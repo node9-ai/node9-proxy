@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
-import { authorizeAction, authorizeHeadless } from './core';
+import { authorizeAction, authorizeHeadless, redactSecrets } from './core';
 import { setupClaude, setupGemini, setupCursor } from './setup';
 import { spawn } from 'child_process';
 import { parseCommandString } from 'execa';
@@ -94,6 +94,9 @@ program
     if (target === 'claude') return await setupClaude();
     if (target === 'cursor') return await setupCursor();
   });
+
+import { DANGEROUS_WORDS } from './core';
+
 // 3. INIT
 program
   .command('init')
@@ -182,7 +185,7 @@ program
             decision: 'block',
             reason: msg,
             hookSpecificOutput: {
-              hookEventName: 'PreToolUse',
+              hookEvent_name: 'PreToolUse',
               permissionDecision: 'deny',
               permissionDecisionReason: msg,
             },
@@ -219,11 +222,14 @@ program
       try {
         if (!raw || raw.trim() === '') process.exit(0);
         const payload = JSON.parse(raw) as { tool_name?: string; tool_input?: unknown };
+
+        // Redact secrets from the input before stringifying for the log
         const entry = {
           ts: new Date().toISOString(),
           tool: sanitize(payload.tool_name ?? 'unknown'),
-          input: payload.tool_input,
+          input: JSON.parse(redactSecrets(JSON.stringify(payload.tool_input || {}))),
         };
+
         const logPath = path.join(os.homedir(), '.node9', 'audit.log');
         if (!fs.existsSync(path.dirname(logPath)))
           fs.mkdirSync(path.dirname(logPath), { recursive: true });
@@ -268,5 +274,4 @@ program
     }
   });
 
-import { DANGEROUS_WORDS } from './core';
 program.parse();
