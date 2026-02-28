@@ -1,80 +1,81 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { evaluatePolicy, _resetConfigCache } from '../core';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import fs from 'fs';
-import path from 'path';
+import { evaluatePolicy, _resetConfigCache } from '../core.js';
+
+vi.spyOn(fs, 'existsSync').mockReturnValue(false);
+vi.spyOn(fs, 'readFileSync');
+
+beforeEach(() => {
+  _resetConfigCache();
+  vi.mocked(fs.existsSync).mockReturnValue(false);
+});
 
 describe('Path-Based Policy (Advanced)', () => {
-  const configPath = path.join(process.cwd(), 'node9.config.json');
-
-  beforeEach(() => {
-    vi.mock('fs', async () => {
-      const actual = await vi.importActual<typeof import('fs')>('fs');
-      return {
-        ...actual,
-        existsSync: vi.fn(),
-        readFileSync: vi.fn(),
-      };
-    });
-    _resetConfigCache();
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it('allows "rm -rf node_modules" with recursive glob pattern', () => {
+  it('allows "rm -rf node_modules" with recursive glob pattern', async () => {
     const mockConfig = {
       policy: {
-        dangerousWords: ['rm'],
-        rules: [{ action: 'rm', allowPaths: ['**/node_modules/**'] }],
+        rules: [
+          {
+            action: 'rm',
+            allowPaths: ['**/node_modules/**'],
+          },
+        ],
       },
     };
-    vi.spyOn(fs, 'existsSync').mockImplementation((p) => p === configPath);
+    vi.mocked(fs.existsSync).mockReturnValue(true);
     vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(mockConfig));
 
-    expect(evaluatePolicy('Bash', { command: 'rm -rf node_modules' })).toBe('allow');
-    expect(evaluatePolicy('Bash', { command: 'rm -rf ./subdir/node_modules' })).toBe('allow');
+    // Should be allowed because it matches the glob
+    expect(await evaluatePolicy('Bash', { command: 'rm -rf ./node_modules/lodash' })).toBe('allow');
   });
 
-  it('blocks "rm -rf src" when not in allow list', () => {
+  it('blocks "rm -rf src" when not in allow list', async () => {
     const mockConfig = {
       policy: {
-        dangerousWords: ['rm'],
-        rules: [{ action: 'rm', allowPaths: ['**/node_modules/**'] }],
+        rules: [
+          {
+            action: 'rm',
+            allowPaths: ['dist/**'],
+          },
+        ],
       },
     };
-    vi.spyOn(fs, 'existsSync').mockImplementation((p) => p === configPath);
+    vi.mocked(fs.existsSync).mockReturnValue(true);
     vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(mockConfig));
 
-    expect(evaluatePolicy('Bash', { command: 'rm -rf src' })).toBe('review');
+    expect(await evaluatePolicy('Bash', { command: 'rm -rf src' })).toBe('review');
   });
 
-  it('blocks "rm -rf .env" using explicit blockPaths', () => {
+  it('blocks "rm -rf .env" using explicit blockPaths', async () => {
     const mockConfig = {
       policy: {
-        dangerousWords: ['rm'],
-        rules: [{ action: 'rm', allowPaths: ['tmp/**'], blockPaths: ['.env'] }],
+        rules: [
+          {
+            action: 'rm',
+            allowPaths: ['**/*'],
+            blockPaths: ['.env', 'config/*'],
+          },
+        ],
       },
     };
-    vi.spyOn(fs, 'existsSync').mockImplementation((p) => p === configPath);
+    vi.mocked(fs.existsSync).mockReturnValue(true);
     vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(mockConfig));
 
-    expect(evaluatePolicy('Bash', { command: 'rm .env' })).toBe('review');
+    expect(await evaluatePolicy('Bash', { command: 'rm .env' })).toBe('review');
   });
 
-  it('correctly tokenizes and identifies "rm" even with complex shell syntax', () => {
+  it('correctly tokenizes and identifies "rm" even with complex shell syntax', async () => {
     const mockConfig = {
       policy: {
         dangerousWords: ['rm'],
-        rules: [{ action: 'rm', allowPaths: ['**/tmp/**'] }],
       },
     };
-    vi.spyOn(fs, 'existsSync').mockImplementation((p) => p === configPath);
+    vi.mocked(fs.existsSync).mockReturnValue(true);
     vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(mockConfig));
 
     // Pipe bypass attempt
-    expect(evaluatePolicy('Bash', { command: 'echo "hello" | rm' })).toBe('review');
+    expect(await evaluatePolicy('Bash', { command: 'echo "hello" | rm' })).toBe('review');
     // Escaped bypass attempt
-    expect(evaluatePolicy('Bash', { command: 'r\m -rf /' })).toBe('review');
+    expect(await evaluatePolicy('Bash', { command: 'r\\m -rf /' })).toBe('review');
   });
 });

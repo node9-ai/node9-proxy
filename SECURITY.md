@@ -10,7 +10,7 @@
 
 **Please do not report security vulnerabilities through public GitHub issues.**
 
-Email: **security@node9.ai**
+Email: **suppot@node9.ai**
 
 Include:
 - A description of the vulnerability and its potential impact

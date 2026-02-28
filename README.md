@@ -8,6 +8,32 @@
 
 While others try to *guess* if a prompt is malicious (Semantic Security), Node9 *intercepts* the actual action (Execution Security).
 
+## 🗺️ Architecture
+
+```mermaid
+sequenceDiagram
+    participant LLM as AI Model (Gemini/Claude)
+    participant Agent as Agent CLI (Gemini/Claude Code)
+    participant Node9 as Node9 Proxy
+    participant OS as Local System/Shell
+
+    LLM->>Agent: "Delete the tmp folder"
+    Agent->>Node9: Tool Call: Shell { command: "rm -rf ./tmp" }
+    
+    Note over Node9: 🧠 Semantic Parser analyzes AST
+    Note over Node9: 🛡️ Policy Engine checks rules
+    
+    alt is dangerous & not allowed
+        Node9-->>Agent: ❌ BLOCK: Decision denied
+        Agent-->>LLM: "Action blocked by security policy"
+    else is safe OR approved by user
+        Node9->>OS: Execute: rm -rf ./tmp
+        OS-->>Node9: Success
+        Node9-->>Agent: Tool Result: Success
+        Agent-->>LLM: "Folder deleted"
+    end
+```
+
 ---
 
 ## 🛑 The Problem: Agent Liability
@@ -167,6 +193,18 @@ Add a `node9.config.json` to your project root or `~/.node9/config.json` for glo
 **Environment overrides** (keyed by `NODE_ENV`):
 - `requireApproval: false` — auto-allow all actions in that environment (useful for local dev).
 - `slackChannel` — route cloud approvals to a specific Slack channel for that environment.
+
+### 🔌 Universal Tool Inspection (The "Universal Adapter")
+Node9 can protect **any** tool, even if it's not Claude or Gemini. You can tell Node9 where to find the "dangerous" payload in any tool call.
+
+Example: Protecting a custom "Stripe" MCP server:
+```json
+"toolInspection": {
+  "stripe.send_refund": "amount",
+  "github.delete*": "params.repo_name"
+}
+```
+Now, whenever your agent calls `stripe.send_refund`, Node9 will extract the `amount` and check it against your global security policy.
 
 ---
 

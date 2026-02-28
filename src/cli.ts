@@ -94,22 +94,42 @@ program
     if (target === 'claude') return await setupClaude();
     if (target === 'cursor') return await setupCursor();
   });
-
 // 3. INIT
-program.command('init').action(() => {
-  const configPath = path.join(os.homedir(), '.node9', 'config.json');
-  const defaultConfig = {
-    policy: {
-      dangerousWords: DANGEROUS_WORDS,
-      toolInspection: { bash: 'command', shell: 'command', run_shell_command: 'command' },
-      rules: [{ action: 'rm', allowPaths: ['**/node_modules/**', 'dist/**', 'build/**'] }],
-    },
-  };
-  if (!fs.existsSync(path.dirname(configPath)))
-    fs.mkdirSync(path.dirname(configPath), { recursive: true });
-  fs.writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2));
-  console.log(chalk.green(`✅ Config initialized.`));
-});
+program
+  .command('init')
+  .description('Create ~/.node9/config.json with default policy')
+  .action(() => {
+    const configPath = path.join(os.homedir(), '.node9', 'config.json');
+    const defaultConfig = {
+      version: '1.0',
+      settings: { mode: 'standard' },
+      policy: {
+        dangerousWords: DANGEROUS_WORDS,
+        ignoredTools: [
+          'list_*', 'get_*', 'read_*', 'describe_*',
+          'read', 'write', 'edit', 'multiedit', 'glob', 'grep', 'ls',
+          'notebookread', 'notebookedit', 'todoread', 'todowrite',
+          'webfetch', 'websearch', 'exitplanmode', 'askuserquestion'
+        ],
+        toolInspection: {
+          'bash': 'command',
+          'shell': 'command',
+          'run_shell_command': 'command',
+          'terminal.execute': 'command'
+        },
+        rules: [
+          { 
+            action: 'rm', 
+            allowPaths: ['**/node_modules/**', 'dist/**', 'build/**', '.DS_Store'] 
+          }
+        ]
+      }
+    };
+    if (!fs.existsSync(path.dirname(configPath))) fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2));
+    console.log(chalk.green(`✅ Global config created: ${configPath}`));
+    console.log(chalk.gray(`   Edit this file to add custom tool inspection or security rules.`));
+  });
 
 // 4. CHECK (Internal Hook)
 program
