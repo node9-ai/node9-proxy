@@ -54,12 +54,14 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src/",
-    "lint:fix": "eslint src/ --fix",
-    "format": "prettier --write src/",
-    "format:check": "prettier --check src/",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "fix": "npm run format && npm run lint:fix",
+    "validate": "npm run format && npm run lint && npm run typecheck && npm run test && npm run test:e2e && npm run build",
     "test:e2e": "bash scripts/e2e.sh",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run validate"
   },
   "dependencies": {
     "@inquirer/prompts": "^8.3.0",

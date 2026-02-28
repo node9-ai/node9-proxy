@@ -13,8 +13,9 @@ async function main() {
 
   try {
     await secureDelete('production-db-v1');
-  } catch (err: any) {
-    console.log(chalk.yellow(`\n🛡️ Node9 caught it: ${err.message}`));
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(chalk.yellow(`\n🛡️ Node9 caught it: ${msg}`));
   }
 }
 
