@@ -1,0 +1,28 @@
+# Source (compiled output in dist/ is what gets published)
+src/
+
+# Examples and configuration templates
+examples/
+node9.config.json
+
+# TypeScript / build config
+tsconfig.json
+tsup.config.ts
+vitest.config.ts
+
+# Linting / formatting config
+eslint.config.mjs
+.prettierrc
+.prettierignore
+
+# GitHub / community files
+.github/
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+SECURITY.md
+CHANGELOG.md
+
+# Local tooling
+.claude/
+.nvmrc
+.env*

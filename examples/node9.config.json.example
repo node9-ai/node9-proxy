@@ -1,0 +1,57 @@
+{
+  "version": "1.0",
+  "settings": {
+    "mode": "standard", 
+    "failOpen": false
+  },
+  "policy": {
+    "dangerousWords": [
+      "delete",
+      "drop",
+      "remove",
+      "rm",
+      "rmdir",
+      "terminate",
+      "refund",
+      "write",
+      "update",
+      "destroy",
+      "purge",
+      "revoke",
+      "format",
+      "truncate"
+    ],
+    "ignoredTools": [
+      "list_*",
+      "get_*",
+      "read_*",
+      "describe_*",
+      "read",
+      "write",
+      "edit",
+      "multiedit",
+      "glob",
+      "grep",
+      "ls",
+      "notebookread",
+      "notebookedit",
+      "todoread",
+      "todowrite",
+      "webfetch",
+      "websearch",
+      "exitplanmode",
+      "askuserquestion",
+      "run_shell_command"
+    ]
+  },
+  "environments": {
+    "production": {
+      "requireApproval": true,
+      "slackChannel": "#alerts-prod-security"
+    },
+    "development": {
+      "requireApproval": true,
+      "slackChannel": "#alerts-dev-sandbox"
+    }
+  }
+}

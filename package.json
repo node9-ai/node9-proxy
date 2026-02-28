@@ -1,0 +1,84 @@
+{
+  "name": "@node9/proxy",
+  "version": "0.1.0",
+  "description": "The Sudo Command for AI Agents. Execution Security for Claude Code & MCP.",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "node9": "./dist/cli.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nadav-node9/node9-proxy.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nadav-node9/node9-proxy/issues"
+  },
+  "homepage": "https://github.com/nadav-node9/node9-proxy#readme",
+  "keywords": [
+    "ai-security",
+    "mcp",
+    "mcp-proxy",
+    "claude-code",
+    "gemini-cli",
+    "cursor",
+    "agentic-ai",
+    "agent-security",
+    "sudo",
+    "security-proxy",
+    "human-in-the-loop",
+    "hitl"
+  ],
+  "author": "Nadav <nadav@node9.ai>",
+  "license": "MIT",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "demo": "tsx examples/demo.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix",
+    "format": "prettier --write src/",
+    "format:check": "prettier --check src/",
+    "test:e2e": "bash scripts/e2e.sh",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^8.3.0",
+    "chalk": "^4.1.2",
+    "commander": "^14.0.3",
+    "execa": "^9.6.1",
+    "picomatch": "^4.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.1",
+    "@types/picomatch": "^4.0.2",
+    "prettier": "^3.4.2",
+    "tsup": "^8.5.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.20.0",
+    "vitest": "^4.0.18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
