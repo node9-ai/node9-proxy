@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import fs from 'fs';
-import path from 'path';
 import os from 'os';
 import { evaluatePolicy, authorizeHeadless, _resetConfigCache } from '../core.js';
 import { setupGemini } from '../setup.js';
@@ -13,11 +12,6 @@ vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
 vi.spyOn(fs, 'mkdirSync').mockImplementation(() => undefined);
 vi.spyOn(os, 'homedir').mockReturnValue('/mock/home');
 
-function mockConfig(config: object) {
-  const globalPath = path.join('/mock/home', '.node9', 'config.json');
-  vi.mocked(fs.existsSync).mockImplementation((p) => String(p) === globalPath);
-  vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(config));
-}
 
 beforeEach(() => {
   _resetConfigCache();

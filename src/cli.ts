@@ -15,6 +15,7 @@ const { version } = JSON.parse(
 ) as { version: string };
 
 function sanitize(value: string): string {
+  // eslint-disable-next-line no-control-regex
   return value.replace(/[\x00-\x1F\x7F]/g, '');
 }
 
@@ -90,7 +91,7 @@ program
       policy: {
         dangerousWords: DANGEROUS_WORDS,
         toolInspection: { 'bash': 'command', 'shell': 'command', 'run_shell_command': 'command' },
-        rules: [{ action: 'rm', allowPaths: ['**/node_modules/**', 'dist/**', 'build/**'] }]
+        rules: [{ action: 'rm', allowPaths:['**/node_modules/**', 'dist/**', 'build/**'] }]
       }
     };
     if (!fs.existsSync(path.dirname(configPath))) fs.mkdirSync(path.dirname(configPath), { recursive: true });
@@ -137,8 +138,9 @@ program
           },
         }) + '\n');
         process.exit(0);
-      } catch (err: any) {
-        fs.appendFileSync(logPath, `[${new Date().toISOString()}] ERROR: ${err.message}\n`);
+      } catch (err: unknown) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        fs.appendFileSync(logPath, `[${new Date().toISOString()}] ERROR: ${errMsg}\n`);
         process.exit(0); // Fail open on parse error
       }
     };
@@ -172,7 +174,9 @@ program
         const logPath = path.join(os.homedir(), '.node9', 'audit.log');
         if (!fs.existsSync(path.dirname(logPath))) fs.mkdirSync(path.dirname(logPath), { recursive: true });
         fs.appendFileSync(logPath, JSON.stringify(entry) + '\n');
-      } catch {}
+      } catch {
+        // Ignored
+      }
       process.exit(0);
     };
 

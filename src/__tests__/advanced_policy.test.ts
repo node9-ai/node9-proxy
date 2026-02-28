@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { evaluatePolicy, _resetConfigCache } from '../core';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 
 describe('Path-Based Policy (Advanced)', () => {

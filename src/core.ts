@@ -251,7 +251,7 @@ function getCredentials() {
         apiUrl: creds.apiUrl || 'https://api.node9.ai/api/v1/intercept'
       };
     }
-  } catch (e) {}
+  } catch {}
   return null;
 }
 
@@ -316,8 +316,9 @@ async function callNode9SaaS(
       console.log(chalk.red(`❌ Node9 Cloud: ${data.message || 'Blocked'}`));
       return false;
     }
-  } catch (error: any) {
-    console.error(chalk.red(`❌ Cloud Error: ${error.message}`));
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(chalk.red(`❌ Cloud Error: ${message}`));
     return false;
   }
 }

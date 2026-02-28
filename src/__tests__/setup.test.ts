@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
@@ -17,7 +18,7 @@ async function getConfirm() {
 
 // Returns the parsed JSON of the LAST write to a given file path
 // (Gemini writes the same file twice: hooks first, then MCP servers)
-function writtenTo(filePath: string): unknown {
+function writtenTo(filePath: string): any {
   const calls = vi.mocked(fs.writeFileSync).mock.calls
     .filter(([p]) => String(p) === filePath);
   if (calls.length === 0) return null;
@@ -48,7 +49,7 @@ describe('setupClaude', () => {
     await setupClaude();
 
     expect(confirm).not.toHaveBeenCalled();
-    const written = writtenTo(hooksPath) as any;
+    const written = writtenTo(hooksPath);
     expect(written.hooks.PreToolUse[0].hooks[0].command).toBe('node9 check');
     expect(written.hooks.PostToolUse[0].hooks[0].command).toBe('node9 log');
   });
@@ -56,63 +57,58 @@ describe('setupClaude', () => {
   it('does not add hooks that already exist', async () => {
     withExistingFile(hooksPath, {
       hooks: {
-        PreToolUse:  [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] }],
-        PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log'   }] }],
+        PreToolUse:  [{ matcher: '.*', hooks:[{ type: 'command', command: 'node9 check' }] }],
+        PostToolUse:[{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log'   }] }],
       },
     });
 
     await setupClaude();
-
-    // Settings file should not be rewritten since nothing changed
     expect(writtenTo(hooksPath)).toBeNull();
   });
 
   it('prompts before wrapping existing MCP servers', async () => {
     withExistingFile(mcpPath, {
-      mcpServers: { github: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-github'] } },
+      mcpServers: { github: { command: 'npx', args:['-y', '@modelcontextprotocol/server-github'] } },
     });
     const confirm = await getConfirm();
     confirm.mockResolvedValue(true);
 
     await setupClaude();
-
     expect(confirm).toHaveBeenCalledTimes(1);
   });
 
   it('wraps MCP servers when user confirms', async () => {
     withExistingFile(mcpPath, {
-      mcpServers: { github: { command: 'npx', args: ['-y', 'server-github'] } },
+      mcpServers: { github: { command: 'npx', args:['-y', 'server-github'] } },
     });
     const confirm = await getConfirm();
     confirm.mockResolvedValue(true);
 
     await setupClaude();
 
-    const written = writtenTo(mcpPath) as any;
+    const written = writtenTo(mcpPath);
     expect(written.mcpServers.github.command).toBe('node9');
     expect(written.mcpServers.github.args[0]).toBe('proxy');
   });
 
   it('skips MCP wrapping when user denies', async () => {
     withExistingFile(mcpPath, {
-      mcpServers: { github: { command: 'npx', args: ['-y', 'server-github'] } },
+      mcpServers: { github: { command: 'npx', args:['-y', 'server-github'] } },
     });
     const confirm = await getConfirm();
     confirm.mockResolvedValue(false);
 
     await setupClaude();
-
     expect(writtenTo(mcpPath)).toBeNull();
   });
 
   it('skips MCP servers that are already wrapped', async () => {
     withExistingFile(mcpPath, {
-      mcpServers: { github: { command: 'node9', args: ['proxy', 'npx server-github'] } },
+      mcpServers: { github: { command: 'node9', args:['proxy', 'npx server-github'] } },
     });
     const confirm = await getConfirm();
 
     await setupClaude();
-
     expect(confirm).not.toHaveBeenCalled();
     expect(writtenTo(mcpPath)).toBeNull();
   });
@@ -121,7 +117,7 @@ describe('setupClaude', () => {
     withExistingFile(hooksPath, {
       hooks: {
         PreToolUse:  [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] }],
-        PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log'   }] }],
+        PostToolUse: [{ matcher: '.*', hooks:[{ type: 'command', command: 'node9 log'   }] }],
       },
     });
 
@@ -142,7 +138,7 @@ describe('setupGemini', () => {
     await setupGemini();
 
     expect(confirm).not.toHaveBeenCalled();
-    const written = writtenTo(settingsPath) as any;
+    const written = writtenTo(settingsPath);
     expect(written.hooks.BeforeTool[0].hooks[0].command).toBe('node9 check');
     expect(written.hooks.AfterTool[0].hooks[0].command).toBe('node9 log');
   });
@@ -151,22 +147,12 @@ describe('setupGemini', () => {
     withExistingFile(settingsPath, {
       hooks: {
         BeforeTool: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] }],
-        AfterTool:  [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log'   }] }],
+        AfterTool:  [{ matcher: '.*', hooks:[{ type: 'command', command: 'node9 log'   }] }],
       },
     });
 
     await setupGemini();
     expect(writtenTo(settingsPath)).toBeNull();
-  });
-
-  it('adds both hooks immediately on a fresh install — no prompt', async () => {
-    const confirm = await getConfirm();
-    await setupGemini();
-
-    expect(confirm).not.toHaveBeenCalled();
-    const written = writtenTo(settingsPath) as any;
-    expect(written.hooks.BeforeTool[0].hooks[0].command).toBe('node9 check');
-    expect(written.hooks.AfterTool[0].hooks[0].command).toBe('node9 log');
   });
 
   it('prompts before wrapping existing MCP servers', async () => {
@@ -189,8 +175,7 @@ describe('setupGemini', () => {
 
     await setupGemini();
 
-    // Gemini writes the same file twice (hooks first, then MCP) — check the last write
-    const written = writtenTo(settingsPath) as any;
+    const written = writtenTo(settingsPath);
     expect(written?.mcpServers.aws.command).toBe('node9');
   });
 });
@@ -206,7 +191,7 @@ describe('setupCursor', () => {
     await setupCursor();
 
     expect(confirm).not.toHaveBeenCalled();
-    const written = writtenTo(hooksPath) as any;
+    const written = writtenTo(hooksPath);
     expect(written.version).toBe(1);
     expect(written.hooks.preToolUse[0].command).toBe('node9');
     expect(written.hooks.postToolUse[0].command).toBe('node9');
@@ -245,7 +230,7 @@ describe('setupCursor', () => {
 
     await setupCursor();
 
-    const written = writtenTo(mcpPath) as any;
+    const written = writtenTo(mcpPath);
     expect(written.mcpServers.brave.command).toBe('node9');
     expect(written.mcpServers.brave.args[0]).toBe('proxy');
   });
@@ -269,7 +254,7 @@ describe('setupCursor', () => {
 
     await setupCursor();
 
-    const written = writtenTo(hooksPath) as any;
+    const written = writtenTo(hooksPath);
     // node9 should be appended, not replace the existing hook
     expect(written.hooks.preToolUse).toHaveLength(2);
     expect(written.hooks.preToolUse[0].command).toBe('some-other-tool');

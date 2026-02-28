@@ -1,6 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { spawn } from 'child_process';
-import { Command } from 'commander';
+import { describe, it, expect, vi} from 'vitest';
 
 // We mock child_process.spawn to verify that the Smart Runner actually tries to execute proxied commands
 vi.mock('child_process', () => ({

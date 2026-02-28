@@ -1,9 +1,9 @@
-//src/index.ts
 import { authorizeAction } from './core';
 
 /**
  * The "Sudo" wrapper for AI tools.
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function protect<T extends (...args: any[]) => any>(
   toolName: string,
   fn: T
