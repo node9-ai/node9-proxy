@@ -25,18 +25,18 @@ function mockConfig(config: MockConfig) {
     if (String(p) === globalPath) {
       return JSON.stringify({
         settings: { mode: 'standard', ...config.settings },
-        policy: { 
+        policy: {
           dangerousWords: DANGEROUS_WORDS, // Use defaults!
-          ignoredTools: [], 
-          toolInspection: { 
-            'Shell': 'command', 
-            'run_shell_command': 'command',
-            'bash': 'command'
-          }, 
-          rules: [], 
-          ...config.policy 
+          ignoredTools: [],
+          toolInspection: {
+            Shell: 'command',
+            run_shell_command: 'command',
+            bash: 'command',
+          },
+          rules: [],
+          ...config.policy,
         },
-        environments: config.environments || {}
+        environments: config.environments || {},
       });
     }
     return '';
@@ -51,9 +51,8 @@ beforeEach(() => {
 });
 
 describe('Gemini Integration Security', () => {
-  
   it('identifies "Shell" (capital S) as a shell-executing tool', async () => {
-    mockConfig({}); 
+    mockConfig({});
     const result = await evaluatePolicy('Shell', { command: 'rm -rf /' });
     expect(result).toBe('review');
   });
@@ -88,18 +87,18 @@ describe('Gemini Integration Security', () => {
       policy: {
         dangerousWords: ['DROP', 'DELETE'],
         toolInspection: {
-          'Database.*': 'payload.sql'
-        }
-      }
+          'Database.*': 'payload.sql',
+        },
+      },
     });
 
-    const dangerousResult = await evaluatePolicy('Database.query', { 
-      payload: { sql: 'DROP TABLE users;' } 
+    const dangerousResult = await evaluatePolicy('Database.query', {
+      payload: { sql: 'DROP TABLE users;' },
     });
     expect(dangerousResult).toBe('review');
 
-    const safeResult = await evaluatePolicy('Database.query', { 
-      payload: { sql: 'SELECT * FROM users;' } 
+    const safeResult = await evaluatePolicy('Database.query', {
+      payload: { sql: 'SELECT * FROM users;' },
     });
     expect(safeResult).toBe('allow');
   });
@@ -114,8 +113,8 @@ describe('Gemini Setup (New Schema)', () => {
       if (String(p) === settingsPath) {
         return JSON.stringify({
           hooks: {
-            BeforeTool: { command: 'old-way' }
-          }
+            BeforeTool: { command: 'old-way' },
+          },
         });
       }
       return '';

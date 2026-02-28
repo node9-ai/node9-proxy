@@ -106,26 +106,42 @@ program
       policy: {
         dangerousWords: DANGEROUS_WORDS,
         ignoredTools: [
-          'list_*', 'get_*', 'read_*', 'describe_*',
-          'read', 'write', 'edit', 'multiedit', 'glob', 'grep', 'ls',
-          'notebookread', 'notebookedit', 'todoread', 'todowrite',
-          'webfetch', 'websearch', 'exitplanmode', 'askuserquestion'
+          'list_*',
+          'get_*',
+          'read_*',
+          'describe_*',
+          'read',
+          'write',
+          'edit',
+          'multiedit',
+          'glob',
+          'grep',
+          'ls',
+          'notebookread',
+          'notebookedit',
+          'todoread',
+          'todowrite',
+          'webfetch',
+          'websearch',
+          'exitplanmode',
+          'askuserquestion',
         ],
         toolInspection: {
-          'bash': 'command',
-          'shell': 'command',
-          'run_shell_command': 'command',
-          'terminal.execute': 'command'
+          bash: 'command',
+          shell: 'command',
+          run_shell_command: 'command',
+          'terminal.execute': 'command',
         },
         rules: [
-          { 
-            action: 'rm', 
-            allowPaths: ['**/node_modules/**', 'dist/**', 'build/**', '.DS_Store'] 
-          }
-        ]
-      }
+          {
+            action: 'rm',
+            allowPaths: ['**/node_modules/**', 'dist/**', 'build/**', '.DS_Store'],
+          },
+        ],
+      },
     };
-    if (!fs.existsSync(path.dirname(configPath))) fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    if (!fs.existsSync(path.dirname(configPath)))
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
     fs.writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2));
     console.log(chalk.green(`✅ Global config created: ${configPath}`));
     console.log(chalk.gray(`   Edit this file to add custom tool inspection or security rules.`));

@@ -24,7 +24,7 @@ beforeEach(() => {
   writeSpy.mockImplementation(() => undefined);
   mkdirSpy.mockImplementation(() => undefined);
   homeSpy.mockReturnValue('/mock/home');
-  
+
   // Default headless
   Object.defineProperty(process.stdout, 'isTTY', { value: false, configurable: true });
 });

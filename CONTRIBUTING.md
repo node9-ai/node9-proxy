@@ -12,6 +12,7 @@ npm run build
 ```
 
 Run the demo to verify your setup:
+
 ```bash
 npm run demo
 ```
@@ -19,12 +20,15 @@ npm run demo
 ## How to Contribute
 
 ### Reporting Bugs
+
 Open an issue at https://github.com/nadav-node9/node9-proxy/issues with:
+
 - Node.js version (`node --version`)
 - What you ran and what you expected
 - The full error output
 
 ### Suggesting Features
+
 Open an issue with the label `enhancement`. Describe the use case, not just the feature.
 
 ### Submitting Code

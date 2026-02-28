@@ -13,6 +13,7 @@
 Email: **suppot@node9.ai**
 
 Include:
+
 - A description of the vulnerability and its potential impact
 - Steps to reproduce
 - Any suggested mitigation (optional but appreciated)
@@ -24,6 +25,7 @@ We follow responsible disclosure — we ask that you give us time to patch befor
 ## Scope
 
 Reports are in scope for:
+
 - Command injection or privilege escalation in the proxy or CLI
 - Policy bypass — a dangerous tool call that passes through without triggering HITL
 - Credential exposure (API keys stored or transmitted insecurely)

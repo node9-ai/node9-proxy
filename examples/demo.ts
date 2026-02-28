@@ -10,7 +10,7 @@ async function main() {
   const secureDelete = protect('aws.rds.delete_database', deleteDatabase);
 
   console.log(chalk.cyan("🤖 AI Agent: 'I am going to clean up the production DB...'"));
-  
+
   try {
     await secureDelete('production-db-v1');
   } catch (err: any) {

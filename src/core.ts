@@ -38,9 +38,9 @@ function containsDangerousWord(toolName: string, dangerousWords: string[]): bool
 function matchesPattern(text: string, patterns: string[] | string): boolean {
   const p = Array.isArray(patterns) ? patterns : [patterns];
   if (p.length === 0) return false;
-  
+
   const isMatch = pm(p, { nocase: true, dot: true });
-  
+
   const target = text.toLowerCase();
   const directMatch = isMatch(target);
   if (directMatch) return true;
@@ -51,7 +51,9 @@ function matchesPattern(text: string, patterns: string[] | string): boolean {
 
 function getNestedValue(obj: unknown, path: string): unknown {
   if (!obj || typeof obj !== 'object') return null;
-  return path.split('.').reduce<unknown>((prev, curr) => (prev as Record<string, unknown>)?.[curr], obj);
+  return path
+    .split('.')
+    .reduce<unknown>((prev, curr) => (prev as Record<string, unknown>)?.[curr], obj);
 }
 
 function extractShellCommand(
@@ -60,8 +62,8 @@ function extractShellCommand(
   toolInspection: Record<string, string>
 ): string | null {
   const patterns = Object.keys(toolInspection);
-  const matchingPattern = patterns.find(p => matchesPattern(toolName, p));
-  
+  const matchingPattern = patterns.find((p) => matchesPattern(toolName, p));
+
   if (!matchingPattern) return null;
 
   const fieldPath = toolInspection[matchingPattern];
@@ -81,7 +83,9 @@ interface ShellNode {
  * Robust Shell Parser
  * Combines sh-syntax AST with a reliable fallback for keyword detection.
  */
-async function analyzeShellCommand(command: string): Promise<{ actions: string[], paths: string[], allTokens: string[] }> {
+async function analyzeShellCommand(
+  command: string
+): Promise<{ actions: string[]; paths: string[]; allTokens: string[] }> {
   const actions: string[] = [];
   const paths: string[] = [];
   const allTokens: string[] = [];
@@ -92,57 +96,70 @@ async function analyzeShellCommand(command: string): Promise<{ actions: string[]
     const walk = (node: ShellNode) => {
       if (!node) return;
       if (node.type === 'CallExpr') {
-        const parts = (node.Args || []).map((arg) => {
-          return (arg.Parts || []).map((p) => p.Value || '').join('');
-        }).filter((s: string) => s.length > 0);
+        const parts = (node.Args || [])
+          .map((arg) => {
+            return (arg.Parts || []).map((p) => p.Value || '').join('');
+          })
+          .filter((s: string) => s.length > 0);
 
         if (parts.length > 0) {
           // Decompose the action (e.g. /usr/bin/rm -> rm)
           const actionPart = parts[0].toLowerCase();
-          const actionTokens = actionPart.split(/[/.]/).filter(t => t.length > 0);
+          const actionTokens = actionPart.split(/[/.]/).filter((t) => t.length > 0);
           actions.push(...actionTokens);
-          
+
           parts.forEach((p: string) => {
-             // Add full token and its decomposed parts
-             const clean = p.toLowerCase().replace(/^-+/, '');
-             allTokens.push(clean);
-             if (p.includes('/')) {
-               p.split('/').filter(x => x.length > 0).forEach(x => allTokens.push(x.toLowerCase()));
-             }
+            // Add full token and its decomposed parts
+            const clean = p.toLowerCase().replace(/^-+/, '');
+            allTokens.push(clean);
+            if (p.includes('/')) {
+              p.split('/')
+                .filter((x) => x.length > 0)
+                .forEach((x) => allTokens.push(x.toLowerCase()));
+            }
           });
 
-          parts.slice(1).forEach((p: string) => { if (!p.startsWith('-')) paths.push(p); });
+          parts.slice(1).forEach((p: string) => {
+            if (!p.startsWith('-')) paths.push(p);
+          });
         }
       }
       for (const key in node) {
         if (key === 'Parent') continue;
         const val = node[key];
         if (Array.isArray(val)) {
-          val.forEach((child) => { if (child && typeof child === 'object') walk(child as ShellNode); });
+          val.forEach((child) => {
+            if (child && typeof child === 'object') walk(child as ShellNode);
+          });
         } else if (val && typeof val === 'object') {
           walk(val as ShellNode);
         }
       }
     };
     walk(ast);
-  } catch { /* Fallback used below */ }
+  } catch {
+    /* Fallback used below */
+  }
 
   // 2. Semantic Fallback Pass (Fixes path-based bypasses like /usr/bin/rm)
-  const normalized = command.replace(/\\(.)/g, '$1'); 
-  const sanitized = normalized.replace(/["'<>]/g, ' '); 
+  const normalized = command.replace(/\\(.)/g, '$1');
+  const sanitized = normalized.replace(/["'<>]/g, ' ');
   const segments = sanitized.split(/[|;&]|\$\(|\)|`/);
-  
-  segments.forEach(segment => {
-    const tokens = segment.trim().split(/\s+/).filter((t) => t.length > 0);
+
+  segments.forEach((segment) => {
+    const tokens = segment
+      .trim()
+      .split(/\s+/)
+      .filter((t) => t.length > 0);
     if (tokens.length > 0) {
       tokens.forEach((t, idx) => {
         // Remove leading dashes (e.g. -delete -> delete)
         const cleanToken = t.replace(/^-+/, '').toLowerCase();
-        
+
         // Handle paths (e.g. /usr/bin/rm -> rm)
-        const subParts = cleanToken.split(/[/.]/).filter(p => p.length > 0);
-        
-        subParts.forEach(part => {
+        const subParts = cleanToken.split(/[/.]/).filter((p) => p.length > 0);
+
+        subParts.forEach((part) => {
           if (!allTokens.includes(part)) allTokens.push(part);
           // If it's the first token in a segment, it's an action
           if (idx === 0 && !actions.includes(part)) actions.push(part);
@@ -188,14 +205,30 @@ const DEFAULT_CONFIG: Config = {
   policy: {
     dangerousWords: DANGEROUS_WORDS,
     ignoredTools: [
-      'list_*', 'get_*', 'read_*', 'describe_*', 'read', 'write', 'edit',
-      'multiedit', 'glob', 'grep', 'ls', 'notebookread', 'notebookedit',
-      'todoread', 'todowrite', 'webfetch', 'websearch', 'exitplanmode', 'askuserquestion',
+      'list_*',
+      'get_*',
+      'read_*',
+      'describe_*',
+      'read',
+      'write',
+      'edit',
+      'multiedit',
+      'glob',
+      'grep',
+      'ls',
+      'notebookread',
+      'notebookedit',
+      'todoread',
+      'todowrite',
+      'webfetch',
+      'websearch',
+      'exitplanmode',
+      'askuserquestion',
     ],
     toolInspection: {
-      'bash': 'command',
-      'run_shell_command': 'command',
-      'shell': 'command',
+      bash: 'command',
+      run_shell_command: 'command',
+      shell: 'command',
       'terminal.execute': 'command',
     },
     rules: [
@@ -215,7 +248,10 @@ export function _resetConfigCache(): void {
   cachedConfig = null;
 }
 
-export async function evaluatePolicy(toolName: string, args?: unknown): Promise<'allow' | 'review'> {
+export async function evaluatePolicy(
+  toolName: string,
+  args?: unknown
+): Promise<'allow' | 'review'> {
   const config = getConfig();
 
   if (matchesPattern(toolName, config.policy.ignoredTools)) return 'allow';
@@ -224,9 +260,11 @@ export async function evaluatePolicy(toolName: string, args?: unknown): Promise<
 
   if (shellCommand) {
     const { actions, paths, allTokens } = await analyzeShellCommand(shellCommand);
-    
+
     for (const action of actions) {
-      const rule = config.policy.rules.find((r) => r.action === action || matchesPattern(action, r.action));
+      const rule = config.policy.rules.find(
+        (r) => r.action === action || matchesPattern(action, r.action)
+      );
       if (rule) {
         if (paths.length > 0) {
           const anyBlocked = paths.some((p) => matchesPattern(p, rule.blockPaths || []));
@@ -238,10 +276,10 @@ export async function evaluatePolicy(toolName: string, args?: unknown): Promise<
       }
     }
 
-    const isDangerous = allTokens.some((token) => 
+    const isDangerous = allTokens.some((token) =>
       config.policy.dangerousWords.some((word) => token === word.toLowerCase())
     );
-    
+
     if (isDangerous) return 'review';
     if (config.settings.mode === 'strict') return 'review';
     return 'allow';
@@ -316,7 +354,7 @@ function tryLoadConfig(filePath: string): Record<string, unknown> | null {
 function validateConfig(config: Record<string, unknown>, path: string): void {
   const allowedTopLevel = ['version', 'settings', 'policy', 'environments'];
   const keys = Object.keys(config);
-  keys.forEach(key => {
+  keys.forEach((key) => {
     if (!allowedTopLevel.includes(key)) {
       console.warn(chalk.yellow(`⚠️  Node9: Unknown top-level key "${key}" in ${path}`));
     }
@@ -325,7 +363,7 @@ function validateConfig(config: Record<string, unknown>, path: string): void {
   if (config.policy && typeof config.policy === 'object') {
     const policy = config.policy as Record<string, unknown>;
     const allowedPolicy = ['dangerousWords', 'ignoredTools', 'toolInspection', 'rules'];
-    Object.keys(policy).forEach(key => {
+    Object.keys(policy).forEach((key) => {
       if (!allowedPolicy.includes(key)) {
         console.warn(chalk.yellow(`⚠️  Node9: Unknown policy key "${key}" in ${path}`));
       }
@@ -335,9 +373,9 @@ function validateConfig(config: Record<string, unknown>, path: string): void {
 
 function mergeWithDefaults(parsed: Record<string, unknown>): Config {
   return {
-    settings: { ...DEFAULT_CONFIG.settings, ...(parsed.settings as object || {}) },
-    policy: { ...DEFAULT_CONFIG.policy, ...(parsed.policy as object || {}) },
-    environments: (parsed.environments as Record<string, EnvironmentConfig>) || {}
+    settings: { ...DEFAULT_CONFIG.settings, ...((parsed.settings as object) || {}) },
+    policy: { ...DEFAULT_CONFIG.policy, ...((parsed.policy as object) || {}) },
+    environments: (parsed.environments as Record<string, EnvironmentConfig>) || {},
   };
 }
 
@@ -350,7 +388,7 @@ function getCredentials() {
   if (process.env.NODE9_API_KEY) {
     return {
       apiKey: process.env.NODE9_API_KEY,
-      apiUrl: process.env.NODE9_API_URL || 'https://api.node9.ai/api/v1/intercept'
+      apiUrl: process.env.NODE9_API_URL || 'https://api.node9.ai/api/v1/intercept',
     };
   }
   try {
@@ -359,7 +397,7 @@ function getCredentials() {
       const creds = JSON.parse(fs.readFileSync(credPath, 'utf-8'));
       return {
         apiKey: creds.apiKey,
-        apiUrl: creds.apiUrl || 'https://api.node9.ai/api/v1/intercept'
+        apiUrl: creds.apiUrl || 'https://api.node9.ai/api/v1/intercept',
       };
     }
   } catch {}
@@ -367,23 +405,28 @@ function getCredentials() {
 }
 
 export async function authorizeAction(toolName: string, args: unknown): Promise<boolean> {
-  if (await evaluatePolicy(toolName, args) === 'allow') return true;
+  if ((await evaluatePolicy(toolName, args)) === 'allow') return true;
   const creds = getCredentials();
   const envConfig = getActiveEnvironment(getConfig());
   if (creds && creds.apiKey) {
     const slackChannel = envConfig?.slackChannel;
-    console.log(chalk.blue(`🔹 Node9 Cloud: Routing approval to ${slackChannel || 'default channel'}...`));
+    console.log(
+      chalk.blue(`🔹 Node9 Cloud: Routing approval to ${slackChannel || 'default channel'}...`)
+    );
     return await callNode9SaaS(toolName, args, creds, slackChannel);
   }
   if (process.stdout.isTTY) {
     console.log(chalk.bgRed.white.bold(` 🛑 NODE9 INTERCEPTOR `));
     console.log(`${chalk.bold('Action:')} ${chalk.red(toolName)}`);
     const argsPreview = JSON.stringify(args, null, 2);
-    const truncated = argsPreview.length > 500 ? argsPreview.slice(0, 500) + '\n  ... (truncated)' : argsPreview;
+    const truncated =
+      argsPreview.length > 500 ? argsPreview.slice(0, 500) + '\n  ... (truncated)' : argsPreview;
     console.log(`${chalk.bold('Args:')}\n${chalk.gray(truncated)}`);
     return await confirm({ message: 'Authorize?', default: false });
   }
-  throw new Error(`[Node9] Blocked dangerous action: ${toolName}. Run 'node9 login' to enable remote approval.`);
+  throw new Error(
+    `[Node9] Blocked dangerous action: ${toolName}. Run 'node9 login' to enable remote approval.`
+  );
 }
 
 async function callNode9SaaS(
@@ -400,17 +443,19 @@ async function callNode9SaaS(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${creds.apiKey}`
+        Authorization: `Bearer ${creds.apiKey}`,
       },
       body: JSON.stringify({
-        toolName, args, slackChannel,
-        context: { hostname: os.hostname(), cwd: process.cwd(), platform: os.platform() }
+        toolName,
+        args,
+        slackChannel,
+        context: { hostname: os.hostname(), cwd: process.cwd(), platform: os.platform() },
       }),
-      signal: controller.signal
+      signal: controller.signal,
     });
     clearTimeout(timeout);
     if (!response.ok) throw new Error(`API responded with Status ${response.status}`);
-    const data = await response.json() as { approved: boolean; message?: string };
+    const data = (await response.json()) as { approved: boolean; message?: string };
     if (data.approved) {
       console.log(chalk.green(`✅ Node9 Cloud: ${data.message || 'Approved'}`));
       return true;

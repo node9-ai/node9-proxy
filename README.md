@@ -1,4 +1,5 @@
 # 🛡️ Node9 Proxy
+
 ### The "Sudo" Command for AI Agents.
 
 [![NPM Version](https://img.shields.io/npm/v/@node9/proxy.svg)](https://www.npmjs.com/package/@node9/proxy)
@@ -6,7 +7,7 @@
 
 **Node9** is the execution security layer for the Agentic Era. It acts as a deterministic "Sudo" proxy between AI Agents (Claude Code, Gemini CLI, Cursor, MCP Servers) and your production environment.
 
-While others try to *guess* if a prompt is malicious (Semantic Security), Node9 *intercepts* the actual action (Execution Security).
+While others try to _guess_ if a prompt is malicious (Semantic Security), Node9 _intercepts_ the actual action (Execution Security).
 
 ## 🗺️ Architecture
 
@@ -19,10 +20,10 @@ sequenceDiagram
 
     LLM->>Agent: "Delete the tmp folder"
     Agent->>Node9: Tool Call: Shell { command: "rm -rf ./tmp" }
-    
+
     Note over Node9: 🧠 Semantic Parser analyzes AST
     Note over Node9: 🛡️ Policy Engine checks rules
-    
+
     alt is dangerous & not allowed
         Node9-->>Agent: ❌ BLOCK: Decision denied
         Agent-->>LLM: "Action blocked by security policy"
@@ -37,11 +38,14 @@ sequenceDiagram
 ---
 
 ## 🛑 The Problem: Agent Liability
+
 In 2026, AI agents have "Write Access" to everything (GitHub, AWS, Stripe, Databases).
+
 - **The Risk:** An agent hallucinating a `DROP DATABASE` or an unauthorized `aws.delete_instance`.
 - **The Solution:** Node9 intercepts high-risk tool calls and pauses execution until a human provides a signature.
 
 ## 🚀 Key Features
+
 - **Deterministic "Sudo" Mode:** Intercepts dangerous tool calls based on hardcoded policies.
 - **Human-in-the-Loop (HITL):** Requires explicit approval via the **Terminal** (Local) or **Slack** (Cloud).
 - **One-Command Setup:** `node9 addto claude` wires up full protection in seconds — no manual config editing.
@@ -75,6 +79,7 @@ node9 addto cursor
 ```
 
 ### 🎯 The Smart Runner
+
 You can now protect any command by simply prefixing it with `node9`:
 
 ```bash
@@ -84,7 +89,8 @@ node9 "rm -rf /"
 # Runs Gemini with full proxy & hook protection
 node9 gemini
 ```
-*Note: Always wrap the target command in quotes to avoid argument conflicts.*
+
+_Note: Always wrap the target command in quotes to avoid argument conflicts._
 
 Node9 will show you exactly what it's about to change and ask for confirmation before touching any config file.
 
@@ -93,24 +99,27 @@ Node9 will show you exactly what it's about to change and ask for confirmation b
 ## 🛠 Usage
 
 ### 1. Connect to Node9 Cloud (Optional)
+
 To route approvals to **Slack** when you are away from your terminal, login once with your API key:
 
 ```bash
 node9 login <your_api_key>
 ```
-*Your credentials are stored securely in `~/.node9/credentials.json`.*
+
+_Your credentials are stored securely in `~/.node9/credentials.json`._
 
 ### 2. One-Command Agent Setup
 
 `node9 addto <target>` wires up Node9 to your AI agent automatically:
 
-| Target | MCP Servers | Built-in Tools (Bash, Write, Edit...) | Audit Log |
-|--------|:-----------:|:-------------------------------------:|:---------:|
-| `claude` | ✅ | ✅ via `PreToolUse` hook | ✅ |
-| `gemini` | ✅ | ✅ via `BeforeTool` hook | ✅ |
-| `cursor` | ✅ | ✅ via `preToolUse` hook | ✅ |
+| Target   | MCP Servers | Built-in Tools (Bash, Write, Edit...) | Audit Log |
+| -------- | :---------: | :-----------------------------------: | :-------: |
+| `claude` |     ✅      |       ✅ via `PreToolUse` hook        |    ✅     |
+| `gemini` |     ✅      |       ✅ via `BeforeTool` hook        |    ✅     |
+| `cursor` |     ✅      |       ✅ via `preToolUse` hook        |    ✅     |
 
 **What it does under the hood:**
+
 - Wraps your existing MCP servers with `node9 proxy` (asks for confirmation first)
 - Adds a pre-execution hook → `node9 check` runs before every tool call
 - Adds a post-execution hook → `node9 log` writes every executed action to `~/.node9/audit.log`
@@ -120,16 +129,19 @@ node9 login <your_api_key>
 To protect any command or MCP server manually:
 
 **Protecting the Gemini CLI:**
+
 ```bash
 node9 gemini
 ```
 
 **Protecting a direct command:**
+
 ```bash
 node9 "rm -rf ./data"
 ```
 
 **Protecting GitHub MCP Server:**
+
 ```bash
 node9 "npx @modelcontextprotocol/server-github"
 ```
@@ -152,6 +164,7 @@ await deleteDatabase('production-db-v1');
 ---
 
 ## ⚙️ Configuration (`node9.config.json`)
+
 Add a `node9.config.json` to your project root or `~/.node9/config.json` for global use.
 
 ```json
@@ -187,31 +200,38 @@ Add a `node9.config.json` to your project root or `~/.node9/config.json` for glo
 ```
 
 **Modes:**
+
 - `standard`: Allows everything except tools containing `dangerousWords`.
 - `strict`: Blocks **everything** except tools listed in `ignoredTools`.
 
 **Environment overrides** (keyed by `NODE_ENV`):
+
 - `requireApproval: false` — auto-allow all actions in that environment (useful for local dev).
 - `slackChannel` — route cloud approvals to a specific Slack channel for that environment.
 
 ### 🔌 Universal Tool Inspection (The "Universal Adapter")
+
 Node9 can protect **any** tool, even if it's not Claude or Gemini. You can tell Node9 where to find the "dangerous" payload in any tool call.
 
 Example: Protecting a custom "Stripe" MCP server:
+
 ```json
 "toolInspection": {
   "stripe.send_refund": "amount",
   "github.delete*": "params.repo_name"
 }
 ```
+
 Now, whenever your agent calls `stripe.send_refund`, Node9 will extract the `amount` and check it against your global security policy.
 
 ---
 
 ## 🛡️ How it Works
+
 Node9 is **deterministic**. It doesn't use AI to check AI.
 
 ### Hook Mode (via `node9 addto`)
+
 ```
 Claude wants to run Bash("rm -rf /data")
           │
@@ -231,6 +251,7 @@ Claude wants to run Bash("rm -rf /data")
 ```
 
 ### Proxy Mode (via `node9 proxy`)
+
 ```
 1. Intercept  — catches the JSON-RPC tools/call request mid-flight
 2. Evaluate   — checks against your local node9.config.json
@@ -242,6 +263,7 @@ Claude wants to run Bash("rm -rf /data")
 ---
 
 ## 📈 Roadmap
+
 - [x] Local Terminal "Sudo" (OSS)
 - [x] MCP JSON-RPC Interceptor
 - [x] Slack Remote Approvals (Pro)
@@ -254,6 +276,7 @@ Claude wants to run Bash("rm -rf /data")
 ---
 
 ## 🏢 Enterprise & Commercial Use
+
 The local proxy is free forever for individual developers. For teams requiring **Slack Integration**, **VPC Deployment**, and **Tamper-proof Audit Logs**, visit [node9.ai](https://node9.ai) or contact `support@node9.ai`.
 
 ---
