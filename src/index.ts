@@ -10,7 +10,7 @@ export function protect<T extends (...args: any[]) => any>(
 ): (...args: Parameters<T>) => Promise<ReturnType<T>> {
   return async (...args: Parameters<T>) => {
     const isAuthorized = await authorizeAction(toolName, args);
-    
+
     if (!isAuthorized) {
       throw new Error(`Node9: Execution of ${toolName} was denied by the user.`);
     }

@@ -39,9 +39,7 @@ function mockBothConfigs(projectConfig: object, globalConfig: object) {
     return s === projectPath || s === globalPath;
   });
   vi.mocked(fs.readFileSync).mockImplementation((p) => {
-    return String(p) === projectPath
-      ? JSON.stringify(projectConfig)
-      : JSON.stringify(globalConfig);
+    return String(p) === projectPath ? JSON.stringify(projectConfig) : JSON.stringify(globalConfig);
   });
 }
 
@@ -81,16 +79,14 @@ describe('ignored tool patterns', () => {
 // Standard mode — safe tools
 // ---------------------------------------------------------------------------
 describe('standard mode — safe tools', () => {
-  it.each([
-    'create_user',
-    'send_notification',
-    'invoke_lambda',
-    'start_job',
-  ])('allows "%s" without prompting', async (tool) => {
-    const confirm = await getConfirm();
-    expect(await authorizeAction(tool, {})).toBe(true);
-    expect(confirm).not.toHaveBeenCalled();
-  });
+  it.each(['create_user', 'send_notification', 'invoke_lambda', 'start_job'])(
+    'allows "%s" without prompting',
+    async (tool) => {
+      const confirm = await getConfirm();
+      expect(await authorizeAction(tool, {})).toBe(true);
+      expect(confirm).not.toHaveBeenCalled();
+    }
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -336,10 +332,13 @@ describe('authorizeHeadless', () => {
 
   it('calls the cloud API and returns approved:true when the API approves', async () => {
     process.env.NODE9_API_KEY = 'test-key';
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ approved: true, message: 'Approved via Slack' }),
-    }));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ approved: true, message: 'Approved via Slack' }),
+      })
+    );
 
     const result = await authorizeHeadless('delete_user', { id: 1 });
     expect(result.approved).toBe(true);
@@ -349,10 +348,13 @@ describe('authorizeHeadless', () => {
 
   it('calls the cloud API and returns approved:false when the API denies', async () => {
     process.env.NODE9_API_KEY = 'test-key';
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ approved: false, message: 'Denied' }),
-    }));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ approved: false, message: 'Denied' }),
+      })
+    );
 
     const result = await authorizeHeadless('delete_user', { id: 1 });
     expect(result.approved).toBe(false);
@@ -381,17 +383,17 @@ describe('Bash tool — shell command interception', () => {
   });
 
   it.each([
-    { cmd: 'rm /tmp/deleteme.txt',     desc: 'rm command' },
-    { cmd: 'rm -rf /',                 desc: 'rm -rf' },
-    { cmd: 'sudo rm -rf /home/user',   desc: 'sudo rm' },
-    { cmd: 'rmdir /tmp/mydir',         desc: 'rmdir command' },
-    { cmd: '/usr/bin/rm file.txt',     desc: 'absolute path to rm' },
-    { cmd: 'find . -delete',           desc: 'find --delete flag' },
-    { cmd: 'npm update',               desc: 'npm update' },
-    { cmd: 'apt-get purge vim',        desc: 'apt-get purge' },
-    { cmd: 'echo "rm -rf /" | bash',   desc: 'pipe with rm' },
-    { cmd: 'r\\m -rf /',               desc: 'escaped command' },
-    { cmd: '$(echo rm) -rf /',         desc: 'subshell command' },
+    { cmd: 'rm /tmp/deleteme.txt', desc: 'rm command' },
+    { cmd: 'rm -rf /', desc: 'rm -rf' },
+    { cmd: 'sudo rm -rf /home/user', desc: 'sudo rm' },
+    { cmd: 'rmdir /tmp/mydir', desc: 'rmdir command' },
+    { cmd: '/usr/bin/rm file.txt', desc: 'absolute path to rm' },
+    { cmd: 'find . -delete', desc: 'find --delete flag' },
+    { cmd: 'npm update', desc: 'npm update' },
+    { cmd: 'apt-get purge vim', desc: 'apt-get purge' },
+    { cmd: 'echo "rm -rf /" | bash', desc: 'pipe with rm' },
+    { cmd: 'r\\m -rf /', desc: 'escaped command' },
+    { cmd: '$(echo rm) -rf /', desc: 'subshell command' },
     { cmd: 'git commit && rm test.sh', desc: 'chained commands' },
   ])('blocks Bash tool when command is "$desc"', async ({ cmd }) => {
     const confirm = await getConfirm();
@@ -400,13 +402,13 @@ describe('Bash tool — shell command interception', () => {
   });
 
   it.each([
-    { cmd: 'ls -la',             desc: 'ls' },
-    { cmd: 'cat /etc/hosts',     desc: 'cat' },
-    { cmd: 'git status',         desc: 'git status' },
-    { cmd: 'npm install',        desc: 'npm install' },
-    { cmd: 'echo hello',         desc: 'echo' },
-    { cmd: 'pwd',                desc: 'pwd' },
-    { cmd: 'node --version',     desc: 'node --version' },
+    { cmd: 'ls -la', desc: 'ls' },
+    { cmd: 'cat /etc/hosts', desc: 'cat' },
+    { cmd: 'git status', desc: 'git status' },
+    { cmd: 'npm install', desc: 'npm install' },
+    { cmd: 'echo hello', desc: 'echo' },
+    { cmd: 'pwd', desc: 'pwd' },
+    { cmd: 'node --version', desc: 'node --version' },
   ])('allows Bash tool when command is "$desc"', async ({ cmd }) => {
     const confirm = await getConfirm();
     expect(await authorizeAction('Bash', { command: cmd })).toBe(true);
@@ -508,8 +510,16 @@ describe('global config (~/.node9/config.json)', () => {
   it('project config takes precedence over global config', async () => {
     // Global has 'nuke' as dangerous; project overrides with empty list → should allow
     mockBothConfigs(
-      { settings: { mode: 'standard' }, policy: { dangerousWords: [], ignoredTools: [] }, environments: {} },
-      { settings: { mode: 'standard' }, policy: { dangerousWords: ['nuke'], ignoredTools: [] }, environments: {} }
+      {
+        settings: { mode: 'standard' },
+        policy: { dangerousWords: [], ignoredTools: [] },
+        environments: {},
+      },
+      {
+        settings: { mode: 'standard' },
+        policy: { dangerousWords: ['nuke'], ignoredTools: [] },
+        environments: {},
+      }
     );
 
     const confirm = await getConfirm();

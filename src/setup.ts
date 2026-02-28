@@ -81,21 +81,21 @@ function writeJson(filePath: string, data: unknown): void {
 // ── Claude Code ──────────────────────────────────────────────────────────────
 
 export async function setupClaude(): Promise<void> {
-  const homeDir     = os.homedir();
-  const mcpPath     = path.join(homeDir, '.claude.json');
-  const hooksPath   = path.join(homeDir, '.claude', 'settings.json');
+  const homeDir = os.homedir();
+  const mcpPath = path.join(homeDir, '.claude.json');
+  const hooksPath = path.join(homeDir, '.claude', 'settings.json');
 
   const claudeConfig = readJson<ClaudeConfig>(mcpPath) ?? {};
-  const settings     = readJson<ClaudeSettings>(hooksPath) ?? {};
-  const servers      = claudeConfig.mcpServers ?? {};
+  const settings = readJson<ClaudeSettings>(hooksPath) ?? {};
+  const servers = claudeConfig.mcpServers ?? {};
 
   let anythingChanged = false;
 
   // ── Step 1: Pure additions — apply immediately, no prompt ────────────────
   if (!settings.hooks) settings.hooks = {};
 
-  const hasPreHook = settings.hooks.PreToolUse?.some(m =>
-    m.hooks.some(h => h.command?.includes('node9 check'))
+  const hasPreHook = settings.hooks.PreToolUse?.some((m) =>
+    m.hooks.some((h) => h.command?.includes('node9 check'))
   );
   if (!hasPreHook) {
     if (!settings.hooks.PreToolUse) settings.hooks.PreToolUse = [];
@@ -107,8 +107,8 @@ export async function setupClaude(): Promise<void> {
     anythingChanged = true;
   }
 
-  const hasPostHook = settings.hooks.PostToolUse?.some(m =>
-    m.hooks.some(h => h.command?.includes('node9 log'))
+  const hasPostHook = settings.hooks.PostToolUse?.some((m) =>
+    m.hooks.some((h) => h.command?.includes('node9 log'))
   );
   if (!hasPostHook) {
     if (!settings.hooks.PostToolUse) settings.hooks.PostToolUse = [];
@@ -173,25 +173,25 @@ export async function setupClaude(): Promise<void> {
 // ── Gemini CLI ───────────────────────────────────────────────────────────────
 
 export async function setupGemini(): Promise<void> {
-  const homeDir     = os.homedir();
+  const homeDir = os.homedir();
   const settingsPath = path.join(homeDir, '.gemini', 'settings.json');
 
   const settings = readJson<GeminiSettings>(settingsPath) ?? {};
-  const servers  = settings.mcpServers ?? {};
+  const servers = settings.mcpServers ?? {};
 
   let anythingChanged = false;
 
   // ── Step 1: Pure additions — apply immediately, no prompt ────────────────
   if (!settings.hooks) settings.hooks = {};
 
-  const hasBeforeHook = Array.isArray(settings.hooks.BeforeTool) && settings.hooks.BeforeTool.some(m =>
-    m.hooks.some(h => h.command?.includes('node9 check'))
-  );
+  const hasBeforeHook =
+    Array.isArray(settings.hooks.BeforeTool) &&
+    settings.hooks.BeforeTool.some((m) => m.hooks.some((h) => h.command?.includes('node9 check')));
   if (!hasBeforeHook) {
     if (!settings.hooks.BeforeTool) settings.hooks.BeforeTool = [];
     // If it was an object (old format), we re-initialize it as an array
     if (!Array.isArray(settings.hooks.BeforeTool)) settings.hooks.BeforeTool = [];
-    
+
     settings.hooks.BeforeTool.push({
       matcher: '.*',
       hooks: [{ name: 'node9-check', type: 'command', command: 'node9 check', timeout: 60000 }],
@@ -200,9 +200,9 @@ export async function setupGemini(): Promise<void> {
     anythingChanged = true;
   }
 
-  const hasAfterHook = Array.isArray(settings.hooks.AfterTool) && settings.hooks.AfterTool.some(m =>
-    m.hooks.some(h => h.command?.includes('node9 log'))
-  );
+  const hasAfterHook =
+    Array.isArray(settings.hooks.AfterTool) &&
+    settings.hooks.AfterTool.some((m) => m.hooks.some((h) => h.command?.includes('node9 log')));
   if (!hasAfterHook) {
     if (!settings.hooks.AfterTool) settings.hooks.AfterTool = [];
     // If it was an object (old format), we re-initialize it as an array
@@ -288,21 +288,21 @@ interface CursorHooksFile {
 }
 
 export async function setupCursor(): Promise<void> {
-  const homeDir   = os.homedir();
-  const mcpPath   = path.join(homeDir, '.cursor', 'mcp.json');
+  const homeDir = os.homedir();
+  const mcpPath = path.join(homeDir, '.cursor', 'mcp.json');
   const hooksPath = path.join(homeDir, '.cursor', 'hooks.json');
 
-  const mcpConfig  = readJson<CursorMcpConfig>(mcpPath) ?? {};
-  const hooksFile  = readJson<CursorHooksFile>(hooksPath) ?? { version: 1 };
-  const servers    = mcpConfig.mcpServers ?? {};
+  const mcpConfig = readJson<CursorMcpConfig>(mcpPath) ?? {};
+  const hooksFile = readJson<CursorHooksFile>(hooksPath) ?? { version: 1 };
+  const servers = mcpConfig.mcpServers ?? {};
 
   let anythingChanged = false;
 
   // ── Step 1: Pure additions — apply immediately, no prompt ────────────────
   if (!hooksFile.hooks) hooksFile.hooks = {};
 
-  const hasPreHook = hooksFile.hooks.preToolUse?.some(h =>
-    h.command === 'node9' && h.args?.includes('check')
+  const hasPreHook = hooksFile.hooks.preToolUse?.some(
+    (h) => h.command === 'node9' && h.args?.includes('check')
   );
   if (!hasPreHook) {
     if (!hooksFile.hooks.preToolUse) hooksFile.hooks.preToolUse = [];
@@ -311,8 +311,8 @@ export async function setupCursor(): Promise<void> {
     anythingChanged = true;
   }
 
-  const hasPostHook = hooksFile.hooks.postToolUse?.some(h =>
-    h.command === 'node9' && h.args?.includes('log')
+  const hasPostHook = hooksFile.hooks.postToolUse?.some(
+    (h) => h.command === 'node9' && h.args?.includes('log')
   );
   if (!hasPostHook) {
     if (!hooksFile.hooks.postToolUse) hooksFile.hooks.postToolUse = [];

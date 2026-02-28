@@ -26,8 +26,8 @@ describe('Path-Based Policy (Advanced)', () => {
     const mockConfig = {
       policy: {
         dangerousWords: ['rm'],
-        rules: [{ action: 'rm', allowPaths: ['**/node_modules/**'] }]
-      }
+        rules: [{ action: 'rm', allowPaths: ['**/node_modules/**'] }],
+      },
     };
     vi.spyOn(fs, 'existsSync').mockImplementation((p) => p === configPath);
     vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(mockConfig));
@@ -40,8 +40,8 @@ describe('Path-Based Policy (Advanced)', () => {
     const mockConfig = {
       policy: {
         dangerousWords: ['rm'],
-        rules: [{ action: 'rm', allowPaths: ['**/node_modules/**'] }]
-      }
+        rules: [{ action: 'rm', allowPaths: ['**/node_modules/**'] }],
+      },
     };
     vi.spyOn(fs, 'existsSync').mockImplementation((p) => p === configPath);
     vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(mockConfig));
@@ -53,8 +53,8 @@ describe('Path-Based Policy (Advanced)', () => {
     const mockConfig = {
       policy: {
         dangerousWords: ['rm'],
-        rules: [{ action: 'rm', allowPaths: ['tmp/**'], blockPaths: ['.env'] }]
-      }
+        rules: [{ action: 'rm', allowPaths: ['tmp/**'], blockPaths: ['.env'] }],
+      },
     };
     vi.spyOn(fs, 'existsSync').mockImplementation((p) => p === configPath);
     vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(mockConfig));
@@ -66,8 +66,8 @@ describe('Path-Based Policy (Advanced)', () => {
     const mockConfig = {
       policy: {
         dangerousWords: ['rm'],
-        rules: [{ action: 'rm', allowPaths: ['**/tmp/**'] }]
-      }
+        rules: [{ action: 'rm', allowPaths: ['**/tmp/**'] }],
+      },
     };
     vi.spyOn(fs, 'existsSync').mockImplementation((p) => p === configPath);
     vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(mockConfig));

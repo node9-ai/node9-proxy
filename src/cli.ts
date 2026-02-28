@@ -21,10 +21,7 @@ function sanitize(value: string): string {
 
 const program = new Command();
 
-program
-  .name('node9')
-  .description('The Sudo Command for AI Agents')
-  .version(version);
+program.name('node9').description('The Sudo Command for AI Agents').version(version);
 
 // Helper for the Proxy logic
 async function runProxy(targetCommand: string) {
@@ -35,28 +32,40 @@ async function runProxy(targetCommand: string) {
 
   const child = spawn(cmd, args, {
     stdio: ['pipe', 'pipe', 'inherit'],
-    shell: true
+    shell: true,
   });
 
   const rl = readline.createInterface({ input: process.stdin, terminal: true });
-  rl.on('line', (line) => { child.stdin.write(line + '\n'); });
+  rl.on('line', (line) => {
+    child.stdin.write(line + '\n');
+  });
 
   const childOut = readline.createInterface({ input: child.stdout, terminal: false });
   childOut.on('line', async (line) => {
     try {
       const message = JSON.parse(line);
-      if (message.method === 'call_tool' || message.method === 'tools/call' || message.method === 'use_tool') {
+      if (
+        message.method === 'call_tool' ||
+        message.method === 'tools/call' ||
+        message.method === 'use_tool'
+      ) {
         const name = message.params?.name || message.params?.tool_name || 'unknown';
         const toolArgs = message.params?.arguments || message.params?.tool_input || {};
         const approved = await authorizeAction(sanitize(name), toolArgs);
         if (!approved) {
-          const errorResponse = { jsonrpc: "2.0", id: message.id, error: { code: -32000, message: "Node9: Action denied." } };
+          const errorResponse = {
+            jsonrpc: '2.0',
+            id: message.id,
+            error: { code: -32000, message: 'Node9: Action denied.' },
+          };
           child.stdin.write(JSON.stringify(errorResponse) + '\n');
           return;
         }
       }
       process.stdout.write(line + '\n');
-    } catch { process.stdout.write(line + '\n'); }
+    } catch {
+      process.stdout.write(line + '\n');
+    }
   });
   child.on('exit', (code) => process.exit(code || 0));
 }
@@ -67,8 +76,12 @@ program
   .argument('<apiKey>')
   .action((apiKey) => {
     const credPath = path.join(os.homedir(), '.node9', 'credentials.json');
-    if (!fs.existsSync(path.dirname(credPath))) fs.mkdirSync(path.dirname(credPath), { recursive: true });
-    fs.writeFileSync(credPath, JSON.stringify({ apiKey, apiUrl: 'https://api.node9.ai/api/v1/intercept' }, null, 2));
+    if (!fs.existsSync(path.dirname(credPath)))
+      fs.mkdirSync(path.dirname(credPath), { recursive: true });
+    fs.writeFileSync(
+      credPath,
+      JSON.stringify({ apiKey, apiUrl: 'https://api.node9.ai/api/v1/intercept' }, null, 2)
+    );
     console.log(chalk.green(`✅ Logged in.`));
   });
 
@@ -83,21 +96,20 @@ program
   });
 
 // 3. INIT
-program
-  .command('init')
-  .action(() => {
-    const configPath = path.join(os.homedir(), '.node9', 'config.json');
-    const defaultConfig = {
-      policy: {
-        dangerousWords: DANGEROUS_WORDS,
-        toolInspection: { 'bash': 'command', 'shell': 'command', 'run_shell_command': 'command' },
-        rules: [{ action: 'rm', allowPaths:['**/node_modules/**', 'dist/**', 'build/**'] }]
-      }
-    };
-    if (!fs.existsSync(path.dirname(configPath))) fs.mkdirSync(path.dirname(configPath), { recursive: true });
-    fs.writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2));
-    console.log(chalk.green(`✅ Config initialized.`));
-  });
+program.command('init').action(() => {
+  const configPath = path.join(os.homedir(), '.node9', 'config.json');
+  const defaultConfig = {
+    policy: {
+      dangerousWords: DANGEROUS_WORDS,
+      toolInspection: { bash: 'command', shell: 'command', run_shell_command: 'command' },
+      rules: [{ action: 'rm', allowPaths: ['**/node_modules/**', 'dist/**', 'build/**'] }],
+    },
+  };
+  if (!fs.existsSync(path.dirname(configPath)))
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2));
+  console.log(chalk.green(`✅ Config initialized.`));
+});
 
 // 4. CHECK (Internal Hook)
 program
@@ -109,9 +121,10 @@ program
       const logPath = path.join(os.homedir(), '.node9', 'hook-debug.log');
       try {
         if (!raw || raw.trim() === '') process.exit(0);
-        
+
         // Debug: Log raw input and TTY status
-        if (!fs.existsSync(path.dirname(logPath))) fs.mkdirSync(path.dirname(logPath), { recursive: true });
+        if (!fs.existsSync(path.dirname(logPath)))
+          fs.mkdirSync(path.dirname(logPath), { recursive: true });
         fs.appendFileSync(logPath, `[${new Date().toISOString()}] STDIN: ${raw}\n`);
         fs.appendFileSync(logPath, `[${new Date().toISOString()}] TTY: ${process.stdout.isTTY}\n`);
 
@@ -123,20 +136,22 @@ program
         if (approved) process.exit(0);
 
         const msg = reason ?? `Node9 blocked "${toolName}".`;
-        
+
         // Ensure block reason is visible in terminal even if Gemini swallows stdout
         console.error(chalk.red(`\n🛡️  Node9 Security Block: ${msg}\n`));
 
         // Full Claude Code & Gemini compatibility format
-        process.stdout.write(JSON.stringify({
-          decision: 'block',
-          reason: msg,
-          hookSpecificOutput: {
-            hookEventName: 'PreToolUse',
-            permissionDecision: 'deny',
-            permissionDecisionReason: msg,
-          },
-        }) + '\n');
+        process.stdout.write(
+          JSON.stringify({
+            decision: 'block',
+            reason: msg,
+            hookSpecificOutput: {
+              hookEventName: 'PreToolUse',
+              permissionDecision: 'deny',
+              permissionDecisionReason: msg,
+            },
+          }) + '\n'
+        );
         process.exit(0);
       } catch (err: unknown) {
         const errMsg = err instanceof Error ? err.message : String(err);
@@ -150,9 +165,11 @@ program
     } else {
       let raw = '';
       process.stdin.setEncoding('utf-8');
-      process.stdin.on('data', chunk => (raw += chunk));
+      process.stdin.on('data', (chunk) => (raw += chunk));
       process.stdin.on('end', async () => await processPayload(raw));
-      setTimeout(() => { if (!raw) process.exit(0); }, 500);
+      setTimeout(() => {
+        if (!raw) process.exit(0);
+      }, 500);
     }
   });
 
@@ -172,7 +189,8 @@ program
           input: payload.tool_input,
         };
         const logPath = path.join(os.homedir(), '.node9', 'audit.log');
-        if (!fs.existsSync(path.dirname(logPath))) fs.mkdirSync(path.dirname(logPath), { recursive: true });
+        if (!fs.existsSync(path.dirname(logPath)))
+          fs.mkdirSync(path.dirname(logPath), { recursive: true });
         fs.appendFileSync(logPath, JSON.stringify(entry) + '\n');
       } catch {
         // Ignored
@@ -185,9 +203,11 @@ program
     } else {
       let raw = '';
       process.stdin.setEncoding('utf-8');
-      process.stdin.on('data', chunk => (raw += chunk));
+      process.stdin.on('data', (chunk) => (raw += chunk));
       process.stdin.on('end', () => logPayload(raw));
-      setTimeout(() => { if (!raw) process.exit(0); }, 500);
+      setTimeout(() => {
+        if (!raw) process.exit(0);
+      }, 500);
     }
   });
 
@@ -197,7 +217,7 @@ program
   .action(async (commandArgs) => {
     if (commandArgs && commandArgs.length > 0) {
       const fullCommand = commandArgs.join(' ');
-      
+
       // NEW: Check the command itself against policy before running
       // We treat the initial command as a 'shell' tool call
       const { approved, reason } = await authorizeHeadless('shell', { command: fullCommand });

@@ -12,7 +12,6 @@ vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
 vi.spyOn(fs, 'mkdirSync').mockImplementation(() => undefined);
 vi.spyOn(os, 'homedir').mockReturnValue('/mock/home');
 
-
 beforeEach(() => {
   _resetConfigCache();
   vi.mocked(fs.existsSync).mockReturnValue(false);
@@ -21,7 +20,6 @@ beforeEach(() => {
 });
 
 describe('Gemini Integration Security', () => {
-  
   it('identifies "Shell" (capital S) as a shell-executing tool', () => {
     const result = evaluatePolicy('Shell', { command: 'rm -rf /' });
     expect(result).toBe('review');
@@ -57,13 +55,15 @@ describe('Gemini Setup (New Schema)', () => {
     // If the file exists with the OLD format (which caused the original error)
     // we don't necessarily want to "fix" it automatically if it's corrupt,
     // but our new setup code should at least add the correct array structure.
-    
+
     vi.mocked(fs.existsSync).mockImplementation((p) => String(p) === settingsPath);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
-       hooks: {
-         BeforeTool: { command: 'old-way' } // This is what caused the error
-       }
-    }));
+    vi.mocked(fs.readFileSync).mockReturnValue(
+      JSON.stringify({
+        hooks: {
+          BeforeTool: { command: 'old-way' }, // This is what caused the error
+        },
+      })
+    );
 
     await setupGemini();
 

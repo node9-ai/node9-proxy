@@ -19,8 +19,7 @@ async function getConfirm() {
 // Returns the parsed JSON of the LAST write to a given file path
 // (Gemini writes the same file twice: hooks first, then MCP servers)
 function writtenTo(filePath: string): any {
-  const calls = vi.mocked(fs.writeFileSync).mock.calls
-    .filter(([p]) => String(p) === filePath);
+  const calls = vi.mocked(fs.writeFileSync).mock.calls.filter(([p]) => String(p) === filePath);
   if (calls.length === 0) return null;
   return JSON.parse(String(calls[calls.length - 1][1]));
 }
@@ -42,7 +41,7 @@ beforeEach(() => {
 
 describe('setupClaude', () => {
   const hooksPath = '/mock/home/.claude/settings.json';
-  const mcpPath   = '/mock/home/.claude.json';
+  const mcpPath = '/mock/home/.claude.json';
 
   it('adds both hooks immediately on a fresh install — no prompt', async () => {
     const confirm = await getConfirm();
@@ -57,8 +56,8 @@ describe('setupClaude', () => {
   it('does not add hooks that already exist', async () => {
     withExistingFile(hooksPath, {
       hooks: {
-        PreToolUse:  [{ matcher: '.*', hooks:[{ type: 'command', command: 'node9 check' }] }],
-        PostToolUse:[{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log'   }] }],
+        PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] }],
+        PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
       },
     });
 
@@ -68,7 +67,9 @@ describe('setupClaude', () => {
 
   it('prompts before wrapping existing MCP servers', async () => {
     withExistingFile(mcpPath, {
-      mcpServers: { github: { command: 'npx', args:['-y', '@modelcontextprotocol/server-github'] } },
+      mcpServers: {
+        github: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-github'] },
+      },
     });
     const confirm = await getConfirm();
     confirm.mockResolvedValue(true);
@@ -79,7 +80,7 @@ describe('setupClaude', () => {
 
   it('wraps MCP servers when user confirms', async () => {
     withExistingFile(mcpPath, {
-      mcpServers: { github: { command: 'npx', args:['-y', 'server-github'] } },
+      mcpServers: { github: { command: 'npx', args: ['-y', 'server-github'] } },
     });
     const confirm = await getConfirm();
     confirm.mockResolvedValue(true);
@@ -93,7 +94,7 @@ describe('setupClaude', () => {
 
   it('skips MCP wrapping when user denies', async () => {
     withExistingFile(mcpPath, {
-      mcpServers: { github: { command: 'npx', args:['-y', 'server-github'] } },
+      mcpServers: { github: { command: 'npx', args: ['-y', 'server-github'] } },
     });
     const confirm = await getConfirm();
     confirm.mockResolvedValue(false);
@@ -104,7 +105,7 @@ describe('setupClaude', () => {
 
   it('skips MCP servers that are already wrapped', async () => {
     withExistingFile(mcpPath, {
-      mcpServers: { github: { command: 'node9', args:['proxy', 'npx server-github'] } },
+      mcpServers: { github: { command: 'node9', args: ['proxy', 'npx server-github'] } },
     });
     const confirm = await getConfirm();
 
@@ -116,8 +117,8 @@ describe('setupClaude', () => {
   it('prints "already configured" when everything is in place', async () => {
     withExistingFile(hooksPath, {
       hooks: {
-        PreToolUse:  [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] }],
-        PostToolUse: [{ matcher: '.*', hooks:[{ type: 'command', command: 'node9 log'   }] }],
+        PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] }],
+        PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
       },
     });
 
@@ -147,7 +148,7 @@ describe('setupGemini', () => {
     withExistingFile(settingsPath, {
       hooks: {
         BeforeTool: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] }],
-        AfterTool:  [{ matcher: '.*', hooks:[{ type: 'command', command: 'node9 log'   }] }],
+        AfterTool: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
       },
     });
 
@@ -184,7 +185,7 @@ describe('setupGemini', () => {
 
 describe('setupCursor', () => {
   const hooksPath = '/mock/home/.cursor/hooks.json';
-  const mcpPath   = '/mock/home/.cursor/mcp.json';
+  const mcpPath = '/mock/home/.cursor/mcp.json';
 
   it('adds both hooks immediately on a fresh install — no prompt', async () => {
     const confirm = await getConfirm();
@@ -201,8 +202,8 @@ describe('setupCursor', () => {
     withExistingFile(hooksPath, {
       version: 1,
       hooks: {
-        preToolUse:  [{ command: 'node9', args: ['check'] }],
-        postToolUse: [{ command: 'node9', args: ['log']   }],
+        preToolUse: [{ command: 'node9', args: ['check'] }],
+        postToolUse: [{ command: 'node9', args: ['log'] }],
       },
     });
 
