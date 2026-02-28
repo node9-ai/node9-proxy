@@ -16,7 +16,9 @@ describe('redactSecrets', () => {
   });
 
   it('masks tokens and passwords', () => {
-    expect(redactSecrets('GITHUB_TOKEN=token_1234567890abcdefghijk')).toContain('GITHUB_TOKEN=********');
+    expect(redactSecrets('GITHUB_TOKEN=token_1234567890abcdefghijk')).toContain(
+      'GITHUB_TOKEN=********'
+    );
     expect(redactSecrets('password: "password_example_123"')).toContain('password: "********');
   });
 
