@@ -9,4 +9,7 @@ export default defineConfig({
   dts: true,
   clean: true,
   splitting: false,
+  esbuildOptions(options) {
+    options.loader = { ...options.loader, '.html': 'text' };
+  },
 });

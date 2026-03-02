@@ -22,10 +22,12 @@ describe('redactSecrets', () => {
     expect(redactSecrets('password: "password_example_123"')).toContain('password: "********');
   });
 
-  it('masks generic long entropy strings', () => {
+  it('does NOT mask bare long strings without a secret prefix — avoids redacting SHAs, paths, IDs', () => {
+    // Pattern 3 was removed: bare long alphanumeric strings like git SHAs should NOT be redacted.
+    // Only strings with a recognised prefix (api_key=, token=, Authorization: Bearer) are redacted.
     const input = 'The hash is a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0u1v2w3x4y5z6a7b8c9d0e1f2';
     const output = redactSecrets(input);
-    expect(output).toContain('********');
+    expect(output).toBe(input); // unchanged — no recognised prefix
   });
 
   it('does not mask short, safe words', () => {

@@ -1,0 +1,886 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Node9 Security Guard</title>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Fira+Code:wght@400;500&display=swap');
+      :root {
+        --bg: #0a0c10;
+        --card: #1c2128;
+        --panel: #161b22;
+        --border: #30363d;
+        --text: #adbac7;
+        --text-bright: #cdd9e5;
+        --muted: #768390;
+        --primary: #f0883e;
+        --success: #347d39;
+        --danger: #c93c37;
+        --accent: #539bf5;
+      }
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font-family:
+          'Inter',
+          -apple-system,
+          sans-serif;
+        min-height: 100vh;
+      }
+
+      .shell {
+        max-width: 1000px;
+        margin: 0 auto;
+        padding: 32px 24px 48px;
+        display: grid;
+        grid-template-rows: auto 1fr;
+        gap: 24px;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding-bottom: 20px;
+        border-bottom: 1px solid var(--border);
+      }
+      .logo {
+        font-size: 24px;
+      }
+      h1 {
+        font-size: 18px;
+        font-weight: 700;
+        color: var(--text-bright);
+        letter-spacing: -0.3px;
+      }
+      .status-badge {
+        margin-left: auto;
+        font-size: 11px;
+        font-weight: 700;
+        padding: 3px 10px;
+        border-radius: 6px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        background: rgba(48, 54, 61, 0.5);
+        border: 1px solid var(--border);
+        color: var(--muted);
+      }
+      .status-badge.online {
+        color: #57ab5a;
+        border-color: rgba(52, 125, 57, 0.4);
+      }
+
+      .body {
+        display: grid;
+        grid-template-columns: 1fr 272px;
+        gap: 20px;
+        align-items: start;
+      }
+
+      .warning-banner {
+        display: none;
+        background: rgba(240, 136, 62, 0.08);
+        border: 1px solid rgba(240, 136, 62, 0.3);
+        border-radius: 10px;
+        padding: 10px 14px;
+        margin-bottom: 14px;
+        font-size: 12px;
+        color: var(--primary);
+        line-height: 1.5;
+      }
+      .warning-banner.show {
+        display: block;
+      }
+
+      .main {
+        min-width: 0;
+      }
+      .section-title {
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        color: var(--muted);
+        margin-bottom: 12px;
+      }
+      #empty {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        padding: 48px 24px;
+        border: 2px dashed var(--border);
+        border-radius: 16px;
+        color: var(--muted);
+        font-size: 13px;
+        text-align: center;
+        line-height: 1.5;
+      }
+      #empty .empty-icon {
+        font-size: 28px;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 24px;
+        margin-bottom: 16px;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+        animation: pop 0.35s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      }
+      .card.slack-viewer {
+        border-color: rgba(83, 155, 245, 0.3);
+      }
+      @keyframes pop {
+        from {
+          opacity: 0;
+          transform: scale(0.97) translateY(6px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+      .label {
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+        color: var(--muted);
+        letter-spacing: 1px;
+        display: block;
+        margin-bottom: 6px;
+      }
+      .source-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 10px;
+        flex-wrap: wrap;
+      }
+      .agent-badge {
+        font-size: 11px;
+        font-weight: 600;
+        padding: 2px 8px;
+        border-radius: 5px;
+        background: rgba(83, 155, 245, 0.12);
+        border: 1px solid rgba(83, 155, 245, 0.25);
+        color: var(--accent);
+        letter-spacing: 0.2px;
+      }
+      .mcp-badge {
+        font-size: 11px;
+        font-weight: 600;
+        padding: 2px 8px;
+        border-radius: 5px;
+        background: rgba(87, 171, 90, 0.12);
+        border: 1px solid rgba(87, 171, 90, 0.25);
+        color: #57ab5a;
+        font-family: 'Fira Code', monospace;
+        letter-spacing: 0.2px;
+      }
+      .source-arrow {
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .tool-chip {
+        display: inline-block;
+        padding: 3px 10px;
+        background: rgba(240, 136, 62, 0.1);
+        color: var(--primary);
+        border-radius: 6px;
+        font-family: 'Fira Code', monospace;
+        font-size: 13px;
+        font-weight: 500;
+        margin-bottom: 16px;
+      }
+      .slack-indicator {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11px;
+        color: var(--accent);
+        background: rgba(83, 155, 245, 0.08);
+        border: 1px solid rgba(83, 155, 245, 0.2);
+        border-radius: 6px;
+        padding: 5px 10px;
+        margin-bottom: 14px;
+      }
+      pre {
+        background: #0d1117;
+        padding: 14px 16px;
+        border-radius: 10px;
+        font-family: 'Fira Code', monospace;
+        font-size: 12px;
+        color: #e6edf3;
+        line-height: 1.6;
+        border: 1px solid var(--border);
+        margin-bottom: 20px;
+        overflow-x: auto;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+      .actions {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+      button {
+        padding: 11px 14px;
+        border-radius: 8px;
+        border: 1px solid transparent;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.15s ease;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        font-family: inherit;
+      }
+      .btn-allow {
+        background: var(--success);
+        color: #fff;
+        grid-column: span 2;
+      }
+      .btn-deny {
+        background: var(--danger);
+        color: #fff;
+        grid-column: span 2;
+      }
+      .btn-secondary {
+        background: transparent;
+        border-color: var(--border);
+        color: var(--text);
+        font-size: 12px;
+        font-weight: 500;
+      }
+      button:hover:not(:disabled) {
+        filter: brightness(1.15);
+        transform: translateY(-1px);
+      }
+      button:active:not(:disabled) {
+        transform: none;
+        filter: brightness(0.95);
+      }
+      button:disabled {
+        opacity: 0.35;
+        cursor: not-allowed;
+      }
+
+      .sidebar {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        position: sticky;
+        top: 24px;
+      }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 16px;
+      }
+      .panel-title {
+        font-size: 12px;
+        font-weight: 700;
+        color: var(--text-bright);
+        margin-bottom: 12px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .setting-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+        margin-bottom: 12px;
+      }
+      .setting-row:last-child {
+        margin-bottom: 0;
+      }
+      .setting-text {
+        flex: 1;
+      }
+      .setting-label {
+        font-size: 12px;
+        color: var(--text-bright);
+        margin-bottom: 3px;
+      }
+      .setting-desc {
+        font-size: 11px;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+      .toggle {
+        position: relative;
+        display: inline-block;
+        width: 40px;
+        height: 22px;
+        flex-shrink: 0;
+        margin-top: 1px;
+      }
+      .toggle input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+      .slider {
+        position: absolute;
+        cursor: pointer;
+        inset: 0;
+        background: #30363d;
+        border-radius: 22px;
+        transition: 0.2s;
+      }
+      .slider:before {
+        content: '';
+        position: absolute;
+        width: 16px;
+        height: 16px;
+        left: 3px;
+        bottom: 3px;
+        background: #fff;
+        border-radius: 50%;
+        transition: 0.2s;
+      }
+      input:checked + .slider {
+        background: var(--success);
+      }
+      input:checked + .slider:before {
+        transform: translateX(18px);
+      }
+      input:disabled + .slider {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+
+      .slack-key-row {
+        display: flex;
+        gap: 6px;
+        margin-top: 10px;
+      }
+      .slack-key-input {
+        flex: 1;
+        background: #0d1117;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        color: var(--text-bright);
+        padding: 6px 10px;
+        font-size: 12px;
+        font-family: 'Fira Code', monospace;
+        outline: none;
+      }
+      .slack-key-input:focus {
+        border-color: var(--accent);
+      }
+      .btn-save-key {
+        background: var(--accent);
+        color: #fff;
+        border: none;
+        border-radius: 6px;
+        padding: 6px 12px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        white-space: nowrap;
+        font-family: inherit;
+      }
+      .btn-save-key:hover {
+        filter: brightness(1.1);
+      }
+      .slack-status-line {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 6px;
+      }
+      .slack-status-line.active {
+        color: #57ab5a;
+      }
+
+      .decisions-empty {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .decision-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 0;
+        border-bottom: 1px solid var(--border);
+      }
+      .decision-row:last-child {
+        border-bottom: none;
+      }
+      .decision-tool {
+        flex: 1;
+        font-family: 'Fira Code', monospace;
+        font-size: 11px;
+        color: var(--text-bright);
+        word-break: break-all;
+      }
+      .decision-badge {
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+        white-space: nowrap;
+      }
+      .decision-badge.allow {
+        background: rgba(52, 125, 57, 0.2);
+        color: #57ab5a;
+      }
+      .decision-badge.deny {
+        background: rgba(201, 60, 55, 0.2);
+        color: #e5534b;
+      }
+      .btn-revoke {
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--muted);
+        padding: 3px 8px;
+        font-size: 10px;
+        border-radius: 5px;
+        white-space: nowrap;
+        font-family: inherit;
+        cursor: pointer;
+      }
+      .btn-revoke:hover {
+        border-color: var(--danger);
+        color: var(--danger);
+      }
+
+      .modal-overlay {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.7);
+        z-index: 100;
+        align-items: center;
+        justify-content: center;
+      }
+      .modal-overlay.show {
+        display: flex;
+      }
+      .modal {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 28px;
+        max-width: 380px;
+        width: 90%;
+      }
+      .modal h2 {
+        font-size: 16px;
+        color: var(--text-bright);
+        margin-bottom: 10px;
+      }
+      .modal p {
+        font-size: 13px;
+        color: var(--muted);
+        line-height: 1.6;
+        margin-bottom: 20px;
+      }
+      .modal-actions {
+        display: flex;
+        gap: 10px;
+      }
+      .modal-actions button {
+        flex: 1;
+        padding: 10px;
+        border-radius: 8px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        font-family: inherit;
+      }
+      .btn-modal-yes {
+        background: var(--success);
+        color: #fff;
+        border: none;
+      }
+      .btn-modal-no {
+        background: transparent;
+        color: var(--text);
+        border: 1px solid var(--border);
+      }
+
+      @media (max-width: 680px) {
+        .body {
+          grid-template-columns: 1fr;
+        }
+        .sidebar {
+          position: static;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header>
+        <span class="logo">🛡️</span>
+        <h1>Node9 Guard</h1>
+        <div id="st" class="status-badge">Waiting...</div>
+      </header>
+
+      <div class="body">
+        <div class="main">
+          <div id="warnBanner" class="warning-banner">
+            ⚠️ Auto-start is off — daemon started manually. Run "node9 daemon stop" to stop it, or
+            enable Auto-start in Settings.
+          </div>
+          <div class="section-title">Pending Approvals</div>
+          <div id="list"></div>
+          <div id="empty">
+            <span class="empty-icon">✨</span>
+            <span>All clear — no pending tool calls.</span>
+          </div>
+        </div>
+
+        <div class="sidebar">
+          <div class="panel">
+            <div class="panel-title">⚙️ Settings</div>
+            <div class="setting-row">
+              <div class="setting-text">
+                <div class="setting-label">Auto-start daemon</div>
+                <div class="setting-desc">
+                  Open this browser automatically when a dangerous call arrives.
+                </div>
+              </div>
+              <label class="toggle">
+                <input
+                  type="checkbox"
+                  id="autoStartToggle"
+                  onchange="saveSetting('autoStartDaemon', this.checked)"
+                />
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-title">💬 Slack Approvals</div>
+            <div class="setting-row">
+              <div class="setting-text">
+                <div class="setting-label">Enable Slack</div>
+                <div class="setting-desc">
+                  Use Slack as the approval authority when a key is saved.
+                </div>
+              </div>
+              <label class="toggle">
+                <input
+                  type="checkbox"
+                  id="slackEnabledToggle"
+                  onchange="saveSetting('slackEnabled', this.checked)"
+                />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="slack-key-row">
+              <input
+                type="password"
+                id="slackKeyInput"
+                class="slack-key-input"
+                placeholder="Paste API key…"
+              />
+              <button class="btn-save-key" onclick="saveSlackKey()">Save</button>
+            </div>
+            <div id="slackStatusLine" class="slack-status-line">No key saved</div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-title">📋 Persistent Decisions</div>
+            <div id="decisionsList"><span class="decisions-empty">None yet.</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="slackModal" class="modal-overlay">
+      <div class="modal">
+        <h2>✅ Slack key saved</h2>
+        <p>
+          Slack is now the approval authority. Would you like to
+          <strong>disable the browser popup</strong>? You can re-enable it in Settings anytime.
+        </p>
+        <div class="modal-actions">
+          <button class="btn-modal-yes" onclick="dismissModal(true)">Yes, disable popup</button>
+          <button class="btn-modal-no" onclick="dismissModal(false)">Keep popup</button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const CSRF_TOKEN = '{{CSRF_TOKEN}}';
+      const list = document.getElementById('list');
+      const empty = document.getElementById('empty');
+      const st = document.getElementById('st');
+      const requests = new Set();
+      let orgName = null;
+      let autoDenyMs = 120000;
+
+      function highlightSyntax(code) {
+        if (typeof code !== 'string') return esc(code);
+        return esc(code)
+          .replace(
+            /(\b(sudo|rm|cat|grep|ls|git|npm|yarn|pnpm|python3|node|curl|wget|sh|bash|zsh|docker)\b)/g,
+            '<span class="hl-cmd"></span>'
+          )
+          .replace(/(\s)(-[-a-zA-Z0-9]+)/g, '<span class="hl-flag"></span>')
+          .replace(/(".*?"|'.*?')/g, '<span class="hl-str"></span>');
+      }
+
+      function updateDenyButton(id, timestamp) {
+        const btn = document.querySelector('#c-' + id + ' .btn-deny');
+        if (!btn) return;
+        const elapsed = Date.now() - timestamp;
+        const remaining = Math.max(0, Math.ceil((autoDenyMs - elapsed) / 1000));
+        if (remaining <= 0) {
+          btn.textContent = 'Auto-Denying...';
+          btn.disabled = true;
+        } else {
+          btn.textContent = 'Block Action (' + remaining + 's)';
+          setTimeout(() => updateDenyButton(id, timestamp), 1000);
+        }
+      }
+
+      function esc(s) {
+        return String(s)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;');
+      }
+      function refresh() {
+        empty.style.display = requests.size === 0 ? 'block' : 'none';
+      }
+
+      function sendDecision(id, decision, persist) {
+        const card = document.getElementById('c-' + id);
+        if (card) card.style.opacity = '0.5';
+        fetch('/decision/' + id, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Node9-Token': CSRF_TOKEN },
+          body: JSON.stringify({ decision, persist: !!persist }),
+        });
+        setTimeout(() => {
+          card?.remove();
+          requests.delete(id);
+          refresh();
+        }, 200);
+      }
+
+      function addCard(req) {
+        if (requests.has(req.id)) return;
+        requests.add(req.id);
+        refresh();
+        const isSlack = !!req.slackDelegated;
+        const cmd = esc(
+          String(
+            req.args &&
+              (req.args.command ||
+                req.args.cmd ||
+                req.args.script ||
+                JSON.stringify(req.args, null, 2))
+          )
+        );
+        const card = document.createElement('div');
+        card.className = 'card' + (isSlack ? ' slack-viewer' : '');
+        card.id = 'c-' + req.id;
+        const agentLabel = req.agent ? esc(req.agent) : 'AI Agent';
+        const mcpLabel = req.mcpServer ? esc(req.mcpServer) : null;
+        card.innerHTML = `
+        <div class="source-row">
+          <span class="agent-badge">${agentLabel}</span>
+          ${mcpLabel ? `<span class="source-arrow">→</span><span class="mcp-badge">mcp::${mcpLabel}</span>` : ''}
+        </div>
+        <div class="tool-chip">${esc(req.toolName)}</div>
+        ${isSlack ? '<div class="slack-indicator">⚡ Awaiting Slack approval — view only</div>' : ''}
+        <span class="label">Input Payload</span>
+        <pre>${cmd}</pre>
+        <div class="actions">
+          <button class="btn-allow" onclick="sendDecision('${req.id}','allow',false)" ${isSlack ? 'disabled' : ''}>Approve Execution</button>
+          <button class="btn-deny"  onclick="sendDecision('${req.id}','deny',false)"  ${isSlack ? 'disabled' : ''}>Block Action</button>
+          <button class="btn-secondary" onclick="sendDecision('${req.id}','allow',true)" ${isSlack ? 'disabled' : ''}>Always Allow</button>
+          <button class="btn-secondary" onclick="sendDecision('${req.id}','deny',true)"  ${isSlack ? 'disabled' : ''}>Always Deny</button>
+        </div>
+      `;
+        list.appendChild(card);
+        if (!isSlack) updateDenyButton(req.id, req.timestamp || Date.now());
+        if (!isSlack) {
+          try {
+            new Audio(
+              'data:audio/wav;base64,UklGRl9vT19XQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YTdvT18AAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA='
+            ).play();
+          } catch (e) {}
+        }
+      }
+
+      function connect() {
+        const ev = new EventSource('/events');
+        ev.onopen = () => {
+          st.className = 'status-badge online';
+          st.innerText = 'System Live';
+        };
+        ev.onerror = () => {
+          st.className = 'status-badge';
+          st.innerText = 'Reconnecting...';
+          setTimeout(connect, 2000);
+          ev.close();
+        };
+        ev.addEventListener('init', (e) => {
+          const data = JSON.parse(e.data);
+          orgName = data.orgName;
+          autoDenyMs = data.autoDenyMs;
+          if (orgName) {
+            const b = document.getElementById('cloudBadge');
+            b.innerText = orgName;
+            b.classList.add('online');
+          }
+          data.requests.forEach(addCard);
+        });
+        ev.addEventListener('add', (e) => {
+          addCard(JSON.parse(e.data));
+        });
+        ev.addEventListener('remove', (e) => {
+          const id = JSON.parse(e.data).id;
+          document.getElementById('c-' + id)?.remove();
+          requests.delete(id);
+          refresh();
+        });
+        ev.addEventListener('decisions', (e) => {
+          renderDecisions(JSON.parse(e.data));
+        });
+        ev.addEventListener('slack-status', (e) => {
+          applySlackStatus(JSON.parse(e.data));
+        });
+      }
+      connect();
+
+      function saveSetting(key, value) {
+        fetch('/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Node9-Token': CSRF_TOKEN },
+          body: JSON.stringify({ [key]: value }),
+        }).catch(() => {});
+      }
+
+      fetch('/settings')
+        .then((r) => r.json())
+        .then((s) => {
+          const tog = document.getElementById('autoStartToggle');
+          tog.checked = s.autoStartDaemon;
+          if (!s.autoStarted) {
+            tog.disabled = true;
+            tog.title = 'Start the daemon via "node9 daemon" to change this setting';
+          }
+          if (!s.autoStartDaemon && !s.autoStarted) {
+            document.getElementById('warnBanner').classList.add('show');
+          }
+        })
+        .catch(() => {});
+
+      document.getElementById('autoStartToggle').addEventListener('change', function () {
+        document.getElementById('warnBanner').classList.toggle('show', !this.checked);
+      });
+
+      function applySlackStatus(s) {
+        const tog = document.getElementById('slackEnabledToggle');
+        const line = document.getElementById('slackStatusLine');
+        tog.disabled = !s.hasKey;
+        tog.checked = s.hasKey && s.enabled;
+        if (s.hasKey) {
+          line.textContent = s.enabled
+            ? '🟢 Slack active — approvals handled by Slack'
+            : '⚫ Key saved, Slack disabled';
+          line.className = 'slack-status-line' + (s.enabled ? ' active' : '');
+        } else {
+          line.textContent = 'No key saved';
+          line.className = 'slack-status-line';
+        }
+      }
+
+      fetch('/slack-status')
+        .then((r) => r.json())
+        .then(applySlackStatus)
+        .catch(() => {});
+
+      function saveSlackKey() {
+        const key = document.getElementById('slackKeyInput').value.trim();
+        if (!key) return;
+        fetch('/slack-key', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Node9-Token': CSRF_TOKEN },
+          body: JSON.stringify({ apiKey: key }),
+        })
+          .then((r) => {
+            if (r.ok) {
+              document.getElementById('slackKeyInput').value = '';
+              document.getElementById('slackModal').classList.add('show');
+            }
+          })
+          .catch(() => {});
+      }
+
+      function dismissModal(disablePopup) {
+        document.getElementById('slackModal').classList.remove('show');
+        if (disablePopup) {
+          saveSetting('autoStartDaemon', false);
+          document.getElementById('autoStartToggle').checked = false;
+          document.getElementById('warnBanner').classList.remove('show');
+        }
+      }
+
+      function renderDecisions(decisions) {
+        const dl = document.getElementById('decisionsList');
+        const entries = Object.entries(decisions);
+        if (entries.length === 0) {
+          dl.innerHTML = '<span class="decisions-empty">None yet.</span>';
+          return;
+        }
+        dl.innerHTML = entries
+          .map(
+            ([tool, dec]) => `
+        <div class="decision-row" id="dr-${encodeURIComponent(tool)}">
+          <span class="decision-tool">${esc(tool)}</span>
+          <span class="decision-badge ${esc(dec)}">${dec === 'allow' ? 'Always Allow' : 'Always Deny'}</span>
+          <button class="btn-revoke" onclick="revokeDecision(this)">Revoke</button>
+        </div>
+      `
+          )
+          .join('');
+        entries.forEach(([tool]) => {
+          const row = document.getElementById('dr-' + encodeURIComponent(tool));
+          if (row) row.querySelector('.btn-revoke').dataset.tool = tool;
+        });
+      }
+
+      function revokeDecision(btn) {
+        const toolName = btn.dataset.tool;
+        if (!toolName) return;
+        fetch('/decisions/' + encodeURIComponent(toolName), {
+          method: 'DELETE',
+          headers: { 'X-Node9-Token': CSRF_TOKEN },
+        }).catch(() => {});
+        document.getElementById('dr-' + encodeURIComponent(toolName))?.remove();
+        if (!document.querySelector('#decisionsList .decision-row')) {
+          document.getElementById('decisionsList').innerHTML =
+            '<span class="decisions-empty">None yet.</span>';
+        }
+      }
+
+      fetch('/decisions')
+        .then((r) => r.json())
+        .then(renderDecisions)
+        .catch(() => {});
+    </script>
+  </body>
+</html>

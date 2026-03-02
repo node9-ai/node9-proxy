@@ -5,7 +5,7 @@ Thank you for helping make AI agents safer. All contributions are welcome — bu
 ## Getting Started
 
 ```bash
-git clone https://github.com/nadav-node9/node9-proxy.git
+git clone https://github.com/node9-ai/node9-proxy.git
 cd node9-proxy
 npm install
 npm run build
@@ -21,7 +21,7 @@ npm run demo
 
 ### Reporting Bugs
 
-Open an issue at https://github.com/nadav-node9/node9-proxy/issues with:
+Open an issue at https://github.com/node9-ai/node9-proxy/issues with:
 
 - Node.js version (`node --version`)
 - What you ran and what you expected

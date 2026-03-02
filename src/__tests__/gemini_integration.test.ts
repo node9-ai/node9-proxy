@@ -104,6 +104,29 @@ describe('Gemini Integration Security', () => {
   });
 });
 
+describe('Gemini BeforeTool payload format', () => {
+  it('evaluates tool policy from Gemini { name, args } format', async () => {
+    mockConfig({});
+    // Gemini sends { name, args } not { tool_name, tool_input }
+    const dangerous = await evaluatePolicy('Shell', { command: 'rm -rf /' });
+    expect(dangerous).toBe('review');
+  });
+
+  it('blocks dangerous Gemini tool via name/args format', async () => {
+    mockConfig({});
+    const result = await authorizeHeadless('Shell', { command: 'rm -rf /' });
+    expect(result.approved).toBe(false);
+  });
+
+  it('allows safe Gemini read tool via name/args format', async () => {
+    mockConfig({
+      policy: { ignoredTools: ['read_*', 'ReadFile'] },
+    });
+    const result = await authorizeHeadless('ReadFile', { path: '/etc/hosts' });
+    expect(result.approved).toBe(true);
+  });
+});
+
 describe('Gemini Setup (New Schema)', () => {
   const settingsPath = '/mock/home/.gemini/settings.json';
 

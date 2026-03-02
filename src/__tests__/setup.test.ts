@@ -89,7 +89,8 @@ describe('setupClaude', () => {
 
     const written = writtenTo(mcpPath);
     expect(written.mcpServers.github.command).toBe('node9');
-    expect(written.mcpServers.github.args[0]).toBe('proxy');
+    // args are the full original command parts — no 'proxy' indirection
+    expect(written.mcpServers.github.args).toEqual(['npx', '-y', 'server-github']);
   });
 
   it('skips MCP wrapping when user denies', async () => {
@@ -105,7 +106,7 @@ describe('setupClaude', () => {
 
   it('skips MCP servers that are already wrapped', async () => {
     withExistingFile(mcpPath, {
-      mcpServers: { github: { command: 'node9', args: ['proxy', 'npx server-github'] } },
+      mcpServers: { github: { command: 'node9', args: ['npx', 'server-github'] } },
     });
     const confirm = await getConfirm();
 
@@ -194,8 +195,8 @@ describe('setupCursor', () => {
     expect(confirm).not.toHaveBeenCalled();
     const written = writtenTo(hooksPath);
     expect(written.version).toBe(1);
-    expect(written.hooks.preToolUse[0].command).toBe('node9');
-    expect(written.hooks.postToolUse[0].command).toBe('node9');
+    expect(written.hooks.preToolUse[0].command).toBe('node9 check');
+    expect(written.hooks.postToolUse[0].command).toBe('node9 log');
   });
 
   it('does not add hooks that already exist', async () => {
@@ -233,7 +234,7 @@ describe('setupCursor', () => {
 
     const written = writtenTo(mcpPath);
     expect(written.mcpServers.brave.command).toBe('node9');
-    expect(written.mcpServers.brave.args[0]).toBe('proxy');
+    expect(written.mcpServers.brave.args).toEqual(['npx', 'server-brave']);
   });
 
   it('skips MCP wrapping when user denies', async () => {
@@ -259,6 +260,6 @@ describe('setupCursor', () => {
     // node9 should be appended, not replace the existing hook
     expect(written.hooks.preToolUse).toHaveLength(2);
     expect(written.hooks.preToolUse[0].command).toBe('some-other-tool');
-    expect(written.hooks.preToolUse[1].command).toBe('node9');
+    expect(written.hooks.preToolUse[1].command).toBe('node9 check');
   });
 });

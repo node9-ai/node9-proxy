@@ -61,6 +61,25 @@ interface GeminiSettings {
   [key: string]: unknown;
 }
 
+function printDaemonTip(): void {
+  console.log(
+    chalk.cyan('\n   💡 Enable browser approvals (no API key needed):') +
+      chalk.green('  node9 daemon --background')
+  );
+}
+
+/**
+ * Returns a shell-safe hook command that works regardless of the user's $PATH.
+ * Hooks run in a restricted shell (no .bashrc / nvm init), so bare "node9"
+ * is often not found. Using the full node + cli.js paths avoids this.
+ */
+function fullPathCommand(subcommand: string): string {
+  if (process.env.NODE9_TESTING === '1') return `node9 ${subcommand}`;
+  const nodeExec = process.execPath; // e.g. /home/user/.nvm/.../bin/node
+  const cliScript = process.argv[1]; // e.g. /.../dist/cli.js
+  return `${nodeExec} ${cliScript} ${subcommand}`;
+}
+
 function readJson<T>(filePath: string): T | null {
   try {
     if (fs.existsSync(filePath)) {
@@ -95,26 +114,26 @@ export async function setupClaude(): Promise<void> {
   if (!settings.hooks) settings.hooks = {};
 
   const hasPreHook = settings.hooks.PreToolUse?.some((m) =>
-    m.hooks.some((h) => h.command?.includes('node9 check'))
+    m.hooks.some((h) => h.command?.includes('node9 check') || h.command?.includes('cli.js check'))
   );
   if (!hasPreHook) {
     if (!settings.hooks.PreToolUse) settings.hooks.PreToolUse = [];
     settings.hooks.PreToolUse.push({
       matcher: '.*',
-      hooks: [{ type: 'command', command: 'node9 check', timeout: 60 }],
+      hooks: [{ type: 'command', command: fullPathCommand('check'), timeout: 60 }],
     });
     console.log(chalk.green('  ✅ PreToolUse hook added  → node9 check'));
     anythingChanged = true;
   }
 
   const hasPostHook = settings.hooks.PostToolUse?.some((m) =>
-    m.hooks.some((h) => h.command?.includes('node9 log'))
+    m.hooks.some((h) => h.command?.includes('node9 log') || h.command?.includes('cli.js log'))
   );
   if (!hasPostHook) {
     if (!settings.hooks.PostToolUse) settings.hooks.PostToolUse = [];
     settings.hooks.PostToolUse.push({
       matcher: '.*',
-      hooks: [{ type: 'command', command: 'node9 log' }],
+      hooks: [{ type: 'command', command: fullPathCommand('log') }],
     });
     console.log(chalk.green('  ✅ PostToolUse hook added → node9 log'));
     anythingChanged = true;
@@ -126,27 +145,25 @@ export async function setupClaude(): Promise<void> {
   }
 
   // ── Step 2: Modifications — show preview and ask ─────────────────────────
-  const serversToWrap: Array<{ name: string; originalCmd: string }> = [];
+  const serversToWrap: Array<{ name: string; originalCmd: string; parts: string[] }> = [];
   for (const [name, server] of Object.entries(servers)) {
     if (!server.command || server.command === 'node9') continue;
-    serversToWrap.push({
-      name,
-      originalCmd: [server.command, ...(server.args ?? [])].join(' '),
-    });
+    const parts = [server.command, ...(server.args ?? [])];
+    serversToWrap.push({ name, originalCmd: parts.join(' '), parts });
   }
 
   if (serversToWrap.length > 0) {
     console.log(chalk.bold('The following existing entries will be modified:\n'));
     console.log(chalk.white(`  ${mcpPath}`));
     for (const { name, originalCmd } of serversToWrap) {
-      console.log(chalk.gray(`    • ${name}: "npx ${originalCmd}" → node9 proxy "${originalCmd}"`));
+      console.log(chalk.gray(`    • ${name}: "${originalCmd}" → node9 ${originalCmd}`));
     }
     console.log('');
 
     const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
     if (proceed) {
-      for (const { name, originalCmd } of serversToWrap) {
-        servers[name] = { ...servers[name], command: 'node9', args: ['proxy', originalCmd] };
+      for (const { name, parts } of serversToWrap) {
+        servers[name] = { ...servers[name], command: 'node9', args: parts };
       }
       claudeConfig.mcpServers = servers;
       writeJson(mcpPath, claudeConfig);
@@ -161,12 +178,14 @@ export async function setupClaude(): Promise<void> {
   // ── Summary ───────────────────────────────────────────────────────────────
   if (!anythingChanged && serversToWrap.length === 0) {
     console.log(chalk.blue('ℹ️  Node9 is already fully configured for Claude Code.'));
+    printDaemonTip();
     return;
   }
 
   if (anythingChanged) {
     console.log(chalk.green.bold('🛡️  Node9 is now protecting Claude Code!'));
     console.log(chalk.gray('    Restart Claude Code for changes to take effect.'));
+    printDaemonTip();
   }
 }
 
@@ -186,7 +205,9 @@ export async function setupGemini(): Promise<void> {
 
   const hasBeforeHook =
     Array.isArray(settings.hooks.BeforeTool) &&
-    settings.hooks.BeforeTool.some((m) => m.hooks.some((h) => h.command?.includes('node9 check')));
+    settings.hooks.BeforeTool.some((m) =>
+      m.hooks.some((h) => h.command?.includes('node9 check') || h.command?.includes('cli.js check'))
+    );
   if (!hasBeforeHook) {
     if (!settings.hooks.BeforeTool) settings.hooks.BeforeTool = [];
     // If it was an object (old format), we re-initialize it as an array
@@ -194,7 +215,9 @@ export async function setupGemini(): Promise<void> {
 
     settings.hooks.BeforeTool.push({
       matcher: '.*',
-      hooks: [{ name: 'node9-check', type: 'command', command: 'node9 check', timeout: 60000 }],
+      hooks: [
+        { name: 'node9-check', type: 'command', command: fullPathCommand('check'), timeout: 60000 },
+      ],
     });
     console.log(chalk.green('  ✅ BeforeTool hook added → node9 check'));
     anythingChanged = true;
@@ -202,7 +225,9 @@ export async function setupGemini(): Promise<void> {
 
   const hasAfterHook =
     Array.isArray(settings.hooks.AfterTool) &&
-    settings.hooks.AfterTool.some((m) => m.hooks.some((h) => h.command?.includes('node9 log')));
+    settings.hooks.AfterTool.some((m) =>
+      m.hooks.some((h) => h.command?.includes('node9 log') || h.command?.includes('cli.js log'))
+    );
   if (!hasAfterHook) {
     if (!settings.hooks.AfterTool) settings.hooks.AfterTool = [];
     // If it was an object (old format), we re-initialize it as an array
@@ -210,7 +235,7 @@ export async function setupGemini(): Promise<void> {
 
     settings.hooks.AfterTool.push({
       matcher: '.*',
-      hooks: [{ name: 'node9-log', type: 'command', command: 'node9 log' }],
+      hooks: [{ name: 'node9-log', type: 'command', command: fullPathCommand('log') }],
     });
     console.log(chalk.green('  ✅ AfterTool hook added  → node9 log'));
     anythingChanged = true;
@@ -222,27 +247,25 @@ export async function setupGemini(): Promise<void> {
   }
 
   // ── Step 2: Modifications — show preview and ask ─────────────────────────
-  const serversToWrap: Array<{ name: string; originalCmd: string }> = [];
+  const serversToWrap: Array<{ name: string; originalCmd: string; parts: string[] }> = [];
   for (const [name, server] of Object.entries(servers)) {
     if (!server.command || server.command === 'node9') continue;
-    serversToWrap.push({
-      name,
-      originalCmd: [server.command, ...(server.args ?? [])].join(' '),
-    });
+    const parts = [server.command, ...(server.args ?? [])];
+    serversToWrap.push({ name, originalCmd: parts.join(' '), parts });
   }
 
   if (serversToWrap.length > 0) {
     console.log(chalk.bold('The following existing entries will be modified:\n'));
     console.log(chalk.white(`  ${settingsPath}  (mcpServers)`));
     for (const { name, originalCmd } of serversToWrap) {
-      console.log(chalk.gray(`    • ${name}: "${originalCmd}" → node9 proxy "${originalCmd}"`));
+      console.log(chalk.gray(`    • ${name}: "${originalCmd}" → node9 ${originalCmd}`));
     }
     console.log('');
 
     const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
     if (proceed) {
-      for (const { name, originalCmd } of serversToWrap) {
-        servers[name] = { ...servers[name], command: 'node9', args: ['proxy', originalCmd] };
+      for (const { name, parts } of serversToWrap) {
+        servers[name] = { ...servers[name], command: 'node9', args: parts };
       }
       settings.mcpServers = servers;
       writeJson(settingsPath, settings);
@@ -257,12 +280,14 @@ export async function setupGemini(): Promise<void> {
   // ── Summary ───────────────────────────────────────────────────────────────
   if (!anythingChanged && serversToWrap.length === 0) {
     console.log(chalk.blue('ℹ️  Node9 is already fully configured for Gemini CLI.'));
+    printDaemonTip();
     return;
   }
 
   if (anythingChanged) {
     console.log(chalk.green.bold('🛡️  Node9 is now protecting Gemini CLI!'));
     console.log(chalk.gray('    Restart Gemini CLI for changes to take effect.'));
+    printDaemonTip();
   }
 }
 
@@ -302,21 +327,21 @@ export async function setupCursor(): Promise<void> {
   if (!hooksFile.hooks) hooksFile.hooks = {};
 
   const hasPreHook = hooksFile.hooks.preToolUse?.some(
-    (h) => h.command === 'node9' && h.args?.includes('check')
+    (h) => (h.command === 'node9' && h.args?.includes('check')) || h.command?.includes('cli.js')
   );
   if (!hasPreHook) {
     if (!hooksFile.hooks.preToolUse) hooksFile.hooks.preToolUse = [];
-    hooksFile.hooks.preToolUse.push({ command: 'node9', args: ['check'] });
+    hooksFile.hooks.preToolUse.push({ command: fullPathCommand('check') });
     console.log(chalk.green('  ✅ preToolUse hook added → node9 check'));
     anythingChanged = true;
   }
 
   const hasPostHook = hooksFile.hooks.postToolUse?.some(
-    (h) => h.command === 'node9' && h.args?.includes('log')
+    (h) => (h.command === 'node9' && h.args?.includes('log')) || h.command?.includes('cli.js')
   );
   if (!hasPostHook) {
     if (!hooksFile.hooks.postToolUse) hooksFile.hooks.postToolUse = [];
-    hooksFile.hooks.postToolUse.push({ command: 'node9', args: ['log'] });
+    hooksFile.hooks.postToolUse.push({ command: fullPathCommand('log') });
     console.log(chalk.green('  ✅ postToolUse hook added → node9 log'));
     anythingChanged = true;
   }
@@ -327,27 +352,25 @@ export async function setupCursor(): Promise<void> {
   }
 
   // ── Step 2: Modifications — show preview and ask ─────────────────────────
-  const serversToWrap: Array<{ name: string; originalCmd: string }> = [];
+  const serversToWrap: Array<{ name: string; originalCmd: string; parts: string[] }> = [];
   for (const [name, server] of Object.entries(servers)) {
     if (!server.command || server.command === 'node9') continue;
-    serversToWrap.push({
-      name,
-      originalCmd: [server.command, ...(server.args ?? [])].join(' '),
-    });
+    const parts = [server.command, ...(server.args ?? [])];
+    serversToWrap.push({ name, originalCmd: parts.join(' '), parts });
   }
 
   if (serversToWrap.length > 0) {
     console.log(chalk.bold('The following existing entries will be modified:\n'));
     console.log(chalk.white(`  ${mcpPath}`));
     for (const { name, originalCmd } of serversToWrap) {
-      console.log(chalk.gray(`    • ${name}: "${originalCmd}" → node9 proxy "${originalCmd}"`));
+      console.log(chalk.gray(`    • ${name}: "${originalCmd}" → node9 ${originalCmd}`));
     }
     console.log('');
 
     const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
     if (proceed) {
-      for (const { name, originalCmd } of serversToWrap) {
-        servers[name] = { ...servers[name], command: 'node9', args: ['proxy', originalCmd] };
+      for (const { name, parts } of serversToWrap) {
+        servers[name] = { ...servers[name], command: 'node9', args: parts };
       }
       mcpConfig.mcpServers = servers;
       writeJson(mcpPath, mcpConfig);
@@ -362,11 +385,13 @@ export async function setupCursor(): Promise<void> {
   // ── Summary ───────────────────────────────────────────────────────────────
   if (!anythingChanged && serversToWrap.length === 0) {
     console.log(chalk.blue('ℹ️  Node9 is already fully configured for Cursor.'));
+    printDaemonTip();
     return;
   }
 
   if (anythingChanged) {
     console.log(chalk.green.bold('🛡️  Node9 is now protecting Cursor!'));
     console.log(chalk.gray('    Restart Cursor for changes to take effect.'));
+    printDaemonTip();
   }
 }

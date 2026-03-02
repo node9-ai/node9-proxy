@@ -40,7 +40,9 @@ fi
 # Run all hook checks from a temp dir with a known config so tests are
 # independent of whatever node9.config.json exists in the repo root.
 TESTDIR=$(mktemp -d)
-trap 'rm -rf "$TESTDIR"' EXIT
+TEST_HOME=$(mktemp -d)
+mkdir -p "$TEST_HOME/.node9"
+trap 'rm -rf "$TESTDIR" "$TEST_HOME"' EXIT
 
 cat > "$TESTDIR/node9.config.json" << 'EOF'
 {
@@ -57,6 +59,12 @@ cat > "$TESTDIR/node9.config.json" << 'EOF'
 EOF
 
 cd "$TESTDIR"
+# Disable all daemon interaction so tests never open a browser or hang waiting for clicks
+export NODE9_NO_AUTO_DAEMON=1
+# Stop any running daemon using the real HOME before we isolate the environment
+node "$REPO_ROOT/dist/cli.js" daemon stop 2>/dev/null || true
+# Use an isolated HOME so credentials.json and decisions.json don't affect results
+export HOME="$TEST_HOME"
 
 # =============================================================================
 # PART 1 — node9 check  (simulates Claude Code's PreToolUse hook)
@@ -130,6 +138,14 @@ out=$(echo '' | $NODE9 check 2>/dev/null); ec=$?
 
 out=$(echo 'not json at all' | $NODE9 check 2>/dev/null); ec=$?
 [ $ec -eq 0 ] && pass "Invalid JSON → exits 0 (fail-open)" || fail "Invalid JSON crashed (exit $ec)"
+
+echo -e "\n  ${YELLOW}Daemon isolation (NODE9_NO_AUTO_DAEMON=1 must prevent auto-start):${RESET}"
+if [ ! -f "$HOME/.node9/daemon.pid" ]; then
+  pass "NODE9_NO_AUTO_DAEMON=1 — no daemon was started during check tests"
+else
+  fail "Daemon was auto-started during tests — NODE9_NO_AUTO_DAEMON=1 had no effect"
+  node "$REPO_ROOT/dist/cli.js" daemon stop 2>/dev/null || true
+fi
 
 # =============================================================================
 # PART 2 — node9 log  (simulates Claude Code's PostToolUse hook)
