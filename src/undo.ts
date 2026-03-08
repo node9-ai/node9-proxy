@@ -70,10 +70,21 @@ export function applyUndo(hash: string): boolean {
     const lsTree = spawnSync('git', ['ls-tree', '-r', '--name-only', hash]);
     const snapshotFiles = new Set(lsTree.stdout.toString().trim().split('\n').filter(Boolean));
 
-    // 3. Find currently tracked files that weren't in the snapshot → delete them
-    const lsCurrent = spawnSync('git', ['ls-files']);
-    const currentFiles = lsCurrent.stdout.toString().trim().split('\n').filter(Boolean);
-    for (const file of currentFiles) {
+    // 3. Delete files that weren't in the snapshot.
+    //    Must cover both tracked files (git ls-files) AND untracked non-ignored
+    //    files (git ls-files --others --exclude-standard), since `git add -A`
+    //    captures both and `git restore` doesn't remove either category.
+    const tracked = spawnSync('git', ['ls-files'])
+      .stdout.toString()
+      .trim()
+      .split('\n')
+      .filter(Boolean);
+    const untracked = spawnSync('git', ['ls-files', '--others', '--exclude-standard'])
+      .stdout.toString()
+      .trim()
+      .split('\n')
+      .filter(Boolean);
+    for (const file of [...tracked, ...untracked]) {
       if (!snapshotFiles.has(file) && fs.existsSync(file)) {
         fs.unlinkSync(file);
       }
