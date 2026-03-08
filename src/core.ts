@@ -696,23 +696,20 @@ export async function authorizeHeadless(
     process.env.NODE9_TESTING === '1'
   );
 
-  // Get the actual config from file/defaults
-  const approvers = isTestEnv
-    ? {
-        native: false,
-        browser: false,
-        cloud: config.settings.approvers?.cloud ?? true,
-        terminal: false,
-      }
-    : config.settings.approvers || { native: true, browser: true, cloud: true, terminal: true };
+  // 2. Clone the config object!
+  // This prevents us from accidentally mutating the global config cache.
+  const approvers = {
+    ...(config.settings.approvers || { native: true, browser: true, cloud: true, terminal: true }),
+  };
 
-  // 2. THE TEST SILENCER: If we are in a test environment, hard-disable all physical UIs.
-  // We leave 'cloud' alone so your SaaS/Cloud tests can still manage it via mock configs!
-  if (process.env.VITEST || process.env.NODE_ENV === 'test' || process.env.NODE9_TESTING === '1') {
+  // 3. THE TEST SILENCER: Hard-disable all physical UIs in test/CI environments.
+  // We leave 'cloud' untouched so your SaaS/Cloud tests can still manage it via mock configs.
+  if (isTestEnv) {
     approvers.native = false;
     approvers.browser = false;
     approvers.terminal = false;
   }
+
   const isManual = meta?.agent === 'Terminal';
 
   let explainableLabel = 'Local Config';
@@ -1006,6 +1003,14 @@ export async function authorizeHeadless(
             () => null
           );
         }
+
+        // If a LOCAL channel won (native/browser/terminal) while the cloud had a
+        // pending request open, report the decision back so Mission Control doesn't
+        // stay stuck on PENDING forever.
+        if (cloudRequestId && creds && res.checkedBy !== 'cloud') {
+          resolveNode9SaaS(cloudRequestId, creds, res.approved).catch(() => null);
+        }
+
         resolve(res);
       }
     };
@@ -1268,4 +1273,29 @@ async function pollNode9SaaS(
     }
   }
   return { approved: false, reason: 'Cloud approval timed out after 10 minutes.' };
+}
+
+/**
+ * Reports a locally-made decision (native/browser/terminal) back to the SaaS
+ * so the pending request doesn't stay stuck in Mission Control.
+ */
+async function resolveNode9SaaS(
+  requestId: string,
+  creds: { apiKey: string; apiUrl: string },
+  approved: boolean
+): Promise<void> {
+  try {
+    const resolveUrl = `${creds.apiUrl}/requests/${requestId}`;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    await fetch(resolveUrl, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${creds.apiKey}` },
+      body: JSON.stringify({ decision: approved ? 'APPROVED' : 'DENIED' }),
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+  } catch {
+    /* fire-and-forget — don't block the proxy on a network error */
+  }
 }
