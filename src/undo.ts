@@ -63,21 +63,12 @@ export async function createShadowSnapshot(): Promise<string | null> {
 export function applyUndo(hash: string): boolean {
   try {
     // 1. Restore all tracked files to snapshot state
-    const restore = spawnSync('git', [
-      'restore',
-      '--source',
-      hash,
-      '--staged',
-      '--worktree',
-      '.',
-    ]);
+    const restore = spawnSync('git', ['restore', '--source', hash, '--staged', '--worktree', '.']);
     if (restore.status !== 0) return false;
 
     // 2. Find files in the snapshot tree
     const lsTree = spawnSync('git', ['ls-tree', '-r', '--name-only', hash]);
-    const snapshotFiles = new Set(
-      lsTree.stdout.toString().trim().split('\n').filter(Boolean)
-    );
+    const snapshotFiles = new Set(lsTree.stdout.toString().trim().split('\n').filter(Boolean));
 
     // 3. Find currently tracked files that weren't in the snapshot → delete them
     const lsCurrent = spawnSync('git', ['ls-files']);
