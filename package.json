@@ -92,7 +92,9 @@
     "access": "public"
   },
   "release": {
-    "branches": ["main"],
+    "branches": [
+      "main"
+    ],
     "plugins": [
       "@semantic-release/commit-analyzer",
       "@semantic-release/release-notes-generator",
@@ -100,13 +102,19 @@
       [
         "@semantic-release/github",
         {
-          "assets": ["dist/*.js", "dist/*.mjs"]
+          "assets": [
+            "dist/*.js",
+            "dist/*.mjs"
+          ]
         }
       ],
       [
         "@semantic-release/git",
         {
-          "assets": ["package.json", "package-lock.json"],
+          "assets": [
+            "package.json",
+            "package-lock.json"
+          ],
           "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
         }
       ]
