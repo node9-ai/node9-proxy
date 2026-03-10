@@ -4,26 +4,27 @@ on:
   push:
     branches: [dev]
 
-permissions:
-  contents: read
-  pull-requests: write
-
 jobs:
   open-pr:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Create PR if not exists
-        uses: peter-evans/create-pull-request@v6
-        with:
-          token: ${{ secrets.PAT_TOKEN }}
-          base: main
-          branch: dev
-          title: 'chore: merge dev into main'
-          body: |
-            ### Auto-generated PR
-            Merge latest `dev` changes into `main` to trigger a release.
+      - name: Open PR dev -> main if not exists
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          PR=$(gh pr list --base main --head dev --state open --json number -q '.[0].number')
+          if [ -z "$PR" ]; then
+            gh pr create \
+              --base main \
+              --head dev \
+              --title "chore: merge dev into main" \
+              --body "### Auto-generated PR
+          Merge latest \`dev\` changes into \`main\` to trigger a release.
 
-            > Squash and merge to keep a clean history.
-          draft: false
+          > Squash and merge to keep a clean history."
+            echo "PR created."
+          else
+            echo "PR #$PR already open, skipping."
+          fi
