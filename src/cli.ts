@@ -9,7 +9,8 @@ import {
   checkPause,
   pauseNode9,
   resumeNode9,
-  getConfig, // Ensure this is exported from core.ts!
+  getConfig,
+  _resetConfigCache,
 } from './core';
 import { setupClaude, setupGemini, setupCursor } from './setup';
 import { startDaemon, stopDaemon, daemonStatus, DAEMON_PORT, DAEMON_HOST } from './daemon/index';
@@ -125,15 +126,27 @@ async function runProxy(targetCommand: string) {
   const agentIn = readline.createInterface({ input: process.stdin, terminal: false });
 
   agentIn.on('line', async (line) => {
-    try {
-      const message = JSON.parse(line);
+    let message;
 
-      // If the Agent is trying to call a tool
-      if (
-        message.method === 'call_tool' ||
-        message.method === 'tools/call' ||
-        message.method === 'use_tool'
-      ) {
+    // 1. Safely attempt to parse JSON first
+    try {
+      message = JSON.parse(line);
+    } catch {
+      // If it's not JSON (raw shell usage), just forward it immediately
+      child.stdin.write(line + '\n');
+      return;
+    }
+
+    // 2. Check if it's an MCP tool call
+    if (
+      message.method === 'call_tool' ||
+      message.method === 'tools/call' ||
+      message.method === 'use_tool'
+    ) {
+      // PAUSE the stream so we don't process the next request while waiting for the human
+      agentIn.pause();
+
+      try {
         const name = message.params?.name || message.params?.tool_name || 'unknown';
         const toolArgs = message.params?.arguments || message.params?.tool_input || {};
 
@@ -143,7 +156,7 @@ async function runProxy(targetCommand: string) {
         });
 
         if (!result.approved) {
-          // If denied, send the error back to the Agent and DO NOT forward to the server
+          // If denied, send the MCP error back to the Agent and DO NOT forward to the server
           const errorResponse = {
             jsonrpc: '2.0',
             id: message.id,
@@ -153,15 +166,28 @@ async function runProxy(targetCommand: string) {
             },
           };
           process.stdout.write(JSON.stringify(errorResponse) + '\n');
-          return; // Stop the command here!
+          return; // Stop here! (The 'finally' block will handle the resume)
         }
+      } catch {
+        // FAIL CLOSED SECURITY: If the auth engine crashes, deny the action!
+        const errorResponse = {
+          jsonrpc: '2.0',
+          id: message.id,
+          error: {
+            code: -32000,
+            message: `Node9: Security engine encountered an error. Action blocked for safety.`,
+          },
+        };
+        process.stdout.write(JSON.stringify(errorResponse) + '\n');
+        return;
+      } finally {
+        // 3. GUARANTEE RESUME: Whether approved, denied, or errored, always wake up the stream
+        agentIn.resume();
       }
-      // If approved or not a tool call, forward it to the server's STDIN
-      child.stdin.write(line + '\n');
-    } catch {
-      // If it's not JSON (raw shell usage), just forward it
-      child.stdin.write(line + '\n');
     }
+
+    // If approved or not a tool call, forward it to the real server's STDIN
+    child.stdin.write(line + '\n');
   });
 
   // ── FORWARD OUTPUT (Server -> Agent) ──
@@ -465,19 +491,45 @@ program
       try {
         if (!raw || raw.trim() === '') process.exit(0);
 
-        const payload = JSON.parse(raw) as {
+        let payload = JSON.parse(raw) as {
           tool_name?: string;
           tool_input?: unknown;
           name?: string;
           args?: unknown;
           cwd?: string;
+          session_id?: string;
+          hook_event_name?: string; // Claude: "PreToolUse" | Gemini: "BeforeTool"
+          tool_use_id?: string; // Claude-only
+          permission_mode?: string; // Claude-only
+          timestamp?: string; // Gemini-only
         };
+
+        try {
+          payload = JSON.parse(raw);
+        } catch (err) {
+          // If JSON is broken (e.g. half-sent due to timeout), log it and fail open.
+          // We load config temporarily just to check if debug logging is on.
+          const tempConfig = getConfig();
+          if (process.env.NODE9_DEBUG === '1' || tempConfig.settings.enableHookLogDebug) {
+            const logPath = path.join(os.homedir(), '.node9', 'hook-debug.log');
+            const errMsg = err instanceof Error ? err.message : String(err);
+            fs.appendFileSync(
+              logPath,
+              `[${new Date().toISOString()}] JSON_PARSE_ERROR: ${errMsg}\nRAW: ${raw}\n`
+            );
+          }
+          process.exit(0);
+          return;
+        }
 
         // Change to the project cwd from the hook payload BEFORE loading config,
         // so getConfig() finds the correct node9.config.json for that project.
         if (payload.cwd) {
           try {
             process.chdir(payload.cwd);
+            // Crucial: Reset the config cache so we look for node9.config.json
+            // in the project folder we just moved into.
+            _resetConfigCache();
           } catch {
             // ignore if cwd doesn't exist
           }
@@ -495,12 +547,22 @@ program
         const toolName = sanitize(payload.tool_name ?? payload.name ?? '');
         const toolInput = payload.tool_input ?? payload.args ?? {};
 
+        // Both Claude and Gemini send session_id + hook_event_name, but with different values:
+        //   Claude:  hook_event_name = "PreToolUse" | "PostToolUse", also sends tool_use_id
+        //   Gemini:  hook_event_name = "BeforeTool" | "AfterTool",   also sends timestamp
         const agent =
-          payload.tool_name !== undefined
+          payload.hook_event_name === 'PreToolUse' ||
+          payload.hook_event_name === 'PostToolUse' ||
+          payload.tool_use_id !== undefined ||
+          payload.permission_mode !== undefined
             ? 'Claude Code'
-            : payload.name !== undefined
+            : payload.hook_event_name === 'BeforeTool' ||
+                payload.hook_event_name === 'AfterTool' ||
+                payload.timestamp !== undefined
               ? 'Gemini CLI'
-              : 'Terminal';
+              : payload.tool_name !== undefined || payload.name !== undefined
+                ? 'Unknown Agent'
+                : 'Terminal';
         const mcpMatch = toolName.match(/^mcp__([^_](?:[^_]|_(?!_))*?)__/i);
         const mcpServer = mcpMatch?.[1];
 
@@ -646,18 +708,40 @@ program
     if (data) {
       await processPayload(data);
     } else {
+      // ── THIS IS THE SECTION YOU ARE REPLACING ──
       let raw = '';
       let processed = false;
+      let inactivityTimer: NodeJS.Timeout | null = null;
+
       const done = async () => {
+        // Atomic check: prevents double-processing if 'end' and 'timeout' fire together
         if (processed) return;
         processed = true;
+
+        // Kill the timer so it doesn't fire while we are waiting for human approval
+        if (inactivityTimer) clearTimeout(inactivityTimer);
+
         if (!raw.trim()) return process.exit(0);
+
         await processPayload(raw);
       };
+
       process.stdin.setEncoding('utf-8');
-      process.stdin.on('data', (chunk) => (raw += chunk));
-      process.stdin.on('end', () => void done());
-      setTimeout(() => void done(), 5000);
+
+      process.stdin.on('data', (chunk) => {
+        raw += chunk;
+
+        // Sliding window: reset timer every time data arrives
+        if (inactivityTimer) clearTimeout(inactivityTimer);
+        inactivityTimer = setTimeout(() => void done(), 2000);
+      });
+
+      process.stdin.on('end', () => {
+        void done();
+      });
+
+      // Initial safety: if no data arrives at all within 5s, exit.
+      inactivityTimer = setTimeout(() => void done(), 5000);
     }
   });
 
