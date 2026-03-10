@@ -1344,3 +1344,48 @@ async function resolveNode9SaaS(
     /* fire-and-forget — don't block the proxy on a network error */
   }
 }
+
+/**
+ * STEP 2: The Poller. Runs INSIDE the Race Engine.
+ */
+async function pollNode9SaaS(
+  requestId: string,
+  creds: { apiKey: string; apiUrl: string },
+  signal: AbortSignal
+): Promise<CloudApprovalResult> {
+  const statusUrl = `${creds.apiUrl}/status/${requestId}`;
+  const POLL_INTERVAL_MS = 1000;
+  const POLL_DEADLINE = Date.now() + 10 * 60 * 1000;
+
+  while (Date.now() < POLL_DEADLINE) {
+    if (signal.aborted) throw new Error('Aborted');
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+
+    try {
+      const pollCtrl = new AbortController();
+      const pollTimer = setTimeout(() => pollCtrl.abort(), 5000);
+      const statusRes = await fetch(statusUrl, {
+        headers: { Authorization: `Bearer ${creds.apiKey}` },
+        signal: pollCtrl.signal,
+      });
+      clearTimeout(pollTimer);
+
+      if (!statusRes.ok) continue;
+
+      // FIX: Using TypeScript 'as' casting to resolve the unknown type error
+      const { status, reason } = (await statusRes.json()) as { status: string; reason?: string };
+
+      if (status === 'APPROVED') {
+        console.error(chalk.green('✅  Approved via Cloud.\n'));
+        return { approved: true, reason };
+      }
+      if (status === 'DENIED' || status === 'AUTO_BLOCKED' || status === 'TIMED_OUT') {
+        console.error(chalk.red('❌  Denied via Cloud.\n'));
+        return { approved: false, reason };
+      }
+    } catch {
+      /* transient network error */
+    }
+  }
+  return { approved: false, reason: 'Cloud approval timed out after 10 minutes.' };
+}
