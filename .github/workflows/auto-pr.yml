@@ -16,7 +16,7 @@ jobs:
 
       - name: Open PR dev -> main if not exists
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.AUTO_PR_TOKEN }}
         run: |
           PR=$(gh pr list --base main --head dev --state open --json number -q '.[0].number')
           if [ -z "$PR" ]; then
