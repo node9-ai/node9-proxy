@@ -24,7 +24,6 @@ jobs:
               --base main \
               --head dev \
               --title "fix: merge latest dev updates into main" \
-              --body "### Auto-generated PR
           Merge latest \`dev\` changes into \`main\` to trigger a release.
 
           > Squash and merge to keep a clean history."
