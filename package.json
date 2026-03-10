@@ -20,12 +20,13 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nadav-node9/node9-proxy.git"
+    "url": "git+https://github.com/node9-ai/node9-proxy.git"
   },
   "bugs": {
-    "url": "https://github.com/nadav-node9/node9-proxy/issues"
+    "url": "https://github.com/node9-ai/node9-proxy/issues"
+
   },
-  "homepage": "https://github.com/nadav-node9/node9-proxy#readme",
+  "homepage": "https://github.com/node9-ai/node9-proxy#readme",
   "keywords": [
     "ai-security",
     "mcp",

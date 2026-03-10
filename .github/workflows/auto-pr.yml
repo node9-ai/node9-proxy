@@ -23,7 +23,7 @@ jobs:
             gh pr create \
               --base main \
               --head dev \
-              --title "chore: merge dev into main" \
+              --title "fix: merge latest dev updates into main" \
               --body "### Auto-generated PR
           Merge latest \`dev\` changes into \`main\` to trigger a release.
 
