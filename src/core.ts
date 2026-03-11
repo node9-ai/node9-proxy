@@ -110,22 +110,6 @@ export function writeTrustSession(toolName: string, durationMs: number): void {
   }
 }
 
-function appendAuditModeEntry(toolName: string, args: unknown): void {
-  try {
-    const entry = JSON.stringify({
-      ts: new Date().toISOString(),
-      tool: toolName,
-      args,
-      decision: 'would-have-blocked',
-      source: 'audit-mode',
-    });
-    const logPath = path.join(os.homedir(), '.node9', 'audit.log');
-    const dir = path.dirname(logPath);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.appendFileSync(logPath, entry + '\n');
-  } catch {}
-}
-
 function appendToLog(logPath: string, entry: object): void {
   try {
     const dir = path.dirname(logPath);
@@ -813,7 +797,7 @@ export async function authorizeHeadless(
     if (!isIgnoredTool(toolName)) {
       const policyResult = await evaluatePolicy(toolName, args, meta?.agent);
       if (policyResult.decision === 'review') {
-        appendAuditModeEntry(toolName, args);
+        appendLocalAudit(toolName, args, 'allow', 'audit-mode', meta);
         sendDesktopNotification(
           'Node9 Audit Mode',
           `Would have blocked "${toolName}" (${policyResult.blockedByLabel || 'Local Config'}) — running in audit mode`
