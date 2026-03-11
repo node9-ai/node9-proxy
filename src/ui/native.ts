@@ -1,5 +1,6 @@
 // src/ui/native.ts
-import { spawn } from 'child_process';
+import { spawn, ChildProcess } from 'child_process'; // 1. Added ChildProcess import
+import chalk from 'chalk';
 
 const isTestEnv = () => {
   return (
@@ -13,122 +14,124 @@ const isTestEnv = () => {
 };
 
 /**
- * Sends a non-blocking, one-way system notification.
+ * Truncates long strings by keeping the start and end.
  */
+function smartTruncate(str: string, maxLen: number = 500): string {
+  if (str.length <= maxLen) return str;
+  const edge = Math.floor(maxLen / 2) - 3;
+  return `${str.slice(0, edge)} ... ${str.slice(-edge)}`;
+}
+
+function formatArgs(args: unknown): string {
+  if (args === null || args === undefined) return '(none)';
+
+  let parsed = args;
+
+  // 1. EXTRA STEP: If args is a string, try to see if it's nested JSON
+  // Gemini often wraps the command inside a stringified JSON object
+  if (typeof args === 'string') {
+    const trimmed = args.trim();
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch {
+        parsed = args;
+      }
+    } else {
+      return smartTruncate(args, 600);
+    }
+  }
+
+  // 2. Now handle the object (whether it was passed as one or parsed above)
+  if (typeof parsed === 'object' && !Array.isArray(parsed)) {
+    const obj = parsed as Record<string, unknown>;
+
+    const codeKeys = [
+      'command',
+      'cmd',
+      'shell_command',
+      'bash_command',
+      'script',
+      'code',
+      'input',
+      'sql',
+      'query',
+      'arguments',
+      'args',
+      'param',
+      'params',
+      'text',
+    ];
+    const foundKey = Object.keys(obj).find((k) => codeKeys.includes(k.toLowerCase()));
+
+    if (foundKey) {
+      const val = obj[foundKey];
+      const str = typeof val === 'string' ? val : JSON.stringify(val);
+      // Visual improvement: add a label so you know what you are looking at
+      return `[${foundKey.toUpperCase()}]:\n${smartTruncate(str, 500)}`;
+    }
+
+    return Object.entries(obj)
+      .slice(0, 5)
+      .map(
+        ([k, v]) => `  ${k}: ${smartTruncate(typeof v === 'string' ? v : JSON.stringify(v), 300)}`
+      )
+      .join('\n');
+  }
+
+  return smartTruncate(JSON.stringify(parsed), 200);
+}
+
 export function sendDesktopNotification(title: string, body: string): void {
   if (isTestEnv()) return;
-
   try {
-    const safeTitle = title.replace(/"/g, '\\"');
-    const safeBody = body.replace(/"/g, '\\"');
-
     if (process.platform === 'darwin') {
-      const script = `display notification "${safeBody}" with title "${safeTitle}"`;
+      const script = `display notification "${body.replace(/"/g, '\\"')}" with title "${title.replace(/"/g, '\\"')}"`;
       spawn('osascript', ['-e', script], { detached: true, stdio: 'ignore' }).unref();
     } else if (process.platform === 'linux') {
-      spawn('notify-send', [safeTitle, safeBody, '--icon=dialog-warning'], {
+      spawn('notify-send', [title, body, '--icon=dialog-warning'], {
         detached: true,
         stdio: 'ignore',
       }).unref();
     }
   } catch {
-    /* Silent fail for notifications */
+    /* ignore */
   }
 }
 
-/**
- * Formats tool arguments into readable key: value lines.
- * Each value is truncated to avoid overwhelming the popup.
- */
-function formatArgs(args: unknown): string {
-  if (args === null || args === undefined) return '(none)';
-
-  if (typeof args !== 'object' || Array.isArray(args)) {
-    const str = typeof args === 'string' ? args : JSON.stringify(args);
-    return str.length > 200 ? str.slice(0, 200) + '…' : str;
-  }
-
-  const entries = Object.entries(args as Record<string, unknown>).filter(
-    ([, v]) => v !== null && v !== undefined && v !== ''
-  );
-
-  if (entries.length === 0) return '(none)';
-
-  const MAX_FIELDS = 5;
-  const MAX_VALUE_LEN = 120;
-
-  const lines = entries.slice(0, MAX_FIELDS).map(([key, val]) => {
-    const str = typeof val === 'string' ? val : JSON.stringify(val);
-    const truncated = str.length > MAX_VALUE_LEN ? str.slice(0, MAX_VALUE_LEN) + '…' : str;
-    return `  ${key}: ${truncated}`;
-  });
-
-  if (entries.length > MAX_FIELDS) {
-    lines.push(`  … and ${entries.length - MAX_FIELDS} more field(s)`);
-  }
-
-  return lines.join('\n');
-}
-
-/**
- * Triggers an asynchronous, two-way OS dialog box.
- * Returns: 'allow' | 'deny' | 'always_allow'
- */
 export async function askNativePopup(
   toolName: string,
   args: unknown,
   agent?: string,
   explainableLabel?: string,
-  locked: boolean = false, // Phase 4.1: The Remote Lock
-  signal?: AbortSignal // Phase 4.2: The Auto-Close Trigger
+  locked: boolean = false,
+  signal?: AbortSignal
 ): Promise<'allow' | 'deny' | 'always_allow'> {
   if (isTestEnv()) return 'deny';
-  if (process.env.NODE9_DEBUG === '1' || process.env.VITEST) {
-    console.log(`[DEBUG Native] askNativePopup called for: ${toolName}`);
-    console.log(`[DEBUG Native] isTestEnv check:`, {
-      VITEST: process.env.VITEST,
-      NODE_ENV: process.env.NODE_ENV,
-      CI: process.env.CI,
-      isTest: isTestEnv(),
-    });
-  }
 
-  const title = locked
-    ? `⚡ Node9 — Locked by Admin Policy`
-    : `🛡️ Node9 — Action Requires Approval`;
+  const formattedArgs = formatArgs(args);
+  const title = locked ? `⚡ Node9 — Locked` : `🛡️ Node9 — Action Approval`;
 
-  // Build a structured, scannable message
   let message = '';
+  if (locked) message += `⚠️ LOCKED BY ADMIN POLICY\n`;
+  message += `Tool:  ${toolName}\n`;
+  message += `Agent: ${agent || 'AI Agent'}\n`;
+  message += `Rule:  ${explainableLabel || 'Security Policy'}\n\n`;
+  message += `${formattedArgs}`;
 
-  if (locked) {
-    message += `⚡ Awaiting remote approval via Slack. Local override is disabled.\n`;
-    message += `─────────────────────────────────\n`;
-  }
-
-  message += `Tool:    ${toolName}\n`;
-  message += `Agent:   ${agent || 'AI Agent'}\n`;
-  if (explainableLabel) {
-    message += `Reason:  ${explainableLabel}\n`;
-  }
-  message += `\nArguments:\n${formatArgs(args)}`;
-
-  if (!locked) {
-    message += `\n\nEnter = Allow  |  Click "Block" to deny`;
-  }
-
-  // Escape for shell/applescript safety
-  const safeMessage = message.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/`/g, "'");
-  const safeTitle = title.replace(/"/g, '\\"');
+  process.stderr.write(chalk.yellow(`\n🛡️  Node9: Intercepted "${toolName}" — awaiting user...\n`));
 
   return new Promise((resolve) => {
-    let childProcess: ReturnType<typeof spawn> | null = null;
+    // 2. FIXED: Use ChildProcess type instead of any
+    let childProcess: ChildProcess | null = null;
 
-    // The Auto-Close Logic (Fires when Cloud wins the race)
     const onAbort = () => {
-      if (childProcess) {
+      if (childProcess && childProcess.pid) {
         try {
-          process.kill(childProcess.pid!, 'SIGKILL');
-        } catch {}
+          process.kill(childProcess.pid, 'SIGKILL');
+        } catch {
+          /* ignore */
+        }
       }
       resolve('deny');
     };
@@ -138,103 +141,51 @@ export async function askNativePopup(
       signal.addEventListener('abort', onAbort);
     }
 
-    const cleanup = () => {
-      if (signal) signal.removeEventListener('abort', onAbort);
-    };
-
     try {
-      // --- macOS ---
       if (process.platform === 'darwin') {
-        // Default button is "Allow" — Enter = permit, Escape = Block
         const buttons = locked
           ? `buttons {"Waiting…"} default button "Waiting…"`
           : `buttons {"Block", "Always Allow", "Allow"} default button "Allow" cancel button "Block"`;
-
-        const script = `
-          tell application "System Events"
-            activate
-            display dialog "${safeMessage}" with title "${safeTitle}" ${buttons}
-          end tell`;
-
-        childProcess = spawn('osascript', ['-e', script]);
-        let output = '';
-        childProcess.stdout?.on('data', (d) => (output += d.toString()));
-
-        childProcess.on('close', (code) => {
-          cleanup();
-          if (locked) return resolve('deny');
-          if (code === 0) {
-            if (output.includes('Always Allow')) return resolve('always_allow');
-            if (output.includes('Allow')) return resolve('allow');
-          }
-          resolve('deny');
-        });
-      }
-
-      // --- Linux ---
-      else if (process.platform === 'linux') {
-        const argsList = locked
-          ? [
-              '--info',
-              '--title',
-              title,
-              '--text',
-              safeMessage,
-              '--ok-label',
-              'Waiting for Slack…',
-              '--timeout',
-              '300',
-            ]
-          : [
-              '--question',
-              '--title',
-              title,
-              '--text',
-              safeMessage,
-              '--ok-label',
-              'Allow',
-              '--cancel-label',
-              'Block',
-              '--extra-button',
-              'Always Allow',
-              '--timeout',
-              '300',
-            ];
-
+        const script = `on run argv\ntell application "System Events"\nactivate\ndisplay dialog (item 1 of argv) with title (item 2 of argv) ${buttons}\nend tell\nend run`;
+        childProcess = spawn('osascript', ['-e', script, '--', message, title]);
+      } else if (process.platform === 'linux') {
+        const argsList = [
+          locked ? '--info' : '--question',
+          '--modal',
+          '--width=450',
+          '--title',
+          title,
+          '--text',
+          message,
+          '--ok-label',
+          locked ? 'Waiting...' : 'Allow',
+          '--timeout',
+          '300',
+        ];
+        if (!locked) {
+          argsList.push('--cancel-label', 'Block');
+          argsList.push('--extra-button', 'Always Allow');
+        }
         childProcess = spawn('zenity', argsList);
-        let output = '';
-        childProcess.stdout?.on('data', (d) => (output += d.toString()));
-
-        childProcess.on('close', (code) => {
-          cleanup();
-          if (locked) return resolve('deny');
-          // zenity: --ok-label (Allow) = exit 0, --cancel-label (Block) = exit 1, extra-button = stdout
-          if (output.trim() === 'Always Allow') return resolve('always_allow');
-          if (code === 0) return resolve('allow'); // clicked "Allow" (ok-label, Enter)
-          resolve('deny'); // clicked "Block" or timed out
-        });
-      }
-
-      // --- Windows ---
-      else if (process.platform === 'win32') {
-        const buttonType = locked ? 'OK' : 'YesNo';
-        const ps = `
-          Add-Type -AssemblyName PresentationFramework;
-          $res = [System.Windows.MessageBox]::Show("${safeMessage}", "${safeTitle}", "${buttonType}", "Warning", "Button2", "DefaultDesktopOnly");
-          if ($res -eq "Yes") { exit 0 } else { exit 1 }`;
-
+      } else if (process.platform === 'win32') {
+        const b64Msg = Buffer.from(message).toString('base64');
+        const b64Title = Buffer.from(title).toString('base64');
+        const ps = `Add-Type -AssemblyName PresentationFramework; $msg = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("${b64Msg}")); $title = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("${b64Title}")); $res = [System.Windows.MessageBox]::Show($msg, $title, "${locked ? 'OK' : 'YesNo'}", "Warning", "Button2", "DefaultDesktopOnly"); if ($res -eq "Yes") { exit 0 } else { exit 1 }`;
         childProcess = spawn('powershell', ['-Command', ps]);
-        childProcess.on('close', (code) => {
-          cleanup();
-          if (locked) return resolve('deny');
-          resolve(code === 0 ? 'allow' : 'deny');
-        });
-      } else {
-        cleanup();
-        resolve('deny');
       }
+
+      let output = '';
+      // 3. FIXED: Specified Buffer type for stream data
+      childProcess?.stdout?.on('data', (d: Buffer) => (output += d.toString()));
+
+      childProcess?.on('close', (code: number) => {
+        if (signal) signal.removeEventListener('abort', onAbort);
+        if (locked) return resolve('deny');
+        if (output.includes('Always Allow')) return resolve('always_allow');
+        if (code === 0) return resolve('allow');
+        resolve('deny');
+      });
     } catch {
-      cleanup();
       resolve('deny');
     }
   });
