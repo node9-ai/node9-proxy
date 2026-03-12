@@ -123,10 +123,11 @@ function appendHookDebug(
   args: unknown,
   meta?: { agent?: string; mcpServer?: string }
 ): void {
+  const safeArgs = args ? JSON.parse(redactSecrets(JSON.stringify(args))) : {};
   appendToLog(HOOK_DEBUG_LOG, {
     ts: new Date().toISOString(),
     tool: toolName,
-    args,
+    args: safeArgs,
     agent: meta?.agent,
     mcpServer: meta?.mcpServer,
     hostname: os.hostname(),
@@ -141,10 +142,11 @@ function appendLocalAudit(
   checkedBy: string,
   meta?: { agent?: string; mcpServer?: string }
 ): void {
+  const safeArgs = args ? JSON.parse(redactSecrets(JSON.stringify(args))) : {};
   appendToLog(LOCAL_AUDIT_LOG, {
     ts: new Date().toISOString(),
     tool: toolName,
-    args,
+    args: safeArgs,
     decision,
     checkedBy,
     agent: meta?.agent,
@@ -554,31 +556,36 @@ export async function evaluatePolicy(
       if (pathTokens.length > 0) {
         const anyBlocked = pathTokens.some((p) => matchesPattern(p, rule.blockPaths || []));
         if (anyBlocked)
-          return { decision: 'review', blockedByLabel: 'Project/Global Config (Rule Block)' };
+          return {
+            decision: 'review',
+            blockedByLabel: `Project/Global Config — rule "${rule.action}" (path blocked)`,
+          };
         const allAllowed = pathTokens.every((p) => matchesPattern(p, rule.allowPaths || []));
         if (allAllowed) return { decision: 'allow' };
       }
-      return { decision: 'review', blockedByLabel: 'Project/Global Config (Rule Default Block)' };
+      return {
+        decision: 'review',
+        blockedByLabel: `Project/Global Config — rule "${rule.action}" (default block)`,
+      };
     }
   }
 
   // ── 6. Dangerous Words Evaluation ───────────────────────────────────────
+  let matchedDangerousWord: string | undefined;
   const isDangerous = allTokens.some((token) =>
     config.policy.dangerousWords.some((word) => {
       const w = word.toLowerCase();
-      if (token === w) return true;
-      try {
-        return new RegExp(`\\b${w}\\b`, 'i').test(token);
-      } catch {
-        return false;
-      }
+      const hit = token === w || (() => { try { return new RegExp(`\\b${w}\\b`, 'i').test(token); } catch { return false; } })();
+      if (hit && !matchedDangerousWord) matchedDangerousWord = word;
+      return hit;
     })
   );
 
   if (isDangerous) {
-    // Use "Project/Global Config" so E2E tests can verify hierarchy overrides
-    const label = 'Project/Global Config (Dangerous Word)';
-    return { decision: 'review', blockedByLabel: label };
+    return {
+      decision: 'review',
+      blockedByLabel: `Project/Global Config — dangerous word: "${matchedDangerousWord}"`,
+    };
   }
 
   // ── 7. Strict Mode Fallback ─────────────────────────────────────────────
@@ -811,13 +818,13 @@ export async function authorizeHeadless(
   if (!isIgnoredTool(toolName)) {
     if (getActiveTrustSession(toolName)) {
       if (creds?.apiKey) auditLocalAllow(toolName, args, 'trust', creds, meta);
-      appendLocalAudit(toolName, args, 'allow', 'trust', meta);
+      if (!isManual) appendLocalAudit(toolName, args, 'allow', 'trust', meta);
       return { approved: true, checkedBy: 'trust' };
     }
     const policyResult = await evaluatePolicy(toolName, args, meta?.agent);
     if (policyResult.decision === 'allow') {
       if (creds?.apiKey) auditLocalAllow(toolName, args, 'local-policy', creds, meta);
-      appendLocalAudit(toolName, args, 'allow', 'local-policy', meta);
+      if (!isManual) appendLocalAudit(toolName, args, 'allow', 'local-policy', meta);
       return { approved: true, checkedBy: 'local-policy' };
     }
 
@@ -826,11 +833,11 @@ export async function authorizeHeadless(
     const persistent = getPersistentDecision(toolName);
     if (persistent === 'allow') {
       if (creds?.apiKey) auditLocalAllow(toolName, args, 'persistent', creds, meta);
-      appendLocalAudit(toolName, args, 'allow', 'persistent', meta);
+      if (!isManual) appendLocalAudit(toolName, args, 'allow', 'persistent', meta);
       return { approved: true, checkedBy: 'persistent' };
     }
     if (persistent === 'deny') {
-      appendLocalAudit(toolName, args, 'deny', 'persistent-deny', meta);
+      if (!isManual) appendLocalAudit(toolName, args, 'deny', 'persistent-deny', meta);
       return {
         approved: false,
         reason: `This tool ("${toolName}") is explicitly listed in your 'Always Deny' list.`,
@@ -840,7 +847,7 @@ export async function authorizeHeadless(
     }
   } else {
     if (creds?.apiKey) auditLocalAllow(toolName, args, 'ignoredTools', creds, meta);
-    appendLocalAudit(toolName, args, 'allow', 'ignored', meta);
+    if (!isManual) appendLocalAudit(toolName, args, 'allow', 'ignored', meta);
     return { approved: true };
   }
 
@@ -1139,13 +1146,15 @@ export async function authorizeHeadless(
     await resolveNode9SaaS(cloudRequestId, creds, finalResult.approved);
   }
 
-  appendLocalAudit(
-    toolName,
-    args,
-    finalResult.approved ? 'allow' : 'deny',
-    finalResult.checkedBy || finalResult.blockedBy || 'unknown',
-    meta
-  );
+  if (!isManual) {
+    appendLocalAudit(
+      toolName,
+      args,
+      finalResult.approved ? 'allow' : 'deny',
+      finalResult.checkedBy || finalResult.blockedBy || 'unknown',
+      meta
+    );
+  }
 
   return finalResult;
 }

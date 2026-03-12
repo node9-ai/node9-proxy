@@ -11,6 +11,25 @@ While others try to _guess_ if a prompt is malicious (Semantic Security), Node9 
 
 ---
 
+## 💎 The "Aha!" Moment
+
+**AIs are literal.** When you ask an agent to "Fix my disk space," it might decide to run `docker system prune -af`. 
+
+![](https://github.com/user-attachments/assets/cd646604-0be3-4043-bc59-cb12351e5f51)
+
+
+<div align="center">
+  <video src="https://github.com/user-attachments/assets/dd296c35-fcd5-4114-b935-b326736d7f52.mp4" autoplay loop muted playsinline width="80%"></video>
+</div>
+
+**With Node9, the interaction looks like this:**
+
+1. **🤖 AI attempts a "Nuke":** `Bash("docker system prune -af --volumes")`
+2. **🛡️ Node9 Intercepts:** An OS-native popup appears immediately.
+3. **🛑 User Blocks:** You click "Block" in the popup.
+4. **🧠 AI Negotiates:** Node9 explains the block to the AI. The AI responds: *"I understand. I will pivot to a safer cleanup, like removing only large log files instead."*
+
+---
 ## ⚡ Key Architectural Upgrades
 
 ### 🏁 The Multi-Channel Race Engine
@@ -26,6 +45,11 @@ Node9 initiates a **Concurrent Race** across all enabled channels. The first cha
 
 Node9 doesn't just "cut the wire." When a command is blocked, it injects a **Structured Negotiation Prompt** back into the AI’s context window. This teaches the AI why it was stopped and instructs it to pivot to a safer alternative or apologize to the human.
 
+### ⏪ Shadow Git Snapshots (Auto-Undo)
+Node9 takes silent, lightweight Git snapshots right before an AI agent is allowed to edit or delete files. If the AI hallucinates and ruins your code, don't waste time manualy fixing it. Just run:
+```bash
+node9 undo
+```
 ### 🌊 The Resolution Waterfall
 
 Security posture is resolved using a strict 5-tier waterfall:
@@ -40,6 +64,7 @@ Security posture is resolved using a strict 5-tier waterfall:
 
 ## 🚀 Quick Start
 
+
 ```bash
 npm install -g @node9/proxy
 
@@ -47,8 +72,8 @@ npm install -g @node9/proxy
 node9 addto claude
 node9 addto gemini
 
-# 2. (Optional) Connect to Slack for remote approvals
-node9 login <your_api_key>
+# 2. Initialize your local safety net
+node9 init
 
 # 3. Check your status
 node9 status
@@ -121,9 +146,8 @@ A corporate policy has locked this action. You must click the "Approve" button i
 - [x] **AI Negotiation Loop** (Instructional feedback loop to guide LLM behavior)
 - [x] **Resolution Waterfall** (Cascading configuration: Env > Cloud > Project > Global)
 - [x] **Native OS Dialogs** (Sub-second approval via Mac/Win/Linux system windows)
-- [x] **One-command Agent Setup** (`node9 addto claude | gemini | cursor`)
+- [x] **Shadow Git Snapshots** (1-click Undo for AI hallucinations)
 - [x] **Identity-Aware Execution** (Differentiates between Human vs. AI risk levels)
-- [ ] **Shadow Git Snapshots** (1-click Undo for AI hallucinations)
 - [ ] **Execution Sandboxing** (Simulate dangerous commands in a virtual FS before applying)
 - [ ] **Multi-Admin Quorum** (Require 2+ human signatures for high-stakes production actions)
 - [ ] **SOC2 Tamper-proof Audit Trail** (Cryptographically signed, cloud-managed logs)

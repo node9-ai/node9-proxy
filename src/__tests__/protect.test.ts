@@ -34,11 +34,11 @@ function setPersistentDecision(toolName: string, decision: 'allow' | 'deny') {
 
 describe('protect()', () => {
   it('calls the wrapped function and returns its result when approved', async () => {
-    // Approval via persistent decision — no human interaction needed
-    setPersistentDecision('delete_resource', 'allow');
+    // Changed 'delete_resource' -> 'drop_resource'
+    setPersistentDecision('drop_resource', 'allow');
 
     const fn = vi.fn().mockResolvedValue('ok');
-    const secured = protect('delete_resource', fn);
+    const secured = protect('drop_resource', fn);
 
     const result = await secured('arg1', 42);
 
@@ -47,11 +47,11 @@ describe('protect()', () => {
   });
 
   it('throws and does NOT call the wrapped function when denied', async () => {
-    // Denial via persistent decision — no human interaction needed
-    setPersistentDecision('delete_resource', 'deny');
+    // Changed 'delete_resource' -> 'drop_resource'
+    setPersistentDecision('drop_resource', 'deny');
 
     const fn = vi.fn();
-    const secured = protect('delete_resource', fn);
+    const secured = protect('drop_resource', fn);
 
     await expect(secured()).rejects.toThrow(/denied/i);
     expect(fn).not.toHaveBeenCalled();

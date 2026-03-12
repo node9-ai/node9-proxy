@@ -99,6 +99,61 @@ export function sendDesktopNotification(title: string, body: string): void {
   }
 }
 
+function escapePango(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function buildPlainMessage(
+  toolName: string,
+  formattedArgs: string,
+  agent: string | undefined,
+  explainableLabel: string | undefined,
+  locked: boolean
+): string {
+  const lines: string[] = [];
+
+  if (locked) lines.push('⚠️  LOCKED BY ADMIN POLICY\n');
+
+  lines.push(`🤖 ${agent || 'AI Agent'}  |  🔧 ${toolName}`);
+  lines.push(`🛡️  ${explainableLabel || 'Security Policy'}`);
+  lines.push('');
+  lines.push(formattedArgs);
+
+  if (!locked) {
+    lines.push('');
+    lines.push('↵ Enter = Allow ↵   |   ⎋ Esc = Block ⎋   |   "Always Allow" = never ask again');
+  }
+
+  return lines.join('\n');
+}
+
+function buildPangoMessage(
+  toolName: string,
+  formattedArgs: string,
+  agent: string | undefined,
+  explainableLabel: string | undefined,
+  locked: boolean
+): string {
+  const lines: string[] = [];
+
+  if (locked) {
+    lines.push('<span foreground="red" weight="bold">⚠️  LOCKED BY ADMIN POLICY</span>');
+    lines.push('');
+  }
+
+  lines.push(`<b>🤖 ${escapePango(agent || 'AI Agent')}</b>  |  <b>🔧 <tt>${escapePango(toolName)}</tt></b>`);
+  lines.push(`<i>🛡️  ${escapePango(explainableLabel || 'Security Policy')}</i>`);
+  lines.push('');
+  lines.push(`<tt>${escapePango(formattedArgs)}</tt>`);
+
+  if (!locked) {
+    lines.push('');
+    lines.push('<small>↵ Enter = <b>Allow ↵</b>   |   ⎋ Esc = <b>Block ⎋</b>   |   "Always Allow" = never ask again</small>');
+  }
+
+  return lines.join('\n');
+}
+
 export async function askNativePopup(
   toolName: string,
   args: unknown,
@@ -112,12 +167,7 @@ export async function askNativePopup(
   const formattedArgs = formatArgs(args);
   const title = locked ? `⚡ Node9 — Locked` : `🛡️ Node9 — Action Approval`;
 
-  let message = '';
-  if (locked) message += `⚠️ LOCKED BY ADMIN POLICY\n`;
-  message += `Tool:  ${toolName}\n`;
-  message += `Agent: ${agent || 'AI Agent'}\n`;
-  message += `Rule:  ${explainableLabel || 'Security Policy'}\n\n`;
-  message += `${formattedArgs}`;
+  const message = buildPlainMessage(toolName, formattedArgs, agent, explainableLabel, locked);
 
   process.stderr.write(chalk.yellow(`\n🛡️  Node9: Intercepted "${toolName}" — awaiting user...\n`));
 
@@ -145,25 +195,32 @@ export async function askNativePopup(
       if (process.platform === 'darwin') {
         const buttons = locked
           ? `buttons {"Waiting…"} default button "Waiting…"`
-          : `buttons {"Block", "Always Allow", "Allow"} default button "Allow" cancel button "Block"`;
+          : `buttons {"Block ⎋", "Always Allow", "Allow ↵"} default button "Allow ↵" cancel button "Block ⎋"`;
         const script = `on run argv\ntell application "System Events"\nactivate\ndisplay dialog (item 1 of argv) with title (item 2 of argv) ${buttons}\nend tell\nend run`;
         childProcess = spawn('osascript', ['-e', script, '--', message, title]);
       } else if (process.platform === 'linux') {
+        const pangoMessage = buildPangoMessage(
+          toolName,
+          formattedArgs,
+          agent,
+          explainableLabel,
+          locked
+        );
         const argsList = [
           locked ? '--info' : '--question',
           '--modal',
-          '--width=450',
+          '--width=480',
           '--title',
           title,
           '--text',
-          message,
+          pangoMessage,
           '--ok-label',
-          locked ? 'Waiting...' : 'Allow',
+          locked ? 'Waiting...' : 'Allow  ↵',
           '--timeout',
           '300',
         ];
         if (!locked) {
-          argsList.push('--cancel-label', 'Block');
+          argsList.push('--cancel-label', 'Block  ⎋');
           argsList.push('--extra-button', 'Always Allow');
         }
         childProcess = spawn('zenity', argsList);

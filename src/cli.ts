@@ -3,7 +3,7 @@ import { Command } from 'commander';
 import {
   authorizeHeadless,
   redactSecrets,
-  DANGEROUS_WORDS,
+  DEFAULT_CONFIG,
   isDaemonRunning,
   getCredentials,
   checkPause,
@@ -280,7 +280,8 @@ program
   .command('init')
   .description('Create ~/.node9/config.json with default policy (safe to run multiple times)')
   .option('--force', 'Overwrite existing config')
-  .action((options) => {
+  .option('-m, --mode <mode>', 'Set initial security mode (standard, strict, audit)', 'standard')
+  .action((options: { force?: boolean; mode: string }) => {
     const configPath = path.join(os.homedir(), '.node9', 'config.json');
 
     if (fs.existsSync(configPath) && !options.force) {
@@ -288,68 +289,32 @@ program
       console.log(chalk.gray(`   Run with --force to overwrite.`));
       return;
     }
-    const defaultConfig = {
-      version: '1.0',
+
+    // Validate mode from CLI flag
+    const requestedMode = options.mode.toLowerCase();
+    const safeMode = ['standard', 'strict', 'audit'].includes(requestedMode)
+      ? requestedMode
+      : DEFAULT_CONFIG.settings.mode;
+
+    // Use the exact same object from core.ts, just override the mode from the CLI flag
+    const configToSave = {
+      ...DEFAULT_CONFIG,
       settings: {
-        mode: 'standard',
-        autoStartDaemon: true,
-        enableUndo: true,
-        enableHookLogDebug: false,
-        approvers: { native: true, browser: true, cloud: true, terminal: true },
-      },
-      policy: {
-        sandboxPaths: ['/tmp/**', '**/sandbox/**', '**/test-results/**'],
-        dangerousWords: DANGEROUS_WORDS,
-        ignoredTools: [
-          'list_*',
-          'get_*',
-          'read_*',
-          'describe_*',
-          'read',
-          'write',
-          'edit',
-          'glob',
-          'grep',
-          'ls',
-          'notebookread',
-          'notebookedit',
-          'webfetch',
-          'websearch',
-          'exitplanmode',
-          'askuserquestion',
-          'agent',
-          'task*',
-        ],
-        toolInspection: {
-          bash: 'command',
-          shell: 'command',
-          run_shell_command: 'command',
-          'terminal.execute': 'command',
-          'postgres:query': 'sql',
-        },
-        rules: [
-          {
-            action: 'rm',
-            allowPaths: [
-              '**/node_modules/**',
-              'dist/**',
-              'build/**',
-              '.next/**',
-              'coverage/**',
-              '.cache/**',
-              'tmp/**',
-              'temp/**',
-              '.DS_Store',
-            ],
-          },
-        ],
+        ...DEFAULT_CONFIG.settings,
+        mode: safeMode,
       },
     };
-    if (!fs.existsSync(path.dirname(configPath)))
-      fs.mkdirSync(path.dirname(configPath), { recursive: true });
-    fs.writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2));
+
+    const dir = path.dirname(configPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    fs.writeFileSync(configPath, JSON.stringify(configToSave, null, 2));
+
     console.log(chalk.green(`✅ Global config created: ${configPath}`));
-    console.log(chalk.gray(`   Edit this file to add custom tool inspection or security rules.`));
+    console.log(chalk.cyan(`   Mode set to: ${safeMode}`));
+    console.log(
+      chalk.gray(`   Undo Engine is ENABLED by default. Use 'node9 undo' to revert AI changes.`)
+    );
   });
 
 // 4. STATUS (Upgraded to show Waterfall & Undo status)
@@ -593,26 +558,27 @@ program
           let aiFeedbackMessage = '';
 
           if (isHumanDecision) {
-            // Voice for User Rejection
             aiFeedbackMessage = `NODE9 SECURITY INTERVENTION: The human user specifically REJECTED this action.
-        REASON: ${msg || 'No specific reason provided by user.'}
+REASON: ${msg || 'No specific reason provided by user.'}
 
-        INSTRUCTIONS FOR AI AGENT:
-        - Do NOT retry this exact command immediately.
-        - Explain to the user that you understand they blocked the action.
-        - Ask the user if there is an alternative approach they would prefer, or if they intended to block this action entirely.
-        - If you believe this action is critical, explain your reasoning to the user and ask them to run 'node9 pause 15m' to allow you to proceed.`;
+INSTRUCTIONS FOR AI AGENT:
+- Do NOT retry this exact command immediately.
+- Explain to the user that you understand they blocked the action.
+- Ask the user if there is an alternative approach they would prefer, or if they intended to block this action entirely.
+- If you believe this action is critical, explain your reasoning to the user and ask them to run 'node9 pause 15m' to allow you to proceed.`;
           } else {
-            // Voice for Policy/Rule Rejection
             aiFeedbackMessage = `NODE9 SECURITY INTERVENTION: Action blocked by automated policy [${blockedByContext}].
-        REASON: ${msg}
+REASON: ${msg}
 
-        INSTRUCTIONS FOR AI AGENT:
-        - This command violates the current security configuration.
-        - Do NOT attempt to bypass this rule with bash syntax tricks; it will be blocked again.
-        - Pivot to a non-destructive or read-only alternative.
-        - Inform the user which security rule was triggered.`;
+INSTRUCTIONS FOR AI AGENT:
+- This command violates the current security configuration.
+- Do NOT attempt to bypass this rule with bash syntax tricks; it will be blocked again.
+- Pivot to a non-destructive or read-only alternative.
+- Inform the user which security rule was triggered.`;
           }
+
+          console.error(chalk.dim(`   (Detailed instructions sent to AI agent)`));
+
 
           // 5. Send the structured JSON back to the LLM agent
           process.stdout.write(
@@ -875,7 +841,9 @@ program
       }
 
       const fullCommand = commandArgs.join(' ');
-      let result = await authorizeHeadless('shell', { command: fullCommand });
+      let result = await authorizeHeadless('shell', { command: fullCommand }, true, {
+        agent: 'Terminal',
+      });
 
       if (
         result.noApprovalMechanism &&

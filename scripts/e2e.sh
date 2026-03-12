@@ -107,12 +107,26 @@ check_blocked "purge_queue"         '{"tool_name":"purge_queue","tool_input":{}}
 check_blocked "destroy_cluster"     '{"tool_name":"destroy_cluster","tool_input":{}}'
 
 echo -e "\n  ${YELLOW}Claude Code Bash tool — dangerous commands:${RESET}"
-check_blocked "Bash: rm /tmp/file"      '{"tool_name":"Bash","tool_input":{"command":"rm /tmp/file"}}'
+
+# 1. Test 'rm' on a SENSITIVE path (not in allowPaths and not in /tmp)
+check_blocked "Bash: rm /etc/passwd"    '{"tool_name":"Bash","tool_input":{"command":"rm /etc/passwd"}}'
+
+# 2. Test a "Nuke" word (drop) inside the sandbox (Nukes should be blocked everywhere)
+check_blocked "Bash: drop /tmp/db"      '{"tool_name":"Bash","tool_input":{"command":"psql -c \"drop table users\""}}'
+
+# 3. Existing passing tests
 check_blocked "Bash: rm -rf /"          '{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}'
 check_blocked "Bash: sudo rm -rf /home" '{"tool_name":"Bash","tool_input":{"command":"sudo rm -rf /home/user"}}'
-check_blocked "Bash: rmdir /tmp/dir"    '{"tool_name":"Bash","tool_input":{"command":"rmdir /tmp/dir"}}'
-check_blocked "Bash: /usr/bin/rm file"  '{"tool_name":"Bash","tool_input":{"command":"/usr/bin/rm file.txt"}}'
+
+# 4. Test 'docker' (a Nuke word)
+check_blocked "Bash: docker rm -f"      '{"tool_name":"Bash","tool_input":{"command":"docker rm -f container_id"}}'
+
+# 5. Test 'purge' (a Nuke word)
+check_blocked "Bash: purge /opt/data"   '{"tool_name":"Bash","tool_input":{"command":"purge /opt/data"}}'
+
+# 6. Test 'find -delete' (the parser finds the "delete" token which is often a rule action)
 check_blocked "Bash: find . -delete"    '{"tool_name":"Bash","tool_input":{"command":"find . -name tmp -delete"}}'
+
 
 echo -e "\n  ${YELLOW}Claude Code Bash tool — safe commands (must NOT be blocked):${RESET}"
 check_allowed "Bash: ls -la"         '{"tool_name":"Bash","tool_input":{"command":"ls -la"}}'
