@@ -13,16 +13,23 @@
     }
   },
   "policy": {
-    "sandboxPaths": [
-      "/tmp/**",
-      "**/sandbox/**",
-      "**/test-results/**"
-    ],
+    "sandboxPaths": ["/tmp/**", "**/sandbox/**", "**/test-results/**"],
 
     "dangerousWords": [
-      "drop", "truncate", "purge", "format", "destroy", "terminate",
-      "revoke", "docker", "psql",
-      "rmdir", "delete", "alter", "grant", "rm"
+      "drop",
+      "truncate",
+      "purge",
+      "format",
+      "destroy",
+      "terminate",
+      "revoke",
+      "docker",
+      "psql",
+      "rmdir",
+      "delete",
+      "alter",
+      "grant",
+      "rm"
     ],
 
     "ignoredTools": [
