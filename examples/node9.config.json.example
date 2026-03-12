@@ -1,6 +1,7 @@
 {
   "settings": {
     "mode": "standard",
+    "environment": "production",
     "autoStartDaemon": true,
     "enableUndo": true,
     "enableHookLogDebug": false,

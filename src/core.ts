@@ -312,6 +312,7 @@ interface Config {
     enableUndo?: boolean;
     enableHookLogDebug?: boolean;
     approvers: { native: boolean; browser: boolean; cloud: boolean; terminal: boolean };
+    environment?: string;
   };
   policy: {
     sandboxPaths: string[];
@@ -1213,6 +1214,7 @@ export function getConfig(): Config {
     if (s.enableHookLogDebug !== undefined)
       mergedSettings.enableHookLogDebug = s.enableHookLogDebug;
     if (s.approvers) mergedSettings.approvers = { ...mergedSettings.approvers, ...s.approvers };
+    if (s.environment !== undefined) mergedSettings.environment = s.environment;
 
     if (p.sandboxPaths) mergedPolicy.sandboxPaths.push(...p.sandboxPaths);
     if (p.ignoredTools) mergedPolicy.ignoredTools.push(...p.ignoredTools);
@@ -1252,7 +1254,7 @@ function tryLoadConfig(filePath: string): Record<string, unknown> | null {
 }
 
 function getActiveEnvironment(config: Config): EnvironmentConfig | null {
-  const env = process.env.NODE_ENV || 'development';
+  const env = config.settings.environment || process.env.NODE_ENV || 'development';
   return config.environments[env] ?? null;
 }
 
