@@ -11,6 +11,8 @@ import { askNativePopup, sendDesktopNotification } from './ui/native';
 // ── Feature file paths ────────────────────────────────────────────────────────
 const PAUSED_FILE = path.join(os.homedir(), '.node9', 'PAUSED');
 const TRUST_FILE = path.join(os.homedir(), '.node9', 'trust.json');
+const LOCAL_AUDIT_LOG = path.join(os.homedir(), '.node9', 'audit.log');
+const HOOK_DEBUG_LOG = path.join(os.homedir(), '.node9', 'hook-debug.log');
 
 interface PauseState {
   expiry: number;
@@ -108,37 +110,50 @@ export function writeTrustSession(toolName: string, durationMs: number): void {
   }
 }
 
-function appendAuditModeEntry(toolName: string, args: unknown): void {
+function appendToLog(logPath: string, entry: object): void {
   try {
-    const entry = JSON.stringify({
-      ts: new Date().toISOString(),
-      tool: toolName,
-      args,
-      decision: 'would-have-blocked',
-      source: 'audit-mode',
-    });
-    const logPath = path.join(os.homedir(), '.node9', 'audit.log');
     const dir = path.dirname(logPath);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.appendFileSync(logPath, entry + '\n');
+    fs.appendFileSync(logPath, JSON.stringify(entry) + '\n');
   } catch {}
 }
 
-// Default Enterprise Posture
-export const DANGEROUS_WORDS = [
-  'delete',
-  'drop',
-  'remove',
-  'terminate',
-  'refund',
-  'write',
-  'update',
-  'destroy',
-  'rm',
-  'rmdir',
-  'purge',
-  'format',
-];
+function appendHookDebug(
+  toolName: string,
+  args: unknown,
+  meta?: { agent?: string; mcpServer?: string }
+): void {
+  const safeArgs = args ? JSON.parse(redactSecrets(JSON.stringify(args))) : {};
+  appendToLog(HOOK_DEBUG_LOG, {
+    ts: new Date().toISOString(),
+    tool: toolName,
+    args: safeArgs,
+    agent: meta?.agent,
+    mcpServer: meta?.mcpServer,
+    hostname: os.hostname(),
+    cwd: process.cwd(),
+  });
+}
+
+function appendLocalAudit(
+  toolName: string,
+  args: unknown,
+  decision: 'allow' | 'deny',
+  checkedBy: string,
+  meta?: { agent?: string; mcpServer?: string }
+): void {
+  const safeArgs = args ? JSON.parse(redactSecrets(JSON.stringify(args))) : {};
+  appendToLog(LOCAL_AUDIT_LOG, {
+    ts: new Date().toISOString(),
+    tool: toolName,
+    args: safeArgs,
+    decision,
+    checkedBy,
+    agent: meta?.agent,
+    mcpServer: meta?.mcpServer,
+    hostname: os.hostname(),
+  });
+}
 
 function tokenize(toolName: string): string[] {
   return toolName
@@ -308,16 +323,46 @@ interface Config {
   environments: Record<string, EnvironmentConfig>;
 }
 
-const DEFAULT_CONFIG: Config = {
+// Default Enterprise Posture
+/*
+export const DANGEROUS_WORDS = [
+  'delete',
+  'drop',
+  'remove',
+  'terminate',
+  'refund',
+  'write',
+  'update',
+  'destroy',
+  'rm',
+  'rmdir',
+  'purge',
+  'format',
+];
+*/
+export const DANGEROUS_WORDS = [
+  'drop',
+  'truncate',
+  'purge',
+  'format',
+  'destroy',
+  'terminate',
+  'revoke',
+  'docker',
+  'psql',
+];
+
+// 2. The Master Default Config
+export const DEFAULT_CONFIG: Config = {
   settings: {
     mode: 'standard',
     autoStartDaemon: true,
-    enableUndo: false,
+    enableUndo: true, // 🔥 ALWAYS TRUE BY DEFAULT for the safety net
     enableHookLogDebug: false,
     approvers: { native: true, browser: true, cloud: true, terminal: true },
   },
   policy: {
-    sandboxPaths: [],
+    sandboxPaths: ['/tmp/**', '**/sandbox/**', '**/test-results/**'],
     dangerousWords: DANGEROUS_WORDS,
     ignoredTools: [
       'list_*',
@@ -325,12 +370,44 @@ const DEFAULT_CONFIG: Config = {
       'read_*',
       'describe_*',
       'read',
+      'glob',
       'grep',
       'ls',
+      'notebookread',
+      'notebookedit',
+      'webfetch',
+      'websearch',
+      'exitplanmode',
       'askuserquestion',
+      'agent',
+      'task*',
+      'toolsearch',
+      'mcp__ide__*',
+      'getDiagnostics',
     ],
-    toolInspection: { bash: 'command', shell: 'command' },
-    rules: [{ action: 'rm', allowPaths: ['**/node_modules/**', 'dist/**', '.DS_Store'] }],
+    toolInspection: {
+      bash: 'command',
+      shell: 'command',
+      run_shell_command: 'command',
+      'terminal.execute': 'command',
+      'postgres:query': 'sql',
+    },
+    rules: [
+      {
+        action: 'rm',
+        allowPaths: [
+          '**/node_modules/**',
+          'dist/**',
+          'build/**',
+          '.next/**',
+          'coverage/**',
+          '.cache/**',
+          'tmp/**',
+          'temp/**',
+          '.DS_Store',
+        ],
+      },
+    ],
   },
   environments: {},
 };
@@ -440,28 +517,28 @@ export async function evaluatePolicy(
 
   // ── 3. CONTEXTUAL RISK DOWNGRADE (PRD Section 3 / Phase 3) ──────────────
   // If the human is typing manually, we only block "Nuclear" actions.
+  // If the human is typing manually, we only block "Total System Disaster" actions.
   const isManual = agent === 'Terminal';
   if (isManual) {
-    const NUCLEAR_COMMANDS = [
-      'drop',
-      'destroy',
-      'purge',
-      'rmdir',
-      'format',
-      'truncate',
-      'alter',
-      'grant',
-      'revoke',
-      'docker',
-    ];
+    const SYSTEM_DISASTER_COMMANDS = ['mkfs', 'shred', 'dd', 'drop', 'truncate', 'purge'];
 
-    const hasNuclear = allTokens.some((t) => NUCLEAR_COMMANDS.includes(t.toLowerCase()));
+    const hasSystemDisaster = allTokens.some((t) =>
+      SYSTEM_DISASTER_COMMANDS.includes(t.toLowerCase())
+    );
 
-    // If it's manual and NOT nuclear, we auto-allow (bypass standard "dangerous" words like 'rm' or 'delete')
-    if (!hasNuclear) return { decision: 'allow' };
+    // Catch the most famous disaster: rm -rf /
+    const isRootWipe =
+      allTokens.includes('rm') && (allTokens.includes('/') || allTokens.includes('/*'));
 
-    // If it IS nuclear, we fall through to the standard logic so the developer
-    // gets a "Flagged By: Manual Nuclear Protection" popup.
+    if (hasSystemDisaster || isRootWipe) {
+      // If it IS a system disaster, return review so the dev gets a
+      // "Manual Nuclear Protection" popup as a final safety check.
+      return { decision: 'review', blockedByLabel: 'Manual Nuclear Protection' };
+    }
+
+    // For everything else (docker, psql, rmdir, delete, rm),
+    // we trust the human and auto-allow.
+    return { decision: 'allow' };
   }
 
   // ── 4. Sandbox Check (Safe Zones) ───────────────────────────────────────
@@ -479,31 +556,44 @@ export async function evaluatePolicy(
       if (pathTokens.length > 0) {
         const anyBlocked = pathTokens.some((p) => matchesPattern(p, rule.blockPaths || []));
         if (anyBlocked)
-          return { decision: 'review', blockedByLabel: 'Project/Global Config (Rule Block)' };
+          return {
+            decision: 'review',
+            blockedByLabel: `Project/Global Config — rule "${rule.action}" (path blocked)`,
+          };
         const allAllowed = pathTokens.every((p) => matchesPattern(p, rule.allowPaths || []));
         if (allAllowed) return { decision: 'allow' };
       }
-      return { decision: 'review', blockedByLabel: 'Project/Global Config (Rule Default Block)' };
+      return {
+        decision: 'review',
+        blockedByLabel: `Project/Global Config — rule "${rule.action}" (default block)`,
+      };
     }
   }
 
   // ── 6. Dangerous Words Evaluation ───────────────────────────────────────
+  let matchedDangerousWord: string | undefined;
   const isDangerous = allTokens.some((token) =>
     config.policy.dangerousWords.some((word) => {
       const w = word.toLowerCase();
-      if (token === w) return true;
-      try {
-        return new RegExp(`\\b${w}\\b`, 'i').test(token);
-      } catch {
-        return false;
-      }
+      const hit =
+        token === w ||
+        (() => {
+          try {
+            return new RegExp(`\\b${w}\\b`, 'i').test(token);
+          } catch {
+            return false;
+          }
+        })();
+      if (hit && !matchedDangerousWord) matchedDangerousWord = word;
+      return hit;
     })
   );
 
   if (isDangerous) {
-    // Use "Project/Global Config" so E2E tests can verify hierarchy overrides
-    const label = isManual ? 'Manual Nuclear Protection' : 'Project/Global Config (Dangerous Word)';
-    return { decision: 'review', blockedByLabel: label };
+    return {
+      decision: 'review',
+      blockedByLabel: `Project/Global Config — dangerous word: "${matchedDangerousWord}"`,
+    };
   }
 
   // ── 7. Strict Mode Fallback ─────────────────────────────────────────────
@@ -710,6 +800,10 @@ export async function authorizeHeadless(
     approvers.terminal = false;
   }
 
+  if (config.settings.enableHookLogDebug && !isTestEnv) {
+    appendHookDebug(toolName, args, meta);
+  }
+
   const isManual = meta?.agent === 'Terminal';
 
   let explainableLabel = 'Local Config';
@@ -718,7 +812,7 @@ export async function authorizeHeadless(
     if (!isIgnoredTool(toolName)) {
       const policyResult = await evaluatePolicy(toolName, args, meta?.agent);
       if (policyResult.decision === 'review') {
-        appendAuditModeEntry(toolName, args);
+        appendLocalAudit(toolName, args, 'allow', 'audit-mode', meta);
         sendDesktopNotification(
           'Node9 Audit Mode',
           `Would have blocked "${toolName}" (${policyResult.blockedByLabel || 'Local Config'}) — running in audit mode`
@@ -732,11 +826,13 @@ export async function authorizeHeadless(
   if (!isIgnoredTool(toolName)) {
     if (getActiveTrustSession(toolName)) {
       if (creds?.apiKey) auditLocalAllow(toolName, args, 'trust', creds, meta);
+      if (!isManual) appendLocalAudit(toolName, args, 'allow', 'trust', meta);
       return { approved: true, checkedBy: 'trust' };
     }
     const policyResult = await evaluatePolicy(toolName, args, meta?.agent);
     if (policyResult.decision === 'allow') {
       if (creds?.apiKey) auditLocalAllow(toolName, args, 'local-policy', creds, meta);
+      if (!isManual) appendLocalAudit(toolName, args, 'allow', 'local-policy', meta);
       return { approved: true, checkedBy: 'local-policy' };
     }
 
@@ -745,9 +841,11 @@ export async function authorizeHeadless(
     const persistent = getPersistentDecision(toolName);
     if (persistent === 'allow') {
       if (creds?.apiKey) auditLocalAllow(toolName, args, 'persistent', creds, meta);
+      if (!isManual) appendLocalAudit(toolName, args, 'allow', 'persistent', meta);
       return { approved: true, checkedBy: 'persistent' };
     }
     if (persistent === 'deny') {
+      if (!isManual) appendLocalAudit(toolName, args, 'deny', 'persistent-deny', meta);
       return {
         approved: false,
         reason: `This tool ("${toolName}") is explicitly listed in your 'Always Deny' list.`,
@@ -757,6 +855,7 @@ export async function authorizeHeadless(
     }
   } else {
     if (creds?.apiKey) auditLocalAllow(toolName, args, 'ignoredTools', creds, meta);
+    if (!isManual) appendLocalAudit(toolName, args, 'allow', 'ignored', meta);
     return { approved: true };
   }
 
@@ -1055,6 +1154,16 @@ export async function authorizeHeadless(
     await resolveNode9SaaS(cloudRequestId, creds, finalResult.approved);
   }
 
+  if (!isManual) {
+    appendLocalAudit(
+      toolName,
+      args,
+      finalResult.approved ? 'allow' : 'deny',
+      finalResult.checkedBy || finalResult.blockedBy || 'unknown',
+      meta
+    );
+  }
+
   return finalResult;
 }
 
@@ -1106,8 +1215,9 @@ export function getConfig(): Config {
     if (s.approvers) mergedSettings.approvers = { ...mergedSettings.approvers, ...s.approvers };
 
     if (p.sandboxPaths) mergedPolicy.sandboxPaths.push(...p.sandboxPaths);
-    if (p.dangerousWords) mergedPolicy.dangerousWords = [...p.dangerousWords];
     if (p.ignoredTools) mergedPolicy.ignoredTools.push(...p.ignoredTools);
+    // This allows a project to relax global restrictions.
+    if (p.dangerousWords) mergedPolicy.dangerousWords = [...p.dangerousWords];
 
     if (p.toolInspection)
       mergedPolicy.toolInspection = { ...mergedPolicy.toolInspection, ...p.toolInspection };

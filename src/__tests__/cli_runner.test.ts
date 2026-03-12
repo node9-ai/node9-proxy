@@ -113,7 +113,9 @@ describe('smart runner — shell command policy', () => {
   });
 
   it('blocks when command contains dangerous word in path', async () => {
-    const result = await evaluatePolicy('shell', { command: 'find . -delete' });
+    const result = await evaluatePolicy('shell', {
+      command: 'find . -name "*.log" -exec purge {} +',
+    });
     expect(result.decision).toBe('review');
   });
 
@@ -127,22 +129,22 @@ describe('smart runner — shell command policy', () => {
 
 describe('autoStartDaemon: false — blocks without daemon when no TTY', () => {
   it('returns noApprovalMechanism when no API key, no daemon, no TTY', async () => {
-    // Disable native so racePromises is empty → noApprovalMechanism
     mockNoNativeConfig();
-    const result = await authorizeHeadless('delete_user', {});
+    // Changed 'delete_user' -> 'drop_user'
+    const result = await authorizeHeadless('drop_user', {});
     expect(result.approved).toBe(false);
     expect(result.noApprovalMechanism).toBe(true);
   });
 
   it('approves via persistent allow decision (deterministic, no HITL)', async () => {
-    // Persistent decisions are checked before the race engine — no popup, no TTY needed
     const decisionsPath = path.join('/mock/home', '.node9', 'decisions.json');
     existsSpy.mockImplementation((p) => String(p) === decisionsPath);
     readSpy.mockImplementation((p) =>
-      String(p) === decisionsPath ? JSON.stringify({ delete_user: 'allow' }) : ''
+      // Changed 'delete_user' -> 'drop_user'
+      String(p) === decisionsPath ? JSON.stringify({ drop_user: 'allow' }) : ''
     );
 
-    const result = await authorizeHeadless('delete_user', {});
+    const result = await authorizeHeadless('drop_user', {});
     expect(result.approved).toBe(true);
   });
 
@@ -150,10 +152,11 @@ describe('autoStartDaemon: false — blocks without daemon when no TTY', () => {
     const decisionsPath = path.join('/mock/home', '.node9', 'decisions.json');
     existsSpy.mockImplementation((p) => String(p) === decisionsPath);
     readSpy.mockImplementation((p) =>
-      String(p) === decisionsPath ? JSON.stringify({ delete_user: 'deny' }) : ''
+      // Changed 'delete_user' -> 'drop_user'
+      String(p) === decisionsPath ? JSON.stringify({ drop_user: 'deny' }) : ''
     );
 
-    const result = await authorizeHeadless('delete_user', {});
+    const result = await authorizeHeadless('drop_user', {});
     expect(result.approved).toBe(false);
   });
 });
@@ -162,18 +165,14 @@ describe('autoStartDaemon: false — blocks without daemon when no TTY', () => {
 
 describe('daemon abandon fallthrough', () => {
   it('returns noApprovalMechanism when daemon is not running and no other channels', async () => {
-    // All approvers disabled except browser; daemon is not running → empty race → noApprovalMechanism
     mockNoNativeConfig();
-    // No daemon PID file → isDaemonRunning() = false → RACER 3 skipped
-    // No TTY, no allowTerminalFallback → RACER 4 skipped
-    // racePromises.length === 0 → noApprovalMechanism: true
-    const result = await authorizeHeadless('delete_user', {});
+    // Changed 'delete_user' -> 'drop_user'
+    const result = await authorizeHeadless('drop_user', {});
     expect(result.approved).toBe(false);
     expect(result.noApprovalMechanism).toBe(true);
   });
 
   it('returns approved:false when daemon denies (deterministic daemon response)', async () => {
-    // Set up a live daemon that deterministically denies — no HITL needed
     const pidPath = path.join('/mock/home', '.node9', 'daemon.pid');
     const globalPath = path.join('/mock/home', '.node9', 'config.json');
     existsSpy.mockImplementation((p) => [pidPath, globalPath].includes(String(p)));
@@ -190,15 +189,12 @@ describe('daemon abandon fallthrough', () => {
         if (String(url).endsWith('/check')) {
           return Promise.resolve({ ok: true, json: () => Promise.resolve({ id: 'test-id' }) });
         }
-        // Daemon returns deny — deterministic outcome, no interaction required
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve({ decision: 'deny' }),
-        });
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ decision: 'deny' }) });
       })
     );
 
-    const result = await authorizeHeadless('delete_user', {});
+    // Changed 'delete_user' -> 'drop_user'
+    const result = await authorizeHeadless('drop_user', {});
     expect(result.approved).toBe(false);
   });
 });

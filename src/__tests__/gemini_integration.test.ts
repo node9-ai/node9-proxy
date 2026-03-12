@@ -63,25 +63,31 @@ beforeEach(() => {
 describe('Gemini Integration Security', () => {
   it('identifies "Shell" (capital S) as a shell-executing tool', async () => {
     mockConfig({});
-    const result = await evaluatePolicy('Shell', { command: 'rm -rf /' });
+    // Use 'drop' which is a true "Nuke" in our new DANGEROUS_WORDS
+    const result = await evaluatePolicy('Shell', { command: 'psql -c "drop table users"' });
     expect(result.decision).toBe('review');
   });
 
   it('identifies "run_shell_command" as a shell-executing tool', async () => {
     mockConfig({});
-    const result = await evaluatePolicy('run_shell_command', { command: 'rm -rf /' });
+    // Use 'purge' which is in our new DANGEROUS_WORDS
+    const result = await evaluatePolicy('run_shell_command', { command: 'purge /var/log' });
     expect(result.decision).toBe('review');
   });
 
   it('correctly parses complex shell commands inside run_shell_command', async () => {
     mockConfig({});
-    const result = await evaluatePolicy('run_shell_command', { command: 'ls && rm -rf tmp' });
+    // Proves the AST parser finds dangerous words even at the end of a chain
+    const result = await evaluatePolicy('run_shell_command', {
+      command: 'ls -la && drop database',
+    });
     expect(result.decision).toBe('review');
   });
 
   it('blocks dangerous commands in Gemini hooks without API key', async () => {
     mockConfig({});
-    const result = await authorizeHeadless('Shell', { command: 'rm -rf /' });
+    // 'docker' is in our new DANGEROUS_WORDS
+    const result = await authorizeHeadless('Shell', { command: 'docker rm -f my_container' });
     expect(result.approved).toBe(false);
     expect(result.noApprovalMechanism).toBe(true);
   });
@@ -90,6 +96,17 @@ describe('Gemini Integration Security', () => {
     mockConfig({});
     const result = await authorizeHeadless('Shell', { command: 'ls -la' });
     expect(result.approved).toBe(true);
+  });
+
+  // FIXED TEST: Use a path that is in the DEFAULT_CONFIG allowPaths list (like 'dist')
+  it('allows "rm" on specific allowed paths even if the verb is monitored', async () => {
+    mockConfig({
+      policy: {
+        rules: [{ action: 'rm', allowPaths: ['dist/**'] }],
+      },
+    });
+    const result = await evaluatePolicy('run_shell_command', { command: 'rm -rf dist/old_build' });
+    expect(result.decision).toBe('allow');
   });
 
   it('Universal Adapter: dynamically inspects a custom tool defined in config', async () => {
