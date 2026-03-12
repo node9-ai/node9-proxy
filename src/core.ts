@@ -296,7 +296,6 @@ export function redactSecrets(text: string): string {
 
 interface EnvironmentConfig {
   requireApproval?: boolean;
-  slackChannel?: string;
 }
 
 interface PolicyRule {
@@ -868,7 +867,7 @@ export async function authorizeHeadless(
   if (cloudEnforced) {
     try {
       const envConfig = getActiveEnvironment(getConfig());
-      const initResult = await initNode9SaaS(toolName, args, creds!, envConfig?.slackChannel, meta);
+      const initResult = await initNode9SaaS(toolName, args, creds!, meta);
 
       if (!initResult.pending) {
         return {
@@ -1341,7 +1340,6 @@ async function initNode9SaaS(
   toolName: string,
   args: unknown,
   creds: { apiKey: string; apiUrl: string },
-  slackChannel?: string,
   meta?: { agent?: string; mcpServer?: string }
 ): Promise<{
   pending: boolean;
@@ -1360,7 +1358,6 @@ async function initNode9SaaS(
       body: JSON.stringify({
         toolName,
         args,
-        slackChannel,
         context: {
           agent: meta?.agent,
           mcpServer: meta?.mcpServer,

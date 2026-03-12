@@ -90,12 +90,7 @@
   },
 
   "environments": {
-    "production": {
-      "requireApproval": true,
-      "slackChannel": "#node9-approvals"
-    },
-    "development": {
-      "requireApproval": false
-    }
+    "production": { "requireApproval": true },
+    "development": { "requireApproval": false }
   }
 }
