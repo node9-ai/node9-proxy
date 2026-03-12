@@ -866,7 +866,6 @@ export async function authorizeHeadless(
 
   if (cloudEnforced) {
     try {
-      const envConfig = getActiveEnvironment(getConfig());
       const initResult = await initNode9SaaS(toolName, args, creds!, meta);
 
       if (!initResult.pending) {
