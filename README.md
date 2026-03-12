@@ -15,10 +15,8 @@ While others try to _guess_ if a prompt is malicious (Semantic Security), Node9 
 
 **AIs are literal.** When you ask an agent to "Fix my disk space," it might decide to run `docker system prune -af`.
 
-![](https://github.com/user-attachments/assets/cd646604-0be3-4043-bc59-cb12351e5f51)
-
 <div align="center">
-  <video src="https://github.com/user-attachments/assets/dd296c35-fcd5-4114-b935-b326736d7f52.mp4" autoplay loop muted playsinline width="80%"></video>
+  <video src="https://github.com/user-attachments/assets/dd296c35-fcd5-4114-b935-b326736d7f52.mp4" autoplay loop muted playsinline width="100%"></video>
 </div>
 
 **With Node9, the interaction looks like this:**
