@@ -154,8 +154,6 @@ function buildPangoMessage(
       '<small>↵ Enter = <b>Allow ↵</b>   |   ⎋ Esc = <b>Block ⎋</b>   |   "Always Allow" = never ask again</small>'
     );
   }
-
-  return lines.join('\n');
 }
 
 export async function askNativePopup(
