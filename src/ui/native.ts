@@ -141,14 +141,18 @@ function buildPangoMessage(
     lines.push('');
   }
 
-  lines.push(`<b>🤖 ${escapePango(agent || 'AI Agent')}</b>  |  <b>🔧 <tt>${escapePango(toolName)}</tt></b>`);
+  lines.push(
+    `<b>🤖 ${escapePango(agent || 'AI Agent')}</b>  |  <b>🔧 <tt>${escapePango(toolName)}</tt></b>`
+  );
   lines.push(`<i>🛡️  ${escapePango(explainableLabel || 'Security Policy')}</i>`);
   lines.push('');
   lines.push(`<tt>${escapePango(formattedArgs)}</tt>`);
 
   if (!locked) {
     lines.push('');
-    lines.push('<small>↵ Enter = <b>Allow ↵</b>   |   ⎋ Esc = <b>Block ⎋</b>   |   "Always Allow" = never ask again</small>');
+    lines.push(
+      '<small>↵ Enter = <b>Allow ↵</b>   |   ⎋ Esc = <b>Block ⎋</b>   |   "Always Allow" = never ask again</small>'
+    );
   }
 
   return lines.join('\n');

@@ -579,7 +579,6 @@ INSTRUCTIONS FOR AI AGENT:
 
           console.error(chalk.dim(`   (Detailed instructions sent to AI agent)`));
 
-
           // 5. Send the structured JSON back to the LLM agent
           process.stdout.write(
             JSON.stringify({

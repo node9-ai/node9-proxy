@@ -575,7 +575,15 @@ export async function evaluatePolicy(
   const isDangerous = allTokens.some((token) =>
     config.policy.dangerousWords.some((word) => {
       const w = word.toLowerCase();
-      const hit = token === w || (() => { try { return new RegExp(`\\b${w}\\b`, 'i').test(token); } catch { return false; } })();
+      const hit =
+        token === w ||
+        (() => {
+          try {
+            return new RegExp(`\\b${w}\\b`, 'i').test(token);
+          } catch {
+            return false;
+          }
+        })();
       if (hit && !matchedDangerousWord) matchedDangerousWord = word;
       return hit;
     })
