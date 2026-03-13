@@ -296,7 +296,6 @@ export function redactSecrets(text: string): string {
 
 interface EnvironmentConfig {
   requireApproval?: boolean;
-  slackChannel?: string;
 }
 
 interface PolicyRule {
@@ -312,6 +311,7 @@ interface Config {
     enableUndo?: boolean;
     enableHookLogDebug?: boolean;
     approvers: { native: boolean; browser: boolean; cloud: boolean; terminal: boolean };
+    environment?: string;
   };
   policy: {
     sandboxPaths: string[];
@@ -866,8 +866,7 @@ export async function authorizeHeadless(
 
   if (cloudEnforced) {
     try {
-      const envConfig = getActiveEnvironment(getConfig());
-      const initResult = await initNode9SaaS(toolName, args, creds!, envConfig?.slackChannel, meta);
+      const initResult = await initNode9SaaS(toolName, args, creds!, meta);
 
       if (!initResult.pending) {
         return {
@@ -1213,6 +1212,7 @@ export function getConfig(): Config {
     if (s.enableHookLogDebug !== undefined)
       mergedSettings.enableHookLogDebug = s.enableHookLogDebug;
     if (s.approvers) mergedSettings.approvers = { ...mergedSettings.approvers, ...s.approvers };
+    if (s.environment !== undefined) mergedSettings.environment = s.environment;
 
     if (p.sandboxPaths) mergedPolicy.sandboxPaths.push(...p.sandboxPaths);
     if (p.ignoredTools) mergedPolicy.ignoredTools.push(...p.ignoredTools);
@@ -1252,7 +1252,7 @@ function tryLoadConfig(filePath: string): Record<string, unknown> | null {
 }
 
 function getActiveEnvironment(config: Config): EnvironmentConfig | null {
-  const env = process.env.NODE_ENV || 'development';
+  const env = config.settings.environment || process.env.NODE_ENV || 'development';
   return config.environments[env] ?? null;
 }
 
@@ -1339,7 +1339,6 @@ async function initNode9SaaS(
   toolName: string,
   args: unknown,
   creds: { apiKey: string; apiUrl: string },
-  slackChannel?: string,
   meta?: { agent?: string; mcpServer?: string }
 ): Promise<{
   pending: boolean;
@@ -1358,7 +1357,6 @@ async function initNode9SaaS(
       body: JSON.stringify({
         toolName,
         args,
-        slackChannel,
         context: {
           agent: meta?.agent,
           mcpServer: meta?.mcpServer,

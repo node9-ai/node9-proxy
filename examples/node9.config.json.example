@@ -1,57 +1,96 @@
 {
-  "version": "1.0",
   "settings": {
     "mode": "standard",
-    "failOpen": false
+    "environment": "production",
+    "autoStartDaemon": true,
+    "enableUndo": true,
+    "enableHookLogDebug": false,
+    "approvers": {
+      "native": true,
+      "browser": false,
+      "cloud": false,
+      "terminal": true
+    }
   },
   "policy": {
+    "sandboxPaths": ["/tmp/**", "**/sandbox/**", "**/test-results/**"],
+
     "dangerousWords": [
-      "delete",
       "drop",
-      "remove",
-      "rm",
-      "rmdir",
-      "terminate",
-      "refund",
-      "write",
-      "update",
-      "destroy",
+      "truncate",
       "purge",
-      "revoke",
       "format",
-      "truncate"
+      "destroy",
+      "terminate",
+      "revoke",
+      "docker",
+      "psql",
+      "rmdir",
+      "delete",
+      "alter",
+      "grant",
+      "rm"
     ],
+
     "ignoredTools": [
       "list_*",
       "get_*",
       "read_*",
       "describe_*",
       "read",
-      "write",
-      "edit",
-      "multiedit",
       "glob",
       "grep",
       "ls",
       "notebookread",
-      "notebookedit",
-      "todoread",
-      "todowrite",
       "webfetch",
       "websearch",
       "exitplanmode",
       "askuserquestion",
-      "run_shell_command"
+      "agent",
+      "task*",
+      "toolsearch",
+      "mcp__ide__*",
+      "getDiagnostics"
+    ],
+
+    "toolInspection": {
+      "bash": "command",
+      "shell": "command",
+      "run_shell_command": "command",
+      "terminal.execute": "command",
+      "postgres:query": "sql",
+      "mcp__github__*": "command",
+      "mcp__redis__*": "query"
+    },
+
+    "rules": [
+      {
+        "action": "rm",
+        "allowPaths": [
+          "**/node_modules/**",
+          "dist/**",
+          "build/**",
+          ".next/**",
+          ".nuxt/**",
+          "coverage/**",
+          ".cache/**",
+          "tmp/**",
+          "temp/**",
+          "**/__pycache__/**",
+          "**/.pytest_cache/**",
+          "**/*.log",
+          "**/*.tmp",
+          ".DS_Store",
+          "**/yarn.lock",
+          "**/package-lock.json",
+          "**/pnpm-lock.yaml"
+        ]
+      }
     ]
   },
+
   "environments": {
-    "production": {
-      "requireApproval": true,
-      "slackChannel": "#alerts-prod-security"
-    },
-    "development": {
-      "requireApproval": true,
-      "slackChannel": "#alerts-dev-sandbox"
-    }
+    "production": { "requireApproval": true },
+    "development": { "requireApproval": false }
   }
 }
