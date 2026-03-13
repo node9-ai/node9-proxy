@@ -153,16 +153,16 @@ Rules are **merged additive**—you cannot "un-danger" a word locally if it was 
 
 ## 🖥️ CLI Reference
 
-| Command | Description |
-| :--- | :--- |
-| `node9 setup` | Interactive menu — detects installed agents and wires hooks for you |
-| `node9 addto <agent>` | Wire hooks for a specific agent (`claude`, `gemini`, `cursor`) |
-| `node9 init` | Create default `~/.node9/config.json` |
-| `node9 status` | Show current protection status and active rules |
-| `node9 doctor` | Health check — verifies binaries, config, credentials, and all agent hooks |
-| `node9 explain <tool> [args]` | Trace the policy waterfall for a given tool call (dry-run, no approval prompt) |
-| `node9 undo [--steps N]` | Revert the last N AI file edits using shadow Git snapshots |
-| `node9 check` | Called by agent hooks; evaluates a pending tool call and exits 0 (allow) or 1 (block) |
+| Command                       | Description                                                                           |
+| :---------------------------- | :------------------------------------------------------------------------------------ |
+| `node9 setup`                 | Interactive menu — detects installed agents and wires hooks for you                   |
+| `node9 addto <agent>`         | Wire hooks for a specific agent (`claude`, `gemini`, `cursor`)                        |
+| `node9 init`                  | Create default `~/.node9/config.json`                                                 |
+| `node9 status`                | Show current protection status and active rules                                       |
+| `node9 doctor`                | Health check — verifies binaries, config, credentials, and all agent hooks            |
+| `node9 explain <tool> [args]` | Trace the policy waterfall for a given tool call (dry-run, no approval prompt)        |
+| `node9 undo [--steps N]`      | Revert the last N AI file edits using shadow Git snapshots                            |
+| `node9 check`                 | Called by agent hooks; evaluates a pending tool call and exits 0 (allow) or 1 (block) |
 
 ### `node9 doctor`
 
