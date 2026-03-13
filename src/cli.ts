@@ -422,7 +422,7 @@ program
       const which = execSync('which node9', { encoding: 'utf-8' }).trim();
       pass(`node9 found at ${which}`);
     } catch {
-      fail('node9 not found on PATH', 'Run: npm install -g @node9/proxy');
+      warn('node9 not found in $PATH — hooks may not find it', 'Run: npm install -g @node9/proxy');
     }
 
     const nodeMajor = parseInt(process.versions.node.split('.')[0], 10);
