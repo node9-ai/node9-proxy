@@ -341,6 +341,7 @@ interface Config {
     autoStartDaemon?: boolean;
     enableUndo?: boolean;
     enableHookLogDebug?: boolean;
+    approvalTimeoutMs?: number;
     approvers: { native: boolean; browser: boolean; cloud: boolean; terminal: boolean };
     environment?: string;
   };
@@ -390,6 +391,7 @@ export const DEFAULT_CONFIG: Config = {
     autoStartDaemon: true,
     enableUndo: true, // 🔥 ALWAYS TRUE BY DEFAULT for the safety net
     enableHookLogDebug: false,
+    approvalTimeoutMs: 0, // 0 = disabled; set e.g. 30000 for 30-second auto-deny
     approvers: { native: true, browser: true, cloud: true, terminal: true },
   },
   policy: {
@@ -1141,7 +1143,8 @@ export interface AuthResult {
     | 'persistent-deny'
     | 'local-config'
     | 'local-decision'
-    | 'no-approval-mechanism';
+    | 'no-approval-mechanism'
+    | 'timeout';
   changeHint?: string;
   checkedBy?:
     | 'cloud'
@@ -1315,6 +1318,27 @@ export async function authorizeHeadless(
   const abortController = new AbortController();
   const { signal } = abortController;
   const racePromises: Promise<AuthResult>[] = [];
+
+  // ⏱️ RACER 0: Approval Timeout
+  const approvalTimeoutMs = config.settings.approvalTimeoutMs ?? 0;
+  if (approvalTimeoutMs > 0) {
+    racePromises.push(
+      new Promise<AuthResult>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          resolve({
+            approved: false,
+            reason: `No human response within ${approvalTimeoutMs / 1000}s — auto-denied by timeout policy.`,
+            blockedBy: 'timeout',
+            blockedByLabel: 'Approval Timeout',
+          });
+        }, approvalTimeoutMs);
+        signal.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(new Error('Aborted'));
+        });
+      })
+    );
+  }
 
   let viewerId: string | null = null;
   const internalToken = getInternalToken();
