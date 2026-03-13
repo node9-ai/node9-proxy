@@ -75,6 +75,8 @@ Revert to this snapshot? [y/N]
 
 Node9 keeps the last 10 snapshots. Snapshots are only taken for file-writing tools (`write_file`, `edit_file`, `str_replace_based_edit_tool`, `create_file`) — not for read-only or shell commands.
 
+Node9 keeps the last 10 snapshots. Snapshots are only taken for file-writing tools (`write_file`, `edit_file`, `str_replace_based_edit_tool`, `create_file`) — not for read-only or shell commands.
+
 ### 🌊 The Resolution Waterfall
 
 Security posture is resolved using a strict 5-tier waterfall:
