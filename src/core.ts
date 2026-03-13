@@ -193,6 +193,37 @@ function extractShellCommand(
   return typeof value === 'string' ? value : null;
 }
 
+/** Returns true when a tool's inspected field is SQL (sql or query). */
+function isSqlTool(toolName: string, toolInspection: Record<string, string>): boolean {
+  const patterns = Object.keys(toolInspection);
+  const matchingPattern = patterns.find((p) => matchesPattern(toolName, p));
+  if (!matchingPattern) return false;
+  const fieldName = toolInspection[matchingPattern];
+  return fieldName === 'sql' || fieldName === 'query';
+}
+
+// SQL DML keywords — safe in a scoped context (WHERE clause present).
+// Filtered from tokens so user dangerousWords like "delete"/"update" don't
+// re-trigger after the WHERE-clause check has already passed.
+const SQL_DML_KEYWORDS = new Set(['select', 'insert', 'update', 'delete', 'merge', 'upsert']);
+
+/**
+ * Checks a SQL string for dangerous unscoped mutations.
+ * Returns a reason string if dangerous, null if safe.
+ */
+export function checkDangerousSql(sql: string): string | null {
+  const norm = sql.replace(/\s+/g, ' ').trim().toLowerCase();
+  const hasWhere = /\bwhere\b/.test(norm);
+
+  if (/^delete\s+from\s+\S+/.test(norm) && !hasWhere)
+    return 'DELETE without WHERE — full table wipe';
+
+  if (/^update\s+\S+\s+set\s+/.test(norm) && !hasWhere)
+    return 'UPDATE without WHERE — updates every row';
+
+  return null;
+}
+
 interface AstNode {
   type: string;
   Args?: { Parts?: { Value?: string }[] }[];
@@ -510,9 +541,26 @@ export async function evaluatePolicy(
     if (INLINE_EXEC_PATTERN.test(shellCommand.trim())) {
       return { decision: 'review', blockedByLabel: 'Node9 Standard (Inline Execution)' };
     }
+
+    // SQL-aware check: flag DELETE/UPDATE without WHERE, allow scoped mutations
+    if (isSqlTool(toolName, config.policy.toolInspection)) {
+      const sqlDanger = checkDangerousSql(shellCommand);
+      if (sqlDanger) return { decision: 'review', blockedByLabel: `SQL Safety: ${sqlDanger}` };
+      // Safe SQL — strip DML keywords from tokens so user dangerousWords
+      // like "delete"/"update" don't re-flag an already-validated query.
+      allTokens = allTokens.filter((t) => !SQL_DML_KEYWORDS.has(t.toLowerCase()));
+      actionTokens = actionTokens.filter((t) => !SQL_DML_KEYWORDS.has(t.toLowerCase()));
+    }
   } else {
     allTokens = tokenize(toolName);
     actionTokens = [toolName];
+
+    // Deep scan: if this tool isn't in toolInspection, scan all arg values for dangerous words
+    if (args && typeof args === 'object') {
+      const flattenedArgs = JSON.stringify(args).toLowerCase();
+      const extraTokens = flattenedArgs.split(/[^a-zA-Z0-9]+/).filter((t) => t.length > 1);
+      allTokens.push(...extraTokens);
+    }
   }
 
   // ── 3. CONTEXTUAL RISK DOWNGRADE (PRD Section 3 / Phase 3) ──────────────
@@ -604,6 +652,347 @@ export async function evaluatePolicy(
   }
 
   return { decision: 'allow' };
+}
+
+// ── explainPolicy ─────────────────────────────────────────────────────────────
+
+export interface ExplainStep {
+  name: string;
+  outcome: 'checked' | 'allow' | 'review' | 'skip';
+  detail: string;
+  isFinal?: boolean;
+}
+
+export interface WaterfallTier {
+  tier: number;
+  label: string;
+  status: 'active' | 'missing' | 'env';
+  path?: string;
+  note?: string;
+}
+
+export interface ExplainResult {
+  tool: string;
+  args: unknown;
+  waterfall: WaterfallTier[];
+  steps: ExplainStep[];
+  decision: 'allow' | 'review';
+  blockedByLabel?: string;
+  matchedToken?: string;
+}
+
+export async function explainPolicy(toolName: string, args?: unknown): Promise<ExplainResult> {
+  const steps: ExplainStep[] = [];
+
+  const globalPath = path.join(os.homedir(), '.node9', 'config.json');
+  const projectPath = path.join(process.cwd(), 'node9.config.json');
+  const credsPath = path.join(os.homedir(), '.node9', 'credentials.json');
+
+  // ── Waterfall tiers ───────────────────────────────────────────────────────
+  const waterfall: WaterfallTier[] = [
+    {
+      tier: 1,
+      label: 'Env vars',
+      status: 'env',
+      note: process.env.NODE9_MODE ? `NODE9_MODE=${process.env.NODE9_MODE}` : 'not set',
+    },
+    {
+      tier: 2,
+      label: 'Cloud policy',
+      status: fs.existsSync(credsPath) ? 'active' : 'missing',
+      note: fs.existsSync(credsPath)
+        ? 'credentials found (not evaluated in explain mode)'
+        : 'not connected — run: node9 login',
+    },
+    {
+      tier: 3,
+      label: 'Project config',
+      status: fs.existsSync(projectPath) ? 'active' : 'missing',
+      path: projectPath,
+    },
+    {
+      tier: 4,
+      label: 'Global config',
+      status: fs.existsSync(globalPath) ? 'active' : 'missing',
+      path: globalPath,
+    },
+    {
+      tier: 5,
+      label: 'Defaults',
+      status: 'active',
+      note: 'always active',
+    },
+  ];
+
+  const config = getConfig();
+
+  // ── 1. Ignored tools ──────────────────────────────────────────────────────
+  if (matchesPattern(toolName, config.policy.ignoredTools)) {
+    steps.push({
+      name: 'Ignored tools',
+      outcome: 'allow',
+      detail: `"${toolName}" matches ignoredTools pattern → fast-path allow`,
+      isFinal: true,
+    });
+    return { tool: toolName, args, waterfall, steps, decision: 'allow' };
+  }
+  steps.push({
+    name: 'Ignored tools',
+    outcome: 'checked',
+    detail: `"${toolName}" not in ignoredTools list`,
+  });
+
+  // ── 2. Input parsing ──────────────────────────────────────────────────────
+  let allTokens: string[] = [];
+  let actionTokens: string[] = [];
+  let pathTokens: string[] = [];
+
+  const shellCommand = extractShellCommand(toolName, args, config.policy.toolInspection);
+  if (shellCommand) {
+    const analyzed = await analyzeShellCommand(shellCommand);
+    allTokens = analyzed.allTokens;
+    actionTokens = analyzed.actions;
+    pathTokens = analyzed.paths;
+
+    const patterns = Object.keys(config.policy.toolInspection);
+    const matchingPattern = patterns.find((p) => matchesPattern(toolName, p));
+    const fieldName = matchingPattern ? config.policy.toolInspection[matchingPattern] : 'command';
+    steps.push({
+      name: 'Input parsing',
+      outcome: 'checked',
+      detail: `Shell command via toolInspection["${matchingPattern ?? toolName}"] → field "${fieldName}": "${shellCommand}"`,
+    });
+
+    // ── 3. Inline exec ────────────────────────────────────────────────────
+    const INLINE_EXEC_PATTERN = /^(python3?|bash|sh|zsh|perl|ruby|node|php|lua)\s+(-c|-e|-eval)\s/i;
+    if (INLINE_EXEC_PATTERN.test(shellCommand.trim())) {
+      steps.push({
+        name: 'Inline execution',
+        outcome: 'review',
+        detail: 'Inline code execution detected (e.g. "bash -c ...") — always requires review',
+        isFinal: true,
+      });
+      return {
+        tool: toolName,
+        args,
+        waterfall,
+        steps,
+        decision: 'review',
+        blockedByLabel: 'Node9 Standard (Inline Execution)',
+      };
+    }
+    steps.push({
+      name: 'Inline execution',
+      outcome: 'checked',
+      detail: 'No inline execution pattern detected',
+    });
+
+    // ── 4. SQL-aware check ────────────────────────────────────────────────
+    if (isSqlTool(toolName, config.policy.toolInspection)) {
+      const sqlDanger = checkDangerousSql(shellCommand);
+      if (sqlDanger) {
+        steps.push({
+          name: 'SQL safety',
+          outcome: 'review',
+          detail: sqlDanger,
+          isFinal: true,
+        });
+        return {
+          tool: toolName,
+          args,
+          waterfall,
+          steps,
+          decision: 'review',
+          blockedByLabel: `SQL Safety: ${sqlDanger}`,
+        };
+      }
+      // Safe — strip DML keywords so they don't re-trigger dangerous words
+      allTokens = allTokens.filter((t) => !SQL_DML_KEYWORDS.has(t.toLowerCase()));
+      actionTokens = actionTokens.filter((t) => !SQL_DML_KEYWORDS.has(t.toLowerCase()));
+      steps.push({
+        name: 'SQL safety',
+        outcome: 'checked',
+        detail: 'DELETE/UPDATE have a WHERE clause — scoped mutation, safe',
+      });
+    }
+  } else {
+    allTokens = tokenize(toolName);
+    actionTokens = [toolName];
+    let detail = `No toolInspection match for "${toolName}" — tokens: [${allTokens.join(', ')}]`;
+    if (args && typeof args === 'object') {
+      const flattenedArgs = JSON.stringify(args).toLowerCase();
+      const extraTokens = flattenedArgs.split(/[^a-zA-Z0-9]+/).filter((t) => t.length > 1);
+      allTokens.push(...extraTokens);
+      const preview = extraTokens.slice(0, 8).join(', ') + (extraTokens.length > 8 ? '…' : '');
+      detail += ` + deep scan of args: [${preview}]`;
+    }
+    steps.push({ name: 'Input parsing', outcome: 'checked', detail });
+  }
+
+  // ── 4. Tokens ─────────────────────────────────────────────────────────────
+  const uniqueTokens = [...new Set(allTokens)];
+  steps.push({
+    name: 'Tokens scanned',
+    outcome: 'checked',
+    detail: `[${uniqueTokens.join(', ')}]`,
+  });
+
+  // ── 5. Sandbox paths ──────────────────────────────────────────────────────
+  if (pathTokens.length > 0 && config.policy.sandboxPaths.length > 0) {
+    const allInSandbox = pathTokens.every((p) => matchesPattern(p, config.policy.sandboxPaths));
+    if (allInSandbox) {
+      steps.push({
+        name: 'Sandbox paths',
+        outcome: 'allow',
+        detail: `[${pathTokens.join(', ')}] all match sandbox patterns → auto-allow`,
+        isFinal: true,
+      });
+      return { tool: toolName, args, waterfall, steps, decision: 'allow' };
+    }
+    const unmatched = pathTokens.filter((p) => !matchesPattern(p, config.policy.sandboxPaths));
+    steps.push({
+      name: 'Sandbox paths',
+      outcome: 'checked',
+      detail: `[${unmatched.join(', ')}] not in sandbox — not auto-allowed`,
+    });
+  } else {
+    steps.push({
+      name: 'Sandbox paths',
+      outcome: 'skip',
+      detail:
+        pathTokens.length === 0 ? 'No path tokens found in input' : 'No sandbox paths configured',
+    });
+  }
+
+  // ── 6. Policy rules ───────────────────────────────────────────────────────
+  let ruleMatched = false;
+  for (const action of actionTokens) {
+    const rule = config.policy.rules.find(
+      (r) => r.action === action || matchesPattern(action, r.action)
+    );
+    if (rule) {
+      ruleMatched = true;
+      if (pathTokens.length > 0) {
+        const anyBlocked = pathTokens.some((p) => matchesPattern(p, rule.blockPaths || []));
+        if (anyBlocked) {
+          steps.push({
+            name: 'Policy rules',
+            outcome: 'review',
+            detail: `Rule "${rule.action}" matched + path is in blockPaths`,
+            isFinal: true,
+          });
+          return {
+            tool: toolName,
+            args,
+            waterfall,
+            steps,
+            decision: 'review',
+            blockedByLabel: `Project/Global Config — rule "${rule.action}" (path blocked)`,
+          };
+        }
+        const allAllowed = pathTokens.every((p) => matchesPattern(p, rule.allowPaths || []));
+        if (allAllowed) {
+          steps.push({
+            name: 'Policy rules',
+            outcome: 'allow',
+            detail: `Rule "${rule.action}" matched + all paths are in allowPaths`,
+            isFinal: true,
+          });
+          return { tool: toolName, args, waterfall, steps, decision: 'allow' };
+        }
+      }
+      steps.push({
+        name: 'Policy rules',
+        outcome: 'review',
+        detail: `Rule "${rule.action}" matched — default block (no path exception)`,
+        isFinal: true,
+      });
+      return {
+        tool: toolName,
+        args,
+        waterfall,
+        steps,
+        decision: 'review',
+        blockedByLabel: `Project/Global Config — rule "${rule.action}" (default block)`,
+      };
+    }
+  }
+  if (!ruleMatched) {
+    steps.push({
+      name: 'Policy rules',
+      outcome: 'skip',
+      detail:
+        config.policy.rules.length === 0
+          ? 'No rules configured'
+          : `No rule matched [${actionTokens.join(', ')}]`,
+    });
+  }
+
+  // ── 7. Dangerous words ────────────────────────────────────────────────────
+  let matchedDangerousWord: string | undefined;
+  const isDangerous = uniqueTokens.some((token) =>
+    config.policy.dangerousWords.some((word) => {
+      const w = word.toLowerCase();
+      const hit =
+        token === w ||
+        (() => {
+          try {
+            return new RegExp(`\\b${w}\\b`, 'i').test(token);
+          } catch {
+            return false;
+          }
+        })();
+      if (hit && !matchedDangerousWord) matchedDangerousWord = word;
+      return hit;
+    })
+  );
+  if (isDangerous) {
+    steps.push({
+      name: 'Dangerous words',
+      outcome: 'review',
+      detail: `"${matchedDangerousWord}" found in token list`,
+      isFinal: true,
+    });
+    return {
+      tool: toolName,
+      args,
+      waterfall,
+      steps,
+      decision: 'review',
+      blockedByLabel: `Project/Global Config — dangerous word: "${matchedDangerousWord}"`,
+      matchedToken: matchedDangerousWord,
+    };
+  }
+  steps.push({
+    name: 'Dangerous words',
+    outcome: 'checked',
+    detail: `No dangerous words matched`,
+  });
+
+  // ── 8. Strict mode ────────────────────────────────────────────────────────
+  if (config.settings.mode === 'strict') {
+    steps.push({
+      name: 'Strict mode',
+      outcome: 'review',
+      detail: 'Mode is "strict" — all tools require approval unless explicitly allowed',
+      isFinal: true,
+    });
+    return {
+      tool: toolName,
+      args,
+      waterfall,
+      steps,
+      decision: 'review',
+      blockedByLabel: 'Global Config (Strict Mode Active)',
+    };
+  }
+  steps.push({
+    name: 'Strict mode',
+    outcome: 'skip',
+    detail: `Mode is "${config.settings.mode}" — no catch-all review`,
+  });
+
+  return { tool: toolName, args, waterfall, steps, decision: 'allow' };
 }
 
 /** Returns true when toolName matches an ignoredTools pattern (fast-path, silent allow). */

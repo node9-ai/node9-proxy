@@ -16,7 +16,7 @@ While others try to _guess_ if a prompt is malicious (Semantic Security), Node9 
 **AIs are literal.** When you ask an agent to "Fix my disk space," it might decide to run `docker system prune -af`.
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/0e45e843-4cf7-408e-95ce-23fb09525ee4" width="100%">
+  <img src="https://github.com/user-attachments/assets/afae9caa-0605-4cac-929a-c14198383169" width="100%">
 </p>
 
 **With Node9, the interaction looks like this:**
@@ -45,11 +45,35 @@ Node9 doesn't just "cut the wire." When a command is blocked, it injects a **Str
 
 ### ⏪ Shadow Git Snapshots (Auto-Undo)
 
-Node9 takes silent, lightweight Git snapshots right before an AI agent is allowed to edit or delete files. If the AI hallucinates and ruins your code, don't waste time manualy fixing it. Just run:
+Node9 takes a silent, lightweight Git snapshot before every AI file edit. If the AI hallucinates and breaks your code, run `node9 undo` to instantly revert — with a full diff preview before anything changes.
 
 ```bash
+# Undo the last AI action (shows diff + asks confirmation)
 node9 undo
+
+# Go back N actions at once
+node9 undo --steps 3
 ```
+
+Example output:
+
+```
+⏪  Node9 Undo
+    Tool:  str_replace_based_edit_tool → src/app.ts
+    When:  2m ago
+    Dir:   /home/user/my-project
+
+--- src/app.ts (snapshot)
++++ src/app.ts (current)
+@@ -1,4 +1,6 @@
+-const x = 1;
++const x = 99;
++const y = "hello";
+
+Revert to this snapshot? [y/N]
+```
+
+Node9 keeps the last 10 snapshots. Snapshots are only taken for file-writing tools (`write_file`, `edit_file`, `str_replace_based_edit_tool`, `create_file`) — not for read-only or shell commands.
 
 ### 🌊 The Resolution Waterfall
 
@@ -120,10 +144,6 @@ Rules are **merged additive**—you cannot "un-danger" a word locally if it was 
 ```
 
 ---
-
-## ⏪ Phase 2: The "Undo" Engine (Coming Soon)
-
-Node9 is currently building **Shadow Git Snapshots**. When enabled, Node9 takes a silent, lightweight Git snapshot right before an AI agent is allowed to edit or delete files. If the AI hallucinates, you can revert the entire session with one click: `node9 undo`.
 
 ---
 
