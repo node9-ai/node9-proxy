@@ -36,6 +36,9 @@ jobs:
       - name: Format check
         run: npm run format:check
 
+      - name: Build (required for integration tests)
+        run: npm run build
+
       - name: Run tests
         run: npm test
 
