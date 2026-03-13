@@ -97,13 +97,17 @@ Security posture is resolved using a strict 5-tier waterfall:
 npm install -g @node9/proxy
 
 # 1. Setup protection for your favorite agent
-node9 addto claude
+node9 setup           # interactive menu — picks the right agent for you
+node9 addto claude    # or wire directly
 node9 addto gemini
 
 # 2. Initialize your local safety net
 node9 init
 
-# 3. Check your status
+# 3. Verify everything is wired correctly
+node9 doctor
+
+# 4. Check your status
 node9 status
 ```
 
@@ -148,6 +152,65 @@ Rules are **merged additive**—you cannot "un-danger" a word locally if it was 
 ```
 
 ---
+
+---
+
+## 🖥️ CLI Reference
+
+| Command | Description |
+| :--- | :--- |
+| `node9 setup` | Interactive menu — detects installed agents and wires hooks for you |
+| `node9 addto <agent>` | Wire hooks for a specific agent (`claude`, `gemini`, `cursor`) |
+| `node9 init` | Create default `~/.node9/config.json` |
+| `node9 status` | Show current protection status and active rules |
+| `node9 doctor` | Health check — verifies binaries, config, credentials, and all agent hooks |
+| `node9 explain <tool> [args]` | Trace the policy waterfall for a given tool call (dry-run, no approval prompt) |
+| `node9 undo [--steps N]` | Revert the last N AI file edits using shadow Git snapshots |
+| `node9 check` | Called by agent hooks; evaluates a pending tool call and exits 0 (allow) or 1 (block) |
+
+### `node9 doctor`
+
+Runs a full self-test and exits 1 if any required check fails:
+
+```
+Node9 Doctor  v1.2.0
+────────────────────────────────────────
+Binaries
+  ✅  Node.js v20.11.0
+  ✅  git version 2.43.0
+
+Configuration
+  ✅  ~/.node9/config.json found and valid
+  ✅  ~/.node9/credentials.json — cloud credentials found
+
+Agent Hooks
+  ✅  Claude Code — PreToolUse hook active
+  ⚠️  Gemini CLI — not configured (optional)
+  ⚠️  Cursor — not configured (optional)
+
+────────────────────────────────────────
+All checks passed ✅
+```
+
+### `node9 explain`
+
+Dry-runs the policy engine and prints exactly which rule (or waterfall tier) would block or allow a given tool call — useful for debugging your config:
+
+```bash
+node9 explain bash '{"command":"rm -rf /tmp/build"}'
+```
+
+```
+Policy Waterfall for: bash
+──────────────────────────────────────────────
+Tier 1 · Cloud Org Policy       SKIP  (no org policy loaded)
+Tier 2 · Dangerous Words        BLOCK ← matched "rm -rf"
+Tier 3 · Path Block             –
+Tier 4 · Inline Exec            –
+Tier 5 · Rule Match             –
+──────────────────────────────────────────────
+Verdict: BLOCK  (dangerous word: rm -rf)
+```
 
 ---
 
