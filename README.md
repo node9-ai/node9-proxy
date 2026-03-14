@@ -130,6 +130,7 @@ Rules are **merged additive**—you cannot "un-danger" a word locally if it was 
   "settings": {
     "mode": "standard",
     "enableUndo": true,
+    "approvalTimeoutMs": 30000,
     "approvers": {
       "native": true,
       "browser": true,
@@ -144,12 +145,92 @@ Rules are **merged additive**—you cannot "un-danger" a word locally if it was 
     "toolInspection": {
       "bash": "command",
       "postgres:query": "sql"
-    }
+    },
+    "rules": [
+      { "action": "rm", "allowPaths": ["**/node_modules/**", "dist/**"] },
+      { "action": "push", "blockPaths": ["**"] }
+    ],
+    "smartRules": [
+      {
+        "name": "no-delete-without-where",
+        "tool": "*",
+        "conditions": [
+          { "field": "sql", "op": "matches", "value": "^(DELETE|UPDATE)\\s", "flags": "i" },
+          { "field": "sql", "op": "notMatches", "value": "\\bWHERE\\b", "flags": "i" }
+        ],
+        "verdict": "review",
+        "reason": "DELETE/UPDATE without WHERE — would affect every row"
+      }
+    ]
   }
 }
 ```
 
----
+### ⚙️ `settings` options
+
+| Key                  | Default      | Description                                                  |
+| :------------------- | :----------- | :----------------------------------------------------------- |
+| `mode`               | `"standard"` | `standard` \| `strict` \| `audit`                            |
+| `enableUndo`         | `true`       | Take git snapshots before every AI file edit                 |
+| `approvalTimeoutMs`  | `0`          | Auto-deny after N ms if no human responds (0 = wait forever) |
+| `approvers.native`   | `true`       | OS-native popup                                              |
+| `approvers.browser`  | `true`       | Browser dashboard (`node9 daemon`)                           |
+| `approvers.cloud`    | `true`       | Slack / SaaS approval                                        |
+| `approvers.terminal` | `true`       | `[Y/n]` prompt in terminal                                   |
+
+### 🧠 Smart Rules
+
+Smart rules match on **raw tool arguments** using structured conditions — more powerful than `dangerousWords` or `rules`, which only see extracted tokens.
+
+```json
+{
+  "name": "curl-pipe-to-shell",
+  "tool": "bash",
+  "conditions": [{ "field": "command", "op": "matches", "value": "curl.+\\|.*(bash|sh)" }],
+  "verdict": "block",
+  "reason": "curl piped to shell — remote code execution risk"
+}
+```
+
+**Fields:**
+
+| Field           | Description                                                                          |
+| :-------------- | :----------------------------------------------------------------------------------- |
+| `tool`          | Tool name or glob (`"bash"`, `"mcp__postgres__*"`, `"*"`)                            |
+| `conditions`    | Array of conditions evaluated against the raw args object                            |
+| `conditionMode` | `"all"` (AND, default) or `"any"` (OR)                                               |
+| `verdict`       | `"review"` (approval prompt) \| `"block"` (hard deny) \| `"allow"` (skip all checks) |
+| `reason`        | Human-readable explanation shown in the approval prompt and audit log                |
+
+**Condition operators:**
+
+| `op`          | Meaning                                                             |
+| :------------ | :------------------------------------------------------------------ |
+| `matches`     | Field value matches regex (`value` = pattern, `flags` = e.g. `"i"`) |
+| `notMatches`  | Field value does not match regex                                    |
+| `contains`    | Field value contains substring                                      |
+| `notContains` | Field value does not contain substring                              |
+| `exists`      | Field is present and non-empty                                      |
+| `notExists`   | Field is absent or empty                                            |
+
+The `field` key supports dot-notation for nested args: `"params.query.sql"`.
+
+**Built-in default smart rule** (always active, no config needed):
+
+```json
+{
+  "name": "no-delete-without-where",
+  "tool": "*",
+  "conditions": [
+    { "field": "sql", "op": "matches", "value": "^(DELETE|UPDATE)\\s", "flags": "i" },
+    { "field": "sql", "op": "notMatches", "value": "\\bWHERE\\b", "flags": "i" }
+  ],
+  "verdict": "review",
+  "reason": "DELETE/UPDATE without WHERE clause — would affect every row in the table"
+}
+```
+
+Use `node9 explain <tool> <args>` to dry-run any tool call and see exactly which smart rule (or other policy tier) would trigger.
 
 ---
 
