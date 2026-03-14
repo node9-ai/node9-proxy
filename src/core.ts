@@ -198,7 +198,7 @@ export interface SmartRule {
   reason?: string;
 }
 
-function evaluateSmartConditions(args: unknown, rule: SmartRule): boolean {
+export function evaluateSmartConditions(args: unknown, rule: SmartRule): boolean {
   if (!rule.conditions || rule.conditions.length === 0) return true;
   const mode = rule.conditionMode ?? 'all';
 
