@@ -130,6 +130,7 @@ Rules are **merged additive**—you cannot "un-danger" a word locally if it was 
   "settings": {
     "mode": "standard",
     "enableUndo": true,
+    "approvalTimeoutMs": 30000,
     "approvers": {
       "native": true,
       "browser": true,
@@ -144,12 +145,151 @@ Rules are **merged additive**—you cannot "un-danger" a word locally if it was 
     "toolInspection": {
       "bash": "command",
       "postgres:query": "sql"
-    }
+    },
+    "rules": [
+      { "action": "rm", "allowPaths": ["**/node_modules/**", "dist/**"] },
+      { "action": "push", "blockPaths": ["**"] }
+    ],
+    "smartRules": [
+      {
+        "name": "no-delete-without-where",
+        "tool": "*",
+        "conditions": [
+          { "field": "sql", "op": "matches", "value": "^(DELETE|UPDATE)\\s", "flags": "i" },
+          { "field": "sql", "op": "notMatches", "value": "\\bWHERE\\b", "flags": "i" }
+        ],
+        "verdict": "review",
+        "reason": "DELETE/UPDATE without WHERE — would affect every row"
+      }
+    ]
   }
 }
 ```
 
+### ⚙️ `settings` options
+
+| Key                  | Default      | Description                                                  |
+| :------------------- | :----------- | :----------------------------------------------------------- |
+| `mode`               | `"standard"` | `standard` \| `strict` \| `audit`                            |
+| `enableUndo`         | `true`       | Take git snapshots before every AI file edit                 |
+| `approvalTimeoutMs`  | `0`          | Auto-deny after N ms if no human responds (0 = wait forever) |
+| `approvers.native`   | `true`       | OS-native popup                                              |
+| `approvers.browser`  | `true`       | Browser dashboard (`node9 daemon`)                           |
+| `approvers.cloud`    | `true`       | Slack / SaaS approval                                        |
+| `approvers.terminal` | `true`       | `[Y/n]` prompt in terminal                                   |
+
+### 🧠 Smart Rules
+
+Smart rules match on **raw tool arguments** using structured conditions — more powerful than `dangerousWords` or `rules`, which only see extracted tokens.
+
+```json
+{
+  "name": "curl-pipe-to-shell",
+  "tool": "bash",
+  "conditions": [{ "field": "command", "op": "matches", "value": "curl.+\\|.*(bash|sh)" }],
+  "verdict": "block",
+  "reason": "curl piped to shell — remote code execution risk"
+}
+```
+
+**Fields:**
+
+| Field           | Description                                                                          |
+| :-------------- | :----------------------------------------------------------------------------------- |
+| `tool`          | Tool name or glob (`"bash"`, `"mcp__postgres__*"`, `"*"`)                            |
+| `conditions`    | Array of conditions evaluated against the raw args object                            |
+| `conditionMode` | `"all"` (AND, default) or `"any"` (OR)                                               |
+| `verdict`       | `"review"` (approval prompt) \| `"block"` (hard deny) \| `"allow"` (skip all checks) |
+| `reason`        | Human-readable explanation shown in the approval prompt and audit log                |
+
+**Condition operators:**
+
+| `op`          | Meaning                                                             |
+| :------------ | :------------------------------------------------------------------ |
+| `matches`     | Field value matches regex (`value` = pattern, `flags` = e.g. `"i"`) |
+| `notMatches`  | Field value does not match regex                                    |
+| `contains`    | Field value contains substring                                      |
+| `notContains` | Field value does not contain substring                              |
+| `exists`      | Field is present and non-empty                                      |
+| `notExists`   | Field is absent or empty                                            |
+
+The `field` key supports dot-notation for nested args: `"params.query.sql"`.
+
+**Built-in default smart rule** (always active, no config needed):
+
+```json
+{
+  "name": "no-delete-without-where",
+  "tool": "*",
+  "conditions": [
+    { "field": "sql", "op": "matches", "value": "^(DELETE|UPDATE)\\s", "flags": "i" },
+    { "field": "sql", "op": "notMatches", "value": "\\bWHERE\\b", "flags": "i" }
+  ],
+  "verdict": "review",
+  "reason": "DELETE/UPDATE without WHERE clause — would affect every row in the table"
+}
+```
+
+Use `node9 explain <tool> <args>` to dry-run any tool call and see exactly which smart rule (or other policy tier) would trigger.
+
 ---
+
+## 🖥️ CLI Reference
+
+| Command                       | Description                                                                           |
+| :---------------------------- | :------------------------------------------------------------------------------------ |
+| `node9 setup`                 | Interactive menu — detects installed agents and wires hooks for you                   |
+| `node9 addto <agent>`         | Wire hooks for a specific agent (`claude`, `gemini`, `cursor`)                        |
+| `node9 init`                  | Create default `~/.node9/config.json`                                                 |
+| `node9 status`                | Show current protection status and active rules                                       |
+| `node9 doctor`                | Health check — verifies binaries, config, credentials, and all agent hooks            |
+| `node9 explain <tool> [args]` | Trace the policy waterfall for a given tool call (dry-run, no approval prompt)        |
+| `node9 undo [--steps N]`      | Revert the last N AI file edits using shadow Git snapshots                            |
+| `node9 check`                 | Called by agent hooks; evaluates a pending tool call and exits 0 (allow) or 1 (block) |
+
+### `node9 doctor`
+
+Runs a full self-test and exits 1 if any required check fails:
+
+```
+Node9 Doctor  v1.2.0
+────────────────────────────────────────
+Binaries
+  ✅  Node.js v20.11.0
+  ✅  git version 2.43.0
+
+Configuration
+  ✅  ~/.node9/config.json found and valid
+  ✅  ~/.node9/credentials.json — cloud credentials found
+
+Agent Hooks
+  ✅  Claude Code — PreToolUse hook active
+  ⚠️  Gemini CLI — not configured (optional)
+  ⚠️  Cursor — not configured (optional)
+
+────────────────────────────────────────
+All checks passed ✅
+```
+
+### `node9 explain`
+
+Dry-runs the policy engine and prints exactly which rule (or waterfall tier) would block or allow a given tool call — useful for debugging your config:
+
+```bash
+node9 explain bash '{"command":"rm -rf /tmp/build"}'
+```
+
+```
+Policy Waterfall for: bash
+──────────────────────────────────────────────
+Tier 1 · Cloud Org Policy       SKIP  (no org policy loaded)
+Tier 2 · Dangerous Words        BLOCK ← matched "rm -rf"
+Tier 3 · Path Block             –
+Tier 4 · Inline Exec            –
+Tier 5 · Rule Match             –
+──────────────────────────────────────────────
+Verdict: BLOCK  (dangerous word: rm -rf)
+```
 
 ---
 
@@ -242,4 +382,4 @@ A corporate policy has locked this action. You must click the "Approve" button i
 ## 🏢 Enterprise & Compliance
 
 Node9 Pro provides **Governance Locking**, **SAML/SSO**, and **VPC Deployment**.
-Visit [node9.ai](https://node9.ai
+Visit [node9.ai](https://node9.ai)

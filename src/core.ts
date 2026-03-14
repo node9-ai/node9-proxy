@@ -180,6 +180,67 @@ function getNestedValue(obj: unknown, path: string): unknown {
     .reduce<unknown>((prev, curr) => (prev as Record<string, unknown>)?.[curr], obj);
 }
 
+// ── SMART RULES EVALUATOR ─────────────────────────────────────────────────────
+
+export interface SmartCondition {
+  field: string;
+  op: 'matches' | 'notMatches' | 'contains' | 'notContains' | 'exists' | 'notExists';
+  value?: string;
+  flags?: string;
+}
+
+export interface SmartRule {
+  name?: string;
+  tool: string;
+  conditions: SmartCondition[];
+  conditionMode?: 'all' | 'any';
+  verdict: 'allow' | 'review' | 'block';
+  reason?: string;
+}
+
+export function evaluateSmartConditions(args: unknown, rule: SmartRule): boolean {
+  if (!rule.conditions || rule.conditions.length === 0) return true;
+  const mode = rule.conditionMode ?? 'all';
+
+  const results = rule.conditions.map((cond) => {
+    const rawVal = getNestedValue(args, cond.field);
+    // Normalize whitespace so multi-space SQL doesn't bypass regex checks
+    const val =
+      rawVal !== null && rawVal !== undefined ? String(rawVal).replace(/\s+/g, ' ').trim() : null;
+
+    switch (cond.op) {
+      case 'exists':
+        return val !== null && val !== '';
+      case 'notExists':
+        return val === null || val === '';
+      case 'contains':
+        return val !== null && cond.value ? val.includes(cond.value) : false;
+      case 'notContains':
+        return val !== null && cond.value ? !val.includes(cond.value) : true;
+      case 'matches': {
+        if (val === null || !cond.value) return false;
+        try {
+          return new RegExp(cond.value, cond.flags ?? '').test(val);
+        } catch {
+          return false;
+        }
+      }
+      case 'notMatches': {
+        if (val === null || !cond.value) return true;
+        try {
+          return !new RegExp(cond.value, cond.flags ?? '').test(val);
+        } catch {
+          return true;
+        }
+      }
+      default:
+        return false;
+    }
+  });
+
+  return mode === 'any' ? results.some((r) => r) : results.every((r) => r);
+}
+
 function extractShellCommand(
   toolName: string,
   args: unknown,
@@ -341,6 +402,7 @@ interface Config {
     autoStartDaemon?: boolean;
     enableUndo?: boolean;
     enableHookLogDebug?: boolean;
+    approvalTimeoutMs?: number;
     approvers: { native: boolean; browser: boolean; cloud: boolean; terminal: boolean };
     environment?: string;
   };
@@ -350,6 +412,7 @@ interface Config {
     ignoredTools: string[];
     toolInspection: Record<string, string>;
     rules: PolicyRule[];
+    smartRules: SmartRule[];
   };
   environments: Record<string, EnvironmentConfig>;
 }
@@ -390,6 +453,7 @@ export const DEFAULT_CONFIG: Config = {
     autoStartDaemon: true,
     enableUndo: true, // 🔥 ALWAYS TRUE BY DEFAULT for the safety net
     enableHookLogDebug: false,
+    approvalTimeoutMs: 0, // 0 = disabled; set e.g. 30000 for 30-second auto-deny
     approvers: { native: true, browser: true, cloud: true, terminal: true },
   },
   policy: {
@@ -437,6 +501,19 @@ export const DEFAULT_CONFIG: Config = {
           'temp/**',
           '.DS_Store',
         ],
+      },
+    ],
+    smartRules: [
+      {
+        name: 'no-delete-without-where',
+        tool: '*',
+        conditions: [
+          { field: 'sql', op: 'matches', value: '^(DELETE|UPDATE)\\s', flags: 'i' },
+          { field: 'sql', op: 'notMatches', value: '\\bWHERE\\b', flags: 'i' },
+        ],
+        conditionMode: 'all',
+        verdict: 'review',
+        reason: 'DELETE/UPDATE without WHERE clause — would affect every row in the table',
       },
     ],
   },
@@ -517,12 +594,27 @@ function getInternalToken(): string | null {
 export async function evaluatePolicy(
   toolName: string,
   args?: unknown,
-  agent?: string // NEW: Added agent metadata parameter
-): Promise<{ decision: 'allow' | 'review'; blockedByLabel?: string }> {
+  agent?: string
+): Promise<{ decision: 'allow' | 'review' | 'block'; blockedByLabel?: string; reason?: string }> {
   const config = getConfig();
 
   // 1. Ignored tools (Fast Path) - Always allow these first
   if (matchesPattern(toolName, config.policy.ignoredTools)) return { decision: 'allow' };
+
+  // 2. Smart Rules — raw args matching before tokenization
+  if (config.policy.smartRules.length > 0) {
+    const matchedRule = config.policy.smartRules.find(
+      (rule) => matchesPattern(toolName, rule.tool) && evaluateSmartConditions(args, rule)
+    );
+    if (matchedRule) {
+      if (matchedRule.verdict === 'allow') return { decision: 'allow' };
+      return {
+        decision: matchedRule.verdict,
+        blockedByLabel: `Smart Rule: ${matchedRule.name ?? matchedRule.tool}`,
+        reason: matchedRule.reason,
+      };
+    }
+  }
 
   let allTokens: string[] = [];
   let actionTokens: string[] = [];
@@ -542,12 +634,9 @@ export async function evaluatePolicy(
       return { decision: 'review', blockedByLabel: 'Node9 Standard (Inline Execution)' };
     }
 
-    // SQL-aware check: flag DELETE/UPDATE without WHERE, allow scoped mutations
+    // Strip DML keywords from tokens so user dangerousWords like "delete"/"update"
+    // don't re-flag a SQL query that already passed the smart rules check above.
     if (isSqlTool(toolName, config.policy.toolInspection)) {
-      const sqlDanger = checkDangerousSql(shellCommand);
-      if (sqlDanger) return { decision: 'review', blockedByLabel: `SQL Safety: ${sqlDanger}` };
-      // Safe SQL — strip DML keywords from tokens so user dangerousWords
-      // like "delete"/"update" don't re-flag an already-validated query.
       allTokens = allTokens.filter((t) => !SQL_DML_KEYWORDS.has(t.toLowerCase()));
       actionTokens = actionTokens.filter((t) => !SQL_DML_KEYWORDS.has(t.toLowerCase()));
     }
@@ -658,7 +747,7 @@ export async function evaluatePolicy(
 
 export interface ExplainStep {
   name: string;
-  outcome: 'checked' | 'allow' | 'review' | 'skip';
+  outcome: 'checked' | 'allow' | 'review' | 'block' | 'skip';
   detail: string;
   isFinal?: boolean;
 }
@@ -676,7 +765,7 @@ export interface ExplainResult {
   args: unknown;
   waterfall: WaterfallTier[];
   steps: ExplainStep[];
-  decision: 'allow' | 'review';
+  decision: 'allow' | 'review' | 'block';
   blockedByLabel?: string;
   matchedToken?: string;
 }
@@ -742,7 +831,47 @@ export async function explainPolicy(toolName: string, args?: unknown): Promise<E
     detail: `"${toolName}" not in ignoredTools list`,
   });
 
-  // ── 2. Input parsing ──────────────────────────────────────────────────────
+  // ── 2. Smart Rules ────────────────────────────────────────────────────────
+  if (config.policy.smartRules.length > 0) {
+    const matchedRule = config.policy.smartRules.find(
+      (rule) => matchesPattern(toolName, rule.tool) && evaluateSmartConditions(args, rule)
+    );
+    if (matchedRule) {
+      const label = `Smart Rule: ${matchedRule.name ?? matchedRule.tool}`;
+      if (matchedRule.verdict === 'allow') {
+        steps.push({
+          name: 'Smart rules',
+          outcome: 'allow',
+          detail: `${label} → allow`,
+          isFinal: true,
+        });
+        return { tool: toolName, args, waterfall, steps, decision: 'allow' };
+      }
+      steps.push({
+        name: 'Smart rules',
+        outcome: matchedRule.verdict,
+        detail: `${label} → ${matchedRule.verdict}${matchedRule.reason ? `: ${matchedRule.reason}` : ''}`,
+        isFinal: true,
+      });
+      return {
+        tool: toolName,
+        args,
+        waterfall,
+        steps,
+        decision: matchedRule.verdict,
+        blockedByLabel: label,
+      };
+    }
+    steps.push({
+      name: 'Smart rules',
+      outcome: 'checked',
+      detail: `No smart rule matched "${toolName}"`,
+    });
+  } else {
+    steps.push({ name: 'Smart rules', outcome: 'skip', detail: 'No smart rules configured' });
+  }
+
+  // ── 3. Input parsing ──────────────────────────────────────────────────────
   let allTokens: string[] = [];
   let actionTokens: string[] = [];
   let pathTokens: string[] = [];
@@ -787,32 +916,16 @@ export async function explainPolicy(toolName: string, args?: unknown): Promise<E
       detail: 'No inline execution pattern detected',
     });
 
-    // ── 4. SQL-aware check ────────────────────────────────────────────────
+    // ── 4. SQL DML keyword stripping ──────────────────────────────────────
+    // SQL WHERE safety is handled by smart rules above. Here we only strip
+    // DML keywords so dangerous-word checks don't re-flag a validated query.
     if (isSqlTool(toolName, config.policy.toolInspection)) {
-      const sqlDanger = checkDangerousSql(shellCommand);
-      if (sqlDanger) {
-        steps.push({
-          name: 'SQL safety',
-          outcome: 'review',
-          detail: sqlDanger,
-          isFinal: true,
-        });
-        return {
-          tool: toolName,
-          args,
-          waterfall,
-          steps,
-          decision: 'review',
-          blockedByLabel: `SQL Safety: ${sqlDanger}`,
-        };
-      }
-      // Safe — strip DML keywords so they don't re-trigger dangerous words
       allTokens = allTokens.filter((t) => !SQL_DML_KEYWORDS.has(t.toLowerCase()));
       actionTokens = actionTokens.filter((t) => !SQL_DML_KEYWORDS.has(t.toLowerCase()));
       steps.push({
-        name: 'SQL safety',
+        name: 'SQL token stripping',
         outcome: 'checked',
-        detail: 'DELETE/UPDATE have a WHERE clause — scoped mutation, safe',
+        detail: 'DML keywords stripped from tokens (SQL safety handled by smart rules)',
       });
     }
   } else {
@@ -1141,7 +1254,8 @@ export interface AuthResult {
     | 'persistent-deny'
     | 'local-config'
     | 'local-decision'
-    | 'no-approval-mechanism';
+    | 'no-approval-mechanism'
+    | 'timeout';
   changeHint?: string;
   checkedBy?:
     | 'cloud'
@@ -1223,6 +1337,17 @@ export async function authorizeHeadless(
       if (creds?.apiKey) auditLocalAllow(toolName, args, 'local-policy', creds, meta);
       if (!isManual) appendLocalAudit(toolName, args, 'allow', 'local-policy', meta);
       return { approved: true, checkedBy: 'local-policy' };
+    }
+
+    // Hard block from smart rules — skip the race engine entirely
+    if (policyResult.decision === 'block') {
+      if (!isManual) appendLocalAudit(toolName, args, 'deny', 'smart-rule-block', meta);
+      return {
+        approved: false,
+        reason: policyResult.reason ?? 'Action explicitly blocked by Smart Policy.',
+        blockedBy: 'local-config',
+        blockedByLabel: policyResult.blockedByLabel,
+      };
     }
 
     explainableLabel = policyResult.blockedByLabel || 'Local Config';
@@ -1315,6 +1440,27 @@ export async function authorizeHeadless(
   const abortController = new AbortController();
   const { signal } = abortController;
   const racePromises: Promise<AuthResult>[] = [];
+
+  // ⏱️ RACER 0: Approval Timeout
+  const approvalTimeoutMs = config.settings.approvalTimeoutMs ?? 0;
+  if (approvalTimeoutMs > 0) {
+    racePromises.push(
+      new Promise<AuthResult>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          resolve({
+            approved: false,
+            reason: `No human response within ${approvalTimeoutMs / 1000}s — auto-denied by timeout policy.`,
+            blockedBy: 'timeout',
+            blockedByLabel: 'Approval Timeout',
+          });
+        }, approvalTimeoutMs);
+        signal.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(new Error('Aborted'));
+        });
+      })
+    );
+  }
 
   let viewerId: string | null = null;
   const internalToken = getInternalToken();
@@ -1588,6 +1734,7 @@ export function getConfig(): Config {
     ignoredTools: [...DEFAULT_CONFIG.policy.ignoredTools],
     toolInspection: { ...DEFAULT_CONFIG.policy.toolInspection },
     rules: [...DEFAULT_CONFIG.policy.rules],
+    smartRules: [...DEFAULT_CONFIG.policy.smartRules],
   };
 
   const applyLayer = (source: Record<string, unknown> | null) => {
@@ -1611,6 +1758,7 @@ export function getConfig(): Config {
     if (p.toolInspection)
       mergedPolicy.toolInspection = { ...mergedPolicy.toolInspection, ...p.toolInspection };
     if (p.rules) mergedPolicy.rules.push(...p.rules);
+    if (p.smartRules) mergedPolicy.smartRules.push(...p.smartRules);
   };
 
   applyLayer(globalConfig);
