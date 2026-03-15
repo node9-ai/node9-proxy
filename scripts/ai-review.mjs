@@ -3,8 +3,15 @@ import { Octokit } from "@octokit/rest";
 
 const prNumber = parseInt(process.env.PR_NUMBER);
 const githubToken = process.env.GITHUB_TOKEN;
-const [repoOwner, repoName] = (process.env.GITHUB_REPOSITORY || "").split("/");
+const repo = process.env.GITHUB_REPOSITORY || "";
+const [repoOwner, repoName] = repo.split("/");
 
+if (!prNumber || !githubToken || !repoOwner || !repoName || !process.env.ANTHROPIC_API_KEY) {
+  console.error("Missing required environment variables.");
+  process.exit(1);
+}
+
+const MAX_DIFF_CHARS = 20000;
 const octokit = new Octokit({ auth: githubToken });
 
 async function runReview() {
@@ -21,6 +28,10 @@ async function runReview() {
       console.log("Empty diff, skipping review.");
       return;
     }
+
+    const truncatedDiff = prDiff.length > MAX_DIFF_CHARS
+      ? prDiff.slice(0, MAX_DIFF_CHARS) + "\n\n... [diff truncated]"
+      : prDiff;
 
     const prompt = `You are a senior TypeScript/Node.js engineer reviewing a pull request for Node9 Proxy.
 Node9 Proxy is an execution security layer for AI agents — it intercepts tool calls from Claude Code, Gemini CLI, Cursor, and MCP servers, and asks for human approval before running them.
@@ -44,7 +55,7 @@ Do NOT rewrite the code. Just review it.
 Keep your review under 400 words.
 
 ## Git Diff:
-${prDiff}`;
+${truncatedDiff}`;
 
     console.log("Sending diff to Claude for review...");
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
