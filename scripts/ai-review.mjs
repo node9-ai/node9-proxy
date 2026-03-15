@@ -1,13 +1,13 @@
-import Anthropic from "@anthropic-ai/sdk";
-import { Octokit } from "@octokit/rest";
+import Anthropic from '@anthropic-ai/sdk';
+import { Octokit } from '@octokit/rest';
 
 const prNumber = parseInt(process.env.PR_NUMBER);
 const githubToken = process.env.GITHUB_TOKEN;
-const repo = process.env.GITHUB_REPOSITORY || "";
-const [repoOwner, repoName] = repo.split("/");
+const repo = process.env.GITHUB_REPOSITORY || '';
+const [repoOwner, repoName] = repo.split('/');
 
 if (!prNumber || !githubToken || !repoOwner || !repoName || !process.env.ANTHROPIC_API_KEY) {
-  console.error("Missing required environment variables.");
+  console.error('Missing required environment variables.');
   process.exit(1);
 }
 
@@ -21,17 +21,18 @@ async function runReview() {
       owner: repoOwner,
       repo: repoName,
       pull_number: prNumber,
-      mediaType: { format: "diff" },
+      mediaType: { format: 'diff' },
     });
 
     if (!prDiff || prDiff.trim().length === 0) {
-      console.log("Empty diff, skipping review.");
+      console.log('Empty diff, skipping review.');
       return;
     }
 
-    const truncatedDiff = prDiff.length > MAX_DIFF_CHARS
-      ? prDiff.slice(0, MAX_DIFF_CHARS) + "\n\n... [diff truncated]"
-      : prDiff;
+    const truncatedDiff =
+      prDiff.length > MAX_DIFF_CHARS
+        ? prDiff.slice(0, MAX_DIFF_CHARS) + '\n\n... [diff truncated]'
+        : prDiff;
 
     const prompt = `You are a senior TypeScript/Node.js engineer reviewing a pull request for Node9 Proxy.
 Node9 Proxy is an execution security layer for AI agents — it intercepts tool calls from Claude Code, Gemini CLI, Cursor, and MCP servers, and asks for human approval before running them.
@@ -57,17 +58,17 @@ Keep your review under 400 words.
 ## Git Diff:
 ${truncatedDiff}`;
 
-    console.log("Sending diff to Claude for review...");
+    console.log('Sending diff to Claude for review...');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const message = await client.messages.create({
-      model: "claude-sonnet-4-5",
+      model: 'claude-sonnet-4-5',
       max_tokens: 1024,
-      messages: [{ role: "user", content: prompt }],
+      messages: [{ role: 'user', content: prompt }],
     });
 
     const review = message.content[0].text;
 
-    console.log("Posting review comment...");
+    console.log('Posting review comment...');
     await octokit.issues.createComment({
       owner: repoOwner,
       repo: repoName,
@@ -75,9 +76,9 @@ ${truncatedDiff}`;
       body: `## 🤖 Claude Code Review\n\n${review}\n\n---\n*Automated review by Claude Sonnet*`,
     });
 
-    console.log("Review posted successfully.");
+    console.log('Review posted successfully.');
   } catch (error) {
-    console.error("Error:", error.message);
+    console.error('Error:', error.message);
     process.exit(1);
   }
 }
