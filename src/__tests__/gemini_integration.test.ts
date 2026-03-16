@@ -63,31 +63,31 @@ beforeEach(() => {
 describe('Gemini Integration Security', () => {
   it('identifies "Shell" (capital S) as a shell-executing tool', async () => {
     mockConfig({});
-    // Use 'drop' which is a true "Nuke" in our new DANGEROUS_WORDS
-    const result = await evaluatePolicy('Shell', { command: 'psql -c "drop table users"' });
+    // mkfs is in DANGEROUS_WORDS — proves Shell is inspected as a shell tool
+    const result = await evaluatePolicy('Shell', { command: 'mkfs.ext4 /dev/sdb' });
     expect(result.decision).toBe('review');
   });
 
   it('identifies "run_shell_command" as a shell-executing tool', async () => {
     mockConfig({});
-    // Use 'purge' which is in our new DANGEROUS_WORDS
-    const result = await evaluatePolicy('run_shell_command', { command: 'purge /var/log' });
+    // mkfs is in DANGEROUS_WORDS — catches filesystem-wiping commands
+    const result = await evaluatePolicy('run_shell_command', { command: 'mkfs.ext4 /dev/sdb' });
     expect(result.decision).toBe('review');
   });
 
   it('correctly parses complex shell commands inside run_shell_command', async () => {
     mockConfig({});
-    // Proves the AST parser finds dangerous words even at the end of a chain
+    // Proves the AST parser finds the dangerous token even at the end of a chain
     const result = await evaluatePolicy('run_shell_command', {
-      command: 'ls -la && drop database',
+      command: 'ls -la && mkfs /dev/sdb',
     });
     expect(result.decision).toBe('review');
   });
 
   it('blocks dangerous commands in Gemini hooks without API key', async () => {
     mockConfig({});
-    // 'docker' is in our new DANGEROUS_WORDS
-    const result = await authorizeHeadless('Shell', { command: 'docker rm -f my_container' });
+    // mkfs triggers dangerous-word review; no native/cloud approver → noApprovalMechanism
+    const result = await authorizeHeadless('Shell', { command: 'mkfs /dev/sda' });
     expect(result.approved).toBe(false);
     expect(result.noApprovalMechanism).toBe(true);
   });

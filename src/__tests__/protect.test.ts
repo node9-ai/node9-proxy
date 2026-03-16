@@ -47,11 +47,12 @@ describe('protect()', () => {
   });
 
   it('throws and does NOT call the wrapped function when denied', async () => {
-    // Changed 'delete_resource' -> 'drop_resource'
-    setPersistentDecision('drop_resource', 'deny');
+    // 'mkfs_resource' contains 'mkfs' (in DANGEROUS_WORDS) so it evaluates to review,
+    // then the persistent deny decision kicks in.
+    setPersistentDecision('mkfs_resource', 'deny');
 
     const fn = vi.fn();
-    const secured = protect('drop_resource', fn);
+    const secured = protect('mkfs_resource', fn);
 
     await expect(secured()).rejects.toThrow(/denied/i);
     expect(fn).not.toHaveBeenCalled();

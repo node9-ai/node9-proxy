@@ -70,7 +70,8 @@
     "commander": "^14.0.3",
     "execa": "^9.6.1",
     "picomatch": "^4.0.3",
-    "sh-syntax": "^0.5.8"
+    "sh-syntax": "^0.5.8",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.78.0",

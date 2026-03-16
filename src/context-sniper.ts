@@ -12,11 +12,11 @@ export interface RiskMetadata {
   blockedByLabel: string;
   matchedWord?: string;
   matchedField?: string;
-  contextSnippet?: string;   // Pre-computed 7-line window with 🛑 marker
+  contextSnippet?: string; // Pre-computed 7-line window with 🛑 marker
   contextLineIndex?: number; // Index of the 🛑 line within the snippet (0-based)
-  editFileName?: string;     // basename of file_path (EDIT intent only)
-  editFilePath?: string;     // full file_path (EDIT intent only)
-  ruleName?: string;         // Tier 2 (Smart Rules) only
+  editFileName?: string; // basename of file_path (EDIT intent only)
+  editFilePath?: string; // full file_path (EDIT intent only)
+  ruleName?: string; // Tier 2 (Smart Rules) only
 }
 
 /** Keeps the start and end of a long string, truncating the middle. */
@@ -33,7 +33,7 @@ export function smartTruncate(str: string, maxLen = 500): string {
  */
 export function extractContext(
   text: string,
-  matchedWord?: string,
+  matchedWord?: string
 ): { snippet: string; lineIndex: number } {
   const lines = text.split('\n');
   if (lines.length <= 7 || !matchedWord) {
@@ -69,8 +69,20 @@ export function extractContext(
 }
 
 const CODE_KEYS = [
-  'command', 'cmd', 'shell_command', 'bash_command', 'script',
-  'code', 'input', 'sql', 'query', 'arguments', 'args', 'param', 'params', 'text',
+  'command',
+  'cmd',
+  'shell_command',
+  'bash_command',
+  'script',
+  'code',
+  'input',
+  'sql',
+  'query',
+  'arguments',
+  'args',
+  'param',
+  'params',
+  'text',
 ];
 
 /**
@@ -83,7 +95,7 @@ export function computeRiskMetadata(
   blockedByLabel: string,
   matchedField?: string,
   matchedWord?: string,
-  ruleName?: string,
+  ruleName?: string
 ): RiskMetadata {
   let intent: 'EDIT' | 'EXEC' = 'EXEC';
   let contextSnippet: string | undefined;
@@ -96,7 +108,11 @@ export function computeRiskMetadata(
   if (typeof args === 'string') {
     const trimmed = args.trim();
     if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-      try { parsed = JSON.parse(trimmed); } catch { /* keep as string */ }
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch {
+        /* keep as string */
+      }
     }
   }
 
@@ -113,13 +129,11 @@ export function computeRiskMetadata(
       const result = extractContext(String(obj.new_string), matchedWord);
       contextSnippet = result.snippet;
       if (result.lineIndex >= 0) contextLineIndex = result.lineIndex;
-
     } else if (matchedField && obj[matchedField] !== undefined) {
       // EXEC — we know which field triggered, extract context from it
       const result = extractContext(String(obj[matchedField]), matchedWord);
       contextSnippet = result.snippet;
       if (result.lineIndex >= 0) contextLineIndex = result.lineIndex;
-
     } else {
       // EXEC fallback — pick the first recognisable code-like key
       const foundKey = Object.keys(obj).find((k) => CODE_KEYS.includes(k.toLowerCase()));

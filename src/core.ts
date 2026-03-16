@@ -8,6 +8,7 @@ import pm from 'picomatch';
 import { parse } from 'sh-syntax';
 import { askNativePopup, sendDesktopNotification } from './ui/native';
 import { computeRiskMetadata, RiskMetadata } from './context-sniper';
+import { validateConfig } from './config-schema';
 
 // ── Feature file paths ────────────────────────────────────────────────────────
 const PAUSED_FILE = path.join(os.homedir(), '.node9', 'PAUSED');
@@ -461,16 +462,12 @@ export const DANGEROUS_WORDS = [
   'format',
 ];
 */
+// Intentionally minimal — only words that are catastrophic AND never appear
+// in legitimate code/content. Everything else is handled by smart rules,
+// which can scope to specific tool fields and avoid false positives.
 export const DANGEROUS_WORDS = [
-  'drop',
-  'truncate',
-  'purge',
-  'format',
-  'destroy',
-  'terminate',
-  'revoke',
-  'docker',
-  'psql',
+  'mkfs', // formats/wipes a filesystem partition
+  'shred', // permanently overwrites file contents (unrecoverable)
 ];
 
 // 2. The Master Default Config
@@ -527,6 +524,8 @@ export const DEFAULT_CONFIG: Config = {
       ignorePaths: ['**/node_modules/**', 'dist/**', 'build/**', '.next/**', '**/*.log'],
     },
     rules: [
+      // Only use the legacy rules format for simple path-based rm control.
+      // All other command-level enforcement lives in smartRules below.
       {
         action: 'rm',
         allowPaths: [
@@ -543,6 +542,7 @@ export const DEFAULT_CONFIG: Config = {
       },
     ],
     smartRules: [
+      // ── SQL safety ────────────────────────────────────────────────────────
       {
         name: 'no-delete-without-where',
         tool: '*',
@@ -553,6 +553,84 @@ export const DEFAULT_CONFIG: Config = {
         conditionMode: 'all',
         verdict: 'review',
         reason: 'DELETE/UPDATE without WHERE clause — would affect every row in the table',
+      },
+      {
+        name: 'review-drop-truncate-shell',
+        tool: 'bash',
+        conditions: [
+          {
+            field: 'command',
+            op: 'matches',
+            value: '\\b(DROP|TRUNCATE)\\s+(TABLE|DATABASE|SCHEMA|INDEX)',
+            flags: 'i',
+          },
+        ],
+        conditionMode: 'all',
+        verdict: 'review',
+        reason: 'SQL DDL destructive statement inside a shell command',
+      },
+      // ── Git safety ────────────────────────────────────────────────────────
+      {
+        name: 'block-force-push',
+        tool: 'bash',
+        conditions: [
+          {
+            field: 'command',
+            op: 'matches',
+            value: 'git push.*(--force|--force-with-lease|-f\\b)',
+            flags: 'i',
+          },
+        ],
+        conditionMode: 'all',
+        verdict: 'block',
+        reason: 'Force push overwrites remote history and cannot be undone',
+      },
+      {
+        name: 'review-git-push',
+        tool: 'bash',
+        conditions: [{ field: 'command', op: 'matches', value: '^\\s*git push\\b', flags: 'i' }],
+        conditionMode: 'all',
+        verdict: 'review',
+        reason: 'git push sends changes to a shared remote',
+      },
+      {
+        name: 'review-git-destructive',
+        tool: 'bash',
+        conditions: [
+          {
+            field: 'command',
+            op: 'matches',
+            value: 'git\\s+(reset\\s+--hard|clean\\s+-[fdxX]|rebase|tag\\s+-d|branch\\s+-[dD])',
+            flags: 'i',
+          },
+        ],
+        conditionMode: 'all',
+        verdict: 'review',
+        reason: 'Destructive git operation — discards history or working-tree changes',
+      },
+      // ── Shell safety ──────────────────────────────────────────────────────
+      {
+        name: 'review-sudo',
+        tool: 'bash',
+        conditions: [{ field: 'command', op: 'matches', value: '^\\s*sudo\\s', flags: 'i' }],
+        conditionMode: 'all',
+        verdict: 'review',
+        reason: 'Command requires elevated privileges',
+      },
+      {
+        name: 'review-curl-pipe-shell',
+        tool: 'bash',
+        conditions: [
+          {
+            field: 'command',
+            op: 'matches',
+            value: '(curl|wget)[^|]*\\|\\s*(ba|z|da|fi|c|k)?sh',
+            flags: 'i',
+          },
+        ],
+        conditionMode: 'all',
+        verdict: 'block',
+        reason: 'Piping remote script into a shell is a supply-chain attack vector',
       },
     ],
   },
@@ -1238,7 +1316,13 @@ async function askDaemon(
     const checkRes = await fetch(`${base}/check`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ toolName, args, agent: meta?.agent, mcpServer: meta?.mcpServer, ...(riskMetadata && { riskMetadata }) }),
+      body: JSON.stringify({
+        toolName,
+        args,
+        agent: meta?.agent,
+        mcpServer: meta?.mcpServer,
+        ...(riskMetadata && { riskMetadata }),
+      }),
       signal: checkCtrl.signal,
     });
     if (!checkRes.ok) throw new Error('Daemon fail');
@@ -1399,6 +1483,11 @@ export async function authorizeHeadless(
       const policyResult = await evaluatePolicy(toolName, args, meta?.agent);
       if (policyResult.decision === 'review') {
         appendLocalAudit(toolName, args, 'allow', 'audit-mode', meta);
+        // Must await — process.exit(0) follows immediately and kills any fire-and-forget fetch.
+        // Only send to SaaS when cloud is enabled — respects privacy mode (cloud: false).
+        if (approvers.cloud && creds?.apiKey) {
+          await auditLocalAllow(toolName, args, 'audit-mode', creds, meta);
+        }
         sendDesktopNotification(
           'Node9 Audit Mode',
           `Would have blocked "${toolName}" (${policyResult.blockedByLabel || 'Local Config'}) — running in audit mode`
@@ -1411,13 +1500,15 @@ export async function authorizeHeadless(
   // Fast Paths (Ignore, Trust, Policy Allow)
   if (!isIgnoredTool(toolName)) {
     if (getActiveTrustSession(toolName)) {
-      if (creds?.apiKey) auditLocalAllow(toolName, args, 'trust', creds, meta);
+      if (approvers.cloud && creds?.apiKey)
+        await auditLocalAllow(toolName, args, 'trust', creds, meta);
       if (!isManual) appendLocalAudit(toolName, args, 'allow', 'trust', meta);
       return { approved: true, checkedBy: 'trust' };
     }
     const policyResult = await evaluatePolicy(toolName, args, meta?.agent);
     if (policyResult.decision === 'allow') {
-      if (creds?.apiKey) auditLocalAllow(toolName, args, 'local-policy', creds, meta);
+      if (approvers.cloud && creds?.apiKey)
+        auditLocalAllow(toolName, args, 'local-policy', creds, meta);
       if (!isManual) appendLocalAudit(toolName, args, 'allow', 'local-policy', meta);
       return { approved: true, checkedBy: 'local-policy' };
     }
@@ -1442,12 +1533,13 @@ export async function authorizeHeadless(
       explainableLabel,
       policyMatchedField,
       policyMatchedWord,
-      policyResult.ruleName,
+      policyResult.ruleName
     );
 
     const persistent = getPersistentDecision(toolName);
     if (persistent === 'allow') {
-      if (creds?.apiKey) auditLocalAllow(toolName, args, 'persistent', creds, meta);
+      if (approvers.cloud && creds?.apiKey)
+        await auditLocalAllow(toolName, args, 'persistent', creds, meta);
       if (!isManual) appendLocalAudit(toolName, args, 'allow', 'persistent', meta);
       return { approved: true, checkedBy: 'persistent' };
     }
@@ -1461,7 +1553,8 @@ export async function authorizeHeadless(
       };
     }
   } else {
-    if (creds?.apiKey) auditLocalAllow(toolName, args, 'ignoredTools', creds, meta);
+    // ignoredTools (read, glob, grep, ls…) fire on every agent operation — too
+    // frequent and too noisy to send to the SaaS audit log.
     if (!isManual) appendLocalAudit(toolName, args, 'allow', 'ignored', meta);
     return { approved: true };
   }
@@ -1478,7 +1571,11 @@ export async function authorizeHeadless(
       if (!initResult.pending) {
         // Shadow mode: allowed through, but warn the developer passively
         if (initResult.shadowMode) {
-          console.error(chalk.yellow(`\n⚠️  Node9 Shadow Mode: Action allowed, but would have been blocked by company policy.`));
+          console.error(
+            chalk.yellow(
+              `\n⚠️  Node9 Shadow Mode: Action allowed, but would have been blocked by company policy.`
+            )
+          );
           if (initResult.shadowReason) {
             console.error(chalk.dim(`   Reason: ${initResult.shadowReason}\n`));
           }
@@ -1523,18 +1620,23 @@ export async function authorizeHeadless(
   // Print before the race so the message is guaranteed to show regardless of
   // which channel wins (cloud message was previously lost when native popup
   // resolved first and aborted the race before pollNode9SaaS could print it).
-  if (cloudEnforced && cloudRequestId) {
-    console.error(
-      chalk.yellow('\n🛡️  Node9: Action suspended — waiting for Organization approval.')
-    );
-    console.error(chalk.cyan('   Dashboard  → ') + chalk.bold('Mission Control > Activity Feed\n'));
-  } else if (!cloudEnforced) {
-    const cloudOffReason = !creds?.apiKey
-      ? 'no API key — run `node9 login` to connect'
-      : 'privacy mode (cloud disabled)';
-    console.error(
-      chalk.dim(`\n🛡️  Node9: intercepted "${toolName}" — cloud off (${cloudOffReason})\n`)
-    );
+  // Skip when called from the daemon — the CLI already printed this message.
+  if (!options?.calledFromDaemon) {
+    if (cloudEnforced && cloudRequestId) {
+      console.error(
+        chalk.yellow('\n🛡️  Node9: Action suspended — waiting for Organization approval.')
+      );
+      console.error(
+        chalk.cyan('   Dashboard  → ') + chalk.bold('Mission Control > Activity Feed\n')
+      );
+    } else if (!cloudEnforced) {
+      const cloudOffReason = !creds?.apiKey
+        ? 'no API key — run `node9 login` to connect'
+        : 'privacy mode (cloud disabled)';
+      console.error(
+        chalk.dim(`\n🛡️  Node9: intercepted "${toolName}" — cloud off (${cloudOffReason})\n`)
+      );
+    }
   }
 
   // ── THE MULTI-CHANNEL RACE ENGINE ──────────────────────────────────────────
@@ -1572,7 +1674,9 @@ export async function authorizeHeadless(
       (async () => {
         try {
           if (isDaemonRunning() && internalToken && !options?.calledFromDaemon) {
-            viewerId = await notifyDaemonViewer(toolName, args, meta, riskMetadata).catch(() => null);
+            viewerId = await notifyDaemonViewer(toolName, args, meta, riskMetadata).catch(
+              () => null
+            );
           }
           const cloudResult = await pollNode9SaaS(cloudRequestId, creds!, signal);
 
@@ -1595,7 +1699,10 @@ export async function authorizeHeadless(
   }
 
   // 🏁 RACER 2: Native OS Popup
-  if (approvers.native && !isManual) {
+  // Skip when called from the daemon's background pipeline — the CLI already
+  // launched this popup as part of its own race; firing it a second time from
+  // the daemon would show a duplicate popup for the same request.
+  if (approvers.native && !isManual && !options?.calledFromDaemon) {
     racePromises.push(
       (async () => {
         // Pass isRemoteLocked so the popup knows to hide the "Allow" button
@@ -1630,7 +1737,10 @@ export async function authorizeHeadless(
   }
 
   // 🏁 RACER 3: Browser Dashboard
-  if (approvers.browser && isDaemonRunning() && !options?.calledFromDaemon) {
+  // Skip when cloudEnforced — notifyDaemonViewer already created a viewer card on
+  // the dashboard. Running askDaemon on top would create a second duplicate entry,
+  // open a second browser tab, and fire a second daemon authorizeHeadless call.
+  if (approvers.browser && isDaemonRunning() && !options?.calledFromDaemon && !cloudEnforced) {
     racePromises.push(
       (async () => {
         try {
@@ -1899,11 +2009,23 @@ export function getConfig(): Config {
 
 function tryLoadConfig(filePath: string): Record<string, unknown> | null {
   if (!fs.existsSync(filePath)) return null;
+  let raw: unknown;
   try {
-    return JSON.parse(fs.readFileSync(filePath, 'utf-8')) as Record<string, unknown>;
-  } catch {
+    raw = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(
+      `\n⚠️  Node9: Failed to parse ${filePath}\n   ${msg}\n   → Using default config\n\n`
+    );
     return null;
   }
+  const error = validateConfig(raw, filePath);
+  if (error) {
+    process.stderr.write(
+      `\n⚠️  Node9: ${error}\n   → Invalid fields ignored, using defaults for those keys\n\n`
+    );
+  }
+  return raw as Record<string, unknown>;
 }
 
 function getActiveEnvironment(config: Config): EnvironmentConfig | null {
@@ -1955,8 +2077,9 @@ export interface CloudApprovalResult {
 }
 
 /**
- * Fire-and-forget: send an audit record to the backend for a locally fast-pathed call.
- * Never blocks the agent — failures are silently ignored.
+ * Send an audit record to the SaaS backend for a locally fast-pathed call.
+ * Returns a Promise so callers that precede process.exit(0) can await it.
+ * Failures are silently ignored — never blocks the agent.
  */
 function auditLocalAllow(
   toolName: string,
@@ -1964,11 +2087,8 @@ function auditLocalAllow(
   checkedBy: string,
   creds: { apiKey: string; apiUrl: string },
   meta?: { agent?: string; mcpServer?: string }
-): void {
-  const controller = new AbortController();
-  setTimeout(() => controller.abort(), 5000);
-
-  fetch(`${creds.apiUrl}/audit`, {
+): Promise<void> {
+  return fetch(`${creds.apiUrl}/audit`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${creds.apiKey}` },
     body: JSON.stringify({
@@ -1983,8 +2103,10 @@ function auditLocalAllow(
         platform: os.platform(),
       },
     }),
-    signal: controller.signal,
-  }).catch(() => {});
+    signal: AbortSignal.timeout(5000),
+  })
+    .then(() => {})
+    .catch(() => {});
 }
 
 /**

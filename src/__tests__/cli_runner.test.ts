@@ -113,8 +113,9 @@ describe('smart runner — shell command policy', () => {
   });
 
   it('blocks when command contains dangerous word in path', async () => {
+    // mkfs is in DANGEROUS_WORDS — triggers review even as a token in a find command
     const result = await evaluatePolicy('shell', {
-      command: 'find . -name "*.log" -exec purge {} +',
+      command: 'find /dev -name "sd*" -exec mkfs.ext4 {} +',
     });
     expect(result.decision).toBe('review');
   });
@@ -130,8 +131,8 @@ describe('smart runner — shell command policy', () => {
 describe('autoStartDaemon: false — blocks without daemon when no TTY', () => {
   it('returns noApprovalMechanism when no API key, no daemon, no TTY', async () => {
     mockNoNativeConfig();
-    // Changed 'delete_user' -> 'drop_user'
-    const result = await authorizeHeadless('drop_user', {});
+    // Use mkfs_disk — contains mkfs (in DANGEROUS_WORDS) so triggers review
+    const result = await authorizeHeadless('mkfs_disk', {});
     expect(result.approved).toBe(false);
     expect(result.noApprovalMechanism).toBe(true);
   });
@@ -140,11 +141,11 @@ describe('autoStartDaemon: false — blocks without daemon when no TTY', () => {
     const decisionsPath = path.join('/mock/home', '.node9', 'decisions.json');
     existsSpy.mockImplementation((p) => String(p) === decisionsPath);
     readSpy.mockImplementation((p) =>
-      // Changed 'delete_user' -> 'drop_user'
-      String(p) === decisionsPath ? JSON.stringify({ drop_user: 'allow' }) : ''
+      // Use mkfs_disk — contains mkfs (in DANGEROUS_WORDS) so triggers review
+      String(p) === decisionsPath ? JSON.stringify({ mkfs_disk: 'allow' }) : ''
     );
 
-    const result = await authorizeHeadless('drop_user', {});
+    const result = await authorizeHeadless('mkfs_disk', {});
     expect(result.approved).toBe(true);
   });
 
@@ -152,11 +153,11 @@ describe('autoStartDaemon: false — blocks without daemon when no TTY', () => {
     const decisionsPath = path.join('/mock/home', '.node9', 'decisions.json');
     existsSpy.mockImplementation((p) => String(p) === decisionsPath);
     readSpy.mockImplementation((p) =>
-      // Changed 'delete_user' -> 'drop_user'
-      String(p) === decisionsPath ? JSON.stringify({ drop_user: 'deny' }) : ''
+      // Use mkfs_disk — contains mkfs (in DANGEROUS_WORDS) so triggers review
+      String(p) === decisionsPath ? JSON.stringify({ mkfs_disk: 'deny' }) : ''
     );
 
-    const result = await authorizeHeadless('drop_user', {});
+    const result = await authorizeHeadless('mkfs_disk', {});
     expect(result.approved).toBe(false);
   });
 });
@@ -166,8 +167,8 @@ describe('autoStartDaemon: false — blocks without daemon when no TTY', () => {
 describe('daemon abandon fallthrough', () => {
   it('returns noApprovalMechanism when daemon is not running and no other channels', async () => {
     mockNoNativeConfig();
-    // Changed 'delete_user' -> 'drop_user'
-    const result = await authorizeHeadless('drop_user', {});
+    // Use mkfs_disk — contains mkfs (in DANGEROUS_WORDS) so triggers review
+    const result = await authorizeHeadless('mkfs_disk', {});
     expect(result.approved).toBe(false);
     expect(result.noApprovalMechanism).toBe(true);
   });
@@ -193,8 +194,8 @@ describe('daemon abandon fallthrough', () => {
       })
     );
 
-    // Changed 'delete_user' -> 'drop_user'
-    const result = await authorizeHeadless('drop_user', {});
+    // Use mkfs_disk — contains mkfs (in DANGEROUS_WORDS) so triggers review
+    const result = await authorizeHeadless('mkfs_disk', {});
     expect(result.approved).toBe(false);
   });
 });

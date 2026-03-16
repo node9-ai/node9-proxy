@@ -333,7 +333,13 @@ program
         cloud: true,
         terminal: true,
       };
-      approvers.cloud = !options.local;
+      // Only change cloud setting when --local is explicitly passed.
+      // Without --local, preserve whatever the user had before so that
+      // re-running `node9 login` to refresh an API key doesn't silently
+      // re-enable cloud approvals for users who had turned them off.
+      if (options.local) {
+        approvers.cloud = false;
+      }
       s.approvers = approvers;
       if (!fs.existsSync(path.dirname(configPath)))
         fs.mkdirSync(path.dirname(configPath), { recursive: true });

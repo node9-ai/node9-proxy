@@ -8,7 +8,7 @@ import os from 'os';
 import { spawn } from 'child_process';
 import { randomUUID } from 'crypto';
 import chalk from 'chalk';
-import { authorizeHeadless, getGlobalSettings, getConfig } from '../core';
+import { authorizeHeadless, getGlobalSettings, getConfig, _resetConfigCache } from '../core';
 
 export const DAEMON_PORT = 7391;
 export const DAEMON_HOST = '127.0.0.1';
@@ -303,10 +303,18 @@ export function startDaemon(): void {
     if (req.method === 'POST' && pathname === '/check') {
       try {
         resetIdleTimer(); // Agent is active, reset the shutdown clock
+        _resetConfigCache(); // Always read fresh config — catches login/manual edits without restart
 
         const body = await readBody(req);
         if (body.length > 65_536) return res.writeHead(413).end();
-        const { toolName, args, slackDelegated = false, agent, mcpServer, riskMetadata } = JSON.parse(body);
+        const {
+          toolName,
+          args,
+          slackDelegated = false,
+          agent,
+          mcpServer,
+          riskMetadata,
+        } = JSON.parse(body);
         const id = randomUUID();
         const entry: PendingEntry = {
           id,
