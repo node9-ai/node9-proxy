@@ -1,5 +1,6 @@
 // src/daemon/index.ts — Node9 localhost approval server
 import { UI_HTML_TEMPLATE } from './ui';
+import { RiskMetadata } from '../context-sniper';
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
@@ -136,6 +137,7 @@ interface PendingEntry {
   id: string;
   toolName: string;
   args: unknown;
+  riskMetadata?: RiskMetadata;
   agent?: string;
   mcpServer?: string;
   timestamp: number;
@@ -274,6 +276,7 @@ export function startDaemon(): void {
             id: e.id,
             toolName: e.toolName,
             args: e.args,
+            riskMetadata: e.riskMetadata,
             slackDelegated: e.slackDelegated,
             timestamp: e.timestamp,
             agent: e.agent,
@@ -303,12 +306,13 @@ export function startDaemon(): void {
 
         const body = await readBody(req);
         if (body.length > 65_536) return res.writeHead(413).end();
-        const { toolName, args, slackDelegated = false, agent, mcpServer } = JSON.parse(body);
+        const { toolName, args, slackDelegated = false, agent, mcpServer, riskMetadata } = JSON.parse(body);
         const id = randomUUID();
         const entry: PendingEntry = {
           id,
           toolName,
           args,
+          riskMetadata: riskMetadata ?? undefined,
           agent: typeof agent === 'string' ? agent : undefined,
           mcpServer: typeof mcpServer === 'string' ? mcpServer : undefined,
           slackDelegated: !!slackDelegated,
@@ -340,6 +344,7 @@ export function startDaemon(): void {
             id,
             toolName,
             args,
+            riskMetadata: entry.riskMetadata,
             slackDelegated: entry.slackDelegated,
             agent: entry.agent,
             mcpServer: entry.mcpServer,

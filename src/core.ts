@@ -7,6 +7,7 @@ import os from 'os';
 import pm from 'picomatch';
 import { parse } from 'sh-syntax';
 import { askNativePopup, sendDesktopNotification } from './ui/native';
+import { computeRiskMetadata, RiskMetadata } from './context-sniper';
 
 // ── Feature file paths ────────────────────────────────────────────────────────
 const PAUSED_FILE = path.join(os.homedir(), '.node9', 'PAUSED');
@@ -639,6 +640,8 @@ export async function evaluatePolicy(
   reason?: string;
   matchedField?: string;
   matchedWord?: string;
+  tier?: 1 | 2 | 3 | 4 | 5 | 6 | 7;
+  ruleName?: string;
 }> {
   const config = getConfig();
 
@@ -656,6 +659,8 @@ export async function evaluatePolicy(
         decision: matchedRule.verdict,
         blockedByLabel: `Smart Rule: ${matchedRule.name ?? matchedRule.tool}`,
         reason: matchedRule.reason,
+        tier: 2,
+        ruleName: matchedRule.name ?? matchedRule.tool,
       };
     }
   }
@@ -675,7 +680,7 @@ export async function evaluatePolicy(
     // Inline arbitrary code execution is always a review
     const INLINE_EXEC_PATTERN = /^(python3?|bash|sh|zsh|perl|ruby|node|php|lua)\s+(-c|-e|-eval)\s/i;
     if (INLINE_EXEC_PATTERN.test(shellCommand.trim())) {
-      return { decision: 'review', blockedByLabel: 'Node9 Standard (Inline Execution)' };
+      return { decision: 'review', blockedByLabel: 'Node9 Standard (Inline Execution)', tier: 3 };
     }
 
     // Strip DML keywords from tokens so user dangerousWords like "delete"/"update"
@@ -714,7 +719,7 @@ export async function evaluatePolicy(
     if (hasSystemDisaster || isRootWipe) {
       // If it IS a system disaster, return review so the dev gets a
       // "Manual Nuclear Protection" popup as a final safety check.
-      return { decision: 'review', blockedByLabel: 'Manual Nuclear Protection' };
+      return { decision: 'review', blockedByLabel: 'Manual Nuclear Protection', tier: 3 };
     }
 
     // For everything else (docker, psql, rmdir, delete, rm),
@@ -740,6 +745,7 @@ export async function evaluatePolicy(
           return {
             decision: 'review',
             blockedByLabel: `Project/Global Config — rule "${rule.action}" (path blocked)`,
+            tier: 5,
           };
         const allAllowed = pathTokens.every((p) => matchesPattern(p, rule.allowPaths || []));
         if (allAllowed) return { decision: 'allow' };
@@ -747,6 +753,7 @@ export async function evaluatePolicy(
       return {
         decision: 'review',
         blockedByLabel: `Project/Global Config — rule "${rule.action}" (default block)`,
+        tier: 5,
       };
     }
   }
@@ -798,6 +805,7 @@ export async function evaluatePolicy(
       blockedByLabel: `Project/Global Config — dangerous word: "${matchedDangerousWord}"`,
       matchedWord: matchedDangerousWord,
       matchedField,
+      tier: 6,
     };
   }
 
@@ -805,7 +813,7 @@ export async function evaluatePolicy(
   if (config.settings.mode === 'strict') {
     const envConfig = getActiveEnvironment(config);
     if (envConfig?.requireApproval === false) return { decision: 'allow' };
-    return { decision: 'review', blockedByLabel: 'Global Config (Strict Mode Active)' };
+    return { decision: 'review', blockedByLabel: 'Global Config (Strict Mode Active)', tier: 7 };
   }
 
   return { decision: 'allow' };
@@ -1215,7 +1223,8 @@ async function askDaemon(
   toolName: string,
   args: unknown,
   meta?: { agent?: string; mcpServer?: string },
-  signal?: AbortSignal // NEW: Added signal
+  signal?: AbortSignal,
+  riskMetadata?: RiskMetadata
 ): Promise<'allow' | 'deny' | 'abandoned'> {
   const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
 
@@ -1229,7 +1238,7 @@ async function askDaemon(
     const checkRes = await fetch(`${base}/check`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ toolName, args, agent: meta?.agent, mcpServer: meta?.mcpServer }),
+      body: JSON.stringify({ toolName, args, agent: meta?.agent, mcpServer: meta?.mcpServer, ...(riskMetadata && { riskMetadata }) }),
       signal: checkCtrl.signal,
     });
     if (!checkRes.ok) throw new Error('Daemon fail');
@@ -1261,7 +1270,8 @@ async function askDaemon(
 async function notifyDaemonViewer(
   toolName: string,
   args: unknown,
-  meta?: { agent?: string; mcpServer?: string }
+  meta?: { agent?: string; mcpServer?: string },
+  riskMetadata?: RiskMetadata
 ): Promise<string> {
   const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
   const res = await fetch(`${base}/check`, {
@@ -1273,6 +1283,7 @@ async function notifyDaemonViewer(
       slackDelegated: true,
       agent: meta?.agent,
       mcpServer: meta?.mcpServer,
+      ...(riskMetadata && { riskMetadata }),
     }),
     signal: AbortSignal.timeout(3000),
   });
@@ -1381,6 +1392,7 @@ export async function authorizeHeadless(
   let explainableLabel = 'Local Config';
   let policyMatchedField: string | undefined;
   let policyMatchedWord: string | undefined;
+  let riskMetadata: RiskMetadata | undefined;
 
   if (config.settings.mode === 'audit') {
     if (!isIgnoredTool(toolName)) {
@@ -1424,6 +1436,14 @@ export async function authorizeHeadless(
     explainableLabel = policyResult.blockedByLabel || 'Local Config';
     policyMatchedField = policyResult.matchedField;
     policyMatchedWord = policyResult.matchedWord;
+    riskMetadata = computeRiskMetadata(
+      args,
+      policyResult.tier ?? 6,
+      explainableLabel,
+      policyMatchedField,
+      policyMatchedWord,
+      policyResult.ruleName,
+    );
 
     const persistent = getPersistentDecision(toolName);
     if (persistent === 'allow') {
@@ -1453,7 +1473,7 @@ export async function authorizeHeadless(
 
   if (cloudEnforced) {
     try {
-      const initResult = await initNode9SaaS(toolName, args, creds!, meta);
+      const initResult = await initNode9SaaS(toolName, args, creds!, meta, riskMetadata);
 
       if (!initResult.pending) {
         return {
@@ -1544,7 +1564,7 @@ export async function authorizeHeadless(
       (async () => {
         try {
           if (isDaemonRunning() && internalToken && !options?.calledFromDaemon) {
-            viewerId = await notifyDaemonViewer(toolName, args, meta).catch(() => null);
+            viewerId = await notifyDaemonViewer(toolName, args, meta, riskMetadata).catch(() => null);
           }
           const cloudResult = await pollNode9SaaS(cloudRequestId, creds!, signal);
 
@@ -1613,7 +1633,7 @@ export async function authorizeHeadless(
             console.error(chalk.cyan(`   URL → http://${DAEMON_HOST}:${DAEMON_PORT}/\n`));
           }
 
-          const daemonDecision = await askDaemon(toolName, args, meta, signal);
+          const daemonDecision = await askDaemon(toolName, args, meta, signal, riskMetadata);
           if (daemonDecision === 'abandoned') throw new Error('Abandoned');
 
           const isApproved = daemonDecision === 'allow';
@@ -1966,7 +1986,8 @@ async function initNode9SaaS(
   toolName: string,
   args: unknown,
   creds: { apiKey: string; apiUrl: string },
-  meta?: { agent?: string; mcpServer?: string }
+  meta?: { agent?: string; mcpServer?: string },
+  riskMetadata?: RiskMetadata
 ): Promise<{
   pending: boolean;
   requestId?: string;
@@ -1991,6 +2012,7 @@ async function initNode9SaaS(
           cwd: process.cwd(),
           platform: os.platform(),
         },
+        ...(riskMetadata && { riskMetadata }),
       }),
       signal: controller.signal,
     });

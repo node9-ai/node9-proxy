@@ -2,6 +2,7 @@
 import { spawn, ChildProcess } from 'child_process';
 import path from 'path';
 import chalk from 'chalk';
+import { smartTruncate, extractContext } from '../context-sniper';
 
 const isTestEnv = () => {
   return (
@@ -13,50 +14,6 @@ const isTestEnv = () => {
     process.env.NODE9_TESTING === '1'
   );
 };
-
-/**
- * Truncates long strings by keeping the start and end.
- */
-function smartTruncate(str: string, maxLen: number = 500): string {
-  if (str.length <= maxLen) return str;
-  const edge = Math.floor(maxLen / 2) - 3;
-  return `${str.slice(0, edge)} ... ${str.slice(-edge)}`;
-}
-
-/**
- * Shows 3 lines of context around the dangerous word.
- * Prefers non-comment lines when the word appears in multiple places.
- */
-function extractContext(text: string, matchedWord?: string): string {
-  const lines = text.split('\n');
-  if (lines.length <= 7 || !matchedWord) return smartTruncate(text, 500);
-
-  const escaped = matchedWord.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const pattern = new RegExp(`\\b${escaped}\\b`, 'i');
-
-  const allHits = lines.map((line, i) => ({ i, line })).filter(({ line }) => pattern.test(line));
-  if (allHits.length === 0) return smartTruncate(text, 500);
-
-  // Prefer lines that aren't pure comments
-  const nonComment = allHits.find(({ line }) => {
-    const trimmed = line.trim();
-    return !trimmed.startsWith('//') && !trimmed.startsWith('#');
-  });
-  const hitIndex = (nonComment ?? allHits[0]).i;
-
-  const start = Math.max(0, hitIndex - 3);
-  const end = Math.min(lines.length, hitIndex + 4);
-
-  const snippet = lines
-    .slice(start, end)
-    .map((line, i) => `${start + i === hitIndex ? '🛑 ' : '   '}${line}`)
-    .join('\n');
-
-  const head = start > 0 ? `... [${start} lines hidden] ...\n` : '';
-  const tail = end < lines.length ? `\n... [${lines.length - end} lines hidden] ...` : '';
-
-  return `${head}${snippet}${tail}`;
-}
 
 function formatArgs(
   args: unknown,
@@ -88,7 +45,7 @@ function formatArgs(
     if (obj.old_string !== undefined && obj.new_string !== undefined) {
       const file = obj.file_path ? path.basename(String(obj.file_path)) : 'file';
       const oldPreview = smartTruncate(String(obj.old_string), 120);
-      const newPreview = extractContext(String(obj.new_string), matchedWord);
+      const newPreview = extractContext(String(obj.new_string), matchedWord).snippet;
       return {
         intent: 'EDIT',
         message:
@@ -105,7 +62,7 @@ function formatArgs(
         otherKeys.length > 0
           ? `⚙️  Context: ${otherKeys.map((k) => `${k}=${smartTruncate(typeof obj[k] === 'object' ? JSON.stringify(obj[k]) : String(obj[k]), 30)}`).join(', ')}\n\n`
           : '';
-      const content = extractContext(String(obj[matchedField]), matchedWord);
+      const content = extractContext(String(obj[matchedField]), matchedWord).snippet;
       return {
         intent: 'EXEC',
         message: `${context}🛑 [${matchedField.toUpperCase()}]:\n${content}`,

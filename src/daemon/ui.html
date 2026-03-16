@@ -225,6 +225,55 @@
         white-space: pre-wrap;
         word-break: break-all;
       }
+      /* ── Context Sniper ─────────────────────────────────────────── */
+      .sniper-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-bottom: 8px;
+      }
+      .sniper-badge {
+        font-size: 11px;
+        font-weight: 600;
+        padding: 3px 8px;
+        border-radius: 5px;
+        letter-spacing: 0.02em;
+      }
+      .sniper-badge-edit {
+        background: rgba(59, 130, 246, 0.15);
+        color: #60a5fa;
+        border: 1px solid rgba(59, 130, 246, 0.3);
+      }
+      .sniper-badge-exec {
+        background: rgba(239, 68, 68, 0.12);
+        color: #f87171;
+        border: 1px solid rgba(239, 68, 68, 0.25);
+      }
+      .sniper-tier {
+        font-size: 10px;
+        color: var(--muted);
+        font-family: 'Fira Code', monospace;
+      }
+      .sniper-filepath {
+        font-size: 11px;
+        color: #a8b3c4;
+        font-family: 'Fira Code', monospace;
+        margin-bottom: 6px;
+        word-break: break-all;
+      }
+      .sniper-match {
+        font-size: 11px;
+        color: #a8b3c4;
+        margin-bottom: 6px;
+      }
+      .sniper-match code {
+        background: rgba(239, 68, 68, 0.15);
+        color: #f87171;
+        padding: 1px 5px;
+        border-radius: 3px;
+        font-family: 'Fira Code', monospace;
+      }
       .actions {
         display: grid;
         grid-template-columns: 1fr 1fr;
@@ -731,20 +780,42 @@
         }, 200);
       }
 
+      function renderPayload(req) {
+        const rm = req.riskMetadata;
+        if (!rm) {
+          // Fallback: raw args for requests without context sniper data
+          const cmd = esc(String(
+            req.args && (req.args.command || req.args.cmd || req.args.script || JSON.stringify(req.args, null, 2))
+          ));
+          return `<span class="label">Input Payload</span><pre>${cmd}</pre>`;
+        }
+        const isEdit = rm.intent === 'EDIT';
+        const badgeClass = isEdit ? 'sniper-badge-edit' : 'sniper-badge-exec';
+        const badgeLabel = isEdit ? '📝 Code Edit' : '🛑 Execution';
+        const tierLabel = `Tier ${rm.tier} · ${esc(rm.blockedByLabel)}`;
+        const fileLine = isEdit && rm.editFilePath
+          ? `<div class="sniper-filepath">📂 ${esc(rm.editFilePath)}</div>`
+          : !isEdit && rm.matchedWord
+            ? `<div class="sniper-match">Matched: <code>${esc(rm.matchedWord)}</code>${rm.matchedField ? ` in <code>${esc(rm.matchedField)}</code>` : ''}</div>`
+            : '';
+        const snippetHtml = rm.contextSnippet
+          ? `<pre>${esc(rm.contextSnippet)}</pre>`
+          : '';
+        return `
+          <div class="sniper-header">
+            <span class="sniper-badge ${badgeClass}">${badgeLabel}</span>
+            <span class="sniper-tier">${tierLabel}</span>
+          </div>
+          ${fileLine}
+          ${snippetHtml}
+        `;
+      }
+
       function addCard(req) {
         if (requests.has(req.id)) return;
         requests.add(req.id);
         refresh();
         const isSlack = !!req.slackDelegated;
-        const cmd = esc(
-          String(
-            req.args &&
-              (req.args.command ||
-                req.args.cmd ||
-                req.args.script ||
-                JSON.stringify(req.args, null, 2))
-          )
-        );
         const card = document.createElement('div');
         card.className = 'card' + (isSlack ? ' slack-viewer' : '');
         card.id = 'c-' + req.id;
@@ -758,8 +829,7 @@
         </div>
         <div class="tool-chip">${esc(req.toolName)}</div>
         ${isSlack ? '<div class="slack-indicator">⚡ Awaiting Slack approval — view only</div>' : ''}
-        <span class="label">Input Payload</span>
-        <pre>${cmd}</pre>
+        ${renderPayload(req)}
         <div class="actions" id="act-${req.id}">
           <button class="btn-allow" onclick="sendDecision('${req.id}','allow',false)" ${dis}>Approve Execution</button>
           <button class="btn-deny"  onclick="sendDecision('${req.id}','deny',false)"  ${dis}>Block Action</button>
