@@ -12,6 +12,7 @@ import {
   getConfig,
   _resetConfigCache,
   explainPolicy,
+  shouldSnapshot,
 } from './core';
 import { setupClaude, setupGemini, setupCursor } from './setup';
 import { startDaemon, stopDaemon, daemonStatus, DAEMON_PORT, DAEMON_HOST } from './daemon/index';
@@ -1045,19 +1046,7 @@ program
         // Snapshot BEFORE the tool runs (PreToolUse) so undo can restore to
         // the state prior to this change. Snapshotting after (PostToolUse)
         // captures the changed state, making undo a no-op.
-        const STATE_CHANGING_TOOLS_PRE = [
-          'write_file',
-          'edit_file',
-          'edit',
-          'replace',
-          'terminal.execute',
-          'str_replace_based_edit_tool',
-          'create_file',
-        ];
-        if (
-          config.settings.enableUndo &&
-          STATE_CHANGING_TOOLS_PRE.includes(toolName.toLowerCase())
-        ) {
+        if (shouldSnapshot(toolName, toolInput, config)) {
           await createShadowSnapshot(toolName, toolInput);
         }
 
@@ -1186,16 +1175,10 @@ program
         fs.appendFileSync(logPath, JSON.stringify(entry) + '\n');
 
         const config = getConfig();
-        const STATE_CHANGING_TOOLS = [
-          'bash',
-          'shell',
-          'write_file',
-          'edit_file',
-          'replace',
-          'terminal.execute',
-        ];
 
-        if (config.settings.enableUndo && STATE_CHANGING_TOOLS.includes(tool.toLowerCase())) {
+        // PostToolUse snapshot is a fallback for tools not covered by PreToolUse.
+        // Uses the same configurable snapshot policy.
+        if (shouldSnapshot(tool, {}, config)) {
           await createShadowSnapshot();
         }
       } catch {

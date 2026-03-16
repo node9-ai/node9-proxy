@@ -1,0 +1,31 @@
+name: Sync dev from main
+
+# After any push to main (release bot version bump, hotfix, etc.)
+# fast-forward dev so the next dev -> main PR has no stale divergence.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Merge main → dev
+    runs-on: ubuntu-latest
+    # Skip the release bot's own commits to avoid infinite loops
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+          token: ${{ secrets.AUTO_PR_TOKEN }}
+
+      - name: Merge main into dev
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git merge origin/main --no-edit -m "chore: sync dev from main [skip ci]"
+          git push origin dev

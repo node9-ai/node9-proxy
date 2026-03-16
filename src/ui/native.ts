@@ -1,5 +1,6 @@
 // src/ui/native.ts
-import { spawn, ChildProcess } from 'child_process'; // 1. Added ChildProcess import
+import { spawn, ChildProcess } from 'child_process';
+import path from 'path';
 import chalk from 'chalk';
 
 const isTestEnv = () => {
@@ -22,13 +23,51 @@ function smartTruncate(str: string, maxLen: number = 500): string {
   return `${str.slice(0, edge)} ... ${str.slice(-edge)}`;
 }
 
-function formatArgs(args: unknown): string {
-  if (args === null || args === undefined) return '(none)';
+/**
+ * Shows 3 lines of context around the dangerous word.
+ * Prefers non-comment lines when the word appears in multiple places.
+ */
+function extractContext(text: string, matchedWord?: string): string {
+  const lines = text.split('\n');
+  if (lines.length <= 7 || !matchedWord) return smartTruncate(text, 500);
+
+  const escaped = matchedWord.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`\\b${escaped}\\b`, 'i');
+
+  const allHits = lines.map((line, i) => ({ i, line })).filter(({ line }) => pattern.test(line));
+  if (allHits.length === 0) return smartTruncate(text, 500);
+
+  // Prefer lines that aren't pure comments
+  const nonComment = allHits.find(({ line }) => {
+    const trimmed = line.trim();
+    return !trimmed.startsWith('//') && !trimmed.startsWith('#');
+  });
+  const hitIndex = (nonComment ?? allHits[0]).i;
+
+  const start = Math.max(0, hitIndex - 3);
+  const end = Math.min(lines.length, hitIndex + 4);
+
+  const snippet = lines
+    .slice(start, end)
+    .map((line, i) => `${start + i === hitIndex ? '🛑 ' : '   '}${line}`)
+    .join('\n');
+
+  const head = start > 0 ? `... [${start} lines hidden] ...\n` : '';
+  const tail = end < lines.length ? `\n... [${lines.length - end} lines hidden] ...` : '';
+
+  return `${head}${snippet}${tail}`;
+}
+
+function formatArgs(
+  args: unknown,
+  matchedField?: string,
+  matchedWord?: string
+): { message: string; intent: 'EDIT' | 'EXEC' } {
+  if (args === null || args === undefined) return { message: '(none)', intent: 'EXEC' };
 
   let parsed = args;
 
-  // 1. EXTRA STEP: If args is a string, try to see if it's nested JSON
-  // Gemini often wraps the command inside a stringified JSON object
+  // Handle stringified JSON (Gemini wraps commands inside a JSON string)
   if (typeof args === 'string') {
     const trimmed = args.trim();
     if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
@@ -38,14 +77,42 @@ function formatArgs(args: unknown): string {
         parsed = args;
       }
     } else {
-      return smartTruncate(args, 600);
+      return { message: smartTruncate(args, 600), intent: 'EXEC' };
     }
   }
 
-  // 2. Now handle the object (whether it was passed as one or parsed above)
   if (typeof parsed === 'object' && !Array.isArray(parsed)) {
     const obj = parsed as Record<string, unknown>;
 
+    // Case 1: File edit — detected by presence of old_string + new_string keys
+    if (obj.old_string !== undefined && obj.new_string !== undefined) {
+      const file = obj.file_path ? path.basename(String(obj.file_path)) : 'file';
+      const oldPreview = smartTruncate(String(obj.old_string), 120);
+      const newPreview = extractContext(String(obj.new_string), matchedWord);
+      return {
+        intent: 'EDIT',
+        message:
+          `📝 EDITING: ${file}\n📂 PATH: ${obj.file_path}\n\n` +
+          `--- REPLACING ---\n${oldPreview}\n\n` +
+          `+++ NEW CODE +++\n${newPreview}`,
+      };
+    }
+
+    // Case 2: We know exactly which field triggered — highlight it
+    if (matchedField && obj[matchedField] !== undefined) {
+      const otherKeys = Object.keys(obj).filter((k) => k !== matchedField);
+      const context =
+        otherKeys.length > 0
+          ? `⚙️  Context: ${otherKeys.map((k) => `${k}=${smartTruncate(typeof obj[k] === 'object' ? JSON.stringify(obj[k]) : String(obj[k]), 30)}`).join(', ')}\n\n`
+          : '';
+      const content = extractContext(String(obj[matchedField]), matchedWord);
+      return {
+        intent: 'EXEC',
+        message: `${context}🛑 [${matchedField.toUpperCase()}]:\n${content}`,
+      };
+    }
+
+    // Case 3: Hardcoded common keys fallback
     const codeKeys = [
       'command',
       'cmd',
@@ -63,23 +130,26 @@ function formatArgs(args: unknown): string {
       'text',
     ];
     const foundKey = Object.keys(obj).find((k) => codeKeys.includes(k.toLowerCase()));
-
     if (foundKey) {
       const val = obj[foundKey];
       const str = typeof val === 'string' ? val : JSON.stringify(val);
-      // Visual improvement: add a label so you know what you are looking at
-      return `[${foundKey.toUpperCase()}]:\n${smartTruncate(str, 500)}`;
+      return {
+        intent: 'EXEC',
+        message: `[${foundKey.toUpperCase()}]:\n${smartTruncate(str, 500)}`,
+      };
     }
 
-    return Object.entries(obj)
+    // Case 4: Pretty-print up to 5 fields
+    const msg = Object.entries(obj)
       .slice(0, 5)
       .map(
         ([k, v]) => `  ${k}: ${smartTruncate(typeof v === 'string' ? v : JSON.stringify(v), 300)}`
       )
       .join('\n');
+    return { intent: 'EXEC', message: msg };
   }
 
-  return smartTruncate(JSON.stringify(parsed), 200);
+  return { intent: 'EXEC', message: smartTruncate(JSON.stringify(parsed), 200) };
 }
 
 export function sendDesktopNotification(title: string, body: string): void {
@@ -164,12 +234,15 @@ export async function askNativePopup(
   agent?: string,
   explainableLabel?: string,
   locked: boolean = false,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  matchedField?: string,
+  matchedWord?: string
 ): Promise<'allow' | 'deny' | 'always_allow'> {
   if (isTestEnv()) return 'deny';
 
-  const formattedArgs = formatArgs(args);
-  const title = locked ? `⚡ Node9 — Locked` : `🛡️ Node9 — Action Approval`;
+  const { message: formattedArgs, intent } = formatArgs(args, matchedField, matchedWord);
+  const intentLabel = intent === 'EDIT' ? 'Code Edit' : 'Action Approval';
+  const title = locked ? `⚡ Node9 — Locked` : `🛡️ Node9 — ${intentLabel}`;
 
   const message = buildPlainMessage(toolName, formattedArgs, agent, explainableLabel, locked);
 

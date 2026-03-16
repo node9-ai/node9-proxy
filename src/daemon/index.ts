@@ -7,7 +7,7 @@ import os from 'os';
 import { spawn } from 'child_process';
 import { randomUUID } from 'crypto';
 import chalk from 'chalk';
-import { getGlobalSettings } from '../core';
+import { authorizeHeadless, getGlobalSettings, getConfig } from '../core';
 
 export const DAEMON_PORT = 7391;
 export const DAEMON_HOST = '127.0.0.1';
@@ -141,8 +141,9 @@ interface PendingEntry {
   timestamp: number;
   slackDelegated: boolean;
   timer: ReturnType<typeof setTimeout>;
-  waiter: ((d: Decision) => void) | null;
+  waiter: ((d: Decision, reason?: string) => void) | null;
   earlyDecision: Decision | null;
+  earlyReason?: string;
 }
 
 const pending = new Map<string, PendingEntry>();
@@ -322,28 +323,87 @@ export function startDaemon(): void {
                 args: e.args,
                 decision: 'auto-deny',
               });
-              if (e.waiter) e.waiter('deny');
-              else e.earlyDecision = 'deny';
+              if (e.waiter) e.waiter('deny', 'No response — auto-denied after timeout');
+              else {
+                e.earlyDecision = 'deny';
+                e.earlyReason = 'No response — auto-denied after timeout';
+              }
               pending.delete(id);
               broadcast('remove', { id });
             }
           }, AUTO_DENY_MS),
         };
         pending.set(id, entry);
-        broadcast('add', {
-          id,
+        const browserEnabled = getConfig().settings.approvers?.browser !== false;
+        if (browserEnabled) {
+          broadcast('add', {
+            id,
+            toolName,
+            args,
+            slackDelegated: entry.slackDelegated,
+            agent: entry.agent,
+            mcpServer: entry.mcpServer,
+          });
+          // When auto-started, the CLI already called openBrowserLocal() before
+          // the request was registered, so the browser is already opening.
+          // Skip here to avoid opening a duplicate tab.
+          if (sseClients.size === 0 && !autoStarted)
+            openBrowser(`http://127.0.0.1:${DAEMON_PORT}/`);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ id }));
+
+        // Run the full policy + cloud + native pipeline in the background.
+        // Browser and terminal racers are skipped (no TTY, browser card already exists via SSE).
+        authorizeHeadless(
           toolName,
           args,
-          slackDelegated: entry.slackDelegated,
-          agent: entry.agent,
-          mcpServer: entry.mcpServer,
-        });
-        // When auto-started, the CLI already called openBrowserLocal() before
-        // the request was registered, so the browser is already opening.
-        // Skip here to avoid opening a duplicate tab.
-        if (sseClients.size === 0 && !autoStarted) openBrowser(`http://127.0.0.1:${DAEMON_PORT}/`);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ id }));
+          false,
+          {
+            agent: typeof agent === 'string' ? agent : undefined,
+            mcpServer: typeof mcpServer === 'string' ? mcpServer : undefined,
+          },
+          { calledFromDaemon: true }
+        )
+          .then((result) => {
+            const e = pending.get(id);
+            if (!e) return; // Already resolved (browser click or auto-deny timer)
+
+            // If no background channels were available (no cloud, no native),
+            // leave the entry alive so the browser dashboard can decide.
+            if (result.noApprovalMechanism) return;
+
+            clearTimeout(e.timer);
+            const decision: Decision = result.approved ? 'allow' : 'deny';
+            appendAuditLog({ toolName: e.toolName, args: e.args, decision });
+            if (e.waiter) {
+              // Python is already waiting on GET /wait/:id — respond and clean up
+              e.waiter(decision, result.reason);
+              pending.delete(id);
+              broadcast('remove', { id });
+            } else {
+              // Python hasn't sent GET /wait/:id yet — set earlyDecision and leave
+              // the entry alive so the GET handler can find it and respond
+              e.earlyDecision = decision;
+              e.earlyReason = result.reason;
+            }
+          })
+          .catch((err) => {
+            const e = pending.get(id);
+            if (!e) return;
+            clearTimeout(e.timer);
+            const reason =
+              (err as { reason?: string })?.reason || 'No response — request timed out';
+            if (e.waiter) e.waiter('deny', reason);
+            else {
+              e.earlyDecision = 'deny';
+              e.earlyReason = reason;
+            }
+            pending.delete(id);
+            broadcast('remove', { id });
+          });
+
+        return;
       } catch {
         res.writeHead(400).end();
       }
@@ -354,12 +414,18 @@ export function startDaemon(): void {
       const entry = pending.get(id);
       if (!entry) return res.writeHead(404).end();
       if (entry.earlyDecision) {
+        pending.delete(id);
+        broadcast('remove', { id });
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ decision: entry.earlyDecision }));
+        const body: { decision: Decision; reason?: string } = { decision: entry.earlyDecision };
+        if (entry.earlyReason) body.reason = entry.earlyReason;
+        return res.end(JSON.stringify(body));
       }
-      entry.waiter = (d) => {
+      entry.waiter = (d, reason?) => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ decision: d }));
+        const body: { decision: Decision; reason?: string } = { decision: d };
+        if (reason) body.reason = reason;
+        res.end(JSON.stringify(body));
       };
       return;
     }
@@ -370,10 +436,11 @@ export function startDaemon(): void {
         const id = pathname.split('/').pop()!;
         const entry = pending.get(id);
         if (!entry) return res.writeHead(404).end();
-        const { decision, persist, trustDuration } = JSON.parse(await readBody(req)) as {
+        const { decision, persist, trustDuration, reason } = JSON.parse(await readBody(req)) as {
           decision: string;
           persist?: boolean;
           trustDuration?: string;
+          reason?: string;
         };
 
         // Trust session
@@ -402,8 +469,11 @@ export function startDaemon(): void {
           decision: resolvedDecision,
         });
         clearTimeout(entry.timer);
-        if (entry.waiter) entry.waiter(resolvedDecision);
-        else entry.earlyDecision = resolvedDecision;
+        if (entry.waiter) entry.waiter(resolvedDecision, reason);
+        else {
+          entry.earlyDecision = resolvedDecision;
+          entry.earlyReason = reason;
+        }
         pending.delete(id!);
         broadcast('remove', { id });
         res.writeHead(200);

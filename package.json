@@ -41,7 +41,7 @@
     "hitl"
   ],
   "author": "Nadav <nadav@node9.ai>",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "files": [
     "dist",
     "README.md",
@@ -73,6 +73,8 @@
     "sh-syntax": "^0.5.8"
   },
   "devDependencies": {
+    "@anthropic-ai/sdk": "^0.78.0",
+    "@octokit/rest": "^22.0.1",
     "@semantic-release/commit-analyzer": "^13.0.1",
     "@semantic-release/git": "^10.0.1",
     "@semantic-release/github": "^12.0.6",

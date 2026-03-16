@@ -198,6 +198,27 @@ export interface SmartRule {
   reason?: string;
 }
 
+/**
+ * Returns true if a snapshot should be taken for this tool call.
+ * Checks: tool name match → ignorePaths → onlyPaths (if specified).
+ */
+export function shouldSnapshot(toolName: string, args: unknown, config: Config): boolean {
+  if (!config.settings.enableUndo) return false;
+
+  const snap = config.policy.snapshot;
+  if (!snap.tools.includes(toolName.toLowerCase())) return false;
+
+  const a = args && typeof args === 'object' ? (args as Record<string, unknown>) : {};
+  const filePath = String(a.file_path ?? a.path ?? a.filename ?? '');
+
+  if (filePath) {
+    if (snap.ignorePaths.length && pm(snap.ignorePaths)(filePath)) return false;
+    if (snap.onlyPaths.length && !pm(snap.onlyPaths)(filePath)) return false;
+  }
+
+  return true;
+}
+
 export function evaluateSmartConditions(args: unknown, rule: SmartRule): boolean {
   if (!rule.conditions || rule.conditions.length === 0) return true;
   const mode = rule.conditionMode ?? 'all';
@@ -413,6 +434,11 @@ interface Config {
     toolInspection: Record<string, string>;
     rules: PolicyRule[];
     smartRules: SmartRule[];
+    snapshot: {
+      tools: string[];
+      onlyPaths: string[];
+      ignorePaths: string[];
+    };
   };
   environments: Record<string, EnvironmentConfig>;
 }
@@ -486,6 +512,18 @@ export const DEFAULT_CONFIG: Config = {
       run_shell_command: 'command',
       'terminal.execute': 'command',
       'postgres:query': 'sql',
+    },
+    snapshot: {
+      tools: [
+        'str_replace_based_edit_tool',
+        'write_file',
+        'edit_file',
+        'create_file',
+        'edit',
+        'replace',
+      ],
+      onlyPaths: [],
+      ignorePaths: ['**/node_modules/**', 'dist/**', 'build/**', '.next/**', '**/*.log'],
     },
     rules: [
       {
@@ -595,7 +633,13 @@ export async function evaluatePolicy(
   toolName: string,
   args?: unknown,
   agent?: string
-): Promise<{ decision: 'allow' | 'review' | 'block'; blockedByLabel?: string; reason?: string }> {
+): Promise<{
+  decision: 'allow' | 'review' | 'block';
+  blockedByLabel?: string;
+  reason?: string;
+  matchedField?: string;
+  matchedWord?: string;
+}> {
   const config = getConfig();
 
   // 1. Ignored tools (Fast Path) - Always allow these first
@@ -727,9 +771,33 @@ export async function evaluatePolicy(
   );
 
   if (isDangerous) {
+    // Find which specific field contained the dangerous word for the UI
+    let matchedField: string | undefined;
+    if (matchedDangerousWord && args && typeof args === 'object' && !Array.isArray(args)) {
+      const obj = args as Record<string, unknown>;
+      for (const [key, value] of Object.entries(obj)) {
+        if (typeof value === 'string') {
+          try {
+            if (
+              new RegExp(
+                `\\b${matchedDangerousWord.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`,
+                'i'
+              ).test(value)
+            ) {
+              matchedField = key;
+              break;
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    }
     return {
       decision: 'review',
       blockedByLabel: `Project/Global Config — dangerous word: "${matchedDangerousWord}"`,
+      matchedWord: matchedDangerousWord,
+      matchedField,
     };
   }
 
@@ -1272,7 +1340,8 @@ export async function authorizeHeadless(
   toolName: string,
   args: unknown,
   allowTerminalFallback = false,
-  meta?: { agent?: string; mcpServer?: string }
+  meta?: { agent?: string; mcpServer?: string },
+  options?: { calledFromDaemon?: boolean }
 ): Promise<AuthResult> {
   if (process.env.NODE9_PAUSED === '1') return { approved: true, checkedBy: 'paused' };
   const pauseState = checkPause();
@@ -1310,6 +1379,8 @@ export async function authorizeHeadless(
   const isManual = meta?.agent === 'Terminal';
 
   let explainableLabel = 'Local Config';
+  let policyMatchedField: string | undefined;
+  let policyMatchedWord: string | undefined;
 
   if (config.settings.mode === 'audit') {
     if (!isIgnoredTool(toolName)) {
@@ -1351,6 +1422,8 @@ export async function authorizeHeadless(
     }
 
     explainableLabel = policyResult.blockedByLabel || 'Local Config';
+    policyMatchedField = policyResult.matchedField;
+    policyMatchedWord = policyResult.matchedWord;
 
     const persistent = getPersistentDecision(toolName);
     if (persistent === 'allow') {
@@ -1470,7 +1543,7 @@ export async function authorizeHeadless(
     racePromises.push(
       (async () => {
         try {
-          if (isDaemonRunning() && internalToken) {
+          if (isDaemonRunning() && internalToken && !options?.calledFromDaemon) {
             viewerId = await notifyDaemonViewer(toolName, args, meta).catch(() => null);
           }
           const cloudResult = await pollNode9SaaS(cloudRequestId, creds!, signal);
@@ -1504,7 +1577,9 @@ export async function authorizeHeadless(
           meta?.agent,
           explainableLabel,
           isRemoteLocked,
-          signal
+          signal,
+          policyMatchedField,
+          policyMatchedWord
         );
 
         if (decision === 'always_allow') {
@@ -1527,7 +1602,7 @@ export async function authorizeHeadless(
   }
 
   // 🏁 RACER 3: Browser Dashboard
-  if (approvers.browser && isDaemonRunning()) {
+  if (approvers.browser && isDaemonRunning() && !options?.calledFromDaemon) {
     racePromises.push(
       (async () => {
         try {
@@ -1735,6 +1810,11 @@ export function getConfig(): Config {
     toolInspection: { ...DEFAULT_CONFIG.policy.toolInspection },
     rules: [...DEFAULT_CONFIG.policy.rules],
     smartRules: [...DEFAULT_CONFIG.policy.smartRules],
+    snapshot: {
+      tools: [...DEFAULT_CONFIG.policy.snapshot.tools],
+      onlyPaths: [...DEFAULT_CONFIG.policy.snapshot.onlyPaths],
+      ignorePaths: [...DEFAULT_CONFIG.policy.snapshot.ignorePaths],
+    },
   };
 
   const applyLayer = (source: Record<string, unknown> | null) => {
@@ -1748,6 +1828,7 @@ export function getConfig(): Config {
     if (s.enableHookLogDebug !== undefined)
       mergedSettings.enableHookLogDebug = s.enableHookLogDebug;
     if (s.approvers) mergedSettings.approvers = { ...mergedSettings.approvers, ...s.approvers };
+    if (s.approvalTimeoutMs !== undefined) mergedSettings.approvalTimeoutMs = s.approvalTimeoutMs;
     if (s.environment !== undefined) mergedSettings.environment = s.environment;
 
     if (p.sandboxPaths) mergedPolicy.sandboxPaths.push(...p.sandboxPaths);
@@ -1759,6 +1840,12 @@ export function getConfig(): Config {
       mergedPolicy.toolInspection = { ...mergedPolicy.toolInspection, ...p.toolInspection };
     if (p.rules) mergedPolicy.rules.push(...p.rules);
     if (p.smartRules) mergedPolicy.smartRules.push(...p.smartRules);
+    if (p.snapshot) {
+      const s = p.snapshot as Partial<Config['policy']['snapshot']>;
+      if (s.tools) mergedPolicy.snapshot.tools.push(...s.tools);
+      if (s.onlyPaths) mergedPolicy.snapshot.onlyPaths.push(...s.onlyPaths);
+      if (s.ignorePaths) mergedPolicy.snapshot.ignorePaths.push(...s.ignorePaths);
+    }
   };
 
   applyLayer(globalConfig);
@@ -1769,6 +1856,9 @@ export function getConfig(): Config {
   mergedPolicy.sandboxPaths = [...new Set(mergedPolicy.sandboxPaths)];
   mergedPolicy.dangerousWords = [...new Set(mergedPolicy.dangerousWords)];
   mergedPolicy.ignoredTools = [...new Set(mergedPolicy.ignoredTools)];
+  mergedPolicy.snapshot.tools = [...new Set(mergedPolicy.snapshot.tools)];
+  mergedPolicy.snapshot.onlyPaths = [...new Set(mergedPolicy.snapshot.onlyPaths)];
+  mergedPolicy.snapshot.ignorePaths = [...new Set(mergedPolicy.snapshot.ignorePaths)];
 
   cachedConfig = {
     settings: mergedSettings,

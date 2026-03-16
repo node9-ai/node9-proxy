@@ -39,6 +39,8 @@ import {
   getPersistentDecision,
   isDaemonRunning,
   evaluateSmartConditions,
+  shouldSnapshot,
+  DEFAULT_CONFIG,
 } from '../core.js';
 
 // Global spies
@@ -739,6 +741,99 @@ describe('authorizeHeadless — smart rule hard block', () => {
     expect(result.approved).toBe(false);
     expect(result.reason).toMatch(/root wipe blocked/);
     expect(result.blockedBy).toBe('local-config');
+  });
+});
+
+// ── shouldSnapshot ────────────────────────────────────────────────────────────
+describe('shouldSnapshot', () => {
+  const baseConfig = () => JSON.parse(JSON.stringify(DEFAULT_CONFIG)) as typeof DEFAULT_CONFIG;
+
+  it('returns true for a default snapshot tool', () => {
+    const config = baseConfig();
+    expect(shouldSnapshot('str_replace_based_edit_tool', { file_path: 'src/app.ts' }, config)).toBe(
+      true
+    );
+  });
+
+  it('returns true for write_file with no path filters active', () => {
+    const config = baseConfig();
+    expect(shouldSnapshot('write_file', { file_path: 'src/index.ts' }, config)).toBe(true);
+  });
+
+  it('returns false for a non-snapshot tool (bash)', () => {
+    const config = baseConfig();
+    expect(shouldSnapshot('bash', { command: 'ls' }, config)).toBe(false);
+  });
+
+  it('returns false when enableUndo is false', () => {
+    const config = baseConfig();
+    config.settings.enableUndo = false;
+    expect(shouldSnapshot('write_file', { file_path: 'src/app.ts' }, config)).toBe(false);
+  });
+
+  it('respects ignorePaths — skips node_modules', () => {
+    const config = baseConfig();
+    expect(
+      shouldSnapshot('write_file', { file_path: 'node_modules/lodash/index.js' }, config)
+    ).toBe(false);
+  });
+
+  it('respects ignorePaths — skips dist/', () => {
+    const config = baseConfig();
+    expect(shouldSnapshot('edit_file', { file_path: 'dist/bundle.js' }, config)).toBe(false);
+  });
+
+  it('respects ignorePaths — skips .log files', () => {
+    const config = baseConfig();
+    expect(shouldSnapshot('write_file', { file_path: 'logs/app.log' }, config)).toBe(false);
+  });
+
+  it('allows src/ path that does not match any ignorePaths', () => {
+    const config = baseConfig();
+    expect(shouldSnapshot('edit', { file_path: 'src/utils/helper.ts' }, config)).toBe(true);
+  });
+
+  it('respects onlyPaths — skips file outside onlyPaths when set', () => {
+    const config = baseConfig();
+    config.policy.snapshot.onlyPaths = ['src/**'];
+    expect(shouldSnapshot('write_file', { file_path: 'scripts/deploy.sh' }, config)).toBe(false);
+  });
+
+  it('respects onlyPaths — allows file inside onlyPaths', () => {
+    const config = baseConfig();
+    config.policy.snapshot.onlyPaths = ['src/**'];
+    expect(shouldSnapshot('write_file', { file_path: 'src/api/routes.ts' }, config)).toBe(true);
+  });
+
+  it('ignorePaths takes priority over onlyPaths', () => {
+    const config = baseConfig();
+    config.policy.snapshot.onlyPaths = ['src/**'];
+    config.policy.snapshot.ignorePaths.push('src/generated/**');
+    expect(shouldSnapshot('write_file', { file_path: 'src/generated/schema.ts' }, config)).toBe(
+      false
+    );
+  });
+
+  it('handles args with path key instead of file_path', () => {
+    const config = baseConfig();
+    expect(shouldSnapshot('write_file', { path: 'src/app.ts' }, config)).toBe(true);
+  });
+
+  it('handles args with filename key', () => {
+    const config = baseConfig();
+    expect(shouldSnapshot('write_file', { filename: 'src/app.ts' }, config)).toBe(true);
+  });
+
+  it('allows snapshot when no file path present and no onlyPaths set', () => {
+    const config = baseConfig();
+    // No file_path — ignorePaths/onlyPaths checks are skipped
+    expect(shouldSnapshot('write_file', {}, config)).toBe(true);
+  });
+
+  it('user-added tool via config is snapshotted', () => {
+    const config = baseConfig();
+    config.policy.snapshot.tools.push('my_custom_write_tool');
+    expect(shouldSnapshot('my_custom_write_tool', { file_path: 'src/foo.ts' }, config)).toBe(true);
   });
 });
 

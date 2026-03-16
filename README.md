@@ -3,7 +3,7 @@
 ### The "Sudo" Command for AI Agents.
 
 [![NPM Version](https://img.shields.io/npm/v/@node9/proxy.svg)](https://www.npmjs.com/package/@node9/proxy)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 **Node9** is the execution security layer for the Agentic Era. It encases autonomous AI Agents (Claude Code, Gemini CLI, Cursor, MCP Servers) in a deterministic security wrapper, intercepting dangerous shell commands and tool calls before they execute.
 
@@ -72,8 +72,6 @@ Example output:
 
 Revert to this snapshot? [y/N]
 ```
-
-Node9 keeps the last 10 snapshots. Snapshots are only taken for file-writing tools (`write_file`, `edit_file`, `str_replace_based_edit_tool`, `create_file`) — not for read-only or shell commands.
 
 Node9 keeps the last 10 snapshots. Snapshots are only taken for file-writing tools (`write_file`, `edit_file`, `str_replace_based_edit_tool`, `create_file`) — not for read-only or shell commands.
 
@@ -232,8 +230,6 @@ The `field` key supports dot-notation for nested args: `"params.query.sql"`.
 
 Use `node9 explain <tool> <args>` to dry-run any tool call and see exactly which smart rule (or other policy tier) would trigger.
 
-## <<<<<<< Updated upstream
-
 ## 🖥️ CLI Reference
 
 | Command                       | Description                                                                           |
@@ -274,107 +270,6 @@ All checks passed ✅
 ### `node9 explain`
 
 Dry-runs the policy engine and prints exactly which rule (or waterfall tier) would block or allow a given tool call — useful for debugging your config:
-
-```bash
-node9 explain bash '{"command":"rm -rf /tmp/build"}'
-```
-
-```
-Policy Waterfall for: bash
-──────────────────────────────────────────────
-Tier 1 · Cloud Org Policy       SKIP  (no org policy loaded)
-Tier 2 · Dangerous Words        BLOCK ← matched "rm -rf"
-Tier 3 · Path Block             –
-Tier 4 · Inline Exec            –
-Tier 5 · Rule Match             –
-──────────────────────────────────────────────
-Verdict: BLOCK  (dangerous word: rm -rf)
-```
-
----
-
-## 🖥️ CLI Reference
-
-| Command                       | Description                                                                           |
-| :---------------------------- | :------------------------------------------------------------------------------------ |
-| `node9 setup`                 | Interactive menu — detects installed agents and wires hooks for you                   |
-| `node9 addto <agent>`         | Wire hooks for a specific agent (`claude`, `gemini`, `cursor`)                        |
-| `node9 init`                  | Create default `~/.node9/config.json`                                                 |
-| `node9 status`                | Show current protection status and active rules                                       |
-| `node9 doctor`                | Health check — verifies binaries, config, credentials, and all agent hooks            |
-| `node9 explain <tool> [args]` | Trace the policy waterfall for a given tool call (dry-run, no approval prompt)        |
-| `node9 undo [--steps N]`      | Revert the last N AI file edits using shadow Git snapshots                            |
-| `node9 check`                 | Called by agent hooks; evaluates a pending tool call and exits 0 (allow) or 1 (block) |
-
-### `node9 doctor`
-
-Runs a full self-test and exits 1 if any required check fails:
-
-```
-Node9 Doctor  v1.2.0
-────────────────────────────────────────
-Binaries
-  ✅  Node.js v20.11.0
-  ✅  git version 2.43.0
-
-Configuration
-  ✅  ~/.node9/config.json found and valid
-  ✅  ~/.node9/credentials.json — cloud credentials found
-
-Agent Hooks
-  ✅  Claude Code — PreToolUse hook active
-  ⚠️  Gemini CLI — not configured (optional)
-  ⚠️  Cursor — not configured (optional)
-
-────────────────────────────────────────
-All checks passed ✅
-```
-
-### `node9 explain`
-
-## =======
-
-## 🖥️ CLI Reference
-
-| Command                       | Description                                                                           |
-| :---------------------------- | :------------------------------------------------------------------------------------ |
-| `node9 setup`                 | Interactive menu — detects installed agents and wires hooks for you                   |
-| `node9 addto <agent>`         | Wire hooks for a specific agent (`claude`, `gemini`, `cursor`)                        |
-| `node9 init`                  | Create default `~/.node9/config.json`                                                 |
-| `node9 status`                | Show current protection status and active rules                                       |
-| `node9 doctor`                | Health check — verifies binaries, config, credentials, and all agent hooks            |
-| `node9 explain <tool> [args]` | Trace the policy waterfall for a given tool call (dry-run, no approval prompt)        |
-| `node9 undo [--steps N]`      | Revert the last N AI file edits using shadow Git snapshots                            |
-| `node9 check`                 | Called by agent hooks; evaluates a pending tool call and exits 0 (allow) or 1 (block) |
-
-### `node9 doctor`
-
-Runs a full self-test and exits 1 if any required check fails:
-
-```
-Node9 Doctor  v1.2.0
-────────────────────────────────────────
-Binaries
-  ✅  Node.js v20.11.0
-  ✅  git version 2.43.0
-
-Configuration
-  ✅  ~/.node9/config.json found and valid
-  ✅  ~/.node9/credentials.json — cloud credentials found
-
-Agent Hooks
-  ✅  Claude Code — PreToolUse hook active
-  ⚠️  Gemini CLI — not configured (optional)
-  ⚠️  Cursor — not configured (optional)
-
-────────────────────────────────────────
-All checks passed ✅
-```
-
-### `node9 explain`
-
-> > > > > > > Stashed changes
-> > > > > > > Dry-runs the policy engine and prints exactly which rule (or waterfall tier) would block or allow a given tool call — useful for debugging your config:
 
 ```bash
 node9 explain bash '{"command":"rm -rf /tmp/build"}'
