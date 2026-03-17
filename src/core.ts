@@ -588,7 +588,7 @@ export const DEFAULT_CONFIG: Config = {
       {
         name: 'review-git-push',
         tool: 'bash',
-        conditions: [{ field: 'command', op: 'matches', value: '^\\s*git push\\b', flags: 'i' }],
+        conditions: [{ field: 'command', op: 'matches', value: '^\\s*git\\s+push\\b', flags: 'i' }],
         conditionMode: 'all',
         verdict: 'review',
         reason: 'git push sends changes to a shared remote',
@@ -1984,7 +1984,19 @@ export function getConfig(): Config {
       if (s.onlyPaths) mergedPolicy.snapshot.onlyPaths.push(...s.onlyPaths);
       if (s.ignorePaths) mergedPolicy.snapshot.ignorePaths.push(...s.ignorePaths);
     }
+
+    const envs = (source.environments || {}) as Record<string, unknown>;
+    for (const [envName, envConfig] of Object.entries(envs)) {
+      if (envConfig && typeof envConfig === 'object') {
+        mergedEnvironments[envName] = {
+          ...mergedEnvironments[envName],
+          ...(envConfig as Partial<EnvironmentConfig>),
+        };
+      }
+    }
   };
+
+  const mergedEnvironments: Record<string, EnvironmentConfig> = { ...DEFAULT_CONFIG.environments };
 
   applyLayer(globalConfig);
   applyLayer(projectConfig);
@@ -2001,7 +2013,7 @@ export function getConfig(): Config {
   cachedConfig = {
     settings: mergedSettings,
     policy: mergedPolicy,
-    environments: {},
+    environments: mergedEnvironments,
   };
 
   return cachedConfig;

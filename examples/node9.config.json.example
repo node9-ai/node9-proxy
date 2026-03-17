@@ -1,56 +1,26 @@
 {
+  "version": "1.0",
   "settings": {
     "mode": "standard",
-    "environment": "production",
     "autoStartDaemon": true,
     "enableUndo": true,
     "enableHookLogDebug": false,
-    "approvers": {
-      "native": true,
-      "browser": false,
-      "cloud": false,
-      "terminal": true
-    }
+    "approvalTimeoutMs": 30000,
+    "approvers": { "native": true, "browser": true, "cloud": true, "terminal": true }
   },
   "policy": {
     "sandboxPaths": ["/tmp/**", "**/sandbox/**", "**/test-results/**"],
 
-    "dangerousWords": [
-      "drop",
-      "truncate",
-      "purge",
-      "format",
-      "destroy",
-      "terminate",
-      "revoke",
-      "docker",
-      "psql",
-      "rmdir",
-      "delete",
-      "alter",
-      "grant",
-      "rm"
-    ],
+    "dangerousWords": ["mkfs", "shred"],
 
     "ignoredTools": [
-      "list_*",
-      "get_*",
-      "read_*",
-      "describe_*",
-      "read",
-      "glob",
-      "grep",
-      "ls",
-      "notebookread",
-      "webfetch",
-      "websearch",
-      "exitplanmode",
-      "askuserquestion",
-      "agent",
-      "task*",
-      "toolsearch",
-      "mcp__ide__*",
-      "getDiagnostics"
+      "list_*", "get_*", "read_*", "describe_*",
+      "read", "glob", "grep", "ls", "notebookread",
+      "webfetch", "websearch",
+      "exitplanmode", "enterplanmode",
+      "enterworktree", "exitworktree",
+      "askuserquestion", "agent", "task*",
+      "toolsearch", "mcp__ide__*", "getDiagnostics"
     ],
 
     "toolInspection": {
@@ -58,39 +28,65 @@
       "shell": "command",
       "run_shell_command": "command",
       "terminal.execute": "command",
-      "postgres:query": "sql",
       "mcp__github__*": "command",
+      "postgres:query": "sql",
+      "execute_query": "sql",
+      "query": "sql",
+      "mcp__postgres__*": "sql",
       "mcp__redis__*": "query"
     },
 
-    "rules": [
+    "smartRules": [
       {
-        "action": "rm",
-        "allowPaths": [
-          "**/node_modules/**",
-          "dist/**",
-          "build/**",
-          ".next/**",
-          ".nuxt/**",
-          "coverage/**",
-          ".cache/**",
-          "tmp/**",
-          "temp/**",
-          "**/__pycache__/**",
-          "**/.pytest_cache/**",
-          "**/*.log",
-          "**/*.tmp",
-          ".DS_Store",
-          "**/yarn.lock",
-          "**/package-lock.json",
-          "**/pnpm-lock.yaml"
-        ]
+        "name": "allow-readonly-bash",
+        "tool": "bash",
+        "conditions": [
+          {
+            "field": "command",
+            "op": "matches",
+            "value": "^\\s*(find|grep|rg|cat|head|tail|ls|echo|which|pwd|wc|sort|uniq|diff|du|df|stat|file|type|env|printenv|node --version|npm (list|ls|run (build|test|lint|typecheck|format))|git (log|status|diff|show|branch|remote|fetch|stash list|tag))",
+            "flags": "i"
+          }
+        ],
+        "conditionMode": "all",
+        "verdict": "allow",
+        "reason": "Read-only or safe bash command"
+      },
+      {
+        "name": "allow-install-devtools",
+        "tool": "bash",
+        "conditions": [
+          {
+            "field": "command",
+            "op": "matches",
+            "value": "^\\s*(npm (install|ci|update)|yarn (install|add)|pnpm (install|add))",
+            "flags": "i"
+          }
+        ],
+        "conditionMode": "all",
+        "verdict": "allow",
+        "reason": "Package install — not destructive"
+      },
+      {
+        "name": "review-secrets-write",
+        "tool": "*",
+        "conditions": [
+          {
+            "field": "file_path",
+            "op": "matches",
+            "value": "(\\.env(\\.\\w+)?$|\\.pem$|\\.key$|id_rsa|credentials\\.json|secrets?\\.json)"
+          }
+        ],
+        "conditionMode": "all",
+        "verdict": "review",
+        "reason": "Writing to secrets or credentials file"
       }
-    ]
-  },
+    ],
 
-  "environments": {
-    "production": { "requireApproval": true },
-    "development": { "requireApproval": false }
+    "snapshot": {
+      "tools": ["str_replace_based_edit_tool", "write_file", "edit_file", "create_file", "edit", "replace", "write"],
+      "onlyPaths": [],
+      "ignorePaths": ["**/node_modules/**", "dist/**", "build/**", ".next/**", "**/*.log", "**/tmp/**"]
+    }
   }
 }
