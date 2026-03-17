@@ -11,7 +11,7 @@
   "policy": {
     "sandboxPaths": ["/tmp/**", "**/sandbox/**", "**/test-results/**"],
 
-    "dangerousWords": ["mkfs", "shred"],
+    "dangerousWords": ["rm", "drop", "mkfs", "shred"],
 
     "ignoredTools": [
       "list_*",
@@ -64,7 +64,7 @@
           {
             "field": "command",
             "op": "notMatches",
-            "value": "(&&|\\|\\||;\\s*\\S|\\$\\(|`)",
+            "value": "(&&|\\|\\||;|\\$\\(|`)",
             "flags": "i"
           }
         ],
@@ -124,7 +124,7 @@
         "reason": "Command contains $() or backtick substitution — can run arbitrary subcommands"
       },
       {
-        "name": "review-secrets-write",
+        "name": "flag-secrets-access",
         "tool": "*",
         "conditions": [
           {
@@ -145,7 +145,7 @@
         ],
         "conditionMode": "any",
         "verdict": "review",
-        "reason": "Writing to secrets or credentials file"
+        "reason": "Accessing a secrets or credentials file (read or write)"
       }
     ],
 

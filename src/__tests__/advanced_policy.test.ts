@@ -110,7 +110,7 @@ describe('allow-readonly-bash — chained command guard', () => {
             {
               field: 'command',
               op: 'notMatches',
-              value: '(&&|\\|\\||;\\s*\\S)',
+              value: '(&&|\\|\\||;)',
               flags: 'i',
             },
           ],
@@ -180,7 +180,7 @@ describe('allow-readonly-bash — command substitution bypass', () => {
             {
               field: 'command',
               op: 'notMatches',
-              value: '(&&|\\|\\||;\\s*\\S|\\$\\(|`)',
+              value: '(&&|\\|\\||;|\\$\\(|`)',
               flags: 'i',
             },
           ],
@@ -290,15 +290,15 @@ describe('allow-install-devtools — global install guard', () => {
   });
 });
 
-// ── review-secrets-write — multi-field matching ───────────────────────────────
+// ── flag-secrets-access — multi-field matching ────────────────────────────────
 
-describe('review-secrets-write — multi-field matching', () => {
+describe('flag-secrets-access — multi-field matching', () => {
   const secretsRule = {
     policy: {
       dangerousWords: [],
       smartRules: [
         {
-          name: 'review-secrets-write',
+          name: 'flag-secrets-access',
           tool: '*',
           conditions: [
             {
@@ -322,7 +322,7 @@ describe('review-secrets-write — multi-field matching', () => {
           ],
           conditionMode: 'any',
           verdict: 'review',
-          reason: 'Writing to secrets or credentials file',
+          reason: 'Accessing a secrets or credentials file (read or write)',
         },
       ],
     },
@@ -353,9 +353,15 @@ describe('review-secrets-write — multi-field matching', () => {
     expect(r.decision).not.toBe('review');
   });
 
-  it('does NOT flag a file whose name merely contains .env as a substring', async () => {
+  it('does NOT flag a file whose basename does not start with .env (e.g. notmy.env.bak)', async () => {
+    // Regex anchors on (^|[/\\]) + .env, so "notmy.env.bak" does NOT match — basename starts with 'n'
     const r = await evaluatePolicy('write', { file_path: '/project/notmy.env.bak' });
     expect(r.decision).not.toBe('review');
+  });
+
+  it('flags a file named .env.bak (actual dotfile backup of .env)', async () => {
+    const r = await evaluatePolicy('write', { file_path: '/project/.env.bak' });
+    expect(r.decision).toBe('review');
   });
 });
 
