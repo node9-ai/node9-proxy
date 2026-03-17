@@ -60,11 +60,17 @@
             "op": "matches",
             "value": "^\\s*(find|grep|rg|cat|head|tail|ls|echo|which|pwd|wc|sort|uniq|diff|du|df|stat|file|type|env|printenv|node --version|npm (list|ls|run (build|test|lint|typecheck|format))|git (log|status|diff|show|branch|remote|fetch|stash list|tag))",
             "flags": "i"
+          },
+          {
+            "field": "command",
+            "op": "notMatches",
+            "value": "(&&|\\|\\||;\\s*\\S)",
+            "flags": "i"
           }
         ],
         "conditionMode": "all",
         "verdict": "allow",
-        "reason": "Read-only or safe bash command"
+        "reason": "Read-only or safe bash command — rejected if chained with && || or ;"
       },
       {
         "name": "allow-install-devtools",
@@ -88,7 +94,7 @@
           {
             "field": "file_path",
             "op": "matches",
-            "value": "(\\.env(\\.\\w+)?$|\\.pem$|\\.key$|id_rsa|credentials\\.json|secrets?\\.json)"
+            "value": "(^|[/\\\\])(\\.env(\\.\\w+)?$|\\.pem$|\\.key$|id_rsa|credentials\\.json|secrets?\\.json)"
           }
         ],
         "conditionMode": "all",

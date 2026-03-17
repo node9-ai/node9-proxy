@@ -1954,6 +1954,7 @@ export function getConfig(): Config {
       ignorePaths: [...DEFAULT_CONFIG.policy.snapshot.ignorePaths],
     },
   };
+  const mergedEnvironments: Record<string, EnvironmentConfig> = { ...DEFAULT_CONFIG.environments };
 
   const applyLayer = (source: Record<string, unknown> | null) => {
     if (!source) return;
@@ -1988,15 +1989,17 @@ export function getConfig(): Config {
     const envs = (source.environments || {}) as Record<string, unknown>;
     for (const [envName, envConfig] of Object.entries(envs)) {
       if (envConfig && typeof envConfig === 'object') {
+        const ec = envConfig as Record<string, unknown>;
         mergedEnvironments[envName] = {
           ...mergedEnvironments[envName],
-          ...(envConfig as Partial<EnvironmentConfig>),
+          // Validate field types before merging — do not blindly spread user input
+          ...(typeof ec.requireApproval === 'boolean'
+            ? { requireApproval: ec.requireApproval }
+            : {}),
         };
       }
     }
   };
-
-  const mergedEnvironments: Record<string, EnvironmentConfig> = { ...DEFAULT_CONFIG.environments };
 
   applyLayer(globalConfig);
   applyLayer(projectConfig);
@@ -2031,6 +2034,14 @@ function tryLoadConfig(filePath: string): Record<string, unknown> | null {
     );
     return null;
   }
+  const SUPPORTED_VERSION = '1.0';
+  const fileVersion = (raw as Record<string, unknown>)?.version;
+  if (fileVersion !== undefined && fileVersion !== SUPPORTED_VERSION) {
+    process.stderr.write(
+      `\n⚠️  Node9: Config at ${filePath} declares version "${fileVersion}" — expected "${SUPPORTED_VERSION}". Some settings may not be recognised.\n\n`
+    );
+  }
+
   const { sanitized, error } = sanitizeConfig(raw);
   if (error) {
     process.stderr.write(
