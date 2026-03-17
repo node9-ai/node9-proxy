@@ -64,13 +64,13 @@
           {
             "field": "command",
             "op": "notMatches",
-            "value": "(&&|\\|\\||;\\s*\\S)",
+            "value": "(&&|\\|\\||;\\s*\\S|\\$\\(|`)",
             "flags": "i"
           }
         ],
         "conditionMode": "all",
         "verdict": "allow",
-        "reason": "Read-only or safe bash command — rejected if chained with && || or ;"
+        "reason": "Read-only or safe bash command — rejected if chained with && || ; $() or backtick"
       },
       {
         "name": "allow-install-devtools",
@@ -81,11 +81,47 @@
             "op": "matches",
             "value": "^\\s*(npm (install|ci|update)|yarn (install|add)|pnpm (install|add))",
             "flags": "i"
+          },
+          {
+            "field": "command",
+            "op": "notMatches",
+            "value": "(-g|--global)\\b",
+            "flags": "i"
           }
         ],
         "conditionMode": "all",
         "verdict": "allow",
-        "reason": "Package install — not destructive"
+        "reason": "Package install — not destructive (global installs require review)"
+      },
+      {
+        "name": "review-global-install",
+        "tool": "bash",
+        "conditions": [
+          {
+            "field": "command",
+            "op": "matches",
+            "value": "\\b(npm|yarn|pnpm)\\b.+(-g|--global)\\b",
+            "flags": "i"
+          }
+        ],
+        "conditionMode": "all",
+        "verdict": "review",
+        "reason": "Global package install modifies the system PATH — requires explicit approval"
+      },
+      {
+        "name": "review-command-substitution",
+        "tool": "bash",
+        "conditions": [
+          {
+            "field": "command",
+            "op": "matches",
+            "value": "(\\$\\(|`)",
+            "flags": "i"
+          }
+        ],
+        "conditionMode": "all",
+        "verdict": "review",
+        "reason": "Command contains $() or backtick substitution — can run arbitrary subcommands"
       },
       {
         "name": "review-secrets-write",
@@ -95,9 +131,19 @@
             "field": "file_path",
             "op": "matches",
             "value": "(^|[/\\\\])(\\.env(\\.\\w+)?$|\\.pem$|\\.key$|id_rsa|credentials\\.json|secrets?\\.json)"
+          },
+          {
+            "field": "path",
+            "op": "matches",
+            "value": "(^|[/\\\\])(\\.env(\\.\\w+)?$|\\.pem$|\\.key$|id_rsa|credentials\\.json|secrets?\\.json)"
+          },
+          {
+            "field": "filename",
+            "op": "matches",
+            "value": "(^|[/\\\\])(\\.env(\\.\\w+)?$|\\.pem$|\\.key$|id_rsa|credentials\\.json|secrets?\\.json)"
           }
         ],
-        "conditionMode": "all",
+        "conditionMode": "any",
         "verdict": "review",
         "reason": "Writing to secrets or credentials file"
       }

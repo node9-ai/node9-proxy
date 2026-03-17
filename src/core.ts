@@ -2035,11 +2035,21 @@ function tryLoadConfig(filePath: string): Record<string, unknown> | null {
     return null;
   }
   const SUPPORTED_VERSION = '1.0';
+  const SUPPORTED_MAJOR = SUPPORTED_VERSION.split('.')[0];
   const fileVersion = (raw as Record<string, unknown>)?.version;
-  if (fileVersion !== undefined && fileVersion !== SUPPORTED_VERSION) {
-    process.stderr.write(
-      `\n⚠️  Node9: Config at ${filePath} declares version "${fileVersion}" — expected "${SUPPORTED_VERSION}". Some settings may not be recognised.\n\n`
-    );
+  if (fileVersion !== undefined) {
+    const vStr = String(fileVersion);
+    const fileMajor = vStr.split('.')[0];
+    if (fileMajor !== SUPPORTED_MAJOR) {
+      process.stderr.write(
+        `\n❌  Node9: Config at ${filePath} has version "${vStr}" — major version is incompatible with this release (expected "${SUPPORTED_VERSION}"). Config will not be loaded.\n\n`
+      );
+      return null;
+    } else if (vStr !== SUPPORTED_VERSION) {
+      process.stderr.write(
+        `\n⚠️  Node9: Config at ${filePath} declares version "${vStr}" — expected "${SUPPORTED_VERSION}". Continuing with best-effort parsing.\n\n`
+      );
+    }
   }
 
   const { sanitized, error } = sanitizeConfig(raw);
