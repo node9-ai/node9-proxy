@@ -1534,9 +1534,10 @@ shieldCmd
       // Remove dangerousWords, protecting words still needed by other active shields
       const remaining = active.filter((s) => s !== name);
       const protectedWords = new Set(remaining.flatMap((s) => getShield(s)?.dangerousWords ?? []));
+      const shieldWords = new Set(shield.dangerousWords);
       const existingWords = (policy.dangerousWords as string[] | undefined) ?? [];
       policy.dangerousWords = existingWords.filter(
-        (w) => !shield.dangerousWords.includes(w) || protectedWords.has(w)
+        (w) => !shieldWords.has(w) || protectedWords.has(w)
       );
 
       config.policy = policy;

@@ -166,21 +166,27 @@ export const SHIELDS: Record<string, ShieldDefinition> = {
       {
         name: 'shield:filesystem:block-rm-rf-home',
         tool: 'bash',
+        // Two conditions (AND): command is a recursive rm AND targets a home path.
+        // Using conditionMode:'all' avoids a single complex regex that's hard to verify.
+        // Known bypass vectors not covered: unlink, find -delete, language-level file ops.
+        // This rule is a best-effort heuristic, not a comprehensive sandbox.
+        conditionMode: 'all',
         conditions: [
           {
             field: 'command',
-            // Covers: rm -rf, rm --recursive --force, rm -fr, and home paths including
-            // ~, $HOME, /home/*, /root.
-            // Known bypass vectors not covered: unlink, find -delete, python/node file ops.
-            // This rule is a best-effort heuristic, not a comprehensive sandbox.
             op: 'matches',
-            value:
-              'rm\\b.*(--recursive|--force|-[a-z]*r[a-z]*|-[a-z]*f[a-z]*).*(-[a-z]*f[a-z]*|-[a-z]*r[a-z]*|--force|--recursive).*(~|\\$HOME|\\/home\\/|\\/root\\/|\\/root$)',
-            flags: 'i',
+            // Matches: rm -r, rm -R, rm -rf, rm -fr, rm --recursive (any order)
+            value: 'rm\\b.*(-[rRfF]*[rR][rRfF]*|--recursive)',
+          },
+          {
+            field: 'command',
+            op: 'matches',
+            // Matches home path targets: ~, $HOME, ~/*, /home/*, /root, /root/*
+            value: '(~|\\/root(\\/|$)|\\$HOME|\\/home\\/)',
           },
         ],
         verdict: 'block',
-        reason: 'Recursive force-delete of home directory — blocked by filesystem shield',
+        reason: 'Recursive delete of home directory — blocked by filesystem shield',
       },
       {
         name: 'shield:filesystem:review-chmod-777',
@@ -197,9 +203,10 @@ export const SHIELDS: Record<string, ShieldDefinition> = {
         conditions: [
           {
             field: 'command',
-            // Matches /etc/ anywhere in the command string
+            // Narrow to write-indicative operations to avoid approval fatigue on reads.
+            // Matches: tee /etc/*, cp .../etc/*, mv .../etc/*, > /etc/*, install .../etc/*
             op: 'matches',
-            value: '\\/etc\\/',
+            value: '(tee|\\bcp\\b|\\bmv\\b|install|>+)\\s+.*\\/etc\\/',
           },
         ],
         verdict: 'review',
