@@ -237,18 +237,20 @@ const SHIELDS_STATE_FILE = path.join(os.homedir(), '.node9', 'shields.json');
 
 export function readActiveShields(): string[] {
   try {
-    if (fs.existsSync(SHIELDS_STATE_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(SHIELDS_STATE_FILE, 'utf-8')) as {
-        active?: unknown;
-      };
-      if (Array.isArray(parsed.active)) {
-        // Validate each element is a non-empty string that refers to a known shield
-        return parsed.active.filter(
-          (e): e is string => typeof e === 'string' && e.length > 0 && e in SHIELDS
-        );
-      }
+    const raw = fs.readFileSync(SHIELDS_STATE_FILE, 'utf-8');
+    const parsed = JSON.parse(raw) as { active?: unknown };
+    if (Array.isArray(parsed.active)) {
+      // Validate each element is a non-empty string that refers to a known shield
+      return parsed.active.filter(
+        (e): e is string => typeof e === 'string' && e.length > 0 && e in SHIELDS
+      );
     }
-  } catch {}
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      // Unexpected error (permissions, parse failure) — log but don't crash
+      process.stderr.write(`[node9] Warning: could not read shields state: ${String(err)}\n`);
+    }
+  }
   return [];
 }
 

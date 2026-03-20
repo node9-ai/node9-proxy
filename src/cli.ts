@@ -1417,26 +1417,28 @@ program
 
 const SHIELD_CONFIG_PATH = path.join(os.homedir(), '.node9', 'config.json');
 
-function readRawConfig(): Record<string, unknown> {
+// Returns the parsed config, or null if the file doesn't exist, or exits on parse/IO error.
+// WARNING: no advisory lock — concurrent shield invocations use last-writer-wins semantics.
+function readRawConfig(): Record<string, unknown> | null {
   try {
-    if (fs.existsSync(SHIELD_CONFIG_PATH)) {
-      return JSON.parse(fs.readFileSync(SHIELD_CONFIG_PATH, 'utf-8')) as Record<string, unknown>;
-    }
-  } catch (err) {
-    // Log to stderr so the user knows their config was unreadable — do not silently overwrite
+    const raw = fs.readFileSync(SHIELD_CONFIG_PATH, 'utf-8');
+    return JSON.parse(raw) as Record<string, unknown>;
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null; // file doesn't exist yet
+    // Parse error or permission error — bail out to avoid overwriting valid config
     console.error(
-      chalk.yellow(
-        `⚠️  Could not read ${SHIELD_CONFIG_PATH}: ${err instanceof Error ? err.message : String(err)}`
+      chalk.red(
+        `\n❌ Cannot read ${SHIELD_CONFIG_PATH}: ${err instanceof Error ? err.message : String(err)}`
       )
     );
-    console.error(chalk.yellow('   Shield rules will be added to a fresh config object.\n'));
+    console.error(chalk.red('   Aborting to avoid overwriting your existing config.\n'));
+    process.exit(1);
   }
-  return {};
 }
 
 function writeRawConfig(config: Record<string, unknown>): void {
-  const dir = path.dirname(SHIELD_CONFIG_PATH);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  // mkdirSync is idempotent with recursive:true — no TOCTOU concern here
+  fs.mkdirSync(path.dirname(SHIELD_CONFIG_PATH), { recursive: true });
   // Random suffix avoids pid collision on concurrent CLI invocations
   const tmp = `${SHIELD_CONFIG_PATH}.${crypto.randomBytes(6).toString('hex')}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(config, null, 2));
@@ -1461,7 +1463,7 @@ shieldCmd
     const shield = getShield(name);
     if (!shield) throw new Error(`Shield "${name}" resolved but not found — this is a bug`);
 
-    const config = readRawConfig();
+    const config = readRawConfig() ?? {};
     if (!config.policy || typeof config.policy !== 'object') config.policy = {};
     const policy = config.policy as Record<string, unknown>;
 
@@ -1486,8 +1488,16 @@ shieldCmd
     console.log(chalk.green(`\n🛡️  Shield "${name}" enabled.`));
     console.log(chalk.gray(`   Added ${shield.smartRules.length} smart rules.`));
     if (shield.dangerousWords.length > 0)
-      console.log(chalk.gray(`   Added ${shield.dangerousWords.length} dangerous words.\n`));
-    else console.log('');
+      console.log(chalk.gray(`   Added ${shield.dangerousWords.length} dangerous words.`));
+    if (name === 'filesystem') {
+      console.log(
+        chalk.yellow(
+          `\n   ⚠️  Note: filesystem rules cover common rm -rf patterns but not all variants.\n` +
+            `      Tools like unlink, find -delete, or language-level file ops are not intercepted.`
+        )
+      );
+    }
+    console.log('');
   });
 
 shieldCmd
@@ -1510,24 +1520,30 @@ shieldCmd
       return;
     }
 
-    const config = readRawConfig();
-    const policy = (config.policy ?? {}) as Record<string, unknown>;
+    const config = readRawConfig() ?? {};
 
-    // Remove this shield's smartRules
-    const prefix = `shield:${name}:`;
-    const rules = (policy.smartRules as Array<{ name?: string }> | undefined) ?? [];
-    policy.smartRules = rules.filter((r) => !r.name?.startsWith(prefix));
+    // Only mutate policy if it already exists — avoid creating an empty policy object
+    if (config.policy && typeof config.policy === 'object') {
+      const policy = config.policy as Record<string, unknown>;
 
-    // Remove dangerousWords, protecting words still needed by other active shields
+      // Remove this shield's smartRules
+      const prefix = `shield:${name}:`;
+      const rules = (policy.smartRules as Array<{ name?: string }> | undefined) ?? [];
+      policy.smartRules = rules.filter((r) => !r.name?.startsWith(prefix));
+
+      // Remove dangerousWords, protecting words still needed by other active shields
+      const remaining = active.filter((s) => s !== name);
+      const protectedWords = new Set(remaining.flatMap((s) => getShield(s)?.dangerousWords ?? []));
+      const existingWords = (policy.dangerousWords as string[] | undefined) ?? [];
+      policy.dangerousWords = existingWords.filter(
+        (w) => !shield.dangerousWords.includes(w) || protectedWords.has(w)
+      );
+
+      config.policy = policy;
+      writeRawConfig(config);
+    }
+
     const remaining = active.filter((s) => s !== name);
-    const protectedWords = new Set(remaining.flatMap((s) => getShield(s)?.dangerousWords ?? []));
-    const existingWords = (policy.dangerousWords as string[] | undefined) ?? [];
-    policy.dangerousWords = existingWords.filter(
-      (w) => !shield.dangerousWords.includes(w) || protectedWords.has(w)
-    );
-
-    config.policy = policy;
-    writeRawConfig(config);
     writeActiveShields(remaining);
 
     console.log(chalk.green(`\n🛡️  Shield "${name}" disabled.\n`));
