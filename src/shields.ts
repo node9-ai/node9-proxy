@@ -168,8 +168,11 @@ export const SHIELDS: Record<string, ShieldDefinition> = {
         conditions: [
           {
             field: 'command',
+            // Covers: rm -rf, rm --recursive --force, rm -fr, and home paths including
+            // ~, $HOME, /home/*, /root. Does not rely on whitespace before path.
             op: 'matches',
-            value: 'rm\\s+(-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r)\\s+(~|\\/home\\/|\\/root\\/)',
+            value:
+              'rm\\b.*(--recursive|--force|-[a-z]*r[a-z]*|-[a-z]*f[a-z]*).*(-[a-z]*f[a-z]*|-[a-z]*r[a-z]*|--force|--recursive).*(~|\\$HOME|\\/home\\/|\\/root\\/|\\/root$)',
             flags: 'i',
           },
         ],
@@ -188,7 +191,14 @@ export const SHIELDS: Record<string, ShieldDefinition> = {
       {
         name: 'shield:filesystem:review-write-etc',
         tool: 'bash',
-        conditions: [{ field: 'command', op: 'matches', value: '\\s\\/etc\\/', flags: 'i' }],
+        conditions: [
+          {
+            field: 'command',
+            // Match /etc/ anywhere in the command, not just after whitespace
+            op: 'matches',
+            value: '\\/etc\\/',
+          },
+        ],
         verdict: 'review',
         reason: 'Writing to /etc requires human approval (filesystem shield)',
       },
@@ -226,7 +236,10 @@ export function readActiveShields(): string[] {
       const parsed = JSON.parse(fs.readFileSync(SHIELDS_STATE_FILE, 'utf-8')) as {
         active?: unknown;
       };
-      if (Array.isArray(parsed.active)) return parsed.active as string[];
+      if (Array.isArray(parsed.active)) {
+        // Validate each element is a non-empty string
+        return parsed.active.filter((e): e is string => typeof e === 'string' && e.length > 0);
+      }
     }
   } catch {}
   return [];

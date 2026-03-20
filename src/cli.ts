@@ -1414,23 +1414,23 @@ program
 // node9 shield — manage pre-packaged security rule templates
 // ---------------------------------------------------------------------------
 
-const CONFIG_PATH = path.join(os.homedir(), '.node9', 'config.json');
+const SHIELD_CONFIG_PATH = path.join(os.homedir(), '.node9', 'config.json');
 
 function readRawConfig(): Record<string, unknown> {
   try {
-    if (fs.existsSync(CONFIG_PATH)) {
-      return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8')) as Record<string, unknown>;
+    if (fs.existsSync(SHIELD_CONFIG_PATH)) {
+      return JSON.parse(fs.readFileSync(SHIELD_CONFIG_PATH, 'utf-8')) as Record<string, unknown>;
     }
   } catch {}
   return {};
 }
 
 function writeRawConfig(config: Record<string, unknown>): void {
-  const dir = path.dirname(CONFIG_PATH);
+  const dir = path.dirname(SHIELD_CONFIG_PATH);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  const tmp = `${CONFIG_PATH}.${process.pid}.tmp`;
+  const tmp = `${SHIELD_CONFIG_PATH}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(config, null, 2));
-  fs.renameSync(tmp, CONFIG_PATH);
+  fs.renameSync(tmp, SHIELD_CONFIG_PATH);
 }
 
 const shieldCmd = program
@@ -1446,8 +1446,11 @@ shieldCmd
       console.error(chalk.red(`\n❌ Unknown shield: "${service}"\n`));
       console.log(`Run ${chalk.cyan('node9 shield list')} to see available shields.\n`);
       process.exit(1);
+      return;
     }
-    const shield = getShield(name)!;
+    const shield = getShield(name);
+    if (!shield) return; // resolveShieldName guarantees this exists; guard for type safety
+
     const config = readRawConfig();
     if (!config.policy || typeof config.policy !== 'object') config.policy = {};
     const policy = config.policy as Record<string, unknown>;
@@ -1464,6 +1467,7 @@ shieldCmd
     const existingWords = (policy.dangerousWords as string[] | undefined) ?? [];
     policy.dangerousWords = [...new Set([...existingWords, ...shield.dangerousWords])];
 
+    config.policy = policy;
     writeRawConfig(config);
 
     const active = readActiveShields();
@@ -1485,10 +1489,13 @@ shieldCmd
       console.error(chalk.red(`\n❌ Unknown shield: "${service}"\n`));
       console.log(`Run ${chalk.cyan('node9 shield list')} to see available shields.\n`);
       process.exit(1);
+      return;
     }
-    const shield = getShield(name)!;
+    const shield = getShield(name);
+    if (!shield) return;
 
-    if (!fs.existsSync(CONFIG_PATH)) {
+    const active = readActiveShields();
+    if (!active.includes(name)) {
       console.log(chalk.yellow(`\nℹ️  Shield "${name}" is not active.\n`));
       return;
     }
@@ -1502,7 +1509,7 @@ shieldCmd
     policy.smartRules = rules.filter((r) => !r.name?.startsWith(prefix));
 
     // Remove dangerousWords, protecting words still needed by other active shields
-    const remaining = readActiveShields().filter((s) => s !== name);
+    const remaining = active.filter((s) => s !== name);
     const protectedWords = new Set(remaining.flatMap((s) => getShield(s)?.dangerousWords ?? []));
     const existingWords = (policy.dangerousWords as string[] | undefined) ?? [];
     policy.dangerousWords = existingWords.filter(
