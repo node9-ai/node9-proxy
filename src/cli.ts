@@ -1503,9 +1503,7 @@ shieldCmd
 
     // Remove dangerousWords, protecting words still needed by other active shields
     const remaining = readActiveShields().filter((s) => s !== name);
-    const protectedWords = new Set(
-      remaining.flatMap((s) => getShield(s)?.dangerousWords ?? [])
-    );
+    const protectedWords = new Set(remaining.flatMap((s) => getShield(s)?.dangerousWords ?? []));
     const existingWords = (policy.dangerousWords as string[] | undefined) ?? [];
     policy.dangerousWords = existingWords.filter(
       (w) => !shield.dangerousWords.includes(w) || protectedWords.has(w)
@@ -1525,9 +1523,7 @@ shieldCmd
     const active = new Set(readActiveShields());
     console.log(chalk.bold('\n🛡️  Available Shields\n'));
     for (const shield of listShields()) {
-      const status = active.has(shield.name)
-        ? chalk.green('● enabled')
-        : chalk.gray('○ disabled');
+      const status = active.has(shield.name) ? chalk.green('● enabled') : chalk.gray('○ disabled');
       console.log(`  ${status}  ${chalk.cyan(shield.name.padEnd(12))} ${shield.description}`);
       if (shield.aliases.length > 0)
         console.log(chalk.gray(`              aliases: ${shield.aliases.join(', ')}`));
@@ -1550,7 +1546,11 @@ shieldCmd
       const shield = getShield(name);
       if (!shield) continue;
       console.log(`  ${chalk.green('●')} ${chalk.cyan(name)}`);
-      console.log(chalk.gray(`    ${shield.smartRules.length} smart rules · ${shield.dangerousWords.length} dangerous words`));
+      console.log(
+        chalk.gray(
+          `    ${shield.smartRules.length} smart rules · ${shield.dangerousWords.length} dangerous words`
+        )
+      );
     }
     console.log('');
   });
