@@ -1306,15 +1306,26 @@ program
 program
   .command('undo')
   .description(
-    'Revert files to a pre-AI snapshot. Shows a diff and asks for confirmation before reverting. Use --steps N to go back N actions.'
+    'Revert files to a pre-AI snapshot. Shows a diff and asks for confirmation before reverting. Use --steps N to go back N actions, --all to include snapshots from other directories.'
   )
   .option('--steps <n>', 'Number of snapshots to go back (default: 1)', '1')
-  .action(async (options: { steps: string }) => {
+  .option('--all', 'Show snapshots from all directories, not just the current one')
+  .action(async (options: { steps: string; all?: boolean }) => {
     const steps = Math.max(1, parseInt(options.steps, 10) || 1);
-    const history = getSnapshotHistory();
+    const allHistory = getSnapshotHistory();
+    const history = options.all ? allHistory : allHistory.filter((s) => s.cwd === process.cwd());
 
     if (history.length === 0) {
-      console.log(chalk.yellow('\nℹ️  No undo snapshots found.\n'));
+      if (!options.all && allHistory.length > 0) {
+        console.log(
+          chalk.yellow(
+            `\nℹ️  No snapshots found for the current directory (${process.cwd()}).\n` +
+              `    Run ${chalk.cyan('node9 undo --all')} to see snapshots from all projects.\n`
+          )
+        );
+      } else {
+        console.log(chalk.yellow('\nℹ️  No undo snapshots found.\n'));
+      }
       return;
     }
 

@@ -40,3 +40,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.AUTO_PR_TOKEN }}
           NPM_CONFIG_PROVENANCE: 'true'
         run: npx semantic-release
+
+      - name: Notify homebrew tap
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          curl -s -X POST \
+            -H "Authorization: token ${{ secrets.AUTO_PR_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/node9-ai/homebrew-node9/dispatches \
+            -d "{\"event_type\":\"new-release\",\"client_payload\":{\"version\":\"${VERSION}\"}}"
