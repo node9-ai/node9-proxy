@@ -4,6 +4,7 @@
 
 [![NPM Version](https://img.shields.io/npm/v/@node9/proxy.svg)](https://www.npmjs.com/package/@node9/proxy)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Open in HF Spaces](https://huggingface.co/datasets/huggingface/badges/resolve/main/open-in-hf-spaces-sm.svg)](https://huggingface.co/spaces/Node9ai/node9-security-demo)
 
 **Node9** is the execution security layer for the Agentic Era. It encases autonomous AI Agents (Claude Code, Gemini CLI, Cursor, MCP Servers) in a deterministic security wrapper, intercepting dangerous shell commands and tool calls before they execute.
 
@@ -84,6 +85,14 @@ Security posture is resolved using a strict 5-tier waterfall:
 3.  **Project Config:** Repository-specific rules (`node9.config.json`).
 4.  **Global Config:** Personal UI preferences (`~/.node9/config.json`).
 5.  **Defaults:** The built-in safety net.
+
+---
+
+## 🎮 Try it Live
+
+No install needed — test Node9's AST parser against real commands in the browser:
+
+[![Open in HF Spaces](https://huggingface.co/datasets/huggingface/badges/resolve/main/open-in-hf-spaces-sm.svg)](https://huggingface.co/spaces/Node9ai/node9-security-demo)
 
 ---
 
