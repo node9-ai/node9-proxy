@@ -827,6 +827,52 @@ describe('authorizeHeadless — smart rule hard block', () => {
   });
 });
 
+// ── Layer 1 security invariant ────────────────────────────────────────────────
+// Built-in block rules (Layer 1) are evaluated BEFORE user-defined rules.
+// A user allow rule must never be able to bypass a built-in block.
+
+describe('Layer 1 security invariant — built-in blocks cannot be bypassed', () => {
+  it('block-rm-rf-home fires before a user allow rule on the same command', async () => {
+    // User adds an allow rule that would match rm -rf ~ if evaluated first.
+    mockProjectConfig({
+      policy: {
+        smartRules: [
+          {
+            name: 'user-allow-rm',
+            tool: 'bash',
+            conditions: [{ field: 'command', op: 'matches', value: 'rm' }],
+            verdict: 'allow',
+            reason: 'user allow — should NOT fire before block-rm-rf-home',
+          },
+        ],
+      },
+    });
+    const result = await evaluatePolicy('bash', { command: 'rm -rf ~' });
+    // block-rm-rf-home (Layer 1) must win — not the user allow rule
+    expect(result.decision).toBe('block');
+    expect(result.blockedByLabel).toMatch(/block-rm-rf-home/);
+  });
+
+  it('block-force-push fires before a user allow rule on the same command', async () => {
+    mockProjectConfig({
+      policy: {
+        smartRules: [
+          {
+            name: 'user-allow-git',
+            tool: 'bash',
+            conditions: [{ field: 'command', op: 'matches', value: 'git' }],
+            verdict: 'allow',
+            reason: 'user allow — should NOT fire before block-force-push',
+          },
+        ],
+      },
+    });
+    const result = await evaluatePolicy('bash', { command: 'git push --force origin main' });
+    expect(result.decision).toBe('block');
+    expect(result.blockedByLabel).toMatch(/block-force-push/);
+  });
+});
+
 // ── shouldSnapshot ────────────────────────────────────────────────────────────
 describe('shouldSnapshot', () => {
   const baseConfig = () => JSON.parse(JSON.stringify(DEFAULT_CONFIG)) as typeof DEFAULT_CONFIG;

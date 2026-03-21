@@ -136,6 +136,22 @@ node9 shield status             # see what's currently active
 
 ---
 
+## 🔗 Configuration Precedence
+
+Node9 merges configuration from multiple sources in priority order. Higher tiers win:
+
+| Tier | Source                    | Notes                                                     |
+| :--- | :------------------------ | :-------------------------------------------------------- |
+| 1    | **Environment variables** | `NODE9_MODE=strict` overrides everything                  |
+| 2    | **Cloud / Org policy**    | Set in the Node9 dashboard — cannot be overridden locally |
+| 3    | **Project config**        | `node9.config.json` in the working directory              |
+| 4    | **Global config**         | `~/.node9/config.json`                                    |
+| 5    | **Built-in defaults**     | Always active, no config needed                           |
+
+Smart rules from all layers are **concatenated** in evaluation order (first-match-wins): built-in defaults → global → project → shields → advisory defaults. This means built-in `block` rules always fire before any user-defined `allow` rules — a user config cannot bypass Layer 1 protection.
+
+---
+
 ## ⚙️ Custom Rules (Advanced)
 
 Most users never need this. If you need protection beyond Layer 1 and the available shields, add **Smart Rules** to `node9.config.json` in your project root or `~/.node9/config.json` globally.
