@@ -58,32 +58,20 @@ export const SHIELDS: Record<string, ShieldDefinition> = {
     aliases: ['git'],
     smartRules: [
       {
-        name: 'shield:github:block-force-push',
+        // Note: git branch -d/-D is already caught by the built-in review-git-destructive rule.
+        // This rule adds coverage for `git push --delete` which the built-in does not match.
+        name: 'shield:github:review-delete-branch-remote',
         tool: 'bash',
         conditions: [
           {
             field: 'command',
             op: 'matches',
-            value: 'git\\s+push.*(--force|-f\\b|--force-with-lease)',
-            flags: 'i',
-          },
-        ],
-        verdict: 'block',
-        reason: 'Force push is irreversible — blocked by GitHub shield',
-      },
-      {
-        name: 'shield:github:review-delete-branch',
-        tool: 'bash',
-        conditions: [
-          {
-            field: 'command',
-            op: 'matches',
-            value: 'git\\s+push\\s+.*--delete|git\\s+branch\\s+-[dD]',
+            value: 'git\\s+push\\s+.*--delete',
             flags: 'i',
           },
         ],
         verdict: 'review',
-        reason: 'Branch deletion requires human approval (GitHub shield)',
+        reason: 'Remote branch deletion requires human approval (GitHub shield)',
       },
       {
         name: 'shield:github:block-delete-repo',
@@ -214,8 +202,9 @@ export const SHIELDS: Record<string, ShieldDefinition> = {
       },
     ],
     // dd removed: too common as a legitimate tool (disk imaging, file ops).
-    // wipefs and mkfs are retained as they are rarely legitimate in an agent context.
-    dangerousWords: ['wipefs', 'mkfs'],
+    // mkfs removed: already in the built-in DANGEROUS_WORDS baseline.
+    // wipefs retained: rarely legitimate in an agent context and not in built-ins.
+    dangerousWords: ['wipefs'],
   },
 };
 
