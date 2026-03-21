@@ -9,6 +9,7 @@ import { parse } from 'sh-syntax';
 import { askNativePopup, sendDesktopNotification } from './ui/native';
 import { computeRiskMetadata, RiskMetadata } from './context-sniper';
 import { sanitizeConfig } from './config-schema';
+import { readActiveShields, getShield } from './shields';
 
 // ── Feature file paths ────────────────────────────────────────────────────────
 const PAUSED_FILE = path.join(os.homedir(), '.node9', 'PAUSED');
@@ -2003,6 +2004,22 @@ export function getConfig(): Config {
 
   applyLayer(globalConfig);
   applyLayer(projectConfig);
+
+  // ── Shield layer ──────────────────────────────────────────────────────────
+  // Shields are applied after user config so they cannot be overridden locally.
+  // Rules are sourced from the in-memory catalog, not from config.json — so
+  // enabling a shield never mutates the user's config file.
+  for (const shieldName of readActiveShields()) {
+    const shield = getShield(shieldName);
+    if (!shield) continue;
+    // Deduplicate smartRules by name — prevents duplicates if the user also
+    // has the same rule name in their config (shouldn't happen, but be safe).
+    const existingRuleNames = new Set(mergedPolicy.smartRules.map((r) => r.name));
+    for (const rule of shield.smartRules) {
+      if (!existingRuleNames.has(rule.name)) mergedPolicy.smartRules.push(rule);
+    }
+    for (const word of shield.dangerousWords) mergedPolicy.dangerousWords.push(word);
+  }
 
   if (process.env.NODE9_MODE) mergedSettings.mode = process.env.NODE9_MODE as string;
 
