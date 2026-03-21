@@ -1277,7 +1277,8 @@ async function askDaemon(
   args: unknown,
   meta?: { agent?: string; mcpServer?: string },
   signal?: AbortSignal,
-  riskMetadata?: RiskMetadata
+  riskMetadata?: RiskMetadata,
+  activityId?: string
 ): Promise<'allow' | 'deny' | 'abandoned'> {
   const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
 
@@ -1297,6 +1298,11 @@ async function askDaemon(
         agent: meta?.agent,
         mcpServer: meta?.mcpServer,
         fromCLI: true,
+        // Pass the flight-recorder ID so the daemon uses the same UUID for
+        // activity-result as the CLI used for the pending activity event.
+        // Without this, the two UUIDs never match and tail.ts never resolves
+        // the pending item.
+        activityId,
         ...(riskMetadata && { riskMetadata }),
       }),
       signal: checkCtrl.signal,
@@ -1453,13 +1459,10 @@ export async function authorizeHeadless(
     const actId = randomUUID();
     const actTs = Date.now();
     await notifyActivity({ id: actId, ts: actTs, tool: toolName, args, status: 'pending' });
-    const result = await _authorizeHeadlessCore(
-      toolName,
-      args,
-      allowTerminalFallback,
-      meta,
-      options
-    );
+    const result = await _authorizeHeadlessCore(toolName, args, allowTerminalFallback, meta, {
+      ...options,
+      activityId: actId,
+    });
     // noApprovalMechanism means no channels were available — the CLI will retry
     // after auto-starting the daemon. Don't log a false 'block' to the flight
     // recorder; the retry call will produce the real result notification.
@@ -1486,7 +1489,7 @@ async function _authorizeHeadlessCore(
   args: unknown,
   allowTerminalFallback = false,
   meta?: { agent?: string; mcpServer?: string },
-  options?: { calledFromDaemon?: boolean }
+  options?: { calledFromDaemon?: boolean; activityId?: string }
 ): Promise<AuthResult> {
   if (process.env.NODE9_PAUSED === '1') return { approved: true, checkedBy: 'paused' };
   const pauseState = checkPause();
@@ -1830,7 +1833,14 @@ async function _authorizeHeadlessCore(
             console.error(chalk.cyan(`   URL → http://${DAEMON_HOST}:${DAEMON_PORT}/\n`));
           }
 
-          const daemonDecision = await askDaemon(toolName, args, meta, signal, riskMetadata);
+          const daemonDecision = await askDaemon(
+            toolName,
+            args,
+            meta,
+            signal,
+            riskMetadata,
+            options?.activityId
+          );
           if (daemonDecision === 'abandoned') throw new Error('Abandoned');
 
           const isApproved = daemonDecision === 'allow';
@@ -2107,7 +2117,10 @@ export function getConfig(): Config {
     for (const rule of shield.smartRules) {
       if (!existingRuleNames.has(rule.name)) mergedPolicy.smartRules.push(rule);
     }
-    for (const word of shield.dangerousWords) mergedPolicy.dangerousWords.push(word);
+    const existingWords = new Set(mergedPolicy.dangerousWords);
+    for (const word of shield.dangerousWords) {
+      if (!existingWords.has(word)) mergedPolicy.dangerousWords.push(word);
+    }
   }
 
   // Advisory rm rules are always appended last so user-defined rules (project/global/shield)

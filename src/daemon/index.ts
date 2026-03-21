@@ -192,7 +192,9 @@ function broadcast(event: string, data: unknown) {
     activityRing.push({ event, data });
     if (activityRing.length > ACTIVITY_RING_SIZE) activityRing.shift();
   } else if (event === 'activity-result') {
-    // Patch the status in the ring buffer so replayed history is up-to-date
+    // Patch the status in the ring buffer so replayed history is up-to-date.
+    // Intentional in-place mutation — safe because Node.js is single-threaded
+    // and ring entries are only read during SSE replay on the same event loop tick.
     const { id, status, label } = data as { id: string; status: string; label?: string };
     for (let i = activityRing.length - 1; i >= 0; i--) {
       if ((activityRing[i].data as { id: string }).id === id) {
@@ -347,8 +349,12 @@ export function startDaemon(): void {
           mcpServer,
           riskMetadata,
           fromCLI = false,
+          activityId,
         } = JSON.parse(body);
-        const id = randomUUID();
+        // When fromCLI is true the CLI already sent an 'activity' event with
+        // activityId via the Unix socket. Reuse that ID so the daemon's
+        // 'activity-result' broadcast matches what tail.ts has in its pending map.
+        const id = (fromCLI && typeof activityId === 'string' && activityId) || randomUUID();
         const entry: PendingEntry = {
           id,
           toolName,
@@ -667,6 +673,7 @@ export function startDaemon(): void {
     }
 
     if (req.method === 'GET' && pathname === '/shields') {
+      if (!validToken(req)) return res.writeHead(403).end();
       const active = readActiveShields();
       const shields = Object.values(SHIELDS).map((s) => ({
         name: s.name,

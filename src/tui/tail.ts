@@ -6,6 +6,7 @@ import os from 'os';
 import path from 'path';
 import readline from 'readline';
 import { spawn } from 'child_process';
+import { DAEMON_PORT } from '../daemon';
 
 const PID_FILE = path.join(os.homedir(), '.node9', 'daemon.pid');
 
@@ -107,7 +108,7 @@ async function ensureDaemon(): Promise<number> {
     await new Promise((r) => setTimeout(r, 250));
     if (!fs.existsSync(PID_FILE)) continue;
     try {
-      const res = await fetch('http://127.0.0.1:7391/settings', {
+      const res = await fetch(`http://127.0.0.1:${DAEMON_PORT}/settings`, {
         signal: AbortSignal.timeout(500),
       });
       if (res.ok) {
