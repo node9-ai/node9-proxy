@@ -1413,6 +1413,9 @@ const ACTIVITY_SOCKET_PATH =
     ? '\\\\.\\pipe\\node9-activity'
     : path.join(os.tmpdir(), 'node9-activity.sock');
 
+// Returns a Promise so callers can await socket flush before process.exit().
+// Without await, process.exit(0) kills the socket mid-connect for fast-passing
+// tools (Read, Glob, Grep, etc.), making them invisible in node9 tail.
 function notifyActivity(data: {
   id: string;
   ts: number;
@@ -1420,13 +1423,21 @@ function notifyActivity(data: {
   args?: unknown;
   status: string;
   label?: string;
-}): void {
-  try {
-    const payload = JSON.stringify(data);
-    const sock = net.createConnection(ACTIVITY_SOCKET_PATH);
-    sock.on('connect', () => sock.end(payload));
-    sock.on('error', () => {}); // daemon not running — silently skip
-  } catch {}
+}): Promise<void> {
+  return new Promise<void>((resolve) => {
+    try {
+      const payload = JSON.stringify(data);
+      const sock = net.createConnection(ACTIVITY_SOCKET_PATH);
+      sock.on('connect', () => {
+        sock.end(payload);
+        sock.on('finish', resolve);
+        sock.on('close', resolve);
+      });
+      sock.on('error', resolve); // daemon not running — resolve immediately
+    } catch {
+      resolve();
+    }
+  });
 }
 
 export async function authorizeHeadless(
@@ -1440,7 +1451,7 @@ export async function authorizeHeadless(
   if (!options?.calledFromDaemon) {
     const actId = randomUUID();
     const actTs = Date.now();
-    notifyActivity({ id: actId, ts: actTs, tool: toolName, args, status: 'pending' });
+    await notifyActivity({ id: actId, ts: actTs, tool: toolName, args, status: 'pending' });
     const result = await _authorizeHeadlessCore(
       toolName,
       args,
@@ -1448,7 +1459,7 @@ export async function authorizeHeadless(
       meta,
       options
     );
-    notifyActivity({
+    await notifyActivity({
       id: actId,
       tool: toolName,
       ts: actTs,
