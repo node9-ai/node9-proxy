@@ -12,29 +12,29 @@ const noNewlines = z.string().refine((s) => !s.includes('\n') && !s.includes('\r
   message: 'Value must not contain literal newline characters (use \\n instead)',
 });
 
-/** Validates that a string is a valid regex pattern. */
-const validRegex = noNewlines.refine(
-  (s) => {
-    try {
-      new RegExp(s);
-      return true;
-    } catch {
-      return false;
-    }
-  },
-  { message: 'Value must be a valid regular expression' }
-);
-
 // ── Smart Rules ───────────────────────────────────────────────────────────────
 
 const SmartConditionSchema = z.object({
   field: z.string().min(1, 'Condition field must not be empty'),
-  op: z.enum(['matches', 'notMatches', 'contains', 'notContains', 'exists', 'notExists'], {
-    errorMap: () => ({
-      message: 'op must be one of: matches, notMatches, contains, notContains, exists, notExists',
-    }),
-  }),
-  value: validRegex.optional(),
+  op: z.enum(
+    [
+      'matches',
+      'notMatches',
+      'contains',
+      'notContains',
+      'exists',
+      'notExists',
+      'matchesGlob',
+      'notMatchesGlob',
+    ],
+    {
+      errorMap: () => ({
+        message:
+          'op must be one of: matches, notMatches, contains, notContains, exists, notExists, matchesGlob, notMatchesGlob',
+      }),
+    }
+  ),
+  value: z.string().optional(),
   flags: z.string().optional(),
 });
 
@@ -47,14 +47,6 @@ const SmartRuleSchema = z.object({
     errorMap: () => ({ message: 'verdict must be one of: allow, review, block' }),
   }),
   reason: z.string().optional(),
-});
-
-// ── Policy Rules ──────────────────────────────────────────────────────────────
-
-const PolicyRuleSchema = z.object({
-  action: z.string().min(1),
-  allowPaths: z.array(z.string()).optional(),
-  blockPaths: z.array(z.string()).optional(),
 });
 
 // ── Top-level Config ─────────────────────────────────────────────────────────
@@ -89,7 +81,6 @@ export const ConfigFileSchema = z
         dangerousWords: z.array(noNewlines).optional(),
         ignoredTools: z.array(z.string()).optional(),
         toolInspection: z.record(z.string()).optional(),
-        rules: z.array(PolicyRuleSchema).optional(),
         smartRules: z.array(SmartRuleSchema).optional(),
         snapshot: z
           .object({

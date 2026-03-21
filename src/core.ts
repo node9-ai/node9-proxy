@@ -187,7 +187,15 @@ function getNestedValue(obj: unknown, path: string): unknown {
 
 export interface SmartCondition {
   field: string;
-  op: 'matches' | 'notMatches' | 'contains' | 'notContains' | 'exists' | 'notExists';
+  op:
+    | 'matches'
+    | 'notMatches'
+    | 'contains'
+    | 'notContains'
+    | 'exists'
+    | 'notExists'
+    | 'matchesGlob'
+    | 'notMatchesGlob';
   value?: string;
   flags?: string;
 }
@@ -257,6 +265,10 @@ export function evaluateSmartConditions(args: unknown, rule: SmartRule): boolean
           return true;
         }
       }
+      case 'matchesGlob':
+        return val !== null && cond.value ? pm.isMatch(val, cond.value) : false;
+      case 'notMatchesGlob':
+        return val !== null && cond.value ? !pm.isMatch(val, cond.value) : true;
       default:
         return false;
     }
@@ -414,12 +426,6 @@ interface EnvironmentConfig {
   requireApproval?: boolean;
 }
 
-interface PolicyRule {
-  action: string;
-  allowPaths?: string[];
-  blockPaths?: string[];
-}
-
 interface Config {
   settings: {
     mode: string;
@@ -435,7 +441,6 @@ interface Config {
     dangerousWords: string[];
     ignoredTools: string[];
     toolInspection: Record<string, string>;
-    rules: PolicyRule[];
     smartRules: SmartRule[];
     snapshot: {
       tools: string[];
@@ -524,25 +529,27 @@ export const DEFAULT_CONFIG: Config = {
       onlyPaths: [],
       ignorePaths: ['**/node_modules/**', 'dist/**', 'build/**', '.next/**', '**/*.log'],
     },
-    rules: [
-      // Only use the legacy rules format for simple path-based rm control.
-      // All other command-level enforcement lives in smartRules below.
-      {
-        action: 'rm',
-        allowPaths: [
-          '**/node_modules/**',
-          'dist/**',
-          'build/**',
-          '.next/**',
-          'coverage/**',
-          '.cache/**',
-          'tmp/**',
-          'temp/**',
-          '.DS_Store',
-        ],
-      },
-    ],
     smartRules: [
+      // ── rm safety (critical — always evaluated first) ──────────────────────
+      {
+        name: 'block-rm-rf-home',
+        tool: 'bash',
+        conditionMode: 'all',
+        conditions: [
+          {
+            field: 'command',
+            op: 'matches',
+            value: 'rm\\b.*(-[rRfF]*[rR][rRfF]*|--recursive)',
+          },
+          {
+            field: 'command',
+            op: 'matches',
+            value: '(~|\\/root(\\/|$)|\\$HOME|\\/home\\/)',
+          },
+        ],
+        verdict: 'block',
+        reason: 'Recursive delete of home directory is irreversible',
+      },
       // ── SQL safety ────────────────────────────────────────────────────────
       {
         name: 'no-delete-without-where',
@@ -637,6 +644,38 @@ export const DEFAULT_CONFIG: Config = {
   },
   environments: {},
 };
+
+// Advisory rm rules — appended LAST in getConfig() so user-defined smart rules
+// (project/global/shield) are evaluated first and can override them.
+// tool: '*' so they cover bash, shell, run_shell_command, and Gemini's Shell.
+// Pattern '(^|&&|\|\||;)\s*rm\b' matches rm as a shell command (including in chained
+// commands like 'cat foo && rm bar') but avoids false-positives on 'docker rm'.
+const ADVISORY_SMART_RULES: SmartRule[] = [
+  {
+    name: 'allow-rm-safe-paths',
+    tool: '*',
+    conditionMode: 'all',
+    conditions: [
+      { field: 'command', op: 'matches', value: '(^|&&|\\|\\||;)\\s*rm\\b' },
+      {
+        field: 'command',
+        op: 'matches',
+        // Matches known-safe build artifact paths in the command.
+        value:
+          '(node_modules|\\bdist\\b|\\.next|\\bcoverage\\b|\\.cache|\\btmp\\b|\\btemp\\b|\\.DS_Store)(\\/|\\s|$)',
+      },
+    ],
+    verdict: 'allow',
+    reason: 'Deleting a known-safe build artifact path',
+  },
+  {
+    name: 'review-rm',
+    tool: '*',
+    conditions: [{ field: 'command', op: 'matches', value: '(^|&&|\\|\\||;)\\s*rm\\b' }],
+    verdict: 'review',
+    reason: 'rm can permanently delete files — confirm the target path',
+  },
+];
 
 let cachedConfig: Config | null = null;
 
@@ -745,7 +784,6 @@ export async function evaluatePolicy(
   }
 
   let allTokens: string[] = [];
-  let actionTokens: string[] = [];
   let pathTokens: string[] = [];
 
   // 2. Tokenize the input
@@ -753,7 +791,6 @@ export async function evaluatePolicy(
   if (shellCommand) {
     const analyzed = await analyzeShellCommand(shellCommand);
     allTokens = analyzed.allTokens;
-    actionTokens = analyzed.actions;
     pathTokens = analyzed.paths;
 
     // Inline arbitrary code execution is always a review
@@ -766,11 +803,9 @@ export async function evaluatePolicy(
     // don't re-flag a SQL query that already passed the smart rules check above.
     if (isSqlTool(toolName, config.policy.toolInspection)) {
       allTokens = allTokens.filter((t) => !SQL_DML_KEYWORDS.has(t.toLowerCase()));
-      actionTokens = actionTokens.filter((t) => !SQL_DML_KEYWORDS.has(t.toLowerCase()));
     }
   } else {
     allTokens = tokenize(toolName);
-    actionTokens = [toolName];
 
     // Deep scan: if this tool isn't in toolInspection, scan all arg values for dangerous words
     if (args && typeof args === 'object') {
@@ -812,32 +847,7 @@ export async function evaluatePolicy(
     if (allInSandbox) return { decision: 'allow' };
   }
 
-  // ── 5. Rules Evaluation ─────────────────────────────────────────────────
-  for (const action of actionTokens) {
-    const rule = config.policy.rules.find(
-      (r) => r.action === action || matchesPattern(action, r.action)
-    );
-    if (rule) {
-      if (pathTokens.length > 0) {
-        const anyBlocked = pathTokens.some((p) => matchesPattern(p, rule.blockPaths || []));
-        if (anyBlocked)
-          return {
-            decision: 'review',
-            blockedByLabel: `Project/Global Config — rule "${rule.action}" (path blocked)`,
-            tier: 5,
-          };
-        const allAllowed = pathTokens.every((p) => matchesPattern(p, rule.allowPaths || []));
-        if (allAllowed) return { decision: 'allow' };
-      }
-      return {
-        decision: 'review',
-        blockedByLabel: `Project/Global Config — rule "${rule.action}" (default block)`,
-        tier: 5,
-      };
-    }
-  }
-
-  // ── 6. Dangerous Words Evaluation ───────────────────────────────────────
+  // ── 5. Dangerous Words Evaluation ───────────────────────────────────────
   let matchedDangerousWord: string | undefined;
   const isDangerous = allTokens.some((token) =>
     config.policy.dangerousWords.some((word) => {
@@ -1028,14 +1038,12 @@ export async function explainPolicy(toolName: string, args?: unknown): Promise<E
 
   // ── 3. Input parsing ──────────────────────────────────────────────────────
   let allTokens: string[] = [];
-  let actionTokens: string[] = [];
   let pathTokens: string[] = [];
 
   const shellCommand = extractShellCommand(toolName, args, config.policy.toolInspection);
   if (shellCommand) {
     const analyzed = await analyzeShellCommand(shellCommand);
     allTokens = analyzed.allTokens;
-    actionTokens = analyzed.actions;
     pathTokens = analyzed.paths;
 
     const patterns = Object.keys(config.policy.toolInspection);
@@ -1076,7 +1084,6 @@ export async function explainPolicy(toolName: string, args?: unknown): Promise<E
     // DML keywords so dangerous-word checks don't re-flag a validated query.
     if (isSqlTool(toolName, config.policy.toolInspection)) {
       allTokens = allTokens.filter((t) => !SQL_DML_KEYWORDS.has(t.toLowerCase()));
-      actionTokens = actionTokens.filter((t) => !SQL_DML_KEYWORDS.has(t.toLowerCase()));
       steps.push({
         name: 'SQL token stripping',
         outcome: 'checked',
@@ -1085,7 +1092,6 @@ export async function explainPolicy(toolName: string, args?: unknown): Promise<E
     }
   } else {
     allTokens = tokenize(toolName);
-    actionTokens = [toolName];
     let detail = `No toolInspection match for "${toolName}" — tokens: [${allTokens.join(', ')}]`;
     if (args && typeof args === 'object') {
       const flattenedArgs = JSON.stringify(args).toLowerCase();
@@ -1132,71 +1138,7 @@ export async function explainPolicy(toolName: string, args?: unknown): Promise<E
     });
   }
 
-  // ── 6. Policy rules ───────────────────────────────────────────────────────
-  let ruleMatched = false;
-  for (const action of actionTokens) {
-    const rule = config.policy.rules.find(
-      (r) => r.action === action || matchesPattern(action, r.action)
-    );
-    if (rule) {
-      ruleMatched = true;
-      if (pathTokens.length > 0) {
-        const anyBlocked = pathTokens.some((p) => matchesPattern(p, rule.blockPaths || []));
-        if (anyBlocked) {
-          steps.push({
-            name: 'Policy rules',
-            outcome: 'review',
-            detail: `Rule "${rule.action}" matched + path is in blockPaths`,
-            isFinal: true,
-          });
-          return {
-            tool: toolName,
-            args,
-            waterfall,
-            steps,
-            decision: 'review',
-            blockedByLabel: `Project/Global Config — rule "${rule.action}" (path blocked)`,
-          };
-        }
-        const allAllowed = pathTokens.every((p) => matchesPattern(p, rule.allowPaths || []));
-        if (allAllowed) {
-          steps.push({
-            name: 'Policy rules',
-            outcome: 'allow',
-            detail: `Rule "${rule.action}" matched + all paths are in allowPaths`,
-            isFinal: true,
-          });
-          return { tool: toolName, args, waterfall, steps, decision: 'allow' };
-        }
-      }
-      steps.push({
-        name: 'Policy rules',
-        outcome: 'review',
-        detail: `Rule "${rule.action}" matched — default block (no path exception)`,
-        isFinal: true,
-      });
-      return {
-        tool: toolName,
-        args,
-        waterfall,
-        steps,
-        decision: 'review',
-        blockedByLabel: `Project/Global Config — rule "${rule.action}" (default block)`,
-      };
-    }
-  }
-  if (!ruleMatched) {
-    steps.push({
-      name: 'Policy rules',
-      outcome: 'skip',
-      detail:
-        config.policy.rules.length === 0
-          ? 'No rules configured'
-          : `No rule matched [${actionTokens.join(', ')}]`,
-    });
-  }
-
-  // ── 7. Dangerous words ────────────────────────────────────────────────────
+  // ── 6. Dangerous words ────────────────────────────────────────────────────
   let matchedDangerousWord: string | undefined;
   const isDangerous = uniqueTokens.some((token) =>
     config.policy.dangerousWords.some((word) => {
@@ -1947,7 +1889,6 @@ export function getConfig(): Config {
     dangerousWords: [...DEFAULT_CONFIG.policy.dangerousWords],
     ignoredTools: [...DEFAULT_CONFIG.policy.ignoredTools],
     toolInspection: { ...DEFAULT_CONFIG.policy.toolInspection },
-    rules: [...DEFAULT_CONFIG.policy.rules],
     smartRules: [...DEFAULT_CONFIG.policy.smartRules],
     snapshot: {
       tools: [...DEFAULT_CONFIG.policy.snapshot.tools],
@@ -1978,7 +1919,6 @@ export function getConfig(): Config {
 
     if (p.toolInspection)
       mergedPolicy.toolInspection = { ...mergedPolicy.toolInspection, ...p.toolInspection };
-    if (p.rules) mergedPolicy.rules.push(...p.rules);
     if (p.smartRules) mergedPolicy.smartRules.push(...p.smartRules);
     if (p.snapshot) {
       const s = p.snapshot as Partial<Config['policy']['snapshot']>;
@@ -2019,6 +1959,13 @@ export function getConfig(): Config {
       if (!existingRuleNames.has(rule.name)) mergedPolicy.smartRules.push(rule);
     }
     for (const word of shield.dangerousWords) mergedPolicy.dangerousWords.push(word);
+  }
+
+  // Advisory rm rules are always appended last so user-defined rules (project/global/shield)
+  // are evaluated first and can override default rm behaviour.
+  const existingAdvisoryNames = new Set(mergedPolicy.smartRules.map((r) => r.name));
+  for (const rule of ADVISORY_SMART_RULES) {
+    if (!existingAdvisoryNames.has(rule.name)) mergedPolicy.smartRules.push(rule);
   }
 
   if (process.env.NODE9_MODE) mergedSettings.mode = process.env.NODE9_MODE as string;

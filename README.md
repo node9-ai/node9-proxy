@@ -172,14 +172,16 @@ Smart Rules match on **raw tool arguments** using structured conditions:
 
 **Condition operators:**
 
-| `op`          | Meaning                                                             |
-| :------------ | :------------------------------------------------------------------ |
-| `matches`     | Field value matches regex (`value` = pattern, `flags` = e.g. `"i"`) |
-| `notMatches`  | Field value does not match regex                                    |
-| `contains`    | Field value contains substring                                      |
-| `notContains` | Field value does not contain substring                              |
-| `exists`      | Field is present and non-empty                                      |
-| `notExists`   | Field is absent or empty                                            |
+| `op`             | Meaning                                                              |
+| :--------------- | :------------------------------------------------------------------- |
+| `matches`        | Field value matches regex (`value` = pattern, `flags` = e.g. `"i"`) |
+| `notMatches`     | Field value does not match regex (`value` = pattern, `flags` optional) |
+| `contains`       | Field value contains substring                                       |
+| `notContains`    | Field value does not contain substring                               |
+| `exists`         | Field is present and non-empty                                       |
+| `notExists`      | Field is absent or empty                                             |
+| `matchesGlob`    | Field value matches a glob pattern (`value` = e.g. `"**/node_modules/**"`) |
+| `notMatchesGlob` | Field value does not match a glob pattern                            |
 
 The `field` key supports dot-notation for nested args: `"params.query.sql"`.
 

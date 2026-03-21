@@ -43,7 +43,6 @@ function mockConfig(config: MockConfig) {
             run_shell_command: 'command',
             bash: 'command',
           },
-          rules: [],
           ...config.policy,
         },
         environments: config.environments || {},
@@ -98,13 +97,9 @@ describe('Gemini Integration Security', () => {
     expect(result.approved).toBe(true);
   });
 
-  // FIXED TEST: Use a path that is in the DEFAULT_CONFIG allowPaths list (like 'dist')
-  it('allows "rm" on specific allowed paths even if the verb is monitored', async () => {
-    mockConfig({
-      policy: {
-        rules: [{ action: 'rm', allowPaths: ['dist/**'] }],
-      },
-    });
+  it('allows "rm" on safe build artifact paths via built-in advisory rule', async () => {
+    mockConfig({});
+    // dist/ is in the built-in allow-rm-safe-paths rule — no config needed.
     const result = await evaluatePolicy('run_shell_command', { command: 'rm -rf dist/old_build' });
     expect(result.decision).toBe('allow');
   });

@@ -152,31 +152,6 @@ export const SHIELDS: Record<string, ShieldDefinition> = {
     aliases: ['fs'],
     smartRules: [
       {
-        name: 'shield:filesystem:block-rm-rf-home',
-        tool: 'bash',
-        // Two conditions (AND): command is a recursive rm AND targets a home path.
-        // Using conditionMode:'all' avoids a single complex regex that's hard to verify.
-        // Known bypass vectors not covered: unlink, find -delete, language-level file ops.
-        // This rule is a best-effort heuristic, not a comprehensive sandbox.
-        conditionMode: 'all',
-        conditions: [
-          {
-            field: 'command',
-            op: 'matches',
-            // Matches: rm -r, rm -R, rm -rf, rm -fr, rm --recursive (any order)
-            value: 'rm\\b.*(-[rRfF]*[rR][rRfF]*|--recursive)',
-          },
-          {
-            field: 'command',
-            op: 'matches',
-            // Matches home path targets: ~, $HOME, ~/*, /home/*, /root, /root/*
-            value: '(~|\\/root(\\/|$)|\\$HOME|\\/home\\/)',
-          },
-        ],
-        verdict: 'block',
-        reason: 'Recursive delete of home directory — blocked by filesystem shield',
-      },
-      {
         name: 'shield:filesystem:review-chmod-777',
         tool: 'bash',
         conditions: [

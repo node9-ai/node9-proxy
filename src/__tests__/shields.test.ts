@@ -12,6 +12,7 @@ import {
   readActiveShields,
   writeActiveShields,
 } from '../shields.js';
+import { DEFAULT_CONFIG } from '../core.js';
 
 // ── fs mocks ──────────────────────────────────────────────────────────────────
 const readFileSyncSpy = vi.spyOn(fs, 'readFileSync');
@@ -151,11 +152,11 @@ describe('shield enable deduplication', () => {
   });
 });
 
-// ── filesystem shield rule regexes ────────────────────────────────────────────
+// ── built-in block-rm-rf-home rule regexes ────────────────────────────────────
 describe('filesystem shield: block-rm-rf-home regex', () => {
-  const rule = SHIELDS.filesystem.smartRules.find(
-    (r) => r.name === 'shield:filesystem:block-rm-rf-home'
-  )!;
+  // block-rm-rf-home was moved from the filesystem shield to the built-in DEFAULT_CONFIG
+  // so it fires before any user-defined rules.
+  const rule = DEFAULT_CONFIG.policy.smartRules.find((r) => r.name === 'block-rm-rf-home')!;
 
   // Helper: check if ALL conditions match the given command
   function matches(command: string): boolean {
