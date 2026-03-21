@@ -304,60 +304,20 @@ interface CursorMcpConfig {
   [key: string]: unknown;
 }
 
-interface CursorHookEntry {
-  command: string;
-  args?: string[];
-}
-
-interface CursorHooksFile {
-  version: number;
-  hooks?: {
-    preToolUse?: CursorHookEntry[];
-    postToolUse?: CursorHookEntry[];
-    [key: string]: CursorHookEntry[] | undefined;
-  };
-}
-
 export async function setupCursor(): Promise<void> {
   const homeDir = os.homedir();
   const mcpPath = path.join(homeDir, '.cursor', 'mcp.json');
-  const hooksPath = path.join(homeDir, '.cursor', 'hooks.json');
 
   const mcpConfig = readJson<CursorMcpConfig>(mcpPath) ?? {};
-  const hooksFile = readJson<CursorHooksFile>(hooksPath) ?? { version: 1 };
   const servers = mcpConfig.mcpServers ?? {};
 
   let anythingChanged = false;
 
-  // ── Step 1: Pure additions — apply immediately, no prompt ────────────────
-  if (!hooksFile.hooks) hooksFile.hooks = {};
+  // Note: Cursor does not yet support a pre-execution hooks file.
+  // Native hook mode is pending Cursor shipping that capability.
+  // MCP proxy wrapping is the supported protection method for now.
 
-  const hasPreHook = hooksFile.hooks.preToolUse?.some(
-    (h) => (h.command === 'node9' && h.args?.includes('check')) || h.command?.includes('cli.js')
-  );
-  if (!hasPreHook) {
-    if (!hooksFile.hooks.preToolUse) hooksFile.hooks.preToolUse = [];
-    hooksFile.hooks.preToolUse.push({ command: fullPathCommand('check') });
-    console.log(chalk.green('  ✅ preToolUse hook added → node9 check'));
-    anythingChanged = true;
-  }
-
-  const hasPostHook = hooksFile.hooks.postToolUse?.some(
-    (h) => (h.command === 'node9' && h.args?.includes('log')) || h.command?.includes('cli.js')
-  );
-  if (!hasPostHook) {
-    if (!hooksFile.hooks.postToolUse) hooksFile.hooks.postToolUse = [];
-    hooksFile.hooks.postToolUse.push({ command: fullPathCommand('log') });
-    console.log(chalk.green('  ✅ postToolUse hook added → node9 log'));
-    anythingChanged = true;
-  }
-
-  if (anythingChanged) {
-    writeJson(hooksPath, hooksFile);
-    console.log('');
-  }
-
-  // ── Step 2: Modifications — show preview and ask ─────────────────────────
+  // ── Modifications — show preview and ask ─────────────────────────
   const serversToWrap: Array<{ name: string; originalCmd: string; parts: string[] }> = [];
   for (const [name, server] of Object.entries(servers)) {
     if (!server.command || server.command === 'node9') continue;
@@ -389,14 +349,26 @@ export async function setupCursor(): Promise<void> {
   }
 
   // ── Summary ───────────────────────────────────────────────────────────────
+  console.log(
+    chalk.yellow(
+      '  ⚠️  Note: Cursor does not yet support native pre-execution hooks.\n' +
+        '     MCP proxy wrapping is the only supported protection mode for Cursor.'
+    )
+  );
+  console.log('');
+
   if (!anythingChanged && serversToWrap.length === 0) {
-    console.log(chalk.blue('ℹ️  Node9 is already fully configured for Cursor.'));
+    console.log(
+      chalk.blue(
+        'ℹ️  No MCP servers found to wrap. Add MCP servers to ~/.cursor/mcp.json and re-run.'
+      )
+    );
     printDaemonTip();
     return;
   }
 
   if (anythingChanged) {
-    console.log(chalk.green.bold('🛡️  Node9 is now protecting Cursor!'));
+    console.log(chalk.green.bold('🛡️  Node9 is now protecting Cursor via MCP proxy!'));
     console.log(chalk.gray('    Restart Cursor for changes to take effect.'));
     printDaemonTip();
   }

@@ -185,31 +185,15 @@ describe('setupGemini', () => {
 // ── setupCursor ───────────────────────────────────────────────────────────────
 
 describe('setupCursor', () => {
-  const hooksPath = '/mock/home/.cursor/hooks.json';
   const mcpPath = '/mock/home/.cursor/mcp.json';
 
-  it('adds both hooks immediately on a fresh install — no prompt', async () => {
+  it('does not write hooks.json — Cursor does not support native hooks', async () => {
     const confirm = await getConfirm();
     await setupCursor();
 
     expect(confirm).not.toHaveBeenCalled();
-    const written = writtenTo(hooksPath);
-    expect(written.version).toBe(1);
-    expect(written.hooks.preToolUse[0].command).toBe('node9 check');
-    expect(written.hooks.postToolUse[0].command).toBe('node9 log');
-  });
-
-  it('does not add hooks that already exist', async () => {
-    withExistingFile(hooksPath, {
-      version: 1,
-      hooks: {
-        preToolUse: [{ command: 'node9', args: ['check'] }],
-        postToolUse: [{ command: 'node9', args: ['log'] }],
-      },
-    });
-
-    await setupCursor();
-    expect(writtenTo(hooksPath)).toBeNull();
+    // hooks.json must never be written
+    expect(writtenTo('/mock/home/.cursor/hooks.json')).toBeNull();
   });
 
   it('prompts before wrapping existing MCP servers', async () => {
@@ -246,20 +230,5 @@ describe('setupCursor', () => {
 
     await setupCursor();
     expect(writtenTo(mcpPath)).toBeNull();
-  });
-
-  it('preserves existing hooks from other tools when adding node9', async () => {
-    withExistingFile(hooksPath, {
-      version: 1,
-      hooks: { preToolUse: [{ command: 'some-other-tool' }] },
-    });
-
-    await setupCursor();
-
-    const written = writtenTo(hooksPath);
-    // node9 should be appended, not replace the existing hook
-    expect(written.hooks.preToolUse).toHaveLength(2);
-    expect(written.hooks.preToolUse[0].command).toBe('some-other-tool');
-    expect(written.hooks.preToolUse[1].command).toBe('node9 check');
   });
 });

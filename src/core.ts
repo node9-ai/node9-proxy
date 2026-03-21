@@ -10,6 +10,7 @@ import { askNativePopup, sendDesktopNotification } from './ui/native';
 import { computeRiskMetadata, RiskMetadata } from './context-sniper';
 import { sanitizeConfig } from './config-schema';
 import { readActiveShields, getShield } from './shields';
+import { scanArgs, type DlpMatch } from './dlp';
 
 // ── Feature file paths ────────────────────────────────────────────────────────
 const PAUSED_FILE = path.join(os.homedir(), '.node9', 'PAUSED');
@@ -447,6 +448,10 @@ interface Config {
       onlyPaths: string[];
       ignorePaths: string[];
     };
+    dlp: {
+      enabled: boolean;
+      scanIgnoredTools: boolean;
+    };
   };
   environments: Record<string, EnvironmentConfig>;
 }
@@ -641,6 +646,7 @@ export const DEFAULT_CONFIG: Config = {
         reason: 'Piping remote script into a shell is a supply-chain attack vector',
       },
     ],
+    dlp: { enabled: true, scanIgnoredTools: true },
   },
   environments: {},
 };
@@ -980,8 +986,31 @@ export async function explainPolicy(toolName: string, args?: unknown): Promise<E
 
   const config = getConfig();
 
+  // ── 0. DLP Content Scanner ────────────────────────────────────────────────
+  const wouldBeIgnored = matchesPattern(toolName, config.policy.ignoredTools);
+  if (config.policy.dlp.enabled && (!wouldBeIgnored || config.policy.dlp.scanIgnoredTools)) {
+    const dlpMatch = args !== undefined ? scanArgs(args) : null;
+    if (dlpMatch) {
+      steps.push({
+        name: 'DLP Content Scanner',
+        outcome: dlpMatch.severity === 'block' ? 'block' : 'review',
+        detail: `🚨 ${dlpMatch.patternName} detected in ${dlpMatch.fieldPath} — sample: ${dlpMatch.redactedSample}`,
+        isFinal: dlpMatch.severity === 'block',
+      });
+      if (dlpMatch.severity === 'block') {
+        return { tool: toolName, args, waterfall, steps, decision: 'block' };
+      }
+    } else {
+      steps.push({
+        name: 'DLP Content Scanner',
+        outcome: 'checked',
+        detail: 'No sensitive credentials detected in args',
+      });
+    }
+  }
+
   // ── 1. Ignored tools ──────────────────────────────────────────────────────
-  if (matchesPattern(toolName, config.policy.ignoredTools)) {
+  if (wouldBeIgnored) {
     steps.push({
       name: 'Ignored tools',
       outcome: 'allow',
@@ -1421,6 +1450,32 @@ export async function authorizeHeadless(
   let policyMatchedWord: string | undefined;
   let riskMetadata: RiskMetadata | undefined;
 
+  // ── DLP CONTENT SCANNER ───────────────────────────────────────────────────
+  // Runs before ignored-tool fast path and audit mode so that a leaked
+  // credential is always caught — even for "safe" tools like web_search.
+  if (
+    config.policy.dlp.enabled &&
+    (!isIgnoredTool(toolName) || config.policy.dlp.scanIgnoredTools)
+  ) {
+    const dlpMatch: DlpMatch | null = scanArgs(args);
+    if (dlpMatch) {
+      const dlpReason =
+        `🚨 DATA LOSS PREVENTION: ${dlpMatch.patternName} detected in ` +
+        `field "${dlpMatch.fieldPath}" (${dlpMatch.redactedSample})`;
+      if (dlpMatch.severity === 'block') {
+        if (!isManual) appendLocalAudit(toolName, args, 'deny', 'dlp-block', meta);
+        return {
+          approved: false,
+          reason: dlpReason,
+          blockedBy: 'local-config',
+          blockedByLabel: '🚨 Node9 DLP (Secret Detected)',
+        };
+      }
+      // severity === 'review': fall through to the race engine with a DLP label
+      explainableLabel = '🚨 Node9 DLP (Credential Review)';
+    }
+  }
+
   if (config.settings.mode === 'audit') {
     if (!isIgnoredTool(toolName)) {
       const policyResult = await evaluatePolicy(toolName, args, meta?.agent);
@@ -1719,7 +1774,14 @@ export async function authorizeHeadless(
     racePromises.push(
       (async () => {
         try {
-          console.log(chalk.bgRed.white.bold(` 🛑 NODE9 INTERCEPTOR `));
+          if (explainableLabel.includes('DLP')) {
+            console.log(chalk.bgRed.white.bold(` 🚨 NODE9 DLP ALERT — CREDENTIAL DETECTED `));
+            console.log(
+              chalk.red.bold(`   A sensitive secret was detected in the tool arguments!`)
+            );
+          } else {
+            console.log(chalk.bgRed.white.bold(` 🛑 NODE9 INTERCEPTOR `));
+          }
           console.log(`${chalk.bold('Action:')} ${chalk.red(toolName)}`);
           console.log(`${chalk.bold('Flagged By:')} ${chalk.yellow(explainableLabel)}`);
 
@@ -1895,6 +1957,7 @@ export function getConfig(): Config {
       onlyPaths: [...DEFAULT_CONFIG.policy.snapshot.onlyPaths],
       ignorePaths: [...DEFAULT_CONFIG.policy.snapshot.ignorePaths],
     },
+    dlp: { ...DEFAULT_CONFIG.policy.dlp },
   };
   const mergedEnvironments: Record<string, EnvironmentConfig> = { ...DEFAULT_CONFIG.environments };
 
@@ -1925,6 +1988,11 @@ export function getConfig(): Config {
       if (s.tools) mergedPolicy.snapshot.tools.push(...s.tools);
       if (s.onlyPaths) mergedPolicy.snapshot.onlyPaths.push(...s.onlyPaths);
       if (s.ignorePaths) mergedPolicy.snapshot.ignorePaths.push(...s.ignorePaths);
+    }
+    if (p.dlp) {
+      const d = p.dlp as Partial<Config['policy']['dlp']>;
+      if (d.enabled !== undefined) mergedPolicy.dlp.enabled = d.enabled;
+      if (d.scanIgnoredTools !== undefined) mergedPolicy.dlp.scanIgnoredTools = d.scanIgnoredTools;
     }
 
     const envs = (source.environments || {}) as Record<string, unknown>;

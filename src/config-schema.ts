@@ -89,6 +89,12 @@ export const ConfigFileSchema = z
             ignorePaths: z.array(z.string()).optional(),
           })
           .optional(),
+        dlp: z
+          .object({
+            enabled: z.boolean().optional(),
+            scanIgnoredTools: z.boolean().optional(),
+          })
+          .optional(),
       })
       .optional(),
     environments: z.record(z.object({ requireApproval: z.boolean().optional() })).optional(),

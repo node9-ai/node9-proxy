@@ -83,6 +83,20 @@ INSTRUCTIONS:
 
   const label = blockedByLabel.toLowerCase();
 
+  if (
+    label.includes('dlp') ||
+    label.includes('secret detected') ||
+    label.includes('credential review')
+  ) {
+    return `NODE9 SECURITY ALERT: A sensitive credential (API key, token, or private key) was found in your tool call arguments.
+CRITICAL INSTRUCTION: Do NOT retry this action.
+REQUIRED ACTIONS:
+1. Remove the hardcoded credential from your command or code.
+2. Use an environment variable or a dedicated secrets manager instead.
+3. Treat the leaked credential as compromised and rotate it immediately.
+Do NOT attempt to bypass this check or pass the credential through another tool.`;
+  }
+
   if (label.includes('sql safety') && label.includes('delete without where')) {
     return `NODE9: Blocked — DELETE without WHERE clause would wipe the entire table.
 INSTRUCTION: Add a WHERE clause to scope the deletion (e.g. WHERE id = <value>).
@@ -1025,7 +1039,16 @@ program
             blockedByContext.toLowerCase().includes('decision');
 
           // 3. Print to the human terminal for visibility
-          console.error(chalk.red(`\n🛑 Node9 blocked "${toolName}"`));
+          if (
+            blockedByContext.includes('DLP') ||
+            blockedByContext.includes('Secret Detected') ||
+            blockedByContext.includes('Credential Review')
+          ) {
+            console.error(chalk.bgRed.white.bold(`\n 🚨 NODE9 DLP ALERT — CREDENTIAL DETECTED `));
+            console.error(chalk.red.bold(`   A sensitive secret was found in the tool arguments!`));
+          } else {
+            console.error(chalk.red(`\n🛑 Node9 blocked "${toolName}"`));
+          }
           console.error(chalk.gray(`   Triggered by: ${blockedByContext}`));
           if (result?.changeHint) console.error(chalk.cyan(`   To change:  ${result.changeHint}`));
           console.error('');

@@ -209,6 +209,7 @@ const SHIELDS_STATE_FILE = path.join(os.homedir(), '.node9', 'shields.json');
 export function readActiveShields(): string[] {
   try {
     const raw = fs.readFileSync(SHIELDS_STATE_FILE, 'utf-8');
+    if (!raw.trim()) return []; // empty file — treat same as missing
     const parsed = JSON.parse(raw) as { active?: unknown };
     if (Array.isArray(parsed.active)) {
       // Validate each element is a non-empty string that refers to a known shield
