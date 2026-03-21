@@ -18,22 +18,51 @@ beforeEach(() => {
 describe('Path-Based Policy (Advanced)', () => {
   // The old rules-based path policy has been replaced by smartRules.
   // These tests verify that the built-in advisory smartRules produce the same outcomes.
+  // All tests in this block rely on the beforeEach default: existsSpy returns false
+  // (no project/global config file present), so only built-in defaults are active.
 
   it('allows "rm -rf node_modules" via built-in allow-rm-safe-paths rule', async () => {
-    // No config needed — the built-in advisory rule covers node_modules.
     const result = await evaluatePolicy('Bash', { command: 'rm -rf ./node_modules/lodash' });
     expect(result.decision).toBe('allow');
+    // ruleName confirms the specific rule matched, not just any allow path
     expect(result.ruleName).toBe('allow-rm-safe-paths');
   });
 
   it('reviews "rm -rf src" — not a safe path, caught by built-in review-rm', async () => {
-    // No config needed — built-in review-rm catches any rm on non-safe paths.
-    expect((await evaluatePolicy('Bash', { command: 'rm -rf src' })).decision).toBe('review');
+    const result = await evaluatePolicy('Bash', { command: 'rm -rf src' });
+    expect(result.decision).toBe('review');
+    expect(result.ruleName).toBe('review-rm');
   });
 
   it('reviews "rm .env" — caught by built-in review-rm (review by default)', async () => {
-    // review-rm fires on any rm not explicitly allowed.
-    expect((await evaluatePolicy('Bash', { command: 'rm .env' })).decision).toBe('review');
+    const result = await evaluatePolicy('Bash', { command: 'rm .env' });
+    expect(result.decision).toBe('review');
+    expect(result.ruleName).toBe('review-rm');
+  });
+
+  it('Layer 1 invariant — user allow rule cannot bypass a built-in block', async () => {
+    // Security-critical: even if a project adds a broad allow rule, built-in
+    // block rules (Layer 1) must fire first and cannot be overridden.
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.spyOn(fs, 'readFileSync').mockReturnValue(
+      JSON.stringify({
+        policy: {
+          smartRules: [
+            {
+              name: 'user-allow-everything',
+              tool: 'bash',
+              conditions: [{ field: 'command', op: 'matches', value: '.*' }],
+              verdict: 'allow',
+              reason: 'allow all — must NOT override built-in blocks',
+            },
+          ],
+        },
+      })
+    );
+    // block-force-push is a Layer 1 built-in — must fire before the user allow rule
+    const result = await evaluatePolicy('bash', { command: 'git push --force origin main' });
+    expect(result.decision).toBe('block');
+    expect(result.ruleName).toBe('block-force-push');
   });
 
   it('a project smartRule can block rm on a sensitive path before advisory rules fire', async () => {

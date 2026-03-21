@@ -148,9 +148,15 @@ Node9 merges configuration from multiple sources in priority order. Higher tiers
 | 4    | **Global config**         | `~/.node9/config.json`                                    |
 | 5    | **Built-in defaults**     | Always active, no config needed                           |
 
-Smart rules from all layers are **concatenated** in evaluation order (first-match-wins): built-in defaults → global → project → shields → advisory defaults. This means built-in `block` rules always fire before any user-defined `allow` rules — a user config cannot bypass Layer 1 protection.
+**Settings** (mode, approvers, timeouts) follow the table above — higher tier wins. A project config overrides a global config.
 
-> **Note:** The two orderings run in opposite directions. The _settings table_ above shows override priority (Tier 1 wins over Tier 5 for settings like `mode`). The _smart rules evaluation order_ is the reverse — defaults are evaluated first so built-in blocks fire before any user rule can allow them. A project-level `block` rule fires before shield `block` rules; this is intentional so project policy can tighten or override shield defaults.
+**Smart rules** work differently. All layers are concatenated into a single ordered list and evaluated first-match-wins:
+
+```
+built-in defaults → global config → project config → shields → advisory defaults
+```
+
+Because built-in `block` rules sit at the front of this list, they always fire before any user-defined `allow` rule. **A project or global config cannot bypass Layer 1 protection.** Within the user layers, a project `block` rule fires before a shield `block` rule — so project policy can tighten or selectively override a shield.
 
 ---
 
