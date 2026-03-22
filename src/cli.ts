@@ -460,18 +460,40 @@ program
       console.log(chalk.blue('  ℹ️  Daemon was not running'));
     }
 
-    // 2. Remove hooks from all agents
+    // 2. Remove hooks from all agents (each wrapped independently so a partial
+    //    failure does not silently skip the remaining agents)
     console.log(chalk.bold('\nRemoving hooks...'));
-    teardownClaude();
-    teardownGemini();
-    teardownCursor();
+    for (const [label, fn] of [
+      ['Claude', teardownClaude],
+      ['Gemini', teardownGemini],
+      ['Cursor', teardownCursor],
+    ] as const) {
+      try {
+        fn();
+      } catch (err) {
+        console.error(
+          chalk.red(
+            `  ⚠️  Failed to remove ${label} hooks: ${err instanceof Error ? err.message : String(err)}`
+          )
+        );
+      }
+    }
 
-    // 3. Optionally purge ~/.node9/
+    // 3. Optionally purge ~/.node9/ — requires explicit confirmation because the
+    //    directory may contain credentials and cannot be recovered after deletion.
     if (options.purge) {
       const node9Dir = path.join(os.homedir(), '.node9');
       if (fs.existsSync(node9Dir)) {
-        fs.rmSync(node9Dir, { recursive: true, force: true });
-        console.log(chalk.green('\n  ✅ Deleted ~/.node9/ (config, audit log, credentials)'));
+        const confirmed = await confirm({
+          message: `Permanently delete ${node9Dir} (config, audit log, credentials)?`,
+          default: false,
+        });
+        if (confirmed) {
+          fs.rmSync(node9Dir, { recursive: true, force: true });
+          console.log(chalk.green('\n  ✅ Deleted ~/.node9/ (config, audit log, credentials)'));
+        } else {
+          console.log(chalk.yellow('\n  Skipped — ~/.node9/ was not deleted.'));
+        }
       } else {
         console.log(chalk.blue('\n  ℹ️  ~/.node9/ not found — nothing to delete'));
       }
@@ -1216,6 +1238,9 @@ program
               process.exit(0);
             }
             // Add the dynamic label so we know if it was Cloud, Config, etc.
+            // Denials communicate via exit code (non-zero) and JSON on stdout —
+            // stderr is intentionally unused so Claude Code never treats a block
+            // as a "hook error" (it does so on any stderr output regardless of exit code).
             sendBlock(retry.reason ?? `Node9 blocked "${toolName}".`, {
               ...retry,
               blockedByLabel: retry.blockedByLabel,
@@ -1224,7 +1249,9 @@ program
           }
         }
 
-        // Add the dynamic label to the final block
+        // Denials communicate via exit code (non-zero) and JSON on stdout —
+        // stderr is intentionally unused so Claude Code never treats a block
+        // as a "hook error" (it does so on any stderr output regardless of exit code).
         sendBlock(result.reason ?? `Node9 blocked "${toolName}".`, {
           ...result,
           blockedByLabel: result.blockedByLabel,

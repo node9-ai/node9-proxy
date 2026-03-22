@@ -44,9 +44,10 @@ function mockHttpRequest(
 ): void {
   vi.spyOn(http, 'request').mockImplementationOnce((...args: unknown[]) => {
     // tail.ts always uses the 2-arg form: http.request(options, callback).
-    // If the call signature ever changes to 3-arg (url, options, callback),
-    // update this index from 1 to 2.
-    const resCallback = args[1] as ((res: unknown) => void) | undefined;
+    // Fail loudly if the signature ever changes to 3-arg (url, options, callback).
+    if (args.length < 2 || typeof args[1] !== 'function')
+      throw new Error(`http.request call signature changed: expected 2 args, got ${args.length}`);
+    const resCallback = args[1] as (res: unknown) => void;
 
     const callbacks: {
       respond?: (statusCode: number) => void;
@@ -154,5 +155,35 @@ describe('startTail --clear error handling', () => {
 
     const { startTail } = await import('../tui/tail.js');
     await expect(startTail({ clear: true })).rejects.toThrow(/ECONNRESET/);
+  });
+});
+
+// ── startTail --history ───────────────────────────────────────────────────────
+
+describe('startTail --history flag', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }));
+  });
+
+  it('opens an SSE /events connection (does not call /events/clear)', async () => {
+    // The streaming path uses http.get — mock it to capture the call.
+    // We don't invoke the response callback, so readline is never created and
+    // the function returns as soon as it has set up the request.
+    const mockReq = { on: vi.fn() };
+    const getSpy = vi
+      .spyOn(http, 'get')
+      .mockReturnValueOnce(mockReq as unknown as http.ClientRequest);
+
+    const { startTail } = await import('../tui/tail.js');
+    await startTail({ history: true });
+
+    expect(getSpy).toHaveBeenCalledOnce();
+    // Connects to the SSE endpoint, not the clear endpoint
+    expect(String(getSpy.mock.calls[0][0])).toContain('/events');
+    expect(String(getSpy.mock.calls[0][0])).not.toContain('/clear');
+    // Error listener is always registered on the request
+    expect(mockReq.on).toHaveBeenCalledWith('error', expect.any(Function));
   });
 });

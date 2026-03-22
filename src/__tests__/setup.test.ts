@@ -317,6 +317,13 @@ describe('teardownClaude', () => {
     // No write — nothing changed
     expect(writtenTo(hooksPath)).toBeNull();
   });
+
+  it('does nothing when settings.json does not exist', () => {
+    // existsSync returns false (default beforeEach state) — no files present
+    teardownClaude();
+    expect(writtenTo(hooksPath)).toBeNull();
+    expect(writtenTo(mcpPath)).toBeNull();
+  });
 });
 
 // ── teardownGemini ────────────────────────────────────────────────────────────
