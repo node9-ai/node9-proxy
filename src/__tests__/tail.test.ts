@@ -33,6 +33,7 @@ function mockHttpRequest(
       on: ReturnType<typeof vi.fn>;
       once: ReturnType<typeof vi.fn>;
       end: ReturnType<typeof vi.fn>;
+      destroy: ReturnType<typeof vi.fn>;
     },
     callbacks: {
       respond?: (statusCode: number) => void;
