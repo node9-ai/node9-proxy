@@ -306,6 +306,21 @@ describe('teardownClaude', () => {
     expect(written.mcpServers.other.command).toBe('python');
   });
 
+  it('unwraps MCP server with no original args (args: undefined, not [])', () => {
+    withExistingFile(mcpPath, {
+      mcpServers: {
+        solo: { command: 'node9', args: ['my-binary'] },
+      },
+    });
+
+    teardownClaude();
+
+    const written = writtenTo(mcpPath);
+    expect(written.mcpServers.solo.command).toBe('my-binary');
+    // No original args — should be omitted, not set to []
+    expect(written.mcpServers.solo.args).toBeUndefined();
+  });
+
   it('does nothing when settings.json has no node9 hooks', () => {
     withExistingFile(hooksPath, {
       hooks: {

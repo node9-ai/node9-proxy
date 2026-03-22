@@ -489,8 +489,16 @@ program
           default: false,
         });
         if (confirmed) {
-          fs.rmSync(node9Dir, { recursive: true, force: true });
-          console.log(chalk.green('\n  ✅ Deleted ~/.node9/ (config, audit log, credentials)'));
+          fs.rmSync(node9Dir, { recursive: true });
+          // Verify deletion succeeded — force:true would swallow errors and
+          // print a false success if a file was locked or permission-denied.
+          if (fs.existsSync(node9Dir)) {
+            console.error(
+              chalk.red('\n  ⚠️  ~/.node9/ could not be fully deleted — remove it manually.')
+            );
+          } else {
+            console.log(chalk.green('\n  ✅ Deleted ~/.node9/ (config, audit log, credentials)'));
+          }
         } else {
           console.log(chalk.yellow('\n  Skipped — ~/.node9/ was not deleted.'));
         }
