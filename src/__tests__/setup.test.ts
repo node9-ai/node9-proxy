@@ -386,6 +386,17 @@ describe('teardownGemini', () => {
     teardownGemini();
     expect(writtenTo(settingsPath)).toBeNull();
   });
+
+  it('does nothing when settings.json has hooks but none belong to node9', () => {
+    withExistingFile(settingsPath, {
+      hooks: {
+        BeforeTool: [{ matcher: '.*', hooks: [{ command: '/other/tool run' }] }],
+      },
+    });
+
+    teardownGemini();
+    expect(writtenTo(settingsPath)).toBeNull();
+  });
 });
 
 // ── teardownCursor ────────────────────────────────────────────────────────────

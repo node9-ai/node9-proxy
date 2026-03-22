@@ -292,6 +292,19 @@ describe('smart rules', () => {
     expect(r.stdout).toBe('');
     expect(r.stderr).toContain('allowed');
   });
+
+  it('allowed call produces no stderr in production mode (NODE9_DEBUG unset)', () => {
+    // This is the actual production behavior: Claude Code treats any stderr
+    // output as a hook error regardless of exit code, so allowed calls must
+    // be completely silent on stderr when NODE9_DEBUG is not set.
+    const r = runCheck(
+      { tool_name: 'bash', tool_input: { command: 'ls -la /tmp' } },
+      { HOME: tmpHome },
+      tmpHome
+    );
+    expect(r.status).toBe(0);
+    expect(r.stderr).toBe('');
+  });
 });
 
 // ── 3. Dangerous words ────────────────────────────────────────────────────────
