@@ -131,26 +131,28 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
   const port = await ensureDaemon();
 
   if (options.clear) {
-    await new Promise<void>((resolve) => {
-      const req = http.request(
-        { method: 'POST', hostname: '127.0.0.1', port, path: '/events/clear' },
-        (res) => {
-          res.resume();
-          res.on('end', resolve);
-        }
-      );
-      req.on('error', resolve);
-      req.end();
-    });
+    let ok = false;
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/events/clear`, {
+        method: 'POST',
+        signal: AbortSignal.timeout(2000),
+      });
+      ok = res.ok;
+    } catch {}
+    if (ok) {
+      console.log(chalk.green('✓ Flight Recorder buffer cleared.'));
+    } else {
+      console.error(chalk.red('❌ Failed to clear buffer — is the daemon running?'));
+      process.exit(1);
+    }
+    return;
   }
 
   const connectionTime = Date.now();
   const pending = new Map<string, ActivityItem>();
 
   console.log(chalk.cyan.bold(`\n🛰️  Node9 tail  `) + chalk.dim(`→ localhost:${port}`));
-  if (options.clear) {
-    console.log(chalk.dim('History cleared. Showing live events. Press Ctrl+C to exit.\n'));
-  } else if (options.history) {
+  if (options.history) {
     console.log(chalk.dim('Showing history + live events. Press Ctrl+C to exit.\n'));
   } else {
     console.log(
