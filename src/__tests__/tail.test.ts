@@ -54,6 +54,10 @@ function mockHttpRequest(
       if (event === 'error')
         callbacks.error = (code: string) => cb(Object.assign(new Error(), { code }));
     }),
+    once: vi.fn((event: string, cb: (err?: NodeJS.ErrnoException) => void) => {
+      if (event === 'error')
+        callbacks.error = (code: string) => cb(Object.assign(new Error(), { code }));
+    }),
     end: vi.fn(),
     destroy: vi.fn(),
   };
@@ -130,5 +134,14 @@ describe('startTail --clear error handling', () => {
 
     const { startTail } = await import('../tui/tail.js');
     await expect(startTail({ clear: true })).rejects.toThrow(/HTTP 500/);
+  });
+
+  it('throws with error code for unrecognised network errors (e.g. ECONNRESET)', async () => {
+    mockHttpRequest((_req, cb) => {
+      cb.error?.('ECONNRESET');
+    });
+
+    const { startTail } = await import('../tui/tail.js');
+    await expect(startTail({ clear: true })).rejects.toThrow(/ECONNRESET/);
   });
 });

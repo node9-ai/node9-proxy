@@ -149,12 +149,12 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
         }
       );
       req.setTimeout(2000, () => {
-        // req.destroy() may also emit an error event (ECONNRESET) after this
-        // resolves — that's benign because Promise.resolve() is idempotent.
+        // destroy() may fire the error listener once more (ECONNRESET) after this
+        // resolves — req.once ensures the listener is already gone by then.
         req.destroy();
         resolve({ ok: false, code: 'ETIMEDOUT' });
       });
-      req.on('error', (err: NodeJS.ErrnoException) => resolve({ ok: false, code: err.code }));
+      req.once('error', (err: NodeJS.ErrnoException) => resolve({ ok: false, code: err.code }));
       req.end();
     });
     if (result.ok) {
