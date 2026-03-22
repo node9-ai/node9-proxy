@@ -19,6 +19,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Shadow Git Snapshots (Phase 2):** (Coming Soon) Automatic lightweight git commits before AI edits, allowing `node9 undo`.
 - **`flightRecorder` setting:** New `settings.flightRecorder` flag (default `true`) controls whether the daemon records tool call activity to the flight recorder ring buffer. Can be set to `false` to disable activity recording when the browser dashboard is not in use.
 
+### Breaking Changes
+
+- **`node9 tail --clear` no longer streams after clearing:** Previously `--clear` wiped the ring buffer and then continued tailing live events — visually identical to plain `node9 tail`. It now clears the buffer and exits immediately. To start fresh and watch, chain the commands: `node9 tail --clear && node9 tail --history`. Scripts relying on the old streaming-after-clear behaviour must be updated.
+
 ### Changed
 
 - **Default mode is now `audit`:** Fresh installs now default to `mode: "audit"` instead of `mode: "standard"`. In audit mode every tool call is approved and logged, with a desktop notification for anything that _would_ have been blocked. This lets teams observe agent behaviour before committing to a blocking policy. Switch to `mode: "standard"` or `mode: "strict"` when you are ready to enforce.

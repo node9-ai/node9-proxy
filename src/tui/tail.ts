@@ -139,10 +139,15 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
         (res) => {
           res.resume();
           const status = res.statusCode ?? 0;
-          res.on('end', () => resolve({ ok: status >= 200 && status < 300 }));
+          // Non-2xx: surface the HTTP status so the user knows what went wrong
+          res.on('end', () =>
+            resolve({ ok: status >= 200 && status < 300, code: status >= 200 && status < 300 ? undefined : `HTTP ${status}` })
+          );
         }
       );
       req.setTimeout(2000, () => {
+        // req.destroy() may also emit an error event (ECONNRESET) after this
+        // resolves — that's benign because Promise.resolve() is idempotent.
         req.destroy();
         resolve({ ok: false, code: 'ETIMEDOUT' });
       });
