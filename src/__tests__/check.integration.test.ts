@@ -747,3 +747,18 @@ describe('malformed JSON payload', () => {
     expect(r.stderr).not.toContain('TypeError');
   });
 });
+
+// ── removefrom CLI wiring ─────────────────────────────────────────────────────
+
+describe('removefrom command', () => {
+  it('exits with code 1 and prints error for unknown target', () => {
+    const result = spawnSync(process.execPath, [CLI, 'removefrom', 'vscode'], {
+      encoding: 'utf-8',
+      timeout: 5000,
+      env: { ...process.env, NODE9_TESTING: '1' },
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Unknown target');
+    expect(result.stderr).toContain('vscode');
+  });
+});

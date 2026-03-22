@@ -432,7 +432,8 @@ program
   .addHelpText('after', '\n  Supported targets:  claude  gemini  cursor')
   .argument('<target>', 'The agent to remove from: claude | gemini | cursor')
   .action((target: string) => {
-    console.log(chalk.cyan(`\n🛡️  Node9: removing hooks from ${target}...\n`));
+    // Validate before logging so the target string is never interpolated
+    // into output before it has been confirmed to be a known value.
     let fn: (() => void) | undefined;
     if (target === 'claude') fn = teardownClaude;
     else if (target === 'gemini') fn = teardownGemini;
@@ -441,6 +442,7 @@ program
       console.error(chalk.red(`Unknown target: "${target}". Supported: claude, gemini, cursor`));
       process.exit(1);
     }
+    console.log(chalk.cyan(`\n🛡️  Node9: removing hooks from ${target}...\n`));
     try {
       fn!();
     } catch (err) {

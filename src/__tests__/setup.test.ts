@@ -351,6 +351,14 @@ describe('teardownClaude', () => {
     expect(writtenTo(hooksPath)).toBeNull();
     expect(writtenTo(mcpPath)).toBeNull();
   });
+
+  it('does nothing when settings.json exists but hooks key is absent', () => {
+    // File exists but has no hooks section (e.g. only mcpServers configured)
+    withExistingFile(hooksPath, { someOtherKey: true });
+
+    teardownClaude();
+    expect(writtenTo(hooksPath)).toBeNull();
+  });
 });
 
 // ── teardownGemini ────────────────────────────────────────────────────────────
