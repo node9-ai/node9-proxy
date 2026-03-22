@@ -98,6 +98,144 @@ function writeJson(filePath: string, data: unknown): void {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + '\n');
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function isNode9Hook(cmd: string | undefined): boolean {
+  return !!(
+    cmd?.includes('node9 check') ||
+    cmd?.includes('cli.js check') ||
+    cmd?.includes('node9 log') ||
+    cmd?.includes('cli.js log')
+  );
+}
+
+// ── Teardown ──────────────────────────────────────────────────────────────────
+
+export function teardownClaude(): void {
+  const homeDir = os.homedir();
+  const hooksPath = path.join(homeDir, '.claude', 'settings.json');
+  const mcpPath = path.join(homeDir, '.claude.json');
+  let changed = false;
+
+  // Remove hook matchers from settings.json
+  const settings = readJson<ClaudeSettings>(hooksPath);
+  if (settings?.hooks) {
+    for (const event of ['PreToolUse', 'PostToolUse'] as const) {
+      const before = settings.hooks[event]?.length ?? 0;
+      settings.hooks[event] = settings.hooks[event]?.filter(
+        (m) => !m.hooks.some((h) => isNode9Hook(h.command))
+      );
+      if ((settings.hooks[event]?.length ?? 0) < before) changed = true;
+      if (settings.hooks[event]?.length === 0) delete settings.hooks[event];
+    }
+    if (changed) {
+      writeJson(hooksPath, settings);
+      console.log(
+        chalk.green('  ✅ Removed PreToolUse / PostToolUse hooks from ~/.claude/settings.json')
+      );
+    } else {
+      console.log(chalk.blue('  ℹ️  No Node9 hooks found in ~/.claude/settings.json'));
+    }
+  }
+
+  // Unwrap MCP servers in .claude.json
+  const claudeConfig = readJson<ClaudeConfig>(mcpPath);
+  if (claudeConfig?.mcpServers) {
+    let mcpChanged = false;
+    for (const [name, server] of Object.entries(claudeConfig.mcpServers)) {
+      if (server.command === 'node9' && Array.isArray(server.args) && server.args.length > 0) {
+        const [originalCmd, ...originalArgs] = server.args as string[];
+        claudeConfig.mcpServers[name] = {
+          ...server,
+          command: originalCmd,
+          args: originalArgs.length ? originalArgs : undefined,
+        };
+        mcpChanged = true;
+      }
+    }
+    if (mcpChanged) {
+      writeJson(mcpPath, claudeConfig);
+      console.log(chalk.green('  ✅ Unwrapped MCP servers in ~/.claude.json'));
+    }
+  }
+}
+
+export function teardownGemini(): void {
+  const homeDir = os.homedir();
+  const settingsPath = path.join(homeDir, '.gemini', 'settings.json');
+
+  const settings = readJson<GeminiSettings>(settingsPath);
+  if (!settings) {
+    console.log(chalk.blue('  ℹ️  ~/.gemini/settings.json not found — nothing to remove'));
+    return;
+  }
+
+  let changed = false;
+  for (const event of ['BeforeTool', 'AfterTool'] as const) {
+    const before = settings.hooks?.[event]?.length ?? 0;
+    if (settings.hooks?.[event]) {
+      settings.hooks[event] = settings.hooks[event]!.filter(
+        (m) => !m.hooks.some((h) => isNode9Hook(h.command))
+      );
+      if ((settings.hooks[event]?.length ?? 0) < before) changed = true;
+      if (settings.hooks[event]?.length === 0) delete settings.hooks[event];
+    }
+  }
+
+  // Unwrap MCP servers
+  if (settings.mcpServers) {
+    for (const [name, server] of Object.entries(settings.mcpServers)) {
+      if (server.command === 'node9' && Array.isArray(server.args) && server.args.length > 0) {
+        const [originalCmd, ...originalArgs] = server.args as string[];
+        settings.mcpServers[name] = {
+          ...server,
+          command: originalCmd,
+          args: originalArgs.length ? originalArgs : undefined,
+        };
+        changed = true;
+      }
+    }
+  }
+
+  if (changed) {
+    writeJson(settingsPath, settings);
+    console.log(chalk.green('  ✅ Removed Node9 hooks from ~/.gemini/settings.json'));
+  } else {
+    console.log(chalk.blue('  ℹ️  No Node9 hooks found in ~/.gemini/settings.json'));
+  }
+}
+
+export function teardownCursor(): void {
+  const homeDir = os.homedir();
+  const mcpPath = path.join(homeDir, '.cursor', 'mcp.json');
+
+  const mcpConfig = readJson<CursorMcpConfig>(mcpPath);
+  if (!mcpConfig?.mcpServers) {
+    console.log(chalk.blue('  ℹ️  ~/.cursor/mcp.json not found — nothing to remove'));
+    return;
+  }
+
+  let changed = false;
+  for (const [name, server] of Object.entries(mcpConfig.mcpServers)) {
+    if (server.command === 'node9' && Array.isArray(server.args) && server.args.length > 0) {
+      const [originalCmd, ...originalArgs] = server.args as string[];
+      mcpConfig.mcpServers[name] = {
+        ...server,
+        command: originalCmd,
+        args: originalArgs.length ? originalArgs : undefined,
+      };
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    writeJson(mcpPath, mcpConfig);
+    console.log(chalk.green('  ✅ Unwrapped MCP servers in ~/.cursor/mcp.json'));
+  } else {
+    console.log(chalk.blue('  ℹ️  No Node9-wrapped MCP servers found in ~/.cursor/mcp.json'));
+  }
+}
+
 // ── Claude Code ──────────────────────────────────────────────────────────────
 
 export async function setupClaude(): Promise<void> {

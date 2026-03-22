@@ -14,7 +14,14 @@ import {
   explainPolicy,
   shouldSnapshot,
 } from './core';
-import { setupClaude, setupGemini, setupCursor } from './setup';
+import {
+  setupClaude,
+  setupGemini,
+  setupCursor,
+  teardownClaude,
+  teardownGemini,
+  teardownCursor,
+} from './setup';
 import { startDaemon, stopDaemon, daemonStatus, DAEMON_PORT, DAEMON_HOST } from './daemon/index';
 import { spawn, execSync } from 'child_process';
 import { parseCommandString } from 'execa';
@@ -418,7 +425,68 @@ program
     process.exit(1);
   });
 
-// 2c. DOCTOR
+// 2c. REMOVEFROM
+program
+  .command('removefrom')
+  .description('Remove Node9 hooks from an AI agent configuration')
+  .addHelpText('after', '\n  Supported targets:  claude  gemini  cursor')
+  .argument('<target>', 'The agent to remove from: claude | gemini | cursor')
+  .action((target: string) => {
+    console.log(chalk.cyan(`\n🛡️  Node9: removing hooks from ${target}...\n`));
+    if (target === 'claude') teardownClaude();
+    else if (target === 'gemini') teardownGemini();
+    else if (target === 'cursor') teardownCursor();
+    else {
+      console.error(chalk.red(`Unknown target: "${target}". Supported: claude, gemini, cursor`));
+      process.exit(1);
+    }
+    console.log(chalk.gray('\n  Restart the agent for changes to take effect.'));
+  });
+
+// 2d. UNINSTALL
+program
+  .command('uninstall')
+  .description('Remove all Node9 hooks and optionally delete config files')
+  .option('--purge', 'Also delete ~/.node9/ directory (config, audit log, credentials)')
+  .action(async (options: { purge?: boolean }) => {
+    console.log(chalk.cyan('\n🛡️  Node9 Uninstall\n'));
+
+    // 1. Stop the daemon
+    console.log(chalk.bold('Stopping daemon...'));
+    try {
+      const { stopDaemon } = await import('./daemon/index.js');
+      await stopDaemon();
+      console.log(chalk.green('  ✅ Daemon stopped'));
+    } catch {
+      console.log(chalk.blue('  ℹ️  Daemon was not running'));
+    }
+
+    // 2. Remove hooks from all agents
+    console.log(chalk.bold('\nRemoving hooks...'));
+    teardownClaude();
+    teardownGemini();
+    teardownCursor();
+
+    // 3. Optionally purge ~/.node9/
+    if (options.purge) {
+      const node9Dir = path.join(os.homedir(), '.node9');
+      if (fs.existsSync(node9Dir)) {
+        fs.rmSync(node9Dir, { recursive: true, force: true });
+        console.log(chalk.green('\n  ✅ Deleted ~/.node9/ (config, audit log, credentials)'));
+      } else {
+        console.log(chalk.blue('\n  ℹ️  ~/.node9/ not found — nothing to delete'));
+      }
+    } else {
+      console.log(
+        chalk.gray('\n  ~/.node9/ kept — run with --purge to delete config and audit log')
+      );
+    }
+
+    console.log(chalk.green.bold('\n🛡️  Node9 removed. Run: npm uninstall -g @node9/proxy'));
+    console.log(chalk.gray('   Restart any open AI agent sessions for changes to take effect.\n'));
+  });
+
+// 2e. DOCTOR
 program
   .command('doctor')
   .description('Check that Node9 is installed and configured correctly')

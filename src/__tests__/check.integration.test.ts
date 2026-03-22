@@ -282,7 +282,7 @@ describe('smart rules', () => {
   it('readonly bash → allowed with checkedBy in stderr', () => {
     const r = runCheck(
       { tool_name: 'bash', tool_input: { command: 'ls -la /tmp' } },
-      { HOME: tmpHome },
+      { HOME: tmpHome, NODE9_DEBUG: '1' },
       tmpHome
     );
     expect(r.status).toBe(0);
@@ -388,7 +388,7 @@ describe('audit mode', () => {
   it('risky tool in audit mode → allowed with checkedBy:audit', () => {
     const r = runCheck(
       { tool_name: 'bash', tool_input: { command: 'mkfs.ext4 /dev/sda' } },
-      { HOME: tmpHome },
+      { HOME: tmpHome, NODE9_DEBUG: '1' },
       tmpHome
     );
     expect(r.status).toBe(0);
@@ -470,7 +470,7 @@ describe('audit mode + cloud gating', () => {
     // No sleep needed — if it races here, it's a production bug too.
     const r = await runCheckAsync(
       { tool_name: 'bash', tool_input: { command: 'mkfs.ext4 /dev/sda' } },
-      { HOME: tmpHome },
+      { HOME: tmpHome, NODE9_DEBUG: '1' },
       tmpHome
     );
     expect(r.status).toBe(0);
@@ -494,7 +494,7 @@ describe('audit mode + cloud gating', () => {
 
     const r = await runCheckAsync(
       { tool_name: 'bash', tool_input: { command: 'mkfs.ext4 /dev/sda' } },
-      { HOME: tmpHome },
+      { HOME: tmpHome, NODE9_DEBUG: '1' },
       tmpHome
     );
     expect(r.status).toBe(0);
@@ -673,7 +673,7 @@ describe('cloud race engine', () => {
 
     const r = await runCheckAsync(
       { tool_name: 'bash', tool_input: { command: 'mkfs.ext4 /dev/sda' } },
-      { HOME: tmpHome },
+      { HOME: tmpHome, NODE9_DEBUG: '1' },
       tmpHome,
       10000
     );
