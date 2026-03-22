@@ -87,20 +87,25 @@ function renderPending(activity: ActivityItem): void {
 }
 
 async function ensureDaemon(): Promise<number> {
-  // Already running — just read the port
+  // Read the port from PID file if it exists, then verify the daemon is alive
+  let pidPort: number | null = null;
   if (fs.existsSync(PID_FILE)) {
     try {
       const { port } = JSON.parse(fs.readFileSync(PID_FILE, 'utf-8')) as { port: number };
-      return port;
-    } catch {}
+      pidPort = port;
+    } catch {
+      // Corrupt or unreadable PID file — fall back to DAEMON_PORT for the health check
+      console.error(chalk.dim('⚠️  Could not read PID file; falling back to default port.'));
+    }
   }
 
-  // No PID file — check if an orphaned daemon is already listening on the port
+  // Health check — covers both PID-file and orphaned daemon cases
+  const checkPort = pidPort ?? DAEMON_PORT;
   try {
-    const res = await fetch(`http://127.0.0.1:${DAEMON_PORT}/settings`, {
+    const res = await fetch(`http://127.0.0.1:${checkPort}/settings`, {
       signal: AbortSignal.timeout(500),
     });
-    if (res.ok) return DAEMON_PORT;
+    if (res.ok) return checkPort;
   } catch {}
 
   // Not running — start it in the background
@@ -131,26 +136,53 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
   const port = await ensureDaemon();
 
   if (options.clear) {
-    await new Promise<void>((resolve) => {
+    const result = await new Promise<{ ok: boolean; code?: string }>((resolve) => {
       const req = http.request(
         { method: 'POST', hostname: '127.0.0.1', port, path: '/events/clear' },
         (res) => {
+          const status = res.statusCode ?? 0;
+          // Attach 'end' before resume() so the event is never missed on fast responses
+          res.on('end', () =>
+            resolve({
+              ok: status >= 200 && status < 300,
+              code: status >= 200 && status < 300 ? undefined : `HTTP ${status}`,
+            })
+          );
           res.resume();
-          res.on('end', resolve);
         }
       );
-      req.on('error', resolve);
+      // Register error handler before setTimeout so it is always in place before
+      // any path that calls req.destroy() (timeout or caller abort).
+      req.once('error', (err: NodeJS.ErrnoException) => resolve({ ok: false, code: err.code }));
+      req.setTimeout(2000, () => {
+        // resolve() before destroy() so the promise settles as ETIMEDOUT first.
+        // destroy() may subsequently emit an error (e.g. ECONNRESET), but
+        // req.once ensures the listener is already consumed by then — preventing
+        // a second resolve(). Node.js guarantees no listener fires between a
+        // synchronous resolve() and the next event-loop tick, so there is no
+        // unhandled-rejection window here.
+        resolve({ ok: false, code: 'ETIMEDOUT' });
+        req.destroy();
+      });
       req.end();
     });
+    if (result.ok) {
+      console.log(chalk.green('✓ Flight Recorder buffer cleared.'));
+    } else if (result.code === 'ECONNREFUSED') {
+      throw new Error('Daemon is not running. Start it with: node9 daemon start');
+    } else if (result.code === 'ETIMEDOUT') {
+      throw new Error('Daemon did not respond in time. Try: node9 daemon restart');
+    } else {
+      throw new Error(`Failed to clear buffer (${result.code ?? 'unknown error'})`);
+    }
+    return;
   }
 
   const connectionTime = Date.now();
   const pending = new Map<string, ActivityItem>();
 
   console.log(chalk.cyan.bold(`\n🛰️  Node9 tail  `) + chalk.dim(`→ localhost:${port}`));
-  if (options.clear) {
-    console.log(chalk.dim('History cleared. Showing live events. Press Ctrl+C to exit.\n'));
-  } else if (options.history) {
+  if (options.history) {
     console.log(chalk.dim('Showing history + live events. Press Ctrl+C to exit.\n'));
   } else {
     console.log(

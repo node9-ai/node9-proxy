@@ -59,6 +59,7 @@
     "fix": "npm run format && npm run lint:fix",
     "validate": "npm run format && npm run lint && npm run typecheck && npm run test && npm run test:e2e && npm run build",
     "test:e2e": "NODE9_TESTING=1 bash scripts/e2e.sh",
+    "preuninstall": "node9 uninstall || echo 'node9 uninstall failed — remove hooks manually from ~/.claude/settings.json'",
     "prepublishOnly": "npm run validate",
     "test": "NODE_ENV=test vitest --run",
     "test:watch": "NODE_ENV=test vitest",

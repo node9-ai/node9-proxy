@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **`node9 tail --clear` no longer streams after clearing** ⚠️ **Breaking:** Previously `--clear` wiped the ring buffer and then continued tailing live events — visually identical to plain `node9 tail`. It now clears the buffer and exits immediately. To start fresh and watch, chain the commands: `node9 tail --clear && node9 tail --history`. Scripts relying on the old streaming-after-clear behaviour must be updated.
 - **Default mode is now `audit`:** Fresh installs now default to `mode: "audit"` instead of `mode: "standard"`. In audit mode every tool call is approved and logged, with a desktop notification for anything that _would_ have been blocked. This lets teams observe agent behaviour before committing to a blocking policy. Switch to `mode: "standard"` or `mode: "strict"` when you are ready to enforce.
 - **Approval timeout default is now 30 seconds:** `approvalTimeoutMs` defaults to `30000` (was `0` / wait forever). Pending approval prompts now auto-deny after 30 seconds if no human responds, preventing agents from stalling indefinitely.
 - **Cloud approver disabled by default:** `approvers.cloud` defaults to `false`. Cloud (Slack/SaaS) approval must be explicitly opted in via `settings.approvers.cloud: true` after running `node9 login`.

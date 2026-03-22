@@ -280,14 +280,30 @@ describe('smart rules', () => {
   });
 
   it('readonly bash → allowed with checkedBy in stderr', () => {
+    // NODE9_DEBUG: '1' is required to see the "allowed" confirmation on stderr.
+    // Without it the message is suppressed to avoid Claude Code treating any
+    // stderr output as a hook error (GitHub issue: hook error on every tool call).
+    const r = runCheck(
+      { tool_name: 'bash', tool_input: { command: 'ls -la /tmp' } },
+      { HOME: tmpHome, NODE9_DEBUG: '1' },
+      tmpHome
+    );
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe('');
+    expect(r.stderr).toContain('allowed');
+  });
+
+  it('allowed call produces no stderr in production mode (NODE9_DEBUG unset)', () => {
+    // This is the actual production behavior: Claude Code treats any stderr
+    // output as a hook error regardless of exit code, so allowed calls must
+    // be completely silent on stderr when NODE9_DEBUG is not set.
     const r = runCheck(
       { tool_name: 'bash', tool_input: { command: 'ls -la /tmp' } },
       { HOME: tmpHome },
       tmpHome
     );
     expect(r.status).toBe(0);
-    expect(r.stdout).toBe('');
-    expect(r.stderr).toContain('allowed');
+    expect(r.stderr).toBe('');
   });
 });
 
@@ -388,7 +404,7 @@ describe('audit mode', () => {
   it('risky tool in audit mode → allowed with checkedBy:audit', () => {
     const r = runCheck(
       { tool_name: 'bash', tool_input: { command: 'mkfs.ext4 /dev/sda' } },
-      { HOME: tmpHome },
+      { HOME: tmpHome, NODE9_DEBUG: '1' },
       tmpHome
     );
     expect(r.status).toBe(0);
@@ -470,7 +486,7 @@ describe('audit mode + cloud gating', () => {
     // No sleep needed — if it races here, it's a production bug too.
     const r = await runCheckAsync(
       { tool_name: 'bash', tool_input: { command: 'mkfs.ext4 /dev/sda' } },
-      { HOME: tmpHome },
+      { HOME: tmpHome, NODE9_DEBUG: '1' },
       tmpHome
     );
     expect(r.status).toBe(0);
@@ -494,7 +510,7 @@ describe('audit mode + cloud gating', () => {
 
     const r = await runCheckAsync(
       { tool_name: 'bash', tool_input: { command: 'mkfs.ext4 /dev/sda' } },
-      { HOME: tmpHome },
+      { HOME: tmpHome, NODE9_DEBUG: '1' },
       tmpHome
     );
     expect(r.status).toBe(0);
@@ -673,7 +689,7 @@ describe('cloud race engine', () => {
 
     const r = await runCheckAsync(
       { tool_name: 'bash', tool_input: { command: 'mkfs.ext4 /dev/sda' } },
-      { HOME: tmpHome },
+      { HOME: tmpHome, NODE9_DEBUG: '1' },
       tmpHome,
       10000
     );
@@ -743,4 +759,40 @@ describe('malformed JSON payload', () => {
     expect(r.status).toBe(0);
     expect(r.stderr).not.toContain('TypeError');
   });
+});
+
+// ── removefrom command ────────────────────────────────────────────────────────
+
+describe('removefrom command', () => {
+  // Use a minimal env to avoid leaking CI secrets into subprocess invocations.
+  // PATH is required so Node.js can resolve its own binary; everything else is
+  // explicitly set to control test behaviour.
+  const minimalEnv = { PATH: process.env.PATH ?? '', NODE9_TESTING: '1' };
+
+  it('exits with code 1 and prints error for unknown target', () => {
+    const result = spawnSync(process.execPath, [CLI, 'removefrom', 'vscode'], {
+      encoding: 'utf-8',
+      timeout: 5000,
+      env: minimalEnv,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Unknown target');
+    expect(result.stderr).toContain('vscode');
+  });
+
+  for (const target of ['claude', 'gemini', 'cursor'] as const) {
+    it(`exits with code 0 for valid target "${target}" even when nothing to remove`, () => {
+      const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-removefrom-'));
+      try {
+        const result = spawnSync(process.execPath, [CLI, 'removefrom', target], {
+          encoding: 'utf-8',
+          timeout: 5000,
+          env: { ...minimalEnv, HOME: tmpHome },
+        });
+        expect(result.status).toBe(0);
+      } finally {
+        fs.rmSync(tmpHome, { recursive: true });
+      }
+    });
+  }
 });

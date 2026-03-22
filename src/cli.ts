@@ -14,7 +14,14 @@ import {
   explainPolicy,
   shouldSnapshot,
 } from './core';
-import { setupClaude, setupGemini, setupCursor } from './setup';
+import {
+  setupClaude,
+  setupGemini,
+  setupCursor,
+  teardownClaude,
+  teardownGemini,
+  teardownCursor,
+} from './setup';
 import { startDaemon, stopDaemon, daemonStatus, DAEMON_PORT, DAEMON_HOST } from './daemon/index';
 import { spawn, execSync } from 'child_process';
 import { parseCommandString } from 'execa';
@@ -418,7 +425,112 @@ program
     process.exit(1);
   });
 
-// 2c. DOCTOR
+// 2c. REMOVEFROM
+program
+  .command('removefrom')
+  .description('Remove Node9 hooks from an AI agent configuration')
+  .addHelpText('after', '\n  Supported targets:  claude  gemini  cursor')
+  .argument('<target>', 'The agent to remove from: claude | gemini | cursor')
+  .action((target: string) => {
+    // Validate before logging so the target string is never interpolated
+    // into output before it has been confirmed to be a known value.
+    let fn: (() => void) | undefined;
+    if (target === 'claude') fn = teardownClaude;
+    else if (target === 'gemini') fn = teardownGemini;
+    else if (target === 'cursor') fn = teardownCursor;
+    else {
+      console.error(chalk.red(`Unknown target: "${target}". Supported: claude, gemini, cursor`));
+      process.exit(1);
+    }
+    console.log(chalk.cyan(`\n🛡️  Node9: removing hooks from ${target}...\n`));
+    try {
+      fn!();
+    } catch (err) {
+      console.error(chalk.red(`  ⚠️  Failed: ${err instanceof Error ? err.message : String(err)}`));
+      process.exit(1);
+    }
+    console.log(chalk.gray('\n  Restart the agent for changes to take effect.'));
+  });
+
+// 2d. UNINSTALL
+program
+  .command('uninstall')
+  .description('Remove all Node9 hooks and optionally delete config files')
+  .option('--purge', 'Also delete ~/.node9/ directory (config, audit log, credentials)')
+  .action(async (options: { purge?: boolean }) => {
+    console.log(chalk.cyan('\n🛡️  Node9 Uninstall\n'));
+
+    // 1. Stop the daemon
+    console.log(chalk.bold('Stopping daemon...'));
+    try {
+      stopDaemon();
+      console.log(chalk.green('  ✅ Daemon stopped'));
+    } catch {
+      console.log(chalk.blue('  ℹ️  Daemon was not running'));
+    }
+
+    // 2. Remove hooks from all agents (each wrapped independently so a partial
+    //    failure does not silently skip the remaining agents)
+    console.log(chalk.bold('\nRemoving hooks...'));
+    let teardownFailed = false;
+    for (const [label, fn] of [
+      ['Claude', teardownClaude],
+      ['Gemini', teardownGemini],
+      ['Cursor', teardownCursor],
+    ] as const) {
+      try {
+        fn();
+      } catch (err) {
+        teardownFailed = true;
+        console.error(
+          chalk.red(
+            `  ⚠️  Failed to remove ${label} hooks: ${err instanceof Error ? err.message : String(err)}`
+          )
+        );
+      }
+    }
+
+    // 3. Optionally purge ~/.node9/ — requires explicit confirmation because the
+    //    directory may contain credentials and cannot be recovered after deletion.
+    if (options.purge) {
+      const node9Dir = path.join(os.homedir(), '.node9');
+      if (fs.existsSync(node9Dir)) {
+        const confirmed = await confirm({
+          message: `Permanently delete ${node9Dir} (config, audit log, credentials)?`,
+          default: false,
+        });
+        if (confirmed) {
+          fs.rmSync(node9Dir, { recursive: true });
+          // Verify deletion succeeded — force:true would swallow errors and
+          // print a false success if a file was locked or permission-denied.
+          if (fs.existsSync(node9Dir)) {
+            console.error(
+              chalk.red('\n  ⚠️  ~/.node9/ could not be fully deleted — remove it manually.')
+            );
+          } else {
+            console.log(chalk.green('\n  ✅ Deleted ~/.node9/ (config, audit log, credentials)'));
+          }
+        } else {
+          console.log(chalk.yellow('\n  Skipped — ~/.node9/ was not deleted.'));
+        }
+      } else {
+        console.log(chalk.blue('\n  ℹ️  ~/.node9/ not found — nothing to delete'));
+      }
+    } else {
+      console.log(
+        chalk.gray('\n  ~/.node9/ kept — run with --purge to delete config and audit log')
+      );
+    }
+
+    if (teardownFailed) {
+      console.error(chalk.red('\n  ⚠️  Some hooks could not be removed — see errors above.'));
+      process.exit(1);
+    }
+    console.log(chalk.green.bold('\n🛡️  Node9 removed. Run: npm uninstall -g @node9/proxy'));
+    console.log(chalk.gray('   Restart any open AI agent sessions for changes to take effect.\n'));
+  });
+
+// 2e. DOCTOR
 program
   .command('doctor')
   .description('Check that Node9 is installed and configured correctly')
@@ -959,11 +1071,16 @@ program
 program
   .command('tail')
   .description('Stream live agent activity to the terminal')
-  .option('--history', 'Include recent history on connect', false)
-  .option('--clear', 'Clear history buffer and stream live events fresh', false)
+  .option('--history', 'Replay recent history then continue live', false)
+  .option('--clear', 'Clear the history buffer and exit (does not stream)', false)
   .action(async (options: { history?: boolean; clear?: boolean }) => {
     const { startTail } = await import('./tui/tail.js');
-    await startTail(options);
+    try {
+      await startTail(options);
+    } catch (err) {
+      console.error(chalk.red(`❌ ${err instanceof Error ? err.message : String(err)}`));
+      process.exit(1);
+    }
   });
 
 // 7. CHECK (Internal Hook - Upgraded with AI Negotiation Loop)
@@ -1119,7 +1236,9 @@ program
         const result = await authorizeHeadless(toolName, toolInput, false, meta);
 
         if (result.approved) {
-          if (result.checkedBy)
+          // Only write to stderr in debug mode — Claude Code treats any stderr
+          // output as a hook error regardless of exit code (see GitHub issue).
+          if (result.checkedBy && process.env.NODE9_DEBUG === '1')
             process.stderr.write(`✓ node9 [${result.checkedBy}]: "${toolName}" allowed\n`);
           process.exit(0);
         }
@@ -1137,11 +1256,14 @@ program
           if (daemonReady) {
             const retry = await authorizeHeadless(toolName, toolInput, false, meta);
             if (retry.approved) {
-              if (retry.checkedBy)
+              if (retry.checkedBy && process.env.NODE9_DEBUG === '1')
                 process.stderr.write(`✓ node9 [${retry.checkedBy}]: "${toolName}" allowed\n`);
               process.exit(0);
             }
             // Add the dynamic label so we know if it was Cloud, Config, etc.
+            // Denials communicate via exit code (non-zero) and JSON on stdout —
+            // stderr is intentionally unused so Claude Code never treats a block
+            // as a "hook error" (it does so on any stderr output regardless of exit code).
             sendBlock(retry.reason ?? `Node9 blocked "${toolName}".`, {
               ...retry,
               blockedByLabel: retry.blockedByLabel,
@@ -1150,7 +1272,9 @@ program
           }
         }
 
-        // Add the dynamic label to the final block
+        // Denials communicate via exit code (non-zero) and JSON on stdout —
+        // stderr is intentionally unused so Claude Code never treats a block
+        // as a "hook error" (it does so on any stderr output regardless of exit code).
         sendBlock(result.reason ?? `Node9 blocked "${toolName}".`, {
           ...result,
           blockedByLabel: result.blockedByLabel,
