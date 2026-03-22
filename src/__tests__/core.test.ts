@@ -443,6 +443,43 @@ describe('authorizeHeadless', () => {
   });
 });
 
+// ── DLP wiring: evaluatePolicy → authorizeHeadless ───────────────────────────
+// Verifies that a DLP-blocked tool call propagates through the full stack and
+// results in approved:false — not just that scanArgs() returns a match.
+
+describe('DLP wiring — authorizeHeadless blocks on detected secret', () => {
+  // Fake AWS key split to avoid GitHub secret scanner flagging this test file
+  const FAKE_AWS_KEY = 'AKIA' + 'IOSFODNN7' + 'EXAMPLE';
+
+  it('authorizeHeadless returns approved:false when args contain an AWS key', async () => {
+    mockNoNativeConfig();
+    const result = await authorizeHeadless('bash', { command: `aws s3 cp --key ${FAKE_AWS_KEY}` });
+    expect(result.approved).toBe(false);
+    expect(result.reason).toMatch(/DATA LOSS PREVENTION/i);
+  });
+
+  it('reason includes the pattern name and redacted sample', async () => {
+    mockNoNativeConfig();
+    const result = await authorizeHeadless('bash', { command: `aws s3 cp --key ${FAKE_AWS_KEY}` });
+    expect(result.reason).toContain('AWS Access Key ID');
+    // Secret must be redacted — raw key must not appear in the reason string
+    expect(result.reason).not.toContain(FAKE_AWS_KEY);
+  });
+
+  it('DLP scan is skipped for ignored tools when scanIgnoredTools is false', async () => {
+    mockGlobalConfig({
+      settings: { mode: 'standard', approvalTimeoutMs: 0, approvers: { native: false } },
+      policy: {
+        ignoredTools: ['read_file'],
+        dlp: { enabled: true, scanIgnoredTools: false },
+      },
+    });
+    // read_file is in ignoredTools and scanIgnoredTools:false — DLP must not block it
+    const result = await authorizeHeadless('read_file', { content: `key=${FAKE_AWS_KEY}` });
+    expect(result.approved).toBe(true);
+  });
+});
+
 // ── evaluatePolicy — project config ──────────────────────────────────────────
 
 describe('evaluatePolicy — project config', () => {

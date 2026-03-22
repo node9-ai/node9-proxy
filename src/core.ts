@@ -272,7 +272,8 @@ export function evaluateSmartConditions(args: unknown, rule: SmartRule): boolean
       case 'matchesGlob':
         return val !== null && cond.value ? pm.isMatch(val, cond.value) : false;
       case 'notMatchesGlob':
-        return val !== null && cond.value ? !pm.isMatch(val, cond.value) : true;
+        // Missing value → treat as misconfigured rule; fail closed (false) rather than open (true)
+        return val !== null && cond.value ? !pm.isMatch(val, cond.value) : false;
       default:
         return false;
     }

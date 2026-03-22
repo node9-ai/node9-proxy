@@ -14,29 +14,37 @@ const noNewlines = z.string().refine((s) => !s.includes('\n') && !s.includes('\r
 
 // ── Smart Rules ───────────────────────────────────────────────────────────────
 
-const SmartConditionSchema = z.object({
-  field: z.string().min(1, 'Condition field must not be empty'),
-  op: z.enum(
-    [
-      'matches',
-      'notMatches',
-      'contains',
-      'notContains',
-      'exists',
-      'notExists',
-      'matchesGlob',
-      'notMatchesGlob',
-    ],
-    {
-      errorMap: () => ({
-        message:
-          'op must be one of: matches, notMatches, contains, notContains, exists, notExists, matchesGlob, notMatchesGlob',
-      }),
-    }
-  ),
-  value: z.string().optional(),
-  flags: z.string().optional(),
-});
+const SmartConditionSchema = z
+  .object({
+    field: z.string().min(1, 'Condition field must not be empty'),
+    op: z.enum(
+      [
+        'matches',
+        'notMatches',
+        'contains',
+        'notContains',
+        'exists',
+        'notExists',
+        'matchesGlob',
+        'notMatchesGlob',
+      ],
+      {
+        errorMap: () => ({
+          message:
+            'op must be one of: matches, notMatches, contains, notContains, exists, notExists, matchesGlob, notMatchesGlob',
+        }),
+      }
+    ),
+    value: z.string().optional(),
+    flags: z.string().optional(),
+  })
+  .refine(
+    (c) => {
+      if (c.op === 'matchesGlob' || c.op === 'notMatchesGlob') return c.value !== undefined;
+      return true;
+    },
+    { message: 'matchesGlob and notMatchesGlob conditions require a value field' }
+  );
 
 const SmartRuleSchema = z.object({
   name: z.string().optional(),
