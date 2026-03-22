@@ -321,6 +321,18 @@ describe('teardownClaude', () => {
     expect(written.mcpServers.solo.args).toBeUndefined();
   });
 
+  it('skips MCP servers where args is empty (cannot determine original command)', () => {
+    withExistingFile(mcpPath, {
+      mcpServers: {
+        broken: { command: 'node9', args: [] },
+      },
+    });
+
+    teardownClaude();
+    // args: [] has no original command to restore — leave it untouched
+    expect(writtenTo(mcpPath)).toBeNull();
+  });
+
   it('does nothing when settings.json has no node9 hooks', () => {
     withExistingFile(hooksPath, {
       hooks: {

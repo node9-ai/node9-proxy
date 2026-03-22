@@ -106,7 +106,10 @@ describe('startTail --clear error handling', () => {
     });
 
     const { startTail } = await import('../tui/tail.js');
+    const getSpy = vi.spyOn(http, 'get');
     await expect(startTail({ clear: true })).resolves.toBeUndefined();
+    // --clear must never open an SSE streaming connection
+    expect(getSpy).not.toHaveBeenCalled();
   });
 
   it('resolves without throwing for any 2xx status (e.g. 299)', async () => {

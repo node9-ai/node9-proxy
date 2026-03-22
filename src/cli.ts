@@ -433,11 +433,20 @@ program
   .argument('<target>', 'The agent to remove from: claude | gemini | cursor')
   .action((target: string) => {
     console.log(chalk.cyan(`\n🛡️  Node9: removing hooks from ${target}...\n`));
-    if (target === 'claude') teardownClaude();
-    else if (target === 'gemini') teardownGemini();
-    else if (target === 'cursor') teardownCursor();
+    let fn: (() => void) | undefined;
+    if (target === 'claude') fn = teardownClaude;
+    else if (target === 'gemini') fn = teardownGemini;
+    else if (target === 'cursor') fn = teardownCursor;
     else {
       console.error(chalk.red(`Unknown target: "${target}". Supported: claude, gemini, cursor`));
+      process.exit(1);
+    }
+    try {
+      fn!();
+    } catch (err) {
+      console.error(
+        chalk.red(`  ⚠️  Failed: ${err instanceof Error ? err.message : String(err)}`)
+      );
       process.exit(1);
     }
     console.log(chalk.gray('\n  Restart the agent for changes to take effect.'));
