@@ -280,6 +280,9 @@ describe('smart rules', () => {
   });
 
   it('readonly bash → allowed with checkedBy in stderr', () => {
+    // NODE9_DEBUG: '1' is required to see the "allowed" confirmation on stderr.
+    // Without it the message is suppressed to avoid Claude Code treating any
+    // stderr output as a hook error (GitHub issue: hook error on every tool call).
     const r = runCheck(
       { tool_name: 'bash', tool_input: { command: 'ls -la /tmp' } },
       { HOME: tmpHome, NODE9_DEBUG: '1' },

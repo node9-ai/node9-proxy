@@ -154,6 +154,14 @@ export function teardownClaude(): void {
           args: originalArgs.length ? originalArgs : undefined,
         };
         mcpChanged = true;
+      } else if (server.command === 'node9') {
+        // args is empty or missing — cannot determine original command.
+        // Leave the entry intact and warn so the user can fix it manually.
+        console.warn(
+          chalk.yellow(
+            `  ⚠️  Cannot unwrap MCP server "${name}" in ~/.claude.json — args is empty. Remove it manually.`
+          )
+        );
       }
     }
     if (mcpChanged) {

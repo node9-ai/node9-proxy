@@ -470,6 +470,7 @@ program
     // 2. Remove hooks from all agents (each wrapped independently so a partial
     //    failure does not silently skip the remaining agents)
     console.log(chalk.bold('\nRemoving hooks...'));
+    let teardownFailed = false;
     for (const [label, fn] of [
       ['Claude', teardownClaude],
       ['Gemini', teardownGemini],
@@ -478,6 +479,7 @@ program
       try {
         fn();
       } catch (err) {
+        teardownFailed = true;
         console.error(
           chalk.red(
             `  ⚠️  Failed to remove ${label} hooks: ${err instanceof Error ? err.message : String(err)}`
@@ -518,6 +520,10 @@ program
       );
     }
 
+    if (teardownFailed) {
+      console.error(chalk.red('\n  ⚠️  Some hooks could not be removed — see errors above.'));
+      process.exit(1);
+    }
     console.log(chalk.green.bold('\n🛡️  Node9 removed. Run: npm uninstall -g @node9/proxy'));
     console.log(chalk.gray('   Restart any open AI agent sessions for changes to take effect.\n'));
   });
