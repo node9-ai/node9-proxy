@@ -133,21 +133,24 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
   const port = await ensureDaemon();
 
   if (options.clear) {
-    const ok = await new Promise<boolean>((resolve) => {
+    const result = await new Promise<{ ok: boolean; code?: string }>((resolve) => {
       const req = http.request(
         { method: 'POST', hostname: '127.0.0.1', port, path: '/events/clear' },
         (res) => {
           res.resume();
-          res.on('end', () => resolve(res.statusCode === 200));
+          res.on('end', () => resolve({ ok: res.statusCode === 200 }));
         }
       );
-      req.on('error', () => resolve(false));
+      req.on('error', (err: NodeJS.ErrnoException) => resolve({ ok: false, code: err.code }));
       req.end();
     });
-    if (ok) {
+    if (result.ok) {
       console.log(chalk.green('✓ Flight Recorder buffer cleared.'));
+    } else if (result.code === 'ECONNREFUSED') {
+      console.error(chalk.red('❌ Daemon is not running. Start it with: node9 daemon start'));
+      process.exit(1);
     } else {
-      console.error(chalk.red('❌ Failed to clear buffer — is the daemon running?'));
+      console.error(chalk.red(`❌ Failed to clear buffer (${result.code ?? 'unknown error'})`));
       process.exit(1);
     }
     return;

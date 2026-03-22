@@ -959,8 +959,8 @@ program
 program
   .command('tail')
   .description('Stream live agent activity to the terminal')
-  .option('--history', 'Include recent history on connect', false)
-  .option('--clear', 'Clear history buffer and stream live events fresh', false)
+  .option('--history', 'Replay recent history then continue live', false)
+  .option('--clear', 'Clear the history buffer and exit (does not stream)', false)
   .action(async (options: { history?: boolean; clear?: boolean }) => {
     const { startTail } = await import('./tui/tail.js');
     await startTail(options);
