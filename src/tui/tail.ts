@@ -93,7 +93,10 @@ async function ensureDaemon(): Promise<number> {
     try {
       const { port } = JSON.parse(fs.readFileSync(PID_FILE, 'utf-8')) as { port: number };
       pidPort = port;
-    } catch {}
+    } catch {
+      // Corrupt or unreadable PID file — fall back to DAEMON_PORT for the health check
+      console.error(chalk.dim('⚠️  Could not read PID file; falling back to default port.'));
+    }
   }
 
   // Health check — covers both PID-file and orphaned daemon cases
@@ -153,8 +156,11 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
       req.once('error', (err: NodeJS.ErrnoException) => resolve({ ok: false, code: err.code }));
       req.setTimeout(2000, () => {
         // resolve() before destroy() so the promise settles as ETIMEDOUT first.
-        // destroy() may then emit an error event, but req.once ensures the
-        // listener has already been consumed and won't call resolve() again.
+        // destroy() may subsequently emit an error (e.g. ECONNRESET), but
+        // req.once ensures the listener is already consumed by then — preventing
+        // a second resolve(). Node.js guarantees no listener fires between a
+        // synchronous resolve() and the next event-loop tick, so there is no
+        // unhandled-rejection window here.
         resolve({ ok: false, code: 'ETIMEDOUT' });
         req.destroy();
       });

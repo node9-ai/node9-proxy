@@ -90,6 +90,9 @@ function mockHttpRequest(
 
 describe('startTail --clear error handling', () => {
   beforeEach(() => {
+    // resetModules() forces each test to re-import tail.js fresh, which means
+    // the http.request spy MUST be set up (via mockHttpRequest) before the
+    // dynamic import — otherwise the module captures the unspied original.
     vi.resetModules();
     vi.clearAllMocks();
     // ensureDaemon: make the health-check fetch succeed so we reach the --clear logic
