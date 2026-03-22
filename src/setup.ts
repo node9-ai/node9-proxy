@@ -77,7 +77,10 @@ function printDaemonTip(): void {
 function fullPathCommand(subcommand: string): string {
   if (process.env.NODE9_TESTING === '1') return `node9 ${subcommand}`;
   const nodeExec = process.execPath; // e.g. /home/user/.nvm/.../bin/node
-  const cliScript = process.argv[1]; // e.g. /.../dist/cli.js
+  const cliScript = process.argv[1]; // dist/cli.js (dev) or .../bin/node9 (global install)
+  // When installed globally or via npm link, argv[1] is the binary itself — a
+  // self-contained executable that must not be prefixed with node.
+  if (!cliScript.endsWith('.js')) return `${cliScript} ${subcommand}`;
   return `${nodeExec} ${cliScript} ${subcommand}`;
 }
 
