@@ -44,6 +44,10 @@ Node9 initiates a **Concurrent Race** across all enabled channels. The first cha
 
 Node9 records every tool call your AI agent makes in real-time — no polling, no log files, no refresh. Two ways to watch:
 
+<p align="center">
+  <img src="docs/flight-recorder.jpeg" width="100%">
+</p>
+
 **Browser Dashboard** (`node9 daemon start` → `localhost:7391`)
 
 A live 3-column dashboard. The left column streams every tool call as it happens, updating in-place from `● PENDING` to `✓ ALLOW` or `✗ BLOCK`. The center handles pending approvals. The right sidebar controls shields and persistent decisions — all without ever causing a browser scrollbar.
