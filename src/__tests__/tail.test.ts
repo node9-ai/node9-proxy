@@ -73,7 +73,7 @@ describe('startTail --clear error handling', () => {
   });
 
   it('resolves without throwing when daemon returns 200', async () => {
-    mockHttpRequest((_req, cb) => {
+    mockHttpRequest((_req, _cb) => {
       // Simulate daemon responding with 200
       const mockRes = {
         statusCode: 200,
@@ -113,7 +113,7 @@ describe('startTail --clear error handling', () => {
   });
 
   it('throws with HTTP status when daemon returns non-2xx', async () => {
-    mockHttpRequest((_req, cb) => {
+    mockHttpRequest((_req, _cb) => {
       const mockRes = {
         statusCode: 500,
         resume: vi.fn(),
