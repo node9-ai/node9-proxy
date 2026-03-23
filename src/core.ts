@@ -598,7 +598,7 @@ export const DEFAULT_CONFIG: Config = {
           {
             field: 'command',
             op: 'matches',
-            value: 'git push.*(--force|--force-with-lease|-f\\b)',
+            value: 'git\\b.*\\bpush\\b.*(--force|--force-with-lease|-f\\b)',
             flags: 'i',
           },
         ],
@@ -609,7 +609,7 @@ export const DEFAULT_CONFIG: Config = {
       {
         name: 'review-git-push',
         tool: 'bash',
-        conditions: [{ field: 'command', op: 'matches', value: '^\\s*git\\s+push\\b', flags: 'i' }],
+        conditions: [{ field: 'command', op: 'matches', value: 'git\\b.*\\bpush\\b(?!.*(-f\\b|--force|--force-with-lease))', flags: 'i' }],
         conditionMode: 'all',
         verdict: 'review',
         reason: 'git push sends changes to a shared remote',
@@ -621,7 +621,7 @@ export const DEFAULT_CONFIG: Config = {
           {
             field: 'command',
             op: 'matches',
-            value: 'git\\s+(reset\\s+--hard|clean\\s+-[fdxX]|rebase|tag\\s+-d|branch\\s+-[dD])',
+            value: 'git\\b.*(reset\\s+--hard|clean\\s+-[fdxX]|\\brebase\\b|tag\\s+-d|branch\\s+-[dD])',
             flags: 'i',
           },
         ],
