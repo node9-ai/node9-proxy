@@ -58,13 +58,19 @@ function isPortFree(port: number): Promise<boolean> {
 
 async function waitForDaemon(timeoutMs = 5000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
+  let lastErr: unknown;
   while (Date.now() < deadline) {
     try {
       const res = await fetch(`http://127.0.0.1:${DAEMON_PORT}/settings`);
       if (res.ok) return true;
-    } catch {}
+    } catch (err) {
+      lastErr = err; // capture for diagnostics — ECONNREFUSED is expected until ready
+    }
     await new Promise((r) => setTimeout(r, 100));
   }
+  // Log the last error so CI failure messages explain why the daemon never responded
+  // (e.g. EACCES on port, crashed on startup) rather than just "did not start within Xs"
+  if (lastErr) process.stderr.write(`waitForDaemon: last error: ${lastErr}\n`);
   return false;
 }
 
