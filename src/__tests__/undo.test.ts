@@ -822,6 +822,7 @@ describe('applyUndo', () => {
   });
 
   it('returns false when ls-tree exits non-zero (prevents empty-set mass delete)', () => {
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     vi.mocked(fs.readdirSync).mockReturnValue([]);
     mockSpawn.mockImplementation((_cmd, args) => {
       const a = (args ?? []) as string[];
@@ -833,11 +834,14 @@ describe('applyUndo', () => {
     // Must return false rather than deleting every file in the working tree
     expect(applyUndo('abc123', '/mock/project')).toBe(false);
     expect(vi.mocked(fs.unlinkSync)).not.toHaveBeenCalled();
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('ls-tree failed'));
+    stderrSpy.mockRestore();
   });
 
   it('returns false when ls-tree exits 0 with empty stdout (mass-delete footgun)', () => {
     // ls-tree status 0 + empty stdout → snapshotFiles would be empty set →
     // every tracked file would be deleted. The empty-set guard catches this case.
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     vi.mocked(fs.readdirSync).mockReturnValue([]);
     vi.mocked(fs.existsSync).mockReturnValue(true);
     mockSpawn.mockImplementation((_cmd, args) => {
@@ -850,5 +854,7 @@ describe('applyUndo', () => {
     });
     expect(applyUndo('abc123', '/mock/project')).toBe(false);
     expect(vi.mocked(fs.unlinkSync)).not.toHaveBeenCalled();
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('no files'));
+    stderrSpy.mockRestore();
   });
 });
