@@ -826,10 +826,10 @@ describe('applyUndo', () => {
     mockSpawn.mockImplementation((_cmd, args) => {
       const a = (args ?? []) as string[];
       if (a.includes('rev-parse') && a.includes('--git-dir'))
-        return spawnResult(0, '/shadow\n');
-      if (a.includes('restore')) return spawnResult(0, '');
-      if (a.includes('ls-tree')) return spawnResult(1, ''); // ls-tree fails
-      return spawnResult(0, '');
+        return spawnResult('/shadow\n', 0);
+      if (a.includes('restore')) return spawnResult('', 0);
+      if (a.includes('ls-tree')) return spawnResult('', 1); // ls-tree fails
+      return spawnResult('', 0);
     });
     // Must return false rather than deleting every file in the working tree
     expect(applyUndo('abc123', '/mock/project')).toBe(false);
