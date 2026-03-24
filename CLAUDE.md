@@ -7,6 +7,7 @@ Before committing or opening a PR, verify all of the following:
 - [ ] New behavior has a test that **fails without the change**
 - [ ] `npm test` passes (455+ tests)
 - [ ] `npm run typecheck` passes
+- [ ] `npm run lint` passes (catches `require()` imports, unused vars, etc.)
 - [ ] `npm run format:check` passes (run `npm run format` to fix)
 - [ ] No `console.log` in hook or proxy code paths — use `console.error` (stdout must stay clean for JSON-RPC / MCP)
 

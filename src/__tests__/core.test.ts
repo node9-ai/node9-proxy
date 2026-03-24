@@ -1455,7 +1455,7 @@ describe('getConfig — nonexistent cwd falls back to global config', () => {
     // from disk rather than returning the per-project result.
     getConfig('/some/project/dir');
     // Reset existsSpy to return true for a global config path with specific content
-    const globalPath = require('path').join(require('os').homedir(), '.node9', 'config.json');
+    const globalPath = path.join(os.homedir(), '.node9', 'config.json');
     existsSpy.mockImplementation((p) => String(p) === globalPath);
     readSpy.mockImplementation((p) =>
       String(p) === globalPath ? JSON.stringify({ settings: { mode: 'strict' } }) : ''
