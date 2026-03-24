@@ -81,6 +81,9 @@ function mockGitSuccess(treeHash = 'abc123tree', commitHash = 'def456commit') {
  * Sets up fs mocks to simulate a healthy shadow repo for cwd=/mock/project.
  */
 function withShadowRepo(includeStackFile = false) {
+  // readdirSync → [] simulates no orphaned index_* files in the shadow dir.
+  // The shadow repo existence check uses `git rev-parse --git-dir` (spawnSync),
+  // NOT readdirSync, so this empty return is correct and doesn't affect init logic.
   vi.mocked(fs.readdirSync).mockReturnValue([]);
   vi.mocked(fs.existsSync).mockImplementation((p) => {
     const s = String(p);
@@ -330,6 +333,23 @@ describe('createShadowSnapshot', () => {
     await createShadowSnapshot('edit', {});
 
     // unlinkSync should be called for the index file (inside shadow dir)
+    const unlinkCalls = vi.mocked(fs.unlinkSync).mock.calls.map(([p]) => String(p));
+    expect(unlinkCalls.some((p) => p.includes('index_'))).toBe(true);
+  });
+
+  it('cleans up index file even when write-tree fails (finally block on error path)', async () => {
+    withShadowRepo(false);
+    mockSpawn.mockImplementation((_cmd, args) => {
+      const a = (args ?? []) as string[];
+      if (a.includes('rev-parse') && a.includes('--git-dir')) return spawnResult('/shadow\n');
+      if (a.includes('write-tree')) return spawnResult('', 1); // simulate failure
+      return spawnResult();
+    });
+
+    const result = await createShadowSnapshot('edit', {});
+    expect(result).toBeNull(); // snapshot failed
+
+    // Index file must still be cleaned up — the finally block must fire on failure
     const unlinkCalls = vi.mocked(fs.unlinkSync).mock.calls.map(([p]) => String(p));
     expect(unlinkCalls.some((p) => p.includes('index_'))).toBe(true);
   });

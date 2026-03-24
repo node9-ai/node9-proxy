@@ -93,7 +93,7 @@ node9 undo
 node9 undo --steps 3
 ```
 
-Up to 10 snapshots are tracked per session. The snapshot stack is stored at `~/.node9/snapshots.json`.
+The last 10 snapshots are kept globally across all sessions in `~/.node9/snapshots.json`. Older snapshots are dropped as new ones are added.
 
 ---
 

@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
-import { scanArgs, DLP_PATTERNS } from '../dlp.js';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import fs from 'fs';
+import { scanArgs, scanFilePath, DLP_PATTERNS } from '../dlp.js';
 
 // NOTE: All fake secret strings are built via concatenation so GitHub's secret
 // scanner doesn't flag this test file. The values are obviously fake (sequential
@@ -191,5 +192,102 @@ describe('DLP_PATTERNS export', () => {
       expect(p.regex).toBeInstanceOf(RegExp);
       expect(['block', 'review']).toContain(p.severity);
     }
+  });
+});
+
+// ── scanFilePath — sensitive file path blocking ───────────────────────────────
+
+describe('scanFilePath — sensitive path blocking', () => {
+  // Mock fs so tests don't touch the real filesystem
+  beforeEach(() => {
+    vi.spyOn(fs, 'existsSync').mockReturnValue(false);
+    // Mock realpathSync.native — this is the production symlink-resolution path
+    vi.spyOn(fs, 'realpathSync').mockImplementation((p) => String(p));
+    (fs.realpathSync as unknown as { native: (p: unknown) => string }).native = vi
+      .fn()
+      .mockImplementation((p: unknown) => String(p));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('blocks access to SSH key files', () => {
+    const match = scanFilePath('/home/user/.ssh/id_rsa', '/');
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Sensitive File Path');
+    expect(match!.severity).toBe('block');
+  });
+
+  it('blocks access to AWS credentials directory', () => {
+    const match = scanFilePath('/home/user/.aws/credentials', '/');
+    expect(match).not.toBeNull();
+    expect(match!.severity).toBe('block');
+  });
+
+  it('blocks .env files', () => {
+    expect(scanFilePath('/project/.env', '/')).not.toBeNull();
+    expect(scanFilePath('/project/.env.local', '/')).not.toBeNull();
+    expect(scanFilePath('/project/.env.production', '/')).not.toBeNull();
+  });
+
+  it('does NOT block .envoy or similar non-credential files', () => {
+    expect(scanFilePath('/project/.envoy-config', '/')).toBeNull();
+    expect(scanFilePath('/project/environment.ts', '/')).toBeNull();
+  });
+
+  it('blocks PEM certificate files', () => {
+    expect(scanFilePath('/certs/server.pem', '/')).not.toBeNull();
+    expect(scanFilePath('/keys/private.key', '/')).not.toBeNull();
+  });
+
+  it('blocks /etc/passwd and /etc/shadow', () => {
+    expect(scanFilePath('/etc/passwd', '/')).not.toBeNull();
+    expect(scanFilePath('/etc/shadow', '/')).not.toBeNull();
+  });
+
+  it('returns null for ordinary source files', () => {
+    expect(scanFilePath('src/app.ts', '/project')).toBeNull();
+    expect(scanFilePath('README.md', '/project')).toBeNull();
+    expect(scanFilePath('package.json', '/project')).toBeNull();
+  });
+
+  it('returns null for empty or missing path', () => {
+    expect(scanFilePath('', '/project')).toBeNull();
+  });
+
+  it('calls realpathSync.native to resolve symlinks when the file exists', () => {
+    // Simulate an existing file so the symlink-resolution branch is taken
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    const nativeSpy = vi.mocked(
+      (fs.realpathSync as unknown as { native: (p: unknown) => string }).native
+    );
+
+    scanFilePath('/project/safe-looking-link.txt', '/project');
+
+    // .native must have been called — this is the symlink-escape prevention path
+    expect(nativeSpy).toHaveBeenCalled();
+  });
+
+  it('blocks when a symlink resolves to a sensitive path', () => {
+    // existsSync → true so realpathSync.native is invoked
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    // .native resolves the "safe" symlink to a sensitive target
+    (fs.realpathSync as unknown as { native: (p: unknown) => string }).native = vi
+      .fn()
+      .mockReturnValue('/home/user/.ssh/id_rsa');
+
+    const match = scanFilePath('/project/totally-safe-link', '/project');
+    expect(match).not.toBeNull();
+    expect(match!.severity).toBe('block');
+  });
+
+  it('does NOT block when a symlink resolves to a safe path', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    (fs.realpathSync as unknown as { native: (p: unknown) => string }).native = vi
+      .fn()
+      .mockReturnValue('/project/src/app.ts');
+
+    expect(scanFilePath('/project/link-to-app', '/project')).toBeNull();
   });
 });
