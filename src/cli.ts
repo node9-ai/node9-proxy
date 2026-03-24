@@ -1336,14 +1336,12 @@ program
           cwd?: string;
         };
 
-        // Pass payload.cwd directly to getConfig() instead of mutating process.chdir —
-        // process.chdir is process-global and would race with concurrent hook invocations.
-        const config = getConfig(payload.cwd || undefined);
-
         // Handle both Claude (tool_name) and Gemini (name)
         const tool = sanitize(payload.tool_name ?? payload.name ?? 'unknown');
         const rawInput = payload.tool_input ?? payload.args ?? {};
 
+        // Audit write FIRST — before any config load that could fail.
+        // A config error must never silently skip the audit entry.
         const entry = {
           ts: new Date().toISOString(),
           tool: tool,
@@ -1356,6 +1354,16 @@ program
         if (!fs.existsSync(path.dirname(logPath)))
           fs.mkdirSync(path.dirname(logPath), { recursive: true });
         fs.appendFileSync(logPath, JSON.stringify(entry) + '\n');
+
+        // Validate cwd is absolute before passing to getConfig() — prevents path
+        // traversal via a crafted hook payload (e.g. cwd: "../../../../etc").
+        // A relative or empty cwd falls back to ambient process.cwd().
+        const safeCwd =
+          typeof payload.cwd === 'string' && path.isAbsolute(payload.cwd) ? payload.cwd : undefined;
+
+        // Config load and snapshot run AFTER the audit write — a config failure
+        // here is non-fatal and must not retroactively gap the audit trail above.
+        const config = getConfig(safeCwd);
 
         // PostToolUse snapshot is a fallback for tools not covered by PreToolUse.
         // Uses the same configurable snapshot policy.

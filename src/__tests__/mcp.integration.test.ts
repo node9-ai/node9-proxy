@@ -61,6 +61,8 @@ describe('proxy command — stdout must stay clean for stdio protocols (MCP / JS
   });
 
   it('banner goes to stderr; stdout contains only the child process output', () => {
+    // Note: uses the external /usr/bin/echo (resolved via `which`), not a shell builtin.
+    // This test is Linux/macOS only — Windows echo is a shell builtin and not spawnable.
     const result = spawnSync(process.execPath, [CLI, 'echo', 'hello-mcp-test'], {
       encoding: 'utf-8',
       timeout: 8000,
@@ -212,5 +214,45 @@ describe('log command — audit.log written when payload.cwd differs from proces
       .map((l) => JSON.parse(l) as Record<string, unknown>);
 
     expect(entries[0]).toMatchObject({ tool: 'read_file', decision: 'allowed' });
+  });
+
+  it('audit.log is written even when global config.json is corrupt JSON — config load must not skip audit', () => {
+    // Regression: getConfig() was called BEFORE appendFileSync. A config parse error
+    // would throw and skip the audit write entirely. The fix moves the audit write first.
+    // This test proves a corrupt config never creates a silent audit gap.
+    const corruptHome = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-corrupt-'));
+    try {
+      const node9Dir = path.join(corruptHome, '.node9');
+      fs.mkdirSync(node9Dir, { recursive: true });
+      // Write deliberately corrupt JSON to trigger a parse error in tryLoadConfig
+      fs.writeFileSync(path.join(node9Dir, 'config.json'), '{ this is not valid json !!');
+
+      const payload = JSON.stringify({
+        tool_name: 'bash',
+        tool_input: { command: 'ls' },
+        hook_event_name: 'PostToolUse',
+      });
+
+      const r = spawnSync(process.execPath, [CLI, 'log', payload], {
+        encoding: 'utf-8',
+        timeout: 5000,
+        cwd: os.tmpdir(),
+        env: { ...process.env, ...BASE_ENV, HOME: corruptHome },
+      });
+      expect(r.error).toBeUndefined();
+      expect(r.status).toBe(0);
+
+      // audit.log must exist and contain the entry despite the corrupt config
+      const auditLog = path.join(corruptHome, '.node9', 'audit.log');
+      expect(fs.existsSync(auditLog)).toBe(true);
+      const entries = fs
+        .readFileSync(auditLog, 'utf-8')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l) as Record<string, unknown>);
+      expect(entries[0]).toMatchObject({ tool: 'bash', decision: 'allowed' });
+    } finally {
+      cleanupDir(corruptHome);
+    }
   });
 });
