@@ -1367,8 +1367,11 @@ program
         // silent failures here directly create audit gaps. Do NOT call getConfig()
         // here: if it caused the original error, calling it again re-throws and
         // hides the real message.
-        const debugPath = path.join(os.homedir(), '.node9', 'hook-debug.log');
         const msg = err instanceof Error ? err.message : String(err);
+        // Emit to stderr so the failure surfaces in the tool output stream — operators
+        // should not need to proactively check hook-debug.log to learn of audit gaps.
+        process.stderr.write(`[Node9] audit log error: ${msg}\n`);
+        const debugPath = path.join(os.homedir(), '.node9', 'hook-debug.log');
         try {
           fs.appendFileSync(debugPath, `[${new Date().toISOString()}] LOG_ERROR: ${msg}\n`);
         } catch {
@@ -1378,7 +1381,7 @@ program
         // here would cause Claude/Gemini to treat the *tool call itself* as failed,
         // which is incorrect — the tool already ran. The tradeoff is that the hook
         // host sees success even when audit.log was not written; the error is
-        // recorded in hook-debug.log for operator visibility.
+        // surfaced on stderr and in hook-debug.log for operator visibility.
       }
       process.exit(0);
     };

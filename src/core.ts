@@ -2149,6 +2149,10 @@ export function getConfig(cwd?: string): Config {
   if (!cwd && cachedConfig) return cachedConfig;
 
   const globalPath = path.join(os.homedir(), '.node9', 'config.json');
+  // If cwd doesn't exist on disk, tryLoadConfig returns null and the project
+  // config layer is simply skipped — global config + defaults are used instead.
+  // This is intentional: a nonexistent cwd (e.g. deleted project, stale hook)
+  // must not crash; it falls back gracefully to the global config.
   const projectPath = path.join(cwd ?? process.cwd(), 'node9.config.json');
 
   const globalConfig = tryLoadConfig(globalPath);

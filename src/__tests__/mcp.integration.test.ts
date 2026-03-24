@@ -12,7 +12,7 @@
  *   - Tests set HOME to an isolated tmp directory to control config state
  */
 
-import { describe, it, expect, beforeAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
 import { spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
@@ -32,8 +32,10 @@ function cleanupDir(dir: string) {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
-// Collect temp dirs created per test for cleanup
-const tempDirs: string[] = [];
+const BASE_ENV = {
+  NODE9_NO_AUTO_DAEMON: '1',
+  NODE9_TESTING: '1',
+};
 
 beforeAll(() => {
   if (!fs.existsSync(CLI)) {
@@ -43,32 +45,30 @@ beforeAll(() => {
   }
 });
 
-afterEach(() => {
-  for (const d of tempDirs.splice(0)) cleanupDir(d);
-});
-
 // ── 1. Proxy stdout cleanliness ───────────────────────────────────────────────
 // Regression: banner was written to stdout via console.log, corrupting JSON-RPC
 // streams when node9 wrapped stdio MCP servers.
 
 describe('proxy command — stdout must stay clean for stdio protocols (MCP / JSON-RPC)', () => {
-  it('banner goes to stderr; stdout contains only the child process output', () => {
-    const tmpHome = makeTempHome({ settings: { mode: 'audit', autoStartDaemon: false } });
-    tempDirs.push(tmpHome);
+  let tmpHome: string;
 
+  beforeEach(() => {
+    tmpHome = makeTempHome({ settings: { mode: 'audit', autoStartDaemon: false } });
+  });
+
+  afterEach(() => {
+    cleanupDir(tmpHome);
+  });
+
+  it('banner goes to stderr; stdout contains only the child process output', () => {
     const result = spawnSync(process.execPath, [CLI, 'echo', 'hello-mcp-test'], {
       encoding: 'utf-8',
       timeout: 8000,
       cwd: os.tmpdir(),
-      env: {
-        ...process.env,
-        HOME: tmpHome,
-        NODE9_NO_AUTO_DAEMON: '1',
-        NODE9_TESTING: '1',
-      },
+      env: { ...process.env, ...BASE_ENV, HOME: tmpHome },
     });
 
-    // Guard: if spawn itself failed, result.error is set and stdout is empty — fail loudly
+    // Guard: if spawn itself failed, result.error is set — fail loudly
     expect(result.error).toBeUndefined();
     expect(result.status).toBe(0);
     // Critical: stdout must be exactly what the child wrote — no banner injected
@@ -78,9 +78,6 @@ describe('proxy command — stdout must stay clean for stdio protocols (MCP / JS
   });
 
   it('stdout is valid JSON when the child writes JSON — banner does not corrupt the stream', () => {
-    const tmpHome = makeTempHome({ settings: { mode: 'audit', autoStartDaemon: false } });
-    tempDirs.push(tmpHome);
-
     // Simulate a minimal JSON-RPC response from an MCP server
     const jsonRpcResponse = '{"jsonrpc":"2.0","id":1,"result":{"ok":true}}';
 
@@ -88,15 +85,9 @@ describe('proxy command — stdout must stay clean for stdio protocols (MCP / JS
       encoding: 'utf-8',
       timeout: 8000,
       cwd: os.tmpdir(),
-      env: {
-        ...process.env,
-        HOME: tmpHome,
-        NODE9_NO_AUTO_DAEMON: '1',
-        NODE9_TESTING: '1',
-      },
+      env: { ...process.env, ...BASE_ENV, HOME: tmpHome },
     });
 
-    // Guard: if spawn itself failed, result.error is set — fail loudly
     expect(result.error).toBeUndefined();
     expect(result.status).toBe(0);
     // Pre-assertion: non-empty stdout before attempting JSON.parse (better diagnostics)
@@ -114,31 +105,68 @@ describe('proxy command — stdout must stay clean for stdio protocols (MCP / JS
 // it to throw and the catch block to silently swallow the error.
 
 describe('log command — audit.log written when payload.cwd differs from process.cwd()', () => {
-  it('writes MCP tool call to audit.log when payload.cwd is a different project directory', () => {
-    const tmpHome = makeTempHome({ settings: { mode: 'audit', autoStartDaemon: false } });
-    tempDirs.push(tmpHome);
+  let tmpHome: string;
 
+  beforeEach(() => {
+    tmpHome = makeTempHome({ settings: { mode: 'audit', autoStartDaemon: false } });
+  });
+
+  afterEach(() => {
+    cleanupDir(tmpHome);
+  });
+
+  it('writes MCP tool call to audit.log when payload.cwd is a different project directory', () => {
     // Project directory is different from the node9 binary's cwd
     const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-project-'));
-    tempDirs.push(projectDir);
+    try {
+      const payload = JSON.stringify({
+        tool_name: 'mcp__opsgenie__list_teams',
+        tool_input: { limit: 10 },
+        cwd: projectDir,
+        hook_event_name: 'PostToolUse',
+      });
 
+      const r = spawnSync(process.execPath, [CLI, 'log', payload], {
+        encoding: 'utf-8',
+        timeout: 5000,
+        cwd: os.tmpdir(), // intentionally different from projectDir
+        env: { ...process.env, ...BASE_ENV, HOME: tmpHome },
+      });
+      expect(r.error).toBeUndefined();
+      expect(r.status).toBe(0);
+
+      const auditLog = path.join(tmpHome, '.node9', 'audit.log');
+      expect(fs.existsSync(auditLog)).toBe(true);
+
+      const entries = fs
+        .readFileSync(auditLog, 'utf-8')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l) as Record<string, unknown>);
+
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toMatchObject({
+        tool: 'mcp__opsgenie__list_teams',
+        decision: 'allowed',
+        source: 'post-hook',
+      });
+    } finally {
+      cleanupDir(projectDir);
+    }
+  });
+
+  it('writes to audit.log when payload has no cwd (backward compat — uses process.cwd())', () => {
     const payload = JSON.stringify({
-      tool_name: 'mcp__opsgenie__list_teams',
-      tool_input: { limit: 10 },
-      cwd: projectDir,
+      tool_name: 'write_file',
+      tool_input: { file_path: '/tmp/test.txt', content: 'hello' },
       hook_event_name: 'PostToolUse',
     });
 
     const r = spawnSync(process.execPath, [CLI, 'log', payload], {
       encoding: 'utf-8',
       timeout: 5000,
-      cwd: os.tmpdir(), // intentionally different from projectDir
-      env: {
-        ...process.env,
-        HOME: tmpHome,
-        NODE9_NO_AUTO_DAEMON: '1',
-        NODE9_TESTING: '1',
-      },
+      cwd: os.tmpdir(),
+      env: { ...process.env, ...BASE_ENV, HOME: tmpHome },
     });
     expect(r.error).toBeUndefined();
     expect(r.status).toBe(0);
@@ -152,37 +180,27 @@ describe('log command — audit.log written when payload.cwd differs from proces
       .split('\n')
       .map((l) => JSON.parse(l) as Record<string, unknown>);
 
-    expect(entries).toHaveLength(1);
-    expect(entries[0]).toMatchObject({
-      tool: 'mcp__opsgenie__list_teams',
-      decision: 'allowed',
-      source: 'post-hook',
-    });
+    expect(entries[0]).toMatchObject({ tool: 'write_file', decision: 'allowed' });
   });
 
-  it('writes to audit.log when payload has no cwd (backward compat — uses process.cwd())', () => {
-    const tmpHome = makeTempHome({ settings: { mode: 'audit', autoStartDaemon: false } });
-    tempDirs.push(tmpHome);
-
+  it('writes to audit.log when payload.cwd is a nonexistent directory — falls back to global config', () => {
+    // getConfig() must not throw when the project dir doesn't exist.
+    // tryLoadConfig returns null for a missing path → global config used → audit write succeeds.
     const payload = JSON.stringify({
-      tool_name: 'write_file',
-      tool_input: { file_path: '/tmp/test.txt', content: 'hello' },
+      tool_name: 'read_file',
+      tool_input: { file_path: '/tmp/test.txt' },
+      cwd: '/nonexistent/project/dir/that/does/not/exist',
       hook_event_name: 'PostToolUse',
     });
 
-    const r2 = spawnSync(process.execPath, [CLI, 'log', payload], {
+    const r = spawnSync(process.execPath, [CLI, 'log', payload], {
       encoding: 'utf-8',
       timeout: 5000,
       cwd: os.tmpdir(),
-      env: {
-        ...process.env,
-        HOME: tmpHome,
-        NODE9_NO_AUTO_DAEMON: '1',
-        NODE9_TESTING: '1',
-      },
+      env: { ...process.env, ...BASE_ENV, HOME: tmpHome },
     });
-    expect(r2.error).toBeUndefined();
-    expect(r2.status).toBe(0);
+    expect(r.error).toBeUndefined();
+    expect(r.status).toBe(0);
 
     const auditLog = path.join(tmpHome, '.node9', 'audit.log');
     expect(fs.existsSync(auditLog)).toBe(true);
@@ -193,6 +211,6 @@ describe('log command — audit.log written when payload.cwd differs from proces
       .split('\n')
       .map((l) => JSON.parse(l) as Record<string, unknown>);
 
-    expect(entries[0]).toMatchObject({ tool: 'write_file', decision: 'allowed' });
+    expect(entries[0]).toMatchObject({ tool: 'read_file', decision: 'allowed' });
   });
 });
