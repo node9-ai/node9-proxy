@@ -182,8 +182,11 @@ describe('scanArgs — performance guards', () => {
 // ── All patterns export ───────────────────────────────────────────────────────
 
 describe('DLP_PATTERNS export', () => {
-  it('exports at least 7 built-in patterns', () => {
-    expect(DLP_PATTERNS.length).toBeGreaterThanOrEqual(7);
+  it('exports at least 9 built-in patterns', () => {
+    // 9 patterns as of current implementation:
+    // AWS Key ID, GitHub Token, Slack Bot Token, OpenAI Key, Stripe Secret Key,
+    // Private Key PEM, GCP Service Account, NPM Auth Token, Bearer Token
+    expect(DLP_PATTERNS.length).toBeGreaterThanOrEqual(9);
   });
 
   it('all patterns have name, regex, and severity', () => {
@@ -294,5 +297,30 @@ describe('scanFilePath — sensitive path blocking', () => {
     (fs.realpathSync as RealpathWithNative).native = vi.fn().mockReturnValue('/project/src/app.ts');
 
     expect(scanFilePath('/project/link-to-app', '/project')).toBeNull();
+  });
+
+  it('does not throw when realpathSync.native throws (TOCTOU race — file deleted between existsSync and native)', () => {
+    // existsSync returns true (file existed at check time), but .native throws
+    // because the file was deleted in the race window — a real TOCTOU scenario.
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    (fs.realpathSync as RealpathWithNative).native = vi.fn().mockImplementation(() => {
+      throw new Error('ENOENT: no such file or directory');
+    });
+
+    // Must not throw — the catch block in production falls back to path.resolve
+    expect(() => scanFilePath('/project/src/app.ts', '/project')).not.toThrow();
+  });
+
+  it('falls back to original path when native throws, still blocks if original path is sensitive', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    (fs.realpathSync as RealpathWithNative).native = vi.fn().mockImplementation(() => {
+      throw new Error('ENOENT');
+    });
+
+    // Even with the TOCTOU fallback, the original sensitive path is still blocked
+    // because path.resolve('/home/user/.ssh/id_rsa') is also sensitive
+    const match = scanFilePath('/home/user/.ssh/id_rsa', '/home/user');
+    expect(match).not.toBeNull();
+    expect(match!.severity).toBe('block');
   });
 });

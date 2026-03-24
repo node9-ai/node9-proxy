@@ -3,6 +3,10 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
+// Typed alias for fs.realpathSync.native — avoids repeated `unknown` casts and
+// matches the same alias used in dlp.test.ts for consistency.
+type RealpathWithNative = typeof fs.realpathSync & { native: (p: unknown) => string };
+
 // ── Mock child_process BEFORE importing undo (hoisted by vitest) ─────────────
 vi.mock('child_process', () => ({
   spawnSync: vi.fn(),
@@ -29,7 +33,7 @@ vi.spyOn(fs, 'unlinkSync').mockImplementation(() => undefined);
 // for symlink-escape prevention. Mocking only the base function would leave
 // the security path untested.
 vi.spyOn(fs, 'realpathSync').mockImplementation((p) => String(p));
-(fs.realpathSync as unknown as { native: (p: unknown) => string }).native = vi
+(fs.realpathSync as RealpathWithNative).native = vi
   .fn()
   .mockImplementation((p: unknown) => String(p));
 vi.spyOn(fs, 'readdirSync').mockReturnValue([]);
@@ -108,9 +112,9 @@ beforeEach(() => {
   vi.mocked(fs.mkdirSync).mockImplementation(() => undefined);
   vi.mocked(fs.unlinkSync).mockImplementation(() => undefined);
   vi.mocked(fs.realpathSync).mockImplementation((p) => String(p));
-  vi.mocked(
-    (fs.realpathSync as unknown as { native: (p: unknown) => string }).native
-  ).mockImplementation((p: unknown) => String(p));
+  vi.mocked((fs.realpathSync as RealpathWithNative).native).mockImplementation((p: unknown) =>
+    String(p)
+  );
   vi.mocked(fs.readdirSync).mockReturnValue([]);
   vi.mocked(fs.statSync).mockReturnValue({ mtimeMs: 0 } as ReturnType<typeof fs.statSync>);
   vi.mocked(fs.rmSync).mockImplementation(() => undefined);

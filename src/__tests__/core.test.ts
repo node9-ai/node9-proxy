@@ -1284,6 +1284,11 @@ describe('validateRegex', () => {
   it('rejects quantified alternations — catastrophic backtracking risk', () => {
     expect(validateRegex('(foo|bar)+')).not.toBeNull();
     expect(validateRegex('(a|b|c)*')).not.toBeNull();
+    // Reviewer-specific patterns: nested groups with ranges and non-capturing variants
+    expect(validateRegex('(a{1,10}|b{1,10}){1,10}')).not.toBeNull();
+    expect(validateRegex('(?:a|b){1,100}')).not.toBeNull();
+    expect(validateRegex('(?:a|b)*')).not.toBeNull();
+    expect(validateRegex('(a{2}|b{3})+')).not.toBeNull();
   });
 
   it('allows bounded quantifiers with ? (safe — zero-or-one cannot backtrack)', () => {
@@ -1324,5 +1329,15 @@ describe('getCompiledRegex', () => {
     const re1 = getCompiledRegex('hello', '');
     const re2 = getCompiledRegex('hello', 'i');
     expect(re1).not.toBe(re2);
+  });
+
+  it('handles 520 distinct patterns without error (LRU stays bounded)', () => {
+    // Adds more entries than REGEX_CACHE_MAX (500) to verify the eviction path
+    // runs without throwing and all returned values are valid RegExps.
+    // Note: getCompiledRegex is sync — no async interleaving concerns.
+    for (let i = 0; i < 520; i++) {
+      const re = getCompiledRegex(`lru-bound-test-[a-z]{${i + 1}}`);
+      expect(re).toBeInstanceOf(RegExp);
+    }
   });
 });
