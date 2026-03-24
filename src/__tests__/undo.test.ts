@@ -835,10 +835,9 @@ describe('applyUndo', () => {
     expect(vi.mocked(fs.unlinkSync)).not.toHaveBeenCalled();
   });
 
-  it('documents known gap: ls-tree exits 0 with empty stdout produces empty snapshotFiles', () => {
-    // The non-zero exit guard does not catch status 0 + empty stdout.
-    // An empty snapshotFiles set causes all tracked files to be unlinkSync'd.
-    // This test documents the invariant so the gap is visible and explicit.
+  it('returns false when ls-tree exits 0 with empty stdout (mass-delete footgun)', () => {
+    // ls-tree status 0 + empty stdout → snapshotFiles would be empty set →
+    // every tracked file would be deleted. The empty-set guard catches this case.
     vi.mocked(fs.readdirSync).mockReturnValue([]);
     vi.mocked(fs.existsSync).mockReturnValue(true);
     mockSpawn.mockImplementation((_cmd, args) => {
@@ -847,10 +846,9 @@ describe('applyUndo', () => {
       if (a.includes('restore')) return spawnResult('', 0);
       if (a.includes('ls-tree')) return spawnResult('', 0); // exits 0 but no files
       if (a.includes('--others')) return spawnResult('', 0);
-      return spawnResult('src/app.ts\n', 0); // one tracked file
+      return spawnResult('src/app.ts\n', 0); // one tracked file that would be mass-deleted
     });
-    applyUndo('abc123', '/mock/project');
-    // src/app.ts is NOT in the empty snapshot → gets deleted
-    expect(vi.mocked(fs.unlinkSync)).toHaveBeenCalled();
+    expect(applyUndo('abc123', '/mock/project')).toBe(false);
+    expect(vi.mocked(fs.unlinkSync)).not.toHaveBeenCalled();
   });
 });
