@@ -1281,14 +1281,22 @@ describe('validateRegex', () => {
     expect(validateRegex('([a-z]+){2,}')).not.toBeNull();
   });
 
-  it('rejects quantified alternations — catastrophic backtracking risk', () => {
-    expect(validateRegex('(foo|bar)+')).not.toBeNull();
-    expect(validateRegex('(a|b|c)*')).not.toBeNull();
-    // Reviewer-specific patterns: nested groups with ranges and non-capturing variants
+  it('rejects quantified alternations where alternatives contain quantifiers (true ReDoS risk)', () => {
+    // Dangerous: alternatives themselves have quantifiers — can match same string many ways
+    expect(validateRegex('(a+|b+)*')).not.toBeNull();
     expect(validateRegex('(a{1,10}|b{1,10}){1,10}')).not.toBeNull();
-    expect(validateRegex('(?:a|b){1,100}')).not.toBeNull();
-    expect(validateRegex('(?:a|b)*')).not.toBeNull();
+    expect(validateRegex('(?:a+|b+){1,100}')).not.toBeNull();
     expect(validateRegex('(a{2}|b{3})+')).not.toBeNull();
+  });
+
+  it('allows quantified alternations with fixed-length disjoint alternatives (safe)', () => {
+    // Safe: alternatives are fixed-length and disjoint — no ambiguous matching
+    expect(validateRegex('(foo|bar)+')).toBeNull();
+    expect(validateRegex('(a|b|c)*')).toBeNull();
+    expect(validateRegex('(GET|POST|PUT)+')).toBeNull();
+    expect(validateRegex('(https?|ftp)://')).toBeNull();
+    // ? is also safe (bounded zero-or-one)
+    expect(validateRegex('(?:a|b)*')).toBeNull();
   });
 
   it('allows bounded quantifiers with ? (safe — zero-or-one cannot backtrack)', () => {
@@ -1325,6 +1333,17 @@ describe('getCompiledRegex', () => {
 
   it('returns null for a ReDoS pattern', () => {
     expect(getCompiledRegex('(a+)+')).toBeNull();
+  });
+
+  it('returns null for invalid flag characters', () => {
+    expect(getCompiledRegex('hello', 'z')).toBeNull(); // z is not a valid JS flag
+    expect(getCompiledRegex('hello', 'ig!')).toBeNull();
+  });
+
+  it('accepts valid flag characters', () => {
+    expect(getCompiledRegex('hello', 'i')).toBeInstanceOf(RegExp);
+    expect(getCompiledRegex('hello2', 'gi')).toBeInstanceOf(RegExp);
+    expect(getCompiledRegex('hello3', 'gims')).toBeInstanceOf(RegExp);
   });
 
   it('returns the same RegExp instance for the same pattern (cache hit)', () => {

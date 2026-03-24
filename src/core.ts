@@ -118,8 +118,14 @@ export function validateRegex(pattern: string): string | null {
   // ReDoS vectors — only flag + * { as dangerous outer quantifiers; ? (zero-or-one) is bounded and safe
   if (/\([^)]*[*+{][^)]*\)[*+{]/.test(pattern))
     return 'Nested quantifiers are forbidden (ReDoS risk)';
-  if (/\([^)]*\|[^)]*\)[*+{]/.test(pattern))
-    return 'Quantified alternations are forbidden (ReDoS risk)';
+  // Only reject quantified alternations when the alternatives themselves contain
+  // quantifiers — e.g. (a+|b+)* is dangerous, but (GET|POST)+ is safe because
+  // the alternatives are fixed-length and disjoint.
+  if (
+    /\([^)]*[*+{][^)]*\|[^)]*\)[*+{]/.test(pattern) ||
+    /\([^)]*\|[^)]*[*+{][^)]*\)[*+{]/.test(pattern)
+  )
+    return 'Quantified alternations with internal quantifiers are forbidden (ReDoS risk)';
   if (/\\\d+[*+{]/.test(pattern)) return 'Quantified backreferences are forbidden (ReDoS risk)';
 
   // Final compile check
@@ -137,6 +143,12 @@ export function validateRegex(pattern: string): string | null {
  * Returns null if the pattern is invalid or dangerous.
  */
 export function getCompiledRegex(pattern: string, flags = ''): RegExp | null {
+  // Validate flags before anything else — invalid flags (e.g. 'z') would throw
+  // inside new RegExp() and could leak debug info; reject them explicitly.
+  if (flags && !/^[gimsuy]+$/.test(flags)) {
+    if (process.env.NODE9_DEBUG === '1') console.error(`[Node9] Invalid regex flags: "${flags}"`);
+    return null;
+  }
   const key = `${pattern}\0${flags}`;
   if (regexCache.has(key)) {
     // LRU bump: move to insertion-order end

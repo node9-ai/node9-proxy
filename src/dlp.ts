@@ -83,20 +83,27 @@ export function scanFilePath(filePath: string, cwd = process.cwd()): DlpMatch | 
   let resolved: string;
   try {
     const absolute = path.resolve(cwd, filePath);
-    // Resolve symlinks only if the file already exists (Write to new files uses resolved absolute path)
-    resolved = fs.existsSync(absolute) ? fs.realpathSync.native(absolute) : absolute;
-  } catch {
-    // Fail-closed: realpathSync.native threw — most likely a TOCTOU race where
-    // the file existed at existsSync time but was deleted before native() ran.
-    // A safe-looking symlink pointing to a sensitive file could exploit the
-    // fallback window, so we block immediately rather than falling back to the
-    // unresolved path.
-    return {
-      patternName: 'Sensitive File Path',
-      fieldPath: 'file_path',
-      redactedSample: filePath,
-      severity: 'block',
-    };
+    // Call native() unconditionally — no existsSync pre-check.
+    // Skipping existsSync eliminates the TOCTOU window between the check and
+    // the native() call. Missing files throw ENOENT, which is caught below and
+    // treated as unresolvable (safe — a non-existent file can't be read).
+    resolved = fs.realpathSync.native(absolute);
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      // File doesn't exist yet (e.g. new file being written) — use raw path.
+      // A non-existent file can't be a symlink, so no symlink escape is possible.
+      resolved = path.resolve(cwd, filePath);
+    } else {
+      // Any other error (EACCES, unexpected throw, possible TOCTOU remnant) —
+      // fail-closed: block rather than risk allowing a sensitive file.
+      return {
+        patternName: 'Sensitive File Path',
+        fieldPath: 'file_path',
+        redactedSample: filePath,
+        severity: 'block',
+      };
+    }
   }
 
   // Normalise to forward slashes for cross-platform pattern matching
