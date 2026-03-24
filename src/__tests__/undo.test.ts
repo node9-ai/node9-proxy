@@ -825,8 +825,7 @@ describe('applyUndo', () => {
     vi.mocked(fs.readdirSync).mockReturnValue([]);
     mockSpawn.mockImplementation((_cmd, args) => {
       const a = (args ?? []) as string[];
-      if (a.includes('rev-parse') && a.includes('--git-dir'))
-        return spawnResult('/shadow\n', 0);
+      if (a.includes('rev-parse') && a.includes('--git-dir')) return spawnResult('/shadow\n', 0);
       if (a.includes('restore')) return spawnResult('', 0);
       if (a.includes('ls-tree')) return spawnResult('', 1); // ls-tree fails
       return spawnResult('', 0);
