@@ -24,7 +24,13 @@ vi.spyOn(fs, 'readFileSync').mockReturnValue('');
 const writeSpy = vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
 vi.spyOn(fs, 'mkdirSync').mockImplementation(() => undefined);
 vi.spyOn(fs, 'unlinkSync').mockImplementation(() => undefined);
+// Mock BOTH realpathSync and realpathSync.native — production code calls .native
+// for symlink-escape prevention. Mocking only the base function would leave
+// the security path untested.
 vi.spyOn(fs, 'realpathSync').mockImplementation((p) => String(p));
+(fs.realpathSync as unknown as { native: (p: unknown) => string }).native = vi
+  .fn()
+  .mockImplementation((p: unknown) => String(p));
 vi.spyOn(fs, 'readdirSync').mockReturnValue([]);
 vi.spyOn(fs, 'statSync').mockReturnValue({ mtimeMs: 0 } as ReturnType<typeof fs.statSync>);
 vi.spyOn(fs, 'rmSync').mockImplementation(() => undefined);
@@ -43,48 +49,31 @@ const mockSpawn = vi.mocked(spawnSync);
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
+/** Constructs a typed spawnSync return value, reducing cast boilerplate. */
+function spawnResult(stdout = '', status = 0): ReturnType<typeof spawnSync> {
+  return {
+    status,
+    stdout: Buffer.from(stdout),
+    stderr: Buffer.from(''),
+  } as ReturnType<typeof spawnSync>;
+}
+
 /**
- * Mocks spawnSync so all git operations succeed. Handles rev-parse (shadow
- * repo health check), config, add, write-tree, and commit-tree.
+ * Mocks spawnSync so all git operations succeed. Handles rev-parse --git-dir
+ * (shadow repo health check), config, add, write-tree, and commit-tree.
+ * Uses `--git-dir` to distinguish the health-check rev-parse from other
+ * rev-parse variants (e.g. rev-parse HEAD) so those don't collapse.
  */
 function mockGitSuccess(treeHash = 'abc123tree', commitHash = 'def456commit') {
   mockSpawn.mockImplementation((_cmd, args) => {
     const a = (args ?? []) as string[];
-    if (a.includes('rev-parse'))
-      return {
-        status: 0,
-        stdout: Buffer.from('/shadow\n'),
-        stderr: Buffer.from(''),
-      } as ReturnType<typeof spawnSync>;
-    if (a.includes('config') || a.includes('init'))
-      return {
-        status: 0,
-        stdout: Buffer.from(''),
-        stderr: Buffer.from(''),
-      } as ReturnType<typeof spawnSync>;
-    if (a.includes('add'))
-      return {
-        status: 0,
-        stdout: Buffer.from(''),
-        stderr: Buffer.from(''),
-      } as ReturnType<typeof spawnSync>;
-    if (a.includes('write-tree'))
-      return {
-        status: 0,
-        stdout: Buffer.from(treeHash + '\n'),
-        stderr: Buffer.from(''),
-      } as ReturnType<typeof spawnSync>;
-    if (a.includes('commit-tree'))
-      return {
-        status: 0,
-        stdout: Buffer.from(commitHash + '\n'),
-        stderr: Buffer.from(''),
-      } as ReturnType<typeof spawnSync>;
-    return {
-      status: 0,
-      stdout: Buffer.from(''),
-      stderr: Buffer.from(''),
-    } as ReturnType<typeof spawnSync>;
+    // Only match the shadow-repo health-check: `git rev-parse --git-dir`
+    if (a.includes('rev-parse') && a.includes('--git-dir')) return spawnResult('/shadow\n');
+    if (a.includes('config') || a.includes('init')) return spawnResult();
+    if (a.includes('add')) return spawnResult();
+    if (a.includes('write-tree')) return spawnResult(treeHash + '\n');
+    if (a.includes('commit-tree')) return spawnResult(commitHash + '\n');
+    return spawnResult();
   });
 }
 
@@ -115,6 +104,9 @@ beforeEach(() => {
   vi.mocked(fs.mkdirSync).mockImplementation(() => undefined);
   vi.mocked(fs.unlinkSync).mockImplementation(() => undefined);
   vi.mocked(fs.realpathSync).mockImplementation((p) => String(p));
+  vi.mocked(
+    (fs.realpathSync as unknown as { native: (p: unknown) => string }).native
+  ).mockImplementation((p: unknown) => String(p));
   vi.mocked(fs.readdirSync).mockReturnValue([]);
   vi.mocked(fs.statSync).mockReturnValue({ mtimeMs: 0 } as ReturnType<typeof fs.statSync>);
   vi.mocked(fs.rmSync).mockImplementation(() => undefined);
@@ -222,7 +214,7 @@ describe('createShadowSnapshot', () => {
     withShadowRepo(false);
     mockSpawn.mockImplementation((_cmd, args) => {
       const a = (args ?? []) as string[];
-      if (a.includes('rev-parse'))
+      if (a.includes('rev-parse') && a.includes('--git-dir'))
         return {
           status: 0,
           stdout: Buffer.from('/shadow\n'),
@@ -326,8 +318,9 @@ describe('createShadowSnapshot', () => {
     const addEnv = addCall![2]?.env as Record<string, string>;
     expect(addEnv?.GIT_DIR).toContain('.node9/snapshots');
     expect(addEnv?.GIT_WORK_TREE).toBe('/mock/project');
-    // Index file must be inside shadow dir, not user's .git
+    // Index file must be inside shadow dir — never in the user's .git
     expect(addEnv?.GIT_INDEX_FILE).toContain('.node9/snapshots');
+    expect(addEnv?.GIT_INDEX_FILE).not.toContain('/.git/');
   });
 
   it('cleans up the per-invocation index file after snapshot (finally block)', async () => {
@@ -354,7 +347,7 @@ describe('ensureShadowRepo', () => {
 
     mockSpawn.mockImplementation((_cmd, args) => {
       const a = (args ?? []) as string[];
-      if (a.includes('rev-parse'))
+      if (a.includes('rev-parse') && a.includes('--git-dir'))
         return {
           status: 1,
           stdout: Buffer.from(''),
@@ -411,7 +404,7 @@ describe('ensureShadowRepo', () => {
 
     mockSpawn.mockImplementation((_cmd, args) => {
       const a = (args ?? []) as string[];
-      if (a.includes('rev-parse'))
+      if (a.includes('rev-parse') && a.includes('--git-dir'))
         return {
           status: 0,
           stdout: Buffer.from('/shadow\n'),
@@ -454,7 +447,7 @@ describe('ensureShadowRepo', () => {
 
     mockSpawn.mockImplementation((_cmd, args) => {
       const a = (args ?? []) as string[];
-      if (a.includes('rev-parse'))
+      if (a.includes('rev-parse') && a.includes('--git-dir'))
         return { status: 1, stdout: Buffer.from(''), stderr: Buffer.from('') } as ReturnType<
           typeof spawnSync
         >;
@@ -649,7 +642,7 @@ describe('applyUndo', () => {
     vi.mocked(fs.readdirSync).mockReturnValue([]);
     mockSpawn.mockImplementation((_cmd, args) => {
       const a = (args ?? []) as string[];
-      if (a.includes('rev-parse'))
+      if (a.includes('rev-parse') && a.includes('--git-dir'))
         return {
           status: 0,
           stdout: Buffer.from('/shadow\n'),
@@ -684,7 +677,7 @@ describe('applyUndo', () => {
     vi.mocked(fs.readdirSync).mockReturnValue([]);
     mockSpawn.mockImplementation((_cmd, args) => {
       const a = (args ?? []) as string[];
-      if (a.includes('rev-parse'))
+      if (a.includes('rev-parse') && a.includes('--git-dir'))
         return {
           status: 0,
           stdout: Buffer.from('/shadow\n'),
@@ -723,7 +716,7 @@ describe('applyUndo', () => {
     vi.mocked(fs.readdirSync).mockReturnValue([]);
     mockSpawn.mockImplementation((_cmd, args) => {
       const a = (args ?? []) as string[];
-      if (a.includes('rev-parse'))
+      if (a.includes('rev-parse') && a.includes('--git-dir'))
         return {
           status: 0,
           stdout: Buffer.from('/shadow\n'),
