@@ -83,7 +83,7 @@ Node9 doesn't just "cut the wire." When a command is blocked, it injects a **Str
 
 ### ⏪ Shadow Git Snapshots (Auto-Undo)
 
-Node9 takes a silent, lightweight Git snapshot before every AI file edit. If the AI hallucinates and breaks your code, run `node9 undo` to instantly revert — with a full diff preview before anything changes.
+Node9 takes a silent, lightweight Git snapshot before every AI file edit. Snapshots are stored in an isolated shadow bare repo at `~/.node9/snapshots/` — your project's `.git` is never touched, and no existing git setup is required. If the AI hallucinates and breaks your code, run `node9 undo` to instantly revert — with a full diff preview before anything changes.
 
 ```bash
 # Undo the last AI action (shows diff + asks confirmation)
@@ -92,6 +92,8 @@ node9 undo
 # Go back N actions at once
 node9 undo --steps 3
 ```
+
+Up to 10 snapshots are tracked per session. The snapshot stack is stored at `~/.node9/snapshots.json`.
 
 ---
 

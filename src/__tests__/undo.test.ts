@@ -37,8 +37,7 @@ const byStackPath = ([p]: Parameters<typeof fs.writeFileSync>) =>
   String(p).endsWith('snapshots.json');
 const byLatestPath = ([p]: Parameters<typeof fs.writeFileSync>) =>
   String(p).endsWith('undo_latest.txt');
-const byExcludePath = ([p]: Parameters<typeof fs.writeFileSync>) =>
-  String(p).endsWith('exclude');
+const byExcludePath = ([p]: Parameters<typeof fs.writeFileSync>) => String(p).endsWith('exclude');
 
 const mockSpawn = vi.mocked(spawnSync);
 
@@ -386,7 +385,7 @@ describe('ensureShadowRepo', () => {
 
     const initCall = mockSpawn.mock.calls.find(([, args]) => (args as string[]).includes('init'));
     expect(initCall).toBeDefined();
-    expect((initCall![1] as string[])).toContain('--bare');
+    expect(initCall![1] as string[]).toContain('--bare');
   });
 
   it('skips init when shadow repo is healthy and path matches', async () => {

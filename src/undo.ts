@@ -341,11 +341,11 @@ export function applyUndo(hash: string, cwd?: string): boolean {
     const dir = cwd ?? process.cwd();
     const env = buildGitEnv(dir);
 
-    const restore = spawnSync(
-      'git',
-      ['restore', '--source', hash, '--staged', '--worktree', '.'],
-      { cwd: dir, env, timeout: GIT_TIMEOUT }
-    );
+    const restore = spawnSync('git', ['restore', '--source', hash, '--staged', '--worktree', '.'], {
+      cwd: dir,
+      env,
+      timeout: GIT_TIMEOUT,
+    });
     if (restore.status !== 0) return false;
 
     const lsTree = spawnSync('git', ['ls-tree', '-r', '--name-only', hash], {
