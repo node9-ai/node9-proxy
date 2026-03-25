@@ -40,5 +40,12 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Verify dist artifacts
+        run: |
+          node -e "require('fs').existsSync('dist/cli.js') || (console.error('Missing: dist/cli.js'), process.exit(1))"
+          node -e "require('fs').existsSync('dist/index.js') || (console.error('Missing: dist/index.js'), process.exit(1))"
+
       - name: Test
+        # NODE_ENV=test is set automatically by Vitest; NODE9_TESTING=1 guards
+        # native popups and daemon auto-start in spawned child processes.
         run: npm test

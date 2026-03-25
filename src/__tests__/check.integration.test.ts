@@ -144,9 +144,11 @@ function makeTempHomeRaw(content: string): string {
 
 /** Returns a process env with both HOME and USERPROFILE pointing to the
  *  isolated home dir. Windows uses USERPROFILE; Unix uses HOME. Setting
- *  both ensures os.homedir() resolves correctly on every platform. */
-function makeEnv(home: string, extra: Record<string, string> = {}): Record<string, string> {
-  return { HOME: home, USERPROFILE: home, ...extra };
+ *  both ensures os.homedir() resolves correctly on every platform.
+ *  Spreads process.env so PATH and other required vars (including NODE_ENV=test
+ *  set by Vitest, and NODE9_TESTING) propagate to spawned child processes. */
+function makeEnv(home: string, extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+  return { ...process.env, HOME: home, USERPROFILE: home, ...extra };
 }
 
 function cleanupHome(tmpHome: string) {
@@ -782,8 +784,6 @@ describe('malformed JSON payload', () => {
 // ── shield set — allow verdict guard ─────────────────────────────────────────
 
 describe('shield set — allow verdict guard', () => {
-  const minimalEnv = { PATH: process.env.PATH ?? '', NODE9_TESTING: '1' };
-
   it('exits with code 1 and prints --force hint when setting allow without --force', () => {
     const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-shield-'));
     const node9Dir = path.join(tmpHome, '.node9');
@@ -797,7 +797,7 @@ describe('shield set — allow verdict guard', () => {
         {
           encoding: 'utf-8',
           timeout: 5000,
-          env: { ...minimalEnv, ...makeEnv(tmpHome) },
+          env: makeEnv(tmpHome, { NODE9_TESTING: '1' }),
         }
       );
       expect(result.error).toBeUndefined();
@@ -820,7 +820,7 @@ describe('shield set — allow verdict guard', () => {
         {
           encoding: 'utf-8',
           timeout: 5000,
-          env: { ...minimalEnv, ...makeEnv(tmpHome) },
+          env: makeEnv(tmpHome, { NODE9_TESTING: '1' }),
         }
       );
       expect(result.error).toBeUndefined();
@@ -858,7 +858,7 @@ describe('removefrom command', () => {
         const result = spawnSync(process.execPath, [CLI, 'removefrom', target], {
           encoding: 'utf-8',
           timeout: 5000,
-          env: { ...minimalEnv, ...makeEnv(tmpHome) },
+          env: makeEnv(tmpHome, { NODE9_TESTING: '1' }),
         });
         expect(result.status).toBe(0);
       } finally {
