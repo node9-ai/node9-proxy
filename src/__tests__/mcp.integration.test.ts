@@ -124,7 +124,75 @@ describe('proxy command — stdout must stay clean for stdio protocols (MCP / JS
   );
 });
 
-// ── 2. Log command cross-cwd audit write ──────────────────────────────────────
+// ── 2. Proxy flag pass-through ────────────────────────────────────────────────
+// Regression: Commander parsed flags like -y, --config as node9 options and
+// errored with "unknown option" before the proxy action handler ever ran.
+// Fix: inject '--' before the command when not a known node9 subcommand so
+// Commander stops parsing options and passes everything through intact.
+
+describe('proxy command — flags are passed through to the wrapped command', () => {
+  let tmpHome: string;
+
+  beforeEach(() => {
+    tmpHome = makeTempHome({ settings: { mode: 'audit', autoStartDaemon: false } });
+  });
+
+  afterEach(() => {
+    cleanupDir(tmpHome);
+  });
+
+  itUnix('short flag (-y style) is not consumed by node9 argument parser', () => {
+    // The key regression: before the fix, Commander errored with "unknown option '-n'"
+    // before the proxy ran at all. We assert no such error and exit 0.
+    // We intentionally avoid asserting on echo's stdout output — echo -n behaviour
+    // varies across platforms (some print the flag literally), and the regression
+    // being tested is node9's argument parser, not echo's flag handling.
+    const result = spawnSync(process.execPath, [CLI, 'echo', '-n', 'flag-passthrough'], {
+      encoding: 'utf-8',
+      timeout: 8000,
+      cwd: os.tmpdir(),
+      env: { ...process.env, ...BASE_ENV, HOME: tmpHome },
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.stderr).not.toContain('unknown option');
+    expect(result.status).toBe(0);
+  });
+
+  itUnix('--version flag is passed to wrapped command, not intercepted as node9 --version', () => {
+    // Before the fix, node9 echo --version printed node9's own version and exited,
+    // because Commander intercepted --version as a built-in option.
+    // After the fix, --version reaches echo. echo treats unknown flags as text and
+    // prints them — so stdout will be '--version\n', not node9's semver string.
+    const node9Version = spawnSync(process.execPath, [CLI, '--version'], {
+      encoding: 'utf-8',
+      timeout: 5000,
+      env: { ...process.env, ...BASE_ENV, HOME: tmpHome },
+    });
+    expect(node9Version.error).toBeUndefined();
+    const version = node9Version.stdout.trim(); // e.g. "1.1.2"
+
+    const result = spawnSync(process.execPath, [CLI, 'echo', '--version'], {
+      encoding: 'utf-8',
+      timeout: 8000,
+      cwd: os.tmpdir(),
+      env: { ...process.env, ...BASE_ENV, HOME: tmpHome },
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.stderr).not.toContain('unknown option');
+    expect(result.status).toBe(0);
+    // --version reached the wrapped command (echo), not node9's built-in handler.
+    // We don't assert echo's exact output — /bin/echo --version on Linux prints
+    // version info; macOS echo prints '--version' literally. Both are correct;
+    // the key is that node9's own semver string is absent, proving Commander did
+    // not intercept the flag.
+    expect(result.stdout.trim()).toBeTruthy(); // echo actually ran and produced output
+    expect(result.stdout.trim()).not.toBe(version);
+  });
+});
+
+// ── 3. Log command cross-cwd audit write ──────────────────────────────────────
 // Regression: `node9 log` silently failed to write audit.log when payload.cwd
 // pointed to a project dir different from the binary's process.cwd(). The root
 // cause was getConfig() reading the wrong config (wrong project), which caused

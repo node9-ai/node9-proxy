@@ -317,6 +317,16 @@ export function startDaemon(): void {
         })}\n\n`
       );
       res.write(`event: decisions\ndata: ${JSON.stringify(readPersistentDecisions())}\n\n`);
+      const activeShields = readActiveShields();
+      res.write(
+        `event: shields-status\ndata: ${JSON.stringify({
+          shields: Object.values(SHIELDS).map((s) => ({
+            name: s.name,
+            description: s.description,
+            active: activeShields.includes(s.name),
+          })),
+        })}\n\n`
+      );
       // Replay recent activity history so late-joining browsers see the feed
       for (const item of activityRing) {
         res.write(`event: ${item.event}\ndata: ${JSON.stringify(item.data)}\n\n`);

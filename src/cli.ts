@@ -1725,4 +1725,21 @@ process.on('unhandledRejection', (reason) => {
   }
 });
 
+// If the first argument is not a known node9 subcommand and doesn't start with
+// '-', we are in proxy mode (e.g. `node9 npx -y @pkg`). Inject '--' before the
+// command so Commander stops parsing options and passes everything — including
+// flags like -y, --config, --nexus-url — through to the action handler intact.
+// Without this, Commander errors on unknown flags before the handler ever runs.
+//
+// Derived from registered commands at runtime so it stays in sync automatically
+// when new subcommands are added — no hand-maintained allowlist to forget to update.
+// Note: c.name() returns the primary name; aliases (c.aliases()) are not included.
+// No subcommands currently use aliases, so this is safe. If aliases are added later,
+// extend this set with: program.commands.flatMap(c => [c.name(), ...c.aliases()])
+const knownSubcommands = new Set(program.commands.map((c) => c.name()));
+const firstArg = process.argv[2];
+if (firstArg && firstArg !== '--' && !firstArg.startsWith('-') && !knownSubcommands.has(firstArg)) {
+  process.argv.splice(2, 0, '--');
+}
+
 program.parse();
