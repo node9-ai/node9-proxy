@@ -761,6 +761,51 @@ describe('malformed JSON payload', () => {
   });
 });
 
+// ── shield set — allow verdict guard ─────────────────────────────────────────
+
+describe('shield set — allow verdict guard', () => {
+  const minimalEnv = { PATH: process.env.PATH ?? '', NODE9_TESTING: '1' };
+
+  it('exits with code 1 and prints --force hint when setting allow without --force', () => {
+    const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-shield-'));
+    const node9Dir = path.join(tmpHome, '.node9');
+    fs.mkdirSync(node9Dir, { recursive: true });
+    // Write active shields file so the command passes the "shield active" check
+    fs.writeFileSync(path.join(node9Dir, 'shields.json'), JSON.stringify({ active: ['postgres'] }));
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [CLI, 'shield', 'set', 'postgres', 'block-drop-table', 'allow'],
+        { encoding: 'utf-8', timeout: 5000, env: { ...minimalEnv, HOME: tmpHome } }
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('--force');
+    } finally {
+      fs.rmSync(tmpHome, { recursive: true });
+    }
+  });
+
+  it('succeeds with exit 0 when setting allow with --force', () => {
+    const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-shield-'));
+    const node9Dir = path.join(tmpHome, '.node9');
+    fs.mkdirSync(node9Dir, { recursive: true });
+    fs.writeFileSync(path.join(node9Dir, 'shields.json'), JSON.stringify({ active: ['postgres'] }));
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [CLI, 'shield', 'set', 'postgres', 'block-drop-table', 'allow', '--force'],
+        { encoding: 'utf-8', timeout: 5000, env: { ...minimalEnv, HOME: tmpHome } }
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
+      expect(result.stderr).toContain('allow');
+    } finally {
+      fs.rmSync(tmpHome, { recursive: true });
+    }
+  });
+});
+
 // ── removefrom command ────────────────────────────────────────────────────────
 
 describe('removefrom command', () => {

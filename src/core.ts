@@ -13,7 +13,7 @@ import { parse } from 'sh-syntax';
 import { askNativePopup, sendDesktopNotification } from './ui/native';
 import { computeRiskMetadata, RiskMetadata } from './context-sniper';
 import { sanitizeConfig } from './config-schema';
-import { readActiveShields, getShield } from './shields';
+import { readActiveShields, readShieldOverrides, getShield } from './shields';
 import { scanArgs, scanFilePath, type DlpMatch } from './dlp';
 
 // ── Feature file paths ────────────────────────────────────────────────────────
@@ -744,12 +744,16 @@ export const DEFAULT_CONFIG: Config = {
   environments: {},
 };
 
-// Advisory rm rules — appended LAST in getConfig() so user-defined smart rules
+// Advisory rules — appended LAST in getConfig() so user-defined smart rules
 // (project/global/shield) are evaluated first and can override them.
-// tool: '*' so they cover bash, shell, run_shell_command, and Gemini's Shell.
-// Pattern '(^|&&|\|\||;)\s*rm\b' matches rm as a shell command (including in chained
-// commands like 'cat foo && rm bar') but avoids false-positives on 'docker rm'.
+// This is the "Safe by Default" safety net: operations that are dangerous enough
+// to require human review out-of-the-box, but where shields can upgrade the
+// verdict to 'block' for teams that want stricter enforcement.
 const ADVISORY_SMART_RULES: SmartRule[] = [
+  // ── rm safety ─────────────────────────────────────────────────────────────
+  // tool: '*' so they cover bash, shell, run_shell_command, and Gemini's Shell.
+  // Pattern '(^|&&|\|\||;)\s*rm\b' matches rm as a shell command (including in
+  // chained commands like 'cat foo && rm bar') but avoids false-positives on 'docker rm'.
   {
     name: 'allow-rm-safe-paths',
     tool: '*',
@@ -774,12 +778,53 @@ const ADVISORY_SMART_RULES: SmartRule[] = [
     verdict: 'review',
     reason: 'rm can permanently delete files — confirm the target path',
   },
+  // ── SQL safety (Safe by Default) ──────────────────────────────────────────
+  // These rules fire when an AI calls a database tool directly (e.g. MCP postgres,
+  // mcp__postgres__query) with a destructive SQL statement in the 'sql' field.
+  // The postgres shield upgrades these from 'review' → 'block' for stricter teams;
+  // without a shield, users still get a human-approval gate on every destructive op.
+  {
+    name: 'review-drop-table-sql',
+    tool: '*',
+    conditions: [{ field: 'sql', op: 'matches', value: 'DROP\\s+TABLE', flags: 'i' }],
+    verdict: 'review',
+    reason: 'DROP TABLE is irreversible — enable the postgres shield to block instead',
+  },
+  {
+    name: 'review-truncate-sql',
+    tool: '*',
+    conditions: [{ field: 'sql', op: 'matches', value: 'TRUNCATE\\s+TABLE', flags: 'i' }],
+    verdict: 'review',
+    reason: 'TRUNCATE removes all rows — enable the postgres shield to block instead',
+  },
+  {
+    name: 'review-drop-column-sql',
+    tool: '*',
+    conditions: [
+      { field: 'sql', op: 'matches', value: 'ALTER\\s+TABLE.*DROP\\s+COLUMN', flags: 'i' },
+    ],
+    verdict: 'review',
+    reason: 'DROP COLUMN is irreversible — enable the postgres shield to block instead',
+  },
 ];
 
 let cachedConfig: Config | null = null;
 
 export function _resetConfigCache(): void {
   cachedConfig = null;
+}
+
+/**
+ * Appends a config-change event to the local audit log.
+ * Used for security-relevant CLI mutations (e.g. allow overrides) that happen
+ * outside the normal tool-call flow and would otherwise be invisible in audit.
+ */
+export function appendConfigAudit(entry: Record<string, unknown>): void {
+  appendToLog(LOCAL_AUDIT_LOG, {
+    ts: new Date().toISOString(),
+    ...entry,
+    hostname: os.hostname(),
+  });
 }
 
 /**
@@ -2233,14 +2278,22 @@ export function getConfig(cwd?: string): Config {
   // Shields are applied after user config so they cannot be overridden locally.
   // Rules are sourced from the in-memory catalog, not from config.json — so
   // enabling a shield never mutates the user's config file.
+  // Per-rule verdict overrides (from `node9 shield set`) are applied here.
+  const shieldOverrides = readShieldOverrides();
   for (const shieldName of readActiveShields()) {
     const shield = getShield(shieldName);
     if (!shield) continue;
     // Deduplicate smartRules by name — prevents duplicates if the user also
     // has the same rule name in their config (shouldn't happen, but be safe).
     const existingRuleNames = new Set(mergedPolicy.smartRules.map((r) => r.name));
+    const ruleOverrides = shieldOverrides[shieldName] ?? {};
     for (const rule of shield.smartRules) {
-      if (!existingRuleNames.has(rule.name)) mergedPolicy.smartRules.push(rule);
+      if (!existingRuleNames.has(rule.name)) {
+        const overrideVerdict = rule.name ? ruleOverrides[rule.name] : undefined;
+        mergedPolicy.smartRules.push(
+          overrideVerdict !== undefined ? { ...rule, verdict: overrideVerdict } : rule
+        );
+      }
     }
     const existingWords = new Set(mergedPolicy.dangerousWords);
     for (const word of shield.dangerousWords) {

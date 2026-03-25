@@ -138,13 +138,13 @@ Node9 has two layers of protection. You get Layer 1 automatically. Layer 2 is on
 
 Built into the binary. Zero configuration required. Protects the tools every developer uses.
 
-| What it protects  | Example blocked action                                  |
-| :---------------- | :------------------------------------------------------ |
-| **Git**           | `git push --force`, `git reset --hard`, `git clean -fd` |
-| **Shell**         | `curl ... \| bash`, `sudo` commands                     |
-| **SQL**           | `DELETE` / `UPDATE` without a `WHERE` clause            |
-| **Filesystem**    | `rm -rf` targeting home directory                       |
-| **Secrets (DLP)** | AWS keys, GitHub tokens, Stripe keys, PEM private keys  |
+| What it protects  | Example blocked action                                                             |
+| :---------------- | :--------------------------------------------------------------------------------- |
+| **Git**           | `git push --force`, `git reset --hard`, `git clean -fd`                            |
+| **Shell**         | `curl ... \| bash`, `sudo` commands                                                |
+| **SQL**           | `DELETE` / `UPDATE` without `WHERE`; `DROP TABLE`, `TRUNCATE TABLE`, `DROP COLUMN` |
+| **Filesystem**    | `rm -rf` targeting home directory                                                  |
+| **Secrets (DLP)** | AWS keys, GitHub tokens, Stripe keys, PEM private keys                             |
 
 ### 🔍 DLP — Content Scanner (Always On)
 
@@ -188,12 +188,12 @@ Secrets are **never logged in full** — the audit trail stores only a redacted 
 
 Shields add protection for specific infrastructure and services — only relevant if you actually use them.
 
-| Shield       | What it protects                                                              |
-| :----------- | :---------------------------------------------------------------------------- |
-| `postgres`   | Blocks `DROP TABLE`, `TRUNCATE`, `DROP COLUMN`; reviews `GRANT`/`REVOKE`      |
-| `github`     | Blocks `gh repo delete`; reviews remote branch deletion                       |
-| `aws`        | Blocks S3 bucket deletion, EC2 termination; reviews IAM changes, RDS deletion |
-| `filesystem` | Reviews `chmod 777`, writes to `/etc/`                                        |
+| Shield       | What it protects                                                                                                |
+| :----------- | :-------------------------------------------------------------------------------------------------------------- |
+| `postgres`   | Hard-blocks `DROP TABLE`, `TRUNCATE`, `DROP COLUMN` (upgrades Layer 1 review → block); reviews `GRANT`/`REVOKE` |
+| `github`     | Blocks `gh repo delete`; reviews remote branch deletion                                                         |
+| `aws`        | Blocks S3 bucket deletion, EC2 termination; reviews IAM changes, RDS deletion                                   |
+| `filesystem` | Reviews `chmod 777`, writes to `/etc/`                                                                          |
 
 ```bash
 node9 shield enable postgres    # protect your database

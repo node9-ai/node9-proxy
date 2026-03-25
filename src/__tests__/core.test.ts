@@ -46,6 +46,7 @@ import {
   getCompiledRegex,
   getConfig,
 } from '../core.js';
+import * as shieldsModule from '../shields.js';
 
 // Global spies
 const existsSpy = vi.spyOn(fs, 'existsSync');
@@ -878,6 +879,139 @@ describe('evaluatePolicy — smart rules', () => {
     // Project rule also active (DROP)
     const dropResult = await evaluatePolicy('any_tool', { sql: 'DROP TABLE users' });
     expect(dropResult.decision).toBe('block');
+  });
+});
+
+// ── Safe by Default — advisory SQL rules ──────────────────────────────────────
+// Destructive SQL ops must be reviewed out-of-the-box (no config required).
+// The postgres shield should upgrade 'review' → 'block' for stricter teams.
+
+describe('Safe by Default — advisory SQL rules', () => {
+  it('DROP TABLE in sql field is reviewed with no config', async () => {
+    const result = await evaluatePolicy('mcp__postgres__query', { sql: 'DROP TABLE users' });
+    expect(result.decision).toBe('review');
+    expect(result.ruleName).toBe('review-drop-table-sql');
+  });
+
+  it('DROP TABLE is reviewed regardless of tool name', async () => {
+    const result = await evaluatePolicy('execute_sql', { sql: 'DROP TABLE orders' });
+    expect(result.decision).toBe('review');
+    expect(result.ruleName).toBe('review-drop-table-sql');
+  });
+
+  it('TRUNCATE TABLE in sql field is reviewed with no config', async () => {
+    const result = await evaluatePolicy('run_query', { sql: 'TRUNCATE TABLE logs' });
+    expect(result.decision).toBe('review');
+    expect(result.ruleName).toBe('review-truncate-sql');
+  });
+
+  it('ALTER TABLE DROP COLUMN in sql field is reviewed with no config', async () => {
+    const result = await evaluatePolicy('run_query', {
+      sql: 'ALTER TABLE users DROP COLUMN email',
+    });
+    expect(result.decision).toBe('review');
+    expect(result.ruleName).toBe('review-drop-column-sql');
+  });
+
+  it('DROP table (mixed case) in sql field is reviewed', async () => {
+    const result = await evaluatePolicy('execute_sql', { sql: 'DROP table users' });
+    expect(result.decision).toBe('review');
+    expect(result.ruleName).toBe('review-drop-table-sql');
+  });
+
+  it('drop TABLE (mixed case) in sql field is reviewed', async () => {
+    const result = await evaluatePolicy('execute_sql', { sql: 'drop TABLE users' });
+    expect(result.decision).toBe('review');
+    expect(result.ruleName).toBe('review-drop-table-sql');
+  });
+
+  it('TRUNCATE table (mixed case) in sql field is reviewed', async () => {
+    const result = await evaluatePolicy('run_query', { sql: 'TRUNCATE table logs' });
+    expect(result.decision).toBe('review');
+    expect(result.ruleName).toBe('review-truncate-sql');
+  });
+
+  it('postgres shield upgrades DROP TABLE from review to block', async () => {
+    vi.spyOn(shieldsModule, 'readActiveShields').mockReturnValue(['postgres']);
+    _resetConfigCache();
+    const result = await evaluatePolicy('mcp__postgres__query', { sql: 'DROP TABLE users' });
+    expect(result.decision).toBe('block');
+    expect(result.ruleName).toBe('shield:postgres:block-drop-table');
+  });
+
+  it('postgres shield upgrades TRUNCATE from review to block', async () => {
+    vi.spyOn(shieldsModule, 'readActiveShields').mockReturnValue(['postgres']);
+    _resetConfigCache();
+    const result = await evaluatePolicy('mcp__postgres__query', { sql: 'TRUNCATE TABLE events' });
+    expect(result.decision).toBe('block');
+    expect(result.ruleName).toBe('shield:postgres:block-truncate');
+  });
+
+  it('postgres shield upgrades DROP COLUMN from review to block', async () => {
+    vi.spyOn(shieldsModule, 'readActiveShields').mockReturnValue(['postgres']);
+    _resetConfigCache();
+    const result = await evaluatePolicy('mcp__postgres__query', {
+      sql: 'ALTER TABLE users DROP COLUMN email',
+    });
+    expect(result.decision).toBe('block');
+    expect(result.ruleName).toBe('shield:postgres:block-drop-column');
+  });
+
+  it('shield verdict override downgrades block → review', async () => {
+    vi.spyOn(shieldsModule, 'readActiveShields').mockReturnValue(['postgres']);
+    vi.spyOn(shieldsModule, 'readShieldOverrides').mockReturnValue({
+      postgres: { 'shield:postgres:block-drop-table': 'review' },
+    });
+    _resetConfigCache();
+    const result = await evaluatePolicy('mcp__postgres__query', { sql: 'DROP TABLE users' });
+    expect(result.decision).toBe('review');
+    expect(result.ruleName).toBe('shield:postgres:block-drop-table');
+  });
+
+  it('shield verdict override does not affect other rules in the same shield', async () => {
+    vi.spyOn(shieldsModule, 'readActiveShields').mockReturnValue(['postgres']);
+    vi.spyOn(shieldsModule, 'readShieldOverrides').mockReturnValue({
+      postgres: { 'shield:postgres:block-drop-table': 'review' },
+    });
+    _resetConfigCache();
+    // TRUNCATE has no override — should still block
+    const result = await evaluatePolicy('mcp__postgres__query', { sql: 'TRUNCATE TABLE events' });
+    expect(result.decision).toBe('block');
+    expect(result.ruleName).toBe('shield:postgres:block-truncate');
+  });
+
+  it('allow override is re-read from disk after _resetConfigCache()', async () => {
+    // Verify that _resetConfigCache() invalidates the merged policy so a newly
+    // applied allow override is actually picked up on the next getConfig() call.
+    vi.spyOn(shieldsModule, 'readActiveShields').mockReturnValue(['postgres']);
+    // First pass: block-drop-table is at its default (block)
+    vi.spyOn(shieldsModule, 'readShieldOverrides').mockReturnValue({});
+    _resetConfigCache();
+    const before = await evaluatePolicy('mcp__postgres__query', { sql: 'DROP TABLE users' });
+    expect(before.decision).toBe('block');
+
+    // Simulate writing an allow override then resetting the cache
+    vi.spyOn(shieldsModule, 'readShieldOverrides').mockReturnValue({
+      postgres: { 'shield:postgres:block-drop-table': 'allow' },
+    });
+    _resetConfigCache();
+    const after = await evaluatePolicy('mcp__postgres__query', { sql: 'DROP TABLE users' });
+    expect(after.decision).toBe('allow');
+  });
+
+  it('shield verdict override allow → authorizeHeadless approves without race engine', async () => {
+    // Verify that a block rule overridden to allow passes cleanly through the
+    // headless path — not just evaluatePolicy — so the shield doesn't silently
+    // re-block it at a higher stack level.
+    mockNoNativeConfig(); // sets mode: 'standard' so evaluatePolicy result drives the decision
+    vi.spyOn(shieldsModule, 'readActiveShields').mockReturnValue(['postgres']);
+    vi.spyOn(shieldsModule, 'readShieldOverrides').mockReturnValue({
+      postgres: { 'shield:postgres:block-drop-table': 'allow' },
+    });
+    _resetConfigCache();
+    const result = await authorizeHeadless('mcp__postgres__query', { sql: 'DROP TABLE users' });
+    expect(result.approved).toBe(true);
+    expect(result.checkedBy).toBe('local-policy');
   });
 });
 
