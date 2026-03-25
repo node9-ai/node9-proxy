@@ -1713,6 +1713,8 @@ shieldCmd
 // Daemon registers its own keep-alive unhandledRejection handler in startDaemon().
 // Skip registration here entirely for daemon mode to avoid any ordering dependency
 // between this handler and the daemon's handler.
+// Note: process.argv[2] is evaluated at module load time — this is intentional,
+// cli.ts is always the process entry point, never imported as a library.
 if (process.argv[2] !== 'daemon') {
   process.on('unhandledRejection', (reason) => {
     const isCheckHook = process.argv[2] === 'check';

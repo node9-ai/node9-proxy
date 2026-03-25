@@ -813,18 +813,23 @@ export function startDaemon(): void {
   // cli.ts does not register an unhandledRejection handler for daemon mode,
   // so this is the only handler in the process — no ordering dependency.
   // Module-level flag prevents double-registration if startDaemon() is called
-  // more than once (e.g. in tests).
+  // more than once. Note: jest.resetModules() would reset the flag too, but
+  // that re-registers a fresh handler which is safe in test isolation.
   //
   // NOTE: The critical approval path (POST /check, POST /decide) has its own
   // per-request try/catch and .catch() — a rejection there is handled locally
   // and never reaches this handler. This handler is a last-resort safety net
   // for unexpected throws in non-critical routes only.
+  //
+  // Limitation: if the rejection came from a route that already called
+  // res.writeHead() but not res.end(), that connection will hang until client
+  // timeout — acceptable for a last-resort handler.
   if (!daemonRejectionHandlerRegistered) {
     daemonRejectionHandlerRegistered = true;
-    // cli.ts skips registering its exit-on-rejection handler for daemon mode,
-    // so this is the only unhandledRejection handler in the process. No ordering
-    // dependency. Logs with stack trace so systematic failures are visible.
     process.on('unhandledRejection', (reason) => {
+      // Stack trace may include fragments of user-supplied input if the rejection
+      // originated from a malformed request body — acceptable for internal stderr
+      // logging on a localhost-only daemon.
       const stack = reason instanceof Error ? reason.stack : String(reason);
       console.error(chalk.red('[node9 daemon] unhandled rejection — keeping daemon alive:'), stack);
     });
