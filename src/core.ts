@@ -744,12 +744,16 @@ export const DEFAULT_CONFIG: Config = {
   environments: {},
 };
 
-// Advisory rm rules — appended LAST in getConfig() so user-defined smart rules
+// Advisory rules — appended LAST in getConfig() so user-defined smart rules
 // (project/global/shield) are evaluated first and can override them.
-// tool: '*' so they cover bash, shell, run_shell_command, and Gemini's Shell.
-// Pattern '(^|&&|\|\||;)\s*rm\b' matches rm as a shell command (including in chained
-// commands like 'cat foo && rm bar') but avoids false-positives on 'docker rm'.
+// This is the "Safe by Default" safety net: operations that are dangerous enough
+// to require human review out-of-the-box, but where shields can upgrade the
+// verdict to 'block' for teams that want stricter enforcement.
 const ADVISORY_SMART_RULES: SmartRule[] = [
+  // ── rm safety ─────────────────────────────────────────────────────────────
+  // tool: '*' so they cover bash, shell, run_shell_command, and Gemini's Shell.
+  // Pattern '(^|&&|\|\||;)\s*rm\b' matches rm as a shell command (including in
+  // chained commands like 'cat foo && rm bar') but avoids false-positives on 'docker rm'.
   {
     name: 'allow-rm-safe-paths',
     tool: '*',
@@ -773,6 +777,34 @@ const ADVISORY_SMART_RULES: SmartRule[] = [
     conditions: [{ field: 'command', op: 'matches', value: '(^|&&|\\|\\||;)\\s*rm\\b' }],
     verdict: 'review',
     reason: 'rm can permanently delete files — confirm the target path',
+  },
+  // ── SQL safety (Safe by Default) ──────────────────────────────────────────
+  // These rules fire when an AI calls a database tool directly (e.g. MCP postgres,
+  // mcp__postgres__query) with a destructive SQL statement in the 'sql' field.
+  // The postgres shield upgrades these from 'review' → 'block' for stricter teams;
+  // without a shield, users still get a human-approval gate on every destructive op.
+  {
+    name: 'review-drop-table-sql',
+    tool: '*',
+    conditions: [{ field: 'sql', op: 'matches', value: 'DROP\\s+TABLE', flags: 'i' }],
+    verdict: 'review',
+    reason: 'DROP TABLE is irreversible — enable the postgres shield to block instead',
+  },
+  {
+    name: 'review-truncate-sql',
+    tool: '*',
+    conditions: [{ field: 'sql', op: 'matches', value: 'TRUNCATE\\s+TABLE', flags: 'i' }],
+    verdict: 'review',
+    reason: 'TRUNCATE removes all rows — enable the postgres shield to block instead',
+  },
+  {
+    name: 'review-drop-column-sql',
+    tool: '*',
+    conditions: [
+      { field: 'sql', op: 'matches', value: 'ALTER\\s+TABLE.*DROP\\s+COLUMN', flags: 'i' },
+    ],
+    verdict: 'review',
+    reason: 'DROP COLUMN is irreversible — enable the postgres shield to block instead',
   },
 ];
 
