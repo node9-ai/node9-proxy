@@ -61,9 +61,9 @@
     "test:e2e": "NODE9_TESTING=1 bash scripts/e2e.sh",
     "preuninstall": "node9 uninstall || echo 'node9 uninstall failed — remove hooks manually from ~/.claude/settings.json'",
     "prepublishOnly": "npm run validate",
-    "test": "NODE_ENV=test vitest --run",
-    "test:watch": "NODE_ENV=test vitest",
-    "test:ui": "NODE_ENV=test vitest --ui"
+    "test": "vitest --run",
+    "test:watch": "vitest",
+    "test:ui": "vitest --ui"
   },
   "dependencies": {
     "@inquirer/prompts": "^8.3.0",

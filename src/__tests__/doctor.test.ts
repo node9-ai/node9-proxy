@@ -15,7 +15,7 @@ const NODE = process.execPath;
 /** Run `node9 doctor` with an isolated HOME. Returns stdout+stderr and exit code. */
 function runDoctor(homeDir: string, cwd?: string): { output: string; exitCode: number } {
   const result = spawnSync(NODE, [CLI, 'doctor'], {
-    env: { ...process.env, HOME: homeDir, NODE9_TESTING: '1' },
+    env: { ...process.env, HOME: homeDir, USERPROFILE: homeDir, NODE9_TESTING: '1' },
     cwd: cwd ?? homeDir,
     encoding: 'utf-8',
   });

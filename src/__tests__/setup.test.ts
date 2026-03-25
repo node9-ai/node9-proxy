@@ -2,6 +2,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
+import path from 'path';
 import {
   setupClaude,
   setupGemini,
@@ -47,8 +48,8 @@ beforeEach(() => {
 // ── setupClaude ──────────────────────────────────────────────────────────────
 
 describe('setupClaude', () => {
-  const hooksPath = '/mock/home/.claude/settings.json';
-  const mcpPath = '/mock/home/.claude.json';
+  const hooksPath = path.join(os.homedir(), '.claude', 'settings.json');
+  const mcpPath = path.join(os.homedir(), '.claude.json');
 
   it('adds both hooks immediately on a fresh install — no prompt', async () => {
     const confirm = await getConfirm();
@@ -140,7 +141,7 @@ describe('setupClaude', () => {
 // ── setupGemini ──────────────────────────────────────────────────────────────
 
 describe('setupGemini', () => {
-  const settingsPath = '/mock/home/.gemini/settings.json';
+  const settingsPath = path.join(os.homedir(), '.gemini', 'settings.json');
 
   it('adds both hooks immediately on a fresh install — no prompt', async () => {
     const confirm = await getConfirm();
@@ -192,7 +193,7 @@ describe('setupGemini', () => {
 // ── setupCursor ───────────────────────────────────────────────────────────────
 
 describe('setupCursor', () => {
-  const mcpPath = '/mock/home/.cursor/mcp.json';
+  const mcpPath = path.join(os.homedir(), '.cursor', 'mcp.json');
 
   it('does not write hooks.json — Cursor does not support native hooks', async () => {
     const confirm = await getConfirm();
@@ -200,7 +201,7 @@ describe('setupCursor', () => {
 
     expect(confirm).not.toHaveBeenCalled();
     // hooks.json must never be written
-    expect(writtenTo('/mock/home/.cursor/hooks.json')).toBeNull();
+    expect(writtenTo(path.join(os.homedir(), '.cursor', 'hooks.json'))).toBeNull();
   });
 
   it('prompts before wrapping existing MCP servers', async () => {
@@ -243,8 +244,8 @@ describe('setupCursor', () => {
 // ── teardownClaude ────────────────────────────────────────────────────────────
 
 describe('teardownClaude', () => {
-  const hooksPath = '/mock/home/.claude/settings.json';
-  const mcpPath = '/mock/home/.claude.json';
+  const hooksPath = path.join(os.homedir(), '.claude', 'settings.json');
+  const mcpPath = path.join(os.homedir(), '.claude.json');
 
   it('removes node9 PreToolUse and PostToolUse hook matchers', () => {
     withExistingFile(hooksPath, {
@@ -376,7 +377,7 @@ describe('teardownClaude', () => {
 // ── teardownGemini ────────────────────────────────────────────────────────────
 
 describe('teardownGemini', () => {
-  const settingsPath = '/mock/home/.gemini/settings.json';
+  const settingsPath = path.join(os.homedir(), '.gemini', 'settings.json');
 
   it('removes node9 BeforeTool and AfterTool hook matchers', () => {
     withExistingFile(settingsPath, {
@@ -444,7 +445,7 @@ describe('teardownGemini', () => {
 // ── teardownCursor ────────────────────────────────────────────────────────────
 
 describe('teardownCursor', () => {
-  const mcpPath = '/mock/home/.cursor/mcp.json';
+  const mcpPath = path.join(os.homedir(), '.cursor', 'mcp.json');
 
   it('unwraps node9-wrapped MCP servers', () => {
     withExistingFile(mcpPath, {

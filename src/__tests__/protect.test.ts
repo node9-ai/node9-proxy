@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
+import path from 'path';
 import { protect } from '../index.js';
 import { _resetConfigCache } from '../core.js';
 
@@ -25,8 +26,8 @@ beforeEach(() => {
 
 /** Grant approval for a tool via a persistent decision file (no HITL needed). */
 function setPersistentDecision(toolName: string, decision: 'allow' | 'deny') {
-  const decisionsPath = '/mock/home/.node9/decisions.json';
-  const globalPath = '/mock/home/.node9/config.json';
+  const decisionsPath = path.join(os.homedir(), '.node9', 'decisions.json');
+  const globalPath = path.join(os.homedir(), '.node9', 'config.json');
   existsSpy.mockImplementation((p) => String(p) === decisionsPath || String(p) === globalPath);
   readSpy.mockImplementation((p) => {
     if (String(p) === decisionsPath) return JSON.stringify({ [toolName]: decision });

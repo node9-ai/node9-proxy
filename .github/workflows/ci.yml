@@ -4,66 +4,48 @@ on:
   push:
     branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
 
 jobs:
   test:
-    name: Test (Node ${{ matrix.node-version }})
-    runs-on: ubuntu-latest
-
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        node-version: [20, 22]
+        os: [ubuntu-latest, windows-latest]
+        node: [20, 22]
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Use Node.js ${{ matrix.node-version }}
+      - name: Set up Node.js ${{ matrix.node }}
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
-          cache: 'npm'
+          node-version: ${{ matrix.node }}
+          cache: npm
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Type check
+      - name: Format check
+        run: npm run format:check
+
+      - name: Typecheck
         run: npm run typecheck
 
       - name: Lint
         run: npm run lint
 
-      - name: Format check
-        run: npm run format:check
-
-      - name: Build (required for integration tests)
-        run: npm run build
-
-      - name: Run tests
-        run: npm test
-
-  build:
-    name: Build
-    runs-on: ubuntu-latest
-    needs: test
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Use Node.js 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci
-
       - name: Build
         run: npm run build
 
-      - name: Verify dist output
+      - name: Verify dist artifacts
         run: |
-          test -f dist/index.js || (echo "dist/index.js missing" && exit 1)
-          test -f dist/cli.js   || (echo "dist/cli.js missing"   && exit 1)
-          echo "Build artifacts verified"
+          node -e "require('fs').existsSync('dist/cli.js') || (console.error('Missing: dist/cli.js'), process.exit(1))"
+          node -e "require('fs').existsSync('dist/index.js') || (console.error('Missing: dist/index.js'), process.exit(1))"
+
+      - name: Test
+        # NODE_ENV=test is set automatically by Vitest; NODE9_TESTING=1 guards
+        # native popups and daemon auto-start in spawned child processes.
+        run: npm test

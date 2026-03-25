@@ -41,8 +41,19 @@ function makeTempHome(): string {
   return tmpHome;
 }
 
+/** Returns a process env with both HOME and USERPROFILE pointing to the
+ *  isolated home dir. Windows uses USERPROFILE; Unix uses HOME. */
+function makeEnv(home: string): NodeJS.ProcessEnv {
+  return { ...process.env, HOME: home, USERPROFILE: home, NODE9_TESTING: '1' };
+}
+
 function cleanupDir(dir: string) {
-  fs.rmSync(dir, { recursive: true, force: true });
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException).code !== 'EBUSY') throw e;
+    console.warn(`[cleanupDir] EBUSY — temp dir leaked: ${dir}`);
+  }
 }
 
 function isPortFree(port: number): Promise<boolean> {
@@ -162,7 +173,7 @@ describe('daemon /events — shields-status emitted on connect', () => {
 
     try {
       daemonProc = spawn(process.execPath, [CLI, 'daemon', 'start'], {
-        env: { ...process.env, HOME: tmpHome, NODE9_TESTING: '1' },
+        env: makeEnv(tmpHome),
         stdio: 'pipe',
       });
 
@@ -188,7 +199,7 @@ describe('daemon /events — shields-status emitted on connect', () => {
   afterAll(() => {
     if (!portWasFree) return;
     spawnSync(process.execPath, [CLI, 'daemon', 'stop'], {
-      env: { ...process.env, HOME: tmpHome, NODE9_TESTING: '1' },
+      env: makeEnv(tmpHome),
       timeout: 3000,
     });
     if (tmpHome) cleanupDir(tmpHome);

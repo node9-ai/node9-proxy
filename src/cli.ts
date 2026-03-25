@@ -173,7 +173,7 @@ function openBrowserLocal() {
 
 async function autoStartDaemonAndWait(): Promise<boolean> {
   try {
-    const child = spawn('node9', ['daemon'], {
+    const child = spawn(process.execPath, [process.argv[1], 'daemon'], {
       detached: true,
       stdio: 'ignore',
       env: { ...process.env, NODE9_AUTO_STARTED: '1' },
@@ -1051,7 +1051,10 @@ program
           console.log(chalk.green(`🌐  Opened browser: http://${DAEMON_HOST}:${DAEMON_PORT}/`));
           process.exit(0);
         }
-        const child = spawn('node9', ['daemon'], { detached: true, stdio: 'ignore' });
+        const child = spawn(process.execPath, [process.argv[1], 'daemon'], {
+          detached: true,
+          stdio: 'ignore',
+        });
         child.unref();
         for (let i = 0; i < 12; i++) {
           await new Promise((r) => setTimeout(r, 250));
@@ -1063,7 +1066,10 @@ program
       }
 
       if (options.background) {
-        const child = spawn('node9', ['daemon'], { detached: true, stdio: 'ignore' });
+        const child = spawn(process.execPath, [process.argv[1], 'daemon'], {
+          detached: true,
+          stdio: 'ignore',
+        });
         child.unref();
         console.log(chalk.green(`\n🛡️  Node9 daemon started in background  (PID ${child.pid})`));
         process.exit(0);
