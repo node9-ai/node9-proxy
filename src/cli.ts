@@ -1722,8 +1722,12 @@ process.on('unhandledRejection', (reason) => {
     }
     process.exit(0);
   } else if (isDaemon) {
-    // Daemon's own handler (registered in daemon/index.ts) takes over from here.
-    // This branch is a no-op — the daemon handler fires next in the listener chain.
+    // Both this handler and the daemon's handler (registered in daemon/index.ts)
+    // fire independently — Node.js calls all listeners. This branch is a no-op
+    // so the else-branch process.exit(1) does not run. The daemon's handler
+    // (registered later by startDaemon()) logs the rejection and keeps the
+    // process alive. Returning here is what prevents the exit, not any
+    // listener-chain mechanism.
     return;
   } else {
     console.error('[Node9] Unhandled error:', reason);

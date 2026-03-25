@@ -821,10 +821,11 @@ export function startDaemon(): void {
   // for unexpected throws in non-critical routes only.
   if (!daemonRejectionHandlerRegistered) {
     daemonRejectionHandlerRegistered = true;
-    // cli.ts's unhandledRejection handler returns early for 'daemon' commands,
-    // so this handler fires next in the listener chain without removeAllListeners.
-    // Includes stack trace so systematic failures (e.g. a broken shield check)
-    // are surfaced in logs rather than appearing as silent open-failures.
+    // Both this handler and cli.ts's handler fire independently for every
+    // unhandledRejection. cli.ts's handler returns early (no-op) for daemon
+    // mode — that no-op is what prevents process.exit(1). This handler logs
+    // the rejection with a stack trace and keeps the daemon alive.
+    // Includes stack trace so systematic failures are surfaced in logs.
     process.on('unhandledRejection', (reason) => {
       const stack = reason instanceof Error ? reason.stack : String(reason);
       console.error(chalk.red('[node9 daemon] unhandled rejection — keeping daemon alive:'), stack);
