@@ -57,6 +57,9 @@ function runCheck(
       NODE9_NO_AUTO_DAEMON: '1',
       NODE9_TESTING: '1',
       ...env,
+      // Windows uses USERPROFILE; Unix uses HOME. Set both so os.homedir()
+      // resolves to the isolated test directory on every platform.
+      ...(env.HOME != null ? { USERPROFILE: env.HOME } : {}),
     },
   });
   return {
@@ -98,6 +101,9 @@ function runCheckAsync(
         NODE9_NO_AUTO_DAEMON: '1',
         NODE9_TESTING: '1',
         ...env,
+        // Windows uses USERPROFILE; Unix uses HOME. Set both so os.homedir()
+        // resolves to the isolated test directory on every platform.
+        ...(env.HOME != null ? { USERPROFILE: env.HOME } : {}),
       },
     });
 
@@ -137,7 +143,11 @@ function makeTempHomeRaw(content: string): string {
 }
 
 function cleanupHome(tmpHome: string) {
-  fs.rmSync(tmpHome, { recursive: true, force: true });
+  try {
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException).code !== 'EBUSY') throw e;
+  }
 }
 
 // ── Pre-flight: ensure the binary is built ────────────────────────────────────
@@ -776,7 +786,11 @@ describe('shield set — allow verdict guard', () => {
       const result = spawnSync(
         process.execPath,
         [CLI, 'shield', 'set', 'postgres', 'block-drop-table', 'allow'],
-        { encoding: 'utf-8', timeout: 5000, env: { ...minimalEnv, HOME: tmpHome } }
+        {
+          encoding: 'utf-8',
+          timeout: 5000,
+          env: { ...minimalEnv, HOME: tmpHome, USERPROFILE: tmpHome },
+        }
       );
       expect(result.error).toBeUndefined();
       expect(result.status).toBe(1);
@@ -795,7 +809,11 @@ describe('shield set — allow verdict guard', () => {
       const result = spawnSync(
         process.execPath,
         [CLI, 'shield', 'set', 'postgres', 'block-drop-table', 'allow', '--force'],
-        { encoding: 'utf-8', timeout: 5000, env: { ...minimalEnv, HOME: tmpHome } }
+        {
+          encoding: 'utf-8',
+          timeout: 5000,
+          env: { ...minimalEnv, HOME: tmpHome, USERPROFILE: tmpHome },
+        }
       );
       expect(result.error).toBeUndefined();
       expect(result.status).toBe(0);
@@ -832,7 +850,7 @@ describe('removefrom command', () => {
         const result = spawnSync(process.execPath, [CLI, 'removefrom', target], {
           encoding: 'utf-8',
           timeout: 5000,
-          env: { ...minimalEnv, HOME: tmpHome },
+          env: { ...minimalEnv, HOME: tmpHome, USERPROFILE: tmpHome },
         });
         expect(result.status).toBe(0);
       } finally {
