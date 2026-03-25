@@ -227,7 +227,15 @@ function validateOverrides(raw: unknown): ShieldOverrides {
     if (!rules || typeof rules !== 'object' || Array.isArray(rules)) continue;
     const validRules: Record<string, ShieldVerdict> = {};
     for (const [ruleName, verdict] of Object.entries(rules as Record<string, unknown>)) {
-      if (isShieldVerdict(verdict)) validRules[ruleName] = verdict;
+      if (isShieldVerdict(verdict)) {
+        validRules[ruleName] = verdict;
+      } else {
+        process.stderr.write(
+          `[node9] Warning: shields.json contains invalid verdict "${String(verdict)}" ` +
+            `for ${shieldName}/${ruleName} — entry ignored. ` +
+            `File may be corrupted or tampered with.\n`
+        );
+      }
     }
     if (Object.keys(validRules).length > 0) result[shieldName] = validRules;
   }
@@ -281,6 +289,15 @@ export function readShieldOverrides(): ShieldOverrides {
   return readShieldsFile().overrides ?? {};
 }
 
+/**
+ * Writes a per-rule verdict override to shields.json.
+ *
+ * TRUST BOUNDARY: This function is a raw storage primitive with no policy
+ * guards of its own. The allow-requires-force guard lives in the CLI.
+ * Any non-CLI caller (daemon, programmatic use) must validate the verdict
+ * and rule name via resolveShieldRule() before calling this function.
+ * The daemon currently does NOT expose this function through any endpoint.
+ */
 export function writeShieldOverride(
   shieldName: string,
   ruleName: string,

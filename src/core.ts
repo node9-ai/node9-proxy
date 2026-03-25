@@ -815,6 +815,19 @@ export function _resetConfigCache(): void {
 }
 
 /**
+ * Appends a config-change event to the local audit log.
+ * Used for security-relevant CLI mutations (e.g. allow overrides) that happen
+ * outside the normal tool-call flow and would otherwise be invisible in audit.
+ */
+export function appendConfigAudit(entry: Record<string, unknown>): void {
+  appendToLog(LOCAL_AUDIT_LOG, {
+    ts: new Date().toISOString(),
+    ...entry,
+    hostname: os.hostname(),
+  });
+}
+
+/**
  * Reads settings from the global config (~/.node9/config.json) only.
  * Intentionally does NOT merge project config — these are machine-level
  * preferences, not project policies.

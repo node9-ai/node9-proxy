@@ -980,6 +980,25 @@ describe('Safe by Default — advisory SQL rules', () => {
     expect(result.ruleName).toBe('shield:postgres:block-truncate');
   });
 
+  it('allow override is re-read from disk after _resetConfigCache()', async () => {
+    // Verify that _resetConfigCache() invalidates the merged policy so a newly
+    // applied allow override is actually picked up on the next getConfig() call.
+    vi.spyOn(shieldsModule, 'readActiveShields').mockReturnValue(['postgres']);
+    // First pass: block-drop-table is at its default (block)
+    vi.spyOn(shieldsModule, 'readShieldOverrides').mockReturnValue({});
+    _resetConfigCache();
+    const before = await evaluatePolicy('mcp__postgres__query', { sql: 'DROP TABLE users' });
+    expect(before.decision).toBe('block');
+
+    // Simulate writing an allow override then resetting the cache
+    vi.spyOn(shieldsModule, 'readShieldOverrides').mockReturnValue({
+      postgres: { 'shield:postgres:block-drop-table': 'allow' },
+    });
+    _resetConfigCache();
+    const after = await evaluatePolicy('mcp__postgres__query', { sql: 'DROP TABLE users' });
+    expect(after.decision).toBe('allow');
+  });
+
   it('shield verdict override allow → authorizeHeadless approves without race engine', async () => {
     // Verify that a block rule overridden to allow passes cleanly through the
     // headless path — not just evaluatePolicy — so the shield doesn't silently

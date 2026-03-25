@@ -12,6 +12,7 @@ import {
   getConfig,
   explainPolicy,
   shouldSnapshot,
+  appendConfigAudit,
 } from './core';
 import {
   setupClaude,
@@ -1782,6 +1783,10 @@ shieldCmd
       process.exit(1);
     }
     writeShieldOverride(name, ruleName, verdict);
+    if (verdict === 'allow') {
+      // Security-relevant mutation: log to audit trail so silenced rules are visible
+      appendConfigAudit({ event: 'shield-override-allow', shield: name, rule: ruleName });
+    }
     const shortName = ruleName.replace(`shield:${name}:`, '');
     const verdictLabel =
       verdict === 'block'

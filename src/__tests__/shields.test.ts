@@ -305,6 +305,20 @@ describe('readShieldOverrides schema validation', () => {
     const overrides = readShieldOverrides();
     expect(overrides.postgres).toBeUndefined();
   });
+
+  it('emits a stderr warning when an invalid verdict is dropped', () => {
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    readFileSyncSpy.mockReturnValueOnce(
+      JSON.stringify({
+        active: ['postgres'],
+        overrides: { postgres: { 'shield:postgres:block-drop-table': 'explode' } },
+      })
+    );
+    readShieldOverrides();
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('invalid verdict "explode"'));
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('corrupted or tampered'));
+    stderrSpy.mockRestore();
+  });
 });
 
 // ── enable idempotency (deduplication logic) ──────────────────────────────────
