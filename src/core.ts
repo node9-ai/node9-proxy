@@ -16,6 +16,20 @@ import { sanitizeConfig } from './config-schema';
 import { readActiveShields, readShieldOverrides, getShield } from './shields';
 import { scanArgs, scanFilePath, type DlpMatch } from './dlp';
 
+// ── Terminal output helper ────────────────────────────────────────────────────
+// Write directly to /dev/tty instead of stderr. Claude Code treats any stderr
+// output from a PreToolUse hook as a hook error and fails open (allows the tool
+// to proceed). /dev/tty is an out-of-band channel that bypasses this check.
+function writeTty(line: string): void {
+  try {
+    const tty = fs.openSync('/dev/tty', 'w');
+    fs.writeSync(tty, line + '\n');
+    fs.closeSync(tty);
+  } catch {
+    // /dev/tty unavailable (CI, non-interactive) — skip
+  }
+}
+
 // ── Feature file paths ────────────────────────────────────────────────────────
 const PAUSED_FILE = path.join(os.homedir(), '.node9', 'PAUSED');
 const TRUST_FILE = path.join(os.homedir(), '.node9', 'trust.json');
@@ -1820,13 +1834,13 @@ async function _authorizeHeadlessCore(
       if (!initResult.pending) {
         // Shadow mode: allowed through, but warn the developer passively
         if (initResult.shadowMode) {
-          console.error(
+          writeTty(
             chalk.yellow(
               `\n⚠️  Node9 Shadow Mode: Action allowed, but would have been blocked by company policy.`
             )
           );
           if (initResult.shadowReason) {
-            console.error(chalk.dim(`   Reason: ${initResult.shadowReason}\n`));
+            writeTty(chalk.dim(`   Reason: ${initResult.shadowReason}\n`));
           }
           return { approved: true, checkedBy: 'cloud' };
         }
@@ -1858,7 +1872,7 @@ async function _authorizeHeadlessCore(
           ? 'Could not reach the Node9 cloud. Check your network or API URL.'
           : error.message;
 
-      console.error(
+      writeTty(
         chalk.yellow(`\n⚠️  Node9: Cloud API Handshake failed — ${reason}`) +
           chalk.dim(`\n   Falling back to local rules...\n`)
       );
@@ -1872,17 +1886,13 @@ async function _authorizeHeadlessCore(
   // Skip when called from the daemon — the CLI already printed this message.
   if (!options?.calledFromDaemon) {
     if (cloudEnforced && cloudRequestId) {
-      console.error(
-        chalk.yellow('\n🛡️  Node9: Action suspended — waiting for Organization approval.')
-      );
-      console.error(
-        chalk.cyan('   Dashboard  → ') + chalk.bold('Mission Control > Activity Feed\n')
-      );
+      writeTty(chalk.yellow('\n🛡️  Node9: Action suspended — waiting for Organization approval.'));
+      writeTty(chalk.cyan('   Dashboard  → ') + chalk.bold('Mission Control > Activity Feed\n'));
     } else if (!cloudEnforced) {
       const cloudOffReason = !creds?.apiKey
         ? 'no API key — run `node9 login` to connect'
         : 'privacy mode (cloud disabled)';
-      console.error(
+      writeTty(
         chalk.dim(`\n🛡️  Node9: intercepted "${toolName}" — cloud off (${cloudOffReason})\n`)
       );
     }
@@ -2018,15 +2028,13 @@ async function _authorizeHeadlessCore(
       (async () => {
         if (!approvers.native && !cloudEnforced) {
           if (approvers.browser) {
-            console.error(
-              chalk.yellow('\n🛡️  Node9: Action suspended — waiting for browser approval.')
-            );
-            console.error(chalk.cyan(`   URL → http://${DAEMON_HOST}:${DAEMON_PORT}/\n`));
+            writeTty(chalk.yellow('\n🛡️  Node9: Action suspended — waiting for browser approval.'));
+            writeTty(chalk.cyan(`   URL → http://${DAEMON_HOST}:${DAEMON_PORT}/\n`));
           } else {
-            console.error(
+            writeTty(
               chalk.yellow('\n🛡️  Node9: Action suspended — waiting for terminal approval.')
             );
-            console.error(chalk.cyan(`   Run \`node9 tail\` in another terminal to approve.\n`));
+            writeTty(chalk.cyan(`   Run \`node9 tail\` in another terminal to approve.\n`));
           }
         }
 
@@ -2065,7 +2073,7 @@ async function _authorizeHeadlessCore(
       (async () => {
         if (isRemoteLocked) {
           // Admin policy: only Slack/cloud can approve — hold until another racer wins.
-          console.error(chalk.yellow(`⚡ LOCKED BY ADMIN POLICY: Waiting for Slack Approval...\n`));
+          writeTty(chalk.yellow(`⚡ LOCKED BY ADMIN POLICY: Waiting for Slack Approval...\n`));
           await new Promise<never>((_, reject) => {
             signal.addEventListener('abort', () => reject(new Error('Aborted by SaaS')));
           });
@@ -2548,11 +2556,11 @@ async function pollNode9SaaS(
       const { status, reason } = (await statusRes.json()) as { status: string; reason?: string };
 
       if (status === 'APPROVED') {
-        console.error(chalk.green('✅  Approved via Cloud.\n'));
+        writeTty(chalk.green('✅  Approved via Cloud.\n'));
         return { approved: true, reason };
       }
       if (status === 'DENIED' || status === 'AUTO_BLOCKED' || status === 'TIMED_OUT') {
-        console.error(chalk.red('❌  Denied via Cloud.\n'));
+        writeTty(chalk.red('❌  Denied via Cloud.\n'));
         return { approved: false, reason };
       }
     } catch {

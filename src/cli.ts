@@ -1248,25 +1248,35 @@ program
             blockedByContext.toLowerCase().includes('daemon') ||
             blockedByContext.toLowerCase().includes('decision');
 
-          // 3. Print to the human terminal for visibility
-          if (
-            blockedByContext.includes('DLP') ||
-            blockedByContext.includes('Secret Detected') ||
-            blockedByContext.includes('Credential Review')
-          ) {
-            console.error(chalk.bgRed.white.bold(`\n 🚨 NODE9 DLP ALERT — CREDENTIAL DETECTED `));
-            console.error(chalk.red.bold(`   A sensitive secret was found in the tool arguments!`));
-          } else {
-            console.error(chalk.red(`\n🛑 Node9 blocked "${toolName}"`));
+          // 3. Print to the human terminal for visibility.
+          // MUST NOT use stderr (console.error) — Claude Code treats any stderr
+          // output as a hook error and fails open, allowing the tool to proceed
+          // regardless of the JSON block payload. Write directly to /dev/tty so
+          // the message appears on the developer's screen without touching the
+          // Claude Code pipe.
+          try {
+            const tty = fs.openSync('/dev/tty', 'w');
+            const writeTty = (line: string) => fs.writeSync(tty, line + '\n');
+            if (
+              blockedByContext.includes('DLP') ||
+              blockedByContext.includes('Secret Detected') ||
+              blockedByContext.includes('Credential Review')
+            ) {
+              writeTty(chalk.bgRed.white.bold(`\n 🚨 NODE9 DLP ALERT — CREDENTIAL DETECTED `));
+              writeTty(chalk.red.bold(`   A sensitive secret was found in the tool arguments!`));
+            } else {
+              writeTty(chalk.red(`\n🛑 Node9 blocked "${toolName}"`));
+            }
+            writeTty(chalk.gray(`   Triggered by: ${blockedByContext}`));
+            if (result?.changeHint) writeTty(chalk.cyan(`   To change:  ${result.changeHint}`));
+            writeTty('');
+            fs.closeSync(tty);
+          } catch {
+            // /dev/tty unavailable (CI, non-interactive) — skip visual output
           }
-          console.error(chalk.gray(`   Triggered by: ${blockedByContext}`));
-          if (result?.changeHint) console.error(chalk.cyan(`   To change:  ${result.changeHint}`));
-          console.error('');
 
           // 4. THE NEGOTIATION PROMPT: Context-specific instruction for the AI
           const aiFeedbackMessage = buildNegotiationMessage(blockedByContext, isHumanDecision, msg);
-
-          console.error(chalk.dim(`   (Detailed instructions sent to AI agent)`));
 
           // 5. Send the structured JSON back to the LLM agent
           process.stdout.write(
@@ -1317,7 +1327,16 @@ program
           !process.stdout.isTTY &&
           config.settings.autoStartDaemon
         ) {
-          console.error(chalk.cyan('\n🛡️  Node9: Starting approval daemon automatically...'));
+          try {
+            const tty = fs.openSync('/dev/tty', 'w');
+            fs.writeSync(
+              tty,
+              chalk.cyan('\n🛡️  Node9: Starting approval daemon automatically...\n')
+            );
+            fs.closeSync(tty);
+          } catch {
+            /* non-interactive env */
+          }
           const daemonReady = await autoStartDaemonAndWait();
           if (daemonReady) {
             const retry = await authorizeHeadless(toolName, toolInput, true, meta);

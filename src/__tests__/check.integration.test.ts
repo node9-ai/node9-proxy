@@ -287,7 +287,10 @@ describe('smart rules', () => {
   });
   afterEach(() => cleanupHome(tmpHome));
 
-  it('force push → blocked with JSON decision:block in stdout', () => {
+  it('force push → blocked with JSON decision:block in stdout and no stderr', () => {
+    // Regression guard: sendBlock must NOT write to stderr. Claude Code treats any
+    // stderr output from a PreToolUse hook as a hook error and fails open, allowing
+    // the tool to proceed despite the deny JSON. Messages go to /dev/tty instead.
     const r = runCheck(
       { tool_name: 'bash', tool_input: { command: 'git push origin main --force' } },
       { HOME: tmpHome },
@@ -296,7 +299,7 @@ describe('smart rules', () => {
     expect(r.status).toBe(0); // CLI always exits 0; block is communicated via stdout JSON
     const parsed = JSON.parse(r.stdout.trim());
     expect(parsed.decision).toBe('block');
-    expect(r.stderr).toContain('blocked');
+    expect(r.stderr).toBe(''); // ← no stderr: prevents Claude Code fail-open on hook error
   });
 
   it('readonly bash → allowed with checkedBy in stderr', () => {
@@ -346,7 +349,7 @@ describe('dangerous words', () => {
   });
   afterEach(() => cleanupHome(tmpHome));
 
-  it('command with mkfs → blocked (no approval mechanism → block)', () => {
+  it('command with mkfs → blocked (no approval mechanism → block) with no stderr', () => {
     const r = runCheck(
       { tool_name: 'bash', tool_input: { command: 'mkfs.ext4 /dev/sdb' } },
       { HOME: tmpHome },
@@ -355,7 +358,7 @@ describe('dangerous words', () => {
     expect(r.status).toBe(0);
     const parsed = JSON.parse(r.stdout.trim());
     expect(parsed.decision).toBe('block');
-    expect(r.stderr).toContain('blocked');
+    expect(r.stderr).toBe(''); // block message goes to /dev/tty, not stderr
   });
 
   it('safe command without dangerous word → allowed', () => {
