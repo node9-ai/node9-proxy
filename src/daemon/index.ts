@@ -586,9 +586,13 @@ export function startDaemon(): void {
     }
 
     if (req.method === 'GET' && pathname === '/settings') {
-      const s = getGlobalSettings();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ ...s, autoStarted }));
+      try {
+        const s = getGlobalSettings();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ ...s, autoStarted }));
+      } catch {
+        res.writeHead(500).end();
+      }
     }
 
     // ── Updated POST /settings to handle new config schema ─────────────────
@@ -615,9 +619,13 @@ export function startDaemon(): void {
     }
 
     if (req.method === 'GET' && pathname === '/slack-status') {
-      const s = getGlobalSettings();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ hasKey: hasStoredSlackKey(), enabled: s.slackEnabled }));
+      try {
+        const s = getGlobalSettings();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ hasKey: hasStoredSlackKey(), enabled: s.slackEnabled }));
+      } catch {
+        res.writeHead(500).end();
+      }
     }
 
     if (req.method === 'POST' && pathname === '/slack-key') {
@@ -798,6 +806,12 @@ export function startDaemon(): void {
       { mode: 0o600 }
     );
     console.log(chalk.green(`🛡️  Node9 Guard LIVE: http://127.0.0.1:${DAEMON_PORT}`));
+  });
+
+  // Safety net: an unhandled rejection in any async request handler must never
+  // crash the daemon and disconnect all SSE clients. Log to stderr for diagnosis.
+  process.on('unhandledRejection', (reason) => {
+    console.error(chalk.red('[node9 daemon] unhandled rejection — keeping daemon alive:'), reason);
   });
 
   // ── Flight Recorder — Unix socket for all tool call activity ─────────────
