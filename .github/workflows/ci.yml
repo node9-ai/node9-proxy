@@ -14,7 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        node: [20]
+        node: [20, 22]
 
     steps:
       - uses: actions/checkout@v4
@@ -27,6 +27,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Format check
+        run: npm run format:check
 
       - name: Typecheck
         run: npm run typecheck

@@ -142,11 +142,19 @@ function makeTempHomeRaw(content: string): string {
   return tmpHome;
 }
 
+/** Returns a process env with both HOME and USERPROFILE pointing to the
+ *  isolated home dir. Windows uses USERPROFILE; Unix uses HOME. Setting
+ *  both ensures os.homedir() resolves correctly on every platform. */
+function makeEnv(home: string, extra: Record<string, string> = {}): Record<string, string> {
+  return { HOME: home, USERPROFILE: home, ...extra };
+}
+
 function cleanupHome(tmpHome: string) {
   try {
     fs.rmSync(tmpHome, { recursive: true, force: true });
   } catch (e: unknown) {
     if ((e as NodeJS.ErrnoException).code !== 'EBUSY') throw e;
+    console.warn(`[cleanupHome] EBUSY — temp dir leaked: ${tmpHome}`);
   }
 }
 
@@ -789,7 +797,7 @@ describe('shield set — allow verdict guard', () => {
         {
           encoding: 'utf-8',
           timeout: 5000,
-          env: { ...minimalEnv, HOME: tmpHome, USERPROFILE: tmpHome },
+          env: { ...minimalEnv, ...makeEnv(tmpHome) },
         }
       );
       expect(result.error).toBeUndefined();
@@ -812,7 +820,7 @@ describe('shield set — allow verdict guard', () => {
         {
           encoding: 'utf-8',
           timeout: 5000,
-          env: { ...minimalEnv, HOME: tmpHome, USERPROFILE: tmpHome },
+          env: { ...minimalEnv, ...makeEnv(tmpHome) },
         }
       );
       expect(result.error).toBeUndefined();
@@ -850,7 +858,7 @@ describe('removefrom command', () => {
         const result = spawnSync(process.execPath, [CLI, 'removefrom', target], {
           encoding: 'utf-8',
           timeout: 5000,
-          env: { ...minimalEnv, HOME: tmpHome, USERPROFILE: tmpHome },
+          env: { ...minimalEnv, ...makeEnv(tmpHome) },
         });
         expect(result.status).toBe(0);
       } finally {

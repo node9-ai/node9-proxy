@@ -56,6 +56,7 @@ function cleanupDir(dir: string) {
     // On Windows, files may be briefly locked after spawnSync completes (EBUSY).
     // Leave the temp dir for OS cleanup rather than failing the test.
     if ((e as NodeJS.ErrnoException).code !== 'EBUSY') throw e;
+    console.warn(`[cleanupDir] EBUSY — temp dir leaked: ${dir}`);
   }
 }
 
