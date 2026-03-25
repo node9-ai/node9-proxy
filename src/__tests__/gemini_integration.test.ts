@@ -11,6 +11,7 @@ vi.mock('../ui/native.js', () => ({
 import { describe, it, expect, beforeEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
+import path from 'path';
 import { evaluatePolicy, authorizeHeadless, _resetConfigCache, DANGEROUS_WORDS } from '../core.js';
 import { setupGemini } from '../setup.js';
 
@@ -29,7 +30,7 @@ interface MockConfig {
 }
 
 function mockConfig(config: MockConfig) {
-  const globalPath = '/mock/home/.node9/config.json';
+  const globalPath = path.join(os.homedir(), '.node9', 'config.json');
   existsSpy.mockImplementation((p) => String(p) === globalPath);
   readSpy.mockImplementation((p) => {
     if (String(p) === globalPath) {
@@ -155,7 +156,7 @@ describe('Gemini BeforeTool payload format', () => {
 });
 
 describe('Gemini Setup (New Schema)', () => {
-  const settingsPath = '/mock/home/.gemini/settings.json';
+  const settingsPath = path.join(os.homedir(), '.gemini', 'settings.json');
 
   it('converts old object-based hooks to the new array-based schema', async () => {
     existsSpy.mockImplementation((p) => String(p) === settingsPath);

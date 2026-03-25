@@ -259,9 +259,11 @@ describe('log command — audit.log written when payload.cwd differs from proces
   });
 
   it('writes to audit.log when payload has no cwd (backward compat — uses process.cwd())', () => {
+    // Use a non-snapshotted tool to avoid git add -A on the system temp dir,
+    // which can hold thousands of files on Windows and cause a spawnSync timeout.
     const payload = JSON.stringify({
-      tool_name: 'write_file',
-      tool_input: { file_path: '/tmp/test.txt', content: 'hello' },
+      tool_name: 'list_directory',
+      tool_input: { path: '/tmp' },
       hook_event_name: 'PostToolUse',
     });
 
@@ -283,7 +285,7 @@ describe('log command — audit.log written when payload.cwd differs from proces
       .split('\n')
       .map((l) => JSON.parse(l) as Record<string, unknown>);
 
-    expect(entries[0]).toMatchObject({ tool: 'write_file', decision: 'allowed' });
+    expect(entries[0]).toMatchObject({ tool: 'list_directory', decision: 'allowed' });
   });
 
   it('writes to audit.log when payload.cwd is a nonexistent directory — falls back to global config', () => {

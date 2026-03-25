@@ -42,7 +42,11 @@ function makeTempHome(): string {
 }
 
 function cleanupDir(dir: string) {
-  fs.rmSync(dir, { recursive: true, force: true });
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException).code !== 'EBUSY') throw e;
+  }
 }
 
 function isPortFree(port: number): Promise<boolean> {
@@ -162,7 +166,7 @@ describe('daemon /events — shields-status emitted on connect', () => {
 
     try {
       daemonProc = spawn(process.execPath, [CLI, 'daemon', 'start'], {
-        env: { ...process.env, HOME: tmpHome, NODE9_TESTING: '1' },
+        env: { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome, NODE9_TESTING: '1' },
         stdio: 'pipe',
       });
 
@@ -188,7 +192,7 @@ describe('daemon /events — shields-status emitted on connect', () => {
   afterAll(() => {
     if (!portWasFree) return;
     spawnSync(process.execPath, [CLI, 'daemon', 'stop'], {
-      env: { ...process.env, HOME: tmpHome, NODE9_TESTING: '1' },
+      env: { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome, NODE9_TESTING: '1' },
       timeout: 3000,
     });
     if (tmpHome) cleanupDir(tmpHome);
