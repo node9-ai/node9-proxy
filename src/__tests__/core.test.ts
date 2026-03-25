@@ -913,6 +913,24 @@ describe('Safe by Default — advisory SQL rules', () => {
     expect(result.ruleName).toBe('review-drop-column-sql');
   });
 
+  it('DROP table (mixed case) in sql field is reviewed', async () => {
+    const result = await evaluatePolicy('execute_sql', { sql: 'DROP table users' });
+    expect(result.decision).toBe('review');
+    expect(result.ruleName).toBe('review-drop-table-sql');
+  });
+
+  it('drop TABLE (mixed case) in sql field is reviewed', async () => {
+    const result = await evaluatePolicy('execute_sql', { sql: 'drop TABLE users' });
+    expect(result.decision).toBe('review');
+    expect(result.ruleName).toBe('review-drop-table-sql');
+  });
+
+  it('TRUNCATE table (mixed case) in sql field is reviewed', async () => {
+    const result = await evaluatePolicy('run_query', { sql: 'TRUNCATE table logs' });
+    expect(result.decision).toBe('review');
+    expect(result.ruleName).toBe('review-truncate-sql');
+  });
+
   it('postgres shield upgrades DROP TABLE from review to block', async () => {
     vi.spyOn(shieldsModule, 'readActiveShields').mockReturnValue(['postgres']);
     _resetConfigCache();

@@ -1741,8 +1741,9 @@ shieldCmd
 
 shieldCmd
   .command('set <service> <rule> <verdict>')
-  .description('Override the verdict for a specific shield rule (block or review)')
-  .action((service: string, rule: string, verdict: string) => {
+  .description('Override the verdict for a specific shield rule (block, review, or allow)')
+  .option('--force', 'Required when setting verdict to allow (silences a block rule)')
+  .action((service: string, rule: string, verdict: string, opts: { force?: boolean }) => {
     const name = resolveShieldName(service);
     if (!name) {
       console.error(chalk.red(`\n❌ Unknown shield: "${service}"\n`));
@@ -1758,12 +1759,22 @@ shieldCmd
       console.error(chalk.red(`\n❌ Invalid verdict "${verdict}". Use: block, review, or allow\n`));
       process.exit(1);
     }
+    if (verdict === 'allow' && !opts.force) {
+      console.error(
+        chalk.red(`\n⚠️  Setting a verdict to "allow" silences the rule entirely.\n`) +
+          chalk.yellow(
+            `   This disables a shield protection. If you are sure, re-run with --force:\n`
+          ) +
+          chalk.cyan(`\n   node9 shield set ${service} ${rule} allow --force\n`)
+      );
+      process.exit(1);
+    }
     const ruleName = resolveShieldRule(name, rule);
     if (!ruleName) {
-      const shield = getShield(name)!;
+      const shield = getShield(name);
       console.error(chalk.red(`\n❌ Unknown rule "${rule}" for shield "${name}".\n`));
       console.error('  Available rules:');
-      for (const r of shield.smartRules) {
+      for (const r of shield?.smartRules ?? []) {
         const short = r.name ? r.name.replace(`shield:${name}:`, '') : '';
         console.error(`    ${chalk.cyan(short)}`);
       }
@@ -1778,7 +1789,14 @@ shieldCmd
         : verdict === 'review'
           ? chalk.yellow('review')
           : chalk.green('allow');
-    console.error(chalk.green(`\n✅  ${name}/${shortName} → ${verdictLabel}\n`));
+    if (verdict === 'allow') {
+      console.error(
+        chalk.yellow(`\n⚠️  ${name}/${shortName} → ${verdictLabel}`) +
+          chalk.gray(' (rule silenced — use `node9 shield unset` to restore)\n')
+      );
+    } else {
+      console.error(chalk.green(`\n✅  ${name}/${shortName} → ${verdictLabel}\n`));
+    }
     console.error(
       chalk.gray(`   Run ${chalk.cyan('node9 shield status')} to see all active rules.\n`)
     );

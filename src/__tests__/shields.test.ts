@@ -199,7 +199,7 @@ describe('shield overrides', () => {
   });
 
   it('readShieldOverrides returns stored overrides', () => {
-    readFileSyncSpy.mockReturnValue(
+    readFileSyncSpy.mockReturnValueOnce(
       JSON.stringify({
         active: ['postgres'],
         overrides: { postgres: { 'shield:postgres:block-drop-table': 'review' } },
@@ -227,6 +227,14 @@ describe('shield overrides', () => {
     const parsed = JSON.parse(written);
     expect(parsed.overrides.postgres['shield:postgres:block-drop-table']).toBeUndefined();
     expect(parsed.overrides.postgres['shield:postgres:block-truncate']).toBe('review');
+  });
+
+  it('clearShieldOverride is a no-op when the rule has no existing override', () => {
+    readFileSyncSpy.mockReturnValueOnce(JSON.stringify({ active: ['postgres'] }));
+    clearShieldOverride('postgres', 'shield:postgres:block-drop-table');
+    const written = writeFileSyncSpy.mock.calls[0][1] as string;
+    const parsed = JSON.parse(written);
+    expect(parsed.overrides).toBeUndefined();
   });
 
   it('clearShieldOverride removes overrides key entirely when last override cleared', () => {
