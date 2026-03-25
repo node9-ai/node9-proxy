@@ -481,6 +481,11 @@ export function startDaemon(): void {
             // leave the entry alive so the browser dashboard can decide.
             if (result.noApprovalMechanism) return;
 
+            // In audit mode the hook auto-approves without blocking the tool.
+            // The daemon entry is for display only — leave it for browser/tail
+            // to resolve interactively (or for the auto-deny timer).
+            if (result.checkedBy === 'audit') return;
+
             // First write wins — POST /decision (browser or tail) may have already
             // resolved this entry while authorizeHeadless was running in the background.
             if (e.earlyDecision !== null) return;
