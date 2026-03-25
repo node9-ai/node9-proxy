@@ -81,21 +81,34 @@ async function waitForDaemon(timeoutMs = 5000): Promise<boolean> {
 function readSseStream(timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = '';
+    let settled = false;
+    const done = (value: string) => {
+      if (!settled) {
+        settled = true;
+        resolve(value);
+      }
+    };
     const req = http.get(`http://127.0.0.1:${DAEMON_PORT}/events`, (res) => {
       res.setEncoding('utf-8');
       res.on('data', (chunk: string) => {
         data += chunk;
       });
-      res.on('end', () => resolve(data));
-      res.on('error', reject);
+      res.on('end', () => done(data));
+      // After req.destroy() the res stream may still emit 'error' — guard with
+      // settled flag so it doesn't fire reject after the Promise already resolved.
+      res.on('error', () => {
+        if (!settled) reject(new Error('SSE stream error'));
+      });
     });
-    req.on('error', reject);
+    req.on('error', (err) => {
+      if (!settled) reject(err);
+    });
     // Close after timeoutMs — enough time to receive the initial burst of events.
     // Note: parseSseEvents silently drops multi-data-line events (valid SSE spec),
     // which is acceptable since all daemon events use a single data line.
     setTimeout(() => {
       req.destroy();
-      resolve(data);
+      done(data);
     }, timeoutMs);
   });
 }

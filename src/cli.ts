@@ -1733,6 +1733,9 @@ process.on('unhandledRejection', (reason) => {
 //
 // Derived from registered commands at runtime so it stays in sync automatically
 // when new subcommands are added — no hand-maintained allowlist to forget to update.
+// Note: c.name() returns the primary name; aliases (c.aliases()) are not included.
+// No subcommands currently use aliases, so this is safe. If aliases are added later,
+// extend this set with: program.commands.flatMap(c => [c.name(), ...c.aliases()])
 const knownSubcommands = new Set(program.commands.map((c) => c.name()));
 const firstArg = process.argv[2];
 if (firstArg && firstArg !== '--' && !firstArg.startsWith('-') && !knownSubcommands.has(firstArg)) {
