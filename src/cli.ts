@@ -1735,7 +1735,7 @@ process.on('unhandledRejection', (reason) => {
 // when new subcommands are added — no hand-maintained allowlist to forget to update.
 const knownSubcommands = new Set(program.commands.map((c) => c.name()));
 const firstArg = process.argv[2];
-if (firstArg && !firstArg.startsWith('-') && !knownSubcommands.has(firstArg)) {
+if (firstArg && firstArg !== '--' && !firstArg.startsWith('-') && !knownSubcommands.has(firstArg)) {
   process.argv.splice(2, 0, '--');
 }
 

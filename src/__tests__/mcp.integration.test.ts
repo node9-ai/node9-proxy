@@ -186,6 +186,7 @@ describe('proxy command — flags are passed through to the wrapped command', ()
     // We don't assert echo's exact output — GNU echo prints version info, macOS echo
     // prints '--version' literally. Both are correct; the key is that node9's own
     // semver string is absent, proving Commander did not intercept the flag.
+    expect(result.stdout.trim()).toBeTruthy(); // echo actually ran and produced output
     expect(result.stdout.trim()).not.toBe(version);
   });
 });
