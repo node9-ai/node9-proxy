@@ -481,6 +481,10 @@ export function startDaemon(): void {
             // leave the entry alive so the browser dashboard can decide.
             if (result.noApprovalMechanism) return;
 
+            // First write wins — POST /decision (browser or tail) may have already
+            // resolved this entry while authorizeHeadless was running in the background.
+            if (e.earlyDecision !== null) return;
+
             // ── Flight Recorder: update the feed item with the final verdict ──
             broadcast('activity-result', {
               id,
