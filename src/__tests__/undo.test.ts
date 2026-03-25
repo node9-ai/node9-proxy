@@ -174,7 +174,7 @@ describe('getLatestSnapshot', () => {
 describe('getShadowRepoDir', () => {
   it('returns a path under ~/.node9/snapshots/', () => {
     const dir = getShadowRepoDir('/mock/project');
-    expect(dir).toContain('/mock/home/.node9/snapshots/');
+    expect(dir).toContain(path.join('mock', 'home', '.node9', 'snapshots'));
   });
 
   it('returns the same dir for the same cwd', () => {
@@ -321,11 +321,11 @@ describe('createShadowSnapshot', () => {
     const addCall = mockSpawn.mock.calls.find(([, args]) => (args as string[]).includes('add'));
     expect(addCall).toBeDefined();
     const addEnv = addCall![2]?.env as Record<string, string>;
-    expect(addEnv?.GIT_DIR).toContain('.node9/snapshots');
+    expect(addEnv?.GIT_DIR).toContain(path.join('.node9', 'snapshots'));
     expect(addEnv?.GIT_WORK_TREE).toBe('/mock/project');
     // Index file must be inside shadow dir — never in the user's .git
-    expect(addEnv?.GIT_INDEX_FILE).toContain('.node9/snapshots');
-    expect(addEnv?.GIT_INDEX_FILE).not.toContain('/.git/');
+    expect(addEnv?.GIT_INDEX_FILE).toContain(path.join('.node9', 'snapshots'));
+    expect(addEnv?.GIT_INDEX_FILE).not.toMatch(/[/\\]\.git[/\\]/);
   });
 
   it('cleans up the per-invocation index file after snapshot (finally block)', async () => {
@@ -412,8 +412,8 @@ describe('createShadowSnapshot', () => {
 
     // All index files must be inside the shadow dir, never in user's .git
     for (const f of indexFiles) {
-      expect(f).toContain('.node9/snapshots');
-      expect(f).not.toContain('/.git/');
+      expect(f).toContain(path.join('.node9', 'snapshots'));
+      expect(f).not.toMatch(/[/\\]\.git[/\\]/);
     }
   });
 });
@@ -817,7 +817,7 @@ describe('applyUndo', () => {
     );
     expect(restoreCall).toBeDefined();
     const restoreEnv = restoreCall![2]?.env as Record<string, string>;
-    expect(restoreEnv?.GIT_DIR).toContain('.node9/snapshots');
+    expect(restoreEnv?.GIT_DIR).toContain(path.join('.node9', 'snapshots'));
     expect(restoreEnv?.GIT_WORK_TREE).toBe('/mock/project');
   });
 
