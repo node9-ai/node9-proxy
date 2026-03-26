@@ -202,6 +202,7 @@ describe('daemon /events — shields-status emitted on connect', () => {
       env: makeEnv(tmpHome),
       timeout: 3000,
     });
+    daemonProc?.kill(); // fallback: ensure no leak if `daemon stop` fails
     if (tmpHome) cleanupDir(tmpHome);
   });
 
@@ -325,6 +326,7 @@ describe('daemon POST /decision — idempotency', () => {
       env: makeEnv(tmpHome),
       timeout: 3000,
     });
+    daemonProc?.kill(); // fallback: ensure no leak if `daemon stop` fails
     if (tmpHome) cleanupDir(tmpHome);
   });
 
@@ -457,6 +459,7 @@ describe('daemon POST /decision — source tracking', () => {
       env: makeEnv(tmpHome),
       timeout: 3000,
     });
+    daemonProc?.kill(); // fallback: ensure no leak if `daemon stop` fails
     if (tmpHome) cleanupDir(tmpHome);
   });
 
