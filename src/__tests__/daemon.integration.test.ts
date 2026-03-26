@@ -513,6 +513,30 @@ describe('daemon POST /decision — source tracking', () => {
     expect(body.source).toBeUndefined(); // invalid source silently dropped
   });
 
+  // source field injection boundary: non-string and prototype-pollution attempts
+  // must be rejected — the implementation uses a VALID_SOURCES allowlist Set,
+  // these tests make the boundary explicit.
+  it.each([
+    ['null', null],
+    ['number', 123],
+    ['object', { __proto__: { polluted: true } }],
+  ])('POST /decision with source:%s does not store a source value', async (label, sourceValue) => {
+    if (!portWasFree) return; // skip via early return to satisfy ts type
+
+    const id = await registerEntry(`source-type-${label}`);
+
+    await fetch(`http://127.0.0.1:${DAEMON_PORT}/decision/${id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Node9-Token': csrfToken },
+      body: JSON.stringify({ decision: 'allow', source: sourceValue }),
+    });
+
+    const waitRes = await fetch(`http://127.0.0.1:${DAEMON_PORT}/wait/${id}`);
+    const body = (await waitRes.json()) as { decision: string; source?: string };
+    expect(body.decision).toBe('allow');
+    expect(body.source).toBeUndefined();
+  });
+
   it('POST /decision without CSRF token returns 403', async ({ skip }) => {
     if (!portWasFree) skip();
 
@@ -560,10 +584,10 @@ describe('daemon POST /decision — source tracking', () => {
     const { id } = (await checkRes.json()) as { id: string };
     expect(id).toBeTruthy();
 
-    // Give the daemon 200ms to run any background work — if background auth ran,
+    // Give the daemon 500ms to run any background work — if background auth ran,
     // it would resolve the entry immediately (audit mode auto-approves). The entry
     // must stay pending because slackDelegated skips background auth entirely.
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 500));
 
     // Resolve via /decision so GET /wait doesn't hang the test
     const d = await fetch(`http://127.0.0.1:${DAEMON_PORT}/decision/${id}`, {

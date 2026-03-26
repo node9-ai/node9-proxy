@@ -1605,10 +1605,26 @@ describe('getConfig — nonexistent cwd falls back to global config', () => {
 // doesn't stay stuck on PENDING.
 
 describe('resolveNode9SaaS — decidedBy field when local racer wins', () => {
+  // Safety net: restore all env vars that the test temporarily unsets to bypass
+  // the isTestEnv guard. The try/finally in the test body is the primary restore
+  // path; this afterEach catches any crash before the try block is entered.
+  const envSnapshot = {
+    VITEST: process.env.VITEST,
+    NODE9_TESTING: process.env.NODE9_TESTING,
+    NODE_ENV: process.env.NODE_ENV,
+    CI: process.env.CI,
+  };
   afterEach(() => {
     vi.unstubAllGlobals();
     delete process.env.NODE9_API_KEY;
     _resetConfigCache();
+    // Restore isTestEnv vars so subsequent tests are not affected
+    if (envSnapshot.VITEST !== undefined) process.env.VITEST = envSnapshot.VITEST;
+    if (envSnapshot.NODE9_TESTING !== undefined)
+      process.env.NODE9_TESTING = envSnapshot.NODE9_TESTING;
+    if (envSnapshot.NODE_ENV !== undefined) process.env.NODE_ENV = envSnapshot.NODE_ENV;
+    if (envSnapshot.CI !== undefined) process.env.CI = envSnapshot.CI;
+    else delete process.env.CI;
   });
 
   it('sends decidedBy:native to cloud PATCH when native popup wins the race', async () => {
