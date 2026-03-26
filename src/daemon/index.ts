@@ -442,10 +442,10 @@ export function startDaemon(): void {
         const projectConfig = getConfig(projectCwd);
         const browserEnabled = projectConfig.settings.approvers?.browser !== false;
         const terminalEnabled = projectConfig.settings.approvers?.terminal !== false;
-        // Broadcast 'add' when the browser dashboard is on OR when an interactive
-        // tail client is connected (terminal approver). Without this, tail never
-        // receives new requests when browser is disabled.
-        if (browserEnabled || (terminalEnabled && hasInteractiveClient())) {
+        // Broadcast 'add' when the browser dashboard is on OR terminal approver is
+        // enabled. Tail may connect after the event fires and will see pending entries
+        // via the SSE stream's initial state — don't gate on hasInteractiveClient().
+        if (browserEnabled || terminalEnabled) {
           broadcast('add', {
             id,
             toolName,
