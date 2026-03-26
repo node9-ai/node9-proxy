@@ -1625,15 +1625,18 @@ describe('resolveNode9SaaS — decidedBy field when local racer wins', () => {
     });
     process.env.NODE9_API_KEY = 'test-key';
 
-    // The core's isTestEnv guard disables approvers.native when VITEST/NODE9_TESTING/
-    // NODE_ENV=test are set, even though askNativePopup is fully mocked. Temporarily
-    // unset them so the native racer actually participates; restore in finally.
+    // The core's isTestEnv guard disables approvers.native when any of
+    // VITEST / NODE9_TESTING / NODE_ENV=test / CI are set, even though
+    // askNativePopup is fully mocked. Temporarily unset all of them so
+    // the native racer participates; restore in finally.
     const savedVitest = process.env.VITEST;
     const savedTesting = process.env.NODE9_TESTING;
     const savedNodeEnv = process.env.NODE_ENV;
+    const savedCI = process.env.CI;
     delete process.env.VITEST;
     delete process.env.NODE9_TESTING;
     delete process.env.NODE_ENV;
+    delete process.env.CI;
 
     // Make native popup approve immediately
     const { askNativePopup: nativeMock } = await import('../ui/native.js');
@@ -1655,8 +1658,17 @@ describe('resolveNode9SaaS — decidedBy field when local racer wins', () => {
             json: async () => ({ pending: true, requestId: 'r1' }),
           });
         }
-        // GET poll — hang; aborted by AbortController when native wins
-        return new Promise(() => {});
+        // GET poll — resolve to pending status; the outer signal aborts
+        // the while-loop on the next iteration after native wins.
+        return new Promise((_resolve, reject) => {
+          const signal = (opts as RequestInit & { signal?: AbortSignal })?.signal;
+          const abort = () => reject(new DOMException('Aborted', 'AbortError'));
+          if (signal?.aborted) {
+            abort();
+            return;
+          }
+          signal?.addEventListener('abort', abort);
+        });
       })
     );
 
@@ -1668,6 +1680,7 @@ describe('resolveNode9SaaS — decidedBy field when local racer wins', () => {
       process.env.VITEST = savedVitest;
       process.env.NODE9_TESTING = savedTesting;
       process.env.NODE_ENV = savedNodeEnv;
+      process.env.CI = savedCI;
     }
 
     // Assert: native won
