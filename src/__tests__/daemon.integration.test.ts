@@ -194,7 +194,7 @@ describe('daemon /events — shields-status emitted on connect', () => {
       if (tmpHome) cleanupDir(tmpHome);
       throw err;
     }
-  });
+  }, 15_000); // waitForDaemon(6s) + readSseStream(3s) = 9s minimum; 15s gives CI headroom
 
   afterAll(() => {
     if (!portWasFree) return;
@@ -317,7 +317,7 @@ describe('daemon POST /decision — idempotency', () => {
     const raw = await readSseStream(1500);
     const events = parseSseEvents(raw);
     csrfToken = (events.get('csrf') as { token: string } | undefined)?.token ?? '';
-  });
+  }, 15_000); // waitForDaemon(6s) + readSseStream(1.5s) = 7.5s minimum; 15s gives CI headroom
 
   afterAll(() => {
     if (!portWasFree) return;
@@ -449,7 +449,7 @@ describe('daemon POST /decision — source tracking', () => {
     const raw = await readSseStream(1500);
     const events = parseSseEvents(raw);
     csrfToken = (events.get('csrf') as { token: string } | undefined)?.token ?? '';
-  });
+  }, 15_000); // waitForDaemon(6s) + readSseStream(1.5s) = 7.5s minimum; 15s gives CI headroom
 
   afterAll(() => {
     if (!portWasFree) return;
