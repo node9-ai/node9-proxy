@@ -8,7 +8,7 @@ import { spawnSync } from 'child_process';
 import pm from 'picomatch';
 import safeRegex from 'safe-regex2';
 import { parse } from 'sh-syntax';
-import { askNativePopup, sendDesktopNotification } from './ui/native';
+import { askNativePopup } from './ui/native';
 import { computeRiskMetadata, RiskMetadata } from './context-sniper';
 import { sanitizeConfig } from './config-schema';
 import { readActiveShields, readShieldOverrides, getShield } from './shields';
@@ -1731,10 +1731,8 @@ async function _authorizeHeadlessCore(
         if (approvers.cloud && creds?.apiKey) {
           await auditLocalAllow(toolName, args, 'audit-mode', creds, meta);
         }
-        sendDesktopNotification(
-          'Node9 Audit Mode',
-          `Would have blocked "${toolName}" (${policyResult.blockedByLabel || 'Local Config'}) — running in audit mode`
-        );
+        // Note: desktop notification intentionally omitted — notify-send routes through
+        // the browser on many Linux setups (Firefox as D-Bus handler), causing spurious popups.
       }
     }
     return { approved: true, checkedBy: 'audit' };

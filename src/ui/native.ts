@@ -1,7 +1,6 @@
 // src/ui/native.ts
 import { spawn, ChildProcess } from 'child_process';
 import path from 'path';
-import chalk from 'chalk';
 import { smartTruncate, extractContext } from '../context-sniper';
 
 export const isTestEnv = () => {
@@ -202,8 +201,6 @@ export async function askNativePopup(
   const title = locked ? `⚡ Node9 — Locked` : `🛡️ Node9 — ${intentLabel}`;
 
   const message = buildPlainMessage(toolName, formattedArgs, agent, explainableLabel, locked);
-
-  process.stderr.write(chalk.yellow(`\n🛡️  Node9: Intercepted "${toolName}" — awaiting user...\n`));
 
   return new Promise((resolve) => {
     // 2. FIXED: Use ChildProcess type instead of any
