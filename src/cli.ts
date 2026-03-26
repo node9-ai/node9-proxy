@@ -1317,7 +1317,11 @@ program
           await createShadowSnapshot(toolName, toolInput, config.policy.snapshot.ignorePaths);
         }
 
-        const result = await authorizeHeadless(toolName, toolInput, meta);
+        const safeCwdForAuth =
+          typeof payload.cwd === 'string' && path.isAbsolute(payload.cwd) ? payload.cwd : undefined;
+        const result = await authorizeHeadless(toolName, toolInput, meta, {
+          cwd: safeCwdForAuth,
+        });
 
         if (result.approved) {
           // Only write to stderr in debug mode — Claude Code treats any stderr
@@ -1347,7 +1351,9 @@ program
           }
           const daemonReady = await autoStartDaemonAndWait();
           if (daemonReady) {
-            const retry = await authorizeHeadless(toolName, toolInput, meta);
+            const retry = await authorizeHeadless(toolName, toolInput, meta, {
+              cwd: safeCwdForAuth,
+            });
             if (retry.approved) {
               if (retry.checkedBy && process.env.NODE9_DEBUG === '1')
                 process.stderr.write(`✓ node9 [${retry.checkedBy}]: "${toolName}" allowed\n`);

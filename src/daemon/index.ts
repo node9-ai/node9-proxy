@@ -388,6 +388,7 @@ export function startDaemon(): void {
           riskMetadata,
           fromCLI = false,
           activityId,
+          cwd,
         } = JSON.parse(body);
         // When fromCLI is true the CLI already sent an 'activity' event with
         // activityId via the Unix socket. Reuse that ID so the daemon's
@@ -437,8 +438,10 @@ export function startDaemon(): void {
           });
         }
 
-        const browserEnabled = getConfig().settings.approvers?.browser !== false;
-        const terminalEnabled = getConfig().settings.approvers?.terminal !== false;
+        const projectCwd = typeof cwd === 'string' && path.isAbsolute(cwd) ? cwd : undefined;
+        const projectConfig = getConfig(projectCwd);
+        const browserEnabled = projectConfig.settings.approvers?.browser !== false;
+        const terminalEnabled = projectConfig.settings.approvers?.terminal !== false;
         // Broadcast 'add' when the browser dashboard is on OR when an interactive
         // tail client is connected (terminal approver). Without this, tail never
         // receives new requests when browser is disabled.

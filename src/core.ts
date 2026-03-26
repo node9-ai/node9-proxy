@@ -1437,7 +1437,8 @@ async function registerDaemonEntry(
   args: unknown,
   meta?: { agent?: string; mcpServer?: string },
   riskMetadata?: RiskMetadata,
-  activityId?: string
+  activityId?: string,
+  cwd?: string
 ): Promise<string> {
   const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
   const ctrl = new AbortController();
@@ -1456,6 +1457,7 @@ async function registerDaemonEntry(
         // activity-result as the CLI used for the pending activity event.
         activityId,
         ...(riskMetadata && { riskMetadata }),
+        ...(cwd && { cwd }),
       }),
       signal: ctrl.signal,
     });
@@ -1607,7 +1609,7 @@ export async function authorizeHeadless(
   toolName: string,
   args: unknown,
   meta?: { agent?: string; mcpServer?: string },
-  options?: { calledFromDaemon?: boolean }
+  options?: { calledFromDaemon?: boolean; cwd?: string }
 ): Promise<AuthResult> {
   // Skip socket notification when called from daemon — daemon already broadcasts via SSE
   if (!options?.calledFromDaemon) {
@@ -1643,14 +1645,14 @@ async function _authorizeHeadlessCore(
   toolName: string,
   args: unknown,
   meta?: { agent?: string; mcpServer?: string },
-  options?: { calledFromDaemon?: boolean; activityId?: string }
+  options?: { calledFromDaemon?: boolean; activityId?: string; cwd?: string }
 ): Promise<AuthResult> {
   if (process.env.NODE9_PAUSED === '1') return { approved: true, checkedBy: 'paused' };
   const pauseState = checkPause();
   if (pauseState.paused) return { approved: true, checkedBy: 'paused' };
 
   const creds = getCredentials();
-  const config = getConfig();
+  const config = getConfig(options?.cwd);
 
   // 1. Check if we are in any kind of test environment (Vitest, CI, or E2E)
   const isTestEnv = !!(
@@ -1947,7 +1949,8 @@ async function _authorizeHeadlessCore(
         args,
         meta,
         riskMetadata,
-        options?.activityId
+        options?.activityId,
+        options?.cwd
       );
     } catch {
       // Daemon unreachable — skip both racers gracefully
