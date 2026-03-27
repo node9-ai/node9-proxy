@@ -153,6 +153,8 @@ describe('node9 doctor — agent hooks section', () => {
 // ── Summary ───────────────────────────────────────────────────────────────────
 
 describe('node9 doctor — summary', () => {
+  // runDoctor spawns a subprocess that calls `ss` for port checking — can be slow
+  // on CI runners. Raise Vitest timeout to 20s to avoid flaky failures.
   it('exits 0 and prints "All checks passed" when everything is configured', () => {
     const home = path.join(tmpBase, 'all-good');
     writeJson(path.join(home, '.node9', 'config.json'), { settings: { mode: 'standard' } });
@@ -175,7 +177,7 @@ describe('node9 doctor — summary', () => {
     const { output, exitCode } = runDoctor(home);
     expect(output).toMatch(/All checks passed/);
     expect(exitCode).toBe(0);
-  });
+  }, 20000);
 
   it('exits 1 and prints failure count when checks fail', () => {
     const home = path.join(tmpBase, 'has-failures');

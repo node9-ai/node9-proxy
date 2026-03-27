@@ -721,6 +721,8 @@ describe('cloud race engine', () => {
     expect(r.stderr).toMatch(/\[cloud\].*allowed/i);
   });
 
+  // approvalTimeoutMs:3000 means the check process legitimately runs ~3s before
+  // the cloud mock responds. Vitest default is 5s — raise to 15s for CI headroom.
   it('cloud denies → blocked JSON output', async () => {
     await startMockSaas('deny');
 
@@ -748,7 +750,7 @@ describe('cloud race engine', () => {
     expect(r.status).toBe(0);
     const denied = JSON.parse(r.stdout.trim());
     expect(denied.decision).toBe('block');
-  });
+  }, 15000);
 });
 
 // ── 10. Malformed payload to `node9 check` ───────────────────────────────────
