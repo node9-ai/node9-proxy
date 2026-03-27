@@ -645,6 +645,8 @@ export function startDaemon(): void {
         });
         clearTimeout(entry.timer);
 
+        // source is validated against an allowlist AFTER appendAuditLog so the
+        // raw user-supplied value never reaches any log string — no log injection.
         const VALID_SOURCES = new Set(['terminal', 'browser', 'native']);
         if (source && VALID_SOURCES.has(source)) entry.decisionSource = source;
         if (entry.waiter) {
