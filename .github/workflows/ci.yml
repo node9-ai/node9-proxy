@@ -46,11 +46,28 @@ jobs:
           node -e "require('fs').existsSync('dist/index.js') || (console.error('Missing: dist/index.js'), process.exit(1))"
 
       - name: Test
-        # On ubuntu/Node 22: run with coverage so thresholds (vitest.config.mts) are enforced.
-        # On all other matrix cells: plain test run — avoids doubling execution time.
-        # Intentional: thresholds only block on this one cell. Branch protection must require
-        # the "Test (ubuntu-latest, Node 22)" job specifically to gate the PR.
-        # NODE_ENV=test is set automatically by Vitest; NODE9_TESTING=1 guards
-        # native popups and daemon auto-start in spawned child processes.
-        # Note: matrix.node is typed as string in GHA expressions — use '22' not 22.
-        run: ${{ matrix.os == 'ubuntu-latest' && matrix.node == '22' && 'npm run test:coverage' || 'npm test' }}
+        # NODE9_TESTING=1 guards native popups and daemon auto-start in spawned child processes.
+        run: npm test
+
+  coverage:
+    # Dedicated job so branch protection can require it by name without fragile matrix selectors.
+    # Enforces the thresholds defined in vitest.config.mts (statements: 68, branches: 58,
+    # functions: 66, lines: 70). Must be listed in branch protection "required status checks"
+    # as "coverage" for the gate to hold.
+    name: coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test with coverage
+        run: npm run test:coverage

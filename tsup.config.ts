@@ -12,4 +12,7 @@ export default defineConfig({
   esbuildOptions(options) {
     options.loader = { ...options.loader, '.html': 'text' };
   },
+  // Coverage and test tooling (@vitest/coverage-v8, @rolldown/*, etc.) are devDependencies
+  // and are never imported by any src/ file, so tsup's tree-shaking naturally excludes them
+  // from the production bundle. No explicit `external` entry is needed.
 });
