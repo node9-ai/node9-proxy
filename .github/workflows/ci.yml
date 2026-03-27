@@ -28,6 +28,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Audit dependencies
+        # Audit production deps only (--omit=dev). devDep CVEs (handlebars via semantic-release,
+        # flatted via eslint) are in tools that never ship in the production bundle and are
+        # not exploitable at runtime. --audit-level=high flags anything we can actually ship.
+        run: npm audit --omit=dev --audit-level=high
+
       - name: Format check
         run: npm run format:check
 
