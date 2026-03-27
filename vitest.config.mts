@@ -22,14 +22,13 @@ export default defineConfig({
     reportsDirectory: './coverage',
     all: true,
     thresholds: {
-      // Floors set at the measured baseline (2026-03-27) — CI blocks any regression below
-      // these numbers. Core security paths (policy evaluation, auth orchestrator, DLP) are
-      // well-covered by integration tests; these thresholds prevent silent coverage drops
-      // as the codebase grows. Target: 80% across the board.
-      statements: 68,
-      branches: 58,
-      functions: 66,
-      lines: 70,
+      // Floors raised on 2026-03-28 after adding auth/state, timeout-racer, and
+      // unknown-ID tests. CI blocks any regression below these numbers.
+      // Target: 80% across the board.
+      statements: 70,
+      branches: 60,
+      functions: 70,
+      lines: 71,
     },
   },
 });

@@ -445,6 +445,23 @@ describe('authorizeHeadless', () => {
     const result = await authorizeHeadless('mkfs_db', { id: 1 });
     expect(result.approved).toBe(true);
   });
+
+  it('returns approved:false with blockedBy:timeout when approvalTimeoutMs fires', async () => {
+    // 50ms timeout; all UI channels disabled. In test env (NODE9_TESTING=1) native,
+    // browser, and terminal approvers are hard-disabled. No daemon is running and no
+    // cloud key is set — the timeout racer is the only active promise in the race.
+    mockGlobalConfig({
+      settings: {
+        mode: 'standard',
+        approvalTimeoutMs: 50,
+        approvers: { native: false, browser: false, terminal: false, cloud: false },
+      },
+    });
+    const result = await authorizeHeadless('mkfs_db', {});
+    expect(result.approved).toBe(false);
+    expect(result.blockedBy).toBe('timeout');
+    expect(result.blockedByLabel).toBe('Approval Timeout');
+  }, 5000);
 });
 
 // ── DLP wiring: evaluatePolicy → authorizeHeadless ───────────────────────────

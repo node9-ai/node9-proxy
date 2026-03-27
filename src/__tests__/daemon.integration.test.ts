@@ -437,6 +437,20 @@ describe('daemon POST /decision — idempotency', () => {
     const body: unknown = await d2.json();
     expect(body).toMatchObject({ decision: 'deny' });
   });
+
+  it('POST /decision with an unknown id returns 404', async ({ skip }) => {
+    if (!portWasFree) skip();
+    // A UUID that was never registered via POST /check — must return 404, not 500.
+    const res = await fetch(
+      `http://127.0.0.1:${DAEMON_PORT}/decision/00000000-0000-0000-0000-000000000000`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Node9-Token': csrfToken },
+        body: JSON.stringify({ decision: 'allow' }),
+      }
+    );
+    expect(res.status).toBe(404);
+  });
 });
 
 // ── POST /decision source tracking ────────────────────────────────────────────
