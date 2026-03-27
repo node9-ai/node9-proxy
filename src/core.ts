@@ -211,7 +211,6 @@ export function writeTrustSession(toolName: string, durationMs: number): void {
   }
 }
 
-
 function tokenize(toolName: string): string[] {
   return toolName
     .toLowerCase()
@@ -1646,7 +1645,6 @@ async function _authorizeHeadlessCore(
 
   return finalResult;
 }
-
 
 export async function authorizeAction(toolName: string, args: unknown): Promise<boolean> {
   const result = await authorizeHeadless(toolName, args);
