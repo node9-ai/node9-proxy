@@ -6,33 +6,35 @@
  * wrappers. The fix is to use process.execPath + process.argv[1] instead, which is the
  * pattern already used in src/tui/tail.ts.
  *
- * These tests read cli.ts and cli/daemon-starter.ts to assert the unsafe pattern is absent
- * at all call sites: autoStartDaemonAndWait(), daemon --openui, daemon --background, node9 watch.
+ * Call sites (all must use process.execPath):
+ *   cli/daemon-starter.ts  — autoStartDaemonAndWait()             (1)
+ *   cli/commands/daemon-cmd.ts — daemon --openui, --background    (2)
+ *   cli/commands/watch.ts  — watch mode daemon start              (1)
  */
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 
-const CLI_SRC = path.resolve(__dirname, '../cli.ts');
-const DAEMON_STARTER_SRC = path.resolve(__dirname, '../cli/daemon-starter.ts');
-const src = fs.readFileSync(CLI_SRC, 'utf-8');
-const daemonStarterSrc = fs.readFileSync(DAEMON_STARTER_SRC, 'utf-8');
+const COMMANDS_DIR = path.resolve(__dirname, '../cli');
+const sources = [
+  fs.readFileSync(path.join(COMMANDS_DIR, 'daemon-starter.ts'), 'utf-8'),
+  fs.readFileSync(path.join(COMMANDS_DIR, 'commands/daemon-cmd.ts'), 'utf-8'),
+  fs.readFileSync(path.join(COMMANDS_DIR, 'commands/watch.ts'), 'utf-8'),
+];
 
 const SAFE_SPAWN_RE = /spawn\(process\.execPath,\s*\[process\.argv\[1\],\s*'daemon'\]/g;
+const UNSAFE_SPAWN_RE = /spawn\(['"]node9['"]/;
 
 describe('spawn Windows compatibility (#41)', () => {
-  it('cli.ts does not spawn node9 by name (would fail on Windows — no .cmd resolution)', () => {
-    // Any occurrence of spawn('node9' or spawn("node9" is the bug.
-    expect(src).not.toMatch(/spawn\(['"]node9['"]/);
-    expect(daemonStarterSrc).not.toMatch(/spawn\(['"]node9['"]/);
+  it('no file spawns node9 by name (would fail on Windows — no .cmd resolution)', () => {
+    for (const src of sources) {
+      expect(src).not.toMatch(UNSAFE_SPAWN_RE);
+    }
   });
 
-  it('spawns daemon using process.execPath at all call sites', () => {
-    // All daemon-spawning sites must use process.execPath as the first argument.
-    // autoStartDaemonAndWait is in cli/daemon-starter.ts (1 call site);
-    // daemon --openui, daemon --background, node9 watch are in cli.ts (3 call sites).
-    const cliCalls = (src.match(SAFE_SPAWN_RE) ?? []).length;
-    const starterCalls = (daemonStarterSrc.match(SAFE_SPAWN_RE) ?? []).length;
-    expect(cliCalls + starterCalls).toBe(4);
+  it('spawns daemon using process.execPath at all 4 call sites', () => {
+    // autoStartDaemonAndWait (1) + daemon --openui (1) + daemon --background (1) + watch (1)
+    const total = sources.reduce((sum, src) => sum + (src.match(SAFE_SPAWN_RE) ?? []).length, 0);
+    expect(total).toBe(4);
   });
 });

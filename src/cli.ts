@@ -4,12 +4,11 @@ import {
   authorizeHeadless,
   DEFAULT_CONFIG,
   isDaemonRunning,
-  getCredentials,
-  checkPause,
-  pauseNode9,
-  resumeNode9,
   getConfig,
   explainPolicy,
+  pauseNode9,
+  resumeNode9,
+  checkPause,
 } from './core';
 import {
   setupClaude,
@@ -19,20 +18,24 @@ import {
   teardownGemini,
   teardownCursor,
 } from './setup';
-import { startDaemon, stopDaemon, daemonStatus, DAEMON_PORT, DAEMON_HOST } from './daemon/index';
-import { spawn, execSync, spawnSync } from 'child_process';
+import { stopDaemon } from './daemon/index';
 import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { applyUndo, getSnapshotHistory, computeUndoDiff } from './undo';
 import { confirm } from '@inquirer/prompts';
 import { parseDuration } from './utils/duration';
 import { runProxy } from './proxy';
-import { openBrowserLocal, autoStartDaemonAndWait } from './cli/daemon-starter';
+import { autoStartDaemonAndWait } from './cli/daemon-starter';
 import { registerCheckCommand } from './cli/commands/check';
 import { registerLogCommand } from './cli/commands/log';
 import { registerShieldCommand, registerConfigShowCommand } from './cli/commands/shield';
+import { registerDoctorCommand } from './cli/commands/doctor';
+import { registerAuditCommand } from './cli/commands/audit';
+import { registerDaemonCommand } from './cli/commands/daemon-cmd';
+import { registerStatusCommand } from './cli/commands/status';
+import { registerUndoCommand } from './cli/commands/undo';
+import { registerWatchCommand } from './cli/commands/watch';
 
 const { version } = JSON.parse(
   fs.readFileSync(path.join(__dirname, '../package.json'), 'utf-8')
@@ -256,174 +259,7 @@ program
   });
 
 // 2e. DOCTOR
-program
-  .command('doctor')
-  .description('Check that Node9 is installed and configured correctly')
-  .action(() => {
-    const homeDir = os.homedir();
-    let failures = 0;
-
-    function pass(msg: string) {
-      console.log(chalk.green('  ✅ ') + msg);
-    }
-    function fail(msg: string, hint?: string) {
-      console.log(chalk.red('  ❌ ') + msg);
-      if (hint) console.log(chalk.gray('       ' + hint));
-      failures++;
-    }
-    function warn(msg: string, hint?: string) {
-      console.log(chalk.yellow('  ⚠️  ') + msg);
-      if (hint) console.log(chalk.gray('       ' + hint));
-    }
-    function section(title: string) {
-      console.log('\n' + chalk.bold(title));
-    }
-
-    console.log(chalk.cyan.bold(`\n🛡️  Node9 Doctor  v${version}\n`));
-
-    // ── Binary ───────────────────────────────────────────────────────────────
-    section('Binary');
-    try {
-      const which = execSync('which node9', { encoding: 'utf-8', timeout: 3000 }).trim();
-      pass(`node9 found at ${which}`);
-    } catch {
-      warn('node9 not found in $PATH — hooks may not find it', 'Run: npm install -g @node9/proxy');
-    }
-
-    const nodeMajor = parseInt(process.versions.node.split('.')[0], 10);
-    if (nodeMajor >= 18) {
-      pass(`Node.js ${process.versions.node}`);
-    } else {
-      fail(
-        `Node.js ${process.versions.node} (requires ≥18)`,
-        'Upgrade Node.js: https://nodejs.org'
-      );
-    }
-
-    try {
-      const gitVersion = execSync('git --version', { encoding: 'utf-8', timeout: 3000 }).trim();
-      pass(gitVersion);
-    } catch {
-      warn(
-        'git not found — Undo Engine will be disabled',
-        'Install git to enable snapshot-based undo'
-      );
-    }
-
-    // ── Config ───────────────────────────────────────────────────────────────
-    section('Configuration');
-    const globalConfigPath = path.join(homeDir, '.node9', 'config.json');
-    if (fs.existsSync(globalConfigPath)) {
-      try {
-        JSON.parse(fs.readFileSync(globalConfigPath, 'utf-8'));
-        pass('~/.node9/config.json found and valid');
-      } catch {
-        fail('~/.node9/config.json is invalid JSON', 'Run: node9 init --force');
-      }
-    } else {
-      warn('~/.node9/config.json not found (using defaults)', 'Run: node9 init');
-    }
-
-    const projectConfigPath = path.join(process.cwd(), 'node9.config.json');
-    if (fs.existsSync(projectConfigPath)) {
-      try {
-        JSON.parse(fs.readFileSync(projectConfigPath, 'utf-8'));
-        pass('node9.config.json found and valid (project)');
-      } catch {
-        fail('node9.config.json is invalid JSON', 'Fix the JSON or delete it and run: node9 init');
-      }
-    }
-
-    const credsPath = path.join(homeDir, '.node9', 'credentials.json');
-    if (fs.existsSync(credsPath)) {
-      pass('Cloud credentials found (~/.node9/credentials.json)');
-    } else {
-      warn(
-        'No cloud credentials — running in local-only mode',
-        'Run: node9 login <apiKey>  (or skip for local-only)'
-      );
-    }
-
-    // ── Hooks ────────────────────────────────────────────────────────────────
-    section('Agent Hooks');
-
-    // Claude
-    const claudeSettingsPath = path.join(homeDir, '.claude', 'settings.json');
-    if (fs.existsSync(claudeSettingsPath)) {
-      try {
-        const cs = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf-8')) as {
-          hooks?: { PreToolUse?: Array<{ hooks: Array<{ command?: string }> }> };
-        };
-        const hasHook = cs.hooks?.PreToolUse?.some((m) =>
-          m.hooks.some((h) => h.command?.includes('node9') || h.command?.includes('cli.js'))
-        );
-        if (hasHook) pass('Claude Code — PreToolUse hook active');
-        else
-          fail('Claude Code — hooks file found but node9 hook missing', 'Run: node9 setup claude');
-      } catch {
-        fail('Claude Code — ~/.claude/settings.json is invalid JSON');
-      }
-    } else {
-      warn('Claude Code — not configured', 'Run: node9 setup claude');
-    }
-
-    // Gemini
-    const geminiSettingsPath = path.join(homeDir, '.gemini', 'settings.json');
-    if (fs.existsSync(geminiSettingsPath)) {
-      try {
-        const gs = JSON.parse(fs.readFileSync(geminiSettingsPath, 'utf-8')) as {
-          hooks?: { BeforeTool?: Array<{ hooks: Array<{ command?: string }> }> };
-        };
-        const hasHook = gs.hooks?.BeforeTool?.some((m) =>
-          m.hooks.some((h) => h.command?.includes('node9') || h.command?.includes('cli.js'))
-        );
-        if (hasHook) pass('Gemini CLI  — BeforeTool hook active');
-        else
-          fail('Gemini CLI  — hooks file found but node9 hook missing', 'Run: node9 setup gemini');
-      } catch {
-        fail('Gemini CLI  — ~/.gemini/settings.json is invalid JSON');
-      }
-    } else {
-      warn('Gemini CLI  — not configured', 'Run: node9 setup gemini  (skip if not using Gemini)');
-    }
-
-    // Cursor
-    const cursorHooksPath = path.join(homeDir, '.cursor', 'hooks.json');
-    if (fs.existsSync(cursorHooksPath)) {
-      try {
-        const cur = JSON.parse(fs.readFileSync(cursorHooksPath, 'utf-8')) as {
-          hooks?: { preToolUse?: Array<{ command?: string }> };
-        };
-        const hasHook = cur.hooks?.preToolUse?.some(
-          (h) => h.command?.includes('node9') || h.command?.includes('cli.js')
-        );
-        if (hasHook) pass('Cursor      — preToolUse hook active');
-        else
-          fail('Cursor      — hooks file found but node9 hook missing', 'Run: node9 setup cursor');
-      } catch {
-        fail('Cursor      — ~/.cursor/hooks.json is invalid JSON');
-      }
-    } else {
-      warn('Cursor      — not configured', 'Run: node9 setup cursor  (skip if not using Cursor)');
-    }
-
-    // ── Daemon ───────────────────────────────────────────────────────────────
-    section('Daemon (optional)');
-    if (isDaemonRunning()) {
-      pass(`Browser dashboard running → http://${DAEMON_HOST}:${DAEMON_PORT}/`);
-    } else {
-      warn('Daemon not running — browser approvals unavailable', 'Run: node9 daemon --background');
-    }
-
-    // ── Summary ───────────────────────────────────────────────────────────────
-    console.log('');
-    if (failures === 0) {
-      console.log(chalk.green.bold('  All checks passed. Node9 is ready.\n'));
-    } else {
-      console.log(chalk.red.bold(`  ${failures} check(s) failed. See hints above.\n`));
-      process.exit(1);
-    }
-  });
+registerDoctorCommand(program, version);
 
 // 2d. EXPLAIN
 program
@@ -556,247 +392,13 @@ program
   });
 
 // 4. AUDIT
-function formatRelativeTime(timestamp: string): string {
-  const diff = Date.now() - new Date(timestamp).getTime();
-  const sec = Math.floor(diff / 1000);
-  if (sec < 60) return `${sec}s ago`;
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hrs = Math.floor(min / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return new Date(timestamp).toLocaleDateString();
-}
+registerAuditCommand(program);
 
-program
-  .command('audit')
-  .description('View local execution audit log')
-  .option('--tail <n>', 'Number of entries to show', '20')
-  .option('--tool <pattern>', 'Filter by tool name (substring match)')
-  .option('--deny', 'Show only denied actions')
-  .option('--json', 'Output raw JSON')
-  .action((options: { tail: string; tool?: string; deny?: boolean; json?: boolean }) => {
-    const logPath = path.join(os.homedir(), '.node9', 'audit.log');
-    if (!fs.existsSync(logPath)) {
-      console.log(
-        chalk.yellow('No audit logs found. Run node9 with an agent to generate entries.')
-      );
-      return;
-    }
-
-    const raw = fs.readFileSync(logPath, 'utf-8');
-    const lines = raw.split('\n').filter((l) => l.trim() !== '');
-
-    let entries = lines.flatMap((line) => {
-      try {
-        return [JSON.parse(line)];
-      } catch {
-        return [];
-      }
-    });
-
-    // Normalize decision field — some older entries use "allowed"/"denied"
-    entries = entries.map((e) => ({
-      ...e,
-      decision: String(e.decision).startsWith('allow') ? 'allow' : 'deny',
-    }));
-
-    if (options.tool) entries = entries.filter((e) => String(e.tool).includes(options.tool!));
-    if (options.deny) entries = entries.filter((e) => e.decision === 'deny');
-
-    const limit = Math.max(1, parseInt(options.tail, 10) || 20);
-    entries = entries.slice(-limit);
-
-    if (options.json) {
-      console.log(JSON.stringify(entries, null, 2));
-      return;
-    }
-
-    if (entries.length === 0) {
-      console.log(chalk.yellow('No matching audit entries.'));
-      return;
-    }
-
-    console.log(
-      `\n  ${chalk.bold('Node9 Audit Log')}  ${chalk.dim(`(${entries.length} entries)`)}`
-    );
-    console.log(chalk.dim('  ' + '─'.repeat(65)));
-    console.log(
-      `  ${'Time'.padEnd(12)} ${'Tool'.padEnd(18)} ${'Result'.padEnd(10)} ${'By'.padEnd(15)} Agent`
-    );
-    console.log(chalk.dim('  ' + '─'.repeat(65)));
-
-    for (const e of entries) {
-      const time = formatRelativeTime(String(e.ts)).padEnd(12);
-      const tool = String(e.tool).slice(0, 17).padEnd(18);
-      const result =
-        e.decision === 'allow' ? chalk.green('ALLOW'.padEnd(10)) : chalk.red('DENY'.padEnd(10));
-      const checker = String(e.checkedBy || 'unknown')
-        .slice(0, 14)
-        .padEnd(15);
-      const agent = String(e.agent || 'unknown');
-      console.log(`  ${time} ${tool} ${result} ${checker} ${agent}`);
-    }
-
-    const allowed = entries.filter((e) => e.decision === 'allow').length;
-    const denied = entries.filter((e) => e.decision === 'deny').length;
-    console.log(chalk.dim('  ' + '─'.repeat(65)));
-    console.log(
-      `  ${entries.length} entries  |  ${chalk.green(allowed + ' allowed')}  |  ${chalk.red(denied + ' denied')}\n`
-    );
-  });
-
-// 5. STATUS (Upgraded to show Waterfall & Undo status)
-program
-  .command('status')
-  .description('Show current Node9 mode, policy source, and persistent decisions')
-  .action(() => {
-    const creds = getCredentials();
-    const daemonRunning = isDaemonRunning();
-
-    // Grab the fully resolved waterfall config!
-    const mergedConfig = getConfig();
-    const settings = mergedConfig.settings;
-
-    console.log('');
-
-    // ── Policy authority ────────────────────────────────────────────────────
-    if (creds && settings.approvers.cloud) {
-      console.log(chalk.green('  ● Agent mode') + chalk.gray(' — cloud team policy enforced'));
-    } else if (creds && !settings.approvers.cloud) {
-      console.log(
-        chalk.blue('  ● Privacy mode 🛡️') + chalk.gray(' — all decisions stay on this machine')
-      );
-    } else {
-      console.log(
-        chalk.yellow('  ○ Privacy mode 🛡️') + chalk.gray(' — no API key (Local rules only)')
-      );
-    }
-
-    // ── Daemon & Architecture ────────────────────────────────────────────────
-    console.log('');
-    if (daemonRunning) {
-      console.log(
-        chalk.green('  ● Daemon running') + chalk.gray(` → http://127.0.0.1:${DAEMON_PORT}/`)
-      );
-    } else {
-      console.log(chalk.gray('  ○ Daemon stopped'));
-    }
-
-    if (settings.enableUndo) {
-      console.log(
-        chalk.magenta('  ● Undo Engine') +
-          chalk.gray(`    → Auto-snapshotting Git repos on AI change`)
-      );
-    }
-
-    // ── Configuration State ──────────────────────────────────────────────────
-    console.log('');
-    const modeLabel =
-      settings.mode === 'audit'
-        ? chalk.blue('audit')
-        : settings.mode === 'strict'
-          ? chalk.red('strict')
-          : chalk.white('standard');
-    console.log(`  Mode:    ${modeLabel}`);
-
-    const projectConfig = path.join(process.cwd(), 'node9.config.json');
-    const globalConfig = path.join(os.homedir(), '.node9', 'config.json');
-    console.log(
-      `  Local:   ${fs.existsSync(projectConfig) ? chalk.green('Active (node9.config.json)') : chalk.gray('Not present')}`
-    );
-    console.log(
-      `  Global:  ${fs.existsSync(globalConfig) ? chalk.green('Active (~/.node9/config.json)') : chalk.gray('Not present')}`
-    );
-
-    if (mergedConfig.policy.sandboxPaths.length > 0) {
-      console.log(
-        `  Sandbox: ${chalk.green(`${mergedConfig.policy.sandboxPaths.length} safe zones active`)}`
-      );
-    }
-
-    // ── Pause state ──────────────────────────────────────────────────────────
-    const pauseState = checkPause();
-    if (pauseState.paused) {
-      const expiresAt = pauseState.expiresAt
-        ? new Date(pauseState.expiresAt).toLocaleTimeString()
-        : 'indefinitely';
-      console.log('');
-      console.log(
-        chalk.yellow(`  ⏸  PAUSED until ${expiresAt}`) + chalk.gray(' — all tool calls allowed')
-      );
-    }
-
-    console.log('');
-  });
+// 5. STATUS
+registerStatusCommand(program);
 
 // 5. DAEMON
-program
-  .command('daemon')
-  .description('Run the local approval server')
-  .argument('[action]', 'start | stop | status (default: start)')
-  .option('-b, --background', 'Start the daemon in the background (detached)')
-  .option('-o, --openui', 'Start in background and open browser')
-  .option(
-    '-w, --watch',
-    'Start daemon + open browser, stay alive permanently (Flight Recorder mode)'
-  )
-  .action(
-    async (
-      action: string | undefined,
-      options: { background?: boolean; openui?: boolean; watch?: boolean }
-    ) => {
-      const cmd = (action ?? 'start').toLowerCase();
-      if (cmd === 'stop') return stopDaemon();
-      if (cmd === 'status') return daemonStatus();
-      if (cmd !== 'start' && action !== undefined) {
-        console.error(chalk.red(`Unknown daemon action: "${action}". Use: start | stop | status`));
-        process.exit(1);
-      }
-
-      if (options.watch) {
-        process.env.NODE9_WATCH_MODE = '1';
-        // Open browser shortly after daemon binds to its port
-        setTimeout(() => {
-          openBrowserLocal();
-          console.log(chalk.cyan(`🛰️  Flight Recorder: http://${DAEMON_HOST}:${DAEMON_PORT}/`));
-        }, 600);
-        startDaemon(); // foreground — keeps process alive
-        return;
-      }
-
-      if (options.openui) {
-        if (isDaemonRunning()) {
-          openBrowserLocal();
-          console.log(chalk.green(`🌐  Opened browser: http://${DAEMON_HOST}:${DAEMON_PORT}/`));
-          process.exit(0);
-        }
-        const child = spawn(process.execPath, [process.argv[1], 'daemon'], {
-          detached: true,
-          stdio: 'ignore',
-        });
-        child.unref();
-        for (let i = 0; i < 12; i++) {
-          await new Promise((r) => setTimeout(r, 250));
-          if (isDaemonRunning()) break;
-        }
-        openBrowserLocal();
-        console.log(chalk.green(`\n🛡️  Node9 daemon started + browser opened`));
-        process.exit(0);
-      }
-
-      if (options.background) {
-        const child = spawn(process.execPath, [process.argv[1], 'daemon'], {
-          detached: true,
-          stdio: 'ignore',
-        });
-        child.unref();
-        console.log(chalk.green(`\n🛡️  Node9 daemon started in background  (PID ${child.pid})`));
-        process.exit(0);
-      }
-
-      startDaemon();
-    }
-  );
+registerDaemonCommand(program);
 
 // 6. TAIL
 program
@@ -814,72 +416,8 @@ program
     }
   });
 
-// node9 watch <command...> — runs a command under Node9 supervision with watch-mode daemon
-program
-  .command('watch')
-  .description('Run a command under Node9 watch mode (daemon stays alive for the session)')
-  .argument('<command>', 'Command to run')
-  .argument('[args...]', 'Arguments for the command')
-  .action(async (cmd: string, args: string[]) => {
-    // Ensure daemon is running in watch mode (never idle-exits)
-    let port = DAEMON_PORT;
-    try {
-      const res = await fetch(`http://127.0.0.1:${DAEMON_PORT}/settings`, {
-        signal: AbortSignal.timeout(500),
-      });
-      if (res.ok) {
-        const data = (await res.json()) as { port?: number };
-        if (typeof data.port === 'number') port = data.port;
-      } else {
-        throw new Error('not running');
-      }
-    } catch {
-      // Not running — start it with watch mode enabled
-      console.error(chalk.dim('🛡️  Starting Node9 daemon (watch mode)...'));
-      const child = spawn(process.execPath, [process.argv[1], 'daemon'], {
-        detached: true,
-        stdio: 'ignore',
-        env: { ...process.env, NODE9_AUTO_STARTED: '1', NODE9_WATCH_MODE: '1' },
-      });
-      child.unref();
-      // Wait up to 5s
-      let ready = false;
-      for (let i = 0; i < 20; i++) {
-        await new Promise((r) => setTimeout(r, 250));
-        try {
-          const r = await fetch(`http://127.0.0.1:${DAEMON_PORT}/settings`, {
-            signal: AbortSignal.timeout(500),
-          });
-          if (r.ok) {
-            ready = true;
-            break;
-          }
-        } catch {}
-      }
-      if (!ready) {
-        console.error(chalk.red('❌ Daemon failed to start. Try: node9 daemon start'));
-        process.exit(1);
-      }
-    }
-
-    console.error(
-      chalk.cyan.bold('🛡️  Node9 watch') +
-        chalk.dim(` → localhost:${port}`) +
-        chalk.dim(
-          '\n   Tip: run `node9 tail` in another terminal to review and approve AI actions.\n'
-        )
-    );
-
-    const result = spawnSync(cmd, args, {
-      stdio: 'inherit',
-      env: { ...process.env, NODE9_WATCH_MODE: '1' },
-    });
-    if (result.error) {
-      console.error(chalk.red(`❌ Failed to run command: ${result.error.message}`));
-      process.exit(1);
-    }
-    process.exit(result.status ?? 0);
-  });
+// node9 watch
+registerWatchCommand(program);
 
 // 7. CHECK (PreToolUse hook) + LOG (PostToolUse hook)
 registerCheckCommand(program);
@@ -995,105 +533,8 @@ program
     }
   });
 
-program
-  .command('undo')
-  .description(
-    'Revert files to a pre-AI snapshot. Shows a diff and asks for confirmation before reverting. Use --steps N to go back N actions, --all to include snapshots from other directories.'
-  )
-  .option('--steps <n>', 'Number of snapshots to go back (default: 1)', '1')
-  .option('--all', 'Show snapshots from all directories, not just the current one')
-  .action(async (options: { steps: string; all?: boolean }) => {
-    const steps = Math.max(1, parseInt(options.steps, 10) || 1);
-    const allHistory = getSnapshotHistory();
-    const history = options.all ? allHistory : allHistory.filter((s) => s.cwd === process.cwd());
-
-    if (history.length === 0) {
-      if (!options.all && allHistory.length > 0) {
-        console.log(
-          chalk.yellow(
-            `\nℹ️  No snapshots found for the current directory (${process.cwd()}).\n` +
-              `    Run ${chalk.cyan('node9 undo --all')} to see snapshots from all projects.\n`
-          )
-        );
-      } else {
-        console.log(chalk.yellow('\nℹ️  No undo snapshots found.\n'));
-      }
-      return;
-    }
-
-    // Pick the snapshot N steps back (newest is last in array)
-    const idx = history.length - steps;
-    if (idx < 0) {
-      console.log(
-        chalk.yellow(
-          `\nℹ️  Only ${history.length} snapshot(s) available, cannot go back ${steps}.\n`
-        )
-      );
-      return;
-    }
-    const snapshot = history[idx];
-
-    const age = Math.round((Date.now() - snapshot.timestamp) / 1000);
-    const ageStr =
-      age < 60
-        ? `${age}s ago`
-        : age < 3600
-          ? `${Math.round(age / 60)}m ago`
-          : `${Math.round(age / 3600)}h ago`;
-
-    console.log(chalk.magenta.bold(`\n⏪  Node9 Undo${steps > 1 ? ` (${steps} steps back)` : ''}`));
-    console.log(
-      chalk.white(
-        `    Tool:  ${chalk.cyan(snapshot.tool)}${snapshot.argsSummary ? chalk.gray(' → ' + snapshot.argsSummary) : ''}`
-      )
-    );
-    console.log(chalk.white(`    When:  ${chalk.gray(ageStr)}`));
-    console.log(chalk.white(`    Dir:   ${chalk.gray(snapshot.cwd)}`));
-    if (steps > 1)
-      console.log(
-        chalk.yellow(`    Note:  This will also undo the ${steps - 1} action(s) after it.`)
-      );
-    console.log('');
-
-    // Show diff
-    const diff = computeUndoDiff(snapshot.hash, snapshot.cwd);
-    if (diff) {
-      const lines = diff.split('\n');
-      for (const line of lines) {
-        if (line.startsWith('+++') || line.startsWith('---')) {
-          console.log(chalk.bold(line));
-        } else if (line.startsWith('+')) {
-          console.log(chalk.green(line));
-        } else if (line.startsWith('-')) {
-          console.log(chalk.red(line));
-        } else if (line.startsWith('@@')) {
-          console.log(chalk.cyan(line));
-        } else {
-          console.log(chalk.gray(line));
-        }
-      }
-      console.log('');
-    } else {
-      console.log(
-        chalk.gray('    (no diff available — working tree may already match snapshot)\n')
-      );
-    }
-
-    const proceed = await confirm({
-      message: `Revert to this snapshot?`,
-      default: false,
-    });
-
-    if (proceed) {
-      if (applyUndo(snapshot.hash, snapshot.cwd)) {
-        console.log(chalk.green('\n✅ Reverted successfully.\n'));
-      } else {
-        console.error(chalk.red('\n❌ Undo failed. Ensure you are in a Git repository.\n'));
-      }
-    } else {
-      console.log(chalk.gray('\nCancelled.\n'));
-    }
-  });
+// UNDO
+registerUndoCommand(program);
 
 // Shield management + config show
 registerShieldCommand(program);
