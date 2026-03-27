@@ -18,6 +18,7 @@ function runDoctor(homeDir: string, cwd?: string): { output: string; exitCode: n
     env: { ...process.env, HOME: homeDir, USERPROFILE: homeDir, NODE9_TESTING: '1' },
     cwd: cwd ?? homeDir,
     encoding: 'utf-8',
+    timeout: 15000,
   });
   const output = (result.stdout ?? '') + (result.stderr ?? '');
   return { output, exitCode: result.status ?? 1 };

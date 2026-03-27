@@ -860,9 +860,10 @@ describe('removefrom command', () => {
       try {
         const result = spawnSync(process.execPath, [CLI, 'removefrom', target], {
           encoding: 'utf-8',
-          timeout: 5000,
+          timeout: 15000,
           env: makeEnv(tmpHome, { NODE9_TESTING: '1' }),
         });
+        expect(result.error).toBeUndefined();
         expect(result.status).toBe(0);
       } finally {
         fs.rmSync(tmpHome, { recursive: true });

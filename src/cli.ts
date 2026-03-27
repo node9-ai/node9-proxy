@@ -567,7 +567,7 @@ program
     // ── Binary ───────────────────────────────────────────────────────────────
     section('Binary');
     try {
-      const which = execSync('which node9', { encoding: 'utf-8' }).trim();
+      const which = execSync('which node9', { encoding: 'utf-8', timeout: 3000 }).trim();
       pass(`node9 found at ${which}`);
     } catch {
       warn('node9 not found in $PATH — hooks may not find it', 'Run: npm install -g @node9/proxy');
@@ -584,7 +584,7 @@ program
     }
 
     try {
-      const gitVersion = execSync('git --version', { encoding: 'utf-8' }).trim();
+      const gitVersion = execSync('git --version', { encoding: 'utf-8', timeout: 3000 }).trim();
       pass(gitVersion);
     } catch {
       warn(
