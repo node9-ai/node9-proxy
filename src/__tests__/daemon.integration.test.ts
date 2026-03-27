@@ -51,8 +51,16 @@ function cleanupDir(dir: string) {
   try {
     fs.rmSync(dir, { recursive: true, force: true });
   } catch (e: unknown) {
-    if ((e as NodeJS.ErrnoException).code !== 'EBUSY') throw e;
-    console.warn(`[cleanupDir] EBUSY — temp dir leaked: ${dir}`);
+    const code = (e as NodeJS.ErrnoException).code;
+    // EBUSY: file locked by another process (common on Windows).
+    // ENOTEMPTY: Windows creates system junctions (AppData\Local\Microsoft\Windows)
+    //   inside any directory that becomes USERPROFILE — these can't be deleted
+    //   by a plain rmdir but are harmless to leak from a CI temp dir.
+    if (code === 'EBUSY' || code === 'ENOTEMPTY') {
+      console.warn(`[cleanupDir] ${code} — temp dir leaked: ${dir}`);
+      return;
+    }
+    throw e;
   }
 }
 
