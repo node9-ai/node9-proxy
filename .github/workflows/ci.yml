@@ -60,10 +60,11 @@ jobs:
 
   coverage:
     # Dedicated job so branch protection can require it by name without fragile matrix selectors.
-    # Enforces the thresholds defined in vitest.config.mts (statements: 68, branches: 58,
-    # functions: 66, lines: 70). Must be listed in branch protection "required status checks"
-    # as "coverage" for the gate to hold.
+    # Enforces the thresholds defined in vitest.config.mts. Must be listed in branch protection
+    # "required status checks" as "coverage" for the gate to hold.
+    # needs: [test] prevents a misleading green coverage check when the test job fails.
     name: coverage
+    needs: [test]
     runs-on: ubuntu-latest
 
     steps:
