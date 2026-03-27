@@ -49,3 +49,9 @@ jobs:
         # NODE_ENV=test is set automatically by Vitest; NODE9_TESTING=1 guards
         # native popups and daemon auto-start in spawned child processes.
         run: npm test
+
+      - name: Coverage (with threshold enforcement)
+        # Run only on Linux to avoid duplicating cost across the matrix.
+        # Thresholds are configured in vitest.config.mts — CI fails if any drop below baseline.
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 22
+        run: npm run test:coverage
