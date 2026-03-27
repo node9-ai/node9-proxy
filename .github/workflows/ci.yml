@@ -48,6 +48,9 @@ jobs:
       - name: Test
         # On ubuntu/Node 22: run with coverage so thresholds (vitest.config.mts) are enforced.
         # On all other matrix cells: plain test run — avoids doubling execution time.
+        # Intentional: thresholds only block on this one cell. Branch protection must require
+        # the "Test (ubuntu-latest, Node 22)" job specifically to gate the PR.
         # NODE_ENV=test is set automatically by Vitest; NODE9_TESTING=1 guards
         # native popups and daemon auto-start in spawned child processes.
-        run: ${{ matrix.os == 'ubuntu-latest' && matrix.node == 22 && 'npm run test:coverage' || 'npm test' }}
+        # Note: matrix.node is typed as string in GHA expressions — use '22' not 22.
+        run: ${{ matrix.os == 'ubuntu-latest' && matrix.node == '22' && 'npm run test:coverage' || 'npm test' }}
