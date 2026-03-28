@@ -103,8 +103,12 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
     if (stdout) executable = stdout.trim();
   } catch {}
 
-  // Check binary provenance before spawning — a server in /tmp or world-writable
-  // could be a supply-chain attack (malicious binary replacing the real MCP server).
+  // Check binary provenance before spawning — warn if the upstream server binary
+  // is in a suspicious location (temp dir, world-writable).
+  // The gateway warns but does NOT exit: the upstream is human-configured (the user
+  // wrote the --upstream flag or .mcp.json), so we surface the concern without
+  // blocking a legitimate setup. The hard block (process.exit) applies to
+  // AI-initiated bash commands via the policy engine, not to configured servers.
   const prov = checkProvenance(executable);
   if (prov.trustLevel === 'suspect') {
     console.error(
@@ -112,16 +116,7 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
         `⚠️  Node9: Upstream MCP server binary is suspect — ${prov.reason} (${prov.resolvedPath})`
       )
     );
-    console.error(chalk.red('   Refusing to spawn. Use a system-installed or managed binary.'));
-    process.exit(1);
-  }
-  if (prov.trustLevel === 'unknown') {
-    console.error(
-      chalk.yellow(
-        `⚠️  Node9: Upstream MCP server binary is in an unrecognized location — ${prov.resolvedPath}`
-      )
-    );
-    console.error(chalk.yellow('   Proceeding, but verify this binary is trusted.'));
+    console.error(chalk.red('   Verify this binary is trusted before proceeding.'));
   }
 
   // stderr only — stdout must stay clean for the JSON-RPC stdio protocol
