@@ -433,6 +433,26 @@ describe('mcp-gateway tool call interception', () => {
     }
   });
 
+  itUnix('id: 0 is a valid JSON-RPC id and gets a normal response', () => {
+    // id===0 is a valid JSON-RPC id (number). Must not be treated as a notification
+    // (id===undefined) or rejected — both would be protocol violations.
+    const home = makeTempHome({ settings: { mode: 'audit' } });
+    try {
+      const r = runGateway(
+        [JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'tools/list', params: {} })],
+        home
+      );
+      expect(r.status).toBe(0);
+      const responses = parseResponses(r.stdout);
+      const resp = responses.find((r) => r.id === 0);
+      expect(resp).toBeDefined();
+      expect(resp!.result).toBeDefined();
+      expect(resp!.error).toBeUndefined();
+    } finally {
+      cleanupDir(home);
+    }
+  });
+
   itUnix('invalid JSON-RPC id type returns -32600 error with id:null', () => {
     const home = makeTempHome({ settings: { mode: 'audit' } });
     try {
