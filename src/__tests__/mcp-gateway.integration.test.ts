@@ -95,9 +95,10 @@ function cleanupDir(dir: string) {
 function runGateway(
   inputLines: string[],
   homeDir: string,
-  timeoutMs = 8000
+  timeoutMs = 8000,
+  upstreamScript = mockScriptPath
 ): { stdout: string; stderr: string; status: number | null } {
-  const result = spawnSync(NODE, [CLI, 'mcp-gateway', '--upstream', `${NODE} ${mockScriptPath}`], {
+  const result = spawnSync(NODE, [CLI, 'mcp-gateway', '--upstream', `${NODE} ${upstreamScript}`], {
     input: inputLines.join('\n') + '\n',
     encoding: 'utf-8',
     timeout: timeoutMs,
@@ -252,6 +253,7 @@ describe('mcp-gateway tool call interception', () => {
         home,
         5000
       );
+      expect(r.status).toBe(0);
       const responses = r.stdout
         .split('\n')
         .filter(Boolean)
@@ -296,12 +298,89 @@ describe('mcp-gateway tool call interception', () => {
         home,
         5000
       );
+      expect(r.status).toBe(0);
       const responses = r.stdout
         .split('\n')
         .filter(Boolean)
         .map((l) => JSON.parse(l) as { id?: unknown; error?: unknown });
       const errorResponse = responses.find((r) => r.id === requestId);
       expect(errorResponse?.error).toBeDefined();
+    } finally {
+      cleanupDir(home);
+    }
+  });
+
+  itUnix('invalid JSON-RPC id type returns -32600 error with id:null', () => {
+    const home = makeTempHome({ settings: { mode: 'audit' } });
+    try {
+      // id is an object — invalid per JSON-RPC spec; gateway must not reflect it
+      const r = runGateway(
+        [
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: { nested: 'object' },
+            method: 'tools/list',
+            params: {},
+          }),
+        ],
+        home
+      );
+      expect(r.status).toBe(0);
+      const responses = r.stdout
+        .split('\n')
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as { id?: unknown; error?: { code: number } });
+      const errorResponse = responses.find((r) => r.error?.code === -32600);
+      expect(errorResponse).toBeDefined();
+      expect(errorResponse!.id).toBeNull();
+    } finally {
+      cleanupDir(home);
+    }
+  });
+});
+
+// ── resilience ─────────────────────────────────────────────────────────────────
+
+describe('mcp-gateway resilience', () => {
+  itUnix('upstream emitting invalid JSON is forwarded as-is (transparent proxy)', () => {
+    // The gateway is a transparent proxy for upstream output — it does not parse
+    // or validate upstream responses. Invalid JSON from upstream reaches the client
+    // so the client can handle or log it. This is intentional: we only intercept
+    // inbound tool calls, never outbound responses.
+    const home = makeTempHome({ settings: { mode: 'audit' } });
+    const badUpstreamScript = path.join(mockScriptDir, 'bad-upstream.js');
+    fs.writeFileSync(badUpstreamScript, `process.stdout.write('not-valid-json\\n');\n`);
+    try {
+      const r = runGateway(
+        [JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })],
+        home,
+        8000,
+        badUpstreamScript
+      );
+      // Gateway must not crash — exit 0 or propagate upstream's code
+      expect(r.status).not.toBeNull();
+      // The invalid line is forwarded unchanged (transparent proxy contract)
+      expect(r.stdout).toContain('not-valid-json');
+    } finally {
+      cleanupDir(home);
+    }
+  });
+
+  itUnix('upstream that exits immediately produces no gateway crash', () => {
+    // Upstream exits before responding to any request.
+    // Gateway propagates the exit code and does not crash or hang.
+    const home = makeTempHome({ settings: { mode: 'audit' } });
+    const crashScript = path.join(mockScriptDir, 'crash-upstream.js');
+    fs.writeFileSync(crashScript, `process.exit(1);\n`);
+    try {
+      const r = runGateway(
+        [JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })],
+        home,
+        8000,
+        crashScript
+      );
+      // Gateway exits cleanly — status is not null (not a timeout/hang)
+      expect(r.status).not.toBeNull();
     } finally {
       cleanupDir(home);
     }

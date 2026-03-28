@@ -27,6 +27,11 @@ function sanitize(value: string): string {
   return value.replace(/[\x00-\x1F\x7F]/g, '');
 }
 
+/** Validate JSON-RPC id — must be string, number, or null (per spec). */
+function isValidId(id: unknown): id is string | number | null {
+  return id === null || typeof id === 'string' || typeof id === 'number';
+}
+
 /** Extract the MCP server name from a namespaced tool name (mcp__<server>__<tool>). */
 function extractMcpServer(toolName: string): string | undefined {
   const match = toolName.match(/^mcp__([^_](?:[^_]|_(?!_))*?)__/i);
@@ -67,10 +72,26 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
   const agentIn = readline.createInterface({ input: process.stdin, terminal: false });
 
   agentIn.on('line', async (line) => {
-    let message: { method?: string; id?: unknown; params?: Record<string, unknown> };
+    let message: { method?: string; id?: string | number | null; params?: Record<string, unknown> };
 
     try {
-      message = JSON.parse(line) as typeof message;
+      const parsed = JSON.parse(line) as {
+        method?: string;
+        id?: unknown;
+        params?: Record<string, unknown>;
+      };
+      // Reject messages with invalid id types — protects downstream from
+      // reflected objects/arrays that could cause issues in MCP clients.
+      if ('id' in parsed && !isValidId(parsed.id)) {
+        const errorResponse = {
+          jsonrpc: '2.0',
+          id: null,
+          error: { code: -32600, message: 'Invalid Request: id must be string, number, or null' },
+        };
+        process.stdout.write(JSON.stringify(errorResponse) + '\n');
+        return;
+      }
+      message = { ...parsed, id: parsed.id as string | number | null | undefined };
     } catch {
       // Non-JSON line — forward as-is (handles raw shell or malformed input)
       child.stdin.write(line + '\n');
