@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
-import path from 'path';
 import { checkProvenance } from '../utils/provenance.js';
 
 describe('checkProvenance', () => {
@@ -18,46 +17,43 @@ describe('checkProvenance', () => {
     vi.restoreAllMocks();
   });
 
-  function mockBinary(resolvedPath: string, mode = 0o755) {
-    // accessSync: succeed for the resolved path (found in PATH)
-    accessSpy.mockImplementation((p: fs.PathLike) => {
-      if (String(p).endsWith(path.basename(resolvedPath))) return undefined;
-      throw new Error('ENOENT');
-    });
+  // Helper: mock realpathSync + statSync for an absolute path input.
+  // Does NOT mock accessSync because absolute paths skip the PATH walk.
+  function mockAbsoluteBinary(resolvedPath: string, mode = 0o755) {
     realpathSpy.mockReturnValue(resolvedPath);
     statSpy.mockReturnValue({ mode } as fs.Stats);
   }
 
   it('classifies /usr/bin/curl as system', () => {
-    mockBinary('/usr/bin/curl');
-    const result = checkProvenance('curl');
+    mockAbsoluteBinary('/usr/bin/curl');
+    const result = checkProvenance('/usr/bin/curl');
     expect(result.trustLevel).toBe('system');
     expect(result.resolvedPath).toBe('/usr/bin/curl');
   });
 
   it('classifies /usr/local/bin/node as managed', () => {
-    mockBinary('/usr/local/bin/node');
-    const result = checkProvenance('node');
+    mockAbsoluteBinary('/usr/local/bin/node');
+    const result = checkProvenance('/usr/local/bin/node');
     expect(result.trustLevel).toBe('managed');
   });
 
   it('classifies /tmp/curl as suspect', () => {
-    mockBinary('/tmp/curl');
-    const result = checkProvenance('curl');
+    mockAbsoluteBinary('/tmp/curl');
+    const result = checkProvenance('/tmp/curl');
     expect(result.trustLevel).toBe('suspect');
     expect(result.reason).toMatch(/temp directory/i);
   });
 
   it('classifies /var/tmp/evil as suspect', () => {
-    mockBinary('/var/tmp/evil');
-    const result = checkProvenance('evil');
+    mockAbsoluteBinary('/var/tmp/evil');
+    const result = checkProvenance('/var/tmp/evil');
     expect(result.trustLevel).toBe('suspect');
   });
 
   it('classifies a world-writable binary as suspect', () => {
     // mode 0o777 — bit 0o002 is set (world-writable)
-    mockBinary('/usr/bin/curl', 0o777);
-    const result = checkProvenance('curl');
+    mockAbsoluteBinary('/usr/bin/curl', 0o777);
+    const result = checkProvenance('/usr/bin/curl');
     expect(result.trustLevel).toBe('suspect');
     expect(result.reason).toMatch(/world-writable/i);
   });
@@ -73,22 +69,20 @@ describe('checkProvenance', () => {
 
   it('classifies binary in project cwd as user', () => {
     const cwd = '/home/dev/myproject';
-    mockBinary(`${cwd}/.bin/tool`);
-    const result = checkProvenance('tool', cwd);
+    mockAbsoluteBinary(`${cwd}/.bin/tool`);
+    const result = checkProvenance(`${cwd}/.bin/tool`, cwd);
     expect(result.trustLevel).toBe('user');
     expect(result.reason).toMatch(/project directory/i);
   });
 
   it('classifies binary in unrecognized location as unknown', () => {
-    mockBinary('/opt/custom/bin/mytool');
-    const result = checkProvenance('mytool');
+    mockAbsoluteBinary('/opt/custom/bin/mytool');
+    const result = checkProvenance('/opt/custom/bin/mytool');
     expect(result.trustLevel).toBe('unknown');
     expect(result.reason).toMatch(/unrecognized/i);
   });
 
-  it('handles absolute path input directly', () => {
-    // When given an absolute path, skips PATH walk
-    accessSpy.mockImplementation(() => undefined); // accept /tmp/tool
+  it('handles absolute path input — skips PATH walk', () => {
     realpathSpy.mockReturnValue('/tmp/tool');
     statSpy.mockReturnValue({ mode: 0o755 } as fs.Stats);
     const result = checkProvenance('/tmp/tool');

@@ -326,9 +326,11 @@ export async function evaluatePolicy(
     }
 
     // ── Binary provenance check ───────────────────────────────────────────────
-    // Check the first binary in the command (the primary executable).
-    // suspect → always review; unknown in strict mode → review.
-    if (firstToken && firstToken.length > 0) {
+    // Only check absolute paths (e.g. /tmp/curl). Bare command names (npm, curl)
+    // require PATH resolution which varies by environment (nvm, volta, CI toolcache)
+    // and causes false positives. The MCP gateway handles provenance for configured
+    // upstream servers separately.
+    if (firstToken && path.isAbsolute(firstToken)) {
       const prov = checkProvenance(firstToken, cwd);
       if (prov.trustLevel === 'suspect') {
         return {
