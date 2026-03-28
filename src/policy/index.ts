@@ -330,7 +330,7 @@ export async function evaluatePolicy(
     // require PATH resolution which varies by environment (nvm, volta, CI toolcache)
     // and causes false positives. The MCP gateway handles provenance for configured
     // upstream servers separately.
-    if (firstToken && path.isAbsolute(firstToken)) {
+    if (firstToken && path.posix.isAbsolute(firstToken)) {
       const prov = checkProvenance(firstToken, cwd);
       if (prov.trustLevel === 'suspect') {
         return {

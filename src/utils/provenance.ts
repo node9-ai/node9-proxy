@@ -28,7 +28,8 @@ const SUSPECT_PREFIXES = ['/tmp', '/var/tmp', '/dev/shm'];
 
 /** Walk PATH to find the first executable matching `cmd`. */
 function findInPath(cmd: string): string | null {
-  if (path.isAbsolute(cmd)) return cmd;
+  // Use POSIX semantics: shell commands always use forward-slash paths even on Windows (WSL, Git Bash).
+  if (path.posix.isAbsolute(cmd)) return cmd;
   const pathEnv = process.env.PATH ?? '';
   for (const dir of pathEnv.split(path.delimiter)) {
     if (!dir) continue;
@@ -53,26 +54,29 @@ export function _classifyPath(
   resolved: string,
   cwd?: string
 ): { trustLevel: TrustLevel; reason: string } {
+  // All prefix checks use '/' explicitly — these are always POSIX paths.
+  // Using path.sep would break on Windows where it is '\\'.
+
   // Project-local binary
-  if (cwd && resolved.startsWith(cwd + path.sep)) {
+  if (cwd && resolved.startsWith(cwd + '/')) {
     return { trustLevel: 'user', reason: 'binary in project directory' };
   }
 
   // Temp / suspect directories
   const osTmp = os.tmpdir();
   const allSuspect = osTmp ? [...SUSPECT_PREFIXES, osTmp] : SUSPECT_PREFIXES;
-  if (allSuspect.some((p) => resolved === p || resolved.startsWith(p + path.sep))) {
+  if (allSuspect.some((p) => resolved === p || resolved.startsWith(p + '/'))) {
     return { trustLevel: 'suspect', reason: `binary in temp directory: ${resolved}` };
   }
 
   // Well-known locations
-  if (SYSTEM_PREFIXES.some((p) => resolved === p || resolved.startsWith(p + path.sep))) {
+  if (SYSTEM_PREFIXES.some((p) => resolved === p || resolved.startsWith(p + '/'))) {
     return { trustLevel: 'system', reason: '' };
   }
-  if (MANAGED_PREFIXES.some((p) => resolved === p || resolved.startsWith(p + path.sep))) {
+  if (MANAGED_PREFIXES.some((p) => resolved === p || resolved.startsWith(p + '/'))) {
     return { trustLevel: 'managed', reason: '' };
   }
-  if (USER_PREFIXES.some((p) => resolved === p || resolved.startsWith(p + path.sep))) {
+  if (USER_PREFIXES.some((p) => resolved === p || resolved.startsWith(p + '/'))) {
     return { trustLevel: 'user', reason: '' };
   }
 
@@ -94,7 +98,7 @@ export function checkProvenance(cmd: string, cwd?: string): ProvenanceResult {
   // exist yet (or realpathSync fails). Temp-dir membership is determined by
   // the input path, not the symlink target — a binary accessed via /tmp/link
   // is suspect regardless of where the link points.
-  if (path.isAbsolute(bare)) {
+  if (path.posix.isAbsolute(bare)) {
     const early = _classifyPath(bare, cwd);
     if (early.trustLevel === 'suspect') {
       return { resolvedPath: bare, ...early };
