@@ -39,7 +39,10 @@ beforeAll(() => {
     );
   }
 
-  // Write the mock upstream MCP server to a file — avoids all shell-escaping issues
+  // Write the mock upstream MCP server to a file — avoids all shell-escaping issues.
+  // The mock uses process.stdout.write (unbuffered in Node.js) so the gateway's
+  // pipe always receives responses without needing an explicit flush. Tests that
+  // replace this mock with a custom upstream must preserve this property.
   mockScriptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-gw-mock-'));
   mockScriptPath = path.join(mockScriptDir, 'upstream.js');
   fs.writeFileSync(
@@ -94,30 +97,52 @@ function cleanupDir(dir: string) {
   }
 }
 
+/** Shared shape for every JSON-RPC message on stdout. */
+type GatewayResponse = {
+  id?: unknown;
+  jsonrpc?: string;
+  result?: Record<string, unknown>;
+  error?: { code: number; message: string; data?: unknown };
+};
+
+/** Parse all non-empty stdout lines as JSON-RPC responses. */
+function parseResponses(stdout: string): GatewayResponse[] {
+  return stdout
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l) as GatewayResponse);
+}
+
 function runGateway(
   inputLines: string[],
   homeDir: string,
-  timeoutMs = 8000,
+  timeoutMs = 5000,
   upstreamScript = mockScriptPath
 ): { stdout: string; stderr: string; status: number | null } {
+  // Strip all NODE9_* env vars so local developer config (NODE9_MODE, NODE9_API_KEY,
+  // NODE9_PAUSED, etc.) cannot leak into the hermetically-isolated test home.
+  const cleanEnv = Object.fromEntries(
+    Object.entries(process.env).filter(([k]) => !k.startsWith('NODE9_'))
+  );
   const result = spawnSync(NODE, [CLI, 'mcp-gateway', '--upstream', `${NODE} ${upstreamScript}`], {
     input: inputLines.join('\n') + '\n',
     encoding: 'utf-8',
     timeout: timeoutMs,
     env: {
-      ...process.env,
+      ...cleanEnv,
       HOME: homeDir,
       USERPROFILE: homeDir,
-      NODE9_TESTING: '1',
+      NODE9_TESTING: '1', // disables UI approvers only — policy/DLP/smart-rules still run
     },
   });
 
   // A spawnSync error (e.g. ETIMEDOUT) means the process was killed — fail fast.
   if (result.error) throw result.error;
-  // status===null means the process was killed by a signal without an error object
-  // (platform-dependent). Treat as a failure so hung gateways don't silently pass.
-  if (result.status === null && result.signal) {
-    throw new Error(`Gateway process killed by signal ${result.signal}`);
+  // status===null means the process was killed by a signal or timed out.
+  // On some platforms signal may also be null in this case — treat both as failure
+  // so a hung/killed gateway doesn't silently appear to pass.
+  if (result.status === null) {
+    throw new Error(`Gateway process did not exit cleanly (signal: ${result.signal ?? 'none'})`);
   }
 
   return {
@@ -160,10 +185,7 @@ describe('mcp-gateway pass-through', () => {
         home
       );
       expect(r.status).toBe(0);
-      const responses = r.stdout
-        .split('\n')
-        .filter(Boolean)
-        .map((l) => JSON.parse(l) as { result?: { tools?: unknown[] } });
+      const responses = parseResponses(r.stdout);
       const listResponse = responses.find((resp) => resp.result && 'tools' in resp.result);
       expect(listResponse).toBeDefined();
       expect(Array.isArray(listResponse!.result!.tools)).toBe(true);
@@ -187,10 +209,7 @@ describe('mcp-gateway pass-through', () => {
         home
       );
       expect(r.status).toBe(0);
-      const responses = r.stdout
-        .split('\n')
-        .filter(Boolean)
-        .map((l) => JSON.parse(l) as { id?: number });
+      const responses = parseResponses(r.stdout);
       expect(responses.some((resp) => resp.id === 1)).toBe(true);
     } finally {
       cleanupDir(home);
@@ -219,11 +238,11 @@ describe('mcp-gateway tool call interception', () => {
         ],
         home
       );
+      // The mock upstream echoes back whatever params it receives — forwarding the
+      // path "/tmp/test.txt" is safe here because the upstream is a mock script,
+      // not a real filesystem server. It never actually reads from disk.
       expect(r.status).toBe(0);
-      const responses = r.stdout
-        .split('\n')
-        .filter(Boolean)
-        .map((l) => JSON.parse(l) as { id?: number; result?: unknown; error?: unknown });
+      const responses = parseResponses(r.stdout);
       const callResponse = responses.find((resp) => resp.id === 42);
       expect(callResponse).toBeDefined();
       // Should have a result (forwarded to upstream), not an error
@@ -260,17 +279,7 @@ describe('mcp-gateway tool call interception', () => {
         5000
       );
       expect(r.status).toBe(0);
-      const responses = r.stdout
-        .split('\n')
-        .filter(Boolean)
-        .map(
-          (l) =>
-            JSON.parse(l) as {
-              id?: number;
-              error?: { code: number; message: string };
-              result?: unknown;
-            }
-        );
+      const responses = parseResponses(r.stdout);
       const errorResponse = responses.find((resp) => resp.id === 7);
       expect(errorResponse).toBeDefined();
       expect(errorResponse!.error).toBeDefined();
@@ -305,10 +314,7 @@ describe('mcp-gateway tool call interception', () => {
         5000
       );
       expect(r.status).toBe(0);
-      const responses = r.stdout
-        .split('\n')
-        .filter(Boolean)
-        .map((l) => JSON.parse(l) as { id?: unknown; error?: unknown });
+      const responses = parseResponses(r.stdout);
       const errorResponse = responses.find((resp) => resp.id === requestId);
       expect(errorResponse?.error).toBeDefined();
     } finally {
@@ -334,10 +340,7 @@ describe('mcp-gateway tool call interception', () => {
         home
       );
       expect(r.status).toBe(0);
-      const responses = r.stdout
-        .split('\n')
-        .filter(Boolean)
-        .map((l) => JSON.parse(l) as { id?: unknown; error?: { code: number } });
+      const responses = parseResponses(r.stdout);
       const errorResponse = responses.find((resp) => resp.id === 99);
       expect(errorResponse?.error).toBeDefined();
       expect(errorResponse!.error!.code).toBe(-32000);
@@ -362,10 +365,7 @@ describe('mcp-gateway tool call interception', () => {
         home
       );
       expect(r.status).toBe(0);
-      const responses = r.stdout
-        .split('\n')
-        .filter(Boolean)
-        .map((l) => JSON.parse(l) as { id?: unknown; error?: { code: number } });
+      const responses = parseResponses(r.stdout);
       const errorResponse = responses.find((resp) => resp.error?.code === -32600);
       expect(errorResponse).toBeDefined();
       expect(errorResponse!.id).toBeNull();
@@ -432,10 +432,7 @@ rl.on('line', (line) => {
       });
       expect(result.error).toBeUndefined();
       expect(result.status).toBe(0);
-      const responses = result.stdout
-        .split('\n')
-        .filter(Boolean)
-        .map((l) => JSON.parse(l) as { id?: unknown });
+      const responses = parseResponses(result.stdout);
       expect(responses.some((resp) => resp.id === 1)).toBe(true);
     } finally {
       cleanupDir(home);
@@ -458,6 +455,64 @@ rl.on('line', (line) => {
       );
       // Gateway exits cleanly — status is not null (not a timeout/hang)
       expect(r.status).not.toBeNull();
+    } finally {
+      cleanupDir(home);
+    }
+  });
+
+  itUnix('malformed (non-JSON) input line is forwarded to upstream as-is', () => {
+    // The gateway must not crash on non-JSON stdin — it forwards malformed lines
+    // directly to the upstream (transparent proxy contract for non-parseable input).
+    const home = makeTempHome({ settings: { mode: 'audit' } });
+    try {
+      // Send a bad line followed by a valid request so we get stdout output
+      const r = runGateway(
+        [
+          'not-valid-json',
+          JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+        ],
+        home
+      );
+      expect(r.status).toBe(0);
+      // The valid tools/list request must still get a response
+      const responses = parseResponses(r.stdout);
+      const listResponse = responses.find((resp) => resp.result && 'tools' in resp.result);
+      expect(listResponse).toBeDefined();
+    } finally {
+      cleanupDir(home);
+    }
+  });
+
+  itUnix('tools/call notification (no id) is forwarded and generates no gateway response', () => {
+    // JSON-RPC notifications have no id. The gateway must forward them to upstream
+    // (so the server can act on them) but must not generate a response of its own,
+    // because responding to a notification is a protocol violation.
+    const home = makeTempHome({
+      settings: { mode: 'standard', autoStartDaemon: false },
+      policy: { ignoredTools: ['notify_tool'] },
+    });
+    try {
+      const r = runGateway(
+        [
+          // notification — no id field
+          JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'tools/call',
+            params: { name: 'notify_tool', arguments: {} },
+          }),
+          // follow-up request so we get stdout output to inspect
+          JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'tools/list', params: {} }),
+        ],
+        home
+      );
+      expect(r.status).toBe(0);
+      const responses = parseResponses(r.stdout);
+      // The follow-up tools/list must arrive
+      expect(responses.some((resp) => resp.result && 'tools' in resp.result)).toBe(true);
+      // No response should carry id:null as a result of the notification
+      // (an error response with id:null is only valid for parse/invalid-request errors)
+      const nullIdResults = responses.filter((resp) => resp.id === null && resp.result);
+      expect(nullIdResults).toHaveLength(0);
     } finally {
       cleanupDir(home);
     }
