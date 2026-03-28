@@ -20,6 +20,7 @@ import { spawn } from 'child_process';
 import { execa } from 'execa';
 import { authorizeHeadless } from '../auth/orchestrator';
 import { buildNegotiationMessage } from '../policy/negotiation';
+import { checkProvenance } from '../utils/provenance.js';
 
 function sanitize(value: string): string {
   // eslint-disable-next-line no-control-regex
@@ -101,6 +102,22 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
     const { stdout } = await execa('which', [cmd]);
     if (stdout) executable = stdout.trim();
   } catch {}
+
+  // Check binary provenance before spawning — warn if the upstream server binary
+  // is in a suspicious location (temp dir, world-writable).
+  // The gateway warns but does NOT exit: the upstream is human-configured (the user
+  // wrote the --upstream flag or .mcp.json), so we surface the concern without
+  // blocking a legitimate setup. The hard block (process.exit) applies to
+  // AI-initiated bash commands via the policy engine, not to configured servers.
+  const prov = checkProvenance(executable);
+  if (prov.trustLevel === 'suspect') {
+    console.error(
+      chalk.red(
+        `⚠️  Node9: Upstream MCP server binary is suspect — ${prov.reason} (${prov.resolvedPath})`
+      )
+    );
+    console.error(chalk.red('   Verify this binary is trusted before proceeding.'));
+  }
 
   // stderr only — stdout must stay clean for the JSON-RPC stdio protocol
   console.error(chalk.green(`🚀 Node9 MCP Gateway: Monitoring [${upstreamCommand}]`));

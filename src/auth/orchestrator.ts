@@ -206,7 +206,7 @@ async function _authorizeHeadlessCore(
 
   if (config.settings.mode === 'audit') {
     if (!isIgnoredTool(toolName)) {
-      const policyResult = await evaluatePolicy(toolName, args, meta?.agent);
+      const policyResult = await evaluatePolicy(toolName, args, meta?.agent, options?.cwd);
       if (policyResult.decision === 'review') {
         appendLocalAudit(toolName, args, 'allow', 'audit-mode', meta);
         // Must await — process.exit(0) follows immediately and kills any fire-and-forget fetch.

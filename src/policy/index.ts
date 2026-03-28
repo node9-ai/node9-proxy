@@ -9,6 +9,9 @@ import { parse } from 'sh-syntax';
 import { scanArgs, scanFilePath } from '../dlp';
 import { type SmartRule, type Config, getConfig, getActiveEnvironment } from '../config';
 import { getCompiledRegex } from '../utils/regex';
+import { checkProvenance } from '../utils/provenance.js';
+import { analyzePipeChain } from './pipe-chain.js';
+import { extractAllSshHosts } from './ssh-parser.js';
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
@@ -240,7 +243,8 @@ async function analyzeShellCommand(
 export async function evaluatePolicy(
   toolName: string,
   args?: unknown,
-  agent?: string
+  agent?: string,
+  cwd?: string
 ): Promise<{
   decision: 'allow' | 'review' | 'block';
   blockedByLabel?: string;
@@ -287,6 +291,63 @@ export async function evaluatePolicy(
     const INLINE_EXEC_PATTERN = /^(python3?|bash|sh|zsh|perl|ruby|node|php|lua)\s+(-c|-e|-eval)\s/i;
     if (INLINE_EXEC_PATTERN.test(shellCommand.trim())) {
       return { decision: 'review', blockedByLabel: 'Node9 Standard (Inline Execution)', tier: 3 };
+    }
+
+    // ── Pipe-chain exfiltration detection ────────────────────────────────────
+    const pipeAnalysis = analyzePipeChain(shellCommand);
+    if (pipeAnalysis.isPipeline) {
+      if (pipeAnalysis.risk === 'critical') {
+        return {
+          decision: 'block',
+          blockedByLabel: 'Node9: Pipe-Chain Exfiltration (critical)',
+          reason: `Sensitive file piped through obfuscator to network sink: ${pipeAnalysis.sourceFiles.join(', ')} → ${pipeAnalysis.sinkTargets.join(', ')}`,
+          tier: 3,
+        };
+      }
+      if (pipeAnalysis.risk === 'high') {
+        return {
+          decision: 'review',
+          blockedByLabel: 'Node9: Pipe-Chain Exfiltration (high)',
+          reason: `Sensitive file piped to network sink: ${pipeAnalysis.sourceFiles.join(', ')} → ${pipeAnalysis.sinkTargets.join(', ')}`,
+          tier: 3,
+        };
+      }
+    }
+
+    // ── SSH multi-hop host extraction ─────────────────────────────────────────
+    // Runs only for ssh/scp/rsync to extract all involved hosts (including jump hosts).
+    // Currently surfaced via tokens for dangerous-word scanning below;
+    // deep policy integration (trusted-host check) comes in v1.4.0.
+    const firstToken = analyzed.actions[0] ?? '';
+    if (['ssh', 'scp', 'rsync'].includes(firstToken)) {
+      const rawTokens = shellCommand.trim().split(/\s+/);
+      const sshHosts = extractAllSshHosts(rawTokens.slice(1));
+      allTokens.push(...sshHosts);
+    }
+
+    // ── Binary provenance check ───────────────────────────────────────────────
+    // Only check absolute paths (e.g. /tmp/curl). Bare command names (npm, curl)
+    // require PATH resolution which varies by environment (nvm, volta, CI toolcache)
+    // and causes false positives. The MCP gateway handles provenance for configured
+    // upstream servers separately.
+    if (firstToken && path.posix.isAbsolute(firstToken)) {
+      const prov = checkProvenance(firstToken, cwd);
+      if (prov.trustLevel === 'suspect') {
+        return {
+          decision: config.settings.mode === 'strict' ? 'block' : 'review',
+          blockedByLabel: 'Node9: Suspect Binary',
+          reason: `Binary "${firstToken}" resolved to ${prov.resolvedPath} — ${prov.reason}`,
+          tier: 3,
+        };
+      }
+      if (prov.trustLevel === 'unknown' && config.settings.mode === 'strict') {
+        return {
+          decision: 'review',
+          blockedByLabel: 'Node9: Unknown Binary (strict mode)',
+          reason: `Binary "${firstToken}" — ${prov.reason}`,
+          tier: 3,
+        };
+      }
     }
 
     // Strip DML keywords from tokens so user dangerousWords like "delete"/"update"
