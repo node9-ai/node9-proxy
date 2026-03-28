@@ -108,8 +108,8 @@ function makeTempHome(config: object): string {
 }
 
 function cleanupDir(dir: string) {
-  // Re-throw all errors — EBUSY/ENOTEMPTY on Linux means a child process is still
-  // holding the directory open, which is a real test isolation failure worth surfacing.
+  // force:true suppresses ENOENT (already gone — fine). Any other error (EBUSY,
+  // ENOTEMPTY, EPERM) propagates and surfaces as a test isolation failure.
   fs.rmSync(dir, { recursive: true, force: true });
 }
 

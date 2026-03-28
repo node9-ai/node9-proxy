@@ -26,6 +26,15 @@ function sanitize(value: string): string {
   return value.replace(/[\x00-\x1F\x7F]/g, '');
 }
 
+/**
+ * JSON-RPC error codes used by the gateway.
+ * -32600: Invalid Request (id type rejected before processing)
+ * -32000: Server Error — implementation-defined range (-32000 to -32099 per spec)
+ *         Used for security blocks (policy, DLP, auth engine failures).
+ */
+const RPC_INVALID_REQUEST = -32600;
+const RPC_SERVER_ERROR = -32000;
+
 /** Validate JSON-RPC id — must be string, number, or null (per spec). */
 function isValidId(id: unknown): id is string | number | null {
   return id === null || typeof id === 'string' || typeof id === 'number';
@@ -156,7 +165,10 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
         const errorResponse = {
           jsonrpc: '2.0',
           id: null,
-          error: { code: -32600, message: 'Invalid Request: id must be string, number, or null' },
+          error: {
+            code: RPC_INVALID_REQUEST,
+            message: 'Invalid Request: id must be string, number, or null',
+          },
         };
         process.stdout.write(JSON.stringify(errorResponse) + '\n');
         return;
@@ -211,7 +223,7 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
             jsonrpc: '2.0',
             id: message.id ?? null,
             error: {
-              code: -32000,
+              code: RPC_SERVER_ERROR,
               message: aiInstruction,
               data: { reason: result.reason, blockedBy: result.blockedByLabel },
             },
