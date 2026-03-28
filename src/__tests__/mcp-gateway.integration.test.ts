@@ -151,6 +151,7 @@ function runGateway(
   //   PYTHONPATH / PYTHONSTARTUP — Python module-path and startup-script injection
   //   PERL5LIB / PERL5OPT      — Perl module-path and option injection
   //   RUBYLIB / RUBYOPT        — Ruby load-path and option injection
+  //   JAVA_TOOL_OPTIONS / JDK_JAVA_OPTIONS — JVM agent injection for Java MCP servers
   // PATH is kept: all spawns use absolute paths (NODE, CLI) so the ambient
   // PATH cannot inject a different binary.
   const INJECTOR_VARS = new Set([
@@ -165,6 +166,8 @@ function runGateway(
     'PERL5OPT',
     'RUBYLIB',
     'RUBYOPT',
+    'JAVA_TOOL_OPTIONS',
+    'JDK_JAVA_OPTIONS',
   ]);
   const cleanEnv = Object.fromEntries(
     Object.entries(process.env).filter(([k]) => !k.startsWith('NODE9_') && !INJECTOR_VARS.has(k))

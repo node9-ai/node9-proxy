@@ -105,6 +105,7 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
   //   PYTHONPATH / PYTHONSTARTUP   — Python module-path and startup-script injection
   //   PERL5LIB / PERL5OPT          — Perl module-path and option injection
   //   RUBYLIB / RUBYOPT            — Ruby load-path and option injection
+  //   JAVA_TOOL_OPTIONS / JDK_JAVA_OPTIONS — JVM agent injection for Java MCP servers
   const UPSTREAM_INJECTOR_VARS = new Set([
     'NODE_OPTIONS',
     'NODE_PATH',
@@ -117,6 +118,8 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
     'PERL5OPT',
     'RUBYLIB',
     'RUBYOPT',
+    'JAVA_TOOL_OPTIONS',
+    'JDK_JAVA_OPTIONS',
   ]);
   const safeEnv = Object.fromEntries(
     Object.entries(process.env).filter(([k]) => !UPSTREAM_INJECTOR_VARS.has(k))
