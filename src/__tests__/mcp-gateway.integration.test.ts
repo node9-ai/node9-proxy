@@ -27,23 +27,30 @@ const NODE = process.execPath;
 // Skip on Windows — stdio piping behaviour differs and spawnSync input handling
 // for gateway processes is not reliable on Windows CI.
 // Log explicitly so CI doesn't silently pass with zero tests executed.
+// Skip the entire suite if the build hasn't been run yet — produces a clear skip
+// message rather than a confusing suite-level failure.
+const cliExists = fs.existsSync(CLI);
+if (!cliExists) {
+  console.warn(
+    `[mcp-gateway] All integration tests skipped — dist/cli.js not found. Run "npm run build" first.\nExpected: ${CLI}`
+  );
+}
+
+// Skip on Windows — stdio piping behaviour differs and spawnSync input handling
+// for gateway processes is not reliable on Windows CI.
+// Log explicitly so CI doesn't silently pass with zero tests executed.
 if (process.platform === 'win32') {
   console.warn(
     '[mcp-gateway] All integration tests skipped on Windows — stdio piping not supported'
   );
 }
-const itUnix = it.skipIf(process.platform === 'win32');
+const itUnix = it.skipIf(process.platform === 'win32' || !cliExists);
 
-// Temp dir for the mock upstream script — cleaned up in afterAll
 let mockScriptDir: string;
 let mockScriptPath: string;
 
 beforeAll(() => {
-  if (!fs.existsSync(CLI)) {
-    throw new Error(
-      `dist/cli.js not found. Run "npm run build" before running integration tests.\nExpected: ${CLI}`
-    );
-  }
+  if (!cliExists) return; // already warned above
 
   // Write the mock upstream MCP server to a file — avoids all shell-escaping issues.
   // The mock uses process.stdout.write (unbuffered in Node.js) so the gateway's
@@ -72,6 +79,7 @@ rl.on('line', (line) => {
     } else if (msg.id !== undefined && msg.id !== null) {
       // Only respond to requests (have an id). Notifications have no id and
       // must not get a response — writing one would be invalid JSON-RPC.
+      // Note: id===0 is a valid JSON-RPC id; it passes both checks correctly.
       process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} }) + '\\n');
     }
   } catch (err) {
@@ -148,8 +156,11 @@ function runGateway(
   //   PERL5LIB / PERL5OPT      — Perl module-path and option injection
   //   RUBYLIB / RUBYOPT        — Ruby load-path and option injection
   //   JAVA_TOOL_OPTIONS / JDK_JAVA_OPTIONS — JVM agent injection for Java MCP servers
+  //   XDG_CONFIG_HOME / XDG_DATA_HOME — XDG base dirs; some tools resolve config
+  //     through these instead of HOME; strip to prevent local config bleed-in
   // PATH is kept: all spawns use absolute paths (NODE, CLI) so the ambient
   // PATH cannot inject a different binary.
+  // TMPDIR is intentionally kept — os.tmpdir() uses it to create test temp dirs.
   const INJECTOR_VARS = new Set([
     'NODE_OPTIONS',
     'NODE_PATH',
@@ -164,6 +175,8 @@ function runGateway(
     'RUBYOPT',
     'JAVA_TOOL_OPTIONS',
     'JDK_JAVA_OPTIONS',
+    'XDG_CONFIG_HOME',
+    'XDG_DATA_HOME',
   ]);
   const cleanEnv = Object.fromEntries(
     Object.entries(process.env).filter(([k]) => !k.startsWith('NODE9_') && !INJECTOR_VARS.has(k))
