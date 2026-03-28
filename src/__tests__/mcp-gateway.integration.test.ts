@@ -102,13 +102,9 @@ function makeTempHome(config: object): string {
 }
 
 function cleanupDir(dir: string) {
-  try {
-    fs.rmSync(dir, { recursive: true, force: true });
-  } catch (e: unknown) {
-    if (!(e instanceof Error)) throw e;
-    const code = (e as NodeJS.ErrnoException).code;
-    if (code !== 'EBUSY' && code !== 'ENOTEMPTY') throw e;
-  }
+  // Re-throw all errors — EBUSY/ENOTEMPTY on Linux means a child process is still
+  // holding the directory open, which is a real test isolation failure worth surfacing.
+  fs.rmSync(dir, { recursive: true, force: true });
 }
 
 /** Shared shape for every JSON-RPC message on stdout. */
@@ -203,8 +199,12 @@ function runGateway(
   // so a hung/killed gateway doesn't silently appear to pass.
   // Include partial output to make timeout failures diagnosable.
   if (result.status === null) {
+    // signal===null with status===null means the process timed out (spawnSync timeout
+    // hit), not that it was killed by a signal. Distinguish the two for clear CI output.
+    const reason =
+      result.signal != null ? `killed by signal ${result.signal}` : `timed out (>${timeoutMs}ms)`;
     throw new Error(
-      `Gateway process did not exit cleanly (signal: ${result.signal ?? 'none'})\n` +
+      `Gateway process did not exit cleanly (${reason})\n` +
         `  stdout: ${result.stdout ? JSON.stringify(result.stdout.slice(0, 500)) : '(empty)'}\n` +
         `  stderr: ${result.stderr ? result.stderr.slice(0, 500) : '(empty)'}`
     );
@@ -354,6 +354,10 @@ describe('mcp-gateway tool call interception', () => {
       expect(errorResponse!.error).toBeDefined();
       expect(errorResponse!.error!.code).toBe(-32000);
       expect(errorResponse!.result).toBeUndefined();
+      // Upstream isolation: only one response for this id — if the gateway also
+      // forwarded the message, the mock upstream would echo back a second response
+      // with a `result`, which would appear as a duplicate id=7 on stdout.
+      expect(responses.filter((resp) => resp.id === 7)).toHaveLength(1);
     } finally {
       cleanupDir(home);
     }
