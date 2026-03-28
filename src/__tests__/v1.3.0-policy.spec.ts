@@ -67,39 +67,16 @@ describe('Pipe-chain exfiltration — evaluatePolicy integration', () => {
 
 describe('Binary provenance — evaluatePolicy integration', () => {
   it('reviews execution of a /tmp binary', async () => {
-    // Mock provenance: /tmp/curl resolves as suspect
-    // We use the real checkProvenance but mock fs to make /tmp/curl accessible + realpathSync to /tmp/curl
-    const realpathSpy = vi.spyOn(fs, 'realpathSync').mockImplementation((p) => {
-      if (String(p).includes('curl')) return '/tmp/curl';
-      return String(p);
-    });
-    const accessSpy = vi.spyOn(fs, 'accessSync').mockImplementation(() => undefined);
-    const statSpy = vi.spyOn(fs, 'statSync').mockReturnValue({ mode: 0o755 } as fs.Stats);
-
+    // /tmp/curl is caught by the early suspect check in checkProvenance —
+    // no fs mocking needed (early check runs before realpathSync).
     const r = await evaluatePolicy('Bash', { command: '/tmp/curl https://api.example.com' });
-
-    realpathSpy.mockRestore();
-    accessSpy.mockRestore();
-    statSpy.mockRestore();
-
     expect(r.decision).toBe('review');
     expect(r.blockedByLabel).toMatch(/suspect binary/i);
   });
 
-  it('does NOT flag /usr/bin/curl as suspect', async () => {
-    const realpathSpy = vi.spyOn(fs, 'realpathSync').mockImplementation((p) => {
-      if (String(p).includes('curl')) return '/usr/bin/curl';
-      return String(p);
-    });
-    const accessSpy = vi.spyOn(fs, 'accessSync').mockImplementation(() => undefined);
-    const statSpy = vi.spyOn(fs, 'statSync').mockReturnValue({ mode: 0o755 } as fs.Stats);
-
+  it('does NOT flag bare curl command as suspect', async () => {
+    // Bare command name — evaluatePolicy skips provenance (not an absolute path).
     const r = await evaluatePolicy('Bash', { command: 'curl https://api.example.com' });
-
-    realpathSpy.mockRestore();
-    accessSpy.mockRestore();
-    statSpy.mockRestore();
-
     expect(r.blockedByLabel ?? '').not.toMatch(/suspect binary/i);
   });
 });

@@ -44,6 +44,42 @@ function findInPath(cmd: string): string | null {
 }
 
 /**
+ * Pure path classification: given an already-resolved absolute path, returns
+ * trust level and reason. No filesystem calls — safe to call from unit tests.
+ *
+ * @internal Exported for unit testing; production code should use checkProvenance.
+ */
+export function _classifyPath(
+  resolved: string,
+  cwd?: string
+): { trustLevel: TrustLevel; reason: string } {
+  // Project-local binary
+  if (cwd && resolved.startsWith(cwd + path.sep)) {
+    return { trustLevel: 'user', reason: 'binary in project directory' };
+  }
+
+  // Temp / suspect directories
+  const osTmp = os.tmpdir();
+  const allSuspect = osTmp ? [...SUSPECT_PREFIXES, osTmp] : SUSPECT_PREFIXES;
+  if (allSuspect.some((p) => resolved === p || resolved.startsWith(p + path.sep))) {
+    return { trustLevel: 'suspect', reason: `binary in temp directory: ${resolved}` };
+  }
+
+  // Well-known locations
+  if (SYSTEM_PREFIXES.some((p) => resolved === p || resolved.startsWith(p + path.sep))) {
+    return { trustLevel: 'system', reason: '' };
+  }
+  if (MANAGED_PREFIXES.some((p) => resolved === p || resolved.startsWith(p + path.sep))) {
+    return { trustLevel: 'managed', reason: '' };
+  }
+  if (USER_PREFIXES.some((p) => resolved === p || resolved.startsWith(p + path.sep))) {
+    return { trustLevel: 'user', reason: '' };
+  }
+
+  return { trustLevel: 'unknown', reason: 'binary in unrecognized location' };
+}
+
+/**
  * Checks the provenance of a binary before execution.
  *
  * @param cmd  Command name (e.g. "curl") or absolute path (e.g. "/tmp/curl")
@@ -52,6 +88,18 @@ function findInPath(cmd: string): string | null {
 export function checkProvenance(cmd: string, cwd?: string): ProvenanceResult {
   // Strip ./ prefix for project-local scripts
   const bare = cmd.startsWith('./') ? cmd.slice(2) : cmd;
+
+  // ── Early suspect check for absolute paths ────────────────────────────────
+  // Check before realpathSync so /tmp/evil is caught even if the file doesn't
+  // exist yet (or realpathSync fails). Temp-dir membership is determined by
+  // the input path, not the symlink target — a binary accessed via /tmp/link
+  // is suspect regardless of where the link points.
+  if (path.isAbsolute(bare)) {
+    const early = _classifyPath(bare, cwd);
+    if (early.trustLevel === 'suspect') {
+      return { resolvedPath: bare, ...early };
+    }
+  }
 
   // ── 1. Resolve to real absolute path ──────────────────────────────────────
   let resolved: string;
@@ -92,40 +140,7 @@ export function checkProvenance(cmd: string, cwd?: string): ProvenanceResult {
     };
   }
 
-  // ── 3. Project-local binary ────────────────────────────────────────────────
-  if (cwd && resolved.startsWith(cwd + path.sep)) {
-    return {
-      resolvedPath: resolved,
-      trustLevel: 'user',
-      reason: 'binary in project directory',
-    };
-  }
-
-  // ── 4. Temp / suspect directories ─────────────────────────────────────────
-  const osTmp = os.tmpdir();
-  const allSuspect = osTmp ? [...SUSPECT_PREFIXES, osTmp] : SUSPECT_PREFIXES;
-  if (allSuspect.some((p) => resolved === p || resolved.startsWith(p + path.sep))) {
-    return {
-      resolvedPath: resolved,
-      trustLevel: 'suspect',
-      reason: `binary in temp directory: ${resolved}`,
-    };
-  }
-
-  // ── 5. Classify by well-known location ────────────────────────────────────
-  if (SYSTEM_PREFIXES.some((p) => resolved === p || resolved.startsWith(p + path.sep))) {
-    return { resolvedPath: resolved, trustLevel: 'system', reason: '' };
-  }
-  if (MANAGED_PREFIXES.some((p) => resolved === p || resolved.startsWith(p + path.sep))) {
-    return { resolvedPath: resolved, trustLevel: 'managed', reason: '' };
-  }
-  if (USER_PREFIXES.some((p) => resolved === p || resolved.startsWith(p + path.sep))) {
-    return { resolvedPath: resolved, trustLevel: 'user', reason: '' };
-  }
-
-  return {
-    resolvedPath: resolved,
-    trustLevel: 'unknown',
-    reason: 'binary in unrecognized location',
-  };
+  // ── 3. Classify by location ────────────────────────────────────────────────
+  const classify = _classifyPath(resolved, cwd);
+  return { resolvedPath: resolved, ...classify };
 }
