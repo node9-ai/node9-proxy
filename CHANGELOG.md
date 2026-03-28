@@ -6,9 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [Unreleased]
+## [Unreleased] → v1.2.0
 
 ### Added
+
+- **MCP Gateway (`node9 mcp-gateway`):** Universal stdio proxy that sits between any MCP client (Claude, Cursor, Windsurf) and any upstream MCP server. Every `tools/call` passes through the full Node9 authorization engine — DLP scanner, smart rules, and human approval — before reaching the upstream. Blocked calls receive a structured JSON-RPC `-32000` error with an AI-readable explanation so the agent can reason about the block and try an alternative. Approved calls are forwarded unchanged; the gateway is transparent to both client and server. Configure in `.mcp.json`:
+
+  ```json
+  {
+    "mcpServers": {
+      "filesystem-node9": {
+        "command": "node9",
+        "args": [
+          "mcp-gateway",
+          "--upstream",
+          "npx @modelcontextprotocol/server-filesystem /home/user"
+        ]
+      }
+    }
+  }
+  ```
+
+  Key security properties:
+  - **Fail-closed:** auth engine error → deny, never pass-through
+  - **Env injection stripping:** `NODE_OPTIONS`, `LD_PRELOAD`, `PYTHONPATH`, `PERL5LIB`, `RUBYLIB`, `JAVA_TOOL_OPTIONS`, `XDG_CONFIG_HOME`, and 7 more injection vectors are stripped from the upstream subprocess environment
+  - **Shell-free tokenizer:** `"node /path with spaces/server.js"` is split correctly without ever spawning a shell
+  - **MCP server namespacing:** `mcp__filesystem__write_file` → server name extracted and passed to the auth engine for per-server smart rules
+  - **id=0 valid, object/array ids rejected** with `-32600 Invalid Request`
+  - **Race condition guards:** `deferredStdinEnd` / `deferredExitCode` ensure responses are always flushed before process exit, even when the AI client disconnects mid-authorization
 
 - **Flight Recorder — Browser Dashboard:** The browser dashboard (`localhost:7391`) is now a true fixed-viewport 3-column layout. The left column streams every tool call in real-time — appearing immediately as `● PENDING` and resolving to `✓ ALLOW`, `✗ BLOCK`, or `🛡️ DLP` as decisions arrive. The feed scrolls internally and never causes the browser page to scroll. History from the current session is replayed to new browser tabs via an in-memory ring buffer (last 100 events).
 - **`node9 tail` — Terminal Flight Recorder:** New command that streams live agent activity directly to the terminal. Uses a spec-compliant SSE parser (handles TCP fragmentation), filters history floods on connect, and shows a live `● …` pending indicator for slow operations (bash, SQL, agent calls). Auto-starts the daemon if it isn't running. Supports `--history` to replay recent events on connect. Output is pipeable (`node9 tail | grep DLP`).
