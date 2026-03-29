@@ -86,8 +86,19 @@ export function startDaemon(): void {
   }
   resetIdleTimer(); // Start the clock
 
+  // Allowed Host header values — DNS rebinding guard.
+  // A malicious website that DNS-rebinds attacker.com → 127.0.0.1 would send
+  // Host: attacker.com, which won't match. Only 127.0.0.1 and localhost are valid.
+  const allowedHosts = new Set([`127.0.0.1:${DAEMON_PORT}`, `localhost:${DAEMON_PORT}`]);
+
   const server = http.createServer(async (req, res) => {
-    const reqUrl = new URL(req.url || '/', `http://${req.headers.host}`);
+    const host = req.headers.host ?? '';
+    if (!allowedHosts.has(host)) {
+      res.writeHead(421, { 'Content-Type': 'text/plain' });
+      return res.end('Misdirected Request');
+    }
+
+    const reqUrl = new URL(req.url || '/', `http://${host}`);
     const { pathname } = reqUrl;
 
     if (req.method === 'GET' && pathname === '/') {

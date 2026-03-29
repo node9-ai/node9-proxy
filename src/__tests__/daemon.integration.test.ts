@@ -762,3 +762,71 @@ describe('daemon POST /suggestions/:id/apply — path traversal guard', () => {
     expect(res.status).toBe(404); // guard passed; suggestion not found
   });
 });
+
+// ── DNS rebinding guard ────────────────────────────────────────────────────────
+// Regression: daemon must reject requests with a Host header that doesn't match
+// 127.0.0.1:PORT or localhost:PORT. A DNS-rebinding attack sets Host: attacker.com
+// (which resolves to 127.0.0.1) — without this guard the attacker could read the
+// CSRF token from /events and make authenticated requests.
+
+describe('daemon DNS rebinding guard', () => {
+  let tmpHome: string;
+  let daemonProc: ChildProcess;
+  let portWasFree = false;
+
+  beforeAll(async () => {
+    portWasFree = await isPortFree(DAEMON_PORT);
+    if (!portWasFree) return;
+
+    tmpHome = makeTempHome();
+    daemonProc = spawn(process.execPath, [CLI, 'daemon', 'start'], {
+      env: makeEnv(tmpHome),
+      stdio: 'pipe',
+    });
+
+    const ready = await waitForDaemon(6000);
+    if (!ready) {
+      daemonProc.kill();
+      throw new Error('Daemon did not start within 6s');
+    }
+  }, 15_000);
+
+  afterAll(() => {
+    if (!portWasFree) return;
+    spawnSync(process.execPath, [CLI, 'daemon', 'stop'], {
+      env: makeEnv(tmpHome),
+      timeout: 3000,
+    });
+    if (daemonProc?.exitCode === null) daemonProc.kill();
+    if (tmpHome) cleanupDir(tmpHome);
+  });
+
+  it('rejects requests with a spoofed Host header (421)', async ({ skip }) => {
+    if (!portWasFree) skip();
+
+    // Simulate what a DNS-rebinding attack sends: TCP connection to 127.0.0.1
+    // but Host header set to the attacker's domain.
+    const res = await fetch(`http://127.0.0.1:${DAEMON_PORT}/settings`, {
+      headers: { Host: 'attacker.com' },
+    });
+    expect(res.status).toBe(421);
+  });
+
+  it('accepts requests with Host: 127.0.0.1:PORT (200)', async ({ skip }) => {
+    if (!portWasFree) skip();
+
+    const res = await fetch(`http://127.0.0.1:${DAEMON_PORT}/settings`, {
+      headers: { Host: `127.0.0.1:${DAEMON_PORT}` },
+    });
+    expect(res.ok).toBe(true);
+  });
+
+  it('accepts requests with Host: localhost:PORT (200)', async ({ skip }) => {
+    if (!portWasFree) skip();
+
+    const res = await fetch(`http://localhost:${DAEMON_PORT}/settings`, {
+      headers: { Host: `localhost:${DAEMON_PORT}` },
+    });
+    expect(res.ok).toBe(true);
+  });
+});
