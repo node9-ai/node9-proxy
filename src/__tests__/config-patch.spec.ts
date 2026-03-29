@@ -151,8 +151,13 @@ describe('patchConfig — error handling', () => {
       patchConfig(configPath, { type: 'ignoredTool', toolName: 'Bash' });
       const tmpCall = writeSpy.mock.calls.find(([p]) => String(p).endsWith('.node9-tmp'));
       if (!tmpCall) throw new Error('Expected writeFileSync to be called with a .node9-tmp path');
-      const opts = tmpCall[2] as { mode?: number };
-      expect(opts?.mode).toBe(0o600);
+      const opts = tmpCall[2];
+      // Guard against a string encoding arg — if the call signature changes to pass
+      // e.g. 'utf8', opts would be a string and mode would be undefined, silently
+      // letting the test pass. The typeof check makes that failure explicit.
+      if (typeof opts !== 'object' || opts === null)
+        throw new Error(`Expected options object, got ${typeof opts}`);
+      expect((opts as { mode?: number }).mode).toBe(0o600);
     } finally {
       writeSpy.mockRestore();
     }
