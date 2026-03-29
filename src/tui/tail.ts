@@ -7,6 +7,7 @@ import path from 'path';
 import readline from 'readline';
 import { spawn, execSync } from 'child_process';
 import { DAEMON_PORT } from '../daemon';
+import { getInternalToken } from '../auth/daemon';
 import { getConfig } from '../core';
 
 const PID_FILE = path.join(os.homedir(), '.node9', 'daemon.pid');
@@ -490,7 +491,11 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
         execSync(`cmd /c start "" "${dashboardUrl}"`, { stdio: 'ignore' });
       else execSync(`xdg-open "${dashboardUrl}"`, { stdio: 'ignore' });
       // Notify the daemon so it won't open a duplicate tab on the first approval.
-      fetch(`http://127.0.0.1:${port}/browser-opened`, { method: 'POST' }).catch(() => {});
+      const intToken = getInternalToken();
+      fetch(`http://127.0.0.1:${port}/browser-opened`, {
+        method: 'POST',
+        headers: intToken ? { 'X-Node9-Internal': intToken } : {},
+      }).catch(() => {});
     }
   } catch {
     // Browser open failed — URL is printed in the banner below so the user

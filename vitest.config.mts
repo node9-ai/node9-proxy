@@ -5,6 +5,11 @@ export default defineConfig({
     environment: 'node',
     env: { NODE9_TESTING: '1' },
     clearMocks: true,
+    // Integration tests spawn child processes via spawnSync (runCheck / runDoctor).
+    // On slow CI runners those can take 10-15s. The default 5s vitest timeout fires
+    // before the child process completes, causing false timeouts. 30s is generous
+    // enough for any CI machine while still catching genuinely hanging tests.
+    testTimeout: 30000,
   },
   coverage: {
     provider: 'v8',

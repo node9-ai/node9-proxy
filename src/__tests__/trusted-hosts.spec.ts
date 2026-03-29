@@ -92,6 +92,24 @@ describe('isTrustedHost', () => {
     expect(isTrustedHost('logs.io')).toBe(false);
   });
 
+  it('wildcard does NOT match attacker suffix (evil.logs.io.attacker.com)', () => {
+    // Ensures the suffix check uses a leading dot so "logs.io.attacker.com"
+    // does not match "*.logs.io" via naive endsWith("logs.io").
+    expect(isTrustedHost('evil.logs.io.attacker.com')).toBe(false);
+  });
+
+  it('wildcard match is case-insensitive', () => {
+    expect(isTrustedHost('APP.LOGS.IO')).toBe(true);
+  });
+
+  it('exact match is case-insensitive', () => {
+    expect(isTrustedHost('API.MyCompany.COM')).toBe(true);
+  });
+
+  it('wildcard does NOT match bare domain even with trailing dot', () => {
+    expect(isTrustedHost('logs.io.')).toBe(false);
+  });
+
   it('returns false when trusted-hosts.json is missing', () => {
     _resetTrustedHostsCache();
     vi.spyOn(fs, 'readFileSync').mockImplementation(() => {

@@ -163,7 +163,10 @@ export function startDaemon(): void {
 
     // Tail notifies the daemon that it already opened the browser so the daemon
     // won't open a duplicate tab on the first /check request.
+    // Uses the internal token (from daemon.pid) so only node9 CLI tools can call this —
+    // not arbitrary local processes that don't have access to the PID file.
     if (req.method === 'POST' && pathname === '/browser-opened') {
+      if (req.headers['x-node9-internal'] !== internalToken) return res.writeHead(403).end();
       browserOpened = true;
       res.writeHead(200).end();
       return;
@@ -690,6 +693,11 @@ export function startDaemon(): void {
 
         patchConfig(configPath, patch);
         _resetConfigCache();
+
+        // Reset insight counter for this tool — the rule now handles it automatically,
+        // so re-nudging immediately would cause a redundant suggestion on the next call.
+        insightCounts.delete(suggestion.toolName);
+        saveInsightCounts();
 
         suggestion.status = 'applied';
         broadcast('suggestion:resolved', { id, status: 'applied' });
