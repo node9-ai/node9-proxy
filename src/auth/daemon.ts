@@ -171,6 +171,13 @@ import type { TaintRecord } from '../daemon/taint-store.js';
 export interface TaintCheckResult {
   tainted: boolean;
   record?: TaintRecord;
+  /**
+   * True when the taint daemon was unreachable and the check could not be
+   * completed. The caller should treat this as a soft warning: files may be
+   * tainted but the status is unknown. Distinct from tainted:false, which
+   * means the daemon was reachable and confirmed the paths are clean.
+   */
+  daemonUnavailable?: boolean;
 }
 
 /**
@@ -182,7 +189,8 @@ export interface TaintCheckResult {
  * visible without being fatal.
  */
 export async function checkTaint(paths: string[]): Promise<TaintCheckResult> {
-  if (paths.length === 0 || !isDaemonRunning()) return { tainted: false };
+  if (paths.length === 0) return { tainted: false };
+  if (!isDaemonRunning()) return { tainted: false, daemonUnavailable: true };
   const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
   try {
     const res = await fetch(`${base}/taint/check`, {
@@ -206,7 +214,7 @@ export async function checkTaint(paths: string[]): Promise<TaintCheckResult> {
     } catch {
       /* audit write failure is non-fatal */
     }
-    return { tainted: false };
+    return { tainted: false, daemonUnavailable: true };
   }
 }
 

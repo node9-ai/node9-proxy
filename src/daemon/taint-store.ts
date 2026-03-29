@@ -58,7 +58,10 @@ export class TaintStore {
     if (!taintRecord) return;
     const remainingMs = taintRecord.expiresAt - Date.now();
     if (remainingMs > 0) {
-      this.taint(destPath, `propagated:${taintRecord.source}`, remainingMs);
+      // Strip any existing "propagated:" prefix so chained copies don't
+      // produce "propagated:propagated:..." — one level of prefix is enough.
+      const baseSource = taintRecord.source.replace(/^(propagated:)+/, '');
+      this.taint(destPath, `propagated:${baseSource}`, remainingMs);
     }
     if (clearSource) {
       this.records.delete(this._resolve(sourcePath));

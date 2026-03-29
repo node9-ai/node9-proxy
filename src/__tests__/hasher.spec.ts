@@ -104,12 +104,19 @@ describe('hashArgs', () => {
     const h2 = hashArgs(['c', 'b', 'a']);
     expect(h1).not.toBe(h2);
   });
+
+  it('string "1" and number 1 produce different hashes — JSON type is preserved', () => {
+    // canonicalise must not collapse { a: "1" } and { a: 1 } to the same hash.
+    // Both serialise differently in JSON so this should hold trivially, but
+    // explicitly asserting it prevents regressions if serialisation ever changes.
+    expect(hashArgs({ a: '1' })).not.toBe(hashArgs({ a: 1 }));
+  });
 });
 
-describe('auditHashArgs integration: appendLocalAudit output', () => {
-  it('audit log entry has argsHash instead of args when flag is set', async () => {
-    // Directly verify the hasher contract used by appendLocalAudit:
-    // when auditHashArgsEnabled=true, the log entry stores argsHash (not args).
+describe('hashArgs contract: used by appendLocalAudit when auditHashArgs is enabled', () => {
+  it('hash is a 32-char hex string that does not contain the original secret content', async () => {
+    // When auditHashArgsEnabled=true, appendLocalAudit stores argsHash (not args).
+    // Verify the hash contract: 32 hex chars, no plaintext leakage.
     const args = { file_path: '/tmp/secret.env', content: 'API_KEY=supersecret' };
     const hash = hashArgs(args);
     expect(hash).toMatch(/^[0-9a-f]{32}$/);

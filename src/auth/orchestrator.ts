@@ -254,6 +254,12 @@ async function _authorizeHeadlessCore(
       if (taintResult.tainted && taintResult.record) {
         const { path: taintedPath, source: taintSource } = taintResult.record;
         taintWarning = `⚠️ ${taintedPath} was flagged by ${taintSource} — this file may contain sensitive data`;
+      } else if (taintResult.daemonUnavailable) {
+        // Taint service is down — cannot confirm files are clean.
+        // Treat as a soft taint: the user sees a warning and must explicitly
+        // approve. This prevents a daemon crash from silently unblocking
+        // exfiltration checks.
+        taintWarning = `⚠️ Taint service unavailable — cannot verify if ${filePaths.join(', ')} is clean`;
       }
     }
   }

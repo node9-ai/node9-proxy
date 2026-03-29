@@ -101,7 +101,15 @@ async function postTaintCheck(paths: string[]): Promise<{ tainted: boolean; reco
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ paths }),
   });
-  return res.json() as Promise<{ tainted: boolean; record?: unknown }>;
+  const json: unknown = await res.json();
+  if (
+    typeof json !== 'object' ||
+    json === null ||
+    typeof (json as Record<string, unknown>).tainted !== 'boolean'
+  ) {
+    throw new Error(`Unexpected taint/check response shape: ${JSON.stringify(json)}`);
+  }
+  return json as { tainted: boolean; record?: unknown };
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -110,6 +118,9 @@ describe('Taint daemon endpoints', () => {
   // Fresh store per group — prevents taint records from bleeding into later groups.
   // The server handler captures `store` by variable reference, so reassignment
   // here is picked up immediately by the running server.
+  // Assumption: Vitest runs describe blocks within a file sequentially (default
+  // behavior). If file-level parallelism is ever enabled, this store reset
+  // would need to move to a beforeEach with per-test path namespacing instead.
   beforeAll(() => {
     store = new TaintStore();
   });

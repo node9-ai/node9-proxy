@@ -117,6 +117,22 @@ describe('TaintStore — propagate', () => {
     expect(store.check('/tmp/src.txt')).toBeNull();
     expect(store.check('/tmp/dest.txt')).not.toBeNull();
   });
+
+  it('chained propagation does not accumulate "propagated:" prefixes', () => {
+    store.taint('/tmp/a.txt', 'DLP:APIKey');
+    store.propagate('/tmp/a.txt', '/tmp/b.txt'); // source: "propagated:DLP:APIKey"
+    store.propagate('/tmp/b.txt', '/tmp/c.txt'); // must NOT be "propagated:propagated:..."
+    const record = store.check('/tmp/c.txt');
+    expect(record).not.toBeNull();
+    expect(record!.source).toBe('propagated:DLP:APIKey');
+  });
+
+  it('path traversal inputs are normalized — ../../etc/passwd resolves correctly', () => {
+    store.taint('/tmp/uploads/../../etc/passwd', 'DLP:Test');
+    // Both the traversal form and the canonical form must resolve to the same record
+    expect(store.check('/etc/passwd')).not.toBeNull();
+    expect(store.check('/tmp/uploads/../../etc/passwd')).not.toBeNull();
+  });
 });
 
 describe('TaintStore — propagate TTL inheritance', () => {
