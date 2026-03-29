@@ -140,6 +140,22 @@ describe('isTrustedHost', () => {
     expect(isTrustedHost('api.mycompany.com')).toBe(false);
   });
 
+  it('returns false for all hosts when file is deleted while cache is warm', () => {
+    // Cache is warm with api.mycompany.com (mtime is a real nonzero value in the spy).
+    // When the file disappears, statSync throws → getFileMtime() returns 0.
+    // 0 !== real-mtime → cache miss → readTrustedHosts() catches ENOENT → returns [].
+    // This confirms the fail-safe: a deleted file is never confused with a cache hit.
+    expect(isTrustedHost('api.mycompany.com')).toBe(true); // warm the cache
+
+    _resetTrustedHostsCache();
+    vi.spyOn(fs, 'readFileSync').mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' });
+    });
+
+    expect(isTrustedHost('api.mycompany.com')).toBe(false);
+    expect(isTrustedHost('app.logs.io')).toBe(false);
+  });
+
   it('re-reads file when mtime changes (cross-process cache invalidation)', () => {
     // First call — cache is warm with api.mycompany.com
     expect(isTrustedHost('api.mycompany.com')).toBe(true);

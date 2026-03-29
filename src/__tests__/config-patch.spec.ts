@@ -139,10 +139,13 @@ describe('patchConfig — error handling', () => {
     // of 0o022 would also leave 0o600 intact — yet we want to verify the mode arg
     // is actually passed, not inferred from a lucky umask.
     //
-    // NOTE: process.umask() is process-global. Vitest runs tests within a file
-    // serially (not concurrently), so the try/finally restore is safe here. If
-    // this suite is ever run with --pool=forks in a shared worker, this test
-    // must be moved to its own isolated file or annotated with @vitest-isolate.
+    // NOTE: process.umask() is process-global and affects all threads sharing the
+    // same OS process. Vitest's default --pool=threads runs each test FILE in its
+    // own worker_threads worker, but worker threads share the host process umask.
+    // Tests within a single file run serially, so the try/finally restore is safe
+    // against other tests in this file. The risk window (µs duration of patchConfig)
+    // is tiny, but if strict isolation is ever required, run with --pool=forks or
+    // move this test to a dedicated file so no other file shares the same worker.
     const prevUmask = process.umask(0o000);
     try {
       patchConfig(configPath, { type: 'ignoredTool', toolName: 'Bash' });

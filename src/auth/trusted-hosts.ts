@@ -53,7 +53,12 @@ function getFileMtime(): number {
 function getCachedHosts(): TrustedHostEntry[] {
   const now = Date.now();
   if (_cache && now < _cache.expiry) {
-    // Fast path: TTL not expired — but still check mtime for cross-process writes
+    // Fast path: TTL not expired — but still check mtime for cross-process writes.
+    // getFileMtime() returns 0 if the file doesn't exist (stat throws ENOENT).
+    // If the file was deleted after the cache was populated, _cache.mtime is a
+    // real nonzero value and mtime (0) won't match it — cache miss triggers a
+    // re-read, which returns [] (fail-safe, no stale trust). If the file never
+    // existed, both mtime and _cache.mtime are 0 — cache hit correctly returns [].
     const mtime = getFileMtime();
     if (mtime === _cache.mtime) return _cache.hosts;
   }
