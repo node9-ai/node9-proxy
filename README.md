@@ -1,5 +1,7 @@
 # 🛡️ Node9 Proxy
 
+[![SafeSkill 53/100](https://img.shields.io/badge/SafeSkill-53%2F100_Use%20with%20Caution-orange)](https://safeskill.dev/scan/node9-ai-node9-proxy)
+
 ### The "Sudo" Command for AI Agents.
 
 [![NPM Version](https://img.shields.io/npm/v/@node9/proxy.svg)](https://www.npmjs.com/package/@node9/proxy)
