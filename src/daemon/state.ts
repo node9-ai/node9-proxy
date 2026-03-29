@@ -11,8 +11,10 @@ import { randomUUID } from 'crypto';
 import { RiskMetadata } from '../context-sniper';
 import { DAEMON_PORT, DAEMON_HOST } from '../auth/daemon';
 import { SuggestionTracker, type Suggestion } from './suggestion-tracker.js';
+import { TaintStore } from './taint-store.js';
 
 export type { Suggestion };
+export { TaintStore };
 
 export { DAEMON_PORT, DAEMON_HOST };
 
@@ -63,6 +65,7 @@ export const pending = new Map<string, PendingEntry>();
 export const sseClients = new Set<SseClient>();
 export const suggestionTracker = new SuggestionTracker(3);
 export const suggestions = new Map<string, Suggestion>();
+export const taintStore = new TaintStore();
 /** Cumulative per-tool allow count for the 💡 insight line.
  *  Unlike suggestionTracker, this never resets after the suggestion threshold —
  *  only on deny. Used by all approval channels (terminal, browser, native popup).

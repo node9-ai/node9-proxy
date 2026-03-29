@@ -49,6 +49,7 @@ import {
   CREDENTIALS_FILE,
   suggestionTracker,
   suggestions,
+  taintStore,
   insightCounts,
   loadInsightCounts,
   saveInsightCounts,
@@ -762,6 +763,56 @@ export function startDaemon(): void {
         return res.end(JSON.stringify({ ok: true }));
       } catch {
         res.writeHead(400).end();
+      }
+    }
+
+    // ── Taint — record a tainted file path ───────────────────────────────────
+    // Called by the hook process after a DLP write-block to persist the taint
+    // in the long-running daemon so later tool calls can check it.
+    // No CSRF token required — callers are local hook subprocesses, not browsers.
+    if (req.method === 'POST' && pathname === '/taint') {
+      try {
+        const body = JSON.parse(await readBody(req)) as {
+          path?: unknown;
+          source?: unknown;
+          ttlMs?: unknown;
+        };
+        if (typeof body.path !== 'string' || typeof body.source !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'path and source are required strings' }));
+        }
+        const ttlMs = typeof body.ttlMs === 'number' ? body.ttlMs : undefined;
+        taintStore.taint(body.path, body.source, ttlMs);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ ok: true }));
+      } catch {
+        res.writeHead(400).end();
+        return;
+      }
+    }
+
+    // ── Taint check — query whether any paths are tainted ────────────────────
+    // Called by the hook process before approving a network/upload operation.
+    if (req.method === 'POST' && pathname === '/taint/check') {
+      try {
+        const body = JSON.parse(await readBody(req)) as { paths?: unknown };
+        if (!Array.isArray(body.paths)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'paths must be an array' }));
+        }
+        for (const p of body.paths) {
+          if (typeof p !== 'string') continue;
+          const record = taintStore.check(p);
+          if (record) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ tainted: true, record }));
+          }
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ tainted: false }));
+      } catch {
+        res.writeHead(400).end();
+        return;
       }
     }
 

@@ -23,6 +23,8 @@ import {
   waitForDaemonDecision,
   notifyDaemonViewer,
   resolveViaDaemon,
+  notifyTaint,
+  checkTaint,
 } from './daemon';
 import { auditLocalAllow, initNode9SaaS, pollNode9SaaS, resolveNode9SaaS } from './cloud';
 
@@ -50,6 +52,74 @@ export interface AuthResult {
     | 'audit';
   /** Structured decision source from the winning racer — used for cloud audit reporting. */
   decisionSource?: 'terminal' | 'browser' | 'native' | 'cloud' | 'timeout' | 'local';
+}
+
+// ── Taint helpers ────────────────────────────────────────────────────────────
+
+const WRITE_TOOLS = new Set([
+  'write',
+  'write_file',
+  'create_file',
+  'edit',
+  'multiedit',
+  'str_replace_based_edit_tool',
+  'replace',
+  'notebook_edit',
+  'notebookedit',
+]);
+
+function isWriteTool(toolName: string): boolean {
+  const t = toolName.toLowerCase().replace(/[^a-z_]/g, '_');
+  return WRITE_TOOLS.has(t);
+}
+
+/**
+ * Extract file paths that a tool might be reading from or uploading.
+ * Used to check taint before approving network/shell operations.
+ */
+function extractFilePaths(toolName: string, args: unknown): string[] {
+  const paths: string[] = [];
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return paths;
+  const a = args as Record<string, unknown>;
+
+  // Structured file path fields
+  for (const key of ['file_path', 'path', 'filename', 'source', 'src', 'input']) {
+    if (typeof a[key] === 'string' && a[key]) paths.push(a[key] as string);
+  }
+
+  // Shell command — extract file references from curl -T, scp, rsync, nc etc.
+  const cmd = typeof a.command === 'string' ? a.command : typeof a.cmd === 'string' ? a.cmd : '';
+  if (cmd) {
+    // curl -T <file> or --data-binary @<file> or --upload-file <file>
+    for (const m of cmd.matchAll(/(?:-T|--upload-file|--data(?:-binary)?)\s+@?(\S+)/g)) {
+      paths.push(m[1]);
+    }
+    // scp <file> user@host or rsync <file>
+    for (const m of cmd.matchAll(/\b(?:scp|rsync)\s+(?:-\S+\s+)*(\S+)\s+\S+@/g)) {
+      paths.push(m[1]);
+    }
+    // nc / ncat with input redirect: nc host port < file
+    for (const m of cmd.matchAll(/<\s*(\S+)/g)) {
+      paths.push(m[1]);
+    }
+  }
+
+  return paths.filter(Boolean);
+}
+
+/**
+ * Returns true if this is a shell/network tool that could exfiltrate a file.
+ * Used to decide whether to run a taint check.
+ */
+function isNetworkTool(toolName: string, args: unknown): boolean {
+  const t = toolName.toLowerCase();
+  if (t === 'bash' || t === 'shell' || t === 'run_shell_command' || t === 'terminal.execute') {
+    const a = args as Record<string, unknown> | null;
+    const cmd =
+      typeof a?.command === 'string' ? a.command : typeof a?.cmd === 'string' ? a.cmd : '';
+    return /\b(curl|wget|scp|rsync|nc|ncat|netcat|ssh)\b/.test(cmd);
+  }
+  return false;
 }
 
 // ── Flight Recorder — fire-and-forget socket notify ──────────────────────────
@@ -113,7 +183,9 @@ export async function authorizeHeadless(
           ? 'allow'
           : result.blockedByLabel?.includes('DLP')
             ? 'dlp'
-            : 'block',
+            : result.blockedByLabel?.includes('Taint')
+              ? 'taint'
+              : 'block',
         label: result.blockedByLabel,
       });
     }
@@ -134,6 +206,7 @@ async function _authorizeHeadlessCore(
 
   const creds = getCredentials();
   const config = getConfig(options?.cwd);
+  const hashAuditArgs = config.settings.auditHashArgs === true;
 
   // 1. Check if we are in any kind of test environment (Vitest, CI, or E2E)
   const isTestEnv = !!(
@@ -158,7 +231,7 @@ async function _authorizeHeadlessCore(
   }
 
   if (config.settings.enableHookLogDebug && !isTestEnv) {
-    appendHookDebug(toolName, args, meta);
+    appendHookDebug(toolName, args, meta, hashAuditArgs);
   }
 
   const isManual = meta?.agent === 'Terminal';
@@ -167,6 +240,23 @@ async function _authorizeHeadlessCore(
   let policyMatchedField: string | undefined;
   let policyMatchedWord: string | undefined;
   let riskMetadata: RiskMetadata | undefined;
+
+  // ── TAINT CHECK ───────────────────────────────────────────────────────────
+  // Before DLP: if this is a network/upload operation touching a previously
+  // tainted file, surface a warning through the race engine — the user decides.
+  // Taint is heuristic (a file *may* still be sensitive); hard blocks are
+  // reserved for team policy shields.
+  let taintWarning: string | null = null;
+  if (isNetworkTool(toolName, args)) {
+    const filePaths = extractFilePaths(toolName, args);
+    if (filePaths.length > 0) {
+      const taintResult = await checkTaint(filePaths);
+      if (taintResult.tainted && taintResult.record) {
+        const { path: taintedPath, source: taintSource } = taintResult.record;
+        taintWarning = `⚠️ ${taintedPath} was flagged by ${taintSource} — this file may contain sensitive data`;
+      }
+    }
+  }
 
   // ── DLP CONTENT SCANNER ───────────────────────────────────────────────────
   // Runs before ignored-tool fast path and audit mode so that a leaked
@@ -188,7 +278,12 @@ async function _authorizeHeadlessCore(
         `🚨 DATA LOSS PREVENTION: ${dlpMatch.patternName} detected in ` +
         `field "${dlpMatch.fieldPath}" (${dlpMatch.redactedSample})`;
       if (dlpMatch.severity === 'block') {
-        if (!isManual) appendLocalAudit(toolName, args, 'deny', 'dlp-block', meta);
+        // Always hash args on DLP blocks — the secret must never appear in the audit log
+        if (!isManual) appendLocalAudit(toolName, args, 'deny', 'dlp-block', meta, true);
+        // Taint the destination file so future uploads of it are also blocked.
+        if (isWriteTool(toolName) && filePath) {
+          await notifyTaint(filePath, `DLP:${dlpMatch.patternName}`);
+        }
         return {
           approved: false,
           reason: dlpReason,
@@ -199,7 +294,8 @@ async function _authorizeHeadlessCore(
       // severity === 'review': fall through to the race engine with a DLP label.
       // Write an audit entry now so the DLP flag is traceable even if the race
       // engine later approves the call without recording why it was intercepted.
-      if (!isManual) appendLocalAudit(toolName, args, 'allow', 'dlp-review-flagged', meta);
+      if (!isManual)
+        appendLocalAudit(toolName, args, 'allow', 'dlp-review-flagged', meta, hashAuditArgs);
       explainableLabel = '🚨 Node9 DLP (Credential Review)';
     }
   }
@@ -208,7 +304,7 @@ async function _authorizeHeadlessCore(
     if (!isIgnoredTool(toolName)) {
       const policyResult = await evaluatePolicy(toolName, args, meta?.agent, options?.cwd);
       if (policyResult.decision === 'review') {
-        appendLocalAudit(toolName, args, 'allow', 'audit-mode', meta);
+        appendLocalAudit(toolName, args, 'allow', 'audit-mode', meta, hashAuditArgs);
         // Must await — process.exit(0) follows immediately and kills any fire-and-forget fetch.
         // Only send to SaaS when cloud is enabled — respects privacy mode (cloud: false).
         if (approvers.cloud && creds?.apiKey) {
@@ -222,24 +318,27 @@ async function _authorizeHeadlessCore(
   }
 
   // Fast Paths (Ignore, Trust, Policy Allow)
-  if (!isIgnoredTool(toolName)) {
+  // Bypassed entirely when a taint warning is active — taint overrides trust
+  // sessions and policy allows so the user always gets a chance to review.
+  if (!taintWarning && !isIgnoredTool(toolName)) {
     if (getActiveTrustSession(toolName)) {
       if (approvers.cloud && creds?.apiKey)
         await auditLocalAllow(toolName, args, 'trust', creds, meta);
-      if (!isManual) appendLocalAudit(toolName, args, 'allow', 'trust', meta);
+      if (!isManual) appendLocalAudit(toolName, args, 'allow', 'trust', meta, hashAuditArgs);
       return { approved: true, checkedBy: 'trust' };
     }
     const policyResult = await evaluatePolicy(toolName, args, meta?.agent);
     if (policyResult.decision === 'allow') {
       if (approvers.cloud && creds?.apiKey)
         auditLocalAllow(toolName, args, 'local-policy', creds, meta);
-      if (!isManual) appendLocalAudit(toolName, args, 'allow', 'local-policy', meta);
+      if (!isManual) appendLocalAudit(toolName, args, 'allow', 'local-policy', meta, hashAuditArgs);
       return { approved: true, checkedBy: 'local-policy' };
     }
 
     // Hard block from smart rules — skip the race engine entirely
     if (policyResult.decision === 'block') {
-      if (!isManual) appendLocalAudit(toolName, args, 'deny', 'smart-rule-block', meta);
+      if (!isManual)
+        appendLocalAudit(toolName, args, 'deny', 'smart-rule-block', meta, hashAuditArgs);
       return {
         approved: false,
         reason: policyResult.reason ?? 'Action explicitly blocked by Smart Policy.',
@@ -264,11 +363,12 @@ async function _authorizeHeadlessCore(
     if (persistent === 'allow') {
       if (approvers.cloud && creds?.apiKey)
         await auditLocalAllow(toolName, args, 'persistent', creds, meta);
-      if (!isManual) appendLocalAudit(toolName, args, 'allow', 'persistent', meta);
+      if (!isManual) appendLocalAudit(toolName, args, 'allow', 'persistent', meta, hashAuditArgs);
       return { approved: true, checkedBy: 'persistent' };
     }
     if (persistent === 'deny') {
-      if (!isManual) appendLocalAudit(toolName, args, 'deny', 'persistent-deny', meta);
+      if (!isManual)
+        appendLocalAudit(toolName, args, 'deny', 'persistent-deny', meta, hashAuditArgs);
       return {
         approved: false,
         reason: `This tool ("${toolName}") is explicitly listed in your 'Always Deny' list.`,
@@ -276,11 +376,27 @@ async function _authorizeHeadlessCore(
         blockedByLabel: 'Persistent User Rule',
       };
     }
-  } else {
+  } else if (!taintWarning) {
     // ignoredTools (read, glob, grep, ls…) fire on every agent operation — too
     // frequent and too noisy to send to the SaaS audit log.
-    if (!isManual) appendLocalAudit(toolName, args, 'allow', 'ignored', meta);
+    if (!isManual) appendLocalAudit(toolName, args, 'allow', 'ignored', meta, hashAuditArgs);
     return { approved: true };
+  }
+
+  // Taint warning active — set a high-risk label and fall through to the race engine.
+  // The user sees the taint context in the browser dashboard / native popup / Slack.
+  if (taintWarning) {
+    explainableLabel = '🔴 Node9 Taint (Exfiltration Prevention)';
+    // tier 7 = highest valid tier; pass taintWarning as ruleName so all
+    // approval channels (terminal card, browser dashboard, Slack) can render it.
+    riskMetadata = computeRiskMetadata(
+      args,
+      7,
+      explainableLabel,
+      undefined,
+      undefined,
+      taintWarning
+    );
   }
 
   // ── THE HANDSHAKE (Phase 4.1: Cloud Init) ────────────────────────────────
@@ -310,7 +426,8 @@ async function _authorizeHeadlessCore(
       cloudRequestId = initResult.requestId || null;
       // remoteApprovalOnly is noted but not enforced — local UI always has control.
       // Hard blocks are handled by Shields before the UI opens.
-      explainableLabel = 'Organization Policy (SaaS)';
+      // Don't overwrite the taint label — taint context must stay visible to the user.
+      if (!taintWarning) explainableLabel = 'Organization Policy (SaaS)';
     } catch {
       // Cloud API handshake failed — fall through to local rules silently
     }
@@ -569,7 +686,8 @@ async function _authorizeHeadlessCore(
       args,
       finalResult.approved ? 'allow' : 'deny',
       finalResult.checkedBy || finalResult.blockedBy || 'unknown',
-      meta
+      meta,
+      hashAuditArgs
     );
   }
 

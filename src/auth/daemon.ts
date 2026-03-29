@@ -144,6 +144,52 @@ export async function notifyDaemonViewer(
   return { id, allowCount: allowCount ?? 1 };
 }
 
+/**
+ * Notify the daemon to taint a file path after a DLP write-block.
+ * Must be awaited before the hook process exits — fire-and-forget loses the
+ * taint because the process exits before the fetch completes.
+ */
+export async function notifyTaint(filePath: string, source: string): Promise<void> {
+  if (!isDaemonRunning()) return;
+  const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
+  try {
+    await fetch(`${base}/taint`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: filePath, source }),
+      signal: AbortSignal.timeout(1000),
+    });
+  } catch {
+    // Taint is best-effort — daemon unreachable is non-fatal
+  }
+}
+
+export interface TaintCheckResult {
+  tainted: boolean;
+  record?: { path: string; source: string; createdAt: number; expiresAt: number };
+}
+
+/**
+ * Ask the daemon if any of the given file paths are tainted.
+ * Returns the first tainted record found, or { tainted: false }.
+ * Returns { tainted: false } if daemon is unreachable.
+ */
+export async function checkTaint(paths: string[]): Promise<TaintCheckResult> {
+  if (paths.length === 0 || !isDaemonRunning()) return { tainted: false };
+  const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
+  try {
+    const res = await fetch(`${base}/taint/check`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths }),
+      signal: AbortSignal.timeout(2000),
+    });
+    return (await res.json()) as TaintCheckResult;
+  } catch {
+    return { tainted: false };
+  }
+}
+
 /** Clear a viewer-mode card from the daemon once Slack has decided.
  *  Also used by the Event Bridge to notify the daemon when native popup or
  *  cloud wins the race — so SuggestionTracker sees every human decision. */
