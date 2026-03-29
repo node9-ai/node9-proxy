@@ -99,6 +99,23 @@ describe('isTrustedHost', () => {
     });
     expect(isTrustedHost('api.mycompany.com')).toBe(false);
   });
+
+  it('re-reads file when mtime changes (cross-process cache invalidation)', () => {
+    // First call — cache is warm with api.mycompany.com
+    expect(isTrustedHost('api.mycompany.com')).toBe(true);
+
+    // Simulate another process writing a new file (different mtime, no new hosts)
+    _resetTrustedHostsCache();
+    vi.spyOn(fs, 'readFileSync').mockImplementation((p) => {
+      if (String(p).includes('trusted-hosts')) {
+        return JSON.stringify({ hosts: [] }); // host removed by CLI in another process
+      }
+      return '';
+    });
+
+    // Should re-read and return false — cache was invalidated
+    expect(isTrustedHost('api.mycompany.com')).toBe(false);
+  });
 });
 
 // ── addTrustedHost / removeTrustedHost ────────────────────────────────────────

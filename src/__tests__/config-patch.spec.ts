@@ -95,9 +95,23 @@ describe('patchConfig — error handling', () => {
   });
 
   it.skipIf(process.platform === 'win32')('writes file with mode 0o600', () => {
+    // Set process umask to 0 so the test is not sensitive to the environment umask.
+    // Without this, a umask of 0o077 would mask 0o600 to 0o600 (same), but a umask
+    // of 0o022 would also leave 0o600 intact — yet we want to verify the mode arg
+    // is actually passed, not inferred from a lucky umask.
+    const prevUmask = process.umask(0o000);
+    try {
+      patchConfig(configPath, { type: 'ignoredTool', toolName: 'Bash' });
+      const stat = fs.statSync(configPath);
+      expect(stat.mode & 0o777).toBe(0o600);
+    } finally {
+      process.umask(prevUmask);
+    }
+  });
+
+  it('does not leave a .node9-tmp file after successful write', () => {
     patchConfig(configPath, { type: 'ignoredTool', toolName: 'Bash' });
-    const stat = fs.statSync(configPath);
-    // Check owner read/write only (0o600). On Linux, mask to lower 9 bits.
-    expect(stat.mode & 0o777).toBe(0o600);
+    const tmpPath = configPath + '.node9-tmp';
+    expect(fs.existsSync(tmpPath)).toBe(false);
   });
 });

@@ -24,6 +24,7 @@ export const AUDIT_LOG_FILE = path.join(homeDir, '.node9', 'audit.log');
 export const TRUST_FILE = path.join(homeDir, '.node9', 'trust.json');
 export const GLOBAL_CONFIG_FILE = path.join(homeDir, '.node9', 'config.json');
 export const CREDENTIALS_FILE = path.join(homeDir, '.node9', 'credentials.json');
+export const INSIGHT_COUNTS_FILE = path.join(homeDir, '.node9', 'insight-counts.json');
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 export interface AuditEntry {
@@ -64,8 +65,32 @@ export const suggestionTracker = new SuggestionTracker(3);
 export const suggestions = new Map<string, Suggestion>();
 /** Cumulative per-tool allow count for the 💡 insight line.
  *  Unlike suggestionTracker, this never resets after the suggestion threshold —
- *  only on deny. Used by all approval channels (terminal, browser, native popup). */
+ *  only on deny. Used by all approval channels (terminal, browser, native popup).
+ *  Persisted to disk so daemon restarts don't reset the nudge threshold. */
 export const insightCounts = new Map<string, number>();
+
+export function loadInsightCounts(): void {
+  try {
+    if (!fs.existsSync(INSIGHT_COUNTS_FILE)) return;
+    const data = JSON.parse(fs.readFileSync(INSIGHT_COUNTS_FILE, 'utf-8')) as Record<
+      string,
+      number
+    >;
+    for (const [tool, count] of Object.entries(data)) {
+      if (typeof count === 'number' && count > 0) insightCounts.set(tool, count);
+    }
+  } catch {}
+}
+
+export function saveInsightCounts(): void {
+  try {
+    const data: Record<string, number> = {};
+    insightCounts.forEach((count, tool) => {
+      data[tool] = count;
+    });
+    atomicWriteSync(INSIGHT_COUNTS_FILE, JSON.stringify(data, null, 2), { mode: 0o600 });
+  } catch {}
+}
 let _abandonTimer: ReturnType<typeof setTimeout> | null = null;
 export function getAbandonTimer() {
   return _abandonTimer;

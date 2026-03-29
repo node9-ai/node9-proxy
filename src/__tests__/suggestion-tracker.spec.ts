@@ -43,6 +43,14 @@ describe('extractPath', () => {
   it('returns null for empty string path', () => {
     expect(extractPath({ path: '' })).toBeNull();
   });
+
+  it('returns null when path field is a non-string (e.g. number)', () => {
+    expect(extractPath({ path: 42 })).toBeNull();
+  });
+
+  it('returns null when path field is null', () => {
+    expect(extractPath({ path: null })).toBeNull();
+  });
 });
 
 // ── commonPathPrefix ───────────────────────────────────────────────────────────

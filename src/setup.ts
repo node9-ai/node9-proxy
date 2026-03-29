@@ -466,12 +466,17 @@ export function detectAgents(homeDir: string = os.homedir()): {
   gemini: boolean;
   cursor: boolean;
 } {
+  const exists = (p: string): boolean => {
+    try {
+      return fs.existsSync(p);
+    } catch {
+      return false;
+    }
+  };
   return {
-    claude:
-      fs.existsSync(path.join(homeDir, '.claude')) ||
-      fs.existsSync(path.join(homeDir, '.claude.json')),
-    gemini: fs.existsSync(path.join(homeDir, '.gemini')),
-    cursor: fs.existsSync(path.join(homeDir, '.cursor')),
+    claude: exists(path.join(homeDir, '.claude')) || exists(path.join(homeDir, '.claude.json')),
+    gemini: exists(path.join(homeDir, '.gemini')),
+    cursor: exists(path.join(homeDir, '.cursor')),
   };
 }
 

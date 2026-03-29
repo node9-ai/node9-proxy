@@ -493,6 +493,13 @@ describe('detectAgents', () => {
     });
     expect(detectAgents(home)).toEqual({ claude: true, gemini: true, cursor: true });
   });
+
+  it('returns all false when existsSync throws (e.g. permission denied)', () => {
+    vi.mocked(fs.existsSync).mockImplementation(() => {
+      throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+    });
+    expect(detectAgents(home)).toEqual({ claude: false, gemini: false, cursor: false });
+  });
 });
 
 // ── teardownCursor ────────────────────────────────────────────────────────────

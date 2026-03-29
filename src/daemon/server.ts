@@ -50,10 +50,13 @@ import {
   suggestionTracker,
   suggestions,
   insightCounts,
+  loadInsightCounts,
+  saveInsightCounts,
 } from './state';
 import { patchConfig, GLOBAL_CONFIG_PATH, type ConfigPatch } from '../config/patch.js';
 
 export function startDaemon(): void {
+  loadInsightCounts(); // restore persisted nudge counters across restarts
   const csrfToken = randomUUID();
   const internalToken = randomUUID();
   const UI_HTML = UI_HTML_TEMPLATE.replace('{{CSRF_TOKEN}}', csrfToken);
@@ -441,6 +444,7 @@ export function startDaemon(): void {
         // Reset the counter on deny so we never suggest allowing blocked actions.
         if (resolvedDecision === 'allow' && !persist) {
           insightCounts.set(entry.toolName, (insightCounts.get(entry.toolName) ?? 0) + 1);
+          saveInsightCounts();
           const suggestion = suggestionTracker.recordAllow(entry.toolName, entry.args);
           if (suggestion) {
             suggestions.set(suggestion.id, suggestion);
@@ -448,6 +452,7 @@ export function startDaemon(): void {
           }
         } else if (resolvedDecision === 'deny') {
           insightCounts.delete(entry.toolName);
+          saveInsightCounts();
           suggestionTracker.resetTool(entry.toolName);
         }
 
@@ -575,8 +580,10 @@ export function startDaemon(): void {
         // not generate smart rule suggestions (different UX intent).
         if (resolvedResolveDecision === 'allow') {
           insightCounts.set(entry.toolName, (insightCounts.get(entry.toolName) ?? 0) + 1);
+          saveInsightCounts();
         } else {
           insightCounts.delete(entry.toolName);
+          saveInsightCounts();
         }
         if (!entry.slackDelegated) {
           if (resolvedResolveDecision === 'allow') {

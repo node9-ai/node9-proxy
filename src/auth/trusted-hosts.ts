@@ -31,29 +31,45 @@ export function readTrustedHosts(): TrustedHostEntry[] {
 }
 
 // Module-level TTL cache — avoids a sync disk read on every policy evaluation.
+// Cross-process invalidation: we store the file mtime alongside the cached hosts.
+// If another process (e.g. `node9 trust remove`) writes the file, the mtime changes
+// and the next call re-reads immediately — no need to wait for TTL expiry.
 // Invalidated by _resetTrustedHostsCache() (used in tests) and after each write.
-let _cache: { hosts: TrustedHostEntry[]; expiry: number } | null = null;
+let _cache: { hosts: TrustedHostEntry[]; expiry: number; mtime: number } | null = null;
 const CACHE_TTL_MS = 5_000;
 
 export function _resetTrustedHostsCache(): void {
   _cache = null;
 }
 
+function getFileMtime(): number {
+  try {
+    return fs.statSync(getTrustedHostsPath()).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
 function getCachedHosts(): TrustedHostEntry[] {
   const now = Date.now();
-  if (_cache && now < _cache.expiry) return _cache.hosts;
+  if (_cache && now < _cache.expiry) {
+    // Fast path: TTL not expired — but still check mtime for cross-process writes
+    const mtime = getFileMtime();
+    if (mtime === _cache.mtime) return _cache.hosts;
+  }
   const hosts = readTrustedHosts();
-  _cache = { hosts, expiry: now + CACHE_TTL_MS };
+  _cache = { hosts, expiry: now + CACHE_TTL_MS, mtime: getFileMtime() };
   return hosts;
 }
 
 function writeTrustedHosts(hosts: TrustedHostEntry[]): void {
-  _cache = null; // invalidate cache on every write
   const filePath = getTrustedHostsPath();
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const tmp = filePath + '.node9-tmp';
   fs.writeFileSync(tmp, JSON.stringify({ hosts }, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, filePath);
+  // Update cache with new content and fresh mtime — no stale window after our own writes
+  _cache = { hosts, expiry: Date.now() + CACHE_TTL_MS, mtime: getFileMtime() };
 }
 
 /** Add a host to the trusted list. Normalizes input before storing. No-op if already present. */
