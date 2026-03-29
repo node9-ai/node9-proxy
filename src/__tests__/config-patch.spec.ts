@@ -89,9 +89,12 @@ describe('patchConfig — smartRule', () => {
 });
 
 describe('patchConfig — error handling', () => {
-  it('throws on corrupted config file', () => {
-    fs.writeFileSync(configPath, 'NOT JSON {{{');
+  it('throws on corrupted config file and does not clobber it', () => {
+    const badContent = 'NOT JSON {{{';
+    fs.writeFileSync(configPath, badContent);
     expect(() => patchConfig(configPath, { type: 'ignoredTool', toolName: 'Bash' })).toThrow();
+    // Corrupted file must not be truncated or overwritten by the failing call
+    expect(fs.readFileSync(configPath, 'utf8')).toBe(badContent);
   });
 
   it.skipIf(process.platform === 'win32')('writes file with mode 0o600', () => {
@@ -99,6 +102,11 @@ describe('patchConfig — error handling', () => {
     // Without this, a umask of 0o077 would mask 0o600 to 0o600 (same), but a umask
     // of 0o022 would also leave 0o600 intact — yet we want to verify the mode arg
     // is actually passed, not inferred from a lucky umask.
+    //
+    // NOTE: process.umask() is process-global. Vitest runs tests within a file
+    // serially (not concurrently), so the try/finally restore is safe here. If
+    // this suite is ever run with --pool=forks in a shared worker, this test
+    // must be moved to its own isolated file or annotated with @vitest-isolate.
     const prevUmask = process.umask(0o000);
     try {
       patchConfig(configPath, { type: 'ignoredTool', toolName: 'Bash' });
@@ -131,15 +139,19 @@ describe('patchConfig — error handling', () => {
   });
 
   it('throws when writeFileSync fails (e.g. EACCES on a read-only directory)', () => {
-    vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(() => {
+    // writeFileSync is the call that CREATES the tmp file. If it throws, the tmp
+    // file was never created — nothing to clean up. Assert both the error and the
+    // absence of the tmp file to confirm no partial artifact was left.
+    const writeSpy = vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(() => {
       throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
     });
     try {
       expect(() => patchConfig(configPath, { type: 'ignoredTool', toolName: 'Bash' })).toThrow(
         /EACCES/
       );
+      expect(fs.existsSync(configPath + '.node9-tmp')).toBe(false);
     } finally {
-      vi.restoreAllMocks();
+      writeSpy.mockRestore();
     }
   });
 });

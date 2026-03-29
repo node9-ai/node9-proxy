@@ -66,7 +66,11 @@ export const suggestions = new Map<string, Suggestion>();
 /** Cumulative per-tool allow count for the 💡 insight line.
  *  Unlike suggestionTracker, this never resets after the suggestion threshold —
  *  only on deny. Used by all approval channels (terminal, browser, native popup).
- *  Persisted to disk so daemon restarts don't reset the nudge threshold. */
+ *  Persisted to disk so daemon restarts don't reset the nudge threshold.
+ *
+ *  Thread-safety: Node.js is single-threaded; all mutations happen in the
+ *  main event loop so no locking is needed. If the daemon ever moves to
+ *  worker_threads, this Map must be guarded (e.g. Atomics or message-passing). */
 export const insightCounts = new Map<string, number>();
 
 export function loadInsightCounts(): void {
