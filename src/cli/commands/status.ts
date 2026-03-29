@@ -8,6 +8,95 @@ import os from 'os';
 import { getCredentials, getConfig, checkPause } from '../../core';
 import { isDaemonRunning, DAEMON_PORT } from '../../auth/daemon';
 
+interface McpServer {
+  command?: string;
+  args?: string[];
+  [key: string]: unknown;
+}
+
+interface ClaudeConfig {
+  mcpServers?: Record<string, McpServer>;
+  [key: string]: unknown;
+}
+
+interface HookEntry {
+  command?: string;
+  [key: string]: unknown;
+}
+
+interface HookMatcher {
+  hooks: HookEntry[];
+  [key: string]: unknown;
+}
+
+interface ClaudeSettings {
+  hooks?: {
+    PreToolUse?: HookMatcher[];
+    PostToolUse?: HookMatcher[];
+    [key: string]: HookMatcher[] | undefined;
+  };
+  [key: string]: unknown;
+}
+
+interface GeminiSettings {
+  mcpServers?: Record<string, McpServer>;
+  hooks?: {
+    BeforeTool?: HookMatcher[];
+    AfterTool?: HookMatcher[];
+    [key: string]: HookMatcher[] | undefined;
+  };
+  [key: string]: unknown;
+}
+
+interface CursorMcpConfig {
+  mcpServers?: Record<string, McpServer>;
+  [key: string]: unknown;
+}
+
+function readJson<T>(filePath: string): T | null {
+  try {
+    if (fs.existsSync(filePath)) return JSON.parse(fs.readFileSync(filePath, 'utf-8')) as T;
+  } catch {}
+  return null;
+}
+
+function isNode9Hook(cmd: string | undefined): boolean {
+  if (!cmd) return false;
+  return (
+    /(?:^|[\s/\\])node9 (?:check|log)/.test(cmd) || /(?:^|[\s/\\])cli\.js (?:check|log)/.test(cmd)
+  );
+}
+
+function wrappedMcpServers(servers: Record<string, McpServer> | undefined): string[] {
+  if (!servers) return [];
+  return Object.entries(servers)
+    .filter(([, s]) => s.command === 'node9' && Array.isArray(s.args) && s.args.length > 0)
+    .map(([name, s]) => `${name} → ${(s.args as string[]).join(' ')}`);
+}
+
+function printAgentSection(
+  label: string,
+  hookPairs: Array<{ name: string; present: boolean }>,
+  wrapped: string[]
+): void {
+  console.log(chalk.bold(`  ${label}`));
+  for (const { name, present } of hookPairs) {
+    if (present) {
+      console.log(chalk.green(`    ✓ ${name}`));
+    } else {
+      console.log(chalk.red(`    ✗ ${name}`) + chalk.gray(' (not wired)'));
+    }
+  }
+  if (wrapped.length > 0) {
+    console.log(chalk.cyan(`    MCP proxied:`));
+    for (const entry of wrapped) {
+      console.log(chalk.gray(`      • ${entry}`));
+    }
+  } else {
+    console.log(chalk.gray(`    MCP proxied: none`));
+  }
+}
+
 export function registerStatusCommand(program: Command): void {
   program
     .command('status')
@@ -75,6 +164,71 @@ export function registerStatusCommand(program: Command): void {
         console.log(
           `  Sandbox: ${chalk.green(`${mergedConfig.policy.sandboxPaths.length} safe zones active`)}`
         );
+      }
+
+      // ── Agent wiring ─────────────────────────────────────────────────────────
+      const homeDir = os.homedir();
+
+      const claudeSettings = readJson<ClaudeSettings>(
+        path.join(homeDir, '.claude', 'settings.json')
+      );
+      const claudeConfig = readJson<ClaudeConfig>(path.join(homeDir, '.claude.json'));
+      const geminiSettings = readJson<GeminiSettings>(
+        path.join(homeDir, '.gemini', 'settings.json')
+      );
+      const cursorConfig = readJson<CursorMcpConfig>(path.join(homeDir, '.cursor', 'mcp.json'));
+
+      const agentFound = claudeSettings || claudeConfig || geminiSettings || cursorConfig;
+
+      if (agentFound) {
+        console.log('');
+        console.log(chalk.bold('  Agent Wiring:'));
+        console.log('');
+
+        if (claudeSettings || claudeConfig) {
+          const preHook =
+            claudeSettings?.hooks?.PreToolUse?.some((m) =>
+              m.hooks.some((h) => isNode9Hook(h.command))
+            ) ?? false;
+          const postHook =
+            claudeSettings?.hooks?.PostToolUse?.some((m) =>
+              m.hooks.some((h) => isNode9Hook(h.command))
+            ) ?? false;
+          printAgentSection(
+            'Claude Code',
+            [
+              { name: 'PreToolUse  (node9 check)', present: preHook },
+              { name: 'PostToolUse (node9 log)', present: postHook },
+            ],
+            wrappedMcpServers(claudeConfig?.mcpServers)
+          );
+          console.log('');
+        }
+
+        if (geminiSettings) {
+          const beforeHook =
+            geminiSettings.hooks?.BeforeTool?.some((m) =>
+              m.hooks.some((h) => isNode9Hook(h.command))
+            ) ?? false;
+          const afterHook =
+            geminiSettings.hooks?.AfterTool?.some((m) =>
+              m.hooks.some((h) => isNode9Hook(h.command))
+            ) ?? false;
+          printAgentSection(
+            'Gemini CLI',
+            [
+              { name: 'BeforeTool  (node9 check)', present: beforeHook },
+              { name: 'AfterTool   (node9 log)', present: afterHook },
+            ],
+            wrappedMcpServers(geminiSettings.mcpServers)
+          );
+          console.log('');
+        }
+
+        if (cursorConfig) {
+          printAgentSection('Cursor', [], wrappedMcpServers(cursorConfig.mcpServers));
+          console.log('');
+        }
       }
 
       // ── Pause state ──────────────────────────────────────────────────────────

@@ -65,7 +65,7 @@ export async function registerDaemonEntry(
   riskMetadata?: RiskMetadata,
   activityId?: string,
   cwd?: string
-): Promise<string> {
+): Promise<{ id: string; allowCount: number }> {
   const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 5000);
@@ -88,8 +88,8 @@ export async function registerDaemonEntry(
       signal: ctrl.signal,
     });
     if (!res.ok) throw new Error('Daemon fail');
-    const { id } = (await res.json()) as { id: string };
-    return id;
+    const { id, allowCount } = (await res.json()) as { id: string; allowCount?: number };
+    return { id, allowCount: allowCount ?? 1 };
   } finally {
     clearTimeout(timer);
   }
@@ -124,7 +124,7 @@ export async function notifyDaemonViewer(
   args: unknown,
   meta?: { agent?: string; mcpServer?: string },
   riskMetadata?: RiskMetadata
-): Promise<string> {
+): Promise<{ id: string; allowCount: number }> {
   const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
   const res = await fetch(`${base}/check`, {
     method: 'POST',
@@ -140,21 +140,24 @@ export async function notifyDaemonViewer(
     signal: AbortSignal.timeout(3000),
   });
   if (!res.ok) throw new Error('Daemon unreachable');
-  const { id } = (await res.json()) as { id: string };
-  return id;
+  const { id, allowCount } = (await res.json()) as { id: string; allowCount?: number };
+  return { id, allowCount: allowCount ?? 1 };
 }
 
-/** Clear a viewer-mode card from the daemon once Slack has decided. */
+/** Clear a viewer-mode card from the daemon once Slack has decided.
+ *  Also used by the Event Bridge to notify the daemon when native popup or
+ *  cloud wins the race — so SuggestionTracker sees every human decision. */
 export async function resolveViaDaemon(
   id: string,
   decision: 'allow' | 'deny',
-  internalToken: string
+  internalToken: string,
+  source?: string
 ): Promise<void> {
   const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
   await fetch(`${base}/resolve/${id}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Node9-Internal': internalToken },
-    body: JSON.stringify({ decision }),
+    body: JSON.stringify({ decision, ...(source && { source }) }),
     signal: AbortSignal.timeout(3000),
   });
 }

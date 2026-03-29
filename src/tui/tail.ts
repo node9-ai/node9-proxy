@@ -7,6 +7,7 @@ import path from 'path';
 import readline from 'readline';
 import { spawn, execSync } from 'child_process';
 import { DAEMON_PORT } from '../daemon';
+import { getInternalToken } from '../auth/daemon';
 import { getConfig } from '../core';
 
 const PID_FILE = path.join(os.homedir(), '.node9', 'daemon.pid');
@@ -62,6 +63,8 @@ interface ApprovalRequest {
     matchedWord?: string;
   };
   timestamp?: number;
+  /** How many consecutive allows (including this one) if approved. Used for 💡 insight. */
+  allowCount?: number;
 }
 
 export interface TailOptions {
@@ -170,12 +173,16 @@ async function ensureDaemon(): Promise<number> {
 
 function postDecisionHttp(
   id: string,
-  decision: 'allow' | 'deny',
+  decision: 'allow' | 'deny' | 'trust',
   csrfToken: string,
-  port: number
+  port: number,
+  opts?: { persist?: boolean; trustDuration?: string }
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ decision, source: 'terminal' });
+    const bodyObj: Record<string, unknown> = { decision, source: 'terminal' };
+    if (opts?.persist) bodyObj.persist = true;
+    if (opts?.trustDuration) bodyObj.trustDuration = opts.trustDuration;
+    const body = JSON.stringify(bodyObj);
     const req = http.request(
       {
         hostname: '127.0.0.1',
@@ -202,7 +209,7 @@ function postDecisionHttp(
 
 // ── Approval card ─────────────────────────────────────────────────────────────
 
-function buildCardLines(req: ApprovalRequest): string[] {
+function buildCardLines(req: ApprovalRequest, localCount: number = 0): string[] {
   const argsStr = JSON.stringify(req.args ?? {}).replace(/\s+/g, ' ');
   const argsPreview = argsStr.length > 60 ? argsStr.slice(0, 60) + '…' : argsStr;
 
@@ -214,17 +221,29 @@ function buildCardLines(req: ApprovalRequest): string[] {
       : `${YELLOW}⚠  Review`;
   const blockedBy = req.riskMetadata?.blockedByLabel ?? 'Policy rule';
 
-  return [
+  const lines: string[] = [
     ``,
     `${BOLD}${CYAN}╔══ Node9 Approval Required ══╗${RESET}`,
     `${CYAN}║${RESET} Tool:    ${BOLD}${req.toolName}${RESET}`,
     `${CYAN}║${RESET} Reason:  ${tierLabel} — ${blockedBy}${RESET}`,
     `${CYAN}║${RESET} Args:    ${GRAY}${argsPreview}${RESET}`,
+  ];
+
+  // 💡 Insight: show after 2+ prior terminal approvals for this tool (i.e. the 3rd prompt onward)
+  if (localCount >= 2) {
+    lines.push(
+      `${CYAN}║${RESET} ${YELLOW}💡${RESET} Approved ${localCount}× before — ${BOLD}[a]${RESET}${YELLOW} creates a permanent rule${RESET}`
+    );
+  }
+
+  lines.push(
     `${CYAN}╚${RESET}`,
     ``,
-    `  ${BOLD}${GREEN}[A]${RESET} Allow   ${BOLD}${RED}[D]${RESET} Deny`,
-    ``,
-  ];
+    `  ${BOLD}${GREEN}[↵/y]${RESET} Allow   ${BOLD}${RED}[n]${RESET} Deny   ${BOLD}${YELLOW}[a]${RESET} Always Allow   ${BOLD}${CYAN}[t]${RESET} Trust 30m`,
+    ``
+  );
+
+  return lines;
 }
 
 // ── Main export ───────────────────────────────────────────────────────────────
@@ -285,7 +304,10 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
   // Number of lines the current card occupies (for clearing)
   let cardLineCount = 0;
   // Called when an external event (native popup, browser) resolves the active card
-  let cancelActiveCard: (() => void) | null = null;
+  let cancelActiveCard: ((externalDecision?: 'allow' | 'deny') => void) | null = null;
+  // Local consecutive-allow counter per toolName — tracks THIS terminal's approvals
+  // so the 💡 insight fires reliably regardless of native popup / browser racing.
+  const localAllowCounts = new Map<string, number>();
 
   const canApprove = process.stdout.isTTY && process.stdin.isTTY;
   // Enable keypress event parsing on stdin (idempotent — safe to call multiple times)
@@ -300,7 +322,13 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
 
   function printCard(req: ApprovalRequest): void {
     process.stdout.write(HIDE_CURSOR + SAVE_CURSOR);
-    const lines = buildCardLines(req);
+    // Seed localAllowCounts from the daemon value when it's higher.
+    // This handles cross-session persistence (tail restart) while keeping local
+    // increments so the insight stays visible even after the suggestion threshold resets.
+    const daemonPrior = req.allowCount !== undefined ? req.allowCount - 1 : 0;
+    const localPrior = localAllowCounts.get(req.toolName) ?? 0;
+    const priorCount = Math.max(daemonPrior, localPrior);
+    const lines = buildCardLines(req, priorCount);
     for (const line of lines) process.stdout.write(line + '\n');
     cardLineCount = lines.length;
   }
@@ -338,15 +366,56 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
       cancelActiveCard = null;
     };
 
-    const settle = (decision: 'allow' | 'deny') => {
+    const settle = (action: 'allow' | 'deny' | 'always-allow' | 'trust') => {
       if (settled) return;
       settled = true;
       cleanup();
-      clearCard();
+      // Stamp the decision onto the card in place (keeps card visible in scrollback).
+      // We are at SAVE_CURSOR position; reprint card with decision line appended,
+      // then leave cursor below it so the activity feed continues naturally.
+      process.stdout.write(RESTORE_CURSOR + ERASE_DOWN);
+      const stampedLines = buildCardLines(
+        req,
+        Math.max(
+          req.allowCount !== undefined ? req.allowCount - 1 : 0,
+          localAllowCounts.get(req.toolName) ?? 0
+        )
+      );
+      const decisionStamp =
+        action === 'always-allow'
+          ? chalk.yellow('★ ALWAYS ALLOW')
+          : action === 'trust'
+            ? chalk.cyan('⏱ TRUST 30m')
+            : action === 'allow'
+              ? chalk.green('✓ ALLOWED')
+              : chalk.red('✗ DENIED');
+      stampedLines.push(`  ${BOLD}→${RESET} ${decisionStamp} ${GRAY}(terminal)${RESET}`, ``);
+      for (const line of stampedLines) process.stdout.write(line + '\n');
       process.stdout.write(SHOW_CURSOR);
+      cardLineCount = 0;
+
+      // Update local consecutive-allow counter for this toolName
+      if (action === 'allow' || action === 'always-allow' || action === 'trust') {
+        localAllowCounts.set(req.toolName, (localAllowCounts.get(req.toolName) ?? 0) + 1);
+      } else if (action === 'deny') {
+        localAllowCounts.delete(req.toolName);
+      }
+
+      // Map action to decision + options for the daemon
+      let httpDecision: 'allow' | 'deny' | 'trust';
+      let httpOpts: { persist?: boolean; trustDuration?: string } | undefined;
+      if (action === 'always-allow') {
+        httpDecision = 'allow';
+        httpOpts = { persist: true };
+      } else if (action === 'trust') {
+        httpDecision = 'trust';
+        httpOpts = { trustDuration: '30m' };
+      } else {
+        httpDecision = action;
+      }
 
       // POST decision best-effort; 409 = another racer already won
-      postDecisionHttp(req.id, decision, csrfToken, port).catch((err) => {
+      postDecisionHttp(req.id, httpDecision, csrfToken, port, httpOpts).catch((err) => {
         try {
           fs.appendFileSync(
             path.join(os.homedir(), '.node9', 'hook-debug.log'),
@@ -357,12 +426,7 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
         }
       });
 
-      // Print outcome in the activity feed
-      const decisionLabel =
-        decision === 'allow'
-          ? chalk.green('✓ ALLOWED (terminal)')
-          : chalk.red('✗ DENIED (terminal)');
-      console.log(`${chalk.cyan('◆')} ${chalk.bold(req.toolName.padEnd(16))}  ${decisionLabel}`);
+      // Decision is already stamped on the card above — no separate activity line needed.
 
       approvalQueue.shift();
       cardActive = false;
@@ -371,12 +435,25 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
 
     // Exposed so the 'remove' SSE event can dismiss the card when another
     // racer (native popup, browser) already resolved the request.
-    cancelActiveCard = () => {
+    cancelActiveCard = (externalDecision?: 'allow' | 'deny') => {
       if (settled) return;
       settled = true;
       cleanup();
-      clearCard();
+      // Stamp the card with the external decision so it stays in scrollback.
+      process.stdout.write(RESTORE_CURSOR + ERASE_DOWN);
+      const priorCount = Math.max(
+        req.allowCount !== undefined ? req.allowCount - 1 : 0,
+        localAllowCounts.get(req.toolName) ?? 0
+      );
+      const stampedLines = buildCardLines(req, priorCount);
+      if (externalDecision) {
+        const source =
+          externalDecision === 'allow' ? chalk.green('✓ ALLOWED') : chalk.red('✗ DENIED');
+        stampedLines.push(`  ${BOLD}→${RESET} ${source} ${GRAY}(external)${RESET}`, ``);
+      }
+      for (const line of stampedLines) process.stdout.write(line + '\n');
       process.stdout.write(SHOW_CURSOR);
+      cardLineCount = 0;
       approvalQueue.shift();
       cardActive = false;
       showNextCard();
@@ -387,15 +464,14 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
     // more reliable than raw 'data' buffer parsing across Node.js versions.
     onKeypress = (_str: string, key: { name?: string; ctrl?: boolean }) => {
       const name = key?.name ?? '';
-      if (name === 'a') {
+      if (name === 'y' || name === 'return') {
         settle('allow');
-      } else if (
-        name === 'd' ||
-        name === 'return' ||
-        name === 'enter' ||
-        (key?.ctrl && name === 'c')
-      ) {
+      } else if (name === 'n' || name === 'd' || (key?.ctrl && name === 'c')) {
         settle('deny');
+      } else if (name === 'a') {
+        settle('always-allow');
+      } else if (name === 't') {
+        settle('trust');
       }
     };
     process.stdin.on('keypress', onKeypress);
@@ -414,6 +490,12 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
       else if (process.platform === 'win32')
         execSync(`cmd /c start "" "${dashboardUrl}"`, { stdio: 'ignore' });
       else execSync(`xdg-open "${dashboardUrl}"`, { stdio: 'ignore' });
+      // Notify the daemon so it won't open a duplicate tab on the first approval.
+      const intToken = getInternalToken();
+      fetch(`http://127.0.0.1:${port}/browser-opened`, {
+        method: 'POST',
+        headers: intToken ? { 'X-Node9-Internal': intToken } : {},
+      }).catch(() => {});
     }
   } catch {
     // Browser open failed — URL is printed in the banner below so the user
@@ -422,7 +504,9 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
 
   console.log(chalk.cyan.bold(`\n🛰️  Node9 tail  `) + chalk.dim(`→ ${dashboardUrl}`));
   if (canApprove) {
-    console.log(chalk.dim('Interactive approvals enabled. [A] Allow  [D] Deny'));
+    console.log(
+      chalk.dim('Interactive approvals: [↵/y] Allow  [n] Deny  [a] Always Allow  [t] Trust 30m')
+    );
   }
   if (options.history) {
     console.log(chalk.dim('Showing history + live events. Press Ctrl+C to exit.\n'));
@@ -532,13 +616,23 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
     // ── Request resolved (by another racer) ──────────────────────────────────
     if (event === 'remove') {
       try {
-        const { id } = JSON.parse(rawData) as { id: string };
+        const { id, decision } = JSON.parse(rawData) as {
+          id: string;
+          decision?: 'allow' | 'deny';
+        };
         const idx = approvalQueue.findIndex((r) => r.id === id);
         if (idx !== -1) {
           if (idx === 0 && cardActive && cancelActiveCard) {
             // Current card was resolved externally (native popup, browser, timeout).
-            // cancelActiveCard() stops raw-mode, clears the card, and advances the queue.
-            cancelActiveCard();
+            // Update local count based on the external decision before cancelling.
+            const toolName = approvalQueue[0].toolName;
+            if (decision === 'allow') {
+              localAllowCounts.set(toolName, (localAllowCounts.get(toolName) ?? 0) + 1);
+            } else if (decision === 'deny') {
+              localAllowCounts.delete(toolName);
+            }
+            // cancelActiveCard() stops raw-mode, stamps the card, and advances the queue.
+            cancelActiveCard(decision);
           } else {
             approvalQueue.splice(idx, 1);
           }

@@ -346,6 +346,28 @@ describe('interactive approval card – keypress regression', () => {
     expect(JSON.parse(getBody())).toMatchObject({ decision: 'allow' });
   });
 
+  it('[Enter/return] keypress sends allow decision to daemon', async () => {
+    const { getBody } = captureDecision();
+    const { startTail } = await import('../tui/tail.js');
+    void startTail({});
+    await tick();
+
+    const stdinOnSpy = vi.spyOn(mockStdin, 'on');
+    sendSse('csrf', { token: 'csrf789' });
+    sendSse('add', { id: 'r2b', toolName: 'bash', args: {}, interactive: true });
+    await tick();
+
+    const handler = stdinOnSpy.mock.calls.find((c) => c[0] === 'keypress')![1] as (
+      str: string,
+      key: { name: string }
+    ) => void;
+
+    handler('\r', { name: 'return' });
+    await tick();
+
+    expect(JSON.parse(getBody())).toMatchObject({ decision: 'allow' });
+  });
+
   it('[D] keypress sends deny decision to daemon', async () => {
     const { getBody } = captureDecision();
     const { startTail } = await import('../tui/tail.js');

@@ -10,6 +10,7 @@ import {
   teardownClaude,
   teardownGemini,
   teardownCursor,
+  detectAgents,
 } from '../setup.js';
 
 vi.mock('@inquirer/prompts', () => ({ confirm: vi.fn() }));
@@ -439,6 +440,115 @@ describe('teardownGemini', () => {
     const written = writtenTo(settingsPath);
     expect(written.hooks.BeforeTool).toHaveLength(1);
     expect(written.hooks.BeforeTool[0].hooks[0].command).toBe('/other/tool run');
+  });
+});
+
+// ── detectAgents ─────────────────────────────────────────────────────────────
+
+describe('detectAgents', () => {
+  // Normalize to forward slashes so comparisons work on Windows too
+  const home = '/mock/home';
+  const p = (name: string) => path.join(home, name).replace(/\\/g, '/');
+
+  it('returns all false when no agent directories exist', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+    expect(detectAgents(home)).toEqual({ claude: false, gemini: false, cursor: false });
+  });
+
+  it('detects Claude via ~/.claude directory', () => {
+    vi.mocked(fs.existsSync).mockImplementation(
+      (q) => String(q).replace(/\\/g, '/') === p('.claude')
+    );
+    const result = detectAgents(home);
+    expect(result.claude).toBe(true);
+    expect(result.gemini).toBe(false);
+    expect(result.cursor).toBe(false);
+  });
+
+  it('detects Claude via ~/.claude.json (no directory)', () => {
+    vi.mocked(fs.existsSync).mockImplementation(
+      (q) => String(q).replace(/\\/g, '/') === p('.claude.json')
+    );
+    expect(detectAgents(home).claude).toBe(true);
+  });
+
+  it('detects Gemini via ~/.gemini directory', () => {
+    vi.mocked(fs.existsSync).mockImplementation(
+      (q) => String(q).replace(/\\/g, '/') === p('.gemini')
+    );
+    expect(detectAgents(home).gemini).toBe(true);
+  });
+
+  it('detects Cursor via ~/.cursor directory', () => {
+    vi.mocked(fs.existsSync).mockImplementation(
+      (q) => String(q).replace(/\\/g, '/') === p('.cursor')
+    );
+    expect(detectAgents(home).cursor).toBe(true);
+  });
+
+  it('detects all three agents simultaneously', () => {
+    vi.mocked(fs.existsSync).mockImplementation((q) => {
+      const s = String(q).replace(/\\/g, '/');
+      return s === p('.claude') || s === p('.gemini') || s === p('.cursor');
+    });
+    expect(detectAgents(home)).toEqual({ claude: true, gemini: true, cursor: true });
+  });
+
+  it('returns all false when existsSync throws (e.g. permission denied)', () => {
+    vi.mocked(fs.existsSync).mockImplementation(() => {
+      throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+    });
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    expect(detectAgents(home)).toEqual({ claude: false, gemini: false, cursor: false });
+    // Should warn to stderr for non-ENOENT errors so misconfigured systems surface
+    expect(stderrSpy).toHaveBeenCalled();
+    expect(String(stderrSpy.mock.calls[0][0])).toContain('EACCES');
+    stderrSpy.mockRestore();
+  });
+
+  it('ENOENT is silently treated as false — no stderr warning', () => {
+    // ENOENT just means the file/dir does not exist; it must not produce noise on stderr.
+    vi.mocked(fs.existsSync).mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    expect(detectAgents(home)).toEqual({ claude: false, gemini: false, cursor: false });
+    expect(stderrSpy).not.toHaveBeenCalled();
+    stderrSpy.mockRestore();
+  });
+
+  it('returns partial results when only some paths throw (second check throws)', () => {
+    // .claude exists, .claude.json throws EACCES — claude should still be true
+    // because the first exists() call short-circuits via ||.
+    vi.mocked(fs.existsSync).mockImplementation((q) => {
+      const s = String(q).replace(/\\/g, '/');
+      if (s === p('.claude.json')) {
+        throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      }
+      return s === p('.claude');
+    });
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const result = detectAgents(home);
+    // Short-circuit: .claude is true so .claude.json is never called
+    expect(result.claude).toBe(true);
+    expect(result.gemini).toBe(false);
+    stderrSpy.mockRestore();
+  });
+
+  it('returns true for claude when first check throws but second check succeeds', () => {
+    // .claude throws EACCES, .claude.json exists — claude should still be true
+    vi.mocked(fs.existsSync).mockImplementation((q) => {
+      const s = String(q).replace(/\\/g, '/');
+      if (s === p('.claude')) {
+        throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      }
+      return s === p('.claude.json');
+    });
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    expect(detectAgents(home).claude).toBe(true);
+    // EACCES on the first check should still warn
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('EACCES'));
+    stderrSpy.mockRestore();
   });
 });
 

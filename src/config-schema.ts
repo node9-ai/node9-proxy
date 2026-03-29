@@ -46,7 +46,7 @@ const SmartConditionSchema = z
     { message: 'matchesGlob and notMatchesGlob conditions require a value field' }
   );
 
-const SmartRuleSchema = z.object({
+export const SmartRuleSchema = z.object({
   name: z.string().optional(),
   tool: z.string().min(1, 'Smart rule tool must not be empty'),
   conditions: z.array(SmartConditionSchema).min(1, 'Smart rule must have at least one condition'),

@@ -134,7 +134,8 @@ function buildPlainMessage(
   formattedArgs: string,
   agent: string | undefined,
   explainableLabel: string | undefined,
-  locked: boolean
+  locked: boolean,
+  allowCount: number = 1
 ): string {
   const lines: string[] = [];
 
@@ -144,6 +145,11 @@ function buildPlainMessage(
   lines.push(`🛡️  ${explainableLabel || 'Security Policy'}`);
   lines.push('');
   lines.push(formattedArgs);
+
+  if (allowCount >= 3) {
+    lines.push('');
+    lines.push(`💡 Approved ${allowCount - 1}× before — "Always Allow" creates a permanent rule`);
+  }
 
   if (!locked) {
     lines.push('');
@@ -158,7 +164,8 @@ function buildPangoMessage(
   formattedArgs: string,
   agent: string | undefined,
   explainableLabel: string | undefined,
-  locked: boolean
+  locked: boolean,
+  allowCount: number = 1
 ): string {
   const lines: string[] = [];
 
@@ -173,6 +180,13 @@ function buildPangoMessage(
   lines.push(`<i>🛡️  ${escapePango(explainableLabel || 'Security Policy')}</i>`);
   lines.push('');
   lines.push(`<tt>${escapePango(formattedArgs)}</tt>`);
+
+  if (allowCount >= 3) {
+    lines.push('');
+    lines.push(
+      `<span foreground="#f0c040">💡 Approved ${allowCount - 1}× before — "Always Allow" creates a permanent rule</span>`
+    );
+  }
 
   if (!locked) {
     lines.push('');
@@ -192,7 +206,8 @@ export async function askNativePopup(
   locked: boolean = false,
   signal?: AbortSignal,
   matchedField?: string,
-  matchedWord?: string
+  matchedWord?: string,
+  allowCount: number = 1
 ): Promise<'allow' | 'deny' | 'always_allow'> {
   if (isTestEnv()) return 'deny';
 
@@ -200,7 +215,14 @@ export async function askNativePopup(
   const intentLabel = intent === 'EDIT' ? 'Code Edit' : 'Action Approval';
   const title = locked ? `⚡ Node9 — Locked` : `🛡️ Node9 — ${intentLabel}`;
 
-  const message = buildPlainMessage(toolName, formattedArgs, agent, explainableLabel, locked);
+  const message = buildPlainMessage(
+    toolName,
+    formattedArgs,
+    agent,
+    explainableLabel,
+    locked,
+    allowCount
+  );
 
   return new Promise((resolve) => {
     // 2. FIXED: Use ChildProcess type instead of any
@@ -235,7 +257,8 @@ export async function askNativePopup(
           formattedArgs,
           agent,
           explainableLabel,
-          locked
+          locked,
+          allowCount
         );
         const argsList = [
           locked ? '--info' : '--question',

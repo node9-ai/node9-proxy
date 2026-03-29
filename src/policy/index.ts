@@ -301,6 +301,7 @@ export async function evaluatePolicy(
       (pipeAnalysis.risk === 'critical' || pipeAnalysis.risk === 'high')
     ) {
       const sinks = pipeAnalysis.sinkTargets;
+      // sinks.length === 0 means no network targets were identified → treat as untrusted
       const allTrusted = sinks.length > 0 && sinks.every(isTrustedHost);
 
       if (pipeAnalysis.risk === 'critical') {
@@ -323,7 +324,12 @@ export async function evaluatePolicy(
 
       // high risk: trusted hosts → allow; untrusted → review
       if (allTrusted) {
-        return { decision: 'allow' };
+        return {
+          decision: 'allow',
+          blockedByLabel: 'Node9: Pipe-Chain to Trusted Host',
+          reason: `Sensitive file piped to trusted host(s): ${sinks.join(', ')}`,
+          tier: 3,
+        };
       }
       return {
         decision: 'review',

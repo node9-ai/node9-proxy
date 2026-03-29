@@ -2,7 +2,6 @@
 import { Command } from 'commander';
 import {
   authorizeHeadless,
-  DEFAULT_CONFIG,
   isDaemonRunning,
   getConfig,
   explainPolicy,
@@ -34,6 +33,7 @@ import { registerDoctorCommand } from './cli/commands/doctor';
 import { registerAuditCommand } from './cli/commands/audit';
 import { registerDaemonCommand } from './cli/commands/daemon-cmd';
 import { registerStatusCommand } from './cli/commands/status';
+import { registerInitCommand } from './cli/commands/init';
 import { registerUndoCommand } from './cli/commands/undo';
 import { registerWatchCommand } from './cli/commands/watch';
 import { registerMcpGatewayCommand } from './cli/commands/mcp-gateway';
@@ -351,47 +351,8 @@ program
     console.log('');
   });
 
-// 3. INIT (Upgraded with Enterprise Schema)
-program
-  .command('init')
-  .description('Create ~/.node9/config.json with default policy (safe to run multiple times)')
-  .option('--force', 'Overwrite existing config')
-  .option('-m, --mode <mode>', 'Set initial security mode (standard, strict, audit)', 'standard')
-  .action((options: { force?: boolean; mode: string }) => {
-    const configPath = path.join(os.homedir(), '.node9', 'config.json');
-
-    if (fs.existsSync(configPath) && !options.force) {
-      console.log(chalk.yellow(`ℹ️  Global config already exists: ${configPath}`));
-      console.log(chalk.gray(`   Run with --force to overwrite.`));
-      return;
-    }
-
-    // Validate mode from CLI flag
-    const requestedMode = options.mode.toLowerCase();
-    const safeMode = ['standard', 'strict', 'audit'].includes(requestedMode)
-      ? requestedMode
-      : DEFAULT_CONFIG.settings.mode;
-
-    // Use the exact same object from core.ts, just override the mode from the CLI flag
-    const configToSave = {
-      ...DEFAULT_CONFIG,
-      settings: {
-        ...DEFAULT_CONFIG.settings,
-        mode: safeMode,
-      },
-    };
-
-    const dir = path.dirname(configPath);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-
-    fs.writeFileSync(configPath, JSON.stringify(configToSave, null, 2));
-
-    console.log(chalk.green(`✅ Global config created: ${configPath}`));
-    console.log(chalk.cyan(`   Mode set to: ${safeMode}`));
-    console.log(
-      chalk.gray(`   Undo Engine is ENABLED by default. Use 'node9 undo' to revert AI changes.`)
-    );
-  });
+// 3. INIT
+registerInitCommand(program);
 
 // 4. AUDIT
 registerAuditCommand(program);

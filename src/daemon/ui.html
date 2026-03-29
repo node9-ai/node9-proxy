@@ -272,6 +272,15 @@
         padding: 5px 10px;
         margin-bottom: 14px;
       }
+      .insight-hint {
+        font-size: 12px;
+        color: #f0c040;
+        background: rgba(240, 192, 64, 0.08);
+        border: 1px solid rgba(240, 192, 64, 0.25);
+        border-radius: 6px;
+        padding: 6px 10px;
+        margin-bottom: 12px;
+      }
       pre {
         background: #0d1117;
         padding: 14px 16px;
@@ -744,6 +753,78 @@
         color: var(--danger);
       }
 
+      /* ── Suggestion cards ─────────────────────────────────────────────── */
+      .suggestion-card {
+        background: rgba(82, 130, 255, 0.06);
+        border: 1px solid rgba(82, 130, 255, 0.25);
+        border-radius: 8px;
+        padding: 10px 12px;
+        margin-bottom: 8px;
+      }
+      .suggestion-card:last-child {
+        margin-bottom: 0;
+      }
+      .suggestion-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 6px;
+      }
+      .suggestion-tool {
+        font-family: 'Fira Code', monospace;
+        font-size: 11px;
+        color: var(--text-bright);
+        flex: 1;
+        word-break: break-all;
+      }
+      .suggestion-count {
+        font-size: 10px;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      .suggestion-rule {
+        font-family: 'Fira Code', monospace;
+        font-size: 10px;
+        color: #79c0ff;
+        background: rgba(0, 0, 0, 0.25);
+        border-radius: 4px;
+        padding: 4px 8px;
+        margin-bottom: 8px;
+        word-break: break-all;
+        white-space: pre-wrap;
+      }
+      .suggestion-actions {
+        display: flex;
+        gap: 6px;
+      }
+      .btn-apply {
+        background: rgba(52, 125, 57, 0.2);
+        border: 1px solid rgba(87, 171, 90, 0.4);
+        color: #57ab5a;
+        padding: 4px 10px;
+        font-size: 11px;
+        border-radius: 5px;
+        font-family: inherit;
+        cursor: pointer;
+      }
+      .btn-apply:hover {
+        background: rgba(52, 125, 57, 0.35);
+      }
+      .btn-dismiss-suggestion {
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--muted);
+        padding: 4px 10px;
+        font-size: 11px;
+        border-radius: 5px;
+        font-family: inherit;
+        cursor: pointer;
+      }
+      .btn-dismiss-suggestion:hover {
+        border-color: var(--danger);
+        color: var(--danger);
+      }
+
       .modal-overlay {
         display: none;
         position: fixed;
@@ -924,6 +1005,11 @@
           <div class="panel">
             <div class="panel-title">📋 Persistent Decisions</div>
             <div id="decisionsList"><span class="decisions-empty">None yet.</span></div>
+          </div>
+
+          <div class="panel" id="suggestionsPanel" style="display: none">
+            <div class="panel-title">💡 Smart Rule Suggestions</div>
+            <div id="suggestionsList"></div>
           </div>
         </div>
       </div>
@@ -1114,6 +1200,7 @@
         </div>
         <div class="tool-chip">${esc(req.toolName)}</div>
         ${isSlack ? '<div class="slack-indicator">⚡ Awaiting Cloud approval — view only</div>' : ''}
+        ${req.allowCount >= 3 ? `<div class="insight-hint">💡 Approved ${req.allowCount - 1}× before — "Always Allow" creates a permanent rule</div>` : ''}
         ${renderPayload(req)}
         <div class="actions" id="act-${req.id}">
           <button class="btn-allow" onclick="sendDecision('${req.id}','allow',false)" ${dis}>✅ Allow this Action</button>
@@ -1179,6 +1266,14 @@
         });
         ev.addEventListener('shields-status', (e) => {
           renderShields(JSON.parse(e.data).shields);
+        });
+        ev.addEventListener('suggestion:new', (e) => {
+          const s = JSON.parse(e.data);
+          addSuggestionCard(s);
+        });
+        ev.addEventListener('suggestion:resolved', (e) => {
+          const { id } = JSON.parse(e.data);
+          removeSuggestionCard(id);
         });
 
         // ── Flight Recorder ────────────────────────────────────────────────
@@ -1428,6 +1523,74 @@
       fetch('/decisions')
         .then((r) => r.json())
         .then(renderDecisions)
+        .catch(() => {});
+
+      // ── Smart Rule Suggestions ────────────────────────────────────────────
+      function rulePreview(suggestion) {
+        const r = suggestion.suggestedRule;
+        if (r.type === 'ignoredTool') return `ignoredTool: "${r.toolName}"`;
+        const cond = r.rule.conditions?.[0];
+        const condStr = cond ? ` where ${cond.field} ${cond.op} "${cond.value}"` : '';
+        return `allow ${r.rule.tool}${condStr}`;
+      }
+
+      function addSuggestionCard(s) {
+        const panel = document.getElementById('suggestionsPanel');
+        const list = document.getElementById('suggestionsList');
+        panel.style.display = '';
+
+        const card = document.createElement('div');
+        card.className = 'suggestion-card';
+        card.id = 'sg-' + s.id;
+        card.innerHTML = `
+          <div class="suggestion-header">
+            <span class="suggestion-tool">${esc(s.toolName)}</span>
+            <span class="suggestion-count">allowed ${s.allowCount}×</span>
+          </div>
+          <div class="suggestion-rule">${esc(rulePreview(s))}</div>
+          <div class="suggestion-actions">
+            <button class="btn-apply" onclick="applySuggestion('${esc(s.id)}')">Apply rule</button>
+            <button class="btn-dismiss-suggestion" onclick="dismissSuggestion('${esc(s.id)}')">Dismiss</button>
+          </div>
+        `;
+        list.appendChild(card);
+      }
+
+      function removeSuggestionCard(id) {
+        document.getElementById('sg-' + id)?.remove();
+        const list = document.getElementById('suggestionsList');
+        if (!list.querySelector('.suggestion-card')) {
+          document.getElementById('suggestionsPanel').style.display = 'none';
+        }
+      }
+
+      function applySuggestion(id) {
+        fetch('/suggestions/' + id + '/apply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Node9-Token': CSRF_TOKEN },
+          body: JSON.stringify({}),
+        })
+          .then((r) => {
+            if (r.ok) removeSuggestionCard(id);
+          })
+          .catch(() => {});
+      }
+
+      function dismissSuggestion(id) {
+        fetch('/suggestions/' + id + '/dismiss', {
+          method: 'POST',
+          headers: { 'X-Node9-Token': CSRF_TOKEN },
+        })
+          .then((r) => {
+            if (r.ok) removeSuggestionCard(id);
+          })
+          .catch(() => {});
+      }
+
+      // Load any suggestions that survived a page reload (daemon still running)
+      fetch('/suggestions')
+        .then((r) => r.json())
+        .then((list) => list.filter((s) => s.status === 'pending').forEach(addSuggestionCard))
         .catch(() => {});
     </script>
   </body>

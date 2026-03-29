@@ -669,3 +669,179 @@ describe('daemon POST /decision — source tracking', () => {
     expect(d.status).toBe(200);
   });
 });
+
+// ── POST /suggestions/:id/apply — path traversal guard ────────────────────────
+// Regression test: configPath from the request body must be confined to ~/.node9/.
+// path.resolve() neutralises any .. segments before the check.
+
+describe('daemon POST /suggestions/:id/apply — path traversal guard', () => {
+  let tmpHome: string;
+  let daemonProc: ChildProcess;
+  let portWasFree = false;
+  let csrfToken = '';
+
+  beforeAll(async () => {
+    portWasFree = await isPortFree(DAEMON_PORT);
+    if (!portWasFree) return;
+
+    tmpHome = makeTempHome();
+    daemonProc = spawn(process.execPath, [CLI, 'daemon', 'start'], {
+      env: makeEnv(tmpHome),
+      stdio: 'pipe',
+    });
+
+    const ready = await waitForDaemon(6000);
+    if (!ready) {
+      daemonProc.kill();
+      throw new Error('Daemon did not start within 6s');
+    }
+
+    const raw = await readSseStream(1500);
+    const events = parseSseEvents(raw);
+    csrfToken = (events.get('csrf') as { token: string } | undefined)?.token ?? '';
+  }, 15_000);
+
+  afterAll(() => {
+    if (!portWasFree) return;
+    spawnSync(process.execPath, [CLI, 'daemon', 'stop'], {
+      env: makeEnv(tmpHome),
+      timeout: 3000,
+    });
+    if (daemonProc?.exitCode === null) daemonProc.kill();
+    if (tmpHome) cleanupDir(tmpHome);
+  });
+
+  it('rejects configPath outside ~/.node9/ with 400', async ({ skip }) => {
+    if (!portWasFree) skip();
+    expect(csrfToken).toBeTruthy();
+
+    // path check runs before suggestion lookup — any UUID works as the ID here
+    const res = await fetch(
+      `http://127.0.0.1:${DAEMON_PORT}/suggestions/00000000-0000-0000-0000-000000000000/apply`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Node9-Token': csrfToken },
+        body: JSON.stringify({ configPath: '/etc/crontab' }),
+      }
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/node9 config directory/);
+  });
+
+  it('rejects .. traversal in configPath with 400', async ({ skip }) => {
+    if (!portWasFree) skip();
+    expect(csrfToken).toBeTruthy();
+
+    const res = await fetch(
+      `http://127.0.0.1:${DAEMON_PORT}/suggestions/00000000-0000-0000-0000-000000000000/apply`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Node9-Token': csrfToken },
+        body: JSON.stringify({ configPath: `${tmpHome}/.node9/../../etc/passwd` }),
+      }
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it('accepts configPath within ~/.node9/ (returns 404 — no matching suggestion)', async ({
+    skip,
+  }) => {
+    if (!portWasFree) skip();
+    expect(csrfToken).toBeTruthy();
+
+    // Path is valid — traversal guard passes, then 404 because no suggestion exists
+    const res = await fetch(
+      `http://127.0.0.1:${DAEMON_PORT}/suggestions/00000000-0000-0000-0000-000000000000/apply`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Node9-Token': csrfToken },
+        body: JSON.stringify({ configPath: `${tmpHome}/.node9/config.json` }),
+      }
+    );
+    expect(res.status).toBe(404); // guard passed; suggestion not found
+  });
+});
+
+// ── DNS rebinding guard ────────────────────────────────────────────────────────
+// Regression: daemon must reject requests with a Host header that doesn't match
+// 127.0.0.1:PORT or localhost:PORT. A DNS-rebinding attack sets Host: attacker.com
+// (which resolves to 127.0.0.1) — without this guard the attacker could read the
+// CSRF token from /events and make authenticated requests.
+
+describe('daemon DNS rebinding guard', () => {
+  let tmpHome: string;
+  let daemonProc: ChildProcess;
+  let portWasFree = false;
+
+  beforeAll(async () => {
+    portWasFree = await isPortFree(DAEMON_PORT);
+    if (!portWasFree) return;
+
+    tmpHome = makeTempHome();
+    daemonProc = spawn(process.execPath, [CLI, 'daemon', 'start'], {
+      env: makeEnv(tmpHome),
+      stdio: 'pipe',
+    });
+
+    const ready = await waitForDaemon(6000);
+    if (!ready) {
+      daemonProc.kill();
+      throw new Error('Daemon did not start within 6s');
+    }
+  }, 15_000);
+
+  afterAll(() => {
+    if (!portWasFree) return;
+    spawnSync(process.execPath, [CLI, 'daemon', 'stop'], {
+      env: makeEnv(tmpHome),
+      timeout: 3000,
+    });
+    if (daemonProc?.exitCode === null) daemonProc.kill();
+    if (tmpHome) cleanupDir(tmpHome);
+  });
+
+  it('rejects requests with a spoofed Host header (421)', async ({ skip }) => {
+    if (!portWasFree) skip();
+
+    // fetch() silently ignores custom Host header overrides (undici sets Host
+    // from the URL). Use http.request() directly so the spoofed header is
+    // actually sent on the wire — this is what a DNS-rebinding attack does.
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port: DAEMON_PORT,
+          path: '/settings',
+          method: 'GET',
+          headers: { Host: 'attacker.com' },
+        },
+        (res) => {
+          resolve(res.statusCode ?? 0);
+          res.resume();
+        }
+      );
+      req.on('error', reject);
+      req.end();
+    });
+    expect(status).toBe(421);
+  });
+
+  it('accepts requests with Host: 127.0.0.1:PORT (200)', async ({ skip }) => {
+    if (!portWasFree) skip();
+
+    const res = await fetch(`http://127.0.0.1:${DAEMON_PORT}/settings`, {
+      headers: { Host: `127.0.0.1:${DAEMON_PORT}` },
+    });
+    expect(res.ok).toBe(true);
+  });
+
+  it('accepts requests with Host: localhost:PORT (200)', async ({ skip }) => {
+    if (!portWasFree) skip();
+
+    const res = await fetch(`http://localhost:${DAEMON_PORT}/settings`, {
+      headers: { Host: `localhost:${DAEMON_PORT}` },
+    });
+    expect(res.ok).toBe(true);
+  });
+});

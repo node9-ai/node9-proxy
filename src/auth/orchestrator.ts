@@ -350,6 +350,7 @@ async function _authorizeHeadlessCore(
   // notifyDaemonViewer is moved here (out of RACER 1) so viewerId is known before
   // the race starts, allowing RACER 3 to use it as its entry ID.
   let daemonEntryId: string | null = null;
+  let daemonAllowCount = 1;
   if (
     (approvers.browser || approvers.terminal) &&
     isDaemonRunning() &&
@@ -359,11 +360,13 @@ async function _authorizeHeadlessCore(
       // Cloud path: create a single card via notifyDaemonViewer so RACER 3
       // (terminal/browser) shares the same daemon entry — no duplicate card.
       // Local UI always participates in the race regardless of cloud policy.
-      viewerId = await notifyDaemonViewer(toolName, args, meta, riskMetadata).catch(() => null);
+      const viewer = await notifyDaemonViewer(toolName, args, meta, riskMetadata).catch(() => null);
+      viewerId = viewer?.id ?? null;
       daemonEntryId = viewerId;
+      if (viewer) daemonAllowCount = viewer.allowCount;
     } else {
       try {
-        daemonEntryId = await registerDaemonEntry(
+        const entry = await registerDaemonEntry(
           toolName,
           args,
           meta,
@@ -371,6 +374,8 @@ async function _authorizeHeadlessCore(
           options?.activityId,
           options?.cwd
         );
+        daemonEntryId = entry.id;
+        daemonAllowCount = entry.allowCount;
       } catch {
         // Daemon unreachable — skip both racers gracefully
       }
@@ -417,7 +422,8 @@ async function _authorizeHeadlessCore(
           false,
           signal,
           policyMatchedField,
-          policyMatchedWord
+          policyMatchedWord,
+          daemonAllowCount
         );
 
         if (decision === 'always_allow') {
@@ -498,10 +504,17 @@ async function _authorizeHeadlessCore(
         resolved = true;
         abortController.abort(); // KILL THE LOSERS
 
-        if (viewerId && internalToken) {
-          resolveViaDaemon(viewerId, res.approved ? 'allow' : 'deny', internalToken).catch(
-            () => null
-          );
+        // Event Bridge: notify the daemon whenever any channel wins the race.
+        // Covers native popup, cloud, and timeout — not just the cloud/Slack path.
+        // Browser and terminal racers already go through POST /decision/:id, so
+        // calling /resolve/:id afterwards is harmless (entry is gone → 404 ignored).
+        if (daemonEntryId && internalToken) {
+          resolveViaDaemon(
+            daemonEntryId,
+            res.approved ? 'allow' : 'deny',
+            internalToken,
+            res.decisionSource
+          ).catch(() => null);
         }
 
         resolve(res);

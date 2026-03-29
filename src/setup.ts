@@ -457,6 +457,33 @@ interface CursorMcpConfig {
   [key: string]: unknown;
 }
 
+/**
+ * Detect which AI agents are installed on this machine.
+ * Used by `node9 init` to auto-wire all detected agents.
+ */
+export function detectAgents(homeDir: string = os.homedir()): {
+  claude: boolean;
+  gemini: boolean;
+  cursor: boolean;
+} {
+  const exists = (p: string): boolean => {
+    try {
+      return fs.existsSync(p);
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') {
+        process.stderr.write(`[node9] detectAgents: cannot access ${p}: ${code ?? String(err)}\n`);
+      }
+      return false;
+    }
+  };
+  return {
+    claude: exists(path.join(homeDir, '.claude')) || exists(path.join(homeDir, '.claude.json')),
+    gemini: exists(path.join(homeDir, '.gemini')),
+    cursor: exists(path.join(homeDir, '.cursor')),
+  };
+}
+
 export async function setupCursor(): Promise<void> {
   const homeDir = os.homedir();
   const mcpPath = path.join(homeDir, '.cursor', 'mcp.json');
