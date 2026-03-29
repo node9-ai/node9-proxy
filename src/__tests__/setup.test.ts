@@ -498,7 +498,12 @@ describe('detectAgents', () => {
     vi.mocked(fs.existsSync).mockImplementation(() => {
       throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
     });
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     expect(detectAgents(home)).toEqual({ claude: false, gemini: false, cursor: false });
+    // Should warn to stderr for non-ENOENT errors so misconfigured systems surface
+    expect(stderrSpy).toHaveBeenCalled();
+    expect(String(stderrSpy.mock.calls[0][0])).toContain('EACCES');
+    stderrSpy.mockRestore();
   });
 });
 

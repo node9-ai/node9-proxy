@@ -469,7 +469,11 @@ export function detectAgents(homeDir: string = os.homedir()): {
   const exists = (p: string): boolean => {
     try {
       return fs.existsSync(p);
-    } catch {
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') {
+        process.stderr.write(`[node9] detectAgents: cannot access ${p}: ${code ?? String(err)}\n`);
+      }
       return false;
     }
   };

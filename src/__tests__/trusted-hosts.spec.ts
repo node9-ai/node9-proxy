@@ -92,6 +92,23 @@ describe('isTrustedHost', () => {
     expect(isTrustedHost('logs.io')).toBe(false);
   });
 
+  it('wildcard *.mycompany.com does NOT match bare mycompany.com', () => {
+    // Reviewer-requested explicit test: the most exploitable edge case —
+    // attacker controls mycompany.com and uses it as a sink.
+    // The mock data has api.mycompany.com (exact) — add a wildcard entry inline.
+    _resetTrustedHostsCache();
+    vi.spyOn(fs, 'readFileSync').mockImplementation((p) => {
+      if (String(p).includes('trusted-hosts')) {
+        return JSON.stringify({
+          hosts: [{ host: '*.mycompany.com', addedAt: 1000, addedBy: 'user' }],
+        });
+      }
+      return '';
+    });
+    expect(isTrustedHost('api.mycompany.com')).toBe(true); // subdomain: OK
+    expect(isTrustedHost('mycompany.com')).toBe(false); // bare domain: NOT OK
+  });
+
   it('wildcard does NOT match attacker suffix (evil.logs.io.attacker.com)', () => {
     // Ensures the suffix check uses a leading dot so "logs.io.attacker.com"
     // does not match "*.logs.io" via naive endsWith("logs.io").
