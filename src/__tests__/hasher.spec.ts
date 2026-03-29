@@ -64,6 +64,21 @@ describe('canonicalise', () => {
     const result = canonicalise(arr) as unknown[];
     expect(result[2]).toBe('[Circular]');
   });
+
+  it('deeply nested circular reference — cycle inside nested object does not throw', () => {
+    // Cycle is several levels deep — tests that the WeakSet is threaded through
+    // recursion, not just checked at the top level.
+    const inner: Record<string, unknown> = { value: 42 };
+    const outer = { level1: { level2: inner } };
+    inner['back'] = outer; // outer → level1 → level2 → back → outer (cycle)
+    expect(() => canonicalise(outer)).not.toThrow();
+    const result = canonicalise(outer) as Record<string, unknown>;
+    const level2 = (result['level1'] as Record<string, unknown>)['level2'] as Record<
+      string,
+      unknown
+    >;
+    expect(level2['back']).toBe('[Circular]');
+  });
 });
 
 describe('hashArgs', () => {
