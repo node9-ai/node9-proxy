@@ -184,6 +184,27 @@ describe('isTrustedHost', () => {
     // Should re-read and return false — cache was invalidated
     expect(isTrustedHost('api.mycompany.com')).toBe(false);
   });
+
+  it('cache hit avoids repeated readFileSync calls', () => {
+    // Verify the cache actually suppresses redundant disk reads within the TTL window.
+    // readFileSync must be called exactly once even though isTrustedHost is called three times.
+    let readCount = 0;
+    vi.spyOn(fs, 'readFileSync').mockImplementation((p) => {
+      if (String(p).includes('trusted-hosts')) {
+        readCount++;
+        return JSON.stringify({
+          hosts: [{ host: 'api.mycompany.com', addedAt: 1000, addedBy: 'user' }],
+        });
+      }
+      return '';
+    });
+
+    isTrustedHost('api.mycompany.com'); // cache miss — reads file
+    isTrustedHost('api.mycompany.com'); // cache hit — skips read
+    isTrustedHost('evil.com'); // cache hit — skips read
+
+    expect(readCount).toBe(1);
+  });
 });
 
 // ── addTrustedHost / removeTrustedHost ────────────────────────────────────────

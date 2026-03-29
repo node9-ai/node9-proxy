@@ -150,8 +150,8 @@ describe('patchConfig — error handling', () => {
     try {
       patchConfig(configPath, { type: 'ignoredTool', toolName: 'Bash' });
       const tmpCall = writeSpy.mock.calls.find(([p]) => String(p).endsWith('.node9-tmp'));
-      expect(tmpCall).toBeDefined();
-      const opts = tmpCall![2] as { mode?: number };
+      if (!tmpCall) throw new Error('Expected writeFileSync to be called with a .node9-tmp path');
+      const opts = tmpCall[2] as { mode?: number };
       expect(opts?.mode).toBe(0o600);
     } finally {
       writeSpy.mockRestore();
