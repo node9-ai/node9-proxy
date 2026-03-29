@@ -52,11 +52,29 @@ export function patchConfig(configPath: string, patch: ConfigPatch): void {
   }
 
   // Atomic write: tmp → rename. Clean up tmp on any failure so we never
-  // leave a stale .node9-tmp artifact on disk.
+  // leave a stale .node9-tmp artifact on disk — this covers both ENOSPC
+  // (writeFileSync writes partial content before throwing) and EXDEV
+  // (renameSync fails on cross-device links).
+  //
+  // Concurrency: patchConfig is fully synchronous. In the daemon, the only
+  // async boundary before this function is readBody() in the route handler.
+  // Once patchConfig begins, Node.js's single-threaded event loop guarantees
+  // the read-modify-write cycle runs without interleaving with other requests.
+  // Cross-process races (e.g. CLI and daemon writing simultaneously) are
+  // handled by the tmp+rename atomicity — rename is atomic on POSIX systems.
   const dir = path.dirname(configPath);
   fs.mkdirSync(dir, { recursive: true });
   const tmp = configPath + '.node9-tmp';
-  fs.writeFileSync(tmp, JSON.stringify(config, null, 2), { mode: 0o600 });
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(config, null, 2), { mode: 0o600 });
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* best-effort: may not exist if open() failed before any bytes were written */
+    }
+    throw err;
+  }
   try {
     fs.renameSync(tmp, configPath);
   } catch (err) {

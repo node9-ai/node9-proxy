@@ -154,4 +154,27 @@ describe('patchConfig — error handling', () => {
       writeSpy.mockRestore();
     }
   });
+
+  it('cleans up .node9-tmp when writeFileSync writes partial content then throws (ENOSPC)', () => {
+    // Simulate a disk-full scenario: writeFileSync creates the tmp file (partial
+    // content written) and then throws. patchConfig must unlink the partial tmp
+    // before re-throwing so no stale artifact remains.
+    const tmpPath = configPath + '.node9-tmp';
+    const realWriteFileSync = fs.writeFileSync.bind(fs); // capture before spy
+    const writeSpy = vi
+      .spyOn(fs, 'writeFileSync')
+      .mockImplementationOnce((p: fs.PathOrFileDescriptor) => {
+        // Write partial content to simulate bytes-written-then-failed
+        realWriteFileSync(String(p), 'partial{');
+        throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+      });
+    try {
+      expect(() => patchConfig(configPath, { type: 'ignoredTool', toolName: 'Bash' })).toThrow(
+        /ENOSPC/
+      );
+      expect(fs.existsSync(tmpPath)).toBe(false);
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
 });
