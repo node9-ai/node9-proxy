@@ -164,15 +164,22 @@ export async function notifyTaint(filePath: string, source: string): Promise<voi
   }
 }
 
+// Re-export TaintRecord so callers share one canonical type instead of an inline duplicate.
+export type { TaintRecord } from '../daemon/taint-store.js';
+import type { TaintRecord } from '../daemon/taint-store.js';
+
 export interface TaintCheckResult {
   tainted: boolean;
-  record?: { path: string; source: string; createdAt: number; expiresAt: number };
+  record?: TaintRecord;
 }
 
 /**
  * Ask the daemon if any of the given file paths are tainted.
  * Returns the first tainted record found, or { tainted: false }.
- * Returns { tainted: false } if daemon is unreachable.
+ *
+ * Fail-open: returns { tainted: false } on network error so a daemon blip
+ * doesn't stall the agent. The error is logged to hook-debug.log so it's
+ * visible without being fatal.
  */
 export async function checkTaint(paths: string[]): Promise<TaintCheckResult> {
   if (paths.length === 0 || !isDaemonRunning()) return { tainted: false };
@@ -185,7 +192,20 @@ export async function checkTaint(paths: string[]): Promise<TaintCheckResult> {
       signal: AbortSignal.timeout(2000),
     });
     return (await res.json()) as TaintCheckResult;
-  } catch {
+  } catch (err) {
+    // Fail-open: a taint check failure must not block the agent entirely.
+    // Log so the operator can diagnose daemon instability without user impact.
+    try {
+      const { appendToLog, HOOK_DEBUG_LOG } = await import('../audit/index.js');
+      appendToLog(HOOK_DEBUG_LOG, {
+        ts: new Date().toISOString(),
+        event: 'checkTaint-error',
+        error: String(err),
+        paths,
+      });
+    } catch {
+      /* audit write failure is non-fatal */
+    }
     return { tainted: false };
   }
 }

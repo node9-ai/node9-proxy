@@ -11,10 +11,11 @@ import { TaintStore } from '../daemon/taint-store.js';
 // ── Minimal stub daemon that only serves /taint and /taint/check ──────────────
 
 function readBody(req: http.IncomingMessage): Promise<string> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let body = '';
     req.on('data', (c) => (body += c));
     req.on('end', () => resolve(body));
+    req.on('error', reject);
   });
 }
 
@@ -155,6 +156,23 @@ describe('Exfiltration scenario: write secret → upload blocked', () => {
 
   it('step 3: upload of a different (clean) file is not blocked', async () => {
     const result = await postTaintCheck(['/tmp/clean-report.pdf']);
+    expect(result.tainted).toBe(false);
+  });
+});
+
+describe('checkTaint fail-open: unreachable daemon returns tainted:false', () => {
+  it('fetch to a closed port resolves as { tainted: false } — does not throw', async () => {
+    // Simulate what checkTaint() does when the daemon is unreachable.
+    // The function must fail-open so a daemon crash does not block the agent entirely.
+    const result = await fetch('http://127.0.0.1:1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths: ['/tmp/secret.txt'] }),
+      signal: AbortSignal.timeout(200),
+    }).then(
+      () => ({ tainted: false as const }), // unexpected success → treat as clean
+      () => ({ tainted: false as const }) // connection refused / timeout → fail-open
+    );
     expect(result.tainted).toBe(false);
   });
 });

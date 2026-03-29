@@ -31,12 +31,29 @@ describe('canonicalise', () => {
     const result = canonicalise([{ b: 2, a: 1 }]) as Array<Record<string, number>>;
     expect(Object.keys(result[0])).toEqual(['a', 'b']);
   });
+
+  it('coerces Date to ISO string — not {} which would cause all dates to collide', () => {
+    const d = new Date('2026-01-01T00:00:00.000Z');
+    expect(canonicalise(d)).toBe('2026-01-01T00:00:00.000Z');
+    // Two different dates must produce different hashes
+    const d2 = new Date('2026-06-01T00:00:00.000Z');
+    expect(hashArgs({ ts: d })).not.toBe(hashArgs({ ts: d2 }));
+  });
+
+  it('coerces RegExp to string', () => {
+    expect(canonicalise(/foo/gi)).toBe('/foo/gi');
+  });
+
+  it('coerces Buffer to base64', () => {
+    const buf = Buffer.from('hello');
+    expect(canonicalise(buf)).toBe(buf.toString('base64'));
+  });
 });
 
 describe('hashArgs', () => {
-  it('returns a 16-character hex string', () => {
+  it('returns a 32-character hex string', () => {
     const h = hashArgs({ file_path: '/tmp/foo.txt', content: 'hello' });
-    expect(h).toMatch(/^[0-9a-f]{16}$/);
+    expect(h).toMatch(/^[0-9a-f]{32}$/);
   });
 
   it('is deterministic — same args produce the same hash', () => {
@@ -58,11 +75,12 @@ describe('hashArgs', () => {
 
   it('handles null args', () => {
     expect(() => hashArgs(null)).not.toThrow();
-    expect(hashArgs(null)).toMatch(/^[0-9a-f]{16}$/);
+    expect(hashArgs(null)).toMatch(/^[0-9a-f]{32}$/);
   });
 
-  it('handles undefined args', () => {
+  it('handles undefined args — returns valid hex string', () => {
     expect(() => hashArgs(undefined)).not.toThrow();
+    expect(hashArgs(undefined)).toMatch(/^[0-9a-f]{32}$/);
   });
 
   it('array arg order matters', () => {
@@ -78,7 +96,7 @@ describe('auditHashArgs integration: appendLocalAudit output', () => {
     // when auditHashArgsEnabled=true, the log entry stores argsHash (not args).
     const args = { file_path: '/tmp/secret.env', content: 'API_KEY=supersecret' };
     const hash = hashArgs(args);
-    expect(hash).toMatch(/^[0-9a-f]{16}$/);
+    expect(hash).toMatch(/^[0-9a-f]{32}$/);
     // The hash must NOT contain the original content
     expect(hash).not.toContain('supersecret');
     expect(hash).not.toContain('API_KEY');
