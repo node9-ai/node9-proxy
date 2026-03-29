@@ -505,6 +505,51 @@ describe('detectAgents', () => {
     expect(String(stderrSpy.mock.calls[0][0])).toContain('EACCES');
     stderrSpy.mockRestore();
   });
+
+  it('ENOENT is silently treated as false — no stderr warning', () => {
+    // ENOENT just means the file/dir does not exist; it must not produce noise on stderr.
+    vi.mocked(fs.existsSync).mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    expect(detectAgents(home)).toEqual({ claude: false, gemini: false, cursor: false });
+    expect(stderrSpy).not.toHaveBeenCalled();
+    stderrSpy.mockRestore();
+  });
+
+  it('returns partial results when only some paths throw (second check throws)', () => {
+    // .claude exists, .claude.json throws EACCES — claude should still be true
+    // because the first exists() call short-circuits via ||.
+    vi.mocked(fs.existsSync).mockImplementation((q) => {
+      const s = String(q).replace(/\\/g, '/');
+      if (s === p('.claude.json')) {
+        throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      }
+      return s === p('.claude');
+    });
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const result = detectAgents(home);
+    // Short-circuit: .claude is true so .claude.json is never called
+    expect(result.claude).toBe(true);
+    expect(result.gemini).toBe(false);
+    stderrSpy.mockRestore();
+  });
+
+  it('returns true for claude when first check throws but second check succeeds', () => {
+    // .claude throws EACCES, .claude.json exists — claude should still be true
+    vi.mocked(fs.existsSync).mockImplementation((q) => {
+      const s = String(q).replace(/\\/g, '/');
+      if (s === p('.claude')) {
+        throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      }
+      return s === p('.claude.json');
+    });
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    expect(detectAgents(home).claude).toBe(true);
+    // EACCES on the first check should still warn
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('EACCES'));
+    stderrSpy.mockRestore();
+  });
 });
 
 // ── teardownCursor ────────────────────────────────────────────────────────────

@@ -51,10 +51,20 @@ export function patchConfig(configPath: string, patch: ConfigPatch): void {
     }
   }
 
-  // Atomic write: tmp → rename
+  // Atomic write: tmp → rename. Clean up tmp on any failure so we never
+  // leave a stale .node9-tmp artifact on disk.
   const dir = path.dirname(configPath);
   fs.mkdirSync(dir, { recursive: true });
   const tmp = configPath + '.node9-tmp';
   fs.writeFileSync(tmp, JSON.stringify(config, null, 2), { mode: 0o600 });
-  fs.renameSync(tmp, configPath);
+  try {
+    fs.renameSync(tmp, configPath);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* best-effort cleanup */
+    }
+    throw err;
+  }
 }

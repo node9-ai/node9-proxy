@@ -1,6 +1,6 @@
 // src/__tests__/config-patch.spec.ts
 // Unit tests for patchConfig: smartRule and ignoredTool patching, dedup, atomic write.
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -113,5 +113,33 @@ describe('patchConfig — error handling', () => {
     patchConfig(configPath, { type: 'ignoredTool', toolName: 'Bash' });
     const tmpPath = configPath + '.node9-tmp';
     expect(fs.existsSync(tmpPath)).toBe(false);
+  });
+
+  it('cleans up .node9-tmp when renameSync fails', () => {
+    // Simulate cross-device rename failure (EXDEV). writeFileSync succeeds and
+    // creates the tmp file; renameSync throws. patchConfig must delete the tmp
+    // file before re-throwing so it doesn't accumulate stale artifacts.
+    const renameSpy = vi.spyOn(fs, 'renameSync').mockImplementationOnce(() => {
+      throw Object.assign(new Error('EXDEV: cross-device link'), { code: 'EXDEV' });
+    });
+    try {
+      expect(() => patchConfig(configPath, { type: 'ignoredTool', toolName: 'Bash' })).toThrow();
+      expect(fs.existsSync(configPath + '.node9-tmp')).toBe(false);
+    } finally {
+      renameSpy.mockRestore();
+    }
+  });
+
+  it('throws when writeFileSync fails (e.g. EACCES on a read-only directory)', () => {
+    vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(() => {
+      throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+    });
+    try {
+      expect(() => patchConfig(configPath, { type: 'ignoredTool', toolName: 'Bash' })).toThrow(
+        /EACCES/
+      );
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 });
