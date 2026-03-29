@@ -83,6 +83,7 @@ export const ConfigFileSchema = z
         slackEnabled: z.boolean().optional(),
         enableTrustSessions: z.boolean().optional(),
         allowGlobalPause: z.boolean().optional(),
+        auditHashArgs: z.boolean().optional(),
       })
       .optional(),
     policy: z

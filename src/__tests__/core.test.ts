@@ -587,6 +587,46 @@ describe('authorizeHeadless — persistent decisions', () => {
     expect(result.approved).toBe(false);
     expect(result.reason).toMatch(/always deny/i);
   });
+
+  it('smart-rule review is NOT bypassed by a persistent allow — { "Bash": "allow" } must not skip review-git-push', async () => {
+    // Regression: a blanket persistent allow for the Bash tool must never override
+    // a smart rule with verdict "review". The user explicitly configured review-git-push
+    // to require human approval; a stored "always allow" should not silently bypass it.
+    const decisionsPath = path.join('/mock/home', '.node9', 'decisions.json');
+    const globalPath = path.join('/mock/home', '.node9', 'config.json');
+    const globalConfig = {
+      // Short timeout so the race engine resolves deterministically in test mode
+      // (no UI approvers are available). The specific blockedBy value is 'timeout'.
+      settings: { mode: 'standard', approvalTimeoutMs: 50 },
+      policy: {
+        smartRules: [
+          {
+            name: 'review-git-push',
+            tool: 'bash',
+            conditions: [{ field: 'command', op: 'matches', value: '\\bgit\\b.*\\bpush\\b' }],
+            conditionMode: 'all',
+            verdict: 'review',
+            reason: 'git push sends changes to a shared remote',
+          },
+        ],
+      },
+    };
+    existsSpy.mockImplementation((p) => String(p) === decisionsPath || String(p) === globalPath);
+    readSpy.mockImplementation((p) => {
+      if (String(p) === decisionsPath) return JSON.stringify({ Bash: 'allow' });
+      if (String(p) === globalPath) return JSON.stringify(globalConfig);
+      return '';
+    });
+    // git push matches the review-git-push smart rule → must NOT be auto-approved
+    // by the persistent store. The request must reach the race engine. With a
+    // 50ms timeout and no UI approvers in test mode, it resolves via timeout.
+    const result = await authorizeHeadless('Bash', { command: 'git push origin dev' });
+    expect(result.approved).toBe(false);
+    // Key invariant: the persistent store was NOT used to decide
+    expect(result.checkedBy).not.toBe('persistent');
+    // Request reached the race engine (timed out or no mechanism) — not short-circuited
+    expect(result.blockedBy === 'timeout' || result.noApprovalMechanism === true).toBe(true);
+  });
 });
 
 // ── isDaemonRunning ───────────────────────────────────────────────────────────

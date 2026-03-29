@@ -46,6 +46,7 @@ export interface Config {
     approvalTimeoutMs?: number;
     approvalTimeoutSeconds?: number;
     flightRecorder?: boolean;
+    auditHashArgs?: boolean;
     approvers: { native: boolean; browser: boolean; cloud: boolean; terminal: boolean };
     environment?: string;
   };
@@ -103,6 +104,7 @@ export const DEFAULT_CONFIG: Config = {
     enableHookLogDebug: true,
     approvalTimeoutMs: 120_000, // 120-second auto-deny timeout
     flightRecorder: true,
+    auditHashArgs: true,
     approvers: { native: true, browser: true, cloud: false, terminal: true },
   },
   policy: {
