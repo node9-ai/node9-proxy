@@ -804,12 +804,27 @@ describe('daemon DNS rebinding guard', () => {
   it('rejects requests with a spoofed Host header (421)', async ({ skip }) => {
     if (!portWasFree) skip();
 
-    // Simulate what a DNS-rebinding attack sends: TCP connection to 127.0.0.1
-    // but Host header set to the attacker's domain.
-    const res = await fetch(`http://127.0.0.1:${DAEMON_PORT}/settings`, {
-      headers: { Host: 'attacker.com' },
+    // fetch() silently ignores custom Host header overrides (undici sets Host
+    // from the URL). Use http.request() directly so the spoofed header is
+    // actually sent on the wire — this is what a DNS-rebinding attack does.
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port: DAEMON_PORT,
+          path: '/settings',
+          method: 'GET',
+          headers: { Host: 'attacker.com' },
+        },
+        (res) => {
+          resolve(res.statusCode ?? 0);
+          res.resume();
+        }
+      );
+      req.on('error', reject);
+      req.end();
     });
-    expect(res.status).toBe(421);
+    expect(status).toBe(421);
   });
 
   it('accepts requests with Host: 127.0.0.1:PORT (200)', async ({ skip }) => {
