@@ -679,13 +679,25 @@ export function startDaemon(): void {
     ) {
       if (!validToken(req)) return res.writeHead(403).end();
       try {
-        const id = pathname.split('/')[2];
-        const suggestion = suggestions.get(id);
-        if (!suggestion) return res.writeHead(404).end();
-
         const body = await readBody(req);
         const data = body ? (JSON.parse(body) as { configPath?: string; rule?: unknown }) : {};
         const configPath = data.configPath ?? GLOBAL_CONFIG_PATH;
+
+        // Clamp configPath to ~/.node9/ before touching anything else — path.resolve
+        // neutralises any .. traversal so a crafted body cannot write outside the
+        // node9 config directory. Check happens before suggestion lookup so it is
+        // testable without a pre-existing suggestion in memory.
+        const node9Dir = path.dirname(GLOBAL_CONFIG_PATH); // ~/.node9
+        if (!path.resolve(configPath).startsWith(node9Dir + path.sep)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(
+            JSON.stringify({ error: 'configPath must be within the node9 config directory' })
+          );
+        }
+
+        const id = pathname.split('/')[2];
+        const suggestion = suggestions.get(id);
+        if (!suggestion) return res.writeHead(404).end();
 
         // Allow the UI to override the rule before applying — validate against schema first
         // to prevent a malformed rule from corrupting the config file.
