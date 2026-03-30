@@ -803,6 +803,47 @@ describe('authorizeHeadless — persistent decisions', () => {
     const localPolicyCheckedBy: AuthResult['checkedBy'] = 'local-policy';
     expect(result.checkedBy).toBe(localPolicyCheckedBy);
   });
+
+  it('smart rule verdict:deny blocks even when persistent allow exists — persistent cannot override a block', async () => {
+    // Security invariant: a smart rule with verdict:'deny' must always block,
+    // regardless of what the persistent decisions store says.
+    // The orchestrator exits at the hard-block path before reaching the
+    // persistent check (`policyResult.ruleName ? null : getPersistentDecision`
+    // is never reached when decision === 'block').
+    //
+    // If this test fails (approved: true), the persistent store is overriding
+    // an explicit user-configured block rule — a critical security regression.
+    const decisionsPath = path.join('/mock/home', '.node9', 'decisions.json');
+    const globalPath = path.join('/mock/home', '.node9', 'config.json');
+    existsSpy.mockImplementation((p) => String(p) === decisionsPath || String(p) === globalPath);
+    readSpy.mockImplementation((p) => {
+      if (String(p) === decisionsPath) return JSON.stringify({ Bash: 'allow' }); // would approve if reached
+      if (String(p) === globalPath)
+        return JSON.stringify({
+          settings: { mode: 'standard', approvalTimeoutMs: 0 },
+          policy: {
+            smartRules: [
+              {
+                name: 'block-deploy-script',
+                tool: 'bash',
+                conditions: [{ field: 'command', op: 'matches', value: 'restricted_deploy\\.sh' }],
+                conditionMode: 'all',
+                verdict: 'block',
+                reason: 'deploy script is explicitly blocked',
+              },
+            ],
+          },
+        });
+      return '';
+    });
+    const result = await authorizeHeadless('Bash', {
+      command: './restricted_deploy.sh --env prod',
+    });
+    expect(result.approved).toBe(false);
+    // Blocked by smart rule hard-block, not by persistent or timeout.
+    const localConfigBlockedBy: AuthResult['blockedBy'] = 'local-config';
+    expect(result.blockedBy).toBe(localConfigBlockedBy);
+  });
 });
 
 // ── isDaemonRunning ───────────────────────────────────────────────────────────
@@ -1269,6 +1310,42 @@ describe('authorizeHeadless — smart rule hard block', () => {
     expect(result.approved).toBe(false);
     expect(result.reason).toMatch(/root wipe blocked/);
     expect(result.blockedBy).toBe('local-config');
+  });
+
+  it('persistent allow does not override a smart rule block verdict', async () => {
+    // A persistent 'allow' decision exists for the tool, but a smart rule
+    // blocks the specific command. The block must win: evaluatePolicy returns
+    // 'block' at line ~351 of orchestrator.ts before getPersistentDecision is
+    // consulted.
+    const projectPath = path.join(process.cwd(), 'node9.config.json');
+    const decisionsPath = path.join('/mock/home', '.node9', 'decisions.json');
+    existsSpy.mockImplementation((p) => String(p) === projectPath || String(p) === decisionsPath);
+    readSpy.mockImplementation((p) => {
+      if (String(p) === projectPath)
+        return JSON.stringify({
+          settings: { mode: 'standard', approvalTimeoutMs: 0 },
+          policy: {
+            smartRules: [
+              {
+                name: 'block-deploy-script',
+                tool: 'bash',
+                conditions: [{ field: 'command', op: 'matches', value: 'restricted_deploy\\.sh' }],
+                conditionMode: 'all',
+                verdict: 'block',
+                reason: 'deploy script blocked by policy',
+              },
+            ],
+          },
+        });
+      if (String(p) === decisionsPath) return JSON.stringify({ bash: 'allow' });
+      return '';
+    });
+    const result = await authorizeHeadless('bash', {
+      command: './restricted_deploy.sh --env prod',
+    });
+    expect(result.approved).toBe(false);
+    const localConfigBlockedBy: AuthResult['blockedBy'] = 'local-config';
+    expect(result.blockedBy).toBe(localConfigBlockedBy);
   });
 });
 
