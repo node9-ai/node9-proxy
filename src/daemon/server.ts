@@ -49,6 +49,7 @@ import {
   CREDENTIALS_FILE,
   suggestionTracker,
   suggestions,
+  taintStore,
   insightCounts,
   loadInsightCounts,
   saveInsightCounts,
@@ -762,6 +763,85 @@ export function startDaemon(): void {
         return res.end(JSON.stringify({ ok: true }));
       } catch {
         res.writeHead(400).end();
+      }
+    }
+
+    // ── Taint — record a tainted file path ───────────────────────────────────
+    // Called by the hook process after a DLP write-block to persist the taint
+    // in the long-running daemon so later tool calls can check it.
+    // No CSRF token required — callers are local hook subprocesses, not browsers.
+    if (req.method === 'POST' && pathname === '/taint') {
+      try {
+        const body = JSON.parse(await readBody(req)) as {
+          path?: unknown;
+          source?: unknown;
+          ttlMs?: unknown;
+        };
+        if (typeof body.path !== 'string' || typeof body.source !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'path and source are required strings' }));
+        }
+        const ttlMs = typeof body.ttlMs === 'number' ? body.ttlMs : undefined;
+        taintStore.taint(body.path, body.source, ttlMs);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ ok: true }));
+      } catch {
+        res.writeHead(400).end();
+        return;
+      }
+    }
+
+    // ── Taint check — query whether any paths are tainted ────────────────────
+    // Called by the hook process before approving a network/upload operation.
+    if (req.method === 'POST' && pathname === '/taint/check') {
+      try {
+        const body = JSON.parse(await readBody(req)) as { paths?: unknown };
+        if (!Array.isArray(body.paths)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'paths must be an array' }));
+        }
+        // Reject upfront if any element is not a string — silently skipping
+        // non-strings would allow a mixed array to sneak through the check.
+        if ((body.paths as unknown[]).some((p) => typeof p !== 'string')) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'all paths must be strings' }));
+        }
+        for (const p of body.paths as string[]) {
+          const record = taintStore.check(p);
+          if (record) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ tainted: true, record }));
+          }
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ tainted: false }));
+      } catch {
+        res.writeHead(400).end();
+        return;
+      }
+    }
+
+    // ── Taint propagate — copy/move taint from source to destination path ────
+    // Called by the hook process after a file copy (cp) or move (mv) involving
+    // a tainted source. clearSource=true implements mv semantics.
+    if (req.method === 'POST' && pathname === '/taint/propagate') {
+      try {
+        const body = JSON.parse(await readBody(req)) as {
+          src?: unknown;
+          dest?: unknown;
+          clearSource?: unknown;
+        };
+        if (typeof body.src !== 'string' || typeof body.dest !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'src and dest are required strings' }));
+        }
+        const clearSource = body.clearSource === true;
+        taintStore.propagate(body.src, body.dest, clearSource);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ ok: true }));
+      } catch {
+        res.writeHead(400).end();
+        return;
       }
     }
 

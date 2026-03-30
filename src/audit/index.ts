@@ -5,6 +5,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { hashArgs } from './hasher.js';
 
 export const LOCAL_AUDIT_LOG = path.join(os.homedir(), '.node9', 'audit.log');
 export const HOOK_DEBUG_LOG = path.join(os.homedir(), '.node9', 'hook-debug.log');
@@ -37,13 +38,16 @@ export function appendToLog(logPath: string, entry: object): void {
 export function appendHookDebug(
   toolName: string,
   args: unknown,
-  meta?: { agent?: string; mcpServer?: string }
+  meta?: { agent?: string; mcpServer?: string },
+  auditHashArgsEnabled?: boolean
 ): void {
-  const safeArgs = args ? JSON.parse(redactSecrets(JSON.stringify(args))) : {};
+  const argsField = auditHashArgsEnabled
+    ? { argsHash: hashArgs(args) }
+    : { args: args ? JSON.parse(redactSecrets(JSON.stringify(args))) : {} };
   appendToLog(HOOK_DEBUG_LOG, {
     ts: new Date().toISOString(),
     tool: toolName,
-    args: safeArgs,
+    ...argsField,
     agent: meta?.agent,
     mcpServer: meta?.mcpServer,
     hostname: os.hostname(),
@@ -56,13 +60,16 @@ export function appendLocalAudit(
   args: unknown,
   decision: 'allow' | 'deny',
   checkedBy: string,
-  meta?: { agent?: string; mcpServer?: string }
+  meta?: { agent?: string; mcpServer?: string },
+  auditHashArgsEnabled?: boolean
 ): void {
-  const safeArgs = args ? JSON.parse(redactSecrets(JSON.stringify(args))) : {};
+  const argsField = auditHashArgsEnabled
+    ? { argsHash: hashArgs(args) }
+    : { args: args ? JSON.parse(redactSecrets(JSON.stringify(args))) : {} };
   appendToLog(LOCAL_AUDIT_LOG, {
     ts: new Date().toISOString(),
     tool: toolName,
-    args: safeArgs,
+    ...argsField,
     decision,
     checkedBy,
     agent: meta?.agent,

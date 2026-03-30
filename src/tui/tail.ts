@@ -61,6 +61,7 @@ interface ApprovalRequest {
     blockedByLabel?: string;
     matchedField?: string;
     matchedWord?: string;
+    ruleName?: string;
   };
   timestamp?: number;
   /** How many consecutive allows (including this one) if approved. Used for 💡 insight. */
@@ -84,8 +85,6 @@ const GREEN = '\x1B[32m';
 const HIDE_CURSOR = '\x1B[?25l';
 const SHOW_CURSOR = '\x1B[?25h';
 const ERASE_DOWN = '\x1B[J';
-const SAVE_CURSOR = '\x1B7';
-const RESTORE_CURSOR = '\x1B8';
 
 // ── Activity feed rendering ───────────────────────────────────────────────────
 
@@ -226,8 +225,14 @@ function buildCardLines(req: ApprovalRequest, localCount: number = 0): string[] 
     `${BOLD}${CYAN}╔══ Node9 Approval Required ══╗${RESET}`,
     `${CYAN}║${RESET} Tool:    ${BOLD}${req.toolName}${RESET}`,
     `${CYAN}║${RESET} Reason:  ${tierLabel} — ${blockedBy}${RESET}`,
-    `${CYAN}║${RESET} Args:    ${GRAY}${argsPreview}${RESET}`,
   ];
+
+  // Taint warning: show the file + source context so the user knows exactly why
+  if (req.riskMetadata?.ruleName && blockedBy.includes('Taint')) {
+    lines.push(`${CYAN}║${RESET} ${YELLOW}⚠  ${req.riskMetadata.ruleName}${RESET}`);
+  }
+
+  lines.push(`${CYAN}║${RESET} Args:    ${GRAY}${argsPreview}${RESET}`);
 
   // 💡 Insight: show after 2+ prior terminal approvals for this tool (i.e. the 3rd prompt onward)
   if (localCount >= 2) {
@@ -315,13 +320,18 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
 
   function clearCard(): void {
     if (cardLineCount > 0) {
-      process.stdout.write(RESTORE_CURSOR + ERASE_DOWN);
+      // Use cursor-up instead of RESTORE_CURSOR so scrolling doesn't orphan lines.
+      // RESTORE_CURSOR saves screen coordinates; if the terminal scrolled while the
+      // card was showing, the saved row points to the wrong content and ERASE_DOWN
+      // misses the card's top line, causing a visible duplicate on external resolve.
+      readline.moveCursor(process.stdout, 0, -cardLineCount);
+      process.stdout.write(ERASE_DOWN);
       cardLineCount = 0;
     }
   }
 
   function printCard(req: ApprovalRequest): void {
-    process.stdout.write(HIDE_CURSOR + SAVE_CURSOR);
+    process.stdout.write(HIDE_CURSOR);
     // Seed localAllowCounts from the daemon value when it's higher.
     // This handles cross-session persistence (tail restart) while keeping local
     // increments so the insight stays visible even after the suggestion threshold resets.
@@ -371,9 +381,8 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
       settled = true;
       cleanup();
       // Stamp the decision onto the card in place (keeps card visible in scrollback).
-      // We are at SAVE_CURSOR position; reprint card with decision line appended,
-      // then leave cursor below it so the activity feed continues naturally.
-      process.stdout.write(RESTORE_CURSOR + ERASE_DOWN);
+      // clearCard() moves cursor up to card start and erases; then reprint with stamp.
+      clearCard();
       const stampedLines = buildCardLines(
         req,
         Math.max(
@@ -440,7 +449,7 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
       settled = true;
       cleanup();
       // Stamp the card with the external decision so it stays in scrollback.
-      process.stdout.write(RESTORE_CURSOR + ERASE_DOWN);
+      clearCard();
       const priorCount = Math.max(
         req.allowCount !== undefined ? req.allowCount - 1 : 0,
         localAllowCounts.get(req.toolName) ?? 0

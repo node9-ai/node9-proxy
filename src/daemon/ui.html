@@ -1160,12 +1160,15 @@
         const badgeClass = isEdit ? 'sniper-badge-edit' : 'sniper-badge-exec';
         const badgeLabel = isEdit ? '📝 Code Edit' : '🛑 Execution';
         const tierLabel = `Tier ${rm.tier} · ${esc(rm.blockedByLabel)}`;
+        const isTaint = rm.blockedByLabel?.includes('Taint');
         const fileLine =
-          isEdit && rm.editFilePath
-            ? `<div class="sniper-filepath">📂 ${esc(rm.editFilePath)}</div>`
-            : !isEdit && rm.matchedWord
-              ? `<div class="sniper-match">Matched: <code>${esc(rm.matchedWord)}</code>${rm.matchedField ? ` in <code>${esc(rm.matchedField)}</code>` : ''}</div>`
-              : '';
+          isTaint && rm.ruleName
+            ? `<div class="sniper-match">⚠️ ${esc(rm.ruleName)}</div>`
+            : isEdit && rm.editFilePath
+              ? `<div class="sniper-filepath">📂 ${esc(rm.editFilePath)}</div>`
+              : !isEdit && rm.matchedWord
+                ? `<div class="sniper-match">Matched: <code>${esc(rm.matchedWord)}</code>${rm.matchedField ? ` in <code>${esc(rm.matchedField)}</code>` : ''}</div>`
+                : '';
         const snippetHtml = rm.contextSnippet ? `<pre>${esc(rm.contextSnippet)}</pre>` : '';
         return `
           <div class="sniper-header">

@@ -2,6 +2,18 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import type { AuthResult } from '../auth/orchestrator.js';
+
+// Allow CI to increase the approval timeout without touching test logic.
+// On a loaded runner the 500ms default may be tight; set TEST_APPROVAL_TIMEOUT_MS
+// (e.g. to 2000) in the CI environment to reduce flakiness without code changes.
+// Use isNaN guard (not || 500) so an intentional 0 is preserved — || would
+// silently override 0 with 500, masking a deliberate "no timeout" configuration.
+const rawTimeout = parseInt(process.env.TEST_APPROVAL_TIMEOUT_MS ?? '', 10);
+// Minimum 50ms: a zero timeout would fire the race engine before notifyActivity's
+// I/O callback is even queued, producing intermittent false passes unrelated to
+// policy logic. 50ms is enough to let the I/O round-trip complete.
+const TEST_APPROVAL_TIMEOUT_MS = Number.isNaN(rawTimeout) ? 500 : Math.max(50, rawTimeout); // floor: 0 fires before notifyActivity I/O callback is queued
 
 // 1. Lock down the testing environment globally so it survives between tests.
 process.env.NODE9_TESTING = '1';
@@ -586,6 +598,210 @@ describe('authorizeHeadless — persistent decisions', () => {
     const result = await authorizeHeadless('mkfs_disk', {});
     expect(result.approved).toBe(false);
     expect(result.reason).toMatch(/always deny/i);
+  });
+
+  // Shared config for the regression test and its positive-path complements.
+  // All three tests use the same smart rule (review-git-push scoped to tool:'bash')
+  // to prove the rule fires when it should and stays silent when it shouldn't.
+  const reviewGitPushConfig = {
+    // Short timeout so the race engine resolves deterministically in test mode.
+    // See wall-clock comment in the regression test below for why fake timers
+    // can't be used here.
+    settings: { mode: 'standard', approvalTimeoutMs: TEST_APPROVAL_TIMEOUT_MS },
+    policy: {
+      smartRules: [
+        {
+          name: 'review-git-push',
+          tool: 'bash',
+          conditions: [{ field: 'command', op: 'matches', value: '\\bgit\\b.*\\bpush\\b' }],
+          conditionMode: 'all',
+          verdict: 'review',
+          reason: 'git push sends changes to a shared remote',
+        },
+      ],
+    },
+  };
+
+  // Helper: wire existsSpy and readSpy so decisions.json returns `decisions`
+  // and config.json returns reviewGitPushConfig. Extracted to avoid repeating
+  // the same mock structure verbatim across three tests — a single change to
+  // the mock layout (e.g. adding a third spy target) only needs to land here.
+  //
+  // Closure note: the function closes over the existsSpy/readSpy *variables*
+  // (not their values at definition time). beforeEach reassigns these variables
+  // before each test, so the helper always references the current spy when
+  // called inside a test body. Vitest runs tests sequentially within a file,
+  // so there is no concurrent-reassignment risk.
+  function setupReviewGitPushMocks(decisions: Record<string, string>): void {
+    const decisionsPath = path.join('/mock/home', '.node9', 'decisions.json');
+    const globalPath = path.join('/mock/home', '.node9', 'config.json');
+    existsSpy.mockImplementation((p) => String(p) === decisionsPath || String(p) === globalPath);
+    readSpy.mockImplementation((p) => {
+      if (String(p) === decisionsPath) return JSON.stringify(decisions);
+      if (String(p) === globalPath) return JSON.stringify(reviewGitPushConfig);
+      return '';
+    });
+  }
+
+  it('smart-rule review is NOT bypassed by a persistent allow — { "Bash": "allow" } must not skip review-git-push', async () => {
+    // Regression: a blanket persistent allow for the Bash tool must never override
+    // a smart rule with verdict "review". The user explicitly configured review-git-push
+    // to require human approval; a stored "always allow" should not silently bypass it.
+    setupReviewGitPushMocks({ Bash: 'allow' });
+    // git push matches the review-git-push smart rule → must NOT be auto-approved
+    // by the persistent store. The request must reach the race engine.
+    //
+    // Why wall-clock and not vi.useFakeTimers():
+    //   authorizeHeadless() calls notifyActivity() before entering the race engine.
+    //   notifyActivity opens a real Unix socket; the error callback fires as an I/O
+    //   event that vi.advanceTimersByTimeAsync cannot unblock because fake timers
+    //   don't intercept libuv I/O. The setTimeout(500) is registered only AFTER
+    //   that I/O round-trip, so timer advancement fires it too early and the test
+    //   hangs waiting for a promise that never resolves.
+    //
+    // TEST_APPROVAL_TIMEOUT_MS (default 500ms) is still deterministic: in
+    // NODE9_TESTING=1 mode native/browser/terminal approvers are hard-disabled,
+    // there is no cloud API key, and the daemon is not running — the timeout
+    // racer is the only active promise in the race.
+    //
+    // policyResult.ruleName (internal) is not exposed on AuthResult; checkedBy !==
+    // 'persistent' is the correct invariant — it proves the persistent short-circuit
+    // was suppressed by the smart-rule match.
+    // Guard: this test's determinism depends on NODE9_TESTING=1 disabling all
+    // non-timeout racers (native, browser, terminal approvers). If a future
+    // approver is added without checking NODE9_TESTING, blockedBy could be
+    // something other than 'timeout' and the assertion below would silently
+    // stop testing the right thing.
+    expect(process.env.NODE9_TESTING).toBe('1');
+    const result = await authorizeHeadless('Bash', { command: 'git push origin dev' });
+    expect(result.approved).toBe(false);
+    // Key invariant: the persistent store was NOT used to decide.
+    // Typed so TypeScript catches it if 'persistent' is removed from AuthResult['checkedBy'].
+    const persistentCheckedBy: AuthResult['checkedBy'] = 'persistent';
+    expect(result.checkedBy).not.toBe(persistentCheckedBy);
+    // Race engine was entered and resolved via the timeout racer.
+    const timeoutBlockedBy: AuthResult['blockedBy'] = 'timeout';
+    expect(result.blockedBy).toBe(timeoutBlockedBy);
+    // Do NOT pin result.reason text — rewording the timeout message should not
+    // fail this regression test. The invariants above are the meaningful signal.
+  });
+
+  it('persistent allow DOES short-circuit when no smart rule matches the command — positive path', async () => {
+    // Complement to the regression test above: confirms that the smart-rule
+    // check only suppresses the persistent short-circuit when the rule actually
+    // matches. A non-matching command with a persistent allow must approve
+    // immediately without entering the race engine.
+    //
+    // Same smart-rule config as the regression test (review-git-push present),
+    // but the tool is 'mkfs_disk' which is scoped to tool:'bash' — so the rule
+    // does not fire. Result must be approved via the persistent store, not the
+    // race engine.
+    setupReviewGitPushMocks({ mkfs_disk: 'allow' });
+    // 'mkfs_disk' contains 'mkfs' (a DANGEROUS_WORDS hit) — this makes it
+    // "risky" in the local policy evaluation, which means it does NOT get
+    // auto-allowed by the local-policy path. Instead, the orchestrator checks
+    // the persistent decisions store. That is the path this test exercises:
+    // DANGEROUS_WORDS → skip local-policy auto-allow → consult persistent store
+    // → persistent allow found → approved:true, checkedBy:'persistent'.
+    //
+    // FRAGILITY NOTE: this test depends on 'mkfs' remaining in DANGEROUS_WORDS.
+    // If 'mkfs_disk' is ever removed from DANGEROUS_WORDS, local-policy would
+    // auto-allow it directly (checkedBy:'local-policy') and the persistent store
+    // path would no longer be exercised — the test would still pass but would
+    // silently cover a different code path. If DANGEROUS_WORDS is refactored,
+    // update this test to use a tool name that still triggers the dangerous-word
+    // check, or add an explicit assertion that checkedBy is NOT 'local-policy'.
+    //
+    // DANGEROUS_WORDS does NOT force the race engine the way a smart rule does.
+    // Only a smart rule with verdict:'review' suppresses the persistent short-circuit.
+    //
+    // Smart rule scoping is by tool NAME, not command content:
+    //   rule.tool = 'bash' matches when authorizeHeadless('Bash', ...) is called.
+    //   authorizeHeadless('mkfs_disk', ...) does not match — 'mkfs_disk' !== 'bash'.
+    // If the call were authorizeHeadless('Bash', { command: 'mkfs ...' }), the rule
+    // would fire (assuming the condition matched), suppressing persistent. That is a
+    // different test. Here the tool name itself is 'mkfs_disk', so the rule is silent
+    // and persistent allow wins.
+    const result = await authorizeHeadless('mkfs_disk', {});
+    expect(result.approved).toBe(true);
+    // Persistent store was used — smart rule did not fire for mkfs_disk.
+    const expectedCheckedBy: AuthResult['checkedBy'] = 'persistent';
+    expect(result.checkedBy).toBe(expectedCheckedBy);
+    // Race engine was NOT entered — no blockedBy value.
+    expect(result.blockedBy).toBeUndefined();
+  });
+
+  it('persistent allow DOES short-circuit when smart rule is present but command does not match — same tool', async () => {
+    // Variant of the positive-path test above: the call is authorizeHeadless('Bash', ...)
+    // so the tool name matches the rule, but the command ('mkfs /dev/sdb') does not
+    // match the rule's condition (which fires on git-push patterns). Persistent allow
+    // must still win without entering the race engine.
+    //
+    // 'mkfs' is a DANGEROUS_WORDS hit — local-policy skips auto-allow and consults
+    // persistent. The persistent store finds { Bash: 'allow' } and approves immediately
+    // (checkedBy:'persistent'). The smart rule is present for tool:'bash' but its
+    // condition doesn't match 'mkfs /dev/sdb', so it never suppresses persistent.
+    //
+    // This confirms that tool-name matching alone is insufficient to suppress persistent;
+    // the rule's condition must also evaluate to true.
+    //
+    // FRAGILITY NOTE: same DANGEROUS_WORDS dependency as the mkfs_disk test above.
+    // 'mkfs' must remain in DANGEROUS_WORDS for local-policy to skip auto-allow and
+    // reach the persistent store check. If 'mkfs' is removed from DANGEROUS_WORDS,
+    // local-policy would auto-allow this call (checkedBy:'local-policy') and the
+    // persistent path would no longer be exercised.
+    setupReviewGitPushMocks({ Bash: 'allow' });
+    // 'Bash' matches the rule's tool, but 'mkfs /dev/sdb' does not match the
+    // git-push condition — so the rule is a no-op and persistent allow short-circuits.
+    const result = await authorizeHeadless('Bash', { command: 'mkfs /dev/sdb' });
+    expect(result.approved).toBe(true);
+    const expectedCheckedBy: AuthResult['checkedBy'] = 'persistent';
+    expect(result.checkedBy).toBe(expectedCheckedBy);
+    expect(result.blockedBy).toBeUndefined();
+  });
+
+  it('smart rule with verdict:allow short-circuits via local-policy — persistent store is never consulted', async () => {
+    // When a smart rule matches with verdict:'allow', evaluatePolicy returns
+    // decision:'allow' and the orchestrator exits at the local-policy fast path
+    // (line: `if (policyResult.decision === 'allow') return { checkedBy:'local-policy' }`).
+    // The persistent check at `policyResult.ruleName ? null : getPersistentDecision()`
+    // is never reached — persistent is moot, not suppressed.
+    //
+    // This is distinct from verdict:'review' suppression: 'review' falls through
+    // to the persistent check and then nulls it out (ruleName is set). 'allow'
+    // never reaches that code at all.
+    //
+    // approvalTimeoutMs: 0 is safe here (unlike the regression test which needs
+    // 50ms+): the verdict:'allow' fast-path exits before the race engine is
+    // entered — no setTimeout is ever registered, so a zero timeout cannot fire
+    // prematurely and cause a hang.
+    const decisionsPath = path.join('/mock/home', '.node9', 'decisions.json');
+    const globalPath = path.join('/mock/home', '.node9', 'config.json');
+    existsSpy.mockImplementation((p) => String(p) === decisionsPath || String(p) === globalPath);
+    readSpy.mockImplementation((p) => {
+      if (String(p) === decisionsPath) return JSON.stringify({ Bash: 'deny' }); // would block if reached
+      if (String(p) === globalPath)
+        return JSON.stringify({
+          settings: { mode: 'standard', approvalTimeoutMs: 0 },
+          policy: {
+            smartRules: [
+              {
+                name: 'allow-git-status',
+                tool: 'bash',
+                conditions: [{ field: 'command', op: 'matches', value: '\\bgit\\b.*\\bstatus\\b' }],
+                conditionMode: 'all',
+                verdict: 'allow',
+              },
+            ],
+          },
+        });
+      return '';
+    });
+    const result = await authorizeHeadless('Bash', { command: 'git status' });
+    expect(result.approved).toBe(true);
+    // Smart rule verdict:'allow' exits via local-policy, not persistent.
+    const localPolicyCheckedBy: AuthResult['checkedBy'] = 'local-policy';
+    expect(result.checkedBy).toBe(localPolicyCheckedBy);
   });
 });
 

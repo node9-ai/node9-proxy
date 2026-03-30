@@ -144,6 +144,103 @@ export async function notifyDaemonViewer(
   return { id, allowCount: allowCount ?? 1 };
 }
 
+/**
+ * Notify the daemon to taint a file path after a DLP write-block.
+ * Must be awaited before the hook process exits — fire-and-forget loses the
+ * taint because the process exits before the fetch completes.
+ */
+export async function notifyTaint(filePath: string, source: string): Promise<void> {
+  if (!isDaemonRunning()) return;
+  const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
+  try {
+    await fetch(`${base}/taint`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: filePath, source }),
+      signal: AbortSignal.timeout(1000),
+    });
+  } catch {
+    // Taint is best-effort — daemon unreachable is non-fatal
+  }
+}
+
+/**
+ * Notify the daemon to propagate taint from src to dest (cp/mv semantics).
+ * clearSource=true implements mv: the source taint is removed after propagation.
+ */
+export async function notifyTaintPropagate(
+  src: string,
+  dest: string,
+  clearSource = false
+): Promise<void> {
+  if (!isDaemonRunning()) return;
+  const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
+  try {
+    await fetch(`${base}/taint/propagate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ src, dest, clearSource }),
+      signal: AbortSignal.timeout(1000),
+    });
+  } catch {
+    // Propagation is best-effort — daemon unreachable is non-fatal
+  }
+}
+
+// Re-export TaintRecord so callers share one canonical type instead of an inline duplicate.
+export type { TaintRecord } from '../daemon/taint-store.js';
+import type { TaintRecord } from '../daemon/taint-store.js';
+
+export interface TaintCheckResult {
+  tainted: boolean;
+  record?: TaintRecord;
+  /**
+   * True when the taint daemon was unreachable and the check could not be
+   * completed. The caller should treat this as a soft warning: files may be
+   * tainted but the status is unknown. Distinct from tainted:false, which
+   * means the daemon was reachable and confirmed the paths are clean.
+   */
+  daemonUnavailable?: boolean;
+}
+
+/**
+ * Ask the daemon if any of the given file paths are tainted.
+ * Returns the first tainted record found, or { tainted: false }.
+ *
+ * Fail-open: returns { tainted: false } on network error so a daemon blip
+ * doesn't stall the agent. The error is logged to hook-debug.log so it's
+ * visible without being fatal.
+ */
+export async function checkTaint(paths: string[]): Promise<TaintCheckResult> {
+  if (paths.length === 0) return { tainted: false };
+  if (!isDaemonRunning()) return { tainted: false, daemonUnavailable: true };
+  const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
+  try {
+    const res = await fetch(`${base}/taint/check`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths }),
+      signal: AbortSignal.timeout(2000),
+    });
+    return (await res.json()) as TaintCheckResult;
+  } catch (err) {
+    // Fail-open: a taint check failure must not block the agent entirely.
+    // Log so the operator can diagnose daemon instability without user impact.
+    try {
+      const { appendToLog, HOOK_DEBUG_LOG } = await import('../audit/index.js');
+      appendToLog(HOOK_DEBUG_LOG, {
+        ts: new Date().toISOString(),
+        event: 'checkTaint-error',
+        error: String(err),
+        paths,
+      });
+    } catch {
+      /* audit write failure is non-fatal */
+    }
+    return { tainted: false, daemonUnavailable: true };
+  }
+}
+
 /** Clear a viewer-mode card from the daemon once Slack has decided.
  *  Also used by the Event Bridge to notify the daemon when native popup or
  *  cloud wins the race — so SuggestionTracker sees every human decision. */
