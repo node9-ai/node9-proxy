@@ -82,6 +82,13 @@ describe('parseCpMvOp — returns null for unsupported / non-cp-mv commands', ()
     expect(parseCpMvOp('cp -r /tmp/a /tmp/b /tmp/destdir')).toBeNull();
   });
 
+  it('mv a b /destdir — multi-source mv, bail out (higher stakes: clearSource=true would fire)', () => {
+    // mv is more dangerous than cp in the multi-source case: incorrect parsing
+    // would clear the source taint AND set dest taint on the wrong path.
+    // Confirm the same multi-source bail applies.
+    expect(parseCpMvOp('mv /tmp/a /tmp/b /tmp/destdir')).toBeNull();
+  });
+
   it('cp -t destdir src — destination-first flag, bail out', () => {
     expect(parseCpMvOp('cp -t /destdir /tmp/src')).toBeNull();
   });
@@ -97,6 +104,12 @@ describe('parseCpMvOp — returns null for unsupported / non-cp-mv commands', ()
 
   it('cp -rt destdir src — flag cluster containing t, bail out', () => {
     expect(parseCpMvOp('cp -rt /destdir /tmp/src')).toBeNull();
+  });
+
+  it('cp -tr destdir src — reversed cluster order, bail out (tok.includes checks char presence, not position)', () => {
+    // Our parser uses tok.includes('t') on the flag cluster — order within the
+    // cluster is irrelevant. -tr and -rt both contain 't' and both bail.
+    expect(parseCpMvOp('cp -tr /destdir /tmp/src')).toBeNull();
   });
 
   it('command is just "cp" with no args', () => {
@@ -175,6 +188,15 @@ describe('parseCpMvOp — adversarial / shell metacharacter inputs', () => {
 
   it('glob wildcard * in dest — bail out', () => {
     expect(parseCpMvOp('cp /tmp/src /tmp/dest*')).toBeNull();
+  });
+
+  it('null byte \\x00 in path — bail out', () => {
+    // Filesystems reject paths containing null bytes; a path with \x00 would
+    // never match a tainted entry in the store. An adversarial AI could embed
+    // a null byte to construct a path that looks like a real dest but isn't.
+    // Bail rather than propagate taint to an unmatchable literal.
+    expect(parseCpMvOp('cp /tmp/tainted /tmp/dest\x00evil')).toBeNull();
+    expect(parseCpMvOp('cp /tmp/tainted\x00 /tmp/dest')).toBeNull();
   });
 });
 

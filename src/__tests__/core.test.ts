@@ -13,7 +13,7 @@ const _rawTimeout = parseInt(process.env.TEST_APPROVAL_TIMEOUT_MS ?? '', 10);
 // Minimum 50ms: a zero timeout would fire the race engine before notifyActivity's
 // I/O callback is even queued, producing intermittent false passes unrelated to
 // policy logic. 50ms is enough to let the I/O round-trip complete.
-const TEST_APPROVAL_TIMEOUT_MS = Number.isNaN(_rawTimeout) ? 500 : Math.max(50, _rawTimeout);
+const TEST_APPROVAL_TIMEOUT_MS = Number.isNaN(_rawTimeout) ? 500 : Math.max(50, _rawTimeout); // floor: 0 fires before notifyActivity I/O callback is queued
 
 // 1. Lock down the testing environment globally so it survives between tests.
 process.env.NODE9_TESTING = '1';
@@ -661,6 +661,12 @@ describe('authorizeHeadless — persistent decisions', () => {
     // policyResult.ruleName (internal) is not exposed on AuthResult; checkedBy !==
     // 'persistent' is the correct invariant — it proves the persistent short-circuit
     // was suppressed by the smart-rule match.
+    // Guard: this test's determinism depends on NODE9_TESTING=1 disabling all
+    // non-timeout racers (native, browser, terminal approvers). If a future
+    // approver is added without checking NODE9_TESTING, blockedBy could be
+    // something other than 'timeout' and the assertion below would silently
+    // stop testing the right thing.
+    expect(process.env.NODE9_TESTING).toBe('1');
     const result = await authorizeHeadless('Bash', { command: 'git push origin dev' });
     expect(result.approved).toBe(false);
     // Key invariant: the persistent store was NOT used to decide.
@@ -746,6 +752,45 @@ describe('authorizeHeadless — persistent decisions', () => {
     const expectedCheckedBy: AuthResult['checkedBy'] = 'persistent';
     expect(result.checkedBy).toBe(expectedCheckedBy);
     expect(result.blockedBy).toBeUndefined();
+  });
+
+  it('smart rule with verdict:allow short-circuits via local-policy — persistent store is never consulted', async () => {
+    // When a smart rule matches with verdict:'allow', evaluatePolicy returns
+    // decision:'allow' and the orchestrator exits at the local-policy fast path
+    // (line: `if (policyResult.decision === 'allow') return { checkedBy:'local-policy' }`).
+    // The persistent check at `policyResult.ruleName ? null : getPersistentDecision()`
+    // is never reached — persistent is moot, not suppressed.
+    //
+    // This is distinct from verdict:'review' suppression: 'review' falls through
+    // to the persistent check and then nulls it out (ruleName is set). 'allow'
+    // never reaches that code at all.
+    const decisionsPath = path.join('/mock/home', '.node9', 'decisions.json');
+    const globalPath = path.join('/mock/home', '.node9', 'config.json');
+    existsSpy.mockImplementation((p) => String(p) === decisionsPath || String(p) === globalPath);
+    readSpy.mockImplementation((p) => {
+      if (String(p) === decisionsPath) return JSON.stringify({ Bash: 'deny' }); // would block if reached
+      if (String(p) === globalPath)
+        return JSON.stringify({
+          settings: { mode: 'standard', approvalTimeoutMs: 0 },
+          policy: {
+            smartRules: [
+              {
+                name: 'allow-git-status',
+                tool: 'bash',
+                conditions: [{ field: 'command', op: 'matches', value: '\\bgit\\b.*\\bstatus\\b' }],
+                conditionMode: 'all',
+                verdict: 'allow',
+              },
+            ],
+          },
+        });
+      return '';
+    });
+    const result = await authorizeHeadless('Bash', { command: 'git status' });
+    expect(result.approved).toBe(true);
+    // Smart rule verdict:'allow' exits via local-policy, not persistent.
+    const localPolicyCheckedBy: AuthResult['checkedBy'] = 'local-policy';
+    expect(result.checkedBy).toBe(localPolicyCheckedBy);
   });
 });
 

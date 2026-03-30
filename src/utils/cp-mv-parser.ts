@@ -86,5 +86,10 @@ function containsShellMetachar(token: string): boolean {
   // * and ? matter because `cp /tmp/*.txt /dest` produces src '/tmp/*.txt' which
   // doesn't match any real tainted path (the shell expands it before exec). Bail;
   // taint stays on the source rather than propagating to a non-existent glob literal.
-  return /[$`{;*?]/.test(token);
+  if (/[$`{;*?]/.test(token)) return true;
+  // Null byte (\x00): filesystems reject paths containing null bytes; such a path
+  // would never match a tainted entry in the store. Checked separately to avoid
+  // putting a control character inside a regex literal (no-control-regex lint rule).
+  if (token.includes('\x00')) return true;
+  return false;
 }
