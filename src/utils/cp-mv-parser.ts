@@ -8,7 +8,7 @@
 //   - multi-source:       cp a b c /dest/
 //   - destination-first:  cp -t /dest src
 //   - heredoc / process substitution
-//   - shell metacharacters in paths: $VAR, $(cmd), `cmd`, {a,b} — returns null
+//   - shell metacharacters in paths: $VAR, $(cmd), `cmd`, {a,b}, trailing ; — returns null
 
 export interface CpMvOp {
   src: string;
@@ -78,6 +78,9 @@ export function parseCpMvOp(command: string): CpMvOp | null {
 
 /** Returns true if the token contains shell metacharacters that require expansion. */
 function containsShellMetachar(token: string): boolean {
-  // $VAR / ${VAR} / $(cmd) / `cmd` / {a,b} brace expansion
-  return /[$`{]/.test(token);
+  // $VAR / ${VAR} / $(cmd) / `cmd` / {a,b} brace expansion / trailing ; command separator
+  // Semicolon matters because `cp /tmp/a /tmp/b;` (no space before ;) produces a
+  // single token '/tmp/b;' — the real dest is '/tmp/b' but we'd taint '/tmp/b;'
+  // (non-existent) and miss the real path. Bail out; taint stays on the source.
+  return /[$`{;]/.test(token);
 }

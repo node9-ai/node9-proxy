@@ -58,13 +58,29 @@ describe('parseCpMvOp — returns null for unsupported / non-cp-mv commands', ()
     expect(parseCpMvOp('cp /tmp/only-one')).toBeNull();
   });
 
+  it('mv with too few positional args — same bail as cp, higher stakes (clearSource=true)', () => {
+    // mv is higher-stakes than cp: incorrect parsing would clear the source taint.
+    // Confirm the same bail applies.
+    expect(parseCpMvOp('mv /tmp/only-one')).toBeNull();
+  });
+
   it('cp with more than two positional args — multi-source, bail out safely', () => {
     // cp a b /destdir — destination-last multi-source; bail rather than guess wrong
     expect(parseCpMvOp('cp /tmp/a /tmp/b /tmp/destdir')).toBeNull();
   });
 
+  it('cp -r src1 src2 /destdir — three positional args, bail out', () => {
+    // Explicit coverage for 3-positional with a short flag present.
+    expect(parseCpMvOp('cp -r /tmp/a /tmp/b /tmp/destdir')).toBeNull();
+  });
+
   it('cp -t destdir src — destination-first flag, bail out', () => {
     expect(parseCpMvOp('cp -t /destdir /tmp/src')).toBeNull();
+  });
+
+  it('mv -t destdir src — same -t bail applies to mv', () => {
+    // mv shares the same flag-parsing path as cp; confirm -t bails for mv too.
+    expect(parseCpMvOp('mv -t /destdir /tmp/src')).toBeNull();
   });
 
   it('cp --target-directory=/dest src — long form, bail out', () => {
@@ -123,11 +139,18 @@ describe('parseCpMvOp — adversarial / shell metacharacter inputs', () => {
     expect(parseCpMvOp('cp "/tmp/my file" "/tmp/dest"')).toBeNull();
   });
 
-  it('semicolon-chained commands — only first command is parsed, rest treated as positional args → bail', () => {
-    // 'cp /tmp/a /tmp/b; rm /tmp/a' — tokens after 'cp': ['/tmp/a', '/tmp/b;', 'rm', '/tmp/a']
-    // '/tmp/b;' contains ';' but is still one token — however we now have 4 positional
-    // args so multi-source bail fires.
+  it('semicolon-chained commands with space — multi-token bail fires first', () => {
+    // 'cp /tmp/a /tmp/b; rm /tmp/a' → tokens ['/tmp/a', '/tmp/b;', 'rm', '/tmp/a']
+    // 4 positional args → multi-source bail. Safe.
     expect(parseCpMvOp('cp /tmp/a /tmp/b; rm /tmp/a')).toBeNull();
+  });
+
+  it('trailing semicolon no space — dest contains ; → metacharacter bail', () => {
+    // 'cp /tmp/a /tmp/b;' → tokens ['/tmp/a', '/tmp/b;'] → exactly 2 positional args.
+    // Without metacharacter bail the dest would be '/tmp/b;' (non-existent path),
+    // and the real '/tmp/b' would stay untainted — a false negative.
+    // ';' is in the metacharacter set so we bail; taint stays on the source.
+    expect(parseCpMvOp('cp /tmp/a /tmp/b;')).toBeNull();
   });
 });
 

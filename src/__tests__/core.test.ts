@@ -10,7 +10,10 @@ import type { AuthResult } from '../auth/orchestrator.js';
 // Use isNaN guard (not || 500) so an intentional 0 is preserved — || would
 // silently override 0 with 500, masking a deliberate "no timeout" configuration.
 const _rawTimeout = parseInt(process.env.TEST_APPROVAL_TIMEOUT_MS ?? '', 10);
-const TEST_APPROVAL_TIMEOUT_MS = Number.isNaN(_rawTimeout) ? 500 : _rawTimeout;
+// Minimum 50ms: a zero timeout would fire the race engine before notifyActivity's
+// I/O callback is even queued, producing intermittent false passes unrelated to
+// policy logic. 50ms is enough to let the I/O round-trip complete.
+const TEST_APPROVAL_TIMEOUT_MS = Number.isNaN(_rawTimeout) ? 500 : Math.max(50, _rawTimeout);
 
 // 1. Lock down the testing environment globally so it survives between tests.
 process.env.NODE9_TESTING = '1';
@@ -690,8 +693,14 @@ describe('authorizeHeadless — persistent decisions', () => {
     //
     // DANGEROUS_WORDS does NOT force the race engine the way a smart rule does.
     // Only a smart rule with verdict:'review' suppresses the persistent short-circuit.
-    // The review-git-push smart rule is scoped to tool:'bash' and does not fire
-    // for 'mkfs_disk', so persistent allow wins.
+    //
+    // Smart rule scoping is by tool NAME, not command content:
+    //   rule.tool = 'bash' matches when authorizeHeadless('Bash', ...) is called.
+    //   authorizeHeadless('mkfs_disk', ...) does not match — 'mkfs_disk' !== 'bash'.
+    // If the call were authorizeHeadless('Bash', { command: 'mkfs ...' }), the rule
+    // would fire (assuming the condition matched), suppressing persistent. That is a
+    // different test. Here the tool name itself is 'mkfs_disk', so the rule is silent
+    // and persistent allow wins.
     const result = await authorizeHeadless('mkfs_disk', {});
     expect(result.approved).toBe(true);
     // Persistent store was used — smart rule did not fire for mkfs_disk.
