@@ -9,6 +9,8 @@ import { redactSecrets } from '../../audit';
 import { getConfig } from '../../config';
 import { shouldSnapshot } from '../../policy';
 import { createShadowSnapshot } from '../../undo';
+import { notifyTaintPropagate, isDaemonRunning } from '../../auth/daemon';
+import { parseCpMvOp } from '../../utils/cp-mv-parser';
 
 function sanitize(value: string): string {
   // eslint-disable-next-line no-control-regex
@@ -50,6 +52,26 @@ export function registerLogCommand(program: Command): void {
           if (!fs.existsSync(path.dirname(logPath)))
             fs.mkdirSync(path.dirname(logPath), { recursive: true });
           fs.appendFileSync(logPath, JSON.stringify(entry) + '\n');
+
+          // Taint propagation: if the completed bash command was a cp or mv,
+          // forward taint from source to destination so a later network upload
+          // of the copy is still caught. Must be awaited before process.exit(0)
+          // — fire-and-forget would lose the propagation when the process exits.
+          if ((tool === 'Bash' || tool === 'bash') && isDaemonRunning()) {
+            const command =
+              typeof rawInput === 'object' &&
+              rawInput !== null &&
+              'command' in rawInput &&
+              typeof (rawInput as Record<string, unknown>).command === 'string'
+                ? ((rawInput as Record<string, unknown>).command as string)
+                : null;
+            if (command) {
+              const op = parseCpMvOp(command);
+              if (op) {
+                await notifyTaintPropagate(op.src, op.dest, op.clearSource);
+              }
+            }
+          }
 
           // Validate cwd is absolute before passing to getConfig() — prevents path
           // traversal via a crafted hook payload (e.g. cwd: "../../../../etc").
