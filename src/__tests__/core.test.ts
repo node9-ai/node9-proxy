@@ -3,6 +3,11 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
+// Allow CI to increase the approval timeout without touching test logic.
+// On a loaded runner the 500ms default may be tight; set TEST_APPROVAL_TIMEOUT_MS
+// (e.g. to 2000) in the CI environment to reduce flakiness without code changes.
+const TEST_APPROVAL_TIMEOUT_MS = parseInt(process.env.TEST_APPROVAL_TIMEOUT_MS ?? '500', 10);
+
 // 1. Lock down the testing environment globally so it survives between tests.
 process.env.NODE9_TESTING = '1';
 process.env.VITEST = 'true';
@@ -597,7 +602,7 @@ describe('authorizeHeadless — persistent decisions', () => {
     const globalConfig = {
       // Short timeout so the race engine resolves deterministically in test mode
       // (no UI approvers are available). The specific blockedBy value is 'timeout'.
-      settings: { mode: 'standard', approvalTimeoutMs: 500 },
+      settings: { mode: 'standard', approvalTimeoutMs: TEST_APPROVAL_TIMEOUT_MS },
       policy: {
         smartRules: [
           {
@@ -628,9 +633,10 @@ describe('authorizeHeadless — persistent decisions', () => {
     //   that I/O round-trip, so timer advancement fires it too early and the test
     //   hangs waiting for a promise that never resolves.
     //
-    // 500ms is still deterministic: in NODE9_TESTING=1 mode native/browser/terminal
-    // approvers are hard-disabled, there is no cloud API key, and the daemon is not
-    // running — the timeout racer is the only active promise in the race.
+    // TEST_APPROVAL_TIMEOUT_MS (default 500ms) is still deterministic: in
+    // NODE9_TESTING=1 mode native/browser/terminal approvers are hard-disabled,
+    // there is no cloud API key, and the daemon is not running — the timeout
+    // racer is the only active promise in the race.
     //
     // policyResult.ruleName (internal) is not exposed on AuthResult; checkedBy !==
     // 'persistent' is the correct invariant — it proves the persistent short-circuit

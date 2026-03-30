@@ -143,14 +143,18 @@ beforeAll(
 afterAll(() => new Promise<void>((resolve) => server.close(() => resolve())));
 
 // Reset the store before every test — each test is fully isolated.
-// clear() is atomic (one Map.clear() call) and avoids rebinding the module-level
-// `store` variable. The handler always reads `store` at request time so the
-// cleared instance is immediately visible to the next inbound request.
+// clear() is used deliberately instead of `store = new TaintStore()`: the HTTP
+// handler captures `store` as a free variable and reads it on every request, so
+// reassigning the module-level binding would leave the handler pointing at the
+// old instance. clear() avoids that hazard by mutating in place.
 beforeEach(() => {
   store.clear();
 });
 
 // ── Helper: call the stub daemon directly ─────────────────────────────────────
+// Global fetch is used here. It requires Node.js >=18, which is enforced by
+// package.json `engines: { node: ">=18" }`. Do not lower that requirement
+// without replacing these calls with node-fetch or a polyfill.
 
 async function postTaint(filePath: string, source: string): Promise<void> {
   const res = await fetch(`http://127.0.0.1:${port}/taint`, {

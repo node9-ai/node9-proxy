@@ -90,6 +90,10 @@ describe('canonicalise', () => {
   });
 
   it('two different circular structures produce different hashes — sentinel does not cause collision', () => {
+    // canonicalise replaces only the cycle-back *property value* with a sentinel,
+    // not the entire top-level object. So { x:1, self:'[Circular]' } and
+    // { x:2, self:'[Circular]' } are distinct because x differs — the sentinel
+    // alone is not what differentiates them.
     const a: Record<string, unknown> = { x: 1 };
     a['self'] = a;
     const b: Record<string, unknown> = { x: 2 };
@@ -132,8 +136,11 @@ describe('hashArgs', () => {
   });
 
   it('null and undefined produce the same hash — both represent "no args"', () => {
-    // Documented contract in hasher.ts: null and undefined are both coerced to
-    // JSON null so audit log entries for "no args" correlate correctly.
+    // Contract enforced by `canonicalise(args) ?? null` in hasher.ts:
+    // canonicalise(undefined) returns undefined, which the ?? coerces to null,
+    // so both null and undefined serialise to the JSON string 'null'.
+    // This is intentional for audit-log correlation; do not change without
+    // understanding the MCP call-site semantics (null vs missing arg).
     expect(hashArgs(null)).toBe(hashArgs(undefined));
   });
 
@@ -158,6 +165,16 @@ describe('hashArgs', () => {
     inner['back'] = outer;
     expect(() => hashArgs(outer)).not.toThrow();
     expect(hashArgs(outer)).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it('Buffer coercion to base64 is a known collision with equivalent base64 strings', () => {
+    // canonicalise converts Buffer → base64 string (the Buffer.isBuffer branch in
+    // hasher.ts). This means hashArgs({ data: buf }) === hashArgs({ data: b64 })
+    // when b64 === buf.toString('base64'). This is an intentional design trade-off:
+    // stable, cross-platform hashing takes priority over type fidelity. The audit
+    // log records the tool name + args hash for correlation, not reconstruction.
+    const buf = Buffer.from('hello');
+    expect(hashArgs({ data: buf })).toBe(hashArgs({ data: buf.toString('base64') }));
   });
 
   it('string "1" and number 1 produce different hashes — JSON type is preserved', () => {
