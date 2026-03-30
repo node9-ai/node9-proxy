@@ -306,17 +306,28 @@ describe('Taint daemon endpoints', () => {
     expect(res.status).toBe(404);
   });
 
-  it('POST /taint/check → traversal path is canonicalised — ../x resolves to canonical form', async () => {
-    // Use path.resolve() explicitly to derive both the taint key and the lookup key
-    // so this test doesn't depend on intermediate directories existing on the host
-    // (realpathSync falls back to path.resolve when paths don't exist on disk).
+  it('POST /taint/check → single-level traversal (../) is canonicalised', async () => {
+    // path.resolve() is used on both sides so the test does not depend on
+    // intermediate directories existing (realpathSync falls back to path.resolve).
     const canonical = path.resolve('/tmp/traversal-target.txt');
     const traversal = path.resolve('/tmp/subdir/../traversal-target.txt');
-    // Both must resolve to the same string — assert it so the test is self-documenting.
-    expect(traversal).toBe(canonical);
+    expect(traversal).toBe(canonical); // sanity-check the test assumption
     await postTaint(canonical, 'DLP:Test');
-    const result = await postTaintCheck(['/tmp/subdir/../traversal-target.txt']);
-    expect(result.tainted).toBe(true);
+    expect((await postTaintCheck(['/tmp/subdir/../traversal-target.txt'])).tainted).toBe(true);
+  });
+
+  it('POST /taint/check → multi-level traversal (../../) is canonicalised — taint cannot be escaped', async () => {
+    // Security invariant: deep ../../ traversal sequences must normalise to the
+    // same canonical path as the file that was tainted.
+    // /tmp/a/b/../../taint-deep.txt → /tmp/taint-deep.txt
+    const canonical = path.resolve('/tmp/taint-deep.txt');
+    const deep = path.resolve('/tmp/a/b/../../taint-deep.txt');
+    expect(deep).toBe(canonical);
+    await postTaint(canonical, 'DLP:DeepTraversal');
+    expect((await postTaintCheck(['/tmp/a/b/../../taint-deep.txt'])).tainted).toBe(true);
+    // Confirm that an unrelated canonical path is NOT found via a traversal that
+    // points elsewhere — traversal cannot conjure a match out of thin air.
+    expect((await postTaintCheck(['/tmp/a/b/../../other.txt'])).tainted).toBe(false);
   });
 });
 

@@ -131,6 +131,19 @@ describe('hashArgs', () => {
     expect(hashArgs(undefined)).toMatch(/^[0-9a-f]{32}$/);
   });
 
+  it('null and undefined produce the same hash — both represent "no args"', () => {
+    // Documented contract in hasher.ts: null and undefined are both coerced to
+    // JSON null so audit log entries for "no args" correlate correctly.
+    expect(hashArgs(null)).toBe(hashArgs(undefined));
+  });
+
+  it('empty object {} produces a different hash from null — not "no args"', () => {
+    // {} serialises to '{}' while null/undefined serialise to 'null'.
+    // An empty-args object must not collide with a missing-args entry.
+    expect(hashArgs({})).not.toBe(hashArgs(null));
+    expect(hashArgs({})).not.toBe(hashArgs([]));
+  });
+
   it('array arg order matters', () => {
     const h1 = hashArgs(['a', 'b', 'c']);
     const h2 = hashArgs(['c', 'b', 'a']);

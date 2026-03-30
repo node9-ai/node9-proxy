@@ -641,6 +641,9 @@ describe('authorizeHeadless — persistent decisions', () => {
     expect(result.checkedBy).not.toBe('persistent');
     // Race engine was entered and resolved via the timeout racer.
     expect(result.blockedBy).toBe('timeout');
+    // Pin the reason so a future refactor that returns approved:false via a
+    // different deny path (e.g. a new racer) doesn't silently mask this regression.
+    expect(result.reason).toMatch(/auto-denied by timeout policy/i);
   });
 });
 
