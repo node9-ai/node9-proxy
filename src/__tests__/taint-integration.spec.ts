@@ -10,7 +10,10 @@ import path from 'path';
 import { TaintStore, type TaintRecord } from '../daemon/taint-store.js';
 import { checkTaint } from '../auth/daemon.js';
 
-// ── Minimal stub daemon that only serves /taint and /taint/check ──────────────
+// ── Minimal stub daemon that only serves /taint, /taint/check, /taint/propagate ─
+// NOTE: This stub has no authentication. The production daemon restricts these
+// endpoints to local callers only (Unix socket or loopback + internal token).
+// Do not copy this pattern to production without adding the auth layer.
 
 // 64 KB — matches the production daemon's body limit for the /check endpoint
 // (server.ts line ~194: `if (body.length > 65_536) return res.writeHead(413).end()`).
@@ -32,7 +35,10 @@ function readBody(req: http.IncomingMessage): Promise<string> {
       }
       body += c;
     });
-    req.on('end', () => resolve(body));
+    req.on('end', () => {
+      if (destroyed) return; // 'end' can fire after destroy() on some Node.js versions
+      resolve(body);
+    });
     req.on('error', reject);
   });
 }
@@ -43,7 +49,7 @@ let store: TaintStore;
 
 beforeAll(
   () =>
-    new Promise<void>((resolve) => {
+    new Promise<void>((resolve, reject) => {
       store = new TaintStore();
       server = http.createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', `http://127.0.0.1`);
@@ -86,8 +92,9 @@ beforeAll(
             return res.end(JSON.stringify({ error: 'all paths must be strings' }));
           }
           for (const p of body.paths as string[]) {
-            // store.check() normalises via path.resolve()/realpathSync so traversal
-            // sequences (e.g. ../../etc/passwd) are canonicalised before the lookup.
+            // store.check() calls _resolve() which tries realpathSync.native and
+            // falls back to path.resolve() when the path doesn't exist on disk.
+            // Either way traversal sequences are canonicalised before the lookup.
             const record = store.check(p);
             if (record) {
               res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -122,6 +129,7 @@ beforeAll(
         res.writeHead(404).end();
       });
 
+      server.on('error', reject); // surface port conflicts instead of hanging forever
       server.listen(0, '127.0.0.1', () => {
         port = (server.address() as { port: number }).port;
         resolve();
@@ -196,6 +204,16 @@ describe('Taint daemon endpoints', () => {
     await postTaint('/tmp/secret-data.txt', 'DLP:GitHubToken');
     const result = await postTaintCheck(['/tmp/innocent.txt', '/tmp/secret-data.txt']);
     expect(result.tainted).toBe(true);
+  });
+
+  it('POST /taint/check → first-match-wins: returns correct record when first path is clean', async () => {
+    // Verify both which path was matched AND that the returned record is for that path,
+    // not vacuously tainted:true without a corresponding record.
+    await postTaint('/tmp/second-is-tainted.txt', 'DLP:AWSKey');
+    const result = await postTaintCheck(['/tmp/first-is-clean.txt', '/tmp/second-is-tainted.txt']);
+    expect(result.tainted).toBe(true);
+    expect(result.record?.source).toBe('DLP:AWSKey');
+    expect(result.record?.path).toContain('second-is-tainted');
   });
 
   it('POST /taint/check → returns the taint record with source', async () => {
@@ -329,6 +347,14 @@ describe('Taint propagation: cp and mv semantics via HTTP', () => {
     await postTaintPropagate('/tmp/clean-src.txt', '/tmp/would-be-tainted.txt');
     const dest = await postTaintCheck(['/tmp/would-be-tainted.txt']);
     expect(dest.tainted).toBe(false);
+  });
+
+  it('clearSource: false is equivalent to omitting clearSource — source stays tainted', async () => {
+    // Explicit false and omitted should both mean cp semantics (source is kept).
+    await postTaint('/tmp/explicit-false-src.txt', 'DLP:Test');
+    await postTaintPropagate('/tmp/explicit-false-src.txt', '/tmp/explicit-false-dest.txt', false);
+    expect((await postTaintCheck(['/tmp/explicit-false-src.txt'])).tainted).toBe(true);
+    expect((await postTaintCheck(['/tmp/explicit-false-dest.txt'])).tainted).toBe(true);
   });
 
   it('chained propagation does not accumulate "propagated:" prefixes', async () => {

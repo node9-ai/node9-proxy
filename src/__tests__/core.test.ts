@@ -619,12 +619,22 @@ describe('authorizeHeadless — persistent decisions', () => {
     });
     // git push matches the review-git-push smart rule → must NOT be auto-approved
     // by the persistent store. The request must reach the race engine.
-    // 500ms gives ample headroom on a loaded CI runner; the result is still
-    // deterministic because no UI approvers are active in NODE9_TESTING=1 mode
-    // and there is no cloud API key — the timeout racer is the only active promise.
-    // (policyResult.ruleName is set when a smart rule matches, which suppresses
-    //  the persistent-allow short-circuit. AuthResult doesn't expose ruleName
-    //  directly, but checkedBy !== 'persistent' proves it wasn't short-circuited.)
+    //
+    // Why wall-clock and not vi.useFakeTimers():
+    //   authorizeHeadless() calls notifyActivity() before entering the race engine.
+    //   notifyActivity opens a real Unix socket; the error callback fires as an I/O
+    //   event that vi.advanceTimersByTimeAsync cannot unblock because fake timers
+    //   don't intercept libuv I/O. The setTimeout(500) is registered only AFTER
+    //   that I/O round-trip, so timer advancement fires it too early and the test
+    //   hangs waiting for a promise that never resolves.
+    //
+    // 500ms is still deterministic: in NODE9_TESTING=1 mode native/browser/terminal
+    // approvers are hard-disabled, there is no cloud API key, and the daemon is not
+    // running — the timeout racer is the only active promise in the race.
+    //
+    // policyResult.ruleName (internal) is not exposed on AuthResult; checkedBy !==
+    // 'persistent' is the correct invariant — it proves the persistent short-circuit
+    // was suppressed by the smart-rule match.
     const result = await authorizeHeadless('Bash', { command: 'git push origin dev' });
     expect(result.approved).toBe(false);
     // Key invariant: the persistent store was NOT used to decide.
