@@ -6,6 +6,7 @@
 // Tests use a real daemon HTTP server to verify the full flow.
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import http from 'http';
+import path from 'path';
 import { TaintStore, type TaintRecord } from '../daemon/taint-store.js';
 import { checkTaint } from '../auth/daemon.js';
 
@@ -19,9 +20,12 @@ function readBody(req: http.IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let body = '';
     let size = 0;
+    let destroyed = false;
     req.on('data', (c: Buffer) => {
+      if (destroyed) return; // guard: chunks already buffered before destroy() can still fire
       size += c.length;
       if (size > MAX_BODY_BYTES) {
+        destroyed = true;
         req.destroy();
         reject(new Error('request body too large'));
         return;
@@ -165,11 +169,7 @@ async function postTaintCheck(
   return json as { tainted: boolean; record?: TaintRecord };
 }
 
-async function postTaintPropagate(
-  src: string,
-  dest: string,
-  clearSource?: boolean
-): Promise<void> {
+async function postTaintPropagate(src: string, dest: string, clearSource?: boolean): Promise<void> {
   const res = await fetch(`http://127.0.0.1:${port}/taint/propagate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -266,10 +266,15 @@ describe('Taint daemon endpoints', () => {
     expect(res.status).toBe(404);
   });
 
-  it('POST /taint/check → traversal path is canonicalised — ../subdir resolves to real path', async () => {
-    // Taint the canonical path; look it up via a traversal form.
-    // /tmp/subdir/../traversal-target.txt → path.resolve → /tmp/traversal-target.txt
-    await postTaint('/tmp/traversal-target.txt', 'DLP:Test');
+  it('POST /taint/check → traversal path is canonicalised — ../x resolves to canonical form', async () => {
+    // Use path.resolve() explicitly to derive both the taint key and the lookup key
+    // so this test doesn't depend on intermediate directories existing on the host
+    // (realpathSync falls back to path.resolve when paths don't exist on disk).
+    const canonical = path.resolve('/tmp/traversal-target.txt');
+    const traversal = path.resolve('/tmp/subdir/../traversal-target.txt');
+    // Both must resolve to the same string — assert it so the test is self-documenting.
+    expect(traversal).toBe(canonical);
+    await postTaint(canonical, 'DLP:Test');
     const result = await postTaintCheck(['/tmp/subdir/../traversal-target.txt']);
     expect(result.tainted).toBe(true);
   });

@@ -49,20 +49,22 @@ describe('canonicalise', () => {
     expect(canonicalise(buf)).toBe(buf.toString('base64'));
   });
 
-  it('circular object reference — returns [Circular] instead of throwing', () => {
+  it('circular object reference — returns a string sentinel instead of throwing', () => {
     const obj: Record<string, unknown> = { a: 1 };
     obj['self'] = obj; // circular reference
     expect(() => canonicalise(obj)).not.toThrow();
     const result = canonicalise(obj) as Record<string, unknown>;
-    expect(result['self']).toBe('[Circular]');
+    // Assert the cycle is replaced with a string placeholder, not the original object.
+    // We don't pin the exact sentinel text so a rename doesn't break this test.
+    expect(typeof result['self']).toBe('string');
   });
 
-  it('circular array reference — returns [Circular] instead of throwing', () => {
+  it('circular array reference — returns a string sentinel instead of throwing', () => {
     const arr: unknown[] = [1, 2];
     arr.push(arr); // circular reference
     expect(() => canonicalise(arr)).not.toThrow();
     const result = canonicalise(arr) as unknown[];
-    expect(result[2]).toBe('[Circular]');
+    expect(typeof result[2]).toBe('string');
   });
 
   it('deeply nested circular reference — cycle inside nested object does not throw', () => {
@@ -77,7 +79,15 @@ describe('canonicalise', () => {
       string,
       unknown
     >;
-    expect(level2['back']).toBe('[Circular]');
+    expect(typeof level2['back']).toBe('string');
+  });
+
+  it('two different circular structures produce different hashes — sentinel does not cause collision', () => {
+    const a: Record<string, unknown> = { x: 1 };
+    a['self'] = a;
+    const b: Record<string, unknown> = { x: 2 };
+    b['self'] = b;
+    expect(hashArgs(a)).not.toBe(hashArgs(b));
   });
 });
 

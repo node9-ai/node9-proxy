@@ -597,7 +597,7 @@ describe('authorizeHeadless — persistent decisions', () => {
     const globalConfig = {
       // Short timeout so the race engine resolves deterministically in test mode
       // (no UI approvers are available). The specific blockedBy value is 'timeout'.
-      settings: { mode: 'standard', approvalTimeoutMs: 50 },
+      settings: { mode: 'standard', approvalTimeoutMs: 500 },
       policy: {
         smartRules: [
           {
@@ -618,14 +618,18 @@ describe('authorizeHeadless — persistent decisions', () => {
       return '';
     });
     // git push matches the review-git-push smart rule → must NOT be auto-approved
-    // by the persistent store. The request must reach the race engine. With a
-    // 50ms timeout and no UI approvers in test mode, it resolves via timeout.
+    // by the persistent store. The request must reach the race engine.
+    // 500ms gives ample headroom on a loaded CI runner; the result is still
+    // deterministic because no UI approvers are active in NODE9_TESTING=1 mode
+    // and there is no cloud API key — the timeout racer is the only active promise.
+    // (policyResult.ruleName is set when a smart rule matches, which suppresses
+    //  the persistent-allow short-circuit. AuthResult doesn't expose ruleName
+    //  directly, but checkedBy !== 'persistent' proves it wasn't short-circuited.)
     const result = await authorizeHeadless('Bash', { command: 'git push origin dev' });
     expect(result.approved).toBe(false);
-    // Key invariant: the persistent store was NOT used to decide
+    // Key invariant: the persistent store was NOT used to decide.
     expect(result.checkedBy).not.toBe('persistent');
-    // Request reached the race engine and timed out. approvalTimeoutMs: 50 is set,
-    // so the timeout racer is always active — noApprovalMechanism cannot happen here.
+    // Race engine was entered and resolved via the timeout racer.
     expect(result.blockedBy).toBe('timeout');
   });
 });
