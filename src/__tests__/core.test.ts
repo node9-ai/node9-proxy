@@ -624,8 +624,9 @@ describe('authorizeHeadless — persistent decisions', () => {
     expect(result.approved).toBe(false);
     // Key invariant: the persistent store was NOT used to decide
     expect(result.checkedBy).not.toBe('persistent');
-    // Request reached the race engine (timed out or no mechanism) — not short-circuited
-    expect(result.blockedBy === 'timeout' || result.noApprovalMechanism === true).toBe(true);
+    // Request reached the race engine and timed out. approvalTimeoutMs: 50 is set,
+    // so the timeout racer is always active — noApprovalMechanism cannot happen here.
+    expect(result.blockedBy).toBe('timeout');
   });
 });
 

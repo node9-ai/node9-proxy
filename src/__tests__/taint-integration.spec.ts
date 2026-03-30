@@ -11,10 +11,21 @@ import { checkTaint } from '../auth/daemon.js';
 
 // ── Minimal stub daemon that only serves /taint and /taint/check ──────────────
 
+const MAX_BODY_BYTES = 64 * 1024; // 64 KB — test stub guard against runaway bodies
+
 function readBody(req: http.IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let body = '';
-    req.on('data', (c) => (body += c));
+    let size = 0;
+    req.on('data', (c: Buffer) => {
+      size += c.length;
+      if (size > MAX_BODY_BYTES) {
+        req.destroy();
+        reject(new Error('request body too large'));
+        return;
+      }
+      body += c;
+    });
     req.on('end', () => resolve(body));
     req.on('error', reject);
   });
@@ -63,6 +74,8 @@ beforeAll(
           }
           for (const p of body.paths) {
             if (typeof p !== 'string') continue;
+            // store.check() normalises via path.resolve()/realpathSync so traversal
+            // sequences (e.g. ../../etc/passwd) are canonicalised before the lookup.
             const record = store.check(p);
             if (record) {
               res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -86,8 +99,10 @@ beforeAll(
 afterAll(() => new Promise<void>((resolve) => server.close(() => resolve())));
 
 // Reset the store before every test — each test is fully isolated.
-// The server handler captures `store` by variable reference so reassignment
-// is picked up immediately. Tests use distinct path prefixes for clarity.
+// The server handler reads `store` as a free variable on each request; it is
+// NOT captured once at server-creation time. Reassigning the module-level
+// `let` binding here is sufficient — the next inbound request will see the
+// new TaintStore instance. Tests use distinct path prefixes for clarity.
 beforeEach(() => {
   store = new TaintStore();
 });
@@ -212,6 +227,11 @@ describe('Exfiltration scenario: write secret → upload blocked', () => {
   });
 });
 
+// Fail-open is the intentional security trade-off here: if the taint daemon is
+// unavailable we allow the tool call to proceed rather than blocking all work.
+// The alternative (fail-closed) would mean a crashed daemon halts Claude entirely.
+// Taint tracking is defence-in-depth; DLP scanning is the primary gate and runs
+// independently of the daemon, so a temporary daemon outage does not disable DLP.
 describe('checkTaint fail-open: tests the real checkTaint() function', () => {
   it('checkTaint returns daemonUnavailable:true when fetch throws — does not propagate the error', async () => {
     // Mock global fetch to throw so we test the actual catch path in checkTaint().
