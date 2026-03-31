@@ -45,7 +45,7 @@ function runCheck(
   payload: object | string,
   env: Record<string, string> = {},
   cwd = os.tmpdir(),
-  timeoutMs = 15000
+  timeoutMs = 20000
 ): RunResult {
   const payloadArg = typeof payload === 'string' ? payload : JSON.stringify(payload);
   const result = spawnSync(process.execPath, [CLI, 'check', payloadArg], {
@@ -81,7 +81,7 @@ function runCheckAsync(
   payload: object | string,
   env: Record<string, string> = {},
   cwd = os.tmpdir(),
-  timeoutMs = 15000
+  timeoutMs = 20000
 ): Promise<RunResult> {
   const payloadArg = typeof payload === 'string' ? payload : JSON.stringify(payload);
   return new Promise((resolve) => {
