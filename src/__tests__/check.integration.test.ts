@@ -41,6 +41,10 @@ interface RunResult {
  * written by makeTempHome(). Pass tmpHome explicitly to keep both HOME and cwd
  * consistent.
  */
+// 20 s default: cold-starting Node.js + parsing the ~390 KB bundle takes
+// 10-15 s on constrained CI runners (documented in vitest.config.mts).
+// Raising this does NOT mask a performance regression — the CLI exits in
+// ~150 ms locally; the extra headroom is pure OS/runner startup overhead.
 function runCheck(
   payload: object | string,
   env: Record<string, string> = {},
