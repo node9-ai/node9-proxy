@@ -2116,10 +2116,13 @@ describe('stateful smart rules — dependsOnState', () => {
       settings: { mode: 'standard', approvalTimeoutMs: 100, approvers: { native: false } },
       policy: { smartRules: [STATEFUL_RULE] },
     });
-    // Fail-open: unknown predicate state → rule does not apply → race engine → timeout
+    // Fail-open: predicate state unknown → stateful block skipped → race engine runs.
+    // With no interactive approver and approvalTimeoutMs:100, the timeout racer fires.
+    // approved:false + blockedBy:'timeout' = the tool call IS DENIED (hard deny via
+    // timeout, not a stateful hard-block). The tool does NOT proceed.
     const result = await authorizeHeadless('Bash', { command: DEPLOY_CMD });
-    expect(result.approved).toBe(false);
-    expect(result.blockedBy).toBe('timeout'); // race engine ran, not hard-blocked
+    expect(result.approved).toBe(false); // call is DENIED — timeout is a hard deny
+    expect(result.blockedBy).toBe('timeout'); // denied by timeout racer, not stateful rule
     expect(result.blockedByLabel).not.toContain('require-tests-before-deploy');
     expect(result.blockedBy).not.toBe('local-config');
   });
