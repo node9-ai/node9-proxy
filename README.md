@@ -451,9 +451,11 @@ Stateful rules let you block actions based on **what the AI has done earlier in 
 
 1. The AI attempts a deploy command.
 2. Node9 checks the daemon: _"Has a test passed since the last file edit?"_
-3. **If no** → hard block. Terminal shows `🛑 Blocked` + `💡 Run: npm test`. The AI is instructed to run `npm test` first.
-4. **If yes** → the rule is skipped (downgraded to review), normal approval flow continues.
+3. **If no** → routes to the race engine. Terminal shows the STATE GUARD card with `[1] Allow / [2] Redirect AI to run tests / [3] Deny`. The AI receives a negotiation hint to run `npm test` first if the human redirects.
+4. **If yes** → the rule is skipped, normal approval flow continues.
 5. **Daemon unreachable** → fail-open, rule is skipped.
+
+> **⚠️ Security note — fail-open behaviour:** When the daemon is unreachable, stateful block rules are silently downgraded to review. This is intentional (availability over lockout), but it means a network disruption can temporarily weaken these rules. A per-rule `failMode: 'closed'` option is planned. If you need a hard guarantee, use a plain block rule (no `dependsOnState`) instead.
 
 **State is tracked automatically** — no config required beyond the rule itself:
 

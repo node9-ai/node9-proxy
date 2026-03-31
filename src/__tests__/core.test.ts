@@ -2042,13 +2042,15 @@ describe('stateful smart rules — dependsOnState', () => {
       vi.fn().mockImplementation((url: string) => {
         if (String(url).includes('/state/check')) {
           if (result === null) return Promise.reject(new Error('ECONNREFUSED'));
-          return Promise.resolve({
-            ok: true,
-            json: async () => result,
-          });
+          // Cast avoids providing the full Response interface in test mocks
+          return Promise.resolve({ ok: true, json: async () => result } as unknown as Response);
         }
         // Other fetch calls (cloud SaaS, etc.) — return generic failure
-        return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          json: async () => ({}),
+        } as unknown as Response);
       })
     );
   }
@@ -2333,5 +2335,43 @@ describe('stateful smart rules — dependsOnState', () => {
     expect(result.approved).toBe(false);
     expect(result.blockedBy).toBe('local-config');
     expect(result.recoveryCommand).toBe('npm test');
+  });
+
+  it('dependsOnState uses AND semantics — all predicates must be === true', async () => {
+    // The schema currently has one valid predicate. AND semantics are tested by
+    // verifying that a daemon response where the predicate key is absent (undefined)
+    // is treated as false — i.e. every(p => result[p] === true) uses strict equality.
+    // This ensures a partial response does not accidentally satisfy the predicate.
+
+    // Predicate key present and true → predicates met → race engine fires
+    stubStateCheck({ no_test_passed_since_last_edit: true });
+    mockProjectConfig({
+      settings: { mode: 'standard', approvalTimeoutMs: 100, approvers: { native: false } },
+      policy: { smartRules: [STATEFUL_RULE] },
+    });
+    const predicateMet = await authorizeHeadless('Bash', { command: DEPLOY_CMD });
+    expect(predicateMet.blockedBy).toBe('timeout'); // race engine, not hard-block
+
+    // Predicate key present but false → AND fails → fail-open (race engine, no recovery card)
+    _resetConfigCache();
+    stubStateCheck({ no_test_passed_since_last_edit: false });
+    mockProjectConfig({
+      settings: { mode: 'standard', approvalTimeoutMs: 100, approvers: { native: false } },
+      policy: { smartRules: [STATEFUL_RULE] },
+    });
+    const predicateFalse = await authorizeHeadless('Bash', { command: DEPLOY_CMD });
+    expect(predicateFalse.blockedBy).toBe('timeout');
+    expect(predicateFalse.blockedBy).not.toBe('local-config');
+
+    // Predicate key absent (undefined !== true) → AND fails → same fail-open behaviour
+    _resetConfigCache();
+    stubStateCheck({}); // key missing entirely
+    mockProjectConfig({
+      settings: { mode: 'standard', approvalTimeoutMs: 100, approvers: { native: false } },
+      policy: { smartRules: [STATEFUL_RULE] },
+    });
+    const predicateAbsent = await authorizeHeadless('Bash', { command: DEPLOY_CMD });
+    expect(predicateAbsent.blockedBy).toBe('timeout');
+    expect(predicateAbsent.blockedBy).not.toBe('local-config');
   });
 });

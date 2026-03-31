@@ -389,12 +389,18 @@ async function _authorizeHeadlessCore(
       // If predicates are not all satisfied (or daemon unreachable), downgrade
       // to review so the user can decide rather than being hard-blocked.
       if (policyResult.dependsOnStatePredicates?.length) {
-        await checkStatePredicates(policyResult.dependsOnStatePredicates);
-        // Whether or not predicates are met, fall through to the race engine so
-        // the human decides via the approvers (tail [1]/[2]/[3], native popup,
-        // browser dashboard). The /dev/tty approach was wrong: Claude Code holds
-        // the terminal, so the user cannot interact with a tty menu mid-run.
-        if (policyResult.recoveryCommand) {
+        const stateResults = await checkStatePredicates(policyResult.dependsOnStatePredicates);
+        // Strict === true check: undefined (missing key) and false are both treated
+        // as "predicate not satisfied" — both result in fail-open (no recovery card).
+        const predicatesMet =
+          stateResults !== null &&
+          policyResult.dependsOnStatePredicates.every((p) => stateResults[p] === true);
+        // Always fall through to the race engine — the human decides via the approvers
+        // (tail [1]/[2]/[3], native popup, browser dashboard). When predicates are met,
+        // attach the recoveryCommand so the tail can render the STATE GUARD card.
+        // When predicates are not met (or daemon unreachable), omit it so the tail
+        // shows a standard review card without a recovery-command prompt.
+        if (predicatesMet && policyResult.recoveryCommand) {
           statefulRecoveryCommand = policyResult.recoveryCommand;
         }
       } else {
