@@ -4,7 +4,7 @@ import { randomUUID } from 'crypto';
 import { askNativePopup } from '../ui/native';
 import { computeRiskMetadata, type RiskMetadata } from '../context-sniper';
 import { scanArgs, scanFilePath, type DlpMatch } from '../dlp';
-import { appendHookDebug, appendLocalAudit } from '../audit';
+import { appendHookDebug, appendLocalAudit, appendToLog, HOOK_DEBUG_LOG } from '../audit';
 import { getConfig, getCredentials } from '../config';
 import { isIgnoredTool, evaluatePolicy } from '../policy';
 import {
@@ -395,6 +395,23 @@ async function _authorizeHeadlessCore(
         const predicatesMet =
           stateResults !== null &&
           policyResult.dependsOnStatePredicates.every((p) => stateResults[p] === true);
+
+        // Emit an audit entry whenever the state check fails so silent degradation
+        // is visible in hook-debug.log. stateResults===null means daemon was
+        // unreachable or timed out; a non-null result with any predicate !== true
+        // means the block was intentionally skipped (normal operation, not an error).
+        if (stateResults === null && !isManual) {
+          appendToLog(HOOK_DEBUG_LOG, {
+            ts: new Date().toISOString(),
+            event: 'state-check-fail-open',
+            tool: toolName,
+            rule: policyResult.ruleName,
+            predicates: policyResult.dependsOnStatePredicates,
+            reason:
+              'daemon unreachable or /state/check timed out — block rule downgraded to review',
+          });
+        }
+
         // Always fall through to the race engine — the human decides via the approvers
         // (tail [1]/[2]/[3], native popup, browser dashboard). When predicates are met,
         // attach the recoveryCommand so the tail can render the STATE GUARD card.

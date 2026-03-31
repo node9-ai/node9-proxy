@@ -2076,9 +2076,15 @@ describe('stateful smart rules — dependsOnState', () => {
     expect(result.blockedBy).toBe('local-config');
   });
 
-  it('block rule with dependsOnState fires when predicate is satisfied', async () => {
-    // Predicates met → falls through to race engine (human decides via approvers).
-    // In test mode all interactive channels are off → timeout fires.
+  it('stateful block routes to race engine (not hard-block) when predicate is satisfied', async () => {
+    // DESIGN NOTE: stateful blocks intentionally do NOT hard-block (blockedBy:'local-config').
+    // Instead they fall through to the race engine so a human can override via the approvers
+    // (tail [1]/[2]/[3], native popup, browser). Plain block rules (no dependsOnState) still
+    // hard-block immediately. The distinction: stateful predicates can be wrong; a human must
+    // always have a chance to override without needing to edit config.
+    //
+    // In this test all interactive channels are disabled, so the timeout racer fires.
+    // In production with `node9 tail` running, the STATE GUARD card would appear instead.
     stubStateCheck({ no_test_passed_since_last_edit: true });
     mockProjectConfig({
       settings: { mode: 'standard', approvalTimeoutMs: 500 },
@@ -2086,7 +2092,8 @@ describe('stateful smart rules — dependsOnState', () => {
     });
     const result = await authorizeHeadless('Bash', { command: DEPLOY_CMD });
     expect(result.approved).toBe(false);
-    expect(result.blockedBy).toBe('timeout');
+    expect(result.blockedBy).toBe('timeout'); // race engine, NOT 'local-config' (by design)
+    expect(result.blockedBy).not.toBe('local-config'); // plain block rules return 'local-config'
   });
 
   it('block rule with dependsOnState is skipped when predicate is false', async () => {
@@ -2192,6 +2199,29 @@ describe('stateful smart rules — dependsOnState', () => {
     const policyResult = await evaluatePolicy('Bash', { command: 'rm -rf /' });
     expect(policyResult.decision).toBe('block');
     expect(policyResult.dependsOnStatePredicates).toBeUndefined();
+  });
+
+  it('unknown predicate name in dependsOnState is rejected by Zod schema — rule has no predicates', async () => {
+    // The schema uses z.enum(['no_test_passed_since_last_edit']) so unknown
+    // predicate names cause Zod validation to warn and strip dependsOnState.
+    // Result: the rule has no dependsOnState → treated as a plain block rule → hard-block.
+    mockProjectConfig({
+      settings: { mode: 'standard', approvalTimeoutMs: 100 },
+      policy: {
+        smartRules: [
+          {
+            name: 'bad-predicate',
+            tool: 'Bash',
+            conditions: [{ field: 'command', op: 'matches', value: './deploy.sh' }],
+            verdict: 'block',
+            dependsOnState: ['unknown_predicate_name'],
+          },
+        ],
+      },
+    });
+    const policyResult = await evaluatePolicy('Bash', { command: DEPLOY_CMD });
+    // Zod strips the invalid enum value — dependsOnStatePredicates should be absent or empty
+    expect(policyResult.dependsOnStatePredicates?.length ?? 0).toBe(0);
   });
 
   it('registerDaemonEntry sends recoveryCommand in POST body', async () => {
