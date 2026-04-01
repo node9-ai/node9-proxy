@@ -21,6 +21,10 @@ export interface SnapshotEntry {
   hash: string;
   tool: string;
   argsSummary: string;
+  /** Files changed in this snapshot (absent in snapshots created before v1.9.0). */
+  files?: string[];
+  /** Unified diff captured at creation time — always available, never recomputed. */
+  diff?: string | null;
   cwd: string;
   timestamp: number;
 }
@@ -48,7 +52,7 @@ function buildArgsSummary(tool: string, args: unknown): string {
   if (typeof cmd === 'string') return cmd.slice(0, 80);
   const sql = a.sql ?? a.query;
   if (typeof sql === 'string') return sql.slice(0, 80);
-  return tool;
+  return '';
 }
 
 // ── Shadow Repo Helpers ───────────────────────────────────────────────────────
@@ -243,11 +247,49 @@ export async function createShadowSnapshot(
     const commitHash = commitRes.stdout?.toString().trim();
     if (!commitHash || commitRes.status !== 0) return null;
 
+    // ── Capture diff + file list at creation time ─────────────────────────────
+    // Find the most recent snapshot for this project (same cwd) to diff against.
     const stack = readStack();
+    const prevEntry = [...stack].reverse().find((e) => e.cwd === cwd);
+
+    let capturedFiles: string[] = [];
+    let capturedDiff: string | null = null;
+
+    if (prevEntry) {
+      // Incremental diff: what changed from the previous snapshot to this one
+      const filesRes = spawnSync('git', ['diff', '--name-only', prevEntry.hash, commitHash], {
+        env: shadowEnv,
+        timeout: GIT_TIMEOUT,
+      });
+      if (filesRes.status === 0) {
+        capturedFiles = filesRes.stdout?.toString().trim().split('\n').filter(Boolean) ?? [];
+      }
+      const diffRes = spawnSync('git', ['diff', prevEntry.hash, commitHash], {
+        env: shadowEnv,
+        timeout: GIT_TIMEOUT,
+      });
+      if (diffRes.status === 0) {
+        capturedDiff = diffRes.stdout?.toString() || null;
+      }
+    } else {
+      // First snapshot for this project — list all files
+      const filesRes = spawnSync('git', ['ls-tree', '-r', '--name-only', commitHash], {
+        env: shadowEnv,
+        timeout: GIT_TIMEOUT,
+      });
+      if (filesRes.status === 0) {
+        capturedFiles = filesRes.stdout?.toString().trim().split('\n').filter(Boolean) ?? [];
+      }
+      // No meaningful diff for the first snapshot (no prior state to compare against)
+      capturedDiff = null;
+    }
+
     stack.push({
       hash: commitHash,
       tool,
       argsSummary: buildArgsSummary(tool, args),
+      files: capturedFiles,
+      diff: capturedDiff,
       cwd,
       timestamp: Date.now(),
     });

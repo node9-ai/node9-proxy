@@ -65,11 +65,15 @@ function spawnResult(stdout = '', status = 0): ReturnType<typeof spawnSync> {
 
 /**
  * Mocks spawnSync so all git operations succeed. Handles rev-parse --git-dir
- * (shadow repo health check), config, add, write-tree, and commit-tree.
+ * (shadow repo health check), config, add, write-tree, commit-tree, diff, and ls-tree.
  * Uses `--git-dir` to distinguish the health-check rev-parse from other
  * rev-parse variants (e.g. rev-parse HEAD) so those don't collapse.
  */
-function mockGitSuccess(treeHash = 'abc123tree', commitHash = 'def456commit') {
+function mockGitSuccess(
+  treeHash = 'abc123tree',
+  commitHash = 'def456commit',
+  opts: { diffFiles?: string; diffContent?: string; lsTreeFiles?: string } = {}
+) {
   mockSpawn.mockImplementation((_cmd, args) => {
     const a = (args ?? []) as string[];
     // Only match the shadow-repo health-check: `git rev-parse --git-dir`
@@ -78,6 +82,12 @@ function mockGitSuccess(treeHash = 'abc123tree', commitHash = 'def456commit') {
     if (a.includes('add')) return spawnResult();
     if (a.includes('write-tree')) return spawnResult(treeHash + '\n');
     if (a.includes('commit-tree')) return spawnResult(commitHash + '\n');
+    // diff --name-only → file list
+    if (a.includes('diff') && a.includes('--name-only')) return spawnResult(opts.diffFiles ?? '');
+    // diff (without --name-only) → unified diff content
+    if (a.includes('diff')) return spawnResult(opts.diffContent ?? '');
+    // ls-tree → file list for first snapshot
+    if (a.includes('ls-tree')) return spawnResult(opts.lsTreeFiles ?? '');
     return spawnResult();
   });
 }
@@ -388,6 +398,93 @@ describe('createShadowSnapshot', () => {
       (r) => r.type === 'return' && r.value?.unref
     )?.value;
     expect(returnVal?.unref).toHaveBeenCalled();
+  });
+
+  it('captures files and diff from previous snapshot for the same cwd', async () => {
+    withShadowRepo(true);
+    const existing = [
+      {
+        hash: 'prevhash',
+        tool: 'edit',
+        argsSummary: 'old.ts',
+        cwd: '/mock/project',
+        timestamp: 1000,
+      },
+    ];
+    vi.mocked(fs.readFileSync).mockImplementation((p) => {
+      const s = String(p);
+      if (s.endsWith('project-path.txt')) return '/mock/project';
+      if (s.endsWith('snapshots.json')) return JSON.stringify(existing);
+      return '';
+    });
+    vi.mocked(fs.existsSync).mockImplementation((p) => String(p).endsWith('snapshots.json'));
+    mockGitSuccess('treeD', 'commitD', {
+      diffFiles: 'src/auth.ts\nsrc/utils.ts\n',
+      diffContent: '-old\n+new\n',
+    });
+
+    await createShadowSnapshot('edit', { file_path: 'src/auth.ts' });
+
+    const writeCall = writeSpy.mock.calls.find(byStackPath);
+    const written = JSON.parse(String(writeCall![1]));
+    const entry = written[written.length - 1];
+    expect(entry.files).toEqual(['src/auth.ts', 'src/utils.ts']);
+    expect(entry.diff).toBe('-old\n+new\n');
+  });
+
+  it('uses ls-tree for files on first snapshot (no previous entry for cwd)', async () => {
+    withShadowRepo(true);
+    mockGitSuccess('treeF', 'commitF', { lsTreeFiles: 'src/index.ts\npackage.json\n' });
+
+    await createShadowSnapshot('write', { file_path: 'src/index.ts' });
+
+    const writeCall = writeSpy.mock.calls.find(byStackPath);
+    const written = JSON.parse(String(writeCall![1]));
+    expect(written[0].files).toEqual(['src/index.ts', 'package.json']);
+    expect(written[0].diff).toBeNull();
+  });
+
+  it('does not use a previous snapshot from a different cwd for diff', async () => {
+    withShadowRepo(true);
+    // Previous snapshot is from a DIFFERENT project
+    const existing = [
+      {
+        hash: 'otherhash',
+        tool: 'edit',
+        argsSummary: 'file.ts',
+        cwd: '/other/project',
+        timestamp: 1000,
+      },
+    ];
+    vi.mocked(fs.readFileSync).mockImplementation((p) => {
+      const s = String(p);
+      if (s.endsWith('project-path.txt')) return '/mock/project';
+      if (s.endsWith('snapshots.json')) return JSON.stringify(existing);
+      return '';
+    });
+    vi.mocked(fs.existsSync).mockImplementation((p) => String(p).endsWith('snapshots.json'));
+    mockGitSuccess('treeN', 'commitN', { lsTreeFiles: 'src/app.ts\n' });
+
+    await createShadowSnapshot('write', { file_path: 'src/app.ts' });
+
+    const writeCall = writeSpy.mock.calls.find(byStackPath);
+    const written = JSON.parse(String(writeCall![1]));
+    const entry = written[written.length - 1];
+    // Should use ls-tree (first snapshot path), not diff against other project
+    expect(entry.files).toEqual(['src/app.ts']);
+    expect(entry.diff).toBeNull();
+  });
+
+  it('buildArgsSummary falls back to empty string when no recognisable field', async () => {
+    withShadowRepo(true);
+    mockGitSuccess('treeZ', 'commitZ');
+
+    await createShadowSnapshot('unknown', { unrecognised: 'value' });
+
+    const writeCall = writeSpy.mock.calls.find(byStackPath);
+    const written = JSON.parse(String(writeCall![1]));
+    // Should be empty string, NOT 'unknown' (the tool name)
+    expect(written[0].argsSummary).toBe('');
   });
 
   it('uses a unique GIT_INDEX_FILE per concurrent invocation', async () => {
