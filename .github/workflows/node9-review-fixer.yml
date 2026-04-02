@@ -50,6 +50,7 @@ jobs:
 
       - name: Run node9 review
         env:
+          PYTHONUNBUFFERED: '1'
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           NODE9_API_KEY: ${{ secrets.NODE9_API_KEY }}
           NODE9_API_URL: https://dev-api.node9.ai/api/v1/intercept

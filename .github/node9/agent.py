@@ -4,10 +4,12 @@ import re
 import subprocess
 import urllib.request
 import urllib.error
-import time  # Added for throttling
+import time 
+import sys
 
 import anthropic
 from dotenv import load_dotenv
+from node9 import ActionDeniedException
 
 import tools
 
@@ -16,6 +18,23 @@ load_dotenv()
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 CI_CONTEXT_PATH = os.path.expanduser("~/.node9/ci-context.json")
+
+
+def _write_github_summary(issues_found, issues_fixed):
+    """Writes the review results to the GitHub Actions Summary page."""
+    summary_file = os.environ.get('GITHUB_STEP_SUMMARY')
+    if not summary_file:
+        return
+    
+    with open(summary_file, 'a') as f:
+        f.write("### 🤖 node9 AI Code Review Summary\n")
+        f.write("#### 🔍 Issues Found:\n")
+        for issue in issues_found:
+            f.write(f"- {issue}\n")
+        f.write("\n#### ✅ Fixes Applied:\n")
+        for fix in issues_fixed:
+            f.write(f"- {fix}\n")
+        f.write("\n> **Action Required:** Please go to the Node9 Dashboard to Approve or Discard these changes.")
 
 
 # ---------------------------------------------------------------------------
@@ -86,29 +105,26 @@ def _get_pr_review_comments(pr_number: int, repo: str, github_token: str) -> str
 # CI context
 # ---------------------------------------------------------------------------
 
-def _write_ci_context(
-    tests_passed: int,
-    tests_total: int,
-    files_changed: list,
-    issues_found: list,
-    issues_fixed: list,
-) -> None:
+def _write_ci_context(tests_passed, tests_total, files_changed, issues_found, issues_fixed, pr_url=""):
     os.makedirs(os.path.dirname(CI_CONTEXT_PATH), exist_ok=True)
+    
+    # Copy lists to avoid modifying original lists in place (since we run context updates in a loop)
+    found_copy = list(issues_found)
+    if pr_url:
+        found_copy.insert(0, f"🔗 [View Draft PR on GitHub]({pr_url})")
+
     with open(CI_CONTEXT_PATH, "w") as f:
-        json.dump(
-            {
-                "tests_after": {"passed": tests_passed, "total": tests_total},
-                "files_changed": files_changed,
-                "issues_found": issues_found,
-                "issues_fixed": issues_fixed,
-                "github_repository": os.environ.get("GITHUB_REPOSITORY"),
-                "github_head_ref": os.environ.get("GITHUB_HEAD_REF"),
-                "github_token": os.environ.get("GITHUB_TOKEN"),
-                "iteration": int(os.environ.get("ITERATION", "1")),
-                "draft_pr_number": os.environ.get("DRAFT_PR_NUMBER"),
-            },
-            f,
-        )
+        json.dump({
+            "tests_after": {"passed": tests_passed, "total": tests_total},
+            "files_changed": files_changed,
+            "issues_found": found_copy,
+            "issues_fixed": issues_fixed,
+            "github_repository": os.environ.get("GITHUB_REPOSITORY"),
+            "github_head_ref": os.environ.get("GITHUB_HEAD_REF"),
+            "github_token": os.environ.get("GITHUB_TOKEN"),
+            "iteration": int(os.environ.get("ITERATION", "1")),
+            "draft_pr_number": os.environ.get("DRAFT_PR_NUMBER"),
+        }, f)
 
 
 # ---------------------------------------------------------------------------
@@ -125,19 +141,16 @@ def execute_review_fix() -> None:
     github_token = os.environ.get("GITHUB_TOKEN", "")
     fix_branch = f"node9/fix/{original_branch}"
 
-    print(f"🤖 node9 CI Review — iteration {iteration} on {original_branch} → {base_branch}")
+    print(f"🤖 node9 CI Review — iteration {iteration} on {original_branch} → {base_branch}", flush=True)
 
     diff_output = tools._run_unprotected(f"git diff origin/{base_branch}...HEAD")
 
     if iteration == 1:
         diff_truncated = len(diff_output) > 8000
-        if diff_truncated:
-            print(f"⚠️  Diff is {len(diff_output)} chars — truncated to 8000 for context window.")
-        
         user_content = (
             f"Review the following git diff for {original_branch} → {base_branch} "
             f"and fix any issues you find.\n\n"
-            f"Git diff{' (truncated)' if diff_truncated else ''}:\n```\n{diff_output[:8000]}\n```\n\n"
+            f"Git diff:\n```\n{diff_output[:8000]}\n```\n\n"
             "Instructions:\n1. Read files\n2. Fix bugs\n3. Run tests\n4. Respond with summary."
         )
     else:
@@ -146,12 +159,11 @@ def execute_review_fix() -> None:
             pr_comments = _get_pr_review_comments(int(draft_pr_number_str), repo, github_token)
 
         user_content = (
-            f"Iteration {iteration}. Apply the requested changes.\n\n"
+            f"Iteration {iteration}. Apply requested changes.\n\n"
             + (f"Feedback: {feedback}\n\n" if feedback else "")
-            + (f"PR line comments: {pr_comments}\n\n" if pr_comments else "")
+            + (f"PR line comments:\n{pr_comments}\n\n" if pr_comments else "")
         )
 
-    # UPDATED: Use content blocks to enable Prompt Caching for the initial diff
     messages = [
         {
             "role": "user", 
@@ -159,7 +171,7 @@ def execute_review_fix() -> None:
                 {
                     "type": "text", 
                     "text": user_content,
-                    "cache_control": {"type": "ephemeral"} # CACHED
+                    "cache_control": {"type": "ephemeral"} 
                 }
             ]
         }
@@ -174,7 +186,6 @@ def execute_review_fix() -> None:
     _write_ci_context(0, 0, [], [], [])
 
     for i in range(20):
-        # UPDATED: Added beta header and caching to system prompt
         response = client.messages.create(
             model="claude-sonnet-4-6", 
             max_tokens=4096,
@@ -221,7 +232,7 @@ def execute_review_fix() -> None:
                         "FOUND: <one-line description>\n"
                         "FIXED: <one-line description>"
                     ),
-                    "cache_control": {"type": "ephemeral"} # CACHED
+                    "cache_control": {"type": "ephemeral"} 
                 }
             ],
             messages=messages,
@@ -243,11 +254,10 @@ def execute_review_fix() -> None:
 
         tool_results = []
         for tool_use in response.content:
-            if tool_use.type != "tool_use":
-                continue
+            if tool_use.type != "tool_use": continue
 
             name, args = tool_use.name, tool_use.input
-            print(f"  → {name}({list(args.keys())})")
+            print(f"  → {name}({list(args.keys())})", flush=True)
 
             func = getattr(tools, name)
             result = func(**args)
@@ -266,10 +276,9 @@ def execute_review_fix() -> None:
                     tests_passed = p
                     tests_total = p + f
 
-            # UPDATED: Truncate tool results to avoid hitting token limits
             sanitized_result = str(result)
             if len(sanitized_result) > 10000:
-                sanitized_result = sanitized_result[:10000] + "\n... (result truncated to save tokens)"
+                sanitized_result = sanitized_result[:10000] + "\n... (truncated)"
 
             tool_results.append({
                 "type": "tool_result",
@@ -280,28 +289,41 @@ def execute_review_fix() -> None:
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
 
-        # UPDATED: Throttling for Tier 1 limits
-        print(f"  (Loop {i+1}/20) Waiting 12s to stay under rate limits...")
+        print(f"  (Loop {i+1}/20) Waiting 12s...", flush=True)
         time.sleep(12) 
 
-    _write_ci_context(tests_passed, tests_total, files_changed, issues_found, issues_fixed)
+    # 1. Update GitHub Actions Step Summary UI
+    _write_github_summary(issues_found, issues_fixed)
 
+    # 2. Prepare the local branch
     tools._run_unprotected(f"git checkout -b {fix_branch} 2>/dev/null || git checkout {fix_branch}")
     tools._run_unprotected("git add -A")
     commit_msg = f"node9: automated fixes for {original_branch} (iteration {iteration})"
-    subprocess.run(
-        ["git", "commit", "-m", commit_msg, "--allow-empty"],
-        cwd=tools.WORKSPACE_DIR,
-        check=True,
-    )
+    subprocess.run(["git", "commit", "-m", commit_msg, "--allow-empty"], cwd=tools.WORKSPACE_DIR, check=True)
 
-    tools.run_bash(f"git push origin {fix_branch}")
+    # 3. PUSH PREVIEW (Unprotected): Makes branch exist on GitHub so PR can be created
+    print("📤 Uploading preview branch...", flush=True)
+    tools._run_unprotected(f"git push origin {fix_branch} --force")
 
+    # 4. CREATE DRAFT PR & GET LINK
+    pr_url = ""
     if github_token and repo:
         pr_number = _open_or_find_draft_pr(fix_branch, original_branch, repo, github_token)
         if pr_number:
-            print(f"✅ Draft PR #{pr_number} ready for review")
+            pr_url = f"https://github.com/{repo}/pull/{pr_number}"
+            print(f"👀 PREVIEW YOUR CHANGES HERE: {pr_url}", flush=True)
 
+    # 5. FINAL CONTEXT UPDATE: Includes the PR Link for the Node9 Dashboard
+    _write_ci_context(tests_passed, tests_total, files_changed, issues_found, issues_fixed, pr_url=pr_url)
+
+    # 6. THE GOVERNANCE GATE (Protected Push)
+    try:
+        print("🛡️ Node9: Waiting for dashboard approval...", flush=True)
+        tools.run_bash(f"git push origin {fix_branch}")
+        print("✅ Push approved and completed.")
+    except ActionDeniedException:
+        print("\n🛑 Action Denied: Review discarded. PR can be closed manually.", flush=True)
+        sys.exit(0) 
 
 if __name__ == "__main__":
     execute_review_fix()

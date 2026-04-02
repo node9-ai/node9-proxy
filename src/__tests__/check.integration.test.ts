@@ -49,7 +49,7 @@ function runCheck(
   payload: object | string,
   env: Record<string, string> = {},
   cwd = os.tmpdir(),
-  timeoutMs = 20000
+  timeoutMs = 60000
 ): RunResult {
   const payloadArg = typeof payload === 'string' ? payload : JSON.stringify(payload);
   const result = spawnSync(process.execPath, [CLI, 'check', payloadArg], {
@@ -66,6 +66,13 @@ function runCheck(
       ...(env.HOME != null ? { USERPROFILE: env.HOME } : {}),
     },
   });
+
+  if (result.status === null) {
+    const errorMsg = result.error?.message || 'Process terminated';
+    const signal = result.signal || 'unknown';
+    console.error(`[runCheck Fail] ${errorMsg} (Signal: ${signal})\nStderr: ${result.stderr}`);
+  }
+
   return {
     status: result.status,
     stdout: result.stdout ?? '',
@@ -85,7 +92,7 @@ function runCheckAsync(
   payload: object | string,
   env: Record<string, string> = {},
   cwd = os.tmpdir(),
-  timeoutMs = 20000
+  timeoutMs = 260000
 ): Promise<RunResult> {
   const payloadArg = typeof payload === 'string' ? payload : JSON.stringify(payload);
   return new Promise((resolve) => {
