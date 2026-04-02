@@ -420,10 +420,10 @@ async function _authorizeHeadlessCore(
         if (predicatesMet && policyResult.recoveryCommand) {
           statefulRecoveryCommand = policyResult.recoveryCommand;
         }
-      } else if (isDaemonRunning()) {
-        // Local development: daemon is running, so a human is at the keyboard.
-        // Downgrade hard-block to review — the user gets a popup and can approve
-        // or deny the action. Hard blocks stay hard in CI (no daemon = no human).
+      } else if (isDaemonRunning() && !isTestEnv) {
+        // Local development: daemon is running and not in a test/CI environment,
+        // so a human is at the keyboard. Downgrade hard-block to review — the user
+        // gets a popup and can approve or deny. Hard blocks stay hard in CI.
         // Audit the block attempt to SaaS before falling through to the race engine.
         if (!isManual)
           appendLocalAudit(toolName, args, 'deny', 'smart-rule-block', meta, hashAuditArgs);

@@ -102,6 +102,49 @@ def _get_pr_review_comments(pr_number: int, repo: str, github_token: str) -> str
 
 
 # ---------------------------------------------------------------------------
+# Token management helpers
+# ---------------------------------------------------------------------------
+
+def _truncate_output(text: str, max_chars: int = 8000) -> str:
+    """Middle-out truncation: keep the first and last half so both the error
+    header and the test summary survive. Tail-only truncation drops the error."""
+    if len(text) <= max_chars:
+        return text
+    half = max_chars // 2
+    removed = len(text) - max_chars
+    return text[:half] + f"\n\n... [{removed} chars truncated] ...\n\n" + text[-half:]
+
+
+def _apply_rolling_cache(messages: list) -> None:
+    """Keep exactly one cache breakpoint, always on the last user message.
+    Strips stale markers from earlier messages so we never exceed the 4-breakpoint limit
+    and so the cache window moves forward with the conversation."""
+    for msg in messages:
+        if msg["role"] == "user" and isinstance(msg["content"], list):
+            for block in msg["content"]:
+                if isinstance(block, dict):
+                    block.pop("cache_control", None)
+    for msg in reversed(messages):
+        if msg["role"] == "user" and isinstance(msg["content"], list):
+            for block in reversed(msg["content"]):
+                if isinstance(block, dict):
+                    block["cache_control"] = {"type": "ephemeral"}
+                    return
+
+
+def _create_with_retry(client, **kwargs):
+    """Wrap client.messages.create with exponential backoff on 429."""
+    for attempt in range(5):
+        try:
+            return client.messages.create(**kwargs)
+        except anthropic.RateLimitError:
+            wait = 30 * (2 ** attempt)
+            print(f"  ⏳ Rate limited — waiting {wait}s before retry {attempt + 1}/5...", flush=True)
+            time.sleep(wait)
+    return client.messages.create(**kwargs)  # Final attempt — let it raise
+
+
+# ---------------------------------------------------------------------------
 # CI context
 # ---------------------------------------------------------------------------
 
@@ -186,8 +229,13 @@ def execute_review_fix() -> None:
     _write_ci_context(0, 0, [], [], [])
 
     for i in range(20):
-        response = client.messages.create(
-            model="claude-sonnet-4-6", 
+        # Roll the cache checkpoint to the latest message before every API call.
+        # This keeps input tokens low as history grows and avoids 429 rate limits.
+        _apply_rolling_cache(messages)
+
+        response = _create_with_retry(
+            client,
+            model="claude-sonnet-4-6",
             max_tokens=4096,
             extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"},
             tools=[
@@ -239,6 +287,22 @@ def execute_review_fix() -> None:
         )
 
         if response.stop_reason != "tool_use":
+            # Verification gate: run tests one final time before accepting the summary.
+            # Claude sometimes says "done" while tests still fail.
+            if i < 19:
+                print("🕵️  Final verification: running tests...", flush=True)
+                verify = tools._run_unprotected("npm test 2>&1 | tail -30")
+                failed = re.search(r"(\d+)\s+failed", verify)
+                if failed and int(failed.group(1)) > 0:
+                    print(f"❌ {failed.group(1)} test(s) still failing — forcing another fix loop...", flush=True)
+                    messages.append({"role": "assistant", "content": response.content})
+                    messages.append({"role": "user", "content": [{
+                        "type": "text",
+                        "text": f"Tests are still failing. Please fix them:\n\n{_truncate_output(verify)}",
+                    }]})
+                    time.sleep(12)
+                    continue
+
             for block in response.content:
                 if hasattr(block, "text") and block.text:
                     for line in block.text.splitlines():
@@ -276,9 +340,7 @@ def execute_review_fix() -> None:
                     tests_passed = p
                     tests_total = p + f
 
-            sanitized_result = str(result)
-            if len(sanitized_result) > 10000:
-                sanitized_result = sanitized_result[:10000] + "\n... (truncated)"
+            sanitized_result = _truncate_output(str(result))
 
             tool_results.append({
                 "type": "tool_result",
