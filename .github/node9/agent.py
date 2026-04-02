@@ -170,6 +170,11 @@ def execute_review_fix() -> None:
     tests_passed = 0
     tests_total = 0
 
+    # Write a stub ci-context.json immediately so that every SDK call in the loop
+    # carries ciContext. This triggers node9 SaaS auto-provisioning of CI policies
+    # on the very first tool call, not just at the git push gate.
+    _write_ci_context(0, 0, [], [], [])
+
     for _ in range(20):
         response = client.messages.create(
             model="claude-sonnet-4-6",
