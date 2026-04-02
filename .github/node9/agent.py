@@ -176,7 +176,7 @@ def execute_review_fix() -> None:
     for i in range(20):
         # UPDATED: Added beta header and caching to system prompt
         response = client.messages.create(
-            model="claude-3-5-sonnet-20240620", 
+            model="claude-sonnet-4-6", 
             max_tokens=4096,
             extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"},
             tools=[
