@@ -1,5 +1,4 @@
 import subprocess
-import shlex
 import os
 import sys
 
@@ -17,7 +16,7 @@ def run_bash(command: str):
     """Executes a bash command (tests, ls, etc) in the workspace."""
     try:
         result = subprocess.check_output(
-            shlex.split(command),
+            ["bash", "-c", command],
             stderr=subprocess.STDOUT,
             cwd=WORKSPACE_DIR,
         )
@@ -46,7 +45,7 @@ def _run_unprotected(command: str) -> str:
     """Run a bash command without node9 interception (for git setup, staging, etc.)."""
     try:
         result = subprocess.check_output(
-            shlex.split(command),
+            ["bash", "-c", command],
             stderr=subprocess.STDOUT,
             cwd=WORKSPACE_DIR,
         )
