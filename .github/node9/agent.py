@@ -4,7 +4,7 @@ import re
 import subprocess
 import urllib.request
 import urllib.error
-import time 
+import time
 import sys
 
 import anthropic
@@ -311,12 +311,12 @@ def execute_review_fix() -> None:
 
     messages = [
         {
-            "role": "user", 
+            "role": "user",
             "content": [
                 {
-                    "type": "text", 
+                    "type": "text",
                     "text": user_content,
-                    "cache_control": {"type": "ephemeral"} 
+                    "cache_control": {"type": "ephemeral"}
                 }
             ]
         }
@@ -383,7 +383,7 @@ def execute_review_fix() -> None:
                         "FOUND: <one-line description>\n"
                         "FIXED: <one-line description>"
                     ),
-                    "cache_control": {"type": "ephemeral"} 
+                    "cache_control": {"type": "ephemeral"}
                 }
             ],
             messages=messages,
@@ -462,7 +462,7 @@ def execute_review_fix() -> None:
         messages.append({"role": "user", "content": tool_results})
 
         print(f"  (Loop {i+1}/20) Waiting 12s...", flush=True)
-        time.sleep(12) 
+        time.sleep(12)
 
     # 1. Prepare the local branch
     tools._run_unprotected(f"git checkout -b {fix_branch} 2>/dev/null || git checkout {fix_branch}")
