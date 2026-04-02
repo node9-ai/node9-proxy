@@ -154,7 +154,8 @@ export async function pollNode9SaaS(
         return { approved: false, reason: statusBody.reason };
       }
       if (status === 'FIX') {
-        const feedbackText = statusBody.feedbackText ?? statusBody.reason ?? 'Run again with feedback.';
+        const feedbackText =
+          statusBody.feedbackText ?? statusBody.reason ?? 'Run again with feedback.';
         return { approved: false, reason: feedbackText };
       }
     } catch {
