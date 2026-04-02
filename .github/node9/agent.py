@@ -20,21 +20,30 @@ client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 CI_CONTEXT_PATH = os.path.expanduser("~/.node9/ci-context.json")
 
 
-def _write_github_summary(issues_found, issues_fixed):
+def _write_github_summary(issues_found, issues_fixed, pr_url=""):
     """Writes the review results to the GitHub Actions Summary page."""
     summary_file = os.environ.get('GITHUB_STEP_SUMMARY')
     if not summary_file:
+        print("⚠️  GITHUB_STEP_SUMMARY not set — skipping step summary", flush=True)
         return
-    
+
     with open(summary_file, 'a') as f:
-        f.write("### 🤖 node9 AI Code Review Summary\n")
-        f.write("#### 🔍 Issues Found:\n")
-        for issue in issues_found:
-            f.write(f"- {issue}\n")
-        f.write("\n#### ✅ Fixes Applied:\n")
-        for fix in issues_fixed:
-            f.write(f"- {fix}\n")
-        f.write("\n> **Action Required:** Please go to the Node9 Dashboard to Approve or Discard these changes.")
+        f.write("### 🤖 node9 AI Code Review\n\n")
+        if pr_url:
+            f.write(f"**[View Draft PR on GitHub]({pr_url})**\n\n")
+        if issues_found:
+            f.write("#### Issues Found\n")
+            for issue in issues_found:
+                f.write(f"- {issue}\n")
+            f.write("\n")
+        if issues_fixed:
+            f.write("#### Fixes Applied\n")
+            for fix in issues_fixed:
+                f.write(f"- {fix}\n")
+            f.write("\n")
+        if not issues_found and not issues_fixed:
+            f.write("No issues found in this diff.\n\n")
+        f.write("> **Action Required:** Go to the [node9 Dashboard](https://app.node9.ai) to Approve, Discard, or Run Again.\n")
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +80,12 @@ def _open_or_find_draft_pr(fix_branch: str, base_branch: str, repo: str, github_
     }
     result, status = _github_request("POST", f"https://api.github.com/repos/{repo}/pulls", github_token, body)
     if status == 201:
+        print(f"  ✅ Draft PR created: #{result.get('number')}", flush=True)
         return result.get("number")
+
+    # 422 = already exists; try to find it. Anything else = real error.
+    if status not in (422, 200):
+        print(f"  ⚠️  PR create returned HTTP {status}: {result}", flush=True)
 
     owner = repo.split("/")[0]
     result, status = _github_request(
@@ -80,7 +94,10 @@ def _open_or_find_draft_pr(fix_branch: str, base_branch: str, repo: str, github_
         github_token,
     )
     if status == 200 and result:
-        return result[0].get("number")
+        pr_num = result[0].get("number")
+        print(f"  ♻️  Found existing Draft PR: #{pr_num}", flush=True)
+        return pr_num
+    print(f"  ⚠️  Could not find existing PR either (HTTP {status}): {result}", flush=True)
     return None
 
 
@@ -352,27 +369,39 @@ def execute_review_fix() -> None:
         print(f"  (Loop {i+1}/20) Waiting 12s...", flush=True)
         time.sleep(12) 
 
-    # 1. Update GitHub Actions Step Summary UI
-    _write_github_summary(issues_found, issues_fixed)
-
-    # 2. Prepare the local branch
+    # 1. Prepare the local branch
     tools._run_unprotected(f"git checkout -b {fix_branch} 2>/dev/null || git checkout {fix_branch}")
     tools._run_unprotected("git add -A")
     commit_msg = f"node9: automated fixes for {original_branch} (iteration {iteration})"
     subprocess.run(["git", "commit", "-m", commit_msg, "--allow-empty"], cwd=tools.WORKSPACE_DIR, check=True)
 
-    # 3. PUSH PREVIEW (Unprotected): Makes branch exist on GitHub so PR can be created
+    # 2. PUSH PREVIEW (Unprotected): Makes branch exist on GitHub so PR can be created
     print("📤 Uploading preview branch...", flush=True)
-    tools._run_unprotected(f"git push origin {fix_branch} --force")
+    push_result = tools._run_unprotected(f"git push origin {fix_branch} --force")
+    if push_result.startswith("Error:"):
+        print(f"⚠️  Preview push failed: {push_result}", flush=True)
+    else:
+        print(f"✅ Preview branch pushed: {push_result.strip() or 'ok'}", flush=True)
 
-    # 4. CREATE DRAFT PR & GET LINK
+    # 3. CREATE DRAFT PR & GET LINK
     pr_url = ""
     pr_number = None
-    if github_token and repo:
+    if not github_token:
+        print("⚠️  GITHUB_TOKEN not set — skipping Draft PR creation", flush=True)
+    elif not repo:
+        print("⚠️  GITHUB_REPOSITORY not set — skipping Draft PR creation", flush=True)
+    elif push_result.startswith("Error:"):
+        print("⚠️  Skipping Draft PR — preview branch push failed", flush=True)
+    else:
         pr_number = _open_or_find_draft_pr(fix_branch, original_branch, repo, github_token)
         if pr_number:
             pr_url = f"https://github.com/{repo}/pull/{pr_number}"
             print(f"👀 PREVIEW YOUR CHANGES HERE: {pr_url}", flush=True)
+        else:
+            print(f"⚠️  Draft PR creation failed for {fix_branch} → {original_branch}", flush=True)
+
+    # 4. GitHub Actions Step Summary (written here so it includes the PR link)
+    _write_github_summary(issues_found, issues_fixed, pr_url=pr_url)
 
     # 5. FINAL CONTEXT UPDATE: Includes the PR Link for the Node9 Dashboard
     _write_ci_context(tests_passed, tests_total, files_changed, issues_found, issues_fixed, pr_url=pr_url, pr_number=pr_number)
