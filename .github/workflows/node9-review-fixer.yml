@@ -59,6 +59,7 @@ jobs:
           GITHUB_BASE_REF: ${{ github.event.client_payload.base_ref || github.base_ref || 'main' }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           CI: 'true'
+          NODE9_TEST_CMD: 'npm test 2>&1 | tail -50' # override if your test command differs
           ITERATION: ${{ github.event.client_payload.iteration || '1' }}
           FEEDBACK: ${{ github.event.client_payload.feedback || '' }}
           DRAFT_PR_NUMBER: ${{ github.event.client_payload.draft_pr_number || '' }}

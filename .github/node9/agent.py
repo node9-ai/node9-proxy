@@ -258,8 +258,20 @@ def _write_ci_context(tests_passed, tests_total, files_changed, issues_found, is
 # ---------------------------------------------------------------------------
 
 def execute_review_fix() -> None:
-    original_branch = os.environ.get("GITHUB_HEAD_REF", "unknown-branch")
-    base_branch = os.environ.get("GITHUB_BASE_REF", "main")
+    original_branch = os.environ.get("GITHUB_HEAD_REF", "").strip()
+    if not original_branch:
+        # GITHUB_HEAD_REF is only set for PR events; derive from git for push events
+        try:
+            original_branch = subprocess.check_output(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=tools.WORKSPACE_DIR, stderr=subprocess.STDOUT,
+            ).decode().strip()
+            if original_branch in ("HEAD", ""):
+                original_branch = "unknown-branch"
+        except Exception:
+            original_branch = "unknown-branch"
+
+    base_branch = os.environ.get("GITHUB_BASE_REF", "").strip() or "main"
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     iteration = int(os.environ.get("ITERATION", "1"))
     feedback = os.environ.get("FEEDBACK", "")
@@ -372,13 +384,19 @@ def execute_review_fix() -> None:
 
         if response.stop_reason != "tool_use":
             # Verification gate: run tests one final time before accepting the summary.
-            # Claude sometimes says "done" while tests still fail.
-            if i < 19:
+            # Only force re-loop if Claude hasn't already tried 3+ times (avoid exhausting 20 loops).
+            if i < 3:
                 print("🕵️  Final verification: running tests...", flush=True)
-                verify = tools._run_unprotected("npm test 2>&1 | tail -30")
+                test_cmd = os.environ.get("NODE9_TEST_CMD", "npm test 2>&1 | tail -50")
+                verify = tools._run_unprotected(test_cmd)
                 failed = re.search(r"(\d+)\s+failed", verify)
                 if failed and int(failed.group(1)) > 0:
                     print(f"❌ {failed.group(1)} test(s) still failing — forcing another fix loop...", flush=True)
+                    if m_p := re.search(r"(\d+)\s+passed", verify):
+                        p = int(m_p.group(1))
+                        f = int(failed.group(1))
+                        tests_passed, tests_total = p, p + f
+                        last_test_output = verify
                     messages.append({"role": "assistant", "content": response.content})
                     messages.append({"role": "user", "content": [{
                         "type": "text",
@@ -441,6 +459,9 @@ def execute_review_fix() -> None:
 
     # 1. Prepare the local branch
     tools._run_unprotected(f"git checkout -b {fix_branch} 2>/dev/null || git checkout {fix_branch}")
+    # Remove pycache created by pip install — they must not go into the PR
+    tools._run_unprotected("find . -type d -name '__pycache__' -not -path './.git/*' -exec rm -rf {} + 2>/dev/null || true")
+    tools._run_unprotected("find . -name '*.pyc' -not -path './.git/*' -delete 2>/dev/null || true")
     tools._run_unprotected("git add -A")
     commit_msg = f"node9: automated fixes for {original_branch} (iteration {iteration})"
     subprocess.run(["git", "commit", "-m", commit_msg, "--allow-empty"], cwd=tools.WORKSPACE_DIR, check=True)
