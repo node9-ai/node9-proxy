@@ -148,25 +148,23 @@ def _create_with_retry(client, **kwargs):
 # CI context
 # ---------------------------------------------------------------------------
 
-def _write_ci_context(tests_passed, tests_total, files_changed, issues_found, issues_fixed, pr_url=""):
+def _write_ci_context(tests_passed, tests_total, files_changed, issues_found, issues_fixed, pr_url="", pr_number=None):
     os.makedirs(os.path.dirname(CI_CONTEXT_PATH), exist_ok=True)
-    
-    # Copy lists to avoid modifying original lists in place (since we run context updates in a loop)
-    found_copy = list(issues_found)
-    if pr_url:
-        found_copy.insert(0, f"🔗 [View Draft PR on GitHub]({pr_url})")
-
+    # Use the freshly created PR number if available; otherwise fall back to the
+    # env var (set for iteration 2+ by the RUN_AGAIN dispatch).
+    stored_pr_number = pr_number or os.environ.get("DRAFT_PR_NUMBER") or None
     with open(CI_CONTEXT_PATH, "w") as f:
         json.dump({
             "tests_after": {"passed": tests_passed, "total": tests_total},
             "files_changed": files_changed,
-            "issues_found": found_copy,
+            "issues_found": issues_found,
             "issues_fixed": issues_fixed,
             "github_repository": os.environ.get("GITHUB_REPOSITORY"),
             "github_head_ref": os.environ.get("GITHUB_HEAD_REF"),
             "github_token": os.environ.get("GITHUB_TOKEN"),
             "iteration": int(os.environ.get("ITERATION", "1")),
-            "draft_pr_number": os.environ.get("DRAFT_PR_NUMBER"),
+            "draft_pr_number": stored_pr_number,
+            "draft_pr_url": pr_url,
         }, f)
 
 
@@ -369,6 +367,7 @@ def execute_review_fix() -> None:
 
     # 4. CREATE DRAFT PR & GET LINK
     pr_url = ""
+    pr_number = None
     if github_token and repo:
         pr_number = _open_or_find_draft_pr(fix_branch, original_branch, repo, github_token)
         if pr_number:
@@ -376,7 +375,7 @@ def execute_review_fix() -> None:
             print(f"👀 PREVIEW YOUR CHANGES HERE: {pr_url}", flush=True)
 
     # 5. FINAL CONTEXT UPDATE: Includes the PR Link for the Node9 Dashboard
-    _write_ci_context(tests_passed, tests_total, files_changed, issues_found, issues_fixed, pr_url=pr_url)
+    _write_ci_context(tests_passed, tests_total, files_changed, issues_found, issues_fixed, pr_url=pr_url, pr_number=pr_number)
 
     # 6. THE GOVERNANCE GATE (Protected Push)
     try:
@@ -385,7 +384,7 @@ def execute_review_fix() -> None:
         print("✅ Push approved and completed.")
     except ActionDeniedException:
         print("\n🛑 Action Denied: Review discarded. PR can be closed manually.", flush=True)
-        sys.exit(0) 
+        sys.exit(1)
 
 if __name__ == "__main__":
     execute_review_fix()
