@@ -70,15 +70,76 @@ def _github_request(method: str, url: str, github_token: str, body: dict | None 
         return json.loads(e.read()), e.code
 
 
-def _open_or_find_draft_pr(fix_branch: str, base_branch: str, repo: str, github_token: str) -> int | None:
-    body = {
+def _build_pr_body(
+    issues_found: list, issues_fixed: list,
+    tests_passed: int, tests_total: int,
+    files_changed: list, last_test_output: str,
+    iteration: int,
+) -> str:
+    lines = ["## 🤖 node9 AI Code Review\n"]
+
+    # Test results
+    if tests_total > 0:
+        icon = "✅" if tests_passed == tests_total else "❌"
+        lines.append(f"### {icon} Tests: {tests_passed}/{tests_total} passed\n")
+        if tests_passed < tests_total and last_test_output:
+            lines.append("<details><summary>Test output</summary>\n")
+            lines.append(f"\n```\n{last_test_output.strip()}\n```\n")
+            lines.append("</details>\n")
+    else:
+        lines.append("### ⚪ Tests: not run\n")
+
+    # Issues found
+    if issues_found:
+        lines.append("### 🔍 Issues Found\n")
+        for issue in issues_found:
+            lines.append(f"- {issue}\n")
+        lines.append("")
+
+    # Fixes applied
+    if issues_fixed:
+        lines.append("### 🔧 Fixes Applied\n")
+        for fix in issues_fixed:
+            lines.append(f"- {fix}\n")
+        lines.append("")
+
+    # Files changed
+    if files_changed:
+        lines.append("### 📁 Files Changed\n")
+        for f in files_changed:
+            lines.append(f"- `{f}`\n")
+        lines.append("")
+
+    if not issues_found and not issues_fixed:
+        lines.append("_No issues found in this diff._\n")
+
+    if iteration > 1:
+        lines.append(f"\n---\n_Iteration {iteration} — updated by node9 AI reviewer_\n")
+    else:
+        lines.append("\n---\n_Review and approve in the [node9 Dashboard](https://app.node9.ai)_\n")
+
+    return "".join(lines)
+
+
+def _open_or_find_draft_pr(
+    fix_branch: str, base_branch: str, repo: str, github_token: str,
+    issues_found: list, issues_fixed: list,
+    tests_passed: int, tests_total: int,
+    files_changed: list, last_test_output: str,
+    iteration: int,
+) -> int | None:
+    pr_body = _build_pr_body(
+        issues_found, issues_fixed, tests_passed, tests_total,
+        files_changed, last_test_output, iteration,
+    )
+    create_body = {
         "title": f"[node9] AI review: {base_branch}",
         "head": fix_branch,
         "base": base_branch,
         "draft": True,
-        "body": "Automated fixes by node9 CI code reviewer.\n\nReview this diff and click **Approve & Merge** in the node9 dashboard.",
+        "body": pr_body,
     }
-    result, status = _github_request("POST", f"https://api.github.com/repos/{repo}/pulls", github_token, body)
+    result, status = _github_request("POST", f"https://api.github.com/repos/{repo}/pulls", github_token, create_body)
     if status == 201:
         print(f"  ✅ Draft PR created: #{result.get('number')}", flush=True)
         return result.get("number")
@@ -95,7 +156,14 @@ def _open_or_find_draft_pr(fix_branch: str, base_branch: str, repo: str, github_
     )
     if status == 200 and result:
         pr_num = result[0].get("number")
-        print(f"  ♻️  Found existing Draft PR: #{pr_num}", flush=True)
+        print(f"  ♻️  Found existing Draft PR: #{pr_num} — updating body...", flush=True)
+        # Update the PR body with fresh review details
+        _github_request(
+            "PATCH",
+            f"https://api.github.com/repos/{repo}/pulls/{pr_num}",
+            github_token,
+            {"body": pr_body},
+        )
         return pr_num
     print(f"  ⚠️  Could not find existing PR either (HTTP {status}): {result}", flush=True)
     return None
@@ -240,6 +308,7 @@ def execute_review_fix() -> None:
     issues_fixed: list = []
     tests_passed = 0
     tests_total = 0
+    last_test_output = ""
 
     _write_ci_context(0, 0, [], [], [])
 
@@ -354,6 +423,7 @@ def execute_review_fix() -> None:
                     f = int(m_failed.group(1)) if m_failed else 0
                     tests_passed = p
                     tests_total = p + f
+                    last_test_output = result  # keep latest test run output for PR body
 
             sanitized_result = _truncate_output(str(result))
 
@@ -393,7 +463,11 @@ def execute_review_fix() -> None:
     elif push_result.startswith("Error:"):
         print("⚠️  Skipping Draft PR — preview branch push failed", flush=True)
     else:
-        pr_number = _open_or_find_draft_pr(fix_branch, original_branch, repo, github_token)
+        pr_number = _open_or_find_draft_pr(
+            fix_branch, original_branch, repo, github_token,
+            issues_found, issues_fixed, tests_passed, tests_total,
+            files_changed, last_test_output, iteration,
+        )
         if pr_number:
             pr_url = f"https://github.com/{repo}/pull/{pr_number}"
             print(f"👀 PREVIEW YOUR CHANGES HERE: {pr_url}", flush=True)
