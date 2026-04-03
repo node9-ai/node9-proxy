@@ -128,10 +128,21 @@ def _run_unprotected(command: str) -> str:
 
 
 def read_code(filename: str):
-    """Reads the content of a file for Claude to analyze."""
+    """Reads the content of a file for Claude to analyze. If a directory is given, returns its file listing."""
     _audit("filesystem", {"filename": filename, "op": "read"})
     path = _safe_path(filename)
     if not os.path.exists(path):
         return "Error: File not found."
+    if os.path.isdir(path):
+        try:
+            entries = sorted(os.listdir(path))
+            lines = [f"Directory listing for {filename}/:"]
+            for entry in entries:
+                full = os.path.join(path, entry)
+                suffix = "/" if os.path.isdir(full) else ""
+                lines.append(f"  {entry}{suffix}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error listing directory: {e}"
     with open(path, "r") as f:
         return f.read()
