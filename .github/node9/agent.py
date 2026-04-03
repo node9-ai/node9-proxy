@@ -309,7 +309,8 @@ def _phase2_engineering(filtered_diff, before_out, original_branch, base_branch,
                 print(f"  → {tool_use.name}({tool_use.input})")
                 result = getattr(tools, tool_use.name)(**tool_use.input)
                 if tool_use.name == "write_code": files_changed.append(tool_use.input['filename'])
-                if tool_use.name == "run_bash": after_test_output = result
+                if tool_use.name == "run_bash" and any(k in tool_use.input['command'] for k in ("npm test", "npm run test", "vitest", "jest")):
+                    after_test_output = result
                 tool_results.append({"type": "tool_result", "tool_use_id": tool_use.id, "content": _truncate_output(str(result))})
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
@@ -346,7 +347,8 @@ def _phase4_review_fix_loop(review_issues, test_cmd):
             if tool_use.type == "tool_use":
                 result = getattr(tools, tool_use.name)(**tool_use.input)
                 if tool_use.name == "write_code": files_changed.append(tool_use.input['filename'])
-                if tool_use.name == "run_bash": after_test_output = result
+                if tool_use.name == "run_bash" and any(k in tool_use.input['command'] for k in ("npm test", "npm run test", "vitest", "jest")):
+                    after_test_output = result
                 tool_results.append({"type": "tool_result", "tool_use_id": tool_use.id, "content": str(result)})
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
