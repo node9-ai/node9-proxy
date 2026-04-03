@@ -7,8 +7,6 @@ import sys
 # whatever version pip installed from PyPI — the PyPI package may be older.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from node9 import protect
-
 # In CI, GITHUB_WORKSPACE is the repo root; fall back to local "workspace/" for dev
 WORKSPACE_DIR = os.environ.get("GITHUB_WORKSPACE") or os.path.abspath("workspace")
 
@@ -73,13 +71,22 @@ def _safe_path(filename: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Audit logging (local — no network call, never crashes the agent)
+# ---------------------------------------------------------------------------
+
+def _audit(tool: str, args: dict) -> None:
+    """Write a local audit entry. Used instead of @protect to avoid network dependency."""
+    arg_summary = ", ".join(f"{k}={str(v)[:80]!r}" for k, v in args.items())
+    print(f"  [audit] {tool}({arg_summary})", flush=True)
+
+
+# ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
 
-@protect("bash")
 def run_bash(command: str):
-    """Executes a bash command in the workspace.
-    @protect audit-logs every command through node9 (Phase 1: ALLOW policy — no blocking)."""
+    """Executes a bash command in the workspace. Audit-logged locally."""
+    _audit("bash", {"command": command})
     try:
         result = subprocess.check_output(
             ["bash", "-c", command],
@@ -91,9 +98,10 @@ def run_bash(command: str):
         return f"Error: {e.output.decode()}"
 
 
-@protect("filesystem")
 def write_code(filename: str, content: str):
     """Writes a file after DLP scanning. Blocks if a secret is detected."""
+    _audit("filesystem", {"filename": filename, "bytes": len(content)})
+
     # DLP scan before anything touches disk
     hit = _dlp_scan(filename, content)
     if hit:
@@ -107,7 +115,7 @@ def write_code(filename: str, content: str):
 
 
 def _run_unprotected(command: str) -> str:
-    """Run a bash command without node9 interception (for git setup, staging, etc.)."""
+    """Run a bash command without audit logging (for git setup, staging, etc.)."""
     try:
         result = subprocess.check_output(
             ["bash", "-c", command],
@@ -119,9 +127,9 @@ def _run_unprotected(command: str) -> str:
         return f"Error: {e.output.decode()}"
 
 
-@protect("filesystem")
 def read_code(filename: str):
     """Reads the content of a file for Claude to analyze."""
+    _audit("filesystem", {"filename": filename, "op": "read"})
     path = _safe_path(filename)
     if not os.path.exists(path):
         return "Error: File not found."
