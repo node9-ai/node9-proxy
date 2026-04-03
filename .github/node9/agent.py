@@ -163,7 +163,13 @@ def _create_with_retry(client, **kwargs):
 
 
 def _resolve_branch() -> str:
-    return os.environ.get("GITHUB_HEAD_REF", "dev")
+    # GITHUB_HEAD_REF is only set for pull_request events.
+    # For push events, extract the branch from GITHUB_REF (refs/heads/<branch>).
+    ref = os.environ.get("GITHUB_HEAD_REF") or ""
+    if not ref:
+        ref = os.environ.get("GITHUB_REF", "refs/heads/dev")
+        ref = ref.replace("refs/heads/", "")
+    return ref or "dev"
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +364,8 @@ def execute_review_fix() -> None:
         with open(summary_file, "w") as f: f.write("")
 
     original_branch = _resolve_branch()
-    base_branch = os.environ.get("GITHUB_BASE_REF", "main")
+    # GITHUB_BASE_REF is empty string (not missing) on push events — use `or` not default arg.
+    base_branch = os.environ.get("GITHUB_BASE_REF") or "main"
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     iteration = int(os.environ.get("ITERATION", "1"))
     github_token = os.environ.get("GITHUB_TOKEN", "")
