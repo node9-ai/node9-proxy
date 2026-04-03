@@ -12,7 +12,10 @@ from dotenv import load_dotenv
 import tools
 
 load_dotenv()
-client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+_api_key = os.getenv("ANTHROPIC_API_KEY")
+if not _api_key:
+    raise RuntimeError("ANTHROPIC_API_KEY is not set — cannot start agent")
+client = anthropic.Anthropic(api_key=_api_key)
 
 CI_CONTEXT_PATH = os.path.expanduser("~/.node9/ci-context.json")
 
@@ -22,7 +25,8 @@ CI_CONTEXT_PATH = os.path.expanduser("~/.node9/ci-context.json")
 
 _SKIP_DIFF_RE = re.compile(
     r"diff --git a/(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|.*\.lock"
-    r"|.*migrations/.*|.*\.generated\.|dist/|build/|.*\.min\.(js|css)|.*\.snap)",
+    r"|.*migrations/.*|.*\.generated\.\w|dist/|build/|.*\.min\.(js|css)|.*\.snap"
+    r"|\.github/node9/)",
     re.IGNORECASE,
 )
 
@@ -81,12 +85,13 @@ def _extract_test_summary(raw: str, max_chars: int = 2000) -> str:
         if re.search(r"(^●\s|^FAIL\s|^FAILED\s|✕|✗|Error:)", line):
             in_failure = True
         if in_failure:
-            failure_lines.append(line)
-            if len("\n".join(failure_lines)) > max_chars - 300:
-                failure_lines.append("... [truncated]")
-                break
-        if in_failure and not line.strip():
-            in_failure = False
+            if not line.strip():
+                in_failure = False
+            else:
+                failure_lines.append(line)
+                if len("\n".join(failure_lines)) > max_chars - 300:
+                    failure_lines.append("... [truncated]")
+                    break
 
     if failure_lines or summary_lines:
         combined = "\n".join(failure_lines) + "\n\n" + "\n".join(summary_lines)
