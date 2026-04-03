@@ -52,12 +52,17 @@ function runCheck(
   timeoutMs = 60000
 ): RunResult {
   const payloadArg = typeof payload === 'string' ? payload : JSON.stringify(payload);
+  // Strip real CI credentials so tests that write mock credentials.json
+  // always hit the mock server — not the real node9 API.
+  const baseEnv = { ...process.env };
+  delete baseEnv.NODE9_API_KEY;
+  delete baseEnv.NODE9_API_URL;
   const result = spawnSync(process.execPath, [CLI, 'check', payloadArg], {
     encoding: 'utf-8',
     timeout: timeoutMs,
     cwd, // avoid loading the repo's own node9.config.json
     env: {
-      ...process.env,
+      ...baseEnv,
       NODE9_NO_AUTO_DAEMON: '1',
       NODE9_TESTING: '1',
       ...env,
@@ -105,10 +110,15 @@ function runCheckAsync(
       }
     };
 
+    // Strip real CI credentials so tests that write mock credentials.json
+    // always hit the mock server — not the real node9 API.
+    const baseEnv = { ...process.env };
+    delete baseEnv.NODE9_API_KEY;
+    delete baseEnv.NODE9_API_URL;
     const child = spawn(process.execPath, [CLI, 'check', payloadArg], {
       cwd,
       env: {
-        ...process.env,
+        ...baseEnv,
         NODE9_NO_AUTO_DAEMON: '1',
         NODE9_TESTING: '1',
         ...env,
