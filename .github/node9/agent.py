@@ -45,6 +45,35 @@ def _filter_diff(raw_diff: str) -> str:
     return "".join(kept)
 
 
+def _chunk_diff(diff: str, max_chars: int = 8000) -> str:
+    """
+    Fit as many complete per-file sections as possible within max_chars.
+    Appends a note about omitted files so the agent knows the diff was partial.
+    Never cuts mid-hunk (unlike a plain [:N] slice).
+    """
+    if len(diff) <= max_chars:
+        return diff
+    sections = re.split(r"(?=^diff --git )", diff, flags=re.MULTILINE)
+    kept: list[str] = []
+    total = 0
+    skipped: list[str] = []
+    for section in sections:
+        if not section.startswith("diff --git"):
+            kept.append(section)
+            continue
+        if total + len(section) <= max_chars:
+            kept.append(section)
+            total += len(section)
+        else:
+            # Extract filename for the omission note
+            m = re.match(r"diff --git a/(\S+)", section)
+            skipped.append(m.group(1) if m else "?")
+    result = "".join(kept)
+    if skipped:
+        result += f"\n\n# ⚠️  {len(skipped)} file(s) omitted (diff too large): {', '.join(skipped)}"
+    return result
+
+
 def _count_diff_lines(diff: str) -> int:
     """Count meaningful added/removed lines (not +++ / --- header lines)."""
     return sum(
@@ -378,7 +407,7 @@ def _phase2_engineering(
     if iteration == 1:
         user_content = (
             f"Review this git diff for `{original_branch}` → `{base_branch}`.\n\n"
-            f"```diff\n{filtered_diff[:6000]}\n```\n\n"
+            f"```diff\n{_chunk_diff(filtered_diff, 8000)}\n```\n\n"
             "## Your job:\n"
             "1. Use `read_code` ONLY when the diff alone is insufficient — do not read every file\n"
             f"2. Run tests: `run_bash('{test_cmd}')`\n"
@@ -521,8 +550,8 @@ def _phase3_code_review(
 
     prompt = (
         "You are a senior engineer reviewing a pull request.\n\n"
-        f"## Original diff (what the developer wrote):\n```diff\n{original_diff[:5000]}\n```\n\n"
-        + (f"## Changes made by the AI engineer on top:\n```diff\n{agent_diff[:3000]}\n```\n\n" if agent_diff.strip() else "")
+        f"## Original diff (what the developer wrote):\n```diff\n{_chunk_diff(original_diff, 5000)}\n```\n\n"
+        + (f"## Changes made by the AI engineer on top:\n```diff\n{_chunk_diff(agent_diff, 3000)}\n```\n\n" if agent_diff.strip() else "")
         + f"## Test results\n- Before: {before_summary}\n- After: {after_summary}\n\n"
         "## Your task:\n"
         "1. Write a concise review (under 400 words). Focus on:\n"
@@ -758,7 +787,7 @@ def execute_review_fix() -> None:
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     iteration = int(os.environ.get("ITERATION", "1"))
     github_token = os.environ.get("GITHUB_TOKEN", "")
-    test_cmd = os.environ.get("NODE9_TEST_CMD", "npm test 2>&1 | tail -50")
+    test_cmd = os.environ.get("NODE9_TEST_CMD", "npm test 2>&1")
     fix_branch = f"node9/fix/{original_branch}"
 
     draft_pr_number_env = os.environ.get("DRAFT_PR_NUMBER", "")
@@ -843,7 +872,7 @@ def execute_review_fix() -> None:
 
     # ── Phase 6: Preview (unprotected) ───────────────────────────────────────
     print("\n📤 Phase 6: Preview", flush=True)
-    tools._run_unprotected(f"git checkout -b {fix_branch} 2>/dev/null || git checkout {fix_branch}")
+    tools._run_unprotected(f"git checkout -B {fix_branch}")  # -B: create or reset to current HEAD
     tools._run_unprotected("find . -type d -name '__pycache__' -not -path './.git/*' -exec rm -rf {} + 2>/dev/null || true")
     tools._run_unprotected("find . -name '*.pyc' -not -path './.git/*' -delete 2>/dev/null || true")
     tools._run_unprotected("git add -A")

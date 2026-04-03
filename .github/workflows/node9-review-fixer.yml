@@ -53,7 +53,7 @@ jobs:
           PYTHONUNBUFFERED: '1'
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           NODE9_API_KEY: ${{ secrets.NODE9_API_KEY }}
-          NODE9_API_URL: https://dev-api.node9.ai/api/v1/intercept
+          NODE9_API_URL: ${{ secrets.NODE9_API_URL || vars.NODE9_API_URL }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_HEAD_REF: ${{ github.event.client_payload.head_ref || github.head_ref || github.ref_name }}
           GITHUB_BASE_REF: ${{ github.event.client_payload.base_ref || github.base_ref || 'main' }}
