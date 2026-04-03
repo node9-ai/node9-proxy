@@ -5,11 +5,9 @@ import subprocess
 import urllib.request
 import urllib.error
 import time
-import sys
 
 import anthropic
 from dotenv import load_dotenv
-from node9 import ActionDeniedException
 
 import tools
 
@@ -686,21 +684,11 @@ def execute_review_fix() -> None:
         pr_url=pr_url, pr_number=pr_number,
     )
 
-    # ── Phase 6: Gate ────────────────────────────────────────────────────────
-    print("\n🛡️  Phase 6: Gate — waiting for approval in node9 Dashboard...", flush=True)
+    # ── Done ─────────────────────────────────────────────────────────────────
     if pr_url:
-        print(f"  PR: {pr_url}", flush=True)
-
-    if not pr_number:
-        print("  ⚠️  No PR number — skipping governance gate", flush=True)
-        return
-
-    try:
-        tools.governance_push(f"gh pr merge {pr_number} --squash --delete-branch")
-        print("✅ Approved — changes merged.", flush=True)
-    except ActionDeniedException:
-        print("\n🛑 Review discarded. Fix branch available for manual review.", flush=True)
-        sys.exit(0)
+        print(f"\n✅ Review complete. Draft PR ready for your review: {pr_url}", flush=True)
+    else:
+        print("\n✅ Review complete.", flush=True)
 
 
 if __name__ == "__main__":
