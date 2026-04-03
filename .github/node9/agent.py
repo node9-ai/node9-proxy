@@ -167,11 +167,17 @@ def _github_request(method: str, url: str, github_token: str, body: dict | None 
         return json.loads(e.read()), e.code
 
 
-def _post_pr_comment(pr_number: int, repo: str, github_token: str, comment: str) -> None:
-    """Post the code review as a PR comment."""
+def _post_pr_comment(
+    pr_number: int, repo: str, github_token: str, comment: str,
+    issues_fixed: list | None = None,
+) -> None:
+    """Post the code review as a PR comment, including any fixes applied."""
     if not pr_number or not github_token or not repo:
         return
-    body = f"## 🔍 node9 Code Review\n\n{comment}\n\n---\n*Automated review by node9 AI*"
+    body = f"## 🔍 node9 Code Review\n\n{comment}"
+    if issues_fixed:
+        body += "\n\n### 🔧 Fixes Applied by Agent\n" + "\n".join(f"- {f}" for f in issues_fixed)
+    body += "\n\n---\n*Automated review by node9 AI*"
     _, status = _github_request(
         "POST",
         f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments",
@@ -808,8 +814,21 @@ def execute_review_fix() -> None:
         issues_fixed = issues_fixed + fix_fixed
         if fix_output:
             after_test_output = fix_output
-        after_passed, after_total = _parse_test_counts(after_test_output)
-        print(f"  After fixes: {after_passed}/{after_total} passing", flush=True)
+
+        # Final verification — confirm fixes didn't break anything
+        print("  Running final verification tests...", flush=True)
+        final_output = tools._run_unprotected(test_cmd)
+        final_passed, final_total = _parse_test_counts(final_output)
+        if final_total > 0:
+            after_test_output = final_output
+            after_failed = final_total - final_passed
+            if after_failed > 0:
+                print(f"  ⚠️  {after_failed} test(s) still failing after fixes — check Phase 4 output", flush=True)
+            else:
+                print(f"  ✅ Final: {final_passed}/{final_total} passing", flush=True)
+        else:
+            after_passed, after_total = _parse_test_counts(after_test_output)
+            print(f"  After fixes: {after_passed}/{after_total} passing", flush=True)
     else:
         print("\n✅ Phase 4: Code Review Fix — skipped (no issues)", flush=True)
 
@@ -829,7 +848,12 @@ def execute_review_fix() -> None:
     tools._run_unprotected("find . -name '*.pyc' -not -path './.git/*' -delete 2>/dev/null || true")
     tools._run_unprotected("git add -A")
     commit_msg = f"node9: AI review for {original_branch} (iteration {iteration})"
-    subprocess.run(["git", "commit", "-m", commit_msg, "--allow-empty"], cwd=tools.WORKSPACE_DIR, check=True)
+    has_changes = tools._run_unprotected("git diff --cached --name-only").strip()
+    if has_changes:
+        subprocess.run(["git", "commit", "-m", commit_msg], cwd=tools.WORKSPACE_DIR, check=True)
+        print(f"  ✅ Committed {len(has_changes.splitlines())} file(s)", flush=True)
+    else:
+        print("  ℹ️  No changes to commit (diff was clean)", flush=True)
 
     push_result = tools._run_unprotected(f"git push origin {fix_branch} --force")
     if push_result.startswith("Error:"):
@@ -846,7 +870,7 @@ def execute_review_fix() -> None:
         if pr_url:
             print(f"  👀 PR: {pr_url}", flush=True)
         if pr_number and review_comment:
-            _post_pr_comment(pr_number, repo, github_token, review_comment)
+            _post_pr_comment(pr_number, repo, github_token, review_comment, issues_fixed=issues_fixed)
 
     # Write summaries
     _write_github_summary(
