@@ -76,8 +76,10 @@ def _safe_path(filename: str) -> str:
 # Tools
 # ---------------------------------------------------------------------------
 
+@protect("bash")
 def run_bash(command: str):
-    """Executes a bash command (tests, ls, etc) in the workspace — unprotected."""
+    """Executes a bash command in the workspace.
+    @protect audit-logs every command through node9 (Phase 1: ALLOW policy — no blocking)."""
     try:
         result = subprocess.check_output(
             ["bash", "-c", command],
