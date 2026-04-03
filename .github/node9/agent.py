@@ -153,9 +153,11 @@ def _create_with_retry(client, **kwargs):
     for attempt in range(5):
         try:
             return client.messages.create(**kwargs)
-        except anthropic.RateLimitError:
+        except (anthropic.RateLimitError, anthropic.APIStatusError) as e:
+            if isinstance(e, anthropic.APIStatusError) and e.status_code != 529:
+                raise
             wait = 30 * (2 ** attempt)
-            print(f"  ⏳ Rate limited — waiting {wait}s...", flush=True)
+            print(f"  ⏳ API overloaded/rate-limited — waiting {wait}s (attempt {attempt+1}/5)...", flush=True)
             time.sleep(wait)
     return client.messages.create(**kwargs)
 

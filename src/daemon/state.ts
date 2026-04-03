@@ -305,6 +305,7 @@ export function readBody(req: http.IncomingMessage): Promise<string> {
 }
 
 export function openBrowser(url: string): void {
+  if (process.env.NODE9_TESTING === '1') return;
   try {
     const args =
       process.platform === 'darwin'

@@ -14,6 +14,7 @@ export function openBrowserLocal() {
 }
 
 export async function autoStartDaemonAndWait(): Promise<boolean> {
+  if (process.env.NODE9_TESTING === '1') return false;
   try {
     const child = spawn(process.execPath, [process.argv[1], 'daemon'], {
       detached: true,
