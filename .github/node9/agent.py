@@ -87,7 +87,21 @@ def _count_diff_lines(diff: str) -> int:
 # ---------------------------------------------------------------------------
 
 def _parse_test_counts(output: str) -> tuple[int, int]:
-    """Return (passed, total) from test runner output."""
+    """Return (passed, total) from test runner output.
+    Vitest prints two summary lines: 'Test Files' and 'Tests'.
+    We want the 'Tests' line (individual test counts), not the file counts.
+    Falls back to first match if no 'Tests' line found.
+    """
+    # Prefer the "Tests  N failed | N passed" line over "Test Files" line
+    for line in output.splitlines():
+        if re.match(r"\s*Tests\s+", line):
+            m_p = re.search(r"(\d+)\s+passed", line)
+            m_f = re.search(r"(\d+)\s+failed", line)
+            passed = int(m_p.group(1)) if m_p else 0
+            failed = int(m_f.group(1)) if m_f else 0
+            if passed + failed > 0:
+                return passed, passed + failed
+    # Fallback: first match anywhere
     m_p = re.search(r"(\d+)\s+passed", output)
     m_f = re.search(r"(\d+)\s+failed", output)
     passed = int(m_p.group(1)) if m_p else 0
@@ -257,6 +271,23 @@ def _open_or_find_draft_pr(
     return None, ""
 
 
+def _find_developer_pr(branch: str, base_branch: str, repo: str, github_token: str) -> tuple[int | None, str]:
+    """Find an open PR from the developer's branch → base_branch."""
+    if not github_token or not repo:
+        return None, ""
+    owner = repo.split("/")[0]
+    result, status = _github_request(
+        "GET",
+        f"https://api.github.com/repos/{repo}/pulls?head={owner}:{branch}&base={base_branch}&state=open",
+        github_token,
+    )
+    if status == 200 and result:
+        pr_num = result[0].get("number")
+        pr_url = result[0].get("html_url", "")
+        return pr_num, pr_url
+    return None, ""
+
+
 def _get_pr_review_comments(pr_number: int, repo: str, github_token: str) -> str:
     result, status = _github_request(
         "GET",
@@ -291,16 +322,25 @@ def _write_ci_context(
             "issues_fixed": issues_fixed,
             "github_repository": os.environ.get("GITHUB_REPOSITORY"),
             "github_head_ref": os.environ.get("GITHUB_HEAD_REF"),
-            "github_token": os.environ.get("GITHUB_TOKEN"),
             "iteration": int(os.environ.get("ITERATION", "1")),
             "draft_pr_number": stored_pr_number,
             "draft_pr_url": pr_url,
         }, f)
 
 
+def _diff_file_list(diff: str) -> list[str]:
+    """Extract list of filenames from a filtered diff."""
+    files = []
+    for line in diff.splitlines():
+        m = re.match(r"diff --git a/(\S+)", line)
+        if m and m.group(1) not in files:
+            files.append(m.group(1))
+    return files
+
+
 def _write_github_summary(
     issues_found, issues_fixed, pr_url="", review_comment="",
-    before_test_output="", after_test_output="",
+    before_test_output="", after_test_output="", diff_files: list | None = None,
 ):
     summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
     if not summary_file:
@@ -337,6 +377,11 @@ def _write_github_summary(
             f.write(review_comment[:2000] + "\n\n")
         if not issues_found and not issues_fixed:
             f.write("_No issues found in this diff._\n\n")
+        if diff_files:
+            f.write("#### Files Reviewed\n")
+            for fname in diff_files:
+                f.write(f"- `{fname}`\n")
+            f.write("\n")
         f.write("> Review the Draft PR on GitHub and merge when ready.\n")
 
 
@@ -911,9 +956,22 @@ def execute_review_fix() -> None:
             tests_regressed=tests_regressed,
         )
         if pr_url:
-            print(f"  👀 PR: {pr_url}", flush=True)
-        if pr_number and review_comment:
-            _post_pr_comment(pr_number, repo, github_token, review_comment, issues_fixed=issues_fixed)
+            print(f"  👀 Agent PR: {pr_url}", flush=True)
+
+        # If agent made no changes, no Draft PR exists — post review on developer's own PR instead
+        review_pr_number = pr_number
+        if not review_pr_number and review_comment:
+            dev_pr_number, dev_pr_url = _find_developer_pr(
+                original_branch, base_branch, repo, github_token,
+            )
+            if dev_pr_number:
+                review_pr_number = dev_pr_number
+                if not pr_url:
+                    pr_url = dev_pr_url
+                print(f"  💬 Posting review on developer PR #{dev_pr_number}", flush=True)
+
+        if review_pr_number and review_comment:
+            _post_pr_comment(review_pr_number, repo, github_token, review_comment, issues_fixed=issues_fixed)
 
     # Write summaries
     _write_github_summary(
@@ -921,6 +979,7 @@ def execute_review_fix() -> None:
         pr_url=pr_url, review_comment=review_comment,
         before_test_output=before_test_output,
         after_test_output=after_test_output,
+        diff_files=_diff_file_list(filtered_diff),
     )
     after_passed, after_total = _parse_test_counts(after_test_output)
     _write_ci_context(

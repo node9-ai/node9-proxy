@@ -71,7 +71,25 @@ export async function initNode9SaaS(
   if (process.env.CI) {
     try {
       const ciContextPath = path.join(os.homedir(), '.node9', 'ci-context.json');
-      ciContext = JSON.parse(fs.readFileSync(ciContextPath, 'utf8')) as Record<string, unknown>;
+      const raw = fs.readFileSync(ciContextPath, 'utf8');
+      if (raw.length > 10_000) throw new Error('ci-context.json exceeds 10 KB');
+      const parsed = JSON.parse(raw) as unknown;
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        throw new Error('ci-context.json is not a plain object');
+      }
+      // Allowlist: only forward known safe keys — never tokens or credentials
+      const p = parsed as Record<string, unknown>;
+      ciContext = {
+        tests_after: p['tests_after'],
+        files_changed: p['files_changed'],
+        issues_found: p['issues_found'],
+        issues_fixed: p['issues_fixed'],
+        github_repository: p['github_repository'],
+        github_head_ref: p['github_head_ref'],
+        iteration: p['iteration'],
+        draft_pr_number: p['draft_pr_number'],
+        draft_pr_url: p['draft_pr_url'],
+      };
     } catch {
       // not present — not a CI push gate
     }
