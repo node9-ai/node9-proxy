@@ -177,7 +177,7 @@ def _get_pr_review_comments(pr_number: int, repo: str, github_token: str) -> str
     )
     if status != 200 or not result:
         return ""
-    lines = []
+    lines =[]
     for c in result:
         file_path = c.get("path", "?")
         line = c.get("line") or c.get("original_line", "?")
@@ -187,7 +187,7 @@ def _get_pr_review_comments(pr_number: int, repo: str, github_token: str) -> str
 
 
 # ---------------------------------------------------------------------------
-# Token management helpers
+# Token & API management helpers
 # ---------------------------------------------------------------------------
 
 def _truncate_output(text: str, max_chars: int = 8000) -> str:
@@ -201,9 +201,7 @@ def _truncate_output(text: str, max_chars: int = 8000) -> str:
 
 
 def _apply_rolling_cache(messages: list) -> None:
-    """Keep exactly one cache breakpoint, always on the last user message.
-    Strips stale markers from earlier messages so we never exceed the 4-breakpoint limit
-    and so the cache window moves forward with the conversation."""
+    """Keep exactly one cache breakpoint, always on the last user message."""
     for msg in messages:
         if msg["role"] == "user" and isinstance(msg["content"], list):
             for block in msg["content"]:
@@ -226,17 +224,48 @@ def _create_with_retry(client, **kwargs):
             wait = 30 * (2 ** attempt)
             print(f"  ⏳ Rate limited — waiting {wait}s before retry {attempt + 1}/5...", flush=True)
             time.sleep(wait)
-    return client.messages.create(**kwargs)  # Final attempt — let it raise
+    return client.messages.create(**kwargs)
 
 
-# ---------------------------------------------------------------------------
-# CI context
-# ---------------------------------------------------------------------------
+def _generate_final_summary(client, base_branch):
+    """Makes one final Haiku call to summarize the ACTUAL changes made by the agent."""
+    print("📝 Generating final PR summary from diff...", flush=True)
+    
+    final_diff = tools._run_unprotected(f"git diff origin/{base_branch}...HEAD")
+    
+    if not final_diff.strip():
+        return["No issues found in this diff."], ["Nothing fixed."]
+
+    response = _create_with_retry(
+        client,
+        model="claude-3-5-haiku-20241022",
+        max_tokens=1000,
+        system=(
+            "You are a technical writer. Look at this git diff and summarize the fixes. "
+            "Output exactly two sections. Start each line with a dash (-).\n"
+            "ISSUES FOUND:\n- ...\n"
+            "FIXES APPLIED:\n- ..."
+        ),
+        messages=[{"role": "user", "content": f"```diff\n{final_diff[:10000]}\n```"}]
+    )
+    
+    found, fixed = [], []
+    current_list = None
+    
+    for line in response.content[0].text.splitlines():
+        clean = line.strip()
+        if "ISSUES FOUND" in clean.upper():
+            current_list = found
+        elif "FIXES APPLIED" in clean.upper():
+            current_list = fixed
+        elif clean.startswith("-") and current_list is not None:
+            current_list.append(clean[1:].strip())
+            
+    return found, fixed
+
 
 def _write_ci_context(tests_passed, tests_total, files_changed, issues_found, issues_fixed, pr_url="", pr_number=None):
     os.makedirs(os.path.dirname(CI_CONTEXT_PATH), exist_ok=True)
-    # Use the freshly created PR number if available; otherwise fall back to the
-    # env var (set for iteration 2+ by the RUN_AGAIN dispatch).
     stored_pr_number = pr_number or os.environ.get("DRAFT_PR_NUMBER") or None
     with open(CI_CONTEXT_PATH, "w") as f:
         json.dump({
@@ -260,10 +289,8 @@ def _write_ci_context(tests_passed, tests_total, files_changed, issues_found, is
 def execute_review_fix() -> None:
     original_branch = os.environ.get("GITHUB_HEAD_REF", "").strip()
     if not original_branch:
-        # GITHUB_HEAD_REF is only set for PR events; derive from git for push events
         try:
-            original_branch = subprocess.check_output(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            original_branch = subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"],
                 cwd=tools.WORKSPACE_DIR, stderr=subprocess.STDOUT,
             ).decode().strip()
             if original_branch in ("HEAD", ""):
@@ -282,24 +309,51 @@ def execute_review_fix() -> None:
     print(f"🤖 node9 CI Review — iteration {iteration} on {original_branch} → {base_branch}", flush=True)
 
     diff_output = tools._run_unprotected(f"git diff origin/{base_branch}...HEAD")
+    test_cmd = os.environ.get("NODE9_TEST_CMD", "npm test")  # Removed 'tail -50', handled by Python now
 
-    test_cmd = os.environ.get("NODE9_TEST_CMD", "npm test 2>&1 | tail -50")
+    files_changed: list =[]
+    tests_passed = 0
+    tests_total = 0
+    last_test_output = ""
+
     if iteration == 1:
+        print("🧪 Running baseline tests...", flush=True)
+        baseline_tests = tools._run_unprotected(test_cmd)
+        last_test_output = baseline_tests
+        
+        m_p = re.search(r"(\d+)\s+passed", baseline_tests)
+        m_f = re.search(r"(\d+)\s+failed", baseline_tests)
+        if m_p:
+            tests_passed = int(m_p.group(1))
+            tests_total = tests_passed + (int(m_f.group(1)) if m_f else 0)
+
+        # EARLY EXIT GATE: Ask Haiku if there's any work to do
+        print("⚡ Checking if fixes are needed...", flush=True)
+        quick_check = _create_with_retry(
+            client,
+            model="claude-3-5-haiku-20241022",
+            max_tokens=100,
+            system="Analyze the diff and test results. Are there any critical bugs, security issues, or failing tests? Reply ONLY with YES or NO.",
+            messages=[{"role": "user", "content": f"Diff:\n{diff_output[:5000]}\nTests:\n{_truncate_output(baseline_tests)}"}]
+        )
+        
+        tests_all_pass = (m_f is None or int(m_f.group(1)) == 0)
+        if "NO" in quick_check.content[0].text.upper() and tests_all_pass:
+            print("✅ PR looks perfect and tests pass. Skipping agent loop.", flush=True)
+            _write_github_summary(["No issues found."], ["Nothing fixed."])
+            sys.exit(0)
+
+        # If there IS work, feed baseline test results to Sonnet
         user_content = (
             f"Review this git diff for `{original_branch}` → `{base_branch}`.\n\n"
             f"```diff\n{diff_output[:8000]}\n```\n\n"
-            "## Your job (in order):\n\n"
-            "**Step 1 — Read:** Read the changed files to understand what was modified.\n\n"
-            f"**Step 2 — Run tests:** run_bash('{test_cmd}')\n\n"
-            "**Step 3 — Fix (optional):** Fix ONLY clear bugs visible in the diff above "
-            "(syntax errors, wrong logic, broken imports). "
-            "Do NOT attempt to fix pre-existing test failures or refactor unrelated code. "
-            "If a test was already failing before this diff, skip it.\n\n"
-            "**Step 4 — Stop and report.** After at most ONE round of fixes, "
-            "stop and write your summary. Do not loop on test failures.\n\n"
-            "## Required output format (plain text, one line each):\n"
-            "FOUND: <what issues you found in the diff, or 'No issues found'>\n"
-            "FIXED: <what you fixed, or 'Nothing fixed'>"
+            f"### Baseline Test Results:\n"
+            f"```\n{_truncate_output(baseline_tests)}\n```\n\n"
+            "## Your job:\n"
+            "1. Read the changed files if you need more context.\n"
+            "2. Fix ONLY clear bugs or test failures introduced by this diff.\n"
+            "3. Use `run_bash` to run tests after your fixes to verify.\n"
+            "4. Stop when tests pass or no fixes are needed."
         )
     else:
         pr_comments = ""
@@ -312,31 +366,17 @@ def execute_review_fix() -> None:
             + (f"PR line comments:\n{pr_comments}\n\n" if pr_comments else "")
         )
 
-    messages = [
+    messages =[
         {
             "role": "user", 
-            "content": [
-                {
-                    "type": "text", 
-                    "text": user_content,
-                    "cache_control": {"type": "ephemeral"} 
-                }
-            ]
+            "content":[{"type": "text", "text": user_content, "cache_control": {"type": "ephemeral"}}]
         }
     ]
 
-    files_changed: list = []
-    issues_found: list = []
-    issues_fixed: list = []
-    tests_passed = 0
-    tests_total = 0
-    last_test_output = ""
+    _write_ci_context(0, 0, [], [],[])
 
-    _write_ci_context(0, 0, [], [], [])
-
-    for i in range(8):  # 8 loops max — review + one fix round + test verification
-        # Roll the cache checkpoint to the latest message before every API call.
-        # This keeps input tokens low as history grows and avoids 429 rate limits.
+    # Main Engineering Loop
+    for i in range(8):
         _apply_rolling_cache(messages)
 
         response = _create_with_retry(
@@ -348,48 +388,30 @@ def execute_review_fix() -> None:
                 {
                     "name": "read_code",
                     "description": "Read a source file",
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {"filename": {"type": "string"}},
-                        "required": ["filename"],
-                    },
+                    "input_schema": {"type": "object", "properties": {"filename": {"type": "string"}}, "required": ["filename"]},
                 },
                 {
                     "name": "write_code",
                     "description": "Write or fix a source file",
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {
-                            "filename": {"type": "string"},
-                            "content": {"type": "string"},
-                        },
-                        "required": ["filename", "content"],
-                    },
+                    "input_schema": {"type": "object", "properties": {"filename": {"type": "string"}, "content": {"type": "string"}}, "required": ["filename", "content"]},
                 },
                 {
                     "name": "run_bash",
                     "description": "Run a bash command (tests, linting, etc)",
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {"command": {"type": "string"}},
-                        "required": ["command"],
-                    },
+                    "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
                 },
             ],
             system=[
                 {
                     "type": "text",
                     "text": (
-                        "You are a CI code reviewer. Your goal is to review a diff, "
-                        "run tests once, make ONE round of targeted fixes if needed, then STOP.\n"
+                        "You are a CI code fixer. Your goal is to review a diff, "
+                        "make ONE round of targeted fixes if needed, ensure tests pass, then STOP.\n"
                         "Rules:\n"
-                        "- Run tests exactly once (or twice if you made fixes)\n"
                         "- Only fix bugs clearly introduced by this diff\n"
                         "- Never loop trying to fix the same test failure repeatedly\n"
                         "- If a test was already failing before this diff, skip it\n"
-                        "- End your response with plain text lines:\n"
-                        "  FOUND: <one-line summary or 'No issues found'>\n"
-                        "  FIXED: <one-line summary or 'Nothing fixed'>"
+                        "- When you are done, output a brief sentence saying you are finished and stop using tools."
                     ),
                     "cache_control": {"type": "ephemeral"} 
                 }
@@ -398,11 +420,9 @@ def execute_review_fix() -> None:
         )
 
         if response.stop_reason != "tool_use":
-            # Verification gate: run tests one final time before accepting the summary.
-            # Only force re-loop if Claude hasn't already tried 3+ times (avoid exhausting 20 loops).
+            # Verification gate: run tests one final time before exiting
             if i < 3:
                 print("🕵️  Final verification: running tests...", flush=True)
-                test_cmd = os.environ.get("NODE9_TEST_CMD", "npm test 2>&1 | tail -50")
                 verify = tools._run_unprotected(test_cmd)
                 failed = re.search(r"(\d+)\s+failed", verify)
                 if failed and int(failed.group(1)) > 0:
@@ -412,28 +432,17 @@ def execute_review_fix() -> None:
                         f = int(failed.group(1))
                         tests_passed, tests_total = p, p + f
                         last_test_output = verify
+                    
                     messages.append({"role": "assistant", "content": response.content})
-                    messages.append({"role": "user", "content": [{
+                    messages.append({"role": "user", "content":[{
                         "type": "text",
                         "text": f"Tests are still failing. Please fix them:\n\n{_truncate_output(verify)}",
                     }]})
                     time.sleep(12)
                     continue
-
-            for block in response.content:
-                if hasattr(block, "text") and block.text:
-                    for line in block.text.splitlines():
-                        clean = line.strip()
-                        if clean.upper().startswith("FOUND:"):
-                            item = clean[6:].strip()
-                            if item: issues_found.append(item[:200])
-                        elif clean.upper().startswith("FIXED:"):
-                            item = clean[6:].strip()
-                            if item: issues_fixed.append(item[:200])
-                    break
             break
 
-        tool_results = []
+        tool_results =[]
         for tool_use in response.content:
             if tool_use.type != "tool_use": continue
 
@@ -456,32 +465,29 @@ def execute_review_fix() -> None:
                     f = int(m_failed.group(1)) if m_failed else 0
                     tests_passed = p
                     tests_total = p + f
-                    last_test_output = result  # keep latest test run output for PR body
+                    last_test_output = result
 
             sanitized_result = _truncate_output(str(result))
-
-            tool_results.append({
-                "type": "tool_result",
-                "tool_use_id": tool_use.id,
-                "content": sanitized_result,
-            })
+            tool_results.append({"type": "tool_result", "tool_use_id": tool_use.id, "content": sanitized_result})
 
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
-
         print(f"  (Loop {i+1}/8) Waiting 5s...", flush=True)
         time.sleep(5)
 
-    # 1. Prepare the local branch
+
+    # 1. Prepare branch and commit changes
     tools._run_unprotected(f"git checkout -b {fix_branch} 2>/dev/null || git checkout {fix_branch}")
-    # Remove pycache created by pip install — they must not go into the PR
     tools._run_unprotected("find . -type d -name '__pycache__' -not -path './.git/*' -exec rm -rf {} + 2>/dev/null || true")
     tools._run_unprotected("find . -name '*.pyc' -not -path './.git/*' -delete 2>/dev/null || true")
     tools._run_unprotected("git add -A")
     commit_msg = f"node9: automated fixes for {original_branch} (iteration {iteration})"
     subprocess.run(["git", "commit", "-m", commit_msg, "--allow-empty"], cwd=tools.WORKSPACE_DIR, check=True)
 
-    # 2. PUSH PREVIEW (Unprotected): Makes branch exist on GitHub so PR can be created
+    # 2. Phase 3: The Summarizer AI
+    issues_found, issues_fixed = _generate_final_summary(client, base_branch)
+
+    # 3. PUSH PREVIEW (Unprotected)
     print("📤 Uploading preview branch...", flush=True)
     push_result = tools._run_unprotected(f"git push origin {fix_branch} --force")
     if push_result.startswith("Error:"):
@@ -489,16 +495,12 @@ def execute_review_fix() -> None:
     else:
         print(f"✅ Preview branch pushed: {push_result.strip() or 'ok'}", flush=True)
 
-    # 3. CREATE DRAFT PR & GET LINK
+    # 4. CREATE DRAFT PR & GET LINK
     pr_url = ""
     pr_number = None
-    if not github_token:
-        print("⚠️  GITHUB_TOKEN not set — skipping Draft PR creation", flush=True)
-    elif not repo:
-        print("⚠️  GITHUB_REPOSITORY not set — skipping Draft PR creation", flush=True)
-    elif push_result.startswith("Error:"):
-        print("⚠️  Skipping Draft PR — preview branch push failed", flush=True)
-    else:
+    if not github_token or not repo:
+        print("⚠️  GITHUB_TOKEN or REPO not set — skipping Draft PR creation", flush=True)
+    elif not push_result.startswith("Error:"):
         pr_number = _open_or_find_draft_pr(
             fix_branch, original_branch, repo, github_token,
             issues_found, issues_fixed, tests_passed, tests_total,
@@ -507,13 +509,9 @@ def execute_review_fix() -> None:
         if pr_number:
             pr_url = f"https://github.com/{repo}/pull/{pr_number}"
             print(f"👀 PREVIEW YOUR CHANGES HERE: {pr_url}", flush=True)
-        else:
-            print(f"⚠️  Draft PR creation failed for {fix_branch} → {original_branch}", flush=True)
 
-    # 4. GitHub Actions Step Summary (written here so it includes the PR link)
+    # 5. Final Output and Sync
     _write_github_summary(issues_found, issues_fixed, pr_url=pr_url)
-
-    # 5. FINAL CONTEXT UPDATE: Includes the PR Link for the Node9 Dashboard
     _write_ci_context(tests_passed, tests_total, files_changed, issues_found, issues_fixed, pr_url=pr_url, pr_number=pr_number)
 
     # 6. THE GOVERNANCE GATE (Protected Push)
@@ -523,9 +521,8 @@ def execute_review_fix() -> None:
         print("✅ Push approved and completed.")
     except ActionDeniedException:
         print("\n🛑 Review discarded by human. No changes merged.", flush=True)
-        # Exit 0 — discard is a valid human decision, not a workflow failure.
-        # Exiting 1 would make the node9 check fail on the original PR and block merging.
         sys.exit(0)
+
 
 if __name__ == "__main__":
     execute_review_fix()
