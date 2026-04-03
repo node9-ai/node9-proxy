@@ -26,7 +26,7 @@ CI_CONTEXT_PATH = os.path.expanduser("~/.node9/ci-context.json")
 _SKIP_DIFF_RE = re.compile(
     r"diff --git a/(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|.*\.lock"
     r"|.*migrations/.*|.*\.generated\.\w|dist/|build/|.*\.min\.(js|css)|.*\.snap"
-    r"|\.github/node9/)",
+    r"|\.github/node9/|\.github/workflows/)",
     re.IGNORECASE,
 )
 
@@ -221,10 +221,14 @@ def _post_pr_comment(
 
 def _open_or_find_draft_pr(
     fix_branch: str, base_branch: str, repo: str, github_token: str,
-    pr_body: str, iteration: int,
+    pr_body: str, iteration: int, tests_regressed: bool = False,
 ) -> tuple[int | None, str]:
     """Create or update Draft PR. Returns (pr_number, pr_url)."""
-    title = f"[node9] AI review: {base_branch}"
+    title = (
+        f"⚠️ [node9] Tests regressed — do not merge: {base_branch}"
+        if tests_regressed else
+        f"[node9] AI review: {base_branch}"
+    )
     create_body = {"title": title, "head": fix_branch, "base": base_branch, "draft": True, "body": pr_body}
     result, status = _github_request("POST", f"https://api.github.com/repos/{repo}/pulls", github_token, create_body)
     if status == 201:
@@ -862,8 +866,11 @@ def execute_review_fix() -> None:
         print("\n✅ Phase 4: Code Review Fix — skipped (no issues)", flush=True)
 
     # Surface failing tests as an explicit issue so they're never invisible
+    _before_passed, _before_total = _parse_test_counts(before_test_output)
     _after_passed, _after_total = _parse_test_counts(after_test_output)
     _after_failed = _after_total - _after_passed
+    _before_failed = _before_total - _before_passed
+    tests_regressed = _after_total > 0 and _after_failed > _before_failed
     if _after_total > 0 and _after_failed > 0:
         issues_found.insert(0, f"{_after_failed} test(s) still failing after agent run ({_after_passed}/{_after_total} passing)")
 
@@ -901,6 +908,7 @@ def execute_review_fix() -> None:
     if github_token and repo and not push_result.startswith("Error:"):
         pr_number, pr_url = _open_or_find_draft_pr(
             fix_branch, original_branch, repo, github_token, pr_body, iteration,
+            tests_regressed=tests_regressed,
         )
         if pr_url:
             print(f"  👀 PR: {pr_url}", flush=True)
