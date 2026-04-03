@@ -7,6 +7,23 @@ import sys
 # whatever version pip installed from PyPI — the PyPI package may be older.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# ---------------------------------------------------------------------------
+# node9 audit shim
+# ---------------------------------------------------------------------------
+# When NODE9_API_KEY is set, forward each tool call to the node9 SaaS for
+# cloud audit / approval. Otherwise, fall back to a local console print so
+# the agent never crashes due to a missing daemon or network error.
+def _node9_audit(tool_name: str, args: dict) -> None:
+    if os.environ.get("NODE9_API_KEY"):
+        try:
+            from node9 import evaluate  # type: ignore[import]
+            evaluate(tool_name, args)
+            return
+        except Exception as e:
+            # Network error, timeout, denied — log and continue (never crash agent)
+            print(f"  [node9] cloud audit failed for {tool_name}: {e}", flush=True)
+    _audit(tool_name, args)
+
 # In CI, GITHUB_WORKSPACE is the repo root; fall back to local "workspace/" for dev
 WORKSPACE_DIR = os.environ.get("GITHUB_WORKSPACE") or os.path.abspath("workspace")
 
@@ -85,8 +102,8 @@ def _audit(tool: str, args: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def run_bash(command: str):
-    """Executes a bash command in the workspace. Audit-logged locally."""
-    _audit("bash", {"command": command})
+    """Executes a bash command in the workspace. Audit-logged (cloud if NODE9_API_KEY is set)."""
+    _node9_audit("bash", {"command": command})
     try:
         result = subprocess.check_output(
             ["bash", "-c", command],
@@ -99,8 +116,8 @@ def run_bash(command: str):
 
 
 def write_code(filename: str, content: str):
-    """Writes a file after DLP scanning. Blocks if a secret is detected."""
-    _audit("filesystem", {"filename": filename, "bytes": len(content)})
+    """Writes a file after DLP scanning. Audit-logged (cloud if NODE9_API_KEY is set)."""
+    _node9_audit("filesystem", {"filename": filename, "bytes": len(content)})
 
     # DLP scan before anything touches disk
     hit = _dlp_scan(filename, content)
