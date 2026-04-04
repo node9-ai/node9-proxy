@@ -416,6 +416,9 @@ export function startActivitySocket(): void {
           label?: string;
           ruleHit?: string;
           observeWouldBlock?: boolean;
+          hash?: string;
+          argsSummary?: string;
+          fileCount?: number;
         };
         // Track test results for stateful smart rules
         if (data.status === 'test_pass') {
@@ -424,6 +427,16 @@ export function startActivitySocket(): void {
         }
         if (data.status === 'test_fail') {
           sessionHistory.recordTestFail(data.ts);
+          return;
+        }
+        if (data.status === 'snapshot') {
+          broadcast('snapshot', {
+            hash: data.hash,
+            tool: data.tool,
+            argsSummary: data.argsSummary,
+            fileCount: data.fileCount,
+            ts: data.ts,
+          });
           return;
         }
 

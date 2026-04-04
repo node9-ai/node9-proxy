@@ -7,8 +7,41 @@
 import { spawnSync, spawn } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
+import net from 'net';
 import path from 'path';
 import os from 'os';
+
+const ACTIVITY_SOCKET_PATH =
+  process.platform === 'win32'
+    ? '\\\\.\\pipe\\node9-activity'
+    : path.join(os.tmpdir(), 'node9-activity.sock');
+
+function notifySnapshotTaken(
+  hash: string,
+  tool: string,
+  argsSummary: string,
+  fileCount: number
+): void {
+  try {
+    const payload = JSON.stringify({
+      status: 'snapshot',
+      hash,
+      tool,
+      argsSummary,
+      fileCount,
+      ts: Date.now(),
+    });
+    const sock = net.createConnection(ACTIVITY_SOCKET_PATH);
+    sock.on('connect', () => {
+      sock.end(payload);
+    });
+    sock.on('error', () => {
+      /* daemon not running — ignore */
+    });
+  } catch {
+    /* ignore */
+  }
+}
 
 const SNAPSHOT_STACK_PATH = path.join(os.homedir(), '.node9', 'snapshots.json');
 // Keep backward compat — still write this so existing code reading it doesn't break
@@ -336,6 +369,10 @@ export async function createShadowSnapshot(
     }
     if (cwdCount > MAX_SNAPSHOTS) stack.splice(oldestCwdIdx, 1);
     writeStack(stack);
+
+    // Notify tail TUI — fire-and-forget, safe if daemon is not running
+    const entry = stack[stack.length - 1];
+    notifySnapshotTaken(commitHash.slice(0, 7), tool, entry.argsSummary, capturedFiles.length);
 
     // Backward compat: keep undo_latest.txt
     fs.writeFileSync(UNDO_LATEST_PATH, commitHash);
