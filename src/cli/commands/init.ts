@@ -7,7 +7,7 @@ import path from 'path';
 import os from 'os';
 import https from 'https';
 import { DEFAULT_CONFIG } from '../../core';
-import { setupClaude, setupGemini, setupCursor, setupHud, detectAgents } from '../../setup';
+import { setupClaude, setupGemini, setupCursor, detectAgents } from '../../setup';
 
 function fireTelemetryPing(agents: string[]): void {
   try {
@@ -57,7 +57,7 @@ export function registerInitCommand(program: Command): void {
         chosenMode = DEFAULT_CONFIG.settings.mode;
       }
 
-      if (!fs.existsSync(path.join(os.homedir(), '.node9', 'config.json')) || options.force) {
+      {
         const { confirm } = await import('@inquirer/prompts');
         const enableShields = await confirm({
           message: 'Enable recommended safety shields? (blocks rm -rf, SQL drops, pipe-to-shell)',
@@ -67,11 +67,28 @@ export function registerInitCommand(program: Command): void {
         console.log('');
       }
 
-      // ── Step 2: Create config ──────────────────────────────────────────────
+      // ── Step 2: Create or update config ───────────────────────────────────
       const configPath = path.join(os.homedir(), '.node9', 'config.json');
 
       if (fs.existsSync(configPath) && !options.force) {
-        console.log(chalk.blue(`ℹ️  Config already exists: ${configPath}`));
+        // Update mode in existing config to reflect shields choice
+        try {
+          const existing = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as Record<
+            string,
+            unknown
+          >;
+          const settings = (existing.settings ?? {}) as Record<string, unknown>;
+          if (settings.mode !== chosenMode) {
+            settings.mode = chosenMode;
+            existing.settings = settings;
+            fs.writeFileSync(configPath, JSON.stringify(existing, null, 2) + '\n');
+            console.log(chalk.green(`✅ Mode updated: ${chosenMode}`));
+          } else {
+            console.log(chalk.blue(`ℹ️  Config already exists: ${configPath}`));
+          }
+        } catch {
+          console.log(chalk.blue(`ℹ️  Config already exists: ${configPath}`));
+        }
       } else {
         const configToSave = {
           ...DEFAULT_CONFIG,
@@ -80,7 +97,7 @@ export function registerInitCommand(program: Command): void {
 
         const dir = path.dirname(configPath);
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-        fs.writeFileSync(configPath, JSON.stringify(configToSave, null, 2));
+        fs.writeFileSync(configPath, JSON.stringify(configToSave, null, 2) + '\n');
 
         console.log(chalk.green(`✅ Config created: ${configPath}`));
         console.log(chalk.gray(`   Mode: ${chosenMode}`));
@@ -114,14 +131,6 @@ export function registerInitCommand(program: Command): void {
         if (agent === 'claude') await setupClaude();
         else if (agent === 'gemini') await setupGemini();
         else if (agent === 'cursor') await setupCursor();
-        console.log('');
-      }
-
-      // Wire HUD automatically when Claude Code is detected
-      if (detected.claude) {
-        setupHud();
-        console.log(chalk.green('✅ node9 HUD added to Claude Code statusline'));
-        console.log(chalk.gray('   Restart Claude Code to activate the security statusline.'));
         console.log('');
       }
 

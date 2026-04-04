@@ -101,7 +101,9 @@ function formatBase(activity: ActivityItem): string {
   const time = new Date(activity.ts).toLocaleTimeString([], { hour12: false });
   const icon = getIcon(activity.tool);
   const toolName = activity.tool.slice(0, 16).padEnd(16);
-  const argsStr = JSON.stringify(activity.args ?? {}).replace(/\s+/g, ' ');
+  const argsStr = JSON.stringify(activity.args ?? {})
+    .replace(/\s+/g, ' ')
+    .replaceAll(os.homedir(), '~');
   const argsPreview = argsStr.length > 70 ? argsStr.slice(0, 70) + '…' : argsStr;
   return `${chalk.gray(time)} ${icon} ${chalk.white.bold(toolName)} ${chalk.dim(argsPreview)}`;
 }
