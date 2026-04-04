@@ -109,7 +109,7 @@ export const DANGEROUS_WORDS = [
 export const DEFAULT_CONFIG: Config = {
   version: '1.0',
   settings: {
-    mode: 'audit',
+    mode: 'standard',
     autoStartDaemon: true,
     enableUndo: true, // 🔥 ALWAYS TRUE BY DEFAULT for the safety net
     enableHookLogDebug: true,

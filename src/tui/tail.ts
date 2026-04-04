@@ -308,6 +308,43 @@ function buildRecoveryCardLines(req: ApprovalRequest): string[] {
   ];
 }
 
+// ── Approver helpers ─────────────────────────────────────────────────────────
+
+function readApproversFromDisk(): Record<string, boolean> {
+  const configPath = path.join(os.homedir(), '.node9', 'config.json');
+  try {
+    const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+    const settings = (raw.settings ?? {}) as Record<string, unknown>;
+    return (settings.approvers ?? {}) as Record<string, boolean>;
+  } catch {
+    return {};
+  }
+}
+
+function approverStatusLine(): string {
+  const a = readApproversFromDisk();
+  const fmt = (label: string, key: string): string => {
+    const on = a[key] !== false;
+    return `[${key[0]}]${label.slice(1)} ${on ? chalk.green('✓') : chalk.dim('✗')}`;
+  };
+  return `${fmt('native', 'native')}  ${fmt('browser', 'browser')}  ${fmt('cloud', 'cloud')}  ${fmt('terminal', 'terminal')}`;
+}
+
+function toggleApprover(channel: string): void {
+  const configPath = path.join(os.homedir(), '.node9', 'config.json');
+  try {
+    const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+    const settings = (raw.settings ?? {}) as Record<string, unknown>;
+    const approvers = (settings.approvers ?? {}) as Record<string, boolean>;
+    approvers[channel] = approvers[channel] === false; // flip: false→true, true/undefined→false
+    settings.approvers = approvers;
+    raw.settings = settings;
+    fs.writeFileSync(configPath, JSON.stringify(raw, null, 2) + '\n');
+  } catch (err) {
+    process.stderr.write(`[node9] toggleApprover failed: ${String(err)}\n`);
+  }
+}
+
 // ── Main export ───────────────────────────────────────────────────────────────
 
 export async function startTail(options: TailOptions = {}): Promise<void> {
@@ -375,6 +412,59 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
   // Enable keypress event parsing on stdin (idempotent — safe to call multiple times)
   if (canApprove) readline.emitKeypressEvents(process.stdin);
 
+  // ── Idle keypress handler — active between cards, handles approver toggles ──
+  type KeyCb = (str: string, key: { name?: string; ctrl?: boolean }) => void;
+  let idleKeypressHandler: KeyCb | null = null;
+
+  function enterIdleMode(): void {
+    if (!canApprove || idleKeypressHandler !== null) return;
+    try {
+      process.stdin.setRawMode(true);
+    } catch {
+      return;
+    }
+    process.stdin.resume();
+    idleKeypressHandler = (_str: string, key: { name?: string; ctrl?: boolean }) => {
+      const name = key?.name ?? '';
+      if (key?.ctrl && name === 'c') {
+        process.kill(process.pid, 'SIGINT');
+        return;
+      }
+      if (name === 'q') {
+        process.kill(process.pid, 'SIGINT');
+        return;
+      }
+      const channel =
+        name === 'n'
+          ? 'native'
+          : name === 'b'
+            ? 'browser'
+            : name === 'c'
+              ? 'cloud'
+              : name === 't'
+                ? 'terminal'
+                : null;
+      if (channel) {
+        toggleApprover(channel);
+        console.log(chalk.dim(`  Approvers: ${approverStatusLine()}`));
+      }
+    };
+    process.stdin.on('keypress', idleKeypressHandler);
+  }
+
+  function exitIdleMode(): void {
+    if (idleKeypressHandler) {
+      process.stdin.removeListener('keypress', idleKeypressHandler);
+      idleKeypressHandler = null;
+    }
+    try {
+      process.stdin.setRawMode(false);
+    } catch {
+      /* ignore */
+    }
+    process.stdin.pause();
+  }
+
   function clearCard(): void {
     if (cardLineCount > 0) {
       // Use cursor-up instead of RESTORE_CURSOR so scrolling doesn't orphan lines.
@@ -402,6 +492,7 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
 
   function showNextCard(): void {
     if (cardActive || approvalQueue.length === 0 || !canApprove) return;
+    exitIdleMode();
 
     // Attempt raw mode BEFORE rendering the card — if it fails we bail silently
     // rather than leaving a stranded card with no key handler attached.
@@ -409,6 +500,7 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
       process.stdin.setRawMode(true);
     } catch {
       cardActive = false;
+      enterIdleMode();
       return;
     }
 
@@ -424,13 +516,8 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
       const handler = onKeypress;
       onKeypress = null;
       if (handler) process.stdin.removeListener('keypress', handler);
-      try {
-        process.stdin.setRawMode(false);
-      } catch {
-        /* ignore */
-      }
-      process.stdin.pause();
       cancelActiveCard = null;
+      enterIdleMode();
     };
 
     const settle = (action: 'allow' | 'deny' | 'always-allow' | 'trust' | 'redirect') => {
@@ -605,19 +692,17 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
 
   console.log(chalk.cyan.bold(`\n🛰️  Node9 tail  `) + chalk.dim(`→ ${dashboardUrl}`));
   if (canApprove) {
-    console.log(
-      chalk.dim('Interactive approvals: [↵/y] Allow  [n] Deny  [a] Always Allow  [t] Trust 30m')
-    );
+    console.log(chalk.dim('Card: [↵/y] Allow  [n] Deny  [a] Always  [t] Trust 30m'));
+    console.log(chalk.dim(`Approvers (toggle): ${approverStatusLine()}  [q] quit`));
   }
   if (options.history) {
-    console.log(chalk.dim('Showing history + live events. Press Ctrl+C to exit.\n'));
+    console.log(chalk.dim('Showing history + live events.\n'));
   } else {
-    console.log(
-      chalk.dim('Showing live events only. Use --history to include past. Press Ctrl+C to exit.\n')
-    );
+    console.log(chalk.dim('Showing live events only. Use --history to include past.\n'));
   }
 
   process.on('SIGINT', () => {
+    exitIdleMode();
     clearCard();
     process.stdout.write(SHOW_CURSOR);
     if (process.stdout.isTTY) {
@@ -635,6 +720,10 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
       console.error(chalk.red(`Failed to connect: HTTP ${res.statusCode}`));
       process.exit(1);
     }
+
+    // Start idle keypress listener now that we're connected — avoids terminal
+    // artifacts from setRawMode being called before the SSE stream is open.
+    if (canApprove) enterIdleMode();
 
     // Spec-compliant SSE parser: accumulate fields per message block
     let currentEvent = '';

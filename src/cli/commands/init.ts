@@ -5,8 +5,41 @@ import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import https from 'https';
 import { DEFAULT_CONFIG } from '../../core';
 import { setupClaude, setupGemini, setupCursor, setupHud, detectAgents } from '../../setup';
+
+function fireTelemetryPing(agents: string[]): void {
+  try {
+    const body = JSON.stringify({
+      event: 'init_completed',
+      agents_detected: agents,
+      os: process.platform,
+      node9_version: process.env.npm_package_version ?? 'unknown',
+    });
+    const req = https.request(
+      {
+        hostname: 'api.node9.ai',
+        path: '/api/v1/telemetry',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+        timeout: 3000,
+      },
+      (res) => {
+        res.resume();
+      }
+    );
+    req.on('error', () => {
+      /* best-effort, never crash */
+    });
+    req.on('timeout', () => {
+      req.destroy();
+    });
+    req.end(body);
+  } catch {
+    /* ignore */
+  }
+}
 
 export function registerInitCommand(program: Command): void {
   program
@@ -18,20 +51,31 @@ export function registerInitCommand(program: Command): void {
     .action(async (options: { force?: boolean; mode: string; skipSetup?: boolean }) => {
       console.log(chalk.cyan.bold('\n🛡️  Node9 Init\n'));
 
-      // ── Step 1: Create config ──────────────────────────────────────────────
+      // ── Step 1: Shields prompt → determines mode ───────────────────────────
+      let chosenMode = options.mode.toLowerCase();
+      if (!['standard', 'strict', 'audit'].includes(chosenMode)) {
+        chosenMode = DEFAULT_CONFIG.settings.mode;
+      }
+
+      if (!fs.existsSync(path.join(os.homedir(), '.node9', 'config.json')) || options.force) {
+        const { confirm } = await import('@inquirer/prompts');
+        const enableShields = await confirm({
+          message: 'Enable recommended safety shields? (blocks rm -rf, SQL drops, pipe-to-shell)',
+          default: true,
+        });
+        if (enableShields) chosenMode = 'standard';
+        console.log('');
+      }
+
+      // ── Step 2: Create config ──────────────────────────────────────────────
       const configPath = path.join(os.homedir(), '.node9', 'config.json');
 
       if (fs.existsSync(configPath) && !options.force) {
         console.log(chalk.blue(`ℹ️  Config already exists: ${configPath}`));
       } else {
-        const requestedMode = options.mode.toLowerCase();
-        const safeMode = ['standard', 'strict', 'audit'].includes(requestedMode)
-          ? requestedMode
-          : DEFAULT_CONFIG.settings.mode;
-
         const configToSave = {
           ...DEFAULT_CONFIG,
-          settings: { ...DEFAULT_CONFIG.settings, mode: safeMode },
+          settings: { ...DEFAULT_CONFIG.settings, mode: chosenMode },
         };
 
         const dir = path.dirname(configPath);
@@ -39,12 +83,12 @@ export function registerInitCommand(program: Command): void {
         fs.writeFileSync(configPath, JSON.stringify(configToSave, null, 2));
 
         console.log(chalk.green(`✅ Config created: ${configPath}`));
-        console.log(chalk.gray(`   Mode: ${safeMode}`));
+        console.log(chalk.gray(`   Mode: ${chosenMode}`));
       }
 
       if (options.skipSetup) return;
 
-      // ── Step 2: Auto-detect and wire agents ────────────────────────────────
+      // ── Step 3: Auto-detect and wire agents ────────────────────────────────
       console.log('');
       const detected = detectAgents();
       const found = (Object.keys(detected) as Array<keyof typeof detected>).filter(
@@ -73,8 +117,7 @@ export function registerInitCommand(program: Command): void {
         console.log('');
       }
 
-      // Wire HUD automatically when Claude Code is detected — it writes to the
-      // same settings.json that setupClaude already touched, so no extra prompt.
+      // Wire HUD automatically when Claude Code is detected
       if (detected.claude) {
         setupHud();
         console.log(chalk.green('✅ node9 HUD added to Claude Code statusline'));
@@ -82,7 +125,22 @@ export function registerInitCommand(program: Command): void {
         console.log('');
       }
 
+      // ── Step 4: Telemetry opt-in ───────────────────────────────────────────
+      {
+        const { confirm } = await import('@inquirer/prompts');
+        const sendTelemetry = await confirm({
+          message: 'Send anonymous usage stats to help improve node9? (no code, no args)',
+          default: true,
+        });
+        if (sendTelemetry) fireTelemetryPing(found);
+        console.log('');
+      }
+
+      // ── Summary ────────────────────────────────────────────────────────────
       console.log(chalk.green.bold('🛡️  Node9 is ready!'));
-      console.log(chalk.gray('   Run: node9 daemon start'));
+      console.log('');
+      console.log(chalk.white('  Start watching:  ') + chalk.cyan('node9 tail'));
+      console.log(chalk.white('  Browser view:    ') + chalk.cyan('node9 daemon --openui'));
+      console.log(chalk.white('  Cloud dashboard: ') + chalk.cyan('node9.ai'));
     });
 }
