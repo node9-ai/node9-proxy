@@ -9,7 +9,13 @@
 //     ↓ direct function calls
 //   node9 internals (undo.ts, config, …)
 import readline from 'readline';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { getSnapshotHistory, applyUndo } from '../undo';
+import { getConfig, checkPause } from '../core';
+import { isDaemonRunning } from '../auth/daemon';
+import { listShields, readActiveShields, writeActiveShields, resolveShieldName, getShield } from '../shields';
 
 // ── JSON-RPC helpers ──────────────────────────────────────────────────────────
 
@@ -24,6 +30,45 @@ function err(id: unknown, code: number, message: string): string {
 // ── Tool definitions ──────────────────────────────────────────────────────────
 
 const TOOLS = [
+  {
+    name: 'node9_status',
+    description:
+      'Show the current node9 protection status: mode, daemon state, undo engine, pause state, ' +
+      'active shields, and whether agent hooks are wired. Use this to understand what protection ' +
+      'is active before doing risky work.',
+    inputSchema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'node9_config_get',
+    description:
+      'Read the current node9 configuration: security mode, approver channels, timeouts, ' +
+      'DLP settings, and the number of active smart rules. Returns the merged config ' +
+      '(env > cloud > project > global > defaults).',
+    inputSchema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'node9_shield_list',
+    description:
+      'List all available node9 shields and which ones are currently active. ' +
+      'Shields are pre-packaged rule sets for specific services (postgres, aws, github, filesystem).',
+    inputSchema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'node9_shield_enable',
+    description:
+      'Enable a node9 shield for a specific service. Shields only add protection — they cannot ' +
+      'be used to weaken or bypass node9. Use node9_shield_list to see available shield names.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        service: {
+          type: 'string',
+          description: 'Shield name to enable (e.g. "postgres", "aws", "github", "filesystem").',
+        },
+      },
+      required: ['service'],
+    },
+  },
   {
     name: 'node9_undo_list',
     description:
@@ -56,6 +101,95 @@ const TOOLS = [
 ];
 
 // ── Tool handlers ─────────────────────────────────────────────────────────────
+
+function handleStatus(): string {
+  const config = getConfig();
+  const settings = config.settings;
+  const paused = checkPause();
+  const daemonUp = isDaemonRunning();
+  const activeShields = readActiveShields();
+
+  const lines: string[] = [];
+
+  lines.push(`Mode: ${settings.mode}`);
+  lines.push(`Daemon: ${daemonUp ? 'running' : 'stopped'}`);
+  lines.push(`Undo engine: ${settings.enableUndo ? 'enabled' : 'disabled'}`);
+
+  if (paused.paused) {
+    const until = paused.expiresAt
+      ? new Date(paused.expiresAt).toLocaleTimeString()
+      : 'indefinitely';
+    lines.push(`PAUSED until ${until} — all tool calls currently allowed`);
+  } else {
+    lines.push(`Pause state: not paused`);
+  }
+
+  lines.push(`Active shields: ${activeShields.length > 0 ? activeShields.join(', ') : 'none'}`);
+  lines.push(`Smart rules: ${config.policy.smartRules.length} loaded`);
+  lines.push(`DLP: ${config.policy.dlp?.enabled !== false ? 'enabled' : 'disabled'}`);
+
+  const projectConfig = path.join(process.cwd(), 'node9.config.json');
+  const globalConfig = path.join(os.homedir(), '.node9', 'config.json');
+  lines.push(`Project config (node9.config.json): ${fs.existsSync(projectConfig) ? 'present' : 'not found'}`);
+  lines.push(`Global config (~/.node9/config.json): ${fs.existsSync(globalConfig) ? 'present' : 'not found'}`);
+
+  return lines.join('\n');
+}
+
+function handleConfigGet(): string {
+  const config = getConfig();
+  const s = config.settings;
+  const lines: string[] = [
+    `mode: ${s.mode}`,
+    `enableUndo: ${s.enableUndo}`,
+    `flightRecorder: ${s.flightRecorder}`,
+    `approvalTimeoutMs: ${s.approvalTimeoutMs}`,
+    `approvers:`,
+    `  native:   ${s.approvers.native}`,
+    `  browser:  ${s.approvers.browser}`,
+    `  cloud:    ${s.approvers.cloud}`,
+    `  terminal: ${s.approvers.terminal}`,
+    `dlp.enabled: ${config.policy.dlp?.enabled !== false}`,
+    `dlp.scanIgnoredTools: ${config.policy.dlp?.scanIgnoredTools !== false}`,
+    `smartRules: ${config.policy.smartRules.length} active`,
+    `sandboxPaths: ${config.policy.sandboxPaths.length > 0 ? config.policy.sandboxPaths.join(', ') : 'none'}`,
+  ];
+  return lines.join('\n');
+}
+
+function handleShieldList(): string {
+  const all = listShields();
+  const active = new Set(readActiveShields());
+
+  if (all.length === 0) return 'No shields available.';
+
+  const lines = all.map((shield) => {
+    const on = active.has(shield.name);
+    const ruleCount = shield.smartRules.length;
+    return `${on ? '[active]' : '[off]   '} ${shield.name.padEnd(12)} — ${shield.description ?? ''} (${ruleCount} rule${ruleCount === 1 ? '' : 's'})`;
+  });
+
+  lines.unshift(`${active.size} of ${all.length} shields active:\n`);
+  return lines.join('\n');
+}
+
+function handleShieldEnable(args: Record<string, unknown>): string {
+  const service = args.service;
+  if (typeof service !== 'string' || !service) {
+    throw new Error('service is required');
+  }
+  const name = resolveShieldName(service);
+  if (!name) {
+    throw new Error(`Unknown shield: "${service}". Run node9_shield_list to see available shields.`);
+  }
+  const active = readActiveShields();
+  if (active.includes(name)) {
+    return `Shield "${name}" is already active.`;
+  }
+  writeActiveShields([...active, name]);
+  const shield = getShield(name)!;
+  return `Shield "${name}" enabled — ${shield.smartRules.length} smart rule${shield.smartRules.length === 1 ? '' : 's'} now active.`;
+}
 
 function handleUndoList(): string {
   const history = getSnapshotHistory();
@@ -140,7 +274,15 @@ export function runMcpServer(): void {
 
       try {
         let text: string;
-        if (toolName === 'node9_undo_list') {
+        if (toolName === 'node9_status') {
+          text = handleStatus();
+        } else if (toolName === 'node9_config_get') {
+          text = handleConfigGet();
+        } else if (toolName === 'node9_shield_list') {
+          text = handleShieldList();
+        } else if (toolName === 'node9_shield_enable') {
+          text = handleShieldEnable(toolArgs);
+        } else if (toolName === 'node9_undo_list') {
           text = handleUndoList();
         } else if (toolName === 'node9_undo_revert') {
           text = handleUndoRevert(toolArgs);
