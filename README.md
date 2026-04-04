@@ -20,10 +20,10 @@ While others try to _guess_ if a prompt is malicious (Semantic Security), Node9 
 |                                                   |                                                    |
 | ------------------------------------------------- | -------------------------------------------------- |
 | [💎 The Aha Moment](#-the-aha-moment)             | [🌐 MCP Gateway](#-mcp-gateway)                    |
-| [⚡ Key Features](#-key-features)                 | [🔗 Config Precedence](#-configuration-precedence) |
-| [🎮 Try it Live](#-try-it-live)                   | [⚙️ Custom Rules](#️-custom-rules-advanced)         |
-| [🚀 Quick Start](#-quick-start)                   | [🖥️ CLI Reference](#️-cli-reference)                |
-| [🛡️ How Protection Works](#️-how-protection-works) | [🔧 Troubleshooting](#-troubleshooting)            |
+| [⚡ Key Features](#-key-features)                 | [🤖 MCP Server](#-node9-mcp-server)                |
+| [🎮 Try it Live](#-try-it-live)                   | [🔗 Config Precedence](#-configuration-precedence) |
+| [🚀 Quick Start](#-quick-start)                   | [⚙️ Custom Rules](#️-custom-rules-advanced)         |
+| [🛡️ How Protection Works](#️-how-protection-works) | [🖥️ CLI Reference](#️-cli-reference)                |
 | [🛠 Protection Modes](#-protection-modes)         | [🗺️ Roadmap](#️-roadmap)                            |
 
 ---
@@ -359,6 +359,70 @@ When Node9 blocks an MCP tool call, it returns a structured JSON-RPC error that 
 
 ---
 
+## 🤖 Node9 MCP Server
+
+The Node9 MCP Server exposes node9 capabilities — starting with undo — as native MCP tools that Claude, Cursor, and Gemini can call directly. Unlike the MCP Gateway (which wraps _other_ servers), this server is node9's own surface.
+
+```
+Claude / Cursor / Gemini  (MCP client)
+    ↓ stdio  (JSON-RPC 2.0)
+Node9 MCP Server          ← this process
+    ↓ direct function calls
+~/.node9/snapshots.json   ← undo history
+```
+
+### Setup
+
+The MCP server is registered **automatically** during `node9 init` or `node9 setup`. No separate step needed. What gets added to your agent config:
+
+```json
+{
+  "mcpServers": {
+    "node9": {
+      "command": "node9",
+      "args": ["mcp-server"]
+    }
+  }
+}
+```
+
+### Available Tools
+
+| Tool                | Description                                                           |
+| :------------------ | :-------------------------------------------------------------------- |
+| `node9_undo_list`   | List snapshot history — hash, tool, summary, files changed, timestamp |
+| `node9_undo_revert` | Revert the working directory to a specific snapshot hash              |
+
+### Example — Claude using the MCP server
+
+```
+You: revert the last change node9 captured
+
+Claude: Let me check the snapshot history first.
+[calls node9_undo_list]
+
+[1] a3f2c1d  4/4/2026, 18:15  Write — src/undo.ts  (3 files)  cwd: /home/user/myproject
+    full hash: a3f2c1d8e9b0f1a2b3c4d5e6f7a8b9c0d1e2f3a4
+
+I'll revert to snapshot a3f2c1d.
+[calls node9_undo_revert with hash: "a3f2c1d8e9b0f1a2b3c4d5e6f7a8b9c0d1e2f3a4"]
+
+Successfully reverted to snapshot a3f2c1d in /home/user/myproject.
+```
+
+### Manual testing
+
+```bash
+npm run build
+node dist/cli.js mcp-server
+# paste JSON-RPC lines:
+{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2024-11-05","clientInfo":{"name":"test"},"capabilities":{}}}
+{"jsonrpc":"2.0","method":"tools/list","id":2}
+{"jsonrpc":"2.0","method":"tools/call","id":3,"params":{"name":"node9_undo_list","arguments":{}}}
+```
+
+---
+
 ## 🔗 Configuration Precedence
 
 Node9 merges configuration from multiple sources in priority order. Higher tiers win:
@@ -582,6 +646,7 @@ When the daemon is not running the HUD shows `🛡 node9 | offline` instead of a
 | `node9 explain <tool> [args]`        | Trace the policy waterfall for a given tool call (dry-run, no approval prompt)        |
 | `node9 undo [--steps N]`             | Revert the last N AI file edits using shadow Git snapshots                            |
 | `node9 mcp-gateway --upstream <cmd>` | Wrap an MCP server with Node9 security — intercepts every tool call                   |
+| `node9 mcp-server`                   | Run the Node9 MCP server — exposes undo and other tools to Claude, Cursor, and Gemini |
 | `node9 check`                        | Called by agent hooks; evaluates a pending tool call and exits 0 (allow) or 1 (block) |
 
 ### `node9 doctor`
@@ -653,6 +718,7 @@ This can happen when the daemon's PID file (`~/.node9/daemon.pid`) is missing �
 - [x] **Content Scanner / DLP** (Detect and block secrets like AWS keys and Bearer tokens in-flight)
 - [x] **Flight Recorder** (Real-time activity stream in browser dashboard and `node9 tail` terminal view)
 - [x] **Universal MCP Gateway** (Transparent stdio proxy — wraps any MCP server for any AI agent: `node9 mcp-gateway --upstream <cmd>`)
+- [x] **Node9 MCP Server** (Native MCP tools for Claude/Cursor/Gemini: `node9_undo_list`, `node9_undo_revert` — auto-registered by `node9 init`)
 - [ ] **Cursor & Windsurf Hook** (Native hook support for AI-first IDEs)
 - [ ] **VS Code Extension** (Approval requests in a native sidebar — no more OS popups)
 - [ ] **Execution Sandboxing** (Simulate dangerous commands in a virtual FS before applying)

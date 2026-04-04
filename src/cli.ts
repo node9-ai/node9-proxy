@@ -39,6 +39,7 @@ import { registerInitCommand } from './cli/commands/init';
 import { registerUndoCommand } from './cli/commands/undo';
 import { registerWatchCommand } from './cli/commands/watch';
 import { registerMcpGatewayCommand } from './cli/commands/mcp-gateway';
+import { registerMcpServerCommand } from './cli/commands/mcp-server';
 import { registerTrustCommand } from './cli/commands/trust';
 
 const { version } = JSON.parse(
@@ -394,6 +395,7 @@ registerWatchCommand(program);
 
 // node9 mcp-gateway
 registerMcpGatewayCommand(program);
+registerMcpServerCommand(program);
 
 // 7. CHECK (PreToolUse hook) + LOG (PostToolUse hook)
 registerCheckCommand(program);

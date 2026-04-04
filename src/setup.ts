@@ -61,6 +61,27 @@ interface GeminiSettings {
   [key: string]: unknown;
 }
 
+/** The MCP server entry node9 injects into agent configs. */
+const NODE9_MCP_SERVER_ENTRY: McpServer = { command: 'node9', args: ['mcp-server'] };
+
+/** Returns true if the mcpServers map already has the node9 MCP server entry. */
+function hasNode9McpServer(servers: Record<string, McpServer>): boolean {
+  const entry = servers['node9'];
+  return (
+    !!entry &&
+    entry.command === 'node9' &&
+    Array.isArray(entry.args) &&
+    entry.args[0] === 'mcp-server'
+  );
+}
+
+/** Removes the node9 MCP server entry from a servers map. Returns true if removed. */
+function removeNode9McpServer(servers: Record<string, McpServer>): boolean {
+  if (!hasNode9McpServer(servers)) return false;
+  delete servers['node9'];
+  return true;
+}
+
 function printDaemonTip(): void {
   console.log(
     chalk.cyan('\n   💡 Node9 will protect you automatically using Native OS popups.') +
@@ -149,6 +170,13 @@ export function teardownClaude(): void {
   const claudeConfig = readJson<ClaudeConfig>(mcpPath);
   if (claudeConfig?.mcpServers) {
     let mcpChanged = false;
+
+    // Remove the node9 MCP server entry added by setup
+    if (removeNode9McpServer(claudeConfig.mcpServers)) {
+      mcpChanged = true;
+      console.log(chalk.green('  ✅ Removed node9 MCP server entry from ~/.claude.json'));
+    }
+
     for (const [name, server] of Object.entries(claudeConfig.mcpServers)) {
       if (server.command === 'node9' && Array.isArray(server.args) && server.args.length > 0) {
         const [originalCmd, ...originalArgs] = server.args as string[];
@@ -199,6 +227,12 @@ export function teardownGemini(): void {
 
   // Unwrap MCP servers
   if (settings.mcpServers) {
+    // Remove the node9 MCP server entry added by setup
+    if (removeNode9McpServer(settings.mcpServers)) {
+      changed = true;
+      console.log(chalk.green('  ✅ Removed node9 MCP server entry from ~/.gemini/settings.json'));
+    }
+
     for (const [name, server] of Object.entries(settings.mcpServers)) {
       if (server.command === 'node9' && Array.isArray(server.args) && server.args.length > 0) {
         const [originalCmd, ...originalArgs] = server.args as string[];
@@ -231,6 +265,13 @@ export function teardownCursor(): void {
   }
 
   let changed = false;
+
+  // Remove the node9 MCP server entry added by setup
+  if (removeNode9McpServer(mcpConfig.mcpServers)) {
+    changed = true;
+    console.log(chalk.green('  ✅ Removed node9 MCP server entry from ~/.cursor/mcp.json'));
+  }
+
   for (const [name, server] of Object.entries(mcpConfig.mcpServers)) {
     if (server.command === 'node9' && Array.isArray(server.args) && server.args.length > 0) {
       const [originalCmd, ...originalArgs] = server.args as string[];
@@ -262,6 +303,7 @@ export async function setupClaude(): Promise<void> {
   const settings = readJson<ClaudeSettings>(hooksPath) ?? {};
   const servers = claudeConfig.mcpServers ?? {};
 
+  let hooksChanged = false;
   let anythingChanged = false;
 
   // ── Step 1: Pure additions — apply immediately, no prompt ────────────────
@@ -277,6 +319,7 @@ export async function setupClaude(): Promise<void> {
       hooks: [{ type: 'command', command: fullPathCommand('check'), timeout: 60 }],
     });
     console.log(chalk.green('  ✅ PreToolUse hook added  → node9 check'));
+    hooksChanged = true;
     anythingChanged = true;
   }
 
@@ -290,10 +333,20 @@ export async function setupClaude(): Promise<void> {
       hooks: [{ type: 'command', command: fullPathCommand('log'), timeout: 600 }],
     });
     console.log(chalk.green('  ✅ PostToolUse hook added → node9 log'));
+    hooksChanged = true;
     anythingChanged = true;
   }
 
-  if (anythingChanged) {
+  // Add the node9 MCP server entry if not already present (pure addition — no prompt)
+  if (!hasNode9McpServer(servers)) {
+    servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+    claudeConfig.mcpServers = servers;
+    writeJson(mcpPath, claudeConfig);
+    console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    anythingChanged = true;
+  }
+
+  if (hooksChanged) {
     writeJson(hooksPath, settings);
     console.log('');
   }
@@ -352,6 +405,7 @@ export async function setupGemini(): Promise<void> {
   const settings = readJson<GeminiSettings>(settingsPath) ?? {};
   const servers = settings.mcpServers ?? {};
 
+  let hooksChanged = false;
   let anythingChanged = false;
 
   // ── Step 1: Pure additions — apply immediately, no prompt ────────────────
@@ -379,6 +433,7 @@ export async function setupGemini(): Promise<void> {
       ],
     });
     console.log(chalk.green('  ✅ BeforeTool hook added → node9 check'));
+    hooksChanged = true;
     anythingChanged = true;
   }
 
@@ -397,10 +452,20 @@ export async function setupGemini(): Promise<void> {
       hooks: [{ name: 'node9-log', type: 'command', command: fullPathCommand('log') }],
     });
     console.log(chalk.green('  ✅ AfterTool hook added  → node9 log'));
+    hooksChanged = true;
     anythingChanged = true;
   }
 
-  if (anythingChanged) {
+  // Add the node9 MCP server entry if not already present (pure addition — no prompt)
+  if (!hasNode9McpServer(servers)) {
+    servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+    settings.mcpServers = servers;
+    console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    hooksChanged = true;
+    anythingChanged = true;
+  }
+
+  if (hooksChanged) {
     writeJson(settingsPath, settings);
     console.log('');
   }
@@ -496,6 +561,15 @@ export async function setupCursor(): Promise<void> {
   // Note: Cursor does not yet support a pre-execution hooks file.
   // Native hook mode is pending Cursor shipping that capability.
   // MCP proxy wrapping is the supported protection method for now.
+
+  // Add the node9 MCP server entry if not already present (pure addition — no prompt)
+  if (!hasNode9McpServer(servers)) {
+    servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+    mcpConfig.mcpServers = servers;
+    writeJson(mcpPath, mcpConfig);
+    console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    anythingChanged = true;
+  }
 
   // ── Modifications — show preview and ask ─────────────────────────
   const serversToWrap: Array<{ name: string; originalCmd: string; parts: string[] }> = [];

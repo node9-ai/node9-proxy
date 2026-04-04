@@ -41,6 +41,18 @@ function withExistingFile(filePath: string, content: object) {
   });
 }
 
+function withExistingFiles(files: Record<string, object>) {
+  vi.mocked(fs.existsSync).mockImplementation((p) => String(p) in files);
+  vi.mocked(fs.readFileSync).mockImplementation((p) => {
+    const content = files[String(p)];
+    if (content !== undefined) return JSON.stringify(content);
+    throw new Error('not found');
+  });
+}
+
+/** The node9 MCP server entry that setup.ts auto-injects. */
+const NODE9_MCP_ENTRY = { command: 'node9', args: ['mcp-server'] };
+
 beforeEach(() => {
   vi.mocked(fs.existsSync).mockReturnValue(false);
   vi.mocked(fs.writeFileSync).mockClear();
@@ -63,11 +75,14 @@ describe('setupClaude', () => {
   });
 
   it('does not add hooks that already exist', async () => {
-    withExistingFile(hooksPath, {
-      hooks: {
-        PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] }],
-        PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
+    withExistingFiles({
+      [hooksPath]: {
+        hooks: {
+          PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] }],
+          PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
+        },
       },
+      [mcpPath]: { mcpServers: { node9: NODE9_MCP_ENTRY } },
     });
 
     await setupClaude();
@@ -104,7 +119,10 @@ describe('setupClaude', () => {
 
   it('skips MCP wrapping when user denies', async () => {
     withExistingFile(mcpPath, {
-      mcpServers: { github: { command: 'npx', args: ['-y', 'server-github'] } },
+      mcpServers: {
+        github: { command: 'npx', args: ['-y', 'server-github'] },
+        node9: NODE9_MCP_ENTRY,
+      },
     });
     const confirm = await getConfirm();
     confirm.mockResolvedValue(false);
@@ -115,7 +133,10 @@ describe('setupClaude', () => {
 
   it('skips MCP servers that are already wrapped', async () => {
     withExistingFile(mcpPath, {
-      mcpServers: { github: { command: 'node9', args: ['npx', 'server-github'] } },
+      mcpServers: {
+        github: { command: 'node9', args: ['npx', 'server-github'] },
+        node9: NODE9_MCP_ENTRY,
+      },
     });
     const confirm = await getConfirm();
 
@@ -125,11 +146,14 @@ describe('setupClaude', () => {
   });
 
   it('prints "already configured" when everything is in place', async () => {
-    withExistingFile(hooksPath, {
-      hooks: {
-        PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] }],
-        PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
+    withExistingFiles({
+      [hooksPath]: {
+        hooks: {
+          PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] }],
+          PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
+        },
       },
+      [mcpPath]: { mcpServers: { node9: NODE9_MCP_ENTRY } },
     });
 
     const consoleSpy = vi.spyOn(console, 'log');
@@ -160,6 +184,7 @@ describe('setupGemini', () => {
         BeforeTool: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] }],
         AfterTool: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
       },
+      mcpServers: { node9: NODE9_MCP_ENTRY },
     });
 
     await setupGemini();
@@ -232,7 +257,10 @@ describe('setupCursor', () => {
 
   it('skips MCP wrapping when user denies', async () => {
     withExistingFile(mcpPath, {
-      mcpServers: { brave: { command: 'npx', args: ['server-brave'] } },
+      mcpServers: {
+        brave: { command: 'npx', args: ['server-brave'] },
+        node9: NODE9_MCP_ENTRY,
+      },
     });
     const confirm = await getConfirm();
     confirm.mockResolvedValue(false);

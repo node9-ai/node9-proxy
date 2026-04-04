@@ -13,6 +13,12 @@ vi.mock('child_process', () => ({
   spawn: vi.fn().mockReturnValue({ unref: vi.fn() }),
 }));
 
+// ── Mock net to prevent test snapshots from leaking to the live daemon ────────
+vi.mock('net', () => ({
+  default: { createConnection: vi.fn().mockReturnValue({ on: vi.fn(), end: vi.fn() }) },
+  createConnection: vi.fn().mockReturnValue({ on: vi.fn(), end: vi.fn() }),
+}));
+
 import { spawnSync, spawn } from 'child_process';
 import {
   createShadowSnapshot,
