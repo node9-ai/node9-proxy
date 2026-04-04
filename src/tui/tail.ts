@@ -44,12 +44,14 @@ interface ActivityItem {
   args: unknown;
   ts: number;
   status?: string;
+  costEstimate?: number;
 }
 
 interface ResultItem {
   id: string;
   status: string;
   label?: string;
+  costEstimate?: number;
 }
 
 interface ApprovalRequest {
@@ -115,11 +117,15 @@ function renderResult(activity: ActivityItem, result: ResultItem): void {
     status = chalk.red('✗ BLOCK');
   }
 
+  const cost = result.costEstimate ?? activity.costEstimate;
+  const costSuffix =
+    cost == null ? '' : chalk.dim(`  ~$${cost >= 0.001 ? cost.toFixed(3) : '0.000'}`);
+
   if (process.stdout.isTTY) {
     readline.clearLine(process.stdout, 0);
     readline.cursorTo(process.stdout, 0);
   }
-  console.log(`${base}  ${status}`);
+  console.log(`${base}  ${status}${costSuffix}`);
 }
 
 function renderPending(activity: ActivityItem): void {

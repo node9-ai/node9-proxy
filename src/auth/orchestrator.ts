@@ -172,6 +172,7 @@ export async function authorizeHeadless(
       await notifyActivity({
         id: actId,
         tool: toolName,
+        args,
         ts: actTs,
         status: result.approved
           ? 'allow'

@@ -317,6 +317,48 @@ export function openBrowser(url: string): void {
   } catch {}
 }
 
+// ── FinOps: cost estimation ───────────────────────────────────────────────────
+// Passive mode only — estimates cost from tool args at allow time.
+// Read tools: file size → input tokens ($3/1M for Sonnet default).
+// Write/edit tools: content length → output tokens ($15/1M for Sonnet default).
+// Bash output cost is not estimable at PreToolUse time — omitted.
+
+const INPUT_PRICE_PER_1M = 3.0; // $/1M input tokens  (claude-sonnet-4-6)
+const OUTPUT_PRICE_PER_1M = 15.0; // $/1M output tokens (claude-sonnet-4-6)
+const BYTES_PER_TOKEN = 4;
+
+function estimateToolCost(tool: string, args: unknown): number | undefined {
+  const a = (args ?? {}) as Record<string, unknown>;
+  const t = tool.toLowerCase().replace(/[^a-z_]/g, '_');
+
+  // Read: file content will be returned to the AI as input tokens
+  if (t.includes('read') || t === 'glob' || t === 'grep') {
+    const filePath = (a.file_path ?? a.path) as string | undefined;
+    if (filePath) {
+      try {
+        const bytes = fs.statSync(filePath).size;
+        return (bytes / BYTES_PER_TOKEN / 1_000_000) * INPUT_PRICE_PER_1M;
+      } catch {
+        /* file not found or inaccessible — skip */
+      }
+    }
+  }
+
+  // Write: AI generated this content = output tokens
+  if (t.includes('write')) {
+    const content = (a.content ?? '') as string;
+    return (String(content).length / BYTES_PER_TOKEN / 1_000_000) * OUTPUT_PRICE_PER_1M;
+  }
+
+  // Edit (str_replace): new_string is AI-generated output
+  if (t.includes('edit') || t === 'str_replace_based_edit_tool') {
+    const newStr = (a.new_string ?? '') as string;
+    return (String(newStr).length / BYTES_PER_TOKEN / 1_000_000) * OUTPUT_PRICE_PER_1M;
+  }
+
+  return undefined;
+}
+
 // ── SSE broadcast ─────────────────────────────────────────────────────────────
 
 export function broadcast(event: string, data: unknown): void {
@@ -328,10 +370,15 @@ export function broadcast(event: string, data: unknown): void {
     // Patch the status in the ring buffer so replayed history is up-to-date.
     // Intentional in-place mutation — safe because Node.js is single-threaded
     // and ring entries are only read during SSE replay on the same event loop tick.
-    const { id, status, label } = data as { id: string; status: string; label?: string };
+    const { id, status, label, costEstimate } = data as {
+      id: string;
+      status: string;
+      label?: string;
+      costEstimate?: number;
+    };
     for (let i = activityRing.length - 1; i >= 0; i--) {
       if ((activityRing[i].data as { id: string }).id === id) {
-        Object.assign(activityRing[i].data as object, { status, label });
+        Object.assign(activityRing[i].data as object, { status, label, costEstimate });
         break;
       }
     }
@@ -470,10 +517,15 @@ export function startActivitySocket(): void {
             sessionCounters.recordBlockedTool(data.tool);
           }
 
+          const costEstimate =
+            data.status === 'allow' ? estimateToolCost(data.tool, data.args) : undefined;
+          if (costEstimate != null && costEstimate > 0) sessionCounters.addCost(costEstimate);
+
           broadcast('activity-result', {
             id: data.id,
             status: data.status,
             label: data.label,
+            costEstimate,
           });
         }
       } catch {}

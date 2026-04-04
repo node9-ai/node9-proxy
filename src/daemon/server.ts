@@ -531,6 +531,7 @@ export function startDaemon(): void {
             blocked: counters.blocked,
             dlpHits: counters.dlpHits,
             wouldBlock: counters.wouldBlock,
+            estimatedCost: counters.estimatedCost,
           },
           taintedCount: taintStore.list().length,
           lastRuleHit: counters.lastRuleHit,
