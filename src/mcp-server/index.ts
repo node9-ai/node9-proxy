@@ -76,6 +76,20 @@ const TOOLS = [
     },
   },
   {
+    name: 'node9_shield_disable',
+    description: 'Disable a node9 shield. Use node9_shield_list to see currently active shields.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        service: {
+          type: 'string',
+          description: 'Shield name to disable (e.g. "postgres", "aws", "github", "filesystem").',
+        },
+      },
+      required: ['service'],
+    },
+  },
+  {
     name: 'node9_approver_list',
     description:
       'List all node9 approver channels and their current enabled/disabled state. ' +
@@ -232,6 +246,25 @@ function handleShieldEnable(args: Record<string, unknown>): string {
   writeActiveShields([...active, name]);
   const shield = getShield(name)!;
   return `Shield "${name}" enabled — ${shield.smartRules.length} smart rule${shield.smartRules.length === 1 ? '' : 's'} now active.`;
+}
+
+function handleShieldDisable(args: Record<string, unknown>): string {
+  const service = args.service;
+  if (typeof service !== 'string' || !service) {
+    throw new Error('service is required');
+  }
+  const name = resolveShieldName(service);
+  if (!name) {
+    throw new Error(
+      `Unknown shield: "${service}". Run node9_shield_list to see available shields.`
+    );
+  }
+  const active = readActiveShields();
+  if (!active.includes(name)) {
+    return `Shield "${name}" is not active.`;
+  }
+  writeActiveShields(active.filter((s) => s !== name));
+  return `Shield "${name}" disabled.`;
 }
 
 // ── Approver config helpers ───────────────────────────────────────────────────
@@ -398,6 +431,8 @@ export function runMcpServer(): void {
           text = handleShieldList();
         } else if (toolName === 'node9_shield_enable') {
           text = handleShieldEnable(toolArgs);
+        } else if (toolName === 'node9_shield_disable') {
+          text = handleShieldDisable(toolArgs);
         } else if (toolName === 'node9_approver_list') {
           text = handleApproverList();
         } else if (toolName === 'node9_approver_set') {
