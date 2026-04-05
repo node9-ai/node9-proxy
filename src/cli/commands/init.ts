@@ -8,6 +8,9 @@ import os from 'os';
 import https from 'https';
 import { DEFAULT_CONFIG } from '../../core';
 import { setupClaude, setupGemini, setupCursor, detectAgents } from '../../setup';
+import { readActiveShields, writeActiveShields } from '../../shields';
+
+const DEFAULT_SHIELDS = ['filesystem', 'postgres'];
 
 function fireTelemetryPing(agents: string[]): void {
   try {
@@ -63,7 +66,13 @@ export function registerInitCommand(program: Command): void {
           message: 'Enable recommended safety shields? (blocks rm -rf, SQL drops, pipe-to-shell)',
           default: true,
         });
-        if (enableShields) chosenMode = 'standard';
+        if (enableShields) {
+          chosenMode = 'standard';
+          // Activate default shields — merge with any already-active shields
+          const current = readActiveShields();
+          const merged = Array.from(new Set([...current, ...DEFAULT_SHIELDS]));
+          writeActiveShields(merged);
+        }
         console.log('');
       }
 
