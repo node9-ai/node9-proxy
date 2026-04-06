@@ -286,14 +286,31 @@ function renderOffline(): void {
   process.stdout.write(`${color(BLUE, '🛡')} ${bold('node9')} ${dim('|')} ${dim('offline')}\n`);
 }
 
+let shieldsCache: { value: string[]; expiresAt: number } | null = null;
+const SHIELDS_CACHE_TTL_MS = 2000;
+
 function readActiveShieldsHud(): string[] {
+  const now = Date.now();
+  if (shieldsCache && now < shieldsCache.expiresAt) return shieldsCache.value;
   try {
     const shieldsPath = path.join(os.homedir(), '.node9', 'shields.json');
-    if (!fs.existsSync(shieldsPath)) return [];
+    if (!fs.existsSync(shieldsPath)) {
+      shieldsCache = { value: [], expiresAt: now + SHIELDS_CACHE_TTL_MS };
+      return [];
+    }
     const parsed = JSON.parse(fs.readFileSync(shieldsPath, 'utf-8')) as { active?: unknown };
-    if (!Array.isArray(parsed.active)) return [];
-    return (parsed.active as unknown[]).filter((s): s is string => typeof s === 'string');
+    if (!Array.isArray(parsed.active)) {
+      shieldsCache = { value: [], expiresAt: now + SHIELDS_CACHE_TTL_MS };
+      return [];
+    }
+    const value = (parsed.active as unknown[])
+      .filter((s): s is string => typeof s === 'string')
+      .slice(0, 20)
+      .map((s) => s.slice(0, 64));
+    shieldsCache = { value, expiresAt: now + SHIELDS_CACHE_TTL_MS };
+    return value;
   } catch {
+    shieldsCache = { value: [], expiresAt: now + SHIELDS_CACHE_TTL_MS };
     return [];
   }
 }

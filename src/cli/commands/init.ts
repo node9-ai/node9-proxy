@@ -69,9 +69,14 @@ export function registerInitCommand(program: Command): void {
         if (enableShields) {
           chosenMode = 'standard';
           // Activate default shields — merge with any already-active shields
-          const current = readActiveShields();
-          const merged = Array.from(new Set([...current, ...DEFAULT_SHIELDS]));
-          writeActiveShields(merged);
+          try {
+            const current = readActiveShields();
+            const merged = Array.from(new Set([...current, ...DEFAULT_SHIELDS]));
+            const hasNewShields = DEFAULT_SHIELDS.some((s) => !current.includes(s));
+            if (hasNewShields) writeActiveShields(merged);
+          } catch (err) {
+            console.log(chalk.yellow(`  ⚠️  Could not update shields: ${String(err)}`));
+          }
         }
         console.log('');
       }
