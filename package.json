@@ -75,6 +75,7 @@
     "picomatch": "^4.0.3",
     "safe-regex2": "^5.1.0",
     "sh-syntax": "^0.5.8",
+    "smol-toml": "^1.6.1",
     "zod": "^3.25.76"
   },
   "devDependencies": {

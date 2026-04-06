@@ -3,13 +3,16 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import {
   setupClaude,
   setupGemini,
   setupCursor,
+  setupCodex,
   teardownClaude,
   teardownGemini,
   teardownCursor,
+  teardownCodex,
   detectAgents,
 } from '../setup.js';
 
@@ -48,6 +51,21 @@ function withExistingFiles(files: Record<string, object>) {
     if (content !== undefined) return JSON.stringify(content);
     throw new Error('not found');
   });
+}
+
+function withExistingTomlFile(filePath: string, content: object) {
+  vi.mocked(fs.existsSync).mockImplementation((p) => String(p) === filePath);
+  vi.mocked(fs.readFileSync).mockImplementation((p) => {
+    if (String(p) === filePath) return stringifyToml(content as Record<string, unknown>);
+    throw new Error('not found');
+  });
+}
+
+// Returns the parsed TOML of the LAST write to a given file path
+function writtenTomlTo(filePath: string): any {
+  const calls = vi.mocked(fs.writeFileSync).mock.calls.filter(([p]) => String(p) === filePath);
+  if (calls.length === 0) return null;
+  return parseToml(String(calls[calls.length - 1][1]));
 }
 
 /** The node9 MCP server entry that setup.ts auto-injects. */
@@ -480,7 +498,12 @@ describe('detectAgents', () => {
 
   it('returns all false when no agent directories exist', () => {
     vi.mocked(fs.existsSync).mockReturnValue(false);
-    expect(detectAgents(home)).toEqual({ claude: false, gemini: false, cursor: false });
+    expect(detectAgents(home)).toEqual({
+      claude: false,
+      gemini: false,
+      cursor: false,
+      codex: false,
+    });
   });
 
   it('detects Claude via ~/.claude directory', () => {
@@ -514,12 +537,19 @@ describe('detectAgents', () => {
     expect(detectAgents(home).cursor).toBe(true);
   });
 
-  it('detects all three agents simultaneously', () => {
+  it('detects Codex via ~/.codex directory', () => {
+    vi.mocked(fs.existsSync).mockImplementation(
+      (q) => String(q).replace(/\\/g, '/') === p('.codex')
+    );
+    expect(detectAgents(home).codex).toBe(true);
+  });
+
+  it('detects all four agents simultaneously', () => {
     vi.mocked(fs.existsSync).mockImplementation((q) => {
       const s = String(q).replace(/\\/g, '/');
-      return s === p('.claude') || s === p('.gemini') || s === p('.cursor');
+      return s === p('.claude') || s === p('.gemini') || s === p('.cursor') || s === p('.codex');
     });
-    expect(detectAgents(home)).toEqual({ claude: true, gemini: true, cursor: true });
+    expect(detectAgents(home)).toEqual({ claude: true, gemini: true, cursor: true, codex: true });
   });
 
   it('returns all false when existsSync throws (e.g. permission denied)', () => {
@@ -527,7 +557,12 @@ describe('detectAgents', () => {
       throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
     });
     const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
-    expect(detectAgents(home)).toEqual({ claude: false, gemini: false, cursor: false });
+    expect(detectAgents(home)).toEqual({
+      claude: false,
+      gemini: false,
+      cursor: false,
+      codex: false,
+    });
     // Should warn to stderr for non-ENOENT errors so misconfigured systems surface
     expect(stderrSpy).toHaveBeenCalled();
     expect(String(stderrSpy.mock.calls[0][0])).toContain('EACCES');
@@ -540,7 +575,12 @@ describe('detectAgents', () => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
     const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
-    expect(detectAgents(home)).toEqual({ claude: false, gemini: false, cursor: false });
+    expect(detectAgents(home)).toEqual({
+      claude: false,
+      gemini: false,
+      cursor: false,
+      codex: false,
+    });
     expect(stderrSpy).not.toHaveBeenCalled();
     stderrSpy.mockRestore();
   });
@@ -560,6 +600,7 @@ describe('detectAgents', () => {
     // Short-circuit: .claude is true so .claude.json is never called
     expect(result.claude).toBe(true);
     expect(result.gemini).toBe(false);
+    expect(result.codex).toBe(false);
     stderrSpy.mockRestore();
   });
 
@@ -602,5 +643,120 @@ describe('teardownCursor', () => {
   it('does nothing when file does not exist', () => {
     teardownCursor();
     expect(writtenTo(mcpPath)).toBeNull();
+  });
+});
+
+// ── setupCodex ────────────────────────────────────────────────────────────────
+
+describe('setupCodex', () => {
+  const configPath = path.join(os.homedir(), '.codex', 'config.toml');
+
+  it('does not write hooks — Codex does not support native hooks', async () => {
+    const confirm = await getConfirm();
+    await setupCodex();
+
+    expect(confirm).not.toHaveBeenCalled();
+    // hooks file must never be written
+    expect(writtenTomlTo(path.join(os.homedir(), '.codex', 'hooks.toml'))).toBeNull();
+  });
+
+  it('injects node9 MCP server on a fresh install — no prompt', async () => {
+    const confirm = await getConfirm();
+    await setupCodex();
+
+    expect(confirm).not.toHaveBeenCalled();
+    const written = writtenTomlTo(configPath);
+    expect(written.mcp_servers.node9.command).toBe('node9');
+    expect(written.mcp_servers.node9.args).toEqual(['mcp-server']);
+  });
+
+  it('does not re-inject node9 MCP server if already present', async () => {
+    withExistingTomlFile(configPath, {
+      mcp_servers: { node9: { command: 'node9', args: ['mcp-server'] } },
+    });
+
+    await setupCodex();
+    // No wrappable servers and node9 already present → no write
+    expect(writtenTomlTo(configPath)).toBeNull();
+  });
+
+  it('prompts before wrapping existing MCP servers', async () => {
+    withExistingTomlFile(configPath, {
+      mcp_servers: { brave: { command: 'npx', args: ['server-brave'] } },
+    });
+    const confirm = await getConfirm();
+    confirm.mockResolvedValue(true);
+
+    await setupCodex();
+    expect(confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('wraps MCP servers when user confirms', async () => {
+    withExistingTomlFile(configPath, {
+      mcp_servers: { brave: { command: 'npx', args: ['server-brave'] } },
+    });
+    const confirm = await getConfirm();
+    confirm.mockResolvedValue(true);
+
+    await setupCodex();
+
+    const written = writtenTomlTo(configPath);
+    expect(written.mcp_servers.brave.command).toBe('node9');
+    expect(written.mcp_servers.brave.args).toEqual(['npx', 'server-brave']);
+  });
+
+  it('skips MCP wrapping when user denies', async () => {
+    withExistingTomlFile(configPath, {
+      mcp_servers: {
+        brave: { command: 'npx', args: ['server-brave'] },
+        node9: { command: 'node9', args: ['mcp-server'] },
+      },
+    });
+    const confirm = await getConfirm();
+    confirm.mockResolvedValue(false);
+
+    await setupCodex();
+    expect(writtenTomlTo(configPath)).toBeNull();
+  });
+});
+
+// ── teardownCodex ─────────────────────────────────────────────────────────────
+
+describe('teardownCodex', () => {
+  const configPath = path.join(os.homedir(), '.codex', 'config.toml');
+
+  it('removes node9 MCP server entry', () => {
+    withExistingTomlFile(configPath, {
+      mcp_servers: {
+        node9: { command: 'node9', args: ['mcp-server'] },
+        brave: { command: 'npx', args: ['server-brave'] },
+      },
+    });
+
+    teardownCodex();
+
+    const written = writtenTomlTo(configPath);
+    expect(written.mcp_servers.node9).toBeUndefined();
+    // Non-node9 server untouched
+    expect(written.mcp_servers.brave.command).toBe('npx');
+  });
+
+  it('unwraps node9-wrapped MCP servers', () => {
+    withExistingTomlFile(configPath, {
+      mcp_servers: {
+        brave: { command: 'node9', args: ['npx', 'server-brave'] },
+      },
+    });
+
+    teardownCodex();
+
+    const written = writtenTomlTo(configPath);
+    expect(written.mcp_servers.brave.command).toBe('npx');
+    expect(written.mcp_servers.brave.args).toEqual(['server-brave']);
+  });
+
+  it('does nothing when file does not exist', () => {
+    teardownCodex();
+    expect(writtenTomlTo(configPath)).toBeNull();
   });
 });

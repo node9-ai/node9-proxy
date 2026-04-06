@@ -397,6 +397,8 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
 
   const connectionTime = Date.now();
   const activityPending = new Map<string, ActivityItem>();
+  // Buffer for results that arrive before their matching pending event (race condition)
+  const orphanedResults = new Map<string, ResultItem>();
 
   // ── Approval state ──────────────────────────────────────────────────────────
   let csrfToken = '';
@@ -851,11 +853,16 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
         return;
       }
 
-      activityPending.set(data.id, data);
+      // Race condition: result already arrived before this pending event — render immediately
+      const orphaned = orphanedResults.get(data.id);
+      if (orphaned) {
+        orphanedResults.delete(data.id);
+        renderResult(data, orphaned);
+        return;
+      }
 
-      // Show pending indicator immediately for slow operations (bash, sql, agent)
-      const slowTool = /bash|shell|query|sql|agent/i.test(data.tool);
-      if (slowTool) renderPending(data);
+      activityPending.set(data.id, data);
+      renderPending(data);
     }
 
     if (event === 'snapshot') {
@@ -876,6 +883,9 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
       if (original) {
         renderResult(original, data);
         activityPending.delete(data.id);
+      } else {
+        // Race condition: result arrived before pending — buffer it until activity arrives
+        orphanedResults.set(data.id, data);
       }
     }
   }

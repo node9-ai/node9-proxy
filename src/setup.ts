@@ -4,6 +4,7 @@ import path from 'path';
 import os from 'os';
 import chalk from 'chalk';
 import { confirm } from '@inquirer/prompts';
+import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 
 interface McpServer {
   type?: string;
@@ -530,6 +531,7 @@ export function detectAgents(homeDir: string = os.homedir()): {
   claude: boolean;
   gemini: boolean;
   cursor: boolean;
+  codex: boolean;
 } {
   const exists = (p: string): boolean => {
     try {
@@ -546,6 +548,7 @@ export function detectAgents(homeDir: string = os.homedir()): {
     claude: exists(path.join(homeDir, '.claude')) || exists(path.join(homeDir, '.claude.json')),
     gemini: exists(path.join(homeDir, '.gemini')),
     cursor: exists(path.join(homeDir, '.cursor')),
+    codex: exists(path.join(homeDir, '.codex')),
   };
 }
 
@@ -625,6 +628,147 @@ export async function setupCursor(): Promise<void> {
     console.log(chalk.green.bold('🛡️  Node9 is now protecting Cursor via MCP proxy!'));
     console.log(chalk.gray('    Restart Cursor for changes to take effect.'));
     printDaemonTip();
+  }
+}
+
+// ── Codex ─────────────────────────────────────────────────────────────────────
+
+interface CodexConfig {
+  mcp_servers?: Record<string, McpServer>;
+  [key: string]: unknown;
+}
+
+function readToml<T>(filePath: string): T | null {
+  try {
+    if (fs.existsSync(filePath)) {
+      return parseToml(fs.readFileSync(filePath, 'utf-8')) as T;
+    }
+  } catch {
+    // ignore corrupt or missing files
+  }
+  return null;
+}
+
+function writeToml(filePath: string, data: unknown): void {
+  const dir = path.dirname(filePath);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(filePath, stringifyToml(data as Record<string, unknown>));
+}
+
+export async function setupCodex(): Promise<void> {
+  const homeDir = os.homedir();
+  const configPath = path.join(homeDir, '.codex', 'config.toml');
+
+  const config = readToml<CodexConfig>(configPath) ?? {};
+  const servers = config.mcp_servers ?? {};
+
+  let anythingChanged = false;
+
+  // Note: Codex does not yet support a pre-execution hooks file.
+  // MCP proxy wrapping is the supported protection method for now.
+
+  // Add the node9 MCP server entry if not already present (pure addition — no prompt)
+  if (!hasNode9McpServer(servers)) {
+    servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+    config.mcp_servers = servers;
+    writeToml(configPath, config);
+    console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    anythingChanged = true;
+  }
+
+  // ── Modifications — show preview and ask ─────────────────────────
+  const serversToWrap: Array<{ name: string; originalCmd: string; parts: string[] }> = [];
+  for (const [name, server] of Object.entries(servers)) {
+    if (!server.command || server.command === 'node9') continue;
+    const parts = [server.command, ...(server.args ?? [])];
+    serversToWrap.push({ name, originalCmd: parts.join(' '), parts });
+  }
+
+  if (serversToWrap.length > 0) {
+    console.log(chalk.bold('The following existing entries will be modified:\n'));
+    console.log(chalk.white(`  ${configPath}`));
+    for (const { name, originalCmd } of serversToWrap) {
+      console.log(chalk.gray(`    • ${name}: "${originalCmd}" → node9 ${originalCmd}`));
+    }
+    console.log('');
+
+    const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
+    if (proceed) {
+      for (const { name, parts } of serversToWrap) {
+        servers[name] = { ...servers[name], command: 'node9', args: parts };
+      }
+      config.mcp_servers = servers;
+      writeToml(configPath, config);
+      console.log(chalk.green(`\n  ✅ ${serversToWrap.length} MCP server(s) wrapped`));
+      anythingChanged = true;
+    } else {
+      console.log(chalk.yellow('  Skipped MCP server wrapping.'));
+    }
+    console.log('');
+  }
+
+  // ── Summary ───────────────────────────────────────────────────────────────
+  console.log(
+    chalk.yellow(
+      '  ⚠️  Note: Codex does not yet support native pre-execution hooks.\n' +
+        '     MCP proxy wrapping is the only supported protection mode for Codex.\n' +
+        '     Native bash and file operations are not monitored.'
+    )
+  );
+  console.log('');
+
+  if (!anythingChanged && serversToWrap.length === 0) {
+    console.log(
+      chalk.blue(
+        'ℹ️  No MCP servers found to wrap. Add MCP servers to ~/.codex/config.toml and re-run.'
+      )
+    );
+    printDaemonTip();
+    return;
+  }
+
+  if (anythingChanged) {
+    console.log(chalk.green.bold('🛡️  Node9 is now protecting Codex via MCP proxy!'));
+    console.log(chalk.gray('    Restart Codex for changes to take effect.'));
+    printDaemonTip();
+  }
+}
+
+export function teardownCodex(): void {
+  const homeDir = os.homedir();
+  const configPath = path.join(homeDir, '.codex', 'config.toml');
+
+  const config = readToml<CodexConfig>(configPath);
+  if (!config?.mcp_servers) {
+    console.log(chalk.blue('  ℹ️  ~/.codex/config.toml not found — nothing to remove'));
+    return;
+  }
+
+  let changed = false;
+
+  // Remove the node9 MCP server entry added by setup
+  if (removeNode9McpServer(config.mcp_servers)) {
+    changed = true;
+    console.log(chalk.green('  ✅ Removed node9 MCP server entry from ~/.codex/config.toml'));
+  }
+
+  for (const [name, server] of Object.entries(config.mcp_servers)) {
+    if (server.command === 'node9' && Array.isArray(server.args) && server.args.length > 0) {
+      const [originalCmd, ...originalArgs] = server.args as string[];
+      config.mcp_servers[name] = {
+        ...server,
+        command: originalCmd,
+        args: originalArgs.length ? originalArgs : undefined,
+      };
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    writeToml(configPath, config);
+    console.log(chalk.green('  ✅ Unwrapped MCP servers in ~/.codex/config.toml'));
+  } else {
+    console.log(chalk.blue('  ℹ️  No Node9-wrapped MCP servers found in ~/.codex/config.toml'));
   }
 }
 

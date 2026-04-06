@@ -286,6 +286,18 @@ function renderOffline(): void {
   process.stdout.write(`${color(BLUE, '🛡')} ${bold('node9')} ${dim('|')} ${dim('offline')}\n`);
 }
 
+function readActiveShieldsHud(): string[] {
+  try {
+    const shieldsPath = path.join(os.homedir(), '.node9', 'shields.json');
+    if (!fs.existsSync(shieldsPath)) return [];
+    const parsed = JSON.parse(fs.readFileSync(shieldsPath, 'utf-8')) as { active?: unknown };
+    if (!Array.isArray(parsed.active)) return [];
+    return (parsed.active as unknown[]).filter((s): s is string => typeof s === 'string');
+  } catch {
+    return [];
+  }
+}
+
 function renderSecurityLine(status: HudStatus): string {
   const parts: string[] = [];
 
@@ -307,6 +319,20 @@ function renderSecurityLine(status: HudStatus): string {
   };
   const mc = modeColors[status.mode] ?? WHITE;
   parts.push(`${dim('|')} ${color(mc, modeIcon[status.mode] ?? '')}${color(mc, status.mode)}`);
+
+  // Active shields
+  const activeShields = readActiveShieldsHud();
+  if (activeShields.length > 0) {
+    const shieldAbbrevs: Record<string, string> = {
+      'bash-safe': 'bash',
+      filesystem: 'fs',
+      postgres: 'pg',
+      github: 'gh',
+      aws: 'aws',
+    };
+    const labels = activeShields.map((s) => shieldAbbrevs[s] ?? s).join(' ');
+    parts.push(color(DIM, `[${labels}]`));
+  }
 
   // Session counters
   if (status.mode === 'observe') {

@@ -7,10 +7,10 @@ import path from 'path';
 import os from 'os';
 import https from 'https';
 import { DEFAULT_CONFIG } from '../../core';
-import { setupClaude, setupGemini, setupCursor, detectAgents } from '../../setup';
+import { setupClaude, setupGemini, setupCursor, setupCodex, detectAgents } from '../../setup';
 import { readActiveShields, writeActiveShields } from '../../shields';
 
-const DEFAULT_SHIELDS = ['filesystem', 'postgres'];
+const DEFAULT_SHIELDS = ['bash-safe', 'filesystem', 'postgres'];
 
 function fireTelemetryPing(agents: string[]): void {
   try {
@@ -123,9 +123,9 @@ export function registerInitCommand(program: Command): void {
 
       if (found.length === 0) {
         console.log(
-          chalk.gray('No AI agents detected. Install Claude Code, Gemini CLI, or Cursor')
+          chalk.gray('No AI agents detected. Install Claude Code, Gemini CLI, Cursor, or Codex')
         );
-        console.log(chalk.gray('then run: node9 addto <claude|gemini|cursor>'));
+        console.log(chalk.gray('then run: node9 addto <claude|gemini|cursor|codex>'));
         return;
       }
 
@@ -140,6 +140,7 @@ export function registerInitCommand(program: Command): void {
         if (agent === 'claude') await setupClaude();
         else if (agent === 'gemini') await setupGemini();
         else if (agent === 'cursor') await setupCursor();
+        else if (agent === 'codex') await setupCodex();
         console.log('');
       }
 
