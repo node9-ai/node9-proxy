@@ -289,9 +289,10 @@ export function registerShieldCommand(program: Command): void {
     .description('Install a shield from the community marketplace into ~/.node9/shields/')
     .action((name: string) => {
       if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+        // Do not echo the raw name — it may contain ANSI escape sequences (terminal injection)
         console.error(
           chalk.red(
-            `\n❌ Invalid shield name "${name}": only alphanumeric characters, hyphens, and underscores are allowed\n`
+            `\n❌ Invalid shield name: only alphanumeric characters, hyphens, and underscores are allowed\n`
           )
         );
         process.exit(1);
