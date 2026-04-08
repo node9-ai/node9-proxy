@@ -267,12 +267,31 @@ def _phase1_baseline(base_branch, original_branch, iteration, test_cmd):
     return filtered, before_output, diff_lines, skip, tests_passed
 
 
+CLAUDE_MD_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "CLAUDE.md")
+
+def _load_claude_md() -> str:
+    try:
+        with open(CLAUDE_MD_PATH) as f:
+            content = f.read().strip()
+        return f"\n\n## Project rules (CLAUDE.md):\n{content}" if content else ""
+    except OSError:
+        return ""
+
+
+_AGENT_TOOLS = [
+    {"name": "read_code",  "description": "Read file",      "input_schema": {"type": "object", "properties": {"filename": {"type": "string"}}, "required": ["filename"]}},
+    {"name": "write_code", "description": "Fix file",       "input_schema": {"type": "object", "properties": {"filename": {"type": "string"}, "content": {"type": "string"}}, "required": ["filename", "content"]}},
+    {"name": "run_bash",   "description": "Run tests/cmds", "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
+]
+
+_TEST_KEYS = ("npm test", "npm run test", "vitest", "jest")
+
+
 def _phase2_engineering(filtered_diff, before_out, original_branch, base_branch, test_cmd, tests_passed=False):
     files_changed, issues_found, issues_fixed = [], [], []
     after_test_output = before_out
     file_list = ", ".join(_diff_file_list(filtered_diff))
 
-    # Less aggressive prompt context if test runners are already green
     status_msg = (
         "The tests currently PASS. Only modify code if there is a critical security or logic bug."
         if tests_passed else "Fix ONLY bugs introduced by this diff."
@@ -290,12 +309,24 @@ def _phase2_engineering(filtered_diff, before_out, original_branch, base_branch,
         "5. Report FOUND: <issues> and FIXED: <fixes>."
     )
 
+    claude_md = _load_claude_md()
+    system_prompt = (
+        "You are a PRAGMATIC senior engineer. Fix bugs and STOP. "
+        "Read files immediately. DO NOT WASTE TURNS ON GREP."
+        + claude_md
+    )
+
     messages = [{"role": "user", "content": [{"type": "text", "text": user_content, "cache_control": {"type": "ephemeral"}}]}]
-    system_prompt = "You are a PRAGMATIC senior engineer. Fix bugs and STOP. Read files immediately. DO NOT WASTE TURNS ON GREP."
 
     for i in range(8):
         _apply_rolling_cache(messages)
-        response = _create_with_retry(client, model="claude-sonnet-4-6", max_tokens=4096, extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"}, tools=[{"name": "read_code", "description": "Read file", "input_schema": {"type": "object", "properties": {"filename": {"type": "string"}}, "required": ["filename"]}}, {"name": "write_code", "description": "Fix file", "input_schema": {"type": "object", "properties": {"filename": {"type": "string"}, "content": {"type": "string"}}, "required": ["filename", "content"]}}, {"name": "run_bash", "description": "Run tests", "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}], system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}], messages=messages)
+        response = _create_with_retry(
+            client, model="claude-sonnet-4-6", max_tokens=4096,
+            extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"},
+            tools=_AGENT_TOOLS,
+            system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
+            messages=messages,
+        )
         if response.stop_reason != "tool_use":
             for block in response.content:
                 if hasattr(block, "text") and block.text:
@@ -309,24 +340,26 @@ def _phase2_engineering(filtered_diff, before_out, original_branch, base_branch,
                 print(f"  → {tool_use.name}({tool_use.input})")
                 result = getattr(tools, tool_use.name)(**tool_use.input)
                 if tool_use.name == "write_code": files_changed.append(tool_use.input['filename'])
-                if tool_use.name == "run_bash" and any(k in tool_use.input['command'] for k in ("npm test", "npm run test", "vitest", "jest")):
+                if tool_use.name == "run_bash" and any(k in tool_use.input['command'] for k in _TEST_KEYS):
                     after_test_output = result
                 tool_results.append({"type": "tool_result", "tool_use_id": tool_use.id, "content": _truncate_output(str(result))})
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
-        time.sleep(5)
     return list(set(files_changed)), issues_found, issues_fixed, after_test_output
 
 
 def _phase3_code_review(original_diff, agent_diff, before_out, after_out):
     b_p, b_t = _parse_test_counts(before_out)
     a_p, a_t = _parse_test_counts(after_out)
+    claude_md = _load_claude_md()
     prompt = (
         "You are a PRAGMATIC senior engineer reviewing a pull request.\n\n"
         f"## Original diff:\n```diff\n{_chunk_diff(original_diff, 5000)}\n```\n\n"
         f"## AI Agent Fixes:\n```diff\n{_chunk_diff(agent_diff, 3000)}\n```\n\n"
-        f"## Tests: {b_p}/{b_t} -> {a_p}/{a_t}\n\n"
-        "## Your task: Write a concise review. 1. IGNORE file locations. 2. IGNORE theoretical shell edge cases. 3. ONLY flag: Security, Logic errors, Performance. If fixable, use ISSUE: <desc>."
+        f"## Tests: {b_p}/{b_t} -> {a_p}/{a_t}\n"
+        + claude_md + "\n\n"
+        "## Your task: Write a concise review. 1. IGNORE file locations. 2. IGNORE theoretical shell edge cases. "
+        "3. ONLY flag: Security, Logic errors, Performance. If fixable, use ISSUE: <desc>."
     )
     response = _create_with_retry(client, model="claude-sonnet-4-6", max_tokens=1500, messages=[{"role": "user", "content": prompt}])
     review_text = response.content[0].text.strip()
@@ -334,25 +367,47 @@ def _phase3_code_review(original_diff, agent_diff, before_out, after_out):
     return review_text, issues_to_fix
 
 
-def _phase4_review_fix_loop(review_issues, test_cmd):
+def _phase4_review_fix_loop(review_issues, file_list, test_cmd):
     files_changed, issues_fixed, after_test_output = [], [], ""
-    user_content = f"Fix these review issues: {'; '.join(review_issues)}. Verify with {test_cmd}."
-    messages = [{"role": "user", "content": user_content}]
-    system_prompt = "You are a specialist refiner. Fix ONLY the issues listed. DO NOT GREP. Read the files directly."
+    user_content = (
+        f"Fix these review issues:\n" + "\n".join(f"- {i}" for i in review_issues) + "\n\n"
+        f"Files to look at: {file_list}\n\n"
+        f"Read each file directly, apply the fix, then verify with `run_bash('{test_cmd}')`.\n"
+        "Report each fix as: FIXED: <description>"
+    )
+    claude_md = _load_claude_md()
+    system_prompt = (
+        "You are a specialist refiner. Fix ONLY the issues listed. "
+        "DO NOT GREP. Read the files directly."
+        + claude_md
+    )
+    messages = [{"role": "user", "content": [{"type": "text", "text": user_content, "cache_control": {"type": "ephemeral"}}]}]
     for i in range(3):
-        response = _create_with_retry(client, model="claude-sonnet-4-6", max_tokens=4096, tools=[{"name": "read_code", "description": "Read file", "input_schema": {"type": "object", "properties": {"filename": {"type": "string"}}, "required": ["filename"]}}, {"name": "write_code", "description": "Fix file", "input_schema": {"type": "object", "properties": {"filename": {"type": "string"}, "content": {"type": "string"}}, "required": ["filename", "content"]}}, {"name": "run_bash", "description": "Run tests", "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}], system=system_prompt, messages=messages)
-        if response.stop_reason != "tool_use": break
+        _apply_rolling_cache(messages)
+        response = _create_with_retry(
+            client, model="claude-sonnet-4-6", max_tokens=4096,
+            extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"},
+            tools=_AGENT_TOOLS,
+            system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
+            messages=messages,
+        )
+        if response.stop_reason != "tool_use":
+            for block in response.content:
+                if hasattr(block, "text") and block.text:
+                    for line in block.text.splitlines():
+                        if line.upper().startswith("FIXED:"): issues_fixed.append(line[6:].strip())
+            break
         tool_results = []
         for tool_use in response.content:
             if tool_use.type == "tool_use":
+                print(f"  → {tool_use.name}({tool_use.input})")
                 result = getattr(tools, tool_use.name)(**tool_use.input)
                 if tool_use.name == "write_code": files_changed.append(tool_use.input['filename'])
-                if tool_use.name == "run_bash" and any(k in tool_use.input['command'] for k in ("npm test", "npm run test", "vitest", "jest")):
+                if tool_use.name == "run_bash" and any(k in tool_use.input['command'] for k in _TEST_KEYS):
                     after_test_output = result
-                tool_results.append({"type": "tool_result", "tool_use_id": tool_use.id, "content": str(result)})
+                tool_results.append({"type": "tool_result", "tool_use_id": tool_use.id, "content": _truncate_output(str(result))})
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
-        time.sleep(5)
     return list(set(files_changed)), issues_fixed, after_test_output
 
 
@@ -390,7 +445,7 @@ def execute_review_fix() -> None:
 
     # 4. Final Refinement
     if review_issues:
-        f_files, f_fixed, f_out = _phase4_review_fix_loop(review_issues, test_cmd)
+        f_files, f_fixed, f_out = _phase4_review_fix_loop(review_issues, ", ".join(_diff_file_list(filtered_diff)), test_cmd)
         files_changed = list(set(files_changed + f_files))
         issues_fixed += f_fixed
         if f_out: after_out = f_out
