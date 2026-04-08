@@ -59,7 +59,15 @@ def write_code(filename: str, content: str) -> str:
 @protect("read_code")
 def read_code(filename: str) -> str:
     """Read a file or list a directory in the workspace."""
-    path = safe_path(filename, workspace=WORKSPACE_DIR)
+    # Normalise '.' and '' to the workspace root so safe_path doesn't reject them
+    if not filename or filename in (".", "./"):
+        filename = ""
+        path = WORKSPACE_DIR
+    else:
+        try:
+            path = safe_path(filename, workspace=WORKSPACE_DIR)
+        except ValueError as e:
+            return f"Error: {e}"
     if not os.path.exists(path):
         return f"Error: {filename} not found"
     if os.path.isdir(path):
@@ -155,11 +163,27 @@ TOOL_SPECS = [
 ]
 
 
+_TOOL_ALLOWED_KEYS: dict[str, set[str]] = {
+    "read_code":  {"filename"},
+    "write_code": {"filename", "content"},
+    "run_bash":   {"command"},
+}
+
+
 def dispatch(tool_name: str, tool_input: dict) -> str:
-    if tool_name == "read_code":
-        return read_code(**tool_input)
-    if tool_name == "write_code":
-        return write_code(**tool_input)
-    if tool_name == "run_bash":
-        return run_bash(**tool_input)
+    allowed = _TOOL_ALLOWED_KEYS.get(tool_name)
+    if allowed is None:
+        return f"Unknown tool: {tool_name}"
+    unexpected = set(tool_input.keys()) - allowed
+    if unexpected:
+        return f"Error: unexpected keys for {tool_name}: {sorted(unexpected)}"
+    try:
+        if tool_name == "read_code":
+            return read_code(**tool_input)
+        if tool_name == "write_code":
+            return write_code(**tool_input)
+        if tool_name == "run_bash":
+            return run_bash(**tool_input)
+    except (ValueError, TypeError) as e:
+        return f"Error: {e}"
     return f"Unknown tool: {tool_name}"
