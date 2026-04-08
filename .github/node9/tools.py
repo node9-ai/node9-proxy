@@ -56,7 +56,7 @@ def write_code(filename: str, content: str) -> str:
 
     _node9_audit("filesystem", {"filename": filename, "bytes": len(content)})
 
-    path = safe_path(filename, WORKSPACE_DIR)
+    path = safe_path(filename, workspace=WORKSPACE_DIR)
     with open(path, "w") as f:
         f.write(content)
     return f"Successfully updated {filename}"
@@ -65,7 +65,7 @@ def write_code(filename: str, content: str) -> str:
 def read_code(filename: str) -> str:
     """Reads a file or lists a directory for the agent to analyze."""
     _audit("filesystem", {"filename": filename, "op": "read"})
-    path = safe_path(filename, WORKSPACE_DIR)
+    path = safe_path(filename, workspace=WORKSPACE_DIR)
     if not os.path.exists(path):
         return "Error: File not found."
     if os.path.isdir(path):
