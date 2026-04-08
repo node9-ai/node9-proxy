@@ -288,6 +288,14 @@ export function registerShieldCommand(program: Command): void {
     .command('install <name>')
     .description('Install a shield from the community marketplace into ~/.node9/shields/')
     .action((name: string) => {
+      if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+        console.error(
+          chalk.red(
+            `\n❌ Invalid shield name "${name}": only alphanumeric characters, hyphens, and underscores are allowed\n`
+          )
+        );
+        process.exit(1);
+      }
       console.log(chalk.bold(`\n🛡️  Installing shield "${name}"…\n`));
       httpsFetch(COMMUNITY_INDEX_URL)
         .then((indexBody) => {

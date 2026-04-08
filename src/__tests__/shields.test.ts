@@ -668,6 +668,23 @@ describe('installShield', () => {
     const bad = { ...validShield, smartRules: undefined };
     expect(() => installShield('my-shield', bad)).toThrow(/failed validation/);
   });
+
+  it('rejects path traversal names (../etc/crontab)', () => {
+    expect(() => installShield('../etc/crontab', validShield)).toThrow(/Invalid shield name/);
+  });
+
+  it('rejects names with slashes', () => {
+    expect(() => installShield('foo/bar', validShield)).toThrow(/Invalid shield name/);
+  });
+
+  it('rejects names with spaces', () => {
+    expect(() => installShield('my shield', validShield)).toThrow(/Invalid shield name/);
+  });
+
+  it('accepts valid names with hyphens and underscores', () => {
+    const shield = { ...validShield, name: 'my_shield-v2' };
+    expect(() => installShield('my_shield-v2', shield)).not.toThrow();
+  });
 });
 
 // ── shield loader: user shields override builtins ────────────────────────────

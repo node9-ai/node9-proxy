@@ -261,6 +261,12 @@ export const USER_SHIELDS_DIR_PATH = USER_SHIELDS_DIR;
 
 /** Validates and writes a shield definition to ~/.node9/shields/<name>.json */
 export function installShield(name: string, shieldJson: unknown): void {
+  // Reject names that could escape USER_SHIELDS_DIR via path traversal
+  if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+    throw new Error(
+      `Invalid shield name '${name}': only alphanumeric characters, hyphens, and underscores are allowed`
+    );
+  }
   const shield = validateShieldDefinition(shieldJson, `<downloaded:${name}>`);
   if (!shield) throw new Error(`Downloaded shield '${name}' failed validation`);
   if (shield.name !== name) {
