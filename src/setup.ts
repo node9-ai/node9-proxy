@@ -143,7 +143,7 @@ function isNode9Hook(cmd: string | undefined): boolean {
 export function teardownClaude(): void {
   const homeDir = os.homedir();
   const hooksPath = path.join(homeDir, '.claude', 'settings.json');
-  const mcpPath = path.join(homeDir, '.claude.json');
+  const mcpPath = path.join(homeDir, '.claude', '.mcp.json');
   let changed = false;
 
   // Remove hook matchers from settings.json
@@ -175,12 +175,19 @@ export function teardownClaude(): void {
     // Remove the node9 MCP server entry added by setup
     if (removeNode9McpServer(claudeConfig.mcpServers)) {
       mcpChanged = true;
-      console.log(chalk.green('  ✅ Removed node9 MCP server entry from ~/.claude.json'));
+      console.log(chalk.green('  ✅ Removed node9 MCP server entry from ~/.claude/.mcp.json'));
     }
 
     for (const [name, server] of Object.entries(claudeConfig.mcpServers)) {
-      if (server.command === 'node9' && Array.isArray(server.args) && server.args.length > 0) {
-        const [originalCmd, ...originalArgs] = server.args as string[];
+      const args = server.args as string[] | undefined;
+      if (
+        server.command === 'node9' &&
+        Array.isArray(args) &&
+        args[0] === 'mcp' &&
+        args[1] === '--upstream' &&
+        typeof args[2] === 'string'
+      ) {
+        const [originalCmd, ...originalArgs] = args[2].split(' ');
         claudeConfig.mcpServers[name] = {
           ...server,
           command: originalCmd,
@@ -188,18 +195,12 @@ export function teardownClaude(): void {
         };
         mcpChanged = true;
       } else if (server.command === 'node9') {
-        // args is empty or missing — cannot determine original command.
-        // Leave the entry intact and warn so the user can fix it manually.
-        console.warn(
-          chalk.yellow(
-            `  ⚠️  Cannot unwrap MCP server "${name}" in ~/.claude.json — args is empty. Remove it manually.`
-          )
-        );
+        // Not a wrapped entry (e.g. node9 mcp-server) — skip silently.
       }
     }
     if (mcpChanged) {
       writeJson(mcpPath, claudeConfig);
-      console.log(chalk.green('  ✅ Unwrapped MCP servers in ~/.claude.json'));
+      console.log(chalk.green('  ✅ Unwrapped MCP servers in ~/.claude/.mcp.json'));
     }
   }
 }
@@ -235,8 +236,15 @@ export function teardownGemini(): void {
     }
 
     for (const [name, server] of Object.entries(settings.mcpServers)) {
-      if (server.command === 'node9' && Array.isArray(server.args) && server.args.length > 0) {
-        const [originalCmd, ...originalArgs] = server.args as string[];
+      const args = server.args as string[] | undefined;
+      if (
+        server.command === 'node9' &&
+        Array.isArray(args) &&
+        args[0] === 'mcp' &&
+        args[1] === '--upstream' &&
+        typeof args[2] === 'string'
+      ) {
+        const [originalCmd, ...originalArgs] = args[2].split(' ');
         settings.mcpServers[name] = {
           ...server,
           command: originalCmd,
@@ -274,8 +282,15 @@ export function teardownCursor(): void {
   }
 
   for (const [name, server] of Object.entries(mcpConfig.mcpServers)) {
-    if (server.command === 'node9' && Array.isArray(server.args) && server.args.length > 0) {
-      const [originalCmd, ...originalArgs] = server.args as string[];
+    const args = server.args as string[] | undefined;
+    if (
+      server.command === 'node9' &&
+      Array.isArray(args) &&
+      args[0] === 'mcp' &&
+      args[1] === '--upstream' &&
+      typeof args[2] === 'string'
+    ) {
+      const [originalCmd, ...originalArgs] = args[2].split(' ');
       mcpConfig.mcpServers[name] = {
         ...server,
         command: originalCmd,
@@ -297,7 +312,7 @@ export function teardownCursor(): void {
 
 export async function setupClaude(): Promise<void> {
   const homeDir = os.homedir();
-  const mcpPath = path.join(homeDir, '.claude.json');
+  const mcpPath = path.join(homeDir, '.claude', '.mcp.json');
   const hooksPath = path.join(homeDir, '.claude', 'settings.json');
 
   const claudeConfig = readJson<ClaudeConfig>(mcpPath) ?? {};
@@ -317,7 +332,7 @@ export async function setupClaude(): Promise<void> {
     if (!settings.hooks.PreToolUse) settings.hooks.PreToolUse = [];
     settings.hooks.PreToolUse.push({
       matcher: '.*',
-      hooks: [{ type: 'command', command: fullPathCommand('check'), timeout: 60 }],
+      hooks: [{ type: 'command', command: fullPathCommand('check'), timeout: 600 }],
     });
     console.log(chalk.green('  ✅ PreToolUse hook added  → node9 check'));
     hooksChanged = true;
@@ -353,25 +368,29 @@ export async function setupClaude(): Promise<void> {
   }
 
   // ── Step 2: Modifications — show preview and ask ─────────────────────────
-  const serversToWrap: Array<{ name: string; originalCmd: string; parts: string[] }> = [];
+  const serversToWrap: Array<{ name: string; upstream: string }> = [];
   for (const [name, server] of Object.entries(servers)) {
     if (!server.command || server.command === 'node9') continue;
-    const parts = [server.command, ...(server.args ?? [])];
-    serversToWrap.push({ name, originalCmd: parts.join(' '), parts });
+    const upstream = [server.command, ...(server.args ?? [])].join(' ');
+    serversToWrap.push({ name, upstream });
   }
 
   if (serversToWrap.length > 0) {
     console.log(chalk.bold('The following existing entries will be modified:\n'));
     console.log(chalk.white(`  ${mcpPath}`));
-    for (const { name, originalCmd } of serversToWrap) {
-      console.log(chalk.gray(`    • ${name}: "${originalCmd}" → node9 ${originalCmd}`));
+    for (const { name, upstream } of serversToWrap) {
+      console.log(chalk.gray(`    • ${name}: "${upstream}" → node9 mcp --upstream "${upstream}"`));
     }
     console.log('');
 
     const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
     if (proceed) {
-      for (const { name, parts } of serversToWrap) {
-        servers[name] = { ...servers[name], command: 'node9', args: parts };
+      for (const { name, upstream } of serversToWrap) {
+        servers[name] = {
+          ...servers[name],
+          command: 'node9',
+          args: ['mcp', '--upstream', upstream],
+        };
       }
       claudeConfig.mcpServers = servers;
       writeJson(mcpPath, claudeConfig);
@@ -472,25 +491,29 @@ export async function setupGemini(): Promise<void> {
   }
 
   // ── Step 2: Modifications — show preview and ask ─────────────────────────
-  const serversToWrap: Array<{ name: string; originalCmd: string; parts: string[] }> = [];
+  const serversToWrap: Array<{ name: string; upstream: string }> = [];
   for (const [name, server] of Object.entries(servers)) {
     if (!server.command || server.command === 'node9') continue;
-    const parts = [server.command, ...(server.args ?? [])];
-    serversToWrap.push({ name, originalCmd: parts.join(' '), parts });
+    const upstream = [server.command, ...(server.args ?? [])].join(' ');
+    serversToWrap.push({ name, upstream });
   }
 
   if (serversToWrap.length > 0) {
     console.log(chalk.bold('The following existing entries will be modified:\n'));
     console.log(chalk.white(`  ${settingsPath}  (mcpServers)`));
-    for (const { name, originalCmd } of serversToWrap) {
-      console.log(chalk.gray(`    • ${name}: "${originalCmd}" → node9 ${originalCmd}`));
+    for (const { name, upstream } of serversToWrap) {
+      console.log(chalk.gray(`    • ${name}: "${upstream}" → node9 mcp --upstream "${upstream}"`));
     }
     console.log('');
 
     const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
     if (proceed) {
-      for (const { name, parts } of serversToWrap) {
-        servers[name] = { ...servers[name], command: 'node9', args: parts };
+      for (const { name, upstream } of serversToWrap) {
+        servers[name] = {
+          ...servers[name],
+          command: 'node9',
+          args: ['mcp', '--upstream', upstream],
+        };
       }
       settings.mcpServers = servers;
       writeJson(settingsPath, settings);
@@ -575,25 +598,29 @@ export async function setupCursor(): Promise<void> {
   }
 
   // ── Modifications — show preview and ask ─────────────────────────
-  const serversToWrap: Array<{ name: string; originalCmd: string; parts: string[] }> = [];
+  const serversToWrap: Array<{ name: string; upstream: string }> = [];
   for (const [name, server] of Object.entries(servers)) {
     if (!server.command || server.command === 'node9') continue;
-    const parts = [server.command, ...(server.args ?? [])];
-    serversToWrap.push({ name, originalCmd: parts.join(' '), parts });
+    const upstream = [server.command, ...(server.args ?? [])].join(' ');
+    serversToWrap.push({ name, upstream });
   }
 
   if (serversToWrap.length > 0) {
     console.log(chalk.bold('The following existing entries will be modified:\n'));
     console.log(chalk.white(`  ${mcpPath}`));
-    for (const { name, originalCmd } of serversToWrap) {
-      console.log(chalk.gray(`    • ${name}: "${originalCmd}" → node9 ${originalCmd}`));
+    for (const { name, upstream } of serversToWrap) {
+      console.log(chalk.gray(`    • ${name}: "${upstream}" → node9 mcp --upstream "${upstream}"`));
     }
     console.log('');
 
     const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
     if (proceed) {
-      for (const { name, parts } of serversToWrap) {
-        servers[name] = { ...servers[name], command: 'node9', args: parts };
+      for (const { name, upstream } of serversToWrap) {
+        servers[name] = {
+          ...servers[name],
+          command: 'node9',
+          args: ['mcp', '--upstream', upstream],
+        };
       }
       mcpConfig.mcpServers = servers;
       writeJson(mcpPath, mcpConfig);
@@ -677,25 +704,29 @@ export async function setupCodex(): Promise<void> {
   }
 
   // ── Modifications — show preview and ask ─────────────────────────
-  const serversToWrap: Array<{ name: string; originalCmd: string; parts: string[] }> = [];
+  const serversToWrap: Array<{ name: string; upstream: string }> = [];
   for (const [name, server] of Object.entries(servers)) {
     if (!server.command || server.command === 'node9') continue;
-    const parts = [server.command, ...(server.args ?? [])];
-    serversToWrap.push({ name, originalCmd: parts.join(' '), parts });
+    const upstream = [server.command, ...(server.args ?? [])].join(' ');
+    serversToWrap.push({ name, upstream });
   }
 
   if (serversToWrap.length > 0) {
     console.log(chalk.bold('The following existing entries will be modified:\n'));
     console.log(chalk.white(`  ${configPath}`));
-    for (const { name, originalCmd } of serversToWrap) {
-      console.log(chalk.gray(`    • ${name}: "${originalCmd}" → node9 ${originalCmd}`));
+    for (const { name, upstream } of serversToWrap) {
+      console.log(chalk.gray(`    • ${name}: "${upstream}" → node9 mcp --upstream "${upstream}"`));
     }
     console.log('');
 
     const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
     if (proceed) {
-      for (const { name, parts } of serversToWrap) {
-        servers[name] = { ...servers[name], command: 'node9', args: parts };
+      for (const { name, upstream } of serversToWrap) {
+        servers[name] = {
+          ...servers[name],
+          command: 'node9',
+          args: ['mcp', '--upstream', upstream],
+        };
       }
       config.mcp_servers = servers;
       writeToml(configPath, config);
@@ -753,8 +784,15 @@ export function teardownCodex(): void {
   }
 
   for (const [name, server] of Object.entries(config.mcp_servers)) {
-    if (server.command === 'node9' && Array.isArray(server.args) && server.args.length > 0) {
-      const [originalCmd, ...originalArgs] = server.args as string[];
+    const args = server.args as string[] | undefined;
+    if (
+      server.command === 'node9' &&
+      Array.isArray(args) &&
+      args[0] === 'mcp' &&
+      args[1] === '--upstream' &&
+      typeof args[2] === 'string'
+    ) {
+      const [originalCmd, ...originalArgs] = args[2].split(' ');
       config.mcp_servers[name] = {
         ...server,
         command: originalCmd,
