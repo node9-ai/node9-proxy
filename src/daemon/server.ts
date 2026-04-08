@@ -210,6 +210,7 @@ export function startDaemon(): void {
           fromCLI = false,
           activityId,
           cwd,
+          localSmartRuleMatched = false,
         } = JSON.parse(body);
         // When fromCLI is true the CLI already sent an 'activity' event with
         // activityId via the Unix socket. Reuse that ID so the daemon's
@@ -311,7 +312,7 @@ export function startDaemon(): void {
             agent: typeof agent === 'string' ? agent : undefined,
             mcpServer: typeof mcpServer === 'string' ? mcpServer : undefined,
           },
-          { calledFromDaemon: true }
+          { calledFromDaemon: true, localSmartRuleMatched: !!localSmartRuleMatched }
         )
           .then((result) => {
             const e = pending.get(id);

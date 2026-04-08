@@ -168,7 +168,8 @@ export function registerCheckCommand(program: Command): void {
                 },
               }) + '\n'
             );
-            process.exit(0);
+            // Exit code 2 signals a block to Claude Code. Exit 0 = allow, non-zero = block.
+            process.exit(2);
           };
           if (!toolName) {
             sendBlock('Node9: unrecognised hook payload — tool name missing.');

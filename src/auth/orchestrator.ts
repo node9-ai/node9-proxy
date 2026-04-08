@@ -148,7 +148,7 @@ export async function authorizeHeadless(
   toolName: string,
   args: unknown,
   meta?: { agent?: string; mcpServer?: string },
-  options?: { calledFromDaemon?: boolean; cwd?: string }
+  options?: { calledFromDaemon?: boolean; cwd?: string; localSmartRuleMatched?: boolean }
 ): Promise<AuthResult> {
   // Skip socket notification when called from daemon — daemon already broadcasts via SSE
   if (!options?.calledFromDaemon) {
@@ -195,7 +195,12 @@ async function _authorizeHeadlessCore(
   toolName: string,
   args: unknown,
   meta?: { agent?: string; mcpServer?: string },
-  options?: { calledFromDaemon?: boolean; activityId?: string; cwd?: string }
+  options?: {
+    calledFromDaemon?: boolean;
+    activityId?: string;
+    cwd?: string;
+    localSmartRuleMatched?: boolean;
+  }
 ): Promise<AuthResult> {
   if (process.env.NODE9_PAUSED === '1') return { approved: true, checkedBy: 'paused' };
   const pauseState = checkPause();
@@ -241,6 +246,9 @@ async function _authorizeHeadlessCore(
   // Set when a stateful block's predicates are NOT met and we fall through to the
   // race engine — passed to registerDaemonEntry so the tail shows the recovery menu.
   let statefulRecoveryCommand: string | undefined;
+  // Set when a local smart rule with verdict "review" matched — prevents cloud's
+  // immediate-allow from bypassing the human approval card.
+  let localSmartRuleMatched = false;
 
   // ── TAINT CHECK ───────────────────────────────────────────────────────────
   // Before DLP: if this is a network/upload operation touching a previously
@@ -450,6 +458,7 @@ async function _authorizeHeadlessCore(
     explainableLabel = policyResult.blockedByLabel || 'Local Config';
     policyMatchedField = policyResult.matchedField;
     policyMatchedWord = policyResult.matchedWord;
+    if (policyResult.ruleName) localSmartRuleMatched = true;
     riskMetadata = computeRiskMetadata(
       args,
       policyResult.tier ?? 6,
@@ -507,7 +516,9 @@ async function _authorizeHeadlessCore(
   let cloudRequestId: string | null = null;
   const cloudEnforced = approvers.cloud && !!creds?.apiKey;
 
-  if (cloudEnforced) {
+  // When a local smart rule requires human review, skip cloud entirely so it
+  // cannot auto-resolve the request before a human sees the approval card.
+  if (cloudEnforced && !localSmartRuleMatched && !options?.localSmartRuleMatched) {
     try {
       const initResult = await initNode9SaaS(toolName, args, creds!, meta, riskMetadata);
 
@@ -516,18 +527,30 @@ async function _authorizeHeadlessCore(
         if (initResult.shadowMode) {
           return { approved: true, checkedBy: 'cloud' };
         }
-        return {
-          approved: !!initResult.approved,
-          reason:
-            initResult.reason ||
-            (initResult.approved ? undefined : 'Action rejected by organization policy.'),
-          checkedBy: initResult.approved ? 'cloud' : undefined,
-          blockedBy: initResult.approved ? undefined : 'team-policy',
-          blockedByLabel: 'Organization Policy (SaaS)',
-        };
+        // A local smart rule with verdict "review" represents explicit user intent
+        // (e.g. require-approval-before-push). Cloud's immediate-allow must not
+        // bypass it — fall through to the race engine so the user sees an approval card.
+        // Also respect the flag when called from the daemon's background auth pass.
+        if (!localSmartRuleMatched && !options?.localSmartRuleMatched) {
+          return {
+            approved: !!initResult.approved,
+            reason:
+              initResult.reason ||
+              (initResult.approved ? undefined : 'Action rejected by organization policy.'),
+            checkedBy: initResult.approved ? 'cloud' : undefined,
+            blockedBy: initResult.approved ? undefined : 'team-policy',
+            blockedByLabel: 'Organization Policy (SaaS)',
+          };
+        }
+        // Smart rule active — fall through to race engine; cloud still joins as a racer
+        // via cloudRequestId if the SaaS returned a pending request.
       }
 
-      cloudRequestId = initResult.requestId || null;
+      // When a local smart rule requires human review, don't let cloud be a racer —
+      // the user must approve via tail/browser/native, not via SaaS auto-resolve.
+      if (!localSmartRuleMatched && !options?.localSmartRuleMatched) {
+        cloudRequestId = initResult.requestId || null;
+      }
       // remoteApprovalOnly is noted but not enforced — local UI always has control.
       // Hard blocks are handled by Shields before the UI opens.
       // Don't overwrite the taint label — taint context must stay visible to the user.
@@ -594,7 +617,10 @@ async function _authorizeHeadlessCore(
           riskMetadata,
           options?.activityId,
           options?.cwd,
-          statefulRecoveryCommand
+          statefulRecoveryCommand,
+          undefined,
+          undefined,
+          localSmartRuleMatched || options?.localSmartRuleMatched
         );
         daemonEntryId = entry.id;
         daemonAllowCount = entry.allowCount;
@@ -605,7 +631,14 @@ async function _authorizeHeadlessCore(
   }
 
   // 🏁 RACER 1: Cloud SaaS Channel (The Poller)
-  if (cloudEnforced && cloudRequestId) {
+  // Skip cloud polling when a local smart rule requires human approval — cloud
+  // must not auto-resolve entries that the user explicitly wants to review locally.
+  if (
+    cloudEnforced &&
+    cloudRequestId &&
+    !localSmartRuleMatched &&
+    !options?.localSmartRuleMatched
+  ) {
     racePromises.push(
       (async () => {
         try {
@@ -633,6 +666,10 @@ async function _authorizeHeadlessCore(
   // Skip when called from the daemon's background pipeline — the CLI already
   // launched this popup as part of its own race; firing it a second time from
   // the daemon would show a duplicate popup for the same request.
+  // Note: localSmartRuleMatched does NOT skip the native popup — zenity requires
+  // explicit user click (approve/deny), it never auto-resolves. Cloud is skipped
+  // when localSmartRuleMatched to prevent SaaS auto-allow from bypassing human review,
+  // but the native popup is a valid human approval channel even for smart rule matches.
   if (approvers.native && !isManual && !options?.calledFromDaemon) {
     racePromises.push(
       (async () => {

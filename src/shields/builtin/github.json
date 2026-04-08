@@ -1,0 +1,26 @@
+{
+  "name": "github",
+  "description": "Protects GitHub repositories from destructive AI operations",
+  "aliases": ["git"],
+  "smartRules": [
+    {
+      "name": "shield:github:review-delete-branch-remote",
+      "tool": "bash",
+      "conditions": [
+        { "field": "command", "op": "matches", "value": "git\\s+push\\s+.*--delete", "flags": "i" }
+      ],
+      "verdict": "review",
+      "reason": "Remote branch deletion requires human approval (GitHub shield)"
+    },
+    {
+      "name": "shield:github:block-delete-repo",
+      "tool": "*",
+      "conditions": [
+        { "field": "command", "op": "matches", "value": "gh\\s+repo\\s+delete", "flags": "i" }
+      ],
+      "verdict": "block",
+      "reason": "Repository deletion is irreversible — blocked by GitHub shield"
+    }
+  ],
+  "dangerousWords": []
+}

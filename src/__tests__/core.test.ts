@@ -1893,7 +1893,8 @@ describe('resolveNode9SaaS — decidedBy field when local racer wins', () => {
     // Arrange: enable cloud + native only (no browser/terminal = no daemon needed).
     // mode:'standard' required — DEFAULT_CONFIG.settings.mode is 'audit', which
     // would return {checkedBy:'audit'} before reaching the race engine.
-    // Use a 'review'-verdict command (git push, not --force which is 'block').
+    // Use a 'review'-verdict command that does NOT trigger a smart rule — smart rules
+    // set localSmartRuleMatched=true which skips the native racer (by design).
     mockGlobalConfig({
       settings: {
         mode: 'standard',
@@ -1950,8 +1951,10 @@ describe('resolveNode9SaaS — decidedBy field when local racer wins', () => {
       })
     );
 
-    // 'git push origin main' triggers review-git-push (verdict:'review', not 'block')
-    const result = await authorizeHeadless('bash', { command: 'git push origin main' });
+    // Use inline-exec to get a 'review' verdict without triggering a smart rule
+    // (smart rules set localSmartRuleMatched=true which skips the native racer).
+    // 'bash -c ...' matches the INLINE_EXEC_PATTERN and returns review without a ruleName.
+    const result = await authorizeHeadless('bash', { command: 'bash -c "echo hello"' });
 
     // Assert: native won
     expect(result.approved).toBe(true);

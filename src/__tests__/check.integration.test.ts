@@ -317,7 +317,7 @@ describe('smart rules', () => {
       { HOME: tmpHome },
       tmpHome
     );
-    expect(r.status).toBe(0); // CLI always exits 0; block is communicated via stdout JSON
+    expect(r.status).toBe(2); // exit 2 signals a block to Claude Code; exit 0 = allow
     const parsed = JSON.parse(r.stdout.trim());
     expect(parsed.decision).toBe('block');
     expect(r.stderr).toBe(''); // ← no stderr: prevents Claude Code fail-open on hook error
@@ -376,7 +376,7 @@ describe('dangerous words', () => {
       { HOME: tmpHome },
       tmpHome
     );
-    expect(r.status).toBe(0);
+    expect(r.status).toBe(2); // exit 2 signals a block to Claude Code
     const parsed = JSON.parse(r.stdout.trim());
     expect(parsed.decision).toBe('block');
     expect(r.stderr).toBe(''); // block message goes to /dev/tty, not stderr
@@ -423,7 +423,7 @@ describe('no approval mechanism', () => {
       { HOME: tmpHome },
       tmpHome
     );
-    expect(r.status).toBe(0);
+    expect(r.status).toBe(2); // exit 2 signals a block to Claude Code
     const parsed = JSON.parse(r.stdout.trim());
     expect(parsed.decision).toBe('block');
   });
@@ -768,7 +768,7 @@ describe('cloud race engine', () => {
       tmpHome,
       10000
     );
-    expect(r.status).toBe(0);
+    expect(r.status).toBe(2); // exit 2 signals a block to Claude Code
     const denied = JSON.parse(r.stdout.trim());
     expect(denied.decision).toBe('block');
   }, 15000);

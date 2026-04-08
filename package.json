@@ -48,7 +48,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && node scripts/copy-shield-assets.js",
     "dev": "tsup --watch",
     "demo": "tsx examples/demo.ts",
     "typecheck": "tsc --noEmit",

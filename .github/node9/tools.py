@@ -1,80 +1,165 @@
-import subprocess
+"""
+Governed tools for the CI code review agent.
+
+@protect wraps every agent-facing tool — each call is audited via node9.
+Git plumbing (_run_unprotected) is intentionally excluded from audit.
+DLP scanning and path safety run before anything touches disk.
+"""
 import os
-import sys
+import re
+import subprocess
 
-# Prefer the bundled node9 SDK over whatever pip installed — may be newer.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from node9 import protect, dlp_scan, safe_path
 
-from node9 import protect, dlp_scan, safe_path  # type: ignore[import]
-
-# In CI, GITHUB_WORKSPACE is the repo root; fall back to local "workspace/" for dev
 WORKSPACE_DIR = os.environ.get("GITHUB_WORKSPACE") or os.path.abspath("workspace")
 
+# Files that add noise but no signal to a code review.
+_SKIP_DIFF_RE = re.compile(
+    r"diff --git a/(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|.*\.lock"
+    r"|.*migrations/.*|.*\.generated\.\w+|dist/|build/|.*\.min\.(js|css)|.*\.snap"
+    r"|\.github/node9/|\.github/workflows/)",
+    re.IGNORECASE,
+)
+
 
 # ---------------------------------------------------------------------------
-# Tools
+# Governed tools — every call audited via node9
 # ---------------------------------------------------------------------------
-
 
 @protect("bash")
 def run_bash(command: str) -> str:
-    """Executes a bash command in the workspace. Audit-logged."""
+    """Run a bash command in the workspace and return output."""
     try:
         result = subprocess.check_output(
             ["bash", "-c", command],
             stderr=subprocess.STDOUT,
             cwd=WORKSPACE_DIR,
+            timeout=300,
         )
-        return result.decode()
+        return result.decode(errors="replace")
     except subprocess.CalledProcessError as e:
-        return f"Error: {e.output.decode()}"
+        return f"exit {e.returncode}:\n{e.output.decode(errors='replace')}"
+    except subprocess.TimeoutExpired:
+        return "Error: command timed out after 300s"
 
 
+@protect("write_code")
 def write_code(filename: str, content: str) -> str:
-    """Writes a file after DLP scanning. Audit-logged."""
+    """Write content to a file after DLP scanning."""
     hit = dlp_scan(filename, content)
     if hit:
-        print(f"  🚨 DLP BLOCK: {hit}", flush=True)
         return f"BLOCKED by DLP: {hit}. Do not write secrets to files."
-
-    _write_code_governed(filename, content)
-    return f"Successfully updated {filename}"
-
-
-@protect("filesystem")
-def _write_code_governed(filename: str, content: str) -> None:
     path = safe_path(filename, workspace=WORKSPACE_DIR)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         f.write(content)
+    return f"Written {filename} ({len(content)} bytes)"
 
 
+@protect("read_code")
 def read_code(filename: str) -> str:
-    """Reads a file or lists a directory for the agent to analyze."""
+    """Read a file or list a directory in the workspace."""
     path = safe_path(filename, workspace=WORKSPACE_DIR)
     if not os.path.exists(path):
-        return "Error: File not found."
+        return f"Error: {filename} not found"
     if os.path.isdir(path):
-        try:
-            entries = sorted(os.listdir(path))
-            lines = [f"Directory listing for {filename}/:"]
-            for entry in entries:
-                suffix = "/" if os.path.isdir(os.path.join(path, entry)) else ""
-                lines.append(f"  {entry}{suffix}")
-            return "\n".join(lines)
-        except Exception as e:
-            return f"Error listing directory: {e}"
-    with open(path, "r") as f:
-        return f.read()
+        entries = sorted(os.listdir(path))
+        lines = [f"Directory: {filename}/"]
+        for e in entries:
+            suffix = "/" if os.path.isdir(os.path.join(path, e)) else ""
+            lines.append(f"  {e}{suffix}")
+        return "\n".join(lines)
+    with open(path, "r", errors="replace") as f:
+        content = f.read()
+    # Cap large files — model doesn't need the full 50k line file
+    if len(content) > 20_000:
+        content = content[:20_000] + f"\n\n... [truncated at 20k chars] ..."
+    return content
 
+
+# ---------------------------------------------------------------------------
+# Internal helpers — git plumbing, not agent decisions
+# ---------------------------------------------------------------------------
 
 def _run_unprotected(command: str) -> str:
-    """Run a git/infra command without audit logging. Use sparingly — only for agent scaffolding."""
+    """Run a git/shell command without audit logging."""
     try:
         result = subprocess.check_output(
             ["bash", "-c", command],
             stderr=subprocess.STDOUT,
             cwd=WORKSPACE_DIR,
         )
-        return result.decode()
+        return result.decode(errors="replace")
     except subprocess.CalledProcessError as e:
-        return f"Error: {e.output.decode()}"
+        return f"Error: {e.output.decode(errors='replace')}"
+
+
+def get_diff(base_branch: str) -> str:
+    """Get filtered diff from base branch to HEAD."""
+    raw = _run_unprotected(f"git diff origin/{base_branch}...HEAD")
+    return _filter_diff(raw)
+
+
+def _filter_diff(raw_diff: str) -> str:
+    sections = re.split(r"(?=^diff --git )", raw_diff, flags=re.MULTILINE)
+    kept = []
+    for section in sections:
+        if not section.startswith("diff --git"):
+            kept.append(section)
+            continue
+        if _SKIP_DIFF_RE.search(section.splitlines()[0]):
+            continue
+        kept.append(section)
+    return "".join(kept)
+
+
+# ---------------------------------------------------------------------------
+# Tool specs — passed to Claude in the fix loop
+# ---------------------------------------------------------------------------
+
+TOOL_SPECS = [
+    {
+        "name": "read_code",
+        "description": "Read a file or list a directory in the workspace.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string", "description": "Relative path to read"},
+            },
+            "required": ["filename"],
+        },
+    },
+    {
+        "name": "write_code",
+        "description": "Write content to a file. Blocked if content contains secrets.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string", "description": "Relative path to write"},
+                "content": {"type": "string", "description": "File content"},
+            },
+            "required": ["filename", "content"],
+        },
+    },
+    {
+        "name": "run_bash",
+        "description": "Run a bash command in the workspace (use for tests only).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "Command to run"},
+            },
+            "required": ["command"],
+        },
+    },
+]
+
+
+def dispatch(tool_name: str, tool_input: dict) -> str:
+    if tool_name == "read_code":
+        return read_code(**tool_input)
+    if tool_name == "write_code":
+        return write_code(**tool_input)
+    if tool_name == "run_bash":
+        return run_bash(**tool_input)
+    return f"Unknown tool: {tool_name}"

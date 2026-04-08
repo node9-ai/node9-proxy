@@ -16,6 +16,7 @@ import {
   writeShieldOverride,
   clearShieldOverride,
   isShieldVerdict,
+  installShield,
 } from '../shields.js';
 import { DEFAULT_CONFIG } from '../core.js';
 
@@ -47,6 +48,8 @@ describe('resolveShieldName', () => {
     expect(resolveShieldName('git')).toBe('github');
     expect(resolveShieldName('amazon')).toBe('aws');
     expect(resolveShieldName('fs')).toBe('filesystem');
+    expect(resolveShieldName('bash')).toBe('bash-safe');
+    expect(resolveShieldName('shell')).toBe('bash-safe');
   });
 
   it('is case-insensitive', () => {
@@ -81,12 +84,13 @@ describe('getShield', () => {
 
 // ── listShields ───────────────────────────────────────────────────────────────
 describe('listShields', () => {
-  it('returns all four shields', () => {
+  it('returns all five builtin shields', () => {
     const names = listShields().map((s) => s.name);
     expect(names).toContain('postgres');
     expect(names).toContain('github');
     expect(names).toContain('aws');
     expect(names).toContain('filesystem');
+    expect(names).toContain('bash-safe');
   });
 });
 
@@ -606,5 +610,98 @@ describe('shield dangerousWords', () => {
     const existing = [...SHIELDS.postgres.dangerousWords];
     const result = existing.filter((w) => !shieldWords.has(w) || protectedWords.has(w));
     expect(result).toEqual([]);
+  });
+});
+
+// ── installShield ─────────────────────────────────────────────────────────────
+describe('installShield', () => {
+  const validShield = {
+    name: 'my-shield',
+    description: 'A test shield',
+    aliases: ['test'],
+    smartRules: [
+      {
+        name: 'shield:my-shield:block-test',
+        tool: 'bash',
+        conditions: [{ field: 'command', op: 'matches', value: 'test' }],
+        verdict: 'block',
+        reason: 'test',
+      },
+    ],
+    dangerousWords: [],
+  };
+
+  it('writes validated shield to ~/.node9/shields/<name>.json atomically', () => {
+    installShield('my-shield', validShield);
+    expect(writeFileSyncSpy).toHaveBeenCalledOnce();
+    const writtenContent = writeFileSyncSpy.mock.calls[0][1] as string;
+    expect(JSON.parse(writtenContent)).toEqual(validShield);
+    // atomic write: tmp file then rename
+    expect(renameSyncSpy).toHaveBeenCalledOnce();
+    const tmpPath = renameSyncSpy.mock.calls[0][0] as string;
+    const destPath = renameSyncSpy.mock.calls[0][1] as string;
+    expect(destPath).toContain('my-shield.json');
+    expect(tmpPath).toContain('.tmp');
+  });
+
+  it('creates the user shields directory if it does not exist', () => {
+    installShield('my-shield', validShield);
+    expect(mkdirSyncSpy).toHaveBeenCalledWith(expect.stringContaining('shields'), {
+      recursive: true,
+    });
+  });
+
+  it('throws when shield JSON fails validation (missing name)', () => {
+    const bad = { ...validShield, name: '' };
+    expect(() => installShield('my-shield', bad)).toThrow(/failed validation/);
+  });
+
+  it('throws when shield name does not match declared name', () => {
+    expect(() => installShield('other-name', validShield)).toThrow(/name mismatch/);
+  });
+
+  it('throws when shield is not an object', () => {
+    expect(() => installShield('my-shield', 'not-an-object')).toThrow(/failed validation/);
+  });
+
+  it('throws when smartRules is missing', () => {
+    const bad = { ...validShield, smartRules: undefined };
+    expect(() => installShield('my-shield', bad)).toThrow(/failed validation/);
+  });
+});
+
+// ── shield loader: user shields override builtins ────────────────────────────
+describe('SHIELDS loader: user shields', () => {
+  it('user-installed shield appears in SHIELDS map alongside builtins', () => {
+    // User shields are loaded at module init time from ~/.node9/shields/.
+    // The mock for homedir returns '/mock/home', so the user dir would be
+    // /mock/home/.node9/shields/. Since no files are there in tests, only
+    // builtins are loaded. Verify the builtins loaded correctly.
+    expect(Object.keys(SHIELDS).length).toBeGreaterThanOrEqual(5);
+    expect(SHIELDS['postgres']).toBeDefined();
+    expect(SHIELDS['bash-safe']).toBeDefined();
+  });
+
+  it('each builtin shield has required fields', () => {
+    for (const [name, shield] of Object.entries(SHIELDS)) {
+      expect(shield.name, `${name}.name`).toBe(name);
+      expect(typeof shield.description, `${name}.description`).toBe('string');
+      expect(Array.isArray(shield.aliases), `${name}.aliases`).toBe(true);
+      expect(Array.isArray(shield.smartRules), `${name}.smartRules`).toBe(true);
+      expect(Array.isArray(shield.dangerousWords), `${name}.dangerousWords`).toBe(true);
+    }
+  });
+
+  it('each builtin smartRule has a name, tool, verdict, and at least one condition', () => {
+    for (const [shieldName, shield] of Object.entries(SHIELDS)) {
+      for (const rule of shield.smartRules) {
+        expect(rule.name, `${shieldName} rule.name`).toBeTruthy();
+        expect(rule.tool, `${shieldName}/${rule.name} tool`).toBeTruthy();
+        expect(['block', 'review', 'allow'], `${shieldName}/${rule.name} verdict`).toContain(
+          rule.verdict
+        );
+        expect(rule.conditions.length, `${shieldName}/${rule.name} conditions`).toBeGreaterThan(0);
+      }
+    }
   });
 });

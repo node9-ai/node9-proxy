@@ -1,0 +1,42 @@
+{
+  "name": "postgres",
+  "description": "Protects PostgreSQL databases from destructive AI operations",
+  "aliases": ["pg", "postgresql"],
+  "smartRules": [
+    {
+      "name": "shield:postgres:block-drop-table",
+      "tool": "*",
+      "conditions": [{ "field": "sql", "op": "matches", "value": "DROP\\s+TABLE", "flags": "i" }],
+      "verdict": "block",
+      "reason": "DROP TABLE is irreversible — blocked by Postgres shield"
+    },
+    {
+      "name": "shield:postgres:block-truncate",
+      "tool": "*",
+      "conditions": [
+        { "field": "sql", "op": "matches", "value": "TRUNCATE\\s+TABLE", "flags": "i" }
+      ],
+      "verdict": "block",
+      "reason": "TRUNCATE is irreversible — blocked by Postgres shield"
+    },
+    {
+      "name": "shield:postgres:block-drop-column",
+      "tool": "*",
+      "conditions": [
+        { "field": "sql", "op": "matches", "value": "ALTER\\s+TABLE.*DROP\\s+COLUMN", "flags": "i" }
+      ],
+      "verdict": "block",
+      "reason": "DROP COLUMN is irreversible — blocked by Postgres shield"
+    },
+    {
+      "name": "shield:postgres:review-grant-revoke",
+      "tool": "*",
+      "conditions": [
+        { "field": "sql", "op": "matches", "value": "\\b(GRANT|REVOKE)\\b", "flags": "i" }
+      ],
+      "verdict": "review",
+      "reason": "Permission changes require human approval (Postgres shield)"
+    }
+  ],
+  "dangerousWords": ["dropdb", "pg_dropcluster"]
+}

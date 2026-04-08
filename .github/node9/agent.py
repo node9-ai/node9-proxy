@@ -1,56 +1,72 @@
+"""
+CI Code Review Agent — governed by node9.
+
+Pipeline:
+  1. Fix loop    — read diff, fix bugs, run tests (max 6 turns, token-capped)
+  2. Safety check — revert AI changes if tests break
+  3. Code review  — one-shot review of agent's own diff, posted as PR comment
+
+Token discipline:
+  - Diff filtered (no lock files / generated files) and chunked to 8k chars
+  - Test output reduced to failures + summary line only (~500 chars)
+  - Tool results truncated to 4k chars
+  - Fix loop uses rolling prompt cache to avoid re-sending growing history
+  - Code review input capped at 4k chars
+
+Environment variables:
+  ANTHROPIC_API_KEY   — Anthropic API key
+  NODE9_API_KEY       — node9 SaaS key (audit trail)
+  GITHUB_TOKEN        — injected by GitHub Actions
+  GITHUB_REPOSITORY   — e.g. "org/repo"
+  GITHUB_HEAD_REF     — branch being reviewed
+  GITHUB_BASE_REF     — base branch (default: main)
+  NODE9_TEST_CMD      — test command (default: npm test)
+"""
 import json
 import os
 import re
 import subprocess
-import urllib.request
-import urllib.error
+import sys
 import time
+import urllib.error
+import urllib.request
 
 import anthropic
 from dotenv import load_dotenv
+from node9 import configure
+
+load_dotenv()
 
 import tools
 
-load_dotenv()
-_api_key = os.getenv("ANTHROPIC_API_KEY")
-if not _api_key:
-    raise RuntimeError("ANTHROPIC_API_KEY is not set — cannot start agent")
-client = anthropic.Anthropic(api_key=_api_key)
+# ---------------------------------------------------------------------------
+# Identity
+# ---------------------------------------------------------------------------
+configure(agent_name="ci-code-review", policy="audit")
 
-CI_CONTEXT_PATH = os.path.expanduser("~/.node9/ci-context.json")
+MODEL        = "claude-sonnet-4-6"
+MAX_FIX_TURNS = 6
+
+BASE_BRANCH  = os.environ.get("GITHUB_BASE_REF") or "main"
+REPO         = os.environ.get("GITHUB_REPOSITORY", "")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+TEST_CMD     = os.environ.get("NODE9_TEST_CMD", "npm test")
+
+client = anthropic.Anthropic()
+
 
 # ---------------------------------------------------------------------------
 # Diff helpers
 # ---------------------------------------------------------------------------
 
-_SKIP_DIFF_RE = re.compile(
-    r"diff --git a/(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|.*\.lock"
-    r"|.*migrations/.*|.*\.generated\.\w|dist/|build/|.*\.min\.(js|css)|.*\.snap"
-    r"|\.github/node9/|\.github/workflows/)",
-    re.IGNORECASE,
-)
-
-
-def _filter_diff(raw_diff: str) -> str:
-    sections = re.split(r"(?=^diff --git )", raw_diff, flags=re.MULTILINE)
-    kept = []
-    for section in sections:
-        if not section.startswith("diff --git"):
-            kept.append(section)
-            continue
-        if _SKIP_DIFF_RE.search(section.splitlines()[0]):
-            continue
-        kept.append(section)
-    return "".join(kept)
-
-
 def _chunk_diff(diff: str, max_chars: int = 8000) -> str:
+    """Truncate diff to max_chars, dropping whole file sections and noting omissions."""
     if len(diff) <= max_chars:
         return diff
     sections = re.split(r"(?=^diff --git )", diff, flags=re.MULTILINE)
     kept: list[str] = []
-    total = 0
     skipped: list[str] = []
+    total = 0
     for section in sections:
         if not section.startswith("diff --git"):
             kept.append(section)
@@ -67,15 +83,8 @@ def _chunk_diff(diff: str, max_chars: int = 8000) -> str:
     return result
 
 
-def _count_diff_lines(diff: str) -> int:
-    return sum(
-        1 for line in diff.splitlines()
-        if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
-    )
-
-
-def _diff_file_list(diff: str) -> list:
-    files = []
+def _diff_file_list(diff: str) -> list[str]:
+    files: list[str] = []
     for line in diff.splitlines():
         m = re.match(r"diff --git a/(\S+)", line)
         if m and m.group(1) not in files:
@@ -83,59 +92,78 @@ def _diff_file_list(diff: str) -> list:
     return files
 
 
+def _count_diff_lines(diff: str) -> int:
+    return sum(
+        1 for line in diff.splitlines()
+        if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
+    )
+
+
 # ---------------------------------------------------------------------------
 # Test output helpers
 # ---------------------------------------------------------------------------
 
+def _run_tests(cmd: str) -> tuple[str, int]:
+    """Run tests and return (output, exit_code)."""
+    proc = subprocess.run(
+        cmd, shell=True, capture_output=True, text=True, cwd=tools.WORKSPACE_DIR
+    )
+    return proc.stdout + "\n" + proc.stderr, proc.returncode
+
+
+def _extract_test_summary(raw: str, max_chars: int = 500) -> str:
+    """Extract only failure blocks + summary line. Keeps token count tiny."""
+    if len(raw) <= max_chars:
+        return raw
+    lines = raw.splitlines()
+    # Summary line (e.g. "Tests: 3 failed, 452 passed")
+    summary = [l for l in lines if re.search(r"\d+.*(passed|failed|total)", l)]
+    # Failure blocks
+    failures: list[str] = []
+    in_fail = False
+    for line in lines:
+        if re.search(r"(^●\s|^FAIL\s|^FAILED\s|✕|✗|Error:)", line):
+            in_fail = True
+        if in_fail:
+            if not line.strip():
+                in_fail = False
+            else:
+                failures.append(line)
+                if len("\n".join(failures)) > max_chars - 100:
+                    failures.append("... [truncated]")
+                    break
+    combined = "\n".join(failures + [""] + summary)
+    return combined[:max_chars]
+
+
 def _parse_test_counts(output: str) -> tuple[int, int]:
-    lines = output.splitlines()
-    for line in reversed(lines):
+    for line in reversed(output.splitlines()):
         if "Tests" in line and ("passed" in line or "failed" in line):
-            m_p = re.search(r"(\d+)\s+passed", line)
-            m_f = re.search(r"(\d+)\s+failed", line)
-            passed = int(m_p.group(1)) if m_p else 0
-            failed = int(m_f.group(1)) if m_f else 0
+            passed = int(m.group(1)) if (m := re.search(r"(\d+)\s+passed", line)) else 0
+            failed = int(m.group(1)) if (m := re.search(r"(\d+)\s+failed", line)) else 0
             return passed, passed + failed
     return 0, 0
 
 
-def _extract_test_summary(raw: str, max_chars: int = 2000) -> str:
-    if len(raw) <= max_chars:
-        return raw
-    lines = raw.splitlines()
-    summary_lines = [l for l in lines if re.search(r"\d+.*(passed|failed|total)", l)]
-    failure_lines: list[str] = []
-    in_failure = False
-    for line in lines:
-        if re.search(r"(^●\s|^FAIL\s|^FAILED\s|✕|✗|Error:)", line):
-            in_failure = True
-        if in_failure:
-            if not line.strip():
-                in_failure = False
-            else:
-                failure_lines.append(line)
-                if len("\n".join(failure_lines)) > max_chars - 300:
-                    failure_lines.append("... [truncated]")
-                    break
-    if failure_lines or summary_lines:
-        combined = "\n".join(failure_lines) + "\n\n" + "\n".join(summary_lines)
-        return combined[:max_chars]
-    half = max_chars // 2
-    return raw[:half] + f"\n\n... [truncated] ...\n\n" + raw[-half:]
-
-
 # ---------------------------------------------------------------------------
-# Helpers
+# API helpers
 # ---------------------------------------------------------------------------
 
-def _truncate_output(text: str, max_chars: int = 4000) -> str:
-    if len(text) <= max_chars:
-        return text
-    half = max_chars // 2
-    return text[:half] + f"\n\n... [truncated] ...\n\n" + text[-half:]
+def _create_with_retry(client: anthropic.Anthropic, **kwargs) -> anthropic.types.Message:
+    for attempt in range(5):
+        try:
+            return client.messages.create(**kwargs)
+        except (anthropic.RateLimitError, anthropic.APIStatusError) as e:
+            if isinstance(e, anthropic.APIStatusError) and e.status_code != 529:
+                raise
+            wait = 30 * (2 ** attempt)
+            print(f"  ⏳ Rate limited — retrying in {wait}s (attempt {attempt+1}/5)...", flush=True)
+            time.sleep(wait)
+    return client.messages.create(**kwargs)
 
 
 def _apply_rolling_cache(messages: list) -> None:
+    """Mark only the most recent user message for caching (rolling window)."""
     for msg in messages:
         if msg["role"] == "user" and isinstance(msg["content"], list):
             for block in msg["content"]:
@@ -149,22 +177,18 @@ def _apply_rolling_cache(messages: list) -> None:
                     return
 
 
-def _create_with_retry(client, **kwargs):
-    for attempt in range(5):
-        try:
-            return client.messages.create(**kwargs)
-        except (anthropic.RateLimitError, anthropic.APIStatusError) as e:
-            if isinstance(e, anthropic.APIStatusError) and e.status_code != 529:
-                raise
-            wait = 30 * (2 ** attempt)
-            print(f"  ⏳ API overloaded/rate-limited — waiting {wait}s (attempt {attempt+1}/5)...", flush=True)
-            time.sleep(wait)
-    return client.messages.create(**kwargs)
+def _truncate(text: str, n: int = 4000) -> str:
+    if len(text) <= n:
+        return text
+    half = n // 2
+    return text[:half] + f"\n\n... [truncated] ...\n\n" + text[-half:]
 
+
+# ---------------------------------------------------------------------------
+# GitHub helpers
+# ---------------------------------------------------------------------------
 
 def _resolve_branch() -> str:
-    # GITHUB_HEAD_REF is only set for pull_request events.
-    # For push events, extract the branch from GITHUB_REF (refs/heads/<branch>).
     ref = os.environ.get("GITHUB_HEAD_REF") or ""
     if not ref:
         ref = os.environ.get("GITHUB_REF", "refs/heads/dev")
@@ -172,313 +196,280 @@ def _resolve_branch() -> str:
     return ref or "dev"
 
 
-# ---------------------------------------------------------------------------
-# GitHub API helpers
-# ---------------------------------------------------------------------------
-
-def _github_request(method: str, url: str, github_token: str, body: dict | None = None):
+def _github_request(method: str, path: str, body: dict | None = None) -> tuple[dict, int]:
+    url = f"https://api.github.com{path}"
     data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(
         url,
         data=data,
         headers={
-            "Authorization": f"Bearer {github_token}",
+            "Authorization": f"Bearer {GITHUB_TOKEN}",
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "Node9-CI-Runner",
+            "User-Agent": "node9-ci-review",
             **({"Content-Type": "application/json"} if data else {}),
         },
         method=method,
     )
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read()), resp.status
     except urllib.error.HTTPError as e:
         try:
             return json.loads(e.read()), e.code
-        except:
+        except Exception:
             return {}, e.code
 
 
-def _post_pr_comment(pr_number: int, repo: str, github_token: str, comment: str, issues_fixed: list | None = None) -> None:
-    if not pr_number or not github_token or not repo:
-        return
-    body = f"## 🔍 node9 Code Review\n\n{comment}"
-    if issues_fixed:
-        body += "\n\n### 🔧 Fixes Applied by Agent\n" + "\n".join(f"- {f}" for f in issues_fixed)
-    body += "\n\n---\n*Automated review by node9 AI*"
-    _github_request("POST", f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments", github_token, {"body": body})
-
-
-def _open_or_find_draft_pr(fix_branch: str, base_branch: str, repo: str, github_token: str, pr_body: str) -> tuple:
-    create_body = {"title": f"[node9] AI review: {base_branch}", "head": fix_branch, "base": base_branch, "draft": True, "body": pr_body}
-    result, status = _github_request("POST", f"https://api.github.com/repos/{repo}/pulls", github_token, create_body)
+def _open_or_find_pr(fix_branch: str, base_branch: str, title: str, body: str) -> tuple[int | None, str]:
+    result, status = _github_request("POST", f"/repos/{REPO}/pulls", {
+        "title": title, "head": fix_branch, "base": base_branch, "draft": True, "body": body,
+    })
     if status == 201:
-        return result.get("number"), result.get("html_url")
-    owner = repo.split("/")[0]
-    result, status = _github_request("GET", f"https://api.github.com/repos/{repo}/pulls?head={owner}:{fix_branch}&base={base_branch}&state=open", github_token)
-    if status == 200 and result:
-        pr_num = result[0].get("number")
-        _github_request("PATCH", f"https://api.github.com/repos/{repo}/pulls/{pr_num}", github_token, {"body": pr_body})
-        return pr_num, result[0].get("html_url")
+        return result.get("number"), result.get("html_url", "")
+    # PR already exists — find and update it
+    owner = REPO.split("/")[0]
+    prs, _ = _github_request("GET", f"/repos/{REPO}/pulls?head={owner}:{fix_branch}&base={base_branch}&state=open")
+    if isinstance(prs, list) and prs:
+        pr_num = prs[0].get("number")
+        _github_request("PATCH", f"/repos/{REPO}/pulls/{pr_num}", {"body": body})
+        return pr_num, prs[0].get("html_url", "")
     return None, ""
 
 
-def _write_github_summary(issues_found, issues_fixed, pr_url, before_out, after_out):
+def _post_pr_comment(pr_number: int, comment: str) -> None:
+    if not pr_number or not GITHUB_TOKEN or not REPO:
+        return
+    _github_request("POST", f"/repos/{REPO}/issues/{pr_number}/comments", {"body": comment})
+
+
+def _write_github_summary(pr_url: str, before: str, after: str, review: str) -> None:
     summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
     if not summary_file:
         return
-    b_p, b_t = _parse_test_counts(before_out)
-    a_p, a_t = _parse_test_counts(after_out)
-    with open(summary_file, "a") as f:
-        f.write(f"### 🤖 node9 AI Code Review\n\n[View PR]({pr_url})\n\n")
+    b_p, b_t = _parse_test_counts(before)
+    a_p, a_t = _parse_test_counts(after)
+    with open(summary_file, "w") as f:
+        f.write(f"### 🤖 node9 AI Code Review\n\n")
+        if pr_url:
+            f.write(f"[View PR]({pr_url})\n\n")
         f.write(f"**Tests:** {b_p}/{b_t} → {a_p}/{a_t} passed\n\n")
-        if issues_found:
-            f.write("#### Issues Found\n" + "\n".join(f"- {i}" for i in issues_found) + "\n\n")
-        if issues_fixed:
-            f.write("#### Fixes Applied\n" + "\n".join(f"- {f}" for f in issues_fixed) + "\n\n")
+        if review:
+            f.write(f"#### Review\n{review}\n")
 
 
 # ---------------------------------------------------------------------------
-# Core Phases
+# Step 1: Fix loop
 # ---------------------------------------------------------------------------
 
-def _phase1_baseline(base_branch, original_branch, iteration, test_cmd):
-    raw_diff = tools._run_unprotected(f"git diff origin/{base_branch}...HEAD")
-    filtered = _filter_diff(raw_diff)
-    diff_lines = _count_diff_lines(filtered)
-    print(f"  Diff: {diff_lines} lines across {len(_diff_file_list(filtered))} files")
-    
-    print("  Running baseline tests...")
-    cwd = tools.WORKSPACE_DIR if hasattr(tools, 'WORKSPACE_DIR') else os.getcwd()
-    proc = subprocess.run(test_cmd, shell=True, capture_output=True, text=True, cwd=cwd)
-    before_output = proc.stdout + "\n" + proc.stderr
-    
-    print(f"\n--- DEBUG: RAW TEST OUTPUT ---\n{before_output}\n---------------------------\n")
-
-    passed, total = _parse_test_counts(before_output)
-    
-    # Reliably determine if tests passed via the test runner exit code instead of regex parsing alone
-    tests_passed = (proc.returncode == 0)
-    
-    print(f"  Baseline: {passed}/{total} passing (exit code: {proc.returncode})")
-    
-    skip = (iteration == 1) and tests_passed and (diff_lines < 100)
-    return filtered, before_output, diff_lines, skip, tests_passed
-
-
-CLAUDE_MD_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "CLAUDE.md")
-
-def _load_claude_md() -> str:
-    try:
-        with open(CLAUDE_MD_PATH) as f:
-            content = f.read().strip()
-        return f"\n\n## Project rules (CLAUDE.md):\n{content}" if content else ""
-    except OSError:
-        return ""
-
-
-_AGENT_TOOLS = [
-    {"name": "read_code",  "description": "Read file",      "input_schema": {"type": "object", "properties": {"filename": {"type": "string"}}, "required": ["filename"]}},
-    {"name": "write_code", "description": "Fix file",       "input_schema": {"type": "object", "properties": {"filename": {"type": "string"}, "content": {"type": "string"}}, "required": ["filename", "content"]}},
-    {"name": "run_bash",   "description": "Run tests/cmds", "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
-]
-
-_TEST_KEYS = ("npm test", "npm run test", "vitest", "jest")
-
-
-def _phase2_engineering(filtered_diff, before_out, original_branch, base_branch, test_cmd, tests_passed=False):
-    files_changed, issues_found, issues_fixed = [], [], []
-    after_test_output = before_out
-    file_list = ", ".join(_diff_file_list(filtered_diff))
-
-    status_msg = (
-        "The tests currently PASS. Only modify code if there is a critical security or logic bug."
-        if tests_passed else "Fix ONLY bugs introduced by this diff."
-    )
+def _step1_fix_loop(
+    diff: str, before_summary: str, file_list: str, test_cmd: str
+) -> tuple[list[str], str]:
+    """
+    Agentic fix loop. Reads files, fixes bugs, runs tests.
+    Returns (files_changed, last_test_output).
+    Token discipline: chunked diff (8k), tool results truncated (4k), rolling cache.
+    """
+    files_changed: list[str] = []
+    last_test_output = before_summary
 
     user_content = (
-        f"Review this git diff for `{original_branch}` → `{base_branch}`.\n\n"
-        f"The following files are in the diff: {file_list}\n\n"
-        f"```diff\n{_chunk_diff(filtered_diff, 8000)}\n```\n\n"
-        "## Your instructions:\n"
-        "1. **Read these files immediately** using `read_code` to understand the logic.\n"
-        "2. **DO NOT use grep or find** to search for code. Use `read_code` on the files above.\n"
-        f"3. Run tests: `run_bash('{test_cmd}')`.\n"
-        f"4. {status_msg}\n"
-        "5. Report FOUND: <issues> and FIXED: <fixes>."
+        f"Review this diff and fix any bugs you find.\n\n"
+        f"Files changed: {file_list}\n\n"
+        f"```diff\n{_chunk_diff(diff)}\n```\n\n"
+        f"Baseline test output:\n```\n{before_summary}\n```\n\n"
+        f"Instructions:\n"
+        f"1. Read the changed files immediately using `read_code`.\n"
+        f"2. Fix only real bugs: failing tests, type errors, logic errors, security issues.\n"
+        f"3. Do NOT refactor or add features.\n"
+        f"4. After fixing, run `{test_cmd}` to verify.\n"
+        f"5. List each fix on its own line starting with `FIXED: `."
     )
 
-    claude_md = _load_claude_md()
-    system_prompt = (
-        "You are a PRAGMATIC senior engineer. Fix bugs and STOP. "
-        "Read files immediately. DO NOT WASTE TURNS ON GREP."
-        + claude_md
-    )
+    messages: list[dict] = [
+        {"role": "user", "content": [{"type": "text", "text": user_content, "cache_control": {"type": "ephemeral"}}]}
+    ]
+    system = "You are a pragmatic senior engineer. Fix bugs and stop. Read files directly — do not grep."
 
-    messages = [{"role": "user", "content": [{"type": "text", "text": user_content, "cache_control": {"type": "ephemeral"}}]}]
-
-    for i in range(8):
+    for turn in range(MAX_FIX_TURNS):
         _apply_rolling_cache(messages)
         response = _create_with_retry(
-            client, model="claude-sonnet-4-6", max_tokens=4096,
-            extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"},
-            tools=_AGENT_TOOLS,
-            system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
+            client,
+            model=MODEL,
+            max_tokens=4096,
+            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+            tools=tools.TOOL_SPECS,
             messages=messages,
+            extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"},
         )
-        if response.stop_reason != "tool_use":
-            for block in response.content:
-                if hasattr(block, "text") and block.text:
-                    for line in block.text.splitlines():
-                        if line.upper().startswith("FOUND:"): issues_found.append(line[6:].strip())
-                        elif line.upper().startswith("FIXED:"): issues_fixed.append(line[6:].strip())
-            break
-        tool_results = []
-        for tool_use in response.content:
-            if tool_use.type == "tool_use":
-                print(f"  → {tool_use.name}({tool_use.input})")
-                result = getattr(tools, tool_use.name)(**tool_use.input)
-                if tool_use.name == "write_code": files_changed.append(tool_use.input['filename'])
-                if tool_use.name == "run_bash" and any(k in tool_use.input['command'] for k in _TEST_KEYS):
-                    after_test_output = result
-                tool_results.append({"type": "tool_result", "tool_use_id": tool_use.id, "content": _truncate_output(str(result))})
+
         messages.append({"role": "assistant", "content": response.content})
+
+        if response.stop_reason != "tool_use":
+            break
+
+        tool_results = []
+        for block in response.content:
+            if block.type != "tool_use":
+                continue
+            print(f"  → {block.name}({list(block.input.keys())})", flush=True)
+            result = tools.dispatch(block.name, block.input)
+
+            if block.name == "write_code":
+                filename = block.input.get("filename", "")
+                if filename and filename not in files_changed:
+                    files_changed.append(filename)
+            if block.name == "run_bash":
+                last_test_output = _extract_test_summary(result)
+
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": _truncate(result),
+            })
+
         messages.append({"role": "user", "content": tool_results})
-    return list(set(files_changed)), issues_found, issues_fixed, after_test_output
+
+    return files_changed, last_test_output
 
 
-def _phase3_code_review(original_diff, agent_diff, before_out, after_out):
-    b_p, b_t = _parse_test_counts(before_out)
-    a_p, a_t = _parse_test_counts(after_out)
-    claude_md = _load_claude_md()
+# ---------------------------------------------------------------------------
+# Step 2: Safety check
+# ---------------------------------------------------------------------------
+
+def _step2_safety_check(
+    files_changed: list[str], tests_passed_before: bool, test_cmd: str
+) -> list[str]:
+    """
+    If the agent made changes AND tests were green before, verify they still pass.
+    Revert everything if the AI broke the build.
+    """
+    if not files_changed or not tests_passed_before:
+        return files_changed
+
+    print("  Verifying tests after AI changes...", flush=True)
+    _, code = _run_tests(test_cmd)
+
+    if code != 0:
+        print("  ❌ AI changes broke tests — reverting.", flush=True)
+        tools._run_unprotected("git reset --hard HEAD")
+        tools._run_unprotected("git clean -fd")
+        return []
+
+    return files_changed
+
+
+# ---------------------------------------------------------------------------
+# Step 3: Code review
+# ---------------------------------------------------------------------------
+
+def _step3_code_review(original_diff: str, agent_diff: str, before_summary: str, after_summary: str) -> str:
+    """
+    One-shot review of the agent's own changes.
+    Caps both diffs to keep the prompt token-efficient.
+    """
     prompt = (
-        "You are a PRAGMATIC senior engineer reviewing a pull request.\n\n"
-        f"## Original diff:\n```diff\n{_chunk_diff(original_diff, 5000)}\n```\n\n"
-        f"## AI Agent Fixes:\n```diff\n{_chunk_diff(agent_diff, 3000)}\n```\n\n"
-        f"## Tests: {b_p}/{b_t} -> {a_p}/{a_t}\n"
-        + claude_md + "\n\n"
-        "## Your task: Write a concise review. 1. IGNORE file locations. 2. IGNORE theoretical shell edge cases. "
-        "3. ONLY flag: Security, Logic errors, Performance. If fixable, use ISSUE: <desc>."
+        "You are a senior engineer reviewing AI-generated code fixes.\n\n"
+        f"## Original diff (what was being reviewed):\n```diff\n{_chunk_diff(original_diff, 4000)}\n```\n\n"
+        f"## AI fixes applied:\n```diff\n{_truncate(agent_diff, 3000)}\n```\n\n"
+        f"## Tests before: {before_summary.strip()[:200]}\n"
+        f"## Tests after:  {after_summary.strip()[:200]}\n\n"
+        "Write a concise review of the AI's changes. Focus only on:\n"
+        "- Security issues\n"
+        "- Logic errors introduced by the fix\n"
+        "- Correctness problems\n\n"
+        "Ignore style, formatting, and theoretical edge cases. "
+        "If everything looks good, say so briefly."
     )
-    response = _create_with_retry(client, model="claude-sonnet-4-6", max_tokens=1500, messages=[{"role": "user", "content": prompt}])
-    review_text = response.content[0].text.strip()
-    issues_to_fix = [l[6:].strip() for l in review_text.splitlines() if l.startswith("ISSUE:")]
-    return review_text, issues_to_fix
 
-
-def _phase4_review_fix_loop(review_issues, file_list, test_cmd):
-    files_changed, issues_fixed, after_test_output = [], [], ""
-    user_content = (
-        f"Fix these review issues:\n" + "\n".join(f"- {i}" for i in review_issues) + "\n\n"
-        f"Files to look at: {file_list}\n\n"
-        f"Read each file directly, apply the fix, then verify with `run_bash('{test_cmd}')`.\n"
-        "Report each fix as: FIXED: <description>"
+    response = _create_with_retry(
+        client, model=MODEL, max_tokens=1000, messages=[{"role": "user", "content": prompt}]
     )
-    claude_md = _load_claude_md()
-    system_prompt = (
-        "You are a specialist refiner. Fix ONLY the issues listed. "
-        "DO NOT GREP. Read the files directly."
-        + claude_md
-    )
-    messages = [{"role": "user", "content": [{"type": "text", "text": user_content, "cache_control": {"type": "ephemeral"}}]}]
-    for i in range(3):
-        _apply_rolling_cache(messages)
-        response = _create_with_retry(
-            client, model="claude-sonnet-4-6", max_tokens=4096,
-            extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"},
-            tools=_AGENT_TOOLS,
-            system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
-            messages=messages,
-        )
-        if response.stop_reason != "tool_use":
-            for block in response.content:
-                if hasattr(block, "text") and block.text:
-                    for line in block.text.splitlines():
-                        if line.upper().startswith("FIXED:"): issues_fixed.append(line[6:].strip())
-            break
-        tool_results = []
-        for tool_use in response.content:
-            if tool_use.type == "tool_use":
-                print(f"  → {tool_use.name}({tool_use.input})")
-                result = getattr(tools, tool_use.name)(**tool_use.input)
-                if tool_use.name == "write_code": files_changed.append(tool_use.input['filename'])
-                if tool_use.name == "run_bash" and any(k in tool_use.input['command'] for k in _TEST_KEYS):
-                    after_test_output = result
-                tool_results.append({"type": "tool_result", "tool_use_id": tool_use.id, "content": _truncate_output(str(result))})
-        messages.append({"role": "assistant", "content": response.content})
-        messages.append({"role": "user", "content": tool_results})
-    return list(set(files_changed)), issues_fixed, after_test_output
+    return response.content[0].text.strip()
 
 
 # ---------------------------------------------------------------------------
-# Main Execution
+# Main entry point
 # ---------------------------------------------------------------------------
 
 def execute_review_fix() -> None:
-    summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary_file:
-        with open(summary_file, "w") as f: f.write("")
+    head_branch = _resolve_branch()
+    fix_branch  = f"node9/fix/{head_branch}"
 
-    original_branch = _resolve_branch()
-    # GITHUB_BASE_REF is empty string (not missing) on push events — use `or` not default arg.
-    base_branch = os.environ.get("GITHUB_BASE_REF") or "main"
-    repo = os.environ.get("GITHUB_REPOSITORY", "")
-    iteration = int(os.environ.get("ITERATION", "1"))
-    github_token = os.environ.get("GITHUB_TOKEN", "")
-    test_cmd = os.environ.get("NODE9_TEST_CMD", "npm test")
-    fix_branch = f"node9/fix/{original_branch}"
+    print(f"\n🤖 node9 CI Review: {head_branch} → {BASE_BRANCH}", flush=True)
 
-    print(f"🤖 node9 CI Review: {original_branch} → {base_branch}")
+    # Get and filter diff
+    diff = tools.get_diff(BASE_BRANCH)
+    if not diff.strip():
+        print("  No diff to review.", flush=True)
+        return
 
-    # 1. Baseline
-    filtered_diff, before_out, diff_lines, skip_eng, tests_passed = _phase1_baseline(base_branch, original_branch, iteration, test_cmd)
-    
-    # 2. Engineering
-    files_changed, issues_found, issues_fixed, after_out = [], [], [], before_out
-    if not skip_eng:
-        files_changed, issues_found, issues_fixed, after_out = _phase2_engineering(filtered_diff, before_out, original_branch, base_branch, test_cmd, tests_passed)
+    file_list    = ", ".join(_diff_file_list(diff))
+    diff_lines   = _count_diff_lines(diff)
+    print(f"  {diff_lines} changed lines across {len(_diff_file_list(diff))} files", flush=True)
 
-    # 3. Review
-    agent_diff = tools._run_unprotected("git diff HEAD") if files_changed else ""
-    review_text, review_issues = _phase3_code_review(filtered_diff, agent_diff, before_out, after_out)
+    # Baseline tests
+    print("\n📋 Baseline tests...", flush=True)
+    before_raw, before_code = _run_tests(TEST_CMD)
+    before_summary   = _extract_test_summary(before_raw)
+    tests_passed_before = (before_code == 0)
+    print(f"  {'✓' if tests_passed_before else '✗'} exit {before_code}", flush=True)
 
-    # 4. Final Refinement
-    if review_issues:
-        f_files, f_fixed, f_out = _phase4_review_fix_loop(review_issues, ", ".join(_diff_file_list(filtered_diff)), test_cmd)
-        files_changed = list(set(files_changed + f_files))
-        issues_fixed += f_fixed
-        if f_out: after_out = f_out
+    # Step 1: Fix loop
+    print("\n🔧 Fix loop...", flush=True)
+    files_changed, after_summary = _step1_fix_loop(diff, before_summary, file_list, TEST_CMD)
 
-    # --- SAFETY CHECK: Prevent the agent from pushing broken code ---
-    if files_changed and tests_passed:
-        print("  Verifying tests after AI changes...")
-        cwd = tools.WORKSPACE_DIR if hasattr(tools, 'WORKSPACE_DIR') else os.getcwd()
-        verify_proc = subprocess.run(test_cmd, shell=True, capture_output=True, text=True, cwd=cwd)
-        
-        if verify_proc.returncode != 0:
-            print("  ❌ AI changes broke the tests! Reverting to prevent CI failure.")
-            tools._run_unprotected("git reset --hard HEAD")
-            tools._run_unprotected("git clean -fd")
-            files_changed = []
-            issues_fixed = ["Attempted fixes were reverted because they broke the test suite."]
-            after_out = before_out
+    # Step 2: Safety check
+    files_changed = _step2_safety_check(files_changed, tests_passed_before, TEST_CMD)
 
-    # 5. Delivery
+    # Step 3: Code review (always runs, even if no fixes were applied)
+    print("\n🔍 Code review...", flush=True)
+    agent_diff   = tools._run_unprotected("git diff HEAD") if files_changed else ""
+    review_text  = _step3_code_review(diff, agent_diff, before_summary, after_summary)
+    print(f"  Review done ({len(review_text)} chars)", flush=True)
+
+    # Commit and push
+    tools._run_unprotected("git config user.email 'node9-ci@node9.ai'")
+    tools._run_unprotected("git config user.name 'node9 CI'")
     tools._run_unprotected(f"git checkout -B {fix_branch}")
-    
+
     if files_changed:
         tools._run_unprotected("git add -A")
-        
-    subprocess.run(["git", "commit", "-m", "node9 review", "--allow-empty"], cwd=tools.WORKSPACE_DIR if hasattr(tools, 'WORKSPACE_DIR') else os.getcwd())
+
+    subprocess.run(
+        ["git", "commit", "-m", f"node9 review: {len(files_changed)} file(s) fixed", "--allow-empty"],
+        cwd=tools.WORKSPACE_DIR,
+    )
     tools._run_unprotected(f"git push origin {fix_branch} --force")
 
-    pr_num, pr_url = _open_or_find_draft_pr(fix_branch, base_branch, repo, github_token, "AI Review Complete")
-    if pr_num and review_text:
-        _post_pr_comment(pr_num, repo, github_token, review_text, issues_fixed)
+    # Open PR
+    pr_body  = f"## 🤖 node9 AI Code Review\n\n"
+    pr_body += f"**Branch:** `{head_branch}` → `{BASE_BRANCH}`\n\n"
+    if files_changed:
+        pr_body += f"**Files fixed:** {', '.join(f'`{f}`' for f in files_changed)}\n\n"
+    pr_body += f"**Tests:** {'✓ passing' if tests_passed_before else '✗ failing'} → after AI: {after_summary.strip()[:100]}\n\n"
+    pr_body += "\n---\n*Governed by [node9](https://node9.ai) — full audit trail at node9.ai*"
 
-    _write_github_summary(issues_found, issues_fixed, pr_url, before_out, after_out)
-    print(f"✅ Review complete: {pr_url}")
+    pr_number, pr_url = _open_or_find_pr(
+        fix_branch, BASE_BRANCH,
+        f"[node9] AI review: {head_branch}",
+        pr_body,
+    )
+
+    # Post review as comment
+    if pr_number:
+        comment  = f"## 🔍 node9 Code Review\n\n{review_text}\n\n"
+        comment += "---\n*Automated review by [node9](https://node9.ai)*"
+        _post_pr_comment(pr_number, comment)
+        print(f"\n✅ Draft PR #{pr_number}: {pr_url}", flush=True)
+    else:
+        print(f"\n✅ Pushed to {fix_branch}", flush=True)
+
+    _write_github_summary(pr_url, before_raw, after_summary, review_text)
+
 
 if __name__ == "__main__":
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        print("Error: ANTHROPIC_API_KEY not set", file=sys.stderr)
+        sys.exit(1)
     execute_review_fix()

@@ -117,7 +117,10 @@ export async function registerDaemonEntry(
    *  entries where check.ts is the sole decision maker via the tty menu. */
   skipBackgroundAuth?: boolean,
   /** When true, the tail shows the card for context only (no interactive keypress). */
-  viewOnly?: boolean
+  viewOnly?: boolean,
+  /** When true, the daemon skips cloud's immediate-allow for the background auth pass.
+   *  Set when a local smart rule with verdict "review" matched in the hook process. */
+  localSmartRuleMatched?: boolean
 ): Promise<{ id: string; allowCount: number }> {
   const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
   const ctrl = new AbortController();
@@ -140,6 +143,7 @@ export async function registerDaemonEntry(
         ...(recoveryCommand && { recoveryCommand }),
         ...(skipBackgroundAuth && { skipBackgroundAuth: true }),
         ...(viewOnly && { viewOnly: true }),
+        ...(localSmartRuleMatched && { localSmartRuleMatched: true }),
       }),
       signal: ctrl.signal,
     });

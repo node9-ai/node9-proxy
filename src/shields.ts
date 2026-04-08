@@ -12,257 +12,78 @@ export interface ShieldDefinition {
   dangerousWords: string[];
 }
 
-export const SHIELDS: Record<string, ShieldDefinition> = {
-  postgres: {
-    name: 'postgres',
-    description: 'Protects PostgreSQL databases from destructive AI operations',
-    aliases: ['pg', 'postgresql'],
-    smartRules: [
-      {
-        name: 'shield:postgres:block-drop-table',
-        tool: '*',
-        conditions: [{ field: 'sql', op: 'matches', value: 'DROP\\s+TABLE', flags: 'i' }],
-        verdict: 'block',
-        reason: 'DROP TABLE is irreversible — blocked by Postgres shield',
-      },
-      {
-        name: 'shield:postgres:block-truncate',
-        tool: '*',
-        conditions: [{ field: 'sql', op: 'matches', value: 'TRUNCATE\\s+TABLE', flags: 'i' }],
-        verdict: 'block',
-        reason: 'TRUNCATE is irreversible — blocked by Postgres shield',
-      },
-      {
-        name: 'shield:postgres:block-drop-column',
-        tool: '*',
-        conditions: [
-          { field: 'sql', op: 'matches', value: 'ALTER\\s+TABLE.*DROP\\s+COLUMN', flags: 'i' },
-        ],
-        verdict: 'block',
-        reason: 'DROP COLUMN is irreversible — blocked by Postgres shield',
-      },
-      {
-        name: 'shield:postgres:review-grant-revoke',
-        tool: '*',
-        conditions: [{ field: 'sql', op: 'matches', value: '\\b(GRANT|REVOKE)\\b', flags: 'i' }],
-        verdict: 'review',
-        reason: 'Permission changes require human approval (Postgres shield)',
-      },
-    ],
-    dangerousWords: ['dropdb', 'pg_dropcluster'],
-  },
+// ---------------------------------------------------------------------------
+// Shield loader — reads builtin JSON files + user-installed shields
+// ---------------------------------------------------------------------------
 
-  github: {
-    name: 'github',
-    description: 'Protects GitHub repositories from destructive AI operations',
-    aliases: ['git'],
-    smartRules: [
-      {
-        // Note: git branch -d/-D is already caught by the built-in review-git-destructive rule.
-        // This rule adds coverage for `git push --delete` which the built-in does not match.
-        name: 'shield:github:review-delete-branch-remote',
-        tool: 'bash',
-        conditions: [
-          {
-            field: 'command',
-            op: 'matches',
-            value: 'git\\s+push\\s+.*--delete',
-            flags: 'i',
-          },
-        ],
-        verdict: 'review',
-        reason: 'Remote branch deletion requires human approval (GitHub shield)',
-      },
-      {
-        name: 'shield:github:block-delete-repo',
-        tool: '*',
-        conditions: [
-          { field: 'command', op: 'matches', value: 'gh\\s+repo\\s+delete', flags: 'i' },
-        ],
-        verdict: 'block',
-        reason: 'Repository deletion is irreversible — blocked by GitHub shield',
-      },
-    ],
-    dangerousWords: [],
-  },
+const BUILTIN_DIR = path.join(__dirname, 'shields', 'builtin');
+const USER_SHIELDS_DIR = path.join(os.homedir(), '.node9', 'shields');
 
-  aws: {
-    name: 'aws',
-    description: 'Protects AWS infrastructure from destructive AI operations',
-    aliases: ['amazon'],
-    smartRules: [
-      {
-        name: 'shield:aws:block-delete-s3-bucket',
-        tool: '*',
-        conditions: [
-          {
-            field: 'command',
-            op: 'matches',
-            value: 'aws\\s+s3.*rb\\s|aws\\s+s3api\\s+delete-bucket',
-            flags: 'i',
-          },
-        ],
-        verdict: 'block',
-        reason: 'S3 bucket deletion is irreversible — blocked by AWS shield',
-      },
-      {
-        name: 'shield:aws:review-iam-changes',
-        tool: '*',
-        conditions: [
-          {
-            field: 'command',
-            op: 'matches',
-            value: 'aws\\s+iam\\s+(create|delete|attach|detach|put|remove)',
-            flags: 'i',
-          },
-        ],
-        verdict: 'review',
-        reason: 'IAM changes require human approval (AWS shield)',
-      },
-      {
-        name: 'shield:aws:block-ec2-terminate',
-        tool: '*',
-        conditions: [
-          {
-            field: 'command',
-            op: 'matches',
-            value: 'aws\\s+ec2\\s+terminate-instances',
-            flags: 'i',
-          },
-        ],
-        verdict: 'block',
-        reason: 'EC2 instance termination is irreversible — blocked by AWS shield',
-      },
-      {
-        name: 'shield:aws:review-rds-delete',
-        tool: '*',
-        conditions: [
-          { field: 'command', op: 'matches', value: 'aws\\s+rds\\s+delete-', flags: 'i' },
-        ],
-        verdict: 'review',
-        reason: 'RDS deletion requires human approval (AWS shield)',
-      },
-    ],
-    dangerousWords: [],
-  },
+function validateShieldDefinition(raw: unknown, filePath: string): ShieldDefinition | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    process.stderr.write(`[node9] Shield file is not an object: ${filePath}\n`);
+    return null;
+  }
+  const r = raw as Record<string, unknown>;
+  if (typeof r.name !== 'string' || !r.name) {
+    process.stderr.write(`[node9] Shield file missing 'name': ${filePath}\n`);
+    return null;
+  }
+  if (typeof r.description !== 'string') {
+    process.stderr.write(`[node9] Shield file missing 'description': ${filePath}\n`);
+    return null;
+  }
+  if (!Array.isArray(r.aliases)) {
+    process.stderr.write(`[node9] Shield file missing 'aliases' array: ${filePath}\n`);
+    return null;
+  }
+  if (!Array.isArray(r.smartRules)) {
+    process.stderr.write(`[node9] Shield file missing 'smartRules' array: ${filePath}\n`);
+    return null;
+  }
+  if (!Array.isArray(r.dangerousWords)) {
+    process.stderr.write(`[node9] Shield file missing 'dangerousWords' array: ${filePath}\n`);
+    return null;
+  }
+  return r as unknown as ShieldDefinition;
+}
 
-  'bash-safe': {
-    name: 'bash-safe',
-    description: 'Blocks high-risk bash patterns: pipe-to-shell, rm -rf /, disk overwrites, eval',
-    aliases: ['bash', 'shell'],
-    smartRules: [
-      {
-        name: 'shield:bash-safe:block-pipe-to-shell',
-        tool: 'bash',
-        conditions: [
-          {
-            field: 'command',
-            op: 'matches',
-            value: '(curl|wget)\\s+[^|]*\\|\\s*(bash|sh|zsh|fish|python3?|ruby|perl|node)',
-            flags: 'i',
-          },
-        ],
-        verdict: 'block',
-        reason:
-          'Pipe-to-shell is a common supply-chain attack vector — blocked by bash-safe shield',
-      },
-      {
-        name: 'shield:bash-safe:block-obfuscated-exec',
-        tool: 'bash',
-        conditions: [
-          {
-            field: 'command',
-            op: 'matches',
-            value: 'base64\\s+(-d|--decode).*\\|\\s*(bash|sh|zsh)',
-            flags: 'i',
-          },
-        ],
-        verdict: 'block',
-        reason: 'Obfuscated execution via base64 decode — blocked by bash-safe shield',
-      },
-      {
-        name: 'shield:bash-safe:block-rm-root',
-        tool: 'bash',
-        conditions: [
-          {
-            field: 'command',
-            op: 'matches',
-            value:
-              'rm\\s+(-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r)[a-zA-Z]*\\s+(\\/|~|\\$HOME|\\$\\{HOME\\})\\s*$',
-            flags: 'i',
-          },
-        ],
-        verdict: 'block',
-        reason: 'rm -rf of root or home directory is catastrophic — blocked by bash-safe shield',
-      },
-      {
-        name: 'shield:bash-safe:block-disk-overwrite',
-        tool: 'bash',
-        conditions: [
-          {
-            field: 'command',
-            op: 'matches',
-            value: 'dd\\s+.*of=\\/dev\\/(sd|nvme|hd|vd|xvd)',
-            flags: 'i',
-          },
-        ],
-        verdict: 'block',
-        reason: 'Writing directly to a block device is irreversible — blocked by bash-safe shield',
-      },
-      {
-        name: 'shield:bash-safe:review-eval',
-        tool: 'bash',
-        conditions: [
-          {
-            field: 'command',
-            op: 'matches',
-            value: '\\beval\\s+[\\$`("]',
-            flags: 'i',
-          },
-        ],
-        verdict: 'review',
-        reason: 'eval of dynamic content requires human approval (bash-safe shield)',
-      },
-    ],
-    dangerousWords: [],
-  },
+function loadShieldsFromDir(dir: string, label: string): Record<string, ShieldDefinition> {
+  const result: Record<string, ShieldDefinition> = {};
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(dir).filter((f) => f.endsWith('.json'));
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      process.stderr.write(`[node9] Could not read ${label} shields dir ${dir}: ${String(err)}\n`);
+    }
+    return result;
+  }
+  for (const file of entries) {
+    const filePath = path.join(dir, file);
+    try {
+      const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as unknown;
+      const shield = validateShieldDefinition(raw, filePath);
+      if (shield) result[shield.name] = shield;
+    } catch (err) {
+      process.stderr.write(`[node9] Failed to load ${label} shield ${file}: ${String(err)}\n`);
+    }
+  }
+  return result;
+}
 
-  filesystem: {
-    name: 'filesystem',
-    description: 'Protects the local filesystem from dangerous AI operations',
-    aliases: ['fs'],
-    smartRules: [
-      {
-        name: 'shield:filesystem:review-chmod-777',
-        tool: 'bash',
-        conditions: [
-          { field: 'command', op: 'matches', value: 'chmod\\s+(777|a\\+rwx)', flags: 'i' },
-        ],
-        verdict: 'review',
-        reason: 'chmod 777 requires human approval (filesystem shield)',
-      },
-      {
-        name: 'shield:filesystem:review-write-etc',
-        tool: 'bash',
-        conditions: [
-          {
-            field: 'command',
-            // Narrow to write-indicative operations to avoid approval fatigue on reads.
-            // Matches: tee /etc/*, cp .../etc/*, mv .../etc/*, > /etc/*, install .../etc/*
-            op: 'matches',
-            value: '(tee|\\bcp\\b|\\bmv\\b|install|>+)\\s+.*\\/etc\\/',
-          },
-        ],
-        verdict: 'review',
-        reason: 'Writing to /etc requires human approval (filesystem shield)',
-      },
-    ],
-    // dd removed: too common as a legitimate tool (disk imaging, file ops).
-    // mkfs removed: already in the built-in DANGEROUS_WORDS baseline.
-    // wipefs retained: rarely legitimate in an agent context and not in built-ins.
-    dangerousWords: ['wipefs'],
-  },
-};
+function buildSHIELDS(): Record<string, ShieldDefinition> {
+  const builtins = loadShieldsFromDir(BUILTIN_DIR, 'builtin');
+  const userShields = loadShieldsFromDir(USER_SHIELDS_DIR, 'user');
+  // User shields override builtins on name collision (power-user customisation)
+  return { ...builtins, ...userShields };
+}
+
+export const SHIELDS: Record<string, ShieldDefinition> = buildSHIELDS();
+
+// ---------------------------------------------------------------------------
+// Lookup helpers
+// ---------------------------------------------------------------------------
 
 // Resolve alias → canonical name
 export function resolveShieldName(input: string): string | null {
@@ -283,7 +104,9 @@ export function listShields(): ShieldDefinition[] {
   return Object.values(SHIELDS);
 }
 
-// --- Shield state (active shields + per-rule verdict overrides) ---
+// ---------------------------------------------------------------------------
+// Shield state (active shields + per-rule verdict overrides)
+// ---------------------------------------------------------------------------
 
 const SHIELDS_STATE_FILE = path.join(os.homedir(), '.node9', 'shields.json');
 
@@ -428,4 +251,24 @@ export function resolveShieldRule(shieldName: string, identifier: string): strin
     if (operation === id) return rule.name;
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// User shield install helper (used by CLI `node9 shield install`)
+// ---------------------------------------------------------------------------
+
+export const USER_SHIELDS_DIR_PATH = USER_SHIELDS_DIR;
+
+/** Validates and writes a shield definition to ~/.node9/shields/<name>.json */
+export function installShield(name: string, shieldJson: unknown): void {
+  const shield = validateShieldDefinition(shieldJson, `<downloaded:${name}>`);
+  if (!shield) throw new Error(`Downloaded shield '${name}' failed validation`);
+  if (shield.name !== name) {
+    throw new Error(`Shield name mismatch: file declares '${shield.name}' but expected '${name}'`);
+  }
+  fs.mkdirSync(USER_SHIELDS_DIR, { recursive: true });
+  const filePath = path.join(USER_SHIELDS_DIR, `${name}.json`);
+  const tmp = `${filePath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(shieldJson, null, 2), { mode: 0o600 });
+  fs.renameSync(tmp, filePath);
 }

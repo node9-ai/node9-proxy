@@ -52,7 +52,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install "anthropic>=0.40,<1.0" "python-dotenv>=1.0,<2.0" "node9>=0.1"
+          pip install -r .github/node9/requirements.txt
           npm ci --prefer-offline
 
       - name: Run node9 review

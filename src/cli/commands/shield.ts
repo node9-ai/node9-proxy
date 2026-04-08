@@ -14,9 +14,21 @@ import {
   resolveShieldName,
   resolveShieldRule,
   isShieldVerdict,
+  installShield,
 } from '../../shields';
 import { appendConfigAudit } from '../../audit';
 import { getConfig } from '../../config';
+import { httpsFetch } from '../../utils/https-fetch';
+
+const COMMUNITY_INDEX_URL =
+  'https://raw.githubusercontent.com/node9ai/node9-proxy/main/shields/community/index.json';
+
+interface CommunityEntry {
+  name: string;
+  description: string;
+  author: string;
+  url: string;
+}
 
 export function registerShieldCommand(program: Command): void {
   // ---------------------------------------------------------------------------
@@ -88,8 +100,36 @@ export function registerShieldCommand(program: Command): void {
 
   shieldCmd
     .command('list')
-    .description('Show all available shields')
-    .action(() => {
+    .description('Show available shields (add --community to browse the marketplace)')
+    .option('--community', 'List shields available from the community marketplace')
+    .action((opts: { community?: boolean }) => {
+      if (opts.community) {
+        console.log(chalk.bold('\n🛡️  Community Shield Marketplace\n'));
+        console.log(chalk.gray('  Fetching index…\n'));
+        httpsFetch(COMMUNITY_INDEX_URL)
+          .then((body) => {
+            const entries = JSON.parse(body) as CommunityEntry[];
+            const installed = new Set(listShields().map((s) => s.name));
+            for (const e of entries) {
+              const tag = installed.has(e.name)
+                ? chalk.green('installed')
+                : chalk.gray('available');
+              console.log(
+                `  ${tag}  ${chalk.cyan(e.name.padEnd(12))} ${e.description}  ${chalk.gray(`by ${e.author}`)}`
+              );
+            }
+            console.log('');
+            console.log(
+              chalk.gray(`  Install a shield: ${chalk.cyan('node9 shield install <name>')}\n`)
+            );
+          })
+          .catch((err: unknown) => {
+            console.error(chalk.red(`\n❌ Could not fetch community index: ${String(err)}\n`));
+            process.exit(1);
+          });
+        return;
+      }
+
       const active = new Set(readActiveShields());
       console.log(chalk.bold('\n🛡️  Available Shields\n'));
       for (const shield of listShields()) {
@@ -101,6 +141,9 @@ export function registerShieldCommand(program: Command): void {
           console.log(chalk.gray(`              aliases: ${shield.aliases.join(', ')}`));
       }
       console.log('');
+      console.log(
+        chalk.gray(`  Browse community shields: ${chalk.cyan('node9 shield list --community')}\n`)
+      );
     });
 
   shieldCmd
@@ -239,6 +282,43 @@ export function registerShieldCommand(program: Command): void {
       console.error(
         chalk.green(`\n✅  Override removed — ${name}/${shortName} restored to default.\n`)
       );
+    });
+
+  shieldCmd
+    .command('install <name>')
+    .description('Install a shield from the community marketplace into ~/.node9/shields/')
+    .action((name: string) => {
+      console.log(chalk.bold(`\n🛡️  Installing shield "${name}"…\n`));
+      httpsFetch(COMMUNITY_INDEX_URL)
+        .then((indexBody) => {
+          const entries = JSON.parse(indexBody) as CommunityEntry[];
+          const entry = entries.find((e) => e.name === name);
+          if (!entry) {
+            const names = entries.map((e) => chalk.cyan(e.name)).join(', ');
+            console.error(
+              chalk.red(`❌ Shield "${name}" not found in the community marketplace.\n`)
+            );
+            console.error(`  Available: ${names}\n`);
+            process.exit(1);
+          }
+          return httpsFetch(entry.url);
+        })
+        .then((shieldBody) => {
+          const shieldJson = JSON.parse(shieldBody) as unknown;
+          installShield(name, shieldJson);
+          console.log(
+            chalk.green(`✅  Shield "${name}" installed to ~/.node9/shields/${name}.json`)
+          );
+          console.log(
+            chalk.gray(`   Activate it with: ${chalk.cyan(`node9 shield enable ${name}`)}\n`)
+          );
+          // Log install to audit trail
+          appendConfigAudit({ event: 'shield-install', shield: name });
+        })
+        .catch((err: unknown) => {
+          console.error(chalk.red(`\n❌ Install failed: ${String(err)}\n`));
+          process.exit(1);
+        });
     });
 }
 

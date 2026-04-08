@@ -1,0 +1,59 @@
+{
+  "name": "aws",
+  "description": "Protects AWS infrastructure from destructive AI operations",
+  "aliases": ["amazon"],
+  "smartRules": [
+    {
+      "name": "shield:aws:block-delete-s3-bucket",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "aws\\s+s3.*rb\\s|aws\\s+s3api\\s+delete-bucket",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "S3 bucket deletion is irreversible — blocked by AWS shield"
+    },
+    {
+      "name": "shield:aws:review-iam-changes",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "aws\\s+iam\\s+(create|delete|attach|detach|put|remove)",
+          "flags": "i"
+        }
+      ],
+      "verdict": "review",
+      "reason": "IAM changes require human approval (AWS shield)"
+    },
+    {
+      "name": "shield:aws:block-ec2-terminate",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "aws\\s+ec2\\s+terminate-instances",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "EC2 instance termination is irreversible — blocked by AWS shield"
+    },
+    {
+      "name": "shield:aws:review-rds-delete",
+      "tool": "*",
+      "conditions": [
+        { "field": "command", "op": "matches", "value": "aws\\s+rds\\s+delete-", "flags": "i" }
+      ],
+      "verdict": "review",
+      "reason": "RDS deletion requires human approval (AWS shield)"
+    }
+  ],
+  "dangerousWords": []
+}

@@ -1,0 +1,32 @@
+[
+  {
+    "name": "postgres",
+    "description": "Protects PostgreSQL databases from destructive AI operations",
+    "author": "node9",
+    "url": "https://raw.githubusercontent.com/node9ai/node9-proxy/main/src/shields/builtin/postgres.json"
+  },
+  {
+    "name": "github",
+    "description": "Protects GitHub repositories from destructive AI operations",
+    "author": "node9",
+    "url": "https://raw.githubusercontent.com/node9ai/node9-proxy/main/src/shields/builtin/github.json"
+  },
+  {
+    "name": "aws",
+    "description": "Protects AWS infrastructure from destructive AI operations",
+    "author": "node9",
+    "url": "https://raw.githubusercontent.com/node9ai/node9-proxy/main/src/shields/builtin/aws.json"
+  },
+  {
+    "name": "bash-safe",
+    "description": "Blocks high-risk bash patterns: pipe-to-shell, rm -rf /, disk overwrites, eval",
+    "author": "node9",
+    "url": "https://raw.githubusercontent.com/node9ai/node9-proxy/main/src/shields/builtin/bash-safe.json"
+  },
+  {
+    "name": "filesystem",
+    "description": "Protects the local filesystem from dangerous AI operations",
+    "author": "node9",
+    "url": "https://raw.githubusercontent.com/node9ai/node9-proxy/main/src/shields/builtin/filesystem.json"
+  }
+]

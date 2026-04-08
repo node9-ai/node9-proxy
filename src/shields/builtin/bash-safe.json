@@ -1,0 +1,78 @@
+{
+  "name": "bash-safe",
+  "description": "Blocks high-risk bash patterns: pipe-to-shell, rm -rf /, disk overwrites, eval",
+  "aliases": ["bash", "shell"],
+  "smartRules": [
+    {
+      "name": "shield:bash-safe:block-pipe-to-shell",
+      "tool": "bash",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "(curl|wget)\\s+[^|]*\\|\\s*(bash|sh|zsh|fish|python3?|ruby|perl|node)",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "Pipe-to-shell is a common supply-chain attack vector — blocked by bash-safe shield"
+    },
+    {
+      "name": "shield:bash-safe:block-obfuscated-exec",
+      "tool": "bash",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "base64\\s+(-d|--decode).*\\|\\s*(bash|sh|zsh)",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "Obfuscated execution via base64 decode — blocked by bash-safe shield"
+    },
+    {
+      "name": "shield:bash-safe:block-rm-root",
+      "tool": "bash",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "rm\\s+(-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r)[a-zA-Z]*\\s+(\\/|~|\\$HOME|\\$\\{HOME\\})\\s*$",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "rm -rf of root or home directory is catastrophic — blocked by bash-safe shield"
+    },
+    {
+      "name": "shield:bash-safe:block-disk-overwrite",
+      "tool": "bash",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "dd\\s+.*of=\\/dev\\/(sd|nvme|hd|vd|xvd)",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "Writing directly to a block device is irreversible — blocked by bash-safe shield"
+    },
+    {
+      "name": "shield:bash-safe:review-eval",
+      "tool": "bash",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "\\beval\\s+[\\$`(\"]",
+          "flags": "i"
+        }
+      ],
+      "verdict": "review",
+      "reason": "eval of dynamic content requires human approval (bash-safe shield)"
+    }
+  ],
+  "dangerousWords": []
+}

@@ -1,0 +1,30 @@
+{
+  "name": "filesystem",
+  "description": "Protects the local filesystem from dangerous AI operations",
+  "aliases": ["fs"],
+  "smartRules": [
+    {
+      "name": "shield:filesystem:review-chmod-777",
+      "tool": "bash",
+      "conditions": [
+        { "field": "command", "op": "matches", "value": "chmod\\s+(777|a\\+rwx)", "flags": "i" }
+      ],
+      "verdict": "review",
+      "reason": "chmod 777 requires human approval (filesystem shield)"
+    },
+    {
+      "name": "shield:filesystem:review-write-etc",
+      "tool": "bash",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "(tee|\\bcp\\b|\\bmv\\b|install|>+)\\s+.*\\/etc\\/"
+        }
+      ],
+      "verdict": "review",
+      "reason": "Writing to /etc requires human approval (filesystem shield)"
+    }
+  ],
+  "dangerousWords": ["wipefs"]
+}
