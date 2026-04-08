@@ -509,7 +509,18 @@ def execute_review_fix() -> None:
     print(f"  Security review done ({len(security_text)} chars)", flush=True)
 
     # Post code review + security review on the original PR (your branch → main)
+    # Open one if it doesn't exist yet so reviews always have somewhere to land
     original_pr_number, original_pr_url = _find_existing_pr(head_branch, BASE_BRANCH)
+    if not original_pr_number:
+        pr_body  = f"## Changes on `{head_branch}`\n\n"
+        pr_body += f"**Tests:** {'✓ passing' if tests_passed_before else '✗ failing'}\n\n"
+        pr_body += "\n---\n*PR opened automatically by [node9](https://node9.ai) CI agent*"
+        original_pr_number, original_pr_url = _open_or_find_pr(
+            head_branch, BASE_BRANCH,
+            f"{head_branch} → {BASE_BRANCH}",
+            pr_body,
+        )
+
     if original_pr_number:
         comment  = f"## 🔍 node9 Code Review\n\n{review_text}\n\n"
         comment += "---\n*Automated review by [node9](https://node9.ai)*"
@@ -520,7 +531,7 @@ def execute_review_fix() -> None:
         _post_pr_comment(original_pr_number, security_comment)
         print(f"  Reviews posted on PR #{original_pr_number}", flush=True)
     else:
-        print("  No open PR found for this branch — reviews not posted", flush=True)
+        print("  Could not find or create PR — reviews not posted", flush=True)
 
     # If agent made fixes, open a separate fix PR
     fix_pr_number, fix_pr_url = None, ""
