@@ -82,7 +82,7 @@ check_blocked() {
   local label="$1"
   local payload="$2"
   local out
-  out=$(echo "$payload" | $NODE9 check 2>/dev/null)
+  out=$(echo "$payload" | $NODE9 check 2>/dev/null) || true
   if echo "$out" | grep -q '"decision":"block"'; then
     pass "BLOCKED  → $label"
   else
@@ -94,7 +94,7 @@ check_allowed() {
   local label="$1"
   local payload="$2"
   local out
-  out=$(echo "$payload" | $NODE9 check 2>/dev/null)
+  out=$(echo "$payload" | $NODE9 check 2>/dev/null) || true
   if [ -z "$out" ]; then
     pass "ALLOWED  → $label"
   else
@@ -151,10 +151,10 @@ check_allowed "check_permissions" '{"tool_name":"check_permissions","tool_input"
 check_allowed "perform_search"  '{"tool_name":"perform_search","tool_input":{}}'
 
 echo -e "\n  ${YELLOW}Malformed / empty input (must never crash Claude):${RESET}"
-out=$(echo '' | $NODE9 check 2>/dev/null); ec=$?
+out=$(echo '' | $NODE9 check 2>/dev/null) || true; ec=$?
 [ $ec -eq 0 ] && pass "Empty stdin → exits 0 (fail-open)" || fail "Empty stdin crashed (exit $ec)"
 
-out=$(echo 'not json at all' | $NODE9 check 2>/dev/null); ec=$?
+out=$(echo 'not json at all' | $NODE9 check 2>/dev/null) || true; ec=$?
 [ $ec -eq 0 ] && pass "Invalid JSON → exits 0 (fail-open)" || fail "Invalid JSON crashed (exit $ec)"
 
 echo -e "\n  ${YELLOW}Daemon isolation (NODE9_NO_AUTO_DAEMON=1 must prevent auto-start):${RESET}"
@@ -208,7 +208,7 @@ fi
 # =============================================================================
 section "Part 4 · Response format"
 
-RESPONSE=$(echo '{"tool_name":"delete_user","tool_input":{"id":1}}' | $NODE9 check 2>/dev/null)
+RESPONSE=$(echo '{"tool_name":"delete_user","tool_input":{"id":1}}' | $NODE9 check 2>/dev/null) || true
 
 echo "$RESPONSE" | grep -q '"decision":"block"' \
   && pass 'Response has decision:"block"' \
@@ -247,14 +247,14 @@ EOF
 # Run from a dir with NO project config — global config must apply
 NOPROJECT=$(mktemp -d)
 
-out=$(cd "$NOPROJECT" && echo '{"tool_name":"nuke_everything","tool_input":{}}' | HOME="$GLOBAL_HOME" $NODE9 check 2>/dev/null)
+out=$(cd "$NOPROJECT" && echo '{"tool_name":"nuke_everything","tool_input":{}}' | HOME="$GLOBAL_HOME" $NODE9 check 2>/dev/null) || true
 if echo "$out" | grep -q '"decision":"block"'; then
   pass "Global config: custom dangerous word 'nuke' is blocked"
 else
   fail "Global config not applied: 'nuke_everything' not blocked (got: '$out')"
 fi
 
-out=$(cd "$NOPROJECT" && echo '{"tool_name":"list_users","tool_input":{}}' | HOME="$GLOBAL_HOME" $NODE9 check 2>/dev/null)
+out=$(cd "$NOPROJECT" && echo '{"tool_name":"list_users","tool_input":{}}' | HOME="$GLOBAL_HOME" $NODE9 check 2>/dev/null) || true
 if [ -z "$out" ]; then
   pass "Global config: ignoredTools still work"
 else
@@ -274,7 +274,7 @@ cat > "$NOPROJECT/node9.config.json" << 'EOF'
 }
 EOF
 
-out=$(cd "$NOPROJECT" && echo '{"tool_name":"nuke_everything","tool_input":{}}' | HOME="$GLOBAL_HOME" $NODE9 check 2>/dev/null)
+out=$(cd "$NOPROJECT" && echo '{"tool_name":"nuke_everything","tool_input":{}}' | HOME="$GLOBAL_HOME" $NODE9 check 2>/dev/null) || true
 if [ -z "$out" ]; then
   pass "Project config takes precedence over global config"
 else
