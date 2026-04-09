@@ -365,8 +365,12 @@ export async function setupClaude(): Promise<void> {
   // ── HUD (statusLine) — set alongside hooks in the same write ────────────
   const hudCommand = fullPathCommand('hud');
   const statusLineObj = { type: 'command', command: hudCommand };
-  const existingStatusLine = settings.statusLine as { type?: string; command?: string } | string | undefined;
-  const existingStatusCommand = typeof existingStatusLine === 'object' ? existingStatusLine?.command : existingStatusLine;
+  const existingStatusLine = settings.statusLine as
+    | { type?: string; command?: string }
+    | string
+    | undefined;
+  const existingStatusCommand =
+    typeof existingStatusLine === 'object' ? existingStatusLine?.command : existingStatusLine;
   if (existingStatusCommand !== hudCommand) {
     settings.statusLine = statusLineObj as unknown as string;
     hooksChanged = true;
