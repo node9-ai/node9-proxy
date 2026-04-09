@@ -443,6 +443,29 @@ export async function main(): Promise<void> {
   try {
     const [stdin, daemonStatus] = await Promise.all([readStdin(), queryDaemon()]);
 
+    // Debug: presence of ~/.node9/hud-debug flag file enables stdin logging.
+    // Toggle with: node9 hud debug on|off
+    if (fs.existsSync(path.join(os.homedir(), '.node9', 'hud-debug'))) {
+      try {
+        const logPath = path.join(os.homedir(), '.node9', 'hud-debug.log');
+        const MAX_LOG_SIZE = 10 * 1024 * 1024; // 10 MB — prevent unbounded growth
+        let size = 0;
+        try {
+          size = fs.statSync(logPath).size;
+        } catch {
+          /* file doesn't exist yet */
+        }
+        if (size < MAX_LOG_SIZE) {
+          fs.appendFileSync(
+            logPath,
+            JSON.stringify({ ts: new Date().toISOString(), stdin }) + '\n'
+          );
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+
     if (!daemonStatus) {
       renderOffline();
       return;

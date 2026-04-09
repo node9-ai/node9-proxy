@@ -4,6 +4,7 @@
 import type { Command } from 'commander';
 import chalk from 'chalk';
 import fs from 'fs';
+import { spawn } from 'child_process';
 import path from 'path';
 import os from 'os';
 import { authorizeHeadless } from '../../auth/orchestrator';
@@ -62,6 +63,49 @@ export function registerCheckCommand(program: Command): void {
           // Pass payload.cwd directly to getConfig() instead of mutating process.chdir —
           // process.chdir is process-global and would race with concurrent hook invocations.
           const config = getConfig(payload.cwd || undefined);
+
+          // Eagerly start the daemon for activity logging (fire-and-forget).
+          // Without this, tool events never reach `node9 tail` if the daemon
+          // wasn't already running when the Claude Code session started.
+          if (
+            config.settings.autoStartDaemon &&
+            !isDaemonRunning() &&
+            !process.env.NODE9_NO_AUTO_DAEMON
+          ) {
+            try {
+              // Resolve symlinks on argv[1] and verify it matches this package's own
+              // CLI entry (dist/cli.js). Prevents spawn from executing an attacker-
+              // controlled script if the process is invoked via a malicious wrapper or
+              // crafted argv.
+              const scriptPath = process.argv[1];
+              if (typeof scriptPath !== 'string' || !path.isAbsolute(scriptPath))
+                throw new Error('node9: argv[1] is not an absolute path');
+              const resolvedScript = fs.realpathSync(scriptPath);
+              const expectedCli = fs.realpathSync(path.resolve(__dirname, '../../cli.js'));
+              if (resolvedScript !== expectedCli)
+                throw new Error(
+                  'node9: daemon spawn aborted — argv[1] does not resolve to the node9 CLI'
+                );
+              // Strip env vars that can inject code into the spawned Node.js process.
+              const safeEnv = { ...process.env };
+              for (const key of [
+                'NODE_OPTIONS',
+                'LD_PRELOAD',
+                'LD_LIBRARY_PATH',
+                'DYLD_INSERT_LIBRARIES',
+                'NODE_PATH',
+                'ELECTRON_RUN_AS_NODE',
+              ]) {
+                delete safeEnv[key];
+              }
+              const d = spawn(process.execPath, [scriptPath, 'daemon'], {
+                detached: true,
+                stdio: 'ignore',
+                env: { ...safeEnv, NODE9_AUTO_STARTED: '1', NODE9_BROWSER_OPENED: '1' },
+              });
+              d.unref();
+            } catch {}
+          }
 
           // Debug logging — controlled by Env Var OR new Settings config
           if (process.env.NODE9_DEBUG === '1' || config.settings.enableHookLogDebug) {

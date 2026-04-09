@@ -266,10 +266,15 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
         return;
       } finally {
         authPending = false;
-        agentIn.resume();
         // If agent stdin closed while we were authorizing, end the child's stdin now.
         // The approved write above (if any) has already been queued before this runs.
-        if (deferredStdinEnd) child.stdin.end();
+        // Do NOT call agentIn.resume() in this case — readline auto-closes when its
+        // input stream closes, so resume() would throw ERR_USE_AFTER_CLOSE.
+        if (deferredStdinEnd) {
+          child.stdin.end();
+        } else {
+          agentIn.resume();
+        }
         // If upstream exited while we were authorizing, exit now that the
         // response has been written to stdout.
         if (deferredExitCode !== null) process.exit(deferredExitCode);

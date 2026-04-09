@@ -356,6 +356,14 @@ function estimateToolCost(tool: string, args: unknown): number | undefined {
     return (String(newStr).length / BYTES_PER_TOKEN / 1_000_000) * OUTPUT_PRICE_PER_1M;
   }
 
+  // Bash/shell: the command text itself is AI-generated output tokens
+  if (t === 'bash' || t === 'shell' || t === 'run_shell_command' || t === 'terminal_execute') {
+    const command = String(a.command ?? a.cmd ?? a.input ?? '');
+    if (command.length > 0) {
+      return (command.length / BYTES_PER_TOKEN / 1_000_000) * OUTPUT_PRICE_PER_1M;
+    }
+  }
+
   return undefined;
 }
 

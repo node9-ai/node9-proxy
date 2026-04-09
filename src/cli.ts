@@ -405,7 +405,46 @@ registerLogCommand(program);
 program
   .command('hud')
   .description('Render node9 security statusline (spawned by Claude Code statusLine)')
-  .action(async () => {
+  .addHelpText(
+    'after',
+    `
+Outputs up to 3 lines to stdout, then exits:
+
+  Line 1 — Security state (always shown):
+    🛡 node9 | <mode> [shields] | ✅ allowed  🛑 blocked  🚨 dlp  ~$cost
+    Shows "offline" if the node9 daemon is not running.
+
+  Line 2 — Claude context & rate limits (shown when available):
+    <model>  │ ctx ██████░░░░ 61%  │ 5h ████░░░░░░ 40% (2h 10m left)
+    Only appears when Claude Code passes context_window / rate_limits data via stdin.
+
+  Line 3 — Environment counts (shown when non-zero):
+    2 CLAUDE.md | 5 rules | 4 MCPs | 3 hooks
+    Counts CLAUDE.md files, rules/, MCP servers, and hook entries across user + project scope.
+    Disable with: { "settings": { "hud": { "showEnvironmentCounts": false } } } in node9.config.json
+
+Claude Code spawns this command every ~300ms and writes a JSON payload to stdin.
+Run "node9 addto claude" to register it as the statusLine.`
+  )
+  .argument('[subcommand]', 'Optional: "debug on" / "debug off" to toggle stdin logging')
+  .argument('[state]', 'on|off — used with "debug" subcommand')
+  .action(async (subcommand?: string, state?: string) => {
+    if (subcommand === 'debug') {
+      const flagFile = path.join(os.homedir(), '.node9', 'hud-debug');
+      if (state === 'on') {
+        fs.mkdirSync(path.dirname(flagFile), { recursive: true });
+        fs.writeFileSync(flagFile, '');
+        console.log('HUD debug logging enabled → ~/.node9/hud-debug.log');
+        console.log('Tail it with: tail -f ~/.node9/hud-debug.log');
+      } else if (state === 'off') {
+        if (fs.existsSync(flagFile)) fs.unlinkSync(flagFile);
+        console.log('HUD debug logging disabled.');
+      } else {
+        console.error('Usage: node9 hud debug on|off');
+        process.exit(1);
+      }
+      return;
+    }
     const { main } = await import('./cli/hud.js');
     await main();
   });

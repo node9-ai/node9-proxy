@@ -396,6 +396,9 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
   }
 
   const connectionTime = Date.now();
+  // True until the first live (pending) event arrives — ring buffer replay events
+  // are shown regardless of timestamp so the user always sees recent history on connect.
+  let initialReplayDone = false;
   const activityPending = new Map<string, ActivityItem>();
   // Buffer for results that arrive before their matching pending event (race condition)
   const orphanedResults = new Map<string, ResultItem>();
@@ -844,14 +847,27 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
     }
 
     if (event === 'activity') {
-      // History filter: skip replayed events unless --history requested
-      if (!options.history && data.ts > 0 && data.ts < connectionTime) return;
-
-      // Ring-buffer replay: activity events already have a resolved status — render immediately
-      if (data.status && data.status !== 'pending') {
+      // Ring-buffer replay events (resolved status, old timestamp) are always shown on
+      // initial connect so the user sees recent history without needing --history.
+      // Once the first live pending event arrives, initialReplayDone = true and the
+      // time filter applies normally to avoid re-showing stale events on reconnect.
+      const isReplayEvent = data.status && data.status !== 'pending';
+      if (isReplayEvent && !initialReplayDone) {
         renderResult(data, data);
         return;
       }
+
+      // History filter: skip old events after initial replay, unless --history requested
+      if (!options.history && data.ts > 0 && data.ts < connectionTime) return;
+
+      // Ring-buffer replay: activity events already have a resolved status — render immediately
+      if (isReplayEvent) {
+        renderResult(data, data);
+        return;
+      }
+
+      // First live pending event — initial replay is complete
+      if (!initialReplayDone) initialReplayDone = true;
 
       // Race condition: result already arrived before this pending event — render immediately
       const orphaned = orphanedResults.get(data.id);
