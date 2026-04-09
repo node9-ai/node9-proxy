@@ -73,13 +73,17 @@ export function registerCheckCommand(program: Command): void {
             !process.env.NODE9_NO_AUTO_DAEMON
           ) {
             try {
+              // Resolve symlinks on argv[1] and verify it matches this package's own
+              // CLI entry (dist/cli.js). Prevents spawn from executing an attacker-
+              // controlled script if the process is invoked via a malicious wrapper or
+              // crafted argv.
               const scriptPath = process.argv[1];
-              if (
-                typeof scriptPath !== 'string' ||
-                !path.isAbsolute(scriptPath) ||
-                !fs.existsSync(scriptPath)
-              )
-                throw new Error('node9: cannot resolve CLI script path for daemon spawn');
+              if (typeof scriptPath !== 'string' || !path.isAbsolute(scriptPath))
+                throw new Error('node9: argv[1] is not an absolute path');
+              const resolvedScript = fs.realpathSync(scriptPath);
+              const expectedCli = fs.realpathSync(path.resolve(__dirname, '../../cli.js'));
+              if (resolvedScript !== expectedCli)
+                throw new Error('node9: daemon spawn aborted — argv[1] does not resolve to the node9 CLI');
               // Strip env vars that can inject code into the spawned Node.js process.
               const safeEnv = { ...process.env };
               for (const key of [
@@ -88,6 +92,7 @@ export function registerCheckCommand(program: Command): void {
                 'LD_LIBRARY_PATH',
                 'DYLD_INSERT_LIBRARIES',
                 'NODE_PATH',
+                'ELECTRON_RUN_AS_NODE',
               ]) {
                 delete safeEnv[key];
               }
