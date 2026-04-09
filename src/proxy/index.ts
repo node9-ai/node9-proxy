@@ -34,10 +34,12 @@ export async function runProxy(targetCommand: string) {
   // stderr only — stdout must stay clean for stdio protocols (JSON-RPC, MCP)
   console.error(chalk.green(`🚀 Node9 Proxy Active: Monitoring [${targetCommand}]`));
 
-  // Spawn the MCP Server / Shell command
+  // Spawn the MCP Server / Shell command.
+  // Use bash (not /bin/sh) for shell fallback so that bash builtins and
+  // bash-specific syntax work correctly — /bin/sh is dash on many systems.
   const spawnEnv = { ...process.env, FORCE_COLOR: '1' };
   const child = useShell
-    ? spawn(targetCommand, { stdio: ['pipe', 'pipe', 'inherit'], shell: true, env: spawnEnv })
+    ? spawn('/bin/bash', ['-c', targetCommand], { stdio: ['pipe', 'pipe', 'inherit'], shell: false, env: spawnEnv })
     : spawn(executable, args, { stdio: ['pipe', 'pipe', 'inherit'], shell: false, env: spawnEnv });
 
   // ── INTERCEPT INPUT (Agent -> Server) ──
