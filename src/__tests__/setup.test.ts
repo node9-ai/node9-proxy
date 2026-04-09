@@ -99,6 +99,7 @@ describe('setupClaude', () => {
           PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] }],
           PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
         },
+        statusLine: { type: 'command', command: 'node9 hud' },
       },
       [mcpPath]: { mcpServers: { node9: NODE9_MCP_ENTRY } },
     });
@@ -170,6 +171,7 @@ describe('setupClaude', () => {
           PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] }],
           PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
         },
+        statusLine: { type: 'command', command: 'node9 hud' },
       },
       [mcpPath]: { mcpServers: { node9: NODE9_MCP_ENTRY } },
     });

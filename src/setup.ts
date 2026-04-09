@@ -362,13 +362,21 @@ export async function setupClaude(): Promise<void> {
     anythingChanged = true;
   }
 
+  // ── HUD (statusLine) — set alongside hooks in the same write ────────────
+  const hudCommand = fullPathCommand('hud');
+  const statusLineObj = { type: 'command', command: hudCommand };
+  const existingStatusLine = settings.statusLine as { type?: string; command?: string } | string | undefined;
+  const existingStatusCommand = typeof existingStatusLine === 'object' ? existingStatusLine?.command : existingStatusLine;
+  if (existingStatusCommand !== hudCommand) {
+    settings.statusLine = statusLineObj as unknown as string;
+    hooksChanged = true;
+    anythingChanged = true;
+  }
+
   if (hooksChanged) {
     writeJson(hooksPath, settings);
     console.log('');
   }
-
-  // ── HUD (statusLine) — always set alongside hooks ────────────────────────
-  setupHud();
 
   // ── Step 2: Modifications — show preview and ask ─────────────────────────
   const serversToWrap: Array<{ name: string; upstream: string }> = [];
