@@ -540,10 +540,15 @@ def execute_review_fix() -> None:
         tools._run_unprotected("git config user.name 'node9 CI'")
         tools._run_unprotected(f"git checkout -B {fix_branch}")
         tools._run_unprotected("git add -A")
-        subprocess.run(
-            ["git", "commit", "-m", f"node9 fix: {len(files_changed)} file(s) fixed"],
+        staged = subprocess.run(
+            ["git", "diff", "--staged", "--quiet"],
             cwd=tools.WORKSPACE_DIR,
         )
+        if staged.returncode != 0:
+            subprocess.run(
+                ["git", "commit", "-m", f"node9 fix: {len(files_changed)} file(s) fixed"],
+                cwd=tools.WORKSPACE_DIR,
+            )
         tools._run_unprotected(f"git push origin {fix_branch} --force")
 
         fix_pr_body  = f"## 🤖 node9 AI Fixes\n\n"
