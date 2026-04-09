@@ -260,6 +260,10 @@ export async function askNativePopup(
           locked,
           allowCount
         );
+        // No --timeout: zenity's timeout exit code is 0 on X11/XWayland, which
+        // the close handler would silently treat as "allow". Instead we rely on
+        // the orchestrator's AbortSignal (approvalTimeoutMs) to kill zenity via
+        // SIGKILL — that exits with a non-zero code and correctly resolves as deny.
         const argsList = [
           locked ? '--info' : '--question',
           '--modal',
@@ -270,8 +274,6 @@ export async function askNativePopup(
           pangoMessage,
           '--ok-label',
           locked ? 'Waiting...' : 'Allow  ↵',
-          '--timeout',
-          '300',
         ];
         if (!locked) {
           argsList.push('--cancel-label', 'Block  ⎋');
