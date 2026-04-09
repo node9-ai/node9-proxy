@@ -1,8 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import fs from 'fs';
-import os from 'os';
 
-vi.spyOn(os, 'homedir').mockReturnValue('/mock/home');
+// vi.mock is hoisted above imports so the mock is active when shields.ts
+// evaluates SHIELDS at module load time.  vi.spyOn(os, 'homedir') does NOT
+// work here because static imports are hoisted above vi.spyOn calls.
+vi.mock('os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('os')>();
+  return { ...actual, default: { ...actual, homedir: () => '/mock/home' } };
+});
 
 import {
   SHIELDS,
@@ -40,6 +45,10 @@ describe('resolveShieldName', () => {
     expect(resolveShieldName('github')).toBe('github');
     expect(resolveShieldName('aws')).toBe('aws');
     expect(resolveShieldName('filesystem')).toBe('filesystem');
+    expect(resolveShieldName('docker')).toBe('docker');
+    expect(resolveShieldName('k8s')).toBe('k8s');
+    expect(resolveShieldName('mongodb')).toBe('mongodb');
+    expect(resolveShieldName('redis')).toBe('redis');
   });
 
   it('resolves aliases', () => {
@@ -50,6 +59,9 @@ describe('resolveShieldName', () => {
     expect(resolveShieldName('fs')).toBe('filesystem');
     expect(resolveShieldName('bash')).toBe('bash-safe');
     expect(resolveShieldName('shell')).toBe('bash-safe');
+    expect(resolveShieldName('kubernetes')).toBe('k8s');
+    expect(resolveShieldName('kubectl')).toBe('k8s');
+    expect(resolveShieldName('mongo')).toBe('mongodb');
   });
 
   it('is case-insensitive', () => {
@@ -84,13 +96,27 @@ describe('getShield', () => {
 
 // ── listShields ───────────────────────────────────────────────────────────────
 describe('listShields', () => {
-  it('returns all five builtin shields', () => {
-    const names = listShields().map((s) => s.name);
-    expect(names).toContain('postgres');
-    expect(names).toContain('github');
-    expect(names).toContain('aws');
-    expect(names).toContain('filesystem');
-    expect(names).toContain('bash-safe');
+  const EXPECTED_BUILTIN_SHIELDS = [
+    'aws',
+    'bash-safe',
+    'docker',
+    'filesystem',
+    'github',
+    'k8s',
+    'mongodb',
+    'postgres',
+    'redis',
+  ];
+
+  it('loads every builtin shield JSON', () => {
+    const names = listShields()
+      .map((s) => s.name)
+      .sort();
+    expect(names).toEqual(EXPECTED_BUILTIN_SHIELDS);
+  });
+
+  it.each(EXPECTED_BUILTIN_SHIELDS)('resolves "%s" by canonical name', (name) => {
+    expect(resolveShieldName(name)).toBe(name);
   });
 });
 
@@ -694,9 +720,10 @@ describe('SHIELDS loader: user shields', () => {
     // The mock for homedir returns '/mock/home', so the user dir would be
     // /mock/home/.node9/shields/. Since no files are there in tests, only
     // builtins are loaded. Verify the builtins loaded correctly.
-    expect(Object.keys(SHIELDS).length).toBeGreaterThanOrEqual(5);
+    expect(Object.keys(SHIELDS).length).toBeGreaterThanOrEqual(9);
     expect(SHIELDS['postgres']).toBeDefined();
     expect(SHIELDS['bash-safe']).toBeDefined();
+    expect(SHIELDS['k8s']).toBeDefined();
   });
 
   it('each builtin shield has required fields', () => {
@@ -721,4 +748,440 @@ describe('SHIELDS loader: user shields', () => {
       }
     }
   });
+});
+
+// ── shared regex-test helper ─────────────────────────────────────────────────
+// Tests all conditions of a rule against an input string (works for both
+// `command` and `sql` fields — the helper only validates the regex pattern).
+function matchesShieldRule(shieldName: string, ruleName: string, input: string): boolean {
+  const shield = SHIELDS[shieldName];
+  if (!shield) throw new Error(`Shield not found: ${shieldName}`);
+  const rule = shield.smartRules.find((r) => r.name === ruleName);
+  if (!rule) throw new Error(`Rule not found: ${ruleName}`);
+  return rule.conditions.every((c) => {
+    const re = new RegExp(c.value ?? '', c.flags ?? '');
+    return re.test(input);
+  });
+}
+
+// ── AWS shield rule patterns ────────────────────────────────────────────────
+describe('aws shield rules', () => {
+  describe('block-delete-s3-bucket', () => {
+    const rule = 'shield:aws:block-delete-s3-bucket';
+    it('matches aws s3 rb', () =>
+      expect(matchesShieldRule('aws', rule, 'aws s3 rb s3://my-bucket')).toBe(true));
+    it('matches aws s3api delete-bucket', () =>
+      expect(matchesShieldRule('aws', rule, 'aws s3api delete-bucket --bucket my-bucket')).toBe(
+        true
+      ));
+    it('does not match aws s3 ls', () =>
+      expect(matchesShieldRule('aws', rule, 'aws s3 ls')).toBe(false));
+    it('does not match aws s3 cp', () =>
+      expect(matchesShieldRule('aws', rule, 'aws s3 cp file.txt s3://bucket/')).toBe(false));
+  });
+
+  describe('review-iam-changes', () => {
+    const rule = 'shield:aws:review-iam-changes';
+    it('matches aws iam create-user', () =>
+      expect(matchesShieldRule('aws', rule, 'aws iam create-user --user-name test')).toBe(true));
+    it('matches aws iam delete-role', () =>
+      expect(matchesShieldRule('aws', rule, 'aws iam delete-role --role-name test')).toBe(true));
+    it('matches aws iam attach-role-policy', () =>
+      expect(
+        matchesShieldRule(
+          'aws',
+          rule,
+          'aws iam attach-role-policy --role-name test --policy-arn arn:aws:iam::policy/test'
+        )
+      ).toBe(true));
+    it('does not match aws iam list-users', () =>
+      expect(matchesShieldRule('aws', rule, 'aws iam list-users')).toBe(false));
+    it('does not match aws iam get-user', () =>
+      expect(matchesShieldRule('aws', rule, 'aws iam get-user --user-name test')).toBe(false));
+  });
+
+  describe('block-ec2-terminate', () => {
+    const rule = 'shield:aws:block-ec2-terminate';
+    it('matches aws ec2 terminate-instances', () =>
+      expect(
+        matchesShieldRule('aws', rule, 'aws ec2 terminate-instances --instance-ids i-1234')
+      ).toBe(true));
+    it('does not match aws ec2 describe-instances', () =>
+      expect(matchesShieldRule('aws', rule, 'aws ec2 describe-instances')).toBe(false));
+    it('does not match aws ec2 stop-instances', () =>
+      expect(matchesShieldRule('aws', rule, 'aws ec2 stop-instances --instance-ids i-1234')).toBe(
+        false
+      ));
+  });
+
+  describe('review-rds-delete', () => {
+    const rule = 'shield:aws:review-rds-delete';
+    it('matches aws rds delete-db-instance', () =>
+      expect(
+        matchesShieldRule('aws', rule, 'aws rds delete-db-instance --db-instance-identifier test')
+      ).toBe(true));
+    it('matches aws rds delete-db-cluster', () =>
+      expect(
+        matchesShieldRule('aws', rule, 'aws rds delete-db-cluster --db-cluster-identifier test')
+      ).toBe(true));
+    it('does not match aws rds describe-db-instances', () =>
+      expect(matchesShieldRule('aws', rule, 'aws rds describe-db-instances')).toBe(false));
+    it('does not match aws rds create-db-instance', () =>
+      expect(
+        matchesShieldRule('aws', rule, 'aws rds create-db-instance --db-instance-identifier test')
+      ).toBe(false));
+  });
+});
+
+// ── Docker shield rule patterns ─────────────────────────────────────────────
+describe('docker shield rules', () => {
+  describe('block-system-prune', () => {
+    const rule = 'shield:docker:block-system-prune';
+    it('matches docker system prune', () =>
+      expect(matchesShieldRule('docker', rule, 'docker system prune')).toBe(true));
+    it('matches docker system prune -af', () =>
+      expect(matchesShieldRule('docker', rule, 'docker system prune -af')).toBe(true));
+    it('does not match docker system df', () =>
+      expect(matchesShieldRule('docker', rule, 'docker system df')).toBe(false));
+  });
+
+  describe('block-volume-prune', () => {
+    const rule = 'shield:docker:block-volume-prune';
+    it('matches docker volume prune', () =>
+      expect(matchesShieldRule('docker', rule, 'docker volume prune')).toBe(true));
+    it('does not match docker volume ls', () =>
+      expect(matchesShieldRule('docker', rule, 'docker volume ls')).toBe(false));
+  });
+
+  describe('block-rm-force', () => {
+    const rule = 'shield:docker:block-rm-force';
+    it('matches docker rm -f container', () =>
+      expect(matchesShieldRule('docker', rule, 'docker rm -f container1')).toBe(true));
+    it('matches docker rm --force container', () =>
+      expect(matchesShieldRule('docker', rule, 'docker rm --force container1')).toBe(true));
+    it('does not match docker rm container (no force)', () =>
+      expect(matchesShieldRule('docker', rule, 'docker rm container1')).toBe(false));
+    it('does not match docker rmi -f (rmi not rm)', () =>
+      expect(matchesShieldRule('docker', rule, 'docker rmi -f image1')).toBe(false));
+  });
+
+  describe('review-volume-rm', () => {
+    const rule = 'shield:docker:review-volume-rm';
+    it('matches docker volume rm myvolume', () =>
+      expect(matchesShieldRule('docker', rule, 'docker volume rm myvolume')).toBe(true));
+    it('does not match docker volume ls', () =>
+      expect(matchesShieldRule('docker', rule, 'docker volume ls')).toBe(false));
+  });
+
+  describe('review-stop-kill', () => {
+    const rule = 'shield:docker:review-stop-kill';
+    it('matches docker stop container', () =>
+      expect(matchesShieldRule('docker', rule, 'docker stop container1')).toBe(true));
+    it('matches docker kill container', () =>
+      expect(matchesShieldRule('docker', rule, 'docker kill container1')).toBe(true));
+    it('does not match docker start container', () =>
+      expect(matchesShieldRule('docker', rule, 'docker start container1')).toBe(false));
+  });
+
+  describe('review-image-rm', () => {
+    const rule = 'shield:docker:review-image-rm';
+    it('matches docker image rm myimage', () =>
+      expect(matchesShieldRule('docker', rule, 'docker image rm myimage')).toBe(true));
+    it('does not match docker image ls', () =>
+      expect(matchesShieldRule('docker', rule, 'docker image ls')).toBe(false));
+  });
+
+  describe('review-rmi-force', () => {
+    const rule = 'shield:docker:review-rmi-force';
+    it('matches docker rmi -f myimage', () =>
+      expect(matchesShieldRule('docker', rule, 'docker rmi -f myimage')).toBe(true));
+    it('matches docker rmi --force myimage', () =>
+      expect(matchesShieldRule('docker', rule, 'docker rmi --force myimage')).toBe(true));
+    it('does not match docker rmi myimage (no force)', () =>
+      expect(matchesShieldRule('docker', rule, 'docker rmi myimage')).toBe(false));
+    it('does not match docker rm -f container (rm not rmi)', () =>
+      expect(matchesShieldRule('docker', rule, 'docker rm -f container1')).toBe(false));
+  });
+});
+
+// ── GitHub shield rule patterns ─────────────────────────────────────────────
+describe('github shield rules', () => {
+  describe('review-delete-branch-remote', () => {
+    const rule = 'shield:github:review-delete-branch-remote';
+    it('matches git push origin --delete branch', () =>
+      expect(matchesShieldRule('github', rule, 'git push origin --delete feature-branch')).toBe(
+        true
+      ));
+    it('does not match git push origin main', () =>
+      expect(matchesShieldRule('github', rule, 'git push origin main')).toBe(false));
+    it('does not match git branch --delete (local)', () =>
+      expect(matchesShieldRule('github', rule, 'git branch --delete feature-branch')).toBe(false));
+  });
+
+  describe('block-delete-repo', () => {
+    const rule = 'shield:github:block-delete-repo';
+    it('matches gh repo delete', () =>
+      expect(matchesShieldRule('github', rule, 'gh repo delete my-repo')).toBe(true));
+    it('matches gh repo delete with --yes', () =>
+      expect(matchesShieldRule('github', rule, 'gh repo delete org/repo --yes')).toBe(true));
+    it('does not match gh repo create', () =>
+      expect(matchesShieldRule('github', rule, 'gh repo create my-repo')).toBe(false));
+    it('does not match gh repo view', () =>
+      expect(matchesShieldRule('github', rule, 'gh repo view')).toBe(false));
+  });
+});
+
+// ── K8s shield rule patterns ────────────────────────────────────────────────
+describe('k8s shield rules', () => {
+  describe('block-delete-namespace', () => {
+    const rule = 'shield:k8s:block-delete-namespace';
+    it('matches kubectl delete namespace production', () =>
+      expect(matchesShieldRule('k8s', rule, 'kubectl delete namespace production')).toBe(true));
+    it('matches kubectl delete ns default', () =>
+      expect(matchesShieldRule('k8s', rule, 'kubectl delete ns default')).toBe(true));
+    it('does not match kubectl get namespace', () =>
+      expect(matchesShieldRule('k8s', rule, 'kubectl get namespace')).toBe(false));
+    it('does not match kubectl describe ns', () =>
+      expect(matchesShieldRule('k8s', rule, 'kubectl describe ns production')).toBe(false));
+  });
+
+  describe('block-delete-all', () => {
+    const rule = 'shield:k8s:block-delete-all';
+    it('matches kubectl delete pods --all', () =>
+      expect(matchesShieldRule('k8s', rule, 'kubectl delete pods --all')).toBe(true));
+    it('matches kubectl delete deployments --all -n prod', () =>
+      expect(matchesShieldRule('k8s', rule, 'kubectl delete deployments --all -n prod')).toBe(
+        true
+      ));
+    it('does not match kubectl delete pod my-pod', () =>
+      expect(matchesShieldRule('k8s', rule, 'kubectl delete pod my-pod')).toBe(false));
+  });
+
+  describe('block-helm-uninstall', () => {
+    const rule = 'shield:k8s:block-helm-uninstall';
+    it('matches helm uninstall my-release', () =>
+      expect(matchesShieldRule('k8s', rule, 'helm uninstall my-release')).toBe(true));
+    it('matches helm delete my-release', () =>
+      expect(matchesShieldRule('k8s', rule, 'helm delete my-release')).toBe(true));
+    it('does not match helm install my-release', () =>
+      expect(matchesShieldRule('k8s', rule, 'helm install my-release ./chart')).toBe(false));
+    it('does not match helm list', () =>
+      expect(matchesShieldRule('k8s', rule, 'helm list')).toBe(false));
+  });
+
+  describe('review-scale-zero', () => {
+    const rule = 'shield:k8s:review-scale-zero';
+    it('matches kubectl scale --replicas=0', () =>
+      expect(matchesShieldRule('k8s', rule, 'kubectl scale deployment myapp --replicas=0')).toBe(
+        true
+      ));
+    it('does not match kubectl scale --replicas=3', () =>
+      expect(matchesShieldRule('k8s', rule, 'kubectl scale deployment myapp --replicas=3')).toBe(
+        false
+      ));
+  });
+
+  describe('review-delete-deployment', () => {
+    const rule = 'shield:k8s:review-delete-deployment';
+    it('matches kubectl delete deployment myapp', () =>
+      expect(matchesShieldRule('k8s', rule, 'kubectl delete deployment myapp')).toBe(true));
+    it('matches kubectl delete deploy myapp', () =>
+      expect(matchesShieldRule('k8s', rule, 'kubectl delete deploy myapp')).toBe(true));
+    it('matches kubectl delete statefulset mydb', () =>
+      expect(matchesShieldRule('k8s', rule, 'kubectl delete statefulset mydb')).toBe(true));
+    it('matches kubectl delete sts mydb', () =>
+      expect(matchesShieldRule('k8s', rule, 'kubectl delete sts mydb')).toBe(true));
+    it('matches kubectl delete daemonset myds', () =>
+      expect(matchesShieldRule('k8s', rule, 'kubectl delete daemonset myds')).toBe(true));
+    it('matches kubectl delete ds myds', () =>
+      expect(matchesShieldRule('k8s', rule, 'kubectl delete ds myds')).toBe(true));
+    it('does not match kubectl delete pod my-pod', () =>
+      expect(matchesShieldRule('k8s', rule, 'kubectl delete pod my-pod')).toBe(false));
+    it('does not match kubectl get deployment', () =>
+      expect(matchesShieldRule('k8s', rule, 'kubectl get deployment myapp')).toBe(false));
+  });
+
+  describe('review-apply-force', () => {
+    const rule = 'shield:k8s:review-apply-force';
+    it('matches kubectl apply --force', () =>
+      expect(matchesShieldRule('k8s', rule, 'kubectl apply -f manifest.yaml --force')).toBe(true));
+    it('matches kubectl replace --force', () =>
+      expect(matchesShieldRule('k8s', rule, 'kubectl replace -f pod.yaml --force')).toBe(true));
+    it('does not match kubectl apply (no force)', () =>
+      expect(matchesShieldRule('k8s', rule, 'kubectl apply -f manifest.yaml')).toBe(false));
+  });
+});
+
+// ── MongoDB shield rule patterns ────────────────────────────────────────────
+describe('mongodb shield rules', () => {
+  describe('block-drop-database', () => {
+    const rule = 'shield:mongodb:block-drop-database';
+    it('matches db.dropDatabase()', () =>
+      expect(matchesShieldRule('mongodb', rule, 'db.dropDatabase()')).toBe(true));
+    it('matches with leading code', () =>
+      expect(matchesShieldRule('mongodb', rule, 'use mydb; db.dropDatabase()')).toBe(true));
+    it('does not match db.getCollectionNames()', () =>
+      expect(matchesShieldRule('mongodb', rule, 'db.getCollectionNames()')).toBe(false));
+  });
+
+  describe('block-drop-collection', () => {
+    const rule = 'shield:mongodb:block-drop-collection';
+    it('matches db.users.drop()', () =>
+      expect(matchesShieldRule('mongodb', rule, 'db.users.drop()')).toBe(true));
+    it('matches db.getCollection().drop()', () =>
+      expect(matchesShieldRule('mongodb', rule, "db.getCollection('users').drop()")).toBe(true));
+    it('does not match db.users.find()', () =>
+      expect(matchesShieldRule('mongodb', rule, 'db.users.find()')).toBe(false));
+  });
+
+  describe('block-delete-many-empty-filter', () => {
+    const rule = 'shield:mongodb:block-delete-many-empty-filter';
+    it('matches .deleteMany({})', () =>
+      expect(matchesShieldRule('mongodb', rule, 'db.users.deleteMany({})')).toBe(true));
+    it('matches with whitespace .deleteMany( { } )', () =>
+      expect(matchesShieldRule('mongodb', rule, 'db.users.deleteMany( { } )')).toBe(true));
+    it('does not match .deleteMany with filter', () =>
+      expect(matchesShieldRule('mongodb', rule, 'db.users.deleteMany({ age: { $gt: 100 } })')).toBe(
+        false
+      ));
+  });
+
+  describe('review-delete-many', () => {
+    const rule = 'shield:mongodb:review-delete-many';
+    it('matches .deleteMany( with filter', () =>
+      expect(
+        matchesShieldRule('mongodb', rule, "db.users.deleteMany({ status: 'inactive' })")
+      ).toBe(true));
+    it('does not match .deleteOne()', () =>
+      expect(matchesShieldRule('mongodb', rule, 'db.users.deleteOne({})')).toBe(false));
+    it('does not match .find()', () =>
+      expect(matchesShieldRule('mongodb', rule, 'db.users.find({})')).toBe(false));
+  });
+
+  describe('review-drop-index', () => {
+    const rule = 'shield:mongodb:review-drop-index';
+    it('matches .dropIndex()', () =>
+      expect(matchesShieldRule('mongodb', rule, "db.users.dropIndex('email_1')")).toBe(true));
+    it('matches .dropIndexes()', () =>
+      expect(matchesShieldRule('mongodb', rule, 'db.users.dropIndexes()')).toBe(true));
+    it('does not match .createIndex()', () =>
+      expect(matchesShieldRule('mongodb', rule, 'db.users.createIndex({ email: 1 })')).toBe(false));
+  });
+});
+
+// ── Postgres shield rule patterns ───────────────────────────────────────────
+describe('postgres shield rules', () => {
+  describe('block-drop-table', () => {
+    const rule = 'shield:postgres:block-drop-table';
+    it('matches DROP TABLE users', () =>
+      expect(matchesShieldRule('postgres', rule, 'DROP TABLE users')).toBe(true));
+    it('matches case-insensitive', () =>
+      expect(matchesShieldRule('postgres', rule, 'drop table users cascade')).toBe(true));
+    it('does not match CREATE TABLE', () =>
+      expect(matchesShieldRule('postgres', rule, 'CREATE TABLE users (id int)')).toBe(false));
+    it('does not match SELECT', () =>
+      expect(matchesShieldRule('postgres', rule, 'SELECT * FROM users')).toBe(false));
+  });
+
+  describe('block-truncate', () => {
+    const rule = 'shield:postgres:block-truncate';
+    it('matches TRUNCATE TABLE users', () =>
+      expect(matchesShieldRule('postgres', rule, 'TRUNCATE TABLE users')).toBe(true));
+    it('matches case-insensitive', () =>
+      expect(matchesShieldRule('postgres', rule, 'truncate table users cascade')).toBe(true));
+    it('does not match DELETE FROM', () =>
+      expect(matchesShieldRule('postgres', rule, 'DELETE FROM users')).toBe(false));
+  });
+
+  describe('block-drop-column', () => {
+    const rule = 'shield:postgres:block-drop-column';
+    it('matches ALTER TABLE DROP COLUMN', () =>
+      expect(matchesShieldRule('postgres', rule, 'ALTER TABLE users DROP COLUMN email')).toBe(
+        true
+      ));
+    it('does not match ALTER TABLE ADD COLUMN', () =>
+      expect(matchesShieldRule('postgres', rule, 'ALTER TABLE users ADD COLUMN email text')).toBe(
+        false
+      ));
+  });
+
+  describe('review-grant-revoke', () => {
+    const rule = 'shield:postgres:review-grant-revoke';
+    it('matches GRANT', () =>
+      expect(matchesShieldRule('postgres', rule, 'GRANT SELECT ON users TO reader')).toBe(true));
+    it('matches REVOKE', () =>
+      expect(matchesShieldRule('postgres', rule, 'REVOKE ALL ON users FROM public')).toBe(true));
+    it('does not match SELECT FROM grants table', () =>
+      expect(matchesShieldRule('postgres', rule, 'SELECT * FROM grants')).toBe(false));
+  });
+});
+
+// ── Redis shield rule patterns ──────────────────────────────────────────────
+describe('redis shield rules', () => {
+  describe('block-flushall', () => {
+    const rule = 'shield:redis:block-flushall';
+    it('matches FLUSHALL', () => expect(matchesShieldRule('redis', rule, 'FLUSHALL')).toBe(true));
+    it('matches redis-cli FLUSHALL', () =>
+      expect(matchesShieldRule('redis', rule, 'redis-cli FLUSHALL')).toBe(true));
+    it('matches case-insensitive', () =>
+      expect(matchesShieldRule('redis', rule, 'flushall')).toBe(true));
+    it('does not match GET key', () =>
+      expect(matchesShieldRule('redis', rule, 'GET key')).toBe(false));
+  });
+
+  describe('block-flushdb', () => {
+    const rule = 'shield:redis:block-flushdb';
+    it('matches FLUSHDB', () => expect(matchesShieldRule('redis', rule, 'FLUSHDB')).toBe(true));
+    it('matches redis-cli FLUSHDB', () =>
+      expect(matchesShieldRule('redis', rule, 'redis-cli FLUSHDB')).toBe(true));
+    it('does not match DBSIZE', () =>
+      expect(matchesShieldRule('redis', rule, 'DBSIZE')).toBe(false));
+  });
+
+  describe('block-config-resetstat', () => {
+    const rule = 'shield:redis:block-config-resetstat';
+    it('matches CONFIG RESETSTAT', () =>
+      expect(matchesShieldRule('redis', rule, 'CONFIG RESETSTAT')).toBe(true));
+    it('does not match CONFIG GET', () =>
+      expect(matchesShieldRule('redis', rule, 'CONFIG GET maxmemory')).toBe(false));
+  });
+
+  describe('review-config-set', () => {
+    const rule = 'shield:redis:review-config-set';
+    it('matches CONFIG SET', () =>
+      expect(matchesShieldRule('redis', rule, 'CONFIG SET maxmemory 100mb')).toBe(true));
+    it('does not match CONFIG GET', () =>
+      expect(matchesShieldRule('redis', rule, 'CONFIG GET maxmemory')).toBe(false));
+    it('does not match SET key value', () =>
+      expect(matchesShieldRule('redis', rule, 'SET key value')).toBe(false));
+  });
+
+  describe('review-del-wildcard', () => {
+    const rule = 'shield:redis:review-del-wildcard';
+    it('matches DEL user:*', () =>
+      expect(matchesShieldRule('redis', rule, 'DEL user:*')).toBe(true));
+    it('matches redis-cli --scan | xargs del', () =>
+      expect(
+        matchesShieldRule(
+          'redis',
+          rule,
+          "redis-cli --scan --pattern 'user:*' | xargs redis-cli del"
+        )
+      ).toBe(true));
+    it('does not match DEL user:123 (no wildcard)', () =>
+      expect(matchesShieldRule('redis', rule, 'DEL user:123')).toBe(false));
+  });
+});
+
+// ── Filesystem shield: review-chmod-777 regex ───────────────────────────────
+describe('filesystem shield: review-chmod-777 regex', () => {
+  const rule = 'shield:filesystem:review-chmod-777';
+  it('matches chmod 777', () =>
+    expect(matchesShieldRule('filesystem', rule, 'chmod 777 /tmp/file')).toBe(true));
+  it('matches chmod a+rwx', () =>
+    expect(matchesShieldRule('filesystem', rule, 'chmod a+rwx /tmp/file')).toBe(true));
+  it('does not match chmod 755', () =>
+    expect(matchesShieldRule('filesystem', rule, 'chmod 755 /tmp/file')).toBe(false));
+  it('does not match chmod u+rx', () =>
+    expect(matchesShieldRule('filesystem', rule, 'chmod u+rx /tmp/file')).toBe(false));
 });
