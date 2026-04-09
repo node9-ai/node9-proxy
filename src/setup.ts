@@ -367,6 +367,9 @@ export async function setupClaude(): Promise<void> {
     console.log('');
   }
 
+  // ── HUD (statusLine) — always set alongside hooks ────────────────────────
+  setupHud();
+
   // ── Step 2: Modifications — show preview and ask ─────────────────────────
   const serversToWrap: Array<{ name: string; upstream: string }> = [];
   for (const [name, server] of Object.entries(servers)) {

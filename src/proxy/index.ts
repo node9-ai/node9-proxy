@@ -39,7 +39,11 @@ export async function runProxy(targetCommand: string) {
   // bash-specific syntax work correctly — /bin/sh is dash on many systems.
   const spawnEnv = { ...process.env, FORCE_COLOR: '1' };
   const child = useShell
-    ? spawn('/bin/bash', ['-c', targetCommand], { stdio: ['pipe', 'pipe', 'inherit'], shell: false, env: spawnEnv })
+    ? spawn('/bin/bash', ['-c', targetCommand], {
+        stdio: ['pipe', 'pipe', 'inherit'],
+        shell: false,
+        env: spawnEnv,
+      })
     : spawn(executable, args, { stdio: ['pipe', 'pipe', 'inherit'], shell: false, env: spawnEnv });
 
   // ── INTERCEPT INPUT (Agent -> Server) ──

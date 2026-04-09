@@ -4,6 +4,7 @@
 import type { Command } from 'commander';
 import chalk from 'chalk';
 import fs from 'fs';
+import { spawn } from 'child_process';
 import path from 'path';
 import os from 'os';
 import { authorizeHeadless } from '../../auth/orchestrator';
@@ -62,6 +63,24 @@ export function registerCheckCommand(program: Command): void {
           // Pass payload.cwd directly to getConfig() instead of mutating process.chdir —
           // process.chdir is process-global and would race with concurrent hook invocations.
           const config = getConfig(payload.cwd || undefined);
+
+          // Eagerly start the daemon for activity logging (fire-and-forget).
+          // Without this, tool events never reach `node9 tail` if the daemon
+          // wasn't already running when the Claude Code session started.
+          if (
+            config.settings.autoStartDaemon &&
+            !isDaemonRunning() &&
+            !process.env.NODE9_NO_AUTO_DAEMON
+          ) {
+            try {
+              const d = spawn(process.execPath, [process.argv[1], 'daemon'], {
+                detached: true,
+                stdio: 'ignore',
+                env: { ...process.env, NODE9_AUTO_STARTED: '1', NODE9_BROWSER_OPENED: '1' },
+              });
+              d.unref();
+            } catch {}
+          }
 
           // Debug logging — controlled by Env Var OR new Settings config
           if (process.env.NODE9_DEBUG === '1' || config.settings.enableHookLogDebug) {
