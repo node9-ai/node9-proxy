@@ -28,5 +28,29 @@
     "description": "Protects the local filesystem from dangerous AI operations",
     "author": "node9",
     "url": "https://raw.githubusercontent.com/node9ai/node9-proxy/main/src/shields/builtin/filesystem.json"
+  },
+  {
+    "name": "mongodb",
+    "description": "Protects MongoDB databases from destructive AI operations",
+    "author": "node9",
+    "url": "https://raw.githubusercontent.com/node9ai/node9-proxy/main/src/shields/builtin/mongodb.json"
+  },
+  {
+    "name": "redis",
+    "description": "Protects Redis instances from destructive AI operations",
+    "author": "node9",
+    "url": "https://raw.githubusercontent.com/node9ai/node9-proxy/main/src/shields/builtin/redis.json"
+  },
+  {
+    "name": "k8s",
+    "description": "Protects Kubernetes clusters from destructive AI operations",
+    "author": "node9",
+    "url": "https://raw.githubusercontent.com/node9ai/node9-proxy/main/src/shields/builtin/k8s.json"
+  },
+  {
+    "name": "docker",
+    "description": "Protects Docker environments from destructive AI operations",
+    "author": "node9",
+    "url": "https://raw.githubusercontent.com/node9ai/node9-proxy/main/src/shields/builtin/docker.json"
   }
 ]

@@ -1,0 +1,92 @@
+{
+  "name": "k8s",
+  "description": "Protects Kubernetes clusters from destructive AI operations",
+  "aliases": ["kubernetes", "kubectl"],
+  "smartRules": [
+    {
+      "name": "shield:k8s:block-delete-namespace",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "kubectl\\s+delete\\s+(ns|namespace)\\s+",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "Deleting a namespace destroys all resources inside it — blocked by k8s shield"
+    },
+    {
+      "name": "shield:k8s:block-delete-all",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "kubectl\\s+delete\\s+.*--all\\b",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "kubectl delete --all is irreversible — blocked by k8s shield"
+    },
+    {
+      "name": "shield:k8s:block-helm-uninstall",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "helm\\s+(uninstall|delete|del)\\s+",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "helm uninstall removes a release and its resources — blocked by k8s shield"
+    },
+    {
+      "name": "shield:k8s:review-scale-zero",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "kubectl\\s+scale\\s+.*--replicas=0",
+          "flags": "i"
+        }
+      ],
+      "verdict": "review",
+      "reason": "Scaling to zero takes down a workload and requires human approval (k8s shield)"
+    },
+    {
+      "name": "shield:k8s:review-delete-deployment",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "kubectl\\s+delete\\s+(deployment|deploy|statefulset|sts|daemonset|ds)\\s+",
+          "flags": "i"
+        }
+      ],
+      "verdict": "review",
+      "reason": "Deleting a workload requires human approval (k8s shield)"
+    },
+    {
+      "name": "shield:k8s:review-apply-force",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "kubectl\\s+(apply|replace)\\s+.*--force",
+          "flags": "i"
+        }
+      ],
+      "verdict": "review",
+      "reason": "Force-apply overwrites live resources and requires human approval (k8s shield)"
+    }
+  ],
+  "dangerousWords": []
+}

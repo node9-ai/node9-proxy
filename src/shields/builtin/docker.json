@@ -1,0 +1,92 @@
+{
+  "name": "docker",
+  "description": "Protects Docker environments from destructive AI operations",
+  "aliases": [],
+  "smartRules": [
+    {
+      "name": "shield:docker:block-system-prune",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "docker\\s+system\\s+prune",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "docker system prune removes all unused containers, images, and volumes — blocked by Docker shield"
+    },
+    {
+      "name": "shield:docker:block-volume-prune",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "docker\\s+volume\\s+prune",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "docker volume prune destroys all unused volumes and their data — blocked by Docker shield"
+    },
+    {
+      "name": "shield:docker:block-rm-force",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "docker\\s+rm\\s+.*-f|docker\\s+rm\\s+.*--force",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "Force-removing running containers is destructive — blocked by Docker shield"
+    },
+    {
+      "name": "shield:docker:review-volume-rm",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "docker\\s+volume\\s+rm\\s+",
+          "flags": "i"
+        }
+      ],
+      "verdict": "review",
+      "reason": "Volume removal deletes persistent data and requires human approval (Docker shield)"
+    },
+    {
+      "name": "shield:docker:review-stop-kill",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "docker\\s+(stop|kill)\\s+",
+          "flags": "i"
+        }
+      ],
+      "verdict": "review",
+      "reason": "Stopping or killing containers requires human approval (Docker shield)"
+    },
+    {
+      "name": "shield:docker:review-rmi-force",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "docker\\s+rmi\\s+.*(-f|--force)|docker\\s+image\\s+rm\\s+",
+          "flags": "i"
+        }
+      ],
+      "verdict": "review",
+      "reason": "Force image removal requires human approval (Docker shield)"
+    }
+  ],
+  "dangerousWords": []
+}

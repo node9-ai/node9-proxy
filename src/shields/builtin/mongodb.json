@@ -1,0 +1,78 @@
+{
+  "name": "mongodb",
+  "description": "Protects MongoDB databases from destructive AI operations",
+  "aliases": ["mongo"],
+  "smartRules": [
+    {
+      "name": "shield:mongodb:block-drop-database",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "\\.dropDatabase\\s*\\(",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "dropDatabase is irreversible — blocked by MongoDB shield"
+    },
+    {
+      "name": "shield:mongodb:block-drop-collection",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "\\.drop\\s*\\(|db\\.getCollection\\([^)]+\\)\\.drop\\s*\\(",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "Collection drop is irreversible — blocked by MongoDB shield"
+    },
+    {
+      "name": "shield:mongodb:block-delete-many-empty-filter",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "\\.deleteMany\\s*\\(\\s*\\{\\s*\\}\\s*\\)",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "deleteMany({}) with empty filter wipes the entire collection — blocked by MongoDB shield"
+    },
+    {
+      "name": "shield:mongodb:review-delete-many",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "\\.deleteMany\\s*\\(",
+          "flags": "i"
+        }
+      ],
+      "verdict": "review",
+      "reason": "deleteMany requires human approval (MongoDB shield)"
+    },
+    {
+      "name": "shield:mongodb:review-drop-index",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "\\.dropIndex\\s*\\(|\\.dropIndexes\\s*\\(",
+          "flags": "i"
+        }
+      ],
+      "verdict": "review",
+      "reason": "Index drops affect query performance and require human approval (MongoDB shield)"
+    }
+  ],
+  "dangerousWords": ["dropDatabase", "dropCollection", "mongodrop"]
+}

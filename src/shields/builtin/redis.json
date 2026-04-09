@@ -1,0 +1,78 @@
+{
+  "name": "redis",
+  "description": "Protects Redis instances from destructive AI operations",
+  "aliases": [],
+  "smartRules": [
+    {
+      "name": "shield:redis:block-flushall",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "\\bFLUSHALL\\b",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "FLUSHALL deletes every key in every database — blocked by Redis shield"
+    },
+    {
+      "name": "shield:redis:block-flushdb",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "\\bFLUSHDB\\b",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "FLUSHDB deletes all keys in the current database — blocked by Redis shield"
+    },
+    {
+      "name": "shield:redis:block-config-resetstat",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "\\bCONFIG\\s+RESETSTAT\\b",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "CONFIG RESETSTAT resets server statistics irreversibly — blocked by Redis shield"
+    },
+    {
+      "name": "shield:redis:review-config-set",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "\\bCONFIG\\s+SET\\b",
+          "flags": "i"
+        }
+      ],
+      "verdict": "review",
+      "reason": "CONFIG SET changes live server configuration and requires human approval (Redis shield)"
+    },
+    {
+      "name": "shield:redis:review-del-wildcard",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "\\bDEL\\b.*[*?\\[]|redis-cli.*--scan.*\\|.*xargs.*del",
+          "flags": "i"
+        }
+      ],
+      "verdict": "review",
+      "reason": "Wildcard key deletion requires human approval (Redis shield)"
+    }
+  ],
+  "dangerousWords": ["FLUSHALL", "FLUSHDB"]
+}

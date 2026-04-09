@@ -206,11 +206,11 @@ Shields add protection for specific infrastructure and services — only relevan
 **Builtin shields** (ship with every install):
 
 | Shield       | What it protects                                                                                                |
-| :----------- | :-------------------------------------------------------------------------------------------------------------- | -------------------------------- | --------------------------------- |
+| :----------- | :-------------------------------------------------------------------------------------------------------------- |
 | `postgres`   | Hard-blocks `DROP TABLE`, `TRUNCATE`, `DROP COLUMN` (upgrades Layer 1 review → block); reviews `GRANT`/`REVOKE` |
 | `github`     | Blocks `gh repo delete`; reviews remote branch deletion                                                         |
 | `aws`        | Blocks S3 bucket deletion, EC2 termination; reviews IAM changes, RDS deletion                                   |
-| `bash-safe`  | Blocks pipe-to-shell (`curl                                                                                     | bash`), obfuscated exec (`base64 | sh`), `rm -rf /`, raw disk writes |
+| `bash-safe`  | Blocks pipe-to-shell (`curl \| bash`), obfuscated exec (`base64 \| sh`), `rm -rf /`, raw disk writes            |
 | `filesystem` | Reviews `chmod 777`, writes to `/etc/`                                                                          |
 
 ```bash
