@@ -447,10 +447,17 @@ export async function main(): Promise<void> {
     // Toggle with: node9 hud debug on|off
     if (fs.existsSync(path.join(os.homedir(), '.node9', 'hud-debug'))) {
       try {
-        fs.appendFileSync(
-          path.join(os.homedir(), '.node9', 'hud-debug.log'),
-          JSON.stringify({ ts: new Date().toISOString(), stdin }) + '\n'
-        );
+        const logPath = path.join(os.homedir(), '.node9', 'hud-debug.log');
+        const MAX_LOG_SIZE = 10 * 1024 * 1024; // 10 MB — prevent unbounded growth
+        let size = 0;
+        try {
+          size = fs.statSync(logPath).size;
+        } catch {
+          /* file doesn't exist yet */
+        }
+        if (size < MAX_LOG_SIZE) {
+          fs.appendFileSync(logPath, JSON.stringify({ ts: new Date().toISOString(), stdin }) + '\n');
+        }
       } catch {
         /* ignore */
       }

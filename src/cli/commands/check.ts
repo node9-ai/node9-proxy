@@ -73,10 +73,21 @@ export function registerCheckCommand(program: Command): void {
             !process.env.NODE9_NO_AUTO_DAEMON
           ) {
             try {
-              const d = spawn(process.execPath, [process.argv[1], 'daemon'], {
+              const scriptPath = process.argv[1];
+              if (
+                typeof scriptPath !== 'string' ||
+                !path.isAbsolute(scriptPath) ||
+                !fs.existsSync(scriptPath)
+              )
+                throw new Error('node9: cannot resolve CLI script path for daemon spawn');
+              // Strip env vars that can inject code into the spawned Node.js process.
+              // eslint-disable-next-line @typescript-eslint/no-unused-vars
+              const { NODE_OPTIONS, LD_PRELOAD, LD_LIBRARY_PATH, DYLD_INSERT_LIBRARIES, NODE_PATH, ...safeEnv } =
+                process.env;
+              const d = spawn(process.execPath, [scriptPath, 'daemon'], {
                 detached: true,
                 stdio: 'ignore',
-                env: { ...process.env, NODE9_AUTO_STARTED: '1', NODE9_BROWSER_OPENED: '1' },
+                env: { ...safeEnv, NODE9_AUTO_STARTED: '1', NODE9_BROWSER_OPENED: '1' },
               });
               d.unref();
             } catch {}
