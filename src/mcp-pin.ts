@@ -70,23 +70,44 @@ export function getServerKey(upstreamCommand: string): string {
 // File I/O
 // ---------------------------------------------------------------------------
 
-/** Read the pin registry from disk. Returns empty servers on missing/corrupt file. */
-export function readMcpPins(): PinsFile {
+export type PinsReadResult =
+  | { ok: true; pins: PinsFile }
+  | { ok: false; reason: 'missing' }
+  | { ok: false; reason: 'corrupt'; detail: string };
+
+/**
+ * Read the pin registry from disk with explicit error reporting.
+ * - File missing (ENOENT): returns `{ ok: false, reason: 'missing' }` — genuinely new.
+ * - File corrupt / unreadable: returns `{ ok: false, reason: 'corrupt' }` — fail closed.
+ * - File valid: returns `{ ok: true, pins }`.
+ */
+export function readMcpPinsSafe(): PinsReadResult {
   const filePath = getPinsFilePath();
   try {
     const raw = fs.readFileSync(filePath, 'utf-8');
-    if (!raw.trim()) return { servers: {} };
+    if (!raw.trim()) {
+      return { ok: false, reason: 'corrupt', detail: 'empty file' };
+    }
     const parsed = JSON.parse(raw) as Partial<PinsFile>;
     if (!parsed.servers || typeof parsed.servers !== 'object' || Array.isArray(parsed.servers)) {
-      return { servers: {} };
+      return { ok: false, reason: 'corrupt', detail: 'invalid structure: missing servers object' };
     }
-    return { servers: parsed.servers };
+    return { ok: true, pins: { servers: parsed.servers } };
   } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-      process.stderr.write(`[node9] Warning: could not read MCP pins: ${String(err)}\n`);
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { ok: false, reason: 'missing' };
     }
-    return { servers: {} };
+    return { ok: false, reason: 'corrupt', detail: String(err) };
   }
+}
+
+/** Read the pin registry from disk. Returns empty servers only on missing file. Throws on corrupt. */
+export function readMcpPins(): PinsFile {
+  const result = readMcpPinsSafe();
+  if (result.ok) return result.pins;
+  if (result.reason === 'missing') return { servers: {} };
+  // Corrupt / unreadable — fail closed
+  throw new Error(`[node9] MCP pin file is corrupt: ${result.detail}`);
 }
 
 /** Atomic write of the pin registry to disk. */
@@ -105,13 +126,22 @@ function writeMcpPins(data: PinsFile): void {
 /**
  * Check whether a server's tool definitions match the pinned hash.
  * Returns:
- *   'new'      — no pin exists for this server (first connection)
+ *   'new'      — no pin exists for this server (first connection, file missing)
  *   'match'    — hash matches the pinned value
  *   'mismatch' — hash differs from the pinned value (possible rug pull)
+ *   'corrupt'  — pin file exists but is unreadable/malformed (fail closed)
  */
-export function checkPin(serverKey: string, currentHash: string): 'match' | 'mismatch' | 'new' {
-  const pins = readMcpPins();
-  const entry = pins.servers[serverKey];
+export function checkPin(
+  serverKey: string,
+  currentHash: string
+): 'match' | 'mismatch' | 'new' | 'corrupt' {
+  const result = readMcpPinsSafe();
+  if (!result.ok) {
+    if (result.reason === 'missing') return 'new';
+    // Corrupt pin file — caller must fail closed
+    return 'corrupt';
+  }
+  const entry = result.pins.servers[serverKey];
   if (!entry) return 'new';
   return entry.toolsHash === currentHash ? 'match' : 'mismatch';
 }
@@ -132,6 +162,12 @@ export function updatePin(
     pinnedAt: new Date().toISOString(),
   };
   writeMcpPins(pins);
+}
+
+/** Get a single server's pin entry, or undefined if not found. */
+export function getPin(serverKey: string): PinEntry | undefined {
+  const pins = readMcpPins();
+  return pins.servers[serverKey];
 }
 
 /** Remove a single server's pin. */

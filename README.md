@@ -84,6 +84,24 @@ Wrap any MCP server transparently. The AI sees the same server — Node9 interce
 
 Or use `node9 setup` — it wraps existing MCP servers automatically.
 
+### MCP Tool Pinning — rug pull defense
+
+MCP servers can change their tool definitions between sessions. A compromised or malicious server could silently add, remove, or modify tools after initial trust — a **rug pull** attack.
+
+Node9 defends against this by **pinning** tool definitions on first use:
+
+1. **First connection** — the gateway records a SHA-256 hash of all tool definitions
+2. **Subsequent connections** — the hash is compared; if tools changed, the session is **quarantined** and all tool calls are blocked until a human reviews and approves the change
+3. **Corrupt pin state** — fails closed (blocks), never silently re-trusts
+
+```bash
+node9 mcp pin list                # show all pinned servers and hashes
+node9 mcp pin update <serverKey>  # review tool changes, diff old vs new, re-pin after approval
+node9 mcp pin reset               # clear all pins (re-pin on next connection)
+```
+
+This is automatic — no configuration needed. The gateway pins on first `tools/list` and enforces on every subsequent session.
+
 ---
 
 ## Python SDK — govern any Python agent

@@ -10,11 +10,11 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-// The module under test — does not exist yet (TDD)
 import {
   hashToolDefinitions,
   getServerKey,
   readMcpPins,
+  readMcpPinsSafe,
   checkPin,
   updatePin,
   removePin,
@@ -181,13 +181,89 @@ describe('pin file operations', () => {
     expect(stat.mode & 0o777).toBe(0o600);
   });
 
-  it('handles corrupted pin file gracefully', () => {
+  it('readMcpPins throws on corrupted pin file (fail closed)', () => {
     const node9Dir = path.join(tmpHome, '.node9');
     fs.mkdirSync(node9Dir, { recursive: true });
     fs.writeFileSync(path.join(node9Dir, 'mcp-pins.json'), 'not valid json');
 
-    // Should not throw — returns empty
-    const pins = readMcpPins();
-    expect(pins.servers).toEqual({});
+    expect(() => readMcpPins()).toThrow(/corrupt/i);
+  });
+
+  it('readMcpPinsSafe returns corrupt for invalid JSON', () => {
+    const node9Dir = path.join(tmpHome, '.node9');
+    fs.mkdirSync(node9Dir, { recursive: true });
+    fs.writeFileSync(path.join(node9Dir, 'mcp-pins.json'), 'not valid json');
+
+    const result = readMcpPinsSafe();
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('corrupt');
+    }
+  });
+
+  it('readMcpPinsSafe returns corrupt for empty file', () => {
+    const node9Dir = path.join(tmpHome, '.node9');
+    fs.mkdirSync(node9Dir, { recursive: true });
+    fs.writeFileSync(path.join(node9Dir, 'mcp-pins.json'), '');
+
+    const result = readMcpPinsSafe();
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('corrupt');
+    }
+  });
+
+  it('readMcpPinsSafe returns corrupt for truncated JSON', () => {
+    const node9Dir = path.join(tmpHome, '.node9');
+    fs.mkdirSync(node9Dir, { recursive: true });
+    fs.writeFileSync(path.join(node9Dir, 'mcp-pins.json'), '{"servers": {"key1": {"toolsHash":');
+
+    const result = readMcpPinsSafe();
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('corrupt');
+    }
+  });
+
+  it('readMcpPinsSafe returns corrupt for JSON missing servers object', () => {
+    const node9Dir = path.join(tmpHome, '.node9');
+    fs.mkdirSync(node9Dir, { recursive: true });
+    fs.writeFileSync(path.join(node9Dir, 'mcp-pins.json'), '{"version": 1}');
+
+    const result = readMcpPinsSafe();
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('corrupt');
+    }
+  });
+
+  it('readMcpPinsSafe returns missing when no file exists', () => {
+    const result = readMcpPinsSafe();
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('missing');
+    }
+  });
+
+  it('readMcpPinsSafe returns ok with valid pins', () => {
+    updatePin('key1', 'cmd1', 'a'.repeat(64), ['t1']);
+    const result = readMcpPinsSafe();
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.pins.servers['key1']).toBeDefined();
+    }
+  });
+
+  it('checkPin returns "corrupt" for corrupted pin file', () => {
+    const node9Dir = path.join(tmpHome, '.node9');
+    fs.mkdirSync(node9Dir, { recursive: true });
+    fs.writeFileSync(path.join(node9Dir, 'mcp-pins.json'), 'not valid json');
+
+    expect(checkPin('anykey', 'anyhash')).toBe('corrupt');
+  });
+
+  it('checkPin returns "new" when file is missing (not corrupt)', () => {
+    // No pin file exists at all
+    expect(checkPin('anykey', 'anyhash')).toBe('new');
   });
 });
