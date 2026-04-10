@@ -164,12 +164,6 @@ export function updatePin(
   writeMcpPins(pins);
 }
 
-/** Get a single server's pin entry, or undefined if not found. */
-export function getPin(serverKey: string): PinEntry | undefined {
-  const pins = readMcpPins();
-  return pins.servers[serverKey];
-}
-
 /** Remove a single server's pin. */
 export function removePin(serverKey: string): void {
   const pins = readMcpPins();
