@@ -96,7 +96,7 @@ Node9 defends against this by **pinning** tool definitions on first use:
 
 ```bash
 node9 mcp pin list                # show all pinned servers and hashes
-node9 mcp pin update <serverKey>  # review tool changes, diff old vs new, re-pin after approval
+node9 mcp pin update <serverKey>  # remove pin, re-pin on next connection
 node9 mcp pin reset               # clear all pins (re-pin on next connection)
 ```
 
