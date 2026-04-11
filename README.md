@@ -3,11 +3,12 @@
 ### The "Sudo" Command for AI Agents.
 
 [![NPM Version](https://img.shields.io/npm/v/@node9/proxy.svg)](https://www.npmjs.com/package/@node9/proxy)
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Open in HF Spaces](https://huggingface.co/datasets/huggingface/badges/resolve/main/open-in-hf-spaces-sm.svg)](https://huggingface.co/spaces/Node9ai/node9-security-demo)
 [![Documentation](https://img.shields.io/badge/docs-node9.ai%2Fdocs-blue)](https://node9.ai/docs)
 
 **Node9** sits between your AI agent and your system. Every shell command, file write, and tool call passes through Node9 first — blocked, approved, or logged based on your policy. Works with Claude Code, Gemini CLI, Cursor, Codex, and any MCP server.
+
 
 📖 **[Full Documentation →](https://node9.ai/docs)**
 

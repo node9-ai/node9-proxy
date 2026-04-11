@@ -149,6 +149,70 @@ const TOOLS = [
       required: ['hash'],
     },
   },
+  {
+    name: 'node9_audit_get',
+    description:
+      'Read recent entries from the node9 audit log (~/.node9/audit.log). ' +
+      'Each entry shows timestamp, tool name, decision (allow/block/review), and agent. ' +
+      'Use this to review what AI actions have been taken recently.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: {
+          type: 'number',
+          description: 'Number of recent entries to return (default: 20, max: 100).',
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'node9_policy_get',
+    description:
+      'Show all active smart rules in detail — name, tool, verdict, conditions, and reason. ' +
+      'Includes default rules, shield rules, and any custom project rules. ' +
+      'Use this to understand exactly what is being blocked or reviewed.',
+    inputSchema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'node9_rule_add',
+    description:
+      'Add a new protective smart rule to the global node9 config (~/.node9/config.json). ' +
+      'Rules can block or send dangerous commands for human review based on regex conditions. ' +
+      'IMPORTANT: only "block" and "review" verdicts are permitted — "allow" rules are never ' +
+      'accepted because they would weaken node9 security. Rules can only be added, never removed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: {
+          type: 'string',
+          description: 'Unique rule name (e.g. "block-drop-prod-db").',
+        },
+        tool: {
+          type: 'string',
+          description: 'Tool to match — "bash", "*", or a specific tool name.',
+        },
+        field: {
+          type: 'string',
+          description: 'Field to inspect — "command" for bash, "sql" for database tools.',
+        },
+        pattern: {
+          type: 'string',
+          description: 'Regex pattern to match against the field.',
+        },
+        verdict: {
+          type: 'string',
+          enum: ['block', 'review'],
+          description: 'Action to take when the rule matches. Only "block" or "review" are allowed.',
+        },
+        reason: {
+          type: 'string',
+          description: 'Human-readable explanation shown when the rule triggers.',
+        },
+      },
+      required: ['name', 'tool', 'field', 'pattern', 'verdict', 'reason'],
+    },
+  },
 ];
 
 // ── Tool handlers ─────────────────────────────────────────────────────────────
@@ -340,6 +404,86 @@ function handleApproverSet(args: Record<string, unknown>): string {
   return `Approver channel "${channel}" ${enabled ? 'enabled' : 'disabled'} in ~/.node9/config.json.${suffix}`;
 }
 
+function handleAuditGet(args: Record<string, unknown>): string {
+  const limit = Math.min(typeof args.limit === 'number' ? args.limit : 20, 100);
+  const auditPath = path.join(os.homedir(), '.node9', 'audit.log');
+  if (!fs.existsSync(auditPath)) return 'No audit log found.';
+  const lines = fs.readFileSync(auditPath, 'utf-8').trim().split('\n').filter(Boolean);
+  const recent = lines.slice(-limit);
+  const entries = recent.map((line) => {
+    try {
+      const e = JSON.parse(line) as Record<string, unknown>;
+      return `${e.ts}  ${String(e.tool).padEnd(20)} ${String(e.decision).padEnd(8)} ${e.agent ?? ''}`;
+    } catch {
+      return line;
+    }
+  });
+  return `Last ${entries.length} audit entries:\n\n${entries.join('\n')}`;
+}
+
+
+function handlePolicyGet(): string {
+  const config = getConfig();
+  const rules = config.policy.smartRules;
+  if (rules.length === 0) return 'No smart rules active.';
+  const lines = rules.map((r, i) => {
+    const conditions = r.conditions
+      .map((c) => `${c.field} ${c.op} "${c.value}"`)
+      .join(` ${r.conditionMode ?? 'all'} `);
+    return `[${i + 1}] ${r.name ?? '(unnamed)'}  tool:${r.tool}  verdict:${r.verdict}\n    conditions: ${conditions}\n    reason: ${r.reason ?? '—'}`;
+  });
+  return `${rules.length} active smart rules:\n\n${lines.join('\n\n')}`;
+}
+
+
+function handleRuleAdd(args: Record<string, unknown>): string {
+  const name = args.name as string;
+  const tool = args.tool as string;
+  const field = args.field as string;
+  const pattern = args.pattern as string;
+  const verdict = args.verdict as string;
+  const reason = args.reason as string;
+
+  if (!['block', 'review'].includes(verdict)) {
+    throw new Error(
+      'verdict must be "block" or "review" — "allow" rules are not permitted as they would weaken node9 security'
+    );
+  }
+
+  // Validate regex
+  try {
+    new RegExp(pattern);
+  } catch {
+    throw new Error(`Invalid regex pattern: ${pattern}`);
+  }
+
+  const raw = readGlobalConfigRaw();
+  const policy = (raw.policy ?? {}) as Record<string, unknown>;
+  const smartRules = (policy.smartRules ?? []) as unknown[];
+
+  // Check for duplicate name
+  const existing = smartRules.find(
+    (r) => typeof r === 'object' && r !== null && (r as Record<string, unknown>).name === name
+  );
+  if (existing) throw new Error(`A rule named "${name}" already exists.`);
+
+  smartRules.push({
+    name,
+    tool,
+    conditions: [{ field, op: 'matches', value: pattern }],
+    conditionMode: 'all',
+    verdict,
+    reason,
+  });
+
+  policy.smartRules = smartRules;
+  raw.policy = policy;
+  writeGlobalConfigRaw(raw);
+
+  return `Rule "${name}" added to ~/.node9/config.json — verdict: ${verdict} when ${field} matches "${pattern}"`;
+}
+
+
 function handleUndoList(): string {
   const history = getSnapshotHistory();
   if (history.length === 0) {
@@ -441,6 +585,12 @@ export function runMcpServer(): void {
           text = handleUndoList();
         } else if (toolName === 'node9_undo_revert') {
           text = handleUndoRevert(toolArgs);
+        } else if (toolName === 'node9_audit_get') {
+          text = handleAuditGet(toolArgs);
+        } else if (toolName === 'node9_policy_get') {
+          text = handlePolicyGet();
+        } else if (toolName === 'node9_rule_add') {
+          text = handleRuleAdd(toolArgs);
         } else {
           process.stdout.write(err(id, -32601, `Unknown tool: ${toolName}`) + '\n');
           return;
