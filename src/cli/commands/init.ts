@@ -168,7 +168,9 @@ export function registerInitCommand(program: Command): void {
       console.log(chalk.white('  Local UI:    ') + chalk.cyan('node9 daemon --openui'));
       console.log('');
       console.log(chalk.gray('  ─────────────────────────────────────────────────'));
-      console.log(chalk.white('  Team dashboard + full audit trail → ') + chalk.cyan.bold('https://node9.ai'));
+      console.log(
+        chalk.white('  Team dashboard + full audit trail → ') + chalk.cyan.bold('https://node9.ai')
+      );
       console.log(chalk.gray('  ─────────────────────────────────────────────────'));
     });
 }
