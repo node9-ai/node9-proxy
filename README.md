@@ -9,7 +9,6 @@
 
 **Node9** sits between your AI agent and your system. Every shell command, file write, and tool call passes through Node9 first — blocked, approved, or logged based on your policy. Works with Claude Code, Gemini CLI, Cursor, Codex, and any MCP server.
 
-
 📖 **[Full Documentation →](https://node9.ai/docs)**
 
 ---

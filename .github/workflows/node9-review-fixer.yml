@@ -26,8 +26,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: write       # push fix branch
-      pull-requests: write  # open Draft PR
+      contents: write # push fix branch
+      pull-requests: write # open Draft PR
 
     steps:
       - uses: actions/checkout@v4

@@ -203,7 +203,8 @@ const TOOLS = [
         verdict: {
           type: 'string',
           enum: ['block', 'review'],
-          description: 'Action to take when the rule matches. Only "block" or "review" are allowed.',
+          description:
+            'Action to take when the rule matches. Only "block" or "review" are allowed.',
         },
         reason: {
           type: 'string',
@@ -421,7 +422,6 @@ function handleAuditGet(args: Record<string, unknown>): string {
   return `Last ${entries.length} audit entries:\n\n${entries.join('\n')}`;
 }
 
-
 function handlePolicyGet(): string {
   const config = getConfig();
   const rules = config.policy.smartRules;
@@ -434,7 +434,6 @@ function handlePolicyGet(): string {
   });
   return `${rules.length} active smart rules:\n\n${lines.join('\n\n')}`;
 }
-
 
 function handleRuleAdd(args: Record<string, unknown>): string {
   const name = args.name as string;
@@ -482,7 +481,6 @@ function handleRuleAdd(args: Record<string, unknown>): string {
 
   return `Rule "${name}" added to ~/.node9/config.json — verdict: ${verdict} when ${field} matches "${pattern}"`;
 }
-
 
 function handleUndoList(): string {
   const history = getSnapshotHistory();
