@@ -144,6 +144,7 @@ export function registerCheckCommand(program: Command): void {
               changeHint?: string;
               blockedByLabel?: string;
               recoveryCommand?: string;
+              ruleDescription?: string;
             }
           ) => {
             // 1. Determine the context (User vs Policy)
@@ -176,6 +177,7 @@ export function registerCheckCommand(program: Command): void {
               } else {
                 writeTty(chalk.red(`\n🛑 Node9 blocked "${toolName}"`));
               }
+              if (result?.ruleDescription) writeTty(chalk.white(`   ${result.ruleDescription}`));
               writeTty(chalk.gray(`   Triggered by: ${blockedByContext}`));
               if (result?.changeHint) writeTty(chalk.cyan(`   To change:  ${result.changeHint}`));
               if (result?.recoveryCommand)

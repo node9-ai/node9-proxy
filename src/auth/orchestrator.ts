@@ -57,6 +57,8 @@ export interface AuthResult {
   observeWouldBlock?: boolean;
   /** Recovery command to suggest when a stateful rule hard-blocks (e.g. "npm test"). */
   recoveryCommand?: string;
+  /** Plain-English description of what triggered this result (from SmartRule.description). */
+  ruleDescription?: string;
 }
 
 // ── Taint helpers ────────────────────────────────────────────────────────────
@@ -451,6 +453,7 @@ async function _authorizeHeadlessCore(
           blockedByLabel: policyResult.blockedByLabel,
           ruleHit: policyResult.ruleName,
           ...(policyResult.recoveryCommand && { recoveryCommand: policyResult.recoveryCommand }),
+          ...(policyResult.ruleDescription && { ruleDescription: policyResult.ruleDescription }),
         };
       }
     }

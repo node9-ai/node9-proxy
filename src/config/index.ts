@@ -38,6 +38,10 @@ export interface SmartRule {
    *  Shown to the developer on /dev/tty and passed to the AI as a hint.
    *  Example: "npm test" */
   recoveryCommand?: string;
+  /** Plain-English explanation of what this rule does and why it matters.
+   *  Shown to the user in the review/block card instead of (or alongside) the raw command.
+   *  Example: "Force push rewrites shared history and can permanently destroy teammates' work." */
+  description?: string;
 }
 
 export interface EnvironmentConfig {
@@ -183,6 +187,8 @@ export const DEFAULT_CONFIG: Config = {
         ],
         verdict: 'block',
         reason: 'Recursive delete of home directory is irreversible',
+        description:
+          'The AI wants to recursively delete your home directory. This will permanently destroy all your personal files and cannot be undone.',
       },
       // ── SQL safety ────────────────────────────────────────────────────────
       {
@@ -195,6 +201,8 @@ export const DEFAULT_CONFIG: Config = {
         conditionMode: 'all',
         verdict: 'review',
         reason: 'DELETE/UPDATE without WHERE clause — would affect every row in the table',
+        description:
+          'The AI is running a SQL statement that will modify every row in the table — no WHERE filter was found. This could wipe or corrupt all your data.',
       },
       {
         name: 'review-drop-truncate-shell',
@@ -210,6 +218,8 @@ export const DEFAULT_CONFIG: Config = {
         conditionMode: 'all',
         verdict: 'review',
         reason: 'SQL DDL destructive statement inside a shell command',
+        description:
+          'The AI wants to drop or truncate a database table via the shell. This permanently deletes the table structure or all its data.',
       },
       // ── Git safety ────────────────────────────────────────────────────────
       {
@@ -226,6 +236,8 @@ export const DEFAULT_CONFIG: Config = {
         conditionMode: 'all',
         verdict: 'block',
         reason: 'Force push overwrites remote history and cannot be undone',
+        description:
+          'The AI wants to force push to a remote git branch. This rewrites shared history and can permanently destroy commits that teammates have already pulled.',
       },
       {
         name: 'review-git-push',
@@ -241,6 +253,8 @@ export const DEFAULT_CONFIG: Config = {
         conditionMode: 'all',
         verdict: 'review',
         reason: 'git push sends changes to a shared remote',
+        description:
+          'The AI wants to push commits to a remote repository. Once pushed, those changes are visible to everyone with access.',
       },
       {
         name: 'review-git-destructive',
@@ -257,6 +271,8 @@ export const DEFAULT_CONFIG: Config = {
         conditionMode: 'all',
         verdict: 'review',
         reason: 'Destructive git operation — discards history or working-tree changes',
+        description:
+          'The AI wants to run a destructive git operation (reset, rebase, clean, or branch delete) that can permanently discard commits or uncommitted work.',
       },
       // ── Shell safety ──────────────────────────────────────────────────────
       {
@@ -266,6 +282,8 @@ export const DEFAULT_CONFIG: Config = {
         conditionMode: 'all',
         verdict: 'review',
         reason: 'Command requires elevated privileges',
+        description:
+          'The AI wants to run a command as root (sudo). Commands with root access can modify system files, install software, or change security settings.',
       },
       {
         name: 'review-curl-pipe-shell',
@@ -281,6 +299,8 @@ export const DEFAULT_CONFIG: Config = {
         conditionMode: 'all',
         verdict: 'block',
         reason: 'Piping remote script into a shell is a supply-chain attack vector',
+        description:
+          'The AI wants to download a script from the internet and run it immediately, without you seeing what it contains. This is one of the most common ways malware gets installed.',
       },
     ],
     dlp: { enabled: true, scanIgnoredTools: true },
@@ -321,6 +341,8 @@ const ADVISORY_SMART_RULES: SmartRule[] = [
     conditions: [{ field: 'command', op: 'matches', value: '(^|&&|\\|\\||;)\\s*rm\\b' }],
     verdict: 'review',
     reason: 'rm can permanently delete files — confirm the target path',
+    description:
+      'The AI wants to delete files. Unlike moving to trash, rm is permanent — the files cannot be recovered without a backup.',
   },
   // ── SQL safety (Safe by Default) ──────────────────────────────────────────
   // These rules fire when an AI calls a database tool directly (e.g. MCP postgres,
@@ -333,6 +355,8 @@ const ADVISORY_SMART_RULES: SmartRule[] = [
     conditions: [{ field: 'sql', op: 'matches', value: 'DROP\\s+TABLE', flags: 'i' }],
     verdict: 'review',
     reason: 'DROP TABLE is irreversible — enable the postgres shield to block instead',
+    description:
+      'The AI wants to drop a database table. This permanently deletes the table and all its data — there is no undo.',
   },
   {
     name: 'review-truncate-sql',
@@ -340,6 +364,8 @@ const ADVISORY_SMART_RULES: SmartRule[] = [
     conditions: [{ field: 'sql', op: 'matches', value: 'TRUNCATE\\s+TABLE', flags: 'i' }],
     verdict: 'review',
     reason: 'TRUNCATE removes all rows — enable the postgres shield to block instead',
+    description:
+      'The AI wants to truncate a database table, which instantly deletes every row. The table structure remains but all data is gone.',
   },
   {
     name: 'review-drop-column-sql',
@@ -349,6 +375,8 @@ const ADVISORY_SMART_RULES: SmartRule[] = [
     ],
     verdict: 'review',
     reason: 'DROP COLUMN is irreversible — enable the postgres shield to block instead',
+    description:
+      'The AI wants to drop a column from a database table. This permanently removes the column and all its data from every row.',
   },
 ];
 
