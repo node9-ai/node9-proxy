@@ -102,21 +102,9 @@ node9 mcp pin reset               # clear all pins (re-pin on next connection)
 
 This is automatic — no configuration needed. The gateway pins on first `tools/list` and enforces on every subsequent session.
 
-### Skills Pinning — supply chain & update drift defense
+### Skills Pinning — same defense, extended to agent skill files
 
-Agent skills (`~/.claude/skills/`, `~/.claude/CLAUDE.md`, `.cursor/rules/`, `AGENTS.md`, project `CLAUDE.md`) can be silently swapped by a compromised skill registry or an automatic update. Node9 is the first runtime defense to extend pinning to the skills layer — covering **AST 02 Supply Chain Compromise** and **AST 07 Update Drift** in a single primitive.
-
-1. **First session** — Node9 records a SHA-256 hash of every skill file across known roots
-2. **Subsequent sessions** — hashes are verified; if a skill changed, the session is **quarantined** and every tool call is blocked until you review and re-pin
-3. **Corrupt pin state** — fails closed, never silently re-trusts
-
-```bash
-node9 skill pin list                 # show all pinned skill roots and hashes
-node9 skill pin update <rootKey>     # remove a pin, re-pin on next session
-node9 skill pin reset                # clear all pins (re-pin on next session)
-```
-
-Automatic and zero-config. Add custom skill paths via `policy.skillRoots` in `node9.config.json`.
+Same idea as MCP pinning, at the skills layer: `~/.claude/skills/`, `~/.claude/CLAUDE.md`, `.cursor/rules/`, `AGENTS.md`, project `CLAUDE.md`. First session hashes them; any later-session change quarantines the session until you re-pin. Covers **AST 02 (supply chain)** and **AST 07 (update drift)**. Manage with `node9 skill pin list | update <rootKey> | reset`. Zero-config; extend via `policy.skillRoots`.
 
 ---
 
