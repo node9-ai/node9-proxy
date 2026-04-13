@@ -41,7 +41,7 @@ npm install -g @node9/proxy
 ```
 
 ```bash
-node9 setup      # auto-detects Claude Code, Gemini CLI, Cursor, Codex
+node9 init       # auto-detects Claude Code, Gemini CLI, Cursor, Codex
 node9 doctor     # verify everything is wired correctly
 ```
 
@@ -82,7 +82,7 @@ Wrap any MCP server transparently. The AI sees the same server — Node9 interce
 }
 ```
 
-Or use `node9 setup` — it wraps existing MCP servers automatically.
+Or use `node9 init` — it wraps existing MCP servers automatically.
 
 ### MCP Tool Pinning — rug pull defense
 
@@ -144,7 +144,7 @@ Every tool call your AI agent makes is recorded — command, arguments, result, 
 
 **Line 3 — Environment:** how many CLAUDE.md files, rules, MCP servers, and hooks are active in the current project.
 
-The HUD is wired automatically by `node9 setup`. Full session logs land in `~/.node9/audit.log`.
+The HUD is wired automatically by `node9 init`. Full session logs land in `~/.node9/audit.log`.
 
 ---
 
