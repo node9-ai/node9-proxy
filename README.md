@@ -128,6 +128,26 @@ configure(agent_name="my-agent", policy="require_approval")
 
 ---
 
+## Flight Recorder & HUD
+
+Every tool call your AI agent makes is recorded — command, arguments, result, and cost estimate. Node9 wires a live statusline into Claude Code that shows you what's happening in real time:
+
+```
+🛡 node9 | standard | [bash-safe] | ✅ 12 allowed  🛑 2 blocked  🚨 0 dlp | ~$0.43 | ⚡ no-force-push
+📊 claude-opus-4-6 | ctx [████████░░░░░░░] 54% | 5h [██░░░░░░░░░░░░░] 12% | 7d [█░░░░░░░░░░░░░░] 7%
+🗂 2 CLAUDE.md | 8 rules | 3 MCPs | 4 hooks
+```
+
+**Line 1 — Security state:** active mode, enabled shields, session totals (allowed / blocked / DLP hits), estimated cost, last rule that fired.
+
+**Line 2 — Context & rate limits:** model name, context window usage, 5-hour and 7-day token rate-limit bars — so you can see when an agent is burning through quota.
+
+**Line 3 — Environment:** how many CLAUDE.md files, rules, MCP servers, and hooks are active in the current project.
+
+The HUD is wired automatically by `node9 setup`. Full session logs land in `~/.node9/audit.log`.
+
+---
+
 ## 📖 Full docs
 
 Everything else — config reference, smart rules, stateful rules, trusted hosts, approval modes, CLI reference — is at **[node9.ai/docs](https://node9.ai/docs)**.

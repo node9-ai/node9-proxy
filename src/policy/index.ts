@@ -280,7 +280,9 @@ export async function evaluatePolicy(
         reason: matchedRule.reason,
         tier: 2,
         ruleName: matchedRule.name ?? matchedRule.tool,
-        ...(matchedRule.description && { ruleDescription: matchedRule.description }),
+        ...((matchedRule.description ?? matchedRule.reason) && {
+          ruleDescription: matchedRule.description ?? matchedRule.reason,
+        }),
         ...(matchedRule.verdict === 'block' &&
           matchedRule.dependsOnState?.length && {
             dependsOnStatePredicates: matchedRule.dependsOnState,
