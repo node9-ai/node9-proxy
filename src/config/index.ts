@@ -80,6 +80,8 @@ export interface Config {
       enabled: boolean;
       scanIgnoredTools: boolean;
     };
+    /** Additional skill roots to pin beyond the built-in defaults. */
+    skillRoots: string[];
   };
   environments: Record<string, EnvironmentConfig>;
 }
@@ -304,6 +306,7 @@ export const DEFAULT_CONFIG: Config = {
       },
     ],
     dlp: { enabled: true, scanIgnoredTools: true },
+    skillRoots: [],
   },
   environments: {},
 };
@@ -517,6 +520,7 @@ export function getConfig(cwd?: string): Config {
       ignorePaths: [...DEFAULT_CONFIG.policy.snapshot.ignorePaths],
     },
     dlp: { ...DEFAULT_CONFIG.policy.dlp },
+    skillRoots: [...DEFAULT_CONFIG.policy.skillRoots],
   };
   const mergedEnvironments: Record<string, EnvironmentConfig> = { ...DEFAULT_CONFIG.environments };
 
@@ -566,6 +570,11 @@ export function getConfig(cwd?: string): Config {
       const d = p.dlp as Partial<Config['policy']['dlp']>;
       if (d.enabled !== undefined) mergedPolicy.dlp.enabled = d.enabled;
       if (d.scanIgnoredTools !== undefined) mergedPolicy.dlp.scanIgnoredTools = d.scanIgnoredTools;
+    }
+    if (Array.isArray(p.skillRoots)) {
+      for (const r of p.skillRoots) {
+        if (typeof r === 'string' && r.length > 0) mergedPolicy.skillRoots.push(r);
+      }
     }
 
     const envs = (source.environments || {}) as Record<string, unknown>;
@@ -625,6 +634,7 @@ export function getConfig(cwd?: string): Config {
   mergedPolicy.sandboxPaths = [...new Set(mergedPolicy.sandboxPaths)];
   mergedPolicy.dangerousWords = [...new Set(mergedPolicy.dangerousWords)];
   mergedPolicy.ignoredTools = [...new Set(mergedPolicy.ignoredTools)];
+  mergedPolicy.skillRoots = [...new Set(mergedPolicy.skillRoots)];
   mergedPolicy.snapshot.tools = [...new Set(mergedPolicy.snapshot.tools)];
   mergedPolicy.snapshot.onlyPaths = [...new Set(mergedPolicy.snapshot.onlyPaths)];
   mergedPolicy.snapshot.ignorePaths = [...new Set(mergedPolicy.snapshot.ignorePaths)];

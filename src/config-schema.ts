@@ -119,6 +119,10 @@ export const ConfigFileSchema = z
             scanIgnoredTools: z.boolean().optional(),
           })
           .optional(),
+        // Additional skill roots to pin beyond the defaults. Absolute paths,
+        // `~/`-prefixed paths, or paths relative to the hook payload's cwd.
+        // See src/skill-pin.ts for semantics (AST 02 + AST 07 defense).
+        skillRoots: z.array(z.string()).optional(),
       })
       .optional(),
     environments: z.record(z.object({ requireApproval: z.boolean().optional() })).optional(),

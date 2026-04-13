@@ -14,6 +14,7 @@ import { shouldSnapshot } from '../../policy';
 import { buildNegotiationMessage } from '../../policy/negotiation';
 import { createShadowSnapshot } from '../../undo';
 import { autoStartDaemonAndWait } from '../daemon-starter';
+import { defaultSkillRoots, resolveUserSkillRoot, verifyAndPinRoots } from '../../skill-pin';
 
 function sanitize(value: string): string {
   // eslint-disable-next-line no-control-regex
@@ -223,6 +224,122 @@ export function registerCheckCommand(program: Command): void {
           }
 
           const meta = { agent, mcpServer };
+
+          // ── Skill pinning — supply chain & update drift defense (AST 02 + AST 07) ──
+          // First tool call of a session hashes all known skill roots and
+          // pins them. Every subsequent session re-hashes and compares; any
+          // drift quarantines the session and blocks further tool calls until
+          // a human reviews via `node9 skill pin update`.
+          //
+          // Per-session verification is memoised in ~/.node9/skill-sessions/
+          // so we only pay the hashing cost once per Claude/Gemini session id.
+          const rawSessionId = typeof payload.session_id === 'string' ? payload.session_id : '';
+          // Path-safety: filesystem name, limited charset + length, to defeat
+          // traversal via a malicious session_id.
+          const safeSessionId = /^[A-Za-z0-9_\-]{1,128}$/.test(rawSessionId) ? rawSessionId : '';
+          if (safeSessionId) {
+            try {
+              const sessionsDir = path.join(os.homedir(), '.node9', 'skill-sessions');
+              const flagPath = path.join(sessionsDir, `${safeSessionId}.json`);
+              let flag: { state?: string; detail?: string } | null = null;
+              try {
+                flag = JSON.parse(fs.readFileSync(flagPath, 'utf-8'));
+              } catch {
+                /* missing/unreadable — treat as fresh */
+              }
+
+              const writeFlag = (data: { state: string; detail?: string }) => {
+                try {
+                  fs.mkdirSync(sessionsDir, { recursive: true });
+                  fs.writeFileSync(
+                    flagPath,
+                    JSON.stringify({ ...data, timestamp: new Date().toISOString() }, null, 2),
+                    { mode: 0o600 }
+                  );
+                } catch {
+                  /* best effort — a failed flag write is not worth crashing the hook */
+                }
+              };
+
+              if (flag && flag.state === 'quarantined') {
+                sendBlock(
+                  `Node9: session quarantined due to skill drift — ${flag.detail ?? 'review required'}`,
+                  {
+                    blockedByLabel: 'Skill Pin Quarantine',
+                    recoveryCommand: 'node9 skill pin list',
+                  }
+                );
+                return;
+              }
+
+              if (!flag || flag.state !== 'verified') {
+                const absoluteCwd =
+                  typeof payload.cwd === 'string' && path.isAbsolute(payload.cwd)
+                    ? payload.cwd
+                    : undefined;
+                const extraRoots = Array.isArray(config.policy.skillRoots)
+                  ? config.policy.skillRoots
+                  : [];
+                const resolvedExtra = extraRoots
+                  .map((r) => resolveUserSkillRoot(r, absoluteCwd))
+                  .filter((r): r is string => typeof r === 'string');
+                const roots = [...defaultSkillRoots(absoluteCwd), ...resolvedExtra];
+
+                const result = verifyAndPinRoots(roots);
+                if (result.kind === 'corrupt') {
+                  writeFlag({
+                    state: 'quarantined',
+                    detail: `pin file corrupt: ${result.detail}`,
+                  });
+                  sendBlock('Node9: skill pin file is corrupt — fail-closed.', {
+                    blockedByLabel: 'Skill Pin Quarantine',
+                    recoveryCommand: 'node9 skill pin reset',
+                  });
+                  return;
+                }
+                if (result.kind === 'drift') {
+                  writeFlag({ state: 'quarantined', detail: result.summary });
+                  sendBlock(`Node9: skill drift detected — ${result.summary}`, {
+                    blockedByLabel: 'Skill Pin Quarantine',
+                    recoveryCommand: `node9 skill pin update ${result.changedRootKey}`,
+                  });
+                  return;
+                }
+                writeFlag({ state: 'verified' });
+
+                // Best-effort GC of session flags older than 7 days so the
+                // directory doesn't grow without bound across machine lifetime.
+                try {
+                  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+                  for (const name of fs.readdirSync(sessionsDir)) {
+                    const p = path.join(sessionsDir, name);
+                    try {
+                      const st = fs.statSync(p);
+                      if (st.mtimeMs < cutoff) fs.unlinkSync(p);
+                    } catch {
+                      /* ignore */
+                    }
+                  }
+                } catch {
+                  /* ignore */
+                }
+              }
+            } catch (err) {
+              // Unexpected error (not a corrupt pin file — that's handled above)
+              // → log for debugging, but fail open so a bug in the skill-pin
+              // path never bricks Claude Code. The same philosophy check.ts
+              // already follows for its top-level catch.
+              if (process.env.NODE9_DEBUG === '1') {
+                try {
+                  const dbg = path.join(os.homedir(), '.node9', 'hook-debug.log');
+                  const msg = err instanceof Error ? err.message : String(err);
+                  fs.appendFileSync(dbg, `[${new Date().toISOString()}] SKILL_PIN_ERROR: ${msg}\n`);
+                } catch {
+                  /* ignore */
+                }
+              }
+            }
+          }
 
           // Snapshot BEFORE the tool runs (PreToolUse) so undo can restore to
           // the state prior to this change. Snapshotting after (PostToolUse)

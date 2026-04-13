@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## v1.10.0 — Skills Pinning (AST 02 + AST 07)
+
+### Added
+
+- **Skills Pinning:** Extends MCP tool pinning to agent skill repositories (`~/.claude/skills/`, `~/.claude/CLAUDE.md`, `~/.claude/rules/`, project `.claude/CLAUDE.md`, `.claude/CLAUDE.local.md`, `.claude/rules/`, `.cursor/rules/`, `AGENTS.md`, `CLAUDE.md`). On the first tool call of a Claude / Gemini / Cursor session, Node9 records a SHA-256 hash of every skill file. On every subsequent session, hashes are re-checked; any difference **quarantines** the session and blocks every tool call until a human reviews the drift via `node9 skill pin update <rootKey>`. One feature, two threats covered in a single primitive:
+  - **AST 02 Supply Chain Compromise** — malicious skill-registry overwrites (ClawHub-style)
+  - **AST 07 Update Drift** — auto-updated skills carrying backdoors (CVE-2026-28363 ClawJacked-style)
+
+  Per-session verification is memoised in `~/.node9/skill-sessions/<session_id>.json` so the hashing cost is paid once per session, not once per tool call. Flags older than 7 days are GC'd best-effort.
+
+- **`node9 skill pin` CLI:** three subcommands, mirroring `node9 mcp pin`:
+  - `node9 skill pin list` — show all pinned skill roots, content hashes, file counts, pin timestamps
+  - `node9 skill pin update <rootKey> [--yes]` — show a per-file diff (added / removed / modified) for directory roots, prompt for confirmation, then re-pin. `--yes` skips the prompt for scripted workflows
+  - `node9 skill pin reset` — clear all pins AND wipe quarantined session flags so state can't leak across re-installs
+
+- **`policy.skillRoots` config field:** user-extensible list of extra skill paths beyond the defaults. Accepts absolute paths, `~/`-prefixed paths, or paths relative to the hook payload's `cwd` (CLAUDE.md validated-path rules apply — relative paths without an absolute cwd are ignored).
+
+### Security properties
+
+- **Fail-closed on corrupt pin file:** `skill-pins.json` that fails to parse quarantines the session immediately; the only recovery is `node9 skill pin reset`.
+- **Symlink-safe:** `hashSkillRoot` never follows symlinks into arbitrary filesystem locations.
+- **Size-bounded:** caps any single root at 5000 files / 50 MB total to defeat pathological skill directories.
+- **Path-traversal-safe session IDs:** only `[A-Za-z0-9_-]{1,128}` accepted as session flag filenames; anything else silently disables the skill check for that payload.
+- **Atomic writes, mode 0o600:** pin file and session flags use the same atomic-rename + owner-only-permission pattern as `~/.node9/mcp-pins.json`.
+
+---
+
 ## v1.7.0 — Steerable Redirect Recovery Menu
 
 ### Added

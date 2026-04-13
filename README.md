@@ -102,6 +102,22 @@ node9 mcp pin reset               # clear all pins (re-pin on next connection)
 
 This is automatic — no configuration needed. The gateway pins on first `tools/list` and enforces on every subsequent session.
 
+### Skills Pinning — supply chain & update drift defense
+
+Agent skills (`~/.claude/skills/`, `~/.claude/CLAUDE.md`, `.cursor/rules/`, `AGENTS.md`, project `CLAUDE.md`) can be silently swapped by a compromised skill registry or an automatic update. Node9 is the first runtime defense to extend pinning to the skills layer — covering **AST 02 Supply Chain Compromise** and **AST 07 Update Drift** in a single primitive.
+
+1. **First session** — Node9 records a SHA-256 hash of every skill file across known roots
+2. **Subsequent sessions** — hashes are verified; if a skill changed, the session is **quarantined** and every tool call is blocked until you review and re-pin
+3. **Corrupt pin state** — fails closed, never silently re-trusts
+
+```bash
+node9 skill pin list                 # show all pinned skill roots and hashes
+node9 skill pin update <rootKey>     # show diff, then re-pin
+node9 skill pin reset                # clear all pins (re-pin on next session)
+```
+
+Automatic and zero-config. Add custom skill paths via `policy.skillRoots` in `node9.config.json`.
+
 ---
 
 ## Python SDK — govern any Python agent
@@ -125,6 +141,7 @@ configure(agent_name="my-agent", policy="require_approval")
 - **Shell:** blocks `curl | bash`, `sudo` commands
 - **DLP:** blocks AWS keys, GitHub tokens, Stripe keys, PEM private keys in any tool call argument
 - **Auto-undo:** git snapshot before every AI file edit → `node9 undo` to revert
+- **Skills Pinning:** SHA-256 verification of agent skill files between sessions; quarantines on drift (AST 02 + AST 07 — supply chain & update drift)
 
 ---
 
