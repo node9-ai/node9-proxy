@@ -118,6 +118,13 @@ export const ConfigFileSchema = z
             scanIgnoredTools: z.boolean().optional(),
           })
           .optional(),
+        loopDetection: z
+          .object({
+            enabled: z.boolean().optional(),
+            threshold: z.number().min(2).optional(),
+            windowSeconds: z.number().min(10).optional(),
+          })
+          .optional(),
       })
       .optional(),
     environments: z.record(z.object({ requireApproval: z.boolean().optional() })).optional(),

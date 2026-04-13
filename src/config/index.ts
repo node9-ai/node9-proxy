@@ -76,6 +76,11 @@ export interface Config {
       enabled: boolean;
       scanIgnoredTools: boolean;
     };
+    loopDetection: {
+      enabled: boolean;
+      threshold: number;
+      windowSeconds: number;
+    };
   };
   environments: Record<string, EnvironmentConfig>;
 }
@@ -284,6 +289,7 @@ export const DEFAULT_CONFIG: Config = {
       },
     ],
     dlp: { enabled: true, scanIgnoredTools: true },
+    loopDetection: { enabled: true, threshold: 3, windowSeconds: 120 },
   },
   environments: {},
 };
@@ -489,6 +495,7 @@ export function getConfig(cwd?: string): Config {
       ignorePaths: [...DEFAULT_CONFIG.policy.snapshot.ignorePaths],
     },
     dlp: { ...DEFAULT_CONFIG.policy.dlp },
+    loopDetection: { ...DEFAULT_CONFIG.policy.loopDetection },
   };
   const mergedEnvironments: Record<string, EnvironmentConfig> = { ...DEFAULT_CONFIG.environments };
 
@@ -538,6 +545,13 @@ export function getConfig(cwd?: string): Config {
       const d = p.dlp as Partial<Config['policy']['dlp']>;
       if (d.enabled !== undefined) mergedPolicy.dlp.enabled = d.enabled;
       if (d.scanIgnoredTools !== undefined) mergedPolicy.dlp.scanIgnoredTools = d.scanIgnoredTools;
+    }
+    if (p.loopDetection) {
+      const ld = p.loopDetection as Partial<Config['policy']['loopDetection']>;
+      if (ld.enabled !== undefined) mergedPolicy.loopDetection.enabled = ld.enabled;
+      if (ld.threshold !== undefined) mergedPolicy.loopDetection.threshold = ld.threshold;
+      if (ld.windowSeconds !== undefined)
+        mergedPolicy.loopDetection.windowSeconds = ld.windowSeconds;
     }
 
     const envs = (source.environments || {}) as Record<string, unknown>;
