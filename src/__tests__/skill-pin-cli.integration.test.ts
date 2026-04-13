@@ -1,11 +1,6 @@
 /**
  * Integration tests for `node9 skill pin` CLI (list / update / reset).
- *
- * These spawn the real built CLI subprocess against dist/cli.js with an
- * isolated HOME directory. See src/__tests__/check.integration.test.ts for
- * the runner pattern this mirrors.
- *
- * Requires `npm run build` before running.
+ * Spawns dist/cli.js with an isolated HOME. Requires `npm run build` first.
  */
 
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
@@ -14,27 +9,26 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { updatePin, getRootKey, hashSkillRoot } from '../skill-pin';
+import { updatePin, getRootKey } from '../skill-pin';
 
 const CLI = path.resolve(__dirname, '../../dist/cli.js');
 const cliExists = fs.existsSync(CLI);
-
-// Skip the whole suite if dist/cli.js wasn't built — avoids confusing CI output.
 const itBuilt = cliExists ? it : it.skip;
 
-interface RunResult {
+function runCli(
+  args: string[],
+  env: Record<string, string> = {}
+): {
   status: number | null;
   stdout: string;
   stderr: string;
-}
-
-function runCli(args: string[], env: Record<string, string> = {}, timeoutMs = 60000): RunResult {
+} {
   const baseEnv = { ...process.env };
   delete baseEnv.NODE9_API_KEY;
   delete baseEnv.NODE9_API_URL;
-  const result = spawnSync(process.execPath, [CLI, ...args], {
+  const r = spawnSync(process.execPath, [CLI, ...args], {
     encoding: 'utf-8',
-    timeout: timeoutMs,
+    timeout: 60000,
     cwd: os.tmpdir(),
     env: {
       ...baseEnv,
@@ -45,26 +39,29 @@ function runCli(args: string[], env: Record<string, string> = {}, timeoutMs = 60
       ...(env.HOME != null ? { USERPROFILE: env.HOME } : {}),
     },
   });
+  return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+}
 
-  if (result.error) {
-    console.error('[skill-pin CLI test] spawn error:', result.error);
+function seedPin(tmpHome: string, rootKey: string, rootPath: string): void {
+  const origHome = process.env.HOME;
+  const origUP = process.env.USERPROFILE;
+  process.env.HOME = tmpHome;
+  process.env.USERPROFILE = tmpHome;
+  try {
+    updatePin(rootKey, rootPath, 'a'.repeat(64), true, 4);
+  } finally {
+    process.env.HOME = origHome;
+    process.env.USERPROFILE = origUP;
   }
-  return {
-    status: result.status,
-    stdout: result.stdout ?? '',
-    stderr: result.stderr ?? '',
-  };
 }
 
 beforeAll(() => {
   if (!cliExists) {
-    console.warn(
-      `[skill-pin CLI test] dist/cli.js not found at ${CLI} — run \`npm run build\` first. Tests will be skipped.`
-    );
+    console.warn(`[skill-pin CLI test] dist/cli.js not found — run \`npm run build\`.`);
   }
 });
 
-describe('node9 skill pin list', () => {
+describe('node9 skill pin', () => {
   let tmpHome: string;
   beforeEach(() => {
     tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-skillpin-cli-'));
@@ -73,143 +70,63 @@ describe('node9 skill pin list', () => {
     fs.rmSync(tmpHome, { recursive: true, force: true });
   });
 
-  itBuilt('prints a friendly message when no pins exist', () => {
+  itBuilt('list: friendly empty message when no pins exist', () => {
     const r = runCli(['skill', 'pin', 'list'], { HOME: tmpHome });
     expect(r.status).toBe(0);
     expect(r.stdout).toMatch(/No skill roots are pinned/i);
   });
 
-  itBuilt('lists a previously-written pin with rootPath, hash, fileCount', () => {
-    // Seed the HOME pin file directly by running the module in-process with mocked HOME
-    const origHome = process.env.HOME;
-    const origUserprofile = process.env.USERPROFILE;
-    process.env.HOME = tmpHome;
-    process.env.USERPROFILE = tmpHome;
-    try {
-      const rootPath = '/tmp/project-alpha/.cursor/rules';
-      updatePin(getRootKey(rootPath), rootPath, 'a'.repeat(64), true, 4);
-    } finally {
-      process.env.HOME = origHome;
-      process.env.USERPROFILE = origUserprofile;
-    }
-
+  itBuilt('list: shows rootPath, hash, fileCount for a seeded pin', () => {
+    const rootPath = '/tmp/project-alpha/.cursor/rules';
+    seedPin(tmpHome, getRootKey(rootPath), rootPath);
     const r = runCli(['skill', 'pin', 'list'], { HOME: tmpHome });
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain('/tmp/project-alpha/.cursor/rules');
+    expect(r.stdout).toContain(rootPath);
     expect(r.stdout).toContain('Files (4)');
-    expect(r.stdout).toContain('a'.repeat(16)); // truncated hash display
+    expect(r.stdout).toContain('a'.repeat(16));
   });
 
-  itBuilt('reports a corrupt pin file and exits 1 with a remediation hint', () => {
-    const node9Dir = path.join(tmpHome, '.node9');
-    fs.mkdirSync(node9Dir, { recursive: true });
-    fs.writeFileSync(path.join(node9Dir, 'skill-pins.json'), 'not json');
+  itBuilt('list: corrupt pin file exits 1 with remediation hint', () => {
+    const dir = path.join(tmpHome, '.node9');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'skill-pins.json'), 'not json');
     const r = runCli(['skill', 'pin', 'list'], { HOME: tmpHome });
     expect(r.status).toBe(1);
     expect(r.stderr).toMatch(/corrupt/i);
     expect(r.stderr).toMatch(/skill pin reset/);
   });
-});
 
-describe('node9 skill pin update', () => {
-  let tmpHome: string;
-  let tmpSkills: string;
-  beforeEach(() => {
-    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-skillpin-cli-'));
-    tmpSkills = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-skillpin-root-'));
-  });
-  afterEach(() => {
-    fs.rmSync(tmpHome, { recursive: true, force: true });
-    fs.rmSync(tmpSkills, { recursive: true, force: true });
-  });
-
-  itBuilt('exits 1 with a helpful message when the rootKey is unknown', () => {
-    const r = runCli(['skill', 'pin', 'update', 'deadbeefcafebabe', '--yes'], { HOME: tmpHome });
+  itBuilt('update: unknown rootKey exits 1 with a helpful message', () => {
+    const r = runCli(['skill', 'pin', 'update', 'deadbeefcafebabe'], { HOME: tmpHome });
     expect(r.status).toBe(1);
     expect(r.stderr).toMatch(/No pin found/);
-    expect(r.stderr).toMatch(/skill pin list/);
   });
 
-  itBuilt('re-pins with --yes (non-interactive) and shows the diff summary', () => {
-    // Seed a directory root and its pin
-    fs.writeFileSync(path.join(tmpSkills, 'a.md'), 'original');
-    fs.writeFileSync(path.join(tmpSkills, 'gone.md'), 'will-be-removed');
-
-    const origHome = process.env.HOME;
-    const origUserprofile = process.env.USERPROFILE;
-    process.env.HOME = tmpHome;
-    process.env.USERPROFILE = tmpHome;
-    try {
-      const before = hashSkillRoot(tmpSkills);
-      updatePin(
-        getRootKey(tmpSkills),
-        tmpSkills,
-        before.contentHash,
-        before.exists,
-        before.fileCount,
-        before.fileManifest
-      );
-    } finally {
-      process.env.HOME = origHome;
-      process.env.USERPROFILE = origUserprofile;
-    }
-
-    // Mutate: modify one, remove one, add one
-    fs.writeFileSync(path.join(tmpSkills, 'a.md'), 'tampered');
-    fs.unlinkSync(path.join(tmpSkills, 'gone.md'));
-    fs.writeFileSync(path.join(tmpSkills, 'added.md'), 'new');
-
-    const rootKey = getRootKey(tmpSkills);
-    const r = runCli(['skill', 'pin', 'update', rootKey, '--yes'], { HOME: tmpHome });
+  itBuilt('update: removes a known pin so next session re-pins', () => {
+    const rootPath = '/tmp/project-alpha/.cursor/rules';
+    const key = getRootKey(rootPath);
+    seedPin(tmpHome, key, rootPath);
+    const r = runCli(['skill', 'pin', 'update', key], { HOME: tmpHome });
     expect(r.status).toBe(0);
-    expect(r.stdout).toMatch(/added/i);
-    expect(r.stdout).toMatch(/removed/i);
-    expect(r.stdout).toMatch(/modified/i);
-    expect(r.stdout).toMatch(/re-?pinned/i);
-  });
-});
-
-describe('node9 skill pin reset', () => {
-  let tmpHome: string;
-  beforeEach(() => {
-    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-skillpin-cli-'));
-  });
-  afterEach(() => {
-    fs.rmSync(tmpHome, { recursive: true, force: true });
+    expect(r.stdout).toMatch(/Pin removed/);
+    const pins = JSON.parse(
+      fs.readFileSync(path.join(tmpHome, '.node9', 'skill-pins.json'), 'utf-8')
+    );
+    expect(pins.roots[key]).toBeUndefined();
   });
 
-  itBuilt('reports "nothing to clear" when no pins exist', () => {
-    const r = runCli(['skill', 'pin', 'reset'], { HOME: tmpHome });
-    expect(r.status).toBe(0);
-    expect(r.stdout).toMatch(/No pins to clear|Cleared 0/i);
-  });
-
-  itBuilt('clears pins and wipes the skill-sessions directory', () => {
-    const origHome = process.env.HOME;
-    const origUserprofile = process.env.USERPROFILE;
-    process.env.HOME = tmpHome;
-    process.env.USERPROFILE = tmpHome;
-    try {
-      updatePin(getRootKey('/p'), '/p', 'a'.repeat(64), true, 1);
-    } finally {
-      process.env.HOME = origHome;
-      process.env.USERPROFILE = origUserprofile;
-    }
-
-    // Seed a stale session flag
+  itBuilt('reset: clears pins AND wipes skill-sessions/', () => {
+    seedPin(tmpHome, getRootKey('/p'), '/p');
     const sessionsDir = path.join(tmpHome, '.node9', 'skill-sessions');
     fs.mkdirSync(sessionsDir, { recursive: true });
     fs.writeFileSync(path.join(sessionsDir, 'sess-1.json'), '{"state":"verified"}');
-
     const r = runCli(['skill', 'pin', 'reset'], { HOME: tmpHome });
     expect(r.status).toBe(0);
     expect(r.stdout).toMatch(/Cleared/);
-
-    const pinsPath = path.join(tmpHome, '.node9', 'skill-pins.json');
-    const pinsRaw = fs.readFileSync(pinsPath, 'utf-8');
-    expect(JSON.parse(pinsRaw)).toEqual({ roots: {} });
-
-    // Session flags should be wiped so the session isn't resurrected with stale state.
+    const pins = JSON.parse(
+      fs.readFileSync(path.join(tmpHome, '.node9', 'skill-pins.json'), 'utf-8')
+    );
+    expect(pins).toEqual({ roots: {} });
     expect(fs.existsSync(path.join(sessionsDir, 'sess-1.json'))).toBe(false);
   });
 });

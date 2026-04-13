@@ -112,7 +112,7 @@ Agent skills (`~/.claude/skills/`, `~/.claude/CLAUDE.md`, `.cursor/rules/`, `AGE
 
 ```bash
 node9 skill pin list                 # show all pinned skill roots and hashes
-node9 skill pin update <rootKey>     # show diff, then re-pin
+node9 skill pin update <rootKey>     # remove a pin, re-pin on next session
 node9 skill pin reset                # clear all pins (re-pin on next session)
 ```
 
