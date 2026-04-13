@@ -15,7 +15,7 @@
 
 ## The "Aha!" Moment
 
-**AIs are literal.** Ask an agent to "fix disk space" and it might run `docker system prune -af --volumes`.
+**AIs move fast.** Ask an agent to "ship the fix" and it might push straight to git without asking you.
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/4aa6e45b-9aba-4953-9ce3-548226622588" width="100%">
@@ -23,10 +23,10 @@
 
 With Node9:
 
-1. **AI attempts:** `Bash("docker system prune -af --volumes")`
+1. **AI attempts:** `Bash("git push origin main")`
 2. **Node9 intercepts:** OS-native popup appears instantly
 3. **You block it** — one click
-4. **AI pivots:** _"I'll remove large log files instead"_
+4. **AI pivots:** _"I'll create a PR for review instead"_
 
 ---
 
