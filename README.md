@@ -146,6 +146,35 @@ Every tool call your AI agent makes is recorded — command, arguments, result, 
 
 The HUD is wired automatically by `node9 init`. Full session logs land in `~/.node9/audit.log`.
 
+### Offline Report
+
+Run `node9 report` after a session to get a summary dashboard — what was allowed, what was blocked, DLP hits, cost (Claude Code only), and daily activity:
+
+```
+$ node9 report --period 7d
+
+  🛡 node9 Report  ·  Last 7 Days  Apr 8 – Apr 14  2,255 events
+  ──────────────────────────────────────────────────────────────────────────────
+
+  ✅ 1,746 allowed   🛑 509 blocked   🚨 70 DLP hits   23% block rate   💰 $82.91
+
+  Top Tools                              Top Blocks
+  ─────────────────────────────────────  ─────────────────────────────────────
+  Bash                    ██████ 1,595   timeout                 ██████ 281
+  Read                    █░░░░░   196   smart-rule-block        ██░░░░  79
+  Edit                    █░░░░░   118   observe-mode-dlp-would… █░░░░░  69
+  drop_resource           █░░░░░    69   persistent-deny         █░░░░░  69
+  Grep                    █░░░░░    35   local-decision          █░░░░░   5
+
+  Daily Activity
+  ──────────────────────────────────────────────────────────────────────────────
+  Apr 9       ██████████████████████████████  833  216 blocked
+  Apr 10      █████░░░░░░░░░░░░░░░░░░░░░░░░░  145   24 blocked
+  Apr 11      ██████████████████████░░░░░░░░  617  139 blocked
+```
+
+Periods: `today`, `7d` (default), `30d`, `month`. Cost data is read from `~/.claude/projects/` — no API calls, fully offline.
+
 ---
 
 ## 📖 Full docs
