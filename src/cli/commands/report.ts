@@ -23,6 +23,20 @@ interface AuditEntry {
   source?: string;
 }
 
+interface JournalEntry {
+  type: string;
+  timestamp?: string;
+  message?: {
+    model?: string;
+    usage?: {
+      input_tokens?: number;
+      output_tokens?: number;
+      cache_creation_input_tokens?: number;
+      cache_read_input_tokens?: number;
+    };
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -97,6 +111,100 @@ function num(n: number): string {
   return n.toLocaleString();
 }
 
+function fmtCost(usd: number): string {
+  if (usd < 0.001) return '< $0.001';
+  if (usd < 1) return '$' + usd.toFixed(4);
+  return '$' + usd.toFixed(2);
+}
+
+// ---------------------------------------------------------------------------
+// Claude Code cost tracking (reads ~/.claude/projects/**/*.jsonl)
+// ---------------------------------------------------------------------------
+
+const CLAUDE_PRICING: Record<string, { i: number; o: number; cw: number; cr: number }> = {
+  'claude-opus-4-6': { i: 5e-6, o: 25e-6, cw: 6.25e-6, cr: 0.5e-6 },
+  'claude-opus-4-5': { i: 5e-6, o: 25e-6, cw: 6.25e-6, cr: 0.5e-6 },
+  'claude-opus-4': { i: 15e-6, o: 75e-6, cw: 18.75e-6, cr: 1.5e-6 },
+  'claude-sonnet-4-6': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
+  'claude-sonnet-4-5': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
+  'claude-sonnet-4': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
+  'claude-3-7-sonnet': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
+  'claude-3-5-sonnet': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
+  'claude-haiku-4-5': { i: 1e-6, o: 5e-6, cw: 1.25e-6, cr: 0.1e-6 },
+  'claude-3-5-haiku': { i: 0.8e-6, o: 4e-6, cw: 1e-6, cr: 0.08e-6 },
+};
+
+function claudeModelPrice(model: string): { i: number; o: number; cw: number; cr: number } | null {
+  const base = model.replace(/@.*$/, '').replace(/-\d{8}$/, '');
+  for (const [key, p] of Object.entries(CLAUDE_PRICING)) {
+    if (base === key || base.startsWith(key + '-') || base.startsWith(key)) return p;
+  }
+  return null;
+}
+
+function loadClaudeCost(start: Date, end: Date): number {
+  const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+  if (!fs.existsSync(projectsDir)) return 0;
+
+  let total = 0;
+  let dirs: string[];
+  try {
+    dirs = fs.readdirSync(projectsDir);
+  } catch {
+    return 0;
+  }
+
+  for (const proj of dirs) {
+    const projPath = path.join(projectsDir, proj);
+    let files: string[];
+    try {
+      const stat = fs.statSync(projPath);
+      if (!stat.isDirectory()) continue;
+      files = fs
+        .readdirSync(projPath)
+        .filter((f) => f.endsWith('.jsonl') && !f.startsWith('agent-'));
+    } catch {
+      continue;
+    }
+
+    for (const file of files) {
+      try {
+        const raw = fs.readFileSync(path.join(projPath, file), 'utf-8');
+        for (const line of raw.split('\n')) {
+          if (!line.trim()) continue;
+          let entry: JournalEntry;
+          try {
+            entry = JSON.parse(line) as JournalEntry;
+          } catch {
+            continue;
+          }
+          if (entry.type !== 'assistant') continue;
+          if (!entry.timestamp) continue;
+          const ts = new Date(entry.timestamp);
+          if (ts < start || ts > end) continue;
+
+          const usage = entry.message?.usage;
+          const model = entry.message?.model;
+          if (!usage || !model) continue;
+
+          const p = claudeModelPrice(model);
+          if (!p) continue;
+
+          total +=
+            (usage.input_tokens ?? 0) * p.i +
+            (usage.output_tokens ?? 0) * p.o +
+            (usage.cache_creation_input_tokens ?? 0) * p.cw +
+            (usage.cache_read_input_tokens ?? 0) * p.cr;
+        }
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  return total;
+}
+
 // ---------------------------------------------------------------------------
 // Main command
 // ---------------------------------------------------------------------------
@@ -124,6 +232,8 @@ export function registerReportCommand(program: Command): void {
       }
 
       const { start, end } = getDateRange(period);
+
+      const costUSD = loadClaudeCost(start, end);
 
       // Only count PreToolUse entries (skip PostToolUse source: post-hook duplicates)
       const entries = allEntries.filter((e) => {
@@ -172,15 +282,9 @@ export function registerReportCommand(program: Command): void {
       }
 
       const total = entries.length;
-      const topTools = [...toolMap.entries()]
-        .sort((a, b) => b[1].calls - a[1].calls)
-        .slice(0, 8);
-      const topBlocks = [...blockMap.entries()]
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 6);
-      const dailyList = [...dailyMap.entries()]
-        .sort((a, b) => a[0].localeCompare(b[0]))
-        .slice(-14);
+      const topTools = [...toolMap.entries()].sort((a, b) => b[1].calls - a[1].calls).slice(0, 8);
+      const topBlocks = [...blockMap.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6);
+      const dailyList = [...dailyMap.entries()].sort((a, b) => a[0].localeCompare(b[0])).slice(-14);
 
       const maxTool = Math.max(...topTools.map(([, v]) => v.calls), 1);
       const maxBlock = Math.max(...topBlocks.map(([, v]) => v), 1);
@@ -219,6 +323,7 @@ export function registerReportCommand(program: Command): void {
         blocked > 0 ? chalk.red(`🛑 ${num(blocked)} blocked`) : chalk.dim('🛑 0 blocked');
       const dlpLabel =
         dlpHits > 0 ? chalk.yellow(`🚨 ${dlpHits} DLP hits`) : chalk.dim('🚨 0 DLP hits');
+      const costLabel = costUSD > 0 ? chalk.magenta(`💰 ${fmtCost(costUSD)}`) : chalk.dim('💰 –');
       console.log(
         '  ' +
           chalk.green(`✅ ${num(allowed)} allowed`) +
@@ -227,7 +332,9 @@ export function registerReportCommand(program: Command): void {
           '   ' +
           dlpLabel +
           '   ' +
-          chalk.dim(`${pct(blocked, total)} block rate`)
+          chalk.dim(`${pct(blocked, total)} block rate`) +
+          '   ' +
+          costLabel
       );
       console.log('');
 
@@ -283,9 +390,7 @@ export function registerReportCommand(program: Command): void {
         for (const [agent, count] of [...agentMap.entries()].sort((a, b) => b[1] - a[1])) {
           const label = agent.slice(0, LABEL - 1);
           const b = colorBar(count, maxAgent, BAR);
-          console.log(
-            '  ' + chalk.white(label.padEnd(LABEL)) + b + ' ' + chalk.white(num(count))
-          );
+          console.log('  ' + chalk.white(label.padEnd(LABEL)) + b + ' ' + chalk.white(num(count)));
         }
       }
 
@@ -299,9 +404,7 @@ export function registerReportCommand(program: Command): void {
           const label = fmtDate(dateKey).padEnd(10);
           const b = colorBar(calls, maxDaily, DAY_BAR);
           const note = db > 0 ? chalk.red(`  ${db} blocked`) : '';
-          console.log(
-            '  ' + chalk.dim(label) + '  ' + b + '  ' + chalk.white(num(calls)) + note
-          );
+          console.log('  ' + chalk.dim(label) + '  ' + b + '  ' + chalk.white(num(calls)) + note);
         }
       }
 
