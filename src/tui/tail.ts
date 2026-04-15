@@ -97,6 +97,27 @@ const ERASE_DOWN = '\x1B[J';
 
 // ── Activity feed rendering ───────────────────────────────────────────────────
 
+/** Strip ANSI escape codes to get the printable length of a string. */
+function visibleLength(s: string): number {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/\x1B\[[0-9;]*m/g, '').length;
+}
+
+/**
+ * How many terminal lines does `text` occupy when written to stdout?
+ * Returns 1 when the terminal width is unknown (non-TTY or columns=0).
+ */
+function wrappedLineCount(text: string): number {
+  const cols = process.stdout.columns;
+  if (!cols) return 1;
+  const len = visibleLength(text);
+  return Math.max(1, Math.ceil(len / cols));
+}
+
+// Track which pending item is currently shown and how many lines it occupies.
+let pendingShownForId: string | null = null;
+let pendingWrappedLines = 0;
+
 function formatBase(activity: ActivityItem): string {
   const time = new Date(activity.ts).toLocaleTimeString([], { hour12: false });
   const icon = getIcon(activity.tool);
@@ -124,15 +145,28 @@ function renderResult(activity: ActivityItem, result: ResultItem): void {
     cost == null ? '' : chalk.dim(`  ~$${cost >= 0.001 ? cost.toFixed(3) : '0.000'}`);
 
   if (process.stdout.isTTY) {
-    readline.clearLine(process.stdout, 0);
-    readline.cursorTo(process.stdout, 0);
+    if (pendingShownForId === activity.id && pendingWrappedLines > 1) {
+      // Pending content wrapped onto multiple lines. Move up to the first of
+      // those wrapped lines, then erase everything from there to end-of-screen.
+      readline.moveCursor(process.stdout, 0, -(pendingWrappedLines - 1));
+      readline.cursorTo(process.stdout, 0);
+      process.stdout.write(ERASE_DOWN);
+    } else {
+      readline.clearLine(process.stdout, 0);
+      readline.cursorTo(process.stdout, 0);
+    }
+    pendingShownForId = null;
+    pendingWrappedLines = 0;
   }
   console.log(`${base}  ${status}${costSuffix}`);
 }
 
 function renderPending(activity: ActivityItem): void {
   if (!process.stdout.isTTY) return;
-  process.stdout.write(`${formatBase(activity)}  ${chalk.yellow('● …')}\r`);
+  const line = `${formatBase(activity)}  ${chalk.yellow('● …')}`;
+  pendingShownForId = activity.id;
+  pendingWrappedLines = wrappedLineCount(line);
+  process.stdout.write(`${line}\r`);
 }
 
 // ── Daemon startup ────────────────────────────────────────────────────────────
