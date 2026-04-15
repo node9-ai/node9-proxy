@@ -10,6 +10,15 @@ import { hashArgs } from './hasher.js';
 export const LOCAL_AUDIT_LOG = path.join(os.homedir(), '.node9', 'audit.log');
 export const HOOK_DEBUG_LOG = path.join(os.homedir(), '.node9', 'hook-debug.log');
 
+const TEST_COMMAND_RE =
+  /(?:^|\s)(npm\s+(?:run\s+)?test|npx\s+(?:vitest|jest|mocha)|yarn\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|vitest|jest|mocha|pytest|py\.test|cargo\s+test|go\s+test|bundle\s+exec\s+rspec|rspec|phpunit|dotnet\s+test)\b/i;
+
+function isTestCall(toolName: string, args: unknown): boolean {
+  if (toolName !== 'Bash' && toolName !== 'bash') return false;
+  const cmd = (args as Record<string, unknown> | null)?.command;
+  return typeof cmd === 'string' && TEST_COMMAND_RE.test(cmd);
+}
+
 export function redactSecrets(text: string): string {
   if (!text) return text;
   let redacted = text;
@@ -66,12 +75,14 @@ export function appendLocalAudit(
   const argsField = auditHashArgsEnabled
     ? { argsHash: hashArgs(args) }
     : { args: args ? JSON.parse(redactSecrets(JSON.stringify(args))) : {} };
+  const testRun = isTestCall(toolName, args) ? { testRun: true } : {};
   appendToLog(LOCAL_AUDIT_LOG, {
     ts: new Date().toISOString(),
     tool: toolName,
     ...argsField,
     decision,
     checkedBy,
+    ...testRun,
     agent: meta?.agent,
     mcpServer: meta?.mcpServer,
     hostname: os.hostname(),

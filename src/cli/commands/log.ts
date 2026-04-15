@@ -5,7 +5,7 @@ import type { Command } from 'commander';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { redactSecrets } from '../../audit';
+import { redactSecrets, appendToLog, LOCAL_AUDIT_LOG } from '../../audit';
 import { getConfig } from '../../config';
 import { shouldSnapshot } from '../../policy';
 import { createShadowSnapshot } from '../../undo';
@@ -122,12 +122,21 @@ export function registerLogCommand(program: Command): void {
             if (bashCommand && output) {
               const testResult = detectTestResult(bashCommand, output);
               if (testResult) {
-                await notifyActivitySocket({
-                  id: 'test-result',
-                  ts: Date.now(),
-                  tool: tool,
-                  status: testResult === 'pass' ? 'test_pass' : 'test_fail',
+                // Write to audit log regardless of daemon status — report reads this offline
+                appendToLog(LOCAL_AUDIT_LOG, {
+                  ts: new Date().toISOString(),
+                  tool,
+                  testResult,
+                  source: 'test-result',
                 });
+                if (isDaemonRunning()) {
+                  await notifyActivitySocket({
+                    id: 'test-result',
+                    ts: Date.now(),
+                    tool: tool,
+                    status: testResult === 'pass' ? 'test_pass' : 'test_fail',
+                  });
+                }
               }
             }
           }

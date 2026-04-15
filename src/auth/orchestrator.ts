@@ -26,6 +26,7 @@ import {
   checkStatePredicates,
 } from './daemon';
 import { auditLocalAllow, initNode9SaaS, pollNode9SaaS, resolveNode9SaaS } from './cloud';
+import { recordAndCheck } from '../loop-detector';
 
 export interface AuthResult {
   approved: boolean;
@@ -38,6 +39,7 @@ export interface AuthResult {
     | 'local-config'
     | 'local-decision'
     | 'no-approval-mechanism'
+    | 'loop-detection'
     | 'timeout';
   changeHint?: string;
   checkedBy?:
@@ -380,6 +382,26 @@ async function _authorizeHeadlessCore(
   // Bypassed entirely when a taint warning is active — taint overrides trust
   // sessions and policy allows so the user always gets a chance to review.
   if (!taintWarning && !isIgnoredTool(toolName)) {
+    // ── LOOP DETECTION ────────────────────────────────────────────────────
+    const ld = config.policy.loopDetection;
+    if (ld.enabled) {
+      const loopResult = recordAndCheck(toolName, args, ld.threshold, ld.windowSeconds * 1000);
+      if (loopResult.looping) {
+        const reason =
+          `It looks like you've called "${toolName}" ${loopResult.count} times with identical arguments ` +
+          `in the last ${ld.windowSeconds}s. Are you stuck? Step back and reconsider your approach — ` +
+          `what are you actually trying to accomplish, and is there a different way to get there?`;
+        if (!isManual)
+          appendLocalAudit(toolName, args, 'deny', 'loop-detected', meta, hashAuditArgs);
+        return {
+          approved: false,
+          reason,
+          blockedBy: 'loop-detection',
+          blockedByLabel: '🔄 Loop Detected',
+        };
+      }
+    }
+
     if (getActiveTrustSession(toolName)) {
       if (approvers.cloud && creds?.apiKey)
         await auditLocalAllow(toolName, args, 'trust', creds, meta);

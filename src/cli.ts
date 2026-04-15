@@ -33,6 +33,7 @@ import { registerLogCommand } from './cli/commands/log';
 import { registerShieldCommand, registerConfigShowCommand } from './cli/commands/shield';
 import { registerDoctorCommand } from './cli/commands/doctor';
 import { registerAuditCommand } from './cli/commands/audit';
+import { registerReportCommand } from './cli/commands/report';
 import { registerDaemonCommand } from './cli/commands/daemon-cmd';
 import { registerStatusCommand } from './cli/commands/status';
 import { registerInitCommand } from './cli/commands/init';
@@ -368,6 +369,7 @@ registerInitCommand(program);
 
 // 4. AUDIT
 registerAuditCommand(program);
+registerReportCommand(program);
 
 // 5. STATUS
 registerStatusCommand(program);
