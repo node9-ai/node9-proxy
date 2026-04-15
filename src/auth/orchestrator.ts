@@ -546,9 +546,11 @@ async function _authorizeHeadlessCore(
   let cloudRequestId: string | null = null;
   const cloudEnforced = approvers.cloud && !!creds?.apiKey;
 
-  // When a local smart rule requires human review, skip cloud entirely so it
-  // cannot auto-resolve the request before a human sees the approval card.
-  if (cloudEnforced && !localSmartRuleMatched && !options?.localSmartRuleMatched) {
+  // Always notify SaaS when cloud is enforced so the request appears in the
+  // dashboard / Slack channel even when a local smart rule triggered review.
+  // The guards *inside* this block still prevent cloud from auto-resolving or
+  // racing when a human-review smart rule is active.
+  if (cloudEnforced) {
     try {
       const initResult = await initNode9SaaS(
         toolName,

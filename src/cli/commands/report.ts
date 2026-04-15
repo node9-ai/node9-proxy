@@ -193,7 +193,13 @@ interface CostData {
 }
 
 function loadClaudeCost(start: Date, end: Date): CostData {
-  const empty: CostData = { total: 0, byDay: new Map(), byModel: new Map(), inputTokens: 0, cacheReadTokens: 0 };
+  const empty: CostData = {
+    total: 0,
+    byDay: new Map(),
+    byModel: new Map(),
+    inputTokens: 0,
+    cacheReadTokens: 0,
+  };
   const projectsDir = path.join(os.homedir(), '.claude', 'projects');
   if (!fs.existsSync(projectsDir)) return empty;
 
@@ -248,8 +254,8 @@ function loadClaudeCost(start: Date, end: Date): CostData {
 
           const inp = usage.input_tokens ?? 0;
           const out = usage.output_tokens ?? 0;
-          const cw  = usage.cache_creation_input_tokens ?? 0;
-          const cr  = usage.cache_read_input_tokens ?? 0;
+          const cw = usage.cache_creation_input_tokens ?? 0;
+          const cr = usage.cache_read_input_tokens ?? 0;
           const cost = inp * p.i + out * p.o + cw * p.cw + cr * p.cr;
 
           total += cost;
@@ -300,7 +306,13 @@ export function registerReportCommand(program: Command): void {
 
       const { start, end } = getDateRange(period);
 
-      const { total: costUSD, byDay: costByDay, byModel: costByModel, inputTokens: costInputTokens, cacheReadTokens: costCacheRead } = loadClaudeCost(start, end);
+      const {
+        total: costUSD,
+        byDay: costByDay,
+        byModel: costByModel,
+        inputTokens: costInputTokens,
+        cacheReadTokens: costCacheRead,
+      } = loadClaudeCost(start, end);
 
       // Prior period for block trend (same duration, immediately before start)
       const periodMs = end.getTime() - start.getTime();
@@ -596,7 +608,9 @@ export function registerReportCommand(program: Command): void {
           chalk.yellow(fmtCost(costUSD)),
           chalk.dim(`avg ${fmtCost(avgPerDay)}/day`),
           cacheHitPct > 0 ? chalk.dim(`${cacheHitPct}% cache hit`) : null,
-        ].filter(Boolean).join(chalk.dim('  ·  '));
+        ]
+          .filter(Boolean)
+          .join(chalk.dim('  ·  '));
 
         console.log('');
         console.log('  ' + chalk.bold('Cost') + '  ' + costHeaderRight);
@@ -607,14 +621,11 @@ export function registerReportCommand(program: Command): void {
         const MODEL_LABEL = 22;
         const MODEL_BAR = Math.max(6, Math.min(20, W - MODEL_LABEL - 12));
         for (const [model, cost] of modelList) {
-          const label = model.length > MODEL_LABEL - 1 ? model.slice(0, MODEL_LABEL - 2) + '…' : model;
+          const label =
+            model.length > MODEL_LABEL - 1 ? model.slice(0, MODEL_LABEL - 2) + '…' : model;
           const b = colorBar(cost, maxModelCost, MODEL_BAR);
           console.log(
-            '  ' +
-              chalk.white(label.padEnd(MODEL_LABEL)) +
-              b +
-              '  ' +
-              chalk.yellow(fmtCost(cost))
+            '  ' + chalk.white(label.padEnd(MODEL_LABEL)) + b + '  ' + chalk.yellow(fmtCost(cost))
           );
         }
       }
