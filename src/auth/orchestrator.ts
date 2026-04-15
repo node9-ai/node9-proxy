@@ -550,7 +550,14 @@ async function _authorizeHeadlessCore(
   // cannot auto-resolve the request before a human sees the approval card.
   if (cloudEnforced && !localSmartRuleMatched && !options?.localSmartRuleMatched) {
     try {
-      const initResult = await initNode9SaaS(toolName, args, creds!, meta, riskMetadata);
+      const initResult = await initNode9SaaS(
+        toolName,
+        args,
+        creds!,
+        meta,
+        riskMetadata,
+        config.settings.agentPolicy
+      );
 
       if (!initResult.pending) {
         // Shadow mode: allowed through, but warn the developer passively

@@ -184,19 +184,31 @@ function claudeModelPrice(model: string): { i: number; o: number; cw: number; cr
   return null;
 }
 
-function loadClaudeCost(start: Date, end: Date): { total: number; byDay: Map<string, number> } {
+interface CostData {
+  total: number;
+  byDay: Map<string, number>;
+  byModel: Map<string, number>;
+  inputTokens: number;
+  cacheReadTokens: number;
+}
+
+function loadClaudeCost(start: Date, end: Date): CostData {
+  const empty: CostData = { total: 0, byDay: new Map(), byModel: new Map(), inputTokens: 0, cacheReadTokens: 0 };
   const projectsDir = path.join(os.homedir(), '.claude', 'projects');
-  if (!fs.existsSync(projectsDir)) return { total: 0, byDay: new Map() };
+  if (!fs.existsSync(projectsDir)) return empty;
 
   let dirs: string[];
   try {
     dirs = fs.readdirSync(projectsDir);
   } catch {
-    return { total: 0, byDay: new Map() };
+    return empty;
   }
 
   let total = 0;
+  let inputTokens = 0;
+  let cacheReadTokens = 0;
   const byDay = new Map<string, number>();
+  const byModel = new Map<string, number>();
 
   for (const proj of dirs) {
     const projPath = path.join(projectsDir, proj);
@@ -234,15 +246,21 @@ function loadClaudeCost(start: Date, end: Date): { total: number; byDay: Map<str
           const p = claudeModelPrice(model);
           if (!p) continue;
 
-          const cost =
-            (usage.input_tokens ?? 0) * p.i +
-            (usage.output_tokens ?? 0) * p.o +
-            (usage.cache_creation_input_tokens ?? 0) * p.cw +
-            (usage.cache_read_input_tokens ?? 0) * p.cr;
+          const inp = usage.input_tokens ?? 0;
+          const out = usage.output_tokens ?? 0;
+          const cw  = usage.cache_creation_input_tokens ?? 0;
+          const cr  = usage.cache_read_input_tokens ?? 0;
+          const cost = inp * p.i + out * p.o + cw * p.cw + cr * p.cr;
 
           total += cost;
+          inputTokens += inp;
+          cacheReadTokens += cr;
+
           const dateKey = entry.timestamp.slice(0, 10);
           byDay.set(dateKey, (byDay.get(dateKey) ?? 0) + cost);
+
+          const normModel = model.replace(/@.*$/, '').replace(/-\d{8}$/, '');
+          byModel.set(normModel, (byModel.get(normModel) ?? 0) + cost);
         }
       } catch {
         continue;
@@ -250,7 +268,7 @@ function loadClaudeCost(start: Date, end: Date): { total: number; byDay: Map<str
     }
   }
 
-  return { total, byDay };
+  return { total, byDay, byModel, inputTokens, cacheReadTokens };
 }
 
 // ---------------------------------------------------------------------------
@@ -282,7 +300,7 @@ export function registerReportCommand(program: Command): void {
 
       const { start, end } = getDateRange(period);
 
-      const { total: costUSD, byDay: costByDay } = loadClaudeCost(start, end);
+      const { total: costUSD, byDay: costByDay, byModel: costByModel, inputTokens: costInputTokens, cacheReadTokens: costCacheRead } = loadClaudeCost(start, end);
 
       // Prior period for block trend (same duration, immediately before start)
       const periodMs = end.getTime() - start.getTime();
@@ -417,7 +435,6 @@ export function registerReportCommand(program: Command): void {
         dlpHits > 0 ? chalk.yellow(`🚨 ${dlpHits} DLP hits`) : chalk.dim('🚨 0 DLP hits');
       const loopLabel =
         loopHits > 0 ? chalk.yellow(`🔄 ${loopHits} loops`) : chalk.dim('🔄 0 loops');
-      const costLabel = costUSD > 0 ? chalk.magenta(`💰 ${fmtCost(costUSD)}`) : chalk.dim('💰 –');
       const currentRate = total > 0 ? blocked / total : 0;
       const trendLabel = (() => {
         if (priorBlockRate === null) return chalk.dim(`${pct(blocked, total)} block rate`);
@@ -450,9 +467,7 @@ export function registerReportCommand(program: Command): void {
           '   ' +
           loopLabel +
           '   ' +
-          trendLabel +
-          '   ' +
-          costLabel
+          trendLabel
       );
       console.log('  ' + ratioLabel + '   ' + testLabel);
       console.log('');
@@ -564,6 +579,42 @@ export function registerReportCommand(program: Command): void {
               chalk.white(num(calls)) +
               blockNote +
               costNote
+          );
+        }
+      }
+
+      // ── Cost ──
+      if (costUSD > 0) {
+        const periodDays = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / 86400000));
+        const avgPerDay = costUSD / periodDays;
+        const cacheHitPct =
+          costInputTokens + costCacheRead > 0
+            ? Math.round((costCacheRead / (costInputTokens + costCacheRead)) * 100)
+            : 0;
+
+        const costHeaderRight = [
+          chalk.yellow(fmtCost(costUSD)),
+          chalk.dim(`avg ${fmtCost(avgPerDay)}/day`),
+          cacheHitPct > 0 ? chalk.dim(`${cacheHitPct}% cache hit`) : null,
+        ].filter(Boolean).join(chalk.dim('  ·  '));
+
+        console.log('');
+        console.log('  ' + chalk.bold('Cost') + '  ' + costHeaderRight);
+        console.log('  ' + chalk.dim('─'.repeat(Math.min(50, W - 4))));
+
+        const modelList = [...costByModel.entries()].sort((a, b) => b[1] - a[1]);
+        const maxModelCost = Math.max(...modelList.map(([, v]) => v), 1e-9);
+        const MODEL_LABEL = 22;
+        const MODEL_BAR = Math.max(6, Math.min(20, W - MODEL_LABEL - 12));
+        for (const [model, cost] of modelList) {
+          const label = model.length > MODEL_LABEL - 1 ? model.slice(0, MODEL_LABEL - 2) + '…' : model;
+          const b = colorBar(cost, maxModelCost, MODEL_BAR);
+          console.log(
+            '  ' +
+              chalk.white(label.padEnd(MODEL_LABEL)) +
+              b +
+              '  ' +
+              chalk.yellow(fmtCost(cost))
           );
         }
       }

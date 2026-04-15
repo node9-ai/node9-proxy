@@ -97,6 +97,7 @@ export const ConfigFileSchema = z
         enableTrustSessions: z.boolean().optional(),
         allowGlobalPause: z.boolean().optional(),
         auditHashArgs: z.boolean().optional(),
+        agentPolicy: z.enum(['require_approval', 'block_on_rules']).optional(),
       })
       .optional(),
     policy: z
