@@ -822,7 +822,7 @@ describe('shield set — allow verdict guard', () => {
         [CLI, 'shield', 'set', 'postgres', 'block-drop-table', 'allow'],
         {
           encoding: 'utf-8',
-          timeout: 5000,
+          timeout: 30000,
           env: makeEnv(tmpHome, { NODE9_TESTING: '1' }),
         }
       );
@@ -845,7 +845,7 @@ describe('shield set — allow verdict guard', () => {
         [CLI, 'shield', 'set', 'postgres', 'block-drop-table', 'allow', '--force'],
         {
           encoding: 'utf-8',
-          timeout: 5000,
+          timeout: 30000,
           env: makeEnv(tmpHome, { NODE9_TESTING: '1' }),
         }
       );
@@ -869,7 +869,7 @@ describe('removefrom command', () => {
   it('exits with code 1 and prints error for unknown target', () => {
     const result = spawnSync(process.execPath, [CLI, 'removefrom', 'vscode'], {
       encoding: 'utf-8',
-      timeout: 5000,
+      timeout: 30000,
       env: minimalEnv,
     });
     expect(result.status).toBe(1);

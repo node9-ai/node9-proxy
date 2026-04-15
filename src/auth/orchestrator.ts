@@ -246,6 +246,7 @@ async function _authorizeHeadlessCore(
   let explainableLabel = 'Local Config';
   let policyMatchedField: string | undefined;
   let policyMatchedWord: string | undefined;
+  let policyRuleDescription: string | undefined;
   let riskMetadata: RiskMetadata | undefined;
   // Set when a stateful block's predicates are NOT met and we fall through to the
   // race engine — passed to registerDaemonEntry so the tail shows the recovery menu.
@@ -484,6 +485,10 @@ async function _authorizeHeadlessCore(
     policyMatchedField = policyResult.matchedField;
     policyMatchedWord = policyResult.matchedWord;
     if (policyResult.ruleName) localSmartRuleMatched = true;
+    // Capture the human-readable description so it survives through the race
+    // engine and appears in sendBlock even when the user denies at the daemon.
+    if (policyResult.ruleDescription) policyRuleDescription = policyResult.ruleDescription;
+    else if (policyResult.reason) policyRuleDescription = policyResult.reason;
     riskMetadata = computeRiskMetadata(
       args,
       policyResult.tier ?? 6,
@@ -868,7 +873,15 @@ async function _authorizeHeadlessCore(
     );
   }
 
-  return finalResult;
+  // Inject the human-readable rule description into denied results so check.ts
+  // can display it via sendBlock. The race resolvers (daemon, browser, native)
+  // don't carry this field — we re-attach it here from the policy evaluation.
+  const enrichedResult =
+    !finalResult.approved && policyRuleDescription && !finalResult.ruleDescription
+      ? { ...finalResult, ruleDescription: policyRuleDescription }
+      : finalResult;
+
+  return enrichedResult;
 }
 
 export async function authorizeAction(toolName: string, args: unknown): Promise<boolean> {

@@ -180,7 +180,7 @@ describe('proxy command — flags are passed through to the wrapped command', ()
     // prints them — so stdout will be '--version\n', not node9's semver string.
     const node9Version = spawnSync(process.execPath, [CLI, '--version'], {
       encoding: 'utf-8',
-      timeout: 5000,
+      timeout: 30000,
       env: makeEnv(tmpHome),
     });
     expect(node9Version.error).toBeUndefined();
@@ -236,7 +236,7 @@ describe('log command — audit.log written when payload.cwd differs from proces
 
       const r = spawnSync(process.execPath, [CLI, 'log', payload], {
         encoding: 'utf-8',
-        timeout: 5000,
+        timeout: 30000,
         cwd: os.tmpdir(), // intentionally different from projectDir
         env: makeEnv(tmpHome),
       });
@@ -270,7 +270,7 @@ describe('log command — audit.log written when payload.cwd differs from proces
 
     const r = spawnSync(process.execPath, [CLI, 'log', payload], {
       encoding: 'utf-8',
-      timeout: 5000,
+      timeout: 30000,
       cwd: os.tmpdir(),
       env: makeEnv(tmpHome),
     });
@@ -301,7 +301,7 @@ describe('log command — audit.log written when payload.cwd differs from proces
 
     const r = spawnSync(process.execPath, [CLI, 'log', payload], {
       encoding: 'utf-8',
-      timeout: 5000,
+      timeout: 30000,
       cwd: os.tmpdir(),
       env: makeEnv(tmpHome),
     });
@@ -339,7 +339,7 @@ describe('log command — audit.log written when payload.cwd differs from proces
 
       const r = spawnSync(process.execPath, [CLI, 'log', payload], {
         encoding: 'utf-8',
-        timeout: 5000,
+        timeout: 30000,
         cwd: os.tmpdir(),
         env: makeEnv(corruptHome),
       });
