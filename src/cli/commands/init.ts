@@ -7,7 +7,15 @@ import path from 'path';
 import os from 'os';
 import https from 'https';
 import { DEFAULT_CONFIG } from '../../core';
-import { setupClaude, setupGemini, setupCursor, setupCodex, setupWindsurf, setupVSCode, detectAgents } from '../../setup';
+import {
+  setupClaude,
+  setupGemini,
+  setupCursor,
+  setupCodex,
+  setupWindsurf,
+  setupVSCode,
+  detectAgents,
+} from '../../setup';
 import { readActiveShields, writeActiveShields } from '../../shields';
 import { installDaemonService, isDaemonServiceInstalled } from '../../daemon/service';
 
@@ -129,9 +137,13 @@ export function registerInitCommand(program: Command): void {
 
       if (found.length === 0) {
         console.log(
-          chalk.gray('No AI agents detected. Install Claude Code, Gemini CLI, Cursor, or Codex')
+          chalk.gray(
+            'No AI agents detected. Install Claude Code, Gemini CLI, Cursor, Windsurf, VSCode, or Codex'
+          )
         );
-        console.log(chalk.gray('then run: node9 addto <claude|gemini|cursor|codex>'));
+        console.log(
+          chalk.gray('then run: node9 agents add <claude|gemini|cursor|windsurf|vscode|codex>')
+        );
         return;
       }
 
