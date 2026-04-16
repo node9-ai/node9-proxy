@@ -10,7 +10,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "(curl|wget)\\s+[^|]*\\|\\s*(bash|sh|zsh|fish|python3?|ruby|perl|node)",
+          "value": "(curl|wget)\\s+[^|]*\\|\\s*(?:(bash|sh|zsh|fish)|(python3?|ruby|perl|node)\\b(?!\\s+-[cem]\\b))",
           "flags": "i"
         }
       ],
