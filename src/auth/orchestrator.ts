@@ -497,7 +497,9 @@ async function _authorizeHeadlessCore(
       policyMatchedWord,
       policyResult.ruleName
     );
-    if (policyRuleDescription) riskMetadata.ruleDescription = policyRuleDescription;
+    // Truncate to 200 chars — descriptions come from local config but are
+    // forwarded to the SaaS; cap length to prevent oversized payloads.
+    if (policyRuleDescription) riskMetadata.ruleDescription = policyRuleDescription.slice(0, 200);
 
     // A persistent allow must never override a smart rule with verdict "review".
     // Smart rules represent explicit user intent; a blanket "allow this tool"
@@ -587,10 +589,11 @@ async function _authorizeHeadlessCore(
         // via cloudRequestId if the SaaS returned a pending request.
       }
 
-      // Always set cloudRequestId when the SaaS returned a pending request.
-      // With forceReview, the SaaS always creates a real PENDING entry requiring
-      // a human click — so cloud is a valid racer even for local smart rule matches.
-      cloudRequestId = initResult.requestId || null;
+      // Only set cloudRequestId when the SaaS created a genuine PENDING entry.
+      // Never assign from a pending:false response — the SaaS may have already
+      // auto-resolved it, and polling would return that stale auto-decision
+      // without a real human click, bypassing local smart-rule review intent.
+      if (initResult.pending) cloudRequestId = initResult.requestId || null;
       // remoteApprovalOnly is noted but not enforced — local UI always has control.
       // Hard blocks are handled by Shields before the UI opens.
       // Don't overwrite the taint label — taint context must stay visible to the user.
