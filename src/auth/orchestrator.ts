@@ -551,8 +551,17 @@ async function _authorizeHeadlessCore(
 
   // Always notify SaaS when cloud is enforced so the request appears in the
   // dashboard / Slack channel even when a local smart rule triggered review.
-  // The guards *inside* this block still prevent cloud from auto-resolving or
-  // racing when a human-review smart rule is active.
+  // TRUST MODEL: when forceReview=true, the SaaS must create a genuine PENDING
+  // entry requiring a human click — cloud cannot auto-resolve it. Local racers
+  // (terminal card, native popup) run in parallel so the user can still deny
+  // locally before cloud resolves. If the SaaS is compromised, cloud approvals
+  // are already untrusted regardless — this is not a regression from prior state.
+  // Explicit boolean cast: localSmartRuleMatched is always a boolean, but
+  // options?.localSmartRuleMatched is boolean|undefined — coerce to true/undefined
+  // with a strict boolean check to avoid JS truthiness surprises across the API
+  // boundary.
+  const forceReview =
+    localSmartRuleMatched === true || options?.localSmartRuleMatched === true || undefined;
   if (cloudEnforced) {
     try {
       const initResult = await initNode9SaaS(
@@ -562,7 +571,7 @@ async function _authorizeHeadlessCore(
         meta,
         riskMetadata,
         config.settings.agentPolicy,
-        localSmartRuleMatched || options?.localSmartRuleMatched || undefined
+        forceReview
       );
 
       if (!initResult.pending) {
