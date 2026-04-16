@@ -62,6 +62,7 @@ export interface Config {
     approvers: { native: boolean; browser: boolean; cloud: boolean; terminal: boolean };
     environment?: string;
     agentPolicy?: 'require_approval' | 'block_on_rules';
+    cloudSyncIntervalHours?: number;
     hud?: {
       showEnvironmentCounts?: boolean;
     };
@@ -127,6 +128,7 @@ export const DEFAULT_CONFIG: Config = {
     flightRecorder: true,
     auditHashArgs: true,
     approvers: { native: true, browser: true, cloud: false, terminal: true },
+    cloudSyncIntervalHours: 5,
   },
   policy: {
     sandboxPaths: ['/tmp/**', '**/sandbox/**', '**/test-results/**'],
@@ -545,6 +547,8 @@ export function getConfig(cwd?: string): Config {
     if (s.approvalTimeoutSeconds !== undefined && s.approvalTimeoutMs === undefined)
       mergedSettings.approvalTimeoutMs = s.approvalTimeoutSeconds * 1000;
     if (s.environment !== undefined) mergedSettings.environment = s.environment;
+    if (s.cloudSyncIntervalHours !== undefined)
+      mergedSettings.cloudSyncIntervalHours = s.cloudSyncIntervalHours;
     if (s.hud !== undefined) mergedSettings.hud = { ...mergedSettings.hud, ...s.hud };
 
     if (p.sandboxPaths) mergedPolicy.sandboxPaths.push(...p.sandboxPaths);
@@ -609,6 +613,22 @@ export function getConfig(cwd?: string): Config {
 
   applyLayer(globalConfig);
   applyLayer(projectConfig);
+
+  // ── Cloud rules cache layer ───────────────────────────────────────────────
+  // Rules synced from the cloud dashboard are applied after local config so
+  // admin-defined policy takes precedence over per-user overrides.
+  // Shields still apply last and cannot be overridden by cloud rules.
+  {
+    const cacheFile = path.join(os.homedir(), '.node9', 'rules-cache.json');
+    try {
+      const raw = JSON.parse(fs.readFileSync(cacheFile, 'utf-8')) as Record<string, unknown>;
+      if (Array.isArray(raw.rules) && raw.rules.length > 0) {
+        applyLayer({ policy: { smartRules: raw.rules } });
+      }
+    } catch {
+      /* cache absent or corrupted — silent fallback to local config */
+    }
+  }
 
   // ── Shield layer ──────────────────────────────────────────────────────────
   // Shields are applied after user config so they cannot be overridden locally.

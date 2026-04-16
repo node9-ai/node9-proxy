@@ -60,9 +60,11 @@ import {
 import { patchConfig, GLOBAL_CONFIG_PATH, type ConfigPatch } from '../config/patch.js';
 import { SmartRuleSchema } from '../config-schema.js';
 import { startCostSync } from '../costSync.js';
+import { startCloudSync } from './sync.js';
 
 export function startDaemon(): void {
   startCostSync();
+  startCloudSync();
   loadInsightCounts(); // restore persisted nudge counters across restarts
   const csrfToken = randomUUID();
   const internalToken = randomUUID();
