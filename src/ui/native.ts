@@ -135,7 +135,8 @@ function buildPlainMessage(
   agent: string | undefined,
   explainableLabel: string | undefined,
   locked: boolean,
-  allowCount: number = 1
+  allowCount: number = 1,
+  ruleDescription?: string
 ): string {
   const lines: string[] = [];
 
@@ -143,6 +144,7 @@ function buildPlainMessage(
 
   lines.push(`🤖 ${agent || 'AI Agent'}  |  🔧 ${toolName}`);
   lines.push(`🛡️  ${explainableLabel || 'Security Policy'}`);
+  if (ruleDescription) lines.push(`ℹ  ${ruleDescription}`);
   lines.push('');
   lines.push(formattedArgs);
 
@@ -165,7 +167,8 @@ function buildPangoMessage(
   agent: string | undefined,
   explainableLabel: string | undefined,
   locked: boolean,
-  allowCount: number = 1
+  allowCount: number = 1,
+  ruleDescription?: string
 ): string {
   const lines: string[] = [];
 
@@ -178,6 +181,7 @@ function buildPangoMessage(
     `<b>🤖 ${escapePango(agent || 'AI Agent')}</b>  |  <b>🔧 <tt>${escapePango(toolName)}</tt></b>`
   );
   lines.push(`<i>🛡️  ${escapePango(explainableLabel || 'Security Policy')}</i>`);
+  if (ruleDescription) lines.push(`<i>ℹ  ${escapePango(ruleDescription)}</i>`);
   lines.push('');
   lines.push(`<tt>${escapePango(formattedArgs)}</tt>`);
 
@@ -207,7 +211,8 @@ export async function askNativePopup(
   signal?: AbortSignal,
   matchedField?: string,
   matchedWord?: string,
-  allowCount: number = 1
+  allowCount: number = 1,
+  ruleDescription?: string
 ): Promise<'allow' | 'deny' | 'always_allow'> {
   if (isTestEnv()) return 'deny';
 
@@ -221,7 +226,8 @@ export async function askNativePopup(
     agent,
     explainableLabel,
     locked,
-    allowCount
+    allowCount,
+    ruleDescription
   );
 
   return new Promise((resolve) => {
@@ -258,7 +264,8 @@ export async function askNativePopup(
           agent,
           explainableLabel,
           locked,
-          allowCount
+          allowCount,
+          ruleDescription
         );
         // No --timeout: zenity's timeout exit code is 0 on X11/XWayland, which
         // the close handler would silently treat as "allow". Instead we rely on

@@ -53,7 +53,9 @@ export async function initNode9SaaS(
   args: unknown,
   creds: { apiKey: string; apiUrl: string },
   meta?: { agent?: string; mcpServer?: string },
-  riskMetadata?: RiskMetadata
+  riskMetadata?: RiskMetadata,
+  agentPolicy?: 'require_approval' | 'block_on_rules',
+  forceReview?: boolean
 ): Promise<{
   pending: boolean;
   requestId?: string;
@@ -114,6 +116,8 @@ export async function initNode9SaaS(
         },
         ...(riskMetadata && { riskMetadata }),
         ...(ciContext && { ciContext }),
+        ...(agentPolicy && { policy: agentPolicy }),
+        ...(forceReview && { forceReview: true }),
       }),
       signal: controller.signal,
     });

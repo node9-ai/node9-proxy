@@ -61,6 +61,7 @@ export interface Config {
     auditHashArgs?: boolean;
     approvers: { native: boolean; browser: boolean; cloud: boolean; terminal: boolean };
     environment?: string;
+    agentPolicy?: 'require_approval' | 'block_on_rules';
     hud?: {
       showEnvironmentCounts?: boolean;
     };

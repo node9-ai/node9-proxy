@@ -17,6 +17,7 @@ export interface RiskMetadata {
   editFileName?: string; // basename of file_path (EDIT intent only)
   editFilePath?: string; // full file_path (EDIT intent only)
   ruleName?: string; // Tier 2 (Smart Rules) only
+  ruleDescription?: string; // Human-readable description of the matched smart rule or shield
 }
 
 /** Keeps the start and end of a long string, truncating the middle. */

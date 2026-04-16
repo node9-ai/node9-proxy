@@ -497,6 +497,9 @@ async function _authorizeHeadlessCore(
       policyMatchedWord,
       policyResult.ruleName
     );
+    // Truncate to 200 chars — descriptions come from local config but are
+    // forwarded to the SaaS; cap length to prevent oversized payloads.
+    if (policyRuleDescription) riskMetadata.ruleDescription = policyRuleDescription.slice(0, 200);
 
     // A persistent allow must never override a smart rule with verdict "review".
     // Smart rules represent explicit user intent; a blanket "allow this tool"
@@ -546,11 +549,30 @@ async function _authorizeHeadlessCore(
   let cloudRequestId: string | null = null;
   const cloudEnforced = approvers.cloud && !!creds?.apiKey;
 
-  // When a local smart rule requires human review, skip cloud entirely so it
-  // cannot auto-resolve the request before a human sees the approval card.
-  if (cloudEnforced && !localSmartRuleMatched && !options?.localSmartRuleMatched) {
+  // Always notify SaaS when cloud is enforced so the request appears in the
+  // dashboard / Slack channel even when a local smart rule triggered review.
+  // TRUST MODEL: when forceReview=true, the SaaS must create a genuine PENDING
+  // entry requiring a human click — cloud cannot auto-resolve it. Local racers
+  // (terminal card, native popup) run in parallel so the user can still deny
+  // locally before cloud resolves. If the SaaS is compromised, cloud approvals
+  // are already untrusted regardless — this is not a regression from prior state.
+  // Explicit boolean cast: localSmartRuleMatched is always a boolean, but
+  // options?.localSmartRuleMatched is boolean|undefined — coerce to true/undefined
+  // with a strict boolean check to avoid JS truthiness surprises across the API
+  // boundary.
+  const forceReview =
+    localSmartRuleMatched === true || options?.localSmartRuleMatched === true || undefined;
+  if (cloudEnforced) {
     try {
-      const initResult = await initNode9SaaS(toolName, args, creds!, meta, riskMetadata);
+      const initResult = await initNode9SaaS(
+        toolName,
+        args,
+        creds!,
+        meta,
+        riskMetadata,
+        config.settings.agentPolicy,
+        forceReview
+      );
 
       if (!initResult.pending) {
         // Shadow mode: allowed through, but warn the developer passively
@@ -576,11 +598,11 @@ async function _authorizeHeadlessCore(
         // via cloudRequestId if the SaaS returned a pending request.
       }
 
-      // When a local smart rule requires human review, don't let cloud be a racer —
-      // the user must approve via tail/browser/native, not via SaaS auto-resolve.
-      if (!localSmartRuleMatched && !options?.localSmartRuleMatched) {
-        cloudRequestId = initResult.requestId || null;
-      }
+      // Only set cloudRequestId when the SaaS created a genuine PENDING entry.
+      // Never assign from a pending:false response — the SaaS may have already
+      // auto-resolved it, and polling would return that stale auto-decision
+      // without a real human click, bypassing local smart-rule review intent.
+      if (initResult.pending) cloudRequestId = initResult.requestId || null;
       // remoteApprovalOnly is noted but not enforced — local UI always has control.
       // Hard blocks are handled by Shields before the UI opens.
       // Don't overwrite the taint label — taint context must stay visible to the user.
@@ -661,14 +683,10 @@ async function _authorizeHeadlessCore(
   }
 
   // 🏁 RACER 1: Cloud SaaS Channel (The Poller)
-  // Skip cloud polling when a local smart rule requires human approval — cloud
-  // must not auto-resolve entries that the user explicitly wants to review locally.
-  if (
-    cloudEnforced &&
-    cloudRequestId &&
-    !localSmartRuleMatched &&
-    !options?.localSmartRuleMatched
-  ) {
+  // Cloud is a valid racer even for local smart rule matches — with forceReview,
+  // the SaaS always creates a PENDING entry requiring a real human click in
+  // Mission Control, so an approval there is a genuine human decision.
+  if (cloudEnforced && cloudRequestId) {
     racePromises.push(
       (async () => {
         try {
@@ -712,7 +730,8 @@ async function _authorizeHeadlessCore(
           signal,
           policyMatchedField,
           policyMatchedWord,
-          daemonAllowCount
+          daemonAllowCount,
+          riskMetadata?.ruleDescription
         );
 
         if (decision === 'always_allow') {
