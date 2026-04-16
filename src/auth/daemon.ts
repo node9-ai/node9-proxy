@@ -76,22 +76,81 @@ export function isDaemonRunning(): boolean {
   const pidFile = path.join(os.homedir(), '.node9', 'daemon.pid');
 
   if (fs.existsSync(pidFile)) {
-    // PID file present — trust it: live PID → running, dead PID → not running
+    let pid: unknown;
+    let port: unknown;
     try {
-      const { pid, port } = JSON.parse(fs.readFileSync(pidFile, 'utf-8'));
-      if (port !== DAEMON_PORT) return false;
-      process.kill(pid, 0);
-      return true;
+      const data = JSON.parse(fs.readFileSync(pidFile, 'utf-8')) as Record<string, unknown>;
+      pid = data.pid;
+      port = data.port;
     } catch {
+      // Unreadable or invalid JSON — treat as no daemon running.
+      // Do NOT delete: the file may be mid-write by the daemon process.
       return false;
     }
+
+    // Validate port before comparing — never trust file content blindly.
+    if (port !== DAEMON_PORT) {
+      // Wrong port — stale file from a config change.
+      // Do NOT delete here: deleting based on attacker-controlled content creates
+      // a TOCTOU attack where a malicious file causes us to remove the real PID file.
+      // The daemon manages its own PID file; we only read it.
+      return false;
+    }
+
+    // Validate pid strictly before passing to process.kill.
+    // pid=0 signals the entire process group; pid=-1 signals all reachable processes.
+    // Both are denial-of-service primitives available to any local user who can
+    // write ~/.node9/daemon.pid. Reject anything outside the valid PID range.
+    const MAX_PID = 4_194_304; // Linux kernel default max_pid (2^22)
+    if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0 || pid > MAX_PID) {
+      return false;
+    }
+
+    try {
+      // Signal 0 is a pure existence probe — it sends no signal and cannot
+      // affect the target process. The only outcomes are: success (process
+      // exists and we have permission to signal it), ESRCH (no such process),
+      // or EPERM (process exists but owned by a different uid). We never call
+      // process.kill with any other signal number via this code path.
+      process.kill(pid, 0);
+    } catch (err: unknown) {
+      // ESRCH = no such process (truly dead). Clean up the stale PID file only
+      // in this case so the next call doesn't re-read it.
+      // Do not clean up for EPERM (process exists but we can't signal it) —
+      // that would remove a valid PID file for a daemon running as a different uid.
+      if (
+        err instanceof Error &&
+        'code' in err &&
+        (err as NodeJS.ErrnoException).code === 'ESRCH'
+      ) {
+        try {
+          fs.unlinkSync(pidFile);
+        } catch {
+          /* non-fatal */
+        }
+      }
+      return false;
+    }
+
+    // Verify the TCP port is actually accepting connections.
+    // process.kill(pid,0) only confirms the process exists — it could still
+    // be in early startup before server.listen() completes, or the PID could
+    // be reused by an unrelated process. A TCP probe is the authoritative check.
+    const r = spawnSync('ss', ['-Htnp', `sport = :${DAEMON_PORT}`], {
+      encoding: 'utf8',
+      timeout: 300,
+    });
+    if (r.status === 0 && (r.stdout ?? '').includes(`:${DAEMON_PORT}`)) return true;
+    // PID alive but port not open yet (daemon starting) or PID reuse by another
+    // process. Don't clean the PID file — daemon may still be initializing.
+    return false;
   }
 
   // No PID file — port check catches orphaned daemons (PID file was lost)
   try {
     const r = spawnSync('ss', ['-Htnp', `sport = :${DAEMON_PORT}`], {
       encoding: 'utf8',
-      timeout: 500,
+      timeout: 300,
     });
     return r.status === 0 && (r.stdout ?? '').includes(`:${DAEMON_PORT}`);
   } catch {

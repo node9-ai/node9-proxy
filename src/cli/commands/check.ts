@@ -73,19 +73,26 @@ export function registerCheckCommand(program: Command): void {
             !process.env.NODE9_NO_AUTO_DAEMON
           ) {
             try {
-              // Resolve symlinks on argv[1] and verify it matches this package's own
-              // CLI entry (dist/cli.js). Prevents spawn from executing an attacker-
-              // controlled script if the process is invoked via a malicious wrapper or
-              // crafted argv.
               const scriptPath = process.argv[1];
               if (typeof scriptPath !== 'string' || !path.isAbsolute(scriptPath))
                 throw new Error('node9: argv[1] is not an absolute path');
+
+              // Security: verify argv[1] lives inside this package's own dist/
+              // directory — prevents spawn from executing an attacker-controlled
+              // script if the process is invoked via a malicious wrapper.
+              // We check directory prefix (not exact path equality) so the check
+              // survives different install roots: nvm, global npm, local installs,
+              // and symlinked bin entries all resolve to the same dist/ tree.
               const resolvedScript = fs.realpathSync(scriptPath);
-              const expectedCli = fs.realpathSync(path.resolve(__dirname, '../../cli.js'));
-              if (resolvedScript !== expectedCli)
+              const packageDist = fs.realpathSync(path.resolve(__dirname, '../..'));
+              if (
+                !resolvedScript.startsWith(packageDist + path.sep) &&
+                resolvedScript !== packageDist
+              )
                 throw new Error(
-                  'node9: daemon spawn aborted — argv[1] does not resolve to the node9 CLI'
+                  `node9: daemon spawn aborted — argv[1] (${resolvedScript}) is outside package dist (${packageDist})`
                 );
+
               // Strip env vars that can inject code into the spawned Node.js process.
               const safeEnv = { ...process.env };
               for (const key of [
@@ -104,7 +111,20 @@ export function registerCheckCommand(program: Command): void {
                 env: { ...safeEnv, NODE9_AUTO_STARTED: '1', NODE9_BROWSER_OPENED: '1' },
               });
               d.unref();
-            } catch {}
+            } catch (spawnErr) {
+              // Log spawn failures so they're visible in hook-debug.log instead
+              // of silently swallowed — makes install-path mismatches diagnosable.
+              const logPath = path.join(os.homedir(), '.node9', 'hook-debug.log');
+              const msg = spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
+              try {
+                fs.appendFileSync(
+                  logPath,
+                  `[${new Date().toISOString()}] daemon-autostart-failed: ${msg}\n`
+                );
+              } catch {
+                /* non-fatal */
+              }
+            }
           }
 
           // Debug logging — controlled by Env Var OR new Settings config

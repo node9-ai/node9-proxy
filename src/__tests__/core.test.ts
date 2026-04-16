@@ -1657,13 +1657,25 @@ describe('isDaemonRunning', () => {
     expect(isDaemonRunning()).toBe(false);
   });
 
-  it('returns true when PID exists and process is alive', () => {
+  it('returns true when PID exists, process is alive, and port is open', async () => {
     const pidPath = path.join('/mock/home', '.node9', 'daemon.pid');
     existsSpy.mockImplementation((p) => String(p) === pidPath);
     readSpy.mockImplementation((p) =>
       // Use current process PID so kill(pid, 0) succeeds
       String(p) === pidPath ? JSON.stringify({ pid: process.pid, port: 7391 }) : ''
     );
+    // Also mock ss to confirm port is open — isDaemonRunning now requires both
+    // PID-alive AND TCP port listening to return true.
+    const { spawnSync: mockSpawnSync } = await import('child_process');
+    vi.mocked(mockSpawnSync).mockReturnValueOnce({
+      status: 0,
+      stdout: 'LISTEN 0 128 127.0.0.1:7391 0.0.0.0:* users:(("node",pid=12345,fd=18))',
+      stderr: '',
+      pid: 0,
+      output: [],
+      signal: null,
+      error: undefined,
+    });
     expect(isDaemonRunning()).toBe(true);
   });
 
@@ -1694,6 +1706,84 @@ describe('isDaemonRunning', () => {
       error: undefined,
     });
     expect(isDaemonRunning()).toBe(false);
+  });
+
+  it('returns false when PID file contains invalid JSON', () => {
+    const pidPath = path.join('/mock/home', '.node9', 'daemon.pid');
+    existsSpy.mockImplementation((p) => String(p) === pidPath);
+    readSpy.mockImplementation((p) => (String(p) === pidPath ? 'not-json{{{' : ''));
+    const unlinkSpy = vi.spyOn(fs, 'unlinkSync').mockImplementation(() => undefined);
+    expect(isDaemonRunning()).toBe(false);
+    // Must NOT delete on parse failure — file may be mid-write
+    expect(unlinkSpy).not.toHaveBeenCalled();
+    unlinkSpy.mockRestore();
+  });
+
+  it('returns false and does NOT delete PID file when port is wrong (TOCTOU guard)', () => {
+    const pidPath = path.join('/mock/home', '.node9', 'daemon.pid');
+    existsSpy.mockImplementation((p) => String(p) === pidPath);
+    readSpy.mockImplementation((p) =>
+      String(p) === pidPath ? JSON.stringify({ pid: process.pid, port: 9999 }) : ''
+    );
+    const unlinkSpy = vi.spyOn(fs, 'unlinkSync').mockImplementation(() => undefined);
+    expect(isDaemonRunning()).toBe(false);
+    // Must NOT delete — attacker could swap file to remove the real PID file
+    expect(unlinkSpy).not.toHaveBeenCalled();
+    unlinkSpy.mockRestore();
+  });
+
+  it.each([
+    ['zero', 0],
+    ['negative', -1],
+    ['signal-all', -1],
+    ['float', 1.5],
+    ['too large', 4_194_305],
+    ['string', '1234'],
+  ])('returns false when pid is invalid (%s)', (_label, badPid) => {
+    const pidPath = path.join('/mock/home', '.node9', 'daemon.pid');
+    existsSpy.mockImplementation((p) => String(p) === pidPath);
+    readSpy.mockImplementation((p) =>
+      String(p) === pidPath ? JSON.stringify({ pid: badPid, port: 7391 }) : ''
+    );
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    expect(isDaemonRunning()).toBe(false);
+    // process.kill must never be called with an unvalidated pid
+    expect(killSpy).not.toHaveBeenCalled();
+    killSpy.mockRestore();
+  });
+
+  it('cleans up PID file when process.kill throws ESRCH (dead process)', () => {
+    const pidPath = path.join('/mock/home', '.node9', 'daemon.pid');
+    existsSpy.mockImplementation((p) => String(p) === pidPath);
+    readSpy.mockImplementation((p) =>
+      String(p) === pidPath ? JSON.stringify({ pid: 99999, port: 7391 }) : ''
+    );
+    const esrchErr = Object.assign(new Error('No such process'), { code: 'ESRCH' });
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw esrchErr;
+    });
+    const unlinkSpy = vi.spyOn(fs, 'unlinkSync').mockImplementation(() => undefined);
+    expect(isDaemonRunning()).toBe(false);
+    expect(unlinkSpy).toHaveBeenCalledWith(pidPath);
+    killSpy.mockRestore();
+    unlinkSpy.mockRestore();
+  });
+
+  it('does NOT clean up PID file when process.kill throws EPERM (process exists, different uid)', () => {
+    const pidPath = path.join('/mock/home', '.node9', 'daemon.pid');
+    existsSpy.mockImplementation((p) => String(p) === pidPath);
+    readSpy.mockImplementation((p) =>
+      String(p) === pidPath ? JSON.stringify({ pid: 99999, port: 7391 }) : ''
+    );
+    const epermErr = Object.assign(new Error('Operation not permitted'), { code: 'EPERM' });
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw epermErr;
+    });
+    const unlinkSpy = vi.spyOn(fs, 'unlinkSync').mockImplementation(() => undefined);
+    expect(isDaemonRunning()).toBe(false);
+    expect(unlinkSpy).not.toHaveBeenCalled();
+    killSpy.mockRestore();
+    unlinkSpy.mockRestore();
   });
 });
 
