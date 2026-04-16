@@ -64,6 +64,7 @@ interface ApprovalRequest {
     matchedField?: string;
     matchedWord?: string;
     ruleName?: string;
+    ruleDescription?: string;
   };
   /** When set, shows the [1]/[2]/[3] recovery menu instead of the standard [y/n/a/t] prompt. */
   recoveryCommand?: string;
@@ -283,6 +284,10 @@ function buildCardLines(req: ApprovalRequest, localCount: number = 0): string[] 
     `${CYAN}║${RESET} Tool:    ${BOLD}${req.toolName}${RESET}`,
     `${CYAN}║${RESET} Reason:  ${tierLabel} — ${blockedBy}${RESET}`,
   ];
+
+  if (req.riskMetadata?.ruleDescription) {
+    lines.push(`${CYAN}║${RESET} ${YELLOW}ℹ  ${req.riskMetadata.ruleDescription}${RESET}`);
+  }
 
   // Taint warning: show the file + source context so the user knows exactly why
   if (req.riskMetadata?.ruleName && blockedBy.includes('Taint')) {

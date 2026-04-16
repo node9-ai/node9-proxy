@@ -497,6 +497,7 @@ async function _authorizeHeadlessCore(
       policyMatchedWord,
       policyResult.ruleName
     );
+    if (policyRuleDescription) riskMetadata.ruleDescription = policyRuleDescription;
 
     // A persistent allow must never override a smart rule with verdict "review".
     // Smart rules represent explicit user intent; a blanket "allow this tool"
@@ -717,7 +718,8 @@ async function _authorizeHeadlessCore(
           signal,
           policyMatchedField,
           policyMatchedWord,
-          daemonAllowCount
+          daemonAllowCount,
+          riskMetadata?.ruleDescription
         );
 
         if (decision === 'always_allow') {
