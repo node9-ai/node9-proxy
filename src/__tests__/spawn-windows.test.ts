@@ -32,9 +32,10 @@ describe('spawn Windows compatibility (#41)', () => {
     }
   });
 
-  it('spawns daemon using process.execPath at all 4 call sites', () => {
-    // autoStartDaemonAndWait (1) + daemon --openui (1) + daemon --background (1) + watch (1)
+  it('spawns daemon using process.execPath at all 5 call sites', () => {
+    // autoStartDaemonAndWait (1) + daemon --openui (1) + daemon --background (1) +
+    // daemon restart (1) + watch (1)
     const total = sources.reduce((sum, src) => sum + (src.match(SAFE_SPAWN_RE) ?? []).length, 0);
-    expect(total).toBe(4);
+    expect(total).toBe(5);
   });
 });

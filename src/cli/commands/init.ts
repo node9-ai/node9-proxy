@@ -9,6 +9,7 @@ import https from 'https';
 import { DEFAULT_CONFIG } from '../../core';
 import { setupClaude, setupGemini, setupCursor, setupCodex, detectAgents } from '../../setup';
 import { readActiveShields, writeActiveShields } from '../../shields';
+import { installDaemonService, isDaemonServiceInstalled } from '../../daemon/service';
 
 const DEFAULT_SHIELDS = ['bash-safe', 'filesystem', 'postgres'];
 
@@ -149,7 +150,35 @@ export function registerInitCommand(program: Command): void {
         console.log('');
       }
 
-      // ── Step 4: Telemetry opt-in ───────────────────────────────────────────
+      // ── Step 4: Install daemon as login service ────────────────────────────
+      // Only prompt on platforms that support it and when not already installed.
+      // In non-interactive environments (CI, pipes) we skip silently.
+      if ((process.platform === 'darwin' || process.platform === 'linux') && process.stdout.isTTY) {
+        const alreadyInstalled = isDaemonServiceInstalled();
+        if (!alreadyInstalled) {
+          const { confirm } = await import('@inquirer/prompts');
+          const installService = await confirm({
+            message: 'Install daemon as a login service? (starts automatically on login)',
+            default: true,
+          });
+          if (installService) {
+            const result = installDaemonService();
+            if (result.ok) {
+              console.log(
+                chalk.green(`  ✓ Daemon installed as login service (${result.platform})`)
+              );
+            } else {
+              console.log(chalk.yellow(`  ⚠️  Could not install service: ${result.reason}`));
+              console.log(chalk.gray('     You can try again later with: node9 daemon install'));
+            }
+          }
+        } else {
+          console.log(chalk.green('  ✓ Daemon login service already installed'));
+        }
+        console.log('');
+      }
+
+      // ── Step 5: Telemetry opt-in ───────────────────────────────────────────
       {
         const { confirm } = await import('@inquirer/prompts');
         const sendTelemetry = await confirm({

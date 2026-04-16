@@ -562,7 +562,16 @@ export function getConfig(cwd?: string): Config {
     if (p.smartRules) {
       const defaultBlocks = mergedPolicy.smartRules.filter((r) => r.verdict === 'block');
       const defaultNonBlocks = mergedPolicy.smartRules.filter((r) => r.verdict !== 'block');
-      mergedPolicy.smartRules = [...defaultBlocks, ...p.smartRules, ...defaultNonBlocks];
+      // Deduplicate by name: user-config rules with the same name as a default rule
+      // override the default (user rule wins), rather than stacking on top of it.
+      // This prevents rules 1-N in DEFAULT_CONFIG from appearing twice when a user's
+      // config.json was seeded with the same rule names.
+      const userRuleNames = new Set(p.smartRules.filter((r) => r.name).map((r) => r.name));
+      const filteredBlocks = defaultBlocks.filter((r) => !r.name || !userRuleNames.has(r.name));
+      const filteredNonBlocks = defaultNonBlocks.filter(
+        (r) => !r.name || !userRuleNames.has(r.name)
+      );
+      mergedPolicy.smartRules = [...filteredBlocks, ...p.smartRules, ...filteredNonBlocks];
     }
     if (p.snapshot) {
       const s = p.snapshot as Partial<Config['policy']['snapshot']>;
