@@ -107,7 +107,11 @@ export function isDaemonRunning(): boolean {
     }
 
     try {
-      // Verify the process is alive
+      // Signal 0 is a pure existence probe — it sends no signal and cannot
+      // affect the target process. The only outcomes are: success (process
+      // exists and we have permission to signal it), ESRCH (no such process),
+      // or EPERM (process exists but owned by a different uid). We never call
+      // process.kill with any other signal number via this code path.
       process.kill(pid, 0);
     } catch (err: unknown) {
       // ESRCH = no such process (truly dead). Clean up the stale PID file only
