@@ -25,8 +25,8 @@ import type { SmartRule } from '../../core';
 // ---------------------------------------------------------------------------
 
 interface RuleSource {
-  shieldName: string;   // "bash-safe" | "custom" | "cloud"
-  shieldLabel: string;  // display label
+  shieldName: string; // "bash-safe" | "custom" | "cloud"
+  shieldLabel: string; // display label
   rule: SmartRule;
 }
 
@@ -78,16 +78,16 @@ interface ScanResult {
 // ---------------------------------------------------------------------------
 
 const CLAUDE_PRICING: Record<string, { i: number; o: number; cw: number; cr: number }> = {
-  'claude-opus-4-6':   { i: 5e-6,   o: 25e-6,  cw: 6.25e-6,  cr: 0.5e-6  },
-  'claude-opus-4-5':   { i: 5e-6,   o: 25e-6,  cw: 6.25e-6,  cr: 0.5e-6  },
-  'claude-opus-4':     { i: 15e-6,  o: 75e-6,  cw: 18.75e-6, cr: 1.5e-6  },
-  'claude-sonnet-4-6': { i: 3e-6,   o: 15e-6,  cw: 3.75e-6,  cr: 0.3e-6  },
-  'claude-sonnet-4-5': { i: 3e-6,   o: 15e-6,  cw: 3.75e-6,  cr: 0.3e-6  },
-  'claude-sonnet-4':   { i: 3e-6,   o: 15e-6,  cw: 3.75e-6,  cr: 0.3e-6  },
-  'claude-3-7-sonnet': { i: 3e-6,   o: 15e-6,  cw: 3.75e-6,  cr: 0.3e-6  },
-  'claude-3-5-sonnet': { i: 3e-6,   o: 15e-6,  cw: 3.75e-6,  cr: 0.3e-6  },
-  'claude-haiku-4-5':  { i: 1e-6,   o: 5e-6,   cw: 1.25e-6,  cr: 0.1e-6  },
-  'claude-3-5-haiku':  { i: 0.8e-6, o: 4e-6,   cw: 1e-6,     cr: 0.08e-6 },
+  'claude-opus-4-6': { i: 5e-6, o: 25e-6, cw: 6.25e-6, cr: 0.5e-6 },
+  'claude-opus-4-5': { i: 5e-6, o: 25e-6, cw: 6.25e-6, cr: 0.5e-6 },
+  'claude-opus-4': { i: 15e-6, o: 75e-6, cw: 18.75e-6, cr: 1.5e-6 },
+  'claude-sonnet-4-6': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
+  'claude-sonnet-4-5': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
+  'claude-sonnet-4': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
+  'claude-3-7-sonnet': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
+  'claude-3-5-sonnet': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
+  'claude-haiku-4-5': { i: 1e-6, o: 5e-6, cw: 1.25e-6, cr: 0.1e-6 },
+  'claude-3-5-haiku': { i: 0.8e-6, o: 4e-6, cw: 1e-6, cr: 0.08e-6 },
 };
 
 function claudeModelPrice(model: string): { i: number; o: number; cw: number; cr: number } | null {
@@ -114,7 +114,11 @@ function fmtCost(usd: number): string {
 
 function fmtTs(ts: string): string {
   try {
-    return new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    return new Date(ts).toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
   } catch {
     return ts.slice(0, 10);
   }
@@ -208,7 +212,9 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
 
     let files: string[];
     try {
-      files = fs.readdirSync(projPath).filter((f) => f.endsWith('.jsonl') && !f.startsWith('agent-'));
+      files = fs
+        .readdirSync(projPath)
+        .filter((f) => f.endsWith('.jsonl') && !f.startsWith('agent-'));
     } catch {
       continue;
     }
@@ -243,8 +249,10 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
 
         // Track date range
         if (entry.timestamp) {
-          if (!result.firstDate || entry.timestamp < result.firstDate) result.firstDate = entry.timestamp;
-          if (!result.lastDate || entry.timestamp > result.lastDate) result.lastDate = entry.timestamp;
+          if (!result.firstDate || entry.timestamp < result.firstDate)
+            result.firstDate = entry.timestamp;
+          if (!result.lastDate || entry.timestamp > result.lastDate)
+            result.lastDate = entry.timestamp;
         }
 
         // Cost
@@ -387,10 +395,14 @@ export function registerScanCommand(program: Command): void {
 
       console.log(
         '  ' +
-          chalk.white(num(scan.sessions)) + chalk.dim(' sessions  ') +
-          chalk.white(num(scan.totalToolCalls)) + chalk.dim(' tool calls  ') +
-          chalk.white(num(scan.bashCalls)) + chalk.dim(' bash commands  ') +
-          rangeLabel + dateRange
+          chalk.white(num(scan.sessions)) +
+          chalk.dim(' sessions  ') +
+          chalk.white(num(scan.totalToolCalls)) +
+          chalk.dim(' tool calls  ') +
+          chalk.white(num(scan.bashCalls)) +
+          chalk.dim(' bash commands  ') +
+          rangeLabel +
+          dateRange
       );
       console.log('');
 
@@ -411,26 +423,29 @@ export function registerScanCommand(program: Command): void {
       } else {
         if (totalFindings > 0) {
           console.log(
-            '  ' + chalk.bold('If node9 had been installed:') + '  ' +
-              chalk.yellow.bold(`${num(totalFindings)} command${totalFindings !== 1 ? 's' : ''} flagged for review`)
+            '  ' +
+              chalk.bold('If node9 had been installed:') +
+              '  ' +
+              chalk.yellow.bold(
+                `${num(totalFindings)} command${totalFindings !== 1 ? 's' : ''} flagged for review`
+              )
           );
           console.log('');
 
           // Sort shields: most findings first
-          const sorted = [...byShield.entries()].sort((a, b) => b[1].findings.length - a[1].findings.length);
+          const sorted = [...byShield.entries()].sort(
+            (a, b) => b[1].findings.length - a[1].findings.length
+          );
 
           for (const [shieldName, { label, findings }] of sorted) {
             const count = findings.length;
             const isUserRule = shieldName === 'custom' || shieldName === 'cloud';
-            const shieldBadge = isUserRule
-              ? chalk.magenta(label)
-              : chalk.cyan(label);
+            const shieldBadge = isUserRule ? chalk.magenta(label) : chalk.cyan(label);
 
+            console.log('  ' + chalk.dim('─'.repeat(70)));
             console.log(
-              '  ' + chalk.dim('─'.repeat(70))
-            );
-            console.log(
-              '  ' + shieldBadge +
+              '  ' +
+                shieldBadge +
                 chalk.dim('  ·  ') +
                 chalk.yellow(`${num(count)} finding${count !== 1 ? 's' : ''}`) +
                 (isUserRule ? '' : chalk.dim(`  →  node9 shield enable ${shieldName}`))
@@ -452,7 +467,9 @@ export function registerScanCommand(program: Command): void {
               // Display the short rule name: strip "shield:<name>:" prefix
               const shortName = (rule.name ?? 'unnamed').replace(/^shield:[^:]+:/, '');
               console.log(
-                '    ' + chalk.white(shortName) + countBadge +
+                '    ' +
+                  chalk.white(shortName) +
+                  countBadge +
                   (rule.reason ? chalk.dim(`  — ${rule.reason}`) : '')
               );
 
@@ -464,7 +481,11 @@ export function registerScanCommand(program: Command): void {
                 console.log(`      ${ts}${proj}${cmd}`);
               }
               if (ruleFindings.length > topN) {
-                console.log(chalk.dim(`      … and ${ruleFindings.length - topN} more (--top ${ruleFindings.length})`));
+                console.log(
+                  chalk.dim(
+                    `      … and ${ruleFindings.length - topN} more (--top ${ruleFindings.length})`
+                  )
+                );
               }
             }
             console.log('');
@@ -475,9 +496,12 @@ export function registerScanCommand(program: Command): void {
         if (scan.dlpFindings.length > 0) {
           console.log('  ' + chalk.dim('─'.repeat(70)));
           console.log(
-            '  ' + chalk.red.bold('Secrets / DLP') +
+            '  ' +
+              chalk.red.bold('Secrets / DLP') +
               chalk.dim('  ·  ') +
-              chalk.red(`${num(scan.dlpFindings.length)} potential secret leak${scan.dlpFindings.length !== 1 ? 's' : ''}`)
+              chalk.red(
+                `${num(scan.dlpFindings.length)} potential secret leak${scan.dlpFindings.length !== 1 ? 's' : ''}`
+              )
           );
           const shownDlp = scan.dlpFindings.slice(0, topN);
           for (const f of shownDlp) {
@@ -491,7 +515,11 @@ export function registerScanCommand(program: Command): void {
             );
           }
           if (scan.dlpFindings.length > topN) {
-            console.log(chalk.dim(`    … and ${scan.dlpFindings.length - topN} more (--top ${scan.dlpFindings.length})`));
+            console.log(
+              chalk.dim(
+                `    … and ${scan.dlpFindings.length - topN} more (--top ${scan.dlpFindings.length})`
+              )
+            );
           }
           console.log('');
         }
@@ -500,7 +528,9 @@ export function registerScanCommand(program: Command): void {
       // ── Cost ──────────────────────────────────────────────────────────────
       if (scan.totalCostUSD > 0) {
         console.log(
-          '  ' + chalk.bold('Claude spend:') + '  ' +
+          '  ' +
+            chalk.bold('Claude spend:') +
+            '  ' +
             chalk.yellow(fmtCost(scan.totalCostUSD)) +
             chalk.dim('  (for per-period breakdown: node9 report)')
         );
@@ -511,11 +541,15 @@ export function registerScanCommand(program: Command): void {
       const auditLog = path.join(os.homedir(), '.node9', 'audit.log');
       if (fs.existsSync(auditLog)) {
         console.log(chalk.green('  ✅ node9 is active — future sessions are protected.'));
-        console.log(chalk.dim('  Run ') + chalk.cyan('node9 report') + chalk.dim(' to see live stats.'));
+        console.log(
+          chalk.dim('  Run ') + chalk.cyan('node9 report') + chalk.dim(' to see live stats.')
+        );
       } else {
         console.log(chalk.yellow.bold('  ⚡ node9 was not running during these sessions.'));
         console.log(
-          '  ' + chalk.white('Run ') + chalk.cyan('node9 init') +
+          '  ' +
+            chalk.white('Run ') +
+            chalk.cyan('node9 init') +
             chalk.white(' to start protecting your AI agents.')
         );
       }
