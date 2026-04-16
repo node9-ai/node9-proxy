@@ -76,13 +76,31 @@ export function isDaemonRunning(): boolean {
   const pidFile = path.join(os.homedir(), '.node9', 'daemon.pid');
 
   if (fs.existsSync(pidFile)) {
-    // PID file present — trust it: live PID → running, dead PID → not running
     try {
       const { pid, port } = JSON.parse(fs.readFileSync(pidFile, 'utf-8'));
-      if (port !== DAEMON_PORT) return false;
+      if (port !== DAEMON_PORT) {
+        // Wrong port — stale file from a config change; clean it up
+        try { fs.unlinkSync(pidFile); } catch {}
+        return false;
+      }
+      // Verify the process is alive
       process.kill(pid, 0);
-      return true;
+      // Verify the TCP port is actually accepting connections.
+      // process.kill(pid,0) only confirms the process exists — it could still
+      // be in early startup before server.listen() completes, or the PID could
+      // be reused by an unrelated process. A TCP probe is the authoritative check.
+      const r = spawnSync('ss', ['-Htnp', `sport = :${DAEMON_PORT}`], {
+        encoding: 'utf8',
+        timeout: 300,
+      });
+      if (r.status === 0 && (r.stdout ?? '').includes(`:${DAEMON_PORT}`)) return true;
+      // PID alive but port not open yet (daemon starting) or PID reuse by another
+      // process. Don't clean the PID file — daemon may still be initializing.
+      return false;
     } catch {
+      // PID dead — clean up stale file so the next isDaemonRunning() call
+      // doesn't re-read it and fall into the PID-reuse false-positive path.
+      try { fs.unlinkSync(pidFile); } catch {}
       return false;
     }
   }
@@ -91,7 +109,7 @@ export function isDaemonRunning(): boolean {
   try {
     const r = spawnSync('ss', ['-Htnp', `sport = :${DAEMON_PORT}`], {
       encoding: 'utf8',
-      timeout: 500,
+      timeout: 300,
     });
     return r.status === 0 && (r.stdout ?? '').includes(`:${DAEMON_PORT}`);
   } catch {

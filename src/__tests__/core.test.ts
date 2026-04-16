@@ -1657,13 +1657,25 @@ describe('isDaemonRunning', () => {
     expect(isDaemonRunning()).toBe(false);
   });
 
-  it('returns true when PID exists and process is alive', () => {
+  it('returns true when PID exists, process is alive, and port is open', async () => {
     const pidPath = path.join('/mock/home', '.node9', 'daemon.pid');
     existsSpy.mockImplementation((p) => String(p) === pidPath);
     readSpy.mockImplementation((p) =>
       // Use current process PID so kill(pid, 0) succeeds
       String(p) === pidPath ? JSON.stringify({ pid: process.pid, port: 7391 }) : ''
     );
+    // Also mock ss to confirm port is open — isDaemonRunning now requires both
+    // PID-alive AND TCP port listening to return true.
+    const { spawnSync: mockSpawnSync } = await import('child_process');
+    vi.mocked(mockSpawnSync).mockReturnValueOnce({
+      status: 0,
+      stdout: 'LISTEN 0 128 127.0.0.1:7391 0.0.0.0:* users:(("node",pid=12345,fd=18))',
+      stderr: '',
+      pid: 0,
+      output: [],
+      signal: null,
+      error: undefined,
+    });
     expect(isDaemonRunning()).toBe(true);
   });
 
