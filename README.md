@@ -104,7 +104,7 @@ This is automatic — no configuration needed. The gateway pins on first `tools/
 
 ### Skills Pinning — installed-plugin drift detection
 
-Marketplace plugins at `~/.claude/plugins/marketplaces/` come from registries, not your workspace — `git status` never sees them. Like MCP tools, they can be silently swapped by a compromised package or auto-update. Node9 hashes the directory on first session and warns on drift. Opt-in via `policy.skillPinning.enabled: true`; use `mode: 'block'` for strict enforcement. User-edited files (`CLAUDE.md`, `.cursor/rules/`) are **not** in the default scope. Extend via `policy.skillPinning.roots`.
+Marketplace plugins at `~/.claude/plugins/marketplaces/` come from registries, not your workspace — `git status` never sees them. Each installed plugin gets its own pin (same model as MCP server pinning): installing a new plugin creates a new pin silently; only changes to an already-pinned plugin trigger drift. Opt-in via `policy.skillPinning.enabled: true`; use `mode: 'block'` for strict enforcement. User-edited files are **not** in default scope. Extend via `policy.skillPinning.roots`.
 
 ---
 

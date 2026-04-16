@@ -10,7 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- **Installed Skill Pinning:** Drift detection for `~/.claude/plugins/marketplaces/` — the canonical location for marketplace-installed plugins and skills. These files live outside any git repo, so `git status` can't see when they change. Off by default (`policy.skillPinning.enabled: false`); opt-in for users who install plugins from external sources. Two modes:
+- **Installed Skill Pinning:** Per-plugin drift detection for marketplace-installed plugins at `~/.claude/plugins/marketplaces/<registry>/plugins/<name>/`. Each plugin gets its own pin (same model as MCP server pinning) — installing a new plugin creates a new pin silently, only changes to an already-pinned plugin trigger drift. Off by default (`policy.skillPinning.enabled: false`). Two modes:
   - **`mode: 'warn'` (default)** — `/dev/tty` notification on drift, tool call allowed (exit 0)
   - **`mode: 'block'`** — quarantine the session until the user reviews
 

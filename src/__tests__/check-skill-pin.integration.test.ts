@@ -148,7 +148,17 @@ describe('skillPinning mode=warn (installed skill swap)', () => {
       fs.readFileSync(path.join(tmpHome, '.node9', 'skill-pins.json'), 'utf-8')
     );
     const pinnedPaths = Object.values<{ rootPath: string }>(pins.roots).map((e) => e.rootPath);
-    expect(pinnedPaths).toEqual([path.join(tmpHome, '.claude', 'plugins', 'marketplaces')]);
+    expect(pinnedPaths).toEqual([
+      path.join(
+        tmpHome,
+        '.claude',
+        'plugins',
+        'marketplaces',
+        'test-registry',
+        'plugins',
+        'test-plugin'
+      ),
+    ]);
     const flag = JSON.parse(
       fs.readFileSync(path.join(tmpHome, '.node9', 'skill-sessions', 'w1.json'), 'utf-8')
     );
@@ -241,7 +251,17 @@ describe('default scope does NOT include project CLAUDE.md or .cursor/rules', ()
       fs.readFileSync(path.join(tmpHome, '.node9', 'skill-pins.json'), 'utf-8')
     );
     const pinnedPaths = Object.values<{ rootPath: string }>(pins.roots).map((e) => e.rootPath);
-    expect(pinnedPaths).toEqual([path.join(tmpHome, '.claude', 'plugins', 'marketplaces')]);
+    expect(pinnedPaths).toEqual([
+      path.join(
+        tmpHome,
+        '.claude',
+        'plugins',
+        'marketplaces',
+        'test-registry',
+        'plugins',
+        'test-plugin'
+      ),
+    ]);
     // Explicit absence checks:
     expect(pinnedPaths).not.toContain(path.join(tmpProject, 'CLAUDE.md'));
     expect(pinnedPaths).not.toContain(path.join(tmpProject, '.cursor', 'rules'));
@@ -278,13 +298,14 @@ describe('policy.skillPinning.roots extends the default scope', () => {
     fs.rmSync(tmpProject, { recursive: true, force: true });
   });
 
-  it('user-extended root is included alongside the default', () => {
+  it('user-extended root is pinned (no marketplace plugins = only user roots)', () => {
     runCheck(payload('e1', tmpProject), { HOME: tmpHome }, tmpProject);
     const pins = JSON.parse(
       fs.readFileSync(path.join(tmpHome, '.node9', 'skill-pins.json'), 'utf-8')
     );
     const pinnedPaths = Object.values<{ rootPath: string }>(pins.roots).map((e) => e.rootPath);
-    expect(pinnedPaths).toContain(path.join(tmpHome, '.claude', 'plugins', 'marketplaces'));
-    expect(pinnedPaths).toContain(path.join(tmpProject, 'AGENTS.md'));
+    // No marketplace plugins seeded → defaultSkillRoots returns []
+    // Only the user-configured AGENTS.md root is pinned.
+    expect(pinnedPaths).toEqual([path.join(tmpProject, 'AGENTS.md')]);
   });
 });

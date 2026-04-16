@@ -271,21 +271,44 @@ export function verifyAndPinRoots(roots: string[]): VerifyResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Built-in skill roots — intentionally narrow.
+ * Auto-discover installed marketplace plugins as individual pin roots.
  *
- * Defaults to `~/.claude/plugins/marketplaces/` — the canonical location where
- * `claude plugin install` / marketplace-based plugins put their SKILL.md files.
- * These are third-party artifacts that live OUTSIDE any git repo; `git status`
- * never sees them.
+ * Enumerates `~/.claude/plugins/marketplaces/<registry>/plugins/<name>/`
+ * and returns each plugin directory as its own root — exactly how MCP
+ * pinning gives each server its own pin via `getServerKey(upstreamCommand)`.
  *
- * `~/.claude/skills/` (user-authored custom skills) and user-edited files like
- * `CLAUDE.md` and `.cursor/rules/` are deliberately excluded — they change
- * constantly in normal workflow.
+ * Why per-plugin, not per-tree:
+ *   - Installing a NEW plugin creates a new pin silently (no drift on existing).
+ *   - Only changes to an ALREADY-PINNED plugin trigger drift.
+ *   - This matches MCP semantics: new server = new pin; changed server = drift.
  *
+ * User-authored files (CLAUDE.md, .cursor/rules/) are not included.
  * Extend via `config.policy.skillPinning.roots`.
  */
 export function defaultSkillRoots(_cwd: string | undefined): string[] {
-  return [path.join(os.homedir(), '.claude', 'plugins', 'marketplaces')];
+  const marketplaces = path.join(os.homedir(), '.claude', 'plugins', 'marketplaces');
+  const roots: string[] = [];
+  let registries: fs.Dirent[];
+  try {
+    registries = fs.readdirSync(marketplaces, { withFileTypes: true });
+  } catch {
+    return []; // no marketplace directory — nothing to pin
+  }
+  for (const registry of registries) {
+    if (!registry.isDirectory()) continue;
+    const pluginsDir = path.join(marketplaces, registry.name, 'plugins');
+    let plugins: fs.Dirent[];
+    try {
+      plugins = fs.readdirSync(pluginsDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const plugin of plugins) {
+      if (!plugin.isDirectory()) continue;
+      roots.push(path.join(pluginsDir, plugin.name));
+    }
+  }
+  return roots;
 }
 
 /** Resolve a user-supplied entry: absolute, `~/`-prefixed, or cwd-relative. */
