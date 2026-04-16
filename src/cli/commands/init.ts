@@ -7,8 +7,17 @@ import path from 'path';
 import os from 'os';
 import https from 'https';
 import { DEFAULT_CONFIG } from '../../core';
-import { setupClaude, setupGemini, setupCursor, setupCodex, detectAgents } from '../../setup';
+import {
+  setupClaude,
+  setupGemini,
+  setupCursor,
+  setupCodex,
+  setupWindsurf,
+  setupVSCode,
+  detectAgents,
+} from '../../setup';
 import { readActiveShields, writeActiveShields } from '../../shields';
+import { installDaemonService, isDaemonServiceInstalled } from '../../daemon/service';
 
 const DEFAULT_SHIELDS = ['bash-safe', 'filesystem', 'postgres'];
 
@@ -128,9 +137,13 @@ export function registerInitCommand(program: Command): void {
 
       if (found.length === 0) {
         console.log(
-          chalk.gray('No AI agents detected. Install Claude Code, Gemini CLI, Cursor, or Codex')
+          chalk.gray(
+            'No AI agents detected. Install Claude Code, Gemini CLI, Cursor, Windsurf, VSCode, or Codex'
+          )
         );
-        console.log(chalk.gray('then run: node9 addto <claude|gemini|cursor|codex>'));
+        console.log(
+          chalk.gray('then run: node9 agents add <claude|gemini|cursor|windsurf|vscode|codex>')
+        );
         return;
       }
 
@@ -146,10 +159,40 @@ export function registerInitCommand(program: Command): void {
         else if (agent === 'gemini') await setupGemini();
         else if (agent === 'cursor') await setupCursor();
         else if (agent === 'codex') await setupCodex();
+        else if (agent === 'windsurf') await setupWindsurf();
+        else if (agent === 'vscode') await setupVSCode();
         console.log('');
       }
 
-      // ── Step 4: Telemetry opt-in ───────────────────────────────────────────
+      // ── Step 4: Install daemon as login service ────────────────────────────
+      // Only prompt on platforms that support it and when not already installed.
+      // In non-interactive environments (CI, pipes) we skip silently.
+      if ((process.platform === 'darwin' || process.platform === 'linux') && process.stdout.isTTY) {
+        const alreadyInstalled = isDaemonServiceInstalled();
+        if (!alreadyInstalled) {
+          const { confirm } = await import('@inquirer/prompts');
+          const installService = await confirm({
+            message: 'Install daemon as a login service? (starts automatically on login)',
+            default: true,
+          });
+          if (installService) {
+            const result = installDaemonService();
+            if (result.ok) {
+              console.log(
+                chalk.green(`  ✓ Daemon installed as login service (${result.platform})`)
+              );
+            } else {
+              console.log(chalk.yellow(`  ⚠️  Could not install service: ${result.reason}`));
+              console.log(chalk.gray('     You can try again later with: node9 daemon install'));
+            }
+          }
+        } else {
+          console.log(chalk.green('  ✓ Daemon login service already installed'));
+        }
+        console.log('');
+      }
+
+      // ── Step 5: Telemetry opt-in ───────────────────────────────────────────
       {
         const { confirm } = await import('@inquirer/prompts');
         const sendTelemetry = await confirm({

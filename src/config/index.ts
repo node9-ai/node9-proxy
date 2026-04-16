@@ -62,6 +62,7 @@ export interface Config {
     approvers: { native: boolean; browser: boolean; cloud: boolean; terminal: boolean };
     environment?: string;
     agentPolicy?: 'require_approval' | 'block_on_rules';
+    cloudSyncIntervalHours?: number;
     hud?: {
       showEnvironmentCounts?: boolean;
     };
@@ -127,6 +128,7 @@ export const DEFAULT_CONFIG: Config = {
     flightRecorder: true,
     auditHashArgs: true,
     approvers: { native: true, browser: true, cloud: false, terminal: true },
+    cloudSyncIntervalHours: 5,
   },
   policy: {
     sandboxPaths: ['/tmp/**', '**/sandbox/**', '**/test-results/**'],
@@ -545,6 +547,8 @@ export function getConfig(cwd?: string): Config {
     if (s.approvalTimeoutSeconds !== undefined && s.approvalTimeoutMs === undefined)
       mergedSettings.approvalTimeoutMs = s.approvalTimeoutSeconds * 1000;
     if (s.environment !== undefined) mergedSettings.environment = s.environment;
+    if (s.cloudSyncIntervalHours !== undefined)
+      mergedSettings.cloudSyncIntervalHours = s.cloudSyncIntervalHours;
     if (s.hud !== undefined) mergedSettings.hud = { ...mergedSettings.hud, ...s.hud };
 
     if (p.sandboxPaths) mergedPolicy.sandboxPaths.push(...p.sandboxPaths);
@@ -562,7 +566,16 @@ export function getConfig(cwd?: string): Config {
     if (p.smartRules) {
       const defaultBlocks = mergedPolicy.smartRules.filter((r) => r.verdict === 'block');
       const defaultNonBlocks = mergedPolicy.smartRules.filter((r) => r.verdict !== 'block');
-      mergedPolicy.smartRules = [...defaultBlocks, ...p.smartRules, ...defaultNonBlocks];
+      // Deduplicate by name: user-config rules with the same name as a default rule
+      // override the default (user rule wins), rather than stacking on top of it.
+      // This prevents rules 1-N in DEFAULT_CONFIG from appearing twice when a user's
+      // config.json was seeded with the same rule names.
+      const userRuleNames = new Set(p.smartRules.filter((r) => r.name).map((r) => r.name));
+      const filteredBlocks = defaultBlocks.filter((r) => !r.name || !userRuleNames.has(r.name));
+      const filteredNonBlocks = defaultNonBlocks.filter(
+        (r) => !r.name || !userRuleNames.has(r.name)
+      );
+      mergedPolicy.smartRules = [...filteredBlocks, ...p.smartRules, ...filteredNonBlocks];
     }
     if (p.snapshot) {
       const s = p.snapshot as Partial<Config['policy']['snapshot']>;
@@ -600,6 +613,22 @@ export function getConfig(cwd?: string): Config {
 
   applyLayer(globalConfig);
   applyLayer(projectConfig);
+
+  // ── Cloud rules cache layer ───────────────────────────────────────────────
+  // Rules synced from the cloud dashboard are applied after local config so
+  // admin-defined policy takes precedence over per-user overrides.
+  // Shields still apply last and cannot be overridden by cloud rules.
+  {
+    const cacheFile = path.join(os.homedir(), '.node9', 'rules-cache.json');
+    try {
+      const raw = JSON.parse(fs.readFileSync(cacheFile, 'utf-8')) as Record<string, unknown>;
+      if (Array.isArray(raw.rules) && raw.rules.length > 0) {
+        applyLayer({ policy: { smartRules: raw.rules } });
+      }
+    } catch {
+      /* cache absent or corrupted — silent fallback to local config */
+    }
+  }
 
   // ── Shield layer ──────────────────────────────────────────────────────────
   // Shields are applied after user config so they cannot be overridden locally.

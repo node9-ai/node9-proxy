@@ -98,6 +98,7 @@ export const ConfigFileSchema = z
         allowGlobalPause: z.boolean().optional(),
         auditHashArgs: z.boolean().optional(),
         agentPolicy: z.enum(['require_approval', 'block_on_rules']).optional(),
+        cloudSyncIntervalHours: z.number().positive().optional(),
       })
       .optional(),
     policy: z

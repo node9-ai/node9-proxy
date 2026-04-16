@@ -867,17 +867,17 @@ describe('removefrom command', () => {
   const minimalEnv = { PATH: process.env.PATH ?? '', NODE9_TESTING: '1' };
 
   it('exits with code 1 and prints error for unknown target', () => {
-    const result = spawnSync(process.execPath, [CLI, 'removefrom', 'vscode'], {
+    const result = spawnSync(process.execPath, [CLI, 'removefrom', 'notanagent'], {
       encoding: 'utf-8',
       timeout: 30000,
       env: minimalEnv,
     });
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('Unknown target');
-    expect(result.stderr).toContain('vscode');
+    expect(result.stderr).toContain('notanagent');
   });
 
-  for (const target of ['claude', 'gemini', 'cursor'] as const) {
+  for (const target of ['claude', 'gemini', 'cursor', 'windsurf', 'vscode'] as const) {
     it(`exits with code 0 for valid target "${target}" even when nothing to remove`, () => {
       const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-removefrom-'));
       try {

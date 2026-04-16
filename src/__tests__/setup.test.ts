@@ -506,6 +506,8 @@ describe('detectAgents', () => {
       gemini: false,
       cursor: false,
       codex: false,
+      windsurf: false,
+      vscode: false,
     });
   });
 
@@ -547,12 +549,40 @@ describe('detectAgents', () => {
     expect(detectAgents(home).codex).toBe(true);
   });
 
-  it('detects all four agents simultaneously', () => {
+  it('detects all six agents simultaneously', () => {
     vi.mocked(fs.existsSync).mockImplementation((q) => {
       const s = String(q).replace(/\\/g, '/');
-      return s === p('.claude') || s === p('.gemini') || s === p('.cursor') || s === p('.codex');
+      return (
+        s === p('.claude') ||
+        s === p('.gemini') ||
+        s === p('.cursor') ||
+        s === p('.codex') ||
+        s === p('.codeium/windsurf') ||
+        s === p('.vscode')
+      );
     });
-    expect(detectAgents(home)).toEqual({ claude: true, gemini: true, cursor: true, codex: true });
+    expect(detectAgents(home)).toEqual({
+      claude: true,
+      gemini: true,
+      cursor: true,
+      codex: true,
+      windsurf: true,
+      vscode: true,
+    });
+  });
+
+  it('detects Windsurf via ~/.codeium/windsurf directory', () => {
+    vi.mocked(fs.existsSync).mockImplementation(
+      (q) => String(q).replace(/\\/g, '/') === p('.codeium/windsurf')
+    );
+    expect(detectAgents(home).windsurf).toBe(true);
+  });
+
+  it('detects VSCode via ~/.vscode directory', () => {
+    vi.mocked(fs.existsSync).mockImplementation(
+      (q) => String(q).replace(/\\/g, '/') === p('.vscode')
+    );
+    expect(detectAgents(home).vscode).toBe(true);
   });
 
   it('returns all false when existsSync throws (e.g. permission denied)', () => {
@@ -565,6 +595,8 @@ describe('detectAgents', () => {
       gemini: false,
       cursor: false,
       codex: false,
+      windsurf: false,
+      vscode: false,
     });
     // Should warn to stderr for non-ENOENT errors so misconfigured systems surface
     expect(stderrSpy).toHaveBeenCalled();
@@ -583,6 +615,8 @@ describe('detectAgents', () => {
       gemini: false,
       cursor: false,
       codex: false,
+      windsurf: false,
+      vscode: false,
     });
     expect(stderrSpy).not.toHaveBeenCalled();
     stderrSpy.mockRestore();

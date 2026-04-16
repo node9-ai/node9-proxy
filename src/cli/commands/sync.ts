@@ -1,0 +1,85 @@
+// src/cli/commands/sync.ts
+// Registered as `node9 policy` by cli.ts.
+import type { Command } from 'commander';
+import chalk from 'chalk';
+import { runCloudSync, getCloudSyncStatus, getCloudRules } from '../../daemon/sync';
+
+export function registerSyncCommand(program: Command): void {
+  const policy = program.command('policy').description('Manage cloud policy rules');
+
+  policy
+    .command('sync')
+    .description('Sync cloud policy rules to local cache (~/.node9/rules-cache.json)')
+    .action(async () => {
+      process.stdout.write(chalk.cyan('Syncing cloud policy rules…'));
+      const result = await runCloudSync();
+
+      process.stdout.write('\n');
+      if (!result.ok) {
+        console.error(chalk.red(`✗ ${result.reason}`));
+        process.exit(1);
+      }
+
+      console.log(
+        chalk.green(`✓ Synced ${result.rules} rule${result.rules === 1 ? '' : 's'} from cloud`)
+      );
+      console.log(chalk.gray(`  Cached at: ${result.fetchedAt}`));
+      console.log(chalk.gray(`  File: ~/.node9/rules-cache.json`));
+    });
+
+  policy
+    .command('show')
+    .description('List all cloud policy rules in the local cache')
+    .action(() => {
+      const status = getCloudSyncStatus();
+      if (!status.cached) {
+        console.log(chalk.yellow('\n  No cloud rules cached — run: node9 policy sync\n'));
+        return;
+      }
+
+      const rules = getCloudRules() ?? [];
+      const age = Math.round((Date.now() - new Date(status.fetchedAt).getTime()) / 60_000);
+      console.log(
+        chalk.bold(`\n  Cloud policy rules`) +
+          chalk.gray(
+            ` (${rules.length} rule${rules.length === 1 ? '' : 's'}, synced ${age}m ago)\n`
+          )
+      );
+
+      if (rules.length === 0) {
+        console.log(chalk.gray('  No rules defined in cloud policy.\n'));
+        return;
+      }
+
+      for (const rule of rules) {
+        const r = rule as Record<string, unknown>;
+        const verdictColor =
+          r.verdict === 'block' ? chalk.red : r.verdict === 'allow' ? chalk.green : chalk.yellow;
+        console.log(
+          `  ${verdictColor(
+            String(r.verdict ?? 'unknown')
+              .toUpperCase()
+              .padEnd(6)
+          )}  ${chalk.white(String(r.name ?? '(unnamed)'))}`
+        );
+        if (r.reason) console.log(chalk.gray(`           ${String(r.reason)}`));
+      }
+      console.log('');
+    });
+
+  policy
+    .command('status')
+    .description('Show current cloud policy cache status')
+    .action(() => {
+      const s = getCloudSyncStatus();
+      if (!s.cached) {
+        console.log(chalk.yellow('\n  No cache yet — run: node9 policy sync\n'));
+      } else {
+        const age = Math.round((Date.now() - new Date(s.fetchedAt).getTime()) / 60_000);
+        console.log(`\n  Rules   : ${chalk.green(String(s.rules))} cloud rules loaded`);
+        console.log(
+          `  Synced  : ${chalk.gray(`${age} minute${age === 1 ? '' : 's'} ago`)} (${s.fetchedAt})\n`
+        );
+      }
+    });
+}

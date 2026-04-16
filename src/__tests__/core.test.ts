@@ -428,6 +428,55 @@ describe('global config (~/.node9/config.json)', () => {
   });
 });
 
+// ── getConfig — smart rule deduplication ──────────────────────────────────────
+
+describe('getConfig — smart rule deduplication', () => {
+  it('does not duplicate default rules when user config repeats the same rule names', () => {
+    // Regression: ~/.node9/config.json was seeded with the same rule names as DEFAULT_CONFIG.
+    // applyLayer was concatenating without deduplication → rules 1-N appeared twice.
+    mockGlobalConfig({
+      policy: {
+        smartRules: [
+          {
+            name: 'block-rm-rf-home',
+            tool: 'bash',
+            conditions: [{ field: 'command', op: 'matches', value: 'rm.*-rf.*home' }],
+            verdict: 'block',
+            reason: 'user copy of default rule',
+          },
+        ],
+      },
+    });
+    _resetConfigCache();
+    const config = getConfig();
+    const names = config.policy.smartRules.map((r) => r.name);
+    const dupes = names.filter((n, i) => n && names.indexOf(n) !== i);
+    expect(dupes).toEqual([]);
+    // The rule should appear exactly once
+    expect(names.filter((n) => n === 'block-rm-rf-home')).toHaveLength(1);
+  });
+
+  it('user rule overrides default rule with same name (user wins)', () => {
+    mockGlobalConfig({
+      policy: {
+        smartRules: [
+          {
+            name: 'block-rm-rf-home',
+            tool: 'bash',
+            conditions: [{ field: 'command', op: 'matches', value: 'custom-pattern' }],
+            verdict: 'block',
+            reason: 'customized by user',
+          },
+        ],
+      },
+    });
+    _resetConfigCache();
+    const config = getConfig();
+    const rule = config.policy.smartRules.find((r) => r.name === 'block-rm-rf-home');
+    expect(rule?.reason).toBe('customized by user');
+  });
+});
+
 // ── authorizeHeadless — full coverage ─────────────────────────────────────────
 
 describe('authorizeHeadless', () => {
