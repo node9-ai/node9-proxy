@@ -5,9 +5,7 @@ import chalk from 'chalk';
 import { runCloudSync, getCloudSyncStatus, getCloudRules } from '../../daemon/sync';
 
 export function registerSyncCommand(program: Command): void {
-  const policy = program
-    .command('policy')
-    .description('Manage cloud policy rules');
+  const policy = program.command('policy').description('Manage cloud policy rules');
 
   policy
     .command('sync')
@@ -43,7 +41,9 @@ export function registerSyncCommand(program: Command): void {
       const age = Math.round((Date.now() - new Date(status.fetchedAt).getTime()) / 60_000);
       console.log(
         chalk.bold(`\n  Cloud policy rules`) +
-          chalk.gray(` (${rules.length} rule${rules.length === 1 ? '' : 's'}, synced ${age}m ago)\n`)
+          chalk.gray(
+            ` (${rules.length} rule${rules.length === 1 ? '' : 's'}, synced ${age}m ago)\n`
+          )
       );
 
       if (rules.length === 0) {
@@ -54,13 +54,13 @@ export function registerSyncCommand(program: Command): void {
       for (const rule of rules) {
         const r = rule as Record<string, unknown>;
         const verdictColor =
-          r.verdict === 'block'
-            ? chalk.red
-            : r.verdict === 'allow'
-              ? chalk.green
-              : chalk.yellow;
+          r.verdict === 'block' ? chalk.red : r.verdict === 'allow' ? chalk.green : chalk.yellow;
         console.log(
-          `  ${verdictColor(String(r.verdict ?? 'unknown').toUpperCase().padEnd(6))}  ${chalk.white(String(r.name ?? '(unnamed)'))}`
+          `  ${verdictColor(
+            String(r.verdict ?? 'unknown')
+              .toUpperCase()
+              .padEnd(6)
+          )}  ${chalk.white(String(r.name ?? '(unnamed)'))}`
         );
         if (r.reason) console.log(chalk.gray(`           ${String(r.reason)}`));
       }

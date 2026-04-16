@@ -28,11 +28,7 @@ vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
 vi.spyOn(fs, 'mkdirSync').mockImplementation(() => undefined);
 const homeSpy = vi.spyOn(os, 'homedir');
 
-import {
-  runCloudSync,
-  getCloudSyncStatus,
-  getCloudRules,
-} from '../daemon/sync.js';
+import { runCloudSync, getCloudSyncStatus, getCloudRules } from '../daemon/sync.js';
 import { getConfig, _resetConfigCache } from '../core.js';
 
 // ── helpers ────────────────────────────────────────────────────────────────────
@@ -54,7 +50,9 @@ beforeEach(() => {
   delete process.env.NODE9_PROFILE;
   // Default: no files exist
   existsSpy.mockReturnValue(false);
-  readSpy.mockImplementation(() => { throw new Error('ENOENT'); });
+  readSpy.mockImplementation(() => {
+    throw new Error('ENOENT');
+  });
 });
 
 afterEach(() => {

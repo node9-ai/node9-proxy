@@ -24,7 +24,10 @@ export interface RulesCache {
 function readCredentials(): { apiKey: string; apiUrl: string } | null {
   // 1. Environment variable
   if (process.env.NODE9_API_KEY) {
-    return { apiKey: process.env.NODE9_API_KEY, apiUrl: process.env.NODE9_API_URL ?? DEFAULT_API_URL };
+    return {
+      apiKey: process.env.NODE9_API_KEY,
+      apiUrl: process.env.NODE9_API_URL ?? DEFAULT_API_URL,
+    };
   }
   // 2. ~/.node9/credentials.json (same pattern as getCredentials() in config/index.ts)
   try {
@@ -35,7 +38,10 @@ function readCredentials(): { apiKey: string; apiUrl: string } | null {
     if (typeof profile?.apiKey === 'string' && profile.apiKey.length > 0) {
       return {
         apiKey: profile.apiKey,
-        apiUrl: typeof profile.apiUrl === 'string' ? profile.apiUrl.replace(/\/intercept$/, '/policy') : DEFAULT_API_URL,
+        apiUrl:
+          typeof profile.apiUrl === 'string'
+            ? profile.apiUrl.replace(/\/intercept$/, '/policy')
+            : DEFAULT_API_URL,
       };
     }
     if (typeof creds.apiKey === 'string' && creds.apiKey.length > 0) {
@@ -72,12 +78,11 @@ function fetchCloudRules(apiKey: string, apiUrl: string): Promise<unknown[]> {
           }
           try {
             const body = JSON.parse(Buffer.concat(chunks).toString('utf-8')) as unknown;
-            const rules =
-              Array.isArray(body)
-                ? body
-                : Array.isArray((body as Record<string, unknown>).rules)
-                  ? ((body as Record<string, unknown>).rules as unknown[])
-                  : [];
+            const rules = Array.isArray(body)
+              ? body
+              : Array.isArray((body as Record<string, unknown>).rules)
+                ? ((body as Record<string, unknown>).rules as unknown[])
+                : [];
             resolve(rules);
           } catch (e) {
             reject(e);
@@ -113,8 +118,7 @@ async function syncOnce(): Promise<void> {
  * Exported for use by `node9 sync` CLI command.
  */
 export async function runCloudSync(): Promise<
-  | { ok: true; rules: number; fetchedAt: string }
-  | { ok: false; reason: string }
+  { ok: true; rules: number; fetchedAt: string } | { ok: false; reason: string }
 > {
   const creds = readCredentials();
   if (!creds) {
@@ -135,7 +139,9 @@ export async function runCloudSync(): Promise<
 /**
  * Return info about the current rules cache (last fetch time, rule count).
  */
-export function getCloudSyncStatus(): { cached: false } | { cached: true; rules: number; fetchedAt: string } {
+export function getCloudSyncStatus():
+  | { cached: false }
+  | { cached: true; rules: number; fetchedAt: string } {
   try {
     const raw = JSON.parse(fs.readFileSync(rulesCacheFile(), 'utf-8')) as Record<string, unknown>;
     if (!Array.isArray(raw.rules) || typeof raw.fetchedAt !== 'string') return { cached: false };
