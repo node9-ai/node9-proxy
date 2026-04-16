@@ -558,7 +558,8 @@ async function _authorizeHeadlessCore(
         creds!,
         meta,
         riskMetadata,
-        config.settings.agentPolicy
+        config.settings.agentPolicy,
+        localSmartRuleMatched || options?.localSmartRuleMatched || undefined
       );
 
       if (!initResult.pending) {
@@ -585,11 +586,10 @@ async function _authorizeHeadlessCore(
         // via cloudRequestId if the SaaS returned a pending request.
       }
 
-      // When a local smart rule requires human review, don't let cloud be a racer —
-      // the user must approve via tail/browser/native, not via SaaS auto-resolve.
-      if (!localSmartRuleMatched && !options?.localSmartRuleMatched) {
-        cloudRequestId = initResult.requestId || null;
-      }
+      // Always set cloudRequestId when the SaaS returned a pending request.
+      // With forceReview, the SaaS always creates a real PENDING entry requiring
+      // a human click — so cloud is a valid racer even for local smart rule matches.
+      cloudRequestId = initResult.requestId || null;
       // remoteApprovalOnly is noted but not enforced — local UI always has control.
       // Hard blocks are handled by Shields before the UI opens.
       // Don't overwrite the taint label — taint context must stay visible to the user.
@@ -670,14 +670,10 @@ async function _authorizeHeadlessCore(
   }
 
   // 🏁 RACER 1: Cloud SaaS Channel (The Poller)
-  // Skip cloud polling when a local smart rule requires human approval — cloud
-  // must not auto-resolve entries that the user explicitly wants to review locally.
-  if (
-    cloudEnforced &&
-    cloudRequestId &&
-    !localSmartRuleMatched &&
-    !options?.localSmartRuleMatched
-  ) {
+  // Cloud is a valid racer even for local smart rule matches — with forceReview,
+  // the SaaS always creates a PENDING entry requiring a real human click in
+  // Mission Control, so an approval there is a genuine human decision.
+  if (cloudEnforced && cloudRequestId) {
     racePromises.push(
       (async () => {
         try {
