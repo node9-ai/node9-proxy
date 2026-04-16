@@ -102,9 +102,9 @@ node9 mcp pin reset               # clear all pins (re-pin on next connection)
 
 This is automatic — no configuration needed. The gateway pins on first `tools/list` and enforces on every subsequent session.
 
-### Skills Pinning — installed-skill drift detection
+### Skills Pinning — installed-plugin drift detection
 
-Installed skills in `~/.claude/skills/` come from registries or shared repos, not from your workspace — so `git status` never sees them. Like MCP tools, they can be silently swapped by a compromised package or auto-update. Node9 hashes the directory on first session and warns on drift. Opt-in via `policy.skillPinning.enabled: true`; use `mode: 'block'` for strict enforcement. User-edited files (`CLAUDE.md`, `.cursor/rules/`) are **not** in the default scope — put those in git and use normal diff review. Extend scope explicitly via `policy.skillPinning.roots`.
+Marketplace plugins at `~/.claude/plugins/marketplaces/` come from registries, not your workspace — `git status` never sees them. Like MCP tools, they can be silently swapped by a compromised package or auto-update. Node9 hashes the directory on first session and warns on drift. Opt-in via `policy.skillPinning.enabled: true`; use `mode: 'block'` for strict enforcement. User-edited files (`CLAUDE.md`, `.cursor/rules/`) are **not** in the default scope. Extend via `policy.skillPinning.roots`.
 
 ---
 

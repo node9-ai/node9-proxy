@@ -273,20 +273,19 @@ export function verifyAndPinRoots(roots: string[]): VerifyResult {
 /**
  * Built-in skill roots — intentionally narrow.
  *
- * Only `~/.claude/skills/` is pinned by default because it's the one location
- * typically populated by third-party/installed skills that live OUTSIDE any
- * git repo. User-edited files like `CLAUDE.md` and `.cursor/rules/` are
- * deliberately excluded — they change constantly as part of normal workflow,
- * and if they're in a git repo, `git status` already surfaces diffs better.
+ * Defaults to `~/.claude/plugins/marketplaces/` — the canonical location where
+ * `claude plugin install` / marketplace-based plugins put their SKILL.md files.
+ * These are third-party artifacts that live OUTSIDE any git repo; `git status`
+ * never sees them.
  *
- * Users who want to pin additional paths can add them via
- * `config.policy.skillPinning.roots` (absolute, `~/`-prefixed, or cwd-relative).
+ * `~/.claude/skills/` (user-authored custom skills) and user-edited files like
+ * `CLAUDE.md` and `.cursor/rules/` are deliberately excluded — they change
+ * constantly in normal workflow.
  *
- * The `cwd` param is retained for `resolveUserSkillRoot` callers; this
- * function itself only returns user-scope installed-skill locations.
+ * Extend via `config.policy.skillPinning.roots`.
  */
 export function defaultSkillRoots(_cwd: string | undefined): string[] {
-  return [path.join(os.homedir(), '.claude', 'skills')];
+  return [path.join(os.homedir(), '.claude', 'plugins', 'marketplaces')];
 }
 
 /** Resolve a user-supplied entry: absolute, `~/`-prefixed, or cwd-relative. */

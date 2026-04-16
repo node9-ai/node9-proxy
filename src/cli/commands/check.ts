@@ -264,8 +264,13 @@ export function registerCheckCommand(program: Command): void {
                 try {
                   ttyFd = fs.openSync('/dev/tty', 'w');
                   const w = (line: string) => fs.writeSync(ttyFd!, line + '\n');
-                  w(chalk.yellow(`\n⚠️  Node9: skill drift detected`));
+                  w(chalk.yellow(`\n⚠️  Node9: installed skill drift detected`));
                   w(chalk.gray(`   ${detail}`));
+                  w(
+                    chalk.gray(
+                      `   If you updated a plugin, acknowledge the change to clear this warning.`
+                    )
+                  );
                   if (recoveryCmd) w(chalk.green(`   💡 Run:  ${recoveryCmd}`));
                   w('');
                 } catch {
@@ -284,7 +289,7 @@ export function registerCheckCommand(program: Command): void {
               // 'quarantined' → only block in block mode; in warn mode, re-verify.
               if (flag && flag.state === 'quarantined' && skillPinCfg.mode === 'block') {
                 sendBlock(
-                  `Node9: session quarantined due to skill drift — ${flag.detail ?? 'review required'}`,
+                  `Node9: session quarantined — installed skill changed. Open a separate terminal and run: node9 skill pin list (to see what changed) then: node9 skill pin update <rootKey> (to acknowledge). If you updated a plugin intentionally, this is expected.`,
                   {
                     blockedByLabel: 'Skill Pin Quarantine',
                     recoveryCommand: 'node9 skill pin list',
@@ -327,10 +332,13 @@ export function registerCheckCommand(program: Command): void {
                 } else if (result.kind === 'drift') {
                   if (skillPinCfg.mode === 'block') {
                     writeFlag({ state: 'quarantined', detail: result.summary });
-                    sendBlock(`Node9: skill drift detected — ${result.summary}`, {
-                      blockedByLabel: 'Skill Pin Quarantine',
-                      recoveryCommand: `node9 skill pin update ${result.changedRootKey}`,
-                    });
+                    sendBlock(
+                      `Node9: installed skill changed — ${result.summary}. If you updated a plugin, open a separate terminal and run: node9 skill pin update ${result.changedRootKey}`,
+                      {
+                        blockedByLabel: 'Skill Pin Quarantine',
+                        recoveryCommand: `node9 skill pin update ${result.changedRootKey}`,
+                      }
+                    );
                     return;
                   }
                   // warn mode: notify, allow
@@ -338,6 +346,21 @@ export function registerCheckCommand(program: Command): void {
                   sendSkillWarn(result.summary, `node9 skill pin update ${result.changedRootKey}`);
                 } else {
                   writeFlag({ state: 'verified' });
+                }
+
+                // Best-effort GC of session flags older than 7 days.
+                try {
+                  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+                  for (const name of fs.readdirSync(sessionsDir)) {
+                    const p = path.join(sessionsDir, name);
+                    try {
+                      if (fs.statSync(p).mtimeMs < cutoff) fs.unlinkSync(p);
+                    } catch {
+                      /* ignore */
+                    }
+                  }
+                } catch {
+                  /* ignore */
                 }
               }
             } catch (err) {
