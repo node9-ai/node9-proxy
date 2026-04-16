@@ -85,7 +85,10 @@ export function registerCheckCommand(program: Command): void {
               // and symlinked bin entries all resolve to the same dist/ tree.
               const resolvedScript = fs.realpathSync(scriptPath);
               const packageDist = fs.realpathSync(path.resolve(__dirname, '../..'));
-              if (!resolvedScript.startsWith(packageDist + path.sep) && resolvedScript !== packageDist)
+              if (
+                !resolvedScript.startsWith(packageDist + path.sep) &&
+                resolvedScript !== packageDist
+              )
                 throw new Error(
                   `node9: daemon spawn aborted — argv[1] (${resolvedScript}) is outside package dist (${packageDist})`
                 );
@@ -114,8 +117,13 @@ export function registerCheckCommand(program: Command): void {
               const logPath = path.join(os.homedir(), '.node9', 'hook-debug.log');
               const msg = spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
               try {
-                fs.appendFileSync(logPath, `[${new Date().toISOString()}] daemon-autostart-failed: ${msg}\n`);
-              } catch { /* non-fatal */ }
+                fs.appendFileSync(
+                  logPath,
+                  `[${new Date().toISOString()}] daemon-autostart-failed: ${msg}\n`
+                );
+              } catch {
+                /* non-fatal */
+              }
             }
           }
 

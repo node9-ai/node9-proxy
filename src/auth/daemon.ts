@@ -80,7 +80,9 @@ export function isDaemonRunning(): boolean {
       const { pid, port } = JSON.parse(fs.readFileSync(pidFile, 'utf-8'));
       if (port !== DAEMON_PORT) {
         // Wrong port — stale file from a config change; clean it up
-        try { fs.unlinkSync(pidFile); } catch {}
+        try {
+          fs.unlinkSync(pidFile);
+        } catch {}
         return false;
       }
       // Verify the process is alive
@@ -100,7 +102,9 @@ export function isDaemonRunning(): boolean {
     } catch {
       // PID dead — clean up stale file so the next isDaemonRunning() call
       // doesn't re-read it and fall into the PID-reuse false-positive path.
-      try { fs.unlinkSync(pidFile); } catch {}
+      try {
+        fs.unlinkSync(pidFile);
+      } catch {}
       return false;
     }
   }
