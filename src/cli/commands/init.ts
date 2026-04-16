@@ -7,7 +7,7 @@ import path from 'path';
 import os from 'os';
 import https from 'https';
 import { DEFAULT_CONFIG } from '../../core';
-import { setupClaude, setupGemini, setupCursor, setupCodex, detectAgents } from '../../setup';
+import { setupClaude, setupGemini, setupCursor, setupCodex, setupWindsurf, setupVSCode, detectAgents } from '../../setup';
 import { readActiveShields, writeActiveShields } from '../../shields';
 import { installDaemonService, isDaemonServiceInstalled } from '../../daemon/service';
 
@@ -147,6 +147,8 @@ export function registerInitCommand(program: Command): void {
         else if (agent === 'gemini') await setupGemini();
         else if (agent === 'cursor') await setupCursor();
         else if (agent === 'codex') await setupCodex();
+        else if (agent === 'windsurf') await setupWindsurf();
+        else if (agent === 'vscode') await setupVSCode();
         console.log('');
       }
 

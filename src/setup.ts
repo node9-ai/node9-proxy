@@ -570,6 +570,8 @@ export function detectAgents(homeDir: string = os.homedir()): {
   gemini: boolean;
   cursor: boolean;
   codex: boolean;
+  windsurf: boolean;
+  vscode: boolean;
 } {
   const exists = (p: string): boolean => {
     try {
@@ -587,6 +589,8 @@ export function detectAgents(homeDir: string = os.homedir()): {
     gemini: exists(path.join(homeDir, '.gemini')),
     cursor: exists(path.join(homeDir, '.cursor')),
     codex: exists(path.join(homeDir, '.codex')),
+    windsurf: exists(path.join(homeDir, '.codeium', 'windsurf')),
+    vscode: exists(path.join(homeDir, '.vscode')),
   };
 }
 
@@ -883,4 +887,256 @@ export function teardownHud(): void {
   writeJson(hooksPath, settings);
   console.log(chalk.green('  ✅ node9 HUD removed from ~/.claude/settings.json'));
   console.log(chalk.gray('   Restart Claude Code for changes to take effect.'));
+}
+
+// ── Windsurf ──────────────────────────────────────────────────────────────────
+// Config: ~/.codeium/windsurf/mcp_config.json
+// Format: { mcpServers: { name: { command, args } } }
+// Note: Windsurf does not yet support pre-execution hooks — MCP proxy only.
+
+interface WindsurfMcpConfig {
+  mcpServers?: Record<string, McpServer>;
+  [key: string]: unknown;
+}
+
+export async function setupWindsurf(): Promise<void> {
+  const homeDir = os.homedir();
+  const mcpPath = path.join(homeDir, '.codeium', 'windsurf', 'mcp_config.json');
+
+  const mcpConfig = readJson<WindsurfMcpConfig>(mcpPath) ?? {};
+  const servers = mcpConfig.mcpServers ?? {};
+
+  let anythingChanged = false;
+
+  if (!hasNode9McpServer(servers)) {
+    servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+    mcpConfig.mcpServers = servers;
+    writeJson(mcpPath, mcpConfig);
+    console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    anythingChanged = true;
+  }
+
+  // Wrap existing non-node9 MCP servers
+  const serversToWrap: Array<{ name: string; upstream: string }> = [];
+  for (const [name, server] of Object.entries(servers)) {
+    if (!server.command || server.command === 'node9') continue;
+    serversToWrap.push({ name, upstream: [server.command, ...(server.args ?? [])].join(' ') });
+  }
+
+  if (serversToWrap.length > 0) {
+    console.log(chalk.bold('The following existing entries will be modified:\n'));
+    console.log(chalk.white(`  ${mcpPath}`));
+    for (const { name, upstream } of serversToWrap) {
+      console.log(chalk.gray(`    • ${name}: "${upstream}" → node9 mcp --upstream "${upstream}"`));
+    }
+    console.log('');
+    const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
+    if (proceed) {
+      for (const { name, upstream } of serversToWrap) {
+        servers[name] = { ...servers[name], command: 'node9', args: ['mcp', '--upstream', upstream] };
+      }
+      mcpConfig.mcpServers = servers;
+      writeJson(mcpPath, mcpConfig);
+      console.log(chalk.green(`\n  ✅ ${serversToWrap.length} MCP server(s) wrapped`));
+      anythingChanged = true;
+    } else {
+      console.log(chalk.yellow('  Skipped MCP server wrapping.'));
+    }
+    console.log('');
+  }
+
+  console.log(
+    chalk.yellow(
+      '  ⚠️  Note: Windsurf does not yet support native pre-execution hooks.\n' +
+        '     MCP proxy wrapping is the only supported protection mode for Windsurf.'
+    )
+  );
+  console.log('');
+
+  if (!anythingChanged && serversToWrap.length === 0) {
+    console.log(chalk.blue('ℹ️  Node9 is already fully configured for Windsurf.'));
+    printDaemonTip();
+    return;
+  }
+
+  if (anythingChanged) {
+    console.log(chalk.green.bold('🛡️  Node9 is now protecting Windsurf via MCP proxy!'));
+    console.log(chalk.gray('    Restart Windsurf for changes to take effect.'));
+    printDaemonTip();
+  }
+}
+
+export function teardownWindsurf(): void {
+  const homeDir = os.homedir();
+  const mcpPath = path.join(homeDir, '.codeium', 'windsurf', 'mcp_config.json');
+
+  const mcpConfig = readJson<WindsurfMcpConfig>(mcpPath);
+  if (!mcpConfig?.mcpServers) {
+    console.log(chalk.blue('  ℹ️  ~/.codeium/windsurf/mcp_config.json not found — nothing to remove'));
+    return;
+  }
+
+  let changed = false;
+  if (removeNode9McpServer(mcpConfig.mcpServers)) {
+    changed = true;
+    console.log(chalk.green('  ✅ Removed node9 MCP server entry from ~/.codeium/windsurf/mcp_config.json'));
+  }
+
+  for (const [name, server] of Object.entries(mcpConfig.mcpServers)) {
+    const args = server.args as string[] | undefined;
+    if (
+      server.command === 'node9' &&
+      Array.isArray(args) &&
+      args[0] === 'mcp' &&
+      args[1] === '--upstream' &&
+      typeof args[2] === 'string'
+    ) {
+      const [originalCmd, ...originalArgs] = args[2].split(' ');
+      mcpConfig.mcpServers[name] = { ...server, command: originalCmd, args: originalArgs.length ? originalArgs : undefined };
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    writeJson(mcpPath, mcpConfig);
+    console.log(chalk.green('  ✅ Unwrapped MCP servers in ~/.codeium/windsurf/mcp_config.json'));
+  } else {
+    console.log(chalk.blue('  ℹ️  No Node9-wrapped MCP servers found in ~/.codeium/windsurf/mcp_config.json'));
+  }
+}
+
+// ── VSCode (GitHub Copilot) ───────────────────────────────────────────────────
+// Config: ~/.vscode/mcp.json  (VS Code 1.99+, requires GitHub Copilot extension)
+// Format: { servers: { name: { type: "stdio", command, args } } }
+// Note: VSCode does not support pre-execution hooks — MCP only.
+
+interface VSCodeMcpServer {
+  type?: string;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+}
+
+interface VSCodeMcpConfig {
+  servers?: Record<string, VSCodeMcpServer>;
+  [key: string]: unknown;
+}
+
+function hasNode9McpServerVSCode(servers: Record<string, VSCodeMcpServer>): boolean {
+  const entry = servers['node9'];
+  return (
+    !!entry &&
+    entry.command === 'node9' &&
+    Array.isArray(entry.args) &&
+    entry.args[0] === 'mcp-server'
+  );
+}
+
+export async function setupVSCode(): Promise<void> {
+  const homeDir = os.homedir();
+  const mcpPath = path.join(homeDir, '.vscode', 'mcp.json');
+
+  const mcpConfig = readJson<VSCodeMcpConfig>(mcpPath) ?? {};
+  const servers = mcpConfig.servers ?? {};
+
+  let anythingChanged = false;
+
+  if (!hasNode9McpServerVSCode(servers)) {
+    servers['node9'] = { type: 'stdio', command: 'node9', args: ['mcp-server'] };
+    mcpConfig.servers = servers;
+    writeJson(mcpPath, mcpConfig);
+    console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    anythingChanged = true;
+  }
+
+  // Wrap existing non-node9 MCP servers
+  const serversToWrap: Array<{ name: string; upstream: string }> = [];
+  for (const [name, server] of Object.entries(servers)) {
+    if (!server.command || server.command === 'node9') continue;
+    serversToWrap.push({ name, upstream: [server.command, ...(server.args ?? [])].join(' ') });
+  }
+
+  if (serversToWrap.length > 0) {
+    console.log(chalk.bold('The following existing entries will be modified:\n'));
+    console.log(chalk.white(`  ${mcpPath}`));
+    for (const { name, upstream } of serversToWrap) {
+      console.log(chalk.gray(`    • ${name}: "${upstream}" → node9 mcp --upstream "${upstream}"`));
+    }
+    console.log('');
+    const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
+    if (proceed) {
+      for (const { name, upstream } of serversToWrap) {
+        servers[name] = { ...servers[name], type: 'stdio', command: 'node9', args: ['mcp', '--upstream', upstream] };
+      }
+      mcpConfig.servers = servers;
+      writeJson(mcpPath, mcpConfig);
+      console.log(chalk.green(`\n  ✅ ${serversToWrap.length} MCP server(s) wrapped`));
+      anythingChanged = true;
+    } else {
+      console.log(chalk.yellow('  Skipped MCP server wrapping.'));
+    }
+    console.log('');
+  }
+
+  console.log(
+    chalk.yellow(
+      '  ⚠️  Note: VSCode MCP support requires the GitHub Copilot extension (v1.99+).\n' +
+        '     Pre-execution hooks are not supported — MCP proxy wrapping only.'
+    )
+  );
+  console.log('');
+
+  if (!anythingChanged && serversToWrap.length === 0) {
+    console.log(chalk.blue('ℹ️  Node9 is already fully configured for VSCode.'));
+    printDaemonTip();
+    return;
+  }
+
+  if (anythingChanged) {
+    console.log(chalk.green.bold('🛡️  Node9 is now protecting VSCode via MCP proxy!'));
+    console.log(chalk.gray('    Restart VSCode for changes to take effect.'));
+    printDaemonTip();
+  }
+}
+
+export function teardownVSCode(): void {
+  const homeDir = os.homedir();
+  const mcpPath = path.join(homeDir, '.vscode', 'mcp.json');
+
+  const mcpConfig = readJson<VSCodeMcpConfig>(mcpPath);
+  if (!mcpConfig?.servers) {
+    console.log(chalk.blue('  ℹ️  ~/.vscode/mcp.json not found — nothing to remove'));
+    return;
+  }
+
+  let changed = false;
+
+  if (hasNode9McpServerVSCode(mcpConfig.servers)) {
+    delete mcpConfig.servers['node9'];
+    changed = true;
+    console.log(chalk.green('  ✅ Removed node9 MCP server entry from ~/.vscode/mcp.json'));
+  }
+
+  for (const [name, server] of Object.entries(mcpConfig.servers)) {
+    const args = server.args as string[] | undefined;
+    if (
+      server.command === 'node9' &&
+      Array.isArray(args) &&
+      args[0] === 'mcp' &&
+      args[1] === '--upstream' &&
+      typeof args[2] === 'string'
+    ) {
+      const [originalCmd, ...originalArgs] = args[2].split(' ');
+      mcpConfig.servers[name] = { ...server, type: 'stdio', command: originalCmd, args: originalArgs.length ? originalArgs : undefined };
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    writeJson(mcpPath, mcpConfig);
+    console.log(chalk.green('  ✅ Unwrapped MCP servers in ~/.vscode/mcp.json'));
+  } else {
+    console.log(chalk.blue('  ℹ️  No Node9-wrapped MCP servers found in ~/.vscode/mcp.json'));
+  }
 }
