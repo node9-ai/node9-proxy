@@ -48,6 +48,7 @@ import { registerMcpServerCommand } from './cli/commands/mcp-server';
 import { registerTrustCommand } from './cli/commands/trust';
 import { registerMcpPinCommand } from './cli/commands/mcp-pin';
 import { registerSyncCommand } from './cli/commands/sync';
+import { registerAgentsCommand } from './cli/commands/agents';
 
 const { version } = JSON.parse(
   fs.readFileSync(path.join(__dirname, '../package.json'), 'utf-8')
@@ -139,7 +140,11 @@ program
     if (target === 'windsurf') return await setupWindsurf();
     if (target === 'vscode') return await setupVSCode();
     if (target === 'hud') return setupHud();
-    console.error(chalk.red(`Unknown target: "${target}". Supported: claude, gemini, cursor, windsurf, vscode, hud`));
+    console.error(
+      chalk.red(
+        `Unknown target: "${target}". Supported: claude, gemini, cursor, windsurf, vscode, hud`
+      )
+    );
     process.exit(1);
   });
 
@@ -172,7 +177,11 @@ program
     if (t === 'windsurf') return await setupWindsurf();
     if (t === 'vscode') return await setupVSCode();
     if (t === 'hud') return setupHud();
-    console.error(chalk.red(`Unknown target: "${target}". Supported: claude, gemini, cursor, windsurf, vscode, hud`));
+    console.error(
+      chalk.red(
+        `Unknown target: "${target}". Supported: claude, gemini, cursor, windsurf, vscode, hud`
+      )
+    );
     process.exit(1);
   });
 
@@ -181,7 +190,10 @@ program
   .command('removefrom')
   .description('Remove Node9 hooks from an AI agent configuration')
   .addHelpText('after', '\n  Supported targets:  claude  gemini  cursor  windsurf  vscode  hud')
-  .argument('<target>', 'The agent to remove from: claude | gemini | cursor | windsurf | vscode | hud')
+  .argument(
+    '<target>',
+    'The agent to remove from: claude | gemini | cursor | windsurf | vscode | hud'
+  )
   .action((target: string) => {
     // Validate before logging so the target string is never interpolated
     // into output before it has been confirmed to be a known value.
@@ -194,7 +206,9 @@ program
     else if (target === 'hud') fn = teardownHud;
     else {
       console.error(
-        chalk.red(`Unknown target: "${target}". Supported: claude, gemini, cursor, windsurf, vscode, hud`)
+        chalk.red(
+          `Unknown target: "${target}". Supported: claude, gemini, cursor, windsurf, vscode, hud`
+        )
       );
       process.exit(1);
     }
@@ -590,6 +604,9 @@ registerTrustCommand(program);
 
 // Cloud policy sync
 registerSyncCommand(program);
+
+// Agent management
+registerAgentsCommand(program);
 
 // Daemon registers its own keep-alive unhandledRejection handler in startDaemon().
 // Skip registration here entirely for daemon mode to avoid any ordering dependency

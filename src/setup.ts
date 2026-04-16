@@ -933,7 +933,11 @@ export async function setupWindsurf(): Promise<void> {
     const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
     if (proceed) {
       for (const { name, upstream } of serversToWrap) {
-        servers[name] = { ...servers[name], command: 'node9', args: ['mcp', '--upstream', upstream] };
+        servers[name] = {
+          ...servers[name],
+          command: 'node9',
+          args: ['mcp', '--upstream', upstream],
+        };
       }
       mcpConfig.mcpServers = servers;
       writeJson(mcpPath, mcpConfig);
@@ -972,14 +976,18 @@ export function teardownWindsurf(): void {
 
   const mcpConfig = readJson<WindsurfMcpConfig>(mcpPath);
   if (!mcpConfig?.mcpServers) {
-    console.log(chalk.blue('  ℹ️  ~/.codeium/windsurf/mcp_config.json not found — nothing to remove'));
+    console.log(
+      chalk.blue('  ℹ️  ~/.codeium/windsurf/mcp_config.json not found — nothing to remove')
+    );
     return;
   }
 
   let changed = false;
   if (removeNode9McpServer(mcpConfig.mcpServers)) {
     changed = true;
-    console.log(chalk.green('  ✅ Removed node9 MCP server entry from ~/.codeium/windsurf/mcp_config.json'));
+    console.log(
+      chalk.green('  ✅ Removed node9 MCP server entry from ~/.codeium/windsurf/mcp_config.json')
+    );
   }
 
   for (const [name, server] of Object.entries(mcpConfig.mcpServers)) {
@@ -992,7 +1000,11 @@ export function teardownWindsurf(): void {
       typeof args[2] === 'string'
     ) {
       const [originalCmd, ...originalArgs] = args[2].split(' ');
-      mcpConfig.mcpServers[name] = { ...server, command: originalCmd, args: originalArgs.length ? originalArgs : undefined };
+      mcpConfig.mcpServers[name] = {
+        ...server,
+        command: originalCmd,
+        args: originalArgs.length ? originalArgs : undefined,
+      };
       changed = true;
     }
   }
@@ -1001,7 +1013,9 @@ export function teardownWindsurf(): void {
     writeJson(mcpPath, mcpConfig);
     console.log(chalk.green('  ✅ Unwrapped MCP servers in ~/.codeium/windsurf/mcp_config.json'));
   } else {
-    console.log(chalk.blue('  ℹ️  No Node9-wrapped MCP servers found in ~/.codeium/windsurf/mcp_config.json'));
+    console.log(
+      chalk.blue('  ℹ️  No Node9-wrapped MCP servers found in ~/.codeium/windsurf/mcp_config.json')
+    );
   }
 }
 
@@ -1067,7 +1081,12 @@ export async function setupVSCode(): Promise<void> {
     const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
     if (proceed) {
       for (const { name, upstream } of serversToWrap) {
-        servers[name] = { ...servers[name], type: 'stdio', command: 'node9', args: ['mcp', '--upstream', upstream] };
+        servers[name] = {
+          ...servers[name],
+          type: 'stdio',
+          command: 'node9',
+          args: ['mcp', '--upstream', upstream],
+        };
       }
       mcpConfig.servers = servers;
       writeJson(mcpPath, mcpConfig);
@@ -1128,7 +1147,12 @@ export function teardownVSCode(): void {
       typeof args[2] === 'string'
     ) {
       const [originalCmd, ...originalArgs] = args[2].split(' ');
-      mcpConfig.servers[name] = { ...server, type: 'stdio', command: originalCmd, args: originalArgs.length ? originalArgs : undefined };
+      mcpConfig.servers[name] = {
+        ...server,
+        type: 'stdio',
+        command: originalCmd,
+        args: originalArgs.length ? originalArgs : undefined,
+      };
       changed = true;
     }
   }
@@ -1139,4 +1163,98 @@ export function teardownVSCode(): void {
   } else {
     console.log(chalk.blue('  ℹ️  No Node9-wrapped MCP servers found in ~/.vscode/mcp.json'));
   }
+}
+
+// ── Agent wired-status checks ─────────────────────────────────────────────────
+// Each function returns true if node9 hooks/MCP are present in the agent config.
+
+export type AgentName = 'claude' | 'gemini' | 'cursor' | 'codex' | 'windsurf' | 'vscode';
+
+export interface AgentStatus {
+  name: AgentName;
+  label: string;
+  installed: boolean;
+  wired: boolean;
+  mode: 'hooks' | 'mcp' | null; // null when not installed
+}
+
+export function getAgentsStatus(homeDir: string = os.homedir()): AgentStatus[] {
+  const detected = detectAgents(homeDir);
+
+  const claudeWired = (() => {
+    const settings = readJson<ClaudeSettings>(path.join(homeDir, '.claude', 'settings.json'));
+    return !!settings?.hooks?.PreToolUse?.some((m) => m.hooks.some((h) => isNode9Hook(h.command)));
+  })();
+
+  const geminiWired = (() => {
+    const settings = readJson<GeminiSettings>(path.join(homeDir, '.gemini', 'settings.json'));
+    return !!settings?.hooks?.BeforeTool?.some((m) => m.hooks.some((h) => isNode9Hook(h.command)));
+  })();
+
+  const cursorWired = (() => {
+    const cfg = readJson<CursorMcpConfig>(path.join(homeDir, '.cursor', 'mcp.json'));
+    return !!(cfg?.mcpServers && hasNode9McpServer(cfg.mcpServers));
+  })();
+
+  const codexWired = (() => {
+    const cfg = readToml<CodexConfig>(path.join(homeDir, '.codex', 'config.toml'));
+    return !!(cfg?.mcp_servers && hasNode9McpServer(cfg.mcp_servers));
+  })();
+
+  const windsurfWired = (() => {
+    const cfg = readJson<WindsurfMcpConfig>(
+      path.join(homeDir, '.codeium', 'windsurf', 'mcp_config.json')
+    );
+    return !!(cfg?.mcpServers && hasNode9McpServer(cfg.mcpServers));
+  })();
+
+  const vscodeWired = (() => {
+    const cfg = readJson<VSCodeMcpConfig>(path.join(homeDir, '.vscode', 'mcp.json'));
+    return !!(cfg?.servers && hasNode9McpServerVSCode(cfg.servers));
+  })();
+
+  return [
+    {
+      name: 'claude',
+      label: 'Claude Code',
+      installed: detected.claude,
+      wired: claudeWired,
+      mode: detected.claude ? 'hooks' : null,
+    },
+    {
+      name: 'gemini',
+      label: 'Gemini CLI',
+      installed: detected.gemini,
+      wired: geminiWired,
+      mode: detected.gemini ? 'hooks' : null,
+    },
+    {
+      name: 'cursor',
+      label: 'Cursor',
+      installed: detected.cursor,
+      wired: cursorWired,
+      mode: detected.cursor ? 'mcp' : null,
+    },
+    {
+      name: 'windsurf',
+      label: 'Windsurf',
+      installed: detected.windsurf,
+      wired: windsurfWired,
+      mode: detected.windsurf ? 'mcp' : null,
+    },
+    {
+      name: 'vscode',
+      label: 'VSCode',
+      installed: detected.vscode,
+      wired: vscodeWired,
+      mode: detected.vscode ? 'mcp' : null,
+    },
+    {
+      name: 'codex',
+      label: 'Codex',
+      installed: detected.codex,
+      wired: codexWired,
+      mode: detected.codex ? 'mcp' : null,
+    },
+  ];
 }
