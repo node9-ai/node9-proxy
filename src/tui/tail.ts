@@ -261,40 +261,82 @@ function postDecisionHttp(
 
 const DIVIDER = '─'.repeat(60);
 
+/** Extract the most human-readable summary from tool args. */
+function extractArgsSummary(toolName: string, args: unknown): string {
+  const a = args as Record<string, unknown> | null;
+  if (!a) return '';
+  // Bash / shell — show the raw command, not JSON
+  const cmd = a['command'] ?? a['cmd'];
+  if (typeof cmd === 'string') return cmd.replace(/\s+/g, ' ').trim();
+  // File tools — show the path
+  const fp = a['file_path'] ?? a['path'] ?? a['filepath'];
+  if (typeof fp === 'string') return fp;
+  // SQL / query tools
+  const q = a['query'] ?? a['sql'];
+  if (typeof q === 'string') return q.replace(/\s+/g, ' ').trim();
+  // Generic: JSON but strip outer braces for brevity
+  const s = JSON.stringify(a).replace(/\s+/g, ' ');
+  return s.length > 80 ? s.slice(0, 80) + '…' : s;
+}
+
+/** Strip redundant shield suffix from reason strings.
+ * "Pipe-to-shell is dangerous — blocked by bash-safe shield" → "Pipe-to-shell is dangerous" */
+function cleanReason(raw: string): string {
+  return raw
+    .replace(/\s*[—–-]+\s*(blocked by|requires human approval)[^)]*(\([^)]*\))?\.?\s*$/i, '')
+    .trim();
+}
+
+/** Strip technical prefixes from blockedByLabel for display.
+ * "Smart Rule: shield:bash-safe:block-pipe-to-shell" → "bash-safe" */
+function cleanBlockedBy(raw: string): string {
+  // "Smart Rule: shield:X:rule-name" → "X"
+  const shieldMatch = raw.match(/shield:([^:]+):/i);
+  if (shieldMatch) return shieldMatch[1];
+  // "Smart Rule: my-rule-name" → "my-rule-name"
+  const smartMatch = raw.match(/^Smart Rule:\s*(.+)$/i);
+  if (smartMatch) return smartMatch[1];
+  return raw;
+}
+
 function buildCardLines(req: ApprovalRequest, localCount: number = 0): string[] {
   // Recovery menu: stateful rule with a recoveryCommand uses a different card layout
   if (req.recoveryCommand) {
     return buildRecoveryCardLines(req);
   }
 
-  const argsStr = JSON.stringify(req.args ?? {}).replace(/\s+/g, ' ');
-  const argsPreview = argsStr.length > 60 ? argsStr.slice(0, 60) + '…' : argsStr;
+  const argsSummary = extractArgsSummary(req.toolName, req.args);
+  const argsPreview = argsSummary.length > 72 ? argsSummary.slice(0, 72) + '…' : argsSummary;
 
-  const tierLabel =
-    req.riskMetadata?.tier != null
-      ? req.riskMetadata.tier <= 2
-        ? `${YELLOW}⚠  Tier ${req.riskMetadata.tier}`
-        : `${RED}🛑 Tier ${req.riskMetadata.tier}`
-      : `${YELLOW}⚠  Review`;
-  const blockedBy = req.riskMetadata?.blockedByLabel ?? 'Policy rule';
+  const rawBlockedBy = req.riskMetadata?.blockedByLabel ?? 'Policy rule';
+  const blockedBy = cleanBlockedBy(rawBlockedBy);
+  const isBlock = req.riskMetadata?.tier != null && req.riskMetadata.tier <= 2;
+  const severityIcon = isBlock ? `${RED}🛑` : `${YELLOW}⚠ `;
+
+  // Human-readable description: prefer ruleDescription, fall back to blockedByLabel
+  const rawDesc = req.riskMetadata?.ruleDescription ?? '';
+  const description = rawDesc ? cleanReason(rawDesc) : '';
 
   const lines: string[] = [
     ``,
     `${BOLD}${CYAN}╔══ Node9 Approval Required ══╗${RESET}`,
     `${CYAN}║${RESET} Tool:    ${BOLD}${req.toolName}${RESET}`,
-    `${CYAN}║${RESET} Reason:  ${tierLabel} — ${blockedBy}${RESET}`,
+    `${CYAN}║${RESET} Policy:  ${severityIcon} ${blockedBy}${RESET}`,
   ];
 
-  if (req.riskMetadata?.ruleDescription) {
-    lines.push(`${CYAN}║${RESET} ${YELLOW}ℹ  ${req.riskMetadata.ruleDescription}${RESET}`);
+  if (description) {
+    lines.push(`${CYAN}║${RESET} Why:     ${YELLOW}${description}${RESET}`);
   }
 
-  // Taint warning: show the file + source context so the user knows exactly why
-  if (req.riskMetadata?.ruleName && blockedBy.includes('Taint')) {
+  // Taint warning
+  if (req.riskMetadata?.ruleName && rawBlockedBy.includes('Taint')) {
     lines.push(`${CYAN}║${RESET} ${YELLOW}⚠  ${req.riskMetadata.ruleName}${RESET}`);
   }
 
-  lines.push(`${CYAN}║${RESET} Args:    ${GRAY}${argsPreview}${RESET}`);
+  if (argsPreview) {
+    const argLabel = req.toolName.toLowerCase().includes('bash') ? 'Command' : 'Args   ';
+    lines.push(`${CYAN}║${RESET} ${argLabel}:  ${GRAY}${argsPreview}${RESET}`);
+  }
 
   // 💡 Insight: show after 2+ prior terminal approvals for this tool (i.e. the 3rd prompt onward)
   if (localCount >= 2) {
