@@ -14,10 +14,25 @@ interface PauseState {
 }
 interface TrustEntry {
   tool: string;
+  /** For Bash/shell tools: first 2 words of the command (e.g. "git push").
+   * When present, trust only applies when the actual command starts with this pattern.
+   * Absent for non-Bash tools → tool-level trust. */
+  commandPattern?: string;
   expiry: number;
 }
 interface TrustFile {
   entries: TrustEntry[];
+}
+
+/** Extract a normalised command pattern (first 2 words) for Bash trust scoping. */
+export function extractCommandPattern(toolName: string, args: unknown): string | undefined {
+  const lower = toolName.toLowerCase();
+  if (lower !== 'bash' && lower !== 'execute_bash' && lower !== 'shell') return undefined;
+  const a = args as Record<string, unknown> | null;
+  const cmd = typeof a?.['command'] === 'string' ? a['command'].trim() : '';
+  if (!cmd) return undefined;
+  const words = cmd.split(/\s+/);
+  return words.slice(0, 2).join(' ');
 }
 
 export function checkPause(): { paused: boolean; expiresAt?: number; duration?: string } {
@@ -55,7 +70,7 @@ export function resumeNode9(): void {
   } catch {}
 }
 
-export function getActiveTrustSession(toolName: string): boolean {
+export function getActiveTrustSession(toolName: string, args?: unknown): boolean {
   try {
     if (!fs.existsSync(TRUST_FILE)) return false;
     const trust = JSON.parse(fs.readFileSync(TRUST_FILE, 'utf-8')) as TrustFile;
@@ -64,13 +79,21 @@ export function getActiveTrustSession(toolName: string): boolean {
     if (active.length !== trust.entries.length) {
       fs.writeFileSync(TRUST_FILE, JSON.stringify({ entries: active }, null, 2));
     }
-    return active.some((e) => e.tool === toolName || matchesPattern(toolName, e.tool));
+    return active.some((e) => {
+      if (!(e.tool === toolName || matchesPattern(toolName, e.tool))) return false;
+      if (e.commandPattern) {
+        const actual = extractCommandPattern(toolName, args) ?? '';
+        return actual === e.commandPattern || actual.startsWith(e.commandPattern + ' ');
+      }
+      return true;
+    });
   } catch {
     return false;
   }
 }
 
-export function writeTrustSession(toolName: string, durationMs: number): void {
+export function writeTrustSession(toolName: string, durationMs: number, args?: unknown): void {
+  const commandPattern = extractCommandPattern(toolName, args);
   try {
     let trust: TrustFile = { entries: [] };
 
@@ -83,12 +106,18 @@ export function writeTrustSession(toolName: string, durationMs: number): void {
       // If the file is corrupt, start with a fresh object
     }
 
-    // 2. Filter out the specific tool (to overwrite) and remove any expired entries
+    // 2. Remove the matching (tool, commandPattern) entry and expired entries
     const now = Date.now();
-    trust.entries = trust.entries.filter((e) => e.tool !== toolName && e.expiry > now);
+    trust.entries = trust.entries.filter(
+      (e) => !(e.tool === toolName && e.commandPattern === commandPattern) && e.expiry > now
+    );
 
-    // 3. Add the new time-boxed entry
-    trust.entries.push({ tool: toolName, expiry: now + durationMs });
+    // 3. Add the new time-boxed entry (commandPattern undefined for non-Bash tools)
+    trust.entries.push({
+      tool: toolName,
+      ...(commandPattern && { commandPattern }),
+      expiry: now + durationMs,
+    });
 
     // 4. Perform the ATOMIC write
     atomicWriteSync(TRUST_FILE, JSON.stringify(trust, null, 2));

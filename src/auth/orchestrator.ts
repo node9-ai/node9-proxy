@@ -403,12 +403,6 @@ async function _authorizeHeadlessCore(
       }
     }
 
-    if (getActiveTrustSession(toolName)) {
-      if (approvers.cloud && creds?.apiKey)
-        await auditLocalAllow(toolName, args, 'trust', creds, meta);
-      if (!isManual) appendLocalAudit(toolName, args, 'allow', 'trust', meta, hashAuditArgs);
-      return { approved: true, checkedBy: 'trust' };
-    }
     const policyResult = await evaluatePolicy(toolName, args, meta?.agent);
     if (policyResult.decision === 'allow') {
       if (approvers.cloud && creds?.apiKey)
@@ -527,6 +521,15 @@ async function _authorizeHeadlessCore(
     // frequent and too noisy to send to the SaaS audit log.
     if (!isManual) appendLocalAudit(toolName, args, 'allow', 'ignored', meta, hashAuditArgs);
     return { approved: true };
+  }
+
+  // Trust session bypass — only for review-path calls, never for taint detection.
+  // Runs after hard-block evaluation so block-verdict rules are always enforced.
+  if (!taintWarning && getActiveTrustSession(toolName, args)) {
+    if (approvers.cloud && creds?.apiKey)
+      await auditLocalAllow(toolName, args, 'trust', creds, meta);
+    if (!isManual) appendLocalAudit(toolName, args, 'allow', 'trust', meta, hashAuditArgs);
+    return { approved: true, checkedBy: 'trust' };
   }
 
   // Taint warning active — set a high-risk label and fall through to the race engine.
@@ -735,7 +738,7 @@ async function _authorizeHeadlessCore(
         );
 
         if (decision === 'always_allow') {
-          writeTrustSession(toolName, 3600000);
+          writeTrustSession(toolName, 3600000, args);
           return { approved: true, checkedBy: 'trust' } as AuthResult;
         }
 
