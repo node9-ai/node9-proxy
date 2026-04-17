@@ -128,9 +128,13 @@ configure(agent_name="my-agent", policy="require_approval")
 
 ---
 
-## Flight Recorder & HUD
+## Observability
 
-Every tool call your AI agent makes is recorded — command, arguments, result, and cost estimate. Node9 wires a live statusline into Claude Code that shows you what's happening in real time:
+Every tool call your AI agent makes is recorded — command, arguments, result, and cost estimate. Node9 gives you four ways to see what your agent is doing.
+
+### Live HUD (statusline)
+
+Node9 wires a live statusline into Claude Code that shows you what's happening in real time:
 
 ```
 🛡 node9 | standard | [bash-safe] | ✅ 12 allowed  🛑 2 blocked  🚨 0 dlp | ~$0.43 | ⚡ no-force-push
@@ -146,9 +150,20 @@ Every tool call your AI agent makes is recorded — command, arguments, result, 
 
 The HUD is wired automatically by `node9 init`. Full session logs land in `~/.node9/audit.log`.
 
-### Offline Report
+### `node9 tail` — live stream
 
-Run `node9 report` after a session to get a summary dashboard — what was allowed, what was blocked, DLP hits, cost (Claude Code only), and daily activity:
+Stream every tool call as it happens. Useful when you send an agent off to work and want to watch what it's doing:
+
+```bash
+node9 tail          # stream tool calls for the active session
+node9 tail --all    # include all projects
+```
+
+Each line shows the tool name, a summary of its arguments, and the decision (allowed / blocked / DLP hit).
+
+### `node9 report` — security dashboard
+
+Run after a session to get a summary of what was allowed, blocked, DLP hits, cost, and daily activity:
 
 ```
 $ node9 report --period 7d
@@ -174,6 +189,92 @@ $ node9 report --period 7d
 ```
 
 Periods: `today`, `7d` (default), `30d`, `month`. Cost data is read from `~/.claude/projects/` — no API calls, fully offline.
+
+### `node9 sessions` — session history
+
+See what your AI agent did across sessions — prompt, tool calls, cost, files modified, and whether a snapshot was taken. Useful when you hand off a task and come back to review what happened:
+
+```
+$ node9 sessions --all
+
+  📋  node9 sessions  — what your AI agent did
+
+  7   sessions    $178.93  total    2379  tool calls    122 files modified
+  avg $25.56    /session    7 of 7 sessions had snapshots
+
+  Tool breakdown:
+    Bash    ████████████████████  1165 (49%)
+    Read    ███████████░░░░░░░░░   613 (26%)
+    Edit    ██████░░░░░░░░░░░░░░   367 (15%)
+    Other   ███░░░░░░░░░░░░░░░░░   203 (9%)
+    Write   █░░░░░░░░░░░░░░░░░░░    31 (1%)
+
+  ─── Apr 15  ~/node9
+  14:47  implement delegated sessions feature       919 tools  $74.45  📸  00ac39e2
+  12:47  ok, it seems you crash and we have a bug…   95 tools  $6.40   📸  5a4e7fab
+```
+
+Drill into any session for a full tool trace:
+
+```
+$ node9 sessions --detail 4812594b
+
+  Session  4812594b-c93f-4a26-91f0-44aa2e324918
+  Prompt   can you push node9-proxy to git dev?
+  Project  ~/node9
+  When     Apr 9, 2026, 20:49
+  Cost     ~$2.06
+  Snapshot ✓ taken
+
+  Tool calls (54):
+    20:49  Bash              git status && git branch -a
+    20:52  Write             /home/nadav/node9/node9-proxy/.git/hooks/pre-commit
+    20:56  Edit              /home/nadav/node9/node9-proxy/src/cli/commands/check.ts
+    ...
+
+  Files modified (3):
+    /home/nadav/node9/node9-proxy/.git/hooks/pre-commit
+    /home/nadav/node9/node9-proxy/src/cli/commands/check.ts
+    /home/nadav/node9/node9-proxy/src/cli/hud.ts
+```
+
+```bash
+node9 sessions              # last 7 days
+node9 sessions --all        # all time
+node9 sessions --days 30    # last 30 days
+node9 sessions --detail <session-id>   # full tool trace (prefix match on session ID)
+```
+
+Currently works with Claude Code. Support for other agents coming as they expose session history.
+
+### `node9 scan` — day-0 forecast
+
+Not installed yet? Run `node9 scan` against your existing Claude Code history to see what Node9 **would have caught** if it had been running:
+
+```
+$ node9 scan
+
+  🔍  node9 scan  — what would node9 catch?
+
+  42 sessions  3,891 tool calls  1,165 bash commands  last 90 days
+
+  If node9 had been installed:  23 commands flagged for review
+
+  bash-safe  ·  12 findings  →  node9 shield enable bash-safe
+    block-pipe-to-shell ×8  — Pipe-to-shell is a common supply-chain attack vector
+    review-eval ×4          — eval of dynamic content requires human approval
+
+  Secrets / DLP  ·  2 potential secret leaks
+    aws-access-key  AKIA****************  Bash  Apr 12
+```
+
+`scan` reads raw JSONL history and runs the real policy engine — same shields and rules that would fire in production. No audit log needed.
+
+```bash
+node9 scan              # last 90 days
+node9 scan --all        # all time
+node9 scan --days 30    # custom window
+```
 
 ---
 
