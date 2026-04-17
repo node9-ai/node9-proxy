@@ -90,6 +90,12 @@ describe('DLP_PATTERNS — built-in patterns', () => {
     expect(match!.patternName).toBe('Bearer Token');
     expect(match!.severity).toBe('review'); // not a hard block
   });
+
+  it('does not flag prose containing "Bearer tokens" (false positive)', () => {
+    expect(scanArgs({ text: 'Node9 scans for Bearer tokens in your commands.' })).toBeNull();
+    expect(scanArgs({ text: 'Authorization: Bearer token' })).toBeNull();
+    expect(scanArgs({ text: 'using Bearer token auth' })).toBeNull();
+  });
 });
 
 // ── Redaction ─────────────────────────────────────────────────────────────────

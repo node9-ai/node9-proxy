@@ -309,6 +309,9 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
           for (const source of ruleSources) {
             const { rule } = source;
 
+            // Allow rules are not catches — skip them
+            if (rule.verdict === 'allow') continue;
+
             // Tool name must match the rule's tool pattern
             if (rule.tool && !matchesPattern(toolNameLower, rule.tool)) continue;
 

@@ -44,7 +44,7 @@ export const DLP_PATTERNS: DlpPattern[] = [
     regex: /_authToken\s*=\s*[A-Za-z0-9_\-]{20,}/,
     severity: 'block',
   },
-  { name: 'Bearer Token', regex: /Bearer\s+[a-zA-Z0-9\-._~+/]+=*/i, severity: 'review' },
+  { name: 'Bearer Token', regex: /Bearer\s+[a-zA-Z0-9\-._~+/]{20,}=*/i, severity: 'review' },
 ];
 
 // ── Sensitive File Path Blocklist ─────────────────────────────────────────────
