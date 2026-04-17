@@ -229,16 +229,6 @@ describe('Bash tool — shell command interception', () => {
     expect(result.ruleName).toBe('block-force-push');
   });
 
-  // ── Smart rule: review-git-push ───────────────────────────────────────────
-  it.each([
-    { cmd: 'git push origin main', desc: 'regular push to branch' },
-    { cmd: 'git push', desc: 'bare push' },
-    { cmd: 'git push --tags', desc: 'push tags' },
-  ])('review-git-push: flags "$desc" as review', async ({ cmd }) => {
-    const result = await evaluatePolicy('Bash', { command: cmd });
-    expect(result.decision).toBe('review');
-    expect(result.ruleName).toBe('review-git-push');
-  });
 
   // ── Smart rule: review-git-destructive ────────────────────────────────────
   it.each([
@@ -252,6 +242,16 @@ describe('Bash tool — shell command interception', () => {
     const result = await evaluatePolicy('Bash', { command: cmd });
     expect(result.decision).toBe('review');
     expect(result.ruleName).toBe('review-git-destructive');
+  });
+
+  it.each([
+    { cmd: 'git pull --rebase', desc: 'pull --rebase' },
+    { cmd: 'git pull --rebase origin main', desc: 'pull --rebase origin main' },
+    { cmd: 'git push origin main', desc: 'plain push (review-git-push removed from defaults)' },
+  ])('review-git-destructive: does NOT flag "$desc"', async ({ cmd }) => {
+    const result = await evaluatePolicy('Bash', { command: cmd });
+    expect(result.ruleName).not.toBe('review-git-destructive');
+    expect(result.ruleName).not.toBe('review-git-push');
   });
 
   // ── Smart rule: review-sudo ───────────────────────────────────────────────

@@ -253,23 +253,6 @@ export const DEFAULT_CONFIG: Config = {
           'The AI wants to force push to a remote git branch. This rewrites shared history and can permanently destroy commits that teammates have already pulled.',
       },
       {
-        name: 'review-git-push',
-        tool: 'bash',
-        conditions: [
-          {
-            field: 'command',
-            op: 'matches',
-            value: '\\bgit\\b.*\\bpush\\b(?!.*(-f\\b|--force|--force-with-lease))',
-            flags: 'i',
-          },
-        ],
-        conditionMode: 'all',
-        verdict: 'review',
-        reason: 'git push sends changes to a shared remote',
-        description:
-          'The AI wants to push commits to a remote repository. Once pushed, those changes are visible to everyone with access.',
-      },
-      {
         name: 'review-git-destructive',
         tool: 'bash',
         conditions: [
@@ -277,7 +260,7 @@ export const DEFAULT_CONFIG: Config = {
             field: 'command',
             op: 'matches',
             value:
-              '\\bgit\\b.*(reset\\s+--hard|clean\\s+-[fdxX]|\\brebase\\b|tag\\s+-d|branch\\s+-[dD])',
+              '\\bgit\\s+(reset\\s+--hard|clean\\s+-[fdxX]|rebase\\b|tag\\s+-d|branch\\s+-[dD])',
             flags: 'i',
           },
         ],
