@@ -305,6 +305,17 @@ export function registerReportCommand(program: Command): void {
       const logPath = path.join(os.homedir(), '.node9', 'audit.log');
       const allEntries = parseAuditLog(logPath);
 
+      // Warn immediately if any unacknowledged response-DLP findings exist
+      const unackedDlp = allEntries.filter((e) => e.source === 'response-dlp');
+      if (unackedDlp.length > 0) {
+        console.log('');
+        console.log(
+          chalk.bgRed.white.bold(
+            ` ⚠️  DLP ALERT: ${unackedDlp.length} secret${unackedDlp.length !== 1 ? 's' : ''} found in Claude response text — scroll down for details `
+          )
+        );
+      }
+
       if (allEntries.length === 0) {
         console.log(
           chalk.yellow('\n  No audit data found. Run node9 with Claude Code to generate entries.\n')
@@ -693,10 +704,14 @@ export function registerReportCommand(program: Command): void {
           '  ' +
             chalk.red.bold('⚠️  Response DLP') +
             chalk.dim('  ·  ') +
-            chalk.red(`${responseDlpEntries.length} secret${responseDlpEntries.length !== 1 ? 's' : ''} found in Claude response text`)
+            chalk.red(
+              `${responseDlpEntries.length} secret${responseDlpEntries.length !== 1 ? 's' : ''} found in Claude response text`
+            )
         );
         console.log('  ' + chalk.dim('─'.repeat(Math.min(60, W - 4))));
-        console.log('  ' + chalk.yellow('These were NOT blocked — Claude included them in response prose.'));
+        console.log(
+          '  ' + chalk.yellow('These were NOT blocked — Claude included them in response prose.')
+        );
         console.log('  ' + chalk.yellow('Rotate affected keys immediately.'));
         for (const e of responseDlpEntries.slice(0, 5)) {
           const ts = chalk.dim(fmtDate(e.ts) + '  ');

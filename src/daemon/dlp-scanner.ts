@@ -138,7 +138,7 @@ export function runDlpScan(): void {
 
             sendDesktopNotification(
               '⚠️ node9 DLP Alert',
-              `${match.patternName} detected in Claude response (${projLabel}) — rotate the key`
+              `${match.patternName} found in Claude response\nSample: ${match.redactedSample}\nProject: ${projLabel}\nRun: node9 report --period 30d`
             );
           }
         }
@@ -165,10 +165,13 @@ export function startDlpScanner(): void {
   });
 
   // Then every hour
-  const timer = setInterval(() => {
-    try {
-      runDlpScan();
-    } catch {}
-  }, 60 * 60 * 1000);
+  const timer = setInterval(
+    () => {
+      try {
+        runDlpScan();
+      } catch {}
+    },
+    60 * 60 * 1000
+  );
   timer.unref();
 }

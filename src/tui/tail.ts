@@ -905,6 +905,23 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
     // can open it manually.
   }
 
+  // Warn if response-DLP findings exist in audit log
+  const auditLog = path.join(os.homedir(), '.node9', 'audit.log');
+  try {
+    const unackedDlp = fs
+      .readFileSync(auditLog, 'utf-8')
+      .split('\n')
+      .filter((l) => l.includes('"response-dlp"')).length;
+    if (unackedDlp > 0) {
+      console.log('');
+      console.log(
+        chalk.bgRed.white.bold(
+          ` ⚠️  DLP ALERT: ${unackedDlp} secret${unackedDlp !== 1 ? 's' : ''} found in Claude response text — run: node9 report `
+        )
+      );
+    }
+  } catch {}
+
   console.log(chalk.cyan.bold(`\n🛰️  Node9 tail  `) + chalk.dim(`→ ${dashboardUrl}`));
   if (canApprove) {
     console.log(chalk.dim('Card: [↵/y] Allow  [n] Deny  [a] Always  [t] Trust 30m'));
