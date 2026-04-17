@@ -918,14 +918,6 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
     console.log(chalk.dim('Showing live events only. Use --history to include past.\n'));
   }
 
-  // Refresh context fill % every 30s, but skip if a pending item or card is displayed
-  const ctxTimer = setInterval(() => {
-    if (pendingShownForId !== null || cardActive) return;
-    const s = readSessionUsage();
-    if (s) process.stdout.write('  ' + formatContextStat(s) + '\n');
-  }, 30000);
-  ctxTimer.unref();
-
   process.on('SIGINT', () => {
     exitIdleMode();
     clearCard();
