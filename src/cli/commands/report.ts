@@ -311,8 +311,10 @@ export function registerReportCommand(program: Command): void {
         console.log('');
         console.log(
           chalk.bgRed.white.bold(
-            ` ⚠️  DLP ALERT: ${unackedDlp.length} secret${unackedDlp.length !== 1 ? 's' : ''} found in Claude response text — scroll down for details `
-          )
+            ` ⚠️  DLP ALERT: ${unackedDlp.length} secret${unackedDlp.length !== 1 ? 's' : ''} found in Claude response text `
+          ) +
+            '  ' +
+            chalk.yellow('→ run: node9 dlp')
         );
       }
 

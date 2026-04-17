@@ -916,7 +916,7 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
       console.log('');
       console.log(
         chalk.bgRed.white.bold(
-          ` ⚠️  DLP ALERT: ${unackedDlp} secret${unackedDlp !== 1 ? 's' : ''} found in Claude response text — run: node9 report `
+          ` ⚠️  DLP ALERT: ${unackedDlp} secret${unackedDlp !== 1 ? 's' : ''} found in Claude response text — run: node9 dlp `
         )
       );
     }
