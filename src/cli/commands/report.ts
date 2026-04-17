@@ -342,6 +342,7 @@ export function registerReportCommand(program: Command): void {
       let filteredTestCount = 0;
       const entries = allEntries.filter((e) => {
         if (e.source === 'post-hook') return false;
+        if (e.source === 'response-dlp') return false;
         const ts = new Date(e.ts);
         if (ts < start || ts > end) return false;
         if (excludeTests && isTestEntry(e, testTs)) {
@@ -677,6 +678,34 @@ export function registerReportCommand(program: Command): void {
           console.log(
             '  ' + chalk.white(label.padEnd(MODEL_LABEL)) + b + '  ' + chalk.yellow(fmtCost(cost))
           );
+        }
+      }
+
+      // ── Response DLP ──
+      const responseDlpEntries = allEntries.filter((e) => {
+        if (e.source !== 'response-dlp') return false;
+        const ts = new Date(e.ts);
+        return ts >= start && ts <= end;
+      });
+      if (responseDlpEntries.length > 0) {
+        console.log('');
+        console.log(
+          '  ' +
+            chalk.red.bold('⚠️  Response DLP') +
+            chalk.dim('  ·  ') +
+            chalk.red(`${responseDlpEntries.length} secret${responseDlpEntries.length !== 1 ? 's' : ''} found in Claude response text`)
+        );
+        console.log('  ' + chalk.dim('─'.repeat(Math.min(60, W - 4))));
+        console.log('  ' + chalk.yellow('These were NOT blocked — Claude included them in response prose.'));
+        console.log('  ' + chalk.yellow('Rotate affected keys immediately.'));
+        for (const e of responseDlpEntries.slice(0, 5)) {
+          const ts = chalk.dim(fmtDate(e.ts) + '  ');
+          const pattern = chalk.red((e as unknown as Record<string, string>).dlpPattern ?? 'DLP');
+          const sample = chalk.gray((e as unknown as Record<string, string>).dlpSample ?? '');
+          console.log(`    ${ts}${pattern}  ${sample}`);
+        }
+        if (responseDlpEntries.length > 5) {
+          console.log(chalk.dim(`    … and ${responseDlpEntries.length - 5} more`));
         }
       }
 

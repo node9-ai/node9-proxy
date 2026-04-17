@@ -200,3 +200,19 @@ export function scanArgs(args: unknown, depth = 0, fieldPath = 'args'): DlpMatch
 
   return null;
 }
+
+/** Scan a plain text string (e.g. Claude response prose) for DLP patterns. */
+export function scanText(text: string): DlpMatch | null {
+  const t = text.length > MAX_STRING_BYTES ? text.slice(0, MAX_STRING_BYTES) : text;
+  for (const pattern of DLP_PATTERNS) {
+    if (pattern.regex.test(t)) {
+      return {
+        patternName: pattern.name,
+        fieldPath: 'response-text',
+        redactedSample: maskSecret(t, pattern.regex),
+        severity: pattern.severity,
+      };
+    }
+  }
+  return null;
+}
