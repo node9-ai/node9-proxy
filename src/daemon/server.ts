@@ -57,6 +57,7 @@ import {
   sessionHistory,
   type HudStatus,
 } from './state';
+import { extractCommandPattern } from '../auth/state.js';
 import { patchConfig, GLOBAL_CONFIG_PATH, type ConfigPatch } from '../config/patch.js';
 import { SmartRuleSchema } from '../config-schema.js';
 import { startCostSync } from '../costSync.js';
@@ -444,7 +445,8 @@ export function startDaemon(): void {
         // Trust session
         if (decision === 'trust' && trustDuration) {
           const ms = TRUST_DURATIONS[trustDuration] ?? 60 * 60_000;
-          writeTrustEntry(entry.toolName, ms);
+          const commandPattern = extractCommandPattern(entry.toolName, entry.args);
+          writeTrustEntry(entry.toolName, ms, commandPattern);
           appendAuditLog({
             toolName: entry.toolName,
             args: entry.args,

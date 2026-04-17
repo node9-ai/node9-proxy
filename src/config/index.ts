@@ -87,6 +87,11 @@ export interface Config {
       threshold: number;
       windowSeconds: number;
     };
+    skillPinning: {
+      enabled: boolean;
+      mode: 'warn' | 'block';
+      roots: string[];
+    };
   };
   environments: Record<string, EnvironmentConfig>;
 }
@@ -313,6 +318,7 @@ export const DEFAULT_CONFIG: Config = {
     ],
     dlp: { enabled: true, scanIgnoredTools: true },
     loopDetection: { enabled: true, threshold: 5, windowSeconds: 120 },
+    skillPinning: { enabled: false, mode: 'warn', roots: [] },
   },
   environments: {},
 };
@@ -527,6 +533,10 @@ export function getConfig(cwd?: string): Config {
     },
     dlp: { ...DEFAULT_CONFIG.policy.dlp },
     loopDetection: { ...DEFAULT_CONFIG.policy.loopDetection },
+    skillPinning: {
+      ...DEFAULT_CONFIG.policy.skillPinning,
+      roots: [...DEFAULT_CONFIG.policy.skillPinning.roots],
+    },
   };
   const mergedEnvironments: Record<string, EnvironmentConfig> = { ...DEFAULT_CONFIG.environments };
 
@@ -594,6 +604,16 @@ export function getConfig(cwd?: string): Config {
       if (ld.threshold !== undefined) mergedPolicy.loopDetection.threshold = ld.threshold;
       if (ld.windowSeconds !== undefined)
         mergedPolicy.loopDetection.windowSeconds = ld.windowSeconds;
+    }
+    if (p.skillPinning && typeof p.skillPinning === 'object') {
+      const sp = p.skillPinning as Partial<Config['policy']['skillPinning']>;
+      if (sp.enabled !== undefined) mergedPolicy.skillPinning.enabled = sp.enabled;
+      if (sp.mode !== undefined) mergedPolicy.skillPinning.mode = sp.mode;
+      if (Array.isArray(sp.roots)) {
+        for (const r of sp.roots) {
+          if (typeof r === 'string' && r.length > 0) mergedPolicy.skillPinning.roots.push(r);
+        }
+      }
     }
 
     const envs = (source.environments || {}) as Record<string, unknown>;
@@ -669,6 +689,7 @@ export function getConfig(cwd?: string): Config {
   mergedPolicy.sandboxPaths = [...new Set(mergedPolicy.sandboxPaths)];
   mergedPolicy.dangerousWords = [...new Set(mergedPolicy.dangerousWords)];
   mergedPolicy.ignoredTools = [...new Set(mergedPolicy.ignoredTools)];
+  mergedPolicy.skillPinning.roots = [...new Set(mergedPolicy.skillPinning.roots)];
   mergedPolicy.snapshot.tools = [...new Set(mergedPolicy.snapshot.tools)];
   mergedPolicy.snapshot.onlyPaths = [...new Set(mergedPolicy.snapshot.onlyPaths)];
   mergedPolicy.snapshot.ignorePaths = [...new Set(mergedPolicy.snapshot.ignorePaths)];

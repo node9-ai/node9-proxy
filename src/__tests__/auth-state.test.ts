@@ -25,6 +25,7 @@ import {
   resumeNode9,
   getActiveTrustSession,
   writeTrustSession,
+  extractCommandPattern,
 } from '../auth/state.js';
 
 // Derive paths the same way the module does — avoids a brittle hardcoded constant.
@@ -123,6 +124,36 @@ describe('resumeNode9', () => {
   });
 });
 
+// ── extractCommandPattern ─────────────────────────────────────────────────────
+
+describe('extractCommandPattern', () => {
+  it('returns first 2 words of bash command', () => {
+    expect(extractCommandPattern('Bash', { command: 'git push origin dev' })).toBe('git push');
+  });
+
+  it('returns single word for single-word command', () => {
+    expect(extractCommandPattern('Bash', { command: 'ls' })).toBe('ls');
+  });
+
+  it('returns undefined for non-Bash tools', () => {
+    expect(extractCommandPattern('Write', { file_path: '/src/foo.ts' })).toBeUndefined();
+    expect(extractCommandPattern('Read', { file_path: '/src/foo.ts' })).toBeUndefined();
+  });
+
+  it('returns undefined when args has no command field', () => {
+    expect(extractCommandPattern('Bash', { file_path: '/src/foo.ts' })).toBeUndefined();
+  });
+
+  it('returns undefined for null/undefined args', () => {
+    expect(extractCommandPattern('Bash', null)).toBeUndefined();
+    expect(extractCommandPattern('Bash', undefined)).toBeUndefined();
+  });
+
+  it('normalizes extra whitespace', () => {
+    expect(extractCommandPattern('Bash', { command: '  git   push  origin' })).toBe('git push');
+  });
+});
+
 // ── getActiveTrustSession ─────────────────────────────────────────────────────
 
 describe('getActiveTrustSession', () => {
@@ -180,6 +211,33 @@ describe('getActiveTrustSession', () => {
     readSpy.mockImplementation((p) => (String(p) === TRUST_FILE ? 'not-json' : ''));
     expect(getActiveTrustSession('bash')).toBe(false);
   });
+
+  it('matches command-scoped entry when args command starts with pattern', () => {
+    const entries = [{ tool: 'Bash', commandPattern: 'git push', expiry: Date.now() + 60_000 }];
+    existsSpy.mockImplementation((p) => String(p) === TRUST_FILE);
+    readSpy.mockImplementation((p) =>
+      String(p) === TRUST_FILE ? JSON.stringify({ entries }) : ''
+    );
+    expect(getActiveTrustSession('Bash', { command: 'git push origin dev' })).toBe(true);
+  });
+
+  it('rejects command-scoped entry when args command does not match pattern', () => {
+    const entries = [{ tool: 'Bash', commandPattern: 'git push', expiry: Date.now() + 60_000 }];
+    existsSpy.mockImplementation((p) => String(p) === TRUST_FILE);
+    readSpy.mockImplementation((p) =>
+      String(p) === TRUST_FILE ? JSON.stringify({ entries }) : ''
+    );
+    expect(getActiveTrustSession('Bash', { command: 'rm -rf /' })).toBe(false);
+  });
+
+  it('rejects command-scoped entry when no args provided', () => {
+    const entries = [{ tool: 'Bash', commandPattern: 'git push', expiry: Date.now() + 60_000 }];
+    existsSpy.mockImplementation((p) => String(p) === TRUST_FILE);
+    readSpy.mockImplementation((p) =>
+      String(p) === TRUST_FILE ? JSON.stringify({ entries }) : ''
+    );
+    expect(getActiveTrustSession('Bash')).toBe(false);
+  });
 });
 
 // ── writeTrustSession ─────────────────────────────────────────────────────────
@@ -217,6 +275,49 @@ describe('writeTrustSession', () => {
     // Must still be exactly one entry — replace, not append
     expect(saved.entries).toHaveLength(1);
     expect(saved.entries[0].expiry).toBeGreaterThan(oldExpiry);
+  });
+
+  it('stores commandPattern for Bash tool when args provided', () => {
+    writeTrustSession('Bash', 60_000, { command: 'git push origin dev' });
+
+    const saved = JSON.parse(writeSpy.mock.calls[0][1] as string) as {
+      entries: { tool: string; commandPattern?: string; expiry: number }[];
+    };
+    expect(saved.entries[0].commandPattern).toBe('git push');
+  });
+
+  it('deduplicates by (tool, commandPattern) — same pattern replaces, different patterns coexist', () => {
+    const oldExpiry = Date.now() + 1000;
+    existsSpy.mockImplementation((p) => String(p) === TRUST_FILE);
+    readSpy.mockImplementation((p) =>
+      String(p) === TRUST_FILE
+        ? JSON.stringify({
+            entries: [
+              { tool: 'Bash', commandPattern: 'git push', expiry: oldExpiry },
+              { tool: 'Bash', commandPattern: 'npm run', expiry: oldExpiry },
+            ],
+          })
+        : ''
+    );
+    writeTrustSession('Bash', 3_600_000, { command: 'git push origin dev' });
+
+    const saved = JSON.parse(writeSpy.mock.calls[0][1] as string) as {
+      entries: { tool: string; commandPattern?: string }[];
+    };
+    // npm run entry survives; git push entry is replaced (not duplicated)
+    expect(saved.entries).toHaveLength(2);
+    const patterns = saved.entries.map((e) => e.commandPattern);
+    expect(patterns).toContain('git push');
+    expect(patterns).toContain('npm run');
+  });
+
+  it('omits commandPattern for non-Bash tools', () => {
+    writeTrustSession('Write', 60_000, { file_path: '/src/foo.ts' });
+
+    const saved = JSON.parse(writeSpy.mock.calls[0][1] as string) as {
+      entries: { tool: string; commandPattern?: string }[];
+    };
+    expect(saved.entries[0].commandPattern).toBeUndefined();
   });
 
   it('prunes expired entries from other tools when writing a new session', () => {

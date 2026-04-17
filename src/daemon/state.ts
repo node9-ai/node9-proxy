@@ -259,18 +259,28 @@ export function writeGlobalSetting(key: string, value: unknown): void {
   atomicWriteSync(GLOBAL_CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 });
 }
 
-export function writeTrustEntry(toolName: string, durationMs: number): void {
+export function writeTrustEntry(
+  toolName: string,
+  durationMs: number,
+  commandPattern?: string
+): void {
   try {
     interface TrustFile {
-      entries: { tool: string; expiry: number }[];
+      entries: { tool: string; commandPattern?: string; expiry: number }[];
     }
     let trust: TrustFile = { entries: [] };
     try {
       if (fs.existsSync(TRUST_FILE))
         trust = JSON.parse(fs.readFileSync(TRUST_FILE, 'utf-8')) as TrustFile;
     } catch {}
-    trust.entries = trust.entries.filter((e) => e.tool !== toolName && e.expiry > Date.now());
-    trust.entries.push({ tool: toolName, expiry: Date.now() + durationMs });
+    trust.entries = trust.entries.filter(
+      (e) => !(e.tool === toolName && e.commandPattern === commandPattern) && e.expiry > Date.now()
+    );
+    trust.entries.push({
+      tool: toolName,
+      ...(commandPattern && { commandPattern }),
+      expiry: Date.now() + durationMs,
+    });
     atomicWriteSync(TRUST_FILE, JSON.stringify(trust, null, 2));
   } catch {}
 }

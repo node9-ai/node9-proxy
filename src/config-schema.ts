@@ -128,6 +128,13 @@ export const ConfigFileSchema = z
             windowSeconds: z.number().min(10).optional(),
           })
           .optional(),
+        skillPinning: z
+          .object({
+            enabled: z.boolean().optional(),
+            mode: z.enum(['warn', 'block']).optional(),
+            roots: z.array(z.string()).optional(),
+          })
+          .optional(),
       })
       .optional(),
     environments: z.record(z.object({ requireApproval: z.boolean().optional() })).optional(),
