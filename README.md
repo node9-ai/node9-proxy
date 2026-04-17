@@ -102,6 +102,10 @@ node9 mcp pin reset               # clear all pins (re-pin on next connection)
 
 This is automatic — no configuration needed. The gateway pins on first `tools/list` and enforces on every subsequent session.
 
+### Skills Pinning — installed-plugin drift detection
+
+Marketplace plugins at `~/.claude/plugins/marketplaces/` come from registries, not your workspace — `git status` never sees them. Each installed plugin gets its own pin (same model as MCP server pinning): installing a new plugin creates a new pin silently; only changes to an already-pinned plugin trigger drift. Opt-in via `policy.skillPinning.enabled: true`; use `mode: 'block'` for strict enforcement. User-edited files are **not** in default scope. Extend via `policy.skillPinning.roots`.
+
 ---
 
 ## Python SDK — govern any Python agent
@@ -125,6 +129,7 @@ configure(agent_name="my-agent", policy="require_approval")
 - **Shell:** blocks `curl | bash`, `sudo` commands
 - **DLP:** blocks AWS keys, GitHub tokens, Stripe keys, PEM private keys in any tool call argument
 - **Auto-undo:** git snapshot before every AI file edit → `node9 undo` to revert
+- **Skills Pinning:** SHA-256 verification of agent skill files between sessions; quarantines on drift (AST 02 + AST 07 — supply chain & update drift)
 
 ---
 

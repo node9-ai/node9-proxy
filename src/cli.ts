@@ -51,6 +51,7 @@ import { registerSyncCommand } from './cli/commands/sync';
 import { registerAgentsCommand } from './cli/commands/agents';
 import { registerScanCommand } from './cli/commands/scan';
 import { registerSessionsCommand } from './cli/commands/sessions';
+import { registerSkillPinCommand } from './cli/commands/skill-pin';
 
 const { version } = JSON.parse(
   fs.readFileSync(path.join(__dirname, '../package.json'), 'utf-8')
@@ -431,6 +432,7 @@ registerWatchCommand(program);
 registerMcpGatewayCommand(program);
 registerMcpServerCommand(program);
 registerMcpPinCommand(program);
+registerSkillPinCommand(program);
 
 // 7. CHECK (PreToolUse hook) + LOG (PostToolUse hook)
 registerCheckCommand(program);

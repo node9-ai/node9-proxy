@@ -14,6 +14,7 @@ import { shouldSnapshot } from '../../policy';
 import { buildNegotiationMessage } from '../../policy/negotiation';
 import { createShadowSnapshot } from '../../undo';
 import { autoStartDaemonAndWait } from '../daemon-starter';
+import { defaultSkillRoots, resolveUserSkillRoot, verifyAndPinRoots } from '../../skill-pin';
 
 function sanitize(value: string): string {
   // eslint-disable-next-line no-control-regex
@@ -243,6 +244,157 @@ export function registerCheckCommand(program: Command): void {
           }
 
           const meta = { agent, mcpServer };
+
+          // ── Skill pinning — supply chain & update drift defense (AST 02 + AST 07) ──
+          // Off by default; opt-in via config.policy.skillPinning.enabled.
+          // mode 'warn': /dev/tty notification on drift, tool call allowed (exit 0).
+          // mode 'block': hard quarantine on drift, tool call blocked (exit 2).
+          // Per-session memoisation in ~/.node9/skill-sessions/ so hashing
+          // runs at most once per Claude/Gemini session id.
+          const skillPinCfg = config.policy.skillPinning;
+          const rawSessionId = typeof payload.session_id === 'string' ? payload.session_id : '';
+          const safeSessionId = /^[A-Za-z0-9_\-]{1,128}$/.test(rawSessionId) ? rawSessionId : '';
+          if (skillPinCfg.enabled && safeSessionId) {
+            try {
+              const sessionsDir = path.join(os.homedir(), '.node9', 'skill-sessions');
+              const flagPath = path.join(sessionsDir, `${safeSessionId}.json`);
+              let flag: { state?: string; detail?: string } | null = null;
+              try {
+                flag = JSON.parse(fs.readFileSync(flagPath, 'utf-8'));
+              } catch {
+                /* missing/unreadable — treat as fresh */
+              }
+
+              const writeFlag = (data: { state: string; detail?: string }) => {
+                try {
+                  fs.mkdirSync(sessionsDir, { recursive: true });
+                  fs.writeFileSync(
+                    flagPath,
+                    JSON.stringify({ ...data, timestamp: new Date().toISOString() }, null, 2),
+                    { mode: 0o600 }
+                  );
+                } catch {
+                  /* best effort */
+                }
+              };
+
+              // /dev/tty notification — non-blocking (warn mode only).
+              const sendSkillWarn = (detail: string, recoveryCmd?: string) => {
+                let ttyFd: number | null = null;
+                try {
+                  ttyFd = fs.openSync('/dev/tty', 'w');
+                  const w = (line: string) => fs.writeSync(ttyFd!, line + '\n');
+                  w(chalk.yellow(`\n⚠️  Node9: installed skill drift detected`));
+                  w(chalk.gray(`   ${detail}`));
+                  w(
+                    chalk.gray(
+                      `   If you updated a plugin, acknowledge the change to clear this warning.`
+                    )
+                  );
+                  if (recoveryCmd) w(chalk.green(`   💡 Run:  ${recoveryCmd}`));
+                  w('');
+                } catch {
+                  /* /dev/tty unavailable in CI — skip */
+                } finally {
+                  if (ttyFd !== null)
+                    try {
+                      fs.closeSync(ttyFd);
+                    } catch {
+                      /* ignore */
+                    }
+                }
+              };
+
+              // Memoised states: 'verified' / 'warned' → skip.
+              // 'quarantined' → only block in block mode; in warn mode, re-verify.
+              if (flag && flag.state === 'quarantined' && skillPinCfg.mode === 'block') {
+                sendBlock(
+                  `Node9: session quarantined — installed skill changed. Open a separate terminal and run: node9 skill pin list (to see what changed) then: node9 skill pin update <rootKey> (to acknowledge). If you updated a plugin intentionally, this is expected.`,
+                  {
+                    blockedByLabel: 'Skill Pin Quarantine',
+                    recoveryCommand: 'node9 skill pin list',
+                  }
+                );
+                return;
+              }
+
+              if (!flag || (flag.state !== 'verified' && flag.state !== 'warned')) {
+                const absoluteCwd =
+                  typeof payload.cwd === 'string' && path.isAbsolute(payload.cwd)
+                    ? payload.cwd
+                    : undefined;
+                const extraRoots = skillPinCfg.roots;
+                const resolvedExtra = extraRoots
+                  .map((r) => resolveUserSkillRoot(r, absoluteCwd))
+                  .filter((r): r is string => typeof r === 'string');
+                const roots = [...defaultSkillRoots(absoluteCwd), ...resolvedExtra];
+
+                const result = verifyAndPinRoots(roots);
+
+                if (result.kind === 'corrupt') {
+                  if (skillPinCfg.mode === 'block') {
+                    writeFlag({
+                      state: 'quarantined',
+                      detail: `pin file corrupt: ${result.detail}`,
+                    });
+                    sendBlock('Node9: skill pin file is corrupt — fail-closed.', {
+                      blockedByLabel: 'Skill Pin Quarantine',
+                      recoveryCommand: 'node9 skill pin reset',
+                    });
+                    return;
+                  }
+                  // warn mode: notify, allow
+                  writeFlag({ state: 'warned', detail: `pin file corrupt: ${result.detail}` });
+                  sendSkillWarn(
+                    `Skill pin file is corrupt: ${result.detail}`,
+                    'node9 skill pin reset'
+                  );
+                } else if (result.kind === 'drift') {
+                  if (skillPinCfg.mode === 'block') {
+                    writeFlag({ state: 'quarantined', detail: result.summary });
+                    sendBlock(
+                      `Node9: installed skill changed — ${result.summary}. If you updated a plugin, open a separate terminal and run: node9 skill pin update ${result.changedRootKey}`,
+                      {
+                        blockedByLabel: 'Skill Pin Quarantine',
+                        recoveryCommand: `node9 skill pin update ${result.changedRootKey}`,
+                      }
+                    );
+                    return;
+                  }
+                  // warn mode: notify, allow
+                  writeFlag({ state: 'warned', detail: result.summary });
+                  sendSkillWarn(result.summary, `node9 skill pin update ${result.changedRootKey}`);
+                } else {
+                  writeFlag({ state: 'verified' });
+                }
+
+                // Best-effort GC of session flags older than 7 days.
+                try {
+                  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+                  for (const name of fs.readdirSync(sessionsDir)) {
+                    const p = path.join(sessionsDir, name);
+                    try {
+                      if (fs.statSync(p).mtimeMs < cutoff) fs.unlinkSync(p);
+                    } catch {
+                      /* ignore */
+                    }
+                  }
+                } catch {
+                  /* ignore */
+                }
+              }
+            } catch (err) {
+              if (process.env.NODE9_DEBUG === '1') {
+                try {
+                  const dbg = path.join(os.homedir(), '.node9', 'hook-debug.log');
+                  const msg = err instanceof Error ? err.message : String(err);
+                  fs.appendFileSync(dbg, `[${new Date().toISOString()}] SKILL_PIN_ERROR: ${msg}\n`);
+                } catch {
+                  /* ignore */
+                }
+              }
+            }
+          }
 
           // Snapshot BEFORE the tool runs (PreToolUse) so undo can restore to
           // the state prior to this change. Snapshotting after (PostToolUse)
