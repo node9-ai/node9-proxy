@@ -530,8 +530,8 @@ export function registerReportCommand(program: Command): void {
         console.log('  ' + ' '.repeat(COL) + '  ' + chalk.dim('nothing blocked ✓'));
       }
 
-      // ── Agent breakdown (if more than one agent) ──
-      if (agentMap.size > 1) {
+      // ── Agent breakdown ──
+      if (agentMap.size >= 1) {
         console.log('');
         console.log('  ' + chalk.bold('Agents'));
         console.log('  ' + chalk.dim('─'.repeat(Math.min(50, W - 4))));

@@ -144,6 +144,7 @@ function notifyActivity(data: {
   label?: string;
   ruleHit?: string;
   observeWouldBlock?: boolean;
+  agent?: string;
 }): Promise<void> {
   return notifyActivitySocket(data);
 }
@@ -164,7 +165,7 @@ export async function authorizeHeadless(
     // in tests — vi.advanceTimersByTime fires before the setTimeout is registered.
     // Future refactor: move timeout racer registration to before this call so the
     // clock starts before any I/O side effects, and fake timers become usable.
-    await notifyActivity({ id: actId, ts: actTs, tool: toolName, args, status: 'pending' });
+    await notifyActivity({ id: actId, ts: actTs, tool: toolName, args, status: 'pending', agent: meta?.agent });
     const result = await _authorizeHeadlessCore(toolName, args, meta, {
       ...options,
       activityId: actId,

@@ -45,6 +45,7 @@ interface ActivityItem {
   ts: number;
   status?: string;
   costEstimate?: number;
+  agent?: string;
 }
 
 interface ResultItem {
@@ -58,6 +59,7 @@ interface ApprovalRequest {
   id: string;
   toolName: string;
   args: unknown;
+  agent?: string;
   riskMetadata?: {
     tier?: number;
     blockedByLabel?: string;
@@ -119,6 +121,16 @@ function wrappedLineCount(text: string): number {
 let pendingShownForId: string | null = null;
 let pendingWrappedLines = 0;
 
+function agentLabel(agent: string | undefined): string {
+  if (!agent || agent === 'Terminal') return '';
+  const short =
+    agent === 'Claude Code' ? 'Claude' :
+    agent === 'Gemini CLI'  ? 'Gemini' :
+    agent === 'Unknown Agent' ? '' :
+    agent.split(' ')[0];
+  return short ? chalk.dim(`[${short}] `) : '';
+}
+
 function formatBase(activity: ActivityItem): string {
   const time = new Date(activity.ts).toLocaleTimeString([], { hour12: false });
   const icon = getIcon(activity.tool);
@@ -127,7 +139,7 @@ function formatBase(activity: ActivityItem): string {
     .replace(/\s+/g, ' ')
     .replaceAll(os.homedir(), '~');
   const argsPreview = argsStr.length > 70 ? argsStr.slice(0, 70) + '…' : argsStr;
-  return `${chalk.gray(time)} ${icon} ${chalk.white.bold(toolName)} ${chalk.dim(argsPreview)}`;
+  return `${chalk.gray(time)} ${icon} ${agentLabel(activity.agent)}${chalk.white.bold(toolName)} ${chalk.dim(argsPreview)}`;
 }
 
 function renderResult(activity: ActivityItem, result: ResultItem): void {
@@ -317,10 +329,13 @@ function buildCardLines(req: ApprovalRequest, localCount: number = 0): string[] 
   const rawDesc = req.riskMetadata?.ruleDescription ?? '';
   const description = rawDesc ? cleanReason(rawDesc) : '';
 
+  const agentSuffix = req.agent && req.agent !== 'Terminal'
+    ? ` ${RESET}${chalk.dim(`(${req.agent})`)}` : '';
+
   const lines: string[] = [
     ``,
     `${BOLD}${CYAN}╔══ Node9 Approval Required ══╗${RESET}`,
-    `${CYAN}║${RESET} Tool:    ${BOLD}${req.toolName}${RESET}`,
+    `${CYAN}║${RESET} Tool:    ${BOLD}${req.toolName}${RESET}${agentSuffix}`,
     `${CYAN}║${RESET} Policy:  ${severityIcon} ${blockedBy}${RESET}`,
   ];
 
