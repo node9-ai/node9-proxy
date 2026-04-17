@@ -253,6 +253,27 @@ describe('Bash tool — shell command interception', () => {
     expect(result.ruleName).not.toBe('review-git-push');
   });
 
+  it.each([
+    {
+      cmd: `node -e "const cmd = 'git push --force origin main'; console.log(cmd)"`,
+      rule: 'block-force-push',
+      desc: 'node -e script containing git push --force string',
+    },
+    {
+      cmd: `git commit -m "fix: rm -rf handling in home dir"`,
+      rule: 'block-rm-rf-home',
+      desc: 'git commit message containing rm -rf text',
+    },
+    {
+      cmd: `node -e "const re = /(curl|wget)[^|]*\\|\\s*bash/; console.log(re)"`,
+      rule: 'review-curl-pipe-shell',
+      desc: 'node -e script testing pipe-to-shell regex',
+    },
+  ])('FP guard: "$desc" must NOT trigger $rule', async ({ cmd, rule }) => {
+    const result = await evaluatePolicy('Bash', { command: cmd });
+    expect(result.ruleName).not.toBe(rule);
+  });
+
   // ── Smart rule: review-sudo ───────────────────────────────────────────────
   it.each([
     { cmd: 'sudo apt install vim', desc: 'sudo apt install' },

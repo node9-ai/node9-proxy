@@ -188,9 +188,8 @@ export const DEFAULT_CONFIG: Config = {
           {
             field: 'command',
             op: 'matches',
-            // Require the recursive flag to be preceded by whitespace so that
-            // filenames containing "-r" (e.g. "ai-review.yml") don't false-positive.
-            value: 'rm\\b.*\\s(-[rRfF]*[rR][rRfF]*|--recursive)(\\s|$)',
+            // Anchor rm as a shell command (not inside a string arg like a git commit message).
+            value: '(^|&&|\\|\\||;|`)\\s*rm\\b.*\\s(-[rRfF]*[rR][rRfF]*|--recursive)(\\s|$)',
           },
           {
             field: 'command',
@@ -242,7 +241,9 @@ export const DEFAULT_CONFIG: Config = {
           {
             field: 'command',
             op: 'matches',
-            value: '\\bgit\\b.*\\bpush\\b.*(--force|--force-with-lease|-f\\b)',
+            // Anchor git as a shell command so node -e / python -c scripts containing
+            // "git push --force" as a string don't false-positive.
+            value: '(^|&&|\\|\\||;|`)\\s*git\\s+push.*(--force|--force-with-lease|-f\\b)',
             flags: 'i',
           },
         ],
@@ -288,7 +289,9 @@ export const DEFAULT_CONFIG: Config = {
           {
             field: 'command',
             op: 'matches',
-            value: '(curl|wget)[^|]*\\|\\s*(ba|z|da|fi|c|k)?sh',
+            // Anchor curl/wget as a shell command so node -e scripts testing this
+            // regex pattern don't self-match as a false positive.
+            value: '(^|&&|\\|\\||;|`)\\s*(curl|wget)[^|]*\\|\\s*(ba|z|da|fi|c|k)?sh',
             flags: 'i',
           },
         ],
