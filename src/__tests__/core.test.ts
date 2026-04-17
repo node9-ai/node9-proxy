@@ -229,7 +229,6 @@ describe('Bash tool — shell command interception', () => {
     expect(result.ruleName).toBe('block-force-push');
   });
 
-
   // ── Smart rule: review-git-destructive ────────────────────────────────────
   it.each([
     { cmd: 'git reset --hard HEAD', desc: 'reset --hard' },
