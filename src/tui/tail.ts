@@ -85,6 +85,115 @@ export interface TailOptions {
   clear?: boolean;
 }
 
+// ── Context fill monitor ──────────────────────────────────────────────────────
+
+const MODEL_CONTEXT_LIMITS: Record<string, number> = {
+  'claude-opus-4': 200000,
+  'claude-sonnet-4': 200000,
+  'claude-haiku-4': 200000,
+  'claude-3-7': 200000,
+  'claude-3-5': 200000,
+};
+
+function getModelContextLimit(model: string): number {
+  const base = model.replace(/@.*$/, '').replace(/-\d{8}$/, '');
+  for (const [key, limit] of Object.entries(MODEL_CONTEXT_LIMITS)) {
+    if (base.startsWith(key)) return limit;
+  }
+  return 200000;
+}
+
+interface SessionUsage {
+  inputTokens: number;
+  outputTokens: number;
+  model: string;
+  fillPct: number;
+}
+
+function readSessionUsage(): SessionUsage | null {
+  const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+  if (!fs.existsSync(projectsDir)) return null;
+
+  let latestFile: string | null = null;
+  let latestMtime = 0;
+
+  try {
+    for (const dir of fs.readdirSync(projectsDir)) {
+      const dirPath = path.join(projectsDir, dir);
+      try {
+        if (!fs.statSync(dirPath).isDirectory()) continue;
+        for (const file of fs.readdirSync(dirPath)) {
+          if (!file.endsWith('.jsonl') || file.startsWith('agent-')) continue;
+          const filePath = path.join(dirPath, file);
+          try {
+            const mtime = fs.statSync(filePath).mtimeMs;
+            if (mtime > latestMtime) {
+              latestMtime = mtime;
+              latestFile = filePath;
+            }
+          } catch {}
+        }
+      } catch {}
+    }
+  } catch {}
+
+  if (!latestFile) return null;
+
+  try {
+    const lines = fs.readFileSync(latestFile, 'utf-8').split('\n');
+    let lastModel = '';
+    let lastInput = 0;
+    let lastOutput = 0;
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const entry = JSON.parse(line) as {
+          type?: string;
+          message?: {
+            model?: string;
+            usage?: {
+              input_tokens?: number;
+              output_tokens?: number;
+              cache_creation_input_tokens?: number;
+              cache_read_input_tokens?: number;
+            };
+          };
+        };
+        if (entry.type !== 'assistant' || !entry.message?.usage) continue;
+        const u = entry.message.usage;
+        lastInput =
+          (u.input_tokens ?? 0) +
+          (u.cache_read_input_tokens ?? 0) +
+          (u.cache_creation_input_tokens ?? 0);
+        lastOutput = u.output_tokens ?? 0;
+        if (entry.message.model) lastModel = entry.message.model;
+      } catch {}
+    }
+    if (!lastModel || lastInput === 0) return null;
+    const limit = getModelContextLimit(lastModel);
+    const fillPct = Math.round((lastInput / limit) * 100);
+    return { inputTokens: lastInput, outputTokens: lastOutput, model: lastModel, fillPct };
+  } catch {
+    return null;
+  }
+}
+
+function formatContextStat(stat: SessionUsage): string {
+  const pctColor = stat.fillPct >= 80 ? chalk.red : stat.fillPct >= 50 ? chalk.yellow : chalk.cyan;
+  const k = (n: number) => `${Math.round(n / 1000)}k`;
+  const modelShort = stat.model
+    .replace(/@.*$/, '')
+    .replace(/-\d{8}$/, '')
+    .replace(/^claude-/, '');
+  return (
+    chalk.dim('ctx: ') +
+    pctColor(`${stat.fillPct}%`) +
+    chalk.dim(
+      ` (${k(stat.inputTokens)}/${k(getModelContextLimit(stat.model))}  out ${k(stat.outputTokens)}  · ${modelShort})`
+    )
+  );
+}
+
 // ── ANSI helpers ──────────────────────────────────────────────────────────────
 
 const RESET = '\x1B[0m';
@@ -801,11 +910,21 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
     console.log(chalk.dim('Card: [↵/y] Allow  [n] Deny  [a] Always  [t] Trust 30m'));
     console.log(chalk.dim(`Approvers (toggle): ${approverStatusLine()}  [q] quit`));
   }
+  const ctxStat = readSessionUsage();
+  if (ctxStat) console.log('  ' + formatContextStat(ctxStat));
   if (options.history) {
     console.log(chalk.dim('Showing history + live events.\n'));
   } else {
     console.log(chalk.dim('Showing live events only. Use --history to include past.\n'));
   }
+
+  // Refresh context fill % every 30s, but skip if a pending item or card is displayed
+  const ctxTimer = setInterval(() => {
+    if (pendingShownForId !== null || cardActive) return;
+    const s = readSessionUsage();
+    if (s) process.stdout.write('  ' + formatContextStat(s) + '\n');
+  }, 30000);
+  ctxTimer.unref();
 
   process.on('SIGINT', () => {
     exitIdleMode();

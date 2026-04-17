@@ -189,6 +189,8 @@ interface CostData {
   byDay: Map<string, number>;
   byModel: Map<string, number>;
   inputTokens: number;
+  outputTokens: number;
+  cacheWriteTokens: number;
   cacheReadTokens: number;
 }
 
@@ -198,6 +200,8 @@ function loadClaudeCost(start: Date, end: Date): CostData {
     byDay: new Map(),
     byModel: new Map(),
     inputTokens: 0,
+    outputTokens: 0,
+    cacheWriteTokens: 0,
     cacheReadTokens: 0,
   };
   const projectsDir = path.join(os.homedir(), '.claude', 'projects');
@@ -212,6 +216,8 @@ function loadClaudeCost(start: Date, end: Date): CostData {
 
   let total = 0;
   let inputTokens = 0;
+  let outputTokens = 0;
+  let cacheWriteTokens = 0;
   let cacheReadTokens = 0;
   const byDay = new Map<string, number>();
   const byModel = new Map<string, number>();
@@ -260,6 +266,8 @@ function loadClaudeCost(start: Date, end: Date): CostData {
 
           total += cost;
           inputTokens += inp;
+          outputTokens += out;
+          cacheWriteTokens += cw;
           cacheReadTokens += cr;
 
           const dateKey = entry.timestamp.slice(0, 10);
@@ -274,7 +282,7 @@ function loadClaudeCost(start: Date, end: Date): CostData {
     }
   }
 
-  return { total, byDay, byModel, inputTokens, cacheReadTokens };
+  return { total, byDay, byModel, inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens };
 }
 
 // ---------------------------------------------------------------------------
@@ -311,6 +319,8 @@ export function registerReportCommand(program: Command): void {
         byDay: costByDay,
         byModel: costByModel,
         inputTokens: costInputTokens,
+        outputTokens: costOutputTokens,
+        cacheWriteTokens: costCacheWrite,
         cacheReadTokens: costCacheRead,
       } = loadClaudeCost(start, end);
 
@@ -591,6 +601,46 @@ export function registerReportCommand(program: Command): void {
               chalk.white(num(calls)) +
               blockNote +
               costNote
+          );
+        }
+      }
+
+      // ── Tokens ──
+      const totalTokens = costInputTokens + costOutputTokens + costCacheWrite + costCacheRead;
+      if (totalTokens > 0) {
+        const cacheHitPct =
+          costInputTokens + costCacheRead > 0
+            ? Math.round((costCacheRead / (costInputTokens + costCacheRead)) * 100)
+            : 0;
+        console.log('');
+        console.log('  ' + chalk.bold('Tokens') + '  ' + chalk.dim(`${num(totalTokens)} total`));
+        console.log('  ' + chalk.dim('─'.repeat(Math.min(50, W - 4))));
+        const tokenRows: Array<[string, number, string]> = [
+          ['Input', costInputTokens, chalk.cyan(num(costInputTokens))],
+          ['Output', costOutputTokens, chalk.white(num(costOutputTokens))],
+          ['Cache write', costCacheWrite, chalk.yellow(num(costCacheWrite))],
+          ['Cache read', costCacheRead, chalk.green(num(costCacheRead))],
+        ];
+        const maxTok = Math.max(
+          costInputTokens,
+          costOutputTokens,
+          costCacheWrite,
+          costCacheRead,
+          1
+        );
+        const TOK_BAR = Math.max(6, Math.min(20, W - 30));
+        const TOK_LABEL = 14;
+        for (const [label, count, colored] of tokenRows) {
+          if (count === 0) continue;
+          const b = colorBar(count, maxTok, TOK_BAR);
+          console.log('  ' + chalk.white(label.padEnd(TOK_LABEL)) + b + '  ' + colored);
+        }
+        if (cacheHitPct > 0) {
+          console.log(
+            '  ' +
+              chalk.dim(
+                `Cache hit rate: ${cacheHitPct}%  (saves ~${fmtCost(costCacheRead * 2.7e-6)} vs fresh input)`
+              )
           );
         }
       }
