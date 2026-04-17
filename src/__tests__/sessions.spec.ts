@@ -7,6 +7,7 @@ import {
   encodeProjectPath,
   parseHistoryLines,
   parseSessionLines,
+  auditEntriesInWindow,
 } from '../cli/commands/sessions.js';
 
 // ---------------------------------------------------------------------------
@@ -289,5 +290,97 @@ describe('parseSessionLines', () => {
     ];
     const result = parseSessionLines(lines);
     expect(result.toolCalls).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// auditEntriesInWindow
+// ---------------------------------------------------------------------------
+
+function makeAuditEntry(opts: {
+  ts: string;
+  tool?: string;
+  decision?: string;
+  checkedBy?: string;
+  args?: Record<string, unknown>;
+  argsHash?: string;
+}) {
+  return {
+    ts: opts.ts,
+    tool: opts.tool ?? 'Bash',
+    decision: opts.decision ?? 'deny',
+    checkedBy: opts.checkedBy,
+    args: opts.args,
+    argsHash: opts.argsHash,
+  };
+}
+
+describe('auditEntriesInWindow', () => {
+  const entries = [
+    makeAuditEntry({ ts: '2026-04-17T10:00:00.000Z', decision: 'deny', checkedBy: 'rule-a' }),
+    makeAuditEntry({ ts: '2026-04-17T10:30:00.000Z', decision: 'block', checkedBy: 'rule-b' }),
+    makeAuditEntry({ ts: '2026-04-17T11:00:00.000Z', decision: 'review', checkedBy: 'rule-c' }),
+    makeAuditEntry({ ts: '2026-04-17T12:00:00.000Z', decision: 'deny', checkedBy: 'rule-d' }),
+  ];
+
+  it('returns entries within the window (inclusive)', () => {
+    const result = auditEntriesInWindow(
+      entries,
+      '2026-04-17T10:00:00.000Z',
+      '2026-04-17T11:00:00.000Z'
+    );
+    expect(result).toHaveLength(3);
+    expect(result.map((e) => e.checkedBy)).toEqual(['rule-a', 'rule-b', 'rule-c']);
+  });
+
+  it('excludes entries outside the window', () => {
+    const result = auditEntriesInWindow(
+      entries,
+      '2026-04-17T10:30:00.000Z',
+      '2026-04-17T10:59:00.000Z'
+    );
+    expect(result).toHaveLength(1);
+    expect(result[0].checkedBy).toBe('rule-b');
+  });
+
+  it('returns empty array when no entries match', () => {
+    const result = auditEntriesInWindow(
+      entries,
+      '2026-04-17T13:00:00.000Z',
+      '2026-04-17T14:00:00.000Z'
+    );
+    expect(result).toHaveLength(0);
+  });
+
+  it('preserves args when present', () => {
+    const withArgs = [
+      makeAuditEntry({
+        ts: '2026-04-17T10:00:00.000Z',
+        args: { command: 'git push origin main' },
+      }),
+    ];
+    const result = auditEntriesInWindow(
+      withArgs,
+      '2026-04-17T09:00:00.000Z',
+      '2026-04-17T11:00:00.000Z'
+    );
+    expect(result[0].args).toEqual({ command: 'git push origin main' });
+  });
+
+  it('preserves argsHash when args not present', () => {
+    const hashOnly = [makeAuditEntry({ ts: '2026-04-17T10:00:00.000Z', argsHash: 'abc123' })];
+    const result = auditEntriesInWindow(
+      hashOnly,
+      '2026-04-17T09:00:00.000Z',
+      '2026-04-17T11:00:00.000Z'
+    );
+    expect(result[0].argsHash).toBe('abc123');
+    expect(result[0].args).toBeUndefined();
+  });
+
+  it('returns empty array for empty input', () => {
+    expect(
+      auditEntriesInWindow([], '2026-04-17T10:00:00.000Z', '2026-04-17T11:00:00.000Z')
+    ).toHaveLength(0);
   });
 });

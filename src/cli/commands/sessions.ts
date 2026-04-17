@@ -28,6 +28,15 @@ export interface ToolCall {
   timestamp: string;
 }
 
+export interface BlockedCall {
+  tool: string;
+  args?: Record<string, unknown>; // plaintext when available
+  argsHash?: string; // md5 hash when args not stored (most pre-hook entries)
+  timestamp: string; // ISO
+  decision: string; // deny | block | review
+  checkedBy?: string; // rule name
+}
+
 export interface SessionSummary {
   sessionId: string;
   project: string; // absolute path
@@ -35,6 +44,7 @@ export interface SessionSummary {
   firstPrompt: string;
   startTime: string; // ISO
   toolCalls: ToolCall[];
+  blockedCalls: BlockedCall[]; // from audit.log, joined by timestamp window
   costUSD: number;
   hasSnapshot: boolean;
   modifiedFiles: string[]; // files touched by Write/Edit tools
@@ -203,6 +213,70 @@ export function parseSessionLines(lines: string[]): {
 }
 
 // ---------------------------------------------------------------------------
+// Audit log loader (for blocked/reviewed call join)
+// ---------------------------------------------------------------------------
+
+interface RawAuditEntry {
+  ts: string;
+  tool: string;
+  args?: Record<string, unknown>;
+  argsHash?: string;
+  decision: string;
+  checkedBy?: string;
+}
+
+/** Load all non-allow audit entries from ~/.node9/audit.log. Returns sorted by ts asc. */
+export function loadAuditEntries(auditPath?: string): RawAuditEntry[] {
+  const aPath = auditPath ?? path.join(os.homedir(), '.node9', 'audit.log');
+  let raw: string;
+  try {
+    raw = fs.readFileSync(aPath, 'utf-8');
+  } catch {
+    return [];
+  }
+
+  const entries: RawAuditEntry[] = [];
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const e = JSON.parse(line) as RawAuditEntry;
+      if (!e.ts || !e.tool || !e.decision) continue;
+      // Skip allow/allowed — we only want intercepted calls
+      if (e.decision === 'allow' || e.decision === 'allowed') continue;
+      entries.push(e);
+    } catch {
+      // skip malformed lines
+    }
+  }
+  return entries;
+}
+
+/** Find blocked/reviewed audit entries within a time window. */
+export function auditEntriesInWindow(
+  entries: RawAuditEntry[],
+  windowStart: string,
+  windowEnd: string
+): BlockedCall[] {
+  const start = new Date(windowStart).getTime();
+  const end = new Date(windowEnd).getTime();
+
+  const result: BlockedCall[] = [];
+  for (const e of entries) {
+    const t = new Date(e.ts).getTime();
+    if (t < start || t > end) continue;
+    result.push({
+      tool: e.tool,
+      args: e.args,
+      argsHash: e.argsHash,
+      timestamp: e.ts,
+      decision: e.decision,
+      checkedBy: e.checkedBy,
+    });
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Build session summaries
 // ---------------------------------------------------------------------------
 
@@ -238,6 +312,9 @@ export function buildSessions(days: number | null, historyPath?: string): Sessio
     }
   }
 
+  // Load audit entries once — shared across all sessions
+  const allAuditEntries = loadAuditEntries();
+
   const summaries: SessionSummary[] = [];
 
   for (const entry of bySession.values()) {
@@ -251,6 +328,16 @@ export function buildSessions(days: number | null, historyPath?: string): Sessio
 
     const { toolCalls, costUSD, hasSnapshot, modifiedFiles } = parseSessionLines(sessionLines);
 
+    // Time window for audit join: session start to last tool call + 5 min buffer
+    const windowStart = entry.timestamp;
+    const lastToolTs = toolCalls.length > 0 ? toolCalls[toolCalls.length - 1].timestamp : '';
+    const windowEnd = new Date(
+      Math.max(new Date(windowStart).getTime(), lastToolTs ? new Date(lastToolTs).getTime() : 0) +
+        5 * 60 * 1000 // 5 min buffer
+    ).toISOString();
+
+    const blockedCalls = auditEntriesInWindow(allAuditEntries, windowStart, windowEnd);
+
     summaries.push({
       sessionId: entry.sessionId,
       project: entry.project,
@@ -258,6 +345,7 @@ export function buildSessions(days: number | null, historyPath?: string): Sessio
       firstPrompt: entry.display,
       startTime: entry.timestamp,
       toolCalls,
+      blockedCalls,
       costUSD,
       hasSnapshot,
       modifiedFiles,
@@ -358,6 +446,7 @@ function renderSummary(summaries: SessionSummary[]): void {
   const totalTools = summaries.reduce((n, s) => n + s.toolCalls.length, 0);
   const totalCost = summaries.reduce((n, s) => n + s.costUSD, 0);
   const totalFiles = summaries.reduce((n, s) => n + s.modifiedFiles.length, 0);
+  const totalBlocked = summaries.reduce((n, s) => n + s.blockedCalls.length, 0);
   const snapshots = summaries.filter((s) => s.hasSnapshot).length;
   const avgCost = summaries.length > 0 ? totalCost / summaries.length : 0;
 
@@ -399,7 +488,10 @@ function renderSummary(summaries: SessionSummary[]): void {
       chalk.bold.white(String(totalTools).padEnd(6)) +
       chalk.dim('tool calls    ') +
       chalk.bold.white(String(totalFiles)) +
-      chalk.dim(' files modified')
+      chalk.dim(' files modified') +
+      (totalBlocked > 0
+        ? chalk.dim('    ') + chalk.red.bold(String(totalBlocked)) + chalk.dim(' blocked by node9')
+        : '')
   );
   console.log(
     '  ' +
@@ -487,10 +579,12 @@ function renderList(summaries: SessionSummary[], totalCost: number): void {
         ? chalk.dim(String(s.toolCalls.length).padStart(3) + ' tools')
         : chalk.dim('  0 tools');
     const cost = s.costUSD > 0 ? chalk.dim('  ' + fmtCost(s.costUSD).padEnd(8)) : '          ';
+    const blocked =
+      s.blockedCalls.length > 0 ? chalk.red('  🛑 ' + String(s.blockedCalls.length)) : '';
     const snap = s.hasSnapshot ? chalk.green('  📸') : '';
     const sid = chalk.dim('  ' + s.sessionId.slice(0, 8));
 
-    console.log(`  ${timeStr}  ${prompt}  ${tools}${cost}${snap}${sid}`);
+    console.log(`  ${timeStr}  ${prompt}  ${tools}${cost}${blocked}${snap}${sid}`);
   }
   console.log('');
   console.log(
@@ -521,19 +615,48 @@ function renderDetail(s: SessionSummary): void {
   );
   console.log('');
 
-  if (s.toolCalls.length === 0) {
+  if (s.toolCalls.length === 0 && s.blockedCalls.length === 0) {
     console.log(chalk.dim('  No tool calls recorded.\n'));
     return;
   }
 
-  console.log(chalk.bold(`  Tool calls (${s.toolCalls.length}):`));
+  // Merge tool calls and blocked calls into a single timeline sorted by timestamp
+  type TimelineEntry = { kind: 'tool'; tc: ToolCall } | { kind: 'blocked'; bc: BlockedCall };
+
+  const timeline: TimelineEntry[] = [
+    ...s.toolCalls.map((tc) => ({ kind: 'tool' as const, tc })),
+    ...s.blockedCalls.map((bc) => ({ kind: 'blocked' as const, bc })),
+  ].sort((a, b) => {
+    const ta = a.kind === 'tool' ? a.tc.timestamp : a.bc.timestamp;
+    const tb = b.kind === 'tool' ? b.tc.timestamp : b.bc.timestamp;
+    return ta < tb ? -1 : ta > tb ? 1 : 0;
+  });
+
+  const headerParts = [`Tool calls (${s.toolCalls.length})`];
+  if (s.blockedCalls.length > 0)
+    headerParts.push(chalk.red(`${s.blockedCalls.length} blocked by node9`));
+  console.log(chalk.bold('  ' + headerParts.join('  ·  ')));
   console.log('');
-  for (const tc of s.toolCalls) {
-    const colorFn = toolColor(tc.tool);
-    const toolPad = colorFn(tc.tool.padEnd(16));
-    const detail = chalk.gray(truncate(toolInputSummary(tc.tool, tc.input), 70));
-    const ts = tc.timestamp ? chalk.dim(fmtTime(tc.timestamp) + '  ') : '       ';
-    console.log(`    ${ts}${toolPad}  ${detail}`);
+
+  for (const entry of timeline) {
+    if (entry.kind === 'tool') {
+      const tc = entry.tc;
+      const colorFn = toolColor(tc.tool);
+      const toolPad = colorFn(tc.tool.padEnd(16));
+      const detail = chalk.gray(truncate(toolInputSummary(tc.tool, tc.input), 70));
+      const ts = tc.timestamp ? chalk.dim(fmtTime(tc.timestamp) + '  ') : '       ';
+      console.log(`    ${ts}${toolPad}  ${detail}`);
+    } else {
+      const bc = entry.bc;
+      const ts = bc.timestamp ? chalk.dim(fmtTime(bc.timestamp) + '  ') : '       ';
+      const label = chalk.red('🛑 BLOCKED'.padEnd(16));
+      const toolName = chalk.red(bc.tool.padEnd(10));
+      const argsSummary = bc.args
+        ? chalk.gray(truncate(toolInputSummary(bc.tool, bc.args), 40))
+        : chalk.dim('[args not logged]');
+      const reason = bc.checkedBy ? chalk.dim('  ← ' + bc.checkedBy) : '';
+      console.log(`    ${ts}${label}  ${toolName}  ${argsSummary}${reason}`);
+    }
   }
   console.log('');
 
