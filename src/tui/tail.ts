@@ -124,10 +124,13 @@ let pendingWrappedLines = 0;
 function agentLabel(agent: string | undefined): string {
   if (!agent || agent === 'Terminal') return '';
   const short =
-    agent === 'Claude Code' ? 'Claude' :
-    agent === 'Gemini CLI'  ? 'Gemini' :
-    agent === 'Unknown Agent' ? '' :
-    agent.split(' ')[0];
+    agent === 'Claude Code'
+      ? 'Claude'
+      : agent === 'Gemini CLI'
+        ? 'Gemini'
+        : agent === 'Unknown Agent'
+          ? ''
+          : agent.split(' ')[0];
   return short ? chalk.dim(`[${short}] `) : '';
 }
 
@@ -329,8 +332,8 @@ function buildCardLines(req: ApprovalRequest, localCount: number = 0): string[] 
   const rawDesc = req.riskMetadata?.ruleDescription ?? '';
   const description = rawDesc ? cleanReason(rawDesc) : '';
 
-  const agentSuffix = req.agent && req.agent !== 'Terminal'
-    ? ` ${RESET}${chalk.dim(`(${req.agent})`)}` : '';
+  const agentSuffix =
+    req.agent && req.agent !== 'Terminal' ? ` ${RESET}${chalk.dim(`(${req.agent})`)}` : '';
 
   const lines: string[] = [
     ``,

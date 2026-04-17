@@ -136,8 +136,14 @@ program
 program
   .command('addto')
   .description('Integrate Node9 with an AI agent')
-  .addHelpText('after', '\n  Supported targets:  claude  gemini  cursor  codex  windsurf  vscode  hud')
-  .argument('<target>', 'The agent to protect: claude | gemini | cursor | codex | windsurf | vscode | hud')
+  .addHelpText(
+    'after',
+    '\n  Supported targets:  claude  gemini  cursor  codex  windsurf  vscode  hud'
+  )
+  .argument(
+    '<target>',
+    'The agent to protect: claude | gemini | cursor | codex | windsurf | vscode | hud'
+  )
   .action(async (target: string) => {
     if (target === 'gemini') return await setupGemini();
     if (target === 'claude') return await setupClaude();
@@ -158,8 +164,14 @@ program
 program
   .command('setup')
   .description('Alias for "addto" — integrate Node9 with an AI agent')
-  .addHelpText('after', '\n  Supported targets:  claude  gemini  cursor  codex  windsurf  vscode  hud')
-  .argument('[target]', 'The agent to protect: claude | gemini | cursor | codex | windsurf | vscode | hud')
+  .addHelpText(
+    'after',
+    '\n  Supported targets:  claude  gemini  cursor  codex  windsurf  vscode  hud'
+  )
+  .argument(
+    '[target]',
+    'The agent to protect: claude | gemini | cursor | codex | windsurf | vscode | hud'
+  )
   .action(async (target?: string) => {
     if (!target) {
       console.log(chalk.cyan('\n🛡️  Node9 Setup — integrate with your AI agent\n'));
@@ -197,7 +209,10 @@ program
 program
   .command('removefrom')
   .description('Remove Node9 hooks from an AI agent configuration')
-  .addHelpText('after', '\n  Supported targets:  claude  gemini  cursor  codex  windsurf  vscode  hud')
+  .addHelpText(
+    'after',
+    '\n  Supported targets:  claude  gemini  cursor  codex  windsurf  vscode  hud'
+  )
   .argument(
     '<target>',
     'The agent to remove from: claude | gemini | cursor | codex | windsurf | vscode | hud'
