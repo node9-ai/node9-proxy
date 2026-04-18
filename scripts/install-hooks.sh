@@ -4,6 +4,12 @@
 
 set -e
 REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+if [ ! -d "$REPO_ROOT/.git" ]; then
+  echo "Error: $REPO_ROOT does not look like a git repository" >&2
+  exit 1
+fi
+
 HOOK="$REPO_ROOT/.git/hooks/pre-commit"
 
 cat > "$HOOK" << 'EOF'
