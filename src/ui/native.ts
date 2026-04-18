@@ -145,7 +145,9 @@ function buildPlainMessage(
   if (locked) lines.push('⚠️  LOCKED BY ADMIN POLICY\n');
 
   // Strip ANSI escape sequences — agent name is caller-supplied metadata.
-  const safeAgent = (agent ?? 'AI Agent').replace(/\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-_])/g, '').slice(0, 80);
+  const safeAgent = (agent ?? 'AI Agent')
+    .replace(/\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-_])/g, '')
+    .slice(0, 80);
   lines.push(`🤖 ${safeAgent}  |  🔧 ${toolName}`);
   lines.push(`🛡️  ${explainableLabel || 'Security Policy'}`);
   if (ruleDescription) lines.push(`ℹ  ${ruleDescription}`);

@@ -289,7 +289,8 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
           // should never appear as findings. Match only known subcommands so
           // a command like `node9_wrapper` or `node9 ; rm -rf /` isn't excluded.
           const rawCmd = String(input.command ?? '').trimStart();
-          if (/^node9\s+(scan|explain|report|tail|dlp|status|sessions|audit)\b/.test(rawCmd)) continue;
+          if (/^node9\s+(scan|explain|report|tail|dlp|status|sessions|audit)\b/.test(rawCmd))
+            continue;
 
           // ── DLP scan ───────────────────────────────────────────────────
           const dlpMatch = scanArgs(input);
