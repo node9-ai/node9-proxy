@@ -282,10 +282,12 @@ describe('daemon /events — shields-status emitted on connect', () => {
   }) => {
     if (!portWasFree) skip();
 
-    const [raw1, raw2] = await Promise.all([readSseStream(1500), readSseStream(1500)]);
-    const events1 = parseSseEvents(raw1);
+    // Use sseSnapshot (already captured with 3s headroom in beforeAll) for token1
+    // so we don't need two simultaneous connections — two concurrent 1500ms reads
+    // can race on slow CI and one may not receive the initial burst in time.
+    const token1 = (sseSnapshot.get('csrf') as { token: string } | undefined)?.token;
+    const raw2 = await readSseStream(1500);
     const events2 = parseSseEvents(raw2);
-    const token1 = (events1.get('csrf') as { token: string } | undefined)?.token;
     const token2 = (events2.get('csrf') as { token: string } | undefined)?.token;
     expect(token1).toBeTruthy();
     // Token is process-lifetime (one UUID per daemon start), not per-SSE-session.

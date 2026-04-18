@@ -513,6 +513,12 @@ async function _authorizeHeadlessCore(
     // Smart rules represent explicit user intent; a blanket "allow this tool"
     // should not silently bypass a rule the user wrote (e.g. review-git-push).
     // policyResult.ruleName is set only when a smart rule matched.
+    //
+    // KNOWN GAP (roadmap): persistent approvals are keyed by tool name only.
+    // For shell tools (Bash), "Always Allow" approves the entire tool even for
+    // commands not covered by a smart rule. Future work: key by command-level
+    // pattern (e.g. first command token) so approvals are narrowly scoped.
+    // See: doc/roadmap.md "Command-Scoped Persistent Approvals".
     const persistent = policyResult.ruleName ? null : getPersistentDecision(toolName);
     if (persistent === 'allow') {
       if (approvers.cloud && creds?.apiKey)
