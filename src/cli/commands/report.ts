@@ -47,13 +47,14 @@ function buildTestTimestamps(allEntries: AuditEntry[]): Set<number> {
   return testTs;
 }
 
-/** Returns true if this PreToolUse Bash entry is a test runner call.
- * New entries: tagged testRun:true at write time (reliable).
- * Old entries: fall back to time-join with PostToolUse (approximate). */
+/** Returns true if this PreToolUse entry is from a test run.
+ * New entries: tagged testRun:true at write time (reliable, any tool).
+ * Old Bash entries: fall back to command matching or time-join with PostToolUse. */
 function isTestEntry(entry: AuditEntry, testTs: Set<number>): boolean {
-  if (entry.tool !== 'Bash' && entry.tool !== 'bash') return false;
-  // Tagged at write time — exact
+  // Tagged at write time — applies to any tool type
   if (entry.testRun === true) return true;
+  // Remaining fallbacks only apply to Bash
+  if (entry.tool !== 'Bash' && entry.tool !== 'bash') return false;
   // Plain args available (auditHashArgs disabled) — exact
   const cmd = entry.args?.command;
   if (typeof cmd === 'string') return TEST_COMMAND_RE.test(cmd);
@@ -372,8 +373,10 @@ export function registerReportCommand(program: Command): void {
       // are excluded — they never reached the user.
       let userApproved = 0;
       let userDenied = 0;
-      let hardBlocked = 0; // auto-blocked by policy rule, no popup
-      let dlpBlocked = 0;
+      let timedOut = 0; // daemon showed popup but no response within timeout
+      let hardBlocked = 0; // auto-blocked by smart rule or persistent-deny
+      let dlpBlocked = 0; // actual DLP blocks (not observe-mode)
+      let observeDlp = 0; // observe-mode: DLP would-block but action was allowed
       let loopHits = 0;
       let testPasses = 0;
       let testFails = 0;
@@ -393,11 +396,10 @@ export function registerReportCommand(program: Command): void {
           if (allow) userApproved++;
           else userDenied++;
         } else if (!allow) {
-          if (isDlp(e.checkedBy)) dlpBlocked++;
+          if (e.checkedBy === 'timeout') timedOut++;
+          else if (e.checkedBy === 'observe-mode-dlp-would-block') observeDlp++;
+          else if (isDlp(e.checkedBy)) dlpBlocked++;
           else if (e.checkedBy !== 'loop-detected') hardBlocked++;
-        }
-        if (isDlp(e.checkedBy) && !allow) {
-          /* already counted in dlpBlocked */
         }
         if (e.checkedBy === 'loop-detected') loopHits++;
 
@@ -472,7 +474,7 @@ export function registerReportCommand(program: Command): void {
       console.log('  ' + line);
 
       // ── Protection Summary ──
-      const totalBlocked = hardBlocked + dlpBlocked + loopHits + userDenied;
+      const totalBlocked = timedOut + hardBlocked + dlpBlocked + loopHits + userDenied;
       const currentRate = total > 0 ? totalBlocked / total : 0;
       const trendLabel = (() => {
         if (priorBlockRate === null) return '';
@@ -532,10 +534,17 @@ export function registerReportCommand(program: Command): void {
         userDenied > 0 ? (s) => chalk.red(s) : (s) => chalk.dim(s)
       );
       summaryRow(
+        timedOut > 0 ? chalk.yellow('⏱') : chalk.dim('⏱'),
+        'Timed out',
+        timedOut,
+        timedOut > 0 ? 'no approval response' : undefined,
+        timedOut > 0 ? (s) => chalk.yellow(s) : (s) => chalk.dim(s)
+      );
+      summaryRow(
         hardBlocked > 0 ? chalk.red('🛑') : chalk.dim('🛑'),
         'Auto-blocked',
         hardBlocked,
-        hardBlocked > 0 ? 'hard policy rule' : undefined,
+        undefined,
         hardBlocked > 0 ? (s) => chalk.red(s) : (s) => chalk.dim(s)
       );
       summaryRow(
@@ -544,6 +553,13 @@ export function registerReportCommand(program: Command): void {
         dlpBlocked,
         undefined,
         dlpBlocked > 0 ? (s) => chalk.yellow(s) : (s) => chalk.dim(s)
+      );
+      summaryRow(
+        observeDlp > 0 ? chalk.blue('👁') : chalk.dim('👁'),
+        'DLP (observe)',
+        observeDlp,
+        observeDlp > 0 ? 'would-block in strict mode' : undefined,
+        observeDlp > 0 ? (s) => chalk.blue(s) : (s) => chalk.dim(s)
       );
       summaryRow(
         loopHits > 0 ? chalk.yellow('🔄') : chalk.dim('🔄'),
