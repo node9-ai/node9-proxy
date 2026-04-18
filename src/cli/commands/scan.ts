@@ -36,6 +36,7 @@ interface Finding {
   input: Record<string, unknown>;
   timestamp: string;
   project: string;
+  agent: 'claude' | 'gemini';
 }
 
 interface DlpFinding {
@@ -44,6 +45,7 @@ interface DlpFinding {
   toolName: string;
   timestamp: string;
   project: string;
+  agent: 'claude' | 'gemini';
 }
 
 interface JournalEntry {
@@ -96,6 +98,48 @@ function claudeModelPrice(model: string): { i: number; o: number; cw: number; cr
     if (base === key || base.startsWith(key)) return p;
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Gemini pricing
+// ---------------------------------------------------------------------------
+
+const GEMINI_PRICING: Record<string, { i: number; o: number; cr: number }> = {
+  'gemini-2.5-pro': { i: 1.25e-6, o: 10e-6, cr: 0.31e-6 },
+  'gemini-2.5-flash': { i: 0.15e-6, o: 0.6e-6, cr: 0.0375e-6 },
+  'gemini-2.0-flash': { i: 0.1e-6, o: 0.4e-6, cr: 0.025e-6 },
+  'gemini-1.5-pro': { i: 1.25e-6, o: 5e-6, cr: 0.3125e-6 },
+  'gemini-1.5-flash': { i: 0.075e-6, o: 0.3e-6, cr: 0.01875e-6 },
+  'gemini-3-flash': { i: 0.1e-6, o: 0.4e-6, cr: 0.025e-6 },
+};
+
+function geminiModelPrice(model: string): { i: number; o: number; cr: number } | null {
+  const base = model
+    .replace(/-preview$/, '')
+    .replace(/-exp$/, '')
+    .replace(/-\d{4}-\d{2}-\d{2}$/, '');
+  for (const [key, p] of Object.entries(GEMINI_PRICING)) {
+    if (base === key || base.startsWith(key)) return p;
+  }
+  if (base.includes('flash')) return GEMINI_PRICING['gemini-2.0-flash']!;
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Gemini session types
+// ---------------------------------------------------------------------------
+
+interface GeminiSessionFile {
+  sessionId?: string;
+  startTime?: string;
+  messages?: Array<{
+    type: string;
+    timestamp?: string;
+    tokens?: { input: number; output: number; cached: number };
+    model?: string;
+    toolCalls?: Array<{ name?: string; args?: Record<string, unknown> }>;
+    content?: Array<{ text?: string }> | string;
+  }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -308,6 +352,7 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
                 toolName,
                 timestamp: entry.timestamp ?? '',
                 project: projLabel,
+                agent: 'claude',
               });
             }
           }
@@ -339,6 +384,7 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
                 input,
                 timestamp: entry.timestamp ?? '',
                 project: projLabel,
+                agent: 'claude',
               });
             }
 
@@ -350,6 +396,185 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
   }
 
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Gemini history scanner
+// ---------------------------------------------------------------------------
+
+function scanGeminiHistory(startDate: Date | null): ScanResult {
+  const tmpDir = path.join(os.homedir(), '.gemini', 'tmp');
+  const result: ScanResult = {
+    filesScanned: 0,
+    sessions: 0,
+    totalToolCalls: 0,
+    bashCalls: 0,
+    findings: [],
+    dlpFindings: [],
+    totalCostUSD: 0,
+    firstDate: null,
+    lastDate: null,
+  };
+
+  if (!fs.existsSync(tmpDir)) return result;
+
+  let slugDirs: string[];
+  try {
+    slugDirs = fs.readdirSync(tmpDir);
+  } catch {
+    return result;
+  }
+
+  const ruleSources = buildRuleSources();
+
+  for (const slug of slugDirs) {
+    const slugPath = path.join(tmpDir, slug);
+    try {
+      if (!fs.statSync(slugPath).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+
+    let projLabel = slug;
+    try {
+      projLabel = fs
+        .readFileSync(path.join(slugPath, '.project_root'), 'utf-8')
+        .trim()
+        .replace(os.homedir(), '~')
+        .slice(0, 40);
+    } catch {}
+
+    const chatsDir = path.join(slugPath, 'chats');
+    if (!fs.existsSync(chatsDir)) continue;
+
+    let chatFiles: string[];
+    try {
+      chatFiles = fs.readdirSync(chatsDir).filter((f) => f.endsWith('.json'));
+    } catch {
+      continue;
+    }
+
+    for (const chatFile of chatFiles) {
+      result.filesScanned++;
+
+      let raw: string;
+      try {
+        raw = fs.readFileSync(path.join(chatsDir, chatFile), 'utf-8');
+      } catch {
+        continue;
+      }
+
+      let session: GeminiSessionFile;
+      try {
+        session = JSON.parse(raw) as GeminiSessionFile;
+      } catch {
+        continue;
+      }
+
+      result.sessions++;
+
+      for (const msg of session.messages ?? []) {
+        if (msg.type !== 'gemini') continue;
+
+        if (startDate && msg.timestamp && new Date(msg.timestamp) < startDate) continue;
+
+        if (msg.timestamp) {
+          if (!result.firstDate || msg.timestamp < result.firstDate)
+            result.firstDate = msg.timestamp;
+          if (!result.lastDate || msg.timestamp > result.lastDate) result.lastDate = msg.timestamp;
+        }
+
+        const tokens = msg.tokens;
+        const model = msg.model;
+        if (tokens && model) {
+          const p = geminiModelPrice(model);
+          if (p) {
+            const nonCached = Math.max(0, tokens.input - tokens.cached);
+            result.totalCostUSD += nonCached * p.i + tokens.cached * p.cr + tokens.output * p.o;
+          }
+        }
+
+        for (const tc of msg.toolCalls ?? []) {
+          result.totalToolCalls++;
+          const toolName = tc.name ?? '';
+          const toolNameLower = toolName.toLowerCase();
+          const input = tc.args ?? {};
+
+          if (toolNameLower === 'run_shell_command' || toolNameLower === 'shell') {
+            result.bashCalls++;
+          }
+
+          const rawCmd = String(input.command ?? '').trimStart();
+          if (/^node9\s+(scan|explain|report|tail|dlp|status|sessions|audit)\b/.test(rawCmd))
+            continue;
+
+          const dlpMatch = scanArgs(input);
+          if (dlpMatch) {
+            const isDupe = result.dlpFindings.some(
+              (f) =>
+                f.patternName === dlpMatch.patternName &&
+                f.redactedSample === dlpMatch.redactedSample &&
+                f.project === projLabel
+            );
+            if (!isDupe) {
+              result.dlpFindings.push({
+                patternName: dlpMatch.patternName,
+                redactedSample: dlpMatch.redactedSample,
+                toolName,
+                timestamp: msg.timestamp ?? '',
+                project: projLabel,
+                agent: 'gemini',
+              });
+            }
+          }
+
+          for (const source of ruleSources) {
+            const { rule } = source;
+            if (rule.verdict === 'allow') continue;
+            if (rule.tool && !matchesPattern(toolNameLower, rule.tool)) continue;
+            if (!evaluateSmartConditions(input, rule)) continue;
+
+            const inputPreview = preview(input, 120);
+            const isDupe = result.findings.some(
+              (f) =>
+                f.source.rule.name === rule.name &&
+                preview(f.input, 120) === inputPreview &&
+                f.project === projLabel
+            );
+            if (!isDupe) {
+              result.findings.push({
+                source,
+                toolName,
+                input,
+                timestamp: msg.timestamp ?? '',
+                project: projLabel,
+                agent: 'gemini',
+              });
+            }
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  return result;
+}
+
+function mergeScans(a: ScanResult, b: ScanResult): ScanResult {
+  const dates = [a.firstDate, b.firstDate].filter(Boolean) as string[];
+  const lastDates = [a.lastDate, b.lastDate].filter(Boolean) as string[];
+  return {
+    filesScanned: a.filesScanned + b.filesScanned,
+    sessions: a.sessions + b.sessions,
+    totalToolCalls: a.totalToolCalls + b.totalToolCalls,
+    bashCalls: a.bashCalls + b.bashCalls,
+    findings: [...a.findings, ...b.findings],
+    dlpFindings: [...a.dlpFindings, ...b.dlpFindings],
+    totalCostUSD: a.totalCostUSD + b.totalCostUSD,
+    firstDate: dates.length ? dates.sort()[0] : null,
+    lastDate: lastDates.length ? lastDates.sort().at(-1)! : null,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -378,19 +603,19 @@ export function registerScanCommand(program: Command): void {
       console.log(chalk.cyan.bold('🔍  node9 scan') + chalk.dim('  — what would node9 catch?'));
       console.log('');
 
-      const projectsDir = path.join(os.homedir(), '.claude', 'projects');
-      if (!fs.existsSync(projectsDir)) {
-        console.log(chalk.yellow('  No Claude history found at ~/.claude/projects/'));
-        console.log(chalk.gray('  Install Claude Code, run a few sessions, then try again.\n'));
-        return;
-      }
-
       process.stdout.write(chalk.dim('  Scanning…'));
-      const scan = scanClaudeHistory(startDate);
+      const claudeScan = scanClaudeHistory(startDate);
+      const geminiScan = scanGeminiHistory(startDate);
+      const scan = mergeScans(claudeScan, geminiScan);
       process.stdout.write('\r' + ' '.repeat(20) + '\r');
 
       if (scan.filesScanned === 0) {
-        console.log(chalk.yellow('  No JSONL session files found.\n'));
+        console.log(chalk.yellow('  No session history found.'));
+        console.log(
+          chalk.gray(
+            '  Supported: Claude Code (~/.claude/projects/) · Gemini CLI (~/.gemini/tmp/)\n'
+          )
+        );
         return;
       }
 
@@ -403,10 +628,21 @@ export function registerScanCommand(program: Command): void {
           ? chalk.dim(`  ${fmtTs(scan.firstDate)} – ${fmtTs(scan.lastDate)}`)
           : '';
 
+      const sessionBreakdown =
+        claudeScan.sessions > 0 && geminiScan.sessions > 0
+          ? chalk.dim('(') +
+            chalk.cyan(String(claudeScan.sessions)) +
+            chalk.dim(' Claude · ') +
+            chalk.blue(String(geminiScan.sessions)) +
+            chalk.dim(' Gemini)')
+          : '';
+
       console.log(
         '  ' +
           chalk.white(num(scan.sessions)) +
           chalk.dim(' sessions  ') +
+          sessionBreakdown +
+          (sessionBreakdown ? '  ' : '') +
           chalk.white(num(scan.totalToolCalls)) +
           chalk.dim(' tool calls  ') +
           chalk.white(num(scan.bashCalls)) +
@@ -487,8 +723,10 @@ export function registerScanCommand(program: Command): void {
               for (const f of shown) {
                 const ts = f.timestamp ? chalk.dim(fmtTs(f.timestamp) + '  ') : '';
                 const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
-                const cmd = chalk.gray(preview(f.input, 55));
-                console.log(`      ${ts}${proj}${cmd}`);
+                const agentBadge =
+                  f.agent === 'gemini' ? chalk.blue('[Gemini]  ') : chalk.cyan('[Claude]  ');
+                const cmd = chalk.gray(preview(f.input, 45));
+                console.log(`      ${ts}${proj}${agentBadge}${cmd}`);
               }
               if (ruleFindings.length > topN) {
                 console.log(
@@ -517,8 +755,10 @@ export function registerScanCommand(program: Command): void {
           for (const f of shownDlp) {
             const ts = f.timestamp ? chalk.dim(fmtTs(f.timestamp) + '  ') : '';
             const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
+            const agentBadge =
+              f.agent === 'gemini' ? chalk.blue('[Gemini]  ') : chalk.cyan('[Claude]  ');
             console.log(
-              `    ${ts}${proj}` +
+              `    ${ts}${proj}${agentBadge}` +
                 chalk.yellow(f.patternName) +
                 chalk.dim('  ') +
                 chalk.gray(f.redactedSample)
@@ -539,7 +779,7 @@ export function registerScanCommand(program: Command): void {
       if (scan.totalCostUSD > 0) {
         console.log(
           '  ' +
-            chalk.bold('Claude spend:') +
+            chalk.bold('Agent spend:') +
             '  ' +
             chalk.yellow(fmtCost(scan.totalCostUSD)) +
             chalk.dim('  (for per-period breakdown: node9 report)')

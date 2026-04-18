@@ -48,6 +48,7 @@ export interface SessionSummary {
   costUSD: number;
   hasSnapshot: boolean;
   modifiedFiles: string[]; // files touched by Write/Edit tools
+  agent?: 'claude' | 'gemini';
 }
 
 interface JournalLine {
@@ -88,6 +89,44 @@ function modelPrice(model: string): { i: number; o: number; cw: number; cr: numb
     if (base === key || base.startsWith(key)) return p;
   }
   return null;
+}
+
+const GEMINI_PRICING: Record<string, { i: number; o: number; cr: number }> = {
+  'gemini-2.5-pro': { i: 1.25e-6, o: 10e-6, cr: 0.31e-6 },
+  'gemini-2.5-flash': { i: 0.15e-6, o: 0.6e-6, cr: 0.0375e-6 },
+  'gemini-2.0-flash': { i: 0.1e-6, o: 0.4e-6, cr: 0.025e-6 },
+  'gemini-1.5-pro': { i: 1.25e-6, o: 5e-6, cr: 0.3125e-6 },
+  'gemini-1.5-flash': { i: 0.075e-6, o: 0.3e-6, cr: 0.01875e-6 },
+  'gemini-3-flash': { i: 0.1e-6, o: 0.4e-6, cr: 0.025e-6 },
+};
+
+function geminiModelPrice(model: string): { i: number; o: number; cr: number } | null {
+  const base = model
+    .replace(/-preview$/, '')
+    .replace(/-exp$/, '')
+    .replace(/-\d{4}-\d{2}-\d{2}$/, '');
+  for (const [key, p] of Object.entries(GEMINI_PRICING)) {
+    if (base === key || base.startsWith(key)) return p;
+  }
+  if (base.includes('flash')) return GEMINI_PRICING['gemini-2.0-flash']!;
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Gemini session types
+// ---------------------------------------------------------------------------
+
+interface GeminiSessionFile {
+  sessionId?: string;
+  startTime?: string;
+  messages?: Array<{
+    type: string;
+    timestamp?: string;
+    tokens?: { input: number; output: number; cached: number };
+    model?: string;
+    toolCalls?: Array<{ name?: string; args?: Record<string, unknown> }>;
+    content?: Array<{ text?: string }> | string;
+  }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -277,6 +316,163 @@ export function auditEntriesInWindow(
 }
 
 // ---------------------------------------------------------------------------
+// Build Gemini session summaries
+// ---------------------------------------------------------------------------
+
+function buildGeminiSessions(
+  days: number | null,
+  allAuditEntries: ReturnType<typeof loadAuditEntries>
+): SessionSummary[] {
+  const tmpDir = path.join(os.homedir(), '.gemini', 'tmp');
+  if (!fs.existsSync(tmpDir)) return [];
+
+  const cutoff =
+    days !== null
+      ? (() => {
+          const d = new Date();
+          d.setDate(d.getDate() - days);
+          d.setHours(0, 0, 0, 0);
+          return d;
+        })()
+      : null;
+
+  let slugDirs: string[];
+  try {
+    slugDirs = fs.readdirSync(tmpDir);
+  } catch {
+    return [];
+  }
+
+  const summaries: SessionSummary[] = [];
+
+  for (const slug of slugDirs) {
+    const slugPath = path.join(tmpDir, slug);
+    try {
+      if (!fs.statSync(slugPath).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+
+    let projectRoot = path.join(os.homedir(), slug);
+    try {
+      projectRoot = fs.readFileSync(path.join(slugPath, '.project_root'), 'utf-8').trim();
+    } catch {}
+
+    const chatsDir = path.join(slugPath, 'chats');
+    if (!fs.existsSync(chatsDir)) continue;
+
+    let chatFiles: string[];
+    try {
+      chatFiles = fs.readdirSync(chatsDir).filter((f) => f.endsWith('.json'));
+    } catch {
+      continue;
+    }
+
+    for (const chatFile of chatFiles) {
+      let raw: string;
+      try {
+        raw = fs.readFileSync(path.join(chatsDir, chatFile), 'utf-8');
+      } catch {
+        continue;
+      }
+
+      let session: GeminiSessionFile;
+      try {
+        session = JSON.parse(raw) as GeminiSessionFile;
+      } catch {
+        continue;
+      }
+
+      const startTime = session.startTime ?? '';
+      if (!startTime) continue;
+      if (cutoff && new Date(startTime) < cutoff) continue;
+
+      // First user message as the session prompt
+      let firstPrompt = '';
+      for (const msg of session.messages ?? []) {
+        if (msg.type === 'user') {
+          const content = msg.content;
+          if (Array.isArray(content) && content[0]?.text) {
+            firstPrompt = content[0].text;
+          } else if (typeof content === 'string') {
+            firstPrompt = content;
+          }
+          break;
+        }
+      }
+
+      const toolCalls: ToolCall[] = [];
+      let costUSD = 0;
+      const modifiedFiles: string[] = [];
+      const seenFiles = new Set<string>();
+      let lastToolTs = '';
+
+      for (const msg of session.messages ?? []) {
+        if (msg.type !== 'gemini') continue;
+
+        // Cost
+        const tokens = msg.tokens;
+        const model = msg.model;
+        if (tokens && model) {
+          const p = geminiModelPrice(model);
+          if (p) {
+            const nonCached = Math.max(0, tokens.input - tokens.cached);
+            costUSD += nonCached * p.i + tokens.cached * p.cr + tokens.output * p.o;
+          }
+        }
+
+        // Tool calls
+        for (const tc of msg.toolCalls ?? []) {
+          const tool = tc.name ?? '';
+          const input = tc.args ?? {};
+          const ts = msg.timestamp ?? '';
+          toolCalls.push({ tool, input, timestamp: ts });
+          if (ts > lastToolTs) lastToolTs = ts;
+
+          // Track modified files
+          const toolLower = tool.toLowerCase();
+          if (
+            toolLower === 'write_file' ||
+            toolLower === 'edit_file' ||
+            toolLower === 'create_file' ||
+            toolLower === 'overwrite_file'
+          ) {
+            const fp = input.file_path ?? input.path ?? input.filename;
+            if (typeof fp === 'string' && !seenFiles.has(fp)) {
+              seenFiles.add(fp);
+              modifiedFiles.push(fp);
+            }
+          }
+        }
+      }
+
+      const windowEnd = new Date(
+        Math.max(new Date(startTime).getTime(), lastToolTs ? new Date(lastToolTs).getTime() : 0) +
+          5 * 60 * 1000
+      ).toISOString();
+
+      const blockedCalls = auditEntriesInWindow(allAuditEntries, startTime, windowEnd);
+
+      summaries.push({
+        sessionId: session.sessionId ?? chatFile.replace('.json', ''),
+        project: projectRoot,
+        projectLabel: projectLabel(projectRoot),
+        firstPrompt,
+        startTime,
+        toolCalls,
+        blockedCalls,
+        costUSD,
+        hasSnapshot: false,
+        modifiedFiles,
+        agent: 'gemini',
+      });
+    }
+  }
+
+  return summaries;
+}
+
+// ---------------------------------------------------------------------------
 // Build session summaries
 // ---------------------------------------------------------------------------
 
@@ -349,7 +545,13 @@ export function buildSessions(days: number | null, historyPath?: string): Sessio
       costUSD,
       hasSnapshot,
       modifiedFiles,
+      agent: 'claude',
     });
+  }
+
+  // Include Gemini sessions when not in test mode (historyPath override = test mode)
+  if (!historyPath) {
+    summaries.push(...buildGeminiSessions(days, allAuditEntries));
   }
 
   // Sort newest first
@@ -582,9 +784,10 @@ function renderList(summaries: SessionSummary[], totalCost: number): void {
     const blocked =
       s.blockedCalls.length > 0 ? chalk.red('  🛑 ' + String(s.blockedCalls.length)) : '';
     const snap = s.hasSnapshot ? chalk.green('  📸') : '';
+    const agentBadge = s.agent === 'gemini' ? chalk.blue('  [Gemini]') : chalk.cyan('  [Claude]');
     const sid = chalk.dim('  ' + s.sessionId.slice(0, 8));
 
-    console.log(`  ${timeStr}  ${prompt}  ${tools}${cost}${blocked}${snap}${sid}`);
+    console.log(`  ${timeStr}  ${prompt}  ${tools}${cost}${blocked}${snap}${agentBadge}${sid}`);
   }
   console.log('');
   console.log(
@@ -607,6 +810,10 @@ function renderDetail(s: SessionSummary): void {
     chalk.bold('  Prompt   ') + chalk.white(s.firstPrompt.replace(/\n/g, ' ').slice(0, 120))
   );
   console.log(chalk.bold('  Project  ') + chalk.white(s.projectLabel));
+  if (s.agent) {
+    const agentLabel = s.agent === 'gemini' ? chalk.blue('Gemini CLI') : chalk.cyan('Claude Code');
+    console.log(chalk.bold('  Agent    ') + agentLabel);
+  }
   console.log(chalk.bold('  When     ') + chalk.white(fmtDateTime(s.startTime)));
   if (s.costUSD > 0)
     console.log(chalk.bold('  Cost     ') + chalk.yellow('~' + fmtCost(s.costUSD)));
