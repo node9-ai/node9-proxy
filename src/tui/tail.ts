@@ -45,6 +45,7 @@ interface ActivityItem {
   ts: number;
   status?: string;
   costEstimate?: number;
+  agent?: string;
 }
 
 interface ResultItem {
@@ -58,6 +59,7 @@ interface ApprovalRequest {
   id: string;
   toolName: string;
   args: unknown;
+  agent?: string;
   riskMetadata?: {
     tier?: number;
     blockedByLabel?: string;
@@ -81,6 +83,115 @@ interface ApprovalRequest {
 export interface TailOptions {
   history?: boolean;
   clear?: boolean;
+}
+
+// ── Context fill monitor ──────────────────────────────────────────────────────
+
+const MODEL_CONTEXT_LIMITS: Record<string, number> = {
+  'claude-opus-4': 200000,
+  'claude-sonnet-4': 200000,
+  'claude-haiku-4': 200000,
+  'claude-3-7': 200000,
+  'claude-3-5': 200000,
+};
+
+function getModelContextLimit(model: string): number {
+  const base = model.replace(/@.*$/, '').replace(/-\d{8}$/, '');
+  for (const [key, limit] of Object.entries(MODEL_CONTEXT_LIMITS)) {
+    if (base.startsWith(key)) return limit;
+  }
+  return 200000;
+}
+
+interface SessionUsage {
+  inputTokens: number;
+  outputTokens: number;
+  model: string;
+  fillPct: number;
+}
+
+function readSessionUsage(): SessionUsage | null {
+  const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+  if (!fs.existsSync(projectsDir)) return null;
+
+  let latestFile: string | null = null;
+  let latestMtime = 0;
+
+  try {
+    for (const dir of fs.readdirSync(projectsDir)) {
+      const dirPath = path.join(projectsDir, dir);
+      try {
+        if (!fs.statSync(dirPath).isDirectory()) continue;
+        for (const file of fs.readdirSync(dirPath)) {
+          if (!file.endsWith('.jsonl') || file.startsWith('agent-')) continue;
+          const filePath = path.join(dirPath, file);
+          try {
+            const mtime = fs.statSync(filePath).mtimeMs;
+            if (mtime > latestMtime) {
+              latestMtime = mtime;
+              latestFile = filePath;
+            }
+          } catch {}
+        }
+      } catch {}
+    }
+  } catch {}
+
+  if (!latestFile) return null;
+
+  try {
+    const lines = fs.readFileSync(latestFile, 'utf-8').split('\n');
+    let lastModel = '';
+    let lastInput = 0;
+    let lastOutput = 0;
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const entry = JSON.parse(line) as {
+          type?: string;
+          message?: {
+            model?: string;
+            usage?: {
+              input_tokens?: number;
+              output_tokens?: number;
+              cache_creation_input_tokens?: number;
+              cache_read_input_tokens?: number;
+            };
+          };
+        };
+        if (entry.type !== 'assistant' || !entry.message?.usage) continue;
+        const u = entry.message.usage;
+        lastInput =
+          (u.input_tokens ?? 0) +
+          (u.cache_read_input_tokens ?? 0) +
+          (u.cache_creation_input_tokens ?? 0);
+        lastOutput = u.output_tokens ?? 0;
+        if (entry.message.model) lastModel = entry.message.model;
+      } catch {}
+    }
+    if (!lastModel || lastInput === 0) return null;
+    const limit = getModelContextLimit(lastModel);
+    const fillPct = Math.round((lastInput / limit) * 100);
+    return { inputTokens: lastInput, outputTokens: lastOutput, model: lastModel, fillPct };
+  } catch {
+    return null;
+  }
+}
+
+function formatContextStat(stat: SessionUsage): string {
+  const pctColor = stat.fillPct >= 80 ? chalk.red : stat.fillPct >= 50 ? chalk.yellow : chalk.cyan;
+  const k = (n: number) => `${Math.round(n / 1000)}k`;
+  const modelShort = stat.model
+    .replace(/@.*$/, '')
+    .replace(/-\d{8}$/, '')
+    .replace(/^claude-/, '');
+  return (
+    chalk.dim('ctx: ') +
+    pctColor(`${stat.fillPct}%`) +
+    chalk.dim(
+      ` (${k(stat.inputTokens)}/${k(getModelContextLimit(stat.model))}  out ${k(stat.outputTokens)}  · ${modelShort})`
+    )
+  );
 }
 
 // ── ANSI helpers ──────────────────────────────────────────────────────────────
@@ -119,6 +230,19 @@ function wrappedLineCount(text: string): number {
 let pendingShownForId: string | null = null;
 let pendingWrappedLines = 0;
 
+function agentLabel(agent: string | undefined): string {
+  if (!agent || agent === 'Terminal') return '';
+  const short =
+    agent === 'Claude Code'
+      ? 'Claude'
+      : agent === 'Gemini CLI'
+        ? 'Gemini'
+        : agent === 'Unknown Agent'
+          ? ''
+          : agent.split(' ')[0];
+  return short ? chalk.dim(`[${short}] `) : '';
+}
+
 function formatBase(activity: ActivityItem): string {
   const time = new Date(activity.ts).toLocaleTimeString([], { hour12: false });
   const icon = getIcon(activity.tool);
@@ -127,7 +251,7 @@ function formatBase(activity: ActivityItem): string {
     .replace(/\s+/g, ' ')
     .replaceAll(os.homedir(), '~');
   const argsPreview = argsStr.length > 70 ? argsStr.slice(0, 70) + '…' : argsStr;
-  return `${chalk.gray(time)} ${icon} ${chalk.white.bold(toolName)} ${chalk.dim(argsPreview)}`;
+  return `${chalk.gray(time)} ${icon} ${agentLabel(activity.agent)}${chalk.white.bold(toolName)} ${chalk.dim(argsPreview)}`;
 }
 
 function renderResult(activity: ActivityItem, result: ResultItem): void {
@@ -317,10 +441,13 @@ function buildCardLines(req: ApprovalRequest, localCount: number = 0): string[] 
   const rawDesc = req.riskMetadata?.ruleDescription ?? '';
   const description = rawDesc ? cleanReason(rawDesc) : '';
 
+  const agentSuffix =
+    req.agent && req.agent !== 'Terminal' ? ` ${RESET}${chalk.dim(`(${req.agent})`)}` : '';
+
   const lines: string[] = [
     ``,
     `${BOLD}${CYAN}╔══ Node9 Approval Required ══╗${RESET}`,
-    `${CYAN}║${RESET} Tool:    ${BOLD}${req.toolName}${RESET}`,
+    `${CYAN}║${RESET} Tool:    ${BOLD}${req.toolName}${RESET}${agentSuffix}`,
     `${CYAN}║${RESET} Policy:  ${severityIcon} ${blockedBy}${RESET}`,
   ];
 
@@ -778,11 +905,30 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
     // can open it manually.
   }
 
+  // Warn if response-DLP findings exist in audit log
+  const auditLog = path.join(os.homedir(), '.node9', 'audit.log');
+  try {
+    const unackedDlp = fs
+      .readFileSync(auditLog, 'utf-8')
+      .split('\n')
+      .filter((l) => l.includes('"response-dlp"')).length;
+    if (unackedDlp > 0) {
+      console.log('');
+      console.log(
+        chalk.bgRed.white.bold(
+          ` ⚠️  DLP ALERT: ${unackedDlp} secret${unackedDlp !== 1 ? 's' : ''} found in Claude response text — run: node9 dlp `
+        )
+      );
+    }
+  } catch {}
+
   console.log(chalk.cyan.bold(`\n🛰️  Node9 tail  `) + chalk.dim(`→ ${dashboardUrl}`));
   if (canApprove) {
     console.log(chalk.dim('Card: [↵/y] Allow  [n] Deny  [a] Always  [t] Trust 30m'));
     console.log(chalk.dim(`Approvers (toggle): ${approverStatusLine()}  [q] quit`));
   }
+  const ctxStat = readSessionUsage();
+  if (ctxStat) console.log('  ' + formatContextStat(ctxStat));
   if (options.history) {
     console.log(chalk.dim('Showing history + live events.\n'));
   } else {

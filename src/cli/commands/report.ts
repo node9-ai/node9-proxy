@@ -189,6 +189,8 @@ interface CostData {
   byDay: Map<string, number>;
   byModel: Map<string, number>;
   inputTokens: number;
+  outputTokens: number;
+  cacheWriteTokens: number;
   cacheReadTokens: number;
 }
 
@@ -198,6 +200,8 @@ function loadClaudeCost(start: Date, end: Date): CostData {
     byDay: new Map(),
     byModel: new Map(),
     inputTokens: 0,
+    outputTokens: 0,
+    cacheWriteTokens: 0,
     cacheReadTokens: 0,
   };
   const projectsDir = path.join(os.homedir(), '.claude', 'projects');
@@ -212,6 +216,8 @@ function loadClaudeCost(start: Date, end: Date): CostData {
 
   let total = 0;
   let inputTokens = 0;
+  let outputTokens = 0;
+  let cacheWriteTokens = 0;
   let cacheReadTokens = 0;
   const byDay = new Map<string, number>();
   const byModel = new Map<string, number>();
@@ -260,6 +266,8 @@ function loadClaudeCost(start: Date, end: Date): CostData {
 
           total += cost;
           inputTokens += inp;
+          outputTokens += out;
+          cacheWriteTokens += cw;
           cacheReadTokens += cr;
 
           const dateKey = entry.timestamp.slice(0, 10);
@@ -274,7 +282,7 @@ function loadClaudeCost(start: Date, end: Date): CostData {
     }
   }
 
-  return { total, byDay, byModel, inputTokens, cacheReadTokens };
+  return { total, byDay, byModel, inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens };
 }
 
 // ---------------------------------------------------------------------------
@@ -297,6 +305,19 @@ export function registerReportCommand(program: Command): void {
       const logPath = path.join(os.homedir(), '.node9', 'audit.log');
       const allEntries = parseAuditLog(logPath);
 
+      // Warn immediately if any unacknowledged response-DLP findings exist
+      const unackedDlp = allEntries.filter((e) => e.source === 'response-dlp');
+      if (unackedDlp.length > 0) {
+        console.log('');
+        console.log(
+          chalk.bgRed.white.bold(
+            ` ⚠️  DLP ALERT: ${unackedDlp.length} secret${unackedDlp.length !== 1 ? 's' : ''} found in Claude response text `
+          ) +
+            '  ' +
+            chalk.yellow('→ run: node9 dlp')
+        );
+      }
+
       if (allEntries.length === 0) {
         console.log(
           chalk.yellow('\n  No audit data found. Run node9 with Claude Code to generate entries.\n')
@@ -311,6 +332,8 @@ export function registerReportCommand(program: Command): void {
         byDay: costByDay,
         byModel: costByModel,
         inputTokens: costInputTokens,
+        outputTokens: costOutputTokens,
+        cacheWriteTokens: costCacheWrite,
         cacheReadTokens: costCacheRead,
       } = loadClaudeCost(start, end);
 
@@ -332,6 +355,7 @@ export function registerReportCommand(program: Command): void {
       let filteredTestCount = 0;
       const entries = allEntries.filter((e) => {
         if (e.source === 'post-hook') return false;
+        if (e.source === 'response-dlp') return false;
         const ts = new Date(e.ts);
         if (ts < start || ts > end) return false;
         if (excludeTests && isTestEntry(e, testTs)) {
@@ -530,8 +554,8 @@ export function registerReportCommand(program: Command): void {
         console.log('  ' + ' '.repeat(COL) + '  ' + chalk.dim('nothing blocked ✓'));
       }
 
-      // ── Agent breakdown (if more than one agent) ──
-      if (agentMap.size > 1) {
+      // ── Agent breakdown ──
+      if (agentMap.size >= 1) {
         console.log('');
         console.log('  ' + chalk.bold('Agents'));
         console.log('  ' + chalk.dim('─'.repeat(Math.min(50, W - 4))));
@@ -595,6 +619,46 @@ export function registerReportCommand(program: Command): void {
         }
       }
 
+      // ── Tokens ──
+      const totalTokens = costInputTokens + costOutputTokens + costCacheWrite + costCacheRead;
+      if (totalTokens > 0) {
+        const cacheHitPct =
+          costInputTokens + costCacheRead > 0
+            ? Math.round((costCacheRead / (costInputTokens + costCacheRead)) * 100)
+            : 0;
+        console.log('');
+        console.log('  ' + chalk.bold('Tokens') + '  ' + chalk.dim(`${num(totalTokens)} total`));
+        console.log('  ' + chalk.dim('─'.repeat(Math.min(50, W - 4))));
+        const tokenRows: Array<[string, number, string]> = [
+          ['Input', costInputTokens, chalk.cyan(num(costInputTokens))],
+          ['Output', costOutputTokens, chalk.white(num(costOutputTokens))],
+          ['Cache write', costCacheWrite, chalk.yellow(num(costCacheWrite))],
+          ['Cache read', costCacheRead, chalk.green(num(costCacheRead))],
+        ];
+        const maxTok = Math.max(
+          costInputTokens,
+          costOutputTokens,
+          costCacheWrite,
+          costCacheRead,
+          1
+        );
+        const TOK_BAR = Math.max(6, Math.min(20, W - 30));
+        const TOK_LABEL = 14;
+        for (const [label, count, colored] of tokenRows) {
+          if (count === 0) continue;
+          const b = colorBar(count, maxTok, TOK_BAR);
+          console.log('  ' + chalk.white(label.padEnd(TOK_LABEL)) + b + '  ' + colored);
+        }
+        if (cacheHitPct > 0) {
+          console.log(
+            '  ' +
+              chalk.dim(
+                `Cache hit rate: ${cacheHitPct}%  (saves ~${fmtCost(costCacheRead * 2.7e-6)} vs fresh input)`
+              )
+          );
+        }
+      }
+
       // ── Cost ──
       if (costUSD > 0) {
         const periodDays = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / 86400000));
@@ -627,6 +691,38 @@ export function registerReportCommand(program: Command): void {
           console.log(
             '  ' + chalk.white(label.padEnd(MODEL_LABEL)) + b + '  ' + chalk.yellow(fmtCost(cost))
           );
+        }
+      }
+
+      // ── Response DLP ──
+      const responseDlpEntries = allEntries.filter((e) => {
+        if (e.source !== 'response-dlp') return false;
+        const ts = new Date(e.ts);
+        return ts >= start && ts <= end;
+      });
+      if (responseDlpEntries.length > 0) {
+        console.log('');
+        console.log(
+          '  ' +
+            chalk.red.bold('⚠️  Response DLP') +
+            chalk.dim('  ·  ') +
+            chalk.red(
+              `${responseDlpEntries.length} secret${responseDlpEntries.length !== 1 ? 's' : ''} found in Claude response text`
+            )
+        );
+        console.log('  ' + chalk.dim('─'.repeat(Math.min(60, W - 4))));
+        console.log(
+          '  ' + chalk.yellow('These were NOT blocked — Claude included them in response prose.')
+        );
+        console.log('  ' + chalk.yellow('Rotate affected keys immediately.'));
+        for (const e of responseDlpEntries.slice(0, 5)) {
+          const ts = chalk.dim(fmtDate(e.ts) + '  ');
+          const pattern = chalk.red((e as unknown as Record<string, string>).dlpPattern ?? 'DLP');
+          const sample = chalk.gray((e as unknown as Record<string, string>).dlpSample ?? '');
+          console.log(`    ${ts}${pattern}  ${sample}`);
+        }
+        if (responseDlpEntries.length > 5) {
+          console.log(chalk.dim(`    … and ${responseDlpEntries.length - 5} more`));
         }
       }
 

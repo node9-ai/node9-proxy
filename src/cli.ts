@@ -13,12 +13,14 @@ import {
   setupClaude,
   setupGemini,
   setupCursor,
+  setupCodex,
   setupWindsurf,
   setupVSCode,
   setupHud,
   teardownClaude,
   teardownGemini,
   teardownCursor,
+  teardownCodex,
   teardownWindsurf,
   teardownVSCode,
   teardownHud,
@@ -52,6 +54,7 @@ import { registerAgentsCommand } from './cli/commands/agents';
 import { registerScanCommand } from './cli/commands/scan';
 import { registerSessionsCommand } from './cli/commands/sessions';
 import { registerSkillPinCommand } from './cli/commands/skill-pin';
+import { registerDlpCommand } from './cli/commands/dlp';
 
 const { version } = JSON.parse(
   fs.readFileSync(path.join(__dirname, '../package.json'), 'utf-8')
@@ -134,18 +137,25 @@ program
 program
   .command('addto')
   .description('Integrate Node9 with an AI agent')
-  .addHelpText('after', '\n  Supported targets:  claude  gemini  cursor  windsurf  vscode  hud')
-  .argument('<target>', 'The agent to protect: claude | gemini | cursor | windsurf | vscode | hud')
+  .addHelpText(
+    'after',
+    '\n  Supported targets:  claude  gemini  cursor  codex  windsurf  vscode  hud'
+  )
+  .argument(
+    '<target>',
+    'The agent to protect: claude | gemini | cursor | codex | windsurf | vscode | hud'
+  )
   .action(async (target: string) => {
     if (target === 'gemini') return await setupGemini();
     if (target === 'claude') return await setupClaude();
     if (target === 'cursor') return await setupCursor();
+    if (target === 'codex') return await setupCodex();
     if (target === 'windsurf') return await setupWindsurf();
     if (target === 'vscode') return await setupVSCode();
     if (target === 'hud') return setupHud();
     console.error(
       chalk.red(
-        `Unknown target: "${target}". Supported: claude, gemini, cursor, windsurf, vscode, hud`
+        `Unknown target: "${target}". Supported: claude, gemini, cursor, codex, windsurf, vscode, hud`
       )
     );
     process.exit(1);
@@ -155,8 +165,14 @@ program
 program
   .command('setup')
   .description('Alias for "addto" — integrate Node9 with an AI agent')
-  .addHelpText('after', '\n  Supported targets:  claude  gemini  cursor  windsurf  vscode  hud')
-  .argument('[target]', 'The agent to protect: claude | gemini | cursor | windsurf | vscode | hud')
+  .addHelpText(
+    'after',
+    '\n  Supported targets:  claude  gemini  cursor  codex  windsurf  vscode  hud'
+  )
+  .argument(
+    '[target]',
+    'The agent to protect: claude | gemini | cursor | codex | windsurf | vscode | hud'
+  )
   .action(async (target?: string) => {
     if (!target) {
       console.log(chalk.cyan('\n🛡️  Node9 Setup — integrate with your AI agent\n'));
@@ -165,6 +181,7 @@ program
       console.log('    ' + chalk.green('claude') + '    — Claude Code (hook mode)');
       console.log('    ' + chalk.green('gemini') + '    — Gemini CLI (hook mode)');
       console.log('    ' + chalk.green('cursor') + '    — Cursor (MCP proxy)');
+      console.log('    ' + chalk.green('codex') + '     — OpenAI Codex CLI (MCP proxy)');
       console.log('    ' + chalk.green('windsurf') + '  — Windsurf (MCP proxy)');
       console.log('    ' + chalk.green('vscode') + '    — VSCode / Copilot (MCP proxy)');
       process.stdout.write(
@@ -177,12 +194,13 @@ program
     if (t === 'gemini') return await setupGemini();
     if (t === 'claude') return await setupClaude();
     if (t === 'cursor') return await setupCursor();
+    if (t === 'codex') return await setupCodex();
     if (t === 'windsurf') return await setupWindsurf();
     if (t === 'vscode') return await setupVSCode();
     if (t === 'hud') return setupHud();
     console.error(
       chalk.red(
-        `Unknown target: "${target}". Supported: claude, gemini, cursor, windsurf, vscode, hud`
+        `Unknown target: "${target}". Supported: claude, gemini, cursor, codex, windsurf, vscode, hud`
       )
     );
     process.exit(1);
@@ -192,10 +210,13 @@ program
 program
   .command('removefrom')
   .description('Remove Node9 hooks from an AI agent configuration')
-  .addHelpText('after', '\n  Supported targets:  claude  gemini  cursor  windsurf  vscode  hud')
+  .addHelpText(
+    'after',
+    '\n  Supported targets:  claude  gemini  cursor  codex  windsurf  vscode  hud'
+  )
   .argument(
     '<target>',
-    'The agent to remove from: claude | gemini | cursor | windsurf | vscode | hud'
+    'The agent to remove from: claude | gemini | cursor | codex | windsurf | vscode | hud'
   )
   .action((target: string) => {
     // Validate before logging so the target string is never interpolated
@@ -204,13 +225,14 @@ program
     if (target === 'claude') fn = teardownClaude;
     else if (target === 'gemini') fn = teardownGemini;
     else if (target === 'cursor') fn = teardownCursor;
+    else if (target === 'codex') fn = teardownCodex;
     else if (target === 'windsurf') fn = teardownWindsurf;
     else if (target === 'vscode') fn = teardownVSCode;
     else if (target === 'hud') fn = teardownHud;
     else {
       console.error(
         chalk.red(
-          `Unknown target: "${target}". Supported: claude, gemini, cursor, windsurf, vscode, hud`
+          `Unknown target: "${target}". Supported: claude, gemini, cursor, codex, windsurf, vscode, hud`
         )
       );
       process.exit(1);
@@ -250,6 +272,7 @@ program
       ['Claude', teardownClaude],
       ['Gemini', teardownGemini],
       ['Cursor', teardownCursor],
+      ['Codex', teardownCodex],
       ['Windsurf', teardownWindsurf],
       ['VSCode', teardownVSCode],
     ] as const) {
@@ -617,6 +640,9 @@ registerScanCommand(program);
 
 // Session history
 registerSessionsCommand(program);
+
+// Response DLP findings
+registerDlpCommand(program);
 
 // Daemon registers its own keep-alive unhandledRejection handler in startDaemon().
 // Skip registration here entirely for daemon mode to avoid any ordering dependency

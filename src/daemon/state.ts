@@ -484,6 +484,7 @@ export function startActivitySocket(): void {
           hash?: string;
           argsSummary?: string;
           fileCount?: number;
+          agent?: string;
         };
         // Track test results for stateful smart rules
         if (data.status === 'test_pass') {
@@ -512,6 +513,7 @@ export function startActivitySocket(): void {
             tool: data.tool,
             args: redactArgs(data.args),
             status: 'pending',
+            agent: data.agent,
           });
         } else {
           // Update session counters for HUD

@@ -128,6 +128,7 @@ configure(agent_name="my-agent", policy="require_approval")
 - **SQL:** blocks `DELETE`/`UPDATE` without `WHERE`, `DROP TABLE`, `TRUNCATE`
 - **Shell:** blocks `curl | bash`, `sudo` commands
 - **DLP:** blocks AWS keys, GitHub tokens, Stripe keys, PEM private keys in any tool call argument
+- **Response DLP:** background scanner reads Claude's JSONL history hourly and alerts you if a secret appears in Claude's _response text_ (not just tool args) — see [`node9 dlp`](#node9-dlp--response-secret-scanner)
 - **Auto-undo:** git snapshot before every AI file edit → `node9 undo` to revert
 - **Skills Pinning:** SHA-256 verification of agent skill files between sessions; quarantines on drift (AST 02 + AST 07 — supply chain & update drift)
 
@@ -166,6 +167,14 @@ node9 tail --all    # include all projects
 
 Each line shows the tool name, a summary of its arguments, and the decision (allowed / blocked / DLP hit).
 
+At startup, `tail` prints a one-line context summary:
+
+```
+ctx: 34% (68k/200k  out 2k  · claude-sonnet-4-6)
+```
+
+This shows how full the context window is, how many output tokens were generated, and which model is running. Color-coded: cyan < 50%, yellow 50–79%, red ≥ 80%.
+
 ### `node9 report` — security dashboard
 
 Run after a session to get a summary of what was allowed, blocked, DLP hits, cost, and daily activity:
@@ -193,7 +202,11 @@ $ node9 report --period 7d
   Apr 11      ██████████████████████░░░░░░░░  617  139 blocked
 ```
 
+The report also includes a **Tokens** section showing a breakdown of input, output, cache-write, and cache-read tokens with a cache hit-rate percentage — useful for spotting sessions that are burning tokens without getting cache savings.
+
 Periods: `today`, `7d` (default), `30d`, `month`. Cost data is read from `~/.claude/projects/` — no API calls, fully offline.
+
+If the response DLP scanner found secrets during the period, the report shows a `⚠️ DLP ALERT` banner at the top and a dedicated **Response DLP** section listing each finding with the pattern name, a masked sample, and the project it came from.
 
 ### `node9 sessions` — session history
 
@@ -280,6 +293,45 @@ node9 scan              # last 90 days
 node9 scan --all        # all time
 node9 scan --days 30    # custom window
 ```
+
+### `node9 dlp` — response secret scanner
+
+Node9's tool-call DLP blocks secrets _before_ they leave your machine. But Claude can also write secrets into its **response text** — a curl example with a real token, a config snippet with a live key — and that text bypasses tool-call interception entirely.
+
+The **response DLP scanner** runs as a background daemon. It reads Claude's JSONL conversation history incrementally (delta scan — only new bytes since the last check), looks for secret patterns in assistant response text, and fires a desktop notification the moment it finds one.
+
+```
+⚠️  node9 DLP alert
+AWS Access Key found in Claude response text.
+Sample: AKIA****MPLE  — run: node9 dlp
+```
+
+```bash
+node9 dlp              # show all open findings with pattern, sample, project, date
+node9 dlp resolve      # acknowledge all current findings (clears the banner)
+```
+
+The `node9 dlp` command shows a guided remediation workflow:
+
+```
+🔐  node9 dlp  — secrets found in Claude response text
+
+  ⚠️  1 open finding
+
+  These secrets were included in Claude's response text — NOT blocked.
+  Rotate each affected key immediately.
+
+  ●  AWS Access Key ID   Apr 14, 2026
+     Sample: AKIA****MPLE
+     Project: ~/node9
+
+  Next steps:
+  1. Rotate any exposed keys shown above
+  2. Run node9 dlp resolve to acknowledge
+  3. Run node9 report for full audit history
+```
+
+Findings are never re-shown after `node9 dlp resolve`. The scanner stores resolved keys in `~/.node9/dlp-resolved.json` so only genuinely new secrets surface.
 
 ---
 

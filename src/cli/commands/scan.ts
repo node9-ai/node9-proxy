@@ -285,6 +285,13 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
             result.bashCalls++;
           }
 
+          // Skip node9's own read-only CLI calls — they are dry-runs and
+          // should never appear as findings. Match only known subcommands so
+          // a command like `node9_wrapper` or `node9 ; rm -rf /` isn't excluded.
+          const rawCmd = String(input.command ?? '').trimStart();
+          if (/^node9\s+(scan|explain|report|tail|dlp|status|sessions|audit)\b/.test(rawCmd))
+            continue;
+
           // ── DLP scan ───────────────────────────────────────────────────
           const dlpMatch = scanArgs(input);
           if (dlpMatch) {
@@ -308,6 +315,9 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
           // ── Smart rule matching ────────────────────────────────────────
           for (const source of ruleSources) {
             const { rule } = source;
+
+            // Allow rules are not catches — skip them
+            if (rule.verdict === 'allow') continue;
 
             // Tool name must match the rule's tool pattern
             if (rule.tool && !matchesPattern(toolNameLower, rule.tool)) continue;

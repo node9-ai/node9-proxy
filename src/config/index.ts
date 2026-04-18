@@ -188,9 +188,8 @@ export const DEFAULT_CONFIG: Config = {
           {
             field: 'command',
             op: 'matches',
-            // Require the recursive flag to be preceded by whitespace so that
-            // filenames containing "-r" (e.g. "ai-review.yml") don't false-positive.
-            value: 'rm\\b.*\\s(-[rRfF]*[rR][rRfF]*|--recursive)(\\s|$)',
+            // Anchor rm as a shell command (not inside a string arg like a git commit message).
+            value: '(^|&&|\\|\\||;)\\s*rm\\b[^;&|]*\\s(-[rRfF]*[rR][rRfF]*|--recursive)(\\s|$)',
           },
           {
             field: 'command',
@@ -224,6 +223,14 @@ export const DEFAULT_CONFIG: Config = {
           {
             field: 'command',
             op: 'matches',
+            // Require a DB CLI in the command so grep/cat/echo of SQL strings don't trigger.
+            value:
+              '(^|&&|\\|\\||;|\\|)\\s*(psql|mysql|sqlite3|sqlplus|cockroach|clickhouse-client|mongo)\\b',
+            flags: 'i',
+          },
+          {
+            field: 'command',
+            op: 'matches',
             value: '\\b(DROP|TRUNCATE)\\s+(TABLE|DATABASE|SCHEMA|INDEX)',
             flags: 'i',
           },
@@ -242,7 +249,9 @@ export const DEFAULT_CONFIG: Config = {
           {
             field: 'command',
             op: 'matches',
-            value: '\\bgit\\b.*\\bpush\\b.*(--force|--force-with-lease|-f\\b)',
+            // Anchor git as a shell command so node -e / python -c scripts containing
+            // "git push --force" as a string don't false-positive.
+            value: '(^|&&|\\|\\||;)\\s*git\\s+push[^;&|]*(--force|--force-with-lease|-f\\b)',
             flags: 'i',
           },
         ],
@@ -253,23 +262,6 @@ export const DEFAULT_CONFIG: Config = {
           'The AI wants to force push to a remote git branch. This rewrites shared history and can permanently destroy commits that teammates have already pulled.',
       },
       {
-        name: 'review-git-push',
-        tool: 'bash',
-        conditions: [
-          {
-            field: 'command',
-            op: 'matches',
-            value: '\\bgit\\b.*\\bpush\\b(?!.*(-f\\b|--force|--force-with-lease))',
-            flags: 'i',
-          },
-        ],
-        conditionMode: 'all',
-        verdict: 'review',
-        reason: 'git push sends changes to a shared remote',
-        description:
-          'The AI wants to push commits to a remote repository. Once pushed, those changes are visible to everyone with access.',
-      },
-      {
         name: 'review-git-destructive',
         tool: 'bash',
         conditions: [
@@ -277,7 +269,14 @@ export const DEFAULT_CONFIG: Config = {
             field: 'command',
             op: 'matches',
             value:
-              '\\bgit\\b.*(reset\\s+--hard|clean\\s+-[fdxX]|\\brebase\\b|tag\\s+-d|branch\\s+-[dD])',
+              '\\bgit\\s+(reset\\s+--hard|clean\\s+-[fdxX]|rebase\\b|tag\\s+-d|branch\\s+-[dD])',
+            flags: 'i',
+          },
+          {
+            field: 'command',
+            op: 'notMatches',
+            // Exclude recovery ops — these resolve a conflict, not start a destructive action.
+            value: '\\bgit\\s+rebase\\s+--(abort|continue|skip)\\b',
             flags: 'i',
           },
         ],
@@ -305,7 +304,9 @@ export const DEFAULT_CONFIG: Config = {
           {
             field: 'command',
             op: 'matches',
-            value: '(curl|wget)[^|]*\\|\\s*(ba|z|da|fi|c|k)?sh',
+            // Anchor curl/wget as a shell command so node -e scripts testing this
+            // regex pattern don't self-match as a false positive.
+            value: '(^|&&|\\|\\||;)\\s*(curl|wget)[^|]*\\|\\s*(ba|z|da|fi|c|k)?sh',
             flags: 'i',
           },
         ],
