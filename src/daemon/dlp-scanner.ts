@@ -52,7 +52,12 @@ export function runDlpScan(): void {
   for (const proj of projDirs) {
     const projPath = path.join(PROJECTS_DIR, proj);
     try {
-      if (!fs.statSync(projPath).isDirectory()) continue;
+      // lstatSync does not follow symlinks — prevents a crafted symlink in
+      // ~/.claude/projects/ from redirecting the scanner to arbitrary paths.
+      if (!fs.lstatSync(projPath).isDirectory()) continue;
+      // Canonicalize and verify the resolved path stays under PROJECTS_DIR.
+      const real = fs.realpathSync(projPath);
+      if (!real.startsWith(PROJECTS_DIR + path.sep) && real !== PROJECTS_DIR) continue;
     } catch {
       continue;
     }

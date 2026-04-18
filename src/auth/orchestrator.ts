@@ -171,7 +171,11 @@ export async function authorizeHeadless(
       tool: toolName,
       args,
       status: 'pending',
-      agent: meta?.agent,
+      // Strip ANSI escape sequences — agent name comes from caller-supplied metadata
+      // and may be displayed in a terminal (node9 tail/watch), enabling injection.
+      agent: meta?.agent
+        ? meta.agent.replace(/\x1b\[[0-9;]*[mGKHFJABCDST]/g, '').slice(0, 80)
+        : undefined,
     });
     const result = await _authorizeHeadlessCore(toolName, args, meta, {
       ...options,

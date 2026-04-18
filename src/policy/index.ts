@@ -41,6 +41,40 @@ function getNestedValue(obj: unknown, path: string): unknown {
     .reduce<unknown>((prev, curr) => (prev as Record<string, unknown>)?.[curr], obj);
 }
 
+// ── STRING ARGUMENT STRIPPER ──────────────────────────────────────────────────
+
+/**
+ * Strips quoted string arguments from a normalized bash command so that rule
+ * patterns match only the actual shell commands being run, not text that
+ * happens to appear inside commit messages, inline scripts, or string args.
+ *
+ * Handles:
+ *   - Interpreter inline scripts:  node -e "...", python3 -c '...', ruby -e "..."
+ *   - Commit/PR message flags:     git commit -m "...", gh pr create --body "..."
+ *
+ * Called on the `command` field only, after whitespace normalization.
+ */
+export function stripStringArguments(cmd: string): string {
+  let result = cmd;
+
+  // 1. Interpreter inline scripts — replace the entire script body with ""
+  //    Covers: node -e, python -c, python3 -c, ruby -e, perl -e, php -r, deno eval
+  result = result.replace(
+    /\b(node|python3?|ruby|perl|php|deno)\s+(-[ecr]|eval)\s+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/gi,
+    '$1 $2 ""'
+  );
+
+  // 2. Commit / PR message flags — strip the message body
+  //    Covers: -m "...", --message "...", --body "...", --title "..."
+  //    Also handles heredoc-in-subshell: -m "$(cat <<'EOF' ... EOF )"
+  result = result.replace(
+    /\s(-m|--message|--body|--title|--description)\s+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/g,
+    ' $1 ""'
+  );
+
+  return result;
+}
+
 // ── SMART RULES EVALUATOR ─────────────────────────────────────────────────────
 
 /**
@@ -71,8 +105,14 @@ export function evaluateSmartConditions(args: unknown, rule: SmartRule): boolean
   const results = rule.conditions.map((cond) => {
     const rawVal = getNestedValue(args, cond.field);
     // Normalize whitespace so multi-space SQL doesn't bypass regex checks
-    const val =
+    const normalized =
       rawVal !== null && rawVal !== undefined ? String(rawVal).replace(/\s+/g, ' ').trim() : null;
+    // For command fields, strip quoted string arguments (commit messages, inline
+    // scripts) so patterns match only actual shell commands, not their text args.
+    const val =
+      cond.field === 'command' && normalized !== null
+        ? stripStringArguments(normalized)
+        : normalized;
 
     switch (cond.op) {
       case 'exists':

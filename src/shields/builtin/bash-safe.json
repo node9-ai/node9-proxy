@@ -10,7 +10,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "(curl|wget)\\s+[^|]*\\|\\s*(?:(bash|sh|zsh|fish)|(python3?|ruby|perl|node)\\b(?!\\s+-[cem]\\b))",
+          "value": "(^|&&|\\|\\||;)\\s*(curl|wget)\\s+[^|]*\\|\\s*(?:(bash|sh|zsh|fish)|(python3?|ruby|perl|node)\\b(?!\\s+-[cem]\\b))",
           "flags": "i"
         }
       ],
@@ -24,7 +24,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "base64\\s+(-d|--decode).*\\|\\s*(bash|sh|zsh)",
+          "value": "\\bbase64\\s+(-d|--decode)[^|;&]*\\|\\s*(bash|sh|zsh)",
           "flags": "i"
         }
       ],

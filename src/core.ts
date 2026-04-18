@@ -21,6 +21,7 @@ export {
   matchesPattern,
   shouldSnapshot,
   evaluateSmartConditions,
+  stripStringArguments,
   checkDangerousSql,
   evaluatePolicy,
   isIgnoredTool,

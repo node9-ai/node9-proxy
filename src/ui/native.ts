@@ -112,7 +112,9 @@ export function sendDesktopNotification(title: string, body: string): void {
   if (isTestEnv()) return;
   try {
     if (process.platform === 'darwin') {
-      const script = `display notification "${body.replace(/"/g, '\\"')}" with title "${title.replace(/"/g, '\\"')}"`;
+      // Escape \ before " to prevent AppleScript string injection via crafted notification content.
+      const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      const script = `display notification "${esc(body)}" with title "${esc(title)}"`;
       spawn('osascript', ['-e', script], { detached: true, stdio: 'ignore' }).unref();
     } else if (process.platform === 'linux') {
       spawn('notify-send', [title, body, '--icon=dialog-warning'], {
@@ -142,7 +144,9 @@ function buildPlainMessage(
 
   if (locked) lines.push('⚠️  LOCKED BY ADMIN POLICY\n');
 
-  lines.push(`🤖 ${agent || 'AI Agent'}  |  🔧 ${toolName}`);
+  // Strip ANSI escape sequences — agent name is caller-supplied metadata.
+  const safeAgent = (agent ?? 'AI Agent').replace(/\x1b\[[0-9;]*[mGKHFJABCDST]/g, '').slice(0, 80);
+  lines.push(`🤖 ${safeAgent}  |  🔧 ${toolName}`);
   lines.push(`🛡️  ${explainableLabel || 'Security Policy'}`);
   if (ruleDescription) lines.push(`ℹ  ${ruleDescription}`);
   lines.push('');
