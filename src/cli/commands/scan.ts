@@ -285,10 +285,11 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
             result.bashCalls++;
           }
 
-          // Skip node9's own CLI calls (node9 explain, node9 scan, etc.) —
-          // they are dry-runs and should never appear as findings.
+          // Skip node9's own read-only CLI calls — they are dry-runs and
+          // should never appear as findings. Match only known subcommands so
+          // a command like `node9_wrapper` or `node9 ; rm -rf /` isn't excluded.
           const rawCmd = String(input.command ?? '').trimStart();
-          if (rawCmd.startsWith('node9 ')) continue;
+          if (/^node9\s+(scan|explain|report|tail|dlp|status|sessions|audit)\b/.test(rawCmd)) continue;
 
           // ── DLP scan ───────────────────────────────────────────────────
           const dlpMatch = scanArgs(input);
