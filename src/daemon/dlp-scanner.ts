@@ -26,7 +26,7 @@ function loadIndex(): DlpIndex {
 
 function saveIndex(index: DlpIndex): void {
   try {
-    fs.writeFileSync(INDEX_FILE, JSON.stringify(index), 'utf-8');
+    fs.writeFileSync(INDEX_FILE, JSON.stringify(index), { encoding: 'utf-8', mode: 0o600 });
   } catch {}
 }
 

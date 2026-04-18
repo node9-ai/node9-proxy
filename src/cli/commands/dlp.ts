@@ -20,6 +20,11 @@ interface DlpEntry {
   project?: string;
 }
 
+const ANSI_RE = /\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-_])/g;
+function stripAnsi(s: string): string {
+  return s.replace(ANSI_RE, '');
+}
+
 function loadResolved(): Set<string> {
   try {
     const raw = JSON.parse(fs.readFileSync(RESOLVED_FILE, 'utf-8')) as string[];
@@ -31,7 +36,7 @@ function loadResolved(): Set<string> {
 
 function saveResolved(resolved: Set<string>): void {
   try {
-    fs.writeFileSync(RESOLVED_FILE, JSON.stringify([...resolved], null, 2));
+    fs.writeFileSync(RESOLVED_FILE, JSON.stringify([...resolved], null, 2), { mode: 0o600 });
   } catch {}
 }
 
@@ -134,10 +139,10 @@ export function registerDlpCommand(program: Command): void {
           chalk.dim('  ' + fmtDate(e.ts))
       );
       if (e.dlpSample) {
-        console.log('     ' + chalk.dim('Sample: ') + chalk.yellow(e.dlpSample));
+        console.log('     ' + chalk.dim('Sample: ') + chalk.yellow(stripAnsi(e.dlpSample)));
       }
       if (e.project) {
-        console.log('     ' + chalk.dim('Project: ') + chalk.dim(e.project));
+        console.log('     ' + chalk.dim('Project: ') + chalk.dim(stripAnsi(e.project)));
       }
       console.log('');
     }
