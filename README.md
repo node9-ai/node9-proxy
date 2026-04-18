@@ -128,7 +128,7 @@ configure(agent_name="my-agent", policy="require_approval")
 - **SQL:** blocks `DELETE`/`UPDATE` without `WHERE`, `DROP TABLE`, `TRUNCATE`
 - **Shell:** blocks `curl | bash`, `sudo` commands
 - **DLP:** blocks AWS keys, GitHub tokens, Stripe keys, PEM private keys in any tool call argument
-- **Response DLP:** background scanner reads Claude's JSONL history hourly and alerts you if a secret appears in Claude's *response text* (not just tool args) — see [`node9 dlp`](#node9-dlp--response-secret-scanner)
+- **Response DLP:** background scanner reads Claude's JSONL history hourly and alerts you if a secret appears in Claude's _response text_ (not just tool args) — see [`node9 dlp`](#node9-dlp--response-secret-scanner)
 - **Auto-undo:** git snapshot before every AI file edit → `node9 undo` to revert
 - **Skills Pinning:** SHA-256 verification of agent skill files between sessions; quarantines on drift (AST 02 + AST 07 — supply chain & update drift)
 
@@ -296,7 +296,7 @@ node9 scan --days 30    # custom window
 
 ### `node9 dlp` — response secret scanner
 
-Node9's tool-call DLP blocks secrets *before* they leave your machine. But Claude can also write secrets into its **response text** — a curl example with a real token, a config snippet with a live key — and that text bypasses tool-call interception entirely.
+Node9's tool-call DLP blocks secrets _before_ they leave your machine. But Claude can also write secrets into its **response text** — a curl example with a real token, a config snippet with a live key — and that text bypasses tool-call interception entirely.
 
 The **response DLP scanner** runs as a background daemon. It reads Claude's JSONL conversation history incrementally (delta scan — only new bytes since the last check), looks for secret patterns in assistant response text, and fires a desktop notification the moment it finds one.
 
