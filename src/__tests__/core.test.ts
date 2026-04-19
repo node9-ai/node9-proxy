@@ -285,6 +285,26 @@ describe('Bash tool — shell command interception', () => {
       rule: 'review-git-destructive',
       desc: 'git rebase --continue is a recovery op, not destructive',
     },
+    {
+      cmd: `git rebase --onto main feature~3 feature`,
+      rule: 'review-git-destructive',
+      desc: 'git rebase --onto is routine branch surgery, not destructive',
+    },
+    {
+      cmd: `git rebase --onto origin/main HEAD~5`,
+      rule: 'review-git-destructive',
+      desc: 'git rebase --onto with upstream target',
+    },
+    {
+      cmd: `git add -f -- path/to/file && git commit -m "force-add ignored asset"`,
+      rule: 'block-force-push',
+      desc: 'git add -f (force-add) with no push must not trigger block-force-push',
+    },
+    {
+      cmd: `git commit -m "feat: add --force-with-lease support to deploy script"`,
+      rule: 'block-force-push',
+      desc: 'commit message mentioning --force-with-lease must not trigger block-force-push',
+    },
   ])('FP guard: "$desc" must NOT trigger $rule', async ({ cmd, rule }) => {
     const result = await evaluatePolicy('Bash', { command: cmd });
     expect(result.ruleName).not.toBe(rule);
