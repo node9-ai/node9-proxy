@@ -85,7 +85,7 @@
         }
       ],
       "verdict": "review",
-      "reason": "eval of dynamic content requires human approval (bash-safe shield)"
+      "reason": "eval of dynamic content — backup regex rule for scan path (real-time uses AST detection)"
     }
   ],
   "dangerousWords": []
