@@ -607,6 +607,19 @@ describe('bash-safe shield rules', () => {
     it('does not match plain eval with string literal', () => {
       expect(matchesRule('shield:bash-safe:review-eval', 'eval "export FOO=bar"')).toBe(true); // " is included in the pattern
     });
+    it('matches eval after && chain', () => {
+      expect(matchesRule('shield:bash-safe:review-eval', 'setup && eval "$(curl -s url)"')).toBe(
+        true
+      );
+    });
+    it('does not match eval as a subcommand argument (cmux browser eval)', () => {
+      expect(
+        matchesRule(
+          'shield:bash-safe:review-eval',
+          'cmux browser --surface surface:6 eval "document.body.innerHTML"'
+        )
+      ).toBe(false);
+    });
   });
 });
 
