@@ -725,7 +725,7 @@ export function registerScanCommand(program: Command): void {
                 const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
                 const agentBadge =
                   f.agent === 'gemini' ? chalk.blue('[Gemini]  ') : chalk.cyan('[Claude]  ');
-                const cmd = chalk.gray(preview(f.input, 45));
+                const cmd = chalk.gray(preview(f.input, 70));
                 console.log(`      ${ts}${proj}${agentBadge}${cmd}`);
               }
               if (ruleFindings.length > topN) {
