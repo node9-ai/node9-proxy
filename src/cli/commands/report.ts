@@ -47,13 +47,14 @@ function buildTestTimestamps(allEntries: AuditEntry[]): Set<number> {
   return testTs;
 }
 
-/** Returns true if this PreToolUse Bash entry is a test runner call.
- * New entries: tagged testRun:true at write time (reliable).
- * Old entries: fall back to time-join with PostToolUse (approximate). */
+/** Returns true if this PreToolUse entry is from a test run.
+ * New entries: tagged testRun:true at write time (reliable, any tool).
+ * Old Bash entries: fall back to command matching or time-join with PostToolUse. */
 function isTestEntry(entry: AuditEntry, testTs: Set<number>): boolean {
-  if (entry.tool !== 'Bash' && entry.tool !== 'bash') return false;
-  // Tagged at write time — exact
+  // Tagged at write time — applies to any tool type
   if (entry.testRun === true) return true;
+  // Remaining fallbacks only apply to Bash
+  if (entry.tool !== 'Bash' && entry.tool !== 'bash') return false;
   // Plain args available (auditHashArgs disabled) — exact
   const cmd = entry.args?.command;
   if (typeof cmd === 'string') return TEST_COMMAND_RE.test(cmd);
@@ -137,11 +138,6 @@ function colorBar(value: number, max: number, width: number): string {
   const s = barStr(value, max, width);
   const filled = Math.max(1, Math.round(max > 0 ? (value / max) * width : 0));
   return chalk.cyan(s.slice(0, filled)) + chalk.dim(s.slice(filled));
-}
-
-function pct(num: number, total: number): string {
-  if (total === 0) return '–';
-  return Math.round((num / total) * 100) + '%';
 }
 
 function fmtDate(d: Date | string): string {
@@ -371,9 +367,16 @@ export function registerReportCommand(program: Command): void {
       }
 
       // --- Aggregate ---
-      let allowed = 0;
-      let blocked = 0;
-      let dlpHits = 0;
+      // userApproved / userDenied: only count decisions where the user actually
+      // interacted via an approver (popup, browser, terminal). These have
+      // source === 'daemon'. Auto-passed calls (local-policy, trust, ignored)
+      // are excluded — they never reached the user.
+      let userApproved = 0;
+      let userDenied = 0;
+      let timedOut = 0; // daemon showed popup but no response within timeout
+      let hardBlocked = 0; // auto-blocked by smart rule or persistent-deny
+      let dlpBlocked = 0; // actual DLP blocks (not observe-mode)
+      let observeDlp = 0; // observe-mode: DLP would-block but action was allowed
       let loopHits = 0;
       let testPasses = 0;
       let testFails = 0;
@@ -387,10 +390,17 @@ export function registerReportCommand(program: Command): void {
       for (const e of entries) {
         const allow = isAllow(e.decision);
         const dateKey = e.ts.slice(0, 10);
+        const userInteracted = e.source === 'daemon';
 
-        if (allow) allowed++;
-        else blocked++;
-        if (isDlp(e.checkedBy)) dlpHits++;
+        if (userInteracted) {
+          if (allow) userApproved++;
+          else userDenied++;
+        } else if (!allow) {
+          if (e.checkedBy === 'timeout') timedOut++;
+          else if (e.checkedBy === 'observe-mode-dlp-would-block') observeDlp++;
+          else if (isDlp(e.checkedBy)) dlpBlocked++;
+          else if (e.checkedBy !== 'loop-detected') hardBlocked++;
+        }
         if (e.checkedBy === 'loop-detected') loopHits++;
 
         const t = toolMap.get(e.tool) ?? { calls: 0, blocked: 0 };
@@ -463,26 +473,20 @@ export function registerReportCommand(program: Command): void {
       );
       console.log('  ' + line);
 
-      // ── Overview ──
-      console.log('');
-      const blockLabel =
-        blocked > 0 ? chalk.red(`🛑 ${num(blocked)} blocked`) : chalk.dim('🛑 0 blocked');
-      const dlpLabel =
-        dlpHits > 0 ? chalk.yellow(`🚨 ${dlpHits} DLP hits`) : chalk.dim('🚨 0 DLP hits');
-      const loopLabel =
-        loopHits > 0 ? chalk.yellow(`🔄 ${loopHits} loops`) : chalk.dim('🔄 0 loops');
-      const currentRate = total > 0 ? blocked / total : 0;
+      // ── Protection Summary ──
+      const totalBlocked = timedOut + hardBlocked + dlpBlocked + loopHits + userDenied;
+      const currentRate = total > 0 ? totalBlocked / total : 0;
       const trendLabel = (() => {
-        if (priorBlockRate === null) return chalk.dim(`${pct(blocked, total)} block rate`);
+        if (priorBlockRate === null) return '';
         const delta = Math.round((currentRate - priorBlockRate) * 100);
-        const arrow =
-          delta > 0
-            ? chalk.red(`▲${delta}%`)
-            : delta < 0
-              ? chalk.green(`▼${Math.abs(delta)}%`)
-              : chalk.dim('–');
-        return chalk.dim(`${pct(blocked, total)} block rate `) + arrow + chalk.dim(' vs prior');
+        if (delta === 0) return '';
+        return (
+          '  ' +
+          (delta > 0 ? chalk.red(`▲${delta}%`) : chalk.green(`▼${Math.abs(delta)}%`)) +
+          chalk.dim(' vs prior')
+        );
       })();
+
       const reads = toolMap.get('Read')?.calls ?? 0;
       const edits = (toolMap.get('Edit')?.calls ?? 0) + (toolMap.get('Write')?.calls ?? 0);
       const ratioLabel =
@@ -493,19 +497,82 @@ export function registerReportCommand(program: Command): void {
             chalk.green(`${testPasses}✓`) +
             (testFails > 0 ? ' ' + chalk.red(`${testFails}✗`) : '')
           : chalk.dim('tests –');
+
+      console.log('');
+      console.log('  ' + chalk.bold('Protection Summary'));
+      console.log('  ' + chalk.dim('─'.repeat(Math.min(50, W - 4))));
       console.log(
-        '  ' +
-          chalk.green(`✅ ${num(allowed)} allowed`) +
-          '   ' +
-          blockLabel +
-          '   ' +
-          dlpLabel +
-          '   ' +
-          loopLabel +
-          '   ' +
-          trendLabel
+        '  ' + chalk.dim('Intercepted') + '  ' + chalk.white(num(total)) + chalk.dim(' tool calls')
       );
-      console.log('  ' + ratioLabel + '   ' + testLabel);
+      console.log('');
+
+      const COL1 = 18;
+      const summaryRow = (
+        icon: string,
+        label: string,
+        count: number,
+        note?: string,
+        colorFn: (s: string) => string = (s) => s
+      ) => {
+        const countStr = colorFn(num(count));
+        const noteStr = note ? chalk.dim('   ' + note) : '';
+        console.log('    ' + icon + '  ' + chalk.white(label.padEnd(COL1)) + countStr + noteStr);
+      };
+
+      summaryRow(
+        userApproved > 0 ? chalk.green('✅') : chalk.dim('✅'),
+        'User approved',
+        userApproved,
+        userApproved === 0 ? 'no popups this period' : undefined,
+        userApproved > 0 ? (s) => chalk.green(s) : (s) => chalk.dim(s)
+      );
+      summaryRow(
+        userDenied > 0 ? chalk.red('🚫') : chalk.dim('🚫'),
+        'User denied',
+        userDenied,
+        undefined,
+        userDenied > 0 ? (s) => chalk.red(s) : (s) => chalk.dim(s)
+      );
+      summaryRow(
+        timedOut > 0 ? chalk.yellow('⏱') : chalk.dim('⏱'),
+        'Timed out',
+        timedOut,
+        timedOut > 0 ? 'no approval response' : undefined,
+        timedOut > 0 ? (s) => chalk.yellow(s) : (s) => chalk.dim(s)
+      );
+      summaryRow(
+        hardBlocked > 0 ? chalk.red('🛑') : chalk.dim('🛑'),
+        'Auto-blocked',
+        hardBlocked,
+        undefined,
+        hardBlocked > 0 ? (s) => chalk.red(s) : (s) => chalk.dim(s)
+      );
+      summaryRow(
+        dlpBlocked > 0 ? chalk.yellow('🚨') : chalk.dim('🚨'),
+        'DLP blocked',
+        dlpBlocked,
+        undefined,
+        dlpBlocked > 0 ? (s) => chalk.yellow(s) : (s) => chalk.dim(s)
+      );
+      summaryRow(
+        observeDlp > 0 ? chalk.blue('👁') : chalk.dim('👁'),
+        'DLP (observe)',
+        observeDlp,
+        observeDlp > 0 ? 'would-block in strict mode' : undefined,
+        observeDlp > 0 ? (s) => chalk.blue(s) : (s) => chalk.dim(s)
+      );
+      summaryRow(
+        loopHits > 0 ? chalk.yellow('🔄') : chalk.dim('🔄'),
+        'Loops detected',
+        loopHits,
+        undefined,
+        loopHits > 0 ? (s) => chalk.yellow(s) : (s) => chalk.dim(s)
+      );
+
+      if (trendLabel || ratioLabel || testPasses + testFails > 0) {
+        console.log('');
+        console.log('  ' + ratioLabel + '   ' + testLabel + trendLabel);
+      }
       console.log('');
 
       // ── Top Tools | Top Blocks ──

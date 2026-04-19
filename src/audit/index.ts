@@ -75,7 +75,8 @@ export function appendLocalAudit(
   const argsField = auditHashArgsEnabled
     ? { argsHash: hashArgs(args) }
     : { args: args ? JSON.parse(redactSecrets(JSON.stringify(args))) : {} };
-  const testRun = isTestCall(toolName, args) ? { testRun: true } : {};
+  const testRun =
+    isTestCall(toolName, args) || process.env.NODE9_TESTING === '1' ? { testRun: true } : {};
   appendToLog(LOCAL_AUDIT_LOG, {
     ts: new Date().toISOString(),
     tool: toolName,
