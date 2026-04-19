@@ -15,7 +15,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { SHIELDS } from '../../shields';
-import { getConfig } from '../../config';
+import { getConfig, DEFAULT_CONFIG } from '../../config';
 import { evaluateSmartConditions, matchesPattern } from '../../policy/index';
 import { scanArgs } from '../../dlp';
 import type { SmartRule } from '../../core';
@@ -24,9 +24,12 @@ import type { SmartRule } from '../../core';
 // Types
 // ---------------------------------------------------------------------------
 
+type RuleSourceType = 'default' | 'shield' | 'user';
+
 interface RuleSource {
-  shieldName: string; // "bash-safe" | "custom" | "cloud"
-  shieldLabel: string; // display label
+  shieldName: string;
+  shieldLabel: string;
+  sourceType: RuleSourceType;
   rule: SmartRule;
 }
 
@@ -36,6 +39,7 @@ interface Finding {
   input: Record<string, unknown>;
   timestamp: string;
   project: string;
+  sessionId: string;
   agent: 'claude' | 'gemini';
 }
 
@@ -45,6 +49,7 @@ interface DlpFinding {
   toolName: string;
   timestamp: string;
   project: string;
+  sessionId: string;
   agent: 'claude' | 'gemini';
 }
 
@@ -174,13 +179,18 @@ function preview(input: Record<string, unknown>, max: number): string {
   return s.length > max ? s.slice(0, max - 1) + '…' : s;
 }
 
+function fullCommand(input: Record<string, unknown>): string {
+  const cmd = input.command ?? input.query ?? input.file_path ?? JSON.stringify(input);
+  return String(cmd).replace(/\s+/g, ' ').trim();
+}
+
 // ---------------------------------------------------------------------------
 // Build the rule set for scan
 // ---------------------------------------------------------------------------
-// Includes:
-//   1. All builtin + user shields (regardless of active state) — the forecast
-//   2. User custom smart rules from config.json + cloud rules from rules-cache.json
-//      (rules NOT from shields, identified by names not starting with "shield:")
+
+const DEFAULT_RULE_NAMES = new Set(
+  DEFAULT_CONFIG.policy.smartRules.map((r) => r.name).filter(Boolean)
+);
 
 function buildRuleSources(): RuleSource[] {
   const sources: RuleSource[] = [];
@@ -188,22 +198,23 @@ function buildRuleSources(): RuleSource[] {
   // 1. All shields (builtin + user-installed)
   for (const [shieldName, shield] of Object.entries(SHIELDS)) {
     for (const rule of shield.smartRules) {
-      sources.push({ shieldName, shieldLabel: shieldName, rule });
+      sources.push({ shieldName, shieldLabel: shieldName, sourceType: 'shield', rule });
     }
   }
 
-  // 2. User custom rules + cloud rules (anything not from a shield)
+  // 2. Default built-in rules + user custom rules + cloud rules
   try {
     const config = getConfig();
     for (const rule of config.policy.smartRules) {
       if (!rule.name) continue;
-      // Skip shield rules — already included above
       if (rule.name.startsWith('shield:')) continue;
-      // Guess source label from name convention (cloud rules typically prefixed with "cloud:")
       const isCloud = rule.name.startsWith('cloud:');
+      const isDefault = DEFAULT_RULE_NAMES.has(rule.name);
+      const sourceType: RuleSourceType = isCloud ? 'user' : isDefault ? 'default' : 'user';
       sources.push({
-        shieldName: isCloud ? 'cloud' : 'custom',
-        shieldLabel: isCloud ? 'Cloud Policy' : 'Your Rules',
+        shieldName: isCloud ? 'cloud' : isDefault ? 'default' : 'custom',
+        shieldLabel: isCloud ? 'Cloud Policy' : isDefault ? 'Default Rules' : 'Your Rules',
+        sourceType,
         rule,
       });
     }
@@ -267,6 +278,8 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
       result.filesScanned++;
       result.sessions++;
 
+      const sessionId = file.replace(/\.jsonl$/, '');
+
       let raw: string;
       try {
         raw = fs.readFileSync(path.join(projPath, file), 'utf-8');
@@ -329,9 +342,7 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
             result.bashCalls++;
           }
 
-          // Skip node9's own read-only CLI calls — they are dry-runs and
-          // should never appear as findings. Match only known subcommands so
-          // a command like `node9_wrapper` or `node9 ; rm -rf /` isn't excluded.
+          // Skip node9's own read-only CLI calls
           const rawCmd = String(input.command ?? '').trimStart();
           if (/^node9\s+(scan|explain|report|tail|dlp|status|sessions|audit)\b/.test(rawCmd))
             continue;
@@ -352,6 +363,7 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
                 toolName,
                 timestamp: entry.timestamp ?? '',
                 project: projLabel,
+                sessionId,
                 agent: 'claude',
               });
             }
@@ -361,15 +373,10 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
           for (const source of ruleSources) {
             const { rule } = source;
 
-            // Allow rules are not catches — skip them
             if (rule.verdict === 'allow') continue;
-
-            // Tool name must match the rule's tool pattern
             if (rule.tool && !matchesPattern(toolNameLower, rule.tool)) continue;
-
             if (!evaluateSmartConditions(input, rule)) continue;
 
-            // Deduplicate: same rule + same input preview + same project
             const inputPreview = preview(input, 120);
             const isDupe = result.findings.some(
               (f) =>
@@ -384,6 +391,7 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
                 input,
                 timestamp: entry.timestamp ?? '',
                 project: projLabel,
+                sessionId,
                 agent: 'claude',
               });
             }
@@ -457,6 +465,8 @@ function scanGeminiHistory(startDate: Date | null): ScanResult {
     for (const chatFile of chatFiles) {
       result.filesScanned++;
 
+      const sessionId = chatFile.replace(/\.json$/, '');
+
       let raw: string;
       try {
         raw = fs.readFileSync(path.join(chatsDir, chatFile), 'utf-8');
@@ -523,6 +533,7 @@ function scanGeminiHistory(startDate: Date | null): ScanResult {
                 toolName,
                 timestamp: msg.timestamp ?? '',
                 project: projLabel,
+                sessionId,
                 agent: 'gemini',
               });
             }
@@ -548,6 +559,7 @@ function scanGeminiHistory(startDate: Date | null): ScanResult {
                 input,
                 timestamp: msg.timestamp ?? '',
                 project: projLabel,
+                sessionId,
                 agent: 'gemini',
               });
             }
@@ -578,6 +590,62 @@ function mergeScans(a: ScanResult, b: ScanResult): ScanResult {
 }
 
 // ---------------------------------------------------------------------------
+// Display helpers
+// ---------------------------------------------------------------------------
+
+function verdictIcon(verdict: string): string {
+  return verdict === 'block' ? '🛑' : '👁 ';
+}
+
+function printFindingRow(
+  f: Finding,
+  drillDown: boolean,
+  showSessionId: boolean,
+  previewWidth: number
+): void {
+  const ts = f.timestamp ? chalk.dim(fmtTs(f.timestamp) + '  ') : '';
+  const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
+  const agentBadge = f.agent === 'gemini' ? chalk.blue('[Gemini]  ') : chalk.cyan('[Claude]  ');
+  const cmd = drillDown
+    ? chalk.gray(fullCommand(f.input))
+    : chalk.gray(preview(f.input, previewWidth));
+  const sessionSuffix =
+    showSessionId && f.sessionId ? chalk.dim(`  → ${f.sessionId.slice(0, 8)}`) : '';
+  console.log(`      ${ts}${proj}${agentBadge}${cmd}${sessionSuffix}`);
+}
+
+function printRuleGroup(
+  ruleFindings: Finding[],
+  topN: number,
+  drillDown: boolean,
+  previewWidth: number
+): void {
+  const rule = ruleFindings[0].source.rule;
+  const ruleCount = ruleFindings.length;
+  const countBadge = ruleCount > 1 ? chalk.white(` ×${ruleCount}`) : '';
+  const shortName = (rule.name ?? 'unnamed').replace(/^shield:[^:]+:/, '');
+  const icon = verdictIcon(rule.verdict ?? 'review');
+  console.log(
+    '    ' +
+      icon +
+      '  ' +
+      chalk.white(shortName) +
+      countBadge +
+      (rule.reason ? chalk.dim(`  — ${rule.reason}`) : '')
+  );
+
+  const shown = drillDown ? ruleFindings : ruleFindings.slice(0, topN);
+  for (const f of shown) {
+    printFindingRow(f, drillDown, true, previewWidth);
+  }
+  if (!drillDown && ruleFindings.length > topN) {
+    console.log(
+      chalk.dim(`      … and ${ruleFindings.length - topN} more  (--drill-down for full list)`)
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Registered command
 // ---------------------------------------------------------------------------
 
@@ -587,9 +655,12 @@ export function registerScanCommand(program: Command): void {
     .description('Forecast: scan agent history and show what node9 would catch if installed')
     .option('--all', 'Scan all history (default: last 90 days)')
     .option('--days <n>', 'Scan last N days of history', '90')
-    .option('--top <n>', 'Max findings to show per shield', '5')
-    .action((options: { all?: boolean; days: string; top: string }) => {
-      const topN = Math.max(1, parseInt(options.top, 10) || 5);
+    .option('--top <n>', 'Max findings to show per rule (default: 5)', '5')
+    .option('--drill-down', 'Show all findings with full commands and session IDs')
+    .action((options: { all?: boolean; days: string; top: string; drillDown?: boolean }) => {
+      const drillDown = options.drillDown ?? false;
+      const topN = drillDown ? Infinity : Math.max(1, parseInt(options.top, 10) || 5);
+      const previewWidth = 70;
       const startDate = options.all
         ? null
         : (() => {
@@ -652,92 +723,136 @@ export function registerScanCommand(program: Command): void {
       );
       console.log('');
 
-      // ── Group findings by shield ───────────────────────────────────────────
-      const byShield = new Map<string, { label: string; findings: Finding[] }>();
-      for (const f of scan.findings) {
-        const key = f.source.shieldName;
-        const entry = byShield.get(key) ?? { label: f.source.shieldLabel, findings: [] };
-        entry.findings.push(f);
-        byShield.set(key, entry);
-      }
-
+      // ── Group findings by sourceType + shieldName ─────────────────────────
       const totalFindings = scan.findings.length;
+      const blockedCount = scan.findings.filter((f) => f.source.rule.verdict === 'block').length;
+      const reviewCount = totalFindings - blockedCount;
 
       if (totalFindings === 0 && scan.dlpFindings.length === 0) {
         console.log(chalk.green('  ✅ No findings across all shields and rules.'));
         console.log(chalk.dim('  node9 is still worth running — it monitors in real time.\n'));
       } else {
-        if (totalFindings > 0) {
+        // ── Headline summary ───────────────────────────────────────────────
+        console.log('  ' + chalk.bold('What node9 would have done:'));
+        console.log('');
+        if (blockedCount > 0) {
+          console.log(
+            '    ' +
+              chalk.red('🛑  Blocked') +
+              '          ' +
+              chalk.red.bold(String(blockedCount).padStart(5)) +
+              chalk.dim('   operations stopped before execution')
+          );
+        }
+        if (reviewCount > 0) {
+          console.log(
+            '    ' +
+              chalk.yellow('👁   Reviewed') +
+              '         ' +
+              chalk.yellow.bold(String(reviewCount).padStart(5)) +
+              chalk.dim('   flagged for human approval')
+          );
+        }
+        if (scan.dlpFindings.length > 0) {
+          console.log(
+            '    ' +
+              chalk.red('🔑  Credential leak') +
+              '  ' +
+              chalk.red.bold(String(scan.dlpFindings.length).padStart(5)) +
+              chalk.dim('   secret detected in tool call')
+          );
+        }
+        console.log('');
+
+        // ── Separate findings by section ───────────────────────────────────
+        const sections: Array<{
+          label: string;
+          subtitle: string;
+          shieldKey?: string;
+          findings: Finding[];
+        }> = [];
+
+        // Default rules section
+        const defaultFindings = scan.findings.filter((f) => f.source.sourceType === 'default');
+        if (defaultFindings.length > 0) {
+          sections.push({
+            label: 'Default Rules',
+            subtitle: 'built-in, always on',
+            findings: defaultFindings,
+          });
+        }
+
+        // Shield sections (one per shield, sorted by finding count)
+        const byShield = new Map<string, Finding[]>();
+        for (const f of scan.findings.filter((f) => f.source.sourceType === 'shield')) {
+          const arr = byShield.get(f.source.shieldName) ?? [];
+          arr.push(f);
+          byShield.set(f.source.shieldName, arr);
+        }
+        const sortedShields = [...byShield.entries()].sort((a, b) => b[1].length - a[1].length);
+        for (const [shieldName, findings] of sortedShields) {
+          sections.push({ label: shieldName, subtitle: 'shield', shieldKey: shieldName, findings });
+        }
+
+        // User rules section
+        const userFindings = scan.findings.filter(
+          (f) => f.source.sourceType === 'user' || f.source.shieldName === 'cloud'
+        );
+        if (userFindings.length > 0) {
+          sections.push({
+            label: 'Your Rules',
+            subtitle: 'added in node9.config.json',
+            findings: userFindings,
+          });
+        }
+
+        // ── Print each section ─────────────────────────────────────────────
+        for (const section of sections) {
+          const sectionBlocked = section.findings.filter(
+            (f) => f.source.rule.verdict === 'block'
+          ).length;
+          const sectionReview = section.findings.length - sectionBlocked;
+
+          const countParts: string[] = [];
+          if (sectionBlocked > 0) countParts.push(chalk.red(`${sectionBlocked} blocked`));
+          if (sectionReview > 0) countParts.push(chalk.yellow(`${sectionReview} review`));
+          const countStr = countParts.join(chalk.dim(' · '));
+
+          const enableHint = section.shieldKey
+            ? chalk.dim(`  →  node9 shield enable ${section.shieldKey}`)
+            : '';
+
+          console.log('  ' + chalk.dim('─'.repeat(70)));
           console.log(
             '  ' +
-              chalk.bold('If node9 had been installed:') +
+              chalk.bold(section.label) +
+              chalk.dim(`  ·  ${section.subtitle}`) +
               '  ' +
-              chalk.yellow.bold(
-                `${num(totalFindings)} command${totalFindings !== 1 ? 's' : ''} flagged for review`
-              )
-          );
-          console.log('');
-
-          // Sort shields: most findings first
-          const sorted = [...byShield.entries()].sort(
-            (a, b) => b[1].findings.length - a[1].findings.length
+              countStr +
+              enableHint
           );
 
-          for (const [shieldName, { label, findings }] of sorted) {
-            const count = findings.length;
-            const isUserRule = shieldName === 'custom' || shieldName === 'cloud';
-            const shieldBadge = isUserRule ? chalk.magenta(label) : chalk.cyan(label);
-
-            console.log('  ' + chalk.dim('─'.repeat(70)));
-            console.log(
-              '  ' +
-                shieldBadge +
-                chalk.dim('  ·  ') +
-                chalk.yellow(`${num(count)} finding${count !== 1 ? 's' : ''}`) +
-                (isUserRule ? '' : chalk.dim(`  →  node9 shield enable ${shieldName}`))
-            );
-
-            // Group by rule within the shield
-            const byRule = new Map<string, Finding[]>();
-            for (const f of findings) {
-              const ruleKey = f.source.rule.name ?? 'unnamed';
-              const arr = byRule.get(ruleKey) ?? [];
-              arr.push(f);
-              byRule.set(ruleKey, arr);
-            }
-
-            for (const [, ruleFindings] of byRule) {
-              const rule = ruleFindings[0].source.rule;
-              const ruleCount = ruleFindings.length;
-              const countBadge = ruleCount > 1 ? chalk.white(` ×${ruleCount}`) : '';
-              // Display the short rule name: strip "shield:<name>:" prefix
-              const shortName = (rule.name ?? 'unnamed').replace(/^shield:[^:]+:/, '');
-              console.log(
-                '    ' +
-                  chalk.white(shortName) +
-                  countBadge +
-                  (rule.reason ? chalk.dim(`  — ${rule.reason}`) : '')
-              );
-
-              const shown = ruleFindings.slice(0, topN);
-              for (const f of shown) {
-                const ts = f.timestamp ? chalk.dim(fmtTs(f.timestamp) + '  ') : '';
-                const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
-                const agentBadge =
-                  f.agent === 'gemini' ? chalk.blue('[Gemini]  ') : chalk.cyan('[Claude]  ');
-                const cmd = chalk.gray(preview(f.input, 70));
-                console.log(`      ${ts}${proj}${agentBadge}${cmd}`);
-              }
-              if (ruleFindings.length > topN) {
-                console.log(
-                  chalk.dim(
-                    `      … and ${ruleFindings.length - topN} more (--top ${ruleFindings.length})`
-                  )
-                );
-              }
-            }
-            console.log('');
+          // Group by rule, blocks first then reviews
+          const byRule = new Map<string, Finding[]>();
+          for (const f of section.findings) {
+            const ruleKey = f.source.rule.name ?? 'unnamed';
+            const arr = byRule.get(ruleKey) ?? [];
+            arr.push(f);
+            byRule.set(ruleKey, arr);
           }
+
+          // Sort: block rules first, then by count desc
+          const sortedRules = [...byRule.entries()].sort((a, b) => {
+            const aBlock = a[1][0].source.rule.verdict === 'block' ? 1 : 0;
+            const bBlock = b[1][0].source.rule.verdict === 'block' ? 1 : 0;
+            if (bBlock !== aBlock) return bBlock - aBlock;
+            return b[1].length - a[1].length;
+          });
+
+          for (const [, ruleFindings] of sortedRules) {
+            printRuleGroup(ruleFindings, topN, drillDown, previewWidth);
+          }
+          console.log('');
         }
 
         // ── DLP findings ───────────────────────────────────────────────────
@@ -745,29 +860,31 @@ export function registerScanCommand(program: Command): void {
           console.log('  ' + chalk.dim('─'.repeat(70)));
           console.log(
             '  ' +
-              chalk.red.bold('Secrets / DLP') +
+              chalk.red.bold('🔑  Credential Leaks') +
               chalk.dim('  ·  ') +
               chalk.red(
                 `${num(scan.dlpFindings.length)} potential secret leak${scan.dlpFindings.length !== 1 ? 's' : ''}`
               )
           );
-          const shownDlp = scan.dlpFindings.slice(0, topN);
+          const shownDlp = drillDown ? scan.dlpFindings : scan.dlpFindings.slice(0, topN);
           for (const f of shownDlp) {
             const ts = f.timestamp ? chalk.dim(fmtTs(f.timestamp) + '  ') : '';
             const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
             const agentBadge =
               f.agent === 'gemini' ? chalk.blue('[Gemini]  ') : chalk.cyan('[Claude]  ');
+            const sessionSuffix = f.sessionId ? chalk.dim(`  → ${f.sessionId.slice(0, 8)}`) : '';
             console.log(
               `    ${ts}${proj}${agentBadge}` +
                 chalk.yellow(f.patternName) +
                 chalk.dim('  ') +
-                chalk.gray(f.redactedSample)
+                chalk.gray(f.redactedSample) +
+                sessionSuffix
             );
           }
-          if (scan.dlpFindings.length > topN) {
+          if (!drillDown && scan.dlpFindings.length > topN) {
             console.log(
               chalk.dim(
-                `    … and ${scan.dlpFindings.length - topN} more (--top ${scan.dlpFindings.length})`
+                `    … and ${scan.dlpFindings.length - topN} more  (--drill-down for full list)`
               )
             );
           }
@@ -801,6 +918,19 @@ export function registerScanCommand(program: Command): void {
             chalk.white('Run ') +
             chalk.cyan('node9 init') +
             chalk.white(' to start protecting your AI agents.')
+        );
+      }
+      if (drillDown) {
+        console.log(
+          chalk.dim('  Run ') +
+            chalk.cyan('node9 sessions --detail <session-id>') +
+            chalk.dim(' to see the full conversation for any session above.')
+        );
+      } else {
+        console.log(
+          chalk.dim('  Run ') +
+            chalk.cyan('node9 scan --drill-down') +
+            chalk.dim(' to see full commands and session IDs.')
         );
       }
       console.log('');
