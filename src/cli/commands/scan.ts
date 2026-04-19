@@ -782,16 +782,29 @@ export function registerScanCommand(program: Command): void {
           });
         }
 
-        // Shield sections (one per shield, sorted by finding count)
+        // Shield sections — always show all shields (with or without findings)
         const byShield = new Map<string, Finding[]>();
         for (const f of scan.findings.filter((f) => f.source.sourceType === 'shield')) {
           const arr = byShield.get(f.source.shieldName) ?? [];
           arr.push(f);
           byShield.set(f.source.shieldName, arr);
         }
-        const sortedShields = [...byShield.entries()].sort((a, b) => b[1].length - a[1].length);
-        for (const [shieldName, findings] of sortedShields) {
-          sections.push({ label: shieldName, subtitle: 'shield', shieldKey: shieldName, findings });
+        // Sort: shields with findings first (by count), then 0-finding shields alphabetically
+        const allShieldNames = Object.keys(SHIELDS).sort((a, b) => {
+          const ac = byShield.get(a)?.length ?? 0;
+          const bc = byShield.get(b)?.length ?? 0;
+          if (bc !== ac) return bc - ac;
+          return a.localeCompare(b);
+        });
+        for (const shieldName of allShieldNames) {
+          const findings = byShield.get(shieldName) ?? [];
+          const description = SHIELDS[shieldName]?.description ?? '';
+          sections.push({
+            label: shieldName,
+            subtitle: description,
+            shieldKey: shieldName,
+            findings,
+          });
         }
 
         // User rules section
@@ -816,7 +829,10 @@ export function registerScanCommand(program: Command): void {
           const countParts: string[] = [];
           if (sectionBlocked > 0) countParts.push(chalk.red(`${sectionBlocked} blocked`));
           if (sectionReview > 0) countParts.push(chalk.yellow(`${sectionReview} review`));
-          const countStr = countParts.join(chalk.dim(' · '));
+          const countStr =
+            section.findings.length === 0
+              ? chalk.green('✓ no findings')
+              : countParts.join(chalk.dim(' · '));
 
           const enableHint = section.shieldKey
             ? chalk.dim(`  →  node9 shield enable ${section.shieldKey}`)
@@ -826,11 +842,16 @@ export function registerScanCommand(program: Command): void {
           console.log(
             '  ' +
               chalk.bold(section.label) +
-              chalk.dim(`  ·  ${section.subtitle}`) +
+              (section.subtitle ? chalk.dim(`  ·  ${section.subtitle}`) : '') +
               '  ' +
               countStr +
               enableHint
           );
+
+          if (section.findings.length === 0) {
+            console.log('');
+            continue;
+          }
 
           // Group by rule, blocks first then reviews
           const byRule = new Map<string, Finding[]>();
