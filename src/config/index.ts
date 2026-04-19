@@ -275,8 +275,8 @@ export const DEFAULT_CONFIG: Config = {
           {
             field: 'command',
             op: 'notMatches',
-            // Exclude recovery ops — these resolve a conflict, not start a destructive action.
-            value: '\\bgit\\s+rebase\\s+--(abort|continue|skip)\\b',
+            // Exclude recovery ops and routine branch-surgery (--onto) — these are not destructive.
+            value: '\\bgit\\s+rebase\\s+--(abort|continue|skip|onto)\\b',
             flags: 'i',
           },
         ],
