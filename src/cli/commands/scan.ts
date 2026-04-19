@@ -782,22 +782,17 @@ export function registerScanCommand(program: Command): void {
           });
         }
 
-        // Shield sections — always show all shields (with or without findings)
+        // Shield sections — full section for shields with findings, one summary line if none
         const byShield = new Map<string, Finding[]>();
         for (const f of scan.findings.filter((f) => f.source.sourceType === 'shield')) {
           const arr = byShield.get(f.source.shieldName) ?? [];
           arr.push(f);
           byShield.set(f.source.shieldName, arr);
         }
-        // Sort: shields with findings first (by count), then 0-finding shields alphabetically
-        const allShieldNames = Object.keys(SHIELDS).sort((a, b) => {
-          const ac = byShield.get(a)?.length ?? 0;
-          const bc = byShield.get(b)?.length ?? 0;
-          if (bc !== ac) return bc - ac;
-          return a.localeCompare(b);
-        });
-        for (const shieldName of allShieldNames) {
-          const findings = byShield.get(shieldName) ?? [];
+        const shieldsWithFindings = [...byShield.entries()].sort(
+          (a, b) => b[1].length - a[1].length
+        );
+        for (const [shieldName, findings] of shieldsWithFindings) {
           const description = SHIELDS[shieldName]?.description ?? '';
           sections.push({
             label: shieldName,
@@ -829,10 +824,7 @@ export function registerScanCommand(program: Command): void {
           const countParts: string[] = [];
           if (sectionBlocked > 0) countParts.push(chalk.red(`${sectionBlocked} blocked`));
           if (sectionReview > 0) countParts.push(chalk.yellow(`${sectionReview} review`));
-          const countStr =
-            section.findings.length === 0
-              ? chalk.green('✓ no findings')
-              : countParts.join(chalk.dim(' · '));
+          const countStr = countParts.join(chalk.dim(' · '));
 
           const enableHint = section.shieldKey
             ? chalk.dim(`  →  node9 shield enable ${section.shieldKey}`)
@@ -847,11 +839,6 @@ export function registerScanCommand(program: Command): void {
               countStr +
               enableHint
           );
-
-          if (section.findings.length === 0) {
-            console.log('');
-            continue;
-          }
 
           // Group by rule, blocks first then reviews
           const byRule = new Map<string, Finding[]>();
@@ -873,6 +860,24 @@ export function registerScanCommand(program: Command): void {
           for (const [, ruleFindings] of sortedRules) {
             printRuleGroup(ruleFindings, topN, drillDown, previewWidth);
           }
+          console.log('');
+        }
+
+        // ── Shields with no findings — compact summary line ───────────────
+        const emptyShields = Object.keys(SHIELDS)
+          .filter((n) => !byShield.has(n))
+          .sort();
+        if (emptyShields.length > 0) {
+          console.log('  ' + chalk.dim('─'.repeat(70)));
+          console.log(
+            '  ' +
+              chalk.bold('Shields') +
+              chalk.dim('  ·  no findings in your history') +
+              '  ' +
+              chalk.green('✓')
+          );
+          console.log('  ' + chalk.dim(emptyShields.join(' · ')));
+          console.log('  ' + chalk.dim('→  node9 shield enable <name>  to activate any shield'));
           console.log('');
         }
 
