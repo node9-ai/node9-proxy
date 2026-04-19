@@ -60,13 +60,27 @@
       "reason": "Writing directly to a block device is irreversible — blocked by bash-safe shield"
     },
     {
-      "name": "shield:bash-safe:review-eval",
+      "name": "shield:bash-safe:block-eval-remote",
       "tool": "bash",
       "conditions": [
         {
           "field": "command",
           "op": "matches",
-          "value": "(^|&&|\\|\\||\\||;|\\{|`|\\(|[\\r\\n])\\s*eval\\s+[\\$`(\"]",
+          "value": "\\beval\\b.*\\$\\((curl|wget)\\b",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "eval of remote download is a near-certain supply-chain attack — blocked by bash-safe shield"
+    },
+    {
+      "name": "shield:bash-safe:review-eval-dynamic",
+      "tool": "bash",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "\\beval\\s+([\\$`(]|\"[^\"]*\\$)",
           "flags": "i"
         }
       ],
