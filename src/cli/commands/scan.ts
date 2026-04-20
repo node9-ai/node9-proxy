@@ -755,8 +755,22 @@ export function registerScanCommand(program: Command): void {
             return d;
           })();
 
+      const isInstalled = fs.existsSync(path.join(os.homedir(), '.node9', 'audit.log'));
+
       console.log('');
-      console.log(chalk.cyan.bold('🔍  node9 scan') + chalk.dim('  — what would node9 catch?'));
+      if (!isInstalled) {
+        console.log(
+          chalk.bold('🛡  node9') + chalk.dim('  —  security layer for AI coding agents')
+        );
+        console.log(
+          chalk.dim('   Intercepts dangerous tool calls before they execute. No config needed.')
+        );
+        console.log('');
+      }
+      console.log(
+        chalk.cyan.bold('🔍  Scanning your AI history') +
+          chalk.dim('  — what would node9 have caught?')
+      );
       console.log('');
 
       process.stdout.write(chalk.dim('  Scanning…'));
@@ -814,17 +828,29 @@ export function registerScanCommand(program: Command): void {
       const reviewCount = totalFindings - blockedCount;
 
       if (totalFindings === 0 && scan.dlpFindings.length === 0) {
-        console.log(chalk.green('  ✅ No findings across all shields and rules.'));
-        console.log(chalk.dim('  node9 is still worth running — it monitors in real time.\n'));
+        console.log(chalk.green('  ✅ No risky operations found in your history.'));
+        console.log(
+          chalk.dim('  node9 is still worth running — it monitors every tool call in real time.\n')
+        );
       } else {
-        // ── Headline summary ───────────────────────────────────────────────
-        console.log('  ' + chalk.bold('What node9 would have done:'));
+        // ── Hero headline ──────────────────────────────────────────────────
+        const totalRisky = totalFindings + scan.dlpFindings.length;
+        const heroLine = isInstalled
+          ? chalk.bold(
+              `  Found ${chalk.yellow(String(totalRisky))} risky operation${totalRisky !== 1 ? 's' : ''} in your history`
+            )
+          : chalk.bold(
+              `  ${chalk.red.bold(String(totalRisky))} risky operation${totalRisky !== 1 ? 's' : ''} found — none were blocked`
+            );
+        console.log(heroLine);
         console.log('');
+
+        // ── Breakdown ──────────────────────────────────────────────────────
         if (blockedCount > 0) {
           console.log(
             '    ' +
-              chalk.red('🛑  Blocked') +
-              '          ' +
+              chalk.red('🛑  Would have blocked') +
+              '   ' +
               chalk.red.bold(String(blockedCount).padStart(5)) +
               chalk.dim('   operations stopped before execution')
           );
@@ -832,17 +858,17 @@ export function registerScanCommand(program: Command): void {
         if (reviewCount > 0) {
           console.log(
             '    ' +
-              chalk.yellow('👁   Reviewed') +
-              '         ' +
+              chalk.yellow('👁   Would have flagged') +
+              '   ' +
               chalk.yellow.bold(String(reviewCount).padStart(5)) +
-              chalk.dim('   flagged for human approval')
+              chalk.dim('   sent to you for approval')
           );
         }
         if (scan.dlpFindings.length > 0) {
           console.log(
             '    ' +
               chalk.red('🔑  Credential leak') +
-              '  ' +
+              '     ' +
               chalk.red.bold(String(scan.dlpFindings.length).padStart(5)) +
               chalk.dim('   secret detected in tool call')
           );
@@ -1016,33 +1042,47 @@ export function registerScanCommand(program: Command): void {
       }
 
       // ── CTA ───────────────────────────────────────────────────────────────
-      const auditLog = path.join(os.homedir(), '.node9', 'audit.log');
-      if (fs.existsSync(auditLog)) {
-        console.log(chalk.green('  ✅ node9 is active — future sessions are protected.'));
-        console.log(
-          chalk.dim('  Run ') + chalk.cyan('node9 report') + chalk.dim(' to see live stats.')
-        );
-      } else {
-        console.log(chalk.yellow.bold('  ⚡ node9 was not running during these sessions.'));
-        console.log(
-          '  ' +
-            chalk.white('Run ') +
-            chalk.cyan('node9 init') +
-            chalk.white(' to start protecting your AI agents.')
-        );
-      }
-      if (drillDown) {
+      if (isInstalled) {
+        console.log(chalk.green('  ✅ node9 is active — your future sessions are protected.'));
         console.log(
           chalk.dim('  Run ') +
-            chalk.cyan('node9 sessions --detail <session-id>') +
-            chalk.dim(' to see the full conversation for any session above.')
+            chalk.cyan('node9 report') +
+            chalk.dim(' to see live protection stats.')
         );
+        if (drillDown) {
+          console.log(
+            chalk.dim('  Run ') +
+              chalk.cyan('node9 sessions --detail <session-id>') +
+              chalk.dim(' to see the full conversation for any session above.')
+          );
+        } else {
+          console.log(
+            chalk.dim('  Run ') +
+              chalk.cyan('node9 scan --drill-down') +
+              chalk.dim(' to see full commands and session IDs.')
+          );
+        }
       } else {
+        const riskySummary = totalFindings + scan.dlpFindings.length;
+        if (riskySummary > 0) {
+          console.log(
+            chalk.yellow.bold(
+              `  ⚡ ${riskySummary} operation${riskySummary !== 1 ? 's' : ''} ran unprotected.`
+            ) + chalk.dim(' node9 would have caught them.')
+          );
+        }
+        console.log('');
+        console.log(chalk.bold('  Protect your next session in 30 seconds:'));
+        console.log('');
+        console.log('    ' + chalk.cyan('npm install -g @node9/proxy'));
+        console.log('    ' + chalk.cyan('node9 init'));
+        console.log('');
+        console.log(chalk.dim('  node9 hooks into Claude Code automatically.'));
         console.log(
-          chalk.dim('  Run ') +
-            chalk.cyan('node9 scan --drill-down') +
-            chalk.dim(' to see full commands and session IDs.')
+          chalk.dim('  Every tool call is checked before it runs — no proxy, no latency.')
         );
+        console.log('');
+        console.log('  ' + chalk.dim('→ ') + chalk.underline('https://node9.ai'));
       }
       console.log('');
     });

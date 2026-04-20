@@ -2,7 +2,7 @@
 
 ### The "Sudo" Command for AI Agents.
 
-[![NPM Version](https://img.shields.io/npm/v/@node9/proxy.svg)](https://www.npmjs.com/package/@node9/proxy)
+[![NPM Version](https://img.shields.io/npm/v/node9.svg)](https://www.npmjs.com/package/node9)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Open in HF Spaces](https://huggingface.co/datasets/huggingface/badges/resolve/main/open-in-hf-spaces-sm.svg)](https://huggingface.co/spaces/Node9ai/node9-security-demo)
 [![Documentation](https://img.shields.io/badge/docs-node9.ai%2Fdocs-blue)](https://node9.ai/docs)
@@ -30,6 +30,18 @@ With Node9:
 
 ---
 
+## Try it instantly — no install needed
+
+See what node9 would have caught in your existing Claude Code history:
+
+```bash
+npx node9 scan
+```
+
+Scans `~/.claude/projects/` and `~/.gemini/tmp/`, runs the full policy engine, and shows every operation that would have been blocked or flagged. No account, no daemon, no config.
+
+---
+
 ## Install
 
 ```bash
@@ -37,7 +49,7 @@ With Node9:
 brew tap node9-ai/node9 && brew install node9
 
 # or via npm
-npm install -g @node9/proxy
+npm install -g node9
 ```
 
 ```bash
@@ -265,33 +277,46 @@ node9 sessions --detail <session-id>   # full tool trace (prefix match on sessio
 
 Currently works with Claude Code. Support for other agents coming as they expose session history.
 
-### `node9 scan` — day-0 forecast
+### `node9 scan` — see what you've been missing
 
-Not installed yet? Run `node9 scan` against your existing Claude Code history to see what Node9 **would have caught** if it had been running:
-
-```
-$ node9 scan
-
-  🔍  node9 scan  — what would node9 catch?
-
-  42 sessions  3,891 tool calls  1,165 bash commands  last 90 days
-
-  If node9 had been installed:  23 commands flagged for review
-
-  bash-safe  ·  12 findings  →  node9 shield enable bash-safe
-    block-pipe-to-shell ×8  — Pipe-to-shell is a common supply-chain attack vector
-    review-eval ×4          — eval of dynamic content requires human approval
-
-  Secrets / DLP  ·  2 potential secret leaks
-    aws-access-key  AKIA****************  Bash  Apr 12
-```
-
-`scan` reads raw JSONL history and runs the real policy engine — same shields and rules that would fire in production. No audit log needed.
+Run against your existing history to see what node9 **would have caught**. Works before install — no daemon, no audit log needed:
 
 ```bash
-node9 scan              # last 90 days
-node9 scan --all        # all time
-node9 scan --days 30    # custom window
+npx node9 scan          # try without installing
+node9 scan              # if already installed
+```
+
+```
+🛡  node9  —  security layer for AI coding agents
+   Intercepts dangerous tool calls before they execute. No config needed.
+
+🔍  Scanning your AI history  — what would node9 have caught?
+
+  47 risky operations found — none were blocked
+
+    🛑  Would have blocked        2   operations stopped before execution
+    👁   Would have flagged       44   sent to you for approval
+    🔑  Credential leak           1   secret detected in tool call
+
+  ──────────────────────────────────────────────────────────────────
+  bash-safe  ·  12 findings  →  node9 shield enable bash-safe
+    🛑  block-pipe-to-shell ×8  — Pipe-to-shell is a common supply-chain attack vector
+    👁   review-eval ×4         — eval of dynamic content requires human approval
+
+  ⚡ 47 operations ran unprotected. node9 would have caught them.
+
+  Protect your next session in 30 seconds:
+
+    npm install -g node9
+    node9 init
+```
+
+`scan` reads raw JSONL history and runs the real policy engine — same shields and rules that fire in production.
+
+```bash
+node9 scan                # last 90 days
+node9 scan --all          # all time
+node9 scan --drill-down   # full commands + session IDs
 ```
 
 ### `node9 dlp` — response secret scanner
