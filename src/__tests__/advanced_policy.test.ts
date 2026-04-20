@@ -59,10 +59,10 @@ describe('Path-Based Policy (Advanced)', () => {
         },
       })
     );
-    // block-force-push is a Layer 1 built-in — must fire before the user allow rule
-    const result = await evaluatePolicy('bash', { command: 'git push --force origin main' });
+    // block-rm-rf-home is a Layer 1 built-in — must fire before the user allow rule
+    const result = await evaluatePolicy('bash', { command: 'rm -rf ~' });
     expect(result.decision).toBe('block');
-    expect(result.ruleName).toBe('block-force-push');
+    expect(result.ruleName).toBe('block-rm-rf-home');
   });
 
   it('a project smartRule can block rm on a sensitive path before advisory rules fire', async () => {

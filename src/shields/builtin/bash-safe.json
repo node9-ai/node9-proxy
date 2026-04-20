@@ -52,7 +52,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "dd\\s+.*of=\\/dev\\/(sd|nvme|hd|vd|xvd)",
+          "value": "(^|&&|\\|\\||;)\\s*dd\\s+.*of=\\/dev\\/(sd|nvme|hd|vd|xvd)",
           "flags": "i"
         }
       ],
@@ -66,7 +66,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "\\beval\\b.*\\$\\((curl|wget)\\b",
+          "value": "(^|&&|\\|\\||;)\\s*eval\\s+.*\\$\\((curl|wget)\\b",
           "flags": "i"
         }
       ],
@@ -80,7 +80,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "\\beval\\s+([\\$`(]|\"[^\"]*\\$)",
+          "value": "(^|&&|\\|\\||[;|\\n{(`])\\s*eval\\s+([\\$`(]|\"[^\"]*\\$)",
           "flags": "i"
         }
       ],

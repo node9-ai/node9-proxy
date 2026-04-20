@@ -22,6 +22,7 @@ export {
   shouldSnapshot,
   evaluateSmartConditions,
   normalizeCommandForPolicy,
+  detectDangerousShellExec,
   detectDangerousEval,
   checkDangerousSql,
   evaluatePolicy,

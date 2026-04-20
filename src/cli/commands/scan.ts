@@ -16,7 +16,11 @@ import path from 'path';
 import os from 'os';
 import { SHIELDS } from '../../shields';
 import { getConfig, DEFAULT_CONFIG } from '../../config';
-import { evaluateSmartConditions, matchesPattern } from '../../policy/index';
+import {
+  evaluateSmartConditions,
+  matchesPattern,
+  detectDangerousShellExec,
+} from '../../policy/index';
 import { scanArgs } from '../../dlp';
 import type { SmartRule } from '../../core';
 
@@ -370,6 +374,7 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
           }
 
           // ── Smart rule matching ────────────────────────────────────────
+          let ruleMatched = false;
           for (const source of ruleSources) {
             const { rule } = source;
 
@@ -396,7 +401,45 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
               });
             }
 
+            ruleMatched = true;
             break; // First matching rule wins per tool call
+          }
+
+          // ── AST shell exec detection (catches eval/bash -c with remote download)
+          if (!ruleMatched && (toolNameLower === 'bash' || toolNameLower === 'execute_bash')) {
+            const shellVerdict = detectDangerousShellExec(String(input.command ?? ''));
+            if (shellVerdict) {
+              const astRule: SmartRule = {
+                name: `ast:bash-safe:${shellVerdict}-shell-exec-remote`,
+                tool: 'bash',
+                conditions: [],
+                verdict: shellVerdict,
+                reason: `Shell execution of remote download detected by AST analysis (bash-safe)`,
+              };
+              const inputPreview = preview(input, 120);
+              const isDupe = result.findings.some(
+                (f) =>
+                  f.source.rule.name === astRule.name &&
+                  preview(f.input, 120) === inputPreview &&
+                  f.project === projLabel
+              );
+              if (!isDupe) {
+                result.findings.push({
+                  source: {
+                    shieldName: 'bash-safe',
+                    shieldLabel: 'bash-safe (AST)',
+                    sourceType: 'shield',
+                    rule: astRule,
+                  },
+                  toolName,
+                  input,
+                  timestamp: entry.timestamp ?? '',
+                  project: projLabel,
+                  sessionId,
+                  agent: 'claude',
+                });
+              }
+            }
           }
         }
       }
@@ -539,6 +582,7 @@ function scanGeminiHistory(startDate: Date | null): ScanResult {
             }
           }
 
+          let ruleMatched = false;
           for (const source of ruleSources) {
             const { rule } = source;
             if (rule.verdict === 'allow') continue;
@@ -563,7 +607,48 @@ function scanGeminiHistory(startDate: Date | null): ScanResult {
                 agent: 'gemini',
               });
             }
+            ruleMatched = true;
             break;
+          }
+
+          // ── AST shell exec detection (catches eval/bash -c with remote download)
+          const isShellTool = ['bash', 'execute_bash', 'run_shell_command', 'shell'].includes(
+            toolNameLower
+          );
+          if (!ruleMatched && isShellTool) {
+            const shellVerdict = detectDangerousShellExec(String(input.command ?? ''));
+            if (shellVerdict) {
+              const astRule: SmartRule = {
+                name: `ast:bash-safe:${shellVerdict}-shell-exec-remote`,
+                tool: 'bash',
+                conditions: [],
+                verdict: shellVerdict,
+                reason: `Shell execution of remote download detected by AST analysis (bash-safe)`,
+              };
+              const inputPreview = preview(input, 120);
+              const isDupe = result.findings.some(
+                (f) =>
+                  f.source.rule.name === astRule.name &&
+                  preview(f.input, 120) === inputPreview &&
+                  f.project === projLabel
+              );
+              if (!isDupe) {
+                result.findings.push({
+                  source: {
+                    shieldName: 'bash-safe',
+                    shieldLabel: 'bash-safe (AST)',
+                    sourceType: 'shield',
+                    rule: astRule,
+                  },
+                  toolName,
+                  input,
+                  timestamp: msg.timestamp ?? '',
+                  project: projLabel,
+                  sessionId,
+                  agent: 'gemini',
+                });
+              }
+            }
           }
         }
       }
@@ -636,7 +721,7 @@ function printRuleGroup(
 
   const shown = drillDown ? ruleFindings : ruleFindings.slice(0, topN);
   for (const f of shown) {
-    printFindingRow(f, drillDown, true, previewWidth);
+    printFindingRow(f, drillDown, drillDown, previewWidth);
   }
   if (!drillDown && ruleFindings.length > topN) {
     console.log(

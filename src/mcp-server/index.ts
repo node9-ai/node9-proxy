@@ -12,6 +12,7 @@ import readline from 'readline';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { spawnSync } from 'child_process';
 import { getSnapshotHistory, applyUndo } from '../undo';
 import { getConfig, checkPause } from '../core';
 import { isDaemonRunning } from '../auth/daemon';
@@ -125,8 +126,35 @@ const TOOLS = [
     description:
       'List the node9 snapshot history. Each entry shows the git hash, tool that triggered it, ' +
       'a short summary, affected files, working directory, and timestamp. ' +
-      'Use this to find a hash before calling node9_undo_revert.',
-    inputSchema: { type: 'object', properties: {}, required: [] },
+      'Use this to find a hash before calling node9_undo_revert or node9_undo_detail.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        cwd: {
+          type: 'string',
+          description:
+            'Filter to snapshots for a specific project directory. Omit to show all projects.',
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'node9_undo_detail',
+    description:
+      'Show the full details of a specific node9 snapshot: unified diff, exact files changed, ' +
+      'tool that triggered it, command summary, working directory, and timestamp. ' +
+      'Use this to understand exactly what a snapshot contains before deciding to revert.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        hash: {
+          type: 'string',
+          description: 'The git commit hash (full or 7-char prefix) from node9_undo_list.',
+        },
+      },
+      required: ['hash'],
+    },
   },
   {
     name: 'node9_undo_revert',
@@ -153,14 +181,19 @@ const TOOLS = [
     name: 'node9_audit_get',
     description:
       'Read recent entries from the node9 audit log (~/.node9/audit.log). ' +
-      'Each entry shows timestamp, tool name, decision (allow/block/review), and agent. ' +
-      'Use this to review what AI actions have been taken recently.',
+      'Each entry shows timestamp, tool name, decision (allow/block/review), command/args, and agent. ' +
+      'Use this to review what AI actions have been taken recently, especially blocked or reviewed ops.',
     inputSchema: {
       type: 'object',
       properties: {
         limit: {
           type: 'number',
           description: 'Number of recent entries to return (default: 20, max: 100).',
+        },
+        filter: {
+          type: 'string',
+          enum: ['all', 'block', 'review'],
+          description: 'Filter by decision. Omit or use "all" to show every entry.',
         },
       },
       required: [],
@@ -173,6 +206,62 @@ const TOOLS = [
       'Includes default rules, shield rules, and any custom project rules. ' +
       'Use this to understand exactly what is being blocked or reviewed.',
     inputSchema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'node9_scan',
+    description:
+      'Scan all AI agent history (Claude + Gemini) and report what node9 would have blocked or ' +
+      'flagged. Shows blocked operations, reviewed commands, credential leaks, and agent spend. ' +
+      'Use this to audit past activity and find security gaps before they become incidents.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        drill_down: {
+          type: 'boolean',
+          description:
+            'Show full commands and session IDs for every finding (default: false for a clean summary).',
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'node9_report',
+    description:
+      'Show an activity and security report: tool call counts, blocks, DLP findings, agent cost, ' +
+      'and daily trends for a chosen period. Covers all AI agents (Claude, Gemini, etc.).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        period: {
+          type: 'string',
+          enum: ['today', '7d', '30d', 'month'],
+          description: 'Time period for the report (default: 7d).',
+        },
+        no_tests: {
+          type: 'boolean',
+          description: 'Exclude test runner calls (npm test, vitest, pytest…) from stats.',
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'node9_session',
+    description:
+      'List recent AI agent sessions with per-session summaries: tool calls, cost, modified files, ' +
+      'and any blocked operations. Pass a session_id to see the full tool trace for that session.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        detail: {
+          type: 'string',
+          description:
+            'Session ID to show the full tool trace for. Omit to list all recent sessions.',
+        },
+      },
+      required: [],
+    },
   },
   {
     name: 'node9_rule_add',
@@ -407,19 +496,50 @@ function handleApproverSet(args: Record<string, unknown>): string {
 
 function handleAuditGet(args: Record<string, unknown>): string {
   const limit = Math.min(typeof args.limit === 'number' ? args.limit : 20, 100);
+  const filter = typeof args.filter === 'string' && args.filter !== 'all' ? args.filter : null;
   const auditPath = path.join(os.homedir(), '.node9', 'audit.log');
   if (!fs.existsSync(auditPath)) return 'No audit log found.';
-  const lines = fs.readFileSync(auditPath, 'utf-8').trim().split('\n').filter(Boolean);
-  const recent = lines.slice(-limit);
-  const entries = recent.map((line) => {
+
+  const rawLines = fs.readFileSync(auditPath, 'utf-8').trim().split('\n').filter(Boolean);
+
+  // Parse all, filter by decision if requested, then take the last N
+  const parsed: Array<{ raw: string; decision: string; formatted: string }> = [];
+  for (const line of rawLines) {
     try {
       const e = JSON.parse(line) as Record<string, unknown>;
-      return `${e.ts}  ${String(e.tool).padEnd(20)} ${String(e.decision).padEnd(8)} ${e.agent ?? ''}`;
+      const decision = String(e.decision ?? 'allow');
+      if (filter && decision !== filter) continue;
+
+      // Extract the most useful arg: command for Bash, file_path for Edit/Write, sql for DB tools
+      const argsObj = e.args as Record<string, unknown> | undefined;
+      let detail = '';
+      if (argsObj) {
+        const cmd = argsObj.command ?? argsObj.file_path ?? argsObj.path ?? argsObj.sql;
+        if (typeof cmd === 'string' && cmd) {
+          detail = cmd.length > 80 ? cmd.slice(0, 80) + '…' : cmd;
+        }
+      }
+
+      const decisionPad =
+        decision === 'block' ? '[BLOCK] ' : decision === 'review' ? '[review]' : '[allow] ';
+      const toolPad = String(e.tool ?? '').padEnd(20);
+      const line2 = `${e.ts}  ${decisionPad}  ${toolPad}  ${detail}`;
+      parsed.push({ raw: line, decision, formatted: line2 });
     } catch {
-      return line;
+      parsed.push({ raw: line, decision: 'allow', formatted: line });
     }
-  });
-  return `Last ${entries.length} audit entries:\n\n${entries.join('\n')}`;
+  }
+
+  const recent = parsed.slice(-limit);
+  if (recent.length === 0) {
+    return filter ? `No ${filter} entries found in audit log.` : 'Audit log is empty.';
+  }
+
+  const header = filter
+    ? `Last ${recent.length} ${filter.toUpperCase()} entries:`
+    : `Last ${recent.length} audit entries:`;
+
+  return `${header}\n\n${recent.map((e) => e.formatted).join('\n')}`;
 }
 
 function handlePolicyGet(): string {
@@ -482,10 +602,47 @@ function handleRuleAdd(args: Record<string, unknown>): string {
   return `Rule "${name}" added to ~/.node9/config.json — verdict: ${verdict} when ${field} matches "${pattern}"`;
 }
 
-function handleUndoList(): string {
-  const history = getSnapshotHistory();
+function runCliCommand(subArgs: string[]): string {
+  const result = spawnSync(process.execPath, [process.argv[1], ...subArgs], {
+    encoding: 'utf-8',
+    timeout: 60_000,
+    // Disable colors — stdout is piped (not a TTY), chalk auto-detects, but be explicit
+    env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0' },
+  });
+  if (result.error) throw result.error;
+  const out = (result.stdout ?? '').trimEnd();
+  if (!out && result.stderr) throw new Error(result.stderr.trimEnd());
+  return out || '(no output)';
+}
+
+function handleScanMcp(args: Record<string, unknown>): string {
+  const cliArgs = ['scan'];
+  if (args.drill_down === true) cliArgs.push('--drill-down');
+  return runCliCommand(cliArgs);
+}
+
+function handleReportMcp(args: Record<string, unknown>): string {
+  const cliArgs = ['report'];
+  if (typeof args.period === 'string') cliArgs.push('--period', args.period);
+  if (args.no_tests === true) cliArgs.push('--no-tests');
+  return runCliCommand(cliArgs);
+}
+
+function handleSessionMcp(args: Record<string, unknown>): string {
+  const cliArgs = ['sessions'];
+  if (typeof args.detail === 'string' && args.detail) cliArgs.push('--detail', args.detail);
+  return runCliCommand(cliArgs);
+}
+
+function handleUndoList(args: Record<string, unknown>): string {
+  const cwdFilter = typeof args.cwd === 'string' && args.cwd ? args.cwd : null;
+  let history = getSnapshotHistory();
+  if (cwdFilter) {
+    history = history.filter((e) => e.cwd === cwdFilter);
+  }
   if (history.length === 0) {
-    return 'No snapshots found. Node9 captures snapshots automatically before file edits.';
+    const hint = cwdFilter ? ` for cwd: ${cwdFilter}` : '';
+    return `No snapshots found${hint}. Node9 captures snapshots automatically before file edits.`;
   }
   const lines = history
     .slice()
@@ -496,7 +653,44 @@ function handleUndoList(): string {
       const summary = entry.argsSummary ? ` — ${entry.argsSummary}` : '';
       return `[${i + 1}] ${entry.hash.slice(0, 7)}  ${date}  ${entry.tool}${summary}  (${files})  cwd: ${entry.cwd}\n    full hash: ${entry.hash}`;
     });
-  return lines.join('\n\n');
+  const header = cwdFilter
+    ? `${lines.length} snapshot(s) for ${cwdFilter}:`
+    : `${lines.length} snapshot(s) across all projects:`;
+  return `${header}\n\n${lines.join('\n\n')}`;
+}
+
+function handleUndoDetail(args: Record<string, unknown>): string {
+  const hash = args.hash;
+  if (typeof hash !== 'string' || !hash) {
+    throw new Error('hash is required');
+  }
+  const history = getSnapshotHistory();
+  // Match full hash or 7-char prefix
+  const entry = history.find((e) => e.hash === hash || e.hash.startsWith(hash));
+  if (!entry) {
+    throw new Error(`Snapshot ${hash} not found. Run node9_undo_list to see available snapshots.`);
+  }
+
+  const lines: string[] = [];
+  lines.push(`Hash:    ${entry.hash}`);
+  lines.push(`Tool:    ${entry.tool}`);
+  lines.push(`Summary: ${entry.argsSummary || '(none)'}`);
+  lines.push(`CWD:     ${entry.cwd}`);
+  lines.push(`Time:    ${new Date(entry.timestamp).toLocaleString()}`);
+  lines.push(`Files:   ${entry.files?.length ? entry.files.join(', ') : '(none recorded)'}`);
+
+  if (entry.diff) {
+    lines.push('');
+    lines.push('── Diff ─────────────────────────────────────────────────');
+    lines.push(entry.diff);
+  } else {
+    lines.push('');
+    lines.push(
+      'No diff available (first snapshot for this project, or snapshot predates diff capture).'
+    );
+  }
+
+  return lines.join('\n');
 }
 
 function handleUndoRevert(args: Record<string, unknown>): string {
@@ -580,7 +774,9 @@ export function runMcpServer(): void {
         } else if (toolName === 'node9_approver_set') {
           text = handleApproverSet(toolArgs);
         } else if (toolName === 'node9_undo_list') {
-          text = handleUndoList();
+          text = handleUndoList(toolArgs);
+        } else if (toolName === 'node9_undo_detail') {
+          text = handleUndoDetail(toolArgs);
         } else if (toolName === 'node9_undo_revert') {
           text = handleUndoRevert(toolArgs);
         } else if (toolName === 'node9_audit_get') {
@@ -589,6 +785,12 @@ export function runMcpServer(): void {
           text = handlePolicyGet();
         } else if (toolName === 'node9_rule_add') {
           text = handleRuleAdd(toolArgs);
+        } else if (toolName === 'node9_scan') {
+          text = handleScanMcp(toolArgs);
+        } else if (toolName === 'node9_report') {
+          text = handleReportMcp(toolArgs);
+        } else if (toolName === 'node9_session') {
+          text = handleSessionMcp(toolArgs);
         } else {
           process.stdout.write(err(id, -32601, `Unknown tool: ${toolName}`) + '\n');
           return;

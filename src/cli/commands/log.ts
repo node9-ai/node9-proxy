@@ -7,8 +7,7 @@ import path from 'path';
 import os from 'os';
 import { redactSecrets, appendToLog, LOCAL_AUDIT_LOG } from '../../audit';
 import { getConfig } from '../../config';
-import { shouldSnapshot } from '../../policy';
-import { createShadowSnapshot } from '../../undo';
+import { createShadowSnapshot, getSnapshotHistory } from '../../undo';
 import { notifyTaintPropagate, isDaemonRunning, notifyActivitySocket } from '../../auth/daemon';
 import { parseCpMvOp } from '../../utils/cp-mv-parser';
 
@@ -153,10 +152,32 @@ export function registerLogCommand(program: Command): void {
           // here is non-fatal and must not retroactively gap the audit trail above.
           const config = getConfig(safeCwd);
 
-          // PostToolUse snapshot is a fallback for tools not covered by PreToolUse.
-          // Uses the same configurable snapshot policy.
-          if (shouldSnapshot(tool, {}, config)) {
-            await createShadowSnapshot('unknown', {}, config.policy.snapshot.ignorePaths);
+          // PostToolUse: snapshot Bash commands only.
+          // Edit/Write tools are already snapshotted by PreToolUse in check.ts with full
+          // metadata. Snapshotting them here again creates duplicate 'unknown' entries.
+          // For Bash, we capture post-execution state so that sed -i, echo >, tee etc.
+          // are reversible. Guard: only snapshot if a prior snapshot exists for this cwd —
+          // avoids cold-start overhead on projects where undo was never used.
+          if ((tool === 'Bash' || tool === 'bash') && config.settings.enableUndo !== false) {
+            const bashCommand =
+              typeof rawInput === 'object' &&
+              rawInput !== null &&
+              'command' in rawInput &&
+              typeof (rawInput as Record<string, unknown>).command === 'string'
+                ? ((rawInput as Record<string, unknown>).command as string)
+                : null;
+            if (bashCommand) {
+              const effectiveCwd = safeCwd ?? process.cwd();
+              const history = getSnapshotHistory();
+              const hasPrior = history.some((e) => e.cwd === effectiveCwd);
+              if (hasPrior) {
+                await createShadowSnapshot(
+                  'Bash',
+                  { command: bashCommand },
+                  config.policy.snapshot.ignorePaths
+                );
+              }
+            }
           }
         } catch (err) {
           // Always write to hook-debug.log — this catch guards the audit trail, so
