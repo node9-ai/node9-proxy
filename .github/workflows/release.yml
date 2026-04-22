@@ -44,6 +44,7 @@ jobs:
       - name: Sync and publish wrapper (node9-ai)
         env:
           GITHUB_TOKEN: ${{ secrets.AUTO_PR_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           VERSION=$(node -p "require('./package.json').version")
           git clone https://x-access-token:${GITHUB_TOKEN}@github.com/node9-ai/node9-wrapper.git /tmp/node9-wrapper
