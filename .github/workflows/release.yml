@@ -53,7 +53,7 @@ jobs:
           npm version "$VERSION" --no-git-tag-version
           git config user.email "release-bot@node9.ai"
           git config user.name "node9-release-bot"
-          git add README.md package.json package-lock.json
+          git add README.md package.json
           git commit -m "chore: sync README and bump version to ${VERSION}"
           git push
           npm publish --provenance --access public
