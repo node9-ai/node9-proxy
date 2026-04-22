@@ -132,7 +132,7 @@ export const DEFAULT_CONFIG: Config = {
     approvalTimeoutMs: 120_000, // 120-second auto-deny timeout
     flightRecorder: true,
     auditHashArgs: true,
-    approvers: { native: true, browser: true, cloud: false, terminal: true },
+    approvers: { native: true, browser: false, cloud: false, terminal: true },
     cloudSyncIntervalHours: 5,
   },
   policy: {

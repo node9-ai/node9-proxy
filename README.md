@@ -2,7 +2,7 @@
 
 ### The "Sudo" Command for AI Agents.
 
-[![NPM Version](https://img.shields.io/npm/v/node9.svg)](https://www.npmjs.com/package/node9)
+[![NPM Version](https://img.shields.io/npm/v/node9-ai.svg)](https://www.npmjs.com/package/node9-ai)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Open in HF Spaces](https://huggingface.co/datasets/huggingface/badges/resolve/main/open-in-hf-spaces-sm.svg)](https://huggingface.co/spaces/Node9ai/node9-security-demo)
 [![Documentation](https://img.shields.io/badge/docs-node9.ai%2Fdocs-blue)](https://node9.ai/docs)
@@ -32,13 +32,30 @@ With Node9:
 
 ## Try it instantly — no install needed
 
-See what node9 would have caught in your existing Claude Code history:
+See what node9 would have caught in your existing Claude Code, Gemini CLI, and Codex history:
 
 ```bash
-npx node9 scan
+npx node9-ai scan
 ```
 
-Scans `~/.claude/projects/` and `~/.gemini/tmp/`, runs the full policy engine, and shows every operation that would have been blocked or flagged. No account, no daemon, no config.
+No account, no daemon, no config. Reads `~/.claude/projects/`, `~/.gemini/tmp/`, and `~/.codex/`, runs the full policy engine, and shows every operation that would have been blocked or flagged.
+
+```
+🔍  Scanning your AI history  — what would node9 have caught?
+
+  47 risky operations found — none were blocked
+
+    🛑  Would have blocked        2   operations stopped before execution
+    👁   Would have flagged       44   sent to you for approval
+    🔑  Credential leak           1   secret detected in tool call
+
+  ──────────────────────────────────────────────────────────────────
+  bash-safe  ·  12 findings  →  node9 shield enable bash-safe
+    🛑  block-pipe-to-shell ×8  — Pipe-to-shell is a common supply-chain attack vector
+    👁   review-eval ×4         — eval of dynamic content requires human approval
+
+  ⚡ 47 operations ran unprotected. node9 would have caught them.
+```
 
 ---
 
@@ -168,6 +185,14 @@ Node9 wires a live statusline into Claude Code that shows you what's happening i
 
 The HUD is wired automatically by `node9 init`. Full session logs land in `~/.node9/audit.log`.
 
+### `node9 scan` — flags
+
+```bash
+node9 scan                # last 90 days
+node9 scan --all          # all time
+node9 scan --drill-down   # full commands + session IDs
+```
+
 ### `node9 tail` — live stream
 
 Stream every tool call as it happens. Useful when you send an agent off to work and want to watch what it's doing:
@@ -276,48 +301,6 @@ node9 sessions --detail <session-id>   # full tool trace (prefix match on sessio
 ```
 
 Currently works with Claude Code. Support for other agents coming as they expose session history.
-
-### `node9 scan` — see what you've been missing
-
-Run against your existing history to see what node9 **would have caught**. Works before install — no daemon, no audit log needed:
-
-```bash
-npx node9 scan          # try without installing
-node9 scan              # if already installed
-```
-
-```
-🛡  node9  —  security layer for AI coding agents
-   Intercepts dangerous tool calls before they execute. No config needed.
-
-🔍  Scanning your AI history  — what would node9 have caught?
-
-  47 risky operations found — none were blocked
-
-    🛑  Would have blocked        2   operations stopped before execution
-    👁   Would have flagged       44   sent to you for approval
-    🔑  Credential leak           1   secret detected in tool call
-
-  ──────────────────────────────────────────────────────────────────
-  bash-safe  ·  12 findings  →  node9 shield enable bash-safe
-    🛑  block-pipe-to-shell ×8  — Pipe-to-shell is a common supply-chain attack vector
-    👁   review-eval ×4         — eval of dynamic content requires human approval
-
-  ⚡ 47 operations ran unprotected. node9 would have caught them.
-
-  Protect your next session in 30 seconds:
-
-    npm install -g node9
-    node9 init
-```
-
-`scan` reads raw JSONL history and runs the real policy engine — same shields and rules that fire in production.
-
-```bash
-node9 scan                # last 90 days
-node9 scan --all          # all time
-node9 scan --drill-down   # full commands + session IDs
-```
 
 ### `node9 dlp` — response secret scanner
 
