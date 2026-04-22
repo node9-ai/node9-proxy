@@ -233,7 +233,99 @@ function buildRuleSources(): RuleSource[] {
 // JSONL scanner
 // ---------------------------------------------------------------------------
 
-function scanClaudeHistory(startDate: Date | null): ScanResult {
+function countScanFiles(): number {
+  let total = 0;
+  const claudeDir = path.join(os.homedir(), '.claude', 'projects');
+  if (fs.existsSync(claudeDir)) {
+    try {
+      for (const proj of fs.readdirSync(claudeDir)) {
+        const p = path.join(claudeDir, proj);
+        try {
+          if (!fs.statSync(p).isDirectory()) continue;
+          total += fs
+            .readdirSync(p)
+            .filter((f) => f.endsWith('.jsonl') && !f.startsWith('agent-')).length;
+        } catch {
+          continue;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  const geminiDir = path.join(os.homedir(), '.gemini', 'tmp');
+  if (fs.existsSync(geminiDir)) {
+    try {
+      for (const slug of fs.readdirSync(geminiDir)) {
+        const p = path.join(geminiDir, slug);
+        try {
+          if (!fs.statSync(p).isDirectory()) continue;
+          const chatsDir = path.join(p, 'chats');
+          if (fs.existsSync(chatsDir)) {
+            try {
+              total += fs.readdirSync(chatsDir).filter((f) => f.endsWith('.json')).length;
+            } catch {
+              /* ignore */
+            }
+          }
+        } catch {
+          continue;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  const codexDir = path.join(os.homedir(), '.codex', 'sessions');
+  if (fs.existsSync(codexDir)) {
+    try {
+      for (const year of fs.readdirSync(codexDir)) {
+        const yp = path.join(codexDir, year);
+        try {
+          if (!fs.statSync(yp).isDirectory()) continue;
+          for (const month of fs.readdirSync(yp)) {
+            const mp = path.join(yp, month);
+            try {
+              if (!fs.statSync(mp).isDirectory()) continue;
+              for (const day of fs.readdirSync(mp)) {
+                const dp = path.join(mp, day);
+                try {
+                  if (!fs.statSync(dp).isDirectory()) continue;
+                  total += fs.readdirSync(dp).filter((f) => f.endsWith('.jsonl')).length;
+                } catch {
+                  continue;
+                }
+              }
+            } catch {
+              continue;
+            }
+          }
+        } catch {
+          continue;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return total;
+}
+
+function renderProgressBar(done: number, total: number): void {
+  const width = 28;
+  const pct = total > 0 ? done / total : 0;
+  const filled = Math.min(width, Math.round(pct * width));
+  const bar = '█'.repeat(filled) + '░'.repeat(width - filled);
+  const label = total > 0 ? `${done}/${total} files` : `${done} files`;
+  process.stdout.write(
+    `\r  ${chalk.cyan('Scanning')}  [${chalk.cyan(bar)}]  ${chalk.dim(label)}  `
+  );
+}
+
+function scanClaudeHistory(
+  startDate: Date | null,
+  onProgress?: (done: number) => void
+): ScanResult {
   const projectsDir = path.join(os.homedir(), '.claude', 'projects');
 
   const result: ScanResult = {
@@ -281,6 +373,7 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
     for (const file of files) {
       result.filesScanned++;
       result.sessions++;
+      onProgress?.(result.filesScanned);
 
       const sessionId = file.replace(/\.jsonl$/, '');
 
@@ -453,7 +546,10 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
 // Gemini history scanner
 // ---------------------------------------------------------------------------
 
-function scanGeminiHistory(startDate: Date | null): ScanResult {
+function scanGeminiHistory(
+  startDate: Date | null,
+  onProgress?: (done: number) => void
+): ScanResult {
   const tmpDir = path.join(os.homedir(), '.gemini', 'tmp');
   const result: ScanResult = {
     filesScanned: 0,
@@ -507,6 +603,7 @@ function scanGeminiHistory(startDate: Date | null): ScanResult {
 
     for (const chatFile of chatFiles) {
       result.filesScanned++;
+      onProgress?.(result.filesScanned);
 
       const sessionId = chatFile.replace(/\.json$/, '');
 
@@ -662,7 +759,7 @@ function scanGeminiHistory(startDate: Date | null): ScanResult {
 // Codex history scanner
 // ---------------------------------------------------------------------------
 
-function scanCodexHistory(startDate: Date | null): ScanResult {
+function scanCodexHistory(startDate: Date | null, onProgress?: (done: number) => void): ScanResult {
   const sessionsBase = path.join(os.homedir(), '.codex', 'sessions');
   const result: ScanResult = {
     filesScanned: 0,
@@ -716,6 +813,7 @@ function scanCodexHistory(startDate: Date | null): ScanResult {
 
   for (const filePath of jsonlFiles) {
     result.filesScanned++;
+    onProgress?.(result.filesScanned);
 
     let lines: string[];
     try {
@@ -1013,12 +1111,22 @@ export function registerScanCommand(program: Command): void {
       );
       console.log('');
 
-      process.stdout.write(chalk.dim('  Scanning…'));
-      const claudeScan = scanClaudeHistory(startDate);
-      const geminiScan = scanGeminiHistory(startDate);
-      const codexScan = scanCodexHistory(startDate);
+      const totalFiles = countScanFiles();
+      let filesScanned = 0;
+      const onProgress = (done: number) => {
+        filesScanned = done;
+        renderProgressBar(filesScanned, totalFiles);
+      };
+      renderProgressBar(0, totalFiles);
+      const claudeScan = scanClaudeHistory(startDate, onProgress);
+      const geminiScan = scanGeminiHistory(startDate, (done) =>
+        onProgress(claudeScan.filesScanned + done)
+      );
+      const codexScan = scanCodexHistory(startDate, (done) =>
+        onProgress(claudeScan.filesScanned + geminiScan.filesScanned + done)
+      );
       const scan = mergeScans(mergeScans(claudeScan, geminiScan), codexScan);
-      process.stdout.write('\r' + ' '.repeat(20) + '\r');
+      process.stdout.write('\r' + ' '.repeat(60) + '\r');
 
       if (scan.filesScanned === 0) {
         console.log(chalk.yellow('  No session history found.'));
