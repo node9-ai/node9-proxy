@@ -1331,6 +1331,65 @@
       .btn-export:hover {
         background: rgba(255, 255, 255, 0.1);
       }
+      /* rule aggregation rows */
+      .scan-rule-section-label {
+        padding: 8px 14px 4px;
+        font-size: 10px;
+        font-weight: 700;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+      .scan-rule-row {
+        display: grid;
+        grid-template-columns: 50px 1fr 80px 32px 16px;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 14px;
+        cursor: pointer;
+        border-bottom: 1px solid rgba(48, 54, 61, 0.4);
+        transition: background 0.1s;
+      }
+      .scan-rule-row:hover {
+        background: rgba(255, 255, 255, 0.03);
+      }
+      .scan-rule-name {
+        font-size: 12px;
+        color: var(--accent);
+        font-weight: 600;
+      }
+      .scan-rule-bar-wrap {
+        height: 5px;
+        background: rgba(255, 255, 255, 0.06);
+        border-radius: 3px;
+        overflow: hidden;
+      }
+      .scan-rule-bar {
+        display: block;
+        height: 100%;
+        background: var(--accent);
+        border-radius: 3px;
+        opacity: 0.6;
+      }
+      .scan-rule-count {
+        font-size: 11px;
+        color: var(--text-bright);
+        font-weight: 700;
+        text-align: right;
+      }
+      .scan-rule-arrow {
+        font-size: 9px;
+        color: var(--muted);
+        text-align: center;
+      }
+      .scan-rule-detail {
+        background: rgba(0, 0, 0, 0.2);
+        border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+      }
+      .scan-rule-detail .scan-finding-row {
+        grid-template-columns: 56px 1fr;
+        padding: 5px 14px 5px 24px;
+      }
     </style>
   </head>
   <body>
@@ -2329,6 +2388,20 @@
           );
         }
 
+        // Group items by rule/pattern, sorted by count desc
+        function groupByRule(items, type) {
+          const map = new Map();
+          for (const item of items) {
+            const key =
+              type === 'leak'
+                ? item.pattern || 'DLP'
+                : (item.rule || 'unknown').replace(/^shield:[^:]+:/, '');
+            if (!map.has(key)) map.set(key, []);
+            map.get(key).push(item);
+          }
+          return [...map.entries()].sort((a, b) => b[1].length - a[1].length);
+        }
+
         function findingRow(item, type) {
           const date = new Date(item.timestamp).toLocaleDateString([], {
             month: 'short',
@@ -2338,22 +2411,47 @@
           const badgeClass =
             verdict === 'block' ? 'badge-block' : verdict === 'dlp' ? 'badge-dlp' : 'badge-review';
           const badgeLabel = verdict === 'block' ? 'BLOCK' : verdict === 'dlp' ? 'DLP' : 'REVIEW';
-          const ruleName =
-            type === 'leak'
-              ? esc(item.pattern || '')
-              : esc((item.rule || '').replace(/^shield:[^:]+:/, ''));
           const cmdText =
-            type === 'leak' ? esc(item.sample || '') : esc(truncate(item.command || '', 100));
+            type === 'leak' ? esc(item.sample || '') : esc(truncate(item.command || '', 120));
           return `<div class="scan-finding-row">
             <span class="scan-finding-ts">${date}</span>
-            <span class="scan-finding-rule">${ruleName}</span>
             <span class="scan-finding-cmd"><span class="scan-verdict-badge ${badgeClass}">${badgeLabel}</span>${cmdText}</span>
           </div>`;
         }
 
-        function toggleGroup(header) {
-          const body = header.nextElementSibling;
-          body.style.display = body.style.display === 'none' ? '' : 'none';
+        function ruleRows(grouped, type, maxBar) {
+          return grouped
+            .map(([rule, items]) => {
+              const count = items.length;
+              const verdict = type === 'leak' ? 'dlp' : items[0]?.verdict || 'review';
+              const badgeClass =
+                verdict === 'block'
+                  ? 'badge-block'
+                  : verdict === 'dlp'
+                    ? 'badge-dlp'
+                    : 'badge-review';
+              const badgeLabel =
+                verdict === 'block' ? 'BLOCK' : verdict === 'dlp' ? 'DLP' : 'REVIEW';
+              const barPct = Math.round((count / maxBar) * 100);
+              const detailId = 'detail-' + Math.random().toString(36).slice(2);
+              const detailRows = items.map((i) => findingRow(i, type)).join('');
+              return `<div class="scan-rule-row" onclick="
+                var d=document.getElementById('${detailId}');
+                var a=this.querySelector('.scan-rule-arrow');
+                d.style.display=d.style.display===''?'none':'';
+                a.textContent=d.style.display===''?'▲':'▼';
+              ">
+                <span class="scan-verdict-badge ${badgeClass}">${badgeLabel}</span>
+                <span class="scan-rule-name">${esc(rule)}</span>
+                <span class="scan-rule-bar-wrap">
+                  <span class="scan-rule-bar" style="width:${barPct}%"></span>
+                </span>
+                <span class="scan-rule-count">${count}</span>
+                <span class="scan-rule-arrow">▼</span>
+              </div>
+              <div id="${detailId}" style="display:none" class="scan-rule-detail">${detailRows}</div>`;
+            })
+            .join('');
         }
 
         let groups = '';
@@ -2362,22 +2460,28 @@
           const srcFindings = src.findings || [];
           if (!srcLeaks.length && !srcFindings.length) continue;
           const srcTotal = srcLeaks.length + srcFindings.length;
+
+          const groupedLeaks = groupByRule(srcLeaks, 'leak');
+          const groupedFindings = groupByRule(srcFindings, 'risk');
+          const maxBar = Math.max(
+            ...groupedLeaks.map(([, v]) => v.length),
+            ...groupedFindings.map(([, v]) => v.length),
+            1
+          );
+
           let rows = '';
-          if (srcLeaks.length) {
-            rows += `<div style="padding:6px 14px 2px;font-size:10px;font-weight:700;color:#e5534b;text-transform:uppercase;letter-spacing:.5px">🔑 Credential Leaks</div>`;
-            rows += srcLeaks.map((l) => findingRow(l, 'leak')).join('');
-          }
-          if (srcFindings.length) {
-            rows += `<div style="padding:6px 14px 2px;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">🚨 Policy Risks</div>`;
-            rows += srcFindings.map((f) => findingRow(f, 'risk')).join('');
-          }
+          if (groupedLeaks.length)
+            rows += `<div class="scan-rule-section-label" style="color:#e5534b">🔑 Credential Leaks</div>${ruleRows(groupedLeaks, 'leak', maxBar)}`;
+          if (groupedFindings.length)
+            rows += `<div class="scan-rule-section-label">🚨 Policy Risks</div>${ruleRows(groupedFindings, 'risk', maxBar)}`;
+
           groups += `<div class="scan-group">
-            <div class="scan-group-header" onclick="toggleGroup(this)">
+            <div class="scan-group-header" onclick="var b=this.nextElementSibling;b.style.display=b.style.display==='none'?'':'none'">
               ${esc(src.icon)} ${esc(src.label)}
               <span style="font-size:10px;font-weight:400;color:var(--muted);margin-left:4px">${src.sessions} sessions</span>
               <span class="scan-group-count">${srcTotal} finding${srcTotal !== 1 ? 's' : ''}</span>
             </div>
-            <div class="scan-group-body">${rows}</div>
+            <div class="scan-group-body" style="padding:8px 0">${rows}</div>
           </div>`;
         }
 
