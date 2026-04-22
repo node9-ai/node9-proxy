@@ -1093,7 +1093,7 @@
       }
       /* ── Scan History Button ─────────────────────────────────────────── */
       .btn-scan-history {
-        margin-left: auto;
+        position: relative;
         background: rgba(83, 155, 245, 0.1);
         border: 1px solid rgba(83, 155, 245, 0.3);
         color: var(--accent);
@@ -1106,6 +1106,23 @@
       }
       .btn-scan-history:hover {
         background: rgba(83, 155, 245, 0.2);
+      }
+      .scan-badge {
+        position: absolute;
+        top: -6px;
+        right: -6px;
+        background: var(--danger);
+        color: #fff;
+        font-size: 10px;
+        font-weight: 700;
+        min-width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0 3px;
+        pointer-events: none;
       }
       /* ── Scan Modal ──────────────────────────────────────────────────── */
       .scan-overlay {
@@ -1401,8 +1418,10 @@
           <button class="nav-tab active" onclick="showTab('approvals')">Approvals</button>
           <button class="nav-tab" onclick="showTab('dashboard')">Dashboard</button>
         </div>
-        <button class="btn-scan-history" onclick="openScanModal()">🔍 Scan History</button>
         <div id="st" class="status-badge">Waiting...</div>
+        <button class="btn-scan-history" onclick="openScanModal()" id="btn-scan-history">
+          🔍 Scan History
+        </button>
       </header>
 
       <!-- ── Scan History Modal ─────────────────────────────────────────── -->
@@ -1568,13 +1587,53 @@
           </div>
 
           <div class="panel">
-            <div class="panel-title">💬 Cloud Approvals</div>
+            <div class="panel-title">🔔 Approvers</div>
             <div class="setting-row">
               <div class="setting-text">
-                <div class="setting-label">Enable Cloud</div>
-                <div class="setting-desc">
-                  Use Cloud/Slack as the approval authority when a key is saved.
-                </div>
+                <div class="setting-label">Terminal</div>
+                <div class="setting-desc">Inline approval prompt in the agent's terminal.</div>
+              </div>
+              <label class="toggle">
+                <input
+                  type="checkbox"
+                  id="approverTerminalToggle"
+                  onchange="saveSetting('approverTerminal', this.checked)"
+                />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="setting-row">
+              <div class="setting-text">
+                <div class="setting-label">Native Popup</div>
+                <div class="setting-desc">OS-level dialog (zenity / osascript).</div>
+              </div>
+              <label class="toggle">
+                <input
+                  type="checkbox"
+                  id="approverNativeToggle"
+                  onchange="saveSetting('approverNative', this.checked)"
+                />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="setting-row">
+              <div class="setting-text">
+                <div class="setting-label">Browser</div>
+                <div class="setting-desc">This dashboard (auto-opens on pending request).</div>
+              </div>
+              <label class="toggle">
+                <input
+                  type="checkbox"
+                  id="approverBrowserToggle"
+                  onchange="saveSetting('approverBrowser', this.checked)"
+                />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="setting-row">
+              <div class="setting-text">
+                <div class="setting-label">Cloud / Slack</div>
+                <div class="setting-desc">Remote approval via node9.ai or Slack.</div>
               </div>
               <label class="toggle">
                 <input
@@ -1585,16 +1644,18 @@
                 <span class="slider"></span>
               </label>
             </div>
-            <div class="slack-key-row">
-              <input
-                type="password"
-                id="slackKeyInput"
-                class="slack-key-input"
-                placeholder="Paste API key…"
-              />
-              <button class="btn-save-key" onclick="saveSlackKey()">Save</button>
+            <div id="slackKeySection">
+              <div class="slack-key-row">
+                <input
+                  type="password"
+                  id="slackKeyInput"
+                  class="slack-key-input"
+                  placeholder="Paste Cloud API key…"
+                />
+                <button class="btn-save-key" onclick="saveSlackKey()">Save</button>
+              </div>
+              <div id="slackStatusLine" class="slack-status-line">No key saved</div>
             </div>
-            <div id="slackStatusLine" class="slack-status-line">No key saved</div>
           </div>
 
           <div class="panel">
@@ -1991,10 +2052,15 @@
           trustEnabled = !!s.enableTrustSessions;
           const trustTog = document.getElementById('trustSessionsToggle');
           if (trustTog) trustTog.checked = trustEnabled;
-          // Show/hide trust rows on any cards already rendered
           document.querySelectorAll('[id^="tr-"]').forEach((el) => {
             el.classList.toggle('show', trustEnabled);
           });
+          const tTog = document.getElementById('approverTerminalToggle');
+          const nTog = document.getElementById('approverNativeToggle');
+          const bTog = document.getElementById('approverBrowserToggle');
+          if (tTog) tTog.checked = s.approverTerminal !== false;
+          if (nTog) nTog.checked = s.approverNative !== false;
+          if (bTog) bTog.checked = !!s.approverBrowser;
         })
         .catch(() => {});
 
@@ -2005,18 +2071,25 @@
       function applySlackStatus(s) {
         const tog = document.getElementById('slackEnabledToggle');
         const line = document.getElementById('slackStatusLine');
+        const keySection = document.getElementById('slackKeySection');
         tog.disabled = !s.hasKey;
         tog.checked = s.hasKey && s.enabled;
+        if (keySection) keySection.style.display = tog.checked ? '' : 'none';
         if (s.hasKey) {
           line.textContent = s.enabled
-            ? '🟢 Slack active — approvals handled by Slack'
-            : '⚫ Key saved, Slack disabled';
+            ? '🟢 Cloud active — approvals handled remotely'
+            : '⚫ Key saved, Cloud disabled';
           line.className = 'slack-status-line' + (s.enabled ? ' active' : '');
         } else {
           line.textContent = 'No key saved';
           line.className = 'slack-status-line';
         }
       }
+
+      document.getElementById('slackEnabledToggle').addEventListener('change', function () {
+        const keySection = document.getElementById('slackKeySection');
+        if (keySection) keySection.style.display = this.checked ? '' : 'none';
+      });
 
       fetch('/slack-status')
         .then((r) => r.json())
@@ -2277,10 +2350,43 @@
       let _scanData = null;
       let _progressRaf = null;
 
+      // Run once silently on load — badge the button if issues found
+      (async function backgroundScan() {
+        try {
+          const res = await fetch('/scan', { headers: { 'X-Node9-Token': CSRF_TOKEN } });
+          if (!res.ok) return;
+          const data = await res.json();
+          if (data.status !== 'complete') return;
+          _scanData = data;
+          const sources = data.sources || [];
+          const total =
+            sources.reduce((n, s) => n + s.findings.length, 0) +
+            sources.reduce((n, s) => n + s.leaks.length, 0);
+          if (total > 0) {
+            const btn = document.getElementById('btn-scan-history');
+            if (btn && !btn.querySelector('.scan-badge')) {
+              const badge = document.createElement('span');
+              badge.className = 'scan-badge';
+              badge.textContent = total > 99 ? '99+' : String(total);
+              btn.appendChild(badge);
+            }
+          }
+        } catch {}
+      })();
+
       function openScanModal() {
-        _scanData = null;
         if (_progressRaf) cancelAnimationFrame(_progressRaf);
         document.getElementById('scan-modal-overlay').classList.add('open');
+        // Remove badge when user opens modal
+        const badge = document.querySelector('#btn-scan-history .scan-badge');
+        if (badge) badge.remove();
+        // If background scan already finished, show results immediately
+        if (_scanData) {
+          document.getElementById('scan-progress-view').style.display = 'none';
+          document.getElementById('scan-results-view').style.display = '';
+          document.getElementById('scan-results-content').innerHTML = renderScanResults(_scanData);
+          return;
+        }
         document.getElementById('scan-progress-view').style.display = '';
         document.getElementById('scan-results-view').style.display = 'none';
         const bar = document.getElementById('scan-progress-bar');
