@@ -59,8 +59,8 @@ jobs:
           git config user.email "release-bot@node9.ai"
           git config user.name "node9-release-bot"
           git add README.md package.json
-          git commit -m "chore: sync README and bump version to ${VERSION}"
-          git push
+          git diff --cached --quiet || git commit -m "chore: sync README and bump version to ${VERSION}"
+          git diff origin/main..HEAD --quiet || git push
           # Publish from GITHUB_WORKSPACE so NPM_CONFIG_USERCONFIG auth applies
           cd $GITHUB_WORKSPACE
           npm publish /tmp/node9-wrapper --provenance --access public --ignore-scripts
