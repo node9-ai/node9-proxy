@@ -59,10 +59,10 @@ describe('Path-Based Policy (Advanced)', () => {
         },
       })
     );
-    // block-force-push is a Layer 1 built-in — must fire before the user allow rule
-    const result = await evaluatePolicy('bash', { command: 'git push --force origin main' });
+    // block-rm-rf-home is a Layer 1 built-in — must fire before the user allow rule
+    const result = await evaluatePolicy('bash', { command: 'rm -rf ~' });
     expect(result.decision).toBe('block');
-    expect(result.ruleName).toBe('block-force-push');
+    expect(result.ruleName).toBe('block-rm-rf-home');
   });
 
   it('a project smartRule can block rm on a sensitive path before advisory rules fire', async () => {
@@ -502,5 +502,50 @@ describe('getConfig — environments layer merge', () => {
     const cfg = getConfig();
     expect(cfg.environments['production']?.requireApproval).toBe(true);
     expect(cfg.environments['development']?.requireApproval).toBe(false);
+  });
+});
+
+// ── DLP runs before ignoredTools fast path ────────────────────────────────────
+// Regression test for: evaluatePolicy skipped DLP for ignored tools entirely.
+// A credential passed to ls/grep/cat must be caught even though those tools are
+// on the ignoredTools allowlist.
+
+// NOTE: Fake secret strings built via concatenation to defeat static secret scanners.
+const FAKE_AWS = 'AKIA' + 'J2XZKZMV' + 'P3NQRSTU';
+
+describe('DLP fires before ignoredTools fast path', () => {
+  type RealpathWithNative = typeof fs.realpathSync & { native: (p: unknown) => string };
+  const origNative = (fs.realpathSync as RealpathWithNative).native;
+
+  beforeEach(() => {
+    _resetConfigCache();
+    existsSpy.mockReturnValue(false);
+    readSpy.mockReturnValue('');
+    (fs.realpathSync as RealpathWithNative).native = vi
+      .fn()
+      .mockImplementation((p: unknown) => String(p));
+  });
+
+  afterEach(() => {
+    (fs.realpathSync as RealpathWithNative).native = origNative;
+  });
+
+  it('blocks an AWS key passed to an ignored tool (ls) when scanIgnoredTools is on', async () => {
+    // ls is in the default ignoredTools list — without the fix it would fast-path allow
+    const result = await evaluatePolicy('ls', { command: `ls ${FAKE_AWS}` });
+    expect(result.decision).toBe('block');
+    expect(result.blockedByLabel).toMatch(/DLP/i);
+    expect(result.reason).toMatch(/AWS Access Key ID/i);
+  });
+
+  it('blocks an AWS key passed to a non-ignored tool (Bash)', async () => {
+    const result = await evaluatePolicy('Bash', { command: `echo ${FAKE_AWS}` });
+    expect(result.decision).toBe('block');
+    expect(result.blockedByLabel).toMatch(/DLP/i);
+  });
+
+  it('allows a clean call to an ignored tool with no credentials', async () => {
+    const result = await evaluatePolicy('ls', { command: 'ls -la /tmp' });
+    expect(result.decision).toBe('allow');
   });
 });

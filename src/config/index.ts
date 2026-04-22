@@ -132,7 +132,7 @@ export const DEFAULT_CONFIG: Config = {
     approvalTimeoutMs: 120_000, // 120-second auto-deny timeout
     flightRecorder: true,
     auditHashArgs: true,
-    approvers: { native: true, browser: true, cloud: false, terminal: true },
+    approvers: { native: true, browser: false, cloud: false, terminal: true },
     cloudSyncIntervalHours: 5,
   },
   policy: {
@@ -243,7 +243,7 @@ export const DEFAULT_CONFIG: Config = {
       },
       // ── Git safety ────────────────────────────────────────────────────────
       {
-        name: 'block-force-push',
+        name: 'review-force-push',
         tool: 'bash',
         conditions: [
           {
@@ -256,8 +256,8 @@ export const DEFAULT_CONFIG: Config = {
           },
         ],
         conditionMode: 'all',
-        verdict: 'block',
-        reason: 'Force push overwrites remote history and cannot be undone',
+        verdict: 'review',
+        reason: 'Force push rewrites remote history — confirm this is intentional',
         description:
           'The AI wants to force push to a remote git branch. This rewrites shared history and can permanently destroy commits that teammates have already pulled.',
       },
@@ -268,15 +268,17 @@ export const DEFAULT_CONFIG: Config = {
           {
             field: 'command',
             op: 'matches',
+            // Anchor git as a shell command so node -e / python -c scripts containing
+            // "git reset --hard" as a string don't false-positive.
             value:
-              '\\bgit\\s+(reset\\s+--hard|clean\\s+-[fdxX]|rebase\\b|tag\\s+-d|branch\\s+-[dD])',
+              '(^|&&|\\|\\||;)\\s*git\\s+(reset\\s+--hard|clean\\s+-[fdxX]|rebase\\b|tag\\s+-d|branch\\s+-[dD])',
             flags: 'i',
           },
           {
             field: 'command',
             op: 'notMatches',
-            // Exclude recovery ops — these resolve a conflict, not start a destructive action.
-            value: '\\bgit\\s+rebase\\s+--(abort|continue|skip)\\b',
+            // Exclude recovery ops and routine branch-surgery (--onto) — these are not destructive.
+            value: '\\bgit\\s+rebase\\s+--(abort|continue|skip|onto)\\b',
             flags: 'i',
           },
         ],

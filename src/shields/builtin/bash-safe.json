@@ -52,7 +52,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "dd\\s+.*of=\\/dev\\/(sd|nvme|hd|vd|xvd)",
+          "value": "(^|&&|\\|\\||;)\\s*dd\\s+.*of=\\/dev\\/(sd|nvme|hd|vd|xvd)",
           "flags": "i"
         }
       ],
@@ -60,18 +60,32 @@
       "reason": "Writing directly to a block device is irreversible — blocked by bash-safe shield"
     },
     {
-      "name": "shield:bash-safe:review-eval",
+      "name": "shield:bash-safe:block-eval-remote",
       "tool": "bash",
       "conditions": [
         {
           "field": "command",
           "op": "matches",
-          "value": "\\beval\\s+[\\$`(\"]",
+          "value": "(^|&&|\\|\\||;)\\s*eval\\s+.*\\$\\((curl|wget)\\b",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "eval of remote download is a near-certain supply-chain attack — blocked by bash-safe shield"
+    },
+    {
+      "name": "shield:bash-safe:review-eval-dynamic",
+      "tool": "bash",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "(^|&&|\\|\\||[;|\\n{(`])\\s*eval\\s+([\\$`(]|\"[^\"]*\\$)",
           "flags": "i"
         }
       ],
       "verdict": "review",
-      "reason": "eval of dynamic content requires human approval (bash-safe shield)"
+      "reason": "eval of dynamic content — backup regex rule for scan path (real-time uses AST detection)"
     }
   ],
   "dangerousWords": []

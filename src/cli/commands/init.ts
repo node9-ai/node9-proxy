@@ -14,6 +14,7 @@ import {
   setupCodex,
   setupWindsurf,
   setupVSCode,
+  setupClaudeDesktop,
   detectAgents,
 } from '../../setup';
 import { readActiveShields, writeActiveShields } from '../../shields';
@@ -161,6 +162,7 @@ export function registerInitCommand(program: Command): void {
         else if (agent === 'codex') await setupCodex();
         else if (agent === 'windsurf') await setupWindsurf();
         else if (agent === 'vscode') await setupVSCode();
+        else if (agent === 'claudeDesktop') await setupClaudeDesktop();
         console.log('');
       }
 

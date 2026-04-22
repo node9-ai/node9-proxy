@@ -61,7 +61,7 @@ function mockProjectConfig(config: object) {
 // Constructed at runtime so the literal never appears in source — avoids
 // triggering node9's own DLP scanner when this file is written or committed.
 // This is the canonical AWS example key from AWS documentation (not a real credential).
-const FAKE_AWS_KEY = 'AKIA' + 'IOSFODNN7' + 'EXAMPLE';
+const FAKE_AWS_KEY = 'AKIA' + 'J2XZKZMV' + 'P3NQRSTU';
 
 const BASE_OBSERVE_CONFIG = {
   settings: { mode: 'observe', approvalTimeoutMs: 100 },

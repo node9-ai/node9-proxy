@@ -43,12 +43,13 @@ export interface SessionSummary {
   projectLabel: string; // display label, e.g. ~/node9/node9-proxy
   firstPrompt: string;
   startTime: string; // ISO
+  lastActiveTime: string; // ISO — last tool call timestamp (or startTime if no tool calls)
   toolCalls: ToolCall[];
   blockedCalls: BlockedCall[]; // from audit.log, joined by timestamp window
   costUSD: number;
   hasSnapshot: boolean;
   modifiedFiles: string[]; // files touched by Write/Edit tools
-  agent?: 'claude' | 'gemini';
+  agent?: 'claude' | 'gemini' | 'codex';
 }
 
 interface JournalLine {
@@ -459,6 +460,7 @@ function buildGeminiSessions(
         projectLabel: projectLabel(projectRoot),
         firstPrompt,
         startTime,
+        lastActiveTime: lastToolTs || startTime,
         toolCalls,
         blockedCalls,
         costUSD,
@@ -467,6 +469,155 @@ function buildGeminiSessions(
         agent: 'gemini',
       });
     }
+  }
+
+  return summaries;
+}
+
+// ---------------------------------------------------------------------------
+// Build Codex session summaries
+// ---------------------------------------------------------------------------
+
+function buildCodexSessions(
+  days: number | null,
+  allAuditEntries: ReturnType<typeof loadAuditEntries>
+): SessionSummary[] {
+  const sessionsBase = path.join(os.homedir(), '.codex', 'sessions');
+  if (!fs.existsSync(sessionsBase)) return [];
+
+  const cutoff =
+    days !== null
+      ? (() => {
+          const d = new Date();
+          d.setDate(d.getDate() - days);
+          d.setHours(0, 0, 0, 0);
+          return d;
+        })()
+      : null;
+
+  const jsonlFiles: string[] = [];
+  try {
+    for (const year of fs.readdirSync(sessionsBase)) {
+      const yearPath = path.join(sessionsBase, year);
+      try {
+        if (!fs.statSync(yearPath).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      for (const month of fs.readdirSync(yearPath)) {
+        const monthPath = path.join(yearPath, month);
+        try {
+          if (!fs.statSync(monthPath).isDirectory()) continue;
+        } catch {
+          continue;
+        }
+        for (const day of fs.readdirSync(monthPath)) {
+          const dayPath = path.join(monthPath, day);
+          try {
+            if (!fs.statSync(dayPath).isDirectory()) continue;
+          } catch {
+            continue;
+          }
+          for (const file of fs.readdirSync(dayPath)) {
+            if (file.endsWith('.jsonl')) jsonlFiles.push(path.join(dayPath, file));
+          }
+        }
+      }
+    }
+  } catch {
+    return [];
+  }
+
+  const summaries: SessionSummary[] = [];
+
+  for (const filePath of jsonlFiles) {
+    let lines: string[];
+    try {
+      lines = fs.readFileSync(filePath, 'utf-8').split('\n');
+    } catch {
+      continue;
+    }
+
+    let sessionId = '';
+    let startTime = '';
+    let cwd = '';
+    let firstPrompt = '';
+    const toolCalls: ToolCall[] = [];
+    let lastToolTs = '';
+    let lastTotalInput = 0;
+    let lastTotalCached = 0;
+    let lastTotalOutput = 0;
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let entry: { type: string; timestamp?: string; payload?: Record<string, unknown> };
+      try {
+        entry = JSON.parse(line) as typeof entry;
+      } catch {
+        continue;
+      }
+
+      const p = (entry.payload ?? {}) as Record<string, unknown>;
+
+      if (entry.type === 'session_meta') {
+        sessionId = String(p['id'] ?? '');
+        startTime = String(p['timestamp'] ?? '');
+        cwd = String(p['cwd'] ?? '');
+        continue;
+      }
+
+      if (entry.type === 'event_msg' && p['type'] === 'user_message' && !firstPrompt) {
+        firstPrompt = String(p['message'] ?? '');
+        continue;
+      }
+
+      if (entry.type === 'event_msg' && p['type'] === 'token_count') {
+        const info = (p['info'] ?? {}) as Record<string, unknown>;
+        const usage = (info['total_token_usage'] ?? {}) as Record<string, number>;
+        lastTotalInput = usage['input_tokens'] ?? lastTotalInput;
+        lastTotalCached = usage['cached_input_tokens'] ?? lastTotalCached;
+        lastTotalOutput = usage['output_tokens'] ?? lastTotalOutput;
+        continue;
+      }
+
+      if (entry.type === 'response_item' && p['type'] === 'function_call') {
+        const tool = String(p['name'] ?? '');
+        let input: Record<string, unknown> = {};
+        try {
+          input = JSON.parse(String(p['arguments'] ?? '{}')) as Record<string, unknown>;
+        } catch {}
+        const ts = entry.timestamp ?? startTime;
+        toolCalls.push({ tool, input, timestamp: ts });
+        if (ts > lastToolTs) lastToolTs = ts;
+      }
+    }
+
+    if (!sessionId || !startTime) continue;
+    if (cutoff && new Date(startTime) < cutoff) continue;
+
+    const nonCached = Math.max(0, lastTotalInput - lastTotalCached);
+    const costUSD = nonCached * 5e-6 + lastTotalCached * 2.5e-6 + lastTotalOutput * 15e-6;
+
+    const windowEnd = new Date(
+      Math.max(new Date(startTime).getTime(), lastToolTs ? new Date(lastToolTs).getTime() : 0) +
+        5 * 60 * 1000
+    ).toISOString();
+    const blockedCalls = auditEntriesInWindow(allAuditEntries, startTime, windowEnd);
+
+    summaries.push({
+      sessionId,
+      project: cwd,
+      projectLabel: projectLabel(cwd),
+      firstPrompt,
+      startTime,
+      lastActiveTime: lastToolTs || startTime,
+      toolCalls,
+      blockedCalls,
+      costUSD,
+      hasSnapshot: false,
+      modifiedFiles: [],
+      agent: 'codex',
+    });
   }
 
   return summaries;
@@ -533,6 +684,7 @@ export function buildSessions(days: number | null, historyPath?: string): Sessio
     ).toISOString();
 
     const blockedCalls = auditEntriesInWindow(allAuditEntries, windowStart, windowEnd);
+    const lastActiveTime = lastToolTs || entry.timestamp;
 
     summaries.push({
       sessionId: entry.sessionId,
@@ -540,6 +692,7 @@ export function buildSessions(days: number | null, historyPath?: string): Sessio
       projectLabel: projectLabel(entry.project),
       firstPrompt: entry.display,
       startTime: entry.timestamp,
+      lastActiveTime,
       toolCalls,
       blockedCalls,
       costUSD,
@@ -549,13 +702,14 @@ export function buildSessions(days: number | null, historyPath?: string): Sessio
     });
   }
 
-  // Include Gemini sessions when not in test mode (historyPath override = test mode)
+  // Include Gemini and Codex sessions when not in test mode (historyPath override = test mode)
   if (!historyPath) {
     summaries.push(...buildGeminiSessions(days, allAuditEntries));
+    summaries.push(...buildCodexSessions(days, allAuditEntries));
   }
 
-  // Sort newest first
-  summaries.sort((a, b) => (a.startTime > b.startTime ? -1 : 1));
+  // Sort by last activity, newest first
+  summaries.sort((a, b) => (a.lastActiveTime > b.lastActiveTime ? -1 : 1));
   return summaries;
 }
 
@@ -763,17 +917,19 @@ function renderList(summaries: SessionSummary[], totalCost: number): void {
   );
   console.log('');
 
-  // Group by date + project for headers
+  // Group by last-active date + project for headers
   let lastGroup = '';
   for (const s of summaries) {
-    const group = fmtDate(s.startTime) + '  ' + s.projectLabel;
+    const activeDate = fmtDate(s.lastActiveTime);
+    const group = activeDate + '  ' + s.projectLabel;
     if (group !== lastGroup) {
-      console.log(
-        chalk.dim('  ─── ') + chalk.bold(fmtDate(s.startTime)) + chalk.dim('  ' + s.projectLabel)
-      );
+      console.log(chalk.dim('  ─── ') + chalk.bold(activeDate) + chalk.dim('  ' + s.projectLabel));
       lastGroup = group;
     }
 
+    const startDate = fmtDate(s.startTime);
+    const dateRange =
+      startDate !== activeDate ? chalk.dim(' (' + startDate + ' → ' + activeDate + ')') : '';
     const timeStr = chalk.dim(fmtTime(s.startTime));
     const prompt = chalk.white(truncate(s.firstPrompt.replace(/\n/g, ' '), 50).padEnd(50));
     const tools =
@@ -784,10 +940,17 @@ function renderList(summaries: SessionSummary[], totalCost: number): void {
     const blocked =
       s.blockedCalls.length > 0 ? chalk.red('  🛑 ' + String(s.blockedCalls.length)) : '';
     const snap = s.hasSnapshot ? chalk.green('  📸') : '';
-    const agentBadge = s.agent === 'gemini' ? chalk.blue('  [Gemini]') : chalk.cyan('  [Claude]');
+    const agentBadge =
+      s.agent === 'gemini'
+        ? chalk.blue('  [Gemini]')
+        : s.agent === 'codex'
+          ? chalk.magenta('  [Codex]')
+          : chalk.cyan('  [Claude]');
     const sid = chalk.dim('  ' + s.sessionId.slice(0, 8));
 
-    console.log(`  ${timeStr}  ${prompt}  ${tools}${cost}${blocked}${snap}${agentBadge}${sid}`);
+    console.log(
+      `  ${timeStr}  ${prompt}  ${tools}${cost}${blocked}${snap}${agentBadge}${sid}${dateRange}`
+    );
   }
   console.log('');
   console.log(
@@ -811,7 +974,12 @@ function renderDetail(s: SessionSummary): void {
   );
   console.log(chalk.bold('  Project  ') + chalk.white(s.projectLabel));
   if (s.agent) {
-    const agentLabel = s.agent === 'gemini' ? chalk.blue('Gemini CLI') : chalk.cyan('Claude Code');
+    const agentLabel =
+      s.agent === 'gemini'
+        ? chalk.blue('Gemini CLI')
+        : s.agent === 'codex'
+          ? chalk.magenta('Codex')
+          : chalk.cyan('Claude Code');
     console.log(chalk.bold('  Agent    ') + agentLabel);
   }
   console.log(chalk.bold('  When     ') + chalk.white(fmtDateTime(s.startTime)));
@@ -912,7 +1080,12 @@ export function registerSessionsCommand(program: Command): void {
 
       process.stdout.write(chalk.dim('  Loading…'));
       const summaries = buildSessions(days);
-      process.stdout.write('\r' + ' '.repeat(20) + '\r');
+      if (process.stdout.isTTY) {
+        process.stdout.clearLine(0);
+        process.stdout.cursorTo(0);
+      } else {
+        process.stdout.write('\n');
+      }
 
       // ── Detail view ────────────────────────────────────────────────────────
       if (options.detail) {

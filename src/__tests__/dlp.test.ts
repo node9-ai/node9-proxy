@@ -8,18 +8,18 @@ import { scanArgs, scanFilePath, DLP_PATTERNS } from '../dlp.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-// Fake AWS Access Key ID — split to defeat static secret scanners
-const FAKE_AWS_KEY = 'AKIA' + 'IOSFODNN7' + 'EXAMPLE';
+// Fake AWS Access Key ID — Base32 charset [A-Z2-7], avoid stopwords
+const FAKE_AWS_KEY = 'AKIA' + 'J2XZKZMV' + 'P3NQRSTU';
 
 // Stripe keys: sk_(live|test)_ + exactly 24 alphanumeric chars
-const FAKE_STRIPE_LIVE = 'sk_live_' + 'abcdefghijklmnop' + 'qrstuvwx';
-const FAKE_STRIPE_TEST = 'sk_test_' + 'abcdefghijklmnop' + 'qrstuvwx';
+const FAKE_STRIPE_LIVE = 'sk_live_' + 'x7Bm3Kp9Qs2Nv6Wt' + 'R1Yc4Zh8';
+const FAKE_STRIPE_TEST = 'sk_test_' + 'x7Bm3Kp9Qs2Nv6Wt' + 'R1Yc4Zh8';
 
-// OpenAI key: sk- + 20+ alphanumeric chars
-const FAKE_OPENAI_KEY = 'sk-' + 'abcdefghij' + '1234567890klmn';
+// OpenAI key: sk- + 20+ alphanumeric chars (avoid stopwords)
+const FAKE_OPENAI_KEY = 'sk-' + 'Xm7Kp3Qn9Bt' + '2Vc6Wr1Ys4Zh';
 
 // Slack bot token
-const FAKE_SLACK_TOKEN = 'xoxb-' + '1234-5678-abcdefghij';
+const FAKE_SLACK_TOKEN = 'xoxb-' + '5182736490-' + 'Km3Pq7Xn2Bt';
 
 // ── Pattern coverage ──────────────────────────────────────────────────────────
 
@@ -30,11 +30,11 @@ describe('DLP_PATTERNS — built-in patterns', () => {
     expect(match!.patternName).toBe('AWS Access Key ID');
     expect(match!.severity).toBe('block');
     expect(match!.redactedSample).not.toContain(FAKE_AWS_KEY);
-    expect(match!.redactedSample).toMatch(/AKIA\*+MPLE/);
+    expect(match!.redactedSample).toMatch(/AKIA\*+RSTU/);
   });
 
   it('detects GitHub personal access token (ghp_)', () => {
-    const token = 'ghp_' + 'a'.repeat(36);
+    const token = 'ghp_' + 'Xm7Kp3Qn9Bt2Vc6Wr1Ys4Zh8Pq5Nv3MtRjWf';
     const match = scanArgs({ command: `git clone https://${token}@github.com/org/repo` });
     expect(match).not.toBeNull();
     expect(match!.patternName).toBe('GitHub Token');
@@ -43,7 +43,7 @@ describe('DLP_PATTERNS — built-in patterns', () => {
   });
 
   it('detects GitHub OAuth token (gho_)', () => {
-    const token = 'gho_' + 'b'.repeat(36);
+    const token = 'gho_' + 'Xm7Kp3Qn9Bt2Vc6Wr1Ys4Zh8Pq5Nv3MtRjWf';
     const match = scanArgs({ env: { TOKEN: token } });
     expect(match).not.toBeNull();
     expect(match!.patternName).toBe('GitHub Token');
@@ -104,11 +104,11 @@ describe('maskSecret redaction', () => {
   it('shows first 4 + last 4 chars of the matched secret', () => {
     const match = scanArgs({ key: FAKE_AWS_KEY });
     expect(match).not.toBeNull();
-    // prefix = 'AKIA', suffix = 'MPLE'
+    // prefix = 'AKIA', suffix = last 4 of 'J2XZKZMVP3NQRSTU' = 'RSTU'
     expect(match!.redactedSample).toMatch(/^AKIA/);
-    expect(match!.redactedSample).toMatch(/MPLE$/);
+    expect(match!.redactedSample).toMatch(/RSTU$/);
     expect(match!.redactedSample).toContain('*');
-    expect(match!.redactedSample).not.toContain('IOSFODNN7EXA');
+    expect(match!.redactedSample).not.toContain('J2XZKZMV');
   });
 });
 
@@ -188,11 +188,8 @@ describe('scanArgs — performance guards', () => {
 // ── All patterns export ───────────────────────────────────────────────────────
 
 describe('DLP_PATTERNS export', () => {
-  it('exports at least 9 built-in patterns', () => {
-    // 9 patterns as of current implementation:
-    // AWS Key ID, GitHub Token, Slack Bot Token, OpenAI Key, Stripe Secret Key,
-    // Private Key PEM, GCP Service Account, NPM Auth Token, Bearer Token
-    expect(DLP_PATTERNS.length).toBeGreaterThanOrEqual(9);
+  it('exports at least 37 built-in patterns', () => {
+    expect(DLP_PATTERNS.length).toBeGreaterThanOrEqual(37);
   });
 
   it('all patterns have name, regex, and severity', () => {
