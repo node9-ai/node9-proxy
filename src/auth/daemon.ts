@@ -14,20 +14,22 @@ const ACTIVITY_SOCKET_PATH =
 
 /**
  * Write a message to the activity Unix socket (flight recorder + session counters).
- * Resolves immediately if the daemon is not running.
+ * Returns true if the send succeeded, false if the daemon is not reachable.
+ * Callers that set fromCLI=true on POST /check must check this return value —
+ * if it's false, pass fromCLI=false so the daemon emits the activity event itself.
  */
-export function notifyActivitySocket(data: Record<string, unknown>): Promise<void> {
-  return new Promise<void>((resolve) => {
+export function notifyActivitySocket(data: Record<string, unknown>): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
     try {
       const payload = JSON.stringify(data);
       const sock = net.createConnection(ACTIVITY_SOCKET_PATH);
       sock.on('connect', () => {
-        sock.on('close', resolve);
+        sock.on('close', () => resolve(true));
         sock.end(payload);
       });
-      sock.on('error', resolve);
+      sock.on('error', () => resolve(false));
     } catch {
-      resolve();
+      resolve(false);
     }
   });
 }
@@ -179,7 +181,9 @@ export async function registerDaemonEntry(
   viewOnly?: boolean,
   /** When true, the daemon skips cloud's immediate-allow for the background auth pass.
    *  Set when a local smart rule with verdict "review" matched in the hook process. */
-  localSmartRuleMatched?: boolean
+  localSmartRuleMatched?: boolean,
+  /** When false, the socket send of the activity event failed — daemon must emit it. */
+  socketActivitySent?: boolean
 ): Promise<{ id: string; allowCount: number }> {
   const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
   const ctrl = new AbortController();
@@ -193,7 +197,10 @@ export async function registerDaemonEntry(
         args,
         agent: meta?.agent,
         mcpServer: meta?.mcpServer,
-        fromCLI: true,
+        // fromCLI=true tells the daemon the CLI already sent the activity event via
+        // socket. If the socket send failed (socketActivitySent=false), set fromCLI=false
+        // so the daemon emits the activity event itself — tail never misses an entry.
+        fromCLI: socketActivitySent !== false,
         // Pass the flight-recorder ID so the daemon uses the same UUID for
         // activity-result as the CLI used for the pending activity event.
         activityId,
