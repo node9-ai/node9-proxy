@@ -52,7 +52,10 @@ jobs:
           cp README.md /tmp/node9-wrapper/README.md
           cd /tmp/node9-wrapper
           npm install --ignore-scripts
-          npm version "$VERSION" --no-git-tag-version
+          CURRENT=$(node -p "require('./package.json').version")
+          if [ "$CURRENT" != "$VERSION" ]; then
+            npm version "$VERSION" --no-git-tag-version
+          fi
           git config user.email "release-bot@node9.ai"
           git config user.name "node9-release-bot"
           git add README.md package.json
