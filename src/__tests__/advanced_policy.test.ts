@@ -504,3 +504,48 @@ describe('getConfig — environments layer merge', () => {
     expect(cfg.environments['development']?.requireApproval).toBe(false);
   });
 });
+
+// ── DLP runs before ignoredTools fast path ────────────────────────────────────
+// Regression test for: evaluatePolicy skipped DLP for ignored tools entirely.
+// A credential passed to ls/grep/cat must be caught even though those tools are
+// on the ignoredTools allowlist.
+
+// NOTE: Fake secret strings built via concatenation to defeat static secret scanners.
+const FAKE_AWS = 'AKIA' + 'J2XZKZMV' + 'P3NQRSTU';
+
+describe('DLP fires before ignoredTools fast path', () => {
+  type RealpathWithNative = typeof fs.realpathSync & { native: (p: unknown) => string };
+  const origNative = (fs.realpathSync as RealpathWithNative).native;
+
+  beforeEach(() => {
+    _resetConfigCache();
+    existsSpy.mockReturnValue(false);
+    readSpy.mockReturnValue('');
+    (fs.realpathSync as RealpathWithNative).native = vi
+      .fn()
+      .mockImplementation((p: unknown) => String(p));
+  });
+
+  afterEach(() => {
+    (fs.realpathSync as RealpathWithNative).native = origNative;
+  });
+
+  it('blocks an AWS key passed to an ignored tool (ls) when scanIgnoredTools is on', async () => {
+    // ls is in the default ignoredTools list — without the fix it would fast-path allow
+    const result = await evaluatePolicy('ls', { command: `ls ${FAKE_AWS}` });
+    expect(result.decision).toBe('block');
+    expect(result.blockedByLabel).toMatch(/DLP/i);
+    expect(result.reason).toMatch(/AWS Access Key ID/i);
+  });
+
+  it('blocks an AWS key passed to a non-ignored tool (Bash)', async () => {
+    const result = await evaluatePolicy('Bash', { command: `echo ${FAKE_AWS}` });
+    expect(result.decision).toBe('block');
+    expect(result.blockedByLabel).toMatch(/DLP/i);
+  });
+
+  it('allows a clean call to an ignored tool with no credentials', async () => {
+    const result = await evaluatePolicy('ls', { command: 'ls -la /tmp' });
+    expect(result.decision).toBe('allow');
+  });
+});

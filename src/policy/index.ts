@@ -460,8 +460,24 @@ export async function evaluatePolicy(
 }> {
   const config = getConfig();
 
+  // 0. DLP Content Scanner — runs before ignoredTools fast path so credentials
+  // in "safe" tools (ls, grep, cat) are always caught when scanIgnoredTools is on.
+  // Uses scanArgs only (not scanFilePath): sensitive-path access is already covered
+  // by smart rules; this tier catches secret content (AWS keys, tokens) in arg values.
+  const wouldBeIgnored = matchesPattern(toolName, config.policy.ignoredTools);
+  if (config.policy.dlp.enabled && (!wouldBeIgnored || config.policy.dlp.scanIgnoredTools)) {
+    const dlpMatch = args !== undefined ? scanArgs(args) : null;
+    if (dlpMatch) {
+      return {
+        decision: dlpMatch.severity,
+        blockedByLabel: `DLP: ${dlpMatch.patternName}`,
+        reason: `${dlpMatch.patternName} detected in ${dlpMatch.fieldPath}`,
+      };
+    }
+  }
+
   // 1. Ignored tools (Fast Path) - Always allow these first
-  if (matchesPattern(toolName, config.policy.ignoredTools)) return { decision: 'allow' };
+  if (wouldBeIgnored) return { decision: 'allow' };
 
   // 2. Smart Rules — raw args matching before tokenization
   if (config.policy.smartRules.length > 0) {
@@ -495,7 +511,7 @@ export async function evaluatePolicy(
   let allTokens: string[] = [];
   let pathTokens: string[] = [];
 
-  // 2. Tokenize the input
+  // 3. Tokenize the input
   const shellCommand = extractShellCommand(toolName, args, config.policy.toolInspection);
   if (shellCommand) {
     const analyzed = analyzeShellCommand(shellCommand);
@@ -624,8 +640,7 @@ export async function evaluatePolicy(
     }
   }
 
-  // ── 3. CONTEXTUAL RISK DOWNGRADE (PRD Section 3 / Phase 3) ──────────────
-  // If the human is typing manually, we only block "Nuclear" actions.
+  // ── 4. CONTEXTUAL RISK DOWNGRADE ────────────────────────────────────────
   // If the human is typing manually, we only block "Total System Disaster" actions.
   const isManual = agent === 'Terminal';
   if (isManual) {
@@ -650,13 +665,13 @@ export async function evaluatePolicy(
     return { decision: 'allow' };
   }
 
-  // ── 4. Sandbox Check (Safe Zones) ───────────────────────────────────────
+  // ── 5. Sandbox Check (Safe Zones) ───────────────────────────────────────
   if (pathTokens.length > 0 && config.policy.sandboxPaths.length > 0) {
     const allInSandbox = pathTokens.every((p) => matchesPattern(p, config.policy.sandboxPaths));
     if (allInSandbox) return { decision: 'allow' };
   }
 
-  // ── 5. Dangerous Words Evaluation ───────────────────────────────────────
+  // ── 6. Dangerous Words Evaluation ───────────────────────────────────────
   let matchedDangerousWord: string | undefined;
   const isDangerous = allTokens.some((token) =>
     config.policy.dangerousWords.some((word) => {

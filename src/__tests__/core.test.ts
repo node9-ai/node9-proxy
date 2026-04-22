@@ -589,7 +589,7 @@ describe('authorizeHeadless', () => {
 
 describe('DLP wiring — authorizeHeadless blocks on detected secret', () => {
   // Fake AWS key split to avoid GitHub secret scanner flagging this test file
-  const FAKE_AWS_KEY = 'AKIA' + 'IOSFODNN7' + 'EXAMPLE';
+  const FAKE_AWS_KEY = 'AKIA' + 'J2XZKZMV' + 'P3NQRSTU';
 
   it('authorizeHeadless returns approved:false when args contain an AWS key', async () => {
     mockNoNativeConfig();
@@ -2326,7 +2326,7 @@ describe('observe mode — always allow, track wouldBlock', () => {
       policy: { dlp: { enabled: true, scanIgnoredTools: false } },
     });
     // Fake AWS key split to avoid GitHub secret scanner
-    const FAKE_AWS_KEY = 'AKIA' + 'IOSFODNN7' + 'EXAMPLE';
+    const FAKE_AWS_KEY = 'AKIA' + 'J2XZKZMV' + 'P3NQRSTU';
     const result = await authorizeHeadless('bash', {
       command: `echo "${FAKE_AWS_KEY}"`,
     });

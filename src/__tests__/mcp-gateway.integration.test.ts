@@ -418,7 +418,7 @@ describe('mcp-gateway tool call interception', () => {
     // Build the fake key at runtime so the DLP scanner doesn't flag this source file.
     // The gateway's DLP sees the assembled string and blocks it.
     // Must send tools/list first so the gateway's pin state becomes 'validated'.
-    const fakeKey = ['sk-ant-', 'api03-', 'A'.repeat(40)].join('');
+    const fakeKey = ['sk-ant-', 'api03-', 'Xm7Kp3Qn9Bt2Vc6Wr1Ys4Zh8Pq5Nv3Mt1Uj6Rf0Dw'].join('');
     const home = makeTempHome({ settings: { mode: 'standard', autoStartDaemon: false } });
     try {
       const r = runGateway(
