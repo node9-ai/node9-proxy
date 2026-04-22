@@ -59,8 +59,8 @@ jobs:
           git add README.md package.json
           git commit -m "chore: sync README and bump version to ${VERSION}"
           git push
-          # Configure npm auth and publish (NODE_AUTH_TOKEN requires setup-node registry-url)
-          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > .npmrc
+          # Write auth to user-level config — wins over any local .npmrc
+          npm config set //registry.npmjs.org/:_authToken "${NODE_AUTH_TOKEN}"
           # Skip prepublishOnly — README already copied above; ../node9-proxy doesn't exist in CI
           npm publish --provenance --access public --ignore-scripts
 
