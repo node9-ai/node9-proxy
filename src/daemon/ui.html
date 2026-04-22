@@ -1425,6 +1425,14 @@
             <div id="scan-results-view" style="display: none">
               <div id="scan-results-content"></div>
               <div class="scan-export-row">
+                <button
+                  class="btn-export"
+                  id="btn-expand-all"
+                  onclick="toggleExpandAll(this)"
+                  style="margin-right: auto"
+                >
+                  ↕ Expand All
+                </button>
                 <button class="btn-export" onclick="exportScanPng()">📸 Save as Image</button>
                 <button class="btn-export" onclick="exportScanJson()">💾 Export JSON</button>
               </div>
@@ -2486,6 +2494,15 @@
         }
 
         return stats + groups;
+      }
+
+      function toggleExpandAll(btn) {
+        const details = document.querySelectorAll('#scan-results-content .scan-rule-detail');
+        const arrows = document.querySelectorAll('#scan-results-content .scan-rule-arrow');
+        const expand = btn.textContent.includes('Expand');
+        details.forEach((d) => (d.style.display = expand ? '' : 'none'));
+        arrows.forEach((a) => (a.textContent = expand ? '▲' : '▼'));
+        btn.textContent = expand ? '↕ Collapse All' : '↕ Expand All';
       }
 
       function exportScanJson() {
