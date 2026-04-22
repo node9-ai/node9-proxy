@@ -98,6 +98,30 @@ describe('DLP_PATTERNS — built-in patterns', () => {
   });
 });
 
+// ── User prompt scanning ──────────────────────────────────────────────────────
+
+describe('DLP — user prompt scanning via scanArgs({text})', () => {
+  const FAKE_BEARER = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig';
+  const FAKE_AWS = 'AKIA' + 'J2XZKZMV' + 'P3NQRSTU';
+
+  it('detects credential pasted directly in a user prompt', () => {
+    const match = scanArgs({ text: `please use this token: Bearer ${FAKE_BEARER}` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Bearer Token');
+  });
+
+  it('detects AWS key pasted in a user prompt', () => {
+    const match = scanArgs({ text: `my aws key is ${FAKE_AWS}` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('AWS Access Key ID');
+  });
+
+  it('does not flag prose that mentions credential concepts without actual values', () => {
+    expect(scanArgs({ text: 'can you help me rotate my Bearer token?' })).toBeNull();
+    expect(scanArgs({ text: 'I need to add an AWS access key to the config' })).toBeNull();
+  });
+});
+
 // ── Assignment context boost ───────────────────────────────────────────────────
 
 describe('DLP — assignment context severity boost', () => {

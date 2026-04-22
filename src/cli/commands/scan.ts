@@ -394,7 +394,7 @@ export function scanClaudeHistory(
           continue;
         }
 
-        if (entry.type !== 'assistant') continue;
+        if (entry.type !== 'assistant' && entry.type !== 'user') continue;
 
         // Date filter
         if (startDate && entry.timestamp) {
@@ -407,6 +407,40 @@ export function scanClaudeHistory(
             result.firstDate = entry.timestamp;
           if (!result.lastDate || entry.timestamp > result.lastDate)
             result.lastDate = entry.timestamp;
+        }
+
+        // ── User prompt DLP scan ───────────────────────────────────────────
+        if (entry.type === 'user') {
+          const content = entry.message?.content;
+          if (Array.isArray(content)) {
+            const text = content
+              .filter((b) => b.type === 'text')
+              .map((b) => (b as Record<string, unknown>)['text'] ?? '')
+              .join('\n');
+            if (text) {
+              const dlpMatch = scanArgs({ text });
+              if (dlpMatch) {
+                const isDupe = result.dlpFindings.some(
+                  (f) =>
+                    f.patternName === dlpMatch.patternName &&
+                    f.redactedSample === dlpMatch.redactedSample &&
+                    f.project === projLabel
+                );
+                if (!isDupe) {
+                  result.dlpFindings.push({
+                    patternName: dlpMatch.patternName,
+                    redactedSample: dlpMatch.redactedSample,
+                    toolName: 'user-prompt',
+                    timestamp: entry.timestamp ?? '',
+                    project: projLabel,
+                    sessionId,
+                    agent: 'claude',
+                  });
+                }
+              }
+            }
+          }
+          continue;
         }
 
         // Cost
@@ -624,6 +658,39 @@ export function scanGeminiHistory(
       result.sessions++;
 
       for (const msg of session.messages ?? []) {
+        // ── User prompt DLP scan ─────────────────────────────────────────
+        if (msg.type === 'user') {
+          const content = msg.content;
+          const text = Array.isArray(content)
+            ? content.map((c) => c.text ?? '').join('\n')
+            : typeof content === 'string'
+              ? content
+              : '';
+          if (text) {
+            const dlpMatch = scanArgs({ text });
+            if (dlpMatch) {
+              const isDupe = result.dlpFindings.some(
+                (f) =>
+                  f.patternName === dlpMatch.patternName &&
+                  f.redactedSample === dlpMatch.redactedSample &&
+                  f.project === projLabel
+              );
+              if (!isDupe) {
+                result.dlpFindings.push({
+                  patternName: dlpMatch.patternName,
+                  redactedSample: dlpMatch.redactedSample,
+                  toolName: 'user-prompt',
+                  timestamp: msg.timestamp ?? '',
+                  project: projLabel,
+                  sessionId,
+                  agent: 'gemini',
+                });
+              }
+            }
+          }
+          continue;
+        }
+
         if (msg.type !== 'gemini') continue;
 
         if (startDate && msg.timestamp && new Date(msg.timestamp) < startDate) continue;
@@ -860,6 +927,34 @@ export function scanCodexHistory(
         lastTotalInput = usage['input_tokens'] ?? lastTotalInput;
         lastTotalCached = usage['cached_input_tokens'] ?? lastTotalCached;
         lastTotalOutput = usage['output_tokens'] ?? lastTotalOutput;
+        continue;
+      }
+
+      // ── User prompt DLP scan ─────────────────────────────────────────────
+      if (entry.type === 'event_msg' && payload['type'] === 'user_message') {
+        const text = String(payload['message'] ?? '');
+        if (text) {
+          const dlpMatch = scanArgs({ text });
+          if (dlpMatch) {
+            const isDupe = result.dlpFindings.some(
+              (f) =>
+                f.patternName === dlpMatch.patternName &&
+                f.redactedSample === dlpMatch.redactedSample &&
+                f.project === projLabel
+            );
+            if (!isDupe) {
+              result.dlpFindings.push({
+                patternName: dlpMatch.patternName,
+                redactedSample: dlpMatch.redactedSample,
+                toolName: 'user-prompt',
+                timestamp: entry.timestamp ?? startTime,
+                project: projLabel,
+                sessionId,
+                agent: 'codex',
+              });
+            }
+          }
+        }
         continue;
       }
 
