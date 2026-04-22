@@ -145,7 +145,7 @@ function notifyActivity(data: {
   ruleHit?: string;
   observeWouldBlock?: boolean;
   agent?: string;
-}): Promise<void> {
+}): Promise<boolean> {
   return notifyActivitySocket(data);
 }
 
@@ -165,7 +165,7 @@ export async function authorizeHeadless(
     // in tests — vi.advanceTimersByTime fires before the setTimeout is registered.
     // Future refactor: move timeout racer registration to before this call so the
     // clock starts before any I/O side effects, and fake timers become usable.
-    await notifyActivity({
+    const socketOk = await notifyActivity({
       id: actId,
       ts: actTs,
       tool: toolName,
@@ -182,6 +182,9 @@ export async function authorizeHeadless(
     const result = await _authorizeHeadlessCore(toolName, args, meta, {
       ...options,
       activityId: actId,
+      // If socket send failed, tell the daemon NOT to assume we already sent the
+      // activity event — it must emit it itself so tail never misses an entry.
+      socketActivitySent: socketOk,
     });
     // noApprovalMechanism means no channels were available — the CLI will retry
     // after auto-starting the daemon. Don't log a false 'block' to the flight
@@ -218,6 +221,7 @@ async function _authorizeHeadlessCore(
     activityId?: string;
     cwd?: string;
     localSmartRuleMatched?: boolean;
+    socketActivitySent?: boolean;
   }
 ): Promise<AuthResult> {
   if (process.env.NODE9_PAUSED === '1') return { approved: true, checkedBy: 'paused' };
@@ -695,7 +699,8 @@ async function _authorizeHeadlessCore(
           statefulRecoveryCommand,
           undefined,
           undefined,
-          localSmartRuleMatched || options?.localSmartRuleMatched
+          localSmartRuleMatched || options?.localSmartRuleMatched,
+          options?.socketActivitySent
         );
         daemonEntryId = entry.id;
         daemonAllowCount = entry.allowCount;
