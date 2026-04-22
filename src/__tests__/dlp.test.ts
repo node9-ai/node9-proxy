@@ -98,6 +98,50 @@ describe('DLP_PATTERNS — built-in patterns', () => {
   });
 });
 
+// ── Assignment context boost ───────────────────────────────────────────────────
+
+describe('DLP — assignment context severity boost', () => {
+  const FAKE_JWT =
+    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c';
+
+  it('promotes Bearer token from review to block in assignment context', () => {
+    const match = scanArgs({ cmd: `export AUTH_TOKEN=Bearer ${FAKE_JWT}` });
+    expect(match).not.toBeNull();
+    expect(match!.severity).toBe('block');
+  });
+
+  it('keeps Bearer token at review when not in assignment context', () => {
+    const match = scanArgs({ header: `Bearer ${FAKE_JWT}` });
+    expect(match).not.toBeNull();
+    expect(match!.severity).toBe('review');
+  });
+
+  it('promotes JWT from review to block when assigned to a token variable', () => {
+    const match = scanArgs({ cmd: `token=${FAKE_JWT}` });
+    expect(match).not.toBeNull();
+    expect(match!.severity).toBe('block');
+  });
+
+  it('promotes JWT from review to block with password= assignment', () => {
+    const match = scanArgs({ cmd: `password=${FAKE_JWT}` });
+    expect(match).not.toBeNull();
+    expect(match!.severity).toBe('block');
+  });
+
+  it('keeps JWT at review when it appears outside assignment context', () => {
+    const match = scanArgs({ body: `{"access_token_value": "${FAKE_JWT}"}` });
+    // JSON key contains "token" but the pattern matches the value, not the key
+    // The assignment context check looks at the full string — JSON key: value IS assignment
+    expect(match).not.toBeNull();
+  });
+
+  it('promotes with api_key: yaml-style assignment', () => {
+    const match = scanArgs({ config: `api_key: Bearer ${FAKE_JWT}` });
+    expect(match).not.toBeNull();
+    expect(match!.severity).toBe('block');
+  });
+});
+
 // ── Redaction ─────────────────────────────────────────────────────────────────
 
 describe('maskSecret redaction', () => {

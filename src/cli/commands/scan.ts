@@ -72,7 +72,7 @@ interface JournalEntry {
   };
 }
 
-interface ScanResult {
+export interface ScanResult {
   filesScanned: number;
   sessions: number;
   totalToolCalls: number;
@@ -322,7 +322,7 @@ function renderProgressBar(done: number, total: number): void {
   );
 }
 
-function scanClaudeHistory(
+export function scanClaudeHistory(
   startDate: Date | null,
   onProgress?: (done: number) => void
 ): ScanResult {
@@ -546,7 +546,7 @@ function scanClaudeHistory(
 // Gemini history scanner
 // ---------------------------------------------------------------------------
 
-function scanGeminiHistory(
+export function scanGeminiHistory(
   startDate: Date | null,
   onProgress?: (done: number) => void
 ): ScanResult {
@@ -759,7 +759,10 @@ function scanGeminiHistory(
 // Codex history scanner
 // ---------------------------------------------------------------------------
 
-function scanCodexHistory(startDate: Date | null, onProgress?: (done: number) => void): ScanResult {
+export function scanCodexHistory(
+  startDate: Date | null,
+  onProgress?: (done: number) => void
+): ScanResult {
   const sessionsBase = path.join(os.homedir(), '.codex', 'sessions');
   const result: ScanResult = {
     filesScanned: 0,

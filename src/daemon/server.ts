@@ -4,12 +4,14 @@
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { randomUUID } from 'crypto';
 import { spawnSync } from 'child_process';
 import chalk from 'chalk';
 import { authorizeHeadless, getGlobalSettings, getConfig, _resetConfigCache } from '../core';
 import { SHIELDS, readActiveShields, writeActiveShields } from '../shields';
 import { UI_HTML_TEMPLATE } from './ui';
+import { scanClaudeHistory, scanGeminiHistory, scanCodexHistory } from '../cli/commands/scan';
 import {
   DAEMON_PORT,
   DAEMON_HOST,
@@ -710,6 +712,164 @@ export function startDaemon(): void {
       }));
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ shields }));
+    }
+
+    if (req.method === 'GET' && pathname === '/report') {
+      if (!validToken(req)) return res.writeHead(403).end();
+      const periodParam = reqUrl.searchParams.get('period') || '7d';
+      const period = (['today', '7d', '30d', 'month'] as const).includes(periodParam as any)
+        ? (periodParam as 'today' | '7d' | '30d' | 'month')
+        : '7d';
+
+      const logPath = path.join(os.homedir(), '.node9', 'audit.log');
+      if (!fs.existsSync(logPath)) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(
+          JSON.stringify({
+            summary: { total: 0, allowed: 0, blocked: 0, dlp: 0, loops: 0 },
+            daily: [],
+            topTools: [],
+          })
+        );
+      }
+
+      try {
+        const raw = fs.readFileSync(logPath, 'utf-8');
+        const allEntries = raw.split('\n').flatMap((line) => {
+          if (!line.trim()) return [];
+          try {
+            return [JSON.parse(line)];
+          } catch {
+            return [];
+          }
+        });
+
+        const now = new Date();
+        const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        let start = new Date(todayStart);
+        if (period === '7d') start.setDate(start.getDate() - 6);
+        else if (period === '30d') start.setDate(start.getDate() - 29);
+        else if (period === 'month') start = new Date(now.getFullYear(), now.getMonth(), 1);
+
+        const entries = allEntries.filter((e) => {
+          if (e.source === 'post-hook' || e.source === 'response-dlp') return false;
+          return new Date(e.ts) >= start;
+        });
+
+        const summary = {
+          total: entries.length,
+          allowed: entries.filter((e) => e.decision && e.decision.startsWith('allow')).length,
+          blocked: entries.filter((e) => e.decision && !e.decision.startsWith('allow')).length,
+          dlp: entries.filter((e) => e.checkedBy && e.checkedBy.includes('dlp')).length,
+          loops: entries.filter((e) => e.checkedBy === 'loop-detected').length,
+        };
+
+        const dailyMap = new Map();
+        for (const e of entries) {
+          const date = e.ts.slice(0, 10);
+          const d = dailyMap.get(date) || { date, calls: 0, blocked: 0 };
+          d.calls++;
+          if (e.decision && !e.decision.startsWith('allow')) d.blocked++;
+          dailyMap.set(date, d);
+        }
+
+        const topToolsMap = new Map();
+        for (const e of entries) {
+          topToolsMap.set(e.tool, (topToolsMap.get(e.tool) || 0) + 1);
+        }
+        const topTools = [...topToolsMap.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 5)
+          .map(([name, value]) => ({ name, value }));
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(
+          JSON.stringify({
+            summary,
+            daily: [...dailyMap.values()].sort((a, b) => a.date.localeCompare(b.date)),
+            topTools,
+          })
+        );
+      } catch {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'Failed to parse report' }));
+      }
+    }
+
+    if (req.method === 'GET' && pathname === '/scan') {
+      if (!validToken(req)) return res.writeHead(403).end();
+
+      try {
+        const d = new Date();
+        d.setDate(d.getDate() - 90); // default 90 days
+        d.setHours(0, 0, 0, 0);
+
+        let claude = { sessions: 0, findings: [], dlpFindings: [] };
+        let gemini = { sessions: 0, findings: [], dlpFindings: [] };
+        let codex = { sessions: 0, findings: [], dlpFindings: [] };
+
+        try {
+          claude = scanClaudeHistory(d) as any;
+        } catch (e) {
+          console.error('Claude scan failed:', e);
+        }
+        try {
+          gemini = scanGeminiHistory(d) as any;
+        } catch (e) {
+          console.error('Gemini scan failed:', e);
+        }
+        try {
+          codex = scanCodexHistory(d) as any;
+        } catch (e) {
+          console.error('Codex scan failed:', e);
+        }
+
+        const totalFindings =
+          claude.findings.length + gemini.findings.length + codex.findings.length;
+        const totalDlp =
+          claude.dlpFindings.length + gemini.dlpFindings.length + codex.dlpFindings.length;
+        const totalSessions = claude.sessions + gemini.sessions + codex.sessions;
+
+        // Collect top findings for the UI to show "Evidence"
+        const allFindings = [...claude.findings, ...gemini.findings, ...codex.findings]
+          .sort((a: any, b: any) => (b.timestamp || '').localeCompare(a.timestamp || ''))
+          .slice(0, 15)
+          .map((f: any) => ({
+            timestamp: f.timestamp || new Date().toISOString(),
+            rule: f.source?.rule?.name ?? f.source?.shieldLabel ?? 'unnamed',
+            command:
+              f.input?.command ?? f.input?.cmd ?? f.input?.file_path ?? f.toolName ?? 'unknown',
+            verdict: f.source?.rule?.verdict ?? f.source?.rule?.action ?? 'review',
+          }));
+
+        const allDlp = [...claude.dlpFindings, ...gemini.dlpFindings, ...codex.dlpFindings]
+          .slice(0, 5)
+          .map((f: any) => ({
+            timestamp: f.timestamp || new Date().toISOString(),
+            pattern: f.patternName || 'DLP',
+            sample: f.redactedSample || '********',
+          }));
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(
+          JSON.stringify({
+            status: 'complete',
+            summary: {
+              sessions: totalSessions,
+              findings: totalFindings,
+              dlp: totalDlp,
+            },
+            evidence: {
+              risks: allFindings,
+              leaks: allDlp,
+            },
+          })
+        );
+      } catch (err) {
+        console.error('Scan failed:', err);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'History scan failed' }));
+      }
     }
 
     if (req.method === 'POST' && pathname === '/shields') {

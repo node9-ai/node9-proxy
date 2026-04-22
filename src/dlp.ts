@@ -19,6 +19,21 @@ interface DlpPattern {
   severity: 'block' | 'review';
   /** Lowercase keyword substrings — if none found in the string, skip regex entirely. */
   keywords?: string[];
+  /**
+   * When true, a 'review' finding is promoted to 'block' if the string is in
+   * assignment context (e.g. export TOKEN=..., password: ..., api_key = ...).
+   */
+  contextBoost?: boolean;
+}
+
+// Matches variable assignment or config-file patterns that indicate a secret
+// is being set rather than just referenced or searched.
+// Examples: export API_KEY=..., password: ..., TOKEN = ..., "secret": "..."
+const ASSIGNMENT_CONTEXT_RE =
+  /\b(?:password|passwd|secret|token|api[_-]?key|auth(?:_key|_token)?|credential|private[_-]?key|access[_-]?key|client[_-]?secret)\s*[=:]\s*/i;
+
+function isAssignmentContext(text: string): boolean {
+  return ASSIGNMENT_CONTEXT_RE.test(text);
 }
 
 // ── Stop Words ────────────────────────────────────────────────────────────────
@@ -225,11 +240,13 @@ export const DLP_PATTERNS: DlpPattern[] = [
 
   // ── JWT ───────────────────────────────────────────────────────────────────
   // review (not block): JWTs appear legitimately in API calls; flag for human approval
+  // contextBoost: promoted to block when assigned (e.g. TOKEN=eyJ...)
   {
     name: 'JWT',
     regex: /\bey[a-zA-Z0-9]{17,}\.ey[a-zA-Z0-9\/_-]{17,}\.[a-zA-Z0-9\/_-]{10,}={0,2}\b/,
     severity: 'review',
     keywords: ['eyj'],
+    contextBoost: true,
   },
 
   // ── Stripe (extended — adds restricted key rk_ prefix) ──────────────────
@@ -352,11 +369,13 @@ export const DLP_PATTERNS: DlpPattern[] = [
   },
 
   // ── Bearer Token ─────────────────────────────────────────────────────────
+  // contextBoost: promoted to block when assigned (e.g. AUTH_TOKEN=Bearer eyJ...)
   {
     name: 'Bearer Token',
     regex: /Bearer\s+[a-zA-Z0-9\-._~+/]{20,}=*/i,
     severity: 'review',
     keywords: ['bearer'],
+    contextBoost: true,
   },
 ];
 
@@ -484,6 +503,7 @@ export function scanArgs(args: unknown, depth = 0, fieldPath = 'args'): DlpMatch
   if (typeof args === 'string') {
     const text = args.length > MAX_STRING_BYTES ? args.slice(0, MAX_STRING_BYTES) : args;
     const textLower = text.toLowerCase();
+    const assignmentCtx = isAssignmentContext(text);
 
     for (const pattern of DLP_PATTERNS) {
       // Keyword prefilter: if the pattern declares keywords, at least one must
@@ -500,11 +520,15 @@ export function scanArgs(args: unknown, depth = 0, fieldPath = 'args'): DlpMatch
         const matchedValue = (text.match(pattern.regex)?.[0] ?? '').toLowerCase();
         if (DLP_STOPWORDS.some((sw) => matchedValue.includes(sw))) continue;
 
+        // Assignment context: promote review → block when the secret appears
+        // in an assignment (export TOKEN=..., password: ..., api_key = ...).
+        const severity = pattern.contextBoost && assignmentCtx ? 'block' : pattern.severity;
+
         return {
           patternName: pattern.name,
           fieldPath,
           redactedSample: maskSecret(text, pattern.regex),
-          severity: pattern.severity,
+          severity,
         };
       }
     }

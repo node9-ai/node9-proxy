@@ -880,6 +880,204 @@
         border: 1px solid var(--border);
       }
 
+      /* ── Dashboard & Tabs ───────────────────────────────────────────── */
+      .nav-tabs {
+        display: flex;
+        gap: 8px;
+        margin-left: 20px;
+      }
+      .nav-tab {
+        background: transparent;
+        border: none;
+        color: var(--muted);
+        padding: 6px 12px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        border-bottom: 2px solid transparent;
+        border-radius: 0;
+      }
+      .nav-tab:hover {
+        color: var(--text-bright);
+        transform: none;
+      }
+      .nav-tab.active {
+        color: var(--primary);
+        border-bottom-color: var(--primary);
+      }
+      .tab-content {
+        display: none;
+      }
+      .tab-content.active {
+        display: block;
+      }
+
+      .dashboard-scorecard {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: 12px;
+        margin-bottom: 20px;
+      }
+      .score-card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 16px;
+        text-align: center;
+      }
+      .score-label {
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin-bottom: 8px;
+      }
+      .score-value {
+        font-size: 24px;
+        font-weight: 700;
+        color: var(--text-bright);
+      }
+      .score-value.danger {
+        color: #f87171;
+      }
+      .score-value.warning {
+        color: #fbbf24;
+      }
+
+      .chart-container {
+        height: 120px;
+        display: flex;
+        align-items: flex-end;
+        gap: 4px;
+        padding-top: 10px;
+      }
+      .chart-bar-wrapper {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+      }
+      .chart-bar {
+        width: 100%;
+        background: var(--accent);
+        border-radius: 4px 4px 0 0;
+        min-height: 2px;
+        transition: height 0.3s ease;
+      }
+      .chart-label {
+        font-size: 9px;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+
+      .top-tools-grid {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .tool-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        font-size: 12px;
+      }
+      .tool-name {
+        flex: 1;
+        font-family: 'Fira Code', monospace;
+        color: var(--text-bright);
+      }
+      .tool-bar-bg {
+        flex: 2;
+        height: 8px;
+        background: rgba(48, 54, 61, 0.5);
+        border-radius: 4px;
+        overflow: hidden;
+      }
+      .tool-bar-fill {
+        height: 100%;
+        background: var(--primary);
+        border-radius: 4px;
+      }
+      .tool-count {
+        width: 40px;
+        text-align: right;
+        color: var(--muted);
+        font-family: 'Fira Code', monospace;
+      }
+
+      /* ── Findings List ─────────────────────────────────────────────── */
+      .findings-list {
+        margin-top: 16px;
+        background: rgba(0, 0, 0, 0.2);
+        border-radius: 8px;
+        padding: 12px;
+        border: 1px solid var(--border);
+      }
+      .finding-item {
+        font-size: 11px;
+        padding: 6px 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        display: flex;
+        gap: 8px;
+        align-items: flex-start;
+      }
+      .finding-item:last-child {
+        border: none;
+      }
+      .finding-ts {
+        color: var(--muted);
+        width: 70px;
+        flex-shrink: 0;
+      }
+      .finding-rule {
+        color: var(--primary);
+        font-weight: 600;
+        width: 120px;
+        flex-shrink: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .finding-cmd {
+        color: var(--text);
+        font-family: 'Fira Code', monospace;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+      .finding-badge {
+        font-size: 9px;
+        padding: 1px 4px;
+        border-radius: 4px;
+        text-transform: uppercase;
+        font-weight: 700;
+        margin-right: 4px;
+      }
+      .badge-block {
+        background: rgba(201, 60, 55, 0.2);
+        color: #f87171;
+      }
+      .badge-leak {
+        background: rgba(240, 136, 62, 0.2);
+        color: #fbbf24;
+      }
+
+      .spinner {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        border: 2px solid rgba(255, 255, 255, 0.3);
+        border-radius: 50%;
+        border-top-color: #fff;
+        animation: spin 1s ease-in-out infinite;
+        margin-right: 8px;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
       @media (max-width: 960px) {
         .body {
           grid-template-columns: 1fr 220px;
@@ -900,6 +1098,10 @@
       <header>
         <span class="logo">🛡️</span>
         <h1>Node9 Guard</h1>
+        <div class="nav-tabs">
+          <button class="nav-tab active" onclick="showTab('approvals')">Approvals</button>
+          <button class="nav-tab" onclick="showTab('dashboard')">Dashboard</button>
+        </div>
         <div id="st" class="status-badge">Waiting...</div>
       </header>
 
@@ -918,15 +1120,77 @@
         </div>
 
         <div class="main">
-          <div id="warnBanner" class="warning-banner">
-            ⚠️ Auto-start is off — daemon started manually. Run "node9 daemon stop" to stop it, or
-            enable Auto-start in Settings.
+          <div id="tab-approvals" class="tab-content active">
+            <div id="warnBanner" class="warning-banner">
+              ⚠️ Auto-start is off — daemon started manually. Run "node9 daemon stop" to stop it, or
+              enable Auto-start in Settings.
+            </div>
+            <div class="section-title">Pending Approvals</div>
+            <div id="list"></div>
+            <div id="empty">
+              <span class="empty-icon">✨</span>
+              <span>All clear — no pending tool calls.</span>
+            </div>
           </div>
-          <div class="section-title">Pending Approvals</div>
-          <div id="list"></div>
-          <div id="empty">
-            <span class="empty-icon">✨</span>
-            <span>All clear — no pending tool calls.</span>
+
+          <div id="tab-dashboard" class="tab-content">
+            <div class="section-title">Local Protection Dashboard</div>
+            <div class="dashboard-scorecard">
+              <div class="score-card">
+                <div class="score-label">Total Events</div>
+                <div class="score-value" id="stat-total">0</div>
+              </div>
+              <div class="score-card">
+                <div class="score-label">Blocked</div>
+                <div class="score-value danger" id="stat-blocked">0</div>
+              </div>
+              <div class="score-card">
+                <div class="score-label">DLP Caught</div>
+                <div class="score-value warning" id="stat-dlp">0</div>
+              </div>
+              <div class="score-card">
+                <div class="score-label">Loops Stopped</div>
+                <div class="score-value warning" id="stat-loops">0</div>
+              </div>
+            </div>
+
+            <div class="card" style="margin-top: 20px">
+              <div class="card-header">
+                <span class="card-header-icon">📈</span>
+                <span class="card-header-title">Daily Activity (Last 7 Days)</span>
+              </div>
+              <div id="daily-chart" class="chart-container">
+                <!-- Bar chart will be rendered here -->
+                <div class="decisions-empty">No activity data found.</div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-header">
+                <span class="card-header-icon">🛠️</span>
+                <span class="card-header-title">Top Tools</span>
+              </div>
+              <div id="top-tools-list" class="top-tools-grid">
+                <div class="decisions-empty">No tool usage yet.</div>
+              </div>
+            </div>
+
+            <div class="card scan-promo-card">
+              <div class="card-header">
+                <span class="card-header-icon">🔍</span>
+                <span class="card-header-title">History Audit</span>
+              </div>
+              <p style="font-size: 13px; color: var(--muted); margin-bottom: 16px">
+                Scan your pre-Node9 history (Claude/Gemini logs) to see what risks were present
+                before installation.
+              </p>
+              <button class="btn-trust" onclick="runHistoryScan()" id="btn-scan">
+                🚀 Run Historical Security Scan
+              </button>
+              <div id="scan-results" style="margin-top: 16px; display: none">
+                <div class="insight-hint">✨ Ready to scan your local agent logs.</div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -1030,7 +1294,7 @@
     </div>
 
     <script>
-      const CSRF_TOKEN = '{{CSRF_TOKEN}}';
+      let CSRF_TOKEN = '{{CSRF_TOKEN}}';
       const list = document.getElementById('list');
       const empty = document.getElementById('empty');
       const st = document.getElementById('st');
@@ -1073,6 +1337,9 @@
         }
       }
 
+      function truncate(s, n) {
+        return s && s.length > n ? s.slice(0, n) + '…' : s || '';
+      }
       function esc(s) {
         return String(s)
           .replace(/&/g, '&amp;')
@@ -1239,6 +1506,10 @@
           setTimeout(connect, 2000);
           ev.close();
         };
+        ev.addEventListener('csrf', (e) => {
+          const data = JSON.parse(e.data);
+          if (data.token) CSRF_TOKEN = data.token;
+        });
         ev.addEventListener('init', (e) => {
           const data = JSON.parse(e.data);
           orgName = data.orgName;
@@ -1590,11 +1861,158 @@
           .catch(() => {});
       }
 
-      // Load any suggestions that survived a page reload (daemon still running)
       fetch('/suggestions')
         .then((r) => r.json())
         .then((list) => list.filter((s) => s.status === 'pending').forEach(addSuggestionCard))
         .catch(() => {});
+
+      // ── Dashboard Logic ───────────────────────────────────────────────────
+      function showTab(tabId) {
+        document.querySelectorAll('.nav-tab').forEach((t) => t.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach((c) => c.classList.remove('active'));
+
+        event.target.classList.add('active');
+        document.getElementById('tab-' + tabId).classList.add('active');
+
+        if (tabId === 'dashboard') {
+          loadDashboardData();
+        }
+      }
+
+      async function loadDashboardData() {
+        try {
+          const res = await fetch('/report?period=7d', {
+            headers: { 'X-Node9-Token': CSRF_TOKEN },
+          });
+          const data = await res.json();
+          if (data.error) return;
+
+          // Update Scorecard
+          document.getElementById('stat-total').textContent = data.summary.total.toLocaleString();
+          document.getElementById('stat-blocked').textContent =
+            data.summary.blocked.toLocaleString();
+          document.getElementById('stat-dlp').textContent = data.summary.dlp.toLocaleString();
+          document.getElementById('stat-loops').textContent = data.summary.loops.toLocaleString();
+
+          // Render Chart
+          const chart = document.getElementById('daily-chart');
+          if (data.daily.length > 0) {
+            const maxCalls = Math.max(...data.daily.map((d) => d.calls), 1);
+            chart.innerHTML = data.daily
+              .map((d) => {
+                const height = (d.calls / maxCalls) * 100;
+                const dateObj = new Date(d.date + 'T12:00:00');
+                const label = dateObj.toLocaleDateString([], { month: 'short', day: 'numeric' });
+                return `
+                <div class="chart-bar-wrapper">
+                  <div class="chart-bar" style="height: ${height}%" title="${d.calls} calls, ${d.blocked} blocked"></div>
+                  <div class="chart-label">${label}</div>
+                </div>
+              `;
+              })
+              .join('');
+          }
+
+          // Render Top Tools
+          const toolsList = document.getElementById('top-tools-list');
+          if (data.topTools.length > 0) {
+            const maxVal = Math.max(...data.topTools.map((t) => t.value), 1);
+            toolsList.innerHTML = data.topTools
+              .map((t) => {
+                const width = (t.value / maxVal) * 100;
+                return `
+                <div class="tool-row">
+                  <div class="tool-name">${esc(t.name)}</div>
+                  <div class="tool-bar-bg">
+                    <div class="tool-bar-fill" style="width: ${width}%"></div>
+                  </div>
+                  <div class="tool-count">${t.value}</div>
+                </div>
+              `;
+              })
+              .join('');
+          }
+        } catch (err) {
+          console.error('Failed to load dashboard:', err);
+        }
+      }
+
+      async function runHistoryScan() {
+        const btn = document.getElementById('btn-scan');
+        const results = document.getElementById('scan-results');
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner"></span> Scanning AI History...';
+
+        try {
+          const res = await fetch('/scan', {
+            headers: { 'X-Node9-Token': CSRF_TOKEN },
+          });
+          const data = await res.json();
+          results.style.display = 'block';
+
+          if (data.status === 'complete') {
+            let risksHtml = '';
+            if (data.evidence.risks.length > 0) {
+              risksHtml = `
+                <div class="findings-list">
+                  <div style="font-size: 10px; font-weight: 700; color: var(--muted); margin-bottom: 8px; text-transform: uppercase;">Top Historical Risks Found</div>
+                  ${data.evidence.risks
+                    .map(
+                      (r) => `
+                    <div class="finding-item">
+                      <span class="finding-ts">${new Date(r.timestamp).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
+                      <span class="finding-rule">${r.rule.replace(/^shield:[^:]+:/, '')}</span>
+                      <span class="finding-cmd"><span class="finding-badge ${r.verdict === 'block' ? 'badge-block' : ''}">${r.verdict === 'block' ? '🛑' : '👁️'}</span>${esc(truncate(r.command, 120))}</span>
+                    </div>
+                  `
+                    )
+                    .join('')}
+                </div>
+              `;
+            }
+
+            let leaksHtml = '';
+            if (data.evidence.leaks.length > 0) {
+              leaksHtml = `
+                <div class="findings-list" style="border-color: rgba(201, 60, 55, 0.3);">
+                  <div style="font-size: 10px; font-weight: 700; color: #f87171; margin-bottom: 8px; text-transform: uppercase;">Credential Leaks Identified</div>
+                  ${data.evidence.leaks
+                    .map(
+                      (l) => `
+                    <div class="finding-item">
+                      <span class="finding-ts">${new Date(l.timestamp).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
+                      <span class="finding-rule">${esc(l.pattern)}</span>
+                      <span class="finding-cmd"><span class="finding-badge badge-leak">🔑</span>${esc(l.sample)}</span>
+                    </div>
+                  `
+                    )
+                    .join('')}
+                </div>
+              `;
+            }
+
+            results.innerHTML = `
+              <div class="insight-hint" style="color: #57ab5a; border-color: rgba(87, 171, 90, 0.4); background: rgba(87, 171, 90, 0.08);">
+                <strong>✅ History Audit Complete</strong><br>
+                Scanned ${data.summary.sessions} sessions. Found <strong>${data.summary.findings} risky operations</strong> and <strong>${data.summary.dlp} secret leaks</strong>.
+                Node9 is now actively protecting you from these types of events.
+              </div>
+              ${leaksHtml}
+              ${risksHtml}
+              <div style="font-size: 11px; color: var(--muted); margin-top: 10px; text-align: center;">
+                <em>These commands ran unprotected in the past. Installing Node9 has closed these gaps.</em>
+              </div>
+            `;
+          } else {
+            results.innerHTML = `<div class="insight-hint danger">Scan failed. Please check the logs.</div>`;
+          }
+          btn.textContent = '🚀 Audit Complete';
+        } catch (err) {
+          console.error('[node9 scan]', err);
+          btn.textContent = '❌ Scan Failed';
+          btn.disabled = false;
+        }
+      }
     </script>
   </body>
 </html>
