@@ -2208,32 +2208,49 @@
 
       // ── Scan History Modal ────────────────────────────────────────────────
       let _scanData = null;
+      let _progressRaf = null;
 
       function openScanModal() {
         _scanData = null;
-        const overlay = document.getElementById('scan-modal-overlay');
-        overlay.classList.add('open');
+        if (_progressRaf) cancelAnimationFrame(_progressRaf);
+        document.getElementById('scan-modal-overlay').classList.add('open');
         document.getElementById('scan-progress-view').style.display = '';
         document.getElementById('scan-results-view').style.display = 'none';
-        document.getElementById('scan-progress-label').textContent = 'Preparing scan…';
-        document.getElementById('scan-progress-sub').textContent = '';
         const bar = document.getElementById('scan-progress-bar');
+        bar.style.transition = 'none';
+        bar.style.background = '';
         bar.style.width = '0%';
-        bar.classList.add('indeterminate');
+        document.getElementById('scan-progress-label').textContent = 'Scanning AI history…';
+        document.getElementById('scan-progress-sub').textContent = 'Claude · Gemini · Codex';
+        _startFakeProgress(bar);
         runModalScan();
       }
 
       function closeScanModal(e) {
         if (!e || e.target === document.getElementById('scan-modal-overlay')) {
           document.getElementById('scan-modal-overlay').classList.remove('open');
+          if (_progressRaf) {
+            cancelAnimationFrame(_progressRaf);
+            _progressRaf = null;
+          }
         }
+      }
+
+      function _startFakeProgress(bar) {
+        const start = performance.now();
+        const duration = 5000; // 5 s eases to ~85%
+        function step(now) {
+          const t = Math.min((now - start) / duration, 1);
+          const pct = 85 * (1 - Math.pow(1 - t, 2.5)); // ease-out
+          bar.style.width = pct.toFixed(1) + '%';
+          if (t < 1) _progressRaf = requestAnimationFrame(step);
+        }
+        _progressRaf = requestAnimationFrame(step);
       }
 
       async function runModalScan() {
         const label = document.getElementById('scan-progress-label');
         const sub = document.getElementById('scan-progress-sub');
-        label.textContent = 'Scanning AI history…';
-        sub.textContent = 'Claude · Gemini · Codex';
 
         try {
           const res = await fetch('/scan', { headers: { 'X-Node9-Token': CSRF_TOKEN } });
@@ -2241,8 +2258,12 @@
           const data = await res.json();
           _scanData = data;
 
+          if (_progressRaf) {
+            cancelAnimationFrame(_progressRaf);
+            _progressRaf = null;
+          }
           const bar = document.getElementById('scan-progress-bar');
-          bar.classList.remove('indeterminate');
+          bar.style.transition = 'width 0.4s ease';
           bar.style.width = '100%';
           label.textContent = 'Scan complete';
           sub.textContent = '';
@@ -2251,13 +2272,17 @@
             document.getElementById('scan-progress-view').style.display = 'none';
             document.getElementById('scan-results-view').style.display = '';
             document.getElementById('scan-results-content').innerHTML = renderScanResults(data);
-          }, 400);
+          }, 500);
         } catch (err) {
           console.error('[node9 scan modal]', err);
+          if (_progressRaf) {
+            cancelAnimationFrame(_progressRaf);
+            _progressRaf = null;
+          }
           const bar = document.getElementById('scan-progress-bar');
-          bar.classList.remove('indeterminate');
-          bar.style.width = '100%';
+          bar.style.transition = 'width 0.3s ease';
           bar.style.background = 'var(--danger)';
+          bar.style.width = '100%';
           label.textContent = '❌ Scan failed';
           sub.textContent = String(err);
         }
@@ -2268,90 +2293,91 @@
           return '<div style="text-align:center;color:var(--muted);padding:32px">No data returned.</div>';
         }
         const s = data.summary || {};
-        const risks = (data.evidence && data.evidence.risks) || [];
-        const leaks = (data.evidence && data.evidence.leaks) || [];
-        const total = risks.length + leaks.length;
+        const sources = data.sources || [];
+        const totalLeaks = sources.reduce((n, src) => n + src.leaks.length, 0);
+        const totalRisks = sources.reduce((n, src) => n + src.findings.length, 0);
+        const totalFindings = totalLeaks + totalRisks;
 
-        const statColor = (n, warn, danger) =>
-          n >= danger ? 'danger' : n >= warn ? 'warning' : 'ok';
+        const statColor = (n, warn, bad) => (n >= bad ? 'danger' : n >= warn ? 'warning' : 'ok');
 
-        const stats = `
-          <div class="scan-summary-row">
-            <div class="scan-stat">
-              <div class="scan-stat-val">${s.sessions || 0}</div>
-              <div class="scan-stat-label">Sessions</div>
-            </div>
-            <div class="scan-stat">
-              <div class="scan-stat-val ${statColor(total, 1, 5)}">${total}</div>
-              <div class="scan-stat-label">Findings</div>
-            </div>
-            <div class="scan-stat">
-              <div class="scan-stat-val ${leaks.length ? 'danger' : 'ok'}">${leaks.length}</div>
-              <div class="scan-stat-label">Secret Leaks</div>
-            </div>
-            <div class="scan-stat">
-              <div class="scan-stat-val ${statColor(risks.length, 1, 3)}">${risks.length}</div>
-              <div class="scan-stat-label">Policy Risks</div>
-            </div>
-          </div>`;
+        const stats = `<div class="scan-summary-row">
+          <div class="scan-stat">
+            <div class="scan-stat-val">${s.sessions || 0}</div>
+            <div class="scan-stat-label">Sessions</div>
+          </div>
+          <div class="scan-stat">
+            <div class="scan-stat-val ${statColor(totalFindings, 1, 5)}">${totalFindings}</div>
+            <div class="scan-stat-label">Total Findings</div>
+          </div>
+          <div class="scan-stat">
+            <div class="scan-stat-val ${totalLeaks ? 'danger' : 'ok'}">${totalLeaks}</div>
+            <div class="scan-stat-label">Secret Leaks</div>
+          </div>
+          <div class="scan-stat">
+            <div class="scan-stat-val ${statColor(totalRisks, 1, 3)}">${totalRisks}</div>
+            <div class="scan-stat-label">Policy Risks</div>
+          </div>
+        </div>`;
 
-        if (total === 0) {
+        if (totalFindings === 0) {
           return (
             stats +
-            `<div style="text-align:center;color:#57ab5a;padding:24px 0;font-size:13px">✅ No issues found in AI history</div>`
+            `<div style="text-align:center;color:#57ab5a;padding:28px 0;font-size:13px;line-height:1.8">
+              ✅ <strong>No issues found</strong><br>
+              <span style="font-size:11px;color:var(--muted)">Scanned ${s.sessions || 0} sessions across ${sources.length} AI source(s)</span>
+            </div>`
           );
         }
 
-        function findingRows(items, type) {
-          return items
-            .map((item) => {
-              const date = new Date(item.timestamp).toLocaleDateString([], {
-                month: 'short',
-                day: 'numeric',
-              });
-              const verdict = type === 'leak' ? 'dlp' : item.verdict || 'review';
-              const badgeClass =
-                verdict === 'block'
-                  ? 'badge-block'
-                  : verdict === 'dlp'
-                    ? 'badge-dlp'
-                    : 'badge-review';
-              const badgeLabel =
-                verdict === 'block' ? 'BLOCK' : verdict === 'dlp' ? 'DLP' : 'REVIEW';
-              const ruleName =
-                type === 'leak'
-                  ? esc(item.pattern || '')
-                  : esc((item.rule || '').replace(/^shield:[^:]+:/, ''));
-              const cmdText =
-                type === 'leak' ? esc(item.sample || '') : esc(truncate(item.command || '', 100));
-              return `<div class="scan-finding-row">
-              <span class="scan-finding-ts">${date}</span>
-              <span class="scan-finding-rule">${ruleName}</span>
-              <span class="scan-finding-cmd"><span class="scan-verdict-badge ${badgeClass}">${badgeLabel}</span>${cmdText}</span>
-            </div>`;
-            })
-            .join('');
-        }
-
-        let groups = '';
-
-        if (leaks.length > 0) {
-          groups += `<div class="scan-group">
-            <div class="scan-group-header" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">
-              🔑 Credential Leaks
-              <span class="scan-group-count">${leaks.length}</span>
-            </div>
-            <div class="scan-group-body">${findingRows(leaks, 'leak')}</div>
+        function findingRow(item, type) {
+          const date = new Date(item.timestamp).toLocaleDateString([], {
+            month: 'short',
+            day: 'numeric',
+          });
+          const verdict = type === 'leak' ? 'dlp' : item.verdict || 'review';
+          const badgeClass =
+            verdict === 'block' ? 'badge-block' : verdict === 'dlp' ? 'badge-dlp' : 'badge-review';
+          const badgeLabel = verdict === 'block' ? 'BLOCK' : verdict === 'dlp' ? 'DLP' : 'REVIEW';
+          const ruleName =
+            type === 'leak'
+              ? esc(item.pattern || '')
+              : esc((item.rule || '').replace(/^shield:[^:]+:/, ''));
+          const cmdText =
+            type === 'leak' ? esc(item.sample || '') : esc(truncate(item.command || '', 100));
+          return `<div class="scan-finding-row">
+            <span class="scan-finding-ts">${date}</span>
+            <span class="scan-finding-rule">${ruleName}</span>
+            <span class="scan-finding-cmd"><span class="scan-verdict-badge ${badgeClass}">${badgeLabel}</span>${cmdText}</span>
           </div>`;
         }
 
-        if (risks.length > 0) {
+        function toggleGroup(header) {
+          const body = header.nextElementSibling;
+          body.style.display = body.style.display === 'none' ? '' : 'none';
+        }
+
+        let groups = '';
+        for (const src of sources) {
+          const srcLeaks = src.leaks || [];
+          const srcFindings = src.findings || [];
+          if (!srcLeaks.length && !srcFindings.length) continue;
+          const srcTotal = srcLeaks.length + srcFindings.length;
+          let rows = '';
+          if (srcLeaks.length) {
+            rows += `<div style="padding:6px 14px 2px;font-size:10px;font-weight:700;color:#e5534b;text-transform:uppercase;letter-spacing:.5px">🔑 Credential Leaks</div>`;
+            rows += srcLeaks.map((l) => findingRow(l, 'leak')).join('');
+          }
+          if (srcFindings.length) {
+            rows += `<div style="padding:6px 14px 2px;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">🚨 Policy Risks</div>`;
+            rows += srcFindings.map((f) => findingRow(f, 'risk')).join('');
+          }
           groups += `<div class="scan-group">
-            <div class="scan-group-header" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">
-              🚨 Policy Risks
-              <span class="scan-group-count">${risks.length}</span>
+            <div class="scan-group-header" onclick="toggleGroup(this)">
+              ${esc(src.icon)} ${esc(src.label)}
+              <span style="font-size:10px;font-weight:400;color:var(--muted);margin-left:4px">${src.sessions} sessions</span>
+              <span class="scan-group-count">${srcTotal} finding${srcTotal !== 1 ? 's' : ''}</span>
             </div>
-            <div class="scan-group-body">${findingRows(risks, 'risk')}</div>
+            <div class="scan-group-body">${rows}</div>
           </div>`;
         }
 
@@ -2404,12 +2430,17 @@
           results.style.display = 'block';
 
           if (data.status === 'complete') {
+            const sources = data.sources || [];
+            const allRisks = sources.flatMap((s) => s.findings || []);
+            const allLeaks = sources.flatMap((s) => s.leaks || []);
+
             let risksHtml = '';
-            if (data.evidence.risks.length > 0) {
+            if (allRisks.length > 0) {
               risksHtml = `
                 <div class="findings-list">
                   <div style="font-size: 10px; font-weight: 700; color: var(--muted); margin-bottom: 8px; text-transform: uppercase;">Top Historical Risks Found</div>
-                  ${data.evidence.risks
+                  ${allRisks
+                    .slice(0, 10)
                     .map(
                       (r) => `
                     <div class="finding-item">
@@ -2425,11 +2456,12 @@
             }
 
             let leaksHtml = '';
-            if (data.evidence.leaks.length > 0) {
+            if (allLeaks.length > 0) {
               leaksHtml = `
                 <div class="findings-list" style="border-color: rgba(201, 60, 55, 0.3);">
                   <div style="font-size: 10px; font-weight: 700; color: #f87171; margin-bottom: 8px; text-transform: uppercase;">Credential Leaks Identified</div>
-                  ${data.evidence.leaks
+                  ${allLeaks
+                    .slice(0, 5)
                     .map(
                       (l) => `
                     <div class="finding-item">

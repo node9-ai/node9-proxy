@@ -801,68 +801,93 @@ export function startDaemon(): void {
 
       try {
         const d = new Date();
-        d.setDate(d.getDate() - 90); // default 90 days
+        d.setDate(d.getDate() - 90);
         d.setHours(0, 0, 0, 0);
 
-        let claude = { sessions: 0, findings: [], dlpFindings: [] };
-        let gemini = { sessions: 0, findings: [], dlpFindings: [] };
-        let codex = { sessions: 0, findings: [], dlpFindings: [] };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let claude: any = { sessions: 0, findings: [], dlpFindings: [] };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let gemini: any = { sessions: 0, findings: [], dlpFindings: [] };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let codex: any = { sessions: 0, findings: [], dlpFindings: [] };
 
         try {
-          claude = scanClaudeHistory(d) as any;
+          claude = scanClaudeHistory(d);
         } catch (e) {
           console.error('Claude scan failed:', e);
         }
         try {
-          gemini = scanGeminiHistory(d) as any;
+          gemini = scanGeminiHistory(d);
         } catch (e) {
           console.error('Gemini scan failed:', e);
         }
         try {
-          codex = scanCodexHistory(d) as any;
+          codex = scanCodexHistory(d);
         } catch (e) {
           console.error('Codex scan failed:', e);
         }
 
-        const totalFindings =
-          claude.findings.length + gemini.findings.length + codex.findings.length;
-        const totalDlp =
-          claude.dlpFindings.length + gemini.dlpFindings.length + codex.dlpFindings.length;
-        const totalSessions = claude.sessions + gemini.sessions + codex.sessions;
-
-        // Collect top findings for the UI to show "Evidence"
-        const allFindings = [...claude.findings, ...gemini.findings, ...codex.findings]
-          .sort((a: any, b: any) => (b.timestamp || '').localeCompare(a.timestamp || ''))
-          .slice(0, 15)
-          .map((f: any) => ({
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const mapFindings = (arr: any[], src: string) =>
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          arr.map((f: any) => ({
             timestamp: f.timestamp || new Date().toISOString(),
             rule: f.source?.rule?.name ?? f.source?.shieldLabel ?? 'unnamed',
             command:
               f.input?.command ?? f.input?.cmd ?? f.input?.file_path ?? f.toolName ?? 'unknown',
             verdict: f.source?.rule?.verdict ?? f.source?.rule?.action ?? 'review',
+            source: src,
           }));
 
-        const allDlp = [...claude.dlpFindings, ...gemini.dlpFindings, ...codex.dlpFindings]
-          .slice(0, 5)
-          .map((f: any) => ({
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const mapLeaks = (arr: any[], src: string) =>
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          arr.map((f: any) => ({
             timestamp: f.timestamp || new Date().toISOString(),
             pattern: f.patternName || 'DLP',
             sample: f.redactedSample || '********',
+            source: src,
           }));
+
+        const sources = [
+          {
+            id: 'claude',
+            label: 'Claude',
+            icon: '🤖',
+            sessions: claude.sessions,
+            findings: mapFindings(claude.findings, 'claude'),
+            leaks: mapLeaks(claude.dlpFindings, 'claude'),
+          },
+          {
+            id: 'gemini',
+            label: 'Gemini',
+            icon: '♊',
+            sessions: gemini.sessions,
+            findings: mapFindings(gemini.findings, 'gemini'),
+            leaks: mapLeaks(gemini.dlpFindings, 'gemini'),
+          },
+          {
+            id: 'codex',
+            label: 'Codex',
+            icon: '🔮',
+            sessions: codex.sessions,
+            findings: mapFindings(codex.findings, 'codex'),
+            leaks: mapLeaks(codex.dlpFindings, 'codex'),
+          },
+        ].filter((s) => s.sessions > 0 || s.findings.length > 0 || s.leaks.length > 0);
+
+        const totalSessions = claude.sessions + gemini.sessions + codex.sessions;
+        const totalFindings =
+          claude.findings.length + gemini.findings.length + codex.findings.length;
+        const totalDlp =
+          claude.dlpFindings.length + gemini.dlpFindings.length + codex.dlpFindings.length;
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         return res.end(
           JSON.stringify({
             status: 'complete',
-            summary: {
-              sessions: totalSessions,
-              findings: totalFindings,
-              dlp: totalDlp,
-            },
-            evidence: {
-              risks: allFindings,
-              leaks: allDlp,
-            },
+            summary: { sessions: totalSessions, findings: totalFindings, dlp: totalDlp },
+            sources,
           })
         );
       } catch (err) {
