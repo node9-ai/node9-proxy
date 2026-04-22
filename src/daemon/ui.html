@@ -1091,6 +1091,246 @@
           grid-template-columns: 1fr;
         }
       }
+      /* ── Scan History Button ─────────────────────────────────────────── */
+      .btn-scan-history {
+        margin-left: auto;
+        background: rgba(83, 155, 245, 0.1);
+        border: 1px solid rgba(83, 155, 245, 0.3);
+        color: var(--accent);
+        border-radius: 8px;
+        padding: 6px 14px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background 0.15s;
+      }
+      .btn-scan-history:hover {
+        background: rgba(83, 155, 245, 0.2);
+      }
+      /* ── Scan Modal ──────────────────────────────────────────────────── */
+      .scan-overlay {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.7);
+        z-index: 1000;
+        align-items: center;
+        justify-content: center;
+      }
+      .scan-overlay.open {
+        display: flex;
+      }
+      .scan-modal {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        width: min(760px, 94vw);
+        max-height: 85vh;
+        display: flex;
+        flex-direction: column;
+        box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+        overflow: hidden;
+      }
+      .scan-modal-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 16px 20px;
+        border-bottom: 1px solid var(--border);
+        font-size: 14px;
+        font-weight: 700;
+        color: var(--text-bright);
+      }
+      .scan-modal-close {
+        background: none;
+        border: none;
+        color: var(--muted);
+        font-size: 16px;
+        cursor: pointer;
+        padding: 2px 6px;
+        border-radius: 4px;
+      }
+      .scan-modal-close:hover {
+        color: var(--text-bright);
+        background: rgba(255, 255, 255, 0.05);
+      }
+      #scan-modal-body {
+        padding: 24px 20px;
+        overflow-y: auto;
+        flex: 1;
+      }
+      /* progress */
+      .scan-progress-label {
+        font-size: 13px;
+        color: var(--text-bright);
+        margin-bottom: 16px;
+        text-align: center;
+      }
+      .scan-progress-track {
+        height: 8px;
+        background: rgba(255, 255, 255, 0.06);
+        border-radius: 4px;
+        overflow: hidden;
+        margin-bottom: 8px;
+      }
+      .scan-progress-bar {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, var(--accent), #7cb9f8);
+        border-radius: 4px;
+        transition: width 0.3s ease;
+      }
+      .scan-progress-bar.indeterminate {
+        width: 40%;
+        animation: indeterminate 1.4s ease-in-out infinite;
+      }
+      @keyframes indeterminate {
+        0% {
+          transform: translateX(-100%);
+        }
+        100% {
+          transform: translateX(350%);
+        }
+      }
+      .scan-progress-sub {
+        font-size: 11px;
+        color: var(--muted);
+        text-align: center;
+      }
+      /* results */
+      .scan-summary-row {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 10px;
+        margin-bottom: 20px;
+      }
+      .scan-stat {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 12px;
+        text-align: center;
+      }
+      .scan-stat-val {
+        font-size: 22px;
+        font-weight: 700;
+        color: var(--text-bright);
+      }
+      .scan-stat-val.danger {
+        color: #e5534b;
+      }
+      .scan-stat-val.warning {
+        color: #f0c040;
+      }
+      .scan-stat-val.ok {
+        color: #57ab5a;
+      }
+      .scan-stat-label {
+        font-size: 10px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-top: 4px;
+      }
+      .scan-group {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        margin-bottom: 12px;
+        overflow: hidden;
+      }
+      .scan-group-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--border);
+        font-size: 11px;
+        font-weight: 700;
+        color: var(--text-bright);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        cursor: pointer;
+        user-select: none;
+      }
+      .scan-group-header:hover {
+        background: rgba(255, 255, 255, 0.02);
+      }
+      .scan-group-count {
+        margin-left: auto;
+        font-size: 10px;
+        padding: 2px 7px;
+        border-radius: 4px;
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--muted);
+      }
+      .scan-group-body {
+        padding: 6px 0;
+      }
+      .scan-finding-row {
+        display: grid;
+        grid-template-columns: 60px 160px 1fr;
+        gap: 8px;
+        padding: 7px 14px;
+        font-size: 11px;
+        border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+        align-items: center;
+      }
+      .scan-finding-row:last-child {
+        border-bottom: none;
+      }
+      .scan-finding-ts {
+        color: var(--muted);
+        font-family: 'Fira Code', monospace;
+      }
+      .scan-finding-rule {
+        color: var(--accent);
+        font-weight: 600;
+      }
+      .scan-verdict-badge {
+        display: inline-block;
+        padding: 1px 6px;
+        border-radius: 4px;
+        font-size: 10px;
+        font-weight: 700;
+        margin-right: 6px;
+      }
+      .badge-block {
+        background: rgba(201, 60, 55, 0.2);
+        color: #e5534b;
+      }
+      .badge-review {
+        background: rgba(240, 192, 64, 0.15);
+        color: #f0c040;
+      }
+      .badge-dlp {
+        background: rgba(201, 60, 55, 0.2);
+        color: #e5534b;
+      }
+      .scan-finding-cmd {
+        color: var(--text);
+        font-family: 'Fira Code', monospace;
+        font-size: 10px;
+      }
+      .scan-export-row {
+        display: flex;
+        gap: 10px;
+        margin-top: 20px;
+        justify-content: flex-end;
+      }
+      .btn-export {
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--border);
+        color: var(--text-bright);
+        border-radius: 8px;
+        padding: 7px 16px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .btn-export:hover {
+        background: rgba(255, 255, 255, 0.1);
+      }
     </style>
   </head>
   <body>
@@ -1102,8 +1342,37 @@
           <button class="nav-tab active" onclick="showTab('approvals')">Approvals</button>
           <button class="nav-tab" onclick="showTab('dashboard')">Dashboard</button>
         </div>
+        <button class="btn-scan-history" onclick="openScanModal()">🔍 Scan History</button>
         <div id="st" class="status-badge">Waiting...</div>
       </header>
+
+      <!-- ── Scan History Modal ─────────────────────────────────────────── -->
+      <div id="scan-modal-overlay" class="scan-overlay" onclick="closeScanModal(event)">
+        <div class="scan-modal" id="scan-modal">
+          <div class="scan-modal-header">
+            <span>🔍 History Audit</span>
+            <button class="scan-modal-close" onclick="closeScanModal()">✕</button>
+          </div>
+          <div id="scan-modal-body">
+            <!-- progress state -->
+            <div id="scan-progress-view">
+              <div class="scan-progress-label" id="scan-progress-label">Preparing scan…</div>
+              <div class="scan-progress-track">
+                <div class="scan-progress-bar" id="scan-progress-bar"></div>
+              </div>
+              <div class="scan-progress-sub" id="scan-progress-sub">0 files</div>
+            </div>
+            <!-- results state -->
+            <div id="scan-results-view" style="display: none">
+              <div id="scan-results-content"></div>
+              <div class="scan-export-row">
+                <button class="btn-export" onclick="exportScanPng()">📸 Save as Image</button>
+                <button class="btn-export" onclick="exportScanJson()">💾 Export JSON</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <div class="body">
         <div class="flight-col">
@@ -1935,6 +2204,190 @@
         } catch (err) {
           console.error('Failed to load dashboard:', err);
         }
+      }
+
+      // ── Scan History Modal ────────────────────────────────────────────────
+      let _scanData = null;
+
+      function openScanModal() {
+        _scanData = null;
+        const overlay = document.getElementById('scan-modal-overlay');
+        overlay.classList.add('open');
+        document.getElementById('scan-progress-view').style.display = '';
+        document.getElementById('scan-results-view').style.display = 'none';
+        document.getElementById('scan-progress-label').textContent = 'Preparing scan…';
+        document.getElementById('scan-progress-sub').textContent = '';
+        const bar = document.getElementById('scan-progress-bar');
+        bar.style.width = '0%';
+        bar.classList.add('indeterminate');
+        runModalScan();
+      }
+
+      function closeScanModal(e) {
+        if (!e || e.target === document.getElementById('scan-modal-overlay')) {
+          document.getElementById('scan-modal-overlay').classList.remove('open');
+        }
+      }
+
+      async function runModalScan() {
+        const label = document.getElementById('scan-progress-label');
+        const sub = document.getElementById('scan-progress-sub');
+        label.textContent = 'Scanning AI history…';
+        sub.textContent = 'Claude · Gemini · Codex';
+
+        try {
+          const res = await fetch('/scan', { headers: { 'X-Node9-Token': CSRF_TOKEN } });
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const data = await res.json();
+          _scanData = data;
+
+          const bar = document.getElementById('scan-progress-bar');
+          bar.classList.remove('indeterminate');
+          bar.style.width = '100%';
+          label.textContent = 'Scan complete';
+          sub.textContent = '';
+
+          setTimeout(() => {
+            document.getElementById('scan-progress-view').style.display = 'none';
+            document.getElementById('scan-results-view').style.display = '';
+            document.getElementById('scan-results-content').innerHTML = renderScanResults(data);
+          }, 400);
+        } catch (err) {
+          console.error('[node9 scan modal]', err);
+          const bar = document.getElementById('scan-progress-bar');
+          bar.classList.remove('indeterminate');
+          bar.style.width = '100%';
+          bar.style.background = 'var(--danger)';
+          label.textContent = '❌ Scan failed';
+          sub.textContent = String(err);
+        }
+      }
+
+      function renderScanResults(data) {
+        if (!data || data.status !== 'complete') {
+          return '<div style="text-align:center;color:var(--muted);padding:32px">No data returned.</div>';
+        }
+        const s = data.summary || {};
+        const risks = (data.evidence && data.evidence.risks) || [];
+        const leaks = (data.evidence && data.evidence.leaks) || [];
+        const total = risks.length + leaks.length;
+
+        const statColor = (n, warn, danger) =>
+          n >= danger ? 'danger' : n >= warn ? 'warning' : 'ok';
+
+        const stats = `
+          <div class="scan-summary-row">
+            <div class="scan-stat">
+              <div class="scan-stat-val">${s.sessions || 0}</div>
+              <div class="scan-stat-label">Sessions</div>
+            </div>
+            <div class="scan-stat">
+              <div class="scan-stat-val ${statColor(total, 1, 5)}">${total}</div>
+              <div class="scan-stat-label">Findings</div>
+            </div>
+            <div class="scan-stat">
+              <div class="scan-stat-val ${leaks.length ? 'danger' : 'ok'}">${leaks.length}</div>
+              <div class="scan-stat-label">Secret Leaks</div>
+            </div>
+            <div class="scan-stat">
+              <div class="scan-stat-val ${statColor(risks.length, 1, 3)}">${risks.length}</div>
+              <div class="scan-stat-label">Policy Risks</div>
+            </div>
+          </div>`;
+
+        if (total === 0) {
+          return (
+            stats +
+            `<div style="text-align:center;color:#57ab5a;padding:24px 0;font-size:13px">✅ No issues found in AI history</div>`
+          );
+        }
+
+        function findingRows(items, type) {
+          return items
+            .map((item) => {
+              const date = new Date(item.timestamp).toLocaleDateString([], {
+                month: 'short',
+                day: 'numeric',
+              });
+              const verdict = type === 'leak' ? 'dlp' : item.verdict || 'review';
+              const badgeClass =
+                verdict === 'block'
+                  ? 'badge-block'
+                  : verdict === 'dlp'
+                    ? 'badge-dlp'
+                    : 'badge-review';
+              const badgeLabel =
+                verdict === 'block' ? 'BLOCK' : verdict === 'dlp' ? 'DLP' : 'REVIEW';
+              const ruleName =
+                type === 'leak'
+                  ? esc(item.pattern || '')
+                  : esc((item.rule || '').replace(/^shield:[^:]+:/, ''));
+              const cmdText =
+                type === 'leak' ? esc(item.sample || '') : esc(truncate(item.command || '', 100));
+              return `<div class="scan-finding-row">
+              <span class="scan-finding-ts">${date}</span>
+              <span class="scan-finding-rule">${ruleName}</span>
+              <span class="scan-finding-cmd"><span class="scan-verdict-badge ${badgeClass}">${badgeLabel}</span>${cmdText}</span>
+            </div>`;
+            })
+            .join('');
+        }
+
+        let groups = '';
+
+        if (leaks.length > 0) {
+          groups += `<div class="scan-group">
+            <div class="scan-group-header" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">
+              🔑 Credential Leaks
+              <span class="scan-group-count">${leaks.length}</span>
+            </div>
+            <div class="scan-group-body">${findingRows(leaks, 'leak')}</div>
+          </div>`;
+        }
+
+        if (risks.length > 0) {
+          groups += `<div class="scan-group">
+            <div class="scan-group-header" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">
+              🚨 Policy Risks
+              <span class="scan-group-count">${risks.length}</span>
+            </div>
+            <div class="scan-group-body">${findingRows(risks, 'risk')}</div>
+          </div>`;
+        }
+
+        return stats + groups;
+      }
+
+      function exportScanJson() {
+        if (!_scanData) return;
+        const blob = new Blob([JSON.stringify(_scanData, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'node9-scan-' + new Date().toISOString().slice(0, 10) + '.json';
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+
+      function exportScanPng() {
+        const el = document.getElementById('scan-modal');
+        if (!window.html2canvas) {
+          const script = document.createElement('script');
+          script.src = 'https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js';
+          script.onload = () => _doCapture(el);
+          document.head.appendChild(script);
+        } else {
+          _doCapture(el);
+        }
+      }
+
+      function _doCapture(el) {
+        html2canvas(el, { backgroundColor: '#1c2128', scale: 2, useCORS: true }).then((canvas) => {
+          const a = document.createElement('a');
+          a.href = canvas.toDataURL('image/png');
+          a.download = 'node9-scan-' + new Date().toISOString().slice(0, 10) + '.png';
+          a.click();
+        });
       }
 
       async function runHistoryScan() {
