@@ -561,6 +561,27 @@ interface CursorMcpConfig {
   [key: string]: unknown;
 }
 
+/** Returns the Claude Desktop config path for the current platform, or null if unsupported. */
+export function claudeDesktopConfigPath(homeDir: string = os.homedir()): string | null {
+  if (process.platform === 'darwin') {
+    return path.join(
+      homeDir,
+      'Library',
+      'Application Support',
+      'Claude',
+      'claude_desktop_config.json'
+    );
+  }
+  if (process.platform === 'linux') {
+    return path.join(homeDir, '.config', 'Claude', 'claude_desktop_config.json');
+  }
+  if (process.platform === 'win32') {
+    const appData = process.env.APPDATA ?? path.join(homeDir, 'AppData', 'Roaming');
+    return path.join(appData, 'Claude', 'claude_desktop_config.json');
+  }
+  return null;
+}
+
 /**
  * Detect which AI agents are installed on this machine.
  * Used by `node9 init` to auto-wire all detected agents.
@@ -572,6 +593,7 @@ export function detectAgents(homeDir: string = os.homedir()): {
   codex: boolean;
   windsurf: boolean;
   vscode: boolean;
+  claudeDesktop: boolean;
 } {
   const exists = (p: string): boolean => {
     try {
@@ -584,6 +606,7 @@ export function detectAgents(homeDir: string = os.homedir()): {
       return false;
     }
   };
+  const desktopPath = claudeDesktopConfigPath(homeDir);
   return {
     claude: exists(path.join(homeDir, '.claude')) || exists(path.join(homeDir, '.claude.json')),
     gemini: exists(path.join(homeDir, '.gemini')),
@@ -591,6 +614,7 @@ export function detectAgents(homeDir: string = os.homedir()): {
     codex: exists(path.join(homeDir, '.codex')),
     windsurf: exists(path.join(homeDir, '.codeium', 'windsurf')),
     vscode: exists(path.join(homeDir, '.vscode')),
+    claudeDesktop: desktopPath !== null && exists(path.dirname(desktopPath)),
   };
 }
 
@@ -1165,10 +1189,143 @@ export function teardownVSCode(): void {
   }
 }
 
+// ── Claude Desktop ────────────────────────────────────────────────────────────
+// Config: ~/Library/Application Support/Claude/claude_desktop_config.json (macOS)
+//         ~/.config/Claude/claude_desktop_config.json (Linux)
+// Format: { mcpServers: { name: { command, args } } }
+// Note: Claude Desktop does not support pre-execution hooks — MCP proxy only.
+
+export async function setupClaudeDesktop(): Promise<void> {
+  const configPath = claudeDesktopConfigPath();
+  if (!configPath) {
+    console.log(chalk.yellow('  ⚠️  Claude Desktop is not supported on this platform.'));
+    return;
+  }
+
+  const config = readJson<ClaudeConfig>(configPath) ?? {};
+  const servers = config.mcpServers ?? {};
+
+  let anythingChanged = false;
+
+  if (!hasNode9McpServer(servers)) {
+    servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+    config.mcpServers = servers;
+    writeJson(configPath, config);
+    console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    anythingChanged = true;
+  }
+
+  const serversToWrap: Array<{ name: string; upstream: string }> = [];
+  for (const [name, server] of Object.entries(servers)) {
+    if (!server.command || server.command === 'node9') continue;
+    serversToWrap.push({ name, upstream: [server.command, ...(server.args ?? [])].join(' ') });
+  }
+
+  if (serversToWrap.length > 0) {
+    console.log(chalk.bold('The following existing entries will be modified:\n'));
+    console.log(chalk.white(`  ${configPath}`));
+    for (const { name, upstream } of serversToWrap) {
+      console.log(chalk.gray(`    • ${name}: "${upstream}" → node9 mcp --upstream "${upstream}"`));
+    }
+    console.log('');
+    const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
+    if (proceed) {
+      for (const { name, upstream } of serversToWrap) {
+        servers[name] = {
+          ...servers[name],
+          command: 'node9',
+          args: ['mcp', '--upstream', upstream],
+        };
+      }
+      config.mcpServers = servers;
+      writeJson(configPath, config);
+      console.log(chalk.green(`\n  ✅ ${serversToWrap.length} MCP server(s) wrapped`));
+      anythingChanged = true;
+    } else {
+      console.log(chalk.yellow('  Skipped MCP server wrapping.'));
+    }
+    console.log('');
+  }
+
+  console.log(
+    chalk.yellow(
+      '  ⚠️  Note: Claude Desktop does not support pre-execution hooks.\n' +
+        '     MCP proxy wrapping is the only supported protection mode.'
+    )
+  );
+  console.log('');
+
+  if (!anythingChanged && serversToWrap.length === 0) {
+    console.log(chalk.blue('ℹ️  Node9 is already fully configured for Claude Desktop.'));
+    printDaemonTip();
+    return;
+  }
+
+  if (anythingChanged) {
+    console.log(chalk.green.bold('🛡️  Node9 is now protecting Claude Desktop via MCP proxy!'));
+    console.log(chalk.gray('    Restart Claude Desktop for changes to take effect.'));
+    printDaemonTip();
+  }
+}
+
+export function teardownClaudeDesktop(): void {
+  const configPath = claudeDesktopConfigPath();
+  if (!configPath) {
+    console.log(chalk.yellow('  ⚠️  Claude Desktop is not supported on this platform.'));
+    return;
+  }
+
+  const config = readJson<ClaudeConfig>(configPath);
+  if (!config?.mcpServers) {
+    console.log(chalk.blue('  ℹ️  Claude Desktop config not found — nothing to remove'));
+    return;
+  }
+
+  let changed = false;
+
+  if (removeNode9McpServer(config.mcpServers)) {
+    changed = true;
+    console.log(chalk.green(`  ✅ Removed node9 MCP server entry from ${configPath}`));
+  }
+
+  for (const [name, server] of Object.entries(config.mcpServers)) {
+    const args = server.args as string[] | undefined;
+    if (
+      server.command === 'node9' &&
+      Array.isArray(args) &&
+      args[0] === 'mcp' &&
+      args[1] === '--upstream' &&
+      typeof args[2] === 'string'
+    ) {
+      const [originalCmd, ...originalArgs] = args[2].split(' ');
+      config.mcpServers[name] = {
+        ...server,
+        command: originalCmd,
+        args: originalArgs.length ? originalArgs : undefined,
+      };
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    writeJson(configPath, config);
+    console.log(chalk.green('  ✅ Unwrapped MCP servers in Claude Desktop config'));
+  } else {
+    console.log(chalk.blue('  ℹ️  No Node9-wrapped MCP servers found in Claude Desktop config'));
+  }
+}
+
 // ── Agent wired-status checks ─────────────────────────────────────────────────
 // Each function returns true if node9 hooks/MCP are present in the agent config.
 
-export type AgentName = 'claude' | 'gemini' | 'cursor' | 'codex' | 'windsurf' | 'vscode';
+export type AgentName =
+  | 'claude'
+  | 'gemini'
+  | 'cursor'
+  | 'codex'
+  | 'windsurf'
+  | 'vscode'
+  | 'claudeDesktop';
 
 export interface AgentStatus {
   name: AgentName;
@@ -1255,6 +1412,18 @@ export function getAgentsStatus(homeDir: string = os.homedir()): AgentStatus[] {
       installed: detected.codex,
       wired: codexWired,
       mode: detected.codex ? 'mcp' : null,
+    },
+    {
+      name: 'claudeDesktop',
+      label: 'Claude Desktop',
+      installed: detected.claudeDesktop,
+      wired: (() => {
+        const cfgPath = claudeDesktopConfigPath(homeDir);
+        if (!cfgPath) return false;
+        const cfg = readJson<ClaudeConfig>(cfgPath);
+        return !!(cfg?.mcpServers && hasNode9McpServer(cfg.mcpServers));
+      })(),
+      mode: detected.claudeDesktop ? 'mcp' : null,
     },
   ];
 }

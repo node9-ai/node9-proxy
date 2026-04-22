@@ -9,12 +9,14 @@ import {
   setupCodex,
   setupWindsurf,
   setupVSCode,
+  setupClaudeDesktop,
   teardownClaude,
   teardownGemini,
   teardownCursor,
   teardownCodex,
   teardownWindsurf,
   teardownVSCode,
+  teardownClaudeDesktop,
   getAgentsStatus,
   type AgentName,
 } from '../../setup';
@@ -26,6 +28,7 @@ const SETUP_FN: Record<AgentName, () => Promise<void> | void> = {
   codex: setupCodex,
   windsurf: setupWindsurf,
   vscode: setupVSCode,
+  claudeDesktop: setupClaudeDesktop,
 };
 
 const TEARDOWN_FN: Record<AgentName, () => void> = {
@@ -35,6 +38,7 @@ const TEARDOWN_FN: Record<AgentName, () => void> = {
   codex: teardownCodex,
   windsurf: teardownWindsurf,
   vscode: teardownVSCode,
+  claudeDesktop: teardownClaudeDesktop,
 };
 
 const AGENT_NAMES = Object.keys(SETUP_FN) as AgentName[];

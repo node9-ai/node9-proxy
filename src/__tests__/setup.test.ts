@@ -508,6 +508,7 @@ describe('detectAgents', () => {
       codex: false,
       windsurf: false,
       vscode: false,
+      claudeDesktop: false,
     });
   });
 
@@ -549,7 +550,7 @@ describe('detectAgents', () => {
     expect(detectAgents(home).codex).toBe(true);
   });
 
-  it('detects all six agents simultaneously', () => {
+  it('detects all seven agents simultaneously', () => {
     vi.mocked(fs.existsSync).mockImplementation((q) => {
       const s = String(q).replace(/\\/g, '/');
       return (
@@ -558,7 +559,8 @@ describe('detectAgents', () => {
         s === p('.cursor') ||
         s === p('.codex') ||
         s === p('.codeium/windsurf') ||
-        s === p('.vscode')
+        s === p('.vscode') ||
+        s.includes('Claude') // Claude Desktop dir on any platform
       );
     });
     expect(detectAgents(home)).toEqual({
@@ -568,6 +570,7 @@ describe('detectAgents', () => {
       codex: true,
       windsurf: true,
       vscode: true,
+      claudeDesktop: true,
     });
   });
 
@@ -597,6 +600,7 @@ describe('detectAgents', () => {
       codex: false,
       windsurf: false,
       vscode: false,
+      claudeDesktop: false,
     });
     // Should warn to stderr for non-ENOENT errors so misconfigured systems surface
     expect(stderrSpy).toHaveBeenCalled();
@@ -617,6 +621,7 @@ describe('detectAgents', () => {
       codex: false,
       windsurf: false,
       vscode: false,
+      claudeDesktop: false,
     });
     expect(stderrSpy).not.toHaveBeenCalled();
     stderrSpy.mockRestore();

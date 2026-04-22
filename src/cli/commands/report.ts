@@ -127,6 +127,20 @@ function isDlp(checkedBy: string | undefined): boolean {
   return !!checkedBy?.includes('dlp');
 }
 
+const BLOCK_REASON_LABELS: Record<string, string> = {
+  timeout: 'Popup timeout',
+  'smart-rule-block': 'Smart rule',
+  'observe-mode-dlp-would-block': 'DLP (observe)',
+  'persistent-deny': 'Persistent deny',
+  'local-decision': 'User denied',
+  'dlp-block': 'DLP block',
+  'loop-detected': 'Loop detected',
+};
+
+function humanBlockReason(reason: string): string {
+  return BLOCK_REASON_LABELS[reason] ?? reason;
+}
+
 /** Plain bar string — no chalk so padEnd works on the raw string. */
 function barStr(value: number, max: number, width: number): string {
   if (max === 0 || width <= 0) return '░'.repeat(width);
@@ -282,6 +296,113 @@ function loadClaudeCost(start: Date, end: Date): CostData {
 }
 
 // ---------------------------------------------------------------------------
+// Codex cost tracking (reads ~/.codex/sessions/YYYY/MM/DD/*.jsonl)
+// ---------------------------------------------------------------------------
+
+function loadCodexCost(
+  start: Date,
+  end: Date
+): { total: number; byDay: Map<string, number>; toolCalls: number } {
+  const sessionsBase = path.join(os.homedir(), '.codex', 'sessions');
+  const byDay = new Map<string, number>();
+  let total = 0;
+  let toolCalls = 0;
+
+  if (!fs.existsSync(sessionsBase)) return { total, byDay, toolCalls };
+
+  const jsonlFiles: string[] = [];
+
+  try {
+    for (const year of fs.readdirSync(sessionsBase)) {
+      const yearPath = path.join(sessionsBase, year);
+      try {
+        if (!fs.statSync(yearPath).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      for (const month of fs.readdirSync(yearPath)) {
+        const monthPath = path.join(yearPath, month);
+        try {
+          if (!fs.statSync(monthPath).isDirectory()) continue;
+        } catch {
+          continue;
+        }
+        for (const day of fs.readdirSync(monthPath)) {
+          const dayPath = path.join(monthPath, day);
+          try {
+            if (!fs.statSync(dayPath).isDirectory()) continue;
+          } catch {
+            continue;
+          }
+          for (const file of fs.readdirSync(dayPath)) {
+            if (file.endsWith('.jsonl')) jsonlFiles.push(path.join(dayPath, file));
+          }
+        }
+      }
+    }
+  } catch {
+    return { total, byDay, toolCalls };
+  }
+
+  for (const filePath of jsonlFiles) {
+    let lines: string[];
+    try {
+      lines = fs.readFileSync(filePath, 'utf-8').split('\n');
+    } catch {
+      continue;
+    }
+
+    let sessionStart = '';
+    let lastTotalInput = 0;
+    let lastTotalCached = 0;
+    let lastTotalOutput = 0;
+    let sessionToolCalls = 0;
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let entry: { type: string; payload?: Record<string, unknown> };
+      try {
+        entry = JSON.parse(line) as typeof entry;
+      } catch {
+        continue;
+      }
+
+      const p = (entry.payload ?? {}) as Record<string, unknown>;
+
+      if (entry.type === 'session_meta') {
+        sessionStart = String(p['timestamp'] ?? '');
+        continue;
+      }
+
+      if (entry.type === 'event_msg' && p['type'] === 'token_count') {
+        const info = (p['info'] ?? {}) as Record<string, unknown>;
+        const usage = (info['total_token_usage'] ?? {}) as Record<string, number>;
+        lastTotalInput = usage['input_tokens'] ?? lastTotalInput;
+        lastTotalCached = usage['cached_input_tokens'] ?? lastTotalCached;
+        lastTotalOutput = usage['output_tokens'] ?? lastTotalOutput;
+      }
+
+      if (entry.type === 'response_item' && p['type'] === 'function_call') {
+        sessionToolCalls++;
+      }
+    }
+
+    if (!sessionStart) continue;
+    const ts = new Date(sessionStart);
+    if (ts < start || ts > end) continue;
+
+    const nonCached = Math.max(0, lastTotalInput - lastTotalCached);
+    const cost = nonCached * 5e-6 + lastTotalCached * 2.5e-6 + lastTotalOutput * 15e-6;
+    total += cost;
+    toolCalls += sessionToolCalls;
+    const dateKey = sessionStart.slice(0, 10);
+    byDay.set(dateKey, (byDay.get(dateKey) ?? 0) + cost);
+  }
+
+  return { total, byDay, toolCalls };
+}
+
+// ---------------------------------------------------------------------------
 // Main command
 // ---------------------------------------------------------------------------
 
@@ -324,7 +445,7 @@ export function registerReportCommand(program: Command): void {
       const { start, end } = getDateRange(period);
 
       const {
-        total: costUSD,
+        total: claudeCostUSD,
         byDay: costByDay,
         byModel: costByModel,
         inputTokens: costInputTokens,
@@ -332,6 +453,17 @@ export function registerReportCommand(program: Command): void {
         cacheWriteTokens: costCacheWrite,
         cacheReadTokens: costCacheRead,
       } = loadClaudeCost(start, end);
+
+      const {
+        total: codexCostUSD,
+        byDay: codexCostByDay,
+        toolCalls: codexToolCalls,
+      } = loadCodexCost(start, end);
+      const costUSD = claudeCostUSD + codexCostUSD;
+      // Merge Codex daily costs into costByDay
+      for (const [day, c] of codexCostByDay) {
+        costByDay.set(day, (costByDay.get(day) ?? 0) + c);
+      }
 
       // Prior period for block trend (same duration, immediately before start)
       const periodMs = end.getTime() - start.getTime();
@@ -432,6 +564,9 @@ export function registerReportCommand(program: Command): void {
         if (e.testResult === 'pass') testPasses++;
         else if (e.testResult === 'fail') testFails++;
       }
+
+      // Add Codex to agentMap if it had activity in the period (no hooks, so not in audit.log)
+      if (codexToolCalls > 0) agentMap.set('Codex', (agentMap.get('Codex') ?? 0) + codexToolCalls);
 
       const total = entries.length;
       const topTools = [...toolMap.entries()].sort((a, b) => b[1].calls - a[1].calls).slice(0, 8);
@@ -606,7 +741,8 @@ export function registerReportCommand(program: Command): void {
         let rightStyled = '';
         if (i < topBlocks.length) {
           const [reason, count] = topBlocks[i];
-          const label = reason.length > LABEL - 1 ? reason.slice(0, LABEL - 2) + '…' : reason;
+          const readable = humanBlockReason(reason);
+          const label = readable.length > LABEL - 1 ? readable.slice(0, LABEL - 2) + '…' : readable;
           const countStr = num(count).padStart(BLOCK_COUNT_W);
           const b = colorBar(count, maxBlock, BAR);
           rightStyled = chalk.white(label.padEnd(LABEL)) + b + ' ' + chalk.red(countStr);
@@ -696,32 +832,30 @@ export function registerReportCommand(program: Command): void {
         console.log('');
         console.log('  ' + chalk.bold('Tokens') + '  ' + chalk.dim(`${num(totalTokens)} total`));
         console.log('  ' + chalk.dim('─'.repeat(Math.min(50, W - 4))));
-        const tokenRows: Array<[string, number, string]> = [
+        const TOK_BAR = Math.max(6, Math.min(20, W - 30));
+        const TOK_LABEL = 14;
+        // Scale bars on non-cache tokens so cache-read (which can be 100x larger) doesn't dwarf them
+        const maxNonCache = Math.max(costInputTokens, costOutputTokens, costCacheWrite, 1);
+        const nonCacheRows: Array<[string, number, string]> = [
           ['Input', costInputTokens, chalk.cyan(num(costInputTokens))],
           ['Output', costOutputTokens, chalk.white(num(costOutputTokens))],
           ['Cache write', costCacheWrite, chalk.yellow(num(costCacheWrite))],
-          ['Cache read', costCacheRead, chalk.green(num(costCacheRead))],
         ];
-        const maxTok = Math.max(
-          costInputTokens,
-          costOutputTokens,
-          costCacheWrite,
-          costCacheRead,
-          1
-        );
-        const TOK_BAR = Math.max(6, Math.min(20, W - 30));
-        const TOK_LABEL = 14;
-        for (const [label, count, colored] of tokenRows) {
+        for (const [label, count, colored] of nonCacheRows) {
           if (count === 0) continue;
-          const b = colorBar(count, maxTok, TOK_BAR);
+          const b = colorBar(count, maxNonCache, TOK_BAR);
           console.log('  ' + chalk.white(label.padEnd(TOK_LABEL)) + b + '  ' + colored);
         }
-        if (cacheHitPct > 0) {
+        if (costCacheRead > 0) {
+          const cacheBar = colorBar(costCacheRead, costCacheRead, TOK_BAR);
+          const pct = cacheHitPct > 0 ? chalk.dim(`  ${cacheHitPct}% hit rate`) : '';
           console.log(
             '  ' +
-              chalk.dim(
-                `Cache hit rate: ${cacheHitPct}%  (saves ~${fmtCost(costCacheRead * 2.7e-6)} vs fresh input)`
-              )
+              chalk.white('Cache read'.padEnd(TOK_LABEL)) +
+              cacheBar +
+              '  ' +
+              chalk.green(num(costCacheRead)) +
+              pct
           );
         }
       }
@@ -747,6 +881,11 @@ export function registerReportCommand(program: Command): void {
         console.log('  ' + chalk.bold('Cost') + '  ' + costHeaderRight);
         console.log('  ' + chalk.dim('─'.repeat(Math.min(50, W - 4))));
 
+        if (codexCostUSD > 0)
+          costByModel.set(
+            'codex (openai)',
+            (costByModel.get('codex (openai)') ?? 0) + codexCostUSD
+          );
         const modelList = [...costByModel.entries()].sort((a, b) => b[1] - a[1]);
         const maxModelCost = Math.max(...modelList.map(([, v]) => v), 1e-9);
         const MODEL_LABEL = 22;

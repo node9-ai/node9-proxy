@@ -44,7 +44,7 @@ interface Finding {
   timestamp: string;
   project: string;
   sessionId: string;
-  agent: 'claude' | 'gemini';
+  agent: 'claude' | 'gemini' | 'codex';
 }
 
 interface DlpFinding {
@@ -54,7 +54,7 @@ interface DlpFinding {
   timestamp: string;
   project: string;
   sessionId: string;
-  agent: 'claude' | 'gemini';
+  agent: 'claude' | 'gemini' | 'codex';
 }
 
 interface JournalEntry {
@@ -658,6 +658,241 @@ function scanGeminiHistory(startDate: Date | null): ScanResult {
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// Codex history scanner
+// ---------------------------------------------------------------------------
+
+function scanCodexHistory(startDate: Date | null): ScanResult {
+  const sessionsBase = path.join(os.homedir(), '.codex', 'sessions');
+  const result: ScanResult = {
+    filesScanned: 0,
+    sessions: 0,
+    totalToolCalls: 0,
+    bashCalls: 0,
+    findings: [],
+    dlpFindings: [],
+    totalCostUSD: 0,
+    firstDate: null,
+    lastDate: null,
+  };
+
+  if (!fs.existsSync(sessionsBase)) return result;
+
+  // Collect all .jsonl files under YYYY/MM/DD structure
+  const jsonlFiles: string[] = [];
+  try {
+    for (const year of fs.readdirSync(sessionsBase)) {
+      const yearPath = path.join(sessionsBase, year);
+      try {
+        if (!fs.statSync(yearPath).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      for (const month of fs.readdirSync(yearPath)) {
+        const monthPath = path.join(yearPath, month);
+        try {
+          if (!fs.statSync(monthPath).isDirectory()) continue;
+        } catch {
+          continue;
+        }
+        for (const day of fs.readdirSync(monthPath)) {
+          const dayPath = path.join(monthPath, day);
+          try {
+            if (!fs.statSync(dayPath).isDirectory()) continue;
+          } catch {
+            continue;
+          }
+          for (const file of fs.readdirSync(dayPath)) {
+            if (file.endsWith('.jsonl')) jsonlFiles.push(path.join(dayPath, file));
+          }
+        }
+      }
+    }
+  } catch {
+    return result;
+  }
+
+  const ruleSources = buildRuleSources();
+
+  for (const filePath of jsonlFiles) {
+    result.filesScanned++;
+
+    let lines: string[];
+    try {
+      lines = fs.readFileSync(filePath, 'utf-8').split('\n');
+    } catch {
+      continue;
+    }
+
+    let sessionId = '';
+    let startTime = '';
+    let projLabel = '';
+    result.sessions++;
+
+    // Track last cumulative token count for cost
+    let lastTotalInput = 0;
+    let lastTotalCached = 0;
+    let lastTotalOutput = 0;
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let entry: { type: string; timestamp?: string; payload?: Record<string, unknown> };
+      try {
+        entry = JSON.parse(line) as typeof entry;
+      } catch {
+        continue;
+      }
+
+      const payload = (entry.payload ?? {}) as Record<string, unknown>;
+
+      if (entry.type === 'session_meta') {
+        sessionId = String(payload['id'] ?? filePath);
+        startTime = String(payload['timestamp'] ?? '');
+        const cwd = String(payload['cwd'] ?? '');
+        projLabel = cwd.replace(os.homedir(), '~').slice(0, 40);
+        continue;
+      }
+
+      if (entry.type === 'event_msg' && payload['type'] === 'token_count') {
+        const info = payload['info'] as Record<string, unknown> | null;
+        const usage = (info?.['total_token_usage'] ?? {}) as Record<string, number>;
+        lastTotalInput = usage['input_tokens'] ?? lastTotalInput;
+        lastTotalCached = usage['cached_input_tokens'] ?? lastTotalCached;
+        lastTotalOutput = usage['output_tokens'] ?? lastTotalOutput;
+        continue;
+      }
+
+      if (entry.type !== 'response_item') continue;
+      if (payload['type'] !== 'function_call') continue;
+
+      const ts = startTime;
+      if (startDate && ts && new Date(ts) < startDate) continue;
+
+      if (ts) {
+        if (!result.firstDate || ts < result.firstDate) result.firstDate = ts;
+        if (!result.lastDate || ts > result.lastDate) result.lastDate = ts;
+      }
+
+      result.totalToolCalls++;
+      const toolName = String(payload['name'] ?? '');
+      const toolNameLower = toolName.toLowerCase();
+
+      let input: Record<string, unknown> = {};
+      try {
+        input = JSON.parse(String(payload['arguments'] ?? '{}')) as Record<string, unknown>;
+      } catch {}
+
+      // Codex uses 'cmd' — normalise to 'command' so existing rules fire correctly
+      if ('cmd' in input && !('command' in input)) {
+        input = { ...input, command: input['cmd'] };
+      }
+
+      if (toolNameLower === 'exec_command' || toolNameLower === 'shell') {
+        result.bashCalls++;
+      }
+
+      const rawCmd = String(input['command'] ?? '').trimStart();
+      if (/^node9\s+(scan|explain|report|tail|dlp|status|sessions|audit)\b/.test(rawCmd)) continue;
+
+      const dlpMatch = scanArgs(input);
+      if (dlpMatch) {
+        const isDupe = result.dlpFindings.some(
+          (f) =>
+            f.patternName === dlpMatch.patternName &&
+            f.redactedSample === dlpMatch.redactedSample &&
+            f.project === projLabel
+        );
+        if (!isDupe) {
+          result.dlpFindings.push({
+            patternName: dlpMatch.patternName,
+            redactedSample: dlpMatch.redactedSample,
+            toolName,
+            timestamp: ts,
+            project: projLabel,
+            sessionId,
+            agent: 'codex',
+          });
+        }
+      }
+
+      let ruleMatched = false;
+      for (const source of ruleSources) {
+        const { rule } = source;
+        if (rule.verdict === 'allow') continue;
+        if (
+          rule.tool &&
+          !matchesPattern(toolNameLower === 'exec_command' ? 'bash' : toolNameLower, rule.tool)
+        )
+          continue;
+        if (!evaluateSmartConditions(input, rule)) continue;
+
+        const inputPreview = preview(input, 120);
+        const isDupe = result.findings.some(
+          (f) =>
+            f.source.rule.name === rule.name &&
+            preview(f.input, 120) === inputPreview &&
+            f.project === projLabel
+        );
+        if (!isDupe) {
+          result.findings.push({
+            source,
+            toolName,
+            input,
+            timestamp: ts,
+            project: projLabel,
+            sessionId,
+            agent: 'codex',
+          });
+        }
+        ruleMatched = true;
+        break;
+      }
+
+      if (!ruleMatched && (toolNameLower === 'exec_command' || toolNameLower === 'shell')) {
+        const shellVerdict = detectDangerousShellExec(String(input['command'] ?? ''));
+        if (shellVerdict) {
+          const astRule: SmartRule = {
+            name: `ast:bash-safe:${shellVerdict}-shell-exec-remote`,
+            tool: 'bash',
+            conditions: [],
+            verdict: shellVerdict,
+            reason: `Shell execution of remote download detected by AST analysis (bash-safe)`,
+          };
+          const inputPreview = preview(input, 120);
+          const isDupe = result.findings.some(
+            (f) =>
+              f.source.rule.name === astRule.name &&
+              preview(f.input, 120) === inputPreview &&
+              f.project === projLabel
+          );
+          if (!isDupe) {
+            result.findings.push({
+              source: {
+                shieldName: 'bash-safe',
+                shieldLabel: 'bash-safe (AST)',
+                sourceType: 'shield',
+                rule: astRule,
+              },
+              toolName,
+              input,
+              timestamp: ts,
+              project: projLabel,
+              sessionId,
+              agent: 'codex',
+            });
+          }
+        }
+      }
+    }
+
+    // Accumulate session cost using GPT-4o pricing as proxy for codex-1/GPT-5
+    const nonCached = Math.max(0, lastTotalInput - lastTotalCached);
+    result.totalCostUSD += nonCached * 5e-6 + lastTotalCached * 2.5e-6 + lastTotalOutput * 15e-6;
+  }
+
+  return result;
+}
+
 function mergeScans(a: ScanResult, b: ScanResult): ScanResult {
   const dates = [a.firstDate, b.firstDate].filter(Boolean) as string[];
   const lastDates = [a.lastDate, b.lastDate].filter(Boolean) as string[];
@@ -690,7 +925,12 @@ function printFindingRow(
 ): void {
   const ts = f.timestamp ? chalk.dim(fmtTs(f.timestamp) + '  ') : '';
   const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
-  const agentBadge = f.agent === 'gemini' ? chalk.blue('[Gemini]  ') : chalk.cyan('[Claude]  ');
+  const agentBadge =
+    f.agent === 'gemini'
+      ? chalk.blue('[Gemini]  ')
+      : f.agent === 'codex'
+        ? chalk.magenta('[Codex]   ')
+        : chalk.cyan('[Claude]  ');
   const cmd = drillDown
     ? chalk.gray(fullCommand(f.input))
     : chalk.gray(preview(f.input, previewWidth));
@@ -776,7 +1016,8 @@ export function registerScanCommand(program: Command): void {
       process.stdout.write(chalk.dim('  Scanning…'));
       const claudeScan = scanClaudeHistory(startDate);
       const geminiScan = scanGeminiHistory(startDate);
-      const scan = mergeScans(claudeScan, geminiScan);
+      const codexScan = scanCodexHistory(startDate);
+      const scan = mergeScans(mergeScans(claudeScan, geminiScan), codexScan);
       process.stdout.write('\r' + ' '.repeat(20) + '\r');
 
       if (scan.filesScanned === 0) {
@@ -798,13 +1039,16 @@ export function registerScanCommand(program: Command): void {
           ? chalk.dim(`  ${fmtTs(scan.firstDate)} – ${fmtTs(scan.lastDate)}`)
           : '';
 
+      const breakdownParts: string[] = [];
+      if (claudeScan.sessions > 0)
+        breakdownParts.push(chalk.cyan(String(claudeScan.sessions)) + chalk.dim(' Claude'));
+      if (geminiScan.sessions > 0)
+        breakdownParts.push(chalk.blue(String(geminiScan.sessions)) + chalk.dim(' Gemini'));
+      if (codexScan.sessions > 0)
+        breakdownParts.push(chalk.magenta(String(codexScan.sessions)) + chalk.dim(' Codex'));
       const sessionBreakdown =
-        claudeScan.sessions > 0 && geminiScan.sessions > 0
-          ? chalk.dim('(') +
-            chalk.cyan(String(claudeScan.sessions)) +
-            chalk.dim(' Claude · ') +
-            chalk.blue(String(geminiScan.sessions)) +
-            chalk.dim(' Gemini)')
+        breakdownParts.length > 1
+          ? chalk.dim('(') + breakdownParts.join(chalk.dim(' · ')) + chalk.dim(')')
           : '';
 
       console.log(
@@ -1008,7 +1252,11 @@ export function registerScanCommand(program: Command): void {
             const ts = f.timestamp ? chalk.dim(fmtTs(f.timestamp) + '  ') : '';
             const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
             const agentBadge =
-              f.agent === 'gemini' ? chalk.blue('[Gemini]  ') : chalk.cyan('[Claude]  ');
+              f.agent === 'gemini'
+                ? chalk.blue('[Gemini]  ')
+                : f.agent === 'codex'
+                  ? chalk.magenta('[Codex]   ')
+                  : chalk.cyan('[Claude]  ');
             const sessionSuffix = f.sessionId ? chalk.dim(`  → ${f.sessionId.slice(0, 8)}`) : '';
             console.log(
               `    ${ts}${proj}${agentBadge}` +

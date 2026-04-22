@@ -49,7 +49,7 @@ Scans `~/.claude/projects/` and `~/.gemini/tmp/`, runs the full policy engine, a
 brew tap node9-ai/node9 && brew install node9
 
 # or via npm
-npm install -g node9
+npm install -g node9-ai
 ```
 
 ```bash
