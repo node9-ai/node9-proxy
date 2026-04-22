@@ -51,6 +51,8 @@ jobs:
           cd /tmp/node9-wrapper
           # Copy README from proxy workspace (already checked out at $GITHUB_WORKSPACE)
           cp $GITHUB_WORKSPACE/README.md ./README.md
+          # Copy .npmrc that setup-node created — same auth that published @node9/proxy
+          cp $GITHUB_WORKSPACE/.npmrc ./.npmrc
           # Restore bin/node9.js (not tracked in git — install deps to get it)
           npm install --ignore-scripts
           npm version "$VERSION" --no-git-tag-version
@@ -59,8 +61,6 @@ jobs:
           git add README.md package.json
           git commit -m "chore: sync README and bump version to ${VERSION}"
           git push
-          # Configure npm auth and publish (NODE_AUTH_TOKEN requires setup-node registry-url)
-          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > .npmrc
           # Skip prepublishOnly — README already copied above; ../node9-proxy doesn't exist in CI
           npm publish --provenance --access public --ignore-scripts
 
