@@ -41,6 +41,23 @@ jobs:
           NPM_CONFIG_PROVENANCE: 'true'
         run: npx semantic-release
 
+      - name: Sync and publish wrapper (node9-ai)
+        env:
+          GITHUB_TOKEN: ${{ secrets.AUTO_PR_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          git clone https://x-access-token:${GITHUB_TOKEN}@github.com/node9-ai/node9-wrapper.git /tmp/node9-wrapper
+          cd /tmp/node9-wrapper
+          cp $GITHUB_WORKSPACE/README.md ./README.md
+          npm version "$VERSION" --no-git-tag-version
+          git config user.email "release-bot@node9.ai"
+          git config user.name "node9-release-bot"
+          git add README.md package.json package-lock.json
+          git commit -m "chore: sync README and bump version to ${VERSION}"
+          git push
+          npm publish --provenance --access public
+
       - name: Notify homebrew tap
         run: |
           VERSION=$(node -p "require('./package.json').version")
