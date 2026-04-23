@@ -23,6 +23,8 @@ import {
 } from '../../policy/index';
 import { scanArgs } from '../../dlp';
 import type { SmartRule } from '../../core';
+import { isDaemonRunning, getInternalToken, DAEMON_PORT, DAEMON_HOST } from '../../auth/daemon';
+import { openBrowserLocal } from '../daemon-starter';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1277,7 +1279,7 @@ export function registerScanCommand(program: Command): void {
     .option('--days <n>', 'Scan last N days of history', '90')
     .option('--top <n>', 'Max findings to show per rule (default: 5)', '5')
     .option('--drill-down', 'Show all findings with full commands and session IDs')
-    .action((options: { all?: boolean; days: string; top: string; drillDown?: boolean }) => {
+    .action(async (options: { all?: boolean; days: string; top: string; drillDown?: boolean }) => {
       const drillDown = options.drillDown ?? false;
       const topN = drillDown ? Infinity : Math.max(1, parseInt(options.top, 10) || 5);
       const previewWidth = 70;
@@ -1687,5 +1689,105 @@ export function registerScanCommand(program: Command): void {
         console.log('  ' + chalk.dim('→ ') + chalk.underline('https://node9.ai'));
       }
       console.log('');
+
+      // Push results to daemon and open browser if daemon is running
+      if (isDaemonRunning() && process.env.NODE9_TESTING !== '1') {
+        const internalToken = getInternalToken();
+        if (internalToken) {
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const mapFindings = (arr: any[], src: string) =>
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              arr.map((f: any) => ({
+                timestamp: f.timestamp || new Date().toISOString(),
+                rule: f.source?.rule?.name ?? f.source?.shieldLabel ?? 'unnamed',
+                command:
+                  f.input?.command ?? f.input?.cmd ?? f.input?.file_path ?? f.toolName ?? 'unknown',
+                verdict: f.source?.rule?.verdict ?? f.source?.rule?.action ?? 'review',
+                ruleSource: f.source?.sourceType ?? 'default',
+                source: src,
+              }));
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const mapLeaks = (arr: any[], src: string) =>
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              arr.map((f: any) => ({
+                timestamp: f.timestamp || new Date().toISOString(),
+                pattern: f.patternName || 'DLP',
+                sample: f.redactedSample || '********',
+                source: src,
+              }));
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const mapLoops = (arr: any[], src: string) =>
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              arr.map((f: any) => ({
+                timestamp: f.timestamp || new Date().toISOString(),
+                toolName: f.toolName || 'unknown',
+                commandPreview: f.commandPreview || '',
+                count: f.count || 0,
+                source: src,
+              }));
+
+            const sources = [
+              {
+                id: 'claude',
+                label: 'Claude',
+                icon: '🤖',
+                sessions: claudeScan.sessions,
+                findings: mapFindings(claudeScan.findings, 'claude'),
+                leaks: mapLeaks(claudeScan.dlpFindings, 'claude'),
+                loops: mapLoops(claudeScan.loopFindings, 'claude'),
+              },
+              {
+                id: 'gemini',
+                label: 'Gemini',
+                icon: '♊',
+                sessions: geminiScan.sessions,
+                findings: mapFindings(geminiScan.findings, 'gemini'),
+                leaks: mapLeaks(geminiScan.dlpFindings, 'gemini'),
+                loops: mapLoops(geminiScan.loopFindings, 'gemini'),
+              },
+              {
+                id: 'codex',
+                label: 'Codex',
+                icon: '🔮',
+                sessions: codexScan.sessions,
+                findings: mapFindings(codexScan.findings, 'codex'),
+                leaks: mapLeaks(codexScan.dlpFindings, 'codex'),
+                loops: mapLoops(codexScan.loopFindings, 'codex'),
+              },
+            ].filter(
+              (s) =>
+                s.sessions > 0 || s.findings.length > 0 || s.leaks.length > 0 || s.loops.length > 0
+            );
+
+            const payload = {
+              status: 'complete',
+              summary: {
+                sessions: scan.sessions,
+                findings: scan.findings.length,
+                dlp: scan.dlpFindings.length,
+                loops: scan.loopFindings.length,
+                totalCostUSD: scan.totalCostUSD,
+              },
+              sources,
+            };
+
+            await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/scan/push`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'x-node9-internal': internalToken },
+              body: JSON.stringify(payload),
+              signal: AbortSignal.timeout(3000),
+            });
+
+            const url = `http://${DAEMON_HOST}:${DAEMON_PORT}/`;
+            console.log('  ' + chalk.cyan('🌐 View in browser:') + '  ' + chalk.underline(url));
+            console.log('');
+
+            openBrowserLocal();
+          } catch {
+            // fire-and-forget — scan already printed, don't fail if daemon is unreachable
+          }
+        }
+      }
     });
 }

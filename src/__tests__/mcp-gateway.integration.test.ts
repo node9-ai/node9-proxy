@@ -17,6 +17,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawnSync } from 'child_process';
+import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -1104,6 +1105,237 @@ rl.on('line', (line) => {
       expect(errorResp).toBeDefined();
       expect(errorResp!.error!.code).toBe(-32000);
       expect(errorResp!.error!.message).toMatch(/corrupt/i);
+    } finally {
+      cleanupDir(home);
+    }
+  });
+});
+
+// ── MCP tool gating shield ─────────────────────────────────────────────────────
+
+describe('mcp-gateway tool gating shield', () => {
+  let gateMockScript: string;
+
+  beforeAll(() => {
+    if (!cliExists || !mockScriptDir) return;
+    gateMockScript = path.join(mockScriptDir, 'gate-upstream.js');
+    fs.writeFileSync(
+      gateMockScript,
+      `const rl = require('readline').createInterface({ input: process.stdin, terminal: false });
+rl.on('line', (line) => {
+  try {
+    const msg = JSON.parse(line);
+    if (msg.method === 'tools/list') {
+      process.stdout.write(JSON.stringify({
+        jsonrpc: '2.0', id: msg.id,
+        result: { tools: [
+          { name: 'read_file', description: 'Read a file', inputSchema: { type: 'object' } },
+          { name: 'write_file', description: 'Write a file', inputSchema: { type: 'object' } }
+        ] }
+      }) + '\\n');
+    } else if (msg.id !== undefined && msg.id !== null) {
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} }) + '\\n');
+    }
+  } catch (err) {
+    process.stderr.write('[gate-mock] parse error: ' + err + '\\n');
+  }
+});
+`
+    );
+  });
+
+  itUnix(
+    'approved server with disabled tools — gateway filters disabled tools from tools/list',
+    () => {
+      // When mcp-tool-gating shield is enabled and a server is already approved
+      // with some tools disabled, the gateway must filter those tools out of the
+      // tools/list response without blocking or waiting for user approval.
+      // This exercises the `else if (serverCfg?.disabled ...)` branch in index.ts.
+
+      // The gateway uses getServerKey(upstreamCommand) where upstreamCommand is
+      // the --upstream flag value exactly as passed. Match the format runGateway uses.
+      const upstreamCmd = `"${NODE}" "${gateMockScript}"`;
+      const serverKey = crypto.createHash('sha256').update(upstreamCmd).digest('hex').slice(0, 16);
+
+      const home = makeTempHome({ settings: { mode: 'audit' } });
+      const node9Dir = path.join(home, '.node9');
+
+      // Pre-populate mcp-tools.json: server approved, write_file disabled
+      fs.writeFileSync(
+        path.join(node9Dir, 'mcp-tools.json'),
+        JSON.stringify({
+          [serverKey]: {
+            tools: [
+              { name: 'read_file', description: 'Read a file' },
+              { name: 'write_file', description: 'Write a file' },
+            ],
+            disabled: ['write_file'],
+            status: 'approved',
+          },
+        })
+      );
+
+      // Enable the mcp-tool-gating shield
+      fs.writeFileSync(
+        path.join(node9Dir, 'shields.json'),
+        JSON.stringify({ active: ['mcp-tool-gating'] })
+      );
+
+      try {
+        const r = runGateway(
+          [JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })],
+          home,
+          5000,
+          gateMockScript
+        );
+        expect(r.status).toBe(0);
+        const responses = parseResponses(r.stdout);
+        const listResp = responses.find((resp) => resp.result && 'tools' in resp.result);
+        expect(listResp).toBeDefined();
+        const toolNames = (listResp!.result!.tools as Array<{ name: string }>).map((t) => t.name);
+        // read_file is allowed — must be present
+        expect(toolNames).toContain('read_file');
+        // write_file is disabled — must be filtered out
+        expect(toolNames).not.toContain('write_file');
+      } finally {
+        cleanupDir(home);
+      }
+    }
+  );
+
+  itUnix('mcp-tool-gating shield disabled — unknown server passes through without gating', () => {
+    // Without the shield active, a server not yet in mcp-tools.json must never
+    // be blocked or held for approval. The approval flow is strictly opt-in.
+    const home = makeTempHome({ settings: { mode: 'audit', autoStartDaemon: false } });
+    const node9Dir = path.join(home, '.node9');
+
+    // shields.json has NO active shields — gating is opt-in and currently off
+    fs.writeFileSync(path.join(node9Dir, 'shields.json'), JSON.stringify({ active: [] }));
+    // No mcp-tools.json — server is unknown
+
+    try {
+      const r = runGateway(
+        [JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })],
+        home,
+        5000,
+        gateMockScript
+      );
+      expect(r.status).toBe(0);
+      const responses = parseResponses(r.stdout);
+      const listResp = responses.find((resp) => resp.result && 'tools' in resp.result);
+      expect(listResp).toBeDefined();
+      const toolNames = (listResp!.result!.tools as Array<{ name: string }>).map((t) => t.name);
+      // Both tools pass through — no gating without the shield
+      expect(toolNames).toContain('read_file');
+      expect(toolNames).toContain('write_file');
+    } finally {
+      cleanupDir(home);
+    }
+  });
+});
+
+// ── Large MCP response detection ──────────────────────────────────────────────
+
+describe('mcp-gateway large response detection', () => {
+  // Upstream that returns a tools/call result exceeding the 500KB threshold.
+  // The payload is generated inline — no file dependency.
+  let largeUpstreamScript: string;
+
+  beforeAll(() => {
+    if (!cliExists || !mockScriptDir) return;
+    largeUpstreamScript = path.join(mockScriptDir, 'large-upstream.js');
+    fs.writeFileSync(
+      largeUpstreamScript,
+      `const rl = require('readline').createInterface({ input: process.stdin, terminal: false });
+rl.on('line', (line) => {
+  try {
+    const msg = JSON.parse(line);
+    if (msg.method === 'tools/list') {
+      process.stdout.write(JSON.stringify({
+        jsonrpc: '2.0', id: msg.id,
+        result: { tools: [{ name: 'big_query', description: 'Returns lots of data', inputSchema: { type: 'object' } }] }
+      }) + '\\n');
+    } else if (msg.method === 'tools/call') {
+      // Return a response well above the 500KB threshold
+      const payload = 'x'.repeat(600_000);
+      process.stdout.write(JSON.stringify({
+        jsonrpc: '2.0', id: msg.id,
+        result: { content: [{ type: 'text', text: payload }] }
+      }) + '\\n');
+    } else if (msg.id !== undefined && msg.id !== null) {
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} }) + '\\n');
+    }
+  } catch (err) {
+    process.stderr.write('[large-mock] parse error: ' + err + '\\n');
+  }
+});
+`
+    );
+  });
+
+  itUnix('oversized tools/call response triggers stderr warning', () => {
+    // Send tools/list (pin) then tools/call — the large response must:
+    //   1. Still be forwarded to the agent (no blocking)
+    //   2. Produce a ⚡ warning on stderr with the tool name and size
+    //
+    // Note: parseResponses() is intentionally NOT used here. The 600KB+ response
+    // exceeds the OS pipe buffer (~64KB), which can cause spawnSync to deliver a
+    // truncated (non-parseable) stdout. The forwarding contract is verified with a
+    // simple string check; the warning emission is the primary assertion.
+    const home = makeTempHome({
+      settings: { mode: 'standard', autoStartDaemon: false },
+      policy: { ignoredTools: ['big_query'] },
+    });
+    try {
+      const r = runGateway(
+        [
+          JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: 2,
+            method: 'tools/call',
+            params: { name: 'big_query', arguments: {} },
+          }),
+        ],
+        home,
+        10000,
+        largeUpstreamScript
+      );
+      expect(r.status).toBe(0);
+
+      // Response was forwarded — gateway did not block or swallow it
+      expect(r.stdout).toContain('"id":2');
+      expect(r.stdout).not.toContain('"error"');
+
+      // stderr must contain the large-response warning with tool name and size
+      expect(r.stderr).toMatch(/⚡.*Node9.*large.*response/i);
+      expect(r.stderr).toMatch(/big_query/);
+      expect(r.stderr).toMatch(/KB/);
+    } finally {
+      cleanupDir(home);
+    }
+  });
+
+  itUnix('normal-sized tools/call response produces no large-response warning', () => {
+    const home = makeTempHome({
+      settings: { mode: 'standard', autoStartDaemon: false },
+      policy: { ignoredTools: ['echo'] },
+    });
+    try {
+      const r = runGateway(
+        [
+          JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: 2,
+            method: 'tools/call',
+            params: { name: 'echo', arguments: {} },
+          }),
+        ],
+        home
+      );
+      expect(r.status).toBe(0);
+      expect(r.stderr).not.toMatch(/⚡.*Node9.*large/i);
     } finally {
       cleanupDir(home);
     }

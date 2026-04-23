@@ -545,6 +545,25 @@
         filter: none;
         transform: none;
       }
+      /* ── Large response entries ─────────────────────────────────────────── */
+      .large-response-row {
+        padding: 6px 0;
+        border-bottom: 1px solid var(--border);
+        font-size: 11px;
+      }
+      .large-response-row:last-child {
+        border-bottom: none;
+      }
+      .large-response-tool {
+        font-family: 'Fira Code', monospace;
+        color: #f59e0b;
+        font-weight: 600;
+      }
+      .large-response-size {
+        color: var(--muted);
+        margin-top: 2px;
+      }
+
       /* ── Shields ────────────────────────────────────────────────────────── */
       .shield-row {
         display: flex;
@@ -699,6 +718,52 @@
       .decisions-empty {
         font-size: 12px;
         color: var(--muted);
+      }
+
+      /* MCP Tools Styles */
+      .mcp-server-row {
+        margin-bottom: 12px;
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 8px;
+      }
+      .mcp-server-row:last-child {
+        border-bottom: none;
+        margin-bottom: 0;
+      }
+      .mcp-server-name {
+        font-weight: 600;
+        font-size: 11px;
+        color: var(--text-bright);
+        margin-bottom: 6px;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .mcp-tool-list {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        padding-left: 2px;
+      }
+      .mcp-tool-item {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11px;
+        color: var(--muted);
+        cursor: pointer;
+        padding: 1px 3px;
+        border-radius: 4px;
+        transition: background 0.1s;
+      }
+      .mcp-tool-item:hover {
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--text-bright);
+      }
+      .mcp-tool-item input[type='checkbox'] {
+        cursor: pointer;
+        width: 12px;
+        height: 12px;
       }
       .decision-row {
         display: flex;
@@ -1468,6 +1533,217 @@
         background: rgba(201, 60, 55, 0.2);
         color: #e5534b;
       }
+      .badge-user {
+        background: rgba(56, 139, 253, 0.15);
+        color: #58a6ff;
+        font-size: 9px;
+      }
+      .scan-agent-group {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+        padding: 6px 14px 14px;
+        border-bottom: 1px solid var(--border);
+        margin-bottom: 8px;
+      }
+      .scan-agent-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .scan-agent-name {
+        color: var(--text);
+        font-weight: 600;
+      }
+      .scan-agent-stat {
+        color: var(--muted);
+      }
+      .scan-agent-sep {
+        color: var(--border);
+      }
+      .savings-card {
+        background: rgba(56, 139, 253, 0.06);
+        border: 1px solid rgba(56, 139, 253, 0.2);
+        border-radius: 8px;
+        padding: 12px 14px;
+        margin: 4px 0 14px;
+      }
+      .savings-card-title {
+        font-size: 11px;
+        font-weight: 600;
+        color: #58a6ff;
+        margin-bottom: 10px;
+        letter-spacing: 0.03em;
+      }
+      .savings-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 0;
+        font-size: 12px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      }
+      .savings-row:last-child {
+        border-bottom: none;
+      }
+      .savings-icon {
+        width: 18px;
+        text-align: center;
+        flex-shrink: 0;
+      }
+      .savings-label {
+        flex: 1;
+        color: var(--muted);
+      }
+      .savings-val {
+        font-weight: 600;
+        font-size: 13px;
+        white-space: nowrap;
+      }
+      /* ── Session status strip ─────────────────────────────────────────────── */
+      #session-strip {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 6px 16px;
+        background: rgba(0, 0, 0, 0.25);
+        border-bottom: 1px solid var(--border);
+        font-size: 11px;
+        color: var(--muted);
+        flex-wrap: wrap;
+      }
+      .strip-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        flex-shrink: 0;
+        transition: background 0.4s;
+      }
+      .strip-dot.loading {
+        background: #8b949e;
+        box-shadow: 0 0 5px #8b949e88;
+        animation: stripPulse 1.2s ease-in-out infinite;
+      }
+      @keyframes stripPulse {
+        0%,
+        100% {
+          opacity: 0.4;
+        }
+        50% {
+          opacity: 1;
+        }
+      }
+      .strip-loading {
+        color: var(--muted) !important;
+        opacity: 0.6;
+      }
+      .strip-dot.green {
+        background: #57ab5a;
+        box-shadow: 0 0 5px #57ab5a88;
+      }
+      .strip-dot.yellow {
+        background: #f0c040;
+        box-shadow: 0 0 5px #f0c04088;
+      }
+      .strip-dot.red {
+        background: #e5534b;
+        box-shadow: 0 0 5px #e5534b88;
+      }
+      .strip-label {
+        font-weight: 600;
+        color: var(--text);
+      }
+      .strip-sep {
+        color: var(--border);
+      }
+      .strip-val {
+        color: var(--text);
+        font-weight: 500;
+      }
+      .strip-val.danger {
+        color: #e5534b;
+      }
+      .strip-val.warning {
+        color: #f0c040;
+      }
+      .strip-val.mcp {
+        color: #f0c040;
+      }
+      /* ── Toast notifications ─────────────────────────────────────────────── */
+      #toast-container {
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        display: flex;
+        flex-direction: column-reverse;
+        gap: 8px;
+        z-index: 9999;
+        pointer-events: none;
+      }
+      .toast {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        padding: 10px 14px;
+        background: #2d333b;
+        border: 1px solid var(--border);
+        border-left: 3px solid #57ab5a;
+        border-radius: 8px;
+        font-size: 12px;
+        color: var(--text);
+        min-width: 240px;
+        max-width: 340px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+        animation: toastIn 0.25s ease;
+        pointer-events: auto;
+      }
+      .toast.toast-block {
+        border-left-color: #e5534b;
+      }
+      .toast.toast-dlp {
+        border-left-color: #e5534b;
+      }
+      .toast.toast-mcp {
+        border-left-color: #f0c040;
+      }
+      .toast-icon {
+        font-size: 14px;
+        flex-shrink: 0;
+        line-height: 1.4;
+      }
+      .toast-body {
+        flex: 1;
+        line-height: 1.5;
+      }
+      .toast-title {
+        font-weight: 600;
+        margin-bottom: 1px;
+      }
+      .toast-sub {
+        font-size: 11px;
+        color: var(--muted);
+      }
+      @keyframes toastIn {
+        from {
+          opacity: 0;
+          transform: translateX(20px);
+        }
+        to {
+          opacity: 1;
+          transform: translateX(0);
+        }
+      }
+      .toast.toast-out {
+        animation: toastOut 0.3s ease forwards;
+      }
+      @keyframes toastOut {
+        to {
+          opacity: 0;
+          transform: translateX(20px);
+        }
+      }
       .scan-finding-cmd {
         color: var(--text);
         font-family: 'Fira Code', monospace;
@@ -1558,11 +1834,27 @@
       <header>
         <span class="logo">🛡️</span>
         <h1>Node9 Guard</h1>
-        <div id="st" class="status-badge">Waiting...</div>
+        <div id="st" class="status-badge">🔄 Connecting…</div>
         <button class="btn-scan-history" onclick="openScanModal()" id="btn-scan-history">
           🔍 Scan History
         </button>
       </header>
+
+      <!-- ── Session Status Strip ─────────────────────────────────────────── -->
+      <div id="session-strip">
+        <span id="strip-dot" class="strip-dot loading"></span>
+        <span id="strip-label" class="strip-label">Connecting to Node9 daemon…</span>
+        <span class="strip-sep">·</span>
+        <span id="strip-approved" class="strip-val strip-loading">— approved</span>
+        <span class="strip-sep">·</span>
+        <span id="strip-blocked-val" class="strip-val strip-loading">— blocked</span>
+        <span class="strip-sep">·</span>
+        <span id="strip-cost" class="strip-val strip-loading">— spent</span>
+        <span id="strip-mcp-wrap" style="display: none">
+          <span class="strip-sep">·</span>
+          <span id="strip-mcp-val" class="strip-val mcp">0 large MCP responses</span>
+        </span>
+      </div>
 
       <!-- ── Scan History Modal ─────────────────────────────────────────── -->
       <div id="scan-modal-overlay" class="scan-overlay" onclick="closeScanModal(event)">
@@ -1615,8 +1907,8 @@
             </div>
             <div id="list"></div>
             <div id="empty">
-              <span class="empty-icon">✨</span>
-              <span>All clear — no pending tool calls.</span>
+              <span class="empty-icon" id="empty-icon">⏳</span>
+              <span id="empty-text">Connecting to Node9 daemon…</span>
             </div>
             <div class="pending-divider">Activity</div>
             <div id="activity-feed">
@@ -1659,6 +1951,10 @@
                 <div class="score-value" id="stat-total">0</div>
               </div>
               <div class="score-card">
+                <div class="score-label">Protection Rate</div>
+                <div class="score-value" id="stat-rate" style="color: #58a6ff">—</div>
+              </div>
+              <div class="score-card">
                 <div class="score-label">Blocked</div>
                 <div class="score-value danger" id="stat-blocked">0</div>
               </div>
@@ -1680,6 +1976,16 @@
               <div id="by-agent-list" class="top-tools-grid">
                 <div class="decisions-empty">No agent activity yet.</div>
               </div>
+              <div
+                style="
+                  font-size: 10px;
+                  color: var(--muted);
+                  padding: 8px 14px 0;
+                  font-style: italic;
+                "
+              >
+                💡 Codex is history-only — view Codex activity in Scan History
+              </div>
             </div>
 
             <div class="card" style="margin-top: 20px">
@@ -1700,6 +2006,16 @@
               </div>
               <div id="top-tools-list" class="top-tools-grid">
                 <div class="decisions-empty">No tool usage yet.</div>
+              </div>
+            </div>
+
+            <div class="card" style="margin-top: 20px">
+              <div class="card-header">
+                <span class="card-header-icon">🛑</span>
+                <span class="card-header-title">Top Blocked Tools</span>
+              </div>
+              <div id="top-blocked-list" class="top-tools-grid">
+                <div class="decisions-empty">Nothing blocked — all clear.</div>
               </div>
             </div>
           </div>
@@ -1824,6 +2140,16 @@
             <div id="decisionsList"><span class="decisions-empty">None yet.</span></div>
           </div>
 
+          <div class="panel" id="mcpToolsPanel" style="display: none">
+            <div class="panel-title">🛠️ MCP Tools</div>
+            <div id="mcpToolsList"><span class="decisions-empty">None yet.</span></div>
+          </div>
+
+          <div class="panel" id="largeResponsePanel" style="display: none">
+            <div class="panel-title">⚡ Large MCP Responses</div>
+            <div id="largeResponseList"></div>
+          </div>
+
           <div class="panel" id="suggestionsPanel" style="display: none">
             <div class="panel-title">💡 Smart Rule Suggestions</div>
             <div id="suggestionsList"></div>
@@ -1842,6 +2168,45 @@
         <div class="modal-actions">
           <button class="btn-modal-yes" onclick="dismissModal(true)">Yes, disable popup</button>
           <button class="btn-modal-no" onclick="dismissModal(false)">Keep popup</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="mcpReviewModal" class="modal-overlay">
+      <div
+        class="modal"
+        style="
+          max-width: 500px;
+          max-height: 80vh;
+          overflow: hidden;
+          display: flex;
+          flex-direction: column;
+        "
+      >
+        <h2 id="mcpReviewServer">🔌 MCP Server Review</h2>
+        <p style="font-size: 13px; color: var(--muted); margin-bottom: 12px">
+          Review the tools offered by this server. Uncheck any tools you want to hide from the AI
+          agent to save tokens and improve security.
+        </p>
+        <div
+          id="mcpReviewList"
+          style="
+            flex: 1;
+            overflow-y: auto;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 8px;
+            padding: 10px;
+            margin-bottom: 16px;
+            border: 1px solid var(--border);
+          "
+        >
+          <!-- Tools populated here -->
+        </div>
+        <div class="modal-actions">
+          <button class="btn-modal-yes" onclick="approveMcpDiscovery()">
+            Allow Selected Tools
+          </button>
+          <button class="btn-modal-no" onclick="closeMcpReview()">Cancel</button>
         </div>
       </div>
     </div>
@@ -2016,10 +2381,34 @@
         btn.textContent = open ? '▼ Details' : '▲ Hide';
       }
 
+      const pendingRequests = new Map();
       function addCard(req) {
         if (requests.has(req.id)) return;
         requests.add(req.id);
+        pendingRequests.set(req.id, req);
         refresh();
+
+        if (req.type === 'mcp-discovery') {
+          const card = document.createElement('div');
+          card.className = 'pending-card discovery-card';
+          card.id = 'c-' + req.id;
+          card.innerHTML = `
+            <div class="pending-card-header">
+              <span style="font-size:14px">🔌</span>
+              <span class="pending-agent-badge">New MCP Server Discovered</span>
+              <span class="card-timer" id="timer-${req.id}">60s</span>
+            </div>
+            <div class="pending-tool-name" style="color:var(--accent)">${esc(req.serverKey)}</div>
+            <div class="pending-args-preview">${req.mcpTools.length} tool(s) found. Review and allow before the agent can use them.</div>
+            <div class="pending-actions">
+              <button class="btn-allow-sm" onclick="openMcpReview('${req.id}', '${esc(req.serverKey)}')">🔍 Review & Allow</button>
+              <button class="btn-deny-sm" onclick="sendDecision('${req.id}','deny',false)">🚫 Ignore</button>
+            </div>
+          `;
+          list.appendChild(card);
+          return;
+        }
+
         const isSlack = !!req.slackDelegated;
         const card = document.createElement('div');
         card.className = 'pending-card' + (isSlack ? ' slack-pending' : '');
@@ -2068,15 +2457,111 @@
         }
       }
 
+      // ── Session strip state ───────────────────────────────────────────────
+      let _stripAllowed = 0;
+      let _stripBlocked = 0;
+      let _stripCost = 0;
+      let _stripLargeMcp = 0;
+      const _activityToolMap = new Map(); // id → toolName for toast lookup
+
+      let _stripConnected = false;
+      function updateStrip() {
+        const dot = document.getElementById('strip-dot');
+        const label = document.getElementById('strip-label');
+        const approvedEl = document.getElementById('strip-approved');
+        const blockedEl = document.getElementById('strip-blocked-val');
+        const costEl = document.getElementById('strip-cost');
+
+        // Remove loading state once any real data arrives
+        approvedEl.classList.remove('strip-loading');
+        blockedEl.classList.remove('strip-loading');
+        costEl.classList.remove('strip-loading');
+
+        approvedEl.textContent = _stripAllowed + ' approved';
+        blockedEl.textContent = _stripBlocked + ' blocked';
+        blockedEl.className = 'strip-val' + (_stripBlocked ? ' danger' : '');
+        costEl.textContent = '$' + _stripCost.toFixed(2) + ' spent';
+
+        const mcpWrap = document.getElementById('strip-mcp-wrap');
+        if (_stripLargeMcp > 0) {
+          mcpWrap.style.display = '';
+          document.getElementById('strip-mcp-val').textContent =
+            _stripLargeMcp + ' large MCP response' + (_stripLargeMcp !== 1 ? 's' : '');
+        } else {
+          mcpWrap.style.display = 'none';
+        }
+
+        const hasActivity = _stripAllowed > 0 || _stripBlocked > 0 || _stripLargeMcp > 0;
+        if (_stripBlocked > 0) {
+          dot.className = 'strip-dot red';
+          label.textContent = 'Threat blocked';
+        } else if (_stripLargeMcp > 0) {
+          dot.className = 'strip-dot yellow';
+          label.textContent = 'MCP alert';
+        } else if (_stripConnected && !hasActivity) {
+          dot.className = 'strip-dot green';
+          label.textContent = 'Protected — waiting for agent activity';
+        } else {
+          dot.className = 'strip-dot green';
+          label.textContent = 'Protected';
+        }
+      }
+
+      function showToast(icon, title, sub, typeClass) {
+        const container = document.getElementById('toast-container');
+        const t = document.createElement('div');
+        t.className = 'toast ' + (typeClass || '');
+        t.innerHTML =
+          '<span class="toast-icon">' +
+          icon +
+          '</span>' +
+          '<div class="toast-body"><div class="toast-title">' +
+          esc(title) +
+          '</div>' +
+          (sub ? '<div class="toast-sub">' + esc(sub) + '</div>' : '') +
+          '</div>';
+        container.appendChild(t);
+        setTimeout(() => {
+          t.classList.add('toast-out');
+          setTimeout(() => t.remove(), 320);
+        }, 4000);
+      }
+
+      // ── Count-up animation for scan stats ────────────────────────────────
+      function animateCountUp(container) {
+        const els = container.querySelectorAll('[data-countup]');
+        if (!els.length) return;
+        const duration = 700;
+        const start = performance.now();
+        function step(now) {
+          const t = Math.min((now - start) / duration, 1);
+          const ease = 1 - Math.pow(1 - t, 3);
+          els.forEach(function (el) {
+            const target = parseFloat(el.dataset.countup);
+            const isCurrency = el.dataset.countupFmt === 'usd';
+            const val = target * ease;
+            el.textContent = isCurrency
+              ? '$' + val.toFixed(val < 1 ? 3 : 2)
+              : Math.round(val).toString();
+          });
+          if (t < 1) requestAnimationFrame(step);
+          else
+            els.forEach(function (el) {
+              el.textContent = el.dataset.countupFinal || el.dataset.countup;
+            });
+        }
+        requestAnimationFrame(step);
+      }
+
       function connect() {
         const ev = new EventSource('/events');
         ev.onopen = () => {
           st.className = 'status-badge online';
-          st.innerText = 'System Live';
+          st.innerText = '✅ Live';
         };
         ev.onerror = () => {
           st.className = 'status-badge';
-          st.innerText = 'Reconnecting...';
+          st.innerText = '🔄 Reconnecting…';
           setTimeout(connect, 2000);
           ev.close();
         };
@@ -2095,6 +2580,11 @@
               b.classList.add('online');
             }
           }
+          // Switch from "connecting" to "all clear" now that we have real state
+          document.getElementById('empty-icon').textContent = '✨';
+          document.getElementById('empty-text').textContent = 'All clear — no pending tool calls.';
+          _stripConnected = true;
+          updateStrip();
           data.requests.forEach(addCard);
         });
         ev.addEventListener('add', (e) => {
@@ -2115,6 +2605,38 @@
         ev.addEventListener('shields-status', (e) => {
           renderShields(JSON.parse(e.data).shields);
         });
+        ev.addEventListener('mcp-large-response', (e) => {
+          const ev2 = JSON.parse(e.data);
+          addLargeResponseEntry(ev2);
+          _stripLargeMcp++;
+          updateStrip();
+          const kb = ev2.originalBytes ? Math.round(ev2.originalBytes / 1024) : '?';
+          showToast(
+            '⚡',
+            'Large MCP response',
+            (ev2.toolName || 'unknown') + ' · ' + kb + 'KB injected into context',
+            'toast-mcp'
+          );
+        });
+        ev.addEventListener('mcp-large-response-history', (e) => {
+          const { events } = JSON.parse(e.data);
+          events.forEach(addLargeResponseEntry);
+          _stripLargeMcp = events.length;
+          updateStrip();
+        });
+        ev.addEventListener('scan-ready', () => {
+          // CLI `node9 scan` just pushed fresh results — fetch from cache and open modal
+          fetch('/scan', { headers: { 'X-Node9-Token': CSRF_TOKEN } })
+            .then(function (r) {
+              return r.ok ? r.json() : null;
+            })
+            .then(function (data) {
+              if (!data) return;
+              _scanData = data;
+              openScanModal();
+            })
+            .catch(function () {});
+        });
         ev.addEventListener('suggestion:new', (e) => {
           const s = JSON.parse(e.data);
           addSuggestionCard(s);
@@ -2123,10 +2645,20 @@
           const { id } = JSON.parse(e.data);
           removeSuggestionCard(id);
         });
+        ev.addEventListener('mcp-tools-discovered', (e) => {
+          const data = JSON.parse(e.data);
+          if (!window._mcpDiscoveryCache) window._mcpDiscoveryCache = new Map();
+          window._mcpDiscoveryCache.set(data.serverKey, data.tools);
+          refreshMcpTools();
+        });
+        ev.addEventListener('mcp-tools-updated', (e) => {
+          refreshMcpTools();
+        });
 
         // ── Flight Recorder ────────────────────────────────────────────────
         ev.addEventListener('activity', (e) => {
           const data = JSON.parse(e.data);
+          _activityToolMap.set(data.id, data.tool || 'unknown');
           const feed = document.getElementById('activity-feed');
           // Remove placeholder on first item
           const placeholder = feed.querySelector('.decisions-empty');
@@ -2156,7 +2688,28 @@
         });
 
         ev.addEventListener('activity-result', (e) => {
-          const { id, status, label } = JSON.parse(e.data);
+          const { id, status, label, costEstimate } = JSON.parse(e.data);
+          const toolName = _activityToolMap.get(id) || 'unknown';
+          _activityToolMap.delete(id);
+
+          // Update strip counters
+          if (status === 'allow') {
+            _stripAllowed++;
+            if (costEstimate && costEstimate > 0) _stripCost += costEstimate;
+          } else if (status === 'block' || status === 'taint') {
+            _stripBlocked++;
+            showToast(
+              '🛑',
+              'Blocked: ' + toolName,
+              label || 'Dangerous operation stopped',
+              'toast-block'
+            );
+          } else if (status === 'dlp') {
+            _stripBlocked++;
+            showToast('🔑', 'Credential detected', 'Leaked secret in: ' + toolName, 'toast-dlp');
+          }
+          updateStrip();
+
           const row = document.getElementById('fr-' + id);
           if (!row) return;
           const badge = row.querySelector('.feed-badge');
@@ -2344,6 +2897,21 @@
         .then(({ shields }) => renderShields(shields))
         .catch(() => {});
 
+      function addLargeResponseEntry(ev) {
+        const panel = document.getElementById('largeResponsePanel');
+        const list = document.getElementById('largeResponseList');
+        panel.style.display = '';
+        const kb = (ev.originalBytes / 1024).toFixed(0);
+        const mb =
+          ev.originalBytes >= 1000000 ? (ev.originalBytes / 1000000).toFixed(1) + 'MB' : kb + 'KB';
+        const time = new Date(ev.ts).toLocaleTimeString();
+        const row = document.createElement('div');
+        row.className = 'large-response-row';
+        row.innerHTML = `<div class="large-response-tool">${esc(ev.toolName)}</div>
+          <div class="large-response-size">returned ${esc(mb)} &mdash; context window enlarged &middot; ${esc(time)}</div>`;
+        list.prepend(row);
+      }
+
       function renderDecisions(decisions) {
         const dl = document.getElementById('decisionsList');
         const entries = Object.entries(decisions);
@@ -2461,6 +3029,147 @@
         document.querySelectorAll('.period-btn').forEach((b) => b.classList.remove('active'));
         btn.classList.add('active');
         loadDashboardData();
+        refreshMcpTools();
+      }
+
+      async function refreshMcpTools() {
+        try {
+          const res = await fetch('/mcp/tools', {
+            headers: { 'X-Node9-Token': CSRF_TOKEN },
+          });
+          const config = await res.json();
+          const panel = document.getElementById('mcpToolsPanel');
+          const list = document.getElementById('mcpToolsList');
+
+          if (!window._mcpDiscoveryCache) window._mcpDiscoveryCache = new Map();
+
+          const serverKeys = Object.keys(config);
+          if (serverKeys.length === 0) {
+            panel.style.display = 'none';
+            return;
+          }
+
+          panel.style.display = 'block';
+
+          let html = '';
+          for (const key of serverKeys) {
+            const server = config[key];
+            const discovered = server.tools || [];
+            // Update cache so the sidebar remains populated on reload
+            if (discovered.length > 0) window._mcpDiscoveryCache.set(key, discovered);
+
+            const disabled = server.disabled || [];
+            const displayTools =
+              discovered.length > 0 ? discovered : window._mcpDiscoveryCache.get(key) || [];
+
+            html += `<div class="mcp-server-row">
+              <div class="mcp-server-name">🔌 ${esc(key)}</div>
+              <div class="mcp-tool-list">`;
+
+            if (displayTools.length > 0) {
+              for (const tool of displayTools) {
+                const isChecked = !disabled.includes(tool.name);
+                html += `<label class="mcp-tool-item">
+                  <input type="checkbox" ${isChecked ? 'checked' : ''} 
+                    onchange="toggleMcpTool('${esc(key)}', '${esc(tool.name)}', this.checked)">
+                  <span title="${esc(tool.description || '')}">${esc(tool.name)}</span>
+                </label>`;
+              }
+            } else {
+              html += `<div class="decisions-empty">Awaiting connection...</div>`;
+            }
+
+            html += `</div></div>`;
+          }
+          list.innerHTML = html;
+        } catch (err) {
+          console.error('Failed to refresh MCP tools:', err);
+        }
+      }
+
+      function openMcpReview(id, serverKey) {
+        const req = pendingRequests.get(id);
+        if (!req || !req.mcpTools) return;
+
+        const modal = document.getElementById('mcpReviewModal');
+        const list = document.getElementById('mcpReviewList');
+        document.getElementById('mcpReviewServer').textContent = '🔌 ' + serverKey;
+
+        list.innerHTML = req.mcpTools
+          .map(
+            (t) => `
+          <label class="mcp-tool-item">
+            <input type="checkbox" checked value="${esc(t.name)}">
+            <div style="flex:1">
+              <div style="font-weight:600">${esc(t.name)}</div>
+              <div style="font-size:10px;color:var(--muted)">${esc(t.description || 'No description')}</div>
+            </div>
+          </label>
+        `
+          )
+          .join('');
+
+        modal.dataset.id = id;
+        modal.dataset.serverKey = serverKey;
+        modal.classList.add('open');
+      }
+
+      function closeMcpReview() {
+        document.getElementById('mcpReviewModal').classList.remove('open');
+      }
+
+      async function approveMcpDiscovery() {
+        const modal = document.getElementById('mcpReviewModal');
+        const id = modal.dataset.id;
+        const serverKey = modal.dataset.serverKey;
+        const checkboxes = modal.querySelectorAll('input[type="checkbox"]');
+
+        const disabledTools = [];
+        checkboxes.forEach((cb) => {
+          if (!cb.checked) disabledTools.push(cb.value);
+        });
+
+        try {
+          await fetch('/mcp/approve', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Node9-Token': CSRF_TOKEN,
+            },
+            body: JSON.stringify({ id, serverKey, disabledTools }),
+          });
+          closeMcpReview();
+          refreshMcpTools();
+        } catch (err) {
+          console.error('Failed to approve MCP server:', err);
+        }
+      }
+
+      async function toggleMcpTool(serverKey, toolName, enabled) {
+        try {
+          const res = await fetch('/mcp/tools', {
+            headers: { 'X-Node9-Token': CSRF_TOKEN },
+          });
+          const config = await res.json();
+          let disabled = config[serverKey].disabled || [];
+
+          if (enabled) {
+            disabled = disabled.filter((t) => t !== toolName);
+          } else {
+            if (!disabled.includes(toolName)) disabled.push(toolName);
+          }
+
+          await fetch('/mcp/tools', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Node9-Token': CSRF_TOKEN,
+            },
+            body: JSON.stringify({ serverKey, disabledTools: disabled }),
+          });
+        } catch (err) {
+          console.error('Failed to toggle MCP tool:', err);
+        }
       }
 
       async function loadDashboardData() {
@@ -2477,6 +3186,12 @@
             data.summary.blocked.toLocaleString();
           document.getElementById('stat-dlp').textContent = data.summary.dlp.toLocaleString();
           document.getElementById('stat-loops').textContent = data.summary.loops.toLocaleString();
+
+          // Protection rate: % of operations node9 intercepted (blocked + dlp) vs total
+          const intercepted = (data.summary.blocked || 0) + (data.summary.dlp || 0);
+          const total = data.summary.total || 0;
+          const rate = total > 0 ? Math.round((intercepted / total) * 100) : 0;
+          document.getElementById('stat-rate').textContent = total > 0 ? rate + '%' : '—';
 
           // Render By Agent
           const agentList = document.getElementById('by-agent-list');
@@ -2504,23 +3219,32 @@
           }
 
           // Render Chart
+          const isHourly = _dashboardPeriod === 'today';
           const chartTitle = document.getElementById('daily-chart-title');
           if (chartTitle)
-            chartTitle.textContent =
-              _dashboardPeriod === 'today'
-                ? 'Daily Activity (Today)'
-                : 'Daily Activity (Last 7 Days)';
+            chartTitle.textContent = isHourly
+              ? 'Hourly Activity (Today)'
+              : 'Daily Activity (Last 7 Days)';
           const chart = document.getElementById('daily-chart');
           if (data.daily.length > 0) {
             const maxCalls = Math.max(...data.daily.map((d) => d.calls), 1);
             chart.innerHTML = data.daily
-              .map((d) => {
+              .map((d, i) => {
                 const height = (d.calls / maxCalls) * 100;
-                const dateObj = new Date(d.date + 'T12:00:00');
-                const label = dateObj.toLocaleDateString([], { month: 'short', day: 'numeric' });
+                let label;
+                if (isHourly) {
+                  // Label every 3 hours to keep the x-axis readable
+                  label = i % 3 === 0 ? d.date : '';
+                } else {
+                  const dateObj = new Date(d.date + 'T12:00:00');
+                  label = dateObj.toLocaleDateString([], { month: 'short', day: 'numeric' });
+                }
+                const titleText = isHourly
+                  ? `${d.date} — ${d.calls} calls, ${d.blocked} blocked`
+                  : `${d.calls} calls, ${d.blocked} blocked`;
                 return `
                 <div class="chart-bar-wrapper">
-                  <div class="chart-bar" style="height: ${height}%" title="${d.calls} calls, ${d.blocked} blocked"></div>
+                  <div class="chart-bar" style="height: ${height}%" title="${titleText}"></div>
                   <div class="chart-label">${label}</div>
                 </div>
               `;
@@ -2546,6 +3270,31 @@
               `;
               })
               .join('');
+          }
+
+          // Render Top Blocked Tools
+          const blockedList = document.getElementById('top-blocked-list');
+          if (blockedList) {
+            if (data.topBlockedTools && data.topBlockedTools.length > 0) {
+              const maxVal = Math.max(...data.topBlockedTools.map((t) => t.value), 1);
+              blockedList.innerHTML = data.topBlockedTools
+                .map((t) => {
+                  const width = (t.value / maxVal) * 100;
+                  return `
+                  <div class="tool-row">
+                    <div class="tool-name">${esc(t.name)}</div>
+                    <div class="tool-bar-bg">
+                      <div class="tool-bar-fill" style="width: ${width}%;background:#e5534b"></div>
+                    </div>
+                    <div class="tool-count" style="color:#e5534b">${t.value}</div>
+                  </div>
+                `;
+                })
+                .join('');
+            } else {
+              blockedList.innerHTML =
+                '<div class="decisions-empty">Nothing blocked — all clear.</div>';
+            }
           }
         } catch (err) {
           console.error('Failed to load dashboard:', err);
@@ -2591,7 +3340,9 @@
         if (_scanData) {
           document.getElementById('scan-progress-view').style.display = 'none';
           document.getElementById('scan-results-view').style.display = '';
-          document.getElementById('scan-results-content').innerHTML = renderScanResults(_scanData);
+          const _rc1 = document.getElementById('scan-results-content');
+          _rc1.innerHTML = renderScanResults(_scanData);
+          animateCountUp(_rc1);
           return;
         }
         document.getElementById('scan-progress-view').style.display = '';
@@ -2651,7 +3402,9 @@
           setTimeout(() => {
             document.getElementById('scan-progress-view').style.display = 'none';
             document.getElementById('scan-results-view').style.display = '';
-            document.getElementById('scan-results-content').innerHTML = renderScanResults(data);
+            const _rc2 = document.getElementById('scan-results-content');
+            _rc2.innerHTML = renderScanResults(data);
+            animateCountUp(_rc2);
           }, 500);
         } catch (err) {
           console.error('[node9 scan modal]', err);
@@ -2674,52 +3427,108 @@
         }
         const s = data.summary || {};
         const sources = data.sources || [];
-        const totalLeaks = sources.reduce((n, src) => n + (src.leaks || []).length, 0);
-        const totalRisks = sources.reduce((n, src) => n + (src.findings || []).length, 0);
-        const totalLoops = sources.reduce((n, src) => n + (src.loops || []).length, 0);
-        const totalFindings = totalLeaks + totalRisks + totalLoops;
 
-        const statColor = (n, warn, bad) => (n >= bad ? 'danger' : n >= warn ? 'warning' : 'ok');
+        // Flatten all findings across sources
+        const allFindings = sources.flatMap((src) => src.findings || []);
+        const allLeaks = sources.flatMap((src) => src.leaks || []);
+        const allLoops = sources.flatMap((src) => src.loops || []);
 
-        const stats = `<div class="scan-summary-row">
-          <div class="scan-stat">
-            <div class="scan-stat-val">${s.sessions || 0}</div>
-            <div class="scan-stat-label">Sessions</div>
-          </div>
-          <div class="scan-stat">
-            <div class="scan-stat-val ${statColor(totalRisks, 1, 3)}">${totalRisks}</div>
-            <div class="scan-stat-label">Policy Risks</div>
-          </div>
-          <div class="scan-stat">
-            <div class="scan-stat-val ${totalLeaks ? 'danger' : 'ok'}">${totalLeaks}</div>
-            <div class="scan-stat-label">Secret Leaks</div>
-          </div>
-          <div class="scan-stat">
-            <div class="scan-stat-val ${totalLoops ? 'warning' : 'ok'}">${totalLoops}</div>
-            <div class="scan-stat-label">Loops Found</div>
-          </div>
-        </div>`;
+        // Split findings into three distinct buckets
+        const blocked = allFindings.filter((f) => f.verdict === 'block' && f.ruleSource !== 'user');
+        const supervised = allFindings.filter(
+          (f) => f.verdict !== 'block' && f.ruleSource !== 'user'
+        );
+        const yourRules = allFindings.filter((f) => f.ruleSource === 'user');
 
-        if (totalFindings === 0) {
+        // Loop cost estimate: each wasted iteration ~2K tokens at Sonnet pricing
+        const LOOP_THRESHOLD = 3;
+        const COST_PER_ITER = 0.006;
+        const wastedIters = allLoops.reduce(
+          (sum, l) => sum + Math.max(0, (l.count || 0) - LOOP_THRESHOLD),
+          0
+        );
+        const loopWastedUSD = wastedIters * COST_PER_ITER;
+
+        const totalCost = s.totalCostUSD || 0;
+
+        function fmtUSD(n) {
+          if (!n || n < 0.001) return null;
+          if (n < 1) return '$' + n.toFixed(3);
+          return '$' + n.toFixed(2);
+        }
+
+        // ── Hero stats row ────────────────────────────────────────────────────
+        const costStr = fmtUSD(totalCost);
+        const savingsStr = fmtUSD(loopWastedUSD);
+
+        function statVal(n, cls, style, fmt) {
+          const finalStr =
+            fmt === 'usd' && n > 0 ? (n < 1 ? '$' + n.toFixed(3) : '$' + n.toFixed(2)) : String(n);
           return (
-            stats +
-            `<div style="text-align:center;color:#57ab5a;padding:28px 0;font-size:13px;line-height:1.8">
-              ✅ <strong>No issues found</strong><br>
-              <span style="font-size:11px;color:var(--muted)">Scanned ${s.sessions || 0} sessions across ${sources.length} AI source(s)</span>
-            </div>`
+            '<div class="scan-stat-val' +
+            (cls ? ' ' + cls : '') +
+            '"' +
+            (style ? ' style="' + style + '"' : '') +
+            ' data-countup="' +
+            n +
+            '"' +
+            (fmt ? ' data-countup-fmt="' + fmt + '"' : '') +
+            ' data-countup-final="' +
+            finalStr +
+            '">0</div>'
           );
         }
 
-        // Group items by rule/pattern, sorted by count desc
-        function groupByRule(items, type) {
+        const stats =
+          '<div class="scan-summary-row">' +
+          '<div class="scan-stat">' +
+          statVal(s.sessions || 0, '') +
+          '<div class="scan-stat-label">Sessions</div></div>' +
+          (totalCost > 0
+            ? '<div class="scan-stat">' +
+              statVal(totalCost, '', 'color:#8b949e', 'usd') +
+              '<div class="scan-stat-label">AI Spend</div></div>'
+            : '') +
+          '<div class="scan-stat">' +
+          statVal(blocked.length, blocked.length ? 'danger' : 'ok') +
+          '<div class="scan-stat-label">Blocked</div></div>' +
+          '<div class="scan-stat">' +
+          statVal(supervised.length, supervised.length ? 'warning' : 'ok') +
+          '<div class="scan-stat-label">Supervised</div></div>' +
+          '<div class="scan-stat">' +
+          statVal(yourRules.length, '', yourRules.length ? 'color:#58a6ff' : '') +
+          '<div class="scan-stat-label">Your Rules</div></div>' +
+          '<div class="scan-stat">' +
+          statVal(allLeaks.length, allLeaks.length ? 'danger' : 'ok') +
+          '<div class="scan-stat-label">Leaks</div></div>' +
+          '<div class="scan-stat">' +
+          statVal(allLoops.length, allLoops.length ? 'warning' : 'ok') +
+          '<div class="scan-stat-label">Loops</div></div>' +
+          '</div>' +
+          (savingsStr
+            ? '<div style="text-align:center;font-size:11px;color:var(--muted);margin:-6px 0 10px;padding-bottom:8px;border-bottom:1px solid var(--border)">⚡ Loops wasted an estimated <span style="color:var(--warning)">' +
+              savingsStr +
+              '</span> in unnecessary LLM turns</div>'
+            : '');
+
+        if (!allFindings.length && !allLeaks.length && !allLoops.length) {
+          return (
+            stats +
+            '<div style="text-align:center;color:#57ab5a;padding:28px 0;font-size:13px;line-height:1.8">✅ <strong>No issues found</strong><br><span style="font-size:11px;color:var(--muted)">Scanned ' +
+            (s.sessions || 0) +
+            ' sessions across ' +
+            sources.length +
+            ' AI source(s)</span></div>'
+          );
+        }
+
+        // ── Helpers ───────────────────────────────────────────────────────────
+        function groupByKey(items, keyFn) {
           const map = new Map();
           for (const item of items) {
-            const key =
-              type === 'leak'
-                ? item.pattern || 'DLP'
-                : (item.rule || 'unknown').replace(/^shield:[^:]+:/, '');
-            if (!map.has(key)) map.set(key, []);
-            map.get(key).push(item);
+            const k = keyFn(item);
+            if (!map.has(k)) map.set(k, []);
+            map.get(k).push(item);
           }
           return [...map.entries()].sort((a, b) => b[1].length - a[1].length);
         }
@@ -2729,122 +3538,209 @@
             month: 'short',
             day: 'numeric',
           });
-          const verdict = type === 'leak' ? 'dlp' : item.verdict || 'review';
-          const badgeClass =
-            verdict === 'block' ? 'badge-block' : verdict === 'dlp' ? 'badge-dlp' : 'badge-review';
-          const badgeLabel = verdict === 'block' ? 'BLOCK' : verdict === 'dlp' ? 'DLP' : 'REVIEW';
           const cmdText =
             type === 'leak' ? esc(item.sample || '') : esc(truncate(item.command || '', 120));
-          return `<div class="scan-finding-row">
-            <span class="scan-finding-ts">${date}</span>
-            <span class="scan-finding-cmd"><span class="scan-verdict-badge ${badgeClass}">${badgeLabel}</span>${cmdText}</span>
-          </div>`;
+          return (
+            '<div class="scan-finding-row"><span class="scan-finding-ts">' +
+            date +
+            '</span><span class="scan-finding-cmd">' +
+            cmdText +
+            '</span></div>'
+          );
         }
 
-        function ruleRows(grouped, type, maxBar) {
+        function ruleSection(items, type, badgeClass, badgeLabel, maxBar) {
+          const keyFn =
+            type === 'leak'
+              ? (i) => i.pattern || 'DLP'
+              : (i) => (i.rule || 'unknown').replace(/^shield:[^:]+:/, '');
+          const grouped = groupByKey(items, keyFn);
           return grouped
-            .map(([rule, items]) => {
-              const count = items.length;
-              const verdict = type === 'leak' ? 'dlp' : items[0]?.verdict || 'review';
-              const badgeClass =
-                verdict === 'block'
-                  ? 'badge-block'
-                  : verdict === 'dlp'
-                    ? 'badge-dlp'
-                    : 'badge-review';
-              const badgeLabel =
-                verdict === 'block' ? 'BLOCK' : verdict === 'dlp' ? 'DLP' : 'REVIEW';
+            .map(([rule, group]) => {
+              const count = group.length;
               const barPct = Math.round((count / maxBar) * 100);
               const detailId = 'detail-' + Math.random().toString(36).slice(2);
-              const detailRows = items.map((i) => findingRow(i, type)).join('');
-              return `<div class="scan-rule-row" onclick="
-                var d=document.getElementById('${detailId}');
-                var a=this.querySelector('.scan-rule-arrow');
-                d.style.display=d.style.display===''?'none':'';
-                a.textContent=d.style.display===''?'▲':'▼';
-              ">
-                <span class="scan-verdict-badge ${badgeClass}">${badgeLabel}</span>
-                <span class="scan-rule-name">${esc(rule)}</span>
-                <span class="scan-rule-bar-wrap">
-                  <span class="scan-rule-bar" style="width:${barPct}%"></span>
-                </span>
-                <span class="scan-rule-count">${count}</span>
-                <span class="scan-rule-arrow">▼</span>
-              </div>
-              <div id="${detailId}" style="display:none" class="scan-rule-detail">${detailRows}</div>`;
+              const rows = group.map((i) => findingRow(i, type)).join('');
+              return (
+                '<div class="scan-rule-row" onclick="var d=document.getElementById(\'' +
+                detailId +
+                "');var a=this.querySelector('.scan-rule-arrow');d.style.display=d.style.display===''?'none':'';a.textContent=d.style.display===''?'▲':'▼';\">" +
+                '<span class="scan-verdict-badge ' +
+                badgeClass +
+                '">' +
+                badgeLabel +
+                '</span>' +
+                '<span class="scan-rule-name">' +
+                esc(rule) +
+                '</span>' +
+                '<span class="scan-rule-bar-wrap"><span class="scan-rule-bar" style="width:' +
+                barPct +
+                '%' +
+                (badgeClass === 'badge-user' ? ';background:#388bfd33' : '') +
+                '"></span></span>' +
+                '<span class="scan-rule-count">' +
+                count +
+                '</span>' +
+                '<span class="scan-rule-arrow">▼</span>' +
+                '</div><div id="' +
+                detailId +
+                '" style="display:none" class="scan-rule-detail">' +
+                rows +
+                '</div>'
+              );
             })
             .join('');
         }
 
-        function loopRows(loops, maxBar) {
-          return loops
+        // ── Sections ──────────────────────────────────────────────────────────
+        const maxBar = Math.max(
+          ...allFindings.map((f) => 1),
+          ...groupByKey(allFindings, (f) => (f.rule || '').replace(/^shield:[^:]+:/, '')).map(
+            ([, v]) => v.length
+          ),
+          ...groupByKey(allLeaks, (f) => f.pattern || 'DLP').map(([, v]) => v.length),
+          1
+        );
+
+        // Per-agent breakdown — one row per active agent (only shows active ones)
+        const agentBreakdown = (function () {
+          const rows = sources
+            .filter(
+              (src) =>
+                (src.sessions || 0) > 0 ||
+                (src.findings || []).length > 0 ||
+                (src.leaks || []).length > 0 ||
+                (src.loops || []).length > 0
+            )
+            .map((src) => {
+              const f = (src.findings || []).length;
+              const l = (src.leaks || []).length;
+              const lp = (src.loops || []).length;
+              const findingsTotal = f + l + lp;
+              return (
+                '<div class="scan-agent-row">' +
+                '<span class="scan-agent-name">' +
+                esc(src.icon || '') +
+                ' ' +
+                esc(src.label || src.id) +
+                '</span>' +
+                '<span class="scan-agent-stat">' +
+                (src.sessions || 0) +
+                ' session' +
+                ((src.sessions || 0) !== 1 ? 's' : '') +
+                '</span>' +
+                '<span class="scan-agent-sep">·</span>' +
+                '<span class="scan-agent-stat">' +
+                findingsTotal +
+                ' finding' +
+                (findingsTotal !== 1 ? 's' : '') +
+                '</span>' +
+                '</div>'
+              );
+            });
+          if (!rows.length) return '';
+          return '<div class="scan-agent-group">' + rows.join('') + '</div>';
+        })();
+
+        let html = stats + agentBreakdown;
+
+        if (allLeaks.length) {
+          html +=
+            '<div class="scan-rule-section-label" style="color:#e5534b">🔑 Credential Leaks — secrets found in tool calls</div>';
+          html += ruleSection(allLeaks, 'leak', 'badge-dlp', 'DLP', maxBar);
+        }
+
+        if (blocked.length) {
+          html +=
+            '<div class="scan-rule-section-label" style="color:#e5534b">🛑 Blocked — Node9 would have stopped these</div>';
+          html += ruleSection(blocked, 'risk', 'badge-block', 'BLOCK', maxBar);
+        }
+
+        if (supervised.length) {
+          html +=
+            '<div class="scan-rule-section-label">👁 Supervised — Node9 would have asked you first</div>';
+          html += ruleSection(supervised, 'risk', 'badge-review', 'REVIEW', maxBar);
+        }
+
+        if (yourRules.length) {
+          html +=
+            '<div class="scan-rule-section-label" style="color:#58a6ff">✅ Your Rules — working as configured</div>';
+          html += ruleSection(yourRules, 'risk', 'badge-user', 'YOUR RULE', maxBar);
+        }
+
+        // Loops: single collapsed summary card, expand to see all groups
+        if (allLoops.length) {
+          const totalReps = allLoops.reduce((sum, l) => sum + (l.count || 0), 0);
+          const loopsDetailId = 'loops-detail-' + Math.random().toString(36).slice(2);
+          const savingNote = savingsStr
+            ? ' · <span style="color:var(--warning)">~' + savingsStr + ' wasted</span>'
+            : '';
+          const loopGroupRows = allLoops
             .map((item) => {
               const date = new Date(item.timestamp).toLocaleDateString([], {
                 month: 'short',
                 day: 'numeric',
               });
-              const barPct = Math.round((item.count / maxBar) * 100);
+              const barPct = Math.round(
+                (item.count / Math.max(...allLoops.map((l) => l.count), 1)) * 100
+              );
               const detailId = 'detail-' + Math.random().toString(36).slice(2);
-              return `<div class="scan-rule-row" onclick="
-                var d=document.getElementById('${detailId}');
-                var a=this.querySelector('.scan-rule-arrow');
-                d.style.display=d.style.display===''?'none':'';
-                a.textContent=d.style.display===''?'▲':'▼';
-              ">
-                <span class="scan-verdict-badge badge-review">LOOP</span>
-                <span class="scan-rule-name">${esc(item.toolName)}</span>
-                <span class="scan-rule-bar-wrap">
-                  <span class="scan-rule-bar" style="width:${barPct}%;background:var(--warning)"></span>
-                </span>
-                <span class="scan-rule-count">×${item.count}</span>
-                <span class="scan-rule-arrow">▼</span>
-              </div>
-              <div id="${detailId}" style="display:none" class="scan-rule-detail">
-                <div class="scan-finding-row">
-                  <span class="scan-finding-ts">${date}</span>
-                  <span class="scan-finding-cmd">${esc(item.commandPreview)}</span>
-                </div>
-              </div>`;
+              return (
+                '<div class="scan-rule-row" onclick="event.stopPropagation();var d=document.getElementById(\'' +
+                detailId +
+                "');var a=this.querySelector('.scan-rule-arrow');d.style.display=d.style.display===''?'none':'';a.textContent=d.style.display===''?'▲':'▼';\">" +
+                '<span class="scan-verdict-badge badge-review">LOOP</span>' +
+                '<span class="scan-rule-name">' +
+                esc(item.toolName) +
+                '</span>' +
+                '<span class="scan-rule-bar-wrap"><span class="scan-rule-bar" style="width:' +
+                barPct +
+                '%;background:var(--warning)"></span></span>' +
+                '<span class="scan-rule-count">×' +
+                item.count +
+                '</span>' +
+                '<span class="scan-rule-arrow">▼</span>' +
+                '</div><div id="' +
+                detailId +
+                '" style="display:none" class="scan-rule-detail">' +
+                '<div class="scan-finding-row"><span class="scan-finding-ts">' +
+                date +
+                '</span><span class="scan-finding-cmd">' +
+                esc(item.commandPreview) +
+                '</span></div>' +
+                '</div>'
+              );
             })
             .join('');
+
+          html +=
+            '<div class="scan-rule-section-label" style="color:var(--warning)">🔁 Agent Loops — repeated tool calls</div>';
+          html +=
+            '<div class="scan-rule-row" onclick="var d=document.getElementById(\'' +
+            loopsDetailId +
+            "');var a=this.querySelector('.scan-rule-arrow');d.style.display=d.style.display===''?'none':'';a.textContent=d.style.display===''?'▲':'▼';\">" +
+            '<span class="scan-verdict-badge badge-review">LOOP</span>' +
+            '<span class="scan-rule-name">' +
+            allLoops.length +
+            ' pattern' +
+            (allLoops.length !== 1 ? 's' : '') +
+            ' · ' +
+            totalReps +
+            ' total repetitions' +
+            savingNote +
+            '</span>' +
+            '<span class="scan-rule-bar-wrap"></span>' +
+            '<span class="scan-rule-count"></span>' +
+            '<span class="scan-rule-arrow">▼</span>' +
+            '</div>' +
+            '<div id="' +
+            loopsDetailId +
+            '" style="display:none" class="scan-rule-detail">' +
+            loopGroupRows +
+            '</div>';
         }
 
-        let groups = '';
-        for (const src of sources) {
-          const srcLeaks = src.leaks || [];
-          const srcFindings = src.findings || [];
-          const srcLoops = src.loops || [];
-          if (!srcLeaks.length && !srcFindings.length && !srcLoops.length) continue;
-          const srcTotal = srcLeaks.length + srcFindings.length + srcLoops.length;
-
-          const groupedLeaks = groupByRule(srcLeaks, 'leak');
-          const groupedFindings = groupByRule(srcFindings, 'risk');
-          const maxBar = Math.max(
-            ...groupedLeaks.map(([, v]) => v.length),
-            ...groupedFindings.map(([, v]) => v.length),
-            ...srcLoops.map((l) => l.count),
-            1
-          );
-
-          let rows = '';
-          if (groupedLeaks.length)
-            rows += `<div class="scan-rule-section-label" style="color:#e5534b">🔑 Credential Leaks</div>${ruleRows(groupedLeaks, 'leak', maxBar)}`;
-          if (groupedFindings.length)
-            rows += `<div class="scan-rule-section-label">🚨 Policy Risks</div>${ruleRows(groupedFindings, 'risk', maxBar)}`;
-          if (srcLoops.length)
-            rows += `<div class="scan-rule-section-label" style="color:var(--warning)">🔁 Agent Loops</div>${loopRows(srcLoops, maxBar)}`;
-
-          groups += `<div class="scan-group">
-            <div class="scan-group-header" onclick="var b=this.nextElementSibling;b.style.display=b.style.display==='none'?'':'none'">
-              ${esc(src.icon)} ${esc(src.label)}
-              <span style="font-size:10px;font-weight:400;color:var(--muted);margin-left:4px">${src.sessions} sessions</span>
-              <span class="scan-group-count">${srcTotal} finding${srcTotal !== 1 ? 's' : ''}</span>
-            </div>
-            <div class="scan-group-body" style="padding:8px 0">${rows}</div>
-          </div>`;
-        }
-
-        return stats + groups;
+        return html;
       }
 
       function toggleExpandAll(btn) {
@@ -2971,5 +3867,6 @@
         }
       }
     </script>
+    <div id="toast-container"></div>
   </body>
 </html>

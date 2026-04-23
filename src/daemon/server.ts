@@ -58,6 +58,13 @@ import {
   sessionCounters,
   sessionHistory,
   type HudStatus,
+  largeResponseRing,
+  LARGE_RESPONSE_RING_SIZE,
+  type LargeResponseEvent,
+  cachedScanResult,
+  cachedScanTs,
+  SCAN_CACHE_TTL_MS,
+  setCachedScanResult,
 } from './state';
 import { extractCommandPattern } from '../auth/state.js';
 import { patchConfig, GLOBAL_CONFIG_PATH, type ConfigPatch } from '../config/patch.js';
@@ -65,6 +72,12 @@ import { SmartRuleSchema } from '../config-schema.js';
 import { startCostSync } from '../costSync.js';
 import { startCloudSync } from './sync.js';
 import { startDlpScanner } from './dlp-scanner.js';
+import {
+  readMcpToolsConfig,
+  updateServerDiscovery,
+  approveServer,
+  getServerConfig,
+} from './mcp-tools.js';
 
 export function startDaemon(): void {
   startCostSync();
@@ -174,6 +187,12 @@ export function startDaemon(): void {
       // Emit the CSRF token on every connection so reconnecting clients
       // (including the terminal racer) can acquire it without a browser tab.
       res.write(`event: csrf\ndata: ${JSON.stringify({ token: csrfToken })}\n\n`);
+      // Replay large-response history so late-joining browsers see past events
+      if (largeResponseRing.length > 0) {
+        res.write(
+          `event: mcp-large-response-history\ndata: ${JSON.stringify({ events: largeResponseRing })}\n\n`
+        );
+      }
       // Replay recent activity history so late-joining browsers see the feed
       for (const item of activityRing) {
         res.write(`event: ${item.event}\ndata: ${JSON.stringify(item.data)}\n\n`);
@@ -729,6 +748,7 @@ export function startDaemon(): void {
             summary: { total: 0, allowed: 0, blocked: 0, dlp: 0, loops: 0 },
             daily: [],
             topTools: [],
+            topBlockedTools: [],
             byAgent: [],
           })
         );
@@ -765,20 +785,45 @@ export function startDaemon(): void {
           loops: entries.filter((e) => e.checkedBy === 'loop-detected').length,
         };
 
+        // For "today" we group by hour (00-23) so the chart has real shape.
+        // Other periods group by calendar day.
         const dailyMap = new Map();
-        for (const e of entries) {
-          const date = e.ts.slice(0, 10);
-          const d = dailyMap.get(date) || { date, calls: 0, blocked: 0 };
-          d.calls++;
-          if (e.decision && !e.decision.startsWith('allow')) d.blocked++;
-          dailyMap.set(date, d);
+        if (period === 'today') {
+          // Pre-populate 24 hour buckets so the chart always shows a full day
+          for (let h = 0; h < 24; h++) {
+            const key = String(h).padStart(2, '0') + ':00';
+            dailyMap.set(key, { date: key, calls: 0, blocked: 0 });
+          }
+          for (const e of entries) {
+            const hour = new Date(e.ts).getHours();
+            const key = String(hour).padStart(2, '0') + ':00';
+            const d = dailyMap.get(key)!;
+            d.calls++;
+            if (e.decision && !e.decision.startsWith('allow')) d.blocked++;
+          }
+        } else {
+          for (const e of entries) {
+            const date = e.ts.slice(0, 10);
+            const d = dailyMap.get(date) || { date, calls: 0, blocked: 0 };
+            d.calls++;
+            if (e.decision && !e.decision.startsWith('allow')) d.blocked++;
+            dailyMap.set(date, d);
+          }
         }
 
         const topToolsMap = new Map();
+        const topBlockedMap = new Map();
         for (const e of entries) {
           topToolsMap.set(e.tool, (topToolsMap.get(e.tool) || 0) + 1);
+          if (e.decision && !e.decision.startsWith('allow')) {
+            topBlockedMap.set(e.tool, (topBlockedMap.get(e.tool) || 0) + 1);
+          }
         }
         const topTools = [...topToolsMap.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 5)
+          .map(([name, value]) => ({ name, value }));
+        const topBlockedTools = [...topBlockedMap.entries()]
           .sort((a, b) => b[1] - a[1])
           .slice(0, 5)
           .map(([name, value]) => ({ name, value }));
@@ -803,6 +848,7 @@ export function startDaemon(): void {
             summary,
             daily: [...dailyMap.values()].sort((a, b) => a.date.localeCompare(b.date)),
             topTools,
+            topBlockedTools,
             byAgent,
           })
         );
@@ -812,8 +858,28 @@ export function startDaemon(): void {
       }
     }
 
+    if (req.method === 'POST' && pathname === '/scan/push') {
+      if (req.headers['x-node9-internal'] !== internalToken) return res.writeHead(403).end();
+      try {
+        const body = JSON.parse(await readBody(req)) as unknown;
+        setCachedScanResult(body);
+        broadcast('scan-ready', {});
+        res.writeHead(200).end();
+        return;
+      } catch {
+        res.writeHead(400).end();
+        return;
+      }
+    }
+
     if (req.method === 'GET' && pathname === '/scan') {
       if (!validToken(req)) return res.writeHead(403).end();
+
+      // Return pushed scan result if it's fresh (avoids re-scanning after `node9 scan`)
+      if (cachedScanResult !== null && Date.now() - cachedScanTs < SCAN_CACHE_TTL_MS) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify(cachedScanResult));
+      }
 
       try {
         const d = new Date();
@@ -852,6 +918,7 @@ export function startDaemon(): void {
             command:
               f.input?.command ?? f.input?.cmd ?? f.input?.file_path ?? f.toolName ?? 'unknown',
             verdict: f.source?.rule?.verdict ?? f.source?.rule?.action ?? 'review',
+            ruleSource: f.source?.sourceType ?? 'default',
             source: src,
           }));
 
@@ -915,6 +982,8 @@ export function startDaemon(): void {
           claude.dlpFindings.length + gemini.dlpFindings.length + codex.dlpFindings.length;
         const totalLoops =
           claude.loopFindings.length + gemini.loopFindings.length + codex.loopFindings.length;
+        const totalCostUSD =
+          (claude.totalCostUSD || 0) + (gemini.totalCostUSD || 0) + (codex.totalCostUSD || 0);
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         return res.end(
@@ -922,6 +991,7 @@ export function startDaemon(): void {
             status: 'complete',
             summary: {
               sessions: totalSessions,
+              totalCostUSD,
               findings: totalFindings,
               dlp: totalDlp,
               loops: totalLoops,
@@ -1129,6 +1199,138 @@ export function startDaemon(): void {
         res.writeHead(400).end();
         return;
       }
+    }
+
+    // ── MCP Tools — list and configure disabled tools ────────────────────────
+    if (req.method === 'GET' && pathname === '/mcp/tools') {
+      if (!validToken(req)) return res.writeHead(403).end();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(readMcpToolsConfig()));
+    }
+
+    if (req.method === 'POST' && pathname === '/mcp/tools') {
+      if (!validToken(req)) return res.writeHead(403).end();
+      try {
+        const { serverKey, disabledTools } = JSON.parse(await readBody(req));
+        if (typeof serverKey !== 'string' || !Array.isArray(disabledTools)) {
+          res.writeHead(400).end();
+          return;
+        }
+        approveServer(serverKey, disabledTools);
+        broadcast('mcp-tools-updated', { serverKey, disabledTools });
+        res.writeHead(200).end();
+        return;
+      } catch {
+        res.writeHead(400).end();
+        return;
+      }
+    }
+
+    if (req.method === 'POST' && pathname === '/mcp/discovered') {
+      // Called by gateway, requires internal token
+      if (req.headers['x-node9-internal'] !== internalToken) return res.writeHead(403).end();
+      try {
+        const { serverKey, tools } = JSON.parse(await readBody(req));
+        if (typeof serverKey !== 'string' || !Array.isArray(tools)) {
+          res.writeHead(400).end();
+          return;
+        }
+
+        const status = updateServerDiscovery(serverKey, tools);
+        if (status === 'new' || status === 'drift') {
+          // Trigger interactive approval flow
+          const id = randomUUID();
+          const entry: PendingEntry = {
+            id,
+            type: 'mcp-discovery',
+            serverKey,
+            mcpTools: tools,
+            toolName: 'mcp-discovery',
+            args: { serverKey, tools: tools.length },
+            timestamp: Date.now(),
+            slackDelegated: false,
+            timer: setTimeout(() => {
+              if (pending.has(id)) {
+                pending.delete(id);
+                broadcast('remove', { id, decision: 'deny' });
+              }
+            }, 60_000), // 60s timeout for discovery
+            waiter: null,
+            earlyDecision: null,
+          };
+          pending.set(id, entry);
+          broadcast('add', {
+            id,
+            type: 'mcp-discovery',
+            serverKey,
+            mcpTools: tools,
+            toolName: 'mcp-discovery',
+            args: { serverKey, toolCount: tools.length },
+          });
+        }
+
+        res.writeHead(200).end();
+        return;
+      } catch {
+        res.writeHead(400).end();
+        return;
+      }
+    }
+
+    if (req.method === 'POST' && pathname === '/mcp/large-response') {
+      if (req.headers['x-node9-internal'] !== internalToken) return res.writeHead(403).end();
+      try {
+        const body = JSON.parse(await readBody(req)) as {
+          toolName?: unknown;
+          serverKey?: unknown;
+          originalBytes?: unknown;
+        };
+        const event: LargeResponseEvent = {
+          ts: new Date().toISOString(),
+          toolName: String(body.toolName ?? 'unknown'),
+          serverKey: String(body.serverKey ?? ''),
+          originalBytes: Number(body.originalBytes) || 0,
+        };
+        largeResponseRing.push(event);
+        if (largeResponseRing.length > LARGE_RESPONSE_RING_SIZE) largeResponseRing.shift();
+        broadcast('mcp-large-response', event);
+        res.writeHead(200).end();
+        return;
+      } catch {
+        res.writeHead(400).end();
+        return;
+      }
+    }
+
+    if (req.method === 'POST' && pathname === '/mcp/approve') {
+      if (!validToken(req)) return res.writeHead(403).end();
+      try {
+        const { id, serverKey, disabledTools } = JSON.parse(await readBody(req));
+        const entry = pending.get(id);
+        if (!entry || entry.type !== 'mcp-discovery' || entry.serverKey !== serverKey) {
+          res.writeHead(404).end();
+          return;
+        }
+
+        clearTimeout(entry.timer);
+        approveServer(serverKey, disabledTools);
+        pending.delete(id);
+        broadcast('remove', { id, decision: 'allow' });
+        res.writeHead(200).end();
+        return;
+      } catch {
+        res.writeHead(400).end();
+        return;
+      }
+    }
+
+    if (req.method === 'GET' && pathname.startsWith('/mcp/status/')) {
+      // Called by gateway, requires internal token
+      if (req.headers['x-node9-internal'] !== internalToken) return res.writeHead(403).end();
+      const serverKey = pathname.split('/').pop()!;
+      const config = getServerConfig(serverKey);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(config || { status: 'pending' }));
     }
 
     res.writeHead(404).end();

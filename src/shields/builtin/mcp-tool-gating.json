@@ -1,0 +1,7 @@
+{
+  "name": "mcp-tool-gating",
+  "description": "Intercept MCP tool lists and require user approval before the agent can use any tools from a new server",
+  "aliases": ["mcp-gating", "mcp-tools"],
+  "smartRules": [],
+  "dangerousWords": []
+}
