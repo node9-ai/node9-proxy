@@ -1848,6 +1848,7 @@
 
     <script>
       let CSRF_TOKEN = '{{CSRF_TOKEN}}';
+      let _dashboardPeriod = 'today';
       const list = document.getElementById('list');
       const empty = document.getElementById('empty');
       const st = document.getElementById('st');
@@ -2025,7 +2026,6 @@
         card.id = 'c-' + req.id;
         const agentLabel = req.agent ? esc(req.agent) : 'AI Agent';
         const mcpLabel = req.mcpServer ? esc(req.mcpServer) : null;
-        const dis = isSlack ? 'disabled' : '';
         const timerVal = autoDenyMs > 0 ? Math.ceil(autoDenyMs / 1000) + 's' : '';
         const argsStr = JSON.stringify(req.args ?? {});
         const argsPreview = esc(argsStr.length > 140 ? argsStr.slice(0, 140) + '…' : argsStr);
@@ -2034,7 +2034,7 @@
             ? `<div class="insight-hint" style="font-size:10px;margin-bottom:6px">💡 Approved ${req.allowCount - 1}× — "Always Allow" makes it permanent</div>`
             : '';
         const slackNote = isSlack
-          ? `<div style="font-size:10px;color:var(--accent);margin-bottom:6px">⚡ Awaiting Cloud approval</div>`
+          ? `<div style="font-size:10px;color:var(--accent);margin-bottom:6px">⚡ Cloud approver notified — first decision wins</div>`
           : '';
         card.innerHTML = `
           <div class="pending-card-header">
@@ -2046,19 +2046,19 @@
           <div class="pending-args-preview">${argsPreview}</div>
           ${slackNote}${insight}
           <div class="pending-actions">
-            <button class="btn-allow-sm" onclick="sendDecision('${req.id}','allow',false)" ${dis}>✅ Allow</button>
-            <button class="btn-deny-sm"  onclick="sendDecision('${req.id}','deny',false)"  ${dis}>🚫 Block</button>
+            <button class="btn-allow-sm" onclick="sendDecision('${req.id}','allow',false)">✅ Allow</button>
+            <button class="btn-deny-sm"  onclick="sendDecision('${req.id}','deny',false)">🚫 Block</button>
           </div>
           <div class="pending-secondary">
-            <button onclick="sendDecision('${req.id}','allow',true)" ${dis}>Always Allow</button>
-            <button onclick="sendDecision('${req.id}','deny',true)"  ${dis}>Always Deny</button>
-            ${trustEnabled ? `<button onclick="sendTrust('${req.id}','30m')" ${dis}>⏱ 30m</button><button onclick="sendTrust('${req.id}','1h')" ${dis}>⏱ 1h</button>` : ''}
+            <button onclick="sendDecision('${req.id}','allow',true)">Always Allow</button>
+            <button onclick="sendDecision('${req.id}','deny',true)">Always Deny</button>
+            ${trustEnabled ? `<button onclick="sendTrust('${req.id}','30m')">⏱ 30m</button><button onclick="sendTrust('${req.id}','1h')">⏱ 1h</button>` : ''}
           </div>
           <button class="pending-detail-toggle" onclick="togglePendingDetail(this)">▼ Details</button>
           <div class="pending-detail" style="display:none">${renderPayload(req)}</div>
         `;
         list.appendChild(card);
-        if (!isSlack) updateDenyButton(req.id, req.timestamp || Date.now());
+        updateDenyButton(req.id, req.timestamp || Date.now());
         if (!isSlack) {
           try {
             new Audio(
@@ -2174,7 +2174,8 @@
         });
       }
       connect();
-      loadDashboardData();
+      // Defer slightly so the DOM is fully ready and CSRF token is confirmed
+      setTimeout(loadDashboardData, 0);
 
       const FR_ICONS = {
         bash: '💻',
@@ -2454,8 +2455,6 @@
         .catch(() => {});
 
       // ── Dashboard Logic ───────────────────────────────────────────────────
-
-      let _dashboardPeriod = 'today';
 
       function setDashboardPeriod(period, btn) {
         _dashboardPeriod = period;
