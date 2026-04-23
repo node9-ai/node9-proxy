@@ -2262,11 +2262,16 @@
         return s && s.length > n ? s.slice(0, n) + '…' : s || '';
       }
       function esc(s) {
+        // Also escape ' (as &#39;) — some onclick/onchange handlers embed
+        // values inside single-quoted JS strings, so an unescaped apostrophe
+        // would break out of that string and execute attacker code.
+        // Browsers decode &#39; back to ' in text contexts, so no visible change.
         return String(s)
           .replace(/&/g, '&amp;')
           .replace(/</g, '&lt;')
           .replace(/>/g, '&gt;')
-          .replace(/"/g, '&quot;');
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
       }
       function refresh() {
         const isEmpty = requests.size === 0;
