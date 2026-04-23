@@ -729,6 +729,7 @@ export function startDaemon(): void {
             summary: { total: 0, allowed: 0, blocked: 0, dlp: 0, loops: 0 },
             daily: [],
             topTools: [],
+            byAgent: [],
           })
         );
       }
@@ -782,12 +783,27 @@ export function startDaemon(): void {
           .slice(0, 5)
           .map(([name, value]) => ({ name, value }));
 
+        const agentMap = new Map<
+          string,
+          { agent: string; total: number; blocked: number; dlp: number }
+        >();
+        for (const e of entries) {
+          const key = (e.agent as string) || 'unknown';
+          const a = agentMap.get(key) ?? { agent: key, total: 0, blocked: 0, dlp: 0 };
+          a.total++;
+          if (e.decision && !(e.decision as string).startsWith('allow')) a.blocked++;
+          if ((e.checkedBy as string | undefined)?.includes('dlp')) a.dlp++;
+          agentMap.set(key, a);
+        }
+        const byAgent = [...agentMap.values()].sort((a, b) => b.total - a.total);
+
         res.writeHead(200, { 'Content-Type': 'application/json' });
         return res.end(
           JSON.stringify({
             summary,
             daily: [...dailyMap.values()].sort((a, b) => a.date.localeCompare(b.date)),
             topTools,
+            byAgent,
           })
         );
       } catch {
@@ -805,11 +821,11 @@ export function startDaemon(): void {
         d.setHours(0, 0, 0, 0);
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        let claude: any = { sessions: 0, findings: [], dlpFindings: [] };
+        let claude: any = { sessions: 0, findings: [], dlpFindings: [], loopFindings: [] };
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        let gemini: any = { sessions: 0, findings: [], dlpFindings: [] };
+        let gemini: any = { sessions: 0, findings: [], dlpFindings: [], loopFindings: [] };
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        let codex: any = { sessions: 0, findings: [], dlpFindings: [] };
+        let codex: any = { sessions: 0, findings: [], dlpFindings: [], loopFindings: [] };
 
         try {
           claude = scanClaudeHistory(d);
@@ -849,6 +865,17 @@ export function startDaemon(): void {
             source: src,
           }));
 
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const mapLoops = (arr: any[], src: string) =>
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          arr.map((f: any) => ({
+            timestamp: f.timestamp || new Date().toISOString(),
+            toolName: f.toolName || 'unknown',
+            commandPreview: f.commandPreview || '',
+            count: f.count || 0,
+            source: src,
+          }));
+
         const sources = [
           {
             id: 'claude',
@@ -857,6 +884,7 @@ export function startDaemon(): void {
             sessions: claude.sessions,
             findings: mapFindings(claude.findings, 'claude'),
             leaks: mapLeaks(claude.dlpFindings, 'claude'),
+            loops: mapLoops(claude.loopFindings, 'claude'),
           },
           {
             id: 'gemini',
@@ -865,6 +893,7 @@ export function startDaemon(): void {
             sessions: gemini.sessions,
             findings: mapFindings(gemini.findings, 'gemini'),
             leaks: mapLeaks(gemini.dlpFindings, 'gemini'),
+            loops: mapLoops(gemini.loopFindings, 'gemini'),
           },
           {
             id: 'codex',
@@ -873,20 +902,30 @@ export function startDaemon(): void {
             sessions: codex.sessions,
             findings: mapFindings(codex.findings, 'codex'),
             leaks: mapLeaks(codex.dlpFindings, 'codex'),
+            loops: mapLoops(codex.loopFindings, 'codex'),
           },
-        ].filter((s) => s.sessions > 0 || s.findings.length > 0 || s.leaks.length > 0);
+        ].filter(
+          (s) => s.sessions > 0 || s.findings.length > 0 || s.leaks.length > 0 || s.loops.length > 0
+        );
 
         const totalSessions = claude.sessions + gemini.sessions + codex.sessions;
         const totalFindings =
           claude.findings.length + gemini.findings.length + codex.findings.length;
         const totalDlp =
           claude.dlpFindings.length + gemini.dlpFindings.length + codex.dlpFindings.length;
+        const totalLoops =
+          claude.loopFindings.length + gemini.loopFindings.length + codex.loopFindings.length;
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         return res.end(
           JSON.stringify({
             status: 'complete',
-            summary: { sessions: totalSessions, findings: totalFindings, dlp: totalDlp },
+            summary: {
+              sessions: totalSessions,
+              findings: totalFindings,
+              dlp: totalDlp,
+              loops: totalLoops,
+            },
             sources,
           })
         );

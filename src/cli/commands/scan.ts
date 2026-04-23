@@ -57,6 +57,16 @@ interface DlpFinding {
   agent: 'claude' | 'gemini' | 'codex';
 }
 
+export interface LoopFinding {
+  toolName: string;
+  commandPreview: string;
+  count: number;
+  timestamp: string;
+  project: string;
+  sessionId: string;
+  agent: 'claude' | 'gemini' | 'codex';
+}
+
 interface JournalEntry {
   type: string;
   timestamp?: string;
@@ -79,6 +89,7 @@ export interface ScanResult {
   bashCalls: number;
   findings: Finding[];
   dlpFindings: DlpFinding[];
+  loopFindings: LoopFinding[];
   totalCostUSD: number;
   firstDate: string | null;
   lastDate: string | null;
@@ -186,6 +197,62 @@ function preview(input: Record<string, unknown>, max: number): string {
 function fullCommand(input: Record<string, unknown>): string {
   const cmd = input.command ?? input.query ?? input.file_path ?? JSON.stringify(input);
   return String(cmd).replace(/\s+/g, ' ').trim();
+}
+
+// ---------------------------------------------------------------------------
+// Loop detection
+// ---------------------------------------------------------------------------
+
+const LOOP_TOOLS = new Set([
+  'bash',
+  'execute_bash',
+  'exec_command',
+  'shell',
+  'run_shell_command',
+  'write',
+  'edit',
+  'multiedit',
+]);
+const LOOP_THRESHOLD = 3;
+
+function detectLoops(
+  calls: Array<{ toolName: string; input: Record<string, unknown>; timestamp: string }>,
+  project: string,
+  sessionId: string,
+  agent: 'claude' | 'gemini' | 'codex'
+): LoopFinding[] {
+  const counts = new Map<
+    string,
+    { count: number; timestamp: string; input: Record<string, unknown>; toolName: string }
+  >();
+  for (const call of calls) {
+    const tl = call.toolName.toLowerCase();
+    if (!LOOP_TOOLS.has(tl)) continue;
+    const key = tl + '\0' + preview(call.input, 200);
+    const entry = counts.get(key) ?? {
+      count: 0,
+      timestamp: call.timestamp,
+      input: call.input,
+      toolName: call.toolName,
+    };
+    entry.count++;
+    counts.set(key, entry);
+  }
+  const findings: LoopFinding[] = [];
+  for (const [, entry] of counts) {
+    if (entry.count >= LOOP_THRESHOLD) {
+      findings.push({
+        toolName: entry.toolName,
+        commandPreview: preview(entry.input, 80),
+        count: entry.count,
+        timestamp: entry.timestamp,
+        project,
+        sessionId,
+        agent,
+      });
+    }
+  }
+  return findings.sort((a, b) => b.count - a.count);
 }
 
 // ---------------------------------------------------------------------------
@@ -335,6 +402,7 @@ export function scanClaudeHistory(
     bashCalls: 0,
     findings: [],
     dlpFindings: [],
+    loopFindings: [],
     totalCostUSD: 0,
     firstDate: null,
     lastDate: null,
@@ -383,6 +451,12 @@ export function scanClaudeHistory(
       } catch {
         continue;
       }
+
+      const sessionCalls: Array<{
+        toolName: string;
+        input: Record<string, unknown>;
+        timestamp: string;
+      }> = [];
 
       for (const line of raw.split('\n')) {
         if (!line.trim()) continue;
@@ -468,6 +542,8 @@ export function scanClaudeHistory(
           const toolName = block.name ?? '';
           const toolNameLower = toolName.toLowerCase();
           const input = block.input ?? {};
+
+          sessionCalls.push({ toolName, input, timestamp: entry.timestamp ?? '' });
 
           if (toolNameLower === 'bash' || toolNameLower === 'execute_bash') {
             result.bashCalls++;
@@ -570,6 +646,7 @@ export function scanClaudeHistory(
           }
         }
       }
+      result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'claude'));
     }
   }
 
@@ -592,6 +669,7 @@ export function scanGeminiHistory(
     bashCalls: 0,
     findings: [],
     dlpFindings: [],
+    loopFindings: [],
     totalCostUSD: 0,
     firstDate: null,
     lastDate: null,
@@ -647,6 +725,12 @@ export function scanGeminiHistory(
       } catch {
         continue;
       }
+
+      const sessionCalls: Array<{
+        toolName: string;
+        input: Record<string, unknown>;
+        timestamp: string;
+      }> = [];
 
       let session: GeminiSessionFile;
       try {
@@ -716,6 +800,8 @@ export function scanGeminiHistory(
           const toolName = tc.name ?? '';
           const toolNameLower = toolName.toLowerCase();
           const input = tc.args ?? {};
+
+          sessionCalls.push({ toolName, input, timestamp: msg.timestamp ?? '' });
 
           if (toolNameLower === 'run_shell_command' || toolNameLower === 'shell') {
             result.bashCalls++;
@@ -816,6 +902,7 @@ export function scanGeminiHistory(
           }
         }
       }
+      result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'gemini'));
     }
   }
 
@@ -838,6 +925,7 @@ export function scanCodexHistory(
     bashCalls: 0,
     findings: [],
     dlpFindings: [],
+    loopFindings: [],
     totalCostUSD: 0,
     firstDate: null,
     lastDate: null,
@@ -896,6 +984,12 @@ export function scanCodexHistory(
     let startTime = '';
     let projLabel = '';
     result.sessions++;
+
+    const sessionCalls: Array<{
+      toolName: string;
+      input: Record<string, unknown>;
+      timestamp: string;
+    }> = [];
 
     // Track last cumulative token count for cost
     let lastTotalInput = 0;
@@ -982,6 +1076,8 @@ export function scanCodexHistory(
       if ('cmd' in input && !('command' in input)) {
         input = { ...input, command: input['cmd'] };
       }
+
+      sessionCalls.push({ toolName, input, timestamp: ts });
 
       if (toolNameLower === 'exec_command' || toolNameLower === 'shell') {
         result.bashCalls++;
@@ -1084,6 +1180,8 @@ export function scanCodexHistory(
     // Accumulate session cost using GPT-4o pricing as proxy for codex-1/GPT-5
     const nonCached = Math.max(0, lastTotalInput - lastTotalCached);
     result.totalCostUSD += nonCached * 5e-6 + lastTotalCached * 2.5e-6 + lastTotalOutput * 15e-6;
+
+    result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'codex'));
   }
 
   return result;
@@ -1099,6 +1197,7 @@ function mergeScans(a: ScanResult, b: ScanResult): ScanResult {
     bashCalls: a.bashCalls + b.bashCalls,
     findings: [...a.findings, ...b.findings],
     dlpFindings: [...a.dlpFindings, ...b.dlpFindings],
+    loopFindings: [...a.loopFindings, ...b.loopFindings],
     totalCostUSD: a.totalCostUSD + b.totalCostUSD,
     firstDate: dates.length ? dates.sort()[0] : null,
     lastDate: lastDates.length ? lastDates.sort().at(-1)! : null,
@@ -1323,6 +1422,15 @@ export function registerScanCommand(program: Command): void {
               chalk.dim('   secret detected in tool call')
           );
         }
+        if (scan.loopFindings.length > 0) {
+          console.log(
+            '    ' +
+              chalk.yellow('🔁  Loop detected') +
+              '      ' +
+              chalk.yellow.bold(String(scan.loopFindings.length).padStart(5)) +
+              chalk.dim('   repeated tool call patterns found')
+          );
+        }
         console.log('');
 
         // ── Separate findings by section ───────────────────────────────────
@@ -1476,6 +1584,46 @@ export function registerScanCommand(program: Command): void {
             console.log(
               chalk.dim(
                 `    … and ${scan.dlpFindings.length - topN} more  (--drill-down for full list)`
+              )
+            );
+          }
+          console.log('');
+        }
+
+        // ── Loop findings ──────────────────────────────────────────────────
+        if (scan.loopFindings.length > 0) {
+          console.log('  ' + chalk.dim('─'.repeat(70)));
+          console.log(
+            '  ' +
+              chalk.yellow.bold('🔁  Agent Loops') +
+              chalk.dim('  ·  ') +
+              chalk.yellow(
+                `${num(scan.loopFindings.length)} repeated pattern${scan.loopFindings.length !== 1 ? 's' : ''} found`
+              )
+          );
+          const shownLoops = drillDown ? scan.loopFindings : scan.loopFindings.slice(0, topN);
+          for (const f of shownLoops) {
+            const ts = f.timestamp ? chalk.dim(fmtTs(f.timestamp) + '  ') : '';
+            const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
+            const agentBadge =
+              f.agent === 'gemini'
+                ? chalk.blue('[Gemini]  ')
+                : f.agent === 'codex'
+                  ? chalk.magenta('[Codex]   ')
+                  : chalk.cyan('[Claude]  ');
+            const sessionSuffix = f.sessionId ? chalk.dim(`  → ${f.sessionId.slice(0, 8)}`) : '';
+            console.log(
+              `    ${ts}${proj}${agentBadge}` +
+                chalk.yellow(f.toolName) +
+                chalk.dim(`  ×${f.count}  `) +
+                chalk.gray(f.commandPreview) +
+                sessionSuffix
+            );
+          }
+          if (!drillDown && scan.loopFindings.length > topN) {
+            console.log(
+              chalk.dim(
+                `    … and ${scan.loopFindings.length - topN} more  (--drill-down for full list)`
               )
             );
           }

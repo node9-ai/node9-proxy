@@ -83,7 +83,7 @@
 
       .body {
         display: grid;
-        grid-template-columns: 360px 1fr 270px;
+        grid-template-columns: 420px 1fr 270px;
         gap: 16px;
         min-height: 0;
         overflow: hidden;
@@ -121,20 +121,17 @@
       }
       #empty {
         display: flex;
-        flex-direction: column;
         align-items: center;
-        justify-content: center;
-        gap: 10px;
-        padding: 48px 24px;
-        border: 2px dashed var(--border);
-        border-radius: 16px;
+        gap: 6px;
+        padding: 8px 10px;
+        border: 1px dashed var(--border);
+        border-radius: 8px;
         color: var(--muted);
-        font-size: 13px;
-        text-align: center;
-        line-height: 1.5;
+        font-size: 11px;
+        margin-bottom: 8px;
       }
       #empty .empty-icon {
-        font-size: 28px;
+        font-size: 14px;
       }
       .card {
         background: var(--card);
@@ -880,38 +877,180 @@
         border: 1px solid var(--border);
       }
 
-      /* ── Dashboard & Tabs ───────────────────────────────────────────── */
-      .nav-tabs {
-        display: flex;
-        gap: 8px;
-        margin-left: 20px;
+      /* ── Pending approval cards (inline in Flight Recorder) ─────────── */
+      .pending-card {
+        background: rgba(240, 136, 62, 0.05);
+        border: 1px solid rgba(240, 136, 62, 0.35);
+        border-radius: 10px;
+        padding: 10px 12px;
+        margin-bottom: 6px;
+        animation: pop 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
       }
-      .nav-tab {
+      .pending-card.slack-pending {
+        border-color: rgba(83, 155, 245, 0.35);
+        background: rgba(83, 155, 245, 0.04);
+      }
+      .pending-card-header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 5px;
+      }
+      .pending-agent-badge {
+        font-size: 10px;
+        font-weight: 700;
+        color: var(--primary);
+        background: rgba(240, 136, 62, 0.12);
+        padding: 1px 6px;
+        border-radius: 4px;
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .pending-tool-name {
+        font-size: 12px;
+        font-weight: 700;
+        color: var(--text-bright);
+        font-family: 'Fira Code', monospace;
+        margin-bottom: 3px;
+      }
+      .pending-args-preview {
+        font-size: 10px;
+        color: var(--muted);
+        font-family: monospace;
+        word-break: break-all;
+        margin-bottom: 8px;
+        max-height: 36px;
+        overflow: hidden;
+      }
+      .pending-actions {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 5px;
+        margin-bottom: 5px;
+      }
+      .btn-allow-sm {
+        background: var(--success);
+        color: #fff;
+        font-size: 12px;
+        font-weight: 700;
+        padding: 7px 6px;
+        border-radius: 7px;
+        border: none;
+        cursor: pointer;
+        transition: filter 0.15s;
+      }
+      .btn-allow-sm:hover:not(:disabled) {
+        filter: brightness(1.1);
+      }
+      .btn-deny-sm {
+        background: rgba(201, 60, 55, 0.15);
+        color: #e5534b;
+        border: 1px solid rgba(201, 60, 55, 0.3);
+        font-size: 12px;
+        font-weight: 700;
+        padding: 7px 6px;
+        border-radius: 7px;
+        cursor: pointer;
+        transition: background 0.15s;
+      }
+      .btn-deny-sm:hover:not(:disabled) {
+        background: var(--danger);
+        color: #fff;
+        border-color: transparent;
+      }
+      .pending-secondary {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 4px;
+        margin-bottom: 4px;
+      }
+      .pending-secondary button {
+        font-size: 10px;
+        padding: 4px 4px;
+        border-radius: 5px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid var(--border);
+        color: var(--muted);
+        cursor: pointer;
+        transition: color 0.15s;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .pending-secondary button:hover:not(:disabled) {
+        color: var(--text-bright);
+      }
+      .pending-detail-toggle {
         background: transparent;
         border: none;
         color: var(--muted);
-        padding: 6px 12px;
-        font-size: 13px;
-        font-weight: 600;
+        font-size: 10px;
         cursor: pointer;
-        border-bottom: 2px solid transparent;
-        border-radius: 0;
+        padding: 0;
+        font-family: inherit;
+        display: flex;
+        align-items: center;
+        gap: 3px;
+        margin-bottom: 4px;
       }
-      .nav-tab:hover {
+      .pending-detail-toggle:hover {
         color: var(--text-bright);
+        filter: none;
         transform: none;
       }
-      .nav-tab.active {
-        color: var(--primary);
-        border-bottom-color: var(--primary);
+      .pending-detail {
+        border-top: 1px solid var(--border);
+        margin-top: 6px;
+        padding-top: 6px;
+        font-size: 11px;
+        overflow: hidden;
       }
-      .tab-content {
+      .pending-detail pre {
+        font-size: 10px;
+        max-height: 120px;
+        overflow-y: auto;
+      }
+      .pending-divider {
+        font-size: 9px;
+        font-weight: 700;
+        letter-spacing: 0.8px;
+        color: var(--muted);
+        text-transform: uppercase;
+        margin: 6px 0 4px;
+        opacity: 0.6;
+      }
+      #pending-count-badge {
+        background: var(--danger);
+        color: #fff;
+        font-size: 9px;
+        font-weight: 700;
+        padding: 1px 5px;
+        border-radius: 10px;
+        margin-left: 2px;
         display: none;
       }
-      .tab-content.active {
-        display: block;
+      /* ── Dashboard ───────────────────────────────────────────────────── */
+      .period-btn {
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--muted);
+        padding: 3px 10px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        border-radius: 4px;
       }
-
+      .period-btn:hover {
+        color: var(--text-bright);
+      }
+      .period-btn.active {
+        background: var(--primary);
+        border-color: var(--primary);
+        color: #fff;
+      }
       .dashboard-scorecard {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -1078,6 +1217,11 @@
         }
       }
 
+      @media (max-width: 1100px) {
+        .body {
+          grid-template-columns: 380px 1fr 240px;
+        }
+      }
       @media (max-width: 960px) {
         .body {
           grid-template-columns: 1fr 220px;
@@ -1414,10 +1558,6 @@
       <header>
         <span class="logo">🛡️</span>
         <h1>Node9 Guard</h1>
-        <div class="nav-tabs">
-          <button class="nav-tab active" onclick="showTab('approvals')">Approvals</button>
-          <button class="nav-tab" onclick="showTab('dashboard')">Dashboard</button>
-        </div>
         <div id="st" class="status-badge">Waiting...</div>
         <button class="btn-scan-history" onclick="openScanModal()" id="btn-scan-history">
           🔍 Scan History
@@ -1466,8 +1606,19 @@
             <div class="panel-title">
               🛰️ Flight Recorder
               <span style="font-weight: 400; color: var(--muted); font-size: 11px">live</span>
+              <span id="pending-count-badge"></span>
               <button class="feed-clear-btn" onclick="clearFeed()">clear</button>
             </div>
+            <div id="warnBanner" class="warning-banner">
+              ⚠️ Auto-start is off — daemon started manually. Run "node9 daemon stop" to stop it, or
+              enable Auto-start in Settings.
+            </div>
+            <div id="list"></div>
+            <div id="empty">
+              <span class="empty-icon">✨</span>
+              <span>All clear — no pending tool calls.</span>
+            </div>
+            <div class="pending-divider">Activity</div>
             <div id="activity-feed">
               <span class="decisions-empty">Waiting for agent activity…</span>
             </div>
@@ -1475,21 +1626,33 @@
         </div>
 
         <div class="main">
-          <div id="tab-approvals" class="tab-content active">
-            <div id="warnBanner" class="warning-banner">
-              ⚠️ Auto-start is off — daemon started manually. Run "node9 daemon stop" to stop it, or
-              enable Auto-start in Settings.
+          <div id="tab-dashboard">
+            <div
+              style="
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                margin-bottom: 12px;
+              "
+            >
+              <div class="section-title" style="margin: 0">Local Protection Dashboard</div>
+              <div style="display: flex; gap: 6px">
+                <button
+                  class="period-btn active"
+                  id="period-btn-1d"
+                  onclick="setDashboardPeriod('today', this)"
+                >
+                  1d
+                </button>
+                <button
+                  class="period-btn"
+                  id="period-btn-7d"
+                  onclick="setDashboardPeriod('7d', this)"
+                >
+                  7d
+                </button>
+              </div>
             </div>
-            <div class="section-title">Pending Approvals</div>
-            <div id="list"></div>
-            <div id="empty">
-              <span class="empty-icon">✨</span>
-              <span>All clear — no pending tool calls.</span>
-            </div>
-          </div>
-
-          <div id="tab-dashboard" class="tab-content">
-            <div class="section-title">Local Protection Dashboard</div>
             <div class="dashboard-scorecard">
               <div class="score-card">
                 <div class="score-label">Total Events</div>
@@ -1511,8 +1674,18 @@
 
             <div class="card" style="margin-top: 20px">
               <div class="card-header">
+                <span class="card-header-icon">🤖</span>
+                <span class="card-header-title">By Agent</span>
+              </div>
+              <div id="by-agent-list" class="top-tools-grid">
+                <div class="decisions-empty">No agent activity yet.</div>
+              </div>
+            </div>
+
+            <div class="card" style="margin-top: 20px">
+              <div class="card-header">
                 <span class="card-header-icon">📈</span>
-                <span class="card-header-title">Daily Activity (Last 7 Days)</span>
+                <span class="card-header-title" id="daily-chart-title">Daily Activity</span>
               </div>
               <div id="daily-chart" class="chart-container">
                 <!-- Bar chart will be rendered here -->
@@ -1527,23 +1700,6 @@
               </div>
               <div id="top-tools-list" class="top-tools-grid">
                 <div class="decisions-empty">No tool usage yet.</div>
-              </div>
-            </div>
-
-            <div class="card scan-promo-card">
-              <div class="card-header">
-                <span class="card-header-icon">🔍</span>
-                <span class="card-header-title">History Audit</span>
-              </div>
-              <p style="font-size: 13px; color: var(--muted); margin-bottom: 16px">
-                Scan your pre-Node9 history (Claude/Gemini logs) to see what risks were present
-                before installation.
-              </p>
-              <button class="btn-trust" onclick="runHistoryScan()" id="btn-scan">
-                🚀 Run Historical Security Scan
-              </button>
-              <div id="scan-results" style="margin-top: 16px; display: none">
-                <div class="insight-hint">✨ Ready to scan your local agent logs.</div>
               </div>
             </div>
           </div>
@@ -1712,20 +1868,22 @@
       }
 
       function updateDenyButton(id, timestamp) {
-        const btn = document.querySelector('#c-' + id + ' .btn-deny');
+        const btn = document.querySelector('#c-' + id + ' .btn-deny-sm');
         const timer = document.querySelector('#timer-' + id);
         if (!btn) return;
         const elapsed = Date.now() - timestamp;
         const remaining = Math.max(0, Math.ceil((autoDenyMs - elapsed) / 1000));
         if (remaining <= 0) {
-          btn.textContent = '⏳ Auto-Denying…';
-          btn.disabled = true;
+          if (btn) {
+            btn.textContent = '⏳…';
+            btn.disabled = true;
+          }
           if (timer) {
-            timer.textContent = 'auto-deny';
+            timer.textContent = 'auto';
             timer.className = 'card-timer urgent';
           }
         } else {
-          btn.textContent = '🚫 Block this Action';
+          if (btn) btn.textContent = '🚫 Block';
           if (timer) {
             timer.textContent = remaining + 's';
             timer.className = 'card-timer' + (remaining < 15 ? ' urgent' : '');
@@ -1745,7 +1903,13 @@
           .replace(/"/g, '&quot;');
       }
       function refresh() {
-        empty.style.display = requests.size === 0 ? 'block' : 'none';
+        const isEmpty = requests.size === 0;
+        empty.style.display = isEmpty ? 'flex' : 'none';
+        const badge = document.getElementById('pending-count-badge');
+        if (badge) {
+          badge.textContent = requests.size > 0 ? String(requests.size) : '';
+          badge.style.display = requests.size > 0 ? 'inline' : 'none';
+        }
       }
 
       function setCardBusy(card, busy) {
@@ -1844,42 +2008,55 @@
         `;
       }
 
+      function togglePendingDetail(btn) {
+        const detail = btn.closest('.pending-card').querySelector('.pending-detail');
+        const open = detail.style.display !== 'none';
+        detail.style.display = open ? 'none' : '';
+        btn.textContent = open ? '▼ Details' : '▲ Hide';
+      }
+
       function addCard(req) {
         if (requests.has(req.id)) return;
         requests.add(req.id);
         refresh();
         const isSlack = !!req.slackDelegated;
         const card = document.createElement('div');
-        card.className = 'card' + (isSlack ? ' slack-viewer' : '');
+        card.className = 'pending-card' + (isSlack ? ' slack-pending' : '');
         card.id = 'c-' + req.id;
         const agentLabel = req.agent ? esc(req.agent) : 'AI Agent';
         const mcpLabel = req.mcpServer ? esc(req.mcpServer) : null;
         const dis = isSlack ? 'disabled' : '';
+        const timerVal = autoDenyMs > 0 ? Math.ceil(autoDenyMs / 1000) + 's' : '';
+        const argsStr = JSON.stringify(req.args ?? {});
+        const argsPreview = esc(argsStr.length > 140 ? argsStr.slice(0, 140) + '…' : argsStr);
+        const insight =
+          req.allowCount >= 3
+            ? `<div class="insight-hint" style="font-size:10px;margin-bottom:6px">💡 Approved ${req.allowCount - 1}× — "Always Allow" makes it permanent</div>`
+            : '';
+        const slackNote = isSlack
+          ? `<div style="font-size:10px;color:var(--accent);margin-bottom:6px">⚡ Awaiting Cloud approval</div>`
+          : '';
         card.innerHTML = `
-        <div class="card-header">
-          <span class="card-header-icon">${isSlack ? '⚡' : '⚠️'}</span>
-          <span class="card-header-title">${isSlack ? 'Awaiting Cloud Approval' : 'Action Required'}</span>
-          <span class="card-timer" id="timer-${req.id}">${autoDenyMs > 0 ? Math.ceil(autoDenyMs / 1000) + 's' : ''}</span>
-        </div>
-        <div class="source-row">
-          <span class="agent-badge">${agentLabel}</span>
-          ${mcpLabel ? `<span class="source-arrow">→</span><span class="mcp-badge">mcp::${mcpLabel}</span>` : ''}
-        </div>
-        <div class="tool-chip">${esc(req.toolName)}</div>
-        ${isSlack ? '<div class="slack-indicator">⚡ Awaiting Cloud approval — view only</div>' : ''}
-        ${req.allowCount >= 3 ? `<div class="insight-hint">💡 Approved ${req.allowCount - 1}× before — "Always Allow" creates a permanent rule</div>` : ''}
-        ${renderPayload(req)}
-        <div class="actions" id="act-${req.id}">
-          <button class="btn-allow" onclick="sendDecision('${req.id}','allow',false)" ${dis}>✅ Allow this Action</button>
-          <button class="btn-deny"  onclick="sendDecision('${req.id}','deny',false)"  ${dis}>🚫 Block this Action</button>
-          <div class="trust-row${trustEnabled ? ' show' : ''}" id="tr-${req.id}">
-            <button class="btn-trust" onclick="sendTrust('${req.id}','30m')" ${dis}>⏱ Trust 30m</button>
-            <button class="btn-trust" onclick="sendTrust('${req.id}','1h')"  ${dis}>⏱ Trust 1h</button>
+          <div class="pending-card-header">
+            <span style="font-size:14px">${isSlack ? '⚡' : '⚠️'}</span>
+            <span class="pending-agent-badge">${agentLabel}${mcpLabel ? ' → ' + mcpLabel : ''}</span>
+            <span class="card-timer" id="timer-${req.id}">${timerVal}</span>
           </div>
-          <button class="btn-secondary" onclick="sendDecision('${req.id}','allow',true)" ${dis}>Always Allow</button>
-          <button class="btn-secondary" onclick="sendDecision('${req.id}','deny',true)"  ${dis}>Always Deny</button>
-        </div>
-      `;
+          <div class="pending-tool-name">${esc(req.toolName)}</div>
+          <div class="pending-args-preview">${argsPreview}</div>
+          ${slackNote}${insight}
+          <div class="pending-actions">
+            <button class="btn-allow-sm" onclick="sendDecision('${req.id}','allow',false)" ${dis}>✅ Allow</button>
+            <button class="btn-deny-sm"  onclick="sendDecision('${req.id}','deny',false)"  ${dis}>🚫 Block</button>
+          </div>
+          <div class="pending-secondary">
+            <button onclick="sendDecision('${req.id}','allow',true)" ${dis}>Always Allow</button>
+            <button onclick="sendDecision('${req.id}','deny',true)"  ${dis}>Always Deny</button>
+            ${trustEnabled ? `<button onclick="sendTrust('${req.id}','30m')" ${dis}>⏱ 30m</button><button onclick="sendTrust('${req.id}','1h')" ${dis}>⏱ 1h</button>` : ''}
+          </div>
+          <button class="pending-detail-toggle" onclick="togglePendingDetail(this)">▼ Details</button>
+          <div class="pending-detail" style="display:none">${renderPayload(req)}</div>
+        `;
         list.appendChild(card);
         if (!isSlack) updateDenyButton(req.id, req.timestamp || Date.now());
         if (!isSlack) {
@@ -1997,6 +2174,7 @@
         });
       }
       connect();
+      loadDashboardData();
 
       const FR_ICONS = {
         bash: '💻',
@@ -2276,21 +2454,19 @@
         .catch(() => {});
 
       // ── Dashboard Logic ───────────────────────────────────────────────────
-      function showTab(tabId) {
-        document.querySelectorAll('.nav-tab').forEach((t) => t.classList.remove('active'));
-        document.querySelectorAll('.tab-content').forEach((c) => c.classList.remove('active'));
 
-        event.target.classList.add('active');
-        document.getElementById('tab-' + tabId).classList.add('active');
+      let _dashboardPeriod = 'today';
 
-        if (tabId === 'dashboard') {
-          loadDashboardData();
-        }
+      function setDashboardPeriod(period, btn) {
+        _dashboardPeriod = period;
+        document.querySelectorAll('.period-btn').forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+        loadDashboardData();
       }
 
       async function loadDashboardData() {
         try {
-          const res = await fetch('/report?period=7d', {
+          const res = await fetch('/report?period=' + _dashboardPeriod, {
             headers: { 'X-Node9-Token': CSRF_TOKEN },
           });
           const data = await res.json();
@@ -2303,7 +2479,38 @@
           document.getElementById('stat-dlp').textContent = data.summary.dlp.toLocaleString();
           document.getElementById('stat-loops').textContent = data.summary.loops.toLocaleString();
 
+          // Render By Agent
+          const agentList = document.getElementById('by-agent-list');
+          if (data.byAgent && data.byAgent.length > 0) {
+            const maxVal = Math.max(...data.byAgent.map((a) => a.total), 1);
+            agentList.innerHTML = data.byAgent
+              .map((a) => {
+                const width = (a.total / maxVal) * 100;
+                const blockedBadge = a.blocked
+                  ? ` <span style="color:var(--danger);font-size:11px">🚫${a.blocked}</span>`
+                  : '';
+                const dlpBadge = a.dlp
+                  ? ` <span style="color:var(--warning);font-size:11px">🔑${a.dlp}</span>`
+                  : '';
+                return `
+                <div class="tool-row">
+                  <div class="tool-name">${esc(a.agent)}</div>
+                  <div class="tool-bar-bg">
+                    <div class="tool-bar-fill" style="width:${width}%"></div>
+                  </div>
+                  <div class="tool-count">${a.total}${blockedBadge}${dlpBadge}</div>
+                </div>`;
+              })
+              .join('');
+          }
+
           // Render Chart
+          const chartTitle = document.getElementById('daily-chart-title');
+          if (chartTitle)
+            chartTitle.textContent =
+              _dashboardPeriod === 'today'
+                ? 'Daily Activity (Today)'
+                : 'Daily Activity (Last 7 Days)';
           const chart = document.getElementById('daily-chart');
           if (data.daily.length > 0) {
             const maxCalls = Math.max(...data.daily.map((d) => d.calls), 1);
@@ -2360,8 +2567,9 @@
           _scanData = data;
           const sources = data.sources || [];
           const total =
-            sources.reduce((n, s) => n + s.findings.length, 0) +
-            sources.reduce((n, s) => n + s.leaks.length, 0);
+            sources.reduce((n, s) => n + (s.findings || []).length, 0) +
+            sources.reduce((n, s) => n + (s.leaks || []).length, 0) +
+            sources.reduce((n, s) => n + (s.loops || []).length, 0);
           if (total > 0) {
             const btn = document.getElementById('btn-scan-history');
             if (btn && !btn.querySelector('.scan-badge')) {
@@ -2467,9 +2675,10 @@
         }
         const s = data.summary || {};
         const sources = data.sources || [];
-        const totalLeaks = sources.reduce((n, src) => n + src.leaks.length, 0);
-        const totalRisks = sources.reduce((n, src) => n + src.findings.length, 0);
-        const totalFindings = totalLeaks + totalRisks;
+        const totalLeaks = sources.reduce((n, src) => n + (src.leaks || []).length, 0);
+        const totalRisks = sources.reduce((n, src) => n + (src.findings || []).length, 0);
+        const totalLoops = sources.reduce((n, src) => n + (src.loops || []).length, 0);
+        const totalFindings = totalLeaks + totalRisks + totalLoops;
 
         const statColor = (n, warn, bad) => (n >= bad ? 'danger' : n >= warn ? 'warning' : 'ok');
 
@@ -2479,16 +2688,16 @@
             <div class="scan-stat-label">Sessions</div>
           </div>
           <div class="scan-stat">
-            <div class="scan-stat-val ${statColor(totalFindings, 1, 5)}">${totalFindings}</div>
-            <div class="scan-stat-label">Total Findings</div>
+            <div class="scan-stat-val ${statColor(totalRisks, 1, 3)}">${totalRisks}</div>
+            <div class="scan-stat-label">Policy Risks</div>
           </div>
           <div class="scan-stat">
             <div class="scan-stat-val ${totalLeaks ? 'danger' : 'ok'}">${totalLeaks}</div>
             <div class="scan-stat-label">Secret Leaks</div>
           </div>
           <div class="scan-stat">
-            <div class="scan-stat-val ${statColor(totalRisks, 1, 3)}">${totalRisks}</div>
-            <div class="scan-stat-label">Policy Risks</div>
+            <div class="scan-stat-val ${totalLoops ? 'warning' : 'ok'}">${totalLoops}</div>
+            <div class="scan-stat-label">Loops Found</div>
           </div>
         </div>`;
 
@@ -2568,18 +2777,53 @@
             .join('');
         }
 
+        function loopRows(loops, maxBar) {
+          return loops
+            .map((item) => {
+              const date = new Date(item.timestamp).toLocaleDateString([], {
+                month: 'short',
+                day: 'numeric',
+              });
+              const barPct = Math.round((item.count / maxBar) * 100);
+              const detailId = 'detail-' + Math.random().toString(36).slice(2);
+              return `<div class="scan-rule-row" onclick="
+                var d=document.getElementById('${detailId}');
+                var a=this.querySelector('.scan-rule-arrow');
+                d.style.display=d.style.display===''?'none':'';
+                a.textContent=d.style.display===''?'▲':'▼';
+              ">
+                <span class="scan-verdict-badge badge-review">LOOP</span>
+                <span class="scan-rule-name">${esc(item.toolName)}</span>
+                <span class="scan-rule-bar-wrap">
+                  <span class="scan-rule-bar" style="width:${barPct}%;background:var(--warning)"></span>
+                </span>
+                <span class="scan-rule-count">×${item.count}</span>
+                <span class="scan-rule-arrow">▼</span>
+              </div>
+              <div id="${detailId}" style="display:none" class="scan-rule-detail">
+                <div class="scan-finding-row">
+                  <span class="scan-finding-ts">${date}</span>
+                  <span class="scan-finding-cmd">${esc(item.commandPreview)}</span>
+                </div>
+              </div>`;
+            })
+            .join('');
+        }
+
         let groups = '';
         for (const src of sources) {
           const srcLeaks = src.leaks || [];
           const srcFindings = src.findings || [];
-          if (!srcLeaks.length && !srcFindings.length) continue;
-          const srcTotal = srcLeaks.length + srcFindings.length;
+          const srcLoops = src.loops || [];
+          if (!srcLeaks.length && !srcFindings.length && !srcLoops.length) continue;
+          const srcTotal = srcLeaks.length + srcFindings.length + srcLoops.length;
 
           const groupedLeaks = groupByRule(srcLeaks, 'leak');
           const groupedFindings = groupByRule(srcFindings, 'risk');
           const maxBar = Math.max(
             ...groupedLeaks.map(([, v]) => v.length),
             ...groupedFindings.map(([, v]) => v.length),
+            ...srcLoops.map((l) => l.count),
             1
           );
 
@@ -2588,6 +2832,8 @@
             rows += `<div class="scan-rule-section-label" style="color:#e5534b">🔑 Credential Leaks</div>${ruleRows(groupedLeaks, 'leak', maxBar)}`;
           if (groupedFindings.length)
             rows += `<div class="scan-rule-section-label">🚨 Policy Risks</div>${ruleRows(groupedFindings, 'risk', maxBar)}`;
+          if (srcLoops.length)
+            rows += `<div class="scan-rule-section-label" style="color:var(--warning)">🔁 Agent Loops</div>${loopRows(srcLoops, maxBar)}`;
 
           groups += `<div class="scan-group">
             <div class="scan-group-header" onclick="var b=this.nextElementSibling;b.style.display=b.style.display==='none'?'':'none'">
