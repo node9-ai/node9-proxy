@@ -1637,7 +1637,9 @@ export function registerScanCommand(program: Command): void {
         if (!daemonReady) {
           daemonReady = await autoStartDaemonAndWait(false); // start without pre-opening browser
         }
-        if (daemonReady) {
+        // Re-verify daemon is still running (PID + port) before posting sensitive data.
+        // Collapses the TOCTOU window between readiness poll and POST.
+        if (daemonReady && isDaemonRunning()) {
           const internalToken = getInternalToken();
           if (internalToken) {
             try {
