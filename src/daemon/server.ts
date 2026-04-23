@@ -1150,6 +1150,11 @@ export function startDaemon(): void {
           return;
         }
         approveServer(serverKey, disabledTools);
+        appendAuditLog({
+          toolName: `mcp-server:${serverKey}`,
+          args: { disabledTools },
+          decision: 'allow',
+        });
         broadcast('mcp-tools-updated', { serverKey, disabledTools });
         res.writeHead(200).end();
         return;
@@ -1171,6 +1176,11 @@ export function startDaemon(): void {
 
         const status = updateServerDiscovery(serverKey, tools);
         if (status === 'new' || status === 'drift') {
+          appendAuditLog({
+            toolName: `mcp-server:${serverKey}`,
+            args: { toolCount: tools.length, status },
+            decision: 'mcp-discovered',
+          });
           // Trigger interactive approval flow
           const id = randomUUID();
           const entry: PendingEntry = {
@@ -1247,6 +1257,11 @@ export function startDaemon(): void {
 
         clearTimeout(entry.timer);
         approveServer(serverKey, disabledTools);
+        appendAuditLog({
+          toolName: `mcp-server:${serverKey}`,
+          args: { disabledTools },
+          decision: 'allow',
+        });
         pending.delete(id);
         broadcast('remove', { id, decision: 'allow' });
         res.writeHead(200).end();
