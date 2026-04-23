@@ -21,7 +21,8 @@ export async function autoStartDaemonAndWait(openBrowser = true): Promise<boolea
       stdio: 'ignore',
       // NODE9_BROWSER_OPENED=1 tells the daemon we will open the browser ourselves
       // (openBrowserLocal below), so it must not open a duplicate tab on first approval.
-      env: { ...process.env, NODE9_AUTO_STARTED: '1', NODE9_BROWSER_OPENED: '1' },
+      // Only set this flag when we actually intend to open the browser here.
+      env: { ...process.env, NODE9_AUTO_STARTED: '1', ...(openBrowser && { NODE9_BROWSER_OPENED: '1' }) },
     });
     child.unref();
     for (let i = 0; i < 20; i++) {
@@ -31,7 +32,7 @@ export async function autoStartDaemonAndWait(openBrowser = true): Promise<boolea
       // the process is alive. isDaemonRunning() only checks the PID file, which
       // could be stale (OS PID reuse) or written before the socket is fully ready.
       try {
-        const res = await fetch('http://127.0.0.1:7391/settings', {
+        const res = await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/settings`, {
           signal: AbortSignal.timeout(500),
         });
         if (res.ok) {
