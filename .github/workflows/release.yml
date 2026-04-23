@@ -47,6 +47,14 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           VERSION=$(node -p "require('./package.json').version")
+          # Skip wrapper publish when this version is already on npm.
+          # Happens when the triggering release was docs-only / refactor and
+          # semantic-release didn't bump @node9/proxy — in that case the
+          # wrapper version is already at $VERSION and we'd hit a 403.
+          if npm view "node9-ai@$VERSION" version >/dev/null 2>&1; then
+            echo "node9-ai@$VERSION already on npm — no proxy version bump this cycle, skipping wrapper publish"
+            exit 0
+          fi
           git clone https://x-access-token:${GITHUB_TOKEN}@github.com/node9-ai/node9-wrapper.git /tmp/node9-wrapper
           # Copy README — stay in $GITHUB_WORKSPACE so setup-node npm auth applies
           cp README.md /tmp/node9-wrapper/README.md
