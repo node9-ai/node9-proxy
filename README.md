@@ -18,7 +18,7 @@ Node9 sits between your AI agent and your system. Every shell command, file writ
 
 - 🛑 **Block** dangerous actions (`git push --force`, `rm -rf /`, `curl|bash`, `DROP TABLE`, ...) before they run
 - 👁 **Review** anything worth a human glance — OS-native popup, Slack, or browser approval
-- 🔑 **Catch credential leaks** in tool arguments and AI response text
+- 🔑 **Catch credential leaks** in tool arguments and Claude response text
 - 🔁 **Stop agent loops** that burn tokens and money
 - 🔌 **Gate MCP tools** and detect rug-pull attacks on server definitions
 - 📊 **Dashboard + scan report** in your browser — see what your agents actually did
@@ -58,7 +58,11 @@ Reads your existing Claude / Gemini / Codex session history, runs the full Node9
   🌐  View in browser:  http://127.0.0.1:7391/
 ```
 
-The last line opens a live dashboard in your browser with collapsible drill-downs, per-agent breakdown, and credential-leak samples.
+The last line opens a live dashboard in your browser with collapsible drill-downs, per-agent breakdown, and credential-leak samples:
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/825f99d8-b487-4746-9cef-a02a9ca76c1f" width="90%" alt="Node9 browser History Audit dashboard" />
+</p>
 
 ---
 
@@ -110,7 +114,7 @@ node9 shield list    # show all shields + status
 - **SQL** — blocks `DELETE` / `UPDATE` without `WHERE`, `DROP TABLE`, `TRUNCATE`
 - **Shell** — blocks `curl | bash`, unauthorized `sudo`
 - **DLP** — blocks AWS keys, GitHub tokens, Stripe keys, PEM private keys in any tool argument
-- **Response DLP** — scans AI response text for secrets Claude might have _written_ (not just executed) and alerts you
+- **Response DLP** — background scanner reads Claude's conversation history and alerts you if Claude _wrote_ a secret in its response text (not just executed one). Gemini / Codex coverage coming.
 - **Auto-undo** — git snapshot before every AI file edit → `node9 undo` to revert
 - **Skills pinning** — SHA-256 verification of installed Claude skills / plugins between sessions
 
@@ -173,7 +177,7 @@ Every tool call is recorded — command, arguments, decision, cost. See what you
 | `node9 tail`     | Live stream of every tool call                           | Watching an agent work in real time       |
 | `node9 report`   | Per-period summary: allowed/blocked/DLP/cost + top tools | Reviewing what happened after a session   |
 | `node9 sessions` | Session history with prompt, tool trace, cost, snapshot  | Reviewing a handoff or past work          |
-| `node9 dlp`      | Credential-leak findings in AI response text             | Any time a DLP desktop alert fires        |
+| `node9 dlp`      | Credential-leak findings in Claude response text         | Any time a DLP desktop alert fires        |
 
 Plus a **live HUD** in your Claude Code statusline:
 
@@ -217,7 +221,7 @@ def run_command(cmd: str) -> str:
     ...
 ```
 
-**[Python SDK →](https://github.com/node9-ai/node9-python)** · **[Governed agent examples →](https://github.com/node9-ai/governed-agent)**
+**[Python SDK →](https://github.com/node9-ai/node9-python)** · **[CI code review agent example →](https://github.com/node9-ai/node9-pr-agent)**
 
 ---
 
@@ -240,8 +244,7 @@ Everything else — config reference, smart rules, stateful rules, trusted hosts
 ## Related projects
 
 - **[node9-python](https://github.com/node9-ai/node9-python)** — Python SDK for governed agents
-- **[governed-agent](https://github.com/node9-ai/governed-agent)** — Reference implementations (CI code review fixer)
-- **[node9-pr-agent](https://github.com/node9-ai/node9-pr-agent)** — GitHub Action that reviews PRs through Node9
+- **[node9-pr-agent](https://github.com/node9-ai/node9-pr-agent)** — GitHub Action that reviews PRs through Node9 (reference implementation of a governed agent)
 
 ---
 
