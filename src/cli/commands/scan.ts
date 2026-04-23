@@ -24,7 +24,7 @@ import {
 import { scanArgs } from '../../dlp';
 import type { SmartRule } from '../../core';
 import { isDaemonRunning, getInternalToken, DAEMON_PORT, DAEMON_HOST } from '../../auth/daemon';
-import { openBrowserLocal, autoStartDaemonAndWait } from '../daemon-starter';
+import { openBrowserLocal, isTestingMode } from '../daemon-starter';
 import { buildScanSummary, type FindingRef, type RuleGroup } from '../../scan-summary';
 
 // ---------------------------------------------------------------------------
@@ -1631,40 +1631,35 @@ export function registerScanCommand(program: Command): void {
       }
       console.log('');
 
-      // Push results to daemon and open browser — auto-start daemon if not already running
-      if (process.env.NODE9_TESTING !== '1') {
-        let daemonReady = isDaemonRunning();
-        if (!daemonReady) {
-          daemonReady = await autoStartDaemonAndWait(false); // start without pre-opening browser
-        }
-        // Re-verify daemon is still running (PID + port) before posting sensitive data.
-        // Collapses the TOCTOU window between readiness poll and POST.
-        if (daemonReady && isDaemonRunning()) {
-          const internalToken = getInternalToken();
-          if (internalToken) {
-            try {
-              const summary = buildScanSummary([
-                { id: 'claude', label: 'Claude', icon: '🤖', scan: claudeScan },
-                { id: 'gemini', label: 'Gemini', icon: '♊', scan: geminiScan },
-                { id: 'codex', label: 'Codex', icon: '🔮', scan: codexScan },
-              ]);
-              const payload = { status: 'complete', summary };
+      // Push results to an already-running daemon and open the browser.
+      // We do not auto-start the daemon here: scan results may contain sensitive
+      // DLP findings and should only be posted over the loopback channel when the
+      // user has already opted in to running the daemon.
+      if (!isTestingMode() && isDaemonRunning()) {
+        const internalToken = getInternalToken();
+        if (internalToken) {
+          try {
+            const summary = buildScanSummary([
+              { id: 'claude', label: 'Claude', icon: '🤖', scan: claudeScan },
+              { id: 'gemini', label: 'Gemini', icon: '♊', scan: geminiScan },
+              { id: 'codex', label: 'Codex', icon: '🔮', scan: codexScan },
+            ]);
+            const payload = { status: 'complete', summary };
 
-              await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/scan/push`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-node9-internal': internalToken },
-                body: JSON.stringify(payload),
-                signal: AbortSignal.timeout(3000),
-              });
+            await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/scan/push`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'x-node9-internal': internalToken },
+              body: JSON.stringify(payload),
+              signal: AbortSignal.timeout(3000),
+            });
 
-              const url = `http://${DAEMON_HOST}:${DAEMON_PORT}/`;
-              console.log('  ' + chalk.cyan('🌐 View in browser:') + '  ' + chalk.underline(url));
-              console.log('');
+            const url = `http://${DAEMON_HOST}:${DAEMON_PORT}/`;
+            console.log('  ' + chalk.cyan('🌐 View in browser:') + '  ' + chalk.underline(url));
+            console.log('');
 
-              openBrowserLocal();
-            } catch {
-              // fire-and-forget — scan already printed, don't fail if daemon is unreachable
-            }
+            openBrowserLocal();
+          } catch {
+            // fire-and-forget — scan already printed, don't fail if daemon is unreachable
           }
         }
       }
