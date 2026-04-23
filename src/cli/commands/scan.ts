@@ -25,6 +25,7 @@ import { scanArgs } from '../../dlp';
 import type { SmartRule } from '../../core';
 import { isDaemonRunning, getInternalToken, DAEMON_PORT, DAEMON_HOST } from '../../auth/daemon';
 import { openBrowserLocal } from '../daemon-starter';
+import { buildScanSummary, type FindingRef, type RuleGroup } from '../../scan-summary';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -194,11 +195,6 @@ function preview(input: Record<string, unknown>, max: number): string {
   const cmd = input.command ?? input.query ?? input.file_path ?? JSON.stringify(input);
   const s = String(cmd).replace(/\s+/g, ' ').trim();
   return s.length > max ? s.slice(0, max - 1) + '…' : s;
-}
-
-function fullCommand(input: Record<string, unknown>): string {
-  const cmd = input.command ?? input.query ?? input.file_path ?? JSON.stringify(input);
-  return String(cmd).replace(/\s+/g, ' ').trim();
 }
 
 // ---------------------------------------------------------------------------
@@ -1215,7 +1211,7 @@ function verdictIcon(verdict: string): string {
 }
 
 function printFindingRow(
-  f: Finding,
+  f: FindingRef,
   drillDown: boolean,
   showSessionId: boolean,
   previewWidth: number
@@ -1228,41 +1224,46 @@ function printFindingRow(
       : f.agent === 'codex'
         ? chalk.magenta('[Codex]   ')
         : chalk.cyan('[Claude]  ');
-  const cmd = drillDown
-    ? chalk.gray(fullCommand(f.input))
-    : chalk.gray(preview(f.input, previewWidth));
+  // FindingRef.command is already the preview; fullCommand is the untruncated form.
+  let cmdText: string;
+  if (drillDown) {
+    cmdText = f.fullCommand;
+  } else {
+    cmdText = f.command;
+    if (cmdText.length > previewWidth) cmdText = cmdText.slice(0, previewWidth - 1) + '…';
+  }
+  const cmd = chalk.gray(cmdText);
   const sessionSuffix =
     showSessionId && f.sessionId ? chalk.dim(`  → ${f.sessionId.slice(0, 8)}`) : '';
   console.log(`      ${ts}${proj}${agentBadge}${cmd}${sessionSuffix}`);
 }
 
 function printRuleGroup(
-  ruleFindings: Finding[],
+  rule: RuleGroup,
   topN: number,
   drillDown: boolean,
   previewWidth: number
 ): void {
-  const rule = ruleFindings[0].source.rule;
-  const ruleCount = ruleFindings.length;
+  const findings = rule.findings;
+  const ruleCount = findings.length;
   const countBadge = ruleCount > 1 ? chalk.white(` ×${ruleCount}`) : '';
-  const shortName = (rule.name ?? 'unnamed').replace(/^shield:[^:]+:/, '');
-  const icon = verdictIcon(rule.verdict ?? 'review');
+  const icon = verdictIcon(rule.verdict);
   console.log(
     '    ' +
       icon +
       '  ' +
-      chalk.white(shortName) +
+      chalk.white(rule.name) +
       countBadge +
       (rule.reason ? chalk.dim(`  — ${rule.reason}`) : '')
   );
 
-  const shown = drillDown ? ruleFindings : ruleFindings.slice(0, topN);
+  const shown = drillDown ? findings : findings.slice(0, topN);
   for (const f of shown) {
     printFindingRow(f, drillDown, drillDown, previewWidth);
   }
-  if (!drillDown && ruleFindings.length > topN) {
+  if (!drillDown && findings.length > topN) {
     console.log(
-      chalk.dim(`      … and ${ruleFindings.length - topN} more  (--drill-down for full list)`)
+      chalk.dim(`      … and ${findings.length - topN} more  (--drill-down for full list)`)
     );
   }
 }
@@ -1325,6 +1326,11 @@ export function registerScanCommand(program: Command): void {
         onProgress(claudeScan.filesScanned + geminiScan.filesScanned + done)
       );
       const scan = mergeScans(mergeScans(claudeScan, geminiScan), codexScan);
+      const summary = buildScanSummary([
+        { id: 'claude', label: 'Claude', icon: '🤖', scan: claudeScan },
+        { id: 'gemini', label: 'Gemini', icon: '♊', scan: geminiScan },
+        { id: 'codex', label: 'Codex', icon: '🔮', scan: codexScan },
+      ]);
       process.stdout.write('\r' + ' '.repeat(60) + '\r');
 
       if (scan.filesScanned === 0) {
@@ -1435,66 +1441,13 @@ export function registerScanCommand(program: Command): void {
         }
         console.log('');
 
-        // ── Separate findings by section ───────────────────────────────────
-        const sections: Array<{
-          label: string;
-          subtitle: string;
-          shieldKey?: string;
-          findings: Finding[];
-        }> = [];
-
-        // Default rules section
-        const defaultFindings = scan.findings.filter((f) => f.source.sourceType === 'default');
-        if (defaultFindings.length > 0) {
-          sections.push({
-            label: 'Default Rules',
-            subtitle: 'built-in, always on',
-            findings: defaultFindings,
-          });
-        }
-
-        // Shield sections — full section for shields with findings, one summary line if none
-        const byShield = new Map<string, Finding[]>();
-        for (const f of scan.findings.filter((f) => f.source.sourceType === 'shield')) {
-          const arr = byShield.get(f.source.shieldName) ?? [];
-          arr.push(f);
-          byShield.set(f.source.shieldName, arr);
-        }
-        const shieldsWithFindings = [...byShield.entries()].sort(
-          (a, b) => b[1].length - a[1].length
-        );
-        for (const [shieldName, findings] of shieldsWithFindings) {
-          const description = SHIELDS[shieldName]?.description ?? '';
-          sections.push({
-            label: shieldName,
-            subtitle: description,
-            shieldKey: shieldName,
-            findings,
-          });
-        }
-
-        // User rules section
-        const userFindings = scan.findings.filter(
-          (f) => f.source.sourceType === 'user' || f.source.shieldName === 'cloud'
-        );
-        if (userFindings.length > 0) {
-          sections.push({
-            label: 'Your Rules',
-            subtitle: 'added in node9.config.json',
-            findings: userFindings,
-          });
-        }
-
-        // ── Print each section ─────────────────────────────────────────────
-        for (const section of sections) {
-          const sectionBlocked = section.findings.filter(
-            (f) => f.source.rule.verdict === 'block'
-          ).length;
-          const sectionReview = section.findings.length - sectionBlocked;
-
+        // ── Print each section (pre-grouped by source via buildScanSummary) ─
+        for (const section of summary.sections) {
           const countParts: string[] = [];
-          if (sectionBlocked > 0) countParts.push(chalk.red(`${sectionBlocked} blocked`));
-          if (sectionReview > 0) countParts.push(chalk.yellow(`${sectionReview} review`));
+          if (section.blockedCount > 0)
+            countParts.push(chalk.red(`${section.blockedCount} blocked`));
+          if (section.reviewCount > 0)
+            countParts.push(chalk.yellow(`${section.reviewCount} review`));
           const countStr = countParts.join(chalk.dim(' · '));
 
           const enableHint = section.shieldKey
@@ -1511,32 +1464,20 @@ export function registerScanCommand(program: Command): void {
               enableHint
           );
 
-          // Group by rule, blocks first then reviews
-          const byRule = new Map<string, Finding[]>();
-          for (const f of section.findings) {
-            const ruleKey = f.source.rule.name ?? 'unnamed';
-            const arr = byRule.get(ruleKey) ?? [];
-            arr.push(f);
-            byRule.set(ruleKey, arr);
-          }
-
-          // Sort: block rules first, then by count desc
-          const sortedRules = [...byRule.entries()].sort((a, b) => {
-            const aBlock = a[1][0].source.rule.verdict === 'block' ? 1 : 0;
-            const bBlock = b[1][0].source.rule.verdict === 'block' ? 1 : 0;
-            if (bBlock !== aBlock) return bBlock - aBlock;
-            return b[1].length - a[1].length;
-          });
-
-          for (const [, ruleFindings] of sortedRules) {
-            printRuleGroup(ruleFindings, topN, drillDown, previewWidth);
+          for (const rule of section.rules) {
+            printRuleGroup(rule, topN, drillDown, previewWidth);
           }
           console.log('');
         }
 
         // ── Shields with no findings — compact summary line ───────────────
+        const activeShieldIds = new Set(
+          summary.sections
+            .filter((s) => s.sourceType === 'shield' && s.shieldKey)
+            .map((s) => s.shieldKey!)
+        );
         const emptyShields = Object.keys(SHIELDS)
-          .filter((n) => !byShield.has(n))
+          .filter((n) => !activeShieldIds.has(n))
           .sort();
         if (emptyShields.length > 0) {
           console.log('  ' + chalk.dim('─'.repeat(70)));
@@ -1695,82 +1636,12 @@ export function registerScanCommand(program: Command): void {
         const internalToken = getInternalToken();
         if (internalToken) {
           try {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const mapFindings = (arr: any[], src: string) =>
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              arr.map((f: any) => ({
-                timestamp: f.timestamp || new Date().toISOString(),
-                rule: f.source?.rule?.name ?? f.source?.shieldLabel ?? 'unnamed',
-                command:
-                  f.input?.command ?? f.input?.cmd ?? f.input?.file_path ?? f.toolName ?? 'unknown',
-                verdict: f.source?.rule?.verdict ?? f.source?.rule?.action ?? 'review',
-                ruleSource: f.source?.sourceType ?? 'default',
-                source: src,
-              }));
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const mapLeaks = (arr: any[], src: string) =>
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              arr.map((f: any) => ({
-                timestamp: f.timestamp || new Date().toISOString(),
-                pattern: f.patternName || 'DLP',
-                sample: f.redactedSample || '********',
-                source: src,
-              }));
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const mapLoops = (arr: any[], src: string) =>
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              arr.map((f: any) => ({
-                timestamp: f.timestamp || new Date().toISOString(),
-                toolName: f.toolName || 'unknown',
-                commandPreview: f.commandPreview || '',
-                count: f.count || 0,
-                source: src,
-              }));
-
-            const sources = [
-              {
-                id: 'claude',
-                label: 'Claude',
-                icon: '🤖',
-                sessions: claudeScan.sessions,
-                findings: mapFindings(claudeScan.findings, 'claude'),
-                leaks: mapLeaks(claudeScan.dlpFindings, 'claude'),
-                loops: mapLoops(claudeScan.loopFindings, 'claude'),
-              },
-              {
-                id: 'gemini',
-                label: 'Gemini',
-                icon: '♊',
-                sessions: geminiScan.sessions,
-                findings: mapFindings(geminiScan.findings, 'gemini'),
-                leaks: mapLeaks(geminiScan.dlpFindings, 'gemini'),
-                loops: mapLoops(geminiScan.loopFindings, 'gemini'),
-              },
-              {
-                id: 'codex',
-                label: 'Codex',
-                icon: '🔮',
-                sessions: codexScan.sessions,
-                findings: mapFindings(codexScan.findings, 'codex'),
-                leaks: mapLeaks(codexScan.dlpFindings, 'codex'),
-                loops: mapLoops(codexScan.loopFindings, 'codex'),
-              },
-            ].filter(
-              (s) =>
-                s.sessions > 0 || s.findings.length > 0 || s.leaks.length > 0 || s.loops.length > 0
-            );
-
-            const payload = {
-              status: 'complete',
-              summary: {
-                sessions: scan.sessions,
-                findings: scan.findings.length,
-                dlp: scan.dlpFindings.length,
-                loops: scan.loopFindings.length,
-                totalCostUSD: scan.totalCostUSD,
-              },
-              sources,
-            };
+            const summary = buildScanSummary([
+              { id: 'claude', label: 'Claude', icon: '🤖', scan: claudeScan },
+              { id: 'gemini', label: 'Gemini', icon: '♊', scan: geminiScan },
+              { id: 'codex', label: 'Codex', icon: '🔮', scan: codexScan },
+            ]);
+            const payload = { status: 'complete', summary };
 
             await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/scan/push`, {
               method: 'POST',
