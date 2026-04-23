@@ -25,7 +25,7 @@ Node9 sits between your AI agent and your system. Every shell command, file writ
 
 ---
 
-## Try it in 10 seconds — no install, no account
+## Try it in 10 seconds — no install
 
 ```bash
 npx node9-ai scan
