@@ -13,7 +13,7 @@ export function openBrowserLocal() {
   } catch {}
 }
 
-export async function autoStartDaemonAndWait(): Promise<boolean> {
+export async function autoStartDaemonAndWait(openBrowser = true): Promise<boolean> {
   if (process.env.NODE9_TESTING === '1') return false;
   try {
     const child = spawn(process.execPath, [process.argv[1], 'daemon'], {
@@ -35,12 +35,14 @@ export async function autoStartDaemonAndWait(): Promise<boolean> {
           signal: AbortSignal.timeout(500),
         });
         if (res.ok) {
-          // Open the browser NOW — before the approval request is registered —
-          // so the browser has time to connect SSE. If we wait until POST /check,
-          // broadcast('add') fires with sseClients.size === 0 and the request
-          // depends on the async openBrowser() inside the daemon, which can lose
-          // the race with the browser's own page-load timing.
-          openBrowserLocal();
+          if (openBrowser) {
+            // Open the browser NOW — before the approval request is registered —
+            // so the browser has time to connect SSE. If we wait until POST /check,
+            // broadcast('add') fires with sseClients.size === 0 and the request
+            // depends on the async openBrowser() inside the daemon, which can lose
+            // the race with the browser's own page-load timing.
+            openBrowserLocal();
+          }
           return true;
         }
       } catch {
