@@ -11,7 +11,13 @@ import chalk from 'chalk';
 import { authorizeHeadless, getGlobalSettings, getConfig, _resetConfigCache } from '../core';
 import { SHIELDS, readActiveShields, writeActiveShields } from '../shields';
 import { UI_HTML_TEMPLATE } from './ui';
-import { scanClaudeHistory, scanGeminiHistory, scanCodexHistory } from '../cli/commands/scan';
+import {
+  scanClaudeHistory,
+  scanGeminiHistory,
+  scanCodexHistory,
+  type ScanResult,
+} from '../cli/commands/scan';
+import { buildScanSummary } from '../scan-summary';
 import {
   DAEMON_PORT,
   DAEMON_HOST,
@@ -886,12 +892,21 @@ export function startDaemon(): void {
         d.setDate(d.getDate() - 90);
         d.setHours(0, 0, 0, 0);
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        let claude: any = { sessions: 0, findings: [], dlpFindings: [], loopFindings: [] };
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        let gemini: any = { sessions: 0, findings: [], dlpFindings: [], loopFindings: [] };
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        let codex: any = { sessions: 0, findings: [], dlpFindings: [], loopFindings: [] };
+        const EMPTY_SCAN: ScanResult = {
+          filesScanned: 0,
+          sessions: 0,
+          totalToolCalls: 0,
+          bashCalls: 0,
+          findings: [],
+          dlpFindings: [],
+          loopFindings: [],
+          totalCostUSD: 0,
+          firstDate: null,
+          lastDate: null,
+        };
+        let claude: ScanResult = EMPTY_SCAN;
+        let gemini: ScanResult = EMPTY_SCAN;
+        let codex: ScanResult = EMPTY_SCAN;
 
         try {
           claude = scanClaudeHistory(d);
@@ -909,96 +924,14 @@ export function startDaemon(): void {
           console.error('Codex scan failed:', e);
         }
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const mapFindings = (arr: any[], src: string) =>
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          arr.map((f: any) => ({
-            timestamp: f.timestamp || new Date().toISOString(),
-            rule: f.source?.rule?.name ?? f.source?.shieldLabel ?? 'unnamed',
-            command:
-              f.input?.command ?? f.input?.cmd ?? f.input?.file_path ?? f.toolName ?? 'unknown',
-            verdict: f.source?.rule?.verdict ?? f.source?.rule?.action ?? 'review',
-            ruleSource: f.source?.sourceType ?? 'default',
-            source: src,
-          }));
-
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const mapLeaks = (arr: any[], src: string) =>
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          arr.map((f: any) => ({
-            timestamp: f.timestamp || new Date().toISOString(),
-            pattern: f.patternName || 'DLP',
-            sample: f.redactedSample || '********',
-            source: src,
-          }));
-
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const mapLoops = (arr: any[], src: string) =>
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          arr.map((f: any) => ({
-            timestamp: f.timestamp || new Date().toISOString(),
-            toolName: f.toolName || 'unknown',
-            commandPreview: f.commandPreview || '',
-            count: f.count || 0,
-            source: src,
-          }));
-
-        const sources = [
-          {
-            id: 'claude',
-            label: 'Claude',
-            icon: '🤖',
-            sessions: claude.sessions,
-            findings: mapFindings(claude.findings, 'claude'),
-            leaks: mapLeaks(claude.dlpFindings, 'claude'),
-            loops: mapLoops(claude.loopFindings, 'claude'),
-          },
-          {
-            id: 'gemini',
-            label: 'Gemini',
-            icon: '♊',
-            sessions: gemini.sessions,
-            findings: mapFindings(gemini.findings, 'gemini'),
-            leaks: mapLeaks(gemini.dlpFindings, 'gemini'),
-            loops: mapLoops(gemini.loopFindings, 'gemini'),
-          },
-          {
-            id: 'codex',
-            label: 'Codex',
-            icon: '🔮',
-            sessions: codex.sessions,
-            findings: mapFindings(codex.findings, 'codex'),
-            leaks: mapLeaks(codex.dlpFindings, 'codex'),
-            loops: mapLoops(codex.loopFindings, 'codex'),
-          },
-        ].filter(
-          (s) => s.sessions > 0 || s.findings.length > 0 || s.leaks.length > 0 || s.loops.length > 0
-        );
-
-        const totalSessions = claude.sessions + gemini.sessions + codex.sessions;
-        const totalFindings =
-          claude.findings.length + gemini.findings.length + codex.findings.length;
-        const totalDlp =
-          claude.dlpFindings.length + gemini.dlpFindings.length + codex.dlpFindings.length;
-        const totalLoops =
-          claude.loopFindings.length + gemini.loopFindings.length + codex.loopFindings.length;
-        const totalCostUSD =
-          (claude.totalCostUSD || 0) + (gemini.totalCostUSD || 0) + (codex.totalCostUSD || 0);
+        const summary = buildScanSummary([
+          { id: 'claude', label: 'Claude', icon: '🤖', scan: claude },
+          { id: 'gemini', label: 'Gemini', icon: '♊', scan: gemini },
+          { id: 'codex', label: 'Codex', icon: '🔮', scan: codex },
+        ]);
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(
-          JSON.stringify({
-            status: 'complete',
-            summary: {
-              sessions: totalSessions,
-              totalCostUSD,
-              findings: totalFindings,
-              dlp: totalDlp,
-              loops: totalLoops,
-            },
-            sources,
-          })
-        );
+        return res.end(JSON.stringify({ status: 'complete', summary }));
       } catch (err) {
         console.error('Scan failed:', err);
         res.writeHead(500, { 'Content-Type': 'application/json' });

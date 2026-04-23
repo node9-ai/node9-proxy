@@ -1424,6 +1424,12 @@
         text-align: center;
       }
       /* results */
+      .scan-date-range {
+        text-align: center;
+        font-size: 11px;
+        color: var(--muted);
+        padding: 6px 0 10px;
+      }
       .scan-summary-row {
         display: grid;
         grid-template-columns: repeat(4, 1fr);
@@ -3316,13 +3322,10 @@
           const res = await fetch('/scan', { headers: { 'X-Node9-Token': CSRF_TOKEN } });
           if (!res.ok) return;
           const data = await res.json();
-          if (data.status !== 'complete') return;
+          if (data.status !== 'complete' || !data.summary) return;
           _scanData = data;
-          const sources = data.sources || [];
-          const total =
-            sources.reduce((n, s) => n + (s.findings || []).length, 0) +
-            sources.reduce((n, s) => n + (s.leaks || []).length, 0) +
-            sources.reduce((n, s) => n + (s.loops || []).length, 0);
+          const v = data.summary.byVerdict || {};
+          const total = (v.blocked || 0) + (v.supervised || 0) + (v.leaks || 0) + (v.loops || 0);
           if (total > 0) {
             const btn = document.getElementById('btn-scan-history');
             if (btn && !btn.querySelector('.scan-badge')) {
@@ -3427,42 +3430,26 @@
       }
 
       function renderScanResults(data) {
-        if (!data || data.status !== 'complete') {
+        if (!data || data.status !== 'complete' || !data.summary) {
           return '<div style="text-align:center;color:var(--muted);padding:32px">No data returned.</div>';
         }
-        const s = data.summary || {};
-        const sources = data.sources || [];
-
-        // Flatten all findings across sources
-        const allFindings = sources.flatMap((src) => src.findings || []);
-        const allLeaks = sources.flatMap((src) => src.leaks || []);
-        const allLoops = sources.flatMap((src) => src.loops || []);
-
-        // Split findings into three distinct buckets
-        const blocked = allFindings.filter((f) => f.verdict === 'block' && f.ruleSource !== 'user');
-        const supervised = allFindings.filter(
-          (f) => f.verdict !== 'block' && f.ruleSource !== 'user'
-        );
-        const yourRules = allFindings.filter((f) => f.ruleSource === 'user');
-
-        // Loop cost estimate: each wasted iteration ~2K tokens at Sonnet pricing
-        const LOOP_THRESHOLD = 3;
-        const COST_PER_ITER = 0.006;
-        const wastedIters = allLoops.reduce(
-          (sum, l) => sum + Math.max(0, (l.count || 0) - LOOP_THRESHOLD),
-          0
-        );
-        const loopWastedUSD = wastedIters * COST_PER_ITER;
-
-        const totalCost = s.totalCostUSD || 0;
+        // Server-computed ScanSummary (see src/scan-summary.ts).
+        // This renderer is a pure presentation layer — no categorization here.
+        const summary = data.summary;
+        const stats = summary.stats || {};
+        const byVerdict = summary.byVerdict || { blocked: 0, supervised: 0, leaks: 0, loops: 0 };
+        const byAgent = summary.byAgent || [];
+        const sections = summary.sections || [];
+        const leaks = summary.leaks || [];
+        const loops = summary.loops || [];
+        const loopWastedUSD = summary.loopWastedUSD || 0;
+        const totalCost = stats.totalCostUSD || 0;
 
         function fmtUSD(n) {
           if (!n || n < 0.001) return null;
           if (n < 1) return '$' + n.toFixed(3);
           return '$' + n.toFixed(2);
         }
-
-        // ── Hero stats row ────────────────────────────────────────────────────
         const costStr = fmtUSD(totalCost);
         const savingsStr = fmtUSD(loopWastedUSD);
 
@@ -3484,10 +3471,46 @@
           );
         }
 
-        const stats =
+        // ── Date range header ────────────────────────────────────────────────
+        function fmtShort(iso) {
+          if (!iso) return null;
+          try {
+            return new Date(iso).toLocaleDateString([], {
+              month: 'short',
+              day: 'numeric',
+              year: 'numeric',
+            });
+          } catch {
+            return null;
+          }
+        }
+        const firstLabel = fmtShort(stats.firstDate);
+        const lastLabel = fmtShort(stats.lastDate);
+        let daySpan = '';
+        if (stats.firstDate && stats.lastDate) {
+          const days =
+            Math.round(
+              (new Date(stats.lastDate).getTime() - new Date(stats.firstDate).getTime()) /
+                (1000 * 60 * 60 * 24)
+            ) + 1;
+          if (days > 1) daySpan = ' · ' + days + ' day' + (days !== 1 ? 's' : '');
+        }
+        const dateRangeHtml =
+          firstLabel && lastLabel
+            ? '<div class="scan-date-range">📅 ' +
+              esc(firstLabel) +
+              ' – ' +
+              esc(lastLabel) +
+              esc(daySpan) +
+              '</div>'
+            : '';
+
+        // ── Hero stats row (by VERDICT — matches terminal) ───────────────────
+        const statsHtml =
+          dateRangeHtml +
           '<div class="scan-summary-row">' +
           '<div class="scan-stat">' +
-          statVal(s.sessions || 0, '') +
+          statVal(stats.sessions || 0, '') +
           '<div class="scan-stat-label">Sessions</div></div>' +
           (totalCost > 0
             ? '<div class="scan-stat">' +
@@ -3495,19 +3518,16 @@
               '<div class="scan-stat-label">AI Spend</div></div>'
             : '') +
           '<div class="scan-stat">' +
-          statVal(blocked.length, blocked.length ? 'danger' : 'ok') +
+          statVal(byVerdict.blocked || 0, byVerdict.blocked ? 'danger' : 'ok') +
           '<div class="scan-stat-label">Blocked</div></div>' +
           '<div class="scan-stat">' +
-          statVal(supervised.length, supervised.length ? 'warning' : 'ok') +
+          statVal(byVerdict.supervised || 0, byVerdict.supervised ? 'warning' : 'ok') +
           '<div class="scan-stat-label">Supervised</div></div>' +
           '<div class="scan-stat">' +
-          statVal(yourRules.length, '', yourRules.length ? 'color:#58a6ff' : '') +
-          '<div class="scan-stat-label">Your Rules</div></div>' +
-          '<div class="scan-stat">' +
-          statVal(allLeaks.length, allLeaks.length ? 'danger' : 'ok') +
+          statVal(byVerdict.leaks || 0, byVerdict.leaks ? 'danger' : 'ok') +
           '<div class="scan-stat-label">Leaks</div></div>' +
           '<div class="scan-stat">' +
-          statVal(allLoops.length, allLoops.length ? 'warning' : 'ok') +
+          statVal(byVerdict.loops || 0, byVerdict.loops ? 'warning' : 'ok') +
           '<div class="scan-stat-label">Loops</div></div>' +
           '</div>' +
           (savingsStr
@@ -3516,56 +3536,103 @@
               '</span> in unnecessary LLM turns</div>'
             : '');
 
-        if (!allFindings.length && !allLeaks.length && !allLoops.length) {
+        const hasNothing = !sections.length && !leaks.length && !loops.length;
+        if (hasNothing) {
           return (
-            stats +
+            statsHtml +
             '<div style="text-align:center;color:#57ab5a;padding:28px 0;font-size:13px;line-height:1.8">✅ <strong>No issues found</strong><br><span style="font-size:11px;color:var(--muted)">Scanned ' +
-            (s.sessions || 0) +
-            ' sessions across ' +
-            sources.length +
-            ' AI source(s)</span></div>'
+            (stats.sessions || 0) +
+            ' sessions</span></div>'
           );
         }
 
-        // ── Helpers ───────────────────────────────────────────────────────────
-        function groupByKey(items, keyFn) {
-          const map = new Map();
-          for (const item of items) {
-            const k = keyFn(item);
-            if (!map.has(k)) map.set(k, []);
-            map.get(k).push(item);
-          }
-          return [...map.entries()].sort((a, b) => b[1].length - a[1].length);
-        }
+        // ── Per-agent breakdown (server-computed byAgent) ────────────────────
+        const agentBreakdown = byAgent.length
+          ? '<div class="scan-agent-group">' +
+            byAgent
+              .map(
+                (a) =>
+                  '<div class="scan-agent-row">' +
+                  '<span class="scan-agent-name">' +
+                  esc(a.icon || '') +
+                  ' ' +
+                  esc(a.label) +
+                  '</span>' +
+                  '<span class="scan-agent-stat">' +
+                  a.sessions +
+                  ' session' +
+                  (a.sessions !== 1 ? 's' : '') +
+                  '</span>' +
+                  '<span class="scan-agent-sep">·</span>' +
+                  '<span class="scan-agent-stat">' +
+                  a.findings +
+                  ' finding' +
+                  (a.findings !== 1 ? 's' : '') +
+                  '</span>' +
+                  '</div>'
+              )
+              .join('') +
+            '</div>'
+          : '';
 
-        function findingRow(item, type) {
-          const date = new Date(item.timestamp).toLocaleDateString([], {
+        // ── Rule row renderer — shared between rule sections + leaks ─────────
+        // Determines bar-max across all sections so relative counts stay honest.
+        let maxBar = 1;
+        for (const section of sections) {
+          for (const rule of section.rules || []) {
+            if (rule.findings.length > maxBar) maxBar = rule.findings.length;
+          }
+        }
+        // Group leaks by patternName for display
+        const leaksByPattern = (function () {
+          const m = new Map();
+          for (const l of leaks) {
+            const k = l.patternName || 'DLP';
+            if (!m.has(k)) m.set(k, []);
+            m.get(k).push(l);
+          }
+          for (const [, group] of m) if (group.length > maxBar) maxBar = group.length;
+          return [...m.entries()].sort((a, b) => b[1].length - a[1].length);
+        })();
+
+        function findingRow(timestamp, text) {
+          const date = new Date(timestamp).toLocaleDateString([], {
             month: 'short',
             day: 'numeric',
           });
-          const cmdText =
-            type === 'leak' ? esc(item.sample || '') : esc(truncate(item.command || '', 120));
           return (
             '<div class="scan-finding-row"><span class="scan-finding-ts">' +
             date +
             '</span><span class="scan-finding-cmd">' +
-            cmdText +
+            text +
             '</span></div>'
           );
         }
 
-        function ruleSection(items, type, badgeClass, badgeLabel, maxBar) {
-          const keyFn =
-            type === 'leak'
-              ? (i) => i.pattern || 'DLP'
-              : (i) => (i.rule || 'unknown').replace(/^shield:[^:]+:/, '');
-          const grouped = groupByKey(items, keyFn);
-          return grouped
-            .map(([rule, group]) => {
-              const count = group.length;
+        function ruleCardsForSection(section) {
+          return (section.rules || [])
+            .map((rule) => {
+              const count = rule.findings.length;
               const barPct = Math.round((count / maxBar) * 100);
               const detailId = 'detail-' + Math.random().toString(36).slice(2);
-              const rows = group.map((i) => findingRow(i, type)).join('');
+              const badgeClass =
+                section.sourceType === 'user'
+                  ? 'badge-user'
+                  : rule.verdict === 'block'
+                    ? 'badge-block'
+                    : 'badge-review';
+              const badgeLabel =
+                section.sourceType === 'user'
+                  ? rule.verdict === 'block'
+                    ? 'YOUR BLOCK'
+                    : 'YOUR RULE'
+                  : rule.verdict === 'block'
+                    ? 'BLOCK'
+                    : 'REVIEW';
+              const barColor = section.sourceType === 'user' ? ';background:#388bfd33' : '';
+              const rows = rule.findings
+                .map((f) => findingRow(f.timestamp, esc(truncate(f.command || '', 120))))
+                .join('');
               return (
                 '<div class="scan-rule-row" onclick="var d=document.getElementById(\'' +
                 detailId +
@@ -3576,12 +3643,12 @@
                 badgeLabel +
                 '</span>' +
                 '<span class="scan-rule-name">' +
-                esc(rule) +
+                esc(rule.name) +
                 '</span>' +
                 '<span class="scan-rule-bar-wrap"><span class="scan-rule-bar" style="width:' +
                 barPct +
                 '%' +
-                (badgeClass === 'badge-user' ? ';background:#388bfd33' : '') +
+                barColor +
                 '"></span></span>' +
                 '<span class="scan-rule-count">' +
                 count +
@@ -3597,98 +3664,95 @@
             .join('');
         }
 
-        // ── Sections ──────────────────────────────────────────────────────────
-        const maxBar = Math.max(
-          ...allFindings.map((f) => 1),
-          ...groupByKey(allFindings, (f) => (f.rule || '').replace(/^shield:[^:]+:/, '')).map(
-            ([, v]) => v.length
-          ),
-          ...groupByKey(allLeaks, (f) => f.pattern || 'DLP').map(([, v]) => v.length),
-          1
-        );
+        // ── Section headings by sourceType / id ──────────────────────────────
+        function sectionHeading(section) {
+          if (section.id === 'default') {
+            return '👁 ' + esc(section.label) + ' — built-in, always on';
+          }
+          if (section.sourceType === 'shield') {
+            return (
+              '🛡 ' +
+              esc(section.label) +
+              ' shield' +
+              (section.subtitle ? ' — ' + esc(section.subtitle) : '')
+            );
+          }
+          if (section.id === 'cloud') {
+            return '☁ Cloud Policy — synced from node9';
+          }
+          return '✅ Your Rules — working as configured';
+        }
+        function sectionColor(section) {
+          if (section.blockedCount > 0) return '#e5534b';
+          if (section.sourceType === 'user') return '#58a6ff';
+          return 'var(--muted)';
+        }
 
-        // Per-agent breakdown — one row per active agent (only shows active ones)
-        const agentBreakdown = (function () {
-          const rows = sources
-            .filter(
-              (src) =>
-                (src.sessions || 0) > 0 ||
-                (src.findings || []).length > 0 ||
-                (src.leaks || []).length > 0 ||
-                (src.loops || []).length > 0
-            )
-            .map((src) => {
-              const f = (src.findings || []).length;
-              const l = (src.leaks || []).length;
-              const lp = (src.loops || []).length;
-              const findingsTotal = f + l + lp;
-              return (
-                '<div class="scan-agent-row">' +
-                '<span class="scan-agent-name">' +
-                esc(src.icon || '') +
-                ' ' +
-                esc(src.label || src.id) +
-                '</span>' +
-                '<span class="scan-agent-stat">' +
-                (src.sessions || 0) +
-                ' session' +
-                ((src.sessions || 0) !== 1 ? 's' : '') +
-                '</span>' +
-                '<span class="scan-agent-sep">·</span>' +
-                '<span class="scan-agent-stat">' +
-                findingsTotal +
-                ' finding' +
-                (findingsTotal !== 1 ? 's' : '') +
-                '</span>' +
-                '</div>'
-              );
-            });
-          if (!rows.length) return '';
-          return '<div class="scan-agent-group">' + rows.join('') + '</div>';
-        })();
+        let html = statsHtml + agentBreakdown;
 
-        let html = stats + agentBreakdown;
-
-        if (allLeaks.length) {
+        // ── Leaks (shown first: credential exposure is highest-severity) ─────
+        if (leaksByPattern.length) {
           html +=
             '<div class="scan-rule-section-label" style="color:#e5534b">🔑 Credential Leaks — secrets found in tool calls</div>';
-          html += ruleSection(allLeaks, 'leak', 'badge-dlp', 'DLP', maxBar);
+          html += leaksByPattern
+            .map(([pattern, group]) => {
+              const count = group.length;
+              const barPct = Math.round((count / maxBar) * 100);
+              const detailId = 'detail-' + Math.random().toString(36).slice(2);
+              const rows = group
+                .map((l) => findingRow(l.timestamp, esc(l.redactedSample || '')))
+                .join('');
+              return (
+                '<div class="scan-rule-row" onclick="var d=document.getElementById(\'' +
+                detailId +
+                "');var a=this.querySelector('.scan-rule-arrow');d.style.display=d.style.display===''?'none':'';a.textContent=d.style.display===''?'▲':'▼';\">" +
+                '<span class="scan-verdict-badge badge-dlp">DLP</span>' +
+                '<span class="scan-rule-name">' +
+                esc(pattern) +
+                '</span>' +
+                '<span class="scan-rule-bar-wrap"><span class="scan-rule-bar" style="width:' +
+                barPct +
+                '%"></span></span>' +
+                '<span class="scan-rule-count">' +
+                count +
+                '</span>' +
+                '<span class="scan-rule-arrow">▼</span>' +
+                '</div><div id="' +
+                detailId +
+                '" style="display:none" class="scan-rule-detail">' +
+                rows +
+                '</div>'
+              );
+            })
+            .join('');
         }
 
-        if (blocked.length) {
+        // ── Sections (pre-grouped by source on the server) ───────────────────
+        for (const section of sections) {
           html +=
-            '<div class="scan-rule-section-label" style="color:#e5534b">🛑 Blocked — Node9 would have stopped these</div>';
-          html += ruleSection(blocked, 'risk', 'badge-block', 'BLOCK', maxBar);
+            '<div class="scan-rule-section-label" style="color:' +
+            sectionColor(section) +
+            '">' +
+            sectionHeading(section) +
+            '</div>';
+          html += ruleCardsForSection(section);
         }
 
-        if (supervised.length) {
-          html +=
-            '<div class="scan-rule-section-label">👁 Supervised — Node9 would have asked you first</div>';
-          html += ruleSection(supervised, 'risk', 'badge-review', 'REVIEW', maxBar);
-        }
-
-        if (yourRules.length) {
-          html +=
-            '<div class="scan-rule-section-label" style="color:#58a6ff">✅ Your Rules — working as configured</div>';
-          html += ruleSection(yourRules, 'risk', 'badge-user', 'YOUR RULE', maxBar);
-        }
-
-        // Loops: single collapsed summary card, expand to see all groups
-        if (allLoops.length) {
-          const totalReps = allLoops.reduce((sum, l) => sum + (l.count || 0), 0);
+        // ── Loops: single collapsed summary card, expand to see all groups ───
+        if (loops.length) {
+          const totalReps = loops.reduce((sum, l) => sum + (l.count || 0), 0);
           const loopsDetailId = 'loops-detail-' + Math.random().toString(36).slice(2);
           const savingNote = savingsStr
             ? ' · <span style="color:var(--warning)">~' + savingsStr + ' wasted</span>'
             : '';
-          const loopGroupRows = allLoops
+          const maxLoopCount = Math.max(...loops.map((l) => l.count || 0), 1);
+          const loopGroupRows = loops
             .map((item) => {
               const date = new Date(item.timestamp).toLocaleDateString([], {
                 month: 'short',
                 day: 'numeric',
               });
-              const barPct = Math.round(
-                (item.count / Math.max(...allLoops.map((l) => l.count), 1)) * 100
-              );
+              const barPct = Math.round((item.count / maxLoopCount) * 100);
               const detailId = 'detail-' + Math.random().toString(36).slice(2);
               return (
                 '<div class="scan-rule-row" onclick="event.stopPropagation();var d=document.getElementById(\'' +
@@ -3726,9 +3790,9 @@
             "');var a=this.querySelector('.scan-rule-arrow');d.style.display=d.style.display===''?'none':'';a.textContent=d.style.display===''?'▲':'▼';\">" +
             '<span class="scan-verdict-badge badge-review">LOOP</span>' +
             '<span class="scan-rule-name">' +
-            allLoops.length +
+            loops.length +
             ' pattern' +
-            (allLoops.length !== 1 ? 's' : '') +
+            (loops.length !== 1 ? 's' : '') +
             ' · ' +
             totalReps +
             ' total repetitions' +
@@ -3802,10 +3866,20 @@
           const data = await res.json();
           results.style.display = 'block';
 
-          if (data.status === 'complete') {
-            const sources = data.sources || [];
-            const allRisks = sources.flatMap((s) => s.findings || []);
-            const allLeaks = sources.flatMap((s) => s.leaks || []);
+          if (data.status === 'complete' && data.summary) {
+            const summary = data.summary;
+            const byVerdict = summary.byVerdict || {};
+            const sections = summary.sections || [];
+            const leaks = summary.leaks || [];
+            // Flatten rule findings across all sections so we can show a Top-N list
+            const allRisks = [];
+            for (const section of sections) {
+              for (const rule of section.rules || []) {
+                for (const f of rule.findings) {
+                  allRisks.push({ rule: rule.name, verdict: rule.verdict, ...f });
+                }
+              }
+            }
 
             let risksHtml = '';
             if (allRisks.length > 0) {
@@ -3818,7 +3892,7 @@
                       (r) => `
                     <div class="finding-item">
                       <span class="finding-ts">${new Date(r.timestamp).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
-                      <span class="finding-rule">${r.rule.replace(/^shield:[^:]+:/, '')}</span>
+                      <span class="finding-rule">${esc(r.rule)}</span>
                       <span class="finding-cmd"><span class="finding-badge ${r.verdict === 'block' ? 'badge-block' : ''}">${r.verdict === 'block' ? '🛑' : '👁️'}</span>${esc(truncate(r.command, 120))}</span>
                     </div>
                   `
@@ -3829,18 +3903,18 @@
             }
 
             let leaksHtml = '';
-            if (allLeaks.length > 0) {
+            if (leaks.length > 0) {
               leaksHtml = `
                 <div class="findings-list" style="border-color: rgba(201, 60, 55, 0.3);">
                   <div style="font-size: 10px; font-weight: 700; color: #f87171; margin-bottom: 8px; text-transform: uppercase;">Credential Leaks Identified</div>
-                  ${allLeaks
+                  ${leaks
                     .slice(0, 5)
                     .map(
                       (l) => `
                     <div class="finding-item">
                       <span class="finding-ts">${new Date(l.timestamp).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
-                      <span class="finding-rule">${esc(l.pattern)}</span>
-                      <span class="finding-cmd"><span class="finding-badge badge-leak">🔑</span>${esc(l.sample)}</span>
+                      <span class="finding-rule">${esc(l.patternName)}</span>
+                      <span class="finding-cmd"><span class="finding-badge badge-leak">🔑</span>${esc(l.redactedSample)}</span>
                     </div>
                   `
                     )
@@ -3849,10 +3923,11 @@
               `;
             }
 
+            const riskCount = (byVerdict.blocked || 0) + (byVerdict.supervised || 0);
             results.innerHTML = `
               <div class="insight-hint" style="color: #57ab5a; border-color: rgba(87, 171, 90, 0.4); background: rgba(87, 171, 90, 0.08);">
                 <strong>✅ History Audit Complete</strong><br>
-                Scanned ${data.summary.sessions} sessions. Found <strong>${data.summary.findings} risky operations</strong> and <strong>${data.summary.dlp} secret leaks</strong>.
+                Scanned ${summary.stats?.sessions || 0} sessions. Found <strong>${riskCount} risky operations</strong> and <strong>${byVerdict.leaks || 0} secret leaks</strong>.
                 Node9 is now actively protecting you from these types of events.
               </div>
               ${leaksHtml}
