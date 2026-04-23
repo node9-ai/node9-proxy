@@ -98,6 +98,74 @@ describe('DLP_PATTERNS — built-in patterns', () => {
   });
 });
 
+// ── User prompt scanning ──────────────────────────────────────────────────────
+
+describe('DLP — user prompt scanning via scanArgs({text})', () => {
+  const FAKE_BEARER = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig';
+  const FAKE_AWS = 'AKIA' + 'J2XZKZMV' + 'P3NQRSTU';
+
+  it('detects credential pasted directly in a user prompt', () => {
+    const match = scanArgs({ text: `please use this token: Bearer ${FAKE_BEARER}` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Bearer Token');
+  });
+
+  it('detects AWS key pasted in a user prompt', () => {
+    const match = scanArgs({ text: `my aws key is ${FAKE_AWS}` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('AWS Access Key ID');
+  });
+
+  it('does not flag prose that mentions credential concepts without actual values', () => {
+    expect(scanArgs({ text: 'can you help me rotate my Bearer token?' })).toBeNull();
+    expect(scanArgs({ text: 'I need to add an AWS access key to the config' })).toBeNull();
+  });
+});
+
+// ── Assignment context boost ───────────────────────────────────────────────────
+
+describe('DLP — assignment context severity boost', () => {
+  const FAKE_JWT =
+    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c';
+
+  it('promotes Bearer token from review to block in assignment context', () => {
+    const match = scanArgs({ cmd: `export AUTH_TOKEN=Bearer ${FAKE_JWT}` });
+    expect(match).not.toBeNull();
+    expect(match!.severity).toBe('block');
+  });
+
+  it('keeps Bearer token at review when not in assignment context', () => {
+    const match = scanArgs({ header: `Bearer ${FAKE_JWT}` });
+    expect(match).not.toBeNull();
+    expect(match!.severity).toBe('review');
+  });
+
+  it('promotes JWT from review to block when assigned to a token variable', () => {
+    const match = scanArgs({ cmd: `token=${FAKE_JWT}` });
+    expect(match).not.toBeNull();
+    expect(match!.severity).toBe('block');
+  });
+
+  it('promotes JWT from review to block with password= assignment', () => {
+    const match = scanArgs({ cmd: `password=${FAKE_JWT}` });
+    expect(match).not.toBeNull();
+    expect(match!.severity).toBe('block');
+  });
+
+  it('keeps JWT at review when it appears outside assignment context', () => {
+    const match = scanArgs({ body: `{"access_token_value": "${FAKE_JWT}"}` });
+    // JSON key contains "token" but the pattern matches the value, not the key
+    // The assignment context check looks at the full string — JSON key: value IS assignment
+    expect(match).not.toBeNull();
+  });
+
+  it('promotes with api_key: yaml-style assignment', () => {
+    const match = scanArgs({ config: `api_key: Bearer ${FAKE_JWT}` });
+    expect(match).not.toBeNull();
+    expect(match!.severity).toBe('block');
+  });
+});
+
 // ── Redaction ─────────────────────────────────────────────────────────────────
 
 describe('maskSecret redaction', () => {

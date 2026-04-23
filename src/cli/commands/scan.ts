@@ -23,6 +23,8 @@ import {
 } from '../../policy/index';
 import { scanArgs } from '../../dlp';
 import type { SmartRule } from '../../core';
+import { isDaemonRunning, getInternalToken, DAEMON_PORT, DAEMON_HOST } from '../../auth/daemon';
+import { openBrowserLocal } from '../daemon-starter';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -57,6 +59,16 @@ interface DlpFinding {
   agent: 'claude' | 'gemini' | 'codex';
 }
 
+export interface LoopFinding {
+  toolName: string;
+  commandPreview: string;
+  count: number;
+  timestamp: string;
+  project: string;
+  sessionId: string;
+  agent: 'claude' | 'gemini' | 'codex';
+}
+
 interface JournalEntry {
   type: string;
   timestamp?: string;
@@ -72,13 +84,14 @@ interface JournalEntry {
   };
 }
 
-interface ScanResult {
+export interface ScanResult {
   filesScanned: number;
   sessions: number;
   totalToolCalls: number;
   bashCalls: number;
   findings: Finding[];
   dlpFindings: DlpFinding[];
+  loopFindings: LoopFinding[];
   totalCostUSD: number;
   firstDate: string | null;
   lastDate: string | null;
@@ -189,6 +202,62 @@ function fullCommand(input: Record<string, unknown>): string {
 }
 
 // ---------------------------------------------------------------------------
+// Loop detection
+// ---------------------------------------------------------------------------
+
+const LOOP_TOOLS = new Set([
+  'bash',
+  'execute_bash',
+  'exec_command',
+  'shell',
+  'run_shell_command',
+  'write',
+  'edit',
+  'multiedit',
+]);
+const LOOP_THRESHOLD = 3;
+
+function detectLoops(
+  calls: Array<{ toolName: string; input: Record<string, unknown>; timestamp: string }>,
+  project: string,
+  sessionId: string,
+  agent: 'claude' | 'gemini' | 'codex'
+): LoopFinding[] {
+  const counts = new Map<
+    string,
+    { count: number; timestamp: string; input: Record<string, unknown>; toolName: string }
+  >();
+  for (const call of calls) {
+    const tl = call.toolName.toLowerCase();
+    if (!LOOP_TOOLS.has(tl)) continue;
+    const key = tl + '\0' + preview(call.input, 200);
+    const entry = counts.get(key) ?? {
+      count: 0,
+      timestamp: call.timestamp,
+      input: call.input,
+      toolName: call.toolName,
+    };
+    entry.count++;
+    counts.set(key, entry);
+  }
+  const findings: LoopFinding[] = [];
+  for (const [, entry] of counts) {
+    if (entry.count >= LOOP_THRESHOLD) {
+      findings.push({
+        toolName: entry.toolName,
+        commandPreview: preview(entry.input, 80),
+        count: entry.count,
+        timestamp: entry.timestamp,
+        project,
+        sessionId,
+        agent,
+      });
+    }
+  }
+  return findings.sort((a, b) => b.count - a.count);
+}
+
+// ---------------------------------------------------------------------------
 // Build the rule set for scan
 // ---------------------------------------------------------------------------
 
@@ -233,7 +302,99 @@ function buildRuleSources(): RuleSource[] {
 // JSONL scanner
 // ---------------------------------------------------------------------------
 
-function scanClaudeHistory(startDate: Date | null): ScanResult {
+function countScanFiles(): number {
+  let total = 0;
+  const claudeDir = path.join(os.homedir(), '.claude', 'projects');
+  if (fs.existsSync(claudeDir)) {
+    try {
+      for (const proj of fs.readdirSync(claudeDir)) {
+        const p = path.join(claudeDir, proj);
+        try {
+          if (!fs.statSync(p).isDirectory()) continue;
+          total += fs
+            .readdirSync(p)
+            .filter((f) => f.endsWith('.jsonl') && !f.startsWith('agent-')).length;
+        } catch {
+          continue;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  const geminiDir = path.join(os.homedir(), '.gemini', 'tmp');
+  if (fs.existsSync(geminiDir)) {
+    try {
+      for (const slug of fs.readdirSync(geminiDir)) {
+        const p = path.join(geminiDir, slug);
+        try {
+          if (!fs.statSync(p).isDirectory()) continue;
+          const chatsDir = path.join(p, 'chats');
+          if (fs.existsSync(chatsDir)) {
+            try {
+              total += fs.readdirSync(chatsDir).filter((f) => f.endsWith('.json')).length;
+            } catch {
+              /* ignore */
+            }
+          }
+        } catch {
+          continue;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  const codexDir = path.join(os.homedir(), '.codex', 'sessions');
+  if (fs.existsSync(codexDir)) {
+    try {
+      for (const year of fs.readdirSync(codexDir)) {
+        const yp = path.join(codexDir, year);
+        try {
+          if (!fs.statSync(yp).isDirectory()) continue;
+          for (const month of fs.readdirSync(yp)) {
+            const mp = path.join(yp, month);
+            try {
+              if (!fs.statSync(mp).isDirectory()) continue;
+              for (const day of fs.readdirSync(mp)) {
+                const dp = path.join(mp, day);
+                try {
+                  if (!fs.statSync(dp).isDirectory()) continue;
+                  total += fs.readdirSync(dp).filter((f) => f.endsWith('.jsonl')).length;
+                } catch {
+                  continue;
+                }
+              }
+            } catch {
+              continue;
+            }
+          }
+        } catch {
+          continue;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return total;
+}
+
+function renderProgressBar(done: number, total: number): void {
+  const width = 28;
+  const pct = total > 0 ? done / total : 0;
+  const filled = Math.min(width, Math.round(pct * width));
+  const bar = '█'.repeat(filled) + '░'.repeat(width - filled);
+  const label = total > 0 ? `${done}/${total} files` : `${done} files`;
+  process.stdout.write(
+    `\r  ${chalk.cyan('Scanning')}  [${chalk.cyan(bar)}]  ${chalk.dim(label)}  `
+  );
+}
+
+export function scanClaudeHistory(
+  startDate: Date | null,
+  onProgress?: (done: number) => void
+): ScanResult {
   const projectsDir = path.join(os.homedir(), '.claude', 'projects');
 
   const result: ScanResult = {
@@ -243,6 +404,7 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
     bashCalls: 0,
     findings: [],
     dlpFindings: [],
+    loopFindings: [],
     totalCostUSD: 0,
     firstDate: null,
     lastDate: null,
@@ -281,6 +443,7 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
     for (const file of files) {
       result.filesScanned++;
       result.sessions++;
+      onProgress?.(result.filesScanned);
 
       const sessionId = file.replace(/\.jsonl$/, '');
 
@@ -290,6 +453,12 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
       } catch {
         continue;
       }
+
+      const sessionCalls: Array<{
+        toolName: string;
+        input: Record<string, unknown>;
+        timestamp: string;
+      }> = [];
 
       for (const line of raw.split('\n')) {
         if (!line.trim()) continue;
@@ -301,7 +470,7 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
           continue;
         }
 
-        if (entry.type !== 'assistant') continue;
+        if (entry.type !== 'assistant' && entry.type !== 'user') continue;
 
         // Date filter
         if (startDate && entry.timestamp) {
@@ -314,6 +483,40 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
             result.firstDate = entry.timestamp;
           if (!result.lastDate || entry.timestamp > result.lastDate)
             result.lastDate = entry.timestamp;
+        }
+
+        // ── User prompt DLP scan ───────────────────────────────────────────
+        if (entry.type === 'user') {
+          const content = entry.message?.content;
+          if (Array.isArray(content)) {
+            const text = content
+              .filter((b) => b.type === 'text')
+              .map((b) => (b as Record<string, unknown>)['text'] ?? '')
+              .join('\n');
+            if (text) {
+              const dlpMatch = scanArgs({ text });
+              if (dlpMatch) {
+                const isDupe = result.dlpFindings.some(
+                  (f) =>
+                    f.patternName === dlpMatch.patternName &&
+                    f.redactedSample === dlpMatch.redactedSample &&
+                    f.project === projLabel
+                );
+                if (!isDupe) {
+                  result.dlpFindings.push({
+                    patternName: dlpMatch.patternName,
+                    redactedSample: dlpMatch.redactedSample,
+                    toolName: 'user-prompt',
+                    timestamp: entry.timestamp ?? '',
+                    project: projLabel,
+                    sessionId,
+                    agent: 'claude',
+                  });
+                }
+              }
+            }
+          }
+          continue;
         }
 
         // Cost
@@ -341,6 +544,8 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
           const toolName = block.name ?? '';
           const toolNameLower = toolName.toLowerCase();
           const input = block.input ?? {};
+
+          sessionCalls.push({ toolName, input, timestamp: entry.timestamp ?? '' });
 
           if (toolNameLower === 'bash' || toolNameLower === 'execute_bash') {
             result.bashCalls++;
@@ -443,6 +648,7 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
           }
         }
       }
+      result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'claude'));
     }
   }
 
@@ -453,7 +659,10 @@ function scanClaudeHistory(startDate: Date | null): ScanResult {
 // Gemini history scanner
 // ---------------------------------------------------------------------------
 
-function scanGeminiHistory(startDate: Date | null): ScanResult {
+export function scanGeminiHistory(
+  startDate: Date | null,
+  onProgress?: (done: number) => void
+): ScanResult {
   const tmpDir = path.join(os.homedir(), '.gemini', 'tmp');
   const result: ScanResult = {
     filesScanned: 0,
@@ -462,6 +671,7 @@ function scanGeminiHistory(startDate: Date | null): ScanResult {
     bashCalls: 0,
     findings: [],
     dlpFindings: [],
+    loopFindings: [],
     totalCostUSD: 0,
     firstDate: null,
     lastDate: null,
@@ -507,6 +717,7 @@ function scanGeminiHistory(startDate: Date | null): ScanResult {
 
     for (const chatFile of chatFiles) {
       result.filesScanned++;
+      onProgress?.(result.filesScanned);
 
       const sessionId = chatFile.replace(/\.json$/, '');
 
@@ -516,6 +727,12 @@ function scanGeminiHistory(startDate: Date | null): ScanResult {
       } catch {
         continue;
       }
+
+      const sessionCalls: Array<{
+        toolName: string;
+        input: Record<string, unknown>;
+        timestamp: string;
+      }> = [];
 
       let session: GeminiSessionFile;
       try {
@@ -527,6 +744,39 @@ function scanGeminiHistory(startDate: Date | null): ScanResult {
       result.sessions++;
 
       for (const msg of session.messages ?? []) {
+        // ── User prompt DLP scan ─────────────────────────────────────────
+        if (msg.type === 'user') {
+          const content = msg.content;
+          const text = Array.isArray(content)
+            ? content.map((c) => c.text ?? '').join('\n')
+            : typeof content === 'string'
+              ? content
+              : '';
+          if (text) {
+            const dlpMatch = scanArgs({ text });
+            if (dlpMatch) {
+              const isDupe = result.dlpFindings.some(
+                (f) =>
+                  f.patternName === dlpMatch.patternName &&
+                  f.redactedSample === dlpMatch.redactedSample &&
+                  f.project === projLabel
+              );
+              if (!isDupe) {
+                result.dlpFindings.push({
+                  patternName: dlpMatch.patternName,
+                  redactedSample: dlpMatch.redactedSample,
+                  toolName: 'user-prompt',
+                  timestamp: msg.timestamp ?? '',
+                  project: projLabel,
+                  sessionId,
+                  agent: 'gemini',
+                });
+              }
+            }
+          }
+          continue;
+        }
+
         if (msg.type !== 'gemini') continue;
 
         if (startDate && msg.timestamp && new Date(msg.timestamp) < startDate) continue;
@@ -552,6 +802,8 @@ function scanGeminiHistory(startDate: Date | null): ScanResult {
           const toolName = tc.name ?? '';
           const toolNameLower = toolName.toLowerCase();
           const input = tc.args ?? {};
+
+          sessionCalls.push({ toolName, input, timestamp: msg.timestamp ?? '' });
 
           if (toolNameLower === 'run_shell_command' || toolNameLower === 'shell') {
             result.bashCalls++;
@@ -652,6 +904,7 @@ function scanGeminiHistory(startDate: Date | null): ScanResult {
           }
         }
       }
+      result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'gemini'));
     }
   }
 
@@ -662,7 +915,10 @@ function scanGeminiHistory(startDate: Date | null): ScanResult {
 // Codex history scanner
 // ---------------------------------------------------------------------------
 
-function scanCodexHistory(startDate: Date | null): ScanResult {
+export function scanCodexHistory(
+  startDate: Date | null,
+  onProgress?: (done: number) => void
+): ScanResult {
   const sessionsBase = path.join(os.homedir(), '.codex', 'sessions');
   const result: ScanResult = {
     filesScanned: 0,
@@ -671,6 +927,7 @@ function scanCodexHistory(startDate: Date | null): ScanResult {
     bashCalls: 0,
     findings: [],
     dlpFindings: [],
+    loopFindings: [],
     totalCostUSD: 0,
     firstDate: null,
     lastDate: null,
@@ -716,6 +973,7 @@ function scanCodexHistory(startDate: Date | null): ScanResult {
 
   for (const filePath of jsonlFiles) {
     result.filesScanned++;
+    onProgress?.(result.filesScanned);
 
     let lines: string[];
     try {
@@ -728,6 +986,12 @@ function scanCodexHistory(startDate: Date | null): ScanResult {
     let startTime = '';
     let projLabel = '';
     result.sessions++;
+
+    const sessionCalls: Array<{
+      toolName: string;
+      input: Record<string, unknown>;
+      timestamp: string;
+    }> = [];
 
     // Track last cumulative token count for cost
     let lastTotalInput = 0;
@@ -762,6 +1026,34 @@ function scanCodexHistory(startDate: Date | null): ScanResult {
         continue;
       }
 
+      // ── User prompt DLP scan ─────────────────────────────────────────────
+      if (entry.type === 'event_msg' && payload['type'] === 'user_message') {
+        const text = String(payload['message'] ?? '');
+        if (text) {
+          const dlpMatch = scanArgs({ text });
+          if (dlpMatch) {
+            const isDupe = result.dlpFindings.some(
+              (f) =>
+                f.patternName === dlpMatch.patternName &&
+                f.redactedSample === dlpMatch.redactedSample &&
+                f.project === projLabel
+            );
+            if (!isDupe) {
+              result.dlpFindings.push({
+                patternName: dlpMatch.patternName,
+                redactedSample: dlpMatch.redactedSample,
+                toolName: 'user-prompt',
+                timestamp: entry.timestamp ?? startTime,
+                project: projLabel,
+                sessionId,
+                agent: 'codex',
+              });
+            }
+          }
+        }
+        continue;
+      }
+
       if (entry.type !== 'response_item') continue;
       if (payload['type'] !== 'function_call') continue;
 
@@ -786,6 +1078,8 @@ function scanCodexHistory(startDate: Date | null): ScanResult {
       if ('cmd' in input && !('command' in input)) {
         input = { ...input, command: input['cmd'] };
       }
+
+      sessionCalls.push({ toolName, input, timestamp: ts });
 
       if (toolNameLower === 'exec_command' || toolNameLower === 'shell') {
         result.bashCalls++;
@@ -888,6 +1182,8 @@ function scanCodexHistory(startDate: Date | null): ScanResult {
     // Accumulate session cost using GPT-4o pricing as proxy for codex-1/GPT-5
     const nonCached = Math.max(0, lastTotalInput - lastTotalCached);
     result.totalCostUSD += nonCached * 5e-6 + lastTotalCached * 2.5e-6 + lastTotalOutput * 15e-6;
+
+    result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'codex'));
   }
 
   return result;
@@ -903,6 +1199,7 @@ function mergeScans(a: ScanResult, b: ScanResult): ScanResult {
     bashCalls: a.bashCalls + b.bashCalls,
     findings: [...a.findings, ...b.findings],
     dlpFindings: [...a.dlpFindings, ...b.dlpFindings],
+    loopFindings: [...a.loopFindings, ...b.loopFindings],
     totalCostUSD: a.totalCostUSD + b.totalCostUSD,
     firstDate: dates.length ? dates.sort()[0] : null,
     lastDate: lastDates.length ? lastDates.sort().at(-1)! : null,
@@ -982,7 +1279,7 @@ export function registerScanCommand(program: Command): void {
     .option('--days <n>', 'Scan last N days of history', '90')
     .option('--top <n>', 'Max findings to show per rule (default: 5)', '5')
     .option('--drill-down', 'Show all findings with full commands and session IDs')
-    .action((options: { all?: boolean; days: string; top: string; drillDown?: boolean }) => {
+    .action(async (options: { all?: boolean; days: string; top: string; drillDown?: boolean }) => {
       const drillDown = options.drillDown ?? false;
       const topN = drillDown ? Infinity : Math.max(1, parseInt(options.top, 10) || 5);
       const previewWidth = 70;
@@ -1013,12 +1310,22 @@ export function registerScanCommand(program: Command): void {
       );
       console.log('');
 
-      process.stdout.write(chalk.dim('  Scanning…'));
-      const claudeScan = scanClaudeHistory(startDate);
-      const geminiScan = scanGeminiHistory(startDate);
-      const codexScan = scanCodexHistory(startDate);
+      const totalFiles = countScanFiles();
+      let filesScanned = 0;
+      const onProgress = (done: number) => {
+        filesScanned = done;
+        renderProgressBar(filesScanned, totalFiles);
+      };
+      renderProgressBar(0, totalFiles);
+      const claudeScan = scanClaudeHistory(startDate, onProgress);
+      const geminiScan = scanGeminiHistory(startDate, (done) =>
+        onProgress(claudeScan.filesScanned + done)
+      );
+      const codexScan = scanCodexHistory(startDate, (done) =>
+        onProgress(claudeScan.filesScanned + geminiScan.filesScanned + done)
+      );
       const scan = mergeScans(mergeScans(claudeScan, geminiScan), codexScan);
-      process.stdout.write('\r' + ' '.repeat(20) + '\r');
+      process.stdout.write('\r' + ' '.repeat(60) + '\r');
 
       if (scan.filesScanned === 0) {
         console.log(chalk.yellow('  No session history found.'));
@@ -1115,6 +1422,15 @@ export function registerScanCommand(program: Command): void {
               '     ' +
               chalk.red.bold(String(scan.dlpFindings.length).padStart(5)) +
               chalk.dim('   secret detected in tool call')
+          );
+        }
+        if (scan.loopFindings.length > 0) {
+          console.log(
+            '    ' +
+              chalk.yellow('🔁  Loop detected') +
+              '      ' +
+              chalk.yellow.bold(String(scan.loopFindings.length).padStart(5)) +
+              chalk.dim('   repeated tool call patterns found')
           );
         }
         console.log('');
@@ -1275,6 +1591,46 @@ export function registerScanCommand(program: Command): void {
           }
           console.log('');
         }
+
+        // ── Loop findings ──────────────────────────────────────────────────
+        if (scan.loopFindings.length > 0) {
+          console.log('  ' + chalk.dim('─'.repeat(70)));
+          console.log(
+            '  ' +
+              chalk.yellow.bold('🔁  Agent Loops') +
+              chalk.dim('  ·  ') +
+              chalk.yellow(
+                `${num(scan.loopFindings.length)} repeated pattern${scan.loopFindings.length !== 1 ? 's' : ''} found`
+              )
+          );
+          const shownLoops = drillDown ? scan.loopFindings : scan.loopFindings.slice(0, topN);
+          for (const f of shownLoops) {
+            const ts = f.timestamp ? chalk.dim(fmtTs(f.timestamp) + '  ') : '';
+            const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
+            const agentBadge =
+              f.agent === 'gemini'
+                ? chalk.blue('[Gemini]  ')
+                : f.agent === 'codex'
+                  ? chalk.magenta('[Codex]   ')
+                  : chalk.cyan('[Claude]  ');
+            const sessionSuffix = f.sessionId ? chalk.dim(`  → ${f.sessionId.slice(0, 8)}`) : '';
+            console.log(
+              `    ${ts}${proj}${agentBadge}` +
+                chalk.yellow(f.toolName) +
+                chalk.dim(`  ×${f.count}  `) +
+                chalk.gray(f.commandPreview) +
+                sessionSuffix
+            );
+          }
+          if (!drillDown && scan.loopFindings.length > topN) {
+            console.log(
+              chalk.dim(
+                `    … and ${scan.loopFindings.length - topN} more  (--drill-down for full list)`
+              )
+            );
+          }
+          console.log('');
+        }
       }
 
       // ── Cost ──────────────────────────────────────────────────────────────
@@ -1333,5 +1689,105 @@ export function registerScanCommand(program: Command): void {
         console.log('  ' + chalk.dim('→ ') + chalk.underline('https://node9.ai'));
       }
       console.log('');
+
+      // Push results to daemon and open browser if daemon is running
+      if (isDaemonRunning() && process.env.NODE9_TESTING !== '1') {
+        const internalToken = getInternalToken();
+        if (internalToken) {
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const mapFindings = (arr: any[], src: string) =>
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              arr.map((f: any) => ({
+                timestamp: f.timestamp || new Date().toISOString(),
+                rule: f.source?.rule?.name ?? f.source?.shieldLabel ?? 'unnamed',
+                command:
+                  f.input?.command ?? f.input?.cmd ?? f.input?.file_path ?? f.toolName ?? 'unknown',
+                verdict: f.source?.rule?.verdict ?? f.source?.rule?.action ?? 'review',
+                ruleSource: f.source?.sourceType ?? 'default',
+                source: src,
+              }));
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const mapLeaks = (arr: any[], src: string) =>
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              arr.map((f: any) => ({
+                timestamp: f.timestamp || new Date().toISOString(),
+                pattern: f.patternName || 'DLP',
+                sample: f.redactedSample || '********',
+                source: src,
+              }));
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const mapLoops = (arr: any[], src: string) =>
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              arr.map((f: any) => ({
+                timestamp: f.timestamp || new Date().toISOString(),
+                toolName: f.toolName || 'unknown',
+                commandPreview: f.commandPreview || '',
+                count: f.count || 0,
+                source: src,
+              }));
+
+            const sources = [
+              {
+                id: 'claude',
+                label: 'Claude',
+                icon: '🤖',
+                sessions: claudeScan.sessions,
+                findings: mapFindings(claudeScan.findings, 'claude'),
+                leaks: mapLeaks(claudeScan.dlpFindings, 'claude'),
+                loops: mapLoops(claudeScan.loopFindings, 'claude'),
+              },
+              {
+                id: 'gemini',
+                label: 'Gemini',
+                icon: '♊',
+                sessions: geminiScan.sessions,
+                findings: mapFindings(geminiScan.findings, 'gemini'),
+                leaks: mapLeaks(geminiScan.dlpFindings, 'gemini'),
+                loops: mapLoops(geminiScan.loopFindings, 'gemini'),
+              },
+              {
+                id: 'codex',
+                label: 'Codex',
+                icon: '🔮',
+                sessions: codexScan.sessions,
+                findings: mapFindings(codexScan.findings, 'codex'),
+                leaks: mapLeaks(codexScan.dlpFindings, 'codex'),
+                loops: mapLoops(codexScan.loopFindings, 'codex'),
+              },
+            ].filter(
+              (s) =>
+                s.sessions > 0 || s.findings.length > 0 || s.leaks.length > 0 || s.loops.length > 0
+            );
+
+            const payload = {
+              status: 'complete',
+              summary: {
+                sessions: scan.sessions,
+                findings: scan.findings.length,
+                dlp: scan.dlpFindings.length,
+                loops: scan.loopFindings.length,
+                totalCostUSD: scan.totalCostUSD,
+              },
+              sources,
+            };
+
+            await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/scan/push`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'x-node9-internal': internalToken },
+              body: JSON.stringify(payload),
+              signal: AbortSignal.timeout(3000),
+            });
+
+            const url = `http://${DAEMON_HOST}:${DAEMON_PORT}/`;
+            console.log('  ' + chalk.cyan('🌐 View in browser:') + '  ' + chalk.underline(url));
+            console.log('');
+
+            openBrowserLocal();
+          } catch {
+            // fire-and-forget — scan already printed, don't fail if daemon is unreachable
+          }
+        }
+      }
     });
 }

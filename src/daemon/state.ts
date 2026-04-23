@@ -64,6 +64,10 @@ export interface PendingEntry {
   earlyDecision: Decision | null;
   earlyReason?: string;
   decisionSource?: string; // 'browser', 'terminal', or undefined (cloud/auto)
+  /** New fields for MCP discovery */
+  type?: 'tool-call' | 'mcp-discovery';
+  mcpTools?: Array<{ name: string; description?: string }>;
+  serverKey?: string;
 }
 
 export interface SseClient {
@@ -162,6 +166,26 @@ const ACTIVITY_SOCKET_PATH =
 // ── Flight Recorder ring buffer — replayed to new SSE clients on connect ──────
 export const ACTIVITY_RING_SIZE = 100;
 export const activityRing: { event: string; data: unknown }[] = [];
+
+// ── Large MCP response ring — replayed to new SSE clients on connect ──────────
+export interface LargeResponseEvent {
+  ts: string;
+  toolName: string;
+  serverKey: string;
+  originalBytes: number;
+}
+export const LARGE_RESPONSE_RING_SIZE = 20;
+export const largeResponseRing: LargeResponseEvent[] = [];
+
+// ── Cached scan result — pushed by CLI `node9 scan`, served to browser ────────
+export let cachedScanResult: unknown = null;
+export let cachedScanTs = 0;
+export const SCAN_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+export function setCachedScanResult(result: unknown): void {
+  cachedScanResult = result;
+  cachedScanTs = Date.now();
+}
 
 // ── Utility functions ─────────────────────────────────────────────────────────
 

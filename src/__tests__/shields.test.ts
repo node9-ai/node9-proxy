@@ -103,6 +103,7 @@ describe('listShields', () => {
     'filesystem',
     'github',
     'k8s',
+    'mcp-tool-gating',
     'mongodb',
     'postgres',
     'redis',

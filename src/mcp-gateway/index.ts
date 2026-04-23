@@ -22,6 +22,35 @@ import { authorizeHeadless } from '../auth/orchestrator';
 import { buildNegotiationMessage } from '../policy/negotiation';
 import { checkProvenance } from '../utils/provenance.js';
 import { hashToolDefinitions, getServerKey, checkPin, updatePin } from '../mcp-pin';
+import type { McpToolInfo } from '../daemon/mcp-tools';
+import { getServerConfig } from '../daemon/mcp-tools';
+import { DAEMON_PORT, DAEMON_HOST, isDaemonRunning, getInternalToken } from '../auth/daemon';
+import { readActiveShields } from '../shields';
+
+/** Wait for human approval of new MCP tools. Polls daemon for status change. */
+async function waitForMcpApproval(
+  serverKey: string
+): Promise<{ status: string; disabled: string[] }> {
+  const token = getInternalToken();
+  const start = Date.now();
+  const timeout = 60_000; // 60s timeout
+
+  while (Date.now() - start < timeout) {
+    try {
+      const res = await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/mcp/status/${serverKey}`, {
+        headers: token ? { 'x-node9-internal': token } : {},
+      });
+      if (res.ok) {
+        const config = (await res.json()) as { status: string; disabled: string[] };
+        if (config.status === 'approved') return config;
+      }
+    } catch {
+      // Daemon might be down — fail open after timeout
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  return { status: 'timed-out', disabled: [] };
+}
 
 function sanitize(value: string): string {
   // eslint-disable-next-line no-control-regex
@@ -181,6 +210,10 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
   // These are replayed (in order) once pin validation completes.
   const pendingToolCalls: string[] = [];
 
+  // Maps in-flight tool call id → tool name so the response handler can
+  // attribute large responses to the tool that triggered them.
+  const pendingCallNames = new Map<string | number, string>();
+
   // ── INTERCEPT INPUT (Agent → Gateway → Upstream) ──────────────────────────
   const agentIn = readline.createInterface({ input: process.stdin, terminal: false });
 
@@ -320,6 +353,9 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
 
         // Approved — forward to upstream inside the try block so child.stdin.write
         // happens BEFORE the finally block can call child.stdin.end().
+        if (message.id !== undefined && message.id !== null) {
+          pendingCallNames.set(message.id as string | number, toolName);
+        }
         child.stdin.write(line + '\n');
       } catch {
         // FAIL CLOSED: auth engine error → deny, never pass through
@@ -380,7 +416,7 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
   // Replaced pipe with readline to intercept tools/list responses for pin checking.
   // All non-tools/list messages pass through unchanged (transparent proxy).
   const upstreamOut = readline.createInterface({ input: child.stdout, terminal: false });
-  upstreamOut.on('line', (line) => {
+  upstreamOut.on('line', async (line) => {
     // Try to parse as JSON to check for tools/list response
     type UpstreamMessage = {
       id?: string | number | null;
@@ -403,11 +439,42 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
     if (parsed.id !== undefined && pendingToolsListIds.has(parsed.id!)) {
       pendingToolsListIds.delete(parsed.id!);
 
-      // Only check pins on successful responses that contain tools
+      // Only check pins and apply filtering on successful responses that contain tools
       if (parsed.result && Array.isArray(parsed.result.tools)) {
-        const tools = parsed.result.tools;
+        const tools = (parsed.result.tools as McpToolInfo[]) || [];
         const currentHash = hashToolDefinitions(tools);
         const pinStatus = checkPin(serverKey, currentHash);
+        const token = getInternalToken();
+
+        // 1. Notify daemon of discovery (handles drift & new servers)
+        if (isDaemonRunning() && process.env.NODE9_TESTING !== '1') {
+          const toolSummary = tools.map((t) => ({ name: t.name, description: t.description }));
+          fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/mcp/discovered`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(token && { 'x-node9-internal': token }),
+            },
+            body: JSON.stringify({ serverKey, tools: toolSummary }),
+          }).catch(() => {
+            /* silent */
+          });
+        }
+
+        // 2. Intercept & Hold — only when mcp-tool-gating shield is active
+        const serverCfg = getServerConfig(serverKey);
+        const gatingEnabled = readActiveShields().includes('mcp-tool-gating');
+        if (gatingEnabled && isDaemonRunning() && (!serverCfg || serverCfg.status === 'pending')) {
+          const config = await waitForMcpApproval(serverKey);
+          if (config.disabled.length > 0) {
+            parsed.result.tools = tools.filter((t) => !config.disabled.includes(t.name));
+            line = JSON.stringify(parsed);
+          }
+        } else if (serverCfg?.disabled && serverCfg.disabled.length > 0) {
+          // Already approved — apply persisted filter immediately
+          parsed.result.tools = tools.filter((t) => !serverCfg.disabled.includes(t.name));
+          line = JSON.stringify(parsed);
+        }
 
         if (pinStatus === 'new') {
           // First connection — pin the tool definitions
@@ -485,6 +552,35 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
         }
         return;
       }
+    }
+
+    // Detect oversized tool call responses and notify the daemon dashboard.
+    // Threshold: 500KB — only fires on genuinely large payloads (full DB dumps,
+    // massive directory listings). Normal responses are a few KB at most.
+    const LARGE_RESPONSE_THRESHOLD = 500_000;
+    if (parsed?.result && line.length > LARGE_RESPONSE_THRESHOLD) {
+      const callId = parsed.id as string | number | undefined;
+      const toolName =
+        callId !== undefined ? (pendingCallNames.get(callId) ?? 'unknown') : 'unknown';
+      if (callId !== undefined) pendingCallNames.delete(callId);
+      console.error(
+        chalk.yellow(
+          `⚡ Node9: Large MCP response from '${toolName}' (${(line.length / 1024).toFixed(0)}KB) — context window enlarged`
+        )
+      );
+      if (isDaemonRunning() && process.env.NODE9_TESTING !== '1') {
+        const token = getInternalToken();
+        fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/mcp/large-response`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token && { 'x-node9-internal': token }),
+          },
+          body: JSON.stringify({ toolName, serverKey, originalBytes: line.length }),
+        }).catch(() => {});
+      }
+    } else if (parsed?.id !== undefined && parsed.id !== null) {
+      pendingCallNames.delete(parsed.id as string | number);
     }
 
     // All other messages — forward unchanged

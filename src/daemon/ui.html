@@ -83,7 +83,7 @@
 
       .body {
         display: grid;
-        grid-template-columns: 360px 1fr 270px;
+        grid-template-columns: 420px 1fr 270px;
         gap: 16px;
         min-height: 0;
         overflow: hidden;
@@ -121,20 +121,17 @@
       }
       #empty {
         display: flex;
-        flex-direction: column;
         align-items: center;
-        justify-content: center;
-        gap: 10px;
-        padding: 48px 24px;
-        border: 2px dashed var(--border);
-        border-radius: 16px;
+        gap: 6px;
+        padding: 8px 10px;
+        border: 1px dashed var(--border);
+        border-radius: 8px;
         color: var(--muted);
-        font-size: 13px;
-        text-align: center;
-        line-height: 1.5;
+        font-size: 11px;
+        margin-bottom: 8px;
       }
       #empty .empty-icon {
-        font-size: 28px;
+        font-size: 14px;
       }
       .card {
         background: var(--card);
@@ -548,6 +545,25 @@
         filter: none;
         transform: none;
       }
+      /* ── Large response entries ─────────────────────────────────────────── */
+      .large-response-row {
+        padding: 6px 0;
+        border-bottom: 1px solid var(--border);
+        font-size: 11px;
+      }
+      .large-response-row:last-child {
+        border-bottom: none;
+      }
+      .large-response-tool {
+        font-family: 'Fira Code', monospace;
+        color: #f59e0b;
+        font-weight: 600;
+      }
+      .large-response-size {
+        color: var(--muted);
+        margin-top: 2px;
+      }
+
       /* ── Shields ────────────────────────────────────────────────────────── */
       .shield-row {
         display: flex;
@@ -702,6 +718,52 @@
       .decisions-empty {
         font-size: 12px;
         color: var(--muted);
+      }
+
+      /* MCP Tools Styles */
+      .mcp-server-row {
+        margin-bottom: 12px;
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 8px;
+      }
+      .mcp-server-row:last-child {
+        border-bottom: none;
+        margin-bottom: 0;
+      }
+      .mcp-server-name {
+        font-weight: 600;
+        font-size: 11px;
+        color: var(--text-bright);
+        margin-bottom: 6px;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .mcp-tool-list {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        padding-left: 2px;
+      }
+      .mcp-tool-item {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11px;
+        color: var(--muted);
+        cursor: pointer;
+        padding: 1px 3px;
+        border-radius: 4px;
+        transition: background 0.1s;
+      }
+      .mcp-tool-item:hover {
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--text-bright);
+      }
+      .mcp-tool-item input[type='checkbox'] {
+        cursor: pointer;
+        width: 12px;
+        height: 12px;
       }
       .decision-row {
         display: flex;
@@ -880,6 +942,351 @@
         border: 1px solid var(--border);
       }
 
+      /* ── Pending approval cards (inline in Flight Recorder) ─────────── */
+      .pending-card {
+        background: rgba(240, 136, 62, 0.05);
+        border: 1px solid rgba(240, 136, 62, 0.35);
+        border-radius: 10px;
+        padding: 10px 12px;
+        margin-bottom: 6px;
+        animation: pop 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      }
+      .pending-card.slack-pending {
+        border-color: rgba(83, 155, 245, 0.35);
+        background: rgba(83, 155, 245, 0.04);
+      }
+      .pending-card-header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 5px;
+      }
+      .pending-agent-badge {
+        font-size: 10px;
+        font-weight: 700;
+        color: var(--primary);
+        background: rgba(240, 136, 62, 0.12);
+        padding: 1px 6px;
+        border-radius: 4px;
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .pending-tool-name {
+        font-size: 12px;
+        font-weight: 700;
+        color: var(--text-bright);
+        font-family: 'Fira Code', monospace;
+        margin-bottom: 3px;
+      }
+      .pending-args-preview {
+        font-size: 10px;
+        color: var(--muted);
+        font-family: monospace;
+        word-break: break-all;
+        margin-bottom: 8px;
+        max-height: 36px;
+        overflow: hidden;
+      }
+      .pending-actions {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 5px;
+        margin-bottom: 5px;
+      }
+      .btn-allow-sm {
+        background: var(--success);
+        color: #fff;
+        font-size: 12px;
+        font-weight: 700;
+        padding: 7px 6px;
+        border-radius: 7px;
+        border: none;
+        cursor: pointer;
+        transition: filter 0.15s;
+      }
+      .btn-allow-sm:hover:not(:disabled) {
+        filter: brightness(1.1);
+      }
+      .btn-deny-sm {
+        background: rgba(201, 60, 55, 0.15);
+        color: #e5534b;
+        border: 1px solid rgba(201, 60, 55, 0.3);
+        font-size: 12px;
+        font-weight: 700;
+        padding: 7px 6px;
+        border-radius: 7px;
+        cursor: pointer;
+        transition: background 0.15s;
+      }
+      .btn-deny-sm:hover:not(:disabled) {
+        background: var(--danger);
+        color: #fff;
+        border-color: transparent;
+      }
+      .pending-secondary {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 4px;
+        margin-bottom: 4px;
+      }
+      .pending-secondary button {
+        font-size: 10px;
+        padding: 4px 4px;
+        border-radius: 5px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid var(--border);
+        color: var(--muted);
+        cursor: pointer;
+        transition: color 0.15s;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .pending-secondary button:hover:not(:disabled) {
+        color: var(--text-bright);
+      }
+      .pending-detail-toggle {
+        background: transparent;
+        border: none;
+        color: var(--muted);
+        font-size: 10px;
+        cursor: pointer;
+        padding: 0;
+        font-family: inherit;
+        display: flex;
+        align-items: center;
+        gap: 3px;
+        margin-bottom: 4px;
+      }
+      .pending-detail-toggle:hover {
+        color: var(--text-bright);
+        filter: none;
+        transform: none;
+      }
+      .pending-detail {
+        border-top: 1px solid var(--border);
+        margin-top: 6px;
+        padding-top: 6px;
+        font-size: 11px;
+        overflow: hidden;
+      }
+      .pending-detail pre {
+        font-size: 10px;
+        max-height: 120px;
+        overflow-y: auto;
+      }
+      .pending-divider {
+        font-size: 9px;
+        font-weight: 700;
+        letter-spacing: 0.8px;
+        color: var(--muted);
+        text-transform: uppercase;
+        margin: 6px 0 4px;
+        opacity: 0.6;
+      }
+      #pending-count-badge {
+        background: var(--danger);
+        color: #fff;
+        font-size: 9px;
+        font-weight: 700;
+        padding: 1px 5px;
+        border-radius: 10px;
+        margin-left: 2px;
+        display: none;
+      }
+      /* ── Dashboard ───────────────────────────────────────────────────── */
+      .period-btn {
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--muted);
+        padding: 3px 10px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        border-radius: 4px;
+      }
+      .period-btn:hover {
+        color: var(--text-bright);
+      }
+      .period-btn.active {
+        background: var(--primary);
+        border-color: var(--primary);
+        color: #fff;
+      }
+      .dashboard-scorecard {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: 12px;
+        margin-bottom: 20px;
+      }
+      .score-card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 16px;
+        text-align: center;
+      }
+      .score-label {
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin-bottom: 8px;
+      }
+      .score-value {
+        font-size: 24px;
+        font-weight: 700;
+        color: var(--text-bright);
+      }
+      .score-value.danger {
+        color: #f87171;
+      }
+      .score-value.warning {
+        color: #fbbf24;
+      }
+
+      .chart-container {
+        height: 120px;
+        display: flex;
+        align-items: flex-end;
+        gap: 4px;
+        padding-top: 10px;
+      }
+      .chart-bar-wrapper {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+      }
+      .chart-bar {
+        width: 100%;
+        background: var(--accent);
+        border-radius: 4px 4px 0 0;
+        min-height: 2px;
+        transition: height 0.3s ease;
+      }
+      .chart-label {
+        font-size: 9px;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+
+      .top-tools-grid {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .tool-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        font-size: 12px;
+      }
+      .tool-name {
+        flex: 1;
+        font-family: 'Fira Code', monospace;
+        color: var(--text-bright);
+      }
+      .tool-bar-bg {
+        flex: 2;
+        height: 8px;
+        background: rgba(48, 54, 61, 0.5);
+        border-radius: 4px;
+        overflow: hidden;
+      }
+      .tool-bar-fill {
+        height: 100%;
+        background: var(--primary);
+        border-radius: 4px;
+      }
+      .tool-count {
+        width: 40px;
+        text-align: right;
+        color: var(--muted);
+        font-family: 'Fira Code', monospace;
+      }
+
+      /* ── Findings List ─────────────────────────────────────────────── */
+      .findings-list {
+        margin-top: 16px;
+        background: rgba(0, 0, 0, 0.2);
+        border-radius: 8px;
+        padding: 12px;
+        border: 1px solid var(--border);
+      }
+      .finding-item {
+        font-size: 11px;
+        padding: 6px 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        display: flex;
+        gap: 8px;
+        align-items: flex-start;
+      }
+      .finding-item:last-child {
+        border: none;
+      }
+      .finding-ts {
+        color: var(--muted);
+        width: 70px;
+        flex-shrink: 0;
+      }
+      .finding-rule {
+        color: var(--primary);
+        font-weight: 600;
+        width: 120px;
+        flex-shrink: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .finding-cmd {
+        color: var(--text);
+        font-family: 'Fira Code', monospace;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+      .finding-badge {
+        font-size: 9px;
+        padding: 1px 4px;
+        border-radius: 4px;
+        text-transform: uppercase;
+        font-weight: 700;
+        margin-right: 4px;
+      }
+      .badge-block {
+        background: rgba(201, 60, 55, 0.2);
+        color: #f87171;
+      }
+      .badge-leak {
+        background: rgba(240, 136, 62, 0.2);
+        color: #fbbf24;
+      }
+
+      .spinner {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        border: 2px solid rgba(255, 255, 255, 0.3);
+        border-radius: 50%;
+        border-top-color: #fff;
+        animation: spin 1s ease-in-out infinite;
+        margin-right: 8px;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      @media (max-width: 1100px) {
+        .body {
+          grid-template-columns: 380px 1fr 240px;
+        }
+      }
       @media (max-width: 960px) {
         .body {
           grid-template-columns: 1fr 220px;
@@ -893,6 +1300,533 @@
           grid-template-columns: 1fr;
         }
       }
+      /* ── Scan History Button ─────────────────────────────────────────── */
+      .btn-scan-history {
+        position: relative;
+        background: rgba(83, 155, 245, 0.1);
+        border: 1px solid rgba(83, 155, 245, 0.3);
+        color: var(--accent);
+        border-radius: 8px;
+        padding: 6px 14px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background 0.15s;
+      }
+      .btn-scan-history:hover {
+        background: rgba(83, 155, 245, 0.2);
+      }
+      .scan-badge {
+        position: absolute;
+        top: -6px;
+        right: -6px;
+        background: var(--danger);
+        color: #fff;
+        font-size: 10px;
+        font-weight: 700;
+        min-width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0 3px;
+        pointer-events: none;
+      }
+      /* ── Scan Modal ──────────────────────────────────────────────────── */
+      .scan-overlay {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.7);
+        z-index: 1000;
+        align-items: center;
+        justify-content: center;
+      }
+      .scan-overlay.open {
+        display: flex;
+      }
+      .scan-modal {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        width: min(760px, 94vw);
+        max-height: 85vh;
+        display: flex;
+        flex-direction: column;
+        box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+        overflow: hidden;
+      }
+      .scan-modal-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 16px 20px;
+        border-bottom: 1px solid var(--border);
+        font-size: 14px;
+        font-weight: 700;
+        color: var(--text-bright);
+      }
+      .scan-modal-close {
+        background: none;
+        border: none;
+        color: var(--muted);
+        font-size: 16px;
+        cursor: pointer;
+        padding: 2px 6px;
+        border-radius: 4px;
+      }
+      .scan-modal-close:hover {
+        color: var(--text-bright);
+        background: rgba(255, 255, 255, 0.05);
+      }
+      #scan-modal-body {
+        padding: 24px 20px;
+        overflow-y: auto;
+        flex: 1;
+      }
+      /* progress */
+      .scan-progress-label {
+        font-size: 13px;
+        color: var(--text-bright);
+        margin-bottom: 16px;
+        text-align: center;
+      }
+      .scan-progress-track {
+        height: 8px;
+        background: rgba(255, 255, 255, 0.06);
+        border-radius: 4px;
+        overflow: hidden;
+        margin-bottom: 8px;
+      }
+      .scan-progress-bar {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, var(--accent), #7cb9f8);
+        border-radius: 4px;
+        transition: width 0.3s ease;
+      }
+      .scan-progress-bar.indeterminate {
+        width: 40%;
+        animation: indeterminate 1.4s ease-in-out infinite;
+      }
+      @keyframes indeterminate {
+        0% {
+          transform: translateX(-100%);
+        }
+        100% {
+          transform: translateX(350%);
+        }
+      }
+      .scan-progress-sub {
+        font-size: 11px;
+        color: var(--muted);
+        text-align: center;
+      }
+      /* results */
+      .scan-summary-row {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 10px;
+        margin-bottom: 20px;
+      }
+      .scan-stat {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 12px;
+        text-align: center;
+      }
+      .scan-stat-val {
+        font-size: 22px;
+        font-weight: 700;
+        color: var(--text-bright);
+      }
+      .scan-stat-val.danger {
+        color: #e5534b;
+      }
+      .scan-stat-val.warning {
+        color: #f0c040;
+      }
+      .scan-stat-val.ok {
+        color: #57ab5a;
+      }
+      .scan-stat-label {
+        font-size: 10px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-top: 4px;
+      }
+      .scan-group {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        margin-bottom: 12px;
+        overflow: hidden;
+      }
+      .scan-group-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--border);
+        font-size: 11px;
+        font-weight: 700;
+        color: var(--text-bright);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        cursor: pointer;
+        user-select: none;
+      }
+      .scan-group-header:hover {
+        background: rgba(255, 255, 255, 0.02);
+      }
+      .scan-group-count {
+        margin-left: auto;
+        font-size: 10px;
+        padding: 2px 7px;
+        border-radius: 4px;
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--muted);
+      }
+      .scan-group-body {
+        padding: 6px 0;
+      }
+      .scan-finding-row {
+        display: grid;
+        grid-template-columns: 60px 160px 1fr;
+        gap: 8px;
+        padding: 7px 14px;
+        font-size: 11px;
+        border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+        align-items: center;
+      }
+      .scan-finding-row:last-child {
+        border-bottom: none;
+      }
+      .scan-finding-ts {
+        color: var(--muted);
+        font-family: 'Fira Code', monospace;
+      }
+      .scan-finding-rule {
+        color: var(--accent);
+        font-weight: 600;
+      }
+      .scan-verdict-badge {
+        display: inline-block;
+        padding: 1px 6px;
+        border-radius: 4px;
+        font-size: 10px;
+        font-weight: 700;
+        margin-right: 6px;
+      }
+      .badge-block {
+        background: rgba(201, 60, 55, 0.2);
+        color: #e5534b;
+      }
+      .badge-review {
+        background: rgba(240, 192, 64, 0.15);
+        color: #f0c040;
+      }
+      .badge-dlp {
+        background: rgba(201, 60, 55, 0.2);
+        color: #e5534b;
+      }
+      .badge-user {
+        background: rgba(56, 139, 253, 0.15);
+        color: #58a6ff;
+        font-size: 9px;
+      }
+      .scan-agent-group {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+        padding: 6px 14px 14px;
+        border-bottom: 1px solid var(--border);
+        margin-bottom: 8px;
+      }
+      .scan-agent-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .scan-agent-name {
+        color: var(--text);
+        font-weight: 600;
+      }
+      .scan-agent-stat {
+        color: var(--muted);
+      }
+      .scan-agent-sep {
+        color: var(--border);
+      }
+      .savings-card {
+        background: rgba(56, 139, 253, 0.06);
+        border: 1px solid rgba(56, 139, 253, 0.2);
+        border-radius: 8px;
+        padding: 12px 14px;
+        margin: 4px 0 14px;
+      }
+      .savings-card-title {
+        font-size: 11px;
+        font-weight: 600;
+        color: #58a6ff;
+        margin-bottom: 10px;
+        letter-spacing: 0.03em;
+      }
+      .savings-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 0;
+        font-size: 12px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      }
+      .savings-row:last-child {
+        border-bottom: none;
+      }
+      .savings-icon {
+        width: 18px;
+        text-align: center;
+        flex-shrink: 0;
+      }
+      .savings-label {
+        flex: 1;
+        color: var(--muted);
+      }
+      .savings-val {
+        font-weight: 600;
+        font-size: 13px;
+        white-space: nowrap;
+      }
+      /* ── Session status strip ─────────────────────────────────────────────── */
+      #session-strip {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 6px 16px;
+        background: rgba(0, 0, 0, 0.25);
+        border-bottom: 1px solid var(--border);
+        font-size: 11px;
+        color: var(--muted);
+        flex-wrap: wrap;
+      }
+      .strip-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        flex-shrink: 0;
+        transition: background 0.4s;
+      }
+      .strip-dot.loading {
+        background: #8b949e;
+        box-shadow: 0 0 5px #8b949e88;
+        animation: stripPulse 1.2s ease-in-out infinite;
+      }
+      @keyframes stripPulse {
+        0%,
+        100% {
+          opacity: 0.4;
+        }
+        50% {
+          opacity: 1;
+        }
+      }
+      .strip-loading {
+        color: var(--muted) !important;
+        opacity: 0.6;
+      }
+      .strip-dot.green {
+        background: #57ab5a;
+        box-shadow: 0 0 5px #57ab5a88;
+      }
+      .strip-dot.yellow {
+        background: #f0c040;
+        box-shadow: 0 0 5px #f0c04088;
+      }
+      .strip-dot.red {
+        background: #e5534b;
+        box-shadow: 0 0 5px #e5534b88;
+      }
+      .strip-label {
+        font-weight: 600;
+        color: var(--text);
+      }
+      .strip-sep {
+        color: var(--border);
+      }
+      .strip-val {
+        color: var(--text);
+        font-weight: 500;
+      }
+      .strip-val.danger {
+        color: #e5534b;
+      }
+      .strip-val.warning {
+        color: #f0c040;
+      }
+      .strip-val.mcp {
+        color: #f0c040;
+      }
+      /* ── Toast notifications ─────────────────────────────────────────────── */
+      #toast-container {
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        display: flex;
+        flex-direction: column-reverse;
+        gap: 8px;
+        z-index: 9999;
+        pointer-events: none;
+      }
+      .toast {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        padding: 10px 14px;
+        background: #2d333b;
+        border: 1px solid var(--border);
+        border-left: 3px solid #57ab5a;
+        border-radius: 8px;
+        font-size: 12px;
+        color: var(--text);
+        min-width: 240px;
+        max-width: 340px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+        animation: toastIn 0.25s ease;
+        pointer-events: auto;
+      }
+      .toast.toast-block {
+        border-left-color: #e5534b;
+      }
+      .toast.toast-dlp {
+        border-left-color: #e5534b;
+      }
+      .toast.toast-mcp {
+        border-left-color: #f0c040;
+      }
+      .toast-icon {
+        font-size: 14px;
+        flex-shrink: 0;
+        line-height: 1.4;
+      }
+      .toast-body {
+        flex: 1;
+        line-height: 1.5;
+      }
+      .toast-title {
+        font-weight: 600;
+        margin-bottom: 1px;
+      }
+      .toast-sub {
+        font-size: 11px;
+        color: var(--muted);
+      }
+      @keyframes toastIn {
+        from {
+          opacity: 0;
+          transform: translateX(20px);
+        }
+        to {
+          opacity: 1;
+          transform: translateX(0);
+        }
+      }
+      .toast.toast-out {
+        animation: toastOut 0.3s ease forwards;
+      }
+      @keyframes toastOut {
+        to {
+          opacity: 0;
+          transform: translateX(20px);
+        }
+      }
+      .scan-finding-cmd {
+        color: var(--text);
+        font-family: 'Fira Code', monospace;
+        font-size: 10px;
+      }
+      .scan-export-row {
+        display: flex;
+        gap: 10px;
+        margin-top: 20px;
+        justify-content: flex-end;
+      }
+      .btn-export {
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--border);
+        color: var(--text-bright);
+        border-radius: 8px;
+        padding: 7px 16px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .btn-export:hover {
+        background: rgba(255, 255, 255, 0.1);
+      }
+      /* rule aggregation rows */
+      .scan-rule-section-label {
+        padding: 8px 14px 4px;
+        font-size: 10px;
+        font-weight: 700;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+      .scan-rule-row {
+        display: grid;
+        grid-template-columns: 50px 1fr 80px 32px 16px;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 14px;
+        cursor: pointer;
+        border-bottom: 1px solid rgba(48, 54, 61, 0.4);
+        transition: background 0.1s;
+      }
+      .scan-rule-row:hover {
+        background: rgba(255, 255, 255, 0.03);
+      }
+      .scan-rule-name {
+        font-size: 12px;
+        color: var(--accent);
+        font-weight: 600;
+      }
+      .scan-rule-bar-wrap {
+        height: 5px;
+        background: rgba(255, 255, 255, 0.06);
+        border-radius: 3px;
+        overflow: hidden;
+      }
+      .scan-rule-bar {
+        display: block;
+        height: 100%;
+        background: var(--accent);
+        border-radius: 3px;
+        opacity: 0.6;
+      }
+      .scan-rule-count {
+        font-size: 11px;
+        color: var(--text-bright);
+        font-weight: 700;
+        text-align: right;
+      }
+      .scan-rule-arrow {
+        font-size: 9px;
+        color: var(--muted);
+        text-align: center;
+      }
+      .scan-rule-detail {
+        background: rgba(0, 0, 0, 0.2);
+        border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+      }
+      .scan-rule-detail .scan-finding-row {
+        grid-template-columns: 56px 1fr;
+        padding: 5px 14px 5px 24px;
+      }
     </style>
   </head>
   <body>
@@ -900,8 +1834,63 @@
       <header>
         <span class="logo">🛡️</span>
         <h1>Node9 Guard</h1>
-        <div id="st" class="status-badge">Waiting...</div>
+        <div id="st" class="status-badge">🔄 Connecting…</div>
+        <button class="btn-scan-history" onclick="openScanModal()" id="btn-scan-history">
+          🔍 Scan History
+        </button>
       </header>
+
+      <!-- ── Session Status Strip ─────────────────────────────────────────── -->
+      <div id="session-strip">
+        <span id="strip-dot" class="strip-dot loading"></span>
+        <span id="strip-label" class="strip-label">Connecting to Node9 daemon…</span>
+        <span class="strip-sep">·</span>
+        <span id="strip-approved" class="strip-val strip-loading">— approved</span>
+        <span class="strip-sep">·</span>
+        <span id="strip-blocked-val" class="strip-val strip-loading">— blocked</span>
+        <span class="strip-sep">·</span>
+        <span id="strip-cost" class="strip-val strip-loading">— spent</span>
+        <span id="strip-mcp-wrap" style="display: none">
+          <span class="strip-sep">·</span>
+          <span id="strip-mcp-val" class="strip-val mcp">0 large MCP responses</span>
+        </span>
+      </div>
+
+      <!-- ── Scan History Modal ─────────────────────────────────────────── -->
+      <div id="scan-modal-overlay" class="scan-overlay" onclick="closeScanModal(event)">
+        <div class="scan-modal" id="scan-modal">
+          <div class="scan-modal-header">
+            <span>🔍 History Audit</span>
+            <button class="scan-modal-close" onclick="closeScanModal()">✕</button>
+          </div>
+          <div id="scan-modal-body">
+            <!-- progress state -->
+            <div id="scan-progress-view">
+              <div class="scan-progress-label" id="scan-progress-label">Preparing scan…</div>
+              <div class="scan-progress-track">
+                <div class="scan-progress-bar" id="scan-progress-bar"></div>
+              </div>
+              <div class="scan-progress-sub" id="scan-progress-sub">0 files</div>
+            </div>
+            <!-- results state -->
+            <div id="scan-results-view" style="display: none">
+              <div id="scan-results-content"></div>
+              <div class="scan-export-row">
+                <button
+                  class="btn-export"
+                  id="btn-expand-all"
+                  onclick="toggleExpandAll(this)"
+                  style="margin-right: auto"
+                >
+                  ↕ Expand All
+                </button>
+                <button class="btn-export" onclick="exportScanPng()">📸 Save as Image</button>
+                <button class="btn-export" onclick="exportScanJson()">💾 Export JSON</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <div class="body">
         <div class="flight-col">
@@ -909,8 +1898,19 @@
             <div class="panel-title">
               🛰️ Flight Recorder
               <span style="font-weight: 400; color: var(--muted); font-size: 11px">live</span>
+              <span id="pending-count-badge"></span>
               <button class="feed-clear-btn" onclick="clearFeed()">clear</button>
             </div>
+            <div id="warnBanner" class="warning-banner">
+              ⚠️ Auto-start is off — daemon started manually. Run "node9 daemon stop" to stop it, or
+              enable Auto-start in Settings.
+            </div>
+            <div id="list"></div>
+            <div id="empty">
+              <span class="empty-icon" id="empty-icon">⏳</span>
+              <span id="empty-text">Connecting to Node9 daemon…</span>
+            </div>
+            <div class="pending-divider">Activity</div>
             <div id="activity-feed">
               <span class="decisions-empty">Waiting for agent activity…</span>
             </div>
@@ -918,15 +1918,106 @@
         </div>
 
         <div class="main">
-          <div id="warnBanner" class="warning-banner">
-            ⚠️ Auto-start is off — daemon started manually. Run "node9 daemon stop" to stop it, or
-            enable Auto-start in Settings.
-          </div>
-          <div class="section-title">Pending Approvals</div>
-          <div id="list"></div>
-          <div id="empty">
-            <span class="empty-icon">✨</span>
-            <span>All clear — no pending tool calls.</span>
+          <div id="tab-dashboard">
+            <div
+              style="
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                margin-bottom: 12px;
+              "
+            >
+              <div class="section-title" style="margin: 0">Local Protection Dashboard</div>
+              <div style="display: flex; gap: 6px">
+                <button
+                  class="period-btn active"
+                  id="period-btn-1d"
+                  onclick="setDashboardPeriod('today', this)"
+                >
+                  1d
+                </button>
+                <button
+                  class="period-btn"
+                  id="period-btn-7d"
+                  onclick="setDashboardPeriod('7d', this)"
+                >
+                  7d
+                </button>
+              </div>
+            </div>
+            <div class="dashboard-scorecard">
+              <div class="score-card">
+                <div class="score-label">Total Events</div>
+                <div class="score-value" id="stat-total">0</div>
+              </div>
+              <div class="score-card">
+                <div class="score-label">Protection Rate</div>
+                <div class="score-value" id="stat-rate" style="color: #58a6ff">—</div>
+              </div>
+              <div class="score-card">
+                <div class="score-label">Blocked</div>
+                <div class="score-value danger" id="stat-blocked">0</div>
+              </div>
+              <div class="score-card">
+                <div class="score-label">DLP Caught</div>
+                <div class="score-value warning" id="stat-dlp">0</div>
+              </div>
+              <div class="score-card">
+                <div class="score-label">Loops Stopped</div>
+                <div class="score-value warning" id="stat-loops">0</div>
+              </div>
+            </div>
+
+            <div class="card" style="margin-top: 20px">
+              <div class="card-header">
+                <span class="card-header-icon">🤖</span>
+                <span class="card-header-title">By Agent</span>
+              </div>
+              <div id="by-agent-list" class="top-tools-grid">
+                <div class="decisions-empty">No agent activity yet.</div>
+              </div>
+              <div
+                style="
+                  font-size: 10px;
+                  color: var(--muted);
+                  padding: 8px 14px 0;
+                  font-style: italic;
+                "
+              >
+                💡 Codex is history-only — view Codex activity in Scan History
+              </div>
+            </div>
+
+            <div class="card" style="margin-top: 20px">
+              <div class="card-header">
+                <span class="card-header-icon">📈</span>
+                <span class="card-header-title" id="daily-chart-title">Daily Activity</span>
+              </div>
+              <div id="daily-chart" class="chart-container">
+                <!-- Bar chart will be rendered here -->
+                <div class="decisions-empty">No activity data found.</div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-header">
+                <span class="card-header-icon">🛠️</span>
+                <span class="card-header-title">Top Tools</span>
+              </div>
+              <div id="top-tools-list" class="top-tools-grid">
+                <div class="decisions-empty">No tool usage yet.</div>
+              </div>
+            </div>
+
+            <div class="card" style="margin-top: 20px">
+              <div class="card-header">
+                <span class="card-header-icon">🛑</span>
+                <span class="card-header-title">Top Blocked Tools</span>
+              </div>
+              <div id="top-blocked-list" class="top-tools-grid">
+                <div class="decisions-empty">Nothing blocked — all clear.</div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -968,13 +2059,53 @@
           </div>
 
           <div class="panel">
-            <div class="panel-title">💬 Cloud Approvals</div>
+            <div class="panel-title">🔔 Approvers</div>
             <div class="setting-row">
               <div class="setting-text">
-                <div class="setting-label">Enable Cloud</div>
-                <div class="setting-desc">
-                  Use Cloud/Slack as the approval authority when a key is saved.
-                </div>
+                <div class="setting-label">Terminal</div>
+                <div class="setting-desc">Inline approval prompt in the agent's terminal.</div>
+              </div>
+              <label class="toggle">
+                <input
+                  type="checkbox"
+                  id="approverTerminalToggle"
+                  onchange="saveSetting('approverTerminal', this.checked)"
+                />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="setting-row">
+              <div class="setting-text">
+                <div class="setting-label">Native Popup</div>
+                <div class="setting-desc">OS-level dialog (zenity / osascript).</div>
+              </div>
+              <label class="toggle">
+                <input
+                  type="checkbox"
+                  id="approverNativeToggle"
+                  onchange="saveSetting('approverNative', this.checked)"
+                />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="setting-row">
+              <div class="setting-text">
+                <div class="setting-label">Browser</div>
+                <div class="setting-desc">This dashboard (auto-opens on pending request).</div>
+              </div>
+              <label class="toggle">
+                <input
+                  type="checkbox"
+                  id="approverBrowserToggle"
+                  onchange="saveSetting('approverBrowser', this.checked)"
+                />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="setting-row">
+              <div class="setting-text">
+                <div class="setting-label">Cloud / Slack</div>
+                <div class="setting-desc">Remote approval via node9.ai or Slack.</div>
               </div>
               <label class="toggle">
                 <input
@@ -985,16 +2116,18 @@
                 <span class="slider"></span>
               </label>
             </div>
-            <div class="slack-key-row">
-              <input
-                type="password"
-                id="slackKeyInput"
-                class="slack-key-input"
-                placeholder="Paste API key…"
-              />
-              <button class="btn-save-key" onclick="saveSlackKey()">Save</button>
+            <div id="slackKeySection">
+              <div class="slack-key-row">
+                <input
+                  type="password"
+                  id="slackKeyInput"
+                  class="slack-key-input"
+                  placeholder="Paste Cloud API key…"
+                />
+                <button class="btn-save-key" onclick="saveSlackKey()">Save</button>
+              </div>
+              <div id="slackStatusLine" class="slack-status-line">No key saved</div>
             </div>
-            <div id="slackStatusLine" class="slack-status-line">No key saved</div>
           </div>
 
           <div class="panel">
@@ -1005,6 +2138,16 @@
           <div class="panel">
             <div class="panel-title">📋 Persistent Decisions</div>
             <div id="decisionsList"><span class="decisions-empty">None yet.</span></div>
+          </div>
+
+          <div class="panel" id="mcpToolsPanel" style="display: none">
+            <div class="panel-title">🛠️ MCP Tools</div>
+            <div id="mcpToolsList"><span class="decisions-empty">None yet.</span></div>
+          </div>
+
+          <div class="panel" id="largeResponsePanel" style="display: none">
+            <div class="panel-title">⚡ Large MCP Responses</div>
+            <div id="largeResponseList"></div>
           </div>
 
           <div class="panel" id="suggestionsPanel" style="display: none">
@@ -1029,8 +2172,48 @@
       </div>
     </div>
 
+    <div id="mcpReviewModal" class="modal-overlay">
+      <div
+        class="modal"
+        style="
+          max-width: 500px;
+          max-height: 80vh;
+          overflow: hidden;
+          display: flex;
+          flex-direction: column;
+        "
+      >
+        <h2 id="mcpReviewServer">🔌 MCP Server Review</h2>
+        <p style="font-size: 13px; color: var(--muted); margin-bottom: 12px">
+          Review the tools offered by this server. Uncheck any tools you want to hide from the AI
+          agent to save tokens and improve security.
+        </p>
+        <div
+          id="mcpReviewList"
+          style="
+            flex: 1;
+            overflow-y: auto;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 8px;
+            padding: 10px;
+            margin-bottom: 16px;
+            border: 1px solid var(--border);
+          "
+        >
+          <!-- Tools populated here -->
+        </div>
+        <div class="modal-actions">
+          <button class="btn-modal-yes" onclick="approveMcpDiscovery()">
+            Allow Selected Tools
+          </button>
+          <button class="btn-modal-no" onclick="closeMcpReview()">Cancel</button>
+        </div>
+      </div>
+    </div>
+
     <script>
-      const CSRF_TOKEN = '{{CSRF_TOKEN}}';
+      let CSRF_TOKEN = '{{CSRF_TOKEN}}';
+      let _dashboardPeriod = 'today';
       const list = document.getElementById('list');
       const empty = document.getElementById('empty');
       const st = document.getElementById('st');
@@ -1051,20 +2234,22 @@
       }
 
       function updateDenyButton(id, timestamp) {
-        const btn = document.querySelector('#c-' + id + ' .btn-deny');
+        const btn = document.querySelector('#c-' + id + ' .btn-deny-sm');
         const timer = document.querySelector('#timer-' + id);
         if (!btn) return;
         const elapsed = Date.now() - timestamp;
         const remaining = Math.max(0, Math.ceil((autoDenyMs - elapsed) / 1000));
         if (remaining <= 0) {
-          btn.textContent = '⏳ Auto-Denying…';
-          btn.disabled = true;
+          if (btn) {
+            btn.textContent = '⏳…';
+            btn.disabled = true;
+          }
           if (timer) {
-            timer.textContent = 'auto-deny';
+            timer.textContent = 'auto';
             timer.className = 'card-timer urgent';
           }
         } else {
-          btn.textContent = '🚫 Block this Action';
+          if (btn) btn.textContent = '🚫 Block';
           if (timer) {
             timer.textContent = remaining + 's';
             timer.className = 'card-timer' + (remaining < 15 ? ' urgent' : '');
@@ -1073,15 +2258,29 @@
         }
       }
 
+      function truncate(s, n) {
+        return s && s.length > n ? s.slice(0, n) + '…' : s || '';
+      }
       function esc(s) {
+        // Also escape ' (as &#39;) — some onclick/onchange handlers embed
+        // values inside single-quoted JS strings, so an unescaped apostrophe
+        // would break out of that string and execute attacker code.
+        // Browsers decode &#39; back to ' in text contexts, so no visible change.
         return String(s)
           .replace(/&/g, '&amp;')
           .replace(/</g, '&lt;')
           .replace(/>/g, '&gt;')
-          .replace(/"/g, '&quot;');
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
       }
       function refresh() {
-        empty.style.display = requests.size === 0 ? 'block' : 'none';
+        const isEmpty = requests.size === 0;
+        empty.style.display = isEmpty ? 'flex' : 'none';
+        const badge = document.getElementById('pending-count-badge');
+        if (badge) {
+          badge.textContent = requests.size > 0 ? String(requests.size) : '';
+          badge.style.display = requests.size > 0 ? 'inline' : 'none';
+        }
       }
 
       function setCardBusy(card, busy) {
@@ -1180,44 +2379,80 @@
         `;
       }
 
+      function togglePendingDetail(btn) {
+        const detail = btn.closest('.pending-card').querySelector('.pending-detail');
+        const open = detail.style.display !== 'none';
+        detail.style.display = open ? 'none' : '';
+        btn.textContent = open ? '▼ Details' : '▲ Hide';
+      }
+
+      const pendingRequests = new Map();
       function addCard(req) {
         if (requests.has(req.id)) return;
         requests.add(req.id);
+        pendingRequests.set(req.id, req);
         refresh();
+
+        if (req.type === 'mcp-discovery') {
+          const card = document.createElement('div');
+          card.className = 'pending-card discovery-card';
+          card.id = 'c-' + req.id;
+          card.innerHTML = `
+            <div class="pending-card-header">
+              <span style="font-size:14px">🔌</span>
+              <span class="pending-agent-badge">New MCP Server Discovered</span>
+              <span class="card-timer" id="timer-${req.id}">60s</span>
+            </div>
+            <div class="pending-tool-name" style="color:var(--accent)">${esc(req.serverKey)}</div>
+            <div class="pending-args-preview">${req.mcpTools.length} tool(s) found. Review and allow before the agent can use them.</div>
+            <div class="pending-actions">
+              <button class="btn-allow-sm" onclick="openMcpReview('${req.id}', '${esc(req.serverKey)}')">🔍 Review & Allow</button>
+              <button class="btn-deny-sm" onclick="sendDecision('${req.id}','deny',false)">🚫 Ignore</button>
+            </div>
+          `;
+          list.appendChild(card);
+          return;
+        }
+
         const isSlack = !!req.slackDelegated;
         const card = document.createElement('div');
-        card.className = 'card' + (isSlack ? ' slack-viewer' : '');
+        card.className = 'pending-card' + (isSlack ? ' slack-pending' : '');
         card.id = 'c-' + req.id;
         const agentLabel = req.agent ? esc(req.agent) : 'AI Agent';
         const mcpLabel = req.mcpServer ? esc(req.mcpServer) : null;
-        const dis = isSlack ? 'disabled' : '';
+        const timerVal = autoDenyMs > 0 ? Math.ceil(autoDenyMs / 1000) + 's' : '';
+        const argsStr = JSON.stringify(req.args ?? {});
+        const argsPreview = esc(argsStr.length > 140 ? argsStr.slice(0, 140) + '…' : argsStr);
+        const insight =
+          req.allowCount >= 3
+            ? `<div class="insight-hint" style="font-size:10px;margin-bottom:6px">💡 Approved ${req.allowCount - 1}× — "Always Allow" makes it permanent</div>`
+            : '';
+        const slackNote = isSlack
+          ? `<div style="font-size:10px;color:var(--accent);margin-bottom:6px">⚡ Cloud approver notified — first decision wins</div>`
+          : '';
         card.innerHTML = `
-        <div class="card-header">
-          <span class="card-header-icon">${isSlack ? '⚡' : '⚠️'}</span>
-          <span class="card-header-title">${isSlack ? 'Awaiting Cloud Approval' : 'Action Required'}</span>
-          <span class="card-timer" id="timer-${req.id}">${autoDenyMs > 0 ? Math.ceil(autoDenyMs / 1000) + 's' : ''}</span>
-        </div>
-        <div class="source-row">
-          <span class="agent-badge">${agentLabel}</span>
-          ${mcpLabel ? `<span class="source-arrow">→</span><span class="mcp-badge">mcp::${mcpLabel}</span>` : ''}
-        </div>
-        <div class="tool-chip">${esc(req.toolName)}</div>
-        ${isSlack ? '<div class="slack-indicator">⚡ Awaiting Cloud approval — view only</div>' : ''}
-        ${req.allowCount >= 3 ? `<div class="insight-hint">💡 Approved ${req.allowCount - 1}× before — "Always Allow" creates a permanent rule</div>` : ''}
-        ${renderPayload(req)}
-        <div class="actions" id="act-${req.id}">
-          <button class="btn-allow" onclick="sendDecision('${req.id}','allow',false)" ${dis}>✅ Allow this Action</button>
-          <button class="btn-deny"  onclick="sendDecision('${req.id}','deny',false)"  ${dis}>🚫 Block this Action</button>
-          <div class="trust-row${trustEnabled ? ' show' : ''}" id="tr-${req.id}">
-            <button class="btn-trust" onclick="sendTrust('${req.id}','30m')" ${dis}>⏱ Trust 30m</button>
-            <button class="btn-trust" onclick="sendTrust('${req.id}','1h')"  ${dis}>⏱ Trust 1h</button>
+          <div class="pending-card-header">
+            <span style="font-size:14px">${isSlack ? '⚡' : '⚠️'}</span>
+            <span class="pending-agent-badge">${agentLabel}${mcpLabel ? ' → ' + mcpLabel : ''}</span>
+            <span class="card-timer" id="timer-${req.id}">${timerVal}</span>
           </div>
-          <button class="btn-secondary" onclick="sendDecision('${req.id}','allow',true)" ${dis}>Always Allow</button>
-          <button class="btn-secondary" onclick="sendDecision('${req.id}','deny',true)"  ${dis}>Always Deny</button>
-        </div>
-      `;
+          <div class="pending-tool-name">${esc(req.toolName)}</div>
+          <div class="pending-args-preview">${argsPreview}</div>
+          ${slackNote}${insight}
+          <div class="pending-actions">
+            <button class="btn-allow-sm" onclick="sendDecision('${req.id}','allow',false)">✅ Allow</button>
+            <button class="btn-deny-sm"  onclick="sendDecision('${req.id}','deny',false)">🚫 Block</button>
+          </div>
+          <div class="pending-secondary">
+            <button onclick="sendDecision('${req.id}','allow',true)">Always Allow</button>
+            <button onclick="sendDecision('${req.id}','deny',true)">Always Deny</button>
+            ${trustEnabled ? `<button onclick="sendTrust('${req.id}','30m')">⏱ 30m</button><button onclick="sendTrust('${req.id}','1h')">⏱ 1h</button>` : ''}
+          </div>
+          <button class="pending-detail-toggle" onclick="togglePendingDetail(this)">▼ Details</button>
+          <div class="pending-detail" style="display:none">${renderPayload(req)}</div>
+        `;
         list.appendChild(card);
-        if (!isSlack) updateDenyButton(req.id, req.timestamp || Date.now());
+        updateDenyButton(req.id, req.timestamp || Date.now());
         if (!isSlack) {
           try {
             new Audio(
@@ -1227,18 +2462,118 @@
         }
       }
 
+      // ── Session strip state ───────────────────────────────────────────────
+      let _stripAllowed = 0;
+      let _stripBlocked = 0;
+      let _stripCost = 0;
+      let _stripLargeMcp = 0;
+      const _activityToolMap = new Map(); // id → toolName for toast lookup
+
+      let _stripConnected = false;
+      function updateStrip() {
+        const dot = document.getElementById('strip-dot');
+        const label = document.getElementById('strip-label');
+        const approvedEl = document.getElementById('strip-approved');
+        const blockedEl = document.getElementById('strip-blocked-val');
+        const costEl = document.getElementById('strip-cost');
+
+        // Remove loading state once any real data arrives
+        approvedEl.classList.remove('strip-loading');
+        blockedEl.classList.remove('strip-loading');
+        costEl.classList.remove('strip-loading');
+
+        approvedEl.textContent = _stripAllowed + ' approved';
+        blockedEl.textContent = _stripBlocked + ' blocked';
+        blockedEl.className = 'strip-val' + (_stripBlocked ? ' danger' : '');
+        costEl.textContent = '$' + _stripCost.toFixed(2) + ' spent';
+
+        const mcpWrap = document.getElementById('strip-mcp-wrap');
+        if (_stripLargeMcp > 0) {
+          mcpWrap.style.display = '';
+          document.getElementById('strip-mcp-val').textContent =
+            _stripLargeMcp + ' large MCP response' + (_stripLargeMcp !== 1 ? 's' : '');
+        } else {
+          mcpWrap.style.display = 'none';
+        }
+
+        const hasActivity = _stripAllowed > 0 || _stripBlocked > 0 || _stripLargeMcp > 0;
+        if (_stripBlocked > 0) {
+          dot.className = 'strip-dot red';
+          label.textContent = 'Threat blocked';
+        } else if (_stripLargeMcp > 0) {
+          dot.className = 'strip-dot yellow';
+          label.textContent = 'MCP alert';
+        } else if (_stripConnected && !hasActivity) {
+          dot.className = 'strip-dot green';
+          label.textContent = 'Protected — waiting for agent activity';
+        } else {
+          dot.className = 'strip-dot green';
+          label.textContent = 'Protected';
+        }
+      }
+
+      function showToast(icon, title, sub, typeClass) {
+        const container = document.getElementById('toast-container');
+        const t = document.createElement('div');
+        t.className = 'toast ' + (typeClass || '');
+        t.innerHTML =
+          '<span class="toast-icon">' +
+          icon +
+          '</span>' +
+          '<div class="toast-body"><div class="toast-title">' +
+          esc(title) +
+          '</div>' +
+          (sub ? '<div class="toast-sub">' + esc(sub) + '</div>' : '') +
+          '</div>';
+        container.appendChild(t);
+        setTimeout(() => {
+          t.classList.add('toast-out');
+          setTimeout(() => t.remove(), 320);
+        }, 4000);
+      }
+
+      // ── Count-up animation for scan stats ────────────────────────────────
+      function animateCountUp(container) {
+        const els = container.querySelectorAll('[data-countup]');
+        if (!els.length) return;
+        const duration = 700;
+        const start = performance.now();
+        function step(now) {
+          const t = Math.min((now - start) / duration, 1);
+          const ease = 1 - Math.pow(1 - t, 3);
+          els.forEach(function (el) {
+            const target = parseFloat(el.dataset.countup);
+            const isCurrency = el.dataset.countupFmt === 'usd';
+            const val = target * ease;
+            el.textContent = isCurrency
+              ? '$' + val.toFixed(val < 1 ? 3 : 2)
+              : Math.round(val).toString();
+          });
+          if (t < 1) requestAnimationFrame(step);
+          else
+            els.forEach(function (el) {
+              el.textContent = el.dataset.countupFinal || el.dataset.countup;
+            });
+        }
+        requestAnimationFrame(step);
+      }
+
       function connect() {
         const ev = new EventSource('/events');
         ev.onopen = () => {
           st.className = 'status-badge online';
-          st.innerText = 'System Live';
+          st.innerText = '✅ Live';
         };
         ev.onerror = () => {
           st.className = 'status-badge';
-          st.innerText = 'Reconnecting...';
+          st.innerText = '🔄 Reconnecting…';
           setTimeout(connect, 2000);
           ev.close();
         };
+        ev.addEventListener('csrf', (e) => {
+          const data = JSON.parse(e.data);
+          if (data.token) CSRF_TOKEN = data.token;
+        });
         ev.addEventListener('init', (e) => {
           const data = JSON.parse(e.data);
           orgName = data.orgName;
@@ -1250,6 +2585,11 @@
               b.classList.add('online');
             }
           }
+          // Switch from "connecting" to "all clear" now that we have real state
+          document.getElementById('empty-icon').textContent = '✨';
+          document.getElementById('empty-text').textContent = 'All clear — no pending tool calls.';
+          _stripConnected = true;
+          updateStrip();
           data.requests.forEach(addCard);
         });
         ev.addEventListener('add', (e) => {
@@ -1270,6 +2610,38 @@
         ev.addEventListener('shields-status', (e) => {
           renderShields(JSON.parse(e.data).shields);
         });
+        ev.addEventListener('mcp-large-response', (e) => {
+          const ev2 = JSON.parse(e.data);
+          addLargeResponseEntry(ev2);
+          _stripLargeMcp++;
+          updateStrip();
+          const kb = ev2.originalBytes ? Math.round(ev2.originalBytes / 1024) : '?';
+          showToast(
+            '⚡',
+            'Large MCP response',
+            (ev2.toolName || 'unknown') + ' · ' + kb + 'KB injected into context',
+            'toast-mcp'
+          );
+        });
+        ev.addEventListener('mcp-large-response-history', (e) => {
+          const { events } = JSON.parse(e.data);
+          events.forEach(addLargeResponseEntry);
+          _stripLargeMcp = events.length;
+          updateStrip();
+        });
+        ev.addEventListener('scan-ready', () => {
+          // CLI `node9 scan` just pushed fresh results — fetch from cache and open modal
+          fetch('/scan', { headers: { 'X-Node9-Token': CSRF_TOKEN } })
+            .then(function (r) {
+              return r.ok ? r.json() : null;
+            })
+            .then(function (data) {
+              if (!data) return;
+              _scanData = data;
+              openScanModal();
+            })
+            .catch(function () {});
+        });
         ev.addEventListener('suggestion:new', (e) => {
           const s = JSON.parse(e.data);
           addSuggestionCard(s);
@@ -1278,10 +2650,20 @@
           const { id } = JSON.parse(e.data);
           removeSuggestionCard(id);
         });
+        ev.addEventListener('mcp-tools-discovered', (e) => {
+          const data = JSON.parse(e.data);
+          if (!window._mcpDiscoveryCache) window._mcpDiscoveryCache = new Map();
+          window._mcpDiscoveryCache.set(data.serverKey, data.tools);
+          refreshMcpTools();
+        });
+        ev.addEventListener('mcp-tools-updated', (e) => {
+          refreshMcpTools();
+        });
 
         // ── Flight Recorder ────────────────────────────────────────────────
         ev.addEventListener('activity', (e) => {
           const data = JSON.parse(e.data);
+          _activityToolMap.set(data.id, data.tool || 'unknown');
           const feed = document.getElementById('activity-feed');
           // Remove placeholder on first item
           const placeholder = feed.querySelector('.decisions-empty');
@@ -1311,7 +2693,28 @@
         });
 
         ev.addEventListener('activity-result', (e) => {
-          const { id, status, label } = JSON.parse(e.data);
+          const { id, status, label, costEstimate } = JSON.parse(e.data);
+          const toolName = _activityToolMap.get(id) || 'unknown';
+          _activityToolMap.delete(id);
+
+          // Update strip counters
+          if (status === 'allow') {
+            _stripAllowed++;
+            if (costEstimate && costEstimate > 0) _stripCost += costEstimate;
+          } else if (status === 'block' || status === 'taint') {
+            _stripBlocked++;
+            showToast(
+              '🛑',
+              'Blocked: ' + toolName,
+              label || 'Dangerous operation stopped',
+              'toast-block'
+            );
+          } else if (status === 'dlp') {
+            _stripBlocked++;
+            showToast('🔑', 'Credential detected', 'Leaked secret in: ' + toolName, 'toast-dlp');
+          }
+          updateStrip();
+
           const row = document.getElementById('fr-' + id);
           if (!row) return;
           const badge = row.querySelector('.feed-badge');
@@ -1329,6 +2732,8 @@
         });
       }
       connect();
+      // Defer slightly so the DOM is fully ready and CSRF token is confirmed
+      setTimeout(loadDashboardData, 0);
 
       const FR_ICONS = {
         bash: '💻',
@@ -1384,10 +2789,15 @@
           trustEnabled = !!s.enableTrustSessions;
           const trustTog = document.getElementById('trustSessionsToggle');
           if (trustTog) trustTog.checked = trustEnabled;
-          // Show/hide trust rows on any cards already rendered
           document.querySelectorAll('[id^="tr-"]').forEach((el) => {
             el.classList.toggle('show', trustEnabled);
           });
+          const tTog = document.getElementById('approverTerminalToggle');
+          const nTog = document.getElementById('approverNativeToggle');
+          const bTog = document.getElementById('approverBrowserToggle');
+          if (tTog) tTog.checked = s.approverTerminal !== false;
+          if (nTog) nTog.checked = s.approverNative !== false;
+          if (bTog) bTog.checked = !!s.approverBrowser;
         })
         .catch(() => {});
 
@@ -1398,18 +2808,25 @@
       function applySlackStatus(s) {
         const tog = document.getElementById('slackEnabledToggle');
         const line = document.getElementById('slackStatusLine');
+        const keySection = document.getElementById('slackKeySection');
         tog.disabled = !s.hasKey;
         tog.checked = s.hasKey && s.enabled;
+        if (keySection) keySection.style.display = tog.checked ? '' : 'none';
         if (s.hasKey) {
           line.textContent = s.enabled
-            ? '🟢 Slack active — approvals handled by Slack'
-            : '⚫ Key saved, Slack disabled';
+            ? '🟢 Cloud active — approvals handled remotely'
+            : '⚫ Key saved, Cloud disabled';
           line.className = 'slack-status-line' + (s.enabled ? ' active' : '');
         } else {
           line.textContent = 'No key saved';
           line.className = 'slack-status-line';
         }
       }
+
+      document.getElementById('slackEnabledToggle').addEventListener('change', function () {
+        const keySection = document.getElementById('slackKeySection');
+        if (keySection) keySection.style.display = this.checked ? '' : 'none';
+      });
 
       fetch('/slack-status')
         .then((r) => r.json())
@@ -1484,6 +2901,21 @@
         .then((r) => r.json())
         .then(({ shields }) => renderShields(shields))
         .catch(() => {});
+
+      function addLargeResponseEntry(ev) {
+        const panel = document.getElementById('largeResponsePanel');
+        const list = document.getElementById('largeResponseList');
+        panel.style.display = '';
+        const kb = (ev.originalBytes / 1024).toFixed(0);
+        const mb =
+          ev.originalBytes >= 1000000 ? (ev.originalBytes / 1000000).toFixed(1) + 'MB' : kb + 'KB';
+        const time = new Date(ev.ts).toLocaleTimeString();
+        const row = document.createElement('div');
+        row.className = 'large-response-row';
+        row.innerHTML = `<div class="large-response-tool">${esc(ev.toolName)}</div>
+          <div class="large-response-size">returned ${esc(mb)} &mdash; context window enlarged &middot; ${esc(time)}</div>`;
+        list.prepend(row);
+      }
 
       function renderDecisions(decisions) {
         const dl = document.getElementById('decisionsList');
@@ -1590,11 +3022,856 @@
           .catch(() => {});
       }
 
-      // Load any suggestions that survived a page reload (daemon still running)
       fetch('/suggestions')
         .then((r) => r.json())
         .then((list) => list.filter((s) => s.status === 'pending').forEach(addSuggestionCard))
         .catch(() => {});
+
+      // ── Dashboard Logic ───────────────────────────────────────────────────
+
+      function setDashboardPeriod(period, btn) {
+        _dashboardPeriod = period;
+        document.querySelectorAll('.period-btn').forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+        loadDashboardData();
+        refreshMcpTools();
+      }
+
+      async function refreshMcpTools() {
+        try {
+          const res = await fetch('/mcp/tools', {
+            headers: { 'X-Node9-Token': CSRF_TOKEN },
+          });
+          const config = await res.json();
+          const panel = document.getElementById('mcpToolsPanel');
+          const list = document.getElementById('mcpToolsList');
+
+          if (!window._mcpDiscoveryCache) window._mcpDiscoveryCache = new Map();
+
+          const serverKeys = Object.keys(config);
+          if (serverKeys.length === 0) {
+            panel.style.display = 'none';
+            return;
+          }
+
+          panel.style.display = 'block';
+
+          let html = '';
+          for (const key of serverKeys) {
+            const server = config[key];
+            const discovered = server.tools || [];
+            // Update cache so the sidebar remains populated on reload
+            if (discovered.length > 0) window._mcpDiscoveryCache.set(key, discovered);
+
+            const disabled = server.disabled || [];
+            const displayTools =
+              discovered.length > 0 ? discovered : window._mcpDiscoveryCache.get(key) || [];
+
+            html += `<div class="mcp-server-row">
+              <div class="mcp-server-name">🔌 ${esc(key)}</div>
+              <div class="mcp-tool-list">`;
+
+            if (displayTools.length > 0) {
+              for (const tool of displayTools) {
+                const isChecked = !disabled.includes(tool.name);
+                html += `<label class="mcp-tool-item">
+                  <input type="checkbox" ${isChecked ? 'checked' : ''} 
+                    onchange="toggleMcpTool('${esc(key)}', '${esc(tool.name)}', this.checked)">
+                  <span title="${esc(tool.description || '')}">${esc(tool.name)}</span>
+                </label>`;
+              }
+            } else {
+              html += `<div class="decisions-empty">Awaiting connection...</div>`;
+            }
+
+            html += `</div></div>`;
+          }
+          list.innerHTML = html;
+        } catch (err) {
+          console.error('Failed to refresh MCP tools:', err);
+        }
+      }
+
+      function openMcpReview(id, serverKey) {
+        const req = pendingRequests.get(id);
+        if (!req || !req.mcpTools) return;
+
+        const modal = document.getElementById('mcpReviewModal');
+        const list = document.getElementById('mcpReviewList');
+        document.getElementById('mcpReviewServer').textContent = '🔌 ' + serverKey;
+
+        list.innerHTML = req.mcpTools
+          .map(
+            (t) => `
+          <label class="mcp-tool-item">
+            <input type="checkbox" checked value="${esc(t.name)}">
+            <div style="flex:1">
+              <div style="font-weight:600">${esc(t.name)}</div>
+              <div style="font-size:10px;color:var(--muted)">${esc(t.description || 'No description')}</div>
+            </div>
+          </label>
+        `
+          )
+          .join('');
+
+        modal.dataset.id = id;
+        modal.dataset.serverKey = serverKey;
+        modal.classList.add('open');
+      }
+
+      function closeMcpReview() {
+        document.getElementById('mcpReviewModal').classList.remove('open');
+      }
+
+      async function approveMcpDiscovery() {
+        const modal = document.getElementById('mcpReviewModal');
+        const id = modal.dataset.id;
+        const serverKey = modal.dataset.serverKey;
+        const checkboxes = modal.querySelectorAll('input[type="checkbox"]');
+
+        const disabledTools = [];
+        checkboxes.forEach((cb) => {
+          if (!cb.checked) disabledTools.push(cb.value);
+        });
+
+        try {
+          await fetch('/mcp/approve', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Node9-Token': CSRF_TOKEN,
+            },
+            body: JSON.stringify({ id, serverKey, disabledTools }),
+          });
+          closeMcpReview();
+          refreshMcpTools();
+        } catch (err) {
+          console.error('Failed to approve MCP server:', err);
+        }
+      }
+
+      async function toggleMcpTool(serverKey, toolName, enabled) {
+        try {
+          const res = await fetch('/mcp/tools', {
+            headers: { 'X-Node9-Token': CSRF_TOKEN },
+          });
+          const config = await res.json();
+          let disabled = config[serverKey].disabled || [];
+
+          if (enabled) {
+            disabled = disabled.filter((t) => t !== toolName);
+          } else {
+            if (!disabled.includes(toolName)) disabled.push(toolName);
+          }
+
+          await fetch('/mcp/tools', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Node9-Token': CSRF_TOKEN,
+            },
+            body: JSON.stringify({ serverKey, disabledTools: disabled }),
+          });
+        } catch (err) {
+          console.error('Failed to toggle MCP tool:', err);
+        }
+      }
+
+      async function loadDashboardData() {
+        try {
+          const res = await fetch('/report?period=' + _dashboardPeriod, {
+            headers: { 'X-Node9-Token': CSRF_TOKEN },
+          });
+          const data = await res.json();
+          if (data.error) return;
+
+          // Update Scorecard
+          document.getElementById('stat-total').textContent = data.summary.total.toLocaleString();
+          document.getElementById('stat-blocked').textContent =
+            data.summary.blocked.toLocaleString();
+          document.getElementById('stat-dlp').textContent = data.summary.dlp.toLocaleString();
+          document.getElementById('stat-loops').textContent = data.summary.loops.toLocaleString();
+
+          // Protection rate: % of operations node9 intercepted (blocked + dlp) vs total
+          const intercepted = (data.summary.blocked || 0) + (data.summary.dlp || 0);
+          const total = data.summary.total || 0;
+          const rate = total > 0 ? Math.round((intercepted / total) * 100) : 0;
+          document.getElementById('stat-rate').textContent = total > 0 ? rate + '%' : '—';
+
+          // Render By Agent
+          const agentList = document.getElementById('by-agent-list');
+          if (data.byAgent && data.byAgent.length > 0) {
+            const maxVal = Math.max(...data.byAgent.map((a) => a.total), 1);
+            agentList.innerHTML = data.byAgent
+              .map((a) => {
+                const width = (a.total / maxVal) * 100;
+                const blockedBadge = a.blocked
+                  ? ` <span style="color:var(--danger);font-size:11px">🚫${a.blocked}</span>`
+                  : '';
+                const dlpBadge = a.dlp
+                  ? ` <span style="color:var(--warning);font-size:11px">🔑${a.dlp}</span>`
+                  : '';
+                return `
+                <div class="tool-row">
+                  <div class="tool-name">${esc(a.agent)}</div>
+                  <div class="tool-bar-bg">
+                    <div class="tool-bar-fill" style="width:${width}%"></div>
+                  </div>
+                  <div class="tool-count">${a.total}${blockedBadge}${dlpBadge}</div>
+                </div>`;
+              })
+              .join('');
+          }
+
+          // Render Chart
+          const isHourly = _dashboardPeriod === 'today';
+          const chartTitle = document.getElementById('daily-chart-title');
+          if (chartTitle)
+            chartTitle.textContent = isHourly
+              ? 'Hourly Activity (Today)'
+              : 'Daily Activity (Last 7 Days)';
+          const chart = document.getElementById('daily-chart');
+          if (data.daily.length > 0) {
+            const maxCalls = Math.max(...data.daily.map((d) => d.calls), 1);
+            chart.innerHTML = data.daily
+              .map((d, i) => {
+                const height = (d.calls / maxCalls) * 100;
+                let label;
+                if (isHourly) {
+                  // Label every 3 hours to keep the x-axis readable
+                  label = i % 3 === 0 ? d.date : '';
+                } else {
+                  const dateObj = new Date(d.date + 'T12:00:00');
+                  label = dateObj.toLocaleDateString([], { month: 'short', day: 'numeric' });
+                }
+                const titleText = isHourly
+                  ? `${d.date} — ${d.calls} calls, ${d.blocked} blocked`
+                  : `${d.calls} calls, ${d.blocked} blocked`;
+                return `
+                <div class="chart-bar-wrapper">
+                  <div class="chart-bar" style="height: ${height}%" title="${titleText}"></div>
+                  <div class="chart-label">${label}</div>
+                </div>
+              `;
+              })
+              .join('');
+          }
+
+          // Render Top Tools
+          const toolsList = document.getElementById('top-tools-list');
+          if (data.topTools.length > 0) {
+            const maxVal = Math.max(...data.topTools.map((t) => t.value), 1);
+            toolsList.innerHTML = data.topTools
+              .map((t) => {
+                const width = (t.value / maxVal) * 100;
+                return `
+                <div class="tool-row">
+                  <div class="tool-name">${esc(t.name)}</div>
+                  <div class="tool-bar-bg">
+                    <div class="tool-bar-fill" style="width: ${width}%"></div>
+                  </div>
+                  <div class="tool-count">${t.value}</div>
+                </div>
+              `;
+              })
+              .join('');
+          }
+
+          // Render Top Blocked Tools
+          const blockedList = document.getElementById('top-blocked-list');
+          if (blockedList) {
+            if (data.topBlockedTools && data.topBlockedTools.length > 0) {
+              const maxVal = Math.max(...data.topBlockedTools.map((t) => t.value), 1);
+              blockedList.innerHTML = data.topBlockedTools
+                .map((t) => {
+                  const width = (t.value / maxVal) * 100;
+                  return `
+                  <div class="tool-row">
+                    <div class="tool-name">${esc(t.name)}</div>
+                    <div class="tool-bar-bg">
+                      <div class="tool-bar-fill" style="width: ${width}%;background:#e5534b"></div>
+                    </div>
+                    <div class="tool-count" style="color:#e5534b">${t.value}</div>
+                  </div>
+                `;
+                })
+                .join('');
+            } else {
+              blockedList.innerHTML =
+                '<div class="decisions-empty">Nothing blocked — all clear.</div>';
+            }
+          }
+        } catch (err) {
+          console.error('Failed to load dashboard:', err);
+        }
+      }
+
+      // ── Scan History Modal ────────────────────────────────────────────────
+      let _scanData = null;
+      let _progressRaf = null;
+
+      // Run once silently on load — badge the button if issues found
+      (async function backgroundScan() {
+        try {
+          const res = await fetch('/scan', { headers: { 'X-Node9-Token': CSRF_TOKEN } });
+          if (!res.ok) return;
+          const data = await res.json();
+          if (data.status !== 'complete') return;
+          _scanData = data;
+          const sources = data.sources || [];
+          const total =
+            sources.reduce((n, s) => n + (s.findings || []).length, 0) +
+            sources.reduce((n, s) => n + (s.leaks || []).length, 0) +
+            sources.reduce((n, s) => n + (s.loops || []).length, 0);
+          if (total > 0) {
+            const btn = document.getElementById('btn-scan-history');
+            if (btn && !btn.querySelector('.scan-badge')) {
+              const badge = document.createElement('span');
+              badge.className = 'scan-badge';
+              badge.textContent = total > 99 ? '99+' : String(total);
+              btn.appendChild(badge);
+            }
+          }
+        } catch {}
+      })();
+
+      function openScanModal() {
+        if (_progressRaf) cancelAnimationFrame(_progressRaf);
+        document.getElementById('scan-modal-overlay').classList.add('open');
+        // Remove badge when user opens modal
+        const badge = document.querySelector('#btn-scan-history .scan-badge');
+        if (badge) badge.remove();
+        // If background scan already finished, show results immediately
+        if (_scanData) {
+          document.getElementById('scan-progress-view').style.display = 'none';
+          document.getElementById('scan-results-view').style.display = '';
+          const _rc1 = document.getElementById('scan-results-content');
+          _rc1.innerHTML = renderScanResults(_scanData);
+          animateCountUp(_rc1);
+          return;
+        }
+        document.getElementById('scan-progress-view').style.display = '';
+        document.getElementById('scan-results-view').style.display = 'none';
+        const bar = document.getElementById('scan-progress-bar');
+        bar.style.transition = 'none';
+        bar.style.background = '';
+        bar.style.width = '0%';
+        document.getElementById('scan-progress-label').textContent = 'Scanning AI history…';
+        document.getElementById('scan-progress-sub').textContent = 'Claude · Gemini · Codex';
+        _startFakeProgress(bar);
+        runModalScan();
+      }
+
+      function closeScanModal(e) {
+        if (!e || e.target === document.getElementById('scan-modal-overlay')) {
+          document.getElementById('scan-modal-overlay').classList.remove('open');
+          if (_progressRaf) {
+            cancelAnimationFrame(_progressRaf);
+            _progressRaf = null;
+          }
+        }
+      }
+
+      function _startFakeProgress(bar) {
+        const start = performance.now();
+        const duration = 5000; // 5 s eases to ~85%
+        function step(now) {
+          const t = Math.min((now - start) / duration, 1);
+          const pct = 85 * (1 - Math.pow(1 - t, 2.5)); // ease-out
+          bar.style.width = pct.toFixed(1) + '%';
+          if (t < 1) _progressRaf = requestAnimationFrame(step);
+        }
+        _progressRaf = requestAnimationFrame(step);
+      }
+
+      async function runModalScan() {
+        const label = document.getElementById('scan-progress-label');
+        const sub = document.getElementById('scan-progress-sub');
+
+        try {
+          const res = await fetch('/scan', { headers: { 'X-Node9-Token': CSRF_TOKEN } });
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const data = await res.json();
+          _scanData = data;
+
+          if (_progressRaf) {
+            cancelAnimationFrame(_progressRaf);
+            _progressRaf = null;
+          }
+          const bar = document.getElementById('scan-progress-bar');
+          bar.style.transition = 'width 0.4s ease';
+          bar.style.width = '100%';
+          label.textContent = 'Scan complete';
+          sub.textContent = '';
+
+          setTimeout(() => {
+            document.getElementById('scan-progress-view').style.display = 'none';
+            document.getElementById('scan-results-view').style.display = '';
+            const _rc2 = document.getElementById('scan-results-content');
+            _rc2.innerHTML = renderScanResults(data);
+            animateCountUp(_rc2);
+          }, 500);
+        } catch (err) {
+          console.error('[node9 scan modal]', err);
+          if (_progressRaf) {
+            cancelAnimationFrame(_progressRaf);
+            _progressRaf = null;
+          }
+          const bar = document.getElementById('scan-progress-bar');
+          bar.style.transition = 'width 0.3s ease';
+          bar.style.background = 'var(--danger)';
+          bar.style.width = '100%';
+          label.textContent = '❌ Scan failed';
+          sub.textContent = String(err);
+        }
+      }
+
+      function renderScanResults(data) {
+        if (!data || data.status !== 'complete') {
+          return '<div style="text-align:center;color:var(--muted);padding:32px">No data returned.</div>';
+        }
+        const s = data.summary || {};
+        const sources = data.sources || [];
+
+        // Flatten all findings across sources
+        const allFindings = sources.flatMap((src) => src.findings || []);
+        const allLeaks = sources.flatMap((src) => src.leaks || []);
+        const allLoops = sources.flatMap((src) => src.loops || []);
+
+        // Split findings into three distinct buckets
+        const blocked = allFindings.filter((f) => f.verdict === 'block' && f.ruleSource !== 'user');
+        const supervised = allFindings.filter(
+          (f) => f.verdict !== 'block' && f.ruleSource !== 'user'
+        );
+        const yourRules = allFindings.filter((f) => f.ruleSource === 'user');
+
+        // Loop cost estimate: each wasted iteration ~2K tokens at Sonnet pricing
+        const LOOP_THRESHOLD = 3;
+        const COST_PER_ITER = 0.006;
+        const wastedIters = allLoops.reduce(
+          (sum, l) => sum + Math.max(0, (l.count || 0) - LOOP_THRESHOLD),
+          0
+        );
+        const loopWastedUSD = wastedIters * COST_PER_ITER;
+
+        const totalCost = s.totalCostUSD || 0;
+
+        function fmtUSD(n) {
+          if (!n || n < 0.001) return null;
+          if (n < 1) return '$' + n.toFixed(3);
+          return '$' + n.toFixed(2);
+        }
+
+        // ── Hero stats row ────────────────────────────────────────────────────
+        const costStr = fmtUSD(totalCost);
+        const savingsStr = fmtUSD(loopWastedUSD);
+
+        function statVal(n, cls, style, fmt) {
+          const finalStr =
+            fmt === 'usd' && n > 0 ? (n < 1 ? '$' + n.toFixed(3) : '$' + n.toFixed(2)) : String(n);
+          return (
+            '<div class="scan-stat-val' +
+            (cls ? ' ' + cls : '') +
+            '"' +
+            (style ? ' style="' + style + '"' : '') +
+            ' data-countup="' +
+            n +
+            '"' +
+            (fmt ? ' data-countup-fmt="' + fmt + '"' : '') +
+            ' data-countup-final="' +
+            finalStr +
+            '">0</div>'
+          );
+        }
+
+        const stats =
+          '<div class="scan-summary-row">' +
+          '<div class="scan-stat">' +
+          statVal(s.sessions || 0, '') +
+          '<div class="scan-stat-label">Sessions</div></div>' +
+          (totalCost > 0
+            ? '<div class="scan-stat">' +
+              statVal(totalCost, '', 'color:#8b949e', 'usd') +
+              '<div class="scan-stat-label">AI Spend</div></div>'
+            : '') +
+          '<div class="scan-stat">' +
+          statVal(blocked.length, blocked.length ? 'danger' : 'ok') +
+          '<div class="scan-stat-label">Blocked</div></div>' +
+          '<div class="scan-stat">' +
+          statVal(supervised.length, supervised.length ? 'warning' : 'ok') +
+          '<div class="scan-stat-label">Supervised</div></div>' +
+          '<div class="scan-stat">' +
+          statVal(yourRules.length, '', yourRules.length ? 'color:#58a6ff' : '') +
+          '<div class="scan-stat-label">Your Rules</div></div>' +
+          '<div class="scan-stat">' +
+          statVal(allLeaks.length, allLeaks.length ? 'danger' : 'ok') +
+          '<div class="scan-stat-label">Leaks</div></div>' +
+          '<div class="scan-stat">' +
+          statVal(allLoops.length, allLoops.length ? 'warning' : 'ok') +
+          '<div class="scan-stat-label">Loops</div></div>' +
+          '</div>' +
+          (savingsStr
+            ? '<div style="text-align:center;font-size:11px;color:var(--muted);margin:-6px 0 10px;padding-bottom:8px;border-bottom:1px solid var(--border)">⚡ Loops wasted an estimated <span style="color:var(--warning)">' +
+              savingsStr +
+              '</span> in unnecessary LLM turns</div>'
+            : '');
+
+        if (!allFindings.length && !allLeaks.length && !allLoops.length) {
+          return (
+            stats +
+            '<div style="text-align:center;color:#57ab5a;padding:28px 0;font-size:13px;line-height:1.8">✅ <strong>No issues found</strong><br><span style="font-size:11px;color:var(--muted)">Scanned ' +
+            (s.sessions || 0) +
+            ' sessions across ' +
+            sources.length +
+            ' AI source(s)</span></div>'
+          );
+        }
+
+        // ── Helpers ───────────────────────────────────────────────────────────
+        function groupByKey(items, keyFn) {
+          const map = new Map();
+          for (const item of items) {
+            const k = keyFn(item);
+            if (!map.has(k)) map.set(k, []);
+            map.get(k).push(item);
+          }
+          return [...map.entries()].sort((a, b) => b[1].length - a[1].length);
+        }
+
+        function findingRow(item, type) {
+          const date = new Date(item.timestamp).toLocaleDateString([], {
+            month: 'short',
+            day: 'numeric',
+          });
+          const cmdText =
+            type === 'leak' ? esc(item.sample || '') : esc(truncate(item.command || '', 120));
+          return (
+            '<div class="scan-finding-row"><span class="scan-finding-ts">' +
+            date +
+            '</span><span class="scan-finding-cmd">' +
+            cmdText +
+            '</span></div>'
+          );
+        }
+
+        function ruleSection(items, type, badgeClass, badgeLabel, maxBar) {
+          const keyFn =
+            type === 'leak'
+              ? (i) => i.pattern || 'DLP'
+              : (i) => (i.rule || 'unknown').replace(/^shield:[^:]+:/, '');
+          const grouped = groupByKey(items, keyFn);
+          return grouped
+            .map(([rule, group]) => {
+              const count = group.length;
+              const barPct = Math.round((count / maxBar) * 100);
+              const detailId = 'detail-' + Math.random().toString(36).slice(2);
+              const rows = group.map((i) => findingRow(i, type)).join('');
+              return (
+                '<div class="scan-rule-row" onclick="var d=document.getElementById(\'' +
+                detailId +
+                "');var a=this.querySelector('.scan-rule-arrow');d.style.display=d.style.display===''?'none':'';a.textContent=d.style.display===''?'▲':'▼';\">" +
+                '<span class="scan-verdict-badge ' +
+                badgeClass +
+                '">' +
+                badgeLabel +
+                '</span>' +
+                '<span class="scan-rule-name">' +
+                esc(rule) +
+                '</span>' +
+                '<span class="scan-rule-bar-wrap"><span class="scan-rule-bar" style="width:' +
+                barPct +
+                '%' +
+                (badgeClass === 'badge-user' ? ';background:#388bfd33' : '') +
+                '"></span></span>' +
+                '<span class="scan-rule-count">' +
+                count +
+                '</span>' +
+                '<span class="scan-rule-arrow">▼</span>' +
+                '</div><div id="' +
+                detailId +
+                '" style="display:none" class="scan-rule-detail">' +
+                rows +
+                '</div>'
+              );
+            })
+            .join('');
+        }
+
+        // ── Sections ──────────────────────────────────────────────────────────
+        const maxBar = Math.max(
+          ...allFindings.map((f) => 1),
+          ...groupByKey(allFindings, (f) => (f.rule || '').replace(/^shield:[^:]+:/, '')).map(
+            ([, v]) => v.length
+          ),
+          ...groupByKey(allLeaks, (f) => f.pattern || 'DLP').map(([, v]) => v.length),
+          1
+        );
+
+        // Per-agent breakdown — one row per active agent (only shows active ones)
+        const agentBreakdown = (function () {
+          const rows = sources
+            .filter(
+              (src) =>
+                (src.sessions || 0) > 0 ||
+                (src.findings || []).length > 0 ||
+                (src.leaks || []).length > 0 ||
+                (src.loops || []).length > 0
+            )
+            .map((src) => {
+              const f = (src.findings || []).length;
+              const l = (src.leaks || []).length;
+              const lp = (src.loops || []).length;
+              const findingsTotal = f + l + lp;
+              return (
+                '<div class="scan-agent-row">' +
+                '<span class="scan-agent-name">' +
+                esc(src.icon || '') +
+                ' ' +
+                esc(src.label || src.id) +
+                '</span>' +
+                '<span class="scan-agent-stat">' +
+                (src.sessions || 0) +
+                ' session' +
+                ((src.sessions || 0) !== 1 ? 's' : '') +
+                '</span>' +
+                '<span class="scan-agent-sep">·</span>' +
+                '<span class="scan-agent-stat">' +
+                findingsTotal +
+                ' finding' +
+                (findingsTotal !== 1 ? 's' : '') +
+                '</span>' +
+                '</div>'
+              );
+            });
+          if (!rows.length) return '';
+          return '<div class="scan-agent-group">' + rows.join('') + '</div>';
+        })();
+
+        let html = stats + agentBreakdown;
+
+        if (allLeaks.length) {
+          html +=
+            '<div class="scan-rule-section-label" style="color:#e5534b">🔑 Credential Leaks — secrets found in tool calls</div>';
+          html += ruleSection(allLeaks, 'leak', 'badge-dlp', 'DLP', maxBar);
+        }
+
+        if (blocked.length) {
+          html +=
+            '<div class="scan-rule-section-label" style="color:#e5534b">🛑 Blocked — Node9 would have stopped these</div>';
+          html += ruleSection(blocked, 'risk', 'badge-block', 'BLOCK', maxBar);
+        }
+
+        if (supervised.length) {
+          html +=
+            '<div class="scan-rule-section-label">👁 Supervised — Node9 would have asked you first</div>';
+          html += ruleSection(supervised, 'risk', 'badge-review', 'REVIEW', maxBar);
+        }
+
+        if (yourRules.length) {
+          html +=
+            '<div class="scan-rule-section-label" style="color:#58a6ff">✅ Your Rules — working as configured</div>';
+          html += ruleSection(yourRules, 'risk', 'badge-user', 'YOUR RULE', maxBar);
+        }
+
+        // Loops: single collapsed summary card, expand to see all groups
+        if (allLoops.length) {
+          const totalReps = allLoops.reduce((sum, l) => sum + (l.count || 0), 0);
+          const loopsDetailId = 'loops-detail-' + Math.random().toString(36).slice(2);
+          const savingNote = savingsStr
+            ? ' · <span style="color:var(--warning)">~' + savingsStr + ' wasted</span>'
+            : '';
+          const loopGroupRows = allLoops
+            .map((item) => {
+              const date = new Date(item.timestamp).toLocaleDateString([], {
+                month: 'short',
+                day: 'numeric',
+              });
+              const barPct = Math.round(
+                (item.count / Math.max(...allLoops.map((l) => l.count), 1)) * 100
+              );
+              const detailId = 'detail-' + Math.random().toString(36).slice(2);
+              return (
+                '<div class="scan-rule-row" onclick="event.stopPropagation();var d=document.getElementById(\'' +
+                detailId +
+                "');var a=this.querySelector('.scan-rule-arrow');d.style.display=d.style.display===''?'none':'';a.textContent=d.style.display===''?'▲':'▼';\">" +
+                '<span class="scan-verdict-badge badge-review">LOOP</span>' +
+                '<span class="scan-rule-name">' +
+                esc(item.toolName) +
+                '</span>' +
+                '<span class="scan-rule-bar-wrap"><span class="scan-rule-bar" style="width:' +
+                barPct +
+                '%;background:var(--warning)"></span></span>' +
+                '<span class="scan-rule-count">×' +
+                item.count +
+                '</span>' +
+                '<span class="scan-rule-arrow">▼</span>' +
+                '</div><div id="' +
+                detailId +
+                '" style="display:none" class="scan-rule-detail">' +
+                '<div class="scan-finding-row"><span class="scan-finding-ts">' +
+                date +
+                '</span><span class="scan-finding-cmd">' +
+                esc(item.commandPreview) +
+                '</span></div>' +
+                '</div>'
+              );
+            })
+            .join('');
+
+          html +=
+            '<div class="scan-rule-section-label" style="color:var(--warning)">🔁 Agent Loops — repeated tool calls</div>';
+          html +=
+            '<div class="scan-rule-row" onclick="var d=document.getElementById(\'' +
+            loopsDetailId +
+            "');var a=this.querySelector('.scan-rule-arrow');d.style.display=d.style.display===''?'none':'';a.textContent=d.style.display===''?'▲':'▼';\">" +
+            '<span class="scan-verdict-badge badge-review">LOOP</span>' +
+            '<span class="scan-rule-name">' +
+            allLoops.length +
+            ' pattern' +
+            (allLoops.length !== 1 ? 's' : '') +
+            ' · ' +
+            totalReps +
+            ' total repetitions' +
+            savingNote +
+            '</span>' +
+            '<span class="scan-rule-bar-wrap"></span>' +
+            '<span class="scan-rule-count"></span>' +
+            '<span class="scan-rule-arrow">▼</span>' +
+            '</div>' +
+            '<div id="' +
+            loopsDetailId +
+            '" style="display:none" class="scan-rule-detail">' +
+            loopGroupRows +
+            '</div>';
+        }
+
+        return html;
+      }
+
+      function toggleExpandAll(btn) {
+        const details = document.querySelectorAll('#scan-results-content .scan-rule-detail');
+        const arrows = document.querySelectorAll('#scan-results-content .scan-rule-arrow');
+        const expand = btn.textContent.includes('Expand');
+        details.forEach((d) => (d.style.display = expand ? '' : 'none'));
+        arrows.forEach((a) => (a.textContent = expand ? '▲' : '▼'));
+        btn.textContent = expand ? '↕ Collapse All' : '↕ Expand All';
+      }
+
+      function exportScanJson() {
+        if (!_scanData) return;
+        const blob = new Blob([JSON.stringify(_scanData, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'node9-scan-' + new Date().toISOString().slice(0, 10) + '.json';
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+
+      function exportScanPng() {
+        const el = document.getElementById('scan-modal');
+        if (!window.html2canvas) {
+          const script = document.createElement('script');
+          script.src = 'https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js';
+          script.onload = () => _doCapture(el);
+          document.head.appendChild(script);
+        } else {
+          _doCapture(el);
+        }
+      }
+
+      function _doCapture(el) {
+        html2canvas(el, { backgroundColor: '#1c2128', scale: 2, useCORS: true }).then((canvas) => {
+          const a = document.createElement('a');
+          a.href = canvas.toDataURL('image/png');
+          a.download = 'node9-scan-' + new Date().toISOString().slice(0, 10) + '.png';
+          a.click();
+        });
+      }
+
+      async function runHistoryScan() {
+        const btn = document.getElementById('btn-scan');
+        const results = document.getElementById('scan-results');
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner"></span> Scanning AI History...';
+
+        try {
+          const res = await fetch('/scan', {
+            headers: { 'X-Node9-Token': CSRF_TOKEN },
+          });
+          const data = await res.json();
+          results.style.display = 'block';
+
+          if (data.status === 'complete') {
+            const sources = data.sources || [];
+            const allRisks = sources.flatMap((s) => s.findings || []);
+            const allLeaks = sources.flatMap((s) => s.leaks || []);
+
+            let risksHtml = '';
+            if (allRisks.length > 0) {
+              risksHtml = `
+                <div class="findings-list">
+                  <div style="font-size: 10px; font-weight: 700; color: var(--muted); margin-bottom: 8px; text-transform: uppercase;">Top Historical Risks Found</div>
+                  ${allRisks
+                    .slice(0, 10)
+                    .map(
+                      (r) => `
+                    <div class="finding-item">
+                      <span class="finding-ts">${new Date(r.timestamp).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
+                      <span class="finding-rule">${r.rule.replace(/^shield:[^:]+:/, '')}</span>
+                      <span class="finding-cmd"><span class="finding-badge ${r.verdict === 'block' ? 'badge-block' : ''}">${r.verdict === 'block' ? '🛑' : '👁️'}</span>${esc(truncate(r.command, 120))}</span>
+                    </div>
+                  `
+                    )
+                    .join('')}
+                </div>
+              `;
+            }
+
+            let leaksHtml = '';
+            if (allLeaks.length > 0) {
+              leaksHtml = `
+                <div class="findings-list" style="border-color: rgba(201, 60, 55, 0.3);">
+                  <div style="font-size: 10px; font-weight: 700; color: #f87171; margin-bottom: 8px; text-transform: uppercase;">Credential Leaks Identified</div>
+                  ${allLeaks
+                    .slice(0, 5)
+                    .map(
+                      (l) => `
+                    <div class="finding-item">
+                      <span class="finding-ts">${new Date(l.timestamp).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
+                      <span class="finding-rule">${esc(l.pattern)}</span>
+                      <span class="finding-cmd"><span class="finding-badge badge-leak">🔑</span>${esc(l.sample)}</span>
+                    </div>
+                  `
+                    )
+                    .join('')}
+                </div>
+              `;
+            }
+
+            results.innerHTML = `
+              <div class="insight-hint" style="color: #57ab5a; border-color: rgba(87, 171, 90, 0.4); background: rgba(87, 171, 90, 0.08);">
+                <strong>✅ History Audit Complete</strong><br>
+                Scanned ${data.summary.sessions} sessions. Found <strong>${data.summary.findings} risky operations</strong> and <strong>${data.summary.dlp} secret leaks</strong>.
+                Node9 is now actively protecting you from these types of events.
+              </div>
+              ${leaksHtml}
+              ${risksHtml}
+              <div style="font-size: 11px; color: var(--muted); margin-top: 10px; text-align: center;">
+                <em>These commands ran unprotected in the past. Installing Node9 has closed these gaps.</em>
+              </div>
+            `;
+          } else {
+            results.innerHTML = `<div class="insight-hint danger">Scan failed. Please check the logs.</div>`;
+          }
+          btn.textContent = '🚀 Audit Complete';
+        } catch (err) {
+          console.error('[node9 scan]', err);
+          btn.textContent = '❌ Scan Failed';
+          btn.disabled = false;
+        }
+      }
     </script>
+    <div id="toast-container"></div>
   </body>
 </html>
