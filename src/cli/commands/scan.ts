@@ -376,20 +376,22 @@ function countScanFiles(): number {
   return total;
 }
 
-function renderProgressBar(done: number, total: number): void {
+function renderProgressBar(done: number, total: number, lines: number): void {
   const width = 28;
   const pct = total > 0 ? done / total : 0;
   const filled = Math.min(width, Math.round(pct * width));
   const bar = '█'.repeat(filled) + '░'.repeat(width - filled);
-  const label = total > 0 ? `${done}/${total} files` : `${done} files`;
+  const fileLabel = total > 0 ? `${done}/${total} files` : `${done} files`;
+  const lineLabel = lines > 0 ? chalk.dim(`  ${lines.toLocaleString()} lines`) : '';
   process.stdout.write(
-    `\r  ${chalk.cyan('Scanning')}  [${chalk.cyan(bar)}]  ${chalk.dim(label)}  `
+    `\r  ${chalk.cyan('Scanning')}  [${chalk.cyan(bar)}]  ${chalk.dim(fileLabel)}${lineLabel}  `
   );
 }
 
 export function scanClaudeHistory(
   startDate: Date | null,
-  onProgress?: (done: number) => void
+  onProgress?: (done: number) => void,
+  onLine?: () => void
 ): ScanResult {
   const projectsDir = path.join(os.homedir(), '.claude', 'projects');
 
@@ -458,6 +460,7 @@ export function scanClaudeHistory(
 
       for (const line of raw.split('\n')) {
         if (!line.trim()) continue;
+        onLine?.();
 
         let entry: JournalEntry;
         try {
@@ -657,7 +660,8 @@ export function scanClaudeHistory(
 
 export function scanGeminiHistory(
   startDate: Date | null,
-  onProgress?: (done: number) => void
+  onProgress?: (done: number) => void,
+  onLine?: () => void
 ): ScanResult {
   const tmpDir = path.join(os.homedir(), '.gemini', 'tmp');
   const result: ScanResult = {
@@ -740,6 +744,7 @@ export function scanGeminiHistory(
       result.sessions++;
 
       for (const msg of session.messages ?? []) {
+        onLine?.();
         // ── User prompt DLP scan ─────────────────────────────────────────
         if (msg.type === 'user') {
           const content = msg.content;
@@ -913,7 +918,8 @@ export function scanGeminiHistory(
 
 export function scanCodexHistory(
   startDate: Date | null,
-  onProgress?: (done: number) => void
+  onProgress?: (done: number) => void,
+  onLine?: () => void
 ): ScanResult {
   const sessionsBase = path.join(os.homedir(), '.codex', 'sessions');
   const result: ScanResult = {
@@ -996,6 +1002,7 @@ export function scanCodexHistory(
 
     for (const line of lines) {
       if (!line.trim()) continue;
+      onLine?.();
       let entry: { type: string; timestamp?: string; payload?: Record<string, unknown> };
       try {
         entry = JSON.parse(line) as typeof entry;
@@ -1276,8 +1283,8 @@ export function registerScanCommand(program: Command): void {
   program
     .command('scan')
     .description('Forecast: scan agent history and show what node9 would catch if installed')
-    .option('--all', 'Scan all history (default: last 90 days)')
-    .option('--days <n>', 'Scan last N days of history', '90')
+    .option('--all', 'Scan all history (default: last 30 days)')
+    .option('--days <n>', 'Scan last N days of history', '30')
     .option('--top <n>', 'Max findings to show per rule (default: 5)', '5')
     .option('--drill-down', 'Show all findings with full commands and session IDs')
     .action(async (options: { all?: boolean; days: string; top: string; drillDown?: boolean }) => {
@@ -1288,7 +1295,7 @@ export function registerScanCommand(program: Command): void {
         ? null
         : (() => {
             const d = new Date();
-            d.setDate(d.getDate() - (parseInt(options.days, 10) || 90));
+            d.setDate(d.getDate() - (parseInt(options.days, 10) || 30));
             d.setHours(0, 0, 0, 0);
             return d;
           })();
@@ -1313,17 +1320,32 @@ export function registerScanCommand(program: Command): void {
 
       const totalFiles = countScanFiles();
       let filesScanned = 0;
+      let linesScanned = 0;
+      let lastRender = 0;
       const onProgress = (done: number) => {
         filesScanned = done;
-        renderProgressBar(filesScanned, totalFiles);
+        renderProgressBar(filesScanned, totalFiles, linesScanned);
+        lastRender = Date.now();
       };
-      renderProgressBar(0, totalFiles);
-      const claudeScan = scanClaudeHistory(startDate, onProgress);
-      const geminiScan = scanGeminiHistory(startDate, (done) =>
-        onProgress(claudeScan.filesScanned + done)
+      const onLine = () => {
+        linesScanned++;
+        const now = Date.now();
+        if (now - lastRender >= 80) {
+          lastRender = now;
+          renderProgressBar(filesScanned, totalFiles, linesScanned);
+        }
+      };
+      renderProgressBar(0, totalFiles, 0);
+      const claudeScan = scanClaudeHistory(startDate, onProgress, onLine);
+      const geminiScan = scanGeminiHistory(
+        startDate,
+        (done) => onProgress(claudeScan.filesScanned + done),
+        onLine
       );
-      const codexScan = scanCodexHistory(startDate, (done) =>
-        onProgress(claudeScan.filesScanned + geminiScan.filesScanned + done)
+      const codexScan = scanCodexHistory(
+        startDate,
+        (done) => onProgress(claudeScan.filesScanned + geminiScan.filesScanned + done),
+        onLine
       );
       const scan = mergeScans(mergeScans(claudeScan, geminiScan), codexScan);
       const summary = buildScanSummary([
@@ -1346,7 +1368,7 @@ export function registerScanCommand(program: Command): void {
       // ── Header ────────────────────────────────────────────────────────────
       const rangeLabel = options.all
         ? chalk.dim('all time')
-        : chalk.dim(`last ${options.days ?? 90} days`);
+        : chalk.dim(`last ${options.days ?? 30} days`);
       const dateRange =
         scan.firstDate && scan.lastDate
           ? chalk.dim(`  ${fmtTs(scan.firstDate)} – ${fmtTs(scan.lastDate)}`)
@@ -1631,37 +1653,36 @@ export function registerScanCommand(program: Command): void {
       }
       console.log('');
 
-      // Push results to an already-running daemon and open the browser.
-      // We do not auto-start the daemon here: scan results may contain sensitive
-      // DLP findings and should only be posted over the loopback channel when the
-      // user has already opted in to running the daemon.
-      if (!isTestingMode() && isDaemonRunning()) {
-        const internalToken = getInternalToken();
-        if (internalToken) {
-          try {
-            const summary = buildScanSummary([
-              { id: 'claude', label: 'Claude', icon: '🤖', scan: claudeScan },
-              { id: 'gemini', label: 'Gemini', icon: '♊', scan: geminiScan },
-              { id: 'codex', label: 'Codex', icon: '🔮', scan: codexScan },
-            ]);
-            const payload = { status: 'complete', summary };
-
-            await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/scan/push`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'x-node9-internal': internalToken },
-              body: JSON.stringify(payload),
-              signal: AbortSignal.timeout(3000),
-            });
-
-            const url = `http://${DAEMON_HOST}:${DAEMON_PORT}/`;
-            console.log('  ' + chalk.cyan('🌐 View in browser:') + '  ' + chalk.underline(url));
-            console.log('');
-
-            openBrowserLocal();
-          } catch {
-            // fire-and-forget — scan already printed, don't fail if daemon is unreachable
+      // Always show the browser link so users know the dashboard exists.
+      const url = `http://${DAEMON_HOST}:${DAEMON_PORT}/`;
+      if (!isTestingMode()) {
+        if (isDaemonRunning()) {
+          // Daemon is running — push results so the browser shows them instantly.
+          const internalToken = getInternalToken();
+          if (internalToken) {
+            try {
+              const summary = buildScanSummary([
+                { id: 'claude', label: 'Claude', icon: '🤖', scan: claudeScan },
+                { id: 'gemini', label: 'Gemini', icon: '♊', scan: geminiScan },
+                { id: 'codex', label: 'Codex', icon: '🔮', scan: codexScan },
+              ]);
+              await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/scan/push`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'x-node9-internal': internalToken },
+                body: JSON.stringify({ status: 'complete', summary }),
+                signal: AbortSignal.timeout(3000),
+              });
+              openBrowserLocal();
+            } catch {
+              // fire-and-forget
+            }
           }
         }
+        console.log('  ' + chalk.cyan('🌐 View in browser:') + '  ' + chalk.underline(url));
+        if (!isDaemonRunning()) {
+          console.log('  ' + chalk.dim('   run node9 daemon --background to activate'));
+        }
+        console.log('');
       }
     });
 }

@@ -889,7 +889,7 @@ export function startDaemon(): void {
 
       try {
         const d = new Date();
-        d.setDate(d.getDate() - 90);
+        d.setDate(d.getDate() - 30);
         d.setHours(0, 0, 0, 0);
 
         const EMPTY_SCAN: ScanResult = {
@@ -1145,7 +1145,11 @@ export function startDaemon(): void {
       if (!validToken(req)) return res.writeHead(403).end();
       try {
         const { serverKey, disabledTools } = JSON.parse(await readBody(req));
-        if (typeof serverKey !== 'string' || !Array.isArray(disabledTools)) {
+        if (
+          typeof serverKey !== 'string' ||
+          serverKey.length > 256 ||
+          !Array.isArray(disabledTools)
+        ) {
           res.writeHead(400).end();
           return;
         }
@@ -1169,7 +1173,7 @@ export function startDaemon(): void {
       if (req.headers['x-node9-internal'] !== internalToken) return res.writeHead(403).end();
       try {
         const { serverKey, tools } = JSON.parse(await readBody(req));
-        if (typeof serverKey !== 'string' || !Array.isArray(tools)) {
+        if (typeof serverKey !== 'string' || serverKey.length > 256 || !Array.isArray(tools)) {
           res.writeHead(400).end();
           return;
         }
