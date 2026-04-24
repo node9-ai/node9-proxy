@@ -24,7 +24,7 @@ import {
 import { scanArgs } from '../../dlp';
 import type { SmartRule } from '../../core';
 import { isDaemonRunning, getInternalToken, DAEMON_PORT, DAEMON_HOST } from '../../auth/daemon';
-import { openBrowserLocal } from '../daemon-starter';
+import { openBrowserLocal, isTestingMode } from '../daemon-starter';
 import { buildScanSummary, type FindingRef, type RuleGroup } from '../../scan-summary';
 
 // ---------------------------------------------------------------------------
@@ -1631,8 +1631,11 @@ export function registerScanCommand(program: Command): void {
       }
       console.log('');
 
-      // Push results to daemon and open browser if daemon is running
-      if (isDaemonRunning() && process.env.NODE9_TESTING !== '1') {
+      // Push results to an already-running daemon and open the browser.
+      // We do not auto-start the daemon here: scan results may contain sensitive
+      // DLP findings and should only be posted over the loopback channel when the
+      // user has already opted in to running the daemon.
+      if (!isTestingMode() && isDaemonRunning()) {
         const internalToken = getInternalToken();
         if (internalToken) {
           try {

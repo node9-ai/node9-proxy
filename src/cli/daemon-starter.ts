@@ -1,7 +1,12 @@
 // src/cli/daemon-starter.ts
 // Shared helpers for auto-starting the approval daemon from CLI commands.
 import { spawn, execSync } from 'child_process';
+import path from 'path';
 import { isDaemonRunning, DAEMON_PORT, DAEMON_HOST } from '../auth/daemon';
+
+export function isTestingMode(): boolean {
+  return /^(1|true|yes)$/i.test(process.env.NODE9_TESTING ?? '');
+}
 
 export function openBrowserLocal() {
   const url = `http://${DAEMON_HOST}:${DAEMON_PORT}/`;
@@ -13,8 +18,9 @@ export function openBrowserLocal() {
   } catch {}
 }
 
-export async function autoStartDaemonAndWait(): Promise<boolean> {
-  if (process.env.NODE9_TESTING === '1') return false;
+export async function autoStartDaemonAndWait(openBrowser = true): Promise<boolean> {
+  if (isTestingMode()) return false;
+  if (!path.isAbsolute(process.argv[1])) return false;
   try {
     const child = spawn(process.execPath, [process.argv[1], 'daemon'], {
       detached: true,
@@ -35,12 +41,14 @@ export async function autoStartDaemonAndWait(): Promise<boolean> {
           signal: AbortSignal.timeout(500),
         });
         if (res.ok) {
-          // Open the browser NOW — before the approval request is registered —
-          // so the browser has time to connect SSE. If we wait until POST /check,
-          // broadcast('add') fires with sseClients.size === 0 and the request
-          // depends on the async openBrowser() inside the daemon, which can lose
-          // the race with the browser's own page-load timing.
-          openBrowserLocal();
+          if (openBrowser) {
+            // Open the browser NOW — before the approval request is registered —
+            // so the browser has time to connect SSE. If we wait until POST /check,
+            // broadcast('add') fires with sseClients.size === 0 and the request
+            // depends on the async openBrowser() inside the daemon, which can lose
+            // the race with the browser's own page-load timing.
+            openBrowserLocal();
+          }
           return true;
         }
       } catch {
