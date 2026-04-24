@@ -22,7 +22,8 @@ const sources = [
   fs.readFileSync(path.join(COMMANDS_DIR, 'commands/watch.ts'), 'utf-8'),
 ];
 
-const SAFE_SPAWN_RE = /spawn\(process\.execPath,\s*\[process\.argv\[1\],\s*'daemon'\]/g;
+const SAFE_SPAWN_RE =
+  /spawn\(process\.execPath,\s*\[(?:process\.argv\[1\]|resolvedArgv1),\s*'daemon'\]/g;
 const UNSAFE_SPAWN_RE = /spawn\(['"]node9['"]/;
 
 describe('spawn Windows compatibility (#41)', () => {

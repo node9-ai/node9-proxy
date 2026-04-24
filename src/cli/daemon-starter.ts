@@ -2,6 +2,7 @@
 // Shared helpers for auto-starting the approval daemon from CLI commands.
 import { spawn, execSync } from 'child_process';
 import path from 'path';
+import fs from 'fs';
 import { isDaemonRunning, DAEMON_PORT, DAEMON_HOST } from '../auth/daemon';
 
 export function isTestingMode(): boolean {
@@ -21,13 +22,25 @@ export function openBrowserLocal() {
 export async function autoStartDaemonAndWait(openBrowser = true): Promise<boolean> {
   if (isTestingMode()) return false;
   if (!path.isAbsolute(process.argv[1])) return false;
+  let resolvedArgv1: string;
   try {
-    const child = spawn(process.execPath, [process.argv[1], 'daemon'], {
+    resolvedArgv1 = fs.realpathSync(process.argv[1]);
+  } catch {
+    return false;
+  }
+  if (!resolvedArgv1.endsWith('.js')) return false;
+  try {
+    const child = spawn(process.execPath, [resolvedArgv1, 'daemon'], {
       detached: true,
       stdio: 'ignore',
       // NODE9_BROWSER_OPENED=1 tells the daemon we will open the browser ourselves
       // (openBrowserLocal below), so it must not open a duplicate tab on first approval.
-      env: { ...process.env, NODE9_AUTO_STARTED: '1', NODE9_BROWSER_OPENED: '1' },
+      // Only set NODE9_BROWSER_OPENED when we actually intend to open it here.
+      env: {
+        ...process.env,
+        NODE9_AUTO_STARTED: '1',
+        ...(openBrowser && { NODE9_BROWSER_OPENED: '1' }),
+      },
     });
     child.unref();
     for (let i = 0; i < 20; i++) {
@@ -37,7 +50,7 @@ export async function autoStartDaemonAndWait(openBrowser = true): Promise<boolea
       // the process is alive. isDaemonRunning() only checks the PID file, which
       // could be stale (OS PID reuse) or written before the socket is fully ready.
       try {
-        const res = await fetch('http://127.0.0.1:7391/settings', {
+        const res = await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/settings`, {
           signal: AbortSignal.timeout(500),
         });
         if (res.ok) {

@@ -521,7 +521,13 @@ export async function evaluatePolicy(
     // Inline arbitrary code execution is always a review
     const INLINE_EXEC_PATTERN = /^(python3?|bash|sh|zsh|perl|ruby|node|php|lua)\s+(-c|-e|-eval)\s/i;
     if (INLINE_EXEC_PATTERN.test(shellCommand.trim())) {
-      return { decision: 'review', blockedByLabel: 'Node9 Standard (Inline Execution)', tier: 3 };
+      return {
+        decision: 'review',
+        blockedByLabel: 'Node9 Standard (Inline Execution)',
+        ruleDescription:
+          'The AI is running code directly from the command line. Review the full script below before allowing it to execute.',
+        tier: 3,
+      };
     }
 
     // AST-based eval detection — structurally accurate, not fooled by string content
@@ -531,6 +537,8 @@ export async function evaluatePolicy(
         decision: 'block',
         blockedByLabel: 'Node9: Eval Remote Execution',
         reason: 'eval of remote download (curl/wget) is a near-certain supply-chain attack',
+        ruleDescription:
+          'The AI is downloading a script from the internet and running it immediately without inspection. This is a common way malware gets installed.',
         tier: 3,
       };
     }
@@ -539,6 +547,8 @@ export async function evaluatePolicy(
         decision: 'review',
         blockedByLabel: 'Node9: Eval Dynamic Content',
         reason: 'eval of dynamic content (variable or subshell expansion) requires approval',
+        ruleDescription:
+          'The AI is running a command that includes a variable or subshell expansion. The actual command executed at runtime may differ from what is shown here.',
         tier: 3,
       };
     }
@@ -718,6 +728,7 @@ export async function evaluatePolicy(
       blockedByLabel: `Project/Global Config — dangerous word: "${matchedDangerousWord}"`,
       matchedWord: matchedDangerousWord,
       matchedField,
+      ruleDescription: `This command contains a flagged keyword ("${matchedDangerousWord}") from your node9 config. Review it before allowing.`,
       tier: 6,
     };
   }
@@ -757,6 +768,7 @@ export interface ExplainResult {
   decision: 'allow' | 'review' | 'block';
   blockedByLabel?: string;
   matchedToken?: string;
+  ruleDescription?: string;
 }
 
 export async function explainPolicy(toolName: string, args?: unknown): Promise<ExplainResult> {
@@ -924,6 +936,8 @@ export async function explainPolicy(toolName: string, args?: unknown): Promise<E
         steps,
         decision: 'review',
         blockedByLabel: 'Node9 Standard (Inline Execution)',
+        ruleDescription:
+          'The AI is running code directly from the command line. Review the full script below before allowing it to execute.',
       };
     }
     steps.push({
@@ -1049,6 +1063,7 @@ export async function explainPolicy(toolName: string, args?: unknown): Promise<E
       decision: 'review',
       blockedByLabel: `Project/Global Config — dangerous word: "${matchedDangerousWord}"`,
       matchedToken: matchedDangerousWord,
+      ruleDescription: `This command contains a flagged keyword ("${matchedDangerousWord}") from your node9 config. Review it before allowing.`,
     };
   }
   steps.push({
