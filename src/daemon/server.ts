@@ -1147,7 +1147,9 @@ export function startDaemon(): void {
         const { serverKey, disabledTools } = JSON.parse(await readBody(req));
         if (
           typeof serverKey !== 'string' ||
+          serverKey.length < 1 ||
           serverKey.length > 256 ||
+          !/^[\w.-]+$/.test(serverKey) ||
           !Array.isArray(disabledTools)
         ) {
           res.writeHead(400).end();
@@ -1173,7 +1175,13 @@ export function startDaemon(): void {
       if (req.headers['x-node9-internal'] !== internalToken) return res.writeHead(403).end();
       try {
         const { serverKey, tools } = JSON.parse(await readBody(req));
-        if (typeof serverKey !== 'string' || serverKey.length > 256 || !Array.isArray(tools)) {
+        if (
+          typeof serverKey !== 'string' ||
+          serverKey.length < 1 ||
+          serverKey.length > 256 ||
+          !/^[\w.-]+$/.test(serverKey) ||
+          !Array.isArray(tools)
+        ) {
           res.writeHead(400).end();
           return;
         }

@@ -28,6 +28,7 @@ export async function autoStartDaemonAndWait(openBrowser = true): Promise<boolea
   } catch {
     return false;
   }
+  if (!resolvedArgv1.endsWith('.js')) return false;
   try {
     const child = spawn(process.execPath, [resolvedArgv1, 'daemon'], {
       detached: true,
