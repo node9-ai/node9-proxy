@@ -1318,7 +1318,7 @@ export function registerScanCommand(program: Command): void {
       );
       console.log('');
 
-      const useTTY = process.stdout.isTTY === true;
+      const useTTY = process.stdout.isTTY === true && process.env.NODE9_WRAPPER !== '1';
       if (!useTTY) {
         process.stdout.write(
           '  ' + chalk.dim('Scanning your history — this may take a moment...\n')
