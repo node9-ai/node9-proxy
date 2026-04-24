@@ -24,7 +24,7 @@ import {
 import { scanArgs } from '../../dlp';
 import type { SmartRule } from '../../core';
 import { isDaemonRunning, getInternalToken, DAEMON_PORT, DAEMON_HOST } from '../../auth/daemon';
-import { openBrowserLocal, isTestingMode } from '../daemon-starter';
+import { openBrowserLocal, isTestingMode, autoStartDaemonAndWait } from '../daemon-starter';
 import { buildScanSummary, type FindingRef, type RuleGroup } from '../../scan-summary';
 
 // ---------------------------------------------------------------------------
@@ -1318,24 +1318,28 @@ export function registerScanCommand(program: Command): void {
       );
       console.log('');
 
+      if (!isInstalled) {
+        process.stdout.write('  ' + chalk.dim('Scanning... this may take a moment\n'));
+      }
+
       const totalFiles = countScanFiles();
       let filesScanned = 0;
       let linesScanned = 0;
       let lastRender = 0;
       const onProgress = (done: number) => {
         filesScanned = done;
-        renderProgressBar(filesScanned, totalFiles, linesScanned);
+        if (isInstalled) renderProgressBar(filesScanned, totalFiles, linesScanned);
         lastRender = Date.now();
       };
       const onLine = () => {
         linesScanned++;
         const now = Date.now();
-        if (now - lastRender >= 80) {
+        if (isInstalled && now - lastRender >= 80) {
           lastRender = now;
           renderProgressBar(filesScanned, totalFiles, linesScanned);
         }
       };
-      renderProgressBar(0, totalFiles, 0);
+      if (isInstalled) renderProgressBar(0, totalFiles, 0);
       const claudeScan = scanClaudeHistory(startDate, onProgress, onLine);
       const geminiScan = scanGeminiHistory(
         startDate,
@@ -1353,7 +1357,7 @@ export function registerScanCommand(program: Command): void {
         { id: 'gemini', label: 'Gemini', icon: '♊', scan: geminiScan },
         { id: 'codex', label: 'Codex', icon: '🔮', scan: codexScan },
       ]);
-      process.stdout.write('\r' + ' '.repeat(60) + '\r');
+      if (isInstalled) process.stdout.write('\r' + ' '.repeat(60) + '\r');
 
       if (scan.filesScanned === 0) {
         console.log(chalk.yellow('  No session history found.'));
@@ -1653,36 +1657,52 @@ export function registerScanCommand(program: Command): void {
       }
       console.log('');
 
-      // Always show the browser link so users know the dashboard exists.
-      const url = `http://${DAEMON_HOST}:${DAEMON_PORT}/`;
       if (!isTestingMode()) {
-        if (isDaemonRunning()) {
-          // Daemon is running — push results so the browser shows them instantly.
-          const internalToken = getInternalToken();
-          if (internalToken) {
-            try {
-              const summary = buildScanSummary([
-                { id: 'claude', label: 'Claude', icon: '🤖', scan: claudeScan },
-                { id: 'gemini', label: 'Gemini', icon: '♊', scan: geminiScan },
-                { id: 'codex', label: 'Codex', icon: '🔮', scan: codexScan },
-              ]);
-              await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/scan/push`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-node9-internal': internalToken },
-                body: JSON.stringify({ status: 'complete', summary }),
-                signal: AbortSignal.timeout(3000),
-              });
-              openBrowserLocal();
-            } catch {
-              // fire-and-forget
+        if (isInstalled) {
+          // Installed users: ensure daemon is running, then show the browser link.
+          if (!isDaemonRunning()) {
+            await autoStartDaemonAndWait(false);
+          }
+          const url = `http://${DAEMON_HOST}:${DAEMON_PORT}/`;
+          if (isDaemonRunning()) {
+            const internalToken = getInternalToken();
+            if (internalToken) {
+              try {
+                const pushSummary = buildScanSummary([
+                  { id: 'claude', label: 'Claude', icon: '🤖', scan: claudeScan },
+                  { id: 'gemini', label: 'Gemini', icon: '♊', scan: geminiScan },
+                  { id: 'codex', label: 'Codex', icon: '🔮', scan: codexScan },
+                ]);
+                await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/scan/push`, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'x-node9-internal': internalToken,
+                  },
+                  body: JSON.stringify({ status: 'complete', summary: pushSummary }),
+                  signal: AbortSignal.timeout(3000),
+                });
+                openBrowserLocal();
+              } catch {
+                // fire-and-forget
+              }
             }
           }
+          console.log('  ' + chalk.cyan('🌐 View in browser:') + '  ' + chalk.underline(url));
+          if (!isDaemonRunning()) {
+            console.log('  ' + chalk.dim('   run node9 daemon --background to activate'));
+          }
+          console.log('');
+        } else {
+          // npx / not installed: prompt to install instead of showing the link.
+          console.log(
+            '  ' +
+              chalk.dim('📊 For a full browser report:') +
+              '  ' +
+              chalk.cyan('npm install -g node9-ai')
+          );
+          console.log('');
         }
-        console.log('  ' + chalk.cyan('🌐 View in browser:') + '  ' + chalk.underline(url));
-        if (!isDaemonRunning()) {
-          console.log('  ' + chalk.dim('   run node9 daemon --background to activate'));
-        }
-        console.log('');
       }
     });
 }
