@@ -683,4 +683,6 @@ if (firstArg && firstArg !== '--' && !firstArg.startsWith('-') && !knownSubcomma
   process.argv.splice(2, 0, '--');
 }
 
-program.parse();
+(async () => {
+  await program.parseAsync();
+})();
