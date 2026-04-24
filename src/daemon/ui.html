@@ -955,6 +955,10 @@
         border-color: rgba(83, 155, 245, 0.35);
         background: rgba(83, 155, 245, 0.04);
       }
+      .pending-card.discovery-card {
+        border-color: rgba(120, 100, 255, 0.45);
+        background: rgba(100, 80, 255, 0.06);
+      }
       .pending-card-header {
         display: flex;
         align-items: center;
@@ -3141,7 +3145,7 @@
         });
 
         try {
-          await fetch('/mcp/approve', {
+          const res = await fetch('/mcp/approve', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -3149,9 +3153,19 @@
             },
             body: JSON.stringify({ id, serverKey, disabledTools }),
           });
+          if (!res.ok) {
+            showToast(
+              '⚠️',
+              'Approval failed',
+              `Server responded with ${res.status}`,
+              'toast-block'
+            );
+            return;
+          }
           closeMcpReview();
           refreshMcpTools();
         } catch (err) {
+          showToast('⚠️', 'Approval failed', 'Network error — check the daemon', 'toast-block');
           console.error('Failed to approve MCP server:', err);
         }
       }

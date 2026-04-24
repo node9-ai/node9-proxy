@@ -1,7 +1,12 @@
 // src/cli/daemon-starter.ts
 // Shared helpers for auto-starting the approval daemon from CLI commands.
 import { spawn, execSync } from 'child_process';
+import path from 'path';
 import { isDaemonRunning, DAEMON_PORT, DAEMON_HOST } from '../auth/daemon';
+
+export function isTestingMode(): boolean {
+  return /^(1|true|yes)$/i.test(process.env.NODE9_TESTING ?? '');
+}
 
 export function openBrowserLocal() {
   const url = `http://${DAEMON_HOST}:${DAEMON_PORT}/`;
