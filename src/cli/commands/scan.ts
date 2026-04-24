@@ -24,7 +24,7 @@ import {
 import { scanArgs } from '../../dlp';
 import type { SmartRule } from '../../core';
 import { isDaemonRunning, getInternalToken, DAEMON_PORT, DAEMON_HOST } from '../../auth/daemon';
-import { openBrowserLocal, isTestingMode, autoStartDaemonAndWait } from '../daemon-starter';
+import { openBrowserLocal, isTestingMode } from '../daemon-starter';
 import { buildScanSummary, type FindingRef, type RuleGroup } from '../../scan-summary';
 
 // ---------------------------------------------------------------------------
@@ -1318,8 +1318,11 @@ export function registerScanCommand(program: Command): void {
       );
       console.log('');
 
-      if (!isInstalled) {
-        process.stdout.write('  ' + chalk.dim('Scanning... this may take a moment\n'));
+      const useTTY = process.stdout.isTTY === true;
+      if (!useTTY) {
+        process.stdout.write(
+          '  ' + chalk.dim('Scanning your history — this may take a moment...\n')
+        );
       }
 
       const totalFiles = countScanFiles();
@@ -1328,18 +1331,18 @@ export function registerScanCommand(program: Command): void {
       let lastRender = 0;
       const onProgress = (done: number) => {
         filesScanned = done;
-        if (isInstalled) renderProgressBar(filesScanned, totalFiles, linesScanned);
+        if (useTTY) renderProgressBar(filesScanned, totalFiles, linesScanned);
         lastRender = Date.now();
       };
       const onLine = () => {
         linesScanned++;
         const now = Date.now();
-        if (isInstalled && now - lastRender >= 80) {
+        if (useTTY && now - lastRender >= 80) {
           lastRender = now;
           renderProgressBar(filesScanned, totalFiles, linesScanned);
         }
       };
-      if (isInstalled) renderProgressBar(0, totalFiles, 0);
+      if (useTTY) renderProgressBar(0, totalFiles, 0);
       const claudeScan = scanClaudeHistory(startDate, onProgress, onLine);
       const geminiScan = scanGeminiHistory(
         startDate,
@@ -1357,7 +1360,7 @@ export function registerScanCommand(program: Command): void {
         { id: 'gemini', label: 'Gemini', icon: '♊', scan: geminiScan },
         { id: 'codex', label: 'Codex', icon: '🔮', scan: codexScan },
       ]);
-      if (isInstalled) process.stdout.write('\r' + ' '.repeat(60) + '\r');
+      if (useTTY) process.stdout.write('\r' + ' '.repeat(60) + '\r');
 
       if (scan.filesScanned === 0) {
         console.log(chalk.yellow('  No session history found.'));
@@ -1659,10 +1662,6 @@ export function registerScanCommand(program: Command): void {
 
       if (!isTestingMode()) {
         if (isInstalled) {
-          // Installed users: ensure daemon is running, then show the browser link.
-          if (!isDaemonRunning()) {
-            await autoStartDaemonAndWait(false);
-          }
           const url = `http://${DAEMON_HOST}:${DAEMON_PORT}/`;
           if (isDaemonRunning()) {
             const internalToken = getInternalToken();
@@ -1690,14 +1689,19 @@ export function registerScanCommand(program: Command): void {
           }
           console.log('  ' + chalk.cyan('🌐 View in browser:') + '  ' + chalk.underline(url));
           if (!isDaemonRunning()) {
-            console.log('  ' + chalk.dim('   run node9 daemon --background to activate'));
+            console.log(
+              '  ' +
+                chalk.dim('   run ') +
+                chalk.cyan('node9 daemon --background') +
+                chalk.dim(' to open the dashboard')
+            );
           }
           console.log('');
         } else {
-          // npx / not installed: prompt to install instead of showing the link.
+          // npx / not installed: prompt to install for browser report.
           console.log(
             '  ' +
-              chalk.dim('📊 For a full browser report:') +
+              chalk.dim('📊 For a full browser report, install node9:') +
               '  ' +
               chalk.cyan('npm install -g node9-ai')
           );
