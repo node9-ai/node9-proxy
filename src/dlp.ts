@@ -430,6 +430,86 @@ export const DLP_PATTERNS: DlpPattern[] = [
     severity: 'block',
     keywords: ['pk.eyj1'],
   },
+
+  // ── Notion ────────────────────────────────────────────────────────────────
+  {
+    name: 'Notion Integration Token',
+    regex: /\bsecret_[a-zA-Z0-9]{43}\b/,
+    severity: 'block',
+    keywords: ['secret_'],
+  },
+
+  // ── Square ────────────────────────────────────────────────────────────────
+  {
+    name: 'Square Access Token',
+    regex: /\bsq0atp-[0-9A-Za-z_-]{22}\b/,
+    severity: 'block',
+    keywords: ['sq0atp-'],
+  },
+  {
+    name: 'Square OAuth Secret',
+    regex: /\bsq0csp-[0-9A-Za-z_-]{43}\b/,
+    severity: 'block',
+    keywords: ['sq0csp-'],
+  },
+
+  // ── Typeform ──────────────────────────────────────────────────────────────
+  {
+    name: 'Typeform Token',
+    regex: /\btfp_[a-zA-Z0-9_]{59}\b/,
+    severity: 'block',
+    keywords: ['tfp_'],
+  },
+
+  // ── Cloudinary ────────────────────────────────────────────────────────────
+  {
+    name: 'Cloudinary URL',
+    regex: /\bcloudinary:\/\/[0-9]+:[a-zA-Z0-9_-]+@[a-zA-Z0-9_-]+/,
+    severity: 'block',
+    keywords: ['cloudinary://'],
+  },
+
+  // ── Airtable ──────────────────────────────────────────────────────────────
+  // New PAT format: pat + 14 alphanum + . + 64 alphanum
+  {
+    name: 'Airtable PAT',
+    regex: /\bpat[a-zA-Z0-9]{14}\.[a-zA-Z0-9]{64}\b/,
+    severity: 'block',
+    keywords: ['pat'],
+  },
+
+  // ── RubyGems ──────────────────────────────────────────────────────────────
+  {
+    name: 'RubyGems API Key',
+    regex: /\brubygems_[a-f0-9]{48}\b/,
+    severity: 'block',
+    keywords: ['rubygems_'],
+  },
+
+  // ── Shippo ────────────────────────────────────────────────────────────────
+  {
+    name: 'Shippo Token',
+    regex: /\bshippo_(?:live|test)_[a-f0-9]{40}\b/,
+    severity: 'block',
+    keywords: ['shippo_'],
+  },
+
+  // ── Plaid ─────────────────────────────────────────────────────────────────
+  {
+    name: 'Plaid Access Token',
+    regex:
+      /\baccess-(?:sandbox|development|production)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/,
+    severity: 'block',
+    keywords: ['access-sandbox', 'access-development', 'access-production'],
+  },
+
+  // ── Age ───────────────────────────────────────────────────────────────────
+  {
+    name: 'Age Identity Key',
+    regex: /\bAGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JNLH]{58}\b/,
+    severity: 'block',
+    keywords: ['age-secret-key-'],
+  },
 ];
 
 // ── Sensitive File Path Blocklist ─────────────────────────────────────────────

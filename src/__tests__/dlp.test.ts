@@ -491,3 +491,102 @@ describe('DLP_PATTERNS — new provider patterns', () => {
     expect(match!.severity).toBe('block');
   });
 });
+
+// ── Gitleaks-sourced patterns ─────────────────────────────────────────────────
+// Token values use concatenation so no single string literal in the source
+// contains a complete matching token (avoids triggering DLP on the source file).
+
+describe('DLP_PATTERNS — Gitleaks-sourced patterns', () => {
+  const NOTION_TOKEN = 'secret_' + 'AbCdEfGhIjKlMnOpQrStUvWxYz' + 'AbCdEfGhIjKlMnOpQ';
+  const SQUARE_AT = 'sq0atp-' + 'AbCdEfGhIjKlMnOpQrStUv';
+  const SQUARE_CSP = 'sq0csp-' + 'AbCdEfGhIjKlMnOpQrStUvWxYz' + 'AbCdEfGhIjKlMnOpQ';
+  const TYPEFORM_TOKEN =
+    'tfp_' + 'AbCdEfGhIjKlMnOpQrStUvWxYz' + 'AbCdEfGhIjKlMnOpQrStUvWxYz' + 'AbCdEfG';
+  const CLOUDINARY_URL = 'cloudinary://' + '123456789012345:AbCdEfGhIjKlMnOpQrStUvWxy@mycloud';
+  const AIRTABLE_PAT =
+    'pat' +
+    'AbCdEfGhIjKlMn' +
+    '.' +
+    'AbCdEfGhIjKlMnOpQrStUvWxYz' +
+    'AbCdEfGhIjKlMnOpQrStUvWxYz' +
+    'AbCdEfGhIjKl';
+  const RUBYGEMS_KEY = 'rubygems_' + 'a1b2c3d4e5f60a1b' + '2c3d4e5f60a1b2c3' + 'd4e5f60a1b2c3d4e';
+  const SHIPPO_TOKEN = 'shippo_' + 'live_' + 'a1b2c3d4e5f60a1b' + '2c3d4e5f60a1b2c3' + 'd4e5f60a';
+  const PLAID_TOKEN = 'access-' + 'sandbox-' + 'a1b2c3d4-e5f6-0a1b-2c3d-' + '4e5f60a1b2c3';
+  const AGE_KEY =
+    'AGE-SECRET-KEY-' +
+    '1' +
+    'QPZRY9X8GF2TVDW0S3JNLH' +
+    'QPZRY9X8GF2TVDW0S3JNLH' +
+    'QPZRY9X8GF2TVD';
+
+  it('detects Notion integration token', () => {
+    const match = scanArgs({ env: `NOTION_TOKEN=${NOTION_TOKEN}` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Notion Integration Token');
+    expect(match!.severity).toBe('block');
+  });
+
+  it('detects Square access token', () => {
+    const match = scanArgs({ env: `SQUARE_TOKEN=${SQUARE_AT}` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Square Access Token');
+    expect(match!.severity).toBe('block');
+  });
+
+  it('detects Square OAuth secret', () => {
+    const match = scanArgs({ env: `SQUARE_SECRET=${SQUARE_CSP}` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Square OAuth Secret');
+    expect(match!.severity).toBe('block');
+  });
+
+  it('detects Typeform token', () => {
+    const match = scanArgs({ env: `TYPEFORM_TOKEN=${TYPEFORM_TOKEN}` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Typeform Token');
+    expect(match!.severity).toBe('block');
+  });
+
+  it('detects Cloudinary URL with embedded credentials', () => {
+    const match = scanArgs({ config: CLOUDINARY_URL });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Cloudinary URL');
+    expect(match!.severity).toBe('block');
+  });
+
+  it('detects Airtable PAT', () => {
+    const match = scanArgs({ env: `AIRTABLE_TOKEN=${AIRTABLE_PAT}` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Airtable PAT');
+    expect(match!.severity).toBe('block');
+  });
+
+  it('detects RubyGems API key', () => {
+    const match = scanArgs({ env: `RUBYGEMS_KEY=${RUBYGEMS_KEY}` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('RubyGems API Key');
+    expect(match!.severity).toBe('block');
+  });
+
+  it('detects Shippo token', () => {
+    const match = scanArgs({ env: `SHIPPO_TOKEN=${SHIPPO_TOKEN}` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Shippo Token');
+    expect(match!.severity).toBe('block');
+  });
+
+  it('detects Plaid access token (sandbox)', () => {
+    const match = scanArgs({ env: `PLAID_TOKEN=${PLAID_TOKEN}` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Plaid Access Token');
+    expect(match!.severity).toBe('block');
+  });
+
+  it('detects Age identity key', () => {
+    const match = scanArgs({ content: AGE_KEY });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Age Identity Key');
+    expect(match!.severity).toBe('block');
+  });
+});
