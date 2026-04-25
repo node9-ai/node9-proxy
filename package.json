@@ -78,7 +78,7 @@
     "smol-toml": "^1.6.1",
     "zod": "^3.25.76"
   },
-  "bundleDependencies": [
+  "bundledDependencies": [
     "mvdan-sh"
   ],
   "devDependencies": {
