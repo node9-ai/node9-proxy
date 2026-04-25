@@ -1699,8 +1699,8 @@ export function registerScanCommand(program: Command): void {
           } else {
             console.log(
               '  ' +
-                chalk.dim('📊 To view in browser, start the daemon:  ') +
-                chalk.cyan('node9 daemon --background')
+                chalk.dim('📊 To view in browser, install node9:  ') +
+                chalk.cyan('npm install -g node9-ai')
             );
           }
           console.log('');
