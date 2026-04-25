@@ -19,6 +19,7 @@ import {
 } from '../../setup';
 import { readActiveShields, writeActiveShields } from '../../shields';
 import { installDaemonService, isDaemonServiceInstalled } from '../../daemon/service';
+import { autoStartDaemonAndWait, isTestingMode } from '../daemon-starter';
 
 const DEFAULT_SHIELDS = ['bash-safe', 'filesystem', 'postgres'];
 
@@ -190,6 +191,22 @@ export function registerInitCommand(program: Command): void {
           }
         } else {
           console.log(chalk.green('  ✓ Daemon login service already installed'));
+        }
+
+        // Start the daemon right now so protection is immediate — don't make
+        // the user wait for next login or run node9 tail manually.
+        if (!isTestingMode()) {
+          process.stdout.write(chalk.dim('  Starting daemon...'));
+          const started = await autoStartDaemonAndWait(false);
+          if (started) {
+            process.stdout.write(
+              '\r' + chalk.green('  ✓ Daemon started — protection is active') + '\n'
+            );
+          } else {
+            process.stdout.write(
+              '\r' + chalk.dim('  Daemon will start on next login         ') + '\n'
+            );
+          }
         }
         console.log('');
       }
