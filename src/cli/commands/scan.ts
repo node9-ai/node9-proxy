@@ -1694,13 +1694,13 @@ export function registerScanCommand(program: Command): void {
               }
             }
           }
-          console.log('  ' + chalk.cyan('🌐 View in browser:') + '  ' + chalk.underline(url));
-          if (!isDaemonRunning()) {
+          if (isDaemonRunning()) {
+            console.log('  ' + chalk.cyan('🌐 View in browser:') + '  ' + chalk.underline(url));
+          } else {
             console.log(
               '  ' +
-                chalk.dim('   run ') +
-                chalk.cyan('node9 daemon --background') +
-                chalk.dim(' to open the dashboard')
+                chalk.dim('📊 To view in browser, start the daemon:  ') +
+                chalk.cyan('node9 daemon --background')
             );
           }
           console.log('');
