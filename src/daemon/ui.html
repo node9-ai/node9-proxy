@@ -3349,6 +3349,10 @@
               btn.appendChild(badge);
             }
           }
+          // Auto-open when browser was launched directly from `node9 scan`
+          if (new URLSearchParams(location.search).get('openscan') === '1') {
+            openScanModal();
+          }
         } catch {}
       })();
 
