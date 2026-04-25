@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
-import { scanArgs, scanFilePath, DLP_PATTERNS } from '../dlp.js';
+import { scanArgs, scanFilePath, scanText, DLP_PATTERNS } from '../dlp.js';
 
 // NOTE: All fake secret strings are built via concatenation so GitHub's secret
 // scanner doesn't flag this test file. The values are obviously fake (sequential
@@ -399,5 +399,194 @@ describe('scanFilePath — sensitive path blocking', () => {
     // In that case native() would succeed and return the sensitive resolved path
     // This test confirms: if file is deleted mid-race, we don't block unnecessarily
     expect(scanFilePath('/project/harmless-config.ts', '/project')).toBeNull();
+  });
+});
+
+// ── Entropy Guard ─────────────────────────────────────────────────────────────
+
+describe('DLP — entropy guard suppresses low-entropy placeholders', () => {
+  it('suppresses a repeated-char OpenAI-style key (entropy ~0)', () => {
+    // sk- + 30 identical chars → all-same character, entropy = 0
+    const fake = 'sk-' + 'a'.repeat(30);
+    expect(scanArgs({ key: fake })).toBeNull();
+  });
+
+  it('suppresses a narrow-charset OpenAI-style key (entropy ~2.0)', () => {
+    // only 3 unique chars in the value → entropy well below 3.5 threshold
+    const fake = 'sk-' + 'abcabcabcabcabcabcabcabcabcabc';
+    expect(scanArgs({ key: fake })).toBeNull();
+  });
+
+  it('detects a high-entropy OpenAI-style key', () => {
+    // Random-looking alphanumeric — high entropy
+    const real = 'sk-' + 'Xm7Kp3Qn9Bt2Vc6Wr1Ys4Zh8Pq5Nv3Mt';
+    const match = scanArgs({ key: real });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('OpenAI API Key');
+  });
+
+  it('suppresses a repeated-char HuggingFace-style token', () => {
+    const fake = 'hf_' + 'a'.repeat(34);
+    expect(scanArgs({ token: fake })).toBeNull();
+  });
+
+  it('detects a high-entropy HuggingFace token', () => {
+    // exactly 34 mixed-case letters — matches hf_[A-Za-z]{34}
+    const real = 'hf_' + 'AbCdEfGhIjKlMnOpQrStUvWxYzAbCdEfGh';
+    const match = scanArgs({ token: real });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('HuggingFace Token');
+  });
+
+  it('suppresses a low-entropy Bearer token value', () => {
+    const fake = 'Bearer ' + 'a'.repeat(30);
+    expect(scanArgs({ header: fake })).toBeNull();
+  });
+
+  it('works the same in scanText', () => {
+    const fake = 'sk-' + 'a'.repeat(30);
+    expect(scanText(fake)).toBeNull();
+    const real = 'sk-' + 'Xm7Kp3Qn9Bt2Vc6Wr1Ys4Zh8Pq5Nv3Mt';
+    expect(scanText(real)).not.toBeNull();
+  });
+});
+
+// ── New patterns: Resend, Telegram, Mapbox ────────────────────────────────────
+
+describe('DLP_PATTERNS — new provider patterns', () => {
+  it('detects Resend API key', () => {
+    // exactly 24 alphanum chars after re_
+    const key = 're_' + 'AbCdEfGhIjKlMnOpQrStUvWx';
+    const match = scanArgs({ env: `RESEND_API_KEY=${key}` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Resend API Key');
+    expect(match!.severity).toBe('block');
+  });
+
+  it('does not flag re_ prefix with wrong length', () => {
+    expect(scanArgs({ val: 're_short' })).toBeNull();
+    expect(scanArgs({ val: 're_' + 'x'.repeat(30) })).toBeNull(); // too long (word boundary fails)
+  });
+
+  it('detects Telegram bot token', () => {
+    // 10-digit bot ID + :AA + exactly 33 alphanum chars
+    const token = '1234567890:AA' + 'AbCdEfGhIjKlMnOpQrStUvWxYzAbCdEfG';
+    const match = scanArgs({ config: `BOT_TOKEN=${token}` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Telegram Bot Token');
+    expect(match!.severity).toBe('block');
+  });
+
+  it('does not flag malformed Telegram-style strings', () => {
+    expect(scanArgs({ val: '123:notaa_tooshort' })).toBeNull();
+    expect(scanArgs({ val: '12345:AAshort' })).toBeNull();
+  });
+
+  it('detects Mapbox access token', () => {
+    // pk.eyJ1 prefix (base64url of {"u"…) + 20+ alphanum/dot/dash chars
+    const token = 'pk.eyJ1IjoibXl1c2VyIiwiYSI6ImFiY2QifQ.AbCdEfGhIjKlMnOpQrSt';
+    const match = scanArgs({ config: `MAPBOX_TOKEN=${token}` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Mapbox Access Token');
+    expect(match!.severity).toBe('block');
+  });
+});
+
+// ── Gitleaks-sourced patterns ─────────────────────────────────────────────────
+// Token values use concatenation so no single string literal in the source
+// contains a complete matching token (avoids triggering DLP on the source file).
+
+describe('DLP_PATTERNS — Gitleaks-sourced patterns', () => {
+  const NOTION_TOKEN = 'secret_' + 'AbCdEfGhIjKlMnOpQrStUvWxYz' + 'AbCdEfGhIjKlMnOpQ';
+  const SQUARE_AT = 'sq0atp-' + 'AbCdEfGhIjKlMnOpQrStUv';
+  const SQUARE_CSP = 'sq0csp-' + 'AbCdEfGhIjKlMnOpQrStUvWxYz' + 'AbCdEfGhIjKlMnOpQ';
+  const TYPEFORM_TOKEN =
+    'tfp_' + 'AbCdEfGhIjKlMnOpQrStUvWxYz' + 'AbCdEfGhIjKlMnOpQrStUvWxYz' + 'AbCdEfG';
+  const CLOUDINARY_URL = 'cloudinary://' + '123456789012345:AbCdEfGhIjKlMnOpQrStUvWxy@mycloud';
+  const AIRTABLE_PAT =
+    'pat' +
+    'AbCdEfGhIjKlMn' +
+    '.' +
+    'AbCdEfGhIjKlMnOpQrStUvWxYz' +
+    'AbCdEfGhIjKlMnOpQrStUvWxYz' +
+    'AbCdEfGhIjKl';
+  const RUBYGEMS_KEY = 'rubygems_' + 'a1b2c3d4e5f60a1b' + '2c3d4e5f60a1b2c3' + 'd4e5f60a1b2c3d4e';
+  const SHIPPO_TOKEN = 'shippo_' + 'live_' + 'a1b2c3d4e5f60a1b' + '2c3d4e5f60a1b2c3' + 'd4e5f60a';
+  const PLAID_TOKEN = 'access-' + 'sandbox-' + 'a1b2c3d4-e5f6-0a1b-2c3d-' + '4e5f60a1b2c3';
+  const AGE_KEY =
+    'AGE-SECRET-KEY-' +
+    '1' +
+    'QPZRY9X8GF2TVDW0S3JNLH' +
+    'QPZRY9X8GF2TVDW0S3JNLH' +
+    'QPZRY9X8GF2TVD';
+
+  it('detects Notion integration token', () => {
+    const match = scanArgs({ env: `NOTION_TOKEN=${NOTION_TOKEN}` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Notion Integration Token');
+    expect(match!.severity).toBe('block');
+  });
+
+  it('detects Square access token', () => {
+    const match = scanArgs({ env: `SQUARE_TOKEN=${SQUARE_AT}` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Square Access Token');
+    expect(match!.severity).toBe('block');
+  });
+
+  it('detects Square OAuth secret', () => {
+    const match = scanArgs({ env: `SQUARE_SECRET=${SQUARE_CSP}` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Square OAuth Secret');
+    expect(match!.severity).toBe('block');
+  });
+
+  it('detects Typeform token', () => {
+    const match = scanArgs({ env: `TYPEFORM_TOKEN=${TYPEFORM_TOKEN}` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Typeform Token');
+    expect(match!.severity).toBe('block');
+  });
+
+  it('detects Cloudinary URL with embedded credentials', () => {
+    const match = scanArgs({ config: CLOUDINARY_URL });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Cloudinary URL');
+    expect(match!.severity).toBe('block');
+  });
+
+  it('detects Airtable PAT', () => {
+    const match = scanArgs({ env: `AIRTABLE_TOKEN=${AIRTABLE_PAT}` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Airtable PAT');
+    expect(match!.severity).toBe('block');
+  });
+
+  it('detects RubyGems API key', () => {
+    const match = scanArgs({ env: `RUBYGEMS_KEY=${RUBYGEMS_KEY}` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('RubyGems API Key');
+    expect(match!.severity).toBe('block');
+  });
+
+  it('detects Shippo token', () => {
+    const match = scanArgs({ env: `SHIPPO_TOKEN=${SHIPPO_TOKEN}` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Shippo Token');
+    expect(match!.severity).toBe('block');
+  });
+
+  it('detects Plaid access token (sandbox)', () => {
+    const match = scanArgs({ env: `PLAID_TOKEN=${PLAID_TOKEN}` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Plaid Access Token');
+    expect(match!.severity).toBe('block');
+  });
+
+  it('detects Age identity key', () => {
+    const match = scanArgs({ content: AGE_KEY });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Age Identity Key');
+    expect(match!.severity).toBe('block');
   });
 });

@@ -1431,23 +1431,13 @@ export function registerScanCommand(program: Command): void {
         console.log(heroLine);
         console.log('');
 
-        // ── Breakdown ──────────────────────────────────────────────────────
-        if (blockedCount > 0) {
+        // ── Summary breakdown — ordered by impact ──────────────────────────
+        if (scan.totalCostUSD > 0) {
           console.log(
             '    ' +
-              chalk.red('🛑  Would have blocked') +
-              '   ' +
-              chalk.red.bold(String(blockedCount).padStart(5)) +
-              chalk.dim('   operations stopped before execution')
-          );
-        }
-        if (reviewCount > 0) {
-          console.log(
-            '    ' +
-              chalk.yellow('👁   Would have flagged') +
-              '   ' +
-              chalk.yellow.bold(String(reviewCount).padStart(5)) +
-              chalk.dim('   sent to you for approval')
+              chalk.bold(fmtCost(scan.totalCostUSD)) +
+              chalk.dim(' AI spend  ·  ') +
+              chalk.dim(`${totalRisky} risky operations`)
           );
         }
         if (scan.dlpFindings.length > 0) {
@@ -1459,6 +1449,15 @@ export function registerScanCommand(program: Command): void {
               chalk.dim('   secret detected in tool call')
           );
         }
+        if (blockedCount > 0) {
+          console.log(
+            '    ' +
+              chalk.red('🛑  Would have blocked') +
+              '   ' +
+              chalk.red.bold(String(blockedCount).padStart(5)) +
+              chalk.dim('   operations stopped before execution')
+          );
+        }
         if (scan.loopFindings.length > 0) {
           console.log(
             '    ' +
@@ -1468,61 +1467,18 @@ export function registerScanCommand(program: Command): void {
               chalk.dim('   repeated tool call patterns found')
           );
         }
+        if (reviewCount > 0) {
+          console.log(
+            '    ' +
+              chalk.yellow('👁   Would have flagged') +
+              '   ' +
+              chalk.yellow.bold(String(reviewCount).padStart(5)) +
+              chalk.dim('   sent to you for approval')
+          );
+        }
         console.log('');
 
-        // ── Print each section (pre-grouped by source via buildScanSummary) ─
-        for (const section of summary.sections) {
-          const countParts: string[] = [];
-          if (section.blockedCount > 0)
-            countParts.push(chalk.red(`${section.blockedCount} blocked`));
-          if (section.reviewCount > 0)
-            countParts.push(chalk.yellow(`${section.reviewCount} review`));
-          const countStr = countParts.join(chalk.dim(' · '));
-
-          const enableHint = section.shieldKey
-            ? chalk.dim(`  →  node9 shield enable ${section.shieldKey}`)
-            : '';
-
-          console.log('  ' + chalk.dim('─'.repeat(70)));
-          console.log(
-            '  ' +
-              chalk.bold(section.label) +
-              (section.subtitle ? chalk.dim(`  ·  ${section.subtitle}`) : '') +
-              '  ' +
-              countStr +
-              enableHint
-          );
-
-          for (const rule of section.rules) {
-            printRuleGroup(rule, topN, drillDown, previewWidth);
-          }
-          console.log('');
-        }
-
-        // ── Shields with no findings — compact summary line ───────────────
-        const activeShieldIds = new Set(
-          summary.sections
-            .filter((s) => s.sourceType === 'shield' && s.shieldKey)
-            .map((s) => s.shieldKey!)
-        );
-        const emptyShields = Object.keys(SHIELDS)
-          .filter((n) => !activeShieldIds.has(n))
-          .sort();
-        if (emptyShields.length > 0) {
-          console.log('  ' + chalk.dim('─'.repeat(70)));
-          console.log(
-            '  ' +
-              chalk.bold('Shields') +
-              chalk.dim('  ·  no findings in your history') +
-              '  ' +
-              chalk.green('✓')
-          );
-          console.log('  ' + chalk.dim(emptyShields.join(' · ')));
-          console.log('  ' + chalk.dim('→  node9 shield enable <name>  to activate any shield'));
-          console.log('');
-        }
-
-        // ── DLP findings ───────────────────────────────────────────────────
+        // ── Credential Leaks — first, most alarming ───────────────────────
         if (scan.dlpFindings.length > 0) {
           console.log('  ' + chalk.dim('─'.repeat(70)));
           console.log(
@@ -1530,7 +1486,7 @@ export function registerScanCommand(program: Command): void {
               chalk.red.bold('🔑  Credential Leaks') +
               chalk.dim('  ·  ') +
               chalk.red(
-                `${num(scan.dlpFindings.length)} potential secret leak${scan.dlpFindings.length !== 1 ? 's' : ''}`
+                `${num(scan.dlpFindings.length)} secret${scan.dlpFindings.length !== 1 ? 's' : ''} found in plain text`
               )
           );
           const shownDlp = drillDown ? scan.dlpFindings : scan.dlpFindings.slice(0, topN);
@@ -1545,7 +1501,7 @@ export function registerScanCommand(program: Command): void {
                   : chalk.cyan('[Claude]  ');
             const sessionSuffix = f.sessionId ? chalk.dim(`  → ${f.sessionId.slice(0, 8)}`) : '';
             console.log(
-              `    ${ts}${proj}${agentBadge}` +
+              `    🚨 ${ts}${proj}${agentBadge}` +
                 chalk.yellow(f.patternName) +
                 chalk.dim('  ') +
                 chalk.gray(f.redactedSample) +
@@ -1562,7 +1518,29 @@ export function registerScanCommand(program: Command): void {
           console.log('');
         }
 
-        // ── Loop findings ──────────────────────────────────────────────────
+        // ── Blocked operations — consolidated across all rule sources ─────
+        const blockedRuleSections = summary.sections
+          .map((s) => ({ ...s, rules: s.rules.filter((r) => r.verdict === 'block') }))
+          .filter((s) => s.rules.length > 0);
+        if (blockedRuleSections.length > 0) {
+          console.log('  ' + chalk.dim('─'.repeat(70)));
+          console.log(
+            '  ' +
+              chalk.red.bold('🛑  Blocked') +
+              chalk.dim('  ·  ') +
+              chalk.red(
+                `${blockedCount} operation${blockedCount !== 1 ? 's' : ''} node9 would have stopped`
+              )
+          );
+          for (const section of blockedRuleSections) {
+            for (const rule of section.rules) {
+              printRuleGroup(rule, topN, drillDown, previewWidth);
+            }
+          }
+          console.log('');
+        }
+
+        // ── Agent Loops ────────────────────────────────────────────────────
         if (scan.loopFindings.length > 0) {
           console.log('  ' + chalk.dim('─'.repeat(70)));
           console.log(
@@ -1601,18 +1579,47 @@ export function registerScanCommand(program: Command): void {
           }
           console.log('');
         }
-      }
 
-      // ── Cost ──────────────────────────────────────────────────────────────
-      if (scan.totalCostUSD > 0) {
-        console.log(
-          '  ' +
-            chalk.bold('Agent spend:') +
+        // ── Flagged for review — review-verdict rules only ─────────────────
+        for (const section of summary.sections) {
+          const reviewRules = section.rules.filter((r) => r.verdict !== 'block');
+          if (reviewRules.length === 0) continue;
+          const enableHint = section.shieldKey
+            ? chalk.dim(`  →  node9 shield enable ${section.shieldKey}`)
+            : '';
+          console.log('  ' + chalk.dim('─'.repeat(70)));
+          console.log(
             '  ' +
-            chalk.yellow(fmtCost(scan.totalCostUSD)) +
-            chalk.dim('  (for per-period breakdown: node9 report)')
+              chalk.bold(section.label) +
+              (section.subtitle ? chalk.dim(`  ·  ${section.subtitle}`) : '') +
+              '  ' +
+              chalk.yellow(`${section.reviewCount} review`) +
+              enableHint
+          );
+          for (const rule of reviewRules) {
+            printRuleGroup(rule, topN, drillDown, previewWidth);
+          }
+          console.log('');
+        }
+
+        // ── Inactive Shields — upsell, always last ─────────────────────────
+        const activeShieldIds = new Set(
+          summary.sections
+            .filter((s) => s.sourceType === 'shield' && s.shieldKey)
+            .map((s) => s.shieldKey!)
         );
-        console.log('');
+        const emptyShields = Object.keys(SHIELDS)
+          .filter((n) => !activeShieldIds.has(n))
+          .sort();
+        if (emptyShields.length > 0) {
+          console.log('  ' + chalk.dim('─'.repeat(70)));
+          console.log(
+            '  ' + chalk.bold('🛡  Inactive Shields') + chalk.dim('  ·  enable for more coverage')
+          );
+          console.log('  ' + chalk.dim(emptyShields.join(' · ')));
+          console.log('  ' + chalk.dim('→  node9 shield enable <name>  to activate'));
+          console.log('');
+        }
       }
 
       // ── CTA ───────────────────────────────────────────────────────────────
@@ -1662,7 +1669,7 @@ export function registerScanCommand(program: Command): void {
 
       if (!isTestingMode()) {
         if (isInstalled) {
-          const url = `http://${DAEMON_HOST}:${DAEMON_PORT}/`;
+          const url = `http://${DAEMON_HOST}:${DAEMON_PORT}/?openscan=1`;
           if (isDaemonRunning()) {
             const internalToken = getInternalToken();
             if (internalToken) {

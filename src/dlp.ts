@@ -24,6 +24,12 @@ interface DlpPattern {
    * assignment context (e.g. export TOKEN=..., password: ..., api_key = ...).
    */
   contextBoost?: boolean;
+  /**
+   * Minimum Shannon entropy (bits/char) the matched token must have.
+   * Suppresses obvious placeholders and sequential values (e.g. sk-aaaaaaaaaa…).
+   * Only set on broad patterns where the regex alone can't distinguish real secrets.
+   */
+  minEntropy?: number;
 }
 
 // Matches variable assignment or config-file patterns that indicate a secret
@@ -34,6 +40,18 @@ const ASSIGNMENT_CONTEXT_RE =
 
 function isAssignmentContext(text: string): boolean {
   return ASSIGNMENT_CONTEXT_RE.test(text);
+}
+
+function shannonEntropy(s: string): number {
+  if (s.length === 0) return 0;
+  const freq = new Map<string, number>();
+  for (const ch of s) freq.set(ch, (freq.get(ch) ?? 0) + 1);
+  let h = 0;
+  for (const count of freq.values()) {
+    const p = count / s.length;
+    h -= p * Math.log2(p);
+  }
+  return h;
 }
 
 // ── Stop Words ────────────────────────────────────────────────────────────────
@@ -62,6 +80,8 @@ const DLP_STOPWORDS: string[] = [
   '<your',
   'test_key',
   'test_token',
+  'your',
+  'here',
 ];
 
 export const DLP_PATTERNS: DlpPattern[] = [
@@ -118,6 +138,7 @@ export const DLP_PATTERNS: DlpPattern[] = [
     regex: /\bsk-[a-zA-Z0-9_-]{20,}\b/,
     severity: 'block',
     keywords: ['sk-'],
+    minEntropy: 3.5,
   },
 
   // ── Stripe ────────────────────────────────────────────────────────────────
@@ -196,7 +217,13 @@ export const DLP_PATTERNS: DlpPattern[] = [
   },
 
   // ── Hugging Face ──────────────────────────────────────────────────────────
-  { name: 'HuggingFace Token', regex: /\bhf_[A-Za-z]{34}\b/, severity: 'block', keywords: ['hf_'] },
+  {
+    name: 'HuggingFace Token',
+    regex: /\bhf_[A-Za-z]{34}\b/,
+    severity: 'block',
+    keywords: ['hf_'],
+    minEntropy: 3.0,
+  },
 
   // ── Postman ───────────────────────────────────────────────────────────────
   {
@@ -366,6 +393,7 @@ export const DLP_PATTERNS: DlpPattern[] = [
     regex: /\bpypi-[A-Za-z0-9_-]{50,}\b/,
     severity: 'block',
     keywords: ['pypi-'],
+    minEntropy: 3.0,
   },
 
   // ── Bearer Token ─────────────────────────────────────────────────────────
@@ -376,6 +404,111 @@ export const DLP_PATTERNS: DlpPattern[] = [
     severity: 'review',
     keywords: ['bearer'],
     contextBoost: true,
+    minEntropy: 3.0,
+  },
+
+  // ── Resend ────────────────────────────────────────────────────────────────
+  {
+    name: 'Resend API Key',
+    regex: /\bre_[a-zA-Z0-9]{24}\b/,
+    severity: 'block',
+    keywords: ['re_'],
+  },
+
+  // ── Telegram ──────────────────────────────────────────────────────────────
+  {
+    name: 'Telegram Bot Token',
+    regex: /\b[0-9]{7,10}:AA[a-zA-Z0-9_-]{33}\b/,
+    severity: 'block',
+    keywords: [':aa'],
+  },
+
+  // ── Mapbox ────────────────────────────────────────────────────────────────
+  {
+    name: 'Mapbox Access Token',
+    regex: /\bpk\.eyJ1[a-zA-Z0-9._-]{20,}\b/,
+    severity: 'block',
+    keywords: ['pk.eyj1'],
+  },
+
+  // ── Notion ────────────────────────────────────────────────────────────────
+  {
+    name: 'Notion Integration Token',
+    regex: /\bsecret_[a-zA-Z0-9]{43}\b/,
+    severity: 'block',
+    keywords: ['secret_'],
+  },
+
+  // ── Square ────────────────────────────────────────────────────────────────
+  {
+    name: 'Square Access Token',
+    regex: /\bsq0atp-[0-9A-Za-z_-]{22}\b/,
+    severity: 'block',
+    keywords: ['sq0atp-'],
+  },
+  {
+    name: 'Square OAuth Secret',
+    regex: /\bsq0csp-[0-9A-Za-z_-]{43}\b/,
+    severity: 'block',
+    keywords: ['sq0csp-'],
+  },
+
+  // ── Typeform ──────────────────────────────────────────────────────────────
+  {
+    name: 'Typeform Token',
+    regex: /\btfp_[a-zA-Z0-9_]{59}\b/,
+    severity: 'block',
+    keywords: ['tfp_'],
+  },
+
+  // ── Cloudinary ────────────────────────────────────────────────────────────
+  {
+    name: 'Cloudinary URL',
+    regex: /\bcloudinary:\/\/[0-9]+:[a-zA-Z0-9_-]+@[a-zA-Z0-9_-]+/,
+    severity: 'block',
+    keywords: ['cloudinary://'],
+  },
+
+  // ── Airtable ──────────────────────────────────────────────────────────────
+  // New PAT format: pat + 14 alphanum + . + 64 alphanum
+  {
+    name: 'Airtable PAT',
+    regex: /\bpat[a-zA-Z0-9]{14}\.[a-zA-Z0-9]{64}\b/,
+    severity: 'block',
+    keywords: ['pat'],
+  },
+
+  // ── RubyGems ──────────────────────────────────────────────────────────────
+  {
+    name: 'RubyGems API Key',
+    regex: /\brubygems_[a-f0-9]{48}\b/,
+    severity: 'block',
+    keywords: ['rubygems_'],
+  },
+
+  // ── Shippo ────────────────────────────────────────────────────────────────
+  {
+    name: 'Shippo Token',
+    regex: /\bshippo_(?:live|test)_[a-f0-9]{40}\b/,
+    severity: 'block',
+    keywords: ['shippo_'],
+  },
+
+  // ── Plaid ─────────────────────────────────────────────────────────────────
+  {
+    name: 'Plaid Access Token',
+    regex:
+      /\baccess-(?:sandbox|development|production)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/,
+    severity: 'block',
+    keywords: ['access-sandbox', 'access-development', 'access-production'],
+  },
+
+  // ── Age ───────────────────────────────────────────────────────────────────
+  {
+    name: 'Age Identity Key',
+    regex: /\bAGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JNLH]{58}\b/,
+    severity: 'block',
+    keywords: ['age-secret-key-'],
   },
 ];
 
@@ -516,9 +649,13 @@ export function scanArgs(args: unknown, depth = 0, fieldPath = 'args'): DlpMatch
       }
 
       if (pattern.regex.test(text)) {
+        const raw = text.match(pattern.regex)?.[0] ?? '';
+
         // Stopword check: suppress common placeholders / template variables
-        const matchedValue = (text.match(pattern.regex)?.[0] ?? '').toLowerCase();
-        if (DLP_STOPWORDS.some((sw) => matchedValue.includes(sw))) continue;
+        if (DLP_STOPWORDS.some((sw) => raw.toLowerCase().includes(sw))) continue;
+
+        // Entropy guard: suppress low-entropy matches (repeated chars, sequential values)
+        if (pattern.minEntropy !== undefined && shannonEntropy(raw) < pattern.minEntropy) continue;
 
         // Assignment context: promote review → block when the secret appears
         // in an assignment (export TOKEN=..., password: ..., api_key = ...).
@@ -561,8 +698,9 @@ export function scanText(text: string): DlpMatch | null {
       continue;
     }
     if (pattern.regex.test(t)) {
-      const matchedValue = (t.match(pattern.regex)?.[0] ?? '').toLowerCase();
-      if (DLP_STOPWORDS.some((sw) => matchedValue.includes(sw))) continue;
+      const raw = t.match(pattern.regex)?.[0] ?? '';
+      if (DLP_STOPWORDS.some((sw) => raw.toLowerCase().includes(sw))) continue;
+      if (pattern.minEntropy !== undefined && shannonEntropy(raw) < pattern.minEntropy) continue;
       return {
         patternName: pattern.name,
         fieldPath: 'response-text',
