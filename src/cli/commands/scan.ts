@@ -26,6 +26,7 @@ import type { SmartRule } from '../../core';
 import { isDaemonRunning, getInternalToken, DAEMON_PORT, DAEMON_HOST } from '../../auth/daemon';
 import { openBrowserLocal, isTestingMode } from '../daemon-starter';
 import { buildScanSummary, type FindingRef, type RuleGroup } from '../../scan-summary';
+import { getAgentsStatus } from '../../setup';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1300,10 +1301,15 @@ export function registerScanCommand(program: Command): void {
             return d;
           })();
 
-      const isInstalled = fs.existsSync(path.join(os.homedir(), '.node9', 'audit.log'));
+      // "Wired" = node9 hooks are actually installed in at least one agent's
+      // settings file (~/.claude/settings.json, ~/.gemini/settings.json, etc.).
+      // This is the real signal that future sessions are protected — checking
+      // for ~/.node9/audit.log alone falsely treats npx users as installed
+      // after their first run.
+      const isWired = getAgentsStatus().some((a) => a.wired);
 
       console.log('');
-      if (!isInstalled) {
+      if (!isWired) {
         console.log(
           chalk.bold('🛡  node9') + chalk.dim('  —  security layer for AI coding agents')
         );
@@ -1421,7 +1427,7 @@ export function registerScanCommand(program: Command): void {
       } else {
         // ── Hero headline ──────────────────────────────────────────────────
         const totalRisky = totalFindings + scan.dlpFindings.length;
-        const heroLine = isInstalled
+        const heroLine = isWired
           ? chalk.bold(
               `  Found ${chalk.yellow(String(totalRisky))} risky operation${totalRisky !== 1 ? 's' : ''} in your history`
             )
@@ -1623,7 +1629,7 @@ export function registerScanCommand(program: Command): void {
       }
 
       // ── CTA ───────────────────────────────────────────────────────────────
-      if (isInstalled) {
+      if (isWired) {
         console.log(chalk.green('  ✅ node9 is active — your future sessions are protected.'));
         console.log(
           chalk.dim('  Run ') +
@@ -1668,7 +1674,7 @@ export function registerScanCommand(program: Command): void {
       console.log('');
 
       if (!isTestingMode()) {
-        if (isInstalled) {
+        if (isWired) {
           const url = `http://${DAEMON_HOST}:${DAEMON_PORT}/?openscan=1`;
           if (isDaemonRunning()) {
             const internalToken = getInternalToken();
@@ -1699,21 +1705,13 @@ export function registerScanCommand(program: Command): void {
           } else {
             console.log(
               '  ' +
-                chalk.dim('📊 To view in browser, install node9:  ') +
-                chalk.cyan('npm install -g node9-ai')
+                chalk.dim('📊 To view in browser, start the daemon:  ') +
+                chalk.cyan('node9 daemon --background')
             );
           }
           console.log('');
-        } else {
-          // npx / not installed: prompt to install for browser report.
-          console.log(
-            '  ' +
-              chalk.dim('📊 For a full browser report, install node9:') +
-              '  ' +
-              chalk.cyan('npm install -g node9-ai')
-          );
-          console.log('');
         }
+        // When not wired, the install CTA above is the next step — no browser hint.
       }
     });
 }
