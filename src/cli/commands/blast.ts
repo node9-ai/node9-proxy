@@ -118,11 +118,56 @@ function isReadable(filePath: string): boolean {
   }
 }
 
-function scoreLabel(score: number): string {
+export function scoreLabel(score: number): string {
   if (score >= 80) return chalk.green(`${score}/100  Good`);
   if (score >= 50) return chalk.yellow(`${score}/100  Moderate risk`);
   if (score >= 25) return chalk.red(`${score}/100  High risk`);
   return chalk.red.bold(`${score}/100  Critical`);
+}
+
+// ---------------------------------------------------------------------------
+// Core logic — exported so node9 scan can embed the results
+// ---------------------------------------------------------------------------
+
+export interface BlastFinding {
+  full: string;
+  label: string;
+  description: string;
+  score: number;
+}
+
+export interface BlastResult {
+  reachable: BlastFinding[];
+  envFindings: Array<{ key: string; patternName: string }>;
+  score: number;
+}
+
+export function runBlast(): BlastResult {
+  const home = os.homedir();
+  const cwd = process.cwd();
+  const paths = buildSensitivePaths(home, cwd);
+
+  let scoreDeduction = 0;
+  const reachable: BlastFinding[] = [];
+
+  for (const p of paths) {
+    if (fs.existsSync(p.full) && isReadable(p.full)) {
+      reachable.push(p);
+      scoreDeduction += p.score;
+    }
+  }
+
+  const envFindings: Array<{ key: string; patternName: string }> = [];
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!value) continue;
+    const match = scanArgs({ [key]: value });
+    if (match) {
+      envFindings.push({ key, patternName: match.patternName });
+      scoreDeduction += 10;
+    }
+  }
+
+  return { reachable, envFindings, score: Math.max(0, 100 - scoreDeduction) };
 }
 
 // ---------------------------------------------------------------------------
@@ -136,7 +181,7 @@ export function registerBlastCommand(program: Command): void {
     .action(() => {
       const home = os.homedir();
       const cwd = process.cwd();
-      const paths = buildSensitivePaths(home, cwd);
+      const { reachable, envFindings, score } = runBlast();
 
       console.log('');
       console.log(
@@ -146,20 +191,6 @@ export function registerBlastCommand(program: Command): void {
       console.log(chalk.dim('  Running in: ') + chalk.white(cwd.replace(home, '~')));
       console.log('');
 
-      // ── Sensitive file check ──────────────────────────────────────────────
-      let scoreDeduction = 0;
-      const reachable: Array<(typeof paths)[0]> = [];
-      const missing: Array<(typeof paths)[0]> = [];
-
-      for (const p of paths) {
-        if (fs.existsSync(p.full) && isReadable(p.full)) {
-          reachable.push(p);
-          scoreDeduction += p.score;
-        } else {
-          missing.push(p);
-        }
-      }
-
       if (reachable.length > 0) {
         console.log('  ' + chalk.red.bold('Sensitive files reachable:'));
         for (const p of reachable) {
@@ -168,17 +199,6 @@ export function registerBlastCommand(program: Command): void {
           );
         }
         console.log('');
-      }
-
-      // ── Environment variable check ────────────────────────────────────────
-      const envFindings: Array<{ key: string; patternName: string }> = [];
-      for (const [key, value] of Object.entries(process.env)) {
-        if (!value) continue;
-        const match = scanArgs({ [key]: value });
-        if (match) {
-          envFindings.push({ key, patternName: match.patternName });
-          scoreDeduction += 10;
-        }
       }
 
       if (envFindings.length > 0) {
@@ -191,8 +211,6 @@ export function registerBlastCommand(program: Command): void {
         console.log('');
       }
 
-      // ── Score ─────────────────────────────────────────────────────────────
-      const score = Math.max(0, 100 - scoreDeduction);
       console.log('  ' + chalk.dim('─'.repeat(70)));
 
       if (reachable.length === 0 && envFindings.length === 0) {

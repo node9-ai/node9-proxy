@@ -27,6 +27,7 @@ import { isDaemonRunning, getInternalToken, DAEMON_PORT, DAEMON_HOST } from '../
 import { openBrowserLocal, isTestingMode } from '../daemon-starter';
 import { buildScanSummary, type FindingRef, type RuleGroup } from '../../scan-summary';
 import { getAgentsStatus } from '../../setup';
+import { runBlast, scoreLabel } from './blast';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1782,6 +1783,52 @@ export function registerScanCommand(program: Command): void {
           console.log('  ' + chalk.dim('→  node9 shield enable <name>  to activate'));
           console.log('');
         }
+      }
+
+      // ── Blast Radius ──────────────────────────────────────────────────────
+      const blast = runBlast();
+      if (blast.reachable.length > 0 || blast.envFindings.length > 0) {
+        console.log('  ' + chalk.dim('─'.repeat(70)));
+        console.log(
+          '  ' +
+            chalk.bold('🔭  Blast Radius') +
+            chalk.dim('  ·  what an AI agent can reach right now')
+        );
+        console.log('');
+        if (blast.reachable.length > 0) {
+          for (const p of blast.reachable) {
+            console.log(
+              '    ' +
+                chalk.red('✗  ') +
+                chalk.yellow(p.label.padEnd(38)) +
+                chalk.dim(p.description)
+            );
+          }
+        }
+        if (blast.envFindings.length > 0) {
+          for (const f of blast.envFindings) {
+            console.log(
+              '    ' +
+                chalk.red('✗  ') +
+                chalk.yellow(f.key.padEnd(38)) +
+                chalk.dim(f.patternName + ' in environment')
+            );
+          }
+        }
+        console.log('');
+        console.log(
+          '  Security Score: ' +
+            scoreLabel(blast.score) +
+            chalk.dim(
+              `  (${blast.reachable.length + blast.envFindings.length} exposure${blast.reachable.length + blast.envFindings.length !== 1 ? 's' : ''})`
+            )
+        );
+        console.log(
+          chalk.dim(
+            '\n  Run `node9 shield enable project-jail` to block agent access to these files.'
+          )
+        );
+        console.log('');
       }
 
       // ── CTA ───────────────────────────────────────────────────────────────
