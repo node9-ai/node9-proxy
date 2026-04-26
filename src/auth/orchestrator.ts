@@ -153,7 +153,7 @@ function notifyActivity(data: {
 export async function authorizeHeadless(
   toolName: string,
   args: unknown,
-  meta?: { agent?: string; mcpServer?: string },
+  meta?: { agent?: string; mcpServer?: string; sessionId?: string },
   options?: { calledFromDaemon?: boolean; cwd?: string; localSmartRuleMatched?: boolean }
 ): Promise<AuthResult> {
   // Skip socket notification when called from daemon — daemon already broadcasts via SSE
@@ -216,7 +216,7 @@ export async function authorizeHeadless(
 async function _authorizeHeadlessCore(
   toolName: string,
   args: unknown,
-  meta?: { agent?: string; mcpServer?: string },
+  meta?: { agent?: string; mcpServer?: string; sessionId?: string },
   options?: {
     calledFromDaemon?: boolean;
     activityId?: string;

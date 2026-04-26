@@ -59,6 +59,7 @@ export function registerLogCommand(program: Command): void {
             tool_use_id?: string;
             permission_mode?: string;
             timestamp?: string;
+            session_id?: string;
           };
 
           // Handle both Claude (tool_name) and Gemini (name)
@@ -88,6 +89,7 @@ export function registerLogCommand(program: Command): void {
             source: 'post-hook',
           };
           if (agent) entry.agent = agent;
+          if (payload.session_id) entry.sessionId = payload.session_id;
 
           const logPath = path.join(os.homedir(), '.node9', 'audit.log');
           if (!fs.existsSync(path.dirname(logPath)))
