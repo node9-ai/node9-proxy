@@ -3730,7 +3730,7 @@
                   return findingRow(
                     l.timestamp,
                     '<span style="opacity:0.6;margin-right:6px">' +
-                      agentBadge +
+                      esc(agentBadge) +
                       '</span>' +
                       esc(l.redactedSample || '')
                   );

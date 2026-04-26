@@ -717,26 +717,39 @@ export function scanText(text: string): DlpMatch | null {
 
 // Replaces all DLP pattern matches in text with [node9-redacted:<PatternName>].
 // Returns the redacted string and a list of pattern names that were found.
+// Applies MAX_STRING_BYTES to each chunk to bound ReDoS risk on crafted input.
 export function redactText(text: string): { result: string; found: string[] } {
-  let result = text;
   const found: string[] = [];
-  const lower = text.toLowerCase();
 
-  for (const pattern of DLP_PATTERNS) {
-    if (pattern.keywords && !pattern.keywords.some((kw) => lower.includes(kw.toLowerCase()))) {
-      continue;
-    }
-    const globalRegex = new RegExp(
-      pattern.regex.source,
-      pattern.regex.flags.includes('g') ? pattern.regex.flags : pattern.regex.flags + 'g'
-    );
-    result = result.replace(globalRegex, (match) => {
-      if (DLP_STOPWORDS.some((sw) => match.toLowerCase().includes(sw))) return match;
-      if (pattern.minEntropy !== undefined && shannonEntropy(match) < pattern.minEntropy)
-        return match;
-      if (!found.includes(pattern.name)) found.push(pattern.name);
-      return `[node9-redacted:${pattern.name}]`;
-    });
+  // Process in MAX_STRING_BYTES chunks so no single regex call runs on
+  // unbounded input — guards against ReDoS on attacker-controlled file content.
+  const CHUNK = MAX_STRING_BYTES;
+  const chunks: string[] = [];
+  for (let i = 0; i < text.length; i += CHUNK) {
+    chunks.push(text.slice(i, i + CHUNK));
   }
-  return { result, found };
+
+  const redactedChunks = chunks.map((chunk) => {
+    let result = chunk;
+    const lower = chunk.toLowerCase();
+    for (const pattern of DLP_PATTERNS) {
+      if (pattern.keywords && !pattern.keywords.some((kw) => lower.includes(kw.toLowerCase()))) {
+        continue;
+      }
+      const globalRegex = new RegExp(
+        pattern.regex.source,
+        pattern.regex.flags.includes('g') ? pattern.regex.flags : pattern.regex.flags + 'g'
+      );
+      result = result.replace(globalRegex, (match) => {
+        if (DLP_STOPWORDS.some((sw) => match.toLowerCase().includes(sw))) return match;
+        if (pattern.minEntropy !== undefined && shannonEntropy(match) < pattern.minEntropy)
+          return match;
+        if (!found.includes(pattern.name)) found.push(pattern.name);
+        return `[node9-redacted:${pattern.name}]`;
+      });
+    }
+    return result;
+  });
+
+  return { result: redactedChunks.join(''), found };
 }
