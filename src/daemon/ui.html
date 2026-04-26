@@ -3711,14 +3711,30 @@
         // ── Leaks (shown first: credential exposure is highest-severity) ─────
         if (leaksByPattern.length) {
           html +=
-            '<div class="scan-rule-section-label" style="color:#e5534b">🔑 Credential Leaks — secrets found in tool calls</div>';
+            '<div class="scan-rule-section-label" style="color:#e5534b">🔑 Credential Leaks — secrets found in history or shell config</div>';
           html += leaksByPattern
             .map(([pattern, group]) => {
               const count = group.length;
               const barPct = Math.round((count / maxBar) * 100);
               const detailId = 'detail-' + Math.random().toString(36).slice(2);
               const rows = group
-                .map((l) => findingRow(l.timestamp, esc(l.redactedSample || '')))
+                .map((l) => {
+                  const agentBadge =
+                    l.agent === 'gemini'
+                      ? '[Gemini]'
+                      : l.agent === 'codex'
+                        ? '[Codex]'
+                        : l.agent === 'shell'
+                          ? '[Shell]'
+                          : '[Claude]';
+                  return findingRow(
+                    l.timestamp,
+                    '<span style="opacity:0.6;margin-right:6px">' +
+                      agentBadge +
+                      '</span>' +
+                      esc(l.redactedSample || '')
+                  );
+                })
                 .join('');
               return (
                 '<div class="scan-rule-row" onclick="var d=document.getElementById(\'' +

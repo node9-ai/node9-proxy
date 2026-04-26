@@ -714,3 +714,29 @@ export function scanText(text: string): DlpMatch | null {
   }
   return null;
 }
+
+// Replaces all DLP pattern matches in text with [node9-redacted:<PatternName>].
+// Returns the redacted string and a list of pattern names that were found.
+export function redactText(text: string): { result: string; found: string[] } {
+  let result = text;
+  const found: string[] = [];
+  const lower = text.toLowerCase();
+
+  for (const pattern of DLP_PATTERNS) {
+    if (pattern.keywords && !pattern.keywords.some((kw) => lower.includes(kw.toLowerCase()))) {
+      continue;
+    }
+    const globalRegex = new RegExp(
+      pattern.regex.source,
+      pattern.regex.flags.includes('g') ? pattern.regex.flags : pattern.regex.flags + 'g'
+    );
+    result = result.replace(globalRegex, (match) => {
+      if (DLP_STOPWORDS.some((sw) => match.toLowerCase().includes(sw))) return match;
+      if (pattern.minEntropy !== undefined && shannonEntropy(match) < pattern.minEntropy)
+        return match;
+      if (!found.includes(pattern.name)) found.push(pattern.name);
+      return `[node9-redacted:${pattern.name}]`;
+    });
+  }
+  return { result, found };
+}
