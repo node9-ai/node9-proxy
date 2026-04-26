@@ -515,6 +515,20 @@ export const DLP_PATTERNS: DlpPattern[] = [
   },
 ];
 
+// Pre-compiled global versions of each DLP pattern regex, built once at module
+// load time from the static DLP_PATTERNS list. Used by redactText to avoid
+// constructing RegExp objects at call time (which would be a footgun if
+// DLP_PATTERNS ever became configurable).
+const DLP_PATTERNS_GLOBAL: Array<{ pattern: DlpPattern; globalRegex: RegExp }> = DLP_PATTERNS.map(
+  (p) => ({
+    pattern: p,
+    globalRegex: new RegExp(
+      p.regex.source,
+      p.regex.flags.includes('g') ? p.regex.flags : p.regex.flags + 'g'
+    ),
+  })
+);
+
 // ── Sensitive File Path Blocklist ─────────────────────────────────────────────
 // Blocks access attempts to credential/key files before their content is read.
 const SENSITIVE_PATH_PATTERNS: RegExp[] = [
@@ -729,14 +743,10 @@ export function redactText(text: string): { result: string; found: string[] } {
   const found: string[] = [];
   const lower = t.toLowerCase();
 
-  for (const pattern of DLP_PATTERNS) {
+  for (const { pattern, globalRegex } of DLP_PATTERNS_GLOBAL) {
     if (pattern.keywords && !pattern.keywords.some((kw) => lower.includes(kw.toLowerCase()))) {
       continue;
     }
-    const globalRegex = new RegExp(
-      pattern.regex.source,
-      pattern.regex.flags.includes('g') ? pattern.regex.flags : pattern.regex.flags + 'g'
-    );
     result = result.replace(globalRegex, (match) => {
       if (DLP_STOPWORDS.some((sw) => match.toLowerCase().includes(sw))) return match;
       if (pattern.minEntropy !== undefined && shannonEntropy(match) < pattern.minEntropy)
