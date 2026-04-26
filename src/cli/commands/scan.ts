@@ -58,7 +58,7 @@ interface DlpFinding {
   timestamp: string;
   project: string;
   sessionId: string;
-  agent: 'claude' | 'gemini' | 'codex';
+  agent: 'claude' | 'gemini' | 'codex' | 'shell';
 }
 
 export interface LoopFinding {
@@ -76,7 +76,15 @@ interface JournalEntry {
   timestamp?: string;
   message?: {
     model?: string;
-    content?: Array<{ type: string; name?: string; input?: Record<string, unknown> }>;
+    content?: Array<{
+      type: string;
+      id?: string;
+      name?: string;
+      input?: Record<string, unknown>;
+      // tool_result fields (present in user-role entries)
+      tool_use_id?: string;
+      content?: string | Array<{ type: string; text?: string }>;
+    }>;
     usage?: {
       input_tokens?: number;
       output_tokens?: number;
@@ -165,6 +173,41 @@ interface GeminiSessionFile {
     content?: Array<{ text?: string }> | string;
   }>;
 }
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+// File extensions whose contents are skipped for DLP scanning.
+// Source code files contain auth patterns (template literals, test fixtures)
+// that look like secrets but are not.
+const CODE_EXTENSIONS = new Set([
+  '.ts',
+  '.tsx',
+  '.js',
+  '.jsx',
+  '.mjs',
+  '.cjs',
+  '.py',
+  '.rb',
+  '.go',
+  '.rs',
+  '.java',
+  '.kt',
+  '.swift',
+  '.c',
+  '.cpp',
+  '.h',
+  '.cs',
+  '.php',
+  '.sh',
+  '.bash',
+  '.html',
+  '.css',
+  '.scss',
+  '.vue',
+  '.svelte',
+]);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -459,6 +502,9 @@ export function scanClaudeHistory(
         timestamp: string;
       }> = [];
 
+      // Maps tool_use id → file extension so tool_result scanning can skip code files
+      const toolUseFilePaths = new Map<string, string>();
+
       for (const line of raw.split('\n')) {
         if (!line.trim()) continue;
         onLine?.();
@@ -515,6 +561,49 @@ export function scanClaudeHistory(
                 }
               }
             }
+
+            // ── Tool result DLP scan ─────────────────────────────────────
+            // Secrets that Claude read back (file contents, command output)
+            // are stored in tool_result blocks inside user-role entries.
+            // Skip code files — they contain auth patterns in source code
+            // that are not real secrets (template literals, test fixtures, etc.)
+            for (const block of content) {
+              if (block.type !== 'tool_result') continue;
+              const filePath = block.tool_use_id
+                ? toolUseFilePaths.get(block.tool_use_id)
+                : undefined;
+              if (filePath) {
+                const ext = path.extname(filePath).toLowerCase();
+                if (CODE_EXTENSIONS.has(ext)) continue;
+              }
+              const resultText =
+                typeof block.content === 'string'
+                  ? block.content
+                  : Array.isArray(block.content)
+                    ? block.content.map((c) => c.text ?? '').join('\n')
+                    : null;
+              if (!resultText) continue;
+              const dlpMatch = scanArgs({ text: resultText });
+              if (dlpMatch) {
+                const isDupe = result.dlpFindings.some(
+                  (f) =>
+                    f.patternName === dlpMatch.patternName &&
+                    f.redactedSample === dlpMatch.redactedSample &&
+                    f.project === projLabel
+                );
+                if (!isDupe) {
+                  result.dlpFindings.push({
+                    patternName: dlpMatch.patternName,
+                    redactedSample: dlpMatch.redactedSample,
+                    toolName: 'tool-result',
+                    timestamp: entry.timestamp ?? '',
+                    project: projLabel,
+                    sessionId,
+                    agent: 'claude',
+                  });
+                }
+              }
+            }
           }
           continue;
         }
@@ -545,6 +634,11 @@ export function scanClaudeHistory(
           const toolNameLower = toolName.toLowerCase();
           const input = block.input ?? {};
 
+          // Record file path for tool_result DLP filtering
+          if (block.id && typeof input.file_path === 'string') {
+            toolUseFilePaths.set(block.id, input.file_path);
+          }
+
           sessionCalls.push({ toolName, input, timestamp: entry.timestamp ?? '' });
 
           if (toolNameLower === 'bash' || toolNameLower === 'execute_bash') {
@@ -557,6 +651,12 @@ export function scanClaudeHistory(
             continue;
 
           // ── DLP scan ───────────────────────────────────────────────────
+          // Skip code files — Edit/Write pass full source in old_string/new_string
+          // which contains auth patterns that are not real secrets.
+          const inputFilePath = typeof input.file_path === 'string' ? input.file_path : '';
+          const inputFileExt = inputFilePath ? path.extname(inputFilePath).toLowerCase() : '';
+          if (CODE_EXTENSIONS.has(inputFileExt)) continue;
+
           const dlpMatch = scanArgs(input);
           if (dlpMatch) {
             const isDupe = result.dlpFindings.some(
@@ -1193,6 +1293,49 @@ export function scanCodexHistory(
   return result;
 }
 
+function scanShellConfig(): DlpFinding[] {
+  const home = os.homedir();
+  const configFiles = ['.zshrc', '.bashrc', '.bash_profile', '.profile'].map((f) =>
+    path.join(home, f)
+  );
+  const findings: DlpFinding[] = [];
+
+  for (const filePath of configFiles) {
+    if (!fs.existsSync(filePath)) continue;
+    let lines: string[];
+    try {
+      lines = fs.readFileSync(filePath, 'utf-8').split('\n');
+    } catch {
+      continue;
+    }
+    const shortPath = filePath.replace(home, '~');
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const dlpMatch = scanArgs({ text: trimmed });
+      if (!dlpMatch) continue;
+      const isDupe = findings.some(
+        (f) =>
+          f.patternName === dlpMatch.patternName &&
+          f.redactedSample === dlpMatch.redactedSample &&
+          f.project === shortPath
+      );
+      if (!isDupe) {
+        findings.push({
+          patternName: dlpMatch.patternName,
+          redactedSample: dlpMatch.redactedSample,
+          toolName: 'shell-config',
+          timestamp: '',
+          project: shortPath,
+          sessionId: '',
+          agent: 'shell',
+        });
+      }
+    }
+  }
+  return findings;
+}
+
 function mergeScans(a: ScanResult, b: ScanResult): ScanResult {
   const dates = [a.firstDate, b.firstDate].filter(Boolean) as string[];
   const lastDates = [a.lastDate, b.lastDate].filter(Boolean) as string[];
@@ -1361,6 +1504,7 @@ export function registerScanCommand(program: Command): void {
         onLine
       );
       const scan = mergeScans(mergeScans(claudeScan, geminiScan), codexScan);
+      scan.dlpFindings.push(...scanShellConfig());
       const summary = buildScanSummary([
         { id: 'claude', label: 'Claude', icon: '🤖', scan: claudeScan },
         { id: 'gemini', label: 'Gemini', icon: '♊', scan: geminiScan },
@@ -1452,7 +1596,7 @@ export function registerScanCommand(program: Command): void {
               chalk.red('🔑  Credential leak') +
               '     ' +
               chalk.red.bold(String(scan.dlpFindings.length).padStart(5)) +
-              chalk.dim('   secret detected in tool call')
+              chalk.dim('   secret detected in history or shell config')
           );
         }
         if (blockedCount > 0) {
@@ -1465,12 +1609,17 @@ export function registerScanCommand(program: Command): void {
           );
         }
         if (scan.loopFindings.length > 0) {
+          const loopCost =
+            summary.loopWastedUSD > 0
+              ? chalk.dim('  ·  ') + chalk.yellow('~' + fmtCost(summary.loopWastedUSD) + ' wasted')
+              : '';
           console.log(
             '    ' +
               chalk.yellow('🔁  Loop detected') +
               '      ' +
               chalk.yellow.bold(String(scan.loopFindings.length).padStart(5)) +
-              chalk.dim('   repeated tool call patterns found')
+              chalk.dim('   repeated tool call patterns found') +
+              loopCost
           );
         }
         if (reviewCount > 0) {
@@ -1504,7 +1653,9 @@ export function registerScanCommand(program: Command): void {
                 ? chalk.blue('[Gemini]  ')
                 : f.agent === 'codex'
                   ? chalk.magenta('[Codex]   ')
-                  : chalk.cyan('[Claude]  ');
+                  : f.agent === 'shell'
+                    ? chalk.yellow('[Shell]   ')
+                    : chalk.cyan('[Claude]  ');
             const sessionSuffix = f.sessionId ? chalk.dim(`  → ${f.sessionId.slice(0, 8)}`) : '';
             console.log(
               `    🚨 ${ts}${proj}${agentBadge}` +
@@ -1549,13 +1700,18 @@ export function registerScanCommand(program: Command): void {
         // ── Agent Loops ────────────────────────────────────────────────────
         if (scan.loopFindings.length > 0) {
           console.log('  ' + chalk.dim('─'.repeat(70)));
+          const loopCostLabel =
+            summary.loopWastedUSD > 0
+              ? chalk.dim('  ·  ') + chalk.yellow('~' + fmtCost(summary.loopWastedUSD) + ' wasted')
+              : '';
           console.log(
             '  ' +
               chalk.yellow.bold('🔁  Agent Loops') +
               chalk.dim('  ·  ') +
               chalk.yellow(
                 `${num(scan.loopFindings.length)} repeated pattern${scan.loopFindings.length !== 1 ? 's' : ''} found`
-              )
+              ) +
+              loopCostLabel
           );
           const shownLoops = drillDown ? scan.loopFindings : scan.loopFindings.slice(0, topN);
           for (const f of shownLoops) {

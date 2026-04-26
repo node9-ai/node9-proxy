@@ -99,6 +99,7 @@ export const DLP_PATTERNS: DlpPattern[] = [
     regex: /\bgh[pous]_[A-Za-z0-9]{36}\b/,
     severity: 'block',
     keywords: ['ghp_', 'gho_', 'ghu_', 'ghs_'],
+    minEntropy: 3.0,
   },
   {
     name: 'GitHub Fine-Grained PAT',
@@ -155,6 +156,7 @@ export const DLP_PATTERNS: DlpPattern[] = [
     regex: /\bAIza[0-9A-Za-z_-]{35}\b/,
     severity: 'block',
     keywords: ['aiza'],
+    minEntropy: 3.0,
   },
   {
     name: 'GCP Service Account',
@@ -429,6 +431,7 @@ export const DLP_PATTERNS: DlpPattern[] = [
     regex: /\bpk\.eyJ1[a-zA-Z0-9._-]{20,}\b/,
     severity: 'block',
     keywords: ['pk.eyj1'],
+    minEntropy: 3.0,
   },
 
   // ── Notion ────────────────────────────────────────────────────────────────
