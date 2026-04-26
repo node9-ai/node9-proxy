@@ -19,6 +19,7 @@ Node9 sits between your AI agent and your system. Every shell command, file writ
 - 🛑 **Block** dangerous actions (`git push --force`, `rm -rf /`, `curl|bash`, `DROP TABLE`, ...) before they run
 - 👁 **Review** anything worth a human glance — OS-native popup, Slack, or browser approval
 - 🔑 **Catch credential leaks** in tool arguments, file contents Claude reads back, and shell config files
+- 🔭 **Map your blast radius** — see exactly what SSH keys, AWS credentials, and `.env` files an AI agent can reach right now
 - 🔁 **Stop agent loops** that burn tokens and money
 - 🔌 **Gate MCP tools** and detect rug-pull attacks on server definitions
 - 📊 **Dashboard + scan report** in your browser — see what your agents actually did
@@ -89,18 +90,19 @@ That's it — future agent sessions are protected.
 
 Each shield is a curated rule set for a service or domain. Enable only what you need.
 
-| Shield            | What it catches                                                   | Enable                                |
-| ----------------- | ----------------------------------------------------------------- | ------------------------------------- |
-| `bash-safe`       | `curl \| bash`, `rm -rf /`, disk overwrite, `eval` of remote      | `node9 shield enable bash-safe`       |
-| `postgres`        | `DROP TABLE`, `TRUNCATE`, `DROP COLUMN`, `DELETE` without `WHERE` | `node9 shield enable postgres`        |
-| `mongodb`         | `dropDatabase`, `drop()`, `deleteMany({})`, index drops           | `node9 shield enable mongodb`         |
-| `redis`           | `FLUSHALL`, `FLUSHDB`, `CONFIG SET` on a live server              | `node9 shield enable redis`           |
-| `aws`             | S3 delete, EC2 terminate, IAM changes, RDS destroy                | `node9 shield enable aws`             |
-| `k8s`             | namespace delete, `helm uninstall`, cluster role wipes            | `node9 shield enable k8s`             |
-| `docker`          | `system prune`, `volume prune`, `rm -f` containers                | `node9 shield enable docker`          |
-| `github`          | `gh repo delete`, remote branch deletion, settings changes        | `node9 shield enable github`          |
-| `filesystem`      | `chmod 777`, writes under `/etc/`, `/boot/`, `/usr/`              | `node9 shield enable filesystem`      |
-| `mcp-tool-gating` | unapproved MCP tools silently activating new capabilities         | `node9 shield enable mcp-tool-gating` |
+| Shield            | What it catches                                                                | Enable                                |
+| ----------------- | ------------------------------------------------------------------------------ | ------------------------------------- |
+| `project-jail`    | Blocks reads of `~/.ssh`, `~/.aws`, `.env`, credentials via Bash and Read tool | `node9 shield enable project-jail`    |
+| `bash-safe`       | `curl \| bash`, `rm -rf /`, disk overwrite, `eval` of remote                   | `node9 shield enable bash-safe`       |
+| `postgres`        | `DROP TABLE`, `TRUNCATE`, `DROP COLUMN`, `DELETE` without `WHERE`              | `node9 shield enable postgres`        |
+| `mongodb`         | `dropDatabase`, `drop()`, `deleteMany({})`, index drops                        | `node9 shield enable mongodb`         |
+| `redis`           | `FLUSHALL`, `FLUSHDB`, `CONFIG SET` on a live server                           | `node9 shield enable redis`           |
+| `aws`             | S3 delete, EC2 terminate, IAM changes, RDS destroy                             | `node9 shield enable aws`             |
+| `k8s`             | namespace delete, `helm uninstall`, cluster role wipes                         | `node9 shield enable k8s`             |
+| `docker`          | `system prune`, `volume prune`, `rm -f` containers                             | `node9 shield enable docker`          |
+| `github`          | `gh repo delete`, remote branch deletion, settings changes                     | `node9 shield enable github`          |
+| `filesystem`      | `chmod 777`, writes under `/etc/`, `/boot/`, `/usr/`                           | `node9 shield enable filesystem`      |
+| `mcp-tool-gating` | unapproved MCP tools silently activating new capabilities                      | `node9 shield enable mcp-tool-gating` |
 
 ```bash
 node9 shield list    # show all shields + status
@@ -173,6 +175,7 @@ Every tool call is recorded — command, arguments, decision, cost. See what you
 
 | Command          | What it shows                                             | When to use                               |
 | ---------------- | --------------------------------------------------------- | ----------------------------------------- |
+| `node9 blast`    | What an AI agent can reach right now — files, creds, env  | First thing to run on any machine         |
 | `node9 scan`     | Retrospective audit of existing agent history             | Before installing, or to review past risk |
 | `node9 mask`     | Redact plaintext secrets from local session history files | After a DLP finding — cleans local disk   |
 | `node9 tail`     | Live stream of every tool call                            | Watching an agent work in real time       |
