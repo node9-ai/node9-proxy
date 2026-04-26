@@ -515,6 +515,20 @@ export const DLP_PATTERNS: DlpPattern[] = [
   },
 ];
 
+// Pre-compiled global versions of each DLP pattern regex, built once at module
+// load time from the static DLP_PATTERNS list. Used by redactText to avoid
+// constructing RegExp objects at call time (which would be a footgun if
+// DLP_PATTERNS ever became configurable).
+const DLP_PATTERNS_GLOBAL: Array<{ pattern: DlpPattern; globalRegex: RegExp }> = DLP_PATTERNS.map(
+  (p) => ({
+    pattern: p,
+    globalRegex: new RegExp(
+      p.regex.source,
+      p.regex.flags.includes('g') ? p.regex.flags : p.regex.flags + 'g'
+    ),
+  })
+);
+
 // ── Sensitive File Path Blocklist ─────────────────────────────────────────────
 // Blocks access attempts to credential/key files before their content is read.
 const SENSITIVE_PATH_PATTERNS: RegExp[] = [
@@ -713,4 +727,33 @@ export function scanText(text: string): DlpMatch | null {
     }
   }
   return null;
+}
+
+// Replaces all DLP pattern matches in text with [node9-redacted:<PatternName>].
+// Returns the redacted string and a list of pattern names that were found.
+//
+// Uses the same MAX_STRING_BYTES truncation as scanArgs/scanText. Chunking
+// was rejected because it creates chunk-boundary evasion: a secret split
+// across a boundary would not be matched. Individual string values inside
+// JSONL session files are almost never > 100KB, so truncation is the safe
+// and correct bound here.
+export function redactText(text: string): { result: string; found: string[] } {
+  const t = text.length > MAX_STRING_BYTES ? text.slice(0, MAX_STRING_BYTES) : text;
+  let result = t;
+  const found: string[] = [];
+  const lower = t.toLowerCase();
+
+  for (const { pattern, globalRegex } of DLP_PATTERNS_GLOBAL) {
+    if (pattern.keywords && !pattern.keywords.some((kw) => lower.includes(kw.toLowerCase()))) {
+      continue;
+    }
+    result = result.replace(globalRegex, (match) => {
+      if (DLP_STOPWORDS.some((sw) => match.toLowerCase().includes(sw))) return match;
+      if (pattern.minEntropy !== undefined && shannonEntropy(match) < pattern.minEntropy)
+        return match;
+      if (!found.includes(pattern.name)) found.push(pattern.name);
+      return `[node9-redacted:${pattern.name}]`;
+    });
+  }
+  return { result, found };
 }

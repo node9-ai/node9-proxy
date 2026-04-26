@@ -18,7 +18,7 @@ Node9 sits between your AI agent and your system. Every shell command, file writ
 
 - 🛑 **Block** dangerous actions (`git push --force`, `rm -rf /`, `curl|bash`, `DROP TABLE`, ...) before they run
 - 👁 **Review** anything worth a human glance — OS-native popup, Slack, or browser approval
-- 🔑 **Catch credential leaks** in tool arguments and Claude response text
+- 🔑 **Catch credential leaks** in tool arguments, file contents Claude reads back, and shell config files
 - 🔁 **Stop agent loops** that burn tokens and money
 - 🔌 **Gate MCP tools** and detect rug-pull attacks on server definitions
 - 📊 **Dashboard + scan report** in your browser — see what your agents actually did
@@ -43,7 +43,7 @@ Reads your existing Claude / Gemini / Codex session history, runs the full Node9
 
     🛑  Would have blocked       3   operations stopped before execution
     👁   Would have flagged     162   sent to you for approval
-    🔑  Credential leak          3   secret detected in tool call
+    🔑  Credential leak          3   secret detected in history or shell config
     🔁  Loop detected          117   repeated tool call patterns found
 
   ──────────────────────────────────────────────────────────────────────
@@ -113,7 +113,7 @@ node9 shield list    # show all shields + status
 - **Git** — blocks `git push --force`, `git reset --hard`, `git clean -fd`
 - **SQL** — blocks `DELETE` / `UPDATE` without `WHERE`, `DROP TABLE`, `TRUNCATE`
 - **Shell** — blocks `curl | bash`, unauthorized `sudo`
-- **DLP** — blocks AWS keys, GitHub tokens, Stripe keys, PEM private keys in any tool argument
+- **DLP** — blocks AWS keys, GitHub tokens, Stripe keys, PEM private keys in any tool argument, file Claude reads, or shell config (`~/.zshrc`, `~/.bashrc`)
 - **Response DLP** — background scanner reads Claude's conversation history and alerts you if Claude _wrote_ a secret in its response text (not just executed one). Gemini / Codex coverage coming.
 - **Auto-undo** — git snapshot before every AI file edit → `node9 undo` to revert
 - **Skills pinning** — SHA-256 verification of installed Claude skills / plugins between sessions
@@ -171,13 +171,14 @@ When an MCP server returns a 500KB+ response, it sits in the context window for 
 
 Every tool call is recorded — command, arguments, decision, cost. See what your agent did, five ways:
 
-| Command          | What it shows                                            | When to use                               |
-| ---------------- | -------------------------------------------------------- | ----------------------------------------- |
-| `node9 scan`     | Retrospective audit of existing agent history            | Before installing, or to review past risk |
-| `node9 tail`     | Live stream of every tool call                           | Watching an agent work in real time       |
-| `node9 report`   | Per-period summary: allowed/blocked/DLP/cost + top tools | Reviewing what happened after a session   |
-| `node9 sessions` | Session history with prompt, tool trace, cost, snapshot  | Reviewing a handoff or past work          |
-| `node9 dlp`      | Credential-leak findings in Claude response text         | Any time a DLP desktop alert fires        |
+| Command          | What it shows                                             | When to use                               |
+| ---------------- | --------------------------------------------------------- | ----------------------------------------- |
+| `node9 scan`     | Retrospective audit of existing agent history             | Before installing, or to review past risk |
+| `node9 mask`     | Redact plaintext secrets from local session history files | After a DLP finding — cleans local disk   |
+| `node9 tail`     | Live stream of every tool call                            | Watching an agent work in real time       |
+| `node9 report`   | Per-period summary: allowed/blocked/DLP/cost + top tools  | Reviewing what happened after a session   |
+| `node9 sessions` | Session history with prompt, tool trace, cost, snapshot   | Reviewing a handoff or past work          |
+| `node9 dlp`      | Credential-leak findings in Claude response text          | Any time a DLP desktop alert fires        |
 
 Plus a **live HUD** in your Claude Code statusline:
 
@@ -195,15 +196,17 @@ And a **browser dashboard** that auto-opens after `node9 scan` — History Audit
 
 Node9 surfaces the signal. Here are the patterns worth knowing:
 
-| Signal                                                      | Likely meaning                                                               |
-| ----------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `Would have blocked` ≥ 5 in a week                          | Agent is attempting destructive ops; shields need review                     |
-| Single `review-git-push` rule accounts for >50% of findings | Your own rule is firing as intended — not a risk, just supervision           |
-| DLP finding in `user-prompt` tool                           | You pasted a secret into your own prompt — rotate the key                    |
-| Agent Loop ×50+ on same file                                | Agent stuck in edit/test/fix cycle — check context or slow down              |
-| MCP tool pin mismatch                                       | Server changed its tools — review before re-trusting                         |
-| Large MCP response warning                                  | That server is inflating your context window for every subsequent turn       |
-| `Response DLP` alert                                        | Claude wrote a secret in its response text — not blocked, rotate immediately |
+| Signal                                                      | Likely meaning                                                                                     |
+| ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `Would have blocked` ≥ 5 in a week                          | Agent is attempting destructive ops; shields need review                                           |
+| Single `review-git-push` rule accounts for >50% of findings | Your own rule is firing as intended — not a risk, just supervision                                 |
+| DLP finding in `user-prompt` tool                           | You pasted a secret into your own prompt — rotate the key                                          |
+| Agent Loop ×50+ on same file                                | Agent stuck in edit/test/fix cycle — check context or slow down                                    |
+| MCP tool pin mismatch                                       | Server changed its tools — review before re-trusting                                               |
+| Large MCP response warning                                  | That server is inflating your context window for every subsequent turn                             |
+| `Response DLP` alert                                        | Claude wrote a secret in its response text — not blocked, rotate immediately                       |
+| DLP finding in `tool-result`                                | Claude read a file containing a secret (`.env`, credentials) — rotate the key and run `node9 mask` |
+| DLP finding in `[Shell]`                                    | Plaintext secret in `~/.zshrc` or `~/.bashrc` — every AI session can see it                        |
 
 These are starting points, not verdicts. One-off signals are normal; persistent patterns are what you act on.
 
