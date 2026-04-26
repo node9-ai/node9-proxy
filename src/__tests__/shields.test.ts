@@ -106,6 +106,7 @@ describe('listShields', () => {
     'mcp-tool-gating',
     'mongodb',
     'postgres',
+    'project-jail',
     'redis',
   ];
 
