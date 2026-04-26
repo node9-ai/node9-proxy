@@ -717,39 +717,33 @@ export function scanText(text: string): DlpMatch | null {
 
 // Replaces all DLP pattern matches in text with [node9-redacted:<PatternName>].
 // Returns the redacted string and a list of pattern names that were found.
-// Applies MAX_STRING_BYTES to each chunk to bound ReDoS risk on crafted input.
+//
+// Uses the same MAX_STRING_BYTES truncation as scanArgs/scanText. Chunking
+// was rejected because it creates chunk-boundary evasion: a secret split
+// across a boundary would not be matched. Individual string values inside
+// JSONL session files are almost never > 100KB, so truncation is the safe
+// and correct bound here.
 export function redactText(text: string): { result: string; found: string[] } {
+  const t = text.length > MAX_STRING_BYTES ? text.slice(0, MAX_STRING_BYTES) : text;
+  let result = t;
   const found: string[] = [];
+  const lower = t.toLowerCase();
 
-  // Process in MAX_STRING_BYTES chunks so no single regex call runs on
-  // unbounded input — guards against ReDoS on attacker-controlled file content.
-  const CHUNK = MAX_STRING_BYTES;
-  const chunks: string[] = [];
-  for (let i = 0; i < text.length; i += CHUNK) {
-    chunks.push(text.slice(i, i + CHUNK));
-  }
-
-  const redactedChunks = chunks.map((chunk) => {
-    let result = chunk;
-    const lower = chunk.toLowerCase();
-    for (const pattern of DLP_PATTERNS) {
-      if (pattern.keywords && !pattern.keywords.some((kw) => lower.includes(kw.toLowerCase()))) {
-        continue;
-      }
-      const globalRegex = new RegExp(
-        pattern.regex.source,
-        pattern.regex.flags.includes('g') ? pattern.regex.flags : pattern.regex.flags + 'g'
-      );
-      result = result.replace(globalRegex, (match) => {
-        if (DLP_STOPWORDS.some((sw) => match.toLowerCase().includes(sw))) return match;
-        if (pattern.minEntropy !== undefined && shannonEntropy(match) < pattern.minEntropy)
-          return match;
-        if (!found.includes(pattern.name)) found.push(pattern.name);
-        return `[node9-redacted:${pattern.name}]`;
-      });
+  for (const pattern of DLP_PATTERNS) {
+    if (pattern.keywords && !pattern.keywords.some((kw) => lower.includes(kw.toLowerCase()))) {
+      continue;
     }
-    return result;
-  });
-
-  return { result: redactedChunks.join(''), found };
+    const globalRegex = new RegExp(
+      pattern.regex.source,
+      pattern.regex.flags.includes('g') ? pattern.regex.flags : pattern.regex.flags + 'g'
+    );
+    result = result.replace(globalRegex, (match) => {
+      if (DLP_STOPWORDS.some((sw) => match.toLowerCase().includes(sw))) return match;
+      if (pattern.minEntropy !== undefined && shannonEntropy(match) < pattern.minEntropy)
+        return match;
+      if (!found.includes(pattern.name)) found.push(pattern.name);
+      return `[node9-redacted:${pattern.name}]`;
+    });
+  }
+  return { result, found };
 }
