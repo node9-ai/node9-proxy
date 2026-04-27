@@ -55,6 +55,7 @@ function emptyScan(overrides: Partial<ScanResult> = {}): ScanResult {
     totalCostUSD: 0,
     firstDate: null,
     lastDate: null,
+    sessionsWithEarlySecrets: 0,
     ...overrides,
   };
 }
