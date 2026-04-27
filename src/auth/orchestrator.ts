@@ -27,6 +27,7 @@ import {
 } from './daemon';
 import { auditLocalAllow, initNode9SaaS, pollNode9SaaS, resolveNode9SaaS } from './cloud';
 import { recordAndCheck } from '../loop-detector';
+import { readActiveShields } from '../shields';
 
 export interface AuthResult {
   approved: boolean;
@@ -152,7 +153,7 @@ function notifyActivity(data: {
 export async function authorizeHeadless(
   toolName: string,
   args: unknown,
-  meta?: { agent?: string; mcpServer?: string },
+  meta?: { agent?: string; mcpServer?: string; sessionId?: string },
   options?: { calledFromDaemon?: boolean; cwd?: string; localSmartRuleMatched?: boolean }
 ): Promise<AuthResult> {
   // Skip socket notification when called from daemon — daemon already broadcasts via SSE
@@ -215,7 +216,7 @@ export async function authorizeHeadless(
 async function _authorizeHeadlessCore(
   toolName: string,
   args: unknown,
-  meta?: { agent?: string; mcpServer?: string },
+  meta?: { agent?: string; mcpServer?: string; sessionId?: string },
   options?: {
     calledFromDaemon?: boolean;
     activityId?: string;
@@ -541,10 +542,37 @@ async function _authorizeHeadlessCore(
       };
     }
   } else if (!taintWarning) {
-    // ignoredTools (read, glob, grep, ls…) fire on every agent operation — too
-    // frequent and too noisy to send to the SaaS audit log.
-    if (!isManual) appendLocalAudit(toolName, args, 'allow', 'ignored', meta, hashAuditArgs);
-    return { approved: true };
+    // project-jail: if the shield is active, don't fast-path Read/Grep/Glob
+    // calls that target sensitive credential paths — let them fall through to
+    // policy evaluation so the shield's block rules can fire.
+    const toolLower = toolName.toLowerCase();
+    const isFileTool =
+      toolLower === 'read' ||
+      toolLower === 'grep' ||
+      toolLower === 'glob' ||
+      toolLower === 'read_file' ||
+      toolLower === 'grep_search' ||
+      toolLower === 'list_files';
+    if (isFileTool && readActiveShields().includes('project-jail')) {
+      const argsObj =
+        args && typeof args === 'object' && !Array.isArray(args)
+          ? (args as Record<string, unknown>)
+          : {};
+      const filePath = String(
+        argsObj.file_path ?? argsObj.path ?? argsObj.pattern ?? argsObj.filename ?? ''
+      );
+      if (filePath && scanFilePath(filePath)) {
+        // Sensitive path — skip fast-path, fall through to policy evaluation
+      } else {
+        if (!isManual) appendLocalAudit(toolName, args, 'allow', 'ignored', meta, hashAuditArgs);
+        return { approved: true };
+      }
+    } else {
+      // ignoredTools (read, glob, grep, ls…) fire on every agent operation — too
+      // frequent and too noisy to send to the SaaS audit log.
+      if (!isManual) appendLocalAudit(toolName, args, 'allow', 'ignored', meta, hashAuditArgs);
+      return { approved: true };
+    }
   }
 
   // Trust session bypass — only for review-path calls, never for taint detection.

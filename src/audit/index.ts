@@ -47,7 +47,7 @@ export function appendToLog(logPath: string, entry: object): void {
 export function appendHookDebug(
   toolName: string,
   args: unknown,
-  meta?: { agent?: string; mcpServer?: string },
+  meta?: { agent?: string; mcpServer?: string; sessionId?: string },
   auditHashArgsEnabled?: boolean
 ): void {
   const argsField = auditHashArgsEnabled
@@ -69,7 +69,7 @@ export function appendLocalAudit(
   args: unknown,
   decision: 'allow' | 'deny',
   checkedBy: string,
-  meta?: { agent?: string; mcpServer?: string },
+  meta?: { agent?: string; mcpServer?: string; sessionId?: string },
   auditHashArgsEnabled?: boolean
 ): void {
   const argsField = auditHashArgsEnabled
@@ -86,6 +86,7 @@ export function appendLocalAudit(
     ...testRun,
     agent: meta?.agent,
     mcpServer: meta?.mcpServer,
+    sessionId: meta?.sessionId,
     hostname: os.hostname(),
   });
 }

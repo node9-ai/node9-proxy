@@ -56,6 +56,7 @@ import { registerSessionsCommand } from './cli/commands/sessions';
 import { registerSkillPinCommand } from './cli/commands/skill-pin';
 import { registerDlpCommand } from './cli/commands/dlp';
 import { registerMaskCommand } from './cli/commands/mask';
+import { registerBlastCommand } from './cli/commands/blast';
 
 const { version } = JSON.parse(
   fs.readFileSync(path.join(__dirname, '../package.json'), 'utf-8')
@@ -645,6 +646,7 @@ registerSessionsCommand(program);
 // Response DLP findings
 registerDlpCommand(program);
 registerMaskCommand(program);
+registerBlastCommand(program);
 
 // Daemon registers its own keep-alive unhandledRejection handler in startDaemon().
 // Skip registration here entirely for daemon mode to avoid any ordering dependency

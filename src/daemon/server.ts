@@ -903,6 +903,7 @@ export function startDaemon(): void {
           totalCostUSD: 0,
           firstDate: null,
           lastDate: null,
+          sessionsWithEarlySecrets: 0,
         };
         let claude: ScanResult = EMPTY_SCAN;
         let gemini: ScanResult = EMPTY_SCAN;

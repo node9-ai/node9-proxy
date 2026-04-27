@@ -27,6 +27,7 @@ import { isDaemonRunning, getInternalToken, DAEMON_PORT, DAEMON_HOST } from '../
 import { openBrowserLocal, isTestingMode } from '../daemon-starter';
 import { buildScanSummary, type FindingRef, type RuleGroup } from '../../scan-summary';
 import { getAgentsStatus } from '../../setup';
+import { runBlast, scoreLabel } from './blast';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -105,6 +106,7 @@ export interface ScanResult {
   totalCostUSD: number;
   firstDate: string | null;
   lastDate: string | null;
+  sessionsWithEarlySecrets: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -450,6 +452,7 @@ export function scanClaudeHistory(
     totalCostUSD: 0,
     firstDate: null,
     lastDate: null,
+    sessionsWithEarlySecrets: 0,
   };
 
   if (!fs.existsSync(projectsDir)) return result;
@@ -504,6 +507,10 @@ export function scanClaudeHistory(
 
       // Maps tool_use id → file extension so tool_result scanning can skip code files
       const toolUseFilePaths = new Map<string, string>();
+
+      // Metric: secrets before first useful edit
+      let firstDlpTs: string | null = null;
+      let firstEditTs: string | null = null;
 
       for (const line of raw.split('\n')) {
         if (!line.trim()) continue;
@@ -585,6 +592,7 @@ export function scanClaudeHistory(
               if (!resultText) continue;
               const dlpMatch = scanArgs({ text: resultText });
               if (dlpMatch) {
+                if (firstDlpTs === null) firstDlpTs = entry.timestamp ?? null;
                 const isDupe = result.dlpFindings.some(
                   (f) =>
                     f.patternName === dlpMatch.patternName &&
@@ -645,6 +653,18 @@ export function scanClaudeHistory(
             result.bashCalls++;
           }
 
+          // Track first edit/write for early-secrets metric
+          if (
+            firstEditTs === null &&
+            (toolNameLower === 'edit' ||
+              toolNameLower === 'write' ||
+              toolNameLower === 'write_file' ||
+              toolNameLower === 'edit_file' ||
+              toolNameLower === 'multiedit')
+          ) {
+            firstEditTs = entry.timestamp ?? null;
+          }
+
           // Skip node9's own read-only CLI calls
           const rawCmd = String(input.command ?? '').trimStart();
           if (/^node9\s+(scan|explain|report|tail|dlp|status|sessions|audit)\b/.test(rawCmd))
@@ -659,6 +679,7 @@ export function scanClaudeHistory(
 
           const dlpMatch = scanArgs(input);
           if (dlpMatch) {
+            if (firstDlpTs === null) firstDlpTs = entry.timestamp ?? null;
             const isDupe = result.dlpFindings.some(
               (f) =>
                 f.patternName === dlpMatch.patternName &&
@@ -749,6 +770,11 @@ export function scanClaudeHistory(
         }
       }
       result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'claude'));
+
+      // Metric 1: secret entered context before first useful edit
+      if (firstDlpTs !== null && (firstEditTs === null || firstDlpTs < firstEditTs)) {
+        result.sessionsWithEarlySecrets++;
+      }
     }
   }
 
@@ -776,6 +802,7 @@ export function scanGeminiHistory(
     totalCostUSD: 0,
     firstDate: null,
     lastDate: null,
+    sessionsWithEarlySecrets: 0,
   };
 
   if (!fs.existsSync(tmpDir)) return result;
@@ -1034,6 +1061,7 @@ export function scanCodexHistory(
     totalCostUSD: 0,
     firstDate: null,
     lastDate: null,
+    sessionsWithEarlySecrets: 0,
   };
 
   if (!fs.existsSync(sessionsBase)) return result;
@@ -1350,6 +1378,7 @@ function mergeScans(a: ScanResult, b: ScanResult): ScanResult {
     totalCostUSD: a.totalCostUSD + b.totalCostUSD,
     firstDate: dates.length ? dates.sort()[0] : null,
     lastDate: lastDates.length ? lastDates.sort().at(-1)! : null,
+    sessionsWithEarlySecrets: a.sessionsWithEarlySecrets + b.sessionsWithEarlySecrets,
   };
 }
 
@@ -1591,12 +1620,20 @@ export function registerScanCommand(program: Command): void {
           );
         }
         if (scan.dlpFindings.length > 0) {
+          const earlyLabel =
+            scan.sessionsWithEarlySecrets > 0
+              ? chalk.dim('  ·  ') +
+                chalk.red(
+                  `${scan.sessionsWithEarlySecrets} session${scan.sessionsWithEarlySecrets !== 1 ? 's' : ''} loaded secrets before first edit`
+                )
+              : '';
           console.log(
             '    ' +
               chalk.red('🔑  Credential leak') +
               '     ' +
               chalk.red.bold(String(scan.dlpFindings.length).padStart(5)) +
-              chalk.dim('   secret detected in history or shell config')
+              chalk.dim('   secret detected in history or shell config') +
+              earlyLabel
           );
         }
         if (blockedCount > 0) {
@@ -1609,9 +1646,17 @@ export function registerScanCommand(program: Command): void {
           );
         }
         if (scan.loopFindings.length > 0) {
+          const wastedCalls = scan.loopFindings.reduce((s, l) => s + Math.max(0, l.count - 1), 0);
+          const loopRatio =
+            scan.totalToolCalls > 0
+              ? chalk.dim('  ·  ') +
+                chalk.yellow(
+                  Math.round((wastedCalls / scan.totalToolCalls) * 100) + '% of calls wasted'
+                )
+              : '';
           const loopCost =
             summary.loopWastedUSD > 0
-              ? chalk.dim('  ·  ') + chalk.yellow('~' + fmtCost(summary.loopWastedUSD) + ' wasted')
+              ? chalk.dim('  ·  ') + chalk.yellow('~' + fmtCost(summary.loopWastedUSD))
               : '';
           console.log(
             '    ' +
@@ -1619,6 +1664,7 @@ export function registerScanCommand(program: Command): void {
               '      ' +
               chalk.yellow.bold(String(scan.loopFindings.length).padStart(5)) +
               chalk.dim('   repeated tool call patterns found') +
+              loopRatio +
               loopCost
           );
         }
@@ -1782,6 +1828,52 @@ export function registerScanCommand(program: Command): void {
           console.log('  ' + chalk.dim('→  node9 shield enable <name>  to activate'));
           console.log('');
         }
+      }
+
+      // ── Blast Radius ──────────────────────────────────────────────────────
+      const blast = runBlast();
+      if (blast.reachable.length > 0 || blast.envFindings.length > 0) {
+        console.log('  ' + chalk.dim('─'.repeat(70)));
+        console.log(
+          '  ' +
+            chalk.bold('🔭  Blast Radius') +
+            chalk.dim('  ·  what an AI agent can reach right now')
+        );
+        console.log('');
+        if (blast.reachable.length > 0) {
+          for (const p of blast.reachable) {
+            console.log(
+              '    ' +
+                chalk.red('✗  ') +
+                chalk.yellow(p.label.padEnd(38)) +
+                chalk.dim(p.description)
+            );
+          }
+        }
+        if (blast.envFindings.length > 0) {
+          for (const f of blast.envFindings) {
+            console.log(
+              '    ' +
+                chalk.red('✗  ') +
+                chalk.yellow(f.key.padEnd(38)) +
+                chalk.dim(f.patternName + ' in environment')
+            );
+          }
+        }
+        console.log('');
+        console.log(
+          '  Security Score: ' +
+            scoreLabel(blast.score) +
+            chalk.dim(
+              `  (${blast.reachable.length + blast.envFindings.length} exposure${blast.reachable.length + blast.envFindings.length !== 1 ? 's' : ''})`
+            )
+        );
+        console.log(
+          chalk.dim(
+            '\n  Run `node9 shield enable project-jail` to block agent access to these files.'
+          )
+        );
+        console.log('');
       }
 
       // ── CTA ───────────────────────────────────────────────────────────────

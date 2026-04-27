@@ -1,0 +1,64 @@
+{
+  "name": "project-jail",
+  "description": "Restricts AI agents from reading sensitive credential files outside the current project",
+  "aliases": ["jail"],
+  "smartRules": [
+    {
+      "name": "shield:project-jail:block-read-ssh",
+      "tool": "bash",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "(cat|less|head|tail|bat|more|open|print|nano|vim|vi|emacs|code|type)\\s+.*[\\/\\\\]\\.ssh[\\/\\\\]",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "Reading SSH private keys is blocked by project-jail shield"
+    },
+    {
+      "name": "shield:project-jail:block-read-aws",
+      "tool": "bash",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "(cat|less|head|tail|bat|more|open|print|nano|vim|vi|emacs|code|type)\\s+.*[\\/\\\\]\\.aws[\\/\\\\]",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "Reading AWS credentials is blocked by project-jail shield"
+    },
+    {
+      "name": "shield:project-jail:block-read-env",
+      "tool": "bash",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "(cat|less|head|tail|bat|more|open|print|nano|vim|vi|emacs|code|type)\\s+.*\\.env(\\.local|\\.production|\\.staging)?\\b",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "Reading .env files is blocked by project-jail shield"
+    },
+    {
+      "name": "shield:project-jail:block-read-credentials",
+      "tool": "bash",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "(cat|less|head|tail|bat|more|open|print|nano|vim|vi|emacs|code|type)\\s+.*(credentials\\.json|\\.netrc|\\.npmrc|\\.docker[\\/\\\\]config\\.json|gcloud[\\/\\\\]credentials)",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "Reading credential files is blocked by project-jail shield"
+    }
+  ],
+  "dangerousWords": []
+}

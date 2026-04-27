@@ -243,7 +243,8 @@ export function registerCheckCommand(program: Command): void {
             return;
           }
 
-          const meta = { agent, mcpServer };
+          const sessionId = typeof payload.session_id === 'string' ? payload.session_id : undefined;
+          const meta = { agent, mcpServer, sessionId };
 
           // ── Skill pinning — supply chain & update drift defense (AST 02 + AST 07) ──
           // Off by default; opt-in via config.policy.skillPinning.enabled.
