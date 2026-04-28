@@ -6,12 +6,10 @@
 import fs from 'fs';
 import path from 'path';
 
-export interface DlpMatch {
-  patternName: string;
-  fieldPath: string;
-  redactedSample: string;
-  severity: 'block' | 'review';
-}
+// DlpMatch is now defined in @node9/policy-engine. Re-exported here so
+// existing import paths (`from '../dlp'`) keep working unchanged.
+export type { DlpMatch } from '@node9/policy-engine';
+import type { DlpMatch } from '@node9/policy-engine';
 
 interface DlpPattern {
   name: string;

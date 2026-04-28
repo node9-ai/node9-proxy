@@ -6,19 +6,10 @@
 
 import path from 'path';
 
-export interface RiskMetadata {
-  intent: 'EDIT' | 'EXEC';
-  tier: 1 | 2 | 3 | 4 | 5 | 6 | 7;
-  blockedByLabel: string;
-  matchedWord?: string;
-  matchedField?: string;
-  contextSnippet?: string; // Pre-computed 7-line window with 🛑 marker
-  contextLineIndex?: number; // Index of the 🛑 line within the snippet (0-based)
-  editFileName?: string; // basename of file_path (EDIT intent only)
-  editFilePath?: string; // full file_path (EDIT intent only)
-  ruleName?: string; // Tier 2 (Smart Rules) only
-  ruleDescription?: string; // Human-readable description of the matched smart rule or shield
-}
+// RiskMetadata is now defined in @node9/policy-engine. Re-exported here
+// so existing import paths (`from '../context-sniper'`) keep working.
+export type { RiskMetadata } from '@node9/policy-engine';
+import type { RiskMetadata } from '@node9/policy-engine';
 
 /** Keeps the start and end of a long string, truncating the middle. */
 export function smartTruncate(str: string, maxLen = 500): string {
