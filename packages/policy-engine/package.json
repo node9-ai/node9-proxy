@@ -28,9 +28,12 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "mvdan-sh": "^0.10.1"
+    "mvdan-sh": "^0.10.1",
+    "picomatch": "^4.0.3",
+    "safe-regex2": "^5.1.0"
   },
   "devDependencies": {
+    "@types/picomatch": "^4.0.2",
     "tsup": "^8.0.0",
     "typescript": "^5.0.0",
     "vitest": "^4.0.0"

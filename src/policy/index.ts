@@ -7,8 +7,7 @@ import os from 'os';
 import pm from 'picomatch';
 import mvdanSh from 'mvdan-sh';
 import { scanArgs, scanFilePath } from '../dlp';
-import { type SmartRule, type Config, getConfig, getActiveEnvironment } from '../config';
-import { getCompiledRegex } from '../utils/regex';
+import { type Config, getConfig, getActiveEnvironment } from '../config';
 import { checkProvenance } from '../utils/provenance.js';
 import { analyzePipeChain } from './pipe-chain.js';
 import { extractAllSshHosts } from './ssh-parser.js';
@@ -16,6 +15,9 @@ import { isTrustedHost } from '../auth/trusted-hosts.js';
 import {
   normalizeCommandForPolicy as engineNormalizeCommandForPolicy,
   detectDangerousShellExec as engineDetectDangerousShellExec,
+  matchesPattern as engineMatchesPattern,
+  evaluateSmartConditions as engineEvaluateSmartConditions,
+  getNestedValue,
 } from '@node9/policy-engine';
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -27,23 +29,8 @@ function tokenize(toolName: string): string[] {
     .filter(Boolean);
 }
 
-export function matchesPattern(text: string, patterns: string[] | string): boolean {
-  const p = Array.isArray(patterns) ? patterns : [patterns];
-  if (p.length === 0) return false;
-  const isMatch = pm(p, { nocase: true, dot: true });
-  const target = text.toLowerCase();
-  const directMatch = isMatch(target);
-  if (directMatch) return true;
-  const withoutDotSlash = text.replace(/^\.\//, '');
-  return isMatch(withoutDotSlash) || isMatch(`./${withoutDotSlash}`);
-}
-
-function getNestedValue(obj: unknown, path: string): unknown {
-  if (!obj || typeof obj !== 'object') return null;
-  return path
-    .split('.')
-    .reduce<unknown>((prev, curr) => (prev as Record<string, unknown>)?.[curr], obj);
-}
+export const matchesPattern = engineMatchesPattern;
+export const evaluateSmartConditions = engineEvaluateSmartConditions;
 
 // ── SHELL AST HELPERS ─────────────────────────────────────────────────────────
 // AST detectors live in @node9/policy-engine (pure mvdan-sh wrappers).
@@ -81,61 +68,6 @@ export function shouldSnapshot(toolName: string, args: unknown, config: Config):
   }
 
   return true;
-}
-
-export function evaluateSmartConditions(args: unknown, rule: SmartRule): boolean {
-  if (!rule.conditions || rule.conditions.length === 0) return true;
-  const mode = rule.conditionMode ?? 'all';
-
-  const results = rule.conditions.map((cond) => {
-    const rawVal = getNestedValue(args, cond.field);
-    // Normalize whitespace so multi-space SQL doesn't bypass regex checks
-    const normalized =
-      rawVal !== null && rawVal !== undefined ? String(rawVal).replace(/\s+/g, ' ').trim() : null;
-    // For command fields, strip quoted string arguments (commit messages, inline
-    // scripts) so patterns match only actual shell commands, not their text args.
-    const val =
-      cond.field === 'command' && normalized !== null
-        ? normalizeCommandForPolicy(normalized)
-        : normalized;
-
-    switch (cond.op) {
-      case 'exists':
-        return val !== null && val !== '';
-      case 'notExists':
-        return val === null || val === '';
-      case 'contains':
-        return val !== null && cond.value ? val.includes(cond.value) : false;
-      case 'notContains':
-        return val !== null && cond.value ? !val.includes(cond.value) : true;
-      case 'matches': {
-        if (val === null || !cond.value) return false;
-        const reM = getCompiledRegex(cond.value, cond.flags ?? '');
-        if (!reM) return false; // invalid/dangerous pattern → fail closed
-        return reM.test(val);
-      }
-      case 'notMatches': {
-        if (!cond.value) return false; // no pattern → fail closed
-        if (val === null) return true; // field absent → condition passes (preserve original)
-        const reN = getCompiledRegex(cond.value, cond.flags ?? '');
-        if (!reN) return false; // invalid/dangerous pattern → fail closed
-        return !reN.test(val);
-      }
-      case 'matchesGlob':
-        return val !== null && cond.value ? pm.isMatch(val, cond.value) : false;
-      case 'notMatchesGlob':
-        // Both absent field AND missing pattern → fail closed.
-        // For a security tool, fail-closed is the safer default: an attacker
-        // omitting a field must not satisfy a notMatchesGlob allow rule.
-        // Rule authors who need "pass when field absent" should add an explicit
-        // 'notExists' condition paired with 'notMatchesGlob'.
-        return val !== null && cond.value ? !pm.isMatch(val, cond.value) : false;
-      default:
-        return false;
-    }
-  });
-
-  return mode === 'any' ? results.some((r) => r) : results.every((r) => r);
 }
 
 function extractShellCommand(

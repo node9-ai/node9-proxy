@@ -26,3 +26,9 @@ export {
 
 // Shell — AST-based detectors (mvdan-sh). Pure: input is a string, output is a verdict.
 export { normalizeCommandForPolicy, detectDangerousShellExec, detectDangerousEval } from './shell';
+
+// Smart rules — tool-name pattern match + condition evaluator.
+export { matchesPattern, getNestedValue, evaluateSmartConditions } from './rules';
+
+// Regex utilities — ReDoS-safe validation + LRU-cached compilation.
+export { validateRegex, getCompiledRegex } from './utils/regex';
