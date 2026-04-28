@@ -206,3 +206,88 @@ export function detectDangerousShellExec(command: string): 'block' | 'review' | 
 
 /** @deprecated Use detectDangerousShellExec — kept for backwards compatibility */
 export const detectDangerousEval = detectDangerousShellExec;
+
+export interface ShellCommandAnalysis {
+  /** First word of every CallExpr — the command names invoked. */
+  actions: string[];
+  /** Non-flag positional arguments — likely file paths. */
+  paths: string[];
+  /** Lowercased token bag, expanded to include split path segments and de-flagged variants. */
+  allTokens: string[];
+}
+
+/**
+ * Tokenizes a shell command into actions / paths / all-tokens for policy
+ * matching. Tries the AST first; if mvdan-sh fails to parse, falls back to
+ * a permissive regex tokenizer so dangerous-word checks still see something.
+ */
+export function analyzeShellCommand(command: string): ShellCommandAnalysis {
+  const actions: string[] = [];
+  const paths: string[] = [];
+  const allTokens: string[] = [];
+
+  const addToken = (token: string) => {
+    const lower = token.toLowerCase();
+    allTokens.push(lower);
+    if (lower.includes('/')) allTokens.push(...lower.split('/').filter(Boolean));
+    if (lower.startsWith('-')) allTokens.push(lower.replace(/^-+/, ''));
+  };
+
+  try {
+    const f = sharedParser.Parse(command, 'cmd');
+    syntax.Walk(f, (node: unknown) => {
+      if (!node) return false;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const n = node as any;
+      if (syntax.NodeType(n) !== 'CallExpr') return true;
+
+      // Collect literal text from each word argument (skip pure flag tokens).
+      // Unescape Lit values so `r\m` is treated as `rm` (shell backslash-escaping).
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const wordValues: string[] = (n.Args || [])
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .map((arg: any) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return (
+            (arg.Parts || [])
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              .map((p: any) => (p.Value ?? '').replace(/\\(.)/g, '$1'))
+              .join('')
+          );
+        })
+        .filter((s: string) => s.length > 0);
+
+      if (wordValues.length > 0) {
+        const cmd = wordValues[0].toLowerCase();
+        if (!actions.includes(cmd)) actions.push(cmd);
+        wordValues.forEach((w: string) => addToken(w));
+        wordValues.slice(1).forEach((w: string) => {
+          if (!w.startsWith('-')) paths.push(w);
+        });
+      }
+      return true;
+    });
+  } catch {
+    // AST parse failed — fallback to regex tokenizer
+  }
+
+  if (allTokens.length === 0) {
+    const normalized = command.replace(/\\(.)/g, '$1');
+    const sanitized = normalized.replace(/["'<>]/g, ' ');
+    const segments = sanitized.split(/[|;&]|\$\(|\)|`/);
+    segments.forEach((segment) => {
+      const tokens = segment.trim().split(/\s+/).filter(Boolean);
+      if (tokens.length > 0) {
+        const action = tokens[0].toLowerCase();
+        if (!actions.includes(action)) actions.push(action);
+        tokens.forEach((t) => {
+          addToken(t);
+          if (t !== tokens[0] && !t.startsWith('-')) {
+            if (!paths.includes(t)) paths.push(t);
+          }
+        });
+      }
+    });
+  }
+  return { actions, paths, allTokens };
+}

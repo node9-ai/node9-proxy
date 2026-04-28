@@ -25,7 +25,32 @@ export {
 } from './dlp';
 
 // Shell — AST-based detectors (mvdan-sh). Pure: input is a string, output is a verdict.
-export { normalizeCommandForPolicy, detectDangerousShellExec, detectDangerousEval } from './shell';
+export type { ShellCommandAnalysis } from './shell';
+export {
+  normalizeCommandForPolicy,
+  detectDangerousShellExec,
+  detectDangerousEval,
+  analyzeShellCommand,
+} from './shell';
+
+// Policy — pure shell sub-helpers (pipe-chain, ssh, flag tables) + stateless evaluator.
+export type { PipeChainAnalysis } from './policy/pipe-chain';
+export { analyzePipeChain } from './policy/pipe-chain';
+export { extractAllSshHosts, parseAllSshHostsFromCommand } from './policy/ssh-parser';
+export {
+  FLAGS_WITH_VALUES,
+  extractPositionalArgs,
+  extractNetworkTargets,
+} from './policy/flag-tables';
+export type {
+  PolicyConfig,
+  PolicyContext,
+  PolicyHostHooks,
+  PolicyVerdict,
+  ProvenanceLookup,
+  ProvenanceTrust,
+} from './policy';
+export { evaluatePolicy, isIgnoredTool, checkDangerousSql } from './policy';
 
 // Smart rules — tool-name pattern match + condition evaluator.
 export { matchesPattern, getNestedValue, evaluateSmartConditions } from './rules';
