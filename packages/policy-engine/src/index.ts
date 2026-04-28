@@ -32,3 +32,12 @@ export { matchesPattern, getNestedValue, evaluateSmartConditions } from './rules
 
 // Regex utilities — ReDoS-safe validation + LRU-cached compilation.
 export { validateRegex, getCompiledRegex } from './utils/regex';
+
+// Shields — 11 builtin definitions + pure validators (no fs).
+export type { ShieldDefinition, ShieldVerdict, ShieldOverrides } from './shields';
+export {
+  BUILTIN_SHIELDS,
+  isShieldVerdict,
+  validateShieldDefinition,
+  validateOverrides,
+} from './shields';
