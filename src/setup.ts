@@ -106,6 +106,26 @@ function fullPathCommand(subcommand: string): string {
   return `${nodeExec} ${cliScript} ${subcommand}`;
 }
 
+/**
+ * A previously-installed Node9 hook command can outlive the install that
+ * wrote it — `npm uninstall -g node9-ai` deletes the cli.js but leaves the
+ * stored command in `~/.claude/settings.json` pointing at a vanished path.
+ * Claude Code then crashes every tool call with `node:internal/modules/cjs/loader`.
+ *
+ * Returns true when the command references at least one absolute path that
+ * no longer exists on disk. Bare commands like `node9 check` (no `/`)
+ * resolve via $PATH at runtime and are never considered stale here.
+ */
+function isStaleHookCommand(command: string): boolean {
+  if (!command) return false;
+  const tokens = command.split(/\s+/);
+  for (const tok of tokens) {
+    if (!tok.startsWith('/')) continue;
+    if (!fs.existsSync(tok)) return true;
+  }
+  return false;
+}
+
 function readJson<T>(filePath: string): T | null {
   try {
     if (fs.existsSync(filePath)) {
@@ -337,6 +357,20 @@ export async function setupClaude(): Promise<void> {
     console.log(chalk.green('  ✅ PreToolUse hook added  → node9 check'));
     hooksChanged = true;
     anythingChanged = true;
+  } else if (settings.hooks.PreToolUse) {
+    // Self-heal: rewrite Node9 hooks whose absolute paths have vanished.
+    for (const matcher of settings.hooks.PreToolUse) {
+      for (const h of matcher.hooks) {
+        const cmd = h.command ?? '';
+        const isNode9 = cmd.includes('node9 check') || cmd.includes('cli.js check');
+        if (isNode9 && isStaleHookCommand(cmd)) {
+          h.command = fullPathCommand('check');
+          console.log(chalk.yellow('  🔧 PreToolUse hook repaired (stale path → current binary)'));
+          hooksChanged = true;
+          anythingChanged = true;
+        }
+      }
+    }
   }
 
   const hasPostHook = settings.hooks.PostToolUse?.some((m) =>
@@ -351,6 +385,19 @@ export async function setupClaude(): Promise<void> {
     console.log(chalk.green('  ✅ PostToolUse hook added → node9 log'));
     hooksChanged = true;
     anythingChanged = true;
+  } else if (settings.hooks.PostToolUse) {
+    for (const matcher of settings.hooks.PostToolUse) {
+      for (const h of matcher.hooks) {
+        const cmd = h.command ?? '';
+        const isNode9 = cmd.includes('node9 log') || cmd.includes('cli.js log');
+        if (isNode9 && isStaleHookCommand(cmd)) {
+          h.command = fullPathCommand('log');
+          console.log(chalk.yellow('  🔧 PostToolUse hook repaired (stale path → current binary)'));
+          hooksChanged = true;
+          anythingChanged = true;
+        }
+      }
+    }
   }
 
   // Add the node9 MCP server entry if not already present (pure addition — no prompt)
