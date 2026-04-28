@@ -23,3 +23,6 @@ export {
   sensitivePathMatch,
   SENSITIVE_PATH_REGEXES,
 } from './dlp';
+
+// Shell — AST-based detectors (mvdan-sh). Pure: input is a string, output is a verdict.
+export { normalizeCommandForPolicy, detectDangerousShellExec, detectDangerousEval } from './shell';

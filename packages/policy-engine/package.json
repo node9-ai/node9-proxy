@@ -27,6 +27,9 @@
     "test": "vitest --run",
     "test:watch": "vitest"
   },
+  "dependencies": {
+    "mvdan-sh": "^0.10.1"
+  },
   "devDependencies": {
     "tsup": "^8.0.0",
     "typescript": "^5.0.0",
