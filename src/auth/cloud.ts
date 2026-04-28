@@ -12,10 +12,22 @@ export interface CloudApprovalResult {
   remoteApprovalOnly?: boolean;
 }
 
+// Cap on the DLP redacted sample length forwarded to the SaaS — defends
+// against partially-redacted secret material being persisted in audit logs
+// when upstream redaction is incomplete.
+const DLP_SAMPLE_MAX_LEN = 200;
+
 /**
  * Send an audit record to the SaaS backend for a locally fast-pathed call.
  * Returns a Promise so callers that precede process.exit(0) can await it.
  * Failures are silently ignored — never blocks the agent.
+ *
+ * `containsSensitiveArgs` is the explicit security decision controlled by
+ * the call site: when true, raw args are stripped before transmission.
+ * The previous substring-match-on-checkedBy heuristic was fragile because
+ * it both (a) trusted a free-form caller-controlled string for a security
+ * decision and (b) silently sent raw args for any code path whose tag
+ * happened not to contain "dlp" (e.g. loop-detected following a DLP match).
  */
 export function auditLocalAllow(
   toolName: string,
@@ -23,12 +35,14 @@ export function auditLocalAllow(
   checkedBy: string,
   creds: { apiKey: string; apiUrl: string },
   meta?: { agent?: string; mcpServer?: string },
-  dlpInfo?: { pattern: string; redactedSample: string }
+  dlpInfo?: { pattern: string; redactedSample: string },
+  containsSensitiveArgs: boolean = false
 ): Promise<void> {
-  // DLP events: strip raw args before sending to SaaS — they contain the
-  // matched secret. The pattern name and redacted sample carry the signal.
-  const isDlp = checkedBy.includes('dlp');
-  const safeArgs = isDlp ? { tool: toolName, redacted: true } : args;
+  const safeArgs = containsSensitiveArgs ? { tool: toolName, redacted: true } : args;
+  const dlpSample =
+    dlpInfo && typeof dlpInfo.redactedSample === 'string'
+      ? dlpInfo.redactedSample.slice(0, DLP_SAMPLE_MAX_LEN)
+      : undefined;
 
   return fetch(`${creds.apiUrl}/audit`, {
     method: 'POST',
@@ -37,7 +51,7 @@ export function auditLocalAllow(
       toolName,
       args: safeArgs,
       checkedBy,
-      ...(dlpInfo && { dlpPattern: dlpInfo.pattern, dlpSample: dlpInfo.redactedSample }),
+      ...(dlpInfo && { dlpPattern: dlpInfo.pattern, dlpSample }),
       context: {
         agent: meta?.agent,
         mcpServer: meta?.mcpServer,
