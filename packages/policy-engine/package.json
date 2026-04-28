@@ -6,7 +6,7 @@
   "homepage": "https://node9.ai",
   "repository": {
     "type": "git",
-    "url": "https://github.com/node9-ai/node9-proxy.git",
+    "url": "git+https://github.com/node9-ai/node9-proxy.git",
     "directory": "packages/policy-engine"
   },
   "keywords": [
