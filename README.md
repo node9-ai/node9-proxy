@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/node9-ai-node9-proxy-badge.png)](https://mseep.ai/app/node9-ai-node9-proxy)
+
 <p align="center">
   <img src="https://github.com/user-attachments/assets/4aa6e45b-9aba-4953-9ce3-548226622588" width="720" alt="Node9 intercepts a dangerous git push" />
 </p>
