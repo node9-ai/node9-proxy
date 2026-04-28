@@ -22,15 +22,22 @@ export function auditLocalAllow(
   args: unknown,
   checkedBy: string,
   creds: { apiKey: string; apiUrl: string },
-  meta?: { agent?: string; mcpServer?: string }
+  meta?: { agent?: string; mcpServer?: string },
+  dlpInfo?: { pattern: string; redactedSample: string }
 ): Promise<void> {
+  // DLP events: strip raw args before sending to SaaS — they contain the
+  // matched secret. The pattern name and redacted sample carry the signal.
+  const isDlp = checkedBy.includes('dlp');
+  const safeArgs = isDlp ? { tool: toolName, redacted: true } : args;
+
   return fetch(`${creds.apiUrl}/audit`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${creds.apiKey}` },
     body: JSON.stringify({
       toolName,
-      args,
+      args: safeArgs,
       checkedBy,
+      ...(dlpInfo && { dlpPattern: dlpInfo.pattern, dlpSample: dlpInfo.redactedSample }),
       context: {
         agent: meta?.agent,
         mcpServer: meta?.mcpServer,
