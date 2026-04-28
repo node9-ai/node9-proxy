@@ -77,4 +77,137 @@ describe('auditLocalAllow — sensitive-args redaction', () => {
     expect(typeof sent).toBe('string');
     expect(sent.length).toBeLessThanOrEqual(200);
   });
+
+  it('caps dlpInfo.pattern length before transmission', async () => {
+    // MEDIUM finding: pattern must also be bounded — an unbounded pattern
+    // string can be persisted in audit logs or used to probe backend behavior.
+    const longPattern = 'p'.repeat(5000);
+    await auditLocalAllow(
+      'bash',
+      secretArgs,
+      'dlp-block',
+      creds,
+      undefined,
+      { pattern: longPattern, redactedSample: 'x' },
+      true
+    );
+    const sent = captured[0].body.dlpPattern as string;
+    expect(typeof sent).toBe('string');
+    expect(sent.length).toBeLessThanOrEqual(100);
+  });
+});
+
+describe('auditLocalAllow — apiUrl validation (SSRF / key-leak guard)', () => {
+  let captured: CapturedRequest[];
+  let originalFetch: typeof fetch;
+
+  beforeEach(() => {
+    captured = [];
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const u = typeof url === 'string' ? url : url instanceof URL ? url.toString() : url.url;
+      const body = init?.body
+        ? (JSON.parse(init.body as string) as Record<string, unknown>)
+        : ({} as Record<string, unknown>);
+      captured.push({ url: u, body });
+      return new Response('{}', { status: 200 });
+    }) as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const args = { command: 'ls' };
+
+  it('refuses to send the bearer token to non-HTTPS public hosts', async () => {
+    // HIGH finding: a malicious apiUrl (e.g. supply-chain compromise) must not
+    // receive Authorization: Bearer <token>.
+    await auditLocalAllow('bash', args, 'local-policy', {
+      apiKey: 'sk-secret-token',
+      apiUrl: 'http://attacker.example.com',
+    });
+    expect(captured).toHaveLength(0);
+  });
+
+  it('refuses URLs containing userinfo (https://attacker@real.host)', async () => {
+    await auditLocalAllow('bash', args, 'local-policy', {
+      apiKey: 'sk-secret-token',
+      apiUrl: 'https://attacker.example.com@api.node9.ai',
+    });
+    expect(captured).toHaveLength(0);
+  });
+
+  it('refuses malformed URLs', async () => {
+    await auditLocalAllow('bash', args, 'local-policy', {
+      apiKey: 'k',
+      apiUrl: 'not a url',
+    });
+    expect(captured).toHaveLength(0);
+  });
+
+  it('refuses non-http(s) schemes (file://, data://, javascript:)', async () => {
+    for (const apiUrl of ['file:///etc/passwd', 'data://text', 'ftp://x.example.com']) {
+      await auditLocalAllow('bash', args, 'local-policy', { apiKey: 'k', apiUrl });
+    }
+    expect(captured).toHaveLength(0);
+  });
+
+  it('allows HTTPS public hosts', async () => {
+    await auditLocalAllow('bash', args, 'local-policy', {
+      apiKey: 'k',
+      apiUrl: 'https://api.node9.ai/v1',
+    });
+    expect(captured).toHaveLength(1);
+    expect(captured[0].url).toBe('https://api.node9.ai/v1/audit');
+  });
+
+  it('allows http on loopback (test/dev fixtures)', async () => {
+    await auditLocalAllow('bash', args, 'local-policy', {
+      apiKey: 'k',
+      apiUrl: 'http://127.0.0.1:8080',
+    });
+    expect(captured).toHaveLength(1);
+    expect(captured[0].url).toBe('http://127.0.0.1:8080/audit');
+  });
+});
+
+describe('auditLocalAllow — checkedBy allowlist', () => {
+  let captured: CapturedRequest[];
+  let originalFetch: typeof fetch;
+
+  beforeEach(() => {
+    captured = [];
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const u = typeof url === 'string' ? url : url instanceof URL ? url.toString() : url.url;
+      const body = init?.body
+        ? (JSON.parse(init.body as string) as Record<string, unknown>)
+        : ({} as Record<string, unknown>);
+      captured.push({ url: u, body });
+      return new Response('{}', { status: 200 });
+    }) as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const creds = { apiKey: 'k', apiUrl: 'http://127.0.0.1:0' };
+
+  it('passes through known checkedBy values verbatim', async () => {
+    for (const v of ['dlp-block', 'loop-detected', 'local-policy', 'persistent', 'trust']) {
+      captured.length = 0;
+      await auditLocalAllow('bash', {}, v, creds);
+      expect(captured[0].body.checkedBy).toBe(v);
+    }
+  });
+
+  it('normalizes unknown checkedBy values to "unknown" (log-injection guard)', async () => {
+    // LOW finding: free-form strings could be used for log injection or to
+    // confuse downstream JSON parsers. Anything not on the allowlist is
+    // replaced before transmission.
+    await auditLocalAllow('bash', {}, '{"injected":"json","newline":"\\n[admin]"}', creds);
+    expect(captured[0].body.checkedBy).toBe('unknown');
+  });
 });
