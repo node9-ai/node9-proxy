@@ -10,6 +10,15 @@ export default tseslint.config(
     },
   },
   {
-    ignores: ['dist/**', 'node_modules/**', 'coverage/**', 'scripts/**'],
+    ignores: [
+      'dist/**',
+      'node_modules/**',
+      'coverage/**',
+      'scripts/**',
+      // The policy-engine workspace has its own build output. Lint runs
+      // from inside the package; the parent shouldn't reach into dist/.
+      'packages/**/dist/**',
+      'packages/**/node_modules/**',
+    ],
   }
 );

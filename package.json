@@ -18,6 +18,9 @@
   "engines": {
     "node": ">=18"
   },
+  "workspaces": [
+    "packages/*"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/node9-ai/node9-proxy.git"
