@@ -41,3 +41,7 @@ export {
   validateShieldDefinition,
   validateOverrides,
 } from './shields';
+
+// Loop detection — pure sliding-window math; host wraps with persistence.
+export type { ToolCallRecord, LoopWindowEvaluation } from './loop';
+export { LOOP_MAX_RECORDS, computeArgsHash, evaluateLoopWindow } from './loop';
