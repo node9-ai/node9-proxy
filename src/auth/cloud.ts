@@ -12,25 +12,115 @@ export interface CloudApprovalResult {
   remoteApprovalOnly?: boolean;
 }
 
+// Cap on the DLP redacted sample length forwarded to the SaaS — defends
+// against partially-redacted secret material being persisted in audit logs
+// when upstream redaction is incomplete.
+const DLP_SAMPLE_MAX_LEN = 200;
+const DLP_PATTERN_MAX_LEN = 100;
+
+// Known checkedBy values emitted by the orchestrator. Anything outside this
+// set is normalized to 'unknown' before transmission — defends against log
+// injection and prevents free-form caller strings from polluting the audit
+// stream (e.g. JSON-shaped values that confuse downstream log consumers).
+const KNOWN_CHECKED_BY = new Set([
+  'dlp-block',
+  'observe-mode-dlp-would-block',
+  'dlp-review-flagged',
+  'loop-detected',
+  'audit-mode',
+  'local-policy',
+  'smart-rule-block',
+  'persistent',
+  'trust',
+  'observe-mode',
+  'observe-mode-would-block',
+]);
+
+/**
+ * Validates the audit URL before we send the bearer token to it.
+ *
+ * Threat model: `creds.apiUrl` originates from `$NODE9_API_URL` or
+ * `~/.node9/credentials.json`. Both are local-user-controlled but a
+ * supply-chain compromise, malicious installer, or env-var injection from a
+ * parent process could redirect audit traffic — including the API key in the
+ * Authorization header — to an attacker-controlled host. We require HTTPS,
+ * with a narrow exception for loopback addresses used by tests/dev fixtures.
+ *
+ * Returns the parsed URL on success, or null when the URL is malformed,
+ * uses a non-HTTPS scheme on a non-loopback host, or contains userinfo.
+ */
+function validateApiUrl(raw: string): URL | null {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return null;
+  }
+  // Reject userinfo (`https://attacker@real.host`) — the Bearer token is
+  // already in the Authorization header; userinfo here is always a smell.
+  if (u.username || u.password) return null;
+  if (u.protocol === 'https:') return u;
+  if (u.protocol === 'http:') {
+    const h = u.hostname;
+    if (h === '127.0.0.1' || h === 'localhost' || h === '::1' || h === '[::1]') return u;
+  }
+  return null;
+}
+
 /**
  * Send an audit record to the SaaS backend for a locally fast-pathed call.
  * Returns a Promise so callers that precede process.exit(0) can await it.
  * Failures are silently ignored — never blocks the agent.
+ *
+ * `containsSensitiveArgs` is the explicit security decision controlled by
+ * the call site: when true, raw args are stripped before transmission.
+ * The previous substring-match-on-checkedBy heuristic was fragile because
+ * it both (a) trusted a free-form caller-controlled string for a security
+ * decision and (b) silently sent raw args for any code path whose tag
+ * happened not to contain "dlp" (e.g. loop-detected following a DLP match).
  */
 export function auditLocalAllow(
   toolName: string,
   args: unknown,
   checkedBy: string,
   creds: { apiKey: string; apiUrl: string },
-  meta?: { agent?: string; mcpServer?: string }
+  meta?: { agent?: string; mcpServer?: string },
+  dlpInfo?: { pattern: string; redactedSample: string },
+  containsSensitiveArgs: boolean = false
 ): Promise<void> {
-  return fetch(`${creds.apiUrl}/audit`, {
+  // SSRF / key-leak guard: refuse to send the bearer token to anything that
+  // isn't HTTPS (loopback excepted for tests/dev). Silent skip — we never
+  // want the audit path to break the agent.
+  const validated = validateApiUrl(creds.apiUrl);
+  if (!validated) {
+    try {
+      fs.appendFileSync(
+        HOOK_DEBUG_LOG,
+        `[audit] refused to send: invalid apiUrl scheme/host (got "${String(creds.apiUrl).slice(0, 200)}")\n`
+      );
+    } catch {}
+    return Promise.resolve();
+  }
+
+  const safeArgs = containsSensitiveArgs ? { tool: toolName, redacted: true } : args;
+  const dlpSample =
+    dlpInfo && typeof dlpInfo.redactedSample === 'string'
+      ? dlpInfo.redactedSample.slice(0, DLP_SAMPLE_MAX_LEN)
+      : undefined;
+  const dlpPattern =
+    dlpInfo && typeof dlpInfo.pattern === 'string'
+      ? dlpInfo.pattern.slice(0, DLP_PATTERN_MAX_LEN)
+      : undefined;
+  const safeCheckedBy = KNOWN_CHECKED_BY.has(checkedBy) ? checkedBy : 'unknown';
+
+  return fetch(`${validated.toString().replace(/\/$/, '')}/audit`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${creds.apiKey}` },
     body: JSON.stringify({
       toolName,
-      args,
-      checkedBy,
+      args: safeArgs,
+      checkedBy: safeCheckedBy,
+      ...(dlpInfo && { dlpPattern, dlpSample }),
       context: {
         agent: meta?.agent,
         mcpServer: meta?.mcpServer,

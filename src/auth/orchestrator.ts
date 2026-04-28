@@ -327,6 +327,19 @@ async function _authorizeHeadlessCore(
             meta,
             true
           );
+        // Sync DLP block to SaaS so org admins see credential-leak attempts in the dashboard.
+        // Fire-and-forget. containsSensitiveArgs=true strips raw args — they contain
+        // the matched secret. The pattern name and redacted sample carry the signal.
+        if (approvers.cloud && creds?.apiKey)
+          auditLocalAllow(
+            toolName,
+            args,
+            isObserveMode ? 'observe-mode-dlp-would-block' : 'dlp-block',
+            creds,
+            meta,
+            { pattern: dlpMatch.patternName, redactedSample: dlpMatch.redactedSample },
+            true
+          );
         // Taint the destination file so future uploads of it are also blocked.
         if (isWriteTool(toolName) && filePath) {
           await notifyTaint(filePath, `DLP:${dlpMatch.patternName}`);
@@ -413,6 +426,12 @@ async function _authorizeHeadlessCore(
           `what are you actually trying to accomplish, and is there a different way to get there?`;
         if (!isManual)
           appendLocalAudit(toolName, args, 'deny', 'loop-detected', meta, hashAuditArgs);
+        // Sync loop detection to SaaS so org admins see runaway agents in the dashboard.
+        // containsSensitiveArgs=true: a loop may follow a DLP match on the same args,
+        // and we never want to exfiltrate the looping payload to the audit endpoint.
+        // The tool name + checkedBy + count signal is enough for dashboard alerting.
+        if (approvers.cloud && creds?.apiKey)
+          auditLocalAllow(toolName, args, 'loop-detected', creds, meta, undefined, true);
         return {
           approved: false,
           reason,
