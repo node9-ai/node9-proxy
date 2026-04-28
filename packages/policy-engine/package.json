@@ -1,8 +1,24 @@
 {
   "name": "@node9/policy-engine",
-  "version": "0.1.0-alpha.0",
-  "description": "Shared policy evaluation engine for node9 — DLP, smart rules, AST shell parsing, shields. Pure functions, no I/O. Both node9-proxy and node9Firewall import this.",
+  "version": "1.0.0",
+  "description": "Shared policy evaluation engine for node9 — DLP, smart rules, AST shell parsing, shields, loop detection. Pure functions, no I/O. Used by both node9-proxy and the node9 SaaS firewall.",
   "license": "Apache-2.0",
+  "homepage": "https://node9.ai",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/node9-ai/node9-proxy.git",
+    "directory": "packages/policy-engine"
+  },
+  "keywords": [
+    "node9",
+    "ai-security",
+    "policy",
+    "dlp",
+    "agent-firewall"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",

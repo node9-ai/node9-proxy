@@ -9,7 +9,7 @@
 // scanFilePath wrapper since that's filesystem access.
 
 /** Engine version stamped on audit entries for future drift detection. */
-export const ENGINE_VERSION = '0.1.0-alpha.0';
+export const ENGINE_VERSION = '1.0.0';
 
 export type { SmartCondition, SmartRule, DlpMatch, RiskMetadata } from './types';
 
