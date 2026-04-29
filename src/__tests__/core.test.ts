@@ -2167,6 +2167,40 @@ describe('getCompiledRegex', () => {
   });
 });
 
+// ── Builtin DLP pattern safety (engine module-load guard) ────────────────────
+// The engine asserts every shipped DLP regex passes safe-regex2 at import
+// time. These tests prove (a) the current shipped set is safe — i.e. importing
+// the engine never throws — and (b) if a future commit lands a ReDoS pattern,
+// the guard would catch it.
+
+describe('engine builtin DLP patterns — ReDoS safety', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+  const safeRegex = require('safe-regex2') as (s: string) => boolean;
+
+  it('every shipped DLP_PATTERNS entry passes safe-regex2', async () => {
+    const { DLP_PATTERNS } = await import('@node9/policy-engine');
+    for (const p of DLP_PATTERNS) {
+      expect(safeRegex(p.regex.source)).toBe(true);
+    }
+  });
+
+  it('every shipped SENSITIVE_PATH_REGEXES entry passes safe-regex2', async () => {
+    const { SENSITIVE_PATH_REGEXES } = await import('@node9/policy-engine');
+    for (const re of SENSITIVE_PATH_REGEXES) {
+      expect(safeRegex(re.source)).toBe(true);
+    }
+  });
+
+  it('safe-regex2 itself catches the canonical ReDoS shapes (guard is real)', () => {
+    // If a future PR adds one of these to DLP_PATTERNS, the module-load
+    // assertion in engine/dlp/index.ts will throw at import — these are the
+    // shapes the guard is protecting against.
+    expect(safeRegex('(a+)+')).toBe(false);
+    expect(safeRegex('(a*)*')).toBe(false);
+    expect(safeRegex('([a-z]+)*')).toBe(false);
+  });
+});
+
 // ── Prototype-pollution defense in evaluateSmartConditions ────────────────────
 // Smart-rule field paths are user-authored (config) but evaluated against
 // attacker-controlled tool args. A path like "__proto__.x" must never traverse

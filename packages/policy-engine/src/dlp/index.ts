@@ -7,6 +7,7 @@
 // This module returns only a redacted match object — the full secret value
 // never leaves the module.
 
+import safeRegex from 'safe-regex2';
 import type { DlpMatch } from '../types';
 export type { DlpMatch } from '../types';
 
@@ -591,6 +592,31 @@ export function sensitivePathMatch(originalPath: string): DlpMatch {
 
 /** Exposed so the proxy can apply the same patterns directly if needed. */
 export const SENSITIVE_PATH_REGEXES: readonly RegExp[] = SENSITIVE_PATH_PATTERNS;
+
+// ── Builtin pattern safety check (runs at module load) ────────────────────
+// Every regex shipped in this package is run against scanArgs / scanText on
+// every tool call, so a single ReDoS-vulnerable pattern would let an
+// attacker hang the proxy with a crafted argument. We already require this
+// of *user*-supplied regexes via getCompiledRegex; this guard extends the
+// same standard to our own builtins. Throws at import time if any pattern
+// fails — fail-loud in dev/CI rather than fail-silently at runtime.
+function assertBuiltinPatternsAreSafe(): void {
+  for (const p of DLP_PATTERNS) {
+    if (!safeRegex(p.regex.source)) {
+      throw new Error(
+        `[node9 engine] Builtin DLP pattern '${p.name}' is vulnerable to ReDoS: ${p.regex.source}`
+      );
+    }
+  }
+  for (const re of SENSITIVE_PATH_PATTERNS) {
+    if (!safeRegex(re.source)) {
+      throw new Error(
+        `[node9 engine] Builtin sensitive-path pattern is vulnerable to ReDoS: ${re.source}`
+      );
+    }
+  }
+}
+assertBuiltinPatternsAreSafe();
 
 /**
  * Masks a matched secret: keeps 4-char prefix + 4-char suffix, replaces the
