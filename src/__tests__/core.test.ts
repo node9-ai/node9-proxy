@@ -2199,6 +2199,19 @@ describe('engine builtin DLP patterns — ReDoS safety', () => {
     expect(safeRegex('(a*)*')).toBe(false);
     expect(safeRegex('([a-z]+)*')).toBe(false);
   });
+
+  it('every shipped builtin shield matches/notMatches regex passes safe-regex2', async () => {
+    const { BUILTIN_SHIELDS } = await import('@node9/policy-engine');
+    for (const shield of Object.values(BUILTIN_SHIELDS)) {
+      for (const rule of shield.smartRules) {
+        for (const cond of rule.conditions ?? []) {
+          if (cond.op !== 'matches' && cond.op !== 'notMatches') continue;
+          if (!cond.value) continue;
+          expect(safeRegex(cond.value)).toBe(true);
+        }
+      }
+    }
+  });
 });
 
 // ── Prototype-pollution defense in evaluateSmartConditions ────────────────────

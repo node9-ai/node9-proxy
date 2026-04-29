@@ -5,6 +5,7 @@
 // works the same in CJS/ESM bundles, and the host repo doesn't need to
 // know where the JSONs live on disk.
 
+import safeRegex from 'safe-regex2';
 import type { SmartRule } from '../types';
 
 import aws from './builtin/aws.json';
@@ -103,3 +104,30 @@ export const BUILTIN_SHIELDS: Record<string, ShieldDefinition> = {
   [(projectJail as ShieldDefinition).name]: projectJail as ShieldDefinition,
   [(redis as ShieldDefinition).name]: redis as ShieldDefinition,
 };
+
+// ── Builtin shield regex safety check (runs at module load) ──────────────
+// Smart-rule conditions inside shield JSONs use `matches` / `notMatches`
+// operators whose `value` is a regex compiled by getCompiledRegex at
+// evaluation time. That path already runs safe-regex2 — but the failure
+// is silent (returns null → fail-closed). We want shipped-shield bad
+// patterns to fail LOUD at import, same standard as the DLP guard in
+// dlp/index.ts. Catches a vulnerable pattern landing in a future
+// shield-JSON edit before any customer hits it.
+function assertBuiltinShieldRegexesAreSafe(): void {
+  for (const shield of Object.values(BUILTIN_SHIELDS)) {
+    for (const rule of shield.smartRules) {
+      const conditions = rule.conditions ?? [];
+      for (const cond of conditions) {
+        if (cond.op !== 'matches' && cond.op !== 'notMatches') continue;
+        const pattern = cond.value;
+        if (!pattern) continue;
+        if (!safeRegex(pattern)) {
+          throw new Error(
+            `[node9 engine] Shield '${shield.name}' rule '${rule.name ?? rule.tool}' has unsafe regex: ${pattern}`
+          );
+        }
+      }
+    }
+  }
+}
+assertBuiltinShieldRegexesAreSafe();
