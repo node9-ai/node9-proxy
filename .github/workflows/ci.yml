@@ -43,6 +43,14 @@ jobs:
         # of every agent tool call, so moderate-severity prod vulns (e.g. regex DoS) matter.
         run: npm audit --omit=dev --audit-level=moderate
 
+      - name: Audit engine dependencies
+        # The engine ships as @node9/policy-engine — used by both the local proxy
+        # AND the SaaS firewall — so a CVE in mvdan-sh / picomatch / safe-regex2
+        # affects every consumer. Audit the engine workspace separately because
+        # `npm audit` at the root only walks the root package's deps. Same
+        # threshold (moderate) as the proxy audit above.
+        run: npm --workspace @node9/policy-engine audit --omit=dev --audit-level=moderate
+
       - name: Format check
         run: npm run format:check
 
