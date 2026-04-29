@@ -2167,6 +2167,52 @@ describe('getCompiledRegex', () => {
   });
 });
 
+// ── Prototype-pollution defense in evaluateSmartConditions ────────────────────
+// Smart-rule field paths are user-authored (config) but evaluated against
+// attacker-controlled tool args. A path like "__proto__.x" must never traverse
+// the prototype chain — both to prevent reads of inherited values like
+// `toString` accidentally matching a rule, and to defend against any future
+// code path that might assign through a similar nested-key helper.
+
+describe('evaluateSmartConditions — prototype-pollution defense', () => {
+  const reviewRule = (field: string) => ({
+    tool: '*',
+    verdict: 'review' as const,
+    conditions: [{ field, op: 'exists' as const }],
+  });
+
+  it('does NOT match an "__proto__" path even when args has the inherited property', () => {
+    // Object.prototype.toString exists on every object — if the path traversal
+    // walked the prototype chain, this would (incorrectly) match.
+    expect(evaluateSmartConditions({}, reviewRule('__proto__.toString'))).toBe(false);
+  });
+
+  it('does NOT match a "constructor.name" path', () => {
+    expect(evaluateSmartConditions({}, reviewRule('constructor.name'))).toBe(false);
+  });
+
+  it('does NOT match a "prototype" segment', () => {
+    expect(evaluateSmartConditions({ x: { prototype: 1 } }, reviewRule('x.prototype'))).toBe(false);
+  });
+
+  it('does not pollute Object.prototype when args carries a malicious __proto__ key', () => {
+    // Construct args via a JSON parse so `__proto__` becomes a real own property
+    // rather than the magic setter — this is the real-world shape an attacker
+    // would deliver via `{"toolName":"...","args":{"__proto__":{"polluted":1}}}`.
+    const args = JSON.parse('{"__proto__":{"polluted":1}}') as Record<string, unknown>;
+    evaluateSmartConditions(args, reviewRule('__proto__.polluted'));
+    // Reading off a fresh empty object — if the prototype was polluted, this
+    // would now equal 1.
+    expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
+  });
+
+  it('still resolves a normal nested path (regression: defense did not over-block)', () => {
+    expect(
+      evaluateSmartConditions({ request: { command: 'ls' } }, reviewRule('request.command'))
+    ).toBe(true);
+  });
+});
+
 // ── getConfig — cwd fallback behaviour ───────────────────────────────────────
 
 describe('getConfig — nonexistent cwd falls back to global config', () => {

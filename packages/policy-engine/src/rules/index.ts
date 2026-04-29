@@ -27,14 +27,27 @@ export function matchesPattern(text: string, patterns: string[] | string): boole
 }
 
 /**
+ * Path segments that would walk the prototype chain or read class internals.
+ * Smart-rule field paths come from user-authored config and are evaluated
+ * against attacker-controlled tool args, so we explicitly refuse to traverse
+ * these — both to avoid prototype pollution reads and to make sure a smart
+ * rule can never accidentally match against `Object.prototype`-inherited
+ * properties like `toString`.
+ */
+const FORBIDDEN_PATH_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/**
  * Reads `obj.a.b.c` style nested keys. Returns null when any segment is
- * missing or the parent isn't an object.
+ * missing, the parent isn't an object, or the path attempts to walk the
+ * prototype chain (`__proto__`, `constructor`, `prototype`).
  */
 export function getNestedValue(obj: unknown, path: string): unknown {
   if (!obj || typeof obj !== 'object') return null;
-  return path
-    .split('.')
-    .reduce<unknown>((prev, curr) => (prev as Record<string, unknown>)?.[curr], obj);
+  const segments = path.split('.');
+  for (const seg of segments) {
+    if (FORBIDDEN_PATH_SEGMENTS.has(seg)) return null;
+  }
+  return segments.reduce<unknown>((prev, curr) => (prev as Record<string, unknown>)?.[curr], obj);
 }
 
 /**
