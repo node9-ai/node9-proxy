@@ -39,6 +39,8 @@ function pricingFor(model: string): readonly [number, number, number, number] | 
 type DailyEntry = {
   date: string;
   model: string;
+  /** Project working directory the session ran in. Optional for back-compat with older BE. */
+  workingDir?: string;
   costUSD: number;
   inputTokens: number;
   outputTokens: number;
@@ -46,7 +48,22 @@ type DailyEntry = {
   cacheWriteTokens: number;
 };
 
-function parseJSONLFile(filePath: string): Map<string, DailyEntry> {
+/**
+ * Claude Code stores per-project sessions under
+ * `~/.claude/projects/<encoded-cwd>/<session>.jsonl`, where `<encoded-cwd>`
+ * is the absolute path with `/` replaced by `-` (e.g. `/home/nadav/node9` →
+ * `-home-nadav-node9`). The decoding is lossy when a real path component
+ * contains `-`, so we treat this as a hint only — the per-row `cwd` field
+ * inside the JSONL (when present) is the authoritative source.
+ */
+export function decodeProjectDirName(dirName: string): string {
+  return dirName.replace(/-/g, '/');
+}
+
+export function parseJSONLFile(
+  filePath: string,
+  fallbackWorkingDir: string
+): Map<string, DailyEntry> {
   let content: string;
   try {
     content = fs.readFileSync(filePath, 'utf8');
@@ -84,8 +101,14 @@ function parseJSONLFile(filePath: string): Map<string, DailyEntry> {
     const cr = Number(usage['cache_read_input_tokens'] ?? 0);
     const cost = inp * p[0] + out * p[1] + cw * p[2] + cr * p[3];
 
+    // Authoritative: per-row `cwd` if present; otherwise the decoded dir name.
+    const rowCwd = typeof row['cwd'] === 'string' ? (row['cwd'] as string) : null;
+    const workingDir = rowCwd && rowCwd.startsWith('/') ? rowCwd : fallbackWorkingDir;
+
     const norm = normalizeModel(model);
-    const key = `${date}::${norm}`;
+    // Aggregate by date::model::workingDir so two projects on the same day
+    // with the same model produce two entries, not one merged total.
+    const key = `${date}::${norm}::${workingDir}`;
     const prev = daily.get(key);
     if (prev) {
       prev.costUSD += cost;
@@ -97,6 +120,7 @@ function parseJSONLFile(filePath: string): Map<string, DailyEntry> {
       daily.set(key, {
         date,
         model: norm,
+        workingDir,
         costUSD: cost,
         inputTokens: inp,
         outputTokens: out,
@@ -137,8 +161,9 @@ function collectEntries(): DailyEntry[] {
       continue;
     }
 
+    const fallbackWorkingDir = decodeProjectDirName(dir);
     for (const file of files) {
-      const entries = parseJSONLFile(path.join(dirPath, file));
+      const entries = parseJSONLFile(path.join(dirPath, file), fallbackWorkingDir);
       for (const [key, e] of entries) {
         const prev = combined.get(key);
         if (prev) {
