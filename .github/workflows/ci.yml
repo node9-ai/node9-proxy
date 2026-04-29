@@ -28,6 +28,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build workspace engine
+        # Proxy code imports @node9/policy-engine via npm workspaces, which
+        # resolves to packages/policy-engine/dist/. Without this step,
+        # `tsc --noEmit` can't find the engine's .d.ts files and every type
+        # imported from the package collapses to `any` — surfacing as
+        # "Cannot find module" + cascading TS7006 implicit-any errors.
+        run: npm --workspace @node9/policy-engine run build
+
       - name: Audit dependencies
         # Audit production deps only (--omit=dev). devDep CVEs (handlebars via semantic-release,
         # flatted via eslint) are in tools that never ship in the production bundle and are
@@ -78,6 +86,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Build workspace engine
+        run: npm --workspace @node9/policy-engine run build
 
       - name: Build
         run: npm run build
