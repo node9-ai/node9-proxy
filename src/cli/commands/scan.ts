@@ -237,9 +237,31 @@ function fmtTs(ts: string): string {
   }
 }
 
+// Strip ANSI escape sequences and non-printable control characters from
+// strings that originated in AI session history before rendering to the
+// user's terminal. A malicious AI tool input could embed `\x1b[2J` to
+// clear the user's screen, OSC sequences to set fake titles, or other
+// terminal-control payloads. These never carry security-relevant content
+// for our display, so unconditional removal is safe and avoids the class
+// entirely.
+//
+// Pattern matches:
+//   - ESC ([\x1b]) followed by typical CSI/OSC/SS3 control sequence terminators
+//   - Lone ESC bytes (defence)
+//   - C0 control characters except whitespace (TAB, LF, CR are kept; the
+//     subsequent whitespace collapse normalizes them)
+//   - DEL (0x7f)
+// eslint-disable-next-line no-control-regex
+const TERMINAL_ESCAPE_RE =
+  /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
+
+export function stripTerminalEscapes(s: string): string {
+  return s.replace(TERMINAL_ESCAPE_RE, '');
+}
+
 function preview(input: Record<string, unknown>, max: number): string {
   const cmd = input.command ?? input.query ?? input.file_path ?? JSON.stringify(input);
-  const s = String(cmd).replace(/\s+/g, ' ').trim();
+  const s = stripTerminalEscapes(String(cmd)).replace(/\s+/g, ' ').trim();
   return s.length > max ? s.slice(0, max - 1) + '…' : s;
 }
 
@@ -607,7 +629,9 @@ export function scanClaudeHistory(
       continue;
     }
 
-    const projLabel = decodeURIComponent(proj).replace(os.homedir(), '~').slice(0, 40);
+    const projLabel = stripTerminalEscapes(
+      decodeURIComponent(proj).replace(os.homedir(), '~')
+    ).slice(0, 40);
 
     let files: string[];
     try {
@@ -957,11 +981,11 @@ export function scanGeminiHistory(
       continue;
     }
 
-    let projLabel = slug;
+    let projLabel = stripTerminalEscapes(slug).slice(0, 40);
     try {
-      projLabel = fs
-        .readFileSync(path.join(slugPath, '.project_root'), 'utf-8')
-        .trim()
+      projLabel = stripTerminalEscapes(
+        fs.readFileSync(path.join(slugPath, '.project_root'), 'utf-8').trim()
+      )
         .replace(os.homedir(), '~')
         .slice(0, 40);
     } catch {}
@@ -1278,7 +1302,7 @@ export function scanCodexHistory(
         sessionId = String(payload['id'] ?? filePath);
         startTime = String(payload['timestamp'] ?? '');
         const cwd = String(payload['cwd'] ?? '');
-        projLabel = cwd.replace(os.homedir(), '~').slice(0, 40);
+        projLabel = stripTerminalEscapes(cwd.replace(os.homedir(), '~')).slice(0, 40);
         continue;
       }
 
