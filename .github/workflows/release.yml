@@ -29,6 +29,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build workspace engine
+        # The proxy imports @node9/policy-engine via npm workspaces, which
+        # resolves to packages/policy-engine/dist/. Without this step the
+        # subsequent `tsc --noEmit` typecheck can't find the engine's
+        # .d.ts files and every type imported from the package collapses
+        # to `any` — surfacing as cascading TS2307 / TS7006 errors.
+        # Mirrors the same fix in ci.yml.
+        run: npm --workspace @node9/policy-engine run build
+
       - name: Type check
         run: npm run typecheck
 

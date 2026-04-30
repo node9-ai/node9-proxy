@@ -305,6 +305,26 @@ export function computeStuckTools(loopFindings: LoopFinding[]): StuckTool[] {
 }
 
 /**
+ * Normalizes a DLP finding's toolName field into a user-facing entry-path
+ * label. The internal toolName captures where the secret was observed in
+ * the agent's session — different paths suggest different mitigations:
+ *
+ *   tool-output   → secret came back FROM a tool (audit which tools)
+ *   user-prompt   → user typed it (rotate the credential)
+ *   shell-config  → in ~/.zshrc / ~/.bashrc (move to a secret manager)
+ *   tool-input    → secret was passed INTO a tool (enable project-jail
+ *                   shield, review which files the AI read)
+ *
+ * Pure function — testable in isolation.
+ */
+export function entryPathLabel(toolName: string): string {
+  if (toolName === 'tool-result') return 'tool-output';
+  if (toolName === 'user-prompt') return 'user-prompt';
+  if (toolName === 'shell-config') return 'shell-config';
+  return 'tool-input';
+}
+
+/**
  * Counts how many distinct sessions each DLP pattern appears in. Used by
  * isRecurringPattern to flag patterns the user keeps leaking across
  * multiple sessions — those should be at the top of their attention.
@@ -1828,6 +1848,7 @@ export function registerScanCommand(program: Command): void {
             const sampleDisplay = stale
               ? chalk.dim(f.redactedSample)
               : chalk.gray(f.redactedSample);
+            const entryBadge = chalk.dim(`  [${entryPathLabel(f.toolName)}]`);
             const leadIcon = stale ? chalk.dim('🚨') : '🚨';
             console.log(
               `    ${leadIcon} ${ts}${proj}${agentBadge}` +
@@ -1835,6 +1856,7 @@ export function registerScanCommand(program: Command): void {
                 recurringBadge +
                 chalk.dim('  ') +
                 sampleDisplay +
+                entryBadge +
                 sessionSuffix
             );
           }

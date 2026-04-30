@@ -34,6 +34,8 @@ npx node9-ai scan
 
 Reads your existing Claude / Gemini / Codex session history, runs the full Node9 policy engine, and shows every operation that would have been blocked or flagged.
 
+> Runs entirely locally — no API calls, no telemetry on `scan`, nothing leaves your machine.
+
 ```
 🔍  Scanning your AI history  — what would node9 have caught?
 
@@ -64,6 +66,21 @@ The last line opens a live dashboard in your browser with collapsible drill-down
 <p align="center">
   <img src="https://github.com/user-attachments/assets/825f99d8-b487-4746-9cef-a02a9ca76c1f" width="90%" alt="Node9 browser History Audit dashboard" />
 </p>
+
+---
+
+## How is this different from gitleaks / Snyk / TruffleHog?
+
+Those scan **repositories** for credentials. Node9 scans **AI agent session history** — what your AI ran, what it read, what credentials passed through tool calls. Different surface area.
+
+Node9 catches things gitleaks can't:
+
+- Credentials the AI read but never committed
+- Agent edit loops that burn tokens on retries
+- Dangerous shell commands the AI ran without confirmation
+- Blast radius — which credential files an AI agent on this machine could reach right now
+
+Run gitleaks for committed code. Run Node9 for AI session history.
 
 ---
 
