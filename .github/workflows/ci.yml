@@ -28,12 +28,28 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build workspace engine
+        # Proxy code imports @node9/policy-engine via npm workspaces, which
+        # resolves to packages/policy-engine/dist/. Without this step,
+        # `tsc --noEmit` can't find the engine's .d.ts files and every type
+        # imported from the package collapses to `any` — surfacing as
+        # "Cannot find module" + cascading TS7006 implicit-any errors.
+        run: npm --workspace @node9/policy-engine run build
+
       - name: Audit dependencies
         # Audit production deps only (--omit=dev). devDep CVEs (handlebars via semantic-release,
         # flatted via eslint) are in tools that never ship in the production bundle and are
         # not exploitable at runtime. --audit-level=moderate: Node9 sits on the critical path
         # of every agent tool call, so moderate-severity prod vulns (e.g. regex DoS) matter.
         run: npm audit --omit=dev --audit-level=moderate
+
+      - name: Audit engine dependencies
+        # The engine ships as @node9/policy-engine — used by both the local proxy
+        # AND the SaaS firewall — so a CVE in mvdan-sh / picomatch / safe-regex2
+        # affects every consumer. Audit the engine workspace separately because
+        # `npm audit` at the root only walks the root package's deps. Same
+        # threshold (moderate) as the proxy audit above.
+        run: npm --workspace @node9/policy-engine audit --omit=dev --audit-level=moderate
 
       - name: Format check
         run: npm run format:check
@@ -78,6 +94,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Build workspace engine
+        run: npm --workspace @node9/policy-engine run build
 
       - name: Build
         run: npm run build

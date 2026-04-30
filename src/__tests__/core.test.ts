@@ -2167,6 +2167,99 @@ describe('getCompiledRegex', () => {
   });
 });
 
+// ── Builtin DLP pattern safety (engine module-load guard) ────────────────────
+// The engine asserts every shipped DLP regex passes safe-regex2 at import
+// time. These tests prove (a) the current shipped set is safe — i.e. importing
+// the engine never throws — and (b) if a future commit lands a ReDoS pattern,
+// the guard would catch it.
+
+describe('engine builtin DLP patterns — ReDoS safety', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+  const safeRegex = require('safe-regex2') as (s: string) => boolean;
+
+  it('every shipped DLP_PATTERNS entry passes safe-regex2', async () => {
+    const { DLP_PATTERNS } = await import('@node9/policy-engine');
+    for (const p of DLP_PATTERNS) {
+      expect(safeRegex(p.regex.source)).toBe(true);
+    }
+  });
+
+  it('every shipped SENSITIVE_PATH_REGEXES entry passes safe-regex2', async () => {
+    const { SENSITIVE_PATH_REGEXES } = await import('@node9/policy-engine');
+    for (const re of SENSITIVE_PATH_REGEXES) {
+      expect(safeRegex(re.source)).toBe(true);
+    }
+  });
+
+  it('safe-regex2 itself catches the canonical ReDoS shapes (guard is real)', () => {
+    // If a future PR adds one of these to DLP_PATTERNS, the module-load
+    // assertion in engine/dlp/index.ts will throw at import — these are the
+    // shapes the guard is protecting against.
+    expect(safeRegex('(a+)+')).toBe(false);
+    expect(safeRegex('(a*)*')).toBe(false);
+    expect(safeRegex('([a-z]+)*')).toBe(false);
+  });
+
+  it('every shipped builtin shield matches/notMatches regex passes safe-regex2', async () => {
+    const { BUILTIN_SHIELDS } = await import('@node9/policy-engine');
+    for (const shield of Object.values(BUILTIN_SHIELDS)) {
+      for (const rule of shield.smartRules) {
+        for (const cond of rule.conditions ?? []) {
+          if (cond.op !== 'matches' && cond.op !== 'notMatches') continue;
+          if (!cond.value) continue;
+          expect(safeRegex(cond.value)).toBe(true);
+        }
+      }
+    }
+  });
+});
+
+// ── Prototype-pollution defense in evaluateSmartConditions ────────────────────
+// Smart-rule field paths are user-authored (config) but evaluated against
+// attacker-controlled tool args. A path like "__proto__.x" must never traverse
+// the prototype chain — both to prevent reads of inherited values like
+// `toString` accidentally matching a rule, and to defend against any future
+// code path that might assign through a similar nested-key helper.
+
+describe('evaluateSmartConditions — prototype-pollution defense', () => {
+  const reviewRule = (field: string) => ({
+    tool: '*',
+    verdict: 'review' as const,
+    conditions: [{ field, op: 'exists' as const }],
+  });
+
+  it('does NOT match an "__proto__" path even when args has the inherited property', () => {
+    // Object.prototype.toString exists on every object — if the path traversal
+    // walked the prototype chain, this would (incorrectly) match.
+    expect(evaluateSmartConditions({}, reviewRule('__proto__.toString'))).toBe(false);
+  });
+
+  it('does NOT match a "constructor.name" path', () => {
+    expect(evaluateSmartConditions({}, reviewRule('constructor.name'))).toBe(false);
+  });
+
+  it('does NOT match a "prototype" segment', () => {
+    expect(evaluateSmartConditions({ x: { prototype: 1 } }, reviewRule('x.prototype'))).toBe(false);
+  });
+
+  it('does not pollute Object.prototype when args carries a malicious __proto__ key', () => {
+    // Construct args via a JSON parse so `__proto__` becomes a real own property
+    // rather than the magic setter — this is the real-world shape an attacker
+    // would deliver via `{"toolName":"...","args":{"__proto__":{"polluted":1}}}`.
+    const args = JSON.parse('{"__proto__":{"polluted":1}}') as Record<string, unknown>;
+    evaluateSmartConditions(args, reviewRule('__proto__.polluted'));
+    // Reading off a fresh empty object — if the prototype was polluted, this
+    // would now equal 1.
+    expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
+  });
+
+  it('still resolves a normal nested path (regression: defense did not over-block)', () => {
+    expect(
+      evaluateSmartConditions({ request: { command: 'ls' } }, reviewRule('request.command'))
+    ).toBe(true);
+  });
+});
+
 // ── getConfig — cwd fallback behaviour ───────────────────────────────────────
 
 describe('getConfig — nonexistent cwd falls back to global config', () => {

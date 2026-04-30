@@ -444,8 +444,11 @@ describe('filesystem shield: block-rm-rf-home regex', () => {
   const rule = DEFAULT_CONFIG.policy.smartRules.find((r) => r.name === 'block-rm-rf-home')!;
 
   // Helper: check if ALL conditions match the given command
+  // Explicit typing on `c` because Zod's inferred SmartCondition shape
+  // mixes with the re-exported package type — TypeScript can't narrow
+  // across the package boundary without help.
   function matches(command: string): boolean {
-    return rule.conditions.every((c) => {
+    return rule.conditions.every((c: { value?: string; flags?: string }) => {
       if (c.value === undefined) throw new Error(`Condition on rule "${rule.name}" has no value`);
       const re = new RegExp(c.value, c.flags);
       return re.test(command);

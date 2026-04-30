@@ -8,41 +8,12 @@ import os from 'os';
 import { sanitizeConfig } from '../config-schema';
 import { readActiveShields, readShieldOverrides, getShield } from '../shields';
 
-export interface SmartCondition {
-  field: string;
-  op:
-    | 'matches'
-    | 'notMatches'
-    | 'contains'
-    | 'notContains'
-    | 'exists'
-    | 'notExists'
-    | 'matchesGlob'
-    | 'notMatchesGlob';
-  value?: string;
-  flags?: string;
-}
-
-export interface SmartRule {
-  name?: string;
-  tool: string;
-  conditions: SmartCondition[];
-  conditionMode?: 'all' | 'any';
-  verdict: 'allow' | 'review' | 'block';
-  reason?: string;
-  /** State predicates that must ALL be true for a 'block' verdict to apply.
-   *  If any predicate is false (or the daemon is unreachable), the block is
-   *  downgraded to a review. Ignored for 'allow' and 'review' verdicts. */
-  dependsOnState?: string[];
-  /** Shell command to suggest as a recovery action when this rule hard-blocks.
-   *  Shown to the developer on /dev/tty and passed to the AI as a hint.
-   *  Example: "npm test" */
-  recoveryCommand?: string;
-  /** Plain-English explanation of what this rule does and why it matters.
-   *  Shown to the user in the review/block card instead of (or alongside) the raw command.
-   *  Example: "Force push rewrites shared history and can permanently destroy teammates' work." */
-  description?: string;
-}
+// SmartCondition + SmartRule are now defined in @node9/policy-engine.
+// Re-exported here so existing import paths (`from '../config'`) keep
+// working unchanged across the codebase. The local `import type` lets
+// the rest of this file reference SmartRule by bare name.
+export type { SmartCondition, SmartRule } from '@node9/policy-engine';
+import type { SmartRule } from '@node9/policy-engine';
 
 export interface EnvironmentConfig {
   requireApproval?: boolean;

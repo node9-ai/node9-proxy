@@ -18,6 +18,9 @@
   "engines": {
     "node": ">=18"
   },
+  "workspaces": [
+    "packages/*"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/node9-ai/node9-proxy.git"
@@ -48,7 +51,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsup && node scripts/copy-shield-assets.js",
+    "build": "npm --workspace @node9/policy-engine run build && tsup",
     "dev": "tsup --watch",
     "demo": "tsx examples/demo.ts",
     "typecheck": "tsc --noEmit",

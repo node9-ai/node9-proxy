@@ -41,6 +41,22 @@ jobs:
           NPM_CONFIG_PROVENANCE: 'true'
         run: npx semantic-release
 
+      - name: Publish @node9/policy-engine if not already on npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: 'true'
+        # The engine version is bumped manually in packages/policy-engine/package.json
+        # (semantic-release only bumps the root proxy). We publish the engine when its
+        # version isn't on the registry yet — same skip pattern as the wrapper below.
+        run: |
+          ENGINE_VERSION=$(node -p "require('./packages/policy-engine/package.json').version")
+          if npm view "@node9/policy-engine@$ENGINE_VERSION" version >/dev/null 2>&1; then
+            echo "@node9/policy-engine@$ENGINE_VERSION already on npm — skipping engine publish"
+            exit 0
+          fi
+          echo "Publishing @node9/policy-engine@$ENGINE_VERSION"
+          npm --workspace @node9/policy-engine publish
+
       - name: Sync and publish wrapper (node9-ai)
         env:
           GITHUB_TOKEN: ${{ secrets.AUTO_PR_TOKEN }}

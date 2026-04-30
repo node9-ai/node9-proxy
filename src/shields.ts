@@ -1,82 +1,66 @@
-import type { SmartRule } from './core';
+// I/O wrapper around @node9/policy-engine's pure shield primitives.
+//
+// The 11 builtin shield definitions and the validation/type code live in
+// the engine. This file only handles host-side I/O:
+//   - reads user-installed shields from ~/.node9/shields/*.json
+//   - reads/writes the shields-state file (~/.node9/shields.json)
+//   - runs the install helper that copies a downloaded shield onto disk
+
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
+import {
+  BUILTIN_SHIELDS,
+  validateShieldDefinition,
+  validateOverrides,
+  type ShieldDefinition,
+  type ShieldVerdict,
+  type ShieldOverrides,
+} from '@node9/policy-engine';
 
-export interface ShieldDefinition {
-  name: string;
-  description: string;
-  aliases: string[];
-  smartRules: SmartRule[];
-  dangerousWords: string[];
-}
+export type { ShieldDefinition, ShieldVerdict, ShieldOverrides } from '@node9/policy-engine';
+export { isShieldVerdict } from '@node9/policy-engine';
 
 // ---------------------------------------------------------------------------
-// Shield loader — reads builtin JSON files + user-installed shields
+// Shield loader — engine builtins + user-installed shields
 // ---------------------------------------------------------------------------
 
-const BUILTIN_DIR = path.join(__dirname, 'shields', 'builtin');
 const USER_SHIELDS_DIR = path.join(os.homedir(), '.node9', 'shields');
 
-function validateShieldDefinition(raw: unknown, filePath: string): ShieldDefinition | null {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    process.stderr.write(`[node9] Shield file is not an object: ${filePath}\n`);
-    return null;
-  }
-  const r = raw as Record<string, unknown>;
-  if (typeof r.name !== 'string' || !r.name) {
-    process.stderr.write(`[node9] Shield file missing 'name': ${filePath}\n`);
-    return null;
-  }
-  if (typeof r.description !== 'string') {
-    process.stderr.write(`[node9] Shield file missing 'description': ${filePath}\n`);
-    return null;
-  }
-  if (!Array.isArray(r.aliases)) {
-    process.stderr.write(`[node9] Shield file missing 'aliases' array: ${filePath}\n`);
-    return null;
-  }
-  if (!Array.isArray(r.smartRules)) {
-    process.stderr.write(`[node9] Shield file missing 'smartRules' array: ${filePath}\n`);
-    return null;
-  }
-  if (!Array.isArray(r.dangerousWords)) {
-    process.stderr.write(`[node9] Shield file missing 'dangerousWords' array: ${filePath}\n`);
-    return null;
-  }
-  return r as unknown as ShieldDefinition;
-}
-
-function loadShieldsFromDir(dir: string, label: string): Record<string, ShieldDefinition> {
+function loadUserShields(): Record<string, ShieldDefinition> {
   const result: Record<string, ShieldDefinition> = {};
   let entries: string[];
   try {
-    entries = fs.readdirSync(dir).filter((f) => f.endsWith('.json'));
+    entries = fs.readdirSync(USER_SHIELDS_DIR).filter((f) => f.endsWith('.json'));
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-      process.stderr.write(`[node9] Could not read ${label} shields dir ${dir}: ${String(err)}\n`);
+      process.stderr.write(
+        `[node9] Could not read user shields dir ${USER_SHIELDS_DIR}: ${String(err)}\n`
+      );
     }
     return result;
   }
   for (const file of entries) {
-    const filePath = path.join(dir, file);
+    const filePath = path.join(USER_SHIELDS_DIR, file);
     try {
       const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as unknown;
-      const shield = validateShieldDefinition(raw, filePath);
-      if (shield) result[shield.name] = shield;
+      const v = validateShieldDefinition(raw);
+      if ('error' in v) {
+        process.stderr.write(`[node9] ${v.error}: ${filePath}\n`);
+        continue;
+      }
+      result[v.ok.name] = v.ok;
     } catch (err) {
-      process.stderr.write(`[node9] Failed to load ${label} shield ${file}: ${String(err)}\n`);
+      process.stderr.write(`[node9] Failed to load user shield ${file}: ${String(err)}\n`);
     }
   }
   return result;
 }
 
 function buildSHIELDS(): Record<string, ShieldDefinition> {
-  const builtins = loadShieldsFromDir(BUILTIN_DIR, 'builtin');
-  const userShields = loadShieldsFromDir(USER_SHIELDS_DIR, 'user');
   // User shields override builtins on name collision (power-user customisation)
-  return { ...builtins, ...userShields };
+  return { ...BUILTIN_SHIELDS, ...loadUserShields() };
 }
 
 export const SHIELDS: Record<string, ShieldDefinition> = buildSHIELDS();
@@ -110,42 +94,6 @@ export function listShields(): ShieldDefinition[] {
 
 const SHIELDS_STATE_FILE = path.join(os.homedir(), '.node9', 'shields.json');
 
-export type ShieldVerdict = 'allow' | 'review' | 'block';
-// overrides: { shieldName: { fullRuleName: verdict } }
-export type ShieldOverrides = Record<string, Record<string, ShieldVerdict>>;
-
-export function isShieldVerdict(v: unknown): v is ShieldVerdict {
-  return v === 'allow' || v === 'review' || v === 'block';
-}
-
-/**
- * Validates and filters an overrides object read from disk.
- * Entries with invalid (non-ShieldVerdict) values are silently dropped
- * to prevent tampered disk content from propagating arbitrary strings
- * into the policy engine.
- */
-function validateOverrides(raw: unknown): ShieldOverrides {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
-  const result: ShieldOverrides = {};
-  for (const [shieldName, rules] of Object.entries(raw as Record<string, unknown>)) {
-    if (!rules || typeof rules !== 'object' || Array.isArray(rules)) continue;
-    const validRules: Record<string, ShieldVerdict> = {};
-    for (const [ruleName, verdict] of Object.entries(rules as Record<string, unknown>)) {
-      if (isShieldVerdict(verdict)) {
-        validRules[ruleName] = verdict;
-      } else {
-        process.stderr.write(
-          `[node9] Warning: shields.json contains invalid verdict "${String(verdict)}" ` +
-            `for ${shieldName}/${ruleName} — entry ignored. ` +
-            `File may be corrupted or tampered with.\n`
-        );
-      }
-    }
-    if (Object.keys(validRules).length > 0) result[shieldName] = validRules;
-  }
-  return result;
-}
-
 interface ShieldsFile {
   active: string[];
   overrides?: ShieldOverrides;
@@ -161,7 +109,11 @@ function readShieldsFile(): ShieldsFile {
           (e): e is string => typeof e === 'string' && e.length > 0 && e in SHIELDS
         )
       : [];
-    return { active, overrides: validateOverrides(parsed.overrides) };
+    const { overrides, warnings } = validateOverrides(parsed.overrides);
+    for (const w of warnings) {
+      process.stderr.write(`[node9] Warning: ${w}\n`);
+    }
+    return { active, overrides };
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
       process.stderr.write(`[node9] Warning: could not read shields state: ${String(err)}\n`);
@@ -267,10 +219,13 @@ export function installShield(name: string, shieldJson: unknown): void {
       `Invalid shield name '${name}': only alphanumeric characters, hyphens, and underscores are allowed`
     );
   }
-  const shield = validateShieldDefinition(shieldJson, `<downloaded:${name}>`);
-  if (!shield) throw new Error(`Downloaded shield '${name}' failed validation`);
-  if (shield.name !== name) {
-    throw new Error(`Shield name mismatch: file declares '${shield.name}' but expected '${name}'`);
+  const v = validateShieldDefinition(shieldJson);
+  if ('error' in v) {
+    process.stderr.write(`[node9] ${v.error}: <downloaded:${name}>\n`);
+    throw new Error(`Downloaded shield '${name}' failed validation`);
+  }
+  if (v.ok.name !== name) {
+    throw new Error(`Shield name mismatch: file declares '${v.ok.name}' but expected '${name}'`);
   }
   fs.mkdirSync(USER_SHIELDS_DIR, { recursive: true });
   const filePath = path.join(USER_SHIELDS_DIR, `${name}.json`);

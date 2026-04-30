@@ -548,7 +548,7 @@ function handlePolicyGet(): string {
   if (rules.length === 0) return 'No smart rules active.';
   const lines = rules.map((r, i) => {
     const conditions = r.conditions
-      .map((c) => `${c.field} ${c.op} "${c.value}"`)
+      .map((c: { field: string; op: string; value?: string }) => `${c.field} ${c.op} "${c.value}"`)
       .join(` ${r.conditionMode ?? 'all'} `);
     return `[${i + 1}] ${r.name ?? '(unnamed)'}  tool:${r.tool}  verdict:${r.verdict}\n    conditions: ${conditions}\n    reason: ${r.reason ?? '—'}`;
   });

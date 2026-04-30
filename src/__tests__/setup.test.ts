@@ -108,6 +108,33 @@ describe('setupClaude', () => {
     expect(writtenTo(hooksPath)).toBeNull();
   });
 
+  it('rewrites hooks whose absolute paths no longer exist on disk', async () => {
+    // Old hook command from a previous install (e.g. node9-ai wrapper) that
+    // got `npm uninstall`-ed — the stored command points at a deleted file.
+    const stalePre =
+      '/usr/bin/node /lib/node_modules/node9-ai/node_modules/@node9/proxy/dist/cli.js check';
+    const stalePost =
+      '/usr/bin/node /lib/node_modules/node9-ai/node_modules/@node9/proxy/dist/cli.js log';
+    withExistingFiles({
+      [hooksPath]: {
+        hooks: {
+          PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: stalePre }] }],
+          PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: stalePost }] }],
+        },
+        statusLine: { type: 'command', command: 'node9 hud' },
+      },
+      [mcpPath]: { mcpServers: { node9: NODE9_MCP_ENTRY } },
+    });
+
+    await setupClaude();
+
+    // setupClaude rewrites the stored commands to the current binary path —
+    // in NODE9_TESTING mode that resolves to "node9 check" / "node9 log".
+    const written = writtenTo(hooksPath);
+    expect(written.hooks.PreToolUse[0].hooks[0].command).toBe('node9 check');
+    expect(written.hooks.PostToolUse[0].hooks[0].command).toBe('node9 log');
+  });
+
   it('prompts before wrapping existing MCP servers', async () => {
     withExistingFile(mcpPath, {
       mcpServers: {
