@@ -237,9 +237,31 @@ function fmtTs(ts: string): string {
   }
 }
 
+// Strip ANSI escape sequences and non-printable control characters from
+// strings that originated in AI session history before rendering to the
+// user's terminal. A malicious AI tool input could embed `\x1b[2J` to
+// clear the user's screen, OSC sequences to set fake titles, or other
+// terminal-control payloads. These never carry security-relevant content
+// for our display, so unconditional removal is safe and avoids the class
+// entirely.
+//
+// Pattern matches:
+//   - ESC ([\x1b]) followed by typical CSI/OSC/SS3 control sequence terminators
+//   - Lone ESC bytes (defence)
+//   - C0 control characters except whitespace (TAB, LF, CR are kept; the
+//     subsequent whitespace collapse normalizes them)
+//   - DEL (0x7f)
+// eslint-disable-next-line no-control-regex
+const TERMINAL_ESCAPE_RE =
+  /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
+
+export function stripTerminalEscapes(s: string): string {
+  return s.replace(TERMINAL_ESCAPE_RE, '');
+}
+
 function preview(input: Record<string, unknown>, max: number): string {
   const cmd = input.command ?? input.query ?? input.file_path ?? JSON.stringify(input);
-  const s = String(cmd).replace(/\s+/g, ' ').trim();
+  const s = stripTerminalEscapes(String(cmd)).replace(/\s+/g, ' ').trim();
   return s.length > max ? s.slice(0, max - 1) + '…' : s;
 }
 
@@ -258,6 +280,139 @@ const LOOP_TOOLS = new Set([
   'multiedit',
 ]);
 const LOOP_THRESHOLD = 3;
+const STUCK_TOOLS_MIN_WASTE = 5;
+const STUCK_TOOLS_LIMIT = 3;
+
+// ── DLP confidence decay tunables ────────────────────────────────────────
+// A pattern is "recurring" when it appears in this many distinct sessions
+// or more. Three is the smallest signal that's not a one-off.
+const RECURRING_SESSION_THRESHOLD = 3;
+// Findings older than this are visually dimmed (still shown, just lower
+// emphasis) so users prioritize fresh secrets to rotate first.
+const STALE_AGE_DAYS = 30;
+
+export interface StuckTool {
+  toolName: string;
+  /** Wasted calls = sum of (count - 1) across all loop findings for this tool. */
+  waste: number;
+  /** Share of total wasted calls across all tools, rounded to nearest %. */
+  pct: number;
+}
+
+/**
+ * Aggregates loop findings by toolName to surface which tool is burning
+ * the most tokens on retries. Returns the top STUCK_TOOLS_LIMIT entries
+ * by waste, sorted descending. Returns [] when total waste is below
+ * STUCK_TOOLS_MIN_WASTE (avoids noise on light users with 1-2 small loops).
+ *
+ * Pure function — testable in isolation.
+ */
+export function computeStuckTools(loopFindings: LoopFinding[]): StuckTool[] {
+  const byTool = new Map<string, number>();
+  for (const f of loopFindings) {
+    const waste = Math.max(0, f.count - 1);
+    if (waste === 0) continue;
+    byTool.set(f.toolName, (byTool.get(f.toolName) ?? 0) + waste);
+  }
+  const totalWaste = [...byTool.values()].reduce((a, b) => a + b, 0);
+  if (totalWaste < STUCK_TOOLS_MIN_WASTE) return [];
+  return [...byTool.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, STUCK_TOOLS_LIMIT)
+    .map(([toolName, waste]) => ({
+      toolName,
+      waste,
+      pct: Math.round((waste / totalWaste) * 100),
+    }));
+}
+
+/**
+ * Normalizes a DLP finding's toolName field into a user-facing entry-path
+ * label. The internal toolName captures where the secret was observed in
+ * the agent's session — different paths suggest different mitigations:
+ *
+ *   tool-output   → secret came back FROM a tool (audit which tools)
+ *   user-prompt   → user typed it (rotate the credential)
+ *   shell-config  → in ~/.zshrc / ~/.bashrc (move to a secret manager)
+ *   tool-input    → secret was passed INTO a tool (enable project-jail
+ *                   shield, review which files the AI read)
+ *
+ * Pure function — testable in isolation.
+ */
+export function entryPathLabel(toolName: string): string {
+  if (toolName === 'tool-result') return 'tool-output';
+  if (toolName === 'user-prompt') return 'user-prompt';
+  if (toolName === 'shell-config') return 'shell-config';
+  return 'tool-input';
+}
+
+/**
+ * Counts how many distinct sessions each DLP pattern appears in. Used by
+ * isRecurringPattern to flag patterns the user keeps leaking across
+ * multiple sessions — those should be at the top of their attention.
+ *
+ * Pure function — testable in isolation.
+ */
+export function buildRecurringPatternSet(
+  findings: Array<{ patternName: string; sessionId: string }>
+): Set<string> {
+  const sessionsByPattern = new Map<string, Set<string>>();
+  for (const f of findings) {
+    if (!f.sessionId) continue;
+    if (!sessionsByPattern.has(f.patternName)) {
+      sessionsByPattern.set(f.patternName, new Set());
+    }
+    sessionsByPattern.get(f.patternName)!.add(f.sessionId);
+  }
+  const recurring = new Set<string>();
+  for (const [pattern, sessions] of sessionsByPattern) {
+    if (sessions.size >= RECURRING_SESSION_THRESHOLD) recurring.add(pattern);
+  }
+  return recurring;
+}
+
+/**
+ * Returns true when the finding's timestamp is older than STALE_AGE_DAYS.
+ * Defensive about parse failures: unparseable timestamps are treated as
+ * non-stale so we never accidentally hide a real fresh leak.
+ *
+ * `now` is injected for testability.
+ */
+export function isStaleFinding(timestamp: string, now: number = Date.now()): boolean {
+  if (!timestamp) return false;
+  const t = Date.parse(timestamp);
+  if (Number.isNaN(t)) return false;
+  const ageDays = (now - t) / 86_400_000;
+  return ageDays > STALE_AGE_DAYS;
+}
+
+/**
+ * Sorts DLP findings so the most actionable ones surface first:
+ *   1. Recurring patterns before one-offs
+ *   2. Then non-stale before stale
+ *   3. Then most recent first
+ *
+ * Stable: equal-priority findings preserve original order.
+ */
+export function sortDlpFindingsByPriority<
+  T extends { patternName: string; timestamp: string; sessionId: string },
+>(findings: T[], now: number = Date.now()): T[] {
+  const recurring = buildRecurringPatternSet(findings);
+  const indexed = findings.map((f, i) => ({ f, i }));
+  indexed.sort((a, b) => {
+    const aR = recurring.has(a.f.patternName);
+    const bR = recurring.has(b.f.patternName);
+    if (aR !== bR) return aR ? -1 : 1;
+    const aS = isStaleFinding(a.f.timestamp, now);
+    const bS = isStaleFinding(b.f.timestamp, now);
+    if (aS !== bS) return aS ? 1 : -1;
+    const aT = Date.parse(a.f.timestamp || '') || 0;
+    const bT = Date.parse(b.f.timestamp || '') || 0;
+    if (aT !== bT) return bT - aT;
+    return a.i - b.i; // stable tie-breaker
+  });
+  return indexed.map(({ f }) => f);
+}
 
 function detectLoops(
   calls: Array<{ toolName: string; input: Record<string, unknown>; timestamp: string }>,
@@ -474,7 +629,9 @@ export function scanClaudeHistory(
       continue;
     }
 
-    const projLabel = decodeURIComponent(proj).replace(os.homedir(), '~').slice(0, 40);
+    const projLabel = stripTerminalEscapes(
+      decodeURIComponent(proj).replace(os.homedir(), '~')
+    ).slice(0, 40);
 
     let files: string[];
     try {
@@ -824,11 +981,11 @@ export function scanGeminiHistory(
       continue;
     }
 
-    let projLabel = slug;
+    let projLabel = stripTerminalEscapes(slug).slice(0, 40);
     try {
-      projLabel = fs
-        .readFileSync(path.join(slugPath, '.project_root'), 'utf-8')
-        .trim()
+      projLabel = stripTerminalEscapes(
+        fs.readFileSync(path.join(slugPath, '.project_root'), 'utf-8').trim()
+      )
         .replace(os.homedir(), '~')
         .slice(0, 40);
     } catch {}
@@ -1145,7 +1302,7 @@ export function scanCodexHistory(
         sessionId = String(payload['id'] ?? filePath);
         startTime = String(payload['timestamp'] ?? '');
         const cwd = String(payload['cwd'] ?? '');
-        projLabel = cwd.replace(os.homedir(), '~').slice(0, 40);
+        projLabel = stripTerminalEscapes(cwd.replace(os.homedir(), '~')).slice(0, 40);
         continue;
       }
 
@@ -1690,8 +1847,13 @@ export function registerScanCommand(program: Command): void {
                 `${num(scan.dlpFindings.length)} secret${scan.dlpFindings.length !== 1 ? 's' : ''} found in plain text`
               )
           );
-          const shownDlp = drillDown ? scan.dlpFindings : scan.dlpFindings.slice(0, topN);
+          // Confidence decay: surface recurring patterns + recent findings
+          // first, dim stale ones. Same data, just re-prioritized.
+          const sortedDlp = sortDlpFindingsByPriority(scan.dlpFindings);
+          const recurringPatterns = buildRecurringPatternSet(scan.dlpFindings);
+          const shownDlp = drillDown ? sortedDlp : sortedDlp.slice(0, topN);
           for (const f of shownDlp) {
+            const stale = isStaleFinding(f.timestamp);
             const ts = f.timestamp ? chalk.dim(fmtTs(f.timestamp) + '  ') : '';
             const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
             const agentBadge =
@@ -1703,11 +1865,22 @@ export function registerScanCommand(program: Command): void {
                     ? chalk.yellow('[Shell]   ')
                     : chalk.cyan('[Claude]  ');
             const sessionSuffix = f.sessionId ? chalk.dim(`  → ${f.sessionId.slice(0, 8)}`) : '';
+            const recurringBadge = recurringPatterns.has(f.patternName)
+              ? chalk.red.bold(' ⚠️ recurring ')
+              : '';
+            const patternDisplay = stale ? chalk.dim(f.patternName) : chalk.yellow(f.patternName);
+            const sampleDisplay = stale
+              ? chalk.dim(f.redactedSample)
+              : chalk.gray(f.redactedSample);
+            const entryBadge = chalk.dim(`  [${entryPathLabel(f.toolName)}]`);
+            const leadIcon = stale ? chalk.dim('🚨') : '🚨';
             console.log(
-              `    🚨 ${ts}${proj}${agentBadge}` +
-                chalk.yellow(f.patternName) +
+              `    ${leadIcon} ${ts}${proj}${agentBadge}` +
+                patternDisplay +
+                recurringBadge +
                 chalk.dim('  ') +
-                chalk.gray(f.redactedSample) +
+                sampleDisplay +
+                entryBadge +
                 sessionSuffix
             );
           }
@@ -1785,6 +1958,26 @@ export function registerScanCommand(program: Command): void {
               )
             );
           }
+
+          // ── Most stuck tools (top 3 by wasted-call share) ──────────────
+          // Aggregate wasted calls (count - 1 per finding) by toolName, so
+          // a heavy user can see at a glance which tool is burning their
+          // tokens. Hidden when total waste is trivial (<5) to avoid noise.
+          const stuckTools = computeStuckTools(scan.loopFindings);
+          if (stuckTools.length > 0) {
+            console.log('');
+            console.log('  ' + chalk.dim('Most stuck tools:'));
+            for (const t of stuckTools) {
+              console.log(
+                chalk.dim('    ') +
+                  chalk.yellow(t.toolName.padEnd(8)) +
+                  chalk.dim('  ') +
+                  chalk.dim(`×${t.waste} repeats`.padEnd(14)) +
+                  chalk.dim(`  (${t.pct}%)`)
+              );
+            }
+          }
+
           console.log('');
         }
 
