@@ -69,7 +69,11 @@ export function registerInitCommand(program: Command): void {
     .command('init')
     .description('Set up Node9: create config and wire all detected AI agents')
     .option('--force', 'Overwrite existing config')
-    .option('-m, --mode <mode>', 'Set initial security mode (standard, strict, audit)', 'standard')
+    .option(
+      '-m, --mode <mode>',
+      'Initial security mode: standard | strict | audit | observe (logs would-block, never blocks)',
+      'standard'
+    )
     .option('--skip-setup', 'Only create config — do not wire AI agents')
     .option(
       '--recommended',
@@ -86,7 +90,7 @@ export function registerInitCommand(program: Command): void {
 
         // ── Step 1: Shields prompt → determines mode ───────────────────────────
         let chosenMode = options.mode.toLowerCase();
-        if (!['standard', 'strict', 'audit'].includes(chosenMode)) {
+        if (!['standard', 'strict', 'audit', 'observe'].includes(chosenMode)) {
           chosenMode = DEFAULT_CONFIG.settings.mode;
         }
 

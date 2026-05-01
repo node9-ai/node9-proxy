@@ -293,6 +293,8 @@ export function startDaemon(): void {
             tool: toolName,
             args: redactArgs(args),
             status: 'pending',
+            agent: entry.agent,
+            mcpServer: entry.mcpServer,
           });
         }
 
@@ -374,6 +376,8 @@ export function startDaemon(): void {
                   ? 'dlp'
                   : 'block',
               label: result.blockedByLabel,
+              agent: e.agent,
+              mcpServer: e.mcpServer,
             });
 
             clearTimeout(e.timer);

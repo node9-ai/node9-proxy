@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { tokenize } from '../mcp-gateway/index';
+import { tokenize, normalizeClientName } from '../mcp-gateway/index';
 
 describe('tokenize', () => {
   it('splits on whitespace', () => {
@@ -50,5 +50,39 @@ describe('tokenize', () => {
 
   it('drops empty-string token from adjacent quotes (no real command needs empty tokens)', () => {
     expect(tokenize('node "" arg')).toEqual(['node', 'arg']);
+  });
+});
+
+describe('normalizeClientName', () => {
+  it('maps known clients to canonical labels', () => {
+    expect(normalizeClientName('claude-ai')).toBe('Claude');
+    expect(normalizeClientName('Claude Code')).toBe('Claude');
+    expect(normalizeClientName('cursor')).toBe('Cursor');
+    expect(normalizeClientName('Cursor 0.42')).toBe('Cursor');
+    expect(normalizeClientName('codex-cli')).toBe('Codex');
+    expect(normalizeClientName('gemini-cli')).toBe('Gemini');
+    expect(normalizeClientName('cline')).toBe('Cline');
+    expect(normalizeClientName('continue')).toBe('Continue');
+  });
+
+  it('returns undefined for missing or non-string input', () => {
+    expect(normalizeClientName(undefined)).toBeUndefined();
+    expect(normalizeClientName(null)).toBeUndefined();
+    expect(normalizeClientName('')).toBeUndefined();
+    expect(normalizeClientName(42)).toBeUndefined();
+    expect(normalizeClientName({ name: 'claude' })).toBeUndefined();
+  });
+
+  it('preserves unknown clients but sanitizes and caps length', () => {
+    expect(normalizeClientName('weird-client-1.0')).toBe('weird-client-1.0');
+    expect(normalizeClientName('a'.repeat(80))).toBe('a'.repeat(40));
+  });
+
+  it('strips control characters from unknown client names', () => {
+    expect(normalizeClientName('weird\x00\x07client')).toBe('weirdclient');
+  });
+
+  it('returns undefined when sanitizing leaves nothing', () => {
+    expect(normalizeClientName('\x00\x01\x02')).toBeUndefined();
   });
 });
