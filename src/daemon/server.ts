@@ -47,7 +47,6 @@ import {
   readPersistentDecisions,
   writePersistentDecision,
   readBody,
-  openBrowser,
   broadcast,
   abandonPending,
   startActivitySocket,
@@ -99,10 +98,6 @@ export function startDaemon(): void {
   const IDLE_TIMEOUT_MS = 12 * 60 * 60 * 1000; // 12 hours
   const watchMode = process.env.NODE9_WATCH_MODE === '1';
   let idleTimer: NodeJS.Timeout | undefined;
-  // Track if we've already opened the browser this session so we don't
-  // open duplicate tabs when node9 tail is also running (tail is an SSE
-  // client, so sseClients.size > 0 even when no browser is open).
-  let browserOpened = false;
   function resetIdleTimer() {
     if (watchMode) return; // Watch mode — never idle-timeout
     if (idleTimer) clearTimeout(idleTimer);
@@ -213,17 +208,6 @@ export function startDaemon(): void {
       });
     }
 
-    // Tail notifies the daemon that it already opened the browser so the daemon
-    // won't open a duplicate tab on the first /check request.
-    // Uses the internal token (from daemon.pid) so only node9 CLI tools can call this —
-    // not arbitrary local processes that don't have access to the PID file.
-    if (req.method === 'POST' && pathname === '/browser-opened') {
-      if (req.headers['x-node9-internal'] !== internalToken) return res.writeHead(403).end();
-      browserOpened = true;
-      res.writeHead(200).end();
-      return;
-    }
-
     if (req.method === 'POST' && pathname === '/check') {
       try {
         resetIdleTimer(); // Agent is active, reset the shutdown clock
@@ -321,14 +305,10 @@ export function startDaemon(): void {
             // Terminal uses this to show the 💡 insight line on the Nth consecutive approval.
             allowCount: (insightCounts.get(toolName) ?? 0) + 1,
           });
-          // Only the `node9 check` path (autoStartDaemonAndWait) pre-opens the
-          // browser before registering the request — it signals this via
-          // NODE9_BROWSER_OPENED=1 so we don't open a duplicate tab.
-          const browserAlreadyOpened = process.env.NODE9_BROWSER_OPENED === '1';
-          if (browserEnabled && !browserOpened && !browserAlreadyOpened) {
-            browserOpened = true;
-            openBrowser(`http://127.0.0.1:${DAEMON_PORT}/`);
-          }
+          // Browser auto-open removed: approvals route through terminal popup
+          // and native popup; the local browser UI is opt-in via
+          // `node9 daemon start --openui`. Users who want the browser
+          // dashboard can open localhost:7391 manually.
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ id, allowCount: (insightCounts.get(toolName) ?? 0) + 1 }));

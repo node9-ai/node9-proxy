@@ -36,7 +36,7 @@ $3,789 AI spend  ·  62 risky operations
 →  npx node9-ai scan         run this on your machine
 ```
 
-Run it on yours — `npx node9-ai scan` finishes in ~10 seconds and runs entirely local. Nothing uploads. The full breakdown with every tool call, file path, and timestamp is `node9 scan` (default mode); the browser dashboard auto-opens after.
+Run it on yours — `npx node9-ai scan` finishes in ~10 seconds and runs entirely local. Nothing uploads. The full breakdown with every tool call, file path, and timestamp is `node9 scan` (default mode). For a browser dashboard view, run `node9 daemon start --openui`.
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/825f99d8-b487-4746-9cef-a02a9ca76c1f" width="90%" alt="Node9 browser History Audit dashboard" />

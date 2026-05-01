@@ -24,7 +24,7 @@ import {
 import { scanArgs } from '../../dlp';
 import type { SmartRule } from '../../core';
 import { isDaemonRunning, getInternalToken, DAEMON_PORT, DAEMON_HOST } from '../../auth/daemon';
-import { openBrowserLocal, isTestingMode } from '../daemon-starter';
+import { isTestingMode } from '../daemon-starter';
 import {
   buildScanSummary,
   type FindingRef,
@@ -2378,7 +2378,9 @@ export function registerScanCommand(program: Command): void {
                     body: JSON.stringify({ status: 'complete', summary: pushSummary }),
                     signal: AbortSignal.timeout(3000),
                   });
-                  openBrowserLocal();
+                  // Note: no longer auto-opens the browser. The terminal scan
+                  // output is the canonical artifact; users who want the
+                  // browser dashboard can run `node9 daemon start --openui`.
                 } catch {
                   // fire-and-forget
                 }

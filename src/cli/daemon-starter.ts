@@ -19,7 +19,10 @@ export function openBrowserLocal() {
   } catch {}
 }
 
-export async function autoStartDaemonAndWait(openBrowser = true): Promise<boolean> {
+// Default openBrowser=false: auto-starting the daemon should not auto-open
+// the local browser UI. Callers that want the browser (e.g. `node9 daemon
+// start --openui`, `node9 daemon start --watch`) opt in explicitly.
+export async function autoStartDaemonAndWait(openBrowser = false): Promise<boolean> {
   if (isTestingMode()) return false;
   if (!path.isAbsolute(process.argv[1])) return false;
   let resolvedArgv1: string;

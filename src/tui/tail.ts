@@ -5,10 +5,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import readline from 'readline';
-import { spawn, execSync } from 'child_process';
+import { spawn } from 'child_process';
 import { DAEMON_PORT } from '../daemon';
-import { getInternalToken } from '../auth/daemon';
-import { getConfig } from '../core';
 
 const PID_FILE = path.join(os.homedir(), '.node9', 'daemon.pid');
 
@@ -888,28 +886,10 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
 
   const dashboardUrl = `http://127.0.0.1:${port}/`;
 
-  // Open the browser dashboard from the foreground process — more reliable than
-  // the daemon's detached spawn. Use execSync so failures throw and are caught.
-  // getConfig() reads the actual project config (approvers.browser), unlike
-  // GET /settings which only returns global settings and never includes approvers.
-  try {
-    const browserEnabled = getConfig().settings.approvers?.browser !== false;
-    if (browserEnabled) {
-      if (process.platform === 'darwin') execSync(`open "${dashboardUrl}"`, { stdio: 'ignore' });
-      else if (process.platform === 'win32')
-        execSync(`cmd /c start "" "${dashboardUrl}"`, { stdio: 'ignore' });
-      else execSync(`xdg-open "${dashboardUrl}"`, { stdio: 'ignore' });
-      // Notify the daemon so it won't open a duplicate tab on the first approval.
-      const intToken = getInternalToken();
-      fetch(`http://127.0.0.1:${port}/browser-opened`, {
-        method: 'POST',
-        headers: intToken ? { 'X-Node9-Internal': intToken } : {},
-      }).catch(() => {});
-    }
-  } catch {
-    // Browser open failed — URL is printed in the banner below so the user
-    // can open it manually.
-  }
+  // Browser auto-open removed — `node9 tail` is a terminal UI, opening the
+  // browser dashboard alongside it was confusing. The dashboard URL is
+  // printed in the banner below; users who want the browser run
+  // `node9 daemon start --openui` explicitly.
 
   // Warn if response-DLP findings exist in audit log
   const auditLog = path.join(os.homedir(), '.node9', 'audit.log');
