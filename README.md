@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/4aa6e45b-9aba-4953-9ce3-548226622588" width="720" alt="Node9 scan scorecard" />
+  <img src="https://github.com/user-attachments/assets/bc165779-4200-438d-967a-20d42bbfe69e" width="720" alt="Node9 scan scorecard" />
 </p>
 
 <h1 align="center">🛡️ Node9</h1>
@@ -18,20 +18,20 @@
 
 ## What `node9 scan` shows on a real machine
 
-Senior ML engineer · 30 days · $10K in Claude spend.
+This is my own machine — 30 days while building Node9. Yes, even the founder has 14 credential leaks.
 
 ```
-🛡  Node9 Scan  ·  135 sessions  ·  12,604 tool calls  ·  Mar 30 – Apr 29, 2026
+🛡  Node9 Scan  ·  21 sessions  ·  8,114 tool calls  ·  Apr 6 – May 1, 2026
 
-Security Score: 0/100  ·  Critical
-$10,354 AI spend  ·  101 risky operations
+Security Score: 25/100  ·  Critical
+$3,789 AI spend  ·  62 risky operations
 
-🔑  1    credential leak     (JWT in session)
-🛑  4    would have blocked  (read aws ×2, helm uninstall, delete repo)
-🔁  279  agent loops         (12% wasted  ·  ~$5.47)
-👁  96   flagged for review  (force-push ×42, git destructive ×29, rm ×24)
+🔑  14   credential leak     (Bearer Token ×4, GCP API Key ×4, JWT ×2)
+🛑  15   would have blocked  (force-push ×5, read-ssh ×4, read-aws ×4)
+🔁  193  agent loops         (18% wasted  ·  ~$6.51)
+👁  33   flagged for review  (git-destructive ×19, rm ×9, sudo ×2)
 
-🔭  Blast radius             ssh × aws × gcp × docker × netrc (7 exposures)
+🔭  Blast radius             ssh × gcp × npm × other (5 exposures)
 
 →  npx node9-ai scan         run this on your machine
 ```
