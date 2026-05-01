@@ -18,7 +18,7 @@
 
 ## What `node9 scan` shows on a real machine
 
-This is my own machine — 30 days while building Node9. Yes, even the founder has 14 credential leaks.
+This is my own machine — 30 days while building Node9.
 
 ```
 🛡  Node9 Scan  ·  21 sessions  ·  8,114 tool calls  ·  Apr 6 – May 1, 2026
@@ -48,6 +48,7 @@ Run it on yours — `npx node9-ai scan` finishes in ~10 seconds and runs entirel
 
 - 🛑 **Block** dangerous AI actions before they run — `rm -rf`, `git push --force`, `DROP TABLE`, credential reads, `curl | bash`
 - 🔍 **Scan** what your AI agent has already been doing — loops, leaked secrets, blocked operations across every session
+- 🔑 **Catch credential leaks** — AWS keys, GitHub tokens, JWTs, GCP API keys, PEM private keys flagged in tool arguments, file contents Claude reads back, and shell config files
 - 🔭 **Map your blast radius** — every SSH key, AWS credential, and `.env` file an AI agent on this machine could reach right now
 
 Works with **Claude Code · Cursor · Codex · Gemini CLI · any MCP server**.
