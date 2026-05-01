@@ -18,7 +18,7 @@
 
 ## What `node9 scan` shows on a real machine
 
-This is my own machine — 30 days while building Node9.
+This is my own machine — 30 days while building Node9. Score 25/100, 5 credential files an AI agent could reach right now.
 
 ```
 🛡  Node9 Scan  ·  21 sessions  ·  8,114 tool calls  ·  Apr 6 – May 1, 2026
