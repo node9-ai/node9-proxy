@@ -1799,6 +1799,256 @@ function renderCompactScorecard(input: CompactInput): void {
 }
 
 // ---------------------------------------------------------------------------
+// Narrative scorecard renderer (--narrative)
+// ---------------------------------------------------------------------------
+
+type Severity = 'critical' | 'high' | 'medium';
+
+/**
+ * Map a rule name to a severity tier.
+ *
+ * Critical: irreversible damage or credential exfiltration
+ *   - rm -rf home, eval-of-remote, credential reads, repo delete,
+ *     helm uninstall, drop-table, drop-database, flushall, flushdb
+ *
+ * High: significant damage, recoverable
+ *   - force push, destructive git ops, all other block rules
+ *
+ * Medium: workflow / cost risk, not security
+ *   - rm review, sudo review, eval-dynamic review, redis config-set
+ */
+function classifyRuleSeverity(name: string, verdict: 'block' | 'review' | 'allow'): Severity {
+  const n = name.toLowerCase();
+  // Always-critical patterns regardless of verdict shape
+  const criticalPatterns = [
+    'rm-rf',
+    'eval-remote',
+    'eval-curl',
+    'read-aws',
+    'read-ssh',
+    'read-gcp',
+    'read-cred',
+    'delete-repo',
+    'helm-uninstall',
+    'drop-table',
+    'drop-database',
+    'drop-collection',
+    'truncate',
+    'flushall',
+    'flushdb',
+    'pipe-shell',
+  ];
+  if (criticalPatterns.some((p) => n.includes(p))) return 'critical';
+
+  // High-tier patterns
+  const highPatterns = [
+    'force-push',
+    'force_push',
+    'git-destructive',
+    'reset-hard',
+    'rebase',
+    'delete-branch',
+    'delete-remote',
+  ];
+  if (highPatterns.some((p) => n.includes(p))) return 'high';
+
+  // Default by verdict shape
+  if (verdict === 'block') return 'high';
+  return 'medium';
+}
+
+/**
+ * Friendly description for a rule name in the narrative output.
+ *   "block-read-aws"          → "AWS credentials read"
+ *   "shield:k8s:block-helm-uninstall" → "helm uninstall"
+ *   "review-force-push"       → "force pushes"
+ */
+function narrativeRuleLabel(name: string): string {
+  const stripped = compactRuleLabel(name); // re-uses compact-mode prefix-strip
+  const map: Record<string, string> = {
+    'read-aws': 'AWS credentials read',
+    'read-ssh': 'SSH private key read',
+    'read-gcp': 'GCP credentials read',
+    'read-cred': 'credential file read',
+    'delete-repo': 'GitHub repository deletion',
+    'helm-uninstall': 'helm uninstall',
+    'rm-rf-home': 'rm -rf on home directory',
+    'eval-remote': 'eval of remote download',
+    'pipe-shell': 'curl | bash',
+    'drop-table': 'DROP TABLE',
+    'drop-database': 'DROP DATABASE',
+    truncate: 'TRUNCATE',
+    flushall: 'Redis FLUSHALL',
+    flushdb: 'Redis FLUSHDB',
+    'force-push': 'force pushes',
+    'git-destructive': 'destructive git operations',
+    rm: 'rm calls',
+    sudo: 'sudo calls',
+    'eval-dynamic': 'dynamic eval',
+    'config-set': 'Redis CONFIG SET',
+  };
+  for (const [key, label] of Object.entries(map)) {
+    if (stripped.includes(key)) return label;
+  }
+  return stripped;
+}
+
+interface BucketEntry {
+  label: string;
+  count: number;
+}
+
+function renderNarrativeScorecard(input: CompactInput): void {
+  const { scan, summary, blast, blastExposures } = input;
+
+  const critical: BucketEntry[] = [];
+  const high: BucketEntry[] = [];
+  const medium: BucketEntry[] = [];
+
+  // ── DLP findings → critical ─────────────────────────────────────────
+  if (scan.dlpFindings.length > 0) {
+    const patterns = new Map<string, number>();
+    for (const f of scan.dlpFindings) {
+      patterns.set(f.patternName, (patterns.get(f.patternName) ?? 0) + 1);
+    }
+    const top = [...patterns.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([name, n]) => (n > 1 ? `${name} ×${n}` : name))
+      .join(', ');
+    critical.push({
+      label: `${scan.dlpFindings.length} credential leak${scan.dlpFindings.length !== 1 ? 's' : ''} (${top})`,
+      count: scan.dlpFindings.length,
+    });
+  }
+
+  // ── Rules grouped by name → bucket per severity ─────────────────────
+  for (const section of summary.sections) {
+    for (const rule of section.rules) {
+      const sev = classifyRuleSeverity(rule.name, rule.verdict);
+      const label = narrativeRuleLabel(rule.name);
+      const count = rule.findings.length;
+      const display = count > 1 ? `${label} ×${count}` : label;
+      const entry = { label: display, count };
+      if (sev === 'critical') critical.push(entry);
+      else if (sev === 'high') high.push(entry);
+      else medium.push(entry);
+    }
+  }
+
+  // ── Blast radius → high ─────────────────────────────────────────────
+  if (blastExposures > 0) {
+    high.push({
+      label: `${blastExposures} credential file${blastExposures !== 1 ? 's' : ''} reachable on disk`,
+      count: blastExposures,
+    });
+  }
+
+  // ── Loops → medium ──────────────────────────────────────────────────
+  if (scan.loopFindings.length > 0) {
+    const wastedCalls = scan.loopFindings.reduce((s, l) => s + Math.max(0, l.count - 1), 0);
+    const wastePct =
+      scan.totalToolCalls > 0 ? Math.round((wastedCalls / scan.totalToolCalls) * 100) : 0;
+    const cost = summary.loopWastedUSD > 0 ? `, ~${fmtCost(summary.loopWastedUSD)} wasted` : '';
+    medium.push({
+      label: `${scan.loopFindings.length} agent loops (${wastePct}% of calls${cost})`,
+      count: scan.loopFindings.length,
+    });
+  }
+
+  const sortByCount = (a: BucketEntry, b: BucketEntry) => b.count - a.count;
+  critical.sort(sortByCount);
+  high.sort(sortByCount);
+  medium.sort(sortByCount);
+
+  const criticalCount = critical.reduce((s, e) => s + e.count, 0);
+  const highCount = high.reduce((s, e) => s + e.count, 0);
+  const mediumCount = medium.reduce((s, e) => s + e.count, 0);
+
+  // ── Header ─────────────────────────────────────────────────────────
+  const dateRange =
+    scan.firstDate && scan.lastDate ? `${fmtTs(scan.firstDate)} – ${fmtTs(scan.lastDate)}` : '';
+  console.log(
+    chalk.bold('🛡  Node9 Scan') +
+      chalk.dim('  ·  ') +
+      chalk.white(num(scan.sessions)) +
+      chalk.dim(' sessions') +
+      (scan.totalCostUSD > 0
+        ? chalk.dim('  ·  ') + chalk.bold(fmtCost(scan.totalCostUSD)) + chalk.dim(' spend')
+        : '') +
+      (dateRange ? chalk.dim('  ·  ' + dateRange) : '')
+  );
+  console.log('');
+
+  // ── Score ──────────────────────────────────────────────────────────
+  const scoreColor = blast.score >= 80 ? chalk.green : blast.score >= 50 ? chalk.yellow : chalk.red;
+  const scoreSeverity = blast.score >= 80 ? 'Good' : blast.score >= 50 ? 'At Risk' : 'Critical';
+  console.log(
+    (blast.score < 50 ? chalk.red.bold('⚠  ') : '') +
+      chalk.bold('Security Score: ') +
+      scoreColor.bold(`${blast.score}/100`) +
+      chalk.dim('  ·  ') +
+      scoreColor(scoreSeverity)
+  );
+  console.log('');
+
+  // ── Buckets ────────────────────────────────────────────────────────
+  if (criticalCount > 0) {
+    console.log(
+      chalk.red.bold('  🔴  CRITICAL  ') +
+        chalk.red(`${criticalCount} finding${criticalCount !== 1 ? 's' : ''}`)
+    );
+    for (const entry of critical.slice(0, 5)) {
+      console.log(chalk.dim('     • ') + chalk.red(entry.label));
+    }
+    if (critical.length > 5) {
+      const remaining = critical.length - 5;
+      console.log(chalk.dim(`     • … and ${remaining} more`));
+    }
+    console.log('');
+  }
+
+  if (highCount > 0) {
+    console.log(
+      chalk.yellow.bold('  🟡  HIGH       ') +
+        chalk.yellow(`${highCount} finding${highCount !== 1 ? 's' : ''}`)
+    );
+    for (const entry of high.slice(0, 5)) {
+      console.log(chalk.dim('     • ') + chalk.yellow(entry.label));
+    }
+    if (high.length > 5) {
+      const remaining = high.length - 5;
+      console.log(chalk.dim(`     • … and ${remaining} more`));
+    }
+    console.log('');
+  }
+
+  if (mediumCount > 0) {
+    console.log(
+      chalk.bold('  🟢  MEDIUM     ') +
+        chalk.dim(`${mediumCount} finding${mediumCount !== 1 ? 's' : ''}`)
+    );
+    for (const entry of medium.slice(0, 5)) {
+      console.log(chalk.dim('     • ') + chalk.dim(entry.label));
+    }
+    if (medium.length > 5) {
+      const remaining = medium.length - 5;
+      console.log(chalk.dim(`     • … and ${remaining} more`));
+    }
+    console.log('');
+  }
+
+  // ── CTA ────────────────────────────────────────────────────────────
+  console.log(
+    chalk.dim('→  ') +
+      chalk.cyan('npx node9-ai scan') +
+      chalk.dim('       run this on your machine')
+  );
+  console.log(chalk.dim('→  github.com/node9-ai/node9-proxy'));
+  console.log('');
+}
+
+// ---------------------------------------------------------------------------
 // Registered command
 // ---------------------------------------------------------------------------
 
@@ -1811,6 +2061,7 @@ export function registerScanCommand(program: Command): void {
     .option('--top <n>', 'Max findings to show per rule (default: 5)', '5')
     .option('--drill-down', 'Show all findings with full commands and session IDs')
     .option('--compact', 'Compact one-screen scorecard — for screenshots and sharing')
+    .option('--narrative', 'Severity-grouped report — for video / dramatic sharing')
     .action(
       async (options: {
         all?: boolean;
@@ -1818,6 +2069,7 @@ export function registerScanCommand(program: Command): void {
         top: string;
         drillDown?: boolean;
         compact?: boolean;
+        narrative?: boolean;
       }) => {
         const drillDown = options.drillDown ?? false;
         const topN = drillDown ? Infinity : Math.max(1, parseInt(options.top, 10) || 5);
@@ -1838,10 +2090,11 @@ export function registerScanCommand(program: Command): void {
         // after their first run.
         const isWired = getAgentsStatus().some((a) => a.wired);
 
-        // Compact mode prints its own self-contained scorecard — suppress the
-        // verbose preamble (banner + "scanning..." line) so the output starts
-        // cleanly at the scorecard for screenshot use.
-        if (!options.compact) {
+        // Compact / narrative modes print their own self-contained scorecard —
+        // suppress the verbose preamble (banner + "scanning..." line) so the
+        // output starts cleanly at the scorecard for screenshot / video use.
+        const screenshotMode = options.compact || options.narrative;
+        if (!screenshotMode) {
           console.log('');
           if (!isWired) {
             console.log(
@@ -1860,7 +2113,7 @@ export function registerScanCommand(program: Command): void {
         }
 
         const useTTY = process.stdout.isTTY === true && process.env.NODE9_WRAPPER !== '1';
-        if (!useTTY && !options.compact) {
+        if (!useTTY && !screenshotMode) {
           process.stdout.write(
             '  ' + chalk.dim('Scanning your history — this may take a moment...\n')
           );
@@ -1935,9 +2188,9 @@ export function registerScanCommand(program: Command): void {
             ? chalk.dim('(') + breakdownParts.join(chalk.dim(' · ')) + chalk.dim(')')
             : '';
 
-        // Suppress in compact mode — the compact scorecard renders its own
+        // Suppress in compact / narrative modes — they render their own
         // header line.
-        if (!options.compact) {
+        if (!screenshotMode) {
           console.log(
             '  ' +
               chalk.white(num(scan.sessions)) +
@@ -1971,6 +2224,22 @@ export function registerScanCommand(program: Command): void {
         // top callouts per category, blast summary, and CTA.
         if (options.compact) {
           renderCompactScorecard({
+            scan,
+            summary,
+            blast,
+            blastExposures,
+            blockedCount,
+            reviewCount,
+          });
+          return;
+        }
+
+        // ── Narrative scorecard mode ───────────────────────────────────────
+        // Severity-grouped report for video / dramatic sharing. Same data,
+        // different organization: Critical / High / Medium tiers instead of
+        // by-category. More punch for screencast use.
+        if (options.narrative) {
+          renderNarrativeScorecard({
             scan,
             summary,
             blast,
