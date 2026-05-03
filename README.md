@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/node9-ai-node9-proxy-badge.png)](https://mseep.ai/app/node9-ai-node9-proxy)
+
 <p align="center">
   <img src="https://github.com/user-attachments/assets/bc165779-4200-438d-967a-20d42bbfe69e" width="720" alt="Node9 scan scorecard" />
 </p>
