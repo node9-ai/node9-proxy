@@ -24,10 +24,15 @@ import {
 import { scanArgs } from '../../dlp';
 import type { SmartRule } from '../../core';
 import { isDaemonRunning, getInternalToken, DAEMON_PORT, DAEMON_HOST } from '../../auth/daemon';
-import { openBrowserLocal, isTestingMode } from '../daemon-starter';
-import { buildScanSummary, type FindingRef, type RuleGroup } from '../../scan-summary';
+import { isTestingMode } from '../daemon-starter';
+import {
+  buildScanSummary,
+  type FindingRef,
+  type RuleGroup,
+  type ScanSummary,
+} from '../../scan-summary';
 import { getAgentsStatus } from '../../setup';
-import { runBlast, scoreLabel } from './blast';
+import { runBlast, type BlastFinding } from './blast';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1606,6 +1611,444 @@ function printRuleGroup(
 }
 
 // ---------------------------------------------------------------------------
+// Compact scorecard renderer (--compact)
+// ---------------------------------------------------------------------------
+
+/**
+ * Strip the verdict prefix and shield namespace from a rule name and
+ * format it for display in a compact callout.
+ *   "shield:k8s:block-helm-uninstall" → "helm uninstall"
+ *   "block-read-aws"                  → "read aws"
+ *   "review-force-push"               → "force-push"
+ */
+function compactRuleLabel(name: string): string {
+  // Strip shield: prefix (and any nested shield label)
+  let label = name.replace(/^shield:[^:]+:/, '');
+  // Strip verdict prefix
+  label = label.replace(/^(block|review|allow)-/, '');
+  // Light cleanup — collapse double-dashes if any
+  return label.replace(/-+/g, '-');
+}
+
+interface CompactInput {
+  scan: ScanResult;
+  summary: ScanSummary;
+  blast: {
+    reachable: BlastFinding[];
+    envFindings: Array<{ key: string; patternName: string }>;
+    score: number;
+  };
+  blastExposures: number;
+  blockedCount: number;
+  reviewCount: number;
+}
+
+function renderCompactScorecard(input: CompactInput): void {
+  const { scan, summary, blast, blastExposures, blockedCount, reviewCount } = input;
+  const totalRisky = scan.findings.length + scan.dlpFindings.length;
+
+  // ── Header ────────────────────────────────────────────────────────────
+  const dateRange =
+    scan.firstDate && scan.lastDate ? `${fmtTs(scan.firstDate)} – ${fmtTs(scan.lastDate)}` : '';
+  console.log(
+    chalk.bold('🛡  Node9 Scan') +
+      chalk.dim('  ·  ') +
+      chalk.white(num(scan.sessions)) +
+      chalk.dim(' sessions  ·  ') +
+      chalk.white(num(scan.totalToolCalls)) +
+      chalk.dim(' tool calls') +
+      (dateRange ? chalk.dim('  ·  ' + dateRange) : '')
+  );
+  console.log('');
+
+  // ── Score + risky count ──────────────────────────────────────────────
+  const scoreColor = blast.score >= 80 ? chalk.green : blast.score >= 50 ? chalk.yellow : chalk.red;
+  const scoreSeverity = blast.score >= 80 ? 'Good' : blast.score >= 50 ? 'At Risk' : 'Critical';
+  console.log(
+    chalk.bold('Security Score: ') +
+      scoreColor.bold(`${blast.score}/100`) +
+      chalk.dim('  ·  ') +
+      scoreColor(scoreSeverity)
+  );
+  if (scan.totalCostUSD > 0) {
+    console.log(
+      chalk.bold(fmtCost(scan.totalCostUSD)) +
+        chalk.dim(' AI spend  ·  ') +
+        chalk.bold(`${totalRisky}`) +
+        chalk.dim(` risky operation${totalRisky !== 1 ? 's' : ''}`)
+    );
+  }
+  console.log('');
+
+  // ── Per-category lines with callouts ─────────────────────────────────
+  if (scan.dlpFindings.length > 0) {
+    const patternCounts = new Map<string, number>();
+    for (const f of scan.dlpFindings) {
+      patternCounts.set(f.patternName, (patternCounts.get(f.patternName) ?? 0) + 1);
+    }
+    const topPatterns = [...patternCounts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([name, count]) => (count > 1 ? `${name} ×${count}` : name))
+      .join(', ');
+    console.log(
+      chalk.red('🔑  ') +
+        chalk.red.bold(String(scan.dlpFindings.length).padEnd(4)) +
+        chalk.dim('credential leak'.padEnd(20)) +
+        chalk.dim(`(${topPatterns})`)
+    );
+  }
+
+  if (blockedCount > 0) {
+    const blockedRules: Array<{ name: string; count: number }> = [];
+    for (const section of summary.sections) {
+      for (const rule of section.rules) {
+        if (rule.verdict === 'block') {
+          blockedRules.push({ name: rule.name, count: rule.findings.length });
+        }
+      }
+    }
+    const topBlocked = blockedRules
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 3)
+      .map((r) =>
+        r.count > 1 ? `${compactRuleLabel(r.name)} ×${r.count}` : compactRuleLabel(r.name)
+      )
+      .join(', ');
+    console.log(
+      chalk.red('🛑  ') +
+        chalk.red.bold(String(blockedCount).padEnd(4)) +
+        chalk.dim('would have blocked'.padEnd(20)) +
+        chalk.dim(`(${topBlocked})`)
+    );
+  }
+
+  if (scan.loopFindings.length > 0) {
+    const wastedCalls = scan.loopFindings.reduce((s, l) => s + Math.max(0, l.count - 1), 0);
+    const wastePct =
+      scan.totalToolCalls > 0 ? Math.round((wastedCalls / scan.totalToolCalls) * 100) : 0;
+    const wasteParts: string[] = [];
+    if (wastePct > 0) wasteParts.push(`${wastePct}% wasted`);
+    if (summary.loopWastedUSD > 0) wasteParts.push('~' + fmtCost(summary.loopWastedUSD));
+    const wasteSummary = wasteParts.length ? `(${wasteParts.join('  ·  ')})` : '';
+    console.log(
+      chalk.yellow('🔁  ') +
+        chalk.yellow.bold(String(scan.loopFindings.length).padEnd(4)) +
+        chalk.dim('agent loops'.padEnd(20)) +
+        chalk.dim(wasteSummary)
+    );
+  }
+
+  if (reviewCount > 0) {
+    const reviewRules: Array<{ name: string; count: number }> = [];
+    for (const section of summary.sections) {
+      for (const rule of section.rules) {
+        if (rule.verdict !== 'block') {
+          reviewRules.push({ name: rule.name, count: rule.findings.length });
+        }
+      }
+    }
+    const topReview = reviewRules
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 3)
+      .map((r) =>
+        r.count > 1 ? `${compactRuleLabel(r.name)} ×${r.count}` : compactRuleLabel(r.name)
+      )
+      .join(', ');
+    console.log(
+      chalk.yellow('👁  ') +
+        chalk.yellow.bold(String(reviewCount).padEnd(4)) +
+        chalk.dim('flagged for review'.padEnd(20)) +
+        chalk.dim(`(${topReview})`)
+    );
+  }
+  console.log('');
+
+  // ── Blast radius (one-line categorical summary) ──────────────────────
+  if (blastExposures > 0) {
+    const categories = new Set<string>();
+    for (const r of blast.reachable) {
+      const lower = r.label.toLowerCase();
+      if (lower.includes('ssh')) categories.add('ssh');
+      else if (lower.includes('aws')) categories.add('aws');
+      else if (lower.includes('gcloud') || lower.includes('gcp')) categories.add('gcp');
+      else if (lower.includes('docker')) categories.add('docker');
+      else if (lower.includes('netrc')) categories.add('netrc');
+      else if (lower.includes('kube')) categories.add('k8s');
+      else if (lower.includes('npmrc')) categories.add('npm');
+      else categories.add('other');
+    }
+    if (blast.envFindings.length > 0) categories.add('env');
+    const catList = [...categories].slice(0, 6).join(' × ');
+    console.log(
+      chalk.red('🔭  ') +
+        chalk.dim('Blast radius'.padEnd(24)) +
+        chalk.dim(`${catList} (${blastExposures} exposure${blastExposures !== 1 ? 's' : ''})`)
+    );
+    console.log('');
+  }
+
+  // ── CTA ──────────────────────────────────────────────────────────────
+  console.log(
+    chalk.dim('→  ') +
+      chalk.cyan('npx node9-ai scan') +
+      chalk.dim('       run this on your machine')
+  );
+  console.log(chalk.dim('→  github.com/node9-ai/node9-proxy'));
+  console.log('');
+}
+
+// ---------------------------------------------------------------------------
+// Narrative scorecard renderer (--narrative)
+// ---------------------------------------------------------------------------
+
+type Severity = 'critical' | 'high' | 'medium';
+
+/**
+ * Map a rule name to a severity tier.
+ *
+ * Critical: irreversible damage or credential exfiltration
+ *   - rm -rf home, eval-of-remote, credential reads, repo delete,
+ *     helm uninstall, drop-table, drop-database, flushall, flushdb
+ *
+ * High: significant damage, recoverable
+ *   - force push, destructive git ops, all other block rules
+ *
+ * Medium: workflow / cost risk, not security
+ *   - rm review, sudo review, eval-dynamic review, redis config-set
+ */
+function classifyRuleSeverity(name: string, verdict: 'block' | 'review' | 'allow'): Severity {
+  const n = name.toLowerCase();
+  // Always-critical patterns regardless of verdict shape
+  const criticalPatterns = [
+    'rm-rf',
+    'eval-remote',
+    'eval-curl',
+    'read-aws',
+    'read-ssh',
+    'read-gcp',
+    'read-cred',
+    'delete-repo',
+    'helm-uninstall',
+    'drop-table',
+    'drop-database',
+    'drop-collection',
+    'truncate',
+    'flushall',
+    'flushdb',
+    'pipe-shell',
+  ];
+  if (criticalPatterns.some((p) => n.includes(p))) return 'critical';
+
+  // High-tier patterns
+  const highPatterns = [
+    'force-push',
+    'force_push',
+    'git-destructive',
+    'reset-hard',
+    'rebase',
+    'delete-branch',
+    'delete-remote',
+  ];
+  if (highPatterns.some((p) => n.includes(p))) return 'high';
+
+  // Default by verdict shape
+  if (verdict === 'block') return 'high';
+  return 'medium';
+}
+
+/**
+ * Friendly description for a rule name in the narrative output.
+ *   "block-read-aws"          → "AWS credentials read"
+ *   "shield:k8s:block-helm-uninstall" → "helm uninstall"
+ *   "review-force-push"       → "force pushes"
+ */
+function narrativeRuleLabel(name: string): string {
+  const stripped = compactRuleLabel(name); // re-uses compact-mode prefix-strip
+  const map: Record<string, string> = {
+    'read-aws': 'AWS credentials read',
+    'read-ssh': 'SSH private key read',
+    'read-gcp': 'GCP credentials read',
+    'read-cred': 'credential file read',
+    'delete-repo': 'GitHub repository deletion',
+    'helm-uninstall': 'helm uninstall',
+    'rm-rf-home': 'rm -rf on home directory',
+    'eval-remote': 'eval of remote download',
+    'pipe-shell': 'curl | bash',
+    'drop-table': 'DROP TABLE',
+    'drop-database': 'DROP DATABASE',
+    truncate: 'TRUNCATE',
+    flushall: 'Redis FLUSHALL',
+    flushdb: 'Redis FLUSHDB',
+    'force-push': 'force pushes',
+    'git-destructive': 'destructive git operations',
+    rm: 'rm calls',
+    sudo: 'sudo calls',
+    'eval-dynamic': 'dynamic eval',
+    'config-set': 'Redis CONFIG SET',
+  };
+  for (const [key, label] of Object.entries(map)) {
+    if (stripped.includes(key)) return label;
+  }
+  return stripped;
+}
+
+interface BucketEntry {
+  label: string;
+  count: number;
+}
+
+function renderNarrativeScorecard(input: CompactInput): void {
+  const { scan, summary, blast, blastExposures } = input;
+
+  const critical: BucketEntry[] = [];
+  const high: BucketEntry[] = [];
+  const medium: BucketEntry[] = [];
+
+  // ── DLP findings → critical ─────────────────────────────────────────
+  if (scan.dlpFindings.length > 0) {
+    const patterns = new Map<string, number>();
+    for (const f of scan.dlpFindings) {
+      patterns.set(f.patternName, (patterns.get(f.patternName) ?? 0) + 1);
+    }
+    const top = [...patterns.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([name, n]) => (n > 1 ? `${name} ×${n}` : name))
+      .join(', ');
+    critical.push({
+      label: `${scan.dlpFindings.length} credential leak${scan.dlpFindings.length !== 1 ? 's' : ''} (${top})`,
+      count: scan.dlpFindings.length,
+    });
+  }
+
+  // ── Rules grouped by name → bucket per severity ─────────────────────
+  for (const section of summary.sections) {
+    for (const rule of section.rules) {
+      const sev = classifyRuleSeverity(rule.name, rule.verdict);
+      const label = narrativeRuleLabel(rule.name);
+      const count = rule.findings.length;
+      const display = count > 1 ? `${label} ×${count}` : label;
+      const entry = { label: display, count };
+      if (sev === 'critical') critical.push(entry);
+      else if (sev === 'high') high.push(entry);
+      else medium.push(entry);
+    }
+  }
+
+  // ── Blast radius → high ─────────────────────────────────────────────
+  if (blastExposures > 0) {
+    high.push({
+      label: `${blastExposures} credential file${blastExposures !== 1 ? 's' : ''} reachable on disk`,
+      count: blastExposures,
+    });
+  }
+
+  // ── Loops → medium ──────────────────────────────────────────────────
+  if (scan.loopFindings.length > 0) {
+    const wastedCalls = scan.loopFindings.reduce((s, l) => s + Math.max(0, l.count - 1), 0);
+    const wastePct =
+      scan.totalToolCalls > 0 ? Math.round((wastedCalls / scan.totalToolCalls) * 100) : 0;
+    const cost = summary.loopWastedUSD > 0 ? `, ~${fmtCost(summary.loopWastedUSD)} wasted` : '';
+    medium.push({
+      label: `${scan.loopFindings.length} agent loops (${wastePct}% of calls${cost})`,
+      count: scan.loopFindings.length,
+    });
+  }
+
+  const sortByCount = (a: BucketEntry, b: BucketEntry) => b.count - a.count;
+  critical.sort(sortByCount);
+  high.sort(sortByCount);
+  medium.sort(sortByCount);
+
+  const criticalCount = critical.reduce((s, e) => s + e.count, 0);
+  const highCount = high.reduce((s, e) => s + e.count, 0);
+  const mediumCount = medium.reduce((s, e) => s + e.count, 0);
+
+  // ── Header ─────────────────────────────────────────────────────────
+  const dateRange =
+    scan.firstDate && scan.lastDate ? `${fmtTs(scan.firstDate)} – ${fmtTs(scan.lastDate)}` : '';
+  console.log(
+    chalk.bold('🛡  Node9 Scan') +
+      chalk.dim('  ·  ') +
+      chalk.white(num(scan.sessions)) +
+      chalk.dim(' sessions') +
+      (scan.totalCostUSD > 0
+        ? chalk.dim('  ·  ') + chalk.bold(fmtCost(scan.totalCostUSD)) + chalk.dim(' spend')
+        : '') +
+      (dateRange ? chalk.dim('  ·  ' + dateRange) : '')
+  );
+  console.log('');
+
+  // ── Score ──────────────────────────────────────────────────────────
+  const scoreColor = blast.score >= 80 ? chalk.green : blast.score >= 50 ? chalk.yellow : chalk.red;
+  const scoreSeverity = blast.score >= 80 ? 'Good' : blast.score >= 50 ? 'At Risk' : 'Critical';
+  console.log(
+    (blast.score < 50 ? chalk.red.bold('⚠  ') : '') +
+      chalk.bold('Security Score: ') +
+      scoreColor.bold(`${blast.score}/100`) +
+      chalk.dim('  ·  ') +
+      scoreColor(scoreSeverity)
+  );
+  console.log('');
+
+  // ── Buckets ────────────────────────────────────────────────────────
+  if (criticalCount > 0) {
+    console.log(
+      chalk.red.bold('  🔴  CRITICAL  ') +
+        chalk.red(`${criticalCount} finding${criticalCount !== 1 ? 's' : ''}`)
+    );
+    for (const entry of critical.slice(0, 5)) {
+      console.log(chalk.dim('     • ') + chalk.red(entry.label));
+    }
+    if (critical.length > 5) {
+      const remaining = critical.length - 5;
+      console.log(chalk.dim(`     • … and ${remaining} more`));
+    }
+    console.log('');
+  }
+
+  if (highCount > 0) {
+    console.log(
+      chalk.yellow.bold('  🟡  HIGH       ') +
+        chalk.yellow(`${highCount} finding${highCount !== 1 ? 's' : ''}`)
+    );
+    for (const entry of high.slice(0, 5)) {
+      console.log(chalk.dim('     • ') + chalk.yellow(entry.label));
+    }
+    if (high.length > 5) {
+      const remaining = high.length - 5;
+      console.log(chalk.dim(`     • … and ${remaining} more`));
+    }
+    console.log('');
+  }
+
+  if (mediumCount > 0) {
+    console.log(
+      chalk.bold('  🟢  MEDIUM     ') +
+        chalk.dim(`${mediumCount} finding${mediumCount !== 1 ? 's' : ''}`)
+    );
+    for (const entry of medium.slice(0, 5)) {
+      console.log(chalk.dim('     • ') + chalk.dim(entry.label));
+    }
+    if (medium.length > 5) {
+      const remaining = medium.length - 5;
+      console.log(chalk.dim(`     • … and ${remaining} more`));
+    }
+    console.log('');
+  }
+
+  // ── CTA ────────────────────────────────────────────────────────────
+  console.log(
+    chalk.dim('→  ') +
+      chalk.cyan('npx node9-ai scan') +
+      chalk.dim('       run this on your machine')
+  );
+  console.log(chalk.dim('→  github.com/node9-ai/node9-proxy'));
+  console.log('');
+}
+
+// ---------------------------------------------------------------------------
 // Registered command
 // ---------------------------------------------------------------------------
 
@@ -1617,542 +2060,614 @@ export function registerScanCommand(program: Command): void {
     .option('--days <n>', 'Scan last N days of history', '30')
     .option('--top <n>', 'Max findings to show per rule (default: 5)', '5')
     .option('--drill-down', 'Show all findings with full commands and session IDs')
-    .action(async (options: { all?: boolean; days: string; top: string; drillDown?: boolean }) => {
-      const drillDown = options.drillDown ?? false;
-      const topN = drillDown ? Infinity : Math.max(1, parseInt(options.top, 10) || 5);
-      const previewWidth = 70;
-      const startDate = options.all
-        ? null
-        : (() => {
-            const d = new Date();
-            d.setDate(d.getDate() - (parseInt(options.days, 10) || 30));
-            d.setHours(0, 0, 0, 0);
-            return d;
-          })();
+    .option('--compact', 'Compact one-screen scorecard — for screenshots and sharing')
+    .option('--narrative', 'Severity-grouped report — for video / dramatic sharing')
+    .action(
+      async (options: {
+        all?: boolean;
+        days: string;
+        top: string;
+        drillDown?: boolean;
+        compact?: boolean;
+        narrative?: boolean;
+      }) => {
+        const drillDown = options.drillDown ?? false;
+        const topN = drillDown ? Infinity : Math.max(1, parseInt(options.top, 10) || 5);
+        const previewWidth = 70;
+        const startDate = options.all
+          ? null
+          : (() => {
+              const d = new Date();
+              d.setDate(d.getDate() - (parseInt(options.days, 10) || 30));
+              d.setHours(0, 0, 0, 0);
+              return d;
+            })();
 
-      // "Wired" = node9 hooks are actually installed in at least one agent's
-      // settings file (~/.claude/settings.json, ~/.gemini/settings.json, etc.).
-      // This is the real signal that future sessions are protected — checking
-      // for ~/.node9/audit.log alone falsely treats npx users as installed
-      // after their first run.
-      const isWired = getAgentsStatus().some((a) => a.wired);
+        // "Wired" = node9 hooks are actually installed in at least one agent's
+        // settings file (~/.claude/settings.json, ~/.gemini/settings.json, etc.).
+        // This is the real signal that future sessions are protected — checking
+        // for ~/.node9/audit.log alone falsely treats npx users as installed
+        // after their first run.
+        const isWired = getAgentsStatus().some((a) => a.wired);
 
-      console.log('');
-      if (!isWired) {
-        console.log(
-          chalk.bold('🛡  node9') + chalk.dim('  —  security layer for AI coding agents')
-        );
-        console.log(
-          chalk.dim('   Intercepts dangerous tool calls before they execute. No config needed.')
-        );
-        console.log('');
-      }
-      console.log(
-        chalk.cyan.bold('🔍  Scanning your AI history') +
-          chalk.dim('  — what would node9 have caught?')
-      );
-      console.log('');
-
-      const useTTY = process.stdout.isTTY === true && process.env.NODE9_WRAPPER !== '1';
-      if (!useTTY) {
-        process.stdout.write(
-          '  ' + chalk.dim('Scanning your history — this may take a moment...\n')
-        );
-      }
-
-      const totalFiles = countScanFiles();
-      let filesScanned = 0;
-      let linesScanned = 0;
-      let lastRender = 0;
-      const onProgress = (done: number) => {
-        filesScanned = done;
-        if (useTTY) renderProgressBar(filesScanned, totalFiles, linesScanned);
-        lastRender = Date.now();
-      };
-      const onLine = () => {
-        linesScanned++;
-        const now = Date.now();
-        if (useTTY && now - lastRender >= 80) {
-          lastRender = now;
-          renderProgressBar(filesScanned, totalFiles, linesScanned);
-        }
-      };
-      if (useTTY) renderProgressBar(0, totalFiles, 0);
-      const claudeScan = scanClaudeHistory(startDate, onProgress, onLine);
-      const geminiScan = scanGeminiHistory(
-        startDate,
-        (done) => onProgress(claudeScan.filesScanned + done),
-        onLine
-      );
-      const codexScan = scanCodexHistory(
-        startDate,
-        (done) => onProgress(claudeScan.filesScanned + geminiScan.filesScanned + done),
-        onLine
-      );
-      const scan = mergeScans(mergeScans(claudeScan, geminiScan), codexScan);
-      scan.dlpFindings.push(...scanShellConfig());
-      const summary = buildScanSummary([
-        { id: 'claude', label: 'Claude', icon: '🤖', scan: claudeScan },
-        { id: 'gemini', label: 'Gemini', icon: '♊', scan: geminiScan },
-        { id: 'codex', label: 'Codex', icon: '🔮', scan: codexScan },
-      ]);
-      if (useTTY) process.stdout.write('\r' + ' '.repeat(60) + '\r');
-
-      if (scan.filesScanned === 0) {
-        console.log(chalk.yellow('  No session history found.'));
-        console.log(
-          chalk.gray(
-            '  Supported: Claude Code (~/.claude/projects/) · Gemini CLI (~/.gemini/tmp/)\n'
-          )
-        );
-        return;
-      }
-
-      // ── Header ────────────────────────────────────────────────────────────
-      const rangeLabel = options.all
-        ? chalk.dim('all time')
-        : chalk.dim(`last ${options.days ?? 30} days`);
-      const dateRange =
-        scan.firstDate && scan.lastDate
-          ? chalk.dim(`  ${fmtTs(scan.firstDate)} – ${fmtTs(scan.lastDate)}`)
-          : '';
-
-      const breakdownParts: string[] = [];
-      if (claudeScan.sessions > 0)
-        breakdownParts.push(chalk.cyan(String(claudeScan.sessions)) + chalk.dim(' Claude'));
-      if (geminiScan.sessions > 0)
-        breakdownParts.push(chalk.blue(String(geminiScan.sessions)) + chalk.dim(' Gemini'));
-      if (codexScan.sessions > 0)
-        breakdownParts.push(chalk.magenta(String(codexScan.sessions)) + chalk.dim(' Codex'));
-      const sessionBreakdown =
-        breakdownParts.length > 1
-          ? chalk.dim('(') + breakdownParts.join(chalk.dim(' · ')) + chalk.dim(')')
-          : '';
-
-      console.log(
-        '  ' +
-          chalk.white(num(scan.sessions)) +
-          chalk.dim(' sessions  ') +
-          sessionBreakdown +
-          (sessionBreakdown ? '  ' : '') +
-          chalk.white(num(scan.totalToolCalls)) +
-          chalk.dim(' tool calls  ') +
-          chalk.white(num(scan.bashCalls)) +
-          chalk.dim(' bash commands  ') +
-          rangeLabel +
-          dateRange
-      );
-      console.log('');
-
-      // ── Group findings by sourceType + shieldName ─────────────────────────
-      const totalFindings = scan.findings.length;
-      const blockedCount = scan.findings.filter((f) => f.source.rule.verdict === 'block').length;
-      const reviewCount = totalFindings - blockedCount;
-
-      if (totalFindings === 0 && scan.dlpFindings.length === 0) {
-        console.log(chalk.green('  ✅ No risky operations found in your history.'));
-        console.log(
-          chalk.dim('  node9 is still worth running — it monitors every tool call in real time.\n')
-        );
-      } else {
-        // ── Hero headline ──────────────────────────────────────────────────
-        const totalRisky = totalFindings + scan.dlpFindings.length;
-        const heroLine = isWired
-          ? chalk.bold(
-              `  Found ${chalk.yellow(String(totalRisky))} risky operation${totalRisky !== 1 ? 's' : ''} in your history`
-            )
-          : chalk.bold(
-              `  ${chalk.red.bold(String(totalRisky))} risky operation${totalRisky !== 1 ? 's' : ''} found — none were blocked`
+        // Compact / narrative modes print their own self-contained scorecard —
+        // suppress the verbose preamble (banner + "scanning..." line) so the
+        // output starts cleanly at the scorecard for screenshot / video use.
+        const screenshotMode = options.compact || options.narrative;
+        if (!screenshotMode) {
+          console.log('');
+          if (!isWired) {
+            console.log(
+              chalk.bold('🛡  node9') + chalk.dim('  —  security layer for AI coding agents')
             );
-        console.log(heroLine);
-        console.log('');
-
-        // ── Summary breakdown — ordered by impact ──────────────────────────
-        if (scan.totalCostUSD > 0) {
+            console.log(
+              chalk.dim('   Intercepts dangerous tool calls before they execute. No config needed.')
+            );
+            console.log('');
+          }
           console.log(
-            '    ' +
-              chalk.bold(fmtCost(scan.totalCostUSD)) +
-              chalk.dim(' AI spend  ·  ') +
-              chalk.dim(`${totalRisky} risky operations`)
+            chalk.cyan.bold('🔍  Scanning your AI history') +
+              chalk.dim('  — what would node9 have caught?')
+          );
+          console.log('');
+        }
+
+        const useTTY = process.stdout.isTTY === true && process.env.NODE9_WRAPPER !== '1';
+        if (!useTTY && !screenshotMode) {
+          process.stdout.write(
+            '  ' + chalk.dim('Scanning your history — this may take a moment...\n')
           );
         }
-        if (scan.dlpFindings.length > 0) {
-          const earlyLabel =
-            scan.sessionsWithEarlySecrets > 0
-              ? chalk.dim('  ·  ') +
-                chalk.red(
+
+        const totalFiles = countScanFiles();
+        let filesScanned = 0;
+        let linesScanned = 0;
+        let lastRender = 0;
+        const onProgress = (done: number) => {
+          filesScanned = done;
+          if (useTTY) renderProgressBar(filesScanned, totalFiles, linesScanned);
+          lastRender = Date.now();
+        };
+        const onLine = () => {
+          linesScanned++;
+          const now = Date.now();
+          if (useTTY && now - lastRender >= 80) {
+            lastRender = now;
+            renderProgressBar(filesScanned, totalFiles, linesScanned);
+          }
+        };
+        if (useTTY) renderProgressBar(0, totalFiles, 0);
+        const claudeScan = scanClaudeHistory(startDate, onProgress, onLine);
+        const geminiScan = scanGeminiHistory(
+          startDate,
+          (done) => onProgress(claudeScan.filesScanned + done),
+          onLine
+        );
+        const codexScan = scanCodexHistory(
+          startDate,
+          (done) => onProgress(claudeScan.filesScanned + geminiScan.filesScanned + done),
+          onLine
+        );
+        const scan = mergeScans(mergeScans(claudeScan, geminiScan), codexScan);
+        scan.dlpFindings.push(...scanShellConfig());
+        const summary = buildScanSummary([
+          { id: 'claude', label: 'Claude', icon: '🤖', scan: claudeScan },
+          { id: 'gemini', label: 'Gemini', icon: '♊', scan: geminiScan },
+          { id: 'codex', label: 'Codex', icon: '🔮', scan: codexScan },
+        ]);
+        if (useTTY) process.stdout.write('\r' + ' '.repeat(60) + '\r');
+
+        if (scan.filesScanned === 0) {
+          console.log(chalk.yellow('  No session history found.'));
+          console.log(
+            chalk.gray(
+              '  Supported: Claude Code (~/.claude/projects/) · Gemini CLI (~/.gemini/tmp/)\n'
+            )
+          );
+          return;
+        }
+
+        // ── Header ────────────────────────────────────────────────────────────
+        const rangeLabel = options.all
+          ? chalk.dim('all time')
+          : chalk.dim(`last ${options.days ?? 30} days`);
+        const dateRange =
+          scan.firstDate && scan.lastDate
+            ? chalk.dim(`  ${fmtTs(scan.firstDate)} – ${fmtTs(scan.lastDate)}`)
+            : '';
+
+        const breakdownParts: string[] = [];
+        if (claudeScan.sessions > 0)
+          breakdownParts.push(chalk.cyan(String(claudeScan.sessions)) + chalk.dim(' Claude'));
+        if (geminiScan.sessions > 0)
+          breakdownParts.push(chalk.blue(String(geminiScan.sessions)) + chalk.dim(' Gemini'));
+        if (codexScan.sessions > 0)
+          breakdownParts.push(chalk.magenta(String(codexScan.sessions)) + chalk.dim(' Codex'));
+        const sessionBreakdown =
+          breakdownParts.length > 1
+            ? chalk.dim('(') + breakdownParts.join(chalk.dim(' · ')) + chalk.dim(')')
+            : '';
+
+        // Suppress in compact / narrative modes — they render their own
+        // header line.
+        if (!screenshotMode) {
+          console.log(
+            '  ' +
+              chalk.white(num(scan.sessions)) +
+              chalk.dim(' sessions  ') +
+              sessionBreakdown +
+              (sessionBreakdown ? '  ' : '') +
+              chalk.white(num(scan.totalToolCalls)) +
+              chalk.dim(' tool calls  ') +
+              chalk.white(num(scan.bashCalls)) +
+              chalk.dim(' bash commands  ') +
+              rangeLabel +
+              dateRange
+          );
+          console.log('');
+        }
+
+        // ── Group findings by sourceType + shieldName ─────────────────────────
+        const totalFindings = scan.findings.length;
+        const blockedCount = scan.findings.filter((f) => f.source.rule.verdict === 'block').length;
+        const reviewCount = totalFindings - blockedCount;
+
+        // Run blast scan up front so the Security Score can lead the report.
+        // Used both in the top hero block and the detailed Blast Radius section
+        // at the end of the output.
+        const blast = runBlast();
+        const blastExposures = blast.reachable.length + blast.envFindings.length;
+
+        // ── Compact scorecard mode ──────────────────────────────────────────
+        // One-screen output for sharing on Reddit / Twitter / blog posts.
+        // Skips the detailed per-finding rendering — only the headline numbers,
+        // top callouts per category, blast summary, and CTA.
+        if (options.compact) {
+          renderCompactScorecard({
+            scan,
+            summary,
+            blast,
+            blastExposures,
+            blockedCount,
+            reviewCount,
+          });
+          return;
+        }
+
+        // ── Narrative scorecard mode ───────────────────────────────────────
+        // Severity-grouped report for video / dramatic sharing. Same data,
+        // different organization: Critical / High / Medium tiers instead of
+        // by-category. More punch for screencast use.
+        if (options.narrative) {
+          renderNarrativeScorecard({
+            scan,
+            summary,
+            blast,
+            blastExposures,
+            blockedCount,
+            reviewCount,
+          });
+          return;
+        }
+
+        if (totalFindings === 0 && scan.dlpFindings.length === 0) {
+          console.log(chalk.green('  ✅ No risky operations found in your history.'));
+          console.log(
+            chalk.dim(
+              '  node9 is still worth running — it monitors every tool call in real time.\n'
+            )
+          );
+        } else {
+          // ── Hero block ─────────────────────────────────────────────────────
+          // Score-led headline — the dramatic line readers need to see in the
+          // first 5 lines, not buried at the bottom. The detailed per-section
+          // breakdowns below provide the rest.
+          const totalRisky = totalFindings + scan.dlpFindings.length;
+          const scoreSeverity =
+            blast.score >= 80
+              ? chalk.green('Good')
+              : blast.score >= 50
+                ? chalk.yellow('At Risk')
+                : chalk.red.bold('Critical');
+          const scoreColor =
+            blast.score >= 80 ? chalk.green : blast.score >= 50 ? chalk.yellow : chalk.red;
+          console.log(
+            '  ' +
+              (blast.score < 50 ? chalk.red.bold('⚠  ') : '') +
+              chalk.bold('Security Score ') +
+              scoreColor.bold(`${blast.score}/100`) +
+              '  ' +
+              scoreSeverity +
+              chalk.dim('  ·  ') +
+              (totalRisky > 0
+                ? chalk.red.bold(`${totalRisky} risky operation${totalRisky !== 1 ? 's' : ''}`)
+                : chalk.green('No risky operations'))
+          );
+
+          // ── Compact stat card — one line, scannable ────────────────────────
+          const cardParts: string[] = [];
+          if (scan.dlpFindings.length > 0) {
+            cardParts.push(
+              chalk.red('🔑 ') +
+                chalk.red.bold(String(scan.dlpFindings.length)) +
+                chalk.dim(` leak${scan.dlpFindings.length !== 1 ? 's' : ''}`)
+            );
+          }
+          if (blockedCount > 0) {
+            cardParts.push(
+              chalk.red('🛑 ') + chalk.red.bold(String(blockedCount)) + chalk.dim(' blocked')
+            );
+          }
+          if (scan.loopFindings.length > 0) {
+            const wastedCalls = scan.loopFindings.reduce((s, l) => s + Math.max(0, l.count - 1), 0);
+            const wastePct =
+              scan.totalToolCalls > 0 ? Math.round((wastedCalls / scan.totalToolCalls) * 100) : 0;
+            const wasteSuffix = wastePct > 0 ? chalk.dim(` (${wastePct}% wasted)`) : '';
+            cardParts.push(
+              chalk.yellow('🔁 ') +
+                chalk.yellow.bold(String(scan.loopFindings.length)) +
+                chalk.dim(' loops') +
+                wasteSuffix
+            );
+          }
+          if (reviewCount > 0) {
+            cardParts.push(
+              chalk.yellow('👁 ') + chalk.yellow.bold(String(reviewCount)) + chalk.dim(' flagged')
+            );
+          }
+          if (blastExposures > 0) {
+            cardParts.push(
+              chalk.red('🔭 ') + chalk.red.bold(String(blastExposures)) + chalk.dim(' exposures')
+            );
+          }
+          if (cardParts.length > 0) {
+            console.log('  ' + cardParts.join(chalk.dim('   ')));
+          }
+
+          // Spend summary on its own line — useful for power users, not the
+          // headline. (The score + count above is the hook.)
+          if (scan.totalCostUSD > 0) {
+            console.log(
+              '  ' +
+                chalk.dim('AI spend  ') +
+                chalk.bold(fmtCost(scan.totalCostUSD)) +
+                (summary.loopWastedUSD > 0
+                  ? chalk.dim('   ·   wasted on loops  ') +
+                    chalk.yellow('~' + fmtCost(summary.loopWastedUSD))
+                  : '')
+            );
+          }
+          if (scan.dlpFindings.length > 0 && scan.sessionsWithEarlySecrets > 0) {
+            console.log(
+              '  ' +
+                chalk.dim(
                   `${scan.sessionsWithEarlySecrets} session${scan.sessionsWithEarlySecrets !== 1 ? 's' : ''} loaded secrets before first edit`
                 )
-              : '';
-          console.log(
-            '    ' +
-              chalk.red('🔑  Credential leak') +
-              '     ' +
-              chalk.red.bold(String(scan.dlpFindings.length).padStart(5)) +
-              chalk.dim('   secret detected in history or shell config') +
-              earlyLabel
-          );
-        }
-        if (blockedCount > 0) {
-          console.log(
-            '    ' +
-              chalk.red('🛑  Would have blocked') +
-              '   ' +
-              chalk.red.bold(String(blockedCount).padStart(5)) +
-              chalk.dim('   operations stopped before execution')
-          );
-        }
-        if (scan.loopFindings.length > 0) {
-          const wastedCalls = scan.loopFindings.reduce((s, l) => s + Math.max(0, l.count - 1), 0);
-          const loopRatio =
-            scan.totalToolCalls > 0
-              ? chalk.dim('  ·  ') +
-                chalk.yellow(
-                  Math.round((wastedCalls / scan.totalToolCalls) * 100) + '% of calls wasted'
-                )
-              : '';
-          const loopCost =
-            summary.loopWastedUSD > 0
-              ? chalk.dim('  ·  ') + chalk.yellow('~' + fmtCost(summary.loopWastedUSD))
-              : '';
-          console.log(
-            '    ' +
-              chalk.yellow('🔁  Loop detected') +
-              '      ' +
-              chalk.yellow.bold(String(scan.loopFindings.length).padStart(5)) +
-              chalk.dim('   repeated tool call patterns found') +
-              loopRatio +
-              loopCost
-          );
-        }
-        if (reviewCount > 0) {
-          console.log(
-            '    ' +
-              chalk.yellow('👁   Would have flagged') +
-              '   ' +
-              chalk.yellow.bold(String(reviewCount).padStart(5)) +
-              chalk.dim('   sent to you for approval')
-          );
-        }
-        console.log('');
-
-        // ── Credential Leaks — first, most alarming ───────────────────────
-        if (scan.dlpFindings.length > 0) {
-          console.log('  ' + chalk.dim('─'.repeat(70)));
-          console.log(
-            '  ' +
-              chalk.red.bold('🔑  Credential Leaks') +
-              chalk.dim('  ·  ') +
-              chalk.red(
-                `${num(scan.dlpFindings.length)} secret${scan.dlpFindings.length !== 1 ? 's' : ''} found in plain text`
-              )
-          );
-          // Confidence decay: surface recurring patterns + recent findings
-          // first, dim stale ones. Same data, just re-prioritized.
-          const sortedDlp = sortDlpFindingsByPriority(scan.dlpFindings);
-          const recurringPatterns = buildRecurringPatternSet(scan.dlpFindings);
-          const shownDlp = drillDown ? sortedDlp : sortedDlp.slice(0, topN);
-          for (const f of shownDlp) {
-            const stale = isStaleFinding(f.timestamp);
-            const ts = f.timestamp ? chalk.dim(fmtTs(f.timestamp) + '  ') : '';
-            const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
-            const agentBadge =
-              f.agent === 'gemini'
-                ? chalk.blue('[Gemini]  ')
-                : f.agent === 'codex'
-                  ? chalk.magenta('[Codex]   ')
-                  : f.agent === 'shell'
-                    ? chalk.yellow('[Shell]   ')
-                    : chalk.cyan('[Claude]  ');
-            const sessionSuffix = f.sessionId ? chalk.dim(`  → ${f.sessionId.slice(0, 8)}`) : '';
-            const recurringBadge = recurringPatterns.has(f.patternName)
-              ? chalk.red.bold(' ⚠️ recurring ')
-              : '';
-            const patternDisplay = stale ? chalk.dim(f.patternName) : chalk.yellow(f.patternName);
-            const sampleDisplay = stale
-              ? chalk.dim(f.redactedSample)
-              : chalk.gray(f.redactedSample);
-            const entryBadge = chalk.dim(`  [${entryPathLabel(f.toolName)}]`);
-            const leadIcon = stale ? chalk.dim('🚨') : '🚨';
-            console.log(
-              `    ${leadIcon} ${ts}${proj}${agentBadge}` +
-                patternDisplay +
-                recurringBadge +
-                chalk.dim('  ') +
-                sampleDisplay +
-                entryBadge +
-                sessionSuffix
-            );
-          }
-          if (!drillDown && scan.dlpFindings.length > topN) {
-            console.log(
-              chalk.dim(
-                `    … and ${scan.dlpFindings.length - topN} more  (--drill-down for full list)`
-              )
             );
           }
           console.log('');
-        }
 
-        // ── Blocked operations — consolidated across all rule sources ─────
-        const blockedRuleSections = summary.sections
-          .map((s) => ({ ...s, rules: s.rules.filter((r) => r.verdict === 'block') }))
-          .filter((s) => s.rules.length > 0);
-        if (blockedRuleSections.length > 0) {
-          console.log('  ' + chalk.dim('─'.repeat(70)));
-          console.log(
-            '  ' +
-              chalk.red.bold('🛑  Blocked') +
-              chalk.dim('  ·  ') +
-              chalk.red(
-                `${blockedCount} operation${blockedCount !== 1 ? 's' : ''} node9 would have stopped`
-              )
-          );
-          for (const section of blockedRuleSections) {
-            for (const rule of section.rules) {
+          // ── Credential Leaks — first, most alarming ───────────────────────
+          if (scan.dlpFindings.length > 0) {
+            console.log('  ' + chalk.dim('─'.repeat(70)));
+            console.log(
+              '  ' +
+                chalk.red.bold('🔑  Credential Leaks') +
+                chalk.dim('  ·  ') +
+                chalk.red(
+                  `${num(scan.dlpFindings.length)} secret${scan.dlpFindings.length !== 1 ? 's' : ''} found in plain text`
+                )
+            );
+            // Confidence decay: surface recurring patterns + recent findings
+            // first, dim stale ones. Same data, just re-prioritized.
+            const sortedDlp = sortDlpFindingsByPriority(scan.dlpFindings);
+            const recurringPatterns = buildRecurringPatternSet(scan.dlpFindings);
+            const shownDlp = drillDown ? sortedDlp : sortedDlp.slice(0, topN);
+            for (const f of shownDlp) {
+              const stale = isStaleFinding(f.timestamp);
+              const ts = f.timestamp ? chalk.dim(fmtTs(f.timestamp) + '  ') : '';
+              const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
+              const agentBadge =
+                f.agent === 'gemini'
+                  ? chalk.blue('[Gemini]  ')
+                  : f.agent === 'codex'
+                    ? chalk.magenta('[Codex]   ')
+                    : f.agent === 'shell'
+                      ? chalk.yellow('[Shell]   ')
+                      : chalk.cyan('[Claude]  ');
+              const sessionSuffix = f.sessionId ? chalk.dim(`  → ${f.sessionId.slice(0, 8)}`) : '';
+              const recurringBadge = recurringPatterns.has(f.patternName)
+                ? chalk.red.bold(' ⚠️ recurring ')
+                : '';
+              const patternDisplay = stale ? chalk.dim(f.patternName) : chalk.yellow(f.patternName);
+              const sampleDisplay = stale
+                ? chalk.dim(f.redactedSample)
+                : chalk.gray(f.redactedSample);
+              const entryBadge = chalk.dim(`  [${entryPathLabel(f.toolName)}]`);
+              const leadIcon = stale ? chalk.dim('🚨') : '🚨';
+              console.log(
+                `    ${leadIcon} ${ts}${proj}${agentBadge}` +
+                  patternDisplay +
+                  recurringBadge +
+                  chalk.dim('  ') +
+                  sampleDisplay +
+                  entryBadge +
+                  sessionSuffix
+              );
+            }
+            if (!drillDown && scan.dlpFindings.length > topN) {
+              console.log(
+                chalk.dim(
+                  `    … and ${scan.dlpFindings.length - topN} more  (--drill-down for full list)`
+                )
+              );
+            }
+            console.log('');
+          }
+
+          // ── Blocked operations — consolidated across all rule sources ─────
+          const blockedRuleSections = summary.sections
+            .map((s) => ({ ...s, rules: s.rules.filter((r) => r.verdict === 'block') }))
+            .filter((s) => s.rules.length > 0);
+          if (blockedRuleSections.length > 0) {
+            console.log('  ' + chalk.dim('─'.repeat(70)));
+            console.log(
+              '  ' +
+                chalk.red.bold('🛑  Blocked') +
+                chalk.dim('  ·  ') +
+                chalk.red(
+                  `${blockedCount} operation${blockedCount !== 1 ? 's' : ''} node9 would have stopped`
+                )
+            );
+            for (const section of blockedRuleSections) {
+              for (const rule of section.rules) {
+                printRuleGroup(rule, topN, drillDown, previewWidth);
+              }
+            }
+            console.log('');
+          }
+
+          // ── Agent Loops ────────────────────────────────────────────────────
+          if (scan.loopFindings.length > 0) {
+            console.log('  ' + chalk.dim('─'.repeat(70)));
+            const loopCostLabel =
+              summary.loopWastedUSD > 0
+                ? chalk.dim('  ·  ') +
+                  chalk.yellow('~' + fmtCost(summary.loopWastedUSD) + ' wasted')
+                : '';
+            console.log(
+              '  ' +
+                chalk.yellow.bold('🔁  Agent Loops') +
+                chalk.dim('  ·  ') +
+                chalk.yellow(
+                  `${num(scan.loopFindings.length)} repeated pattern${scan.loopFindings.length !== 1 ? 's' : ''} found`
+                ) +
+                loopCostLabel
+            );
+            const shownLoops = drillDown ? scan.loopFindings : scan.loopFindings.slice(0, topN);
+            for (const f of shownLoops) {
+              const ts = f.timestamp ? chalk.dim(fmtTs(f.timestamp) + '  ') : '';
+              const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
+              const agentBadge =
+                f.agent === 'gemini'
+                  ? chalk.blue('[Gemini]  ')
+                  : f.agent === 'codex'
+                    ? chalk.magenta('[Codex]   ')
+                    : chalk.cyan('[Claude]  ');
+              const sessionSuffix = f.sessionId ? chalk.dim(`  → ${f.sessionId.slice(0, 8)}`) : '';
+              console.log(
+                `    ${ts}${proj}${agentBadge}` +
+                  chalk.yellow(f.toolName) +
+                  chalk.dim(`  ×${f.count}  `) +
+                  chalk.gray(f.commandPreview) +
+                  sessionSuffix
+              );
+            }
+            if (!drillDown && scan.loopFindings.length > topN) {
+              console.log(
+                chalk.dim(
+                  `    … and ${scan.loopFindings.length - topN} more  (--drill-down for full list)`
+                )
+              );
+            }
+
+            // ── Most stuck tools (top 3 by wasted-call share) ──────────────
+            // Aggregate wasted calls (count - 1 per finding) by toolName, so
+            // a heavy user can see at a glance which tool is burning their
+            // tokens. Hidden when total waste is trivial (<5) to avoid noise.
+            const stuckTools = computeStuckTools(scan.loopFindings);
+            if (stuckTools.length > 0) {
+              console.log('');
+              console.log('  ' + chalk.dim('Most stuck tools:'));
+              for (const t of stuckTools) {
+                console.log(
+                  chalk.dim('    ') +
+                    chalk.yellow(t.toolName.padEnd(8)) +
+                    chalk.dim('  ') +
+                    chalk.dim(`×${t.waste} repeats`.padEnd(14)) +
+                    chalk.dim(`  (${t.pct}%)`)
+                );
+              }
+            }
+
+            console.log('');
+          }
+
+          // ── Flagged for review — review-verdict rules only ─────────────────
+          for (const section of summary.sections) {
+            const reviewRules = section.rules.filter((r) => r.verdict !== 'block');
+            if (reviewRules.length === 0) continue;
+            const enableHint = section.shieldKey
+              ? chalk.dim(`  →  node9 shield enable ${section.shieldKey}`)
+              : '';
+            console.log('  ' + chalk.dim('─'.repeat(70)));
+            console.log(
+              '  ' +
+                chalk.bold(section.label) +
+                (section.subtitle ? chalk.dim(`  ·  ${section.subtitle}`) : '') +
+                '  ' +
+                chalk.yellow(`${section.reviewCount} review`) +
+                enableHint
+            );
+            for (const rule of reviewRules) {
               printRuleGroup(rule, topN, drillDown, previewWidth);
             }
+            console.log('');
           }
-          console.log('');
+
+          // ── Inactive Shields — upsell, always last ─────────────────────────
+          const activeShieldIds = new Set(
+            summary.sections
+              .filter((s) => s.sourceType === 'shield' && s.shieldKey)
+              .map((s) => s.shieldKey!)
+          );
+          const emptyShields = Object.keys(SHIELDS)
+            .filter((n) => !activeShieldIds.has(n))
+            .sort();
+          if (emptyShields.length > 0) {
+            console.log('  ' + chalk.dim('─'.repeat(70)));
+            console.log(
+              '  ' + chalk.bold('🛡  Inactive Shields') + chalk.dim('  ·  enable for more coverage')
+            );
+            console.log('  ' + chalk.dim(emptyShields.join(' · ')));
+            console.log('  ' + chalk.dim('→  node9 shield enable <name>  to activate'));
+            console.log('');
+          }
         }
 
-        // ── Agent Loops ────────────────────────────────────────────────────
-        if (scan.loopFindings.length > 0) {
+        // ── Blast Radius detail ───────────────────────────────────────────────
+        // Note: Security Score itself is shown in the hero block at the top.
+        // This section is the per-file detail of what's exposed.
+        if (blast.reachable.length > 0 || blast.envFindings.length > 0) {
           console.log('  ' + chalk.dim('─'.repeat(70)));
-          const loopCostLabel =
-            summary.loopWastedUSD > 0
-              ? chalk.dim('  ·  ') + chalk.yellow('~' + fmtCost(summary.loopWastedUSD) + ' wasted')
-              : '';
           console.log(
             '  ' +
-              chalk.yellow.bold('🔁  Agent Loops') +
-              chalk.dim('  ·  ') +
-              chalk.yellow(
-                `${num(scan.loopFindings.length)} repeated pattern${scan.loopFindings.length !== 1 ? 's' : ''} found`
-              ) +
-              loopCostLabel
-          );
-          const shownLoops = drillDown ? scan.loopFindings : scan.loopFindings.slice(0, topN);
-          for (const f of shownLoops) {
-            const ts = f.timestamp ? chalk.dim(fmtTs(f.timestamp) + '  ') : '';
-            const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
-            const agentBadge =
-              f.agent === 'gemini'
-                ? chalk.blue('[Gemini]  ')
-                : f.agent === 'codex'
-                  ? chalk.magenta('[Codex]   ')
-                  : chalk.cyan('[Claude]  ');
-            const sessionSuffix = f.sessionId ? chalk.dim(`  → ${f.sessionId.slice(0, 8)}`) : '';
-            console.log(
-              `    ${ts}${proj}${agentBadge}` +
-                chalk.yellow(f.toolName) +
-                chalk.dim(`  ×${f.count}  `) +
-                chalk.gray(f.commandPreview) +
-                sessionSuffix
-            );
-          }
-          if (!drillDown && scan.loopFindings.length > topN) {
-            console.log(
+              chalk.bold('🔭  Blast Radius') +
               chalk.dim(
-                `    … and ${scan.loopFindings.length - topN} more  (--drill-down for full list)`
+                `  ·  ${blastExposures} exposure${blastExposures !== 1 ? 's' : ''} an AI agent can reach right now`
               )
-            );
-          }
-
-          // ── Most stuck tools (top 3 by wasted-call share) ──────────────
-          // Aggregate wasted calls (count - 1 per finding) by toolName, so
-          // a heavy user can see at a glance which tool is burning their
-          // tokens. Hidden when total waste is trivial (<5) to avoid noise.
-          const stuckTools = computeStuckTools(scan.loopFindings);
-          if (stuckTools.length > 0) {
-            console.log('');
-            console.log('  ' + chalk.dim('Most stuck tools:'));
-            for (const t of stuckTools) {
+          );
+          console.log('');
+          if (blast.reachable.length > 0) {
+            for (const p of blast.reachable) {
               console.log(
-                chalk.dim('    ') +
-                  chalk.yellow(t.toolName.padEnd(8)) +
-                  chalk.dim('  ') +
-                  chalk.dim(`×${t.waste} repeats`.padEnd(14)) +
-                  chalk.dim(`  (${t.pct}%)`)
+                '    ' +
+                  chalk.red('✗  ') +
+                  chalk.yellow(p.label.padEnd(38)) +
+                  chalk.dim(p.description)
               );
             }
           }
-
-          console.log('');
-        }
-
-        // ── Flagged for review — review-verdict rules only ─────────────────
-        for (const section of summary.sections) {
-          const reviewRules = section.rules.filter((r) => r.verdict !== 'block');
-          if (reviewRules.length === 0) continue;
-          const enableHint = section.shieldKey
-            ? chalk.dim(`  →  node9 shield enable ${section.shieldKey}`)
-            : '';
-          console.log('  ' + chalk.dim('─'.repeat(70)));
-          console.log(
-            '  ' +
-              chalk.bold(section.label) +
-              (section.subtitle ? chalk.dim(`  ·  ${section.subtitle}`) : '') +
-              '  ' +
-              chalk.yellow(`${section.reviewCount} review`) +
-              enableHint
-          );
-          for (const rule of reviewRules) {
-            printRuleGroup(rule, topN, drillDown, previewWidth);
-          }
-          console.log('');
-        }
-
-        // ── Inactive Shields — upsell, always last ─────────────────────────
-        const activeShieldIds = new Set(
-          summary.sections
-            .filter((s) => s.sourceType === 'shield' && s.shieldKey)
-            .map((s) => s.shieldKey!)
-        );
-        const emptyShields = Object.keys(SHIELDS)
-          .filter((n) => !activeShieldIds.has(n))
-          .sort();
-        if (emptyShields.length > 0) {
-          console.log('  ' + chalk.dim('─'.repeat(70)));
-          console.log(
-            '  ' + chalk.bold('🛡  Inactive Shields') + chalk.dim('  ·  enable for more coverage')
-          );
-          console.log('  ' + chalk.dim(emptyShields.join(' · ')));
-          console.log('  ' + chalk.dim('→  node9 shield enable <name>  to activate'));
-          console.log('');
-        }
-      }
-
-      // ── Blast Radius ──────────────────────────────────────────────────────
-      const blast = runBlast();
-      if (blast.reachable.length > 0 || blast.envFindings.length > 0) {
-        console.log('  ' + chalk.dim('─'.repeat(70)));
-        console.log(
-          '  ' +
-            chalk.bold('🔭  Blast Radius') +
-            chalk.dim('  ·  what an AI agent can reach right now')
-        );
-        console.log('');
-        if (blast.reachable.length > 0) {
-          for (const p of blast.reachable) {
-            console.log(
-              '    ' +
-                chalk.red('✗  ') +
-                chalk.yellow(p.label.padEnd(38)) +
-                chalk.dim(p.description)
-            );
-          }
-        }
-        if (blast.envFindings.length > 0) {
-          for (const f of blast.envFindings) {
-            console.log(
-              '    ' +
-                chalk.red('✗  ') +
-                chalk.yellow(f.key.padEnd(38)) +
-                chalk.dim(f.patternName + ' in environment')
-            );
-          }
-        }
-        console.log('');
-        console.log(
-          '  Security Score: ' +
-            scoreLabel(blast.score) +
-            chalk.dim(
-              `  (${blast.reachable.length + blast.envFindings.length} exposure${blast.reachable.length + blast.envFindings.length !== 1 ? 's' : ''})`
-            )
-        );
-        console.log(
-          chalk.dim(
-            '\n  Run `node9 shield enable project-jail` to block agent access to these files.'
-          )
-        );
-        console.log('');
-      }
-
-      // ── CTA ───────────────────────────────────────────────────────────────
-      if (isWired) {
-        console.log(chalk.green('  ✅ node9 is active — your future sessions are protected.'));
-        console.log(
-          chalk.dim('  Run ') +
-            chalk.cyan('node9 report') +
-            chalk.dim(' to see live protection stats.')
-        );
-        if (drillDown) {
-          console.log(
-            chalk.dim('  Run ') +
-              chalk.cyan('node9 sessions --detail <session-id>') +
-              chalk.dim(' to see the full conversation for any session above.')
-          );
-        } else {
-          console.log(
-            chalk.dim('  Run ') +
-              chalk.cyan('node9 scan --drill-down') +
-              chalk.dim(' to see full commands and session IDs.')
-          );
-        }
-      } else {
-        const riskySummary = totalFindings + scan.dlpFindings.length;
-        if (riskySummary > 0) {
-          console.log(
-            chalk.yellow.bold(
-              `  ⚡ ${riskySummary} operation${riskySummary !== 1 ? 's' : ''} ran unprotected.`
-            ) + chalk.dim(' node9 would have caught them.')
-          );
-        }
-        console.log('');
-        console.log(chalk.bold('  Protect your next session in 30 seconds:'));
-        console.log('');
-        console.log('    ' + chalk.cyan('npm install -g @node9/proxy'));
-        console.log('    ' + chalk.cyan('node9 init'));
-        console.log('');
-        console.log(chalk.dim('  node9 hooks into Claude Code automatically.'));
-        console.log(
-          chalk.dim('  Every tool call is checked before it runs — no proxy, no latency.')
-        );
-        console.log('');
-        console.log('  ' + chalk.dim('→ ') + chalk.underline('https://node9.ai'));
-      }
-      console.log('');
-
-      if (!isTestingMode()) {
-        if (isWired) {
-          const url = `http://${DAEMON_HOST}:${DAEMON_PORT}/?openscan=1`;
-          if (isDaemonRunning()) {
-            const internalToken = getInternalToken();
-            if (internalToken) {
-              try {
-                const pushSummary = buildScanSummary([
-                  { id: 'claude', label: 'Claude', icon: '🤖', scan: claudeScan },
-                  { id: 'gemini', label: 'Gemini', icon: '♊', scan: geminiScan },
-                  { id: 'codex', label: 'Codex', icon: '🔮', scan: codexScan },
-                ]);
-                await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/scan/push`, {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    'x-node9-internal': internalToken,
-                  },
-                  body: JSON.stringify({ status: 'complete', summary: pushSummary }),
-                  signal: AbortSignal.timeout(3000),
-                });
-                openBrowserLocal();
-              } catch {
-                // fire-and-forget
-              }
+          if (blast.envFindings.length > 0) {
+            for (const f of blast.envFindings) {
+              console.log(
+                '    ' +
+                  chalk.red('✗  ') +
+                  chalk.yellow(f.key.padEnd(38)) +
+                  chalk.dim(f.patternName + ' in environment')
+              );
             }
           }
-          if (isDaemonRunning()) {
-            console.log('  ' + chalk.cyan('🌐 View in browser:') + '  ' + chalk.underline(url));
-          } else {
-            console.log(
-              '  ' +
-                chalk.dim('📊 To view in browser, start the daemon:  ') +
-                chalk.cyan('node9 daemon --background')
-            );
-          }
+          console.log('');
+          console.log(
+            chalk.dim(
+              '  → Run `node9 shield enable project-jail` to block agent access to these files.'
+            )
+          );
           console.log('');
         }
-        // When not wired, the install CTA above is the next step — no browser hint.
+
+        // ── CTA ───────────────────────────────────────────────────────────────
+        if (isWired) {
+          console.log(chalk.green('  ✅ node9 is active — your future sessions are protected.'));
+          console.log(
+            chalk.dim('  Run ') +
+              chalk.cyan('node9 report') +
+              chalk.dim(' to see live protection stats.')
+          );
+          if (drillDown) {
+            console.log(
+              chalk.dim('  Run ') +
+                chalk.cyan('node9 sessions --detail <session-id>') +
+                chalk.dim(' to see the full conversation for any session above.')
+            );
+          } else {
+            console.log(
+              chalk.dim('  Run ') +
+                chalk.cyan('node9 scan --drill-down') +
+                chalk.dim(' to see full commands and session IDs.')
+            );
+          }
+        } else {
+          const riskySummary = totalFindings + scan.dlpFindings.length;
+          if (riskySummary > 0) {
+            console.log(
+              chalk.yellow.bold(
+                `  ⚡ ${riskySummary} operation${riskySummary !== 1 ? 's' : ''} ran unprotected.`
+              ) + chalk.dim(' node9 would have caught them.')
+            );
+            console.log('');
+          }
+          console.log(chalk.bold('  Enable real-time protection:'));
+          console.log('');
+          console.log(
+            '    ' +
+              chalk.cyan('npm install -g @node9/proxy') +
+              chalk.dim('  &&  ') +
+              chalk.cyan('node9 init --recommended')
+          );
+          console.log('');
+          console.log(
+            chalk.dim(
+              '  Hooks into Claude Code automatically. Every tool call checked before it runs.'
+            )
+          );
+          console.log('  ' + chalk.dim('→ ') + chalk.underline('https://node9.ai'));
+        }
+        console.log('');
+
+        if (!isTestingMode()) {
+          if (isWired) {
+            const url = `http://${DAEMON_HOST}:${DAEMON_PORT}/?openscan=1`;
+            if (isDaemonRunning()) {
+              const internalToken = getInternalToken();
+              if (internalToken) {
+                try {
+                  const pushSummary = buildScanSummary([
+                    { id: 'claude', label: 'Claude', icon: '🤖', scan: claudeScan },
+                    { id: 'gemini', label: 'Gemini', icon: '♊', scan: geminiScan },
+                    { id: 'codex', label: 'Codex', icon: '🔮', scan: codexScan },
+                  ]);
+                  await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/scan/push`, {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      'x-node9-internal': internalToken,
+                    },
+                    body: JSON.stringify({ status: 'complete', summary: pushSummary }),
+                    signal: AbortSignal.timeout(3000),
+                  });
+                  // Note: no longer auto-opens the browser. The terminal scan
+                  // output is the canonical artifact; users who want the
+                  // browser dashboard can run `node9 daemon start --openui`.
+                } catch {
+                  // fire-and-forget
+                }
+              }
+            }
+            if (isDaemonRunning()) {
+              console.log('  ' + chalk.cyan('🌐 View in browser:') + '  ' + chalk.underline(url));
+            } else {
+              console.log(
+                '  ' +
+                  chalk.dim('📊 To view in browser, start the daemon:  ') +
+                  chalk.cyan('node9 daemon --background')
+              );
+            }
+            console.log('');
+          }
+          // When not wired, the install CTA above is the next step — no browser hint.
+        }
       }
-    });
+    );
 }

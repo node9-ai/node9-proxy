@@ -5,10 +5,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import readline from 'readline';
-import { spawn, execSync } from 'child_process';
+import { spawn } from 'child_process';
 import { DAEMON_PORT } from '../daemon';
-import { getInternalToken } from '../auth/daemon';
-import { getConfig } from '../core';
 
 const PID_FILE = path.join(os.homedir(), '.node9', 'daemon.pid');
 
@@ -46,6 +44,7 @@ interface ActivityItem {
   status?: string;
   costEstimate?: number;
   agent?: string;
+  mcpServer?: string;
 }
 
 interface ResultItem {
@@ -230,8 +229,12 @@ function wrappedLineCount(text: string): number {
 let pendingShownForId: string | null = null;
 let pendingWrappedLines = 0;
 
-function agentLabel(agent: string | undefined): string {
-  if (!agent || agent === 'Terminal') return '';
+function agentLabel(agent: string | undefined, mcpServer?: string): string {
+  if (!agent || agent === 'Terminal') {
+    // Even without an agent, surface the MCP server when present (e.g. direct
+    // gateway invocation without clientInfo). Otherwise blank as before.
+    return mcpServer ? chalk.dim(`[→ ${mcpServer}] `) : '';
+  }
   const short =
     agent === 'Claude Code'
       ? 'Claude'
@@ -240,7 +243,8 @@ function agentLabel(agent: string | undefined): string {
         : agent === 'Unknown Agent'
           ? ''
           : agent.split(' ')[0];
-  return short ? chalk.dim(`[${short}] `) : '';
+  if (!short) return mcpServer ? chalk.dim(`[→ ${mcpServer}] `) : '';
+  return mcpServer ? chalk.dim(`[${short} → ${mcpServer}] `) : chalk.dim(`[${short}] `);
 }
 
 function formatBase(activity: ActivityItem): string {
@@ -251,7 +255,7 @@ function formatBase(activity: ActivityItem): string {
     .replace(/\s+/g, ' ')
     .replaceAll(os.homedir(), '~');
   const argsPreview = argsStr.length > 70 ? argsStr.slice(0, 70) + '…' : argsStr;
-  return `${chalk.gray(time)} ${icon} ${agentLabel(activity.agent)}${chalk.white.bold(toolName)} ${chalk.dim(argsPreview)}`;
+  return `${chalk.gray(time)} ${icon} ${agentLabel(activity.agent, activity.mcpServer)}${chalk.white.bold(toolName)} ${chalk.dim(argsPreview)}`;
 }
 
 function renderResult(activity: ActivityItem, result: ResultItem): void {
@@ -882,28 +886,10 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
 
   const dashboardUrl = `http://127.0.0.1:${port}/`;
 
-  // Open the browser dashboard from the foreground process — more reliable than
-  // the daemon's detached spawn. Use execSync so failures throw and are caught.
-  // getConfig() reads the actual project config (approvers.browser), unlike
-  // GET /settings which only returns global settings and never includes approvers.
-  try {
-    const browserEnabled = getConfig().settings.approvers?.browser !== false;
-    if (browserEnabled) {
-      if (process.platform === 'darwin') execSync(`open "${dashboardUrl}"`, { stdio: 'ignore' });
-      else if (process.platform === 'win32')
-        execSync(`cmd /c start "" "${dashboardUrl}"`, { stdio: 'ignore' });
-      else execSync(`xdg-open "${dashboardUrl}"`, { stdio: 'ignore' });
-      // Notify the daemon so it won't open a duplicate tab on the first approval.
-      const intToken = getInternalToken();
-      fetch(`http://127.0.0.1:${port}/browser-opened`, {
-        method: 'POST',
-        headers: intToken ? { 'X-Node9-Internal': intToken } : {},
-      }).catch(() => {});
-    }
-  } catch {
-    // Browser open failed — URL is printed in the banner below so the user
-    // can open it manually.
-  }
+  // Browser auto-open removed — `node9 tail` is a terminal UI, opening the
+  // browser dashboard alongside it was confusing. The dashboard URL is
+  // printed in the banner below; users who want the browser run
+  // `node9 daemon start --openui` explicitly.
 
   // Warn if response-DLP findings exist in audit log
   const auditLog = path.join(os.homedir(), '.node9', 'audit.log');
@@ -1130,6 +1116,28 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
         // Race condition: result arrived before pending — buffer it until activity arrives
         orphanedResults.set(data.id, data);
       }
+    }
+
+    if (event === 'execution-result') {
+      // Emitted by the MCP gateway when an upstream tool call returns. Renders
+      // as a small follow-up line under the auth row so the user sees both the
+      // authorization decision (already on screen) and the actual completion.
+      const exec = data as unknown as {
+        tool?: string;
+        agent?: string;
+        mcpServer?: string;
+        durationMs?: number;
+        isError?: boolean;
+      };
+      const time = new Date(Date.now()).toLocaleTimeString([], { hour12: false });
+      const arrow = exec.isError ? chalk.red('  ↳ ✗') : chalk.green('  ↳ ✓');
+      const label = agentLabel(exec.agent, exec.mcpServer);
+      const tool = (exec.tool ?? '').slice(0, 16);
+      const duration =
+        typeof exec.durationMs === 'number' ? chalk.dim(` (${exec.durationMs}ms)`) : '';
+      console.log(
+        `${chalk.gray(time)} ${arrow} ${label}${chalk.dim(tool)}${chalk.dim(' completed')}${duration}`
+      );
     }
   }
 

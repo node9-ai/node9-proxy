@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/4aa6e45b-9aba-4953-9ce3-548226622588" width="720" alt="Node9 intercepts a dangerous git push" />
+  <img src="https://github.com/user-attachments/assets/bc165779-4200-438d-967a-20d42bbfe69e" width="720" alt="Node9 scan scorecard" />
 </p>
 
 <h1 align="center">🛡️ Node9</h1>
 
-<p align="center"><strong>Every command your AI agent runs, reviewed before it runs.</strong></p>
+<p align="center"><strong>What did your AI agent actually do? Find out, and stop the dangerous stuff.</strong></p>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/node9-ai"><img src="https://img.shields.io/npm/v/node9-ai.svg" alt="npm version" /></a>
@@ -14,58 +14,44 @@
   <a href="https://huggingface.co/spaces/Node9ai/node9-security-demo"><img src="https://huggingface.co/datasets/huggingface/badges/resolve/main/open-in-hf-spaces-sm.svg" alt="Try on HF Spaces" /></a>
 </p>
 
-Node9 sits between your AI agent and your system. Every shell command, file write, database query, and MCP tool call passes through Node9 first — blocked, reviewed, or logged based on your policy. Works with **Claude Code**, **Gemini CLI**, **Cursor**, **Codex**, and any **MCP server**.
-
-- 🛑 **Block** dangerous actions (`git push --force`, `rm -rf /`, `curl|bash`, `DROP TABLE`, ...) before they run
-- 👁 **Review** anything worth a human glance — OS-native popup, Slack, or browser approval
-- 🔑 **Catch credential leaks** in tool arguments, file contents Claude reads back, and shell config files
-- 🔭 **Map your blast radius** — see exactly what SSH keys, AWS credentials, and `.env` files an AI agent can reach right now
-- 🔁 **Stop agent loops** that burn tokens and money
-- 🔌 **Gate MCP tools** and detect rug-pull attacks on server definitions
-- 📊 **Dashboard + scan report** in your browser — see what your agents actually did
-
 ---
 
-## Try it in 10 seconds — no install
+## What `node9 scan` shows on a real machine
 
-```bash
-npx node9-ai scan
-```
-
-Reads your existing Claude / Gemini / Codex session history, runs the full Node9 policy engine, and shows every operation that would have been blocked or flagged.
-
-> Runs entirely locally — no API calls, no telemetry on `scan`, nothing leaves your machine.
+This is my own machine — 30 days while building Node9. Score 25/100, 5 credential files an AI agent could reach right now.
 
 ```
-🔍  Scanning your AI history  — what would node9 have caught?
+🛡  Node9 Scan  ·  21 sessions  ·  8,114 tool calls  ·  Apr 6 – May 1, 2026
 
-  15 sessions  (8 Claude · 6 Gemini · 1 Codex)  5,470 tool calls
-  2,439 bash commands  last 90 days  Apr 6, 2026 – Apr 23, 2026
+Security Score: 25/100  ·  Critical
+$3,789 AI spend  ·  62 risky operations
 
-  Found 168 risky operations in your history
+🔑  14   credential leak     (Bearer Token ×4, GCP API Key ×4, JWT ×2)
+🛑  15   would have blocked  (force-push ×5, read-ssh ×4, read-aws ×4)
+🔁  193  agent loops         (18% wasted  ·  ~$6.51)
+👁  33   flagged for review  (git-destructive ×19, rm ×9, sudo ×2)
 
-    🛑  Would have blocked       3   operations stopped before execution
-    👁   Would have flagged     162   sent to you for approval
-    🔑  Credential leak          3   secret detected in history or shell config
-    🔁  Loop detected          117   repeated tool call patterns found
+🔭  Blast radius             ssh × gcp × npm × other (5 exposures)
 
-  ──────────────────────────────────────────────────────────────────────
-  Your Rules  ·  added in node9.config.json   2 blocked · 157 review
-    🛑  block-force-push ×2  — Force push overwrites remote history
-    👁   review-git-push ×154 — git push sends changes to a shared remote
-
-  ──────────────────────────────────────────────────────────────────────
-  bash-safe  ·  high-risk bash patterns    1 blocked · 1 review
-    🛑  block-eval-remote  — eval of remote download (supply-chain attack)
-
-  🌐  View in browser:  http://127.0.0.1:7391/
+→  npx node9-ai scan         run this on your machine
 ```
 
-The last line opens a live dashboard in your browser with collapsible drill-downs, per-agent breakdown, and credential-leak samples:
+Run it on yours — `npx node9-ai scan` finishes in ~10 seconds and runs entirely local. Nothing uploads. The full breakdown with every tool call, file path, and timestamp is `node9 scan` (default mode). For a browser dashboard view, run `node9 daemon start --openui`.
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/825f99d8-b487-4746-9cef-a02a9ca76c1f" width="90%" alt="Node9 browser History Audit dashboard" />
 </p>
+
+---
+
+## What Node9 does
+
+- 🛑 **Block** dangerous AI actions before they run — `rm -rf`, `git push --force`, `DROP TABLE`, credential reads, `curl | bash`
+- 🔍 **Scan** what your AI agent has already been doing — loops, leaked secrets, blocked operations across every session
+- 🔑 **Catch credential leaks** — AWS keys, GitHub tokens, JWTs, GCP API keys, PEM private keys flagged in tool arguments, file contents Claude reads back, and shell config files
+- 🔭 **Map your blast radius** — every SSH key, AWS credential, and `.env` file an AI agent on this machine could reach right now
+
+Works with **Claude Code · Cursor · Codex · Gemini CLI · any MCP server**.
 
 ---
 

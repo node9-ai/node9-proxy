@@ -24,7 +24,13 @@ import { checkProvenance } from '../utils/provenance.js';
 import { hashToolDefinitions, getServerKey, checkPin, updatePin } from '../mcp-pin';
 import type { McpToolInfo } from '../daemon/mcp-tools';
 import { getServerConfig } from '../daemon/mcp-tools';
-import { DAEMON_PORT, DAEMON_HOST, isDaemonRunning, getInternalToken } from '../auth/daemon';
+import {
+  DAEMON_PORT,
+  DAEMON_HOST,
+  isDaemonRunning,
+  getInternalToken,
+  notifyActivitySocket,
+} from '../auth/daemon';
 import { readActiveShields } from '../shields';
 
 /** Wait for human approval of new MCP tools. Polls daemon for status change. */
@@ -75,6 +81,29 @@ function isValidId(id: unknown): id is string | number | null {
 function extractMcpServer(toolName: string): string | undefined {
   const match = toolName.match(/^mcp__([^_](?:[^_]|_(?!_))*?)__/i);
   return match?.[1];
+}
+
+/**
+ * Normalize a client's `clientInfo.name` (from the MCP initialize handshake)
+ * to a friendly agent label used in tail/audit/dashboard surfaces.
+ *
+ * Returns undefined for empty/missing/non-string input so the caller can fall
+ * back to a default ("MCP-Gateway") cleanly.
+ *
+ * Known clients are mapped to canonical labels; unknown clients keep their
+ * sanitized raw name (control chars stripped, capped at 40 chars).
+ */
+export function normalizeClientName(name: unknown): string | undefined {
+  if (typeof name !== 'string' || name.length === 0) return undefined;
+  const lower = name.toLowerCase();
+  if (lower.includes('claude')) return 'Claude';
+  if (lower.includes('cursor')) return 'Cursor';
+  if (lower.includes('codex')) return 'Codex';
+  if (lower.includes('gemini')) return 'Gemini';
+  if (lower.includes('cline')) return 'Cline';
+  if (lower.includes('continue')) return 'Continue';
+  const sanitized = sanitize(name).slice(0, 40);
+  return sanitized.length > 0 ? sanitized : undefined;
 }
 
 /**
@@ -214,6 +243,22 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
   // attribute large responses to the tool that triggered them.
   const pendingCallNames = new Map<string | number, string>();
 
+  // Tracks in-flight tool calls so the upstream response handler can emit a
+  // post-execution event (status: 'execution-completed') with durationMs +
+  // success/error attribution. Populated when forwarding to upstream, drained
+  // when the matching response comes back. Independent of pendingCallNames
+  // because the post-exec attribution needs more fields (agent, mcpServer, ts).
+  const pendingExecutions = new Map<
+    string | number,
+    { ts: number; toolName: string; agent?: string; mcpServer?: string }
+  >();
+
+  // Captured from the MCP `initialize` handshake (clientInfo.name).
+  // Used to attribute tools/call events to the originating agent (Claude /
+  // Cursor / Codex / Gemini) in tail and audit surfaces. Falls back to
+  // "MCP-Gateway" if the client never sent initialize or omitted clientInfo.
+  let clientName: string | undefined;
+
   // ── INTERCEPT INPUT (Agent → Gateway → Upstream) ──────────────────────────
   const agentIn = readline.createInterface({ input: process.stdin, terminal: false });
 
@@ -243,6 +288,19 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
       message = { ...parsed, id: parsed.id as string | number | null | undefined };
     } catch {
       // Non-JSON line — forward as-is (handles raw shell or malformed input)
+      child.stdin.write(line + '\n');
+      return;
+    }
+
+    // Capture client identity from the MCP initialize handshake. The MCP spec
+    // requires every compliant client to send `initialize` as its first request,
+    // including `params.clientInfo.name`. We store the normalized name so later
+    // tools/call events can be attributed to the originating agent (Claude /
+    // Cursor / Codex / Gemini) instead of the generic "MCP-Gateway" label.
+    if (message.method === 'initialize') {
+      clientName = normalizeClientName(
+        (message.params?.clientInfo as { name?: unknown } | undefined)?.name
+      );
       child.stdin.write(line + '\n');
       return;
     }
@@ -317,7 +375,7 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
         const mcpServer = extractMcpServer(toolName);
 
         const result = await authorizeHeadless(toolName, toolArgs, {
-          agent: 'MCP-Gateway',
+          agent: clientName ?? 'MCP-Gateway',
           mcpServer,
         });
 
@@ -355,6 +413,12 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
         // happens BEFORE the finally block can call child.stdin.end().
         if (message.id !== undefined && message.id !== null) {
           pendingCallNames.set(message.id as string | number, toolName);
+          pendingExecutions.set(message.id as string | number, {
+            ts: Date.now(),
+            toolName,
+            agent: clientName,
+            mcpServer,
+          });
         }
         child.stdin.write(line + '\n');
       } catch {
@@ -551,6 +615,31 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
           drainPendingToolCalls();
         }
         return;
+      }
+    }
+
+    // Post-execution event: when the upstream returns a response for a tracked
+    // tool call, emit a flight-recorder event with durationMs + success/error.
+    // Lets `node9 tail` show the tool actually completed (not just authorized)
+    // and gives the audit log real wall-clock duration. Fire-and-forget; never
+    // blocks the response forward.
+    const respId = parsed?.id;
+    if (respId !== undefined && respId !== null) {
+      const exec = pendingExecutions.get(respId as string | number);
+      if (exec) {
+        pendingExecutions.delete(respId as string | number);
+        const durationMs = Date.now() - exec.ts;
+        const isError = parsed?.error !== undefined;
+        notifyActivitySocket({
+          id: String(respId),
+          ts: Date.now(),
+          tool: exec.toolName,
+          status: 'execution-completed',
+          durationMs,
+          agent: exec.agent,
+          mcpServer: exec.mcpServer,
+          isError,
+        }).catch(() => {});
       }
     }
 

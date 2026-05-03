@@ -509,6 +509,9 @@ export function startActivitySocket(): void {
           argsSummary?: string;
           fileCount?: number;
           agent?: string;
+          mcpServer?: string;
+          durationMs?: number;
+          isError?: boolean;
         };
         // Track test results for stateful smart rules
         if (data.status === 'test_pass') {
@@ -530,6 +533,23 @@ export function startActivitySocket(): void {
           return;
         }
 
+        if (data.status === 'execution-completed') {
+          // Emitted by the MCP gateway when an upstream tool call response
+          // arrives. Distinct from 'activity-result' (which marks the auth
+          // decision) — this marks the actual upstream completion plus
+          // wall-clock duration.
+          broadcast('execution-result', {
+            id: data.id,
+            ts: data.ts,
+            tool: data.tool,
+            agent: data.agent,
+            mcpServer: data.mcpServer,
+            durationMs: data.durationMs,
+            isError: data.isError,
+          });
+          return;
+        }
+
         if (data.status === 'pending') {
           broadcast('activity', {
             id: data.id,
@@ -538,6 +558,7 @@ export function startActivitySocket(): void {
             args: redactArgs(data.args),
             status: 'pending',
             agent: data.agent,
+            mcpServer: data.mcpServer,
           });
         } else {
           // Update session counters for HUD
@@ -570,6 +591,8 @@ export function startActivitySocket(): void {
             status: data.status,
             label: data.label,
             costEstimate,
+            agent: data.agent,
+            mcpServer: data.mcpServer,
           });
         }
       } catch {}

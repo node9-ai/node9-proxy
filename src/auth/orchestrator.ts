@@ -146,6 +146,7 @@ function notifyActivity(data: {
   ruleHit?: string;
   observeWouldBlock?: boolean;
   agent?: string;
+  mcpServer?: string;
 }): Promise<boolean> {
   return notifyActivitySocket(data);
 }
@@ -166,19 +167,22 @@ export async function authorizeHeadless(
     // in tests — vi.advanceTimersByTime fires before the setTimeout is registered.
     // Future refactor: move timeout racer registration to before this call so the
     // clock starts before any I/O side effects, and fake timers become usable.
+    // Strip ANSI escape sequences — agent / mcpServer come from caller-supplied
+    // metadata and may be displayed in a terminal (node9 tail/watch), enabling
+    // injection. Same regex as agent below; mcpServer is shorter (40 chars max).
+    const stripAnsi = (s: string): string =>
+      s.replace(/\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-_])/g, '');
+    const sanitizedAgent = meta?.agent ? stripAnsi(meta.agent).slice(0, 80) : undefined;
+    const sanitizedMcpServer = meta?.mcpServer ? stripAnsi(meta.mcpServer).slice(0, 40) : undefined;
+
     const socketOk = await notifyActivity({
       id: actId,
       ts: actTs,
       tool: toolName,
       args,
       status: 'pending',
-      // Strip ANSI escape sequences — agent name comes from caller-supplied metadata
-      // and may be displayed in a terminal (node9 tail/watch), enabling injection.
-      agent: meta?.agent
-        ? meta.agent
-            .replace(/\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-_])/g, '')
-            .slice(0, 80)
-        : undefined,
+      agent: sanitizedAgent,
+      mcpServer: sanitizedMcpServer,
     });
     const result = await _authorizeHeadlessCore(toolName, args, meta, {
       ...options,
@@ -206,6 +210,8 @@ export async function authorizeHeadless(
         label: result.blockedByLabel,
         ruleHit: result.ruleHit,
         observeWouldBlock: result.observeWouldBlock,
+        agent: sanitizedAgent,
+        mcpServer: sanitizedMcpServer,
       });
     }
     return result;
