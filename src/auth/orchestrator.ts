@@ -474,7 +474,13 @@ async function _authorizeHeadlessCore(
 
     if (policyResult.decision === 'allow') {
       if (approvers.cloud && creds?.apiKey)
-        await auditLocalAllow(toolName, args, 'local-policy', creds, meta);
+        await auditLocalAllow(toolName, args, 'local-policy', creds, meta, undefined, false, {
+          ruleName: policyResult.ruleName,
+          ruleDescription: policyResult.ruleDescription,
+          blockedByLabel: policyResult.blockedByLabel,
+          matchedField: policyResult.matchedField,
+          matchedWord: policyResult.matchedWord,
+        });
       if (!isManual) appendLocalAudit(toolName, args, 'allow', 'local-policy', meta, hashAuditArgs);
       return { approved: true, checkedBy: 'local-policy' };
     }
@@ -524,13 +530,25 @@ async function _authorizeHeadlessCore(
         if (!isManual)
           appendLocalAudit(toolName, args, 'deny', 'smart-rule-block', meta, hashAuditArgs);
         if (approvers.cloud && creds?.apiKey)
-          auditLocalAllow(toolName, args, 'smart-rule-block', creds, meta);
+          auditLocalAllow(toolName, args, 'smart-rule-block', creds, meta, undefined, false, {
+            ruleName: policyResult.ruleName,
+            ruleDescription: policyResult.ruleDescription,
+            blockedByLabel: policyResult.blockedByLabel,
+            matchedField: policyResult.matchedField,
+            matchedWord: policyResult.matchedWord,
+          });
         // Fall through to the race engine with the block label visible to the user.
       } else {
         if (!isManual)
           appendLocalAudit(toolName, args, 'deny', 'smart-rule-block', meta, hashAuditArgs);
         if (approvers.cloud && creds?.apiKey)
-          auditLocalAllow(toolName, args, 'smart-rule-block', creds, meta);
+          auditLocalAllow(toolName, args, 'smart-rule-block', creds, meta, undefined, false, {
+            ruleName: policyResult.ruleName,
+            ruleDescription: policyResult.ruleDescription,
+            blockedByLabel: policyResult.blockedByLabel,
+            matchedField: policyResult.matchedField,
+            matchedWord: policyResult.matchedWord,
+          });
         return {
           approved: false,
           reason: policyResult.reason ?? 'Action explicitly blocked by Smart Policy.',

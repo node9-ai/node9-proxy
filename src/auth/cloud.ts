@@ -86,7 +86,19 @@ export function auditLocalAllow(
   creds: { apiKey: string; apiUrl: string },
   meta?: { agent?: string; mcpServer?: string },
   dlpInfo?: { pattern: string; redactedSample: string },
-  containsSensitiveArgs: boolean = false
+  containsSensitiveArgs: boolean = false,
+  // Optional rule attribution. Forwarded into the audit-log row's
+  // riskMetadata column so the SaaS /report endpoint can classify the
+  // event by rule name (engine's classifyAuditEntry uses ruleName as
+  // the highest-priority signal). Without this, every local
+  // smart-rule-block falls back to "high — Bash block" in the Report.
+  riskMetadata?: {
+    ruleName?: string;
+    ruleDescription?: string;
+    blockedByLabel?: string;
+    matchedField?: string;
+    matchedWord?: string;
+  }
 ): Promise<void> {
   // SSRF / key-leak guard: refuse to send the bearer token to anything that
   // isn't HTTPS (loopback excepted for tests/dev). Silent skip — we never
@@ -113,6 +125,15 @@ export function auditLocalAllow(
       : undefined;
   const safeCheckedBy = KNOWN_CHECKED_BY.has(checkedBy) ? checkedBy : 'unknown';
 
+  // Strip empty / undefined fields so the backend Zod schema (.strict())
+  // doesn't reject the payload. Only forward keys that have a real value.
+  const cleanedRiskMetadata = riskMetadata
+    ? Object.fromEntries(
+        Object.entries(riskMetadata).filter(([, v]) => typeof v === 'string' && v.length > 0)
+      )
+    : undefined;
+  const hasRiskMetadata = cleanedRiskMetadata && Object.keys(cleanedRiskMetadata).length > 0;
+
   return fetch(`${validated.toString().replace(/\/$/, '')}/audit`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${creds.apiKey}` },
@@ -121,6 +142,7 @@ export function auditLocalAllow(
       args: safeArgs,
       checkedBy: safeCheckedBy,
       ...(dlpInfo && { dlpPattern, dlpSample }),
+      ...(hasRiskMetadata && { riskMetadata: cleanedRiskMetadata }),
       context: {
         agent: meta?.agent,
         mcpServer: meta?.mcpServer,
