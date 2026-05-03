@@ -10,7 +10,8 @@ import os from 'os';
 import path from 'path';
 import { getConfig } from '../config/index.js';
 import { runBlast } from '../cli/commands/blast.js';
-import { summarizeBlast } from '@node9/policy-engine';
+import { summarizeBlast, summarizeScan } from '@node9/policy-engine';
+import { tickScanWatcher } from './scan-watermark.js';
 
 // Computed lazily so tests can mock os.homedir() before any call
 const rulesCacheFile = () => path.join(os.homedir(), '.node9', 'rules-cache.json');
@@ -231,6 +232,14 @@ async function syncOnce(): Promise<void> {
   if (process.env.NODE9_BLAST_DISABLE !== '1') {
     void pushBlastSnapshot(creds);
   }
+
+  // Same pattern for the forward-only scan: walk JSONL deltas, summarise,
+  // POST to /intercept/scan/report. Watermark module is the source of
+  // truth for "what's new since last tick"; it never reads historical
+  // content. Opt-out via NODE9_SCAN_DISABLE=1.
+  if (process.env.NODE9_SCAN_DISABLE !== '1') {
+    void pushScanSnapshot(creds);
+  }
 }
 
 /**
@@ -292,6 +301,67 @@ async function pushBlastSnapshot(creds: { apiKey: string; apiUrl: string }): Pro
 }
 
 /**
+ * Run the forward-only scan watermark and POST the summary to the SaaS.
+ * Fire-and-forget. Mirrors pushBlastSnapshot one-for-one, including URL
+ * derivation (replace `/policies/sync` → `/scan/report`) and silent
+ * failure mode.
+ *
+ * Privacy: the watermark module produces ScanFinding objects that contain
+ * pattern names + counts only; summarizeScan reduces them to a per-tier
+ * aggregate. Nothing in this payload contains prompt text, tool args, or
+ * file paths.
+ */
+async function pushScanSnapshot(creds: { apiKey: string; apiUrl: string }): Promise<void> {
+  try {
+    const tick = await tickScanWatcher();
+    // Skip the network round-trip when there's nothing new to report —
+    // empty summaries waste an API call and inflate the SaaS rate limit.
+    if (tick.findings.length === 0 && tick.totalToolCalls === 0) {
+      return;
+    }
+    const summary = summarizeScan(tick.findings, {
+      totalToolCalls: tick.totalToolCalls,
+    });
+
+    const scanUrl = creds.apiUrl.endsWith('/policies/sync')
+      ? creds.apiUrl.replace(/\/policies\/sync$/, '/scan/report')
+      : null;
+    if (!scanUrl) return;
+
+    const parsed = new URL(scanUrl);
+    await new Promise<void>((resolve) => {
+      const req = https.request(
+        {
+          hostname: parsed.hostname,
+          port: parsed.port ? parseInt(parsed.port, 10) : undefined,
+          path: parsed.pathname + parsed.search,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${creds.apiKey}`,
+          },
+          timeout: 10_000,
+        },
+        (res) => {
+          res.resume();
+          res.on('end', resolve);
+          res.on('error', () => resolve());
+        }
+      );
+      req.on('error', () => resolve());
+      req.on('timeout', () => {
+        req.destroy();
+        resolve();
+      });
+      req.write(JSON.stringify(summary));
+      req.end();
+    });
+  } catch {
+    // Silent — never break sync over a scan push.
+  }
+}
+
+/**
  * Run a single cloud policy sync and return a result summary.
  * Exported for use by `node9 sync` CLI command.
  */
@@ -306,10 +376,13 @@ export async function runCloudSync(): Promise<
   // Whether the policy fetch succeeded or failed, kick off the blast
   // push fire-and-forget so the manual `node9 policy sync` command also
   // refreshes the SaaS-side disk exposure aggregate. Same opt-out env
-  // var as the daemon path.
+  // var as the daemon path. Scan piggybacks the same way.
   const maybePushBlast = () => {
     if (process.env.NODE9_BLAST_DISABLE !== '1') {
       void pushBlastSnapshot(creds);
+    }
+    if (process.env.NODE9_SCAN_DISABLE !== '1') {
+      void pushScanSnapshot(creds);
     }
   };
 

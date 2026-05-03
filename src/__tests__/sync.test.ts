@@ -20,15 +20,25 @@ process.env.NODE9_TESTING = '1';
 // we need to assert it's invoked / skipped based on NODE9_BLAST_DISABLE.
 // vi.hoisted lets us reference the mock from inside vi.mock's hoisted
 // factory without TDZ errors.
-const { mockRunBlast } = vi.hoisted(() => ({
+const { mockRunBlast, mockTickScanWatcher } = vi.hoisted(() => ({
   mockRunBlast: vi.fn().mockReturnValue({
     reachable: [],
     envFindings: [],
     score: 100,
   }),
+  mockTickScanWatcher: vi.fn().mockResolvedValue({
+    findings: [],
+    totalToolCalls: 0,
+    filesScanned: 0,
+    filesNew: 0,
+    filesSkipped: 0,
+  }),
 }));
 vi.mock('../cli/commands/blast.js', () => ({
   runBlast: mockRunBlast,
+}));
+vi.mock('../daemon/scan-watermark.js', () => ({
+  tickScanWatcher: mockTickScanWatcher,
 }));
 
 const MOCK_HOME = '/mock/home';
@@ -233,6 +243,51 @@ describe('blast piggyback on cloud sync', () => {
     await runCloudSync();
     await new Promise((resolve) => setImmediate(resolve));
     expect(mockRunBlast).not.toHaveBeenCalled();
+  });
+});
+
+// ── B1.3 sibling: forward-only scan piggyback ──────────────────────────
+
+describe('scan piggyback on cloud sync', () => {
+  beforeEach(() => {
+    mockTickScanWatcher.mockClear();
+    delete process.env.NODE9_SCAN_DISABLE;
+  });
+
+  it('invokes tickScanWatcher when sync runs and NODE9_SCAN_DISABLE is unset', async () => {
+    mockFiles({
+      [CRED_PATH]: JSON.stringify({
+        default: {
+          apiKey: 'n9_live_abc123',
+          apiUrl: 'https://localhost:1/api/v1/intercept',
+        },
+      }),
+    });
+    await runCloudSync();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockTickScanWatcher).toHaveBeenCalled();
+  });
+
+  it('skips tickScanWatcher when NODE9_SCAN_DISABLE=1 (opt-out)', async () => {
+    process.env.NODE9_SCAN_DISABLE = '1';
+    mockFiles({
+      [CRED_PATH]: JSON.stringify({
+        default: {
+          apiKey: 'n9_live_abc123',
+          apiUrl: 'https://localhost:1/api/v1/intercept',
+        },
+      }),
+    });
+    await runCloudSync();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockTickScanWatcher).not.toHaveBeenCalled();
+  });
+
+  it('skips tickScanWatcher when there are no credentials', async () => {
+    mockFiles({});
+    await runCloudSync();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockTickScanWatcher).not.toHaveBeenCalled();
   });
 });
 

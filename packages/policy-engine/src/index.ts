@@ -9,7 +9,7 @@
 // scanFilePath wrapper since that's filesystem access.
 
 /** Engine version stamped on audit entries for future drift detection. */
-export const ENGINE_VERSION = '1.2.0';
+export const ENGINE_VERSION = '1.3.0';
 
 export type { SmartCondition, SmartRule, DlpMatch, RiskMetadata } from './types';
 
@@ -87,3 +87,11 @@ export {
 // tick. Pure: host code does the I/O, engine sanitises + sorts.
 export type { BlastFinding, BlastEnvFinding, BlastResult, BlastSummary } from './blast';
 export { summarizeBlast, truncateBlastPath } from './blast';
+
+// Scan summarization — forward-only watermark scanner output, reduced to
+// counts-only summary the proxy pushes to the SaaS on every policy-sync
+// tick. Privacy invariant: NEVER carries prompt text, tool args, or file
+// paths. Pure: host code reads JSONL deltas + runs extractors, engine
+// aggregates the resulting findings into a network-safe summary.
+export type { ScanFinding, ScanSignals, ScanSummary } from './scan';
+export { summarizeScan, computeScanScore } from './scan';
