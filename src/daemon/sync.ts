@@ -70,7 +70,15 @@ function readCredentials(): { apiKey: string; apiUrl: string } | null {
         apiKey: profile.apiKey,
         apiUrl:
           typeof profile.apiUrl === 'string'
-            ? profile.apiUrl.replace(/\/intercept$/, '/policy')
+            ? // Credentials store the firewall base URL (e.g.
+              // `https://api.node9.ai/api/v1/intercept`) so existing CLI
+              // calls keep working. Sync lives at `/intercept/policies/sync`
+              // — append the suffix when the stored URL ends in `/intercept`.
+              // Anything else is taken as-is so users can override the full
+              // URL via NODE9_API_URL or a non-standard apiUrl.
+              /\/intercept$/.test(profile.apiUrl)
+              ? profile.apiUrl + '/policies/sync'
+              : profile.apiUrl
             : DEFAULT_API_URL,
       };
     }
