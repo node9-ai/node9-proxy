@@ -28,7 +28,7 @@ vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
 vi.spyOn(fs, 'mkdirSync').mockImplementation(() => undefined);
 const homeSpy = vi.spyOn(os, 'homedir');
 
-import { runCloudSync, getCloudSyncStatus, getCloudRules } from '../daemon/sync.js';
+import { runCloudSync, getCloudSyncStatus, getCloudRules, extractRules } from '../daemon/sync.js';
 import { getConfig, _resetConfigCache } from '../core.js';
 
 // ── helpers ────────────────────────────────────────────────────────────────────
@@ -249,5 +249,65 @@ describe('getConfig — cloud rules cache layer', () => {
       }),
     });
     expect(getConfig().settings.cloudSyncIntervalHours).toBe(12);
+  });
+
+  // ── Cloud-policy cache shape with new SaaS endpoint fields ───────────────
+  // The /intercept/policies/sync endpoint returns more than just rules:
+  // panicMode, shadowMode, syncIntervalHours, workspaceId, plus an ETag.
+  // The cache file preserves all of these so the engine can apply them
+  // and the next sync can send `If-None-Match` for cheap 304 polling.
+
+  it('reads cloud rules from a cache written with the new sync endpoint shape', () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({ settings: { mode: 'standard' } }),
+      [CACHE_PATH]: JSON.stringify({
+        fetchedAt: '2026-05-03T00:00:00.000Z',
+        // New endpoint serialises into the same `rules` key for back-compat
+        rules: [
+          {
+            name: 'org:cloud-block-aws-read',
+            verdict: 'block',
+            conditions: [{ field: 'command', op: 'matches', pattern: 'cat ~/\\.aws' }],
+          },
+        ],
+        // New fields stored alongside the existing rules array
+        etag: 'abc123def4567890',
+        panicMode: false,
+        shadowMode: false,
+        syncIntervalHours: 1,
+        workspaceId: 'ws_test',
+      }),
+    });
+    const config = getConfig();
+    const rule = config.policy.smartRules.find((r) => r.name === 'org:cloud-block-aws-read');
+    expect(rule).toBeDefined();
+    expect(rule?.verdict).toBe('block');
+  });
+});
+
+// ── extractRules: tolerates three historical response shapes ───────────────
+
+describe('extractRules', () => {
+  it('extracts policies from the new endpoint shape', () => {
+    const rules = extractRules({ policies: [{ name: 'r1' }, { name: 'r2' }] });
+    expect(rules).toHaveLength(2);
+  });
+
+  it('falls back to the legacy `rules` field when `policies` is absent', () => {
+    const rules = extractRules({ rules: [{ name: 'r1' }] });
+    expect(rules).toHaveLength(1);
+  });
+
+  it('prefers `policies` over `rules` when both are present', () => {
+    const rules = extractRules({
+      policies: [{ name: 'new' }],
+      rules: [{ name: 'old' }],
+    });
+    expect(rules).toEqual([{ name: 'new' }]);
+  });
+
+  it('returns an empty array for an unrecognised body shape', () => {
+    expect(extractRules({})).toEqual([]);
+    expect(extractRules({ policies: 'not-an-array' as never })).toEqual([]);
   });
 });

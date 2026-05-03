@@ -12,13 +12,43 @@ import { getConfig } from '../config/index.js';
 
 // Computed lazily so tests can mock os.homedir() before any call
 const rulesCacheFile = () => path.join(os.homedir(), '.node9', 'rules-cache.json');
-const DEFAULT_API_URL = 'https://api.node9.ai/api/v1/policy';
+const DEFAULT_API_URL = 'https://api.node9.ai/api/v1/intercept/policies/sync';
 const DEFAULT_INTERVAL_HOURS = 5;
 const MIN_INTERVAL_HOURS = 1;
 
+/**
+ * Local cache file shape — kept backward-compatible (`rules` field name
+ * preserved for the existing config-waterfall reader in `config/index.ts`).
+ *
+ * The `etag`, `panicMode`, `shadowMode`, `syncIntervalHours`, and
+ * `workspaceId` fields are populated from the SaaS sync endpoint response.
+ * `etag` is sent back as `If-None-Match` on the next sync to enable
+ * cheap 304 polling. `panicMode` and `shadowMode` are stored here so
+ * the policy engine can apply them when evaluating tool calls.
+ */
 export interface RulesCache {
   fetchedAt: string; // ISO-8601
   rules: unknown[];
+  etag?: string;
+  panicMode?: boolean;
+  shadowMode?: boolean;
+  syncIntervalHours?: number;
+  workspaceId?: string;
+}
+
+/**
+ * Result of a single fetch — either a fresh policy snapshot or a 304
+ * indicating the server's policy hasn't changed since the last sync.
+ */
+type FetchResult = { kind: 'fresh'; body: CloudPolicyBody; etag?: string } | { kind: 'unchanged' };
+
+interface CloudPolicyBody {
+  policies?: unknown[];
+  rules?: unknown[]; // legacy field name from older /api/v1/policy responses
+  panicMode?: boolean;
+  shadowMode?: boolean;
+  syncIntervalHours?: number;
+  workspaceId?: string;
 }
 
 function readCredentials(): { apiKey: string; apiUrl: string } | null {
@@ -53,8 +83,33 @@ function readCredentials(): { apiKey: string; apiUrl: string } | null {
   return null;
 }
 
-function fetchCloudRules(apiKey: string, apiUrl: string): Promise<unknown[]> {
+/**
+ * Read the existing cache file to extract the last-known ETag. Used to
+ * send `If-None-Match` on the next sync so the server can short-circuit
+ * with 304 when nothing has changed. Silent fallback on any error —
+ * a missing or corrupt cache simply means "no cached etag, send 200".
+ */
+function readCachedEtag(): string | undefined {
+  try {
+    const raw = JSON.parse(fs.readFileSync(rulesCacheFile(), 'utf-8')) as Record<string, unknown>;
+    return typeof raw.etag === 'string' ? raw.etag : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function fetchCloudPolicy(
+  apiKey: string,
+  apiUrl: string,
+  ifNoneMatch?: string
+): Promise<FetchResult> {
   const parsed = new URL(apiUrl);
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+  };
+  if (ifNoneMatch) headers['If-None-Match'] = `"${ifNoneMatch}"`;
+
   return new Promise((resolve, reject) => {
     const req = https.request(
       {
@@ -62,13 +117,19 @@ function fetchCloudRules(apiKey: string, apiUrl: string): Promise<unknown[]> {
         port: parsed.port ? parseInt(parsed.port, 10) : undefined,
         path: parsed.pathname + parsed.search,
         method: 'GET',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
+        headers,
         timeout: 10_000,
       },
       (res) => {
+        // 304 Not Modified — server confirms our cache is still valid.
+        // No body to parse; the caller keeps the existing cache as-is.
+        if (res.statusCode === 304) {
+          // Drain the stream so the connection can be reused / closed cleanly.
+          res.resume();
+          resolve({ kind: 'unchanged' });
+          return;
+        }
+
         const chunks: Buffer[] = [];
         res.on('data', (chunk: Buffer) => chunks.push(chunk));
         res.on('end', () => {
@@ -77,13 +138,16 @@ function fetchCloudRules(apiKey: string, apiUrl: string): Promise<unknown[]> {
             return;
           }
           try {
-            const body = JSON.parse(Buffer.concat(chunks).toString('utf-8')) as unknown;
-            const rules = Array.isArray(body)
-              ? body
-              : Array.isArray((body as Record<string, unknown>).rules)
-                ? ((body as Record<string, unknown>).rules as unknown[])
-                : [];
-            resolve(rules);
+            const body = JSON.parse(Buffer.concat(chunks).toString('utf-8')) as
+              | CloudPolicyBody
+              | unknown[];
+            const normalized: CloudPolicyBody = Array.isArray(body) ? { policies: body } : body;
+            // Strip surrounding quotes from the ETag header per RFC 7232 §
+            // 2.3 — entity tags are quoted on the wire but compared as opaque
+            // strings.
+            const rawEtag = res.headers.etag;
+            const etag = typeof rawEtag === 'string' ? rawEtag.replace(/^"|"$/g, '') : undefined;
+            resolve({ kind: 'fresh', body: normalized, etag });
           } catch (e) {
             reject(e);
           }
@@ -98,16 +162,53 @@ function fetchCloudRules(apiKey: string, apiUrl: string): Promise<unknown[]> {
   });
 }
 
+/**
+ * Pulls the rules array out of a server response, accommodating three
+ * historical shapes:
+ *   - new endpoint:  `{ policies: [...] }`
+ *   - legacy field:  `{ rules: [...] }`
+ *   - oldest:        bare array
+ *
+ * Returns an empty array on any unrecognised shape. Exported for unit tests.
+ */
+export function extractRules(body: CloudPolicyBody): unknown[] {
+  if (Array.isArray(body.policies)) return body.policies;
+  if (Array.isArray(body.rules)) return body.rules;
+  return [];
+}
+
+/**
+ * Write the policy cache atomically. Best-effort: directory creation
+ * failures fall through silently — the proxy will fall back to local
+ * config and surface the issue via `node9 sync` if the user runs it
+ * explicitly.
+ */
+function writeCache(cache: RulesCache): void {
+  const dir = path.dirname(rulesCacheFile());
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(rulesCacheFile(), JSON.stringify(cache, null, 2) + '\n', 'utf-8');
+}
+
 async function syncOnce(): Promise<void> {
   const creds = readCredentials();
   if (!creds) return; // No API key configured — silent no-op
 
   try {
-    const rules = await fetchCloudRules(creds.apiKey, creds.apiUrl);
-    const cache: RulesCache = { fetchedAt: new Date().toISOString(), rules };
-    const dir = path.dirname(rulesCacheFile());
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(rulesCacheFile(), JSON.stringify(cache, null, 2) + '\n', 'utf-8');
+    const result = await fetchCloudPolicy(creds.apiKey, creds.apiUrl, readCachedEtag());
+    if (result.kind === 'unchanged') {
+      // 304 — keep existing cache as-is. Server confirmed nothing changed.
+      return;
+    }
+    const cache: RulesCache = {
+      fetchedAt: new Date().toISOString(),
+      rules: extractRules(result.body),
+      etag: result.etag,
+      panicMode: result.body.panicMode,
+      shadowMode: result.body.shadowMode,
+      syncIntervalHours: result.body.syncIntervalHours,
+      workspaceId: result.body.workspaceId,
+    };
+    writeCache(cache);
   } catch {
     // Best-effort — stale cache (or no cache) is fine; proxy falls back to local config
   }
@@ -118,19 +219,34 @@ async function syncOnce(): Promise<void> {
  * Exported for use by `node9 sync` CLI command.
  */
 export async function runCloudSync(): Promise<
-  { ok: true; rules: number; fetchedAt: string } | { ok: false; reason: string }
+  | { ok: true; rules: number; fetchedAt: string; unchanged?: boolean }
+  | { ok: false; reason: string }
 > {
   const creds = readCredentials();
   if (!creds) {
     return { ok: false, reason: 'No API key configured. Add credentials with: node9 login' };
   }
   try {
-    const rules = await fetchCloudRules(creds.apiKey, creds.apiUrl);
-    const cache: RulesCache = { fetchedAt: new Date().toISOString(), rules };
-    const dir = path.dirname(rulesCacheFile());
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(rulesCacheFile(), JSON.stringify(cache, null, 2) + '\n', 'utf-8');
-    return { ok: true, rules: rules.length, fetchedAt: cache.fetchedAt };
+    const result = await fetchCloudPolicy(creds.apiKey, creds.apiUrl, readCachedEtag());
+    if (result.kind === 'unchanged') {
+      // 304 — keep existing cache. Report success against the cached
+      // counts so the CLI still tells the user how many rules are active.
+      const status = getCloudSyncStatus();
+      return status.cached
+        ? { ok: true, rules: status.rules, fetchedAt: status.fetchedAt, unchanged: true }
+        : { ok: true, rules: 0, fetchedAt: new Date().toISOString(), unchanged: true };
+    }
+    const cache: RulesCache = {
+      fetchedAt: new Date().toISOString(),
+      rules: extractRules(result.body),
+      etag: result.etag,
+      panicMode: result.body.panicMode,
+      shadowMode: result.body.shadowMode,
+      syncIntervalHours: result.body.syncIntervalHours,
+      workspaceId: result.body.workspaceId,
+    };
+    writeCache(cache);
+    return { ok: true, rules: cache.rules.length, fetchedAt: cache.fetchedAt };
   } catch (err) {
     return { ok: false, reason: err instanceof Error ? err.message : String(err) };
   }
