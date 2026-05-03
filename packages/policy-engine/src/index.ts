@@ -9,7 +9,7 @@
 // scanFilePath wrapper since that's filesystem access.
 
 /** Engine version stamped on audit entries for future drift detection. */
-export const ENGINE_VERSION = '1.0.0';
+export const ENGINE_VERSION = '1.1.0';
 
 export type { SmartCondition, SmartRule, DlpMatch, RiskMetadata } from './types';
 
@@ -70,3 +70,14 @@ export {
 // Loop detection — pure sliding-window math; host wraps with persistence.
 export type { ToolCallRecord, LoopWindowEvaluation } from './loop';
 export { LOOP_MAX_RECORDS, computeArgsHash, evaluateLoopWindow } from './loop';
+
+// Severity classification & risk scoring — single source of truth for
+// "how bad is this?" used by both proxy `scan --narrative` and the SaaS
+// /report aggregation endpoint.
+export type { Severity, ScoreTier, AuditEntryForClassify } from './severity';
+export {
+  classifyRuleSeverity,
+  narrativeRuleLabel,
+  classifyAuditEntry,
+  computeSecurityScore,
+} from './severity';
