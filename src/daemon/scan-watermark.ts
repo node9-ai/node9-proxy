@@ -19,7 +19,7 @@ import os from 'os';
 import path from 'path';
 import readline from 'readline';
 import { scanArgs } from '../dlp.js';
-import type { ScanFinding } from '@node9/policy-engine';
+import { analyzePipeChain, detectDangerousShellExec, type ScanFinding } from '@node9/policy-engine';
 
 const PROJECTS_DIR = () => path.join(os.homedir(), '.claude', 'projects');
 const WATERMARK_FILE = () => path.join(os.homedir(), '.node9', 'scan-watermark.json');
@@ -196,6 +196,45 @@ function extractFindingsFromLine(
         sessionId,
         lineIndex,
       });
+    }
+  }
+
+  // ── Tool-use shell AST detection ────────────────────────────────────
+  // Assistant messages on Claude Code carry an array of content blocks;
+  // tool invocations are { type: 'tool_use', name: 'Bash', input: { command } }.
+  // We walk those blocks and run the same AST detectors the live
+  // interceptor uses — eval-of-remote-download and pipe-chain
+  // exfiltration are deterministic patterns that don't need any state
+  // beyond the single tool call. Same checks `node9 scan` runs on
+  // historical data, but here gated by the watermark.
+  const message = (line as Record<string, unknown>).message;
+  if (message && typeof message === 'object') {
+    const content = (message as Record<string, unknown>).content;
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (!block || typeof block !== 'object') continue;
+        const b = block as Record<string, unknown>;
+        if (b.type !== 'tool_use') continue;
+        const toolName = typeof b.name === 'string' ? b.name.toLowerCase() : '';
+        if (toolName !== 'bash' && toolName !== 'execute_bash') continue;
+        const input = b.input as Record<string, unknown> | undefined;
+        const command = input && typeof input.command === 'string' ? input.command : '';
+        if (!command) continue;
+
+        // eval/bash -c with remote download — engine returns 'block' or
+        // 'review' or undefined.
+        const verdict = detectDangerousShellExec(command);
+        if (verdict) {
+          findings.push({ type: 'eval-of-remote', sessionId, lineIndex });
+        }
+
+        // Pipe chain whose source is a credential file and sink is the
+        // network (or vice versa) — engine flags as critical.
+        const pipe = analyzePipeChain(command);
+        if (pipe.isPipeline && pipe.risk === 'critical') {
+          findings.push({ type: 'pipe-to-shell', sessionId, lineIndex });
+        }
+      }
     }
   }
   return findings;
