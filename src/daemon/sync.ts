@@ -9,6 +9,8 @@ import https from 'https';
 import os from 'os';
 import path from 'path';
 import { getConfig } from '../config/index.js';
+import { runBlast } from '../cli/commands/blast.js';
+import { summarizeBlast } from '@node9/policy-engine';
 
 // Computed lazily so tests can mock os.homedir() before any call
 const rulesCacheFile = () => path.join(os.homedir(), '.node9', 'rules-cache.json');
@@ -205,20 +207,87 @@ async function syncOnce(): Promise<void> {
     const result = await fetchCloudPolicy(creds.apiKey, creds.apiUrl, readCachedEtag());
     if (result.kind === 'unchanged') {
       // 304 — keep existing cache as-is. Server confirmed nothing changed.
-      return;
+    } else {
+      const cache: RulesCache = {
+        fetchedAt: new Date().toISOString(),
+        rules: extractRules(result.body),
+        etag: result.etag,
+        panicMode: result.body.panicMode,
+        shadowMode: result.body.shadowMode,
+        syncIntervalHours: result.body.syncIntervalHours,
+        workspaceId: result.body.workspaceId,
+      };
+      writeCache(cache);
     }
-    const cache: RulesCache = {
-      fetchedAt: new Date().toISOString(),
-      rules: extractRules(result.body),
-      etag: result.etag,
-      panicMode: result.body.panicMode,
-      shadowMode: result.body.shadowMode,
-      syncIntervalHours: result.body.syncIntervalHours,
-      workspaceId: result.body.workspaceId,
-    };
-    writeCache(cache);
   } catch {
     // Best-effort — stale cache (or no cache) is fine; proxy falls back to local config
+  }
+
+  // After the policy fetch (success or 304), push a fresh blast snapshot
+  // so the SaaS can render workspace-wide disk-exposure aggregates. This
+  // is fire-and-forget — never blocks policy sync, never throws to the
+  // caller. Opt-out via NODE9_BLAST_DISABLE=1 for paranoid devs who don't
+  // want any path-shaped data on the wire.
+  if (process.env.NODE9_BLAST_DISABLE !== '1') {
+    void pushBlastSnapshot(creds);
+  }
+}
+
+/**
+ * Build the network-safe blast summary and POST it to the SaaS. Fire-and-
+ * forget — every error path is silent. Failure here must never break the
+ * policy-sync loop.
+ *
+ * Endpoint shape: POST /intercept/blast/report (sibling of /policies/sync,
+ * derived from the same credentials apiUrl).
+ */
+async function pushBlastSnapshot(creds: { apiKey: string; apiUrl: string }): Promise<void> {
+  try {
+    const result = runBlast();
+    const summary = summarizeBlast(result);
+
+    // Derive the blast endpoint from the policy-sync URL the credentials
+    // use. The sync URL ends in `/policies/sync`; replace the last two
+    // segments with `/blast/report` so we hit the sibling endpoint.
+    // If the URL doesn't match the expected shape, skip the push — better
+    // silent no-op than guessing at the host.
+    const blastUrl = creds.apiUrl.endsWith('/policies/sync')
+      ? creds.apiUrl.replace(/\/policies\/sync$/, '/blast/report')
+      : null;
+    if (!blastUrl) return;
+
+    const parsed = new URL(blastUrl);
+    await new Promise<void>((resolve) => {
+      const req = https.request(
+        {
+          hostname: parsed.hostname,
+          port: parsed.port ? parseInt(parsed.port, 10) : undefined,
+          path: parsed.pathname + parsed.search,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${creds.apiKey}`,
+          },
+          timeout: 10_000,
+        },
+        (res) => {
+          // Drain & discard — we don't need the body, but we do need to
+          // let the connection close cleanly.
+          res.resume();
+          res.on('end', resolve);
+          res.on('error', () => resolve());
+        }
+      );
+      req.on('error', () => resolve());
+      req.on('timeout', () => {
+        req.destroy();
+        resolve();
+      });
+      req.write(JSON.stringify(summary));
+      req.end();
+    });
+  } catch {
+    // Silent — never break sync over a blast push.
   }
 }
 
@@ -234,12 +303,23 @@ export async function runCloudSync(): Promise<
   if (!creds) {
     return { ok: false, reason: 'No API key configured. Add credentials with: node9 login' };
   }
+  // Whether the policy fetch succeeded or failed, kick off the blast
+  // push fire-and-forget so the manual `node9 policy sync` command also
+  // refreshes the SaaS-side disk exposure aggregate. Same opt-out env
+  // var as the daemon path.
+  const maybePushBlast = () => {
+    if (process.env.NODE9_BLAST_DISABLE !== '1') {
+      void pushBlastSnapshot(creds);
+    }
+  };
+
   try {
     const result = await fetchCloudPolicy(creds.apiKey, creds.apiUrl, readCachedEtag());
     if (result.kind === 'unchanged') {
       // 304 — keep existing cache. Report success against the cached
       // counts so the CLI still tells the user how many rules are active.
       const status = getCloudSyncStatus();
+      maybePushBlast();
       return status.cached
         ? { ok: true, rules: status.rules, fetchedAt: status.fetchedAt, unchanged: true }
         : { ok: true, rules: 0, fetchedAt: new Date().toISOString(), unchanged: true };
@@ -254,8 +334,10 @@ export async function runCloudSync(): Promise<
       workspaceId: result.body.workspaceId,
     };
     writeCache(cache);
+    maybePushBlast();
     return { ok: true, rules: cache.rules.length, fetchedAt: cache.fetchedAt };
   } catch (err) {
+    maybePushBlast();
     return { ok: false, reason: err instanceof Error ? err.message : String(err) };
   }
 }

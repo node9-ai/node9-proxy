@@ -6,6 +6,7 @@
  *  - getCloudSyncStatus() / getCloudRules(): reads cache file
  *  - runCloudSync(): returns error when no credentials
  *  - getConfig() cloud cache layer: merges rules-cache.json into policy
+ *  - blast piggyback: runBlast is invoked from the policy sync timer
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
@@ -14,6 +15,21 @@ import path from 'path';
 
 // Must be set before any module import that reads it
 process.env.NODE9_TESTING = '1';
+
+// Mock runBlast — we don't want the real fs walk during sync tests, and
+// we need to assert it's invoked / skipped based on NODE9_BLAST_DISABLE.
+// vi.hoisted lets us reference the mock from inside vi.mock's hoisted
+// factory without TDZ errors.
+const { mockRunBlast } = vi.hoisted(() => ({
+  mockRunBlast: vi.fn().mockReturnValue({
+    reachable: [],
+    envFindings: [],
+    score: 100,
+  }),
+}));
+vi.mock('../cli/commands/blast.js', () => ({
+  runBlast: mockRunBlast,
+}));
 
 const MOCK_HOME = '/mock/home';
 const CRED_PATH = path.join(MOCK_HOME, '.node9', 'credentials.json');
@@ -164,6 +180,59 @@ describe('runCloudSync — credentials resolution', () => {
     const apiUrl = 'https://custom.example.com/some/full/path';
     const synced = /\/intercept$/.test(apiUrl) ? apiUrl + '/policies/sync' : apiUrl;
     expect(synced).toBe('https://custom.example.com/some/full/path');
+  });
+});
+
+// ── B1.3: blast piggyback ────────────────────────────────────────────────
+//
+// The policy-sync timer also triggers a blast snapshot push. These tests
+// pin the contract: blast runs by default, can be opted out via env var,
+// and never blocks the policy sync (errors / network failures stay silent).
+
+describe('blast piggyback on cloud sync', () => {
+  beforeEach(() => {
+    mockRunBlast.mockClear();
+    delete process.env.NODE9_BLAST_DISABLE;
+  });
+
+  it('invokes runBlast when sync runs and NODE9_BLAST_DISABLE is unset', async () => {
+    mockFiles({
+      [CRED_PATH]: JSON.stringify({
+        default: {
+          apiKey: 'n9_live_abc123',
+          apiUrl: 'https://localhost:1/api/v1/intercept',
+        },
+      }),
+    });
+    await runCloudSync();
+    // The push happens fire-and-forget after fetchCloudPolicy. Even though
+    // both calls fail (closed port), runBlast still fires.
+    // Allow microtasks to flush so the void pushBlastSnapshot starts.
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockRunBlast).toHaveBeenCalled();
+  });
+
+  it('skips runBlast when NODE9_BLAST_DISABLE=1 (opt-out)', async () => {
+    process.env.NODE9_BLAST_DISABLE = '1';
+    mockFiles({
+      [CRED_PATH]: JSON.stringify({
+        default: {
+          apiKey: 'n9_live_abc123',
+          apiUrl: 'https://localhost:1/api/v1/intercept',
+        },
+      }),
+    });
+    await runCloudSync();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockRunBlast).not.toHaveBeenCalled();
+  });
+
+  it('skips runBlast when there are no credentials', async () => {
+    // No credentials → readCredentials returns null → no sync, no push.
+    mockFiles({});
+    await runCloudSync();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockRunBlast).not.toHaveBeenCalled();
   });
 });
 

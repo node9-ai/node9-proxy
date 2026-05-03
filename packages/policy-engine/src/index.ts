@@ -9,7 +9,7 @@
 // scanFilePath wrapper since that's filesystem access.
 
 /** Engine version stamped on audit entries for future drift detection. */
-export const ENGINE_VERSION = '1.1.0';
+export const ENGINE_VERSION = '1.2.0';
 
 export type { SmartCondition, SmartRule, DlpMatch, RiskMetadata } from './types';
 
@@ -81,3 +81,9 @@ export {
   classifyAuditEntry,
   computeSecurityScore,
 } from './severity';
+
+// Blast summarization — per-machine "what's reachable on disk" reduced to
+// a network-safe summary the proxy pushes to the SaaS on every policy-sync
+// tick. Pure: host code does the I/O, engine sanitises + sorts.
+export type { BlastFinding, BlastEnvFinding, BlastResult, BlastSummary } from './blast';
+export { summarizeBlast, truncateBlastPath } from './blast';
