@@ -285,6 +285,87 @@ describe('getConfig — cloud rules cache layer', () => {
   });
 });
 
+// ── Cloud-pushed runtime flags (panicMode, shadowMode) ─────────────────────
+// These are the workspace-level switches that flow from the SaaS dashboard
+// through the cache file into the active config. panicMode ends up on
+// `settings.panicMode` for the orchestrator to read; shadowMode forces
+// `settings.mode = 'observe'` so all blocks become would-block log entries.
+
+describe('getConfig — cloud-pushed runtime flags', () => {
+  it('panicMode in cache propagates to settings.panicMode', () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({ settings: { mode: 'standard' } }),
+      [CACHE_PATH]: JSON.stringify({
+        fetchedAt: '2026-05-03T00:00:00.000Z',
+        rules: [],
+        panicMode: true,
+      }),
+    });
+    expect(getConfig().settings.panicMode).toBe(true);
+  });
+
+  it('panicMode defaults to undefined when absent from cache', () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({ settings: { mode: 'standard' } }),
+      [CACHE_PATH]: JSON.stringify({ fetchedAt: '2026-05-03T00:00:00.000Z', rules: [] }),
+    });
+    expect(getConfig().settings.panicMode).toBeUndefined();
+  });
+
+  it('shadowMode in cache forces settings.mode = "observe"', () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({ settings: { mode: 'standard' } }),
+      [CACHE_PATH]: JSON.stringify({
+        fetchedAt: '2026-05-03T00:00:00.000Z',
+        rules: [],
+        shadowMode: true,
+      }),
+    });
+    expect(getConfig().settings.mode).toBe('observe');
+  });
+
+  it('shadowMode false leaves user-configured mode untouched', () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({ settings: { mode: 'strict' } }),
+      [CACHE_PATH]: JSON.stringify({
+        fetchedAt: '2026-05-03T00:00:00.000Z',
+        rules: [],
+        shadowMode: false,
+      }),
+    });
+    expect(getConfig().settings.mode).toBe('strict');
+  });
+
+  it('panicMode and shadowMode coexist (both apply)', () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({ settings: { mode: 'standard' } }),
+      [CACHE_PATH]: JSON.stringify({
+        fetchedAt: '2026-05-03T00:00:00.000Z',
+        rules: [],
+        panicMode: true,
+        shadowMode: true,
+      }),
+    });
+    const config = getConfig();
+    expect(config.settings.panicMode).toBe(true);
+    expect(config.settings.mode).toBe('observe');
+  });
+
+  it('panicMode is not set from local user config (cloud-only field)', () => {
+    // Even if a user puts panicMode in their config.json, it shouldn't take
+    // effect — panicMode is a workspace admin's emergency switch and must
+    // not be self-served by individual users. If we ever want a local
+    // panic mode, that's a different feature.
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({
+        settings: { mode: 'standard', panicMode: true },
+      }),
+      // No cache → no cloud flags
+    });
+    expect(getConfig().settings.panicMode).toBeUndefined();
+  });
+});
+
 // ── extractRules: tolerates three historical response shapes ───────────────
 
 describe('extractRules', () => {

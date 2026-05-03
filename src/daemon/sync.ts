@@ -253,15 +253,35 @@ export async function runCloudSync(): Promise<
 }
 
 /**
- * Return info about the current rules cache (last fetch time, rule count).
+ * Return info about the current rules cache (last fetch time, rule count,
+ * cloud-pushed runtime flags). Used by `node9 policy status` and the daemon
+ * HUD to show admins/users whether their workspace has any active policy
+ * overrides in effect.
  */
 export function getCloudSyncStatus():
   | { cached: false }
-  | { cached: true; rules: number; fetchedAt: string } {
+  | {
+      cached: true;
+      rules: number;
+      fetchedAt: string;
+      panicMode?: boolean;
+      shadowMode?: boolean;
+      workspaceId?: string;
+      syncIntervalHours?: number;
+    } {
   try {
     const raw = JSON.parse(fs.readFileSync(rulesCacheFile(), 'utf-8')) as Record<string, unknown>;
     if (!Array.isArray(raw.rules) || typeof raw.fetchedAt !== 'string') return { cached: false };
-    return { cached: true, rules: (raw.rules as unknown[]).length, fetchedAt: raw.fetchedAt };
+    return {
+      cached: true,
+      rules: (raw.rules as unknown[]).length,
+      fetchedAt: raw.fetchedAt,
+      panicMode: typeof raw.panicMode === 'boolean' ? raw.panicMode : undefined,
+      shadowMode: typeof raw.shadowMode === 'boolean' ? raw.shadowMode : undefined,
+      workspaceId: typeof raw.workspaceId === 'string' ? raw.workspaceId : undefined,
+      syncIntervalHours:
+        typeof raw.syncIntervalHours === 'number' ? raw.syncIntervalHours : undefined,
+    };
   } catch {
     return { cached: false };
   }

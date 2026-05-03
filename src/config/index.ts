@@ -37,6 +37,13 @@ export interface Config {
     hud?: {
       showEnvironmentCounts?: boolean;
     };
+    /**
+     * Cloud-pushed panic switch. When true, all review-verdict actions
+     * are upgraded to block. Set by SaaS workspace's `isPanicMode` flag,
+     * synced to the local cache, and applied in the orchestrator.
+     * Never set by local user config — read-only from cloud.
+     */
+    panicMode?: boolean;
   };
   policy: {
     sandboxPaths: string[];
@@ -612,12 +619,32 @@ export function getConfig(cwd?: string): Config {
   // Rules synced from the cloud dashboard are applied after local config so
   // admin-defined policy takes precedence over per-user overrides.
   // Shields still apply last and cannot be overridden by cloud rules.
+  //
+  // The cache also carries two workspace-level switches that control the
+  // proxy's runtime behavior:
+  //   - panicMode: every review-verdict becomes block (admin emergency switch).
+  //                Stored on `mergedSettings.panicMode` and applied in the
+  //                orchestrator after the engine returns its verdict.
+  //   - shadowMode: forces `mergedSettings.mode = 'observe'` so all blocks
+  //                 become "would-block" log entries instead of real blocks.
+  //                 Useful for staging a policy rollout without breaking
+  //                 anyone's workflow. Local user config can still set mode
+  //                 explicitly — but if the user hasn't, cloud takes effect.
   {
     const cacheFile = path.join(os.homedir(), '.node9', 'rules-cache.json');
     try {
       const raw = JSON.parse(fs.readFileSync(cacheFile, 'utf-8')) as Record<string, unknown>;
       if (Array.isArray(raw.rules) && raw.rules.length > 0) {
         applyLayer({ policy: { smartRules: raw.rules } });
+      }
+      if (raw.panicMode === true) {
+        mergedSettings.panicMode = true;
+      }
+      if (raw.shadowMode === true) {
+        // shadowMode acts as the cloud-driven equivalent of running the
+        // proxy in observe mode locally — admin can flip it without each
+        // user editing their config.
+        mergedSettings.mode = 'observe';
       }
     } catch {
       /* cache absent or corrupted — silent fallback to local config */
