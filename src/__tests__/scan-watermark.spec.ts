@@ -380,6 +380,107 @@ describe('tickScanWatcher — shell AST extractors', () => {
   });
 });
 
+// ── Regex extractors: destructiveOps + privilegeEscalation ─────────────
+//
+// These are single-line tool-call detections. We test each regex variant
+// (rm -rf / DROP TABLE / git push --force / FLUSHALL / kubectl delete /
+// helm uninstall, plus sudo / chmod 777 / chown root) to pin the contract
+// against accidental future regex changes that would re-break the
+// false-positive rate or miss real attacks.
+
+describe('tickScanWatcher — destructive-op extractor', () => {
+  /** Helper: run one tick where SESSION_PATH contains exactly the given
+   *  bash command and return finding types. */
+  const runWithCommand = async (cmd: string): Promise<string[]> => {
+    seedFs({});
+    await tickScanWatcher();
+    fsState.files.set(SESSION_PATH, {
+      content: lineWithBashCommand(cmd),
+      mtimeMs: Date.now() + 1000,
+    });
+    fsState.dirs.add(path.dirname(SESSION_PATH));
+    const result = await tickScanWatcher();
+    return result.findings.map((f) => f.type);
+  };
+
+  it('flags `rm -rf <path>` as destructive-op', async () => {
+    expect(await runWithCommand('rm -rf /tmp/build')).toContain('destructive-op');
+  });
+
+  it('flags `rm -Rf <path>` (capital R variant) as destructive-op', async () => {
+    expect(await runWithCommand('rm -Rf node_modules')).toContain('destructive-op');
+  });
+
+  it('flags `DROP TABLE` as destructive-op', async () => {
+    expect(await runWithCommand('psql -c "DROP TABLE users"')).toContain('destructive-op');
+  });
+
+  it('flags `git push --force` and `git push -f` as destructive-op', async () => {
+    expect(await runWithCommand('git push --force origin main')).toContain('destructive-op');
+    expect(await runWithCommand('git push -f origin main')).toContain('destructive-op');
+  });
+
+  it('flags Redis FLUSHALL / FLUSHDB as destructive-op', async () => {
+    expect(await runWithCommand('redis-cli FLUSHALL')).toContain('destructive-op');
+    expect(await runWithCommand('redis-cli FLUSHDB')).toContain('destructive-op');
+  });
+
+  it('flags `kubectl delete` and `helm uninstall` as destructive-op', async () => {
+    expect(await runWithCommand('kubectl delete deployment frontend')).toContain('destructive-op');
+    expect(await runWithCommand('helm uninstall my-app')).toContain('destructive-op');
+  });
+
+  it('does NOT flag `rm` without -rf (no false positives on plain rm)', async () => {
+    const types = await runWithCommand('rm /tmp/single-file.txt');
+    expect(types).not.toContain('destructive-op');
+  });
+
+  it('does NOT flag substrings like "term" or "Drop" in unrelated contexts', async () => {
+    const types = await runWithCommand('echo "Drop me a line about the term"');
+    expect(types).not.toContain('destructive-op');
+  });
+});
+
+describe('tickScanWatcher — privilege-escalation extractor', () => {
+  const runWithCommand = async (cmd: string): Promise<string[]> => {
+    seedFs({});
+    await tickScanWatcher();
+    fsState.files.set(SESSION_PATH, {
+      content: lineWithBashCommand(cmd),
+      mtimeMs: Date.now() + 1000,
+    });
+    fsState.dirs.add(path.dirname(SESSION_PATH));
+    const result = await tickScanWatcher();
+    return result.findings.map((f) => f.type);
+  };
+
+  it('flags `sudo <cmd>` as privilege-escalation', async () => {
+    expect(await runWithCommand('sudo apt install foo')).toContain('privilege-escalation');
+  });
+
+  it('flags `chmod 777 <path>` as privilege-escalation', async () => {
+    expect(await runWithCommand('chmod 777 /etc/passwd')).toContain('privilege-escalation');
+  });
+
+  it('flags `chown root <path>` as privilege-escalation', async () => {
+    expect(await runWithCommand('chown root /usr/local/bin/myscript')).toContain(
+      'privilege-escalation'
+    );
+  });
+
+  it('does NOT flag substring "pseudo" (false-positive guard)', async () => {
+    const types = await runWithCommand('echo "this is a pseudonym"');
+    expect(types).not.toContain('privilege-escalation');
+  });
+
+  it('does NOT flag bare `sudo` without an argument (likely shell prompt or doc)', async () => {
+    const types = await runWithCommand('echo "to elevate, run: sudo"');
+    // "sudo" followed by `"` not a-z, so the regex requiring `\b(sudo|su)\b\s+[a-z]`
+    // shouldn't match. Pin this so a regex tweak doesn't accidentally widen the net.
+    expect(types).not.toContain('privilege-escalation');
+  });
+});
+
 // ── Opt-out ─────────────────────────────────────────────────────────────
 
 describe('tickScanWatcher — opt-out', () => {

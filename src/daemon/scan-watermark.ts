@@ -199,14 +199,14 @@ function extractFindingsFromLine(
     }
   }
 
-  // ── Tool-use shell AST detection ────────────────────────────────────
+  // ── Tool-use shell AST + regex detection ────────────────────────────
   // Assistant messages on Claude Code carry an array of content blocks;
   // tool invocations are { type: 'tool_use', name: 'Bash', input: { command } }.
-  // We walk those blocks and run the same AST detectors the live
-  // interceptor uses — eval-of-remote-download and pipe-chain
-  // exfiltration are deterministic patterns that don't need any state
-  // beyond the single tool call. Same checks `node9 scan` runs on
-  // historical data, but here gated by the watermark.
+  // We walk those blocks and run two layers of detection:
+  //   1. AST detectors (engine) for eval-of-remote and pipe-to-shell —
+  //      deterministic, no false positives.
+  //   2. Regex extractors for destructive ops + privilege escalation —
+  //      cheap, single-line, low FP rate on the patterns matched.
   const message = (line as Record<string, unknown>).message;
   if (message && typeof message === 'object') {
     const content = (message as Record<string, unknown>).content;
@@ -234,11 +234,51 @@ function extractFindingsFromLine(
         if (pipe.isPipeline && pipe.risk === 'critical') {
           findings.push({ type: 'pipe-to-shell', sessionId, lineIndex });
         }
+
+        // ── Destructive ops ────────────────────────────────────────
+        // Hard-to-reverse commands. These regexes are tight enough to
+        // avoid common false-positives:
+        //   - `rm -rf` requires the recursive+force flags together
+        //   - `DROP TABLE` / `DROP DATABASE` / `TRUNCATE TABLE` only
+        //     match on the SQL keyword sequence
+        //   - `git push --force` (and the alias `git push -f`) — pinned
+        //     deletions of remote history
+        //   - Redis FLUSHALL / FLUSHDB — wipe the entire datastore
+        //   - kubectl delete / helm uninstall — cluster-level teardown
+        if (DESTRUCTIVE_OP_RE.test(command)) {
+          findings.push({ type: 'destructive-op', sessionId, lineIndex });
+        }
+
+        // ── Privilege escalation ───────────────────────────────────
+        // sudo, su, chmod 777, chown root. Each implies the agent
+        // tried to broaden permissions. Matched as standalone tokens
+        // so we don't false-positive on substrings like 'pseudonym'.
+        if (PRIVILEGE_ESCALATION_RE.test(command)) {
+          findings.push({
+            type: 'privilege-escalation',
+            sessionId,
+            lineIndex,
+          });
+        }
       }
     }
   }
   return findings;
 }
+
+/**
+ * Destructive-op regex. Word-boundary anchored so partial matches don't
+ * fire (e.g. "term" inside "terminate" wouldn't match `\brm\b`). Each
+ * pattern is independently provable as destructive — no fuzzy heuristics.
+ */
+const DESTRUCTIVE_OP_RE =
+  /\brm\s+-[rRf]+\b|\bDROP\s+(TABLE|DATABASE|COLLECTION|SCHEMA)\b|\bTRUNCATE\s+TABLE\b|\bgit\s+push\s+(--force|-f)\b|\bFLUSHALL\b|\bFLUSHDB\b|\bkubectl\s+delete\b|\bhelm\s+uninstall\b/i;
+
+/**
+ * Privilege-escalation regex. Standalone tokens only — `\bsudo\b` not
+ * `sudo` to avoid matching e.g. `pseudo` substrings.
+ */
+const PRIVILEGE_ESCALATION_RE = /\b(sudo|su)\b\s+[a-z]|\bchmod\s+(0?777|\+x)\b|\bchown\s+root\b/i;
 
 /**
  * Result of one tick — what was scanned and what was found. Caller pushes
