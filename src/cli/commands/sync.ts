@@ -20,11 +20,25 @@ export function registerSyncCommand(program: Command): void {
         process.exit(1);
       }
 
-      console.log(
-        chalk.green(`✓ Synced ${result.rules} rule${result.rules === 1 ? '' : 's'} from cloud`)
-      );
-      console.log(chalk.gray(`  Cached at: ${result.fetchedAt}`));
-      console.log(chalk.gray(`  File: ~/.node9/rules-cache.json`));
+      // Differentiate 304 (server says "no changes since last sync, your
+      // cache is fresh") from a real fetch. Without this, a user with a
+      // hot cache who runs `policy sync` repeatedly sees "Synced 0 rules"
+      // even when they have N rules cached — looks like a bug.
+      if (result.unchanged) {
+        console.log(
+          chalk.green(
+            `✓ Already up to date — ${result.rules} rule${result.rules === 1 ? '' : 's'} cached`
+          )
+        );
+        console.log(chalk.gray(`  Cached at: ${result.fetchedAt}`));
+        console.log(chalk.gray(`  Server returned 304 (no changes since last sync)`));
+      } else {
+        console.log(
+          chalk.green(`✓ Synced ${result.rules} rule${result.rules === 1 ? '' : 's'} from cloud`)
+        );
+        console.log(chalk.gray(`  Cached at: ${result.fetchedAt}`));
+        console.log(chalk.gray(`  File: ~/.node9/rules-cache.json`));
+      }
     });
 
   policy
