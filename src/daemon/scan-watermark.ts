@@ -197,6 +197,23 @@ function extractFindingsFromLine(
         lineIndex,
       });
     }
+
+    // ── PII patterns ────────────────────────────────────────────────
+    // Run on string-shaped candidates only. Skip if the candidate is
+    // already a tool input/result object — those go through scanArgs
+    // above. PII regexes are tight enough to keep FP rate low (each
+    // requires structural delimiters: @ for email, dashes for SSN, etc.).
+    if (typeof candidate === 'string' && candidate.length > 0) {
+      const piiHits = detectPii(candidate);
+      for (const patternName of piiHits) {
+        findings.push({
+          type: 'pii',
+          patternName,
+          sessionId,
+          lineIndex,
+        });
+      }
+    }
   }
 
   // ── Tool-use shell AST + regex detection ────────────────────────────
@@ -214,10 +231,51 @@ function extractFindingsFromLine(
       for (const block of content) {
         if (!block || typeof block !== 'object') continue;
         const b = block as Record<string, unknown>;
+
+        // ── Long output redactions (tool_result blocks) ────────────
+        // The proxy redacts oversized tool outputs before they reach the
+        // model — saves tokens, prevents context-window blow-up, hides
+        // raw fixture data. We count occurrences here as a workflow
+        // signal (agent generated huge output) without surfacing the
+        // content itself.
+        if (b.type === 'tool_result') {
+          const c = b.content;
+          const len =
+            typeof c === 'string' ? c.length : Array.isArray(c) ? JSON.stringify(c).length : 0;
+          if (len > LONG_OUTPUT_THRESHOLD_BYTES) {
+            findings.push({
+              type: 'long-output-redacted',
+              sessionId,
+              lineIndex,
+            });
+          }
+        }
+
         if (b.type !== 'tool_use') continue;
         const toolName = typeof b.name === 'string' ? b.name.toLowerCase() : '';
-        if (toolName !== 'bash' && toolName !== 'execute_bash') continue;
         const input = b.input as Record<string, unknown> | undefined;
+
+        // ── Sensitive file reads ──────────────────────────────────
+        // Read/Edit/Grep/Glob agents that target ~/.aws/, ~/.ssh/,
+        // .env*, and friends. Same path set blast walks. The signal
+        // here is "agent tried to read these files via a tool call"
+        // — distinct from blast's "they were reachable on disk".
+        if (FILE_TOOLS.has(toolName)) {
+          const filePath =
+            (typeof input?.file_path === 'string' && input.file_path) ||
+            (typeof input?.path === 'string' && input.path) ||
+            (typeof input?.pattern === 'string' && input.pattern) ||
+            '';
+          if (filePath && SENSITIVE_PATH_RE.test(filePath)) {
+            findings.push({
+              type: 'sensitive-file-read',
+              sessionId,
+              lineIndex,
+            });
+          }
+        }
+
+        if (toolName !== 'bash' && toolName !== 'execute_bash') continue;
         const command = input && typeof input.command === 'string' ? input.command : '';
         if (!command) continue;
 
@@ -273,6 +331,79 @@ function extractFindingsFromLine(
  */
 const DESTRUCTIVE_OP_RE =
   /\brm\s+-[rRf]+\b|\bDROP\s+(TABLE|DATABASE|COLLECTION|SCHEMA)\b|\bTRUNCATE\s+TABLE\b|\bgit\s+push\s+(--force|-f)\b|\bFLUSHALL\b|\bFLUSHDB\b|\bkubectl\s+delete\b|\bhelm\s+uninstall\b/i;
+
+/**
+ * Threshold for "long output" — tool results larger than this are
+ * counted as redaction-eligible. 100KB is the value the proxy's
+ * runtime redaction layer uses too; staying consistent makes the
+ * counts comparable.
+ */
+const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
+
+/**
+ * Tool names that read or grep file contents. Used to decide whether
+ * the file_path/path/pattern arg is worth running against
+ * SENSITIVE_PATH_RE — restricts the check to file-reading tools so a
+ * Bash command containing the same path doesn't double-count.
+ */
+const FILE_TOOLS = new Set([
+  'read',
+  'read_file',
+  'edit',
+  'edit_file',
+  'write',
+  'write_file',
+  'multiedit',
+  'grep',
+  'grep_search',
+  'glob',
+  'list_files',
+]);
+
+/**
+ * Sensitive file paths the agent shouldn't be reading via tool calls.
+ * Mirrors the blast walker's path set — same files matter, here
+ * detected at tool-call-time rather than fs-walk-time.
+ *
+ * `\b` boundaries on names so substring noise doesn't trigger; the
+ * patterns assume the proxy normalises ~ in inputs (which it does
+ * via path expansion before we see them).
+ */
+const SENSITIVE_PATH_RE =
+  /\.aws\/(credentials|config)\b|\.ssh\/(id_rsa|id_ed25519|id_ecdsa|id_dsa)\b|\.env(\.|$|\b)|\.config\/gcloud\/credentials\.db\b|\.docker\/config\.json\b|\.netrc\b|\.npmrc\b|\.node9\/credentials\.json\b/i;
+
+/**
+ * Detect PII patterns in a string. Returns an array of finding pattern
+ * names — one per distinct PII type found, deduplicated by type.
+ *
+ * Each regex requires structural delimiters that real PII has:
+ *   - Email needs `@` + a TLD-like suffix
+ *   - SSN needs the dash-delimited 3-2-4 layout
+ *   - Phone (US) needs 3-3-4 with separators
+ *   - Credit card needs 16 digits in groups of 4 with valid IIN prefix
+ *
+ * Without these structural anchors the FP rate would explode. If a real
+ * PII string is in a different layout (no dashes for SSN, etc.), it
+ * won't fire — that's a known gap and acceptable v1 behaviour.
+ */
+function detectPii(text: string): string[] {
+  const found = new Set<string>();
+  // Cheap substring guards before we run the full regex — most strings
+  // contain none of these characters; skip the regex engine for them.
+  if (/@/.test(text) && PII_EMAIL_RE.test(text)) found.add('Email');
+  if (/-/.test(text) && PII_SSN_RE.test(text)) found.add('SSN');
+  if (PII_PHONE_RE.test(text)) found.add('Phone');
+  if (PII_CC_RE.test(text)) found.add('Credit Card');
+  return [...found];
+}
+
+const PII_EMAIL_RE = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/;
+const PII_SSN_RE = /\b\d{3}-\d{2}-\d{4}\b/;
+const PII_PHONE_RE = /\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b/;
+// IIN prefixes for the major card networks: Visa (4), Mastercard
+// (51-55, 2221-2720), Amex (34/37), Discover (6). 16-digit grouping with
+// optional dashes/spaces between groups of 4.
+const PII_CC_RE = /\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6\d{3})[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b/;
 
 /**
  * Privilege-escalation regex. Standalone tokens only — `\bsudo\b` not

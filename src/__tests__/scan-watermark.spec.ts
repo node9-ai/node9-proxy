@@ -334,6 +334,184 @@ describe('tickScanWatcher — privilege-escalation extractor', () => {
   });
 });
 
+// ── PII extractor ───────────────────────────────────────────────────────
+
+describe('tickScanWatcher — PII extractor', () => {
+  let piiCounter = 0;
+  /** Run with a user-message containing the given text. */
+  const runWithMessage = async (text: string): Promise<string[]> => {
+    await tickScanWatcher();
+    const newPath = path.join(projectsDir, 'proj-pii', `msg-${++piiCounter}.jsonl`);
+    fs.mkdirSync(path.dirname(newPath), { recursive: true });
+    fs.writeFileSync(
+      newPath,
+      JSON.stringify({
+        sessionId: 'conv-pii',
+        message: { content: text },
+      }) + '\n'
+    );
+    const future = new Date(Date.now() + 1000);
+    fs.utimesSync(newPath, future, future);
+    const result = await tickScanWatcher();
+    return result.findings.filter((f) => f.type === 'pii').map((f) => f.patternName ?? '');
+  };
+
+  it('detects Email PII pattern', async () => {
+    const hits = await runWithMessage('contact me at jane.doe@example.com');
+    expect(hits).toContain('Email');
+  });
+
+  it('detects SSN PII pattern', async () => {
+    const hits = await runWithMessage('SSN: 123-45-6789');
+    expect(hits).toContain('SSN');
+  });
+
+  it('detects US phone PII pattern', async () => {
+    const hits = await runWithMessage('call me at 415-555-1234');
+    expect(hits).toContain('Phone');
+  });
+
+  it('detects Credit Card PII pattern (Visa)', async () => {
+    // 4111-1111-1111-1111 is the canonical Visa test number — recognised
+    // by every payment processor as an explicit fixture.
+    const hits = await runWithMessage('card: 4111-1111-1111-1111');
+    expect(hits).toContain('Credit Card');
+  });
+
+  it('does NOT flag plain text without PII patterns', async () => {
+    const hits = await runWithMessage('just a normal sentence with no sensitive data');
+    expect(hits).toEqual([]);
+  });
+
+  it('does NOT flag substring numbers that lack PII structure', async () => {
+    // "release-2026-05" has dashes but not the SSN 3-2-4 pattern. Tight
+    // structural anchors keep the FP rate down.
+    const hits = await runWithMessage('see release-2026-05 for details');
+    expect(hits).not.toContain('SSN');
+  });
+});
+
+// ── Sensitive file reads extractor ──────────────────────────────────────
+
+describe('tickScanWatcher — sensitive-file-read extractor', () => {
+  let fileCounter = 0;
+  /** Run with a tool_use block (e.g. Read with file_path). */
+  const runWithToolUse = async (
+    toolName: string,
+    input: Record<string, unknown>
+  ): Promise<string[]> => {
+    await tickScanWatcher();
+    const newPath = path.join(projectsDir, 'proj-fileread', `tu-${++fileCounter}.jsonl`);
+    fs.mkdirSync(path.dirname(newPath), { recursive: true });
+    fs.writeFileSync(
+      newPath,
+      JSON.stringify({
+        sessionId: 'conv-fileread',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'tool_use', name: toolName, input }],
+        },
+      }) + '\n'
+    );
+    const future = new Date(Date.now() + 1000);
+    fs.utimesSync(newPath, future, future);
+    const result = await tickScanWatcher();
+    return result.findings.map((f) => f.type);
+  };
+
+  it('flags Read of ~/.aws/credentials', async () => {
+    const types = await runWithToolUse('Read', {
+      file_path: '/home/alice/.aws/credentials',
+    });
+    expect(types).toContain('sensitive-file-read');
+  });
+
+  it('flags Read of ~/.ssh/id_rsa', async () => {
+    const types = await runWithToolUse('Read', {
+      file_path: '/home/alice/.ssh/id_rsa',
+    });
+    expect(types).toContain('sensitive-file-read');
+  });
+
+  it('flags Edit of .env.production', async () => {
+    const types = await runWithToolUse('Edit', {
+      file_path: '/Users/bob/projects/api/.env.production',
+    });
+    expect(types).toContain('sensitive-file-read');
+  });
+
+  it('flags Grep of ~/.npmrc (catches token-bearing rc files)', async () => {
+    const types = await runWithToolUse('Grep', {
+      pattern: '/home/alice/.npmrc',
+    });
+    expect(types).toContain('sensitive-file-read');
+  });
+
+  it('does NOT flag Read of a normal source file', async () => {
+    const types = await runWithToolUse('Read', {
+      file_path: '/home/alice/projects/src/index.ts',
+    });
+    expect(types).not.toContain('sensitive-file-read');
+  });
+
+  it('does NOT flag Bash invocations (handled by the bash extractors)', async () => {
+    // A Bash tool with a sensitive path arg shouldn't double-count as a
+    // file read — Bash goes through destructive/privilege/AST checks.
+    const types = await runWithToolUse('Bash', {
+      command: 'cat /home/alice/.aws/credentials',
+    });
+    expect(types).not.toContain('sensitive-file-read');
+  });
+});
+
+// ── Long-output redactions extractor ────────────────────────────────────
+
+describe('tickScanWatcher — long-output-redacted extractor', () => {
+  let longCounter = 0;
+  /** Run with an assistant message containing a tool_result of given size. */
+  const runWithToolResult = async (contentLength: number): Promise<string[]> => {
+    await tickScanWatcher();
+    const newPath = path.join(projectsDir, 'proj-longout', `tr-${++longCounter}.jsonl`);
+    fs.mkdirSync(path.dirname(newPath), { recursive: true });
+    fs.writeFileSync(
+      newPath,
+      JSON.stringify({
+        sessionId: 'conv-longout',
+        message: {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              content: 'x'.repeat(contentLength),
+            },
+          ],
+        },
+      }) + '\n'
+    );
+    const future = new Date(Date.now() + 1000);
+    fs.utimesSync(newPath, future, future);
+    const result = await tickScanWatcher();
+    return result.findings.map((f) => f.type);
+  };
+
+  it('flags tool_result content larger than 100KB as long-output-redacted', async () => {
+    // 200KB string — well above the 100KB threshold.
+    const types = await runWithToolResult(200 * 1024);
+    expect(types).toContain('long-output-redacted');
+  });
+
+  it('does NOT flag a small tool_result (under 100KB)', async () => {
+    const types = await runWithToolResult(5 * 1024);
+    expect(types).not.toContain('long-output-redacted');
+  });
+
+  it('does NOT flag the threshold edge (exactly 100KB)', async () => {
+    // Boundary check — 100KB exactly should NOT fire (we use `>`).
+    const types = await runWithToolResult(100 * 1024);
+    expect(types).not.toContain('long-output-redacted');
+  });
+});
+
 // ── Opt-out ─────────────────────────────────────────────────────────────
 
 describe('tickScanWatcher — opt-out', () => {

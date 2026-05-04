@@ -9,32 +9,11 @@ import { HOOK_DEBUG_LOG } from './audit';
 
 const SYNC_INTERVAL_MS = 10 * 60 * 1000;
 
-// USD per token for known model families (input / output / cache-write / cache-read)
-const PRICING: Record<string, readonly [number, number, number, number]> = {
-  'claude-opus-4': [5e-6, 25e-6, 6.25e-6, 0.5e-6],
-  'claude-sonnet-4': [3e-6, 15e-6, 3.75e-6, 0.3e-6],
-  'claude-haiku-4': [0.8e-6, 4e-6, 1e-6, 0.08e-6],
-  'claude-3-7-sonnet': [3e-6, 15e-6, 3.75e-6, 0.3e-6],
-  'claude-3-5-sonnet': [3e-6, 15e-6, 3.75e-6, 0.3e-6],
-  'claude-3-5-haiku': [0.8e-6, 4e-6, 1e-6, 0.08e-6],
-  'claude-3-haiku': [0.25e-6, 1.25e-6, 0.3e-6, 0.03e-6],
-};
-
-// Strip the date suffix Anthropic appends to model IDs (e.g. -20251101)
-function normalizeModel(raw: string): string {
-  return raw.replace(/-\d{8}$/, '');
-}
-
-function pricingFor(model: string): readonly [number, number, number, number] | null {
-  const norm = normalizeModel(model);
-  if (PRICING[norm]) return PRICING[norm]!;
-  // Longest-prefix match for future model names
-  let best: string | null = null;
-  for (const key of Object.keys(PRICING)) {
-    if (norm.startsWith(key) && (best === null || key.length > best.length)) best = key;
-  }
-  return best ? PRICING[best]! : null;
-}
+// Pricing now lives in src/pricing/litellm.ts — fetched from the
+// LiteLLM community-maintained JSON with a bundled fallback. Stops the
+// "your numbers are wrong" complaints when Anthropic / OpenAI / Google
+// ship a new model.
+import { ensurePricingLoaded, pricingFor, normalizeModel } from './pricing/litellm.js';
 
 type DailyEntry = {
   date: string;
@@ -185,6 +164,11 @@ function collectEntries(): DailyEntry[] {
 async function syncCost(): Promise<void> {
   const creds = getCredentials();
   if (!creds?.apiKey || !creds?.apiUrl) return;
+
+  // Make sure LiteLLM pricing is loaded before parsing entries —
+  // pricingFor() falls back to bundled defaults if this fails, so
+  // we never block cost-sync on a network hiccup.
+  await ensurePricingLoaded();
 
   const entries = collectEntries();
   if (entries.length === 0) return;
