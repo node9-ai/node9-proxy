@@ -20,6 +20,8 @@ type DailyEntry = {
   model: string;
   /** Project working directory the session ran in. Optional for back-compat with older BE. */
   workingDir?: string;
+  /** Agent session id (the JSONL filename stem). Empty for older BE / unknown. */
+  runId?: string;
   costUSD: number;
   inputTokens: number;
   outputTokens: number;
@@ -43,6 +45,10 @@ export function parseJSONLFile(
   filePath: string,
   fallbackWorkingDir: string
 ): Map<string, DailyEntry> {
+  // Claude Code's JSONL filename IS the session_id (UUID). Stamp every
+  // emitted DailyEntry with it so the BE can produce per-session
+  // tokens + cost via `WHERE runId = X`.
+  const runId = path.basename(filePath, '.jsonl');
   let content: string;
   try {
     content = fs.readFileSync(filePath, 'utf8');
@@ -85,9 +91,10 @@ export function parseJSONLFile(
     const workingDir = rowCwd && rowCwd.startsWith('/') ? rowCwd : fallbackWorkingDir;
 
     const norm = normalizeModel(model);
-    // Aggregate by date::model::workingDir so two projects on the same day
-    // with the same model produce two entries, not one merged total.
-    const key = `${date}::${norm}::${workingDir}`;
+    // Aggregate by date::model::workingDir::runId so each session gets
+    // its own row. Daily totals still recover via SUM(...) GROUP BY date
+    // on the BE; per-session totals via WHERE runId = X.
+    const key = `${date}::${norm}::${workingDir}::${runId}`;
     const prev = daily.get(key);
     if (prev) {
       prev.costUSD += cost;
@@ -100,6 +107,7 @@ export function parseJSONLFile(
         date,
         model: norm,
         workingDir,
+        runId,
         costUSD: cost,
         inputTokens: inp,
         outputTokens: out,

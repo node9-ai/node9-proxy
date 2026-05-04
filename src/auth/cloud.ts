@@ -84,7 +84,7 @@ export function auditLocalAllow(
   args: unknown,
   checkedBy: string,
   creds: { apiKey: string; apiUrl: string },
-  meta?: { agent?: string; mcpServer?: string },
+  meta?: { agent?: string; mcpServer?: string; sessionId?: string; transcriptPath?: string },
   dlpInfo?: { pattern: string; redactedSample: string },
   containsSensitiveArgs: boolean = false,
   // Optional rule attribution. Forwarded into the audit-log row's
@@ -143,6 +143,12 @@ export function auditLocalAllow(
       checkedBy: safeCheckedBy,
       ...(dlpInfo && { dlpPattern, dlpSample }),
       ...(hasRiskMetadata && { riskMetadata: cleanedRiskMetadata }),
+      // session_id (Claude Code + Gemini CLI) groups all audit rows from one
+      // agent run; transcript_path is the authoritative pointer to the
+      // session log (survives Gemini resume drift). Both optional —
+      // unsupported agents (MCP-mediated) leave them undefined.
+      ...(meta?.sessionId && { runId: meta.sessionId }),
+      ...(meta?.transcriptPath && { transcriptPath: meta.transcriptPath }),
       context: {
         agent: meta?.agent,
         mcpServer: meta?.mcpServer,
@@ -164,7 +170,7 @@ export async function initNode9SaaS(
   toolName: string,
   args: unknown,
   creds: { apiKey: string; apiUrl: string },
-  meta?: { agent?: string; mcpServer?: string },
+  meta?: { agent?: string; mcpServer?: string; sessionId?: string; transcriptPath?: string },
   riskMetadata?: RiskMetadata,
   agentPolicy?: 'require_approval' | 'block_on_rules',
   forceReview?: boolean
@@ -219,6 +225,9 @@ export async function initNode9SaaS(
       body: JSON.stringify({
         toolName,
         args,
+        // See auditLocalAllow above for the rationale on these two fields.
+        ...(meta?.sessionId && { runId: meta.sessionId }),
+        ...(meta?.transcriptPath && { transcriptPath: meta.transcriptPath }),
         context: {
           agent: meta?.agent,
           mcpServer: meta?.mcpServer,

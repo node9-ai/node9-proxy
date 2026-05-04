@@ -510,6 +510,7 @@ export function startActivitySocket(): void {
           fileCount?: number;
           agent?: string;
           mcpServer?: string;
+          sessionId?: string;
           durationMs?: number;
           isError?: boolean;
         };
@@ -559,6 +560,7 @@ export function startActivitySocket(): void {
             status: 'pending',
             agent: data.agent,
             mcpServer: data.mcpServer,
+            sessionId: data.sessionId,
           });
         } else {
           // Update session counters for HUD
@@ -593,6 +595,7 @@ export function startActivitySocket(): void {
             costEstimate,
             agent: data.agent,
             mcpServer: data.mcpServer,
+            sessionId: data.sessionId,
           });
         }
       } catch {}

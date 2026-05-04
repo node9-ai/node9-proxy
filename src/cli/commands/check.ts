@@ -104,6 +104,12 @@ export function registerCheckCommand(program: Command): void {
             args?: unknown;
             cwd?: string;
             session_id?: string;
+            // Path to the agent's session JSONL/transcript file. Both Claude
+            // Code and Gemini CLI populate this in the hook payload. Forwarded
+            // to the SaaS so the dashboard can correlate audit rows to the
+            // session content — essential for Gemini, where session_id can
+            // drift across resumes but transcript_path is stable.
+            transcript_path?: string;
             hook_event_name?: string; // Claude: "PreToolUse" | Gemini: "BeforeTool"
             tool_use_id?: string; // Claude-only
             permission_mode?: string; // Claude-only
@@ -295,7 +301,9 @@ export function registerCheckCommand(program: Command): void {
           }
 
           const sessionId = typeof payload.session_id === 'string' ? payload.session_id : undefined;
-          const meta = { agent, mcpServer, sessionId };
+          const transcriptPath =
+            typeof payload.transcript_path === 'string' ? payload.transcript_path : undefined;
+          const meta = { agent, mcpServer, sessionId, transcriptPath };
 
           // ── Skill pinning — supply chain & update drift defense (AST 02 + AST 07) ──
           // Off by default; opt-in via config.policy.skillPinning.enabled.

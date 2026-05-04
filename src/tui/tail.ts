@@ -45,6 +45,9 @@ interface ActivityItem {
   costEstimate?: number;
   agent?: string;
   mcpServer?: string;
+  // Agent session id (Claude Code / Gemini CLI). Forwarded from the
+  // activity socket so two parallel sessions don't visually interleave.
+  sessionId?: string;
 }
 
 interface ResultItem {
@@ -229,7 +232,26 @@ function wrappedLineCount(text: string): number {
 let pendingShownForId: string | null = null;
 let pendingWrappedLines = 0;
 
-function agentLabel(agent: string | undefined, mcpServer?: string): string {
+// Short, stable session tag — last 4 chars of the UUID. Long enough to
+// distinguish two parallel sessions visually, short enough to not hog the
+// row. Empty when no sessionId (MCP / Terminal / unsupported agents).
+// Exported for unit tests.
+export function sessionTag(sessionId: string | undefined): string {
+  if (!sessionId || sessionId.length < 4) return '';
+  // Strip non-alphanumeric (UUIDs have hyphens), then take the last 4.
+  const cleaned = sessionId.replace(/[^a-zA-Z0-9]/g, '');
+  if (cleaned.length < 4) return '';
+  return cleaned.slice(-4);
+}
+
+// Exported for unit tests.
+export function agentLabel(
+  agent: string | undefined,
+  mcpServer?: string,
+  sessionId?: string
+): string {
+  const tag = sessionTag(sessionId);
+  const tagSuffix = tag ? `·${tag}` : '';
   if (!agent || agent === 'Terminal') {
     // Even without an agent, surface the MCP server when present (e.g. direct
     // gateway invocation without clientInfo). Otherwise blank as before.
@@ -244,7 +266,9 @@ function agentLabel(agent: string | undefined, mcpServer?: string): string {
           ? ''
           : agent.split(' ')[0];
   if (!short) return mcpServer ? chalk.dim(`[→ ${mcpServer}] `) : '';
-  return mcpServer ? chalk.dim(`[${short} → ${mcpServer}] `) : chalk.dim(`[${short}] `);
+  return mcpServer
+    ? chalk.dim(`[${short}${tagSuffix} → ${mcpServer}] `)
+    : chalk.dim(`[${short}${tagSuffix}] `);
 }
 
 function formatBase(activity: ActivityItem): string {
@@ -255,7 +279,7 @@ function formatBase(activity: ActivityItem): string {
     .replace(/\s+/g, ' ')
     .replaceAll(os.homedir(), '~');
   const argsPreview = argsStr.length > 70 ? argsStr.slice(0, 70) + '…' : argsStr;
-  return `${chalk.gray(time)} ${icon} ${agentLabel(activity.agent, activity.mcpServer)}${chalk.white.bold(toolName)} ${chalk.dim(argsPreview)}`;
+  return `${chalk.gray(time)} ${icon} ${agentLabel(activity.agent, activity.mcpServer, activity.sessionId)}${chalk.white.bold(toolName)} ${chalk.dim(argsPreview)}`;
 }
 
 function renderResult(activity: ActivityItem, result: ResultItem): void {

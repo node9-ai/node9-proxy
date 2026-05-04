@@ -147,6 +147,10 @@ function notifyActivity(data: {
   observeWouldBlock?: boolean;
   agent?: string;
   mcpServer?: string;
+  // Agent session identifier (Claude Code / Gemini CLI). Lets `node9 tail`
+  // show a session badge so two parallel agent sessions in different
+  // terminals don't visually interleave into a single mystery stream.
+  sessionId?: string;
 }): Promise<boolean> {
   return notifyActivitySocket(data);
 }
@@ -154,7 +158,7 @@ function notifyActivity(data: {
 export async function authorizeHeadless(
   toolName: string,
   args: unknown,
-  meta?: { agent?: string; mcpServer?: string; sessionId?: string },
+  meta?: { agent?: string; mcpServer?: string; sessionId?: string; transcriptPath?: string },
   options?: { calledFromDaemon?: boolean; cwd?: string; localSmartRuleMatched?: boolean }
 ): Promise<AuthResult> {
   // Skip socket notification when called from daemon — daemon already broadcasts via SSE
@@ -183,6 +187,7 @@ export async function authorizeHeadless(
       status: 'pending',
       agent: sanitizedAgent,
       mcpServer: sanitizedMcpServer,
+      sessionId: meta?.sessionId,
     });
     const result = await _authorizeHeadlessCore(toolName, args, meta, {
       ...options,
@@ -212,6 +217,7 @@ export async function authorizeHeadless(
         observeWouldBlock: result.observeWouldBlock,
         agent: sanitizedAgent,
         mcpServer: sanitizedMcpServer,
+        sessionId: meta?.sessionId,
       });
     }
     return result;
@@ -222,7 +228,7 @@ export async function authorizeHeadless(
 async function _authorizeHeadlessCore(
   toolName: string,
   args: unknown,
-  meta?: { agent?: string; mcpServer?: string; sessionId?: string },
+  meta?: { agent?: string; mcpServer?: string; sessionId?: string; transcriptPath?: string },
   options?: {
     calledFromDaemon?: boolean;
     activityId?: string;
