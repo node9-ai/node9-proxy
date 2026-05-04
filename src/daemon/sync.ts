@@ -10,8 +10,87 @@ import os from 'os';
 import path from 'path';
 import { getConfig } from '../config/index.js';
 import { runBlast } from '../cli/commands/blast.js';
-import { summarizeBlast, summarizeScan } from '@node9/policy-engine';
+import {
+  summarizeBlast,
+  summarizeScan,
+  type ScanFinding,
+  type ScanSignals,
+} from '@node9/policy-engine';
 import { tickScanWatcher } from './scan-watermark.js';
+
+// One row per session delta sent on /scan/report. The BE stores
+// these in ScanSessionSignals using INSERT-ON-CONFLICT INCREMENT, so
+// these counts are *deltas* from this tick, not cumulative totals.
+interface SessionDelta {
+  runId: string;
+  totalToolCalls: number;
+  signals: ScanSignals;
+}
+
+// Local mapping from finding type → ScanSignals key. Mirrors the engine's
+// FINDING_TO_SIGNAL but kept in the proxy because the engine doesn't
+// export it (and re-vendoring the engine tarball just for one constant
+// is more friction than this 10-line duplicate).
+const FINDING_TO_SIGNAL: Record<ScanFinding['type'], keyof ScanSignals> = {
+  dlp: 'dlpFindings',
+  pii: 'piiFindings',
+  'sensitive-file-read': 'sensitiveFileReads',
+  'privilege-escalation': 'privilegeEscalation',
+  'network-exfil': 'networkExfil',
+  'pipe-to-shell': 'pipeToShell',
+  'eval-of-remote': 'evalOfRemote',
+  'destructive-op': 'destructiveOps',
+  loop: 'loops',
+  'long-output-redacted': 'longOutputRedactions',
+};
+
+function emptySignals(): ScanSignals {
+  return {
+    dlpFindings: 0,
+    piiFindings: 0,
+    sensitiveFileReads: 0,
+    privilegeEscalation: 0,
+    networkExfil: 0,
+    pipeToShell: 0,
+    evalOfRemote: 0,
+    destructiveOps: 0,
+    loops: 0,
+    longOutputRedactions: 0,
+  };
+}
+
+/**
+ * Group findings by sessionId into per-session deltas. Each delta also
+ * carries the count of new tool-call lines parsed for that session in
+ * this tick (passed in from the watermark).
+ *
+ * Sessions with zero findings AND zero tool calls are excluded — the BE
+ * has nothing useful to write for them.
+ *
+ * Exported for unit tests.
+ */
+export function buildSessionDeltas(
+  findings: ScanFinding[],
+  toolCallsBySession: Record<string, number>
+): SessionDelta[] {
+  const bySession = new Map<string, ScanSignals>();
+  for (const f of findings) {
+    const signals = bySession.get(f.sessionId) ?? emptySignals();
+    const key = FINDING_TO_SIGNAL[f.type];
+    signals[key]++;
+    bySession.set(f.sessionId, signals);
+  }
+  // Include sessions that had tool calls but no findings — the dashboard
+  // still wants to attribute "47 tool calls" to that session.
+  for (const sid of Object.keys(toolCallsBySession)) {
+    if (!bySession.has(sid)) bySession.set(sid, emptySignals());
+  }
+  return [...bySession.entries()].map(([runId, signals]) => ({
+    runId,
+    totalToolCalls: toolCallsBySession[runId] ?? 0,
+    signals,
+  }));
+}
 
 // Computed lazily so tests can mock os.homedir() before any call
 const rulesCacheFile = () => path.join(os.homedir(), '.node9', 'rules-cache.json');
@@ -322,6 +401,10 @@ async function pushScanSnapshot(creds: { apiKey: string; apiUrl: string }): Prom
     const summary = summarizeScan(tick.findings, {
       totalToolCalls: tick.totalToolCalls,
     });
+    // Per-session breakdown — sibling to the workspace-level summary.
+    // Powers the Sessions tab. New on the wire; BE writes to the new
+    // ScanSessionSignals table independently of ScanSnapshot.
+    const sessionDeltas = buildSessionDeltas(tick.findings, tick.toolCallsBySession);
 
     const scanUrl = creds.apiUrl.endsWith('/policies/sync')
       ? creds.apiUrl.replace(/\/policies\/sync$/, '/scan/report')
@@ -353,7 +436,7 @@ async function pushScanSnapshot(creds: { apiKey: string; apiUrl: string }): Prom
         req.destroy();
         resolve();
       });
-      req.write(JSON.stringify(summary));
+      req.write(JSON.stringify({ ...summary, sessionDeltas }));
       req.end();
     });
   } catch {

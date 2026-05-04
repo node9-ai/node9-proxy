@@ -418,6 +418,9 @@ const PRIVILEGE_ESCALATION_RE = /\b(sudo|su)\b\s+[a-z]|\bchmod\s+(0?777|\+x)\b|\
 export interface ScanTickResult {
   findings: ScanFinding[];
   totalToolCalls: number;
+  /** Per-session tool-call counts in this delta. Lets the BE attribute
+   *  "47 calls in this session" on the Sessions tab without reparsing. */
+  toolCallsBySession: Record<string, number>;
   filesScanned: number;
   filesNew: number;
   filesSkipped: number;
@@ -443,13 +446,21 @@ export interface ScanTickResult {
  */
 export async function tickScanWatcher(): Promise<ScanTickResult> {
   if (process.env.NODE9_SCAN_DISABLE === '1') {
-    return { findings: [], totalToolCalls: 0, filesScanned: 0, filesNew: 0, filesSkipped: 0 };
+    return {
+      findings: [],
+      totalToolCalls: 0,
+      toolCallsBySession: {},
+      filesScanned: 0,
+      filesNew: 0,
+      filesSkipped: 0,
+    };
   }
 
   const wm = loadWatermark();
   const watermarkCreatedAt = new Date(wm.createdAt).getTime();
   const findings: ScanFinding[] = [];
   let totalToolCalls = 0;
+  const toolCallsBySession: Record<string, number> = {};
   let filesScanned = 0;
   let filesNew = 0;
   let filesSkipped = 0;
@@ -473,6 +484,7 @@ export async function tickScanWatcher(): Promise<ScanTickResult> {
         const sessionId = path.basename(filePath, '.jsonl');
         const newScannedTo = await scanDelta(filePath, 0, (obj, lineIndex) => {
           totalToolCalls++;
+          toolCallsBySession[sessionId] = (toolCallsBySession[sessionId] ?? 0) + 1;
           findings.push(...extractFindingsFromLine(obj, sessionId, lineIndex));
         });
         wm.files[filePath] = { scannedTo: newScannedTo };
@@ -495,6 +507,7 @@ export async function tickScanWatcher(): Promise<ScanTickResult> {
     const sessionId = path.basename(filePath, '.jsonl');
     const newScannedTo = await scanDelta(filePath, known.scannedTo, (obj, lineIndex) => {
       totalToolCalls++;
+      toolCallsBySession[sessionId] = (toolCallsBySession[sessionId] ?? 0) + 1;
       findings.push(...extractFindingsFromLine(obj, sessionId, lineIndex));
     });
     wm.files[filePath] = { scannedTo: newScannedTo };
@@ -503,5 +516,5 @@ export async function tickScanWatcher(): Promise<ScanTickResult> {
 
   saveWatermark(wm);
 
-  return { findings, totalToolCalls, filesScanned, filesNew, filesSkipped };
+  return { findings, totalToolCalls, toolCallsBySession, filesScanned, filesNew, filesSkipped };
 }
