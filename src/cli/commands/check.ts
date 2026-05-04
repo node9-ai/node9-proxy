@@ -21,6 +21,72 @@ function sanitize(value: string): string {
   return value.replace(/[\x00-\x1F\x7F]/g, '');
 }
 
+/**
+ * Identify the AI agent running this tool call. Source of truth for the
+ * SaaS Report's "AI Agents" breakdown — the value flows: detected here →
+ * passed in `meta.agent` → backend stores as the row's hostname column.
+ *
+ * Detection layers, ordered by signal strength:
+ *
+ *   1. Hook payload fingerprint — most reliable. Claude Code's hook
+ *      sends `PreToolUse` event names + `tool_use_id`; Gemini CLI sends
+ *      `BeforeTool` + `timestamp`. These are deterministic.
+ *
+ *   2. Environment variables — a process running under an AI host often
+ *      sets identifying env vars even when the call doesn't come through
+ *      the hook (e.g. user runs `node9 check` directly inside a Claude
+ *      Code subshell). These are softer but useful when the payload is
+ *      absent.
+ *
+ *   3. Final fallback — "Terminal" for bare-shell calls, "Unknown Agent"
+ *      when there's a tool-name signal but no AI hint at all.
+ *
+ * Exported for unit testing — pure function over (payload, process.env).
+ */
+export function detectAiAgent(payload: Record<string, unknown>): string {
+  // Layer 1: payload fingerprint (existing, most reliable).
+  if (
+    payload.hook_event_name === 'PreToolUse' ||
+    payload.hook_event_name === 'PostToolUse' ||
+    payload.tool_use_id !== undefined ||
+    payload.permission_mode !== undefined
+  ) {
+    return 'Claude Code';
+  }
+  if (
+    payload.hook_event_name === 'BeforeTool' ||
+    payload.hook_event_name === 'AfterTool' ||
+    payload.timestamp !== undefined
+  ) {
+    return 'Gemini CLI';
+  }
+
+  // Layer 2: env-var fallback. Order matters — most specific first.
+  // CLAUDECODE is set by the Claude Code CLI on session start. Gemini's
+  // CLI sets GEMINI_API_KEY (often present) or GEMINI_CLI_VERSION (newer
+  // versions). Cursor sets CURSOR_TRACE_ID for tool-call attribution.
+  // Aider sets AIDER_VERSION when running under aider.
+  if (process.env.CLAUDECODE === '1' || process.env.CLAUDE_CODE_SESSION_ID) {
+    return 'Claude Code';
+  }
+  if (process.env.GEMINI_CLI_VERSION || process.env.GEMINI_API_KEY) {
+    return 'Gemini CLI';
+  }
+  if (process.env.CURSOR_TRACE_ID || process.env.CURSOR_SESSION_ID) {
+    return 'Cursor';
+  }
+  if (process.env.AIDER_VERSION) {
+    return 'Aider';
+  }
+
+  // Layer 3: payload has a tool name but no AI fingerprint — call came
+  // from somewhere we don't recognise yet.
+  if (payload.tool_name !== undefined || payload.name !== undefined) {
+    return 'Unknown Agent';
+  }
+  return 'Terminal';
+}
+
 export function registerCheckCommand(program: Command): void {
   program
     .command('check')
@@ -138,22 +204,7 @@ export function registerCheckCommand(program: Command): void {
           const toolName = sanitize(payload.tool_name ?? payload.name ?? '');
           const toolInput = payload.tool_input ?? payload.args ?? {};
 
-          // Both Claude and Gemini send session_id + hook_event_name, but with different values:
-          //   Claude:  hook_event_name = "PreToolUse" | "PostToolUse", also sends tool_use_id
-          //   Gemini:  hook_event_name = "BeforeTool" | "AfterTool",   also sends timestamp
-          const agent =
-            payload.hook_event_name === 'PreToolUse' ||
-            payload.hook_event_name === 'PostToolUse' ||
-            payload.tool_use_id !== undefined ||
-            payload.permission_mode !== undefined
-              ? 'Claude Code'
-              : payload.hook_event_name === 'BeforeTool' ||
-                  payload.hook_event_name === 'AfterTool' ||
-                  payload.timestamp !== undefined
-                ? 'Gemini CLI'
-                : payload.tool_name !== undefined || payload.name !== undefined
-                  ? 'Unknown Agent'
-                  : 'Terminal';
+          const agent = detectAiAgent(payload);
           const mcpMatch = toolName.match(/^mcp__([^_](?:[^_]|_(?!_))*?)__/i);
           const mcpServer = mcpMatch?.[1];
 

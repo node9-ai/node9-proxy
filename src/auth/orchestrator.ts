@@ -447,10 +447,40 @@ async function _authorizeHeadlessCore(
       }
     }
 
-    const policyResult = await evaluatePolicy(toolName, args, meta?.agent);
+    let policyResult = await evaluatePolicy(toolName, args, meta?.agent);
+
+    // ── Cloud panic mode ──────────────────────────────────────────────
+    // When the workspace admin has flipped panic mode on (via the SaaS
+    // dashboard, synced down by daemon/sync.ts to settings.panicMode),
+    // every review-verdict is upgraded to a hard block. This is the
+    // emergency switch — gives an admin a single toggle to stop all
+    // questionable AI actions across their fleet during an incident.
+    //
+    // Allow-verdicts pass through unaffected (panic mode doesn't fight
+    // explicit allow rules — those are typically the ignored-tool fast
+    // path or user trust decisions, and breaking them would block reads
+    // alongside writes). Block-verdicts also pass through (they're
+    // already strictest possible).
+    if (config.settings.panicMode && policyResult.decision === 'review') {
+      policyResult = {
+        ...policyResult,
+        decision: 'block',
+        blockedByLabel: '🚨 Panic mode (org policy)',
+        reason:
+          'Workspace is in panic mode — all review-verdict actions are blocked. ' +
+          'Contact your admin to disable panic mode in the Node9 dashboard.',
+      };
+    }
+
     if (policyResult.decision === 'allow') {
       if (approvers.cloud && creds?.apiKey)
-        await auditLocalAllow(toolName, args, 'local-policy', creds, meta);
+        await auditLocalAllow(toolName, args, 'local-policy', creds, meta, undefined, false, {
+          ruleName: policyResult.ruleName,
+          ruleDescription: policyResult.ruleDescription,
+          blockedByLabel: policyResult.blockedByLabel,
+          matchedField: policyResult.matchedField,
+          matchedWord: policyResult.matchedWord,
+        });
       if (!isManual) appendLocalAudit(toolName, args, 'allow', 'local-policy', meta, hashAuditArgs);
       return { approved: true, checkedBy: 'local-policy' };
     }
@@ -500,13 +530,25 @@ async function _authorizeHeadlessCore(
         if (!isManual)
           appendLocalAudit(toolName, args, 'deny', 'smart-rule-block', meta, hashAuditArgs);
         if (approvers.cloud && creds?.apiKey)
-          auditLocalAllow(toolName, args, 'smart-rule-block', creds, meta);
+          auditLocalAllow(toolName, args, 'smart-rule-block', creds, meta, undefined, false, {
+            ruleName: policyResult.ruleName,
+            ruleDescription: policyResult.ruleDescription,
+            blockedByLabel: policyResult.blockedByLabel,
+            matchedField: policyResult.matchedField,
+            matchedWord: policyResult.matchedWord,
+          });
         // Fall through to the race engine with the block label visible to the user.
       } else {
         if (!isManual)
           appendLocalAudit(toolName, args, 'deny', 'smart-rule-block', meta, hashAuditArgs);
         if (approvers.cloud && creds?.apiKey)
-          auditLocalAllow(toolName, args, 'smart-rule-block', creds, meta);
+          auditLocalAllow(toolName, args, 'smart-rule-block', creds, meta, undefined, false, {
+            ruleName: policyResult.ruleName,
+            ruleDescription: policyResult.ruleDescription,
+            blockedByLabel: policyResult.blockedByLabel,
+            matchedField: policyResult.matchedField,
+            matchedWord: policyResult.matchedWord,
+          });
         return {
           approved: false,
           reason: policyResult.reason ?? 'Action explicitly blocked by Smart Policy.',

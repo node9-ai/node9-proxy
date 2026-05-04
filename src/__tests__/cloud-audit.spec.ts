@@ -95,6 +95,71 @@ describe('auditLocalAllow — sensitive-args redaction', () => {
     expect(typeof sent).toBe('string');
     expect(sent.length).toBeLessThanOrEqual(100);
   });
+
+  // ── A1: rule attribution propagated to /audit ────────────────────────
+  // Without these, the SaaS Report severity classifier falls back to
+  // "<toolName> block" for every smart-rule match — the engine's friendly
+  // labels (engine.narrativeRuleLabel) never get a chance to fire.
+
+  it('forwards riskMetadata.ruleName to the /audit body when provided', async () => {
+    await auditLocalAllow(
+      'bash',
+      { command: 'rm -rf $HOME' },
+      'smart-rule-block',
+      creds,
+      undefined,
+      undefined,
+      false,
+      {
+        ruleName: 'block-rm-rf-home',
+        ruleDescription: 'rm -rf on $HOME is irreversible',
+        blockedByLabel: '🛑 rm -rf home',
+      }
+    );
+    const meta = captured[0].body.riskMetadata as Record<string, unknown> | undefined;
+    expect(meta).toBeDefined();
+    expect(meta!.ruleName).toBe('block-rm-rf-home');
+    expect(meta!.ruleDescription).toContain('irreversible');
+  });
+
+  it('omits riskMetadata from the body when not provided (older call sites)', async () => {
+    await auditLocalAllow('bash', { command: 'ls' }, 'local-policy', creds);
+    expect(captured[0].body.riskMetadata).toBeUndefined();
+  });
+
+  it('drops empty-string riskMetadata fields rather than sending them', async () => {
+    // Defensive: callers may build the metadata object from a policy result
+    // that has empty fields. Empty strings would pass Zod's optional string
+    // check on the backend but carry no signal — drop them at the boundary.
+    await auditLocalAllow(
+      'bash',
+      { command: 'ls' },
+      'local-policy',
+      creds,
+      undefined,
+      undefined,
+      false,
+      { ruleName: 'block-read-aws', matchedField: '', matchedWord: '' }
+    );
+    const meta = captured[0].body.riskMetadata as Record<string, unknown>;
+    expect(meta.ruleName).toBe('block-read-aws');
+    expect(meta.matchedField).toBeUndefined();
+    expect(meta.matchedWord).toBeUndefined();
+  });
+
+  it('omits riskMetadata entirely when every field is empty/undefined', async () => {
+    await auditLocalAllow(
+      'bash',
+      { command: 'ls' },
+      'local-policy',
+      creds,
+      undefined,
+      undefined,
+      false,
+      { ruleName: '', ruleDescription: undefined }
+    );
+    expect(captured[0].body.riskMetadata).toBeUndefined();
+  });
 });
 
 describe('auditLocalAllow — apiUrl validation (SSRF / key-leak guard)', () => {

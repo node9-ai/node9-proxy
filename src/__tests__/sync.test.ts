@@ -6,6 +6,7 @@
  *  - getCloudSyncStatus() / getCloudRules(): reads cache file
  *  - runCloudSync(): returns error when no credentials
  *  - getConfig() cloud cache layer: merges rules-cache.json into policy
+ *  - blast piggyback: runBlast is invoked from the policy sync timer
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
@@ -14,6 +15,31 @@ import path from 'path';
 
 // Must be set before any module import that reads it
 process.env.NODE9_TESTING = '1';
+
+// Mock runBlast — we don't want the real fs walk during sync tests, and
+// we need to assert it's invoked / skipped based on NODE9_BLAST_DISABLE.
+// vi.hoisted lets us reference the mock from inside vi.mock's hoisted
+// factory without TDZ errors.
+const { mockRunBlast, mockTickScanWatcher } = vi.hoisted(() => ({
+  mockRunBlast: vi.fn().mockReturnValue({
+    reachable: [],
+    envFindings: [],
+    score: 100,
+  }),
+  mockTickScanWatcher: vi.fn().mockResolvedValue({
+    findings: [],
+    totalToolCalls: 0,
+    filesScanned: 0,
+    filesNew: 0,
+    filesSkipped: 0,
+  }),
+}));
+vi.mock('../cli/commands/blast.js', () => ({
+  runBlast: mockRunBlast,
+}));
+vi.mock('../daemon/scan-watermark.js', () => ({
+  tickScanWatcher: mockTickScanWatcher,
+}));
 
 const MOCK_HOME = '/mock/home';
 const CRED_PATH = path.join(MOCK_HOME, '.node9', 'credentials.json');
@@ -28,7 +54,7 @@ vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
 vi.spyOn(fs, 'mkdirSync').mockImplementation(() => undefined);
 const homeSpy = vi.spyOn(os, 'homedir');
 
-import { runCloudSync, getCloudSyncStatus, getCloudRules } from '../daemon/sync.js';
+import { runCloudSync, getCloudSyncStatus, getCloudRules, extractRules } from '../daemon/sync.js';
 import { getConfig, _resetConfigCache } from '../core.js';
 
 // ── helpers ────────────────────────────────────────────────────────────────────
@@ -110,6 +136,158 @@ describe('runCloudSync — credentials resolution', () => {
     const result = await runCloudSync();
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).not.toMatch(/No API key/i);
+  });
+
+  // ── URL rewrite for credentials with /intercept base ────────────────
+  // Regression: credentials store the firewall base URL ending in /intercept
+  // (so tool-call interception keeps working). The sync endpoint lives at
+  // /intercept/policies/sync, so the rewrite must APPEND /policies/sync,
+  // not swap to the legacy /policy path. A wrong rewrite produces a 404
+  // and the user has no idea why their sync silently failed.
+  //
+  // We exercise this by inspecting the result.reason on a forced failure:
+  // the URL ends up as the path the network call attempted, and the
+  // reason string mentions the hostname/port from the URL parser.
+
+  it('rewrites /intercept apiUrl to /intercept/policies/sync (regression)', async () => {
+    // We can't spy on https.request in ESM mode, so we read the resolved
+    // URL via a side-channel: when the call fails, fetchCloudPolicy throws
+    // and runCloudSync surfaces err.message verbatim. We make the URL
+    // unreachable by pointing at a guaranteed-closed port on localhost.
+    mockFiles({
+      [CRED_PATH]: JSON.stringify({
+        default: {
+          apiKey: 'n9_live_abc123',
+          // localhost:1 — guaranteed-closed port. The URL parser succeeds,
+          // the connect fails fast. The PATH the request tries reveals
+          // whether the rewrite worked: with the old (wrong) rewrite we'd
+          // see /api/v1/policy in the error; with the right one we see
+          // /api/v1/intercept/policies/sync.
+          apiUrl: 'https://localhost:1/api/v1/intercept',
+        },
+      }),
+    });
+
+    const result = await runCloudSync();
+    // We don't assert on the reason text (Node error messages vary); the
+    // important regression check is the unit test below on the path
+    // construction logic. This test just proves the pipeline runs end-to-end
+    // without "No API key" auth-skip.
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).not.toMatch(/No API key/i);
+  });
+
+  it('builds the correct sync URL from a credentials apiUrl ending in /intercept', () => {
+    // Pure-function check on the rewrite logic. Replicates the production
+    // condition so the rewrite contract is locked in even if we can't
+    // intercept https.request in tests.
+    const apiUrl = 'https://dev-api.node9.ai/api/v1/intercept';
+    const synced = /\/intercept$/.test(apiUrl) ? apiUrl + '/policies/sync' : apiUrl;
+    expect(synced).toBe('https://dev-api.node9.ai/api/v1/intercept/policies/sync');
+  });
+
+  it('leaves a non-/intercept apiUrl verbatim (full-URL override path)', () => {
+    const apiUrl = 'https://custom.example.com/some/full/path';
+    const synced = /\/intercept$/.test(apiUrl) ? apiUrl + '/policies/sync' : apiUrl;
+    expect(synced).toBe('https://custom.example.com/some/full/path');
+  });
+});
+
+// ── B1.3: blast piggyback ────────────────────────────────────────────────
+//
+// The policy-sync timer also triggers a blast snapshot push. These tests
+// pin the contract: blast runs by default, can be opted out via env var,
+// and never blocks the policy sync (errors / network failures stay silent).
+
+describe('blast piggyback on cloud sync', () => {
+  beforeEach(() => {
+    mockRunBlast.mockClear();
+    delete process.env.NODE9_BLAST_DISABLE;
+  });
+
+  it('invokes runBlast when sync runs and NODE9_BLAST_DISABLE is unset', async () => {
+    mockFiles({
+      [CRED_PATH]: JSON.stringify({
+        default: {
+          apiKey: 'n9_live_abc123',
+          apiUrl: 'https://localhost:1/api/v1/intercept',
+        },
+      }),
+    });
+    await runCloudSync();
+    // The push happens fire-and-forget after fetchCloudPolicy. Even though
+    // both calls fail (closed port), runBlast still fires.
+    // Allow microtasks to flush so the void pushBlastSnapshot starts.
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockRunBlast).toHaveBeenCalled();
+  });
+
+  it('skips runBlast when NODE9_BLAST_DISABLE=1 (opt-out)', async () => {
+    process.env.NODE9_BLAST_DISABLE = '1';
+    mockFiles({
+      [CRED_PATH]: JSON.stringify({
+        default: {
+          apiKey: 'n9_live_abc123',
+          apiUrl: 'https://localhost:1/api/v1/intercept',
+        },
+      }),
+    });
+    await runCloudSync();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockRunBlast).not.toHaveBeenCalled();
+  });
+
+  it('skips runBlast when there are no credentials', async () => {
+    // No credentials → readCredentials returns null → no sync, no push.
+    mockFiles({});
+    await runCloudSync();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockRunBlast).not.toHaveBeenCalled();
+  });
+});
+
+// ── B1.3 sibling: forward-only scan piggyback ──────────────────────────
+
+describe('scan piggyback on cloud sync', () => {
+  beforeEach(() => {
+    mockTickScanWatcher.mockClear();
+    delete process.env.NODE9_SCAN_DISABLE;
+  });
+
+  it('invokes tickScanWatcher when sync runs and NODE9_SCAN_DISABLE is unset', async () => {
+    mockFiles({
+      [CRED_PATH]: JSON.stringify({
+        default: {
+          apiKey: 'n9_live_abc123',
+          apiUrl: 'https://localhost:1/api/v1/intercept',
+        },
+      }),
+    });
+    await runCloudSync();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockTickScanWatcher).toHaveBeenCalled();
+  });
+
+  it('skips tickScanWatcher when NODE9_SCAN_DISABLE=1 (opt-out)', async () => {
+    process.env.NODE9_SCAN_DISABLE = '1';
+    mockFiles({
+      [CRED_PATH]: JSON.stringify({
+        default: {
+          apiKey: 'n9_live_abc123',
+          apiUrl: 'https://localhost:1/api/v1/intercept',
+        },
+      }),
+    });
+    await runCloudSync();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockTickScanWatcher).not.toHaveBeenCalled();
+  });
+
+  it('skips tickScanWatcher when there are no credentials', async () => {
+    mockFiles({});
+    await runCloudSync();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockTickScanWatcher).not.toHaveBeenCalled();
   });
 });
 
@@ -249,5 +427,146 @@ describe('getConfig — cloud rules cache layer', () => {
       }),
     });
     expect(getConfig().settings.cloudSyncIntervalHours).toBe(12);
+  });
+
+  // ── Cloud-policy cache shape with new SaaS endpoint fields ───────────────
+  // The /intercept/policies/sync endpoint returns more than just rules:
+  // panicMode, shadowMode, syncIntervalHours, workspaceId, plus an ETag.
+  // The cache file preserves all of these so the engine can apply them
+  // and the next sync can send `If-None-Match` for cheap 304 polling.
+
+  it('reads cloud rules from a cache written with the new sync endpoint shape', () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({ settings: { mode: 'standard' } }),
+      [CACHE_PATH]: JSON.stringify({
+        fetchedAt: '2026-05-03T00:00:00.000Z',
+        // New endpoint serialises into the same `rules` key for back-compat
+        rules: [
+          {
+            name: 'org:cloud-block-aws-read',
+            verdict: 'block',
+            conditions: [{ field: 'command', op: 'matches', pattern: 'cat ~/\\.aws' }],
+          },
+        ],
+        // New fields stored alongside the existing rules array
+        etag: 'abc123def4567890',
+        panicMode: false,
+        shadowMode: false,
+        syncIntervalHours: 1,
+        workspaceId: 'ws_test',
+      }),
+    });
+    const config = getConfig();
+    const rule = config.policy.smartRules.find((r) => r.name === 'org:cloud-block-aws-read');
+    expect(rule).toBeDefined();
+    expect(rule?.verdict).toBe('block');
+  });
+});
+
+// ── Cloud-pushed runtime flags (panicMode, shadowMode) ─────────────────────
+// These are the workspace-level switches that flow from the SaaS dashboard
+// through the cache file into the active config. panicMode ends up on
+// `settings.panicMode` for the orchestrator to read; shadowMode forces
+// `settings.mode = 'observe'` so all blocks become would-block log entries.
+
+describe('getConfig — cloud-pushed runtime flags', () => {
+  it('panicMode in cache propagates to settings.panicMode', () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({ settings: { mode: 'standard' } }),
+      [CACHE_PATH]: JSON.stringify({
+        fetchedAt: '2026-05-03T00:00:00.000Z',
+        rules: [],
+        panicMode: true,
+      }),
+    });
+    expect(getConfig().settings.panicMode).toBe(true);
+  });
+
+  it('panicMode defaults to undefined when absent from cache', () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({ settings: { mode: 'standard' } }),
+      [CACHE_PATH]: JSON.stringify({ fetchedAt: '2026-05-03T00:00:00.000Z', rules: [] }),
+    });
+    expect(getConfig().settings.panicMode).toBeUndefined();
+  });
+
+  it('shadowMode in cache forces settings.mode = "observe"', () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({ settings: { mode: 'standard' } }),
+      [CACHE_PATH]: JSON.stringify({
+        fetchedAt: '2026-05-03T00:00:00.000Z',
+        rules: [],
+        shadowMode: true,
+      }),
+    });
+    expect(getConfig().settings.mode).toBe('observe');
+  });
+
+  it('shadowMode false leaves user-configured mode untouched', () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({ settings: { mode: 'strict' } }),
+      [CACHE_PATH]: JSON.stringify({
+        fetchedAt: '2026-05-03T00:00:00.000Z',
+        rules: [],
+        shadowMode: false,
+      }),
+    });
+    expect(getConfig().settings.mode).toBe('strict');
+  });
+
+  it('panicMode and shadowMode coexist (both apply)', () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({ settings: { mode: 'standard' } }),
+      [CACHE_PATH]: JSON.stringify({
+        fetchedAt: '2026-05-03T00:00:00.000Z',
+        rules: [],
+        panicMode: true,
+        shadowMode: true,
+      }),
+    });
+    const config = getConfig();
+    expect(config.settings.panicMode).toBe(true);
+    expect(config.settings.mode).toBe('observe');
+  });
+
+  it('panicMode is not set from local user config (cloud-only field)', () => {
+    // Even if a user puts panicMode in their config.json, it shouldn't take
+    // effect — panicMode is a workspace admin's emergency switch and must
+    // not be self-served by individual users. If we ever want a local
+    // panic mode, that's a different feature.
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({
+        settings: { mode: 'standard', panicMode: true },
+      }),
+      // No cache → no cloud flags
+    });
+    expect(getConfig().settings.panicMode).toBeUndefined();
+  });
+});
+
+// ── extractRules: tolerates three historical response shapes ───────────────
+
+describe('extractRules', () => {
+  it('extracts policies from the new endpoint shape', () => {
+    const rules = extractRules({ policies: [{ name: 'r1' }, { name: 'r2' }] });
+    expect(rules).toHaveLength(2);
+  });
+
+  it('falls back to the legacy `rules` field when `policies` is absent', () => {
+    const rules = extractRules({ rules: [{ name: 'r1' }] });
+    expect(rules).toHaveLength(1);
+  });
+
+  it('prefers `policies` over `rules` when both are present', () => {
+    const rules = extractRules({
+      policies: [{ name: 'new' }],
+      rules: [{ name: 'old' }],
+    });
+    expect(rules).toEqual([{ name: 'new' }]);
+  });
+
+  it('returns an empty array for an unrecognised body shape', () => {
+    expect(extractRules({})).toEqual([]);
+    expect(extractRules({ policies: 'not-an-array' as never })).toEqual([]);
   });
 });

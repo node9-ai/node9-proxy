@@ -20,11 +20,25 @@ export function registerSyncCommand(program: Command): void {
         process.exit(1);
       }
 
-      console.log(
-        chalk.green(`✓ Synced ${result.rules} rule${result.rules === 1 ? '' : 's'} from cloud`)
-      );
-      console.log(chalk.gray(`  Cached at: ${result.fetchedAt}`));
-      console.log(chalk.gray(`  File: ~/.node9/rules-cache.json`));
+      // Differentiate 304 (server says "no changes since last sync, your
+      // cache is fresh") from a real fetch. Without this, a user with a
+      // hot cache who runs `policy sync` repeatedly sees "Synced 0 rules"
+      // even when they have N rules cached — looks like a bug.
+      if (result.unchanged) {
+        console.log(
+          chalk.green(
+            `✓ Already up to date — ${result.rules} rule${result.rules === 1 ? '' : 's'} cached`
+          )
+        );
+        console.log(chalk.gray(`  Cached at: ${result.fetchedAt}`));
+        console.log(chalk.gray(`  Server returned 304 (no changes since last sync)`));
+      } else {
+        console.log(
+          chalk.green(`✓ Synced ${result.rules} rule${result.rules === 1 ? '' : 's'} from cloud`)
+        );
+        console.log(chalk.gray(`  Cached at: ${result.fetchedAt}`));
+        console.log(chalk.gray(`  File: ~/.node9/rules-cache.json`));
+      }
     });
 
   policy
@@ -74,12 +88,40 @@ export function registerSyncCommand(program: Command): void {
       const s = getCloudSyncStatus();
       if (!s.cached) {
         console.log(chalk.yellow('\n  No cache yet — run: node9 policy sync\n'));
-      } else {
-        const age = Math.round((Date.now() - new Date(s.fetchedAt).getTime()) / 60_000);
-        console.log(`\n  Rules   : ${chalk.green(String(s.rules))} cloud rules loaded`);
+        return;
+      }
+      const age = Math.round((Date.now() - new Date(s.fetchedAt).getTime()) / 60_000);
+      console.log(`\n  Rules   : ${chalk.green(String(s.rules))} cloud rules loaded`);
+      console.log(
+        `  Synced  : ${chalk.gray(`${age} minute${age === 1 ? '' : 's'} ago`)} (${s.fetchedAt})`
+      );
+      if (s.workspaceId) {
+        console.log(`  Workspace: ${chalk.gray(s.workspaceId)}`);
+      }
+
+      // ── Cloud-pushed runtime flags ──────────────────────────────────
+      // Surface these prominently — when an admin flips panic mode or
+      // shadow mode in the SaaS UI, the dev's `node9 policy status` is
+      // the first place they'll see why their AI's behavior changed.
+      if (s.panicMode) {
         console.log(
-          `  Synced  : ${chalk.gray(`${age} minute${age === 1 ? '' : 's'} ago`)} (${s.fetchedAt})\n`
+          `  ${chalk.red.bold('🚨 Panic mode  : ON')}  ` +
+            chalk.dim('(every review-verdict becomes block)')
         );
       }
+      if (s.shadowMode) {
+        console.log(
+          `  ${chalk.yellow.bold('👁  Shadow mode : ON')}  ` +
+            chalk.dim('(blocks become would-block log entries)')
+        );
+      }
+      if (s.syncIntervalHours) {
+        console.log(
+          chalk.gray(
+            `  Polling : every ${s.syncIntervalHours} hour${s.syncIntervalHours === 1 ? '' : 's'}`
+          )
+        );
+      }
+      console.log('');
     });
 }
