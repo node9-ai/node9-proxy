@@ -1,14 +1,17 @@
 // src/__tests__/panic-mode.spec.ts
-// Tests for cloud-pushed panic mode: when settings.panicMode is true (synced
-// from the SaaS workspace's isPanicMode flag into ~/.node9/rules-cache.json),
-// every review-verdict action is upgraded to a hard block. The orchestrator
-// applies the transformation after evaluatePolicy() returns its verdict.
 //
-// Mocking shape mirrors observe-mode.spec.ts. Each test seeds a project
-// config + cloud-cache fixture and calls authorizeHeadless() to exercise
-// the full orchestrator path.
+// Tests for cloud-pushed panic mode + shadow mode. When the rules-cache
+// pushed by the SaaS contains panicMode: true, every review-verdict
+// action must be upgraded to a hard block. When shadowMode: true, every
+// block becomes a would-block (observed but not enforced).
+//
+// Strategy: real fs in a tmpdir per test. We set HOME to the tmp dir
+// (so the cache file lives at <tmp>/.node9/rules-cache.json) and chdir
+// into it (so the orchestrator's project-config lookup finds our test
+// config at <tmp>/node9.config.json). Same approach as scan-watermark.spec
+// — no fragile vi.mock interop on fs/os.
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -55,27 +58,52 @@ vi.mock('../auth/cloud.js', () => ({
   resolveNode9SaaS: vi.fn().mockResolvedValue(undefined),
 }));
 
-// ── fs / homedir mocks ─────────────────────────────────────────────────────
-const existsSpy = vi.spyOn(fs, 'existsSync').mockReturnValue(false);
-const readSpy = vi.spyOn(fs, 'readFileSync');
-vi.spyOn(os, 'homedir').mockReturnValue('/mock/home');
-
-// ── Module imports ─────────────────────────────────────────────────────────
 import { authorizeHeadless, _resetConfigCache } from '../core.js';
 
+// ── Per-test isolated filesystem ──────────────────────────────────────────
+
+let tmpHome: string;
+let originalHome: string | undefined;
+let originalUserProfile: string | undefined;
+let originalCwd: string;
+
+beforeEach(() => {
+  // Snapshot env + cwd to restore in afterEach.
+  originalHome = process.env.HOME;
+  originalUserProfile = process.env.USERPROFILE;
+  originalCwd = process.cwd();
+
+  // Fresh tmp dir per test. Used as both HOME (cache lives here) and cwd
+  // (project-config lookup finds our test config here).
+  tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'n9-panic-'));
+  process.env.HOME = tmpHome;
+  process.env.USERPROFILE = tmpHome;
+  fs.mkdirSync(path.join(tmpHome, '.node9'), { recursive: true });
+  process.chdir(tmpHome);
+
+  _resetConfigCache();
+  mockRegisterDaemonEntry.mockReset().mockResolvedValue('fake-id');
+});
+
+afterEach(() => {
+  // Always restore cwd before HOME so tmp dir cleanup is safe.
+  try {
+    process.chdir(originalCwd);
+  } catch {
+    /* original cwd may have been deleted by another test — ignore */
+  }
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
+  if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = originalUserProfile;
+  try {
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
+});
+
 // ── Helpers ────────────────────────────────────────────────────────────────
-
-const PROJECT_PATH = path.join(process.cwd(), 'node9.config.json');
-const CACHE_PATH = '/mock/home/.node9/rules-cache.json';
-
-function mockFiles(files: Record<string, string>) {
-  existsSpy.mockImplementation((p) => String(p) in files);
-  readSpy.mockImplementation((p) => {
-    const content = files[String(p)];
-    if (content === undefined) throw new Error(`ENOENT: ${String(p)}`);
-    return content;
-  });
-}
 
 const REVIEW_RULE = {
   name: 'review-deploy',
@@ -101,22 +129,21 @@ function cacheWithFlags(flags: { panicMode?: boolean; shadowMode?: boolean }) {
   };
 }
 
-// ── Lifecycle ──────────────────────────────────────────────────────────────
-
-beforeEach(() => {
-  _resetConfigCache();
-  existsSpy.mockReturnValue(false);
-  readSpy.mockReturnValue('');
-  mockRegisterDaemonEntry.mockReset().mockResolvedValue('fake-id');
-});
+/** Write the project config + cloud rules-cache for a test scenario. */
+function writeFixtures(opts: { config: object; cache?: object }): void {
+  fs.writeFileSync(path.join(tmpHome, 'node9.config.json'), JSON.stringify(opts.config));
+  if (opts.cache) {
+    fs.writeFileSync(path.join(tmpHome, '.node9', 'rules-cache.json'), JSON.stringify(opts.cache));
+  }
+}
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 describe('cloud panic mode', () => {
   it('upgrades a review-verdict rule to a hard block when panicMode is true', async () => {
-    mockFiles({
-      [PROJECT_PATH]: JSON.stringify(configWithRule(REVIEW_RULE)),
-      [CACHE_PATH]: JSON.stringify(cacheWithFlags({ panicMode: true })),
+    writeFixtures({
+      config: configWithRule(REVIEW_RULE),
+      cache: cacheWithFlags({ panicMode: true }),
     });
 
     const result = await authorizeHeadless('Bash', { command: './deploy.sh' });
@@ -129,9 +156,9 @@ describe('cloud panic mode', () => {
   });
 
   it('panic-mode block carries a reason pointing the user back to their admin', async () => {
-    mockFiles({
-      [PROJECT_PATH]: JSON.stringify(configWithRule(REVIEW_RULE)),
-      [CACHE_PATH]: JSON.stringify(cacheWithFlags({ panicMode: true })),
+    writeFixtures({
+      config: configWithRule(REVIEW_RULE),
+      cache: cacheWithFlags({ panicMode: true }),
     });
 
     const result = await authorizeHeadless('Bash', { command: './deploy.sh' });
@@ -140,9 +167,9 @@ describe('cloud panic mode', () => {
   });
 
   it('does not block when panicMode is false (only the upgrade is conditional)', async () => {
-    mockFiles({
-      [PROJECT_PATH]: JSON.stringify(configWithRule(REVIEW_RULE)),
-      [CACHE_PATH]: JSON.stringify(cacheWithFlags({ panicMode: false })),
+    writeFixtures({
+      config: configWithRule(REVIEW_RULE),
+      cache: cacheWithFlags({ panicMode: false }),
     });
 
     const result = await authorizeHeadless('Bash', { command: './deploy.sh' });
@@ -161,9 +188,9 @@ describe('cloud panic mode', () => {
       verdict: 'allow',
       reason: 'ls is always safe',
     };
-    mockFiles({
-      [PROJECT_PATH]: JSON.stringify(configWithRule(ALLOW_RULE)),
-      [CACHE_PATH]: JSON.stringify(cacheWithFlags({ panicMode: true })),
+    writeFixtures({
+      config: configWithRule(ALLOW_RULE),
+      cache: cacheWithFlags({ panicMode: true }),
     });
 
     const result = await authorizeHeadless('Bash', { command: 'ls -la' });
@@ -186,9 +213,9 @@ describe('cloud shadow mode', () => {
       verdict: 'block',
       reason: 'No deploys',
     };
-    mockFiles({
-      [PROJECT_PATH]: JSON.stringify(configWithRule(BLOCK_RULE)),
-      [CACHE_PATH]: JSON.stringify(cacheWithFlags({ shadowMode: true })),
+    writeFixtures({
+      config: configWithRule(BLOCK_RULE),
+      cache: cacheWithFlags({ shadowMode: true }),
     });
 
     const result = await authorizeHeadless('Bash', { command: './deploy.sh' });
