@@ -9,14 +9,22 @@ import path from 'path';
 
 // Stub HOME before importing the module so the const captures the
 // tmpdir path. afterEach restores.
+//
+// USERPROFILE is set alongside HOME because os.homedir() reads
+// USERPROFILE on Windows, not HOME — without it, the Windows CI
+// runner falls through to C:\Users\runneradmin\.node9 and the
+// module-level DECISIONS_FILE points at the real home.
 let tmpHome: string;
 let originalHome: string | undefined;
+let originalUserProfile: string | undefined;
 let registerDecisionsCommand: typeof import('../cli/commands/decisions.js').registerDecisionsCommand;
 
 beforeEach(async () => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-decisions-test-'));
   originalHome = process.env.HOME;
+  originalUserProfile = process.env.USERPROFILE;
   process.env.HOME = tmpHome;
+  process.env.USERPROFILE = tmpHome;
   // Force re-import so the module-level DECISIONS_FILE rebinds.
   // Vitest caches modules; resetModules clears the cache.
   await import('vitest').then(({ vi }) => vi.resetModules());
@@ -26,6 +34,8 @@ beforeEach(async () => {
 afterEach(() => {
   if (originalHome !== undefined) process.env.HOME = originalHome;
   else delete process.env.HOME;
+  if (originalUserProfile !== undefined) process.env.USERPROFILE = originalUserProfile;
+  else delete process.env.USERPROFILE;
   try {
     fs.rmSync(tmpHome, { recursive: true, force: true });
   } catch {
