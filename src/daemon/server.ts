@@ -9,8 +9,8 @@ import { randomUUID } from 'crypto';
 import { spawnSync } from 'child_process';
 import chalk from 'chalk';
 import { authorizeHeadless, getGlobalSettings, getConfig, _resetConfigCache } from '../core';
-import { SHIELDS, readActiveShields, writeActiveShields } from '../shields';
-import { UI_HTML_TEMPLATE } from './ui';
+import { SHIELDS, readActiveShields } from '../shields';
+// UI_HTML_TEMPLATE import removed — local browser dashboard retired (v3).
 import {
   scanClaudeHistory,
   scanGeminiHistory,
@@ -22,7 +22,6 @@ import {
   DAEMON_PORT,
   DAEMON_HOST,
   DAEMON_PID_FILE,
-  DECISIONS_FILE,
   AUTO_DENY_MS,
   TRUST_DURATIONS,
   autoStarted,
@@ -41,7 +40,6 @@ import {
   appendAuditLog,
   getAuditHistory,
   getOrgName,
-  hasStoredSlackKey,
   writeGlobalSetting,
   writeTrustEntry,
   readPersistentDecisions,
@@ -53,7 +51,6 @@ import {
   type PendingEntry,
   type SseClient,
   type Decision,
-  CREDENTIALS_FILE,
   suggestionTracker,
   suggestions,
   taintStore,
@@ -69,11 +66,8 @@ import {
   cachedScanResult,
   cachedScanTs,
   SCAN_CACHE_TTL_MS,
-  setCachedScanResult,
 } from './state';
 import { extractCommandPattern } from '../auth/state.js';
-import { patchConfig, GLOBAL_CONFIG_PATH, type ConfigPatch } from '../config/patch.js';
-import { SmartRuleSchema } from '../config-schema.js';
 import { startCostSync } from '../costSync.js';
 import { startCloudSync } from './sync.js';
 import { startDlpScanner } from './dlp-scanner.js';
@@ -91,7 +85,6 @@ export function startDaemon(): void {
   loadInsightCounts(); // restore persisted nudge counters across restarts
   const csrfToken = randomUUID();
   const internalToken = randomUUID();
-  const UI_HTML = UI_HTML_TEMPLATE.replace('{{CSRF_TOKEN}}', csrfToken);
   const validToken = (req: http.IncomingMessage) => req.headers['x-node9-token'] === csrfToken;
 
   // ── Graceful Idle Timeout ────────────────────────────────────────────────
@@ -128,10 +121,10 @@ export function startDaemon(): void {
     const reqUrl = new URL(req.url || '/', `http://${host}`);
     const { pathname } = reqUrl;
 
-    if (req.method === 'GET' && pathname === '/') {
-      res.writeHead(200, { 'Content-Type': 'text/html' });
-      return res.end(UI_HTML);
-    }
+    // GET / (HTML browser dashboard) — removed in v3 browser-removal sprint.
+    // The local HTTP server now exists only for: SSE stream consumed by
+    // node9 tail, /decision/* approval writes, and /check from the proxy
+    // hook. No HTML surface.
 
     if (req.method === 'GET' && pathname === '/events') {
       const capParam = reqUrl.searchParams.get('capabilities') ?? '';
@@ -598,49 +591,10 @@ export function startDaemon(): void {
       }
     }
 
-    if (req.method === 'GET' && pathname === '/slack-status') {
-      try {
-        const s = getGlobalSettings();
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ hasKey: hasStoredSlackKey(), enabled: s.slackEnabled }));
-      } catch (err) {
-        console.error(chalk.red('[node9 daemon] GET /slack-status failed:'), err);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'internal' }));
-      }
-    }
-
-    if (req.method === 'POST' && pathname === '/slack-key') {
-      if (!validToken(req)) return res.writeHead(403).end();
-      try {
-        const { apiKey } = JSON.parse(await readBody(req));
-        atomicWriteSync(
-          CREDENTIALS_FILE,
-          JSON.stringify({ apiKey, apiUrl: 'https://api.node9.ai/api/v1/intercept' }, null, 2),
-          { mode: 0o600 }
-        );
-        broadcast('slack-status', { hasKey: true, enabled: getGlobalSettings().slackEnabled });
-        res.writeHead(200);
-        return res.end(JSON.stringify({ ok: true }));
-      } catch {
-        res.writeHead(400).end();
-      }
-    }
-
-    if (req.method === 'DELETE' && pathname.startsWith('/decisions/')) {
-      if (!validToken(req)) return res.writeHead(403).end();
-      try {
-        const toolName = decodeURIComponent(pathname.split('/').pop()!);
-        const decisions = readPersistentDecisions();
-        delete decisions[toolName];
-        atomicWriteSync(DECISIONS_FILE, JSON.stringify(decisions, null, 2));
-        broadcast('decisions', decisions);
-        res.writeHead(200);
-        return res.end(JSON.stringify({ ok: true }));
-      } catch {
-        res.writeHead(400).end();
-      }
-    }
+    // GET /slack-status, POST /slack-key, DELETE /decisions/<toolName>
+    // — all removed in v3 browser-removal sprint. Slack-local approvals
+    // are dropped (SaaS handles Slack); persistent-decision management
+    // moves to the new `node9 decisions list / clear` CLI in step 7.
 
     if (req.method === 'POST' && pathname.startsWith('/resolve/')) {
       const internalAuth = req.headers['x-node9-internal'];
@@ -711,17 +665,9 @@ export function startDaemon(): void {
       return res.end(JSON.stringify(getAuditHistory()));
     }
 
-    if (req.method === 'GET' && pathname === '/shields') {
-      if (!validToken(req)) return res.writeHead(403).end();
-      const active = readActiveShields();
-      const shields = Object.values(SHIELDS).map((s) => ({
-        name: s.name,
-        description: s.description,
-        active: active.includes(s.name),
-      }));
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ shields }));
-    }
+    // GET /shields removed (browser-only read). Shield management moves
+    // to CLI: `node9 shield list` / `node9 shield enable <name>` /
+    // `node9 shield disable <name>` (already exist).
 
     if (req.method === 'GET' && pathname === '/report') {
       if (!validToken(req)) return res.writeHead(403).end();
@@ -848,19 +794,9 @@ export function startDaemon(): void {
       }
     }
 
-    if (req.method === 'POST' && pathname === '/scan/push') {
-      if (req.headers['x-node9-internal'] !== internalToken) return res.writeHead(403).end();
-      try {
-        const body = JSON.parse(await readBody(req)) as unknown;
-        setCachedScanResult(body);
-        broadcast('scan-ready', {});
-        res.writeHead(200).end();
-        return;
-      } catch {
-        res.writeHead(400).end();
-        return;
-      }
-    }
+    // POST /scan/push removed — was used to push scan results to the
+    // browser dashboard. CLI scan output is now the only surface.
+    // GET /scan stays — used by the daemon's HUD / status endpoints.
 
     if (req.method === 'GET' && pathname === '/scan') {
       if (!validToken(req)) return res.writeHead(403).end();
@@ -924,121 +860,17 @@ export function startDaemon(): void {
       }
     }
 
-    if (req.method === 'POST' && pathname === '/shields') {
-      if (!validToken(req)) return res.writeHead(403).end();
-      try {
-        const { name, active } = JSON.parse(await readBody(req)) as {
-          name: string;
-          active: boolean;
-        };
-        if (!SHIELDS[name]) return res.writeHead(400).end();
-        const current = readActiveShields();
-        const updated = active
-          ? [...new Set([...current, name])]
-          : current.filter((n) => n !== name);
-        writeActiveShields(updated);
-        _resetConfigCache();
-        const shieldsPayload = Object.values(SHIELDS).map((s) => ({
-          name: s.name,
-          description: s.description,
-          active: updated.includes(s.name),
-        }));
-        broadcast('shields-status', { shields: shieldsPayload });
-        res.writeHead(200);
-        return res.end(JSON.stringify({ ok: true }));
-      } catch {
-        res.writeHead(400).end();
-      }
-    }
+    // POST /shields removed — shield toggling moves to CLI
+    // (`node9 shield enable/disable`) which writes the same shields.json.
 
-    // ── Suggestions routes ────────────────────────────────────────────────────
+    // ── Suggestions routes — removed (browser-only) ──────────────────────────
 
-    if (req.method === 'GET' && pathname === '/suggestions') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify([...suggestions.values()]));
-    }
-
-    if (
-      req.method === 'POST' &&
-      pathname.startsWith('/suggestions/') &&
-      pathname.endsWith('/apply')
-    ) {
-      if (!validToken(req)) return res.writeHead(403).end();
-      try {
-        const body = await readBody(req);
-        const data = body ? (JSON.parse(body) as { configPath?: string; rule?: unknown }) : {};
-        const configPath = data.configPath ?? GLOBAL_CONFIG_PATH;
-
-        // Clamp configPath to ~/.node9/ before touching anything else — path.resolve
-        // neutralises any .. traversal so a crafted body cannot write outside the
-        // node9 config directory. Check happens before suggestion lookup so it is
-        // testable without a pre-existing suggestion in memory.
-        const node9Dir = path.dirname(GLOBAL_CONFIG_PATH); // ~/.node9
-        if (!path.resolve(configPath).startsWith(node9Dir + path.sep)) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          return res.end(
-            JSON.stringify({ error: 'configPath must be within the node9 config directory' })
-          );
-        }
-
-        const id = pathname.split('/')[2];
-        const suggestion = suggestions.get(id);
-        if (!suggestion) return res.writeHead(404).end();
-
-        // Allow the UI to override the rule before applying — validate against schema first
-        // to prevent a malformed rule from corrupting the config file.
-        let patch: ConfigPatch;
-        if (data.rule !== undefined) {
-          const parsed = SmartRuleSchema.safeParse(data.rule);
-          if (!parsed.success) {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            return res.end(JSON.stringify({ error: parsed.error.message }));
-          }
-          patch = { type: 'smartRule', rule: parsed.data };
-        } else {
-          patch = suggestion.suggestedRule as ConfigPatch;
-        }
-
-        patchConfig(configPath, patch);
-        _resetConfigCache();
-
-        // Reset insight counter for this tool — the rule now handles it automatically,
-        // so re-nudging immediately would cause a redundant suggestion on the next call.
-        insightCounts.delete(suggestion.toolName);
-        saveInsightCounts();
-
-        suggestion.status = 'applied';
-        broadcast('suggestion:resolved', { id, status: 'applied' });
-
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ ok: true }));
-      } catch (err) {
-        console.error(chalk.red('[node9 daemon] POST /suggestions/:id/apply failed:'), err);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: String(err) }));
-      }
-    }
-
-    if (
-      req.method === 'POST' &&
-      pathname.startsWith('/suggestions/') &&
-      pathname.endsWith('/dismiss')
-    ) {
-      if (!validToken(req)) return res.writeHead(403).end();
-      try {
-        const id = pathname.split('/')[2];
-        const suggestion = suggestions.get(id);
-        if (!suggestion) return res.writeHead(404).end();
-
-        suggestion.status = 'dismissed';
-        broadcast('suggestion:resolved', { id, status: 'dismissed' });
-
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ ok: true }));
-      } catch {
-        res.writeHead(400).end();
-      }
-    }
+    // GET /suggestions, POST /suggestions/<id>/apply, POST /suggestions/<id>/dismiss
+    // — all removed in v3 browser-removal sprint. The suggestion engine
+    // (smart-rule recommendations after N consecutive allows) had its
+    // user-facing surface only in the browser dashboard. Tracker is kept
+    // in memory but no longer surfaced; step 3 will drop the tracker if
+    // it has no other consumer.
 
     // ── Taint — record a tainted file path ───────────────────────────────────
     // Called by the hook process after a DLP write-block to persist the taint
