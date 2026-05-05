@@ -95,6 +95,71 @@ describe('auditLocalAllow — sensitive-args redaction', () => {
     expect(typeof sent).toBe('string');
     expect(sent.length).toBeLessThanOrEqual(100);
   });
+
+  // ── A1: rule attribution propagated to /audit ────────────────────────
+  // Without these, the SaaS Report severity classifier falls back to
+  // "<toolName> block" for every smart-rule match — the engine's friendly
+  // labels (engine.narrativeRuleLabel) never get a chance to fire.
+
+  it('forwards riskMetadata.ruleName to the /audit body when provided', async () => {
+    await auditLocalAllow(
+      'bash',
+      { command: 'rm -rf $HOME' },
+      'smart-rule-block',
+      creds,
+      undefined,
+      undefined,
+      false,
+      {
+        ruleName: 'block-rm-rf-home',
+        ruleDescription: 'rm -rf on $HOME is irreversible',
+        blockedByLabel: '🛑 rm -rf home',
+      }
+    );
+    const meta = captured[0].body.riskMetadata as Record<string, unknown> | undefined;
+    expect(meta).toBeDefined();
+    expect(meta!.ruleName).toBe('block-rm-rf-home');
+    expect(meta!.ruleDescription).toContain('irreversible');
+  });
+
+  it('omits riskMetadata from the body when not provided (older call sites)', async () => {
+    await auditLocalAllow('bash', { command: 'ls' }, 'local-policy', creds);
+    expect(captured[0].body.riskMetadata).toBeUndefined();
+  });
+
+  it('drops empty-string riskMetadata fields rather than sending them', async () => {
+    // Defensive: callers may build the metadata object from a policy result
+    // that has empty fields. Empty strings would pass Zod's optional string
+    // check on the backend but carry no signal — drop them at the boundary.
+    await auditLocalAllow(
+      'bash',
+      { command: 'ls' },
+      'local-policy',
+      creds,
+      undefined,
+      undefined,
+      false,
+      { ruleName: 'block-read-aws', matchedField: '', matchedWord: '' }
+    );
+    const meta = captured[0].body.riskMetadata as Record<string, unknown>;
+    expect(meta.ruleName).toBe('block-read-aws');
+    expect(meta.matchedField).toBeUndefined();
+    expect(meta.matchedWord).toBeUndefined();
+  });
+
+  it('omits riskMetadata entirely when every field is empty/undefined', async () => {
+    await auditLocalAllow(
+      'bash',
+      { command: 'ls' },
+      'local-policy',
+      creds,
+      undefined,
+      undefined,
+      false,
+      { ruleName: '', ruleDescription: undefined }
+    );
+    expect(captured[0].body.riskMetadata).toBeUndefined();
+  });
 });
 
 describe('auditLocalAllow — apiUrl validation (SSRF / key-leak guard)', () => {
@@ -209,5 +274,142 @@ describe('auditLocalAllow — checkedBy allowlist', () => {
     // replaced before transmission.
     await auditLocalAllow('bash', {}, '{"injected":"json","newline":"\\n[admin]"}', creds);
     expect(captured[0].body.checkedBy).toBe('unknown');
+  });
+});
+
+// ── runId + transcriptPath propagation ─────────────────────────────────
+// Closes the gap where the proxy knew the agent's session_id (Claude
+// Code + Gemini CLI both populate it in the hook payload) but never
+// forwarded it. Without this the dashboard Sessions tab can't correlate
+// audit rows back to the on-disk transcript.
+describe('auditLocalAllow — session correlation fields', () => {
+  let captured: CapturedRequest[];
+  let originalFetch: typeof fetch;
+
+  beforeEach(() => {
+    captured = [];
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const u = typeof url === 'string' ? url : url instanceof URL ? url.toString() : url.url;
+      const body = init?.body
+        ? (JSON.parse(init.body as string) as Record<string, unknown>)
+        : ({} as Record<string, unknown>);
+      captured.push({ url: u, body });
+      return new Response('{}', { status: 200 });
+    }) as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const creds = { apiKey: 'k', apiUrl: 'http://127.0.0.1:0' };
+
+  it('forwards meta.sessionId as body.runId when present', async () => {
+    await auditLocalAllow('bash', {}, 'local-policy', creds, {
+      agent: 'Claude Code',
+      sessionId: 'ea385d8a-0c49-4ebe-8b66-c649672cc19e',
+    });
+    expect(captured[0].body.runId).toBe('ea385d8a-0c49-4ebe-8b66-c649672cc19e');
+  });
+
+  it('forwards meta.transcriptPath verbatim when present', async () => {
+    const transcriptPath = '/home/nadav/.claude/projects/-home-nadav-node9/ea385d8a.jsonl';
+    await auditLocalAllow('bash', {}, 'local-policy', creds, {
+      agent: 'Claude Code',
+      sessionId: 'ea385d8a',
+      transcriptPath,
+    });
+    expect(captured[0].body.transcriptPath).toBe(transcriptPath);
+  });
+
+  it('omits both fields when meta is undefined (older call sites)', async () => {
+    await auditLocalAllow('bash', {}, 'local-policy', creds);
+    expect(captured[0].body.runId).toBeUndefined();
+    expect(captured[0].body.transcriptPath).toBeUndefined();
+  });
+
+  it('omits both fields when meta has agent but no session info (MCP case)', async () => {
+    // Cursor / Codex / VSCode go through MCP and don't carry a session_id —
+    // the body must not contain phantom keys for these flows.
+    await auditLocalAllow('bash', {}, 'local-policy', creds, {
+      agent: 'Cursor',
+      mcpServer: 'node9',
+    });
+    expect(captured[0].body.runId).toBeUndefined();
+    expect(captured[0].body.transcriptPath).toBeUndefined();
+  });
+
+  it('treats empty-string sessionId as absent (does not send runId="")', async () => {
+    await auditLocalAllow('bash', {}, 'local-policy', creds, {
+      agent: 'Claude Code',
+      sessionId: '',
+      transcriptPath: '',
+    });
+    expect(captured[0].body.runId).toBeUndefined();
+    expect(captured[0].body.transcriptPath).toBeUndefined();
+  });
+
+  it('forwards Gemini-style session info (UUID + ~/.gemini/tmp transcript)', async () => {
+    // The Gemini case is exactly why transcriptPath matters: session_id is
+    // useful as a group key, but the on-disk file lives at a path that
+    // session_id alone cannot reconstruct.
+    await auditLocalAllow('list_directory', {}, 'local-policy', creds, {
+      agent: 'Gemini CLI',
+      sessionId: '3745cf2a-c7e2-440a-bd57-4f3568b366f0',
+      transcriptPath: '/home/nadav/.gemini/tmp/node9/chats/session-2026-04-17T11-00-3745cf2a.json',
+    });
+    expect(captured[0].body.runId).toBe('3745cf2a-c7e2-440a-bd57-4f3568b366f0');
+    expect(captured[0].body.transcriptPath).toContain('/.gemini/tmp/');
+  });
+});
+
+// ── initNode9SaaS body parity ──────────────────────────────────────────
+// initNode9SaaS is the /intercept POST. It must forward the same
+// runId/transcriptPath fields so audit rows created by the live firewall
+// (not just /audit fast-path rows) carry session correlation too.
+describe('initNode9SaaS — session correlation fields', () => {
+  let captured: CapturedRequest[];
+  let originalFetch: typeof fetch;
+
+  beforeEach(() => {
+    captured = [];
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const u = typeof url === 'string' ? url : url instanceof URL ? url.toString() : url.url;
+      const body = init?.body
+        ? (JSON.parse(init.body as string) as Record<string, unknown>)
+        : ({} as Record<string, unknown>);
+      captured.push({ url: u, body });
+      return new Response(JSON.stringify({ pending: false, approved: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const creds = { apiKey: 'k', apiUrl: 'http://127.0.0.1:8080/intercept' };
+
+  it('forwards meta.sessionId + meta.transcriptPath in the /intercept body', async () => {
+    const { initNode9SaaS } = await import('../auth/cloud.js');
+    await initNode9SaaS('bash', { command: 'ls' }, creds, {
+      agent: 'Claude Code',
+      sessionId: 'sid-123',
+      transcriptPath: '/home/u/.claude/projects/x/sid-123.jsonl',
+    });
+    expect(captured).toHaveLength(1);
+    expect(captured[0].body.runId).toBe('sid-123');
+    expect(captured[0].body.transcriptPath).toBe('/home/u/.claude/projects/x/sid-123.jsonl');
+  });
+
+  it('omits both fields when meta lacks session info', async () => {
+    const { initNode9SaaS } = await import('../auth/cloud.js');
+    await initNode9SaaS('bash', { command: 'ls' }, creds, { agent: 'Claude Code' });
+    expect(captured[0].body.runId).toBeUndefined();
+    expect(captured[0].body.transcriptPath).toBeUndefined();
   });
 });

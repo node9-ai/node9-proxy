@@ -9,38 +9,19 @@ import { HOOK_DEBUG_LOG } from './audit';
 
 const SYNC_INTERVAL_MS = 10 * 60 * 1000;
 
-// USD per token for known model families (input / output / cache-write / cache-read)
-const PRICING: Record<string, readonly [number, number, number, number]> = {
-  'claude-opus-4': [5e-6, 25e-6, 6.25e-6, 0.5e-6],
-  'claude-sonnet-4': [3e-6, 15e-6, 3.75e-6, 0.3e-6],
-  'claude-haiku-4': [0.8e-6, 4e-6, 1e-6, 0.08e-6],
-  'claude-3-7-sonnet': [3e-6, 15e-6, 3.75e-6, 0.3e-6],
-  'claude-3-5-sonnet': [3e-6, 15e-6, 3.75e-6, 0.3e-6],
-  'claude-3-5-haiku': [0.8e-6, 4e-6, 1e-6, 0.08e-6],
-  'claude-3-haiku': [0.25e-6, 1.25e-6, 0.3e-6, 0.03e-6],
-};
-
-// Strip the date suffix Anthropic appends to model IDs (e.g. -20251101)
-function normalizeModel(raw: string): string {
-  return raw.replace(/-\d{8}$/, '');
-}
-
-function pricingFor(model: string): readonly [number, number, number, number] | null {
-  const norm = normalizeModel(model);
-  if (PRICING[norm]) return PRICING[norm]!;
-  // Longest-prefix match for future model names
-  let best: string | null = null;
-  for (const key of Object.keys(PRICING)) {
-    if (norm.startsWith(key) && (best === null || key.length > best.length)) best = key;
-  }
-  return best ? PRICING[best]! : null;
-}
+// Pricing now lives in src/pricing/litellm.ts — fetched from the
+// LiteLLM community-maintained JSON with a bundled fallback. Stops the
+// "your numbers are wrong" complaints when Anthropic / OpenAI / Google
+// ship a new model.
+import { ensurePricingLoaded, pricingFor, normalizeModel } from './pricing/litellm.js';
 
 type DailyEntry = {
   date: string;
   model: string;
   /** Project working directory the session ran in. Optional for back-compat with older BE. */
   workingDir?: string;
+  /** Agent session id (the JSONL filename stem). Empty for older BE / unknown. */
+  runId?: string;
   costUSD: number;
   inputTokens: number;
   outputTokens: number;
@@ -64,6 +45,10 @@ export function parseJSONLFile(
   filePath: string,
   fallbackWorkingDir: string
 ): Map<string, DailyEntry> {
+  // Claude Code's JSONL filename IS the session_id (UUID). Stamp every
+  // emitted DailyEntry with it so the BE can produce per-session
+  // tokens + cost via `WHERE runId = X`.
+  const runId = path.basename(filePath, '.jsonl');
   let content: string;
   try {
     content = fs.readFileSync(filePath, 'utf8');
@@ -106,9 +91,10 @@ export function parseJSONLFile(
     const workingDir = rowCwd && rowCwd.startsWith('/') ? rowCwd : fallbackWorkingDir;
 
     const norm = normalizeModel(model);
-    // Aggregate by date::model::workingDir so two projects on the same day
-    // with the same model produce two entries, not one merged total.
-    const key = `${date}::${norm}::${workingDir}`;
+    // Aggregate by date::model::workingDir::runId so each session gets
+    // its own row. Daily totals still recover via SUM(...) GROUP BY date
+    // on the BE; per-session totals via WHERE runId = X.
+    const key = `${date}::${norm}::${workingDir}::${runId}`;
     const prev = daily.get(key);
     if (prev) {
       prev.costUSD += cost;
@@ -121,6 +107,7 @@ export function parseJSONLFile(
         date,
         model: norm,
         workingDir,
+        runId,
         costUSD: cost,
         inputTokens: inp,
         outputTokens: out,
@@ -185,6 +172,11 @@ function collectEntries(): DailyEntry[] {
 async function syncCost(): Promise<void> {
   const creds = getCredentials();
   if (!creds?.apiKey || !creds?.apiUrl) return;
+
+  // Make sure LiteLLM pricing is loaded before parsing entries —
+  // pricingFor() falls back to bundled defaults if this fails, so
+  // we never block cost-sync on a network hiccup.
+  await ensurePricingLoaded();
 
   const entries = collectEntries();
   if (entries.length === 0) return;
