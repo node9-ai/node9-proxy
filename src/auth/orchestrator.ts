@@ -263,9 +263,14 @@ async function _authorizeHeadlessCore(
   // We leave 'cloud' untouched so your SaaS/Cloud tests can still manage it via mock configs.
   if (isTestEnv) {
     approvers.native = false;
-    approvers.browser = false;
     approvers.terminal = false;
   }
+  // Browser approval channel was retired in v3 sprint — always off,
+  // regardless of config. The `approvers.browser` field stays in the
+  // schema for back-compat with existing user configs; reads just
+  // ignore it. Forced false here so any in-memory mutation can't
+  // accidentally re-enable the (deleted) channel.
+  approvers.browser = false;
 
   if (config.settings.enableHookLogDebug && !isTestEnv) {
     appendHookDebug(toolName, args, meta, hashAuditArgs);
@@ -802,17 +807,16 @@ async function _authorizeHeadlessCore(
   let viewerId: string | null = null;
   const internalToken = getInternalToken();
 
-  // Pre-register a daemon entry shared by Racers 3 (browser/terminal) and, when
-  // cloudEnforced, by RACER 1 as well (reusing the same card — no duplicate).
-  // notifyDaemonViewer is moved here (out of RACER 1) so viewerId is known before
-  // the race starts, allowing RACER 3 to use it as its entry ID.
+  // Pre-register a daemon entry shared by RACER 3 (terminal popup) and,
+  // when cloudEnforced, by RACER 1 as well (reusing the same card — no
+  // duplicate). notifyDaemonViewer is moved here (out of RACER 1) so
+  // viewerId is known before the race starts.
+  //
+  // The browser approval channel was retired in the v3 sprint — RACER 3
+  // is now terminal-only.
   let daemonEntryId: string | null = null;
   let daemonAllowCount = 1;
-  if (
-    (approvers.browser || approvers.terminal) &&
-    isDaemonRunning() &&
-    !options?.calledFromDaemon
-  ) {
+  if (approvers.terminal && isDaemonRunning() && !options?.calledFromDaemon) {
     if (cloudEnforced && cloudRequestId) {
       // Cloud path: create a single card via notifyDaemonViewer so RACER 3
       // (terminal/browser) shares the same daemon entry — no duplicate card.
@@ -916,11 +920,15 @@ async function _authorizeHeadlessCore(
     );
   }
 
-  // 🏁 RACER 3: Browser Dashboard or node9 tail (interactive terminal)
-  // Both channels resolve via POST /decision/{id} — same waitForDaemonDecision poll.
+  // 🏁 RACER 3: node9 tail (interactive terminal)
+  // Resolves via POST /decision/{id} — same waitForDaemonDecision poll.
   // When cloudEnforced, daemonEntryId == viewerId (same card, no duplicate).
   // Local UI always participates in the race — cloud remoteApprovalOnly is not enforced.
-  if (daemonEntryId && (approvers.browser || approvers.terminal)) {
+  //
+  // Browser channel was retired in the v3 sprint. decisionSource may
+  // still arrive as 'browser' from third-party clients posting to
+  // /decision; we coerce to 'terminal' for label purposes.
+  if (daemonEntryId && approvers.terminal) {
     racePromises.push(
       (async () => {
         const {
@@ -933,29 +941,17 @@ async function _authorizeHeadlessCore(
         const isApproved = daemonDecision === 'allow';
         // 'terminal-redirect' = tail choice [2]: AI redirect with a custom reason string
         const isRedirect = decisionSource === 'terminal-redirect';
-        const src: 'terminal' | 'browser' =
-          decisionSource === 'terminal' ||
-          decisionSource === 'terminal-redirect' ||
-          decisionSource === 'browser'
-            ? decisionSource === 'browser'
-              ? 'browser'
-              : 'terminal'
-            : approvers.browser
-              ? 'browser'
-              : 'terminal';
-        const via = src === 'terminal' ? 'Terminal (node9 tail)' : 'Browser Dashboard';
+        const via = 'Terminal (node9 tail)';
         return {
           approved: isApproved,
           reason: isApproved
             ? undefined
-            : // Use the redirect reason from the tail when choice [2] was selected;
-              // otherwise fall back to the generic rejection message.
-              (isRedirect && daemonReason) ||
+            : (isRedirect && daemonReason) ||
               `The human user rejected this action via the Node9 ${via}.`,
           checkedBy: isApproved ? 'daemon' : undefined,
           blockedBy: isApproved ? undefined : 'local-decision',
           blockedByLabel: isRedirect ? 'Steered Redirect (Terminal)' : `User Decision (${via})`,
-          decisionSource: src,
+          decisionSource: 'terminal',
         } as AuthResult;
       })()
     );
