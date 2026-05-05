@@ -292,11 +292,17 @@ describe('interactive approval card – keypress regression', () => {
 
     // PassThrough stream acts as an http.IncomingMessage for readline.
     sseStream = Object.assign(new PassThrough(), { statusCode: 200 });
-    vi.spyOn(http, 'get').mockImplementation((_url: unknown, callback?: unknown) => {
-      if (typeof callback === 'function')
-        (callback as (r: unknown) => void)(sseStream as unknown as http.IncomingMessage);
-      return { on: vi.fn() } as unknown as http.ClientRequest;
-    });
+    vi.spyOn(http, 'get').mockImplementation(
+      // tail uses http.get(url, options, callback) since the v3
+      // sprint #9 (auth header on /events). Accept the 2-arg shape too
+      // so older tail invocations stay test-compatible.
+      (_url: unknown, optionsOrCb?: unknown, callback?: unknown) => {
+        const cb = typeof optionsOrCb === 'function' ? optionsOrCb : callback;
+        if (typeof cb === 'function')
+          (cb as (r: unknown) => void)(sseStream as unknown as http.IncomingMessage);
+        return { on: vi.fn() } as unknown as http.ClientRequest;
+      }
+    );
   });
 
   afterEach(() => {

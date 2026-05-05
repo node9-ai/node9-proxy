@@ -7,6 +7,7 @@ import path from 'path';
 import readline from 'readline';
 import { spawn } from 'child_process';
 import { DAEMON_PORT } from '../daemon';
+import { getInternalToken } from '../auth/daemon';
 
 const PID_FILE = path.join(os.homedir(), '.node9', 'daemon.pid');
 
@@ -375,7 +376,7 @@ async function ensureDaemon(): Promise<number> {
 function postDecisionHttp(
   id: string,
   decision: 'allow' | 'deny' | 'trust',
-  csrfToken: string,
+  authToken: string,
   port: number,
   opts?: { persist?: boolean; trustDuration?: string; reason?: string; source?: string }
 ): Promise<void> {
@@ -394,7 +395,10 @@ function postDecisionHttp(
         headers: {
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(body),
-          'X-Node9-Token': csrfToken,
+          // Per-process token from ~/.node9/daemon.pid (v3 sprint #9).
+          // Replaces the pre-v3 CSRF token that was harvestable from the
+          // SSE stream by any local subscriber.
+          'X-Node9-Internal': authToken,
         },
       },
       (res) => {
@@ -643,7 +647,13 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
   const orphanedResults = new Map<string, ResultItem>();
 
   // ── Approval state ──────────────────────────────────────────────────────────
-  let csrfToken = '';
+  // Per-process daemon token. Read from ~/.node9/daemon.pid (mode 0600)
+  // before opening the SSE stream — the daemon now requires it on
+  // /events and /decision/* (v3 sprint #9). If the daemon isn't
+  // running yet, the token is empty and the SSE GET below will return
+  // 403; that path falls through to the existing "Failed to connect"
+  // error message.
+  const authToken = getInternalToken() ?? '';
   const approvalQueue: ApprovalRequest[] = [];
   let cardActive = false;
   // Number of lines the current card occupies (for clearing)
@@ -820,7 +830,7 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
       }
 
       // POST decision best-effort; 409 = another racer already won
-      postDecisionHttp(req.id, httpDecision, csrfToken, port, httpOpts).catch((err) => {
+      postDecisionHttp(req.id, httpDecision, authToken, port, httpOpts).catch((err) => {
         try {
           fs.appendFileSync(
             path.join(os.homedir(), '.node9', 'hook-debug.log'),
@@ -950,61 +960,66 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
     process.exit(0);
   });
 
-  // Connect with capabilities=input so the daemon knows this is an interactive terminal
+  // Connect with capabilities=input so the daemon knows this is an interactive terminal.
+  // Auth token in header (v3 sprint #9 — /events now requires it).
   const sseUrl = `http://127.0.0.1:${port}/events?capabilities=input`;
-  const req = http.get(sseUrl, (res) => {
-    if (res.statusCode !== 200) {
-      console.error(chalk.red(`Failed to connect: HTTP ${res.statusCode}`));
-      process.exit(1);
-    }
+  const req = http.get(
+    sseUrl,
+    {
+      headers: authToken ? { 'X-Node9-Internal': authToken } : {},
+    },
+    (res) => {
+      if (res.statusCode !== 200) {
+        console.error(chalk.red(`Failed to connect: HTTP ${res.statusCode}`));
+        process.exit(1);
+      }
 
-    // Start idle keypress listener now that we're connected — avoids terminal
-    // artifacts from setRawMode being called before the SSE stream is open.
-    if (canApprove) enterIdleMode();
+      // Start idle keypress listener now that we're connected — avoids terminal
+      // artifacts from setRawMode being called before the SSE stream is open.
+      if (canApprove) enterIdleMode();
 
-    // Spec-compliant SSE parser: accumulate fields per message block
-    let currentEvent = '';
-    let currentData = '';
-    res.on('error', () => {}); // handled by rl 'close'
-    const rl = readline.createInterface({ input: res, crlfDelay: Infinity });
-    rl.on('error', () => {}); // suppress — 'close' fires next and handles exit
+      // Spec-compliant SSE parser: accumulate fields per message block
+      let currentEvent = '';
+      let currentData = '';
+      res.on('error', () => {}); // handled by rl 'close'
+      const rl = readline.createInterface({ input: res, crlfDelay: Infinity });
+      rl.on('error', () => {}); // suppress — 'close' fires next and handles exit
 
-    rl.on('line', (line) => {
-      if (line.startsWith('event:')) {
-        currentEvent = line.slice(6).trim();
-      } else if (line.startsWith('data:')) {
-        currentData = line.slice(5).trim();
-      } else if (line === '') {
-        // Message boundary — process accumulated fields
-        if (currentEvent && currentData) {
-          handleMessage(currentEvent, currentData);
+      rl.on('line', (line) => {
+        if (line.startsWith('event:')) {
+          currentEvent = line.slice(6).trim();
+        } else if (line.startsWith('data:')) {
+          currentData = line.slice(5).trim();
+        } else if (line === '') {
+          // Message boundary — process accumulated fields
+          if (currentEvent && currentData) {
+            handleMessage(currentEvent, currentData);
+          }
+          currentEvent = '';
+          currentData = '';
         }
-        currentEvent = '';
-        currentData = '';
-      }
-    });
+      });
 
-    rl.on('close', () => {
-      clearCard();
-      process.stdout.write(SHOW_CURSOR);
-      if (process.stdout.isTTY) {
-        readline.clearLine(process.stdout, 0);
-        readline.cursorTo(process.stdout, 0);
-      }
-      console.log(chalk.red('\n❌ Daemon disconnected.'));
-      process.exit(1);
-    });
-  });
+      rl.on('close', () => {
+        clearCard();
+        process.stdout.write(SHOW_CURSOR);
+        if (process.stdout.isTTY) {
+          readline.clearLine(process.stdout, 0);
+          readline.cursorTo(process.stdout, 0);
+        }
+        console.log(chalk.red('\n❌ Daemon disconnected.'));
+        process.exit(1);
+      });
+    }
+  );
 
   function handleMessage(event: string, rawData: string): void {
-    // ── CSRF token ───────────────────────────────────────────────────────────
-    if (event === 'csrf') {
-      try {
-        const parsed = JSON.parse(rawData) as { token: string };
-        if (parsed.token) csrfToken = parsed.token;
-      } catch {}
-      return;
-    }
+    // 'csrf' event was the pre-v3-sprint mechanism: the daemon broadcast
+    // its token on every connect. The token is now read from
+    // ~/.node9/daemon.pid via getInternalToken(); this branch is kept as
+    // a no-op so any in-flight emission from an older daemon doesn't
+    // surface as an "unhandled event" warning during the upgrade window.
+    if (event === 'csrf') return;
 
     // ── Initial payload ──────────────────────────────────────────────────────
     if (event === 'init') {

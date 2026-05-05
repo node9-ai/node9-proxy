@@ -77,9 +77,21 @@ export function startDaemon(): void {
   startCloudSync();
   startDlpScanner();
   loadInsightCounts(); // restore persisted nudge counters across restarts
-  const csrfToken = randomUUID();
+  // Single per-process token. Stored in ~/.node9/daemon.pid (mode 0600)
+  // and read by every local CLI client (`node9 tail`, mcp-gateway,
+  // orchestrator) via auth/daemon.ts:getInternalToken.
+  //
+  // Two header names accepted for back-compat:
+  //   - 'x-node9-internal'  — preferred, used by all current consumers
+  //   - 'x-node9-token'     — older CSRF-style header from when the
+  //                           browser dashboard issued a separate token.
+  //                           Browser is gone (v3 sprint); the alias is
+  //                           kept so any in-flight client requests
+  //                           landing across the upgrade still work.
   const internalToken = randomUUID();
-  const validToken = (req: http.IncomingMessage) => req.headers['x-node9-token'] === csrfToken;
+  const validToken = (req: http.IncomingMessage) =>
+    req.headers['x-node9-internal'] === internalToken ||
+    req.headers['x-node9-token'] === internalToken;
 
   // ── Graceful Idle Timeout ────────────────────────────────────────────────
   const IDLE_TIMEOUT_MS = 12 * 60 * 60 * 1000; // 12 hours
@@ -121,6 +133,19 @@ export function startDaemon(): void {
     // hook. No HTML surface.
 
     if (req.method === 'GET' && pathname === '/events') {
+      // SSE stream — gated on the per-process token. Closes the
+      // pre-v3-sprint hole where any local process could subscribe
+      // and harvest pending tool-call args. Browser query-string
+      // fallback is supported (?token=...) because EventSource
+      // can't set headers; CLI clients read the token from the PID
+      // file via getInternalToken() and use the header.
+      const queryToken = reqUrl.searchParams.get('token');
+      const headerOk =
+        req.headers['x-node9-internal'] === internalToken ||
+        req.headers['x-node9-token'] === internalToken;
+      if (!headerOk && queryToken !== internalToken) {
+        return res.writeHead(403).end();
+      }
       const capParam = reqUrl.searchParams.get('capabilities') ?? '';
       const capabilities = capParam
         ? capParam
@@ -161,13 +186,12 @@ export function startDaemon(): void {
           autoDenyMs: getConfig().settings.approvalTimeoutMs ?? AUTO_DENY_MS,
         })}\n\n`
       );
-      // event: decisions / event: shields-status removed — only the
-      // browser dashboard consumed them. node9 tail subscribes only to
-      // 'activity', 'activity-result', and 'add' events (plus 'csrf'
-      // below to acquire the token for /decision posts).
-      // Emit the CSRF token on every connection so reconnecting clients
-      // (the terminal racer) can acquire it without a browser tab.
-      res.write(`event: csrf\ndata: ${JSON.stringify({ token: csrfToken })}\n\n`);
+      // event: decisions / shields-status / csrf removed in v3 sprint.
+      // Pre-v3, the daemon emitted the CSRF token on every SSE connect
+      // so any subscriber could harvest it and forge /decision posts.
+      // Now: clients read the per-process token from ~/.node9/daemon.pid
+      // (mode 0600) directly, and they had to send it just to subscribe
+      // here — no need to re-broadcast.
       // Replay large-response history so late-joining browsers see past events
       if (largeResponseRing.length > 0) {
         res.write(
