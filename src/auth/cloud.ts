@@ -30,6 +30,12 @@ const KNOWN_CHECKED_BY = new Set([
   'audit-mode',
   'local-policy',
   'smart-rule-block',
+  // Smart-rule block was downgraded to review because the daemon was
+  // running and we're not in CI. The block attempt is still recorded;
+  // the user got a popup. Distinct from 'smart-rule-block' so the
+  // dashboard can show "block rule overridden" separately from a hard
+  // block that fired with no human in the loop.
+  'smart-rule-block-override',
   'persistent',
   'trust',
   'observe-mode',
@@ -84,9 +90,21 @@ export function auditLocalAllow(
   args: unknown,
   checkedBy: string,
   creds: { apiKey: string; apiUrl: string },
-  meta?: { agent?: string; mcpServer?: string },
+  meta?: { agent?: string; mcpServer?: string; sessionId?: string; transcriptPath?: string },
   dlpInfo?: { pattern: string; redactedSample: string },
-  containsSensitiveArgs: boolean = false
+  containsSensitiveArgs: boolean = false,
+  // Optional rule attribution. Forwarded into the audit-log row's
+  // riskMetadata column so the SaaS /report endpoint can classify the
+  // event by rule name (engine's classifyAuditEntry uses ruleName as
+  // the highest-priority signal). Without this, every local
+  // smart-rule-block falls back to "high — Bash block" in the Report.
+  riskMetadata?: {
+    ruleName?: string;
+    ruleDescription?: string;
+    blockedByLabel?: string;
+    matchedField?: string;
+    matchedWord?: string;
+  }
 ): Promise<void> {
   // SSRF / key-leak guard: refuse to send the bearer token to anything that
   // isn't HTTPS (loopback excepted for tests/dev). Silent skip — we never
@@ -113,6 +131,15 @@ export function auditLocalAllow(
       : undefined;
   const safeCheckedBy = KNOWN_CHECKED_BY.has(checkedBy) ? checkedBy : 'unknown';
 
+  // Strip empty / undefined fields so the backend Zod schema (.strict())
+  // doesn't reject the payload. Only forward keys that have a real value.
+  const cleanedRiskMetadata = riskMetadata
+    ? Object.fromEntries(
+        Object.entries(riskMetadata).filter(([, v]) => typeof v === 'string' && v.length > 0)
+      )
+    : undefined;
+  const hasRiskMetadata = cleanedRiskMetadata && Object.keys(cleanedRiskMetadata).length > 0;
+
   return fetch(`${validated.toString().replace(/\/$/, '')}/audit`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${creds.apiKey}` },
@@ -121,6 +148,13 @@ export function auditLocalAllow(
       args: safeArgs,
       checkedBy: safeCheckedBy,
       ...(dlpInfo && { dlpPattern, dlpSample }),
+      ...(hasRiskMetadata && { riskMetadata: cleanedRiskMetadata }),
+      // session_id (Claude Code + Gemini CLI) groups all audit rows from one
+      // agent run; transcript_path is the authoritative pointer to the
+      // session log (survives Gemini resume drift). Both optional —
+      // unsupported agents (MCP-mediated) leave them undefined.
+      ...(meta?.sessionId && { runId: meta.sessionId }),
+      ...(meta?.transcriptPath && { transcriptPath: meta.transcriptPath }),
       context: {
         agent: meta?.agent,
         mcpServer: meta?.mcpServer,
@@ -142,7 +176,7 @@ export async function initNode9SaaS(
   toolName: string,
   args: unknown,
   creds: { apiKey: string; apiUrl: string },
-  meta?: { agent?: string; mcpServer?: string },
+  meta?: { agent?: string; mcpServer?: string; sessionId?: string; transcriptPath?: string },
   riskMetadata?: RiskMetadata,
   agentPolicy?: 'require_approval' | 'block_on_rules',
   forceReview?: boolean
@@ -197,6 +231,9 @@ export async function initNode9SaaS(
       body: JSON.stringify({
         toolName,
         args,
+        // See auditLocalAllow above for the rationale on these two fields.
+        ...(meta?.sessionId && { runId: meta.sessionId }),
+        ...(meta?.transcriptPath && { transcriptPath: meta.transcriptPath }),
         context: {
           agent: meta?.agent,
           mcpServer: meta?.mcpServer,

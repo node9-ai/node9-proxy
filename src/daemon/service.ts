@@ -92,8 +92,6 @@ function launchdPlist(binaryPath: string): string {
     <dict>
         <key>NODE9_AUTO_STARTED</key>
         <string>1</string>
-        <key>NODE9_BROWSER_OPENED</key>
-        <string>1</string>
     </dict>
 </dict>
 </plist>
@@ -142,7 +140,6 @@ ExecStart=${process.execPath} ${binaryPath} daemon
 Restart=on-failure
 RestartSec=10s
 Environment=NODE9_AUTO_STARTED=1
-Environment=NODE9_BROWSER_OPENED=1
 
 [Install]
 WantedBy=default.target

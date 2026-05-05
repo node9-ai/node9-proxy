@@ -24,6 +24,11 @@ credentials.json
 .vscode/settings.json
 *.local
 
+# Claude Code working notes — file stays in repo for now (already tracked),
+# but local edits are skip-worktree'd so they don't accidentally commit.
+# To re-track: git update-index --no-skip-worktree CLAUDE.md
+CLAUDE.md
+
 # OS Junk
 .DS_Store
 Thumbs.db

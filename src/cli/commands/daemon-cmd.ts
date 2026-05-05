@@ -10,9 +10,6 @@ import {
   installDaemonService,
   uninstallDaemonService,
 } from '../../daemon/index';
-import { isDaemonRunning, DAEMON_PORT, DAEMON_HOST } from '../../auth/daemon';
-import { openBrowserLocal } from '../daemon-starter';
-
 const VALID_ACTIONS = 'start | stop | restart | status | install | uninstall';
 
 export function registerDaemonCommand(program: Command): void {
@@ -21,16 +18,12 @@ export function registerDaemonCommand(program: Command): void {
     .description('Manage the local approval daemon')
     .argument('[action]', `${VALID_ACTIONS} (default: start)`)
     .option('-b, --background', 'Start the daemon in the background (detached)')
-    .option('-o, --openui', 'Start in background and open browser')
     .option(
       '-w, --watch',
-      'Start daemon + open browser, stay alive permanently (Flight Recorder mode)'
+      'Start daemon in foreground, stay alive permanently (Flight Recorder mode for tail)'
     )
     .action(
-      async (
-        action: string | undefined,
-        options: { background?: boolean; openui?: boolean; watch?: boolean }
-      ) => {
+      async (action: string | undefined, options: { background?: boolean; watch?: boolean }) => {
         const cmd = (action ?? 'start').toLowerCase();
 
         // ── install ──────────────────────────────────────────────────────────
@@ -72,7 +65,7 @@ export function registerDaemonCommand(program: Command): void {
           const child = spawn(process.execPath, [process.argv[1], 'daemon'], {
             detached: true,
             stdio: 'ignore',
-            env: { ...process.env, NODE9_AUTO_STARTED: '1', NODE9_BROWSER_OPENED: '1' },
+            env: { ...process.env, NODE9_AUTO_STARTED: '1' },
           });
           child.unref();
           if (child.pid) {
@@ -96,31 +89,13 @@ export function registerDaemonCommand(program: Command): void {
         if (options.watch) {
           process.env.NODE9_WATCH_MODE = '1';
           setTimeout(() => {
-            openBrowserLocal();
-            console.log(chalk.cyan(`🛰️  Flight Recorder: http://${DAEMON_HOST}:${DAEMON_PORT}/`));
+            console.log(
+              chalk.cyan(`🛰️  Flight Recorder running. Open another terminal and run:`) +
+                chalk.bold(' node9 tail')
+            );
           }, 600);
           startDaemon(); // foreground — keeps process alive
           return;
-        }
-
-        if (options.openui) {
-          if (isDaemonRunning()) {
-            openBrowserLocal();
-            console.log(chalk.green(`🌐  Opened browser: http://${DAEMON_HOST}:${DAEMON_PORT}/`));
-            process.exit(0);
-          }
-          const child = spawn(process.execPath, [process.argv[1], 'daemon'], {
-            detached: true,
-            stdio: 'ignore',
-          });
-          child.unref();
-          for (let i = 0; i < 12; i++) {
-            await new Promise((r) => setTimeout(r, 250));
-            if (isDaemonRunning()) break;
-          }
-          openBrowserLocal();
-          console.log(chalk.green(`\n🛡️  Node9 daemon started + browser opened`));
-          process.exit(0);
         }
 
         if (options.background) {

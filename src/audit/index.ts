@@ -59,6 +59,7 @@ export function appendHookDebug(
     ...argsField,
     agent: meta?.agent,
     mcpServer: meta?.mcpServer,
+    sessionId: meta?.sessionId,
     hostname: os.hostname(),
     cwd: process.cwd(),
   });

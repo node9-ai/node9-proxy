@@ -23,8 +23,13 @@ import {
 } from '../../policy/index';
 import { scanArgs } from '../../dlp';
 import type { SmartRule } from '../../core';
-import { isDaemonRunning, getInternalToken, DAEMON_PORT, DAEMON_HOST } from '../../auth/daemon';
-import { isTestingMode } from '../daemon-starter';
+import {
+  classifyRuleSeverity as engineClassifyRuleSeverity,
+  narrativeRuleLabel as engineNarrativeRuleLabel,
+} from '@node9/policy-engine';
+// isDaemonRunning / getInternalToken / DAEMON_PORT / DAEMON_HOST /
+// isTestingMode imports removed — only used by the browser auto-push
+// scan flow (retired v3).
 import {
   buildScanSummary,
   type FindingRef,
@@ -1801,97 +1806,14 @@ function renderCompactScorecard(input: CompactInput): void {
 // ---------------------------------------------------------------------------
 // Narrative scorecard renderer (--narrative)
 // ---------------------------------------------------------------------------
+//
+// Severity classification + friendly labels live in @node9/policy-engine
+// so the SaaS Report endpoint and this CLI scorecard agree on tiering.
+// Local re-aliases preserve the original names used throughout the
+// renderer functions below.
 
-type Severity = 'critical' | 'high' | 'medium';
-
-/**
- * Map a rule name to a severity tier.
- *
- * Critical: irreversible damage or credential exfiltration
- *   - rm -rf home, eval-of-remote, credential reads, repo delete,
- *     helm uninstall, drop-table, drop-database, flushall, flushdb
- *
- * High: significant damage, recoverable
- *   - force push, destructive git ops, all other block rules
- *
- * Medium: workflow / cost risk, not security
- *   - rm review, sudo review, eval-dynamic review, redis config-set
- */
-function classifyRuleSeverity(name: string, verdict: 'block' | 'review' | 'allow'): Severity {
-  const n = name.toLowerCase();
-  // Always-critical patterns regardless of verdict shape
-  const criticalPatterns = [
-    'rm-rf',
-    'eval-remote',
-    'eval-curl',
-    'read-aws',
-    'read-ssh',
-    'read-gcp',
-    'read-cred',
-    'delete-repo',
-    'helm-uninstall',
-    'drop-table',
-    'drop-database',
-    'drop-collection',
-    'truncate',
-    'flushall',
-    'flushdb',
-    'pipe-shell',
-  ];
-  if (criticalPatterns.some((p) => n.includes(p))) return 'critical';
-
-  // High-tier patterns
-  const highPatterns = [
-    'force-push',
-    'force_push',
-    'git-destructive',
-    'reset-hard',
-    'rebase',
-    'delete-branch',
-    'delete-remote',
-  ];
-  if (highPatterns.some((p) => n.includes(p))) return 'high';
-
-  // Default by verdict shape
-  if (verdict === 'block') return 'high';
-  return 'medium';
-}
-
-/**
- * Friendly description for a rule name in the narrative output.
- *   "block-read-aws"          → "AWS credentials read"
- *   "shield:k8s:block-helm-uninstall" → "helm uninstall"
- *   "review-force-push"       → "force pushes"
- */
-function narrativeRuleLabel(name: string): string {
-  const stripped = compactRuleLabel(name); // re-uses compact-mode prefix-strip
-  const map: Record<string, string> = {
-    'read-aws': 'AWS credentials read',
-    'read-ssh': 'SSH private key read',
-    'read-gcp': 'GCP credentials read',
-    'read-cred': 'credential file read',
-    'delete-repo': 'GitHub repository deletion',
-    'helm-uninstall': 'helm uninstall',
-    'rm-rf-home': 'rm -rf on home directory',
-    'eval-remote': 'eval of remote download',
-    'pipe-shell': 'curl | bash',
-    'drop-table': 'DROP TABLE',
-    'drop-database': 'DROP DATABASE',
-    truncate: 'TRUNCATE',
-    flushall: 'Redis FLUSHALL',
-    flushdb: 'Redis FLUSHDB',
-    'force-push': 'force pushes',
-    'git-destructive': 'destructive git operations',
-    rm: 'rm calls',
-    sudo: 'sudo calls',
-    'eval-dynamic': 'dynamic eval',
-    'config-set': 'Redis CONFIG SET',
-  };
-  for (const [key, label] of Object.entries(map)) {
-    if (stripped.includes(key)) return label;
-  }
-  return stripped;
-}
+const classifyRuleSeverity = engineClassifyRuleSeverity;
+const narrativeRuleLabel = engineNarrativeRuleLabel;
 
 interface BucketEntry {
   label: string;
@@ -2062,6 +1984,16 @@ export function registerScanCommand(program: Command): void {
     .option('--drill-down', 'Show all findings with full commands and session IDs')
     .option('--compact', 'Compact one-screen scorecard — for screenshots and sharing')
     .option('--narrative', 'Severity-grouped report — for video / dramatic sharing')
+    .option(
+      '--upload-history',
+      'Upload aggregate counts from existing JSONL sessions to the SaaS dashboard. ' +
+        'Defaults to last 3 months; override with --since. Idempotent (safe to re-run).'
+    )
+    .option(
+      '--since <window>',
+      'Backfill window: 3m | 6m | 1y | YYYY-MM-DD. Only used with --upload-history.',
+      '3m'
+    )
     .action(
       async (options: {
         all?: boolean;
@@ -2070,7 +2002,17 @@ export function registerScanCommand(program: Command): void {
         drillDown?: boolean;
         compact?: boolean;
         narrative?: boolean;
+        uploadHistory?: boolean;
+        since?: string;
       }) => {
+        // Backfill path — separate from the normal "show me a forecast"
+        // mode. Doesn't render the full report, just walks JSONLs and
+        // posts to the SaaS.
+        if (options.uploadHistory) {
+          const { runUploadHistory } = await import('../../scan-upload-history.js');
+          await runUploadHistory({ since: options.since ?? '3m' });
+          return;
+        }
         const drillDown = options.drillDown ?? false;
         const topN = drillDown ? Infinity : Math.max(1, parseInt(options.top, 10) || 5);
         const previewWidth = 70;
@@ -2626,48 +2568,10 @@ export function registerScanCommand(program: Command): void {
         }
         console.log('');
 
-        if (!isTestingMode()) {
-          if (isWired) {
-            const url = `http://${DAEMON_HOST}:${DAEMON_PORT}/?openscan=1`;
-            if (isDaemonRunning()) {
-              const internalToken = getInternalToken();
-              if (internalToken) {
-                try {
-                  const pushSummary = buildScanSummary([
-                    { id: 'claude', label: 'Claude', icon: '🤖', scan: claudeScan },
-                    { id: 'gemini', label: 'Gemini', icon: '♊', scan: geminiScan },
-                    { id: 'codex', label: 'Codex', icon: '🔮', scan: codexScan },
-                  ]);
-                  await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/scan/push`, {
-                    method: 'POST',
-                    headers: {
-                      'Content-Type': 'application/json',
-                      'x-node9-internal': internalToken,
-                    },
-                    body: JSON.stringify({ status: 'complete', summary: pushSummary }),
-                    signal: AbortSignal.timeout(3000),
-                  });
-                  // Note: no longer auto-opens the browser. The terminal scan
-                  // output is the canonical artifact; users who want the
-                  // browser dashboard can run `node9 daemon start --openui`.
-                } catch {
-                  // fire-and-forget
-                }
-              }
-            }
-            if (isDaemonRunning()) {
-              console.log('  ' + chalk.cyan('🌐 View in browser:') + '  ' + chalk.underline(url));
-            } else {
-              console.log(
-                '  ' +
-                  chalk.dim('📊 To view in browser, start the daemon:  ') +
-                  chalk.cyan('node9 daemon --background')
-              );
-            }
-            console.log('');
-          }
-          // When not wired, the install CTA above is the next step — no browser hint.
-        }
+        // Browser dashboard view + auto-push to /scan/push retired in
+        // v3 sprint. Terminal scan output (above) is the only artifact.
+        // For richer cross-machine views, point users at the SaaS
+        // dashboard via `node9 sessions` or the audit log.
       }
     );
 }

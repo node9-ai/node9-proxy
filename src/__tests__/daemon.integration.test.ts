@@ -96,8 +96,12 @@ async function waitForDaemon(timeoutMs = 5000): Promise<boolean> {
 /**
  * Read the SSE /events stream for up to timeoutMs, then close.
  * Returns the raw text received.
+ *
+ * The /events endpoint requires a per-process auth token (v3 sprint #9).
+ * Pass the token explicitly so tests can also exercise the unauth path
+ * by passing an empty string / wrong value.
  */
-function readSseStream(timeoutMs: number): Promise<string> {
+function readSseStream(timeoutMs: number, authToken: string): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = '';
     let settled = false;
@@ -107,18 +111,24 @@ function readSseStream(timeoutMs: number): Promise<string> {
         resolve(value);
       }
     };
-    const req = http.get(`http://127.0.0.1:${DAEMON_PORT}/events`, (res) => {
-      res.setEncoding('utf-8');
-      res.on('data', (chunk: string) => {
-        data += chunk;
-      });
-      res.on('end', () => done(data));
-      // After req.destroy() the res stream may still emit 'error' — guard with
-      // settled flag so it doesn't fire reject after the Promise already resolved.
-      res.on('error', () => {
-        if (!settled) reject(new Error('SSE stream error'));
-      });
-    });
+    const req = http.get(
+      `http://127.0.0.1:${DAEMON_PORT}/events`,
+      {
+        headers: authToken ? { 'X-Node9-Internal': authToken } : {},
+      },
+      (res) => {
+        res.setEncoding('utf-8');
+        res.on('data', (chunk: string) => {
+          data += chunk;
+        });
+        res.on('end', () => done(data));
+        // After req.destroy() the res stream may still emit 'error' — guard with
+        // settled flag so it doesn't fire reject after the Promise already resolved.
+        res.on('error', () => {
+          if (!settled) reject(new Error('SSE stream error'));
+        });
+      }
+    );
     req.on('error', (err) => {
       if (!settled) reject(err);
     });
@@ -130,6 +140,42 @@ function readSseStream(timeoutMs: number): Promise<string> {
       done(data);
     }, timeoutMs);
   });
+}
+
+/**
+ * Probe /events without sending an auth token. Returns the response
+ * status code so tests can assert 403 on unauthenticated SSE access.
+ */
+function getEventsStatus(authHeader?: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const req = http.get(
+      `http://127.0.0.1:${DAEMON_PORT}/events`,
+      { headers: authHeader ? { 'X-Node9-Internal': authHeader } : {} },
+      (res) => {
+        const status = res.statusCode ?? 0;
+        res.resume();
+        req.destroy();
+        resolve(status);
+      }
+    );
+    req.on('error', reject);
+  });
+}
+
+/**
+ * Read the per-process auth token from the daemon's PID file. The CLI
+ * `getInternalToken()` does the same thing — but tests can't import
+ * from src/auth/daemon.ts directly without mocking os.homedir, so this
+ * is a small focused reader used only by the integration suite.
+ */
+function readDaemonAuthToken(home: string): string {
+  const pidFile = path.join(home, '.node9', 'daemon.pid');
+  try {
+    const data = JSON.parse(fs.readFileSync(pidFile, 'utf-8')) as Record<string, unknown>;
+    return typeof data.internalToken === 'string' ? data.internalToken : '';
+  } catch {
+    return '';
+  }
 }
 
 /**
@@ -156,22 +202,24 @@ function parseSseEvents(raw: string): Map<string, unknown> {
   return events;
 }
 
-// ── shields-status emitted on SSE connect ─────────────────────────────────────
-// Regression: shields-status was only broadcast on toggle (POST /shields/toggle).
-// A freshly connected dashboard never received it and stayed on "Loading…" forever.
-// Fix: emit shields-status in the GET /events initial payload alongside init and decisions.
+// ── /events SSE — auth gate + initial events ──────────────────────────────────
+// v3 sprint #9: /events now requires the per-process auth token. Closes the
+// pre-v3 hole where any local process could subscribe and harvest the CSRF
+// token + pending tool-call args. The 'shields-status', 'decisions', and 'csrf'
+// initial-connect emissions were retired in the v3 browser-removal sprint —
+// only `node9 tail` consumes /events now, and it doesn't need any of those.
 
-describe('daemon /events — shields-status emitted on connect', () => {
+describe('daemon /events — auth gate + initial event payload', () => {
   let tmpHome: string;
   let daemonProc: ChildProcess;
-  // Captured once in beforeAll and shared across all tests — avoids 3 separate
-  // 1.5s SSE connections and eliminates timing sensitivity on slow CI.
+  // Captured once in beforeAll and shared across the tests below.
   let sseSnapshot: Map<string, unknown>;
+  let authToken: string;
   let portWasFree = false;
 
   beforeAll(async () => {
     portWasFree = await isPortFree(DAEMON_PORT);
-    if (!portWasFree) return; // skip setup — tests will self-skip via ctx.skip()
+    if (!portWasFree) return;
 
     tmpHome = makeTempHome();
     fs.writeFileSync(
@@ -191,18 +239,16 @@ describe('daemon /events — shields-status emitted on connect', () => {
         throw new Error('Daemon did not start within 6s');
       }
 
-      // Capture the initial SSE burst once — shared by all three tests below.
-      // 3000ms gives slow CI enough headroom; the daemon flushes the initial
-      // events synchronously so in practice this completes in <100ms.
-      const raw = await readSseStream(3000);
+      authToken = readDaemonAuthToken(tmpHome);
+
+      // Capture the initial SSE burst once — shared by the tests below.
+      const raw = await readSseStream(3000, authToken);
       sseSnapshot = parseSseEvents(raw);
     } catch (err) {
-      // Ensure tmpHome is always cleaned up even if daemon startup throws,
-      // so temp directories don't accumulate on CI on repeated failures.
       if (tmpHome) cleanupDir(tmpHome);
       throw err;
     }
-  }, 15_000); // waitForDaemon(6s) + readSseStream(3s) = 9s minimum; 15s gives CI headroom
+  }, 15_000);
 
   afterAll(() => {
     if (!portWasFree) return;
@@ -210,93 +256,45 @@ describe('daemon /events — shields-status emitted on connect', () => {
       env: makeEnv(tmpHome),
       timeout: 3000,
     });
-    if (daemonProc?.exitCode === null) daemonProc.kill(); // fallback: only if still running
+    if (daemonProc?.exitCode === null) daemonProc.kill();
     if (tmpHome) cleanupDir(tmpHome);
   });
 
-  it('emits shields-status in the initial SSE payload', ({ skip }) => {
-    // it.skipIf cannot be used here: the condition depends on beforeAll (async port
-    // check), which runs after test collection. ctx.skip() is the correct way to
-    // produce a visible skip in the Vitest report when setup was not possible.
-    if (!portWasFree) skip();
+  // ── Auth gate (the actual #9 fix) ────────────────────────────────────────
 
-    expect(
-      sseSnapshot.has('shields-status'),
-      `shields-status event must be present in initial SSE payload.\nGot events: ${[...sseSnapshot.keys()].join(', ')}`
-    ).toBe(true);
+  it('rejects /events with 403 when no auth token is provided', async ({ skip }) => {
+    if (!portWasFree) skip();
+    const status = await getEventsStatus(); // no token
+    expect(status).toBe(403);
   });
 
-  it('shields-status payload lists all shields with correct active state', ({ skip }) => {
+  it('rejects /events with 403 on wrong token', async ({ skip }) => {
     if (!portWasFree) skip();
-
-    // Assert defined before accessing .shields — gives a clear failure message
-    // if test 1 is skipped or the event is absent (tests can run independently).
-    const payload = sseSnapshot.get('shields-status') as
-      | { shields: Array<{ name: string; description: string; active: boolean }> }
-      | undefined;
-    expect(payload, 'shields-status payload must be defined').toBeDefined();
-    expect(Array.isArray(payload!.shields)).toBe(true);
-
-    const { shields } = payload!;
-
-    // Verify the one shield we configured active
-    const filesystem = shields.find((s) => s.name === 'filesystem');
-    expect(filesystem, 'filesystem shield must appear in payload').toBeDefined();
-    expect(filesystem!.active).toBe(true); // configured active in shields.json
-
-    // Verify all other known shields are inactive — enumerate structurally
-    // rather than hardcoding names so this survives adding/removing shields.
-    for (const s of shields) {
-      expect(typeof s.name, `shield "${s.name}" must have a string name`).toBe('string');
-      expect(typeof s.description, `shield "${s.name}" must have a string description`).toBe(
-        'string'
-      );
-      if (s.name !== 'filesystem') {
-        expect(s.active, `shield "${s.name}" should be inactive (not in shields.json)`).toBe(false);
-      }
-    }
+    const status = await getEventsStatus('not-the-real-token');
+    expect(status).toBe(403);
   });
 
-  it('init and decisions events are still present alongside shields-status', ({ skip }) => {
+  it('accepts /events with the correct auth token', async ({ skip }) => {
     if (!portWasFree) skip();
-
-    expect(sseSnapshot.has('init'), 'init event must still be present').toBe(true);
-    expect(sseSnapshot.has('decisions'), 'decisions event must still be present').toBe(true);
-    expect(sseSnapshot.has('shields-status'), 'shields-status event must be present').toBe(true);
+    expect(authToken).toBeTruthy();
+    const status = await getEventsStatus(authToken);
+    expect(status).toBe(200);
   });
 
-  it('csrf token is emitted in the initial SSE payload', ({ skip }) => {
-    if (!portWasFree) skip();
+  // ── Init payload ─────────────────────────────────────────────────────────
 
-    expect(
-      sseSnapshot.has('csrf'),
-      `csrf event must be present in initial SSE payload.\nGot events: ${[...sseSnapshot.keys()].join(', ')}`
-    ).toBe(true);
-    const payload = sseSnapshot.get('csrf') as { token: string } | undefined;
-    expect(payload?.token).toBeTruthy();
-    expect(typeof payload?.token).toBe('string');
+  it('emits init event in the initial SSE payload', ({ skip }) => {
+    if (!portWasFree) skip();
+    expect(sseSnapshot.has('init')).toBe(true);
   });
 
-  it('csrf token is the same across two SSE connections (re-emit, not regenerate)', async ({
-    skip,
-  }) => {
+  it('does NOT emit shields-status / decisions / csrf in init (retired in v3)', ({ skip }) => {
     if (!portWasFree) skip();
-
-    // Use sseSnapshot (already captured with 3s headroom in beforeAll) for token1
-    // so we don't need two simultaneous connections — two concurrent 1500ms reads
-    // can race on slow CI and one may not receive the initial burst in time.
-    const token1 = (sseSnapshot.get('csrf') as { token: string } | undefined)?.token;
-    const raw2 = await readSseStream(1500);
-    const events2 = parseSseEvents(raw2);
-    const token2 = (events2.get('csrf') as { token: string } | undefined)?.token;
-    expect(token1).toBeTruthy();
-    // Token is process-lifetime (one UUID per daemon start), not per-SSE-session.
-    // Threat model: the CSRF token prevents third-party web pages from submitting
-    // decisions via XSS (they can't read the SSE stream cross-origin). A static
-    // per-process token is sufficient because the daemon binds to 127.0.0.1 only
-    // and dies when the user's shell session ends. Per-reconnect rotation would
-    // break concurrent browser + tail sessions sharing the same daemon.
-    expect(token1).toBe(token2);
+    // These three events backed the local browser dashboard (now removed).
+    // Their absence is the regression guard.
+    expect(sseSnapshot.has('shields-status')).toBe(false);
+    expect(sseSnapshot.has('decisions')).toBe(false);
+    expect(sseSnapshot.has('csrf')).toBe(false);
   });
 });
 
@@ -324,11 +322,11 @@ describe('daemon POST /decision — idempotency', () => {
       throw new Error('Daemon did not start within 6s');
     }
 
-    // Acquire CSRF token from SSE
-    const raw = await readSseStream(1500);
-    const events = parseSseEvents(raw);
-    csrfToken = (events.get('csrf') as { token: string } | undefined)?.token ?? '';
-  }, 15_000); // waitForDaemon(6s) + readSseStream(1.5s) = 7.5s minimum; 15s gives CI headroom
+    // Read the per-process auth token straight from the PID file.
+    // Pre-v3-sprint-#9 this used to come from a 'csrf' event on the SSE
+    // stream; that emission was retired with the browser dashboard.
+    csrfToken = readDaemonAuthToken(tmpHome);
+  }, 10_000);
 
   afterAll(() => {
     if (!portWasFree) return;
@@ -363,7 +361,7 @@ describe('daemon POST /decision — idempotency', () => {
     // First POST /decision → 200
     const d1 = await fetch(`http://127.0.0.1:${DAEMON_PORT}/decision/${id}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Node9-Token': csrfToken },
+      headers: { 'Content-Type': 'application/json', 'X-Node9-Internal': csrfToken },
       body: JSON.stringify({ decision: 'allow' }),
     });
     expect(d1.status).toBe(200);
@@ -371,7 +369,7 @@ describe('daemon POST /decision — idempotency', () => {
     // Second POST /decision (different decision) → 409, first decision preserved
     const d2 = await fetch(`http://127.0.0.1:${DAEMON_PORT}/decision/${id}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Node9-Token': csrfToken },
+      headers: { 'Content-Type': 'application/json', 'X-Node9-Internal': csrfToken },
       body: JSON.stringify({ decision: 'deny' }),
     });
     expect(d2.status).toBe(409);
@@ -395,7 +393,7 @@ describe('daemon POST /decision — idempotency', () => {
 
     const d1 = await fetch(`http://127.0.0.1:${DAEMON_PORT}/decision/${id}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Node9-Token': csrfToken },
+      headers: { 'Content-Type': 'application/json', 'X-Node9-Internal': csrfToken },
       body: JSON.stringify({ decision: 'allow' }),
     });
     expect(d1.status).toBe(200);
@@ -403,7 +401,7 @@ describe('daemon POST /decision — idempotency', () => {
     // Same decision a second time — still 409; the first write always wins
     const d2 = await fetch(`http://127.0.0.1:${DAEMON_PORT}/decision/${id}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Node9-Token': csrfToken },
+      headers: { 'Content-Type': 'application/json', 'X-Node9-Internal': csrfToken },
       body: JSON.stringify({ decision: 'allow' }),
     });
     expect(d2.status).toBe(409);
@@ -425,14 +423,14 @@ describe('daemon POST /decision — idempotency', () => {
 
     const d1 = await fetch(`http://127.0.0.1:${DAEMON_PORT}/decision/${id}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Node9-Token': csrfToken },
+      headers: { 'Content-Type': 'application/json', 'X-Node9-Internal': csrfToken },
       body: JSON.stringify({ decision: 'deny' }),
     });
     expect(d1.status).toBe(200);
 
     const d2 = await fetch(`http://127.0.0.1:${DAEMON_PORT}/decision/${id}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Node9-Token': csrfToken },
+      headers: { 'Content-Type': 'application/json', 'X-Node9-Internal': csrfToken },
       body: JSON.stringify({ decision: 'allow' }),
     });
     expect(d2.status).toBe(409);
@@ -447,7 +445,7 @@ describe('daemon POST /decision — idempotency', () => {
       `http://127.0.0.1:${DAEMON_PORT}/decision/00000000-0000-0000-0000-000000000000`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Node9-Token': csrfToken },
+        headers: { 'Content-Type': 'application/json', 'X-Node9-Internal': csrfToken },
         body: JSON.stringify({ decision: 'allow' }),
       }
     );
@@ -482,10 +480,8 @@ describe('daemon POST /decision — source tracking', () => {
       throw new Error('Daemon did not start within 6s');
     }
 
-    const raw = await readSseStream(1500);
-    const events = parseSseEvents(raw);
-    csrfToken = (events.get('csrf') as { token: string } | undefined)?.token ?? '';
-  }, 15_000); // waitForDaemon(6s) + readSseStream(1.5s) = 7.5s minimum; 15s gives CI headroom
+    csrfToken = readDaemonAuthToken(tmpHome);
+  }, 10_000);
 
   afterAll(() => {
     if (!portWasFree) return;
@@ -518,7 +514,7 @@ describe('daemon POST /decision — source tracking', () => {
     // POST decision with source before GET /wait connects (earlyDecision path)
     await fetch(`http://127.0.0.1:${DAEMON_PORT}/decision/${id}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Node9-Token': csrfToken },
+      headers: { 'Content-Type': 'application/json', 'X-Node9-Internal': csrfToken },
       body: JSON.stringify({ decision: 'deny', source: 'terminal' }),
     });
 
@@ -538,7 +534,7 @@ describe('daemon POST /decision — source tracking', () => {
 
     await fetch(`http://127.0.0.1:${DAEMON_PORT}/decision/${id}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Node9-Token': csrfToken },
+      headers: { 'Content-Type': 'application/json', 'X-Node9-Internal': csrfToken },
       body: JSON.stringify({ decision: 'allow', source: 'browser' }),
     });
 
@@ -555,7 +551,7 @@ describe('daemon POST /decision — source tracking', () => {
 
     await fetch(`http://127.0.0.1:${DAEMON_PORT}/decision/${id}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Node9-Token': csrfToken },
+      headers: { 'Content-Type': 'application/json', 'X-Node9-Internal': csrfToken },
       body: JSON.stringify({ decision: 'deny' }),
     });
 
@@ -574,7 +570,7 @@ describe('daemon POST /decision — source tracking', () => {
 
     await fetch(`http://127.0.0.1:${DAEMON_PORT}/decision/${id}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Node9-Token': csrfToken },
+      headers: { 'Content-Type': 'application/json', 'X-Node9-Internal': csrfToken },
       body: JSON.stringify({ decision: 'allow', source: 'injected-value' }),
     });
 
@@ -598,7 +594,7 @@ describe('daemon POST /decision — source tracking', () => {
 
     await fetch(`http://127.0.0.1:${DAEMON_PORT}/decision/${id}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Node9-Token': csrfToken },
+      headers: { 'Content-Type': 'application/json', 'X-Node9-Internal': csrfToken },
       body: JSON.stringify({ decision: 'allow', source: sourceValue }),
     });
 
@@ -628,7 +624,7 @@ describe('daemon POST /decision — source tracking', () => {
 
     const res = await fetch(`http://127.0.0.1:${DAEMON_PORT}/decision/${id}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Node9-Token': 'wrong-token' },
+      headers: { 'Content-Type': 'application/json', 'X-Node9-Internal': 'wrong-token' },
       body: JSON.stringify({ decision: 'allow' }),
     });
     expect(res.status).toBe(403);
@@ -663,7 +659,7 @@ describe('daemon POST /decision — source tracking', () => {
     // Resolve via /decision so GET /wait doesn't hang the test
     const d = await fetch(`http://127.0.0.1:${DAEMON_PORT}/decision/${id}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Node9-Token': csrfToken },
+      headers: { 'Content-Type': 'application/json', 'X-Node9-Internal': csrfToken },
       body: JSON.stringify({ decision: 'deny' }),
     });
     // If the entry was already auto-resolved by background auth, /decision returns 409.
@@ -672,98 +668,9 @@ describe('daemon POST /decision — source tracking', () => {
   });
 });
 
-// ── POST /suggestions/:id/apply — path traversal guard ────────────────────────
-// Regression test: configPath from the request body must be confined to ~/.node9/.
-// path.resolve() neutralises any .. segments before the check.
-
-describe('daemon POST /suggestions/:id/apply — path traversal guard', () => {
-  let tmpHome: string;
-  let daemonProc: ChildProcess;
-  let portWasFree = false;
-  let csrfToken = '';
-
-  beforeAll(async () => {
-    portWasFree = await isPortFree(DAEMON_PORT);
-    if (!portWasFree) return;
-
-    tmpHome = makeTempHome();
-    daemonProc = spawn(process.execPath, [CLI, 'daemon', 'start'], {
-      env: makeEnv(tmpHome),
-      stdio: 'pipe',
-    });
-
-    const ready = await waitForDaemon(6000);
-    if (!ready) {
-      daemonProc.kill();
-      throw new Error('Daemon did not start within 6s');
-    }
-
-    const raw = await readSseStream(1500);
-    const events = parseSseEvents(raw);
-    csrfToken = (events.get('csrf') as { token: string } | undefined)?.token ?? '';
-  }, 15_000);
-
-  afterAll(() => {
-    if (!portWasFree) return;
-    spawnSync(process.execPath, [CLI, 'daemon', 'stop'], {
-      env: makeEnv(tmpHome),
-      timeout: 3000,
-    });
-    if (daemonProc?.exitCode === null) daemonProc.kill();
-    if (tmpHome) cleanupDir(tmpHome);
-  });
-
-  it('rejects configPath outside ~/.node9/ with 400', async ({ skip }) => {
-    if (!portWasFree) skip();
-    expect(csrfToken).toBeTruthy();
-
-    // path check runs before suggestion lookup — any UUID works as the ID here
-    const res = await fetch(
-      `http://127.0.0.1:${DAEMON_PORT}/suggestions/00000000-0000-0000-0000-000000000000/apply`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Node9-Token': csrfToken },
-        body: JSON.stringify({ configPath: '/etc/crontab' }),
-      }
-    );
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toMatch(/node9 config directory/);
-  });
-
-  it('rejects .. traversal in configPath with 400', async ({ skip }) => {
-    if (!portWasFree) skip();
-    expect(csrfToken).toBeTruthy();
-
-    const res = await fetch(
-      `http://127.0.0.1:${DAEMON_PORT}/suggestions/00000000-0000-0000-0000-000000000000/apply`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Node9-Token': csrfToken },
-        body: JSON.stringify({ configPath: `${tmpHome}/.node9/../../etc/passwd` }),
-      }
-    );
-    expect(res.status).toBe(400);
-  });
-
-  it('accepts configPath within ~/.node9/ (returns 404 — no matching suggestion)', async ({
-    skip,
-  }) => {
-    if (!portWasFree) skip();
-    expect(csrfToken).toBeTruthy();
-
-    // Path is valid — traversal guard passes, then 404 because no suggestion exists
-    const res = await fetch(
-      `http://127.0.0.1:${DAEMON_PORT}/suggestions/00000000-0000-0000-0000-000000000000/apply`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Node9-Token': csrfToken },
-        body: JSON.stringify({ configPath: `${tmpHome}/.node9/config.json` }),
-      }
-    );
-    expect(res.status).toBe(404); // guard passed; suggestion not found
-  });
-});
+// POST /suggestions/:id/apply — entire route + suggestion-engine surface
+// removed in v3 browser-removal sprint. The path-traversal guard test
+// suite previously here is no longer applicable; the route returns 404.
 
 // ── DNS rebinding guard ────────────────────────────────────────────────────────
 // Regression: daemon must reject requests with a Host header that doesn't match
