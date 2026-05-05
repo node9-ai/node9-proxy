@@ -65,17 +65,29 @@ export function evaluateSmartConditions(args: unknown, rule: SmartRule): boolean
   if (!rule.conditions || rule.conditions.length === 0) return true;
   const mode = rule.conditionMode ?? 'all';
 
+  // Per-field memo across this rule's conditions. Multiple conditions on the
+  // same `command` field would otherwise normalize/collapse the same value
+  // repeatedly (and normalize itself ASTs the command). The string is
+  // identical across conditions so the work is the same — cache it.
+  const fieldCache = new Map<string, string | null>();
+  const resolveField = (field: string): string | null => {
+    if (fieldCache.has(field)) return fieldCache.get(field) ?? null;
+    const rawVal = getNestedValue(args, field);
+    const rawStr = rawVal !== null && rawVal !== undefined ? String(rawVal) : null;
+    // For command fields, strip quoted string arguments (commit messages,
+    // inline scripts) so patterns match only actual shell commands, not their
+    // text args. Normalize BEFORE collapsing whitespace so heredoc structure
+    // (which requires newlines) is preserved for the AST parser.
+    const stripped =
+      field === 'command' && rawStr !== null ? normalizeCommandForPolicy(rawStr) : rawStr;
+    // Then collapse whitespace so multi-space SQL doesn't bypass regex checks.
+    const val = stripped !== null ? stripped.replace(/\s+/g, ' ').trim() : null;
+    fieldCache.set(field, val);
+    return val;
+  };
+
   const results = rule.conditions.map((cond) => {
-    const rawVal = getNestedValue(args, cond.field);
-    // Normalize whitespace so multi-space SQL doesn't bypass regex checks
-    const normalized =
-      rawVal !== null && rawVal !== undefined ? String(rawVal).replace(/\s+/g, ' ').trim() : null;
-    // For command fields, strip quoted string arguments (commit messages, inline
-    // scripts) so patterns match only actual shell commands, not their text args.
-    const val =
-      cond.field === 'command' && normalized !== null
-        ? normalizeCommandForPolicy(normalized)
-        : normalized;
+    const val = resolveField(cond.field);
 
     switch (cond.op) {
       case 'exists':

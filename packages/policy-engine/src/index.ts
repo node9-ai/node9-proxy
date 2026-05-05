@@ -25,12 +25,14 @@ export {
 } from './dlp';
 
 // Shell — AST-based detectors (mvdan-sh). Pure: input is a string, output is a verdict.
-export type { ShellCommandAnalysis } from './shell';
+export type { ShellCommandAnalysis, FsOpVerdict } from './shell';
 export {
   normalizeCommandForPolicy,
   detectDangerousShellExec,
   detectDangerousEval,
   analyzeShellCommand,
+  analyzeFsOperation,
+  isProtectedHomePath,
 } from './shell';
 
 // Policy — pure shell sub-helpers (pipe-chain, ssh, flag tables) + stateless evaluator.

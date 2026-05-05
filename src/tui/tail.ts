@@ -646,6 +646,12 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
   // Buffer for results that arrive before their matching pending event (race condition)
   const orphanedResults = new Map<string, ResultItem>();
 
+  // Stall watchdog state — last time ANY SSE message arrived. Used to detect
+  // the pathological case where hooks are firing (audit.log mtime advancing)
+  // but the daemon isn't broadcasting anything (flight-recorder socket dead).
+  let lastActivityFromDaemon = Date.now();
+  let stallWarned = false;
+
   // ── Approval state ──────────────────────────────────────────────────────────
   // Per-process daemon token. Read from ~/.node9/daemon.pid (mode 0600)
   // before opening the SSE stream — the daemon now requires it on
@@ -960,6 +966,31 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
     process.exit(0);
   });
 
+  // Stall watchdog — if the daemon stops broadcasting but the audit log shows
+  // recent hook activity, the flight-recorder socket has likely died (the
+  // failure mode this whole feature is built to recover from). Print a one-shot
+  // warning so the user knows to act if Layer 2's auto-rebind couldn't.
+  const STALL_THRESHOLD_MS = 60_000;
+  const stallWatchdog = setInterval(() => {
+    if (stallWarned) return;
+    if (Date.now() - lastActivityFromDaemon < STALL_THRESHOLD_MS) return;
+    try {
+      const auditMtime = fs.statSync(auditLog).mtimeMs;
+      if (Date.now() - auditMtime >= STALL_THRESHOLD_MS) return;
+      // Hooks ARE firing but we're not seeing them.
+      console.log('');
+      console.log(
+        chalk.yellow(
+          '⚠️  Tail appears stalled — hooks are firing but no events are arriving. Try: node9 daemon restart'
+        )
+      );
+      stallWarned = true;
+    } catch {
+      // audit.log missing — can't make a confident claim, stay quiet
+    }
+  }, STALL_THRESHOLD_MS / 2);
+  stallWatchdog.unref();
+
   // Connect with capabilities=input so the daemon knows this is an interactive terminal.
   // Auth token in header (v3 sprint #9 — /events now requires it).
   const sseUrl = `http://127.0.0.1:${port}/events?capabilities=input`;
@@ -1014,12 +1045,27 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
   );
 
   function handleMessage(event: string, rawData: string): void {
+    // Any traffic from the daemon counts as liveness — used by the stall
+    // watchdog below to distinguish "user is idle" from "flight recorder dead."
+    lastActivityFromDaemon = Date.now();
+
     // 'csrf' event was the pre-v3-sprint mechanism: the daemon broadcast
     // its token on every connect. The token is now read from
     // ~/.node9/daemon.pid via getInternalToken(); this branch is kept as
     // a no-op so any in-flight emission from an older daemon doesn't
     // surface as an "unhandled event" warning during the upgrade window.
     if (event === 'csrf') return;
+
+    // Daemon's circuit breaker tripped — surface it directly.
+    if (event === 'flight-recorder-down') {
+      try {
+        const parsed = JSON.parse(rawData) as { message?: string };
+        const msg = parsed.message ?? 'Flight recorder is down — run: node9 daemon restart';
+        console.log('');
+        console.log(chalk.bgRed.white.bold(` ⚠️  ${msg} `));
+      } catch {}
+      return;
+    }
 
     // ── Initial payload ──────────────────────────────────────────────────────
     if (event === 'init') {

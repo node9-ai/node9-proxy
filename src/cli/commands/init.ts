@@ -268,7 +268,6 @@ export function registerInitCommand(program: Command): void {
         console.log(chalk.green.bold(`🛡️  Node9 is protecting ${agentList}!`));
         console.log('');
         console.log(chalk.white('  Watch live:  ') + chalk.cyan('node9 tail'));
-        console.log(chalk.white('  Local UI:    ') + chalk.cyan('node9 daemon --openui'));
         console.log('');
         console.log(chalk.gray('  ─────────────────────────────────────────────────'));
         console.log(

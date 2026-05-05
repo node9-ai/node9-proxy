@@ -84,11 +84,7 @@ function removeNode9McpServer(servers: Record<string, McpServer>): boolean {
 }
 
 function printDaemonTip(): void {
-  console.log(
-    chalk.cyan('\n   💡 Node9 will protect you automatically using Native OS popups.') +
-      chalk.white('\n      To view your history or manage persistent rules, run:') +
-      chalk.green('\n      node9 daemon --openui')
-  );
+  console.log(chalk.cyan('\n   💡 Node9 will protect you automatically using Native OS popups.'));
 }
 
 /**

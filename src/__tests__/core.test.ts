@@ -1449,6 +1449,43 @@ describe('normalizeCommandForPolicy', () => {
     expect(result).not.toContain(notContain);
   });
 
+  // Heredoc-bodied commit messages must be stripped from rule input. These
+  // need real newlines (heredocs don't parse on a single line), so the
+  // assertion runs normalize on the raw multi-line string and then collapses
+  // whitespace afterwards — matching the order in evaluateSmartConditions.
+  it.each([
+    {
+      input: `git commit -m "$(cat <<'EOF'
+fix(rules): block force push regression
+
+Prevents reset --hard via the new sudo path.
+EOF
+)"`,
+      notContain: '--force',
+      desc: 'strips heredoc commit message body (single-quoted EOF)',
+    },
+    {
+      input: `git commit -m "$(cat <<EOF
+fix: rebase main onto dev
+EOF
+)"`,
+      notContain: 'rebase',
+      desc: 'strips heredoc commit message body (unquoted EOF)',
+    },
+    {
+      input: `git commit -m "$(cat <<-'EOF'
+\tfix: reset --hard recovery
+\tEOF
+)"`,
+      notContain: '--hard',
+      desc: 'strips indented heredoc (<<-) commit message body',
+    },
+  ])('$desc', ({ input, notContain }) => {
+    const stripped = normalizeCommandForPolicy(input);
+    const collapsed = stripped.replace(/\s+/g, ' ').trim();
+    expect(collapsed).not.toContain(notContain);
+  });
+
   it.each([
     { input: 'rm -rf ~/projects', contain: 'rm -rf', desc: 'preserves real rm -rf command' },
     {
@@ -1481,6 +1518,16 @@ describe('normalizeCommandForPolicy', () => {
       input: `psql -c "DROP TABLE users"`,
       contain: 'DROP TABLE',
       desc: 'preserves psql -c SQL (execution flag, not message flag)',
+    },
+    {
+      input: `git commit -m "build $(date) — git push --force"`,
+      contain: '--force',
+      desc: 'preserves -m value when it mixes a non-cat CmdSubst (e.g. $(date))',
+    },
+    {
+      input: `git commit -m "$(bash -c 'echo rm -rf ~')"`,
+      contain: 'rm -rf',
+      desc: 'preserves -m value when CmdSubst is not cat-heredoc (no false strip)',
     },
   ])('does not strip real commands: $desc', ({ input, contain }) => {
     const result = normalizeCommandForPolicy(input);
@@ -1564,6 +1611,132 @@ describe('detectDangerousShellExec', () => {
   });
   it('returns null for git commit -m "bash -c test" — bash in message', () => {
     expect(detectDangerousShellExec('git commit -m "bash -c test"')).toBeNull();
+  });
+});
+
+// ── analyzeFsOperation ──────────────────────────────────────────────────────
+// Validates that the AST-based detector correctly identifies real fs ops vs.
+// strings inside JSON args, heredocs, or unrelated path segments.
+
+import { analyzeFsOperation, isProtectedHomePath } from '@node9/policy-engine';
+
+describe('isProtectedHomePath', () => {
+  it.each([
+    ['~/important', true],
+    ['~/Documents', true],
+    ['~', true],
+    ['/home/nadav/code', true],
+    ['/root', true],
+    ['$HOME/work', true],
+    ['~/.npm/_npx', false],
+    ['~/.cache/foo', false],
+    ['~/.cargo/registry/foo', false],
+    ['~/.gradle/caches', false],
+    ['/tmp/scratch', false],
+    ['/var/log', false],
+    ['./node_modules', false],
+  ])('isProtectedHomePath(%s) → %s', (p, expected) => {
+    expect(isProtectedHomePath(p)).toBe(expected);
+  });
+});
+
+describe('analyzeFsOperation', () => {
+  it('blocks rm -rf ~ (home root)', () => {
+    expect(analyzeFsOperation('rm -rf ~')?.ruleName).toBe('block-rm-rf-home');
+  });
+  it('blocks rm -rf ~/Documents', () => {
+    expect(analyzeFsOperation('rm -rf ~/Documents')?.ruleName).toBe('block-rm-rf-home');
+  });
+  it('blocks rm -rf /home/nadav/code', () => {
+    expect(analyzeFsOperation('rm -rf /home/nadav/code')?.ruleName).toBe('block-rm-rf-home');
+  });
+  it('does NOT block rm -rf ~/.npm/_npx (cache allow-list)', () => {
+    expect(analyzeFsOperation('rm -rf ~/.npm/_npx')).toBeNull();
+  });
+  it('does NOT block rm -rf ~/.cache (cache allow-list)', () => {
+    expect(analyzeFsOperation('rm -rf ~/.cache')).toBeNull();
+  });
+  it('does NOT block rm -rf /tmp/foo (not under home)', () => {
+    expect(analyzeFsOperation('rm -rf /tmp/foo')).toBeNull();
+  });
+  it('does NOT block git commit messages mentioning "rm -rf ~/"', () => {
+    expect(
+      analyzeFsOperation(`git commit -m "fix: docs mention rm -rf ~/foo as bad practice"`)
+    ).toBeNull();
+  });
+  it('does NOT block chained rm of /tmp followed by cd /home/...', () => {
+    // The historical FP: regex matched /home/ in cd part, not the rm target.
+    expect(analyzeFsOperation('rm -rf /tmp/scratch && cd /home/nadav/project')).toBeNull();
+  });
+
+  it('blocks cat ~/.ssh/id_rsa', () => {
+    expect(analyzeFsOperation('cat ~/.ssh/id_rsa')?.ruleName).toBe(
+      'shield:project-jail:block-read-ssh'
+    );
+  });
+  it('blocks less ~/.aws/credentials', () => {
+    expect(analyzeFsOperation('less ~/.aws/credentials')?.ruleName).toBe(
+      'shield:project-jail:block-read-aws'
+    );
+  });
+  it('blocks cat .env.production', () => {
+    expect(analyzeFsOperation('cat .env.production')?.ruleName).toBe(
+      'shield:project-jail:block-read-env'
+    );
+  });
+  it('blocks cat ~/.npmrc', () => {
+    expect(analyzeFsOperation('cat ~/.npmrc')?.ruleName).toBe(
+      'shield:project-jail:block-read-credentials'
+    );
+  });
+  it('does NOT block JSON test payload containing cat ~/.ssh/id_rsa as a string', () => {
+    // The historical FP: project-jail regex matched the literal string inside
+    // a JSON arg passed to a node9 self-test invocation.
+    const cmd = String.raw`echo '{"command":"cat ~/.ssh/id_rsa"}' | node dist/cli.js check`;
+    expect(analyzeFsOperation(cmd)).toBeNull();
+  });
+  it('does NOT block git commit -m "fix: warn on cat ~/.ssh/"', () => {
+    expect(analyzeFsOperation(`git commit -m "fix: warn on cat ~/.ssh/ in audit"`)).toBeNull();
+  });
+
+  // Recall regression suite for the tightened prescreen. The prescreen now
+  // requires the tool keyword at start-of-command position (start-of-string
+  // or after pipe/and/or/semicolon/ampersand/newline/`(`/backtick). Each
+  // case below MUST still produce the same verdict it did with the looser
+  // prescreen, otherwise we've lost detection coverage.
+  it('blocks head ~/.ssh/id_rsa (start of command)', () => {
+    expect(analyzeFsOperation('head ~/.ssh/id_rsa')?.ruleName).toBe(
+      'shield:project-jail:block-read-ssh'
+    );
+  });
+  it('blocks cat ~/.ssh/id_rsa via pipe (head | cat)', () => {
+    expect(analyzeFsOperation('head -1 ~/.bashrc | cat ~/.ssh/id_rsa')?.ruleName).toBe(
+      'shield:project-jail:block-read-ssh'
+    );
+  });
+  it('blocks cat ~/.ssh/id_rsa via && chain', () => {
+    expect(analyzeFsOperation('echo ok && cat ~/.ssh/id_rsa')?.ruleName).toBe(
+      'shield:project-jail:block-read-ssh'
+    );
+  });
+  it('blocks cat ~/.ssh/id_rsa via ; chain', () => {
+    expect(analyzeFsOperation('echo ok; cat ~/.ssh/id_rsa')?.ruleName).toBe(
+      'shield:project-jail:block-read-ssh'
+    );
+  });
+  it('blocks cat ~/.ssh/id_rsa inside $( ... )', () => {
+    expect(analyzeFsOperation('eval "$(cat ~/.ssh/id_rsa)"')?.ruleName).toBe(
+      'shield:project-jail:block-read-ssh'
+    );
+  });
+
+  // Prescreen tightening: these previously paid an AST parse to discover
+  // there was no real verdict. They must continue to return null.
+  it('does NOT block npm run type-check (type is mid-token)', () => {
+    expect(analyzeFsOperation('npm run type-check 2>&1')).toBeNull();
+  });
+  it('does NOT block git log | head -20 (no sensitive path)', () => {
+    expect(analyzeFsOperation('git log | head -20')).toBeNull();
   });
 });
 

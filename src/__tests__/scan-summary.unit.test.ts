@@ -14,7 +14,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { buildScanSummary, type AgentScanInput } from '../scan-summary';
-import type { ScanResult } from '../cli/commands/scan';
+import { isNode9SelfOutput, looksLikeFixtureToken, type ScanResult } from '../cli/commands/scan';
 
 function finding(opts: {
   ruleName: string;
@@ -299,5 +299,156 @@ describe('buildScanSummary', () => {
     // Shield has blocked=1; user has blocked=0 → shield first
     expect(s.sections[0].id).toBe('shield:bash-safe');
     expect(s.sections[1].id).toBe('user');
+  });
+});
+
+// ── DLP self-output filter & fixture-token demotion ─────────────────────────
+
+describe('isNode9SelfOutput', () => {
+  it('detects scanArgs output struct (patternName + redactedSample)', () => {
+    const text = `token: ghp_abc
+scan: { patternName: 'GitHub Token', redactedSample: 'ghp_***abc' }`;
+    expect(isNode9SelfOutput(text)).toBe(true);
+  });
+  it('detects live security alert text', () => {
+    // Two markers needed; combine alert + redactedSample.
+    const text = `NODE9 SECURITY ALERT: secret detected
+redactedSample: 'ghp_***xyz'`;
+    expect(isNode9SelfOutput(text)).toBe(true);
+  });
+  it('detects severity + patternName combo', () => {
+    const text = `{ patternName: 'AWS Access Key ID', severity: 'block' }`;
+    expect(isNode9SelfOutput(text)).toBe(true);
+  });
+  it('does not flag a single coincidental marker', () => {
+    // patternName alone is not enough — could appear in user docs.
+    const text = `the patternName: 'thing' was discussed in the meeting`;
+    expect(isNode9SelfOutput(text)).toBe(false);
+  });
+  it('does not flag normal tool output', () => {
+    expect(isNode9SelfOutput('Here is your token: ghp_realsecret123')).toBe(false);
+  });
+});
+
+// ── detectLoops classifies kind by time span ────────────────────────────────
+
+import { detectLoops } from '../cli/commands/scan';
+
+describe('detectLoops kind classification', () => {
+  function call(toolName: string, command: string, isoTs: string) {
+    return { toolName, input: { command }, timestamp: isoTs };
+  }
+
+  it('flags bursty repeats as kind="loop"', () => {
+    // 5 calls within 60 seconds — clearly stuck behavior.
+    const calls = [
+      call('Bash', 'ls -la', '2026-04-01T00:00:00Z'),
+      call('Bash', 'ls -la', '2026-04-01T00:00:15Z'),
+      call('Bash', 'ls -la', '2026-04-01T00:00:30Z'),
+      call('Bash', 'ls -la', '2026-04-01T00:00:45Z'),
+      call('Bash', 'ls -la', '2026-04-01T00:01:00Z'),
+    ];
+    const found = detectLoops(calls, '~/p', 'sess1', 'claude');
+    expect(found).toHaveLength(1);
+    expect(found[0].kind).toBe('loop');
+    expect(found[0].count).toBe(5);
+  });
+
+  it('flags long-spanning repeats as kind="long-iteration"', () => {
+    // 5 edits over 2 hours — sustained deep work, not stuck.
+    const calls = [
+      call('Edit', 'src/feature.ts', '2026-04-01T10:00:00Z'),
+      call('Edit', 'src/feature.ts', '2026-04-01T10:30:00Z'),
+      call('Edit', 'src/feature.ts', '2026-04-01T11:00:00Z'),
+      call('Edit', 'src/feature.ts', '2026-04-01T11:30:00Z'),
+      call('Edit', 'src/feature.ts', '2026-04-01T12:00:00Z'),
+    ];
+    const found = detectLoops(calls, '~/p', 'sess1', 'claude');
+    expect(found).toHaveLength(1);
+    expect(found[0].kind).toBe('long-iteration');
+  });
+
+  it('boundary: 10 minutes exactly is long-iteration (≥)', () => {
+    const calls = [
+      call('Bash', 'cmd', '2026-04-01T00:00:00Z'),
+      call('Bash', 'cmd', '2026-04-01T00:05:00Z'),
+      call('Bash', 'cmd', '2026-04-01T00:10:00Z'),
+    ];
+    const found = detectLoops(calls, '~/p', 'sess1', 'claude');
+    expect(found[0].kind).toBe('long-iteration');
+  });
+});
+
+// ── Loop vs long-iteration classification ───────────────────────────────────
+
+describe('loopWastedUSD excludes long-iteration findings', () => {
+  it('counts only kind="loop" toward waste; ignores long-iteration', () => {
+    const scan = emptyScan({
+      sessions: 1,
+      loopFindings: [
+        // Real loop: 10 iterations, kind 'loop' — counts as waste
+        {
+          toolName: 'Bash',
+          commandPreview: 'ls -la',
+          count: 10,
+          timestamp: '2026-04-01T00:00:00Z',
+          project: '~/p',
+          sessionId: 'sess1',
+          agent: 'claude',
+          kind: 'loop',
+        },
+        // Long iteration: 100 iterations, kind 'long-iteration' — NO waste
+        {
+          toolName: 'Edit',
+          commandPreview: 'src/feature.ts',
+          count: 100,
+          timestamp: '2026-04-01T00:00:00Z',
+          project: '~/p',
+          sessionId: 'sess1',
+          agent: 'claude',
+          kind: 'long-iteration',
+        },
+      ],
+    });
+    const s = buildScanSummary([claudeAgent(scan)]);
+    // Only 7 wasted iters (10 loop - 3 threshold), at $0.006/iter = $0.042.
+    // The 97 long-iteration iters above threshold contribute ZERO.
+    expect(s.loopWastedUSD).toBeCloseTo(7 * 0.006, 4);
+  });
+
+  it('treats missing kind as a real loop (backwards compat)', () => {
+    const scan = emptyScan({
+      sessions: 1,
+      loopFindings: [
+        {
+          toolName: 'Bash',
+          commandPreview: 'ls -la',
+          count: 10,
+          timestamp: '2026-04-01T00:00:00Z',
+          project: '~/p',
+          sessionId: 'sess1',
+          agent: 'claude',
+          // no `kind` field — legacy data
+        },
+      ],
+    });
+    const s = buildScanSummary([claudeAgent(scan)]);
+    expect(s.loopWastedUSD).toBeCloseTo(7 * 0.006, 4);
+  });
+});
+
+describe('looksLikeFixtureToken', () => {
+  it.each([
+    ['ghp_aaaaaaaa', true],
+    ['ghp_aaaaaaaaaaaaaaaaaaaa', true],
+    ['ghp_abcdefghijklmnop', true],
+    ['ghp_1234567890abcdef', true],
+    ['ghp_***EXAMPLE', true],
+    ['AIzaSyAbcdefghijklmn0123456', true],
+    ['ghp_***GJSn', false], // realistic redaction
+    ['AKIA****5XYZ', false],
+    ['sk-proj-realLooking123', false],
+  ])('looksLikeFixtureToken(%s) → %s', (sample, expected) => {
+    expect(looksLikeFixtureToken(sample)).toBe(expected);
   });
 });
