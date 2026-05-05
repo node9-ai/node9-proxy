@@ -135,15 +135,10 @@ export function startDaemon(): void {
     if (req.method === 'GET' && pathname === '/events') {
       // SSE stream — gated on the per-process token. Closes the
       // pre-v3-sprint hole where any local process could subscribe
-      // and harvest pending tool-call args. Browser query-string
-      // fallback is supported (?token=...) because EventSource
-      // can't set headers; CLI clients read the token from the PID
-      // file via getInternalToken() and use the header.
-      const queryToken = reqUrl.searchParams.get('token');
-      const headerOk =
-        req.headers['x-node9-internal'] === internalToken ||
-        req.headers['x-node9-token'] === internalToken;
-      if (!headerOk && queryToken !== internalToken) {
+      // and harvest pending tool-call args. CLI clients read the
+      // token from the PID file via getInternalToken() and pass it
+      // as the X-Node9-Internal header.
+      if (!validToken(req)) {
         return res.writeHead(403).end();
       }
       const capParam = reqUrl.searchParams.get('capabilities') ?? '';
