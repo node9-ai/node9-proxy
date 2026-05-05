@@ -89,6 +89,12 @@ jobs:
           if [ "$CURRENT" != "$VERSION" ]; then
             npm version "$VERSION" --no-git-tag-version
           fi
+          # Keep the wrapper's @node9/proxy dependency pinned exactly to the
+          # proxy version we're about to publish. Without this the wrapper
+          # would freeze on whatever pin was committed last and silently lag
+          # behind future proxy releases (the bug that shipped node9-ai@1.18.0
+          # depending on a stale @node9/proxy via a loose >=1.11.3 range).
+          node -e "const fs=require('fs'),p=require('./package.json');p.dependencies['@node9/proxy']=process.env.VERSION;fs.writeFileSync('./package.json',JSON.stringify(p,null,2)+'\n')"
           git config user.email "release-bot@node9.ai"
           git config user.name "node9-release-bot"
           git add README.md package.json
