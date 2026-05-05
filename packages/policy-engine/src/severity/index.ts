@@ -6,6 +6,8 @@
 //
 // Pure functions. No I/O. Stateless.
 
+import { SCAN_SIGNAL_WEIGHTS, type ScanSignals } from '../scan';
+
 export type Severity = 'critical' | 'high' | 'medium';
 
 export type ScoreTier = 'good' | 'at-risk' | 'critical';
@@ -223,4 +225,96 @@ export function computeSecurityScore(opts: {
   const score = Math.max(0, Math.min(100, Math.round(100 - deduction)));
   const tier: ScoreTier = score >= 80 ? 'good' : score >= 50 ? 'at-risk' : 'critical';
   return { score, tier };
+}
+
+// ---------------------------------------------------------------------------
+// Scan-signal classification & blended scoring
+// ---------------------------------------------------------------------------
+//
+// The proxy's forward-only scanner produces per-signal counts (see
+// ScanSignals in ../scan). The SaaS Report blends these into the same
+// 0-100 risk-posture score that audit-log findings drive, so users see
+// one number — not a live score next to a separate "scan score" they
+// have to reconcile.
+//
+// classifyScanSignal maps each signal key to a Severity tier using the
+// existing SCAN_SIGNAL_WEIGHTS thresholds (≥25 critical, ≥11 high,
+// otherwise medium). This matches the SessionsTab severity chips on the
+// FE so a "Credentials" chip on a session row corresponds to the same
+// "Critical" bucket on the Risk Posture card.
+
+/**
+ * Map a ScanSignals key to its severity tier. Uses the existing
+ * SCAN_SIGNAL_WEIGHTS so adding a new scan signal type only requires
+ * updating the weights table; classification follows automatically.
+ *
+ * Thresholds:
+ *   - ≥ 25  → critical (dlp, pipeToShell, evalOfRemote, networkExfil)
+ *   - ≥ 11  → high     (sensitiveFileReads, privilegeEscalation,
+ *                       destructiveOps)
+ *   - else  → medium   (piiFindings, loops, longOutputRedactions)
+ */
+export function classifyScanSignal(key: keyof ScanSignals): Severity {
+  const w = SCAN_SIGNAL_WEIGHTS[key];
+  if (w >= 25) return 'critical';
+  if (w >= 11) return 'high';
+  return 'medium';
+}
+
+/**
+ * Compute a 0-100 risk-posture score that blends audit-log severity counts
+ * with forward-only scan signal counts.
+ *
+ * Why this exists: the live audit log answers "what did the firewall block
+ * in this window?" and the scan answers "what's sitting in past sessions?".
+ * Both are real risk; surfacing them as two separate scores forced users
+ * to reconcile two numbers. This function bins scan signals into the same
+ * critical/high/medium buckets via classifyScanSignal, sums them with the
+ * audit counts, and runs the existing computeSecurityScore math.
+ *
+ * Denominator handling: a workspace with zero audit traffic but non-zero
+ * scan findings would otherwise hit the `total === 0` short-circuit and
+ * return 100/good — a false-healthy reading. We add the scan contribution
+ * to `total` so the rate-based math runs:
+ *
+ *   - If `scan.totalToolCalls` is provided, use it as the scan-side
+ *     denominator (best signal — "1 finding per 10000 calls" should
+ *     score better than "1 per 10").
+ *   - Otherwise fall back to the count of scan findings, so a scan-only
+ *     workspace with one credential leak resolves to 1/1 = 100% bad
+ *     rate and lands in critical, not 0/0 = 100/good.
+ *
+ * Backwards compatible: calling with `audit` only and no `scan` produces
+ * the exact same result as `computeSecurityScore(audit)`.
+ */
+export function computeBlendedSecurityScore(opts: {
+  audit: { critical: number; high: number; medium: number; total: number };
+  scan?: { signals: ScanSignals; totalToolCalls?: number };
+}): { score: number; tier: ScoreTier } {
+  const { audit, scan } = opts;
+
+  let critical = audit.critical;
+  let high = audit.high;
+  let medium = audit.medium;
+  let total = audit.total;
+
+  if (scan) {
+    let scanFindingSum = 0;
+    for (const key of Object.keys(scan.signals) as Array<keyof ScanSignals>) {
+      const count = scan.signals[key];
+      if (count <= 0) continue;
+      const tier = classifyScanSignal(key);
+      if (tier === 'critical') critical += count;
+      else if (tier === 'high') high += count;
+      else medium += count;
+      scanFindingSum += count;
+    }
+    // Use totalToolCalls when available (gives "rate of findings per call",
+    // which is the metric the audit-side already uses). Fall back to the
+    // finding count itself so we don't divide-by-zero in scan-only flows.
+    const scanContribution = Math.max(scan.totalToolCalls ?? 0, scanFindingSum);
+    total += scanContribution;
+  }
+
+  return computeSecurityScore({ critical, high, medium, total });
 }
