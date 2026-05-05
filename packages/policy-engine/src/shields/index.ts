@@ -14,7 +14,9 @@ import docker from './builtin/docker.json';
 import filesystem from './builtin/filesystem.json';
 import github from './builtin/github.json';
 import k8s from './builtin/k8s.json';
-import mcpToolGating from './builtin/mcp-tool-gating.json';
+// mcp-tool-gating shield removed — its only HITL surface was the local
+// browser dashboard (retired in v3). The mcp-pin rug-pull defense in
+// the gateway still catches tool-definition drift on subsequent connects.
 import mongodb from './builtin/mongodb.json';
 import postgres from './builtin/postgres.json';
 import projectJail from './builtin/project-jail.json';
@@ -98,7 +100,6 @@ export const BUILTIN_SHIELDS: Record<string, ShieldDefinition> = {
   [(filesystem as ShieldDefinition).name]: filesystem as ShieldDefinition,
   [(github as ShieldDefinition).name]: github as ShieldDefinition,
   [(k8s as ShieldDefinition).name]: k8s as ShieldDefinition,
-  [(mcpToolGating as ShieldDefinition).name]: mcpToolGating as ShieldDefinition,
   [(mongodb as ShieldDefinition).name]: mongodb as ShieldDefinition,
   [(postgres as ShieldDefinition).name]: postgres as ShieldDefinition,
   [(projectJail as ShieldDefinition).name]: projectJail as ShieldDefinition,

@@ -70,12 +70,7 @@ import { extractCommandPattern } from '../auth/state.js';
 import { startCostSync } from '../costSync.js';
 import { startCloudSync } from './sync.js';
 import { startDlpScanner } from './dlp-scanner.js';
-import {
-  readMcpToolsConfig,
-  updateServerDiscovery,
-  approveServer,
-  getServerConfig,
-} from './mcp-tools.js';
+import { readMcpToolsConfig, updateServerDiscovery, approveServer } from './mcp-tools.js';
 
 export function startDaemon(): void {
   startCostSync();
@@ -1077,14 +1072,10 @@ export function startDaemon(): void {
       }
     }
 
-    if (req.method === 'GET' && pathname.startsWith('/mcp/status/')) {
-      // Called by gateway, requires internal token
-      if (req.headers['x-node9-internal'] !== internalToken) return res.writeHead(403).end();
-      const serverKey = pathname.split('/').pop()!;
-      const config = getServerConfig(serverKey);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify(config || { status: 'pending' }));
-    }
+    // GET /mcp/status/<serverKey> — removed in v3 sprint. The gateway
+    // used to poll this while waiting for the user to approve new MCP
+    // tools in the browser. No more browser; first-connect pins
+    // automatically and rug-pull is caught by mcp-pin.
 
     res.writeHead(404).end();
   });

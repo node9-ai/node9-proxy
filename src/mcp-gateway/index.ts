@@ -31,32 +31,10 @@ import {
   getInternalToken,
   notifyActivitySocket,
 } from '../auth/daemon';
-import { readActiveShields } from '../shields';
 
-/** Wait for human approval of new MCP tools. Polls daemon for status change. */
-async function waitForMcpApproval(
-  serverKey: string
-): Promise<{ status: string; disabled: string[] }> {
-  const token = getInternalToken();
-  const start = Date.now();
-  const timeout = 60_000; // 60s timeout
-
-  while (Date.now() - start < timeout) {
-    try {
-      const res = await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/mcp/status/${serverKey}`, {
-        headers: token ? { 'x-node9-internal': token } : {},
-      });
-      if (res.ok) {
-        const config = (await res.json()) as { status: string; disabled: string[] };
-        if (config.status === 'approved') return config;
-      }
-    } catch {
-      // Daemon might be down — fail open after timeout
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-  return { status: 'timed-out', disabled: [] };
-}
+// readActiveShields + waitForMcpApproval helper removed — the
+// mcp-tool-gating shield (which used the browser dashboard for the
+// human-in-the-loop approval) was retired in the v3 sprint.
 
 function sanitize(value: string): string {
   // eslint-disable-next-line no-control-regex
@@ -545,17 +523,18 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
           });
         }
 
-        // 2. Intercept & Hold — only when mcp-tool-gating shield is active
+        // The mcp-tool-gating shield + waitForMcpApproval polling were
+        // retired in the v3 browser-removal sprint — the human-in-the-loop
+        // surface (browser dashboard) was the only place to approve.
+        // First-connect tool lists are now auto-trusted and pinned (see
+        // mcp-pin below); subsequent drift is still caught by the rug-pull
+        // defense.
+        //
+        // Existing per-server `disabled` lists from prior gating sessions
+        // are still respected — admins who already curated them keep the
+        // filter applied.
         const serverCfg = getServerConfig(serverKey);
-        const gatingEnabled = readActiveShields().includes('mcp-tool-gating');
-        if (gatingEnabled && isDaemonRunning() && (!serverCfg || serverCfg.status === 'pending')) {
-          const config = await waitForMcpApproval(serverKey);
-          if (config.disabled.length > 0) {
-            parsed.result.tools = tools.filter((t) => !config.disabled.includes(t.name));
-            line = JSON.stringify(parsed);
-          }
-        } else if (serverCfg?.disabled && serverCfg.disabled.length > 0) {
-          // Already approved — apply persisted filter immediately
+        if (serverCfg?.disabled && serverCfg.disabled.length > 0) {
           parsed.result.tools = tools.filter((t) => !serverCfg.disabled.includes(t.name));
           line = JSON.stringify(parsed);
         }
