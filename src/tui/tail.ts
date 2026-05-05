@@ -565,7 +565,10 @@ function approverStatusLine(): string {
     const on = a[key] !== false;
     return `[${key[0]}]${label.slice(1)} ${on ? chalk.green('✓') : chalk.dim('✗')}`;
   };
-  return `${fmt('native', 'native')}  ${fmt('browser', 'browser')}  ${fmt('cloud', 'cloud')}  ${fmt('terminal', 'terminal')}`;
+  // 'browser' approver removed in v3 sprint — local browser dashboard
+  // retired. Cloud (SaaS) is the remote channel; native + terminal are
+  // the local ones.
+  return `${fmt('native', 'native')}  ${fmt('cloud', 'cloud')}  ${fmt('terminal', 'terminal')}`;
 }
 
 function toggleApprover(channel: string): void {
@@ -677,16 +680,9 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
         process.kill(process.pid, 'SIGINT');
         return;
       }
+      // 'b' (browser toggle) removed in v3 — channel retired.
       const channel =
-        name === 'n'
-          ? 'native'
-          : name === 'b'
-            ? 'browser'
-            : name === 'c'
-              ? 'cloud'
-              : name === 't'
-                ? 'terminal'
-                : null;
+        name === 'n' ? 'native' : name === 'c' ? 'cloud' : name === 't' ? 'terminal' : null;
       if (channel) {
         toggleApprover(channel);
         console.log(chalk.dim(`  Approvers: ${approverStatusLine()}`));
@@ -908,12 +904,9 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
     process.stdin.on('keypress', onKeypress);
   }
 
-  const dashboardUrl = `http://127.0.0.1:${port}/`;
-
-  // Browser auto-open removed — `node9 tail` is a terminal UI, opening the
-  // browser dashboard alongside it was confusing. The dashboard URL is
-  // printed in the banner below; users who want the browser run
-  // `node9 daemon start --openui` explicitly.
+  // Local browser dashboard retired in v3. The daemon's HTTP server is
+  // still on port 7391 — used internally by `node9 tail`'s SSE plus
+  // /decision posts — but there's no HTML to navigate to.
 
   // Warn if response-DLP findings exist in audit log
   const auditLog = path.join(os.homedir(), '.node9', 'audit.log');
@@ -932,7 +925,7 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
     }
   } catch {}
 
-  console.log(chalk.cyan.bold(`\n🛰️  Node9 tail  `) + chalk.dim(`→ ${dashboardUrl}`));
+  console.log(chalk.cyan.bold(`\n🛰️  Node9 tail`));
   if (canApprove) {
     console.log(chalk.dim('Card: [↵/y] Allow  [n] Deny  [a] Always  [t] Trust 30m'));
     console.log(chalk.dim(`Approvers (toggle): ${approverStatusLine()}  [q] quit`));

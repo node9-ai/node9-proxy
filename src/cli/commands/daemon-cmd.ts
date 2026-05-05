@@ -10,8 +10,6 @@ import {
   installDaemonService,
   uninstallDaemonService,
 } from '../../daemon/index';
-import { isDaemonRunning } from '../../auth/daemon';
-
 const VALID_ACTIONS = 'start | stop | restart | status | install | uninstall';
 
 export function registerDaemonCommand(program: Command): void {
@@ -20,20 +18,12 @@ export function registerDaemonCommand(program: Command): void {
     .description('Manage the local approval daemon')
     .argument('[action]', `${VALID_ACTIONS} (default: start)`)
     .option('-b, --background', 'Start the daemon in the background (detached)')
-    // --openui and --watch previously opened the local browser dashboard.
-    // The browser surface has been retired (v3 sprint); these flags are
-    // kept as no-ops so existing scripts don't error, but they no longer
-    // open anything. node9 tail is the live activity surface now.
-    .option('-o, --openui', '(deprecated, no-op) — was: start in background and open browser')
     .option(
       '-w, --watch',
       'Start daemon in foreground, stay alive permanently (Flight Recorder mode for tail)'
     )
     .action(
-      async (
-        action: string | undefined,
-        options: { background?: boolean; openui?: boolean; watch?: boolean }
-      ) => {
+      async (action: string | undefined, options: { background?: boolean; watch?: boolean }) => {
         const cmd = (action ?? 'start').toLowerCase();
 
         // ── install ──────────────────────────────────────────────────────────
@@ -106,34 +96,6 @@ export function registerDaemonCommand(program: Command): void {
           }, 600);
           startDaemon(); // foreground — keeps process alive
           return;
-        }
-
-        // --openui is deprecated (no-op). Treat it as plain start.
-        if (options.openui) {
-          if (isDaemonRunning()) {
-            console.log(
-              chalk.green('✓ Daemon already running. Run ') +
-                chalk.bold('node9 tail') +
-                chalk.green(' to see live activity.')
-            );
-            process.exit(0);
-          }
-          const child = spawn(process.execPath, [process.argv[1], 'daemon'], {
-            detached: true,
-            stdio: 'ignore',
-            env: { ...process.env, NODE9_AUTO_STARTED: '1' },
-          });
-          child.unref();
-          for (let i = 0; i < 12; i++) {
-            await new Promise((r) => setTimeout(r, 250));
-            if (isDaemonRunning()) break;
-          }
-          console.log(
-            chalk.green(`\n🛡️  Node9 daemon started. Run `) +
-              chalk.bold('node9 tail') +
-              chalk.green(' to see live activity.')
-          );
-          process.exit(0);
         }
 
         if (options.background) {

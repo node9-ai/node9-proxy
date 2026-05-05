@@ -96,6 +96,8 @@ describe('getShield', () => {
 
 // ── listShields ───────────────────────────────────────────────────────────────
 describe('listShields', () => {
+  // mcp-tool-gating retired in v3 browser-removal sprint — its only
+  // human-in-the-loop surface was the local browser dashboard.
   const EXPECTED_BUILTIN_SHIELDS = [
     'aws',
     'bash-safe',
@@ -103,7 +105,6 @@ describe('listShields', () => {
     'filesystem',
     'github',
     'k8s',
-    'mcp-tool-gating',
     'mongodb',
     'postgres',
     'project-jail',

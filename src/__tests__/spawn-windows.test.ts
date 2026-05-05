@@ -6,10 +6,13 @@
  * wrappers. The fix is to use process.execPath + process.argv[1] instead, which is the
  * pattern already used in src/tui/tail.ts.
  *
- * Call sites (all must use process.execPath):
- *   cli/daemon-starter.ts  — autoStartDaemonAndWait()             (1)
- *   cli/commands/daemon-cmd.ts — daemon --openui, --background    (2)
- *   cli/commands/watch.ts  — watch mode daemon start              (1)
+ * Call sites that spawn the daemon (all must use process.execPath):
+ *   cli/daemon-starter.ts          — autoStartDaemonAndWait()             (1)
+ *   cli/commands/daemon-cmd.ts     — daemon --background, daemon restart  (2)
+ *   cli/commands/watch.ts          — watch mode daemon start              (1)
+ *
+ * Total expected: 4. Down from 5 in v3 — the daemon --openui flag was
+ * dropped after the local browser dashboard was retired.
  */
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
@@ -33,10 +36,9 @@ describe('spawn Windows compatibility (#41)', () => {
     }
   });
 
-  it('spawns daemon using process.execPath at all 5 call sites', () => {
-    // autoStartDaemonAndWait (1) + daemon --openui (1) + daemon --background (1) +
-    // daemon restart (1) + watch (1)
+  it('spawns daemon using process.execPath at all 4 call sites', () => {
+    // autoStartDaemonAndWait (1) + daemon --background (1) + daemon restart (1) + watch (1)
     const total = sources.reduce((sum, src) => sum + (src.match(SAFE_SPAWN_RE) ?? []).length, 0);
-    expect(total).toBe(5);
+    expect(total).toBe(4);
   });
 });
