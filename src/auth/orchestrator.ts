@@ -532,18 +532,51 @@ async function _authorizeHeadlessCore(
         // Local development: daemon is running and not in a test/CI environment,
         // so a human is at the keyboard. Downgrade hard-block to review — the user
         // gets a popup and can approve or deny. Hard blocks stay hard in CI.
-        // Audit the block attempt to SaaS before falling through to the race engine.
+        //
+        // Make the downgrade visible. Two changes vs. a regular review:
+        //   1. Audit `checkedBy` is 'smart-rule-block-override' — the dashboard
+        //      can show "block rule overridden" separately from a hard block.
+        //   2. blockedByLabel is prefixed with "⚠️ Override block rule: " so the
+        //      popup card / tail row makes it explicit the user is breaking
+        //      their own block rule, not approving a routine review.
         if (!isManual)
-          appendLocalAudit(toolName, args, 'deny', 'smart-rule-block', meta, hashAuditArgs);
+          appendLocalAudit(
+            toolName,
+            args,
+            'deny',
+            'smart-rule-block-override',
+            meta,
+            hashAuditArgs
+          );
         if (approvers.cloud && creds?.apiKey)
-          auditLocalAllow(toolName, args, 'smart-rule-block', creds, meta, undefined, false, {
-            ruleName: policyResult.ruleName,
-            ruleDescription: policyResult.ruleDescription,
-            blockedByLabel: policyResult.blockedByLabel,
-            matchedField: policyResult.matchedField,
-            matchedWord: policyResult.matchedWord,
-          });
-        // Fall through to the race engine with the block label visible to the user.
+          auditLocalAllow(
+            toolName,
+            args,
+            'smart-rule-block-override',
+            creds,
+            meta,
+            undefined,
+            false,
+            {
+              ruleName: policyResult.ruleName,
+              ruleDescription: policyResult.ruleDescription,
+              blockedByLabel: policyResult.blockedByLabel,
+              matchedField: policyResult.matchedField,
+              matchedWord: policyResult.matchedWord,
+            }
+          );
+        // Mutate the policyResult label so the race engine downstream
+        // (line ~570: `explainableLabel = policyResult.blockedByLabel`) picks
+        // up the override prefix. Idempotent — never double-prepends.
+        const baseLabel = policyResult.blockedByLabel || 'Smart Rule';
+        const OVERRIDE_PREFIX = '⚠️ Override block rule: ';
+        if (!baseLabel.startsWith(OVERRIDE_PREFIX)) {
+          policyResult = {
+            ...policyResult,
+            blockedByLabel: `${OVERRIDE_PREFIX}${baseLabel}`,
+          };
+        }
+        // Fall through to the race engine with the override label visible.
       } else {
         if (!isManual)
           appendLocalAudit(toolName, args, 'deny', 'smart-rule-block', meta, hashAuditArgs);

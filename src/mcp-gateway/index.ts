@@ -458,7 +458,17 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
   // ── Queue drain ────────────────────────────────────────────────────────────
   // Replay tool call lines that were queued while pin validation was pending.
   // Called from the upstream output handler after pin state is resolved.
-  function drainPendingToolCalls(): void {
+  //
+  // Serialization: emit() calls the async handler, which sets authPending=true
+  // synchronously before its first `await`. Without serialization, emitting
+  // N lines in a tight loop fires N concurrent auths — confusing UX (multiple
+  // popup cards stack), and out-of-order forwarding to upstream. Wait for the
+  // prior handler's auth to settle before emitting the next, so each tool
+  // call gets approved (or denied) in queue order.
+  //
+  // Fire-and-forget at call sites is fine: drain runs to completion in
+  // background; per-call stdout writes happen inside each handler.
+  async function drainPendingToolCalls(): Promise<void> {
     if (pendingToolCalls.length === 0) {
       // No queued calls. If stdin already closed, end child stdin now.
       if (deferredStdinEnd && !authPending) child.stdin.end();
@@ -466,14 +476,24 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
     }
     const lines = pendingToolCalls.splice(0);
     for (const queuedLine of lines) {
-      // Re-emit the line so the agentIn handler processes it again.
-      // pinState is now resolved, so the quarantine gate will either
-      // allow (validated) or block (quarantined) each queued call.
+      // Wait for any in-flight auth from the previous iteration before
+      // emitting the next line. setImmediate yields to the event loop so
+      // promise resolutions / I/O continuations can run.
+      while (authPending) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      // Re-emit the line so the agentIn handler processes it. pinState
+      // is now resolved, so the quarantine gate will either allow
+      // (validated) or block (quarantined) each queued call.
       agentIn.emit('line', queuedLine);
     }
-    // If all queued calls were blocked (quarantined) and no auth is pending,
-    // end child stdin since the deferred close was never resolved.
-    if (deferredStdinEnd && !authPending) child.stdin.end();
+    // Wait for the FINAL emit's handler to settle before resolving
+    // deferred stdin close — otherwise we'd close stdin while the last
+    // approved call is still trying to forward.
+    while (authPending) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    if (deferredStdinEnd) child.stdin.end();
   }
 
   // ── FORWARD OUTPUT (Upstream → Agent) ─────────────────────────────────────
@@ -555,12 +575,12 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
           );
           // Forward the response — first use is trusted
           process.stdout.write(line + '\n');
-          drainPendingToolCalls();
+          void drainPendingToolCalls();
         } else if (pinStatus === 'match') {
           // Pin matches — forward unchanged
           pinState = 'validated';
           process.stdout.write(line + '\n');
-          drainPendingToolCalls();
+          void drainPendingToolCalls();
         } else if (pinStatus === 'corrupt') {
           // Pin file is corrupt — fail closed, quarantine the session
           pinState = 'quarantined';
@@ -585,7 +605,7 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
             },
           };
           process.stdout.write(JSON.stringify(errorResponse) + '\n');
-          drainPendingToolCalls();
+          void drainPendingToolCalls();
         } else {
           // MISMATCH — possible rug pull attack. Block the response, quarantine session.
           pinState = 'quarantined';
@@ -612,7 +632,7 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
             },
           };
           process.stdout.write(JSON.stringify(errorResponse) + '\n');
-          drainPendingToolCalls();
+          void drainPendingToolCalls();
         }
         return;
       }
