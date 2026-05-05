@@ -31,32 +31,10 @@ import {
   getInternalToken,
   notifyActivitySocket,
 } from '../auth/daemon';
-import { readActiveShields } from '../shields';
 
-/** Wait for human approval of new MCP tools. Polls daemon for status change. */
-async function waitForMcpApproval(
-  serverKey: string
-): Promise<{ status: string; disabled: string[] }> {
-  const token = getInternalToken();
-  const start = Date.now();
-  const timeout = 60_000; // 60s timeout
-
-  while (Date.now() - start < timeout) {
-    try {
-      const res = await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/mcp/status/${serverKey}`, {
-        headers: token ? { 'x-node9-internal': token } : {},
-      });
-      if (res.ok) {
-        const config = (await res.json()) as { status: string; disabled: string[] };
-        if (config.status === 'approved') return config;
-      }
-    } catch {
-      // Daemon might be down — fail open after timeout
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-  return { status: 'timed-out', disabled: [] };
-}
+// readActiveShields + waitForMcpApproval helper removed — the
+// mcp-tool-gating shield (which used the browser dashboard for the
+// human-in-the-loop approval) was retired in the v3 sprint.
 
 function sanitize(value: string): string {
   // eslint-disable-next-line no-control-regex
@@ -458,7 +436,17 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
   // ── Queue drain ────────────────────────────────────────────────────────────
   // Replay tool call lines that were queued while pin validation was pending.
   // Called from the upstream output handler after pin state is resolved.
-  function drainPendingToolCalls(): void {
+  //
+  // Serialization: emit() calls the async handler, which sets authPending=true
+  // synchronously before its first `await`. Without serialization, emitting
+  // N lines in a tight loop fires N concurrent auths — confusing UX (multiple
+  // popup cards stack), and out-of-order forwarding to upstream. Wait for the
+  // prior handler's auth to settle before emitting the next, so each tool
+  // call gets approved (or denied) in queue order.
+  //
+  // Fire-and-forget at call sites is fine: drain runs to completion in
+  // background; per-call stdout writes happen inside each handler.
+  async function drainPendingToolCalls(): Promise<void> {
     if (pendingToolCalls.length === 0) {
       // No queued calls. If stdin already closed, end child stdin now.
       if (deferredStdinEnd && !authPending) child.stdin.end();
@@ -466,14 +454,24 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
     }
     const lines = pendingToolCalls.splice(0);
     for (const queuedLine of lines) {
-      // Re-emit the line so the agentIn handler processes it again.
-      // pinState is now resolved, so the quarantine gate will either
-      // allow (validated) or block (quarantined) each queued call.
+      // Wait for any in-flight auth from the previous iteration before
+      // emitting the next line. setImmediate yields to the event loop so
+      // promise resolutions / I/O continuations can run.
+      while (authPending) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      // Re-emit the line so the agentIn handler processes it. pinState
+      // is now resolved, so the quarantine gate will either allow
+      // (validated) or block (quarantined) each queued call.
       agentIn.emit('line', queuedLine);
     }
-    // If all queued calls were blocked (quarantined) and no auth is pending,
-    // end child stdin since the deferred close was never resolved.
-    if (deferredStdinEnd && !authPending) child.stdin.end();
+    // Wait for the FINAL emit's handler to settle before resolving
+    // deferred stdin close — otherwise we'd close stdin while the last
+    // approved call is still trying to forward.
+    while (authPending) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    if (deferredStdinEnd) child.stdin.end();
   }
 
   // ── FORWARD OUTPUT (Upstream → Agent) ─────────────────────────────────────
@@ -525,17 +523,18 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
           });
         }
 
-        // 2. Intercept & Hold — only when mcp-tool-gating shield is active
+        // The mcp-tool-gating shield + waitForMcpApproval polling were
+        // retired in the v3 browser-removal sprint — the human-in-the-loop
+        // surface (browser dashboard) was the only place to approve.
+        // First-connect tool lists are now auto-trusted and pinned (see
+        // mcp-pin below); subsequent drift is still caught by the rug-pull
+        // defense.
+        //
+        // Existing per-server `disabled` lists from prior gating sessions
+        // are still respected — admins who already curated them keep the
+        // filter applied.
         const serverCfg = getServerConfig(serverKey);
-        const gatingEnabled = readActiveShields().includes('mcp-tool-gating');
-        if (gatingEnabled && isDaemonRunning() && (!serverCfg || serverCfg.status === 'pending')) {
-          const config = await waitForMcpApproval(serverKey);
-          if (config.disabled.length > 0) {
-            parsed.result.tools = tools.filter((t) => !config.disabled.includes(t.name));
-            line = JSON.stringify(parsed);
-          }
-        } else if (serverCfg?.disabled && serverCfg.disabled.length > 0) {
-          // Already approved — apply persisted filter immediately
+        if (serverCfg?.disabled && serverCfg.disabled.length > 0) {
           parsed.result.tools = tools.filter((t) => !serverCfg.disabled.includes(t.name));
           line = JSON.stringify(parsed);
         }
@@ -555,12 +554,12 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
           );
           // Forward the response — first use is trusted
           process.stdout.write(line + '\n');
-          drainPendingToolCalls();
+          void drainPendingToolCalls();
         } else if (pinStatus === 'match') {
           // Pin matches — forward unchanged
           pinState = 'validated';
           process.stdout.write(line + '\n');
-          drainPendingToolCalls();
+          void drainPendingToolCalls();
         } else if (pinStatus === 'corrupt') {
           // Pin file is corrupt — fail closed, quarantine the session
           pinState = 'quarantined';
@@ -585,7 +584,7 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
             },
           };
           process.stdout.write(JSON.stringify(errorResponse) + '\n');
-          drainPendingToolCalls();
+          void drainPendingToolCalls();
         } else {
           // MISMATCH — possible rug pull attack. Block the response, quarantine session.
           pinState = 'quarantined';
@@ -612,7 +611,7 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
             },
           };
           process.stdout.write(JSON.stringify(errorResponse) + '\n');
-          drainPendingToolCalls();
+          void drainPendingToolCalls();
         }
         return;
       }

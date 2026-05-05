@@ -38,6 +38,16 @@ export type PricingTuple = readonly [number, number, number, number];
  * Keys are LiteLLM-style model identifiers (no Anthropic date suffix).
  * Values are [in, out, cacheWrite, cacheRead] in USD-per-token.
  */
+// Pricing source: LiteLLM (https://github.com/BerriAI/litellm) —
+// direct-Anthropic-API entries, not Bedrock-marked-up. Verified
+// 2026-05-05: bundled values match `~/.node9/model-pricing.json`
+// keys `claude-opus-4-*` / `claude-sonnet-4-*` exactly.
+//
+// Note: these are LOWER than Anthropic's claude.ai/api website
+// "list price" of $15/$75/M for Opus and $3/$15/M for Sonnet —
+// LiteLLM appears to track the actual API token-pricing tier rather
+// than the website's headline number. Don't "correct" these to
+// match the website without first checking what LiteLLM has.
 const BUNDLED_PRICING: Record<string, PricingTuple> = {
   // Anthropic
   'claude-opus-4': [5e-6, 25e-6, 6.25e-6, 0.5e-6],

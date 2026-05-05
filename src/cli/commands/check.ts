@@ -181,7 +181,7 @@ export function registerCheckCommand(program: Command): void {
               const d = spawn(process.execPath, [scriptPath, 'daemon'], {
                 detached: true,
                 stdio: 'ignore',
-                env: { ...safeEnv, NODE9_AUTO_STARTED: '1', NODE9_BROWSER_OPENED: '1' },
+                env: { ...safeEnv, NODE9_AUTO_STARTED: '1' },
               });
               d.unref();
             } catch (spawnErr) {

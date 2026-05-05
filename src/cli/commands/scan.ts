@@ -27,8 +27,9 @@ import {
   classifyRuleSeverity as engineClassifyRuleSeverity,
   narrativeRuleLabel as engineNarrativeRuleLabel,
 } from '@node9/policy-engine';
-import { isDaemonRunning, getInternalToken, DAEMON_PORT, DAEMON_HOST } from '../../auth/daemon';
-import { isTestingMode } from '../daemon-starter';
+// isDaemonRunning / getInternalToken / DAEMON_PORT / DAEMON_HOST /
+// isTestingMode imports removed — only used by the browser auto-push
+// scan flow (retired v3).
 import {
   buildScanSummary,
   type FindingRef,
@@ -2567,48 +2568,10 @@ export function registerScanCommand(program: Command): void {
         }
         console.log('');
 
-        if (!isTestingMode()) {
-          if (isWired) {
-            const url = `http://${DAEMON_HOST}:${DAEMON_PORT}/?openscan=1`;
-            if (isDaemonRunning()) {
-              const internalToken = getInternalToken();
-              if (internalToken) {
-                try {
-                  const pushSummary = buildScanSummary([
-                    { id: 'claude', label: 'Claude', icon: '🤖', scan: claudeScan },
-                    { id: 'gemini', label: 'Gemini', icon: '♊', scan: geminiScan },
-                    { id: 'codex', label: 'Codex', icon: '🔮', scan: codexScan },
-                  ]);
-                  await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/scan/push`, {
-                    method: 'POST',
-                    headers: {
-                      'Content-Type': 'application/json',
-                      'x-node9-internal': internalToken,
-                    },
-                    body: JSON.stringify({ status: 'complete', summary: pushSummary }),
-                    signal: AbortSignal.timeout(3000),
-                  });
-                  // Note: no longer auto-opens the browser. The terminal scan
-                  // output is the canonical artifact; users who want the
-                  // browser dashboard can run `node9 daemon start --openui`.
-                } catch {
-                  // fire-and-forget
-                }
-              }
-            }
-            if (isDaemonRunning()) {
-              console.log('  ' + chalk.cyan('🌐 View in browser:') + '  ' + chalk.underline(url));
-            } else {
-              console.log(
-                '  ' +
-                  chalk.dim('📊 To view in browser, start the daemon:  ') +
-                  chalk.cyan('node9 daemon --background')
-              );
-            }
-            console.log('');
-          }
-          // When not wired, the install CTA above is the next step — no browser hint.
-        }
+        // Browser dashboard view + auto-push to /scan/push retired in
+        // v3 sprint. Terminal scan output (above) is the only artifact.
+        // For richer cross-machine views, point users at the SaaS
+        // dashboard via `node9 sessions` or the audit log.
       }
     );
 }

@@ -261,7 +261,17 @@ describe('auditLocalAllow — checkedBy allowlist', () => {
   const creds = { apiKey: 'k', apiUrl: 'http://127.0.0.1:0' };
 
   it('passes through known checkedBy values verbatim', async () => {
-    for (const v of ['dlp-block', 'loop-detected', 'local-policy', 'persistent', 'trust']) {
+    for (const v of [
+      'dlp-block',
+      'loop-detected',
+      'local-policy',
+      'persistent',
+      'trust',
+      // smart-rule-block-override is the v3 sprint 1 #1 addition: distinct
+      // from 'smart-rule-block' so the dashboard can show "block rule
+      // overridden" separately from a hard block that fired with no human.
+      'smart-rule-block-override',
+    ]) {
       captured.length = 0;
       await auditLocalAllow('bash', {}, v, creds);
       expect(captured[0].body.checkedBy).toBe(v);

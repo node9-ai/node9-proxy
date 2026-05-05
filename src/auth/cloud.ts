@@ -30,6 +30,12 @@ const KNOWN_CHECKED_BY = new Set([
   'audit-mode',
   'local-policy',
   'smart-rule-block',
+  // Smart-rule block was downgraded to review because the daemon was
+  // running and we're not in CI. The block attempt is still recorded;
+  // the user got a popup. Distinct from 'smart-rule-block' so the
+  // dashboard can show "block rule overridden" separately from a hard
+  // block that fired with no human in the loop.
+  'smart-rule-block-override',
   'persistent',
   'trust',
   'observe-mode',

@@ -6,7 +6,7 @@ import net from 'net';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { spawn } from 'child_process';
+// `spawn` import removed — only consumer was openBrowser() (deleted).
 import { randomUUID } from 'crypto';
 import { RiskMetadata } from '../context-sniper';
 import { DAEMON_PORT, DAEMON_HOST } from '../auth/daemon';
@@ -326,7 +326,9 @@ export function writePersistentDecision(toolName: string, decision: 'allow' | 'd
     const decisions = readPersistentDecisions();
     decisions[toolName] = decision;
     atomicWriteSync(DECISIONS_FILE, JSON.stringify(decisions, null, 2));
-    broadcast('decisions', decisions);
+    // broadcast('decisions') removed — only the browser dashboard
+    // consumed it. The new `node9 decisions list` CLI re-reads the
+    // file on demand; no live update channel needed.
   } catch {}
 }
 
@@ -338,18 +340,7 @@ export function readBody(req: http.IncomingMessage): Promise<string> {
   });
 }
 
-export function openBrowser(url: string): void {
-  if (process.env.NODE9_TESTING === '1') return;
-  try {
-    const args =
-      process.platform === 'darwin'
-        ? ['open', url]
-        : process.platform === 'win32'
-          ? ['cmd', '/c', 'start', '', url]
-          : ['xdg-open', url];
-    spawn(args[0], args.slice(1), { detached: true, stdio: 'ignore' }).unref();
-  } catch {}
-}
+// openBrowser() helper removed — local browser dashboard retired (v3).
 
 // ── FinOps: cost estimation ───────────────────────────────────────────────────
 // Passive mode only — estimates cost from tool args at allow time.

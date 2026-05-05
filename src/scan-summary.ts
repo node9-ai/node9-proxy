@@ -117,11 +117,12 @@ export interface LoopRef {
 }
 
 // ---------------------------------------------------------------------------
-// Constants
+// Constants — re-exported from @node9/policy-engine so the SaaS Report can
+// compute the same loop-waste figure without copying values across packages.
 // ---------------------------------------------------------------------------
 
-export const LOOP_THRESHOLD_FOR_WASTE = 3;
-export const COST_PER_LOOP_ITER_USD = 0.006; // ~2K tokens at Sonnet pricing
+export { LOOP_THRESHOLD_FOR_WASTE, COST_PER_LOOP_ITER_USD } from '@node9/policy-engine';
+import { LOOP_THRESHOLD_FOR_WASTE, COST_PER_LOOP_ITER_USD } from '@node9/policy-engine';
 
 // ---------------------------------------------------------------------------
 // Main entry point

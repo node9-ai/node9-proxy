@@ -128,8 +128,12 @@ const FINDING_TO_SIGNAL: Record<ScanFinding['type'], keyof ScanSignals> = {
  *   - One destructive op (-15) is a yellow flag.
  *   - One loop (-3) is mild noise; many loops still add up.
  * Total deduction is capped at 100 so the score never goes negative.
+ *
+ * Exported so the SaaS Report can reuse the same severity ladder when
+ * blending scan signals into the workspace risk score (see
+ * `classifyScanSignal` in ../severity).
  */
-const SCORE_WEIGHTS: Record<keyof ScanSignals, number> = {
+export const SCAN_SIGNAL_WEIGHTS: Record<keyof ScanSignals, number> = {
   dlpFindings: 30,
   piiFindings: 10,
   sensitiveFileReads: 20,
@@ -149,10 +153,29 @@ const SCORE_WEIGHTS: Record<keyof ScanSignals, number> = {
 export function computeScanScore(signals: ScanSignals): number {
   let deduction = 0;
   for (const key of Object.keys(signals) as Array<keyof ScanSignals>) {
-    deduction += signals[key] * SCORE_WEIGHTS[key];
+    deduction += signals[key] * SCAN_SIGNAL_WEIGHTS[key];
   }
   return Math.max(0, Math.min(100, 100 - deduction));
 }
+
+// ---------------------------------------------------------------------------
+// Loop-waste constants
+// ---------------------------------------------------------------------------
+//
+// These were previously defined in node9-proxy's scan-summary.ts. They
+// belong here so the SaaS /report endpoint can compute the same
+// "loop-waste in dollars" number without copying constants across packages.
+//
+// LOOP_THRESHOLD_FOR_WASTE: the first N iterations of a loop are treated
+// as "normal retry" — only iterations beyond it count as wasted. The
+// proxy's loop-detector uses the same threshold for its block decision.
+//
+// COST_PER_LOOP_ITER_USD: rough estimate of the cost of one wasted loop
+// iteration. ~2K tokens at Sonnet pricing. Order-of-magnitude — used for
+// "you wasted ~$X" dashboard callouts, not billing.
+
+export const LOOP_THRESHOLD_FOR_WASTE = 3;
+export const COST_PER_LOOP_ITER_USD = 0.006;
 
 /**
  * Build the network-safe summary from a list of findings + total tool-call

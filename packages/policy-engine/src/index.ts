@@ -9,7 +9,7 @@
 // scanFilePath wrapper since that's filesystem access.
 
 /** Engine version stamped on audit entries for future drift detection. */
-export const ENGINE_VERSION = '1.3.0';
+export const ENGINE_VERSION = '1.4.0';
 
 export type { SmartCondition, SmartRule, DlpMatch, RiskMetadata } from './types';
 
@@ -80,6 +80,8 @@ export {
   narrativeRuleLabel,
   classifyAuditEntry,
   computeSecurityScore,
+  classifyScanSignal,
+  computeBlendedSecurityScore,
 } from './severity';
 
 // Blast summarization — per-machine "what's reachable on disk" reduced to
@@ -94,4 +96,10 @@ export { summarizeBlast, truncateBlastPath } from './blast';
 // paths. Pure: host code reads JSONL deltas + runs extractors, engine
 // aggregates the resulting findings into a network-safe summary.
 export type { ScanFinding, ScanSignals, ScanSummary } from './scan';
-export { summarizeScan, computeScanScore } from './scan';
+export {
+  summarizeScan,
+  computeScanScore,
+  SCAN_SIGNAL_WEIGHTS,
+  LOOP_THRESHOLD_FOR_WASTE,
+  COST_PER_LOOP_ITER_USD,
+} from './scan';

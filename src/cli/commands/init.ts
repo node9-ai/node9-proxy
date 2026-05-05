@@ -238,7 +238,7 @@ export function registerInitCommand(program: Command): void {
           // the user wait for next login or run node9 tail manually.
           if (!isTestingMode()) {
             process.stdout.write(chalk.dim('  Starting daemon...'));
-            const started = await autoStartDaemonAndWait(false);
+            const started = await autoStartDaemonAndWait();
             if (started) {
               process.stdout.write(
                 '\r' + chalk.green('  ✓ Daemon started — protection is active') + '\n'

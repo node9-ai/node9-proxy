@@ -9,8 +9,10 @@ import { randomUUID } from 'crypto';
 import { spawnSync } from 'child_process';
 import chalk from 'chalk';
 import { authorizeHeadless, getGlobalSettings, getConfig, _resetConfigCache } from '../core';
-import { SHIELDS, readActiveShields, writeActiveShields } from '../shields';
-import { UI_HTML_TEMPLATE } from './ui';
+// SHIELDS / readActiveShields no longer used in server.ts after the
+// /shields route was removed (v3 browser-removal). CLI shield commands
+// import these directly.
+// UI_HTML_TEMPLATE import removed — local browser dashboard retired (v3).
 import {
   scanClaudeHistory,
   scanGeminiHistory,
@@ -22,7 +24,6 @@ import {
   DAEMON_PORT,
   DAEMON_HOST,
   DAEMON_PID_FILE,
-  DECISIONS_FILE,
   AUTO_DENY_MS,
   TRUST_DURATIONS,
   autoStarted,
@@ -41,10 +42,8 @@ import {
   appendAuditLog,
   getAuditHistory,
   getOrgName,
-  hasStoredSlackKey,
   writeGlobalSetting,
   writeTrustEntry,
-  readPersistentDecisions,
   writePersistentDecision,
   readBody,
   broadcast,
@@ -53,9 +52,6 @@ import {
   type PendingEntry,
   type SseClient,
   type Decision,
-  CREDENTIALS_FILE,
-  suggestionTracker,
-  suggestions,
   taintStore,
   insightCounts,
   loadInsightCounts,
@@ -69,30 +65,33 @@ import {
   cachedScanResult,
   cachedScanTs,
   SCAN_CACHE_TTL_MS,
-  setCachedScanResult,
 } from './state';
 import { extractCommandPattern } from '../auth/state.js';
-import { patchConfig, GLOBAL_CONFIG_PATH, type ConfigPatch } from '../config/patch.js';
-import { SmartRuleSchema } from '../config-schema.js';
 import { startCostSync } from '../costSync.js';
 import { startCloudSync } from './sync.js';
 import { startDlpScanner } from './dlp-scanner.js';
-import {
-  readMcpToolsConfig,
-  updateServerDiscovery,
-  approveServer,
-  getServerConfig,
-} from './mcp-tools.js';
+import { readMcpToolsConfig, updateServerDiscovery, approveServer } from './mcp-tools.js';
 
 export function startDaemon(): void {
   startCostSync();
   startCloudSync();
   startDlpScanner();
   loadInsightCounts(); // restore persisted nudge counters across restarts
-  const csrfToken = randomUUID();
+  // Single per-process token. Stored in ~/.node9/daemon.pid (mode 0600)
+  // and read by every local CLI client (`node9 tail`, mcp-gateway,
+  // orchestrator) via auth/daemon.ts:getInternalToken.
+  //
+  // Two header names accepted for back-compat:
+  //   - 'x-node9-internal'  — preferred, used by all current consumers
+  //   - 'x-node9-token'     — older CSRF-style header from when the
+  //                           browser dashboard issued a separate token.
+  //                           Browser is gone (v3 sprint); the alias is
+  //                           kept so any in-flight client requests
+  //                           landing across the upgrade still work.
   const internalToken = randomUUID();
-  const UI_HTML = UI_HTML_TEMPLATE.replace('{{CSRF_TOKEN}}', csrfToken);
-  const validToken = (req: http.IncomingMessage) => req.headers['x-node9-token'] === csrfToken;
+  const validToken = (req: http.IncomingMessage) =>
+    req.headers['x-node9-internal'] === internalToken ||
+    req.headers['x-node9-token'] === internalToken;
 
   // ── Graceful Idle Timeout ────────────────────────────────────────────────
   const IDLE_TIMEOUT_MS = 12 * 60 * 60 * 1000; // 12 hours
@@ -128,12 +127,20 @@ export function startDaemon(): void {
     const reqUrl = new URL(req.url || '/', `http://${host}`);
     const { pathname } = reqUrl;
 
-    if (req.method === 'GET' && pathname === '/') {
-      res.writeHead(200, { 'Content-Type': 'text/html' });
-      return res.end(UI_HTML);
-    }
+    // GET / (HTML browser dashboard) — removed in v3 browser-removal sprint.
+    // The local HTTP server now exists only for: SSE stream consumed by
+    // node9 tail, /decision/* approval writes, and /check from the proxy
+    // hook. No HTML surface.
 
     if (req.method === 'GET' && pathname === '/events') {
+      // SSE stream — gated on the per-process token. Closes the
+      // pre-v3-sprint hole where any local process could subscribe
+      // and harvest pending tool-call args. CLI clients read the
+      // token from the PID file via getInternalToken() and pass it
+      // as the X-Node9-Internal header.
+      if (!validToken(req)) {
+        return res.writeHead(403).end();
+      }
       const capParam = reqUrl.searchParams.get('capabilities') ?? '';
       const capabilities = capParam
         ? capParam
@@ -174,20 +181,12 @@ export function startDaemon(): void {
           autoDenyMs: getConfig().settings.approvalTimeoutMs ?? AUTO_DENY_MS,
         })}\n\n`
       );
-      res.write(`event: decisions\ndata: ${JSON.stringify(readPersistentDecisions())}\n\n`);
-      const activeShields = readActiveShields();
-      res.write(
-        `event: shields-status\ndata: ${JSON.stringify({
-          shields: Object.values(SHIELDS).map((s) => ({
-            name: s.name,
-            description: s.description,
-            active: activeShields.includes(s.name),
-          })),
-        })}\n\n`
-      );
-      // Emit the CSRF token on every connection so reconnecting clients
-      // (including the terminal racer) can acquire it without a browser tab.
-      res.write(`event: csrf\ndata: ${JSON.stringify({ token: csrfToken })}\n\n`);
+      // event: decisions / shields-status / csrf removed in v3 sprint.
+      // Pre-v3, the daemon emitted the CSRF token on every SSE connect
+      // so any subscriber could harvest it and forge /decision posts.
+      // Now: clients read the per-process token from ~/.node9/daemon.pid
+      // (mode 0600) directly, and they had to send it just to subscribe
+      // here — no need to re-broadcast.
       // Replay large-response history so late-joining browsers see past events
       if (largeResponseRing.length > 0) {
         res.write(
@@ -489,21 +488,16 @@ export function startDaemon(): void {
         clearTimeout(entry.timer);
 
         // ── Smart Rule Suggestions ────────────────────────────────────────────
-        // Track human allow decisions. After threshold consecutive allows for
-        // the same tool, broadcast a suggestion card to reduce future friction.
-        // Reset the counter on deny so we never suggest allowing blocked actions.
+        // Track human allow decisions. The browser dashboard's
+        // suggestion-card surface is gone (v3 sprint), so the
+        // suggestion tracker no longer fires. insightCounts still
+        // drives the 💡 hint in `node9 tail` after N consecutive allows.
         if (resolvedDecision === 'allow' && !persist) {
           insightCounts.set(entry.toolName, (insightCounts.get(entry.toolName) ?? 0) + 1);
           saveInsightCounts();
-          const suggestion = suggestionTracker.recordAllow(entry.toolName, entry.args);
-          if (suggestion) {
-            suggestions.set(suggestion.id, suggestion);
-            broadcast('suggestion:new', suggestion);
-          }
         } else if (resolvedDecision === 'deny') {
           insightCounts.delete(entry.toolName);
           saveInsightCounts();
-          suggestionTracker.resetTool(entry.toolName);
         }
 
         // source is validated against an allowlist AFTER appendAuditLog so the
@@ -598,49 +592,10 @@ export function startDaemon(): void {
       }
     }
 
-    if (req.method === 'GET' && pathname === '/slack-status') {
-      try {
-        const s = getGlobalSettings();
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ hasKey: hasStoredSlackKey(), enabled: s.slackEnabled }));
-      } catch (err) {
-        console.error(chalk.red('[node9 daemon] GET /slack-status failed:'), err);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'internal' }));
-      }
-    }
-
-    if (req.method === 'POST' && pathname === '/slack-key') {
-      if (!validToken(req)) return res.writeHead(403).end();
-      try {
-        const { apiKey } = JSON.parse(await readBody(req));
-        atomicWriteSync(
-          CREDENTIALS_FILE,
-          JSON.stringify({ apiKey, apiUrl: 'https://api.node9.ai/api/v1/intercept' }, null, 2),
-          { mode: 0o600 }
-        );
-        broadcast('slack-status', { hasKey: true, enabled: getGlobalSettings().slackEnabled });
-        res.writeHead(200);
-        return res.end(JSON.stringify({ ok: true }));
-      } catch {
-        res.writeHead(400).end();
-      }
-    }
-
-    if (req.method === 'DELETE' && pathname.startsWith('/decisions/')) {
-      if (!validToken(req)) return res.writeHead(403).end();
-      try {
-        const toolName = decodeURIComponent(pathname.split('/').pop()!);
-        const decisions = readPersistentDecisions();
-        delete decisions[toolName];
-        atomicWriteSync(DECISIONS_FILE, JSON.stringify(decisions, null, 2));
-        broadcast('decisions', decisions);
-        res.writeHead(200);
-        return res.end(JSON.stringify({ ok: true }));
-      } catch {
-        res.writeHead(400).end();
-      }
-    }
+    // GET /slack-status, POST /slack-key, DELETE /decisions/<toolName>
+    // — all removed in v3 browser-removal sprint. Slack-local approvals
+    // are dropped (SaaS handles Slack); persistent-decision management
+    // moves to the new `node9 decisions list / clear` CLI in step 7.
 
     if (req.method === 'POST' && pathname.startsWith('/resolve/')) {
       const internalAuth = req.headers['x-node9-internal'];
@@ -661,28 +616,16 @@ export function startDaemon(): void {
         });
         clearTimeout(entry.timer);
 
-        // ── Event Bridge: track human decisions for Smart Rule Suggestions ────
-        // insightCounts tracks all human approvals (including cloud/Slack) so the
-        // 💡 insight line appears consistently across all approval channels.
-        // suggestionTracker is gated on !slackDelegated — Slack auto-approvals should
-        // not generate smart rule suggestions (different UX intent).
+        // insightCounts tracks all human approvals so the 💡 insight
+        // line appears consistently across all approval channels (tail).
+        // The Smart Rule Suggestions surface (browser-only) was removed
+        // in v3 sprint; suggestionTracker is no longer driven from here.
         if (resolvedResolveDecision === 'allow') {
           insightCounts.set(entry.toolName, (insightCounts.get(entry.toolName) ?? 0) + 1);
           saveInsightCounts();
         } else {
           insightCounts.delete(entry.toolName);
           saveInsightCounts();
-        }
-        if (!entry.slackDelegated) {
-          if (resolvedResolveDecision === 'allow') {
-            const suggestion = suggestionTracker.recordAllow(entry.toolName, entry.args);
-            if (suggestion) {
-              suggestions.set(suggestion.id, suggestion);
-              broadcast('suggestion:new', suggestion);
-            }
-          } else {
-            suggestionTracker.resetTool(entry.toolName);
-          }
         }
 
         const VALID_RESOLVE_SOURCES = new Set(['terminal', 'browser', 'native']);
@@ -711,17 +654,9 @@ export function startDaemon(): void {
       return res.end(JSON.stringify(getAuditHistory()));
     }
 
-    if (req.method === 'GET' && pathname === '/shields') {
-      if (!validToken(req)) return res.writeHead(403).end();
-      const active = readActiveShields();
-      const shields = Object.values(SHIELDS).map((s) => ({
-        name: s.name,
-        description: s.description,
-        active: active.includes(s.name),
-      }));
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ shields }));
-    }
+    // GET /shields removed (browser-only read). Shield management moves
+    // to CLI: `node9 shield list` / `node9 shield enable <name>` /
+    // `node9 shield disable <name>` (already exist).
 
     if (req.method === 'GET' && pathname === '/report') {
       if (!validToken(req)) return res.writeHead(403).end();
@@ -848,19 +783,9 @@ export function startDaemon(): void {
       }
     }
 
-    if (req.method === 'POST' && pathname === '/scan/push') {
-      if (req.headers['x-node9-internal'] !== internalToken) return res.writeHead(403).end();
-      try {
-        const body = JSON.parse(await readBody(req)) as unknown;
-        setCachedScanResult(body);
-        broadcast('scan-ready', {});
-        res.writeHead(200).end();
-        return;
-      } catch {
-        res.writeHead(400).end();
-        return;
-      }
-    }
+    // POST /scan/push removed — was used to push scan results to the
+    // browser dashboard. CLI scan output is now the only surface.
+    // GET /scan stays — used by the daemon's HUD / status endpoints.
 
     if (req.method === 'GET' && pathname === '/scan') {
       if (!validToken(req)) return res.writeHead(403).end();
@@ -924,121 +849,17 @@ export function startDaemon(): void {
       }
     }
 
-    if (req.method === 'POST' && pathname === '/shields') {
-      if (!validToken(req)) return res.writeHead(403).end();
-      try {
-        const { name, active } = JSON.parse(await readBody(req)) as {
-          name: string;
-          active: boolean;
-        };
-        if (!SHIELDS[name]) return res.writeHead(400).end();
-        const current = readActiveShields();
-        const updated = active
-          ? [...new Set([...current, name])]
-          : current.filter((n) => n !== name);
-        writeActiveShields(updated);
-        _resetConfigCache();
-        const shieldsPayload = Object.values(SHIELDS).map((s) => ({
-          name: s.name,
-          description: s.description,
-          active: updated.includes(s.name),
-        }));
-        broadcast('shields-status', { shields: shieldsPayload });
-        res.writeHead(200);
-        return res.end(JSON.stringify({ ok: true }));
-      } catch {
-        res.writeHead(400).end();
-      }
-    }
+    // POST /shields removed — shield toggling moves to CLI
+    // (`node9 shield enable/disable`) which writes the same shields.json.
 
-    // ── Suggestions routes ────────────────────────────────────────────────────
+    // ── Suggestions routes — removed (browser-only) ──────────────────────────
 
-    if (req.method === 'GET' && pathname === '/suggestions') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify([...suggestions.values()]));
-    }
-
-    if (
-      req.method === 'POST' &&
-      pathname.startsWith('/suggestions/') &&
-      pathname.endsWith('/apply')
-    ) {
-      if (!validToken(req)) return res.writeHead(403).end();
-      try {
-        const body = await readBody(req);
-        const data = body ? (JSON.parse(body) as { configPath?: string; rule?: unknown }) : {};
-        const configPath = data.configPath ?? GLOBAL_CONFIG_PATH;
-
-        // Clamp configPath to ~/.node9/ before touching anything else — path.resolve
-        // neutralises any .. traversal so a crafted body cannot write outside the
-        // node9 config directory. Check happens before suggestion lookup so it is
-        // testable without a pre-existing suggestion in memory.
-        const node9Dir = path.dirname(GLOBAL_CONFIG_PATH); // ~/.node9
-        if (!path.resolve(configPath).startsWith(node9Dir + path.sep)) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          return res.end(
-            JSON.stringify({ error: 'configPath must be within the node9 config directory' })
-          );
-        }
-
-        const id = pathname.split('/')[2];
-        const suggestion = suggestions.get(id);
-        if (!suggestion) return res.writeHead(404).end();
-
-        // Allow the UI to override the rule before applying — validate against schema first
-        // to prevent a malformed rule from corrupting the config file.
-        let patch: ConfigPatch;
-        if (data.rule !== undefined) {
-          const parsed = SmartRuleSchema.safeParse(data.rule);
-          if (!parsed.success) {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            return res.end(JSON.stringify({ error: parsed.error.message }));
-          }
-          patch = { type: 'smartRule', rule: parsed.data };
-        } else {
-          patch = suggestion.suggestedRule as ConfigPatch;
-        }
-
-        patchConfig(configPath, patch);
-        _resetConfigCache();
-
-        // Reset insight counter for this tool — the rule now handles it automatically,
-        // so re-nudging immediately would cause a redundant suggestion on the next call.
-        insightCounts.delete(suggestion.toolName);
-        saveInsightCounts();
-
-        suggestion.status = 'applied';
-        broadcast('suggestion:resolved', { id, status: 'applied' });
-
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ ok: true }));
-      } catch (err) {
-        console.error(chalk.red('[node9 daemon] POST /suggestions/:id/apply failed:'), err);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: String(err) }));
-      }
-    }
-
-    if (
-      req.method === 'POST' &&
-      pathname.startsWith('/suggestions/') &&
-      pathname.endsWith('/dismiss')
-    ) {
-      if (!validToken(req)) return res.writeHead(403).end();
-      try {
-        const id = pathname.split('/')[2];
-        const suggestion = suggestions.get(id);
-        if (!suggestion) return res.writeHead(404).end();
-
-        suggestion.status = 'dismissed';
-        broadcast('suggestion:resolved', { id, status: 'dismissed' });
-
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ ok: true }));
-      } catch {
-        res.writeHead(400).end();
-      }
-    }
+    // GET /suggestions, POST /suggestions/<id>/apply, POST /suggestions/<id>/dismiss
+    // — all removed in v3 browser-removal sprint. The suggestion engine
+    // (smart-rule recommendations after N consecutive allows) had its
+    // user-facing surface only in the browser dashboard. Tracker is kept
+    // in memory but no longer surfaced; step 3 will drop the tracker if
+    // it has no other consumer.
 
     // ── Taint — record a tainted file path ───────────────────────────────────
     // Called by the hook process after a DLP write-block to persist the taint
@@ -1146,7 +967,8 @@ export function startDaemon(): void {
           args: { disabledTools },
           decision: 'allow',
         });
-        broadcast('mcp-tools-updated', { serverKey, disabledTools });
+        // broadcast('mcp-tools-updated') removed — browser-only listener.
+        // The route itself + the mcp-tool-gating flow goes in step 6.
         res.writeHead(200).end();
         return;
       } catch {
@@ -1269,14 +1091,10 @@ export function startDaemon(): void {
       }
     }
 
-    if (req.method === 'GET' && pathname.startsWith('/mcp/status/')) {
-      // Called by gateway, requires internal token
-      if (req.headers['x-node9-internal'] !== internalToken) return res.writeHead(403).end();
-      const serverKey = pathname.split('/').pop()!;
-      const config = getServerConfig(serverKey);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify(config || { status: 'pending' }));
-    }
+    // GET /mcp/status/<serverKey> — removed in v3 sprint. The gateway
+    // used to poll this while waiting for the user to approve new MCP
+    // tools in the browser. No more browser; first-connect pins
+    // automatically and rug-pull is caught by mcp-pin.
 
     res.writeHead(404).end();
   });
