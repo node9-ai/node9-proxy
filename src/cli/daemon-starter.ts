@@ -1,6 +1,12 @@
 // src/cli/daemon-starter.ts
 // Shared helpers for auto-starting the approval daemon from CLI commands.
-import { spawn, execSync } from 'child_process';
+//
+// Note: as of the v3 browser-removal sprint this module no longer
+// opens a browser. The local browser dashboard is being retired in
+// favour of terminal (`node9 tail`) + native popup + SaaS approval
+// channels. The daemon still spawns headlessly so `node9 tail` and
+// the MCP gateway can subscribe to its SSE stream.
+import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import { isDaemonRunning, DAEMON_PORT, DAEMON_HOST } from '../auth/daemon';
@@ -9,20 +15,7 @@ export function isTestingMode(): boolean {
   return /^(1|true|yes)$/i.test(process.env.NODE9_TESTING ?? '');
 }
 
-export function openBrowserLocal() {
-  const url = `http://${DAEMON_HOST}:${DAEMON_PORT}/`;
-  try {
-    const opts = { stdio: 'ignore' as const };
-    if (process.platform === 'darwin') execSync(`open "${url}"`, opts);
-    else if (process.platform === 'win32') execSync(`cmd /c start "" "${url}"`, opts);
-    else execSync(`xdg-open "${url}"`, opts);
-  } catch {}
-}
-
-// Default openBrowser=false: auto-starting the daemon should not auto-open
-// the local browser UI. Callers that want the browser (e.g. `node9 daemon
-// start --openui`, `node9 daemon start --watch`) opt in explicitly.
-export async function autoStartDaemonAndWait(openBrowser = false): Promise<boolean> {
+export async function autoStartDaemonAndWait(): Promise<boolean> {
   if (isTestingMode()) return false;
   if (!path.isAbsolute(process.argv[1])) return false;
   let resolvedArgv1: string;
@@ -36,13 +29,9 @@ export async function autoStartDaemonAndWait(openBrowser = false): Promise<boole
     const child = spawn(process.execPath, [resolvedArgv1, 'daemon'], {
       detached: true,
       stdio: 'ignore',
-      // NODE9_BROWSER_OPENED=1 tells the daemon we will open the browser ourselves
-      // (openBrowserLocal below), so it must not open a duplicate tab on first approval.
-      // Only set NODE9_BROWSER_OPENED when we actually intend to open it here.
       env: {
         ...process.env,
         NODE9_AUTO_STARTED: '1',
-        ...(openBrowser && { NODE9_BROWSER_OPENED: '1' }),
       },
     });
     child.unref();
@@ -56,17 +45,7 @@ export async function autoStartDaemonAndWait(openBrowser = false): Promise<boole
         const res = await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/settings`, {
           signal: AbortSignal.timeout(500),
         });
-        if (res.ok) {
-          if (openBrowser) {
-            // Open the browser NOW — before the approval request is registered —
-            // so the browser has time to connect SSE. If we wait until POST /check,
-            // broadcast('add') fires with sseClients.size === 0 and the request
-            // depends on the async openBrowser() inside the daemon, which can lose
-            // the race with the browser's own page-load timing.
-            openBrowserLocal();
-          }
-          return true;
-        }
+        if (res.ok) return true;
       } catch {
         // HTTP not ready yet — keep polling
       }
