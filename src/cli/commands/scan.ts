@@ -1983,6 +1983,16 @@ export function registerScanCommand(program: Command): void {
     .option('--drill-down', 'Show all findings with full commands and session IDs')
     .option('--compact', 'Compact one-screen scorecard — for screenshots and sharing')
     .option('--narrative', 'Severity-grouped report — for video / dramatic sharing')
+    .option(
+      '--upload-history',
+      'Upload aggregate counts from existing JSONL sessions to the SaaS dashboard. ' +
+        'Defaults to last 3 months; override with --since. Idempotent (safe to re-run).'
+    )
+    .option(
+      '--since <window>',
+      'Backfill window: 3m | 6m | 1y | YYYY-MM-DD. Only used with --upload-history.',
+      '3m'
+    )
     .action(
       async (options: {
         all?: boolean;
@@ -1991,7 +2001,17 @@ export function registerScanCommand(program: Command): void {
         drillDown?: boolean;
         compact?: boolean;
         narrative?: boolean;
+        uploadHistory?: boolean;
+        since?: string;
       }) => {
+        // Backfill path — separate from the normal "show me a forecast"
+        // mode. Doesn't render the full report, just walks JSONLs and
+        // posts to the SaaS.
+        if (options.uploadHistory) {
+          const { runUploadHistory } = await import('../../scan-upload-history.js');
+          await runUploadHistory({ since: options.since ?? '3m' });
+          return;
+        }
         const drillDown = options.drillDown ?? false;
         const topN = drillDown ? Infinity : Math.max(1, parseInt(options.top, 10) || 5);
         const previewWidth = 70;

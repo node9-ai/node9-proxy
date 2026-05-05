@@ -161,7 +161,10 @@ export async function scanDelta(
  * never propagate the raw matched text past this function. The host
  * (caller) accumulates findings; the engine summarises them.
  */
-function extractFindingsFromLine(
+// Exported so the backfill path (scan-upload-history.ts) can re-use the
+// exact same per-line extraction logic. Live ticks call this internally;
+// backfill calls it directly across all bytes of the file.
+export function extractFindingsFromLine(
   line: unknown,
   sessionId: string,
   lineIndex: number
