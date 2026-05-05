@@ -126,6 +126,12 @@ describe('activity socket — self-healing rebind (#tail-stability)', () => {
   let portWasFree = false;
 
   beforeAll(async () => {
+    // The daemon binds a Windows named pipe (\\.\pipe\node9-activity), not a
+    // socket file under os.tmpdir(). The test's polling/unlink/connect helpers
+    // all assume a filesystem socket, so they cannot exercise the rebind path
+    // on Windows. The self-heal logic in src/daemon/state.ts is itself gated
+    // on `process.platform !== 'win32'` — skipping here matches that contract.
+    if (process.platform === 'win32') return;
     if (!fs.existsSync(CLI)) {
       throw new Error(`dist/cli.js not found. Run "npm run build" first. Expected: ${CLI}`);
     }
@@ -154,6 +160,7 @@ describe('activity socket — self-healing rebind (#tail-stability)', () => {
   }, 15_000);
 
   afterAll(() => {
+    if (process.platform === 'win32') return;
     if (!portWasFree) return;
     spawnSync(process.execPath, [CLI, 'daemon', 'stop'], {
       env: makeEnv(tmpHome),
@@ -166,11 +173,13 @@ describe('activity socket — self-healing rebind (#tail-stability)', () => {
   });
 
   it('binds the activity socket on startup', ({ skip }) => {
+    if (process.platform === 'win32') skip();
     if (!portWasFree) skip();
     expect(fs.existsSync(ACTIVITY_SOCKET_PATH)).toBe(true);
   });
 
   it('rebinds the socket after it is unlinked at runtime', async ({ skip }) => {
+    if (process.platform === 'win32') skip();
     if (!portWasFree) skip();
 
     // Simulate the bug: socket disappears (systemd-tmpfiles, manual rm, etc.)
