@@ -114,6 +114,8 @@ export interface LoopRef {
   project: string;
   sessionId: string;
   agent: AgentId;
+  /** See LoopFinding.kind. Optional for backwards compat (legacy data). */
+  kind?: 'loop' | 'long-iteration';
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +175,7 @@ export function buildScanSummary(agents: AgentScanInput[]): ScanSummary {
       project: f.project,
       sessionId: f.sessionId,
       agent: f.agent,
+      kind: f.kind,
     }))
   );
 
@@ -199,11 +202,11 @@ export function buildScanSummary(agents: AgentScanInput[]): ScanSummary {
   // Build sections — group findings by (sourceType, shieldName)
   const sections = buildSections(allFindings);
 
-  // Loop savings estimate
-  const wastedIters = allLoops.reduce(
-    (sum, l) => sum + Math.max(0, l.count - LOOP_THRESHOLD_FOR_WASTE),
-    0
-  );
+  // Loop savings estimate — only true loops count toward waste, not long
+  // iterations (sustained deep work on one target across the session).
+  const wastedIters = allLoops
+    .filter((l) => l.kind !== 'long-iteration')
+    .reduce((sum, l) => sum + Math.max(0, l.count - LOOP_THRESHOLD_FOR_WASTE), 0);
   const loopWastedUSD = wastedIters * COST_PER_LOOP_ITER_USD;
 
   return {

@@ -21,6 +21,7 @@ import {
   matchesPattern,
   detectDangerousShellExec,
 } from '../../policy/index';
+import { analyzeFsOperation } from '@node9/policy-engine';
 import { scanArgs } from '../../dlp';
 import type { SmartRule } from '../../core';
 import {
@@ -80,6 +81,21 @@ export interface LoopFinding {
   project: string;
   sessionId: string;
   agent: 'claude' | 'gemini' | 'codex';
+  /**
+   * Distinguishes a true cyclic agent loop (`'loop'`) from sustained iteration
+   * on the same target across a session (`'long-iteration'`).
+   *
+   * Heuristic: time span between the first and last call in the group.
+   *   - < LOOP_TIMESPAN_THRESHOLD_MS  → 'loop' (bursty, agent stuck)
+   *   - ≥ LOOP_TIMESPAN_THRESHOLD_MS  → 'long-iteration' (deep work, not waste)
+   *
+   * Only `'loop'` findings count toward the wasted-spend total. Long iteration
+   * shows up in a separate "high-iteration files" bucket so deep work isn't
+   * framed as money burned.
+   *
+   * Optional for backwards compatibility; missing implies 'loop' (legacy data).
+   */
+  kind?: 'loop' | 'long-iteration';
 }
 
 interface JournalEntry {
@@ -225,6 +241,49 @@ const CODE_EXTENSIONS = new Set([
 // Helpers
 // ---------------------------------------------------------------------------
 
+// Node9 emits its own DLP verdicts in this struct shape (live block alerts and
+// scanArgs() return values). When a tool_result block contains both a token and
+// node9's own output schema, the token is virtually always test/debug input the
+// user fed into the engine — not a real exfiltration. Skipping these prevents
+// node9 from re-detecting its own redactor output weeks later in scan reports.
+const SELF_OUTPUT_MARKERS = [
+  /redactedSample:\s*['"]/,
+  /patternName:\s*['"]/,
+  /\bseverity:\s*['"](?:block|review|allow)['"]/,
+  /NODE9 SECURITY ALERT/,
+];
+
+export function isNode9SelfOutput(text: string): boolean {
+  // Two or more markers in a single tool_result block is high-confidence
+  // node9 self-output. One marker alone could be coincidence (e.g. a docs
+  // grep). Two together (patternName + redactedSample, etc.) is essentially
+  // unique to node9's emit format.
+  let hits = 0;
+  for (const re of SELF_OUTPUT_MARKERS) {
+    if (re.test(text)) hits++;
+    if (hits >= 2) return true;
+  }
+  return false;
+}
+
+// Token shapes that are clearly test/example fixtures rather than real secrets.
+// These appear in tutorials, regex docs, gitleaks rules, and node9's own debug
+// scripts. Demoting them to skip avoids polluting credential-leak counts.
+const FIXTURE_TOKEN_PATTERNS: RegExp[] = [
+  /(.)\1{5,}/, // 6+ repeated characters (aaaaaa, 000000)
+  /(?:EXAMPLE|FAKE|DUMMY|PLACEHOLDER|XXXXX)/i,
+  /abcdefghijklmn/i, // long alpha sequence — fixture, not entropy
+  /1234567890/, // long digit sequence — fixture, not entropy
+  /qwerty/i,
+];
+
+export function looksLikeFixtureToken(sample: string): boolean {
+  for (const re of FIXTURE_TOKEN_PATTERNS) {
+    if (re.test(sample)) return true;
+  }
+  return false;
+}
+
 function num(n: number): string {
   return n.toLocaleString();
 }
@@ -290,6 +349,11 @@ const LOOP_TOOLS = new Set([
   'multiedit',
 ]);
 const LOOP_THRESHOLD = 3;
+// Time span between first and last call in a group above which we classify as
+// "long iteration" (sustained deep work) rather than "agent loop" (bursty stuck
+// behavior). 10 minutes is empirically chosen: real agent loops typically
+// resolve in seconds-to-minutes, while iteration on a feature spans hours.
+const LOOP_TIMESPAN_THRESHOLD_MS = 10 * 60 * 1000;
 const STUCK_TOOLS_MIN_WASTE = 5;
 const STUCK_TOOLS_LIMIT = 3;
 
@@ -381,6 +445,80 @@ export function buildRecurringPatternSet(
   return recurring;
 }
 
+// Names of regex-based rules whose detection is provided by analyzeFsOperation.
+// Suppressed when the AST detector ran on a bash command (regardless of
+// whether AST found a verdict) because the regex rules produce FPs on cases
+// the AST handles correctly (JSON args, heredocs, chained-command segments).
+export const AST_FS_REGEX_RULES = new Set([
+  'block-rm-rf-home',
+  'shield:project-jail:block-read-ssh',
+  'shield:project-jail:block-read-aws',
+  'shield:project-jail:block-read-env',
+  'shield:project-jail:block-read-credentials',
+]);
+
+/**
+ * Run analyzeFsOperation on a bash command and, if it returns a verdict,
+ * append a synthetic finding to `result.findings`. Returns true when a
+ * verdict was emitted (so the caller can mark the call ruleMatched).
+ *
+ * Used by all three agent scan paths (claude/gemini/codex) so the AST-based
+ * fs-op rules fire identically regardless of which agent emitted the call.
+ */
+function pushFsOpAstFinding(
+  command: string,
+  toolName: string,
+  input: Record<string, unknown>,
+  timestamp: string,
+  projLabel: string,
+  sessionId: string,
+  agent: 'claude' | 'gemini' | 'codex',
+  result: ScanResult
+): boolean {
+  const fsVerdict = analyzeFsOperation(command);
+  if (!fsVerdict) return false;
+  const synthRule: SmartRule = {
+    name: fsVerdict.ruleName,
+    tool: 'bash',
+    conditions: [],
+    verdict: fsVerdict.verdict,
+    reason: fsVerdict.reason,
+  };
+  const isShieldRule = fsVerdict.ruleName.startsWith('shield:');
+  const synthSource = isShieldRule
+    ? {
+        shieldName: 'project-jail',
+        shieldLabel: 'project-jail (AST)',
+        sourceType: 'shield' as const,
+        rule: synthRule,
+      }
+    : {
+        shieldName: '',
+        shieldLabel: 'default (AST)',
+        sourceType: 'default' as const,
+        rule: synthRule,
+      };
+  const inputPreview = preview(input, 120);
+  const isDupe = result.findings.some(
+    (f) =>
+      f.source.rule.name === synthRule.name &&
+      preview(f.input, 120) === inputPreview &&
+      f.project === projLabel
+  );
+  if (!isDupe) {
+    result.findings.push({
+      source: synthSource,
+      toolName,
+      input,
+      timestamp,
+      project: projLabel,
+      sessionId,
+      agent,
+    });
+  }
+  return true;
+}
+
 /**
  * Returns true when the finding's timestamp is older than STALE_AGE_DAYS.
  * Defensive about parse failures: unparseable timestamps are treated as
@@ -424,7 +562,7 @@ export function sortDlpFindingsByPriority<
   return indexed.map(({ f }) => f);
 }
 
-function detectLoops(
+export function detectLoops(
   calls: Array<{ toolName: string; input: Record<string, unknown>; timestamp: string }>,
   project: string,
   sessionId: string,
@@ -432,7 +570,14 @@ function detectLoops(
 ): LoopFinding[] {
   const counts = new Map<
     string,
-    { count: number; timestamp: string; input: Record<string, unknown>; toolName: string }
+    {
+      count: number;
+      timestamp: string;
+      firstTs: number | null;
+      lastTs: number | null;
+      input: Record<string, unknown>;
+      toolName: string;
+    }
   >();
   for (const call of calls) {
     const tl = call.toolName.toLowerCase();
@@ -441,15 +586,26 @@ function detectLoops(
     const entry = counts.get(key) ?? {
       count: 0,
       timestamp: call.timestamp,
+      firstTs: null,
+      lastTs: null,
       input: call.input,
       toolName: call.toolName,
     };
     entry.count++;
+    const t = call.timestamp ? Date.parse(call.timestamp) : NaN;
+    if (!Number.isNaN(t)) {
+      if (entry.firstTs === null || t < entry.firstTs) entry.firstTs = t;
+      if (entry.lastTs === null || t > entry.lastTs) entry.lastTs = t;
+    }
     counts.set(key, entry);
   }
   const findings: LoopFinding[] = [];
   for (const [, entry] of counts) {
     if (entry.count >= LOOP_THRESHOLD) {
+      const span =
+        entry.firstTs !== null && entry.lastTs !== null ? entry.lastTs - entry.firstTs : 0;
+      const kind: 'loop' | 'long-iteration' =
+        span >= LOOP_TIMESPAN_THRESHOLD_MS ? 'long-iteration' : 'loop';
       findings.push({
         toolName: entry.toolName,
         commandPreview: preview(entry.input, 80),
@@ -458,6 +614,7 @@ function detectLoops(
         project,
         sessionId,
         agent,
+        kind,
       });
     }
   }
@@ -757,8 +914,15 @@ export function scanClaudeHistory(
                     ? block.content.map((c) => c.text ?? '').join('\n')
                     : null;
               if (!resultText) continue;
+              // Skip tool_result blocks that are clearly node9's own output
+              // (DLP verdict struct, security alert text). Otherwise the
+              // scanner re-detects its own redactor output as a "leak".
+              if (isNode9SelfOutput(resultText)) continue;
               const dlpMatch = scanArgs({ text: resultText });
               if (dlpMatch) {
+                // Demote test-fixture-shape tokens — these are tutorial
+                // examples, regex docs, or debug fixtures, not real secrets.
+                if (looksLikeFixtureToken(dlpMatch.redactedSample)) continue;
                 if (firstDlpTs === null) firstDlpTs = entry.timestamp ?? null;
                 const isDupe = result.dlpFindings.some(
                   (f) =>
@@ -866,13 +1030,33 @@ export function scanClaudeHistory(
             }
           }
 
+          // ── AST filesystem-operation detection ─────────────────────────
+          // Runs FIRST so AST-resolved verdicts win over the regex rules,
+          // which can FP on JSON args, heredocs, and chained commands.
+          let astFsMatched = false;
+          const astRanForBash = toolNameLower === 'bash' || toolNameLower === 'execute_bash';
+          if (astRanForBash) {
+            astFsMatched = pushFsOpAstFinding(
+              String(input.command ?? ''),
+              toolName,
+              input,
+              entry.timestamp ?? '',
+              projLabel,
+              sessionId,
+              'claude',
+              result
+            );
+          }
+
           // ── Smart rule matching ────────────────────────────────────────
-          let ruleMatched = false;
+          let ruleMatched = astFsMatched;
           for (const source of ruleSources) {
             const { rule } = source;
 
             if (rule.verdict === 'allow') continue;
             if (rule.tool && !matchesPattern(toolNameLower, rule.tool)) continue;
+            // Suppress regex rules that AST already covers (correctly).
+            if (astRanForBash && rule.name && AST_FS_REGEX_RULES.has(rule.name)) continue;
             if (!evaluateSmartConditions(input, rule)) continue;
 
             const inputPreview = preview(input, 120);
@@ -1130,11 +1314,28 @@ export function scanGeminiHistory(
             }
           }
 
-          let ruleMatched = false;
+          // ── AST filesystem-operation detection (gemini) ────────────────
+          let astFsMatched = false;
+          const astRanForBash = toolNameLower === 'run_shell_command' || toolNameLower === 'shell';
+          if (astRanForBash) {
+            astFsMatched = pushFsOpAstFinding(
+              String(input.command ?? ''),
+              toolName,
+              input,
+              msg.timestamp ?? '',
+              projLabel,
+              sessionId,
+              'gemini',
+              result
+            );
+          }
+
+          let ruleMatched = astFsMatched;
           for (const source of ruleSources) {
             const { rule } = source;
             if (rule.verdict === 'allow') continue;
             if (rule.tool && !matchesPattern(toolNameLower, rule.tool)) continue;
+            if (astRanForBash && rule.name && AST_FS_REGEX_RULES.has(rule.name)) continue;
             if (!evaluateSmartConditions(input, rule)) continue;
 
             const inputPreview = preview(input, 120);
@@ -1408,7 +1609,23 @@ export function scanCodexHistory(
         }
       }
 
-      let ruleMatched = false;
+      // ── AST filesystem-operation detection (codex) ─────────────────────
+      let astFsMatched = false;
+      const astRanForBash = toolNameLower === 'exec_command' || toolNameLower === 'bash';
+      if (astRanForBash) {
+        astFsMatched = pushFsOpAstFinding(
+          String(input['command'] ?? ''),
+          toolName,
+          input,
+          ts,
+          projLabel,
+          sessionId,
+          'codex',
+          result
+        );
+      }
+
+      let ruleMatched = astFsMatched;
       for (const source of ruleSources) {
         const { rule } = source;
         if (rule.verdict === 'allow') continue;
@@ -1417,6 +1634,7 @@ export function scanCodexHistory(
           !matchesPattern(toolNameLower === 'exec_command' ? 'bash' : toolNameLower, rule.tool)
         )
           continue;
+        if (astRanForBash && rule.name && AST_FS_REGEX_RULES.has(rule.name)) continue;
         if (!evaluateSmartConditions(input, rule)) continue;
 
         const inputPreview = preview(input, 120);
@@ -1728,8 +1946,15 @@ function renderCompactScorecard(input: CompactInput): void {
     );
   }
 
-  if (scan.loopFindings.length > 0) {
-    const wastedCalls = scan.loopFindings.reduce((s, l) => s + Math.max(0, l.count - 1), 0);
+  // Loops vs long-iteration: real cyclic loops indicate stuck behavior and
+  // count toward wasted spend. Long iterations are sustained deep work on the
+  // same target across many minutes — they look identical to a regex group-by
+  // but are not waste, so we render them as a separate, lower-emphasis line.
+  const realLoops = scan.loopFindings.filter((l) => l.kind !== 'long-iteration');
+  const longIterations = scan.loopFindings.filter((l) => l.kind === 'long-iteration');
+
+  if (realLoops.length > 0) {
+    const wastedCalls = realLoops.reduce((s, l) => s + Math.max(0, l.count - 1), 0);
     const wastePct =
       scan.totalToolCalls > 0 ? Math.round((wastedCalls / scan.totalToolCalls) * 100) : 0;
     const wasteParts: string[] = [];
@@ -1738,9 +1963,17 @@ function renderCompactScorecard(input: CompactInput): void {
     const wasteSummary = wasteParts.length ? `(${wasteParts.join('  ·  ')})` : '';
     console.log(
       chalk.yellow('🔁  ') +
-        chalk.yellow.bold(String(scan.loopFindings.length).padEnd(4)) +
+        chalk.yellow.bold(String(realLoops.length).padEnd(4)) +
         chalk.dim('agent loops'.padEnd(20)) +
         chalk.dim(wasteSummary)
+    );
+  }
+  if (longIterations.length > 0) {
+    console.log(
+      chalk.dim('📂  ') +
+        chalk.dim.bold(String(longIterations.length).padEnd(4)) +
+        chalk.dim('long iterations'.padEnd(20)) +
+        chalk.dim('(deep work — not waste)')
     );
   }
 
