@@ -9,7 +9,9 @@ import { randomUUID } from 'crypto';
 import { spawnSync } from 'child_process';
 import chalk from 'chalk';
 import { authorizeHeadless, getGlobalSettings, getConfig, _resetConfigCache } from '../core';
-import { SHIELDS, readActiveShields } from '../shields';
+// SHIELDS / readActiveShields no longer used in server.ts after the
+// /shields route was removed (v3 browser-removal). CLI shield commands
+// import these directly.
 // UI_HTML_TEMPLATE import removed — local browser dashboard retired (v3).
 import {
   scanClaudeHistory,
@@ -42,7 +44,6 @@ import {
   getOrgName,
   writeGlobalSetting,
   writeTrustEntry,
-  readPersistentDecisions,
   writePersistentDecision,
   readBody,
   broadcast,
@@ -51,8 +52,6 @@ import {
   type PendingEntry,
   type SseClient,
   type Decision,
-  suggestionTracker,
-  suggestions,
   taintStore,
   insightCounts,
   loadInsightCounts,
@@ -167,19 +166,12 @@ export function startDaemon(): void {
           autoDenyMs: getConfig().settings.approvalTimeoutMs ?? AUTO_DENY_MS,
         })}\n\n`
       );
-      res.write(`event: decisions\ndata: ${JSON.stringify(readPersistentDecisions())}\n\n`);
-      const activeShields = readActiveShields();
-      res.write(
-        `event: shields-status\ndata: ${JSON.stringify({
-          shields: Object.values(SHIELDS).map((s) => ({
-            name: s.name,
-            description: s.description,
-            active: activeShields.includes(s.name),
-          })),
-        })}\n\n`
-      );
+      // event: decisions / event: shields-status removed — only the
+      // browser dashboard consumed them. node9 tail subscribes only to
+      // 'activity', 'activity-result', and 'add' events (plus 'csrf'
+      // below to acquire the token for /decision posts).
       // Emit the CSRF token on every connection so reconnecting clients
-      // (including the terminal racer) can acquire it without a browser tab.
+      // (the terminal racer) can acquire it without a browser tab.
       res.write(`event: csrf\ndata: ${JSON.stringify({ token: csrfToken })}\n\n`);
       // Replay large-response history so late-joining browsers see past events
       if (largeResponseRing.length > 0) {
@@ -482,21 +474,16 @@ export function startDaemon(): void {
         clearTimeout(entry.timer);
 
         // ── Smart Rule Suggestions ────────────────────────────────────────────
-        // Track human allow decisions. After threshold consecutive allows for
-        // the same tool, broadcast a suggestion card to reduce future friction.
-        // Reset the counter on deny so we never suggest allowing blocked actions.
+        // Track human allow decisions. The browser dashboard's
+        // suggestion-card surface is gone (v3 sprint), so the
+        // suggestion tracker no longer fires. insightCounts still
+        // drives the 💡 hint in `node9 tail` after N consecutive allows.
         if (resolvedDecision === 'allow' && !persist) {
           insightCounts.set(entry.toolName, (insightCounts.get(entry.toolName) ?? 0) + 1);
           saveInsightCounts();
-          const suggestion = suggestionTracker.recordAllow(entry.toolName, entry.args);
-          if (suggestion) {
-            suggestions.set(suggestion.id, suggestion);
-            broadcast('suggestion:new', suggestion);
-          }
         } else if (resolvedDecision === 'deny') {
           insightCounts.delete(entry.toolName);
           saveInsightCounts();
-          suggestionTracker.resetTool(entry.toolName);
         }
 
         // source is validated against an allowlist AFTER appendAuditLog so the
@@ -615,28 +602,16 @@ export function startDaemon(): void {
         });
         clearTimeout(entry.timer);
 
-        // ── Event Bridge: track human decisions for Smart Rule Suggestions ────
-        // insightCounts tracks all human approvals (including cloud/Slack) so the
-        // 💡 insight line appears consistently across all approval channels.
-        // suggestionTracker is gated on !slackDelegated — Slack auto-approvals should
-        // not generate smart rule suggestions (different UX intent).
+        // insightCounts tracks all human approvals so the 💡 insight
+        // line appears consistently across all approval channels (tail).
+        // The Smart Rule Suggestions surface (browser-only) was removed
+        // in v3 sprint; suggestionTracker is no longer driven from here.
         if (resolvedResolveDecision === 'allow') {
           insightCounts.set(entry.toolName, (insightCounts.get(entry.toolName) ?? 0) + 1);
           saveInsightCounts();
         } else {
           insightCounts.delete(entry.toolName);
           saveInsightCounts();
-        }
-        if (!entry.slackDelegated) {
-          if (resolvedResolveDecision === 'allow') {
-            const suggestion = suggestionTracker.recordAllow(entry.toolName, entry.args);
-            if (suggestion) {
-              suggestions.set(suggestion.id, suggestion);
-              broadcast('suggestion:new', suggestion);
-            }
-          } else {
-            suggestionTracker.resetTool(entry.toolName);
-          }
         }
 
         const VALID_RESOLVE_SOURCES = new Set(['terminal', 'browser', 'native']);
@@ -978,7 +953,8 @@ export function startDaemon(): void {
           args: { disabledTools },
           decision: 'allow',
         });
-        broadcast('mcp-tools-updated', { serverKey, disabledTools });
+        // broadcast('mcp-tools-updated') removed — browser-only listener.
+        // The route itself + the mcp-tool-gating flow goes in step 6.
         res.writeHead(200).end();
         return;
       } catch {
