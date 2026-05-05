@@ -54,6 +54,7 @@ import { registerAgentsCommand } from './cli/commands/agents';
 import { registerScanCommand } from './cli/commands/scan';
 import { registerSessionsCommand } from './cli/commands/sessions';
 import { registerSkillPinCommand } from './cli/commands/skill-pin';
+import { registerDecisionsCommand } from './cli/commands/decisions';
 import { registerDlpCommand } from './cli/commands/dlp';
 import { registerMaskCommand } from './cli/commands/mask';
 import { registerBlastCommand } from './cli/commands/blast';
@@ -458,6 +459,7 @@ registerMcpGatewayCommand(program);
 registerMcpServerCommand(program);
 registerMcpPinCommand(program);
 registerSkillPinCommand(program);
+registerDecisionsCommand(program);
 
 // 7. CHECK (PreToolUse hook) + LOG (PostToolUse hook)
 registerCheckCommand(program);
