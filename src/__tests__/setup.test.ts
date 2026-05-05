@@ -208,6 +208,33 @@ describe('setupClaude', () => {
     expect(consoleSpy.mock.calls.some(([msg]) => String(msg).includes('already'))).toBe(true);
     consoleSpy.mockRestore();
   });
+
+  it('does not advertise the retired local browser UI (node9 daemon --openui)', async () => {
+    // Local browser dashboard was retired — the only dashboard we advertise is
+    // https://node9.ai. Verify both fresh-install and already-configured paths
+    // emit no `--openui` hint.
+    const consoleSpy = vi.spyOn(console, 'log');
+
+    // Fresh install path
+    await setupClaude();
+
+    // Already-configured path
+    withExistingFiles({
+      [hooksPath]: {
+        hooks: {
+          PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] }],
+          PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
+        },
+        statusLine: { type: 'command', command: 'node9 hud' },
+      },
+      [mcpPath]: { mcpServers: { node9: NODE9_MCP_ENTRY } },
+    });
+    await setupClaude();
+
+    const allOutput = consoleSpy.mock.calls.map(([msg]) => String(msg)).join('\n');
+    expect(allOutput).not.toMatch(/--openui/);
+    consoleSpy.mockRestore();
+  });
 });
 
 // ── setupGemini ──────────────────────────────────────────────────────────────
