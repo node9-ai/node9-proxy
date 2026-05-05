@@ -94,7 +94,12 @@ jobs:
           # would freeze on whatever pin was committed last and silently lag
           # behind future proxy releases (the bug that shipped node9-ai@1.18.0
           # depending on a stale @node9/proxy via a loose >=1.11.3 range).
-          node -e "const fs=require('fs'),p=require('./package.json');p.dependencies['@node9/proxy']=process.env.VERSION;fs.writeFileSync('./package.json',JSON.stringify(p,null,2)+'\n')"
+          # `VERSION` is a bash-local variable above (not exported), so prefix
+          # it on the command line to make it visible to the node child process.
+          # Without this `process.env.VERSION` is undefined and JSON.stringify
+          # drops the key entirely — shipping a wrapper with empty `dependencies`
+          # (the regression in node9-ai@1.18.1).
+          VERSION="$VERSION" node -e "const fs=require('fs'),p=require('./package.json');p.dependencies['@node9/proxy']=process.env.VERSION;fs.writeFileSync('./package.json',JSON.stringify(p,null,2)+'\n')"
           git config user.email "release-bot@node9.ai"
           git config user.name "node9-release-bot"
           git add README.md package.json
