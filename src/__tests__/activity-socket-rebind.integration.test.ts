@@ -182,11 +182,19 @@ describe('activity socket — self-healing rebind (#tail-stability)', () => {
     if (process.platform === 'win32') skip();
     if (!portWasFree) skip();
 
-    // Simulate the bug: socket disappears (systemd-tmpfiles, manual rm, etc.)
+    // Simulate the bug: socket disappears (systemd-tmpfiles, manual rm, etc.).
+    // We deliberately avoid asserting intermediate state (existsSync, inode
+    // comparison) because both race the daemon's own self-heal:
+    //   - existsSync(false) loses to fs.watch's synchronous inotify rebind
+    //   - inode comparison loses to tmpfs reusing the just-freed inode slot
+    // The end-to-end SSE assertion below is the only race-free proof of
+    // self-heal: if the daemon hadn't rebound, the new connect() would fail
+    // with ENOENT, sendOverSocket would return false, and the SSE event
+    // would never arrive.
     fs.unlinkSync(ACTIVITY_SOCKET_PATH);
-    expect(fs.existsSync(ACTIVITY_SOCKET_PATH)).toBe(false);
 
-    // Daemon should rebind via fs.watch (synchronous on Linux) within a few seconds.
+    // Wait for the file to come back so the subsequent connect() doesn't
+    // race a still-in-progress rebind. Caps at 5s to bound test runtime.
     const rebound = await waitForFile(ACTIVITY_SOCKET_PATH, 5000);
     expect(rebound).toBe(true);
 

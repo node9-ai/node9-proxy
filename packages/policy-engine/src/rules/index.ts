@@ -71,6 +71,10 @@ export function evaluateSmartConditions(args: unknown, rule: SmartRule): boolean
   // identical across conditions so the work is the same — cache it.
   const fieldCache = new Map<string, string | null>();
   const resolveField = (field: string): string | null => {
+    // has() is load-bearing: a stored `null` (= field absent) must be
+    // distinguishable from "not yet computed" so we don't re-normalize
+    // on every condition. Don't drop the has() guard without rewriting
+    // the cache to use a sentinel value.
     if (fieldCache.has(field)) return fieldCache.get(field) ?? null;
     const rawVal = getNestedValue(args, field);
     const rawStr = rawVal !== null && rawVal !== undefined ? String(rawVal) : null;
