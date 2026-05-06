@@ -105,3 +105,14 @@ export {
   LOOP_THRESHOLD_FOR_WASTE,
   COST_PER_LOOP_ITER_USD,
 } from './scan';
+
+// Regex detectors for destructive ops / privilege escalation / sensitive
+// paths. Used by the daemon watermark scanner; will also feed the upcoming
+// canonical extractor that unifies CLI scan, daemon, and --upload-history
+// behind one detection pipeline.
+export {
+  DESTRUCTIVE_OP_RE,
+  PRIVILEGE_ESCALATION_RE,
+  SENSITIVE_PATH_RE,
+  FILE_TOOLS,
+} from './scan/destructive-regex';
