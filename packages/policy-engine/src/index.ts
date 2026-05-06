@@ -33,6 +33,9 @@ export {
   analyzeShellCommand,
   analyzeFsOperation,
   isProtectedHomePath,
+  BASH_TOOL_NAMES,
+  isBashTool,
+  AST_FS_REGEX_RULES,
 } from './shell';
 
 // Policy — pure shell sub-helpers (pipe-chain, ssh, flag tables) + stateless evaluator.

@@ -21,7 +21,7 @@ import {
   matchesPattern,
   detectDangerousShellExec,
 } from '../../policy/index';
-import { analyzeFsOperation } from '@node9/policy-engine';
+import { analyzeFsOperation, AST_FS_REGEX_RULES } from '@node9/policy-engine';
 import { scanArgs } from '../../dlp';
 import type { SmartRule } from '../../core';
 import {
@@ -445,17 +445,8 @@ export function buildRecurringPatternSet(
   return recurring;
 }
 
-// Names of regex-based rules whose detection is provided by analyzeFsOperation.
-// Suppressed when the AST detector ran on a bash command (regardless of
-// whether AST found a verdict) because the regex rules produce FPs on cases
-// the AST handles correctly (JSON args, heredocs, chained-command segments).
-export const AST_FS_REGEX_RULES = new Set([
-  'block-rm-rf-home',
-  'shield:project-jail:block-read-ssh',
-  'shield:project-jail:block-read-aws',
-  'shield:project-jail:block-read-env',
-  'shield:project-jail:block-read-credentials',
-]);
+// AST_FS_REGEX_RULES lives in @node9/policy-engine so the live hook and the
+// CLI scan share one source of truth (see shell/index.ts).
 
 /**
  * Run analyzeFsOperation on a bash command and, if it returns a verdict,

@@ -405,6 +405,34 @@ export interface FsOpVerdict {
   path: string;
 }
 
+// Tool names across all three supported agents that carry a shell command in
+// `args.command`. Both the CLI scan (per-agent in scan.ts) and the live hook's
+// AST FS-op tier need to know which calls are bash-shaped.
+export const BASH_TOOL_NAMES = new Set<string>([
+  'bash',
+  'execute_bash',
+  'run_shell_command',
+  'shell',
+  'exec_command',
+]);
+
+export function isBashTool(toolName: string): boolean {
+  return BASH_TOOL_NAMES.has(toolName.toLowerCase());
+}
+
+// Names of regex-based smart rules whose detection is provided by
+// analyzeFsOperation. When the AST detector ran on a bash command (regardless
+// of whether AST returned a verdict) these regex rules must be suppressed —
+// they FP on JSON args, heredocs, and chained-command segments that AST
+// handles correctly. See scan.ts:1059 for the original CLI usage.
+export const AST_FS_REGEX_RULES = new Set<string>([
+  'block-rm-rf-home',
+  'shield:project-jail:block-read-ssh',
+  'shield:project-jail:block-read-aws',
+  'shield:project-jail:block-read-env',
+  'shield:project-jail:block-read-credentials',
+]);
+
 /**
  * True when `path` is under $HOME (~ or absolute /home/* or /root) AND not in
  * the tool-managed cache allow-list. Used to gate `rm -rf` on home paths.
