@@ -391,7 +391,11 @@ async function pushBlastSnapshot(creds: { apiKey: string; apiUrl: string }): Pro
  * aggregate. Nothing in this payload contains prompt text, tool args, or
  * file paths.
  */
-async function pushScanSnapshot(creds: { apiKey: string; apiUrl: string }): Promise<void> {
+// Exported for tests. Internal — called from syncOnce on the policy-sync
+// timer in production. The exported surface lets sync.test.ts assert the
+// POST builder dispatches on tick.uploadAs ('totals' vs 'deltas') without
+// driving the full timer loop.
+export async function pushScanSnapshot(creds: { apiKey: string; apiUrl: string }): Promise<void> {
   try {
     const tick = await tickScanWatcher();
     // Refuse to POST when the watermark file is from a newer daemon —

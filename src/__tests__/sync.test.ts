@@ -20,23 +20,26 @@ process.env.NODE9_TESTING = '1';
 // we need to assert it's invoked / skipped based on NODE9_BLAST_DISABLE.
 // vi.hoisted lets us reference the mock from inside vi.mock's hoisted
 // factory without TDZ errors.
-const { mockRunBlast, mockTickScanWatcher, mockMarkUploadComplete } = vi.hoisted(() => ({
-  mockRunBlast: vi.fn().mockReturnValue({
-    reachable: [],
-    envFindings: [],
-    score: 100,
-  }),
-  mockTickScanWatcher: vi.fn().mockResolvedValue({
-    findings: [],
-    totalToolCalls: 0,
-    filesScanned: 0,
-    filesNew: 0,
-    filesSkipped: 0,
-    uploadAs: 'deltas',
-    schemaFuture: false,
-  }),
-  mockMarkUploadComplete: vi.fn(),
-}));
+const { mockRunBlast, mockTickScanWatcher, mockMarkUploadComplete, mockHttpsRequest } = vi.hoisted(
+  () => ({
+    mockRunBlast: vi.fn().mockReturnValue({
+      reachable: [],
+      envFindings: [],
+      score: 100,
+    }),
+    mockTickScanWatcher: vi.fn().mockResolvedValue({
+      findings: [],
+      totalToolCalls: 0,
+      filesScanned: 0,
+      filesNew: 0,
+      filesSkipped: 0,
+      uploadAs: 'deltas',
+      schemaFuture: false,
+    }),
+    mockMarkUploadComplete: vi.fn(),
+    mockHttpsRequest: vi.fn(),
+  })
+);
 vi.mock('../cli/commands/blast.js', () => ({
   runBlast: mockRunBlast,
 }));
@@ -44,6 +47,17 @@ vi.mock('../daemon/scan-watermark.js', () => ({
   tickScanWatcher: mockTickScanWatcher,
   markUploadComplete: mockMarkUploadComplete,
 }));
+// Mock https so pushScanSnapshot's network round-trip doesn't escape the
+// test. The factory delegates to the per-test mockHttpsRequest fn so each
+// test can install its own response semantics (status code, body capture).
+vi.mock('https', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('https')>();
+  return {
+    ...actual,
+    default: { ...actual, request: mockHttpsRequest },
+    request: mockHttpsRequest,
+  };
+});
 
 const MOCK_HOME = '/mock/home';
 const CRED_PATH = path.join(MOCK_HOME, '.node9', 'credentials.json');
@@ -58,10 +72,70 @@ vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
 vi.spyOn(fs, 'mkdirSync').mockImplementation(() => undefined);
 const homeSpy = vi.spyOn(os, 'homedir');
 
-import { runCloudSync, getCloudSyncStatus, getCloudRules, extractRules } from '../daemon/sync.js';
+import {
+  runCloudSync,
+  getCloudSyncStatus,
+  getCloudRules,
+  extractRules,
+  pushScanSnapshot,
+} from '../daemon/sync.js';
 import { getConfig, _resetConfigCache } from '../core.js';
 
 // ── helpers ────────────────────────────────────────────────────────────────────
+
+/**
+ * Capture the body that pushScanSnapshot would have POSTed by installing
+ * an implementation on the hoisted https.request mock. Returns the parsed
+ * body, or null when no POST was made (e.g. schemaFuture short-circuit).
+ *
+ * Uses fake creds so the fetch contract URL is well-formed; the mock
+ * intercepts before any network IO. Synthesizes a 2xx response so the
+ * post-success hook (markUploadComplete) on the totals path runs.
+ */
+async function captureScanReportPost(): Promise<Record<string, unknown> | null> {
+  let captured: Record<string, unknown> | null = null;
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  mockHttpsRequest.mockImplementation(((..._args: unknown[]) => {
+    const req = {
+      on: () => {},
+      write: (body: string) => {
+        try {
+          captured = JSON.parse(body);
+        } catch {
+          captured = { _raw: body };
+        }
+      },
+      end: () => {
+        setImmediate(() => {
+          const res = {
+            statusCode: 200,
+            resume: () => {},
+            on: (ev: string, cb: (...a: unknown[]) => void) => {
+              if (ev === 'end') setImmediate(() => cb());
+            },
+          };
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const cb = (_args.find((a) => typeof a === 'function') as any) || (() => {});
+          cb(res);
+        });
+      },
+      destroy: () => {},
+    };
+    return req;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  }) as any);
+
+  await pushScanSnapshot({
+    apiKey: 'test-key',
+    apiUrl: 'https://api.example.com/policies/sync',
+  });
+  // Two flushes: one for end()'s setImmediate response synthesis,
+  // one for res.on('end') firing markUploadComplete.
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  return captured;
+}
 
 function mockFiles(files: Record<string, string>) {
   existsSpy.mockImplementation((p) => p.toString() in files);
@@ -572,5 +646,90 @@ describe('extractRules', () => {
   it('returns an empty array for an unrecognised body shape', () => {
     expect(extractRules({})).toEqual([]);
     expect(extractRules({ policies: 'not-an-array' as never })).toEqual([]);
+  });
+});
+
+// ── pushScanSnapshot: POST builder dispatches on tick.uploadAs ─────────────
+//
+// Step 4 contract: when the daemon tick reports uploadAs='totals' (the
+// first tick after an extractor-stale watermark reset), the POST body must
+// carry sessionTotals (BE replaces the row); otherwise sessionDeltas (BE
+// atomic-increments). Anything else and an upgrading user double-counts on
+// top of any prior `node9 scan --upload-history` baseline.
+//
+// We mock https.request to capture the body the daemon would have sent,
+// rather than running a real HTTP server. The contract lives in the body
+// shape and the markUploadComplete() call after a 2xx; both are
+// observable through mocks.
+
+describe('pushScanSnapshot — POST body dispatches on tick.uploadAs', () => {
+  it('uploadAs="deltas" → body carries sessionDeltas (incrementing path)', async () => {
+    const finding = {
+      type: 'destructive-op' as const,
+      sessionId: 'sess-1',
+      lineIndex: 0,
+    };
+    mockTickScanWatcher.mockResolvedValueOnce({
+      findings: [finding],
+      totalToolCalls: 1,
+      toolCallsBySession: { 'sess-1': 1 },
+      filesScanned: 1,
+      filesNew: 0,
+      filesSkipped: 0,
+      uploadAs: 'deltas' as const,
+      schemaFuture: false,
+    });
+
+    const captured = await captureScanReportPost();
+
+    expect(captured).toBeTruthy();
+    expect(captured!.sessionDeltas).toBeDefined();
+    expect(captured!.sessionTotals).toBeUndefined();
+    expect(captured!.extractorVersion).toBe('canonical-v1');
+    expect(mockMarkUploadComplete).not.toHaveBeenCalled();
+  });
+
+  it('uploadAs="totals" → body carries sessionTotals (overwrite path) and clears the flag on 2xx', async () => {
+    const finding = {
+      type: 'destructive-op' as const,
+      sessionId: 'sess-2',
+      lineIndex: 0,
+    };
+    mockTickScanWatcher.mockResolvedValueOnce({
+      findings: [finding],
+      totalToolCalls: 1,
+      toolCallsBySession: { 'sess-2': 1 },
+      filesScanned: 1,
+      filesNew: 0,
+      filesSkipped: 0,
+      uploadAs: 'totals' as const,
+      schemaFuture: false,
+    });
+
+    const captured = await captureScanReportPost();
+
+    expect(captured).toBeTruthy();
+    expect(captured!.sessionTotals).toBeDefined();
+    expect(captured!.sessionDeltas).toBeUndefined();
+    expect(captured!.extractorVersion).toBe('canonical-v1');
+    // Flag-clear must happen exactly once after the successful POST so a
+    // future tick reverts to the normal sessionDeltas path.
+    expect(mockMarkUploadComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('schemaFuture=true → no POST is made (defensive skip on downgrade)', async () => {
+    mockTickScanWatcher.mockResolvedValueOnce({
+      findings: [],
+      totalToolCalls: 0,
+      toolCallsBySession: {},
+      filesScanned: 0,
+      filesNew: 0,
+      filesSkipped: 0,
+      uploadAs: 'deltas' as const,
+      schemaFuture: true,
+    });
+
+    const captured = await captureScanReportPost();
+    expect(captured).toBeNull();
   });
 });
