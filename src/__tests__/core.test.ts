@@ -1403,22 +1403,25 @@ describe('Safe by Default — advisory SQL rules', () => {
 
 describe('authorizeHeadless — smart rule hard block', () => {
   it('returns approved:false without invoking race engine for block verdict', async () => {
+    // Use a custom rule on a command the AST tier doesn't fire on, so the
+    // smart-rule block path is what's actually exercised here. (rm -rf / is
+    // now caught by AST first, with its own reason text.)
     mockProjectConfig({
       settings: { mode: 'standard', approvalTimeoutMs: 0 },
       policy: {
         smartRules: [
           {
             tool: 'bash',
-            conditions: [{ field: 'command', op: 'matches', value: 'rm -rf /' }],
+            conditions: [{ field: 'command', op: 'matches', value: '^scary-internal-tool' }],
             verdict: 'block',
-            reason: 'root wipe blocked',
+            reason: 'scary tool blocked',
           },
         ],
       },
     });
-    const result = await authorizeHeadless('bash', { command: 'rm -rf /' });
+    const result = await authorizeHeadless('bash', { command: 'scary-internal-tool --go' });
     expect(result.approved).toBe(false);
-    expect(result.reason).toMatch(/root wipe blocked/);
+    expect(result.reason).toMatch(/scary tool blocked/);
     expect(result.blockedBy).toBe('local-config');
   });
 });

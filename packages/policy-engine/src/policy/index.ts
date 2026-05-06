@@ -7,7 +7,14 @@
 
 import type { SmartRule } from '../types';
 import { scanArgs } from '../dlp';
-import { detectDangerousShellExec, analyzeShellCommand, type ShellCommandAnalysis } from '../shell';
+import {
+  detectDangerousShellExec,
+  analyzeShellCommand,
+  analyzeFsOperation,
+  isBashTool,
+  AST_FS_REGEX_RULES,
+  type ShellCommandAnalysis,
+} from '../shell';
 import { matchesPattern, evaluateSmartConditions, getNestedValue } from '../rules';
 import { analyzePipeChain } from './pipe-chain';
 import { extractAllSshHosts } from './ssh-parser';
@@ -124,6 +131,60 @@ export function checkDangerousSql(sql: string): string | null {
   return null;
 }
 
+/**
+ * Translate a pipe-chain analysis into a PolicyVerdict, applying the
+ * trust-host downgrade. Returns null when no verdict applies (no pipe, or
+ * pipe risk below high). Shared between the early bash-command tier (which
+ * pre-empts AST so trusted hosts still allow) and the existing tier-3
+ * shellCommand path (which catches non-bash-tool config shapes).
+ */
+function pipeChainVerdict(
+  command: string,
+  isTrustedHost?: (host: string) => boolean
+): PolicyVerdict | null {
+  const pipeAnalysis = analyzePipeChain(command);
+  if (!pipeAnalysis.isPipeline) return null;
+  if (pipeAnalysis.risk !== 'critical' && pipeAnalysis.risk !== 'high') return null;
+
+  const sinks = pipeAnalysis.sinkTargets;
+  // sinks.length === 0 means no network targets were identified → treat as untrusted
+  const allTrusted =
+    sinks.length > 0 && sinks.every((host) => (isTrustedHost ? isTrustedHost(host) : false));
+
+  if (pipeAnalysis.risk === 'critical') {
+    if (allTrusted) {
+      return {
+        decision: 'review',
+        blockedByLabel: 'Node9: Pipe-Chain to Trusted Host (obfuscated)',
+        reason: `Obfuscated pipe to trusted host(s): ${sinks.join(', ')} — requires approval`,
+        tier: 3,
+      };
+    }
+    return {
+      decision: 'block',
+      blockedByLabel: 'Node9: Pipe-Chain Exfiltration (critical)',
+      reason: `Sensitive file piped through obfuscator to network sink: ${pipeAnalysis.sourceFiles.join(', ')} → ${sinks.join(', ')}`,
+      tier: 3,
+    };
+  }
+
+  // high risk: trusted hosts → allow; untrusted → review
+  if (allTrusted) {
+    return {
+      decision: 'allow',
+      blockedByLabel: 'Node9: Pipe-Chain to Trusted Host',
+      reason: `Sensitive file piped to trusted host(s): ${sinks.join(', ')}`,
+      tier: 3,
+    };
+  }
+  return {
+    decision: 'review',
+    blockedByLabel: 'Node9: Pipe-Chain Exfiltration (high)',
+    reason: `Sensitive file piped to network sink: ${pipeAnalysis.sourceFiles.join(', ')} → ${sinks.join(', ')}`,
+    tier: 3,
+  };
+}
+
 // ── Public evaluator ──────────────────────────────────────────────────────────
 
 /**
@@ -165,10 +226,52 @@ export async function evaluatePolicy(
   // 1. Ignored tools (Fast Path) - Always allow these first
   if (wouldBeIgnored) return { decision: 'allow' };
 
-  // 2. Smart Rules — raw args matching before tokenization
+  // AST FS-op gate — only fires for AI-driven calls on bash-shaped tools.
+  // node9 is AI-driven; manual (Terminal) users are trusted and reach the
+  // tier-4 manual auto-allow without AST/regex interference. Mirrors the
+  // CLI scan's per-agent gates (scan.ts:1037, 1319, 1614).
+  const bashCommand =
+    agent !== 'Terminal' && isBashTool(toolName) && args && typeof args === 'object'
+      ? typeof (args as Record<string, unknown>).command === 'string'
+        ? ((args as Record<string, unknown>).command as string)
+        : null
+      : null;
+
+  // Layer-1 invariant: built-in AST blocks (block-rm-rf-home, project-jail
+  // sensitive-file reads) must fire BEFORE user smart rules so a permissive
+  // user allow rule cannot bypass them. Pipe-chain trust-host analysis runs
+  // FIRST so an explicit trusted-host pipe (e.g. cat .env | curl
+  // https://trusted.com) can still downgrade AST's block — trust list is an
+  // explicit user opt-in. See core.test.ts:1763 and v1.4.0-trusted-hosts.
+  if (bashCommand !== null) {
+    const pipeVerdict = pipeChainVerdict(bashCommand, isTrustedHost);
+    if (pipeVerdict) return pipeVerdict;
+
+    const fsVerdict = analyzeFsOperation(bashCommand);
+    if (fsVerdict) {
+      const isShieldRule = fsVerdict.ruleName.startsWith('shield:');
+      const labelPrefix = isShieldRule ? 'project-jail (AST)' : 'Node9 (AST)';
+      return {
+        decision: fsVerdict.verdict,
+        blockedByLabel: `${labelPrefix}: ${fsVerdict.ruleName}`,
+        reason: fsVerdict.reason,
+        tier: 2,
+        ruleName: fsVerdict.ruleName,
+        ruleDescription: fsVerdict.reason,
+      };
+    }
+  }
+
+  // 2. Smart Rules — raw args matching before tokenization.
+  // When AST ran on this bash command, suppress regex rules whose detection
+  // AST already provides — they FP on JSON args, heredocs, and chained-command
+  // segments that AST handles correctly. Mirrors scan.ts:1059.
   if (config.policy.smartRules.length > 0) {
     const matchedRule = config.policy.smartRules.find(
-      (rule) => matchesPattern(toolName, rule.tool) && evaluateSmartConditions(args, rule)
+      (rule) =>
+        matchesPattern(toolName, rule.tool) &&
+        !(bashCommand !== null && rule.name && AST_FS_REGEX_RULES.has(rule.name)) &&
+        evaluateSmartConditions(args, rule)
     );
     if (matchedRule) {
       if (matchedRule.verdict === 'allow')
@@ -240,50 +343,12 @@ export async function evaluatePolicy(
     }
 
     // ── Pipe-chain exfiltration detection ────────────────────────────────────
-    const pipeAnalysis = analyzePipeChain(shellCommand);
-    if (
-      pipeAnalysis.isPipeline &&
-      (pipeAnalysis.risk === 'critical' || pipeAnalysis.risk === 'high')
-    ) {
-      const sinks = pipeAnalysis.sinkTargets;
-      // sinks.length === 0 means no network targets were identified → treat as untrusted
-      const allTrusted =
-        sinks.length > 0 && sinks.every((host) => (isTrustedHost ? isTrustedHost(host) : false));
-
-      if (pipeAnalysis.risk === 'critical') {
-        // Obfuscated exfil: trusted hosts downgrade block → review; untrusted → block
-        if (allTrusted) {
-          return {
-            decision: 'review',
-            blockedByLabel: 'Node9: Pipe-Chain to Trusted Host (obfuscated)',
-            reason: `Obfuscated pipe to trusted host(s): ${sinks.join(', ')} — requires approval`,
-            tier: 3,
-          };
-        }
-        return {
-          decision: 'block',
-          blockedByLabel: 'Node9: Pipe-Chain Exfiltration (critical)',
-          reason: `Sensitive file piped through obfuscator to network sink: ${pipeAnalysis.sourceFiles.join(', ')} → ${sinks.join(', ')}`,
-          tier: 3,
-        };
-      }
-
-      // high risk: trusted hosts → allow; untrusted → review
-      if (allTrusted) {
-        return {
-          decision: 'allow',
-          blockedByLabel: 'Node9: Pipe-Chain to Trusted Host',
-          reason: `Sensitive file piped to trusted host(s): ${sinks.join(', ')}`,
-          tier: 3,
-        };
-      }
-      return {
-        decision: 'review',
-        blockedByLabel: 'Node9: Pipe-Chain Exfiltration (high)',
-        reason: `Sensitive file piped to network sink: ${pipeAnalysis.sourceFiles.join(', ')} → ${sinks.join(', ')}`,
-        tier: 3,
-      };
-    }
+    // Already evaluated for bash-tool calls in the early Layer-1 block above.
+    // Re-runs here for tools whose command field is exposed via toolInspection
+    // but whose name is not in BASH_TOOL_NAMES. analyzePipeChain is cheap on
+    // non-pipe input.
+    const ptVerdict = pipeChainVerdict(shellCommand, isTrustedHost);
+    if (ptVerdict) return ptVerdict;
 
     // ── SSH multi-hop host extraction ─────────────────────────────────────────
     // Runs only for ssh/scp/rsync to extract all involved hosts (including jump hosts).

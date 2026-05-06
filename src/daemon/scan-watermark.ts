@@ -19,7 +19,16 @@ import os from 'os';
 import path from 'path';
 import readline from 'readline';
 import { scanArgs } from '../dlp.js';
-import { analyzePipeChain, detectDangerousShellExec, type ScanFinding } from '@node9/policy-engine';
+import {
+  detectPii,
+  extractCanonicalFindings,
+  toScanFinding,
+  LONG_OUTPUT_THRESHOLD_BYTES as ENGINE_LONG_OUTPUT_THRESHOLD_BYTES,
+  CANONICAL_EXTRACTOR_VERSION,
+  type ScanFinding,
+  type ToolCallEntry,
+  type ExtractContext,
+} from '@node9/policy-engine';
 
 const PROJECTS_DIR = () => path.join(os.homedir(), '.claude', 'projects');
 const WATERMARK_FILE = () => path.join(os.homedir(), '.node9', 'scan-watermark.json');
@@ -39,32 +48,159 @@ interface WatermarkEntry {
   scannedTo: number;
 }
 
+/**
+ * Bumped when the watermark file's SHAPE changes (new fields, layout
+ * changes). Daemons reading a newer schema than they understand refuse
+ * to write back so a downgrade can't corrupt the file.
+ */
+export const WATERMARK_SCHEMA_VERSION = 2;
+
 export interface Watermark {
+  schemaVersion: number;
+  /**
+   * Identity of the canonical detector pipeline that produced verdicts
+   * against the byte offsets in `files`. When this falls behind the
+   * engine's CANONICAL_EXTRACTOR_VERSION, the daemon resets all offsets
+   * to 0 on next start so the new pipeline gets a fresh look at history.
+   */
+  extractorVersion: string;
+  /**
+   * One-shot flag, set when the daemon resets offsets in response to an
+   * extractor upgrade. Tells the next /scan/report POST to use
+   * sessionTotals (overwrite) instead of sessionDeltas (increment),
+   * avoiding double-counting on top of any prior `node9 scan
+   * --upload-history` baseline. Cleared after the first successful POST.
+   */
+  pendingResetUploadAs?: 'totals';
   createdAt: string;
   files: Record<string, WatermarkEntry>;
 }
 
-/** Read the watermark, or return a fresh seed if missing/corrupt. */
-export function loadWatermark(): Watermark {
-  try {
-    const raw = fs.readFileSync(WATERMARK_FILE(), 'utf-8');
-    const parsed = JSON.parse(raw) as Partial<Watermark>;
-    if (typeof parsed.createdAt === 'string' && parsed.files && typeof parsed.files === 'object') {
-      return parsed as Watermark;
-    }
-  } catch {
-    /* fall through to seed */
-  }
-  return { createdAt: new Date().toISOString(), files: {} };
+/**
+ * Result of `loadWatermark`. The state discriminator drives migration:
+ *
+ *   fresh             — file missing or unparseable. Seed a new one.
+ *   current           — schema + extractor versions match. Run as today.
+ *   extractor-stale   — schema OK but extractor version drifted. Reset
+ *                       all per-file scannedTo to 0, set
+ *                       pendingResetUploadAs:'totals', persist new
+ *                       extractorVersion. Preserves createdAt so we
+ *                       don't backfill pre-install history.
+ *   schema-future     — file was written by a newer daemon. Don't touch.
+ *                       Don't write back. Skip the tick.
+ */
+export type WatermarkState =
+  | { status: 'fresh'; wm: Watermark }
+  | { status: 'current'; wm: Watermark }
+  | { status: 'extractor-stale'; wm: Watermark }
+  | { status: 'schema-future'; wm: Watermark };
+
+/**
+ * Build a default-state watermark (no files known yet). createdAt
+ * is set to now; the daemon's first tick will record current file
+ * sizes for files that already exist (forward-only — no historical
+ * backfill on fresh installs).
+ */
+function freshWatermark(): Watermark {
+  return {
+    schemaVersion: WATERMARK_SCHEMA_VERSION,
+    extractorVersion: CANONICAL_EXTRACTOR_VERSION,
+    createdAt: new Date().toISOString(),
+    files: {},
+  };
 }
 
 /**
- * Atomic save: write to a sibling tempfile, fsync (best effort via
- * writeFileSync's sync nature), then rename. Rename is atomic on POSIX
- * within the same dir, which prevents a half-written watermark from
- * corrupting the daemon's view of "what's been scanned".
+ * Read the watermark and classify it. Resets offsets in-memory for the
+ * `extractor-stale` branch but does NOT save here — the caller owns the
+ * write. Splitting load/save keeps the schema-future refusal honest:
+ * we never persist anything for that case.
+ */
+export function loadWatermark(): WatermarkState {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(WATERMARK_FILE(), 'utf-8');
+  } catch {
+    return { status: 'fresh', wm: freshWatermark() };
+  }
+
+  let parsed: Partial<Watermark>;
+  try {
+    parsed = JSON.parse(raw) as Partial<Watermark>;
+  } catch {
+    return { status: 'fresh', wm: freshWatermark() };
+  }
+
+  if (typeof parsed.createdAt !== 'string' || !parsed.files || typeof parsed.files !== 'object') {
+    return { status: 'fresh', wm: freshWatermark() };
+  }
+
+  const fileSchemaVersion = typeof parsed.schemaVersion === 'number' ? parsed.schemaVersion : 1;
+  if (fileSchemaVersion > WATERMARK_SCHEMA_VERSION) {
+    // Newer daemon wrote this file; current daemon doesn't understand
+    // its shape. Refuse to alter it.
+    const wm: Watermark = {
+      schemaVersion: fileSchemaVersion,
+      extractorVersion:
+        typeof parsed.extractorVersion === 'string'
+          ? parsed.extractorVersion
+          : CANONICAL_EXTRACTOR_VERSION,
+      createdAt: parsed.createdAt,
+      files: parsed.files as Record<string, WatermarkEntry>,
+    };
+    return { status: 'schema-future', wm };
+  }
+
+  const fileExtractorVersion =
+    typeof parsed.extractorVersion === 'string' ? parsed.extractorVersion : '';
+  if (fileExtractorVersion !== CANONICAL_EXTRACTOR_VERSION) {
+    // Detector pipeline changed since this file was written. Reset
+    // every file's offset so the new pipeline re-scans history;
+    // preserve createdAt so files older than the original install
+    // still skip backfill (we don't want to silently turn an upgrade
+    // into a months-deep historical re-scan beyond what was already
+    // tracked). Mark the next POST as overwrite-class so it doesn't
+    // double-count on top of any prior --upload-history.
+    const filesIn = parsed.files as Record<string, WatermarkEntry>;
+    const filesOut: Record<string, WatermarkEntry> = {};
+    for (const [k, v] of Object.entries(filesIn)) {
+      filesOut[k] = { scannedTo: 0 };
+      void v; // discard old offset
+    }
+    const wm: Watermark = {
+      schemaVersion: WATERMARK_SCHEMA_VERSION,
+      extractorVersion: CANONICAL_EXTRACTOR_VERSION,
+      pendingResetUploadAs: 'totals',
+      createdAt: parsed.createdAt,
+      files: filesOut,
+    };
+    return { status: 'extractor-stale', wm };
+  }
+
+  // Schema OK + extractor matches → current. Pass through, including
+  // a possibly-set pendingResetUploadAs from a crash between reset and
+  // first successful POST (we want to honor the flag still).
+  const wm: Watermark = {
+    schemaVersion: WATERMARK_SCHEMA_VERSION,
+    extractorVersion: CANONICAL_EXTRACTOR_VERSION,
+    ...(parsed.pendingResetUploadAs === 'totals' && { pendingResetUploadAs: 'totals' }),
+    createdAt: parsed.createdAt,
+    files: parsed.files as Record<string, WatermarkEntry>,
+  };
+  return { status: 'current', wm };
+}
+
+/**
+ * Atomic save: write to a sibling tempfile, then rename. Rename is
+ * atomic on POSIX within the same dir, which prevents a half-written
+ * watermark from corrupting the daemon's view of "what's been scanned".
+ *
+ * Refuses to write if the on-disk file is from a newer schema (daemon
+ * downgrade scenario). Caller's loadWatermark would have returned
+ * `schema-future` in that case; this is a defensive double-check.
  */
 export function saveWatermark(wm: Watermark): void {
+  if (wm.schemaVersion > WATERMARK_SCHEMA_VERSION) return;
   const target = WATERMARK_FILE();
   const dir = path.dirname(target);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -219,14 +355,25 @@ export function extractFindingsFromLine(
     }
   }
 
-  // ── Tool-use shell AST + regex detection ────────────────────────────
+  // ── Per-tool-call detection — delegate to the canonical extractor ──
   // Assistant messages on Claude Code carry an array of content blocks;
   // tool invocations are { type: 'tool_use', name: 'Bash', input: { command } }.
-  // We walk those blocks and run two layers of detection:
-  //   1. AST detectors (engine) for eval-of-remote and pipe-to-shell —
-  //      deterministic, no false positives.
-  //   2. Regex extractors for destructive ops + privilege escalation —
-  //      cheap, single-line, low FP rate on the patterns matched.
+  // For each tool_use we build a ToolCallEntry and feed it to the engine's
+  // canonical extractor — same detection pipeline the CLI scan uses, so
+  // hook + scan + watermark all agree on identical input.
+  //
+  // tool_result blocks aren't tool calls but they carry the size signal
+  // for long-output-redacted; we encode that as outputBytes on a synthetic
+  // ToolCallEntry whose name attribution is still useful.
+  const ctx: ExtractContext = {
+    sessionId,
+    lineIndex,
+    project: '',
+    agent: 'claude',
+    rules: [],
+    toolInspection: { bash: 'command', execute_bash: 'command' },
+    dlpEnabled: false, // line-level DLP runs above already
+  };
   const message = (line as Record<string, unknown>).message;
   if (message && typeof message === 'object') {
     const content = (message as Record<string, unknown>).content;
@@ -235,12 +382,6 @@ export function extractFindingsFromLine(
         if (!block || typeof block !== 'object') continue;
         const b = block as Record<string, unknown>;
 
-        // ── Long output redactions (tool_result blocks) ────────────
-        // The proxy redacts oversized tool outputs before they reach the
-        // model — saves tokens, prevents context-window blow-up, hides
-        // raw fixture data. We count occurrences here as a workflow
-        // signal (agent generated huge output) without surfacing the
-        // content itself.
         if (b.type === 'tool_result') {
           const c = b.content;
           const len =
@@ -252,74 +393,21 @@ export function extractFindingsFromLine(
               lineIndex,
             });
           }
+          continue;
         }
 
         if (b.type !== 'tool_use') continue;
-        const toolName = typeof b.name === 'string' ? b.name.toLowerCase() : '';
-        const input = b.input as Record<string, unknown> | undefined;
-
-        // ── Sensitive file reads ──────────────────────────────────
-        // Read/Edit/Grep/Glob agents that target ~/.aws/, ~/.ssh/,
-        // .env*, and friends. Same path set blast walks. The signal
-        // here is "agent tried to read these files via a tool call"
-        // — distinct from blast's "they were reachable on disk".
-        if (FILE_TOOLS.has(toolName)) {
-          const filePath =
-            (typeof input?.file_path === 'string' && input.file_path) ||
-            (typeof input?.path === 'string' && input.path) ||
-            (typeof input?.pattern === 'string' && input.pattern) ||
-            '';
-          if (filePath && SENSITIVE_PATH_RE.test(filePath)) {
-            findings.push({
-              type: 'sensitive-file-read',
-              sessionId,
-              lineIndex,
-            });
-          }
-        }
-
-        if (toolName !== 'bash' && toolName !== 'execute_bash') continue;
-        const command = input && typeof input.command === 'string' ? input.command : '';
-        if (!command) continue;
-
-        // eval/bash -c with remote download — engine returns 'block' or
-        // 'review' or undefined.
-        const verdict = detectDangerousShellExec(command);
-        if (verdict) {
-          findings.push({ type: 'eval-of-remote', sessionId, lineIndex });
-        }
-
-        // Pipe chain whose source is a credential file and sink is the
-        // network (or vice versa) — engine flags as critical.
-        const pipe = analyzePipeChain(command);
-        if (pipe.isPipeline && pipe.risk === 'critical') {
-          findings.push({ type: 'pipe-to-shell', sessionId, lineIndex });
-        }
-
-        // ── Destructive ops ────────────────────────────────────────
-        // Hard-to-reverse commands. These regexes are tight enough to
-        // avoid common false-positives:
-        //   - `rm -rf` requires the recursive+force flags together
-        //   - `DROP TABLE` / `DROP DATABASE` / `TRUNCATE TABLE` only
-        //     match on the SQL keyword sequence
-        //   - `git push --force` (and the alias `git push -f`) — pinned
-        //     deletions of remote history
-        //   - Redis FLUSHALL / FLUSHDB — wipe the entire datastore
-        //   - kubectl delete / helm uninstall — cluster-level teardown
-        if (DESTRUCTIVE_OP_RE.test(command)) {
-          findings.push({ type: 'destructive-op', sessionId, lineIndex });
-        }
-
-        // ── Privilege escalation ───────────────────────────────────
-        // sudo, su, chmod 777, chown root. Each implies the agent
-        // tried to broaden permissions. Matched as standalone tokens
-        // so we don't false-positive on substrings like 'pseudonym'.
-        if (PRIVILEGE_ESCALATION_RE.test(command)) {
-          findings.push({
-            type: 'privilege-escalation',
-            sessionId,
-            lineIndex,
-          });
+        const toolName = typeof b.name === 'string' ? b.name : '';
+        const input = (b.input as Record<string, unknown>) ?? {};
+        const call: ToolCallEntry = {
+          toolName,
+          args: input,
+          timestamp: typeof obj.timestamp === 'string' ? (obj.timestamp as string) : '',
+        };
+        const canonical = extractCanonicalFindings(call, ctx);
+        for (const cf of canonical) {
+          const sf = toScanFinding(cf);
+          if (sf) findings.push(sf);
         }
       }
     }
@@ -327,92 +415,15 @@ export function extractFindingsFromLine(
   return findings;
 }
 
-/**
- * Destructive-op regex. Word-boundary anchored so partial matches don't
- * fire (e.g. "term" inside "terminate" wouldn't match `\brm\b`). Each
- * pattern is independently provable as destructive — no fuzzy heuristics.
- */
-const DESTRUCTIVE_OP_RE =
-  /\brm\s+-[rRf]+\b|\bDROP\s+(TABLE|DATABASE|COLLECTION|SCHEMA)\b|\bTRUNCATE\s+TABLE\b|\bgit\s+push\s+(--force|-f)\b|\bFLUSHALL\b|\bFLUSHDB\b|\bkubectl\s+delete\b|\bhelm\s+uninstall\b/i;
+// LONG_OUTPUT_THRESHOLD_BYTES, DESTRUCTIVE_OP_RE, PRIVILEGE_ESCALATION_RE,
+// SENSITIVE_PATH_RE, FILE_TOOLS, detectPii — all live in @node9/policy-engine
+// now. The daemon imports the canonical extractor and a few raw helpers
+// for the line-level DLP/PII walk over non-tool-call content.
+const LONG_OUTPUT_THRESHOLD_BYTES = ENGINE_LONG_OUTPUT_THRESHOLD_BYTES;
 
-/**
- * Threshold for "long output" — tool results larger than this are
- * counted as redaction-eligible. 100KB is the value the proxy's
- * runtime redaction layer uses too; staying consistent makes the
- * counts comparable.
- */
-const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
-
-/**
- * Tool names that read or grep file contents. Used to decide whether
- * the file_path/path/pattern arg is worth running against
- * SENSITIVE_PATH_RE — restricts the check to file-reading tools so a
- * Bash command containing the same path doesn't double-count.
- */
-const FILE_TOOLS = new Set([
-  'read',
-  'read_file',
-  'edit',
-  'edit_file',
-  'write',
-  'write_file',
-  'multiedit',
-  'grep',
-  'grep_search',
-  'glob',
-  'list_files',
-]);
-
-/**
- * Sensitive file paths the agent shouldn't be reading via tool calls.
- * Mirrors the blast walker's path set — same files matter, here
- * detected at tool-call-time rather than fs-walk-time.
- *
- * `\b` boundaries on names so substring noise doesn't trigger; the
- * patterns assume the proxy normalises ~ in inputs (which it does
- * via path expansion before we see them).
- */
-const SENSITIVE_PATH_RE =
-  /\.aws\/(credentials|config)\b|\.ssh\/(id_rsa|id_ed25519|id_ecdsa|id_dsa)\b|\.env(\.|$|\b)|\.config\/gcloud\/credentials\.db\b|\.docker\/config\.json\b|\.netrc\b|\.npmrc\b|\.node9\/credentials\.json\b/i;
-
-/**
- * Detect PII patterns in a string. Returns an array of finding pattern
- * names — one per distinct PII type found, deduplicated by type.
- *
- * Each regex requires structural delimiters that real PII has:
- *   - Email needs `@` + a TLD-like suffix
- *   - SSN needs the dash-delimited 3-2-4 layout
- *   - Phone (US) needs 3-3-4 with separators
- *   - Credit card needs 16 digits in groups of 4 with valid IIN prefix
- *
- * Without these structural anchors the FP rate would explode. If a real
- * PII string is in a different layout (no dashes for SSN, etc.), it
- * won't fire — that's a known gap and acceptable v1 behaviour.
- */
-function detectPii(text: string): string[] {
-  const found = new Set<string>();
-  // Cheap substring guards before we run the full regex — most strings
-  // contain none of these characters; skip the regex engine for them.
-  if (/@/.test(text) && PII_EMAIL_RE.test(text)) found.add('Email');
-  if (/-/.test(text) && PII_SSN_RE.test(text)) found.add('SSN');
-  if (PII_PHONE_RE.test(text)) found.add('Phone');
-  if (PII_CC_RE.test(text)) found.add('Credit Card');
-  return [...found];
-}
-
-const PII_EMAIL_RE = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/;
-const PII_SSN_RE = /\b\d{3}-\d{2}-\d{4}\b/;
-const PII_PHONE_RE = /\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b/;
-// IIN prefixes for the major card networks: Visa (4), Mastercard
-// (51-55, 2221-2720), Amex (34/37), Discover (6). 16-digit grouping with
-// optional dashes/spaces between groups of 4.
-const PII_CC_RE = /\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6\d{3})[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b/;
-
-/**
- * Privilege-escalation regex. Standalone tokens only — `\bsudo\b` not
- * `sudo` to avoid matching e.g. `pseudo` substrings.
- */
-const PRIVILEGE_ESCALATION_RE = /\b(sudo|su)\b\s+[a-z]|\bchmod\s+(0?777|\+x)\b|\bchown\s+root\b/i;
+// detectPii + PII regexes now live in @node9/policy-engine (scan/pii.ts)
+// so the canonical extractor and the daemon's line-level walk share one
+// source of truth.
 
 /**
  * Result of one tick — what was scanned and what was found. Caller pushes
@@ -427,6 +438,45 @@ export interface ScanTickResult {
   filesScanned: number;
   filesNew: number;
   filesSkipped: number;
+  /**
+   * How the per-session payload should be written on the SaaS BE.
+   *   'deltas' (default) — sessionDeltas, atomic increments, normal flow.
+   *   'totals'           — sessionTotals, full overwrite. Set on the first
+   *                        tick after an extractor-stale reset so
+   *                        re-scanned bytes don't double-count on top of a
+   *                        prior `--upload-history` baseline.
+   * Caller (sync.ts) reads this to choose the wire field, then calls
+   * `markUploadComplete()` on success to clear the flag for the next tick.
+   */
+  uploadAs: 'deltas' | 'totals';
+  /**
+   * True when this tick ran with no work because the watermark file is
+   * from a newer daemon schema (downgrade safety). sync.ts should skip
+   * the network round-trip in that case.
+   */
+  schemaFuture: boolean;
+}
+
+/**
+ * Clear the `pendingResetUploadAs` flag from the persisted watermark.
+ * Called by sync.ts after the first post-reset POST succeeds. Subsequent
+ * ticks then revert to the normal incremental sessionDeltas path.
+ */
+export function markUploadComplete(): void {
+  const state = loadWatermark();
+  // schema-future: never write back, current daemon doesn't understand
+  // the file's shape.
+  if (state.status === 'schema-future') return;
+  // extractor-stale: the on-disk file was concurrently rewound to a
+  // different extractorVersion between our tick and this call. Saving
+  // here would persist the in-memory `extractor-stale` state which
+  // resets all scannedTo to 0 — clobbering whatever scan progress the
+  // tick just recorded. Bail; the next tick handles the new stale
+  // state cleanly.
+  if (state.status === 'extractor-stale') return;
+  if (!state.wm.pendingResetUploadAs) return;
+  delete state.wm.pendingResetUploadAs;
+  saveWatermark(state.wm);
 }
 
 /**
@@ -449,17 +499,100 @@ export interface ScanTickResult {
  */
 export async function tickScanWatcher(): Promise<ScanTickResult> {
   if (process.env.NODE9_SCAN_DISABLE === '1') {
-    return {
-      findings: [],
-      totalToolCalls: 0,
-      toolCallsBySession: {},
-      filesScanned: 0,
-      filesNew: 0,
-      filesSkipped: 0,
-    };
+    return emptyTick('deltas');
   }
 
-  const wm = loadWatermark();
+  const state = loadWatermark();
+
+  if (state.status === 'schema-future') {
+    // A newer daemon wrote this watermark file; we don't understand its
+    // shape. Skip the tick entirely and don't touch the file. sync.ts
+    // sees `schemaFuture: true` and skips the network round-trip too.
+    if (process.env.NODE9_DEBUG === '1') {
+      process.stderr.write('[node9] watermark schema is from a newer daemon — skipping tick.\n');
+    }
+    return { ...emptyTick('deltas'), schemaFuture: true };
+  }
+
+  if (state.status === 'extractor-stale') {
+    // One-shot escape hatch. A user who just ran `node9 scan
+    // --upload-history` and is upgrading can set this env var to
+    // acknowledge the version drift and skip the re-scan; their stale
+    // verdicts in the SaaS will not be refreshed by the daemon, but
+    // their next --upload-history run can refresh them. The flag
+    // doesn't suppress; it ACKNOWLEDGES — we write the new
+    // extractorVersion to the watermark and KEEP existing offsets so
+    // subsequent daemon starts run as 'current'.
+    if (process.env.NODE9_SKIP_WATERMARK_RESET === '1') {
+      // Re-load the on-disk file (pre-reset) so we keep the original
+      // scannedTo offsets; then stamp the new extractorVersion.
+      const acknowledged = readRawWatermarkPreservingOffsets();
+      if (acknowledged) {
+        saveWatermark(acknowledged);
+      }
+      process.stderr.write(
+        '[node9] Extractor upgrade acknowledged via NODE9_SKIP_WATERMARK_RESET.\n' +
+          '       Existing verdicts not refreshed — run `node9 scan --upload-history`\n' +
+          '       to backfill them through the new pipeline.\n'
+      );
+      // Re-load again now in 'current' state for the actual tick.
+      return runActualTick(loadWatermark().wm);
+    }
+    process.stderr.write(
+      '[node9] Detector upgrade detected — re-scanning history through the new\n' +
+        '        pipeline. Expect a one-time SaaS payload spike on this tick.\n' +
+        '        Set NODE9_SKIP_WATERMARK_RESET=1 to skip.\n'
+    );
+  }
+
+  return runActualTick(state.wm);
+}
+
+function emptyTick(uploadAs: 'deltas' | 'totals'): ScanTickResult {
+  return {
+    findings: [],
+    totalToolCalls: 0,
+    toolCallsBySession: {},
+    filesScanned: 0,
+    filesNew: 0,
+    filesSkipped: 0,
+    uploadAs,
+    schemaFuture: false,
+  };
+}
+
+/**
+ * Re-read the on-disk watermark and produce a Watermark with offsets
+ * preserved but extractorVersion stamped to the current value. Used by
+ * the NODE9_SKIP_WATERMARK_RESET path to acknowledge an upgrade without
+ * triggering a re-scan. Returns null if the file is missing or
+ * unparseable (in which case there's nothing meaningful to "preserve").
+ */
+function readRawWatermarkPreservingOffsets(): Watermark | null {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(WATERMARK_FILE(), 'utf-8');
+  } catch {
+    return null;
+  }
+  let parsed: Partial<Watermark>;
+  try {
+    parsed = JSON.parse(raw) as Partial<Watermark>;
+  } catch {
+    return null;
+  }
+  if (typeof parsed.createdAt !== 'string' || !parsed.files || typeof parsed.files !== 'object') {
+    return null;
+  }
+  return {
+    schemaVersion: WATERMARK_SCHEMA_VERSION,
+    extractorVersion: CANONICAL_EXTRACTOR_VERSION,
+    createdAt: parsed.createdAt,
+    files: parsed.files as Record<string, WatermarkEntry>,
+  };
+}
+
+async function runActualTick(wm: Watermark): Promise<ScanTickResult> {
   const watermarkCreatedAt = new Date(wm.createdAt).getTime();
   const findings: ScanFinding[] = [];
   let totalToolCalls = 0;
@@ -517,7 +650,17 @@ export async function tickScanWatcher(): Promise<ScanTickResult> {
     filesScanned++;
   }
 
+  const uploadAs: 'deltas' | 'totals' = wm.pendingResetUploadAs === 'totals' ? 'totals' : 'deltas';
   saveWatermark(wm);
 
-  return { findings, totalToolCalls, toolCallsBySession, filesScanned, filesNew, filesSkipped };
+  return {
+    findings,
+    totalToolCalls,
+    toolCallsBySession,
+    filesScanned,
+    filesNew,
+    filesSkipped,
+    uploadAs,
+    schemaFuture: false,
+  };
 }
