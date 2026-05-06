@@ -22,8 +22,15 @@ import https from 'https';
 import os from 'os';
 import path from 'path';
 import chalk from 'chalk';
-import { summarizeScan, type ScanFinding, type ScanSignals } from '@node9/policy-engine';
-import { getCredentials } from './config/index.js';
+import {
+  summarizeScan,
+  extractSessionLevelFindings,
+  toScanFinding,
+  type ScanFinding,
+  type ScanSignals,
+  type SessionToolCall,
+} from '@node9/policy-engine';
+import { getCredentials, getConfig } from './config/index.js';
 import { parseJSONLFile, decodeProjectDirName } from './costSync.js';
 
 interface UploadHistoryOptions {
@@ -222,6 +229,13 @@ export async function runUploadHistory(opts: UploadHistoryOptions): Promise<void
     ReturnType<typeof parseJSONLFile> extends Map<string, infer T> ? T : never
   > = [];
 
+  // Loop-detection config — same source the live hook uses, so the
+  // dashboard's loop count interprets backfilled history under the user's
+  // actual policy. Note: CLI scan (`node9 scan`) uses a different loop
+  // heuristic (threshold=3, 10-min timespan classifier) and may report a
+  // different number — that divergence is the next unification step.
+  const loopCfg = getConfig().policy.loopDetection;
+
   for (const { filePath, sessionId, projectDir } of iterateJsonlFiles(cutoffMs)) {
     filesScanned++;
     let content: string;
@@ -231,6 +245,11 @@ export async function runUploadHistory(opts: UploadHistoryOptions): Promise<void
       continue;
     }
     let lineIndex = 0;
+    // Per-session SessionToolCall[] for the loop pass below. We only buffer
+    // the fields extractSessionLevelFindings needs (toolName/args/timestamp/
+    // lineIndex) — not raw line content — so memory stays bounded even for
+    // large windows.
+    const sessionCalls: SessionToolCall[] = [];
     for (const line of content.split('\n')) {
       if (!line.trim()) continue;
       let obj: Record<string, unknown>;
@@ -255,9 +274,45 @@ export async function runUploadHistory(opts: UploadHistoryOptions): Promise<void
       ) {
         totalToolCalls++;
         toolCallsBySession[sessionId] = (toolCallsBySession[sessionId] ?? 0) + 1;
+        // Capture each tool_use block as a SessionToolCall for the
+        // session-level loop pass below.
+        const ts = typeof obj.timestamp === 'string' ? (obj.timestamp as string) : '';
+        for (const block of msg!.content as unknown[]) {
+          if (!block || typeof block !== 'object') continue;
+          const b = block as Record<string, unknown>;
+          if (b.type !== 'tool_use') continue;
+          sessionCalls.push({
+            toolName: typeof b.name === 'string' ? (b.name as string) : '',
+            args: (b.input as Record<string, unknown>) ?? {},
+            timestamp: ts,
+            lineIndex,
+          });
+        }
       }
       linesParsed++;
       lineIndex++;
+    }
+
+    // ── Session-level loop detection ─────────────────────────────────────
+    // extractFindingsFromLine is per-line and never emits loop findings.
+    // Run the engine's session-level pass once per session and project the
+    // canonical loop findings to ScanFinding so the dashboard's "Loops
+    // Blocked" panel reflects backfilled history, not just live ticks.
+    if (loopCfg.enabled && sessionCalls.length > 0) {
+      const loops = extractSessionLevelFindings(sessionCalls, {
+        sessionId,
+        project: decodeProjectDirName(projectDir),
+        agent: 'claude',
+        loopDetection: {
+          enabled: loopCfg.enabled,
+          threshold: loopCfg.threshold,
+          windowSeconds: loopCfg.windowSeconds,
+        },
+      });
+      for (const cf of loops) {
+        const sf = toScanFinding(cf);
+        if (sf) findings.push(sf);
+      }
     }
 
     // Cost rows — same parser the live cost-sync uses.
