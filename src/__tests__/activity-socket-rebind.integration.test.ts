@@ -184,18 +184,18 @@ describe('activity socket — self-healing rebind (#tail-stability)', () => {
 
     // Simulate the bug: socket disappears (systemd-tmpfiles, manual rm, etc.).
     // We deliberately avoid asserting intermediate state (existsSync, inode
-    // comparison) because both race the daemon's own self-heal:
-    //   - existsSync(false) loses to fs.watch's synchronous inotify rebind
-    //   - inode comparison loses to tmpfs reusing the just-freed inode slot
-    // The end-to-end SSE assertion below is the only race-free proof of
+    // comparison) because both race the daemon's own self-heal — the
+    // end-to-end SSE assertion below is the only race-free proof of
     // self-heal: if the daemon hadn't rebound, the new connect() would fail
     // with ENOENT, sendOverSocket would return false, and the SSE event
     // would never arrive.
     fs.unlinkSync(ACTIVITY_SOCKET_PATH);
 
-    // Wait for the file to come back so the subsequent connect() doesn't
-    // race a still-in-progress rebind. Caps at 5s to bound test runtime.
-    const rebound = await waitForFile(ACTIVITY_SOCKET_PATH, 5000);
+    // Wait for the file to come back. The polling probe runs every ~2s, so
+    // the upper bound is one probe interval plus bind latency. Cap at 6s
+    // to give comfortable headroom on slow CI runners without blowing
+    // overall test runtime.
+    const rebound = await waitForFile(ACTIVITY_SOCKET_PATH, 6000);
     expect(rebound).toBe(true);
 
     // After rebind, a fresh activity payload must travel: socket → daemon → SSE broadcast.
@@ -217,4 +217,32 @@ describe('activity socket — self-healing rebind (#tail-stability)', () => {
     expect(sent).toBe(true);
     expect(await ssePromise).toBe(true);
   }, 15_000);
+
+  // Regression test for the rebind-loop bug: an earlier fs.watch-based
+  // self-heal would observe the daemon's own unlink-then-listen sequence
+  // and trigger another rebind, which fired another inotify event, etc.
+  // The polling-only design eliminates this loop. This test would have
+  // caught the bug: it spawns a daemon, leaves it idle through ~3 polling
+  // cycles, then asserts hook-debug.log shows zero "rebinding" lines.
+  it('does not rebind during quiet operation', async ({ skip }) => {
+    if (process.platform === 'win32') skip();
+    if (!portWasFree) skip();
+
+    const debugLogPath = path.join(tmpHome, '.node9', 'hook-debug.log');
+    // Snapshot any pre-existing rebind lines from earlier tests in this
+    // suite (e.g., the unlink-then-rebind test runs before this one).
+    const baselineRebinds = countRebindLines(debugLogPath);
+
+    // Wait through ~3 polling cycles (probe runs every 2s).
+    await new Promise((r) => setTimeout(r, 6500));
+
+    const finalRebinds = countRebindLines(debugLogPath);
+    expect(finalRebinds - baselineRebinds).toBe(0);
+  }, 15_000);
 });
+
+function countRebindLines(logPath: string): number {
+  if (!fs.existsSync(logPath)) return 0;
+  const contents = fs.readFileSync(logPath, 'utf-8');
+  return contents.split('\n').filter((line) => /\[activity-socket\] rebinding/.test(line)).length;
+}

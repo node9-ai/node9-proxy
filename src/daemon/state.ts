@@ -469,15 +469,24 @@ const WRITE_TOOL_NAMES = new Set([
 // The activity socket can disappear at runtime (systemd-tmpfiles cleanup,
 // manual rm, tmp on tmpfs after suspend). When that happens every hook's
 // notifyActivitySocket() silently returns false and `node9 tail` shows
-// nothing live until the user runs `node9 daemon restart`. The watcher +
-// poller below rebind automatically; the circuit breaker stops infinite
-// rebind loops if something keeps deleting the socket.
+// nothing live until the user runs `node9 daemon restart`. A 2s polling
+// probe rebinds automatically; the circuit breaker stops infinite rebind
+// loops if something keeps deleting the socket.
+//
+// Why polling (setInterval) and not fs.watch (inotify): an earlier version
+// used fs.watch for "near-instant" recovery, but inotify fires for the
+// daemon's own unlink-then-listen sequence inside bindActivitySocket().
+// The watcher's callback would observe the file gone (between unlink and
+// listen completing) and trigger another rebind, which fired another
+// inotify event, etc. — a self-reinforcing loop that quickly tripped the
+// circuit breaker. setInterval is structurally incapable of self-triggering
+// (a tick can't fire in response to its own actions), so the loop is gone.
+// Trade-off: detection latency goes from ~instant to ≤2s, which is fine.
 export const ACTIVITY_REBIND_MAX_ATTEMPTS = 5;
 export const ACTIVITY_REBIND_WINDOW_MS = 60_000;
-const ACTIVITY_HEALTH_PROBE_MS = 30_000;
+const ACTIVITY_HEALTH_PROBE_MS = 2_000;
 
 let activitySocketServer: net.Server | null = null;
-let activitySocketWatcher: fs.FSWatcher | null = null;
 let activityHealthInterval: NodeJS.Timeout | null = null;
 let activityRebindAttempts: number[] = [];
 let activityCircuitTripped = false;
@@ -520,40 +529,15 @@ export const __activitySocketTestHooks = {
 export function startActivitySocket(): void {
   bindActivitySocket();
 
-  // Layer 2 — watch the tmpdir for the socket file disappearing.
-  // fs.watch fires synchronously on Linux when an inotify event arrives, so
-  // recovery is near-instant. We filter to our basename to avoid noise.
-  if (process.platform !== 'win32') {
-    try {
-      activitySocketWatcher = fs.watch(os.tmpdir(), (eventType, filename) => {
-        if (filename !== path.basename(ACTIVITY_SOCKET_PATH)) return;
-        if (eventType !== 'rename') return;
-        if (fs.existsSync(ACTIVITY_SOCKET_PATH)) return;
-        attemptRebind('watch-unlink');
-      });
-      activitySocketWatcher.on('error', (err: Error) => {
-        logActivitySocket(`watcher error: ${err.message}`);
-      });
-      // unref so the watcher never holds the daemon process alive on shutdown
-      activitySocketWatcher.unref();
-    } catch (err) {
-      logActivitySocket(`failed to start watcher: ${(err as Error).message}`);
-    }
-  }
-
-  // Layer 2 (fallback) — fs.watch can be unreliable on macOS and network FS.
-  // A 30s poll catches the case where the watcher missed an unlink.
+  // Polling probe — checks every ACTIVITY_HEALTH_PROBE_MS whether the socket
+  // file is still present. setInterval cannot self-trigger from its own
+  // bind/unlink work the way fs.watch did, so no rebind loops.
   activityHealthInterval = setInterval(() => {
     if (!fs.existsSync(ACTIVITY_SOCKET_PATH)) attemptRebind('health-probe');
   }, ACTIVITY_HEALTH_PROBE_MS);
   activityHealthInterval.unref();
 
   process.on('exit', () => {
-    if (activitySocketWatcher) {
-      try {
-        activitySocketWatcher.close();
-      } catch {}
-    }
     if (activityHealthInterval) clearInterval(activityHealthInterval);
     try {
       fs.unlinkSync(ACTIVITY_SOCKET_PATH);
