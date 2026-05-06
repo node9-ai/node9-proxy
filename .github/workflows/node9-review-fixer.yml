@@ -12,12 +12,10 @@
 name: node9 AI Code Review
 
 on:
-  push:
-    branches:
-      - '**'
-      - '!main'
-      - '!master'
-      - '!node9/**' # Ignore node9's own fix branches
+  # Auto-trigger on push is disabled for solo-dev work — every push opened a
+  # duplicate Draft PR alongside the real human-authored PR. Run on demand via
+  # the node9 dashboard (which fires repository_dispatch) when a review is
+  # actually wanted. Re-enable the push trigger when contributors are added.
   repository_dispatch:
     types: [node9-run-again]
 
