@@ -2202,8 +2202,8 @@ export function registerScanCommand(program: Command): void {
   program
     .command('scan')
     .description('Forecast: scan agent history and show what node9 would catch if installed')
-    .option('--all', 'Scan all history (default: last 30 days)')
-    .option('--days <n>', 'Scan last N days of history', '30')
+    .option('--all', 'Scan all history (default: last 90 days)')
+    .option('--days <n>', 'Scan last N days of history', '90')
     .option('--top <n>', 'Max findings to show per rule (default: 5)', '5')
     .option('--drill-down', 'Show all findings with full commands and session IDs')
     .option('--compact', 'Compact one-screen scorecard — for screenshots and sharing')
@@ -2244,7 +2244,7 @@ export function registerScanCommand(program: Command): void {
           ? null
           : (() => {
               const d = new Date();
-              d.setDate(d.getDate() - (parseInt(options.days, 10) || 30));
+              d.setDate(d.getDate() - (parseInt(options.days, 10) || 90));
               d.setHours(0, 0, 0, 0);
               return d;
             })();
@@ -2336,7 +2336,7 @@ export function registerScanCommand(program: Command): void {
         // ── Header ────────────────────────────────────────────────────────────
         const rangeLabel = options.all
           ? chalk.dim('all time')
-          : chalk.dim(`last ${options.days ?? 30} days`);
+          : chalk.dim(`last ${options.days ?? 90} days`);
         const dateRange =
           scan.firstDate && scan.lastDate
             ? chalk.dim(`  ${fmtTs(scan.firstDate)} – ${fmtTs(scan.lastDate)}`)
