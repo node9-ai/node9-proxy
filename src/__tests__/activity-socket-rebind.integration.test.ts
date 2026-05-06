@@ -182,21 +182,21 @@ describe('activity socket — self-healing rebind (#tail-stability)', () => {
     if (process.platform === 'win32') skip();
     if (!portWasFree) skip();
 
-    // Capture the pre-unlink inode so we can prove the daemon actually
-    // *recreated* the socket (vs. somehow keeping the old one alive).
-    // Comparing inodes is race-free: an existsSync(false) check immediately
-    // after unlinkSync would race the daemon's fs.watch self-heal, which on
-    // Linux fires synchronously via inotify and rebinds in microseconds.
-    const beforeIno = fs.statSync(ACTIVITY_SOCKET_PATH).ino;
-
-    // Simulate the bug: socket disappears (systemd-tmpfiles, manual rm, etc.)
+    // Simulate the bug: socket disappears (systemd-tmpfiles, manual rm, etc.).
+    // We deliberately avoid asserting intermediate state (existsSync, inode
+    // comparison) because both race the daemon's own self-heal:
+    //   - existsSync(false) loses to fs.watch's synchronous inotify rebind
+    //   - inode comparison loses to tmpfs reusing the just-freed inode slot
+    // The end-to-end SSE assertion below is the only race-free proof of
+    // self-heal: if the daemon hadn't rebound, the new connect() would fail
+    // with ENOENT, sendOverSocket would return false, and the SSE event
+    // would never arrive.
     fs.unlinkSync(ACTIVITY_SOCKET_PATH);
 
-    // Daemon should rebind via fs.watch (synchronous on Linux) within a few seconds.
+    // Wait for the file to come back so the subsequent connect() doesn't
+    // race a still-in-progress rebind. Caps at 5s to bound test runtime.
     const rebound = await waitForFile(ACTIVITY_SOCKET_PATH, 5000);
     expect(rebound).toBe(true);
-    const afterIno = fs.statSync(ACTIVITY_SOCKET_PATH).ino;
-    expect(afterIno).not.toBe(beforeIno);
 
     // After rebind, a fresh activity payload must travel: socket → daemon → SSE broadcast.
     const id = `rebind-test-${Date.now()}`;
