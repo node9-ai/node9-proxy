@@ -182,6 +182,42 @@ export interface SessionToolCall extends ToolCallEntry {
 // layer uses, so counts are comparable across consumers.
 export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 
+/**
+ * Wire-format identity of the canonical detector pipeline. Bumped when
+ * extractCanonicalFindings (and friends) change their output in a way
+ * that would invalidate verdicts already recorded against the previous
+ * version. The daemon stores this in ~/.node9/scan-watermark.json and
+ * triggers a one-time re-scan when its persisted value falls behind.
+ *
+ * Bump it when:
+ *   - adding/removing a CanonicalFindingType
+ *   - changing severity classification for an existing type
+ *   - changing dedupe keys (would silently re-bucket existing findings)
+ *   - any semantic change to the detectors that affects emitted counts
+ *
+ * Don't bump for:
+ *   - comment-only edits
+ *   - jsdoc tweaks
+ *   - refactors that demonstrably preserve output
+ *
+ * scripts/check-extractor-version.mjs hashes the detector source files
+ * and fails CI when the hash drifts without a version bump — forgetting
+ * is loud, not silent.
+ */
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v1';
+
+/**
+ * SHA-256 prefix of the detector-source files
+ * (canonical.ts + pii.ts + destructive-regex.ts).
+ *
+ * Updated by `npm run bump-extractor-version`. The CI gate in
+ * `.github/workflows/ci.yml` recomputes the hash on every push and fails
+ * if it doesn't match this constant — the contract is "if any of those
+ * files changed, this hash must change too, and you must consciously
+ * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
+ */
+export const CANONICAL_EXTRACTOR_HASH = 'b1cb91e2352427e9';
+
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
 

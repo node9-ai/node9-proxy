@@ -143,4 +143,6 @@ export {
   toScanFinding,
   previewArgs,
   LONG_OUTPUT_THRESHOLD_BYTES,
+  CANONICAL_EXTRACTOR_VERSION,
+  CANONICAL_EXTRACTOR_HASH,
 } from './scan/canonical';

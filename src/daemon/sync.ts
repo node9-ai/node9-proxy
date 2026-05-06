@@ -13,10 +13,11 @@ import { runBlast } from '../cli/commands/blast.js';
 import {
   summarizeBlast,
   summarizeScan,
+  CANONICAL_EXTRACTOR_VERSION,
   type ScanFinding,
   type ScanSignals,
 } from '@node9/policy-engine';
-import { tickScanWatcher } from './scan-watermark.js';
+import { tickScanWatcher, markUploadComplete } from './scan-watermark.js';
 
 // One row per session delta sent on /scan/report. The BE stores
 // these in ScanSessionSignals using INSERT-ON-CONFLICT INCREMENT, so
@@ -393,6 +394,10 @@ async function pushBlastSnapshot(creds: { apiKey: string; apiUrl: string }): Pro
 async function pushScanSnapshot(creds: { apiKey: string; apiUrl: string }): Promise<void> {
   try {
     const tick = await tickScanWatcher();
+    // Refuse to POST when the watermark file is from a newer daemon —
+    // we don't trust our own state machine for that case (see
+    // scan-watermark.ts WatermarkState 'schema-future').
+    if (tick.schemaFuture) return;
     // Skip the network round-trip when there's nothing new to report —
     // empty summaries waste an API call and inflate the SaaS rate limit.
     if (tick.findings.length === 0 && tick.totalToolCalls === 0) {
@@ -404,14 +409,28 @@ async function pushScanSnapshot(creds: { apiKey: string; apiUrl: string }): Prom
     // Per-session breakdown — sibling to the workspace-level summary.
     // Powers the Sessions tab. New on the wire; BE writes to the new
     // ScanSessionSignals table independently of ScanSnapshot.
-    const sessionDeltas = buildSessionDeltas(tick.findings, tick.toolCallsBySession);
+    //
+    // Wire-field choice depends on tick.uploadAs:
+    //   'deltas' (normal flow) → sessionDeltas, BE atomic-increments.
+    //   'totals' (first tick after extractor-stale reset) → sessionTotals,
+    //     BE replaces the whole row. Avoids double-counting on top of any
+    //     prior `node9 scan --upload-history` baseline. See
+    //     scan-watermark.ts WatermarkState 'extractor-stale' for the
+    //     reset trigger.
+    const perSession = buildSessionDeltas(tick.findings, tick.toolCallsBySession);
 
     const scanUrl = creds.apiUrl.endsWith('/policies/sync')
       ? creds.apiUrl.replace(/\/policies\/sync$/, '/scan/report')
       : null;
     if (!scanUrl) return;
 
+    const body =
+      tick.uploadAs === 'totals'
+        ? { ...summary, sessionTotals: perSession, extractorVersion: CANONICAL_EXTRACTOR_VERSION }
+        : { ...summary, sessionDeltas: perSession, extractorVersion: CANONICAL_EXTRACTOR_VERSION };
+
     const parsed = new URL(scanUrl);
+    let posted = false;
     await new Promise<void>((resolve) => {
       const req = https.request(
         {
@@ -426,6 +445,11 @@ async function pushScanSnapshot(creds: { apiKey: string; apiUrl: string }): Prom
           timeout: 10_000,
         },
         (res) => {
+          // Treat 2xx as success; other status codes leave pendingResetUploadAs
+          // set so the next tick retries with sessionTotals (idempotent on the BE).
+          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+            posted = true;
+          }
           res.resume();
           res.on('end', resolve);
           res.on('error', () => resolve());
@@ -436,9 +460,17 @@ async function pushScanSnapshot(creds: { apiKey: string; apiUrl: string }): Prom
         req.destroy();
         resolve();
       });
-      req.write(JSON.stringify({ ...summary, sessionDeltas }));
+      req.write(JSON.stringify(body));
       req.end();
     });
+
+    // Clear the one-shot post-reset flag only after the overwrite POST
+    // landed. If the network failed, a future tick re-tries with
+    // sessionTotals — safe because the BE upsert is idempotent on the
+    // overwrite path.
+    if (posted && tick.uploadAs === 'totals') {
+      markUploadComplete();
+    }
   } catch {
     // Silent — never break sync over a scan push.
   }

@@ -51,6 +51,16 @@ jobs:
         # threshold (moderate) as the proxy audit above.
         run: npm --workspace @node9/policy-engine audit --omit=dev --audit-level=moderate
 
+      - name: Extractor-version hash check
+        # Verify CANONICAL_EXTRACTOR_HASH in the engine matches the hash of
+        # the detector-source files (canonical.ts, pii.ts, destructive-regex.ts).
+        # If the source changed without a hash bump, the daemon won't trigger
+        # its watermark migration on user upgrade and stale findings stay
+        # frozen in the SaaS — silent corruption that's hard to diagnose.
+        # The check is the only enforcement: pre-commit hooks in this repo
+        # are local-folklore (CLAUDE.md instructions), not auto-installed.
+        run: npm run check:extractor-version
+
       - name: Format check
         run: npm run format:check
 

@@ -20,7 +20,7 @@ process.env.NODE9_TESTING = '1';
 // we need to assert it's invoked / skipped based on NODE9_BLAST_DISABLE.
 // vi.hoisted lets us reference the mock from inside vi.mock's hoisted
 // factory without TDZ errors.
-const { mockRunBlast, mockTickScanWatcher } = vi.hoisted(() => ({
+const { mockRunBlast, mockTickScanWatcher, mockMarkUploadComplete } = vi.hoisted(() => ({
   mockRunBlast: vi.fn().mockReturnValue({
     reachable: [],
     envFindings: [],
@@ -32,13 +32,17 @@ const { mockRunBlast, mockTickScanWatcher } = vi.hoisted(() => ({
     filesScanned: 0,
     filesNew: 0,
     filesSkipped: 0,
+    uploadAs: 'deltas',
+    schemaFuture: false,
   }),
+  mockMarkUploadComplete: vi.fn(),
 }));
 vi.mock('../cli/commands/blast.js', () => ({
   runBlast: mockRunBlast,
 }));
 vi.mock('../daemon/scan-watermark.js', () => ({
   tickScanWatcher: mockTickScanWatcher,
+  markUploadComplete: mockMarkUploadComplete,
 }));
 
 const MOCK_HOME = '/mock/home';

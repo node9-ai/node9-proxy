@@ -24,6 +24,7 @@ import {
   extractCanonicalFindings,
   toScanFinding,
   LONG_OUTPUT_THRESHOLD_BYTES as ENGINE_LONG_OUTPUT_THRESHOLD_BYTES,
+  CANONICAL_EXTRACTOR_VERSION,
   type ScanFinding,
   type ToolCallEntry,
   type ExtractContext,
@@ -47,32 +48,159 @@ interface WatermarkEntry {
   scannedTo: number;
 }
 
+/**
+ * Bumped when the watermark file's SHAPE changes (new fields, layout
+ * changes). Daemons reading a newer schema than they understand refuse
+ * to write back so a downgrade can't corrupt the file.
+ */
+export const WATERMARK_SCHEMA_VERSION = 2;
+
 export interface Watermark {
+  schemaVersion: number;
+  /**
+   * Identity of the canonical detector pipeline that produced verdicts
+   * against the byte offsets in `files`. When this falls behind the
+   * engine's CANONICAL_EXTRACTOR_VERSION, the daemon resets all offsets
+   * to 0 on next start so the new pipeline gets a fresh look at history.
+   */
+  extractorVersion: string;
+  /**
+   * One-shot flag, set when the daemon resets offsets in response to an
+   * extractor upgrade. Tells the next /scan/report POST to use
+   * sessionTotals (overwrite) instead of sessionDeltas (increment),
+   * avoiding double-counting on top of any prior `node9 scan
+   * --upload-history` baseline. Cleared after the first successful POST.
+   */
+  pendingResetUploadAs?: 'totals';
   createdAt: string;
   files: Record<string, WatermarkEntry>;
 }
 
-/** Read the watermark, or return a fresh seed if missing/corrupt. */
-export function loadWatermark(): Watermark {
-  try {
-    const raw = fs.readFileSync(WATERMARK_FILE(), 'utf-8');
-    const parsed = JSON.parse(raw) as Partial<Watermark>;
-    if (typeof parsed.createdAt === 'string' && parsed.files && typeof parsed.files === 'object') {
-      return parsed as Watermark;
-    }
-  } catch {
-    /* fall through to seed */
-  }
-  return { createdAt: new Date().toISOString(), files: {} };
+/**
+ * Result of `loadWatermark`. The state discriminator drives migration:
+ *
+ *   fresh             — file missing or unparseable. Seed a new one.
+ *   current           — schema + extractor versions match. Run as today.
+ *   extractor-stale   — schema OK but extractor version drifted. Reset
+ *                       all per-file scannedTo to 0, set
+ *                       pendingResetUploadAs:'totals', persist new
+ *                       extractorVersion. Preserves createdAt so we
+ *                       don't backfill pre-install history.
+ *   schema-future     — file was written by a newer daemon. Don't touch.
+ *                       Don't write back. Skip the tick.
+ */
+export type WatermarkState =
+  | { status: 'fresh'; wm: Watermark }
+  | { status: 'current'; wm: Watermark }
+  | { status: 'extractor-stale'; wm: Watermark }
+  | { status: 'schema-future'; wm: Watermark };
+
+/**
+ * Build a default-state watermark (no files known yet). createdAt
+ * is set to now; the daemon's first tick will record current file
+ * sizes for files that already exist (forward-only — no historical
+ * backfill on fresh installs).
+ */
+function freshWatermark(): Watermark {
+  return {
+    schemaVersion: WATERMARK_SCHEMA_VERSION,
+    extractorVersion: CANONICAL_EXTRACTOR_VERSION,
+    createdAt: new Date().toISOString(),
+    files: {},
+  };
 }
 
 /**
- * Atomic save: write to a sibling tempfile, fsync (best effort via
- * writeFileSync's sync nature), then rename. Rename is atomic on POSIX
- * within the same dir, which prevents a half-written watermark from
- * corrupting the daemon's view of "what's been scanned".
+ * Read the watermark and classify it. Resets offsets in-memory for the
+ * `extractor-stale` branch but does NOT save here — the caller owns the
+ * write. Splitting load/save keeps the schema-future refusal honest:
+ * we never persist anything for that case.
+ */
+export function loadWatermark(): WatermarkState {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(WATERMARK_FILE(), 'utf-8');
+  } catch {
+    return { status: 'fresh', wm: freshWatermark() };
+  }
+
+  let parsed: Partial<Watermark>;
+  try {
+    parsed = JSON.parse(raw) as Partial<Watermark>;
+  } catch {
+    return { status: 'fresh', wm: freshWatermark() };
+  }
+
+  if (typeof parsed.createdAt !== 'string' || !parsed.files || typeof parsed.files !== 'object') {
+    return { status: 'fresh', wm: freshWatermark() };
+  }
+
+  const fileSchemaVersion = typeof parsed.schemaVersion === 'number' ? parsed.schemaVersion : 1;
+  if (fileSchemaVersion > WATERMARK_SCHEMA_VERSION) {
+    // Newer daemon wrote this file; current daemon doesn't understand
+    // its shape. Refuse to alter it.
+    const wm: Watermark = {
+      schemaVersion: fileSchemaVersion,
+      extractorVersion:
+        typeof parsed.extractorVersion === 'string'
+          ? parsed.extractorVersion
+          : CANONICAL_EXTRACTOR_VERSION,
+      createdAt: parsed.createdAt,
+      files: parsed.files as Record<string, WatermarkEntry>,
+    };
+    return { status: 'schema-future', wm };
+  }
+
+  const fileExtractorVersion =
+    typeof parsed.extractorVersion === 'string' ? parsed.extractorVersion : '';
+  if (fileExtractorVersion !== CANONICAL_EXTRACTOR_VERSION) {
+    // Detector pipeline changed since this file was written. Reset
+    // every file's offset so the new pipeline re-scans history;
+    // preserve createdAt so files older than the original install
+    // still skip backfill (we don't want to silently turn an upgrade
+    // into a months-deep historical re-scan beyond what was already
+    // tracked). Mark the next POST as overwrite-class so it doesn't
+    // double-count on top of any prior --upload-history.
+    const filesIn = parsed.files as Record<string, WatermarkEntry>;
+    const filesOut: Record<string, WatermarkEntry> = {};
+    for (const [k, v] of Object.entries(filesIn)) {
+      filesOut[k] = { scannedTo: 0 };
+      void v; // discard old offset
+    }
+    const wm: Watermark = {
+      schemaVersion: WATERMARK_SCHEMA_VERSION,
+      extractorVersion: CANONICAL_EXTRACTOR_VERSION,
+      pendingResetUploadAs: 'totals',
+      createdAt: parsed.createdAt,
+      files: filesOut,
+    };
+    return { status: 'extractor-stale', wm };
+  }
+
+  // Schema OK + extractor matches → current. Pass through, including
+  // a possibly-set pendingResetUploadAs from a crash between reset and
+  // first successful POST (we want to honor the flag still).
+  const wm: Watermark = {
+    schemaVersion: WATERMARK_SCHEMA_VERSION,
+    extractorVersion: CANONICAL_EXTRACTOR_VERSION,
+    ...(parsed.pendingResetUploadAs === 'totals' && { pendingResetUploadAs: 'totals' }),
+    createdAt: parsed.createdAt,
+    files: parsed.files as Record<string, WatermarkEntry>,
+  };
+  return { status: 'current', wm };
+}
+
+/**
+ * Atomic save: write to a sibling tempfile, then rename. Rename is
+ * atomic on POSIX within the same dir, which prevents a half-written
+ * watermark from corrupting the daemon's view of "what's been scanned".
+ *
+ * Refuses to write if the on-disk file is from a newer schema (daemon
+ * downgrade scenario). Caller's loadWatermark would have returned
+ * `schema-future` in that case; this is a defensive double-check.
  */
 export function saveWatermark(wm: Watermark): void {
+  if (wm.schemaVersion > WATERMARK_SCHEMA_VERSION) return;
   const target = WATERMARK_FILE();
   const dir = path.dirname(target);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -310,6 +438,36 @@ export interface ScanTickResult {
   filesScanned: number;
   filesNew: number;
   filesSkipped: number;
+  /**
+   * How the per-session payload should be written on the SaaS BE.
+   *   'deltas' (default) — sessionDeltas, atomic increments, normal flow.
+   *   'totals'           — sessionTotals, full overwrite. Set on the first
+   *                        tick after an extractor-stale reset so
+   *                        re-scanned bytes don't double-count on top of a
+   *                        prior `--upload-history` baseline.
+   * Caller (sync.ts) reads this to choose the wire field, then calls
+   * `markUploadComplete()` on success to clear the flag for the next tick.
+   */
+  uploadAs: 'deltas' | 'totals';
+  /**
+   * True when this tick ran with no work because the watermark file is
+   * from a newer daemon schema (downgrade safety). sync.ts should skip
+   * the network round-trip in that case.
+   */
+  schemaFuture: boolean;
+}
+
+/**
+ * Clear the `pendingResetUploadAs` flag from the persisted watermark.
+ * Called by sync.ts after the first post-reset POST succeeds. Subsequent
+ * ticks then revert to the normal incremental sessionDeltas path.
+ */
+export function markUploadComplete(): void {
+  const state = loadWatermark();
+  if (state.status === 'schema-future') return;
+  if (!state.wm.pendingResetUploadAs) return;
+  delete state.wm.pendingResetUploadAs;
+  saveWatermark(state.wm);
 }
 
 /**
@@ -332,17 +490,100 @@ export interface ScanTickResult {
  */
 export async function tickScanWatcher(): Promise<ScanTickResult> {
   if (process.env.NODE9_SCAN_DISABLE === '1') {
-    return {
-      findings: [],
-      totalToolCalls: 0,
-      toolCallsBySession: {},
-      filesScanned: 0,
-      filesNew: 0,
-      filesSkipped: 0,
-    };
+    return emptyTick('deltas');
   }
 
-  const wm = loadWatermark();
+  const state = loadWatermark();
+
+  if (state.status === 'schema-future') {
+    // A newer daemon wrote this watermark file; we don't understand its
+    // shape. Skip the tick entirely and don't touch the file. sync.ts
+    // sees `schemaFuture: true` and skips the network round-trip too.
+    if (process.env.NODE9_DEBUG === '1') {
+      process.stderr.write('[node9] watermark schema is from a newer daemon — skipping tick.\n');
+    }
+    return { ...emptyTick('deltas'), schemaFuture: true };
+  }
+
+  if (state.status === 'extractor-stale') {
+    // One-shot escape hatch. A user who just ran `node9 scan
+    // --upload-history` and is upgrading can set this env var to
+    // acknowledge the version drift and skip the re-scan; their stale
+    // verdicts in the SaaS will not be refreshed by the daemon, but
+    // their next --upload-history run can refresh them. The flag
+    // doesn't suppress; it ACKNOWLEDGES — we write the new
+    // extractorVersion to the watermark and KEEP existing offsets so
+    // subsequent daemon starts run as 'current'.
+    if (process.env.NODE9_SKIP_WATERMARK_RESET === '1') {
+      // Re-load the on-disk file (pre-reset) so we keep the original
+      // scannedTo offsets; then stamp the new extractorVersion.
+      const acknowledged = readRawWatermarkPreservingOffsets();
+      if (acknowledged) {
+        saveWatermark(acknowledged);
+      }
+      process.stderr.write(
+        '[node9] Extractor upgrade acknowledged via NODE9_SKIP_WATERMARK_RESET.\n' +
+          '       Existing verdicts not refreshed — run `node9 scan --upload-history`\n' +
+          '       to backfill them through the new pipeline.\n'
+      );
+      // Re-load again now in 'current' state for the actual tick.
+      return runActualTick(loadWatermark().wm);
+    }
+    process.stderr.write(
+      '[node9] Detector upgrade detected — re-scanning history through the new\n' +
+        '        pipeline. Expect a one-time SaaS payload spike on this tick.\n' +
+        '        Set NODE9_SKIP_WATERMARK_RESET=1 to skip.\n'
+    );
+  }
+
+  return runActualTick(state.wm);
+}
+
+function emptyTick(uploadAs: 'deltas' | 'totals'): ScanTickResult {
+  return {
+    findings: [],
+    totalToolCalls: 0,
+    toolCallsBySession: {},
+    filesScanned: 0,
+    filesNew: 0,
+    filesSkipped: 0,
+    uploadAs,
+    schemaFuture: false,
+  };
+}
+
+/**
+ * Re-read the on-disk watermark and produce a Watermark with offsets
+ * preserved but extractorVersion stamped to the current value. Used by
+ * the NODE9_SKIP_WATERMARK_RESET path to acknowledge an upgrade without
+ * triggering a re-scan. Returns null if the file is missing or
+ * unparseable (in which case there's nothing meaningful to "preserve").
+ */
+function readRawWatermarkPreservingOffsets(): Watermark | null {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(WATERMARK_FILE(), 'utf-8');
+  } catch {
+    return null;
+  }
+  let parsed: Partial<Watermark>;
+  try {
+    parsed = JSON.parse(raw) as Partial<Watermark>;
+  } catch {
+    return null;
+  }
+  if (typeof parsed.createdAt !== 'string' || !parsed.files || typeof parsed.files !== 'object') {
+    return null;
+  }
+  return {
+    schemaVersion: WATERMARK_SCHEMA_VERSION,
+    extractorVersion: CANONICAL_EXTRACTOR_VERSION,
+    createdAt: parsed.createdAt,
+    files: parsed.files as Record<string, WatermarkEntry>,
+  };
+}
+
+async function runActualTick(wm: Watermark): Promise<ScanTickResult> {
   const watermarkCreatedAt = new Date(wm.createdAt).getTime();
   const findings: ScanFinding[] = [];
   let totalToolCalls = 0;
@@ -400,7 +641,17 @@ export async function tickScanWatcher(): Promise<ScanTickResult> {
     filesScanned++;
   }
 
+  const uploadAs: 'deltas' | 'totals' = wm.pendingResetUploadAs === 'totals' ? 'totals' : 'deltas';
   saveWatermark(wm);
 
-  return { findings, totalToolCalls, toolCallsBySession, filesScanned, filesNew, filesSkipped };
+  return {
+    findings,
+    totalToolCalls,
+    toolCallsBySession,
+    filesScanned,
+    filesNew,
+    filesSkipped,
+    uploadAs,
+    schemaFuture: false,
+  };
 }

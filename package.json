@@ -59,6 +59,8 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "check:extractor-version": "node scripts/check-extractor-version.mjs",
+    "bump-extractor-version": "node scripts/check-extractor-version.mjs --bump",
     "fix": "npm run format && npm run lint:fix",
     "validate": "npm run format && npm run lint && npm run typecheck && npm run test && npm run test:e2e && npm run build",
     "test:e2e": "cross-env NODE9_TESTING=1 bash scripts/e2e.sh",

@@ -26,6 +26,7 @@ import {
   summarizeScan,
   extractSessionLevelFindings,
   toScanFinding,
+  CANONICAL_EXTRACTOR_VERSION,
   type ScanFinding,
   type ScanSignals,
   type SessionToolCall,
@@ -361,9 +362,14 @@ export async function runUploadHistory(opts: UploadHistoryOptions): Promise<void
     ? creds.apiUrl.replace(/\/policies\/sync$/, '/scan/report')
     : `${creds.apiUrl.replace(/\/$/, '')}/scan/report`;
 
+  // extractorVersion is wire-only metadata in this PR — the BE accepts
+  // unknown fields and doesn't yet read it. Future BE work can use it to
+  // surface "your data was last refreshed with detector vN" or to reject
+  // POSTs from older proxies once a minimum version is set.
   await postJson(scanUrl, creds.apiKey, {
     ...summary,
     sessionTotals,
+    extractorVersion: CANONICAL_EXTRACTOR_VERSION,
   });
   console.log(chalk.green(`   ✓ Uploaded scanner findings`));
 
