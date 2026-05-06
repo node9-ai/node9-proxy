@@ -39,7 +39,7 @@ jobs:
         run: |
           git config user.name "node9[bot]"
           git config user.email "bot@node9.ai"
-          git fetch origin ${{ github.base_ref || 'main' }}
+          git fetch origin ${{ github.base_ref || 'dev' }}
 
       - uses: actions/setup-node@v4
         with:
@@ -57,7 +57,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           test_cmd: 'npm run build 2>&1 && npm test 2>&1'
           head_ref: ${{ github.event.client_payload.head_ref || github.head_ref || github.ref_name }}
-          base_ref: ${{ github.event.client_payload.base_ref || github.base_ref || 'main' }}
+          base_ref: ${{ github.event.client_payload.base_ref || github.base_ref || 'dev' }}
           iteration: ${{ github.event.client_payload.iteration || '1' }}
           feedback: ${{ github.event.client_payload.feedback || '' }}
           draft_pr_number: ${{ github.event.client_payload.draft_pr_number || '' }}
