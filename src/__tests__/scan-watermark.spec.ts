@@ -24,7 +24,14 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { loadWatermark, saveWatermark, tickScanWatcher } from '../daemon/scan-watermark';
+import {
+  loadWatermark,
+  saveWatermark,
+  tickScanWatcher,
+  markUploadComplete,
+  WATERMARK_SCHEMA_VERSION,
+} from '../daemon/scan-watermark';
+import { CANONICAL_EXTRACTOR_VERSION } from '@node9/policy-engine';
 
 // ── Per-test isolated filesystem ────────────────────────────────────────
 
@@ -140,9 +147,9 @@ describe('tickScanWatcher — first run', () => {
     expect(result.filesSkipped).toBe(1);
 
     // Watermark recorded the current size as the floor.
-    const wm = loadWatermark();
+    const state = loadWatermark();
     const expectedSize = fs.statSync(sessionPath()).size;
-    expect(wm.files[sessionPath()].scannedTo).toBe(expectedSize);
+    expect(state.wm.files[sessionPath()].scannedTo).toBe(expectedSize);
   });
 
   it('returns empty result when ~/.claude/projects/ does not exist', async () => {
@@ -529,6 +536,8 @@ describe('tickScanWatcher — opt-out', () => {
 describe('watermark persistence', () => {
   it('saves and reloads the watermark across simulated daemon restart', () => {
     const wm = {
+      schemaVersion: 2,
+      extractorVersion: 'canonical-v1',
       createdAt: '2026-05-03T12:00:00.000Z',
       files: {
         '/foo/a.jsonl': { scannedTo: 100 },
@@ -536,19 +545,164 @@ describe('watermark persistence', () => {
       },
     };
     saveWatermark(wm);
-    const loaded = loadWatermark();
-    expect(loaded).toEqual(wm);
+    const state = loadWatermark();
+    expect(state.status).toBe('current');
+    expect(state.wm).toEqual(wm);
   });
 
   it('returns a fresh seed when the watermark file is missing', () => {
-    const wm = loadWatermark();
-    expect(wm.files).toEqual({});
-    expect(typeof wm.createdAt).toBe('string');
+    const state = loadWatermark();
+    expect(state.status).toBe('fresh');
+    expect(state.wm.files).toEqual({});
+    expect(typeof state.wm.createdAt).toBe('string');
   });
 
   it('returns a fresh seed when the watermark file is corrupt', () => {
     fs.writeFileSync(path.join(tmpHome, '.node9', 'scan-watermark.json'), 'not json {{{');
-    const wm = loadWatermark();
-    expect(wm.files).toEqual({});
+    const state = loadWatermark();
+    expect(state.status).toBe('fresh');
+    expect(state.wm.files).toEqual({});
+  });
+});
+
+// ── Step 4 — schema/extractor migration (WatermarkState) ────────────────
+
+describe('watermark migration — extractor version drift', () => {
+  const wmPath = () => path.join(tmpHome, '.node9', 'scan-watermark.json');
+
+  function writeLegacyWatermark(
+    opts: {
+      extractorVersion?: string;
+      schemaVersion?: number;
+      pendingResetUploadAs?: 'totals';
+    } = {}
+  ): void {
+    fs.mkdirSync(path.dirname(wmPath()), { recursive: true });
+    fs.writeFileSync(
+      wmPath(),
+      JSON.stringify({
+        ...(opts.schemaVersion !== undefined && { schemaVersion: opts.schemaVersion }),
+        ...(opts.extractorVersion !== undefined && { extractorVersion: opts.extractorVersion }),
+        ...(opts.pendingResetUploadAs && { pendingResetUploadAs: opts.pendingResetUploadAs }),
+        createdAt: '2026-04-15T10:00:00.000Z',
+        files: {
+          '/foo/a.jsonl': { scannedTo: 84291 },
+          '/foo/b.jsonl': { scannedTo: 192018 },
+        },
+      })
+    );
+  }
+
+  it('legacy watermark (no schemaVersion / extractorVersion) → extractor-stale, offsets reset, createdAt preserved', () => {
+    writeLegacyWatermark();
+    const state = loadWatermark();
+    expect(state.status).toBe('extractor-stale');
+    if (state.status !== 'extractor-stale') return;
+    expect(state.wm.files['/foo/a.jsonl'].scannedTo).toBe(0);
+    expect(state.wm.files['/foo/b.jsonl'].scannedTo).toBe(0);
+    expect(state.wm.createdAt).toBe('2026-04-15T10:00:00.000Z');
+    expect(state.wm.schemaVersion).toBe(WATERMARK_SCHEMA_VERSION);
+    expect(state.wm.extractorVersion).toBe(CANONICAL_EXTRACTOR_VERSION);
+    expect(state.wm.pendingResetUploadAs).toBe('totals');
+  });
+
+  it('current watermark (matching versions) → current, offsets preserved, no reset', () => {
+    writeLegacyWatermark({
+      schemaVersion: WATERMARK_SCHEMA_VERSION,
+      extractorVersion: CANONICAL_EXTRACTOR_VERSION,
+    });
+    const state = loadWatermark();
+    expect(state.status).toBe('current');
+    expect(state.wm.files['/foo/a.jsonl'].scannedTo).toBe(84291);
+    expect(state.wm.files['/foo/b.jsonl'].scannedTo).toBe(192018);
+    expect(state.wm.pendingResetUploadAs).toBeUndefined();
+  });
+
+  it('schema-future (newer daemon) → refuses to write, file unchanged after a tick', async () => {
+    writeLegacyWatermark({
+      schemaVersion: WATERMARK_SCHEMA_VERSION + 1,
+      extractorVersion: 'canonical-v2',
+    });
+    const before = fs.readFileSync(wmPath(), 'utf-8');
+    const state = loadWatermark();
+    expect(state.status).toBe('schema-future');
+    const result = await tickScanWatcher();
+    expect(result.schemaFuture).toBe(true);
+    expect(result.findings).toEqual([]);
+    // File untouched.
+    const after = fs.readFileSync(wmPath(), 'utf-8');
+    expect(after).toBe(before);
+  });
+
+  it('extractor-stale → tick.uploadAs is "totals" so the SaaS POST overwrites instead of incrementing', async () => {
+    // Simulate: user previously ran --upload-history (their session row
+    // already has counts), then upgraded the daemon to a new detector.
+    // Without this fix, the daemon's first post-reset tick would
+    // increment on top of the upload-history baseline, double-counting.
+    writeLegacyWatermark();
+    // Drop a small JSONL so there's something to scan after the reset.
+    writeSession(lineWithGitHubToken(), Date.now() + 1_000);
+    const result = await tickScanWatcher();
+    expect(result.uploadAs).toBe('totals');
+  });
+
+  it('after markUploadComplete(), pendingResetUploadAs flag is cleared and next tick reverts to "deltas"', async () => {
+    writeLegacyWatermark();
+    writeSession(lineWithGitHubToken(), Date.now() + 1_000);
+    const first = await tickScanWatcher();
+    expect(first.uploadAs).toBe('totals');
+
+    markUploadComplete();
+
+    // Append another finding so the next tick has something to do.
+    fs.appendFileSync(sessionPath(), lineWithGitHubToken());
+    const second = await tickScanWatcher();
+    expect(second.uploadAs).toBe('deltas');
+  });
+
+  it('NODE9_SKIP_WATERMARK_RESET=1 acknowledges the upgrade, KEEPS scannedTo offsets, marks state current', async () => {
+    writeLegacyWatermark();
+    process.env.NODE9_SKIP_WATERMARK_RESET = '1';
+    try {
+      // Pre-existing files in the watermark don't exist on disk, but
+      // tickScanWatcher should still run and persist the new
+      // extractorVersion stamped onto the preserved offsets.
+      await tickScanWatcher();
+    } finally {
+      delete process.env.NODE9_SKIP_WATERMARK_RESET;
+    }
+    const after = loadWatermark();
+    expect(after.status).toBe('current');
+    if (after.status !== 'current') return;
+    expect(after.wm.files['/foo/a.jsonl'].scannedTo).toBe(84291);
+    expect(after.wm.files['/foo/b.jsonl'].scannedTo).toBe(192018);
+    expect(after.wm.extractorVersion).toBe(CANONICAL_EXTRACTOR_VERSION);
+    expect(after.wm.pendingResetUploadAs).toBeUndefined();
+  });
+
+  it('markUploadComplete: bails when on-disk file flips back to extractor-stale between tick and call', () => {
+    // Race window: tick saved a 'current' watermark with advanced offsets
+    // and pendingResetUploadAs='totals'. Then a concurrent process (or
+    // the user manually) restored a legacy watermark. Without the
+    // extractor-stale guard, markUploadComplete would load the stale
+    // file, see in-memory reset offsets (scannedTo=0 for every file),
+    // delete the flag, and save — clobbering the scan progress.
+    //
+    // With the guard, markUploadComplete refuses to write; the next tick
+    // sees extractor-stale and runs the migration cleanly.
+    writeLegacyWatermark({
+      // Concurrent edit that brought the file BACK to legacy state.
+      // Simulates "user restored ~/.node9/scan-watermark.json from a
+      // backup made before the upgrade."
+    });
+
+    // Snapshot the on-disk state before markUploadComplete runs.
+    const before = fs.readFileSync(wmPath(), 'utf-8');
+    markUploadComplete();
+    const after = fs.readFileSync(wmPath(), 'utf-8');
+
+    // Guard fired → file untouched. Offsets preserved for the next
+    // tick to run the actual migration on.
+    expect(after).toBe(before);
   });
 });

@@ -135,9 +135,11 @@ describe('Gemini Integration Security', () => {
 describe('Gemini BeforeTool payload format', () => {
   it('evaluates tool policy from Gemini { name, args } format', async () => {
     mockConfig({});
-    // Gemini sends { name, args } not { tool_name, tool_input }
+    // Gemini sends { name, args } not { tool_name, tool_input }.
+    // The engine's AST FS-op tier blocks `rm -rf /` outright (root wipe).
     const dangerous = await evaluatePolicy('Shell', { command: 'rm -rf /' });
-    expect(dangerous.decision).toBe('review');
+    expect(dangerous.decision).toBe('block');
+    expect(dangerous.ruleName).toBe('block-rm-rf-home');
   });
 
   it('blocks dangerous Gemini tool via name/args format', async () => {

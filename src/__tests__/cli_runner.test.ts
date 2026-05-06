@@ -109,9 +109,12 @@ describe('getGlobalSettings', () => {
 
 describe('smart runner — shell command policy', () => {
   it('blocks dangerous shell commands', async () => {
-    // Use a non-sandbox path — /tmp/** is in sandboxPaths and would be auto-allowed
+    // /home/user/data is under $HOME and not in the cache allow-list, so the
+    // engine's AST FS-op tier returns block-rm-rf-home → 'block' (matches the
+    // CLI scan; previously reviewed-only via dangerous-words tier).
     const result = await evaluatePolicy('shell', { command: 'rm -rf /home/user/data' });
-    expect(result.decision).toBe('review');
+    expect(result.decision).toBe('block');
+    expect(result.ruleName).toBe('block-rm-rf-home');
   });
 
   it('allows safe shell commands', async () => {

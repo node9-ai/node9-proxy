@@ -22,8 +22,16 @@ import https from 'https';
 import os from 'os';
 import path from 'path';
 import chalk from 'chalk';
-import { summarizeScan, type ScanFinding, type ScanSignals } from '@node9/policy-engine';
-import { getCredentials } from './config/index.js';
+import {
+  summarizeScan,
+  extractSessionLevelFindings,
+  toScanFinding,
+  CANONICAL_EXTRACTOR_VERSION,
+  type ScanFinding,
+  type ScanSignals,
+  type SessionToolCall,
+} from '@node9/policy-engine';
+import { getCredentials, getConfig } from './config/index.js';
 import { parseJSONLFile, decodeProjectDirName } from './costSync.js';
 
 interface UploadHistoryOptions {
@@ -222,6 +230,21 @@ export async function runUploadHistory(opts: UploadHistoryOptions): Promise<void
     ReturnType<typeof parseJSONLFile> extends Map<string, infer T> ? T : never
   > = [];
 
+  // Loop-detection settings for backfill. The live hook's config (default
+  // threshold=5, windowSeconds=120) is the wrong fit for historical data:
+  // an agent that did Edit ×126 to one file across an afternoon never
+  // produces 5 calls inside a 2-minute window, so the live setting would
+  // miss every real loop in the upload. Use the CLI scan's heuristic
+  // instead: threshold=3 with no time window. Mirrors scan.ts:351's
+  // LOOP_THRESHOLD and detectLoops semantics so dashboard loop counts
+  // align with `node9 scan`'s terminal output.
+  const liveLoopCfg = getConfig().policy.loopDetection;
+  const loopCfg = {
+    enabled: liveLoopCfg.enabled,
+    threshold: 3,
+    windowSeconds: 0, // "no window" — engine treats this as session-wide
+  };
+
   for (const { filePath, sessionId, projectDir } of iterateJsonlFiles(cutoffMs)) {
     filesScanned++;
     let content: string;
@@ -231,6 +254,11 @@ export async function runUploadHistory(opts: UploadHistoryOptions): Promise<void
       continue;
     }
     let lineIndex = 0;
+    // Per-session SessionToolCall[] for the loop pass below. We only buffer
+    // the fields extractSessionLevelFindings needs (toolName/args/timestamp/
+    // lineIndex) — not raw line content — so memory stays bounded even for
+    // large windows.
+    const sessionCalls: SessionToolCall[] = [];
     for (const line of content.split('\n')) {
       if (!line.trim()) continue;
       let obj: Record<string, unknown>;
@@ -255,9 +283,45 @@ export async function runUploadHistory(opts: UploadHistoryOptions): Promise<void
       ) {
         totalToolCalls++;
         toolCallsBySession[sessionId] = (toolCallsBySession[sessionId] ?? 0) + 1;
+        // Capture each tool_use block as a SessionToolCall for the
+        // session-level loop pass below.
+        const ts = typeof obj.timestamp === 'string' ? (obj.timestamp as string) : '';
+        for (const block of msg!.content as unknown[]) {
+          if (!block || typeof block !== 'object') continue;
+          const b = block as Record<string, unknown>;
+          if (b.type !== 'tool_use') continue;
+          sessionCalls.push({
+            toolName: typeof b.name === 'string' ? (b.name as string) : '',
+            args: (b.input as Record<string, unknown>) ?? {},
+            timestamp: ts,
+            lineIndex,
+          });
+        }
       }
       linesParsed++;
       lineIndex++;
+    }
+
+    // ── Session-level loop detection ─────────────────────────────────────
+    // extractFindingsFromLine is per-line and never emits loop findings.
+    // Run the engine's session-level pass once per session and project the
+    // canonical loop findings to ScanFinding so the dashboard's "Loops
+    // Blocked" panel reflects backfilled history, not just live ticks.
+    if (loopCfg.enabled && sessionCalls.length > 0) {
+      const loops = extractSessionLevelFindings(sessionCalls, {
+        sessionId,
+        project: decodeProjectDirName(projectDir),
+        agent: 'claude',
+        loopDetection: {
+          enabled: loopCfg.enabled,
+          threshold: loopCfg.threshold,
+          windowSeconds: loopCfg.windowSeconds,
+        },
+      });
+      for (const cf of loops) {
+        const sf = toScanFinding(cf);
+        if (sf) findings.push(sf);
+      }
     }
 
     // Cost rows — same parser the live cost-sync uses.
@@ -298,9 +362,14 @@ export async function runUploadHistory(opts: UploadHistoryOptions): Promise<void
     ? creds.apiUrl.replace(/\/policies\/sync$/, '/scan/report')
     : `${creds.apiUrl.replace(/\/$/, '')}/scan/report`;
 
+  // extractorVersion is wire-only metadata in this PR — the BE accepts
+  // unknown fields and doesn't yet read it. Future BE work can use it to
+  // surface "your data was last refreshed with detector vN" or to reject
+  // POSTs from older proxies once a minimum version is set.
   await postJson(scanUrl, creds.apiKey, {
     ...summary,
     sessionTotals,
+    extractorVersion: CANONICAL_EXTRACTOR_VERSION,
   });
   console.log(chalk.green(`   ✓ Uploaded scanner findings`));
 
