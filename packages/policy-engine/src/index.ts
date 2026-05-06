@@ -110,12 +110,37 @@ export {
 } from './scan';
 
 // Regex detectors for destructive ops / privilege escalation / sensitive
-// paths. Used by the daemon watermark scanner; will also feed the upcoming
-// canonical extractor that unifies CLI scan, daemon, and --upload-history
-// behind one detection pipeline.
+// paths. Used by the daemon watermark scanner and the canonical extractor.
 export {
   DESTRUCTIVE_OP_RE,
   PRIVILEGE_ESCALATION_RE,
   SENSITIVE_PATH_RE,
   FILE_TOOLS,
 } from './scan/destructive-regex';
+
+// PII detection — pure regex over a string. One source of truth for both the
+// daemon watermark and the canonical extractor.
+export type { PiiPattern } from './scan/pii';
+export { detectPii } from './scan/pii';
+
+// Canonical extractor — single detection pipeline every JSONL-scanning
+// consumer (CLI scan, daemon watermark, --upload-history backfill) calls so
+// they all produce identical findings on identical input.
+export type {
+  CanonicalFinding,
+  CanonicalFindingType,
+  CanonicalAgent,
+  CanonicalSourceType,
+  ToolCallEntry,
+  ExtractContext,
+  SessionExtractContext,
+  SessionToolCall,
+} from './scan/canonical';
+export {
+  extractCanonicalFindings,
+  extractSessionLevelFindings,
+  dedupeCanonicalFindings,
+  toScanFinding,
+  previewArgs,
+  LONG_OUTPUT_THRESHOLD_BYTES,
+} from './scan/canonical';
