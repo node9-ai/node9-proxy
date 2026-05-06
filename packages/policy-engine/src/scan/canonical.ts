@@ -155,7 +155,16 @@ export interface SessionExtractContext {
   sessionId: string;
   project: string;
   agent: CanonicalAgent;
-  /** Loop-detection window settings. Mirrors PolicyConfig.policy.loopDetection. */
+  /**
+   * Loop-detection window settings. Mirrors PolicyConfig.policy.loopDetection.
+   *
+   * `windowSeconds: 0` means "no window" — count all matching calls in the
+   * session regardless of timing. This is the right setting for historical
+   * backfill (--upload-history): an agent that hammered the same Edit on
+   * the same file 126 times across hours is the loop pattern users care
+   * about, but a 120s window would never fire on it. The live hook keeps
+   * the small window because it's racing against an actively running agent.
+   */
   loopDetection: {
     enabled: boolean;
     threshold: number;
@@ -421,7 +430,13 @@ export function extractSessionLevelFindings(
 
   const out: CanonicalFinding[] = [];
   const seenLoopKeys = new Set<string>();
-  const windowMs = ctx.loopDetection.windowSeconds * 1000;
+  // windowSeconds === 0 → "no window": treat the entire session as the window
+  // so historical loops fire even when calls are spaced hours apart. Avoid
+  // Number.MAX_SAFE_INTEGER (overflow when multiplied by 1000); a year of ms
+  // is a sufficient horizon for any realistic JSONL session.
+  const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
+  const windowMs =
+    ctx.loopDetection.windowSeconds <= 0 ? ONE_YEAR_MS : ctx.loopDetection.windowSeconds * 1000;
 
   // Slide a window of recent records keyed by (toolName, argsHash). The
   // engine helper handles cutoff + counting; we feed it records in

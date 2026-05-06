@@ -229,12 +229,20 @@ export async function runUploadHistory(opts: UploadHistoryOptions): Promise<void
     ReturnType<typeof parseJSONLFile> extends Map<string, infer T> ? T : never
   > = [];
 
-  // Loop-detection config — same source the live hook uses, so the
-  // dashboard's loop count interprets backfilled history under the user's
-  // actual policy. Note: CLI scan (`node9 scan`) uses a different loop
-  // heuristic (threshold=3, 10-min timespan classifier) and may report a
-  // different number — that divergence is the next unification step.
-  const loopCfg = getConfig().policy.loopDetection;
+  // Loop-detection settings for backfill. The live hook's config (default
+  // threshold=5, windowSeconds=120) is the wrong fit for historical data:
+  // an agent that did Edit ×126 to one file across an afternoon never
+  // produces 5 calls inside a 2-minute window, so the live setting would
+  // miss every real loop in the upload. Use the CLI scan's heuristic
+  // instead: threshold=3 with no time window. Mirrors scan.ts:351's
+  // LOOP_THRESHOLD and detectLoops semantics so dashboard loop counts
+  // align with `node9 scan`'s terminal output.
+  const liveLoopCfg = getConfig().policy.loopDetection;
+  const loopCfg = {
+    enabled: liveLoopCfg.enabled,
+    threshold: 3,
+    windowSeconds: 0, // "no window" — engine treats this as session-wide
+  };
 
   for (const { filePath, sessionId, projectDir } of iterateJsonlFiles(cutoffMs)) {
     filesScanned++;
