@@ -19,7 +19,15 @@ import os from 'os';
 import path from 'path';
 import readline from 'readline';
 import { scanArgs } from '../dlp.js';
-import { analyzePipeChain, detectDangerousShellExec, type ScanFinding } from '@node9/policy-engine';
+import {
+  analyzePipeChain,
+  detectDangerousShellExec,
+  DESTRUCTIVE_OP_RE,
+  PRIVILEGE_ESCALATION_RE,
+  SENSITIVE_PATH_RE,
+  FILE_TOOLS,
+  type ScanFinding,
+} from '@node9/policy-engine';
 
 const PROJECTS_DIR = () => path.join(os.homedir(), '.claude', 'projects');
 const WATERMARK_FILE = () => path.join(os.homedir(), '.node9', 'scan-watermark.json');
@@ -328,14 +336,6 @@ export function extractFindingsFromLine(
 }
 
 /**
- * Destructive-op regex. Word-boundary anchored so partial matches don't
- * fire (e.g. "term" inside "terminate" wouldn't match `\brm\b`). Each
- * pattern is independently provable as destructive — no fuzzy heuristics.
- */
-const DESTRUCTIVE_OP_RE =
-  /\brm\s+-[rRf]+\b|\bDROP\s+(TABLE|DATABASE|COLLECTION|SCHEMA)\b|\bTRUNCATE\s+TABLE\b|\bgit\s+push\s+(--force|-f)\b|\bFLUSHALL\b|\bFLUSHDB\b|\bkubectl\s+delete\b|\bhelm\s+uninstall\b/i;
-
-/**
  * Threshold for "long output" — tool results larger than this are
  * counted as redaction-eligible. 100KB is the value the proxy's
  * runtime redaction layer uses too; staying consistent makes the
@@ -343,37 +343,9 @@ const DESTRUCTIVE_OP_RE =
  */
 const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 
-/**
- * Tool names that read or grep file contents. Used to decide whether
- * the file_path/path/pattern arg is worth running against
- * SENSITIVE_PATH_RE — restricts the check to file-reading tools so a
- * Bash command containing the same path doesn't double-count.
- */
-const FILE_TOOLS = new Set([
-  'read',
-  'read_file',
-  'edit',
-  'edit_file',
-  'write',
-  'write_file',
-  'multiedit',
-  'grep',
-  'grep_search',
-  'glob',
-  'list_files',
-]);
-
-/**
- * Sensitive file paths the agent shouldn't be reading via tool calls.
- * Mirrors the blast walker's path set — same files matter, here
- * detected at tool-call-time rather than fs-walk-time.
- *
- * `\b` boundaries on names so substring noise doesn't trigger; the
- * patterns assume the proxy normalises ~ in inputs (which it does
- * via path expansion before we see them).
- */
-const SENSITIVE_PATH_RE =
-  /\.aws\/(credentials|config)\b|\.ssh\/(id_rsa|id_ed25519|id_ecdsa|id_dsa)\b|\.env(\.|$|\b)|\.config\/gcloud\/credentials\.db\b|\.docker\/config\.json\b|\.netrc\b|\.npmrc\b|\.node9\/credentials\.json\b/i;
+// DESTRUCTIVE_OP_RE, PRIVILEGE_ESCALATION_RE, SENSITIVE_PATH_RE, FILE_TOOLS
+// now live in @node9/policy-engine (scan/destructive-regex.ts) so the live
+// daemon and the canonical extractor share one source of truth.
 
 /**
  * Detect PII patterns in a string. Returns an array of finding pattern
@@ -407,12 +379,6 @@ const PII_PHONE_RE = /\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b/;
 // (51-55, 2221-2720), Amex (34/37), Discover (6). 16-digit grouping with
 // optional dashes/spaces between groups of 4.
 const PII_CC_RE = /\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6\d{3})[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b/;
-
-/**
- * Privilege-escalation regex. Standalone tokens only — `\bsudo\b` not
- * `sudo` to avoid matching e.g. `pseudo` substrings.
- */
-const PRIVILEGE_ESCALATION_RE = /\b(sudo|su)\b\s+[a-z]|\bchmod\s+(0?777|\+x)\b|\bchown\s+root\b/i;
 
 /**
  * Result of one tick — what was scanned and what was found. Caller pushes
