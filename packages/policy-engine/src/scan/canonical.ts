@@ -216,7 +216,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v1';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'b1cb91e2352427e9';
+export const CANONICAL_EXTRACTOR_HASH = '88b9f039ec4abf9f';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
@@ -477,10 +477,20 @@ export function extractSessionLevelFindings(
   // Slide a window of recent records keyed by (toolName, argsHash). The
   // engine helper handles cutoff + counting; we feed it records in
   // timestamp order and pass the current call's timestamp as `now`.
+  //
+  // Empty / unparseable timestamps yield NaN from new Date().getTime().
+  // Passing NaN as `now` makes evaluateLoopWindow's cutoff comparison
+  // (`r.ts >= cutoff`) always false — every record gets filtered out and
+  // loop detection silently produces nothing. Synthesize a monotonic
+  // sequence based on the call's index instead, so the windowing logic
+  // still works even on agents (Codex, future formats) that omit the
+  // timestamp field.
   let records: ToolCallRecord[] = [];
+  let syntheticTs = 0;
   for (let i = 0; i < calls.length; i++) {
     const call = calls[i];
-    const now = new Date(call.timestamp).getTime();
+    const parsed = new Date(call.timestamp).getTime();
+    const now = Number.isFinite(parsed) ? parsed : ++syntheticTs;
     const verdict = evaluateLoopWindow(
       records,
       call.toolName,

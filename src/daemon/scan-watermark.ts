@@ -464,7 +464,16 @@ export interface ScanTickResult {
  */
 export function markUploadComplete(): void {
   const state = loadWatermark();
+  // schema-future: never write back, current daemon doesn't understand
+  // the file's shape.
   if (state.status === 'schema-future') return;
+  // extractor-stale: the on-disk file was concurrently rewound to a
+  // different extractorVersion between our tick and this call. Saving
+  // here would persist the in-memory `extractor-stale` state which
+  // resets all scannedTo to 0 — clobbering whatever scan progress the
+  // tick just recorded. Bail; the next tick handles the new stale
+  // state cleanly.
+  if (state.status === 'extractor-stale') return;
   if (!state.wm.pendingResetUploadAs) return;
   delete state.wm.pendingResetUploadAs;
   saveWatermark(state.wm);

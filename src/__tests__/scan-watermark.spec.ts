@@ -679,4 +679,30 @@ describe('watermark migration — extractor version drift', () => {
     expect(after.wm.extractorVersion).toBe(CANONICAL_EXTRACTOR_VERSION);
     expect(after.wm.pendingResetUploadAs).toBeUndefined();
   });
+
+  it('markUploadComplete: bails when on-disk file flips back to extractor-stale between tick and call', () => {
+    // Race window: tick saved a 'current' watermark with advanced offsets
+    // and pendingResetUploadAs='totals'. Then a concurrent process (or
+    // the user manually) restored a legacy watermark. Without the
+    // extractor-stale guard, markUploadComplete would load the stale
+    // file, see in-memory reset offsets (scannedTo=0 for every file),
+    // delete the flag, and save — clobbering the scan progress.
+    //
+    // With the guard, markUploadComplete refuses to write; the next tick
+    // sees extractor-stale and runs the migration cleanly.
+    writeLegacyWatermark({
+      // Concurrent edit that brought the file BACK to legacy state.
+      // Simulates "user restored ~/.node9/scan-watermark.json from a
+      // backup made before the upgrade."
+    });
+
+    // Snapshot the on-disk state before markUploadComplete runs.
+    const before = fs.readFileSync(wmPath(), 'utf-8');
+    markUploadComplete();
+    const after = fs.readFileSync(wmPath(), 'utf-8');
+
+    // Guard fired → file untouched. Offsets preserved for the next
+    // tick to run the actual migration on.
+    expect(after).toBe(before);
+  });
 });

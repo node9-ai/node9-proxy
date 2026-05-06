@@ -236,6 +236,30 @@ describe('extractSessionLevelFindings — loop detection', () => {
     expect(out).toHaveLength(1);
   });
 
+  it('still detects loops when call timestamps are missing or unparseable', () => {
+    // Codex JSONL (and malformed lines from any agent) can omit the
+    // timestamp. Before the NaN guard, evaluateLoopWindow's cutoff
+    // collapsed to NaN and every record got filtered out, silently
+    // suppressing every loop in the session. Synthetic-ts fallback
+    // restores forward progression so windowing still works.
+    const calls: SessionToolCall[] = Array.from({ length: 5 }, (_, i) => ({
+      toolName: 'Bash',
+      args: { command: 'echo ts-missing' },
+      timestamp: '', // empty → new Date('').getTime() === NaN
+      lineIndex: i,
+    }));
+    const ctx: SessionExtractContext = {
+      sessionId: 'sess',
+      project: 'p',
+      agent: 'claude',
+      loopDetection: { enabled: true, threshold: 4, windowSeconds: 0 },
+    };
+    const out = extractSessionLevelFindings(calls, ctx);
+    expect(out).toHaveLength(1);
+    expect(out[0].type).toBe('loop');
+    expect(out[0].loopCount).toBeGreaterThanOrEqual(4);
+  });
+
   it('emits no loop finding when loopDetection is disabled', () => {
     const ctx: SessionExtractContext = {
       sessionId: 'sess',
