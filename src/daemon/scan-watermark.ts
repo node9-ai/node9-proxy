@@ -20,13 +20,13 @@ import path from 'path';
 import readline from 'readline';
 import { scanArgs } from '../dlp.js';
 import {
-  analyzePipeChain,
-  detectDangerousShellExec,
-  DESTRUCTIVE_OP_RE,
-  PRIVILEGE_ESCALATION_RE,
-  SENSITIVE_PATH_RE,
-  FILE_TOOLS,
+  detectPii,
+  extractCanonicalFindings,
+  toScanFinding,
+  LONG_OUTPUT_THRESHOLD_BYTES as ENGINE_LONG_OUTPUT_THRESHOLD_BYTES,
   type ScanFinding,
+  type ToolCallEntry,
+  type ExtractContext,
 } from '@node9/policy-engine';
 
 const PROJECTS_DIR = () => path.join(os.homedir(), '.claude', 'projects');
@@ -227,14 +227,25 @@ export function extractFindingsFromLine(
     }
   }
 
-  // ── Tool-use shell AST + regex detection ────────────────────────────
+  // ── Per-tool-call detection — delegate to the canonical extractor ──
   // Assistant messages on Claude Code carry an array of content blocks;
   // tool invocations are { type: 'tool_use', name: 'Bash', input: { command } }.
-  // We walk those blocks and run two layers of detection:
-  //   1. AST detectors (engine) for eval-of-remote and pipe-to-shell —
-  //      deterministic, no false positives.
-  //   2. Regex extractors for destructive ops + privilege escalation —
-  //      cheap, single-line, low FP rate on the patterns matched.
+  // For each tool_use we build a ToolCallEntry and feed it to the engine's
+  // canonical extractor — same detection pipeline the CLI scan uses, so
+  // hook + scan + watermark all agree on identical input.
+  //
+  // tool_result blocks aren't tool calls but they carry the size signal
+  // for long-output-redacted; we encode that as outputBytes on a synthetic
+  // ToolCallEntry whose name attribution is still useful.
+  const ctx: ExtractContext = {
+    sessionId,
+    lineIndex,
+    project: '',
+    agent: 'claude',
+    rules: [],
+    toolInspection: { bash: 'command', execute_bash: 'command' },
+    dlpEnabled: false, // line-level DLP runs above already
+  };
   const message = (line as Record<string, unknown>).message;
   if (message && typeof message === 'object') {
     const content = (message as Record<string, unknown>).content;
@@ -243,12 +254,6 @@ export function extractFindingsFromLine(
         if (!block || typeof block !== 'object') continue;
         const b = block as Record<string, unknown>;
 
-        // ── Long output redactions (tool_result blocks) ────────────
-        // The proxy redacts oversized tool outputs before they reach the
-        // model — saves tokens, prevents context-window blow-up, hides
-        // raw fixture data. We count occurrences here as a workflow
-        // signal (agent generated huge output) without surfacing the
-        // content itself.
         if (b.type === 'tool_result') {
           const c = b.content;
           const len =
@@ -260,74 +265,21 @@ export function extractFindingsFromLine(
               lineIndex,
             });
           }
+          continue;
         }
 
         if (b.type !== 'tool_use') continue;
-        const toolName = typeof b.name === 'string' ? b.name.toLowerCase() : '';
-        const input = b.input as Record<string, unknown> | undefined;
-
-        // ── Sensitive file reads ──────────────────────────────────
-        // Read/Edit/Grep/Glob agents that target ~/.aws/, ~/.ssh/,
-        // .env*, and friends. Same path set blast walks. The signal
-        // here is "agent tried to read these files via a tool call"
-        // — distinct from blast's "they were reachable on disk".
-        if (FILE_TOOLS.has(toolName)) {
-          const filePath =
-            (typeof input?.file_path === 'string' && input.file_path) ||
-            (typeof input?.path === 'string' && input.path) ||
-            (typeof input?.pattern === 'string' && input.pattern) ||
-            '';
-          if (filePath && SENSITIVE_PATH_RE.test(filePath)) {
-            findings.push({
-              type: 'sensitive-file-read',
-              sessionId,
-              lineIndex,
-            });
-          }
-        }
-
-        if (toolName !== 'bash' && toolName !== 'execute_bash') continue;
-        const command = input && typeof input.command === 'string' ? input.command : '';
-        if (!command) continue;
-
-        // eval/bash -c with remote download — engine returns 'block' or
-        // 'review' or undefined.
-        const verdict = detectDangerousShellExec(command);
-        if (verdict) {
-          findings.push({ type: 'eval-of-remote', sessionId, lineIndex });
-        }
-
-        // Pipe chain whose source is a credential file and sink is the
-        // network (or vice versa) — engine flags as critical.
-        const pipe = analyzePipeChain(command);
-        if (pipe.isPipeline && pipe.risk === 'critical') {
-          findings.push({ type: 'pipe-to-shell', sessionId, lineIndex });
-        }
-
-        // ── Destructive ops ────────────────────────────────────────
-        // Hard-to-reverse commands. These regexes are tight enough to
-        // avoid common false-positives:
-        //   - `rm -rf` requires the recursive+force flags together
-        //   - `DROP TABLE` / `DROP DATABASE` / `TRUNCATE TABLE` only
-        //     match on the SQL keyword sequence
-        //   - `git push --force` (and the alias `git push -f`) — pinned
-        //     deletions of remote history
-        //   - Redis FLUSHALL / FLUSHDB — wipe the entire datastore
-        //   - kubectl delete / helm uninstall — cluster-level teardown
-        if (DESTRUCTIVE_OP_RE.test(command)) {
-          findings.push({ type: 'destructive-op', sessionId, lineIndex });
-        }
-
-        // ── Privilege escalation ───────────────────────────────────
-        // sudo, su, chmod 777, chown root. Each implies the agent
-        // tried to broaden permissions. Matched as standalone tokens
-        // so we don't false-positive on substrings like 'pseudonym'.
-        if (PRIVILEGE_ESCALATION_RE.test(command)) {
-          findings.push({
-            type: 'privilege-escalation',
-            sessionId,
-            lineIndex,
-          });
+        const toolName = typeof b.name === 'string' ? b.name : '';
+        const input = (b.input as Record<string, unknown>) ?? {};
+        const call: ToolCallEntry = {
+          toolName,
+          args: input,
+          timestamp: typeof obj.timestamp === 'string' ? (obj.timestamp as string) : '',
+        };
+        const canonical = extractCanonicalFindings(call, ctx);
+        for (const cf of canonical) {
+          const sf = toScanFinding(cf);
+          if (sf) findings.push(sf);
         }
       }
     }
@@ -335,50 +287,15 @@ export function extractFindingsFromLine(
   return findings;
 }
 
-/**
- * Threshold for "long output" — tool results larger than this are
- * counted as redaction-eligible. 100KB is the value the proxy's
- * runtime redaction layer uses too; staying consistent makes the
- * counts comparable.
- */
-const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
+// LONG_OUTPUT_THRESHOLD_BYTES, DESTRUCTIVE_OP_RE, PRIVILEGE_ESCALATION_RE,
+// SENSITIVE_PATH_RE, FILE_TOOLS, detectPii — all live in @node9/policy-engine
+// now. The daemon imports the canonical extractor and a few raw helpers
+// for the line-level DLP/PII walk over non-tool-call content.
+const LONG_OUTPUT_THRESHOLD_BYTES = ENGINE_LONG_OUTPUT_THRESHOLD_BYTES;
 
-// DESTRUCTIVE_OP_RE, PRIVILEGE_ESCALATION_RE, SENSITIVE_PATH_RE, FILE_TOOLS
-// now live in @node9/policy-engine (scan/destructive-regex.ts) so the live
-// daemon and the canonical extractor share one source of truth.
-
-/**
- * Detect PII patterns in a string. Returns an array of finding pattern
- * names — one per distinct PII type found, deduplicated by type.
- *
- * Each regex requires structural delimiters that real PII has:
- *   - Email needs `@` + a TLD-like suffix
- *   - SSN needs the dash-delimited 3-2-4 layout
- *   - Phone (US) needs 3-3-4 with separators
- *   - Credit card needs 16 digits in groups of 4 with valid IIN prefix
- *
- * Without these structural anchors the FP rate would explode. If a real
- * PII string is in a different layout (no dashes for SSN, etc.), it
- * won't fire — that's a known gap and acceptable v1 behaviour.
- */
-function detectPii(text: string): string[] {
-  const found = new Set<string>();
-  // Cheap substring guards before we run the full regex — most strings
-  // contain none of these characters; skip the regex engine for them.
-  if (/@/.test(text) && PII_EMAIL_RE.test(text)) found.add('Email');
-  if (/-/.test(text) && PII_SSN_RE.test(text)) found.add('SSN');
-  if (PII_PHONE_RE.test(text)) found.add('Phone');
-  if (PII_CC_RE.test(text)) found.add('Credit Card');
-  return [...found];
-}
-
-const PII_EMAIL_RE = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/;
-const PII_SSN_RE = /\b\d{3}-\d{2}-\d{4}\b/;
-const PII_PHONE_RE = /\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b/;
-// IIN prefixes for the major card networks: Visa (4), Mastercard
-// (51-55, 2221-2720), Amex (34/37), Discover (6). 16-digit grouping with
-// optional dashes/spaces between groups of 4.
-const PII_CC_RE = /\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6\d{3})[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b/;
+// detectPii + PII regexes now live in @node9/policy-engine (scan/pii.ts)
+// so the canonical extractor and the daemon's line-level walk share one
+// source of truth.
 
 /**
  * Result of one tick — what was scanned and what was found. Caller pushes
