@@ -482,6 +482,18 @@ let activityHealthInterval: NodeJS.Timeout | null = null;
 let activityRebindAttempts: number[] = [];
 let activityCircuitTripped = false;
 
+/**
+ * Counter of unlinks the daemon performs on its OWN socket file. The fs.watch
+ * watcher fires for every rename event in the tmpdir, including the daemon's
+ * own self-cleanup unlinks at the start of bindActivitySocket(). Without this
+ * counter, those self-unlinks were interpreted as "external process unlinked
+ * the socket" → triggered attemptRebind → bindActivitySocket → another
+ * self-unlink → another watcher event → infinite ping-pong and circuit-
+ * breaker trip. The counter is incremented BEFORE every self-unlink and
+ * decremented by the watcher when the corresponding rename event arrives.
+ */
+let pendingSelfUnlinks = 0;
+
 function logActivitySocket(msg: string): void {
   // Always-on diagnostics — flight-recorder failures are invisible without this.
   try {
@@ -510,9 +522,11 @@ function shouldRebind(now: number = Date.now()): boolean {
 export const __activitySocketTestHooks = {
   shouldRebind,
   isCircuitTripped: () => activityCircuitTripped,
+  pendingSelfUnlinks: () => pendingSelfUnlinks,
   resetCircuitBreaker: () => {
     activityRebindAttempts = [];
     activityCircuitTripped = false;
+    pendingSelfUnlinks = 0;
   },
 };
 
@@ -528,8 +542,19 @@ export function startActivitySocket(): void {
       activitySocketWatcher = fs.watch(os.tmpdir(), (eventType, filename) => {
         if (filename !== path.basename(ACTIVITY_SOCKET_PATH)) return;
         if (eventType !== 'rename') return;
+        // Self-unlink suppression. Each call to bindActivitySocket() unlinks
+        // the stale socket file BEFORE re-binding. That unlink fires this
+        // watcher. Without this guard the watcher would treat the daemon's
+        // own cleanup as an external unlink and fire attemptRebind in a
+        // loop. The counter is set in bindActivitySocket(); we decrement
+        // here whether the file currently exists or not (the rename event
+        // and the bind that follows can interleave either way under load).
+        if (pendingSelfUnlinks > 0) {
+          pendingSelfUnlinks--;
+          return;
+        }
         if (fs.existsSync(ACTIVITY_SOCKET_PATH)) return;
-        attemptRebind('watch-unlink');
+        void attemptRebind('watch-unlink');
       });
       activitySocketWatcher.on('error', (err: Error) => {
         logActivitySocket(`watcher error: ${err.message}`);
@@ -544,7 +569,7 @@ export function startActivitySocket(): void {
   // Layer 2 (fallback) — fs.watch can be unreliable on macOS and network FS.
   // A 30s poll catches the case where the watcher missed an unlink.
   activityHealthInterval = setInterval(() => {
-    if (!fs.existsSync(ACTIVITY_SOCKET_PATH)) attemptRebind('health-probe');
+    if (!fs.existsSync(ACTIVITY_SOCKET_PATH)) void attemptRebind('health-probe');
   }, ACTIVITY_HEALTH_PROBE_MS);
   activityHealthInterval.unref();
 
@@ -561,7 +586,7 @@ export function startActivitySocket(): void {
   });
 }
 
-function attemptRebind(reason: string): void {
+async function attemptRebind(reason: string): Promise<void> {
   if (!shouldRebind()) {
     logActivitySocket(
       `circuit breaker tripped after ${ACTIVITY_REBIND_MAX_ATTEMPTS} attempts in ${ACTIVITY_REBIND_WINDOW_MS}ms — flight recorder down`
@@ -574,19 +599,36 @@ function attemptRebind(reason: string): void {
   }
   logActivitySocket(`rebinding (reason: ${reason}, attempt ${activityRebindAttempts.length})`);
   if (activitySocketServer) {
-    try {
-      activitySocketServer.close();
-    } catch {}
+    // Await close() before re-binding. close() is async — it stops accepting
+    // new connections and resolves once existing ones drain. Without the
+    // await, bindActivitySocket() races and hits EADDRINUSE because the old
+    // server is still listening on the path.
+    await new Promise<void>((resolve) => {
+      try {
+        activitySocketServer!.close(() => resolve());
+      } catch {
+        resolve();
+      }
+    });
     activitySocketServer = null;
   }
   bindActivitySocket();
 }
 
 function bindActivitySocket(): void {
-  // Clean up stale socket file from previous run / failed bind
+  // Clean up stale socket file from previous run / failed bind. Increment
+  // the self-unlink counter BEFORE the unlink so the watcher (which may
+  // observe the rename event before this function returns) suppresses its
+  // own self-triggered rebind. See pendingSelfUnlinks at top of file.
+  pendingSelfUnlinks++;
   try {
     fs.unlinkSync(ACTIVITY_SOCKET_PATH);
-  } catch {}
+  } catch {
+    // unlink failed (file didn't exist) — no rename event will fire, so
+    // give back the counter slot we reserved. Otherwise the next genuine
+    // external unlink would be silently absorbed by this leftover token.
+    pendingSelfUnlinks--;
+  }
 
   const ACTIVITY_MAX_BYTES = 1024 * 1024; // 1 MB guard against runaway senders
   const unixServer = net.createServer((socket) => {

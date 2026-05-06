@@ -217,4 +217,36 @@ describe('activity socket — self-healing rebind (#tail-stability)', () => {
     expect(sent).toBe(true);
     expect(await ssePromise).toBe(true);
   }, 15_000);
+
+  it("does not enter a rebind loop from the daemon's own cleanup unlinks", async ({ skip }) => {
+    if (process.platform === 'win32') skip();
+    if (!portWasFree) skip();
+
+    // Regression: bindActivitySocket()'s self-cleanup unlinkSync fires the
+    // tmpdir fs.watch watcher. Pre-fix, the watcher interpreted that as
+    // "external unlink" and triggered attemptRebind → bindActivitySocket
+    // → another self-unlink → another rebind, looping ~6 times/sec until
+    // the circuit breaker tripped. The pendingSelfUnlinks counter
+    // suppresses these self-events.
+    //
+    // Verification: read hook-debug.log over a 3s idle window and assert no
+    // new `circuit breaker tripped` rows AND no runaway `rebinding` rows.
+    // The loop produces 5+ rebinds in <1s in the bug scenario; we allow
+    // up to 2 to absorb any health-probe firings or scheduling jitter.
+    const hookDebugLog = path.join(tmpHome, '.node9', 'hook-debug.log');
+    const beforeBytes = fs.existsSync(hookDebugLog) ? fs.readFileSync(hookDebugLog, 'utf8') : '';
+    const beforeBreakerCount = (beforeBytes.match(/circuit breaker tripped/g) ?? []).length;
+    const beforeRebindCount = (beforeBytes.match(/\[activity-socket\] rebinding/g) ?? []).length;
+
+    await new Promise((r) => setTimeout(r, 3000));
+
+    const afterBytes = fs.readFileSync(hookDebugLog, 'utf8');
+    const afterBreakerCount = (afterBytes.match(/circuit breaker tripped/g) ?? []).length;
+    const afterRebindCount = (afterBytes.match(/\[activity-socket\] rebinding/g) ?? []).length;
+
+    expect(afterBreakerCount).toBe(beforeBreakerCount);
+    expect(afterRebindCount - beforeRebindCount).toBeLessThanOrEqual(2);
+    // Daemon's socket file should still be there (no orphaned-unlink state).
+    expect(fs.existsSync(ACTIVITY_SOCKET_PATH)).toBe(true);
+  }, 10_000);
 });
