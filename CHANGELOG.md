@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## Unreleased
+
+### Fixed
+
+- **Activity-socket rebind loop.** The flight-recorder Unix socket's self-heal used `fs.watch` on `tmpdir()`, which fired inotify events for the daemon's own unlink-then-listen sequence. The watcher would observe the file gone (between unlink and listen completing), trigger another rebind, fire another inotify event, and so on — quickly hitting `EADDRINUSE` and tripping the circuit breaker, leaving the flight recorder down with the warning _"Activity socket repeatedly disappearing — run: node9 daemon restart"_ until manual intervention. Replaced with a 2 s `setInterval` polling probe that cannot self-trigger. Detection latency on real socket loss goes from ~instant to ≤ 2 s. Adds a regression test asserting zero rebind log lines during quiet operation.
+
+---
+
 ## v1.10.0 — Installed Skill Pinning (AST 02 + AST 07)
 
 ### Added
