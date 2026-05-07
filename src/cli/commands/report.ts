@@ -7,6 +7,7 @@ import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { buildReportJson, type ReportPeriod } from '../render/report-json';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -412,7 +413,8 @@ export function registerReportCommand(program: Command): void {
     .description('Activity and security report — what Claude did, what was blocked')
     .option('--period <period>', 'today | 7d | 30d | month', '7d')
     .option('--no-tests', 'exclude test runner calls (npm test, vitest, pytest…) from stats')
-    .action((options: { period: string; tests: boolean }) => {
+    .option('--json', 'Emit machine-readable JSON to stdout (suppresses renderer)')
+    .action((options: { period: string; tests: boolean; json?: boolean }) => {
       const period: Period = (['today', '7d', '30d', 'month'] as const).includes(
         options.period as Period
       )
@@ -424,7 +426,7 @@ export function registerReportCommand(program: Command): void {
 
       // Warn immediately if any unacknowledged response-DLP findings exist
       const unackedDlp = allEntries.filter((e) => e.source === 'response-dlp');
-      if (unackedDlp.length > 0) {
+      if (unackedDlp.length > 0 && !options.json) {
         console.log('');
         console.log(
           chalk.bgRed.white.bold(
@@ -435,7 +437,7 @@ export function registerReportCommand(program: Command): void {
         );
       }
 
-      if (allEntries.length === 0) {
+      if (allEntries.length === 0 && !options.json) {
         console.log(
           chalk.yellow('\n  No audit data found. Run node9 with Claude Code to generate entries.\n')
         );
@@ -493,7 +495,7 @@ export function registerReportCommand(program: Command): void {
         return true;
       });
 
-      if (entries.length === 0) {
+      if (entries.length === 0 && !options.json) {
         console.log(chalk.yellow(`\n  No activity for period "${period}".\n`));
         return;
       }
@@ -567,6 +569,50 @@ export function registerReportCommand(program: Command): void {
 
       // Add Codex to agentMap if it had activity in the period (no hooks, so not in audit.log)
       if (codexToolCalls > 0) agentMap.set('Codex', (agentMap.get('Codex') ?? 0) + codexToolCalls);
+
+      // ── JSON output mode ────────────────────────────────────────────────
+      // Emits one valid JSON object to stdout and returns. Gates above
+      // already silenced the unacked-DLP warning and the no-data messages,
+      // so stdout is clean. For CI gates and external integrations.
+      if (options.json) {
+        const envelope = buildReportJson({
+          period: period as ReportPeriod,
+          start,
+          end,
+          excludedTests: filteredTestCount,
+          total: entries.length,
+          userApproved,
+          userDenied,
+          timedOut,
+          hardBlocked,
+          dlpBlocked,
+          observeDlp,
+          loopHits,
+          testPasses,
+          testFails,
+          unackedDlp: unackedDlp.length,
+          priorBlockRate,
+          cost: {
+            claudeUSD: claudeCostUSD,
+            codexUSD: codexCostUSD,
+            inputTokens: costInputTokens,
+            outputTokens: costOutputTokens,
+            cacheWriteTokens: costCacheWrite,
+            cacheReadTokens: costCacheRead,
+            byDay: costByDay,
+            byModel: costByModel,
+          },
+          toolMap,
+          blockMap,
+          agentMap,
+          mcpMap,
+          dailyMap,
+          hourMap,
+          generatedAt: new Date().toISOString(),
+        });
+        process.stdout.write(JSON.stringify(envelope, null, 2) + '\n');
+        return;
+      }
 
       const total = entries.length;
       const topTools = [...toolMap.entries()].sort((a, b) => b[1].calls - a[1].calls).slice(0, 8);
