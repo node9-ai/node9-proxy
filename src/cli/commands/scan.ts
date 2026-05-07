@@ -39,6 +39,19 @@ import {
 } from '../../scan-summary';
 import { getAgentsStatus } from '../../setup';
 import { runBlast, type BlastFinding } from './blast';
+import {
+  classifyScore,
+  computeLoopWaste,
+  topDlpPatterns,
+  topRulesByVerdict,
+} from '../render/scan-derive';
+import { buildScanJson } from '../render/scan-json';
+import {
+  appendScanHistory,
+  computeScanDelta,
+  readPreviousScan,
+  type ScanHistoryRecord,
+} from '../render/scan-history';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1766,20 +1779,27 @@ function verdictIcon(verdict: string): string {
   return verdict === 'block' ? '🛑' : '👁 ';
 }
 
-function printFindingRow(
+export function printFindingRow(
   f: FindingRef,
   drillDown: boolean,
   showSessionId: boolean,
   previewWidth: number
 ): void {
+  // Older findings are dimmed across the row so a wall of recent + ancient
+  // hits has clear visual hierarchy. Matches the existing DLP treatment
+  // (see Credential Leaks section) so all finding rows look symmetric.
+  const stale = isStaleFinding(f.timestamp);
   const ts = f.timestamp ? chalk.dim(fmtTs(f.timestamp) + '  ') : '';
   const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
-  const agentBadge =
-    f.agent === 'gemini'
-      ? chalk.blue('[Gemini]  ')
+  const agentLabel =
+    f.agent === 'gemini' ? '[Gemini]  ' : f.agent === 'codex' ? '[Codex]   ' : '[Claude]  ';
+  const agentBadge = stale
+    ? chalk.dim(agentLabel)
+    : f.agent === 'gemini'
+      ? chalk.blue(agentLabel)
       : f.agent === 'codex'
-        ? chalk.magenta('[Codex]   ')
-        : chalk.cyan('[Claude]  ');
+        ? chalk.magenta(agentLabel)
+        : chalk.cyan(agentLabel);
   // FindingRef.command is already the preview; fullCommand is the untruncated form.
   let cmdText: string;
   if (drillDown) {
@@ -1788,7 +1808,7 @@ function printFindingRow(
     cmdText = f.command;
     if (cmdText.length > previewWidth) cmdText = cmdText.slice(0, previewWidth - 1) + '…';
   }
-  const cmd = chalk.gray(cmdText);
+  const cmd = stale ? chalk.dim(cmdText) : chalk.gray(cmdText);
   const sessionSuffix =
     showSessionId && f.sessionId ? chalk.dim(`  → ${f.sessionId.slice(0, 8)}`) : '';
   console.log(`      ${ts}${proj}${agentBadge}${cmd}${sessionSuffix}`);
@@ -1844,7 +1864,7 @@ function compactRuleLabel(name: string): string {
   return label.replace(/-+/g, '-');
 }
 
-interface CompactInput {
+export interface CompactInput {
   scan: ScanResult;
   summary: ScanSummary;
   blast: {
@@ -1857,7 +1877,7 @@ interface CompactInput {
   reviewCount: number;
 }
 
-function renderCompactScorecard(input: CompactInput): void {
+export function renderCompactScorecard(input: CompactInput): void {
   const { scan, summary, blast, blastExposures, blockedCount, reviewCount } = input;
   const totalRisky = scan.findings.length + scan.dlpFindings.length;
 
@@ -1876,13 +1896,12 @@ function renderCompactScorecard(input: CompactInput): void {
   console.log('');
 
   // ── Score + risky count ──────────────────────────────────────────────
-  const scoreColor = blast.score >= 80 ? chalk.green : blast.score >= 50 ? chalk.yellow : chalk.red;
-  const scoreSeverity = blast.score >= 80 ? 'Good' : blast.score >= 50 ? 'At Risk' : 'Critical';
+  const score = classifyScore(blast.score);
   console.log(
     chalk.bold('Security Score: ') +
-      scoreColor.bold(`${blast.score}/100`) +
+      score.color.bold(`${blast.score}/100`) +
       chalk.dim('  ·  ') +
-      scoreColor(scoreSeverity)
+      score.color(score.label)
   );
   if (scan.totalCostUSD > 0) {
     console.log(
@@ -1896,14 +1915,8 @@ function renderCompactScorecard(input: CompactInput): void {
 
   // ── Per-category lines with callouts ─────────────────────────────────
   if (scan.dlpFindings.length > 0) {
-    const patternCounts = new Map<string, number>();
-    for (const f of scan.dlpFindings) {
-      patternCounts.set(f.patternName, (patternCounts.get(f.patternName) ?? 0) + 1);
-    }
-    const topPatterns = [...patternCounts.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 3)
-      .map(([name, count]) => (count > 1 ? `${name} ×${count}` : name))
+    const topPatterns = topDlpPatterns(scan.dlpFindings, 3)
+      .map((p) => (p.count > 1 ? `${p.name} ×${p.count}` : p.name))
       .join(', ');
     console.log(
       chalk.red('🔑  ') +
@@ -1914,17 +1927,7 @@ function renderCompactScorecard(input: CompactInput): void {
   }
 
   if (blockedCount > 0) {
-    const blockedRules: Array<{ name: string; count: number }> = [];
-    for (const section of summary.sections) {
-      for (const rule of section.rules) {
-        if (rule.verdict === 'block') {
-          blockedRules.push({ name: rule.name, count: rule.findings.length });
-        }
-      }
-    }
-    const topBlocked = blockedRules
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 3)
+    const topBlocked = topRulesByVerdict(summary.sections, 'block', 3)
       .map((r) =>
         r.count > 1 ? `${compactRuleLabel(r.name)} ×${r.count}` : compactRuleLabel(r.name)
       )
@@ -1945,9 +1948,7 @@ function renderCompactScorecard(input: CompactInput): void {
   const longIterations = scan.loopFindings.filter((l) => l.kind === 'long-iteration');
 
   if (realLoops.length > 0) {
-    const wastedCalls = realLoops.reduce((s, l) => s + Math.max(0, l.count - 1), 0);
-    const wastePct =
-      scan.totalToolCalls > 0 ? Math.round((wastedCalls / scan.totalToolCalls) * 100) : 0;
+    const { wastePct } = computeLoopWaste(realLoops, scan.totalToolCalls);
     const wasteParts: string[] = [];
     if (wastePct > 0) wasteParts.push(`${wastePct}% wasted`);
     if (summary.loopWastedUSD > 0) wasteParts.push('~' + fmtCost(summary.loopWastedUSD));
@@ -1969,17 +1970,7 @@ function renderCompactScorecard(input: CompactInput): void {
   }
 
   if (reviewCount > 0) {
-    const reviewRules: Array<{ name: string; count: number }> = [];
-    for (const section of summary.sections) {
-      for (const rule of section.rules) {
-        if (rule.verdict !== 'block') {
-          reviewRules.push({ name: rule.name, count: rule.findings.length });
-        }
-      }
-    }
-    const topReview = reviewRules
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 3)
+    const topReview = topRulesByVerdict(summary.sections, 'review', 3)
       .map((r) =>
         r.count > 1 ? `${compactRuleLabel(r.name)} ×${r.count}` : compactRuleLabel(r.name)
       )
@@ -2044,7 +2035,7 @@ interface BucketEntry {
   count: number;
 }
 
-function renderNarrativeScorecard(input: CompactInput): void {
+export function renderNarrativeScorecard(input: CompactInput): void {
   const { scan, summary, blast, blastExposures } = input;
 
   const critical: BucketEntry[] = [];
@@ -2053,14 +2044,8 @@ function renderNarrativeScorecard(input: CompactInput): void {
 
   // ── DLP findings → critical ─────────────────────────────────────────
   if (scan.dlpFindings.length > 0) {
-    const patterns = new Map<string, number>();
-    for (const f of scan.dlpFindings) {
-      patterns.set(f.patternName, (patterns.get(f.patternName) ?? 0) + 1);
-    }
-    const top = [...patterns.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 3)
-      .map(([name, n]) => (n > 1 ? `${name} ×${n}` : name))
+    const top = topDlpPatterns(scan.dlpFindings, 3)
+      .map((p) => (p.count > 1 ? `${p.name} ×${p.count}` : p.name))
       .join(', ');
     critical.push({
       label: `${scan.dlpFindings.length} credential leak${scan.dlpFindings.length !== 1 ? 's' : ''} (${top})`,
@@ -2092,9 +2077,7 @@ function renderNarrativeScorecard(input: CompactInput): void {
 
   // ── Loops → medium ──────────────────────────────────────────────────
   if (scan.loopFindings.length > 0) {
-    const wastedCalls = scan.loopFindings.reduce((s, l) => s + Math.max(0, l.count - 1), 0);
-    const wastePct =
-      scan.totalToolCalls > 0 ? Math.round((wastedCalls / scan.totalToolCalls) * 100) : 0;
+    const { wastePct } = computeLoopWaste(scan.loopFindings, scan.totalToolCalls);
     const cost = summary.loopWastedUSD > 0 ? `, ~${fmtCost(summary.loopWastedUSD)} wasted` : '';
     medium.push({
       label: `${scan.loopFindings.length} agent loops (${wastePct}% of calls${cost})`,
@@ -2127,14 +2110,13 @@ function renderNarrativeScorecard(input: CompactInput): void {
   console.log('');
 
   // ── Score ──────────────────────────────────────────────────────────
-  const scoreColor = blast.score >= 80 ? chalk.green : blast.score >= 50 ? chalk.yellow : chalk.red;
-  const scoreSeverity = blast.score >= 80 ? 'Good' : blast.score >= 50 ? 'At Risk' : 'Critical';
+  const score = classifyScore(blast.score);
   console.log(
-    (blast.score < 50 ? chalk.red.bold('⚠  ') : '') +
+    (score.band === 'critical' ? chalk.red.bold('⚠  ') : '') +
       chalk.bold('Security Score: ') +
-      scoreColor.bold(`${blast.score}/100`) +
+      score.color.bold(`${blast.score}/100`) +
       chalk.dim('  ·  ') +
-      scoreColor(scoreSeverity)
+      score.color(score.label)
   );
   console.log('');
 
@@ -2209,6 +2191,10 @@ export function registerScanCommand(program: Command): void {
     .option('--compact', 'Compact one-screen scorecard — for screenshots and sharing')
     .option('--narrative', 'Severity-grouped report — for video / dramatic sharing')
     .option(
+      '--json',
+      'Emit machine-readable JSON to stdout (suppresses banner, progress, and renderer)'
+    )
+    .option(
       '--upload-history',
       'Upload aggregate counts from existing JSONL sessions to the SaaS dashboard. ' +
         'Defaults to last 3 months; override with --since. Idempotent (safe to re-run).'
@@ -2226,9 +2212,19 @@ export function registerScanCommand(program: Command): void {
         drillDown?: boolean;
         compact?: boolean;
         narrative?: boolean;
+        json?: boolean;
         uploadHistory?: boolean;
         since?: string;
       }) => {
+        // --json is mutually exclusive with the human-output modes.
+        // Fail fast so a script doesn't silently get the wrong shape.
+        if (options.json && (options.compact || options.narrative || options.uploadHistory)) {
+          console.error(
+            'error: --json cannot be combined with --compact, --narrative, or --upload-history'
+          );
+          process.exit(1);
+        }
+
         // Backfill path — separate from the normal "show me a forecast"
         // mode. Doesn't render the full report, just walks JSONLs and
         // posts to the SaaS.
@@ -2259,8 +2255,11 @@ export function registerScanCommand(program: Command): void {
         // Compact / narrative modes print their own self-contained scorecard —
         // suppress the verbose preamble (banner + "scanning..." line) so the
         // output starts cleanly at the scorecard for screenshot / video use.
+        // --json suppresses everything outside the final JSON envelope so
+        // stdout is parseable.
         const screenshotMode = options.compact || options.narrative;
-        if (!screenshotMode) {
+        const quiet = screenshotMode || options.json;
+        if (!quiet) {
           console.log('');
           if (!isWired) {
             console.log(
@@ -2278,8 +2277,9 @@ export function registerScanCommand(program: Command): void {
           console.log('');
         }
 
-        const useTTY = process.stdout.isTTY === true && process.env.NODE9_WRAPPER !== '1';
-        if (!useTTY && !screenshotMode) {
+        const useTTY =
+          process.stdout.isTTY === true && process.env.NODE9_WRAPPER !== '1' && !options.json;
+        if (!useTTY && !quiet) {
           process.stdout.write(
             '  ' + chalk.dim('Scanning your history — this may take a moment...\n')
           );
@@ -2323,7 +2323,7 @@ export function registerScanCommand(program: Command): void {
         ]);
         if (useTTY) process.stdout.write('\r' + ' '.repeat(60) + '\r');
 
-        if (scan.filesScanned === 0) {
+        if (scan.filesScanned === 0 && !options.json) {
           console.log(chalk.yellow('  No session history found.'));
           console.log(
             chalk.gray(
@@ -2354,9 +2354,9 @@ export function registerScanCommand(program: Command): void {
             ? chalk.dim('(') + breakdownParts.join(chalk.dim(' · ')) + chalk.dim(')')
             : '';
 
-        // Suppress in compact / narrative modes — they render their own
-        // header line.
-        if (!screenshotMode) {
+        // Suppress in compact / narrative / json modes — they either render
+        // their own header line or emit no preamble at all.
+        if (!quiet) {
           console.log(
             '  ' +
               chalk.white(num(scan.sessions)) +
@@ -2383,6 +2383,43 @@ export function registerScanCommand(program: Command): void {
         // at the end of the output.
         const blast = runBlast();
         const blastExposures = blast.reachable.length + blast.envFindings.length;
+
+        // ── JSON output mode ────────────────────────────────────────────────
+        // Emits one valid JSON object to stdout and returns. All preamble and
+        // progress writes were already gated above so stdout is clean. For
+        // CI gates, scripting, and external integrations.
+        if (options.json) {
+          const envelope = buildScanJson({
+            scan,
+            summary,
+            blast,
+            isWired,
+            generatedAt: new Date().toISOString(),
+          });
+          process.stdout.write(JSON.stringify(envelope, null, 2) + '\n');
+          return;
+        }
+
+        // ── Trend tracking ──────────────────────────────────────────────────
+        // Only the default human-facing mode appends to scan-history.json
+        // and shows a delta. Compact / narrative modes are deterministic
+        // screenshot artifacts; --json already returned above. Fail-soft:
+        // any history I/O error is swallowed inside the helpers.
+        let scanDelta: ReturnType<typeof computeScanDelta> = null;
+        if (!screenshotMode) {
+          const previous = readPreviousScan();
+          const currentRecord: ScanHistoryRecord = {
+            timestamp: new Date().toISOString(),
+            score: blast.score,
+            blocked: blockedCount,
+            review: reviewCount,
+            leaks: scan.dlpFindings.length,
+            loops: scan.loopFindings.length,
+            totalCalls: scan.totalToolCalls,
+          };
+          appendScanHistory(currentRecord);
+          scanDelta = computeScanDelta(currentRecord, previous);
+        }
 
         // ── Compact scorecard mode ──────────────────────────────────────────
         // One-screen output for sharing on Reddit / Twitter / blog posts.
@@ -2429,21 +2466,32 @@ export function registerScanCommand(program: Command): void {
           // first 5 lines, not buried at the bottom. The detailed per-section
           // breakdowns below provide the rest.
           const totalRisky = totalFindings + scan.dlpFindings.length;
-          const scoreSeverity =
-            blast.score >= 80
-              ? chalk.green('Good')
-              : blast.score >= 50
-                ? chalk.yellow('At Risk')
-                : chalk.red.bold('Critical');
-          const scoreColor =
-            blast.score >= 80 ? chalk.green : blast.score >= 50 ? chalk.yellow : chalk.red;
+          const score = classifyScore(blast.score);
+          const severityDisplay =
+            score.band === 'critical' ? chalk.red.bold(score.label) : score.color(score.label);
+          // Trend suffix vs the user's last scan (if any). Higher score =
+          // safer, so a positive scoreDelta is good (green ▲); negative is
+          // bad (red ▼). Hidden when no prior data or unchanged same-day.
+          const trendSuffix = (() => {
+            if (!scanDelta) return '';
+            const { scoreDelta, daysAgo } = scanDelta;
+            if (scoreDelta === 0) return '';
+            const arrow =
+              scoreDelta > 0
+                ? chalk.green(`▲${scoreDelta}`)
+                : chalk.red(`▼${Math.abs(scoreDelta)}`);
+            const since =
+              daysAgo === 0 ? 'today' : daysAgo === 1 ? 'yesterday' : `${daysAgo} days ago`;
+            return chalk.dim('  ·  ') + arrow + chalk.dim(` since ${since}`);
+          })();
           console.log(
             '  ' +
-              (blast.score < 50 ? chalk.red.bold('⚠  ') : '') +
+              (score.band === 'critical' ? chalk.red.bold('⚠  ') : '') +
               chalk.bold('Security Score ') +
-              scoreColor.bold(`${blast.score}/100`) +
+              score.color.bold(`${blast.score}/100`) +
               '  ' +
-              scoreSeverity +
+              severityDisplay +
+              trendSuffix +
               chalk.dim('  ·  ') +
               (totalRisky > 0
                 ? chalk.red.bold(`${totalRisky} risky operation${totalRisky !== 1 ? 's' : ''}`)
@@ -2465,9 +2513,7 @@ export function registerScanCommand(program: Command): void {
             );
           }
           if (scan.loopFindings.length > 0) {
-            const wastedCalls = scan.loopFindings.reduce((s, l) => s + Math.max(0, l.count - 1), 0);
-            const wastePct =
-              scan.totalToolCalls > 0 ? Math.round((wastedCalls / scan.totalToolCalls) * 100) : 0;
+            const { wastePct } = computeLoopWaste(scan.loopFindings, scan.totalToolCalls);
             const wasteSuffix = wastePct > 0 ? chalk.dim(` (${wastePct}% wasted)`) : '';
             cardParts.push(
               chalk.yellow('🔁 ') +
@@ -2612,20 +2658,32 @@ export function registerScanCommand(program: Command): void {
             );
             const shownLoops = drillDown ? scan.loopFindings : scan.loopFindings.slice(0, topN);
             for (const f of shownLoops) {
+              // Symmetric with printFindingRow: dim stale loops across the row
+              // so old churn fades behind anything from this week.
+              const stale = isStaleFinding(f.timestamp);
               const ts = f.timestamp ? chalk.dim(fmtTs(f.timestamp) + '  ') : '';
               const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
-              const agentBadge =
+              const agentLabel =
                 f.agent === 'gemini'
-                  ? chalk.blue('[Gemini]  ')
+                  ? '[Gemini]  '
                   : f.agent === 'codex'
-                    ? chalk.magenta('[Codex]   ')
-                    : chalk.cyan('[Claude]  ');
+                    ? '[Codex]   '
+                    : '[Claude]  ';
+              const agentBadge = stale
+                ? chalk.dim(agentLabel)
+                : f.agent === 'gemini'
+                  ? chalk.blue(agentLabel)
+                  : f.agent === 'codex'
+                    ? chalk.magenta(agentLabel)
+                    : chalk.cyan(agentLabel);
+              const toolDisplay = stale ? chalk.dim(f.toolName) : chalk.yellow(f.toolName);
+              const cmdDisplay = stale ? chalk.dim(f.commandPreview) : chalk.gray(f.commandPreview);
               const sessionSuffix = f.sessionId ? chalk.dim(`  → ${f.sessionId.slice(0, 8)}`) : '';
               console.log(
                 `    ${ts}${proj}${agentBadge}` +
-                  chalk.yellow(f.toolName) +
+                  toolDisplay +
                   chalk.dim(`  ×${f.count}  `) +
-                  chalk.gray(f.commandPreview) +
+                  cmdDisplay +
                   sessionSuffix
               );
             }
