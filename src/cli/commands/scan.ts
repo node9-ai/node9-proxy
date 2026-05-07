@@ -45,6 +45,7 @@ import {
   topDlpPatterns,
   topRulesByVerdict,
 } from '../render/scan-derive';
+import { buildScanJson } from '../render/scan-json';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -2177,6 +2178,10 @@ export function registerScanCommand(program: Command): void {
     .option('--compact', 'Compact one-screen scorecard — for screenshots and sharing')
     .option('--narrative', 'Severity-grouped report — for video / dramatic sharing')
     .option(
+      '--json',
+      'Emit machine-readable JSON to stdout (suppresses banner, progress, and renderer)'
+    )
+    .option(
       '--upload-history',
       'Upload aggregate counts from existing JSONL sessions to the SaaS dashboard. ' +
         'Defaults to last 3 months; override with --since. Idempotent (safe to re-run).'
@@ -2194,9 +2199,19 @@ export function registerScanCommand(program: Command): void {
         drillDown?: boolean;
         compact?: boolean;
         narrative?: boolean;
+        json?: boolean;
         uploadHistory?: boolean;
         since?: string;
       }) => {
+        // --json is mutually exclusive with the human-output modes.
+        // Fail fast so a script doesn't silently get the wrong shape.
+        if (options.json && (options.compact || options.narrative || options.uploadHistory)) {
+          console.error(
+            'error: --json cannot be combined with --compact, --narrative, or --upload-history'
+          );
+          process.exit(1);
+        }
+
         // Backfill path — separate from the normal "show me a forecast"
         // mode. Doesn't render the full report, just walks JSONLs and
         // posts to the SaaS.
@@ -2227,8 +2242,11 @@ export function registerScanCommand(program: Command): void {
         // Compact / narrative modes print their own self-contained scorecard —
         // suppress the verbose preamble (banner + "scanning..." line) so the
         // output starts cleanly at the scorecard for screenshot / video use.
+        // --json suppresses everything outside the final JSON envelope so
+        // stdout is parseable.
         const screenshotMode = options.compact || options.narrative;
-        if (!screenshotMode) {
+        const quiet = screenshotMode || options.json;
+        if (!quiet) {
           console.log('');
           if (!isWired) {
             console.log(
@@ -2246,8 +2264,9 @@ export function registerScanCommand(program: Command): void {
           console.log('');
         }
 
-        const useTTY = process.stdout.isTTY === true && process.env.NODE9_WRAPPER !== '1';
-        if (!useTTY && !screenshotMode) {
+        const useTTY =
+          process.stdout.isTTY === true && process.env.NODE9_WRAPPER !== '1' && !options.json;
+        if (!useTTY && !quiet) {
           process.stdout.write(
             '  ' + chalk.dim('Scanning your history — this may take a moment...\n')
           );
@@ -2291,7 +2310,7 @@ export function registerScanCommand(program: Command): void {
         ]);
         if (useTTY) process.stdout.write('\r' + ' '.repeat(60) + '\r');
 
-        if (scan.filesScanned === 0) {
+        if (scan.filesScanned === 0 && !options.json) {
           console.log(chalk.yellow('  No session history found.'));
           console.log(
             chalk.gray(
@@ -2322,9 +2341,9 @@ export function registerScanCommand(program: Command): void {
             ? chalk.dim('(') + breakdownParts.join(chalk.dim(' · ')) + chalk.dim(')')
             : '';
 
-        // Suppress in compact / narrative modes — they render their own
-        // header line.
-        if (!screenshotMode) {
+        // Suppress in compact / narrative / json modes — they either render
+        // their own header line or emit no preamble at all.
+        if (!quiet) {
           console.log(
             '  ' +
               chalk.white(num(scan.sessions)) +
@@ -2351,6 +2370,22 @@ export function registerScanCommand(program: Command): void {
         // at the end of the output.
         const blast = runBlast();
         const blastExposures = blast.reachable.length + blast.envFindings.length;
+
+        // ── JSON output mode ────────────────────────────────────────────────
+        // Emits one valid JSON object to stdout and returns. All preamble and
+        // progress writes were already gated above so stdout is clean. For
+        // CI gates, scripting, and external integrations.
+        if (options.json) {
+          const envelope = buildScanJson({
+            scan,
+            summary,
+            blast,
+            isWired,
+            generatedAt: new Date().toISOString(),
+          });
+          process.stdout.write(JSON.stringify(envelope, null, 2) + '\n');
+          return;
+        }
 
         // ── Compact scorecard mode ──────────────────────────────────────────
         // One-screen output for sharing on Reddit / Twitter / blog posts.

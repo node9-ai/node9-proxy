@@ -26,6 +26,7 @@ import {
   type ScanResult,
 } from '../cli/commands/scan';
 import type { ScanSummary } from '../scan-summary';
+import { buildScanJson } from '../cli/render/scan-json';
 
 // ---------------------------------------------------------------------------
 // stdout capture
@@ -385,5 +386,24 @@ describe('renderNarrativeScorecard — output snapshots', () => {
   it('clean fixture (good score, no findings)', () => {
     renderNarrativeScorecard(cleanFixture());
     expect(captureOutput()).toMatchSnapshot();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// JSON envelope snapshot — pins the documented `node9 scan --json` shape.
+// generatedAt is fixed for determinism; isWired is fixed at false.
+// ---------------------------------------------------------------------------
+
+describe('buildScanJson — envelope snapshot', () => {
+  it('rich fixture', () => {
+    const f = richFixture();
+    const out = buildScanJson({
+      scan: f.scan,
+      summary: f.summary,
+      blast: { ...f.blast, score: f.blast.score },
+      isWired: false,
+      generatedAt: '2026-05-07T12:00:00.000Z',
+    });
+    expect(JSON.stringify(out, null, 2)).toMatchSnapshot();
   });
 });
