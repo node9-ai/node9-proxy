@@ -1773,20 +1773,27 @@ function verdictIcon(verdict: string): string {
   return verdict === 'block' ? '🛑' : '👁 ';
 }
 
-function printFindingRow(
+export function printFindingRow(
   f: FindingRef,
   drillDown: boolean,
   showSessionId: boolean,
   previewWidth: number
 ): void {
+  // Older findings are dimmed across the row so a wall of recent + ancient
+  // hits has clear visual hierarchy. Matches the existing DLP treatment
+  // (see Credential Leaks section) so all finding rows look symmetric.
+  const stale = isStaleFinding(f.timestamp);
   const ts = f.timestamp ? chalk.dim(fmtTs(f.timestamp) + '  ') : '';
   const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
-  const agentBadge =
-    f.agent === 'gemini'
-      ? chalk.blue('[Gemini]  ')
+  const agentLabel =
+    f.agent === 'gemini' ? '[Gemini]  ' : f.agent === 'codex' ? '[Codex]   ' : '[Claude]  ';
+  const agentBadge = stale
+    ? chalk.dim(agentLabel)
+    : f.agent === 'gemini'
+      ? chalk.blue(agentLabel)
       : f.agent === 'codex'
-        ? chalk.magenta('[Codex]   ')
-        : chalk.cyan('[Claude]  ');
+        ? chalk.magenta(agentLabel)
+        : chalk.cyan(agentLabel);
   // FindingRef.command is already the preview; fullCommand is the untruncated form.
   let cmdText: string;
   if (drillDown) {
@@ -1795,7 +1802,7 @@ function printFindingRow(
     cmdText = f.command;
     if (cmdText.length > previewWidth) cmdText = cmdText.slice(0, previewWidth - 1) + '…';
   }
-  const cmd = chalk.gray(cmdText);
+  const cmd = stale ? chalk.dim(cmdText) : chalk.gray(cmdText);
   const sessionSuffix =
     showSessionId && f.sessionId ? chalk.dim(`  → ${f.sessionId.slice(0, 8)}`) : '';
   console.log(`      ${ts}${proj}${agentBadge}${cmd}${sessionSuffix}`);
@@ -2608,20 +2615,32 @@ export function registerScanCommand(program: Command): void {
             );
             const shownLoops = drillDown ? scan.loopFindings : scan.loopFindings.slice(0, topN);
             for (const f of shownLoops) {
+              // Symmetric with printFindingRow: dim stale loops across the row
+              // so old churn fades behind anything from this week.
+              const stale = isStaleFinding(f.timestamp);
               const ts = f.timestamp ? chalk.dim(fmtTs(f.timestamp) + '  ') : '';
               const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
-              const agentBadge =
+              const agentLabel =
                 f.agent === 'gemini'
-                  ? chalk.blue('[Gemini]  ')
+                  ? '[Gemini]  '
                   : f.agent === 'codex'
-                    ? chalk.magenta('[Codex]   ')
-                    : chalk.cyan('[Claude]  ');
+                    ? '[Codex]   '
+                    : '[Claude]  ';
+              const agentBadge = stale
+                ? chalk.dim(agentLabel)
+                : f.agent === 'gemini'
+                  ? chalk.blue(agentLabel)
+                  : f.agent === 'codex'
+                    ? chalk.magenta(agentLabel)
+                    : chalk.cyan(agentLabel);
+              const toolDisplay = stale ? chalk.dim(f.toolName) : chalk.yellow(f.toolName);
+              const cmdDisplay = stale ? chalk.dim(f.commandPreview) : chalk.gray(f.commandPreview);
               const sessionSuffix = f.sessionId ? chalk.dim(`  → ${f.sessionId.slice(0, 8)}`) : '';
               console.log(
                 `    ${ts}${proj}${agentBadge}` +
-                  chalk.yellow(f.toolName) +
+                  toolDisplay +
                   chalk.dim(`  ×${f.count}  `) +
-                  chalk.gray(f.commandPreview) +
+                  cmdDisplay +
                   sessionSuffix
               );
             }
