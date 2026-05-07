@@ -46,6 +46,12 @@ import {
   topRulesByVerdict,
 } from '../render/scan-derive';
 import { buildScanJson } from '../render/scan-json';
+import {
+  appendScanHistory,
+  computeScanDelta,
+  readPreviousScan,
+  type ScanHistoryRecord,
+} from '../render/scan-history';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -2394,6 +2400,27 @@ export function registerScanCommand(program: Command): void {
           return;
         }
 
+        // ── Trend tracking ──────────────────────────────────────────────────
+        // Only the default human-facing mode appends to scan-history.json
+        // and shows a delta. Compact / narrative modes are deterministic
+        // screenshot artifacts; --json already returned above. Fail-soft:
+        // any history I/O error is swallowed inside the helpers.
+        let scanDelta: ReturnType<typeof computeScanDelta> = null;
+        if (!screenshotMode) {
+          const previous = readPreviousScan();
+          const currentRecord: ScanHistoryRecord = {
+            timestamp: new Date().toISOString(),
+            score: blast.score,
+            blocked: blockedCount,
+            review: reviewCount,
+            leaks: scan.dlpFindings.length,
+            loops: scan.loopFindings.length,
+            totalCalls: scan.totalToolCalls,
+          };
+          appendScanHistory(currentRecord);
+          scanDelta = computeScanDelta(currentRecord, previous);
+        }
+
         // ── Compact scorecard mode ──────────────────────────────────────────
         // One-screen output for sharing on Reddit / Twitter / blog posts.
         // Skips the detailed per-finding rendering — only the headline numbers,
@@ -2442,6 +2469,21 @@ export function registerScanCommand(program: Command): void {
           const score = classifyScore(blast.score);
           const severityDisplay =
             score.band === 'critical' ? chalk.red.bold(score.label) : score.color(score.label);
+          // Trend suffix vs the user's last scan (if any). Higher score =
+          // safer, so a positive scoreDelta is good (green ▲); negative is
+          // bad (red ▼). Hidden when no prior data or unchanged same-day.
+          const trendSuffix = (() => {
+            if (!scanDelta) return '';
+            const { scoreDelta, daysAgo } = scanDelta;
+            if (scoreDelta === 0) return '';
+            const arrow =
+              scoreDelta > 0
+                ? chalk.green(`▲${scoreDelta}`)
+                : chalk.red(`▼${Math.abs(scoreDelta)}`);
+            const since =
+              daysAgo === 0 ? 'today' : daysAgo === 1 ? 'yesterday' : `${daysAgo} days ago`;
+            return chalk.dim('  ·  ') + arrow + chalk.dim(` since ${since}`);
+          })();
           console.log(
             '  ' +
               (score.band === 'critical' ? chalk.red.bold('⚠  ') : '') +
@@ -2449,6 +2491,7 @@ export function registerScanCommand(program: Command): void {
               score.color.bold(`${blast.score}/100`) +
               '  ' +
               severityDisplay +
+              trendSuffix +
               chalk.dim('  ·  ') +
               (totalRisky > 0
                 ? chalk.red.bold(`${totalRisky} risky operation${totalRisky !== 1 ? 's' : ''}`)
