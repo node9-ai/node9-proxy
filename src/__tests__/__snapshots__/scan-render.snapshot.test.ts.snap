@@ -1,0 +1,64 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`renderCompactScorecard — output snapshots > clean fixture (good score, no findings) 1`] = `
+"🛡  Node9 Scan  ·  5 sessions  ·  200 tool calls  ·  May 1, 2026 – May 7, 2026
+
+Security Score: 95/100  ·  Good
+$1.50 AI spend  ·  0 risky operations
+
+
+→  npx node9-ai scan       run this on your machine
+→  github.com/node9-ai/node9-proxy
+"
+`;
+
+exports[`renderCompactScorecard — output snapshots > rich fixture (critical score) 1`] = `
+"🛡  Node9 Scan  ·  39 sessions  ·  12,481 tool calls  ·  Apr 6, 2026 – May 7, 2026
+
+Security Score: 25/100  ·  Critical
+$9025.15 AI spend  ·  4 risky operations
+
+🔑  4   credential leak     (GitHub Token ×2, AWS Access Key, JWT)
+🛑  8   would have blocked  (force-push ×5, eval-remote)
+🔁  1   agent loops         (1% wasted  ·  ~$0.2460)
+📂  1   long iterations     (deep work — not waste)
+👁  56  flagged for review  (rm)
+
+🔭  Blast radius            ssh × gcp × npm × other (5 exposures)
+
+→  npx node9-ai scan       run this on your machine
+→  github.com/node9-ai/node9-proxy
+"
+`;
+
+exports[`renderNarrativeScorecard — output snapshots > clean fixture (good score, no findings) 1`] = `
+"🛡  Node9 Scan  ·  5 sessions  ·  $1.50 spend  ·  May 1, 2026 – May 7, 2026
+
+Security Score: 95/100  ·  Good
+
+→  npx node9-ai scan       run this on your machine
+→  github.com/node9-ai/node9-proxy
+"
+`;
+
+exports[`renderNarrativeScorecard — output snapshots > rich fixture (critical score) 1`] = `
+"🛡  Node9 Scan  ·  39 sessions  ·  $9025.15 spend  ·  Apr 6, 2026 – May 7, 2026
+
+⚠  Security Score: 25/100  ·  Critical
+
+  🔴  CRITICAL  5 findings
+     • 4 credential leaks (GitHub Token ×2, AWS Access Key, JWT)
+     • eval of remote download
+
+  🟡  HIGH       10 findings
+     • force pushes ×5
+     • 5 credential files reachable on disk
+
+  🟢  MEDIUM     3 findings
+     • 2 agent loops (2% of calls, ~$0.2460 wasted)
+     • rm calls
+
+→  npx node9-ai scan       run this on your machine
+→  github.com/node9-ai/node9-proxy
+"
+`;

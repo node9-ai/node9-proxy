@@ -39,6 +39,12 @@ import {
 } from '../../scan-summary';
 import { getAgentsStatus } from '../../setup';
 import { runBlast, type BlastFinding } from './blast';
+import {
+  classifyScore,
+  computeLoopWaste,
+  topDlpPatterns,
+  topRulesByVerdict,
+} from '../render/scan-derive';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1844,7 +1850,7 @@ function compactRuleLabel(name: string): string {
   return label.replace(/-+/g, '-');
 }
 
-interface CompactInput {
+export interface CompactInput {
   scan: ScanResult;
   summary: ScanSummary;
   blast: {
@@ -1857,7 +1863,7 @@ interface CompactInput {
   reviewCount: number;
 }
 
-function renderCompactScorecard(input: CompactInput): void {
+export function renderCompactScorecard(input: CompactInput): void {
   const { scan, summary, blast, blastExposures, blockedCount, reviewCount } = input;
   const totalRisky = scan.findings.length + scan.dlpFindings.length;
 
@@ -1876,13 +1882,12 @@ function renderCompactScorecard(input: CompactInput): void {
   console.log('');
 
   // ── Score + risky count ──────────────────────────────────────────────
-  const scoreColor = blast.score >= 80 ? chalk.green : blast.score >= 50 ? chalk.yellow : chalk.red;
-  const scoreSeverity = blast.score >= 80 ? 'Good' : blast.score >= 50 ? 'At Risk' : 'Critical';
+  const score = classifyScore(blast.score);
   console.log(
     chalk.bold('Security Score: ') +
-      scoreColor.bold(`${blast.score}/100`) +
+      score.color.bold(`${blast.score}/100`) +
       chalk.dim('  ·  ') +
-      scoreColor(scoreSeverity)
+      score.color(score.label)
   );
   if (scan.totalCostUSD > 0) {
     console.log(
@@ -1896,14 +1901,8 @@ function renderCompactScorecard(input: CompactInput): void {
 
   // ── Per-category lines with callouts ─────────────────────────────────
   if (scan.dlpFindings.length > 0) {
-    const patternCounts = new Map<string, number>();
-    for (const f of scan.dlpFindings) {
-      patternCounts.set(f.patternName, (patternCounts.get(f.patternName) ?? 0) + 1);
-    }
-    const topPatterns = [...patternCounts.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 3)
-      .map(([name, count]) => (count > 1 ? `${name} ×${count}` : name))
+    const topPatterns = topDlpPatterns(scan.dlpFindings, 3)
+      .map((p) => (p.count > 1 ? `${p.name} ×${p.count}` : p.name))
       .join(', ');
     console.log(
       chalk.red('🔑  ') +
@@ -1914,17 +1913,7 @@ function renderCompactScorecard(input: CompactInput): void {
   }
 
   if (blockedCount > 0) {
-    const blockedRules: Array<{ name: string; count: number }> = [];
-    for (const section of summary.sections) {
-      for (const rule of section.rules) {
-        if (rule.verdict === 'block') {
-          blockedRules.push({ name: rule.name, count: rule.findings.length });
-        }
-      }
-    }
-    const topBlocked = blockedRules
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 3)
+    const topBlocked = topRulesByVerdict(summary.sections, 'block', 3)
       .map((r) =>
         r.count > 1 ? `${compactRuleLabel(r.name)} ×${r.count}` : compactRuleLabel(r.name)
       )
@@ -1945,9 +1934,7 @@ function renderCompactScorecard(input: CompactInput): void {
   const longIterations = scan.loopFindings.filter((l) => l.kind === 'long-iteration');
 
   if (realLoops.length > 0) {
-    const wastedCalls = realLoops.reduce((s, l) => s + Math.max(0, l.count - 1), 0);
-    const wastePct =
-      scan.totalToolCalls > 0 ? Math.round((wastedCalls / scan.totalToolCalls) * 100) : 0;
+    const { wastePct } = computeLoopWaste(realLoops, scan.totalToolCalls);
     const wasteParts: string[] = [];
     if (wastePct > 0) wasteParts.push(`${wastePct}% wasted`);
     if (summary.loopWastedUSD > 0) wasteParts.push('~' + fmtCost(summary.loopWastedUSD));
@@ -1969,17 +1956,7 @@ function renderCompactScorecard(input: CompactInput): void {
   }
 
   if (reviewCount > 0) {
-    const reviewRules: Array<{ name: string; count: number }> = [];
-    for (const section of summary.sections) {
-      for (const rule of section.rules) {
-        if (rule.verdict !== 'block') {
-          reviewRules.push({ name: rule.name, count: rule.findings.length });
-        }
-      }
-    }
-    const topReview = reviewRules
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 3)
+    const topReview = topRulesByVerdict(summary.sections, 'review', 3)
       .map((r) =>
         r.count > 1 ? `${compactRuleLabel(r.name)} ×${r.count}` : compactRuleLabel(r.name)
       )
@@ -2044,7 +2021,7 @@ interface BucketEntry {
   count: number;
 }
 
-function renderNarrativeScorecard(input: CompactInput): void {
+export function renderNarrativeScorecard(input: CompactInput): void {
   const { scan, summary, blast, blastExposures } = input;
 
   const critical: BucketEntry[] = [];
@@ -2053,14 +2030,8 @@ function renderNarrativeScorecard(input: CompactInput): void {
 
   // ── DLP findings → critical ─────────────────────────────────────────
   if (scan.dlpFindings.length > 0) {
-    const patterns = new Map<string, number>();
-    for (const f of scan.dlpFindings) {
-      patterns.set(f.patternName, (patterns.get(f.patternName) ?? 0) + 1);
-    }
-    const top = [...patterns.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 3)
-      .map(([name, n]) => (n > 1 ? `${name} ×${n}` : name))
+    const top = topDlpPatterns(scan.dlpFindings, 3)
+      .map((p) => (p.count > 1 ? `${p.name} ×${p.count}` : p.name))
       .join(', ');
     critical.push({
       label: `${scan.dlpFindings.length} credential leak${scan.dlpFindings.length !== 1 ? 's' : ''} (${top})`,
@@ -2092,9 +2063,7 @@ function renderNarrativeScorecard(input: CompactInput): void {
 
   // ── Loops → medium ──────────────────────────────────────────────────
   if (scan.loopFindings.length > 0) {
-    const wastedCalls = scan.loopFindings.reduce((s, l) => s + Math.max(0, l.count - 1), 0);
-    const wastePct =
-      scan.totalToolCalls > 0 ? Math.round((wastedCalls / scan.totalToolCalls) * 100) : 0;
+    const { wastePct } = computeLoopWaste(scan.loopFindings, scan.totalToolCalls);
     const cost = summary.loopWastedUSD > 0 ? `, ~${fmtCost(summary.loopWastedUSD)} wasted` : '';
     medium.push({
       label: `${scan.loopFindings.length} agent loops (${wastePct}% of calls${cost})`,
@@ -2127,14 +2096,13 @@ function renderNarrativeScorecard(input: CompactInput): void {
   console.log('');
 
   // ── Score ──────────────────────────────────────────────────────────
-  const scoreColor = blast.score >= 80 ? chalk.green : blast.score >= 50 ? chalk.yellow : chalk.red;
-  const scoreSeverity = blast.score >= 80 ? 'Good' : blast.score >= 50 ? 'At Risk' : 'Critical';
+  const score = classifyScore(blast.score);
   console.log(
-    (blast.score < 50 ? chalk.red.bold('⚠  ') : '') +
+    (score.band === 'critical' ? chalk.red.bold('⚠  ') : '') +
       chalk.bold('Security Score: ') +
-      scoreColor.bold(`${blast.score}/100`) +
+      score.color.bold(`${blast.score}/100`) +
       chalk.dim('  ·  ') +
-      scoreColor(scoreSeverity)
+      score.color(score.label)
   );
   console.log('');
 
@@ -2429,21 +2397,16 @@ export function registerScanCommand(program: Command): void {
           // first 5 lines, not buried at the bottom. The detailed per-section
           // breakdowns below provide the rest.
           const totalRisky = totalFindings + scan.dlpFindings.length;
-          const scoreSeverity =
-            blast.score >= 80
-              ? chalk.green('Good')
-              : blast.score >= 50
-                ? chalk.yellow('At Risk')
-                : chalk.red.bold('Critical');
-          const scoreColor =
-            blast.score >= 80 ? chalk.green : blast.score >= 50 ? chalk.yellow : chalk.red;
+          const score = classifyScore(blast.score);
+          const severityDisplay =
+            score.band === 'critical' ? chalk.red.bold(score.label) : score.color(score.label);
           console.log(
             '  ' +
-              (blast.score < 50 ? chalk.red.bold('⚠  ') : '') +
+              (score.band === 'critical' ? chalk.red.bold('⚠  ') : '') +
               chalk.bold('Security Score ') +
-              scoreColor.bold(`${blast.score}/100`) +
+              score.color.bold(`${blast.score}/100`) +
               '  ' +
-              scoreSeverity +
+              severityDisplay +
               chalk.dim('  ·  ') +
               (totalRisky > 0
                 ? chalk.red.bold(`${totalRisky} risky operation${totalRisky !== 1 ? 's' : ''}`)
@@ -2465,9 +2428,7 @@ export function registerScanCommand(program: Command): void {
             );
           }
           if (scan.loopFindings.length > 0) {
-            const wastedCalls = scan.loopFindings.reduce((s, l) => s + Math.max(0, l.count - 1), 0);
-            const wastePct =
-              scan.totalToolCalls > 0 ? Math.round((wastedCalls / scan.totalToolCalls) * 100) : 0;
+            const { wastePct } = computeLoopWaste(scan.loopFindings, scan.totalToolCalls);
             const wasteSuffix = wastePct > 0 ? chalk.dim(` (${wastePct}% wasted)`) : '';
             cardParts.push(
               chalk.yellow('🔁 ') +
