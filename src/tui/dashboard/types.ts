@@ -48,6 +48,14 @@ export type ActivityEvent =
       checkedBy?: string;
       sessionId?: string;
       mcpServer?: string;
+      /**
+       * True only for SSE 'add' events — the daemon broadcasts those to
+       * approval listeners, so they represent real "queued for human
+       * approval" requests. Plain 'activity' events with status:'pending'
+       * also lack a decision but are transient (sub-second) and must
+       * NOT trigger the APPROVAL notification flash.
+       */
+      isApprovalRequest?: boolean;
     }
   | {
       kind: 'snapshot';

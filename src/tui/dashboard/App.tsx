@@ -71,6 +71,11 @@ const LIVE_MIN_ROWS = 4;
 const NOTIFICATION_RECENT_WINDOW_MS = 60_000;
 const RESOLVED_HOLD_MS = 5_000;
 const COST_REFRESH_MS = 5 * 60_000;
+/** Once a non-approval notification (block/review/loop) is shown,
+ *  don't replace it with a newer non-approval until this elapses.
+ *  Stops the area from flickering when many blocks fire in a burst.
+ *  Approval cards still preempt instantly. */
+const NOTIFICATION_STICKY_MS = 10_000;
 
 export function App(): React.ReactElement {
   const { exit } = useApp();
@@ -147,11 +152,14 @@ export function App(): React.ReactElement {
           return next.length > LIVE_BUFFER_CAP ? next.slice(next.length - LIVE_BUFFER_CAP) : next;
         });
         setSseError(undefined);
-        // Surface pending review/approval rows in the ApprovalCard.
-        // We only track the most recent — older pending approvals are
-        // silently dropped from the card surface (they remain visible
-        // in the LIVE feed). Daemon's own timeout still resolves them.
-        if (e.kind === 'tool' && (e.verdict === 'review' || e.verdict === 'pending')) {
+        // Surface real approval requests only:
+        //   - verdict === 'review'        → shield/rule explicitly needs decision
+        //   - isApprovalRequest === true  → SSE 'add' event (queued for approval)
+        // Bare verdict === 'pending' is intentionally NOT triggered: those
+        // are transient `activity`-event flashes for auto-allowed calls
+        // that resolve in milliseconds via activity-result. Showing them
+        // would pop the APPROVAL card on every tool call.
+        if (e.kind === 'tool' && (e.verdict === 'review' || e.isApprovalRequest)) {
           setPendingApproval(e);
           setApprovalStatus({ kind: 'idle' });
         }
@@ -323,19 +331,37 @@ export function App(): React.ReactElement {
   const lastEvent = events[events.length - 1];
 
   // Priority cascade for the always-rendered NotificationArea:
-  //   1. pending approval        — the only actionable state
+  //   1. pending approval        — the only actionable state, preempts all
   //   2. recently-resolved (5s)  — flash so the user sees what they did
-  //   3. recent block (60s)      — call attention to last security action
-  //   4. recent review (60s)     — same, but for review-verdicts
-  //   5. recent loop (60s)       — same, for loop-detected events
+  //   3. recent block (60s)      — most recent security block
+  //   4. recent review (60s)     — most recent review-verdict
+  //   5. recent loop (60s)       — most recent loop-detected event
   //   6. idle                    — placeholder; shows blast score for context
-  // `tick` is included in deps so age-based filters re-evaluate every
-  // second (events still pin to ts, so they expire predictably).
+  //
+  // Filtering: observe-mode and timeout entries are skipped — they're
+  // logging-only events that fired without actually blocking, so they
+  // shouldn't surface as alerts. Rule: skip when checkedBy starts with
+  // 'observe-mode' or equals 'timeout' / 'popup-timeout'.
+  //
+  // Stickiness: once a block/review/loop is shown, it stays for at
+  // least NOTIFICATION_STICKY_MS even if a newer event arrives. Stops
+  // the area from flickering when many blocks fire in a burst. Tracked
+  // via stickyNotificationRef — the last non-approval notification +
+  // when we first showed it.
+  const stickyRef = React.useRef<{
+    kind: 'block' | 'review' | 'loop';
+    eventId: string;
+    firstShownAt: number;
+  } | null>(null);
   const notification: Notification = useMemo(() => {
     if (pendingApproval) {
+      // Approval preempts; clear sticky so the next block after the
+      // approval resolves doesn't get held over from before.
+      stickyRef.current = null;
       return { kind: 'approval', event: pendingApproval, status: approvalStatus };
     }
     if (resolvedApproval && Date.now() - resolvedApproval.resolvedAt < RESOLVED_HOLD_MS) {
+      stickyRef.current = null;
       return {
         kind: 'resolved',
         event: resolvedApproval.event,
@@ -343,17 +369,64 @@ export function App(): React.ReactElement {
       };
     }
     const now = Date.now();
-    // Walk from newest backwards; first match wins by priority order.
+
+    // Find the newest notification-worthy event in the recent window.
+    let candidate: {
+      kind: 'block' | 'review' | 'loop';
+      event: ActivityEvent;
+      ageMs: number;
+    } | null = null;
     for (const e of [...events].reverse()) {
       if (e.kind !== 'tool') continue;
+      if (!isNotificationWorthy(e)) continue;
       const ageMs = now - Date.parse(e.ts);
       if (Number.isNaN(ageMs) || ageMs > NOTIFICATION_RECENT_WINDOW_MS) continue;
-      if (e.checkedBy === 'loop-detected') return { kind: 'loop', event: e, ageMs };
-      if (e.verdict === 'block') return { kind: 'block', event: e, ageMs };
-      if (e.verdict === 'review') return { kind: 'review', event: e, ageMs };
+      if (e.checkedBy === 'loop-detected') {
+        candidate = { kind: 'loop', event: e, ageMs };
+        break;
+      }
+      if (e.verdict === 'block') {
+        candidate = { kind: 'block', event: e, ageMs };
+        break;
+      }
+      if (e.verdict === 'review') {
+        candidate = { kind: 'review', event: e, ageMs };
+        break;
+      }
     }
-    return { kind: 'idle', blastScore: blast?.score ?? 100 };
-    // tick is intentionally a dep so resolved/age windows expire over time.
+
+    if (!candidate) {
+      stickyRef.current = null;
+      return { kind: 'idle', blastScore: blast?.score ?? 100 };
+    }
+
+    // If we've been showing a different sticky notification for less
+    // than NOTIFICATION_STICKY_MS, hold it instead of swapping.
+    const sticky = stickyRef.current;
+    if (sticky && sticky.eventId !== candidate.event.id) {
+      const stuckFor = now - sticky.firstShownAt;
+      if (stuckFor < NOTIFICATION_STICKY_MS) {
+        // Re-resolve the sticky event to keep its ageMs fresh.
+        const stickyEvent = events.find((x) => x.kind === 'tool' && x.id === sticky.eventId);
+        if (stickyEvent && stickyEvent.kind === 'tool') {
+          const stickyAge = now - Date.parse(stickyEvent.ts);
+          if (!Number.isNaN(stickyAge) && stickyAge <= NOTIFICATION_RECENT_WINDOW_MS) {
+            return { kind: sticky.kind, event: stickyEvent, ageMs: stickyAge };
+          }
+        }
+      }
+    }
+
+    // New sticky — record id + first-shown time.
+    if (!sticky || sticky.eventId !== candidate.event.id) {
+      stickyRef.current = {
+        kind: candidate.kind,
+        eventId: candidate.event.id,
+        firstShownAt: now,
+      };
+    }
+    return candidate;
+    // tick is intentionally a dep so age windows + sticky expiry re-eval each second.
   }, [pendingApproval, approvalStatus, resolvedApproval, events, blast, tick]);
 
   if (!agg || !blast) {
@@ -385,6 +458,21 @@ export function App(): React.ReactElement {
 
 function capitalize(s: string): string {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : '';
+}
+
+/**
+ * Filter for notification-worthy events. Drops:
+ *   - observe-mode-* checkedBy values (logging only — action ran)
+ *   - timeout / popup-timeout (handled silently, not real alerts)
+ * Everything else (real blocks, reviews, loop-detected, etc.) passes.
+ * Pure function — exported indirectly via tests if needed.
+ */
+function isNotificationWorthy(e: ActivityEvent): boolean {
+  if (e.kind !== 'tool') return false;
+  if (!e.checkedBy) return e.verdict === 'block' || e.verdict === 'review';
+  if (e.checkedBy.startsWith('observe-mode')) return false;
+  if (e.checkedBy === 'timeout' || e.checkedBy === 'popup-timeout') return false;
+  return true;
 }
 
 function readSkillsPinned(): number {

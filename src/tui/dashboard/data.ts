@@ -592,5 +592,10 @@ function toActivityEvent(eventName: string, data: SsePayload): ActivityEvent | n
     checkedBy: payload.checkedBy,
     sessionId: payload.sessionId,
     mcpServer: payload.mcpServer,
+    // Only `add` SSE events are sent to the approval channel — those
+    // are real "queued for human approval" entries. `activity` events
+    // with status:'pending' look identical at the wire level (no
+    // decision, transient) but should NOT pop the notification card.
+    isApprovalRequest: eventName === 'add',
   };
 }
