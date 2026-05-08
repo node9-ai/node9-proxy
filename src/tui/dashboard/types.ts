@@ -92,5 +92,7 @@ export interface CostSnapshot {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  /** Per-model rollup, sorted desc by cost. Top 3 surfaced in REPORT. */
+  byModel: Array<{ model: string; costUSD: number; calls: number }>;
   loaded: boolean;
 }

@@ -100,7 +100,9 @@ export function HighLevel(props: {
             <Text bold>{formatCost(cost.totalUSD)}</Text>
             <Text dimColor>{' cost · '}</Text>
             <Text bold>{formatTokens(cost.inputTokens + cost.outputTokens)}</Text>
-            <Text dimColor>{' tokens  '}</Text>
+            <Text dimColor>{' tokens · '}</Text>
+            <Text bold>{formatPct(cacheHitRate(cost))}</Text>
+            <Text dimColor>{' cache  '}</Text>
           </>
         )}
         <Text bold>{agg.allow.toLocaleString()}</Text>
@@ -141,6 +143,20 @@ function formatTokens(n: number): string {
   if (n < 1000) return `${n}`;
   if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}K`;
   return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+/** Whole-percent format: `94%`. Returns "—" when the input is NaN. */
+function formatPct(pct: number): string {
+  if (!Number.isFinite(pct)) return '—';
+  return `${Math.round(pct)}%`;
+}
+
+/** Cache hit rate from a CostSnapshot. Reads / (reads + new input).
+ *  Mirrors `node9 report`'s definition so the two surfaces match. */
+function cacheHitRate(cost: CostSnapshot): number {
+  const denom = cost.cacheReadTokens + cost.inputTokens;
+  if (denom <= 0) return 0;
+  return (cost.cacheReadTokens / denom) * 100;
 }
 
 function labelFor(w: TimeWindow): string {
@@ -527,10 +543,18 @@ function capitalize(s: string): string {
 // Report — Tools + Shell breakdown side by side
 // ---------------------------------------------------------------------------
 
-export function Report(props: { agg: AuditAggregates; window: TimeWindow }): React.ReactElement {
-  const { agg } = props;
+export function Report(props: {
+  agg: AuditAggregates;
+  cost: CostSnapshot | null;
+  window: TimeWindow;
+}): React.ReactElement {
+  const { agg, cost } = props;
   const maxTool = Math.max(1, ...agg.byTool.map((t) => t.calls));
   const maxShell = Math.max(1, ...agg.byShell.map((s) => s.count));
+  // Top-3 models from cost data (already loaded). Provides per-model
+  // cost split that mirrors what `node9 report` shows under "Cost".
+  const topModels = (cost?.byModel ?? []).slice(0, 3);
+  const maxModelCost = Math.max(1, ...topModels.map((m) => m.costUSD));
   return (
     <Box
       flexDirection="column"
@@ -567,12 +591,23 @@ export function Report(props: { agg: AuditAggregates; window: TimeWindow }): Rea
         </Box>
         <Box flexDirection="column" flexGrow={1} marginLeft={2}>
           <Text dimColor wrap="truncate-end">
-            {'shell'.padEnd(16) + 'calls'.padStart(7) + 'blocked'.padStart(9)}
+            {'model / shell'.padEnd(16) + 'cost / calls'.padStart(13)}
           </Text>
+          {/* Models block — per-model cost split, lifted from `node9 report`. */}
+          {topModels.length > 0
+            ? topModels.map((m) => (
+                <Text key={m.model} wrap="truncate-end">
+                  <Text dimColor>{bar(m.costUSD, maxModelCost, 6)}</Text>
+                  <Text>{` ${truncate(shortenModel(m.model), 14).padEnd(14)}`}</Text>
+                  <Text bold>{formatCost(m.costUSD).padStart(8)}</Text>
+                </Text>
+              ))
+            : null}
+          {/* Shell breakdown — same as before. */}
           {agg.byShell.length === 0 ? (
             <Text dimColor>(no shell)</Text>
           ) : (
-            agg.byShell.map((s) => (
+            agg.byShell.slice(0, Math.max(1, 5 - topModels.length)).map((s) => (
               <Text key={s.cmd} wrap="truncate-end">
                 <Text dimColor>{bar(s.count, maxShell, 6)}</Text>
                 <Text>{` ${truncate(s.cmd, 14).padEnd(14)}`}</Text>
@@ -587,6 +622,15 @@ export function Report(props: { agg: AuditAggregates; window: TimeWindow }): Rea
       </Box>
     </Box>
   );
+}
+
+/** Strip noise from a model id for compact display:
+ *    'claude-opus-4-7'    → 'opus-4-7'
+ *    'claude-haiku-4-5-...'→ 'haiku-4-5'
+ *    'gpt-5'              → 'gpt-5'
+ */
+function shortenModel(model: string): string {
+  return model.replace(/^claude-/, '').replace(/-2025\d{4}$/, '');
 }
 
 function bar(value: number, max: number, width: number): string {

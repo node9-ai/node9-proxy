@@ -296,6 +296,7 @@ export function aggregateCost(
   let outputTokens = 0;
   let cacheReadTokens = 0;
   let cacheWriteTokens = 0;
+  const byModelMap = new Map<string, { costUSD: number; calls: number }>();
   const dayMs = 86_400_000;
   for (const e of entries) {
     const t = Date.parse(e.date);
@@ -307,6 +308,14 @@ export function aggregateCost(
     outputTokens += e.outputTokens;
     cacheReadTokens += e.cacheReadTokens;
     cacheWriteTokens += e.cacheWriteTokens;
+    // DailyEntry doesn't have a per-row call count, but it IS one
+    // distinct day×model bucket, so counting buckets gives an
+    // approximate session-day measure. The real value here is the
+    // per-model cost split, which IS exact.
+    const m = byModelMap.get(e.model) ?? { costUSD: 0, calls: 0 };
+    m.costUSD += e.costUSD;
+    m.calls += 1;
+    byModelMap.set(e.model, m);
   }
   return {
     totalUSD,
@@ -314,6 +323,9 @@ export function aggregateCost(
     outputTokens,
     cacheReadTokens,
     cacheWriteTokens,
+    byModel: [...byModelMap.entries()]
+      .sort((a, b) => b[1].costUSD - a[1].costUSD)
+      .map(([model, v]) => ({ model, costUSD: v.costUSD, calls: v.calls })),
     loaded: true,
   };
 }

@@ -376,7 +376,7 @@ export function App(): React.ReactElement {
         filter={filter}
         filterInputMode={filterInputMode}
       />
-      <Report agg={agg} window={window} />
+      <Report agg={agg} cost={costSnapshot} window={window} />
       <Risk agg={agg} blast={blast} window={window} />
       <StatusBar />
     </Box>
