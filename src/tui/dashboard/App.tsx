@@ -37,15 +37,22 @@ const AUDIT_REFRESH_MS = 30_000;
 const BLAST_REFRESH_MS = 5 * 60_000;
 
 /**
- * Approximate fixed-row cost of every panel except LIVE.
- *   header (1) + HIGH LEVEL (5: 2 border + 3 content) + REPORT (8: 2
- *   border + col header + 5 rows) + RISK (4: 2 border + header + content
- *   + path strip) + status bar (1) + per-panel margins (~3) = ~22.
- * LIVE takes whatever rows are left. Floor at 4 so the panel never
- * collapses to nothing on a tiny terminal (it still scrolls visually
- * via FIFO; older events fall off the top).
+ * Approximate fixed-row cost of every panel except LIVE's content area.
+ *   header             (1)
+ *   HIGH LEVEL         (5: 2 border + 3 content)
+ *   LIVE chrome        (3: 2 border + 1 title — content is variable)
+ *   REPORT             (9: 2 border + 1 title + 1 col-header + 5 rows)
+ *   RISK               (5: 2 border + 1 title + 1 counts + 1 paths)
+ *   StatusBar          (1)
+ *                      = 24
+ * LIVE's content area takes (termRows − 24) rows. Floor at 4 so the
+ * panel never collapses to nothing on a tiny terminal — older events
+ * scroll off the top via the existing 100-event FIFO buffer.
+ *
+ * Calibration: prior value was 22, which made LIVE 2 rows too tall,
+ * pushing the bottom panels off-screen on standard ~41-row terminals.
  */
-const FIXED_PANELS_HEIGHT = 22;
+const FIXED_PANELS_HEIGHT = 24;
 const LIVE_MIN_ROWS = 4;
 const COST_REFRESH_MS = 5 * 60_000;
 
