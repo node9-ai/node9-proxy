@@ -33,14 +33,15 @@ import {
 } from './data.js';
 import type { DailyEntry } from '../../costSync.js';
 import {
-  ApprovalCard,
   Header,
   HighLevel,
   LiveLog,
+  NotificationArea,
   Report,
   Risk,
   StatusBar,
   type ApprovalStatus,
+  type Notification,
 } from './panels.js';
 
 const LIVE_BUFFER_CAP = 100;
@@ -63,8 +64,12 @@ const BLAST_REFRESH_MS = 5 * 60_000;
  * Calibration: prior value was 22, which made LIVE 2 rows too tall,
  * pushing the bottom panels off-screen on standard ~41-row terminals.
  */
-const FIXED_PANELS_HEIGHT = 24;
+// Updated to 28 to accommodate the always-rendered NotificationArea
+// (4 rows incl. border) between HIGH LEVEL and LIVE.
+const FIXED_PANELS_HEIGHT = 28;
 const LIVE_MIN_ROWS = 4;
+const NOTIFICATION_RECENT_WINDOW_MS = 60_000;
+const RESOLVED_HOLD_MS = 5_000;
 const COST_REFRESH_MS = 5 * 60_000;
 
 export function App(): React.ReactElement {
@@ -84,6 +89,21 @@ export function App(): React.ReactElement {
   // or on Esc.
   const [pendingApproval, setPendingApproval] = useState<ActivityEvent | null>(null);
   const [approvalStatus, setApprovalStatus] = useState<ApprovalStatus>({ kind: 'idle' });
+  // Stash the most recently acted-on approval for a few seconds after
+  // resolution so the notification area shows a flash before falling
+  // through to the next priority slot.
+  const [resolvedApproval, setResolvedApproval] = useState<{
+    event: ActivityEvent;
+    outcome: 'allow' | 'deny' | 'trust';
+    resolvedAt: number;
+  } | null>(null);
+  // A render-tick counter so resolved/recent notifications expire in
+  // real time. Bumped every second; cheap.
+  const [tick, setTick] = useState<number>(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
   // Filter — applied to the LIVE panel only. `/` enters input mode;
   // typing edits the filter live; Enter freezes; Esc clears+exits.
   const [filter, setFilter] = useState<string>('');
@@ -229,10 +249,19 @@ export function App(): React.ReactElement {
       if (input === 'a' || input === 'd' || input === 't') {
         const decision = input === 'a' ? 'allow' : input === 'd' ? 'deny' : 'trust';
         const id = pendingApproval.id;
+        const eventAtAction = pendingApproval;
         setApprovalStatus({ kind: 'sending' });
         void submitDecision(id, decision).then((res) => {
           if (res.ok) {
             setApprovalStatus({ kind: 'ok', verdict: decision });
+            // Stash for the resolved-flash priority slot. NotificationArea
+            // uses this for ~5s after action, then falls through to recent
+            // block / review / idle.
+            setResolvedApproval({
+              event: eventAtAction,
+              outcome: decision,
+              resolvedAt: Date.now(),
+            });
             // Auto-dismiss after a short flash so the user gets feedback.
             setTimeout(() => {
               setPendingApproval((prev) => (prev && prev.id === id ? null : prev));
@@ -293,6 +322,40 @@ export function App(): React.ReactElement {
   }, [lastToolEvent]);
   const lastEvent = events[events.length - 1];
 
+  // Priority cascade for the always-rendered NotificationArea:
+  //   1. pending approval        — the only actionable state
+  //   2. recently-resolved (5s)  — flash so the user sees what they did
+  //   3. recent block (60s)      — call attention to last security action
+  //   4. recent review (60s)     — same, but for review-verdicts
+  //   5. recent loop (60s)       — same, for loop-detected events
+  //   6. idle                    — placeholder; shows blast score for context
+  // `tick` is included in deps so age-based filters re-evaluate every
+  // second (events still pin to ts, so they expire predictably).
+  const notification: Notification = useMemo(() => {
+    if (pendingApproval) {
+      return { kind: 'approval', event: pendingApproval, status: approvalStatus };
+    }
+    if (resolvedApproval && Date.now() - resolvedApproval.resolvedAt < RESOLVED_HOLD_MS) {
+      return {
+        kind: 'resolved',
+        event: resolvedApproval.event,
+        outcome: resolvedApproval.outcome,
+      };
+    }
+    const now = Date.now();
+    // Walk from newest backwards; first match wins by priority order.
+    for (const e of [...events].reverse()) {
+      if (e.kind !== 'tool') continue;
+      const ageMs = now - Date.parse(e.ts);
+      if (Number.isNaN(ageMs) || ageMs > NOTIFICATION_RECENT_WINDOW_MS) continue;
+      if (e.checkedBy === 'loop-detected') return { kind: 'loop', event: e, ageMs };
+      if (e.verdict === 'block') return { kind: 'block', event: e, ageMs };
+      if (e.verdict === 'review') return { kind: 'review', event: e, ageMs };
+    }
+    return { kind: 'idle', blastScore: blast?.score ?? 100 };
+    // tick is intentionally a dep so resolved/age windows expire over time.
+  }, [pendingApproval, approvalStatus, resolvedApproval, events, blast, tick]);
+
   if (!agg || !blast) {
     return (
       <Box paddingX={1}>
@@ -311,7 +374,7 @@ export function App(): React.ReactElement {
         cost={costSnapshot}
         skillsPinned={skillsPinned}
       />
-      {pendingApproval ? <ApprovalCard event={pendingApproval} status={approvalStatus} /> : null}
+      <NotificationArea notification={notification} />
       <LiveLog
         events={events}
         errorBanner={sseError}

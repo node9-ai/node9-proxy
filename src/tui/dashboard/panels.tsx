@@ -164,11 +164,18 @@ function labelFor(w: TimeWindow): string {
 }
 
 // ---------------------------------------------------------------------------
-// ApprovalCard — surfaces pending approvals above the LIVE feed. Sits
-// between HIGH LEVEL and LIVE so it's always visible (won't scroll
-// off). Visually distinct via the orange brand border + bold title.
-// Status text shows post-action feedback ("✓ approved", "⚠ failed: ...")
-// before App auto-dismisses on the next render after the resolution.
+// NotificationArea — fixed-height alert lane between HIGH LEVEL and
+// LIVE. Always rendered (avoids the layout jump that came with the
+// older conditional ApprovalCard). Content is computed by App.tsx
+// from a priority cascade and passed in as `notification`:
+//   1. action-needed (pending approval)   ← orange border, [a/d/t]
+//   2. just-acted    (5s flash)           ← outcome-colored border
+//   3. recent block  (last 60s)           ← red border
+//   4. recent review (last 60s)           ← yellow border
+//   5. recent loop   (last 60s)           ← yellow border
+//   6. idle                                ← dim gray border
+// Fixed height so the rest of the dashboard never shifts when the
+// notification swaps in or out.
 // ---------------------------------------------------------------------------
 
 export type ApprovalStatus =
@@ -177,74 +184,171 @@ export type ApprovalStatus =
   | { kind: 'ok'; verdict: 'allow' | 'deny' | 'trust' }
   | { kind: 'error'; message: string };
 
-export function ApprovalCard(props: {
-  event: ActivityEvent;
-  status: ApprovalStatus;
-}): React.ReactElement | null {
-  if (props.event.kind !== 'tool') return null;
-  const e = props.event;
-  const agent = e.agent ? capitalize(e.agent) : 'agent';
-  const sid = e.sessionId ? `·${e.sessionId.slice(0, 4)}` : '';
-  const subject = `${e.tool}  ${e.preview}`;
+export type Notification =
+  | { kind: 'approval'; event: ActivityEvent; status: ApprovalStatus }
+  | { kind: 'resolved'; event: ActivityEvent; outcome: 'allow' | 'deny' | 'trust' }
+  | { kind: 'block'; event: ActivityEvent; ageMs: number }
+  | { kind: 'review'; event: ActivityEvent; ageMs: number }
+  | { kind: 'loop'; event: ActivityEvent; ageMs: number }
+  | { kind: 'idle'; blastScore: number };
 
-  const statusLine = (() => {
-    if (props.status.kind === 'idle') {
-      return (
-        <Text wrap="truncate-end">
-          <Text color={'#5BF58C'}>{'  [a]'}</Text>
-          <Text dimColor>{'llow once   '}</Text>
-          <Text color={COL.liveOff}>{'[d]'}</Text>
-          <Text dimColor>{'eny   '}</Text>
-          <Text color={COL.panelHigh}>{'[t]'}</Text>
-          <Text dimColor>{'rust this tool   '}</Text>
-          <Text dimColor>{'[Esc] dismiss'}</Text>
-        </Text>
-      );
+export const NOTIFICATION_HEIGHT = 4;
+
+export function NotificationArea(props: { notification: Notification }): React.ReactElement {
+  const { notification } = props;
+  const borderColor = (() => {
+    switch (notification.kind) {
+      case 'approval':
+        return COL.brand;
+      case 'resolved':
+        return notification.outcome === 'allow'
+          ? '#5BF58C'
+          : notification.outcome === 'deny'
+            ? COL.liveOff
+            : COL.panelHigh;
+      case 'block':
+        return COL.liveOff;
+      case 'review':
+      case 'loop':
+        return COL.panelHigh;
+      case 'idle':
+        return COL.textDim;
     }
-    if (props.status.kind === 'sending') {
-      return <Text dimColor>{'  sending decision…'}</Text>;
-    }
-    if (props.status.kind === 'ok') {
-      const v = props.status.verdict;
-      if (v === 'allow') return <Text color={'#5BF58C'}>{'  ✓ approved'}</Text>;
-      if (v === 'deny') return <Text color={COL.liveOff}>{'  ✗ denied'}</Text>;
-      return <Text color={COL.panelHigh}>{'  ★ trusted'}</Text>;
-    }
-    return (
-      <Text
-        color={COL.liveOff}
-      >{`  ⚠ failed: ${props.status.message} (retry [a/d/t] or [Esc])`}</Text>
-    );
   })();
 
   return (
     <Box
       flexDirection="column"
       borderStyle="round"
-      borderColor={COL.brand}
+      borderColor={borderColor}
       paddingX={1}
       marginX={1}
+      height={NOTIFICATION_HEIGHT}
     >
+      {renderNotificationBody(notification)}
+    </Box>
+  );
+}
+
+function renderNotificationBody(n: Notification): React.ReactNode {
+  if (n.kind === 'approval') return renderApproval(n.event, n.status);
+  if (n.kind === 'resolved') return renderResolved(n.event, n.outcome);
+  if (n.kind === 'block') return renderEventInfo(n.event, '🛑 BLOCKED', COL.liveOff, n.ageMs);
+  if (n.kind === 'review') return renderEventInfo(n.event, '🟡 REVIEW', COL.panelHigh, n.ageMs);
+  if (n.kind === 'loop') return renderEventInfo(n.event, '🔁 LOOP', COL.panelHigh, n.ageMs);
+  return renderIdle(n.blastScore);
+}
+
+function renderApproval(event: ActivityEvent, status: ApprovalStatus): React.ReactNode {
+  if (event.kind !== 'tool') return null;
+  const agent = event.agent ? capitalize(event.agent) : 'agent';
+  const sid = event.sessionId ? `·${event.sessionId.slice(0, 4)}` : '';
+  const subject = `${event.tool}  ${event.preview}`;
+
+  const actionLine = (() => {
+    if (status.kind === 'idle') {
+      return (
+        <Text wrap="truncate-end">
+          {event.checkedBy ? (
+            <Text
+              dimColor
+            >{`${event.checkedBy}${event.reason ? ` — ${event.reason}` : ''}   `}</Text>
+          ) : null}
+          <Text color="#5BF58C">[a]</Text>
+          <Text dimColor>llow </Text>
+          <Text color={COL.liveOff}>[d]</Text>
+          <Text dimColor>eny </Text>
+          <Text color={COL.panelHigh}>[t]</Text>
+          <Text dimColor>rust </Text>
+          <Text dimColor>[Esc]</Text>
+        </Text>
+      );
+    }
+    if (status.kind === 'sending') return <Text dimColor>sending decision…</Text>;
+    if (status.kind === 'ok') {
+      const v = status.verdict;
+      const color = v === 'allow' ? '#5BF58C' : v === 'deny' ? COL.liveOff : COL.panelHigh;
+      const label = v === 'allow' ? '✓ approved' : v === 'deny' ? '✗ denied' : '★ trusted';
+      return <Text color={color}>{label}</Text>;
+    }
+    return (
+      <Text color={COL.liveOff}>{`⚠ failed: ${status.message} (retry [a/d/t] or [Esc])`}</Text>
+    );
+  })();
+
+  return (
+    <>
       <Text wrap="truncate-end">
         <Text color={COL.brand} bold>
-          ⚠ APPROVAL NEEDED
+          ⚠ APPROVAL
         </Text>
-        <Text dimColor>{`  · ${agent}${sid}`}</Text>
-      </Text>
-      <Text wrap="truncate-end">
+        <Text dimColor>{`  · ${agent}${sid}  `}</Text>
         <Text bold>{subject}</Text>
       </Text>
-      {e.reason ? (
-        <Text dimColor wrap="truncate-end">
-          {`  reason: ${e.checkedBy ?? 'rule'} — ${e.reason}`}
+      {actionLine}
+    </>
+  );
+}
+
+function renderResolved(
+  event: ActivityEvent,
+  outcome: 'allow' | 'deny' | 'trust'
+): React.ReactNode {
+  if (event.kind !== 'tool') return null;
+  const agent = event.agent ? capitalize(event.agent) : 'agent';
+  const subject = `${event.tool}  ${event.preview}`;
+  const color = outcome === 'allow' ? '#5BF58C' : outcome === 'deny' ? COL.liveOff : COL.panelHigh;
+  const label = outcome === 'allow' ? '✓ approved' : outcome === 'deny' ? '✗ denied' : '★ trusted';
+  return (
+    <>
+      <Text wrap="truncate-end">
+        <Text color={color} bold>
+          {label}
         </Text>
-      ) : e.checkedBy ? (
-        <Text dimColor wrap="truncate-end">
-          {`  rule: ${e.checkedBy}`}
+        <Text dimColor>{`  · ${agent}  `}</Text>
+        <Text>{subject}</Text>
+      </Text>
+      <Text dimColor>(dismissing…)</Text>
+    </>
+  );
+}
+
+function renderEventInfo(
+  event: ActivityEvent,
+  label: string,
+  color: string,
+  ageMs: number
+): React.ReactNode {
+  if (event.kind !== 'tool') return null;
+  const ago = ageMs < 1000 ? 'just now' : `${Math.floor(ageMs / 1000)}s ago`;
+  const agent = event.agent ? capitalize(event.agent) : 'agent';
+  const subject = `${event.tool}  ${event.preview}`;
+  return (
+    <>
+      <Text wrap="truncate-end">
+        <Text color={color} bold>
+          {label}
         </Text>
-      ) : null}
-      {statusLine}
-    </Box>
+        <Text dimColor>{`  · ${agent}  `}</Text>
+        <Text>{subject}</Text>
+      </Text>
+      <Text dimColor wrap="truncate-end">
+        {event.checkedBy ? `rule: ${event.checkedBy} · ${ago}` : ago}
+      </Text>
+    </>
+  );
+}
+
+function renderIdle(blastScore: number): React.ReactNode {
+  const scoreColor = blastScore >= 80 ? '#5BF58C' : blastScore >= 50 ? COL.panelHigh : COL.liveOff;
+  return (
+    <>
+      <Text wrap="truncate-end">
+        <Text dimColor>✓ no recent alerts · blast </Text>
+        <Text bold color={scoreColor}>{`${blastScore}/100`}</Text>
+      </Text>
+      <Text dimColor>(approvals + recent blocks/loops appear here)</Text>
+    </>
   );
 }
 
