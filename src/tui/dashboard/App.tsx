@@ -367,13 +367,7 @@ export function App(): React.ReactElement {
   return (
     <Box flexDirection="column" height="100%">
       <Header window={window} connected={!sseError} lastAgent={lastAgent} lastTs={lastEvent?.ts} />
-      <HighLevel
-        window={window}
-        agg={agg}
-        blast={blast}
-        cost={costSnapshot}
-        skillsPinned={skillsPinned}
-      />
+      <HighLevel window={window} agg={agg} cost={costSnapshot} skillsPinned={skillsPinned} />
       <NotificationArea notification={notification} />
       <LiveLog
         events={events}

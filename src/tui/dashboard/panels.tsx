@@ -73,13 +73,10 @@ export function Header(props: {
 export function HighLevel(props: {
   window: TimeWindow;
   agg: AuditAggregates;
-  blast: BlastSnapshot;
   cost: CostSnapshot | null;
   skillsPinned: number;
 }): React.ReactElement {
-  const { agg, blast, cost } = props;
-  const blastColor =
-    blast.score >= 80 ? '#5BF58C' : blast.score >= 50 ? COL.panelHigh : COL.liveOff;
+  const { agg, cost } = props;
   const blockColor = agg.block > 0 ? COL.liveOff : COL.textDim;
   return (
     <Box
@@ -115,18 +112,16 @@ export function HighLevel(props: {
         <Text bold>{agg.total.toLocaleString()}</Text>
         <Text dimColor> events</Text>
       </Text>
+      {/* Second line: activity-only metadata. Loops + blast moved
+          out — they're security signals, surfaced exclusively in the
+          DLP / LOOP / RISK panel below to avoid duplicate numbers. */}
       <Text wrap="truncate-end">
         <Text bold>{agg.sessions}</Text>
         <Text dimColor> sessions · </Text>
         <Text bold>{agg.mcpServers}</Text>
         <Text dimColor>{` MCP (${agg.mcpCalls} calls)  ·  `}</Text>
         <Text bold>{props.skillsPinned}</Text>
-        <Text dimColor> skills · </Text>
-        <Text bold color={agg.loops > 0 ? COL.panelHigh : COL.textDim}>{`${agg.loops}`}</Text>
-        <Text color={agg.loops > 0 ? COL.panelHigh : COL.textDim}>{' 🔁 loops'}</Text>
-        <Text dimColor>{'  ·  blast '}</Text>
-        <Text bold color={blastColor}>{`${blast.score}/100`}</Text>
-        <Text dimColor>{` (${blast.paths.length} paths)`}</Text>
+        <Text dimColor> skills pinned</Text>
       </Text>
     </Box>
   );
