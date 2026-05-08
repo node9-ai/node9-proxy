@@ -550,7 +550,9 @@ export function Report(props: {
 }): React.ReactElement {
   const { agg, cost } = props;
   const maxTool = Math.max(1, ...agg.byTool.map((t) => t.calls));
-  const maxShell = Math.max(1, ...agg.byShell.map((s) => s.count));
+  // Top-3 of each — keeps the right column readable on standard widths.
+  const topBlocks = agg.byBlock.slice(0, 3);
+  const maxBlock = Math.max(1, ...topBlocks.map((b) => b.count));
   // Top-3 models from cost data (already loaded). Provides per-model
   // cost split that mirrors what `node9 report` shows under "Cost".
   const topModels = (cost?.byModel ?? []).slice(0, 3);
@@ -572,7 +574,7 @@ export function Report(props: {
       <Box flexDirection="row">
         <Box flexDirection="column" flexGrow={1}>
           <Text dimColor wrap="truncate-end">
-            {'tool'.padEnd(16) + 'calls'.padStart(7) + 'blocked'.padStart(9)}
+            {'Tools'.padEnd(16) + 'calls'.padStart(7) + 'blocked'.padStart(9)}
           </Text>
           {agg.byTool.length === 0 ? (
             <Text dimColor>(no tools)</Text>
@@ -590,31 +592,36 @@ export function Report(props: {
           )}
         </Box>
         <Box flexDirection="column" flexGrow={1} marginLeft={2}>
+          {/* Top Blocks: which rules actually fired. Lifted from
+              `node9 report` ("Top Blocks" section). Replaces the
+              earlier shell-cmd breakdown — security signal beats
+              shell-vocabulary trivia. */}
           <Text dimColor wrap="truncate-end">
-            {'model / shell'.padEnd(16) + 'cost / calls'.padStart(13)}
+            {'Top Blocks'.padEnd(20) + 'count'.padStart(8)}
           </Text>
-          {/* Models block — per-model cost split, lifted from `node9 report`. */}
-          {topModels.length > 0
-            ? topModels.map((m) => (
-                <Text key={m.model} wrap="truncate-end">
-                  <Text dimColor>{bar(m.costUSD, maxModelCost, 6)}</Text>
-                  <Text>{` ${truncate(shortenModel(m.model), 14).padEnd(14)}`}</Text>
-                  <Text bold>{formatCost(m.costUSD).padStart(8)}</Text>
-                </Text>
-              ))
-            : null}
-          {/* Shell breakdown — same as before. */}
-          {agg.byShell.length === 0 ? (
-            <Text dimColor>(no shell)</Text>
+          {topBlocks.length === 0 ? (
+            <Text dimColor>(no blocks)</Text>
           ) : (
-            agg.byShell.slice(0, Math.max(1, 5 - topModels.length)).map((s) => (
-              <Text key={s.cmd} wrap="truncate-end">
-                <Text dimColor>{bar(s.count, maxShell, 6)}</Text>
-                <Text>{` ${truncate(s.cmd, 14).padEnd(14)}`}</Text>
-                <Text bold>{`${s.count}`.padStart(6)}</Text>
-                <Text color={s.blocked > 0 ? COL.liveOff : COL.textDim}>
-                  {`  ${s.blocked}`.padStart(8)}
-                </Text>
+            topBlocks.map((b) => (
+              <Text key={b.rule} wrap="truncate-end">
+                <Text dimColor>{bar(b.count, maxBlock, 6)}</Text>
+                <Text>{` ${truncate(b.rule, 18).padEnd(18)}`}</Text>
+                <Text bold>{`${b.count}`.padStart(6)}</Text>
+              </Text>
+            ))
+          )}
+          {/* Models breakdown — per-model cost from cost.byModel. */}
+          <Text dimColor wrap="truncate-end">
+            {'Models'.padEnd(20) + 'cost'.padStart(8)}
+          </Text>
+          {topModels.length === 0 ? (
+            <Text dimColor>(cost loading…)</Text>
+          ) : (
+            topModels.map((m) => (
+              <Text key={m.model} wrap="truncate-end">
+                <Text dimColor>{bar(m.costUSD, maxModelCost, 6)}</Text>
+                <Text>{` ${truncate(shortenModel(m.model), 18).padEnd(18)}`}</Text>
+                <Text bold>{formatCost(m.costUSD).padStart(6)}</Text>
               </Text>
             ))
           )}
