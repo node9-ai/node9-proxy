@@ -46,6 +46,8 @@ export interface AuditAggregates {
   allow: number;
   block: number;
   review: number;
+  /** Audit entries blocked by loop-detection (subset of block, surfaced separately for the HUD). */
+  loops: number;
   costUSD: number;
   tokens: number;
   sessions: number;
@@ -53,7 +55,7 @@ export interface AuditAggregates {
   mcpCalls: number;
   byTool: Array<{ tool: string; calls: number; blocked: number }>;
   byBlock: Array<{ rule: string; count: number }>;
-  byShell: Array<{ cmd: string; count: number }>;
+  byShell: Array<{ cmd: string; count: number; blocked: number }>;
 }
 
 export interface BlastSnapshot {

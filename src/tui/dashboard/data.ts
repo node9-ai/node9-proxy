@@ -79,11 +79,12 @@ export function aggregateAudit(
   let allow = 0;
   let block = 0;
   let review = 0;
+  let loops = 0;
   const sessionSet = new Set<string>();
   const mcpSet = new Set<string>();
   const toolMap = new Map<string, { calls: number; blocked: number }>();
   const blockMap = new Map<string, number>();
-  const shellMap = new Map<string, number>();
+  const shellMap = new Map<string, { count: number; blocked: number }>();
 
   for (const e of inWindow) {
     if (e.sessionId) sessionSet.add(e.sessionId);
@@ -91,9 +92,11 @@ export function aggregateAudit(
 
     const isAllow = e.decision === 'allow' || e.decision === 'observe-allow';
     const isReview = e.decision === 'review';
+    const isLoop = e.checkedBy === 'loop-detected';
     if (isAllow) allow++;
     else if (isReview) review++;
     else block++;
+    if (isLoop) loops++;
 
     const t = toolMap.get(e.tool) ?? { calls: 0, blocked: 0 };
     t.calls++;
@@ -105,10 +108,15 @@ export function aggregateAudit(
     }
 
     // Shell-cmd extraction: first token of args.command for Bash entries.
+    // Tracks blocked count per shell command so REPORT can show it
+    // symmetrically with the tools column.
     if (TEST_TOOLS.has(e.tool) && typeof e.args?.command === 'string') {
       const head = (e.args.command as string).trim().split(/\s+/)[0];
       if (head && /^[a-zA-Z0-9._-]+$/.test(head)) {
-        shellMap.set(head, (shellMap.get(head) ?? 0) + 1);
+        const s = shellMap.get(head) ?? { count: 0, blocked: 0 };
+        s.count++;
+        if (!isAllow && !isReview) s.blocked++;
+        shellMap.set(head, s);
       }
     }
   }
@@ -118,6 +126,7 @@ export function aggregateAudit(
     allow,
     block,
     review,
+    loops,
     // Cost / tokens: not in audit.log itself; would need costSync data.
     // Spike returns 0 for both — add a banner in the UI rather than fake numbers.
     costUSD: 0,
@@ -134,9 +143,9 @@ export function aggregateAudit(
       .slice(0, 6)
       .map(([rule, count]) => ({ rule, count })),
     byShell: [...shellMap.entries()]
-      .sort((a, b) => b[1] - a[1])
+      .sort((a, b) => b[1].count - a[1].count)
       .slice(0, 6)
-      .map(([cmd, count]) => ({ cmd, count })),
+      .map(([cmd, v]) => ({ cmd, count: v.count, blocked: v.blocked })),
   };
 }
 
@@ -169,7 +178,12 @@ function shortenPath(p: string): string {
 
 interface SsePayload {
   id?: string;
-  ts?: string;
+  /**
+   * Daemon broadcasts ts as either an ISO-8601 string (audit.log path)
+   * or as an epoch-ms number (server.ts:275 → entry.timestamp = Date.now()).
+   * Always normalize before .slice() / Date parsing.
+   */
+  ts?: string | number;
   tool?: string;
   agent?: string;
   args?: Record<string, unknown>;
@@ -181,6 +195,14 @@ interface SsePayload {
   // Activity events have these on the inner `activity` field on some events;
   // we union both shapes since the daemon broadcasts a few SSE event names.
   activity?: SsePayload;
+}
+
+function normalizeTs(ts: unknown): string {
+  if (typeof ts === 'string' && ts.length > 0) return ts;
+  if (typeof ts === 'number' && Number.isFinite(ts)) {
+    return new Date(ts).toISOString();
+  }
+  return new Date().toISOString();
 }
 
 export function subscribeToSse(
@@ -254,7 +276,9 @@ function toActivityEvent(eventName: string, data: SsePayload): ActivityEvent | n
   // `activity` (incoming) and `add` (pending approval). Others are ignored.
   if (eventName !== 'activity' && eventName !== 'add' && eventName !== 'snapshot') return null;
   const payload = data.activity ?? data;
-  if (!payload.tool || !payload.ts) return null;
+  if (!payload.tool) return null;
+
+  const ts = normalizeTs(payload.ts);
 
   const verdict: ActivityEvent['verdict'] = (() => {
     const d = payload.decision;
@@ -270,8 +294,8 @@ function toActivityEvent(eventName: string, data: SsePayload): ActivityEvent | n
     .slice(0, 70);
 
   return {
-    id: payload.id ?? `${payload.ts}-${payload.tool}`,
-    ts: payload.ts,
+    id: payload.id ?? `${ts}-${payload.tool}`,
+    ts,
     tool: payload.tool,
     agent: payload.agent,
     preview,

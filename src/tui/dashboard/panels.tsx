@@ -113,7 +113,9 @@ export function HighLevel(props: {
         <Text dimColor>{` MCP (${agg.mcpCalls} calls)  ·  `}</Text>
         <Text bold>{props.skillsPinned}</Text>
         <Text dimColor> skills · </Text>
-        <Text dimColor>blast </Text>
+        <Text bold color={agg.loops > 0 ? COL.panelHigh : COL.textDim}>{`${agg.loops}`}</Text>
+        <Text color={agg.loops > 0 ? COL.panelHigh : COL.textDim}>{' 🔁 loops'}</Text>
+        <Text dimColor>{'  ·  blast '}</Text>
         <Text bold color={blastColor}>{`${blast.score}/100`}</Text>
         <Text dimColor>{` (${blast.paths.length} paths)`}</Text>
       </Text>
@@ -172,18 +174,28 @@ export function LiveLog(props: {
 }
 
 function ActivityRow({ event }: { event: ActivityEvent }): React.ReactElement {
-  const t = event.ts.slice(11, 19); // HH:MM:SS
+  // Defensive against unexpected ts shapes: data.ts:normalizeTs already
+  // coerces incoming SSE payloads, but keep this row resilient too in
+  // case a malformed event slips through.
+  const tsStr = typeof event.ts === 'string' ? event.ts : '';
+  const t = tsStr.length >= 19 ? tsStr.slice(11, 19) : '--:--:--';
   const agentLabel = `[${capitalize(event.agent ?? '?')}]`.padEnd(10);
-  const verdictIcon =
-    event.verdict === 'block'
+  // Loop-detected entries get a distinct icon (and color) so the user
+  // can tell "blocked because of a real rule" apart from "blocked by
+  // the loop detector" at a glance.
+  const isLoop = event.checkedBy === 'loop-detected';
+  const verdictIcon = isLoop
+    ? '🔁'
+    : event.verdict === 'block'
       ? '🛑'
       : event.verdict === 'review'
         ? '🟡'
         : event.verdict === 'allow'
           ? '✓ '
           : '… ';
-  const verdictColor =
-    event.verdict === 'block'
+  const verdictColor = isLoop
+    ? COL.panelHigh
+    : event.verdict === 'block'
       ? COL.liveOff
       : event.verdict === 'review'
         ? COL.panelHigh
@@ -204,7 +216,7 @@ function ActivityRow({ event }: { event: ActivityEvent }): React.ReactElement {
         <Text dimColor>{t} </Text>
         <Text color={agentColor}>{agentLabel}</Text>
         <Text> </Text>
-        <Text bold>{event.tool.padEnd(10)}</Text>
+        <Text bold>{truncate(event.tool, 14).padEnd(14)}</Text>
         <Text color={verdictColor}>{verdictIcon} </Text>
         <Text dimColor>{event.preview}</Text>
       </Text>
@@ -215,6 +227,11 @@ function ActivityRow({ event }: { event: ActivityEvent }): React.ReactElement {
       ) : null}
     </Box>
   );
+}
+
+/** Truncate to width with single-char `…` overflow marker; pad-friendly. */
+function truncate(s: string, width: number): string {
+  return s.length <= width ? s : s.slice(0, width - 1) + '…';
 }
 
 function capitalize(s: string): string {
@@ -246,7 +263,7 @@ export function Report(props: { agg: AuditAggregates; window: TimeWindow }): Rea
       <Box flexDirection="row">
         <Box flexDirection="column" flexGrow={1}>
           <Text dimColor wrap="truncate-end">
-            {' '.padEnd(11) + 'calls'.padStart(7) + 'blocked'.padStart(9)}
+            {'tool'.padEnd(16) + 'calls'.padStart(7) + 'blocked'.padStart(9)}
           </Text>
           {agg.byTool.length === 0 ? (
             <Text dimColor>(no tools)</Text>
@@ -254,7 +271,7 @@ export function Report(props: { agg: AuditAggregates; window: TimeWindow }): Rea
             agg.byTool.map((t) => (
               <Text key={t.tool} wrap="truncate-end">
                 <Text dimColor>{bar(t.calls, maxTool, 6)}</Text>
-                <Text>{` ${t.tool.slice(0, 9).padEnd(9)}`}</Text>
+                <Text>{` ${truncate(t.tool, 14).padEnd(14)}`}</Text>
                 <Text bold>{`${t.calls}`.padStart(6)}</Text>
                 <Text color={t.blocked > 0 ? COL.liveOff : COL.textDim}>
                   {`  ${t.blocked}`.padStart(8)}
@@ -265,7 +282,7 @@ export function Report(props: { agg: AuditAggregates; window: TimeWindow }): Rea
         </Box>
         <Box flexDirection="column" flexGrow={1} marginLeft={2}>
           <Text dimColor wrap="truncate-end">
-            {'shell'.padEnd(11) + 'calls'.padStart(7)}
+            {'shell'.padEnd(16) + 'calls'.padStart(7) + 'blocked'.padStart(9)}
           </Text>
           {agg.byShell.length === 0 ? (
             <Text dimColor>(no shell)</Text>
@@ -273,8 +290,11 @@ export function Report(props: { agg: AuditAggregates; window: TimeWindow }): Rea
             agg.byShell.map((s) => (
               <Text key={s.cmd} wrap="truncate-end">
                 <Text dimColor>{bar(s.count, maxShell, 6)}</Text>
-                <Text>{` ${s.cmd.slice(0, 9).padEnd(9)}`}</Text>
+                <Text>{` ${truncate(s.cmd, 14).padEnd(14)}`}</Text>
                 <Text bold>{`${s.count}`.padStart(6)}</Text>
+                <Text color={s.blocked > 0 ? COL.liveOff : COL.textDim}>
+                  {`  ${s.blocked}`.padStart(8)}
+                </Text>
               </Text>
             ))
           )}
