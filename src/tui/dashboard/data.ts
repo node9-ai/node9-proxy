@@ -15,7 +15,14 @@ import http from 'http';
 import { runBlast } from '../../cli/commands/blast.js';
 import { DAEMON_HOST, DAEMON_PORT, getInternalToken } from '../../auth/daemon.js';
 import { collectEntries, type DailyEntry } from '../../costSync.js';
-import type { ActivityEvent, AuditAggregates, BlastSnapshot, CostSnapshot } from './types.js';
+import { SHIELDS, readActiveShields } from '../../shields.js';
+import type {
+  ActivityEvent,
+  AuditAggregates,
+  BlastSnapshot,
+  CostSnapshot,
+  ShieldStatus,
+} from './types.js';
 
 // ---------------------------------------------------------------------------
 // Audit log parsing — minimal copy of the report.ts helper.
@@ -333,6 +340,25 @@ export function aggregateCost(
 // ---------------------------------------------------------------------------
 // Blast — wraps runBlast() with privacy-friendly path truncation.
 // ---------------------------------------------------------------------------
+
+/**
+ * Read the user's shield-config state. Cheap (small JSON file in
+ * ~/.node9/) so safe to call alongside loadBlast on the same cadence.
+ * Returns active + inactive shield names. "Inactive" means a registered
+ * shield (builtin or user) that's not in ~/.node9/shields.json's active
+ * list — these are the call-to-action items shown at the bottom of RISK.
+ */
+export function loadShieldStatus(): ShieldStatus {
+  try {
+    const all = Object.keys(SHIELDS).sort();
+    const activeSet = new Set(readActiveShields());
+    const active = all.filter((n) => activeSet.has(n));
+    const inactive = all.filter((n) => !activeSet.has(n));
+    return { active, inactive };
+  } catch {
+    return { active: [], inactive: [] };
+  }
+}
 
 export function loadBlast(): BlastSnapshot {
   try {

@@ -22,6 +22,7 @@ import {
   type AuditAggregates,
   type BlastSnapshot,
   type CostSnapshot,
+  type ShieldStatus,
   type TimeWindow,
 } from './types.js';
 import {
@@ -30,6 +31,7 @@ import {
   buildLiveBackfill,
   loadBlast,
   loadCostEntries,
+  loadShieldStatus,
   readAuditEntries,
   submitDecision,
   subscribeToSse,
@@ -89,6 +91,7 @@ export function App(): React.ReactElement {
   const [sseError, setSseError] = useState<string | undefined>();
   const [agg, setAgg] = useState<AuditAggregates | null>(null);
   const [blast, setBlast] = useState<BlastSnapshot | null>(null);
+  const [shieldStatus, setShieldStatus] = useState<ShieldStatus | null>(null);
   const [costEntries, setCostEntries] = useState<DailyEntry[] | null>(null);
   const [skillsPinned] = useState<number>(() => readSkillsPinned());
   // Pending approval — most-recent event that needs human action.
@@ -205,6 +208,14 @@ export function App(): React.ReactElement {
     return () => clearInterval(id);
   }, []);
 
+  // Shield status — same cadence as blast (cheap fs read; rarely changes).
+  // Surfaces inactive shields at the bottom of the RISK panel.
+  useEffect(() => {
+    setShieldStatus(loadShieldStatus());
+    const id = setInterval(() => setShieldStatus(loadShieldStatus()), BLAST_REFRESH_MS);
+    return () => clearInterval(id);
+  }, []);
+
   // Cost — async because collectEntries() walks every JSONL under
   // ~/.claude/projects (1-5s on a heavy install). Render shows
   // "loading…" placeholder until the first walk completes.
@@ -310,11 +321,12 @@ export function App(): React.ReactElement {
       const next = TIME_WINDOWS[(idx + 1) % TIME_WINDOWS.length];
       setWindow(next);
     } else if (input === 'r') {
-      // Manual refresh of audit + blast (cheap) and cost (expensive,
-      // dispatched async so the keypress feels instant).
+      // Manual refresh of audit + blast + shields (cheap) and cost
+      // (expensive, dispatched async so the keypress feels instant).
       const entries = readAuditEntries();
       setAgg(aggregateAudit(entries, windowStartMs(window, openedAt)));
       setBlast(loadBlast());
+      setShieldStatus(loadShieldStatus());
       void loadCostEntries().then(setCostEntries);
     }
   });
@@ -453,7 +465,7 @@ export function App(): React.ReactElement {
         filterInputMode={filterInputMode}
       />
       <Report agg={agg} cost={costSnapshot} window={window} />
-      <Risk agg={agg} blast={blast} window={window} />
+      <Risk agg={agg} blast={blast} shieldStatus={shieldStatus} window={window} />
       <StatusBar />
     </Box>
   );

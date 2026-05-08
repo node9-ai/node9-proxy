@@ -91,6 +91,13 @@ export interface BlastSnapshot {
   envFindings: number;
 }
 
+/** Shield-config snapshot — names of shields registered (builtin + user)
+ *  vs the names actually active in ~/.node9/shields.json. */
+export interface ShieldStatus {
+  active: string[];
+  inactive: string[];
+}
+
 /** Aggregated cost + tokens within the selected window. Computed off
  *  costSync.collectEntries(). `loaded: false` is shown while the
  *  initial async walk is in flight. */

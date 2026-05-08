@@ -10,6 +10,7 @@ import type {
   AuditAggregates,
   BlastSnapshot,
   CostSnapshot,
+  ShieldStatus,
   TimeWindow,
 } from './types.js';
 import { TIME_WINDOWS } from './types.js';
@@ -622,6 +623,7 @@ function bar(value: number, max: number, width: number): string {
 export function Risk(props: {
   agg: AuditAggregates;
   blast: BlastSnapshot;
+  shieldStatus: ShieldStatus | null;
   window: TimeWindow;
 }): React.ReactElement {
   // Use the dedicated counters from aggregateAudit. Earlier this
@@ -667,6 +669,16 @@ export function Risk(props: {
         <Text wrap="truncate-end">
           <Text color={COL.liveOff}>{'  ✗ '}</Text>
           <Text>{props.blast.paths.join('  ·  ')}</Text>
+        </Text>
+      ) : null}
+      {props.shieldStatus && props.shieldStatus.inactive.length > 0 ? (
+        // Call-to-action: list shields the user hasn't enabled. Honest
+        // about scope (only shows registered builtin + user shields,
+        // not all possible shield names ever).
+        <Text wrap="truncate-end">
+          <Text dimColor>{'  Inactive: '}</Text>
+          <Text>{props.shieldStatus.inactive.join(' · ')}</Text>
+          <Text dimColor>{'  → node9 shield enable <name>'}</Text>
         </Text>
       ) : null}
     </Box>
