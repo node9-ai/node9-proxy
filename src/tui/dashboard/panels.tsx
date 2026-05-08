@@ -350,18 +350,18 @@ export function Risk(props: {
         <Text dimColor> loops · </Text>
         <Text color={COL.liveOff}>{'🔭 '}</Text>
         <Text bold>{props.blast.paths.length}</Text>
-        <Text dimColor> paths reachable · score </Text>
+        <Text dimColor> paths · score </Text>
         <Text bold color={scoreColor}>{`${props.blast.score}/100`}</Text>
       </Text>
       {props.blast.paths.length > 0 ? (
-        <Box flexDirection="column" marginTop={0}>
-          {props.blast.paths.map((p) => (
-            <Text key={p} wrap="truncate-end">
-              <Text color={COL.liveOff}>{'  ✗ '}</Text>
-              <Text>{p}</Text>
-            </Text>
-          ))}
-        </Box>
+        // Inline path list — saves ~4 rows vs one-per-line. Long
+        // joins get truncated by truncate-end with `…`; the count
+        // above already says how many there are total, so a partial
+        // visible list is honest.
+        <Text wrap="truncate-end">
+          <Text color={COL.liveOff}>{'  ✗ '}</Text>
+          <Text>{props.blast.paths.join('  ·  ')}</Text>
+        </Text>
       ) : null}
     </Box>
   );

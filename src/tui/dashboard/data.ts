@@ -136,7 +136,7 @@ export function aggregateAudit(
     mcpCalls: [...inWindow].filter((e) => !!e.mcpServer).length,
     byTool: [...toolMap.entries()]
       .sort((a, b) => b[1].calls - a[1].calls)
-      .slice(0, 8)
+      .slice(0, 5)
       .map(([tool, v]) => ({ tool, calls: v.calls, blocked: v.blocked })),
     byBlock: [...blockMap.entries()]
       .sort((a, b) => b[1] - a[1])
@@ -144,7 +144,7 @@ export function aggregateAudit(
       .map(([rule, count]) => ({ rule, count })),
     byShell: [...shellMap.entries()]
       .sort((a, b) => b[1].count - a[1].count)
-      .slice(0, 6)
+      .slice(0, 5)
       .map(([cmd, v]) => ({ cmd, count: v.count, blocked: v.blocked })),
   };
 }
