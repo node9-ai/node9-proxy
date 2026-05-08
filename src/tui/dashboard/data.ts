@@ -157,10 +157,13 @@ export function aggregateAudit(
  * a few SSE-only fields (no `id`, no inline `reason`). We synthesize
  * a deterministic id so React keys stay stable across re-renders.
  *
- * Args handling: PreToolUse entries store `argsHash` (not plaintext)
- * when audit-arg-hashing is enabled — the default for privacy. When
- * we can't recover a readable preview, surface "(redacted)" rather
- * than the raw "{}" JSON, so the row is still informative.
+ * Preview handling: PreToolUse entries store `argsHash` (never
+ * plaintext) when audit-arg-hashing is enabled — the default for
+ * privacy. There is no way to recover plaintext from the hash, and
+ * pre→post timestamp pairing is unreliable (long-running tools cause
+ * 30+ second gaps). When args has no readable command/path, surface
+ * the rule name (`→ block-force-push`) — much more informative than
+ * a generic "(redacted)" sentinel.
  */
 export function auditEntryToActivityEvent(e: AuditEntry, index: number): ActivityEvent {
   const ts = normalizeTs(e.ts);
@@ -176,7 +179,7 @@ export function auditEntryToActivityEvent(e: AuditEntry, index: number): Activit
     ts,
     tool: e.tool,
     agent: e.agent,
-    preview: previewFromArgs(e.args),
+    preview: previewFromEntry(e),
     verdict,
     checkedBy: e.checkedBy,
     sessionId: e.sessionId,
@@ -185,28 +188,34 @@ export function auditEntryToActivityEvent(e: AuditEntry, index: number): Activit
 }
 
 /**
- * Best-effort one-line preview from an audit row's args. Falls back
- * to "(redacted)" when args is empty or only has hash metadata,
- * which is what PreToolUse entries look like with the default
- * auditHashArgs=true config.
+ * Best-effort one-line preview from an audit row.
+ *   1. Plaintext command / file_path / path (post-hook + non-hashed pre)
+ *   2. argsSummary if a writer included one
+ *   3. → checkedBy rule name (informative even when args are hashed)
+ *   4. (no preview) — last resort; surfaces verdict-only rows with
+ *      no rule attribution. Rare in practice.
  */
-function previewFromArgs(args: Record<string, unknown> | undefined): string {
-  if (!args) return '(redacted)';
-  if (typeof args.command === 'string' && args.command.length > 0) {
-    return args.command.replace(/\s+/g, ' ').slice(0, 70);
+function previewFromEntry(e: AuditEntry): string {
+  const args = e.args;
+  if (args) {
+    if (typeof args.command === 'string' && args.command.length > 0) {
+      return args.command.replace(/\s+/g, ' ').slice(0, 70);
+    }
+    if (typeof args.file_path === 'string' && args.file_path.length > 0) {
+      return args.file_path.slice(0, 70);
+    }
+    if (typeof args.path === 'string' && args.path.length > 0) {
+      return args.path.slice(0, 70);
+    }
+    if (typeof args.argsSummary === 'string' && args.argsSummary.length > 0) {
+      return args.argsSummary.slice(0, 70);
+    }
   }
-  if (typeof args.file_path === 'string' && args.file_path.length > 0) {
-    return args.file_path.slice(0, 70);
-  }
-  if (typeof args.path === 'string' && args.path.length > 0) {
-    return args.path.slice(0, 70);
-  }
-  // No useful key: either {} or only argsHash / argsSummary metadata.
-  // The latter is acceptable to surface verbatim if present.
-  if (typeof args.argsSummary === 'string' && args.argsSummary.length > 0) {
-    return args.argsSummary.slice(0, 70);
-  }
-  return '(redacted)';
+  // No plaintext available — surface the rule that fired so the row
+  // still carries signal. PreToolUse rows almost always have checkedBy
+  // (every gating decision references the rule that gated it).
+  if (e.checkedBy) return `→ ${e.checkedBy}`;
+  return '(no preview)';
 }
 
 /**
@@ -214,63 +223,21 @@ function previewFromArgs(args: Record<string, unknown> | undefined): string {
  * entries. Returned in chronological order so appending SSE events to
  * the end keeps the buffer monotonic.
  *
- * Privacy-friendly merge: PreToolUse entries store args as a hash
- * (argsHash) rather than plaintext, so on their own they render as
- * "(redacted)". The plaintext lives in the matching PostToolUse row.
- * We match pairs by (ts-truncated-to-second, tool) — same pattern
- * report.ts:buildTestTimestamps uses — and lift command + agent from
- * the post-hook entry into the pre-hook row before projecting to
- * ActivityEvent. PreToolUse remains the row of record (carries the
- * verdict / checkedBy); post-hook is just an enrichment source.
+ * Skips post-hook (would double up with the matching pre-hook row's
+ * verdict) and response-dlp (not tool calls). PreToolUse rows are the
+ * source of record — they carry the verdict and the rule name. When
+ * args is hashed (auditHashArgs default), the row's preview falls
+ * back to the rule name via previewFromEntry; we don't try to merge
+ * plaintext from the matching post-hook because timestamps can drift
+ * 30+ seconds for long-running tools and the pairing is unreliable.
  */
 export function buildLiveBackfill(n: number): ActivityEvent[] {
   if (n <= 0) return [];
-  const all = readAuditEntries();
-
-  // Index post-hook entries by their join key for quick lookup.
-  const postIndex = new Map<string, AuditEntry>();
-  for (const e of all) {
-    if (e.source !== 'post-hook') continue;
-    if (!e.ts || !e.tool) continue;
-    postIndex.set(joinKey(e.ts, e.tool), e);
-  }
-
-  const candidates = all.filter((e) => e.source !== 'post-hook' && e.source !== 'response-dlp');
-  const tail = candidates.slice(-n);
-
-  return tail.map((e, i) => {
-    const enriched = enrichWithPostHook(e, postIndex);
-    return auditEntryToActivityEvent(enriched, i);
-  });
-}
-
-/**
- * Merge a pre-hook entry with its matching post-hook entry: take
- * plaintext args + agent from the post when the pre is missing them.
- */
-function enrichWithPostHook(pre: AuditEntry, postIndex: Map<string, AuditEntry>): AuditEntry {
-  if (!pre.ts || !pre.tool) return pre;
-  const post = postIndex.get(joinKey(pre.ts, pre.tool));
-  if (!post) return pre;
-  // Only override args if pre's args are missing/redacted; never
-  // clobber a real plaintext command that the pre-hook already had.
-  const preHasReadableArgs =
-    pre.args &&
-    (typeof pre.args.command === 'string' ||
-      typeof pre.args.file_path === 'string' ||
-      typeof pre.args.path === 'string');
-  return {
-    ...pre,
-    args: preHasReadableArgs ? pre.args : (post.args ?? pre.args),
-    agent: pre.agent ?? post.agent,
-  };
-}
-
-/** Audit-row join key: ISO timestamp truncated to seconds + tool name.
- *  Pre/post pairs are written within a few ms of each other, so
- *  truncating to seconds is enough to pair them without false matches. */
-function joinKey(ts: string, tool: string): string {
-  return `${ts.slice(0, 19)}|${tool}`;
+  const all = readAuditEntries().filter(
+    (e) => e.source !== 'post-hook' && e.source !== 'response-dlp'
+  );
+  const tail = all.slice(-n);
+  return tail.map((e, i) => auditEntryToActivityEvent(e, i));
 }
 
 // ---------------------------------------------------------------------------

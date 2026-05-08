@@ -248,18 +248,38 @@ describe('auditEntryToActivityEvent', () => {
     expect(observe.verdict).toBe('allow');
   });
 
-  it('falls back to (redacted) when args has no readable command/path', () => {
+  it('falls back to checkedBy rule when args is hashed (privacy default)', () => {
+    // PreToolUse rows store argsHash, never plaintext, when
+    // auditHashArgs=true. Surface the rule name instead of a generic
+    // "(redacted)" — much more informative for the user.
+    const e = auditEntryToActivityEvent(
+      {
+        ts: '2026-05-08T08:00:00.000Z',
+        tool: 'Bash',
+        decision: 'block',
+        args: { argsHash: 'abc123' },
+        checkedBy: 'block-force-push',
+      } as never,
+      0
+    );
+    if (e.kind !== 'tool') throw new Error('expected tool kind');
+    expect(e.preview).toBe('→ block-force-push');
+  });
+
+  it('falls back to (no preview) when args is hashed AND no checkedBy', () => {
+    // Rare: audit row with no plaintext args and no rule attribution.
+    // Surface a sentinel rather than the raw "{}" or "{argsHash:...}".
     const e = auditEntryToActivityEvent(
       {
         ts: '2026-05-08T08:00:00.000Z',
         tool: 'Bash',
         decision: 'allow',
-        args: { argsHash: 'abc123' }, // privacy-redacted shape
+        args: { argsHash: 'abc123' },
       } as never,
       0
     );
     if (e.kind !== 'tool') throw new Error('expected tool kind');
-    expect(e.preview).toBe('(redacted)');
+    expect(e.preview).toBe('(no preview)');
   });
 
   it('uses args.command when present', () => {
