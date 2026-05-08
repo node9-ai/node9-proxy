@@ -179,6 +179,24 @@ function ActivityRow({ event }: { event: ActivityEvent }): React.ReactElement {
   // case a malformed event slips through.
   const tsStr = typeof event.ts === 'string' ? event.ts : '';
   const t = tsStr.length >= 19 ? tsStr.slice(11, 19) : '--:--:--';
+
+  // Snapshot rows have a different shape (no agent, no verdict, no
+  // command preview) — render them in a distinct one-line format that
+  // matches `node9 tail`'s output: `📸 snapshot  <hash>  <summary> · N files`.
+  if (event.kind === 'snapshot') {
+    const filesSuffix =
+      event.fileCount > 0 ? ` · ${event.fileCount} file${event.fileCount === 1 ? '' : 's'}` : '';
+    return (
+      <Text wrap="truncate-end">
+        <Text dimColor>{t} </Text>
+        <Text color={COL.agentClaude}>📸 snapshot</Text>
+        <Text dimColor>{`  ${event.hash}  `}</Text>
+        <Text>{event.summary}</Text>
+        <Text dimColor>{filesSuffix}</Text>
+      </Text>
+    );
+  }
+
   const agentLabel = `[${capitalize(event.agent ?? '?')}]`.padEnd(10);
   // Loop-detected entries get a distinct icon (and color) so the user
   // can tell "blocked because of a real rule" apart from "blocked by

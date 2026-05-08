@@ -113,13 +113,19 @@ export function App(): React.ReactElement {
     }
   });
 
-  const lastEvent = events[events.length - 1];
+  // Header's "last agent" badge tracks the most recent TOOL row only —
+  // snapshot rows don't carry agent/session, so they're skipped.
+  const lastToolEvent = useMemo(
+    () => [...events].reverse().find((e) => e.kind === 'tool'),
+    [events]
+  );
   const lastAgent = useMemo(() => {
-    if (!lastEvent?.agent) return undefined;
-    const a = lastEvent.agent;
-    const sid = lastEvent.sessionId?.slice(0, 4);
+    if (!lastToolEvent || !lastToolEvent.agent) return undefined;
+    const a = lastToolEvent.agent;
+    const sid = lastToolEvent.sessionId?.slice(0, 4);
     return sid ? `${capitalize(a)}·${sid}` : capitalize(a);
-  }, [lastEvent]);
+  }, [lastToolEvent]);
+  const lastEvent = events[events.length - 1];
 
   if (!agg || !blast) {
     return (

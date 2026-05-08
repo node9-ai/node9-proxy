@@ -23,23 +23,41 @@ export function windowStartMs(window: TimeWindow, openedAt: number): number {
   }
 }
 
-export interface ActivityEvent {
-  /** Stable id for React keys. Comes from SSE payload `id`. */
-  id: string;
-  ts: string; // ISO 8601
-  agent?: string; // 'claude' | 'gemini' | 'codex' | ...
-  tool: string;
-  /** First ~70 chars of the tool's command/path arg, for the live row. */
-  preview: string;
-  /** Verdict from the daemon: allow / block / review / pending. */
-  verdict: 'allow' | 'block' | 'review' | 'pending';
-  /** Optional reason text for review/block rows (shown beneath the row). */
-  reason?: string;
-  /** Optional rule that fired (`block-force-push`, `dlp-block`, …). */
-  checkedBy?: string;
-  sessionId?: string;
-  mcpServer?: string;
-}
+/**
+ * Two kinds of rows show up in the LIVE feed:
+ *   - `tool`     — a real agent tool call (Bash, Read, Edit, …) that
+ *                  the daemon either allowed, blocked, or queued for
+ *                  review. The default and most common case.
+ *   - `snapshot` — the daemon recorded a working-directory snapshot
+ *                  before a write. Different shape (hash + fileCount,
+ *                  no verdict) and different visual; matches what
+ *                  `node9 tail` already prints.
+ */
+export type ActivityEvent =
+  | {
+      kind: 'tool';
+      id: string;
+      ts: string; // ISO 8601
+      agent?: string; // 'claude' | 'gemini' | 'codex' | ...
+      tool: string;
+      /** First ~70 chars of the tool's command/path arg. */
+      preview: string;
+      verdict: 'allow' | 'block' | 'review' | 'pending';
+      reason?: string;
+      /** Rule that fired (`block-force-push`, `dlp-block`, `loop-detected`, …). */
+      checkedBy?: string;
+      sessionId?: string;
+      mcpServer?: string;
+    }
+  | {
+      kind: 'snapshot';
+      id: string;
+      ts: string;
+      hash: string;
+      /** Short summary line (path or tool name). */
+      summary: string;
+      fileCount: number;
+    };
 
 export interface AuditAggregates {
   total: number;

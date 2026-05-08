@@ -192,6 +192,10 @@ interface SsePayload {
   checkedBy?: string;
   sessionId?: string;
   mcpServer?: string;
+  // Snapshot-event-only fields (daemon emits these on `event: snapshot`).
+  hash?: string;
+  argsSummary?: string;
+  fileCount?: number;
   // Activity events have these on the inner `activity` field on some events;
   // we union both shapes since the daemon broadcasts a few SSE event names.
   activity?: SsePayload;
@@ -272,15 +276,28 @@ export function subscribeToSse(
 
 function toActivityEvent(eventName: string, data: SsePayload): ActivityEvent | null {
   // The daemon broadcasts several event types: `activity`, `activity-result`,
-  // `add`, `remove`, `snapshot`, `execution-result`. The spike only renders
-  // `activity` (incoming) and `add` (pending approval). Others are ignored.
-  if (eventName !== 'activity' && eventName !== 'add' && eventName !== 'snapshot') return null;
+  // `add`, `remove`, `snapshot`, `execution-result`. The spike renders
+  // `activity` / `add` as tool rows and `snapshot` as snapshot rows.
+  // Others are ignored.
   const payload = data.activity ?? data;
-  if (!payload.tool) return null;
-
   const ts = normalizeTs(payload.ts);
 
-  const verdict: ActivityEvent['verdict'] = (() => {
+  if (eventName === 'snapshot') {
+    // Mirrors the format `node9 tail` uses (see src/tui/tail.ts).
+    return {
+      kind: 'snapshot',
+      id: payload.id ?? `${ts}-snapshot`,
+      ts,
+      hash: payload.hash ?? '',
+      summary: payload.argsSummary ?? payload.tool ?? 'snapshot',
+      fileCount: typeof payload.fileCount === 'number' ? payload.fileCount : 0,
+    };
+  }
+
+  if (eventName !== 'activity' && eventName !== 'add') return null;
+  if (!payload.tool) return null;
+
+  const verdict: 'allow' | 'block' | 'review' | 'pending' = (() => {
     const d = payload.decision;
     if (d === 'allow' || d === 'observe-allow') return 'allow';
     if (d === 'block') return 'block';
@@ -294,6 +311,7 @@ function toActivityEvent(eventName: string, data: SsePayload): ActivityEvent | n
     .slice(0, 70);
 
   return {
+    kind: 'tool',
     id: payload.id ?? `${ts}-${payload.tool}`,
     ts,
     tool: payload.tool,
