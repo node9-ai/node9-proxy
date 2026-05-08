@@ -385,7 +385,7 @@ interface SsePayload {
 }
 
 /** Daemon `activity-result` `status` values → ActivityEvent verdict. */
-function mapResultStatus(status: unknown): ResolvedVerdict | undefined {
+export function mapResultStatus(status: unknown): ResolvedVerdict | undefined {
   if (typeof status !== 'string') return undefined;
   if (status === 'allow' || status === 'observe-allow') return 'allow';
   // 'dlp', 'block', 'denied', timeouts → all render as block on the row.

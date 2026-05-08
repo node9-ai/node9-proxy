@@ -13,6 +13,14 @@ import type {
   TimeWindow,
 } from './types.js';
 import { TIME_WINDOWS } from './types.js';
+import {
+  cacheHitRate,
+  formatCost,
+  formatPct,
+  formatTokens,
+  shortenModel,
+  truncate,
+} from './format.js';
 
 const COL = {
   brand: '#FF8C42', // orange — brand
@@ -127,36 +135,6 @@ export function HighLevel(props: {
       </Text>
     </Box>
   );
-}
-
-/** Compact cost format: `$0.42` for small, `$12.40` for normal, `$1.2K` for large. */
-function formatCost(usd: number): string {
-  if (usd === 0) return '$0';
-  if (usd < 1) return `$${usd.toFixed(2)}`;
-  if (usd < 100) return `$${usd.toFixed(2)}`;
-  if (usd < 10_000) return `$${Math.round(usd).toLocaleString()}`;
-  return `$${(usd / 1000).toFixed(1)}K`;
-}
-
-/** Compact token format: `1.2K` / `12K` / `1.2M`. */
-function formatTokens(n: number): string {
-  if (n < 1000) return `${n}`;
-  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}K`;
-  return `${(n / 1_000_000).toFixed(1)}M`;
-}
-
-/** Whole-percent format: `94%`. Returns "—" when the input is NaN. */
-function formatPct(pct: number): string {
-  if (!Number.isFinite(pct)) return '—';
-  return `${Math.round(pct)}%`;
-}
-
-/** Cache hit rate from a CostSnapshot. Reads / (reads + new input).
- *  Mirrors `node9 report`'s definition so the two surfaces match. */
-function cacheHitRate(cost: CostSnapshot): number {
-  const denom = cost.cacheReadTokens + cost.inputTokens;
-  if (denom <= 0) return 0;
-  return (cost.cacheReadTokens / denom) * 100;
 }
 
 function labelFor(w: TimeWindow): string {
@@ -535,11 +513,6 @@ function ActivityRow({ event }: { event: ActivityEvent }): React.ReactElement {
   );
 }
 
-/** Truncate to width with single-char `…` overflow marker; pad-friendly. */
-function truncate(s: string, width: number): string {
-  return s.length <= width ? s : s.slice(0, width - 1) + '…';
-}
-
 function capitalize(s: string): string {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : '';
 }
@@ -634,15 +607,6 @@ export function Report(props: {
       </Box>
     </Box>
   );
-}
-
-/** Strip noise from a model id for compact display:
- *    'claude-opus-4-7'    → 'opus-4-7'
- *    'claude-haiku-4-5-...'→ 'haiku-4-5'
- *    'gpt-5'              → 'gpt-5'
- */
-function shortenModel(model: string): string {
-  return model.replace(/^claude-/, '').replace(/-2025\d{4}$/, '');
 }
 
 function bar(value: number, max: number, width: number): string {

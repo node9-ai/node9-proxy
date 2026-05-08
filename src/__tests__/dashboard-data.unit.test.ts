@@ -14,7 +14,13 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { aggregateAudit, aggregateCost, auditEntryToActivityEvent } from '../tui/dashboard/data';
+import {
+  aggregateAudit,
+  aggregateCost,
+  auditEntryToActivityEvent,
+  compactPath,
+  mapResultStatus,
+} from '../tui/dashboard/data';
 import type { DailyEntry } from '../costSync';
 
 // ── shared minimal-shape helpers ──────────────────────────────────────────────
@@ -369,5 +375,137 @@ describe('auditEntryToActivityEvent', () => {
     expect(e.sessionId).toBe('sess-abc');
     expect(e.mcpServer).toBe('pg');
     expect(e.checkedBy).toBe('block-force-push');
+  });
+});
+
+// ── compactPath ───────────────────────────────────────────────────────────────
+
+describe('compactPath', () => {
+  it('passes short paths (<= 3 segments) through unchanged', () => {
+    expect(compactPath('/etc/passwd')).toBe('/etc/passwd');
+    expect(compactPath('a/b/c')).toBe('a/b/c');
+  });
+  it('compacts long absolute paths to .../parent/file', () => {
+    expect(compactPath('/home/nadav/node9/node9-proxy/src/tui/dashboard/data.ts')).toBe(
+      '.../dashboard/data.ts'
+    );
+  });
+  it('compacts long ~-relative paths', () => {
+    expect(compactPath('~/projects/foo/bar/baz/main.ts')).toBe('.../baz/main.ts');
+  });
+  it('returns the input verbatim when not path-shaped', () => {
+    expect(compactPath('git status')).toBe('git status');
+    expect(compactPath('not_a_path')).toBe('not_a_path');
+  });
+  it('handles empty / undefined gracefully', () => {
+    expect(compactPath('')).toBe('');
+  });
+});
+
+// ── mapResultStatus ──────────────────────────────────────────────────────────
+
+describe('mapResultStatus', () => {
+  it('maps allow / observe-allow to "allow"', () => {
+    expect(mapResultStatus('allow')).toBe('allow');
+    expect(mapResultStatus('observe-allow')).toBe('allow');
+  });
+  it('maps every block-shaped status to "block"', () => {
+    expect(mapResultStatus('block')).toBe('block');
+    expect(mapResultStatus('dlp')).toBe('block');
+    expect(mapResultStatus('denied')).toBe('block');
+    expect(mapResultStatus('timeout')).toBe('block');
+  });
+  it('maps review to "review"', () => {
+    expect(mapResultStatus('review')).toBe('review');
+  });
+  it('returns undefined for unknown / non-string', () => {
+    expect(mapResultStatus('something-else')).toBeUndefined();
+    expect(mapResultStatus(undefined)).toBeUndefined();
+    expect(mapResultStatus(42)).toBeUndefined();
+    expect(mapResultStatus(null)).toBeUndefined();
+  });
+});
+
+// ── auditEntryToActivityEvent — extra coverage for path compaction in preview
+
+describe('auditEntryToActivityEvent · preview compaction', () => {
+  it('compacts long file_path in preview', () => {
+    const e = auditEntryToActivityEvent(
+      {
+        ts: '2026-05-08T08:00:00.000Z',
+        tool: 'Edit',
+        decision: 'allow',
+        args: { file_path: '/home/u/repo/src/tui/dashboard/data.ts' },
+      } as never,
+      0
+    );
+    if (e.kind !== 'tool') throw new Error('expected tool');
+    expect(e.preview).toBe('.../dashboard/data.ts');
+  });
+
+  it('does NOT compact a short command (Bash)', () => {
+    const e = auditEntryToActivityEvent(
+      {
+        ts: '2026-05-08T08:00:00.000Z',
+        tool: 'Bash',
+        decision: 'allow',
+        args: { command: 'git status' },
+      } as never,
+      0
+    );
+    if (e.kind !== 'tool') throw new Error('expected tool');
+    expect(e.preview).toBe('git status');
+  });
+});
+
+// ── aggregateCost.byModel ─────────────────────────────────────────────────────
+
+describe('aggregateCost — byModel field', () => {
+  function dailyEntry(overrides: Partial<DailyEntry> = {}): DailyEntry {
+    return {
+      date: '2026-05-08',
+      model: 'claude-opus-4-7',
+      costUSD: 1.0,
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadTokens: 200,
+      cacheWriteTokens: 100,
+      ...overrides,
+    };
+  }
+
+  it('groups multi-day entries per model', () => {
+    const startMs = Date.parse('2026-05-01T00:00:00Z');
+    const c = aggregateCost(
+      [
+        dailyEntry({ date: '2026-05-07', model: 'claude-opus-4-7', costUSD: 5 }),
+        dailyEntry({ date: '2026-05-08', model: 'claude-opus-4-7', costUSD: 3 }),
+        dailyEntry({ date: '2026-05-08', model: 'claude-haiku-4-5', costUSD: 1 }),
+      ],
+      startMs
+    );
+    const opus = c.byModel.find((m) => m.model === 'claude-opus-4-7');
+    expect(opus?.costUSD).toBeCloseTo(8);
+  });
+
+  it('sorts byModel desc by cost', () => {
+    const startMs = Date.parse('2026-05-01T00:00:00Z');
+    const c = aggregateCost(
+      [
+        dailyEntry({ model: 'claude-haiku-4-5', costUSD: 0.5 }),
+        dailyEntry({ model: 'claude-opus-4-7', costUSD: 9 }),
+        dailyEntry({ model: 'gpt-5', costUSD: 2 }),
+      ],
+      startMs
+    );
+    expect(c.byModel.map((m) => m.model)).toEqual(['claude-opus-4-7', 'gpt-5', 'claude-haiku-4-5']);
+  });
+
+  it('returns empty byModel array when no entries match window', () => {
+    const c = aggregateCost(
+      [dailyEntry({ date: '2026-04-01' })],
+      Date.parse('2026-05-08T00:00:00Z')
+    );
+    expect(c.byModel).toEqual([]);
   });
 });
