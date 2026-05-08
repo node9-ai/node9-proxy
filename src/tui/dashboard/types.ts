@@ -98,6 +98,22 @@ export interface ShieldStatus {
   inactive: string[];
 }
 
+/** Forensic scan-signal counts — derived by walking ~/.claude/projects
+ *  JSONL files and running the canonical extractor per line. Reflects
+ *  ALL of the user's recent agent history, NOT the dashboard's selected
+ *  time window. The same data `node9 scan` reports under each section.
+ *  `loaded: false` is shown while the initial async walk is in flight. */
+export interface ScanSignalsSnapshot {
+  loaded: boolean;
+  pii: number;
+  sensitiveFileRead: number;
+  privilegeEscalation: number;
+  destructiveOp: number;
+  pipeToShell: number;
+  evalOfRemote: number;
+  longOutputRedacted: number;
+}
+
 /** Aggregated cost + tokens within the selected window. Computed off
  *  costSync.collectEntries(). `loaded: false` is shown while the
  *  initial async walk is in flight. */

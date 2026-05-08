@@ -22,6 +22,7 @@ import {
   type AuditAggregates,
   type BlastSnapshot,
   type CostSnapshot,
+  type ScanSignalsSnapshot,
   type ShieldStatus,
   type TimeWindow,
 } from './types.js';
@@ -31,6 +32,7 @@ import {
   buildLiveBackfill,
   loadBlast,
   loadCostEntries,
+  loadScanSignals,
   loadShieldStatus,
   readAuditEntries,
   submitDecision,
@@ -69,9 +71,11 @@ const BLAST_REFRESH_MS = 5 * 60_000;
  * Calibration: prior value was 22, which made LIVE 2 rows too tall,
  * pushing the bottom panels off-screen on standard ~41-row terminals.
  */
-// Updated to 28 to accommodate the always-rendered NotificationArea
-// (4 rows incl. border) between HIGH LEVEL and LIVE.
-const FIXED_PANELS_HEIGHT = 28;
+// Updated to 30 to accommodate two additional RISK rows (forensic
+// scan signals: PII / file-reads / privesc / destructive on row 2;
+// eval-rem / pipe-shell / long-output on row 3). Originally was 28
+// after adding NotificationArea.
+const FIXED_PANELS_HEIGHT = 30;
 const LIVE_MIN_ROWS = 4;
 const NOTIFICATION_RECENT_WINDOW_MS = 60_000;
 const RESOLVED_HOLD_MS = 5_000;
@@ -92,6 +96,7 @@ export function App(): React.ReactElement {
   const [agg, setAgg] = useState<AuditAggregates | null>(null);
   const [blast, setBlast] = useState<BlastSnapshot | null>(null);
   const [shieldStatus, setShieldStatus] = useState<ShieldStatus | null>(null);
+  const [scanSignals, setScanSignals] = useState<ScanSignalsSnapshot | null>(null);
   const [costEntries, setCostEntries] = useState<DailyEntry[] | null>(null);
   const [skillsPinned] = useState<number>(() => readSkillsPinned());
   // Pending approval — most-recent event that needs human action.
@@ -216,6 +221,25 @@ export function App(): React.ReactElement {
     return () => clearInterval(id);
   }, []);
 
+  // Forensic scan signals (PII / sensitive-file-reads / etc.) — async
+  // because the JSONL walk takes 5-10s. Same async pattern as cost.
+  // Render shows '…' placeholder until first walk completes; never
+  // blocks dashboard mount.
+  useEffect(() => {
+    let cancelled = false;
+    const loadAndSet = () => {
+      loadScanSignals().then((s) => {
+        if (!cancelled) setScanSignals(s);
+      });
+    };
+    loadAndSet();
+    const id = setInterval(loadAndSet, COST_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+
   // Cost — async because collectEntries() walks every JSONL under
   // ~/.claude/projects (1-5s on a heavy install). Render shows
   // "loading…" placeholder until the first walk completes.
@@ -322,12 +346,14 @@ export function App(): React.ReactElement {
       setWindow(next);
     } else if (input === 'r') {
       // Manual refresh of audit + blast + shields (cheap) and cost
-      // (expensive, dispatched async so the keypress feels instant).
+      // + scan-signals (expensive, dispatched async so the keypress
+      // feels instant).
       const entries = readAuditEntries();
       setAgg(aggregateAudit(entries, windowStartMs(window, openedAt)));
       setBlast(loadBlast());
       setShieldStatus(loadShieldStatus());
       void loadCostEntries().then(setCostEntries);
+      void loadScanSignals().then(setScanSignals);
     }
   });
 
@@ -465,7 +491,13 @@ export function App(): React.ReactElement {
         filterInputMode={filterInputMode}
       />
       <Report agg={agg} cost={costSnapshot} window={window} />
-      <Risk agg={agg} blast={blast} shieldStatus={shieldStatus} window={window} />
+      <Risk
+        agg={agg}
+        blast={blast}
+        shieldStatus={shieldStatus}
+        scanSignals={scanSignals}
+        window={window}
+      />
       <StatusBar />
     </Box>
   );

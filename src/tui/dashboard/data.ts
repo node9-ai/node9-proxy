@@ -16,11 +16,13 @@ import { runBlast } from '../../cli/commands/blast.js';
 import { DAEMON_HOST, DAEMON_PORT, getInternalToken } from '../../auth/daemon.js';
 import { collectEntries, type DailyEntry } from '../../costSync.js';
 import { SHIELDS, readActiveShields } from '../../shields.js';
+import { extractFindingsFromLine } from '../../daemon/scan-watermark.js';
 import type {
   ActivityEvent,
   AuditAggregates,
   BlastSnapshot,
   CostSnapshot,
+  ScanSignalsSnapshot,
   ShieldStatus,
 } from './types.js';
 
@@ -340,6 +342,122 @@ export function aggregateCost(
 // ---------------------------------------------------------------------------
 // Blast — wraps runBlast() with privacy-friendly path truncation.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Forensic scan signals — async walk of ~/.claude/projects JSONL files,
+// running the canonical extractor per line. Surfaces the 7 detection
+// categories the audit log doesn't carry (PII, sensitive-file-reads,
+// privilege-escalation, destructive-op, pipe-to-shell, eval-of-remote,
+// long-output-redacted). Expensive: 5-10s on a heavy install — same
+// cost `node9 scan` already pays. Run once on mount + 5min refresh.
+// ---------------------------------------------------------------------------
+
+const EMPTY_SIGNALS: Omit<ScanSignalsSnapshot, 'loaded'> = {
+  pii: 0,
+  sensitiveFileRead: 0,
+  privilegeEscalation: 0,
+  destructiveOp: 0,
+  pipeToShell: 0,
+  evalOfRemote: 0,
+  longOutputRedacted: 0,
+};
+
+export function loadScanSignals(): Promise<ScanSignalsSnapshot> {
+  return new Promise((resolve) => {
+    setImmediate(() => {
+      try {
+        resolve({ loaded: true, ...walkClaudeJsonlsForSignals() });
+      } catch {
+        resolve({ loaded: true, ...EMPTY_SIGNALS });
+      }
+    });
+  });
+}
+
+function walkClaudeJsonlsForSignals(): Omit<ScanSignalsSnapshot, 'loaded'> {
+  const counts = { ...EMPTY_SIGNALS };
+  const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+  if (!fs.existsSync(projectsDir)) return counts;
+
+  let dirs: string[];
+  try {
+    dirs = fs.readdirSync(projectsDir);
+  } catch {
+    return counts;
+  }
+
+  for (const dir of dirs) {
+    const dirPath = path.join(projectsDir, dir);
+    try {
+      if (!fs.statSync(dirPath).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    let files: string[];
+    try {
+      files = fs.readdirSync(dirPath).filter((f) => f.endsWith('.jsonl'));
+    } catch {
+      continue;
+    }
+    for (const file of files) {
+      const sessionId = file.replace(/\.jsonl$/, '');
+      const filePath = path.join(dirPath, file);
+      let content: string;
+      try {
+        content = fs.readFileSync(filePath, 'utf8');
+      } catch {
+        continue;
+      }
+      const lines = content.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line.trim()) continue;
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        let findings;
+        try {
+          findings = extractFindingsFromLine(parsed, sessionId, i);
+        } catch {
+          continue;
+        }
+        for (const f of findings) {
+          switch (f.type) {
+            case 'pii':
+              counts.pii++;
+              break;
+            case 'sensitive-file-read':
+              counts.sensitiveFileRead++;
+              break;
+            case 'privilege-escalation':
+              counts.privilegeEscalation++;
+              break;
+            case 'destructive-op':
+              counts.destructiveOp++;
+              break;
+            case 'pipe-to-shell':
+              counts.pipeToShell++;
+              break;
+            case 'eval-of-remote':
+              counts.evalOfRemote++;
+              break;
+            case 'long-output-redacted':
+              counts.longOutputRedacted++;
+              break;
+            // 'dlp', 'loop', 'network-exfil' tracked via other paths
+            // (audit / session-level) — skip here to avoid double-count.
+            default:
+              break;
+          }
+        }
+      }
+    }
+  }
+  return counts;
+}
 
 /**
  * Read the user's shield-config state. Cheap (small JSON file in

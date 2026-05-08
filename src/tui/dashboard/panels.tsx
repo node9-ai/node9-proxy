@@ -10,6 +10,7 @@ import type {
   AuditAggregates,
   BlastSnapshot,
   CostSnapshot,
+  ScanSignalsSnapshot,
   ShieldStatus,
   TimeWindow,
 } from './types.js';
@@ -610,6 +611,16 @@ export function Report(props: {
   );
 }
 
+/** Read a forensic-signal field from the snapshot. Returns "…" while
+ *  the async walk is in flight so the chip shows a placeholder. */
+function scanCount(
+  s: ScanSignalsSnapshot | null,
+  key: Exclude<keyof ScanSignalsSnapshot, 'loaded'>
+): string | number {
+  if (!s) return '…';
+  return s[key];
+}
+
 function bar(value: number, max: number, width: number): string {
   if (max <= 0 || width <= 0) return '░'.repeat(width);
   const filled = Math.max(1, Math.round((value / max) * width));
@@ -624,6 +635,7 @@ export function Risk(props: {
   agg: AuditAggregates;
   blast: BlastSnapshot;
   shieldStatus: ShieldStatus | null;
+  scanSignals: ScanSignalsSnapshot | null;
   window: TimeWindow;
 }): React.ReactElement {
   // Use the dedicated counters from aggregateAudit. Earlier this
@@ -652,7 +664,7 @@ export function Risk(props: {
       <Text wrap="truncate-end">
         <Text color={COL.liveOff}>{'🔑 '}</Text>
         <Text bold>{dlpHits}</Text>
-        <Text dimColor> DLP hits · </Text>
+        <Text dimColor> DLP · </Text>
         <Text color={COL.panelHigh}>{'🔁 '}</Text>
         <Text bold>{loopHits}</Text>
         <Text dimColor> loops · </Text>
@@ -660,6 +672,35 @@ export function Risk(props: {
         <Text bold>{props.blast.paths.length}</Text>
         <Text dimColor> paths · score </Text>
         <Text bold color={scoreColor}>{`${props.blast.score}/100`}</Text>
+      </Text>
+      {/* Forensic signals from JSONL scan — last 90 days, NOT
+          windowed. `…` placeholder until first walk completes. */}
+      <Text wrap="truncate-end">
+        <Text color={COL.liveOff}>{'👤 '}</Text>
+        <Text bold>{scanCount(props.scanSignals, 'pii')}</Text>
+        <Text dimColor> PII · </Text>
+        <Text color={COL.liveOff}>{'📂 '}</Text>
+        <Text bold>{scanCount(props.scanSignals, 'sensitiveFileRead')}</Text>
+        <Text dimColor> reads · </Text>
+        <Text color={COL.panelHigh}>{'🛡 '}</Text>
+        <Text bold>{scanCount(props.scanSignals, 'privilegeEscalation')}</Text>
+        <Text dimColor> privesc · </Text>
+        <Text color={COL.liveOff}>{'💥 '}</Text>
+        <Text bold>{scanCount(props.scanSignals, 'destructiveOp')}</Text>
+        <Text dimColor> destruct</Text>
+      </Text>
+      <Text wrap="truncate-end">
+        <Text color={COL.liveOff}>{'☠️ '}</Text>
+        <Text bold>{scanCount(props.scanSignals, 'evalOfRemote')}</Text>
+        <Text dimColor> eval-rem · </Text>
+        <Text color={COL.liveOff}>{'📋 '}</Text>
+        <Text bold>{scanCount(props.scanSignals, 'pipeToShell')}</Text>
+        <Text dimColor> pipe-shell · </Text>
+        <Text color={COL.panelHigh}>{'📤 '}</Text>
+        <Text bold>{scanCount(props.scanSignals, 'longOutputRedacted')}</Text>
+        <Text dimColor> long-output</Text>
+        {!props.scanSignals ? <Text dimColor>{'  (forensic scanning… 90d)'}</Text> : null}
+        {props.scanSignals?.loaded ? <Text dimColor>{'  · last 90d'}</Text> : null}
       </Text>
       {props.blast.paths.length > 0 ? (
         // Inline path list — saves ~4 rows vs one-per-line. Long
