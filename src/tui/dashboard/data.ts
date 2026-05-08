@@ -156,6 +156,11 @@ export function aggregateAudit(
  * Project an audit-log row to the LIVE row shape. Audit entries lack
  * a few SSE-only fields (no `id`, no inline `reason`). We synthesize
  * a deterministic id so React keys stay stable across re-renders.
+ *
+ * Args handling: PreToolUse entries store `argsHash` (not plaintext)
+ * when audit-arg-hashing is enabled — the default for privacy. When
+ * we can't recover a readable preview, surface "(redacted)" rather
+ * than the raw "{}" JSON, so the row is still informative.
  */
 export function auditEntryToActivityEvent(e: AuditEntry, index: number): ActivityEvent {
   const ts = normalizeTs(e.ts);
@@ -165,27 +170,43 @@ export function auditEntryToActivityEvent(e: AuditEntry, index: number): Activit
       : e.decision === 'review'
         ? 'review'
         : 'block';
-  const command =
-    typeof e.args?.command === 'string'
-      ? (e.args.command as string)
-      : typeof e.args?.file_path === 'string'
-        ? (e.args.file_path as string)
-        : typeof e.args?.path === 'string'
-          ? (e.args.path as string)
-          : JSON.stringify(e.args ?? {});
-  const preview = command.replace(/\s+/g, ' ').slice(0, 70);
   return {
     kind: 'tool',
     id: `audit-${ts}-${e.tool}-${index}`,
     ts,
     tool: e.tool,
     agent: e.agent,
-    preview,
+    preview: previewFromArgs(e.args),
     verdict,
     checkedBy: e.checkedBy,
     sessionId: e.sessionId,
     mcpServer: e.mcpServer,
   };
+}
+
+/**
+ * Best-effort one-line preview from an audit row's args. Falls back
+ * to "(redacted)" when args is empty or only has hash metadata,
+ * which is what PreToolUse entries look like with the default
+ * auditHashArgs=true config.
+ */
+function previewFromArgs(args: Record<string, unknown> | undefined): string {
+  if (!args) return '(redacted)';
+  if (typeof args.command === 'string' && args.command.length > 0) {
+    return args.command.replace(/\s+/g, ' ').slice(0, 70);
+  }
+  if (typeof args.file_path === 'string' && args.file_path.length > 0) {
+    return args.file_path.slice(0, 70);
+  }
+  if (typeof args.path === 'string' && args.path.length > 0) {
+    return args.path.slice(0, 70);
+  }
+  // No useful key: either {} or only argsHash / argsSummary metadata.
+  // The latter is acceptable to surface verbatim if present.
+  if (typeof args.argsSummary === 'string' && args.argsSummary.length > 0) {
+    return args.argsSummary.slice(0, 70);
+  }
+  return '(redacted)';
 }
 
 /**
