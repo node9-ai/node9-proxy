@@ -319,8 +319,54 @@ function normalizeTs(ts: unknown): string {
   return new Date().toISOString();
 }
 
+/**
+ * POST a decision to the daemon's `/decision/<id>` endpoint. Mirrors
+ * the call shape `node9 tail` uses (src/tui/tail.ts:postDecisionHttp).
+ * Returns success on HTTP 200 OR 409 (race-loser conflict — another
+ * approver got there first, which is still a resolved state).
+ */
+export function submitDecision(
+  id: string,
+  decision: 'allow' | 'deny' | 'trust'
+): Promise<{ ok: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    const token = getInternalToken();
+    if (!token) {
+      resolve({ ok: false, error: 'daemon not running' });
+      return;
+    }
+    const bodyObj: Record<string, unknown> = { decision, source: 'dashboard' };
+    if (decision === 'trust') bodyObj.persist = true;
+    const body = JSON.stringify(bodyObj);
+    const req = http.request(
+      {
+        hostname: DAEMON_HOST,
+        port: DAEMON_PORT,
+        path: `/decision/${encodeURIComponent(id)}`,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+          'X-Node9-Internal': token,
+        },
+      },
+      (res) => {
+        res.resume();
+        if (res.statusCode === 200 || res.statusCode === 409) {
+          resolve({ ok: true });
+        } else {
+          resolve({ ok: false, error: `daemon returned ${res.statusCode}` });
+        }
+      }
+    );
+    req.on('error', (err) => resolve({ ok: false, error: err.message }));
+    req.end(body);
+  });
+}
+
 export function subscribeToSse(
   onEvent: (e: ActivityEvent) => void,
+  onResolve: (id: string) => void,
   onError: (msg: string) => void
 ): () => void {
   const token = getInternalToken();
@@ -358,6 +404,14 @@ export function subscribeToSse(
               if (!raw) continue;
               try {
                 const data = JSON.parse(raw) as SsePayload;
+                // Resolution events (`activity-result`, `remove`) carry
+                // an id but no full tool shape. They tell the UI to
+                // clear a pending approval card (or update its row's
+                // verdict in a future iteration).
+                if (currentEvent === 'activity-result' || currentEvent === 'remove') {
+                  if (typeof data.id === 'string') onResolve(data.id);
+                  continue;
+                }
                 const evt = toActivityEvent(currentEvent, data);
                 if (evt) onEvent(evt);
               } catch {

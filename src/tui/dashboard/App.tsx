@@ -28,10 +28,20 @@ import {
   loadBlast,
   loadCostEntries,
   readAuditEntries,
+  submitDecision,
   subscribeToSse,
 } from './data.js';
 import type { DailyEntry } from '../../costSync.js';
-import { Header, HighLevel, LiveLog, Report, Risk, StatusBar } from './panels.js';
+import {
+  ApprovalCard,
+  Header,
+  HighLevel,
+  LiveLog,
+  Report,
+  Risk,
+  StatusBar,
+  type ApprovalStatus,
+} from './panels.js';
 
 const LIVE_BUFFER_CAP = 100;
 const AUDIT_REFRESH_MS = 30_000;
@@ -68,6 +78,12 @@ export function App(): React.ReactElement {
   const [blast, setBlast] = useState<BlastSnapshot | null>(null);
   const [costEntries, setCostEntries] = useState<DailyEntry[] | null>(null);
   const [skillsPinned] = useState<number>(() => readSkillsPinned());
+  // Pending approval — most-recent event that needs human action.
+  // Set when an `add` event arrives (or any tool event with verdict
+  // 'review' / 'pending'). Cleared on resolve via SSE, on user action,
+  // or on Esc.
+  const [pendingApproval, setPendingApproval] = useState<ActivityEvent | null>(null);
+  const [approvalStatus, setApprovalStatus] = useState<ApprovalStatus>({ kind: 'idle' });
 
   // Track terminal rows so LIVE can size itself to fill whatever space
   // is left after the fixed-height panels above it. Re-renders on
@@ -107,6 +123,19 @@ export function App(): React.ReactElement {
           return next.length > LIVE_BUFFER_CAP ? next.slice(next.length - LIVE_BUFFER_CAP) : next;
         });
         setSseError(undefined);
+        // Surface pending review/approval rows in the ApprovalCard.
+        // We only track the most recent — older pending approvals are
+        // silently dropped from the card surface (they remain visible
+        // in the LIVE feed). Daemon's own timeout still resolves them.
+        if (e.kind === 'tool' && (e.verdict === 'review' || e.verdict === 'pending')) {
+          setPendingApproval(e);
+          setApprovalStatus({ kind: 'idle' });
+        }
+      },
+      (resolvedId) => {
+        // Daemon resolved a pending entry (`activity-result` or
+        // `remove`). Clear the card if it matches.
+        setPendingApproval((prev) => (prev && prev.id === resolvedId ? null : prev));
       },
       (msg) => setSseError(msg)
     );
@@ -155,6 +184,38 @@ export function App(): React.ReactElement {
   }, [costEntries, window, openedAt]);
 
   useInput((input, key) => {
+    // Approval-card key dispatch takes precedence — when a card is
+    // showing, q/Tab/r are suppressed so a misclick can't quit the
+    // dashboard while the user is trying to act on the card.
+    if (pendingApproval && approvalStatus.kind !== 'sending') {
+      if (input === 'a' || input === 'd' || input === 't') {
+        const decision = input === 'a' ? 'allow' : input === 'd' ? 'deny' : 'trust';
+        const id = pendingApproval.id;
+        setApprovalStatus({ kind: 'sending' });
+        void submitDecision(id, decision).then((res) => {
+          if (res.ok) {
+            setApprovalStatus({ kind: 'ok', verdict: decision });
+            // Auto-dismiss after a short flash so the user gets feedback.
+            setTimeout(() => {
+              setPendingApproval((prev) => (prev && prev.id === id ? null : prev));
+              setApprovalStatus({ kind: 'idle' });
+            }, 600);
+          } else {
+            setApprovalStatus({ kind: 'error', message: res.error ?? 'unknown' });
+          }
+        });
+        return;
+      }
+      if (key.escape) {
+        // Local dismiss only — daemon's timeout still runs.
+        setPendingApproval(null);
+        setApprovalStatus({ kind: 'idle' });
+        return;
+      }
+      // Other keys ignored while card is open.
+      return;
+    }
+
     if (input === 'q' || (key.ctrl && input === 'c')) exit();
     else if (key.tab) {
       const idx = TIME_WINDOWS.indexOf(window);
@@ -202,6 +263,7 @@ export function App(): React.ReactElement {
         cost={costSnapshot}
         skillsPinned={skillsPinned}
       />
+      {pendingApproval ? <ApprovalCard event={pendingApproval} status={approvalStatus} /> : null}
       <LiveLog events={events} errorBanner={sseError} maxRows={liveMaxRows} />
       <Report agg={agg} window={window} />
       <Risk agg={agg} blast={blast} window={window} />

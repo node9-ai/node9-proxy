@@ -164,6 +164,91 @@ function labelFor(w: TimeWindow): string {
 }
 
 // ---------------------------------------------------------------------------
+// ApprovalCard — surfaces pending approvals above the LIVE feed. Sits
+// between HIGH LEVEL and LIVE so it's always visible (won't scroll
+// off). Visually distinct via the orange brand border + bold title.
+// Status text shows post-action feedback ("✓ approved", "⚠ failed: ...")
+// before App auto-dismisses on the next render after the resolution.
+// ---------------------------------------------------------------------------
+
+export type ApprovalStatus =
+  | { kind: 'idle' }
+  | { kind: 'sending' }
+  | { kind: 'ok'; verdict: 'allow' | 'deny' | 'trust' }
+  | { kind: 'error'; message: string };
+
+export function ApprovalCard(props: {
+  event: ActivityEvent;
+  status: ApprovalStatus;
+}): React.ReactElement | null {
+  if (props.event.kind !== 'tool') return null;
+  const e = props.event;
+  const agent = e.agent ? capitalize(e.agent) : 'agent';
+  const sid = e.sessionId ? `·${e.sessionId.slice(0, 4)}` : '';
+  const subject = `${e.tool}  ${e.preview}`;
+
+  const statusLine = (() => {
+    if (props.status.kind === 'idle') {
+      return (
+        <Text wrap="truncate-end">
+          <Text color={'#5BF58C'}>{'  [a]'}</Text>
+          <Text dimColor>{'llow once   '}</Text>
+          <Text color={COL.liveOff}>{'[d]'}</Text>
+          <Text dimColor>{'eny   '}</Text>
+          <Text color={COL.panelHigh}>{'[t]'}</Text>
+          <Text dimColor>{'rust this tool   '}</Text>
+          <Text dimColor>{'[Esc] dismiss'}</Text>
+        </Text>
+      );
+    }
+    if (props.status.kind === 'sending') {
+      return <Text dimColor>{'  sending decision…'}</Text>;
+    }
+    if (props.status.kind === 'ok') {
+      const v = props.status.verdict;
+      if (v === 'allow') return <Text color={'#5BF58C'}>{'  ✓ approved'}</Text>;
+      if (v === 'deny') return <Text color={COL.liveOff}>{'  ✗ denied'}</Text>;
+      return <Text color={COL.panelHigh}>{'  ★ trusted'}</Text>;
+    }
+    return (
+      <Text
+        color={COL.liveOff}
+      >{`  ⚠ failed: ${props.status.message} (retry [a/d/t] or [Esc])`}</Text>
+    );
+  })();
+
+  return (
+    <Box
+      flexDirection="column"
+      borderStyle="round"
+      borderColor={COL.brand}
+      paddingX={1}
+      marginX={1}
+    >
+      <Text wrap="truncate-end">
+        <Text color={COL.brand} bold>
+          ⚠ APPROVAL NEEDED
+        </Text>
+        <Text dimColor>{`  · ${agent}${sid}`}</Text>
+      </Text>
+      <Text wrap="truncate-end">
+        <Text bold>{subject}</Text>
+      </Text>
+      {e.reason ? (
+        <Text dimColor wrap="truncate-end">
+          {`  reason: ${e.checkedBy ?? 'rule'} — ${e.reason}`}
+        </Text>
+      ) : e.checkedBy ? (
+        <Text dimColor wrap="truncate-end">
+          {`  rule: ${e.checkedBy}`}
+        </Text>
+      ) : null}
+      {statusLine}
+    </Box>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // LiveLog — last N SSE events, FIFO. Approval card inlined for review/pending.
 // ---------------------------------------------------------------------------
 
