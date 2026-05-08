@@ -147,6 +147,63 @@ export function aggregateAudit(
 }
 
 // ---------------------------------------------------------------------------
+// Audit → ActivityEvent — backfill seed for the LIVE panel on mount.
+// Lets the dashboard open already populated with recent history rather
+// than empty until the next SSE event arrives.
+// ---------------------------------------------------------------------------
+
+/**
+ * Project an audit-log row to the LIVE row shape. Audit entries lack
+ * a few SSE-only fields (no `id`, no inline `reason`). We synthesize
+ * a deterministic id so React keys stay stable across re-renders.
+ */
+export function auditEntryToActivityEvent(e: AuditEntry, index: number): ActivityEvent {
+  const ts = normalizeTs(e.ts);
+  const verdict: 'allow' | 'block' | 'review' | 'pending' =
+    e.decision === 'allow' || e.decision === 'observe-allow'
+      ? 'allow'
+      : e.decision === 'review'
+        ? 'review'
+        : 'block';
+  const command =
+    typeof e.args?.command === 'string'
+      ? (e.args.command as string)
+      : typeof e.args?.file_path === 'string'
+        ? (e.args.file_path as string)
+        : typeof e.args?.path === 'string'
+          ? (e.args.path as string)
+          : JSON.stringify(e.args ?? {});
+  const preview = command.replace(/\s+/g, ' ').slice(0, 70);
+  return {
+    kind: 'tool',
+    id: `audit-${ts}-${e.tool}-${index}`,
+    ts,
+    tool: e.tool,
+    agent: e.agent,
+    preview,
+    verdict,
+    checkedBy: e.checkedBy,
+    sessionId: e.sessionId,
+    mcpServer: e.mcpServer,
+  };
+}
+
+/**
+ * Build a backfill seed for the LIVE panel: the most recent N audit
+ * entries (PreToolUse rows only — skip `post-hook` and `response-dlp`
+ * which are noise in a live feed). Returned in chronological order so
+ * appending SSE events to the end keeps the buffer monotonic.
+ */
+export function buildLiveBackfill(n: number): ActivityEvent[] {
+  if (n <= 0) return [];
+  const all = readAuditEntries().filter(
+    (e) => e.source !== 'post-hook' && e.source !== 'response-dlp'
+  );
+  const tail = all.slice(-n);
+  return tail.map((e, i) => auditEntryToActivityEvent(e, i));
+}
+
+// ---------------------------------------------------------------------------
 // Cost — wraps costSync.collectEntries() with async dispatch + aggregation.
 // collectEntries walks every JSONL under ~/.claude/projects, so it's
 // expensive (1-5s on a heavy install). Callers should run it on mount

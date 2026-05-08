@@ -24,6 +24,7 @@ import {
 import {
   aggregateAudit,
   aggregateCost,
+  buildLiveBackfill,
   loadBlast,
   loadCostEntries,
   readAuditEntries,
@@ -82,6 +83,20 @@ export function App(): React.ReactElement {
     };
   }, [stdout]);
   const liveMaxRows = Math.max(LIVE_MIN_ROWS, termRows - FIXED_PANELS_HEIGHT);
+
+  // Seed LIVE with the last N audit entries so the panel opens
+  // populated rather than empty. Runs once on mount; SSE events
+  // append to this buffer as they arrive. Backfill count tracks the
+  // initial terminal-derived maxRows — switching window doesn't
+  // re-seed (LIVE is independent of the time window per design).
+  // Effect runs once on mount only; liveMaxRows is read at that moment
+  // from the captured closure. We deliberately don't re-seed when the
+  // terminal resizes (would double-fill the buffer).
+  const initialMaxRowsRef = React.useRef(liveMaxRows);
+  useEffect(() => {
+    const backfill = buildLiveBackfill(initialMaxRowsRef.current);
+    if (backfill.length > 0) setEvents(backfill);
+  }, []);
 
   // SSE subscription — runs once, fed by daemon.
   useEffect(() => {
