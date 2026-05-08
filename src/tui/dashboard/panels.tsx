@@ -172,7 +172,14 @@ export function LiveLog(props: {
   errorBanner?: string;
   maxRows: number;
 }): React.ReactElement {
+  // Fixed-size panel: always render exactly maxRows content rows so
+  // the panel height never shifts as events arrive. Real events fill
+  // from the bottom (newest last); empty slots above are blank.
+  // First slot reserved for the empty-state hint when the buffer is
+  // empty so the user gets a one-line explanation without inflating
+  // the panel.
   const visible = props.events.slice(-props.maxRows);
+  const padCount = Math.max(0, props.maxRows - visible.length);
   return (
     <Box
       flexDirection="column"
@@ -189,11 +196,18 @@ export function LiveLog(props: {
         <Text dimColor>{`  · last ${props.maxRows} events`}</Text>
       </Text>
       {props.errorBanner ? <Text color={COL.liveOff}>{`⚠ ${props.errorBanner}`}</Text> : null}
-      {visible.length === 0 ? (
-        <Text dimColor>(no activity yet — daemon needs to be up and an agent must be running)</Text>
-      ) : (
-        visible.map((e) => <ActivityRow key={e.id} event={e} />)
+      {Array.from({ length: padCount }, (_, i) =>
+        i === 0 && visible.length === 0 ? (
+          <Text key={`pad-${i}`} dimColor>
+            (no activity yet — agent must be running and daemon must be up)
+          </Text>
+        ) : (
+          <Text key={`pad-${i}`}> </Text>
+        )
       )}
+      {visible.map((e) => (
+        <ActivityRow key={e.id} event={e} />
+      ))}
     </Box>
   );
 }
