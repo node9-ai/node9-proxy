@@ -81,6 +81,7 @@ export function aggregateAudit(
   let block = 0;
   let review = 0;
   let loops = 0;
+  let dlpHits = 0;
   const sessionSet = new Set<string>();
   const mcpSet = new Set<string>();
   const toolMap = new Map<string, { calls: number; blocked: number }>();
@@ -94,10 +95,14 @@ export function aggregateAudit(
     const isAllow = e.decision === 'allow' || e.decision === 'observe-allow';
     const isReview = e.decision === 'review';
     const isLoop = e.checkedBy === 'loop-detected';
+    // DLP rules emit checkedBy values like `dlp-block`, `dlp-saas:aws`,
+    // `response-dlp-aws`, etc. Substring check covers all variants.
+    const isDlp = !!(e.checkedBy && e.checkedBy.toLowerCase().includes('dlp'));
     if (isAllow) allow++;
     else if (isReview) review++;
     else block++;
     if (isLoop) loops++;
+    if (isDlp) dlpHits++;
 
     const t = toolMap.get(e.tool) ?? { calls: 0, blocked: 0 };
     t.calls++;
@@ -128,6 +133,7 @@ export function aggregateAudit(
     block,
     review,
     loops,
+    dlpHits,
     sessions: sessionSet.size,
     mcpServers: mcpSet.size,
     mcpCalls: [...inWindow].filter((e) => !!e.mcpServer).length,
@@ -202,10 +208,10 @@ function previewFromEntry(e: AuditEntry): string {
       return args.command.replace(/\s+/g, ' ').slice(0, 70);
     }
     if (typeof args.file_path === 'string' && args.file_path.length > 0) {
-      return args.file_path.slice(0, 70);
+      return compactPath(args.file_path).slice(0, 70);
     }
     if (typeof args.path === 'string' && args.path.length > 0) {
-      return args.path.slice(0, 70);
+      return compactPath(args.path).slice(0, 70);
     }
     if (typeof args.argsSummary === 'string' && args.argsSummary.length > 0) {
       return args.argsSummary.slice(0, 70);
@@ -216,6 +222,22 @@ function previewFromEntry(e: AuditEntry): string {
   // (every gating decision references the rule that gated it).
   if (e.checkedBy) return `→ ${e.checkedBy}`;
   return '(no preview)';
+}
+
+/**
+ * Compact a long absolute or home-relative path to `.../parent/file`
+ * so the LIVE column doesn't get blown out by deep project paths.
+ *   /home/user/repo/src/tui/dashboard/data.ts → .../dashboard/data.ts
+ *   ~/projects/foo/bar/baz/main.ts            → .../baz/main.ts
+ * Short paths (≤ 3 segments) pass through unchanged.
+ */
+export function compactPath(p: string): string {
+  if (!p) return p;
+  const looksLikePath = p.startsWith('/') || p.startsWith('~') || p.includes('/');
+  if (!looksLikePath) return p;
+  const segs = p.split('/').filter((s) => s.length > 0);
+  if (segs.length <= 3) return p;
+  return '.../' + segs.slice(-2).join('/');
 }
 
 /**
@@ -529,10 +551,22 @@ function toActivityEvent(eventName: string, data: SsePayload): ActivityEvent | n
     return 'pending';
   })();
 
-  const command = payload.args?.command ?? payload.args?.file_path ?? payload.args?.path;
-  const preview = (typeof command === 'string' ? command : JSON.stringify(payload.args ?? {}))
-    .replace(/\s+/g, ' ')
-    .slice(0, 70);
+  // Pick the most useful arg field for the live row. Bash → command;
+  // Read/Edit/Write → file_path; Glob → path. Long file paths get
+  // compacted via compactPath so deep project trees don't blow out
+  // the column ("…/dashboard/data.ts" instead of the full absolute).
+  let preview: string;
+  if (typeof payload.args?.command === 'string' && payload.args.command.length > 0) {
+    preview = payload.args.command.replace(/\s+/g, ' ').slice(0, 70);
+  } else if (typeof payload.args?.file_path === 'string' && payload.args.file_path.length > 0) {
+    preview = compactPath(payload.args.file_path).slice(0, 70);
+  } else if (typeof payload.args?.path === 'string' && payload.args.path.length > 0) {
+    preview = compactPath(payload.args.path).slice(0, 70);
+  } else {
+    preview = JSON.stringify(payload.args ?? {})
+      .replace(/\s+/g, ' ')
+      .slice(0, 70);
+  }
 
   return {
     kind: 'tool',

@@ -66,6 +66,9 @@ export interface AuditAggregates {
   review: number;
   /** Audit entries blocked by loop-detection (subset of block, surfaced separately for the HUD). */
   loops: number;
+  /** Audit entries flagged by any DLP rule (`dlp-block`, `dlp-saas:*`, etc.).
+   *  Computed from ALL entries, not just byBlock top-6, so the count is honest. */
+  dlpHits: number;
   sessions: number;
   mcpServers: number;
   mcpCalls: number;

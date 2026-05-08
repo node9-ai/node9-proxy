@@ -609,12 +609,13 @@ export function Risk(props: {
   blast: BlastSnapshot;
   window: TimeWindow;
 }): React.ReactElement {
-  const dlpHits = props.agg.byBlock
-    .filter((b) => b.rule.includes('dlp'))
-    .reduce((s, b) => s + b.count, 0);
-  const loopHits = props.agg.byBlock
-    .filter((b) => b.rule === 'loop-detected')
-    .reduce((s, b) => s + b.count, 0);
+  // Use the dedicated counters from aggregateAudit. Earlier this
+  // panel derived counts by filtering byBlock (top-6 only), which
+  // missed any DLP / loop rules that didn't make the top 6 — leading
+  // to a misleading "0 loops" when there were really hundreds, just
+  // spread across many rule names.
+  const dlpHits = props.agg.dlpHits;
+  const loopHits = props.agg.loops;
   const scoreColor =
     props.blast.score >= 80 ? '#5BF58C' : props.blast.score >= 50 ? COL.panelHigh : COL.liveOff;
   return (
