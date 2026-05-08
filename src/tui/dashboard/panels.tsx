@@ -5,7 +5,13 @@
 
 import React from 'react';
 import { Box, Text } from 'ink';
-import type { ActivityEvent, AuditAggregates, BlastSnapshot, TimeWindow } from './types.js';
+import type {
+  ActivityEvent,
+  AuditAggregates,
+  BlastSnapshot,
+  CostSnapshot,
+  TimeWindow,
+} from './types.js';
 import { TIME_WINDOWS } from './types.js';
 
 const COL = {
@@ -68,9 +74,10 @@ export function HighLevel(props: {
   window: TimeWindow;
   agg: AuditAggregates;
   blast: BlastSnapshot;
+  cost: CostSnapshot | null;
   skillsPinned: number;
 }): React.ReactElement {
-  const { agg, blast } = props;
+  const { agg, blast, cost } = props;
   const blastColor =
     blast.score >= 80 ? '#5BF58C' : blast.score >= 50 ? COL.panelHigh : COL.liveOff;
   const blockColor = agg.block > 0 ? COL.liveOff : COL.textDim;
@@ -89,13 +96,15 @@ export function HighLevel(props: {
         <Text dimColor>{`  · ${labelFor(props.window)}`}</Text>
       </Text>
       <Text wrap="truncate-end">
-        {agg.costUSD > 0 ? (
-          <>
-            <Text bold>{`$${agg.costUSD.toFixed(2)}`}</Text>
-            <Text dimColor> cost </Text>
-          </>
+        {!cost ? (
+          <Text dimColor>{'cost loading…  '}</Text>
         ) : (
-          <Text dimColor>{'cost n/a  '}</Text>
+          <>
+            <Text bold>{formatCost(cost.totalUSD)}</Text>
+            <Text dimColor>{' cost · '}</Text>
+            <Text bold>{formatTokens(cost.inputTokens + cost.outputTokens)}</Text>
+            <Text dimColor>{' tokens  '}</Text>
+          </>
         )}
         <Text bold>{agg.allow.toLocaleString()}</Text>
         <Text color="#5BF58C">{' ✓ allow  '}</Text>
@@ -121,6 +130,22 @@ export function HighLevel(props: {
       </Text>
     </Box>
   );
+}
+
+/** Compact cost format: `$0.42` for small, `$12.40` for normal, `$1.2K` for large. */
+function formatCost(usd: number): string {
+  if (usd === 0) return '$0';
+  if (usd < 1) return `$${usd.toFixed(2)}`;
+  if (usd < 100) return `$${usd.toFixed(2)}`;
+  if (usd < 10_000) return `$${Math.round(usd).toLocaleString()}`;
+  return `$${(usd / 1000).toFixed(1)}K`;
+}
+
+/** Compact token format: `1.2K` / `12K` / `1.2M`. */
+function formatTokens(n: number): string {
+  if (n < 1000) return `${n}`;
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}K`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
 function labelFor(w: TimeWindow): string {

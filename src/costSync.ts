@@ -120,7 +120,19 @@ export function parseJSONLFile(
   return daily;
 }
 
-function collectEntries(): DailyEntry[] {
+export type { DailyEntry };
+
+/**
+ * Walk every Claude Code session JSONL under ~/.claude/projects, parse
+ * cost+tokens via parseJSONLFile, and combine into DailyEntry[] keyed
+ * by (date, model, workingDir, runId). Pure (read-only fs walk); no
+ * network. Used by the periodic cost-sync POST and by the Ink
+ * dashboard's HIGH LEVEL strip.
+ *
+ * Cost: O(total JSONL bytes). On a heavy 90-day install this can take
+ * 1-5s. Callers should run async + cache the result.
+ */
+export function collectEntries(): DailyEntry[] {
   const projectsDir = path.join(os.homedir(), '.claude', 'projects');
   if (!fs.existsSync(projectsDir)) return [];
 

@@ -66,8 +66,6 @@ export interface AuditAggregates {
   review: number;
   /** Audit entries blocked by loop-detection (subset of block, surfaced separately for the HUD). */
   loops: number;
-  costUSD: number;
-  tokens: number;
   sessions: number;
   mcpServers: number;
   mcpCalls: number;
@@ -80,4 +78,16 @@ export interface BlastSnapshot {
   score: number;
   paths: string[]; // top reachable paths
   envFindings: number;
+}
+
+/** Aggregated cost + tokens within the selected window. Computed off
+ *  costSync.collectEntries(). `loaded: false` is shown while the
+ *  initial async walk is in flight. */
+export interface CostSnapshot {
+  totalUSD: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  loaded: boolean;
 }

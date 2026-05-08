@@ -18,9 +18,18 @@ import {
   type ActivityEvent,
   type AuditAggregates,
   type BlastSnapshot,
+  type CostSnapshot,
   type TimeWindow,
 } from './types.js';
-import { aggregateAudit, loadBlast, readAuditEntries, subscribeToSse } from './data.js';
+import {
+  aggregateAudit,
+  aggregateCost,
+  loadBlast,
+  loadCostEntries,
+  readAuditEntries,
+  subscribeToSse,
+} from './data.js';
+import type { DailyEntry } from '../../costSync.js';
 import { Header, HighLevel, LiveLog, Report, Risk, StatusBar } from './panels.js';
 
 const LIVE_BUFFER_CAP = 100;
@@ -38,6 +47,7 @@ const BLAST_REFRESH_MS = 5 * 60_000;
  */
 const FIXED_PANELS_HEIGHT = 22;
 const LIVE_MIN_ROWS = 4;
+const COST_REFRESH_MS = 5 * 60_000;
 
 export function App(): React.ReactElement {
   const { exit } = useApp();
@@ -48,6 +58,7 @@ export function App(): React.ReactElement {
   const [sseError, setSseError] = useState<string | undefined>();
   const [agg, setAgg] = useState<AuditAggregates | null>(null);
   const [blast, setBlast] = useState<BlastSnapshot | null>(null);
+  const [costEntries, setCostEntries] = useState<DailyEntry[] | null>(null);
   const [skillsPinned] = useState<number>(() => readSkillsPinned());
 
   // Track terminal rows so LIVE can size itself to fill whatever space
@@ -99,6 +110,28 @@ export function App(): React.ReactElement {
     return () => clearInterval(id);
   }, []);
 
+  // Cost — async because collectEntries() walks every JSONL under
+  // ~/.claude/projects (1-5s on a heavy install). Render shows
+  // "loading…" placeholder until the first walk completes.
+  useEffect(() => {
+    let cancelled = false;
+    const loadAndSet = () => {
+      loadCostEntries().then((entries) => {
+        if (!cancelled) setCostEntries(entries);
+      });
+    };
+    loadAndSet();
+    const id = setInterval(loadAndSet, COST_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+  const costSnapshot: CostSnapshot | null = useMemo(() => {
+    if (!costEntries) return null;
+    return aggregateCost(costEntries, windowStartMs(window, openedAt));
+  }, [costEntries, window, openedAt]);
+
   useInput((input, key) => {
     if (input === 'q' || (key.ctrl && input === 'c')) exit();
     else if (key.tab) {
@@ -106,10 +139,12 @@ export function App(): React.ReactElement {
       const next = TIME_WINDOWS[(idx + 1) % TIME_WINDOWS.length];
       setWindow(next);
     } else if (input === 'r') {
-      // Manual refresh of audit + blast (cheap operations).
+      // Manual refresh of audit + blast (cheap) and cost (expensive,
+      // dispatched async so the keypress feels instant).
       const entries = readAuditEntries();
       setAgg(aggregateAudit(entries, windowStartMs(window, openedAt)));
       setBlast(loadBlast());
+      void loadCostEntries().then(setCostEntries);
     }
   });
 
@@ -138,7 +173,13 @@ export function App(): React.ReactElement {
   return (
     <Box flexDirection="column" height="100%">
       <Header window={window} connected={!sseError} lastAgent={lastAgent} lastTs={lastEvent?.ts} />
-      <HighLevel window={window} agg={agg} blast={blast} skillsPinned={skillsPinned} />
+      <HighLevel
+        window={window}
+        agg={agg}
+        blast={blast}
+        cost={costSnapshot}
+        skillsPinned={skillsPinned}
+      />
       <LiveLog events={events} errorBanner={sseError} maxRows={liveMaxRows} />
       <Report agg={agg} window={window} />
       <Risk agg={agg} blast={blast} window={window} />

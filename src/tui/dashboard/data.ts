@@ -14,7 +14,8 @@ import path from 'path';
 import http from 'http';
 import { runBlast } from '../../cli/commands/blast.js';
 import { DAEMON_HOST, DAEMON_PORT, getInternalToken } from '../../auth/daemon.js';
-import type { ActivityEvent, AuditAggregates, BlastSnapshot } from './types.js';
+import { collectEntries, type DailyEntry } from '../../costSync.js';
+import type { ActivityEvent, AuditAggregates, BlastSnapshot, CostSnapshot } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Audit log parsing — minimal copy of the report.ts helper.
@@ -127,10 +128,6 @@ export function aggregateAudit(
     block,
     review,
     loops,
-    // Cost / tokens: not in audit.log itself; would need costSync data.
-    // Spike returns 0 for both — add a banner in the UI rather than fake numbers.
-    costUSD: 0,
-    tokens: 0,
     sessions: sessionSet.size,
     mcpServers: mcpSet.size,
     mcpCalls: [...inWindow].filter((e) => !!e.mcpServer).length,
@@ -146,6 +143,62 @@ export function aggregateAudit(
       .sort((a, b) => b[1].count - a[1].count)
       .slice(0, 5)
       .map(([cmd, v]) => ({ cmd, count: v.count, blocked: v.blocked })),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Cost — wraps costSync.collectEntries() with async dispatch + aggregation.
+// collectEntries walks every JSONL under ~/.claude/projects, so it's
+// expensive (1-5s on a heavy install). Callers should run it on mount
+// and on `r` keypress, never on every render.
+// ---------------------------------------------------------------------------
+
+export function loadCostEntries(): Promise<DailyEntry[]> {
+  // Defer to next tick so React render isn't blocked by the file walk.
+  return new Promise((resolve) => {
+    setImmediate(() => {
+      try {
+        resolve(collectEntries());
+      } catch {
+        resolve([]);
+      }
+    });
+  });
+}
+
+export function aggregateCost(
+  entries: DailyEntry[],
+  startMs: number,
+  endMs: number = Date.now()
+): CostSnapshot {
+  // entries are keyed by `date: YYYY-MM-DD`. Compare against the window
+  // by converting each date to start-of-day UTC. We include any day
+  // whose start-of-day overlaps the window, which means we may slightly
+  // over-count at the leading edge — acceptable for HUD-level numbers.
+  let totalUSD = 0;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cacheReadTokens = 0;
+  let cacheWriteTokens = 0;
+  const dayMs = 86_400_000;
+  for (const e of entries) {
+    const t = Date.parse(e.date);
+    if (Number.isNaN(t)) continue;
+    if (t + dayMs < startMs) continue;
+    if (t > endMs) continue;
+    totalUSD += e.costUSD;
+    inputTokens += e.inputTokens;
+    outputTokens += e.outputTokens;
+    cacheReadTokens += e.cacheReadTokens;
+    cacheWriteTokens += e.cacheWriteTokens;
+  }
+  return {
+    totalUSD,
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    loaded: true,
   };
 }
 
