@@ -1,12 +1,15 @@
 // src/tui/dashboard/App.tsx
 //
-// Spike: experimental Ink-based unified dashboard for node9.
+// Ink-based unified dashboard for node9, served by `node9 monitor`.
 // Renders four panels: Live SSE feed, High-Level summary, Report
-// breakdown, and DLP/LOOP/RISK summary. Time-window selector at top.
+// breakdown, and DLP/LOOP/RISK summary, with a fixed-height
+// notification area for approvals + recent security alerts.
+// Time-window selector at top.
 //
-// Status: spike — experimental, not a replacement for `node9 tail`.
-// Run via `node9 dashboard-spike`. Reversible: delete this directory
-// and the CLI registration to fully unwind.
+// Note: the directory is named `dashboard/` for historical reasons
+// (the component is a dashboard); the user-facing command is
+// `node9 monitor`. Internal symbols use neither name as gospel —
+// the components are named for what they show, not the command.
 import React, { useEffect, useMemo, useState } from 'react';
 import fs from 'fs';
 import os from 'os';

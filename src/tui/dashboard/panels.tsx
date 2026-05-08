@@ -1,6 +1,6 @@
 // src/tui/dashboard/panels.tsx
 //
-// All panels for the dashboard spike, kept in one file for navigability.
+// All panels for `node9 monitor`, kept in one file for navigability.
 // Each panel is a small Ink component reading props passed from App.tsx.
 
 import React from 'react';

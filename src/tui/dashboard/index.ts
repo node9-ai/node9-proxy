@@ -1,8 +1,8 @@
 // src/tui/dashboard/index.ts
 //
-// Entry point for `node9 dashboard-spike`. Renders the Ink App via
-// dynamic import so the heavy React runtime is only loaded when this
-// command is actually invoked. Other CLI commands stay fast.
+// Entry point for `node9 monitor`. Renders the Ink App via dynamic
+// import so the heavy React runtime is only loaded when this command
+// is actually invoked. Other CLI commands stay fast.
 //
 // Uses the terminal's alternate-screen buffer (like vim, htop, lazygit)
 // so re-renders never leak into the user's scrollback. Cleanup is bound
@@ -27,13 +27,13 @@ function exitAltScreen(): void {
   altScreenActive = false;
 }
 
-export async function startDashboardSpike(): Promise<void> {
+export async function startMonitor(): Promise<void> {
   // The dashboard relies on Ink's useInput, which requires a TTY in raw
-  // mode. Piping or redirecting stdin (CI, `echo q | node9 dashboard-spike`)
+  // mode. Piping or redirecting stdin (CI, `echo q | node9 monitor`)
   // would surface a noisy React error trace; bail with a clean message.
   if (!process.stdin.isTTY) {
     process.stderr.write(
-      'node9 dashboard-spike requires an interactive TTY (run it directly in your terminal).\n'
+      'node9 monitor requires an interactive TTY (run it directly in your terminal).\n'
     );
     process.exit(1);
   }

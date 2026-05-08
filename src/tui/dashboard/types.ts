@@ -1,6 +1,6 @@
 // src/tui/dashboard/types.ts
 //
-// Shared types for the dashboard spike. Kept in one file for navigability.
+// Shared types for the `node9 monitor` dashboard. Kept in one file for navigability.
 
 export type TimeWindow = 'now' | '1d' | '7d' | '30d' | '60d';
 

@@ -3,7 +3,7 @@
  * src/tui/dashboard/data.ts. The interactive React surface is
  * deliberately not covered here — those would belong in a separate
  * suite using ink-testing-library once the component layer stabilizes
- * past the spike phase.
+ * once the component layer is locked.
  *
  * Targets:
  *   - aggregateAudit  : count math, session/MCP set-uniqueness, loop counter,

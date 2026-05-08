@@ -451,10 +451,10 @@ program
     }
   });
 
-// node9 dashboard-spike — experimental Ink-based unified dashboard.
+// node9 monitor — Ink-based unified live dashboard.
 // Renders four panels: live SSE stream, high-level summary, report
-// breakdown, DLP/loop/risk. Behind -spike suffix to keep clearly
-// experimental. Reversible: delete src/tui/dashboard/ + this block.
+// breakdown, DLP/loop/risk. Reversible: delete src/tui/dashboard/ +
+// this block.
 //
 // Implementation note: ink@7 + react@19 are ESM with top-level await,
 // so they cannot be require()'d from this CJS bundle. The dashboard
@@ -464,16 +464,16 @@ program
 // tsup's static-import-to-require transform, which would otherwise
 // rewrite a literal `import()` to require() in this CJS file.
 program
-  .command('dashboard-spike')
-  .description('[experimental] Ink-based dashboard spike — preview before full rollout')
+  .command('monitor')
+  .description('Live interactive dashboard — activity feed, approvals, security signals')
   .action(async () => {
     try {
       const dashboardPath = path.join(__dirname, 'dashboard.mjs');
       const dynamicImport = new Function('id', 'return import(id)') as (id: string) => Promise<{
-        startDashboardSpike: () => Promise<void>;
+        startMonitor: () => Promise<void>;
       }>;
       const mod = await dynamicImport(`file://${dashboardPath}`);
-      await mod.startDashboardSpike();
+      await mod.startMonitor();
     } catch (err) {
       console.error(chalk.red(`❌ ${err instanceof Error ? err.message : String(err)}`));
       process.exit(1);

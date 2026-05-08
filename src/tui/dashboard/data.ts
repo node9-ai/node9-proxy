@@ -1,6 +1,6 @@
 // src/tui/dashboard/data.ts
 //
-// Data plumbing for the dashboard spike. No React in this file — pure
+// Data plumbing for `node9 monitor`. No React in this file — pure
 // I/O + parsing helpers. Components import from here.
 //
 // Three sources:
@@ -19,7 +19,7 @@ import type { ActivityEvent, AuditAggregates, BlastSnapshot, CostSnapshot } from
 
 // ---------------------------------------------------------------------------
 // Audit log parsing — minimal copy of the report.ts helper.
-// We could refactor report.ts to export it but that's outside spike scope.
+// We could refactor report.ts to export it but that's a separate cleanup.
 // ---------------------------------------------------------------------------
 
 interface AuditEntry {
@@ -534,7 +534,7 @@ export function subscribeToSse(
 
 function toActivityEvent(eventName: string, data: SsePayload): ActivityEvent | null {
   // The daemon broadcasts several event types: `activity`, `activity-result`,
-  // `add`, `remove`, `snapshot`, `execution-result`. The spike renders
+  // `add`, `remove`, `snapshot`, `execution-result`. The dashboard renders
   // `activity` / `add` as tool rows and `snapshot` as snapshot rows.
   // Others are ignored.
   const payload = data.activity ?? data;
