@@ -256,6 +256,10 @@ export function LiveLog(props: {
   events: ActivityEvent[];
   errorBanner?: string;
   maxRows: number;
+  /** Active filter text. Empty string = no filter. */
+  filter: string;
+  /** True when the user is actively typing in the filter input. */
+  filterInputMode: boolean;
 }): React.ReactElement {
   // Fixed-size panel: always render exactly maxRows content rows so
   // the panel height never shifts as events arrive. Real events fill
@@ -263,7 +267,8 @@ export function LiveLog(props: {
   // First slot reserved for the empty-state hint when the buffer is
   // empty so the user gets a one-line explanation without inflating
   // the panel.
-  const visible = props.events.slice(-props.maxRows);
+  const filtered = applyFilter(props.events, props.filter);
+  const visible = filtered.slice(-props.maxRows);
   const padCount = Math.max(0, props.maxRows - visible.length);
   return (
     <Box
@@ -274,17 +279,32 @@ export function LiveLog(props: {
       marginX={1}
       flexGrow={1}
     >
-      <Text>
+      <Text wrap="truncate-end">
         <Text color={COL.brand} bold>
           LIVE
         </Text>
         <Text dimColor>{`  · last ${props.maxRows} events`}</Text>
+        {props.filter || props.filterInputMode ? (
+          <Text>
+            <Text dimColor>{'   '}</Text>
+            <Text color={COL.panelHigh}>
+              {props.filterInputMode ? `🔍 /${props.filter}_` : `🔍 /${props.filter}`}
+            </Text>
+            <Text dimColor>
+              {props.filterInputMode
+                ? '   [Enter] apply  [Esc] cancel'
+                : `   ${filtered.length}/${props.events.length} matches  [Esc] clear`}
+            </Text>
+          </Text>
+        ) : null}
       </Text>
       {props.errorBanner ? <Text color={COL.liveOff}>{`⚠ ${props.errorBanner}`}</Text> : null}
       {Array.from({ length: padCount }, (_, i) =>
         i === 0 && visible.length === 0 ? (
           <Text key={`pad-${i}`} dimColor>
-            (no activity yet — agent must be running and daemon must be up)
+            {props.filter
+              ? `(no events match "${props.filter}" — [Esc] to clear)`
+              : '(no activity yet — agent must be running and daemon must be up)'}
           </Text>
         ) : (
           <Text key={`pad-${i}`}> </Text>
@@ -295,6 +315,24 @@ export function LiveLog(props: {
       ))}
     </Box>
   );
+}
+
+/** Substring match (case-insensitive) on tool, agent, preview, checkedBy.
+ *  Matches snapshot rows on hash + summary too. Empty filter passes everything. */
+function applyFilter(events: ActivityEvent[], filter: string): ActivityEvent[] {
+  if (!filter) return events;
+  const needle = filter.toLowerCase();
+  return events.filter((e) => {
+    if (e.kind === 'snapshot') {
+      return e.hash.toLowerCase().includes(needle) || e.summary.toLowerCase().includes(needle);
+    }
+    if (e.tool.toLowerCase().includes(needle)) return true;
+    if (e.agent && e.agent.toLowerCase().includes(needle)) return true;
+    if (e.preview.toLowerCase().includes(needle)) return true;
+    if (e.checkedBy && e.checkedBy.toLowerCase().includes(needle)) return true;
+    if (e.verdict.toLowerCase().includes(needle)) return true;
+    return false;
+  });
 }
 
 function ActivityRow({ event }: { event: ActivityEvent }): React.ReactElement {
@@ -321,7 +359,10 @@ function ActivityRow({ event }: { event: ActivityEvent }): React.ReactElement {
     );
   }
 
-  const agentLabel = `[${capitalize(event.agent ?? '?')}]`.padEnd(10);
+  // Truncate agent name so the LIVE column stays aligned even when
+  // the daemon emits long agent labels like "Claude Code" or
+  // "claude code"; padEnd alone doesn't shrink, only grows.
+  const agentLabel = `[${truncate(capitalize(event.agent ?? '?'), 8)}]`.padEnd(10);
   // Loop-detected entries get a distinct icon (and color) so the user
   // can tell "blocked because of a real rule" apart from "blocked by
   // the loop detector" at a glance.
@@ -344,14 +385,17 @@ function ActivityRow({ event }: { event: ActivityEvent }): React.ReactElement {
         : event.verdict === 'allow'
           ? '#5BF58C'
           : COL.textDim;
-  const agentColor =
-    event.agent === 'claude'
-      ? COL.agentClaude
-      : event.agent === 'gemini'
-        ? COL.agentGemini
-        : event.agent === 'codex'
-          ? COL.agentCodex
-          : COL.agentShell;
+  // Daemon may broadcast agent as 'claude' or 'Claude Code' or
+  // 'claude-code' depending on which writer fired. Match on prefix
+  // lowercase so the color stays right across all variants.
+  const agentLower = (event.agent ?? '').toLowerCase();
+  const agentColor = agentLower.startsWith('claude')
+    ? COL.agentClaude
+    : agentLower.startsWith('gemini')
+      ? COL.agentGemini
+      : agentLower.startsWith('codex')
+        ? COL.agentCodex
+        : COL.agentShell;
   return (
     <Box flexDirection="column">
       <Text wrap="truncate-end">

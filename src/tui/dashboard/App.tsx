@@ -84,6 +84,10 @@ export function App(): React.ReactElement {
   // or on Esc.
   const [pendingApproval, setPendingApproval] = useState<ActivityEvent | null>(null);
   const [approvalStatus, setApprovalStatus] = useState<ApprovalStatus>({ kind: 'idle' });
+  // Filter — applied to the LIVE panel only. `/` enters input mode;
+  // typing edits the filter live; Enter freezes; Esc clears+exits.
+  const [filter, setFilter] = useState<string>('');
+  const [filterInputMode, setFilterInputMode] = useState<boolean>(false);
 
   // Track terminal rows so LIVE can size itself to fill whatever space
   // is left after the fixed-height panels above it. Re-renders on
@@ -132,9 +136,18 @@ export function App(): React.ReactElement {
           setApprovalStatus({ kind: 'idle' });
         }
       },
-      (resolvedId) => {
+      (resolvedId, finalVerdict) => {
         // Daemon resolved a pending entry (`activity-result` or
-        // `remove`). Clear the card if it matches.
+        // `remove`). Update the matching LIVE row's verdict so it
+        // stops rendering as `pending`, and clear the approval card
+        // if it was tracking this id.
+        if (finalVerdict) {
+          setEvents((prev) =>
+            prev.map((e) =>
+              e.kind === 'tool' && e.id === resolvedId ? { ...e, verdict: finalVerdict } : e
+            )
+          );
+        }
         setPendingApproval((prev) => (prev && prev.id === resolvedId ? null : prev));
       },
       (msg) => setSseError(msg)
@@ -184,9 +197,34 @@ export function App(): React.ReactElement {
   }, [costEntries, window, openedAt]);
 
   useInput((input, key) => {
-    // Approval-card key dispatch takes precedence — when a card is
-    // showing, q/Tab/r are suppressed so a misclick can't quit the
-    // dashboard while the user is trying to act on the card.
+    // Filter input mode takes the highest priority — every printable
+    // key edits the filter, Esc clears, Enter freezes. Approval card
+    // and global hotkeys are suppressed.
+    if (filterInputMode) {
+      if (key.escape) {
+        setFilter('');
+        setFilterInputMode(false);
+        return;
+      }
+      if (key.return) {
+        // Freeze the current filter, exit input mode (q/Tab/r work again).
+        setFilterInputMode(false);
+        return;
+      }
+      if (key.backspace || key.delete) {
+        setFilter((prev) => prev.slice(0, -1));
+        return;
+      }
+      if (input && input.length === 1 && input.charCodeAt(0) >= 32) {
+        setFilter((prev) => prev + input);
+        return;
+      }
+      return;
+    }
+
+    // Approval-card key dispatch — when a card is showing, q/Tab/r/`/`
+    // are suppressed so a misclick can't quit the dashboard while the
+    // user is trying to act on the card.
     if (pendingApproval && approvalStatus.kind !== 'sending') {
       if (input === 'a' || input === 'd' || input === 't') {
         const decision = input === 'a' ? 'allow' : input === 'd' ? 'deny' : 'trust';
@@ -216,6 +254,16 @@ export function App(): React.ReactElement {
       return;
     }
 
+    // Global keys (no card, no filter input mode active).
+    if (input === '/') {
+      setFilterInputMode(true);
+      return;
+    }
+    if (key.escape && filter) {
+      // Outside input-mode, Esc clears any active filter.
+      setFilter('');
+      return;
+    }
     if (input === 'q' || (key.ctrl && input === 'c')) exit();
     else if (key.tab) {
       const idx = TIME_WINDOWS.indexOf(window);
@@ -264,7 +312,13 @@ export function App(): React.ReactElement {
         skillsPinned={skillsPinned}
       />
       {pendingApproval ? <ApprovalCard event={pendingApproval} status={approvalStatus} /> : null}
-      <LiveLog events={events} errorBanner={sseError} maxRows={liveMaxRows} />
+      <LiveLog
+        events={events}
+        errorBanner={sseError}
+        maxRows={liveMaxRows}
+        filter={filter}
+        filterInputMode={filterInputMode}
+      />
       <Report agg={agg} window={window} />
       <Risk agg={agg} blast={blast} window={window} />
       <StatusBar />

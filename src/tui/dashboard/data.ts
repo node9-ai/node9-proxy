@@ -319,6 +319,8 @@ interface SsePayload {
   agent?: string;
   args?: Record<string, unknown>;
   decision?: string;
+  /** activity-result carries the final verdict on `status` (allow/dlp/etc). */
+  status?: string;
   reason?: string;
   checkedBy?: string;
   sessionId?: string;
@@ -330,6 +332,18 @@ interface SsePayload {
   // Activity events have these on the inner `activity` field on some events;
   // we union both shapes since the daemon broadcasts a few SSE event names.
   activity?: SsePayload;
+}
+
+/** Daemon `activity-result` `status` values → ActivityEvent verdict. */
+function mapResultStatus(status: unknown): ResolvedVerdict | undefined {
+  if (typeof status !== 'string') return undefined;
+  if (status === 'allow' || status === 'observe-allow') return 'allow';
+  // 'dlp', 'block', 'denied', timeouts → all render as block on the row.
+  if (status === 'dlp' || status === 'block' || status === 'denied' || status === 'timeout') {
+    return 'block';
+  }
+  if (status === 'review') return 'review';
+  return undefined;
 }
 
 function normalizeTs(ts: unknown): string {
@@ -385,9 +399,12 @@ export function submitDecision(
   });
 }
 
+/** Final verdict the daemon assigned to a previously-pending tool call. */
+export type ResolvedVerdict = 'allow' | 'block' | 'review';
+
 export function subscribeToSse(
   onEvent: (e: ActivityEvent) => void,
-  onResolve: (id: string) => void,
+  onResolve: (id: string, verdict?: ResolvedVerdict) => void,
   onError: (msg: string) => void
 ): () => void {
   const token = getInternalToken();
@@ -430,7 +447,13 @@ export function subscribeToSse(
                 // clear a pending approval card (or update its row's
                 // verdict in a future iteration).
                 if (currentEvent === 'activity-result' || currentEvent === 'remove') {
-                  if (typeof data.id === 'string') onResolve(data.id);
+                  if (typeof data.id === 'string') {
+                    // activity-result carries the final daemon verdict on
+                    // `status`. `remove` (timeout/expiry) carries no verdict
+                    // — the row keeps whatever it had.
+                    const verdict = mapResultStatus(data.status);
+                    onResolve(data.id, verdict);
+                  }
                   continue;
                 }
                 const evt = toActivityEvent(currentEvent, data);
