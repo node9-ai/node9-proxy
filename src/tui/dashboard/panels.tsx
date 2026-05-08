@@ -477,7 +477,12 @@ function ActivityRow({ event }: { event: ActivityEvent }): React.ReactElement {
   // Truncate agent name so the LIVE column stays aligned even when
   // the daemon emits long agent labels like "Claude Code" or
   // "claude code"; padEnd alone doesn't shrink, only grows.
-  const agentLabel = `[${truncate(capitalize(event.agent ?? '?'), 8)}]`.padEnd(10);
+  // Audit entries from `node9 check` invocations or older versions
+  // lack agent metadata entirely — render as blank padding so the
+  // column stays aligned without screaming "[?]" at the user.
+  const agentLabel = event.agent
+    ? `[${truncate(capitalize(event.agent), 8)}]`.padEnd(10)
+    : ' '.repeat(10);
   // Loop-detected entries get a distinct icon (and color) so the user
   // can tell "blocked because of a real rule" apart from "blocked by
   // the loop detector" at a glance.
