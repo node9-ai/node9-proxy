@@ -5,7 +5,6 @@
 //   daemon/service.ts — login service install/uninstall (launchd / systemd)
 import fs from 'fs';
 import chalk from 'chalk';
-import { spawnSync } from 'child_process';
 
 export { startDaemon } from './server';
 export {
@@ -69,16 +68,11 @@ export function daemonStatus(): void {
       processStatus = chalk.yellow('not running (stale PID file)');
     }
   } else {
-    // No PID file — check if port is in use (orphaned daemon)
-    const r = spawnSync('ss', ['-Htnp', `sport = :${DAEMON_PORT}`], {
-      encoding: 'utf8',
-      timeout: 500,
-    });
-    if (r.status === 0 && (r.stdout ?? '').includes(`:${DAEMON_PORT}`)) {
-      processStatus = chalk.yellow(`running (orphaned — no PID file)`);
-    } else {
-      processStatus = chalk.yellow('not running');
-    }
+    // No PID file — daemon not running. Detecting orphaned daemons (process
+    // up, PID file lost) previously shelled out to `ss`, which only exists on
+    // Linux; on macOS that probe always failed. The orphan case is recovered
+    // at daemon startup via the EADDRINUSE handler in src/daemon/server.ts.
+    processStatus = chalk.yellow('not running');
   }
 
   console.log(`\n  Process : ${processStatus}`);
