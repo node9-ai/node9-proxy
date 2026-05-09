@@ -596,6 +596,10 @@ export function submitDecision(
 /** Final verdict the daemon assigned to a previously-pending tool call. */
 export type ResolvedVerdict = 'allow' | 'block' | 'review';
 
+/** Initial reconnect delay (ms). Doubles on each failure up to MAX. */
+const SSE_BACKOFF_INITIAL_MS = 1_000;
+const SSE_BACKOFF_MAX_MS = 30_000;
+
 export function subscribeToSse(
   onEvent: (e: ActivityEvent) => void,
   onResolve: (id: string, verdict?: ResolvedVerdict) => void,
@@ -608,7 +612,24 @@ export function subscribeToSse(
   }
 
   let req: http.ClientRequest | undefined;
+  let reconnectTimer: NodeJS.Timeout | undefined;
   let aborted = false;
+  // Backoff resets to INITIAL after a successful 200 connect, doubles
+  // on each failure up to MAX. Survives daemon restarts cleanly: the
+  // dashboard reconnects automatically with a visible "reconnecting…"
+  // hint instead of going silent.
+  let backoffMs = SSE_BACKOFF_INITIAL_MS;
+
+  const scheduleReconnect = (reason: string) => {
+    if (aborted) return;
+    const wait = backoffMs;
+    onError(`${reason}; reconnecting in ${Math.round(wait / 1000)}s…`);
+    backoffMs = Math.min(backoffMs * 2, SSE_BACKOFF_MAX_MS);
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = undefined;
+      connect();
+    }, wait);
+  };
 
   const connect = () => {
     if (aborted) return;
@@ -617,9 +638,14 @@ export function subscribeToSse(
       { headers: { 'X-Node9-Internal': token, Accept: 'text/event-stream' } },
       (res) => {
         if (res.statusCode !== 200) {
-          onError(`daemon /events returned ${res.statusCode}`);
+          // Drain the response so the socket can be reused / closed.
+          res.resume();
+          scheduleReconnect(`daemon /events returned ${res.statusCode}`);
           return;
         }
+        // Successful connect — reset backoff so subsequent failures
+        // start with a short retry rather than the last grown delay.
+        backoffMs = SSE_BACKOFF_INITIAL_MS;
         let buf = '';
         let currentEvent = '';
         res.setEncoding('utf8');
@@ -659,12 +685,12 @@ export function subscribeToSse(
           }
         });
         res.on('end', () => {
-          if (!aborted) onError('daemon disconnected; reconnecting…');
+          if (!aborted) scheduleReconnect('daemon disconnected');
         });
       }
     );
-    req.on('error', () => {
-      if (!aborted) onError('daemon connection failed');
+    req.on('error', (err) => {
+      if (!aborted) scheduleReconnect(`connection failed: ${err.message}`);
     });
   };
 
@@ -672,6 +698,7 @@ export function subscribeToSse(
 
   return () => {
     aborted = true;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
     if (req) req.destroy();
   };
 }
