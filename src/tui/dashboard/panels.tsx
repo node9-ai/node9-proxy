@@ -83,12 +83,15 @@ function renderHealthBadge(h: HealthBadge): React.ReactNode {
   const icon = h.severity === 'critical' ? '🛑' : '⚠';
   const color = h.severity === 'critical' ? COL.liveOff : COL.panelHigh;
   const summary = h.reasons.length > 0 ? h.reasons.join(', ') : 'risk';
+  // Hint ("see node9 scan") used to be inlined here but pushed the
+  // header past 80 chars and forced 2-line wrapping that destabilised
+  // FIXED_PANELS_HEIGHT. The [2] report key in StatusBar already
+  // points users where to look.
   return (
     <>
       <Text dimColor>{'  · '}</Text>
       <Text color={color} bold>{`${icon} `}</Text>
       <Text color={color}>{summary}</Text>
-      {h.hint ? <Text dimColor>{` — ${h.hint}`}</Text> : null}
     </>
   );
 }
