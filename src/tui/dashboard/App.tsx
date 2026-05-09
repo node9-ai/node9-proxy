@@ -24,10 +24,12 @@ import {
   type BlastSnapshot,
   type CostSnapshot,
   type ForensicSseEvent,
+  type ReportPeriod,
   type ScanSignalsSnapshot,
   type SessionForensicAgg,
   type ShieldStatus,
   type TimeWindow,
+  type View,
 } from './types.js';
 import {
   aggregateAudit,
@@ -50,6 +52,7 @@ import {
   LiveLog,
   NotificationArea,
   Report,
+  ReportView,
   Risk,
   StatusBar,
   type ApprovalStatus,
@@ -104,6 +107,14 @@ export function App(): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const [openedAt] = useState<number>(() => Date.now());
+  // Top-level view — '[1]' realtime (default) vs '[2]' report. Phase 1
+  // of the two-view restructure: switcher + stub Report view. Phase 2+
+  // trim the realtime view and populate Report. See plan in
+  // doc/roadmap/monitor-two-view.md.
+  const [view, setView] = useState<View>('realtime');
+  // Period setter wires up in phase 5 (period picker keys). Phase 1 just
+  // shows the default in the stub Report view.
+  const [reportPeriod] = useState<ReportPeriod>('7d');
   const [window, setWindow] = useState<TimeWindow>('1d');
   const [events, setEvents] = useState<ActivityEvent[]>([]);
   const [sseError, setSseError] = useState<string | undefined>();
@@ -390,7 +401,13 @@ export function App(): React.ReactElement {
       return;
     }
     if (input === 'q' || (key.ctrl && input === 'c')) exit();
-    else if (key.tab) {
+    else if (input === '1') {
+      // Top-level view switch. Realtime is the default — pressing 1
+      // from anywhere returns here. See monitor-two-view.md.
+      setView('realtime');
+    } else if (input === '2') {
+      setView('report');
+    } else if (key.tab) {
       const idx = TIME_WINDOWS.indexOf(window);
       const next = TIME_WINDOWS[(idx + 1) % TIME_WINDOWS.length];
       setWindow(next);
@@ -579,31 +596,37 @@ export function App(): React.ReactElement {
         lastTs={lastEvent?.ts}
         health={healthBadge}
       />
-      <HighLevel
-        window={window}
-        agg={agg}
-        cost={costSnapshot}
-        skillsPinned={skillsPinned}
-        mcpPinned={mcpPinned}
-      />
-      <NotificationArea notification={notification} />
-      <LiveLog
-        events={events}
-        errorBanner={sseError}
-        maxRows={liveMaxRows}
-        filter={filter}
-        filterInputMode={filterInputMode}
-      />
-      <Report agg={agg} cost={costSnapshot} window={window} />
-      <Risk
-        agg={agg}
-        blast={blast}
-        shieldStatus={shieldStatus}
-        scanSignals={scanSignals}
-        forensicAgg={sessionForensicAgg}
-        window={window}
-      />
-      <StatusBar />
+      {view === 'realtime' ? (
+        <>
+          <HighLevel
+            window={window}
+            agg={agg}
+            cost={costSnapshot}
+            skillsPinned={skillsPinned}
+            mcpPinned={mcpPinned}
+          />
+          <NotificationArea notification={notification} />
+          <LiveLog
+            events={events}
+            errorBanner={sseError}
+            maxRows={liveMaxRows}
+            filter={filter}
+            filterInputMode={filterInputMode}
+          />
+          <Report agg={agg} cost={costSnapshot} window={window} />
+          <Risk
+            agg={agg}
+            blast={blast}
+            shieldStatus={shieldStatus}
+            scanSignals={scanSignals}
+            forensicAgg={sessionForensicAgg}
+            window={window}
+          />
+        </>
+      ) : (
+        <ReportView period={reportPeriod} />
+      )}
+      <StatusBar view={view} />
     </Box>
   );
 }

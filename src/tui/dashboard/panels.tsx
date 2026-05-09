@@ -11,10 +11,12 @@ import type {
   BlastSnapshot,
   CostSnapshot,
   ForensicSseEvent,
+  ReportPeriod,
   ScanSignalsSnapshot,
   SessionForensicAgg,
   ShieldStatus,
   TimeWindow,
+  View,
 } from './types.js';
 import { TIME_WINDOWS } from './types.js';
 import type { HealthBadge } from './health.js';
@@ -832,13 +834,69 @@ export function Risk(props: {
 // StatusBar — footer with keypress hints
 // ---------------------------------------------------------------------------
 
-export function StatusBar(): React.ReactElement {
+export function StatusBar(props: { view: View }): React.ReactElement {
+  const realtimeActive = props.view === 'realtime';
+  const reportActive = props.view === 'report';
   return (
     <Box paddingX={1}>
+      <Text color={realtimeActive ? COL.brand : undefined} bold={realtimeActive}>
+        {`[1] realtime ${realtimeActive ? '●' : '○'} `}
+      </Text>
+      <Text color={reportActive ? COL.brand : undefined} bold={reportActive}>
+        {`[2] report ${reportActive ? '●' : '○'} `}
+      </Text>
+      <Text dimColor>· </Text>
       <Text dimColor>[Tab] window </Text>
-      <Text dimColor>[r] refresh blast/agg </Text>
+      <Text dimColor>[r] refresh </Text>
       <Text dimColor>[?] help </Text>
       <Text dimColor>[q] quit</Text>
+    </Box>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ReportView — phase-1 stub. Full implementation lands in phases 4-8 (see
+// doc/roadmap/monitor-two-view.md). For now: shows the period picker and
+// a "coming soon" placeholder for each section so the switcher is visibly
+// alive end-to-end.
+// ---------------------------------------------------------------------------
+
+export function ReportView(props: { period: ReportPeriod }): React.ReactElement {
+  return (
+    <Box flexDirection="column" flexGrow={1} paddingX={1}>
+      <Box paddingY={1}>
+        <Text color={COL.brand} bold>
+          REPORT
+        </Text>
+        <Text dimColor>{`  · period ${props.period}`}</Text>
+      </Box>
+      <Box flexDirection="column" gap={0}>
+        <ReportSectionStub label="Security" hint="leaks · blocks · loops · forensic 90d" />
+        <ReportSectionStub label="Activity" hint="top tools · top blocks · daily/hourly" />
+        <ReportSectionStub label="Cost" hint="per model · per day · cache hit" />
+        <ReportSectionStub label="Coverage" hint="inactive shields · reachable paths" />
+      </Box>
+      <Box marginTop={1}>
+        <Text dimColor>(report sections land in phases 4–8 — press [1] to return to realtime)</Text>
+      </Box>
+    </Box>
+  );
+}
+
+function ReportSectionStub(props: { label: string; hint: string }): React.ReactElement {
+  return (
+    <Box
+      borderStyle="round"
+      borderColor={COL.textDim}
+      paddingX={1}
+      marginX={1}
+      flexDirection="column"
+    >
+      <Text>
+        <Text bold>{props.label}</Text>
+        <Text dimColor>{`  — ${props.hint}`}</Text>
+      </Text>
+      <Text dimColor>(coming soon)</Text>
     </Box>
   );
 }

@@ -4,6 +4,19 @@
 
 export type TimeWindow = 'now' | '1d' | '7d' | '30d' | '60d';
 
+/** Top-level dashboard view. `[1]` selects realtime; `[2]` selects report.
+ *  Realtime answers "what's happening now"; report answers "what has
+ *  happened over time". Header + footer are shared chrome; only the body
+ *  swaps. See doc/roadmap/monitor-two-view.md for the full plan. */
+export type View = 'realtime' | 'report';
+
+/** Period selector for the Report view. Independent from TimeWindow
+ *  (which is the realtime monitor's window-tabs concept that's being
+ *  retired in phase 2). */
+export type ReportPeriod = '1d' | '7d' | '30d' | '90d';
+
+export const REPORT_PERIODS: readonly ReportPeriod[] = ['1d', '7d', '30d', '90d'] as const;
+
 export const TIME_WINDOWS: readonly TimeWindow[] = ['now', '1d', '7d', '30d', '60d'] as const;
 
 /** Compute the earliest epoch-ms the window covers. `now` returns Date.now() so
