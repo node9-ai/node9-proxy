@@ -144,10 +144,15 @@ describe('localTimeOf', () => {
     expect(out.length).toBe(8);
   });
 
-  it('returns placeholder for non-string input', () => {
+  it('returns placeholder for non-string non-number input', () => {
     expect(localTimeOf(undefined)).toBe('--:--:--');
     expect(localTimeOf(null)).toBe('--:--:--');
-    expect(localTimeOf(12345)).toBe('--:--:--');
+    // Note: numbers now represent epoch ms — 12345 ≈ 12 s after epoch
+    // and renders as a valid HH:MM:SS, so it's no longer a "non-string
+    // rejected input" case. See the dedicated number-input tests below.
+    expect(localTimeOf({})).toBe('--:--:--');
+    expect(localTimeOf([])).toBe('--:--:--');
+    expect(localTimeOf(true)).toBe('--:--:--');
   });
 
   it('returns placeholder for empty string', () => {
@@ -167,5 +172,26 @@ describe('localTimeOf', () => {
     const expectedLocalHours = String(new Date(iso).getHours()).padStart(2, '0');
     const out = localTimeOf(iso);
     expect(out.slice(0, 2)).toBe(expectedLocalHours);
+  });
+
+  // localTimeOf was extended to accept epoch-ms numbers (used by
+  // StatusBar's last-refresh indicator). Same format guarantees apply.
+  it('accepts an epoch-ms number and produces HH:MM:SS', () => {
+    const epoch = Date.UTC(2026, 4, 9, 14, 30, 45);
+    const out = localTimeOf(epoch);
+    expect(out).toMatch(/^\d{2}:\d{2}:\d{2}$/);
+    expect(out.length).toBe(8);
+  });
+
+  it('returns local time consistent between number and string forms', () => {
+    const epoch = Date.now();
+    const iso = new Date(epoch).toISOString();
+    expect(localTimeOf(epoch)).toBe(localTimeOf(iso));
+  });
+
+  it('rejects NaN / Infinity as invalid number input', () => {
+    expect(localTimeOf(NaN)).toBe('--:--:--');
+    expect(localTimeOf(Infinity)).toBe('--:--:--');
+    expect(localTimeOf(-Infinity)).toBe('--:--:--');
   });
 });

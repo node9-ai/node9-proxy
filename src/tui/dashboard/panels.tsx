@@ -790,9 +790,12 @@ export function Risk(props: {
 // StatusBar — footer with keypress hints
 // ---------------------------------------------------------------------------
 
-export function StatusBar(props: { view: View }): React.ReactElement {
+export function StatusBar(props: { view: View; lastRefreshAt: number }): React.ReactElement {
   const realtimeActive = props.view === 'realtime';
   const reportActive = props.view === 'report';
+  // Local 24-hour time tied to the [r] key. Ticks every keypress so the
+  // user gets visible feedback even when audit/cost/blast didn't change.
+  const refreshedAt = localTimeOf(props.lastRefreshAt);
   return (
     <Box paddingX={1}>
       <Text color={realtimeActive ? COL.brand : undefined} bold={realtimeActive}>
@@ -802,7 +805,7 @@ export function StatusBar(props: { view: View }): React.ReactElement {
         {`[2] report ${reportActive ? '●' : '○'} `}
       </Text>
       <Text dimColor>· </Text>
-      <Text dimColor>[r] refresh </Text>
+      <Text dimColor>{`[r] refresh (${refreshedAt}) `}</Text>
       <Text dimColor>[?] help </Text>
       <Text dimColor>[q] quit</Text>
     </Box>

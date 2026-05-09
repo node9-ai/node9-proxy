@@ -123,6 +123,13 @@ export function App(): React.ReactElement {
   // trim the realtime view and populate Report. See plan in
   // doc/roadmap/monitor-two-view.md.
   const [view, setView] = useState<View>('realtime');
+  // Last-refresh timestamp shown in StatusBar. Updated on mount and on
+  // each [r] keypress so users get visible confirmation that a manual
+  // refresh fired, even when the underlying data didn't change. Auto-
+  // refresh ticks (audit 30s, blast/shield/cost/scan 5min) intentionally
+  // do NOT touch this — keeping it manual-only makes it a clean
+  // "did my keypress work?" diagnostic.
+  const [lastRefreshAt, setLastRefreshAt] = useState<number>(() => Date.now());
   // Period setter wires up in phase 5 (period picker keys). Phase 1 just
   // shows the default in the stub Report view.
   const [reportPeriod] = useState<ReportPeriod>('7d');
@@ -435,7 +442,10 @@ export function App(): React.ReactElement {
     } else if (input === 'r') {
       // Manual refresh of audit + blast + shields (cheap) and cost
       // + scan-signals (expensive, dispatched async so the keypress
-      // feels instant).
+      // feels instant). Update lastRefreshAt synchronously so the
+      // StatusBar timestamp ticks immediately — gives users visible
+      // confirmation [r] fired even when underlying data didn't change.
+      setLastRefreshAt(Date.now());
       const entries = readAuditEntries();
       setAgg(aggregateAudit(entries, windowStartMs(window, openedAt)));
       setBlast(loadBlast());
@@ -652,7 +662,7 @@ export function App(): React.ReactElement {
       ) : (
         <ReportView period={reportPeriod} />
       )}
-      <StatusBar view={view} />
+      <StatusBar view={view} lastRefreshAt={lastRefreshAt} />
     </Box>
   );
 }

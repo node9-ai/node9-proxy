@@ -62,13 +62,20 @@ export function truncate(s: string, width: number): string {
 }
 
 /**
- * Local-time `HH:MM:SS` (24-hour) from an ISO timestamp string. Returns
- * a placeholder when the input can't be parsed. Used by the LIVE row
- * so timestamps render in the user's wall-clock time, not UTC.
+ * Local-time `HH:MM:SS` (24-hour) from an ISO timestamp string OR an
+ * epoch-millisecond number. Returns a placeholder when the input can't
+ * be parsed. Used by the LIVE row (ISO strings) and the StatusBar's
+ * last-refresh indicator (epoch ms from Date.now()).
  */
 export function localTimeOf(ts: unknown): string {
-  if (typeof ts !== 'string' || ts.length === 0) return '--:--:--';
-  const d = new Date(ts);
+  let d: Date;
+  if (typeof ts === 'number' && Number.isFinite(ts)) {
+    d = new Date(ts);
+  } else if (typeof ts === 'string' && ts.length > 0) {
+    d = new Date(ts);
+  } else {
+    return '--:--:--';
+  }
   if (Number.isNaN(d.getTime())) return '--:--:--';
   const hh = String(d.getHours()).padStart(2, '0');
   const mm = String(d.getMinutes()).padStart(2, '0');
