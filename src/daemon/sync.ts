@@ -19,6 +19,7 @@ import {
 } from '@node9/policy-engine';
 import { tickScanWatcher, markUploadComplete, tickForensicBroadcast } from './scan-watermark.js';
 import { broadcastForensic } from './state.js';
+import { appendToLog, HOOK_DEBUG_LOG } from '../audit/index.js';
 
 // One row per session delta sent on /scan/report. The BE stores
 // these in ScanSessionSignals using INSERT-ON-CONFLICT INCREMENT, so
@@ -625,8 +626,17 @@ export function startForensicBroadcast(): void {
     try {
       const findings = await tickForensicBroadcast(forensicBroadcastOffsets);
       for (const f of findings) broadcastForensic(f);
-    } catch {
-      // Silent — never break the timer loop. The next tick re-attempts.
+    } catch (err) {
+      // Never break the timer loop — the next tick re-attempts. But do
+      // record the failure in hook-debug.log so pathological JSONL parse
+      // errors / fs problems are diagnosable. Mirrors the pattern in
+      // src/cli/commands/log.ts.
+      const msg = err instanceof Error ? err.message : String(err);
+      appendToLog(HOOK_DEBUG_LOG, {
+        ts: new Date().toISOString(),
+        kind: 'forensic-broadcast-error',
+        error: msg,
+      });
     }
   };
 

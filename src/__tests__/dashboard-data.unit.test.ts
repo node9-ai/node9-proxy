@@ -20,6 +20,7 @@ import {
   applyForensicEvent,
   auditEntryToActivityEvent,
   compactPath,
+  isValidForensicEvent,
   mapResultStatus,
 } from '../tui/dashboard/data';
 import { EMPTY_SESSION_FORENSIC, type ForensicSseEvent } from '../tui/dashboard/types';
@@ -568,5 +569,75 @@ describe('applyForensicEvent', () => {
     agg = applyForensicEvent(agg, fEvent('pii'));
     agg = applyForensicEvent(agg, fEvent('pii'));
     expect(agg.pii).toBe(3);
+  });
+});
+
+describe('isValidForensicEvent', () => {
+  it('accepts a well-formed event', () => {
+    expect(
+      isValidForensicEvent({
+        type: 'forensic',
+        id: 'fnd_1',
+        ts: 0,
+        sessionId: 's1',
+        category: 'pii',
+        severity: 'warning',
+      })
+    ).toBe(true);
+  });
+
+  it('accepts every known category', () => {
+    const categories: ForensicSseEvent['category'][] = [
+      'dlp',
+      'pii',
+      'sensitive-file-read',
+      'privilege-escalation',
+      'network-exfil',
+      'pipe-to-shell',
+      'eval-of-remote',
+      'destructive-op',
+      'loop',
+      'long-output-redacted',
+    ];
+    for (const c of categories) {
+      expect(
+        isValidForensicEvent({
+          type: 'forensic',
+          id: 'x',
+          ts: 0,
+          sessionId: 's',
+          category: c,
+          severity: 'warning',
+        }),
+        `category=${c}`
+      ).toBe(true);
+    }
+  });
+
+  it('rejects unknown categories (defends against daemon-side bugs)', () => {
+    expect(
+      isValidForensicEvent({
+        type: 'forensic',
+        id: 'x',
+        ts: 0,
+        sessionId: 's',
+        category: 'made-up-category',
+        severity: 'warning',
+      })
+    ).toBe(false);
+  });
+
+  it('rejects missing required fields', () => {
+    expect(isValidForensicEvent({ id: 'x', category: 'pii' })).toBe(false);
+    expect(isValidForensicEvent({ id: 'x', sessionId: 's', category: 'pii' })).toBe(true);
+    expect(isValidForensicEvent({ sessionId: 's', category: 'pii' })).toBe(false);
+  });
+
+  it('rejects non-object inputs', () => {
+    expect(isValidForensicEvent(null)).toBe(false);
+    expect(isValidForensicEvent(undefined)).toBe(false);
+    expect(isValidForensicEvent('string')).toBe(false);
+    expect(isValidForensicEvent(42)).toBe(false);
+    expect(isValidForensicEvent([])).toBe(false);
   });
 });

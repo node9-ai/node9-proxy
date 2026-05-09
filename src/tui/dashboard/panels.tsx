@@ -798,7 +798,6 @@ export function StatusBar(props: { view: View }): React.ReactElement {
         {`[2] report ${reportActive ? '●' : '○'} `}
       </Text>
       <Text dimColor>· </Text>
-      <Text dimColor>[Tab] window </Text>
       <Text dimColor>[r] refresh </Text>
       <Text dimColor>[?] help </Text>
       <Text dimColor>[q] quit</Text>

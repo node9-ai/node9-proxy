@@ -598,6 +598,35 @@ export function submitDecision(
 /** Final verdict the daemon assigned to a previously-pending tool call. */
 export type ResolvedVerdict = 'allow' | 'block' | 'review';
 
+/** Known forensic categories — used to validate inbound SSE payloads
+ *  before dispatch so a daemon-side bug emitting an unknown category
+ *  doesn't silently fall through applyForensicEvent's default branch. */
+const FORENSIC_CATEGORIES: ReadonlySet<ForensicSseEvent['category']> = new Set([
+  'dlp',
+  'pii',
+  'sensitive-file-read',
+  'privilege-escalation',
+  'network-exfil',
+  'pipe-to-shell',
+  'eval-of-remote',
+  'destructive-op',
+  'loop',
+  'long-output-redacted',
+]);
+
+/** Type guard for inbound 'forensic' SSE payloads. Validates required
+ *  fields exist and category is one of the known union members. */
+export function isValidForensicEvent(e: unknown): e is ForensicSseEvent {
+  if (!e || typeof e !== 'object') return false;
+  const ev = e as Partial<ForensicSseEvent>;
+  return (
+    typeof ev.id === 'string' &&
+    typeof ev.sessionId === 'string' &&
+    typeof ev.category === 'string' &&
+    FORENSIC_CATEGORIES.has(ev.category as ForensicSseEvent['category'])
+  );
+}
+
 /**
  * Pure reducer: increment the matching counter on a forensic SSE event.
  * 'dlp', 'loop', 'network-exfil' arrive via the audit-aggregation path
@@ -703,15 +732,11 @@ export function subscribeToSse(
               if (!raw) continue;
               try {
                 // Forensic events have their own payload shape (categorical
-                // metadata only — see ForensicSseEvent). Parse + dispatch
-                // before the SsePayload cast below.
+                // metadata only — see ForensicSseEvent). Parse + validate
+                // (category must be a known union member) before dispatch.
                 if (currentEvent === 'forensic') {
-                  const fEvent = JSON.parse(raw) as ForensicSseEvent;
-                  if (
-                    fEvent &&
-                    typeof fEvent.id === 'string' &&
-                    typeof fEvent.category === 'string'
-                  ) {
+                  const fEvent: unknown = JSON.parse(raw);
+                  if (isValidForensicEvent(fEvent)) {
                     onForensic(fEvent);
                   }
                   continue;
