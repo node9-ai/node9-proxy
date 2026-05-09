@@ -9,6 +9,7 @@ import {
   formatCost,
   formatPct,
   formatTokens,
+  localTimeOf,
   shortenModel,
   truncate,
 } from '../tui/dashboard/format';
@@ -131,5 +132,40 @@ describe('truncate', () => {
   });
   it('handles empty string', () => {
     expect(truncate('', 10)).toBe('');
+  });
+});
+
+describe('localTimeOf', () => {
+  it('produces zero-padded 24-hour HH:MM:SS', () => {
+    // ISO time 03:05:09 UTC. Local time depends on TZ but the format
+    // (HH:MM:SS, 8 chars, all digits + colons) is invariant.
+    const out = localTimeOf('2026-05-09T03:05:09.000Z');
+    expect(out).toMatch(/^\d{2}:\d{2}:\d{2}$/);
+    expect(out.length).toBe(8);
+  });
+
+  it('returns placeholder for non-string input', () => {
+    expect(localTimeOf(undefined)).toBe('--:--:--');
+    expect(localTimeOf(null)).toBe('--:--:--');
+    expect(localTimeOf(12345)).toBe('--:--:--');
+  });
+
+  it('returns placeholder for empty string', () => {
+    expect(localTimeOf('')).toBe('--:--:--');
+  });
+
+  it('returns placeholder for unparseable string', () => {
+    expect(localTimeOf('not-a-date')).toBe('--:--:--');
+  });
+
+  it('renders local time, not UTC slice (the bug it replaces)', () => {
+    // Pre-fix code did `ts.slice(11, 19)` which always returned UTC.
+    // The new implementation must convert via Date — verified below by
+    // round-tripping a known epoch and asserting the formatted hours
+    // matches Date#getHours (the local-time getter). Independent of TZ.
+    const iso = new Date(Date.UTC(2026, 4, 9, 14, 30, 0)).toISOString();
+    const expectedLocalHours = String(new Date(iso).getHours()).padStart(2, '0');
+    const out = localTimeOf(iso);
+    expect(out.slice(0, 2)).toBe(expectedLocalHours);
   });
 });

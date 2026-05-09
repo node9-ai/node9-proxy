@@ -23,6 +23,7 @@ import {
   formatCost,
   formatPct,
   formatTokens,
+  localTimeOf,
   shortenModel,
   truncate,
 } from './format.js';
@@ -112,6 +113,7 @@ export function HighLevel(props: {
   agg: AuditAggregates;
   cost: CostSnapshot | null;
   skillsPinned: number;
+  mcpPinned: number;
 }): React.ReactElement {
   const { agg, cost } = props;
   const blockColor = agg.block > 0 ? COL.liveOff : COL.textDim;
@@ -154,10 +156,14 @@ export function HighLevel(props: {
       {/* Second line: activity-only metadata. Loops + blast moved
           out — they're security signals, surfaced exclusively in the
           DLP / LOOP / RISK panel below to avoid duplicate numbers. */}
+      {/* MCP servers come from ~/.node9/mcp-pins.json (configuration —
+          how many servers are pinned/trusted). MCP calls come from
+          audit-log entries with mcpServer field set (observed usage in
+          the window). They answer different questions; show both. */}
       <Text wrap="truncate-end">
         <Text bold>{agg.sessions}</Text>
         <Text dimColor> sessions · </Text>
-        <Text bold>{agg.mcpServers}</Text>
+        <Text bold>{props.mcpPinned}</Text>
         <Text dimColor>{` MCP (${agg.mcpCalls} calls)  ·  `}</Text>
         <Text bold>{props.skillsPinned}</Text>
         <Text dimColor> skills pinned</Text>
@@ -212,6 +218,11 @@ export type Notification =
   | { kind: 'idle'; blastScore: number };
 
 export const NOTIFICATION_HEIGHT = 4;
+/** Fixed height for the REPORT panel (see Report() for the row math).
+ *  Pinned so adding/removing model or block rows doesn't reflow the
+ *  panels below it — earlier the title scrolled off-screen when an
+ *  extra model entered the cost rollup. */
+export const REPORT_PANEL_HEIGHT = 11;
 
 export function NotificationArea(props: { notification: Notification }): React.ReactElement {
   const { notification } = props;
@@ -493,11 +504,10 @@ function applyFilter(events: ActivityEvent[], filter: string): ActivityEvent[] {
 }
 
 function ActivityRow({ event }: { event: ActivityEvent }): React.ReactElement {
-  // Defensive against unexpected ts shapes: data.ts:normalizeTs already
-  // coerces incoming SSE payloads, but keep this row resilient too in
-  // case a malformed event slips through.
-  const tsStr = typeof event.ts === 'string' ? event.ts : '';
-  const t = tsStr.length >= 19 ? tsStr.slice(11, 19) : '--:--:--';
+  // Local 24-hour time (HH:MM:SS) — converts the daemon's UTC ISO
+  // timestamp to the user's wall-clock time. Returns '--:--:--' on
+  // malformed input as a defensive placeholder.
+  const t = localTimeOf(event.ts);
 
   // Snapshot rows have a different shape (no agent, no verdict, no
   // command preview) — render them in a distinct one-line format that
@@ -600,12 +610,17 @@ export function Report(props: {
   const topModels = (cost?.byModel ?? []).slice(0, 3);
   const maxModelCost = Math.max(1, ...topModels.map((m) => m.costUSD));
   return (
+    // Fixed height so adding/removing model rows doesn't reflow the rest
+    // of the dashboard. Worst-case interior: right column = "Top Blocks"
+    // header + 3 rows + "Models" header + 3 rows = 8 rows. Plus title (1)
+    // + 2 borders = 11.
     <Box
       flexDirection="column"
       borderStyle="round"
       borderColor={COL.panelReport}
       paddingX={1}
       marginX={1}
+      height={REPORT_PANEL_HEIGHT}
     >
       <Text>
         <Text color={COL.brand} bold>

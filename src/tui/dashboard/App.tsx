@@ -76,11 +76,13 @@ const BLAST_REFRESH_MS = 5 * 60_000;
  * Calibration: prior value was 22, which made LIVE 2 rows too tall,
  * pushing the bottom panels off-screen on standard ~41-row terminals.
  */
-// Updated to 31 to accommodate the live-forensic row in RISK
-// (counts since monitor opened, fed by 'forensic' SSE events).
-// Originally 30 with two 90-day forensic rows; 28 before that with
-// NotificationArea but no forensic chips at all.
-const FIXED_PANELS_HEIGHT = 31;
+// Updated to 33 to match actual rendered heights:
+//   header (1) + HIGH LEVEL (5) + Notification (4) + LIVE chrome (3) +
+//   REPORT (11, now pinned) + RISK (~8) + StatusBar (1) = 33
+// Earlier value (31) under-counted REPORT (was 9, actually 11 from
+// "Top Blocks + Models" right column), causing RISK chips to clip on
+// short terminals when the cost rollup gained a row.
+const FIXED_PANELS_HEIGHT = 33;
 const LIVE_MIN_ROWS = 4;
 const NOTIFICATION_RECENT_WINDOW_MS = 60_000;
 const RESOLVED_HOLD_MS = 5_000;
@@ -126,6 +128,7 @@ export function App(): React.ReactElement {
   );
   const [costEntries, setCostEntries] = useState<DailyEntry[] | null>(null);
   const [skillsPinned] = useState<number>(() => readSkillsPinned());
+  const [mcpPinned] = useState<number>(() => readMcpPinned());
   // Pending approval — most-recent event that needs human action.
   // Set when an `add` event arrives (or any tool event with verdict
   // 'review' / 'pending'). Cleared on resolve via SSE, on user action,
@@ -576,7 +579,13 @@ export function App(): React.ReactElement {
         lastTs={lastEvent?.ts}
         health={healthBadge}
       />
-      <HighLevel window={window} agg={agg} cost={costSnapshot} skillsPinned={skillsPinned} />
+      <HighLevel
+        window={window}
+        agg={agg}
+        cost={costSnapshot}
+        skillsPinned={skillsPinned}
+        mcpPinned={mcpPinned}
+      />
       <NotificationArea notification={notification} />
       <LiveLog
         events={events}
@@ -616,6 +625,19 @@ function isNotificationWorthy(e: ActivityEvent): boolean {
   if (e.checkedBy.startsWith('observe-mode')) return false;
   if (e.checkedBy === 'timeout' || e.checkedBy === 'popup-timeout') return false;
   return true;
+}
+
+function readMcpPinned(): number {
+  try {
+    const p = path.join(os.homedir(), '.node9', 'mcp-pins.json');
+    if (!fs.existsSync(p)) return 0;
+    const parsed = JSON.parse(fs.readFileSync(p, 'utf8')) as {
+      servers?: Record<string, unknown>;
+    };
+    return parsed.servers ? Object.keys(parsed.servers).length : 0;
+  } catch {
+    return 0;
+  }
 }
 
 function readSkillsPinned(): number {
