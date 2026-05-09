@@ -204,7 +204,7 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
  * and fails CI when the hash drifts without a version bump — forgetting
  * is loud, not silent.
  */
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v1';
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v2';
 
 /**
  * SHA-256 prefix of the detector-source files
@@ -216,7 +216,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v1';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '88b9f039ec4abf9f';
+export const CANONICAL_EXTRACTOR_HASH = '93b1d6265fcaaa18';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

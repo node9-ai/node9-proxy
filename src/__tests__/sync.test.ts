@@ -79,6 +79,7 @@ import {
   extractRules,
   pushScanSnapshot,
 } from '../daemon/sync.js';
+import { CANONICAL_EXTRACTOR_VERSION } from '@node9/policy-engine';
 import { getConfig, _resetConfigCache } from '../core.js';
 
 // ── helpers ────────────────────────────────────────────────────────────────────
@@ -685,7 +686,7 @@ describe('pushScanSnapshot — POST body dispatches on tick.uploadAs', () => {
     expect(captured).toBeTruthy();
     expect(captured!.sessionDeltas).toBeDefined();
     expect(captured!.sessionTotals).toBeUndefined();
-    expect(captured!.extractorVersion).toBe('canonical-v1');
+    expect(captured!.extractorVersion).toBe(CANONICAL_EXTRACTOR_VERSION);
     expect(mockMarkUploadComplete).not.toHaveBeenCalled();
   });
 
@@ -711,7 +712,7 @@ describe('pushScanSnapshot — POST body dispatches on tick.uploadAs', () => {
     expect(captured).toBeTruthy();
     expect(captured!.sessionTotals).toBeDefined();
     expect(captured!.sessionDeltas).toBeUndefined();
-    expect(captured!.extractorVersion).toBe('canonical-v1');
+    expect(captured!.extractorVersion).toBe(CANONICAL_EXTRACTOR_VERSION);
     // Flag-clear must happen exactly once after the successful POST so a
     // future tick reverts to the normal sessionDeltas path.
     expect(mockMarkUploadComplete).toHaveBeenCalledTimes(1);

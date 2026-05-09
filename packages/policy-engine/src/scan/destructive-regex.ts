@@ -17,9 +17,19 @@ export const DESTRUCTIVE_OP_RE =
 /**
  * Privilege-escalation regex. Standalone tokens only — `\bsudo\b` not
  * `sudo` to avoid matching e.g. `pseudo` substrings.
+ *
+ * The sudo branch matches `sudo` or `su` followed by whitespace then
+ * any non-whitespace character (`\S`). Earlier this required `[a-z]`
+ * (lowercase letter), which silently missed every flag form:
+ *   sudo -n cmd, sudo -S cmd, sudo -u user cmd, sudo --validate,
+ *   sudo -E env-cmd, sudo /path/to/cmd, sudo $CMD
+ * — all common AI-agent invocations and all genuine privilege-escalation
+ * attempts. `\S` catches every flag, absolute path, and var-expansion;
+ * the only thing it doesn't match is bare `sudo` with no arguments
+ * (which does nothing). chmod/chown branches unchanged.
  */
 export const PRIVILEGE_ESCALATION_RE =
-  /\b(sudo|su)\b\s+[a-z]|\bchmod\s+(0?777|\+x)\b|\bchown\s+root\b/i;
+  /\b(sudo|su)\b\s+\S|\bchmod\s+(0?777|\+x)\b|\bchown\s+root\b/i;
 
 /**
  * Sensitive file paths the agent shouldn't be reading via tool calls.

@@ -537,7 +537,7 @@ describe('watermark persistence', () => {
   it('saves and reloads the watermark across simulated daemon restart', () => {
     const wm = {
       schemaVersion: 2,
-      extractorVersion: 'canonical-v1',
+      extractorVersion: CANONICAL_EXTRACTOR_VERSION,
       createdAt: '2026-05-03T12:00:00.000Z',
       files: {
         '/foo/a.jsonl': { scannedTo: 100 },
