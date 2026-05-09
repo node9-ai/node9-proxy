@@ -22,7 +22,9 @@ import type {
   AuditAggregates,
   BlastSnapshot,
   CostSnapshot,
+  ForensicSseEvent,
   ScanSignalsSnapshot,
+  SessionForensicAgg,
   ShieldStatus,
 } from './types.js';
 
@@ -596,6 +598,44 @@ export function submitDecision(
 /** Final verdict the daemon assigned to a previously-pending tool call. */
 export type ResolvedVerdict = 'allow' | 'block' | 'review';
 
+/**
+ * Pure reducer: increment the matching counter on a forensic SSE event.
+ * 'dlp', 'loop', 'network-exfil' arrive via the audit-aggregation path
+ * (counted separately) — skip here to avoid double-count.
+ */
+export function applyForensicEvent(
+  agg: SessionForensicAgg,
+  ev: ForensicSseEvent
+): SessionForensicAgg {
+  const next = { ...agg };
+  switch (ev.category) {
+    case 'pii':
+      next.pii++;
+      break;
+    case 'sensitive-file-read':
+      next.sensitiveFileRead++;
+      break;
+    case 'privilege-escalation':
+      next.privilegeEscalation++;
+      break;
+    case 'destructive-op':
+      next.destructiveOp++;
+      break;
+    case 'pipe-to-shell':
+      next.pipeToShell++;
+      break;
+    case 'eval-of-remote':
+      next.evalOfRemote++;
+      break;
+    case 'long-output-redacted':
+      next.longOutputRedacted++;
+      break;
+    default:
+      break;
+  }
+  return next;
+}
+
 /** Initial reconnect delay (ms). Doubles on each failure up to MAX. */
 const SSE_BACKOFF_INITIAL_MS = 1_000;
 const SSE_BACKOFF_MAX_MS = 30_000;
@@ -603,6 +643,7 @@ const SSE_BACKOFF_MAX_MS = 30_000;
 export function subscribeToSse(
   onEvent: (e: ActivityEvent) => void,
   onResolve: (id: string, verdict?: ResolvedVerdict) => void,
+  onForensic: (e: ForensicSseEvent) => void,
   onError: (msg: string) => void
 ): () => void {
   const token = getInternalToken();
@@ -661,6 +702,20 @@ export function subscribeToSse(
               const raw = line.slice(5).trim();
               if (!raw) continue;
               try {
+                // Forensic events have their own payload shape (categorical
+                // metadata only — see ForensicSseEvent). Parse + dispatch
+                // before the SsePayload cast below.
+                if (currentEvent === 'forensic') {
+                  const fEvent = JSON.parse(raw) as ForensicSseEvent;
+                  if (
+                    fEvent &&
+                    typeof fEvent.id === 'string' &&
+                    typeof fEvent.category === 'string'
+                  ) {
+                    onForensic(fEvent);
+                  }
+                  continue;
+                }
                 const data = JSON.parse(raw) as SsePayload;
                 // Resolution events (`activity-result`, `remove`) carry
                 // an id but no full tool shape. They tell the UI to

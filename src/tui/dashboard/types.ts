@@ -114,6 +114,54 @@ export interface ScanSignalsSnapshot {
   longOutputRedacted: number;
 }
 
+/** Live (since-monitor-opened) forensic counts. Same shape as
+ *  ScanSignalsSnapshot's data fields, no `loaded` flag (always live —
+ *  starts at zero and increments on every 'forensic' SSE event from
+ *  the daemon). Keyed identical to ScanSignalsSnapshot for symmetry
+ *  in the RISK panel. */
+export interface SessionForensicAgg {
+  pii: number;
+  sensitiveFileRead: number;
+  privilegeEscalation: number;
+  destructiveOp: number;
+  pipeToShell: number;
+  evalOfRemote: number;
+  longOutputRedacted: number;
+}
+
+export const EMPTY_SESSION_FORENSIC: SessionForensicAgg = {
+  pii: 0,
+  sensitiveFileRead: 0,
+  privilegeEscalation: 0,
+  destructiveOp: 0,
+  pipeToShell: 0,
+  evalOfRemote: 0,
+  longOutputRedacted: 0,
+};
+
+/** SSE 'forensic' event payload. Mirrors the ForensicEvent shape the
+ *  daemon broadcasts in src/daemon/state.ts. Carries categorical
+ *  metadata only — never raw matched content. */
+export interface ForensicSseEvent {
+  type: 'forensic';
+  id: string;
+  ts: number;
+  sessionId: string;
+  category:
+    | 'dlp'
+    | 'pii'
+    | 'sensitive-file-read'
+    | 'privilege-escalation'
+    | 'network-exfil'
+    | 'pipe-to-shell'
+    | 'eval-of-remote'
+    | 'destructive-op'
+    | 'loop'
+    | 'long-output-redacted';
+  patternName?: string;
+  severity: 'critical' | 'warning';
+}
+
 /** Aggregated cost + tokens within the selected window. Computed off
  *  costSync.collectEntries(). `loaded: false` is shown while the
  *  initial async walk is in flight. */

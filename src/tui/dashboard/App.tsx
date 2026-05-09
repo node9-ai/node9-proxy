@@ -16,19 +16,23 @@ import os from 'os';
 import path from 'path';
 import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import {
+  EMPTY_SESSION_FORENSIC,
   TIME_WINDOWS,
   windowStartMs,
   type ActivityEvent,
   type AuditAggregates,
   type BlastSnapshot,
   type CostSnapshot,
+  type ForensicSseEvent,
   type ScanSignalsSnapshot,
+  type SessionForensicAgg,
   type ShieldStatus,
   type TimeWindow,
 } from './types.js';
 import {
   aggregateAudit,
   aggregateCost,
+  applyForensicEvent,
   buildLiveBackfill,
   loadBlast,
   loadCostEntries,
@@ -71,11 +75,11 @@ const BLAST_REFRESH_MS = 5 * 60_000;
  * Calibration: prior value was 22, which made LIVE 2 rows too tall,
  * pushing the bottom panels off-screen on standard ~41-row terminals.
  */
-// Updated to 30 to accommodate two additional RISK rows (forensic
-// scan signals: PII / file-reads / privesc / destructive on row 2;
-// eval-rem / pipe-shell / long-output on row 3). Originally was 28
-// after adding NotificationArea.
-const FIXED_PANELS_HEIGHT = 30;
+// Updated to 31 to accommodate the live-forensic row in RISK
+// (counts since monitor opened, fed by 'forensic' SSE events).
+// Originally 30 with two 90-day forensic rows; 28 before that with
+// NotificationArea but no forensic chips at all.
+const FIXED_PANELS_HEIGHT = 31;
 const LIVE_MIN_ROWS = 4;
 const NOTIFICATION_RECENT_WINDOW_MS = 60_000;
 const RESOLVED_HOLD_MS = 5_000;
@@ -85,6 +89,13 @@ const COST_REFRESH_MS = 5 * 60_000;
  *  Stops the area from flickering when many blocks fire in a burst.
  *  Approval cards still preempt instantly. */
 const NOTIFICATION_STICKY_MS = 10_000;
+/** Cooldown between two notifications of the same critical-forensic
+ *  category. A privesc storm or a tight rm -rf loop must not flood
+ *  the notification area — one per category per 30 s window. */
+const FORENSIC_NOTIFY_COOLDOWN_MS = 30_000;
+/** How long a critical-forensic notification stays visible before
+ *  falling through to lower-priority notifications. */
+const FORENSIC_DISPLAY_MS = 5_000;
 
 export function App(): React.ReactElement {
   const { exit } = useApp();
@@ -97,6 +108,21 @@ export function App(): React.ReactElement {
   const [blast, setBlast] = useState<BlastSnapshot | null>(null);
   const [shieldStatus, setShieldStatus] = useState<ShieldStatus | null>(null);
   const [scanSignals, setScanSignals] = useState<ScanSignalsSnapshot | null>(null);
+  const [sessionForensicAgg, setSessionForensicAgg] = useState<SessionForensicAgg>(() => ({
+    ...EMPTY_SESSION_FORENSIC,
+  }));
+  // Critical-severity forensic event currently displayed in NotificationArea.
+  // Cleared automatically after FORENSIC_DISPLAY_MS via the tick re-render.
+  const [recentForensic, setRecentForensic] = useState<{
+    category: ForensicSseEvent['category'];
+    sessionId: string;
+    firedAt: number;
+  } | null>(null);
+  // Per-category cooldown ref so a privesc storm produces only one
+  // notification per FORENSIC_NOTIFY_COOLDOWN_MS window.
+  const forensicNotifyCooldownRef = React.useRef<Map<ForensicSseEvent['category'], number>>(
+    new Map()
+  );
   const [costEntries, setCostEntries] = useState<DailyEntry[] | null>(null);
   const [skillsPinned] = useState<number>(() => readSkillsPinned());
   // Pending approval — most-recent event that needs human action.
@@ -188,6 +214,26 @@ export function App(): React.ReactElement {
           );
         }
         setPendingApproval((prev) => (prev && prev.id === resolvedId ? null : prev));
+      },
+      (forensicEvent) => {
+        // Live forensic finding from the daemon's 30 s broadcast tick.
+        // Always increment the counter (RISK panel reads from here).
+        // Only critical-severity events trigger a NotificationArea pop,
+        // and per-category cooldown prevents floods.
+        setSessionForensicAgg((prev) => applyForensicEvent(prev, forensicEvent));
+        if (forensicEvent.severity === 'critical') {
+          const now = Date.now();
+          const cooldown = forensicNotifyCooldownRef.current;
+          const lastFired = cooldown.get(forensicEvent.category) ?? 0;
+          if (now - lastFired >= FORENSIC_NOTIFY_COOLDOWN_MS) {
+            cooldown.set(forensicEvent.category, now);
+            setRecentForensic({
+              category: forensicEvent.category,
+              sessionId: forensicEvent.sessionId,
+              firedAt: now,
+            });
+          }
+        }
       },
       (msg) => setSseError(msg)
     );
@@ -409,6 +455,20 @@ export function App(): React.ReactElement {
         outcome: resolvedApproval.outcome,
       };
     }
+    // Live critical forensic finding — privesc / destructive / eval-rem.
+    // Sits ABOVE audit-derived block/review notifications because
+    // forensic detection runs against Claude's full JSONL while audit
+    // captures decisions, so the same call may produce both signals
+    // and we'd rather surface the higher-severity one first.
+    if (recentForensic && Date.now() - recentForensic.firedAt < FORENSIC_DISPLAY_MS) {
+      stickyRef.current = null;
+      return {
+        kind: 'forensic',
+        category: recentForensic.category,
+        sessionId: recentForensic.sessionId,
+        firedAt: recentForensic.firedAt,
+      };
+    }
     const now = Date.now();
 
     // Find the newest notification-worthy event in the recent window.
@@ -468,7 +528,7 @@ export function App(): React.ReactElement {
     }
     return candidate;
     // tick is intentionally a dep so age windows + sticky expiry re-eval each second.
-  }, [pendingApproval, approvalStatus, resolvedApproval, events, blast, tick]);
+  }, [pendingApproval, approvalStatus, resolvedApproval, recentForensic, events, blast, tick]);
 
   if (!agg || !blast) {
     return (
@@ -496,6 +556,7 @@ export function App(): React.ReactElement {
         blast={blast}
         shieldStatus={shieldStatus}
         scanSignals={scanSignals}
+        forensicAgg={sessionForensicAgg}
         window={window}
       />
       <StatusBar />

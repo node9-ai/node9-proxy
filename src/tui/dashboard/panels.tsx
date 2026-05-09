@@ -10,7 +10,9 @@ import type {
   AuditAggregates,
   BlastSnapshot,
   CostSnapshot,
+  ForensicSseEvent,
   ScanSignalsSnapshot,
+  SessionForensicAgg,
   ShieldStatus,
   TimeWindow,
 } from './types.js';
@@ -178,6 +180,7 @@ export type ApprovalStatus =
 export type Notification =
   | { kind: 'approval'; event: ActivityEvent; status: ApprovalStatus }
   | { kind: 'resolved'; event: ActivityEvent; outcome: 'allow' | 'deny' | 'trust' }
+  | { kind: 'forensic'; category: ForensicSseEvent['category']; sessionId: string; firedAt: number }
   | { kind: 'block'; event: ActivityEvent; ageMs: number }
   | { kind: 'review'; event: ActivityEvent; ageMs: number }
   | { kind: 'loop'; event: ActivityEvent; ageMs: number }
@@ -197,6 +200,8 @@ export function NotificationArea(props: { notification: Notification }): React.R
           : notification.outcome === 'deny'
             ? COL.liveOff
             : COL.panelHigh;
+      case 'forensic':
+        return COL.liveOff;
       case 'block':
         return COL.liveOff;
       case 'review':
@@ -224,10 +229,42 @@ export function NotificationArea(props: { notification: Notification }): React.R
 function renderNotificationBody(n: Notification): React.ReactNode {
   if (n.kind === 'approval') return renderApproval(n.event, n.status);
   if (n.kind === 'resolved') return renderResolved(n.event, n.outcome);
+  if (n.kind === 'forensic') return renderForensic(n.category, n.sessionId);
   if (n.kind === 'block') return renderEventInfo(n.event, '🛑 BLOCKED', COL.liveOff, n.ageMs);
   if (n.kind === 'review') return renderEventInfo(n.event, '🟡 REVIEW', COL.panelHigh, n.ageMs);
   if (n.kind === 'loop') return renderEventInfo(n.event, '🔁 LOOP', COL.panelHigh, n.ageMs);
   return renderIdle(n.blastScore);
+}
+
+function renderForensic(
+  category: ForensicSseEvent['category'],
+  sessionId: string
+): React.ReactNode {
+  const label = (() => {
+    switch (category) {
+      case 'privilege-escalation':
+        return 'PRIVILEGE ESCALATION';
+      case 'destructive-op':
+        return 'DESTRUCTIVE OPERATION';
+      case 'eval-of-remote':
+        return 'EVAL OF REMOTE CONTENT';
+      default:
+        return category.toUpperCase().replace(/-/g, ' ');
+    }
+  })();
+  const sid = sessionId ? `·${sessionId.slice(0, 8)}` : '';
+  return (
+    <>
+      <Text wrap="truncate-end">
+        <Text color={COL.liveOff} bold>{`🛑 CRITICAL  `}</Text>
+        <Text bold>{label}</Text>
+        <Text dimColor>{`  ${sid}`}</Text>
+      </Text>
+      <Text dimColor wrap="truncate-end">
+        forensic finding · see [2] scan for details (Claude session)
+      </Text>
+    </>
+  );
 }
 
 function renderApproval(event: ActivityEvent, status: ApprovalStatus): React.ReactNode {
@@ -636,6 +673,7 @@ export function Risk(props: {
   blast: BlastSnapshot;
   shieldStatus: ShieldStatus | null;
   scanSignals: ScanSignalsSnapshot | null;
+  forensicAgg: SessionForensicAgg;
   window: TimeWindow;
 }): React.ReactElement {
   // Use the dedicated counters from aggregateAudit. Earlier this
@@ -701,6 +739,30 @@ export function Risk(props: {
         <Text dimColor> long-output</Text>
         {!props.scanSignals ? <Text dimColor>{'  (forensic scanning… 90d)'}</Text> : null}
         {props.scanSignals?.loaded ? <Text dimColor>{'  · last 90d'}</Text> : null}
+      </Text>
+      {/* Live forensic counts since `node9 monitor` opened. Updates within
+          ~30s of a finding via the daemon's 'forensic' SSE channel. Claude
+          sessions only — Cursor / Codex don't write JSONL the watermark
+          scanner reads from. See doc/roadmap/daemon-redesign.md (option A)
+          for multi-agent coverage plans. */}
+      <Text wrap="truncate-end">
+        <Text color={COL.brand} bold>
+          {'LIVE  '}
+        </Text>
+        <Text bold>{props.forensicAgg.pii}</Text>
+        <Text dimColor> pii · </Text>
+        <Text bold>{props.forensicAgg.sensitiveFileRead}</Text>
+        <Text dimColor> read · </Text>
+        <Text bold>{props.forensicAgg.privilegeEscalation}</Text>
+        <Text dimColor> priv · </Text>
+        <Text bold>{props.forensicAgg.destructiveOp}</Text>
+        <Text dimColor> dest · </Text>
+        <Text bold>{props.forensicAgg.evalOfRemote}</Text>
+        <Text dimColor> eval · </Text>
+        <Text bold>{props.forensicAgg.pipeToShell}</Text>
+        <Text dimColor> pipe · </Text>
+        <Text bold>{props.forensicAgg.longOutputRedacted}</Text>
+        <Text dimColor> long (Claude)</Text>
       </Text>
       {props.blast.paths.length > 0 ? (
         // Inline path list — saves ~4 rows vs one-per-line. Long

@@ -17,10 +17,12 @@ import { describe, expect, it } from 'vitest';
 import {
   aggregateAudit,
   aggregateCost,
+  applyForensicEvent,
   auditEntryToActivityEvent,
   compactPath,
   mapResultStatus,
 } from '../tui/dashboard/data';
+import { EMPTY_SESSION_FORENSIC, type ForensicSseEvent } from '../tui/dashboard/types';
 import type { DailyEntry } from '../costSync';
 
 // ── shared minimal-shape helpers ──────────────────────────────────────────────
@@ -507,5 +509,64 @@ describe('aggregateCost — byModel field', () => {
       Date.parse('2026-05-08T00:00:00Z')
     );
     expect(c.byModel).toEqual([]);
+  });
+});
+
+// ── applyForensicEvent ────────────────────────────────────────────────────────
+
+describe('applyForensicEvent', () => {
+  function fEvent(
+    category: ForensicSseEvent['category'],
+    severity: 'critical' | 'warning' = 'warning'
+  ): ForensicSseEvent {
+    return {
+      type: 'forensic',
+      id: `fnd_${category}`,
+      ts: 0,
+      sessionId: 's1',
+      category,
+      severity,
+    };
+  }
+
+  it('increments the matching counter for each forensic category', () => {
+    let agg = { ...EMPTY_SESSION_FORENSIC };
+    agg = applyForensicEvent(agg, fEvent('pii'));
+    agg = applyForensicEvent(agg, fEvent('sensitive-file-read'));
+    agg = applyForensicEvent(agg, fEvent('privilege-escalation', 'critical'));
+    agg = applyForensicEvent(agg, fEvent('destructive-op', 'critical'));
+    agg = applyForensicEvent(agg, fEvent('pipe-to-shell'));
+    agg = applyForensicEvent(agg, fEvent('eval-of-remote', 'critical'));
+    agg = applyForensicEvent(agg, fEvent('long-output-redacted'));
+    expect(agg.pii).toBe(1);
+    expect(agg.sensitiveFileRead).toBe(1);
+    expect(agg.privilegeEscalation).toBe(1);
+    expect(agg.destructiveOp).toBe(1);
+    expect(agg.pipeToShell).toBe(1);
+    expect(agg.evalOfRemote).toBe(1);
+    expect(agg.longOutputRedacted).toBe(1);
+  });
+
+  it('skips dlp / loop / network-exfil — those are counted via audit aggregation', () => {
+    let agg = { ...EMPTY_SESSION_FORENSIC };
+    agg = applyForensicEvent(agg, fEvent('dlp'));
+    agg = applyForensicEvent(agg, fEvent('loop'));
+    agg = applyForensicEvent(agg, fEvent('network-exfil'));
+    expect(agg).toEqual(EMPTY_SESSION_FORENSIC);
+  });
+
+  it('treats applyForensicEvent as a pure function (no input mutation)', () => {
+    const before = { ...EMPTY_SESSION_FORENSIC };
+    const snapshot = JSON.stringify(before);
+    applyForensicEvent(before, fEvent('pii'));
+    expect(JSON.stringify(before)).toBe(snapshot);
+  });
+
+  it('accumulates counts on the same category', () => {
+    let agg = { ...EMPTY_SESSION_FORENSIC };
+    agg = applyForensicEvent(agg, fEvent('pii'));
+    agg = applyForensicEvent(agg, fEvent('pii'));
+    agg = applyForensicEvent(agg, fEvent('pii'));
+    expect(agg.pii).toBe(3);
   });
 });
