@@ -83,7 +83,12 @@ const BLAST_REFRESH_MS = 5 * 60_000;
 //   header (1) + HIGH LEVEL (5) + Notification (4) + LIVE chrome (3) +
 //   REPORT (9) + RISK (6) + StatusBar (1) = 29
 const FIXED_PANELS_HEIGHT = 29;
-const LIVE_MIN_ROWS = 4;
+/** Minimum content rows LIVE renders. 1 instead of a higher floor —
+ *  on terminals smaller than 33 rows we'd rather LIVE shrink and keep
+ *  the Header visible than over-claim space and push the dashboard
+ *  past the terminal height (the outer Box's overflow="hidden" then
+ *  clips the bottom panels instead of scrolling the top off). */
+const LIVE_MIN_ROWS = 1;
 const NOTIFICATION_RECENT_WINDOW_MS = 60_000;
 const RESOLVED_HOLD_MS = 5_000;
 const COST_REFRESH_MS = 5 * 60_000;
@@ -573,9 +578,15 @@ export function App(): React.ReactElement {
   // user always sees the brand strip and key hints. Earlier the loading
   // guard early-returned just "Loading dashboard…" with no chrome — that
   // gave the impression the header was missing on slow blast walks.
+  //
+  // overflow="hidden" guards against the case where total panel height
+  // exceeds termRows (any terminal smaller than ~33 rows). Without it,
+  // overflowing children push the top off-screen — the Header walks off
+  // the moment the panels fill in. With it, the bottom (Risk, StatusBar)
+  // gets clipped instead.
   const loading = !agg || !blast;
   return (
-    <Box flexDirection="column" height="100%">
+    <Box flexDirection="column" height="100%" overflow="hidden">
       <Header
         connected={!sseError}
         lastAgent={lastAgent}
