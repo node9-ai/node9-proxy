@@ -297,24 +297,36 @@ export function loadCostEntries(): Promise<DailyEntry[]> {
  * Subtract a baseline snapshot from cost entries so HIGH LEVEL can show
  * since-monitor-opened spend instead of today's running total.
  *
- * costSync.collectEntries returns one row per (date, model). Entries
- * the user already had at mount time form the baseline; rows that grow
- * during the session contribute their delta; rows that didn't exist at
- * mount (e.g., a model used for the first time, or tomorrow's date if
- * the user runs across midnight) contribute their full value.
+ * costSync.collectEntries returns one row per (date, model, workingDir,
+ * runId) tuple — multiple entries can share the same (date, model). The
+ * baseline must therefore key on the FULL tuple; collapsing on (date,
+ * model) only would alias unrelated rows together and produce wildly
+ * wrong deltas.
+ *
+ * Entries the user already had at mount time form the baseline; rows
+ * that grow during the session contribute their delta; rows that didn't
+ * exist at mount (new session, new project dir, tomorrow's date) pass
+ * through unchanged.
  *
  * Pure function. Returns a fresh array of new DailyEntry objects with
- * the original `date`/`model` preserved and numeric fields adjusted.
+ * the original tuple fields preserved and numeric fields adjusted.
  * Math.max(0, ...) guards against negative values that could arise if
  * the underlying cost data is rebuilt or trimmed externally.
  */
+function entryKey(e: DailyEntry): string {
+  // Match the same tuple costSync uses internally (parseJSONLFile:97):
+  // `${date}::${norm}::${workingDir}::${runId}`. We use `|` separators
+  // here for readability since we never round-trip the key back into
+  // costSync — it's local bookkeeping only.
+  return `${e.date}|${e.model}|${e.workingDir ?? ''}|${e.runId ?? ''}`;
+}
+
 export function subtractCostBaseline(
   entries: DailyEntry[],
   baseline: Map<string, DailyEntry>
 ): DailyEntry[] {
   return entries.map((e) => {
-    const key = `${e.date}|${e.model}`;
-    const b = baseline.get(key);
+    const b = baseline.get(entryKey(e));
     if (!b) return e;
     return {
       ...e,
@@ -327,11 +339,12 @@ export function subtractCostBaseline(
   });
 }
 
-/** Build the (date|model)→entry baseline map used by subtractCostBaseline.
- *  Captures the values once on the first cost-load after monitor mount. */
+/** Build the (date|model|workingDir|runId)→entry baseline map used by
+ *  subtractCostBaseline. Captured once on the first cost-load after
+ *  monitor mount. */
 export function buildCostBaseline(entries: DailyEntry[]): Map<string, DailyEntry> {
   const map = new Map<string, DailyEntry>();
-  for (const e of entries) map.set(`${e.date}|${e.model}`, { ...e });
+  for (const e of entries) map.set(entryKey(e), { ...e });
   return map;
 }
 

@@ -732,23 +732,78 @@ describe('buildCostBaseline', () => {
     };
   }
 
-  it('keys entries by `${date}|${model}`', () => {
-    const a = entry({ date: '2026-05-09', model: 'claude-sonnet-4-6' });
-    const b = entry({ date: '2026-05-09', model: 'claude-haiku-4-5' });
+  it('keys entries by the full (date, model, workingDir, runId) tuple', () => {
+    // Two entries with same (date, model) but different runId — they
+    // are distinct sessions and must not collapse to one baseline key.
+    // Earlier the key was just (date, model) which produced wildly wrong
+    // deltas: multiple session entries collapsed onto one baseline value
+    // and each got the wrong delta subtracted.
+    const a = entry({ runId: 'session-A', costUSD: 10 });
+    const b = entry({ runId: 'session-B', costUSD: 20 });
     const map = buildCostBaseline([a, b]);
     expect(map.size).toBe(2);
-    expect(map.has('2026-05-09|claude-sonnet-4-6')).toBe(true);
-    expect(map.has('2026-05-09|claude-haiku-4-5')).toBe(true);
+    expect(map.has('2026-05-09|claude-sonnet-4-6||session-A')).toBe(true);
+    expect(map.has('2026-05-09|claude-sonnet-4-6||session-B')).toBe(true);
+  });
+
+  it('keys distinct workingDir entries separately even with same model+date', () => {
+    const a = entry({ workingDir: '/home/u/projA' });
+    const b = entry({ workingDir: '/home/u/projB' });
+    const map = buildCostBaseline([a, b]);
+    expect(map.size).toBe(2);
   });
 
   it('clones each entry so caller mutations do not bleed into the baseline', () => {
-    const a = entry({ costUSD: 5 });
+    const a = entry({ costUSD: 5, runId: 'r1' });
     const map = buildCostBaseline([a]);
     a.costUSD = 999;
-    expect(map.get('2026-05-09|claude-sonnet-4-6')!.costUSD).toBe(5);
+    expect(map.get('2026-05-09|claude-sonnet-4-6||r1')!.costUSD).toBe(5);
   });
 
   it('returns an empty map for empty input', () => {
     expect(buildCostBaseline([]).size).toBe(0);
+  });
+});
+
+describe('subtractCostBaseline regression — multiple entries per (date, model)', () => {
+  function entry(overrides: Partial<DailyEntry> = {}): DailyEntry {
+    return {
+      date: '2026-05-09',
+      model: 'claude-sonnet-4-6',
+      costUSD: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      ...overrides,
+    };
+  }
+
+  // The original bug: collectEntries can return multiple DailyEntry
+  // rows for the same (date, model) — one per (workingDir, runId)
+  // tuple. With (date, model) keying, all rows collapsed onto the
+  // last one and the deltas were nonsense (HIGH LEVEL showed $169
+  // cost on monitor open instead of $0). Regression test pins the
+  // tuple-keyed baseline behavior.
+  it('zeroes ALL baselined entries even when several share (date, model)', () => {
+    const e1 = entry({ runId: 'r1', costUSD: 80 });
+    const e2 = entry({ runId: 'r2', costUSD: 50 });
+    const e3 = entry({ runId: 'r3', costUSD: 39 });
+    const baseline = buildCostBaseline([e1, e2, e3]);
+    const out = subtractCostBaseline([e1, e2, e3], baseline);
+    expect(out.map((o) => o.costUSD)).toEqual([0, 0, 0]);
+  });
+
+  it('returns correct per-entry delta when each session row grows', () => {
+    const baseline = buildCostBaseline([
+      entry({ runId: 'r1', costUSD: 80 }),
+      entry({ runId: 'r2', costUSD: 50 }),
+    ]);
+    const grown = [
+      entry({ runId: 'r1', costUSD: 90 }), // +$10
+      entry({ runId: 'r2', costUSD: 65 }), // +$15
+    ];
+    const out = subtractCostBaseline(grown, baseline);
+    expect(out.map((o) => o.costUSD)).toEqual([10, 15]);
   });
 });
