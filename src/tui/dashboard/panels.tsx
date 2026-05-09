@@ -262,9 +262,15 @@ function renderNotificationBody(n: Notification): React.ReactNode {
   if (n.kind === 'approval') return renderApproval(n.event, n.status);
   if (n.kind === 'resolved') return renderResolved(n.event, n.outcome);
   if (n.kind === 'forensic') return renderForensic(n.category, n.sessionId);
+  // Past-tense labels for retrospective states. Active ones use
+  // 'approval' kind (with [a/d/t] keys); these render only AFTER the
+  // decision is taken (or hard-blocked) so they're never actionable —
+  // labels need to communicate "already handled" so users don't wait
+  // for keys that aren't coming.
   if (n.kind === 'block') return renderEventInfo(n.event, '🛑 BLOCKED', COL.liveOff, n.ageMs);
-  if (n.kind === 'review') return renderEventInfo(n.event, '🟡 REVIEW', COL.panelHigh, n.ageMs);
-  if (n.kind === 'loop') return renderEventInfo(n.event, '🔁 LOOP', COL.panelHigh, n.ageMs);
+  if (n.kind === 'review') return renderEventInfo(n.event, '🟡 REVIEWED', COL.panelHigh, n.ageMs);
+  if (n.kind === 'loop')
+    return renderEventInfo(n.event, '🔁 LOOP DETECTED', COL.panelHigh, n.ageMs);
   return renderIdle(n.blastScore);
 }
 
