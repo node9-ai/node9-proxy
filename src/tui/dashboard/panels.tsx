@@ -12,13 +12,11 @@ import type {
   CostSnapshot,
   ForensicSseEvent,
   ReportPeriod,
-  ScanSignalsSnapshot,
   SessionForensicAgg,
   ShieldStatus,
   TimeWindow,
   View,
 } from './types.js';
-import { TIME_WINDOWS } from './types.js';
 import type { HealthBadge } from './health.js';
 import {
   cacheHitRate,
@@ -50,26 +48,15 @@ const COL = {
 // ---------------------------------------------------------------------------
 
 export function Header(props: {
-  window: TimeWindow;
   connected: boolean;
   lastAgent?: string;
   lastTs?: string;
   health: HealthBadge;
 }): React.ReactElement {
+  // Phase 2 of two-view restructure: time-window tabs leave the header.
+  // Realtime view is "since open"; Report view has its own period picker.
   return (
     <Box flexDirection="row" justifyContent="space-between" paddingX={1}>
-      <Box>
-        {TIME_WINDOWS.map((w, i) => (
-          <Text key={w}>
-            {i > 0 ? '   ' : ''}
-            {w === props.window ? (
-              <Text color={COL.brand} bold>{`[ ${w} ]`}</Text>
-            ) : (
-              <Text dimColor>{w}</Text>
-            )}
-          </Text>
-        ))}
-      </Box>
       <Box>
         <Text color={COL.brand} bold>
           🛡 node9 dashboard
@@ -78,8 +65,8 @@ export function Header(props: {
         <Text color={props.connected ? COL.live : COL.liveOff}>●</Text>
         <Text dimColor>{props.connected ? ' live' : ' offline'}</Text>
         {props.lastAgent ? <Text dimColor>{`  ${props.lastAgent}`}</Text> : null}
-        {renderHealthBadge(props.health)}
       </Box>
+      <Box>{renderHealthBadge(props.health)}</Box>
     </Box>
   );
 }
@@ -221,10 +208,9 @@ export type Notification =
 
 export const NOTIFICATION_HEIGHT = 4;
 /** Fixed height for the REPORT panel (see Report() for the row math).
- *  Pinned so adding/removing model or block rows doesn't reflow the
- *  panels below it — earlier the title scrolled off-screen when an
- *  extra model entered the cost rollup. */
-export const REPORT_PANEL_HEIGHT = 11;
+ *  3 columns now (Tools / Shell / Models). Worst case = 6 rows in any
+ *  column (1 header + 5 data) + title (1) + 2 borders = 9. */
+export const REPORT_PANEL_HEIGHT = 9;
 
 export function NotificationArea(props: { notification: Notification }): React.ReactElement {
   const { notification } = props;
@@ -604,18 +590,19 @@ export function Report(props: {
 }): React.ReactElement {
   const { agg, cost } = props;
   const maxTool = Math.max(1, ...agg.byTool.map((t) => t.calls));
-  // Top-3 of each — keeps the right column readable on standard widths.
-  const topBlocks = agg.byBlock.slice(0, 3);
-  const maxBlock = Math.max(1, ...topBlocks.map((b) => b.count));
-  // Top-3 models from cost data (already loaded). Provides per-model
-  // cost split that mirrors what `node9 report` shows under "Cost".
+  // Top-5 shell commands (already produced by aggregateAudit). Restored
+  // in phase 2 of the two-view restructure: shell vocabulary is realtime
+  // signal ("how is the agent using bash right now"), and Top Blocks
+  // moves to View 2's Activity section where it sits alongside daily
+  // and per-hour patterns.
+  const maxShell = Math.max(1, ...agg.byShell.map((s) => s.count));
+  // Top-3 models from cost data. Same data `node9 report` uses.
   const topModels = (cost?.byModel ?? []).slice(0, 3);
   const maxModelCost = Math.max(1, ...topModels.map((m) => m.costUSD));
   return (
     // Fixed height so adding/removing model rows doesn't reflow the rest
-    // of the dashboard. Worst-case interior: right column = "Top Blocks"
-    // header + 3 rows + "Models" header + 3 rows = 8 rows. Plus title (1)
-    // + 2 borders = 11.
+    // of the dashboard. Worst case: tools or shell column = 6 rows
+    // (1 header + 5 data). Plus title (1) + 2 borders = 9.
     <Box
       flexDirection="column"
       borderStyle="round"
@@ -631,56 +618,59 @@ export function Report(props: {
         <Text dimColor>{`  · ${labelFor(props.window)}`}</Text>
       </Text>
       <Box flexDirection="row">
+        {/* Tools — top 5 by call count. */}
         <Box flexDirection="column" flexGrow={1}>
           <Text dimColor wrap="truncate-end">
-            {'Tools'.padEnd(16) + 'calls'.padStart(7) + 'blocked'.padStart(9)}
+            {'Tools'.padEnd(13) + 'calls'.padStart(6) + 'blk'.padStart(5)}
           </Text>
           {agg.byTool.length === 0 ? (
             <Text dimColor>(no tools)</Text>
           ) : (
             agg.byTool.map((t) => (
               <Text key={t.tool} wrap="truncate-end">
-                <Text dimColor>{bar(t.calls, maxTool, 6)}</Text>
-                <Text>{` ${truncate(t.tool, 14).padEnd(14)}`}</Text>
-                <Text bold>{`${t.calls}`.padStart(6)}</Text>
+                <Text dimColor>{bar(t.calls, maxTool, 4)}</Text>
+                <Text>{` ${truncate(t.tool, 11).padEnd(11)}`}</Text>
+                <Text bold>{`${t.calls}`.padStart(5)}</Text>
                 <Text color={t.blocked > 0 ? COL.liveOff : COL.textDim}>
-                  {`  ${t.blocked}`.padStart(8)}
+                  {`  ${t.blocked}`.padStart(5)}
                 </Text>
               </Text>
             ))
           )}
         </Box>
+        {/* Shell — top 5 first-token commands. */}
         <Box flexDirection="column" flexGrow={1} marginLeft={2}>
-          {/* Top Blocks: which rules actually fired. Lifted from
-              `node9 report` ("Top Blocks" section). Replaces the
-              earlier shell-cmd breakdown — security signal beats
-              shell-vocabulary trivia. */}
           <Text dimColor wrap="truncate-end">
-            {'Top Blocks'.padEnd(20) + 'count'.padStart(8)}
+            {'Shell'.padEnd(13) + 'calls'.padStart(6) + 'blk'.padStart(5)}
           </Text>
-          {topBlocks.length === 0 ? (
-            <Text dimColor>(no blocks)</Text>
+          {agg.byShell.length === 0 ? (
+            <Text dimColor>(no shell)</Text>
           ) : (
-            topBlocks.map((b) => (
-              <Text key={b.rule} wrap="truncate-end">
-                <Text dimColor>{bar(b.count, maxBlock, 6)}</Text>
-                <Text>{` ${truncate(b.rule, 18).padEnd(18)}`}</Text>
-                <Text bold>{`${b.count}`.padStart(6)}</Text>
+            agg.byShell.map((s) => (
+              <Text key={s.cmd} wrap="truncate-end">
+                <Text dimColor>{bar(s.count, maxShell, 4)}</Text>
+                <Text>{` ${truncate(s.cmd, 11).padEnd(11)}`}</Text>
+                <Text bold>{`${s.count}`.padStart(5)}</Text>
+                <Text color={s.blocked > 0 ? COL.liveOff : COL.textDim}>
+                  {`  ${s.blocked}`.padStart(5)}
+                </Text>
               </Text>
             ))
           )}
-          {/* Models breakdown — per-model cost from cost.byModel. */}
+        </Box>
+        {/* Models — top 3 by cost. */}
+        <Box flexDirection="column" flexGrow={1} marginLeft={2}>
           <Text dimColor wrap="truncate-end">
-            {'Models'.padEnd(20) + 'cost'.padStart(8)}
+            {'Models'.padEnd(15) + 'cost'.padStart(8)}
           </Text>
           {topModels.length === 0 ? (
             <Text dimColor>(cost loading…)</Text>
           ) : (
             topModels.map((m) => (
               <Text key={m.model} wrap="truncate-end">
-                <Text dimColor>{bar(m.costUSD, maxModelCost, 6)}</Text>
-                <Text>{` ${truncate(shortenModel(m.model), 18).padEnd(18)}`}</Text>
-                <Text bold>{formatCost(m.costUSD).padStart(6)}</Text>
+                <Text dimColor>{bar(m.costUSD, maxModelCost, 4)}</Text>
+                <Text>{` ${truncate(shortenModel(m.model), 13).padEnd(13)}`}</Text>
+                <Text bold>{formatCost(m.costUSD).padStart(7)}</Text>
               </Text>
             ))
           )}
@@ -688,16 +678,6 @@ export function Report(props: {
       </Box>
     </Box>
   );
-}
-
-/** Read a forensic-signal field from the snapshot. Returns "…" while
- *  the async walk is in flight so the chip shows a placeholder. */
-function scanCount(
-  s: ScanSignalsSnapshot | null,
-  key: Exclude<keyof ScanSignalsSnapshot, 'loaded'>
-): string | number {
-  if (!s) return '…';
-  return s[key];
 }
 
 function bar(value: number, max: number, width: number): string {
@@ -714,7 +694,6 @@ export function Risk(props: {
   agg: AuditAggregates;
   blast: BlastSnapshot;
   shieldStatus: ShieldStatus | null;
-  scanSignals: ScanSignalsSnapshot | null;
   forensicAgg: SessionForensicAgg;
   window: TimeWindow;
 }): React.ReactElement {
@@ -753,40 +732,13 @@ export function Risk(props: {
         <Text dimColor> paths · score </Text>
         <Text bold color={scoreColor}>{`${props.blast.score}/100`}</Text>
       </Text>
-      {/* Forensic signals from JSONL scan — last 90 days, NOT
-          windowed. `…` placeholder until first walk completes. */}
-      <Text wrap="truncate-end">
-        <Text color={COL.liveOff}>{'👤 '}</Text>
-        <Text bold>{scanCount(props.scanSignals, 'pii')}</Text>
-        <Text dimColor> PII · </Text>
-        <Text color={COL.liveOff}>{'📂 '}</Text>
-        <Text bold>{scanCount(props.scanSignals, 'sensitiveFileRead')}</Text>
-        <Text dimColor> reads · </Text>
-        <Text color={COL.panelHigh}>{'🛡 '}</Text>
-        <Text bold>{scanCount(props.scanSignals, 'privilegeEscalation')}</Text>
-        <Text dimColor> privesc · </Text>
-        <Text color={COL.liveOff}>{'💥 '}</Text>
-        <Text bold>{scanCount(props.scanSignals, 'destructiveOp')}</Text>
-        <Text dimColor> destruct</Text>
-      </Text>
-      <Text wrap="truncate-end">
-        <Text color={COL.liveOff}>{'☠️ '}</Text>
-        <Text bold>{scanCount(props.scanSignals, 'evalOfRemote')}</Text>
-        <Text dimColor> eval-rem · </Text>
-        <Text color={COL.liveOff}>{'📋 '}</Text>
-        <Text bold>{scanCount(props.scanSignals, 'pipeToShell')}</Text>
-        <Text dimColor> pipe-shell · </Text>
-        <Text color={COL.panelHigh}>{'📤 '}</Text>
-        <Text bold>{scanCount(props.scanSignals, 'longOutputRedacted')}</Text>
-        <Text dimColor> long-output</Text>
-        {!props.scanSignals ? <Text dimColor>{'  (forensic scanning… 90d)'}</Text> : null}
-        {props.scanSignals?.loaded ? <Text dimColor>{'  · last 90d'}</Text> : null}
-      </Text>
       {/* Live forensic counts since `node9 monitor` opened. Updates within
           ~30s of a finding via the daemon's 'forensic' SSE channel. Claude
           sessions only — Cursor / Codex don't write JSONL the watermark
           scanner reads from. See doc/roadmap/daemon-redesign.md (option A)
-          for multi-agent coverage plans. */}
+          for multi-agent coverage plans. The 90-day historical row that
+          previously sat above this LIVE row moved to View 2's Security
+          section in phase 2 of the two-view restructure. */}
       <Text wrap="truncate-end">
         <Text color={COL.brand} bold>
           {'LIVE  '}

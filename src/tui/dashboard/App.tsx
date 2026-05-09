@@ -17,7 +17,6 @@ import path from 'path';
 import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import {
   EMPTY_SESSION_FORENSIC,
-  TIME_WINDOWS,
   windowStartMs,
   type ActivityEvent,
   type AuditAggregates,
@@ -79,13 +78,12 @@ const BLAST_REFRESH_MS = 5 * 60_000;
  * Calibration: prior value was 22, which made LIVE 2 rows too tall,
  * pushing the bottom panels off-screen on standard ~41-row terminals.
  */
-// Updated to 33 to match actual rendered heights:
+// Phase 2 of two-view restructure: Risk lost 2 forensic 90d rows and
+// Report dropped Top Blocks (3-col layout now), so REPORT pin moved
+// 11→9. New total:
 //   header (1) + HIGH LEVEL (5) + Notification (4) + LIVE chrome (3) +
-//   REPORT (11, now pinned) + RISK (~8) + StatusBar (1) = 33
-// Earlier value (31) under-counted REPORT (was 9, actually 11 from
-// "Top Blocks + Models" right column), causing RISK chips to clip on
-// short terminals when the cost rollup gained a row.
-const FIXED_PANELS_HEIGHT = 33;
+//   REPORT (9) + RISK (≤7) + StatusBar (1) = 30
+const FIXED_PANELS_HEIGHT = 30;
 const LIVE_MIN_ROWS = 4;
 const NOTIFICATION_RECENT_WINDOW_MS = 60_000;
 const RESOLVED_HOLD_MS = 5_000;
@@ -115,7 +113,11 @@ export function App(): React.ReactElement {
   // Period setter wires up in phase 5 (period picker keys). Phase 1 just
   // shows the default in the stub Report view.
   const [reportPeriod] = useState<ReportPeriod>('7d');
-  const [window, setWindow] = useState<TimeWindow>('1d');
+  // Realtime view is "since monitor opened" — phase 2 of the two-view
+  // restructure. The TimeWindow concept stays (used by audit/cost aggs)
+  // but is pinned to 'now' which means startMs = openedAt. Period
+  // selection moves to View 2 (Report) where it belongs.
+  const [window] = useState<TimeWindow>('now');
   const [events, setEvents] = useState<ActivityEvent[]>([]);
   const [sseError, setSseError] = useState<string | undefined>();
   const [agg, setAgg] = useState<AuditAggregates | null>(null);
@@ -407,10 +409,6 @@ export function App(): React.ReactElement {
       setView('realtime');
     } else if (input === '2') {
       setView('report');
-    } else if (key.tab) {
-      const idx = TIME_WINDOWS.indexOf(window);
-      const next = TIME_WINDOWS[(idx + 1) % TIME_WINDOWS.length];
-      setWindow(next);
     } else if (input === 'r') {
       // Manual refresh of audit + blast + shields (cheap) and cost
       // + scan-signals (expensive, dispatched async so the keypress
@@ -590,7 +588,6 @@ export function App(): React.ReactElement {
   return (
     <Box flexDirection="column" height="100%">
       <Header
-        window={window}
         connected={!sseError}
         lastAgent={lastAgent}
         lastTs={lastEvent?.ts}
@@ -618,7 +615,6 @@ export function App(): React.ReactElement {
             agg={agg}
             blast={blast}
             shieldStatus={shieldStatus}
-            scanSignals={scanSignals}
             forensicAgg={sessionForensicAgg}
             window={window}
           />
