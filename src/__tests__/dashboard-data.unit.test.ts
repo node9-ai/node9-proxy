@@ -19,9 +19,11 @@ import {
   aggregateCost,
   applyForensicEvent,
   auditEntryToActivityEvent,
+  buildCostBaseline,
   compactPath,
   isValidForensicEvent,
   mapResultStatus,
+  subtractCostBaseline,
 } from '../tui/dashboard/data';
 import { EMPTY_SESSION_FORENSIC, type ForensicSseEvent } from '../tui/dashboard/types';
 import type { DailyEntry } from '../costSync';
@@ -639,5 +641,114 @@ describe('isValidForensicEvent', () => {
     expect(isValidForensicEvent('string')).toBe(false);
     expect(isValidForensicEvent(42)).toBe(false);
     expect(isValidForensicEvent([])).toBe(false);
+  });
+});
+
+describe('subtractCostBaseline', () => {
+  function entry(overrides: Partial<DailyEntry> = {}): DailyEntry {
+    return {
+      date: '2026-05-09',
+      model: 'claude-sonnet-4-6',
+      costUSD: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      ...overrides,
+    };
+  }
+
+  it('returns identity when baseline is empty', () => {
+    const entries = [entry({ costUSD: 5 })];
+    const out = subtractCostBaseline(entries, new Map());
+    expect(out).toEqual(entries);
+  });
+
+  it('zeroes out an entry that exactly matches the baseline (since-open delta = 0)', () => {
+    const e = entry({ costUSD: 5, inputTokens: 100, outputTokens: 50 });
+    const baseline = buildCostBaseline([e]);
+    const out = subtractCostBaseline([e], baseline);
+    expect(out[0].costUSD).toBe(0);
+    expect(out[0].inputTokens).toBe(0);
+    expect(out[0].outputTokens).toBe(0);
+  });
+
+  it('returns the delta when the entry has grown since baseline', () => {
+    const baselineEntry = entry({ costUSD: 5, inputTokens: 100, outputTokens: 50 });
+    const baseline = buildCostBaseline([baselineEntry]);
+    const grown = entry({ costUSD: 12, inputTokens: 250, outputTokens: 80 });
+    const out = subtractCostBaseline([grown], baseline);
+    expect(out[0].costUSD).toBe(7);
+    expect(out[0].inputTokens).toBe(150);
+    expect(out[0].outputTokens).toBe(30);
+  });
+
+  it('passes through entries not present in the baseline (e.g. tomorrow or new model)', () => {
+    const todayBaseline = entry({ date: '2026-05-09', costUSD: 5 });
+    const baseline = buildCostBaseline([todayBaseline]);
+    const tomorrow = entry({ date: '2026-05-10', costUSD: 3 });
+    const newModel = entry({ model: 'claude-haiku-4-5', costUSD: 1 });
+    const out = subtractCostBaseline([tomorrow, newModel], baseline);
+    expect(out[0]).toEqual(tomorrow);
+    expect(out[1]).toEqual(newModel);
+  });
+
+  it('clamps negative deltas to 0 (defensive against external data trims)', () => {
+    const baseline = buildCostBaseline([entry({ costUSD: 10, inputTokens: 200 })]);
+    const shrunk = entry({ costUSD: 4, inputTokens: 50 });
+    const out = subtractCostBaseline([shrunk], baseline);
+    expect(out[0].costUSD).toBe(0);
+    expect(out[0].inputTokens).toBe(0);
+  });
+
+  it('preserves date and model on every output entry', () => {
+    const baseline = buildCostBaseline([entry({ costUSD: 5 })]);
+    const grown = entry({ costUSD: 12 });
+    const out = subtractCostBaseline([grown], baseline);
+    expect(out[0].date).toBe(grown.date);
+    expect(out[0].model).toBe(grown.model);
+  });
+
+  it('does not mutate the input array', () => {
+    const grown = entry({ costUSD: 12 });
+    const before = JSON.stringify(grown);
+    const baseline = buildCostBaseline([entry({ costUSD: 5 })]);
+    subtractCostBaseline([grown], baseline);
+    expect(JSON.stringify(grown)).toBe(before);
+  });
+});
+
+describe('buildCostBaseline', () => {
+  function entry(overrides: Partial<DailyEntry> = {}): DailyEntry {
+    return {
+      date: '2026-05-09',
+      model: 'claude-sonnet-4-6',
+      costUSD: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      ...overrides,
+    };
+  }
+
+  it('keys entries by `${date}|${model}`', () => {
+    const a = entry({ date: '2026-05-09', model: 'claude-sonnet-4-6' });
+    const b = entry({ date: '2026-05-09', model: 'claude-haiku-4-5' });
+    const map = buildCostBaseline([a, b]);
+    expect(map.size).toBe(2);
+    expect(map.has('2026-05-09|claude-sonnet-4-6')).toBe(true);
+    expect(map.has('2026-05-09|claude-haiku-4-5')).toBe(true);
+  });
+
+  it('clones each entry so caller mutations do not bleed into the baseline', () => {
+    const a = entry({ costUSD: 5 });
+    const map = buildCostBaseline([a]);
+    a.costUSD = 999;
+    expect(map.get('2026-05-09|claude-sonnet-4-6')!.costUSD).toBe(5);
+  });
+
+  it('returns an empty map for empty input', () => {
+    expect(buildCostBaseline([]).size).toBe(0);
   });
 });

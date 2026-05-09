@@ -34,11 +34,13 @@ import {
   aggregateAudit,
   aggregateCost,
   applyForensicEvent,
+  buildCostBaseline,
   loadBlast,
   loadCostEntries,
   loadScanSignals,
   loadShieldStatus,
   readAuditEntries,
+  subtractCostBaseline,
   submitDecision,
   subscribeToSse,
 } from './data.js';
@@ -303,11 +305,22 @@ export function App(): React.ReactElement {
   // Cost — async because collectEntries() walks every JSONL under
   // ~/.claude/projects (1-5s on a heavy install). Render shows
   // "loading…" placeholder until the first walk completes.
+  //
+  // Baseline: snapshot today's-and-prior-days totals from the FIRST
+  // load. Subsequent loads subtract the baseline so HIGH LEVEL shows
+  // SINCE-MONITOR-OPENED spend, not today's running total. costSync's
+  // data is day-granular per (date, model) so a "since 14:00" delta
+  // requires this kind of bookkeeping.
+  const costBaselineRef = React.useRef<Map<string, DailyEntry> | null>(null);
   useEffect(() => {
     let cancelled = false;
     const loadAndSet = () => {
       loadCostEntries().then((entries) => {
-        if (!cancelled) setCostEntries(entries);
+        if (cancelled) return;
+        if (costBaselineRef.current === null) {
+          costBaselineRef.current = buildCostBaseline(entries);
+        }
+        setCostEntries(entries);
       });
     };
     loadAndSet();
@@ -319,7 +332,13 @@ export function App(): React.ReactElement {
   }, []);
   const costSnapshot: CostSnapshot | null = useMemo(() => {
     if (!costEntries) return null;
-    return aggregateCost(costEntries, windowStartMs(window, openedAt));
+    // Subtract the mount-time baseline so HIGH LEVEL shows since-open
+    // spend, not today's full running total. Baseline is null until
+    // the first loadCostEntries resolves; in that window we're rendering
+    // the placeholder anyway because costEntries is also null.
+    const baseline = costBaselineRef.current ?? new Map<string, DailyEntry>();
+    const adjusted = subtractCostBaseline(costEntries, baseline);
+    return aggregateCost(adjusted, windowStartMs(window, openedAt));
   }, [costEntries, window, openedAt]);
 
   useInput((input, key) => {

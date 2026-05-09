@@ -293,6 +293,48 @@ export function loadCostEntries(): Promise<DailyEntry[]> {
   });
 }
 
+/**
+ * Subtract a baseline snapshot from cost entries so HIGH LEVEL can show
+ * since-monitor-opened spend instead of today's running total.
+ *
+ * costSync.collectEntries returns one row per (date, model). Entries
+ * the user already had at mount time form the baseline; rows that grow
+ * during the session contribute their delta; rows that didn't exist at
+ * mount (e.g., a model used for the first time, or tomorrow's date if
+ * the user runs across midnight) contribute their full value.
+ *
+ * Pure function. Returns a fresh array of new DailyEntry objects with
+ * the original `date`/`model` preserved and numeric fields adjusted.
+ * Math.max(0, ...) guards against negative values that could arise if
+ * the underlying cost data is rebuilt or trimmed externally.
+ */
+export function subtractCostBaseline(
+  entries: DailyEntry[],
+  baseline: Map<string, DailyEntry>
+): DailyEntry[] {
+  return entries.map((e) => {
+    const key = `${e.date}|${e.model}`;
+    const b = baseline.get(key);
+    if (!b) return e;
+    return {
+      ...e,
+      costUSD: Math.max(0, e.costUSD - b.costUSD),
+      inputTokens: Math.max(0, e.inputTokens - b.inputTokens),
+      outputTokens: Math.max(0, e.outputTokens - b.outputTokens),
+      cacheReadTokens: Math.max(0, e.cacheReadTokens - b.cacheReadTokens),
+      cacheWriteTokens: Math.max(0, e.cacheWriteTokens - b.cacheWriteTokens),
+    };
+  });
+}
+
+/** Build the (date|model)→entry baseline map used by subtractCostBaseline.
+ *  Captures the values once on the first cost-load after monitor mount. */
+export function buildCostBaseline(entries: DailyEntry[]): Map<string, DailyEntry> {
+  const map = new Map<string, DailyEntry>();
+  for (const e of entries) map.set(`${e.date}|${e.model}`, { ...e });
+  return map;
+}
+
 export function aggregateCost(
   entries: DailyEntry[],
   startMs: number,
