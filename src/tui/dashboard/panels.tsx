@@ -211,6 +211,11 @@ export const NOTIFICATION_HEIGHT = 4;
  *  3 columns now (Tools / Shell / Models). Worst case = 6 rows in any
  *  column (1 header + 5 data) + title (1) + 2 borders = 9. */
 export const REPORT_PANEL_HEIGHT = 9;
+/** Fixed height for the RISK panel ("Live security"). Always exactly
+ *  4 content rows (title + dlp/loops/score + forensic + shield-summary)
+ *  plus 2 borders = 6. Pinned so the loading→loaded transition for
+ *  shieldStatus doesn't shift the layout. */
+export const RISK_PANEL_HEIGHT = 6;
 
 export function NotificationArea(props: { notification: Notification }): React.ReactElement {
   const { notification } = props;
@@ -713,6 +718,7 @@ export function Risk(props: {
       borderColor={COL.panelRisk}
       paddingX={1}
       marginX={1}
+      height={RISK_PANEL_HEIGHT}
     >
       <Text>
         <Text color={COL.brand} bold>
@@ -758,16 +764,16 @@ export function Risk(props: {
           call-to-action move to View 2's Coverage section in phase 8.
           Likewise the path list (was rendered here) — V2 Coverage owns
           the detail; V1 keeps just enough context for an at-a-glance
-          status check. */}
-      {props.shieldStatus ? (
-        <Text wrap="truncate-end">
-          <Text color={COL.live}>{'🛡 '}</Text>
-          <Text bold>{props.shieldStatus.active.length}</Text>
-          <Text dimColor> active · </Text>
-          <Text bold>{props.shieldStatus.inactive.length}</Text>
-          <Text dimColor> inactive</Text>
-        </Text>
-      ) : null}
+          status check. Always rendered (with `…` placeholder while
+          shieldStatus loads) so the panel height stays constant from
+          first paint. */}
+      <Text wrap="truncate-end">
+        <Text color={COL.live}>{'🛡 '}</Text>
+        <Text bold>{props.shieldStatus ? props.shieldStatus.active.length : '…'}</Text>
+        <Text dimColor> active · </Text>
+        <Text bold>{props.shieldStatus ? props.shieldStatus.inactive.length : '…'}</Text>
+        <Text dimColor> inactive</Text>
+      </Text>
     </Box>
   );
 }
