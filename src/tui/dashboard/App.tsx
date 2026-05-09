@@ -84,7 +84,14 @@ const BLAST_REFRESH_MS = 5 * 60_000;
 // inactive-shield CTA moved to View 2 Coverage.
 //   header (1) + HIGH LEVEL (5) + Notification (4) + LIVE chrome (3) +
 //   REPORT (9) + RISK (6) + StatusBar (1) = 29
-const FIXED_PANELS_HEIGHT = 29;
+//
+// +1 safety margin → 30. The exact-fit math (29 + maxRows == termRows)
+// failed in practice on a terminal reporting 41 rows: Ink emits an
+// extra newline at end-of-frame, or the terminal reserves a row for
+// its status/scrollbar — either way header scrolled off the top once
+// LIVE filled. Reserving 1 extra row makes the dashboard 1 row shorter
+// than the terminal so there's no overflow.
+const FIXED_PANELS_HEIGHT = 30;
 /** Minimum content rows LIVE renders. 1 instead of a higher floor —
  *  on terminals smaller than 33 rows we'd rather LIVE shrink and keep
  *  the Header visible than over-claim space and push the dashboard
