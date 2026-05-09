@@ -14,6 +14,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## v1.19.3 — macOS daemon-detection hotfix
+
+### Fixed
+
+- **`node9 doctor` reported the daemon as not running on macOS even when it was running** (issue #162). `isDaemonRunning()` shelled out to `ss` (Linux iproute2) to verify the TCP port was bound. On macOS `ss` does not exist, so `spawnSync` returned `ENOENT` and the function always returned `false` — even when the daemon process was up and the PID file was valid. This caused `node9 daemon status` (PID-file based) and `node9 doctor` (port-probe based) to disagree on macOS, and made browser/native approvals appear unavailable.
+
+  Fix: drop the TCP probe from the sync hot path. `isDaemonRunning()` now relies on PID-file validity + `process.kill(pid, 0)` — cross-platform and faster (no per-hook `spawnSync`). Callers needing strict HTTP-liveness should use the new `isDaemonReachable()` async helper. The orphan-adoption path in `daemon/server.ts` (rare, fires on `EADDRINUSE` without a PID file) keeps a port probe but now falls back from `ss` to `lsof` on macOS.
+
+  Adds a regression test asserting `isDaemonRunning()` does not invoke `spawnSync` — guards against re-introducing a Linux-only binary dependency.
+
+- **Misleading "browser dashboard" messages.** `node9 doctor` claimed _"Browser dashboard running → http://127.0.0.1:7391/"_ and the daemon banner printed _"🛡️ Node9 Guard LIVE: http://127.0.0.1:7391"_ — but the local browser dashboard was retired in the v3 browser-removal sprint and `GET /` now 404s. Updated both messages to describe what actually exists (terminal & native approvals; SSE/JSON-RPC for `node9 tail` and the MCP gateway).
+
+- **`undo` legacy-fallback inherited `GIT_DIR` from caller env.** `buildGitEnv()`'s shadow-absent path returned `{ ...process.env }` without stripping `GIT_DIR` / `GIT_WORK_TREE`. If those happened to be set in the caller's environment (e.g. running under `git commit` inside a git worktree), the legacy fallback would inherit a worktree pointer it shouldn't use. Now explicitly deletes both before returning.
+
+---
+
 ## v1.10.0 — Installed Skill Pinning (AST 02 + AST 07)
 
 ### Added

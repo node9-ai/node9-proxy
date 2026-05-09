@@ -2056,7 +2056,7 @@ describe('shouldSnapshot', () => {
 
 describe('isDaemonRunning', () => {
   it('returns false when PID file does not exist', () => {
-    // existsSpy returns false (set in beforeEach); spawnSync mock returns status:1 (no match)
+    // existsSpy returns false (set in beforeEach)
     expect(isDaemonRunning()).toBe(false);
   });
 
@@ -2069,55 +2069,37 @@ describe('isDaemonRunning', () => {
     expect(isDaemonRunning()).toBe(false);
   });
 
-  it('returns true when PID exists, process is alive, and port is open', async () => {
+  it('returns true when PID file is valid and process is alive', () => {
     const pidPath = path.join('/mock/home', '.node9', 'daemon.pid');
     existsSpy.mockImplementation((p) => String(p) === pidPath);
     readSpy.mockImplementation((p) =>
       // Use current process PID so kill(pid, 0) succeeds
       String(p) === pidPath ? JSON.stringify({ pid: process.pid, port: 7391 }) : ''
     );
-    // Also mock ss to confirm port is open — isDaemonRunning now requires both
-    // PID-alive AND TCP port listening to return true.
-    const { spawnSync: mockSpawnSync } = await import('child_process');
-    vi.mocked(mockSpawnSync).mockReturnValueOnce({
-      status: 0,
-      stdout: 'LISTEN 0 128 127.0.0.1:7391 0.0.0.0:* users:(("node",pid=12345,fd=18))',
-      stderr: '',
-      pid: 0,
-      output: [],
-      signal: null,
-      error: undefined,
-    });
     expect(isDaemonRunning()).toBe(true);
   });
 
-  it('returns true when no PID file but ss detects orphaned daemon on port', async () => {
+  // Regression for issue #162 (macOS: daemon silently failing).
+  //
+  // A previous version added a TCP probe via `spawnSync('ss', ...)` after
+  // process.kill(pid, 0). On macOS, `ss` (Linux iproute2) does not exist,
+  // so spawnSync returned { error: ENOENT, status: null } and the function
+  // always returned false — even when the daemon was running. This caused
+  // `node9 doctor` to incorrectly report the daemon as not running on macOS.
+  //
+  // We assert that isDaemonRunning() does not invoke spawnSync at all: the
+  // sync hot path must be cross-platform without depending on any external
+  // binary. Callers needing HTTP-liveness should use isDaemonReachable().
+  it('does not shell out to ss/lsof — works on systems without iproute2 (macOS)', async () => {
+    const pidPath = path.join('/mock/home', '.node9', 'daemon.pid');
+    existsSpy.mockImplementation((p) => String(p) === pidPath);
+    readSpy.mockImplementation((p) =>
+      String(p) === pidPath ? JSON.stringify({ pid: process.pid, port: 7391 }) : ''
+    );
     const { spawnSync: mockSpawnSync } = await import('child_process');
-    vi.mocked(mockSpawnSync).mockReturnValueOnce({
-      status: 0,
-      stdout: 'LISTEN 0 128 127.0.0.1:7391 0.0.0.0:* users:(("node",pid=12345,fd=18))',
-      stderr: '',
-      pid: 0,
-      output: [],
-      signal: null,
-      error: undefined,
-    });
-    // existsSpy already returns false (set in beforeEach)
+    vi.mocked(mockSpawnSync).mockClear();
     expect(isDaemonRunning()).toBe(true);
-  });
-
-  it('returns false when no PID file and ss finds nothing on port', async () => {
-    const { spawnSync: mockSpawnSync } = await import('child_process');
-    vi.mocked(mockSpawnSync).mockReturnValueOnce({
-      status: 0,
-      stdout: '',
-      stderr: '',
-      pid: 0,
-      output: [],
-      signal: null,
-      error: undefined,
-    });
-    expect(isDaemonRunning()).toBe(false);
+    expect(mockSpawnSync).not.toHaveBeenCalled();
   });
 
   it('returns false when PID file contains invalid JSON', () => {

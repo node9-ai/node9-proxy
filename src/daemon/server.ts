@@ -1124,14 +1124,33 @@ export function startDaemon(): void {
       })
         .then((res) => {
           if (res.ok) {
+            // Try to recover the orphan's PID and re-create the PID file so
+            // future stop/status calls can find it. Try `ss` first (Linux,
+            // fast); fall back to `lsof` (macOS + portable Linux).
             try {
-              const r = spawnSync('ss', ['-Htnp', `sport = :${DAEMON_PORT}`], {
+              let orphanPid: number | null = null;
+              const ss = spawnSync('ss', ['-Htnp', `sport = :${DAEMON_PORT}`], {
                 encoding: 'utf8',
                 timeout: 1000,
               });
-              const match = r.stdout?.match(/pid=(\d+)/);
-              if (match) {
-                const orphanPid = parseInt(match[1], 10);
+              if (!ss.error && ss.status === 0) {
+                const m = ss.stdout?.match(/pid=(\d+)/);
+                if (m) orphanPid = parseInt(m[1], 10);
+              } else if (
+                (ss.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT' ||
+                ss.status === null
+              ) {
+                const lsof = spawnSync(
+                  'lsof',
+                  ['-nP', `-iTCP:${DAEMON_PORT}`, '-sTCP:LISTEN', '-t'],
+                  { encoding: 'utf8', timeout: 1000 }
+                );
+                if (!lsof.error && lsof.status === 0) {
+                  const first = (lsof.stdout ?? '').split('\n')[0].trim();
+                  if (/^\d+$/.test(first)) orphanPid = parseInt(first, 10);
+                }
+              }
+              if (orphanPid !== null) {
                 process.kill(orphanPid, 0);
                 atomicWriteSync(
                   DAEMON_PID_FILE,
@@ -1170,7 +1189,7 @@ export function startDaemon(): void {
       JSON.stringify({ pid: process.pid, port: DAEMON_PORT, internalToken, autoStarted }),
       { mode: 0o600 }
     );
-    console.error(chalk.green(`🛡️  Node9 Guard LIVE: http://127.0.0.1:${DAEMON_PORT}`));
+    console.error(chalk.green(`🛡️  Node9 Guard LIVE on 127.0.0.1:${DAEMON_PORT}`));
   });
 
   // ── Flight Recorder ──────────────────────────────────────────────────────
