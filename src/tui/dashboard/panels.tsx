@@ -561,22 +561,21 @@ function ActivityRow({ event }: { event: ActivityEvent }): React.ReactElement {
       : agentLower.startsWith('codex')
         ? COL.agentCodex
         : COL.agentShell;
+  // Always exactly 1 row per event. The secondary `└─ rule: reason`
+  // line we used to render here broke the LiveLog padding math (which
+  // assumes 1 row per visible event) and made the panel grow as
+  // reason-bearing events accumulated, pushing the header off-screen.
+  // The reason text is still shown in NotificationArea for the latest
+  // alerted event; older row reasons live in the audit log.
   return (
-    <Box flexDirection="column">
-      <Text wrap="truncate-end">
-        <Text dimColor>{t} </Text>
-        <Text color={agentColor}>{agentLabel}</Text>
-        <Text> </Text>
-        <Text bold>{truncate(event.tool, 14).padEnd(14)}</Text>
-        <Text color={verdictColor}>{verdictIcon} </Text>
-        <Text dimColor>{event.preview}</Text>
-      </Text>
-      {event.reason ? (
-        <Text dimColor wrap="truncate-end">
-          {`           └─ ${event.checkedBy ?? 'rule'}: ${event.reason}`}
-        </Text>
-      ) : null}
-    </Box>
+    <Text wrap="truncate-end">
+      <Text dimColor>{t} </Text>
+      <Text color={agentColor}>{agentLabel}</Text>
+      <Text> </Text>
+      <Text bold>{truncate(event.tool, 14).padEnd(14)}</Text>
+      <Text color={verdictColor}>{verdictIcon} </Text>
+      <Text dimColor>{event.preview}</Text>
+    </Text>
   );
 }
 
