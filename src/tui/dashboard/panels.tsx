@@ -716,7 +716,7 @@ export function Risk(props: {
     >
       <Text>
         <Text color={COL.brand} bold>
-          DLP / LOOP / RISK
+          Live security
         </Text>
         <Text dimColor>{`  · ${labelFor(props.window)}`}</Text>
       </Text>
@@ -732,17 +732,12 @@ export function Risk(props: {
         <Text dimColor> paths · score </Text>
         <Text bold color={scoreColor}>{`${props.blast.score}/100`}</Text>
       </Text>
-      {/* Live forensic counts since `node9 monitor` opened. Updates within
-          ~30s of a finding via the daemon's 'forensic' SSE channel. Claude
-          sessions only — Cursor / Codex don't write JSONL the watermark
-          scanner reads from. See doc/roadmap/daemon-redesign.md (option A)
-          for multi-agent coverage plans. The 90-day historical row that
-          previously sat above this LIVE row moved to View 2's Security
-          section in phase 2 of the two-view restructure. */}
+      {/* Forensic counts since `node9 monitor` opened. Updates within
+          ~30s of a finding via the daemon's 'forensic' SSE channel.
+          Claude-only — Cursor / Codex don't write JSONL the watermark
+          scanner reads from. See doc/roadmap/daemon-redesign.md
+          (option A) for multi-agent coverage plans. */}
       <Text wrap="truncate-end">
-        <Text color={COL.brand} bold>
-          {'LIVE  '}
-        </Text>
         <Text bold>{props.forensicAgg.pii}</Text>
         <Text dimColor> pii · </Text>
         <Text bold>{props.forensicAgg.sensitiveFileRead}</Text>
@@ -758,24 +753,19 @@ export function Risk(props: {
         <Text bold>{props.forensicAgg.longOutputRedacted}</Text>
         <Text dimColor> long (Claude)</Text>
       </Text>
-      {props.blast.paths.length > 0 ? (
-        // Inline path list — saves ~4 rows vs one-per-line. Long
-        // joins get truncated by truncate-end with `…`; the count
-        // above already says how many there are total, so a partial
-        // visible list is honest.
+      {/* Single-line shield summary: active vs inactive counts only.
+          The full inactive-shield list and the "node9 shield enable"
+          call-to-action move to View 2's Coverage section in phase 8.
+          Likewise the path list (was rendered here) — V2 Coverage owns
+          the detail; V1 keeps just enough context for an at-a-glance
+          status check. */}
+      {props.shieldStatus ? (
         <Text wrap="truncate-end">
-          <Text color={COL.liveOff}>{'  ✗ '}</Text>
-          <Text>{props.blast.paths.join('  ·  ')}</Text>
-        </Text>
-      ) : null}
-      {props.shieldStatus && props.shieldStatus.inactive.length > 0 ? (
-        // Call-to-action: list shields the user hasn't enabled. Honest
-        // about scope (only shows registered builtin + user shields,
-        // not all possible shield names ever).
-        <Text wrap="truncate-end">
-          <Text dimColor>{'  Inactive: '}</Text>
-          <Text>{props.shieldStatus.inactive.join(' · ')}</Text>
-          <Text dimColor>{'  → node9 shield enable <name>'}</Text>
+          <Text color={COL.live}>{'🛡 '}</Text>
+          <Text bold>{props.shieldStatus.active.length}</Text>
+          <Text dimColor> active · </Text>
+          <Text bold>{props.shieldStatus.inactive.length}</Text>
+          <Text dimColor> inactive</Text>
         </Text>
       ) : null}
     </Box>

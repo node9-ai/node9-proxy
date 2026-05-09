@@ -34,7 +34,6 @@ import {
   aggregateAudit,
   aggregateCost,
   applyForensicEvent,
-  buildLiveBackfill,
   loadBlast,
   loadCostEntries,
   loadScanSignals,
@@ -78,12 +77,12 @@ const BLAST_REFRESH_MS = 5 * 60_000;
  * Calibration: prior value was 22, which made LIVE 2 rows too tall,
  * pushing the bottom panels off-screen on standard ~41-row terminals.
  */
-// Phase 2 of two-view restructure: Risk lost 2 forensic 90d rows and
-// Report dropped Top Blocks (3-col layout now), so REPORT pin moved
-// 11→9. New total:
+// Post-cleanup: RISK panel is now exactly 6 rows (title + dlp/loops/
+// score + forensic + shield-summary + 2 borders) — path list and full
+// inactive-shield CTA moved to View 2 Coverage.
 //   header (1) + HIGH LEVEL (5) + Notification (4) + LIVE chrome (3) +
-//   REPORT (9) + RISK (≤7) + StatusBar (1) = 30
-const FIXED_PANELS_HEIGHT = 30;
+//   REPORT (9) + RISK (6) + StatusBar (1) = 29
+const FIXED_PANELS_HEIGHT = 29;
 const LIVE_MIN_ROWS = 4;
 const NOTIFICATION_RECENT_WINDOW_MS = 60_000;
 const RESOLVED_HOLD_MS = 5_000;
@@ -183,19 +182,12 @@ export function App(): React.ReactElement {
   }, [stdout]);
   const liveMaxRows = Math.max(LIVE_MIN_ROWS, termRows - FIXED_PANELS_HEIGHT);
 
-  // Seed LIVE with the last N audit entries so the panel opens
-  // populated rather than empty. Runs once on mount; SSE events
-  // append to this buffer as they arrive. Backfill count tracks the
-  // initial terminal-derived maxRows — switching window doesn't
-  // re-seed (LIVE is independent of the time window per design).
-  // Effect runs once on mount only; liveMaxRows is read at that moment
-  // from the captured closure. We deliberately don't re-seed when the
-  // terminal resizes (would double-fill the buffer).
-  const initialMaxRowsRef = React.useRef(liveMaxRows);
-  useEffect(() => {
-    const backfill = buildLiveBackfill(initialMaxRowsRef.current);
-    if (backfill.length > 0) setEvents(backfill);
-  }, []);
+  // LIVE feed starts empty on mount — Realtime view is "since-open"
+  // semantics, so backfilling from past audit entries would mismatch
+  // the rest of the panels (which all aggregate from openedAt forward).
+  // Earlier this used buildLiveBackfill but was removed in the phase 2
+  // RISK/Realtime cleanup for consistency. To see history, switch to
+  // [2] Report view.
 
   // SSE subscription — runs once, fed by daemon.
   useEffect(() => {
@@ -577,14 +569,11 @@ export function App(): React.ReactElement {
     [agg, blast, scanSignals, shieldStatus, sessionForensicAgg]
   );
 
-  if (!agg || !blast) {
-    return (
-      <Box paddingX={1}>
-        <Text dimColor>Loading dashboard…</Text>
-      </Box>
-    );
-  }
-
+  // Render Header + StatusBar in every state (including loading) so the
+  // user always sees the brand strip and key hints. Earlier the loading
+  // guard early-returned just "Loading dashboard…" with no chrome — that
+  // gave the impression the header was missing on slow blast walks.
+  const loading = !agg || !blast;
   return (
     <Box flexDirection="column" height="100%">
       <Header
@@ -593,7 +582,11 @@ export function App(): React.ReactElement {
         lastTs={lastEvent?.ts}
         health={healthBadge}
       />
-      {view === 'realtime' ? (
+      {loading ? (
+        <Box flexGrow={1} paddingX={1}>
+          <Text dimColor>Loading dashboard…</Text>
+        </Box>
+      ) : view === 'realtime' ? (
         <>
           <HighLevel
             window={window}
