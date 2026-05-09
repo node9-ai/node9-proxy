@@ -42,6 +42,7 @@ import {
   submitDecision,
   subscribeToSse,
 } from './data.js';
+import { computeHealthBadge } from './health.js';
 import type { DailyEntry } from '../../costSync.js';
 import {
   Header,
@@ -530,6 +531,34 @@ export function App(): React.ReactElement {
     // tick is intentionally a dep so age windows + sticky expiry re-eval each second.
   }, [pendingApproval, approvalStatus, resolvedApproval, recentForensic, events, blast, tick]);
 
+  // Unified security-health badge for the Header. Pure compute over
+  // every signal source the dashboard already tracks. Re-runs whenever
+  // any input changes — same render cadence as the panels themselves.
+  const healthBadge = useMemo(
+    () =>
+      computeHealthBadge({
+        agg: agg ?? {
+          total: 0,
+          allow: 0,
+          block: 0,
+          review: 0,
+          loops: 0,
+          dlpHits: 0,
+          sessions: 0,
+          mcpServers: 0,
+          mcpCalls: 0,
+          byTool: [],
+          byBlock: [],
+          byShell: [],
+        },
+        blast: blast ?? { score: 100, paths: [], envFindings: 0 },
+        scanSignals,
+        shieldStatus,
+        forensicAgg: sessionForensicAgg,
+      }),
+    [agg, blast, scanSignals, shieldStatus, sessionForensicAgg]
+  );
+
   if (!agg || !blast) {
     return (
       <Box paddingX={1}>
@@ -540,7 +569,13 @@ export function App(): React.ReactElement {
 
   return (
     <Box flexDirection="column" height="100%">
-      <Header window={window} connected={!sseError} lastAgent={lastAgent} lastTs={lastEvent?.ts} />
+      <Header
+        window={window}
+        connected={!sseError}
+        lastAgent={lastAgent}
+        lastTs={lastEvent?.ts}
+        health={healthBadge}
+      />
       <HighLevel window={window} agg={agg} cost={costSnapshot} skillsPinned={skillsPinned} />
       <NotificationArea notification={notification} />
       <LiveLog

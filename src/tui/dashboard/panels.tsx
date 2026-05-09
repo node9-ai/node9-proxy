@@ -17,6 +17,7 @@ import type {
   TimeWindow,
 } from './types.js';
 import { TIME_WINDOWS } from './types.js';
+import type { HealthBadge } from './health.js';
 import {
   cacheHitRate,
   formatCost,
@@ -50,6 +51,7 @@ export function Header(props: {
   connected: boolean;
   lastAgent?: string;
   lastTs?: string;
+  health: HealthBadge;
 }): React.ReactElement {
   return (
     <Box flexDirection="row" justifyContent="space-between" paddingX={1}>
@@ -73,8 +75,31 @@ export function Header(props: {
         <Text color={props.connected ? COL.live : COL.liveOff}>●</Text>
         <Text dimColor>{props.connected ? ' live' : ' offline'}</Text>
         {props.lastAgent ? <Text dimColor>{`  ${props.lastAgent}`}</Text> : null}
+        {renderHealthBadge(props.health)}
       </Box>
     </Box>
+  );
+}
+
+function renderHealthBadge(h: HealthBadge): React.ReactNode {
+  if (h.severity === 'secure') {
+    return (
+      <>
+        <Text dimColor>{'  · '}</Text>
+        <Text color={COL.live}>{'✓ secure'}</Text>
+      </>
+    );
+  }
+  const icon = h.severity === 'critical' ? '🛑' : '⚠';
+  const color = h.severity === 'critical' ? COL.liveOff : COL.panelHigh;
+  const summary = h.reasons.length > 0 ? h.reasons.join(', ') : 'risk';
+  return (
+    <>
+      <Text dimColor>{'  · '}</Text>
+      <Text color={color} bold>{`${icon} `}</Text>
+      <Text color={color}>{summary}</Text>
+      {h.hint ? <Text dimColor>{` — ${h.hint}`}</Text> : null}
+    </>
   );
 }
 
