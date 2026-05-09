@@ -68,13 +68,14 @@ import {
 } from './state';
 import { extractCommandPattern } from '../auth/state.js';
 import { startCostSync } from '../costSync.js';
-import { startCloudSync } from './sync.js';
+import { startCloudSync, startForensicBroadcast } from './sync.js';
 import { startDlpScanner } from './dlp-scanner.js';
 import { readMcpToolsConfig, updateServerDiscovery, approveServer } from './mcp-tools.js';
 
 export function startDaemon(): void {
   startCostSync();
   startCloudSync();
+  startForensicBroadcast();
   startDlpScanner();
   loadInsightCounts(); // restore persisted nudge counters across restarts
   // Single per-process token. Stored in ~/.node9/daemon.pid (mode 0600)

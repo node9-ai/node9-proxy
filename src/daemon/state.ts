@@ -10,6 +10,7 @@ import os from 'os';
 import { randomUUID } from 'crypto';
 import { RiskMetadata } from '../context-sniper';
 import { DAEMON_PORT, DAEMON_HOST } from '../auth/daemon';
+import type { ScanFinding } from '@node9/policy-engine';
 import { SuggestionTracker, type Suggestion } from './suggestion-tracker.js';
 import { TaintStore } from './taint-store.js';
 import { sessionCounters } from './session-counters.js';
@@ -429,6 +430,48 @@ export function broadcast(event: string, data: unknown): void {
 
 export function hasInteractiveClient(): boolean {
   return [...sseClients].some((c) => c.capabilities.includes('input'));
+}
+
+// ── Forensic events ──────────────────────────────────────────────────────────
+//
+// Live forensic findings from the JSONL watermark scanner are broadcast as
+// 'forensic' SSE events for the local monitor to consume. Privacy invariant:
+// payload carries categorical metadata only (category, patternName, severity)
+// — never the raw matched content. lineIndex is dropped at this boundary
+// per the ScanFinding type's "never exfiltrated" comment.
+
+export type ForensicSeverity = 'critical' | 'warning';
+
+export interface ForensicEvent {
+  type: 'forensic';
+  id: string;
+  ts: number;
+  sessionId: string;
+  category: ScanFinding['type'];
+  patternName?: string;
+  severity: ForensicSeverity;
+}
+
+const CRITICAL_FORENSIC_CATEGORIES: ReadonlySet<ScanFinding['type']> = new Set([
+  'privilege-escalation',
+  'destructive-op',
+  'eval-of-remote',
+]);
+
+export function broadcastForensic(finding: ScanFinding): void {
+  const severity: ForensicSeverity = CRITICAL_FORENSIC_CATEGORIES.has(finding.type)
+    ? 'critical'
+    : 'warning';
+  const event: ForensicEvent = {
+    type: 'forensic',
+    id: `fnd_${randomUUID()}`,
+    ts: Date.now(),
+    sessionId: finding.sessionId,
+    category: finding.type,
+    severity,
+  };
+  if (finding.patternName !== undefined) event.patternName = finding.patternName;
+  broadcast('forensic', event);
 }
 
 export function abandonPending(): void {

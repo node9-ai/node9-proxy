@@ -426,6 +426,43 @@ const LONG_OUTPUT_THRESHOLD_BYTES = ENGINE_LONG_OUTPUT_THRESHOLD_BYTES;
 // source of truth.
 
 /**
+ * Read-only forensic scan for live SSE broadcast.
+ *
+ * Independent of the persistent watermark used by the SaaS-sync path:
+ * `offsets` is an in-memory Map maintained by the caller, reset on
+ * daemon restart. On first sight of a file, the offset is initialized
+ * to its current EOF — historical content does not flood the live
+ * channel (the dashboard's mount-time scan covers that). On subsequent
+ * ticks, only newly-appended lines are extracted.
+ *
+ * The persistent watermark file (`~/.node9/scan-watermark.json`) is
+ * NOT touched. The hourly SaaS sync calls `tickScanWatcher` which
+ * advances the persistent watermark and POSTs findings independently.
+ */
+export async function tickForensicBroadcast(offsets: Map<string, number>): Promise<ScanFinding[]> {
+  const out: ScanFinding[] = [];
+  const files = listJsonlFiles();
+  for (const file of files) {
+    const size = fileSize(file);
+    const offset = offsets.get(file);
+    if (offset === undefined) {
+      // First time we see this file — start at EOF so historical lines
+      // don't flood the local broadcast.
+      offsets.set(file, size);
+      continue;
+    }
+    if (size <= offset) continue;
+
+    const sessionId = path.basename(file, '.jsonl');
+    const newOffset = await scanDelta(file, offset, (obj, lineIndex) => {
+      out.push(...extractFindingsFromLine(obj, sessionId, lineIndex));
+    });
+    offsets.set(file, newOffset);
+  }
+  return out;
+}
+
+/**
  * Result of one tick — what was scanned and what was found. Caller pushes
  * the findings through `summarizeScan` and ships the summary to the SaaS.
  */
