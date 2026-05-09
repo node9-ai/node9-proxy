@@ -9,7 +9,7 @@
 import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
-import { isDaemonRunning, DAEMON_PORT, DAEMON_HOST } from '../auth/daemon';
+import { isDaemonRunning, isDaemonReachable } from '../auth/daemon';
 
 export function isTestingMode(): boolean {
   return /^(1|true|yes)$/i.test(process.env.NODE9_TESTING ?? '');
@@ -38,17 +38,11 @@ export async function autoStartDaemonAndWait(): Promise<boolean> {
     for (let i = 0; i < 20; i++) {
       await new Promise((r) => setTimeout(r, 250));
       if (!isDaemonRunning()) continue;
-      // Verify the HTTP server is actually accepting connections, not just that
-      // the process is alive. isDaemonRunning() only checks the PID file, which
-      // could be stale (OS PID reuse) or written before the socket is fully ready.
-      try {
-        const res = await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/settings`, {
-          signal: AbortSignal.timeout(500),
-        });
-        if (res.ok) return true;
-      } catch {
-        // HTTP not ready yet — keep polling
-      }
+      // isDaemonRunning() is the cheap sync check (PID file + process.kill);
+      // confirm the HTTP server is actually accepting connections before
+      // returning true so callers don't get ECONNREFUSED on their first
+      // request. The process may be alive but still mid-listen().
+      if (await isDaemonReachable()) return true;
     }
   } catch {}
   return false;

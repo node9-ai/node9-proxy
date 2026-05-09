@@ -260,8 +260,14 @@ function buildGitEnv(cwd: string): NodeJS.ProcessEnv {
   if (check.status === 0) {
     return { ...process.env, GIT_DIR: shadowDir, GIT_WORK_TREE: cwd };
   }
-  // Legacy fallback: use ambient git context (user's .git or none)
-  return { ...process.env };
+  // Legacy fallback: use ambient git context (user's .git or none).
+  // Strip any inherited GIT_DIR / GIT_WORK_TREE so we don't accidentally
+  // operate in a worktree pointer that happens to be set in our env
+  // (e.g. when running under `git commit` inside a worktree).
+  const env = { ...process.env };
+  delete env.GIT_DIR;
+  delete env.GIT_WORK_TREE;
+  return env;
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────

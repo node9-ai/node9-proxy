@@ -4,7 +4,6 @@ import fs from 'fs';
 import net from 'net';
 import path from 'path';
 import os from 'os';
-import { spawnSync } from 'child_process';
 import { type RiskMetadata } from '../context-sniper';
 
 const ACTIVITY_SOCKET_PATH =
@@ -134,27 +133,35 @@ export function isDaemonRunning(): boolean {
       return false;
     }
 
-    // Verify the TCP port is actually accepting connections.
-    // process.kill(pid,0) only confirms the process exists — it could still
-    // be in early startup before server.listen() completes, or the PID could
-    // be reused by an unrelated process. A TCP probe is the authoritative check.
-    const r = spawnSync('ss', ['-Htnp', `sport = :${DAEMON_PORT}`], {
-      encoding: 'utf8',
-      timeout: 300,
-    });
-    if (r.status === 0 && (r.stdout ?? '').includes(`:${DAEMON_PORT}`)) return true;
-    // PID alive but port not open yet (daemon starting) or PID reuse by another
-    // process. Don't clean the PID file — daemon may still be initializing.
-    return false;
+    // PID file present, JSON valid, port matches, PID validates, process exists.
+    // We treat that as "running". A previous version also spawned `ss` to verify
+    // the TCP port was bound — but `ss` is Linux-only (iproute2), causing this
+    // function to always return false on macOS even when the daemon was up.
+    // Callers that genuinely need HTTP-liveness (e.g. daemon-starter polling)
+    // should use isDaemonReachable() instead.
+    return true;
   }
 
-  // No PID file — port check catches orphaned daemons (PID file was lost)
+  // No PID file — daemon not running. Detecting orphaned daemons (process up,
+  // PID file lost) requires a port probe; that probe is portable only via
+  // spawning `lsof`/`ss`, which we deliberately avoid here to keep this hot
+  // path sync, fast, and cross-platform. The orphan case is recovered at
+  // daemon startup via the EADDRINUSE handler in src/daemon/server.ts.
+  return false;
+}
+
+/**
+ * Async HTTP-liveness probe. Use this when a caller genuinely needs to know
+ * the daemon's HTTP server is accepting requests right now (e.g. after
+ * spawning the daemon, before issuing the first /check call). isDaemonRunning()
+ * is the cheap sync check — sufficient for most call sites.
+ */
+export async function isDaemonReachable(timeoutMs = 500): Promise<boolean> {
   try {
-    const r = spawnSync('ss', ['-Htnp', `sport = :${DAEMON_PORT}`], {
-      encoding: 'utf8',
-      timeout: 300,
+    const res = await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/settings`, {
+      signal: AbortSignal.timeout(timeoutMs),
     });
-    return r.status === 0 && (r.stdout ?? '').includes(`:${DAEMON_PORT}`);
+    return res.ok;
   } catch {
     return false;
   }

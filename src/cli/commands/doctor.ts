@@ -178,10 +178,12 @@ export function registerDoctorCommand(program: Command, version: string): void {
       // ── Daemon ───────────────────────────────────────────────────────────────
       section('Daemon (optional)');
       if (isDaemonRunning()) {
-        pass(`Browser dashboard running → http://${DAEMON_HOST}:${DAEMON_PORT}/`);
+        pass(
+          `Daemon running on ${DAEMON_HOST}:${DAEMON_PORT} — terminal & native approvals enabled`
+        );
       } else {
         warn(
-          'Daemon not running — browser approvals unavailable',
+          'Daemon not running — terminal & native approvals unavailable',
           'Run: node9 daemon --background'
         );
       }
