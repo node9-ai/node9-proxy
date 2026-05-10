@@ -15,21 +15,20 @@ export const DESTRUCTIVE_OP_RE =
   /\brm\s+-[rRf]+\b|\bDROP\s+(TABLE|DATABASE|COLLECTION|SCHEMA)\b|\bTRUNCATE\s+TABLE\b|\bgit\s+push\s+(--force|-f)\b|\bFLUSHALL\b|\bFLUSHDB\b|\bkubectl\s+delete\b|\bhelm\s+uninstall\b/i;
 
 /**
- * Privilege-escalation regex. Standalone tokens only — `\bsudo\b` not
- * `sudo` to avoid matching e.g. `pseudo` substrings.
+ * Privilege-escalation regex — chmod/chown variants only. sudo/su
+ * detection moved to AST tokenization in scan/canonical.ts because
+ * regex matching produced false positives on string literals (`echo
+ * "ran sudo"`, `echo sudo > file`) AND was bypassable by quoting
+ * (`s''udo`, `s\udo`). The AST detector calls analyzeShellCommand,
+ * gets the actual command names invoked per pipeline stage, and
+ * checks if `sudo` or `su` is among them — quoting-resistant and
+ * string-literal-free.
  *
- * The sudo branch matches `sudo` or `su` followed by whitespace then
- * any non-whitespace character (`\S`). Earlier this required `[a-z]`
- * (lowercase letter), which silently missed every flag form:
- *   sudo -n cmd, sudo -S cmd, sudo -u user cmd, sudo --validate,
- *   sudo -E env-cmd, sudo /path/to/cmd, sudo $CMD
- * — all common AI-agent invocations and all genuine privilege-escalation
- * attempts. `\S` catches every flag, absolute path, and var-expansion;
- * the only thing it doesn't match is bare `sudo` with no arguments
- * (which does nothing). chmod/chown branches unchanged.
+ * chmod and chown stay on the regex because they check specific
+ * argument VALUES (`0?777`, `+x`, `root`), not just the first word —
+ * the AST `actions` list alone wouldn't help.
  */
-export const PRIVILEGE_ESCALATION_RE =
-  /\b(sudo|su)\b\s+\S|\bchmod\s+(0?777|\+x)\b|\bchown\s+root\b/i;
+export const PRIVILEGE_ESCALATION_RE = /\bchmod\s+(0?777|\+x)\b|\bchown\s+root\b/i;
 
 /**
  * Sensitive file paths the agent shouldn't be reading via tool calls.

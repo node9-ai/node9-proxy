@@ -160,7 +160,9 @@ describe('extractCanonicalFindings — per-line detectors', () => {
   });
 
   // Regression: PRIVILEGE_ESCALATION_RE used to require `[a-z]` after
-  // `sudo `, silently missing every flag form. The fix uses `\S`.
+  // `sudo `, silently missing every flag form. Fixed with `\S`, then
+  // promoted to AST tokenization via analyzeShellCommand for full
+  // bypass-resistance.
   it.each([
     ['sudo -n true', 'non-interactive flag'],
     ['sudo -S apt update', 'read pwd from stdin'],
@@ -174,20 +176,41 @@ describe('extractCanonicalFindings — per-line detectors', () => {
     expect(out.find((f) => f.type === 'privilege-escalation')).toBeDefined();
   });
 
-  // Negative cases — make sure we didn't introduce false positives.
+  // AST-based detection: catches shell-quoting bypasses that defeat
+  // any regex matcher. mvdan-sh resolves these to `sudo` at parse time;
+  // analyzeShellCommand returns it in the `actions` list.
+  it.each([
+    [`s''udo -n true`, `concat-quote bypass`],
+    [`s\\udo -n cmd`, `backslash-escape bypass`],
+  ])('emits privilege-escalation for AST-resolved `%s` (%s)', (command) => {
+    const out = extractCanonicalFindings(call({ args: { command } }), baseCtx());
+    expect(out.find((f) => f.type === 'privilege-escalation')).toBeDefined();
+  });
+
+  // Negative cases — false positives the AST detector eliminates.
+  // Without AST, the old regex matched `\bsudo\b\s+\S` which fired on
+  // every one of these (sudo word followed by space + any char).
   it.each([
     ['ls /tmp', 'unrelated benign command'],
     ['pseudo apt update', 'sudo as substring of another word'],
-    ['echo "ran sudo"', 'sudo word inside string literal but no following arg in shell sense'],
+    ['echo "ran sudo"', 'sudo word inside string literal — was a known regex FP'],
+    ['echo sudo > /tmp/note', 'sudo as echo argument, not as command'],
+    ['cat /etc/sudoers', 'sudoers path mention, no actual sudo invocation'],
   ])('does NOT emit privilege-escalation for `%s` (%s)', (command) => {
     const out = extractCanonicalFindings(call({ args: { command } }), baseCtx());
-    // Note: the third case (`echo "ran sudo"`) WILL match because the
-    // regex sees `sudo"` followed by ` ` then `)` etc. — natural-language
-    // false positives are a known limitation. We only assert the first
-    // two negative cases here; remove the third from the test if the
-    // expected behavior diverges.
-    if (command.startsWith('echo ')) return; // skip, see comment above
     expect(out.find((f) => f.type === 'privilege-escalation')).toBeUndefined();
+  });
+
+  // chmod/chown stay on regex — argument-value checks the AST `actions`
+  // list alone wouldn't catch.
+  it.each([
+    ['chmod 777 file', 'chmod 777'],
+    ['chmod 0777 /tmp', 'chmod 0777'],
+    ['chmod +x script.sh', 'chmod +x'],
+    ['chown root /etc/foo', 'chown root'],
+  ])('emits privilege-escalation for `%s` (%s)', (command) => {
+    const out = extractCanonicalFindings(call({ args: { command } }), baseCtx());
+    expect(out.find((f) => f.type === 'privilege-escalation')).toBeDefined();
   });
 
   it('emits eval-of-remote for curl | bash', () => {
