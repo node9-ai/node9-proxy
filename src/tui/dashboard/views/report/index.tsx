@@ -16,7 +16,7 @@ import React, { useMemo } from 'react';
 import { Box, Text } from 'ink';
 
 import { COL } from '../../panels.js';
-import type { BlastSnapshot, ReportPeriod, ScanCache } from '../../types.js';
+import type { BlastSnapshot, ReportPeriod, ScanCache, ShieldStatus } from '../../types.js';
 import type { AggregateResult } from '../../../../cli/aggregate/report-audit.js';
 import { COST_PER_LOOP_ITER_USD } from '@node9/policy-engine';
 
@@ -27,6 +27,7 @@ import { BlastRadius } from './panels/BlastRadius.js';
 import { Leaks } from './panels/Leaks.js';
 import { Loops } from './panels/Loops.js';
 import { TopRules } from './panels/TopRules.js';
+import { FooterStrip } from './panels/FooterStrip.js';
 import { EMPTY_FILTERED_SCAN, filterScanByPeriod, type FilteredScan } from './derive.js';
 
 export interface ReportViewProps {
@@ -37,6 +38,8 @@ export interface ReportViewProps {
   blast: BlastSnapshot | null;
   /** Background scan cache. Phase 3f reads results.{claude,gemini,codex}. */
   scanCache: ScanCache;
+  /** Shield activation state — Realtime Risk panel uses the same. */
+  shieldStatus: ShieldStatus | null;
 }
 
 const PERIOD_LONG_LABEL: Record<ReportPeriod, string> = {
@@ -51,6 +54,7 @@ export function ReportView({
   audit,
   blast,
   scanCache,
+  shieldStatus,
 }: ReportViewProps): React.ReactElement {
   // Re-filter the scan cache whenever period changes or the cache
   // transitions from loading → ready. While loading/idle/error, fall
@@ -76,7 +80,7 @@ export function ReportView({
         <Loops scanCache={scanCache} filtered={filtered} />
         <TopRules scanCache={scanCache} filtered={filtered} />
       </Box>
-      <FooterStripPlaceholder />
+      <FooterStrip shieldStatus={shieldStatus} audit={audit} />
     </Box>
   );
 }
@@ -257,18 +261,6 @@ function computeHeadline(
     return { text: 'no critical issues this period', dim: true };
   }
   return null;
-}
-
-// ---------------------------------------------------------------------------
-// Footer strip — sparkline + shields one-liner (phase 3g)
-// ---------------------------------------------------------------------------
-
-function FooterStripPlaceholder(): React.ReactElement {
-  return (
-    <Box paddingX={1} paddingTop={1}>
-      <Text dimColor>SHIELDS · HOUR OF DAY (footer strip — phase 3g)</Text>
-    </Box>
-  );
 }
 
 // ---------------------------------------------------------------------------

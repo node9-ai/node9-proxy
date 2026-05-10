@@ -57,3 +57,24 @@ export function fitLabel(s: string, width: number): string {
 export function num(n: number): string {
   return n.toLocaleString();
 }
+
+/**
+ * Vertical-bar sparkline from a list of values. Each value maps to one of
+ * 9 block heights ' ▁▂▃▄▅▆▇█' based on its share of max(values). Returns
+ * a string of length values.length — one cell per value.
+ *
+ * Used by the Report [2] HOUR OF DAY footer (24 cells, one per hour).
+ * Mirrors the same block set the CLI's `node9 report` already uses so
+ * the visual is consistent across surfaces.
+ */
+export function sparkline(values: readonly number[]): string {
+  if (values.length === 0) return '';
+  const BLOCKS = ' ▁▂▃▄▅▆▇█';
+  const max = Math.max(...values, 1);
+  return values
+    .map((v) => {
+      const idx = Math.max(0, Math.min(8, Math.round((v / max) * 8)));
+      return BLOCKS[idx];
+    })
+    .join('');
+}

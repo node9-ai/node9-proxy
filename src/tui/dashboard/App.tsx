@@ -754,7 +754,13 @@ export function App(): React.ReactElement {
           />
         </>
       ) : (
-        <ReportView period={reportPeriod} audit={reportAudit} blast={blast} scanCache={scanCache} />
+        <ReportView
+          period={reportPeriod}
+          audit={reportAudit}
+          blast={blast}
+          scanCache={scanCache}
+          shieldStatus={shieldStatus}
+        />
       )}
       <StatusBar view={view} lastRefreshAt={lastRefreshAt} />
     </Box>

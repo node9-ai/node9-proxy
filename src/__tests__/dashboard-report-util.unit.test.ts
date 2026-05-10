@@ -12,6 +12,7 @@ import {
   humanBlockReason,
   num,
   renderBar,
+  sparkline,
 } from '../tui/dashboard/views/report/util';
 
 describe('renderBar', () => {
@@ -111,5 +112,36 @@ describe('num', () => {
     expect(num(0)).toBe('0');
     expect(num(1234)).toBe('1,234');
     expect(num(1234567)).toBe('1,234,567');
+  });
+});
+
+describe('sparkline', () => {
+  it('returns empty string for empty input', () => {
+    expect(sparkline([])).toBe('');
+  });
+
+  it('renders one cell per value', () => {
+    expect(sparkline([1, 2, 3, 4]).length).toBe(4);
+  });
+
+  it('renders the highest value as the full block', () => {
+    const out = sparkline([1, 5, 10]);
+    expect(out[2]).toBe('█'); // 10/10 → idx 8
+  });
+
+  it('renders zero values as a space (lowest cell)', () => {
+    const out = sparkline([0, 8, 0]);
+    expect(out[0]).toBe(' ');
+    expect(out[2]).toBe(' ');
+  });
+
+  it('rounds to the nearest 1/8 step', () => {
+    // values 0..8 of max=8 → block index 0..8
+    const out = sparkline([0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(out).toBe(' ▁▂▃▄▅▆▇█');
+  });
+
+  it('handles single-value input (max becomes that value, full block)', () => {
+    expect(sparkline([42])).toBe('█');
   });
 });
