@@ -14,6 +14,9 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import {
   aggregateAudit,
   aggregateCost,
@@ -24,6 +27,7 @@ import {
   compactPathsInCommand,
   isValidForensicEvent,
   mapResultStatus,
+  readAuditEntriesAsync,
   subtractCostBaseline,
   toActivityEvent,
 } from '../tui/dashboard/data';
@@ -474,6 +478,80 @@ describe('mapResultStatus', () => {
 });
 
 // ── auditEntryToActivityEvent — extra coverage for path compaction in preview
+
+describe('readAuditEntriesAsync', () => {
+  function withTempAuditLog(lines: string[], fn: (path: string) => Promise<void>): Promise<void> {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-test-'));
+    const file = path.join(dir, 'audit.log');
+    fs.writeFileSync(file, lines.join('\n'));
+    return fn(file).finally(() => fs.rmSync(dir, { recursive: true, force: true }));
+  }
+
+  it('parses every line and returns the same shape as the sync reader', async () => {
+    const entries = [
+      { ts: '2026-05-08T08:00:00.000Z', tool: 'Bash', decision: 'allow' },
+      { ts: '2026-05-08T08:00:01.000Z', tool: 'Read', decision: 'allow' },
+      { ts: '2026-05-08T08:00:02.000Z', tool: 'Edit', decision: 'block' },
+    ];
+    await withTempAuditLog(
+      entries.map((e) => JSON.stringify(e)),
+      async (file) => {
+        const out = await readAuditEntriesAsync(1000, file);
+        expect(out).toHaveLength(3);
+        expect(out[0].tool).toBe('Bash');
+        expect(out[2].decision).toBe('block');
+      }
+    );
+  });
+
+  it('chunks parsing across setImmediate ticks (no UI block on large logs)', async () => {
+    // Generate 5000 entries — well past the default 1000-line chunk size.
+    // We can't directly observe the yielding, but we CAN observe that the
+    // event loop runs at least one tick mid-parse: schedule a counter that
+    // increments on setImmediate every tick, await the parse, then assert
+    // the counter advanced. If the parse were sync, the counter would
+    // never run between start and resolution.
+    const lines: string[] = [];
+    for (let i = 0; i < 5000; i++) {
+      lines.push(
+        JSON.stringify({ ts: '2026-05-08T08:00:00.000Z', tool: 'Bash', decision: 'allow' })
+      );
+    }
+    await withTempAuditLog(lines, async (file) => {
+      let ticks = 0;
+      const tick = (): void => {
+        ticks++;
+        if (ticks < 10) setImmediate(tick);
+      };
+      setImmediate(tick);
+      const out = await readAuditEntriesAsync(1000, file);
+      expect(out).toHaveLength(5000);
+      // 5000 lines / 1000 per chunk = 5 yields. Even being conservative,
+      // the parser yielded enough times that our independent ticker fired.
+      expect(ticks).toBeGreaterThan(0);
+    });
+  });
+
+  it('returns [] for a missing file', async () => {
+    const out = await readAuditEntriesAsync(1000, '/nonexistent/path/audit.log');
+    expect(out).toEqual([]);
+  });
+
+  it('skips malformed lines without throwing', async () => {
+    await withTempAuditLog(
+      [
+        JSON.stringify({ ts: '2026-05-08T08:00:00.000Z', tool: 'Bash', decision: 'allow' }),
+        'not-json{{{',
+        '',
+        JSON.stringify({ ts: '2026-05-08T08:00:01.000Z', tool: 'Read', decision: 'allow' }),
+      ],
+      async (file) => {
+        const out = await readAuditEntriesAsync(1000, file);
+        expect(out).toHaveLength(2);
+      }
+    );
+  });
+});
 
 describe('toActivityEvent · snapshot path compaction', () => {
   it('compacts a long argsSummary path so the live row stays in column budget', () => {

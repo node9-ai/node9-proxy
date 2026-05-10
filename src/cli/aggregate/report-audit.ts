@@ -26,7 +26,7 @@ import type { BuildReportJsonInput, ReportPeriod } from '../render/report-json';
 // Types
 // ---------------------------------------------------------------------------
 
-interface AuditEntry {
+export interface AuditEntry {
   ts: string;
   tool: string;
   args?: Record<string, unknown>;
@@ -64,6 +64,14 @@ export interface AggregateOpts {
   codexSessionsDir?: string;
   /** When true, exclude test-runner calls (mirrors --no-tests CLI flag). */
   excludeTests?: boolean;
+  /**
+   * When provided, skip the synchronous audit-log read and use these entries
+   * instead. Lets the dashboard pre-load the audit log via an event-loop-
+   * yielding chunked parser (readAuditEntriesAsync) so view switches don't
+   * freeze on large logs. The CLI path leaves this undefined and the function
+   * falls back to the original sync parseAuditLog.
+   */
+  preloadedAuditEntries?: AuditEntry[];
 }
 
 export interface AggregateResult {
@@ -443,7 +451,7 @@ export function aggregateReportFromAudit(
   const codexSessionsDir = opts.codexSessionsDir ?? path.join(os.homedir(), '.codex', 'sessions');
 
   const hasAuditFile = fs.existsSync(auditLogPath);
-  const allEntries = parseAuditLog(auditLogPath);
+  const allEntries = opts.preloadedAuditEntries ?? parseAuditLog(auditLogPath);
 
   const unackedDlp = allEntries.filter((e) => e.source === 'response-dlp');
 

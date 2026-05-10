@@ -38,10 +38,10 @@ import {
   buildCostBaseline,
   loadBlast,
   loadCostEntries,
-  loadReportAudit,
+  loadReportAuditAsync,
   loadScanSignals,
   loadShieldStatus,
-  readAuditEntries,
+  readAuditEntriesAsync,
   startScanWalk,
   subtractCostBaseline,
   submitDecision,
@@ -262,16 +262,17 @@ export function App(): React.ReactElement {
   // presses [2], doesn't run while sitting on Realtime.
   useEffect(() => {
     if (view !== 'report') return;
-    // Audit aggregation reads + parses ~/.node9/audit.log synchronously.
-    // For 7k+ events that's ~100-200ms — long enough to feel like a
-    // frozen UI on view switch. Show the panels' "loading…" state
-    // immediately (setReportAudit(null)), then defer the actual work
-    // one tick via setImmediate so React renders first.
+    // loadReportAuditAsync uses readAuditEntriesAsync internally so the
+    // JSON.parse loop yields between 1k-line chunks. The aggregator's
+    // cost-walk pass (claude / codex JSONLs) is still synchronous — that's
+    // the job of the scan-walker refactor. For now, this change alone
+    // removes the audit-parse component of the [2] freeze; the user still
+    // sees a brief pause from the cost walks until that lands.
     setReportAudit(null);
     let cancelled = false;
-    setImmediate(() => {
+    void loadReportAuditAsync(reportPeriod).then((result) => {
       if (cancelled) return;
-      setReportAudit(loadReportAudit(reportPeriod));
+      setReportAudit(result);
     });
     return () => {
       cancelled = true;
@@ -396,15 +397,26 @@ export function App(): React.ReactElement {
   }, []);
 
   // Audit aggregation — recomputes when window changes or every 30s.
+  // readAuditEntriesAsync chunks the JSON.parse loop across setImmediate
+  // ticks so a 4 MB / 11 k-line log no longer freezes ink for 200-300 ms
+  // on every refresh. The cancelled flag protects against the user
+  // changing the window mid-parse: if they do, the in-flight result is
+  // dropped instead of overwriting the new window's already-current data.
   useEffect(() => {
-    const recompute = () => {
-      const entries = readAuditEntries();
-      const startMs = windowStartMs(window, openedAt);
-      setAgg(aggregateAudit(entries, startMs));
+    let cancelled = false;
+    const recompute = (): void => {
+      void readAuditEntriesAsync().then((entries) => {
+        if (cancelled) return;
+        const startMs = windowStartMs(window, openedAt);
+        setAgg(aggregateAudit(entries, startMs));
+      });
     };
     recompute();
     const id = setInterval(recompute, AUDIT_REFRESH_MS);
-    return () => clearInterval(id);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
   }, [window, openedAt]);
 
   // Blast — once at start, then every 5 min. `r` keypress also triggers below.
@@ -618,8 +630,13 @@ export function App(): React.ReactElement {
       // StatusBar timestamp ticks immediately — gives users visible
       // confirmation [r] fired even when underlying data didn't change.
       setLastRefreshAt(Date.now());
-      const entries = readAuditEntries();
-      setAgg(aggregateAudit(entries, windowStartMs(window, openedAt)));
+      // Audit re-aggregation is async + chunked — readAuditEntriesAsync
+      // yields between 1k-line batches. The setLastRefreshAt above gives
+      // immediate visual confirmation; this fills in once the parse
+      // settles, ~100 ms later for a typical log.
+      void readAuditEntriesAsync().then((entries) => {
+        setAgg(aggregateAudit(entries, windowStartMs(window, openedAt)));
+      });
       setBlast(loadBlast());
       setShieldStatus(loadShieldStatus());
       void loadCostEntries().then(setCostEntries);

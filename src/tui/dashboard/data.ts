@@ -77,6 +77,67 @@ export function readAuditEntries(): AuditEntry[] {
   }
 }
 
+/**
+ * Async, event-loop-friendly variant of readAuditEntries(). Reads the audit
+ * log once (4 MB / ~10 k lines is cheap), then JSON.parses in chunks of
+ * `chunkSize` lines per setImmediate-yielded tick. Between chunks the React
+ * reconciler can repaint the dashboard, so a 30-second auto-refresh on the
+ * Realtime view no longer feels like a 200-300 ms freeze.
+ *
+ * For 11 k entries with chunkSize=1000 → 12 ticks of ~25 ms each, ink gets
+ * to repaint between every batch. Total wall-clock is essentially the same
+ * as the sync path; only the responsiveness changes.
+ *
+ * The sync readAuditEntries() is kept for `node9 audit` / `node9 report`
+ * CLI consumers that print and exit — yielding adds latency for no gain
+ * when there's no UI to repaint.
+ */
+export function readAuditEntriesAsync(
+  chunkSize: number = 1000,
+  /** Test-only override. Production callers always read ~/.node9/audit.log. */
+  customPath?: string
+): Promise<AuditEntry[]> {
+  return new Promise((resolve) => {
+    const p = customPath ?? auditLogPath();
+    if (!fs.existsSync(p)) {
+      resolve([]);
+      return;
+    }
+    let raw: string;
+    try {
+      raw = fs.readFileSync(p, 'utf8');
+    } catch {
+      resolve([]);
+      return;
+    }
+    const lines = raw.split('\n');
+    const out: AuditEntry[] = [];
+    let i = 0;
+    const total = lines.length;
+
+    const processChunk = (): void => {
+      const end = Math.min(i + chunkSize, total);
+      for (; i < end; i++) {
+        const line = lines[i];
+        if (!line.trim()) continue;
+        try {
+          const e = JSON.parse(line) as AuditEntry;
+          if (e && typeof e.ts === 'string') out.push(e);
+        } catch {
+          // ignore malformed lines — same forgiving parse the sync path uses
+        }
+      }
+      if (i < total) {
+        setImmediate(processChunk);
+      } else {
+        resolve(out);
+      }
+    };
+
+    processChunk();
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Aggregation — given audit entries within window, produce the numbers
 // each panel needs. Pure; safe to call on every window change.
@@ -587,12 +648,25 @@ function shortenPath(p: string): string {
 /**
  * Period-aware audit aggregation for Report [2]. Thin wrapper around the
  * shared aggregator in cli/aggregate/report-audit so the dashboard pulls
- * audit data through the same code path as `node9 report --json`. Sync
- * (~10 ms on a typical audit log) — the heavy stuff is the scan walk
- * which goes through startScanWalk() instead.
+ * audit data through the same code path as `node9 report --json`. Sync —
+ * fine for the CLI, but the dashboard should prefer loadReportAuditAsync
+ * below to avoid blocking ink for 200-300 ms on a 4 MB audit log.
  */
 export function loadReportAudit(period: ReportPeriod): AggregateResult {
   return aggregateReportFromAudit(period);
+}
+
+/**
+ * Async-friendly variant of loadReportAudit. Pre-loads the audit log via
+ * the chunked readAuditEntriesAsync, then feeds the result into the shared
+ * aggregator via the new preloadedAuditEntries opt. The aggregator's other
+ * sync work (claude / codex JSONL cost walks) still blocks — that's the
+ * job of the scan-walker chunking refactor (#2 in the responsiveness plan).
+ * This change alone removes the audit-parse component of the [2] freeze.
+ */
+export async function loadReportAuditAsync(period: ReportPeriod): Promise<AggregateResult> {
+  const entries = await readAuditEntriesAsync();
+  return aggregateReportFromAudit(period, { preloadedAuditEntries: entries });
 }
 
 /**
