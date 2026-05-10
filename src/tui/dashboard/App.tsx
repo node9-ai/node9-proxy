@@ -485,8 +485,18 @@ export function App(): React.ReactElement {
     // typing into the filter (where q must remain a printable character);
     // Ctrl+C always quits, even with an approval card on screen. See
     // shouldQuit() at module scope for the full rule table.
+    //
+    // useApp().exit() unmounts ink but does NOT terminate the process —
+    // active setInterval handles (cost refresh, blast refresh, hud
+    // tickers) and the SSE keep-alive socket all hold the event loop
+    // open. Without an explicit process.exit, q would *sometimes* quit
+    // and *sometimes* leave the user staring at a blank dashboard for
+    // 30+ seconds until the next interval fired. The 50ms timeout gives
+    // ink one render tick to flush its restore-cursor sequence so the
+    // terminal doesn't end up in a broken state.
     if (shouldQuit(input, key, { filterInputMode })) {
       exit();
+      setTimeout(() => process.exit(0), 50).unref();
       return;
     }
 

@@ -120,7 +120,7 @@ export function HighLevel(props: {
         <Text color={COL.brand} bold>
           HIGH LEVEL
         </Text>
-        <Text dimColor>{`  · ${labelFor(props.window)}  · Δ since open`}</Text>
+        <Text dimColor>{`  · ${labelFor(props.window)}`}</Text>
       </Text>
       <Text wrap="truncate-end">
         {!cost ? (

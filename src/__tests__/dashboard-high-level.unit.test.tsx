@@ -3,10 +3,9 @@
  *
  * The cost / token figures shown here are deliberately scoped to "spend
  * since the monitor opened" (App.tsx subtracts a baseline at mount).
- * Without that context, the zero/near-zero values look like a bug —
- * which is exactly what users reported. The "Δ since open" caption is
- * the explicit signal; this test pins it so a future copy refactor
- * can't silently drop it.
+ * The window-label caption (`labelFor`) communicates that scope to the
+ * user — we pin its presence here so a future copy refactor can't
+ * silently drop the only contextual signal on this panel.
  */
 import React from 'react';
 import { describe, expect, it } from 'vitest';
@@ -49,11 +48,18 @@ function makeCost(overrides: Partial<CostSnapshot> = {}): CostSnapshot {
 const WINDOW: TimeWindow = '1d';
 
 describe('HighLevel', () => {
-  it('shows the "Δ since open" caption so zero values are self-explanatory', () => {
+  it('renders the window-label caption ("last 24 hours" / "since dashboard opened" / etc.)', () => {
     const { lastFrame } = render(
-      <HighLevel window={WINDOW} agg={makeAgg()} cost={makeCost()} skillsPinned={0} mcpPinned={0} />
+      <HighLevel window="1d" agg={makeAgg()} cost={makeCost()} skillsPinned={0} mcpPinned={0} />
     );
-    expect(lastFrame()).toContain('Δ since open');
+    expect(lastFrame()).toContain('last 24 hours');
+  });
+
+  it('renders "since dashboard opened" when the window is `now`', () => {
+    const { lastFrame } = render(
+      <HighLevel window="now" agg={makeAgg()} cost={makeCost()} skillsPinned={0} mcpPinned={0} />
+    );
+    expect(lastFrame()).toContain('since dashboard opened');
   });
 
   it('renders the cost panel content even when totals are zero', () => {
