@@ -16,16 +16,19 @@ import React from 'react';
 import { Box, Text } from 'ink';
 
 import { COL } from '../../panels.js';
-import type { ReportPeriod, ScanCache } from '../../types.js';
+import type { BlastSnapshot, ReportPeriod, ScanCache } from '../../types.js';
 import type { AggregateResult } from '../../../../cli/aggregate/report-audit.js';
 import { Protection } from './panels/Protection.js';
 import { TopBlocks } from './panels/TopBlocks.js';
 import { ThisWeek } from './panels/ThisWeek.js';
+import { BlastRadius } from './panels/BlastRadius.js';
 
 export interface ReportViewProps {
   period: ReportPeriod;
   /** Result of loadReportAudit(period) — null while initial load runs. */
   audit: AggregateResult | null;
+  /** Blast snapshot — same data the Realtime Risk panel uses. */
+  blast: BlastSnapshot | null;
   /** Background scan cache. Phase 3f reads results.{claude,gemini,codex}. */
   scanCache: ScanCache;
 }
@@ -37,7 +40,7 @@ const PERIOD_LONG_LABEL: Record<ReportPeriod, string> = {
   month: 'This Month',
 };
 
-export function ReportView({ period, audit }: ReportViewProps): React.ReactElement {
+export function ReportView({ period, audit, blast }: ReportViewProps): React.ReactElement {
   return (
     <Box flexDirection="column" flexGrow={1} paddingX={1}>
       <ReportHeader period={period} audit={audit} />
@@ -47,6 +50,7 @@ export function ReportView({ period, audit }: ReportViewProps): React.ReactEleme
         <TopBlocks audit={audit} />
         <ThisWeek audit={audit} />
       </Box>
+      <BlastRadius blast={blast} />
       <RemainingPlaceholders />
     </Box>
   );
@@ -138,7 +142,6 @@ function ScoreBanner({ audit }: { audit: AggregateResult | null }): React.ReactE
 function RemainingPlaceholders(): React.ReactElement {
   return (
     <Box flexDirection="column" gap={0}>
-      <Placeholder label="BLAST RADIUS" hint="reachable paths the agent can read right now" full />
       <Box flexDirection="row" gap={1}>
         <Placeholder label="LEAKS" hint="credential types found" />
         <Placeholder label="LOOPS" hint="repeat-tool waste" />

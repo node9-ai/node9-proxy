@@ -547,7 +547,11 @@ export function loadBlast(): BlastSnapshot {
     const r = runBlast();
     return {
       score: r.score,
-      paths: r.reachable.slice(0, 5).map((f) => shortenPath(f.full)),
+      paths: r.reachable.slice(0, 5).map((f) => ({
+        label: shortenPath(f.full),
+        description: f.description,
+        score: f.score,
+      })),
       envFindings: r.envFindings.length,
     };
   } catch {

@@ -138,7 +138,12 @@ describe('computeHealthBadge', () => {
   it('reports warning on reachable blast paths', () => {
     const b = computeHealthBadge({
       ...baseInput,
-      blast: blast({ paths: ['/home/user/.ssh', '/home/user/.aws'] }),
+      blast: blast({
+        paths: [
+          { label: '/home/user/.ssh', description: '', score: 0 },
+          { label: '/home/user/.aws', description: '', score: 0 },
+        ],
+      }),
     });
     expect(b.severity).toBe('warning');
     expect(b.reasons).toContain('2 paths');
@@ -157,7 +162,10 @@ describe('computeHealthBadge', () => {
     const b = computeHealthBadge({
       ...baseInput,
       agg: emptyAgg({ dlpHits: 2 }),
-      blast: blast({ score: 30, paths: ['/home/user/.ssh'] }),
+      blast: blast({
+        score: 30,
+        paths: [{ label: '/home/user/.ssh', description: '', score: 0 }],
+      }),
       shieldStatus: shields({ inactive: ['block-force-push'] }),
     });
     expect(b.severity).toBe('critical');

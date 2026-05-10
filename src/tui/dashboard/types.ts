@@ -102,9 +102,21 @@ export interface AuditAggregates {
   byShell: Array<{ cmd: string; count: number; blocked: number }>;
 }
 
+export interface BlastPathInfo {
+  /** Short, display-ready path label (e.g. "~/.ssh/id_rsa"). */
+  label: string;
+  /** Human description from blast.ts (e.g. "RSA private key — SSH server access").
+   *  Empty string if unavailable. */
+  description: string;
+  /** Points deducted from the security score for this path being readable. */
+  score: number;
+}
+
 export interface BlastSnapshot {
   score: number;
-  paths: string[]; // top reachable paths
+  /** Top reachable sensitive paths. The Risk panel uses .length only;
+   *  the Report [2] BlastRadius panel renders label + description per row. */
+  paths: BlastPathInfo[];
   envFindings: number;
 }
 
