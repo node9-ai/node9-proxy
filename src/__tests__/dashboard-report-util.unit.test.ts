@@ -46,7 +46,7 @@ describe('renderBar', () => {
 
 describe('humanBlockReason', () => {
   it('maps known checkedBy values to human strings', () => {
-    expect(humanBlockReason('timeout')).toBe('Popup timeout');
+    expect(humanBlockReason('timeout')).toBe('Approval timeout');
     expect(humanBlockReason('smart-rule-block')).toBe('Smart rule');
     expect(humanBlockReason('dlp-block')).toBe('DLP block');
     expect(humanBlockReason('loop-detected')).toBe('Loop detected');

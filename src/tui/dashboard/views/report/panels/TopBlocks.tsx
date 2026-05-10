@@ -3,16 +3,22 @@
 // Top-row panel: most-fired block reasons with horizontal bars. Pulled
 // from BuildReportJsonInput.blockMap, sorted descending, top 5. Each row
 // is human-readable label + bar (red for blocks) + count.
+//
+// Uses fixed-width Box columns + `fitLabel` on the label so a long
+// reason string ("Persistent deny", "Smart rule", …) doesn't push the
+// count off the column. height={1} keeps each row exactly one line.
 
 import React from 'react';
 import { Box, Text } from 'ink';
 
 import { COL } from '../../../panels.js';
 import type { AggregateResult } from '../../../../../cli/aggregate/report-audit.js';
-import { humanBlockReason, num, renderBar } from '../util.js';
+import { fitLabel, humanBlockReason, num, renderBar } from '../util.js';
 
 const ROW_LIMIT = 5;
-const BAR_WIDTH = 6;
+const LABEL_W = 12;
+const BAR_W = 6;
+const COUNT_W = 4;
 
 export function TopBlocks({ audit }: { audit: AggregateResult | null }): React.ReactElement {
   const data = audit?.data;
@@ -37,12 +43,17 @@ export function TopBlocks({ audit }: { audit: AggregateResult | null }): React.R
         <Text dimColor>nothing blocked ✓</Text>
       ) : (
         sorted.map(([reason, count]) => (
-          // Single-Text-with-truncate so the row stays exactly 1 line tall.
-          <Text key={reason} wrap="truncate-end">
-            {humanBlockReason(reason).padEnd(12)}{' '}
-            <Text color="red">{renderBar(count, max, BAR_WIDTH)}</Text>{' '}
-            <Text bold>{num(count).padStart(4)}</Text>
-          </Text>
+          <Box key={reason} height={1}>
+            <Box width={LABEL_W}>
+              <Text>{fitLabel(humanBlockReason(reason), LABEL_W)}</Text>
+            </Box>
+            <Text> </Text>
+            <Text color="red">{renderBar(count, max, BAR_W)}</Text>
+            <Text> </Text>
+            <Box width={COUNT_W} justifyContent="flex-end">
+              <Text bold>{num(count)}</Text>
+            </Box>
+          </Box>
         ))
       )}
     </Box>

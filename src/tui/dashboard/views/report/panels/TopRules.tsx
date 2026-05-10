@@ -3,6 +3,10 @@
 // Bottom-row panel: most-fired rules within the period. Pulled from
 // scan-derived findings (Finding.source.rule.name), sorted desc by
 // count. Top 4 rows. Empty state when ready-but-zero.
+//
+// Fixed-width Box columns + fitLabel — rule names like
+// "shield:project-jail:block-read-credentials" are long; truncating at
+// LABEL_W keeps the count column aligned across rows.
 
 import React from 'react';
 import { Box, Text } from 'ink';
@@ -10,9 +14,11 @@ import { Box, Text } from 'ink';
 import { COL } from '../../../panels.js';
 import type { ScanCache } from '../../../types.js';
 import type { FilteredScan } from '../derive.js';
-import { num } from '../util.js';
+import { fitLabel, num } from '../util.js';
 
 const ROW_LIMIT = 4;
+const LABEL_W = 18;
+const COUNT_W = 4;
 
 export function TopRules({
   scanCache,
@@ -44,13 +50,14 @@ export function TopRules({
         <Text dimColor>no rules fired this period</Text>
       ) : (
         rules.map((row) => (
-          // Single-Text-with-truncate so the row stays exactly 1 line
-          // tall. Putting the rule name in a flex-shrinking Box added
-          // phantom empty rows in some terminals.
-          <Text key={row.rule} wrap="truncate-end">
-            {row.rule.padEnd(18)}
-            <Text bold>{num(row.count).padStart(4)}</Text>
-          </Text>
+          <Box key={row.rule} height={1}>
+            <Box width={LABEL_W}>
+              <Text>{fitLabel(row.rule, LABEL_W)}</Text>
+            </Box>
+            <Box width={COUNT_W} justifyContent="flex-end">
+              <Text bold>{num(row.count)}</Text>
+            </Box>
+          </Box>
         ))
       )}
     </Box>

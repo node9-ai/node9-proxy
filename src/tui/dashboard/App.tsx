@@ -231,7 +231,20 @@ export function App(): React.ReactElement {
   // presses [2], doesn't run while sitting on Realtime.
   useEffect(() => {
     if (view !== 'report') return;
-    setReportAudit(loadReportAudit(reportPeriod));
+    // Audit aggregation reads + parses ~/.node9/audit.log synchronously.
+    // For 7k+ events that's ~100-200ms — long enough to feel like a
+    // frozen UI on view switch. Show the panels' "loading…" state
+    // immediately (setReportAudit(null)), then defer the actual work
+    // one tick via setImmediate so React renders first.
+    setReportAudit(null);
+    let cancelled = false;
+    setImmediate(() => {
+      if (cancelled) return;
+      setReportAudit(loadReportAudit(reportPeriod));
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [view, reportPeriod, lastRefreshAt]);
 
   useEffect(() => {

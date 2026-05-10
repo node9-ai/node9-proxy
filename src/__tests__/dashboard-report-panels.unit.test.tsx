@@ -117,7 +117,9 @@ describe('TopBlocks', () => {
     });
     const { lastFrame } = render(<TopBlocks audit={audit} />);
     expect(lastFrame()).toContain('Smart rule');
-    expect(lastFrame()).toContain('Popup timeout');
+    // Long reason "Approval timeout" gets truncated by fitLabel(LABEL_W=12)
+    // — assert the truncated prefix is present rather than the full string.
+    expect(lastFrame()).toContain('Approval');
   });
 });
 

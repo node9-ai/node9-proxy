@@ -13,9 +13,12 @@ import { Box, Text } from 'ink';
 import { COL } from '../../../panels.js';
 import type { ScanCache } from '../../../types.js';
 import type { FilteredScan } from '../derive.js';
-import { num } from '../util.js';
+import { fitLabel, num } from '../util.js';
 
 const ROW_LIMIT = 4;
+const ICON_W = 2;
+const LABEL_W = 14;
+const COUNT_W = 4;
 
 export function Leaks({
   scanCache,
@@ -50,12 +53,17 @@ export function Leaks({
         <Text color="green">✓ no leaks this period</Text>
       ) : (
         filtered.leaksByType.slice(0, ROW_LIMIT).map((row) => (
-          // Single-Text-with-truncate so the row stays exactly 1 line tall.
-          <Text key={row.type} wrap="truncate-end">
-            <Text color="red">🚨 </Text>
-            {row.type.padEnd(14)}
-            <Text bold>{num(row.count).padStart(3)}</Text>
-          </Text>
+          <Box key={row.type} height={1}>
+            <Box width={ICON_W}>
+              <Text color="red">🚨</Text>
+            </Box>
+            <Box width={LABEL_W}>
+              <Text>{fitLabel(row.type, LABEL_W)}</Text>
+            </Box>
+            <Box width={COUNT_W} justifyContent="flex-end">
+              <Text bold>{num(row.count)}</Text>
+            </Box>
+          </Box>
         ))
       )}
     </Box>

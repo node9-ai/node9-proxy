@@ -21,7 +21,7 @@ export function renderBar(value: number, max: number, width: number): string {
 // `checkedBy` audit values are stable but cryptic; map a few common ones to
 // human strings. Anything unmapped passes through (better than hiding info).
 const BLOCK_REASON_LABELS: Record<string, string> = {
-  timeout: 'Popup timeout',
+  timeout: 'Approval timeout',
   'smart-rule-block': 'Smart rule',
   'observe-mode-dlp-would-block': 'DLP (observe)',
   'persistent-deny': 'Persistent deny',

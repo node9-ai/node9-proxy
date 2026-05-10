@@ -20,7 +20,7 @@ import {
 // ---------------------------------------------------------------------------
 
 const BLOCK_REASON_LABELS: Record<string, string> = {
-  timeout: 'Popup timeout',
+  timeout: 'Approval timeout',
   'smart-rule-block': 'Smart rule',
   'observe-mode-dlp-would-block': 'DLP (observe)',
   'persistent-deny': 'Persistent deny',

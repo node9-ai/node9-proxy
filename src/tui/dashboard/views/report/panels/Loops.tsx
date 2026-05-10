@@ -59,15 +59,19 @@ export function Loops({
       ) : (
         <>
           {filtered.loopsByTool.slice(0, TOOL_ROWS).map((row) => (
-            <Box key={row.tool}>
-              <Text>{fitLabel(row.tool, 6)}</Text>
+            <Box key={row.tool} height={1}>
+              <Box width={6}>
+                <Text>{fitLabel(row.tool, 6)}</Text>
+              </Box>
               <Text dimColor>×</Text>
-              <Text bold>{num(row.count).padStart(5)}</Text>
+              <Box width={5} justifyContent="flex-end">
+                <Text bold>{num(row.count)}</Text>
+              </Box>
               <Text dimColor>{`  (${row.pct}%)`}</Text>
             </Box>
           ))}
           {filtered.topLoopFile ? (
-            <Box>
+            <Box height={1}>
               <Text dimColor>Top: </Text>
               <Box flexGrow={1} flexShrink={1}>
                 <Text wrap="truncate-end">{basenameOf(filtered.topLoopFile.path)}</Text>
