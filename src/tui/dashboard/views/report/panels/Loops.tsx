@@ -12,6 +12,7 @@ import { COL } from '../../../panels.js';
 import type { ScanCache } from '../../../types.js';
 import type { FilteredScan } from '../derive.js';
 import { fitLabel, num } from '../util.js';
+import { Spinner } from './Spinner.js';
 
 const TOOL_ROWS = 2;
 
@@ -49,11 +50,13 @@ export function Loops({
         ) : null}
       </Box>
       {scanCache.status === 'loading' ? (
-        <Text dimColor>Walking history…</Text>
+        <Text dimColor>
+          <Spinner /> Walking history…
+        </Text>
       ) : scanCache.status === 'error' ? (
-        <Text color="red">⚠ scan failed · [s] retry</Text>
+        <Text color="red">⚠ scan failed · [r] retry</Text>
       ) : scanCache.status === 'idle' ? (
-        <Text dimColor>Press [s] to scan history</Text>
+        <Text dimColor>—</Text>
       ) : !hasLoops ? (
         <Text color="green">✓ no loops this period</Text>
       ) : (

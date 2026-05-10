@@ -805,7 +805,6 @@ export function StatusBar(props: { view: View; lastRefreshAt: number }): React.R
       </Text>
       <Text dimColor>· </Text>
       <Text dimColor>{`[r] refresh (${refreshedAt}) `}</Text>
-      {reportActive ? <Text dimColor>[s] scan </Text> : null}
       <Text dimColor>[?] help </Text>
       <Text dimColor>[q] quit</Text>
     </Box>

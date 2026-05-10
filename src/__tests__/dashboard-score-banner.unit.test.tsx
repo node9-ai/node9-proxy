@@ -204,7 +204,10 @@ describe('ScoreBanner headline cascade', () => {
     expect(lastFrame()).not.toContain('exposed path');
   });
 
-  it('shows "[s] scan history" affordance while scanCache is idle (opt-in)', () => {
+  it('shows "[r] to start" affordance while scanCache is idle (transient)', () => {
+    // Idle is transient now — entering [2] auto-starts the walk. The
+    // banner still surfaces an affordance in case the user lands here
+    // (e.g. mid-cancel) so they know how to kick a rescan.
     const { lastFrame } = render(
       <ScoreBanner
         audit={makeAudit()}
@@ -213,7 +216,7 @@ describe('ScoreBanner headline cascade', () => {
         filtered={EMPTY_FILTERED_SCAN}
       />
     );
-    expect(lastFrame()).toContain('[s] scan history');
+    expect(lastFrame()).toContain('[r] to start');
   });
 
   it('shows scan-failed message on cache error', () => {

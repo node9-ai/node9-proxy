@@ -277,18 +277,16 @@ export function App(): React.ReactElement {
     };
   }, [view, reportPeriod, lastRefreshAt]);
 
-  // Scan walk is OPT-IN — the user presses [s] in the Report view to
-  // start it. Auto-running on [2] press caused 60+ second freezes on
-  // heavy ~/.claude/projects installs because the walker scans every
-  // session JSONL. The keypress handler below kicks off a walk and
-  // stashes the cancel function in this ref so a view toggle can stop
-  // it cleanly mid-flight.
+  // Scan walk auto-starts when the user enters [2] Report. The walker
+  // is async (chunked + 7d mtime filter) so this is sub-second on most
+  // installs — the spinner in LEAKS / LOOPS / TOP RULES gives feedback
+  // when it isn't. The cancel fn is stashed in this ref so leaving [2]
+  // can stop a walk cleanly mid-flight; [r] resets to idle which
+  // re-fires the effect.
   const scanWalkCancelRef = React.useRef<(() => void) | null>(null);
   useEffect(() => {
-    // Cleanup when leaving the report view: cancel any in-flight walk
-    // and reset status to idle so a future [s] press can restart it.
-    // Idle/ready/error walks have no cancel work to do; the ref is
-    // null and setScanCache no-ops via the loading guard.
+    // Leaving [2]: cancel any in-flight walk and reset to idle so the
+    // next [2] entry can start fresh.
     if (view !== 'report') {
       const cancel = scanWalkCancelRef.current;
       if (cancel) {
@@ -296,8 +294,27 @@ export function App(): React.ReactElement {
         scanWalkCancelRef.current = null;
         setScanCache((cur) => (cur.status === 'loading' ? { status: 'idle' } : cur));
       }
+      return;
     }
-  }, [view]);
+    // Entering [2] with no cached scan: auto-start the walk. The
+    // deps-loop bug that used to prevent this (scanCache.status in
+    // deps caused an infinite cancel/restart cycle) is fixed by
+    // keying on lastRefreshAt instead. [r] forces a re-walk by
+    // resetting scanCache to idle, which is in this effect's body
+    // (no longer in deps) so it re-fires only on view / refresh
+    // changes — never on internal status transitions.
+    if (scanCache.status === 'idle') {
+      scanWalkCancelRef.current = startScanWalk((cache) => {
+        setScanCache(cache);
+        if (cache.status === 'ready' || cache.status === 'error') {
+          scanWalkCancelRef.current = null;
+        }
+      });
+    }
+    // Intentional minimal deps: scanCache.status is updated *inside*
+    // this effect (idle→loading→ready). Putting it in deps caused an
+    // infinite cancel/restart loop. Re-run only on view + refresh.
+  }, [view, lastRefreshAt]);
 
   // SSE subscription — runs once, fed by daemon.
   useEffect(() => {
@@ -580,64 +597,48 @@ export function App(): React.ReactElement {
       // 30d is what users almost always want; 'month' is reachable via
       // the CLI flag `node9 report --period month` for parity.
       setReportPeriod('30d');
-    } else if (view === 'report' && (input === 's' || input === 'S')) {
-      // Manually start the scan walk (LEAKS / LOOPS / TOP RULES). Opt-in
-      // because the walk reparses every Claude / Gemini / Codex session
-      // JSONL within the 7-day window — fast on a small install, 30+ s
-      // on a heavy one. Cancel any in-flight walk first so [s][s] gives
-      // a clean restart rather than two competing walks.
-      const prev = scanWalkCancelRef.current;
-      if (prev) prev();
-      scanWalkCancelRef.current = startScanWalk((cache) => {
-        setScanCache(cache);
-        if (cache.status === 'ready' || cache.status === 'error') {
-          scanWalkCancelRef.current = null;
-        }
-      });
     } else if (
       view === 'report' &&
       (input === 'l' ||
         input === 'b' ||
         input === 'p' ||
         input === 'o' ||
+        input === 's' ||
         input === 'e' ||
         input === 'L' ||
         input === 'B' ||
         input === 'P' ||
         input === 'O' ||
+        input === 'S' ||
         input === 'E')
     ) {
       // Reserved for drill-down sections (Leaks / Blocks / looPs / rules /
-      // Exposures). Phase 3c reserves; future phase wires them to
-      // per-section detail screens. Swallow now so the keys don't fall
-      // through to other handlers. (`s` is no longer reserved here — it
-      // triggers the scan walk above.)
+      // Shields / Exposures). Phase 3c reserves; future phase wires them
+      // to per-section detail screens. Swallow now so the keys don't fall
+      // through to other handlers.
     } else if (input === 'r') {
-      // Manual refresh of audit + blast + shields (cheap) and cost
-      // + scan-signals (expensive, dispatched async so the keypress
-      // feels instant). Update lastRefreshAt synchronously so the
+      // Manual refresh. Updates lastRefreshAt synchronously so the
       // StatusBar timestamp ticks immediately — gives users visible
       // confirmation [r] fired even when underlying data didn't change.
       setLastRefreshAt(Date.now());
-      // Audit re-aggregation is async + chunked — readAuditEntriesAsync
-      // yields between 1k-line batches. The setLastRefreshAt above gives
-      // immediate visual confirmation; this fills in once the parse
-      // settles, ~100 ms later for a typical log.
-      // Realtime [r]: refresh the cheap signals that don't walk history.
-      // Audit aggregation is gated to [2] view now, so we skip it here
-      // when on Realtime — the user can still see live SSE events.
-      // Cost / scan-signals walks were removed from Realtime entirely
-      // (Phase 1) — those panels no longer exist; data lives in [2].
+      // Audit aggregation is gated to [2] view, so we re-aggregate
+      // only when the user is actually on Report. Realtime stays a
+      // pure SSE stream.
       if (view === 'report') {
         void readAuditEntriesAsync().then((entries) => {
           setAgg(aggregateAudit(entries, windowStartMs(window, openedAt)));
         });
+        // Cancel any in-flight scan walk and reset cache to idle so the
+        // [2]-view effect (which watches lastRefreshAt) re-fires and
+        // starts a fresh walk. Without the explicit cancel + reset,
+        // the effect would see status='ready' or 'loading' and skip.
+        const prev = scanWalkCancelRef.current;
+        if (prev) prev();
+        scanWalkCancelRef.current = null;
+        setScanCache({ status: 'idle' });
       }
       setBlast(loadBlast());
       setShieldStatus(loadShieldStatus());
-      // [r] does NOT auto-trigger the scan walk — that's [s]'s job,
-      // opt-in. If the user wants fresh scan results, they press [s]
-      // explicitly. Keeps [r] cheap and predictable.
     }
   });
 

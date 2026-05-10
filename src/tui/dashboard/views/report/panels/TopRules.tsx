@@ -15,6 +15,7 @@ import { COL } from '../../../panels.js';
 import type { ScanCache } from '../../../types.js';
 import type { FilteredScan } from '../derive.js';
 import { fitLabel, num } from '../util.js';
+import { Spinner } from './Spinner.js';
 
 const ROW_LIMIT = 4;
 const LABEL_W = 18;
@@ -41,11 +42,13 @@ export function TopRules({
     >
       <Text bold>TOP RULES FIRED</Text>
       {scanCache.status === 'loading' ? (
-        <Text dimColor>Walking history…</Text>
+        <Text dimColor>
+          <Spinner /> Walking history…
+        </Text>
       ) : scanCache.status === 'error' ? (
-        <Text color="red">⚠ scan failed · [s] retry</Text>
+        <Text color="red">⚠ scan failed · [r] retry</Text>
       ) : scanCache.status === 'idle' ? (
-        <Text dimColor>Press [s] to scan history</Text>
+        <Text dimColor>—</Text>
       ) : !ready || rules.length === 0 ? (
         <Text dimColor>no rules fired this period</Text>
       ) : (

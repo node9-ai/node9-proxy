@@ -228,12 +228,12 @@ function computeHeadline(
     return { text: '(scanning history…)', dim: true };
   }
   if (scanCache.status === 'error') {
-    return { text: '⚠ scan failed · [s] to retry', color: 'red' };
+    return { text: '⚠ scan failed · [r] to retry', color: 'red' };
   }
   if (scanCache.status === 'idle') {
-    // Scan is opt-in via [s] — surface the affordance in the banner so
-    // the user knows the score is incomplete and how to enrich it.
-    return { text: '[s] scan history for findings', dim: true };
+    // Idle is now transient (entering [2] auto-starts the walk). If the
+    // user somehow lingers here, [r] will rescan — same affordance.
+    return { text: '(scan idle · [r] to start)', dim: true };
   }
   if (filtered.sessionsWithEarlySecrets > 0) {
     const n = filtered.sessionsWithEarlySecrets;

@@ -13,6 +13,7 @@ import { Box, Text } from 'ink';
 import { COL } from '../../../panels.js';
 import type { ScanCache } from '../../../types.js';
 import type { FilteredScan } from '../derive.js';
+import { Spinner } from './Spinner.js';
 import { fitLabel, num } from '../util.js';
 
 const ROW_LIMIT = 4;
@@ -44,11 +45,13 @@ export function Leaks({
         {ready ? <Text dimColor>{`  (${num(total)})`}</Text> : null}
       </Box>
       {scanCache.status === 'loading' ? (
-        <Text dimColor>Walking history…</Text>
+        <Text dimColor>
+          <Spinner /> Walking history…
+        </Text>
       ) : scanCache.status === 'error' ? (
-        <Text color="red">⚠ scan failed · [s] retry</Text>
+        <Text color="red">⚠ scan failed · [r] retry</Text>
       ) : scanCache.status === 'idle' ? (
-        <Text dimColor>Press [s] to scan history</Text>
+        <Text dimColor>—</Text>
       ) : total === 0 ? (
         <Text color="green">✓ no leaks this period</Text>
       ) : (
