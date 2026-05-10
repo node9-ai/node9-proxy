@@ -243,7 +243,28 @@ export function App(): React.ReactElement {
             )
           );
         }
-        setPendingApproval((prev) => (prev && prev.id === resolvedId ? null : prev));
+        // Universal resolution flash: if the resolved id matches the
+        // dashboard's pendingApproval, capture it as resolvedApproval
+        // BEFORE clearing. This makes the 5-second `✓ approved` /
+        // `✗ denied` flash fire for ALL approver paths — terminal,
+        // native popup, browser — not just the dashboard's own
+        // [a/d/t]. Without this, an external approver decides and the
+        // dashboard goes straight to idle with no confirmation.
+        setPendingApproval((prev) => {
+          if (!prev || prev.id !== resolvedId) return prev;
+          if (finalVerdict && prev.kind === 'tool') {
+            const outcome: 'allow' | 'deny' | null =
+              finalVerdict === 'allow' ? 'allow' : finalVerdict === 'block' ? 'deny' : null;
+            if (outcome) {
+              setResolvedApproval({
+                event: prev,
+                outcome,
+                resolvedAt: Date.now(),
+              });
+            }
+          }
+          return null;
+        });
       },
       (forensicEvent) => {
         // Live forensic finding from the daemon's 30 s broadcast tick.

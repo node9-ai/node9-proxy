@@ -410,15 +410,23 @@ describe('compactPath', () => {
 // ── mapResultStatus ──────────────────────────────────────────────────────────
 
 describe('mapResultStatus', () => {
-  it('maps allow / observe-allow to "allow"', () => {
+  it('maps allow / observe-allow / trust to "allow"', () => {
     expect(mapResultStatus('allow')).toBe('allow');
     expect(mapResultStatus('observe-allow')).toBe('allow');
+    // 'trust' is a `decision` value (from `event: remove`) that the user
+    // dashboard treats as a successful approval — same outcome bucket.
+    expect(mapResultStatus('trust')).toBe('allow');
   });
-  it('maps every block-shaped status to "block"', () => {
+  it('maps every block-shaped status/decision to "block"', () => {
+    // From `event: activity-result` (status field)
     expect(mapResultStatus('block')).toBe('block');
     expect(mapResultStatus('dlp')).toBe('block');
     expect(mapResultStatus('denied')).toBe('block');
     expect(mapResultStatus('timeout')).toBe('block');
+    // From `event: remove` (decision field — different vocabulary)
+    // Without this fallback, `remove` events with `decision: "deny"` left
+    // LIVE rows stuck in pending forever (verified via SSE wire log).
+    expect(mapResultStatus('deny')).toBe('block');
   });
   it('maps review to "review"', () => {
     expect(mapResultStatus('review')).toBe('review');

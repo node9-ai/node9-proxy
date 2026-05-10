@@ -566,11 +566,25 @@ interface SsePayload {
    * Always normalize before .slice() / Date parsing.
    */
   ts?: string | number;
+  /**
+   * Tool name. The daemon's `event: activity` payload uses `tool`; the
+   * `event: add` payload (queued for approval) uses `toolName`. Different
+   * conventions; both fields appear on the wire. toActivityEvent reads
+   * either via the normalized helper below.
+   */
   tool?: string;
+  toolName?: string;
   agent?: string;
   args?: Record<string, unknown>;
+  /**
+   * Decision/status fields — also use different conventions across
+   * daemon broadcast paths.
+   *   - `decision` appears on `event: remove` payloads ("allow"/"deny"/"trust")
+   *   - `status` appears on `event: activity-result` ("allow"/"block"/"review"/"dlp"/"timeout")
+   *   - `event: activity` may carry either, depending on the broadcast site
+   * mapResultStatus accepts both vocabularies; call sites pass `data.status ?? data.decision`.
+   */
   decision?: string;
-  /** activity-result carries the final verdict on `status` (allow/dlp/etc). */
   status?: string;
   reason?: string;
   checkedBy?: string;
@@ -585,12 +599,27 @@ interface SsePayload {
   activity?: SsePayload;
 }
 
-/** Daemon `activity-result` `status` values → ActivityEvent verdict. */
+/**
+ * Map a daemon decision/status string to an ActivityEvent verdict.
+ *
+ * Accepts both vocabularies the daemon uses:
+ *   - status (from `activity-result`): allow / block / review / dlp / timeout
+ *   - decision (from `remove`): allow / deny / trust
+ * The two paths share this mapper because the call site does
+ * `mapResultStatus(data.status ?? data.decision)`.
+ */
 export function mapResultStatus(status: unknown): ResolvedVerdict | undefined {
   if (typeof status !== 'string') return undefined;
-  if (status === 'allow' || status === 'observe-allow') return 'allow';
-  // 'dlp', 'block', 'denied', timeouts → all render as block on the row.
-  if (status === 'dlp' || status === 'block' || status === 'denied' || status === 'timeout') {
+  if (status === 'allow' || status === 'observe-allow' || status === 'trust') return 'allow';
+  // status: dlp / block / denied / timeout — all render as block on the row.
+  // decision: deny — same outcome bucket.
+  if (
+    status === 'dlp' ||
+    status === 'block' ||
+    status === 'denied' ||
+    status === 'deny' ||
+    status === 'timeout'
+  ) {
     return 'block';
   }
   if (status === 'review') return 'review';
@@ -803,10 +832,11 @@ export function subscribeToSse(
                 // verdict in a future iteration).
                 if (currentEvent === 'activity-result' || currentEvent === 'remove') {
                   if (typeof data.id === 'string') {
-                    // activity-result carries the final daemon verdict on
-                    // `status`. `remove` (timeout/expiry) carries no verdict
-                    // — the row keeps whatever it had.
-                    const verdict = mapResultStatus(data.status);
+                    // activity-result carries the final verdict on `status`
+                    // ("block"/"allow"/"review"/"dlp"/"timeout"). `remove`
+                    // uses `decision` instead ("allow"/"deny"/"trust").
+                    // Pass either to the same mapper — see mapResultStatus.
+                    const verdict = mapResultStatus(data.status ?? data.decision);
                     onResolve(data.id, verdict);
                   }
                   continue;
@@ -859,12 +889,19 @@ function toActivityEvent(eventName: string, data: SsePayload): ActivityEvent | n
   }
 
   if (eventName !== 'activity' && eventName !== 'add') return null;
-  if (!payload.tool) return null;
+  // 'activity' events carry `tool`; 'add' events (queued approvals)
+  // carry `toolName`. Without this fallback, every 'add' SSE event was
+  // silently dropped at parse time, leaving NotificationArea blind to
+  // approvals that needed user action. Confirmed via wire-log capture.
+  const toolName = payload.tool ?? payload.toolName;
+  if (!toolName) return null;
 
   const verdict: 'allow' | 'block' | 'review' | 'pending' = (() => {
-    const d = payload.decision;
-    if (d === 'allow' || d === 'observe-allow') return 'allow';
-    if (d === 'block') return 'block';
+    // Same dual-vocabulary problem as resolves: status is the standard,
+    // decision is what 'remove' uses. Check both.
+    const d = payload.decision ?? payload.status;
+    if (d === 'allow' || d === 'observe-allow' || d === 'trust') return 'allow';
+    if (d === 'block' || d === 'deny' || d === 'denied' || d === 'dlp') return 'block';
     if (d === 'review') return 'review';
     return 'pending';
   })();
@@ -888,9 +925,9 @@ function toActivityEvent(eventName: string, data: SsePayload): ActivityEvent | n
 
   return {
     kind: 'tool',
-    id: payload.id ?? `${ts}-${payload.tool}`,
+    id: payload.id ?? `${ts}-${toolName}`,
     ts,
-    tool: payload.tool,
+    tool: toolName,
     agent: payload.agent,
     preview,
     verdict,
