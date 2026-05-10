@@ -255,12 +255,22 @@ export async function waitForDaemonDecision(
   }
 }
 
-/** Register a viewer-mode card on the daemon (Slack is the real authority). */
+/** Register a viewer-mode card on the daemon (Slack is the real authority).
+ *
+ *  Mirrors registerDaemonEntry's fromCLI/activityId contract: when the CLI
+ *  has already sent the 'activity' event via the Unix socket, we tell the
+ *  daemon to skip its own 'activity' broadcast and reuse the same id.
+ *  Without this, the cloud-enforced path produced TWO 'activity' SSE
+ *  events per logical command — one from state.ts:688 (socket handler)
+ *  and one from server.ts:274 (/check handler with fromCLI=false). */
 export async function notifyDaemonViewer(
   toolName: string,
   args: unknown,
   meta?: { agent?: string; mcpServer?: string },
-  riskMetadata?: RiskMetadata
+  riskMetadata?: RiskMetadata,
+  activityId?: string,
+  /** When false, the socket send of the activity event failed — daemon must emit it. */
+  socketActivitySent?: boolean
 ): Promise<{ id: string; allowCount: number }> {
   const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
   const res = await fetch(`${base}/check`, {
@@ -273,6 +283,11 @@ export async function notifyDaemonViewer(
       agent: meta?.agent,
       mcpServer: meta?.mcpServer,
       ...(riskMetadata && { riskMetadata }),
+      // fromCLI=true tells the daemon the CLI already sent the activity
+      // event via socket. Same contract as registerDaemonEntry — without
+      // it the daemon double-emits 'activity' for cloud-enforced flows.
+      fromCLI: socketActivitySent !== false,
+      activityId,
     }),
     signal: AbortSignal.timeout(3000),
   });

@@ -17,7 +17,9 @@ import {
   type ScanFinding,
   type ScanSignals,
 } from '@node9/policy-engine';
-import { tickScanWatcher, markUploadComplete } from './scan-watermark.js';
+import { tickScanWatcher, markUploadComplete, tickForensicBroadcast } from './scan-watermark.js';
+import { broadcastForensic } from './state.js';
+import { appendToLog, HOOK_DEBUG_LOG } from '../audit/index.js';
 
 // One row per session delta sent on /scan/report. The BE stores
 // these in ScanSessionSignals using INSERT-ON-CONFLICT INCREMENT, so
@@ -597,5 +599,50 @@ export function startCloudSync(): void {
 
   // Then on the configured interval
   const recurring = setInterval(() => void syncOnce(), intervalMs);
+  recurring.unref();
+}
+
+// Local-broadcast cadence for forensic findings. Decoupled from the SaaS
+// sync interval (hourly) so the monitor's RISK panel updates within ~30 s
+// of a finding instead of waiting a full hour. The two paths use separate
+// state: this timer maintains in-memory file offsets via tickForensicBroadcast,
+// while the SaaS path advances the persistent watermark via tickScanWatcher.
+const FORENSIC_BROADCAST_INTERVAL_MS = 30_000;
+const FORENSIC_INITIAL_DELAY_MS = 5_000;
+
+// Per-process in-memory offsets, keyed by JSONL file path. Reset on daemon
+// restart — first tick after start initializes each file's offset to its
+// current EOF, so historical findings are not re-broadcast.
+const forensicBroadcastOffsets = new Map<string, number>();
+
+/**
+ * Start the local-broadcast loop for forensic findings.
+ * Called once by startDaemon(). Timer is unref'd so it doesn't prevent
+ * process exit. Errors inside the tick never propagate — the timer must
+ * keep firing even if a single tick fails.
+ */
+export function startForensicBroadcast(): void {
+  const tick = async () => {
+    try {
+      const findings = await tickForensicBroadcast(forensicBroadcastOffsets);
+      for (const f of findings) broadcastForensic(f);
+    } catch (err) {
+      // Never break the timer loop — the next tick re-attempts. But do
+      // record the failure in hook-debug.log so pathological JSONL parse
+      // errors / fs problems are diagnosable. Mirrors the pattern in
+      // src/cli/commands/log.ts.
+      const msg = err instanceof Error ? err.message : String(err);
+      appendToLog(HOOK_DEBUG_LOG, {
+        ts: new Date().toISOString(),
+        kind: 'forensic-broadcast-error',
+        error: msg,
+      });
+    }
+  };
+
+  const initial = setTimeout(() => void tick(), FORENSIC_INITIAL_DELAY_MS);
+  initial.unref();
+
+  const recurring = setInterval(() => void tick(), FORENSIC_BROADCAST_INTERVAL_MS);
   recurring.unref();
 }

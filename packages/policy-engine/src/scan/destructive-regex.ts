@@ -15,11 +15,20 @@ export const DESTRUCTIVE_OP_RE =
   /\brm\s+-[rRf]+\b|\bDROP\s+(TABLE|DATABASE|COLLECTION|SCHEMA)\b|\bTRUNCATE\s+TABLE\b|\bgit\s+push\s+(--force|-f)\b|\bFLUSHALL\b|\bFLUSHDB\b|\bkubectl\s+delete\b|\bhelm\s+uninstall\b/i;
 
 /**
- * Privilege-escalation regex. Standalone tokens only — `\bsudo\b` not
- * `sudo` to avoid matching e.g. `pseudo` substrings.
+ * Historical privilege-escalation regex. **No longer used by the canonical
+ * detector** — scan/canonical.ts moved sudo/su, chmod, and chown all to
+ * AST tokenization (analyzeShellCommand actions + allTokens) so:
+ *   - Quoting bypasses (`s''udo`, `c\hmod`) don't slip past the matcher.
+ *   - String literals like `echo "chmod 777 done"` or `cat /etc/sudoers`
+ *     stop firing false positives — those don't put the action name in
+ *     `actions`, only in `allTokens` (a Lit, not a CallExpr first-word).
+ *
+ * Kept as a public export for non-AST consumers that grep raw command
+ * strings (smart-rule conditions that match on the literal command text)
+ * and as documentation of the historical pattern set. Removing it would
+ * be a breaking change for downstream package consumers.
  */
-export const PRIVILEGE_ESCALATION_RE =
-  /\b(sudo|su)\b\s+[a-z]|\bchmod\s+(0?777|\+x)\b|\bchown\s+root\b/i;
+export const PRIVILEGE_ESCALATION_RE = /\bchmod\s+(0?777|\+x)\b|\bchown\s+root\b/i;
 
 /**
  * Sensitive file paths the agent shouldn't be reading via tool calls.

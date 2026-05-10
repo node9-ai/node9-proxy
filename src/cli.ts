@@ -451,6 +451,35 @@ program
     }
   });
 
+// node9 monitor — Ink-based unified live dashboard.
+// Renders four panels: live SSE stream, high-level summary, report
+// breakdown, DLP/loop/risk. Reversible: delete src/tui/dashboard/ +
+// this block.
+//
+// Implementation note: ink@7 + react@19 are ESM with top-level await,
+// so they cannot be require()'d from this CJS bundle. The dashboard
+// is built as a separate ESM bundle (dist/dashboard.mjs by tsup's
+// second config) and loaded here via runtime dynamic import. The
+// `new Function('id', 'return import(id)')` indirection bypasses
+// tsup's static-import-to-require transform, which would otherwise
+// rewrite a literal `import()` to require() in this CJS file.
+program
+  .command('monitor')
+  .description('Live interactive dashboard — activity feed, approvals, security signals')
+  .action(async () => {
+    try {
+      const dashboardPath = path.join(__dirname, 'dashboard.mjs');
+      const dynamicImport = new Function('id', 'return import(id)') as (id: string) => Promise<{
+        startMonitor: () => Promise<void>;
+      }>;
+      const mod = await dynamicImport(`file://${dashboardPath}`);
+      await mod.startMonitor();
+    } catch (err) {
+      console.error(chalk.red(`❌ ${err instanceof Error ? err.message : String(err)}`));
+      process.exit(1);
+    }
+  });
+
 // node9 watch
 registerWatchCommand(program);
 

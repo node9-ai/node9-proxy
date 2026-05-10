@@ -821,7 +821,17 @@ async function _authorizeHeadlessCore(
       // Cloud path: create a single card via notifyDaemonViewer so RACER 3
       // (terminal/browser) shares the same daemon entry — no duplicate card.
       // Local UI always participates in the race regardless of cloud policy.
-      const viewer = await notifyDaemonViewer(toolName, args, meta, riskMetadata).catch(() => null);
+      // Pass activityId + socketActivitySent so the daemon skips its own
+      // 'activity' broadcast and reuses the CLI's id — without these,
+      // every cloud-enforced command produced two 'activity' SSE events.
+      const viewer = await notifyDaemonViewer(
+        toolName,
+        args,
+        meta,
+        riskMetadata,
+        options?.activityId,
+        options?.socketActivitySent
+      ).catch(() => null);
       viewerId = viewer?.id ?? null;
       daemonEntryId = viewerId;
       if (viewer) daemonAllowCount = viewer.allowCount;

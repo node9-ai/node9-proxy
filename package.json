@@ -77,8 +77,10 @@
     "chalk": "^4.1.2",
     "commander": "^14.0.3",
     "execa": "^9.6.1",
+    "ink": "^7.0.2",
     "mvdan-sh": "^0.10.1",
     "picomatch": "^4.0.3",
+    "react": "^19.2.6",
     "safe-regex2": "^5.1.0",
     "smol-toml": "^1.6.1",
     "zod": "^3.25.76"
@@ -96,6 +98,7 @@
     "@semantic-release/release-notes-generator": "^14.1.0",
     "@types/node": "^25.3.1",
     "@types/picomatch": "^4.0.2",
+    "@types/react": "^19.2.14",
     "@vitest/coverage-v8": "4.1.2",
     "cross-env": "^10.1.0",
     "prettier": "^3.4.2",

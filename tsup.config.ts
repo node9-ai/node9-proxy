@@ -1,19 +1,35 @@
 import { defineConfig } from 'tsup';
 
-export default defineConfig({
-  entry: {
-    index: 'src/index.ts', // The SDK
-    cli: 'src/cli.ts', // The Binary
+// Two builds:
+//   1) cli + sdk: cjs + esm, main bundles consumed by `bin: dist/cli.js`
+//      and the @node9/proxy SDK exports.
+//   2) dashboard-spike: esm only, loaded at runtime via dynamic import
+//      because ink@7 + react@19 are ESM with top-level await — they
+//      can't be require()'d from a cjs bundle. Marked as runtime
+//      externals so the dashboard.mjs imports them at load time.
+export default defineConfig([
+  {
+    entry: {
+      index: 'src/index.ts',
+      cli: 'src/cli.ts',
+    },
+    format: ['cjs', 'esm'],
+    dts: true,
+    clean: true,
+    splitting: false,
+    // Even in the cjs+esm bundles, never bundle ink/react — the cli's
+    // dynamic-import path expects them at load time, not inlined.
+    external: ['ink', 'react', 'react/jsx-runtime'],
   },
-  format: ['cjs', 'esm'],
-  dts: true,
-  clean: true,
-  splitting: false,
-  // .html loader removed — was only used to bundle ui.html (the local
-  // browser dashboard) into the binary as a text constant. The dashboard
-  // was retired in the v3 browser-removal sprint; no `.html` imports
-  // remain in src/.
-  // Coverage and test tooling (@vitest/coverage-v8, @rolldown/*, etc.) are devDependencies
-  // and are never imported by any src/ file, so tsup's tree-shaking naturally excludes them
-  // from the production bundle. No explicit `external` entry is needed.
-});
+  {
+    entry: { dashboard: 'src/tui/dashboard/index.ts' },
+    format: ['esm'],
+    dts: false,
+    splitting: false,
+    outExtension: () => ({ js: '.mjs' }),
+    external: ['ink', 'react', 'react/jsx-runtime'],
+  },
+]);
+// Note: tsup's tree-shaking naturally excludes devDependencies (vitest,
+// coverage tooling, etc.) since no src/ file imports them. No explicit
+// `external` entry needed beyond ink/react above.
