@@ -10,12 +10,16 @@ export type TimeWindow = 'now' | '1d' | '7d' | '30d' | '60d';
  *  swaps. See doc/roadmap/monitor-two-view.md for the full plan. */
 export type View = 'realtime' | 'report';
 
-/** Period selector for the Report view. Independent from TimeWindow
- *  (which is the realtime monitor's window-tabs concept that's being
+/** Period selector for the Report view. Re-exported from cli/render/report-json
+ *  so the dashboard, the `node9 report` CLI, and the shared aggregator
+ *  (cli/aggregate/report-audit) all agree on which periods exist. The four
+ *  values are bound to T/W/M hotkeys in the Report view's input handler.
+ *  Independent from TimeWindow (the realtime monitor's window-tabs concept,
  *  retired in phase 2). */
-export type ReportPeriod = '1d' | '7d' | '30d' | '90d';
+export type { ReportPeriod } from '../../cli/render/report-json.js';
+import type { ReportPeriod as _ReportPeriod } from '../../cli/render/report-json.js';
 
-export const REPORT_PERIODS: readonly ReportPeriod[] = ['1d', '7d', '30d', '90d'] as const;
+export const REPORT_PERIODS: readonly _ReportPeriod[] = ['today', '7d', '30d', 'month'] as const;
 
 export const TIME_WINDOWS: readonly TimeWindow[] = ['now', '1d', '7d', '30d', '60d'] as const;
 
@@ -188,3 +192,35 @@ export interface CostSnapshot {
   byModel: Array<{ model: string; costUSD: number; calls: number }>;
   loaded: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// Report [2] view — scan-walker cache state
+// ---------------------------------------------------------------------------
+
+import type { ScanResult } from '../../cli/commands/scan.js';
+
+/**
+ * Lazy cache for the agent-history scan walk. The dashboard's Report [2]
+ * view consumes scan-derived panels (LEAKS / LOOPS / TOP RULES) and the
+ * walk takes 1–2 s on warm machines, so it's deferred until the user
+ * actually presses [2]. State machine:
+ *
+ *   idle    — first dashboard mount, walk hasn't started yet
+ *   loading — startScanWalk() has been kicked off in the background;
+ *             scan-derived panels render a loading placeholder while
+ *             non-scan panels render normally
+ *   ready   — walk finished. results.{claude,gemini,codex} hold full
+ *             ScanResult triples; period filtering is in-memory after this
+ *   error   — walk threw; scan-derived panels render an error state with
+ *             [r] retry hint
+ */
+export type ScanCache =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | {
+      status: 'ready';
+      results: { claude: ScanResult; gemini: ScanResult; codex: ScanResult };
+      /** ms epoch when the walk finished — used to invalidate on [r] refresh. */
+      readyAt: number;
+    }
+  | { status: 'error'; error: Error };

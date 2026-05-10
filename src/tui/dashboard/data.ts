@@ -17,12 +17,19 @@ import { DAEMON_HOST, DAEMON_PORT, getInternalToken } from '../../auth/daemon.js
 import { collectEntries, type DailyEntry } from '../../costSync.js';
 import { SHIELDS, readActiveShields } from '../../shields.js';
 import { extractFindingsFromLine } from '../../daemon/scan-watermark.js';
+import {
+  aggregateReportFromAudit,
+  type AggregateResult,
+} from '../../cli/aggregate/report-audit.js';
+import { scanClaudeHistory, scanGeminiHistory, scanCodexHistory } from '../../cli/commands/scan.js';
 import type {
   ActivityEvent,
   AuditAggregates,
   BlastSnapshot,
   CostSnapshot,
   ForensicSseEvent,
+  ReportPeriod,
+  ScanCache,
   ScanSignalsSnapshot,
   SessionForensicAgg,
   ShieldStatus,
@@ -551,6 +558,79 @@ export function loadBlast(): BlastSnapshot {
 function shortenPath(p: string): string {
   const home = os.homedir();
   return p.startsWith(home) ? p.replace(home, '~') : p;
+}
+
+// ---------------------------------------------------------------------------
+// Report [2] data loaders — period-aware audit aggregator + scan-walk cache
+// ---------------------------------------------------------------------------
+
+/**
+ * Period-aware audit aggregation for Report [2]. Thin wrapper around the
+ * shared aggregator in cli/aggregate/report-audit so the dashboard pulls
+ * audit data through the same code path as `node9 report --json`. Sync
+ * (~10 ms on a typical audit log) — the heavy stuff is the scan walk
+ * which goes through startScanWalk() instead.
+ */
+export function loadReportAudit(period: ReportPeriod): AggregateResult {
+  return aggregateReportFromAudit(period);
+}
+
+/**
+ * Kick off a background walk of all three agent histories
+ * (~/.claude/projects, ~/.gemini, ~/.codex/sessions) and stream cache
+ * updates via onUpdate. The walkers themselves are sync, so we yield
+ * once via setImmediate to avoid blocking the initial paint that
+ * triggered the walk.
+ *
+ * Returns a cancel function — when called before the walk completes,
+ * suppresses the final onUpdate. Useful for unmount cleanup or for
+ * superseding a stale walk after the user pressed [r] refresh.
+ *
+ * Lifecycle:
+ *   1. caller invokes startScanWalk(setCache)
+ *   2. immediate onUpdate({ status: 'loading' })   — ReportView re-renders
+ *      with placeholders on scan-derived panels; non-scan panels (audit /
+ *      blast / shields) render normally
+ *   3. setImmediate fires; walkers run sync; takes ~1–2 s on warm machines
+ *   4. on completion: onUpdate({ status: 'ready', results, readyAt })
+ *   5. on throw:      onUpdate({ status: 'error', error })
+ *
+ * The scan-walker `onProgress` callbacks are not threaded through here —
+ * we'd need a shared total-files count to render percentages and the
+ * walkers don't expose one. Keeping this simple until phase 3f decides
+ * whether per-panel progress bars are worth the plumbing.
+ */
+export function startScanWalk(onUpdate: (cache: ScanCache) => void): () => void {
+  let cancelled = false;
+
+  onUpdate({ status: 'loading' });
+
+  setImmediate(() => {
+    if (cancelled) return;
+    try {
+      const claude = scanClaudeHistory(null);
+      if (cancelled) return;
+      const gemini = scanGeminiHistory(null);
+      if (cancelled) return;
+      const codex = scanCodexHistory(null);
+      if (cancelled) return;
+      onUpdate({
+        status: 'ready',
+        results: { claude, gemini, codex },
+        readyAt: Date.now(),
+      });
+    } catch (err) {
+      if (cancelled) return;
+      onUpdate({
+        status: 'error',
+        error: err instanceof Error ? err : new Error(String(err)),
+      });
+    }
+  });
+
+  return () => {
+    cancelled = true;
+  };
 }
 
 // ---------------------------------------------------------------------------
