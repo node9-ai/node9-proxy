@@ -168,6 +168,27 @@ export const EMPTY_SESSION_FORENSIC: SessionForensicAgg = {
   longOutputRedacted: 0,
 };
 
+/** Live (since-monitor-opened) activity tally — feeds the new LIVE
+ *  ACTIVITY panel on Realtime (tools + shell distribution) and the dlp
+ *  / loops rows of LIVE SECURITY. Pure SSE accumulator: `tools[name]`
+ *  and `shell[firstToken]` increment on every `kind:'tool'` event;
+ *  `dlp` / `loops` increment when `checkedBy` matches the same rules
+ *  the audit aggregator uses. No history walks. */
+export interface SessionActivityAgg {
+  tools: Record<string, number>;
+  /** Bash first-token distribution (git, npm, rm, …). */
+  shell: Record<string, number>;
+  dlp: number;
+  loops: number;
+}
+
+export const EMPTY_SESSION_ACTIVITY: SessionActivityAgg = {
+  tools: {},
+  shell: {},
+  dlp: 0,
+  loops: 0,
+};
+
 /** SSE 'forensic' event payload. Mirrors the ForensicEvent shape the
  *  daemon broadcasts in src/daemon/state.ts. Carries categorical
  *  metadata only — never raw matched content. */

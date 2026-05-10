@@ -38,6 +38,7 @@ import type {
   ReportPeriod,
   ScanCache,
   ScanSignalsSnapshot,
+  SessionActivityAgg,
   SessionForensicAgg,
   ShieldStatus,
 } from './types.js';
@@ -1064,6 +1065,38 @@ export function applyForensicEvent(
   }
   return next;
 }
+
+/**
+ * Pure reducer: tally a tool event into the live activity aggregate.
+ * Called once per `kind:'tool'` SSE event. Increments tools[tool],
+ * shell[firstToken] (Bash only — uses the same first-token + identifier
+ * regex aggregateAudit uses so live + history match), and dlp/loops via
+ * checkedBy substring (same rules aggregateAudit applies offline).
+ *
+ * Pending events still carry checkedBy on the wire when a rule has
+ * already classified them, so we tally on every event — no second pass
+ * needed in the resolve handler.
+ */
+export function applyActivityEvent(agg: SessionActivityAgg, e: ActivityEvent): SessionActivityAgg {
+  if (e.kind !== 'tool') return agg;
+  const tools = { ...agg.tools, [e.tool]: (agg.tools[e.tool] ?? 0) + 1 };
+  let shell = agg.shell;
+  if (SHELL_TOOLS.has(e.tool) && typeof e.preview === 'string' && e.preview.length > 0) {
+    const head = e.preview.trim().split(/\s+/)[0];
+    if (head && /^[a-zA-Z0-9._-]+$/.test(head)) {
+      shell = { ...shell, [head]: (shell[head] ?? 0) + 1 };
+    }
+  }
+  let dlp = agg.dlp;
+  let loops = agg.loops;
+  if (e.checkedBy) {
+    if (e.checkedBy === 'loop-detected') loops++;
+    if (e.checkedBy.toLowerCase().includes('dlp')) dlp++;
+  }
+  return { tools, shell, dlp, loops };
+}
+
+const SHELL_TOOLS: ReadonlySet<string> = new Set(['Bash', 'bash']);
 
 /** Initial reconnect delay (ms). Doubles on each failure up to MAX. */
 const SSE_BACKOFF_INITIAL_MS = 1_000;

@@ -13,6 +13,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import {
+  EMPTY_SESSION_ACTIVITY,
   EMPTY_SESSION_FORENSIC,
   windowStartMs,
   type ActivityEvent,
@@ -22,6 +23,7 @@ import {
   type ReportPeriod,
   type ScanCache,
   type ScanSignalsSnapshot,
+  type SessionActivityAgg,
   type SessionForensicAgg,
   type ShieldStatus,
   type TimeWindow,
@@ -29,6 +31,7 @@ import {
 } from './types.js';
 import {
   aggregateAudit,
+  applyActivityEvent,
   applyForensicEvent,
   loadBlast,
   loadReportAuditAsync,
@@ -42,9 +45,10 @@ import { computeHealthBadge } from './health.js';
 import type { AggregateResult } from '../../cli/aggregate/report-audit.js';
 import {
   Header,
+  LiveActivity,
   LiveLog,
+  LiveSecurity,
   NotificationArea,
-  Risk,
   SessionCounters,
   StatusBar,
   type ApprovalStatus,
@@ -201,6 +205,15 @@ export function App(): React.ReactElement {
     block: 0,
     review: 0,
   });
+  // Live activity tally — feeds the new LIVE ACTIVITY panel (tools +
+  // shell distribution) and the dlp/loops rows of LIVE SECURITY. Pure
+  // SSE accumulator; updates on every kind:'tool' event via
+  // applyActivityEvent.
+  const [sessionActivityAgg, setSessionActivityAgg] = useState<SessionActivityAgg>(() => ({
+    ...EMPTY_SESSION_ACTIVITY,
+    tools: {},
+    shell: {},
+  }));
   // (skillsPinned / mcpPinned counters were inputs to the old HIGH LEVEL
   // panel; they're no longer rendered on Realtime in Phase 1. The
   // readSkillsPinned / readMcpPinned helpers below are kept for [2]
@@ -352,6 +365,7 @@ export function App(): React.ReactElement {
             block: c.block + (e.verdict === 'block' ? 1 : 0),
             review: c.review + (e.verdict === 'review' ? 1 : 0),
           }));
+          setSessionActivityAgg((prev) => applyActivityEvent(prev, e));
         }
         // verdict === 'review' on a regular `activity` event is also a
         // pending-approval signal (shield/rule explicitly asked for
@@ -840,13 +854,14 @@ export function App(): React.ReactElement {
             filter={filter}
             filterInputMode={filterInputMode}
           />
-          <Risk
-            agg={agg}
-            blast={blast}
-            shieldStatus={shieldStatus}
-            forensicAgg={sessionForensicAgg}
-            window={window}
-          />
+          <Box flexDirection="row" marginX={1}>
+            <LiveSecurity
+              blast={blast}
+              forensicAgg={sessionForensicAgg}
+              activityAgg={sessionActivityAgg}
+            />
+            <LiveActivity agg={sessionActivityAgg} />
+          </Box>
         </>
       ) : (
         <ReportView

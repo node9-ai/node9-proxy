@@ -20,6 +20,7 @@ import * as path from 'path';
 import {
   aggregateAudit,
   aggregateCost,
+  applyActivityEvent,
   applyForensicEvent,
   auditEntryToActivityEvent,
   buildCostBaseline,
@@ -31,7 +32,13 @@ import {
   subtractCostBaseline,
   toActivityEvent,
 } from '../tui/dashboard/data';
-import { EMPTY_SESSION_FORENSIC, type ForensicSseEvent } from '../tui/dashboard/types';
+import {
+  EMPTY_SESSION_ACTIVITY,
+  EMPTY_SESSION_FORENSIC,
+  type ActivityEvent,
+  type ForensicSseEvent,
+  type SessionActivityAgg,
+} from '../tui/dashboard/types';
 import type { DailyEntry } from '../costSync';
 
 // ── shared minimal-shape helpers ──────────────────────────────────────────────
@@ -726,6 +733,90 @@ describe('applyForensicEvent', () => {
     agg = applyForensicEvent(agg, fEvent('pii'));
     agg = applyForensicEvent(agg, fEvent('pii'));
     expect(agg.pii).toBe(3);
+  });
+});
+
+// ── applyActivityEvent ────────────────────────────────────────────────────────
+
+describe('applyActivityEvent', () => {
+  function toolEvent(overrides: Partial<ActivityEvent> = {}): ActivityEvent {
+    return {
+      kind: 'tool',
+      id: 'evt_1',
+      ts: '2026-05-10T00:00:00.000Z',
+      tool: 'Bash',
+      preview: 'git status',
+      verdict: 'allow',
+      ...overrides,
+    } as ActivityEvent;
+  }
+
+  it('increments tools[name] for every tool event', () => {
+    let agg: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {} };
+    agg = applyActivityEvent(agg, toolEvent({ tool: 'Read', preview: '/etc/hosts' }));
+    agg = applyActivityEvent(agg, toolEvent({ tool: 'Read', preview: '/tmp/x' }));
+    agg = applyActivityEvent(agg, toolEvent({ tool: 'Edit', preview: 'src/app.ts' }));
+    expect(agg.tools).toEqual({ Read: 2, Edit: 1 });
+  });
+
+  it('extracts shell first-token for Bash and tallies', () => {
+    let agg: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {} };
+    agg = applyActivityEvent(agg, toolEvent({ preview: 'git status' }));
+    agg = applyActivityEvent(agg, toolEvent({ preview: 'git diff HEAD' }));
+    agg = applyActivityEvent(agg, toolEvent({ preview: 'npm test' }));
+    expect(agg.shell).toEqual({ git: 2, npm: 1 });
+  });
+
+  it('skips shell tally for non-Bash tools', () => {
+    let agg: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {} };
+    agg = applyActivityEvent(agg, toolEvent({ tool: 'Read', preview: '/etc/hosts' }));
+    expect(agg.shell).toEqual({});
+  });
+
+  it('skips shell tally when first token has invalid chars', () => {
+    let agg: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {} };
+    agg = applyActivityEvent(agg, toolEvent({ preview: 'cat $(whoami)' }));
+    // first token is 'cat' which IS valid — sanity that valid words tally
+    expect(agg.shell['cat']).toBe(1);
+    agg = applyActivityEvent(agg, toolEvent({ preview: '$(weird)' }));
+    // '$(weird)' fails the identifier regex and is skipped
+    expect(Object.keys(agg.shell)).toEqual(['cat']);
+  });
+
+  it('counts dlp via checkedBy substring', () => {
+    let agg: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {} };
+    agg = applyActivityEvent(agg, toolEvent({ checkedBy: 'dlp-block' }));
+    agg = applyActivityEvent(agg, toolEvent({ checkedBy: 'dlp-saas:aws' }));
+    agg = applyActivityEvent(agg, toolEvent({ checkedBy: 'response-dlp-aws' }));
+    expect(agg.dlp).toBe(3);
+  });
+
+  it('counts loops only on exact loop-detected', () => {
+    let agg: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {} };
+    agg = applyActivityEvent(agg, toolEvent({ checkedBy: 'loop-detected' }));
+    agg = applyActivityEvent(agg, toolEvent({ checkedBy: 'something-else' }));
+    expect(agg.loops).toBe(1);
+  });
+
+  it('ignores snapshot events', () => {
+    const before = { ...EMPTY_SESSION_ACTIVITY, tools: { Bash: 5 }, shell: { git: 5 } };
+    const snapshotEvent: ActivityEvent = {
+      kind: 'snapshot',
+      id: 'snap_1',
+      ts: '2026-05-10T00:00:00.000Z',
+      hash: 'abc',
+      summary: '/tmp/x',
+      fileCount: 1,
+    };
+    const after = applyActivityEvent(before, snapshotEvent);
+    expect(after).toBe(before);
+  });
+
+  it('does not mutate input', () => {
+    const before = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {} };
+    const snapshot = JSON.stringify(before);
+    applyActivityEvent(before, toolEvent({ preview: 'git status' }));
+    expect(JSON.stringify(before)).toBe(snapshot);
   });
 });
 

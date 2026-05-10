@@ -11,8 +11,8 @@ import type {
   BlastSnapshot,
   CostSnapshot,
   ForensicSseEvent,
+  SessionActivityAgg,
   SessionForensicAgg,
-  ShieldStatus,
   TimeWindow,
   View,
 } from './types.js';
@@ -71,6 +71,10 @@ export function Header(props: {
 }
 
 function renderHealthBadge(h: HealthBadge): React.ReactNode {
+  // Binary secure / at-risk indicator only — the prior multi-reason
+  // chips ("5 paths exposed", "5 shields off", score) were retired
+  // from the header pending a clearer definition. The new LIVE
+  // SECURITY panel surfaces the same signals with proper detail.
   if (h.severity === 'secure') {
     return (
       <>
@@ -81,16 +85,11 @@ function renderHealthBadge(h: HealthBadge): React.ReactNode {
   }
   const icon = h.severity === 'critical' ? '🛑' : '⚠';
   const color = h.severity === 'critical' ? COL.liveOff : COL.panelHigh;
-  const summary = h.reasons.length > 0 ? h.reasons.join(', ') : 'risk';
-  // Hint ("see node9 scan") used to be inlined here but pushed the
-  // header past 80 chars and forced 2-line wrapping that destabilised
-  // FIXED_PANELS_HEIGHT. The [2] report key in StatusBar already
-  // points users where to look.
   return (
     <>
       <Text dimColor>{'  · '}</Text>
       <Text color={color} bold>{`${icon} `}</Text>
-      <Text color={color}>{summary}</Text>
+      <Text color={color}>at risk</Text>
     </>
   );
 }
@@ -213,11 +212,6 @@ export const NOTIFICATION_HEIGHT = 4;
  *  3 columns now (Tools / Shell / Models). Worst case = 6 rows in any
  *  column (1 header + 5 data) + title (1) + 2 borders = 9. */
 export const REPORT_PANEL_HEIGHT = 9;
-/** Fixed height for the RISK panel ("Live security"). Always exactly
- *  4 content rows (title + dlp/loops/score + forensic + shield-summary)
- *  plus 2 borders = 6. Pinned so the loading→loaded transition for
- *  shieldStatus doesn't shift the layout. */
-export const RISK_PANEL_HEIGHT = 6;
 
 export function NotificationArea(props: { notification: Notification }): React.ReactElement {
   const { notification } = props;
@@ -699,90 +693,146 @@ function bar(value: number, max: number, width: number): string {
 }
 
 // ---------------------------------------------------------------------------
-// Risk — DLP/loop/blast summary
+// LiveSecurity — vertical "new issues since open" panel for Realtime
+//
+// Replaces the cramped two-line Risk panel. Shows 9 categorical rows
+// sorted by count desc; sources are all live (no history walks):
+//   - dlp / loops          → SessionActivityAgg (rule-tagged SSE events)
+//   - paths                → blast.paths.length (sync FS snapshot)
+//   - pii / read / priv /  → SessionForensicAgg (live ForensicSseEvent
+//     dest / eval / pipe /    stream from the daemon's watermark scan)
+//     long
+//
+// Rows with zero counts render dim and stay at the bottom — the
+// category list is stable across sessions even when nothing has fired
+// in a category yet.
 // ---------------------------------------------------------------------------
 
-export function Risk(props: {
-  agg: AuditAggregates | null;
-  blast: BlastSnapshot;
-  shieldStatus: ShieldStatus | null;
+const LIVE_SECURITY_ROWS_HEIGHT = 11;
+
+export function LiveSecurity(props: {
+  blast: BlastSnapshot | null;
   forensicAgg: SessionForensicAgg;
-  window: TimeWindow;
+  activityAgg: SessionActivityAgg;
 }): React.ReactElement {
-  // agg is nullable on Realtime (Phase 1: audit aggregation is gated to
-  // [2] Report view). When null, we render with zero history counts —
-  // forensicAgg below still surfaces live SSE-driven counts so Risk
-  // remains informative on Realtime, just without the audit-derived
-  // DLP/loop tallies that need a history walk.
-  const dlpHits = props.agg?.dlpHits ?? 0;
-  const loopHits = props.agg?.loops ?? 0;
-  const scoreColor =
-    props.blast.score >= 80 ? '#5BF58C' : props.blast.score >= 50 ? COL.panelHigh : COL.liveOff;
+  const rows: Array<{ label: string; count: number }> = [
+    { label: 'dlp', count: props.activityAgg.dlp },
+    { label: 'loops', count: props.activityAgg.loops },
+    { label: 'paths', count: props.blast?.paths.length ?? 0 },
+    { label: 'pii', count: props.forensicAgg.pii },
+    { label: 'read', count: props.forensicAgg.sensitiveFileRead },
+    { label: 'priv', count: props.forensicAgg.privilegeEscalation },
+    { label: 'dest', count: props.forensicAgg.destructiveOp },
+    { label: 'eval', count: props.forensicAgg.evalOfRemote },
+    { label: 'pipe', count: props.forensicAgg.pipeToShell },
+    { label: 'long', count: props.forensicAgg.longOutputRedacted },
+  ];
+  // Sort desc by count; zero rows naturally fall to the bottom.
+  rows.sort((a, b) => b.count - a.count);
+  const max = Math.max(1, ...rows.map((r) => r.count));
+  const totalIssues = rows.reduce((sum, r) => sum + r.count, 0);
   return (
     <Box
       flexDirection="column"
       borderStyle="round"
-      borderColor={COL.panelRisk}
+      borderColor={totalIssues > 0 ? COL.panelRisk : COL.textDim}
       paddingX={1}
-      marginX={1}
-      height={RISK_PANEL_HEIGHT}
+      flexGrow={1}
+      flexBasis={0}
+      height={LIVE_SECURITY_ROWS_HEIGHT}
     >
       <Text>
         <Text color={COL.brand} bold>
-          Live security
+          LIVE SECURITY
         </Text>
-        <Text dimColor>{`  · ${labelFor(props.window)}`}</Text>
+        <Text dimColor>{`  · since open · ${totalIssues} new`}</Text>
       </Text>
-      <Text wrap="truncate-end">
-        <Text color={COL.liveOff}>{'🔑 '}</Text>
-        <Text bold>{dlpHits}</Text>
-        <Text dimColor> DLP · </Text>
-        <Text color={COL.panelHigh}>{'🔁 '}</Text>
-        <Text bold>{loopHits}</Text>
-        <Text dimColor> loops · </Text>
-        <Text color={COL.liveOff}>{'🔭 '}</Text>
-        <Text bold>{props.blast.paths.length}</Text>
-        <Text dimColor> paths · score </Text>
-        <Text bold color={scoreColor}>{`${props.blast.score}/100`}</Text>
-      </Text>
-      {/* Forensic counts since `node9 monitor` opened. Updates within
-          ~30s of a finding via the daemon's 'forensic' SSE channel.
-          Claude-only — Cursor / Codex don't write JSONL the watermark
-          scanner reads from. See doc/roadmap/daemon-redesign.md
-          (option A) for multi-agent coverage plans. */}
-      <Text wrap="truncate-end">
-        <Text bold>{props.forensicAgg.pii}</Text>
-        <Text dimColor> pii · </Text>
-        <Text bold>{props.forensicAgg.sensitiveFileRead}</Text>
-        <Text dimColor> read · </Text>
-        <Text bold>{props.forensicAgg.privilegeEscalation}</Text>
-        <Text dimColor> priv · </Text>
-        <Text bold>{props.forensicAgg.destructiveOp}</Text>
-        <Text dimColor> dest · </Text>
-        <Text bold>{props.forensicAgg.evalOfRemote}</Text>
-        <Text dimColor> eval · </Text>
-        <Text bold>{props.forensicAgg.pipeToShell}</Text>
-        <Text dimColor> pipe · </Text>
-        <Text bold>{props.forensicAgg.longOutputRedacted}</Text>
-        <Text dimColor> long (Claude)</Text>
-      </Text>
-      {/* Single-line shield summary: active vs inactive counts only.
-          The full inactive-shield list and the "node9 shield enable"
-          call-to-action move to View 2's Coverage section in phase 8.
-          Likewise the path list (was rendered here) — V2 Coverage owns
-          the detail; V1 keeps just enough context for an at-a-glance
-          status check. Always rendered (with `…` placeholder while
-          shieldStatus loads) so the panel height stays constant from
-          first paint. */}
-      <Text wrap="truncate-end">
-        <Text color={COL.live}>{'🛡 '}</Text>
-        <Text bold>{props.shieldStatus ? props.shieldStatus.active.length : '…'}</Text>
-        <Text dimColor> active · </Text>
-        <Text bold>{props.shieldStatus ? props.shieldStatus.inactive.length : '…'}</Text>
-        <Text dimColor> inactive</Text>
-      </Text>
+      {rows.map((r) => (
+        <Text key={r.label} wrap="truncate-end">
+          <Text dimColor>{bar(r.count, max, 4)}</Text>
+          <Text>{` ${r.label.padEnd(6)}`}</Text>
+          <Text bold={r.count > 0} color={r.count > 0 ? undefined : COL.textDim}>
+            {`${r.count}`.padStart(5)}
+          </Text>
+        </Text>
+      ))}
     </Box>
   );
+}
+
+// ---------------------------------------------------------------------------
+// LiveActivity — vertical tools + shell distribution for Realtime
+//
+// SSE-driven counterpart to the Report panel in [2]. Two stacked
+// sections (TOOLS / SHELL) inside one bordered box, each showing the
+// top 5 by count. Counts come from SessionActivityAgg, which the App
+// updates on every kind:'tool' event — so the panel grows in real time
+// without any history walk.
+// ---------------------------------------------------------------------------
+
+const LIVE_ACTIVITY_ROWS = 5;
+
+export function LiveActivity(props: { agg: SessionActivityAgg }): React.ReactElement {
+  const tools = topNFromMap(props.agg.tools, LIVE_ACTIVITY_ROWS);
+  const shell = topNFromMap(props.agg.shell, LIVE_ACTIVITY_ROWS);
+  const maxTool = Math.max(1, ...tools.map((t) => t.count));
+  const maxShell = Math.max(1, ...shell.map((s) => s.count));
+  return (
+    <Box
+      flexDirection="column"
+      borderStyle="round"
+      borderColor={COL.panelReport}
+      paddingX={1}
+      flexGrow={1}
+      flexBasis={0}
+      height={LIVE_SECURITY_ROWS_HEIGHT}
+    >
+      <Text>
+        <Text color={COL.brand} bold>
+          LIVE ACTIVITY
+        </Text>
+        <Text dimColor>{'  · since open'}</Text>
+      </Text>
+      <Text dimColor wrap="truncate-end">
+        TOOLS
+      </Text>
+      {tools.length === 0 ? (
+        <Text dimColor>—</Text>
+      ) : (
+        tools.map((t) => (
+          <Text key={t.name} wrap="truncate-end">
+            <Text dimColor>{bar(t.count, maxTool, 4)}</Text>
+            <Text>{` ${truncate(t.name, 11).padEnd(11)}`}</Text>
+            <Text bold>{`${t.count}`.padStart(5)}</Text>
+          </Text>
+        ))
+      )}
+      <Text dimColor wrap="truncate-end">
+        SHELL
+      </Text>
+      {shell.length === 0 ? (
+        <Text dimColor>—</Text>
+      ) : (
+        shell.map((s) => (
+          <Text key={s.name} wrap="truncate-end">
+            <Text dimColor>{bar(s.count, maxShell, 4)}</Text>
+            <Text>{` ${truncate(s.name, 11).padEnd(11)}`}</Text>
+            <Text bold>{`${s.count}`.padStart(5)}</Text>
+          </Text>
+        ))
+      )}
+    </Box>
+  );
+}
+
+function topNFromMap(
+  map: Record<string, number>,
+  n: number
+): Array<{ name: string; count: number }> {
+  return Object.entries(map)
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, n);
 }
 
 // ---------------------------------------------------------------------------
