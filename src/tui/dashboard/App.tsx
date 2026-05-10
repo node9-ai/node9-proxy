@@ -24,6 +24,7 @@ import {
   type CostSnapshot,
   type ForensicSseEvent,
   type ReportPeriod,
+  type ScanCache,
   type ScanSignalsSnapshot,
   type SessionForensicAgg,
   type ShieldStatus,
@@ -37,14 +38,17 @@ import {
   buildCostBaseline,
   loadBlast,
   loadCostEntries,
+  loadReportAudit,
   loadScanSignals,
   loadShieldStatus,
   readAuditEntries,
+  startScanWalk,
   subtractCostBaseline,
   submitDecision,
   subscribeToSse,
 } from './data.js';
 import { computeHealthBadge } from './health.js';
+import type { AggregateResult } from '../../cli/aggregate/report-audit.js';
 import type { DailyEntry } from '../../costSync.js';
 import {
   Header,
@@ -52,12 +56,12 @@ import {
   LiveLog,
   NotificationArea,
   Report,
-  ReportView,
   Risk,
   StatusBar,
   type ApprovalStatus,
   type Notification,
 } from './panels.js';
+import { ReportView } from './views/report/index.js';
 
 const LIVE_BUFFER_CAP = 100;
 const AUDIT_REFRESH_MS = 30_000;
@@ -130,9 +134,19 @@ export function App(): React.ReactElement {
   // do NOT touch this — keeping it manual-only makes it a clean
   // "did my keypress work?" diagnostic.
   const [lastRefreshAt, setLastRefreshAt] = useState<number>(() => Date.now());
-  // Period setter wires up in phase 5 (period picker keys). Phase 1 just
-  // shows the default in the stub Report view.
-  const [reportPeriod] = useState<ReportPeriod>('7d');
+  // Period selector for the Report [2] view. Default '7d' matches the CLI
+  // (`node9 report --period 7d`). T/W/M hotkeys below set today/7d/30d.
+  // The 'month' value is reachable via the CLI but not the dashboard —
+  // M maps to 30d (rolling) here, which is the more common user intent.
+  const [reportPeriod, setReportPeriod] = useState<ReportPeriod>('7d');
+  // Audit aggregate for Report [2]. Re-loaded by useEffect when the user
+  // switches to view='report' or changes the period. Null while initial
+  // load runs (just one tick — sync ~10ms).
+  const [reportAudit, setReportAudit] = useState<AggregateResult | null>(null);
+  // Scan-walk cache for Report [2]. Phase 3b plumbed it; phase 3f starts
+  // consuming results. Lazy: walks only run on first [2] press, not at
+  // mount. See loadReportAudit / startScanWalk in data.ts.
+  const [scanCache, setScanCache] = useState<ScanCache>({ status: 'idle' });
   // Realtime view is "since monitor opened" — phase 2 of the two-view
   // restructure. The TimeWindow concept stays (used by audit/cost aggs)
   // but is pinned to 'now' which means startMs = openedAt. Period
@@ -209,6 +223,26 @@ export function App(): React.ReactElement {
   // Earlier this used buildLiveBackfill but was removed in the phase 2
   // RISK/Realtime cleanup for consistency. To see history, switch to
   // [2] Report view.
+
+  // Report [2] data — re-aggregates the audit log when the user is on
+  // the Report view and the period changes (or on manual [r] refresh).
+  // Cheap (~10ms) so we can be liberal with re-runs. The scan walk is
+  // separate (lazy + cached) — only kicks off the first time the user
+  // presses [2], doesn't run while sitting on Realtime.
+  useEffect(() => {
+    if (view !== 'report') return;
+    setReportAudit(loadReportAudit(reportPeriod));
+  }, [view, reportPeriod, lastRefreshAt]);
+
+  useEffect(() => {
+    if (view !== 'report') return;
+    if (scanCache.status !== 'idle') return;
+    const cancel = startScanWalk(setScanCache);
+    return cancel;
+    // scanCache intentionally not in deps — we only want to start ONCE
+    // per idle state. State transitions (loading → ready) shouldn't
+    // re-trigger the walk.
+  }, [view]);
 
   // SSE subscription — runs once, fed by daemon.
   useEffect(() => {
@@ -471,6 +505,34 @@ export function App(): React.ReactElement {
       setView('realtime');
     } else if (input === '2') {
       setView('report');
+    } else if (view === 'report' && (input === 't' || input === 'T')) {
+      setReportPeriod('today');
+    } else if (view === 'report' && (input === 'w' || input === 'W')) {
+      setReportPeriod('7d');
+    } else if (view === 'report' && (input === 'm' || input === 'M')) {
+      // [M] maps to 30d (rolling 30 days), not 'month' (calendar month).
+      // 30d is what users almost always want; 'month' is reachable via
+      // the CLI flag `node9 report --period month` for parity.
+      setReportPeriod('30d');
+    } else if (
+      view === 'report' &&
+      (input === 'l' ||
+        input === 'b' ||
+        input === 'p' ||
+        input === 'o' ||
+        input === 's' ||
+        input === 'e' ||
+        input === 'L' ||
+        input === 'B' ||
+        input === 'P' ||
+        input === 'O' ||
+        input === 'S' ||
+        input === 'E')
+    ) {
+      // Reserved for drill-down sections (Leaks / Blocks / looPs / rules /
+      // Shields / Exposures). Phase 3c reserves; future phase wires them
+      // to per-section detail screens. Swallow now so the keys don't fall
+      // through to other handlers.
     } else if (input === 'r') {
       // Manual refresh of audit + blast + shields (cheap) and cost
       // + scan-signals (expensive, dispatched async so the keypress
@@ -692,7 +754,7 @@ export function App(): React.ReactElement {
           />
         </>
       ) : (
-        <ReportView period={reportPeriod} />
+        <ReportView period={reportPeriod} audit={reportAudit} scanCache={scanCache} />
       )}
       <StatusBar view={view} lastRefreshAt={lastRefreshAt} />
     </Box>

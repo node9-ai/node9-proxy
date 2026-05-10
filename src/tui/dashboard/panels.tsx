@@ -11,7 +11,6 @@ import type {
   BlastSnapshot,
   CostSnapshot,
   ForensicSseEvent,
-  ReportPeriod,
   SessionForensicAgg,
   ShieldStatus,
   TimeWindow,
@@ -28,7 +27,7 @@ import {
   truncate,
 } from './format.js';
 
-const COL = {
+export const COL = {
   brand: '#FF8C42', // orange — brand
   live: '#5BF58C', // green — connected status
   liveOff: '#F55B5B', // red — disconnected
@@ -812,49 +811,6 @@ export function StatusBar(props: { view: View; lastRefreshAt: number }): React.R
   );
 }
 
-// ---------------------------------------------------------------------------
-// ReportView — phase-1 stub. Full implementation lands in phases 4-8 (see
-// doc/roadmap/monitor-two-view.md). For now: shows the period picker and
-// a "coming soon" placeholder for each section so the switcher is visibly
-// alive end-to-end.
-// ---------------------------------------------------------------------------
-
-export function ReportView(props: { period: ReportPeriod }): React.ReactElement {
-  return (
-    <Box flexDirection="column" flexGrow={1} paddingX={1}>
-      <Box paddingY={1}>
-        <Text color={COL.brand} bold>
-          REPORT
-        </Text>
-        <Text dimColor>{`  · period ${props.period}`}</Text>
-      </Box>
-      <Box flexDirection="column" gap={0}>
-        <ReportSectionStub label="Security" hint="leaks · blocks · loops · forensic 90d" />
-        <ReportSectionStub label="Activity" hint="top tools · top blocks · daily/hourly" />
-        <ReportSectionStub label="Cost" hint="per model · per day · cache hit" />
-        <ReportSectionStub label="Coverage" hint="inactive shields · reachable paths" />
-      </Box>
-      <Box marginTop={1}>
-        <Text dimColor>(report sections land in phases 4–8 — press [1] to return to realtime)</Text>
-      </Box>
-    </Box>
-  );
-}
-
-function ReportSectionStub(props: { label: string; hint: string }): React.ReactElement {
-  return (
-    <Box
-      borderStyle="round"
-      borderColor={COL.textDim}
-      paddingX={1}
-      marginX={1}
-      flexDirection="column"
-    >
-      <Text>
-        <Text bold>{props.label}</Text>
-        <Text dimColor>{`  — ${props.hint}`}</Text>
-      </Text>
-      <Text dimColor>(coming soon)</Text>
-    </Box>
-  );
-}
+// ReportView lives in src/tui/dashboard/views/report/index.tsx as of phase 3c.
+// The phase-1 stub that used to live here was replaced by the proper view
+// shell — see views/report/index.tsx for the current implementation.
