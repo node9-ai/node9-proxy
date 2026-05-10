@@ -30,6 +30,7 @@ const emptyScan: ScanResult = {
 
 vi.mock('../cli/commands/scan', () => ({
   scanClaudeHistory: vi.fn(() => emptyScan),
+  scanClaudeHistoryAsync: vi.fn(async () => emptyScan),
   scanGeminiHistory: vi.fn(() => emptyScan),
   scanCodexHistory: vi.fn(() => emptyScan),
 }));
@@ -122,8 +123,8 @@ describe('startScanWalk', () => {
 
   it('emits error state when a walker throws', async () => {
     const scanModule = await import('../cli/commands/scan.js');
-    const original = scanModule.scanClaudeHistory;
-    vi.mocked(scanModule.scanClaudeHistory).mockImplementationOnce(() => {
+    const original = scanModule.scanClaudeHistoryAsync;
+    vi.mocked(scanModule.scanClaudeHistoryAsync).mockImplementationOnce(async () => {
       throw new Error('boom');
     });
 
@@ -136,6 +137,6 @@ describe('startScanWalk', () => {
       expect(last.error.message).toBe('boom');
     }
 
-    vi.mocked(scanModule.scanClaudeHistory).mockImplementation(original);
+    vi.mocked(scanModule.scanClaudeHistoryAsync).mockImplementation(original);
   });
 });

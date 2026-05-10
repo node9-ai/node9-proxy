@@ -22,7 +22,6 @@ import { COST_PER_LOOP_ITER_USD } from '@node9/policy-engine';
 
 import { Protection } from './panels/Protection.js';
 import { TopBlocks } from './panels/TopBlocks.js';
-import { ThisWeek } from './panels/ThisWeek.js';
 import { BlastRadius } from './panels/BlastRadius.js';
 import { Leaks } from './panels/Leaks.js';
 import { Loops } from './panels/Loops.js';
@@ -72,7 +71,6 @@ export function ReportView({
       <Box flexDirection="row" gap={1}>
         <Protection audit={audit} />
         <TopBlocks audit={audit} />
-        <ThisWeek audit={audit} />
       </Box>
       <BlastRadius
         blast={blast}
@@ -227,10 +225,15 @@ function computeHeadline(
   blast: BlastSnapshot | null
 ): Headline | null {
   if (scanCache.status === 'loading') {
-    return { text: '(loading scan history…)', dim: true };
+    return { text: '(scanning history…)', dim: true };
   }
   if (scanCache.status === 'error') {
-    return { text: '⚠ scan failed · [r] to retry', color: 'red' };
+    return { text: '⚠ scan failed · [s] to retry', color: 'red' };
+  }
+  if (scanCache.status === 'idle') {
+    // Scan is opt-in via [s] — surface the affordance in the banner so
+    // the user knows the score is incomplete and how to enrich it.
+    return { text: '[s] scan history for findings', dim: true };
   }
   if (filtered.sessionsWithEarlySecrets > 0) {
     const n = filtered.sessionsWithEarlySecrets;

@@ -51,9 +51,9 @@ export function Loops({
       {scanCache.status === 'loading' ? (
         <Text dimColor>Walking history…</Text>
       ) : scanCache.status === 'error' ? (
-        <Text color="red">⚠ scan failed · [r] retry</Text>
+        <Text color="red">⚠ scan failed · [s] retry</Text>
       ) : scanCache.status === 'idle' ? (
-        <Text dimColor>—</Text>
+        <Text dimColor>Press [s] to scan history</Text>
       ) : !hasLoops ? (
         <Text color="green">✓ no loops this period</Text>
       ) : (

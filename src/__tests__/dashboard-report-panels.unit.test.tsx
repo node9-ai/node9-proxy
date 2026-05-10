@@ -15,7 +15,6 @@ import { render } from 'ink-testing-library';
 
 import { Protection } from '../tui/dashboard/views/report/panels/Protection';
 import { TopBlocks } from '../tui/dashboard/views/report/panels/TopBlocks';
-import { ThisWeek } from '../tui/dashboard/views/report/panels/ThisWeek';
 import { BlastRadius } from '../tui/dashboard/views/report/panels/BlastRadius';
 import { FooterStrip } from '../tui/dashboard/views/report/panels/FooterStrip';
 import type { AggregateResult } from '../cli/aggregate/report-audit';
@@ -120,43 +119,6 @@ describe('TopBlocks', () => {
     // Long reason "Approval timeout" gets truncated by fitLabel(LABEL_W=12)
     // — assert the truncated prefix is present rather than the full string.
     expect(lastFrame()).toContain('Approval');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// ThisWeek
-// ---------------------------------------------------------------------------
-
-describe('ThisWeek', () => {
-  it('renders "loading…" when audit is null', () => {
-    const { lastFrame } = render(<ThisWeek audit={null} />);
-    expect(lastFrame()).toContain('THIS WEEK');
-    expect(lastFrame()).toContain('loading…');
-  });
-
-  it('renders "no activity this period" when dailyMap is empty', () => {
-    const { lastFrame } = render(<ThisWeek audit={emptyAudit()} />);
-    expect(lastFrame()).toContain('no activity this period');
-  });
-
-  it('renders daily rows with date + count + cost', () => {
-    const audit = emptyAudit({
-      dailyMap: new Map([['2026-05-09', { calls: 1419, blocked: 304 }]]),
-      cost: {
-        claudeUSD: 1101.31,
-        codexUSD: 0,
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheWriteTokens: 0,
-        cacheReadTokens: 0,
-        byDay: new Map([['2026-05-09', 1101.31]]),
-        byModel: new Map(),
-      },
-    });
-    const { lastFrame } = render(<ThisWeek audit={audit} />);
-    expect(lastFrame()).toContain('May 9');
-    expect(lastFrame()).toContain('1,419');
-    expect(lastFrame()).toContain('$1,101');
   });
 });
 

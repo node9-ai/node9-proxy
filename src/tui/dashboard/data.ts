@@ -14,14 +14,21 @@ import path from 'path';
 import http from 'http';
 import { runBlast } from '../../cli/commands/blast.js';
 import { DAEMON_HOST, DAEMON_PORT, getInternalToken } from '../../auth/daemon.js';
-import { collectEntries, type DailyEntry } from '../../costSync.js';
+import { parseJSONLFile, type DailyEntry } from '../../costSync.js';
 import { SHIELDS, readActiveShields } from '../../shields.js';
 import { extractFindingsFromLine } from '../../daemon/scan-watermark.js';
 import {
   aggregateReportFromAudit,
+  getDateRange,
+  loadClaudeCostAsync,
+  loadCodexCostAsync,
   type AggregateResult,
 } from '../../cli/aggregate/report-audit.js';
-import { scanClaudeHistory, scanGeminiHistory, scanCodexHistory } from '../../cli/commands/scan.js';
+import {
+  scanClaudeHistoryAsync,
+  scanGeminiHistory,
+  scanCodexHistory,
+} from '../../cli/commands/scan.js';
 import type {
   ActivityEvent,
   AuditAggregates,
@@ -364,17 +371,95 @@ export function buildLiveBackfill(n: number): ActivityEvent[] {
 // and on `r` keypress, never on every render.
 // ---------------------------------------------------------------------------
 
-export function loadCostEntries(): Promise<DailyEntry[]> {
-  // Defer to next tick so React render isn't blocked by the file walk.
-  return new Promise((resolve) => {
-    setImmediate(() => {
+/**
+ * Lookback for the dashboard's mount-time JSONL walks (cost + scan signals).
+ *
+ * The dashboard exposes up to a 60-day TimeWindow option, but the *common*
+ * panels (HighLevel cost-since-open, Report-tab default) need at most ~7
+ * days of history. `node9 report --7d` walks the same files in ~2 s by
+ * limiting work to that window; the dashboard was walking ALL history
+ * (~30 s on a heavy install) — for most sessions that 23 extra seconds
+ * was wasted JSON.parse on data the panels filter out before display
+ * anyway.
+ *
+ * Trade-off: when the user picks the 30d / 60d TimeWindow option from
+ * the Realtime view, the cost panel will under-report initially because
+ * we don't have that history loaded. Acceptable: the next 30s refresh
+ * tick has the same constraint, and `node9 report --30d` (the
+ * authoritative source) is a keystroke away. We could lazy-extend the
+ * walk on window change, but that's complexity beyond what the typical
+ * "is the dashboard fast enough" question demands.
+ */
+const COST_WALK_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Chunk size for the per-project yields below. ~3 projects per yield
+ *  keeps each event-loop "Check" phase batch under ~30 ms on a heavy
+ *  install — short enough that stdin keypresses (q / Ctrl+C) dispatch
+ *  with at most one batch of latency. Lowering further hits diminishing
+ *  returns since each setImmediate boundary itself costs ~0.1 ms. */
+const PROJECTS_PER_YIELD = 3;
+
+export async function loadCostEntries(): Promise<DailyEntry[]> {
+  // Walk Claude project dirs in batches, yielding to the event loop after
+  // each batch so ink can repaint and keypresses dispatch. Total wall-
+  // clock is similar to the sync collectEntries; what changes is that
+  // the dashboard stays responsive throughout. mtime filter still skips
+  // pre-window files (the cheapest single optimization).
+  const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+  if (!fs.existsSync(projectsDir)) return [];
+  let dirs: string[];
+  try {
+    dirs = fs.readdirSync(projectsDir);
+  } catch {
+    return [];
+  }
+  const sinceMs = Date.now() - COST_WALK_LOOKBACK_MS;
+  const combined = new Map<string, DailyEntry>();
+
+  for (let i = 0; i < dirs.length; i += PROJECTS_PER_YIELD) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const batch = dirs.slice(i, i + PROJECTS_PER_YIELD);
+    for (const dir of batch) {
+      const dirPath = path.join(projectsDir, dir);
       try {
-        resolve(collectEntries());
+        if (!fs.statSync(dirPath).isDirectory()) continue;
       } catch {
-        resolve([]);
+        continue;
       }
-    });
-  });
+      let files: string[];
+      try {
+        files = fs.readdirSync(dirPath).filter((f) => f.endsWith('.jsonl'));
+      } catch {
+        continue;
+      }
+      const fallbackWorkingDir = path.basename(dir);
+      for (const file of files) {
+        const filePath = path.join(dirPath, file);
+        try {
+          if (fs.statSync(filePath).mtimeMs < sinceMs) continue;
+        } catch {
+          continue;
+        }
+        // costSync's parseJSONLFile is per-file pure; reuse it. The
+        // yield boundary above is what matters for responsiveness.
+        const entries = parseJSONLFile(filePath, fallbackWorkingDir);
+        for (const [key, e] of entries) {
+          const prev = combined.get(key);
+          if (prev) {
+            prev.costUSD += e.costUSD;
+            prev.inputTokens += e.inputTokens;
+            prev.outputTokens += e.outputTokens;
+            prev.cacheWriteTokens += e.cacheWriteTokens;
+            prev.cacheReadTokens += e.cacheReadTokens;
+          } else {
+            combined.set(key, { ...e });
+          }
+        }
+      }
+    }
+  }
+
+  return [...combined.values()];
 }
 
 /**
@@ -503,19 +588,16 @@ const EMPTY_SIGNALS: Omit<ScanSignalsSnapshot, 'loaded'> = {
   longOutputRedacted: 0,
 };
 
-export function loadScanSignals(): Promise<ScanSignalsSnapshot> {
-  return new Promise((resolve) => {
-    setImmediate(() => {
-      try {
-        resolve({ loaded: true, ...walkClaudeJsonlsForSignals() });
-      } catch {
-        resolve({ loaded: true, ...EMPTY_SIGNALS });
-      }
-    });
-  });
+export async function loadScanSignals(): Promise<ScanSignalsSnapshot> {
+  try {
+    const counts = await walkClaudeJsonlsForSignals();
+    return { loaded: true, ...counts };
+  } catch {
+    return { loaded: true, ...EMPTY_SIGNALS };
+  }
 }
 
-function walkClaudeJsonlsForSignals(): Omit<ScanSignalsSnapshot, 'loaded'> {
+async function walkClaudeJsonlsForSignals(): Promise<Omit<ScanSignalsSnapshot, 'loaded'>> {
   const counts = { ...EMPTY_SIGNALS };
   const projectsDir = path.join(os.homedir(), '.claude', 'projects');
   if (!fs.existsSync(projectsDir)) return counts;
@@ -527,71 +609,85 @@ function walkClaudeJsonlsForSignals(): Omit<ScanSignalsSnapshot, 'loaded'> {
     return counts;
   }
 
-  for (const dir of dirs) {
-    const dirPath = path.join(projectsDir, dir);
-    try {
-      if (!fs.statSync(dirPath).isDirectory()) continue;
-    } catch {
-      continue;
-    }
-    let files: string[];
-    try {
-      files = fs.readdirSync(dirPath).filter((f) => f.endsWith('.jsonl'));
-    } catch {
-      continue;
-    }
-    for (const file of files) {
-      const sessionId = file.replace(/\.jsonl$/, '');
-      const filePath = path.join(dirPath, file);
-      let content: string;
+  // Same lookback as cost — files older than this can't carry signals
+  // relevant to any TimeWindow option the dashboard exposes. Avoids
+  // JSON.parsing years-old session files on every mount.
+  const sinceMs = Date.now() - COST_WALK_LOOKBACK_MS;
+
+  for (let pIdx = 0; pIdx < dirs.length; pIdx += PROJECTS_PER_YIELD) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const batch = dirs.slice(pIdx, pIdx + PROJECTS_PER_YIELD);
+    for (const dir of batch) {
+      const dirPath = path.join(projectsDir, dir);
       try {
-        content = fs.readFileSync(filePath, 'utf8');
+        if (!fs.statSync(dirPath).isDirectory()) continue;
       } catch {
         continue;
       }
-      const lines = content.split('\n');
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        if (!line.trim()) continue;
-        let parsed: unknown;
+      let files: string[];
+      try {
+        files = fs.readdirSync(dirPath).filter((f) => f.endsWith('.jsonl'));
+      } catch {
+        continue;
+      }
+      for (const file of files) {
+        const sessionId = file.replace(/\.jsonl$/, '');
+        const filePath = path.join(dirPath, file);
         try {
-          parsed = JSON.parse(line);
+          if (fs.statSync(filePath).mtimeMs < sinceMs) continue;
         } catch {
           continue;
         }
-        let findings;
+        let content: string;
         try {
-          findings = extractFindingsFromLine(parsed, sessionId, i);
+          content = fs.readFileSync(filePath, 'utf8');
         } catch {
           continue;
         }
-        for (const f of findings) {
-          switch (f.type) {
-            case 'pii':
-              counts.pii++;
-              break;
-            case 'sensitive-file-read':
-              counts.sensitiveFileRead++;
-              break;
-            case 'privilege-escalation':
-              counts.privilegeEscalation++;
-              break;
-            case 'destructive-op':
-              counts.destructiveOp++;
-              break;
-            case 'pipe-to-shell':
-              counts.pipeToShell++;
-              break;
-            case 'eval-of-remote':
-              counts.evalOfRemote++;
-              break;
-            case 'long-output-redacted':
-              counts.longOutputRedacted++;
-              break;
-            // 'dlp', 'loop', 'network-exfil' tracked via other paths
-            // (audit / session-level) — skip here to avoid double-count.
-            default:
-              break;
+        const lines = content.split('\n');
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          if (!line.trim()) continue;
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          let findings;
+          try {
+            findings = extractFindingsFromLine(parsed, sessionId, i);
+          } catch {
+            continue;
+          }
+          for (const f of findings) {
+            switch (f.type) {
+              case 'pii':
+                counts.pii++;
+                break;
+              case 'sensitive-file-read':
+                counts.sensitiveFileRead++;
+                break;
+              case 'privilege-escalation':
+                counts.privilegeEscalation++;
+                break;
+              case 'destructive-op':
+                counts.destructiveOp++;
+                break;
+              case 'pipe-to-shell':
+                counts.pipeToShell++;
+                break;
+              case 'eval-of-remote':
+                counts.evalOfRemote++;
+                break;
+              case 'long-output-redacted':
+                counts.longOutputRedacted++;
+                break;
+              // 'dlp', 'loop', 'network-exfil' tracked via other paths
+              // (audit / session-level) — skip here to avoid double-count.
+              default:
+                break;
+            }
           }
         }
       }
@@ -665,8 +761,30 @@ export function loadReportAudit(period: ReportPeriod): AggregateResult {
  * This change alone removes the audit-parse component of the [2] freeze.
  */
 export async function loadReportAuditAsync(period: ReportPeriod): Promise<AggregateResult> {
+  // Pre-load every slow input through chunked async walkers, but
+  // SEQUENTIALLY rather than via Promise.all. Concurrent async walkers
+  // each schedule a setImmediate per yield; with N walkers, the event
+  // loop's Check phase queues N callbacks per tick. Each callback runs
+  // a 30-100 ms sync chunk, so a single Check phase can occupy the loop
+  // for 100-400 ms — long enough that stdin events (including q) wait
+  // 100-400 ms per keypress before they're delivered.
+  //
+  // Running the walks one at a time costs us a few hundred ms of total
+  // wall-clock latency to fully populate Report [2], but it keeps each
+  // Check-phase batch small (one chunk) so the Poll phase fires often
+  // and stdin keypresses dispatch promptly. Net UX: [2] takes ~200 ms
+  // longer to finish loading, but q quits ~instantly throughout.
+  const claudeProjectsDir = path.join(os.homedir(), '.claude', 'projects');
+  const codexSessionsDir = path.join(os.homedir(), '.codex', 'sessions');
+  const { start, end } = getDateRange(period, new Date());
   const entries = await readAuditEntriesAsync();
-  return aggregateReportFromAudit(period, { preloadedAuditEntries: entries });
+  const claudeCost = await loadClaudeCostAsync(start, end, claudeProjectsDir);
+  const codexCost = await loadCodexCostAsync(start, end, codexSessionsDir);
+  return aggregateReportFromAudit(period, {
+    preloadedAuditEntries: entries,
+    preloadedClaudeCost: claudeCost,
+    preloadedCodexCost: codexCost,
+  });
 }
 
 /**
@@ -706,33 +824,30 @@ export function startScanWalk(onUpdate: (cache: ScanCache) => void): () => void 
 
   onUpdate({ status: 'loading' });
 
-  // Run the three agent walkers sequentially, yielding to ink between
-  // each one. Without these yields all three walkers ran in a single
-  // setImmediate tick — observed 1-2 s of frozen UI on the user's first
-  // [2] press (claude walker is ~700 ms by itself on a heavy install).
-  // After this change the UI stays responsive throughout: q / Ctrl+C /
-  // view switch all work mid-walk, even though the 'loading' placeholder
-  // still shows for the same total duration.
-  //
-  // Each walker is still synchronous internally (extracting per-project
-  // chunking from the 380-line scanClaudeHistory is the next step if
-  // this isn't enough — see #2 follow-up in the responsiveness plan).
+  // Same 7-day lookback the cost + signals walks use, for the same
+  // reason: the [2] Report panels filter by period before display, so
+  // walking older history is wasted JSON.parse + AST work. Without this
+  // filter scanClaudeHistoryAsync(null) processes every assistant entry
+  // ever recorded — observed 60+ seconds on a heavy install vs ~2 s for
+  // `node9 report --7d` against the same data.
+  const lookbackStart = new Date(Date.now() - COST_WALK_LOOKBACK_MS);
+
   void (async () => {
     try {
       await yieldToEventLoop();
       if (cancelled) return;
 
-      const claude = scanClaudeHistory(null);
+      const claude = await scanClaudeHistoryAsync(lookbackStart);
       if (cancelled) return;
       await yieldToEventLoop();
       if (cancelled) return;
 
-      const gemini = scanGeminiHistory(null);
+      const gemini = scanGeminiHistory(lookbackStart);
       if (cancelled) return;
       await yieldToEventLoop();
       if (cancelled) return;
 
-      const codex = scanCodexHistory(null);
+      const codex = scanCodexHistory(lookbackStart);
       if (cancelled) return;
 
       onUpdate({

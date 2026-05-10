@@ -46,9 +46,9 @@ export function Leaks({
       {scanCache.status === 'loading' ? (
         <Text dimColor>Walking history…</Text>
       ) : scanCache.status === 'error' ? (
-        <Text color="red">⚠ scan failed · [r] retry</Text>
+        <Text color="red">⚠ scan failed · [s] retry</Text>
       ) : scanCache.status === 'idle' ? (
-        <Text dimColor>—</Text>
+        <Text dimColor>Press [s] to scan history</Text>
       ) : total === 0 ? (
         <Text color="green">✓ no leaks this period</Text>
       ) : (

@@ -703,19 +703,19 @@ function bar(value: number, max: number, width: number): string {
 // ---------------------------------------------------------------------------
 
 export function Risk(props: {
-  agg: AuditAggregates;
+  agg: AuditAggregates | null;
   blast: BlastSnapshot;
   shieldStatus: ShieldStatus | null;
   forensicAgg: SessionForensicAgg;
   window: TimeWindow;
 }): React.ReactElement {
-  // Use the dedicated counters from aggregateAudit. Earlier this
-  // panel derived counts by filtering byBlock (top-6 only), which
-  // missed any DLP / loop rules that didn't make the top 6 — leading
-  // to a misleading "0 loops" when there were really hundreds, just
-  // spread across many rule names.
-  const dlpHits = props.agg.dlpHits;
-  const loopHits = props.agg.loops;
+  // agg is nullable on Realtime (Phase 1: audit aggregation is gated to
+  // [2] Report view). When null, we render with zero history counts —
+  // forensicAgg below still surfaces live SSE-driven counts so Risk
+  // remains informative on Realtime, just without the audit-derived
+  // DLP/loop tallies that need a history walk.
+  const dlpHits = props.agg?.dlpHits ?? 0;
+  const loopHits = props.agg?.loops ?? 0;
   const scoreColor =
     props.blast.score >= 80 ? '#5BF58C' : props.blast.score >= 50 ? COL.panelHigh : COL.liveOff;
   return (
@@ -805,6 +805,7 @@ export function StatusBar(props: { view: View; lastRefreshAt: number }): React.R
       </Text>
       <Text dimColor>· </Text>
       <Text dimColor>{`[r] refresh (${refreshedAt}) `}</Text>
+      {reportActive ? <Text dimColor>[s] scan </Text> : null}
       <Text dimColor>[?] help </Text>
       <Text dimColor>[q] quit</Text>
     </Box>
@@ -814,3 +815,53 @@ export function StatusBar(props: { view: View; lastRefreshAt: number }): React.R
 // ReportView lives in src/tui/dashboard/views/report/index.tsx as of phase 3c.
 // The phase-1 stub that used to live here was replaced by the proper view
 // shell — see views/report/index.tsx for the current implementation.
+
+// ---------------------------------------------------------------------------
+// SessionCounters — tiny "Since Open" strip on Realtime
+//
+// Replaces the old HIGH LEVEL panel which needed ~/.claude/projects walks
+// for cost. This is purely SSE-driven — counters live in App.tsx state and
+// increment as activity events arrive. Cost is intentionally absent; that
+// lives in [2] Report now where the user has accepted "this view loads
+// data."
+//
+// Stays small on purpose: 4 numbers + a label. If it grows, push back —
+// the win is that Realtime mounts in milliseconds with zero history walks.
+// ---------------------------------------------------------------------------
+
+export function SessionCounters(props: {
+  events: number;
+  allow: number;
+  block: number;
+  review: number;
+}): React.ReactElement {
+  const { events, allow, block, review } = props;
+  const blockColor = block > 0 ? COL.liveOff : COL.textDim;
+  const reviewColor = review > 0 ? COL.panelHigh : COL.textDim;
+  return (
+    <Box
+      flexDirection="column"
+      borderStyle="round"
+      borderColor={COL.panelHigh}
+      paddingX={1}
+      marginX={1}
+    >
+      <Text wrap="truncate-end">
+        <Text color={COL.brand} bold>
+          SINCE OPEN
+        </Text>
+        <Text dimColor>{'  ·  live SSE counter, no history walk'}</Text>
+      </Text>
+      <Text wrap="truncate-end">
+        <Text bold>{events.toLocaleString()}</Text>
+        <Text dimColor>{' events  '}</Text>
+        <Text bold>{allow.toLocaleString()}</Text>
+        <Text color="#5BF58C">{' ✓ allow  '}</Text>
+        <Text bold color={blockColor}>{`${block} `}</Text>
+        <Text color={COL.liveOff}>{'🛑 block  '}</Text>
+        <Text bold color={reviewColor}>{`${review} `}</Text>
+        <Text color={COL.panelHigh}>{'🟡 review'}</Text>
+      </Text>
+    </Box>
+  );
+}

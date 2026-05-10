@@ -190,7 +190,7 @@ describe('ScoreBanner score tier', () => {
 // ---------------------------------------------------------------------------
 
 describe('ScoreBanner headline cascade', () => {
-  it('shows "loading scan history…" while scanCache is loading', () => {
+  it('shows "scanning history…" while scanCache is loading', () => {
     const { lastFrame } = render(
       <ScoreBanner
         audit={makeAudit()}
@@ -199,9 +199,21 @@ describe('ScoreBanner headline cascade', () => {
         filtered={EMPTY_FILTERED_SCAN}
       />
     );
-    expect(lastFrame()).toContain('loading scan history');
+    expect(lastFrame()).toContain('scanning history');
     // Loading state preempts even the blast-paths cascade tier
     expect(lastFrame()).not.toContain('exposed path');
+  });
+
+  it('shows "[s] scan history" affordance while scanCache is idle (opt-in)', () => {
+    const { lastFrame } = render(
+      <ScoreBanner
+        audit={makeAudit()}
+        blast={makeBlast(95, 3)}
+        scanCache={{ status: 'idle' }}
+        filtered={EMPTY_FILTERED_SCAN}
+      />
+    );
+    expect(lastFrame()).toContain('[s] scan history');
   });
 
   it('shows scan-failed message on cache error', () => {

@@ -72,6 +72,15 @@ export interface AggregateOpts {
    * falls back to the original sync parseAuditLog.
    */
   preloadedAuditEntries?: AuditEntry[];
+  /**
+   * When provided, skip the synchronous Claude / Codex JSONL cost walks.
+   * The dashboard pre-loads both via async chunked walkers so the [2] view
+   * switch doesn't freeze for the full ~250 ms cost-walk duration. The CLI
+   * leaves both undefined and the function falls back to the original sync
+   * loadClaudeCost / loadCodexCost.
+   */
+  preloadedClaudeCost?: ClaudeCostData;
+  preloadedCodexCost?: CodexCostData;
 }
 
 export interface AggregateResult {
@@ -156,7 +165,7 @@ export function getReportDateRange(
   return getDateRange(period, now);
 }
 
-function getDateRange(period: ReportPeriod, now: Date): { start: Date; end: Date } {
+export function getDateRange(period: ReportPeriod, now: Date): { start: Date; end: Date } {
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
   switch (period) {
@@ -223,7 +232,7 @@ function claudeModelPrice(model: string): { i: number; o: number; cw: number; cr
   return null;
 }
 
-interface ClaudeCostData {
+export interface ClaudeCostData {
   total: number;
   byDay: Map<string, number>;
   byModel: Map<string, number>;
@@ -233,113 +242,249 @@ interface ClaudeCostData {
   cacheReadTokens: number;
 }
 
-function loadClaudeCost(start: Date, end: Date, projectsDir: string): ClaudeCostData {
-  const empty: ClaudeCostData = {
+export interface CodexCostData {
+  total: number;
+  byDay: Map<string, number>;
+  toolCalls: number;
+}
+
+/** Mutable accumulator shared across per-project cost extraction calls. */
+interface ClaudeCostAccumulator {
+  total: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheWriteTokens: number;
+  cacheReadTokens: number;
+  byDay: Map<string, number>;
+  byModel: Map<string, number>;
+}
+
+function emptyClaudeCostAccumulator(): ClaudeCostAccumulator {
+  return {
     total: 0,
-    byDay: new Map(),
-    byModel: new Map(),
     inputTokens: 0,
     outputTokens: 0,
     cacheWriteTokens: 0,
     cacheReadTokens: 0,
+    byDay: new Map(),
+    byModel: new Map(),
   };
-  if (!fs.existsSync(projectsDir)) return empty;
+}
+
+function freezeClaudeCost(acc: ClaudeCostAccumulator): ClaudeCostData {
+  return {
+    total: acc.total,
+    byDay: acc.byDay,
+    byModel: acc.byModel,
+    inputTokens: acc.inputTokens,
+    outputTokens: acc.outputTokens,
+    cacheWriteTokens: acc.cacheWriteTokens,
+    cacheReadTokens: acc.cacheReadTokens,
+  };
+}
+
+/** Walk one project's JSONLs and fold cost into `acc`. Per-project body
+ *  extracted from loadClaudeCost so the sync walker (CLI) and the async
+ *  chunked walker (dashboard) share identical logic. */
+function processClaudeCostProject(
+  proj: string,
+  projectsDir: string,
+  start: Date,
+  end: Date,
+  acc: ClaudeCostAccumulator
+): void {
+  const projPath = path.join(projectsDir, proj);
+  let files: string[];
+  try {
+    const stat = fs.statSync(projPath);
+    if (!stat.isDirectory()) return;
+    files = fs.readdirSync(projPath).filter((f) => f.endsWith('.jsonl') && !f.startsWith('agent-'));
+  } catch {
+    return;
+  }
+
+  // mtime cutoff — files whose last write predates `start` can't carry
+  // assistant entries inside the window. Cheap stat per file saves the
+  // read+JSON.parse on years-old session files. Without this, a heavy
+  // install (multi-year ~/.claude/projects) parses hundreds of MB just
+  // to discard most of it via the per-line `ts < start` check below.
+  const startMs = start.getTime();
+
+  for (const file of files) {
+    const filePath = path.join(projPath, file);
+    try {
+      if (fs.statSync(filePath).mtimeMs < startMs) continue;
+    } catch {
+      continue;
+    }
+    try {
+      const raw = fs.readFileSync(filePath, 'utf-8');
+      for (const line of raw.split('\n')) {
+        if (!line.trim()) continue;
+        let entry: JournalEntry;
+        try {
+          entry = JSON.parse(line) as JournalEntry;
+        } catch {
+          continue;
+        }
+        if (entry.type !== 'assistant') continue;
+        if (!entry.timestamp) continue;
+        const ts = new Date(entry.timestamp);
+        if (ts < start || ts > end) continue;
+
+        const usage = entry.message?.usage;
+        const model = entry.message?.model;
+        if (!usage || !model) continue;
+
+        const p = claudeModelPrice(model);
+        if (!p) continue;
+
+        const inp = usage.input_tokens ?? 0;
+        const out = usage.output_tokens ?? 0;
+        const cw = usage.cache_creation_input_tokens ?? 0;
+        const cr = usage.cache_read_input_tokens ?? 0;
+        const cost = inp * p.i + out * p.o + cw * p.cw + cr * p.cr;
+
+        acc.total += cost;
+        acc.inputTokens += inp;
+        acc.outputTokens += out;
+        acc.cacheWriteTokens += cw;
+        acc.cacheReadTokens += cr;
+
+        const dateKey = entry.timestamp.slice(0, 10);
+        acc.byDay.set(dateKey, (acc.byDay.get(dateKey) ?? 0) + cost);
+
+        const normModel = model.replace(/@.*$/, '').replace(/-\d{8}$/, '');
+        acc.byModel.set(normModel, (acc.byModel.get(normModel) ?? 0) + cost);
+      }
+    } catch {
+      continue;
+    }
+  }
+}
+
+function loadClaudeCost(start: Date, end: Date, projectsDir: string): ClaudeCostData {
+  const acc = emptyClaudeCostAccumulator();
+  if (!fs.existsSync(projectsDir)) return freezeClaudeCost(acc);
 
   let dirs: string[];
   try {
     dirs = fs.readdirSync(projectsDir);
   } catch {
-    return empty;
+    return freezeClaudeCost(acc);
   }
-
-  let total = 0;
-  let inputTokens = 0;
-  let outputTokens = 0;
-  let cacheWriteTokens = 0;
-  let cacheReadTokens = 0;
-  const byDay = new Map<string, number>();
-  const byModel = new Map<string, number>();
 
   for (const proj of dirs) {
-    const projPath = path.join(projectsDir, proj);
-    let files: string[];
-    try {
-      const stat = fs.statSync(projPath);
-      if (!stat.isDirectory()) continue;
-      files = fs
-        .readdirSync(projPath)
-        .filter((f) => f.endsWith('.jsonl') && !f.startsWith('agent-'));
-    } catch {
-      continue;
-    }
-
-    for (const file of files) {
-      try {
-        const raw = fs.readFileSync(path.join(projPath, file), 'utf-8');
-        for (const line of raw.split('\n')) {
-          if (!line.trim()) continue;
-          let entry: JournalEntry;
-          try {
-            entry = JSON.parse(line) as JournalEntry;
-          } catch {
-            continue;
-          }
-          if (entry.type !== 'assistant') continue;
-          if (!entry.timestamp) continue;
-          const ts = new Date(entry.timestamp);
-          if (ts < start || ts > end) continue;
-
-          const usage = entry.message?.usage;
-          const model = entry.message?.model;
-          if (!usage || !model) continue;
-
-          const p = claudeModelPrice(model);
-          if (!p) continue;
-
-          const inp = usage.input_tokens ?? 0;
-          const out = usage.output_tokens ?? 0;
-          const cw = usage.cache_creation_input_tokens ?? 0;
-          const cr = usage.cache_read_input_tokens ?? 0;
-          const cost = inp * p.i + out * p.o + cw * p.cw + cr * p.cr;
-
-          total += cost;
-          inputTokens += inp;
-          outputTokens += out;
-          cacheWriteTokens += cw;
-          cacheReadTokens += cr;
-
-          const dateKey = entry.timestamp.slice(0, 10);
-          byDay.set(dateKey, (byDay.get(dateKey) ?? 0) + cost);
-
-          const normModel = model.replace(/@.*$/, '').replace(/-\d{8}$/, '');
-          byModel.set(normModel, (byModel.get(normModel) ?? 0) + cost);
-        }
-      } catch {
-        continue;
-      }
-    }
+    processClaudeCostProject(proj, projectsDir, start, end, acc);
   }
 
-  return { total, byDay, byModel, inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens };
+  return freezeClaudeCost(acc);
+}
+
+/** Async chunked variant — yields between projects so the dashboard's
+ *  ink reconciler can repaint and the input handler can dispatch keys
+ *  while the [2] view's cost walk is in flight. */
+export async function loadClaudeCostAsync(
+  start: Date,
+  end: Date,
+  projectsDir: string
+): Promise<ClaudeCostData> {
+  const acc = emptyClaudeCostAccumulator();
+  if (!fs.existsSync(projectsDir)) return freezeClaudeCost(acc);
+
+  let dirs: string[];
+  try {
+    dirs = fs.readdirSync(projectsDir);
+  } catch {
+    return freezeClaudeCost(acc);
+  }
+
+  for (const proj of dirs) {
+    processClaudeCostProject(proj, projectsDir, start, end, acc);
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  return freezeClaudeCost(acc);
 }
 
 // ---------------------------------------------------------------------------
 // Codex cost tracking (reads ~/.codex/sessions/YYYY/MM/DD/*.jsonl)
 // ---------------------------------------------------------------------------
 
-function loadCodexCost(
+interface CodexCostAccumulator {
+  total: number;
+  toolCalls: number;
+  byDay: Map<string, number>;
+}
+
+/** Walk one Codex session file and fold cost into `acc`. Per-file body
+ *  extracted so sync and async chunked walkers share identical logic. */
+function processCodexCostFile(
+  filePath: string,
   start: Date,
   end: Date,
-  sessionsBase: string
-): { total: number; byDay: Map<string, number>; toolCalls: number } {
-  const byDay = new Map<string, number>();
-  let total = 0;
-  let toolCalls = 0;
+  acc: CodexCostAccumulator
+): void {
+  let lines: string[];
+  try {
+    lines = fs.readFileSync(filePath, 'utf-8').split('\n');
+  } catch {
+    return;
+  }
 
-  if (!fs.existsSync(sessionsBase)) return { total, byDay, toolCalls };
+  let sessionStart = '';
+  let lastTotalInput = 0;
+  let lastTotalCached = 0;
+  let lastTotalOutput = 0;
+  let sessionToolCalls = 0;
 
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    let entry: { type: string; payload?: Record<string, unknown> };
+    try {
+      entry = JSON.parse(line) as typeof entry;
+    } catch {
+      continue;
+    }
+
+    const p = (entry.payload ?? {}) as Record<string, unknown>;
+
+    if (entry.type === 'session_meta') {
+      sessionStart = String(p['timestamp'] ?? '');
+      continue;
+    }
+
+    if (entry.type === 'event_msg' && p['type'] === 'token_count') {
+      const info = (p['info'] ?? {}) as Record<string, unknown>;
+      const usage = (info['total_token_usage'] ?? {}) as Record<string, number>;
+      lastTotalInput = usage['input_tokens'] ?? lastTotalInput;
+      lastTotalCached = usage['cached_input_tokens'] ?? lastTotalCached;
+      lastTotalOutput = usage['output_tokens'] ?? lastTotalOutput;
+    }
+
+    if (entry.type === 'response_item' && p['type'] === 'function_call') {
+      sessionToolCalls++;
+    }
+  }
+
+  if (!sessionStart) return;
+  const ts = new Date(sessionStart);
+  if (ts < start || ts > end) return;
+
+  const nonCached = Math.max(0, lastTotalInput - lastTotalCached);
+  const cost = nonCached * 5e-6 + lastTotalCached * 2.5e-6 + lastTotalOutput * 15e-6;
+  acc.total += cost;
+  acc.toolCalls += sessionToolCalls;
+  const dateKey = sessionStart.slice(0, 10);
+  acc.byDay.set(dateKey, (acc.byDay.get(dateKey) ?? 0) + cost);
+}
+
+/** Build the flat list of session JSONL paths under `sessionsBase`. The
+ *  Codex layout is YYYY/MM/DD/*.jsonl; this walks the date dirs once so
+ *  both sync and async cost loaders can iterate the same path list. */
+function listCodexSessionFiles(sessionsBase: string): string[] {
   const jsonlFiles: string[] = [];
-
+  if (!fs.existsSync(sessionsBase)) return jsonlFiles;
   try {
     for (const year of fs.readdirSync(sessionsBase)) {
       const yearPath = path.join(sessionsBase, year);
@@ -369,65 +514,44 @@ function loadCodexCost(
       }
     }
   } catch {
-    return { total, byDay, toolCalls };
+    return [];
   }
+  return jsonlFiles;
+}
 
-  for (const filePath of jsonlFiles) {
-    let lines: string[];
-    try {
-      lines = fs.readFileSync(filePath, 'utf-8').split('\n');
-    } catch {
-      continue;
-    }
-
-    let sessionStart = '';
-    let lastTotalInput = 0;
-    let lastTotalCached = 0;
-    let lastTotalOutput = 0;
-    let sessionToolCalls = 0;
-
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      let entry: { type: string; payload?: Record<string, unknown> };
-      try {
-        entry = JSON.parse(line) as typeof entry;
-      } catch {
-        continue;
-      }
-
-      const p = (entry.payload ?? {}) as Record<string, unknown>;
-
-      if (entry.type === 'session_meta') {
-        sessionStart = String(p['timestamp'] ?? '');
-        continue;
-      }
-
-      if (entry.type === 'event_msg' && p['type'] === 'token_count') {
-        const info = (p['info'] ?? {}) as Record<string, unknown>;
-        const usage = (info['total_token_usage'] ?? {}) as Record<string, number>;
-        lastTotalInput = usage['input_tokens'] ?? lastTotalInput;
-        lastTotalCached = usage['cached_input_tokens'] ?? lastTotalCached;
-        lastTotalOutput = usage['output_tokens'] ?? lastTotalOutput;
-      }
-
-      if (entry.type === 'response_item' && p['type'] === 'function_call') {
-        sessionToolCalls++;
-      }
-    }
-
-    if (!sessionStart) continue;
-    const ts = new Date(sessionStart);
-    if (ts < start || ts > end) continue;
-
-    const nonCached = Math.max(0, lastTotalInput - lastTotalCached);
-    const cost = nonCached * 5e-6 + lastTotalCached * 2.5e-6 + lastTotalOutput * 15e-6;
-    total += cost;
-    toolCalls += sessionToolCalls;
-    const dateKey = sessionStart.slice(0, 10);
-    byDay.set(dateKey, (byDay.get(dateKey) ?? 0) + cost);
+function loadCodexCost(
+  start: Date,
+  end: Date,
+  sessionsBase: string
+): { total: number; byDay: Map<string, number>; toolCalls: number } {
+  const acc: CodexCostAccumulator = { total: 0, toolCalls: 0, byDay: new Map() };
+  const files = listCodexSessionFiles(sessionsBase);
+  for (const filePath of files) {
+    processCodexCostFile(filePath, start, end, acc);
   }
+  return { total: acc.total, byDay: acc.byDay, toolCalls: acc.toolCalls };
+}
 
-  return { total, byDay, toolCalls };
+/** Async chunked variant — yields between files. Codex sessions are
+ *  smaller than Claude projects so per-file granularity (rather than
+ *  per-project) is fine. */
+export async function loadCodexCostAsync(
+  start: Date,
+  end: Date,
+  sessionsBase: string
+): Promise<CodexCostData> {
+  const acc: CodexCostAccumulator = { total: 0, toolCalls: 0, byDay: new Map() };
+  const files = listCodexSessionFiles(sessionsBase);
+  // Yield every CHUNK_SIZE files rather than every file — per-file work is
+  // small, and yielding too aggressively adds scheduling overhead.
+  const CHUNK_SIZE = 5;
+  for (let i = 0; i < files.length; i++) {
+    processCodexCostFile(files[i], start, end, acc);
+    if (i % CHUNK_SIZE === CHUNK_SIZE - 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  }
+  return { total: acc.total, byDay: acc.byDay, toolCalls: acc.toolCalls };
 }
 
 // ---------------------------------------------------------------------------
@@ -474,8 +598,8 @@ export function aggregateReportFromAudit(
       };
     });
 
-  const claudeCost = loadClaudeCost(start, end, claudeProjectsDir);
-  const codexCost = loadCodexCost(start, end, codexSessionsDir);
+  const claudeCost = opts.preloadedClaudeCost ?? loadClaudeCost(start, end, claudeProjectsDir);
+  const codexCost = opts.preloadedCodexCost ?? loadCodexCost(start, end, codexSessionsDir);
 
   // Merge Codex daily costs into Claude's byDay map (the wire format has a
   // single byDay; Claude's map is mutable so we extend it in place).
