@@ -136,6 +136,18 @@ function isTestEntry(entry: AuditEntry, testTs: Set<number>): boolean {
 // Date / decision helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Resolve a ReportPeriod to a [start, end] Date pair anchored on `now`.
+ * Exported for the dashboard's filterScanByPeriod() so scan-data
+ * filtering uses the same boundaries as audit aggregation.
+ */
+export function getReportDateRange(
+  period: ReportPeriod,
+  now: Date = new Date()
+): { start: Date; end: Date } {
+  return getDateRange(period, now);
+}
+
 function getDateRange(period: ReportPeriod, now: Date): { start: Date; end: Date } {
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
