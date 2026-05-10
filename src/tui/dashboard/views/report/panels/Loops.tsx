@@ -14,7 +14,6 @@ import type { FilteredScan } from '../derive.js';
 import { fitLabel, num } from '../util.js';
 
 const TOOL_ROWS = 2;
-const FILE_LABEL_WIDTH = 18;
 
 export function Loops({
   scanCache,
@@ -70,7 +69,9 @@ export function Loops({
           {filtered.topLoopFile ? (
             <Box>
               <Text dimColor>Top: </Text>
-              <Text>{fitLabel(basenameOf(filtered.topLoopFile.path), FILE_LABEL_WIDTH)}</Text>
+              <Box flexGrow={1} flexShrink={1}>
+                <Text wrap="truncate-end">{basenameOf(filtered.topLoopFile.path)}</Text>
+              </Box>
               <Text dimColor>×</Text>
               <Text bold>{num(filtered.topLoopFile.count)}</Text>
             </Box>

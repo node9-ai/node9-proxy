@@ -13,10 +13,9 @@ import { Box, Text } from 'ink';
 import { COL } from '../../../panels.js';
 import type { ScanCache } from '../../../types.js';
 import type { FilteredScan } from '../derive.js';
-import { fitLabel, num } from '../util.js';
+import { num } from '../util.js';
 
 const ROW_LIMIT = 4;
-const TYPE_LABEL_WIDTH = 14;
 
 export function Leaks({
   scanCache,
@@ -53,7 +52,9 @@ export function Leaks({
         filtered.leaksByType.slice(0, ROW_LIMIT).map((row) => (
           <Box key={row.type}>
             <Text color="red">🚨 </Text>
-            <Text>{fitLabel(row.type, TYPE_LABEL_WIDTH)}</Text>
+            <Box flexGrow={1} flexShrink={1}>
+              <Text wrap="truncate-end">{row.type}</Text>
+            </Box>
             <Text bold>{num(row.count).padStart(3)}</Text>
           </Box>
         ))

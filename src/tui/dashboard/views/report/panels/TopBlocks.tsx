@@ -9,11 +9,10 @@ import { Box, Text } from 'ink';
 
 import { COL } from '../../../panels.js';
 import type { AggregateResult } from '../../../../../cli/aggregate/report-audit.js';
-import { fitLabel, humanBlockReason, num, renderBar } from '../util.js';
+import { humanBlockReason, num, renderBar } from '../util.js';
 
 const ROW_LIMIT = 5;
 const BAR_WIDTH = 6;
-const LABEL_WIDTH = 12;
 
 export function TopBlocks({ audit }: { audit: AggregateResult | null }): React.ReactElement {
   const data = audit?.data;
@@ -36,8 +35,12 @@ export function TopBlocks({ audit }: { audit: AggregateResult | null }): React.R
         <Text dimColor>nothing blocked ✓</Text>
       ) : (
         sorted.map(([reason, count]) => (
+          // Reason label truncates with ellipsis if it can't fit; bar +
+          // count are right-aligned at fixed width so columns stay even.
           <Box key={reason}>
-            <Text>{fitLabel(humanBlockReason(reason), LABEL_WIDTH)}</Text>
+            <Box flexGrow={1} flexShrink={1}>
+              <Text wrap="truncate-end">{humanBlockReason(reason)}</Text>
+            </Box>
             <Text> </Text>
             <Text color="red">{renderBar(count, max, BAR_WIDTH)}</Text>
             <Text> </Text>

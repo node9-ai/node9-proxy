@@ -10,10 +10,9 @@ import { Box, Text } from 'ink';
 import { COL } from '../../../panels.js';
 import type { ScanCache } from '../../../types.js';
 import type { FilteredScan } from '../derive.js';
-import { fitLabel, num } from '../util.js';
+import { num } from '../util.js';
 
 const ROW_LIMIT = 4;
-const RULE_LABEL_WIDTH = 22;
 
 export function TopRules({
   scanCache,
@@ -45,8 +44,14 @@ export function TopRules({
         <Text dimColor>no rules fired this period</Text>
       ) : (
         rules.map((row) => (
+          // Rule name in a flex-shrinking Box with truncate-end so long
+          // names (e.g. "shield:project-jail:block-read-credentials")
+          // don't push the count off the column or wrap to a new line.
+          // Count is fixed-width on the right.
           <Box key={row.rule}>
-            <Text>{fitLabel(row.rule, RULE_LABEL_WIDTH)}</Text>
+            <Box flexGrow={1} flexShrink={1}>
+              <Text wrap="truncate-end">{row.rule}</Text>
+            </Box>
             <Text bold>{num(row.count).padStart(4)}</Text>
           </Box>
         ))

@@ -41,6 +41,10 @@ export function ThisWeek({ audit }: { audit: AggregateResult | null }): React.Re
       ) : (
         days.map(([dateKey, { calls, blocked }]) => {
           const cost = costByDay.get(dateKey) ?? 0;
+          // Date is fixed-width left; bar fixed-width middle; calls
+          // count flex-grows so the cost label is the first thing to
+          // truncate on a narrow column. This prevents the count from
+          // being clipped (which loses the more important number).
           return (
             <Box key={dateKey}>
               <Text dimColor>{fmtShortDate(dateKey).padEnd(7)}</Text>
@@ -48,12 +52,13 @@ export function ThisWeek({ audit }: { audit: AggregateResult | null }): React.Re
                 {renderBar(calls, maxCalls, BAR_WIDTH)}
               </Text>
               <Text> </Text>
-              <Text bold>{num(calls).padStart(4)}</Text>
+              <Text bold>{num(calls)}</Text>
               {cost > 0 ? (
-                <>
-                  <Text> </Text>
-                  <Text color="yellow">{fmtCost(cost)}</Text>
-                </>
+                <Box flexGrow={1} flexShrink={1} justifyContent="flex-end">
+                  <Text color="yellow" wrap="truncate-end">
+                    {' ' + fmtCost(cost)}
+                  </Text>
+                </Box>
               ) : null}
             </Box>
           );

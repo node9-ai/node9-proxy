@@ -43,10 +43,17 @@ export function BlastRadius({ blast }: { blast: BlastSnapshot | null }): React.R
       </Box>
       {exposed ? (
         paths.map((p) => (
+          // One row per path. The description is placed in a flex-shrinking
+          // Box with wrap="truncate-end" so it never wraps to a second line —
+          // long descriptions get an ellipsis at the column boundary instead.
           <Box key={p.label}>
             <Text color="red">✗ </Text>
             <Text>{p.label.padEnd(LABEL_WIDTH)}</Text>
-            <Text dimColor>{p.description}</Text>
+            <Box flexGrow={1} flexShrink={1}>
+              <Text dimColor wrap="truncate-end">
+                {p.description}
+              </Text>
+            </Box>
           </Box>
         ))
       ) : (
