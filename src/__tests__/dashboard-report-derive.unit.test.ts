@@ -260,26 +260,28 @@ describe('filterScanByPeriod', () => {
 
   it('rolls up topRules from findings.source.rule.name', () => {
     const ts = '2026-05-09T10:00:00Z';
-    const mkFinding = (ruleName: string) => ({
-      source: {
-        shieldName: '',
-        shieldLabel: '',
-        sourceType: 'default' as const,
-        rule: {
-          name: ruleName,
-          conditions: [],
-          verdict: 'review' as const,
-          reason: '',
-          severity: 'medium' as const,
+    // Cast through unknown — Finding/SmartRule have many fields the
+    // rollup never reads. The fixture only needs source.rule.name.
+    const mkFinding = (ruleName: string) =>
+      ({
+        source: {
+          shieldName: '',
+          shieldLabel: '',
+          sourceType: 'default' as const,
+          rule: {
+            name: ruleName,
+            tool: 'Bash',
+            conditions: [],
+            verdict: 'review' as const,
+          },
         },
-      },
-      toolName: 'Bash',
-      input: {},
-      timestamp: ts,
-      project: 'p',
-      sessionId: 's',
-      agent: 'claude' as const,
-    });
+        toolName: 'Bash',
+        input: {},
+        timestamp: ts,
+        project: 'p',
+        sessionId: 's',
+        agent: 'claude' as const,
+      }) as unknown as ScanResult['findings'][number];
     const claude: ScanResult = {
       ...emptyResult(),
       findings: [

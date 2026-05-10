@@ -152,7 +152,7 @@ function PeriodKey({
 // scan walk completes.
 // ---------------------------------------------------------------------------
 
-function ScoreBanner({
+export function ScoreBanner({
   audit,
   blast,
   scanCache,
