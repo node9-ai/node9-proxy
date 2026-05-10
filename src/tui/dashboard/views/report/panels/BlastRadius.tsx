@@ -31,17 +31,23 @@ export function BlastRadius({ blast }: { blast: BlastSnapshot | null }): React.R
     >
       <Box>
         <Text bold>BLAST RADIUS</Text>
-        <Text dimColor>
-          {`  ·  ${paths.length} path${paths.length === 1 ? '' : 's'} an agent can reach right now`}
-        </Text>
-        {exposed ? (
+        {blast === null ? (
+          <Text dimColor>{'  ·  loading…'}</Text>
+        ) : (
           <>
-            <Text>{'      '}</Text>
-            <Text color="yellow">→ enable project-jail</Text>
+            <Text dimColor>
+              {`  ·  ${paths.length} path${paths.length === 1 ? '' : 's'} an agent can reach right now`}
+            </Text>
+            {exposed ? (
+              <>
+                <Text>{'      '}</Text>
+                <Text color="yellow">→ enable project-jail</Text>
+              </>
+            ) : null}
           </>
-        ) : null}
+        )}
       </Box>
-      {exposed ? (
+      {blast === null ? null : exposed ? (
         paths.map((p) => (
           // One row per path. The description is placed in a flex-shrinking
           // Box with wrap="truncate-end" so it never wraps to a second line —

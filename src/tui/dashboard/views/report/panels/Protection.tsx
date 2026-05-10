@@ -25,6 +25,8 @@ export function Protection({ audit }: { audit: AggregateResult | null }): React.
       ]
     : [];
 
+  const isEmpty = data && data.total === 0;
+
   return (
     <Box
       borderStyle="round"
@@ -35,18 +37,24 @@ export function Protection({ audit }: { audit: AggregateResult | null }): React.
       flexBasis={0}
     >
       <Text bold>PROTECTION</Text>
-      {rows.map((r) => (
-        <Box key={r.label}>
-          <Text dimColor={r.count === 0} color={r.count > 0 ? r.color : undefined}>
-            {r.icon}
-          </Text>
-          <Text> </Text>
-          <Text dimColor={r.count === 0}>{r.label.padEnd(13)}</Text>
-          <Text dimColor={r.count === 0} bold={r.count > 0}>
-            {num(r.count).padStart(5)}
-          </Text>
-        </Box>
-      ))}
+      {audit === null ? (
+        <Text dimColor>loading…</Text>
+      ) : isEmpty ? (
+        <Text dimColor>no activity this period</Text>
+      ) : (
+        rows.map((r) => (
+          <Box key={r.label}>
+            <Text dimColor={r.count === 0} color={r.count > 0 ? r.color : undefined}>
+              {r.icon}
+            </Text>
+            <Text> </Text>
+            <Text dimColor={r.count === 0}>{r.label.padEnd(13)}</Text>
+            <Text dimColor={r.count === 0} bold={r.count > 0}>
+              {num(r.count).padStart(5)}
+            </Text>
+          </Box>
+        ))
+      )}
     </Box>
   );
 }

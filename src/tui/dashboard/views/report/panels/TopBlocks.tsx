@@ -31,7 +31,9 @@ export function TopBlocks({ audit }: { audit: AggregateResult | null }): React.R
       flexBasis={0}
     >
       <Text bold>TOP BLOCKS</Text>
-      {sorted.length === 0 ? (
+      {audit === null ? (
+        <Text dimColor>loading…</Text>
+      ) : sorted.length === 0 ? (
         <Text dimColor>nothing blocked ✓</Text>
       ) : (
         sorted.map(([reason, count]) => (

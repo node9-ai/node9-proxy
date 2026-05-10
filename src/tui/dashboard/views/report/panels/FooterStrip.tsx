@@ -31,7 +31,11 @@ export function FooterStrip({
   const visible = active.slice(0, ACTIVE_LIMIT);
   const overflow = active.length - visible.length;
   const activeLine =
-    visible.length > 0 ? visible.join(' · ') + (overflow > 0 ? ` +${overflow}` : '') : '(none)';
+    shieldStatus === null
+      ? 'loading…'
+      : visible.length > 0
+        ? visible.join(' · ') + (overflow > 0 ? ` +${overflow}` : '')
+        : '(none)';
 
   // 24-cell sparkline: one block per hour, 0–23 local time. Falls back to
   // an empty 24-space placeholder until audit data lands.
@@ -45,13 +49,19 @@ export function FooterStrip({
       <Box>
         <Text bold>SHIELDS</Text>
         <Text>{'   '}</Text>
-        <Text color="green">✓ </Text>
-        <Box flexGrow={1} flexShrink={1}>
-          <Text wrap="truncate-end">{activeLine}</Text>
-        </Box>
-        <Text>{'    '}</Text>
-        <Text color={inactive.length > 0 ? 'red' : 'green'}>✗ </Text>
-        <Text dimColor>{`${inactive.length} inactive`}</Text>
+        {shieldStatus === null ? (
+          <Text dimColor>loading…</Text>
+        ) : (
+          <>
+            <Text color="green">✓ </Text>
+            <Box flexGrow={1} flexShrink={1}>
+              <Text wrap="truncate-end">{activeLine}</Text>
+            </Box>
+            <Text>{'    '}</Text>
+            <Text color={inactive.length > 0 ? 'red' : 'green'}>✗ </Text>
+            <Text dimColor>{`${inactive.length} inactive`}</Text>
+          </>
+        )}
       </Box>
       <Box>
         <Text bold>HOUR OF DAY</Text>

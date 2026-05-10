@@ -36,8 +36,10 @@ export function ThisWeek({ audit }: { audit: AggregateResult | null }): React.Re
       flexBasis={0}
     >
       <Text bold>THIS WEEK</Text>
-      {days.length === 0 ? (
-        <Text dimColor>no activity</Text>
+      {audit === null ? (
+        <Text dimColor>loading…</Text>
+      ) : days.length === 0 ? (
+        <Text dimColor>no activity this period</Text>
       ) : (
         days.map(([dateKey, { calls, blocked }]) => {
           const cost = costByDay.get(dateKey) ?? 0;
