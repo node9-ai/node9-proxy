@@ -259,6 +259,22 @@ export function compactPath(p: string): string {
 }
 
 /**
+ * Walk a shell command string and replace every absolute / homedir path
+ * token with its compactPath form. URLs (which start with a scheme like
+ * `https:`) and short paths are left untouched. This keeps the LIVE row
+ * readable when an agent runs something like
+ *   `cd /home/nadav/node9/node9-proxy && wc -l src/tui/dashboard/data.ts`
+ * which would otherwise blow past the 70-char preview budget.
+ */
+export function compactPathsInCommand(cmd: string): string {
+  if (!cmd) return cmd;
+  // Match a non-whitespace run that begins with `/` or `~/`. Greedy on
+  // the run itself is fine — shell tokens are whitespace-delimited at
+  // the level of granularity we care about for display.
+  return cmd.replace(/(?:\/|~\/)[^\s]+/g, (match) => compactPath(match));
+}
+
+/**
  * Build a backfill seed for the LIVE panel: the most recent N audit
  * entries. Returned in chronological order so appending SSE events to
  * the end keeps the buffer monotonic.
@@ -996,7 +1012,7 @@ function toActivityEvent(eventName: string, data: SsePayload): ActivityEvent | n
   // the column ("…/dashboard/data.ts" instead of the full absolute).
   let preview: string;
   if (typeof payload.args?.command === 'string' && payload.args.command.length > 0) {
-    preview = payload.args.command.replace(/\s+/g, ' ').slice(0, 70);
+    preview = compactPathsInCommand(payload.args.command.replace(/\s+/g, ' ')).slice(0, 70);
   } else if (typeof payload.args?.file_path === 'string' && payload.args.file_path.length > 0) {
     preview = compactPath(payload.args.file_path).slice(0, 70);
   } else if (typeof payload.args?.path === 'string' && payload.args.path.length > 0) {

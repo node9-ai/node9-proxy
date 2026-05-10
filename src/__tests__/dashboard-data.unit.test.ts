@@ -21,6 +21,7 @@ import {
   auditEntryToActivityEvent,
   buildCostBaseline,
   compactPath,
+  compactPathsInCommand,
   isValidForensicEvent,
   mapResultStatus,
   subtractCostBaseline,
@@ -404,6 +405,38 @@ describe('compactPath', () => {
   });
   it('handles empty / undefined gracefully', () => {
     expect(compactPath('')).toBe('');
+  });
+});
+
+// ── compactPathsInCommand ────────────────────────────────────────────────────
+
+describe('compactPathsInCommand', () => {
+  it('compacts an absolute path embedded in a shell command', () => {
+    expect(compactPathsInCommand('cd /home/nadav/node9/node9-proxy && wc -l src/tui/tail.ts')).toBe(
+      'cd .../node9/node9-proxy && wc -l src/tui/tail.ts'
+    );
+  });
+
+  it('compacts every absolute path independently', () => {
+    expect(compactPathsInCommand('cp /home/u/proj/a/b/c.txt /home/u/proj/d/e/f.txt')).toBe(
+      'cp .../b/c.txt .../e/f.txt'
+    );
+  });
+
+  it('compacts ~-relative paths', () => {
+    expect(compactPathsInCommand('cat ~/projects/foo/bar/baz.ts')).toBe('cat .../bar/baz.ts');
+  });
+
+  it('leaves URLs and short paths alone', () => {
+    expect(compactPathsInCommand('curl https://example.com/api')).toBe(
+      'curl https://example.com/api'
+    );
+    expect(compactPathsInCommand('ls /etc/hosts')).toBe('ls /etc/hosts');
+  });
+
+  it('passes through commands with no paths', () => {
+    expect(compactPathsInCommand('npm test')).toBe('npm test');
+    expect(compactPathsInCommand('')).toBe('');
   });
 });
 
