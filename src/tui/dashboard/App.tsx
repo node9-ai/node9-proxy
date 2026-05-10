@@ -238,11 +238,26 @@ export function App(): React.ReactElement {
     if (view !== 'report') return;
     if (scanCache.status !== 'idle') return;
     const cancel = startScanWalk(setScanCache);
-    return cancel;
-    // scanCache intentionally not in deps — we only want to start ONCE
-    // per idle state. State transitions (loading → ready) shouldn't
-    // re-trigger the walk.
-  }, [view]);
+    return () => {
+      // Cleanup runs on view change OR before the next effect cycle. Two
+      // cases matter:
+      //   1. Walk completed and status is 'ready' / 'error' → cancel() is
+      //      a no-op; state stays as-is so the cached results survive a
+      //      view toggle.
+      //   2. Walk in flight (status === 'loading') and user toggles away
+      //      mid-walk → cancel() suppresses the pending onUpdate; we ALSO
+      //      reset to 'idle' here so a future [2] press can restart.
+      //      Without this reset the cache would be stuck in 'loading'
+      //      forever (cancelled walk never updates again).
+      cancel();
+      setScanCache((cur) => (cur.status === 'loading' ? { status: 'idle' } : cur));
+    };
+    // Depending on scanCache.status (not the whole object) lets the [r]
+    // refresh handler kick a re-walk by setting status back to 'idle' —
+    // the effect re-runs and starts a fresh walk. Other status changes
+    // (loading → ready) hit the early-return at line 239, so no extra
+    // work happens.
+  }, [view, scanCache.status]);
 
   // SSE subscription — runs once, fed by daemon.
   useEffect(() => {
@@ -546,6 +561,12 @@ export function App(): React.ReactElement {
       setShieldStatus(loadShieldStatus());
       void loadCostEntries().then(setCostEntries);
       void loadScanSignals().then(setScanSignals);
+      // Invalidate the scan-walker cache so Report [2]'s LEAKS / LOOPS /
+      // TOP RULES panels re-walk the agent histories. The useEffect above
+      // depends on scanCache.status, so flipping to 'idle' triggers a
+      // fresh walk when view === 'report'. No-op cost when on Realtime —
+      // the walk only runs on the next [2] press.
+      setScanCache({ status: 'idle' });
     }
   });
 
