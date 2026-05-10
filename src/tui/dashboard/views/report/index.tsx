@@ -74,7 +74,10 @@ export function ReportView({
         <TopBlocks audit={audit} />
         <ThisWeek audit={audit} />
       </Box>
-      <BlastRadius blast={blast} />
+      <BlastRadius
+        blast={blast}
+        protectedByProjectJail={shieldStatus?.active.includes('project-jail') ?? false}
+      />
       <Box flexDirection="row" gap={1}>
         <Leaks scanCache={scanCache} filtered={filtered} />
         <Loops scanCache={scanCache} filtered={filtered} />

@@ -50,13 +50,12 @@ export function Leaks({
         <Text color="green">✓ no leaks this period</Text>
       ) : (
         filtered.leaksByType.slice(0, ROW_LIMIT).map((row) => (
-          <Box key={row.type}>
+          // Single-Text-with-truncate so the row stays exactly 1 line tall.
+          <Text key={row.type} wrap="truncate-end">
             <Text color="red">🚨 </Text>
-            <Box flexGrow={1} flexShrink={1}>
-              <Text wrap="truncate-end">{row.type}</Text>
-            </Box>
+            {row.type.padEnd(14)}
             <Text bold>{num(row.count).padStart(3)}</Text>
-          </Box>
+          </Text>
         ))
       )}
     </Box>

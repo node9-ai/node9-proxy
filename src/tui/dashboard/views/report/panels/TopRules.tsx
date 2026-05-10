@@ -44,16 +44,13 @@ export function TopRules({
         <Text dimColor>no rules fired this period</Text>
       ) : (
         rules.map((row) => (
-          // Rule name in a flex-shrinking Box with truncate-end so long
-          // names (e.g. "shield:project-jail:block-read-credentials")
-          // don't push the count off the column or wrap to a new line.
-          // Count is fixed-width on the right.
-          <Box key={row.rule}>
-            <Box flexGrow={1} flexShrink={1}>
-              <Text wrap="truncate-end">{row.rule}</Text>
-            </Box>
+          // Single-Text-with-truncate so the row stays exactly 1 line
+          // tall. Putting the rule name in a flex-shrinking Box added
+          // phantom empty rows in some terminals.
+          <Text key={row.rule} wrap="truncate-end">
+            {row.rule.padEnd(18)}
             <Text bold>{num(row.count).padStart(4)}</Text>
-          </Box>
+          </Text>
         ))
       )}
     </Box>

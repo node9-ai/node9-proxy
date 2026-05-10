@@ -164,14 +164,14 @@ describe('ThisWeek', () => {
 
 describe('BlastRadius', () => {
   it('renders "loading…" header when blast is null', () => {
-    const { lastFrame } = render(<BlastRadius blast={null} />);
+    const { lastFrame } = render(<BlastRadius blast={null} protectedByProjectJail={false} />);
     expect(lastFrame()).toContain('BLAST RADIUS');
     expect(lastFrame()).toContain('loading…');
   });
 
   it('renders "no exposed sensitive files" when paths is empty', () => {
     const blast: BlastSnapshot = { score: 100, paths: [], envFindings: 0 };
-    const { lastFrame } = render(<BlastRadius blast={blast} />);
+    const { lastFrame } = render(<BlastRadius blast={blast} protectedByProjectJail={false} />);
     expect(lastFrame()).toContain('no exposed sensitive files');
   });
 
@@ -184,22 +184,33 @@ describe('BlastRadius', () => {
         { label: '~/.npmrc', description: 'npm auth token', score: 10 },
       ],
     };
-    const { lastFrame } = render(<BlastRadius blast={blast} />);
+    const { lastFrame } = render(<BlastRadius blast={blast} protectedByProjectJail={false} />);
     expect(lastFrame()).toContain('~/.ssh/id_rsa');
     expect(lastFrame()).toContain('RSA private key');
     expect(lastFrame()).toContain('~/.npmrc');
     expect(lastFrame()).toContain('→ enable project-jail');
   });
 
-  it('uses singular grammar for exactly 1 path', () => {
+  it('shows "blocked by project-jail" when shield is active', () => {
+    const blast: BlastSnapshot = {
+      score: 30,
+      envFindings: 0,
+      paths: [{ label: '~/.npmrc', description: 'npm auth token', score: 10 }],
+    };
+    const { lastFrame } = render(<BlastRadius blast={blast} protectedByProjectJail={true} />);
+    expect(lastFrame()).toContain('blocked by project-jail');
+    expect(lastFrame()).not.toContain('→ enable project-jail');
+  });
+
+  it('uses singular grammar for exactly 1 path on disk', () => {
     const blast: BlastSnapshot = {
       score: 80,
       envFindings: 0,
       paths: [{ label: '~/.npmrc', description: 'npm auth token', score: 10 }],
     };
-    const { lastFrame } = render(<BlastRadius blast={blast} />);
-    expect(lastFrame()).toContain('1 path an agent can reach');
-    expect(lastFrame()).not.toContain('1 paths an agent');
+    const { lastFrame } = render(<BlastRadius blast={blast} protectedByProjectJail={false} />);
+    expect(lastFrame()).toContain('1 path on disk');
+    expect(lastFrame()).not.toContain('1 paths on disk');
   });
 });
 

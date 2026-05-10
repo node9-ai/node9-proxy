@@ -37,17 +37,12 @@ export function TopBlocks({ audit }: { audit: AggregateResult | null }): React.R
         <Text dimColor>nothing blocked ✓</Text>
       ) : (
         sorted.map(([reason, count]) => (
-          // Reason label truncates with ellipsis if it can't fit; bar +
-          // count are right-aligned at fixed width so columns stay even.
-          <Box key={reason}>
-            <Box flexGrow={1} flexShrink={1}>
-              <Text wrap="truncate-end">{humanBlockReason(reason)}</Text>
-            </Box>
-            <Text> </Text>
-            <Text color="red">{renderBar(count, max, BAR_WIDTH)}</Text>
-            <Text> </Text>
+          // Single-Text-with-truncate so the row stays exactly 1 line tall.
+          <Text key={reason} wrap="truncate-end">
+            {humanBlockReason(reason).padEnd(12)}{' '}
+            <Text color="red">{renderBar(count, max, BAR_WIDTH)}</Text>{' '}
             <Text bold>{num(count).padStart(4)}</Text>
-          </Box>
+          </Text>
         ))
       )}
     </Box>

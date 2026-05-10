@@ -1,13 +1,18 @@
 // src/tui/dashboard/views/report/panels/BlastRadius.tsx
 //
 // Full-width row panel: sensitive files an AI agent on this machine can
-// reach right now. Reuses the snapshot loaded by App.tsx via loadBlast()
-// — same data already fed to the Realtime view's Risk panel, just
-// rendered with descriptions and a CTA.
+// reach right now (filesystem-readable). Reuses the snapshot loaded by
+// App.tsx via loadBlast() — same data already fed to the Realtime view's
+// Risk panel, plus the human descriptions from blast.ts.
 //
-// Border turns red when paths > 0 (anything reachable means the
-// project-jail shield isn't fully covering the user's home dir, which
-// is worth visual emphasis on a security report).
+// CTA + border color depend on whether project-jail is active:
+//   - exposed AND project-jail active   → dim border, "✓ blocked by project-jail"
+//   - exposed AND project-jail inactive → red border, "→ enable project-jail"
+//   - not exposed                       → dim border, "✓ no exposed sensitive files"
+//
+// "Blocked by project-jail" reflects that the shield prevents agent
+// tool calls from reading these paths, even though the files are still
+// readable by the user's process (which is what blast.ts walks).
 
 import React from 'react';
 import { Box, Text } from 'ink';
@@ -17,14 +22,23 @@ import type { BlastSnapshot } from '../../../types.js';
 
 const LABEL_WIDTH = 36;
 
-export function BlastRadius({ blast }: { blast: BlastSnapshot | null }): React.ReactElement {
+export function BlastRadius({
+  blast,
+  protectedByProjectJail,
+}: {
+  blast: BlastSnapshot | null;
+  /** True when shieldStatus.active includes 'project-jail'. Drives the
+   *  border color + CTA copy — see header doc comment. */
+  protectedByProjectJail: boolean;
+}): React.ReactElement {
   const paths = blast?.paths ?? [];
   const exposed = paths.length > 0;
+  const showRedBorder = exposed && !protectedByProjectJail;
 
   return (
     <Box
       borderStyle="round"
-      borderColor={exposed ? 'red' : COL.textDim}
+      borderColor={showRedBorder ? 'red' : COL.textDim}
       paddingX={1}
       flexDirection="column"
       flexGrow={1}
@@ -36,12 +50,16 @@ export function BlastRadius({ blast }: { blast: BlastSnapshot | null }): React.R
         ) : (
           <>
             <Text dimColor>
-              {`  ·  ${paths.length} path${paths.length === 1 ? '' : 's'} an agent can reach right now`}
+              {`  ·  ${paths.length} path${paths.length === 1 ? '' : 's'} on disk`}
             </Text>
             {exposed ? (
               <>
                 <Text>{'      '}</Text>
-                <Text color="yellow">→ enable project-jail</Text>
+                {protectedByProjectJail ? (
+                  <Text color="green">✓ blocked by project-jail</Text>
+                ) : (
+                  <Text color="yellow">→ enable project-jail</Text>
+                )}
               </>
             ) : null}
           </>
@@ -49,18 +67,17 @@ export function BlastRadius({ blast }: { blast: BlastSnapshot | null }): React.R
       </Box>
       {blast === null ? null : exposed ? (
         paths.map((p) => (
-          // One row per path. The description is placed in a flex-shrinking
-          // Box with wrap="truncate-end" so it never wraps to a second line —
-          // long descriptions get an ellipsis at the column boundary instead.
-          <Box key={p.label}>
+          // One row per path. Use a single <Text wrap="truncate-end">
+          // wrapping all the colored child Texts — Ink renders this as a
+          // single line and truncates with ellipsis at the column edge.
+          // Wrapping the description in a separate flex Box added phantom
+          // empty rows in some terminals (Ink seems to inflate row height
+          // when a flex child has wrap="truncate-end").
+          <Text key={p.label} wrap="truncate-end">
             <Text color="red">✗ </Text>
             <Text>{p.label.padEnd(LABEL_WIDTH)}</Text>
-            <Box flexGrow={1} flexShrink={1}>
-              <Text dimColor wrap="truncate-end">
-                {p.description}
-              </Text>
-            </Box>
-          </Box>
+            <Text dimColor>{p.description}</Text>
+          </Text>
         ))
       ) : (
         <Text color="green">✓ no exposed sensitive files</Text>
