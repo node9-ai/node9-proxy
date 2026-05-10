@@ -18,6 +18,9 @@ import { Box, Text } from 'ink';
 import { COL } from '../../panels.js';
 import type { ReportPeriod, ScanCache } from '../../types.js';
 import type { AggregateResult } from '../../../../cli/aggregate/report-audit.js';
+import { Protection } from './panels/Protection.js';
+import { TopBlocks } from './panels/TopBlocks.js';
+import { ThisWeek } from './panels/ThisWeek.js';
 
 export interface ReportViewProps {
   period: ReportPeriod;
@@ -39,7 +42,12 @@ export function ReportView({ period, audit }: ReportViewProps): React.ReactEleme
     <Box flexDirection="column" flexGrow={1} paddingX={1}>
       <ReportHeader period={period} audit={audit} />
       <ScoreBanner audit={audit} />
-      <PlaceholderPanels />
+      <Box flexDirection="row" gap={1}>
+        <Protection audit={audit} />
+        <TopBlocks audit={audit} />
+        <ThisWeek audit={audit} />
+      </Box>
+      <RemainingPlaceholders />
     </Box>
   );
 }
@@ -127,31 +135,18 @@ function ScoreBanner({ audit }: { audit: AggregateResult | null }): React.ReactE
 // Placeholder panels — 3d/3e/3f/3g fill these in with real content
 // ---------------------------------------------------------------------------
 
-function PlaceholderPanels(): React.ReactElement {
+function RemainingPlaceholders(): React.ReactElement {
   return (
     <Box flexDirection="column" gap={0}>
-      <PanelRow>
-        <Placeholder label="PROTECTION" hint="6 outcome counters" />
-        <Placeholder label="TOP BLOCKS" hint="rule-grouped block bars" />
-        <Placeholder label="THIS WEEK" hint="daily activity + cost" />
-      </PanelRow>
       <Placeholder label="BLAST RADIUS" hint="reachable paths the agent can read right now" full />
-      <PanelRow>
+      <Box flexDirection="row" gap={1}>
         <Placeholder label="LEAKS" hint="credential types found" />
         <Placeholder label="LOOPS" hint="repeat-tool waste" />
         <Placeholder label="TOP RULES" hint="most-fired rules" />
-      </PanelRow>
+      </Box>
       <Box paddingX={1} paddingTop={1}>
         <Text dimColor>SHIELDS · HOUR OF DAY (footer strip — phase 3g)</Text>
       </Box>
-    </Box>
-  );
-}
-
-function PanelRow(props: { children: React.ReactNode }): React.ReactElement {
-  return (
-    <Box flexDirection="row" gap={1}>
-      {props.children}
     </Box>
   );
 }
