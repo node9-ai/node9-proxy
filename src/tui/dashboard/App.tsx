@@ -214,19 +214,30 @@ export function App(): React.ReactElement {
   useEffect(() => {
     const teardown = subscribeToSse(
       (e) => {
+        // 'add' SSE events feed the approval card and ONLY the approval
+        // card — the daemon also broadcasts an `activity` event for the
+        // same logical command in the same flush, which is what populates
+        // LIVE. Without this early-return, every review-required call
+        // produced THREE LIVE rows (two 'activity' events with different
+        // ids — one tool-call id, one queue tracker id — plus the 'add'
+        // row). Skip the events append for 'add' to bring it back to two.
+        // Full collapse to one row needs a daemon-side fix (single
+        // 'activity' broadcast per logical command) — tracked separately.
+        if (e.kind === 'tool' && e.isApprovalRequest) {
+          setPendingApproval(e);
+          setApprovalStatus({ kind: 'idle' });
+          setSseError(undefined);
+          return;
+        }
         setEvents((prev) => {
           const next = [...prev, e];
           return next.length > LIVE_BUFFER_CAP ? next.slice(next.length - LIVE_BUFFER_CAP) : next;
         });
         setSseError(undefined);
-        // Surface real approval requests only:
-        //   - verdict === 'review'        → shield/rule explicitly needs decision
-        //   - isApprovalRequest === true  → SSE 'add' event (queued for approval)
-        // Bare verdict === 'pending' is intentionally NOT triggered: those
-        // are transient `activity`-event flashes for auto-allowed calls
-        // that resolve in milliseconds via activity-result. Showing them
-        // would pop the APPROVAL card on every tool call.
-        if (e.kind === 'tool' && (e.verdict === 'review' || e.isApprovalRequest)) {
+        // verdict === 'review' on a regular `activity` event is also a
+        // pending-approval signal (shield/rule explicitly asked for
+        // review without queuing through the 'add' channel).
+        if (e.kind === 'tool' && e.verdict === 'review') {
           setPendingApproval(e);
           setApprovalStatus({ kind: 'idle' });
         }
