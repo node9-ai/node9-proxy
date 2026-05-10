@@ -104,7 +104,38 @@ const FIXED_PANELS_HEIGHT = 30;
 const LIVE_MIN_ROWS = 1;
 const NOTIFICATION_RECENT_WINDOW_MS = 60_000;
 const RESOLVED_HOLD_MS = 5_000;
-const COST_REFRESH_MS = 5 * 60_000;
+// Cost refresh cadence. The walk reads ~/.claude/projects/**/*.jsonl which
+// takes 1-2s on a heavy install, but it runs via setImmediate and never blocks
+// render — so we can afford a tighter loop. 30s is the sweet spot: fast enough
+// that the HIGH LEVEL panel feels live as the agent runs, slow enough not to
+// re-walk dozens of MB of JSONL on every breath. Manual refresh via [r] still
+// triggers an immediate reload independent of this interval.
+const COST_REFRESH_MS = 30_000;
+
+/**
+ * Quit-key dispatch — extracted as a pure function so the rules are unit-
+ * testable. Three conventions, in priority order:
+ *   1. Ctrl+C always quits, regardless of mode. Terminal convention; the
+ *      previous code path swallowed it inside an active approval card,
+ *      which trapped users.
+ *   2. `q` quits in every mode EXCEPT filter-input mode (where `q` must
+ *      type a literal `q` into the filter — that's by design).
+ *   3. Anything else: caller continues with normal dispatch.
+ *
+ * Note: pendingApproval state does NOT block quit anymore. The previous
+ * handler returned early on a card without checking q/ctrl+c, so users
+ * could see the dashboard freeze visually until the daemon's own
+ * approvalTimeoutMs fired.
+ */
+export function shouldQuit(
+  input: string,
+  key: { ctrl?: boolean },
+  context: { filterInputMode: boolean }
+): boolean {
+  if (key.ctrl === true && input === 'c') return true;
+  if (input === 'q' && !context.filterInputMode) return true;
+  return false;
+}
 /** Once a non-approval notification (block/review/loop) is shown,
  *  don't replace it with a newer non-approval until this elapses.
  *  Stops the area from flickering when many blocks fire in a burst.
@@ -450,6 +481,15 @@ export function App(): React.ReactElement {
   }, [costEntries, window, openedAt]);
 
   useInput((input, key) => {
+    // Quit takes priority over every mode dispatch. q quits unless we're
+    // typing into the filter (where q must remain a printable character);
+    // Ctrl+C always quits, even with an approval card on screen. See
+    // shouldQuit() at module scope for the full rule table.
+    if (shouldQuit(input, key, { filterInputMode })) {
+      exit();
+      return;
+    }
+
     // Filter input mode takes the highest priority — every printable
     // key edits the filter, Esc clears, Enter freezes. Approval card
     // and global hotkeys are suppressed.
@@ -526,8 +566,8 @@ export function App(): React.ReactElement {
       setFilter('');
       return;
     }
-    if (input === 'q' || (key.ctrl && input === 'c')) exit();
-    else if (input === '1') {
+    // q / Ctrl+C are handled at the top of the handler via shouldQuit().
+    if (input === '1') {
       // Top-level view switch. Realtime is the default — pressing 1
       // from anywhere returns here. See monitor-two-view.md.
       setView('realtime');

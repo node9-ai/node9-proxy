@@ -658,7 +658,7 @@ export function startScanWalk(onUpdate: (cache: ScanCache) => void): () => void 
 // Returns a teardown function the React effect cleans up.
 // ---------------------------------------------------------------------------
 
-interface SsePayload {
+export interface SsePayload {
   id?: string;
   /**
    * Daemon broadcasts ts as either an ISO-8601 string (audit.log path)
@@ -968,7 +968,7 @@ export function subscribeToSse(
   };
 }
 
-function toActivityEvent(eventName: string, data: SsePayload): ActivityEvent | null {
+export function toActivityEvent(eventName: string, data: SsePayload): ActivityEvent | null {
   // The daemon broadcasts several event types: `activity`, `activity-result`,
   // `add`, `remove`, `snapshot`, `execution-result`. The dashboard renders
   // `activity` / `add` as tool rows and `snapshot` as snapshot rows.
@@ -978,12 +978,17 @@ function toActivityEvent(eventName: string, data: SsePayload): ActivityEvent | n
 
   if (eventName === 'snapshot') {
     // Mirrors the format `node9 tail` uses (see src/tui/tail.ts).
+    // argsSummary is typically a file path ("/home/.../src/foo.ts"); compactPath
+    // collapses long absolutes to ".../parent/file" so the live row stays inside
+    // the column budget. Tool name and the literal 'snapshot' fallback are left
+    // alone — compactPath is a no-op on non-path strings anyway.
+    const rawSummary = payload.argsSummary ?? payload.tool ?? 'snapshot';
     return {
       kind: 'snapshot',
       id: payload.id ?? `${ts}-snapshot`,
       ts,
       hash: payload.hash ?? '',
-      summary: payload.argsSummary ?? payload.tool ?? 'snapshot',
+      summary: compactPath(rawSummary),
       fileCount: typeof payload.fileCount === 'number' ? payload.fileCount : 0,
     };
   }

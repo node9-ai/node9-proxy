@@ -25,6 +25,7 @@ import {
   isValidForensicEvent,
   mapResultStatus,
   subtractCostBaseline,
+  toActivityEvent,
 } from '../tui/dashboard/data';
 import { EMPTY_SESSION_FORENSIC, type ForensicSseEvent } from '../tui/dashboard/types';
 import type { DailyEntry } from '../costSync';
@@ -473,6 +474,41 @@ describe('mapResultStatus', () => {
 });
 
 // ── auditEntryToActivityEvent — extra coverage for path compaction in preview
+
+describe('toActivityEvent · snapshot path compaction', () => {
+  it('compacts a long argsSummary path so the live row stays in column budget', () => {
+    const e = toActivityEvent('snapshot', {
+      ts: '2026-05-08T08:00:00.000Z',
+      hash: 'abc1234',
+      argsSummary: '/home/u/repo/src/tui/dashboard/data.ts',
+      fileCount: 2,
+    });
+    if (!e || e.kind !== 'snapshot') throw new Error('expected snapshot event');
+    expect(e.summary).toBe('.../dashboard/data.ts');
+  });
+
+  it('leaves short paths unchanged', () => {
+    const e = toActivityEvent('snapshot', {
+      ts: '2026-05-08T08:00:00.000Z',
+      hash: 'abc1234',
+      argsSummary: '/etc/hosts',
+      fileCount: 1,
+    });
+    if (!e || e.kind !== 'snapshot') throw new Error('expected snapshot event');
+    expect(e.summary).toBe('/etc/hosts');
+  });
+
+  it('falls back to tool name when argsSummary is missing', () => {
+    const e = toActivityEvent('snapshot', {
+      ts: '2026-05-08T08:00:00.000Z',
+      hash: 'abc1234',
+      tool: 'write_file',
+      fileCount: 1,
+    });
+    if (!e || e.kind !== 'snapshot') throw new Error('expected snapshot event');
+    expect(e.summary).toBe('write_file');
+  });
+});
 
 describe('auditEntryToActivityEvent · preview compaction', () => {
   it('compacts long file_path in preview', () => {
