@@ -694,20 +694,47 @@ export async function loadReportAuditAsync(period: ReportPeriod): Promise<Aggreg
  * walkers don't expose one. Keeping this simple until phase 3f decides
  * whether per-panel progress bars are worth the plumbing.
  */
+/** Resolves on the next event-loop tick. Used to break long sync work
+ *  into shorter chunks so ink can repaint and `useInput` can dispatch
+ *  keypresses (q / Ctrl+C / view switch) between chunks. */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 export function startScanWalk(onUpdate: (cache: ScanCache) => void): () => void {
   let cancelled = false;
 
   onUpdate({ status: 'loading' });
 
-  setImmediate(() => {
-    if (cancelled) return;
+  // Run the three agent walkers sequentially, yielding to ink between
+  // each one. Without these yields all three walkers ran in a single
+  // setImmediate tick — observed 1-2 s of frozen UI on the user's first
+  // [2] press (claude walker is ~700 ms by itself on a heavy install).
+  // After this change the UI stays responsive throughout: q / Ctrl+C /
+  // view switch all work mid-walk, even though the 'loading' placeholder
+  // still shows for the same total duration.
+  //
+  // Each walker is still synchronous internally (extracting per-project
+  // chunking from the 380-line scanClaudeHistory is the next step if
+  // this isn't enough — see #2 follow-up in the responsiveness plan).
+  void (async () => {
     try {
+      await yieldToEventLoop();
+      if (cancelled) return;
+
       const claude = scanClaudeHistory(null);
       if (cancelled) return;
+      await yieldToEventLoop();
+      if (cancelled) return;
+
       const gemini = scanGeminiHistory(null);
       if (cancelled) return;
+      await yieldToEventLoop();
+      if (cancelled) return;
+
       const codex = scanCodexHistory(null);
       if (cancelled) return;
+
       onUpdate({
         status: 'ready',
         results: { claude, gemini, codex },
@@ -720,7 +747,7 @@ export function startScanWalk(onUpdate: (cache: ScanCache) => void): () => void 
         error: err instanceof Error ? err : new Error(String(err)),
       });
     }
-  });
+  })();
 
   return () => {
     cancelled = true;

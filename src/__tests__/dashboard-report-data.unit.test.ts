@@ -62,12 +62,22 @@ describe('startScanWalk', () => {
     return new Promise((resolve) => setImmediate(resolve));
   }
 
-  it('emits loading synchronously, then ready after setImmediate', async () => {
+  /** Drain setImmediate ticks until `predicate` becomes true or the cap is
+   *  hit. The walker now yields between agents (claude → gemini → codex) so
+   *  a single flush is no longer enough to reach 'ready'. */
+  async function drainUntil(predicate: () => boolean, maxTicks = 20): Promise<void> {
+    for (let i = 0; i < maxTicks; i++) {
+      if (predicate()) return;
+      await flushImmediate();
+    }
+  }
+
+  it('emits loading synchronously, then ready after the walker yields complete', async () => {
     startScanWalk(collect);
     expect(updates).toHaveLength(1);
     expect(updates[0]).toEqual({ status: 'loading' });
 
-    await flushImmediate();
+    await drainUntil(() => updates.length >= 2);
     expect(updates).toHaveLength(2);
     expect(updates[1].status).toBe('ready');
     if (updates[1].status === 'ready') {
@@ -78,12 +88,33 @@ describe('startScanWalk', () => {
     }
   });
 
+  it('yields to the event loop between agent walkers (UI stays responsive mid-walk)', async () => {
+    // The walker calls scanClaudeHistory → yield → scanGeminiHistory →
+    // yield → scanCodexHistory → emit ready. We pin the yielding by
+    // counting how many times an independent setImmediate-driven ticker
+    // fires before 'ready' arrives. Without yields between walkers the
+    // tickers wouldn't run until ready was already emitted.
+    let independentTicks = 0;
+    const tick = (): void => {
+      independentTicks++;
+      if (independentTicks < 50) setImmediate(tick);
+    };
+    setImmediate(tick);
+
+    startScanWalk(collect);
+    await drainUntil(() => updates.some((u) => u.status === 'ready'));
+
+    // 1 initial yield + 2 between-walker yields + 1 between-tick scheduling
+    // = the independent ticker should fire at least 3 times before ready.
+    expect(independentTicks).toBeGreaterThanOrEqual(3);
+  });
+
   it('suppresses the ready callback when cancel() is called before completion', async () => {
     const cancel = startScanWalk(collect);
     expect(updates).toHaveLength(1); // loading fired immediately
-    cancel(); // cancel before setImmediate runs
+    cancel(); // cancel before any walker runs
 
-    await flushImmediate();
+    await drainUntil(() => false, 5); // give yields a chance to fire
     // After cancel, no further updates should arrive
     expect(updates).toHaveLength(1);
     expect(updates[0]).toEqual({ status: 'loading' });
@@ -97,7 +128,7 @@ describe('startScanWalk', () => {
     });
 
     startScanWalk(collect);
-    await flushImmediate();
+    await drainUntil(() => updates.some((u) => u.status === 'error'));
 
     const last = updates[updates.length - 1];
     expect(last.status).toBe('error');
