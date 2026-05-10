@@ -36,12 +36,7 @@ import {
 } from '../shell';
 import { analyzePipeChain } from '../policy/pipe-chain';
 import { classifyRuleSeverity, type Severity } from '../severity';
-import {
-  DESTRUCTIVE_OP_RE,
-  PRIVILEGE_ESCALATION_RE,
-  SENSITIVE_PATH_RE,
-  FILE_TOOLS,
-} from './destructive-regex';
+import { DESTRUCTIVE_OP_RE, SENSITIVE_PATH_RE, FILE_TOOLS } from './destructive-regex';
 import { detectPii } from './pii';
 import { evaluateLoopWindow, type ToolCallRecord } from '../loop';
 import { COST_PER_LOOP_ITER_USD } from './index';
@@ -205,7 +200,7 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
  * and fails CI when the hash drifts without a version bump — forgetting
  * is loud, not silent.
  */
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v3';
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v4';
 
 /**
  * SHA-256 prefix of the detector-source files
@@ -217,7 +212,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v3';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'd3cca8196018c510';
+export const CANONICAL_EXTRACTOR_HASH = '64a6a63a27f4646f';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
@@ -437,18 +432,31 @@ export function extractCanonicalFindings(
   }
 
   // ── Privilege escalation (sudo, chmod 777, chown root) ───────────────────
-  // Two-stage detection:
-  //   1. AST tokenization for sudo/su — analyzeShellCommand parses the
-  //      command via mvdan-sh and returns the actual command names invoked
-  //      per pipeline stage. Catches quoting bypasses (`s''udo`, `s\udo`)
-  //      that defeated the prior regex; also rejects string-literal
-  //      mentions like `echo "ran sudo"` (sudo is in a Lit, not a CallExpr).
-  //   2. Regex for chmod 0?777 / chmod +x / chown root — these check
-  //      arg VALUES (not first-word) so the regex is fine and a parse
-  //      failure on weird syntax shouldn't block the check.
+  // All-AST detection via analyzeShellCommand (mvdan-sh AST + permissive
+  // regex fallback if AST parse fails). The function returns:
+  //   - actions  — first word of every CallExpr (the actual command names)
+  //   - allTokens — every literal token, lowercased + path-segment-split
+  //
+  // Both sudo/su AND chmod/chown go through this path so all four classes
+  // share the same false-positive elimination (string-literal mentions
+  // like `echo "chmod 777 done"` or `cat /etc/sudoers` no longer trip the
+  // detector — those don't put the action name in `actions`). Quoting
+  // bypasses (`s''udo`, `c\hmod`) are caught because mvdan-sh resolves
+  // the AST before we look at actions.
+  //
+  // PRIVILEGE_ESCALATION_RE is no longer the privesc gate at all; it's
+  // retained in the engine exports for non-AST consumers (smart rules
+  // that grep raw strings) and as documentation of the historical
+  // pattern set.
   const ast = analyzeShellCommand(command);
-  const sudoVariants = ast.actions.includes('sudo') || ast.actions.includes('su');
-  if (sudoVariants || PRIVILEGE_ESCALATION_RE.test(command)) {
+  const sudoVariant = ast.actions.includes('sudo') || ast.actions.includes('su');
+  const chmodVariant =
+    ast.actions.includes('chmod') &&
+    (ast.allTokens.includes('777') ||
+      ast.allTokens.includes('0777') ||
+      ast.allTokens.includes('+x'));
+  const chownVariant = ast.actions.includes('chown') && ast.allTokens.includes('root');
+  if (sudoVariant || chmodVariant || chownVariant) {
     out.push(
       makeFinding({
         type: 'privilege-escalation',

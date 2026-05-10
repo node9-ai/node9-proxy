@@ -201,16 +201,36 @@ describe('extractCanonicalFindings — per-line detectors', () => {
     expect(out.find((f) => f.type === 'privilege-escalation')).toBeUndefined();
   });
 
-  // chmod/chown stay on regex — argument-value checks the AST `actions`
-  // list alone wouldn't catch.
+  // chmod/chown go through AST as well — `actions` includes the command
+  // name, `allTokens` is checked for the dangerous arg value (777, +x,
+  // root). Both halves must match, so a CallExpr alone (chmod with safe
+  // args) doesn't trip, and a Lit alone (string mention) doesn't trip.
   it.each([
     ['chmod 777 file', 'chmod 777'],
     ['chmod 0777 /tmp', 'chmod 0777'],
     ['chmod +x script.sh', 'chmod +x'],
     ['chown root /etc/foo', 'chown root'],
+    ['c\\hmod 777 /tmp', 'AST-resolved escaped chmod'],
+    ['ch""mod 777 /tmp', 'AST-resolved quoted chmod'],
   ])('emits privilege-escalation for `%s` (%s)', (command) => {
     const out = extractCanonicalFindings(call({ args: { command } }), baseCtx());
     expect(out.find((f) => f.type === 'privilege-escalation')).toBeDefined();
+  });
+
+  // Negative cases: command name must appear as a CallExpr first-word
+  // and the dangerous arg as a separate token. Mentions of "chmod 777"
+  // inside a string literal, or `chmod` as an argument to another
+  // command, must not fire.
+  it.each([
+    ['echo "chmod 777 done"', 'chmod 777 inside string literal'],
+    ['echo chmod 777', 'chmod as echo argument, not as command'],
+    ['cat /etc/chmod-notes.txt', 'chmod substring in path'],
+    ['echo "chown root"', 'chown root inside string literal'],
+    ['chmod 644 file', 'chmod with safe mode'],
+    ['chown alice file', 'chown without root'],
+  ])('does NOT emit privilege-escalation for `%s` (%s)', (command) => {
+    const out = extractCanonicalFindings(call({ args: { command } }), baseCtx());
+    expect(out.find((f) => f.type === 'privilege-escalation')).toBeUndefined();
   });
 
   it('emits eval-of-remote for curl | bash', () => {

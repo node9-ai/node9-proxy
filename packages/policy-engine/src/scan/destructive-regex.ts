@@ -15,18 +15,18 @@ export const DESTRUCTIVE_OP_RE =
   /\brm\s+-[rRf]+\b|\bDROP\s+(TABLE|DATABASE|COLLECTION|SCHEMA)\b|\bTRUNCATE\s+TABLE\b|\bgit\s+push\s+(--force|-f)\b|\bFLUSHALL\b|\bFLUSHDB\b|\bkubectl\s+delete\b|\bhelm\s+uninstall\b/i;
 
 /**
- * Privilege-escalation regex — chmod/chown variants only. sudo/su
- * detection moved to AST tokenization in scan/canonical.ts because
- * regex matching produced false positives on string literals (`echo
- * "ran sudo"`, `echo sudo > file`) AND was bypassable by quoting
- * (`s''udo`, `s\udo`). The AST detector calls analyzeShellCommand,
- * gets the actual command names invoked per pipeline stage, and
- * checks if `sudo` or `su` is among them — quoting-resistant and
- * string-literal-free.
+ * Historical privilege-escalation regex. **No longer used by the canonical
+ * detector** — scan/canonical.ts moved sudo/su, chmod, and chown all to
+ * AST tokenization (analyzeShellCommand actions + allTokens) so:
+ *   - Quoting bypasses (`s''udo`, `c\hmod`) don't slip past the matcher.
+ *   - String literals like `echo "chmod 777 done"` or `cat /etc/sudoers`
+ *     stop firing false positives — those don't put the action name in
+ *     `actions`, only in `allTokens` (a Lit, not a CallExpr first-word).
  *
- * chmod and chown stay on the regex because they check specific
- * argument VALUES (`0?777`, `+x`, `root`), not just the first word —
- * the AST `actions` list alone wouldn't help.
+ * Kept as a public export for non-AST consumers that grep raw command
+ * strings (smart-rule conditions that match on the literal command text)
+ * and as documentation of the historical pattern set. Removing it would
+ * be a breaking change for downstream package consumers.
  */
 export const PRIVILEGE_ESCALATION_RE = /\bchmod\s+(0?777|\+x)\b|\bchown\s+root\b/i;
 
