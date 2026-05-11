@@ -50,6 +50,7 @@ import {
   LiveSecurity,
   NotificationArea,
   SessionCounters,
+  Setup,
   StatusBar,
   type ApprovalStatus,
   type Notification,
@@ -88,13 +89,15 @@ const BLAST_REFRESH_MS = 5 * 60_000;
 // its status/scrollbar — either way header scrolled off the top once
 // LIVE filled. Reserving 1 extra row makes the dashboard 1 row shorter
 // than the terminal so there's no overflow.
-const FIXED_PANELS_HEIGHT = 30;
-/** Minimum content rows LIVE renders. 1 instead of a higher floor —
- *  on terminals smaller than 33 rows we'd rather LIVE shrink and keep
- *  the Header visible than over-claim space and push the dashboard
- *  past the terminal height (the outer Box's overflow="hidden" then
- *  clips the bottom panels instead of scrolling the top off). */
-const LIVE_MIN_ROWS = 1;
+const FIXED_PANELS_HEIGHT = 37;
+/** Minimum content rows LIVE renders. Bumped to 11 so the live event
+ *  stream always has useful depth even when the new LIVE SECURITY /
+ *  LIVE ACTIVITY panels grow the fixed-chrome budget. On terminals
+ *  too small to fit chrome + 11 LIVE rows, the outer Box's
+ *  overflow="hidden" clips the bottom (Setup / StatusBar) instead of
+ *  shrinking LIVE — the live feed is the primary signal, the rest is
+ *  context. */
+const LIVE_MIN_ROWS = 11;
 const NOTIFICATION_RECENT_WINDOW_MS = 60_000;
 const RESOLVED_HOLD_MS = 5_000;
 
@@ -862,6 +865,7 @@ export function App(): React.ReactElement {
             />
             <LiveActivity agg={sessionActivityAgg} />
           </Box>
+          <Setup shieldStatus={shieldStatus} />
         </>
       ) : (
         <ReportView

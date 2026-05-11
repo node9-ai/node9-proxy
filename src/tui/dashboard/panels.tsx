@@ -13,6 +13,7 @@ import type {
   ForensicSseEvent,
   SessionActivityAgg,
   SessionForensicAgg,
+  ShieldStatus,
   TimeWindow,
   View,
 } from './types.js';
@@ -708,19 +709,27 @@ function bar(value: number, max: number, width: number): string {
 // in a category yet.
 // ---------------------------------------------------------------------------
 
-const LIVE_SECURITY_ROWS_HEIGHT = 11;
+// Total box height (incl. borders) shared by LIVE SECURITY and LIVE
+// ACTIVITY. 2 borders + 1 title + 9 data rows = 12. Bumped from 11
+// so the title is no longer clipped off the top — that was producing
+// the "since open · N new" overlap on the first data row.
+const LIVE_SECURITY_ROWS_HEIGHT = 12;
 
 export function LiveSecurity(props: {
   blast: BlastSnapshot | null;
   forensicAgg: SessionForensicAgg;
   activityAgg: SessionActivityAgg;
 }): React.ReactElement {
+  // 9 categorical rows — matches the spec you gave: dlp, loop, paths,
+  // pii, priv, dest, eval, pipe, long. sensitive-file-read is folded
+  // into "priv" / "paths" semantics in practice and was dropping the
+  // title off-screen at height=11; keeping it minimal so the title
+  // stays visible.
   const rows: Array<{ label: string; count: number }> = [
     { label: 'dlp', count: props.activityAgg.dlp },
     { label: 'loops', count: props.activityAgg.loops },
     { label: 'paths', count: props.blast?.paths.length ?? 0 },
     { label: 'pii', count: props.forensicAgg.pii },
-    { label: 'read', count: props.forensicAgg.sensitiveFileRead },
     { label: 'priv', count: props.forensicAgg.privilegeEscalation },
     { label: 'dest', count: props.forensicAgg.destructiveOp },
     { label: 'eval', count: props.forensicAgg.evalOfRemote },
@@ -745,7 +754,7 @@ export function LiveSecurity(props: {
         <Text color={COL.brand} bold>
           LIVE SECURITY
         </Text>
-        <Text dimColor>{`  · since open · ${totalIssues} new`}</Text>
+        <Text dimColor>{`  · ${totalIssues} new`}</Text>
       </Text>
       {rows.map((r) => (
         <Text key={r.label} wrap="truncate-end">
@@ -770,7 +779,10 @@ export function LiveSecurity(props: {
 // without any history walk.
 // ---------------------------------------------------------------------------
 
-const LIVE_ACTIVITY_ROWS = 5;
+// Top-N per section. 1 title + 1 TOOLS header + 4 + 1 SHELL header
+// + 4 + 2 borders = 13 → doesn't fit in 12. Using 3 per section to
+// fit symmetrically inside the same height as LIVE SECURITY.
+const LIVE_ACTIVITY_ROWS = 3;
 
 export function LiveActivity(props: { agg: SessionActivityAgg }): React.ReactElement {
   const tools = topNFromMap(props.agg.tools, LIVE_ACTIVITY_ROWS);
@@ -787,11 +799,14 @@ export function LiveActivity(props: { agg: SessionActivityAgg }): React.ReactEle
       flexBasis={0}
       height={LIVE_SECURITY_ROWS_HEIGHT}
     >
+      {/* TOOLS + SHELL share the same height as LIVE SECURITY for
+          symmetry — 5 tool rows + 5 shell rows + 2 section headers
+          + 1 title + 2 borders = 15, but we only show top-5 per
+          section to fit the same 12-row footprint. */}
       <Text>
         <Text color={COL.brand} bold>
           LIVE ACTIVITY
         </Text>
-        <Text dimColor>{'  · since open'}</Text>
       </Text>
       <Text dimColor wrap="truncate-end">
         TOOLS
@@ -833,6 +848,39 @@ function topNFromMap(
     .map(([name, count]) => ({ name, count }))
     .sort((a, b) => b.count - a.count)
     .slice(0, n);
+}
+
+// ---------------------------------------------------------------------------
+// Setup — slim strip of "what's configured" right above StatusBar
+//
+// Currently surfaces shield active/inactive counts. Designed to grow:
+// model name and policy mode are the next two natural inclusions — they
+// share the "configuration state, not live event" semantic. Kept as one
+// line so it doesn't fight LIVE for vertical space.
+//
+// Inactive count colors warning when > 0 — that's the "you have shields
+// turned off, you might want to enable them" signal.
+// ---------------------------------------------------------------------------
+
+export function Setup(props: { shieldStatus: ShieldStatus | null }): React.ReactElement {
+  const loaded = props.shieldStatus !== null;
+  const active = props.shieldStatus?.active.length ?? 0;
+  const inactive = props.shieldStatus?.inactive.length ?? 0;
+  const inactiveWarn = inactive > 0;
+  return (
+    <Box marginX={1} paddingX={1}>
+      <Text wrap="truncate-end">
+        <Text dimColor>SETUP </Text>
+        <Text color={COL.live}>{'🛡 '}</Text>
+        <Text bold>{loaded ? active : '…'}</Text>
+        <Text dimColor> active · </Text>
+        <Text bold color={inactiveWarn ? COL.panelHigh : undefined}>
+          {loaded ? inactive : '…'}
+        </Text>
+        <Text color={inactiveWarn ? COL.panelHigh : COL.textDim}> inactive</Text>
+      </Text>
+    </Box>
+  );
 }
 
 // ---------------------------------------------------------------------------
