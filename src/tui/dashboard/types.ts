@@ -120,20 +120,26 @@ export interface BlastSnapshot {
   envFindings: number;
 }
 
-/** Per-active-protective-shield discount applied to blast deductions.
- *  Names match the SHIELDS registry. For v1, only the jail shields
- *  qualify — their rules genuinely deny the agent's read paths to
- *  sensitive files. Other shields (DLP, dest-op, etc.) defend OTHER
- *  risk surfaces (live security findings, destructive ops) and don't
- *  reduce blast-path exposure, so they don't contribute here. */
-export const PROTECTIVE_SHIELDS: ReadonlySet<string> = new Set(['filesystem-jail', 'project-jail']);
-
-/** Fraction of deducted-points each active protective shield gives
- *  back. Conservative — even with a jail enabled, an attacker who
- *  bypasses the agent (direct FS access) can still reach the paths;
- *  the jail only mitigates *agent-mediated* exfiltration. 80% reflects
- *  "most realistic attack paths are agent-mediated, but not all". */
-export const PROTECTIVE_SHIELD_DISCOUNT = 0.8;
+/** Per-shield discount fraction applied to blast deductions when the
+ *  shield is active. Discounts overlap (both jails on isn't additive)
+ *  so computeProtection() uses the *max* of active discounts, not a
+ *  sum. Names match the SHIELDS registry.
+ *
+ *  Why these numbers:
+ *  - filesystem-jail: denies ALL reads outside its allowlist. The
+ *    broadest blast-path defense available. 80% reflects "blocks
+ *    agent-mediated exfil; doesn't stop a direct-FS bypass".
+ *  - project-jail: only blocks reads *outside the project dir*.
+ *    Sensitive files inside the project (e.g. checked-in .env
+ *    accidentally) stay reachable. Narrower → smaller discount.
+ *
+ *  Other shields (dlp-*, bash-safety, block-rm-rf, etc.) defend
+ *  different risk surfaces (live findings, destructive ops) and
+ *  don't appear here — they don't reduce blast-path exposure. */
+export const PROTECTIVE_SHIELD_DISCOUNTS: Readonly<Record<string, number>> = {
+  'filesystem-jail': 0.8,
+  'project-jail': 0.3,
+};
 
 /** Composite "what's my real risk" summary — combines blast exposure
  *  (static FS reachability) with shield protection (runtime defense)

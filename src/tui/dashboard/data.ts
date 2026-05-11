@@ -30,8 +30,7 @@ import {
   scanCodexHistory,
 } from '../../cli/commands/scan.js';
 import {
-  PROTECTIVE_SHIELDS,
-  PROTECTIVE_SHIELD_DISCOUNT,
+  PROTECTIVE_SHIELD_DISCOUNTS,
   type ActivityEvent,
   type AuditAggregates,
   type BlastSnapshot,
@@ -1150,14 +1149,39 @@ export function computeProtection(
   const exposed = Math.max(0, 100 - score);
   const active = shieldStatus?.active ?? [];
   const inactive = shieldStatus?.inactive ?? [];
-  const anyProtectiveActive = active.some((name) => PROTECTIVE_SHIELDS.has(name));
-  const protect = anyProtectiveActive ? Math.round(exposed * PROTECTIVE_SHIELD_DISCOUNT) : 0;
+  // Use MAX of active shield discounts — overlapping protections (e.g.
+  // having both filesystem-jail AND project-jail) don't double the
+  // defense; the broader shield already covers what the narrower one
+  // does. So toggling filesystem-jail off while project-jail stays on
+  // visibly drops the discount from 0.8 → 0.3, which is the honest
+  // model AND what makes the score responsive to toggles.
+  const activeDiscount = active.reduce((max, name) => {
+    const d = PROTECTIVE_SHIELD_DISCOUNTS[name] ?? 0;
+    return d > max ? d : max;
+  }, 0);
+  const protect = Math.round(exposed * activeDiscount);
   const effective = Math.max(0, Math.min(100, 100 - exposed + protect));
-  const suggestedShield =
-    !anyProtectiveActive && exposed > 0
-      ? (inactive.find((name) => PROTECTIVE_SHIELDS.has(name)) ?? null)
-      : null;
-  const suggestedBonus = suggestedShield ? Math.round(exposed * PROTECTIVE_SHIELD_DISCOUNT) : 0;
+
+  // Suggest the inactive shield whose discount-DELTA over the current
+  // best gives the biggest bonus. If project-jail (0.3) is active and
+  // filesystem-jail (0.8) is inactive, suggesting it yields the extra
+  // 0.5 × exposed. Nothing left to suggest if no inactive shield
+  // would beat what's already active.
+  let suggestedShield: string | null = null;
+  let suggestedBonus = 0;
+  if (exposed > 0) {
+    for (const name of inactive) {
+      const d = PROTECTIVE_SHIELD_DISCOUNTS[name] ?? 0;
+      const delta = d - activeDiscount;
+      if (delta > 0) {
+        const bonus = Math.round(exposed * delta);
+        if (bonus > suggestedBonus) {
+          suggestedShield = name;
+          suggestedBonus = bonus;
+        }
+      }
+    }
+  }
   return { exposed, protect, effective, suggestedShield, suggestedBonus };
 }
 

@@ -851,18 +851,38 @@ describe('computeProtection', () => {
     expect(p.suggestedBonus).toBe(60); // 75 × 0.8
   });
 
-  it('applies the 80% discount when a protective shield is active', () => {
+  it('applies the 80% discount when filesystem-jail is active', () => {
     const p = computeProtection(blast(25), shields(['filesystem-jail']));
     expect(p.exposed).toBe(75);
     expect(p.protect).toBe(60); // 75 × 0.8
     expect(p.effective).toBe(85);
-    expect(p.suggestedShield).toBe(null); // already protected
+    expect(p.suggestedShield).toBe(null); // best protection already on
   });
 
-  it('does not double-apply when both jails are active', () => {
+  it('applies the 30% discount when only project-jail is active', () => {
+    const p = computeProtection(blast(25), shields(['project-jail'], ['filesystem-jail']));
+    expect(p.protect).toBe(23); // round(75 × 0.3)
+    expect(p.effective).toBe(48);
+    // Suggests filesystem-jail because its delta (0.8 - 0.3 = 0.5) is non-zero
+    expect(p.suggestedShield).toBe('filesystem-jail');
+    expect(p.suggestedBonus).toBe(38); // round(75 × 0.5)
+  });
+
+  it('uses max-of-discounts when both jails active (no double-counting)', () => {
     const p = computeProtection(blast(25), shields(['filesystem-jail', 'project-jail']));
-    expect(p.protect).toBe(60); // not 120 — single discount
+    expect(p.protect).toBe(60); // max(0.8, 0.3) × 75
     expect(p.effective).toBe(85);
+    expect(p.suggestedShield).toBe(null);
+  });
+
+  it('drops discount when filesystem-jail toggles off (project-jail still on)', () => {
+    // This is the bug the user hit — toggling filesystem-jail off
+    // should visibly drop the score, not stay at the higher discount.
+    const before = computeProtection(blast(25), shields(['filesystem-jail', 'project-jail']));
+    const after = computeProtection(blast(25), shields(['project-jail'], ['filesystem-jail']));
+    expect(before.protect).toBe(60);
+    expect(after.protect).toBe(23);
+    expect(after.suggestedShield).toBe('filesystem-jail');
   });
 
   it('ignores non-protective shields like dlp / bash-safety', () => {

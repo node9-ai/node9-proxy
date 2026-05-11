@@ -496,11 +496,15 @@ export function App(): React.ReactElement {
     return () => clearInterval(id);
   }, []);
 
-  // Shield status — same cadence as blast (cheap fs read; rarely changes).
-  // Surfaces inactive shields at the bottom of the RISK panel.
+  // Shield status — re-read every 5s so toggling a shield via
+  // `node9 shield enable/disable` is reflected promptly in the
+  // RISK box and SHIELDS panel. Previously this shared the 5-min
+  // BLAST_REFRESH_MS cadence, which made shield toggles look like
+  // they did nothing until the next blast tick or a manual [r].
+  // The read is cheap (small JSON file under ~/.node9/).
   useEffect(() => {
     setShieldStatus(loadShieldStatus());
-    const id = setInterval(() => setShieldStatus(loadShieldStatus()), BLAST_REFRESH_MS);
+    const id = setInterval(() => setShieldStatus(loadShieldStatus()), 5_000);
     return () => clearInterval(id);
   }, []);
 
