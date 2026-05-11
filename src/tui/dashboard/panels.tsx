@@ -754,11 +754,10 @@ export function LiveSecurity(props: {
         <Text color={COL.brand} bold>
           LIVE SECURITY
         </Text>
-        <Text dimColor>{`  · ${totalIssues} new`}</Text>
       </Text>
       {rows.map((r) => (
         <Text key={r.label} wrap="truncate-end">
-          <Text>{r.label.padEnd(8)}</Text>
+          <Text>{r.label.padEnd(10)}</Text>
           <Text bold={r.count > 0} color={r.count > 0 ? undefined : COL.textDim}>
             {`${r.count}`.padStart(4)}
           </Text>
@@ -809,7 +808,7 @@ export function LiveActivity(props: { agg: SessionActivityAgg }): React.ReactEle
       ) : (
         tools.map((t) => (
           <Text key={t.name} wrap="truncate-end">
-            <Text>{truncate(t.name, 8).padEnd(8)}</Text>
+            <Text>{truncate(t.name, 10).padEnd(10)}</Text>
             <Text bold>{`${t.count}`.padStart(4)}</Text>
           </Text>
         ))
@@ -822,7 +821,7 @@ export function LiveActivity(props: { agg: SessionActivityAgg }): React.ReactEle
       ) : (
         shell.map((s) => (
           <Text key={s.name} wrap="truncate-end">
-            <Text>{truncate(s.name, 8).padEnd(8)}</Text>
+            <Text>{truncate(s.name, 10).padEnd(10)}</Text>
             <Text bold>{`${s.count}`.padStart(4)}</Text>
           </Text>
         ))
@@ -912,7 +911,7 @@ export function Shields(props: {
             const n = row.blocks + row.reviews;
             return (
               <Text key={`a-${row.name}`} wrap="truncate-end">
-                <Text>{truncate(row.name, 8).padEnd(8)}</Text>
+                <Text>{truncate(row.name, 10).padEnd(10)}</Text>
                 <Text bold={n > 0} color={n > 0 ? undefined : COL.textDim}>
                   {`${n}`.padStart(4)}
                 </Text>
@@ -921,7 +920,7 @@ export function Shields(props: {
           })}
           {inactiveShown.map((name) => (
             <Text key={`i-${name}`} wrap="truncate-end">
-              <Text dimColor>{truncate(name, 8).padEnd(8)}</Text>
+              <Text dimColor>{truncate(name, 10).padEnd(10)}</Text>
               <Text color={COL.panelHigh}>{' off'}</Text>
             </Text>
           ))}

@@ -101,7 +101,7 @@ const FIXED_PANELS_HEIGHT = 36;
  *  overflow="hidden" clips the bottom (Setup / StatusBar) instead of
  *  shrinking LIVE — the live feed is the primary signal, the rest is
  *  context. */
-const LIVE_MIN_ROWS = 11;
+const LIVE_MIN_ROWS = 13;
 const NOTIFICATION_RECENT_WINDOW_MS = 60_000;
 const RESOLVED_HOLD_MS = 5_000;
 
