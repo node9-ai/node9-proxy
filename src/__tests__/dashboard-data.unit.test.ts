@@ -28,6 +28,7 @@ import {
   buildRuleToShieldMap,
   compactPath,
   compactPathsInCommand,
+  computeProtection,
   isValidForensicEvent,
   mapResultStatus,
   readAuditEntriesAsync,
@@ -821,6 +822,73 @@ describe('applyActivityEvent', () => {
     const snapshot = JSON.stringify(before);
     applyActivityEvent(before, toolEvent({ preview: 'git status' }));
     expect(JSON.stringify(before)).toBe(snapshot);
+  });
+});
+
+// ── computeProtection ────────────────────────────────────────────────────────
+
+describe('computeProtection', () => {
+  const blast = (score: number) => ({ score, paths: [], envFindings: 0 });
+  const shields = (active: string[] = [], inactive: string[] = []) => ({ active, inactive });
+
+  it('returns full 100/100 when blast is perfect', () => {
+    const p = computeProtection(blast(100), shields());
+    expect(p).toEqual({
+      exposed: 0,
+      protect: 0,
+      effective: 100,
+      suggestedShield: null,
+      suggestedBonus: 0,
+    });
+  });
+
+  it('exposes deductions when no protective shield is active', () => {
+    const p = computeProtection(blast(25), shields([], ['filesystem-jail']));
+    expect(p.exposed).toBe(75);
+    expect(p.protect).toBe(0);
+    expect(p.effective).toBe(25);
+    expect(p.suggestedShield).toBe('filesystem-jail');
+    expect(p.suggestedBonus).toBe(60); // 75 × 0.8
+  });
+
+  it('applies the 80% discount when a protective shield is active', () => {
+    const p = computeProtection(blast(25), shields(['filesystem-jail']));
+    expect(p.exposed).toBe(75);
+    expect(p.protect).toBe(60); // 75 × 0.8
+    expect(p.effective).toBe(85);
+    expect(p.suggestedShield).toBe(null); // already protected
+  });
+
+  it('does not double-apply when both jails are active', () => {
+    const p = computeProtection(blast(25), shields(['filesystem-jail', 'project-jail']));
+    expect(p.protect).toBe(60); // not 120 — single discount
+    expect(p.effective).toBe(85);
+  });
+
+  it('ignores non-protective shields like dlp / bash-safety', () => {
+    const p = computeProtection(
+      blast(25),
+      shields(['bash-safety', 'dlp-bash'], ['filesystem-jail'])
+    );
+    expect(p.protect).toBe(0); // bash-safety doesn't defend blast paths
+    expect(p.suggestedShield).toBe('filesystem-jail');
+  });
+
+  it('clamps effective to [0, 100]', () => {
+    expect(computeProtection(blast(0), shields()).effective).toBe(0);
+    expect(computeProtection(blast(100), shields()).effective).toBe(100);
+  });
+
+  it('handles null blast and null shieldStatus gracefully', () => {
+    const p = computeProtection(null, null);
+    expect(p.effective).toBe(100); // no blast = perfect
+    expect(p.suggestedShield).toBe(null);
+  });
+
+  it('omits suggestion when no inactive protective shield exists', () => {
+    const p = computeProtection(blast(25), shields([], ['bash-safety']));
+    expect(p.suggestedShield).toBe(null); // bash-safety isn't protective
+    expect(p.protect).toBe(0);
   });
 });
 

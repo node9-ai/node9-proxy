@@ -120,6 +120,44 @@ export interface BlastSnapshot {
   envFindings: number;
 }
 
+/** Per-active-protective-shield discount applied to blast deductions.
+ *  Names match the SHIELDS registry. For v1, only the jail shields
+ *  qualify — their rules genuinely deny the agent's read paths to
+ *  sensitive files. Other shields (DLP, dest-op, etc.) defend OTHER
+ *  risk surfaces (live security findings, destructive ops) and don't
+ *  reduce blast-path exposure, so they don't contribute here. */
+export const PROTECTIVE_SHIELDS: ReadonlySet<string> = new Set(['filesystem-jail', 'project-jail']);
+
+/** Fraction of deducted-points each active protective shield gives
+ *  back. Conservative — even with a jail enabled, an attacker who
+ *  bypasses the agent (direct FS access) can still reach the paths;
+ *  the jail only mitigates *agent-mediated* exfiltration. 80% reflects
+ *  "most realistic attack paths are agent-mediated, but not all". */
+export const PROTECTIVE_SHIELD_DISCOUNT = 0.8;
+
+/** Composite "what's my real risk" summary — combines blast exposure
+ *  (static FS reachability) with shield protection (runtime defense)
+ *  into a single effective score, plus the most useful action the
+ *  user could take to improve it. Pure function over BlastSnapshot
+ *  and ShieldStatus — see computeProtection in data.ts. */
+export interface ProtectionSummary {
+  /** Points deducted from the perfect 100 by blast findings. Always
+   *  >= 0; equals (100 - blast.score). */
+  exposed: number;
+  /** Points given back by active protective shields. Always >= 0;
+   *  capped at `exposed` so effective never exceeds 100. */
+  protect: number;
+  /** Final score the user sees in the RISK box. exposed - protect
+   *  flipped to score-out-of-100. */
+  effective: number;
+  /** Inactive protective shield whose enablement would give the
+   *  biggest bonus. Null when no protective shield is inactive or
+   *  when effective is already maxed. */
+  suggestedShield: string | null;
+  /** Bonus the suggested shield would add, in score points (0-100). */
+  suggestedBonus: number;
+}
+
 /** Shield-config snapshot — names of shields registered (builtin + user)
  *  vs the names actually active in ~/.node9/shields.json. */
 export interface ShieldStatus {

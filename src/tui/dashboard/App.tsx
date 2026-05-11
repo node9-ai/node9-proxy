@@ -37,6 +37,7 @@ import {
   applyActivityToShields,
   applyForensicEvent,
   buildRuleToShieldMap,
+  computeProtection,
   loadBlast,
   loadReportAuditAsync,
   loadShieldStatus,
@@ -767,7 +768,7 @@ export function App(): React.ReactElement {
 
     if (!candidate) {
       stickyRef.current = null;
-      return { kind: 'idle', blastScore: blast?.score ?? 100 };
+      return { kind: 'idle', protection: computeProtection(blast, shieldStatus) };
     }
 
     // If we've been showing a different sticky notification for less
@@ -797,7 +798,16 @@ export function App(): React.ReactElement {
     }
     return candidate;
     // tick is intentionally a dep so age windows + sticky expiry re-eval each second.
-  }, [pendingApproval, approvalStatus, resolvedApproval, recentForensic, events, blast, tick]);
+  }, [
+    pendingApproval,
+    approvalStatus,
+    resolvedApproval,
+    recentForensic,
+    events,
+    blast,
+    shieldStatus,
+    tick,
+  ]);
 
   // Unified security-health badge for the Header. Pure compute over
   // every signal source the dashboard already tracks. Re-runs whenever
@@ -823,6 +833,7 @@ export function App(): React.ReactElement {
         scanSignals,
         shieldStatus,
         forensicAgg: sessionForensicAgg,
+        effectiveScore: computeProtection(blast, shieldStatus).effective,
       }),
     [agg, blast, scanSignals, shieldStatus, sessionForensicAgg]
   );

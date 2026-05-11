@@ -29,19 +29,22 @@ import {
   scanGeminiHistory,
   scanCodexHistory,
 } from '../../cli/commands/scan.js';
-import type {
-  ActivityEvent,
-  AuditAggregates,
-  BlastSnapshot,
-  CostSnapshot,
-  ForensicSseEvent,
-  ReportPeriod,
-  ScanCache,
-  ScanSignalsSnapshot,
-  SessionActivityAgg,
-  SessionForensicAgg,
-  SessionShieldsAgg,
-  ShieldStatus,
+import {
+  PROTECTIVE_SHIELDS,
+  PROTECTIVE_SHIELD_DISCOUNT,
+  type ActivityEvent,
+  type AuditAggregates,
+  type BlastSnapshot,
+  type CostSnapshot,
+  type ForensicSseEvent,
+  type ProtectionSummary,
+  type ReportPeriod,
+  type ScanCache,
+  type ScanSignalsSnapshot,
+  type SessionActivityAgg,
+  type SessionForensicAgg,
+  type SessionShieldsAgg,
+  type ShieldStatus,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -1116,6 +1119,46 @@ export function buildRuleToShieldMap(): Map<string, string> {
     }
   }
   return map;
+}
+
+/**
+ * Pure function: combine blast exposure with active-shield protection
+ * into a single effective score plus an actionable suggestion. Drives
+ * the RISK box in the idle Notification slot and the secure / at-risk
+ * threshold in the header health badge.
+ *
+ * Math:
+ *   exposed   = 100 - blast.score  (points lost to reachable paths)
+ *   protect   = min(exposed, exposed × PROTECTIVE_SHIELD_DISCOUNT)
+ *               if ANY protective shield is active, else 0
+ *   effective = clamp(100 - exposed + protect, 0, 100)
+ *
+ * The discount is a single rule (not per-shield-additive) because the
+ * jails overlap heavily — both filesystem-jail AND project-jail active
+ * isn't meaningfully more protection than either one alone. v2 could
+ * add finer-grained per-path attribution.
+ *
+ * `suggestedShield` is the highest-value INACTIVE protective shield;
+ * suggestedBonus is the protection points that enabling it would add.
+ * Null when nothing's left to enable or effective is already maxed.
+ */
+export function computeProtection(
+  blast: BlastSnapshot | null,
+  shieldStatus: ShieldStatus | null
+): ProtectionSummary {
+  const score = blast?.score ?? 100;
+  const exposed = Math.max(0, 100 - score);
+  const active = shieldStatus?.active ?? [];
+  const inactive = shieldStatus?.inactive ?? [];
+  const anyProtectiveActive = active.some((name) => PROTECTIVE_SHIELDS.has(name));
+  const protect = anyProtectiveActive ? Math.round(exposed * PROTECTIVE_SHIELD_DISCOUNT) : 0;
+  const effective = Math.max(0, Math.min(100, 100 - exposed + protect));
+  const suggestedShield =
+    !anyProtectiveActive && exposed > 0
+      ? (inactive.find((name) => PROTECTIVE_SHIELDS.has(name)) ?? null)
+      : null;
+  const suggestedBonus = suggestedShield ? Math.round(exposed * PROTECTIVE_SHIELD_DISCOUNT) : 0;
+  return { exposed, protect, effective, suggestedShield, suggestedBonus };
 }
 
 /**

@@ -11,6 +11,7 @@ import type {
   BlastSnapshot,
   CostSnapshot,
   ForensicSseEvent,
+  ProtectionSummary,
   SessionActivityAgg,
   SessionForensicAgg,
   SessionShieldsAgg,
@@ -207,7 +208,7 @@ export type Notification =
   | { kind: 'block'; event: ActivityEvent; ageMs: number }
   | { kind: 'review'; event: ActivityEvent; ageMs: number }
   | { kind: 'loop'; event: ActivityEvent; ageMs: number }
-  | { kind: 'idle'; blastScore: number };
+  | { kind: 'idle'; protection: ProtectionSummary };
 
 export const NOTIFICATION_HEIGHT = 4;
 /** Fixed height for the REPORT panel (see Report() for the row math).
@@ -266,7 +267,7 @@ function renderNotificationBody(n: Notification): React.ReactNode {
   if (n.kind === 'review') return renderEventInfo(n.event, '🟡 REVIEWED', COL.panelHigh, n.ageMs);
   if (n.kind === 'loop')
     return renderEventInfo(n.event, '🔁 LOOP DETECTED', COL.panelHigh, n.ageMs);
-  return renderIdle(n.blastScore);
+  return renderIdle(n.protection);
 }
 
 function renderForensic(
@@ -400,15 +401,35 @@ function renderEventInfo(
   );
 }
 
-function renderIdle(blastScore: number): React.ReactNode {
-  const scoreColor = blastScore >= 80 ? '#5BF58C' : blastScore >= 50 ? COL.panelHigh : COL.liveOff;
+function renderIdle(p: ProtectionSummary): React.ReactNode {
+  // RISK box — replaces the old "blast 25/100" placeholder. Shows the
+  // user where they stand (exposed vs effective) AND gives them the
+  // single highest-value action they can take to improve it. The
+  // suggestion line drops away when no protective shield is left to
+  // enable, or when effective score is already in the safe zone.
+  const effectiveColor =
+    p.effective >= 80 ? '#5BF58C' : p.effective >= 50 ? COL.panelHigh : COL.liveOff;
+  const headlineIcon = p.effective >= 80 ? '✓' : '⚠';
   return (
     <>
       <Text wrap="truncate-end">
-        <Text dimColor>✓ no recent alerts · blast </Text>
-        <Text bold color={scoreColor}>{`${blastScore}/100`}</Text>
+        <Text color={effectiveColor} bold>{`${headlineIcon} `}</Text>
+        <Text dimColor>exposed </Text>
+        <Text bold>{p.exposed}</Text>
+        <Text dimColor>{' · protect '}</Text>
+        <Text bold color={p.protect > 0 ? '#5BF58C' : undefined}>{`+${p.protect}`}</Text>
+        <Text dimColor>{' · effective '}</Text>
+        <Text bold color={effectiveColor}>{`${p.effective}/100`}</Text>
       </Text>
-      <Text dimColor>(approvals + recent blocks/loops appear here)</Text>
+      {p.suggestedShield ? (
+        <Text wrap="truncate-end">
+          <Text dimColor>↑ enable </Text>
+          <Text bold>{p.suggestedShield}</Text>
+          <Text dimColor>{` → +${p.suggestedBonus}`}</Text>
+        </Text>
+      ) : (
+        <Text dimColor>(approvals + recent blocks/loops appear here)</Text>
+      )}
     </>
   );
 }
