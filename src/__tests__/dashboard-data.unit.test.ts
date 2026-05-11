@@ -21,9 +21,11 @@ import {
   aggregateAudit,
   aggregateCost,
   applyActivityEvent,
+  applyActivityToShields,
   applyForensicEvent,
   auditEntryToActivityEvent,
   buildCostBaseline,
+  buildRuleToShieldMap,
   compactPath,
   compactPathsInCommand,
   isValidForensicEvent,
@@ -35,9 +37,11 @@ import {
 import {
   EMPTY_SESSION_ACTIVITY,
   EMPTY_SESSION_FORENSIC,
+  EMPTY_SESSION_SHIELDS,
   type ActivityEvent,
   type ForensicSseEvent,
   type SessionActivityAgg,
+  type SessionShieldsAgg,
 } from '../tui/dashboard/types';
 import type { DailyEntry } from '../costSync';
 
@@ -816,6 +820,79 @@ describe('applyActivityEvent', () => {
     const before = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {} };
     const snapshot = JSON.stringify(before);
     applyActivityEvent(before, toolEvent({ preview: 'git status' }));
+    expect(JSON.stringify(before)).toBe(snapshot);
+  });
+});
+
+// ── buildRuleToShieldMap + applyActivityToShields ────────────────────────────
+
+describe('buildRuleToShieldMap', () => {
+  it('builds a non-empty map from the SHIELDS registry', () => {
+    // Smoke test: the registry ships with builtin shields, so the map
+    // should always have at least a handful of entries. Exact count
+    // depends on which shields ship — assert structure not specifics.
+    const map = buildRuleToShieldMap();
+    expect(map.size).toBeGreaterThan(0);
+    for (const [ruleName, shieldName] of map) {
+      expect(typeof ruleName).toBe('string');
+      expect(typeof shieldName).toBe('string');
+      expect(ruleName.length).toBeGreaterThan(0);
+      expect(shieldName.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe('applyActivityToShields', () => {
+  const ruleToShield = new Map<string, string>([
+    ['rule-a', 'shield-X'],
+    ['rule-b', 'shield-X'],
+    ['rule-c', 'shield-Y'],
+  ]);
+
+  function evt(overrides: Partial<ActivityEvent> = {}): ActivityEvent {
+    return {
+      kind: 'tool',
+      id: 'e1',
+      ts: '2026-05-11T00:00:00.000Z',
+      tool: 'Bash',
+      preview: 'rm -rf /',
+      verdict: 'block',
+      checkedBy: 'rule-a',
+      ...overrides,
+    } as ActivityEvent;
+  }
+
+  it('increments blocks for verdict=block', () => {
+    let agg: SessionShieldsAgg = { ...EMPTY_SESSION_SHIELDS, byShield: {} };
+    agg = applyActivityToShields(agg, evt(), ruleToShield);
+    agg = applyActivityToShields(agg, evt({ checkedBy: 'rule-b' }), ruleToShield);
+    expect(agg.byShield['shield-X']).toEqual({ blocks: 2, reviews: 0 });
+  });
+
+  it('increments reviews for verdict=review', () => {
+    let agg: SessionShieldsAgg = { ...EMPTY_SESSION_SHIELDS, byShield: {} };
+    agg = applyActivityToShields(agg, evt({ verdict: 'review' }), ruleToShield);
+    expect(agg.byShield['shield-X']).toEqual({ blocks: 0, reviews: 1 });
+  });
+
+  it('skips allow / pending verdicts', () => {
+    let agg: SessionShieldsAgg = { ...EMPTY_SESSION_SHIELDS, byShield: {} };
+    agg = applyActivityToShields(agg, evt({ verdict: 'allow' }), ruleToShield);
+    agg = applyActivityToShields(agg, evt({ verdict: 'pending' }), ruleToShield);
+    expect(agg.byShield).toEqual({});
+  });
+
+  it('skips events whose checkedBy does not map to a shield', () => {
+    let agg: SessionShieldsAgg = { ...EMPTY_SESSION_SHIELDS, byShield: {} };
+    agg = applyActivityToShields(agg, evt({ checkedBy: 'dlp-block' }), ruleToShield);
+    agg = applyActivityToShields(agg, evt({ checkedBy: undefined }), ruleToShield);
+    expect(agg.byShield).toEqual({});
+  });
+
+  it('does not mutate input', () => {
+    const before: SessionShieldsAgg = { ...EMPTY_SESSION_SHIELDS, byShield: {} };
+    const snapshot = JSON.stringify(before);
+    applyActivityToShields(before, evt(), ruleToShield);
     expect(JSON.stringify(before)).toBe(snapshot);
   });
 });

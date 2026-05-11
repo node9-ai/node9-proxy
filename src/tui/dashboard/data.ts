@@ -40,6 +40,7 @@ import type {
   ScanSignalsSnapshot,
   SessionActivityAgg,
   SessionForensicAgg,
+  SessionShieldsAgg,
   ShieldStatus,
 } from './types.js';
 
@@ -1097,6 +1098,50 @@ export function applyActivityEvent(agg: SessionActivityAgg, e: ActivityEvent): S
 }
 
 const SHELL_TOOLS: ReadonlySet<string> = new Set(['Bash', 'bash']);
+
+/**
+ * Build a checkedBy-rule-name → shield-name lookup once at startup. Walks
+ * the SHIELDS registry (builtins + user shields loaded from
+ * ~/.node9/shields/). Rules without a `name` field are skipped (they
+ * can't be attributed back to a shield). Built-in detectors that emit
+ * checkedBy values like `dlp-block` / `loop-detected` aren't in SHIELDS
+ * and so won't appear in the returned map — that's intentional; LIVE
+ * SECURITY already counts those separately.
+ */
+export function buildRuleToShieldMap(): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const [shieldName, def] of Object.entries(SHIELDS)) {
+    for (const rule of def.smartRules) {
+      if (rule.name) map.set(rule.name, shieldName);
+    }
+  }
+  return map;
+}
+
+/**
+ * Pure reducer: tally a tool event into the per-shield activity
+ * aggregate. Increments blocks for verdict='block', reviews for
+ * verdict='review', skips allow/pending. Events whose checkedBy
+ * doesn't map to a user shield are skipped — they're either built-in
+ * detector events (counted in LIVE SECURITY) or system events without
+ * a checkedBy at all.
+ */
+export function applyActivityToShields(
+  agg: SessionShieldsAgg,
+  e: ActivityEvent,
+  ruleToShield: Map<string, string>
+): SessionShieldsAgg {
+  if (e.kind !== 'tool' || !e.checkedBy) return agg;
+  if (e.verdict !== 'block' && e.verdict !== 'review') return agg;
+  const shieldName = ruleToShield.get(e.checkedBy);
+  if (!shieldName) return agg;
+  const current = agg.byShield[shieldName] ?? { blocks: 0, reviews: 0 };
+  const updated = {
+    blocks: current.blocks + (e.verdict === 'block' ? 1 : 0),
+    reviews: current.reviews + (e.verdict === 'review' ? 1 : 0),
+  };
+  return { byShield: { ...agg.byShield, [shieldName]: updated } };
+}
 
 /** Initial reconnect delay (ms). Doubles on each failure up to MAX. */
 const SSE_BACKOFF_INITIAL_MS = 1_000;

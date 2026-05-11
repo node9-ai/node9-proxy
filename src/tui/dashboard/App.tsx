@@ -15,6 +15,7 @@ import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import {
   EMPTY_SESSION_ACTIVITY,
   EMPTY_SESSION_FORENSIC,
+  EMPTY_SESSION_SHIELDS,
   windowStartMs,
   type ActivityEvent,
   type AuditAggregates,
@@ -25,6 +26,7 @@ import {
   type ScanSignalsSnapshot,
   type SessionActivityAgg,
   type SessionForensicAgg,
+  type SessionShieldsAgg,
   type ShieldStatus,
   type TimeWindow,
   type View,
@@ -32,7 +34,9 @@ import {
 import {
   aggregateAudit,
   applyActivityEvent,
+  applyActivityToShields,
   applyForensicEvent,
+  buildRuleToShieldMap,
   loadBlast,
   loadReportAuditAsync,
   loadShieldStatus,
@@ -50,7 +54,7 @@ import {
   LiveSecurity,
   NotificationArea,
   SessionCounters,
-  Setup,
+  Shields,
   StatusBar,
   type ApprovalStatus,
   type Notification,
@@ -89,7 +93,7 @@ const BLAST_REFRESH_MS = 5 * 60_000;
 // its status/scrollbar — either way header scrolled off the top once
 // LIVE filled. Reserving 1 extra row makes the dashboard 1 row shorter
 // than the terminal so there's no overflow.
-const FIXED_PANELS_HEIGHT = 37;
+const FIXED_PANELS_HEIGHT = 45;
 /** Minimum content rows LIVE renders. Bumped to 11 so the live event
  *  stream always has useful depth even when the new LIVE SECURITY /
  *  LIVE ACTIVITY panels grow the fixed-chrome budget. On terminals
@@ -216,6 +220,14 @@ export function App(): React.ReactElement {
     ...EMPTY_SESSION_ACTIVITY,
     tools: {},
     shell: {},
+  }));
+  // Per-shield activity tally — feeds the SHIELDS panel. Built once at
+  // mount, the ruleToShield map is a small (~30-entry) Map; lookups are
+  // O(1) and the reducer is pure, so cost per event is microseconds.
+  const ruleToShieldRef = React.useRef<Map<string, string>>(buildRuleToShieldMap());
+  const [sessionShieldsAgg, setSessionShieldsAgg] = useState<SessionShieldsAgg>(() => ({
+    ...EMPTY_SESSION_SHIELDS,
+    byShield: {},
   }));
   // (skillsPinned / mcpPinned counters were inputs to the old HIGH LEVEL
   // panel; they're no longer rendered on Realtime in Phase 1. The
@@ -369,6 +381,7 @@ export function App(): React.ReactElement {
             review: c.review + (e.verdict === 'review' ? 1 : 0),
           }));
           setSessionActivityAgg((prev) => applyActivityEvent(prev, e));
+          setSessionShieldsAgg((prev) => applyActivityToShields(prev, e, ruleToShieldRef.current));
         }
         // verdict === 'review' on a regular `activity` event is also a
         // pending-approval signal (shield/rule explicitly asked for
@@ -865,7 +878,7 @@ export function App(): React.ReactElement {
             />
             <LiveActivity agg={sessionActivityAgg} />
           </Box>
-          <Setup shieldStatus={shieldStatus} />
+          <Shields shieldStatus={shieldStatus} shieldsAgg={sessionShieldsAgg} />
         </>
       ) : (
         <ReportView

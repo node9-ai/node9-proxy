@@ -189,6 +189,18 @@ export const EMPTY_SESSION_ACTIVITY: SessionActivityAgg = {
   loops: 0,
 };
 
+/** Live (since-monitor-opened) per-shield activity tally — feeds the
+ *  SHIELDS panel on Realtime. Keys are shield names (canonical, from
+ *  the SHIELDS registry); values split blocks vs reviews so the panel
+ *  can show which kind of action each shield is taking. Built-in
+ *  detectors (DLP / loops / privesc) don't map to user shields and so
+ *  don't appear here — they have their own counts in LIVE SECURITY. */
+export interface SessionShieldsAgg {
+  byShield: Record<string, { blocks: number; reviews: number }>;
+}
+
+export const EMPTY_SESSION_SHIELDS: SessionShieldsAgg = { byShield: {} };
+
 /** SSE 'forensic' event payload. Mirrors the ForensicEvent shape the
  *  daemon broadcasts in src/daemon/state.ts. Carries categorical
  *  metadata only — never raw matched content. */

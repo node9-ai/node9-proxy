@@ -13,6 +13,7 @@ import type {
   ForensicSseEvent,
   SessionActivityAgg,
   SessionForensicAgg,
+  SessionShieldsAgg,
   ShieldStatus,
   TimeWindow,
   View,
@@ -851,34 +852,98 @@ function topNFromMap(
 }
 
 // ---------------------------------------------------------------------------
-// Setup — slim strip of "what's configured" right above StatusBar
+// Shields — per-shield "is my coverage working" panel for Realtime
 //
-// Currently surfaces shield active/inactive counts. Designed to grow:
-// model name and policy mode are the next two natural inclusions — they
-// share the "configuration state, not live event" semantic. Kept as one
-// line so it doesn't fight LIVE for vertical space.
+// Replaces the slim SETUP strip. Active shields render first, sorted
+// desc by total fires (blocks + reviews) so the most-active shields
+// surface on top. Inactive shields render below with an "off"
+// indicator; capped by SHIELDS_INACTIVE_CAP so the panel never grows
+// past its allocated height. Any beyond the cap collapse to
+// "… N more off".
 //
-// Inactive count colors warning when > 0 — that's the "you have shields
-// turned off, you might want to enable them" signal.
+// Data sources (all live, no walks):
+//   - shieldStatus.active / .inactive → which shields exist + state
+//   - shieldsAgg.byShield[name] → per-shield block/review counts since
+//     monitor opened, populated from SSE activity events via
+//     applyActivityToShields in data.ts
+//
+// Built-in detectors (DLP / loops / privesc) don't map to a user
+// shield and so don't appear here — their counts live in LIVE
+// SECURITY.
 // ---------------------------------------------------------------------------
 
-export function Setup(props: { shieldStatus: ShieldStatus | null }): React.ReactElement {
+const SHIELDS_PANEL_HEIGHT = 9;
+const SHIELDS_INACTIVE_CAP = 3;
+
+export function Shields(props: {
+  shieldStatus: ShieldStatus | null;
+  shieldsAgg: SessionShieldsAgg;
+}): React.ReactElement {
   const loaded = props.shieldStatus !== null;
-  const active = props.shieldStatus?.active.length ?? 0;
-  const inactive = props.shieldStatus?.inactive.length ?? 0;
-  const inactiveWarn = inactive > 0;
+  const active = props.shieldStatus?.active ?? [];
+  const inactive = props.shieldStatus?.inactive ?? [];
+  const activeWithCounts = active
+    .map((name) => {
+      const counts = props.shieldsAgg.byShield[name] ?? { blocks: 0, reviews: 0 };
+      return { name, ...counts, total: counts.blocks + counts.reviews };
+    })
+    .sort((a, b) => b.total - a.total);
+  const inactiveShown = inactive.slice(0, SHIELDS_INACTIVE_CAP);
+  const inactiveRemaining = inactive.length - inactiveShown.length;
   return (
-    <Box marginX={1} paddingX={1}>
-      <Text wrap="truncate-end">
-        <Text dimColor>SETUP </Text>
-        <Text color={COL.live}>{'🛡 '}</Text>
-        <Text bold>{loaded ? active : '…'}</Text>
-        <Text dimColor> active · </Text>
-        <Text bold color={inactiveWarn ? COL.panelHigh : undefined}>
-          {loaded ? inactive : '…'}
+    <Box
+      flexDirection="column"
+      borderStyle="round"
+      borderColor={COL.textDim}
+      paddingX={1}
+      marginX={1}
+      height={SHIELDS_PANEL_HEIGHT}
+    >
+      <Text>
+        <Text color={COL.brand} bold>
+          SHIELDS
         </Text>
-        <Text color={inactiveWarn ? COL.panelHigh : COL.textDim}> inactive</Text>
       </Text>
+      {!loaded ? (
+        <Text dimColor>loading…</Text>
+      ) : active.length === 0 && inactive.length === 0 ? (
+        <Text dimColor>no shields configured</Text>
+      ) : (
+        <>
+          {activeWithCounts.map((row) => (
+            <Text key={`a-${row.name}`} wrap="truncate-end">
+              <Text color={COL.live}>{'✓ '}</Text>
+              <Text>{truncate(row.name, 22).padEnd(22)}</Text>
+              {row.blocks > 0 ? (
+                <>
+                  <Text dimColor>blocks </Text>
+                  <Text bold>{row.blocks}</Text>
+                </>
+              ) : row.reviews > 0 ? (
+                <>
+                  <Text dimColor>reviews </Text>
+                  <Text bold>{row.reviews}</Text>
+                </>
+              ) : (
+                <Text dimColor>0</Text>
+              )}
+              {row.blocks > 0 && row.reviews > 0 ? (
+                <Text dimColor>{` · ${row.reviews} reviews`}</Text>
+              ) : null}
+            </Text>
+          ))}
+          {inactiveShown.map((name) => (
+            <Text key={`i-${name}`} wrap="truncate-end">
+              <Text color={COL.panelHigh}>{'✗ '}</Text>
+              <Text dimColor>{truncate(name, 22).padEnd(22)}</Text>
+              <Text color={COL.panelHigh}>off</Text>
+            </Text>
+          ))}
+          {inactiveRemaining > 0 ? (
+            <Text dimColor>{`  … ${inactiveRemaining} more off`}</Text>
+          ) : null}
+        </>
+      )}
     </Box>
   );
 }
