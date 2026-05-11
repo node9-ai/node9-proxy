@@ -93,7 +93,7 @@ const BLAST_REFRESH_MS = 5 * 60_000;
 // its status/scrollbar — either way header scrolled off the top once
 // LIVE filled. Reserving 1 extra row makes the dashboard 1 row shorter
 // than the terminal so there's no overflow.
-const FIXED_PANELS_HEIGHT = 45;
+const FIXED_PANELS_HEIGHT = 36;
 /** Minimum content rows LIVE renders. Bumped to 11 so the live event
  *  stream always has useful depth even when the new LIVE SECURITY /
  *  LIVE ACTIVITY panels grow the fixed-chrome budget. On terminals
@@ -877,8 +877,8 @@ export function App(): React.ReactElement {
               activityAgg={sessionActivityAgg}
             />
             <LiveActivity agg={sessionActivityAgg} />
+            <Shields shieldStatus={shieldStatus} shieldsAgg={sessionShieldsAgg} />
           </Box>
-          <Shields shieldStatus={shieldStatus} shieldsAgg={sessionShieldsAgg} />
         </>
       ) : (
         <ReportView

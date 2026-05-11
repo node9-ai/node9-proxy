@@ -739,7 +739,6 @@ export function LiveSecurity(props: {
   ];
   // Sort desc by count; zero rows naturally fall to the bottom.
   rows.sort((a, b) => b.count - a.count);
-  const max = Math.max(1, ...rows.map((r) => r.count));
   const totalIssues = rows.reduce((sum, r) => sum + r.count, 0);
   return (
     <Box
@@ -759,10 +758,9 @@ export function LiveSecurity(props: {
       </Text>
       {rows.map((r) => (
         <Text key={r.label} wrap="truncate-end">
-          <Text dimColor>{bar(r.count, max, 4)}</Text>
-          <Text>{` ${r.label.padEnd(6)}`}</Text>
+          <Text>{r.label.padEnd(8)}</Text>
           <Text bold={r.count > 0} color={r.count > 0 ? undefined : COL.textDim}>
-            {`${r.count}`.padStart(5)}
+            {`${r.count}`.padStart(4)}
           </Text>
         </Text>
       ))}
@@ -788,8 +786,6 @@ const LIVE_ACTIVITY_ROWS = 3;
 export function LiveActivity(props: { agg: SessionActivityAgg }): React.ReactElement {
   const tools = topNFromMap(props.agg.tools, LIVE_ACTIVITY_ROWS);
   const shell = topNFromMap(props.agg.shell, LIVE_ACTIVITY_ROWS);
-  const maxTool = Math.max(1, ...tools.map((t) => t.count));
-  const maxShell = Math.max(1, ...shell.map((s) => s.count));
   return (
     <Box
       flexDirection="column"
@@ -800,10 +796,6 @@ export function LiveActivity(props: { agg: SessionActivityAgg }): React.ReactEle
       flexBasis={0}
       height={LIVE_SECURITY_ROWS_HEIGHT}
     >
-      {/* TOOLS + SHELL share the same height as LIVE SECURITY for
-          symmetry — 5 tool rows + 5 shell rows + 2 section headers
-          + 1 title + 2 borders = 15, but we only show top-5 per
-          section to fit the same 12-row footprint. */}
       <Text>
         <Text color={COL.brand} bold>
           LIVE ACTIVITY
@@ -817,9 +809,8 @@ export function LiveActivity(props: { agg: SessionActivityAgg }): React.ReactEle
       ) : (
         tools.map((t) => (
           <Text key={t.name} wrap="truncate-end">
-            <Text dimColor>{bar(t.count, maxTool, 4)}</Text>
-            <Text>{` ${truncate(t.name, 11).padEnd(11)}`}</Text>
-            <Text bold>{`${t.count}`.padStart(5)}</Text>
+            <Text>{truncate(t.name, 8).padEnd(8)}</Text>
+            <Text bold>{`${t.count}`.padStart(4)}</Text>
           </Text>
         ))
       )}
@@ -831,9 +822,8 @@ export function LiveActivity(props: { agg: SessionActivityAgg }): React.ReactEle
       ) : (
         shell.map((s) => (
           <Text key={s.name} wrap="truncate-end">
-            <Text dimColor>{bar(s.count, maxShell, 4)}</Text>
-            <Text>{` ${truncate(s.name, 11).padEnd(11)}`}</Text>
-            <Text bold>{`${s.count}`.padStart(5)}</Text>
+            <Text>{truncate(s.name, 8).padEnd(8)}</Text>
+            <Text bold>{`${s.count}`.padStart(4)}</Text>
           </Text>
         ))
       )}
@@ -872,8 +862,10 @@ function topNFromMap(
 // SECURITY.
 // ---------------------------------------------------------------------------
 
-const SHIELDS_PANEL_HEIGHT = 9;
-const SHIELDS_INACTIVE_CAP = 3;
+// Total active+inactive rows shown. Title (1) + N rows + 2 borders =
+// LIVE_SECURITY_ROWS_HEIGHT (12) → N = 9. Active first (sorted desc
+// by total fires), inactive second; overflow collapses to "… N more".
+const SHIELDS_MAX_ROWS = 9;
 
 export function Shields(props: {
   shieldStatus: ShieldStatus | null;
@@ -888,16 +880,22 @@ export function Shields(props: {
       return { name, ...counts, total: counts.blocks + counts.reviews };
     })
     .sort((a, b) => b.total - a.total);
-  const inactiveShown = inactive.slice(0, SHIELDS_INACTIVE_CAP);
-  const inactiveRemaining = inactive.length - inactiveShown.length;
+  // Budget: show as many active as fit, then fill with inactive, then
+  // collapse the rest as "… N more". Title takes 1 row already.
+  const activeShown = activeWithCounts.slice(0, SHIELDS_MAX_ROWS);
+  const remainingBudget = Math.max(0, SHIELDS_MAX_ROWS - activeShown.length);
+  const inactiveShown = inactive.slice(0, Math.max(0, remainingBudget - 1));
+  const overflow =
+    activeWithCounts.length - activeShown.length + (inactive.length - inactiveShown.length);
   return (
     <Box
       flexDirection="column"
       borderStyle="round"
       borderColor={COL.textDim}
       paddingX={1}
-      marginX={1}
-      height={SHIELDS_PANEL_HEIGHT}
+      flexGrow={1}
+      flexBasis={0}
+      height={LIVE_SECURITY_ROWS_HEIGHT}
     >
       <Text>
         <Text color={COL.brand} bold>
@@ -907,41 +905,27 @@ export function Shields(props: {
       {!loaded ? (
         <Text dimColor>loading…</Text>
       ) : active.length === 0 && inactive.length === 0 ? (
-        <Text dimColor>no shields configured</Text>
+        <Text dimColor>none</Text>
       ) : (
         <>
-          {activeWithCounts.map((row) => (
-            <Text key={`a-${row.name}`} wrap="truncate-end">
-              <Text color={COL.live}>{'✓ '}</Text>
-              <Text>{truncate(row.name, 22).padEnd(22)}</Text>
-              {row.blocks > 0 ? (
-                <>
-                  <Text dimColor>blocks </Text>
-                  <Text bold>{row.blocks}</Text>
-                </>
-              ) : row.reviews > 0 ? (
-                <>
-                  <Text dimColor>reviews </Text>
-                  <Text bold>{row.reviews}</Text>
-                </>
-              ) : (
-                <Text dimColor>0</Text>
-              )}
-              {row.blocks > 0 && row.reviews > 0 ? (
-                <Text dimColor>{` · ${row.reviews} reviews`}</Text>
-              ) : null}
-            </Text>
-          ))}
+          {activeShown.map((row) => {
+            const n = row.blocks + row.reviews;
+            return (
+              <Text key={`a-${row.name}`} wrap="truncate-end">
+                <Text>{truncate(row.name, 8).padEnd(8)}</Text>
+                <Text bold={n > 0} color={n > 0 ? undefined : COL.textDim}>
+                  {`${n}`.padStart(4)}
+                </Text>
+              </Text>
+            );
+          })}
           {inactiveShown.map((name) => (
             <Text key={`i-${name}`} wrap="truncate-end">
-              <Text color={COL.panelHigh}>{'✗ '}</Text>
-              <Text dimColor>{truncate(name, 22).padEnd(22)}</Text>
-              <Text color={COL.panelHigh}>off</Text>
+              <Text dimColor>{truncate(name, 8).padEnd(8)}</Text>
+              <Text color={COL.panelHigh}>{' off'}</Text>
             </Text>
           ))}
-          {inactiveRemaining > 0 ? (
-            <Text dimColor>{`  … ${inactiveRemaining} more off`}</Text>
-          ) : null}
+          {overflow > 0 ? <Text dimColor>{`… ${overflow} more`}</Text> : null}
         </>
       )}
     </Box>
