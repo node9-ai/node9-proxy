@@ -181,6 +181,15 @@ export function getDateRange(period: ReportPeriod, now: Date): { start: Date; en
       s.setDate(s.getDate() - 29);
       return { start: s, end };
     }
+    case '90d': {
+      // Rolling 90 days (the [Q]uarter keypress in the dashboard).
+      // NOT a calendar quarter — that semantic isn't requested and is
+      // ambiguous (fiscal vs calendar). Rolling N days is consistent
+      // with 7d/30d.
+      const s = new Date(todayStart);
+      s.setDate(s.getDate() - 89);
+      return { start: s, end };
+    }
     case 'month':
       return { start: new Date(now.getFullYear(), now.getMonth(), 1), end };
   }

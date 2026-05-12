@@ -17,7 +17,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { aggregateReportFromAudit } from '../cli/aggregate/report-audit';
+import { aggregateReportFromAudit, getDateRange } from '../cli/aggregate/report-audit';
 
 const NOW = new Date('2026-05-10T15:00:00Z');
 
@@ -61,6 +61,47 @@ function makeOpts(extra: Record<string, unknown> = {}) {
     ...extra,
   };
 }
+
+describe('getDateRange', () => {
+  // Anchor "now" to a fixed moment so date math is deterministic.
+  const now = new Date('2026-05-10T15:00:00Z');
+
+  it('handles today: today-start to today-end', () => {
+    const { start, end } = getDateRange('today', now);
+    expect(start.getDate()).toBe(10);
+    expect(start.getHours()).toBe(0);
+    expect(end.getDate()).toBe(10);
+    expect(end.getHours()).toBe(23);
+  });
+
+  it('handles 7d: rolling 7 days (today minus 6)', () => {
+    const { start } = getDateRange('7d', now);
+    expect(start.getDate()).toBe(4);
+  });
+
+  it('handles 30d: rolling 30 days (today minus 29)', () => {
+    const { start } = getDateRange('30d', now);
+    expect(start.getDate()).toBe(11); // April 11
+    expect(start.getMonth()).toBe(3); // April (0-indexed)
+  });
+
+  it('handles 90d: rolling 90 days (today minus 89) — new [Q]uarter period', () => {
+    const { start, end } = getDateRange('90d', now);
+    // 2026-05-10 minus 89 days = 2026-02-10
+    expect(start.getDate()).toBe(10);
+    expect(start.getMonth()).toBe(1); // February
+    expect(start.getFullYear()).toBe(2026);
+    // End is still today
+    expect(end.getDate()).toBe(10);
+    expect(end.getMonth()).toBe(4); // May
+  });
+
+  it('handles month: first day of current month to end of today', () => {
+    const { start } = getDateRange('month', now);
+    expect(start.getDate()).toBe(1);
+    expect(start.getMonth()).toBe(4); // May
+  });
+});
 
 describe('aggregateReportFromAudit', () => {
   it('returns hasAuditFile=false and zeroed envelope when log is missing', () => {

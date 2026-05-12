@@ -73,7 +73,7 @@ export function registerReportCommand(program: Command): void {
     .option('--no-tests', 'exclude test runner calls (npm test, vitest, pytest…) from stats')
     .option('--json', 'Emit machine-readable JSON to stdout (suppresses renderer)')
     .action((options: { period: string; tests: boolean; json?: boolean }) => {
-      const period: ReportPeriod = (['today', '7d', '30d', 'month'] as const).includes(
+      const period: ReportPeriod = (['today', '7d', '30d', '90d', 'month'] as const).includes(
         options.period as ReportPeriod
       )
         ? (options.period as ReportPeriod)
@@ -191,6 +191,7 @@ function renderTerminalReport(
     today: 'Today',
     '7d': 'Last 7 Days',
     '30d': 'Last 30 Days',
+    '90d': 'Last 90 Days',
     month: 'This Month',
   };
   console.log('');

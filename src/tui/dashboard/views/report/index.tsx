@@ -46,6 +46,7 @@ const PERIOD_LONG_LABEL: Record<ReportPeriod, string> = {
   today: 'Today',
   '7d': 'Last 7 Days',
   '30d': 'Last 30 Days',
+  '90d': 'Last 90 Days',
   month: 'This Month',
 };
 
@@ -121,6 +122,8 @@ function ReportHeader({
         <PeriodKey letter="W" label="eek" active={period === '7d'} />
         <Text dimColor>{'  '}</Text>
         <PeriodKey letter="M" label="onth" active={period === '30d' || period === 'month'} />
+        <Text dimColor>{'  '}</Text>
+        <PeriodKey letter="Q" label="uarter" active={period === '90d'} />
         <Text dimColor>{`     ${PERIOD_LONG_LABEL[period]}`}</Text>
       </Box>
       <Box>

@@ -19,7 +19,13 @@ export type View = 'realtime' | 'report';
 export type { ReportPeriod } from '../../cli/render/report-json.js';
 import type { ReportPeriod as _ReportPeriod } from '../../cli/render/report-json.js';
 
-export const REPORT_PERIODS: readonly _ReportPeriod[] = ['today', '7d', '30d', 'month'] as const;
+export const REPORT_PERIODS: readonly _ReportPeriod[] = [
+  'today',
+  '7d',
+  '30d',
+  '90d',
+  'month',
+] as const;
 
 export const TIME_WINDOWS: readonly TimeWindow[] = ['now', '1d', '7d', '30d', '60d'] as const;
 

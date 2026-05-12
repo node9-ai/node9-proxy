@@ -15,7 +15,7 @@
 // Input — the aggregated state collected by the action handler
 // ---------------------------------------------------------------------------
 
-export type ReportPeriod = 'today' | '7d' | '30d' | 'month';
+export type ReportPeriod = 'today' | '7d' | '30d' | '90d' | 'month';
 
 export interface BuildReportJsonInput {
   period: ReportPeriod;
