@@ -22,7 +22,7 @@ import type { AggregateResult } from '../../../../cli/aggregate/report-audit.js'
 import { COST_PER_LOOP_ITER_USD } from '@node9/policy-engine';
 
 import { Protection } from './panels/Protection.js';
-import { TopBlocks } from './panels/TopBlocks.js';
+import { Cost } from './panels/Cost.js';
 import { BlastRadius } from './panels/BlastRadius.js';
 import { Leaks } from './panels/Leaks.js';
 import { Loops } from './panels/Loops.js';
@@ -76,9 +76,14 @@ export function ReportView({
         scanCache={scanCache}
         filtered={filtered}
       />
+      {/* Upper row: PROTECTION (decision breakdown) + COST (spend +
+          per-agent + tokens + daily trend). TOP BLOCKS used to live
+          here — it moves to the bottom row alongside LEAKS / LOOPS
+          in a later commit, where the narrower column lets us drop
+          the bar chart and just show label + count. */}
       <Box flexDirection="row" gap={1}>
         <Protection audit={audit} />
-        <TopBlocks audit={audit} />
+        <Cost audit={audit} />
       </Box>
       <BlastRadius
         blast={blast}

@@ -15,6 +15,7 @@ import { render } from 'ink-testing-library';
 
 import { Protection } from '../tui/dashboard/views/report/panels/Protection';
 import { TopBlocks } from '../tui/dashboard/views/report/panels/TopBlocks';
+import { Cost } from '../tui/dashboard/views/report/panels/Cost';
 import { BlastRadius } from '../tui/dashboard/views/report/panels/BlastRadius';
 import { FooterStrip } from '../tui/dashboard/views/report/panels/FooterStrip';
 import type { AggregateResult } from '../cli/aggregate/report-audit';
@@ -119,6 +120,59 @@ describe('TopBlocks', () => {
     // Long reason "Approval timeout" gets truncated by fitLabel(LABEL_W=12)
     // — assert the truncated prefix is present rather than the full string.
     expect(lastFrame()).toContain('Approval');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cost
+// ---------------------------------------------------------------------------
+
+describe('Cost', () => {
+  it('renders "loading…" when audit is null', () => {
+    const { lastFrame } = render(<Cost audit={null} />);
+    expect(lastFrame()).toContain('COST');
+    expect(lastFrame()).toContain('loading…');
+  });
+
+  it('renders total / Claude / Codex / Trend rows when audit loaded with zeros', () => {
+    const { lastFrame } = render(<Cost audit={emptyAudit()} />);
+    const out = lastFrame();
+    expect(out).toContain('Total');
+    expect(out).toContain('Claude');
+    expect(out).toContain('Codex');
+    expect(out).toContain('Trend');
+  });
+
+  it('renders cost figures + token count', () => {
+    const audit = emptyAudit({
+      cost: {
+        claudeUSD: 5200,
+        codexUSD: 890,
+        inputTokens: 1_800_000,
+        outputTokens: 1_400_000,
+        cacheWriteTokens: 0,
+        cacheReadTokens: 0,
+        byDay: new Map([
+          ['2026-05-04', 100],
+          ['2026-05-05', 200],
+          ['2026-05-06', 800],
+        ]),
+        byModel: new Map(),
+      },
+    });
+    const { lastFrame } = render(<Cost audit={audit} />);
+    const out = lastFrame();
+    // Total = claude + codex = 6090. formatCost rounds/abbreviates to "$6.1K".
+    expect(out).toMatch(/\$6/);
+    // Token count = 3.2M
+    expect(out).toContain('tokens');
+    // Sparkline contains at least one block character from the BLOCKS set
+    expect(out).toMatch(/[▁▂▃▄▅▆▇█]/);
+  });
+
+  it('renders trend with "no data" when byDay is empty', () => {
+    const { lastFrame } = render(<Cost audit={emptyAudit()} />);
+    expect(lastFrame()).toContain('no data');
   });
 });
 
