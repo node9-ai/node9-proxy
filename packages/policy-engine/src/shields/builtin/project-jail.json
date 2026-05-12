@@ -46,7 +46,7 @@
       "reason": "Reading .env files is blocked by project-jail shield"
     },
     {
-      "name": "shield:project-jail:block-read-credentials",
+      "name": "shield:project-jail:review-read-credentials",
       "tool": "bash",
       "conditions": [
         {
@@ -56,8 +56,8 @@
           "flags": "i"
         }
       ],
-      "verdict": "block",
-      "reason": "Reading credential files is blocked by project-jail shield"
+      "verdict": "review",
+      "reason": "Reading credential files requires approval (project-jail shield)"
     },
     {
       "name": "shield:project-jail:block-read-ssh-any-tool",

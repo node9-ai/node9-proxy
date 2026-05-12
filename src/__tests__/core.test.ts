@@ -1700,10 +1700,10 @@ describe('analyzeFsOperation', () => {
       'shield:project-jail:block-read-env'
     );
   });
-  it('blocks cat ~/.npmrc', () => {
-    expect(analyzeFsOperation('cat ~/.npmrc')?.ruleName).toBe(
-      'shield:project-jail:block-read-credentials'
-    );
+  it('reviews cat ~/.npmrc (credentials: review, not block)', () => {
+    const v = analyzeFsOperation('cat ~/.npmrc');
+    expect(v?.ruleName).toBe('shield:project-jail:review-read-credentials');
+    expect(v?.verdict).toBe('review');
   });
   it('does NOT block JSON test payload containing cat ~/.ssh/id_rsa as a string', () => {
     // The historical FP: project-jail regex matched the literal string inside

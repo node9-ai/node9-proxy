@@ -5,7 +5,7 @@
 // count. Top 4 rows. Empty state when ready-but-zero.
 //
 // Fixed-width Box columns + fitLabel — rule names like
-// "shield:project-jail:block-read-credentials" are long; truncating at
+// "shield:project-jail:review-read-credentials" are long; truncating at
 // LABEL_W keeps the count column aligned across rows.
 
 import React from 'react';

@@ -370,32 +370,42 @@ const HOME_CACHE_ALLOWLIST = [
   '.rustup/downloads',
 ];
 
-const SENSITIVE_PATH_RULES: Array<{ rule: string; reason: string; match: (p: string) => boolean }> =
-  [
-    {
-      rule: 'shield:project-jail:block-read-ssh',
-      reason: 'Reading SSH private keys is blocked by project-jail shield',
-      match: (p) => /(^|[\\/])\.ssh[\\/]/i.test(p),
-    },
-    {
-      rule: 'shield:project-jail:block-read-aws',
-      reason: 'Reading AWS credentials is blocked by project-jail shield',
-      match: (p) => /(^|[\\/])\.aws[\\/]/i.test(p),
-    },
-    {
-      rule: 'shield:project-jail:block-read-env',
-      reason: 'Reading .env files is blocked by project-jail shield',
-      match: (p) => /(?:^|[\\/])\.env(?:\.local|\.production|\.staging)?$/i.test(p),
-    },
-    {
-      rule: 'shield:project-jail:block-read-credentials',
-      reason: 'Reading credential files is blocked by project-jail shield',
-      match: (p) =>
-        /(?:credentials\.json|\.netrc|\.npmrc|\.docker[\\/]config\.json|gcloud[\\/]credentials)$/i.test(
-          p
-        ),
-    },
-  ];
+const SENSITIVE_PATH_RULES: Array<{
+  rule: string;
+  reason: string;
+  match: (p: string) => boolean;
+  /** Per-rule verdict; defaults to 'block' when omitted. Credentials
+   *  (.netrc / .npmrc / .docker / .kube / gcloud) use 'review' rather
+   *  than 'block' — these config files have legitimate diagnostic
+   *  read needs ("which registry am I configured for"), so we ask
+   *  rather than hard-stop, matching the any-tool rule's verdict. */
+  verdict?: 'block' | 'review';
+}> = [
+  {
+    rule: 'shield:project-jail:block-read-ssh',
+    reason: 'Reading SSH private keys is blocked by project-jail shield',
+    match: (p) => /(^|[\\/])\.ssh[\\/]/i.test(p),
+  },
+  {
+    rule: 'shield:project-jail:block-read-aws',
+    reason: 'Reading AWS credentials is blocked by project-jail shield',
+    match: (p) => /(^|[\\/])\.aws[\\/]/i.test(p),
+  },
+  {
+    rule: 'shield:project-jail:block-read-env',
+    reason: 'Reading .env files is blocked by project-jail shield',
+    match: (p) => /(?:^|[\\/])\.env(?:\.local|\.production|\.staging)?$/i.test(p),
+  },
+  {
+    rule: 'shield:project-jail:review-read-credentials',
+    reason: 'Reading credential files requires approval (project-jail shield)',
+    verdict: 'review',
+    match: (p) =>
+      /(?:credentials\.json|\.netrc|\.npmrc|\.docker[\\/]config\.json|gcloud[\\/]credentials)$/i.test(
+        p
+      ),
+  },
+];
 
 export interface FsOpVerdict {
   ruleName: string;
@@ -430,7 +440,7 @@ export const AST_FS_REGEX_RULES = new Set<string>([
   'shield:project-jail:block-read-ssh',
   'shield:project-jail:block-read-aws',
   'shield:project-jail:block-read-env',
-  'shield:project-jail:block-read-credentials',
+  'shield:project-jail:review-read-credentials',
 ]);
 
 /**
@@ -586,7 +596,12 @@ function analyzeFsOperationImpl(command: string): FsOpVerdict | null {
         for (const p of paths) {
           for (const sp of SENSITIVE_PATH_RULES) {
             if (sp.match(p)) {
-              result = { ruleName: sp.rule, verdict: 'block', reason: sp.reason, path: p };
+              result = {
+                ruleName: sp.rule,
+                verdict: sp.verdict ?? 'block',
+                reason: sp.reason,
+                path: p,
+              };
               return false;
             }
           }
