@@ -924,6 +924,87 @@ describe('aws shield rules', () => {
   });
 });
 
+// ── project-jail any-tool rule patterns ─────────────────────────────────────
+// These rules use tool="*" + field="file_path" so they cover Read / Edit /
+// Write / MultiEdit (and future MCP file tools). The pre-existing bash-only
+// rules in this shield are exercised via analyzeFsOperation tests in
+// core.test.ts. Here we test the regex shapes directly via matchesShieldRule.
+
+describe('project-jail any-tool rules', () => {
+  describe('block-read-ssh-any-tool', () => {
+    const rule = 'shield:project-jail:block-read-ssh-any-tool';
+    it('matches /home/user/.ssh/id_rsa', () =>
+      expect(matchesShieldRule('project-jail', rule, '/home/user/.ssh/id_rsa')).toBe(true));
+    it('matches /home/user/.ssh/config', () =>
+      expect(matchesShieldRule('project-jail', rule, '/home/user/.ssh/config')).toBe(true));
+    it('does not match /home/user/ssh-keys/key', () =>
+      expect(matchesShieldRule('project-jail', rule, '/home/user/ssh-keys/key')).toBe(false));
+    it('does not match a path with .ssh as a basename (no trailing slash)', () =>
+      expect(matchesShieldRule('project-jail', rule, '/home/user/notes/.ssh')).toBe(false));
+  });
+
+  describe('block-read-aws-any-tool', () => {
+    const rule = 'shield:project-jail:block-read-aws-any-tool';
+    it('matches /home/user/.aws/credentials', () =>
+      expect(matchesShieldRule('project-jail', rule, '/home/user/.aws/credentials')).toBe(true));
+    it('matches /home/user/.aws/config', () =>
+      expect(matchesShieldRule('project-jail', rule, '/home/user/.aws/config')).toBe(true));
+    it('does not match /home/user/aws-cli-docs/readme', () =>
+      expect(matchesShieldRule('project-jail', rule, '/home/user/aws-cli-docs/readme')).toBe(
+        false
+      ));
+  });
+
+  describe('review-read-env-any-tool', () => {
+    const rule = 'shield:project-jail:review-read-env-any-tool';
+    it('matches /project/.env', () =>
+      expect(matchesShieldRule('project-jail', rule, '/project/.env')).toBe(true));
+    it('matches /project/.env.local', () =>
+      expect(matchesShieldRule('project-jail', rule, '/project/.env.local')).toBe(true));
+    it('matches /project/.env.production', () =>
+      expect(matchesShieldRule('project-jail', rule, '/project/.env.production')).toBe(true));
+    it('matches /project/.env.staging', () =>
+      expect(matchesShieldRule('project-jail', rule, '/project/.env.staging')).toBe(true));
+    it('matches /project/.env.development', () =>
+      expect(matchesShieldRule('project-jail', rule, '/project/.env.development')).toBe(true));
+    // The whole point of the explicit allowlist: dev fixtures must NOT match.
+    it('does not match /project/.env.example', () =>
+      expect(matchesShieldRule('project-jail', rule, '/project/.env.example')).toBe(false));
+    it('does not match /project/.env.sample', () =>
+      expect(matchesShieldRule('project-jail', rule, '/project/.env.sample')).toBe(false));
+    it('does not match /project/.env.template', () =>
+      expect(matchesShieldRule('project-jail', rule, '/project/.env.template')).toBe(false));
+    it('does not match /project/.env.test', () =>
+      expect(matchesShieldRule('project-jail', rule, '/project/.env.test')).toBe(false));
+    it('does not match /project/.envrc (direnv config)', () =>
+      expect(matchesShieldRule('project-jail', rule, '/project/.envrc')).toBe(false));
+    it('does not match /project/myenv', () =>
+      expect(matchesShieldRule('project-jail', rule, '/project/myenv')).toBe(false));
+  });
+
+  describe('review-read-credentials-any-tool', () => {
+    const rule = 'shield:project-jail:review-read-credentials-any-tool';
+    it('matches /home/user/credentials.json', () =>
+      expect(matchesShieldRule('project-jail', rule, '/home/user/credentials.json')).toBe(true));
+    it('matches /home/user/.netrc', () =>
+      expect(matchesShieldRule('project-jail', rule, '/home/user/.netrc')).toBe(true));
+    it('matches /home/user/.npmrc', () =>
+      expect(matchesShieldRule('project-jail', rule, '/home/user/.npmrc')).toBe(true));
+    it('matches /home/user/.docker/config.json', () =>
+      expect(matchesShieldRule('project-jail', rule, '/home/user/.docker/config.json')).toBe(true));
+    it('matches /home/user/.config/gcloud/credentials.db', () =>
+      expect(
+        matchesShieldRule('project-jail', rule, '/home/user/.config/gcloud/credentials.db')
+      ).toBe(true));
+    it('matches /home/user/.kube/config', () =>
+      expect(matchesShieldRule('project-jail', rule, '/home/user/.kube/config')).toBe(true));
+    it('does not match /home/user/project-credentials.txt', () =>
+      expect(matchesShieldRule('project-jail', rule, '/home/user/project-credentials.txt')).toBe(
+        false
+      ));
+  });
+});
+
 // ── Docker shield rule patterns ─────────────────────────────────────────────
 describe('docker shield rules', () => {
   describe('block-system-prune', () => {

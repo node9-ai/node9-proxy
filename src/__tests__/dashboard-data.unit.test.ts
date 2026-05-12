@@ -842,20 +842,20 @@ describe('computeProtection', () => {
     });
   });
 
-  it('exposes deductions with no suggestion when project-jail is also inactive', () => {
+  it('exposes deductions with a suggestion when project-jail is inactive', () => {
     const p = computeProtection(blast(25), shields([], ['project-jail']));
     expect(p.exposed).toBe(75);
     expect(p.protect).toBe(0);
     expect(p.effective).toBe(25);
     expect(p.suggestedShield).toBe('project-jail');
-    expect(p.suggestedBonus).toBe(23); // 75 × 0.3
+    expect(p.suggestedBonus).toBe(53); // round(75 × 0.7)
   });
 
-  it('applies the 30% discount when project-jail is active', () => {
+  it('applies the 70% discount when project-jail is active', () => {
     const p = computeProtection(blast(25), shields(['project-jail']));
     expect(p.exposed).toBe(75);
-    expect(p.protect).toBe(23); // round(75 × 0.3)
-    expect(p.effective).toBe(48);
+    expect(p.protect).toBe(53); // round(75 × 0.7)
+    expect(p.effective).toBe(78);
     expect(p.suggestedShield).toBe(null); // best (and only) protection already on
   });
 
@@ -868,7 +868,7 @@ describe('computeProtection', () => {
     );
     expect(p.protect).toBe(0); // none of the active shields are protective
     expect(p.suggestedShield).toBe('project-jail');
-    expect(p.suggestedBonus).toBe(23);
+    expect(p.suggestedBonus).toBe(53);
   });
 
   it('clamps effective to [0, 100]', () => {

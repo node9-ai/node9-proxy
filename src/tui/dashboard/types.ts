@@ -126,12 +126,15 @@ export interface BlastSnapshot {
  *  discounts, not a sum. Names match the SHIELDS registry exactly.
  *
  *  Current entries:
- *  - project-jail: blocks `cat / less / head / tail / vim / code` of
- *    `.ssh/`, `.aws/`, `.env`, credentials.json, etc. via the bash
- *    tool. Narrow today — Read/Edit/Write tool calls bypass it
- *    entirely. 0.3 reflects "covers the dominant bash exfil path
- *    but misses tool-mediated reads". Bumps to 0.7 once Phase 1
- *    expands the rule set to cover `tool: "*"` + `file_path`.
+ *  - project-jail: blocks reads of `.ssh/`, `.aws/`, `.env`,
+ *    `credentials.json`, `.netrc`, `.npmrc`, `.docker/config.json`,
+ *    `gcloud/credentials`, `.kube/config`. Two rule families:
+ *    (a) bash-tool rules matching on `command` (cat / less / vim / etc.)
+ *    (b) tool=* rules matching on `file_path` (Read / Edit / Write /
+ *    MultiEdit / future MCP file tools).
+ *    0.7 reflects "covers bash AND tool-mediated reads"; the
+ *    remaining 30% is symlink dodge, dynamic-path construction,
+ *    Glob enumeration, and tools using non-`file_path` arg names.
  *
  *  NOT in this table (and why):
  *  - filesystem (builtin shield): reviews chmod 777 and writes to
@@ -143,7 +146,7 @@ export interface BlastSnapshot {
  *    findings, destructive ops, domain-specific concerns), don't
  *    reduce static blast-path exposure. */
 export const PROTECTIVE_SHIELD_DISCOUNTS: Readonly<Record<string, number>> = {
-  'project-jail': 0.3,
+  'project-jail': 0.7,
 };
 
 /** Composite "what's my real risk" summary — combines blast exposure
