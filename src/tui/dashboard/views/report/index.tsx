@@ -28,7 +28,7 @@ import { PeriodShields } from './panels/PeriodShields.js';
 import { BlastRadius } from './panels/BlastRadius.js';
 import { Leaks } from './panels/Leaks.js';
 import { Loops } from './panels/Loops.js';
-import { TopRules } from './panels/TopRules.js';
+import { TopBlocks } from './panels/TopBlocks.js';
 import { FooterStrip } from './panels/FooterStrip.js';
 import { EMPTY_FILTERED_SCAN, filterScanByPeriod, type FilteredScan } from './derive.js';
 
@@ -100,10 +100,16 @@ export function ReportView({
         blast={blast}
         protectedByProjectJail={shieldStatus?.active.includes('project-jail') ?? false}
       />
+      {/* Bottom row: LEAKS / LOOPS / TOP BLOCKS. TOP RULES FIRED
+          used to live in the third slot; replaced by TOP BLOCKS in
+          the [2] revamp (2026-05-12). The scan-derived rule
+          breakdown (TopRules) is still exported and tested; we can
+          surface it as a drill-down or move it back if users miss
+          it in practice. */}
       <Box flexDirection="row" gap={1}>
         <Leaks scanCache={scanCache} filtered={filtered} />
         <Loops scanCache={scanCache} filtered={filtered} />
-        <TopRules scanCache={scanCache} filtered={filtered} />
+        <TopBlocks audit={audit} />
       </Box>
       <FooterStrip audit={audit} />
     </Box>
