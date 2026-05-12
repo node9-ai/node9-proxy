@@ -183,6 +183,70 @@ describe('ScoreBanner score tier', () => {
     );
     expect(lastFrame()).toContain('Good');
   });
+
+  it('uses effective score (raw + protect) when shieldStatus has a protective shield active', () => {
+    // Raw blast 25/100 → exposed 75. With project-jail active, protect
+    // = round(75 × 0.7) = 53. Effective = 25 + 53 = 78. Headline tier
+    // for 78 is "Moderate" (50-79 range), not "High risk" (raw 25
+    // would tier).
+    const { lastFrame } = render(
+      <ScoreBanner
+        audit={makeAudit()}
+        blast={makeBlast(25)}
+        shieldStatus={{ active: ['project-jail'], inactive: [] }}
+        scanCache={READY}
+        filtered={EMPTY_FILTERED_SCAN}
+      />
+    );
+    expect(lastFrame()).toContain('Score 78/100');
+    expect(lastFrame()).toContain('Moderate');
+  });
+
+  it('shows exposed/protect/effective breakdown line when exposed > 0', () => {
+    const { lastFrame } = render(
+      <ScoreBanner
+        audit={makeAudit()}
+        blast={makeBlast(25)}
+        shieldStatus={{ active: ['project-jail'], inactive: [] }}
+        scanCache={READY}
+        filtered={EMPTY_FILTERED_SCAN}
+      />
+    );
+    const out = lastFrame();
+    expect(out).toContain('exposed 75');
+    expect(out).toContain('+53');
+    expect(out).toContain('effective 78');
+  });
+
+  it('suppresses breakdown line when score is perfect (exposed 0)', () => {
+    const { lastFrame } = render(
+      <ScoreBanner
+        audit={makeAudit()}
+        blast={makeBlast(100)}
+        shieldStatus={{ active: [], inactive: [] }}
+        scanCache={READY}
+        filtered={EMPTY_FILTERED_SCAN}
+      />
+    );
+    // No "exposed" / "effective" line — score already 100/100 and
+    // showing "exposed 0 · protect +0 · effective 100" is noise.
+    expect(lastFrame()).not.toContain('exposed');
+  });
+
+  it('suggests an inactive protective shield in the breakdown row', () => {
+    const { lastFrame } = render(
+      <ScoreBanner
+        audit={makeAudit()}
+        blast={makeBlast(25)}
+        shieldStatus={{ active: [], inactive: ['project-jail'] }}
+        scanCache={READY}
+        filtered={EMPTY_FILTERED_SCAN}
+      />
+    );
+    const out = lastFrame();
+    expect(out).toContain('enable');
+    expect(out).toContain('project-jail');
+  });
 });
 
 // ---------------------------------------------------------------------------

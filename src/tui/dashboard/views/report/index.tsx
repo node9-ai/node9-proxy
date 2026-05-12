@@ -16,6 +16,7 @@ import React, { useMemo } from 'react';
 import { Box, Text } from 'ink';
 
 import { COL } from '../../panels.js';
+import { computeProtection } from '../../data.js';
 import type { BlastSnapshot, ReportPeriod, ScanCache, ShieldStatus } from '../../types.js';
 import type { AggregateResult } from '../../../../cli/aggregate/report-audit.js';
 import { COST_PER_LOOP_ITER_USD } from '@node9/policy-engine';
@@ -67,7 +68,13 @@ export function ReportView({
   return (
     <Box flexDirection="column" flexGrow={1} paddingX={1}>
       <ReportHeader period={period} audit={audit} />
-      <ScoreBanner audit={audit} blast={blast} scanCache={scanCache} filtered={filtered} />
+      <ScoreBanner
+        audit={audit}
+        blast={blast}
+        shieldStatus={shieldStatus}
+        scanCache={scanCache}
+        filtered={filtered}
+      />
       <Box flexDirection="row" gap={1}>
         <Protection audit={audit} />
         <TopBlocks audit={audit} />
@@ -144,12 +151,18 @@ function PeriodKey({
 }
 
 // ---------------------------------------------------------------------------
-// Score banner — score + headline + spend
+// Score banner — effective score + breakdown + headline + spend
 //
-// Score: blast.score (0-100) — same number `node9 scan` shows. Tier color
-// mirrors the CLI's scoreLabel: green / yellow / red / red-bold.
-// Score is "right now" not period-dependent (blast walks current disk
-// state); spend is audit-derived and reacts to T/W/M.
+// Score: the EFFECTIVE score from computeProtection (blast exposure
+// adjusted for active protective shields). Same headline number the
+// `[1]` Realtime RISK box uses, so users see one consistent risk
+// figure across both views. Prior versions of this banner showed raw
+// blast.score (e.g. 25/100) while `[1]` showed effective (78/100)
+// after project-jail kicked in — confusing inconsistency.
+//
+// Breakdown line: shows the three-number story (exposed N · protect
+// +X · effective Y) so the user can see WHY the score is what it is
+// and what changes if shields toggle.
 //
 // Headline: priority cascade — first match wins. Surfaces the most
 // alarming signal in one line so users glance at the banner and know
@@ -160,40 +173,69 @@ function PeriodKey({
 export function ScoreBanner({
   audit,
   blast,
+  shieldStatus,
   scanCache,
   filtered,
 }: {
   audit: AggregateResult | null;
   blast: BlastSnapshot | null;
+  /** Optional. When omitted, the effective score equals the raw blast
+   *  score (no protect bonus applied). The dashboard always passes
+   *  it; some unit tests render the banner in isolation without
+   *  shield state. */
+  shieldStatus?: ShieldStatus | null;
   scanCache: ScanCache;
   filtered: FilteredScan;
 }): React.ReactElement {
   const data = audit?.data;
   const spend = data ? data.cost.claudeUSD + data.cost.codexUSD : 0;
-  const score = blast?.score ?? null;
-  const tier = score === null ? null : scoreTier(score);
+  const protection = computeProtection(blast, shieldStatus ?? null);
+  const hasBlast = blast !== null;
+  const tier = hasBlast ? scoreTier(protection.effective) : null;
   const headline = computeHeadline(scanCache, filtered, blast);
 
   return (
-    <Box paddingY={1}>
-      {score !== null && tier ? (
-        <>
-          <Text bold color={tier.color}>{`Score ${score}/100`}</Text>
-          <Text>{'  '}</Text>
-          <Text color={tier.color}>{tier.icon + ' ' + tier.label}</Text>
-        </>
-      ) : (
-        <Text dimColor>Score —/100</Text>
-      )}
-      <Text>{'     '}</Text>
-      {headline ? (
-        <Text color={headline.color} dimColor={headline.dim}>
-          {headline.text}
-        </Text>
+    <Box flexDirection="column" paddingY={1}>
+      {/* Row 1: Effective score + tier + headline + spend */}
+      <Box>
+        {hasBlast && tier ? (
+          <>
+            <Text bold color={tier.color}>{`Score ${protection.effective}/100`}</Text>
+            <Text>{'  '}</Text>
+            <Text color={tier.color}>{tier.icon + ' ' + tier.label}</Text>
+          </>
+        ) : (
+          <Text dimColor>Score —/100</Text>
+        )}
+        <Text>{'     '}</Text>
+        {headline ? (
+          <Text color={headline.color} dimColor={headline.dim}>
+            {headline.text}
+          </Text>
+        ) : null}
+        <Text>{'     '}</Text>
+        <Text>💰 </Text>
+        <Text bold>{fmtCost(spend)}</Text>
+      </Box>
+      {/* Row 2: Score breakdown — exposed / protect / effective. Only
+          when blast is loaded; suppressed if exposed is 0 (perfect
+          score, breakdown is just "100 = 100, nothing to explain"). */}
+      {hasBlast && protection.exposed > 0 ? (
+        <Box marginTop={0}>
+          <Text dimColor>{`  exposed ${protection.exposed} · protect `}</Text>
+          <Text bold color={protection.protect > 0 ? '#5BF58C' : undefined}>
+            {`+${protection.protect}`}
+          </Text>
+          <Text dimColor>{` · effective ${protection.effective}/100`}</Text>
+          {protection.suggestedShield ? (
+            <>
+              <Text dimColor>{'     ↑ enable '}</Text>
+              <Text bold>{protection.suggestedShield}</Text>
+              <Text dimColor>{` → +${protection.suggestedBonus}`}</Text>
+            </>
+          ) : null}
+        </Box>
       ) : null}
-      <Text>{'     '}</Text>
-      <Text>💰 </Text>
-      <Text bold>{fmtCost(spend)}</Text>
     </Box>
   );
 }
