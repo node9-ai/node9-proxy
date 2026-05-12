@@ -3110,15 +3110,41 @@ export function registerScanCommand(program: Command): void {
           // 9-section verbose layout below for users who don't opt into
           // --drill-down. The verbose layout still serves --drill-down so
           // forensic detail is one flag away.
+          //
+          // NODE9_SCAN_INK=1 env flag opts into the new Ink-rendered
+          // panel scorecard (in active migration). Default path
+          // remains the chalk-based renderPanelScorecard until the
+          // migration completes — see scan-redesign plan, commit #1.
           if (!drillDown) {
-            renderPanelScorecard({
-              scan,
-              summary,
-              blast,
-              blastExposures,
-              blockedCount,
-              reviewCount,
-            });
+            const useInk = process.env.NODE9_SCAN_INK === '1';
+            if (useInk) {
+              // Ink + React are ESM with top-level await — same constraint
+              // as the monitor dashboard. Load from the separate scan-ink
+              // ESM bundle via the `new Function` indirection that bypasses
+              // tsup's static-import-to-require rewrite. See tsup.config.ts
+              // and src/cli.ts:454+ for the same pattern in `node9 monitor`.
+              const scanInkPath = path.join(__dirname, 'scan-ink.mjs');
+              const dynamicImport = new Function('id', 'return import(id)') as (
+                id: string
+              ) => Promise<{
+                renderScanScorecardInk: (input: CompactInput, rangeLabel: string) => void;
+              }>;
+              const mod = await dynamicImport(`file://${scanInkPath}`);
+              const rangeLabel = options.all ? 'all time' : `last ${options.days ?? 90} days`;
+              mod.renderScanScorecardInk(
+                { scan, summary, blast, blastExposures, blockedCount, reviewCount },
+                rangeLabel
+              );
+            } else {
+              renderPanelScorecard({
+                scan,
+                summary,
+                blast,
+                blastExposures,
+                blockedCount,
+                reviewCount,
+              });
+            }
             // Footer CTAs — distinct from the legacy footer at end of
             // verbose render. Points to monitor (live dashboard) and
             // drill-down (forensic deep-dive) — NOT `node9 report`
