@@ -779,6 +779,41 @@ describe('applyActivityEvent', () => {
     expect(agg.shell).toEqual({});
   });
 
+  it('tallies mcp by server name when mcpServer is set', () => {
+    let agg: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {}, mcp: {} };
+    agg = applyActivityEvent(
+      agg,
+      toolEvent({ tool: 'mcp__postgres__execute_sql', mcpServer: 'postgres' })
+    );
+    agg = applyActivityEvent(
+      agg,
+      toolEvent({ tool: 'mcp__postgres__select', mcpServer: 'postgres' })
+    );
+    agg = applyActivityEvent(
+      agg,
+      toolEvent({ tool: 'mcp__github__create_issue', mcpServer: 'github' })
+    );
+    expect(agg.mcp).toEqual({ postgres: 2, github: 1 });
+  });
+
+  it('does NOT tally mcp when mcpServer is undefined (regular tools)', () => {
+    let agg: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {}, mcp: {} };
+    agg = applyActivityEvent(agg, toolEvent({ tool: 'Read', preview: '/etc/hosts' }));
+    agg = applyActivityEvent(agg, toolEvent({ tool: 'Bash', preview: 'git status' }));
+    expect(agg.mcp).toEqual({});
+  });
+
+  it('mcp tally is independent of tools tally (same event counts in both)', () => {
+    let agg: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {}, mcp: {} };
+    agg = applyActivityEvent(
+      agg,
+      toolEvent({ tool: 'mcp__postgres__execute_sql', mcpServer: 'postgres' })
+    );
+    // Same event shows up in tools (by full tool name) AND mcp (by server) — two views, not double-count.
+    expect(agg.tools['mcp__postgres__execute_sql']).toBe(1);
+    expect(agg.mcp['postgres']).toBe(1);
+  });
+
   it('skips shell tally when first token has invalid chars', () => {
     let agg: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {} };
     agg = applyActivityEvent(agg, toolEvent({ preview: 'cat $(whoami)' }));

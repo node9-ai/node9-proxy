@@ -95,7 +95,7 @@ const BLAST_REFRESH_MS = 5 * 60_000;
 // its status/scrollbar — either way header scrolled off the top once
 // LIVE filled. Reserving 1 extra row makes the dashboard 1 row shorter
 // than the terminal so there's no overflow.
-const FIXED_PANELS_HEIGHT = 36;
+const FIXED_PANELS_HEIGHT = 40;
 /** Minimum content rows LIVE renders. Bumped to 11 so the live event
  *  stream always has useful depth even when the new LIVE SECURITY /
  *  LIVE ACTIVITY panels grow the fixed-chrome budget. On terminals
@@ -103,7 +103,7 @@ const FIXED_PANELS_HEIGHT = 36;
  *  overflow="hidden" clips the bottom (Setup / StatusBar) instead of
  *  shrinking LIVE — the live feed is the primary signal, the rest is
  *  context. */
-const LIVE_MIN_ROWS = 13;
+const LIVE_MIN_ROWS = 11;
 const NOTIFICATION_RECENT_WINDOW_MS = 60_000;
 const RESOLVED_HOLD_MS = 5_000;
 
@@ -222,6 +222,7 @@ export function App(): React.ReactElement {
     ...EMPTY_SESSION_ACTIVITY,
     tools: {},
     shell: {},
+    mcp: {},
   }));
   // Per-shield activity tally — feeds the SHIELDS panel. Built once at
   // mount, the ruleToShield map is a small (~30-entry) Map; lookups are
@@ -894,15 +895,21 @@ export function App(): React.ReactElement {
             filter={filter}
             filterInputMode={filterInputMode}
           />
+          {/* Two-row bottom: row 1 = LIVE SECURITY + SHIELDS (50/50,
+              each 2-column internal); row 2 = LIVE ACTIVITY (full
+              width, 3-column internal for TOOLS / SHELL / MCP). The
+              extra row of chrome buys breathing room — each section
+              has adequate width to render long names without
+              truncation. */}
           <Box flexDirection="row" marginX={1}>
             <LiveSecurity
               blast={blast}
               forensicAgg={sessionForensicAgg}
               activityAgg={sessionActivityAgg}
             />
-            <LiveActivity agg={sessionActivityAgg} />
             <Shields shieldStatus={shieldStatus} shieldsAgg={sessionShieldsAgg} />
           </Box>
+          <LiveActivity agg={sessionActivityAgg} />
         </>
       ) : (
         <ReportView

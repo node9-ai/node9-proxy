@@ -1090,13 +1090,20 @@ export function applyActivityEvent(agg: SessionActivityAgg, e: ActivityEvent): S
       shell = { ...shell, [head]: (shell[head] ?? 0) + 1 };
     }
   }
+  // Per-MCP-server tally. Same event can also live in `tools` (by
+  // tool name) — that's two views of the same activity, not a
+  // double-count of a single signal.
+  let mcp = agg.mcp;
+  if (e.mcpServer) {
+    mcp = { ...mcp, [e.mcpServer]: (mcp[e.mcpServer] ?? 0) + 1 };
+  }
   let dlp = agg.dlp;
   let loops = agg.loops;
   if (e.checkedBy) {
     if (e.checkedBy === 'loop-detected') loops++;
     if (e.checkedBy.toLowerCase().includes('dlp')) dlp++;
   }
-  return { tools, shell, dlp, loops };
+  return { tools, shell, mcp, dlp, loops };
 }
 
 const SHELL_TOOLS: ReadonlySet<string> = new Set(['Bash', 'bash']);

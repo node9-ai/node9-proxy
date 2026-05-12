@@ -731,22 +731,44 @@ function bar(value: number, max: number, width: number): string {
 // in a category yet.
 // ---------------------------------------------------------------------------
 
-// Total box height (incl. borders) shared by LIVE SECURITY and LIVE
-// ACTIVITY. 2 borders + 1 title + 9 data rows = 12. Bumped from 11
-// so the title is no longer clipped off the top — that was producing
-// the "since open · N new" overlap on the first data row.
-const LIVE_SECURITY_ROWS_HEIGHT = 12;
+// Total box height (incl. borders) shared across LIVE SECURITY,
+// SHIELDS, and LIVE ACTIVITY in the new two-row layout. 8 = 1 title
+// + 5 data rows + 2 borders. LIVE SECURITY and SHIELDS share the
+// top row at 50/50 width with 2-column internal layout; LIVE
+// ACTIVITY occupies the full width below with 3-column internal
+// layout. The shorter height (vs the prior 12-row single-column)
+// is bought back by 2-col density.
+const LIVE_SECURITY_ROWS_HEIGHT = 8;
+
+/** Render a single "label N" row for the 2-col LIVE SECURITY layout.
+ *  Item may be undefined when the column has fewer items than the row
+ *  count — we still render a placeholder Box to keep column widths
+ *  stable. */
+function LiveSecurityCell(props: { item?: { label: string; count: number } }): React.ReactElement {
+  const item = props.item;
+  if (!item) return <Box flexGrow={1} flexBasis={0} />;
+  return (
+    <Box flexGrow={1} flexBasis={0}>
+      <Text wrap="truncate-end">
+        <Text>{item.label.padEnd(7)}</Text>
+        <Text bold={item.count > 0} color={item.count > 0 ? undefined : COL.textDim}>
+          {`${item.count}`.padStart(4)}
+        </Text>
+      </Text>
+    </Box>
+  );
+}
 
 export function LiveSecurity(props: {
   blast: BlastSnapshot | null;
   forensicAgg: SessionForensicAgg;
   activityAgg: SessionActivityAgg;
 }): React.ReactElement {
-  // 9 categorical rows — matches the spec you gave: dlp, loop, paths,
-  // pii, priv, dest, eval, pipe, long. sensitive-file-read is folded
-  // into "priv" / "paths" semantics in practice and was dropping the
-  // title off-screen at height=11; keeping it minimal so the title
-  // stays visible.
+  // 9 categorical rows: dlp, loops, paths, pii, priv, dest, eval,
+  // pipe, long. Sorted desc so the noisiest signal floats to row 1
+  // left column; the panel pairs items left-then-right to fill 5
+  // rows (item 0 left row 1, item 1 right row 1, item 2 left row 2,
+  // …, item 8 left row 5, right row 5 blank).
   const rows: Array<{ label: string; count: number }> = [
     { label: 'dlp', count: props.activityAgg.dlp },
     { label: 'loops', count: props.activityAgg.loops },
@@ -758,9 +780,13 @@ export function LiveSecurity(props: {
     { label: 'pipe', count: props.forensicAgg.pipeToShell },
     { label: 'long', count: props.forensicAgg.longOutputRedacted },
   ];
-  // Sort desc by count; zero rows naturally fall to the bottom.
   rows.sort((a, b) => b.count - a.count);
   const totalIssues = rows.reduce((sum, r) => sum + r.count, 0);
+  // Pair into 5 rows × 2 columns. items[2*i] = left, items[2*i+1] = right.
+  const pairs: Array<[(typeof rows)[number] | undefined, (typeof rows)[number] | undefined]> = [];
+  for (let i = 0; i < 10; i += 2) {
+    pairs.push([rows[i], rows[i + 1]]);
+  }
   return (
     <Box
       flexDirection="column"
@@ -776,13 +802,11 @@ export function LiveSecurity(props: {
           LIVE SECURITY
         </Text>
       </Text>
-      {rows.map((r) => (
-        <Text key={r.label} wrap="truncate-end">
-          <Text>{r.label.padEnd(10)}</Text>
-          <Text bold={r.count > 0} color={r.count > 0 ? undefined : COL.textDim}>
-            {`${r.count}`.padStart(4)}
-          </Text>
-        </Text>
+      {pairs.map((pair, i) => (
+        <Box key={i} flexDirection="row">
+          <LiveSecurityCell item={pair[0]} />
+          <LiveSecurityCell item={pair[1]} />
+        </Box>
       ))}
     </Box>
   );
@@ -798,22 +822,39 @@ export function LiveSecurity(props: {
 // without any history walk.
 // ---------------------------------------------------------------------------
 
-// Top-N per section. 1 title + 1 TOOLS header + 4 + 1 SHELL header
-// + 4 + 2 borders = 13 → doesn't fit in 12. Using 3 per section to
-// fit symmetrically inside the same height as LIVE SECURITY.
-const LIVE_ACTIVITY_ROWS = 3;
+// 3-column full-width layout: TOOLS / SHELL / MCP side-by-side
+// inside one bordered box. Title (1) + inline section-header row (1)
+// + 4 data rows + 2 borders = 8 (matches LIVE_SECURITY_ROWS_HEIGHT).
+// Each column shows top-N by count; empty cells render blank.
+const LIVE_ACTIVITY_ROWS = 4;
+
+function ActivityCell(props: { item?: { name: string; count: number } }): React.ReactElement {
+  const item = props.item;
+  return (
+    <Box flexGrow={1} flexBasis={0}>
+      {item ? (
+        <Text wrap="truncate-end">
+          <Text>{truncate(item.name, 14).padEnd(14)}</Text>
+          <Text bold={item.count > 0} color={item.count > 0 ? undefined : COL.textDim}>
+            {`${item.count}`.padStart(4)}
+          </Text>
+        </Text>
+      ) : null}
+    </Box>
+  );
+}
 
 export function LiveActivity(props: { agg: SessionActivityAgg }): React.ReactElement {
   const tools = topNFromMap(props.agg.tools, LIVE_ACTIVITY_ROWS);
   const shell = topNFromMap(props.agg.shell, LIVE_ACTIVITY_ROWS);
+  const mcp = topNFromMap(props.agg.mcp, LIVE_ACTIVITY_ROWS);
   return (
     <Box
       flexDirection="column"
       borderStyle="round"
       borderColor={COL.panelReport}
       paddingX={1}
-      flexGrow={1}
-      flexBasis={0}
+      marginX={1}
       height={LIVE_SECURITY_ROWS_HEIGHT}
     >
       <Text>
@@ -821,32 +862,27 @@ export function LiveActivity(props: { agg: SessionActivityAgg }): React.ReactEle
           LIVE ACTIVITY
         </Text>
       </Text>
-      <Text dimColor wrap="truncate-end">
-        TOOLS
-      </Text>
-      {tools.length === 0 ? (
-        <Text dimColor>—</Text>
-      ) : (
-        tools.map((t) => (
-          <Text key={t.name} wrap="truncate-end">
-            <Text>{truncate(t.name, 10).padEnd(10)}</Text>
-            <Text bold>{`${t.count}`.padStart(4)}</Text>
-          </Text>
-        ))
-      )}
-      <Text dimColor wrap="truncate-end">
-        SHELL
-      </Text>
-      {shell.length === 0 ? (
-        <Text dimColor>—</Text>
-      ) : (
-        shell.map((s) => (
-          <Text key={s.name} wrap="truncate-end">
-            <Text>{truncate(s.name, 10).padEnd(10)}</Text>
-            <Text bold>{`${s.count}`.padStart(4)}</Text>
-          </Text>
-        ))
-      )}
+      {/* Inline section-header row — TOOLS / SHELL / MCP aligned to
+          the three column slots below. Saves a row vs three separate
+          stacked headers. */}
+      <Box flexDirection="row">
+        <Box flexGrow={1} flexBasis={0}>
+          <Text dimColor>TOOLS</Text>
+        </Box>
+        <Box flexGrow={1} flexBasis={0}>
+          <Text dimColor>SHELL</Text>
+        </Box>
+        <Box flexGrow={1} flexBasis={0}>
+          <Text dimColor>MCP</Text>
+        </Box>
+      </Box>
+      {Array.from({ length: LIVE_ACTIVITY_ROWS }, (_, i) => (
+        <Box key={i} flexDirection="row">
+          <ActivityCell item={tools[i]} />
+          <ActivityCell item={shell[i]} />
+          <ActivityCell item={mcp[i]} />
+        </Box>
+      ))}
     </Box>
   );
 }
@@ -882,10 +918,44 @@ function topNFromMap(
 // SECURITY.
 // ---------------------------------------------------------------------------
 
-// Total active+inactive rows shown. Title (1) + N rows + 2 borders =
-// LIVE_SECURITY_ROWS_HEIGHT (12) → N = 9. Active first (sorted desc
-// by total fires), inactive second; overflow collapses to "… N more".
-const SHIELDS_MAX_ROWS = 9;
+// Two-column SHIELDS layout: active shields in the LEFT column,
+// inactive in the RIGHT column. Title (1) + 5 data rows + 2 borders
+// = 8 (matches LIVE_SECURITY_ROWS_HEIGHT). Active sorted desc by
+// total fires (blocks + reviews); inactive in registry order.
+// Overflow (anything past row 5 on either side) collapses to a
+// shared "… N more" line on row 5 left.
+const SHIELDS_ROWS_PER_COL = 4; // leaves row 5 for overflow line
+
+function ShieldActiveCell(props: {
+  row?: { name: string; blocks: number; reviews: number };
+}): React.ReactElement {
+  const row = props.row;
+  if (!row) return <Box flexGrow={1} flexBasis={0} />;
+  const n = row.blocks + row.reviews;
+  return (
+    <Box flexGrow={1} flexBasis={0}>
+      <Text wrap="truncate-end">
+        <Text>{truncate(row.name, 11).padEnd(11)}</Text>
+        <Text bold={n > 0} color={n > 0 ? undefined : COL.textDim}>
+          {`${n}`.padStart(4)}
+        </Text>
+      </Text>
+    </Box>
+  );
+}
+
+function ShieldInactiveCell(props: { name?: string }): React.ReactElement {
+  const name = props.name;
+  if (!name) return <Box flexGrow={1} flexBasis={0} />;
+  return (
+    <Box flexGrow={1} flexBasis={0}>
+      <Text wrap="truncate-end">
+        <Text dimColor>{truncate(name, 11).padEnd(11)}</Text>
+        <Text color={COL.panelHigh}>{' off'}</Text>
+      </Text>
+    </Box>
+  );
+}
 
 export function Shields(props: {
   shieldStatus: ShieldStatus | null;
@@ -900,13 +970,21 @@ export function Shields(props: {
       return { name, ...counts, total: counts.blocks + counts.reviews };
     })
     .sort((a, b) => b.total - a.total);
-  // Budget: show as many active as fit, then fill with inactive, then
-  // collapse the rest as "… N more". Title takes 1 row already.
-  const activeShown = activeWithCounts.slice(0, SHIELDS_MAX_ROWS);
-  const remainingBudget = Math.max(0, SHIELDS_MAX_ROWS - activeShown.length);
-  const inactiveShown = inactive.slice(0, Math.max(0, remainingBudget - 1));
+  const activeShown = activeWithCounts.slice(0, SHIELDS_ROWS_PER_COL);
+  const inactiveShown = inactive.slice(0, SHIELDS_ROWS_PER_COL);
   const overflow =
-    activeWithCounts.length - activeShown.length + (inactive.length - inactiveShown.length);
+    Math.max(0, activeWithCounts.length - activeShown.length) +
+    Math.max(0, inactive.length - inactiveShown.length);
+
+  // Build 4 paired rows (left=active, right=inactive) so empty
+  // cells still occupy width.
+  const pairs: Array<{
+    left?: (typeof activeShown)[number];
+    right?: string;
+  }> = [];
+  for (let i = 0; i < SHIELDS_ROWS_PER_COL; i++) {
+    pairs.push({ left: activeShown[i], right: inactiveShown[i] });
+  }
   return (
     <Box
       flexDirection="column"
@@ -928,22 +1006,11 @@ export function Shields(props: {
         <Text dimColor>none</Text>
       ) : (
         <>
-          {activeShown.map((row) => {
-            const n = row.blocks + row.reviews;
-            return (
-              <Text key={`a-${row.name}`} wrap="truncate-end">
-                <Text>{truncate(row.name, 10).padEnd(10)}</Text>
-                <Text bold={n > 0} color={n > 0 ? undefined : COL.textDim}>
-                  {`${n}`.padStart(4)}
-                </Text>
-              </Text>
-            );
-          })}
-          {inactiveShown.map((name) => (
-            <Text key={`i-${name}`} wrap="truncate-end">
-              <Text dimColor>{truncate(name, 10).padEnd(10)}</Text>
-              <Text color={COL.panelHigh}>{' off'}</Text>
-            </Text>
+          {pairs.map((pair, i) => (
+            <Box key={i} flexDirection="row">
+              <ShieldActiveCell row={pair.left} />
+              <ShieldInactiveCell name={pair.right} />
+            </Box>
           ))}
           {overflow > 0 ? <Text dimColor>{`… ${overflow} more`}</Text> : null}
         </>

@@ -230,6 +230,12 @@ export interface SessionActivityAgg {
   tools: Record<string, number>;
   /** Bash first-token distribution (git, npm, rm, …). */
   shell: Record<string, number>;
+  /** Per-MCP-server call distribution. Key = mcpServer name as it
+   *  appears on the activity event. Counts every tool event where
+   *  `mcpServer` is set, so the same event can show up in `tools`
+   *  (by tool name) AND in `mcp` (by server name). That's
+   *  intentional — they're two views of the same activity. */
+  mcp: Record<string, number>;
   dlp: number;
   loops: number;
 }
@@ -237,6 +243,7 @@ export interface SessionActivityAgg {
 export const EMPTY_SESSION_ACTIVITY: SessionActivityAgg = {
   tools: {},
   shell: {},
+  mcp: {},
   dlp: 0,
   loops: 0,
 };
