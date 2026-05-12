@@ -3117,26 +3117,29 @@ export function registerScanCommand(program: Command): void {
           // migration completes — see scan-redesign plan, commit #1.
           if (!drillDown) {
             const useInk = process.env.NODE9_SCAN_INK === '1';
+            // During the Ink migration window (commits #1-7 of the
+            // scan-redesign plan), the Ink renderer emits ONLY the
+            // panels already migrated. The chalk renderPanelScorecard
+            // below always runs, covering everything else. Net effect:
+            // when NODE9_SCAN_INK=1 the user sees Ink panels at the
+            // top + chalk panels following. As each commit migrates
+            // another panel, the chalk section shrinks. Commit #8
+            // deletes the chalk path entirely.
+            //
+            // Ink load: ink/react are ESM with top-level await, so
+            // they can't be require()'d from this CJS bundle. We
+            // load from a separate scan-ink ESM bundle via the same
+            // `new Function('id', 'return import(id)')` indirection
+            // that `node9 monitor` uses for dashboard.mjs.
             if (useInk) {
-              // Ink + React are ESM with top-level await — same constraint
-              // as the monitor dashboard. Load from the separate scan-ink
-              // ESM bundle via the `new Function` indirection that bypasses
-              // tsup's static-import-to-require rewrite. See tsup.config.ts
-              // and src/cli.ts:454+ for the same pattern in `node9 monitor`.
               const scanInkPath = path.join(__dirname, 'scan-ink.mjs');
               const dynamicImport = new Function('id', 'return import(id)') as (
                 id: string
               ) => Promise<{
-                renderScanScorecardInk: (input: CompactInput, rangeLabel: string) => void;
+                renderScanScorecardInk: (input: CompactInput) => void;
               }>;
               const mod = await dynamicImport(`file://${scanInkPath}`);
-              const rangeLabel = options.all ? 'all time' : `last ${options.days ?? 90} days`;
-              mod.renderScanScorecardInk(
-                { scan, summary, blast, blastExposures, blockedCount, reviewCount },
-                rangeLabel
-              );
-            } else {
-              renderPanelScorecard({
+              mod.renderScanScorecardInk({
                 scan,
                 summary,
                 blast,
@@ -3145,6 +3148,14 @@ export function registerScanCommand(program: Command): void {
                 reviewCount,
               });
             }
+            renderPanelScorecard({
+              scan,
+              summary,
+              blast,
+              blastExposures,
+              blockedCount,
+              reviewCount,
+            });
             // Footer CTAs — distinct from the legacy footer at end of
             // verbose render. Points to monitor (live dashboard) and
             // drill-down (forensic deep-dive) — NOT `node9 report`

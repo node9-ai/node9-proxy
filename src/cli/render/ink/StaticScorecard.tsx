@@ -31,23 +31,26 @@ import { Box, render } from 'ink';
 
 import type { CompactInput } from '../../commands/scan.js';
 import { SeverityBand } from './SeverityBand.js';
-import { Header } from './panels/Header.js';
 import { CostPanel } from './panels/CostPanel.js';
 
 interface Props {
   input: CompactInput;
-  rangeLabel: string;
 }
 
 /** The React tree itself — pure, no I/O. Exported separately so
  *  unit tests can use ink-testing-library to capture rendered
- *  output without going through the full render+unmount dance. */
-export function StaticScorecard({ input, rangeLabel }: Props): React.ReactElement {
-  const { scan, summary, blast } = input;
+ *  output without going through the full render+unmount dance.
+ *
+ *  No Header component during the migration window — the chalk hero
+ *  block in scan.ts already prints sessions / score / stat-card /
+ *  spend BEFORE this Ink renderer runs. Adding an Ink Header now
+ *  would duplicate it. When the chalk hero block is itself migrated
+ *  (eventually a HeaderPanel later in the stack), we'll restore an
+ *  Ink Header here and drop the chalk one. */
+export function StaticScorecard({ input }: Props): React.ReactElement {
+  const { summary } = input;
   return (
     <Box flexDirection="column" paddingTop={1}>
-      <Header scan={scan} blastScore={blast.score} rangeLabel={rangeLabel} />
-
       <SeverityBand label="Spend & activity" />
       <Box flexDirection="row">
         <CostPanel summary={summary} />
@@ -69,8 +72,8 @@ export function StaticScorecard({ input, rangeLabel }: Props): React.ReactElemen
  * No `waitUntilExit()` — there's no interactive state to wait for;
  * the render is synchronous from the caller's perspective.
  */
-export function renderScanScorecardInk(input: CompactInput, rangeLabel: string): void {
-  const { unmount } = render(<StaticScorecard input={input} rangeLabel={rangeLabel} />, {
+export function renderScanScorecardInk(input: CompactInput): void {
+  const { unmount } = render(<StaticScorecard input={input} />, {
     patchConsole: false,
   });
   unmount();
