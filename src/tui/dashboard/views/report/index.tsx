@@ -24,6 +24,7 @@ import { COST_PER_LOOP_ITER_USD } from '@node9/policy-engine';
 import { Protection } from './panels/Protection.js';
 import { Cost } from './panels/Cost.js';
 import { TopToolsProjects } from './panels/TopToolsProjects.js';
+import { PeriodShields } from './panels/PeriodShields.js';
 import { BlastRadius } from './panels/BlastRadius.js';
 import { Leaks } from './panels/Leaks.js';
 import { Loops } from './panels/Loops.js';
@@ -86,14 +87,14 @@ export function ReportView({
         <Protection audit={audit} />
         <Cost audit={audit} />
       </Box>
-      {/* Middle row: TOP TOOLS / PROJECTS (left, half-width). The
-          right side will get a period-windowed SHIELDS panel in
-          the next sub-commit (#4 of the Phase 2 revamp). For now
-          the right half is filled by an empty spacer Box so the
-          left panel sizes correctly. */}
+      {/* Middle row: TOP TOOLS / PROJECTS (left) + SHIELDS (right).
+          Both half-width. SHIELDS is period-windowed (counts come
+          from audit.blockMap filtered through the rule→shield map),
+          unlike the [1] Realtime SHIELDS panel which is
+          since-monitor-opened. */}
       <Box flexDirection="row" gap={1}>
         <TopToolsProjects audit={audit} />
-        <Box flexGrow={1} flexBasis={0} />
+        <PeriodShields audit={audit} shieldStatus={shieldStatus} />
       </Box>
       <BlastRadius
         blast={blast}
@@ -104,7 +105,7 @@ export function ReportView({
         <Loops scanCache={scanCache} filtered={filtered} />
         <TopRules scanCache={scanCache} filtered={filtered} />
       </Box>
-      <FooterStrip shieldStatus={shieldStatus} audit={audit} />
+      <FooterStrip audit={audit} />
     </Box>
   );
 }

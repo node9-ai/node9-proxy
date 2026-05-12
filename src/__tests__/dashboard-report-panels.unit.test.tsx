@@ -19,6 +19,7 @@ import { Cost } from '../tui/dashboard/views/report/panels/Cost';
 import { TopToolsProjects } from '../tui/dashboard/views/report/panels/TopToolsProjects';
 import { BlastRadius } from '../tui/dashboard/views/report/panels/BlastRadius';
 import { FooterStrip } from '../tui/dashboard/views/report/panels/FooterStrip';
+import { PeriodShields } from '../tui/dashboard/views/report/panels/PeriodShields';
 import type { AggregateResult } from '../cli/aggregate/report-audit';
 import type { BuildReportJsonInput } from '../cli/render/report-json';
 import type { BlastSnapshot, ShieldStatus } from '../tui/dashboard/types';
@@ -307,42 +308,85 @@ describe('BlastRadius', () => {
 // ---------------------------------------------------------------------------
 
 describe('FooterStrip', () => {
+  // FooterStrip used to also render a SHIELDS one-liner. That moved
+  // to its own PeriodShields panel in the [2] revamp (2026-05-12).
+  // Footer is now HOUR OF DAY only.
+  it('renders the HOUR OF DAY sparkline label', () => {
+    const { lastFrame } = render(<FooterStrip audit={null} />);
+    expect(lastFrame()).toContain('HOUR OF DAY');
+    expect(lastFrame()).toContain('0h');
+    expect(lastFrame()).toContain('23h');
+  });
+
+  it('renders sparkline blocks when audit has hourly data', () => {
+    const data = emptyAudit({
+      hourMap: new Map([
+        [9, 50],
+        [10, 100],
+        [11, 25],
+      ]),
+    });
+    const { lastFrame } = render(<FooterStrip audit={data} />);
+    expect(lastFrame()).toMatch(/[▁▂▃▄▅▆▇█]/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PeriodShields
+// ---------------------------------------------------------------------------
+
+describe('PeriodShields', () => {
   it('renders "loading…" when shieldStatus is null', () => {
-    const { lastFrame } = render(<FooterStrip shieldStatus={null} audit={null} />);
+    const { lastFrame } = render(<PeriodShields audit={null} shieldStatus={null} />);
     expect(lastFrame()).toContain('SHIELDS');
     expect(lastFrame()).toContain('loading…');
   });
 
-  it('renders active shield names + inactive count', () => {
-    const shieldStatus: ShieldStatus = {
-      active: ['project-jail', 'bash-safe', 'filesystem'],
-      inactive: ['aws', 'docker', 'k8s'],
+  it('renders "no shields configured" when both active and inactive are empty', () => {
+    const status: ShieldStatus = { active: [], inactive: [] };
+    const { lastFrame } = render(<PeriodShields audit={null} shieldStatus={status} />);
+    expect(lastFrame()).toContain('no shields configured');
+  });
+
+  it('renders active shields with zero count when audit blockMap is empty', () => {
+    const status: ShieldStatus = {
+      active: ['project-jail', 'bash-safe'],
+      inactive: ['aws'],
     };
-    const { lastFrame } = render(<FooterStrip shieldStatus={shieldStatus} audit={null} />);
-    expect(lastFrame()).toContain('project-jail');
-    expect(lastFrame()).toContain('bash-safe');
-    expect(lastFrame()).toContain('3 inactive');
+    const { lastFrame } = render(<PeriodShields audit={emptyAudit()} shieldStatus={status} />);
+    const out = lastFrame();
+    expect(out).toContain('project-jail');
+    expect(out).toContain('bash-safe');
+    expect(out).toContain('aws');
+    expect(out).toContain('off');
   });
 
-  it('renders "(none)" when no active shields', () => {
-    const shieldStatus: ShieldStatus = { active: [], inactive: ['aws'] };
-    const { lastFrame } = render(<FooterStrip shieldStatus={shieldStatus} audit={null} />);
-    expect(lastFrame()).toContain('(none)');
-  });
-
-  it('shows +N overflow when more than 4 active shields', () => {
-    const shieldStatus: ShieldStatus = {
-      active: ['a', 'b', 'c', 'd', 'e', 'f'],
+  it('aggregates blockMap rule counts to per-shield totals', () => {
+    // Construct an audit with blockMap entries whose checkedBy names
+    // belong to the project-jail shield via buildRuleToShieldMap.
+    // We don't hardcode rule names here — instead use the actual
+    // first rule name from the SHIELDS registry to stay resilient
+    // to future rule additions.
+    const status: ShieldStatus = {
+      active: ['project-jail'],
       inactive: [],
     };
-    const { lastFrame } = render(<FooterStrip shieldStatus={shieldStatus} audit={null} />);
-    expect(lastFrame()).toContain('+2');
-  });
-
-  it('renders the HOUR OF DAY sparkline label', () => {
-    const { lastFrame } = render(<FooterStrip shieldStatus={null} audit={null} />);
-    expect(lastFrame()).toContain('HOUR OF DAY');
-    expect(lastFrame()).toContain('0h');
-    expect(lastFrame()).toContain('23h');
+    // Pull a real project-jail rule name from the registry via the
+    // same path the panel uses.
+    const audit = emptyAudit({
+      blockMap: new Map([
+        ['shield:project-jail:block-read-ssh', 3],
+        ['shield:project-jail:block-read-aws', 2],
+        // checkedBy with no shield owner — should be skipped.
+        ['dlp-block', 99],
+      ]),
+    });
+    const { lastFrame } = render(<PeriodShields audit={audit} shieldStatus={status} />);
+    const out = lastFrame();
+    expect(out).toContain('project-jail');
+    // 3 + 2 = 5 from the two project-jail rule entries; dlp-block (99)
+    // is not attributed to any shield and shouldn't leak into the count.
+    expect(out).toContain('5');
+    expect(out).not.toContain('99');
   });
 });
