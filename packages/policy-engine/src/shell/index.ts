@@ -429,7 +429,12 @@ const SENSITIVE_PATH_RULES: Array<{
     reason: 'Reading credential files requires approval (project-jail shield)',
     verdict: 'review',
     match: (p) =>
-      /(?:credentials\.json|\.netrc|\.npmrc|\.docker[\\/]config\.json|gcloud[\\/]credentials)$/i.test(
+      // .kube/config holds Kubernetes cluster credentials and was
+      // flagged as missing by the node9-pr-agent review (the comment
+      // above mentioned .kube but the regex didn't include it — a
+      // textbook code-comment vs code drift). The JSON shield's
+      // review-read-credentials-any-tool already had it. Now aligned.
+      /(?:credentials\.json|\.netrc|\.npmrc|\.docker[\\/]config\.json|gcloud[\\/]credentials|\.kube[\\/]config)$/i.test(
         p
       ),
   },

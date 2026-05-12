@@ -1735,6 +1735,19 @@ describe('analyzeFsOperation', () => {
     expect(v?.ruleName).toBe('shield:project-jail:review-read-credentials');
     expect(v?.verdict).toBe('review');
   });
+  // Kubernetes cluster credentials — flagged as missing from the AST
+  // FS-op regex by the node9-pr-agent security review even though the
+  // rule's own header comment listed .kube as covered. Now aligned.
+  it('reviews cat ~/.kube/config (Kubernetes cluster credentials)', () => {
+    const v = analyzeFsOperation('cat ~/.kube/config');
+    expect(v?.ruleName).toBe('shield:project-jail:review-read-credentials');
+    expect(v?.verdict).toBe('review');
+  });
+  it('reviews cat ~/.docker/config.json', () => {
+    const v = analyzeFsOperation('cat ~/.docker/config.json');
+    expect(v?.ruleName).toBe('shield:project-jail:review-read-credentials');
+    expect(v?.verdict).toBe('review');
+  });
   it('does NOT block JSON test payload containing cat ~/.ssh/id_rsa as a string', () => {
     // The historical FP: project-jail regex matched the literal string inside
     // a JSON arg passed to a node9 self-test invocation.
