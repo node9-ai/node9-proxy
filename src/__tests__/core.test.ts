@@ -1700,6 +1700,36 @@ describe('analyzeFsOperation', () => {
       'shield:project-jail:block-read-env'
     );
   });
+  // Next.js / Vite gitignored override files — flagged as a gap by the
+  // node9-pr-agent security review (commit b0afbc2 era). The AST FS-op
+  // pattern used to miss these; now aligned with the JSON shield's regex.
+  it('blocks cat .env.development', () => {
+    expect(analyzeFsOperation('cat .env.development')?.ruleName).toBe(
+      'shield:project-jail:block-read-env'
+    );
+  });
+  it('blocks cat .env.production.local (Next.js double-suffix)', () => {
+    expect(analyzeFsOperation('cat .env.production.local')?.ruleName).toBe(
+      'shield:project-jail:block-read-env'
+    );
+  });
+  it('blocks cat .env.staging.local', () => {
+    expect(analyzeFsOperation('cat .env.staging.local')?.ruleName).toBe(
+      'shield:project-jail:block-read-env'
+    );
+  });
+  it('blocks cat .env.development.local', () => {
+    expect(analyzeFsOperation('cat .env.development.local')?.ruleName).toBe(
+      'shield:project-jail:block-read-env'
+    );
+  });
+  // Intentional non-matches: dev fixtures don't trigger the rule.
+  it('does NOT block cat .env.example (dev fixture)', () => {
+    expect(analyzeFsOperation('cat .env.example')).toBeNull();
+  });
+  it('does NOT block cat .env.test (intentional skip)', () => {
+    expect(analyzeFsOperation('cat .env.test')).toBeNull();
+  });
   it('reviews cat ~/.npmrc (credentials: review, not block)', () => {
     const v = analyzeFsOperation('cat ~/.npmrc');
     expect(v?.ruleName).toBe('shield:project-jail:review-read-credentials');

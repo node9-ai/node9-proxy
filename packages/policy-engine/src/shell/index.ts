@@ -392,11 +392,39 @@ const SENSITIVE_PATH_RULES: Array<{
     match: (p) => /(^|[\\/])\.aws[\\/]/i.test(p),
   },
   {
+    // Mirrors the JSON shield's `.env` pattern (project-jail.json's
+    // review-read-env-any-tool) so the AST FS-op path catches the
+    // same set the regex shield does — including Next.js / Vite's
+    // `.env.<env>.local` double-suffix overrides which are commonly
+    // gitignored AND commonly contain real secrets.
+    //
+    // Intentional non-matches (dev fixtures): .env.example, .env.sample,
+    // .env.template, .env.test, .envrc. See shields.test.ts:983-995
+    // for the canonical test-asserted contract.
     rule: 'shield:project-jail:block-read-env',
     reason: 'Reading .env files is blocked by project-jail shield',
-    match: (p) => /(?:^|[\\/])\.env(?:\.local|\.production|\.staging)?$/i.test(p),
+    match: (p) =>
+      /(?:^|[\\/])\.env(?:\.(?:local|production|staging|development|production\.local|staging\.local|development\.local))?$/i.test(
+        p
+      ),
   },
   {
+    // verdict: 'review' (not 'block') is a deliberate design choice
+    // documented in commit 29327a8. SSH keys and AWS credentials are
+    // cryptographic material with no legitimate read use-case for
+    // an AI agent → hard `block`. But .netrc / .npmrc / .docker /
+    // .kube / gcloud are CONFIG files that hold tokens AND have
+    // legitimate diagnostic reads ("which registry am I configured
+    // for", "what cluster am I on"). Hard-blocking those creates
+    // friction without much safety win because the review gate
+    // still catches genuine exfiltration attempts.
+    //
+    // The review gate FAILS CLOSED on timeout (daemon.approvalTimeoutMs
+    // returns a deny verdict via the orchestrator's timeout branch),
+    // so a stuck or unattended approval does NOT silently grant
+    // credential access. If the threat model demands strict block,
+    // a future per-shield strict-mode toggle is the right fix —
+    // not a regex-level upgrade here.
     rule: 'shield:project-jail:review-read-credentials',
     reason: 'Reading credential files requires approval (project-jail shield)',
     verdict: 'review',
