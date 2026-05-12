@@ -2544,7 +2544,7 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
   // Efficiency, not severity. Split off from REVIEW so the eye isn't
   // confused about what "needs approval" vs "is wasteful but harmless".
   if (scan.loopFindings.length > 0) {
-    const { wastedCalls, wastePct } = computeLoopWaste(scan.loopFindings, scan.totalToolCalls);
+    const { wastePct } = computeLoopWaste(scan.loopFindings, scan.totalToolCalls);
 
     // Group loop findings by toolName to compute the breakdown.
     const byTool = new Map<string, number>();
@@ -2585,15 +2585,10 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
     const wasteSuffix = wastePct > 0 ? `  ·  ${wastePct}% wasted` : '';
     const title = `AGENT LOOPS  ·  ${scan.loopFindings.length} repeated patterns${wasteSuffix}`;
     for (const ln of boxPanel(title, loopLines)) console.log('  ' + ln);
-    // Don't suppress wastedCalls — surface the count for transparency.
-    if (wastedCalls > 0) {
-      console.log(
-        '  ' +
-          chalk.dim(
-            `      ${num(wastedCalls)} repeated calls (~${num(wastedCalls)} × cost-per-iteration wasted)`
-          )
-      );
-    }
+    // Earlier the "N repeated calls (~N × cost-per-iteration)" line
+    // printed below the panel, but it sat outside the frame and read
+    // as orphaned. The wastePct + breakdown rows already convey the
+    // magnitude inside the box — dropped on 2026-05-12.
     console.log('');
   }
 
@@ -2602,11 +2597,15 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
     const blastLines: Line[] = [];
     // Inner width = PANEL_WIDTH (76) - 4 borders/padding = 72. Reserve
     // 3 for the ✗ + 2 spaces and 36 for the label, leaving 33 for the
-    // description. Truncate longer ones with an ellipsis.
+    // description. Strip the em-dash suffix so the description fits
+    // without ugly mid-word truncation ("grants SSH acc…" was the
+    // common case before this change — the descriptions in blast.ts
+    // intentionally pack a noun phrase + explanation separated by '—',
+    // and only the noun phrase is needed here).
     const DESC_W = 33;
     for (const r of blast.reachable.slice(0, 8)) {
-      const desc =
-        r.description.length > DESC_W ? r.description.slice(0, DESC_W - 1) + '…' : r.description;
+      const trimmed = r.description.split(' — ')[0].split(/—|--/)[0].trim();
+      const desc = trimmed.length > DESC_W ? trimmed.slice(0, DESC_W - 1) + '…' : trimmed;
       blastLines.push(mkLine(['✗  ', chalk.red], [r.label.padEnd(36)], [desc, chalk.dim]));
     }
     for (const e of blast.envFindings.slice(0, 3)) {

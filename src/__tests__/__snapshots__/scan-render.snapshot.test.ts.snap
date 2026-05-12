@@ -282,7 +282,6 @@ exports[`renderPanelScorecard — output snapshots > panel fixture (critical sco
   │ Top stuck patterns:                                                      │
   │ ×126  /home/u/node9/src/scan.ts                                          │
   ╰──────────────────────────────────────────────────────────────────────────╯
-        125 repeated calls (~125 × cost-per-iteration wasted)
 
   ╭─ BLAST RADIUS  ·  5 paths reachable right now ───────────────────────────╮
   │ ✗  ~/.ssh/id_rsa                       RSA private key                   │
