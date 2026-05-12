@@ -35,6 +35,11 @@ import { CostPanel } from './panels/CostPanel.js';
 import { ActivityPanel } from './panels/ActivityPanel.js';
 import { LeaksPanel } from './panels/LeaksPanel.js';
 import { BlockedPanel } from './panels/BlockedPanel.js';
+import { BlastRadiusPanel } from './panels/BlastRadiusPanel.js';
+import { ReviewQueuePanel } from './panels/ReviewQueuePanel.js';
+import { AgentLoopsPanel } from './panels/AgentLoopsPanel.js';
+import { ShieldsPanel } from './panels/ShieldsPanel.js';
+import { computeLoopWaste } from '../scan-derive.js';
 
 interface Props {
   input: CompactInput;
@@ -84,7 +89,39 @@ export function StaticScorecard({ input }: Props): React.ReactElement {
         </>
       ) : null}
 
-      {/* High / Medium / Recommended-action bands — added in commits #4-6. */}
+      {input.blastExposures > 0 ? (
+        <>
+          <SeverityBand
+            label={`High (${input.blastExposures} path${input.blastExposures !== 1 ? 's' : ''} reachable on disk)`}
+          />
+          <BlastRadiusPanel blast={input.blast} blastExposures={input.blastExposures} />
+        </>
+      ) : null}
+
+      {(() => {
+        const reviewCount = input.reviewCount;
+        const loopCount = input.scan.loopFindings.length;
+        if (reviewCount === 0 && loopCount === 0) return null;
+        const { wastePct } = computeLoopWaste(input.scan.loopFindings, input.scan.totalToolCalls);
+        const parts: string[] = [];
+        if (reviewCount > 0) parts.push(`${reviewCount} op${reviewCount !== 1 ? 's' : ''} flagged`);
+        if (loopCount > 0)
+          parts.push(
+            `${loopCount} loop${loopCount !== 1 ? 's' : ''}${wastePct > 0 ? ` · ${wastePct}% wasted` : ''}`
+          );
+        return (
+          <>
+            <SeverityBand label={`Medium (${parts.join(' · ')})`} />
+            <Box flexDirection="row" gap={1}>
+              <ReviewQueuePanel summary={input.summary} />
+              <AgentLoopsPanel loopFindings={input.scan.loopFindings} />
+            </Box>
+          </>
+        );
+      })()}
+
+      <SeverityBand label="Recommended action" />
+      <ShieldsPanel summary={input.summary} blastScore={input.blast.score} />
     </Box>
   );
 }

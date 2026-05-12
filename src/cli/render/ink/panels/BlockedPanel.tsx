@@ -58,12 +58,16 @@ export function BlockedPanel({ summary }: Props): React.ReactElement | null {
             <Text color="red">✗</Text>
           </Box>
           <Box width={24}>
-            <Text bold>{rule.name}</Text>
+            <Text bold wrap="truncate-end">
+              {rule.name}
+            </Text>
           </Box>
           <Box width={6}>
             <Text bold>{`×${rule.count}`}</Text>
           </Box>
-          <Text dimColor>{originForRule(rule.name, summary.sections)}</Text>
+          <Text dimColor wrap="truncate-end">
+            {originForRule(rule.name, summary.sections)}
+          </Text>
         </Box>
       ))}
     </Box>
