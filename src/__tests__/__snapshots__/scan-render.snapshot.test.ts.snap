@@ -242,3 +242,66 @@ exports[`renderNarrativeScorecard — output snapshots > rich fixture (critical 
 →  github.com/node9-ai/node9-proxy
 "
 `;
+
+exports[`renderPanelScorecard — output snapshots > clean fixture (good score, no findings) 1`] = `
+"  ╭─ SHIELDS  ·  install node9 + enable these to catch what we found ────────╮
+  │                                                                          │
+  │ aws · bash-safe · docker · filesystem · github · k8s · mongodb · postgres · project-jail · redis │
+  │       no hits in your history — install proactively                      │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+"
+`;
+
+exports[`renderPanelScorecard — output snapshots > panel fixture (critical score, all 7 panels) 1`] = `
+"  ╭─ TOP FINDINGS ───────────────────────────────────────────────────────────╮
+  │ 🚨 2 credential leaks in tool input  (latest: 2d ago, GitHub Token)      │
+  │ 🛑 2 ops node9 would have blocked  (block-read-ssh, block-eval-remote)   │
+  │ 🔁 1 agent loops detected  (Edit dominates, 1% wasted)                   │
+  │ 🔭 5 secrets reachable on disk  → enable project-jail (+53 pts)          │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+
+  ╭─ LEAKS  ·  2 secrets in plain text ──────────────────────────────────────╮
+  │   2d  GitHub Token   ghp_****7iD8         [Bash]          claude         │
+  │  19d  GCP API Key    AIza****4its         [user-prompt]   gemini         │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+
+  ╭─ BLOCKED  ·  2 ops node9 would have stopped ─────────────────────────────╮
+  │ ✗ block-read-ssh           ×1    needs shield:project-jail               │
+  │ ✗ block-eval-remote        ×1    needs shield:bash-safe                  │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+
+  ╭─ REVIEW QUEUE  ·  37 ops flagged for approval ───────────────────────────╮
+  │ 👁  review-git-destructive   ×22   default                               │
+  │ 👁  review-sudo              ×12   default                               │
+  │ 👁  review-read-credentials  ×3    needs shield:project-jail             │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+
+  ╭─ AGENT LOOPS  ·  1 repeated patterns  ·  1% wasted ──────────────────────╮
+  │ Edit      ×125 repeats    (100%)                                         │
+  │                                                                          │
+  │ Top stuck patterns:                                                      │
+  │ ×126  /home/u/node9/src/scan.ts                                          │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+        125 repeated calls (~125 × cost-per-iteration wasted)
+
+  ╭─ BLAST RADIUS  ·  5 paths reachable right now ───────────────────────────╮
+  │ ✗  ~/.ssh/id_rsa                       RSA private key                   │
+  │ ✗  ~/.ssh/id_ed25519                   Ed25519 private key               │
+  │ ✗  ~/.config/gcloud/credentials.db     GCP credentials                   │
+  │ ✗  ~/.npmrc                            npm auth token                    │
+  │ ✗  ~/.node9/credentials.json           Node9 cloud API key               │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+
+  ╭─ SHIELDS  ·  install node9 + enable these to catch what we found ────────╮
+  │ 🛡  project-jail  would catch 4 ops       →  +53 pts  (25 → 78)          │
+  │       review-read-credentials ×3, block-read-ssh                         │
+  │ ☐   bash-safe     would catch 1 op                                       │
+  │       block-eval-remote                                                  │
+  │                                                                          │
+  │ aws · docker · filesystem · github · k8s · mongodb · postgres · redis    │
+  │       no hits in your history — install proactively                      │
+  │                                                                          │
+  │ → node9 shield enable project-jail   (start here — +53 pts)              │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+"
+`;

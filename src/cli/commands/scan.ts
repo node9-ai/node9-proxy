@@ -40,11 +40,15 @@ import {
 import { getAgentsStatus } from '../../setup';
 import { runBlast, type BlastFinding } from './blast';
 import {
+  boxPanel,
   classifyScore,
   computeLoopWaste,
+  relativeDate,
+  rollupByShield,
   topDlpPatterns,
   topRulesByVerdict,
 } from '../render/scan-derive';
+import { PROTECTIVE_SHIELD_DISCOUNTS } from '../../protection';
 import { buildScanJson } from '../render/scan-json';
 import {
   appendScanHistory,
@@ -2327,6 +2331,387 @@ export function renderNarrativeScorecard(input: CompactInput): void {
 }
 
 // ---------------------------------------------------------------------------
+// Panel scorecard renderer (default mode, no flag)
+// ---------------------------------------------------------------------------
+//
+// The default `node9 scan` output. Designed as the polished forecast
+// the user opens to act on — concise, scannable, with a SHIELDS panel
+// that converts hits into a "+N pts if you enable X" recommendation.
+//
+// Mental model: 7 box-drawn panels stacked vertically.
+//   1. TOP FINDINGS      4 auto-derived bullets ranking severity
+//   2. LEAKS             5 most recent credential exposures
+//   3. BLOCKED           per-rule counts that node9 would have stopped
+//   4. REVIEW QUEUE      per-rule counts that node9 would have flagged
+//   5. AGENT LOOPS       efficiency breakdown by tool + top stuck files
+//   6. BLAST RADIUS      paths an AI could reach on disk right now
+//   7. SHIELDS           recommendations w/ score deltas
+//
+// Empty categories are skipped (no "0 leaks" filler rows). The hero
+// block (score line + stat card + spend) is emitted by the caller
+// before this function runs — we only render the panels themselves.
+//
+// `--drill-down` bypasses this renderer and uses the legacy verbose
+// inline section render in the action handler (which now shows the
+// same data with full per-finding examples + session IDs).
+
+/** Pair of "rendered chalk-wrapped string" + "visible width" used to
+ *  compose lines for boxPanel. Width is computed from the plain text
+ *  length BEFORE chalk wraps it, so ANSI escapes don't inflate it. */
+type Line = { rendered: string; width: number };
+
+/** Build a Line from `[plain, formatter?]` segments. Each formatter
+ *  wraps its segment with chalk (or any string → string fn); width
+ *  is the sum of segment plain-string lengths. Emoji is counted as
+ *  JS string length, which matches most terminals' visible-cell
+ *  count closely enough that panels look aligned in practice. */
+function mkLine(...parts: Array<[string, ((s: string) => string)?]>): Line {
+  let rendered = '';
+  let width = 0;
+  for (const [text, fmt] of parts) {
+    rendered += fmt ? fmt(text) : text;
+    width += text.length;
+  }
+  return { rendered, width };
+}
+
+/** Helper: shorten a long rule name to fit a fixed column. Strips the
+ *  `shield:<name>:` prefix that's already implied by the origin column,
+ *  then truncates if still over `width`. Keeps the right edge of the
+ *  column visually clean. */
+function shortRule(name: string, width: number): string {
+  const stripped = name.replace(/^shield:[^:]+:/, '');
+  if (stripped.length <= width) return stripped.padEnd(width);
+  return stripped.slice(0, width - 1) + '…';
+}
+
+export function renderPanelScorecard(input: CompactInput, now: Date = new Date()): void {
+  const { scan, summary, blast, blastExposures, blockedCount, reviewCount } = input;
+
+  // ── TOP FINDINGS ─────────────────────────────────────────────────────
+  // Auto-derived: pick the highest-impact one fact per category. Each
+  // bullet's wording is the SHORTEST sentence that answers "what should
+  // I act on?" — relative dates, top patterns inline.
+  const topLines: Line[] = [];
+  if (scan.dlpFindings.length > 0) {
+    const latest = scan.dlpFindings[0];
+    const rel = relativeDate(latest.timestamp, now);
+    const noun = `credential leak${scan.dlpFindings.length !== 1 ? 's' : ''}`;
+    topLines.push(
+      mkLine(
+        ['🚨 ', chalk.red],
+        [`${scan.dlpFindings.length} ${noun} in tool input  `, chalk.bold],
+        [`(latest: ${rel} ago, ${latest.patternName})`, chalk.dim]
+      )
+    );
+  }
+  if (blockedCount > 0) {
+    // Keep TOP FINDINGS to a single line per category — only top 2
+    // blocked rule names fit comfortably on an 80-col terminal after
+    // the leading "🛑 N ops node9 would have blocked  (...)" framing.
+    const topBlocked = topRulesByVerdict(summary.sections, 'block', 2)
+      .map((r) =>
+        r.count > 1
+          ? `${shortRule(r.name, 20).trimEnd()} ×${r.count}`
+          : shortRule(r.name, 20).trimEnd()
+      )
+      .join(', ');
+    topLines.push(
+      mkLine(
+        ['🛑 ', chalk.red],
+        [`${blockedCount} ops node9 would have blocked  `, chalk.bold],
+        [`(${topBlocked})`, chalk.dim]
+      )
+    );
+  }
+  if (scan.loopFindings.length > 0) {
+    const { wastePct } = computeLoopWaste(scan.loopFindings, scan.totalToolCalls);
+    // Surface the dominant tool name inline — more useful than
+    // "repeated patterns" filler and lets the line fit in 72 cols.
+    const byTool = new Map<string, number>();
+    for (const f of scan.loopFindings) {
+      byTool.set(f.toolName, (byTool.get(f.toolName) ?? 0) + Math.max(0, f.count - 1));
+    }
+    const top = [...byTool.entries()].sort((a, b) => b[1] - a[1])[0];
+    const wasteSuffix = wastePct > 0 ? `, ${wastePct}% wasted` : '';
+    const detail = top ? `(${top[0]} dominates${wasteSuffix})` : '';
+    topLines.push(
+      mkLine(
+        ['🔁 ', chalk.yellow],
+        [`${scan.loopFindings.length} agent loops detected  `, chalk.bold],
+        [detail, chalk.dim]
+      )
+    );
+  }
+  if (blastExposures > 0) {
+    const exposed = Math.max(0, 100 - blast.score);
+    const pjDiscount = PROTECTIVE_SHIELD_DISCOUNTS['project-jail'] ?? 0;
+    const pjBonus = Math.round(exposed * pjDiscount);
+    const cta = pjBonus > 0 ? `  → enable project-jail (+${pjBonus} pts)` : '';
+    topLines.push(
+      mkLine(
+        ['🔭 ', chalk.red],
+        [`${blastExposures} secrets reachable on disk`, chalk.bold],
+        [cta, chalk.dim]
+      )
+    );
+  }
+  if (topLines.length > 0) {
+    for (const ln of boxPanel('TOP FINDINGS', topLines)) console.log('  ' + ln);
+    console.log('');
+  }
+
+  // ── LEAKS panel ─────────────────────────────────────────────────────
+  // Top 5 most recent. Sorted desc by timestamp via the summary builder.
+  if (summary.leaks.length > 0) {
+    const leakLines: Line[] = [];
+    for (const leak of summary.leaks.slice(0, 5)) {
+      const rel = relativeDate(leak.timestamp, now);
+      // Layout: <rel-date>  <pattern>      <redacted>           <[tool]>      <agent>
+      // Project column dropped — most leaks come from the same project
+      // and the column otherwise pushed rows past the right border on
+      // an 80-col terminal. The full project is still in --drill-down.
+      leakLines.push(
+        mkLine(
+          [rel.padStart(4) + '  ', chalk.dim],
+          [leak.patternName.padEnd(14), chalk.red.bold],
+          [' '],
+          [leak.redactedSample.padEnd(20), chalk.red],
+          [' '],
+          [`[${leak.toolName}]`.padEnd(15), chalk.dim],
+          [' '],
+          [leak.agent, chalk.dim]
+        )
+      );
+    }
+    const remaining = summary.leaks.length - 5;
+    if (remaining > 0) {
+      leakLines.push(mkLine([`… +${remaining} more`, chalk.dim]));
+    }
+    const title = `LEAKS  ·  ${summary.leaks.length} secret${summary.leaks.length !== 1 ? 's' : ''} in plain text`;
+    for (const ln of boxPanel(title, leakLines)) console.log('  ' + ln);
+    console.log('');
+  }
+
+  // ── BLOCKED panel ───────────────────────────────────────────────────
+  // Per-rule counts attributable to block-verdict findings. Origin column
+  // shows whether the rule is a built-in default or comes from a shield.
+  if (blockedCount > 0) {
+    const blockedLines: Line[] = [];
+    const ruleEntries = topRulesByVerdict(summary.sections, 'block', 12);
+    for (const r of ruleEntries) {
+      const origin = originForRule(r.name, summary.sections);
+      blockedLines.push(
+        mkLine(
+          ['✗ ', chalk.red],
+          [shortRule(r.name, 24), chalk.bold],
+          [' ×' + String(r.count).padEnd(4), chalk.bold],
+          [' '],
+          [origin, chalk.dim]
+        )
+      );
+    }
+    const title = `BLOCKED  ·  ${blockedCount} ops node9 would have stopped`;
+    for (const ln of boxPanel(title, blockedLines)) console.log('  ' + ln);
+    console.log('');
+  }
+
+  // ── REVIEW QUEUE panel ──────────────────────────────────────────────
+  // Same as BLOCKED but for review-verdict rules. User-config rules
+  // are pre-stripped from summary.sections by buildRuleSources, so the
+  // origin column only ever shows `default` or `needs shield:X`.
+  if (reviewCount > 0) {
+    const reviewLines: Line[] = [];
+    const ruleEntries = topRulesByVerdict(summary.sections, 'review', 12);
+    for (const r of ruleEntries) {
+      const origin = originForRule(r.name, summary.sections);
+      reviewLines.push(
+        mkLine(
+          ['👁  ', chalk.yellow],
+          [shortRule(r.name, 24), chalk.bold],
+          [' ×' + String(r.count).padEnd(4), chalk.bold],
+          [' '],
+          [origin, chalk.dim]
+        )
+      );
+    }
+    const title = `REVIEW QUEUE  ·  ${reviewCount} ops flagged for approval`;
+    for (const ln of boxPanel(title, reviewLines)) console.log('  ' + ln);
+    console.log('');
+  }
+
+  // ── AGENT LOOPS panel ───────────────────────────────────────────────
+  // Efficiency, not severity. Split off from REVIEW so the eye isn't
+  // confused about what "needs approval" vs "is wasteful but harmless".
+  if (scan.loopFindings.length > 0) {
+    const { wastedCalls, wastePct } = computeLoopWaste(scan.loopFindings, scan.totalToolCalls);
+
+    // Group loop findings by toolName to compute the breakdown.
+    const byTool = new Map<string, number>();
+    let totalRepeats = 0;
+    for (const f of scan.loopFindings) {
+      const repeats = Math.max(0, f.count - 1);
+      byTool.set(f.toolName, (byTool.get(f.toolName) ?? 0) + repeats);
+      totalRepeats += repeats;
+    }
+    const toolEntries = [...byTool.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
+    const loopLines: Line[] = [];
+    for (const [tool, repeats] of toolEntries) {
+      const pct = totalRepeats > 0 ? Math.round((repeats / totalRepeats) * 100) : 0;
+      loopLines.push(
+        mkLine(
+          [tool.padEnd(10), chalk.bold],
+          [`×${num(repeats)} repeats`.padEnd(16)],
+          [`(${pct}%)`, chalk.dim]
+        )
+      );
+    }
+
+    // Top stuck files: most-repeated single LoopFinding rows.
+    const topStuck = [...scan.loopFindings].sort((a, b) => b.count - a.count).slice(0, 3);
+    if (topStuck.length > 0) {
+      loopLines.push(mkLine([''])); // blank separator inside box
+      loopLines.push(mkLine(['Top stuck patterns:', chalk.dim]));
+      for (const f of topStuck) {
+        // Width budget: panel inner 72, prefix "×NNNN " = 7, leaving 65
+        // for the target path/command. Use basename when the path is
+        // longer to keep the row stable.
+        const raw = f.commandPreview || f.toolName;
+        const target = raw.length > 60 ? '…' + raw.slice(raw.length - 59) : raw.padEnd(60);
+        loopLines.push(mkLine([`×${num(f.count).padEnd(4)} `, chalk.bold], [target, chalk.dim]));
+      }
+    }
+
+    const wasteSuffix = wastePct > 0 ? `  ·  ${wastePct}% wasted` : '';
+    const title = `AGENT LOOPS  ·  ${scan.loopFindings.length} repeated patterns${wasteSuffix}`;
+    for (const ln of boxPanel(title, loopLines)) console.log('  ' + ln);
+    // Don't suppress wastedCalls — surface the count for transparency.
+    if (wastedCalls > 0) {
+      console.log(
+        '  ' +
+          chalk.dim(
+            `      ${num(wastedCalls)} repeated calls (~${num(wastedCalls)} × cost-per-iteration wasted)`
+          )
+      );
+    }
+    console.log('');
+  }
+
+  // ── BLAST RADIUS panel ─────────────────────────────────────────────
+  if (blast.reachable.length > 0 || blast.envFindings.length > 0) {
+    const blastLines: Line[] = [];
+    // Inner width = PANEL_WIDTH (76) - 4 borders/padding = 72. Reserve
+    // 3 for the ✗ + 2 spaces and 36 for the label, leaving 33 for the
+    // description. Truncate longer ones with an ellipsis.
+    const DESC_W = 33;
+    for (const r of blast.reachable.slice(0, 8)) {
+      const desc =
+        r.description.length > DESC_W ? r.description.slice(0, DESC_W - 1) + '…' : r.description;
+      blastLines.push(mkLine(['✗  ', chalk.red], [r.label.padEnd(36)], [desc, chalk.dim]));
+    }
+    for (const e of blast.envFindings.slice(0, 3)) {
+      blastLines.push(
+        mkLine(['⚠  ', chalk.yellow], [`${e.key} `], [`(${e.patternName})`, chalk.dim])
+      );
+    }
+    const totalExposed = blast.reachable.length + blast.envFindings.length;
+    if (totalExposed > 8) {
+      blastLines.push(mkLine([`… +${totalExposed - 8} more`, chalk.dim]));
+    }
+    const title = `BLAST RADIUS  ·  ${totalExposed} path${totalExposed !== 1 ? 's' : ''} reachable right now`;
+    for (const ln of boxPanel(title, blastLines)) console.log('  ' + ln);
+    console.log('');
+  }
+
+  // ── SHIELDS panel — the action recommendation ─────────────────────
+  // Per-shield "would catch N ops" with a score delta for protective
+  // shields (project-jail today; future protective shields auto-extend
+  // via PROTECTIVE_SHIELD_DISCOUNTS).
+  const shieldImpacts = rollupByShield(summary.sections);
+  const exposed = Math.max(0, 100 - blast.score);
+  const shieldLines: Line[] = [];
+
+  // Sort: protective shields with score impact first, then by hit count.
+  const ranked = [...shieldImpacts].sort((a, b) => {
+    const aDiscount = PROTECTIVE_SHIELD_DISCOUNTS[a.shieldName] ?? 0;
+    const bDiscount = PROTECTIVE_SHIELD_DISCOUNTS[b.shieldName] ?? 0;
+    if (aDiscount !== bDiscount) return bDiscount - aDiscount;
+    return b.totalCatches - a.totalCatches;
+  });
+
+  for (const impact of ranked) {
+    if (impact.totalCatches === 0) continue; // hit shields only — zero-hits go to footer
+    const discount = PROTECTIVE_SHIELD_DISCOUNTS[impact.shieldName] ?? 0;
+    const bonus = Math.round(exposed * discount);
+    const icon = discount > 0 ? '🛡  ' : '☐   ';
+    const wouldCatch = `would catch ${impact.totalCatches} op${impact.totalCatches !== 1 ? 's' : ''}`;
+    const deltaSuffix =
+      bonus > 0 ? `  →  +${bonus} pts  (${blast.score} → ${blast.score + bonus})` : '';
+    shieldLines.push(
+      mkLine(
+        [icon, discount > 0 ? chalk.cyan : chalk.dim],
+        [impact.shieldName.padEnd(14), chalk.bold],
+        [wouldCatch.padEnd(22), chalk.dim],
+        [deltaSuffix, bonus > 0 ? chalk.green.bold : chalk.dim]
+      )
+    );
+    // Top rule descriptions on a sub-line.
+    if (impact.topRuleLabels.length > 0) {
+      const rules = impact.topRuleLabels.join(', ');
+      shieldLines.push(mkLine(['      ', chalk.dim], [rules, chalk.dim]));
+    }
+  }
+
+  // Zero-hit builtin shields on a single collapsed line — acknowledges
+  // they exist without bloating the panel.
+  const hitShieldSet = new Set(
+    shieldImpacts.filter((i) => i.totalCatches > 0).map((i) => i.shieldName)
+  );
+  const zeroHitBuiltins = Object.keys(SHIELDS)
+    .filter((name) => !hitShieldSet.has(name))
+    .sort();
+  if (zeroHitBuiltins.length > 0) {
+    shieldLines.push(mkLine([''])); // blank separator
+    shieldLines.push(mkLine([zeroHitBuiltins.join(' · '), chalk.dim]));
+    shieldLines.push(mkLine(['      no hits in your history — install proactively', chalk.dim]));
+  }
+
+  // Final CTA line inside the panel: highest-impact recommendation.
+  const topRec = ranked.find(
+    (r) => r.totalCatches > 0 && (PROTECTIVE_SHIELD_DISCOUNTS[r.shieldName] ?? 0) > 0
+  );
+  if (topRec) {
+    const bonus = Math.round(exposed * (PROTECTIVE_SHIELD_DISCOUNTS[topRec.shieldName] ?? 0));
+    const cta = `→ node9 shield enable ${topRec.shieldName}   (start here — +${bonus} pts)`;
+    shieldLines.push(mkLine([''])); // blank separator
+    shieldLines.push(mkLine([cta, chalk.cyan]));
+  }
+
+  if (shieldLines.length > 0) {
+    const title = 'SHIELDS  ·  install node9 + enable these to catch what we found';
+    for (const ln of boxPanel(title, shieldLines)) console.log('  ' + ln);
+    console.log('');
+  }
+}
+
+/** Find which origin tag (e.g. `default` or `needs shield:project-jail`)
+ *  applies to a given rule name. The lookup walks the summary sections
+ *  to find which one owns the rule. Used by BLOCKED + REVIEW QUEUE
+ *  panels to render the rightmost origin column. */
+function originForRule(
+  ruleName: string,
+  sections: ReadonlyArray<ScanSummary['sections'][number]>
+): string {
+  for (const section of sections) {
+    if (section.rules.some((r) => r.name === ruleName)) {
+      if (section.sourceType === 'default') return 'default';
+      if (section.sourceType === 'shield') return `needs shield:${section.shieldKey ?? section.id}`;
+    }
+  }
+  return '';
+}
+
+// ---------------------------------------------------------------------------
 // Registered command
 // ---------------------------------------------------------------------------
 
@@ -2699,7 +3084,12 @@ export function registerScanCommand(program: Command): void {
                   : '')
             );
           }
-          if (scan.dlpFindings.length > 0 && scan.sessionsWithEarlySecrets > 0) {
+          // "N sessions loaded secrets before first edit" — only show
+          // in --drill-down. The signal is noisy and misleading at the
+          // headline level (it counts sessions that READ secrets, not
+          // sessions that LEAKED them) and we already pulled the
+          // equivalent callout from monitor for the same reason.
+          if (drillDown && scan.dlpFindings.length > 0 && scan.sessionsWithEarlySecrets > 0) {
             console.log(
               '  ' +
                 chalk.dim(
@@ -2708,6 +3098,42 @@ export function registerScanCommand(program: Command): void {
             );
           }
           console.log('');
+
+          // ── Default-mode panel scorecard ─────────────────────────────────
+          // The polished forecast view (~7 boxed panels) replaces the old
+          // 9-section verbose layout below for users who don't opt into
+          // --drill-down. The verbose layout still serves --drill-down so
+          // forensic detail is one flag away.
+          if (!drillDown) {
+            renderPanelScorecard({
+              scan,
+              summary,
+              blast,
+              blastExposures,
+              blockedCount,
+              reviewCount,
+            });
+            // Footer CTAs — distinct from the legacy footer at end of
+            // verbose render. Points to monitor (live dashboard) and
+            // drill-down (forensic deep-dive) — NOT `node9 report`
+            // which is a different command for installed users.
+            const cta = isWired ? '✅ node9 is active' : '→ install node9 to enable protection';
+            console.log('  ' + chalk.green(cta));
+            console.log(
+              '  ' +
+                chalk.dim('→ ') +
+                chalk.cyan('node9 monitor') +
+                chalk.dim('              live dashboard')
+            );
+            console.log(
+              '  ' +
+                chalk.dim('→ ') +
+                chalk.cyan('node9 scan --drill-down') +
+                chalk.dim('    full commands + session IDs')
+            );
+            console.log('');
+            return;
+          }
 
           // ── Credential Leaks — first, most alarming ───────────────────────
           if (scan.dlpFindings.length > 0) {

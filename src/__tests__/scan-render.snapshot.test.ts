@@ -21,6 +21,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   renderCompactScorecard,
   renderNarrativeScorecard,
+  renderPanelScorecard,
   stripTerminalEscapes,
   type CompactInput,
   type ScanResult,
@@ -361,6 +362,174 @@ function cleanFixture(): CompactInput {
   };
 }
 
+/**
+ * Panel-renderer fixture — mirrors real post-pipeline scan state, NOT
+ * the wider richFixture used by compact/narrative (which still has
+ * user-source sections to exercise the "Your Rules" branch in the
+ * legacy renderers).
+ *
+ * The new panel renderer assumes user-config rules are pre-stripped
+ * (commit d67d5b8), so the fixture only carries default + shield
+ * sections. Also populates summary.leaks (top-N leaks for the LEAKS
+ * panel — distinct from scan.dlpFindings which is the raw list).
+ */
+function panelFixture(): CompactInput {
+  const leak = (
+    pattern: string,
+    sample: string,
+    daysAgo: number,
+    toolName = 'Bash',
+    agent: 'claude' | 'gemini' | 'codex' = 'claude'
+  ) => ({
+    patternName: pattern,
+    redactedSample: sample,
+    toolName,
+    timestamp: new Date(Date.parse('2026-05-12T00:00:00Z') - daysAgo * 86_400_000).toISOString(),
+    project: '~/node9',
+    sessionId: 'sess',
+    agent,
+  });
+
+  const scan: ScanResult = emptyScan({
+    sessions: 39,
+    totalToolCalls: 15_000,
+    bashCalls: 7_500,
+    totalCostUSD: 14_500,
+    firstDate: '2026-02-12T00:00:00Z',
+    lastDate: '2026-05-12T00:00:00Z',
+    dlpFindings: [
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      leak('GitHub Token', 'ghp_****7iD8', 2) as any,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      leak('GCP API Key', 'AIza****4its', 19, 'user-prompt', 'gemini') as any,
+    ],
+    loopFindings: [
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      {
+        toolName: 'Edit',
+        commandPreview: '/home/u/node9/src/scan.ts',
+        count: 126,
+        timestamp: '2026-04-16T00:00:00Z',
+        project: '~/node9',
+        sessionId: 's1',
+        agent: 'claude',
+        kind: 'loop',
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any,
+    ],
+  });
+
+  const ruleGroup = (name: string, verdict: 'block' | 'review', count: number) => ({
+    name,
+    verdict,
+    reason: '',
+    findings: Array(count).fill({
+      timestamp: '2026-05-01T00:00:00Z',
+      command: 'cmd',
+      fullCommand: 'cmd',
+      project: '~/node9',
+      sessionId: 's',
+      agent: 'claude' as const,
+      toolName: 'Bash',
+    }),
+  });
+
+  const summary: ScanSummary = emptySummary({
+    stats: {
+      sessions: 39,
+      totalToolCalls: 15_000,
+      bashCalls: 7_500,
+      totalCostUSD: 14_500,
+      firstDate: '2026-02-12T00:00:00Z',
+      lastDate: '2026-05-12T00:00:00Z',
+    },
+    byVerdict: { blocked: 2, supervised: 36, leaks: 2, loops: 1 },
+    sections: [
+      {
+        id: 'default',
+        label: 'Default Rules',
+        subtitle: 'built-in, always on',
+        sourceType: 'default',
+        blockedCount: 0,
+        reviewCount: 34,
+        rules: [
+          ruleGroup('review-git-destructive', 'review', 22),
+          ruleGroup('review-sudo', 'review', 12),
+        ],
+      },
+      {
+        id: 'shield:project-jail',
+        label: 'project-jail',
+        subtitle: 'jail',
+        sourceType: 'shield',
+        shieldKey: 'project-jail',
+        blockedCount: 1,
+        reviewCount: 3,
+        rules: [
+          // scan-summary strips the `shield:NAME:` prefix from rule
+          // names before placing them in RuleGroup, so we mirror that
+          // here. Otherwise the SHIELDS panel's sub-line would surface
+          // the raw "shield:project-jail:block-read-ssh" form.
+          ruleGroup('block-read-ssh', 'block', 1),
+          ruleGroup('review-read-credentials', 'review', 3),
+        ],
+      },
+      {
+        id: 'shield:bash-safe',
+        label: 'bash-safe',
+        subtitle: 'bash safety',
+        sourceType: 'shield',
+        shieldKey: 'bash-safe',
+        blockedCount: 1,
+        reviewCount: 0,
+        rules: [ruleGroup('block-eval-remote', 'block', 1)],
+      },
+    ],
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    leaks: scan.dlpFindings as any,
+    loopWastedUSD: 0.25,
+  });
+
+  return {
+    scan,
+    summary,
+    blast: {
+      reachable: [
+        {
+          full: '/home/u/.ssh/id_rsa',
+          label: '~/.ssh/id_rsa',
+          description: 'RSA private key',
+          score: 20,
+        },
+        {
+          full: '/home/u/.ssh/id_ed25519',
+          label: '~/.ssh/id_ed25519',
+          description: 'Ed25519 private key',
+          score: 20,
+        },
+        {
+          full: '/home/u/.config/gcloud/credentials.db',
+          label: '~/.config/gcloud/credentials.db',
+          description: 'GCP credentials',
+          score: 15,
+        },
+        { full: '/home/u/.npmrc', label: '~/.npmrc', description: 'npm auth token', score: 10 },
+        {
+          full: '/home/u/.node9/credentials.json',
+          label: '~/.node9/credentials.json',
+          description: 'Node9 cloud API key',
+          score: 10,
+        },
+      ],
+      envFindings: [],
+      score: 25,
+    },
+    blastExposures: 5,
+    blockedCount: 2,
+    reviewCount: 37,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Snapshots
 // ---------------------------------------------------------------------------
@@ -385,6 +554,26 @@ describe('renderNarrativeScorecard — output snapshots', () => {
 
   it('clean fixture (good score, no findings)', () => {
     renderNarrativeScorecard(cleanFixture());
+    expect(captureOutput()).toMatchSnapshot();
+  });
+});
+
+// New default-mode panel renderer. Snapshots pin the 7-panel layout so
+// the box-drawing alignment + width tracking can't silently drift if
+// someone later tweaks one panel without re-checking the others. `now`
+// is injected as a fixed date so relativeDate() output is deterministic.
+// Uses panelFixture() (not richFixture) because the panel renderer
+// assumes user-config rules are pre-stripped — see fixture header.
+describe('renderPanelScorecard — output snapshots', () => {
+  const NOW = new Date('2026-05-12T00:00:00Z');
+
+  it('panel fixture (critical score, all 7 panels)', () => {
+    renderPanelScorecard(panelFixture(), NOW);
+    expect(captureOutput()).toMatchSnapshot();
+  });
+
+  it('clean fixture (good score, no findings)', () => {
+    renderPanelScorecard(cleanFixture(), NOW);
     expect(captureOutput()).toMatchSnapshot();
   });
 });
