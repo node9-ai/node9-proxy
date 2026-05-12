@@ -49,6 +49,9 @@ export interface BuildReportJsonInput {
     cacheReadTokens: number;
     byDay: Map<string, number>; // ISO day (YYYY-MM-DD) → USD
     byModel: Map<string, number>; // Claude model id → USD
+    /** Project (decoded cwd) → cost + token rollup. Drives the
+     *  [2] TOP PROJECTS panel. */
+    byProject: Map<string, { cost: number; inputTokens: number; outputTokens: number }>;
   };
 
   toolMap: Map<string, { calls: number; blocked: number }>;

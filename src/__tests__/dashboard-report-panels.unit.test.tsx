@@ -16,6 +16,7 @@ import { render } from 'ink-testing-library';
 import { Protection } from '../tui/dashboard/views/report/panels/Protection';
 import { TopBlocks } from '../tui/dashboard/views/report/panels/TopBlocks';
 import { Cost } from '../tui/dashboard/views/report/panels/Cost';
+import { TopToolsProjects } from '../tui/dashboard/views/report/panels/TopToolsProjects';
 import { BlastRadius } from '../tui/dashboard/views/report/panels/BlastRadius';
 import { FooterStrip } from '../tui/dashboard/views/report/panels/FooterStrip';
 import type { AggregateResult } from '../cli/aggregate/report-audit';
@@ -53,6 +54,7 @@ function emptyAudit(overrides: Partial<BuildReportJsonInput> = {}): AggregateRes
       cacheReadTokens: 0,
       byDay: new Map(),
       byModel: new Map(),
+      byProject: new Map(),
     },
     toolMap: new Map(),
     blockMap: new Map(),
@@ -158,6 +160,7 @@ describe('Cost', () => {
           ['2026-05-06', 800],
         ]),
         byModel: new Map(),
+        byProject: new Map(),
       },
     });
     const { lastFrame } = render(<Cost audit={audit} />);
@@ -173,6 +176,73 @@ describe('Cost', () => {
   it('renders trend with "no data" when byDay is empty', () => {
     const { lastFrame } = render(<Cost audit={emptyAudit()} />);
     expect(lastFrame()).toContain('no data');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TopToolsProjects
+// ---------------------------------------------------------------------------
+
+describe('TopToolsProjects', () => {
+  it('renders "loading…" when audit is null', () => {
+    const { lastFrame } = render(<TopToolsProjects audit={null} />);
+    expect(lastFrame()).toContain('TOP TOOLS / PROJECTS');
+    expect(lastFrame()).toContain('loading…');
+  });
+
+  it('renders both section headers with — placeholders when audit is empty', () => {
+    const { lastFrame } = render(<TopToolsProjects audit={emptyAudit()} />);
+    const out = lastFrame();
+    expect(out).toContain('TOOLS');
+    expect(out).toContain('PROJECTS');
+    // Empty-section placeholder
+    expect(out).toContain('—');
+  });
+
+  it('renders top tools sorted desc by calls (calls-only column)', () => {
+    const audit = emptyAudit({
+      toolMap: new Map([
+        ['Bash', { calls: 1520, blocked: 0 }],
+        ['Read', { calls: 1032, blocked: 0 }],
+        ['Edit', { calls: 890, blocked: 0 }],
+        ['Write', { calls: 12, blocked: 0 }],
+        ['Glob', { calls: 5, blocked: 0 }],
+      ]),
+    });
+    const { lastFrame } = render(<TopToolsProjects audit={audit} />);
+    const out = lastFrame();
+    expect(out).toContain('Bash');
+    expect(out).toContain('1,520');
+    expect(out).toContain('Read');
+    expect(out).toContain('Edit');
+  });
+
+  it('renders top projects with tokens + cost, basename only', () => {
+    const audit = emptyAudit({
+      cost: {
+        claudeUSD: 0,
+        codexUSD: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheWriteTokens: 0,
+        cacheReadTokens: 0,
+        byDay: new Map(),
+        byModel: new Map(),
+        byProject: new Map([
+          [
+            '/home/nadav/node9-proxy',
+            { cost: 3800, inputTokens: 1_500_000, outputTokens: 600_000 },
+          ],
+          ['/home/nadav/frontend', { cost: 1900, inputTokens: 700_000, outputTokens: 300_000 }],
+        ]),
+      },
+    });
+    const { lastFrame } = render(<TopToolsProjects audit={audit} />);
+    const out = lastFrame();
+    // Basename only — no leading path
+    expect(out).toContain('node9-proxy');
+    expect(out).toContain('frontend');
+    expect(out).not.toContain('/home/nadav');
   });
 });
 

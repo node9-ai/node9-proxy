@@ -48,6 +48,7 @@ function makeAudit(spend: number = 0): AggregateResult {
       cacheReadTokens: 0,
       byDay: new Map(),
       byModel: new Map(),
+      byProject: new Map(),
     },
     toolMap: new Map(),
     blockMap: new Map(),

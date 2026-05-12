@@ -39,6 +39,7 @@ function emptyInput(overrides: Partial<BuildReportJsonInput> = {}): BuildReportJ
       cacheReadTokens: 0,
       byDay: new Map(),
       byModel: new Map(),
+      byProject: new Map(),
     },
     toolMap: new Map(),
     blockMap: new Map(),

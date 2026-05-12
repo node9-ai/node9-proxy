@@ -20,6 +20,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
+import { decodeProjectDirName } from '../../costSync';
 import type { BuildReportJsonInput, ReportPeriod } from '../render/report-json';
 
 // ---------------------------------------------------------------------------
@@ -241,10 +242,22 @@ function claudeModelPrice(model: string): { i: number; o: number; cw: number; cr
   return null;
 }
 
+/** Per-project cost / token rollup. Key = decoded working directory
+ *  (e.g. `/home/nadav/node9` rather than the `-home-nadav-node9`
+ *  folder name on disk). Decoding uses costSync.decodeProjectDirName
+ *  which is lossy when path components themselves contain `-`, but
+ *  it's accurate enough for "which projects am I spending on". */
+export interface ProjectCostRollup {
+  cost: number;
+  inputTokens: number;
+  outputTokens: number;
+}
+
 export interface ClaudeCostData {
   total: number;
   byDay: Map<string, number>;
   byModel: Map<string, number>;
+  byProject: Map<string, ProjectCostRollup>;
   inputTokens: number;
   outputTokens: number;
   cacheWriteTokens: number;
@@ -266,6 +279,7 @@ interface ClaudeCostAccumulator {
   cacheReadTokens: number;
   byDay: Map<string, number>;
   byModel: Map<string, number>;
+  byProject: Map<string, ProjectCostRollup>;
 }
 
 function emptyClaudeCostAccumulator(): ClaudeCostAccumulator {
@@ -277,6 +291,7 @@ function emptyClaudeCostAccumulator(): ClaudeCostAccumulator {
     cacheReadTokens: 0,
     byDay: new Map(),
     byModel: new Map(),
+    byProject: new Map(),
   };
 }
 
@@ -285,6 +300,7 @@ function freezeClaudeCost(acc: ClaudeCostAccumulator): ClaudeCostData {
     total: acc.total,
     byDay: acc.byDay,
     byModel: acc.byModel,
+    byProject: acc.byProject,
     inputTokens: acc.inputTokens,
     outputTokens: acc.outputTokens,
     cacheWriteTokens: acc.cacheWriteTokens,
@@ -365,6 +381,21 @@ function processClaudeCostProject(
 
         const normModel = model.replace(/@.*$/, '').replace(/-\d{8}$/, '');
         acc.byModel.set(normModel, (acc.byModel.get(normModel) ?? 0) + cost);
+
+        // Per-project rollup. `proj` is the encoded dir name (slashes
+        // replaced by dashes), decoded back to a path for display.
+        // Lossy decode is OK — this is for "which projects am I
+        // spending on at a glance", not for path equality.
+        const projectKey = decodeProjectDirName(proj);
+        const projectRollup = acc.byProject.get(projectKey) ?? {
+          cost: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+        };
+        projectRollup.cost += cost;
+        projectRollup.inputTokens += inp;
+        projectRollup.outputTokens += out;
+        acc.byProject.set(projectKey, projectRollup);
       }
     } catch {
       continue;
@@ -742,6 +773,7 @@ export function aggregateReportFromAudit(
       cacheReadTokens: claudeCost.cacheReadTokens,
       byDay: claudeCost.byDay,
       byModel: claudeCost.byModel,
+      byProject: claudeCost.byProject,
     },
     toolMap,
     blockMap,

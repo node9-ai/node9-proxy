@@ -23,6 +23,7 @@ import { COST_PER_LOOP_ITER_USD } from '@node9/policy-engine';
 
 import { Protection } from './panels/Protection.js';
 import { Cost } from './panels/Cost.js';
+import { TopToolsProjects } from './panels/TopToolsProjects.js';
 import { BlastRadius } from './panels/BlastRadius.js';
 import { Leaks } from './panels/Leaks.js';
 import { Loops } from './panels/Loops.js';
@@ -84,6 +85,15 @@ export function ReportView({
       <Box flexDirection="row" gap={1}>
         <Protection audit={audit} />
         <Cost audit={audit} />
+      </Box>
+      {/* Middle row: TOP TOOLS / PROJECTS (left, half-width). The
+          right side will get a period-windowed SHIELDS panel in
+          the next sub-commit (#4 of the Phase 2 revamp). For now
+          the right half is filled by an empty spacer Box so the
+          left panel sizes correctly. */}
+      <Box flexDirection="row" gap={1}>
+        <TopToolsProjects audit={audit} />
+        <Box flexGrow={1} flexBasis={0} />
       </Box>
       <BlastRadius
         blast={blast}
