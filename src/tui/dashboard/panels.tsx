@@ -11,8 +11,10 @@ import type {
   BlastSnapshot,
   CostSnapshot,
   ForensicSseEvent,
-  ReportPeriod,
+  ProtectionSummary,
+  SessionActivityAgg,
   SessionForensicAgg,
+  SessionShieldsAgg,
   ShieldStatus,
   TimeWindow,
   View,
@@ -28,7 +30,7 @@ import {
   truncate,
 } from './format.js';
 
-const COL = {
+export const COL = {
   brand: '#FF8C42', // orange — brand
   live: '#5BF58C', // green — connected status
   liveOff: '#F55B5B', // red — disconnected
@@ -72,6 +74,10 @@ export function Header(props: {
 }
 
 function renderHealthBadge(h: HealthBadge): React.ReactNode {
+  // Binary secure / at-risk indicator only — the prior multi-reason
+  // chips ("5 paths exposed", "5 shields off", score) were retired
+  // from the header pending a clearer definition. The new LIVE
+  // SECURITY panel surfaces the same signals with proper detail.
   if (h.severity === 'secure') {
     return (
       <>
@@ -82,16 +88,11 @@ function renderHealthBadge(h: HealthBadge): React.ReactNode {
   }
   const icon = h.severity === 'critical' ? '🛑' : '⚠';
   const color = h.severity === 'critical' ? COL.liveOff : COL.panelHigh;
-  const summary = h.reasons.length > 0 ? h.reasons.join(', ') : 'risk';
-  // Hint ("see node9 scan") used to be inlined here but pushed the
-  // header past 80 chars and forced 2-line wrapping that destabilised
-  // FIXED_PANELS_HEIGHT. The [2] report key in StatusBar already
-  // points users where to look.
   return (
     <>
       <Text dimColor>{'  · '}</Text>
       <Text color={color} bold>{`${icon} `}</Text>
-      <Text color={color}>{summary}</Text>
+      <Text color={color}>at risk</Text>
     </>
   );
 }
@@ -207,18 +208,13 @@ export type Notification =
   | { kind: 'block'; event: ActivityEvent; ageMs: number }
   | { kind: 'review'; event: ActivityEvent; ageMs: number }
   | { kind: 'loop'; event: ActivityEvent; ageMs: number }
-  | { kind: 'idle'; blastScore: number };
+  | { kind: 'idle'; protection: ProtectionSummary };
 
 export const NOTIFICATION_HEIGHT = 4;
 /** Fixed height for the REPORT panel (see Report() for the row math).
  *  3 columns now (Tools / Shell / Models). Worst case = 6 rows in any
  *  column (1 header + 5 data) + title (1) + 2 borders = 9. */
 export const REPORT_PANEL_HEIGHT = 9;
-/** Fixed height for the RISK panel ("Live security"). Always exactly
- *  4 content rows (title + dlp/loops/score + forensic + shield-summary)
- *  plus 2 borders = 6. Pinned so the loading→loaded transition for
- *  shieldStatus doesn't shift the layout. */
-export const RISK_PANEL_HEIGHT = 6;
 
 export function NotificationArea(props: { notification: Notification }): React.ReactElement {
   const { notification } = props;
@@ -271,7 +267,7 @@ function renderNotificationBody(n: Notification): React.ReactNode {
   if (n.kind === 'review') return renderEventInfo(n.event, '🟡 REVIEWED', COL.panelHigh, n.ageMs);
   if (n.kind === 'loop')
     return renderEventInfo(n.event, '🔁 LOOP DETECTED', COL.panelHigh, n.ageMs);
-  return renderIdle(n.blastScore);
+  return renderIdle(n.protection);
 }
 
 function renderForensic(
@@ -405,15 +401,35 @@ function renderEventInfo(
   );
 }
 
-function renderIdle(blastScore: number): React.ReactNode {
-  const scoreColor = blastScore >= 80 ? '#5BF58C' : blastScore >= 50 ? COL.panelHigh : COL.liveOff;
+function renderIdle(p: ProtectionSummary): React.ReactNode {
+  // RISK box — replaces the old "blast 25/100" placeholder. Shows the
+  // user where they stand (exposed vs effective) AND gives them the
+  // single highest-value action they can take to improve it. The
+  // suggestion line drops away when no protective shield is left to
+  // enable, or when effective score is already in the safe zone.
+  const effectiveColor =
+    p.effective >= 80 ? '#5BF58C' : p.effective >= 50 ? COL.panelHigh : COL.liveOff;
+  const headlineIcon = p.effective >= 80 ? '✓' : '⚠';
   return (
     <>
       <Text wrap="truncate-end">
-        <Text dimColor>✓ no recent alerts · blast </Text>
-        <Text bold color={scoreColor}>{`${blastScore}/100`}</Text>
+        <Text color={effectiveColor} bold>{`${headlineIcon} `}</Text>
+        <Text dimColor>exposed </Text>
+        <Text bold>{p.exposed}</Text>
+        <Text dimColor>{' · protect '}</Text>
+        <Text bold color={p.protect > 0 ? '#5BF58C' : undefined}>{`+${p.protect}`}</Text>
+        <Text dimColor>{' · effective '}</Text>
+        <Text bold color={effectiveColor}>{`${p.effective}/100`}</Text>
       </Text>
-      <Text dimColor>(approvals + recent blocks/loops appear here)</Text>
+      {p.suggestedShield ? (
+        <Text wrap="truncate-end">
+          <Text dimColor>↑ enable </Text>
+          <Text bold>{p.suggestedShield}</Text>
+          <Text dimColor>{` → +${p.suggestedBonus}`}</Text>
+        </Text>
+      ) : (
+        <Text dimColor>(approvals + recent blocks/loops appear here)</Text>
+      )}
     </>
   );
 }
@@ -700,88 +716,305 @@ function bar(value: number, max: number, width: number): string {
 }
 
 // ---------------------------------------------------------------------------
-// Risk — DLP/loop/blast summary
+// LiveSecurity — vertical "new issues since open" panel for Realtime
+//
+// Replaces the cramped two-line Risk panel. Shows 9 categorical rows
+// sorted by count desc; sources are all live (no history walks):
+//   - dlp / loops          → SessionActivityAgg (rule-tagged SSE events)
+//   - paths                → blast.paths.length (sync FS snapshot)
+//   - pii / read / priv /  → SessionForensicAgg (live ForensicSseEvent
+//     dest / eval / pipe /    stream from the daemon's watermark scan)
+//     long
+//
+// Rows with zero counts render dim and stay at the bottom — the
+// category list is stable across sessions even when nothing has fired
+// in a category yet.
 // ---------------------------------------------------------------------------
 
-export function Risk(props: {
-  agg: AuditAggregates;
-  blast: BlastSnapshot;
-  shieldStatus: ShieldStatus | null;
+// Total box height (incl. borders) shared across LIVE SECURITY,
+// SHIELDS, and LIVE ACTIVITY in the new two-row layout. 8 = 1 title
+// + 5 data rows + 2 borders. LIVE SECURITY and SHIELDS share the
+// top row at 50/50 width with 2-column internal layout; LIVE
+// ACTIVITY occupies the full width below with 3-column internal
+// layout. The shorter height (vs the prior 12-row single-column)
+// is bought back by 2-col density.
+const LIVE_SECURITY_ROWS_HEIGHT = 8;
+
+/** Render a single "label N" row for the 2-col LIVE SECURITY layout.
+ *  Item may be undefined when the column has fewer items than the row
+ *  count — we still render a placeholder Box to keep column widths
+ *  stable. */
+function LiveSecurityCell(props: { item?: { label: string; count: number } }): React.ReactElement {
+  const item = props.item;
+  if (!item) return <Box flexGrow={1} flexBasis={0} />;
+  return (
+    <Box flexGrow={1} flexBasis={0}>
+      <Text wrap="truncate-end">
+        <Text>{item.label.padEnd(7)}</Text>
+        <Text bold={item.count > 0} color={item.count > 0 ? undefined : COL.textDim}>
+          {`${item.count}`.padStart(4)}
+        </Text>
+      </Text>
+    </Box>
+  );
+}
+
+export function LiveSecurity(props: {
+  blast: BlastSnapshot | null;
   forensicAgg: SessionForensicAgg;
-  window: TimeWindow;
+  activityAgg: SessionActivityAgg;
 }): React.ReactElement {
-  // Use the dedicated counters from aggregateAudit. Earlier this
-  // panel derived counts by filtering byBlock (top-6 only), which
-  // missed any DLP / loop rules that didn't make the top 6 — leading
-  // to a misleading "0 loops" when there were really hundreds, just
-  // spread across many rule names.
-  const dlpHits = props.agg.dlpHits;
-  const loopHits = props.agg.loops;
-  const scoreColor =
-    props.blast.score >= 80 ? '#5BF58C' : props.blast.score >= 50 ? COL.panelHigh : COL.liveOff;
+  // 9 categorical rows: dlp, loops, paths, pii, priv, dest, eval,
+  // pipe, long. Sorted desc so the noisiest signal floats to row 1
+  // left column; the panel pairs items left-then-right to fill 5
+  // rows (item 0 left row 1, item 1 right row 1, item 2 left row 2,
+  // …, item 8 left row 5, right row 5 blank).
+  const rows: Array<{ label: string; count: number }> = [
+    { label: 'dlp', count: props.activityAgg.dlp },
+    { label: 'loops', count: props.activityAgg.loops },
+    { label: 'paths', count: props.blast?.paths.length ?? 0 },
+    { label: 'pii', count: props.forensicAgg.pii },
+    { label: 'priv', count: props.forensicAgg.privilegeEscalation },
+    { label: 'dest', count: props.forensicAgg.destructiveOp },
+    { label: 'eval', count: props.forensicAgg.evalOfRemote },
+    { label: 'pipe', count: props.forensicAgg.pipeToShell },
+    { label: 'long', count: props.forensicAgg.longOutputRedacted },
+  ];
+  rows.sort((a, b) => b.count - a.count);
+  const totalIssues = rows.reduce((sum, r) => sum + r.count, 0);
+  // Pair into 5 rows × 2 columns. items[2*i] = left, items[2*i+1] = right.
+  const pairs: Array<[(typeof rows)[number] | undefined, (typeof rows)[number] | undefined]> = [];
+  for (let i = 0; i < 10; i += 2) {
+    pairs.push([rows[i], rows[i + 1]]);
+  }
   return (
     <Box
       flexDirection="column"
       borderStyle="round"
-      borderColor={COL.panelRisk}
+      borderColor={totalIssues > 0 ? COL.panelRisk : COL.textDim}
       paddingX={1}
-      marginX={1}
-      height={RISK_PANEL_HEIGHT}
+      flexGrow={1}
+      flexBasis={0}
+      height={LIVE_SECURITY_ROWS_HEIGHT}
     >
       <Text>
         <Text color={COL.brand} bold>
-          Live security
+          LIVE SECURITY
         </Text>
-        <Text dimColor>{`  · ${labelFor(props.window)}`}</Text>
       </Text>
+      {pairs.map((pair, i) => (
+        <Box key={i} flexDirection="row">
+          <LiveSecurityCell item={pair[0]} />
+          <LiveSecurityCell item={pair[1]} />
+        </Box>
+      ))}
+    </Box>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// LiveActivity — vertical tools + shell distribution for Realtime
+//
+// SSE-driven counterpart to the Report panel in [2]. Two stacked
+// sections (TOOLS / SHELL) inside one bordered box, each showing the
+// top 5 by count. Counts come from SessionActivityAgg, which the App
+// updates on every kind:'tool' event — so the panel grows in real time
+// without any history walk.
+// ---------------------------------------------------------------------------
+
+// 3-column full-width layout: TOOLS / SHELL / MCP side-by-side
+// inside one bordered box. Title (1) + inline section-header row (1)
+// + 4 data rows + 2 borders = 8 (matches LIVE_SECURITY_ROWS_HEIGHT).
+// Each column shows top-N by count; empty cells render blank.
+const LIVE_ACTIVITY_ROWS = 4;
+
+function ActivityCell(props: { item?: { name: string; count: number } }): React.ReactElement {
+  const item = props.item;
+  return (
+    <Box flexGrow={1} flexBasis={0}>
+      {item ? (
+        <Text wrap="truncate-end">
+          <Text>{truncate(item.name, 14).padEnd(14)}</Text>
+          <Text bold={item.count > 0} color={item.count > 0 ? undefined : COL.textDim}>
+            {`${item.count}`.padStart(4)}
+          </Text>
+        </Text>
+      ) : null}
+    </Box>
+  );
+}
+
+export function LiveActivity(props: { agg: SessionActivityAgg }): React.ReactElement {
+  const tools = topNFromMap(props.agg.tools, LIVE_ACTIVITY_ROWS);
+  const shell = topNFromMap(props.agg.shell, LIVE_ACTIVITY_ROWS);
+  const mcp = topNFromMap(props.agg.mcp, LIVE_ACTIVITY_ROWS);
+  return (
+    <Box
+      flexDirection="column"
+      borderStyle="round"
+      borderColor={COL.panelReport}
+      paddingX={1}
+      marginX={1}
+      height={LIVE_SECURITY_ROWS_HEIGHT}
+    >
+      <Text>
+        <Text color={COL.brand} bold>
+          LIVE ACTIVITY
+        </Text>
+      </Text>
+      {/* Inline section-header row — TOOLS / SHELL / MCP aligned to
+          the three column slots below. Saves a row vs three separate
+          stacked headers. */}
+      <Box flexDirection="row">
+        <Box flexGrow={1} flexBasis={0}>
+          <Text dimColor>TOOLS</Text>
+        </Box>
+        <Box flexGrow={1} flexBasis={0}>
+          <Text dimColor>SHELL</Text>
+        </Box>
+        <Box flexGrow={1} flexBasis={0}>
+          <Text dimColor>MCP</Text>
+        </Box>
+      </Box>
+      {Array.from({ length: LIVE_ACTIVITY_ROWS }, (_, i) => (
+        <Box key={i} flexDirection="row">
+          <ActivityCell item={tools[i]} />
+          <ActivityCell item={shell[i]} />
+          <ActivityCell item={mcp[i]} />
+        </Box>
+      ))}
+    </Box>
+  );
+}
+
+function topNFromMap(
+  map: Record<string, number>,
+  n: number
+): Array<{ name: string; count: number }> {
+  return Object.entries(map)
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, n);
+}
+
+// ---------------------------------------------------------------------------
+// Shields — per-shield "is my coverage working" panel for Realtime
+//
+// Replaces the slim SETUP strip. Active shields render first, sorted
+// desc by total fires (blocks + reviews) so the most-active shields
+// surface on top. Inactive shields render below with an "off"
+// indicator; capped by SHIELDS_INACTIVE_CAP so the panel never grows
+// past its allocated height. Any beyond the cap collapse to
+// "… N more off".
+//
+// Data sources (all live, no walks):
+//   - shieldStatus.active / .inactive → which shields exist + state
+//   - shieldsAgg.byShield[name] → per-shield block/review counts since
+//     monitor opened, populated from SSE activity events via
+//     applyActivityToShields in data.ts
+//
+// Built-in detectors (DLP / loops / privesc) don't map to a user
+// shield and so don't appear here — their counts live in LIVE
+// SECURITY.
+// ---------------------------------------------------------------------------
+
+// Two-column SHIELDS layout: active shields in the LEFT column,
+// inactive in the RIGHT column. Title (1) + 5 data rows + 2 borders
+// = 8 (matches LIVE_SECURITY_ROWS_HEIGHT). Active sorted desc by
+// total fires (blocks + reviews); inactive in registry order.
+// Overflow (anything past row 5 on either side) collapses to a
+// shared "… N more" line on row 5 left.
+const SHIELDS_ROWS_PER_COL = 4; // leaves row 5 for overflow line
+
+function ShieldActiveCell(props: {
+  row?: { name: string; blocks: number; reviews: number };
+}): React.ReactElement {
+  const row = props.row;
+  if (!row) return <Box flexGrow={1} flexBasis={0} />;
+  const n = row.blocks + row.reviews;
+  return (
+    <Box flexGrow={1} flexBasis={0}>
       <Text wrap="truncate-end">
-        <Text color={COL.liveOff}>{'🔑 '}</Text>
-        <Text bold>{dlpHits}</Text>
-        <Text dimColor> DLP · </Text>
-        <Text color={COL.panelHigh}>{'🔁 '}</Text>
-        <Text bold>{loopHits}</Text>
-        <Text dimColor> loops · </Text>
-        <Text color={COL.liveOff}>{'🔭 '}</Text>
-        <Text bold>{props.blast.paths.length}</Text>
-        <Text dimColor> paths · score </Text>
-        <Text bold color={scoreColor}>{`${props.blast.score}/100`}</Text>
+        <Text>{truncate(row.name, 11).padEnd(11)}</Text>
+        <Text bold={n > 0} color={n > 0 ? undefined : COL.textDim}>
+          {`${n}`.padStart(4)}
+        </Text>
       </Text>
-      {/* Forensic counts since `node9 monitor` opened. Updates within
-          ~30s of a finding via the daemon's 'forensic' SSE channel.
-          Claude-only — Cursor / Codex don't write JSONL the watermark
-          scanner reads from. See doc/roadmap/daemon-redesign.md
-          (option A) for multi-agent coverage plans. */}
+    </Box>
+  );
+}
+
+function ShieldInactiveCell(props: { name?: string }): React.ReactElement {
+  const name = props.name;
+  if (!name) return <Box flexGrow={1} flexBasis={0} />;
+  return (
+    <Box flexGrow={1} flexBasis={0}>
       <Text wrap="truncate-end">
-        <Text bold>{props.forensicAgg.pii}</Text>
-        <Text dimColor> pii · </Text>
-        <Text bold>{props.forensicAgg.sensitiveFileRead}</Text>
-        <Text dimColor> read · </Text>
-        <Text bold>{props.forensicAgg.privilegeEscalation}</Text>
-        <Text dimColor> priv · </Text>
-        <Text bold>{props.forensicAgg.destructiveOp}</Text>
-        <Text dimColor> dest · </Text>
-        <Text bold>{props.forensicAgg.evalOfRemote}</Text>
-        <Text dimColor> eval · </Text>
-        <Text bold>{props.forensicAgg.pipeToShell}</Text>
-        <Text dimColor> pipe · </Text>
-        <Text bold>{props.forensicAgg.longOutputRedacted}</Text>
-        <Text dimColor> long (Claude)</Text>
+        <Text dimColor>{truncate(name, 11).padEnd(11)}</Text>
+        <Text color={COL.panelHigh}>{' off'}</Text>
       </Text>
-      {/* Single-line shield summary: active vs inactive counts only.
-          The full inactive-shield list and the "node9 shield enable"
-          call-to-action move to View 2's Coverage section in phase 8.
-          Likewise the path list (was rendered here) — V2 Coverage owns
-          the detail; V1 keeps just enough context for an at-a-glance
-          status check. Always rendered (with `…` placeholder while
-          shieldStatus loads) so the panel height stays constant from
-          first paint. */}
-      <Text wrap="truncate-end">
-        <Text color={COL.live}>{'🛡 '}</Text>
-        <Text bold>{props.shieldStatus ? props.shieldStatus.active.length : '…'}</Text>
-        <Text dimColor> active · </Text>
-        <Text bold>{props.shieldStatus ? props.shieldStatus.inactive.length : '…'}</Text>
-        <Text dimColor> inactive</Text>
+    </Box>
+  );
+}
+
+export function Shields(props: {
+  shieldStatus: ShieldStatus | null;
+  shieldsAgg: SessionShieldsAgg;
+}): React.ReactElement {
+  const loaded = props.shieldStatus !== null;
+  const active = props.shieldStatus?.active ?? [];
+  const inactive = props.shieldStatus?.inactive ?? [];
+  const activeWithCounts = active
+    .map((name) => {
+      const counts = props.shieldsAgg.byShield[name] ?? { blocks: 0, reviews: 0 };
+      return { name, ...counts, total: counts.blocks + counts.reviews };
+    })
+    .sort((a, b) => b.total - a.total);
+  const activeShown = activeWithCounts.slice(0, SHIELDS_ROWS_PER_COL);
+  const inactiveShown = inactive.slice(0, SHIELDS_ROWS_PER_COL);
+  const overflow =
+    Math.max(0, activeWithCounts.length - activeShown.length) +
+    Math.max(0, inactive.length - inactiveShown.length);
+
+  // Build 4 paired rows (left=active, right=inactive) so empty
+  // cells still occupy width.
+  const pairs: Array<{
+    left?: (typeof activeShown)[number];
+    right?: string;
+  }> = [];
+  for (let i = 0; i < SHIELDS_ROWS_PER_COL; i++) {
+    pairs.push({ left: activeShown[i], right: inactiveShown[i] });
+  }
+  return (
+    <Box
+      flexDirection="column"
+      borderStyle="round"
+      borderColor={COL.textDim}
+      paddingX={1}
+      flexGrow={1}
+      flexBasis={0}
+      height={LIVE_SECURITY_ROWS_HEIGHT}
+    >
+      <Text>
+        <Text color={COL.brand} bold>
+          SHIELDS
+        </Text>
       </Text>
+      {!loaded ? (
+        <Text dimColor>loading…</Text>
+      ) : active.length === 0 && inactive.length === 0 ? (
+        <Text dimColor>none</Text>
+      ) : (
+        <>
+          {pairs.map((pair, i) => (
+            <Box key={i} flexDirection="row">
+              <ShieldActiveCell row={pair.left} />
+              <ShieldInactiveCell name={pair.right} />
+            </Box>
+          ))}
+          {overflow > 0 ? <Text dimColor>{`… ${overflow} more`}</Text> : null}
+        </>
+      )}
     </Box>
   );
 }
@@ -812,49 +1045,56 @@ export function StatusBar(props: { view: View; lastRefreshAt: number }): React.R
   );
 }
 
+// ReportView lives in src/tui/dashboard/views/report/index.tsx as of phase 3c.
+// The phase-1 stub that used to live here was replaced by the proper view
+// shell — see views/report/index.tsx for the current implementation.
+
 // ---------------------------------------------------------------------------
-// ReportView — phase-1 stub. Full implementation lands in phases 4-8 (see
-// doc/roadmap/monitor-two-view.md). For now: shows the period picker and
-// a "coming soon" placeholder for each section so the switcher is visibly
-// alive end-to-end.
+// SessionCounters — tiny "Since Open" strip on Realtime
+//
+// Replaces the old HIGH LEVEL panel which needed ~/.claude/projects walks
+// for cost. This is purely SSE-driven — counters live in App.tsx state and
+// increment as activity events arrive. Cost is intentionally absent; that
+// lives in [2] Report now where the user has accepted "this view loads
+// data."
+//
+// Stays small on purpose: 4 numbers + a label. If it grows, push back —
+// the win is that Realtime mounts in milliseconds with zero history walks.
 // ---------------------------------------------------------------------------
 
-export function ReportView(props: { period: ReportPeriod }): React.ReactElement {
-  return (
-    <Box flexDirection="column" flexGrow={1} paddingX={1}>
-      <Box paddingY={1}>
-        <Text color={COL.brand} bold>
-          REPORT
-        </Text>
-        <Text dimColor>{`  · period ${props.period}`}</Text>
-      </Box>
-      <Box flexDirection="column" gap={0}>
-        <ReportSectionStub label="Security" hint="leaks · blocks · loops · forensic 90d" />
-        <ReportSectionStub label="Activity" hint="top tools · top blocks · daily/hourly" />
-        <ReportSectionStub label="Cost" hint="per model · per day · cache hit" />
-        <ReportSectionStub label="Coverage" hint="inactive shields · reachable paths" />
-      </Box>
-      <Box marginTop={1}>
-        <Text dimColor>(report sections land in phases 4–8 — press [1] to return to realtime)</Text>
-      </Box>
-    </Box>
-  );
-}
-
-function ReportSectionStub(props: { label: string; hint: string }): React.ReactElement {
+export function SessionCounters(props: {
+  events: number;
+  allow: number;
+  block: number;
+  review: number;
+}): React.ReactElement {
+  const { events, allow, block, review } = props;
+  const blockColor = block > 0 ? COL.liveOff : COL.textDim;
+  const reviewColor = review > 0 ? COL.panelHigh : COL.textDim;
   return (
     <Box
+      flexDirection="column"
       borderStyle="round"
-      borderColor={COL.textDim}
+      borderColor={COL.panelHigh}
       paddingX={1}
       marginX={1}
-      flexDirection="column"
     >
-      <Text>
-        <Text bold>{props.label}</Text>
-        <Text dimColor>{`  — ${props.hint}`}</Text>
+      <Text wrap="truncate-end">
+        <Text color={COL.brand} bold>
+          SINCE OPEN
+        </Text>
+        <Text dimColor>{'  ·  live SSE counter, no history walk'}</Text>
       </Text>
-      <Text dimColor>(coming soon)</Text>
+      <Text wrap="truncate-end">
+        <Text bold>{events.toLocaleString()}</Text>
+        <Text dimColor>{' events  '}</Text>
+        <Text bold>{allow.toLocaleString()}</Text>
+        <Text color="#5BF58C">{' ✓ allow  '}</Text>
+        <Text bold color={blockColor}>{`${block} `}</Text>
+        <Text color={COL.liveOff}>{'🛑 block  '}</Text>
+        <Text bold color={reviewColor}>{`${review} `}</Text>
+        <Text color={COL.panelHigh}>{'🟡 review'}</Text>
+      </Text>
     </Box>
   );
 }

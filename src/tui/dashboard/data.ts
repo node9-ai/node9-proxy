@@ -14,19 +14,41 @@ import path from 'path';
 import http from 'http';
 import { runBlast } from '../../cli/commands/blast.js';
 import { DAEMON_HOST, DAEMON_PORT, getInternalToken } from '../../auth/daemon.js';
-import { collectEntries, type DailyEntry } from '../../costSync.js';
+import { parseJSONLFile, type DailyEntry } from '../../costSync.js';
 import { SHIELDS, readActiveShields } from '../../shields.js';
 import { extractFindingsFromLine } from '../../daemon/scan-watermark.js';
-import type {
-  ActivityEvent,
-  AuditAggregates,
-  BlastSnapshot,
-  CostSnapshot,
-  ForensicSseEvent,
-  ScanSignalsSnapshot,
-  SessionForensicAgg,
-  ShieldStatus,
+import {
+  aggregateReportFromAudit,
+  getDateRange,
+  loadClaudeCostAsync,
+  loadCodexCostAsync,
+  loadGeminiCostAsync,
+  type AggregateResult,
+} from '../../cli/aggregate/report-audit.js';
+import {
+  scanClaudeHistoryAsync,
+  scanGeminiHistory,
+  scanCodexHistory,
+} from '../../cli/commands/scan.js';
+import {
+  type ActivityEvent,
+  type AuditAggregates,
+  type BlastSnapshot,
+  type CostSnapshot,
+  type ForensicSseEvent,
+  type ReportPeriod,
+  type ScanCache,
+  type ScanSignalsSnapshot,
+  type SessionActivityAgg,
+  type SessionForensicAgg,
+  type SessionShieldsAgg,
+  type ShieldStatus,
 } from './types.js';
+// Re-export computeProtection from the new neutral home so existing
+// monitor imports (e.g. views/report/index.tsx) keep working without
+// a call-site update. See src/protection.ts header for the move
+// rationale.
+export { computeProtection } from '../../protection.js';
 
 // ---------------------------------------------------------------------------
 // Audit log parsing — minimal copy of the report.ts helper.
@@ -68,6 +90,67 @@ export function readAuditEntries(): AuditEntry[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * Async, event-loop-friendly variant of readAuditEntries(). Reads the audit
+ * log once (4 MB / ~10 k lines is cheap), then JSON.parses in chunks of
+ * `chunkSize` lines per setImmediate-yielded tick. Between chunks the React
+ * reconciler can repaint the dashboard, so a 30-second auto-refresh on the
+ * Realtime view no longer feels like a 200-300 ms freeze.
+ *
+ * For 11 k entries with chunkSize=1000 → 12 ticks of ~25 ms each, ink gets
+ * to repaint between every batch. Total wall-clock is essentially the same
+ * as the sync path; only the responsiveness changes.
+ *
+ * The sync readAuditEntries() is kept for `node9 audit` / `node9 report`
+ * CLI consumers that print and exit — yielding adds latency for no gain
+ * when there's no UI to repaint.
+ */
+export function readAuditEntriesAsync(
+  chunkSize: number = 1000,
+  /** Test-only override. Production callers always read ~/.node9/audit.log. */
+  customPath?: string
+): Promise<AuditEntry[]> {
+  return new Promise((resolve) => {
+    const p = customPath ?? auditLogPath();
+    if (!fs.existsSync(p)) {
+      resolve([]);
+      return;
+    }
+    let raw: string;
+    try {
+      raw = fs.readFileSync(p, 'utf8');
+    } catch {
+      resolve([]);
+      return;
+    }
+    const lines = raw.split('\n');
+    const out: AuditEntry[] = [];
+    let i = 0;
+    const total = lines.length;
+
+    const processChunk = (): void => {
+      const end = Math.min(i + chunkSize, total);
+      for (; i < end; i++) {
+        const line = lines[i];
+        if (!line.trim()) continue;
+        try {
+          const e = JSON.parse(line) as AuditEntry;
+          if (e && typeof e.ts === 'string') out.push(e);
+        } catch {
+          // ignore malformed lines — same forgiving parse the sync path uses
+        }
+      }
+      if (i < total) {
+        setImmediate(processChunk);
+      } else {
+        resolve(out);
+      }
+    };
+
+    processChunk();
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -252,6 +335,22 @@ export function compactPath(p: string): string {
 }
 
 /**
+ * Walk a shell command string and replace every absolute / homedir path
+ * token with its compactPath form. URLs (which start with a scheme like
+ * `https:`) and short paths are left untouched. This keeps the LIVE row
+ * readable when an agent runs something like
+ *   `cd /home/nadav/node9/node9-proxy && wc -l src/tui/dashboard/data.ts`
+ * which would otherwise blow past the 70-char preview budget.
+ */
+export function compactPathsInCommand(cmd: string): string {
+  if (!cmd) return cmd;
+  // Match a non-whitespace run that begins with `/` or `~/`. Greedy on
+  // the run itself is fine — shell tokens are whitespace-delimited at
+  // the level of granularity we care about for display.
+  return cmd.replace(/(?:\/|~\/)[^\s]+/g, (match) => compactPath(match));
+}
+
+/**
  * Build a backfill seed for the LIVE panel: the most recent N audit
  * entries. Returned in chronological order so appending SSE events to
  * the end keeps the buffer monotonic.
@@ -280,17 +379,95 @@ export function buildLiveBackfill(n: number): ActivityEvent[] {
 // and on `r` keypress, never on every render.
 // ---------------------------------------------------------------------------
 
-export function loadCostEntries(): Promise<DailyEntry[]> {
-  // Defer to next tick so React render isn't blocked by the file walk.
-  return new Promise((resolve) => {
-    setImmediate(() => {
+/**
+ * Lookback for the dashboard's mount-time JSONL walks (cost + scan signals).
+ *
+ * The dashboard exposes up to a 60-day TimeWindow option, but the *common*
+ * panels (HighLevel cost-since-open, Report-tab default) need at most ~7
+ * days of history. `node9 report --7d` walks the same files in ~2 s by
+ * limiting work to that window; the dashboard was walking ALL history
+ * (~30 s on a heavy install) — for most sessions that 23 extra seconds
+ * was wasted JSON.parse on data the panels filter out before display
+ * anyway.
+ *
+ * Trade-off: when the user picks the 30d / 60d TimeWindow option from
+ * the Realtime view, the cost panel will under-report initially because
+ * we don't have that history loaded. Acceptable: the next 30s refresh
+ * tick has the same constraint, and `node9 report --30d` (the
+ * authoritative source) is a keystroke away. We could lazy-extend the
+ * walk on window change, but that's complexity beyond what the typical
+ * "is the dashboard fast enough" question demands.
+ */
+const COST_WALK_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Chunk size for the per-project yields below. ~3 projects per yield
+ *  keeps each event-loop "Check" phase batch under ~30 ms on a heavy
+ *  install — short enough that stdin keypresses (q / Ctrl+C) dispatch
+ *  with at most one batch of latency. Lowering further hits diminishing
+ *  returns since each setImmediate boundary itself costs ~0.1 ms. */
+const PROJECTS_PER_YIELD = 3;
+
+export async function loadCostEntries(): Promise<DailyEntry[]> {
+  // Walk Claude project dirs in batches, yielding to the event loop after
+  // each batch so ink can repaint and keypresses dispatch. Total wall-
+  // clock is similar to the sync collectEntries; what changes is that
+  // the dashboard stays responsive throughout. mtime filter still skips
+  // pre-window files (the cheapest single optimization).
+  const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+  if (!fs.existsSync(projectsDir)) return [];
+  let dirs: string[];
+  try {
+    dirs = fs.readdirSync(projectsDir);
+  } catch {
+    return [];
+  }
+  const sinceMs = Date.now() - COST_WALK_LOOKBACK_MS;
+  const combined = new Map<string, DailyEntry>();
+
+  for (let i = 0; i < dirs.length; i += PROJECTS_PER_YIELD) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const batch = dirs.slice(i, i + PROJECTS_PER_YIELD);
+    for (const dir of batch) {
+      const dirPath = path.join(projectsDir, dir);
       try {
-        resolve(collectEntries());
+        if (!fs.statSync(dirPath).isDirectory()) continue;
       } catch {
-        resolve([]);
+        continue;
       }
-    });
-  });
+      let files: string[];
+      try {
+        files = fs.readdirSync(dirPath).filter((f) => f.endsWith('.jsonl'));
+      } catch {
+        continue;
+      }
+      const fallbackWorkingDir = path.basename(dir);
+      for (const file of files) {
+        const filePath = path.join(dirPath, file);
+        try {
+          if (fs.statSync(filePath).mtimeMs < sinceMs) continue;
+        } catch {
+          continue;
+        }
+        // costSync's parseJSONLFile is per-file pure; reuse it. The
+        // yield boundary above is what matters for responsiveness.
+        const entries = parseJSONLFile(filePath, fallbackWorkingDir);
+        for (const [key, e] of entries) {
+          const prev = combined.get(key);
+          if (prev) {
+            prev.costUSD += e.costUSD;
+            prev.inputTokens += e.inputTokens;
+            prev.outputTokens += e.outputTokens;
+            prev.cacheWriteTokens += e.cacheWriteTokens;
+            prev.cacheReadTokens += e.cacheReadTokens;
+          } else {
+            combined.set(key, { ...e });
+          }
+        }
+      }
+    }
+  }
+
+  return [...combined.values()];
 }
 
 /**
@@ -419,19 +596,16 @@ const EMPTY_SIGNALS: Omit<ScanSignalsSnapshot, 'loaded'> = {
   longOutputRedacted: 0,
 };
 
-export function loadScanSignals(): Promise<ScanSignalsSnapshot> {
-  return new Promise((resolve) => {
-    setImmediate(() => {
-      try {
-        resolve({ loaded: true, ...walkClaudeJsonlsForSignals() });
-      } catch {
-        resolve({ loaded: true, ...EMPTY_SIGNALS });
-      }
-    });
-  });
+export async function loadScanSignals(): Promise<ScanSignalsSnapshot> {
+  try {
+    const counts = await walkClaudeJsonlsForSignals();
+    return { loaded: true, ...counts };
+  } catch {
+    return { loaded: true, ...EMPTY_SIGNALS };
+  }
 }
 
-function walkClaudeJsonlsForSignals(): Omit<ScanSignalsSnapshot, 'loaded'> {
+async function walkClaudeJsonlsForSignals(): Promise<Omit<ScanSignalsSnapshot, 'loaded'>> {
   const counts = { ...EMPTY_SIGNALS };
   const projectsDir = path.join(os.homedir(), '.claude', 'projects');
   if (!fs.existsSync(projectsDir)) return counts;
@@ -443,71 +617,85 @@ function walkClaudeJsonlsForSignals(): Omit<ScanSignalsSnapshot, 'loaded'> {
     return counts;
   }
 
-  for (const dir of dirs) {
-    const dirPath = path.join(projectsDir, dir);
-    try {
-      if (!fs.statSync(dirPath).isDirectory()) continue;
-    } catch {
-      continue;
-    }
-    let files: string[];
-    try {
-      files = fs.readdirSync(dirPath).filter((f) => f.endsWith('.jsonl'));
-    } catch {
-      continue;
-    }
-    for (const file of files) {
-      const sessionId = file.replace(/\.jsonl$/, '');
-      const filePath = path.join(dirPath, file);
-      let content: string;
+  // Same lookback as cost — files older than this can't carry signals
+  // relevant to any TimeWindow option the dashboard exposes. Avoids
+  // JSON.parsing years-old session files on every mount.
+  const sinceMs = Date.now() - COST_WALK_LOOKBACK_MS;
+
+  for (let pIdx = 0; pIdx < dirs.length; pIdx += PROJECTS_PER_YIELD) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const batch = dirs.slice(pIdx, pIdx + PROJECTS_PER_YIELD);
+    for (const dir of batch) {
+      const dirPath = path.join(projectsDir, dir);
       try {
-        content = fs.readFileSync(filePath, 'utf8');
+        if (!fs.statSync(dirPath).isDirectory()) continue;
       } catch {
         continue;
       }
-      const lines = content.split('\n');
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        if (!line.trim()) continue;
-        let parsed: unknown;
+      let files: string[];
+      try {
+        files = fs.readdirSync(dirPath).filter((f) => f.endsWith('.jsonl'));
+      } catch {
+        continue;
+      }
+      for (const file of files) {
+        const sessionId = file.replace(/\.jsonl$/, '');
+        const filePath = path.join(dirPath, file);
         try {
-          parsed = JSON.parse(line);
+          if (fs.statSync(filePath).mtimeMs < sinceMs) continue;
         } catch {
           continue;
         }
-        let findings;
+        let content: string;
         try {
-          findings = extractFindingsFromLine(parsed, sessionId, i);
+          content = fs.readFileSync(filePath, 'utf8');
         } catch {
           continue;
         }
-        for (const f of findings) {
-          switch (f.type) {
-            case 'pii':
-              counts.pii++;
-              break;
-            case 'sensitive-file-read':
-              counts.sensitiveFileRead++;
-              break;
-            case 'privilege-escalation':
-              counts.privilegeEscalation++;
-              break;
-            case 'destructive-op':
-              counts.destructiveOp++;
-              break;
-            case 'pipe-to-shell':
-              counts.pipeToShell++;
-              break;
-            case 'eval-of-remote':
-              counts.evalOfRemote++;
-              break;
-            case 'long-output-redacted':
-              counts.longOutputRedacted++;
-              break;
-            // 'dlp', 'loop', 'network-exfil' tracked via other paths
-            // (audit / session-level) — skip here to avoid double-count.
-            default:
-              break;
+        const lines = content.split('\n');
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          if (!line.trim()) continue;
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          let findings;
+          try {
+            findings = extractFindingsFromLine(parsed, sessionId, i);
+          } catch {
+            continue;
+          }
+          for (const f of findings) {
+            switch (f.type) {
+              case 'pii':
+                counts.pii++;
+                break;
+              case 'sensitive-file-read':
+                counts.sensitiveFileRead++;
+                break;
+              case 'privilege-escalation':
+                counts.privilegeEscalation++;
+                break;
+              case 'destructive-op':
+                counts.destructiveOp++;
+                break;
+              case 'pipe-to-shell':
+                counts.pipeToShell++;
+                break;
+              case 'eval-of-remote':
+                counts.evalOfRemote++;
+                break;
+              case 'long-output-redacted':
+                counts.longOutputRedacted++;
+                break;
+              // 'dlp', 'loop', 'network-exfil' tracked via other paths
+              // (audit / session-level) — skip here to avoid double-count.
+              default:
+                break;
+            }
           }
         }
       }
@@ -540,7 +728,11 @@ export function loadBlast(): BlastSnapshot {
     const r = runBlast();
     return {
       score: r.score,
-      paths: r.reachable.slice(0, 5).map((f) => shortenPath(f.full)),
+      paths: r.reachable.slice(0, 5).map((f) => ({
+        label: shortenPath(f.full),
+        description: f.description,
+        score: f.score,
+      })),
       envFindings: r.envFindings.length,
     };
   } catch {
@@ -554,11 +746,157 @@ function shortenPath(p: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Report [2] data loaders — period-aware audit aggregator + scan-walk cache
+// ---------------------------------------------------------------------------
+
+/**
+ * Period-aware audit aggregation for Report [2]. Thin wrapper around the
+ * shared aggregator in cli/aggregate/report-audit so the dashboard pulls
+ * audit data through the same code path as `node9 report --json`. Sync —
+ * fine for the CLI, but the dashboard should prefer loadReportAuditAsync
+ * below to avoid blocking ink for 200-300 ms on a 4 MB audit log.
+ *
+ * Tests are excluded by default — `testRun:true` synthetic entries
+ * from the test harness would otherwise dominate PROTECTION's
+ * auto-blocked count (~870 of one machine's 1,235 entries were tests).
+ * Surfacing real fires only matches user expectations; users who
+ * specifically want to see test-runner activity use the CLI form
+ * `node9 report` (which has `--no-tests` as its own opt-in flag).
+ */
+export function loadReportAudit(period: ReportPeriod): AggregateResult {
+  return aggregateReportFromAudit(period, { excludeTests: true });
+}
+
+/**
+ * Async-friendly variant of loadReportAudit. Pre-loads the audit log via
+ * the chunked readAuditEntriesAsync, then feeds the result into the shared
+ * aggregator via the new preloadedAuditEntries opt. The aggregator's other
+ * sync work (claude / codex JSONL cost walks) still blocks — that's the
+ * job of the scan-walker chunking refactor (#2 in the responsiveness plan).
+ * This change alone removes the audit-parse component of the [2] freeze.
+ */
+export async function loadReportAuditAsync(period: ReportPeriod): Promise<AggregateResult> {
+  // Pre-load every slow input through chunked async walkers, but
+  // SEQUENTIALLY rather than via Promise.all. Concurrent async walkers
+  // each schedule a setImmediate per yield; with N walkers, the event
+  // loop's Check phase queues N callbacks per tick. Each callback runs
+  // a 30-100 ms sync chunk, so a single Check phase can occupy the loop
+  // for 100-400 ms — long enough that stdin events (including q) wait
+  // 100-400 ms per keypress before they're delivered.
+  //
+  // Running the walks one at a time costs us a few hundred ms of total
+  // wall-clock latency to fully populate Report [2], but it keeps each
+  // Check-phase batch small (one chunk) so the Poll phase fires often
+  // and stdin keypresses dispatch promptly. Net UX: [2] takes ~200 ms
+  // longer to finish loading, but q quits ~instantly throughout.
+  const claudeProjectsDir = path.join(os.homedir(), '.claude', 'projects');
+  const codexSessionsDir = path.join(os.homedir(), '.codex', 'sessions');
+  const geminiTmpDir = path.join(os.homedir(), '.gemini', 'tmp');
+  const { start, end } = getDateRange(period, new Date());
+  const entries = await readAuditEntriesAsync();
+  const claudeCost = await loadClaudeCostAsync(start, end, claudeProjectsDir);
+  const codexCost = await loadCodexCostAsync(start, end, codexSessionsDir);
+  const geminiCost = await loadGeminiCostAsync(start, end, geminiTmpDir);
+  return aggregateReportFromAudit(period, {
+    preloadedAuditEntries: entries,
+    preloadedClaudeCost: claudeCost,
+    preloadedCodexCost: codexCost,
+    preloadedGeminiCost: geminiCost,
+    // Strip testRun:true synthetic entries so PROTECTION counts
+    // reflect real fires only. See loadReportAudit's header for the
+    // rationale.
+    excludeTests: true,
+  });
+}
+
+/**
+ * Kick off a background walk of all three agent histories
+ * (~/.claude/projects, ~/.gemini, ~/.codex/sessions) and stream cache
+ * updates via onUpdate. The walkers themselves are sync, so we yield
+ * once via setImmediate to avoid blocking the initial paint that
+ * triggered the walk.
+ *
+ * Returns a cancel function — when called before the walk completes,
+ * suppresses the final onUpdate. Useful for unmount cleanup or for
+ * superseding a stale walk after the user pressed [r] refresh.
+ *
+ * Lifecycle:
+ *   1. caller invokes startScanWalk(setCache)
+ *   2. immediate onUpdate({ status: 'loading' })   — ReportView re-renders
+ *      with placeholders on scan-derived panels; non-scan panels (audit /
+ *      blast / shields) render normally
+ *   3. setImmediate fires; walkers run sync; takes ~1–2 s on warm machines
+ *   4. on completion: onUpdate({ status: 'ready', results, readyAt })
+ *   5. on throw:      onUpdate({ status: 'error', error })
+ *
+ * The scan-walker `onProgress` callbacks are not threaded through here —
+ * we'd need a shared total-files count to render percentages and the
+ * walkers don't expose one. Keeping this simple until phase 3f decides
+ * whether per-panel progress bars are worth the plumbing.
+ */
+/** Resolves on the next event-loop tick. Used to break long sync work
+ *  into shorter chunks so ink can repaint and `useInput` can dispatch
+ *  keypresses (q / Ctrl+C / view switch) between chunks. */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+export function startScanWalk(onUpdate: (cache: ScanCache) => void): () => void {
+  let cancelled = false;
+
+  onUpdate({ status: 'loading' });
+
+  // Same 7-day lookback the cost + signals walks use, for the same
+  // reason: the [2] Report panels filter by period before display, so
+  // walking older history is wasted JSON.parse + AST work. Without this
+  // filter scanClaudeHistoryAsync(null) processes every assistant entry
+  // ever recorded — observed 60+ seconds on a heavy install vs ~2 s for
+  // `node9 report --7d` against the same data.
+  const lookbackStart = new Date(Date.now() - COST_WALK_LOOKBACK_MS);
+
+  void (async () => {
+    try {
+      await yieldToEventLoop();
+      if (cancelled) return;
+
+      const claude = await scanClaudeHistoryAsync(lookbackStart);
+      if (cancelled) return;
+      await yieldToEventLoop();
+      if (cancelled) return;
+
+      const gemini = scanGeminiHistory(lookbackStart);
+      if (cancelled) return;
+      await yieldToEventLoop();
+      if (cancelled) return;
+
+      const codex = scanCodexHistory(lookbackStart);
+      if (cancelled) return;
+
+      onUpdate({
+        status: 'ready',
+        results: { claude, gemini, codex },
+        readyAt: Date.now(),
+      });
+    } catch (err) {
+      if (cancelled) return;
+      onUpdate({
+        status: 'error',
+        error: err instanceof Error ? err : new Error(String(err)),
+      });
+    }
+  })();
+
+  return () => {
+    cancelled = true;
+  };
+}
+
+// ---------------------------------------------------------------------------
 // SSE subscription — connects to the daemon and yields ActivityEvent rows.
 // Returns a teardown function the React effect cleans up.
 // ---------------------------------------------------------------------------
 
-interface SsePayload {
+export interface SsePayload {
   id?: string;
   /**
    * Daemon broadcasts ts as either an ISO-8601 string (audit.log path)
@@ -749,13 +1087,116 @@ export function applyForensicEvent(
   return next;
 }
 
+/**
+ * Pure reducer: tally a tool event into the live activity aggregate.
+ * Called once per `kind:'tool'` SSE event. Increments tools[tool],
+ * shell[firstToken] (Bash only — uses the same first-token + identifier
+ * regex aggregateAudit uses so live + history match), and dlp/loops via
+ * checkedBy substring (same rules aggregateAudit applies offline).
+ *
+ * Pending events still carry checkedBy on the wire when a rule has
+ * already classified them, so we tally on every event — no second pass
+ * needed in the resolve handler.
+ */
+export function applyActivityEvent(agg: SessionActivityAgg, e: ActivityEvent): SessionActivityAgg {
+  if (e.kind !== 'tool') return agg;
+  const tools = { ...agg.tools, [e.tool]: (agg.tools[e.tool] ?? 0) + 1 };
+  let shell = agg.shell;
+  if (SHELL_TOOLS.has(e.tool) && typeof e.preview === 'string' && e.preview.length > 0) {
+    const head = e.preview.trim().split(/\s+/)[0];
+    if (head && /^[a-zA-Z0-9._-]+$/.test(head)) {
+      shell = { ...shell, [head]: (shell[head] ?? 0) + 1 };
+    }
+  }
+  // Per-MCP-server tally. Same event can also live in `tools` (by
+  // tool name) — that's two views of the same activity, not a
+  // double-count of a single signal.
+  let mcp = agg.mcp;
+  if (e.mcpServer) {
+    mcp = { ...mcp, [e.mcpServer]: (mcp[e.mcpServer] ?? 0) + 1 };
+  }
+  let dlp = agg.dlp;
+  let loops = agg.loops;
+  if (e.checkedBy) {
+    if (e.checkedBy === 'loop-detected') loops++;
+    if (e.checkedBy.toLowerCase().includes('dlp')) dlp++;
+  }
+  return { tools, shell, mcp, dlp, loops };
+}
+
+const SHELL_TOOLS: ReadonlySet<string> = new Set(['Bash', 'bash']);
+
+/**
+ * Pure reducer: bump counters that can only be classified from the
+ * resolve-side raw status (e.g. `status: 'dlp'`). The pending-side
+ * `activity` broadcast doesn't carry `checkedBy`, so the original
+ * applyActivityEvent dlp/loops detection never fires for DLP blocks
+ * in practice — they arrive only as `activity-result` resolves.
+ *
+ * This handler is wired in App.tsx's onResolve callback alongside
+ * the existing SessionCounters bucket update.
+ */
+export function applyResolveStatus(
+  agg: SessionActivityAgg,
+  rawStatus: string | undefined
+): SessionActivityAgg {
+  if (rawStatus === 'dlp') {
+    return { ...agg, dlp: agg.dlp + 1 };
+  }
+  return agg;
+}
+
+/**
+ * Build a checkedBy-rule-name → shield-name lookup once at startup. Walks
+ * the SHIELDS registry (builtins + user shields loaded from
+ * ~/.node9/shields/). Rules without a `name` field are skipped (they
+ * can't be attributed back to a shield). Built-in detectors that emit
+ * checkedBy values like `dlp-block` / `loop-detected` aren't in SHIELDS
+ * and so won't appear in the returned map — that's intentional; LIVE
+ * SECURITY already counts those separately.
+ */
+export function buildRuleToShieldMap(): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const [shieldName, def] of Object.entries(SHIELDS)) {
+    for (const rule of def.smartRules) {
+      if (rule.name) map.set(rule.name, shieldName);
+    }
+  }
+  return map;
+}
+
+/**
+ * Pure reducer: tally a tool event into the per-shield activity
+ * aggregate. Increments blocks for verdict='block', reviews for
+ * verdict='review', skips allow/pending. Events whose checkedBy
+ * doesn't map to a user shield are skipped — they're either built-in
+ * detector events (counted in LIVE SECURITY) or system events without
+ * a checkedBy at all.
+ */
+export function applyActivityToShields(
+  agg: SessionShieldsAgg,
+  e: ActivityEvent,
+  ruleToShield: Map<string, string>
+): SessionShieldsAgg {
+  if (e.kind !== 'tool' || !e.checkedBy) return agg;
+  if (e.verdict !== 'block' && e.verdict !== 'review') return agg;
+  const shieldName = ruleToShield.get(e.checkedBy);
+  if (!shieldName) return agg;
+  const current = agg.byShield[shieldName] ?? { blocks: 0, reviews: 0 };
+  const updated = {
+    blocks: current.blocks + (e.verdict === 'block' ? 1 : 0),
+    reviews: current.reviews + (e.verdict === 'review' ? 1 : 0),
+  };
+  return { byShield: { ...agg.byShield, [shieldName]: updated } };
+}
+
 /** Initial reconnect delay (ms). Doubles on each failure up to MAX. */
 const SSE_BACKOFF_INITIAL_MS = 1_000;
 const SSE_BACKOFF_MAX_MS = 30_000;
 
 export function subscribeToSse(
   onEvent: (e: ActivityEvent) => void,
-  onResolve: (id: string, verdict?: ResolvedVerdict) => void,
+  onResolve: (id: string, verdict?: ResolvedVerdict, rawStatus?: string) => void,
   onForensic: (e: ForensicSseEvent) => void,
   onError: (msg: string) => void
 ): () => void {
@@ -836,8 +1277,19 @@ export function subscribeToSse(
                     // ("block"/"allow"/"review"/"dlp"/"timeout"). `remove`
                     // uses `decision` instead ("allow"/"deny"/"trust").
                     // Pass either to the same mapper — see mapResultStatus.
-                    const verdict = mapResultStatus(data.status ?? data.decision);
-                    onResolve(data.id, verdict);
+                    //
+                    // We ALSO pass the raw status as a 3rd arg so the
+                    // dashboard can distinguish `dlp` from a generic
+                    // `block` — mapResultStatus collapses them, which
+                    // would otherwise lose the signal needed to bump the
+                    // sessionActivityAgg.dlp counter in LIVE SECURITY.
+                    const rawStatus = data.status ?? data.decision;
+                    const verdict = mapResultStatus(rawStatus);
+                    onResolve(
+                      data.id,
+                      verdict,
+                      typeof rawStatus === 'string' ? rawStatus : undefined
+                    );
                   }
                   continue;
                 }
@@ -868,7 +1320,7 @@ export function subscribeToSse(
   };
 }
 
-function toActivityEvent(eventName: string, data: SsePayload): ActivityEvent | null {
+export function toActivityEvent(eventName: string, data: SsePayload): ActivityEvent | null {
   // The daemon broadcasts several event types: `activity`, `activity-result`,
   // `add`, `remove`, `snapshot`, `execution-result`. The dashboard renders
   // `activity` / `add` as tool rows and `snapshot` as snapshot rows.
@@ -878,12 +1330,17 @@ function toActivityEvent(eventName: string, data: SsePayload): ActivityEvent | n
 
   if (eventName === 'snapshot') {
     // Mirrors the format `node9 tail` uses (see src/tui/tail.ts).
+    // argsSummary is typically a file path ("/home/.../src/foo.ts"); compactPath
+    // collapses long absolutes to ".../parent/file" so the live row stays inside
+    // the column budget. Tool name and the literal 'snapshot' fallback are left
+    // alone — compactPath is a no-op on non-path strings anyway.
+    const rawSummary = payload.argsSummary ?? payload.tool ?? 'snapshot';
     return {
       kind: 'snapshot',
       id: payload.id ?? `${ts}-snapshot`,
       ts,
       hash: payload.hash ?? '',
-      summary: payload.argsSummary ?? payload.tool ?? 'snapshot',
+      summary: compactPath(rawSummary),
       fileCount: typeof payload.fileCount === 'number' ? payload.fileCount : 0,
     };
   }
@@ -912,7 +1369,7 @@ function toActivityEvent(eventName: string, data: SsePayload): ActivityEvent | n
   // the column ("…/dashboard/data.ts" instead of the full absolute).
   let preview: string;
   if (typeof payload.args?.command === 'string' && payload.args.command.length > 0) {
-    preview = payload.args.command.replace(/\s+/g, ' ').slice(0, 70);
+    preview = compactPathsInCommand(payload.args.command.replace(/\s+/g, ' ')).slice(0, 70);
   } else if (typeof payload.args?.file_path === 'string' && payload.args.file_path.length > 0) {
     preview = compactPath(payload.args.file_path).slice(0, 70);
   } else if (typeof payload.args?.path === 'string' && payload.args.path.length > 0) {

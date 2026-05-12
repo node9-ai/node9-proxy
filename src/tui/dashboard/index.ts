@@ -67,10 +67,36 @@ export async function startMonitor(): Promise<void> {
   });
 
   enterAltScreen();
+
+  // Bypass ink's useInput for the quit key. When the [2] view is loading,
+  // four async walks (audit log, Claude cost, Codex cost, scan walker) all
+  // run concurrently — even though each yields between chunks, the
+  // microtask queue stays full enough that ink can fall behind on
+  // keypress dispatch. Users press q over and over with no response.
+  //
+  // This direct stdin listener fires off Node's Poll phase as soon as
+  // a keystroke arrives, before anything else. We only handle q (0x71)
+  // and Ctrl+C (0x03); every other byte falls through to ink unchanged.
+  // Trade-off: q quits even while the user is typing into the LIVE filter
+  // (Esc to clear and re-enter that flow). The reliability win is worth
+  // the corner-case cost.
+  const onStdinByte = (chunk: Buffer | string): void => {
+    const buf = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+    if (buf.length === 0) return;
+    const byte = buf[0];
+    if (byte === 0x71 /* q */ || byte === 0x03 /* Ctrl+C */) {
+      exitAltScreen();
+      process.stdout.write('\n');
+      process.exit(0);
+    }
+  };
+  process.stdin.on('data', onStdinByte);
+
   try {
     const instance = render(React.createElement(App));
     await instance.waitUntilExit();
   } finally {
+    process.stdin.off('data', onStdinByte);
     exitAltScreen();
   }
 }

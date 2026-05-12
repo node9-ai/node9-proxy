@@ -15,7 +15,7 @@
 // Input — the aggregated state collected by the action handler
 // ---------------------------------------------------------------------------
 
-export type ReportPeriod = 'today' | '7d' | '30d' | 'month';
+export type ReportPeriod = 'today' | '7d' | '30d' | '90d' | 'month';
 
 export interface BuildReportJsonInput {
   period: ReportPeriod;
@@ -43,16 +43,29 @@ export interface BuildReportJsonInput {
   cost: {
     claudeUSD: number;
     codexUSD: number;
+    /** Gemini cost — totaled by walking ~/.gemini/tmp/<proj>/chats/
+     *  session JSONLs and pricing each turn via LiteLLM. Preview-model
+     *  rates fall back to gemini-2.5-flash (see report-audit.ts header
+     *  comment for the Gemini section). */
+    geminiUSD: number;
     inputTokens: number;
     outputTokens: number;
     cacheWriteTokens: number;
     cacheReadTokens: number;
     byDay: Map<string, number>; // ISO day (YYYY-MM-DD) → USD
     byModel: Map<string, number>; // Claude model id → USD
+    /** Project (decoded cwd) → cost + token rollup. Drives the
+     *  [2] TOP PROJECTS panel. */
+    byProject: Map<string, { cost: number; inputTokens: number; outputTokens: number }>;
   };
 
   toolMap: Map<string, { calls: number; blocked: number }>;
   blockMap: Map<string, number>;
+  /** Per-specific-rule fire count (e.g. `shield:project-jail:block-read-ssh`
+   *  → N). Distinct from blockMap which groups by the generic
+   *  checkedBy tag. Drives the [2] Report SHIELDS panel's per-shield
+   *  attribution. */
+  ruleMap: Map<string, number>;
   agentMap: Map<string, number>;
   mcpMap: Map<string, number>;
   dailyMap: Map<string, { calls: number; blocked: number }>;
@@ -97,6 +110,7 @@ export interface ReportJsonOutput {
     totalUSD: number;
     claudeUSD: number;
     codexUSD: number;
+    geminiUSD: number;
     inputTokens: number;
     outputTokens: number;
     cacheWriteTokens: number;
@@ -158,9 +172,10 @@ export function buildReportJson(input: BuildReportJsonInput): ReportJsonOutput {
     },
 
     cost: {
-      totalUSD: input.cost.claudeUSD + input.cost.codexUSD,
+      totalUSD: input.cost.claudeUSD + input.cost.codexUSD + input.cost.geminiUSD,
       claudeUSD: input.cost.claudeUSD,
       codexUSD: input.cost.codexUSD,
+      geminiUSD: input.cost.geminiUSD,
       inputTokens: input.cost.inputTokens,
       outputTokens: input.cost.outputTokens,
       cacheWriteTokens: input.cost.cacheWriteTokens,

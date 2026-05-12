@@ -550,7 +550,10 @@ async function _authorizeHeadlessCore(
             args,
             'deny',
             'smart-rule-block-override',
-            meta,
+            // Same rationale as the smart-rule-block path above —
+            // pass the specific rule name so [2] SHIELDS can
+            // attribute this override-block to its owning shield.
+            { ...meta, ruleName: policyResult.ruleName },
             hashAuditArgs
           );
         if (approvers.cloud && creds?.apiKey)
@@ -584,7 +587,20 @@ async function _authorizeHeadlessCore(
         // Fall through to the race engine with the override label visible.
       } else {
         if (!isManual)
-          appendLocalAudit(toolName, args, 'deny', 'smart-rule-block', meta, hashAuditArgs);
+          appendLocalAudit(
+            toolName,
+            args,
+            'deny',
+            'smart-rule-block',
+            // Include policyResult.ruleName so the [2] Report SHIELDS
+            // panel can attribute this block to its specific shield
+            // (e.g. `shield:project-jail:block-read-ssh`) via the
+            // rule→shield map. checkedBy stays as the generic
+            // `smart-rule-block` for backward compat with existing
+            // log readers.
+            { ...meta, ruleName: policyResult.ruleName },
+            hashAuditArgs
+          );
         if (approvers.cloud && creds?.apiKey)
           auditLocalAllow(toolName, args, 'smart-rule-block', creds, meta, undefined, false, {
             ruleName: policyResult.ruleName,

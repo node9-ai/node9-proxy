@@ -57,6 +57,9 @@ const baseInput = {
   scanSignals: scan(),
   shieldStatus: shields(),
   forensicAgg: { ...EMPTY_SESSION_FORENSIC },
+  // Default: secure baseline (matches blast({ score: 100 })). Tests
+  // exercising the score-tier gating override this alongside `blast`.
+  effectiveScore: 100,
 };
 
 describe('computeHealthBadge', () => {
@@ -114,14 +117,22 @@ describe('computeHealthBadge', () => {
     expect(b.reasons.some((r) => r.includes('severe forensic'))).toBe(true);
   });
 
-  it('flips to critical when blast score < 25', () => {
-    const b = computeHealthBadge({ ...baseInput, blast: blast({ score: 24 }) });
+  it('flips to critical when effective score < 25', () => {
+    const b = computeHealthBadge({
+      ...baseInput,
+      blast: blast({ score: 24 }),
+      effectiveScore: 24,
+    });
     expect(b.severity).toBe('critical');
     expect(b.reasons).toContain('score 24/100');
   });
 
-  it('reports warning when score is 25-49', () => {
-    const b = computeHealthBadge({ ...baseInput, blast: blast({ score: 30 }) });
+  it('reports warning when effective score is 25-49', () => {
+    const b = computeHealthBadge({
+      ...baseInput,
+      blast: blast({ score: 30 }),
+      effectiveScore: 30,
+    });
     expect(b.severity).toBe('warning');
     expect(b.reasons).toContain('score 30/100');
   });
@@ -138,7 +149,12 @@ describe('computeHealthBadge', () => {
   it('reports warning on reachable blast paths', () => {
     const b = computeHealthBadge({
       ...baseInput,
-      blast: blast({ paths: ['/home/user/.ssh', '/home/user/.aws'] }),
+      blast: blast({
+        paths: [
+          { label: '/home/user/.ssh', description: '', score: 0 },
+          { label: '/home/user/.aws', description: '', score: 0 },
+        ],
+      }),
     });
     expect(b.severity).toBe('warning');
     expect(b.reasons).toContain('2 paths');
@@ -157,7 +173,10 @@ describe('computeHealthBadge', () => {
     const b = computeHealthBadge({
       ...baseInput,
       agg: emptyAgg({ dlpHits: 2 }),
-      blast: blast({ score: 30, paths: ['/home/user/.ssh'] }),
+      blast: blast({
+        score: 30,
+        paths: [{ label: '/home/user/.ssh', description: '', score: 0 }],
+      }),
       shieldStatus: shields({ inactive: ['block-force-push'] }),
     });
     expect(b.severity).toBe('critical');
@@ -171,6 +190,7 @@ describe('computeHealthBadge', () => {
       ...baseInput,
       agg: emptyAgg({ dlpHits: 1, loops: 1 }),
       blast: blast({ score: 10 }),
+      effectiveScore: 10,
       forensicAgg: { ...EMPTY_SESSION_FORENSIC, privilegeEscalation: 1 },
     });
     expect(b.severity).toBe('critical');
@@ -189,9 +209,9 @@ describe('computeHealthBadge', () => {
 
   it('omits hint on secure, includes hint on warning/critical', () => {
     expect(computeHealthBadge(baseInput).hint).toBeUndefined();
-    expect(computeHealthBadge({ ...baseInput, blast: blast({ score: 40 }) }).hint).toBe(
-      'see node9 scan'
-    );
+    expect(
+      computeHealthBadge({ ...baseInput, blast: blast({ score: 40 }), effectiveScore: 40 }).hint
+    ).toBe('see node9 scan');
     expect(computeHealthBadge({ ...baseInput, agg: emptyAgg({ dlpHits: 1 }) }).hint).toBe(
       'see node9 scan'
     );

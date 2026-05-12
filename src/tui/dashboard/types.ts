@@ -10,12 +10,22 @@ export type TimeWindow = 'now' | '1d' | '7d' | '30d' | '60d';
  *  swaps. See doc/roadmap/monitor-two-view.md for the full plan. */
 export type View = 'realtime' | 'report';
 
-/** Period selector for the Report view. Independent from TimeWindow
- *  (which is the realtime monitor's window-tabs concept that's being
+/** Period selector for the Report view. Re-exported from cli/render/report-json
+ *  so the dashboard, the `node9 report` CLI, and the shared aggregator
+ *  (cli/aggregate/report-audit) all agree on which periods exist. The four
+ *  values are bound to T/W/M hotkeys in the Report view's input handler.
+ *  Independent from TimeWindow (the realtime monitor's window-tabs concept,
  *  retired in phase 2). */
-export type ReportPeriod = '1d' | '7d' | '30d' | '90d';
+export type { ReportPeriod } from '../../cli/render/report-json.js';
+import type { ReportPeriod as _ReportPeriod } from '../../cli/render/report-json.js';
 
-export const REPORT_PERIODS: readonly ReportPeriod[] = ['1d', '7d', '30d', '90d'] as const;
+export const REPORT_PERIODS: readonly _ReportPeriod[] = [
+  'today',
+  '7d',
+  '30d',
+  '90d',
+  'month',
+] as const;
 
 export const TIME_WINDOWS: readonly TimeWindow[] = ['now', '1d', '7d', '30d', '60d'] as const;
 
@@ -98,18 +108,19 @@ export interface AuditAggregates {
   byShell: Array<{ cmd: string; count: number; blocked: number }>;
 }
 
-export interface BlastSnapshot {
-  score: number;
-  paths: string[]; // top reachable paths
-  envFindings: number;
-}
-
-/** Shield-config snapshot — names of shields registered (builtin + user)
- *  vs the names actually active in ~/.node9/shields.json. */
-export interface ShieldStatus {
-  active: string[];
-  inactive: string[];
-}
+// BlastPathInfo, BlastSnapshot, ShieldStatus, ProtectionSummary, and
+// PROTECTIVE_SHIELD_DISCOUNTS moved to src/protection.ts on 2026-05-12
+// so the CLI scan renderer can compute "+N pts if you enable
+// project-jail" without taking a layering inversion through
+// tui/dashboard/*. Re-exported here so existing monitor imports keep
+// working without call-site churn.
+export type {
+  BlastPathInfo,
+  BlastSnapshot,
+  ShieldStatus,
+  ProtectionSummary,
+} from '../../protection.js';
+export { PROTECTIVE_SHIELD_DISCOUNTS } from '../../protection.js';
 
 /** Forensic scan-signal counts — derived by walking ~/.claude/projects
  *  JSONL files and running the canonical extractor per line. Reflects
@@ -152,6 +163,46 @@ export const EMPTY_SESSION_FORENSIC: SessionForensicAgg = {
   longOutputRedacted: 0,
 };
 
+/** Live (since-monitor-opened) activity tally — feeds the new LIVE
+ *  ACTIVITY panel on Realtime (tools + shell distribution) and the dlp
+ *  / loops rows of LIVE SECURITY. Pure SSE accumulator: `tools[name]`
+ *  and `shell[firstToken]` increment on every `kind:'tool'` event;
+ *  `dlp` / `loops` increment when `checkedBy` matches the same rules
+ *  the audit aggregator uses. No history walks. */
+export interface SessionActivityAgg {
+  tools: Record<string, number>;
+  /** Bash first-token distribution (git, npm, rm, …). */
+  shell: Record<string, number>;
+  /** Per-MCP-server call distribution. Key = mcpServer name as it
+   *  appears on the activity event. Counts every tool event where
+   *  `mcpServer` is set, so the same event can show up in `tools`
+   *  (by tool name) AND in `mcp` (by server name). That's
+   *  intentional — they're two views of the same activity. */
+  mcp: Record<string, number>;
+  dlp: number;
+  loops: number;
+}
+
+export const EMPTY_SESSION_ACTIVITY: SessionActivityAgg = {
+  tools: {},
+  shell: {},
+  mcp: {},
+  dlp: 0,
+  loops: 0,
+};
+
+/** Live (since-monitor-opened) per-shield activity tally — feeds the
+ *  SHIELDS panel on Realtime. Keys are shield names (canonical, from
+ *  the SHIELDS registry); values split blocks vs reviews so the panel
+ *  can show which kind of action each shield is taking. Built-in
+ *  detectors (DLP / loops / privesc) don't map to user shields and so
+ *  don't appear here — they have their own counts in LIVE SECURITY. */
+export interface SessionShieldsAgg {
+  byShield: Record<string, { blocks: number; reviews: number }>;
+}
+
+export const EMPTY_SESSION_SHIELDS: SessionShieldsAgg = { byShield: {} };
+
 /** SSE 'forensic' event payload. Mirrors the ForensicEvent shape the
  *  daemon broadcasts in src/daemon/state.ts. Carries categorical
  *  metadata only — never raw matched content. */
@@ -188,3 +239,35 @@ export interface CostSnapshot {
   byModel: Array<{ model: string; costUSD: number; calls: number }>;
   loaded: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// Report [2] view — scan-walker cache state
+// ---------------------------------------------------------------------------
+
+import type { ScanResult } from '../../cli/commands/scan.js';
+
+/**
+ * Lazy cache for the agent-history scan walk. The dashboard's Report [2]
+ * view consumes scan-derived panels (LEAKS / LOOPS / TOP RULES) and the
+ * walk takes 1–2 s on warm machines, so it's deferred until the user
+ * actually presses [2]. State machine:
+ *
+ *   idle    — first dashboard mount, walk hasn't started yet
+ *   loading — startScanWalk() has been kicked off in the background;
+ *             scan-derived panels render a loading placeholder while
+ *             non-scan panels render normally
+ *   ready   — walk finished. results.{claude,gemini,codex} hold full
+ *             ScanResult triples; period filtering is in-memory after this
+ *   error   — walk threw; scan-derived panels render an error state with
+ *             [r] retry hint
+ */
+export type ScanCache =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | {
+      status: 'ready';
+      results: { claude: ScanResult; gemini: ScanResult; codex: ScanResult };
+      /** ms epoch when the walk finished — used to invalidate on [r] refresh. */
+      readyAt: number;
+    }
+  | { status: 'error'; error: Error };

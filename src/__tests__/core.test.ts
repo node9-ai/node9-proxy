@@ -1677,8 +1677,21 @@ describe('analyzeFsOperation', () => {
       'shield:project-jail:block-read-ssh'
     );
   });
+  // Relative-path bypass fix: an agent calling `cat .ssh/id_rsa` (cwd-relative,
+  // no leading separator) must still be blocked. Prior regex required a leading
+  // `[\/\\]` before `.ssh` which let this slip through.
+  it('blocks cat .ssh/id_rsa (relative, no leading separator)', () => {
+    expect(analyzeFsOperation('cat .ssh/id_rsa')?.ruleName).toBe(
+      'shield:project-jail:block-read-ssh'
+    );
+  });
   it('blocks less ~/.aws/credentials', () => {
     expect(analyzeFsOperation('less ~/.aws/credentials')?.ruleName).toBe(
+      'shield:project-jail:block-read-aws'
+    );
+  });
+  it('blocks cat .aws/credentials (relative, no leading separator)', () => {
+    expect(analyzeFsOperation('cat .aws/credentials')?.ruleName).toBe(
       'shield:project-jail:block-read-aws'
     );
   });
@@ -1687,10 +1700,53 @@ describe('analyzeFsOperation', () => {
       'shield:project-jail:block-read-env'
     );
   });
-  it('blocks cat ~/.npmrc', () => {
-    expect(analyzeFsOperation('cat ~/.npmrc')?.ruleName).toBe(
-      'shield:project-jail:block-read-credentials'
+  // Next.js / Vite gitignored override files — flagged as a gap by the
+  // node9-pr-agent security review (commit b0afbc2 era). The AST FS-op
+  // pattern used to miss these; now aligned with the JSON shield's regex.
+  it('blocks cat .env.development', () => {
+    expect(analyzeFsOperation('cat .env.development')?.ruleName).toBe(
+      'shield:project-jail:block-read-env'
     );
+  });
+  it('blocks cat .env.production.local (Next.js double-suffix)', () => {
+    expect(analyzeFsOperation('cat .env.production.local')?.ruleName).toBe(
+      'shield:project-jail:block-read-env'
+    );
+  });
+  it('blocks cat .env.staging.local', () => {
+    expect(analyzeFsOperation('cat .env.staging.local')?.ruleName).toBe(
+      'shield:project-jail:block-read-env'
+    );
+  });
+  it('blocks cat .env.development.local', () => {
+    expect(analyzeFsOperation('cat .env.development.local')?.ruleName).toBe(
+      'shield:project-jail:block-read-env'
+    );
+  });
+  // Intentional non-matches: dev fixtures don't trigger the rule.
+  it('does NOT block cat .env.example (dev fixture)', () => {
+    expect(analyzeFsOperation('cat .env.example')).toBeNull();
+  });
+  it('does NOT block cat .env.test (intentional skip)', () => {
+    expect(analyzeFsOperation('cat .env.test')).toBeNull();
+  });
+  it('reviews cat ~/.npmrc (credentials: review, not block)', () => {
+    const v = analyzeFsOperation('cat ~/.npmrc');
+    expect(v?.ruleName).toBe('shield:project-jail:review-read-credentials');
+    expect(v?.verdict).toBe('review');
+  });
+  // Kubernetes cluster credentials — flagged as missing from the AST
+  // FS-op regex by the node9-pr-agent security review even though the
+  // rule's own header comment listed .kube as covered. Now aligned.
+  it('reviews cat ~/.kube/config (Kubernetes cluster credentials)', () => {
+    const v = analyzeFsOperation('cat ~/.kube/config');
+    expect(v?.ruleName).toBe('shield:project-jail:review-read-credentials');
+    expect(v?.verdict).toBe('review');
+  });
+  it('reviews cat ~/.docker/config.json', () => {
+    const v = analyzeFsOperation('cat ~/.docker/config.json');
+    expect(v?.ruleName).toBe('shield:project-jail:review-read-credentials');
+    expect(v?.verdict).toBe('review');
   });
   it('does NOT block JSON test payload containing cat ~/.ssh/id_rsa as a string', () => {
     // The historical FP: project-jail regex matched the literal string inside

@@ -11,53 +11,57 @@
 // `node9 monitor`. Internal symbols use neither name as gospel —
 // the components are named for what they show, not the command.
 import React, { useEffect, useMemo, useState } from 'react';
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
 import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import {
+  EMPTY_SESSION_ACTIVITY,
   EMPTY_SESSION_FORENSIC,
+  EMPTY_SESSION_SHIELDS,
   windowStartMs,
   type ActivityEvent,
   type AuditAggregates,
   type BlastSnapshot,
-  type CostSnapshot,
   type ForensicSseEvent,
   type ReportPeriod,
+  type ScanCache,
   type ScanSignalsSnapshot,
+  type SessionActivityAgg,
   type SessionForensicAgg,
+  type SessionShieldsAgg,
   type ShieldStatus,
   type TimeWindow,
   type View,
 } from './types.js';
 import {
   aggregateAudit,
-  aggregateCost,
+  applyActivityEvent,
+  applyActivityToShields,
   applyForensicEvent,
-  buildCostBaseline,
+  applyResolveStatus,
+  buildRuleToShieldMap,
+  computeProtection,
   loadBlast,
-  loadCostEntries,
-  loadScanSignals,
+  loadReportAuditAsync,
   loadShieldStatus,
-  readAuditEntries,
-  subtractCostBaseline,
+  readAuditEntriesAsync,
+  startScanWalk,
   submitDecision,
   subscribeToSse,
 } from './data.js';
 import { computeHealthBadge } from './health.js';
-import type { DailyEntry } from '../../costSync.js';
+import type { AggregateResult } from '../../cli/aggregate/report-audit.js';
 import {
   Header,
-  HighLevel,
+  LiveActivity,
   LiveLog,
+  LiveSecurity,
   NotificationArea,
-  Report,
-  ReportView,
-  Risk,
+  SessionCounters,
+  Shields,
   StatusBar,
   type ApprovalStatus,
   type Notification,
 } from './panels.js';
+import { ReportView } from './views/report/index.js';
 
 const LIVE_BUFFER_CAP = 100;
 const AUDIT_REFRESH_MS = 30_000;
@@ -91,16 +95,42 @@ const BLAST_REFRESH_MS = 5 * 60_000;
 // its status/scrollbar — either way header scrolled off the top once
 // LIVE filled. Reserving 1 extra row makes the dashboard 1 row shorter
 // than the terminal so there's no overflow.
-const FIXED_PANELS_HEIGHT = 30;
-/** Minimum content rows LIVE renders. 1 instead of a higher floor —
- *  on terminals smaller than 33 rows we'd rather LIVE shrink and keep
- *  the Header visible than over-claim space and push the dashboard
- *  past the terminal height (the outer Box's overflow="hidden" then
- *  clips the bottom panels instead of scrolling the top off). */
-const LIVE_MIN_ROWS = 1;
+const FIXED_PANELS_HEIGHT = 40;
+/** Minimum content rows LIVE renders. Bumped to 11 so the live event
+ *  stream always has useful depth even when the new LIVE SECURITY /
+ *  LIVE ACTIVITY panels grow the fixed-chrome budget. On terminals
+ *  too small to fit chrome + 11 LIVE rows, the outer Box's
+ *  overflow="hidden" clips the bottom (Setup / StatusBar) instead of
+ *  shrinking LIVE — the live feed is the primary signal, the rest is
+ *  context. */
+const LIVE_MIN_ROWS = 11;
 const NOTIFICATION_RECENT_WINDOW_MS = 60_000;
 const RESOLVED_HOLD_MS = 5_000;
-const COST_REFRESH_MS = 5 * 60_000;
+
+/**
+ * Quit-key dispatch — extracted as a pure function so the rules are unit-
+ * testable. Three conventions, in priority order:
+ *   1. Ctrl+C always quits, regardless of mode. Terminal convention; the
+ *      previous code path swallowed it inside an active approval card,
+ *      which trapped users.
+ *   2. `q` quits in every mode EXCEPT filter-input mode (where `q` must
+ *      type a literal `q` into the filter — that's by design).
+ *   3. Anything else: caller continues with normal dispatch.
+ *
+ * Note: pendingApproval state does NOT block quit anymore. The previous
+ * handler returned early on a card without checking q/ctrl+c, so users
+ * could see the dashboard freeze visually until the daemon's own
+ * approvalTimeoutMs fired.
+ */
+export function shouldQuit(
+  input: string,
+  key: { ctrl?: boolean },
+  context: { filterInputMode: boolean }
+): boolean {
+  if (key.ctrl === true && input === 'c') return true;
+  if (input === 'q' && !context.filterInputMode) return true;
+  return false;
+}
 /** Once a non-approval notification (block/review/loop) is shown,
  *  don't replace it with a newer non-approval until this elapses.
  *  Stops the area from flickering when many blocks fire in a burst.
@@ -130,9 +160,19 @@ export function App(): React.ReactElement {
   // do NOT touch this — keeping it manual-only makes it a clean
   // "did my keypress work?" diagnostic.
   const [lastRefreshAt, setLastRefreshAt] = useState<number>(() => Date.now());
-  // Period setter wires up in phase 5 (period picker keys). Phase 1 just
-  // shows the default in the stub Report view.
-  const [reportPeriod] = useState<ReportPeriod>('7d');
+  // Period selector for the Report [2] view. Default '7d' matches the CLI
+  // (`node9 report --period 7d`). T/W/M hotkeys below set today/7d/30d.
+  // The 'month' value is reachable via the CLI but not the dashboard —
+  // M maps to 30d (rolling) here, which is the more common user intent.
+  const [reportPeriod, setReportPeriod] = useState<ReportPeriod>('7d');
+  // Audit aggregate for Report [2]. Re-loaded by useEffect when the user
+  // switches to view='report' or changes the period. Null while initial
+  // load runs (just one tick — sync ~10ms).
+  const [reportAudit, setReportAudit] = useState<AggregateResult | null>(null);
+  // Scan-walk cache for Report [2]. Phase 3b plumbed it; phase 3f starts
+  // consuming results. Lazy: walks only run on first [2] press, not at
+  // mount. See loadReportAudit / startScanWalk in data.ts.
+  const [scanCache, setScanCache] = useState<ScanCache>({ status: 'idle' });
   // Realtime view is "since monitor opened" — phase 2 of the two-view
   // restructure. The TimeWindow concept stays (used by audit/cost aggs)
   // but is pinned to 'now' which means startMs = openedAt. Period
@@ -143,7 +183,11 @@ export function App(): React.ReactElement {
   const [agg, setAgg] = useState<AuditAggregates | null>(null);
   const [blast, setBlast] = useState<BlastSnapshot | null>(null);
   const [shieldStatus, setShieldStatus] = useState<ShieldStatus | null>(null);
-  const [scanSignals, setScanSignals] = useState<ScanSignalsSnapshot | null>(null);
+  // scanSignals is intentionally never set on Realtime (Phase 1: the
+  // walk that fed it was removed, since Risk now uses SSE-driven
+  // forensicAgg for live counts). Kept as a typed null reference so
+  // computeHealthBadge's union-typed input keeps working.
+  const [scanSignals] = useState<ScanSignalsSnapshot | null>(null);
   const [sessionForensicAgg, setSessionForensicAgg] = useState<SessionForensicAgg>(() => ({
     ...EMPTY_SESSION_FORENSIC,
   }));
@@ -159,9 +203,39 @@ export function App(): React.ReactElement {
   const forensicNotifyCooldownRef = React.useRef<Map<ForensicSseEvent['category'], number>>(
     new Map()
   );
-  const [costEntries, setCostEntries] = useState<DailyEntry[] | null>(null);
-  const [skillsPinned] = useState<number>(() => readSkillsPinned());
-  const [mcpPinned] = useState<number>(() => readMcpPinned());
+  // Tiny "Since Open" counter strip on Realtime — pure SSE accumulator,
+  // no history walks. Replaces the old HIGH LEVEL panel which needed
+  // ~/.claude/projects walks for cost. The counters reset on mount and
+  // grow as SSE activity events arrive. Cost is intentionally absent —
+  // it lives in [2] Report now.
+  const [sessionCounters, setSessionCounters] = useState({
+    events: 0,
+    allow: 0,
+    block: 0,
+    review: 0,
+  });
+  // Live activity tally — feeds the new LIVE ACTIVITY panel (tools +
+  // shell distribution) and the dlp/loops rows of LIVE SECURITY. Pure
+  // SSE accumulator; updates on every kind:'tool' event via
+  // applyActivityEvent.
+  const [sessionActivityAgg, setSessionActivityAgg] = useState<SessionActivityAgg>(() => ({
+    ...EMPTY_SESSION_ACTIVITY,
+    tools: {},
+    shell: {},
+    mcp: {},
+  }));
+  // Per-shield activity tally — feeds the SHIELDS panel. Built once at
+  // mount, the ruleToShield map is a small (~30-entry) Map; lookups are
+  // O(1) and the reducer is pure, so cost per event is microseconds.
+  const ruleToShieldRef = React.useRef<Map<string, string>>(buildRuleToShieldMap());
+  const [sessionShieldsAgg, setSessionShieldsAgg] = useState<SessionShieldsAgg>(() => ({
+    ...EMPTY_SESSION_SHIELDS,
+    byShield: {},
+  }));
+  // (skillsPinned / mcpPinned counters were inputs to the old HIGH LEVEL
+  // panel; they're no longer rendered on Realtime in Phase 1. The
+  // readSkillsPinned / readMcpPinned helpers below are kept for [2]
+  // Report's HighLevel which still needs them.)
   // Pending approval — most-recent event that needs human action.
   // Set when an `add` event arrives (or any tool event with verdict
   // 'review' / 'pending'). Cleared on resolve via SSE, on user action,
@@ -210,6 +284,69 @@ export function App(): React.ReactElement {
   // RISK/Realtime cleanup for consistency. To see history, switch to
   // [2] Report view.
 
+  // Report [2] data — re-aggregates the audit log when the user is on
+  // the Report view and the period changes (or on manual [r] refresh).
+  // Cheap (~10ms) so we can be liberal with re-runs. The scan walk is
+  // separate (lazy + cached) — only kicks off the first time the user
+  // presses [2], doesn't run while sitting on Realtime.
+  useEffect(() => {
+    if (view !== 'report') return;
+    // loadReportAuditAsync uses readAuditEntriesAsync internally so the
+    // JSON.parse loop yields between 1k-line chunks. The aggregator's
+    // cost-walk pass (claude / codex JSONLs) is still synchronous — that's
+    // the job of the scan-walker refactor. For now, this change alone
+    // removes the audit-parse component of the [2] freeze; the user still
+    // sees a brief pause from the cost walks until that lands.
+    setReportAudit(null);
+    let cancelled = false;
+    void loadReportAuditAsync(reportPeriod).then((result) => {
+      if (cancelled) return;
+      setReportAudit(result);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [view, reportPeriod, lastRefreshAt]);
+
+  // Scan walk auto-starts when the user enters [2] Report. The walker
+  // is async (chunked + 7d mtime filter) so this is sub-second on most
+  // installs — the spinner in LEAKS / LOOPS / TOP RULES gives feedback
+  // when it isn't. The cancel fn is stashed in this ref so leaving [2]
+  // can stop a walk cleanly mid-flight; [r] resets to idle which
+  // re-fires the effect.
+  const scanWalkCancelRef = React.useRef<(() => void) | null>(null);
+  useEffect(() => {
+    // Leaving [2]: cancel any in-flight walk and reset to idle so the
+    // next [2] entry can start fresh.
+    if (view !== 'report') {
+      const cancel = scanWalkCancelRef.current;
+      if (cancel) {
+        cancel();
+        scanWalkCancelRef.current = null;
+        setScanCache((cur) => (cur.status === 'loading' ? { status: 'idle' } : cur));
+      }
+      return;
+    }
+    // Entering [2] with no cached scan: auto-start the walk. The
+    // deps-loop bug that used to prevent this (scanCache.status in
+    // deps caused an infinite cancel/restart cycle) is fixed by
+    // keying on lastRefreshAt instead. [r] forces a re-walk by
+    // resetting scanCache to idle, which is in this effect's body
+    // (no longer in deps) so it re-fires only on view / refresh
+    // changes — never on internal status transitions.
+    if (scanCache.status === 'idle') {
+      scanWalkCancelRef.current = startScanWalk((cache) => {
+        setScanCache(cache);
+        if (cache.status === 'ready' || cache.status === 'error') {
+          scanWalkCancelRef.current = null;
+        }
+      });
+    }
+    // Intentional minimal deps: scanCache.status is updated *inside*
+    // this effect (idle→loading→ready). Putting it in deps caused an
+    // infinite cancel/restart loop. Re-run only on view + refresh.
+  }, [view, lastRefreshAt]);
+
   // SSE subscription — runs once, fed by daemon.
   useEffect(() => {
     const teardown = subscribeToSse(
@@ -234,6 +371,21 @@ export function App(): React.ReactElement {
           return next.length > LIVE_BUFFER_CAP ? next.slice(next.length - LIVE_BUFFER_CAP) : next;
         });
         setSseError(undefined);
+        // Increment Realtime "Since Open" counters for tool events.
+        // Snapshot rows aren't tool calls, skip them. A 'pending' verdict
+        // means the user hasn't decided yet — count it as an event but
+        // don't bucket into allow/block/review until the result arrives
+        // via the resolve handler below.
+        if (e.kind === 'tool') {
+          setSessionCounters((c) => ({
+            events: c.events + 1,
+            allow: c.allow + (e.verdict === 'allow' ? 1 : 0),
+            block: c.block + (e.verdict === 'block' ? 1 : 0),
+            review: c.review + (e.verdict === 'review' ? 1 : 0),
+          }));
+          setSessionActivityAgg((prev) => applyActivityEvent(prev, e));
+          setSessionShieldsAgg((prev) => applyActivityToShields(prev, e, ruleToShieldRef.current));
+        }
         // verdict === 'review' on a regular `activity` event is also a
         // pending-approval signal (shield/rule explicitly asked for
         // review without queuing through the 'add' channel).
@@ -242,17 +394,39 @@ export function App(): React.ReactElement {
           setApprovalStatus({ kind: 'idle' });
         }
       },
-      (resolvedId, finalVerdict) => {
+      (resolvedId, finalVerdict, rawStatus) => {
         // Daemon resolved a pending entry (`activity-result` or
         // `remove`). Update the matching LIVE row's verdict so it
         // stops rendering as `pending`, and clear the approval card
         // if it was tracking this id.
+        //
+        // rawStatus distinguishes `dlp` from a generic `block` — the
+        // mapResultStatus collapse loses that, so we bump
+        // sessionActivityAgg.dlp here based on the raw value. Without
+        // this, DLP blocks (which arrive only as `activity-result`
+        // resolves with status='dlp', not as pending events with a
+        // checkedBy field) silently fail to register in LIVE SECURITY.
+        setSessionActivityAgg((prev) => applyResolveStatus(prev, rawStatus));
         if (finalVerdict) {
-          setEvents((prev) =>
-            prev.map((e) =>
+          setEvents((prev) => {
+            const target = prev.find((e) => e.kind === 'tool' && e.id === resolvedId);
+            // Counter delta: the pending event was already counted in
+            // `events` when it arrived, but its allow/block/review
+            // bucket was 0 (verdict was 'pending'). Now that the final
+            // verdict is in, bump the matching bucket so the
+            // SessionCounters strip stays consistent.
+            if (target && target.kind === 'tool' && target.verdict !== finalVerdict) {
+              setSessionCounters((c) => ({
+                events: c.events,
+                allow: c.allow + (finalVerdict === 'allow' ? 1 : 0),
+                block: c.block + (finalVerdict === 'block' ? 1 : 0),
+                review: c.review + (finalVerdict === 'review' ? 1 : 0),
+              }));
+            }
+            return prev.map((e) =>
               e.kind === 'tool' && e.id === resolvedId ? { ...e, verdict: finalVerdict } : e
-            )
-          );
+            );
+          });
         }
         // Universal resolution flash: if the resolved id matches the
         // dashboard's pendingApproval, capture it as resolvedApproval
@@ -302,17 +476,28 @@ export function App(): React.ReactElement {
     return teardown;
   }, []);
 
-  // Audit aggregation — recomputes when window changes or every 30s.
+  // Audit aggregation — gated to [2] Report view (Phase 1). On Realtime,
+  // agg stays null and the Risk panel renders zero history counts; live
+  // SSE-driven `forensicAgg` keeps the panel informative without needing
+  // a history walk. When the user enters [2], this effect kicks off the
+  // chunked async read; the [r] handler also re-fires it on demand.
   useEffect(() => {
-    const recompute = () => {
-      const entries = readAuditEntries();
-      const startMs = windowStartMs(window, openedAt);
-      setAgg(aggregateAudit(entries, startMs));
+    if (view !== 'report') return;
+    let cancelled = false;
+    const recompute = (): void => {
+      void readAuditEntriesAsync().then((entries) => {
+        if (cancelled) return;
+        const startMs = windowStartMs(window, openedAt);
+        setAgg(aggregateAudit(entries, startMs));
+      });
     };
     recompute();
     const id = setInterval(recompute, AUDIT_REFRESH_MS);
-    return () => clearInterval(id);
-  }, [window, openedAt]);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [view, window, openedAt]);
 
   // Blast — once at start, then every 5 min. `r` keypress also triggers below.
   useEffect(() => {
@@ -321,73 +506,50 @@ export function App(): React.ReactElement {
     return () => clearInterval(id);
   }, []);
 
-  // Shield status — same cadence as blast (cheap fs read; rarely changes).
-  // Surfaces inactive shields at the bottom of the RISK panel.
+  // Shield status — re-read every 5s so toggling a shield via
+  // `node9 shield enable/disable` is reflected promptly in the
+  // RISK box and SHIELDS panel. Previously this shared the 5-min
+  // BLAST_REFRESH_MS cadence, which made shield toggles look like
+  // they did nothing until the next blast tick or a manual [r].
+  // The read is cheap (small JSON file under ~/.node9/).
   useEffect(() => {
     setShieldStatus(loadShieldStatus());
-    const id = setInterval(() => setShieldStatus(loadShieldStatus()), BLAST_REFRESH_MS);
+    const id = setInterval(() => setShieldStatus(loadShieldStatus()), 5_000);
     return () => clearInterval(id);
   }, []);
 
-  // Forensic scan signals (PII / sensitive-file-reads / etc.) — async
-  // because the JSONL walk takes 5-10s. Same async pattern as cost.
-  // Render shows '…' placeholder until first walk completes; never
-  // blocks dashboard mount.
-  useEffect(() => {
-    let cancelled = false;
-    const loadAndSet = () => {
-      loadScanSignals().then((s) => {
-        if (!cancelled) setScanSignals(s);
-      });
-    };
-    loadAndSet();
-    const id = setInterval(loadAndSet, COST_REFRESH_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, []);
-
-  // Cost — async because collectEntries() walks every JSONL under
-  // ~/.claude/projects (1-5s on a heavy install). Render shows
-  // "loading…" placeholder until the first walk completes.
+  // Forensic scan signals (PII / sensitive-file-reads / etc.) — async +
+  // chunked: walks ~/.claude/projects per-batch with setImmediate yields
+  // so the dashboard repaint and keypress dispatch keep working during
+  // the walk. Render shows '…' placeholder until first walk completes.
   //
-  // Baseline: snapshot today's-and-prior-days totals from the FIRST
-  // load. Subsequent loads subtract the baseline so HIGH LEVEL shows
-  // SINCE-MONITOR-OPENED spend, not today's running total. costSync's
-  // data is day-granular per (date, model) so a "since 14:00" delta
-  // requires this kind of bookkeeping.
-  const costBaselineRef = React.useRef<Map<string, DailyEntry> | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    const loadAndSet = () => {
-      loadCostEntries().then((entries) => {
-        if (cancelled) return;
-        if (costBaselineRef.current === null) {
-          costBaselineRef.current = buildCostBaseline(entries);
-        }
-        setCostEntries(entries);
-      });
-    };
-    loadAndSet();
-    const id = setInterval(loadAndSet, COST_REFRESH_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, []);
-  const costSnapshot: CostSnapshot | null = useMemo(() => {
-    if (!costEntries) return null;
-    // Subtract the mount-time baseline so HIGH LEVEL shows since-open
-    // spend, not today's full running total. Baseline is null until
-    // the first loadCostEntries resolves; in that window we're rendering
-    // the placeholder anyway because costEntries is also null.
-    const baseline = costBaselineRef.current ?? new Map<string, DailyEntry>();
-    const adjusted = subtractCostBaseline(costEntries, baseline);
-    return aggregateCost(adjusted, windowStartMs(window, openedAt));
-  }, [costEntries, window, openedAt]);
+  // (loadCostEntries / loadScanSignals removed in the Phase 1 Realtime
+  // refactor: those walks fed the old HIGH LEVEL and Risk forensic-count
+  // panels which were either removed or are now SSE-driven via
+  // sessionForensicAgg. Cost analytics live in [2] Report exclusively
+  // now; the [r] handler still calls loadCostEntries on demand for the
+  // Report view's HighLevel panel further down.)
 
   useInput((input, key) => {
+    // Quit takes priority over every mode dispatch. q quits unless we're
+    // typing into the filter (where q must remain a printable character);
+    // Ctrl+C always quits, even with an approval card on screen. See
+    // shouldQuit() at module scope for the full rule table.
+    //
+    // useApp().exit() unmounts ink but does NOT terminate the process —
+    // active setInterval handles (cost refresh, blast refresh, hud
+    // tickers) and the SSE keep-alive socket all hold the event loop
+    // open. Without an explicit process.exit, q would *sometimes* quit
+    // and *sometimes* leave the user staring at a blank dashboard for
+    // 30+ seconds until the next interval fired. The 50ms timeout gives
+    // ink one render tick to flush its restore-cursor sequence so the
+    // terminal doesn't end up in a broken state.
+    if (shouldQuit(input, key, { filterInputMode })) {
+      exit();
+      setTimeout(() => process.exit(0), 50).unref();
+      return;
+    }
+
     // Filter input mode takes the highest priority — every printable
     // key edits the filter, Esc clears, Enter freezes. Approval card
     // and global hotkeys are suppressed.
@@ -464,26 +626,70 @@ export function App(): React.ReactElement {
       setFilter('');
       return;
     }
-    if (input === 'q' || (key.ctrl && input === 'c')) exit();
-    else if (input === '1') {
+    // q / Ctrl+C are handled at the top of the handler via shouldQuit().
+    if (input === '1') {
       // Top-level view switch. Realtime is the default — pressing 1
       // from anywhere returns here. See monitor-two-view.md.
       setView('realtime');
     } else if (input === '2') {
       setView('report');
+    } else if (view === 'report' && (input === 't' || input === 'T')) {
+      setReportPeriod('today');
+    } else if (view === 'report' && (input === 'w' || input === 'W')) {
+      setReportPeriod('7d');
+    } else if (view === 'report' && (input === 'm' || input === 'M')) {
+      // [M] maps to 30d (rolling 30 days), not 'month' (calendar month).
+      // 30d is what users almost always want; 'month' is reachable via
+      // the CLI flag `node9 report --period month` for parity.
+      setReportPeriod('30d');
+    } else if (view === 'report' && (input === 'n' || input === 'N')) {
+      // [N]inety = rolling 90 days. NOT calendar quarter. See
+      // getDateRange '90d' case for rationale. Letter N rather than Q
+      // so it doesn't collide with the global `q` quit key (long-
+      // standing TUI convention — vim, less, top, htop, etc).
+      setReportPeriod('90d');
+    } else if (
+      view === 'report' &&
+      (input === 'l' ||
+        input === 'b' ||
+        input === 'p' ||
+        input === 'o' ||
+        input === 's' ||
+        input === 'e' ||
+        input === 'L' ||
+        input === 'B' ||
+        input === 'P' ||
+        input === 'O' ||
+        input === 'S' ||
+        input === 'E')
+    ) {
+      // Reserved for drill-down sections (Leaks / Blocks / looPs / rules /
+      // Shields / Exposures). Phase 3c reserves; future phase wires them
+      // to per-section detail screens. Swallow now so the keys don't fall
+      // through to other handlers.
     } else if (input === 'r') {
-      // Manual refresh of audit + blast + shields (cheap) and cost
-      // + scan-signals (expensive, dispatched async so the keypress
-      // feels instant). Update lastRefreshAt synchronously so the
+      // Manual refresh. Updates lastRefreshAt synchronously so the
       // StatusBar timestamp ticks immediately — gives users visible
       // confirmation [r] fired even when underlying data didn't change.
       setLastRefreshAt(Date.now());
-      const entries = readAuditEntries();
-      setAgg(aggregateAudit(entries, windowStartMs(window, openedAt)));
+      // Audit aggregation is gated to [2] view, so we re-aggregate
+      // only when the user is actually on Report. Realtime stays a
+      // pure SSE stream.
+      if (view === 'report') {
+        void readAuditEntriesAsync().then((entries) => {
+          setAgg(aggregateAudit(entries, windowStartMs(window, openedAt)));
+        });
+        // Cancel any in-flight scan walk and reset cache to idle so the
+        // [2]-view effect (which watches lastRefreshAt) re-fires and
+        // starts a fresh walk. Without the explicit cancel + reset,
+        // the effect would see status='ready' or 'loading' and skip.
+        const prev = scanWalkCancelRef.current;
+        if (prev) prev();
+        scanWalkCancelRef.current = null;
+        setScanCache({ status: 'idle' });
+      }
       setBlast(loadBlast());
       setShieldStatus(loadShieldStatus());
-      void loadCostEntries().then(setCostEntries);
-      void loadScanSignals().then(setScanSignals);
     }
   });
 
@@ -582,7 +788,7 @@ export function App(): React.ReactElement {
 
     if (!candidate) {
       stickyRef.current = null;
-      return { kind: 'idle', blastScore: blast?.score ?? 100 };
+      return { kind: 'idle', protection: computeProtection(blast, shieldStatus) };
     }
 
     // If we've been showing a different sticky notification for less
@@ -612,7 +818,16 @@ export function App(): React.ReactElement {
     }
     return candidate;
     // tick is intentionally a dep so age windows + sticky expiry re-eval each second.
-  }, [pendingApproval, approvalStatus, resolvedApproval, recentForensic, events, blast, tick]);
+  }, [
+    pendingApproval,
+    approvalStatus,
+    resolvedApproval,
+    recentForensic,
+    events,
+    blast,
+    shieldStatus,
+    tick,
+  ]);
 
   // Unified security-health badge for the Header. Pure compute over
   // every signal source the dashboard already tracks. Re-runs whenever
@@ -638,6 +853,7 @@ export function App(): React.ReactElement {
         scanSignals,
         shieldStatus,
         forensicAgg: sessionForensicAgg,
+        effectiveScore: computeProtection(blast, shieldStatus).effective,
       }),
     [agg, blast, scanSignals, shieldStatus, sessionForensicAgg]
   );
@@ -652,7 +868,11 @@ export function App(): React.ReactElement {
   // overflowing children push the top off-screen — the Header walks off
   // the moment the panels fill in. With it, the bottom (Risk, StatusBar)
   // gets clipped instead.
-  const loading = !agg || !blast;
+  // Loading gate — only blast is required for first paint. agg is null
+  // on Realtime by design (audit aggregation gated to [2]) so we no
+  // longer wait on it. blast is a small synchronous FS read (~3 ms) so
+  // this gate clears almost immediately on mount.
+  const loading = !blast;
   return (
     <Box flexDirection="column" height="100%" overflow="hidden">
       <Header
@@ -667,12 +887,11 @@ export function App(): React.ReactElement {
         </Box>
       ) : view === 'realtime' ? (
         <>
-          <HighLevel
-            window={window}
-            agg={agg}
-            cost={costSnapshot}
-            skillsPinned={skillsPinned}
-            mcpPinned={mcpPinned}
+          <SessionCounters
+            events={sessionCounters.events}
+            allow={sessionCounters.allow}
+            block={sessionCounters.block}
+            review={sessionCounters.review}
           />
           <NotificationArea notification={notification} />
           <LiveLog
@@ -682,17 +901,30 @@ export function App(): React.ReactElement {
             filter={filter}
             filterInputMode={filterInputMode}
           />
-          <Report agg={agg} cost={costSnapshot} window={window} />
-          <Risk
-            agg={agg}
-            blast={blast}
-            shieldStatus={shieldStatus}
-            forensicAgg={sessionForensicAgg}
-            window={window}
-          />
+          {/* Two-row bottom: row 1 = LIVE SECURITY + SHIELDS (50/50,
+              each 2-column internal); row 2 = LIVE ACTIVITY (full
+              width, 3-column internal for TOOLS / SHELL / MCP). The
+              extra row of chrome buys breathing room — each section
+              has adequate width to render long names without
+              truncation. */}
+          <Box flexDirection="row" marginX={1}>
+            <LiveSecurity
+              blast={blast}
+              forensicAgg={sessionForensicAgg}
+              activityAgg={sessionActivityAgg}
+            />
+            <Shields shieldStatus={shieldStatus} shieldsAgg={sessionShieldsAgg} />
+          </Box>
+          <LiveActivity agg={sessionActivityAgg} />
         </>
       ) : (
-        <ReportView period={reportPeriod} />
+        <ReportView
+          period={reportPeriod}
+          audit={reportAudit}
+          blast={blast}
+          scanCache={scanCache}
+          shieldStatus={shieldStatus}
+        />
       )}
       <StatusBar view={view} lastRefreshAt={lastRefreshAt} />
     </Box>
@@ -718,26 +950,8 @@ function isNotificationWorthy(e: ActivityEvent): boolean {
   return true;
 }
 
-function readMcpPinned(): number {
-  try {
-    const p = path.join(os.homedir(), '.node9', 'mcp-pins.json');
-    if (!fs.existsSync(p)) return 0;
-    const parsed = JSON.parse(fs.readFileSync(p, 'utf8')) as {
-      servers?: Record<string, unknown>;
-    };
-    return parsed.servers ? Object.keys(parsed.servers).length : 0;
-  } catch {
-    return 0;
-  }
-}
-
-function readSkillsPinned(): number {
-  try {
-    const p = path.join(os.homedir(), '.node9', 'skill-pins.json');
-    if (!fs.existsSync(p)) return 0;
-    const parsed = JSON.parse(fs.readFileSync(p, 'utf8')) as { roots?: Record<string, unknown> };
-    return parsed.roots ? Object.keys(parsed.roots).length : 0;
-  } catch {
-    return 0;
-  }
-}
+// readMcpPinned / readSkillsPinned removed in Phase 1 — they fed the
+// HIGH LEVEL "skills pinned" / "mcp" counters which are no longer
+// rendered on Realtime. If [2] Report's HighLevel needs them later,
+// either inline the counts there or restore these helpers and pass
+// them in as ReportView props.

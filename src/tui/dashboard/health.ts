@@ -31,6 +31,11 @@ interface HealthInput {
   scanSignals: ScanSignalsSnapshot | null;
   shieldStatus: ShieldStatus | null;
   forensicAgg: SessionForensicAgg;
+  /** Effective score (blast adjusted for protective shields). The
+   *  header chip flips secure / at-risk on this, not on raw blast,
+   *  so enabling a jail shield visibly moves the badge. Computed by
+   *  computeProtection() in data.ts. */
+  effectiveScore: number;
 }
 
 /**
@@ -84,9 +89,9 @@ export function computeHealthBadge(input: HealthInput): HealthBadge {
   // Blast score below 25 — exposure threshold consistent with the
   // existing color scheme in panels.tsx (red below 50, but 25 is the
   // critical-tier cut for the badge specifically).
-  if (input.blast.score < 25) {
+  if (input.effectiveScore < 25) {
     severity = 'critical';
-    reasons.push(`score ${input.blast.score}/100`);
+    reasons.push(`score ${input.effectiveScore}/100`);
   }
 
   // ── WARNING signals ───────────────────────────────────────────────────────
@@ -116,9 +121,9 @@ export function computeHealthBadge(input: HealthInput): HealthBadge {
       severity = 'warning';
       reasons.push(`${input.shieldStatus.inactive.length} shields off`);
     }
-    if (input.blast.score >= 25 && input.blast.score < 50) {
+    if (input.effectiveScore >= 25 && input.effectiveScore < 50) {
       severity = 'warning';
-      reasons.push(`score ${input.blast.score}/100`);
+      reasons.push(`score ${input.effectiveScore}/100`);
     }
   }
 

@@ -343,9 +343,12 @@ describe('mcp-gateway tool call interception', () => {
       settings: {
         mode: 'standard',
         autoStartDaemon: false,
-        // approvalTimeoutMs is 100ms; give the gateway 2000ms total to leave
-        // enough overhead while keeping the test tight. If the auth engine hangs
-        // instead of rejecting, the test will fail with a clear timeout error.
+        // approvalTimeoutMs is 100ms; give the gateway 8000ms total wall-clock
+        // budget. The auth engine itself rejects in ~100ms, but node child-process
+        // startup under parallel test load can spike to 2-3 seconds on slower
+        // machines (we observed ETIMEDOUTs at ~2.1s with the previous 2000ms
+        // budget). 8000ms still catches a genuinely hung auth engine while
+        // surviving CPU contention from the rest of the suite.
         approvalTimeoutMs: 100,
         approvers: { native: false, browser: false, terminal: false, cloud: false },
       },
@@ -363,7 +366,7 @@ describe('mcp-gateway tool call interception', () => {
           }),
         ],
         home,
-        2000
+        8000
       );
       expect(r.status).toBe(0);
       const responses = parseResponses(r.stdout);
@@ -386,6 +389,7 @@ describe('mcp-gateway tool call interception', () => {
       settings: {
         mode: 'standard',
         autoStartDaemon: false,
+        // See comment on the previous test for the 8000ms rationale.
         approvalTimeoutMs: 100,
         approvers: { native: false, browser: false, terminal: false, cloud: false },
       },
@@ -404,7 +408,7 @@ describe('mcp-gateway tool call interception', () => {
           }),
         ],
         home,
-        2000
+        8000
       );
       expect(r.status).toBe(0);
       const responses = parseResponses(r.stdout);

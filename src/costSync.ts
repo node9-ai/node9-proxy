@@ -132,7 +132,18 @@ export type { DailyEntry };
  * Cost: O(total JSONL bytes). On a heavy 90-day install this can take
  * 1-5s. Callers should run async + cache the result.
  */
-export function collectEntries(): DailyEntry[] {
+/**
+ * Collect cost entries from ~/.claude/projects.
+ *
+ * @param sinceMs Optional epoch-ms cutoff. Files whose mtime is older are
+ *   skipped entirely (cheap fs.statSync; saves the JSON.parse over hundreds
+ *   of thousands of lines from years-old sessions). The dashboard passes
+ *   `Date.now() - 60 days` so HIGH LEVEL's "since open" delta still has the
+ *   recent-history baseline it needs without re-parsing the user's entire
+ *   life on every mount. The cost-sync uploader path leaves it undefined to
+ *   preserve "all history" semantics.
+ */
+export function collectEntries(sinceMs?: number): DailyEntry[] {
   const projectsDir = path.join(os.homedir(), '.claude', 'projects');
   if (!fs.existsSync(projectsDir)) return [];
 
@@ -162,7 +173,19 @@ export function collectEntries(): DailyEntry[] {
 
     const fallbackWorkingDir = decodeProjectDirName(dir);
     for (const file of files) {
-      const entries = parseJSONLFile(path.join(dirPath, file), fallbackWorkingDir);
+      const filePath = path.join(dirPath, file);
+      // mtime cutoff — skip files that are entirely older than the window.
+      // Saves the read+JSON.parse cost on years-old session files. Even on
+      // the SaaS-sync (full-history) path the cost is one stat per file,
+      // negligible compared to the parse it skips.
+      if (sinceMs !== undefined) {
+        try {
+          if (fs.statSync(filePath).mtimeMs < sinceMs) continue;
+        } catch {
+          continue;
+        }
+      }
+      const entries = parseJSONLFile(filePath, fallbackWorkingDir);
       for (const [key, e] of entries) {
         const prev = combined.get(key);
         if (prev) {

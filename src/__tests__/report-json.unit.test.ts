@@ -33,15 +33,18 @@ function emptyInput(overrides: Partial<BuildReportJsonInput> = {}): BuildReportJ
     cost: {
       claudeUSD: 0,
       codexUSD: 0,
+      geminiUSD: 0,
       inputTokens: 0,
       outputTokens: 0,
       cacheWriteTokens: 0,
       cacheReadTokens: 0,
       byDay: new Map(),
       byModel: new Map(),
+      byProject: new Map(),
     },
     toolMap: new Map(),
     blockMap: new Map(),
+    ruleMap: new Map(),
     agentMap: new Map(),
     mcpMap: new Map(),
     dailyMap: new Map(),
@@ -106,17 +109,18 @@ describe('buildReportJson', () => {
     expect(out.trend.deltaPct).toBe(10);
   });
 
-  it('cost.totalUSD sums Claude + Codex', () => {
+  it('cost.totalUSD sums Claude + Codex + Gemini', () => {
     const out = buildReportJson(
       emptyInput({
         cost: {
           ...emptyInput().cost,
           claudeUSD: 12.34,
           codexUSD: 5.67,
+          geminiUSD: 2.99,
         },
       })
     );
-    expect(out.cost.totalUSD).toBeCloseTo(18.01);
+    expect(out.cost.totalUSD).toBeCloseTo(21.0);
   });
 
   it('byTool is sorted by calls desc and includes all entries (untruncated)', () => {

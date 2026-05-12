@@ -15,7 +15,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { SHIELDS } from '../../shields';
-import { getConfig, DEFAULT_CONFIG } from '../../config';
+import { DEFAULT_CONFIG } from '../../config';
 import {
   evaluateSmartConditions,
   matchesPattern,
@@ -40,11 +40,15 @@ import {
 import { getAgentsStatus } from '../../setup';
 import { runBlast, type BlastFinding } from './blast';
 import {
+  boxPanel,
   classifyScore,
   computeLoopWaste,
+  relativeDate,
+  rollupByShield,
   topDlpPatterns,
   topRulesByVerdict,
 } from '../render/scan-derive';
+import { PROTECTIVE_SHIELD_DISCOUNTS } from '../../protection';
 import { buildScanJson } from '../render/scan-json';
 import {
   appendScanHistory,
@@ -469,6 +473,35 @@ export function buildRecurringPatternSet(
  * Used by all three agent scan paths (claude/gemini/codex) so the AST-based
  * fs-op rules fire identically regardless of which agent emitted the call.
  */
+/**
+ * Per-walker dedup index. The walkers used to call result.findings.some(...)
+ * and result.dlpFindings.some(...) inside their per-line loops to suppress
+ * duplicate entries — a linear scan that grew O(N) with every emit. With
+ * 5 k-10 k findings across a busy ~/.claude/projects, the per-line cost
+ * climbed to ~O(N²) and the [2] view took minutes to populate.
+ *
+ * Replaced with two String Sets keyed by the same tuple the .some()
+ * callbacks compared on (rule.name|preview|project for findings; pattern|
+ * sample|project for DLP). Set.has is O(1); the walk is now linear in the
+ * number of input entries instead of quadratic in the output size.
+ */
+interface ScanDedup {
+  findingsKeys: Set<string>;
+  dlpKeys: Set<string>;
+}
+
+function emptyScanDedup(): ScanDedup {
+  return { findingsKeys: new Set(), dlpKeys: new Set() };
+}
+
+function findingKey(ruleName: string | undefined, inputPreview: string, projLabel: string): string {
+  return `${ruleName ?? '<unnamed>'}|${inputPreview}|${projLabel}`;
+}
+
+function dlpKey(patternName: string, redactedSample: string, projLabel: string): string {
+  return `${patternName}|${redactedSample}|${projLabel}`;
+}
+
 function pushFsOpAstFinding(
   command: string,
   toolName: string,
@@ -477,7 +510,8 @@ function pushFsOpAstFinding(
   projLabel: string,
   sessionId: string,
   agent: 'claude' | 'gemini' | 'codex',
-  result: ScanResult
+  result: ScanResult,
+  dedup: ScanDedup
 ): boolean {
   const fsVerdict = analyzeFsOperation(command);
   if (!fsVerdict) return false;
@@ -503,13 +537,9 @@ function pushFsOpAstFinding(
         rule: synthRule,
       };
   const inputPreview = preview(input, 120);
-  const isDupe = result.findings.some(
-    (f) =>
-      f.source.rule.name === synthRule.name &&
-      preview(f.input, 120) === inputPreview &&
-      f.project === projLabel
-  );
-  if (!isDupe) {
+  const k = findingKey(synthRule.name, inputPreview, projLabel);
+  if (!dedup.findingsKeys.has(k)) {
+    dedup.findingsKeys.add(k);
     result.findings.push({
       source: synthSource,
       toolName,
@@ -629,11 +659,7 @@ export function detectLoops(
 // Build the rule set for scan
 // ---------------------------------------------------------------------------
 
-const DEFAULT_RULE_NAMES = new Set(
-  DEFAULT_CONFIG.policy.smartRules.map((r) => r.name).filter(Boolean)
-);
-
-function buildRuleSources(): RuleSource[] {
+export function buildRuleSources(): RuleSource[] {
   const sources: RuleSource[] = [];
 
   // 1. All shields (builtin + user-installed)
@@ -643,24 +669,33 @@ function buildRuleSources(): RuleSource[] {
     }
   }
 
-  // 2. Default built-in rules + user custom rules + cloud rules
-  try {
-    const config = getConfig();
-    for (const rule of config.policy.smartRules) {
-      if (!rule.name) continue;
-      if (rule.name.startsWith('shield:')) continue;
-      const isCloud = rule.name.startsWith('cloud:');
-      const isDefault = DEFAULT_RULE_NAMES.has(rule.name);
-      const sourceType: RuleSourceType = isCloud ? 'user' : isDefault ? 'default' : 'user';
-      sources.push({
-        shieldName: isCloud ? 'cloud' : isDefault ? 'default' : 'custom',
-        shieldLabel: isCloud ? 'Cloud Policy' : isDefault ? 'Default Rules' : 'Your Rules',
-        sourceType,
-        rule,
-      });
-    }
-  } catch {
-    // getConfig() may fail on a truly fresh install — skip user rules silently
+  // 2. Default built-in rules only — sourced directly from DEFAULT_CONFIG.
+  //
+  // Scan is a pre-install forecast: it answers "what would node9 catch
+  // if you installed it with default protection?". Two consequences:
+  //
+  // 1. User-custom rules from node9.config.json and cloud-synced rules
+  //    are skipped entirely. A fresh user doesn't have those, so
+  //    surfacing them would misrepresent what node9 itself catches.
+  // 2. Defaults are loaded from DEFAULT_CONFIG directly, not from the
+  //    user-merged getConfig() result. Otherwise a user who modified
+  //    a default rule (different verdict, extra condition) would see
+  //    their MODIFIED version fired against history — not the canonical
+  //    default. Forecast must reflect the out-of-the-box defaults.
+  //
+  // Installed users who want to see their OWN rule fires (including
+  // customized defaults) use `node9 report`, which reads the audit log.
+  //
+  // (Decision locked 2026-05-12 — see scan-redesign discussion.)
+  for (const rule of DEFAULT_CONFIG.policy.smartRules) {
+    if (!rule.name) continue;
+    if (rule.name.startsWith('shield:')) continue;
+    sources.push({
+      shieldName: 'default',
+      shieldLabel: 'Default Rules',
+      sourceType: 'default',
+      rule,
+    });
   }
 
   return sources;
@@ -760,14 +795,439 @@ function renderProgressBar(done: number, total: number, lines: number): void {
   );
 }
 
-export function scanClaudeHistory(
+/**
+ * Per-project body of scanClaudeHistory, extracted so both the sync walker
+ * (used by `node9 scan` CLI) and the async chunked variant (used by the
+ * dashboard's startScanWalk) can share identical logic. Mutates `result`.
+ *
+ * The three early-returns mirror the original outer-loop `continue`s:
+ * not-a-directory, stat failure, and readdir failure all skip the project
+ * silently — same forgiving behavior the CLI has shipped with for months.
+ */
+/**
+ * Per-file body of the Claude scan walker. Extracted so both the sync
+ * processClaudeProject and the async processClaudeProjectAsync can share
+ * the actual analysis work — the only difference between them is whether
+ * they yield to the event loop between files.
+ *
+ * Yielding per file (instead of per project) drops the q-quit lag during
+ * an in-flight [2] walk from ~1 s (one project of work) to ~10-30 ms
+ * (one file of work).
+ */
+function processClaudeFile(
+  file: string,
+  projPath: string,
+  projLabel: string,
+  ruleSources: RuleSource[],
   startDate: Date | null,
+  result: ScanResult,
+  dedup: ScanDedup,
   onProgress?: (done: number) => void,
   onLine?: () => void
-): ScanResult {
-  const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+): void {
+  result.filesScanned++;
+  result.sessions++;
+  onProgress?.(result.filesScanned);
 
-  const result: ScanResult = {
+  const sessionId = file.replace(/\.jsonl$/, '');
+
+  let raw: string;
+  try {
+    raw = fs.readFileSync(path.join(projPath, file), 'utf-8');
+  } catch {
+    return;
+  }
+
+  const sessionCalls: Array<{
+    toolName: string;
+    input: Record<string, unknown>;
+    timestamp: string;
+  }> = [];
+
+  // Maps tool_use id → file extension so tool_result scanning can skip code files
+  const toolUseFilePaths = new Map<string, string>();
+
+  // Metric: secrets before first useful edit
+  let firstDlpTs: string | null = null;
+  let firstEditTs: string | null = null;
+
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    onLine?.();
+
+    let entry: JournalEntry;
+    try {
+      entry = JSON.parse(line) as JournalEntry;
+    } catch {
+      continue;
+    }
+
+    if (entry.type !== 'assistant' && entry.type !== 'user') continue;
+
+    // Date filter
+    if (startDate && entry.timestamp) {
+      if (new Date(entry.timestamp) < startDate) continue;
+    }
+
+    // Track date range
+    if (entry.timestamp) {
+      if (!result.firstDate || entry.timestamp < result.firstDate)
+        result.firstDate = entry.timestamp;
+      if (!result.lastDate || entry.timestamp > result.lastDate) result.lastDate = entry.timestamp;
+    }
+
+    // ── User prompt DLP scan ───────────────────────────────────────────
+    if (entry.type === 'user') {
+      const content = entry.message?.content;
+      if (Array.isArray(content)) {
+        const text = content
+          .filter((b) => b.type === 'text')
+          .map((b) => (b as Record<string, unknown>)['text'] ?? '')
+          .join('\n');
+        if (text) {
+          const dlpMatch = scanArgs({ text });
+          if (dlpMatch) {
+            const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
+            if (!dedup.dlpKeys.has(k)) {
+              dedup.dlpKeys.add(k);
+              result.dlpFindings.push({
+                patternName: dlpMatch.patternName,
+                redactedSample: dlpMatch.redactedSample,
+                toolName: 'user-prompt',
+                timestamp: entry.timestamp ?? '',
+                project: projLabel,
+                sessionId,
+                agent: 'claude',
+              });
+            }
+          }
+        }
+
+        // ── Tool result DLP scan ─────────────────────────────────────
+        // Secrets that Claude read back (file contents, command output)
+        // are stored in tool_result blocks inside user-role entries.
+        // Skip code files — they contain auth patterns in source code
+        // that are not real secrets (template literals, test fixtures, etc.)
+        for (const block of content) {
+          if (block.type !== 'tool_result') continue;
+          const filePath = block.tool_use_id ? toolUseFilePaths.get(block.tool_use_id) : undefined;
+          if (filePath) {
+            const ext = path.extname(filePath).toLowerCase();
+            if (CODE_EXTENSIONS.has(ext)) continue;
+          }
+          const resultText =
+            typeof block.content === 'string'
+              ? block.content
+              : Array.isArray(block.content)
+                ? block.content.map((c) => c.text ?? '').join('\n')
+                : null;
+          if (!resultText) continue;
+          // Skip tool_result blocks that are clearly node9's own output
+          // (DLP verdict struct, security alert text). Otherwise the
+          // scanner re-detects its own redactor output as a "leak".
+          if (isNode9SelfOutput(resultText)) continue;
+          const dlpMatch = scanArgs({ text: resultText });
+          if (dlpMatch) {
+            // Demote test-fixture-shape tokens — these are tutorial
+            // examples, regex docs, or debug fixtures, not real secrets.
+            if (looksLikeFixtureToken(dlpMatch.redactedSample)) continue;
+            if (firstDlpTs === null) firstDlpTs = entry.timestamp ?? null;
+            const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
+            if (!dedup.dlpKeys.has(k)) {
+              dedup.dlpKeys.add(k);
+              result.dlpFindings.push({
+                patternName: dlpMatch.patternName,
+                redactedSample: dlpMatch.redactedSample,
+                toolName: 'tool-result',
+                timestamp: entry.timestamp ?? '',
+                project: projLabel,
+                sessionId,
+                agent: 'claude',
+              });
+            }
+          }
+        }
+      }
+      continue;
+    }
+
+    // Cost
+    const usage = entry.message?.usage;
+    const model = entry.message?.model;
+    if (usage && model) {
+      const p = claudeModelPrice(model);
+      if (p) {
+        result.totalCostUSD +=
+          (usage.input_tokens ?? 0) * p.i +
+          (usage.output_tokens ?? 0) * p.o +
+          (usage.cache_creation_input_tokens ?? 0) * p.cw +
+          (usage.cache_read_input_tokens ?? 0) * p.cr;
+      }
+    }
+
+    // Tool calls
+    const content = entry.message?.content;
+    if (!Array.isArray(content)) continue;
+
+    for (const block of content) {
+      if (block.type !== 'tool_use') continue;
+      result.totalToolCalls++;
+
+      const toolName = block.name ?? '';
+      const toolNameLower = toolName.toLowerCase();
+      const input = block.input ?? {};
+
+      // Record file path for tool_result DLP filtering
+      if (block.id && typeof input.file_path === 'string') {
+        toolUseFilePaths.set(block.id, input.file_path);
+      }
+
+      sessionCalls.push({ toolName, input, timestamp: entry.timestamp ?? '' });
+
+      if (toolNameLower === 'bash' || toolNameLower === 'execute_bash') {
+        result.bashCalls++;
+      }
+
+      // Track first edit/write for early-secrets metric
+      if (
+        firstEditTs === null &&
+        (toolNameLower === 'edit' ||
+          toolNameLower === 'write' ||
+          toolNameLower === 'write_file' ||
+          toolNameLower === 'edit_file' ||
+          toolNameLower === 'multiedit')
+      ) {
+        firstEditTs = entry.timestamp ?? null;
+      }
+
+      // Skip node9's own read-only CLI calls
+      const rawCmd = String(input.command ?? '').trimStart();
+      if (/^node9\s+(scan|explain|report|tail|dlp|status|sessions|audit)\b/.test(rawCmd)) continue;
+
+      // ── DLP scan ───────────────────────────────────────────────────
+      // Skip code files — Edit/Write pass full source in old_string/new_string
+      // which contains auth patterns that are not real secrets.
+      const inputFilePath = typeof input.file_path === 'string' ? input.file_path : '';
+      const inputFileExt = inputFilePath ? path.extname(inputFilePath).toLowerCase() : '';
+      if (CODE_EXTENSIONS.has(inputFileExt)) continue;
+
+      const dlpMatch = scanArgs(input);
+      if (dlpMatch) {
+        if (firstDlpTs === null) firstDlpTs = entry.timestamp ?? null;
+        const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
+        if (!dedup.dlpKeys.has(k)) {
+          dedup.dlpKeys.add(k);
+          result.dlpFindings.push({
+            patternName: dlpMatch.patternName,
+            redactedSample: dlpMatch.redactedSample,
+            toolName,
+            timestamp: entry.timestamp ?? '',
+            project: projLabel,
+            sessionId,
+            agent: 'claude',
+          });
+        }
+      }
+
+      // ── AST filesystem-operation detection ─────────────────────────
+      // Runs FIRST so AST-resolved verdicts win over the regex rules,
+      // which can FP on JSON args, heredocs, and chained commands.
+      let astFsMatched = false;
+      const astRanForBash = toolNameLower === 'bash' || toolNameLower === 'execute_bash';
+      if (astRanForBash) {
+        astFsMatched = pushFsOpAstFinding(
+          String(input.command ?? ''),
+          toolName,
+          input,
+          entry.timestamp ?? '',
+          projLabel,
+          sessionId,
+          'claude',
+          result,
+          dedup
+        );
+      }
+
+      // ── Smart rule matching ────────────────────────────────────────
+      let ruleMatched = astFsMatched;
+      for (const source of ruleSources) {
+        const { rule } = source;
+
+        if (rule.verdict === 'allow') continue;
+        if (rule.tool && !matchesPattern(toolNameLower, rule.tool)) continue;
+        // Suppress regex rules that AST already covers (correctly).
+        if (astRanForBash && rule.name && AST_FS_REGEX_RULES.has(rule.name)) continue;
+        if (!evaluateSmartConditions(input, rule)) continue;
+
+        const inputPreview = preview(input, 120);
+        const k = findingKey(rule.name, inputPreview, projLabel);
+        if (!dedup.findingsKeys.has(k)) {
+          dedup.findingsKeys.add(k);
+          result.findings.push({
+            source,
+            toolName,
+            input,
+            timestamp: entry.timestamp ?? '',
+            project: projLabel,
+            sessionId,
+            agent: 'claude',
+          });
+        }
+
+        ruleMatched = true;
+        break; // First matching rule wins per tool call
+      }
+
+      // ── AST shell exec detection (catches eval/bash -c with remote download)
+      if (!ruleMatched && (toolNameLower === 'bash' || toolNameLower === 'execute_bash')) {
+        const shellVerdict = detectDangerousShellExec(String(input.command ?? ''));
+        if (shellVerdict) {
+          const astRule: SmartRule = {
+            name: `ast:bash-safe:${shellVerdict}-shell-exec-remote`,
+            tool: 'bash',
+            conditions: [],
+            verdict: shellVerdict,
+            reason: `Shell execution of remote download detected by AST analysis (bash-safe)`,
+          };
+          const inputPreview = preview(input, 120);
+          const k = findingKey(astRule.name, inputPreview, projLabel);
+          if (!dedup.findingsKeys.has(k)) {
+            dedup.findingsKeys.add(k);
+            result.findings.push({
+              source: {
+                shieldName: 'bash-safe',
+                shieldLabel: 'bash-safe (AST)',
+                sourceType: 'shield',
+                rule: astRule,
+              },
+              toolName,
+              input,
+              timestamp: entry.timestamp ?? '',
+              project: projLabel,
+              sessionId,
+              agent: 'claude',
+            });
+          }
+        }
+      }
+    }
+  }
+  result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'claude'));
+
+  // Metric 1: secret entered context before first useful edit
+  if (firstDlpTs !== null && (firstEditTs === null || firstDlpTs < firstEditTs)) {
+    result.sessionsWithEarlySecrets++;
+  }
+}
+
+/**
+ * Sync wrapper used by the CLI (`node9 scan`) and the daemon. Walks every
+ * project under ~/.claude/projects, applying processClaudeFile per session.
+ */
+function processClaudeProject(
+  proj: string,
+  projectsDir: string,
+  ruleSources: RuleSource[],
+  startDate: Date | null,
+  result: ScanResult,
+  dedup: ScanDedup,
+  onProgress?: (done: number) => void,
+  onLine?: () => void
+): void {
+  const projPath = path.join(projectsDir, proj);
+  try {
+    if (!fs.statSync(projPath).isDirectory()) return;
+  } catch {
+    return;
+  }
+
+  const projLabel = stripTerminalEscapes(decodeURIComponent(proj).replace(os.homedir(), '~')).slice(
+    0,
+    40
+  );
+
+  let files: string[];
+  try {
+    files = fs.readdirSync(projPath).filter((f) => f.endsWith('.jsonl') && !f.startsWith('agent-'));
+  } catch {
+    return;
+  }
+
+  for (const file of files) {
+    processClaudeFile(
+      file,
+      projPath,
+      projLabel,
+      ruleSources,
+      startDate,
+      result,
+      dedup,
+      onProgress,
+      onLine
+    );
+  }
+}
+
+/**
+ * Async variant used by the dashboard. Mirrors processClaudeProject but
+ * awaits yieldTick() between FILES (not projects) so the event loop's
+ * Poll phase can dispatch stdin keypresses (q / Ctrl+C / view switch)
+ * with at most one file of latency (~10-30 ms) instead of one project
+ * (~100-500 ms).
+ */
+async function processClaudeProjectAsync(
+  proj: string,
+  projectsDir: string,
+  ruleSources: RuleSource[],
+  startDate: Date | null,
+  result: ScanResult,
+  dedup: ScanDedup,
+  onProgress?: (done: number) => void,
+  onLine?: () => void
+): Promise<void> {
+  const projPath = path.join(projectsDir, proj);
+  try {
+    if (!fs.statSync(projPath).isDirectory()) return;
+  } catch {
+    return;
+  }
+
+  const projLabel = stripTerminalEscapes(decodeURIComponent(proj).replace(os.homedir(), '~')).slice(
+    0,
+    40
+  );
+
+  let files: string[];
+  try {
+    files = fs.readdirSync(projPath).filter((f) => f.endsWith('.jsonl') && !f.startsWith('agent-'));
+  } catch {
+    return;
+  }
+
+  for (const file of files) {
+    processClaudeFile(
+      file,
+      projPath,
+      projLabel,
+      ruleSources,
+      startDate,
+      result,
+      dedup,
+      onProgress,
+      onLine
+    );
+    await yieldTick();
+  }
+}
+
+/** Promise that resolves on the next event-loop tick. The async walker
+ *  awaits this between projects so ink can repaint the loading state. */
+function yieldTick(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+function emptyClaudeScan(): ScanResult {
+  return {
     filesScanned: 0,
     sessions: 0,
     totalToolCalls: 0,
@@ -780,6 +1240,15 @@ export function scanClaudeHistory(
     lastDate: null,
     sessionsWithEarlySecrets: 0,
   };
+}
+
+export function scanClaudeHistory(
+  startDate: Date | null,
+  onProgress?: (done: number) => void,
+  onLine?: () => void
+): ScanResult {
+  const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+  const result = emptyClaudeScan();
 
   if (!fs.existsSync(projectsDir)) return result;
 
@@ -791,346 +1260,62 @@ export function scanClaudeHistory(
   }
 
   const ruleSources = buildRuleSources();
+  const dedup = emptyScanDedup();
 
   for (const proj of projDirs) {
-    const projPath = path.join(projectsDir, proj);
-    try {
-      if (!fs.statSync(projPath).isDirectory()) continue;
-    } catch {
-      continue;
-    }
+    processClaudeProject(
+      proj,
+      projectsDir,
+      ruleSources,
+      startDate,
+      result,
+      dedup,
+      onProgress,
+      onLine
+    );
+  }
 
-    const projLabel = stripTerminalEscapes(
-      decodeURIComponent(proj).replace(os.homedir(), '~')
-    ).slice(0, 40);
+  return result;
+}
 
-    let files: string[];
-    try {
-      files = fs
-        .readdirSync(projPath)
-        .filter((f) => f.endsWith('.jsonl') && !f.startsWith('agent-'));
-    } catch {
-      continue;
-    }
+/**
+ * Async variant of scanClaudeHistory used by the dashboard. Yields to the
+ * event loop between projects so the UI can repaint and process keypresses
+ * (q / Ctrl+C / view switch) while the walk is in flight. The CLI keeps
+ * using the sync version above — a print-and-exit flow has no UI to keep
+ * responsive and pays no benefit from chunking.
+ */
+export async function scanClaudeHistoryAsync(
+  startDate: Date | null,
+  onProgress?: (done: number) => void,
+  onLine?: () => void
+): Promise<ScanResult> {
+  const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+  const result = emptyClaudeScan();
 
-    for (const file of files) {
-      result.filesScanned++;
-      result.sessions++;
-      onProgress?.(result.filesScanned);
+  if (!fs.existsSync(projectsDir)) return result;
 
-      const sessionId = file.replace(/\.jsonl$/, '');
+  let projDirs: string[];
+  try {
+    projDirs = fs.readdirSync(projectsDir);
+  } catch {
+    return result;
+  }
 
-      let raw: string;
-      try {
-        raw = fs.readFileSync(path.join(projPath, file), 'utf-8');
-      } catch {
-        continue;
-      }
+  const ruleSources = buildRuleSources();
+  const dedup = emptyScanDedup();
 
-      const sessionCalls: Array<{
-        toolName: string;
-        input: Record<string, unknown>;
-        timestamp: string;
-      }> = [];
-
-      // Maps tool_use id → file extension so tool_result scanning can skip code files
-      const toolUseFilePaths = new Map<string, string>();
-
-      // Metric: secrets before first useful edit
-      let firstDlpTs: string | null = null;
-      let firstEditTs: string | null = null;
-
-      for (const line of raw.split('\n')) {
-        if (!line.trim()) continue;
-        onLine?.();
-
-        let entry: JournalEntry;
-        try {
-          entry = JSON.parse(line) as JournalEntry;
-        } catch {
-          continue;
-        }
-
-        if (entry.type !== 'assistant' && entry.type !== 'user') continue;
-
-        // Date filter
-        if (startDate && entry.timestamp) {
-          if (new Date(entry.timestamp) < startDate) continue;
-        }
-
-        // Track date range
-        if (entry.timestamp) {
-          if (!result.firstDate || entry.timestamp < result.firstDate)
-            result.firstDate = entry.timestamp;
-          if (!result.lastDate || entry.timestamp > result.lastDate)
-            result.lastDate = entry.timestamp;
-        }
-
-        // ── User prompt DLP scan ───────────────────────────────────────────
-        if (entry.type === 'user') {
-          const content = entry.message?.content;
-          if (Array.isArray(content)) {
-            const text = content
-              .filter((b) => b.type === 'text')
-              .map((b) => (b as Record<string, unknown>)['text'] ?? '')
-              .join('\n');
-            if (text) {
-              const dlpMatch = scanArgs({ text });
-              if (dlpMatch) {
-                const isDupe = result.dlpFindings.some(
-                  (f) =>
-                    f.patternName === dlpMatch.patternName &&
-                    f.redactedSample === dlpMatch.redactedSample &&
-                    f.project === projLabel
-                );
-                if (!isDupe) {
-                  result.dlpFindings.push({
-                    patternName: dlpMatch.patternName,
-                    redactedSample: dlpMatch.redactedSample,
-                    toolName: 'user-prompt',
-                    timestamp: entry.timestamp ?? '',
-                    project: projLabel,
-                    sessionId,
-                    agent: 'claude',
-                  });
-                }
-              }
-            }
-
-            // ── Tool result DLP scan ─────────────────────────────────────
-            // Secrets that Claude read back (file contents, command output)
-            // are stored in tool_result blocks inside user-role entries.
-            // Skip code files — they contain auth patterns in source code
-            // that are not real secrets (template literals, test fixtures, etc.)
-            for (const block of content) {
-              if (block.type !== 'tool_result') continue;
-              const filePath = block.tool_use_id
-                ? toolUseFilePaths.get(block.tool_use_id)
-                : undefined;
-              if (filePath) {
-                const ext = path.extname(filePath).toLowerCase();
-                if (CODE_EXTENSIONS.has(ext)) continue;
-              }
-              const resultText =
-                typeof block.content === 'string'
-                  ? block.content
-                  : Array.isArray(block.content)
-                    ? block.content.map((c) => c.text ?? '').join('\n')
-                    : null;
-              if (!resultText) continue;
-              // Skip tool_result blocks that are clearly node9's own output
-              // (DLP verdict struct, security alert text). Otherwise the
-              // scanner re-detects its own redactor output as a "leak".
-              if (isNode9SelfOutput(resultText)) continue;
-              const dlpMatch = scanArgs({ text: resultText });
-              if (dlpMatch) {
-                // Demote test-fixture-shape tokens — these are tutorial
-                // examples, regex docs, or debug fixtures, not real secrets.
-                if (looksLikeFixtureToken(dlpMatch.redactedSample)) continue;
-                if (firstDlpTs === null) firstDlpTs = entry.timestamp ?? null;
-                const isDupe = result.dlpFindings.some(
-                  (f) =>
-                    f.patternName === dlpMatch.patternName &&
-                    f.redactedSample === dlpMatch.redactedSample &&
-                    f.project === projLabel
-                );
-                if (!isDupe) {
-                  result.dlpFindings.push({
-                    patternName: dlpMatch.patternName,
-                    redactedSample: dlpMatch.redactedSample,
-                    toolName: 'tool-result',
-                    timestamp: entry.timestamp ?? '',
-                    project: projLabel,
-                    sessionId,
-                    agent: 'claude',
-                  });
-                }
-              }
-            }
-          }
-          continue;
-        }
-
-        // Cost
-        const usage = entry.message?.usage;
-        const model = entry.message?.model;
-        if (usage && model) {
-          const p = claudeModelPrice(model);
-          if (p) {
-            result.totalCostUSD +=
-              (usage.input_tokens ?? 0) * p.i +
-              (usage.output_tokens ?? 0) * p.o +
-              (usage.cache_creation_input_tokens ?? 0) * p.cw +
-              (usage.cache_read_input_tokens ?? 0) * p.cr;
-          }
-        }
-
-        // Tool calls
-        const content = entry.message?.content;
-        if (!Array.isArray(content)) continue;
-
-        for (const block of content) {
-          if (block.type !== 'tool_use') continue;
-          result.totalToolCalls++;
-
-          const toolName = block.name ?? '';
-          const toolNameLower = toolName.toLowerCase();
-          const input = block.input ?? {};
-
-          // Record file path for tool_result DLP filtering
-          if (block.id && typeof input.file_path === 'string') {
-            toolUseFilePaths.set(block.id, input.file_path);
-          }
-
-          sessionCalls.push({ toolName, input, timestamp: entry.timestamp ?? '' });
-
-          if (toolNameLower === 'bash' || toolNameLower === 'execute_bash') {
-            result.bashCalls++;
-          }
-
-          // Track first edit/write for early-secrets metric
-          if (
-            firstEditTs === null &&
-            (toolNameLower === 'edit' ||
-              toolNameLower === 'write' ||
-              toolNameLower === 'write_file' ||
-              toolNameLower === 'edit_file' ||
-              toolNameLower === 'multiedit')
-          ) {
-            firstEditTs = entry.timestamp ?? null;
-          }
-
-          // Skip node9's own read-only CLI calls
-          const rawCmd = String(input.command ?? '').trimStart();
-          if (/^node9\s+(scan|explain|report|tail|dlp|status|sessions|audit)\b/.test(rawCmd))
-            continue;
-
-          // ── DLP scan ───────────────────────────────────────────────────
-          // Skip code files — Edit/Write pass full source in old_string/new_string
-          // which contains auth patterns that are not real secrets.
-          const inputFilePath = typeof input.file_path === 'string' ? input.file_path : '';
-          const inputFileExt = inputFilePath ? path.extname(inputFilePath).toLowerCase() : '';
-          if (CODE_EXTENSIONS.has(inputFileExt)) continue;
-
-          const dlpMatch = scanArgs(input);
-          if (dlpMatch) {
-            if (firstDlpTs === null) firstDlpTs = entry.timestamp ?? null;
-            const isDupe = result.dlpFindings.some(
-              (f) =>
-                f.patternName === dlpMatch.patternName &&
-                f.redactedSample === dlpMatch.redactedSample &&
-                f.project === projLabel
-            );
-            if (!isDupe) {
-              result.dlpFindings.push({
-                patternName: dlpMatch.patternName,
-                redactedSample: dlpMatch.redactedSample,
-                toolName,
-                timestamp: entry.timestamp ?? '',
-                project: projLabel,
-                sessionId,
-                agent: 'claude',
-              });
-            }
-          }
-
-          // ── AST filesystem-operation detection ─────────────────────────
-          // Runs FIRST so AST-resolved verdicts win over the regex rules,
-          // which can FP on JSON args, heredocs, and chained commands.
-          let astFsMatched = false;
-          const astRanForBash = toolNameLower === 'bash' || toolNameLower === 'execute_bash';
-          if (astRanForBash) {
-            astFsMatched = pushFsOpAstFinding(
-              String(input.command ?? ''),
-              toolName,
-              input,
-              entry.timestamp ?? '',
-              projLabel,
-              sessionId,
-              'claude',
-              result
-            );
-          }
-
-          // ── Smart rule matching ────────────────────────────────────────
-          let ruleMatched = astFsMatched;
-          for (const source of ruleSources) {
-            const { rule } = source;
-
-            if (rule.verdict === 'allow') continue;
-            if (rule.tool && !matchesPattern(toolNameLower, rule.tool)) continue;
-            // Suppress regex rules that AST already covers (correctly).
-            if (astRanForBash && rule.name && AST_FS_REGEX_RULES.has(rule.name)) continue;
-            if (!evaluateSmartConditions(input, rule)) continue;
-
-            const inputPreview = preview(input, 120);
-            const isDupe = result.findings.some(
-              (f) =>
-                f.source.rule.name === rule.name &&
-                preview(f.input, 120) === inputPreview &&
-                f.project === projLabel
-            );
-            if (!isDupe) {
-              result.findings.push({
-                source,
-                toolName,
-                input,
-                timestamp: entry.timestamp ?? '',
-                project: projLabel,
-                sessionId,
-                agent: 'claude',
-              });
-            }
-
-            ruleMatched = true;
-            break; // First matching rule wins per tool call
-          }
-
-          // ── AST shell exec detection (catches eval/bash -c with remote download)
-          if (!ruleMatched && (toolNameLower === 'bash' || toolNameLower === 'execute_bash')) {
-            const shellVerdict = detectDangerousShellExec(String(input.command ?? ''));
-            if (shellVerdict) {
-              const astRule: SmartRule = {
-                name: `ast:bash-safe:${shellVerdict}-shell-exec-remote`,
-                tool: 'bash',
-                conditions: [],
-                verdict: shellVerdict,
-                reason: `Shell execution of remote download detected by AST analysis (bash-safe)`,
-              };
-              const inputPreview = preview(input, 120);
-              const isDupe = result.findings.some(
-                (f) =>
-                  f.source.rule.name === astRule.name &&
-                  preview(f.input, 120) === inputPreview &&
-                  f.project === projLabel
-              );
-              if (!isDupe) {
-                result.findings.push({
-                  source: {
-                    shieldName: 'bash-safe',
-                    shieldLabel: 'bash-safe (AST)',
-                    sourceType: 'shield',
-                    rule: astRule,
-                  },
-                  toolName,
-                  input,
-                  timestamp: entry.timestamp ?? '',
-                  project: projLabel,
-                  sessionId,
-                  agent: 'claude',
-                });
-              }
-            }
-          }
-        }
-      }
-      result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'claude'));
-
-      // Metric 1: secret entered context before first useful edit
-      if (firstDlpTs !== null && (firstEditTs === null || firstDlpTs < firstEditTs)) {
-        result.sessionsWithEarlySecrets++;
-      }
-    }
+  for (const proj of projDirs) {
+    await processClaudeProjectAsync(
+      proj,
+      projectsDir,
+      ruleSources,
+      startDate,
+      result,
+      dedup,
+      onProgress,
+      onLine
+    );
   }
 
   return result;
@@ -1159,6 +1344,7 @@ export function scanGeminiHistory(
     lastDate: null,
     sessionsWithEarlySecrets: 0,
   };
+  const dedup = emptyScanDedup();
 
   if (!fs.existsSync(tmpDir)) return result;
 
@@ -1239,13 +1425,9 @@ export function scanGeminiHistory(
           if (text) {
             const dlpMatch = scanArgs({ text });
             if (dlpMatch) {
-              const isDupe = result.dlpFindings.some(
-                (f) =>
-                  f.patternName === dlpMatch.patternName &&
-                  f.redactedSample === dlpMatch.redactedSample &&
-                  f.project === projLabel
-              );
-              if (!isDupe) {
+              const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
+              if (!dedup.dlpKeys.has(k)) {
+                dedup.dlpKeys.add(k);
                 result.dlpFindings.push({
                   patternName: dlpMatch.patternName,
                   redactedSample: dlpMatch.redactedSample,
@@ -1299,13 +1481,9 @@ export function scanGeminiHistory(
 
           const dlpMatch = scanArgs(input);
           if (dlpMatch) {
-            const isDupe = result.dlpFindings.some(
-              (f) =>
-                f.patternName === dlpMatch.patternName &&
-                f.redactedSample === dlpMatch.redactedSample &&
-                f.project === projLabel
-            );
-            if (!isDupe) {
+            const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
+            if (!dedup.dlpKeys.has(k)) {
+              dedup.dlpKeys.add(k);
               result.dlpFindings.push({
                 patternName: dlpMatch.patternName,
                 redactedSample: dlpMatch.redactedSample,
@@ -1330,7 +1508,8 @@ export function scanGeminiHistory(
               projLabel,
               sessionId,
               'gemini',
-              result
+              result,
+              dedup
             );
           }
 
@@ -1343,13 +1522,9 @@ export function scanGeminiHistory(
             if (!evaluateSmartConditions(input, rule)) continue;
 
             const inputPreview = preview(input, 120);
-            const isDupe = result.findings.some(
-              (f) =>
-                f.source.rule.name === rule.name &&
-                preview(f.input, 120) === inputPreview &&
-                f.project === projLabel
-            );
-            if (!isDupe) {
+            const k = findingKey(rule.name, inputPreview, projLabel);
+            if (!dedup.findingsKeys.has(k)) {
+              dedup.findingsKeys.add(k);
               result.findings.push({
                 source,
                 toolName,
@@ -1379,13 +1554,9 @@ export function scanGeminiHistory(
                 reason: `Shell execution of remote download detected by AST analysis (bash-safe)`,
               };
               const inputPreview = preview(input, 120);
-              const isDupe = result.findings.some(
-                (f) =>
-                  f.source.rule.name === astRule.name &&
-                  preview(f.input, 120) === inputPreview &&
-                  f.project === projLabel
-              );
-              if (!isDupe) {
+              const k = findingKey(astRule.name, inputPreview, projLabel);
+              if (!dedup.findingsKeys.has(k)) {
+                dedup.findingsKeys.add(k);
                 result.findings.push({
                   source: {
                     shieldName: 'bash-safe',
@@ -1435,6 +1606,7 @@ export function scanCodexHistory(
     lastDate: null,
     sessionsWithEarlySecrets: 0,
   };
+  const dedup = emptyScanDedup();
 
   if (!fs.existsSync(sessionsBase)) return result;
 
@@ -1536,13 +1708,9 @@ export function scanCodexHistory(
         if (text) {
           const dlpMatch = scanArgs({ text });
           if (dlpMatch) {
-            const isDupe = result.dlpFindings.some(
-              (f) =>
-                f.patternName === dlpMatch.patternName &&
-                f.redactedSample === dlpMatch.redactedSample &&
-                f.project === projLabel
-            );
-            if (!isDupe) {
+            const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
+            if (!dedup.dlpKeys.has(k)) {
+              dedup.dlpKeys.add(k);
               result.dlpFindings.push({
                 patternName: dlpMatch.patternName,
                 redactedSample: dlpMatch.redactedSample,
@@ -1594,13 +1762,9 @@ export function scanCodexHistory(
 
       const dlpMatch = scanArgs(input);
       if (dlpMatch) {
-        const isDupe = result.dlpFindings.some(
-          (f) =>
-            f.patternName === dlpMatch.patternName &&
-            f.redactedSample === dlpMatch.redactedSample &&
-            f.project === projLabel
-        );
-        if (!isDupe) {
+        const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
+        if (!dedup.dlpKeys.has(k)) {
+          dedup.dlpKeys.add(k);
           result.dlpFindings.push({
             patternName: dlpMatch.patternName,
             redactedSample: dlpMatch.redactedSample,
@@ -1625,7 +1789,8 @@ export function scanCodexHistory(
           projLabel,
           sessionId,
           'codex',
-          result
+          result,
+          dedup
         );
       }
 
@@ -1642,13 +1807,9 @@ export function scanCodexHistory(
         if (!evaluateSmartConditions(input, rule)) continue;
 
         const inputPreview = preview(input, 120);
-        const isDupe = result.findings.some(
-          (f) =>
-            f.source.rule.name === rule.name &&
-            preview(f.input, 120) === inputPreview &&
-            f.project === projLabel
-        );
-        if (!isDupe) {
+        const k = findingKey(rule.name, inputPreview, projLabel);
+        if (!dedup.findingsKeys.has(k)) {
+          dedup.findingsKeys.add(k);
           result.findings.push({
             source,
             toolName,
@@ -1674,13 +1835,9 @@ export function scanCodexHistory(
             reason: `Shell execution of remote download detected by AST analysis (bash-safe)`,
           };
           const inputPreview = preview(input, 120);
-          const isDupe = result.findings.some(
-            (f) =>
-              f.source.rule.name === astRule.name &&
-              preview(f.input, 120) === inputPreview &&
-              f.project === projLabel
-          );
-          if (!isDupe) {
+          const k = findingKey(astRule.name, inputPreview, projLabel);
+          if (!dedup.findingsKeys.has(k)) {
+            dedup.findingsKeys.add(k);
             result.findings.push({
               source: {
                 shieldName: 'bash-safe',
@@ -1716,6 +1873,7 @@ function scanShellConfig(): DlpFinding[] {
     path.join(home, f)
   );
   const findings: DlpFinding[] = [];
+  const seen = new Set<string>();
 
   for (const filePath of configFiles) {
     if (!fs.existsSync(filePath)) continue;
@@ -1731,13 +1889,9 @@ function scanShellConfig(): DlpFinding[] {
       if (!trimmed || trimmed.startsWith('#')) continue;
       const dlpMatch = scanArgs({ text: trimmed });
       if (!dlpMatch) continue;
-      const isDupe = findings.some(
-        (f) =>
-          f.patternName === dlpMatch.patternName &&
-          f.redactedSample === dlpMatch.redactedSample &&
-          f.project === shortPath
-      );
-      if (!isDupe) {
+      const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, shortPath);
+      if (!seen.has(k)) {
+        seen.add(k);
         findings.push({
           patternName: dlpMatch.patternName,
           redactedSample: dlpMatch.redactedSample,
@@ -2177,6 +2331,386 @@ export function renderNarrativeScorecard(input: CompactInput): void {
 }
 
 // ---------------------------------------------------------------------------
+// Panel scorecard renderer (default mode, no flag)
+// ---------------------------------------------------------------------------
+//
+// The default `node9 scan` output. Designed as the polished forecast
+// the user opens to act on — concise, scannable, with a SHIELDS panel
+// that converts hits into a "+N pts if you enable X" recommendation.
+//
+// Mental model: 7 box-drawn panels stacked vertically.
+//   1. TOP FINDINGS      4 auto-derived bullets ranking severity
+//   2. LEAKS             5 most recent credential exposures
+//   3. BLOCKED           per-rule counts that node9 would have stopped
+//   4. REVIEW QUEUE      per-rule counts that node9 would have flagged
+//   5. AGENT LOOPS       efficiency breakdown by tool + top stuck files
+//   6. BLAST RADIUS      paths an AI could reach on disk right now
+//   7. SHIELDS           recommendations w/ score deltas
+//
+// Empty categories are skipped (no "0 leaks" filler rows). The hero
+// block (score line + stat card + spend) is emitted by the caller
+// before this function runs — we only render the panels themselves.
+//
+// `--drill-down` bypasses this renderer and uses the legacy verbose
+// inline section render in the action handler (which now shows the
+// same data with full per-finding examples + session IDs).
+
+/** Pair of "rendered chalk-wrapped string" + "visible width" used to
+ *  compose lines for boxPanel. Width is computed from the plain text
+ *  length BEFORE chalk wraps it, so ANSI escapes don't inflate it. */
+type Line = { rendered: string; width: number };
+
+/** Build a Line from `[plain, formatter?]` segments. Each formatter
+ *  wraps its segment with chalk (or any string → string fn); width
+ *  is the sum of segment plain-string lengths. Emoji is counted as
+ *  JS string length, which matches most terminals' visible-cell
+ *  count closely enough that panels look aligned in practice. */
+function mkLine(...parts: Array<[string, ((s: string) => string)?]>): Line {
+  let rendered = '';
+  let width = 0;
+  for (const [text, fmt] of parts) {
+    rendered += fmt ? fmt(text) : text;
+    width += text.length;
+  }
+  return { rendered, width };
+}
+
+/** Helper: shorten a long rule name to fit a fixed column. Strips the
+ *  `shield:<name>:` prefix that's already implied by the origin column,
+ *  then truncates if still over `width`. Keeps the right edge of the
+ *  column visually clean. */
+function shortRule(name: string, width: number): string {
+  const stripped = name.replace(/^shield:[^:]+:/, '');
+  if (stripped.length <= width) return stripped.padEnd(width);
+  return stripped.slice(0, width - 1) + '…';
+}
+
+export function renderPanelScorecard(input: CompactInput, now: Date = new Date()): void {
+  const { scan, summary, blast, blastExposures, blockedCount, reviewCount } = input;
+
+  // ── TOP FINDINGS ─────────────────────────────────────────────────────
+  // Auto-derived: pick the highest-impact one fact per category. Each
+  // bullet's wording is the SHORTEST sentence that answers "what should
+  // I act on?" — relative dates, top patterns inline.
+  const topLines: Line[] = [];
+  if (scan.dlpFindings.length > 0) {
+    const latest = scan.dlpFindings[0];
+    const rel = relativeDate(latest.timestamp, now);
+    const noun = `credential leak${scan.dlpFindings.length !== 1 ? 's' : ''}`;
+    topLines.push(
+      mkLine(
+        ['🚨 ', chalk.red],
+        [`${scan.dlpFindings.length} ${noun} in tool input  `, chalk.bold],
+        [`(latest: ${rel} ago, ${latest.patternName})`, chalk.dim]
+      )
+    );
+  }
+  if (blockedCount > 0) {
+    // Keep TOP FINDINGS to a single line per category — only top 2
+    // blocked rule names fit comfortably on an 80-col terminal after
+    // the leading "🛑 N ops node9 would have blocked  (...)" framing.
+    const topBlocked = topRulesByVerdict(summary.sections, 'block', 2)
+      .map((r) =>
+        r.count > 1
+          ? `${shortRule(r.name, 20).trimEnd()} ×${r.count}`
+          : shortRule(r.name, 20).trimEnd()
+      )
+      .join(', ');
+    topLines.push(
+      mkLine(
+        ['🛑 ', chalk.red],
+        [`${blockedCount} ops node9 would have blocked  `, chalk.bold],
+        [`(${topBlocked})`, chalk.dim]
+      )
+    );
+  }
+  if (scan.loopFindings.length > 0) {
+    const { wastePct } = computeLoopWaste(scan.loopFindings, scan.totalToolCalls);
+    // Surface the dominant tool name inline — more useful than
+    // "repeated patterns" filler and lets the line fit in 72 cols.
+    const byTool = new Map<string, number>();
+    for (const f of scan.loopFindings) {
+      byTool.set(f.toolName, (byTool.get(f.toolName) ?? 0) + Math.max(0, f.count - 1));
+    }
+    const top = [...byTool.entries()].sort((a, b) => b[1] - a[1])[0];
+    const wasteSuffix = wastePct > 0 ? `, ${wastePct}% wasted` : '';
+    const detail = top ? `(${top[0]} dominates${wasteSuffix})` : '';
+    topLines.push(
+      mkLine(
+        ['🔁 ', chalk.yellow],
+        [`${scan.loopFindings.length} agent loops detected  `, chalk.bold],
+        [detail, chalk.dim]
+      )
+    );
+  }
+  if (blastExposures > 0) {
+    const exposed = Math.max(0, 100 - blast.score);
+    const pjDiscount = PROTECTIVE_SHIELD_DISCOUNTS['project-jail'] ?? 0;
+    const pjBonus = Math.round(exposed * pjDiscount);
+    const cta = pjBonus > 0 ? `  → enable project-jail (+${pjBonus} pts)` : '';
+    topLines.push(
+      mkLine(
+        ['🔭 ', chalk.red],
+        [`${blastExposures} secrets reachable on disk`, chalk.bold],
+        [cta, chalk.dim]
+      )
+    );
+  }
+  if (topLines.length > 0) {
+    for (const ln of boxPanel('TOP FINDINGS', topLines)) console.log('  ' + ln);
+    console.log('');
+  }
+
+  // ── LEAKS panel ─────────────────────────────────────────────────────
+  // Top 5 most recent. Sorted desc by timestamp via the summary builder.
+  if (summary.leaks.length > 0) {
+    const leakLines: Line[] = [];
+    for (const leak of summary.leaks.slice(0, 5)) {
+      const rel = relativeDate(leak.timestamp, now);
+      // Layout: <rel-date>  <pattern>      <redacted>           <[tool]>      <agent>
+      // Project column dropped — most leaks come from the same project
+      // and the column otherwise pushed rows past the right border on
+      // an 80-col terminal. The full project is still in --drill-down.
+      leakLines.push(
+        mkLine(
+          [rel.padStart(4) + '  ', chalk.dim],
+          [leak.patternName.padEnd(14), chalk.red.bold],
+          [' '],
+          [leak.redactedSample.padEnd(20), chalk.red],
+          [' '],
+          [`[${leak.toolName}]`.padEnd(15), chalk.dim],
+          [' '],
+          [leak.agent, chalk.dim]
+        )
+      );
+    }
+    const remaining = summary.leaks.length - 5;
+    if (remaining > 0) {
+      leakLines.push(mkLine([`… +${remaining} more`, chalk.dim]));
+    }
+    const title = `LEAKS  ·  ${summary.leaks.length} secret${summary.leaks.length !== 1 ? 's' : ''} in plain text`;
+    for (const ln of boxPanel(title, leakLines)) console.log('  ' + ln);
+    console.log('');
+  }
+
+  // ── BLOCKED panel ───────────────────────────────────────────────────
+  // Per-rule counts attributable to block-verdict findings. Origin column
+  // shows whether the rule is a built-in default or comes from a shield.
+  if (blockedCount > 0) {
+    const blockedLines: Line[] = [];
+    const ruleEntries = topRulesByVerdict(summary.sections, 'block', 12);
+    for (const r of ruleEntries) {
+      const origin = originForRule(r.name, summary.sections);
+      blockedLines.push(
+        mkLine(
+          ['✗ ', chalk.red],
+          [shortRule(r.name, 24), chalk.bold],
+          [' ×' + String(r.count).padEnd(4), chalk.bold],
+          [' '],
+          [origin, chalk.dim]
+        )
+      );
+    }
+    const title = `BLOCKED  ·  ${blockedCount} ops node9 would have stopped`;
+    for (const ln of boxPanel(title, blockedLines)) console.log('  ' + ln);
+    console.log('');
+  }
+
+  // ── REVIEW QUEUE panel ──────────────────────────────────────────────
+  // Same as BLOCKED but for review-verdict rules. User-config rules
+  // are pre-stripped from summary.sections by buildRuleSources, so the
+  // origin column only ever shows `default` or `needs shield:X`.
+  if (reviewCount > 0) {
+    const reviewLines: Line[] = [];
+    const ruleEntries = topRulesByVerdict(summary.sections, 'review', 12);
+    for (const r of ruleEntries) {
+      const origin = originForRule(r.name, summary.sections);
+      reviewLines.push(
+        mkLine(
+          ['👁  ', chalk.yellow],
+          [shortRule(r.name, 24), chalk.bold],
+          [' ×' + String(r.count).padEnd(4), chalk.bold],
+          [' '],
+          [origin, chalk.dim]
+        )
+      );
+    }
+    const title = `REVIEW QUEUE  ·  ${reviewCount} ops flagged for approval`;
+    for (const ln of boxPanel(title, reviewLines)) console.log('  ' + ln);
+    console.log('');
+  }
+
+  // ── AGENT LOOPS panel ───────────────────────────────────────────────
+  // Efficiency, not severity. Split off from REVIEW so the eye isn't
+  // confused about what "needs approval" vs "is wasteful but harmless".
+  if (scan.loopFindings.length > 0) {
+    const { wastePct } = computeLoopWaste(scan.loopFindings, scan.totalToolCalls);
+
+    // Group loop findings by toolName to compute the breakdown.
+    const byTool = new Map<string, number>();
+    let totalRepeats = 0;
+    for (const f of scan.loopFindings) {
+      const repeats = Math.max(0, f.count - 1);
+      byTool.set(f.toolName, (byTool.get(f.toolName) ?? 0) + repeats);
+      totalRepeats += repeats;
+    }
+    const toolEntries = [...byTool.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
+    const loopLines: Line[] = [];
+    for (const [tool, repeats] of toolEntries) {
+      const pct = totalRepeats > 0 ? Math.round((repeats / totalRepeats) * 100) : 0;
+      loopLines.push(
+        mkLine(
+          [tool.padEnd(10), chalk.bold],
+          [`×${num(repeats)} repeats`.padEnd(16)],
+          [`(${pct}%)`, chalk.dim]
+        )
+      );
+    }
+
+    // Top stuck files: most-repeated single LoopFinding rows.
+    const topStuck = [...scan.loopFindings].sort((a, b) => b.count - a.count).slice(0, 3);
+    if (topStuck.length > 0) {
+      loopLines.push(mkLine([''])); // blank separator inside box
+      loopLines.push(mkLine(['Top stuck patterns:', chalk.dim]));
+      for (const f of topStuck) {
+        // Width budget: panel inner 72, prefix "×NNNN " = 7, leaving 65
+        // for the target path/command. Use basename when the path is
+        // longer to keep the row stable.
+        const raw = f.commandPreview || f.toolName;
+        const target = raw.length > 60 ? '…' + raw.slice(raw.length - 59) : raw.padEnd(60);
+        loopLines.push(mkLine([`×${num(f.count).padEnd(4)} `, chalk.bold], [target, chalk.dim]));
+      }
+    }
+
+    const wasteSuffix = wastePct > 0 ? `  ·  ${wastePct}% wasted` : '';
+    const title = `AGENT LOOPS  ·  ${scan.loopFindings.length} repeated patterns${wasteSuffix}`;
+    for (const ln of boxPanel(title, loopLines)) console.log('  ' + ln);
+    // Earlier the "N repeated calls (~N × cost-per-iteration)" line
+    // printed below the panel, but it sat outside the frame and read
+    // as orphaned. The wastePct + breakdown rows already convey the
+    // magnitude inside the box — dropped on 2026-05-12.
+    console.log('');
+  }
+
+  // ── BLAST RADIUS panel ─────────────────────────────────────────────
+  if (blast.reachable.length > 0 || blast.envFindings.length > 0) {
+    const blastLines: Line[] = [];
+    // Inner width = PANEL_WIDTH (76) - 4 borders/padding = 72. Reserve
+    // 3 for the ✗ + 2 spaces and 36 for the label, leaving 33 for the
+    // description. Strip the em-dash suffix so the description fits
+    // without ugly mid-word truncation ("grants SSH acc…" was the
+    // common case before this change — the descriptions in blast.ts
+    // intentionally pack a noun phrase + explanation separated by '—',
+    // and only the noun phrase is needed here).
+    const DESC_W = 33;
+    for (const r of blast.reachable.slice(0, 8)) {
+      const trimmed = r.description.split(' — ')[0].split(/—|--/)[0].trim();
+      const desc = trimmed.length > DESC_W ? trimmed.slice(0, DESC_W - 1) + '…' : trimmed;
+      blastLines.push(mkLine(['✗  ', chalk.red], [r.label.padEnd(36)], [desc, chalk.dim]));
+    }
+    for (const e of blast.envFindings.slice(0, 3)) {
+      blastLines.push(
+        mkLine(['⚠  ', chalk.yellow], [`${e.key} `], [`(${e.patternName})`, chalk.dim])
+      );
+    }
+    const totalExposed = blast.reachable.length + blast.envFindings.length;
+    if (totalExposed > 8) {
+      blastLines.push(mkLine([`… +${totalExposed - 8} more`, chalk.dim]));
+    }
+    const title = `BLAST RADIUS  ·  ${totalExposed} path${totalExposed !== 1 ? 's' : ''} reachable right now`;
+    for (const ln of boxPanel(title, blastLines)) console.log('  ' + ln);
+    console.log('');
+  }
+
+  // ── SHIELDS panel — the action recommendation ─────────────────────
+  // Per-shield "would catch N ops" with a score delta for protective
+  // shields (project-jail today; future protective shields auto-extend
+  // via PROTECTIVE_SHIELD_DISCOUNTS).
+  const shieldImpacts = rollupByShield(summary.sections);
+  const exposed = Math.max(0, 100 - blast.score);
+  const shieldLines: Line[] = [];
+
+  // Sort: protective shields with score impact first, then by hit count.
+  const ranked = [...shieldImpacts].sort((a, b) => {
+    const aDiscount = PROTECTIVE_SHIELD_DISCOUNTS[a.shieldName] ?? 0;
+    const bDiscount = PROTECTIVE_SHIELD_DISCOUNTS[b.shieldName] ?? 0;
+    if (aDiscount !== bDiscount) return bDiscount - aDiscount;
+    return b.totalCatches - a.totalCatches;
+  });
+
+  for (const impact of ranked) {
+    if (impact.totalCatches === 0) continue; // hit shields only — zero-hits go to footer
+    const discount = PROTECTIVE_SHIELD_DISCOUNTS[impact.shieldName] ?? 0;
+    const bonus = Math.round(exposed * discount);
+    const icon = discount > 0 ? '🛡  ' : '☐   ';
+    const wouldCatch = `would catch ${impact.totalCatches} op${impact.totalCatches !== 1 ? 's' : ''}`;
+    const deltaSuffix =
+      bonus > 0 ? `  →  +${bonus} pts  (${blast.score} → ${blast.score + bonus})` : '';
+    shieldLines.push(
+      mkLine(
+        [icon, discount > 0 ? chalk.cyan : chalk.dim],
+        [impact.shieldName.padEnd(14), chalk.bold],
+        [wouldCatch.padEnd(22), chalk.dim],
+        [deltaSuffix, bonus > 0 ? chalk.green.bold : chalk.dim]
+      )
+    );
+    // Top rule descriptions on a sub-line.
+    if (impact.topRuleLabels.length > 0) {
+      const rules = impact.topRuleLabels.join(', ');
+      shieldLines.push(mkLine(['      ', chalk.dim], [rules, chalk.dim]));
+    }
+  }
+
+  // Zero-hit builtin shields on a single collapsed line — acknowledges
+  // they exist without bloating the panel.
+  const hitShieldSet = new Set(
+    shieldImpacts.filter((i) => i.totalCatches > 0).map((i) => i.shieldName)
+  );
+  const zeroHitBuiltins = Object.keys(SHIELDS)
+    .filter((name) => !hitShieldSet.has(name))
+    .sort();
+  if (zeroHitBuiltins.length > 0) {
+    shieldLines.push(mkLine([''])); // blank separator
+    shieldLines.push(mkLine([zeroHitBuiltins.join(' · '), chalk.dim]));
+    shieldLines.push(mkLine(['      no hits in your history — install proactively', chalk.dim]));
+  }
+
+  // Final CTA line inside the panel: highest-impact recommendation.
+  const topRec = ranked.find(
+    (r) => r.totalCatches > 0 && (PROTECTIVE_SHIELD_DISCOUNTS[r.shieldName] ?? 0) > 0
+  );
+  if (topRec) {
+    const bonus = Math.round(exposed * (PROTECTIVE_SHIELD_DISCOUNTS[topRec.shieldName] ?? 0));
+    const cta = `→ node9 shield enable ${topRec.shieldName}   (start here — +${bonus} pts)`;
+    shieldLines.push(mkLine([''])); // blank separator
+    shieldLines.push(mkLine([cta, chalk.cyan]));
+  }
+
+  if (shieldLines.length > 0) {
+    const title = 'SHIELDS  ·  install node9 + enable these to catch what we found';
+    for (const ln of boxPanel(title, shieldLines)) console.log('  ' + ln);
+    console.log('');
+  }
+}
+
+/** Find which origin tag (e.g. `default` or `needs shield:project-jail`)
+ *  applies to a given rule name. The lookup walks the summary sections
+ *  to find which one owns the rule. Used by BLOCKED + REVIEW QUEUE
+ *  panels to render the rightmost origin column. */
+function originForRule(
+  ruleName: string,
+  sections: ReadonlyArray<ScanSummary['sections'][number]>
+): string {
+  for (const section of sections) {
+    if (section.rules.some((r) => r.name === ruleName)) {
+      if (section.sourceType === 'default') return 'default';
+      if (section.sourceType === 'shield') return `needs shield:${section.shieldKey ?? section.id}`;
+    }
+  }
+  return '';
+}
+
+// ---------------------------------------------------------------------------
 // Registered command
 // ---------------------------------------------------------------------------
 
@@ -2549,7 +3083,12 @@ export function registerScanCommand(program: Command): void {
                   : '')
             );
           }
-          if (scan.dlpFindings.length > 0 && scan.sessionsWithEarlySecrets > 0) {
+          // "N sessions loaded secrets before first edit" — only show
+          // in --drill-down. The signal is noisy and misleading at the
+          // headline level (it counts sessions that READ secrets, not
+          // sessions that LEAKED them) and we already pulled the
+          // equivalent callout from monitor for the same reason.
+          if (drillDown && scan.dlpFindings.length > 0 && scan.sessionsWithEarlySecrets > 0) {
             console.log(
               '  ' +
                 chalk.dim(
@@ -2558,6 +3097,42 @@ export function registerScanCommand(program: Command): void {
             );
           }
           console.log('');
+
+          // ── Default-mode panel scorecard ─────────────────────────────────
+          // The polished forecast view (~7 boxed panels) replaces the old
+          // 9-section verbose layout below for users who don't opt into
+          // --drill-down. The verbose layout still serves --drill-down so
+          // forensic detail is one flag away.
+          if (!drillDown) {
+            renderPanelScorecard({
+              scan,
+              summary,
+              blast,
+              blastExposures,
+              blockedCount,
+              reviewCount,
+            });
+            // Footer CTAs — distinct from the legacy footer at end of
+            // verbose render. Points to monitor (live dashboard) and
+            // drill-down (forensic deep-dive) — NOT `node9 report`
+            // which is a different command for installed users.
+            const cta = isWired ? '✅ node9 is active' : '→ install node9 to enable protection';
+            console.log('  ' + chalk.green(cta));
+            console.log(
+              '  ' +
+                chalk.dim('→ ') +
+                chalk.cyan('node9 monitor') +
+                chalk.dim('              live dashboard')
+            );
+            console.log(
+              '  ' +
+                chalk.dim('→ ') +
+                chalk.cyan('node9 scan --drill-down') +
+                chalk.dim('    full commands + session IDs')
+            );
+            console.log('');
+            return;
+          }
 
           // ── Credential Leaks — first, most alarming ───────────────────────
           if (scan.dlpFindings.length > 0) {

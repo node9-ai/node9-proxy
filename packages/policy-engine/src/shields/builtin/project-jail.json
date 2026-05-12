@@ -10,7 +10,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "(cat|less|head|tail|bat|more|open|print|nano|vim|vi|emacs|code|type)\\s+.*[\\/\\\\]\\.ssh[\\/\\\\]",
+          "value": "(cat|less|head|tail|bat|more|open|print|nano|vim|vi|emacs|code|type)\\s+.*?\\.ssh[\\/\\\\]",
           "flags": "i"
         }
       ],
@@ -24,7 +24,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "(cat|less|head|tail|bat|more|open|print|nano|vim|vi|emacs|code|type)\\s+.*[\\/\\\\]\\.aws[\\/\\\\]",
+          "value": "(cat|less|head|tail|bat|more|open|print|nano|vim|vi|emacs|code|type)\\s+.*?\\.aws[\\/\\\\]",
           "flags": "i"
         }
       ],
@@ -46,7 +46,7 @@
       "reason": "Reading .env files is blocked by project-jail shield"
     },
     {
-      "name": "shield:project-jail:block-read-credentials",
+      "name": "shield:project-jail:review-read-credentials",
       "tool": "bash",
       "conditions": [
         {
@@ -56,8 +56,64 @@
           "flags": "i"
         }
       ],
+      "verdict": "review",
+      "reason": "Reading credential files requires approval (project-jail shield)"
+    },
+    {
+      "name": "shield:project-jail:block-read-ssh-any-tool",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "file_path",
+          "op": "matches",
+          "value": "(^|[\\/\\\\])\\.ssh[\\/\\\\]",
+          "flags": "i"
+        }
+      ],
       "verdict": "block",
-      "reason": "Reading credential files is blocked by project-jail shield"
+      "reason": "Reading SSH private keys is blocked by project-jail shield"
+    },
+    {
+      "name": "shield:project-jail:block-read-aws-any-tool",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "file_path",
+          "op": "matches",
+          "value": "(^|[\\/\\\\])\\.aws[\\/\\\\]",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "Reading AWS credentials is blocked by project-jail shield"
+    },
+    {
+      "name": "shield:project-jail:review-read-env-any-tool",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "file_path",
+          "op": "matches",
+          "value": "(^|[\\/\\\\])\\.env(\\.(local|production|staging|development|production\\.local|staging\\.local|development\\.local))?$",
+          "flags": "i"
+        }
+      ],
+      "verdict": "review",
+      "reason": "Reading .env files requires approval (project-jail shield)"
+    },
+    {
+      "name": "shield:project-jail:review-read-credentials-any-tool",
+      "tool": "*",
+      "conditions": [
+        {
+          "field": "file_path",
+          "op": "matches",
+          "value": ".*(credentials\\.json|\\.netrc|\\.npmrc|\\.docker[\\/\\\\]config\\.json|gcloud[\\/\\\\]credentials|\\.kube[\\/\\\\]config)",
+          "flags": "i"
+        }
+      ],
+      "verdict": "review",
+      "reason": "Reading credential files requires approval (project-jail shield)"
     }
   ],
   "dangerousWords": []

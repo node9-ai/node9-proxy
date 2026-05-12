@@ -219,6 +219,7 @@ export async function ensurePricingLoaded(): Promise<void> {
   if (fromDisk && Object.keys(fromDisk).length > 0) {
     memCache = fromDisk;
     memCacheAt = Date.now();
+    lookupCache.clear();
     return;
   }
 
@@ -227,12 +228,14 @@ export async function ensurePricingLoaded(): Promise<void> {
     memCache = fetched;
     memCacheAt = Date.now();
     writeCache(fetched);
+    lookupCache.clear();
     return;
   }
 
   // Bundled fallback. Always non-empty.
   memCache = { ...BUNDLED_PRICING };
   memCacheAt = Date.now();
+  lookupCache.clear();
 }
 
 /**
@@ -244,31 +247,51 @@ export async function ensurePricingLoaded(): Promise<void> {
  *
  * Returns null when no match exists in either source. Caller must handle
  * the "unknown model — skip cost calc" path.
+ *
+ * Memoised: the prefix-match loop is O(N keys) (memCache can hold ~600
+ * model names from LiteLLM). costSync's parseJSONLFile calls this for
+ * every assistant entry — tens of thousands per session walk. Caching
+ * by normalised model name turns the dashboard's mount-time JSONL walk
+ * from ~30 s into ~2 s on a heavy install.
  */
+const lookupCache = new Map<string, PricingTuple | null>();
+
 export function pricingFor(model: string): PricingTuple | null {
   const norm = normalizeModel(model);
+  const cached = lookupCache.get(norm);
+  if (cached !== undefined) return cached;
+
   const sources: Array<Record<string, PricingTuple>> = [];
   if (memCache) sources.push(memCache);
   sources.push(BUNDLED_PRICING);
 
+  let resolved: PricingTuple | null = null;
   for (const source of sources) {
     const exact = source[norm];
-    if (exact) return exact;
+    if (exact) {
+      resolved = exact;
+      break;
+    }
     let best: string | null = null;
     for (const key of Object.keys(source)) {
       if (norm.startsWith(key.toLowerCase()) && (best === null || key.length > best.length)) {
         best = key;
       }
     }
-    if (best) return source[best]!;
+    if (best) {
+      resolved = source[best]!;
+      break;
+    }
   }
-  return null;
+  lookupCache.set(norm, resolved);
+  return resolved;
 }
 
 /** Test-only — reset the in-memory cache so tests don't pollute each other. */
 export function _resetPricingCache(): void {
   memCache = null;
   memCacheAt = 0;
+  lookupCache.clear();
 }
 
 /** Test-only — read the bundled fallback directly. */

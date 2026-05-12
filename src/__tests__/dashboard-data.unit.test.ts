@@ -14,18 +14,37 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import {
   aggregateAudit,
   aggregateCost,
+  applyActivityEvent,
+  applyActivityToShields,
   applyForensicEvent,
+  applyResolveStatus,
   auditEntryToActivityEvent,
   buildCostBaseline,
+  buildRuleToShieldMap,
   compactPath,
+  compactPathsInCommand,
+  computeProtection,
   isValidForensicEvent,
   mapResultStatus,
+  readAuditEntriesAsync,
   subtractCostBaseline,
+  toActivityEvent,
 } from '../tui/dashboard/data';
-import { EMPTY_SESSION_FORENSIC, type ForensicSseEvent } from '../tui/dashboard/types';
+import {
+  EMPTY_SESSION_ACTIVITY,
+  EMPTY_SESSION_FORENSIC,
+  EMPTY_SESSION_SHIELDS,
+  type ActivityEvent,
+  type ForensicSseEvent,
+  type SessionActivityAgg,
+  type SessionShieldsAgg,
+} from '../tui/dashboard/types';
 import type { DailyEntry } from '../costSync';
 
 // ── shared minimal-shape helpers ──────────────────────────────────────────────
@@ -407,6 +426,38 @@ describe('compactPath', () => {
   });
 });
 
+// ── compactPathsInCommand ────────────────────────────────────────────────────
+
+describe('compactPathsInCommand', () => {
+  it('compacts an absolute path embedded in a shell command', () => {
+    expect(compactPathsInCommand('cd /home/nadav/node9/node9-proxy && wc -l src/tui/tail.ts')).toBe(
+      'cd .../node9/node9-proxy && wc -l src/tui/tail.ts'
+    );
+  });
+
+  it('compacts every absolute path independently', () => {
+    expect(compactPathsInCommand('cp /home/u/proj/a/b/c.txt /home/u/proj/d/e/f.txt')).toBe(
+      'cp .../b/c.txt .../e/f.txt'
+    );
+  });
+
+  it('compacts ~-relative paths', () => {
+    expect(compactPathsInCommand('cat ~/projects/foo/bar/baz.ts')).toBe('cat .../bar/baz.ts');
+  });
+
+  it('leaves URLs and short paths alone', () => {
+    expect(compactPathsInCommand('curl https://example.com/api')).toBe(
+      'curl https://example.com/api'
+    );
+    expect(compactPathsInCommand('ls /etc/hosts')).toBe('ls /etc/hosts');
+  });
+
+  it('passes through commands with no paths', () => {
+    expect(compactPathsInCommand('npm test')).toBe('npm test');
+    expect(compactPathsInCommand('')).toBe('');
+  });
+});
+
 // ── mapResultStatus ──────────────────────────────────────────────────────────
 
 describe('mapResultStatus', () => {
@@ -440,6 +491,115 @@ describe('mapResultStatus', () => {
 });
 
 // ── auditEntryToActivityEvent — extra coverage for path compaction in preview
+
+describe('readAuditEntriesAsync', () => {
+  function withTempAuditLog(lines: string[], fn: (path: string) => Promise<void>): Promise<void> {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-test-'));
+    const file = path.join(dir, 'audit.log');
+    fs.writeFileSync(file, lines.join('\n'));
+    return fn(file).finally(() => fs.rmSync(dir, { recursive: true, force: true }));
+  }
+
+  it('parses every line and returns the same shape as the sync reader', async () => {
+    const entries = [
+      { ts: '2026-05-08T08:00:00.000Z', tool: 'Bash', decision: 'allow' },
+      { ts: '2026-05-08T08:00:01.000Z', tool: 'Read', decision: 'allow' },
+      { ts: '2026-05-08T08:00:02.000Z', tool: 'Edit', decision: 'block' },
+    ];
+    await withTempAuditLog(
+      entries.map((e) => JSON.stringify(e)),
+      async (file) => {
+        const out = await readAuditEntriesAsync(1000, file);
+        expect(out).toHaveLength(3);
+        expect(out[0].tool).toBe('Bash');
+        expect(out[2].decision).toBe('block');
+      }
+    );
+  });
+
+  it('chunks parsing across setImmediate ticks (no UI block on large logs)', async () => {
+    // Generate 5000 entries — well past the default 1000-line chunk size.
+    // We can't directly observe the yielding, but we CAN observe that the
+    // event loop runs at least one tick mid-parse: schedule a counter that
+    // increments on setImmediate every tick, await the parse, then assert
+    // the counter advanced. If the parse were sync, the counter would
+    // never run between start and resolution.
+    const lines: string[] = [];
+    for (let i = 0; i < 5000; i++) {
+      lines.push(
+        JSON.stringify({ ts: '2026-05-08T08:00:00.000Z', tool: 'Bash', decision: 'allow' })
+      );
+    }
+    await withTempAuditLog(lines, async (file) => {
+      let ticks = 0;
+      const tick = (): void => {
+        ticks++;
+        if (ticks < 10) setImmediate(tick);
+      };
+      setImmediate(tick);
+      const out = await readAuditEntriesAsync(1000, file);
+      expect(out).toHaveLength(5000);
+      // 5000 lines / 1000 per chunk = 5 yields. Even being conservative,
+      // the parser yielded enough times that our independent ticker fired.
+      expect(ticks).toBeGreaterThan(0);
+    });
+  });
+
+  it('returns [] for a missing file', async () => {
+    const out = await readAuditEntriesAsync(1000, '/nonexistent/path/audit.log');
+    expect(out).toEqual([]);
+  });
+
+  it('skips malformed lines without throwing', async () => {
+    await withTempAuditLog(
+      [
+        JSON.stringify({ ts: '2026-05-08T08:00:00.000Z', tool: 'Bash', decision: 'allow' }),
+        'not-json{{{',
+        '',
+        JSON.stringify({ ts: '2026-05-08T08:00:01.000Z', tool: 'Read', decision: 'allow' }),
+      ],
+      async (file) => {
+        const out = await readAuditEntriesAsync(1000, file);
+        expect(out).toHaveLength(2);
+      }
+    );
+  });
+});
+
+describe('toActivityEvent · snapshot path compaction', () => {
+  it('compacts a long argsSummary path so the live row stays in column budget', () => {
+    const e = toActivityEvent('snapshot', {
+      ts: '2026-05-08T08:00:00.000Z',
+      hash: 'abc1234',
+      argsSummary: '/home/u/repo/src/tui/dashboard/data.ts',
+      fileCount: 2,
+    });
+    if (!e || e.kind !== 'snapshot') throw new Error('expected snapshot event');
+    expect(e.summary).toBe('.../dashboard/data.ts');
+  });
+
+  it('leaves short paths unchanged', () => {
+    const e = toActivityEvent('snapshot', {
+      ts: '2026-05-08T08:00:00.000Z',
+      hash: 'abc1234',
+      argsSummary: '/etc/hosts',
+      fileCount: 1,
+    });
+    if (!e || e.kind !== 'snapshot') throw new Error('expected snapshot event');
+    expect(e.summary).toBe('/etc/hosts');
+  });
+
+  it('falls back to tool name when argsSummary is missing', () => {
+    const e = toActivityEvent('snapshot', {
+      ts: '2026-05-08T08:00:00.000Z',
+      hash: 'abc1234',
+      tool: 'write_file',
+      fileCount: 1,
+    });
+    if (!e || e.kind !== 'snapshot') throw new Error('expected snapshot event');
+    expect(e.summary).toBe('write_file');
+  });
+});
 
 describe('auditEntryToActivityEvent · preview compaction', () => {
   it('compacts long file_path in preview', () => {
@@ -579,6 +739,301 @@ describe('applyForensicEvent', () => {
     agg = applyForensicEvent(agg, fEvent('pii'));
     agg = applyForensicEvent(agg, fEvent('pii'));
     expect(agg.pii).toBe(3);
+  });
+});
+
+// ── applyActivityEvent ────────────────────────────────────────────────────────
+
+describe('applyActivityEvent', () => {
+  function toolEvent(overrides: Partial<ActivityEvent> = {}): ActivityEvent {
+    return {
+      kind: 'tool',
+      id: 'evt_1',
+      ts: '2026-05-10T00:00:00.000Z',
+      tool: 'Bash',
+      preview: 'git status',
+      verdict: 'allow',
+      ...overrides,
+    } as ActivityEvent;
+  }
+
+  it('increments tools[name] for every tool event', () => {
+    let agg: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {} };
+    agg = applyActivityEvent(agg, toolEvent({ tool: 'Read', preview: '/etc/hosts' }));
+    agg = applyActivityEvent(agg, toolEvent({ tool: 'Read', preview: '/tmp/x' }));
+    agg = applyActivityEvent(agg, toolEvent({ tool: 'Edit', preview: 'src/app.ts' }));
+    expect(agg.tools).toEqual({ Read: 2, Edit: 1 });
+  });
+
+  it('extracts shell first-token for Bash and tallies', () => {
+    let agg: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {} };
+    agg = applyActivityEvent(agg, toolEvent({ preview: 'git status' }));
+    agg = applyActivityEvent(agg, toolEvent({ preview: 'git diff HEAD' }));
+    agg = applyActivityEvent(agg, toolEvent({ preview: 'npm test' }));
+    expect(agg.shell).toEqual({ git: 2, npm: 1 });
+  });
+
+  it('skips shell tally for non-Bash tools', () => {
+    let agg: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {} };
+    agg = applyActivityEvent(agg, toolEvent({ tool: 'Read', preview: '/etc/hosts' }));
+    expect(agg.shell).toEqual({});
+  });
+
+  it('tallies mcp by server name when mcpServer is set', () => {
+    let agg: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {}, mcp: {} };
+    agg = applyActivityEvent(
+      agg,
+      toolEvent({ tool: 'mcp__postgres__execute_sql', mcpServer: 'postgres' })
+    );
+    agg = applyActivityEvent(
+      agg,
+      toolEvent({ tool: 'mcp__postgres__select', mcpServer: 'postgres' })
+    );
+    agg = applyActivityEvent(
+      agg,
+      toolEvent({ tool: 'mcp__github__create_issue', mcpServer: 'github' })
+    );
+    expect(agg.mcp).toEqual({ postgres: 2, github: 1 });
+  });
+
+  it('does NOT tally mcp when mcpServer is undefined (regular tools)', () => {
+    let agg: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {}, mcp: {} };
+    agg = applyActivityEvent(agg, toolEvent({ tool: 'Read', preview: '/etc/hosts' }));
+    agg = applyActivityEvent(agg, toolEvent({ tool: 'Bash', preview: 'git status' }));
+    expect(agg.mcp).toEqual({});
+  });
+
+  it('mcp tally is independent of tools tally (same event counts in both)', () => {
+    let agg: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {}, mcp: {} };
+    agg = applyActivityEvent(
+      agg,
+      toolEvent({ tool: 'mcp__postgres__execute_sql', mcpServer: 'postgres' })
+    );
+    // Same event shows up in tools (by full tool name) AND mcp (by server) — two views, not double-count.
+    expect(agg.tools['mcp__postgres__execute_sql']).toBe(1);
+    expect(agg.mcp['postgres']).toBe(1);
+  });
+
+  it('skips shell tally when first token has invalid chars', () => {
+    let agg: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {} };
+    agg = applyActivityEvent(agg, toolEvent({ preview: 'cat $(whoami)' }));
+    // first token is 'cat' which IS valid — sanity that valid words tally
+    expect(agg.shell['cat']).toBe(1);
+    agg = applyActivityEvent(agg, toolEvent({ preview: '$(weird)' }));
+    // '$(weird)' fails the identifier regex and is skipped
+    expect(Object.keys(agg.shell)).toEqual(['cat']);
+  });
+
+  it('counts dlp via checkedBy substring', () => {
+    let agg: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {} };
+    agg = applyActivityEvent(agg, toolEvent({ checkedBy: 'dlp-block' }));
+    agg = applyActivityEvent(agg, toolEvent({ checkedBy: 'dlp-saas:aws' }));
+    agg = applyActivityEvent(agg, toolEvent({ checkedBy: 'response-dlp-aws' }));
+    expect(agg.dlp).toBe(3);
+  });
+
+  it('counts loops only on exact loop-detected', () => {
+    let agg: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {} };
+    agg = applyActivityEvent(agg, toolEvent({ checkedBy: 'loop-detected' }));
+    agg = applyActivityEvent(agg, toolEvent({ checkedBy: 'something-else' }));
+    expect(agg.loops).toBe(1);
+  });
+
+  it('ignores snapshot events', () => {
+    const before = { ...EMPTY_SESSION_ACTIVITY, tools: { Bash: 5 }, shell: { git: 5 } };
+    const snapshotEvent: ActivityEvent = {
+      kind: 'snapshot',
+      id: 'snap_1',
+      ts: '2026-05-10T00:00:00.000Z',
+      hash: 'abc',
+      summary: '/tmp/x',
+      fileCount: 1,
+    };
+    const after = applyActivityEvent(before, snapshotEvent);
+    expect(after).toBe(before);
+  });
+
+  it('does not mutate input', () => {
+    const before = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {} };
+    const snapshot = JSON.stringify(before);
+    applyActivityEvent(before, toolEvent({ preview: 'git status' }));
+    expect(JSON.stringify(before)).toBe(snapshot);
+  });
+});
+
+// ── computeProtection ────────────────────────────────────────────────────────
+
+describe('computeProtection', () => {
+  const blast = (score: number) => ({ score, paths: [], envFindings: 0 });
+  const shields = (active: string[] = [], inactive: string[] = []) => ({ active, inactive });
+
+  it('returns full 100/100 when blast is perfect', () => {
+    const p = computeProtection(blast(100), shields());
+    expect(p).toEqual({
+      exposed: 0,
+      protect: 0,
+      effective: 100,
+      suggestedShield: null,
+      suggestedBonus: 0,
+    });
+  });
+
+  it('exposes deductions with a suggestion when project-jail is inactive', () => {
+    const p = computeProtection(blast(25), shields([], ['project-jail']));
+    expect(p.exposed).toBe(75);
+    expect(p.protect).toBe(0);
+    expect(p.effective).toBe(25);
+    expect(p.suggestedShield).toBe('project-jail');
+    expect(p.suggestedBonus).toBe(53); // round(75 × 0.7)
+  });
+
+  it('applies the 70% discount when project-jail is active', () => {
+    const p = computeProtection(blast(25), shields(['project-jail']));
+    expect(p.exposed).toBe(75);
+    expect(p.protect).toBe(53); // round(75 × 0.7)
+    expect(p.effective).toBe(78);
+    expect(p.suggestedShield).toBe(null); // best (and only) protection already on
+  });
+
+  it('ignores non-protective shields like dlp / bash-safe / filesystem', () => {
+    // `filesystem`, `bash-safe`, `dlp-*` etc. defend other risk surfaces
+    // and don't reduce blast-path exposure — they contribute 0.
+    const p = computeProtection(
+      blast(25),
+      shields(['filesystem', 'bash-safe', 'dlp-bash'], ['project-jail'])
+    );
+    expect(p.protect).toBe(0); // none of the active shields are protective
+    expect(p.suggestedShield).toBe('project-jail');
+    expect(p.suggestedBonus).toBe(53);
+  });
+
+  it('clamps effective to [0, 100]', () => {
+    expect(computeProtection(blast(0), shields()).effective).toBe(0);
+    expect(computeProtection(blast(100), shields()).effective).toBe(100);
+  });
+
+  it('handles null blast and null shieldStatus gracefully', () => {
+    const p = computeProtection(null, null);
+    expect(p.effective).toBe(100); // no blast = perfect
+    expect(p.suggestedShield).toBe(null);
+  });
+
+  it('omits suggestion when no inactive protective shield exists', () => {
+    const p = computeProtection(blast(25), shields([], ['bash-safe']));
+    expect(p.suggestedShield).toBe(null); // bash-safe isn't protective
+    expect(p.protect).toBe(0);
+  });
+});
+
+// ── applyResolveStatus ────────────────────────────────────────────────────────
+
+describe('applyResolveStatus', () => {
+  // Regression test for the dlp-counter-stuck-at-zero bug fixed in
+  // 2026-05-12: DLP blocks arrive only as activity-result resolves with
+  // status='dlp', not as pending events with checkedBy. The original
+  // applyActivityEvent dlp-via-checkedBy detection therefore never fired
+  // for DLP in production. This reducer is the resolve-side counterpart.
+  it('increments dlp when raw status is "dlp"', () => {
+    const before: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {} };
+    const after = applyResolveStatus(before, 'dlp');
+    expect(after.dlp).toBe(1);
+  });
+
+  it('ignores other statuses (allow / block / review / taint)', () => {
+    const before: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {} };
+    expect(applyResolveStatus(before, 'allow').dlp).toBe(0);
+    expect(applyResolveStatus(before, 'block').dlp).toBe(0);
+    expect(applyResolveStatus(before, 'review').dlp).toBe(0);
+    expect(applyResolveStatus(before, 'taint').dlp).toBe(0);
+    expect(applyResolveStatus(before, undefined).dlp).toBe(0);
+  });
+
+  it('accumulates dlp counts across multiple resolves', () => {
+    let agg: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {} };
+    agg = applyResolveStatus(agg, 'dlp');
+    agg = applyResolveStatus(agg, 'dlp');
+    agg = applyResolveStatus(agg, 'dlp');
+    expect(agg.dlp).toBe(3);
+  });
+
+  it('does not mutate input', () => {
+    const before: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {} };
+    const snapshot = JSON.stringify(before);
+    applyResolveStatus(before, 'dlp');
+    expect(JSON.stringify(before)).toBe(snapshot);
+  });
+});
+
+// ── buildRuleToShieldMap + applyActivityToShields ────────────────────────────
+
+describe('buildRuleToShieldMap', () => {
+  it('builds a non-empty map from the SHIELDS registry', () => {
+    // Smoke test: the registry ships with builtin shields, so the map
+    // should always have at least a handful of entries. Exact count
+    // depends on which shields ship — assert structure not specifics.
+    const map = buildRuleToShieldMap();
+    expect(map.size).toBeGreaterThan(0);
+    for (const [ruleName, shieldName] of map) {
+      expect(typeof ruleName).toBe('string');
+      expect(typeof shieldName).toBe('string');
+      expect(ruleName.length).toBeGreaterThan(0);
+      expect(shieldName.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe('applyActivityToShields', () => {
+  const ruleToShield = new Map<string, string>([
+    ['rule-a', 'shield-X'],
+    ['rule-b', 'shield-X'],
+    ['rule-c', 'shield-Y'],
+  ]);
+
+  function evt(overrides: Partial<ActivityEvent> = {}): ActivityEvent {
+    return {
+      kind: 'tool',
+      id: 'e1',
+      ts: '2026-05-11T00:00:00.000Z',
+      tool: 'Bash',
+      preview: 'rm -rf /',
+      verdict: 'block',
+      checkedBy: 'rule-a',
+      ...overrides,
+    } as ActivityEvent;
+  }
+
+  it('increments blocks for verdict=block', () => {
+    let agg: SessionShieldsAgg = { ...EMPTY_SESSION_SHIELDS, byShield: {} };
+    agg = applyActivityToShields(agg, evt(), ruleToShield);
+    agg = applyActivityToShields(agg, evt({ checkedBy: 'rule-b' }), ruleToShield);
+    expect(agg.byShield['shield-X']).toEqual({ blocks: 2, reviews: 0 });
+  });
+
+  it('increments reviews for verdict=review', () => {
+    let agg: SessionShieldsAgg = { ...EMPTY_SESSION_SHIELDS, byShield: {} };
+    agg = applyActivityToShields(agg, evt({ verdict: 'review' }), ruleToShield);
+    expect(agg.byShield['shield-X']).toEqual({ blocks: 0, reviews: 1 });
+  });
+
+  it('skips allow / pending verdicts', () => {
+    let agg: SessionShieldsAgg = { ...EMPTY_SESSION_SHIELDS, byShield: {} };
+    agg = applyActivityToShields(agg, evt({ verdict: 'allow' }), ruleToShield);
+    agg = applyActivityToShields(agg, evt({ verdict: 'pending' }), ruleToShield);
+    expect(agg.byShield).toEqual({});
+  });
+
+  it('skips events whose checkedBy does not map to a shield', () => {
+    let agg: SessionShieldsAgg = { ...EMPTY_SESSION_SHIELDS, byShield: {} };
+    agg = applyActivityToShields(agg, evt({ checkedBy: 'dlp-block' }), ruleToShield);
+    agg = applyActivityToShields(agg, evt({ checkedBy: undefined }), ruleToShield);
+    expect(agg.byShield).toEqual({});
+  });
+
+  it('does not mutate input', () => {
+    const before: SessionShieldsAgg = { ...EMPTY_SESSION_SHIELDS, byShield: {} };
+    const snapshot = JSON.stringify(before);
+    applyActivityToShields(before, evt(), ruleToShield);
+    expect(JSON.stringify(before)).toBe(snapshot);
   });
 });
 

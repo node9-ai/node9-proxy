@@ -409,3 +409,29 @@ describe('interactive approval card – keypress regression', () => {
     expect(stdinOnSpy.mock.calls.map((c) => c[0])).not.toContain('keypress');
   });
 });
+
+// ── shortenPathSummary unit tests ─────────────────────────────────────────────
+// Pure helper used to compact long absolute paths in the live snapshot row so
+// the feed stays readable. Regression coverage for that behaviour lives here.
+
+describe('shortenPathSummary', () => {
+  it('compacts a deep absolute path to ".../folder/filename"', async () => {
+    const { shortenPathSummary } = await import('../tui/tail.js');
+    expect(shortenPathSummary('/home/nadav/node9/node9Firewall/fe/src/pages/DocsTab.tsx')).toBe(
+      '…/pages/DocsTab.tsx'
+    );
+  });
+
+  it('leaves short absolute paths alone', async () => {
+    const { shortenPathSummary } = await import('../tui/tail.js');
+    expect(shortenPathSummary('/etc/passwd')).toBe('/etc/passwd');
+    expect(shortenPathSummary('/foo')).toBe('/foo');
+  });
+
+  it('does not mangle non-absolute summaries', async () => {
+    const { shortenPathSummary } = await import('../tui/tail.js');
+    expect(shortenPathSummary('write_file')).toBe('write_file');
+    expect(shortenPathSummary('relative/path/to/file.ts')).toBe('relative/path/to/file.ts');
+    expect(shortenPathSummary('')).toBe('');
+  });
+});

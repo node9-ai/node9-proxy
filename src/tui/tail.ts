@@ -11,6 +11,21 @@ import { getInternalToken } from '../auth/daemon';
 
 const PID_FILE = path.join(os.homedir(), '.node9', 'daemon.pid');
 
+/**
+ * Compact an absolute path for the live feed: keep only the last two segments
+ * (folder/filename) and prefix with `…/` so the path is recognisable as
+ * abbreviated. Non-absolute or short paths are returned unchanged so we don't
+ * mangle non-path summaries that happen to flow through the same field.
+ *
+ * Example: `/home/nadav/node9/fe/src/pages/DocsTab.tsx` → `…/pages/DocsTab.tsx`
+ */
+export function shortenPathSummary(s: string): string {
+  if (!s || !s.startsWith('/')) return s;
+  const parts = s.split('/').filter(Boolean);
+  if (parts.length <= 2) return s;
+  return `…/${parts.slice(-2).join('/')}`;
+}
+
 const ICONS: Record<string, string> = {
   bash: '💻',
   shell: '💻',
@@ -1175,7 +1190,8 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
     if (event === 'snapshot') {
       const time = new Date(data.ts).toLocaleTimeString([], { hour12: false });
       const hash = (data as unknown as { hash: string }).hash ?? '';
-      const summary = (data as unknown as { argsSummary: string }).argsSummary ?? data.tool;
+      const rawSummary = (data as unknown as { argsSummary: string }).argsSummary ?? data.tool;
+      const summary = shortenPathSummary(rawSummary);
       const fileCount = (data as unknown as { fileCount: number }).fileCount ?? 0;
       const files =
         fileCount > 0 ? chalk.dim(` · ${fileCount} file${fileCount === 1 ? '' : 's'}`) : '';

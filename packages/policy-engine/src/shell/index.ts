@@ -370,32 +370,75 @@ const HOME_CACHE_ALLOWLIST = [
   '.rustup/downloads',
 ];
 
-const SENSITIVE_PATH_RULES: Array<{ rule: string; reason: string; match: (p: string) => boolean }> =
-  [
-    {
-      rule: 'shield:project-jail:block-read-ssh',
-      reason: 'Reading SSH private keys is blocked by project-jail shield',
-      match: (p) => /(^|[\\/])\.ssh[\\/]/i.test(p),
-    },
-    {
-      rule: 'shield:project-jail:block-read-aws',
-      reason: 'Reading AWS credentials is blocked by project-jail shield',
-      match: (p) => /(^|[\\/])\.aws[\\/]/i.test(p),
-    },
-    {
-      rule: 'shield:project-jail:block-read-env',
-      reason: 'Reading .env files is blocked by project-jail shield',
-      match: (p) => /(?:^|[\\/])\.env(?:\.local|\.production|\.staging)?$/i.test(p),
-    },
-    {
-      rule: 'shield:project-jail:block-read-credentials',
-      reason: 'Reading credential files is blocked by project-jail shield',
-      match: (p) =>
-        /(?:credentials\.json|\.netrc|\.npmrc|\.docker[\\/]config\.json|gcloud[\\/]credentials)$/i.test(
-          p
-        ),
-    },
-  ];
+const SENSITIVE_PATH_RULES: Array<{
+  rule: string;
+  reason: string;
+  match: (p: string) => boolean;
+  /** Per-rule verdict; defaults to 'block' when omitted. Credentials
+   *  (.netrc / .npmrc / .docker / .kube / gcloud) use 'review' rather
+   *  than 'block' — these config files have legitimate diagnostic
+   *  read needs ("which registry am I configured for"), so we ask
+   *  rather than hard-stop, matching the any-tool rule's verdict. */
+  verdict?: 'block' | 'review';
+}> = [
+  {
+    rule: 'shield:project-jail:block-read-ssh',
+    reason: 'Reading SSH private keys is blocked by project-jail shield',
+    match: (p) => /(^|[\\/])\.ssh[\\/]/i.test(p),
+  },
+  {
+    rule: 'shield:project-jail:block-read-aws',
+    reason: 'Reading AWS credentials is blocked by project-jail shield',
+    match: (p) => /(^|[\\/])\.aws[\\/]/i.test(p),
+  },
+  {
+    // Mirrors the JSON shield's `.env` pattern (project-jail.json's
+    // review-read-env-any-tool) so the AST FS-op path catches the
+    // same set the regex shield does — including Next.js / Vite's
+    // `.env.<env>.local` double-suffix overrides which are commonly
+    // gitignored AND commonly contain real secrets.
+    //
+    // Intentional non-matches (dev fixtures): .env.example, .env.sample,
+    // .env.template, .env.test, .envrc. See shields.test.ts:983-995
+    // for the canonical test-asserted contract.
+    rule: 'shield:project-jail:block-read-env',
+    reason: 'Reading .env files is blocked by project-jail shield',
+    match: (p) =>
+      /(?:^|[\\/])\.env(?:\.(?:local|production|staging|development|production\.local|staging\.local|development\.local))?$/i.test(
+        p
+      ),
+  },
+  {
+    // verdict: 'review' (not 'block') is a deliberate design choice
+    // documented in commit 29327a8. SSH keys and AWS credentials are
+    // cryptographic material with no legitimate read use-case for
+    // an AI agent → hard `block`. But .netrc / .npmrc / .docker /
+    // .kube / gcloud are CONFIG files that hold tokens AND have
+    // legitimate diagnostic reads ("which registry am I configured
+    // for", "what cluster am I on"). Hard-blocking those creates
+    // friction without much safety win because the review gate
+    // still catches genuine exfiltration attempts.
+    //
+    // The review gate FAILS CLOSED on timeout (daemon.approvalTimeoutMs
+    // returns a deny verdict via the orchestrator's timeout branch),
+    // so a stuck or unattended approval does NOT silently grant
+    // credential access. If the threat model demands strict block,
+    // a future per-shield strict-mode toggle is the right fix —
+    // not a regex-level upgrade here.
+    rule: 'shield:project-jail:review-read-credentials',
+    reason: 'Reading credential files requires approval (project-jail shield)',
+    verdict: 'review',
+    match: (p) =>
+      // .kube/config holds Kubernetes cluster credentials and was
+      // flagged as missing by the node9-pr-agent review (the comment
+      // above mentioned .kube but the regex didn't include it — a
+      // textbook code-comment vs code drift). The JSON shield's
+      // review-read-credentials-any-tool already had it. Now aligned.
+      /(?:credentials\.json|\.netrc|\.npmrc|\.docker[\\/]config\.json|gcloud[\\/]credentials|\.kube[\\/]config)$/i.test(
+        p
+      ),
+  },
+];
 
 export interface FsOpVerdict {
   ruleName: string;
@@ -430,7 +473,7 @@ export const AST_FS_REGEX_RULES = new Set<string>([
   'shield:project-jail:block-read-ssh',
   'shield:project-jail:block-read-aws',
   'shield:project-jail:block-read-env',
-  'shield:project-jail:block-read-credentials',
+  'shield:project-jail:review-read-credentials',
 ]);
 
 /**
@@ -586,7 +629,12 @@ function analyzeFsOperationImpl(command: string): FsOpVerdict | null {
         for (const p of paths) {
           for (const sp of SENSITIVE_PATH_RULES) {
             if (sp.match(p)) {
-              result = { ruleName: sp.rule, verdict: 'block', reason: sp.reason, path: p };
+              result = {
+                ruleName: sp.rule,
+                verdict: sp.verdict ?? 'block',
+                reason: sp.reason,
+                path: p,
+              };
               return false;
             }
           }
