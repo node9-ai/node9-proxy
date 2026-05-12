@@ -277,13 +277,13 @@ function computeHeadline(
     // user somehow lingers here, [r] will rescan — same affordance.
     return { text: '(scan idle · [r] to start)', dim: true };
   }
-  if (filtered.sessionsWithEarlySecrets > 0) {
-    const n = filtered.sessionsWithEarlySecrets;
-    return {
-      text: `📌 ${n} session${n === 1 ? '' : 's'} loaded secrets pre-edit`,
-      color: 'red',
-    };
-  }
+  // Tier 1 — `sessionsWithEarlySecrets` cascade rule removed 2026-05-12.
+  // The count was a lifetime-of-history sum (not period-bounded), so
+  // [T]oday could still show "1 session loaded secrets pre-edit" from
+  // a session 6 months ago. Once tripped it became a permanent red
+  // badge that no workflow fix could clear — bad signal-to-noise.
+  // To restore: make scan walker emit per-session timestamps so we can
+  // filter by period in derive.ts (~1-2 hrs of work, deferred).
   if (filtered.leaks.length > 0) {
     const n = filtered.leaks.length;
     return {

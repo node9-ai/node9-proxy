@@ -295,23 +295,16 @@ describe('ScoreBanner headline cascade', () => {
     expect(lastFrame()).toContain('scan failed');
   });
 
-  it('headline tier 1 — sessions-with-early-secrets wins over leaks', () => {
+  it('sessions-with-early-secrets does NOT trigger the headline (cascade rule retired)', () => {
+    // The lifetime-of-history `sessionsWithEarlySecrets` cascade rule
+    // was removed 2026-05-12 — it produced a stuck red badge from
+    // sessions long outside the selected period. With sessionsWithEarlySecrets=2
+    // and NO leaks/loops/blast paths, the headline now falls through
+    // to the dim "clean" state instead of pinning a misleading
+    // pre-edit-secrets message.
     const filtered: FilteredScan = {
       ...EMPTY_FILTERED_SCAN,
       sessionsWithEarlySecrets: 2,
-      // Even with leaks present, the pre-edit-secrets headline comes first
-      leaks: [
-        // a couple leak placeholders — only length is read by the cascade
-        {
-          patternName: 'X',
-          redactedSample: '',
-          toolName: '',
-          timestamp: '',
-          project: '',
-          sessionId: '',
-          agent: 'claude',
-        },
-      ] as FilteredScan['leaks'],
     };
     const { lastFrame } = render(
       <ScoreBanner
@@ -321,7 +314,7 @@ describe('ScoreBanner headline cascade', () => {
         filtered={filtered}
       />
     );
-    expect(lastFrame()).toContain('2 sessions loaded secrets pre-edit');
+    expect(lastFrame()).not.toContain('loaded secrets pre-edit');
   });
 
   it('headline tier 2 — leaks > 0 (when no early-secrets)', () => {
