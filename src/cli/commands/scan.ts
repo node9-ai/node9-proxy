@@ -3117,14 +3117,11 @@ export function registerScanCommand(program: Command): void {
           // migration completes — see scan-redesign plan, commit #1.
           if (!drillDown) {
             const useInk = process.env.NODE9_SCAN_INK === '1';
-            // During the Ink migration window (commits #1-7 of the
-            // scan-redesign plan), the Ink renderer emits ONLY the
-            // panels already migrated. The chalk renderPanelScorecard
-            // below always runs, covering everything else. Net effect:
-            // when NODE9_SCAN_INK=1 the user sees Ink panels at the
-            // top + chalk panels following. As each commit migrates
-            // another panel, the chalk section shrinks. Commit #8
-            // deletes the chalk path entirely.
+            // Commits #1-6 migrated all 6 panels to the Ink scorecard.
+            // As of commit #7, the Ink path renders the complete
+            // scorecard and the chalk renderPanelScorecard is the
+            // strict fallback for users who haven't opted in. Commit
+            // #8 deletes the chalk path entirely.
             //
             // Ink load: ink/react are ESM with top-level await, so
             // they can't be require()'d from this CJS bundle. We
@@ -3147,15 +3144,16 @@ export function registerScanCommand(program: Command): void {
                 blockedCount,
                 reviewCount,
               });
+            } else {
+              renderPanelScorecard({
+                scan,
+                summary,
+                blast,
+                blastExposures,
+                blockedCount,
+                reviewCount,
+              });
             }
-            renderPanelScorecard({
-              scan,
-              summary,
-              blast,
-              blastExposures,
-              blockedCount,
-              reviewCount,
-            });
             // Footer CTAs — distinct from the legacy footer at end of
             // verbose render. Points to monitor (live dashboard) and
             // drill-down (forensic deep-dive) — NOT `node9 report`
