@@ -27,7 +27,11 @@ import type { ShieldStatus } from '../../../types.js';
 import { buildRuleToShieldMap } from '../../../data.js';
 import { num } from '../util.js';
 
-const ROW_LIMIT = 6;
+// Max rows shown across active + inactive combined. Anything past
+// this collapses to "… N more". Kept tight (4) so the panel doesn't
+// dominate the middle row height — 10 shields × 1 row each was
+// pushing the [2] view past terminal-tall on 30d / 90d periods.
+const ROW_LIMIT = 4;
 const LABEL_W = 18;
 
 export function PeriodShields({

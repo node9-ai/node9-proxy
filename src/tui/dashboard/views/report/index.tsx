@@ -151,8 +151,15 @@ function ReportHeader({
         <Text dimColor>{`     ${PERIOD_LONG_LABEL[period]}`}</Text>
       </Box>
       <Box>
-        <Text dimColor>{`  ${dateRange}  ·  ${events.toLocaleString()} events`}</Text>
-        {agentBits ? <Text dimColor>{`  ·  ${agentBits}`}</Text> : null}
+        {/* Single-line — truncate-end safety net so longer agent
+            lists don't wrap "events" onto a second row. The
+            shortenAgent helper above keeps the line under typical
+            widths; this is for the edge case where many agents are
+            in use simultaneously. */}
+        <Text dimColor wrap="truncate-end">
+          {`  ${dateRange}  ·  ${events.toLocaleString()} events`}
+          {agentBits ? `  ·  ${agentBits}` : ''}
+        </Text>
       </Box>
     </Box>
   );
@@ -359,5 +366,16 @@ function fmtCost(usd: number): string {
 function formatAgents(agentMap: Map<string, number>): string {
   if (agentMap.size === 0) return '';
   const ordered = [...agentMap.entries()].sort((a, b) => b[1] - a[1]);
-  return ordered.map(([agent, count]) => `${agent} ${count}`).join(' · ');
+  // Compact agent names so the header line fits on one row of a
+  // typical terminal. "Claude Code" → "Claude", "Gemini CLI" → "Gemini",
+  // "Codex" stays. Without this, longer periods (30d / 90d) push the
+  // header past the right edge and wrap "events" onto a second line.
+  return ordered.map(([agent, count]) => `${shortenAgent(agent)} ${count}`).join(' · ');
+}
+
+function shortenAgent(name: string): string {
+  if (name.startsWith('Claude')) return 'Claude';
+  if (name.startsWith('Gemini')) return 'Gemini';
+  if (name.startsWith('Codex')) return 'Codex';
+  return name;
 }

@@ -36,12 +36,16 @@ export function Cost({ audit }: { audit: AggregateResult | null }): React.ReactE
   const codex = data?.cost.codexUSD ?? 0;
 
   // Daily sparkline — Map<ISO day, USD>. Sort by day so the trend
-  // reads left-to-right oldest → newest. Falls back to a single blank
-  // cell when audit hasn't loaded yet.
+  // reads left-to-right oldest → newest. Cap to the LAST N days so
+  // longer periods (30d / 90d) don't overflow the narrow column and
+  // wrap onto a second line. 14 cells comfortably fits next to the
+  // "Trend" label inside the COST panel at typical widths.
+  const SPARK_CELLS = 14;
   const daySeries = data
     ? [...data.cost.byDay.entries()]
         .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
         .map(([, usd]) => usd)
+        .slice(-SPARK_CELLS)
     : [];
   const trend = daySeries.length > 0 ? sparkline(daySeries) : '';
 

@@ -21,6 +21,11 @@ import { COL } from '../../../panels.js';
 import type { BlastSnapshot } from '../../../types.js';
 
 const LABEL_WIDTH = 36;
+/** Max path rows rendered individually. Anything past this collapses
+ *  to a single "… +N more" line so the panel stays bounded on
+ *  high-exposure machines. Tuned to fit the [2] view inside a
+ *  typical terminal without clipping the dashboard header. */
+const PATH_ROW_LIMIT = 3;
 
 export function BlastRadius({
   blast,
@@ -66,19 +71,24 @@ export function BlastRadius({
         )}
       </Box>
       {blast === null ? null : exposed ? (
-        paths.map((p) => (
-          // One row per path. Use a single <Text wrap="truncate-end">
-          // wrapping all the colored child Texts — Ink renders this as a
-          // single line and truncates with ellipsis at the column edge.
-          // Wrapping the description in a separate flex Box added phantom
-          // empty rows in some terminals (Ink seems to inflate row height
-          // when a flex child has wrap="truncate-end").
-          <Text key={p.label} wrap="truncate-end">
-            <Text color="red">✗ </Text>
-            <Text>{p.label.padEnd(LABEL_WIDTH)}</Text>
-            <Text dimColor>{p.description}</Text>
-          </Text>
-        ))
+        <>
+          {paths.slice(0, PATH_ROW_LIMIT).map((p) => (
+            // One row per path. Use a single <Text wrap="truncate-end">
+            // wrapping all the colored child Texts — Ink renders this as a
+            // single line and truncates with ellipsis at the column edge.
+            // Wrapping the description in a separate flex Box added phantom
+            // empty rows in some terminals (Ink seems to inflate row height
+            // when a flex child has wrap="truncate-end").
+            <Text key={p.label} wrap="truncate-end">
+              <Text color="red">✗ </Text>
+              <Text>{p.label.padEnd(LABEL_WIDTH)}</Text>
+              <Text dimColor>{p.description}</Text>
+            </Text>
+          ))}
+          {paths.length > PATH_ROW_LIMIT ? (
+            <Text dimColor>{`  … +${paths.length - PATH_ROW_LIMIT} more`}</Text>
+          ) : null}
+        </>
       ) : (
         <Text color="green">✓ no exposed sensitive files</Text>
       )}
