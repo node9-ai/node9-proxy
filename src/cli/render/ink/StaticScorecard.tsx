@@ -33,6 +33,8 @@ import type { CompactInput } from '../../commands/scan.js';
 import { SeverityBand } from './SeverityBand.js';
 import { CostPanel } from './panels/CostPanel.js';
 import { ActivityPanel } from './panels/ActivityPanel.js';
+import { LeaksPanel } from './panels/LeaksPanel.js';
+import { BlockedPanel } from './panels/BlockedPanel.js';
 
 interface Props {
   input: CompactInput;
@@ -49,7 +51,23 @@ interface Props {
  *  (eventually a HeaderPanel later in the stack), we'll restore an
  *  Ink Header here and drop the chalk one. */
 export function StaticScorecard({ input }: Props): React.ReactElement {
-  const { summary } = input;
+  const { summary, blockedCount } = input;
+
+  // Critical band shows only when there's something critical to show.
+  // Hide-when-empty matches the locked design — no "0 leaks" placeholders.
+  const leakCount = summary.leaks.length;
+  const hasCritical = leakCount > 0 || blockedCount > 0;
+  const criticalLabel = (() => {
+    const parts: string[] = [];
+    if (leakCount > 0) {
+      parts.push(`${leakCount} secret${leakCount !== 1 ? 's' : ''} leaked`);
+    }
+    if (blockedCount > 0) {
+      parts.push(`${blockedCount} op${blockedCount !== 1 ? 's' : ''} blocked`);
+    }
+    return `Critical (${parts.join(' + ')})`;
+  })();
+
   return (
     <Box flexDirection="column" paddingTop={1}>
       <SeverityBand label="Spend & activity" />
@@ -58,8 +76,15 @@ export function StaticScorecard({ input }: Props): React.ReactElement {
         <ActivityPanel summary={summary} />
       </Box>
 
-      {/* Critical / High / Medium / Recommended-action bands — added
-       *  in commits #3-6. */}
+      {hasCritical ? (
+        <>
+          <SeverityBand label={criticalLabel} />
+          <LeaksPanel summary={summary} />
+          <BlockedPanel summary={summary} />
+        </>
+      ) : null}
+
+      {/* High / Medium / Recommended-action bands — added in commits #4-6. */}
     </Box>
   );
 }
