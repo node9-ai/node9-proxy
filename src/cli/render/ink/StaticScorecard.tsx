@@ -32,6 +32,7 @@ import { Box, render } from 'ink';
 import type { CompactInput } from '../../commands/scan.js';
 import { SeverityBand } from './SeverityBand.js';
 import { CostPanel } from './panels/CostPanel.js';
+import { ActivityPanel } from './panels/ActivityPanel.js';
 
 interface Props {
   input: CompactInput;
@@ -52,9 +53,9 @@ export function StaticScorecard({ input }: Props): React.ReactElement {
   return (
     <Box flexDirection="column" paddingTop={1}>
       <SeverityBand label="Spend & activity" />
-      <Box flexDirection="row">
+      <Box flexDirection="row" gap={1}>
         <CostPanel summary={summary} />
-        {/* ACTIVITY panel — added in commit #2 */}
+        <ActivityPanel summary={summary} />
       </Box>
 
       {/* Critical / High / Medium / Recommended-action bands — added
