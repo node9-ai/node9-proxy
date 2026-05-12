@@ -10,7 +10,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "(cat|less|head|tail|bat|more|open|print|nano|vim|vi|emacs|code|type)\\s+.*[\\/\\\\]\\.ssh[\\/\\\\]",
+          "value": "(cat|less|head|tail|bat|more|open|print|nano|vim|vi|emacs|code|type)\\s+.*?\\.ssh[\\/\\\\]",
           "flags": "i"
         }
       ],
@@ -24,7 +24,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "(cat|less|head|tail|bat|more|open|print|nano|vim|vi|emacs|code|type)\\s+.*[\\/\\\\]\\.aws[\\/\\\\]",
+          "value": "(cat|less|head|tail|bat|more|open|print|nano|vim|vi|emacs|code|type)\\s+.*?\\.aws[\\/\\\\]",
           "flags": "i"
         }
       ],
@@ -66,7 +66,7 @@
         {
           "field": "file_path",
           "op": "matches",
-          "value": ".*[\\/]\\.ssh[\\/]",
+          "value": "(^|[\\/\\\\])\\.ssh[\\/\\\\]",
           "flags": "i"
         }
       ],
@@ -80,7 +80,7 @@
         {
           "field": "file_path",
           "op": "matches",
-          "value": ".*[\\/]\\.aws[\\/]",
+          "value": "(^|[\\/\\\\])\\.aws[\\/\\\\]",
           "flags": "i"
         }
       ],
@@ -94,7 +94,7 @@
         {
           "field": "file_path",
           "op": "matches",
-          "value": "(^|[\\/\\\\])\\.env(\\.(local|production|staging|development))?$",
+          "value": "(^|[\\/\\\\])\\.env(\\.(local|production|staging|development|production\\.local|staging\\.local|development\\.local))?$",
           "flags": "i"
         }
       ],

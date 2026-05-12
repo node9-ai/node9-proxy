@@ -937,6 +937,10 @@ describe('project-jail any-tool rules', () => {
       expect(matchesShieldRule('project-jail', rule, '/home/user/.ssh/id_rsa')).toBe(true));
     it('matches /home/user/.ssh/config', () =>
       expect(matchesShieldRule('project-jail', rule, '/home/user/.ssh/config')).toBe(true));
+    // Relative-path bypass fix: an agent calling Read with file_path=".ssh/id_rsa"
+    // (cwd-relative, no leading separator) must still be blocked.
+    it('matches relative .ssh/id_rsa (no leading separator)', () =>
+      expect(matchesShieldRule('project-jail', rule, '.ssh/id_rsa')).toBe(true));
     it('does not match /home/user/ssh-keys/key', () =>
       expect(matchesShieldRule('project-jail', rule, '/home/user/ssh-keys/key')).toBe(false));
     it('does not match a path with .ssh as a basename (no trailing slash)', () =>
@@ -949,6 +953,9 @@ describe('project-jail any-tool rules', () => {
       expect(matchesShieldRule('project-jail', rule, '/home/user/.aws/credentials')).toBe(true));
     it('matches /home/user/.aws/config', () =>
       expect(matchesShieldRule('project-jail', rule, '/home/user/.aws/config')).toBe(true));
+    // Relative-path bypass fix — same rationale as SSH above.
+    it('matches relative .aws/credentials (no leading separator)', () =>
+      expect(matchesShieldRule('project-jail', rule, '.aws/credentials')).toBe(true));
     it('does not match /home/user/aws-cli-docs/readme', () =>
       expect(matchesShieldRule('project-jail', rule, '/home/user/aws-cli-docs/readme')).toBe(
         false
@@ -967,6 +974,17 @@ describe('project-jail any-tool rules', () => {
       expect(matchesShieldRule('project-jail', rule, '/project/.env.staging')).toBe(true));
     it('matches /project/.env.development', () =>
       expect(matchesShieldRule('project-jail', rule, '/project/.env.development')).toBe(true));
+    // Next.js / Vite convention: .env.<envname>.local overrides .env.<envname>
+    // locally (gitignored). These commonly hold real secrets and must be
+    // reviewed alongside their non-.local siblings.
+    it('matches /project/.env.production.local (Next.js double-suffix)', () =>
+      expect(matchesShieldRule('project-jail', rule, '/project/.env.production.local')).toBe(true));
+    it('matches /project/.env.development.local', () =>
+      expect(matchesShieldRule('project-jail', rule, '/project/.env.development.local')).toBe(
+        true
+      ));
+    it('matches /project/.env.staging.local', () =>
+      expect(matchesShieldRule('project-jail', rule, '/project/.env.staging.local')).toBe(true));
     // The whole point of the explicit allowlist: dev fixtures must NOT match.
     it('does not match /project/.env.example', () =>
       expect(matchesShieldRule('project-jail', rule, '/project/.env.example')).toBe(false));

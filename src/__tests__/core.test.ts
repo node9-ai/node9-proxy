@@ -1677,8 +1677,21 @@ describe('analyzeFsOperation', () => {
       'shield:project-jail:block-read-ssh'
     );
   });
+  // Relative-path bypass fix: an agent calling `cat .ssh/id_rsa` (cwd-relative,
+  // no leading separator) must still be blocked. Prior regex required a leading
+  // `[\/\\]` before `.ssh` which let this slip through.
+  it('blocks cat .ssh/id_rsa (relative, no leading separator)', () => {
+    expect(analyzeFsOperation('cat .ssh/id_rsa')?.ruleName).toBe(
+      'shield:project-jail:block-read-ssh'
+    );
+  });
   it('blocks less ~/.aws/credentials', () => {
     expect(analyzeFsOperation('less ~/.aws/credentials')?.ruleName).toBe(
+      'shield:project-jail:block-read-aws'
+    );
+  });
+  it('blocks cat .aws/credentials (relative, no leading separator)', () => {
+    expect(analyzeFsOperation('cat .aws/credentials')?.ruleName).toBe(
       'shield:project-jail:block-read-aws'
     );
   });
