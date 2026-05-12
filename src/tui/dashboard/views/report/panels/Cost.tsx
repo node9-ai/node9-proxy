@@ -83,6 +83,17 @@ export function Cost({ audit }: { audit: AggregateResult | null }): React.ReactE
             </Box>
             <Text>{formatCost(codex)}</Text>
           </Box>
+          {/* Gemini cost isn't tracked by the aggregator yet —
+              Gemini sessions appear in agentMap (so the header
+              shows "Gemini N") but the JSONL cost walker only
+              handles Claude / Codex. Render an explicit "—" so the
+              user knows it's not missing data, it's a known gap. */}
+          <Box height={1}>
+            <Box width={LABEL_W}>
+              <Text dimColor>Gemini</Text>
+            </Box>
+            <Text dimColor>— (not tracked)</Text>
+          </Box>
           <Box height={1}>
             <Box width={LABEL_W}>
               <Text dimColor>Trend</Text>

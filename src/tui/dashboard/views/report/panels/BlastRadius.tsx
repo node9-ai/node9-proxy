@@ -23,9 +23,10 @@ import type { BlastSnapshot } from '../../../types.js';
 const LABEL_WIDTH = 36;
 /** Max path rows rendered individually. Anything past this collapses
  *  to a single "… +N more" line so the panel stays bounded on
- *  high-exposure machines. Tuned to fit the [2] view inside a
- *  typical terminal without clipping the dashboard header. */
-const PATH_ROW_LIMIT = 3;
+ *  high-exposure machines. 5 is the sweet spot for typical installs
+ *  (most users have 0-5 exposed paths); higher counts overflow
+ *  cleanly. */
+const PATH_ROW_LIMIT = 5;
 
 export function BlastRadius({
   blast,
