@@ -8,6 +8,7 @@ import { Box, Text } from 'ink';
 import type {
   ActivityEvent,
   AuditAggregates,
+  BlastSnapshot,
   CostSnapshot,
   ForensicSseEvent,
   ProtectionSummary,
@@ -730,36 +731,26 @@ function bar(value: number, max: number, width: number): string {
 // in a category yet.
 // ---------------------------------------------------------------------------
 
-// Total box height (incl. borders) shared by LIVE SECURITY, LIVE
-// ACTIVITY, and SHIELDS so the three side-by-side panels line up.
-// LIVE SECURITY drives the math: 2 borders + 1 title + 1 PREVENT
-// header + 2 prevent rows + 1 DETECT header + 6 detect rows = 13.
-// Was 12 before the DETECT/PREVENT split shipped.
-const LIVE_SECURITY_ROWS_HEIGHT = 13;
+// Total box height (incl. borders) shared by LIVE SECURITY and LIVE
+// ACTIVITY. 2 borders + 1 title + 9 data rows = 12. Bumped from 11
+// so the title is no longer clipped off the top — that was producing
+// the "since open · N new" overlap on the first data row.
+const LIVE_SECURITY_ROWS_HEIGHT = 12;
 
 export function LiveSecurity(props: {
+  blast: BlastSnapshot | null;
   forensicAgg: SessionForensicAgg;
   activityAgg: SessionActivityAgg;
 }): React.ReactElement {
-  // PREVENT rows: counts of runtime BLOCKS (dlp rules + loop detector
-  // firing at decision time). When these go up, the agent tried to do
-  // something dangerous and node9 stopped it.
-  const preventRows: Array<{ label: string; count: number }> = [
+  // 9 categorical rows — matches the spec you gave: dlp, loop, paths,
+  // pii, priv, dest, eval, pipe, long. sensitive-file-read is folded
+  // into "priv" / "paths" semantics in practice and was dropping the
+  // title off-screen at height=11; keeping it minimal so the title
+  // stays visible.
+  const rows: Array<{ label: string; count: number }> = [
     { label: 'dlp', count: props.activityAgg.dlp },
     { label: 'loops', count: props.activityAgg.loops },
-  ];
-
-  // DETECT rows: forensic FINDINGS extracted post-fact from the agent
-  // session JSONL by the watermark scanner. When these go up, the
-  // agent did the thing and node9 noticed afterwards. Different signal
-  // entirely — distinct from PREVENT to avoid the user's "did we
-  // actually block it or just see it happen?" confusion.
-  //
-  // `paths` (blast reachable-path count) lived in this panel before
-  // the split but moved out — it's already in the RISK box at the top
-  // as part of the `exposed N` headline, so showing it twice was just
-  // visual noise.
-  const detectRows: Array<{ label: string; count: number }> = [
+    { label: 'paths', count: props.blast?.paths.length ?? 0 },
     { label: 'pii', count: props.forensicAgg.pii },
     { label: 'priv', count: props.forensicAgg.privilegeEscalation },
     { label: 'dest', count: props.forensicAgg.destructiveOp },
@@ -767,16 +758,9 @@ export function LiveSecurity(props: {
     { label: 'pipe', count: props.forensicAgg.pipeToShell },
     { label: 'long', count: props.forensicAgg.longOutputRedacted },
   ];
-
-  // Sort WITHIN each subsection so the noisiest signals in each kind
-  // float to the top. Sorting across the combined list would mix
-  // semantics — a high dlp count buries low-value detect rows or
-  // vice versa.
-  preventRows.sort((a, b) => b.count - a.count);
-  detectRows.sort((a, b) => b.count - a.count);
-
-  const totalIssues =
-    preventRows.reduce((s, r) => s + r.count, 0) + detectRows.reduce((s, r) => s + r.count, 0);
+  // Sort desc by count; zero rows naturally fall to the bottom.
+  rows.sort((a, b) => b.count - a.count);
+  const totalIssues = rows.reduce((sum, r) => sum + r.count, 0);
   return (
     <Box
       flexDirection="column"
@@ -792,22 +776,8 @@ export function LiveSecurity(props: {
           LIVE SECURITY
         </Text>
       </Text>
-      <Text dimColor wrap="truncate-end">
-        PREVENT
-      </Text>
-      {preventRows.map((r) => (
-        <Text key={`p-${r.label}`} wrap="truncate-end">
-          <Text>{r.label.padEnd(10)}</Text>
-          <Text bold={r.count > 0} color={r.count > 0 ? undefined : COL.textDim}>
-            {`${r.count}`.padStart(4)}
-          </Text>
-        </Text>
-      ))}
-      <Text dimColor wrap="truncate-end">
-        DETECT
-      </Text>
-      {detectRows.map((r) => (
-        <Text key={`d-${r.label}`} wrap="truncate-end">
+      {rows.map((r) => (
+        <Text key={r.label} wrap="truncate-end">
           <Text>{r.label.padEnd(10)}</Text>
           <Text bold={r.count > 0} color={r.count > 0 ? undefined : COL.textDim}>
             {`${r.count}`.padStart(4)}
