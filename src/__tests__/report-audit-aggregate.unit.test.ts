@@ -58,6 +58,7 @@ function makeOpts(extra: Record<string, unknown> = {}) {
     auditLogPath,
     claudeProjectsDir: '/nonexistent',
     codexSessionsDir: '/nonexistent',
+    geminiTmpDir: '/nonexistent',
     ...extra,
   };
 }
@@ -390,5 +391,113 @@ describe('aggregateReportFromAudit', () => {
     const result = aggregateReportFromAudit('7d', makeOpts());
     expect(result.data.testPasses).toBe(2);
     expect(result.data.testFails).toBe(1);
+  });
+
+  describe('Gemini cost walker', () => {
+    /** Build a fake ~/.gemini/tmp/<proj>/chats/session-x.jsonl tree. */
+    function writeGeminiSession(
+      proj: string,
+      sessionName: string,
+      turns: Array<Record<string, unknown>>
+    ): string {
+      const chatsDir = path.join(tmpDir, 'gemini-tmp', proj, 'chats');
+      fs.mkdirSync(chatsDir, { recursive: true });
+      const file = path.join(chatsDir, sessionName);
+      fs.writeFileSync(file, turns.map((t) => JSON.stringify(t)).join('\n') + '\n');
+      return path.join(tmpDir, 'gemini-tmp');
+    }
+
+    it('walks gemini session jsonl, dedupes by id, prices via litellm', () => {
+      fs.writeFileSync(auditLogPath, '');
+      // Two distinct turns, each written twice (Gemini flushes partial+final).
+      // gemini-2.5-flash is in LiteLLM at $0.30 / $2.50 per Mtok with
+      // a cache-read rate.
+      const geminiDir = writeGeminiSession('node9', 'session-2026-05-10T10-00.jsonl', [
+        { id: 'turn-1', timestamp: '2026-05-10T10:00:00Z', type: 'user', content: 'hi' },
+        {
+          id: 'turn-1-a',
+          timestamp: '2026-05-10T10:00:01Z',
+          type: 'gemini',
+          tokens: { input: 1000, output: 500, cached: 0 },
+          model: 'gemini-2.5-flash',
+        },
+        {
+          id: 'turn-1-a',
+          timestamp: '2026-05-10T10:00:01Z',
+          type: 'gemini',
+          tokens: { input: 1000, output: 500, cached: 0 },
+          model: 'gemini-2.5-flash',
+        },
+        {
+          id: 'turn-2-a',
+          timestamp: '2026-05-10T10:00:05Z',
+          type: 'gemini',
+          tokens: { input: 2000, output: 100, cached: 1500 },
+          model: 'gemini-2.5-flash',
+        },
+        {
+          id: 'turn-2-a',
+          timestamp: '2026-05-10T10:00:05Z',
+          type: 'gemini',
+          tokens: { input: 2000, output: 100, cached: 1500 },
+          model: 'gemini-2.5-flash',
+        },
+      ]);
+      const result = aggregateReportFromAudit(
+        '7d',
+        makeOpts({ geminiTmpDir: geminiDir, claudeProjectsDir: '/nonexistent' })
+      );
+      // After dedup we count 2 turns: 1000+2000 input, 500+100 output, 1500 cached.
+      expect(result.data.cost.geminiUSD).toBeGreaterThan(0);
+      expect(result.data.cost.inputTokens).toBe(3000);
+      expect(result.data.cost.outputTokens).toBe(600);
+      expect(result.data.cost.cacheReadTokens).toBe(1500);
+      // Per-project entry uses the gemini dir name (no other agent
+      // contributed, so the bare basename stands).
+      expect(result.data.cost.byProject.size).toBe(1);
+      expect([...result.data.cost.byProject.keys()][0]).toBe('node9');
+    });
+
+    it('falls back to gemini-2.5-flash pricing for unknown preview variants', () => {
+      fs.writeFileSync(auditLogPath, '');
+      const geminiDir = writeGeminiSession('node9', 'session.jsonl', [
+        {
+          id: 'turn-1',
+          timestamp: '2026-05-10T10:00:00Z',
+          type: 'gemini',
+          tokens: { input: 1000, output: 500, cached: 0 },
+          model: 'gemini-3-flash-preview',
+        },
+      ]);
+      const result = aggregateReportFromAudit('7d', makeOpts({ geminiTmpDir: geminiDir }));
+      // Cost should be > 0 (proxy pricing applied), not 0 (unpriced skip).
+      expect(result.data.cost.geminiUSD).toBeGreaterThan(0);
+    });
+
+    it('skips entries outside the period window', () => {
+      fs.writeFileSync(auditLogPath, '');
+      const geminiDir = writeGeminiSession('node9', 'session.jsonl', [
+        // Inside 7d window (NOW = 2026-05-10)
+        {
+          id: 'in',
+          timestamp: '2026-05-09T10:00:00Z',
+          type: 'gemini',
+          tokens: { input: 1000, output: 100, cached: 0 },
+          model: 'gemini-2.5-flash',
+        },
+        // Outside 7d window (older than 7 days)
+        {
+          id: 'out',
+          timestamp: '2026-04-01T10:00:00Z',
+          type: 'gemini',
+          tokens: { input: 9999, output: 9999, cached: 0 },
+          model: 'gemini-2.5-flash',
+        },
+      ]);
+      const result = aggregateReportFromAudit('7d', makeOpts({ geminiTmpDir: geminiDir }));
+      // Only the in-window turn counts.
+      expect(result.data.cost.inputTokens).toBe(1000);
+      expect(result.data.cost.outputTokens).toBe(100);
+    });
   });
 });

@@ -150,6 +150,7 @@ function renderTerminalReport(
     cost: {
       claudeUSD,
       codexUSD,
+      geminiUSD,
       inputTokens: costInputTokens,
       outputTokens: costOutputTokens,
       cacheWriteTokens: costCacheWrite,
@@ -165,7 +166,7 @@ function renderTerminalReport(
     hourMap,
   } = data;
 
-  const costUSD = claudeUSD + codexUSD;
+  const costUSD = claudeUSD + codexUSD + geminiUSD;
 
   const topTools = [...toolMap.entries()].sort((a, b) => b[1].calls - a[1].calls).slice(0, 8);
   const topBlocks = [...blockMap.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6);
@@ -469,6 +470,8 @@ function renderTerminalReport(
 
     if (codexUSD > 0)
       costByModel.set('codex (openai)', (costByModel.get('codex (openai)') ?? 0) + codexUSD);
+    if (geminiUSD > 0)
+      costByModel.set('gemini (google)', (costByModel.get('gemini (google)') ?? 0) + geminiUSD);
     const modelList = [...costByModel.entries()].sort((a, b) => b[1] - a[1]);
     const maxModelCost = Math.max(...modelList.map(([, v]) => v), 1e-9);
     const MODEL_LABEL = 22;

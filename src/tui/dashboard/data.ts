@@ -22,6 +22,7 @@ import {
   getDateRange,
   loadClaudeCostAsync,
   loadCodexCostAsync,
+  loadGeminiCostAsync,
   type AggregateResult,
 } from '../../cli/aggregate/report-audit.js';
 import {
@@ -780,14 +781,17 @@ export async function loadReportAuditAsync(period: ReportPeriod): Promise<Aggreg
   // longer to finish loading, but q quits ~instantly throughout.
   const claudeProjectsDir = path.join(os.homedir(), '.claude', 'projects');
   const codexSessionsDir = path.join(os.homedir(), '.codex', 'sessions');
+  const geminiTmpDir = path.join(os.homedir(), '.gemini', 'tmp');
   const { start, end } = getDateRange(period, new Date());
   const entries = await readAuditEntriesAsync();
   const claudeCost = await loadClaudeCostAsync(start, end, claudeProjectsDir);
   const codexCost = await loadCodexCostAsync(start, end, codexSessionsDir);
+  const geminiCost = await loadGeminiCostAsync(start, end, geminiTmpDir);
   return aggregateReportFromAudit(period, {
     preloadedAuditEntries: entries,
     preloadedClaudeCost: claudeCost,
     preloadedCodexCost: codexCost,
+    preloadedGeminiCost: geminiCost,
   });
 }
 

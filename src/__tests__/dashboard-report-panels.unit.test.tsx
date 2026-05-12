@@ -49,6 +49,7 @@ function emptyAudit(overrides: Partial<BuildReportJsonInput> = {}): AggregateRes
     cost: {
       claudeUSD: 0,
       codexUSD: 0,
+      geminiUSD: 0,
       inputTokens: 0,
       outputTokens: 0,
       cacheWriteTokens: 0,
@@ -152,6 +153,7 @@ describe('Cost', () => {
       cost: {
         claudeUSD: 5200,
         codexUSD: 890,
+        geminiUSD: 0,
         inputTokens: 1_800_000,
         outputTokens: 1_400_000,
         cacheWriteTokens: 0,
@@ -224,6 +226,7 @@ describe('TopToolsProjects', () => {
       cost: {
         claudeUSD: 0,
         codexUSD: 0,
+        geminiUSD: 0,
         inputTokens: 0,
         outputTokens: 0,
         cacheWriteTokens: 0,

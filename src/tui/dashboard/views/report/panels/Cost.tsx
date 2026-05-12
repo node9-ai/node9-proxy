@@ -30,10 +30,11 @@ const LABEL_W = 10;
 
 export function Cost({ audit }: { audit: AggregateResult | null }): React.ReactElement {
   const data = audit?.data;
-  const total = data ? data.cost.claudeUSD + data.cost.codexUSD : 0;
+  const total = data ? data.cost.claudeUSD + data.cost.codexUSD + data.cost.geminiUSD : 0;
   const totalTokens = data ? data.cost.inputTokens + data.cost.outputTokens : 0;
   const claude = data?.cost.claudeUSD ?? 0;
   const codex = data?.cost.codexUSD ?? 0;
+  const gemini = data?.cost.geminiUSD ?? 0;
 
   // Daily sparkline — Map<ISO day, USD>. Sort by day so the trend
   // reads left-to-right oldest → newest. Cap to the LAST N days so
@@ -83,16 +84,15 @@ export function Cost({ audit }: { audit: AggregateResult | null }): React.ReactE
             </Box>
             <Text>{formatCost(codex)}</Text>
           </Box>
-          {/* Gemini cost isn't tracked by the aggregator yet —
-              Gemini sessions appear in agentMap (so the header
-              shows "Gemini N") but the JSONL cost walker only
-              handles Claude / Codex. Render an explicit "—" so the
-              user knows it's not missing data, it's a known gap. */}
+          {/* Gemini walker reads ~/.gemini/tmp/<proj>/chats/*.jsonl,
+              dedupes per-id (Gemini flushes each turn twice), and
+              prices via LiteLLM. Preview models fall back to
+              gemini-2.5-flash rates — see report-audit.ts header. */}
           <Box height={1}>
             <Box width={LABEL_W}>
-              <Text dimColor>Gemini</Text>
+              <Text>Gemini</Text>
             </Box>
-            <Text dimColor>— (not tracked)</Text>
+            <Text>{formatCost(gemini)}</Text>
           </Box>
           <Box height={1}>
             <Box width={LABEL_W}>

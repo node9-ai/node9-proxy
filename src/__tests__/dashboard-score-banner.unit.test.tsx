@@ -42,6 +42,7 @@ function makeAudit(spend: number = 0): AggregateResult {
     cost: {
       claudeUSD: spend,
       codexUSD: 0,
+      geminiUSD: 0,
       inputTokens: 0,
       outputTokens: 0,
       cacheWriteTokens: 0,

@@ -43,6 +43,11 @@ export interface BuildReportJsonInput {
   cost: {
     claudeUSD: number;
     codexUSD: number;
+    /** Gemini cost — totaled by walking ~/.gemini/tmp/<proj>/chats/
+     *  session JSONLs and pricing each turn via LiteLLM. Preview-model
+     *  rates fall back to gemini-2.5-flash (see report-audit.ts header
+     *  comment for the Gemini section). */
+    geminiUSD: number;
     inputTokens: number;
     outputTokens: number;
     cacheWriteTokens: number;
@@ -105,6 +110,7 @@ export interface ReportJsonOutput {
     totalUSD: number;
     claudeUSD: number;
     codexUSD: number;
+    geminiUSD: number;
     inputTokens: number;
     outputTokens: number;
     cacheWriteTokens: number;
@@ -166,9 +172,10 @@ export function buildReportJson(input: BuildReportJsonInput): ReportJsonOutput {
     },
 
     cost: {
-      totalUSD: input.cost.claudeUSD + input.cost.codexUSD,
+      totalUSD: input.cost.claudeUSD + input.cost.codexUSD + input.cost.geminiUSD,
       claudeUSD: input.cost.claudeUSD,
       codexUSD: input.cost.codexUSD,
+      geminiUSD: input.cost.geminiUSD,
       inputTokens: input.cost.inputTokens,
       outputTokens: input.cost.outputTokens,
       cacheWriteTokens: input.cost.cacheWriteTokens,

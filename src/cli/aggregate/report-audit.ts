@@ -21,6 +21,7 @@ import os from 'os';
 import path from 'path';
 
 import { decodeProjectDirName } from '../../costSync';
+import { pricingFor } from '../../pricing/litellm';
 import type { BuildReportJsonInput, ReportPeriod } from '../render/report-json';
 
 // ---------------------------------------------------------------------------
@@ -70,6 +71,8 @@ export interface AggregateOpts {
   claudeProjectsDir?: string;
   /** Inject for tests. Defaults to ~/.codex/sessions */
   codexSessionsDir?: string;
+  /** Inject for tests. Defaults to ~/.gemini/tmp */
+  geminiTmpDir?: string;
   /** When true, exclude test-runner calls (mirrors --no-tests CLI flag). */
   excludeTests?: boolean;
   /**
@@ -89,6 +92,7 @@ export interface AggregateOpts {
    */
   preloadedClaudeCost?: ClaudeCostData;
   preloadedCodexCost?: CodexCostData;
+  preloadedGeminiCost?: GeminiCostData;
 }
 
 export interface AggregateResult {
@@ -602,6 +606,228 @@ export async function loadCodexCostAsync(
 }
 
 // ---------------------------------------------------------------------------
+// Gemini cost tracking (reads ~/.gemini/tmp/<project>/chats/session-*.jsonl)
+//
+// Gemini Code's local journals live under ~/.gemini/tmp/<project-basename>/
+// chats/session-*.jsonl. Each turn is one JSONL line with:
+//   { id, timestamp, type: 'gemini' | 'user' | 'info', tokens?:
+//     { input, output, cached, thoughts, tool, total }, model?: string }
+//
+// Quirks vs the Claude/Codex walkers:
+//   - Every gemini turn is written TWICE in the same file with identical
+//     id + tokens (Gemini flushes a partial + final). Dedup by id per-file.
+//   - `tokens.input` is the TOTAL prompt size including `tokens.cached`.
+//     Bill (input - cached) at the input rate, cached at the cache-read
+//     rate (matches Google's billing model).
+//   - Preview models (e.g. `gemini-3-flash-preview`) aren't in LiteLLM's
+//     price list. Fall back to `gemini-2.5-flash` as a same-tier proxy
+//     so we don't undercount; users who care can swap to whatever
+//     comparable model lives in the pricing table.
+//   - The dir basename ("node9", "node9-wrapper") isn't a full path. We
+//     store it as-is in byProject — the panel renders basename anyway,
+//     so it merges visually with Claude's `/home/.../node9` row when
+//     the user picks the same project across agents.
+// ---------------------------------------------------------------------------
+
+/** PricingTuple shape matches src/pricing/litellm.ts:
+ *  [input/tok, output/tok, cache_write/tok, cache_read/tok].
+ *
+ *  Fallback chain when the exact model isn't in LiteLLM: try
+ *  gemini-2.5-flash (live LiteLLM cache), then gemini-2.0-flash
+ *  (in the bundled fallback table). This keeps tests deterministic
+ *  even when ~/.node9/model-pricing.json hasn't been fetched, and
+ *  prefers the closest-tier proxy in production where the live
+ *  cache has 2.5-flash. cacheRead falls back to the input rate when
+ *  the model reports 0 (Gemini's older variants don't expose
+ *  cache_read pricing separately). */
+const GEMINI_FALLBACK_MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash'];
+function geminiPriceFor(
+  model: string
+): { input: number; output: number; cacheRead: number } | null {
+  let tuple = pricingFor(model);
+  if (!tuple && /^gemini-/i.test(model)) {
+    for (const proxy of GEMINI_FALLBACK_MODELS) {
+      tuple = pricingFor(proxy);
+      if (tuple) break;
+    }
+  }
+  if (!tuple) return null;
+  return { input: tuple[0], output: tuple[1], cacheRead: tuple[3] || tuple[0] };
+}
+
+export interface GeminiCostData {
+  total: number;
+  byDay: Map<string, number>;
+  byProject: Map<string, ProjectCostRollup>;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+}
+
+interface GeminiCostAccumulator {
+  total: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  byDay: Map<string, number>;
+  byProject: Map<string, ProjectCostRollup>;
+}
+
+function emptyGeminiAccumulator(): GeminiCostAccumulator {
+  return {
+    total: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    byDay: new Map(),
+    byProject: new Map(),
+  };
+}
+
+function freezeGeminiCost(acc: GeminiCostAccumulator): GeminiCostData {
+  return {
+    total: acc.total,
+    byDay: acc.byDay,
+    byProject: acc.byProject,
+    inputTokens: acc.inputTokens,
+    outputTokens: acc.outputTokens,
+    cacheReadTokens: acc.cacheReadTokens,
+  };
+}
+
+interface GeminiTurn {
+  id: string;
+  timestamp: string;
+  type: string;
+  tokens?: { input?: number; output?: number; cached?: number };
+  model?: string;
+}
+
+/** Walk one Gemini session file and fold cost into `acc`. Dedup by id
+ *  inside the file (each turn is written twice — partial + final). */
+function processGeminiCostFile(
+  filePath: string,
+  projectKey: string,
+  start: Date,
+  end: Date,
+  acc: GeminiCostAccumulator
+): void {
+  const startMs = start.getTime();
+  try {
+    if (fs.statSync(filePath).mtimeMs < startMs) return;
+  } catch {
+    return;
+  }
+  let raw: string;
+  try {
+    raw = fs.readFileSync(filePath, 'utf-8');
+  } catch {
+    return;
+  }
+
+  const seenIds = new Set<string>();
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    let entry: GeminiTurn;
+    try {
+      entry = JSON.parse(line) as GeminiTurn;
+    } catch {
+      continue;
+    }
+    if (entry.type !== 'gemini') continue;
+    if (!entry.tokens || !entry.model || !entry.timestamp) continue;
+    if (entry.id) {
+      if (seenIds.has(entry.id)) continue;
+      seenIds.add(entry.id);
+    }
+    const ts = new Date(entry.timestamp);
+    if (ts < start || ts > end) continue;
+
+    const price = geminiPriceFor(entry.model);
+    if (!price) continue;
+
+    const inp = entry.tokens.input ?? 0;
+    const out = entry.tokens.output ?? 0;
+    const cached = Math.min(entry.tokens.cached ?? 0, inp);
+    const fresh = Math.max(0, inp - cached);
+    const cost = fresh * price.input + cached * price.cacheRead + out * price.output;
+
+    acc.total += cost;
+    acc.inputTokens += inp;
+    acc.outputTokens += out;
+    acc.cacheReadTokens += cached;
+
+    const dateKey = entry.timestamp.slice(0, 10);
+    acc.byDay.set(dateKey, (acc.byDay.get(dateKey) ?? 0) + cost);
+
+    const rollup = acc.byProject.get(projectKey) ?? {
+      cost: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+    };
+    rollup.cost += cost;
+    rollup.inputTokens += inp;
+    rollup.outputTokens += out;
+    acc.byProject.set(projectKey, rollup);
+  }
+}
+
+/** List every session JSONL under ~/.gemini/tmp/<project>/chats/. */
+function listGeminiSessionFiles(geminiTmpDir: string): Array<{ projectKey: string; file: string }> {
+  const out: Array<{ projectKey: string; file: string }> = [];
+  let dirs: string[];
+  try {
+    if (!fs.statSync(geminiTmpDir).isDirectory()) return out;
+    dirs = fs.readdirSync(geminiTmpDir);
+  } catch {
+    return out;
+  }
+  for (const proj of dirs) {
+    const chatsDir = path.join(geminiTmpDir, proj, 'chats');
+    let files: string[];
+    try {
+      if (!fs.statSync(chatsDir).isDirectory()) continue;
+      files = fs.readdirSync(chatsDir);
+    } catch {
+      continue;
+    }
+    for (const f of files) {
+      if (!f.endsWith('.jsonl')) continue;
+      out.push({ projectKey: proj, file: path.join(chatsDir, f) });
+    }
+  }
+  return out;
+}
+
+function loadGeminiCost(start: Date, end: Date, geminiTmpDir: string): GeminiCostData {
+  const acc = emptyGeminiAccumulator();
+  if (!fs.existsSync(geminiTmpDir)) return freezeGeminiCost(acc);
+  for (const { projectKey, file } of listGeminiSessionFiles(geminiTmpDir)) {
+    processGeminiCostFile(file, projectKey, start, end, acc);
+  }
+  return freezeGeminiCost(acc);
+}
+
+/** Async chunked variant — yields every CHUNK_SIZE files. */
+export async function loadGeminiCostAsync(
+  start: Date,
+  end: Date,
+  geminiTmpDir: string
+): Promise<GeminiCostData> {
+  const acc = emptyGeminiAccumulator();
+  if (!fs.existsSync(geminiTmpDir)) return freezeGeminiCost(acc);
+  const files = listGeminiSessionFiles(geminiTmpDir);
+  const CHUNK_SIZE = 5;
+  for (let i = 0; i < files.length; i++) {
+    processGeminiCostFile(files[i].file, files[i].projectKey, start, end, acc);
+    if (i % CHUNK_SIZE === CHUNK_SIZE - 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  }
+  return freezeGeminiCost(acc);
+}
+
+// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
@@ -620,6 +846,7 @@ export function aggregateReportFromAudit(
   const claudeProjectsDir =
     opts.claudeProjectsDir ?? path.join(os.homedir(), '.claude', 'projects');
   const codexSessionsDir = opts.codexSessionsDir ?? path.join(os.homedir(), '.codex', 'sessions');
+  const geminiTmpDir = opts.geminiTmpDir ?? path.join(os.homedir(), '.gemini', 'tmp');
 
   const hasAuditFile = fs.existsSync(auditLogPath);
   const allEntries = opts.preloadedAuditEntries ?? parseAuditLog(auditLogPath);
@@ -647,11 +874,41 @@ export function aggregateReportFromAudit(
 
   const claudeCost = opts.preloadedClaudeCost ?? loadClaudeCost(start, end, claudeProjectsDir);
   const codexCost = opts.preloadedCodexCost ?? loadCodexCost(start, end, codexSessionsDir);
+  const geminiCost = opts.preloadedGeminiCost ?? loadGeminiCost(start, end, geminiTmpDir);
 
-  // Merge Codex daily costs into Claude's byDay map (the wire format has a
-  // single byDay; Claude's map is mutable so we extend it in place).
+  // Merge Codex + Gemini daily costs into Claude's byDay map (the wire
+  // format has a single byDay; Claude's map is mutable so we extend it
+  // in place).
   for (const [day, c] of codexCost.byDay) {
     claudeCost.byDay.set(day, (claudeCost.byDay.get(day) ?? 0) + c);
+  }
+  for (const [day, c] of geminiCost.byDay) {
+    claudeCost.byDay.set(day, (claudeCost.byDay.get(day) ?? 0) + c);
+  }
+
+  // Merge Gemini per-project rollups into Claude's byProject map. Match
+  // by basename: Claude stores decoded paths like `/home/u/node9`,
+  // Gemini stores bare dir names like `node9`. Same basename = same
+  // project across agents. Falls back to insert-new on no match.
+  for (const [geminiKey, gRollup] of geminiCost.byProject) {
+    let mergedInto: string | null = null;
+    for (const claudeKey of claudeCost.byProject.keys()) {
+      const claudeBase = claudeKey.match(/[^/\\]+$/)?.[0] ?? claudeKey;
+      if (claudeBase === geminiKey) {
+        mergedInto = claudeKey;
+        break;
+      }
+    }
+    const targetKey = mergedInto ?? geminiKey;
+    const existing = claudeCost.byProject.get(targetKey) ?? {
+      cost: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+    };
+    existing.cost += gRollup.cost;
+    existing.inputTokens += gRollup.inputTokens;
+    existing.outputTokens += gRollup.outputTokens;
+    claudeCost.byProject.set(targetKey, existing);
   }
 
   // Prior period for block-trend arrow (same duration, immediately before start)
@@ -787,10 +1044,11 @@ export function aggregateReportFromAudit(
     cost: {
       claudeUSD: claudeCost.total,
       codexUSD: codexCost.total,
-      inputTokens: claudeCost.inputTokens,
-      outputTokens: claudeCost.outputTokens,
+      geminiUSD: geminiCost.total,
+      inputTokens: claudeCost.inputTokens + geminiCost.inputTokens,
+      outputTokens: claudeCost.outputTokens + geminiCost.outputTokens,
       cacheWriteTokens: claudeCost.cacheWriteTokens,
-      cacheReadTokens: claudeCost.cacheReadTokens,
+      cacheReadTokens: claudeCost.cacheReadTokens + geminiCost.cacheReadTokens,
       byDay: claudeCost.byDay,
       byModel: claudeCost.byModel,
       byProject: claudeCost.byProject,
