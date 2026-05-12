@@ -642,11 +642,11 @@ export function App(): React.ReactElement {
       // 30d is what users almost always want; 'month' is reachable via
       // the CLI flag `node9 report --period month` for parity.
       setReportPeriod('30d');
-    } else if (view === 'report' && input === 'Q') {
-      // [Q]uarter — rolling 90 days. NOT calendar quarter. See
-      // getDateRange '90d' case for rationale.
-      // Uppercase Q ONLY: lowercase `q` is the global quit (see
-      // shouldQuit). Shift+Q is required to set the period.
+    } else if (view === 'report' && (input === 'n' || input === 'N')) {
+      // [N]inety = rolling 90 days. NOT calendar quarter. See
+      // getDateRange '90d' case for rationale. Letter N rather than Q
+      // so it doesn't collide with the global `q` quit key (long-
+      // standing TUI convention — vim, less, top, htop, etc).
       setReportPeriod('90d');
     } else if (
       view === 'report' &&

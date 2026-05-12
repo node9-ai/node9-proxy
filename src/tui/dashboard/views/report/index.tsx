@@ -123,7 +123,7 @@ function ReportHeader({
         <Text dimColor>{'  '}</Text>
         <PeriodKey letter="M" label="onth" active={period === '30d' || period === 'month'} />
         <Text dimColor>{'  '}</Text>
-        <PeriodKey letter="Q" label="uarter" active={period === '90d'} />
+        <PeriodKey letter="N" label="inety" active={period === '90d'} />
         <Text dimColor>{`     ${PERIOD_LONG_LABEL[period]}`}</Text>
       </Box>
       <Box>
