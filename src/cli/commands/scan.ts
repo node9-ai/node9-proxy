@@ -15,7 +15,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { SHIELDS } from '../../shields';
-import { getConfig, DEFAULT_CONFIG } from '../../config';
+import { DEFAULT_CONFIG } from '../../config';
 import {
   evaluateSmartConditions,
   matchesPattern,
@@ -655,11 +655,7 @@ export function detectLoops(
 // Build the rule set for scan
 // ---------------------------------------------------------------------------
 
-const DEFAULT_RULE_NAMES = new Set(
-  DEFAULT_CONFIG.policy.smartRules.map((r) => r.name).filter(Boolean)
-);
-
-function buildRuleSources(): RuleSource[] {
+export function buildRuleSources(): RuleSource[] {
   const sources: RuleSource[] = [];
 
   // 1. All shields (builtin + user-installed)
@@ -669,24 +665,33 @@ function buildRuleSources(): RuleSource[] {
     }
   }
 
-  // 2. Default built-in rules + user custom rules + cloud rules
-  try {
-    const config = getConfig();
-    for (const rule of config.policy.smartRules) {
-      if (!rule.name) continue;
-      if (rule.name.startsWith('shield:')) continue;
-      const isCloud = rule.name.startsWith('cloud:');
-      const isDefault = DEFAULT_RULE_NAMES.has(rule.name);
-      const sourceType: RuleSourceType = isCloud ? 'user' : isDefault ? 'default' : 'user';
-      sources.push({
-        shieldName: isCloud ? 'cloud' : isDefault ? 'default' : 'custom',
-        shieldLabel: isCloud ? 'Cloud Policy' : isDefault ? 'Default Rules' : 'Your Rules',
-        sourceType,
-        rule,
-      });
-    }
-  } catch {
-    // getConfig() may fail on a truly fresh install — skip user rules silently
+  // 2. Default built-in rules only — sourced directly from DEFAULT_CONFIG.
+  //
+  // Scan is a pre-install forecast: it answers "what would node9 catch
+  // if you installed it with default protection?". Two consequences:
+  //
+  // 1. User-custom rules from node9.config.json and cloud-synced rules
+  //    are skipped entirely. A fresh user doesn't have those, so
+  //    surfacing them would misrepresent what node9 itself catches.
+  // 2. Defaults are loaded from DEFAULT_CONFIG directly, not from the
+  //    user-merged getConfig() result. Otherwise a user who modified
+  //    a default rule (different verdict, extra condition) would see
+  //    their MODIFIED version fired against history — not the canonical
+  //    default. Forecast must reflect the out-of-the-box defaults.
+  //
+  // Installed users who want to see their OWN rule fires (including
+  // customized defaults) use `node9 report`, which reads the audit log.
+  //
+  // (Decision locked 2026-05-12 — see scan-redesign discussion.)
+  for (const rule of DEFAULT_CONFIG.policy.smartRules) {
+    if (!rule.name) continue;
+    if (rule.name.startsWith('shield:')) continue;
+    sources.push({
+      shieldName: 'default',
+      shieldLabel: 'Default Rules',
+      sourceType: 'default',
+      rule,
+    });
   }
 
   return sources;
