@@ -29,6 +29,10 @@ import { num } from '../util.js';
 const ROW_LIMIT = 4;
 const TOOL_LABEL_W = 10;
 const TOOL_COUNT_W = 6;
+/** Spacer between the TOOLS column group and the PROJECTS column
+ *  group. Without it the tool count's rightmost digit butts directly
+ *  into the project name (e.g. "7,600node9-proxy"). */
+const COL_GUTTER = 3;
 const PROJECT_LABEL_W = 14;
 
 export function TopToolsProjects({ audit }: { audit: AggregateResult | null }): React.ReactElement {
@@ -76,14 +80,14 @@ export function TopToolsProjects({ audit }: { audit: AggregateResult | null }): 
         <>
           {/* Inline header row aligning to the two column-groups below. */}
           <Box>
-            <Box width={TOOL_LABEL_W + TOOL_COUNT_W}>
+            <Box width={TOOL_LABEL_W + TOOL_COUNT_W + COL_GUTTER}>
               <Text dimColor>TOOLS</Text>
             </Box>
             <Text dimColor>PROJECTS</Text>
           </Box>
           {rows.map((r, i) => (
             <Box key={i} height={1}>
-              <Box width={TOOL_LABEL_W + TOOL_COUNT_W}>
+              <Box width={TOOL_LABEL_W + TOOL_COUNT_W + COL_GUTTER}>
                 {r.tool ? (
                   <>
                     <Box width={TOOL_LABEL_W}>
