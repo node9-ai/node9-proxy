@@ -49,6 +49,7 @@ import {
   topRulesByVerdict,
 } from '../render/scan-derive';
 import { PROTECTIVE_SHIELD_DISCOUNTS } from '../../protection';
+import stringWidth from 'string-width';
 import { buildScanJson } from '../render/scan-json';
 import {
   appendScanHistory,
@@ -2356,21 +2357,23 @@ export function renderNarrativeScorecard(input: CompactInput): void {
 // same data with full per-finding examples + session IDs).
 
 /** Pair of "rendered chalk-wrapped string" + "visible width" used to
- *  compose lines for boxPanel. Width is computed from the plain text
- *  length BEFORE chalk wraps it, so ANSI escapes don't inflate it. */
+ *  compose lines for boxPanel. Width is the Unicode-correct visible
+ *  cell count, not JS .length — emojis like 👁 / 🛡 are surrogate
+ *  pairs (length 2) but render as either 1 OR 2 cells depending on
+ *  the terminal's emoji presentation. Mismatched assumptions = right
+ *  border drifts. We use string-width to get the actual cell count. */
 type Line = { rendered: string; width: number };
 
 /** Build a Line from `[plain, formatter?]` segments. Each formatter
  *  wraps its segment with chalk (or any string → string fn); width
- *  is the sum of segment plain-string lengths. Emoji is counted as
- *  JS string length, which matches most terminals' visible-cell
- *  count closely enough that panels look aligned in practice. */
+ *  is the sum of stringWidth() across plain segments — handles
+ *  emojis, CJK characters, combining marks correctly. */
 function mkLine(...parts: Array<[string, ((s: string) => string)?]>): Line {
   let rendered = '';
   let width = 0;
   for (const [text, fmt] of parts) {
     rendered += fmt ? fmt(text) : text;
-    width += text.length;
+    width += stringWidth(text);
   }
   return { rendered, width };
 }
@@ -2527,7 +2530,11 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
       const origin = originForRule(r.name, summary.sections);
       reviewLines.push(
         mkLine(
-          ['👁  ', chalk.yellow],
+          // VS-16 (U+FE0F) forces emoji-presentation so string-width
+          // returns 2 cells (matching how modern terminals actually
+          // render it). Without VS-16 string-width says 1 cell — and
+          // the right border drifts off. Same applies to 🛡 / ⚠ below.
+          ['👁️  ', chalk.yellow],
           [shortRule(r.name, 24), chalk.bold],
           [' ×' + String(r.count).padEnd(4), chalk.bold],
           [' '],
@@ -2610,7 +2617,7 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
     }
     for (const e of blast.envFindings.slice(0, 3)) {
       blastLines.push(
-        mkLine(['⚠  ', chalk.yellow], [`${e.key} `], [`(${e.patternName})`, chalk.dim])
+        mkLine(['⚠️  ', chalk.yellow], [`${e.key} `], [`(${e.patternName})`, chalk.dim])
       );
     }
     const totalExposed = blast.reachable.length + blast.envFindings.length;
@@ -2642,7 +2649,7 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
     if (impact.totalCatches === 0) continue; // hit shields only — zero-hits go to footer
     const discount = PROTECTIVE_SHIELD_DISCOUNTS[impact.shieldName] ?? 0;
     const bonus = Math.round(exposed * discount);
-    const icon = discount > 0 ? '🛡  ' : '☐   ';
+    const icon = discount > 0 ? '🛡️  ' : '☐   ';
     const wouldCatch = `would catch ${impact.totalCatches} op${impact.totalCatches !== 1 ? 's' : ''}`;
     const deltaSuffix =
       bonus > 0 ? `  →  +${bonus} pts  (${blast.score} → ${blast.score + bonus})` : '';

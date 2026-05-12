@@ -83,6 +83,7 @@
     "react": "^19.2.6",
     "safe-regex2": "^5.1.0",
     "smol-toml": "^1.6.1",
+    "string-width": "^4.2.3",
     "zod": "^3.25.76"
   },
   "bundleDependencies": [

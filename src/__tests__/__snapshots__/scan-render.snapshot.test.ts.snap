@@ -271,9 +271,9 @@ exports[`renderPanelScorecard — output snapshots > panel fixture (critical sco
   ╰──────────────────────────────────────────────────────────────────────────╯
 
   ╭─ REVIEW QUEUE  ·  37 ops flagged for approval ───────────────────────────╮
-  │ 👁  review-git-destructive   ×22   default                               │
-  │ 👁  review-sudo              ×12   default                               │
-  │ 👁  review-read-credentials  ×3    needs shield:project-jail             │
+  │ 👁️  review-git-destructive   ×22   default                               │
+  │ 👁️  review-sudo              ×12   default                               │
+  │ 👁️  review-read-credentials  ×3    needs shield:project-jail             │
   ╰──────────────────────────────────────────────────────────────────────────╯
 
   ╭─ AGENT LOOPS  ·  1 repeated patterns  ·  1% wasted ──────────────────────╮
@@ -292,7 +292,7 @@ exports[`renderPanelScorecard — output snapshots > panel fixture (critical sco
   ╰──────────────────────────────────────────────────────────────────────────╯
 
   ╭─ SHIELDS  ·  install node9 + enable these to catch what we found ────────╮
-  │ 🛡  project-jail  would catch 4 ops       →  +53 pts  (25 → 78)          │
+  │ 🛡️  project-jail  would catch 4 ops       →  +53 pts  (25 → 78)          │
   │       review-read-credentials ×3, block-read-ssh                         │
   │ ☐   bash-safe     would catch 1 op                                       │
   │       block-eval-remote                                                  │
