@@ -1,11 +1,5 @@
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/bc165779-4200-438d-967a-20d42bbfe69e" width="720" alt="Node9 scan scorecard" />
-</p>
-
 <h1 align="center">🛡️ Node9</h1>
-
 <p align="center"><strong>What did your AI agent actually do? Find out, and stop the dangerous stuff.</strong></p>
-
 <p align="center">
   <a href="https://www.npmjs.com/package/node9-ai"><img src="https://img.shields.io/npm/v/node9-ai.svg" alt="npm version" /></a>
   <a href="https://www.npmjs.com/package/node9-ai"><img src="https://img.shields.io/npm/dm/node9-ai.svg" alt="monthly downloads" /></a>
@@ -14,11 +8,35 @@
   <a href="https://huggingface.co/spaces/Node9ai/node9-security-demo"><img src="https://huggingface.co/datasets/huggingface/badges/resolve/main/open-in-hf-spaces-sm.svg" alt="Try on HF Spaces" /></a>
 </p>
 
----
+Node9 sits between your AI agent and the tools it can use — recording every action, blocking the dangerous ones, and showing you what happened both live and in retrospect.
 
-## What `node9 scan` shows on a real machine
+Works with **Claude Code · Codex CLI · Gemini CLI · Cursor · Windsurf · any MCP server**.
+
+## What Node9 does
+
+- 🛑 **Block** dangerous AI actions before they run — `rm -rf`, `git push --force`, `DROP TABLE`, credential reads, `curl | bash`
+- 🔍 **Scan** what your AI has already been doing — loops, leaked secrets, blocked operations across every session
+- 🔑 **Catch credential leaks** — AWS keys, GitHub tokens, JWTs, GCP API keys, PEM private keys flagged in tool args, file contents, and shell config
+- 🔭 **Map your blast radius** — every SSH key, AWS credential, and `.env` file an AI agent on this machine could reach right now
+
+## Live monitoring
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/25c601db-221d-4553-8b8c-34af85ab30c8" width="720" alt="Node9 monitor dashboard" />
+</p>
+
+`node9 monitor` opens an interactive terminal dashboard with two views:
+
+- **`[1]` Realtime** — live activity, approvals, security alerts, current risk score
+- **`[2]` Report** — period-windowed summary: cost, top tools, shields fired, blast radius
+
+## Retrospective scan
 
 This is my own machine — 30 days while building Node9. Score 25/100, 5 credential files an AI agent could reach right now.
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/bc165779-4200-438d-967a-20d42bbfe69e" width="720" alt="Node9 scan scorecard" />
+</p>
 
 ```
 🛡  Node9 Scan  ·  21 sessions  ·  8,114 tool calls  ·  Apr 6 – May 1, 2026
@@ -36,39 +54,7 @@ $3,789 AI spend  ·  62 risky operations
 →  npx node9-ai scan         run this on your machine
 ```
 
-Run it on yours — `npx node9-ai scan` finishes in ~10 seconds and runs entirely local. Nothing uploads. The full breakdown with every tool call, file path, and timestamp is `node9 scan` (default mode). For a browser dashboard view, run `node9 daemon start --openui`.
-
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/825f99d8-b487-4746-9cef-a02a9ca76c1f" width="90%" alt="Node9 browser History Audit dashboard" />
-</p>
-
----
-
-## What Node9 does
-
-- 🛑 **Block** dangerous AI actions before they run — `rm -rf`, `git push --force`, `DROP TABLE`, credential reads, `curl | bash`
-- 🔍 **Scan** what your AI agent has already been doing — loops, leaked secrets, blocked operations across every session
-- 🔑 **Catch credential leaks** — AWS keys, GitHub tokens, JWTs, GCP API keys, PEM private keys flagged in tool arguments, file contents Claude reads back, and shell config files
-- 🔭 **Map your blast radius** — every SSH key, AWS credential, and `.env` file an AI agent on this machine could reach right now
-
-Works with **Claude Code · Cursor · Codex · Gemini CLI · any MCP server**.
-
----
-
-## How is this different from gitleaks / Snyk / TruffleHog?
-
-Those scan **repositories** for credentials. Node9 scans **AI agent session history** — what your AI ran, what it read, what credentials passed through tool calls. Different surface area.
-
-Node9 catches things gitleaks can't:
-
-- Credentials the AI read but never committed
-- Agent edit loops that burn tokens on retries
-- Dangerous shell commands the AI ran without confirmation
-- Blast radius — which credential files an AI agent on this machine could reach right now
-
-Run gitleaks for committed code. Run Node9 for AI session history.
-
----
+Run it on yours — `npx node9-ai scan` finishes in ~10 seconds and runs entirely local. Nothing uploads.
 
 ## Install
 
@@ -85,11 +71,9 @@ node9 init       # auto-wires Claude Code, Gemini CLI, Cursor, Codex, MCP server
 node9 doctor     # verify everything is wired correctly
 ```
 
-That's it — future agent sessions are protected.
+Requires Node.js 18+.
 
----
-
-## Shields — expert policy in one command
+## Shields — curated rule packs
 
 Each shield is a curated rule set for a service or domain. Enable only what you need.
 
@@ -111,21 +95,17 @@ Each shield is a curated rule set for a service or domain. Enable only what you 
 node9 shield list    # show all shields + status
 ```
 
----
-
 ## Always on — no config needed
 
 - **Git** — blocks `git push --force`, `git reset --hard`, `git clean -fd`
 - **SQL** — blocks `DELETE` / `UPDATE` without `WHERE`, `DROP TABLE`, `TRUNCATE`
 - **Shell** — blocks `curl | bash`, unauthorized `sudo`
-- **DLP** — blocks AWS keys, GitHub tokens, Stripe keys, PEM private keys in any tool argument, file Claude reads, or shell config (`~/.zshrc`, `~/.bashrc`)
-- **Response DLP** — background scanner reads Claude's conversation history and alerts you if Claude _wrote_ a secret in its response text (not just executed one). Gemini / Codex coverage coming.
+- **DLP** — blocks AWS keys, GitHub tokens, Stripe keys, PEM private keys in any tool argument, file contents, or shell config (`~/.zshrc`, `~/.bashrc`)
+- **Response DLP** — background scanner reads Claude's conversation history and alerts you if Claude _wrote_ a secret in its response text
 - **Auto-undo** — git snapshot before every AI file edit → `node9 undo` to revert
 - **Skills pinning** — SHA-256 verification of installed Claude skills / plugins between sessions
 
----
-
-## MCP gateway — protect any MCP server
+## MCP gateway
 
 Wrap any MCP server transparently. The agent sees the same server — Node9 intercepts every tool call.
 
@@ -159,64 +139,45 @@ node9 mcp pin update <serverKey>  # remove pin, re-pin on next connection
 node9 mcp pin reset               # clear all pins
 ```
 
-Automatic, no configuration. The gateway pins on first `tools/list` and enforces on every subsequent session.
-
 </details>
-
-<details>
-<summary><strong>⚡ Large MCP response detection</strong></summary>
-
-When an MCP server returns a 500KB+ response, it sits in the context window for every subsequent LLM turn — often silently doubling per-turn cost. Node9 warns you in real time with a toast and records the event in the dashboard so you can spot the offender.
-
-</details>
-
----
 
 ## Observability — five views
-
-Every tool call is recorded — command, arguments, decision, cost. See what your agent did, five ways:
 
 | Command          | What it shows                                             | When to use                               |
 | ---------------- | --------------------------------------------------------- | ----------------------------------------- |
 | `node9 blast`    | What an AI agent can reach right now — files, creds, env  | First thing to run on any machine         |
 | `node9 scan`     | Retrospective audit of existing agent history             | Before installing, or to review past risk |
-| `node9 mask`     | Redact plaintext secrets from local session history files | After a DLP finding — cleans local disk   |
 | `node9 tail`     | Live stream of every tool call                            | Watching an agent work in real time       |
 | `node9 report`   | Per-period summary: allowed/blocked/DLP/cost + top tools  | Reviewing what happened after a session   |
 | `node9 sessions` | Session history with prompt, tool trace, cost, snapshot   | Reviewing a handoff or past work          |
 | `node9 dlp`      | Credential-leak findings in Claude response text          | Any time a DLP desktop alert fires        |
+| `node9 mask`     | Redact plaintext secrets from local session history files | After a DLP finding — cleans local disk   |
 
 Plus a **live HUD** in your Claude Code statusline:
 
 ```
 🛡 node9 | standard | [bash-safe] | ✅ 12 allowed  🛑 2 blocked  🚨 0 dlp | ~$0.43
-📊 claude-opus-4-6 | ctx [████████░░░] 54% | 5h [██░░░░░░░░] 12% | 7d [█░░░░░░░] 7%
+📊 claude-opus-4-7 | ctx [████████░░░] 54% | 5h [██░░░░░░░░] 12% | 7d [█░░░░░░░] 7%
 🗂 2 CLAUDE.md | 8 rules | 3 MCPs | 4 hooks
 ```
-
-And a **browser dashboard** that auto-opens after `node9 scan` — History Audit modal with full drill-down, per-agent breakdown, loop-cost estimate, and live status strip.
-
----
 
 ## Reading the data — what the numbers mean
 
 Node9 surfaces the signal. Here are the patterns worth knowing:
 
-| Signal                                                      | Likely meaning                                                                                     |
-| ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `Would have blocked` ≥ 5 in a week                          | Agent is attempting destructive ops; shields need review                                           |
-| Single `review-git-push` rule accounts for >50% of findings | Your own rule is firing as intended — not a risk, just supervision                                 |
-| DLP finding in `user-prompt` tool                           | You pasted a secret into your own prompt — rotate the key                                          |
-| Agent Loop ×50+ on same file                                | Agent stuck in edit/test/fix cycle — check context or slow down                                    |
-| MCP tool pin mismatch                                       | Server changed its tools — review before re-trusting                                               |
-| Large MCP response warning                                  | That server is inflating your context window for every subsequent turn                             |
-| `Response DLP` alert                                        | Claude wrote a secret in its response text — not blocked, rotate immediately                       |
-| DLP finding in `tool-result`                                | Claude read a file containing a secret (`.env`, credentials) — rotate the key and run `node9 mask` |
-| DLP finding in `[Shell]`                                    | Plaintext secret in `~/.zshrc` or `~/.bashrc` — every AI session can see it                        |
+| Signal                                         | Likely meaning                                                                                     |
+| ---------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `Would have blocked` ≥ 5 in a week             | Agent is attempting destructive ops; shields need review                                           |
+| Single `review-git-push` rule >50% of findings | Your own rule is firing as intended — not a risk, just supervision                                 |
+| DLP finding in `user-prompt` tool              | You pasted a secret into your own prompt — rotate the key                                          |
+| Agent Loop ×50+ on same file                   | Agent stuck in edit/test/fix cycle — check context or slow down                                    |
+| MCP tool pin mismatch                          | Server changed its tools — review before re-trusting                                               |
+| Large MCP response warning                     | That server is inflating your context window for every subsequent turn                             |
+| `Response DLP` alert                           | Claude wrote a secret in its response text — not blocked, rotate immediately                       |
+| DLP finding in `tool-result`                   | Claude read a file containing a secret (`.env`, credentials) — rotate the key and run `node9 mask` |
+| DLP finding in `[Shell]`                       | Plaintext secret in `~/.zshrc` or `~/.bashrc` — every AI session can see it                        |
 
-These are starting points, not verdicts. One-off signals are normal; persistent patterns are what you act on.
-
----
+One-off signals are normal; persistent patterns are what you act on.
 
 ## Python SDK — govern any Python agent
 
@@ -232,8 +193,6 @@ def run_command(cmd: str) -> str:
 
 **[Python SDK →](https://github.com/node9-ai/node9-python)** · **[CI code review agent example →](https://github.com/node9-ai/node9-pr-agent)**
 
----
-
 ## Under the hood
 
 - **Scan** reads raw agent history from `~/.claude/projects/`, `~/.gemini/tmp/`, `~/.codex/sessions/` — no API calls, fully offline
@@ -242,26 +201,22 @@ def run_command(cmd: str) -> str:
 - **Policy engine** uses [mvdan-sh](https://github.com/mvdan/sh) for bash AST analysis — defeats obfuscation via backslash escaping, variable substitution, eval of remote download
 - **Shadow repo** for auto-undo lives at `~/.node9/snapshots/<hash16>/` — never touches your `.git`
 
----
+## Full docs
 
-## 📖 Full docs
-
-Everything else — config reference, smart rules, stateful rules, trusted hosts, approval modes, Slack integration, CLI reference — is at **[node9.ai/docs](https://node9.ai/docs)**.
-
----
+Config reference, smart rules, stateful rules, trusted hosts, approval modes, CLI reference — at **[node9.ai/docs](https://node9.ai/docs)**.
 
 ## Related projects
 
-- **[node9-python](https://github.com/node9-ai/node9-python)** — Python SDK for governed agents
-- **[node9-pr-agent](https://github.com/node9-ai/node9-pr-agent)** — GitHub Action that reviews PRs through Node9 (reference implementation of a governed agent)
-
----
+- **[node9-python](https://github.com/node9-ai/node9-python)** — Python SDK
+- **[node9-pr-agent](https://github.com/node9-ai/node9-pr-agent)** — GitHub Action that reviews PRs through Node9
 
 ## Enterprise
 
 **Node9 Pro** adds governance locking, SAML/SSO, central audit export, and VPC deployment. See [node9.ai](https://node9.ai).
 
----
+## License
+
+Apache-2.0
 
 <p align="center">
   <sub>Built with ☕ and healthy paranoia.</sub>
