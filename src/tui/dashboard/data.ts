@@ -755,9 +755,16 @@ function shortenPath(p: string): string {
  * audit data through the same code path as `node9 report --json`. Sync —
  * fine for the CLI, but the dashboard should prefer loadReportAuditAsync
  * below to avoid blocking ink for 200-300 ms on a 4 MB audit log.
+ *
+ * Tests are excluded by default — `testRun:true` synthetic entries
+ * from the test harness would otherwise dominate PROTECTION's
+ * auto-blocked count (~870 of one machine's 1,235 entries were tests).
+ * Surfacing real fires only matches user expectations; users who
+ * specifically want to see test-runner activity use the CLI form
+ * `node9 report` (which has `--no-tests` as its own opt-in flag).
  */
 export function loadReportAudit(period: ReportPeriod): AggregateResult {
-  return aggregateReportFromAudit(period);
+  return aggregateReportFromAudit(period, { excludeTests: true });
 }
 
 /**
@@ -795,6 +802,10 @@ export async function loadReportAuditAsync(period: ReportPeriod): Promise<Aggreg
     preloadedClaudeCost: claudeCost,
     preloadedCodexCost: codexCost,
     preloadedGeminiCost: geminiCost,
+    // Strip testRun:true synthetic entries so PROTECTION counts
+    // reflect real fires only. See loadReportAudit's header for the
+    // rationale.
+    excludeTests: true,
   });
 }
 
