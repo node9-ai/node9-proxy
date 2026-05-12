@@ -36,6 +36,7 @@ import {
   applyActivityEvent,
   applyActivityToShields,
   applyForensicEvent,
+  applyResolveStatus,
   buildRuleToShieldMap,
   computeProtection,
   loadBlast,
@@ -392,11 +393,19 @@ export function App(): React.ReactElement {
           setApprovalStatus({ kind: 'idle' });
         }
       },
-      (resolvedId, finalVerdict) => {
+      (resolvedId, finalVerdict, rawStatus) => {
         // Daemon resolved a pending entry (`activity-result` or
         // `remove`). Update the matching LIVE row's verdict so it
         // stops rendering as `pending`, and clear the approval card
         // if it was tracking this id.
+        //
+        // rawStatus distinguishes `dlp` from a generic `block` — the
+        // mapResultStatus collapse loses that, so we bump
+        // sessionActivityAgg.dlp here based on the raw value. Without
+        // this, DLP blocks (which arrive only as `activity-result`
+        // resolves with status='dlp', not as pending events with a
+        // checkedBy field) silently fail to register in LIVE SECURITY.
+        setSessionActivityAgg((prev) => applyResolveStatus(prev, rawStatus));
         if (finalVerdict) {
           setEvents((prev) => {
             const target = prev.find((e) => e.kind === 'tool' && e.id === resolvedId);

@@ -23,6 +23,7 @@ import {
   applyActivityEvent,
   applyActivityToShields,
   applyForensicEvent,
+  applyResolveStatus,
   auditEntryToActivityEvent,
   buildCostBaseline,
   buildRuleToShieldMap,
@@ -886,6 +887,45 @@ describe('computeProtection', () => {
     const p = computeProtection(blast(25), shields([], ['bash-safe']));
     expect(p.suggestedShield).toBe(null); // bash-safe isn't protective
     expect(p.protect).toBe(0);
+  });
+});
+
+// ── applyResolveStatus ────────────────────────────────────────────────────────
+
+describe('applyResolveStatus', () => {
+  // Regression test for the dlp-counter-stuck-at-zero bug fixed in
+  // 2026-05-12: DLP blocks arrive only as activity-result resolves with
+  // status='dlp', not as pending events with checkedBy. The original
+  // applyActivityEvent dlp-via-checkedBy detection therefore never fired
+  // for DLP in production. This reducer is the resolve-side counterpart.
+  it('increments dlp when raw status is "dlp"', () => {
+    const before: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {} };
+    const after = applyResolveStatus(before, 'dlp');
+    expect(after.dlp).toBe(1);
+  });
+
+  it('ignores other statuses (allow / block / review / taint)', () => {
+    const before: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {} };
+    expect(applyResolveStatus(before, 'allow').dlp).toBe(0);
+    expect(applyResolveStatus(before, 'block').dlp).toBe(0);
+    expect(applyResolveStatus(before, 'review').dlp).toBe(0);
+    expect(applyResolveStatus(before, 'taint').dlp).toBe(0);
+    expect(applyResolveStatus(before, undefined).dlp).toBe(0);
+  });
+
+  it('accumulates dlp counts across multiple resolves', () => {
+    let agg: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {} };
+    agg = applyResolveStatus(agg, 'dlp');
+    agg = applyResolveStatus(agg, 'dlp');
+    agg = applyResolveStatus(agg, 'dlp');
+    expect(agg.dlp).toBe(3);
+  });
+
+  it('does not mutate input', () => {
+    const before: SessionActivityAgg = { ...EMPTY_SESSION_ACTIVITY, tools: {}, shell: {} };
+    const snapshot = JSON.stringify(before);
+    applyResolveStatus(before, 'dlp');
+    expect(JSON.stringify(before)).toBe(snapshot);
   });
 });
 

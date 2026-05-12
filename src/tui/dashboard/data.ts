@@ -1102,6 +1102,26 @@ export function applyActivityEvent(agg: SessionActivityAgg, e: ActivityEvent): S
 const SHELL_TOOLS: ReadonlySet<string> = new Set(['Bash', 'bash']);
 
 /**
+ * Pure reducer: bump counters that can only be classified from the
+ * resolve-side raw status (e.g. `status: 'dlp'`). The pending-side
+ * `activity` broadcast doesn't carry `checkedBy`, so the original
+ * applyActivityEvent dlp/loops detection never fires for DLP blocks
+ * in practice — they arrive only as `activity-result` resolves.
+ *
+ * This handler is wired in App.tsx's onResolve callback alongside
+ * the existing SessionCounters bucket update.
+ */
+export function applyResolveStatus(
+  agg: SessionActivityAgg,
+  rawStatus: string | undefined
+): SessionActivityAgg {
+  if (rawStatus === 'dlp') {
+    return { ...agg, dlp: agg.dlp + 1 };
+  }
+  return agg;
+}
+
+/**
  * Build a checkedBy-rule-name → shield-name lookup once at startup. Walks
  * the SHIELDS registry (builtins + user shields loaded from
  * ~/.node9/shields/). Rules without a `name` field are skipped (they
@@ -1219,7 +1239,7 @@ const SSE_BACKOFF_MAX_MS = 30_000;
 
 export function subscribeToSse(
   onEvent: (e: ActivityEvent) => void,
-  onResolve: (id: string, verdict?: ResolvedVerdict) => void,
+  onResolve: (id: string, verdict?: ResolvedVerdict, rawStatus?: string) => void,
   onForensic: (e: ForensicSseEvent) => void,
   onError: (msg: string) => void
 ): () => void {
@@ -1300,8 +1320,19 @@ export function subscribeToSse(
                     // ("block"/"allow"/"review"/"dlp"/"timeout"). `remove`
                     // uses `decision` instead ("allow"/"deny"/"trust").
                     // Pass either to the same mapper — see mapResultStatus.
-                    const verdict = mapResultStatus(data.status ?? data.decision);
-                    onResolve(data.id, verdict);
+                    //
+                    // We ALSO pass the raw status as a 3rd arg so the
+                    // dashboard can distinguish `dlp` from a generic
+                    // `block` — mapResultStatus collapses them, which
+                    // would otherwise lose the signal needed to bump the
+                    // sessionActivityAgg.dlp counter in LIVE SECURITY.
+                    const rawStatus = data.status ?? data.decision;
+                    const verdict = mapResultStatus(rawStatus);
+                    onResolve(
+                      data.id,
+                      verdict,
+                      typeof rawStatus === 'string' ? rawStatus : undefined
+                    );
                   }
                   continue;
                 }
