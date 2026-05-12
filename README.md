@@ -1,5 +1,5 @@
 <h1 align="center">🛡️ Node9</h1>
-<p align="center"><strong>What did your AI agent actually do? Find out, and stop the dangerous stuff.</strong></p>
+<p align="center"><strong>What did your AI agent actually do? Find out.</strong></p>
 <p align="center">
   <a href="https://www.npmjs.com/package/node9-ai"><img src="https://img.shields.io/npm/v/node9-ai.svg" alt="npm version" /></a>
   <a href="https://www.npmjs.com/package/node9-ai"><img src="https://img.shields.io/npm/dm/node9-ai.svg" alt="monthly downloads" /></a>
@@ -8,13 +8,13 @@
   <a href="https://huggingface.co/spaces/Node9ai/node9-security-demo"><img src="https://huggingface.co/datasets/huggingface/badges/resolve/main/open-in-hf-spaces-sm.svg" alt="Try on HF Spaces" /></a>
 </p>
 
-Node9 sits between your AI agent and the tools it can use — recording every action, blocking the dangerous ones, and showing you what happened both live and in retrospect.
+Node9 sits between your AI agent and the tools it can use — recording every action, intervening on risky ones, and showing you what happened both live and in retrospect.
 
 Works with **Claude Code · Codex CLI · Gemini CLI · Cursor · Windsurf · any MCP server**.
 
 ## What Node9 does
 
-- 🛑 **Block** dangerous AI actions before they run — `rm -rf`, `git push --force`, `DROP TABLE`, credential reads, `curl | bash`
+- 🛡 **Review or block** risky commands before they run — `rm -rf`, `git push --force`, `DROP TABLE`, credential reads, `curl | bash`
 - 🔍 **Scan** what your AI has already been doing — loops, leaked secrets, blocked operations across every session
 - 🔑 **Catch credential leaks** — AWS keys, GitHub tokens, JWTs, GCP API keys, PEM private keys flagged in tool args, file contents, and shell config
 - 🔭 **Map your blast radius** — every SSH key, AWS credential, and `.env` file an AI agent on this machine could reach right now
@@ -22,7 +22,7 @@ Works with **Claude Code · Codex CLI · Gemini CLI · Cursor · Windsurf · any
 ## Live monitoring
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/25c601db-221d-4553-8b8c-34af85ab30c8" width="720" alt="Node9 monitor dashboard" />
+  <img src="https://github.com/user-attachments/assets/997b7b42-b251-4046-b9c5-e000f8b5a481" width="720" alt="Node9 monitor dashboard" />
 </p>
 
 `node9 monitor` opens an interactive terminal dashboard with two views:
@@ -97,10 +97,10 @@ node9 shield list    # show all shields + status
 
 ## Always on — no config needed
 
-- **Git** — blocks `git push --force`, `git reset --hard`, `git clean -fd`
-- **SQL** — blocks `DELETE` / `UPDATE` without `WHERE`, `DROP TABLE`, `TRUNCATE`
-- **Shell** — blocks `curl | bash`, unauthorized `sudo`
-- **DLP** — blocks AWS keys, GitHub tokens, Stripe keys, PEM private keys in any tool argument, file contents, or shell config (`~/.zshrc`, `~/.bashrc`)
+- **Git** — catches `git push --force`, `git reset --hard`, `git clean -fd`
+- **SQL** — catches `DELETE` / `UPDATE` without `WHERE`, `DROP TABLE`, `TRUNCATE`
+- **Shell** — catches `curl | bash`, unauthorized `sudo`
+- **DLP** — flags AWS keys, GitHub tokens, Stripe keys, PEM private keys in any tool argument, file contents, or shell config (`~/.zshrc`, `~/.bashrc`)
 - **Response DLP** — background scanner reads Claude's conversation history and alerts you if Claude _wrote_ a secret in its response text
 - **Auto-undo** — git snapshot before every AI file edit → `node9 undo` to revert
 - **Skills pinning** — SHA-256 verification of installed Claude skills / plugins between sessions
@@ -167,7 +167,7 @@ Node9 surfaces the signal. Here are the patterns worth knowing:
 
 | Signal                                         | Likely meaning                                                                                     |
 | ---------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `Would have blocked` ≥ 5 in a week             | Agent is attempting destructive ops; shields need review                                           |
+| `Would have blocked` ≥ 5 in a week             | Agent is attempting high-impact ops; shields are worth reviewing                                   |
 | Single `review-git-push` rule >50% of findings | Your own rule is firing as intended — not a risk, just supervision                                 |
 | DLP finding in `user-prompt` tool              | You pasted a secret into your own prompt — rotate the key                                          |
 | Agent Loop ×50+ on same file                   | Agent stuck in edit/test/fix cycle — check context or slow down                                    |
