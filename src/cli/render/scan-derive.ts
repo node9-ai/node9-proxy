@@ -8,6 +8,7 @@
 // These helpers are the single source of truth so the renderers stay
 // in sync. No I/O, no console — safe to unit-test.
 import chalk from 'chalk';
+import stringWidth from 'string-width';
 import type { Section } from '../../scan-summary';
 
 // ---------------------------------------------------------------------------
@@ -206,9 +207,13 @@ export function boxPanel(
   const out: string[] = [];
 
   // Top border with embedded title:  "╭─ title ─────────╮"
+  // Use stringWidth (not .length) for the title-segment measurement
+  // so emojis in titles still align — caller-side mkLine() is the
+  // primary user of stringWidth, this matches that contract.
   const titlePad = ` ${title} `;
-  const titleSegment = titlePad.length <= inner ? titlePad : titlePad.slice(0, inner);
-  const dashFill = '─'.repeat(Math.max(0, inner - titleSegment.length));
+  const titleWidth = stringWidth(titlePad);
+  const titleSegment = titleWidth <= inner ? titlePad : titlePad.slice(0, inner);
+  const dashFill = '─'.repeat(Math.max(0, inner - stringWidth(titleSegment)));
   out.push(chalk.dim('╭─') + chalk.bold(titleSegment) + chalk.dim(`${dashFill}─╮`));
 
   for (const line of bodyLines) {
