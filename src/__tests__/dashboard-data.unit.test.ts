@@ -842,56 +842,33 @@ describe('computeProtection', () => {
     });
   });
 
-  it('exposes deductions when no protective shield is active', () => {
-    const p = computeProtection(blast(25), shields([], ['filesystem-jail']));
+  it('exposes deductions with no suggestion when project-jail is also inactive', () => {
+    const p = computeProtection(blast(25), shields([], ['project-jail']));
     expect(p.exposed).toBe(75);
     expect(p.protect).toBe(0);
     expect(p.effective).toBe(25);
-    expect(p.suggestedShield).toBe('filesystem-jail');
-    expect(p.suggestedBonus).toBe(60); // 75 × 0.8
+    expect(p.suggestedShield).toBe('project-jail');
+    expect(p.suggestedBonus).toBe(23); // 75 × 0.3
   });
 
-  it('applies the 80% discount when filesystem-jail is active', () => {
-    const p = computeProtection(blast(25), shields(['filesystem-jail']));
+  it('applies the 30% discount when project-jail is active', () => {
+    const p = computeProtection(blast(25), shields(['project-jail']));
     expect(p.exposed).toBe(75);
-    expect(p.protect).toBe(60); // 75 × 0.8
-    expect(p.effective).toBe(85);
-    expect(p.suggestedShield).toBe(null); // best protection already on
-  });
-
-  it('applies the 30% discount when only project-jail is active', () => {
-    const p = computeProtection(blast(25), shields(['project-jail'], ['filesystem-jail']));
     expect(p.protect).toBe(23); // round(75 × 0.3)
     expect(p.effective).toBe(48);
-    // Suggests filesystem-jail because its delta (0.8 - 0.3 = 0.5) is non-zero
-    expect(p.suggestedShield).toBe('filesystem-jail');
-    expect(p.suggestedBonus).toBe(38); // round(75 × 0.5)
+    expect(p.suggestedShield).toBe(null); // best (and only) protection already on
   });
 
-  it('uses max-of-discounts when both jails active (no double-counting)', () => {
-    const p = computeProtection(blast(25), shields(['filesystem-jail', 'project-jail']));
-    expect(p.protect).toBe(60); // max(0.8, 0.3) × 75
-    expect(p.effective).toBe(85);
-    expect(p.suggestedShield).toBe(null);
-  });
-
-  it('drops discount when filesystem-jail toggles off (project-jail still on)', () => {
-    // This is the bug the user hit — toggling filesystem-jail off
-    // should visibly drop the score, not stay at the higher discount.
-    const before = computeProtection(blast(25), shields(['filesystem-jail', 'project-jail']));
-    const after = computeProtection(blast(25), shields(['project-jail'], ['filesystem-jail']));
-    expect(before.protect).toBe(60);
-    expect(after.protect).toBe(23);
-    expect(after.suggestedShield).toBe('filesystem-jail');
-  });
-
-  it('ignores non-protective shields like dlp / bash-safety', () => {
+  it('ignores non-protective shields like dlp / bash-safe / filesystem', () => {
+    // `filesystem`, `bash-safe`, `dlp-*` etc. defend other risk surfaces
+    // and don't reduce blast-path exposure — they contribute 0.
     const p = computeProtection(
       blast(25),
-      shields(['bash-safety', 'dlp-bash'], ['filesystem-jail'])
+      shields(['filesystem', 'bash-safe', 'dlp-bash'], ['project-jail'])
     );
-    expect(p.protect).toBe(0); // bash-safety doesn't defend blast paths
-    expect(p.suggestedShield).toBe('filesystem-jail');
+    expect(p.protect).toBe(0); // none of the active shields are protective
+    expect(p.suggestedShield).toBe('project-jail');
+    expect(p.suggestedBonus).toBe(23);
   });
 
   it('clamps effective to [0, 100]', () => {
@@ -906,8 +883,8 @@ describe('computeProtection', () => {
   });
 
   it('omits suggestion when no inactive protective shield exists', () => {
-    const p = computeProtection(blast(25), shields([], ['bash-safety']));
-    expect(p.suggestedShield).toBe(null); // bash-safety isn't protective
+    const p = computeProtection(blast(25), shields([], ['bash-safe']));
+    expect(p.suggestedShield).toBe(null); // bash-safe isn't protective
     expect(p.protect).toBe(0);
   });
 });

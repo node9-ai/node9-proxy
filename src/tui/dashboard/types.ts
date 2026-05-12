@@ -121,23 +121,28 @@ export interface BlastSnapshot {
 }
 
 /** Per-shield discount fraction applied to blast deductions when the
- *  shield is active. Discounts overlap (both jails on isn't additive)
- *  so computeProtection() uses the *max* of active discounts, not a
- *  sum. Names match the SHIELDS registry.
+ *  shield is active. Discounts overlap (multiple protective shields
+ *  on isn't additive) so computeProtection() uses the *max* of active
+ *  discounts, not a sum. Names match the SHIELDS registry exactly.
  *
- *  Why these numbers:
- *  - filesystem-jail: denies ALL reads outside its allowlist. The
- *    broadest blast-path defense available. 80% reflects "blocks
- *    agent-mediated exfil; doesn't stop a direct-FS bypass".
- *  - project-jail: only blocks reads *outside the project dir*.
- *    Sensitive files inside the project (e.g. checked-in .env
- *    accidentally) stay reachable. Narrower → smaller discount.
+ *  Current entries:
+ *  - project-jail: blocks `cat / less / head / tail / vim / code` of
+ *    `.ssh/`, `.aws/`, `.env`, credentials.json, etc. via the bash
+ *    tool. Narrow today — Read/Edit/Write tool calls bypass it
+ *    entirely. 0.3 reflects "covers the dominant bash exfil path
+ *    but misses tool-mediated reads". Bumps to 0.7 once Phase 1
+ *    expands the rule set to cover `tool: "*"` + `file_path`.
  *
- *  Other shields (dlp-*, bash-safety, block-rm-rf, etc.) defend
- *  different risk surfaces (live findings, destructive ops) and
- *  don't appear here — they don't reduce blast-path exposure. */
+ *  NOT in this table (and why):
+ *  - filesystem (builtin shield): reviews chmod 777 and writes to
+ *    /etc/. Destructive-write protection, NOT blast-path defense.
+ *    Removed from this table on 2026-05-12 — was a dead typo entry
+ *    (`filesystem-jail`) that never matched anyway.
+ *  - dlp / bash-safe / block-rm-rf / aws / docker / github / postgres
+ *    / mongodb / redis / k8s: defend different risk surfaces (live
+ *    findings, destructive ops, domain-specific concerns), don't
+ *    reduce static blast-path exposure. */
 export const PROTECTIVE_SHIELD_DISCOUNTS: Readonly<Record<string, number>> = {
-  'filesystem-jail': 0.8,
   'project-jail': 0.3,
 };
 
