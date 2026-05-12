@@ -29,7 +29,6 @@ import { BlastRadius } from './panels/BlastRadius.js';
 import { Leaks } from './panels/Leaks.js';
 import { Loops } from './panels/Loops.js';
 import { TopBlocks } from './panels/TopBlocks.js';
-import { FooterStrip } from './panels/FooterStrip.js';
 import { EMPTY_FILTERED_SCAN, filterScanByPeriod, type FilteredScan } from './derive.js';
 
 export interface ReportViewProps {
@@ -111,7 +110,10 @@ export function ReportView({
         <Loops scanCache={scanCache} filtered={filtered} />
         <TopBlocks audit={audit} />
       </Box>
-      <FooterStrip audit={audit} />
+      {/* HOUR OF DAY sparkline retired 2026-05-12 — the FooterStrip
+          component still exists but isn't rendered. Could come back as
+          a drill-down panel if the per-hour-pattern view turns out to
+          be load-bearing for anyone. */}
     </Box>
   );
 }

@@ -10,7 +10,6 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 
-import { COL } from '../../../panels.js';
 import type { ScanCache } from '../../../types.js';
 import type { FilteredScan } from '../derive.js';
 import { Spinner } from './Spinner.js';
@@ -32,14 +31,7 @@ export function Leaks({
   const ready = scanCache.status === 'ready';
 
   return (
-    <Box
-      borderStyle="round"
-      borderColor={ready && total > 0 ? 'red' : COL.textDim}
-      paddingX={1}
-      flexDirection="column"
-      flexGrow={1}
-      flexBasis={0}
-    >
+    <Box paddingX={1} flexDirection="column" flexGrow={1} flexBasis={0}>
       <Box>
         <Text bold>LEAKS</Text>
         {ready ? <Text dimColor>{`  (${num(total)})`}</Text> : null}

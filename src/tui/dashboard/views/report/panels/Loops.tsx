@@ -8,7 +8,6 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 
-import { COL } from '../../../panels.js';
 import type { ScanCache } from '../../../types.js';
 import type { FilteredScan } from '../derive.js';
 import { fitLabel, num } from '../util.js';
@@ -33,14 +32,7 @@ export function Loops({
   const hasLoops = totalLoops > 0;
 
   return (
-    <Box
-      borderStyle="round"
-      borderColor={ready && hasLoops ? 'yellow' : COL.textDim}
-      paddingX={1}
-      flexDirection="column"
-      flexGrow={1}
-      flexBasis={0}
-    >
+    <Box paddingX={1} flexDirection="column" flexGrow={1} flexBasis={0}>
       <Box>
         <Text bold>LOOPS</Text>
         {ready ? (

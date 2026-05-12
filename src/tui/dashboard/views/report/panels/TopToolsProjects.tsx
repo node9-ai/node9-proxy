@@ -27,8 +27,9 @@ import { formatCost, formatTokens } from '../../../format.js';
 import { num } from '../util.js';
 
 const ROW_LIMIT = 4;
-const TOOL_LABEL_W = 12;
-const PROJECT_LABEL_W = 16;
+const TOOL_LABEL_W = 10;
+const TOOL_COUNT_W = 6;
+const PROJECT_LABEL_W = 14;
 
 export function TopToolsProjects({ audit }: { audit: AggregateResult | null }): React.ReactElement {
   const data = audit?.data;
@@ -48,47 +49,63 @@ export function TopToolsProjects({ audit }: { audit: AggregateResult | null }): 
         .slice(0, ROW_LIMIT)
     : [];
 
+  // 2-column internal layout: tools[i] on the left of row i, projects[i]
+  // on the right. The shorter array's missing rows render empty so column
+  // widths stay stable. Halves the panel height vs the prior stacked
+  // sections layout.
+  const rows = Array.from({ length: ROW_LIMIT }, (_, i) => ({
+    tool: tools[i],
+    project: projects[i],
+  }));
+
   return (
     <Box
       borderStyle="round"
       borderColor={COL.textDim}
       paddingX={1}
       flexDirection="column"
-      flexGrow={1}
+      flexGrow={2}
       flexBasis={0}
     >
       <Text bold>TOP TOOLS / PROJECTS</Text>
       {audit === null ? (
         <Text dimColor>loading…</Text>
+      ) : tools.length === 0 && projects.length === 0 ? (
+        <Text dimColor>—</Text>
       ) : (
         <>
-          <Text dimColor>TOOLS</Text>
-          {tools.length === 0 ? (
-            <Text dimColor>—</Text>
-          ) : (
-            tools.map(([tool, t]) => (
-              <Box key={tool} height={1}>
-                <Box width={TOOL_LABEL_W}>
-                  <Text>{fit(tool, TOOL_LABEL_W)}</Text>
-                </Box>
-                <Text bold>{num(t.calls)}</Text>
+          {/* Inline header row aligning to the two column-groups below. */}
+          <Box>
+            <Box width={TOOL_LABEL_W + TOOL_COUNT_W}>
+              <Text dimColor>TOOLS</Text>
+            </Box>
+            <Text dimColor>PROJECTS</Text>
+          </Box>
+          {rows.map((r, i) => (
+            <Box key={i} height={1}>
+              <Box width={TOOL_LABEL_W + TOOL_COUNT_W}>
+                {r.tool ? (
+                  <>
+                    <Box width={TOOL_LABEL_W}>
+                      <Text>{fit(r.tool[0], TOOL_LABEL_W)}</Text>
+                    </Box>
+                    <Box width={TOOL_COUNT_W} justifyContent="flex-end">
+                      <Text bold>{num(r.tool[1].calls)}</Text>
+                    </Box>
+                  </>
+                ) : null}
               </Box>
-            ))
-          )}
-          <Text dimColor>PROJECTS</Text>
-          {projects.length === 0 ? (
-            <Text dimColor>—</Text>
-          ) : (
-            projects.map((p) => (
-              <Box key={p.name} height={1}>
-                <Box width={PROJECT_LABEL_W}>
-                  <Text>{fit(p.name, PROJECT_LABEL_W)}</Text>
-                </Box>
-                <Text dimColor>{`${formatTokens(p.tokens)} `}</Text>
-                <Text bold>{formatCost(p.cost)}</Text>
-              </Box>
-            ))
-          )}
+              {r.project ? (
+                <>
+                  <Box width={PROJECT_LABEL_W}>
+                    <Text>{fit(r.project.name, PROJECT_LABEL_W)}</Text>
+                  </Box>
+                  <Text dimColor>{`${formatTokens(r.project.tokens)} `}</Text>
+                  <Text bold>{formatCost(r.project.cost)}</Text>
+                </>
+              ) : null}
+            </Box>
+          ))}
         </>
       )}
     </Box>

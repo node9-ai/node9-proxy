@@ -12,7 +12,6 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 
-import { COL } from '../../../panels.js';
 import type { AggregateResult } from '../../../../../cli/aggregate/report-audit.js';
 import { fitLabel, humanBlockReason, num } from '../util.js';
 
@@ -27,14 +26,7 @@ export function TopBlocks({ audit }: { audit: AggregateResult | null }): React.R
     : [];
 
   return (
-    <Box
-      borderStyle="round"
-      borderColor={COL.textDim}
-      paddingX={1}
-      flexDirection="column"
-      flexGrow={1}
-      flexBasis={0}
-    >
+    <Box paddingX={1} flexDirection="column" flexGrow={1} flexBasis={0}>
       <Text bold>TOP BLOCKS</Text>
       {audit === null ? (
         <Text dimColor>loading…</Text>
