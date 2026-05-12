@@ -43,6 +43,7 @@ function emptyInput(overrides: Partial<BuildReportJsonInput> = {}): BuildReportJ
     },
     toolMap: new Map(),
     blockMap: new Map(),
+    ruleMap: new Map(),
     agentMap: new Map(),
     mcpMap: new Map(),
     dailyMap: new Map(),

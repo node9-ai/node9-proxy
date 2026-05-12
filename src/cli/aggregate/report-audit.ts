@@ -33,6 +33,13 @@ export interface AuditEntry {
   args?: Record<string, unknown>;
   decision: string;
   checkedBy?: string;
+  /** Specific smart-rule name (e.g. `shield:project-jail:block-read-ssh`)
+   *  for entries written by the orchestrator's smart-rule paths.
+   *  `checkedBy` stays as the generic tag (`smart-rule-block` /
+   *  `smart-rule-block-override`); `ruleName` is the precise rule
+   *  that fired, used by the [2] Report SHIELDS panel to attribute
+   *  fires to their owning shield via the rule→shield map. */
+  ruleName?: string;
   agent?: string;
   mcpServer?: string;
   source?: string;
@@ -691,6 +698,13 @@ export function aggregateReportFromAudit(
   let testFails = 0;
   const toolMap = new Map<string, { calls: number; blocked: number }>();
   const blockMap = new Map<string, number>();
+  /** Per-specific-rule fire count. Populated from AuditEntry.ruleName
+   *  (set by the orchestrator's smart-rule paths). Distinct from
+   *  blockMap which groups by the generic `checkedBy` tag
+   *  (`smart-rule-block`, `timeout`, etc.). ruleMap is what `[2]`
+   *  Report's SHIELDS panel reads to attribute fires to their
+   *  owning shield via the rule→shield map. */
+  const ruleMap = new Map<string, number>();
   const agentMap = new Map<string, number>();
   const mcpMap = new Map<string, number>();
   const dailyMap = new Map<string, { calls: number; blocked: number }>();
@@ -719,6 +733,12 @@ export function aggregateReportFromAudit(
 
     if (!allow && e.checkedBy) {
       blockMap.set(e.checkedBy, (blockMap.get(e.checkedBy) ?? 0) + 1);
+    }
+    // Specific-rule attribution: only present on smart-rule paths.
+    // Counts both block and review fires (everything that wasn't an
+    // explicit allow).
+    if (!allow && e.ruleName) {
+      ruleMap.set(e.ruleName, (ruleMap.get(e.ruleName) ?? 0) + 1);
     }
 
     if (e.agent) agentMap.set(e.agent, (agentMap.get(e.agent) ?? 0) + 1);
@@ -777,6 +797,7 @@ export function aggregateReportFromAudit(
     },
     toolMap,
     blockMap,
+    ruleMap,
     agentMap,
     mcpMap,
     dailyMap,

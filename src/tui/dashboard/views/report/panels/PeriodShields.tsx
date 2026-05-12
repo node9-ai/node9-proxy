@@ -40,12 +40,16 @@ export function PeriodShields({
   const data = audit?.data;
   const ruleToShield = buildRuleToShieldMap();
 
-  // Collapse the per-rule blockMap into per-shield counts. Each rule
-  // hit attributes to its owning shield; rules with no shield (DLP /
-  // loop / taint built-ins) drop out — they're surfaced elsewhere.
+  // Collapse the per-rule ruleMap into per-shield counts. ruleMap is
+  // keyed by the SPECIFIC rule name (e.g.
+  // `shield:project-jail:block-read-ssh`) which the orchestrator
+  // now writes to the local audit log alongside the generic
+  // `checkedBy` tag. blockMap (keyed by generic checkedBy) is the
+  // wrong shape for shield attribution — its keys are categories
+  // like `smart-rule-block` that don't map to specific shields.
   const byShield = new Map<string, number>();
   if (data) {
-    for (const [rule, count] of data.blockMap) {
+    for (const [rule, count] of data.ruleMap) {
       const shield = ruleToShield.get(rule);
       if (!shield) continue;
       byShield.set(shield, (byShield.get(shield) ?? 0) + count);

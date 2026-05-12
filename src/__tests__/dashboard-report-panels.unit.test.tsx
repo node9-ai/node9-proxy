@@ -59,6 +59,7 @@ function emptyAudit(overrides: Partial<BuildReportJsonInput> = {}): AggregateRes
     },
     toolMap: new Map(),
     blockMap: new Map(),
+    ruleMap: new Map(),
     agentMap: new Map(),
     mcpMap: new Map(),
     dailyMap: new Map(),
@@ -371,21 +372,24 @@ describe('PeriodShields', () => {
       active: ['project-jail'],
       inactive: [],
     };
-    // Pull a real project-jail rule name from the registry via the
-    // same path the panel uses.
+    // The panel reads ruleMap (keyed by specific rule names), NOT
+    // blockMap (keyed by generic checkedBy tags). Without this fix,
+    // the audit log's `smart-rule-block` generic key was the wrong
+    // shape for shield attribution — see the 2026-05-12 SHIELDS
+    // bug fix commit.
     const audit = emptyAudit({
-      blockMap: new Map([
+      ruleMap: new Map([
         ['shield:project-jail:block-read-ssh', 3],
         ['shield:project-jail:block-read-aws', 2],
-        // checkedBy with no shield owner — should be skipped.
-        ['dlp-block', 99],
+        // ruleName with no shield owner — should be skipped.
+        ['some-orphan-rule', 99],
       ]),
     });
     const { lastFrame } = render(<PeriodShields audit={audit} shieldStatus={status} />);
     const out = lastFrame();
     expect(out).toContain('project-jail');
-    // 3 + 2 = 5 from the two project-jail rule entries; dlp-block (99)
-    // is not attributed to any shield and shouldn't leak into the count.
+    // 3 + 2 = 5 from the two project-jail rule entries; the orphan
+    // rule (99) is not attributed to any shield and shouldn't leak.
     expect(out).toContain('5');
     expect(out).not.toContain('99');
   });

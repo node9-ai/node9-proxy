@@ -56,6 +56,11 @@ export interface BuildReportJsonInput {
 
   toolMap: Map<string, { calls: number; blocked: number }>;
   blockMap: Map<string, number>;
+  /** Per-specific-rule fire count (e.g. `shield:project-jail:block-read-ssh`
+   *  → N). Distinct from blockMap which groups by the generic
+   *  checkedBy tag. Drives the [2] Report SHIELDS panel's per-shield
+   *  attribution. */
+  ruleMap: Map<string, number>;
   agentMap: Map<string, number>;
   mcpMap: Map<string, number>;
   dailyMap: Map<string, { calls: number; blocked: number }>;

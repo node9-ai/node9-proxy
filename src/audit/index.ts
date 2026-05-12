@@ -70,7 +70,18 @@ export function appendLocalAudit(
   args: unknown,
   decision: 'allow' | 'deny',
   checkedBy: string,
-  meta?: { agent?: string; mcpServer?: string; sessionId?: string },
+  meta?: {
+    agent?: string;
+    mcpServer?: string;
+    sessionId?: string;
+    /** Specific smart-rule that fired (e.g.
+     *  `shield:project-jail:block-read-ssh`). Optional — included
+     *  alongside `checkedBy` (which stays as the generic tag like
+     *  `smart-rule-block`) so `[2]` Report can attribute fires to
+     *  specific shields without having to redefine the existing
+     *  checkedBy taxonomy. */
+    ruleName?: string;
+  },
   auditHashArgsEnabled?: boolean
 ): void {
   const argsField = auditHashArgsEnabled
@@ -78,12 +89,14 @@ export function appendLocalAudit(
     : { args: args ? JSON.parse(redactSecrets(JSON.stringify(args))) : {} };
   const testRun =
     isTestCall(toolName, args) || process.env.NODE9_TESTING === '1' ? { testRun: true } : {};
+  const ruleNameField = meta?.ruleName ? { ruleName: meta.ruleName } : {};
   appendToLog(LOCAL_AUDIT_LOG, {
     ts: new Date().toISOString(),
     tool: toolName,
     ...argsField,
     decision,
     checkedBy,
+    ...ruleNameField,
     ...testRun,
     agent: meta?.agent,
     mcpServer: meta?.mcpServer,

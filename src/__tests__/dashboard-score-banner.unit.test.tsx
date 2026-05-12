@@ -52,6 +52,7 @@ function makeAudit(spend: number = 0): AggregateResult {
     },
     toolMap: new Map(),
     blockMap: new Map(),
+    ruleMap: new Map(),
     agentMap: new Map(),
     mcpMap: new Map(),
     dailyMap: new Map(),
