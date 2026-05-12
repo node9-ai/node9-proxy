@@ -31,13 +31,11 @@ import {
   scanCodexHistory,
 } from '../../cli/commands/scan.js';
 import {
-  PROTECTIVE_SHIELD_DISCOUNTS,
   type ActivityEvent,
   type AuditAggregates,
   type BlastSnapshot,
   type CostSnapshot,
   type ForensicSseEvent,
-  type ProtectionSummary,
   type ReportPeriod,
   type ScanCache,
   type ScanSignalsSnapshot,
@@ -46,6 +44,11 @@ import {
   type SessionShieldsAgg,
   type ShieldStatus,
 } from './types.js';
+// Re-export computeProtection from the new neutral home so existing
+// monitor imports (e.g. views/report/index.tsx) keep working without
+// a call-site update. See src/protection.ts header for the move
+// rationale.
+export { computeProtection } from '../../protection.js';
 
 // ---------------------------------------------------------------------------
 // Audit log parsing — minimal copy of the report.ts helper.
@@ -1149,74 +1152,6 @@ export function buildRuleToShieldMap(): Map<string, string> {
     }
   }
   return map;
-}
-
-/**
- * Pure function: combine blast exposure with active-shield protection
- * into a single effective score plus an actionable suggestion. Drives
- * the RISK box in the idle Notification slot and the secure / at-risk
- * threshold in the header health badge.
- *
- * Math:
- *   exposed   = 100 - blast.score  (points lost to reachable paths)
- *   protect   = round(exposed × max-discount-of-active-protective-shields)
- *   effective = clamp(100 - exposed + protect, 0, 100)
- *
- * The discount uses MAX (not sum) across active protective shields
- * because the jails overlap — multiple read-blockers active isn't
- * meaningfully more protection than just the broadest one. v2 may
- * add finer per-path attribution if shields start carving disjoint
- * coverage areas.
- *
- * `suggestedShield` is the highest-value INACTIVE protective shield;
- * suggestedBonus is the protection points that enabling it would add.
- * Null when nothing's left to enable or effective is already maxed.
- */
-export function computeProtection(
-  blast: BlastSnapshot | null,
-  shieldStatus: ShieldStatus | null
-): ProtectionSummary {
-  const score = blast?.score ?? 100;
-  const exposed = Math.max(0, 100 - score);
-  const active = shieldStatus?.active ?? [];
-  const inactive = shieldStatus?.inactive ?? [];
-  // Use MAX of active shield discounts — overlapping protections
-  // (multiple read-blockers covering the same paths) don't double
-  // the defense; the broader shield already covers what the narrower
-  // one does. Today there's only one entry (`project-jail` at 0.3)
-  // so the reduce trivially returns it when active; Phase 1's expanded
-  // ruleset bumps that to 0.7 and may introduce additional protective
-  // shields, at which point the max-of-discounts logic earns its
-  // keep.
-  const activeDiscount = active.reduce((max, name) => {
-    const d = PROTECTIVE_SHIELD_DISCOUNTS[name] ?? 0;
-    return d > max ? d : max;
-  }, 0);
-  const protect = Math.round(exposed * activeDiscount);
-  const effective = Math.max(0, Math.min(100, 100 - exposed + protect));
-
-  // Suggest the inactive shield whose discount-DELTA over the current
-  // best gives the biggest bonus. With one protective shield in the
-  // map today, this either suggests project-jail (when inactive and
-  // exposed > 0) or returns null. After Phase 1 ships additional
-  // protective shields, this picks the highest-value upgrade from
-  // the user's current state.
-  let suggestedShield: string | null = null;
-  let suggestedBonus = 0;
-  if (exposed > 0) {
-    for (const name of inactive) {
-      const d = PROTECTIVE_SHIELD_DISCOUNTS[name] ?? 0;
-      const delta = d - activeDiscount;
-      if (delta > 0) {
-        const bonus = Math.round(exposed * delta);
-        if (bonus > suggestedBonus) {
-          suggestedShield = name;
-          suggestedBonus = bonus;
-        }
-      }
-    }
-  }
-  return { exposed, protect, effective, suggestedShield, suggestedBonus };
 }
 
 /**

@@ -108,82 +108,19 @@ export interface AuditAggregates {
   byShell: Array<{ cmd: string; count: number; blocked: number }>;
 }
 
-export interface BlastPathInfo {
-  /** Short, display-ready path label (e.g. "~/.ssh/id_rsa"). */
-  label: string;
-  /** Human description from blast.ts (e.g. "RSA private key — SSH server access").
-   *  Empty string if unavailable. */
-  description: string;
-  /** Points deducted from the security score for this path being readable. */
-  score: number;
-}
-
-export interface BlastSnapshot {
-  score: number;
-  /** Top reachable sensitive paths. The Risk panel uses .length only;
-   *  the Report [2] BlastRadius panel renders label + description per row. */
-  paths: BlastPathInfo[];
-  envFindings: number;
-}
-
-/** Per-shield discount fraction applied to blast deductions when the
- *  shield is active. Discounts overlap (multiple protective shields
- *  on isn't additive) so computeProtection() uses the *max* of active
- *  discounts, not a sum. Names match the SHIELDS registry exactly.
- *
- *  Current entries:
- *  - project-jail: blocks reads of `.ssh/`, `.aws/`, `.env`,
- *    `credentials.json`, `.netrc`, `.npmrc`, `.docker/config.json`,
- *    `gcloud/credentials`, `.kube/config`. Two rule families:
- *    (a) bash-tool rules matching on `command` (cat / less / vim / etc.)
- *    (b) tool=* rules matching on `file_path` (Read / Edit / Write /
- *    MultiEdit / future MCP file tools).
- *    0.7 reflects "covers bash AND tool-mediated reads"; the
- *    remaining 30% is symlink dodge, dynamic-path construction,
- *    Glob enumeration, and tools using non-`file_path` arg names.
- *
- *  NOT in this table (and why):
- *  - filesystem (builtin shield): reviews chmod 777 and writes to
- *    /etc/. Destructive-write protection, NOT blast-path defense.
- *    Removed from this table on 2026-05-12 — was a dead typo entry
- *    (`filesystem-jail`) that never matched anyway.
- *  - dlp / bash-safe / block-rm-rf / aws / docker / github / postgres
- *    / mongodb / redis / k8s: defend different risk surfaces (live
- *    findings, destructive ops, domain-specific concerns), don't
- *    reduce static blast-path exposure. */
-export const PROTECTIVE_SHIELD_DISCOUNTS: Readonly<Record<string, number>> = {
-  'project-jail': 0.7,
-};
-
-/** Composite "what's my real risk" summary — combines blast exposure
- *  (static FS reachability) with shield protection (runtime defense)
- *  into a single effective score, plus the most useful action the
- *  user could take to improve it. Pure function over BlastSnapshot
- *  and ShieldStatus — see computeProtection in data.ts. */
-export interface ProtectionSummary {
-  /** Points deducted from the perfect 100 by blast findings. Always
-   *  >= 0; equals (100 - blast.score). */
-  exposed: number;
-  /** Points given back by active protective shields. Always >= 0;
-   *  capped at `exposed` so effective never exceeds 100. */
-  protect: number;
-  /** Final score the user sees in the RISK box. exposed - protect
-   *  flipped to score-out-of-100. */
-  effective: number;
-  /** Inactive protective shield whose enablement would give the
-   *  biggest bonus. Null when no protective shield is inactive or
-   *  when effective is already maxed. */
-  suggestedShield: string | null;
-  /** Bonus the suggested shield would add, in score points (0-100). */
-  suggestedBonus: number;
-}
-
-/** Shield-config snapshot — names of shields registered (builtin + user)
- *  vs the names actually active in ~/.node9/shields.json. */
-export interface ShieldStatus {
-  active: string[];
-  inactive: string[];
-}
+// BlastPathInfo, BlastSnapshot, ShieldStatus, ProtectionSummary, and
+// PROTECTIVE_SHIELD_DISCOUNTS moved to src/protection.ts on 2026-05-12
+// so the CLI scan renderer can compute "+N pts if you enable
+// project-jail" without taking a layering inversion through
+// tui/dashboard/*. Re-exported here so existing monitor imports keep
+// working without call-site churn.
+export type {
+  BlastPathInfo,
+  BlastSnapshot,
+  ShieldStatus,
+  ProtectionSummary,
+} from '../../protection.js';
+export { PROTECTIVE_SHIELD_DISCOUNTS } from '../../protection.js';
 
 /** Forensic scan-signal counts — derived by walking ~/.claude/projects
  *  JSONL files and running the canonical extractor per line. Reflects
