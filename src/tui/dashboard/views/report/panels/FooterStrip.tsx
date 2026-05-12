@@ -25,7 +25,7 @@ export function FooterStrip({ audit }: { audit: AggregateResult | null }): React
   const spark = sparkline(hourValues);
 
   return (
-    <Box paddingX={1} paddingTop={1}>
+    <Box paddingX={1}>
       <Text bold>HOUR OF DAY</Text>
       <Text dimColor>{' (local)   '}</Text>
       <Text color="cyan">{spark}</Text>

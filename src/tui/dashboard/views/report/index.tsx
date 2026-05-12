@@ -133,7 +133,7 @@ function ReportHeader({
   const agentBits = data ? formatAgents(data.agentMap) : '';
 
   return (
-    <Box flexDirection="column" paddingTop={1}>
+    <Box flexDirection="column">
       <Box>
         <Text color={COL.brand} bold>
           REPORT
@@ -220,7 +220,7 @@ export function ScoreBanner({
   const headline = computeHeadline(scanCache, filtered, blast);
 
   return (
-    <Box flexDirection="column" paddingY={1}>
+    <Box flexDirection="column">
       {/* Row 1: Effective score + tier + headline + spend */}
       <Box>
         {hasBlast && tier ? (
