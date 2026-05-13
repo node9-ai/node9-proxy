@@ -8,7 +8,7 @@
   <a href="https://huggingface.co/spaces/Node9ai/node9-security-demo"><img src="https://huggingface.co/datasets/huggingface/badges/resolve/main/open-in-hf-spaces-sm.svg" alt="Try on HF Spaces" /></a>
 </p>
 
-Node9 sits between your AI agent and the tools it can use — recording every action, intervening on risky ones, and showing you what happened both live and in retrospect.
+Node9 sits between your AI agent and the tools it can use — **discover** what it's already been doing, **protect** against risky actions in real time, and **review** what happened over any time window.
 
 Works with **Claude Code · Codex CLI · Gemini CLI · Cursor · Windsurf · any MCP server**.
 
@@ -19,42 +19,46 @@ Works with **Claude Code · Codex CLI · Gemini CLI · Cursor · Windsurf · any
 - 🔑 **Catch credential leaks** — AWS keys, GitHub tokens, JWTs, GCP API keys, PEM private keys flagged in tool args, file contents, and shell config
 - 🔭 **Map your blast radius** — every SSH key, AWS credential, and `.env` file an AI agent on this machine could reach right now
 
-## Live monitoring
+## Discover · `node9 scan`
+
+The fastest way to see what your AI has already been doing across every session. No install, no config — walks your local agent history (`~/.claude/projects/`, `~/.gemini/tmp/`, `~/.codex/sessions/`) and reports leaks, blocked operations, agent loops, and reachable secrets in ~10 seconds. Nothing uploads.
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/7c5b30f1-1ca1-40b4-bfd5-d6671002e98e" width="720" alt="Node9 scan scorecard" />
+</p>
+
+```bash
+npx node9-ai scan          # run on any machine, no install
+```
+
+On my own dev machine after 30 days of intense AI development: Score 25/100, 5 credential files reachable, $14K spend with 21% lost to agent loops. Your numbers tell their own story — that's the point.
+
+## Protect · `node9 monitor`
+
+Once installed, `node9 monitor` opens an interactive terminal dashboard. The `[1] Realtime` view shows what's happening **right now** — every tool call as it fires, approval prompts before risky commands run, security alerts the moment a leak is detected.
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/997b7b42-b251-4046-b9c5-e000f8b5a481" width="720" alt="Node9 monitor dashboard" />
 </p>
 
-`node9 monitor` opens an interactive terminal dashboard with two views:
+- Live activity feed — every tool call streamed as it fires
+- Approval prompts — review risky commands before they execute
+- Security alerts — DLP catches, loop detections, blast-radius hits
+- Header score that updates as the session evolves
 
-- **`[1]` Realtime** — live activity, approvals, security alerts, current risk score
-- **`[2]` Report** — period-windowed summary: cost, top tools, shields fired, blast radius
+## Review · `node9 monitor` `[2]`
 
-## Retrospective scan
+Press `[2]` in monitor (or run `node9 report`) for a period-windowed summary across any time window. Same panels as the scan scorecard, but driven by your post-install audit log instead of raw agent history.
 
-This is my own machine — 30 days while building Node9. Score 25/100, 5 credential files an AI agent could reach right now.
+- **Periods**: `[T]oday` · `[W]eek` · `[M]onth` · `[N]inety` — toggle live
+- **COST + ACTIVITY** — spend per agent, sessions, tools, cost/session
+- **Critical band** — credential leaks + ops that would have been blocked
+- **Blast radius** — sensitive paths reachable on disk right now
+- **SHIELDS** — which shields would catch what, with score-delta math (`+53 pts if you enable project-jail`)
 
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/bc165779-4200-438d-967a-20d42bbfe69e" width="720" alt="Node9 scan scorecard" />
-</p>
-
+```bash
+node9 report --period 7d   # CLI form, no TUI
 ```
-🛡  Node9 Scan  ·  21 sessions  ·  8,114 tool calls  ·  Apr 6 – May 1, 2026
-
-Security Score: 25/100  ·  Critical
-$3,789 AI spend  ·  62 risky operations
-
-🔑  14   credential leak     (Bearer Token ×4, GCP API Key ×4, JWT ×2)
-🛑  15   would have blocked  (force-push ×5, read-ssh ×4, read-aws ×4)
-🔁  193  agent loops         (18% wasted  ·  ~$6.51)
-👁  33   flagged for review  (git-destructive ×19, rm ×9, sudo ×2)
-
-🔭  Blast radius             ssh × gcp × npm × other (5 exposures)
-
-→  npx node9-ai scan         run this on your machine
-```
-
-Run it on yours — `npx node9-ai scan` finishes in ~10 seconds and runs entirely local. Nothing uploads.
 
 ## Install
 
@@ -141,17 +145,17 @@ node9 mcp pin reset               # clear all pins
 
 </details>
 
-## Observability — five views
+## Other commands
 
-| Command          | What it shows                                             | When to use                               |
-| ---------------- | --------------------------------------------------------- | ----------------------------------------- |
-| `node9 blast`    | What an AI agent can reach right now — files, creds, env  | First thing to run on any machine         |
-| `node9 scan`     | Retrospective audit of existing agent history             | Before installing, or to review past risk |
-| `node9 tail`     | Live stream of every tool call                            | Watching an agent work in real time       |
-| `node9 report`   | Per-period summary: allowed/blocked/DLP/cost + top tools  | Reviewing what happened after a session   |
-| `node9 sessions` | Session history with prompt, tool trace, cost, snapshot   | Reviewing a handoff or past work          |
-| `node9 dlp`      | Credential-leak findings in Claude response text          | Any time a DLP desktop alert fires        |
-| `node9 mask`     | Redact plaintext secrets from local session history files | After a DLP finding — cleans local disk   |
+Beyond the three flow commands above (`scan` / `monitor` / `report`):
+
+| Command          | What it shows                                             | When to use                             |
+| ---------------- | --------------------------------------------------------- | --------------------------------------- |
+| `node9 blast`    | What an AI agent can reach right now — files, creds, env  | First thing to run on any machine       |
+| `node9 tail`     | Live stream of every tool call (text-only, no TUI)        | Piping into other tools, CI, logs       |
+| `node9 sessions` | Session history with prompt, tool trace, cost, snapshot   | Reviewing a handoff or past work        |
+| `node9 dlp`      | Credential-leak findings in Claude response text          | Any time a DLP desktop alert fires      |
+| `node9 mask`     | Redact plaintext secrets from local session history files | After a DLP finding — cleans local disk |
 
 Plus a **live HUD** in your Claude Code statusline:
 
