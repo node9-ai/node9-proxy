@@ -70,9 +70,11 @@ export function AgentLoopsPanel({ loopFindings, width }: Props): React.ReactElem
 
       {topStuck.length > 0 ? (
         <>
-          <Box>
-            <Text> </Text>
-          </Box>
+          {/* No manual blank-line spacer here — the "Top stuck:" label
+           *  already visually separates the breakdown from the per-file
+           *  list, and removing the gap brings the pair height down by
+           *  one row when the sibling REVIEW QUEUE panel is the shorter
+           *  one in the side-by-side Medium band. */}
           <Text dimColor>Top stuck:</Text>
           {topStuck.map((f, i) => {
             const target = trimRight(f.commandPreview || f.toolName, 32);
