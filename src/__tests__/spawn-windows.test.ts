@@ -22,7 +22,6 @@ const COMMANDS_DIR = path.resolve(__dirname, '../cli');
 const sources = [
   fs.readFileSync(path.join(COMMANDS_DIR, 'daemon-starter.ts'), 'utf-8'),
   fs.readFileSync(path.join(COMMANDS_DIR, 'commands/daemon-cmd.ts'), 'utf-8'),
-  fs.readFileSync(path.join(COMMANDS_DIR, 'commands/watch.ts'), 'utf-8'),
 ];
 
 const SAFE_SPAWN_RE =
@@ -36,9 +35,9 @@ describe('spawn Windows compatibility (#41)', () => {
     }
   });
 
-  it('spawns daemon using process.execPath at all 4 call sites', () => {
-    // autoStartDaemonAndWait (1) + daemon --background (1) + daemon restart (1) + watch (1)
+  it('spawns daemon using process.execPath at all 3 call sites', () => {
+    // autoStartDaemonAndWait (1) + daemon --background (1) + daemon restart (1)
     const total = sources.reduce((sum, src) => sum + (src.match(SAFE_SPAWN_RE) ?? []).length, 0);
-    expect(total).toBe(4);
+    expect(total).toBe(3);
   });
 });
