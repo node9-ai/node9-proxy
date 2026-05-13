@@ -2804,8 +2804,10 @@ export function registerScanCommand(program: Command): void {
         // takes over ("🛡  node9 dashboard · scanned last 90 days") so the
         // chalk banner would just duplicate the brand line above it.
         // --classic opts back into the chalk renderer + chalk preamble.
+        // --drill-down does NOT render Ink (the Ink dispatch is gated by
+        // `!drillDown` below) so it must keep the chalk preamble.
         const screenshotMode = options.compact || options.narrative;
-        const useInk = !options.classic;
+        const useInk = !options.classic && !drillDown;
         const quiet = screenshotMode || options.json || useInk;
         if (!quiet) {
           console.log('');
@@ -3007,7 +3009,9 @@ export function registerScanCommand(program: Command): void {
         // card / AI spend). The dispatch later in this same block must
         // still run, so the gating is on the print lines only, not on
         // the outer `else`. --classic re-enables the chalk hero block.
-        const useInkForHero = !options.classic;
+        // --drill-down also keeps the chalk hero — it doesn't render
+        // Ink, so the hero is its only score/stat-card output.
+        const useInkForHero = !options.classic && !drillDown;
 
         if (totalFindings === 0 && scan.dlpFindings.length === 0) {
           console.log(chalk.green('  ✅ No risky operations found in your history.'));
