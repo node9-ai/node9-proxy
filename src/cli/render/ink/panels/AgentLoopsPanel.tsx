@@ -15,6 +15,7 @@ import type { LoopFinding } from '../../../commands/scan.js';
 
 interface Props {
   loopFindings: LoopFinding[];
+  width: number;
 }
 
 const TOOL_ROW_LIMIT = 5;
@@ -32,7 +33,7 @@ function trimRight(s: string, width: number): string {
   return '…' + s.slice(s.length - (width - 1));
 }
 
-export function AgentLoopsPanel({ loopFindings }: Props): React.ReactElement | null {
+export function AgentLoopsPanel({ loopFindings, width }: Props): React.ReactElement | null {
   if (loopFindings.length === 0) return null;
 
   // Per-tool repeat aggregation.
@@ -49,7 +50,7 @@ export function AgentLoopsPanel({ loopFindings }: Props): React.ReactElement | n
   const topStuck = [...loopFindings].sort((a, b) => b.count - a.count).slice(0, STUCK_ROW_LIMIT);
 
   return (
-    <Box borderStyle="round" borderColor="gray" paddingX={1} flexDirection="column">
+    <Box borderStyle="round" borderColor="gray" paddingX={1} flexDirection="column" width={width}>
       <Text bold>AGENT LOOPS</Text>
 
       {toolEntries.map(([tool, repeats]) => {

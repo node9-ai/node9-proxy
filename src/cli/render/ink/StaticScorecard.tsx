@@ -69,6 +69,10 @@ function renderWidth(): number {
  *  Ink Header here and drop the chalk one. */
 export function StaticScorecard({ input, rangeLabel }: Props): React.ReactElement {
   const { summary, blockedCount } = input;
+  const width = renderWidth();
+  // For side-by-side panel rows: each panel takes half the width minus
+  // the gap. Computed once so all rows share the same column widths.
+  const halfWidth = Math.floor((width - 1) / 2);
 
   // Critical band shows only when there's something critical to show.
   // Hide-when-empty matches the locked design — no "0 leaks" placeholders.
@@ -86,20 +90,22 @@ export function StaticScorecard({ input, rangeLabel }: Props): React.ReactElemen
   })();
 
   return (
-    <Box flexDirection="column" paddingTop={1} width={renderWidth()}>
+    <Box flexDirection="column" paddingTop={1} width={width}>
       <Header rangeLabel={rangeLabel} />
 
-      <SeverityBand label="Spend & activity" />
+      <SeverityBand label="Spend & activity" width={width} />
       <Box flexDirection="row" gap={1}>
-        <CostPanel summary={summary} />
-        <ActivityPanel summary={summary} />
+        <CostPanel summary={summary} width={halfWidth} />
+        <ActivityPanel summary={summary} scan={input.scan} width={halfWidth} />
       </Box>
 
       {hasCritical ? (
         <>
-          <SeverityBand label={criticalLabel} />
-          <LeaksPanel summary={summary} />
-          <BlockedPanel summary={summary} />
+          <SeverityBand label={criticalLabel} width={width} />
+          <Box flexDirection="row" gap={1}>
+            <LeaksPanel summary={summary} width={halfWidth} />
+            <BlockedPanel summary={summary} width={halfWidth} />
+          </Box>
         </>
       ) : null}
 
@@ -107,8 +113,13 @@ export function StaticScorecard({ input, rangeLabel }: Props): React.ReactElemen
         <>
           <SeverityBand
             label={`High (${input.blastExposures} path${input.blastExposures !== 1 ? 's' : ''} reachable on disk)`}
+            width={width}
           />
-          <BlastRadiusPanel blast={input.blast} blastExposures={input.blastExposures} />
+          <BlastRadiusPanel
+            blast={input.blast}
+            blastExposures={input.blastExposures}
+            width={width}
+          />
         </>
       ) : null}
 
@@ -125,17 +136,17 @@ export function StaticScorecard({ input, rangeLabel }: Props): React.ReactElemen
           );
         return (
           <>
-            <SeverityBand label={`Medium (${parts.join(' · ')})`} />
+            <SeverityBand label={`Medium (${parts.join(' · ')})`} width={width} />
             <Box flexDirection="row" gap={1}>
-              <ReviewQueuePanel summary={input.summary} />
-              <AgentLoopsPanel loopFindings={input.scan.loopFindings} />
+              <ReviewQueuePanel summary={input.summary} width={halfWidth} />
+              <AgentLoopsPanel loopFindings={input.scan.loopFindings} width={halfWidth} />
             </Box>
           </>
         );
       })()}
 
-      <SeverityBand label="Recommended action" />
-      <ShieldsPanel summary={input.summary} blastScore={input.blast.score} />
+      <SeverityBand label="Recommended action" width={width} />
+      <ShieldsPanel summary={input.summary} blastScore={input.blast.score} width={width} />
     </Box>
   );
 }

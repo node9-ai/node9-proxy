@@ -2,44 +2,54 @@
 //
 // Right-side panel in the "Spend & activity" band, sits next to
 // CostPanel. Surfaces volume metrics that complement the dollar
-// figures: how much agent time, how many tool calls, the date
-// window in scope.
+// figures: sessions, tools, shell, MCP counts.
 //
-// Data — all from ScanSummary.stats which the scan pipeline
-// already populates. No new walker work needed.
+// Date range is intentionally NOT here — it's already in the
+// scorecard's header line ("scanned last 90 days") so duplicating
+// it in this panel is noise.
 //
-// Tokens are intentionally NOT here (yet) — scan today aggregates
-// cost but not per-agent token counts. The data plumbing would be
-// a separate change. Will revisit if useful for spend attribution.
+// MCP counts: scan.findings carry a toolName per finding. Any tool
+// matching the `mcp__*` naming convention counts as MCP. This is
+// approximate (only counts findings that matched a rule), but it's
+// the best we can do without instrumenting the JSONL walker to
+// track MCP separately. TODO: thread total MCP call count through
+// ScanResult so this panel can show a true count.
 
 import React from 'react';
 import { Box, Text } from 'ink';
 
 import type { ScanSummary } from '../../../../scan-summary.js';
+import type { ScanResult } from '../../../commands/scan.js';
 
 interface Props {
   summary: ScanSummary;
+  scan: ScanResult;
+  width: number;
 }
 
 const LABEL_W = 16;
-
-/** Display a short date like "Apr 6". Returns "?" on bad input. */
-function fmtDate(iso: string | null): string {
-  if (!iso) return '?';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '?';
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-}
 
 function fmtNum(n: number): string {
   return n.toLocaleString();
 }
 
-export function ActivityPanel({ summary }: Props): React.ReactElement {
-  const { sessions, totalToolCalls, bashCalls, totalCostUSD, firstDate, lastDate } = summary.stats;
+/** Approximate MCP call count from findings (tools matching mcp__*).
+ *  Under-counts since findings only include rule-matches, not all
+ *  MCP calls. Returns 0 if none. */
+function countMcpFindings(scan: ScanResult): number {
+  let n = 0;
+  for (const f of scan.findings) {
+    if (f.toolName.startsWith('mcp__')) n++;
+  }
+  return n;
+}
+
+export function ActivityPanel({ summary, scan, width }: Props): React.ReactElement {
+  const { sessions, totalToolCalls, bashCalls, totalCostUSD } = summary.stats;
   const perSession = sessions > 0 ? totalCostUSD / sessions : 0;
+  const mcpCount = countMcpFindings(scan);
   return (
-    <Box borderStyle="round" borderColor="gray" paddingX={1} flexDirection="column" width={32}>
+    <Box borderStyle="round" borderColor="gray" paddingX={1} flexDirection="column" width={width}>
       <Text bold>ACTIVITY</Text>
 
       <Box>
@@ -51,16 +61,23 @@ export function ActivityPanel({ summary }: Props): React.ReactElement {
 
       <Box>
         <Box width={LABEL_W}>
-          <Text>Tool calls</Text>
+          <Text>Tools</Text>
         </Box>
         <Text>{fmtNum(totalToolCalls)}</Text>
       </Box>
 
       <Box>
         <Box width={LABEL_W}>
-          <Text dimColor>{'  Bash'}</Text>
+          <Text dimColor>{'  Shell'}</Text>
         </Box>
         <Text dimColor>{fmtNum(bashCalls)}</Text>
+      </Box>
+
+      <Box>
+        <Box width={LABEL_W}>
+          <Text dimColor>{'  MCP'}</Text>
+        </Box>
+        <Text dimColor>{mcpCount > 0 ? fmtNum(mcpCount) : '—'}</Text>
       </Box>
 
       <Box>
@@ -68,10 +85,6 @@ export function ActivityPanel({ summary }: Props): React.ReactElement {
           <Text>Cost / session</Text>
         </Box>
         <Text>{'~$' + Math.round(perSession).toLocaleString()}</Text>
-      </Box>
-
-      <Box>
-        <Text dimColor>{`${fmtDate(firstDate)} → ${fmtDate(lastDate)}`}</Text>
       </Box>
     </Box>
   );

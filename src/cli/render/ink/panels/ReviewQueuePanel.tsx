@@ -16,6 +16,7 @@ import { topRulesByVerdict } from '../../scan-derive.js';
 
 interface Props {
   summary: ScanSummary;
+  width: number;
 }
 
 function originForRule(ruleName: string, sections: ScanSummary['sections']): string {
@@ -32,12 +33,12 @@ function originForRule(ruleName: string, sections: ScanSummary['sections']): str
 
 const ROW_LIMIT = 8;
 
-export function ReviewQueuePanel({ summary }: Props): React.ReactElement | null {
+export function ReviewQueuePanel({ summary, width }: Props): React.ReactElement | null {
   const rules = topRulesByVerdict(summary.sections, 'review', ROW_LIMIT);
   if (rules.length === 0) return null;
 
   return (
-    <Box borderStyle="round" borderColor="gray" paddingX={1} flexDirection="column" width={42}>
+    <Box borderStyle="round" borderColor="gray" paddingX={1} flexDirection="column" width={width}>
       <Text bold>REVIEW QUEUE</Text>
       {rules.map((rule, i) => (
         <Box key={i}>

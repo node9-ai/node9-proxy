@@ -17,6 +17,7 @@ import { relativeDate } from '../../scan-derive.js';
 
 interface Props {
   summary: ScanSummary;
+  width: number;
 }
 
 /** Max leak rows shown individually. Anything past this collapses to
@@ -24,13 +25,13 @@ interface Props {
  *  machines. 5 covers the common case (~3-5 leaks per period). */
 const ROW_LIMIT = 5;
 
-export function LeaksPanel({ summary }: Props): React.ReactElement | null {
+export function LeaksPanel({ summary, width }: Props): React.ReactElement | null {
   const leaks = summary.leaks;
   if (leaks.length === 0) return null;
 
   const now = new Date();
   return (
-    <Box borderStyle="round" borderColor="red" paddingX={1} flexDirection="column">
+    <Box borderStyle="round" borderColor="red" paddingX={1} flexDirection="column" width={width}>
       <Text bold color="red">
         CREDENTIAL LEAKS
       </Text>
@@ -41,17 +42,16 @@ export function LeaksPanel({ summary }: Props): React.ReactElement | null {
             <Text dimColor>{relativeDate(leak.timestamp, now).padStart(4)}</Text>
           </Box>
           <Box width={16}>
-            <Text color="red" bold>
+            <Text color="red" bold wrap="truncate-end">
               {leak.patternName}
             </Text>
           </Box>
-          <Box width={22}>
-            <Text color="red">{leak.redactedSample}</Text>
-          </Box>
           <Box width={15}>
-            <Text dimColor>{`[${leak.toolName}]`}</Text>
+            <Text dimColor wrap="truncate-end">{`[${leak.toolName}]`}</Text>
           </Box>
-          <Text dimColor>{leak.agent}</Text>
+          <Text dimColor wrap="truncate-end">
+            {leak.agent}
+          </Text>
         </Box>
       ))}
 
@@ -59,14 +59,25 @@ export function LeaksPanel({ summary }: Props): React.ReactElement | null {
         <Text dimColor>{`… +${leaks.length - ROW_LIMIT} more`}</Text>
       ) : null}
 
-      <Box marginTop={1}>
-        <Text dimColor>{'→ '}</Text>
-        <Text bold color="cyan">
-          DLP
-        </Text>
-        <Text dimColor>
-          {' (always on) blocks these at PreToolUse before they leave the agent'}
-        </Text>
+      <Box marginTop={1} flexDirection="column">
+        <Box>
+          <Text dimColor>{'→ '}</Text>
+          <Text bold color="cyan" wrap="truncate-end">
+            DLP
+          </Text>
+          <Text dimColor wrap="truncate-end">
+            {' catches at runtime'}
+          </Text>
+        </Box>
+        <Box>
+          <Text dimColor>{'→ '}</Text>
+          <Text bold color="cyan" wrap="truncate-end">
+            node9 mask
+          </Text>
+          <Text dimColor wrap="truncate-end">
+            {' cleans local logs'}
+          </Text>
+        </Box>
       </Box>
     </Box>
   );

@@ -21,9 +21,10 @@ import { BUILTIN_SHIELDS } from '@node9/policy-engine';
 interface Props {
   summary: ScanSummary;
   blastScore: number;
+  width: number;
 }
 
-export function ShieldsPanel({ summary, blastScore }: Props): React.ReactElement {
+export function ShieldsPanel({ summary, blastScore, width }: Props): React.ReactElement {
   const impacts = rollupByShield(summary.sections);
   const exposed = Math.max(0, 100 - blastScore);
 
@@ -47,7 +48,7 @@ export function ShieldsPanel({ summary, blastScore }: Props): React.ReactElement
     : 0;
 
   return (
-    <Box borderStyle="round" borderColor="cyan" paddingX={1} flexDirection="column">
+    <Box borderStyle="round" borderColor="cyan" paddingX={1} flexDirection="column" width={width}>
       <Text bold color="cyan">
         SHIELDS
       </Text>

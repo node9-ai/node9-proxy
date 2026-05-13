@@ -1,16 +1,17 @@
 // src/cli/render/ink/SeverityBand.tsx
 //
-// Section divider used to anchor the redesigned `node9 scan` panel
-// scorecard. Renders as:
+// Section divider with centered title used to anchor the redesigned
+// `node9 scan` panel scorecard. Renders as:
 //
-//   ━━ Critical (5 secrets leaked + 2 ops blocked) ━━━━━━━━━━━━━━
+//   ━━━━━━━━━━━━ Critical (5 secrets leaked) ━━━━━━━━━━━━━
 //
-// One band per logical group: spend & activity, critical, high,
-// medium, recommended action. Empty bands aren't rendered at all
-// (decided in the scan-redesign plan).
+// The title sits centered with balanced ━ dashes on each side. One
+// band per logical group (spend & activity, critical, high, medium,
+// recommended action). Empty bands aren't rendered at all (decided
+// in the scan-redesign plan).
 //
-// Visual weight (━ box-drawing heavy line) is the hierarchy signal —
-// works without color so it lands in narrow / mono terminals too.
+// Width is passed in by the parent so the band matches the
+// scorecard's renderWidth (terminal cap or 90 cols).
 
 import React from 'react';
 import { Box, Text } from 'ink';
@@ -18,22 +19,22 @@ import { Box, Text } from 'ink';
 interface Props {
   /** Heading text, e.g. "Critical (5 secrets leaked + 2 ops blocked)". */
   label: string;
+  /** Total band width in columns — caller passes scorecard's renderWidth. */
+  width: number;
 }
 
-/** Width of the band when rendered. Matches the panel-row width below
- *  so the band visually frames the section it introduces. Hardcoded
- *  for now; commit #2 will switch to flexBasis so it adapts to
- *  process.stdout.columns. */
-const BAND_WIDTH = 76;
-
-export function SeverityBand({ label }: Props): React.ReactElement {
-  const labelLen = label.length + 4; // "━━ " (2 wide via Unicode) + " " padding + label + " "
-  const trailing = Math.max(3, BAND_WIDTH - labelLen);
+export function SeverityBand({ label, width }: Props): React.ReactElement {
+  // " label " — single-space padding on each side keeps the title
+  // visually distinct from the surrounding dashes.
+  const titleText = ` ${label} `;
+  const remaining = Math.max(2, width - titleText.length);
+  const leftDashes = '━'.repeat(Math.floor(remaining / 2));
+  const rightDashes = '━'.repeat(remaining - leftDashes.length);
   return (
     <Box marginTop={1}>
-      <Text dimColor>{'━━ '}</Text>
-      <Text bold>{label}</Text>
-      <Text dimColor>{' ' + '━'.repeat(trailing)}</Text>
+      <Text dimColor>{leftDashes}</Text>
+      <Text bold>{titleText}</Text>
+      <Text dimColor>{rightDashes}</Text>
     </Box>
   );
 }

@@ -19,6 +19,7 @@ import { topRulesByVerdict } from '../../scan-derive.js';
 
 interface Props {
   summary: ScanSummary;
+  width: number;
 }
 
 /** Find which origin tag (e.g. `default` or `needs shield:project-jail`)
@@ -42,12 +43,12 @@ function originForRule(ruleName: string, sections: ScanSummary['sections']): str
 /** Cap on rule rows. Above this, append a `… +N more` line. */
 const ROW_LIMIT = 12;
 
-export function BlockedPanel({ summary }: Props): React.ReactElement | null {
+export function BlockedPanel({ summary, width }: Props): React.ReactElement | null {
   const rules = topRulesByVerdict(summary.sections, 'block', ROW_LIMIT);
   if (rules.length === 0) return null;
 
   return (
-    <Box borderStyle="round" borderColor="red" paddingX={1} flexDirection="column">
+    <Box borderStyle="round" borderColor="red" paddingX={1} flexDirection="column" width={width}>
       <Text bold color="red">
         WOULD HAVE BLOCKED
       </Text>
@@ -72,7 +73,9 @@ export function BlockedPanel({ summary }: Props): React.ReactElement | null {
       ))}
 
       <Box marginTop={1}>
-        <Text dimColor>{'→ install node9 to enforce; each row above names the shield needed'}</Text>
+        <Text dimColor wrap="truncate-end">
+          {'→ install node9 + enable shields above'}
+        </Text>
       </Box>
     </Box>
   );

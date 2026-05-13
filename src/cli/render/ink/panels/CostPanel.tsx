@@ -20,14 +20,15 @@ import { formatCost } from '../../../../tui/dashboard/format.js';
 
 interface Props {
   summary: ScanSummary;
+  width: number;
 }
 
 const LABEL_W = 16;
 
-export function CostPanel({ summary }: Props): React.ReactElement {
+export function CostPanel({ summary, width }: Props): React.ReactElement {
   const total = summary.stats.totalCostUSD;
   return (
-    <Box borderStyle="round" borderColor="gray" paddingX={1} flexDirection="column" width={32}>
+    <Box borderStyle="round" borderColor="gray" paddingX={1} flexDirection="column" width={width}>
       <Text bold>COST</Text>
 
       <Box>

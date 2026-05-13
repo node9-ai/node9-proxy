@@ -23,17 +23,22 @@ type BlastInput = CompactInput['blast'];
 interface Props {
   blast: BlastInput;
   blastExposures: number;
+  width: number;
 }
 
 /** Max path rows shown individually. Above this, append a `… +N more`
  *  line. 8 covers the heaviest dev machine we've seen (~5 paths). */
 const ROW_LIMIT = 8;
 
-export function BlastRadiusPanel({ blast, blastExposures }: Props): React.ReactElement | null {
+export function BlastRadiusPanel({
+  blast,
+  blastExposures,
+  width,
+}: Props): React.ReactElement | null {
   if (blastExposures === 0) return null;
 
   return (
-    <Box borderStyle="round" borderColor="yellow" paddingX={1} flexDirection="column">
+    <Box borderStyle="round" borderColor="yellow" paddingX={1} flexDirection="column" width={width}>
       <Text bold color="yellow">
         BLAST RADIUS
       </Text>
