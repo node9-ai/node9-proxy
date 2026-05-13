@@ -59,25 +59,18 @@ export function LeaksPanel({ summary, width }: Props): React.ReactElement | null
         <Text dimColor>{`… +${leaks.length - ROW_LIMIT} more`}</Text>
       ) : null}
 
-      <Box marginTop={1} flexDirection="column">
-        <Box>
-          <Text dimColor>{'→ '}</Text>
-          <Text bold color="cyan" wrap="truncate-end">
-            DLP
-          </Text>
-          <Text dimColor wrap="truncate-end">
-            {' catches at runtime'}
-          </Text>
-        </Box>
-        <Box>
-          <Text dimColor>{'→ '}</Text>
-          <Text bold color="cyan" wrap="truncate-end">
-            node9 mask
-          </Text>
-          <Text dimColor wrap="truncate-end">
-            {' cleans local logs'}
-          </Text>
-        </Box>
+      <Box>
+        <Text dimColor>{'→ '}</Text>
+        <Text bold color="cyan">
+          DLP
+        </Text>
+        <Text dimColor>{' · '}</Text>
+        <Text bold color="cyan">
+          node9 mask
+        </Text>
+        <Text dimColor wrap="truncate-end">
+          {' (runtime + cleanup)'}
+        </Text>
       </Box>
     </Box>
   );

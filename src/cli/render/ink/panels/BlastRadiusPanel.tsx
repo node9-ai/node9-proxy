@@ -72,7 +72,7 @@ export function BlastRadiusPanel({
         <Text dimColor>{`… +${blastExposures - ROW_LIMIT} more`}</Text>
       ) : null}
 
-      <Box marginTop={1}>
+      <Box>
         <Text dimColor>{'→ '}</Text>
         <Text bold color="cyan">
           project-jail

@@ -90,7 +90,7 @@ export function AgentLoopsPanel({ loopFindings, width }: Props): React.ReactElem
         </>
       ) : null}
 
-      <Box marginTop={1}>
+      <Box>
         <Text dimColor wrap="truncate-end">
           {'→ '}
         </Text>

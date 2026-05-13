@@ -73,12 +73,14 @@ export function ActivityPanel({ summary, scan, width }: Props): React.ReactEleme
         <Text dimColor>{fmtNum(bashCalls)}</Text>
       </Box>
 
-      <Box>
-        <Box width={LABEL_W}>
-          <Text dimColor>{'  MCP'}</Text>
+      {mcpCount > 0 ? (
+        <Box>
+          <Box width={LABEL_W}>
+            <Text dimColor>{'  MCP'}</Text>
+          </Box>
+          <Text dimColor>{fmtNum(mcpCount)}</Text>
         </Box>
-        <Text dimColor>{mcpCount > 0 ? fmtNum(mcpCount) : '—'}</Text>
-      </Box>
+      ) : null}
 
       <Box>
         <Box width={LABEL_W}>

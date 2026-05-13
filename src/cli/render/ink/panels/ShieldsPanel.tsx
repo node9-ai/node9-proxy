@@ -56,15 +56,17 @@ export function ShieldsPanel({ summary, blastScore, width }: Props): React.React
       {hitShields.map((impact) => {
         const discount = PROTECTIVE_SHIELD_DISCOUNTS[impact.shieldName] ?? 0;
         const bonus = Math.round(exposed * discount);
-        const icon = discount > 0 ? '🛡️ ' : '☐  ';
         const noun = `op${impact.totalCatches !== 1 ? 's' : ''}`;
+        // No icon column — emoji variation-selector widths caused
+        // the protective-shield row to overflow the right border on
+        // some terminals. The shield name styling (bold cyan for
+        // protective, dim otherwise) carries the same signal.
         return (
           <Box key={impact.shieldName}>
-            <Box width={4}>
-              <Text color={discount > 0 ? 'cyan' : 'gray'}>{icon}</Text>
-            </Box>
-            <Box width={14}>
-              <Text bold>{impact.shieldName}</Text>
+            <Box width={16}>
+              <Text bold color={discount > 0 ? 'cyan' : undefined} dimColor={discount === 0}>
+                {impact.shieldName}
+              </Text>
             </Box>
             <Box width={20}>
               <Text dimColor>{`catches ${impact.totalCatches} ${noun}`}</Text>
@@ -80,16 +82,15 @@ export function ShieldsPanel({ summary, blastScore, width }: Props): React.React
       })}
 
       {zeroHitBuiltins.length > 0 ? (
-        <Box flexDirection="column" marginTop={hitShields.length > 0 ? 1 : 0}>
+        <Box flexDirection="column">
           <Text dimColor wrap="truncate-end">
-            {zeroHitBuiltins.join(' · ')}
+            {zeroHitBuiltins.join(' · ') + '  (no hits — install proactively)'}
           </Text>
-          <Text dimColor>{'  no hits in your history — install proactively'}</Text>
         </Box>
       ) : null}
 
       {topRec ? (
-        <Box marginTop={1}>
+        <Box>
           <Text color="cyan" bold>
             {`→ node9 shield enable ${topRec.shieldName}   (start here — +${topRecBonus} pts)`}
           </Text>

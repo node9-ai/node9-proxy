@@ -72,7 +72,7 @@ export function BlockedPanel({ summary, width }: Props): React.ReactElement | nu
         </Box>
       ))}
 
-      <Box marginTop={1}>
+      <Box>
         <Text dimColor wrap="truncate-end">
           {'→ install node9 + enable shields above'}
         </Text>

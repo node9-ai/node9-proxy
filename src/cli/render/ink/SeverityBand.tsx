@@ -31,7 +31,7 @@ export function SeverityBand({ label, width }: Props): React.ReactElement {
   const leftDashes = '━'.repeat(Math.floor(remaining / 2));
   const rightDashes = '━'.repeat(remaining - leftDashes.length);
   return (
-    <Box marginTop={1}>
+    <Box>
       <Text dimColor>{leftDashes}</Text>
       <Text bold>{titleText}</Text>
       <Text dimColor>{rightDashes}</Text>

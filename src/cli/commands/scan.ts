@@ -2798,8 +2798,12 @@ export function registerScanCommand(program: Command): void {
         // output starts cleanly at the scorecard for screenshot / video use.
         // --json suppresses everything outside the final JSON envelope so
         // stdout is parseable.
+        // Ink path also suppresses the preamble — the Ink header takes over
+        // ("🛡  node9 dashboard · scanned last 90 days") so the chalk banner
+        // would just duplicate the brand line above it.
         const screenshotMode = options.compact || options.narrative;
-        const quiet = screenshotMode || options.json;
+        const inkMode = process.env.NODE9_SCAN_INK === '1';
+        const quiet = screenshotMode || options.json || inkMode;
         if (!quiet) {
           console.log('');
           if (!isWired) {
@@ -3160,6 +3164,11 @@ export function registerScanCommand(program: Command): void {
                 },
                 rangeLabel
               );
+              // Ink doesn't emit a trailing newline after the last
+              // rendered row, so the chalk footer CTAs below would
+              // concatenate onto the same line as the SHIELDS panel's
+              // bottom border. Force a separator.
+              console.log('');
             } else {
               renderPanelScorecard({
                 scan,
