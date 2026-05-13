@@ -46,6 +46,16 @@ export interface AuditEntry {
   source?: string;
   testRun?: boolean;
   testResult?: 'pass' | 'fail';
+  /** Stable hash of the tool args — used to pair an intermediate
+   *  `smart-rule-block-override` deny row with the daemon's eventual
+   *  decision row by argsHash + sessionId. Present on rows written by
+   *  the smart-rule and daemon-decision paths (both ends of the pair);
+   *  consumers must treat it as optional for forward-compat with
+   *  older entries that pre-date the field. */
+  argsHash?: string;
+  /** Agent session id — scoped pairing key alongside argsHash so two
+   *  unrelated sessions running the same exact command don't collide. */
+  sessionId?: string;
 }
 
 interface JournalEntry {
@@ -159,6 +169,76 @@ function isTestEntry(entry: AuditEntry, testTs: Set<number>): boolean {
     if (Math.abs(ts - t) <= 3000) return true;
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Smart-rule override deduplication
+// ---------------------------------------------------------------------------
+//
+// When a smart rule with verdict=block fires, the orchestrator writes an
+// immediate `deny / smart-rule-block-override` audit row, prompts the user,
+// then — if the user clicks Allow — writes a second row with
+// `allow / checkedBy=daemon` (the daemon's decision record). The tool call
+// runs. The pair is reliably distinguishable by:
+//   - same argsHash
+//   - same sessionId
+//   - same tool name
+//   - within ~60 seconds (≈ default approval-popup timeout)
+//
+// Without dedupe, the intermediate deny inflates the "Auto-blocked" bucket
+// while the user's actual approval is also recorded separately. The
+// dashboard then over-counts blocks AND misattributes the same user-decision
+// flow to two different outcome buckets.
+//
+// Both rows are kept in the audit log for forensic completeness; only the
+// aggregator skips counting the intermediate.
+//
+// Why match by `checkedBy === 'daemon'` (not `source === 'daemon'`): there
+// are TWO daemon-related allow rows for each override flow — one with
+// `source: 'daemon'` (the routed incoming request, with raw args, no hash)
+// and one with `checkedBy: 'daemon'` (the daemon's decision, with hash +
+// session). Only the latter carries the fields needed to pair safely.
+
+const SUPERSEDE_WINDOW_MS = 60_000;
+
+/** Returns a Set of "ts|argsHash" keys for smart-rule-block-override
+ *  rows that were resolved by a subsequent `allow / checkedBy=daemon`
+ *  row in the same session within SUPERSEDE_WINDOW_MS. The main
+ *  aggregator loop skips counting these — the user's final approval
+ *  row (which has `source === 'daemon'`) is still counted via the
+ *  existing user-interactive branch. */
+function buildSupersededSet(entries: AuditEntry[]): Set<string> {
+  const superseded = new Set<string>();
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    if (e.decision !== 'deny') continue;
+    if (e.checkedBy !== 'smart-rule-block-override') continue;
+    if (!e.argsHash || !e.sessionId) continue;
+
+    const eTs = Date.parse(e.ts);
+    if (Number.isNaN(eTs)) continue;
+
+    for (let j = i + 1; j < entries.length; j++) {
+      const next = entries[j];
+      const nextTs = Date.parse(next.ts);
+      if (Number.isNaN(nextTs)) continue;
+      if (nextTs - eTs > SUPERSEDE_WINDOW_MS) break;
+      if (next.argsHash !== e.argsHash) continue;
+      if (next.sessionId !== e.sessionId) continue;
+      if (next.tool !== e.tool) continue;
+      if (next.decision === 'allow' && next.checkedBy === 'daemon') {
+        superseded.add(`${e.ts}|${e.argsHash}`);
+        break;
+      }
+    }
+  }
+  return superseded;
+}
+
+/** Key for membership checks in the superseded set. Stable because the
+ *  audit log is append-only — row timestamps don't change. */
+function supersedeKey(e: AuditEntry): string {
+  return `${e.ts}|${e.argsHash ?? ''}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -939,6 +1019,15 @@ export function aggregateReportFromAudit(
     return true;
   });
 
+  // Pre-pass: identify smart-rule-block-override deny rows that were
+  // resolved by a subsequent daemon allow within the same approval
+  // flow. The intermediate deny rows are skipped in the bucket loop
+  // below so PROTECTION counters reflect final outcomes. The matching
+  // allow row is counted normally via the user-interactive branch.
+  // See buildSupersededSet for the algorithm + the audit-shape
+  // rationale around matching by `checkedBy === 'daemon'`.
+  const superseded = buildSupersededSet(entries);
+
   // ── Aggregate ──
   // userApproved / userDenied: only count decisions where the user actually
   // interacted via an approver (popup, browser, terminal). These have
@@ -968,6 +1057,12 @@ export function aggregateReportFromAudit(
   const hourMap = new Map<number, number>();
 
   for (const e of entries) {
+    // Skip intermediate `smart-rule-block-override` rows that were
+    // resolved by a later daemon allow. The user-approval row carries
+    // the authoritative outcome — counting both inflates buckets and
+    // misattributes a single decision to two different outcomes.
+    if (superseded.has(supersedeKey(e))) continue;
+
     const allow = isAllow(e.decision);
     const dateKey = e.ts.slice(0, 10);
     const userInteracted = e.source === 'daemon';
@@ -979,6 +1074,11 @@ export function aggregateReportFromAudit(
       if (e.checkedBy === 'timeout') timedOut++;
       else if (e.checkedBy === 'observe-mode-dlp-would-block') observeDlp++;
       else if (isDlp(e.checkedBy)) dlpBlocked++;
+      // A native-OS popup deny — the user clicked Block. Same intent
+      // as a SaaS-approver deny (source=daemon), just a different
+      // channel. Bucket it as user-denied so the dashboard's
+      // "Auto-blocked" tile only reflects truly auto-decided blocks.
+      else if (e.checkedBy === 'local-decision') userDenied++;
       else if (e.checkedBy !== 'loop-detected') hardBlocked++;
     }
     if (e.checkedBy === 'loop-detected') loopHits++;
@@ -1029,7 +1129,9 @@ export function aggregateReportFromAudit(
     start,
     end,
     excludedTests,
-    total: entries.length,
+    // Subtract superseded rows so the headline event count agrees with
+    // the bucket counters (which skip them in the loop above).
+    total: entries.length - superseded.size,
     userApproved,
     userDenied,
     timedOut,
