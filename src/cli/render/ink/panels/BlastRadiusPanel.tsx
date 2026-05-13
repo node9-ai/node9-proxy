@@ -27,8 +27,9 @@ interface Props {
 }
 
 /** Max path rows shown individually. Above this, append a `… +N more`
- *  line. 8 covers the heaviest dev machine we've seen (~5 paths). */
-const ROW_LIMIT = 8;
+ *  line. 4 keeps the panel tight; typical dev machines have ≤5 paths
+ *  and the +N more roll-up handles longer lists. */
+const ROW_LIMIT = 4;
 
 export function BlastRadiusPanel({
   blast,
@@ -68,10 +69,10 @@ export function BlastRadiusPanel({
         </Box>
       ))}
 
-      {blastExposures > ROW_LIMIT ? (
-        <Text dimColor>{`… +${blastExposures - ROW_LIMIT} more`}</Text>
-      ) : null}
-
+      {/* No `… +N more` line — the severity-band header already
+       *  reports the total count, e.g. "High (5 paths reachable on
+       *  disk)". Keeping the panel one row tighter saves vertical
+       *  space. */}
       <Box>
         <Text dimColor>{'→ '}</Text>
         <Text bold color="cyan">

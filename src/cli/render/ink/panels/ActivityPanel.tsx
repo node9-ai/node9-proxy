@@ -47,7 +47,11 @@ function countMcpFindings(scan: ScanResult): number {
 export function ActivityPanel({ summary, scan, width }: Props): React.ReactElement {
   const { sessions, totalToolCalls, bashCalls, totalCostUSD } = summary.stats;
   const perSession = sessions > 0 ? totalCostUSD / sessions : 0;
+  const toolsPerSession = sessions > 0 ? Math.round(totalToolCalls / sessions) : 0;
   const mcpCount = countMcpFindings(scan);
+  // Find the most-active agent (by sessions). Surfaces "Claude
+  // dominates" / "Codex took over" without needing a dedicated panel.
+  const topAgent = summary.byAgent.slice().sort((a, b) => b.sessions - a.sessions)[0];
   return (
     <Box borderStyle="round" borderColor="gray" paddingX={1} flexDirection="column" width={width}>
       <Text bold>ACTIVITY</Text>
@@ -84,10 +88,26 @@ export function ActivityPanel({ summary, scan, width }: Props): React.ReactEleme
 
       <Box>
         <Box width={LABEL_W}>
+          <Text>Tools / session</Text>
+        </Box>
+        <Text>{'~' + fmtNum(toolsPerSession)}</Text>
+      </Box>
+
+      <Box>
+        <Box width={LABEL_W}>
           <Text>Cost / session</Text>
         </Box>
         <Text>{'~$' + Math.round(perSession).toLocaleString()}</Text>
       </Box>
+
+      {topAgent ? (
+        <Box>
+          <Box width={LABEL_W}>
+            <Text dimColor>Top agent</Text>
+          </Box>
+          <Text dimColor>{`${topAgent.label} (${fmtNum(topAgent.sessions)})`}</Text>
+        </Box>
+      ) : null}
     </Box>
   );
 }

@@ -31,7 +31,7 @@ function originForRule(ruleName: string, sections: ScanSummary['sections']): str
   return '';
 }
 
-const ROW_LIMIT = 8;
+const ROW_LIMIT = 5;
 
 export function ReviewQueuePanel({ summary, width }: Props): React.ReactElement | null {
   const rules = topRulesByVerdict(summary.sections, 'review', ROW_LIMIT);

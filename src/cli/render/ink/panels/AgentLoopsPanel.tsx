@@ -19,7 +19,7 @@ interface Props {
 }
 
 const TOOL_ROW_LIMIT = 5;
-const STUCK_ROW_LIMIT = 2;
+const STUCK_ROW_LIMIT = 1;
 
 function fmtNum(n: number): string {
   return n.toLocaleString();

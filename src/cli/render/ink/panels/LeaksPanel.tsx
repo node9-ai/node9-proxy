@@ -22,8 +22,9 @@ interface Props {
 
 /** Max leak rows shown individually. Anything past this collapses to
  *  a `… +N more` line so the panel stays bounded on heavy-leak
- *  machines. 5 covers the common case (~3-5 leaks per period). */
-const ROW_LIMIT = 5;
+ *  machines. 4 keeps the panel tight against BLOCKED in the side-by-
+ *  side Critical band — the +N more line handles overflow. */
+const ROW_LIMIT = 4;
 
 export function LeaksPanel({ summary, width }: Props): React.ReactElement | null {
   const leaks = summary.leaks;
@@ -55,10 +56,9 @@ export function LeaksPanel({ summary, width }: Props): React.ReactElement | null
         </Box>
       ))}
 
-      {leaks.length > ROW_LIMIT ? (
-        <Text dimColor>{`… +${leaks.length - ROW_LIMIT} more`}</Text>
-      ) : null}
-
+      {/* No `… +N more` line — the severity-band header already
+       *  reports the total count, e.g. "Critical (5 secrets leaked)".
+       *  Keeping the panel one row tighter saves vertical space. */}
       <Box>
         <Text dimColor>{'→ '}</Text>
         <Text bold color="cyan">
