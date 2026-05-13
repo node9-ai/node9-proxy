@@ -31,6 +31,7 @@ import { Box, render } from 'ink';
 
 import type { CompactInput } from '../../commands/scan.js';
 import { SeverityBand } from './SeverityBand.js';
+import { Header } from './panels/Header.js';
 import { CostPanel } from './panels/CostPanel.js';
 import { ActivityPanel } from './panels/ActivityPanel.js';
 import { LeaksPanel } from './panels/LeaksPanel.js';
@@ -43,6 +44,17 @@ import { computeLoopWaste } from '../scan-derive.js';
 
 interface Props {
   input: CompactInput;
+  rangeLabel: string;
+}
+
+/** Cap the scorecard's render width so it doesn't expand to fill
+ *  ultra-wide terminals (was hitting 180+ cols on the maintainer's
+ *  machine, panels looked empty). 90 is the comfortable upper bound
+ *  for a CLI scorecard — matches monitor [2]'s footprint. */
+const MAX_WIDTH = 90;
+function renderWidth(): number {
+  const term = process.stdout.columns ?? MAX_WIDTH;
+  return Math.min(term, MAX_WIDTH);
 }
 
 /** The React tree itself — pure, no I/O. Exported separately so
@@ -55,7 +67,7 @@ interface Props {
  *  would duplicate it. When the chalk hero block is itself migrated
  *  (eventually a HeaderPanel later in the stack), we'll restore an
  *  Ink Header here and drop the chalk one. */
-export function StaticScorecard({ input }: Props): React.ReactElement {
+export function StaticScorecard({ input, rangeLabel }: Props): React.ReactElement {
   const { summary, blockedCount } = input;
 
   // Critical band shows only when there's something critical to show.
@@ -74,7 +86,9 @@ export function StaticScorecard({ input }: Props): React.ReactElement {
   })();
 
   return (
-    <Box flexDirection="column" paddingTop={1}>
+    <Box flexDirection="column" paddingTop={1} width={renderWidth()}>
+      <Header rangeLabel={rangeLabel} />
+
       <SeverityBand label="Spend & activity" />
       <Box flexDirection="row" gap={1}>
         <CostPanel summary={summary} />
@@ -135,8 +149,8 @@ export function StaticScorecard({ input }: Props): React.ReactElement {
  * No `waitUntilExit()` — there's no interactive state to wait for;
  * the render is synchronous from the caller's perspective.
  */
-export function renderScanScorecardInk(input: CompactInput): void {
-  const { unmount } = render(<StaticScorecard input={input} />, {
+export function renderScanScorecardInk(input: CompactInput, rangeLabel: string): void {
+  const { unmount } = render(<StaticScorecard input={input} rangeLabel={rangeLabel} />, {
     patchConsole: false,
   });
   unmount();

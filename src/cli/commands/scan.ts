@@ -2994,6 +2994,14 @@ export function registerScanCommand(program: Command): void {
           return;
         }
 
+        // The Ink-rendered scorecard owns its own header (`🛡 node9
+        // dashboard · scanned 90 days`) — when active, skip the chalk
+        // hero PRINT statements below (score line / stat card / AI
+        // spend). The dispatch later in this same block must still
+        // run, so the gating is on the print lines only, not on the
+        // outer `else`.
+        const useInkForHero = process.env.NODE9_SCAN_INK === '1';
+
         if (totalFindings === 0 && scan.dlpFindings.length === 0) {
           console.log(chalk.green('  ✅ No risky operations found in your history.'));
           console.log(
@@ -3025,19 +3033,21 @@ export function registerScanCommand(program: Command): void {
               daysAgo === 0 ? 'today' : daysAgo === 1 ? 'yesterday' : `${daysAgo} days ago`;
             return chalk.dim('  ·  ') + arrow + chalk.dim(` since ${since}`);
           })();
-          console.log(
-            '  ' +
-              (score.band === 'critical' ? chalk.red.bold('⚠  ') : '') +
-              chalk.bold('Security Score ') +
-              score.color.bold(`${blast.score}/100`) +
+          if (!useInkForHero) {
+            console.log(
               '  ' +
-              severityDisplay +
-              trendSuffix +
-              chalk.dim('  ·  ') +
-              (totalRisky > 0
-                ? chalk.red.bold(`${totalRisky} risky operation${totalRisky !== 1 ? 's' : ''}`)
-                : chalk.green('No risky operations'))
-          );
+                (score.band === 'critical' ? chalk.red.bold('⚠  ') : '') +
+                chalk.bold('Security Score ') +
+                score.color.bold(`${blast.score}/100`) +
+                '  ' +
+                severityDisplay +
+                trendSuffix +
+                chalk.dim('  ·  ') +
+                (totalRisky > 0
+                  ? chalk.red.bold(`${totalRisky} risky operation${totalRisky !== 1 ? 's' : ''}`)
+                  : chalk.green('No risky operations'))
+            );
+          }
 
           // ── Compact stat card — one line, scannable ────────────────────────
           const cardParts: string[] = [];
@@ -3073,13 +3083,13 @@ export function registerScanCommand(program: Command): void {
               chalk.red('🔭 ') + chalk.red.bold(String(blastExposures)) + chalk.dim(' exposures')
             );
           }
-          if (cardParts.length > 0) {
+          if (cardParts.length > 0 && !useInkForHero) {
             console.log('  ' + cardParts.join(chalk.dim('   ')));
           }
 
           // Spend summary on its own line — useful for power users, not the
           // headline. (The score + count above is the hook.)
-          if (scan.totalCostUSD > 0) {
+          if (scan.totalCostUSD > 0 && !useInkForHero) {
             console.log(
               '  ' +
                 chalk.dim('AI spend  ') +
@@ -3103,7 +3113,9 @@ export function registerScanCommand(program: Command): void {
                 )
             );
           }
-          console.log('');
+          if (!useInkForHero) {
+            console.log('');
+          }
 
           // ── Default-mode panel scorecard ─────────────────────────────────
           // The polished forecast view (~7 boxed panels) replaces the old
@@ -3133,17 +3145,21 @@ export function registerScanCommand(program: Command): void {
               const dynamicImport = new Function('id', 'return import(id)') as (
                 id: string
               ) => Promise<{
-                renderScanScorecardInk: (input: CompactInput) => void;
+                renderScanScorecardInk: (input: CompactInput, rangeLabel: string) => void;
               }>;
               const mod = await dynamicImport(`file://${scanInkPath}`);
-              mod.renderScanScorecardInk({
-                scan,
-                summary,
-                blast,
-                blastExposures,
-                blockedCount,
-                reviewCount,
-              });
+              const rangeLabel = options.all ? 'all time' : `last ${options.days ?? 90} days`;
+              mod.renderScanScorecardInk(
+                {
+                  scan,
+                  summary,
+                  blast,
+                  blastExposures,
+                  blockedCount,
+                  reviewCount,
+                },
+                rangeLabel
+              );
             } else {
               renderPanelScorecard({
                 scan,
