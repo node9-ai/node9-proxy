@@ -52,6 +52,15 @@ export function ReviewQueuePanel({ summary }: Props): React.ReactElement | null 
           </Text>
         </Box>
       ))}
+
+      <Box marginTop={1}>
+        <Text dimColor wrap="truncate-end">
+          {'→ '}
+        </Text>
+        <Text bold color="cyan" wrap="truncate-end">
+          runtime approval
+        </Text>
+      </Box>
     </Box>
   );
 }

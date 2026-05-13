@@ -70,6 +70,10 @@ export function BlockedPanel({ summary }: Props): React.ReactElement | null {
           </Text>
         </Box>
       ))}
+
+      <Box marginTop={1}>
+        <Text dimColor>{'→ install node9 to enforce; each row above names the shield needed'}</Text>
+      </Box>
     </Box>
   );
 }

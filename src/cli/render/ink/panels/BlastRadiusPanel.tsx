@@ -66,6 +66,14 @@ export function BlastRadiusPanel({ blast, blastExposures }: Props): React.ReactE
       {blastExposures > ROW_LIMIT ? (
         <Text dimColor>{`… +${blastExposures - ROW_LIMIT} more`}</Text>
       ) : null}
+
+      <Box marginTop={1}>
+        <Text dimColor>{'→ '}</Text>
+        <Text bold color="cyan">
+          project-jail
+        </Text>
+        <Text dimColor>{' shield blocks agent reads of these paths'}</Text>
+      </Box>
     </Box>
   );
 }

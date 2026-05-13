@@ -88,6 +88,15 @@ export function AgentLoopsPanel({ loopFindings }: Props): React.ReactElement | n
           })}
         </>
       ) : null}
+
+      <Box marginTop={1}>
+        <Text dimColor wrap="truncate-end">
+          {'→ '}
+        </Text>
+        <Text bold color="cyan" wrap="truncate-end">
+          live loop-detector
+        </Text>
+      </Box>
     </Box>
   );
 }

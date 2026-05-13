@@ -58,6 +58,16 @@ export function LeaksPanel({ summary }: Props): React.ReactElement | null {
       {leaks.length > ROW_LIMIT ? (
         <Text dimColor>{`… +${leaks.length - ROW_LIMIT} more`}</Text>
       ) : null}
+
+      <Box marginTop={1}>
+        <Text dimColor>{'→ '}</Text>
+        <Text bold color="cyan">
+          DLP
+        </Text>
+        <Text dimColor>
+          {' (always on) blocks these at PreToolUse before they leave the agent'}
+        </Text>
+      </Box>
     </Box>
   );
 }
