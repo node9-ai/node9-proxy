@@ -85,6 +85,24 @@ function buildSensitivePaths(home: string, cwd: string): Array<SensitivePath & {
       score: 10,
     },
     {
+      full: path.join(home, '.willow', 'secrets', '.willow_master.key'),
+      label: '~/.willow/secrets/.willow_master.key',
+      description: 'Willow Fernet master key — decrypts all vault credentials',
+      score: 20,
+    },
+    {
+      full: path.join(home, '.willow', 'secrets', '.willow_creds.db'),
+      label: '~/.willow/secrets/.willow_creds.db',
+      description: 'Willow encrypted credential vault (SQLite + Fernet)',
+      score: 10,
+    },
+    {
+      full: path.join(home, '.willow', 'secrets', 'credentials.json'),
+      label: '~/.willow/secrets/credentials.json',
+      description: 'Willow plaintext credential fallback — API keys in clear text',
+      score: 15,
+    },
+    {
       full: path.join(cwd, '.env'),
       label: '.env  (current folder)',
       description: 'App secrets — database passwords, API keys',
