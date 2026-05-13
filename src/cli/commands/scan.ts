@@ -2731,6 +2731,7 @@ export function registerScanCommand(program: Command): void {
     .option('--drill-down', 'Show all findings with full commands and session IDs')
     .option('--compact', 'Compact one-screen scorecard — for screenshots and sharing')
     .option('--narrative', 'Severity-grouped report — for video / dramatic sharing')
+    .option('--classic', 'Original chalk-based scorecard layout (default: new Ink-rendered view)')
     .option(
       '--json',
       'Emit machine-readable JSON to stdout (suppresses banner, progress, and renderer)'
@@ -2753,6 +2754,7 @@ export function registerScanCommand(program: Command): void {
         drillDown?: boolean;
         compact?: boolean;
         narrative?: boolean;
+        classic?: boolean;
         json?: boolean;
         uploadHistory?: boolean;
         since?: string;
@@ -2798,12 +2800,13 @@ export function registerScanCommand(program: Command): void {
         // output starts cleanly at the scorecard for screenshot / video use.
         // --json suppresses everything outside the final JSON envelope so
         // stdout is parseable.
-        // Ink path also suppresses the preamble — the Ink header takes over
-        // ("🛡  node9 dashboard · scanned last 90 days") so the chalk banner
-        // would just duplicate the brand line above it.
+        // Default (Ink) mode also suppresses the preamble — the Ink header
+        // takes over ("🛡  node9 dashboard · scanned last 90 days") so the
+        // chalk banner would just duplicate the brand line above it.
+        // --classic opts back into the chalk renderer + chalk preamble.
         const screenshotMode = options.compact || options.narrative;
-        const inkMode = process.env.NODE9_SCAN_INK === '1';
-        const quiet = screenshotMode || options.json || inkMode;
+        const useInk = !options.classic;
+        const quiet = screenshotMode || options.json || useInk;
         if (!quiet) {
           console.log('');
           if (!isWired) {
@@ -2999,12 +3002,12 @@ export function registerScanCommand(program: Command): void {
         }
 
         // The Ink-rendered scorecard owns its own header (`🛡 node9
-        // dashboard · scanned 90 days`) — when active, skip the chalk
-        // hero PRINT statements below (score line / stat card / AI
-        // spend). The dispatch later in this same block must still
-        // run, so the gating is on the print lines only, not on the
-        // outer `else`.
-        const useInkForHero = process.env.NODE9_SCAN_INK === '1';
+        // dashboard · scanned 90 days`) — when active (default), skip
+        // the chalk hero PRINT statements below (score line / stat
+        // card / AI spend). The dispatch later in this same block must
+        // still run, so the gating is on the print lines only, not on
+        // the outer `else`. --classic re-enables the chalk hero block.
+        const useInkForHero = !options.classic;
 
         if (totalFindings === 0 && scan.dlpFindings.length === 0) {
           console.log(chalk.green('  ✅ No risky operations found in your history.'));
@@ -3127,18 +3130,10 @@ export function registerScanCommand(program: Command): void {
           // --drill-down. The verbose layout still serves --drill-down so
           // forensic detail is one flag away.
           //
-          // NODE9_SCAN_INK=1 env flag opts into the new Ink-rendered
-          // panel scorecard (in active migration). Default path
-          // remains the chalk-based renderPanelScorecard until the
-          // migration completes — see scan-redesign plan, commit #1.
+          // Default: the new Ink-rendered scorecard. --classic opts
+          // back into the original chalk renderPanelScorecard layout.
           if (!drillDown) {
-            const useInk = process.env.NODE9_SCAN_INK === '1';
-            // Commits #1-6 migrated all 6 panels to the Ink scorecard.
-            // As of commit #7, the Ink path renders the complete
-            // scorecard and the chalk renderPanelScorecard is the
-            // strict fallback for users who haven't opted in. Commit
-            // #8 deletes the chalk path entirely.
-            //
+            const useInk = !options.classic;
             // Ink load: ink/react are ESM with top-level await, so
             // they can't be require()'d from this CJS bundle. We
             // load from a separate scan-ink ESM bundle via the same

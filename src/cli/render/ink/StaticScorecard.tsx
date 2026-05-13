@@ -18,13 +18,8 @@
 //   - Same Ink components can later compose into the monitor [2]
 //     Report view, removing the dual-rendering-system duplication
 //
-// Spike scope (commit #1): Header + Spend-band + CostPanel only.
-// Subsequent commits add ACTIVITY, the Critical/High/Medium bands,
-// and the SHIELDS recommendation. See scan-redesign plan.
-//
-// Gated behind NODE9_SCAN_INK=1 env flag while the redesign matures.
-// Default behavior (the existing chalk-based renderPanelScorecard) is
-// unchanged until commit #8 of the plan.
+// Default renderer for `node9 scan`. Pass --classic to fall back to
+// the chalk-based renderPanelScorecard layout instead.
 
 import React from 'react';
 import { Box, render } from 'ink';
