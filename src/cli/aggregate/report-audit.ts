@@ -1088,8 +1088,18 @@ export function aggregateReportFromAudit(
     if (!allow) t.blocked++;
     toolMap.set(e.tool, t);
 
-    if (!allow && e.checkedBy) {
-      blockMap.set(e.checkedBy, (blockMap.get(e.checkedBy) ?? 0) + 1);
+    if (!allow) {
+      // SaaS-approver denials (source=daemon, no checkedBy tag) are
+      // user-initiated denies — the same conceptual bucket as native-
+      // popup denies (checkedBy=local-decision). Without this fold,
+      // TOP BLOCKS would show "User denied 9" while PROTECTION shows
+      // "Denied 19" because the SaaS rows have no checkedBy to group
+      // under. Treat them as local-decision in blockMap so both tiles
+      // agree on the user-denied total.
+      const key = e.checkedBy ?? (e.source === 'daemon' ? 'local-decision' : null);
+      if (key) {
+        blockMap.set(key, (blockMap.get(key) ?? 0) + 1);
+      }
     }
     // Specific-rule attribution: only present on smart-rule paths.
     // Counts both block and review fires (everything that wasn't an

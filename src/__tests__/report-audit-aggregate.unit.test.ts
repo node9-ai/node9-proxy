@@ -731,4 +731,63 @@ describe('aggregateReportFromAudit', () => {
       expect(result.data.userDenied).toBe(0);
     });
   });
+
+  // ── blockMap completeness ────────────────────────────────────────────────
+  // PROTECTION's "Denied" tile counts SaaS-approver denies (source=daemon,
+  // decision=deny, no checkedBy) AND native-popup denies (checkedBy=
+  // local-decision). TOP BLOCKS groups by checkedBy and must include both —
+  // otherwise the two tiles disagree and SaaS denials become invisible in
+  // the "what got blocked and why" panel.
+  describe('blockMap includes SaaS-approver denials', () => {
+    it('folds source=daemon denies into the local-decision bucket', () => {
+      writeLog([
+        // SaaS-approver deny — no checkedBy
+        {
+          ts: '2026-05-08T12:00:00Z',
+          tool: 'Bash',
+          decision: 'deny',
+          source: 'daemon',
+        },
+        // Native popup deny — checkedBy=local-decision
+        {
+          ts: '2026-05-08T12:00:01Z',
+          tool: 'Bash',
+          decision: 'deny',
+          checkedBy: 'local-decision',
+        },
+        {
+          ts: '2026-05-08T12:00:02Z',
+          tool: 'Bash',
+          decision: 'deny',
+          checkedBy: 'local-decision',
+        },
+      ]);
+      const result = aggregateReportFromAudit('7d', makeOpts());
+      // PROTECTION counter
+      expect(result.data.userDenied).toBe(3);
+      // TOP BLOCKS bucket — both channels rolled into local-decision
+      expect(result.data.blockMap.get('local-decision')).toBe(3);
+    });
+
+    it('does not double-count or invent buckets for source=daemon allows', () => {
+      writeLog([
+        {
+          ts: '2026-05-08T12:00:00Z',
+          tool: 'Bash',
+          decision: 'allow',
+          source: 'daemon',
+        },
+        {
+          ts: '2026-05-08T12:00:01Z',
+          tool: 'Bash',
+          decision: 'deny',
+          source: 'daemon',
+        },
+      ]);
+      const result = aggregateReportFromAudit('7d', makeOpts());
+      // Only the deny lands in blockMap; the allow doesn't.
+      expect(result.data.blockMap.get('local-decision')).toBe(1);
+      expect(result.data.blockMap.size).toBe(1);
+    });
+  });
 });
