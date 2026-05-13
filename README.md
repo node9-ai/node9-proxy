@@ -14,10 +14,9 @@ Works with **Claude Code · Codex CLI · Gemini CLI · Cursor · Windsurf · any
 
 ## What Node9 does
 
-- 🛡 **Review or block** risky commands before they run — `rm -rf`, `git push --force`, `DROP TABLE`, credential reads, `curl | bash`
-- 🔍 **Scan** what your AI has already been doing — loops, leaked secrets, blocked operations across every session
-- 🔑 **Catch credential leaks** — AWS keys, GitHub tokens, JWTs, GCP API keys, PEM private keys flagged in tool args, file contents, and shell config
-- 🔭 **Map your blast radius** — every SSH key, AWS credential, and `.env` file an AI agent on this machine could reach right now
+- 🔍 **Discover** — scan every past AI session for credential leaks, agent loops, blocked operations, and every secret on disk an agent could reach right now
+- 🛡 **Protect** — review or block risky commands before they run — `rm -rf`, `git push --force`, `DROP TABLE`, credential reads, `curl | bash`, AWS/GitHub/Stripe key leaks
+- 📊 **Review** — period-windowed report (today / week / month / 90 days) — cost per agent, top tools, shields fired, blast radius
 
 ## Retrospective scan
 
