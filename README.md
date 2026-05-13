@@ -34,7 +34,7 @@ node9 scan          # after installation, same output
 ## Live monitoring
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/997b7b42-b251-4046-b9c5-e000f8b5a481" width="720" alt="Node9 monitor dashboard" />
+  <img src="https://github.com/user-attachments/assets/4661da97-c174-4bae-ae54-4c52a1d69213" width="720" alt="Node9 monitor dashboard" />
 </p>
 
 `node9 monitor` opens an interactive terminal dashboard with two views:
