@@ -83,8 +83,12 @@ BLAST_INDEP=0
 BLAST_FAIL=""
 while IFS= read -r path; do
   [ -z "$path" ] && continue
-  # Expand ~ and glob the path
-  expanded=$(eval echo "$path")
+  # Expand a leading ~ to $HOME via bash parameter substitution. Avoids
+  # eval — paths come from scan output today but could theoretically
+  # contain shell metacharacters if a detector ever surfaces an
+  # attacker-controlled filename. Parameter expansion does no
+  # interpretation.
+  expanded="${path/#\~/$HOME}"
   if [ -r "$expanded" ]; then
     BLAST_INDEP=$((BLAST_INDEP + 1))
   else
