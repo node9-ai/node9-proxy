@@ -34,6 +34,8 @@ interface AuditLine {
   testResult?: 'pass' | 'fail';
   dlpPattern?: string;
   dlpSample?: string;
+  argsHash?: string;
+  sessionId?: string;
 }
 
 let tmpDir: string;
@@ -498,6 +500,235 @@ describe('aggregateReportFromAudit', () => {
       // Only the in-window turn counts.
       expect(result.data.cost.inputTokens).toBe(1000);
       expect(result.data.cost.outputTokens).toBe(100);
+    });
+  });
+
+  // ── Smart-rule override deduplication ────────────────────────────────────
+  // The orchestrator writes 3 rows for one approved override flow:
+  //   1. `deny / smart-rule-block-override` (intermediate, hashed shape)
+  //   2. `allow source=daemon`  (user's incoming request via daemon channel)
+  //   3. `allow checkedBy=daemon` (daemon's decision record, hashed shape)
+  // Rows 1 & 3 share argsHash + sessionId; the dedupe pre-pass uses that
+  // pair to skip row 1 in counting. Row 2 remains the canonical "approved"
+  // counter (existing user-interactive branch). Fixtures here mirror the
+  // real audit-log shape.
+  describe('smart-rule-block-override dedupe', () => {
+    it('skips an intermediate deny when a matching daemon allow exists', () => {
+      writeLog([
+        // (1) Intermediate: smart rule fires
+        {
+          ts: '2026-05-08T12:00:00Z',
+          tool: 'Bash',
+          decision: 'deny',
+          checkedBy: 'smart-rule-block-override',
+          argsHash: 'abc123',
+          sessionId: 'sess-1',
+        },
+        // (2) User clicks Allow via daemon channel (incoming-request row)
+        {
+          ts: '2026-05-08T12:00:05Z',
+          tool: 'Bash',
+          decision: 'allow',
+          source: 'daemon',
+        },
+        // (3) Daemon's decision record — hashed, pairs with (1)
+        {
+          ts: '2026-05-08T12:00:05.1Z',
+          tool: 'Bash',
+          decision: 'allow',
+          checkedBy: 'daemon',
+          argsHash: 'abc123',
+          sessionId: 'sess-1',
+        },
+      ]);
+      const result = aggregateReportFromAudit('7d', makeOpts());
+      // Row 1 is skipped (superseded). Row 2 → userApproved.
+      // Row 3 → no counter (not source=daemon, decision is allow).
+      expect(result.data.userApproved).toBe(1);
+      expect(result.data.hardBlocked).toBe(0);
+      // Headline event count: 3 rows in entries, 1 skipped → 2.
+      expect(result.data.total).toBe(2);
+    });
+
+    it('keeps a solo deny (no matching daemon resolution) as a hard block', () => {
+      writeLog([
+        {
+          ts: '2026-05-08T12:00:00Z',
+          tool: 'Bash',
+          decision: 'deny',
+          checkedBy: 'smart-rule-block-override',
+          argsHash: 'abc123',
+          sessionId: 'sess-1',
+        },
+      ]);
+      const result = aggregateReportFromAudit('7d', makeOpts());
+      expect(result.data.hardBlocked).toBe(1);
+      expect(result.data.userApproved).toBe(0);
+      expect(result.data.total).toBe(1);
+    });
+
+    it('does not dedupe across sessions even with matching argsHash', () => {
+      writeLog([
+        // session 1: deny with no resolution → true block
+        {
+          ts: '2026-05-08T12:00:00Z',
+          tool: 'Bash',
+          decision: 'deny',
+          checkedBy: 'smart-rule-block-override',
+          argsHash: 'abc123',
+          sessionId: 'sess-1',
+        },
+        // session 2: daemon allow, same command coincidentally
+        {
+          ts: '2026-05-08T12:00:05Z',
+          tool: 'Bash',
+          decision: 'allow',
+          checkedBy: 'daemon',
+          argsHash: 'abc123',
+          sessionId: 'sess-2',
+        },
+      ]);
+      const result = aggregateReportFromAudit('7d', makeOpts());
+      expect(result.data.hardBlocked).toBe(1);
+      // The sess-2 daemon allow has decision=allow but no source=daemon,
+      // so it doesn't bump userApproved — it's just an uncounted record.
+      expect(result.data.userApproved).toBe(0);
+    });
+
+    it('does not dedupe outside the 60s window', () => {
+      writeLog([
+        {
+          ts: '2026-05-08T12:00:00Z',
+          tool: 'Bash',
+          decision: 'deny',
+          checkedBy: 'smart-rule-block-override',
+          argsHash: 'abc123',
+          sessionId: 'sess-1',
+        },
+        // 90s later — beyond the pair window
+        {
+          ts: '2026-05-08T12:01:30Z',
+          tool: 'Bash',
+          decision: 'allow',
+          checkedBy: 'daemon',
+          argsHash: 'abc123',
+          sessionId: 'sess-1',
+        },
+      ]);
+      const result = aggregateReportFromAudit('7d', makeOpts());
+      expect(result.data.hardBlocked).toBe(1);
+    });
+
+    it('skips rows missing argsHash or sessionId (older logs, no pairing possible)', () => {
+      writeLog([
+        // Old-style row with no argsHash/sessionId — counts as a normal block
+        {
+          ts: '2026-05-08T12:00:00Z',
+          tool: 'Bash',
+          decision: 'deny',
+          checkedBy: 'smart-rule-block-override',
+        },
+        {
+          ts: '2026-05-08T12:00:05Z',
+          tool: 'Bash',
+          decision: 'allow',
+          source: 'daemon',
+        },
+      ]);
+      const result = aggregateReportFromAudit('7d', makeOpts());
+      expect(result.data.hardBlocked).toBe(1);
+      expect(result.data.userApproved).toBe(1);
+    });
+
+    it('does not pair when tool names differ (defensive against hash collision)', () => {
+      writeLog([
+        {
+          ts: '2026-05-08T12:00:00Z',
+          tool: 'Bash',
+          decision: 'deny',
+          checkedBy: 'smart-rule-block-override',
+          argsHash: 'abc123',
+          sessionId: 'sess-1',
+        },
+        // Different tool, same hash — wouldn't happen in practice but
+        // the matching must be tool-scoped anyway.
+        {
+          ts: '2026-05-08T12:00:05Z',
+          tool: 'Read',
+          decision: 'allow',
+          checkedBy: 'daemon',
+          argsHash: 'abc123',
+          sessionId: 'sess-1',
+        },
+      ]);
+      const result = aggregateReportFromAudit('7d', makeOpts());
+      expect(result.data.hardBlocked).toBe(1);
+    });
+  });
+
+  // ── local-decision re-bucketing ─────────────────────────────────────────
+  // `checkedBy: 'local-decision'` deny rows record a user clicking Block
+  // on a native OS popup. Same user intent as a SaaS-approver deny
+  // (source=daemon, deny), just a different channel. They were previously
+  // lumped into hardBlocked which made the "Auto-blocked" tile misleading.
+  describe('local-decision re-bucketing', () => {
+    it('counts local-decision denies as userDenied, not hardBlocked', () => {
+      writeLog([
+        {
+          ts: '2026-05-08T12:00:00Z',
+          tool: 'Bash',
+          decision: 'deny',
+          checkedBy: 'local-decision',
+        },
+        {
+          ts: '2026-05-08T12:00:01Z',
+          tool: 'Bash',
+          decision: 'deny',
+          checkedBy: 'local-decision',
+        },
+      ]);
+      const result = aggregateReportFromAudit('7d', makeOpts());
+      expect(result.data.userDenied).toBe(2);
+      expect(result.data.hardBlocked).toBe(0);
+    });
+
+    it('combines SaaS-approver and native-popup denials in userDenied', () => {
+      writeLog([
+        // SaaS approver deny
+        {
+          ts: '2026-05-08T12:00:00Z',
+          tool: 'Bash',
+          decision: 'deny',
+          source: 'daemon',
+        },
+        // Native popup deny
+        {
+          ts: '2026-05-08T12:00:01Z',
+          tool: 'Bash',
+          decision: 'deny',
+          checkedBy: 'local-decision',
+        },
+      ]);
+      const result = aggregateReportFromAudit('7d', makeOpts());
+      expect(result.data.userDenied).toBe(2);
+      expect(result.data.hardBlocked).toBe(0);
+    });
+
+    it('keeps smart-rule-block (no override) in hardBlocked', () => {
+      // Sanity: only `local-decision` moves. Other non-daemon denies
+      // (smart-rule-block without resolution, persistent-deny, etc.)
+      // still land in hardBlocked.
+      writeLog([
+        {
+          ts: '2026-05-08T12:00:00Z',
+          tool: 'Bash',
+          decision: 'deny',
+          checkedBy: 'smart-rule-block',
+        },
+      ]);
+      const result = aggregateReportFromAudit('7d', makeOpts());
+      expect(result.data.hardBlocked).toBe(1);
+      expect(result.data.userDenied).toBe(0);
     });
   });
 });

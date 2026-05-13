@@ -30,9 +30,12 @@ const ROW_LIMIT = 4;
 const TOOL_LABEL_W = 10;
 const TOOL_COUNT_W = 6;
 /** Spacer between the TOOLS column group and the PROJECTS column
- *  group. Without it the tool count's rightmost digit butts directly
- *  into the project name (e.g. "7,600node9-proxy"). */
-const COL_GUTTER = 3;
+ *  group, rendered as an explicit Text node (not as trailing width
+ *  on an oversized wrapper Box). Yoga can collapse trailing space
+ *  inside a flex row depending on the parent context, which made
+ *  the project column shift by 1 char across rows when the panel
+ *  was the left child of the middle row alongside SHIELDS. */
+const COL_GUTTER = '   '; // 3 spaces
 const PROJECT_LABEL_W = 14;
 
 export function TopToolsProjects({ audit }: { audit: AggregateResult | null }): React.ReactElement {
@@ -78,27 +81,31 @@ export function TopToolsProjects({ audit }: { audit: AggregateResult | null }): 
         <Text dimColor>—</Text>
       ) : (
         <>
-          {/* Inline header row aligning to the two column-groups below. */}
+          {/* Inline header row aligning to the two column-groups below.
+              The TOOL columns and gutter mirror the data rows exactly so
+              the PROJECTS header lands at the same column as the project
+              names below. */}
           <Box>
-            <Box width={TOOL_LABEL_W + TOOL_COUNT_W + COL_GUTTER}>
+            <Box width={TOOL_LABEL_W}>
               <Text dimColor>TOOLS</Text>
             </Box>
+            <Box width={TOOL_COUNT_W} />
+            <Text dimColor>{COL_GUTTER}</Text>
             <Text dimColor>PROJECTS</Text>
           </Box>
           {rows.map((r, i) => (
             <Box key={i} height={1}>
-              <Box width={TOOL_LABEL_W + TOOL_COUNT_W + COL_GUTTER}>
-                {r.tool ? (
-                  <>
-                    <Box width={TOOL_LABEL_W}>
-                      <Text>{fit(r.tool[0], TOOL_LABEL_W)}</Text>
-                    </Box>
-                    <Box width={TOOL_COUNT_W} justifyContent="flex-end">
-                      <Text bold>{num(r.tool[1].calls)}</Text>
-                    </Box>
-                  </>
-                ) : null}
+              <Box width={TOOL_LABEL_W}>
+                <Text>{r.tool ? fit(r.tool[0], TOOL_LABEL_W) : ''}</Text>
               </Box>
+              <Box width={TOOL_COUNT_W} justifyContent="flex-end">
+                <Text bold>{r.tool ? num(r.tool[1].calls) : ''}</Text>
+              </Box>
+              {/* Explicit gutter — a literal 3-space Text node guarantees
+                  the project column starts at the same offset across
+                  every row, regardless of Yoga's trailing-space
+                  collapsing in different parent flex contexts. */}
+              <Text>{COL_GUTTER}</Text>
               {r.project ? (
                 <>
                   <Box width={PROJECT_LABEL_W}>
