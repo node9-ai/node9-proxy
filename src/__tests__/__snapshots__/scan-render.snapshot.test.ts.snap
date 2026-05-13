@@ -304,3 +304,68 @@ exports[`renderPanelScorecard — output snapshots > panel fixture (critical sco
   ╰──────────────────────────────────────────────────────────────────────────╯
 "
 `;
+
+exports[`renderScanScorecardInk — output snapshots > clean fixture (good score, no findings — hide-when-empty bands collapse) 1`] = `
+"
+🛡  node9 dashboard  ·  scanned last 90 days
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Spend & activity ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+╭──────────────────────────────────────────╮ ╭──────────────────────────────────────────╮
+│ COST                                     │ │ ACTIVITY                                 │
+│ Total           $1.50                    │ │ Sessions        5                        │
+│                                          │ │ Tools           200                      │
+│                                          │ │   Shell         80                       │
+│                                          │ │ Tools / session ~40                      │
+│                                          │ │ Cost / session  ~$0                      │
+╰──────────────────────────────────────────╯ ╰──────────────────────────────────────────╯
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Recommended action ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+╭────────────────────────────────────────────────────────────────────────────────────────╮
+│ SHIELDS                                                                                │
+│ aws · bash-safe · docker · filesystem · github · k8s · mongodb · postgres · project-j… │
+╰────────────────────────────────────────────────────────────────────────────────────────╯"
+`;
+
+exports[`renderScanScorecardInk — output snapshots > panel fixture (critical score, all bands populated) 1`] = `
+"
+🛡  node9 dashboard  ·  scanned last 90 days
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Spend & activity ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+╭──────────────────────────────────────────╮ ╭──────────────────────────────────────────╮
+│ COST                                     │ │ ACTIVITY                                 │
+│ Total           $14.5K                   │ │ Sessions        39                       │
+│ Wasted on loops ~$0.25                   │ │ Tools           15,000                   │
+│                                          │ │   Shell         7,500                    │
+│                                          │ │ Tools / session ~385                     │
+│                                          │ │ Cost / session  ~$372                    │
+╰──────────────────────────────────────────╯ ╰──────────────────────────────────────────╯
+━━━━━━━━━━━━━━━━━━━━━━ Critical (2 secrets leaked + 2 ops blocked) ━━━━━━━━━━━━━━━━━━━━━━━
+╭──────────────────────────────────────────╮ ╭──────────────────────────────────────────╮
+│ CREDENTIAL LEAKS                         │ │ WOULD HAVE BLOCKED                       │
+│   3d GitHub Token   [Bash]        claude │ │ ✗ block-read-ssh   ×1 needs shield:proj… │
+│  20d GCP API Key    [user-prompt] gemini │ │ ✗ block-eval-remote ×1  needs shield:ba… │
+│ → DLP · node9 mask (runtime + cleanup)   │ │ → install node9 + enable shields above   │
+╰──────────────────────────────────────────╯ ╰──────────────────────────────────────────╯
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━ High (5 paths reachable on disk) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+╭────────────────────────────────────────────────────────────────────────────────────────╮
+│ BLAST RADIUS                                                                           │
+│ ✗  ~/.ssh/id_rsa                       RSA private key                                 │
+│ ✗  ~/.ssh/id_ed25519                   Ed25519 private key                             │
+│ ✗  ~/.config/gcloud/credentials.db     GCP credentials                                 │
+│ ✗  ~/.npmrc                            npm auth token                                  │
+│ → project-jail shield blocks agent reads of these paths                                │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+━━━━━━━━━━━━━━━━━━━━━━ Medium (37 ops flagged · 1 loop · 1% wasted) ━━━━━━━━━━━━━━━━━━━━━━
+╭──────────────────────────────────────────╮ ╭──────────────────────────────────────────╮
+│ REVIEW QUEUE                             │ │ AGENT LOOPS                              │
+│ review-git-destructive×22   default      │ │ Edit      ×125          100%             │
+│ review-sudo           ×12   default      │ │ Top stuck:                               │
+│ review-read-cre… ×3  needs shield:proje… │ │ ×126    /home/u/node9/src/scan.ts        │
+│ → runtime approval                       │ │ → live loop-detector                     │
+╰──────────────────────────────────────────╯ ╰──────────────────────────────────────────╯
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Recommended action ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+╭────────────────────────────────────────────────────────────────────────────────────────╮
+│ SHIELDS                                                                                │
+│ project-jail    catches 4 ops       → +53 pts (25 → 78)                                │
+│ bash-safe       catches 1 op                                                           │
+│ aws · docker · filesystem · github · k8s · mongodb · postgres · redis  (no hits — ins… │
+│ → node9 shield enable project-jail   (start here — +53 pts)                            │
+╰────────────────────────────────────────────────────────────────────────────────────────╯"
+`;

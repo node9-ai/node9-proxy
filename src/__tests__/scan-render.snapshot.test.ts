@@ -596,3 +596,61 @@ describe('buildScanJson — envelope snapshot', () => {
     expect(JSON.stringify(out, null, 2)).toMatchSnapshot();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Ink renderer snapshot — pins the new default `node9 scan` scorecard.
+//
+// The Ink path is the production default since the --classic flip; without a
+// snapshot, any layout regression (band widths, panel ordering, copy edits)
+// would land silently. `ink-testing-library` renders the React tree to a
+// string buffer we can assert against.
+//
+// Width is pinned via process.stdout.columns so the snapshot doesn't shift
+// on machines with different terminal widths. Stripped of ANSI for
+// readability in the .snap file.
+// ---------------------------------------------------------------------------
+
+describe('renderScanScorecardInk — output snapshots', () => {
+  const ORIG_COLUMNS = process.stdout.columns;
+
+  beforeEach(() => {
+    // Pin width so layout is deterministic across machines/CI runners.
+    Object.defineProperty(process.stdout, 'columns', {
+      value: 90,
+      configurable: true,
+    });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(process.stdout, 'columns', {
+      value: ORIG_COLUMNS,
+      configurable: true,
+    });
+  });
+
+  it('panel fixture (critical score, all bands populated)', async () => {
+    const { render } = await import('ink-testing-library');
+    const { StaticScorecard } = await import('../cli/render/ink/StaticScorecard.js');
+    const React = await import('react');
+    const { lastFrame } = render(
+      React.createElement(StaticScorecard, {
+        input: panelFixture(),
+        rangeLabel: 'last 90 days',
+      })
+    );
+    expect(stripTerminalEscapes(lastFrame() ?? '')).toMatchSnapshot();
+  });
+
+  it('clean fixture (good score, no findings — hide-when-empty bands collapse)', async () => {
+    const { render } = await import('ink-testing-library');
+    const { StaticScorecard } = await import('../cli/render/ink/StaticScorecard.js');
+    const React = await import('react');
+    const { lastFrame } = render(
+      React.createElement(StaticScorecard, {
+        input: cleanFixture(),
+        rangeLabel: 'last 90 days',
+      })
+    );
+    expect(stripTerminalEscapes(lastFrame() ?? '')).toMatchSnapshot();
+  });
+});
