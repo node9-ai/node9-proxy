@@ -2731,6 +2731,7 @@ export function registerScanCommand(program: Command): void {
     .option('--drill-down', 'Show all findings with full commands and session IDs')
     .option('--compact', 'Compact one-screen scorecard — for screenshots and sharing')
     .option('--narrative', 'Severity-grouped report — for video / dramatic sharing')
+    .option('--classic', 'Original chalk-based scorecard layout (default: new Ink-rendered view)')
     .option(
       '--json',
       'Emit machine-readable JSON to stdout (suppresses banner, progress, and renderer)'
@@ -2753,6 +2754,7 @@ export function registerScanCommand(program: Command): void {
         drillDown?: boolean;
         compact?: boolean;
         narrative?: boolean;
+        classic?: boolean;
         json?: boolean;
         uploadHistory?: boolean;
         since?: string;
@@ -2798,8 +2800,15 @@ export function registerScanCommand(program: Command): void {
         // output starts cleanly at the scorecard for screenshot / video use.
         // --json suppresses everything outside the final JSON envelope so
         // stdout is parseable.
+        // Default (Ink) mode also suppresses the preamble — the Ink header
+        // takes over ("🛡  node9 dashboard · scanned last 90 days") so the
+        // chalk banner would just duplicate the brand line above it.
+        // --classic opts back into the chalk renderer + chalk preamble.
+        // --drill-down does NOT render Ink (the Ink dispatch is gated by
+        // `!drillDown` below) so it must keep the chalk preamble.
         const screenshotMode = options.compact || options.narrative;
-        const quiet = screenshotMode || options.json;
+        const useInk = !options.classic && !drillDown;
+        const quiet = screenshotMode || options.json || useInk;
         if (!quiet) {
           console.log('');
           if (!isWired) {
@@ -2994,6 +3003,16 @@ export function registerScanCommand(program: Command): void {
           return;
         }
 
+        // The Ink-rendered scorecard owns its own header (`🛡 node9
+        // dashboard · scanned 90 days`) — when active (default), skip
+        // the chalk hero PRINT statements below (score line / stat
+        // card / AI spend). The dispatch later in this same block must
+        // still run, so the gating is on the print lines only, not on
+        // the outer `else`. --classic re-enables the chalk hero block.
+        // --drill-down also keeps the chalk hero — it doesn't render
+        // Ink, so the hero is its only score/stat-card output.
+        const useInkForHero = !options.classic && !drillDown;
+
         if (totalFindings === 0 && scan.dlpFindings.length === 0) {
           console.log(chalk.green('  ✅ No risky operations found in your history.'));
           console.log(
@@ -3025,19 +3044,21 @@ export function registerScanCommand(program: Command): void {
               daysAgo === 0 ? 'today' : daysAgo === 1 ? 'yesterday' : `${daysAgo} days ago`;
             return chalk.dim('  ·  ') + arrow + chalk.dim(` since ${since}`);
           })();
-          console.log(
-            '  ' +
-              (score.band === 'critical' ? chalk.red.bold('⚠  ') : '') +
-              chalk.bold('Security Score ') +
-              score.color.bold(`${blast.score}/100`) +
+          if (!useInkForHero) {
+            console.log(
               '  ' +
-              severityDisplay +
-              trendSuffix +
-              chalk.dim('  ·  ') +
-              (totalRisky > 0
-                ? chalk.red.bold(`${totalRisky} risky operation${totalRisky !== 1 ? 's' : ''}`)
-                : chalk.green('No risky operations'))
-          );
+                (score.band === 'critical' ? chalk.red.bold('⚠  ') : '') +
+                chalk.bold('Security Score ') +
+                score.color.bold(`${blast.score}/100`) +
+                '  ' +
+                severityDisplay +
+                trendSuffix +
+                chalk.dim('  ·  ') +
+                (totalRisky > 0
+                  ? chalk.red.bold(`${totalRisky} risky operation${totalRisky !== 1 ? 's' : ''}`)
+                  : chalk.green('No risky operations'))
+            );
+          }
 
           // ── Compact stat card — one line, scannable ────────────────────────
           const cardParts: string[] = [];
@@ -3073,13 +3094,13 @@ export function registerScanCommand(program: Command): void {
               chalk.red('🔭 ') + chalk.red.bold(String(blastExposures)) + chalk.dim(' exposures')
             );
           }
-          if (cardParts.length > 0) {
+          if (cardParts.length > 0 && !useInkForHero) {
             console.log('  ' + cardParts.join(chalk.dim('   ')));
           }
 
           // Spend summary on its own line — useful for power users, not the
           // headline. (The score + count above is the hook.)
-          if (scan.totalCostUSD > 0) {
+          if (scan.totalCostUSD > 0 && !useInkForHero) {
             console.log(
               '  ' +
                 chalk.dim('AI spend  ') +
@@ -3103,22 +3124,60 @@ export function registerScanCommand(program: Command): void {
                 )
             );
           }
-          console.log('');
+          if (!useInkForHero) {
+            console.log('');
+          }
 
           // ── Default-mode panel scorecard ─────────────────────────────────
           // The polished forecast view (~7 boxed panels) replaces the old
           // 9-section verbose layout below for users who don't opt into
           // --drill-down. The verbose layout still serves --drill-down so
           // forensic detail is one flag away.
+          //
+          // Default: the new Ink-rendered scorecard. --classic opts
+          // back into the original chalk renderPanelScorecard layout.
           if (!drillDown) {
-            renderPanelScorecard({
-              scan,
-              summary,
-              blast,
-              blastExposures,
-              blockedCount,
-              reviewCount,
-            });
+            const useInk = !options.classic;
+            // Ink load: ink/react are ESM with top-level await, so
+            // they can't be require()'d from this CJS bundle. We
+            // load from a separate scan-ink ESM bundle via the same
+            // `new Function('id', 'return import(id)')` indirection
+            // that `node9 monitor` uses for dashboard.mjs.
+            if (useInk) {
+              const scanInkPath = path.join(__dirname, 'scan-ink.mjs');
+              const dynamicImport = new Function('id', 'return import(id)') as (
+                id: string
+              ) => Promise<{
+                renderScanScorecardInk: (input: CompactInput, rangeLabel: string) => void;
+              }>;
+              const mod = await dynamicImport(`file://${scanInkPath}`);
+              const rangeLabel = options.all ? 'all time' : `last ${options.days ?? 90} days`;
+              mod.renderScanScorecardInk(
+                {
+                  scan,
+                  summary,
+                  blast,
+                  blastExposures,
+                  blockedCount,
+                  reviewCount,
+                },
+                rangeLabel
+              );
+              // Ink doesn't emit a trailing newline after the last
+              // rendered row, so the chalk footer CTAs below would
+              // concatenate onto the same line as the SHIELDS panel's
+              // bottom border. Force a separator.
+              console.log('');
+            } else {
+              renderPanelScorecard({
+                scan,
+                summary,
+                blast,
+                blastExposures,
+                blockedCount,
+                reviewCount,
+              });
+            }
             // Footer CTAs — distinct from the legacy footer at end of
             // verbose render. Points to monitor (live dashboard) and
             // drill-down (forensic deep-dive) — NOT `node9 report`
