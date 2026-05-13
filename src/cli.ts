@@ -44,7 +44,6 @@ import { registerDaemonCommand } from './cli/commands/daemon-cmd';
 import { registerStatusCommand } from './cli/commands/status';
 import { registerInitCommand } from './cli/commands/init';
 import { registerUndoCommand } from './cli/commands/undo';
-import { registerWatchCommand } from './cli/commands/watch';
 import { registerMcpGatewayCommand } from './cli/commands/mcp-gateway';
 import { registerMcpServerCommand } from './cli/commands/mcp-server';
 import { registerTrustCommand } from './cli/commands/trust';
@@ -138,7 +137,7 @@ program
 
 // 2. ADDTO
 program
-  .command('addto')
+  .command('addto', { hidden: true })
   .description('Integrate Node9 with an AI agent')
   .addHelpText(
     'after',
@@ -166,7 +165,7 @@ program
 
 // 2b. SETUP (alias for addto)
 program
-  .command('setup')
+  .command('setup', { hidden: true })
   .description('Alias for "addto" — integrate Node9 with an AI agent')
   .addHelpText(
     'after',
@@ -211,7 +210,7 @@ program
 
 // 2c. REMOVEFROM
 program
-  .command('removefrom')
+  .command('removefrom', { hidden: true })
   .description('Remove Node9 hooks from an AI agent configuration')
   .addHelpText(
     'after',
@@ -480,9 +479,6 @@ program
     }
   });
 
-// node9 watch
-registerWatchCommand(program);
-
 // node9 mcp-gateway + mcp pin
 registerMcpGatewayCommand(program);
 registerMcpServerCommand(program);
@@ -496,7 +492,7 @@ registerLogCommand(program);
 
 // HUD — statusLine subprocess for Claude Code
 program
-  .command('hud')
+  .command('hud', { hidden: true })
   .description('Render node9 security statusline (spawned by Claude Code statusLine)')
   .addHelpText(
     'after',
