@@ -19,44 +19,40 @@ Works with **Claude Code · Codex CLI · Gemini CLI · Cursor · Windsurf · any
 - 🔑 **Catch credential leaks** — AWS keys, GitHub tokens, JWTs, GCP API keys, PEM private keys flagged in tool args, file contents, and shell config
 - 🔭 **Map your blast radius** — every SSH key, AWS credential, and `.env` file an AI agent on this machine could reach right now
 
-## Discover · `node9 scan`
+## Retrospective scan
 
-The fastest way to see what your AI has already been doing across every session. No install, no config — walks your local agent history (`~/.claude/projects/`, `~/.gemini/tmp/`, `~/.codex/sessions/`) and reports leaks, blocked operations, agent loops, and reachable secrets in ~10 seconds. Nothing uploads.
+This is my own machine — 90 days while building Node9. Score 25/100, 5 credential files an AI agent could reach right now.
+
+```bash
+npx node9-ai scan   # before installation, runs in ~10s, nothing uploads
+node9 scan          # after installation, same output
+```
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/7c5b30f1-1ca1-40b4-bfd5-d6671002e98e" width="720" alt="Node9 scan scorecard" />
 </p>
 
-```bash
-npx node9-ai scan          # run on any machine, no install
-```
-
-On my own dev machine after 30 days of intense AI development: Score 25/100, 5 credential files reachable, $14K spend with 21% lost to agent loops. Your numbers tell their own story — that's the point.
-
-## Protect · `node9 monitor`
-
-Once installed, `node9 monitor` opens an interactive terminal dashboard. The `[1] Realtime` view shows what's happening **right now** — every tool call as it fires, approval prompts before risky commands run, security alerts the moment a leak is detected.
+## Live monitoring
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/997b7b42-b251-4046-b9c5-e000f8b5a481" width="720" alt="Node9 monitor dashboard" />
 </p>
 
-- Live activity feed — every tool call streamed as it fires
-- Approval prompts — review risky commands before they execute
-- Security alerts — DLP catches, loop detections, blast-radius hits
-- Header score that updates as the session evolves
+`node9 monitor` opens an interactive terminal dashboard with two views:
 
-## Review · `node9 monitor` `[2]`
+- **`[1]` Realtime** — live activity, approvals, security alerts, current risk score
+- **`[2]` Report** — period-windowed summary: cost, top tools, shields fired, blast radius
 
-Press `[2]` in monitor (or run `node9 report`) for a period-windowed summary across any time window. Same panels as the scan scorecard, but driven by your post-install audit log instead of raw agent history.
+## Report
 
-- **Periods**: `[T]oday` · `[W]eek` · `[M]onth` · `[N]inety` — toggle live
-- **COST + ACTIVITY** — spend per agent, sessions, tools, cost/session
-- **Critical band** — credential leaks + ops that would have been blocked
-- **Blast radius** — sensitive paths reachable on disk right now
-- **SHIELDS** — which shields would catch what, with score-delta math (`+53 pts if you enable project-jail`)
+Press `[2]` in monitor for a period-windowed summary. Toggle the window with `[T]oday` · `[W]eek` · `[M]onth` · `[N]inety` — same panels as the scan above, driven by your post-install audit log.
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/66c02a72-e477-443d-807f-d65a21d096cd" width="720" alt="Node9 monitor [2] Report" />
+</p>
 
 ```bash
+node9 monitor              # press [2] for Report view
 node9 report --period 7d   # CLI form, no TUI
 ```
 
