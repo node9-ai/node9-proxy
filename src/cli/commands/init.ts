@@ -267,7 +267,7 @@ export function registerInitCommand(program: Command): void {
         const agentList = found.join(', ');
         console.log(chalk.green.bold(`🛡️  Node9 is protecting ${agentList}!`));
         console.log('');
-        console.log(chalk.white('  Watch live:  ') + chalk.cyan('node9 tail'));
+        console.log(chalk.white('  Watch live:  ') + chalk.cyan('node9 monitor'));
         console.log('');
         console.log(chalk.gray('  ─────────────────────────────────────────────────'));
         console.log(
