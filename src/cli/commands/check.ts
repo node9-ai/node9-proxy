@@ -89,7 +89,7 @@ export function detectAiAgent(payload: Record<string, unknown>): string {
 
 export function registerCheckCommand(program: Command): void {
   program
-    .command('check')
+    .command('check', { hidden: true })
     .description('Hook handler — evaluates a tool call before execution')
     .argument('[data]', 'JSON string of the tool call')
     .action(async (data) => {

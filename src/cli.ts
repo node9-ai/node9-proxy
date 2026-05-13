@@ -496,7 +496,7 @@ registerLogCommand(program);
 
 // HUD — statusLine subprocess for Claude Code
 program
-  .command('hud')
+  .command('hud', { hidden: true })
   .description('Render node9 security statusline (spawned by Claude Code statusLine)')
   .addHelpText(
     'after',

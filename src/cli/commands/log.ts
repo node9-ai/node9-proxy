@@ -41,7 +41,7 @@ function sanitize(value: string): string {
 
 export function registerLogCommand(program: Command): void {
   program
-    .command('log')
+    .command('log', { hidden: true })
     .description('PostToolUse hook — records executed tool calls')
     .argument('[data]', 'JSON string of the tool call')
     .action(async (data) => {
