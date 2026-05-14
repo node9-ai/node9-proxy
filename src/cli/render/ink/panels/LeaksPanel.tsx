@@ -18,6 +18,10 @@ import { relativeDate } from '../../scan-derive.js';
 interface Props {
   summary: ScanSummary;
   width: number;
+  /** Reference time for relativeDate(). Defaults to wall clock — tests
+   *  inject a fixed value so snapshots don't drift as days pass since
+   *  the fixture was authored. */
+  now?: Date;
 }
 
 /** Max leak rows shown individually. Anything past this collapses to
@@ -26,11 +30,10 @@ interface Props {
  *  side Critical band — the +N more line handles overflow. */
 const ROW_LIMIT = 4;
 
-export function LeaksPanel({ summary, width }: Props): React.ReactElement | null {
+export function LeaksPanel({ summary, width, now = new Date() }: Props): React.ReactElement | null {
   const leaks = summary.leaks;
   if (leaks.length === 0) return null;
 
-  const now = new Date();
   return (
     <Box borderStyle="round" borderColor="red" paddingX={1} flexDirection="column" width={width}>
       <Text bold color="red">

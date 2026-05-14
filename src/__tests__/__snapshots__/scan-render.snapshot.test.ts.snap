@@ -339,8 +339,8 @@ exports[`renderScanScorecardInk — output snapshots > panel fixture (critical s
 ━━━━━━━━━━━━━━━━━━━━━━ Critical (2 secrets leaked + 2 ops blocked) ━━━━━━━━━━━━━━━━━━━━━━━
 ╭──────────────────────────────────────────╮ ╭──────────────────────────────────────────╮
 │ CREDENTIAL LEAKS                         │ │ WOULD HAVE BLOCKED                       │
-│   3d GitHub Token   [Bash]        claude │ │ ✗ block-read-ssh   ×1 needs shield:proj… │
-│  20d GCP API Key    [user-prompt] gemini │ │ ✗ block-eval-remote ×1  needs shield:ba… │
+│   2d GitHub Token   [Bash]        claude │ │ ✗ block-read-ssh   ×1 needs shield:proj… │
+│  19d GCP API Key    [user-prompt] gemini │ │ ✗ block-eval-remote ×1  needs shield:ba… │
 │ → DLP · node9 mask (runtime + cleanup)   │ │ → install node9 + enable shields above   │
 ╰──────────────────────────────────────────╯ ╰──────────────────────────────────────────╯
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━ High (5 paths reachable on disk) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
