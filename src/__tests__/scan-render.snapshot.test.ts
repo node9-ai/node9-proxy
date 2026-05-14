@@ -628,6 +628,11 @@ describe('renderScanScorecardInk — output snapshots', () => {
     });
   });
 
+  // Fixed reference time so relativeDate() in LeaksPanel produces
+  // stable "Nd"/"yesterday" strings. Without this the snapshot
+  // drifts one day each time it's regenerated after a date change.
+  const NOW = new Date('2026-05-12T00:00:00Z');
+
   it('panel fixture (critical score, all bands populated)', async () => {
     const { render } = await import('ink-testing-library');
     const { StaticScorecard } = await import('../cli/render/ink/StaticScorecard.js');
@@ -636,6 +641,7 @@ describe('renderScanScorecardInk — output snapshots', () => {
       React.createElement(StaticScorecard, {
         input: panelFixture(),
         rangeLabel: 'last 90 days',
+        now: NOW,
       })
     );
     expect(stripTerminalEscapes(lastFrame() ?? '')).toMatchSnapshot();
@@ -649,6 +655,7 @@ describe('renderScanScorecardInk — output snapshots', () => {
       React.createElement(StaticScorecard, {
         input: cleanFixture(),
         rangeLabel: 'last 90 days',
+        now: NOW,
       })
     );
     expect(stripTerminalEscapes(lastFrame() ?? '')).toMatchSnapshot();

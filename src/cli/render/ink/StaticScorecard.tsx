@@ -40,6 +40,9 @@ import { computeLoopWaste } from '../scan-derive.js';
 interface Props {
   input: CompactInput;
   rangeLabel: string;
+  /** Reference time for any panel that renders relative dates. Defaults
+   *  to wall clock; tests inject a fixed value for stable snapshots. */
+  now?: Date;
 }
 
 /** Cap the scorecard's render width so it doesn't expand to fill
@@ -62,7 +65,7 @@ function renderWidth(): number {
  *  would duplicate it. When the chalk hero block is itself migrated
  *  (eventually a HeaderPanel later in the stack), we'll restore an
  *  Ink Header here and drop the chalk one. */
-export function StaticScorecard({ input, rangeLabel }: Props): React.ReactElement {
+export function StaticScorecard({ input, rangeLabel, now }: Props): React.ReactElement {
   const { summary, blockedCount } = input;
   const width = renderWidth();
   // For side-by-side panel rows: each panel takes half the width minus
@@ -98,7 +101,7 @@ export function StaticScorecard({ input, rangeLabel }: Props): React.ReactElemen
         <>
           <SeverityBand label={criticalLabel} width={width} />
           <Box flexDirection="row" gap={1}>
-            <LeaksPanel summary={summary} width={halfWidth} />
+            <LeaksPanel summary={summary} width={halfWidth} now={now} />
             <BlockedPanel summary={summary} width={halfWidth} />
           </Box>
         </>
