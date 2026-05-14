@@ -50,13 +50,93 @@ jobs:
           NPM_CONFIG_PROVENANCE: 'true'
         run: npx semantic-release
 
+      - name: Auto-bump engine version if its files changed
+        # Runs AFTER semantic-release (which has pushed the root version bump).
+        # We pull latest main, diff packages/policy-engine/ against the last
+        # policy-engine-v* tag, and if anything changed, bump the engine and
+        # push a new commit + tag. The next step then publishes from the disk
+        # version. Empty diff → no bump, no push.
+        #
+        # First run: no policy-engine-v* tag exists yet. We tag the current
+        # version on disk as the baseline and exit. Subsequent runs use that
+        # tag as the diff base.
+        #
+        # Bump type is determined from conventional-commit subjects of commits
+        # in the range that touched engine files:
+        #   - BREAKING CHANGE: footer or `type(scope)!:` → major
+        #   - feat / feat(scope) → minor
+        #   - everything else (fix, refactor, perf, etc.) → patch
+        env:
+          GITHUB_TOKEN: ${{ secrets.AUTO_PR_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Sync with whatever semantic-release just pushed
+          git fetch origin main
+          git reset --hard origin/main
+
+          LAST_TAG=$(git tag --list 'policy-engine-v*' --sort=-version:refname | head -1 || true)
+
+          # Configure auth + identity once (used by both the baseline-tag branch
+          # and the bump branch below)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          if [ -z "$LAST_TAG" ]; then
+            BASELINE="policy-engine-v$(node -p "require('./packages/policy-engine/package.json').version")"
+            echo "No prior engine tag — creating baseline $BASELINE"
+            git tag "$BASELINE"
+            git push origin "$BASELINE"
+            exit 0
+          fi
+
+          if git diff --quiet "$LAST_TAG" HEAD -- packages/policy-engine/; then
+            echo "No engine changes since $LAST_TAG — skipping bump"
+            exit 0
+          fi
+
+          # Determine bump type from commits touching engine files
+          BUMP="patch"
+          while IFS= read -r sha; do
+            body=$(git log -1 --format='%B' "$sha")
+            # Breaking change marker: `BREAKING CHANGE:` in body or `!:` after type/scope
+            if echo "$body" | grep -qE '(BREAKING CHANGE|^[a-z]+(\([^)]+\))?!:)'; then
+              BUMP="major"
+              break
+            fi
+            if echo "$body" | grep -qE '^feat(\([^)]+\))?:'; then
+              BUMP="minor"
+              # keep looking — a later major would override
+            fi
+          done < <(git log "$LAST_TAG"..HEAD --format='%H' -- packages/policy-engine/)
+
+          echo "Engine files changed since $LAST_TAG — applying $BUMP bump"
+
+          # npm version writes the new version to package.json with no git op
+          NEW_VERSION=$(cd packages/policy-engine && npm version "$BUMP" --no-git-tag-version)
+          # npm prefixes the output with 'v' — strip for the commit message
+          NEW_VERSION="${NEW_VERSION#v}"
+          NEW_TAG="policy-engine-v$NEW_VERSION"
+
+          echo "Bumping @node9/policy-engine to $NEW_VERSION"
+          git add packages/policy-engine/package.json
+          git commit -m "chore(engine): release $NEW_VERSION [skip ci]"
+          git tag "$NEW_TAG"
+          # --atomic so commit + tag land together or not at all
+          git push --atomic origin HEAD:main "$NEW_TAG"
+
       - name: Publish @node9/policy-engine if not already on npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: 'true'
-        # The engine version is bumped manually in packages/policy-engine/package.json
-        # (semantic-release only bumps the root proxy). We publish the engine when its
-        # version isn't on the registry yet — same skip pattern as the wrapper below.
+        # Engine version is auto-bumped by the previous step when files in
+        # packages/policy-engine/ change. This step reads the current version
+        # from disk and publishes if it isn't already on the registry. The
+        # skip path handles three cases:
+        #   1. Engine was bumped this run → publishes the new version
+        #   2. No engine change since last bump → skips (registry has it)
+        #   3. First-ever run / manual override → publishes if needed
         run: |
           ENGINE_VERSION=$(node -p "require('./packages/policy-engine/package.json').version")
           if npm view "@node9/policy-engine@$ENGINE_VERSION" version >/dev/null 2>&1; then
