@@ -45,6 +45,14 @@ function sanitize(value: string): string {
  */
 export function detectAiAgent(payload: Record<string, unknown>): string {
   // Layer 1: payload fingerprint (existing, most reliable).
+  // Codex's payload is Claude-compatible (same hook_event_name, tool_use_id,
+  // permission_mode) PLUS a Codex-specific `turn_id` field per
+  // openai/codex pre-tool-use.command.input.schema.json ("Codex extension:
+  // expose the active turn id"). Must run before the Claude branch or every
+  // Codex tool call gets misattributed.
+  if (payload.turn_id !== undefined) {
+    return 'Codex';
+  }
   if (
     payload.hook_event_name === 'PreToolUse' ||
     payload.hook_event_name === 'PostToolUse' ||
@@ -130,6 +138,16 @@ export function registerCheckCommand(program: Command): void {
                 `[${new Date().toISOString()}] JSON_PARSE_ERROR: ${errMsg}\nRAW: ${raw}\n`
               );
             }
+            process.exit(0);
+          }
+
+          // UserPromptSubmit (Codex paste-into-prompt hook) carries a `prompt`
+          // field but no tool_name / tool_input, so the tool-call codepath
+          // below would reach the "tool name missing" sendBlock and exit 2 —
+          // which Codex rejects as "exited with code 2 but did not write a
+          // blocking reason to stderr". Exit 0 cleanly here.
+          // TODO(#178 follow-up): scan payload.prompt for secrets (DLP).
+          if (payload.hook_event_name === 'UserPromptSubmit') {
             process.exit(0);
           }
 

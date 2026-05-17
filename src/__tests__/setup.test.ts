@@ -864,6 +864,52 @@ describe('setupCodex', () => {
     consoleSpy.mockRestore();
   });
 
+  it('tells the user to run /hooks in Codex to trust the entries (verified during #178)', async () => {
+    // Codex requires explicit user trust before hooks fire (per
+    // tui/src/startup_hooks_review.rs: "Hooks need review ... Hooks can run
+    // outside the sandbox after you trust them."). Without this instruction
+    // the success line ("Node9 is now protecting Codex") overpromises.
+    const consoleSpy = vi.spyOn(console, 'log');
+    await setupCodex();
+    const allOutput = consoleSpy.mock.calls.map(([msg]) => String(msg)).join('\n');
+    expect(allOutput).toMatch(/\/hooks/);
+    expect(allOutput).toMatch(/trust/i);
+    consoleSpy.mockRestore();
+  });
+
+  it('re-run on an already-configured system: shows trust hint, no misleading message', async () => {
+    // Re-running setup when hooks are already installed used to hit a
+    // "No MCP servers found to wrap" branch that (a) misled the user into
+    // thinking Codex wasn't protected and (b) skipped the /hooks trust
+    // reminder — meaning a user who never trusted hooks the first time
+    // would never learn they need to.
+    withExistingCodexFiles({
+      hooksJson: {
+        hooks: {
+          PreToolUse: [
+            { matcher: '^Bash$', hooks: [{ type: 'command', command: 'node9 check' }] },
+            { matcher: '^apply_patch$', hooks: [{ type: 'command', command: 'node9 check' }] },
+            { matcher: '^mcp__.*', hooks: [{ type: 'command', command: 'node9 check' }] },
+          ],
+          UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'node9 check' }] }],
+          PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
+        },
+      },
+      configToml: { mcp_servers: { node9: { command: 'node9', args: ['mcp-server'] } } },
+    });
+    const consoleSpy = vi.spyOn(console, 'log');
+
+    await setupCodex();
+
+    const allOutput = consoleSpy.mock.calls.map(([msg]) => String(msg)).join('\n');
+    // Must reach the user even on re-run
+    expect(allOutput).toMatch(/\/hooks/);
+    expect(allOutput).toMatch(/trust/i);
+    // Misleading copy must not appear when hooks are already installed
+    expect(allOutput).not.toMatch(/No MCP servers found to wrap/);
+    consoleSpy.mockRestore();
+  });
+
   it('injects node9 MCP server on a fresh install — no prompt', async () => {
     const confirm = await getConfirm();
     await setupCodex();

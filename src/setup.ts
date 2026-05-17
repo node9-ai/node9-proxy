@@ -887,6 +887,11 @@ export async function setupCodex(): Promise<void> {
     anythingChanged = true;
   }
 
+  // Hooks are present in the file whether we just wrote them or they were
+  // already there — drives the re-run UX so the trust hint isn't gated on
+  // anythingChanged.
+  const hooksInstalled = (hooksFile.hooks?.PreToolUse?.length ?? 0) > 0;
+
   // Add the node9 MCP server entry if not already present (pure addition — no prompt)
   if (!hasNode9McpServer(servers)) {
     servers['node9'] = NODE9_MCP_SERVER_ENTRY;
@@ -949,18 +954,38 @@ export async function setupCodex(): Promise<void> {
     console.log('');
   }
 
-  if (!anythingChanged && serversToWrap.length === 0) {
+  // Trust reminder must surface whenever hooks are installed — both on the
+  // first-run success path AND on re-runs that don't change anything,
+  // because a user who never trusted hooks the first time still needs to.
+  const printCodexTrustReminder = () => {
     console.log(
-      chalk.blue(
-        'ℹ️  No MCP servers found to wrap. Add MCP servers to ~/.codex/config.toml and re-run.'
+      chalk.yellow(
+        '    ➜  Open Codex and run /hooks to review and trust the Node9 entries.\n' +
+          '       Until trusted, only MCP proxy wrapping is active.'
       )
     );
+  };
+
+  if (!anythingChanged && serversToWrap.length === 0) {
+    if (hooksInstalled) {
+      console.log(chalk.blue('ℹ️  Codex hooks already installed.'));
+      printCodexTrustReminder();
+    } else {
+      console.log(
+        chalk.blue(
+          'ℹ️  No MCP servers found to wrap. Add MCP servers to ~/.codex/config.toml and re-run.'
+        )
+      );
+    }
     printDaemonTip();
     return;
   }
 
   if (anythingChanged) {
-    console.log(chalk.green.bold('🛡️  Node9 is now protecting Codex!'));
+    console.log(chalk.green.bold('🛡️  Node9 hooks installed for Codex.'));
+    // Codex shows a "Hooks need review" prompt at startup and won't run any
+    // new/changed hook until the user trusts it via the /hooks reviewer.
+    printCodexTrustReminder();
     console.log(chalk.gray('    Restart Codex for changes to take effect.'));
     printDaemonTip();
   }

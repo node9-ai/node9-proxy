@@ -234,6 +234,29 @@ describe('ignored tools fast-path', () => {
     expect(r.stdout).toBe('');
   });
 
+  it('UserPromptSubmit payload exits 0 without writing block JSON (regression for #178)', () => {
+    // Codex sends UserPromptSubmit hook payloads with a `prompt` field but
+    // NO `tool_name` / `tool_input`. Before the fix, this hit the
+    // "tool name missing" sendBlock path, exiting 2 — which Codex reports as
+    // "UserPromptSubmit hook exited with code 2 but did not write a blocking
+    // reason to stderr". Must exit 0 (allow) cleanly. Prompt DLP scanning is
+    // tracked as a separate follow-up.
+    const r = runCheck(
+      {
+        session_id: '019e34c4-02f7-7002-8384-6e54b99f5bc5',
+        turn_id: '019e352f-4df0-7902-b156-0d71433c5a6e',
+        cwd: '/tmp',
+        hook_event_name: 'UserPromptSubmit',
+        prompt: 'please run "ls /tmp" via bash',
+      },
+      { HOME: tmpHome },
+      tmpHome
+    );
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe('');
+    expect(r.stderr).not.toContain('unrecognised hook payload');
+  });
+
   it('task* wildcard — task_drop_all_tables is fast-pathed to allow', () => {
     // "task*" is in ignoredTools; a tool name that looks dangerous but matches
     // the pattern must still be silently allowed (the pattern is opt-in by the user)

@@ -47,6 +47,39 @@ describe('detectAiAgent', () => {
     expect(detectAiAgent({ permission_mode: 'default' })).toBe('Claude Code');
   });
 
+  it('detects Codex from turn_id field (Codex-only payload extension)', () => {
+    // turn_id is a Codex-specific schema extension per openai/codex
+    // pre-tool-use.command.input.schema.json — described as "Codex extension:
+    // expose the active turn id to internal turn-scoped hooks."
+    expect(detectAiAgent({ turn_id: '019e352f-4df0-7902-b156-0d71433c5a6e' })).toBe('Codex');
+  });
+
+  it('detects Codex from a real captured PreToolUse payload', () => {
+    // Captured during issue #178 verification from codex-cli 0.130.0 —
+    // shape is Claude-compatible PLUS turn_id + model fields.
+    expect(
+      detectAiAgent({
+        session_id: '019e34c4-02f7-7002-8384-6e54b99f5bc5',
+        turn_id: '019e352f-4df0-7902-b156-0d71433c5a6e',
+        transcript_path:
+          '/home/nadav/.codex/sessions/2026/05/17/rollout-2026-05-17T10-08-41-019e34c4-02f7-7002-8384-6e54b99f5bc5.jsonl',
+        cwd: '/home/nadav/node9',
+        hook_event_name: 'PreToolUse',
+        model: 'gpt-5.4',
+        permission_mode: 'default',
+        tool_name: 'Bash',
+        tool_input: { command: 'ls /tmp' },
+        tool_use_id: 'call_fEKINAMZxjMuJbczLPxtBwTF',
+      })
+    ).toBe('Codex');
+  });
+
+  it('Codex turn_id takes precedence over Claude-style PreToolUse fingerprint', () => {
+    // Codex's payload always has hook_event_name === 'PreToolUse' (same as
+    // Claude), so without turn_id check it would misattribute as Claude Code.
+    expect(detectAiAgent({ hook_event_name: 'PreToolUse', turn_id: 't_xyz' })).toBe('Codex');
+  });
+
   it('detects Gemini CLI from BeforeTool hook event', () => {
     expect(detectAiAgent({ hook_event_name: 'BeforeTool' })).toBe('Gemini CLI');
   });
