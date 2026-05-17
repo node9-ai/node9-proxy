@@ -45,7 +45,12 @@ describe('broadcastForensic', () => {
   afterEach(() => {
     stateModule.sseClients.clear();
     homeSpy.mockRestore();
-    fs.rmSync(tmpHome, { recursive: true, force: true });
+    // Windows: createReadStream inside tickForensicBroadcast briefly pins
+    // a child file past test completion, so an immediate recursive rm can
+    // hit ENOTEMPTY. maxRetries + retryDelay (Node 14.14+) retries on the
+    // documented set (EBUSY, EMFILE, ENFILE, ENOTEMPTY, EPERM) with linear
+    // backoff. POSIX runs aren't affected — happy path is unchanged.
+    fs.rmSync(tmpHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it('emits a forensic SSE event with correct shape', () => {
@@ -157,7 +162,12 @@ describe('tickForensicBroadcast', () => {
 
   afterEach(() => {
     homeSpy.mockRestore();
-    fs.rmSync(tmpHome, { recursive: true, force: true });
+    // Windows: createReadStream inside tickForensicBroadcast briefly pins
+    // a child file past test completion, so an immediate recursive rm can
+    // hit ENOTEMPTY. maxRetries + retryDelay (Node 14.14+) retries on the
+    // documented set (EBUSY, EMFILE, ENFILE, ENOTEMPTY, EPERM) with linear
+    // backoff. POSIX runs aren't affected — happy path is unchanged.
+    fs.rmSync(tmpHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it('returns empty when no Claude projects directory exists', async () => {
