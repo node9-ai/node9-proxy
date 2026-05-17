@@ -213,4 +213,52 @@ describe('log PostToolUse snapshot behavior', () => {
     expect(entry.tool).toBe('Bash');
     expect(entry.decision).toBe('allowed');
   });
+
+  it('attributes agent=Codex when payload has turn_id (regression for #178)', () => {
+    // Codex's PostToolUse payload is Claude-compatible except for turn_id —
+    // without the turn_id check, this gets misattributed as "Claude Code".
+    const result = runLog(
+      {
+        session_id: '019e34c4-02f7-7002-8384-6e54b99f5bc5',
+        turn_id: '019e352f-4df0-7902-b156-0d71433c5a6e',
+        cwd: tmpCwd,
+        hook_event_name: 'PostToolUse',
+        permission_mode: 'default',
+        tool_name: 'Bash',
+        tool_input: { command: 'ls /tmp' },
+        tool_use_id: 'call_fEKINAMZxjMuJbczLPxtBwTF',
+      },
+      tmpHome,
+      tmpCwd
+    );
+
+    expect(result.status).toBe(0);
+    const auditLog = path.join(tmpHome, '.node9', 'audit.log');
+    const lines = fs.readFileSync(auditLog, 'utf-8').trim().split('\n');
+    const entry = JSON.parse(lines[lines.length - 1]) as { tool: string; agent?: string };
+    expect(entry.agent).toBe('Codex');
+  });
+
+  it('attributes agent=Claude Code when payload has no turn_id', () => {
+    // Sanity: existing Claude detection must still work — turn_id absence
+    // means the original PreToolUse/permission_mode fingerprint takes over.
+    const result = runLog(
+      {
+        cwd: tmpCwd,
+        hook_event_name: 'PostToolUse',
+        permission_mode: 'default',
+        tool_name: 'Bash',
+        tool_input: { command: 'ls /tmp' },
+        tool_use_id: 'toolu_claude_abc',
+      },
+      tmpHome,
+      tmpCwd
+    );
+
+    expect(result.status).toBe(0);
+    const auditLog = path.join(tmpHome, '.node9', 'audit.log');
+    const lines = fs.readFileSync(auditLog, 'utf-8').trim().split('\n');
+    const entry = JSON.parse(lines[lines.length - 1]) as { tool: string; agent?: string };
+    expect(entry.agent).toBe('Claude Code');
+  });
 });

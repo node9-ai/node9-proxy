@@ -60,24 +60,29 @@ export function registerLogCommand(program: Command): void {
             permission_mode?: string;
             timestamp?: string;
             session_id?: string;
+            turn_id?: string; // Codex-specific
           };
 
           // Handle both Claude (tool_name) and Gemini (name)
           const tool = sanitize(payload.tool_name ?? payload.name ?? 'unknown');
           const rawInput = payload.tool_input ?? payload.args ?? {};
 
-          // Detect agent from hook payload — same logic as check.ts
+          // Detect agent from hook payload — must mirror check.ts detectAiAgent.
+          // turn_id is a Codex-only extension and must be checked first because
+          // Codex's payload is otherwise Claude-compatible.
           const agent =
-            payload.hook_event_name === 'PreToolUse' ||
-            payload.hook_event_name === 'PostToolUse' ||
-            payload.tool_use_id !== undefined ||
-            payload.permission_mode !== undefined
-              ? 'Claude Code'
-              : payload.hook_event_name === 'BeforeTool' ||
-                  payload.hook_event_name === 'AfterTool' ||
-                  payload.timestamp !== undefined
-                ? 'Gemini CLI'
-                : undefined;
+            payload.turn_id !== undefined
+              ? 'Codex'
+              : payload.hook_event_name === 'PreToolUse' ||
+                  payload.hook_event_name === 'PostToolUse' ||
+                  payload.tool_use_id !== undefined ||
+                  payload.permission_mode !== undefined
+                ? 'Claude Code'
+                : payload.hook_event_name === 'BeforeTool' ||
+                    payload.hook_event_name === 'AfterTool' ||
+                    payload.timestamp !== undefined
+                  ? 'Gemini CLI'
+                  : undefined;
 
           // Audit write FIRST — before any config load that could fail.
           // A config error must never silently skip the audit entry.

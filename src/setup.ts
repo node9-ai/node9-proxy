@@ -165,7 +165,7 @@ export function teardownClaude(): void {
   // Remove hook matchers from settings.json
   const settings = readJson<ClaudeSettings>(hooksPath);
   if (settings?.hooks) {
-    for (const event of ['PreToolUse', 'PostToolUse'] as const) {
+    for (const event of ['PreToolUse', 'PostToolUse', 'UserPromptSubmit'] as const) {
       const before = settings.hooks[event]?.length ?? 0;
       settings.hooks[event] = settings.hooks[event]?.filter(
         (m) => !m.hooks.some((h) => isNode9Hook(h.command))
@@ -389,6 +389,38 @@ export async function setupClaude(): Promise<void> {
         if (isNode9 && isStaleHookCommand(cmd)) {
           h.command = fullPathCommand('log');
           console.log(chalk.yellow('  🔧 PostToolUse hook repaired (stale path → current binary)'));
+          hooksChanged = true;
+          anythingChanged = true;
+        }
+      }
+    }
+  }
+
+  // UserPromptSubmit — paste-into-prompt DLP. node9 check scans payload.prompt
+  // for credentials and blocks before the prompt ever reaches the model. Same
+  // shim as Codex; the agent-specific block response shape is selected inside
+  // check.ts via detectAiAgent.
+  const hasPromptHook = settings.hooks.UserPromptSubmit?.some((m) =>
+    m.hooks.some((h) => isNode9Hook(h.command))
+  );
+  if (!hasPromptHook) {
+    if (!settings.hooks.UserPromptSubmit) settings.hooks.UserPromptSubmit = [];
+    settings.hooks.UserPromptSubmit.push({
+      matcher: '.*',
+      hooks: [{ type: 'command', command: fullPathCommand('check'), timeout: 600 }],
+    });
+    console.log(chalk.green('  ✅ UserPromptSubmit hook added → node9 check (prompt DLP)'));
+    hooksChanged = true;
+    anythingChanged = true;
+  } else if (settings.hooks.UserPromptSubmit) {
+    for (const matcher of settings.hooks.UserPromptSubmit) {
+      for (const h of matcher.hooks) {
+        const cmd = h.command ?? '';
+        if (isNode9Hook(cmd) && isStaleHookCommand(cmd)) {
+          h.command = fullPathCommand('check');
+          console.log(
+            chalk.yellow('  🔧 UserPromptSubmit hook repaired (stale path → current binary)')
+          );
           hooksChanged = true;
           anythingChanged = true;
         }
@@ -748,8 +780,35 @@ export async function setupCursor(): Promise<void> {
 
 interface CodexConfig {
   mcp_servers?: Record<string, McpServer>;
+  features?: { hooks?: boolean };
+  // Deprecated top-level alias for [features].hooks — still honored by Codex.
+  codex_hooks?: boolean;
   [key: string]: unknown;
 }
+
+// Codex's hooks.json uses Claude-compatible event names but allows entries
+// without a `matcher` (UserPromptSubmit has no tool to match on).
+interface CodexHookMatcher {
+  matcher?: string;
+  hooks: HookEntry[];
+}
+
+interface CodexHooksFile {
+  hooks?: {
+    PreToolUse?: CodexHookMatcher[];
+    PostToolUse?: CodexHookMatcher[];
+    UserPromptSubmit?: CodexHookMatcher[];
+    [key: string]: CodexHookMatcher[] | undefined;
+  };
+  [key: string]: unknown;
+}
+
+// Codex's hook tool names map to the agent's tool surface as of the
+// openai/codex source referenced in #178:
+//   Bash         — covers shell_command + exec_command
+//   apply_patch  — covers Write / Edit via patch body DLP
+//   mcp__*       — MCP tool gating (mirrors Claude Code)
+const CODEX_PRE_TOOL_MATCHERS = ['^Bash$', '^apply_patch$', '^mcp__.*'];
 
 function readToml<T>(filePath: string): T | null {
   try {
@@ -771,14 +830,99 @@ function writeToml(filePath: string, data: unknown): void {
 export async function setupCodex(): Promise<void> {
   const homeDir = os.homedir();
   const configPath = path.join(homeDir, '.codex', 'config.toml');
+  const hooksPath = path.join(homeDir, '.codex', 'hooks.json');
 
   const config = readToml<CodexConfig>(configPath) ?? {};
   const servers = config.mcp_servers ?? {};
 
   let anythingChanged = false;
 
-  // Note: Codex does not yet support a pre-execution hooks file.
-  // MCP proxy wrapping is the supported protection method for now.
+  // ── Codex native hooks (~/.codex/hooks.json) ─────────────────────────────
+  // Codex exposes PreToolUse / UserPromptSubmit / PostToolUse hooks with a
+  // Claude-compatible payload shape. Wire the same `node9 check` / `node9 log`
+  // shims used by setupClaudeCode so Bash + apply_patch + prompt-submit are
+  // shield-evaluated, not just MCP traffic.
+  const hooksFile = readJson<CodexHooksFile>(hooksPath) ?? {};
+  if (!hooksFile.hooks) hooksFile.hooks = {};
+  let hooksChanged = false;
+
+  // PreToolUse — one matcher per Codex tool surface.
+  if (!hooksFile.hooks.PreToolUse) hooksFile.hooks.PreToolUse = [];
+  for (const matcher of CODEX_PRE_TOOL_MATCHERS) {
+    const existing = hooksFile.hooks.PreToolUse.find((m) => m.matcher === matcher);
+    if (!existing) {
+      hooksFile.hooks.PreToolUse.push({
+        matcher,
+        hooks: [{ type: 'command', command: fullPathCommand('check'), timeout: 600 }],
+      });
+      hooksChanged = true;
+    } else {
+      // Self-heal stale absolute paths (mirrors setupClaudeCode behavior).
+      for (const h of existing.hooks) {
+        const cmd = h.command ?? '';
+        if (isNode9Hook(cmd) && isStaleHookCommand(cmd)) {
+          h.command = fullPathCommand('check');
+          hooksChanged = true;
+        }
+      }
+    }
+  }
+
+  // UserPromptSubmit — DLP guard on pasted prompts.
+  if (!hooksFile.hooks.UserPromptSubmit) hooksFile.hooks.UserPromptSubmit = [];
+  const hasPromptHook = hooksFile.hooks.UserPromptSubmit.some((m) =>
+    m.hooks.some((h) => isNode9Hook(h.command))
+  );
+  if (!hasPromptHook) {
+    hooksFile.hooks.UserPromptSubmit.push({
+      hooks: [{ type: 'command', command: fullPathCommand('check'), timeout: 600 }],
+    });
+    hooksChanged = true;
+  } else {
+    for (const m of hooksFile.hooks.UserPromptSubmit) {
+      for (const h of m.hooks) {
+        const cmd = h.command ?? '';
+        if (isNode9Hook(cmd) && isStaleHookCommand(cmd)) {
+          h.command = fullPathCommand('check');
+          hooksChanged = true;
+        }
+      }
+    }
+  }
+
+  // PostToolUse — audit log.
+  if (!hooksFile.hooks.PostToolUse) hooksFile.hooks.PostToolUse = [];
+  const hasPostHook = hooksFile.hooks.PostToolUse.some((m) =>
+    m.hooks.some((h) => isNode9Hook(h.command))
+  );
+  if (!hasPostHook) {
+    hooksFile.hooks.PostToolUse.push({
+      matcher: '.*',
+      hooks: [{ type: 'command', command: fullPathCommand('log'), timeout: 600 }],
+    });
+    hooksChanged = true;
+  } else {
+    for (const m of hooksFile.hooks.PostToolUse) {
+      for (const h of m.hooks) {
+        const cmd = h.command ?? '';
+        if (isNode9Hook(cmd) && isStaleHookCommand(cmd)) {
+          h.command = fullPathCommand('log');
+          hooksChanged = true;
+        }
+      }
+    }
+  }
+
+  if (hooksChanged) {
+    writeJson(hooksPath, hooksFile);
+    console.log(chalk.green('  ✅ Codex hooks added         → node9 check / node9 log'));
+    anythingChanged = true;
+  }
+
+  // Hooks are present in the file whether we just wrote them or they were
+  // already there — drives the re-run UX so the trust hint isn't gated on
+  // anythingChanged.
+  const hooksInstalled = (hooksFile.hooks?.PreToolUse?.length ?? 0) > 0;
 
   // Add the node9 MCP server entry if not already present (pure addition — no prompt)
   if (!hasNode9McpServer(servers)) {
@@ -825,27 +969,55 @@ export async function setupCodex(): Promise<void> {
   }
 
   // ── Summary ───────────────────────────────────────────────────────────────
-  console.log(
-    chalk.yellow(
-      '  ⚠️  Note: Codex does not yet support native pre-execution hooks.\n' +
-        '     MCP proxy wrapping is the only supported protection mode for Codex.\n' +
-        '     Native bash and file operations are not monitored.'
-    )
-  );
-  console.log('');
-
-  if (!anythingChanged && serversToWrap.length === 0) {
+  // Codex honors [features].hooks (and the deprecated top-level codex_hooks
+  // alias). Default is true; only an explicit `false` disables the hook layer.
+  // If it's been turned off, Node9's hooks.json sits dormant — surface that
+  // loudly so the operator knows MCP-only is all they're getting.
+  const hooksDisabled = config.features?.hooks === false || config.codex_hooks === false;
+  if (hooksDisabled) {
     console.log(
-      chalk.blue(
-        'ℹ️  No MCP servers found to wrap. Add MCP servers to ~/.codex/config.toml and re-run.'
+      chalk.yellow(
+        '  ⚠️  Codex hooks are disabled in ~/.codex/config.toml ([features].hooks = false).\n' +
+          '     Re-enable hooks to activate Node9 shield evaluation on Bash, apply_patch,\n' +
+          '     MCP tool calls, and prompt submissions. Until then, only MCP proxy wrapping\n' +
+          '     is active.'
       )
     );
+    console.log('');
+  }
+
+  // Trust reminder must surface whenever hooks are installed — both on the
+  // first-run success path AND on re-runs that don't change anything,
+  // because a user who never trusted hooks the first time still needs to.
+  const printCodexTrustReminder = () => {
+    console.log(
+      chalk.yellow(
+        '    ➜  Open Codex and run /hooks to review and trust the Node9 entries.\n' +
+          '       Until trusted, only MCP proxy wrapping is active.'
+      )
+    );
+  };
+
+  if (!anythingChanged && serversToWrap.length === 0) {
+    if (hooksInstalled) {
+      console.log(chalk.blue('ℹ️  Codex hooks already installed.'));
+      printCodexTrustReminder();
+    } else {
+      console.log(
+        chalk.blue(
+          'ℹ️  No MCP servers found to wrap. Add MCP servers to ~/.codex/config.toml and re-run.'
+        )
+      );
+    }
     printDaemonTip();
     return;
   }
 
   if (anythingChanged) {
-    console.log(chalk.green.bold('🛡️  Node9 is now protecting Codex via MCP proxy!'));
+    console.log(chalk.green.bold('🛡️  Node9 hooks installed for Codex.'));
+    // Codex shows a "Hooks need review" prompt at startup and won't run any
+    // new/changed hook until the user trusts it via the /hooks reviewer.
+    printCodexTrustReminder();
     console.log(chalk.gray('    Restart Codex for changes to take effect.'));
     printDaemonTip();
   }
@@ -854,6 +1026,25 @@ export async function setupCodex(): Promise<void> {
 export function teardownCodex(): void {
   const homeDir = os.homedir();
   const configPath = path.join(homeDir, '.codex', 'config.toml');
+  const hooksPath = path.join(homeDir, '.codex', 'hooks.json');
+
+  // Remove Node9 hook entries from ~/.codex/hooks.json (parallel to teardownClaude).
+  const hooksFile = readJson<CodexHooksFile>(hooksPath);
+  if (hooksFile?.hooks) {
+    let hooksChanged = false;
+    for (const event of ['PreToolUse', 'PostToolUse', 'UserPromptSubmit'] as const) {
+      const before = hooksFile.hooks[event]?.length ?? 0;
+      hooksFile.hooks[event] = hooksFile.hooks[event]?.filter(
+        (m) => !m.hooks.some((h) => isNode9Hook(h.command))
+      );
+      if ((hooksFile.hooks[event]?.length ?? 0) < before) hooksChanged = true;
+      if (hooksFile.hooks[event]?.length === 0) delete hooksFile.hooks[event];
+    }
+    if (hooksChanged) {
+      writeJson(hooksPath, hooksFile);
+      console.log(chalk.green('  ✅ Removed Node9 hooks from ~/.codex/hooks.json'));
+    }
+  }
 
   const config = readToml<CodexConfig>(configPath);
   if (!config?.mcp_servers) {

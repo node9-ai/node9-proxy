@@ -92,12 +92,61 @@ describe('setupClaude', () => {
     expect(written.hooks.PostToolUse[0].hooks[0].command).toBe('node9 log');
   });
 
+  it('also wires UserPromptSubmit for paste-into-prompt DLP', async () => {
+    await setupClaude();
+    const written = writtenTo(hooksPath);
+    expect(written.hooks.UserPromptSubmit).toBeDefined();
+    expect(written.hooks.UserPromptSubmit[0].hooks[0].command).toBe('node9 check');
+  });
+
+  it('does not re-add UserPromptSubmit hook if already present', async () => {
+    withExistingFiles({
+      [hooksPath]: {
+        hooks: {
+          PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] }],
+          PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
+          UserPromptSubmit: [
+            { matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] },
+          ],
+        },
+        statusLine: { type: 'command', command: 'node9 hud' },
+      },
+      [mcpPath]: { mcpServers: { node9: NODE9_MCP_ENTRY } },
+    });
+
+    await setupClaude();
+    expect(writtenTo(hooksPath)).toBeNull();
+  });
+
+  it('self-heals a stale UserPromptSubmit hook absolute path', async () => {
+    const stale =
+      '/usr/bin/node /lib/node_modules/node9-ai/node_modules/@node9/proxy/dist/cli.js check';
+    withExistingFiles({
+      [hooksPath]: {
+        hooks: {
+          PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] }],
+          PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
+          UserPromptSubmit: [{ matcher: '.*', hooks: [{ type: 'command', command: stale }] }],
+        },
+        statusLine: { type: 'command', command: 'node9 hud' },
+      },
+      [mcpPath]: { mcpServers: { node9: NODE9_MCP_ENTRY } },
+    });
+
+    await setupClaude();
+    const written = writtenTo(hooksPath);
+    expect(written.hooks.UserPromptSubmit[0].hooks[0].command).toBe('node9 check');
+  });
+
   it('does not add hooks that already exist', async () => {
     withExistingFiles({
       [hooksPath]: {
         hooks: {
           PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] }],
           PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
+          UserPromptSubmit: [
+            { matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] },
+          ],
         },
         statusLine: { type: 'command', command: 'node9 hud' },
       },
@@ -197,6 +246,9 @@ describe('setupClaude', () => {
         hooks: {
           PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] }],
           PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
+          UserPromptSubmit: [
+            { matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] },
+          ],
         },
         statusLine: { type: 'command', command: 'node9 hud' },
       },
@@ -746,14 +798,168 @@ describe('teardownCursor', () => {
 
 describe('setupCodex', () => {
   const configPath = path.join(os.homedir(), '.codex', 'config.toml');
+  const hooksPath = path.join(os.homedir(), '.codex', 'hooks.json');
 
-  it('does not write hooks — Codex does not support native hooks', async () => {
+  // Codex's hook config lives at ~/.codex/hooks.json. Mixed-format helper because
+  // the same test needs config.toml (TOML) and hooks.json (JSON) co-resident.
+  function withExistingCodexFiles(files: { configToml?: object; hooksJson?: object }) {
+    const paths: Record<string, string> = {};
+    if (files.configToml) {
+      paths[configPath] = stringifyToml(files.configToml as Record<string, unknown>);
+    }
+    if (files.hooksJson) {
+      paths[hooksPath] = JSON.stringify(files.hooksJson);
+    }
+    vi.mocked(fs.existsSync).mockImplementation((p) => String(p) in paths);
+    vi.mocked(fs.readFileSync).mockImplementation((p) => {
+      const content = paths[String(p)];
+      if (content !== undefined) return content;
+      throw new Error('not found');
+    });
+  }
+
+  it('writes hooks.json with Bash, apply_patch, and mcp__* PreToolUse matchers on fresh install', async () => {
     const confirm = await getConfirm();
     await setupCodex();
 
     expect(confirm).not.toHaveBeenCalled();
-    // hooks file must never be written
-    expect(writtenTomlTo(path.join(os.homedir(), '.codex', 'hooks.toml'))).toBeNull();
+    const written = writtenTo(hooksPath);
+    expect(written).not.toBeNull();
+
+    const preMatchers = written.hooks.PreToolUse.map((m: { matcher: string }) => m.matcher);
+    expect(preMatchers).toEqual(expect.arrayContaining(['^Bash$', '^apply_patch$', '^mcp__.*']));
+
+    // Every PreToolUse matcher points at `node9 check`.
+    for (const m of written.hooks.PreToolUse) {
+      expect(m.hooks[0].command).toBe('node9 check');
+    }
+
+    // UserPromptSubmit guard (DLP on pasted prompts) must be present.
+    expect(written.hooks.UserPromptSubmit).toBeDefined();
+    expect(written.hooks.UserPromptSubmit[0].hooks[0].command).toBe('node9 check');
+
+    // PostToolUse for audit logging.
+    expect(written.hooks.PostToolUse[0].hooks[0].command).toBe('node9 log');
+  });
+
+  it('does not re-add hooks that already point to node9', async () => {
+    withExistingCodexFiles({
+      hooksJson: {
+        hooks: {
+          PreToolUse: [
+            { matcher: '^Bash$', hooks: [{ type: 'command', command: 'node9 check' }] },
+            { matcher: '^apply_patch$', hooks: [{ type: 'command', command: 'node9 check' }] },
+            { matcher: '^mcp__.*', hooks: [{ type: 'command', command: 'node9 check' }] },
+          ],
+          UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'node9 check' }] }],
+          PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
+        },
+      },
+      configToml: { mcp_servers: { node9: { command: 'node9', args: ['mcp-server'] } } },
+    });
+
+    await setupCodex();
+    expect(writtenTo(hooksPath)).toBeNull();
+  });
+
+  it('rewrites hooks whose absolute paths no longer exist on disk', async () => {
+    const stalePre =
+      '/usr/bin/node /lib/node_modules/node9-ai/node_modules/@node9/proxy/dist/cli.js check';
+    const stalePost =
+      '/usr/bin/node /lib/node_modules/node9-ai/node_modules/@node9/proxy/dist/cli.js log';
+    withExistingCodexFiles({
+      hooksJson: {
+        hooks: {
+          PreToolUse: [
+            { matcher: '^Bash$', hooks: [{ type: 'command', command: stalePre }] },
+            { matcher: '^apply_patch$', hooks: [{ type: 'command', command: stalePre }] },
+            { matcher: '^mcp__.*', hooks: [{ type: 'command', command: stalePre }] },
+          ],
+          UserPromptSubmit: [{ hooks: [{ type: 'command', command: stalePre }] }],
+          PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: stalePost }] }],
+        },
+      },
+      configToml: { mcp_servers: { node9: { command: 'node9', args: ['mcp-server'] } } },
+    });
+
+    await setupCodex();
+
+    const written = writtenTo(hooksPath);
+    expect(written).not.toBeNull();
+    for (const m of written.hooks.PreToolUse) {
+      expect(m.hooks[0].command).toBe('node9 check');
+    }
+    expect(written.hooks.UserPromptSubmit[0].hooks[0].command).toBe('node9 check');
+    expect(written.hooks.PostToolUse[0].hooks[0].command).toBe('node9 log');
+  });
+
+  it('warns and still writes hooks.json when [features].hooks = false in config.toml', async () => {
+    withExistingCodexFiles({
+      configToml: { features: { hooks: false } },
+    });
+    const consoleSpy = vi.spyOn(console, 'log');
+
+    await setupCodex();
+
+    const allOutput = consoleSpy.mock.calls.map(([msg]) => String(msg)).join('\n');
+    expect(allOutput).toMatch(/\[features\]\.hooks = false|hooks are disabled/i);
+    // Still write the file so re-enabling the toggle activates protection.
+    expect(writtenTo(hooksPath)).not.toBeNull();
+    consoleSpy.mockRestore();
+  });
+
+  it('does not print the legacy "Codex does not yet support native hooks" warning', async () => {
+    const consoleSpy = vi.spyOn(console, 'log');
+    await setupCodex();
+    const allOutput = consoleSpy.mock.calls.map(([msg]) => String(msg)).join('\n');
+    expect(allOutput).not.toMatch(/does not yet support native pre-execution hooks/);
+    consoleSpy.mockRestore();
+  });
+
+  it('tells the user to run /hooks in Codex to trust the entries (verified during #178)', async () => {
+    // Codex requires explicit user trust before hooks fire (per
+    // tui/src/startup_hooks_review.rs: "Hooks need review ... Hooks can run
+    // outside the sandbox after you trust them."). Without this instruction
+    // the success line ("Node9 is now protecting Codex") overpromises.
+    const consoleSpy = vi.spyOn(console, 'log');
+    await setupCodex();
+    const allOutput = consoleSpy.mock.calls.map(([msg]) => String(msg)).join('\n');
+    expect(allOutput).toMatch(/\/hooks/);
+    expect(allOutput).toMatch(/trust/i);
+    consoleSpy.mockRestore();
+  });
+
+  it('re-run on an already-configured system: shows trust hint, no misleading message', async () => {
+    // Re-running setup when hooks are already installed used to hit a
+    // "No MCP servers found to wrap" branch that (a) misled the user into
+    // thinking Codex wasn't protected and (b) skipped the /hooks trust
+    // reminder — meaning a user who never trusted hooks the first time
+    // would never learn they need to.
+    withExistingCodexFiles({
+      hooksJson: {
+        hooks: {
+          PreToolUse: [
+            { matcher: '^Bash$', hooks: [{ type: 'command', command: 'node9 check' }] },
+            { matcher: '^apply_patch$', hooks: [{ type: 'command', command: 'node9 check' }] },
+            { matcher: '^mcp__.*', hooks: [{ type: 'command', command: 'node9 check' }] },
+          ],
+          UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'node9 check' }] }],
+          PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
+        },
+      },
+      configToml: { mcp_servers: { node9: { command: 'node9', args: ['mcp-server'] } } },
+    });
+    const consoleSpy = vi.spyOn(console, 'log');
+
+    await setupCodex();
+
+    const allOutput = consoleSpy.mock.calls.map(([msg]) => String(msg)).join('\n');
+    // Must reach the user even on re-run
+    expect(allOutput).toMatch(/\/hooks/);
+    expect(allOutput).toMatch(/trust/i);
+    // Misleading copy must not appear when hooks are already installed
+    expect(allOutput).not.toMatch(/No MCP servers found to wrap/);
+    consoleSpy.mockRestore();
   });
 
   it('injects node9 MCP server on a fresh install — no prompt', async () => {
