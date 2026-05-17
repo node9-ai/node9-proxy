@@ -21,6 +21,8 @@ const existsSpy = vi.spyOn(fs, 'existsSync').mockReturnValue(false);
 const readSpy = vi.spyOn(fs, 'readFileSync');
 vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
 vi.spyOn(fs, 'mkdirSync').mockImplementation(() => undefined);
+// seedMcpPinsIfMissing (#179) atomic write — mock renameSync too
+vi.spyOn(fs, 'renameSync').mockImplementation(() => undefined);
 vi.spyOn(os, 'homedir').mockReturnValue('/mock/home');
 
 interface MockConfig {

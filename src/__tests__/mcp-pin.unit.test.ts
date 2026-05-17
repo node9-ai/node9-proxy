@@ -19,6 +19,7 @@ import {
   updatePin,
   removePin,
   clearAllPins,
+  seedMcpPinsIfMissing,
 } from '../mcp-pin';
 
 // ---------------------------------------------------------------------------
@@ -143,6 +144,31 @@ describe('pin file operations', () => {
     updatePin(key, 'test-upstream-cmd', 'a'.repeat(64), ['tool_a']);
 
     expect(checkPin(key, 'b'.repeat(64))).toBe('mismatch');
+  });
+
+  it('seedMcpPinsIfMissing writes an empty pin file when none exists (#179)', () => {
+    const pinFile = path.join(tmpHome, '.node9', 'mcp-pins.json');
+    expect(fs.existsSync(pinFile)).toBe(false);
+
+    seedMcpPinsIfMissing();
+
+    expect(fs.existsSync(pinFile)).toBe(true);
+    const raw = fs.readFileSync(pinFile, 'utf-8');
+    expect(JSON.parse(raw)).toEqual({ servers: {} });
+    // Distinguishes "never installed" from "installed but no pins yet":
+    // readMcpPinsSafe now returns ok=true with empty servers instead of missing.
+    const result = readMcpPinsSafe();
+    expect(result.ok).toBe(true);
+  });
+
+  it('seedMcpPinsIfMissing does not overwrite existing pins', () => {
+    const key = 'preserved-server';
+    updatePin(key, 'cmd', 'a'.repeat(64), ['tool_a']);
+
+    seedMcpPinsIfMissing();
+
+    // Existing pin must survive the seed call (idempotent on present file).
+    expect(checkPin(key, 'a'.repeat(64))).toBe('match');
   });
 
   it('removePin deletes a pin so checkPin returns "new"', () => {

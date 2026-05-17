@@ -119,6 +119,21 @@ function writeMcpPins(data: PinsFile): void {
   fs.renameSync(tmp, filePath);
 }
 
+/**
+ * Seed an empty pin registry at ~/.node9/mcp-pins.json if it doesn't exist.
+ * Called from agent setup paths (#179) so a fresh install distinguishes
+ * "never installed" from "installed but no pins yet" — tooling that asserts
+ * pin presence can now treat a missing file as "node9 install was never
+ * run", separate from "no MCP server has been pinned yet".
+ *
+ * Idempotent: no-op when the file already exists.
+ */
+export function seedMcpPinsIfMissing(): void {
+  const filePath = getPinsFilePath();
+  if (fs.existsSync(filePath)) return;
+  writeMcpPins({ servers: {} });
+}
+
 // ---------------------------------------------------------------------------
 // Pin operations
 // ---------------------------------------------------------------------------

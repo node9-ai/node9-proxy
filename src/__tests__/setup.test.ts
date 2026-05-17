@@ -22,6 +22,9 @@ vi.spyOn(fs, 'existsSync').mockReturnValue(false);
 vi.spyOn(fs, 'readFileSync');
 vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
 vi.spyOn(fs, 'mkdirSync').mockImplementation(() => undefined);
+// seedMcpPinsIfMissing (#179) uses an atomic write (writeFileSync → renameSync);
+// mock both so setup tests don't hit real disk on rename.
+vi.spyOn(fs, 'renameSync').mockImplementation(() => undefined);
 vi.spyOn(os, 'homedir').mockReturnValue('/mock/home');
 
 async function getConfirm() {

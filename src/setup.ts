@@ -5,6 +5,7 @@ import os from 'os';
 import chalk from 'chalk';
 import { confirm } from '@inquirer/prompts';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
+import { seedMcpPinsIfMissing } from './mcp-pin';
 
 interface McpServer {
   type?: string;
@@ -327,6 +328,10 @@ export function teardownCursor(): void {
 // ── Claude Code ──────────────────────────────────────────────────────────────
 
 export async function setupClaude(): Promise<void> {
+  // Seed the MCP pin registry (#179) so absence-vs-empty is distinguishable.
+  // Idempotent — no-op if file already exists.
+  seedMcpPinsIfMissing();
+
   const homeDir = os.homedir();
   const mcpPath = path.join(homeDir, '.claude', '.mcp.json');
   const hooksPath = path.join(homeDir, '.claude', 'settings.json');
@@ -509,6 +514,7 @@ export async function setupClaude(): Promise<void> {
 // ── Gemini CLI ───────────────────────────────────────────────────────────────
 
 export async function setupGemini(): Promise<void> {
+  seedMcpPinsIfMissing(); // #179: distinguish never-installed from no-pins-yet
   const homeDir = os.homedir();
   const settingsPath = path.join(homeDir, '.gemini', 'settings.json');
 
@@ -694,6 +700,7 @@ export function detectAgents(homeDir: string = os.homedir()): {
 }
 
 export async function setupCursor(): Promise<void> {
+  seedMcpPinsIfMissing(); // #179
   const homeDir = os.homedir();
   const mcpPath = path.join(homeDir, '.cursor', 'mcp.json');
 
@@ -828,6 +835,7 @@ function writeToml(filePath: string, data: unknown): void {
 }
 
 export async function setupCodex(): Promise<void> {
+  seedMcpPinsIfMissing(); // #179
   const homeDir = os.homedir();
   const configPath = path.join(homeDir, '.codex', 'config.toml');
   const hooksPath = path.join(homeDir, '.codex', 'hooks.json');
@@ -1158,6 +1166,7 @@ interface WindsurfMcpConfig {
 }
 
 export async function setupWindsurf(): Promise<void> {
+  seedMcpPinsIfMissing(); // #179
   const homeDir = os.homedir();
   const mcpPath = path.join(homeDir, '.codeium', 'windsurf', 'mcp_config.json');
 
@@ -1306,6 +1315,7 @@ function hasNode9McpServerVSCode(servers: Record<string, VSCodeMcpServer>): bool
 }
 
 export async function setupVSCode(): Promise<void> {
+  seedMcpPinsIfMissing(); // #179
   const homeDir = os.homedir();
   const mcpPath = path.join(homeDir, '.vscode', 'mcp.json');
 
@@ -1430,6 +1440,7 @@ export function teardownVSCode(): void {
 // Note: Claude Desktop does not support pre-execution hooks — MCP proxy only.
 
 export async function setupClaudeDesktop(): Promise<void> {
+  seedMcpPinsIfMissing(); // #179
   const configPath = claudeDesktopConfigPath();
   if (!configPath) {
     console.log(chalk.yellow('  ⚠️  Claude Desktop is not supported on this platform.'));
