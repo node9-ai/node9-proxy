@@ -5,7 +5,7 @@
  * Each test describes a contract that src/mcp-pin.ts must satisfy.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -456,6 +456,36 @@ describe('repo-local mcp-pins.json', () => {
 
   it('promotePin throws when the server is not pinned in home', () => {
     expect(() => promotePin('does-not-exist', tmpRepo)).toThrow(/not pinned/i);
+  });
+
+  it('checkPin treats a TOCTOU file-vanished as corrupt (not silent fallback to home)', () => {
+    // Scenario: findPinsFilePath's fs.existsSync says the repo file exists,
+    // but by the time readPinsFile actually opens it, the file is gone.
+    // Could be a benign concurrent `rm`, could be an attacker timing a
+    // delete to slip past the pin check. Either way we should refuse —
+    // not silently fall back to a potentially more permissive home file.
+    const repoPath = path.join(tmpRepo, '.node9', 'mcp-pins.json');
+    // Home has a clean entry that would say 'new' (server not pinned).
+    updatePin('serverX', 'cmd', 'a'.repeat(64), ['t']);
+
+    // Mock fs.existsSync to claim the repo pin file exists even though
+    // we never wrote it. readFileSync will then throw ENOENT — exactly
+    // the TOCTOU window in production.
+    const realExistsSync = fs.existsSync.bind(fs);
+    const spy = vi.spyOn(fs, 'existsSync').mockImplementation((p) => {
+      if (String(p) === repoPath) return true;
+      return realExistsSync(p);
+    });
+
+    try {
+      // checkPin would otherwise return 'new' (no entry for serverX
+      // anywhere with the relevant hash). With the TOCTOU hardening it
+      // must return 'corrupt' — refuse to evaluate when the world stops
+      // making sense.
+      expect(checkPin('serverX', 'b'.repeat(64), tmpRepo)).toBe('corrupt');
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('promotePin overwrites an existing repo entry for the same server', () => {

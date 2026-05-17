@@ -214,14 +214,15 @@ export function checkPin(
   if (found.source === 'repo') {
     const repoResult = readPinsFile(found.path);
     if (!repoResult.ok) {
-      // Repo file present but unreadable — fail closed. Don't silently
-      // fall back to home (home may be more permissive).
-      if (repoResult.reason === 'corrupt') return 'corrupt';
-      // 'missing' shouldn't happen since findPinsFilePath only returns
-      // 'repo' when fs.existsSync returned true, but handle defensively.
-    } else {
-      repoEntry = repoResult.pins.servers[serverKey];
+      // Repo file present-then-gone is suspicious — could be a benign
+      // concurrent `rm`, could be an attacker racing the existsSync ↔
+      // readFileSync window to slip past the pin check. Either way we
+      // refuse to evaluate rather than silently fall back to home
+      // (which may be more permissive). Fail closed on both 'corrupt'
+      // and 'missing'.
+      return 'corrupt';
     }
+    repoEntry = repoResult.pins.servers[serverKey];
   }
   if (repoEntry) {
     return repoEntry.toolsHash === currentHash ? 'match' : 'mismatch';
