@@ -5,7 +5,7 @@
  * Each test describes a contract that src/mcp-pin.ts must satisfy.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -19,6 +19,9 @@ import {
   updatePin,
   removePin,
   clearAllPins,
+  seedMcpPinsIfMissing,
+  findPinsFilePath,
+  promotePin,
 } from '../mcp-pin';
 
 // ---------------------------------------------------------------------------
@@ -145,6 +148,31 @@ describe('pin file operations', () => {
     expect(checkPin(key, 'b'.repeat(64))).toBe('mismatch');
   });
 
+  it('seedMcpPinsIfMissing writes an empty pin file when none exists (#179)', () => {
+    const pinFile = path.join(tmpHome, '.node9', 'mcp-pins.json');
+    expect(fs.existsSync(pinFile)).toBe(false);
+
+    seedMcpPinsIfMissing();
+
+    expect(fs.existsSync(pinFile)).toBe(true);
+    const raw = fs.readFileSync(pinFile, 'utf-8');
+    expect(JSON.parse(raw)).toEqual({ servers: {} });
+    // Distinguishes "never installed" from "installed but no pins yet":
+    // readMcpPinsSafe now returns ok=true with empty servers instead of missing.
+    const result = readMcpPinsSafe();
+    expect(result.ok).toBe(true);
+  });
+
+  it('seedMcpPinsIfMissing does not overwrite existing pins', () => {
+    const key = 'preserved-server';
+    updatePin(key, 'cmd', 'a'.repeat(64), ['tool_a']);
+
+    seedMcpPinsIfMissing();
+
+    // Existing pin must survive the seed call (idempotent on present file).
+    expect(checkPin(key, 'a'.repeat(64))).toBe('match');
+  });
+
   it('removePin deletes a pin so checkPin returns "new"', () => {
     const key = 'testserver1234';
     updatePin(key, 'test-cmd', 'a'.repeat(64), ['tool_a']);
@@ -267,5 +295,218 @@ describe('pin file operations', () => {
   it('checkPin returns "new" when file is missing (not corrupt)', () => {
     // No pin file exists at all
     expect(checkPin('anykey', 'anyhash')).toBe('new');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Repo-local pin file (#179 part 2)
+// ---------------------------------------------------------------------------
+
+describe('repo-local mcp-pins.json', () => {
+  let tmpHome: string;
+  let tmpRepo: string;
+  let origHome: string;
+
+  beforeEach(() => {
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-pin-home-'));
+    tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-pin-repo-'));
+    origHome = process.env.HOME!;
+    process.env.HOME = tmpHome;
+    process.env.USERPROFILE = tmpHome;
+  });
+
+  afterEach(() => {
+    process.env.HOME = origHome;
+    process.env.USERPROFILE = origHome;
+    fs.rmSync(tmpHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    fs.rmSync(tmpRepo, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+
+  function writeRepoPins(dir: string, data: object): string {
+    const repoDotNode9 = path.join(dir, '.node9');
+    fs.mkdirSync(repoDotNode9, { recursive: true });
+    const pinPath = path.join(repoDotNode9, 'mcp-pins.json');
+    fs.writeFileSync(pinPath, JSON.stringify(data, null, 2));
+    return pinPath;
+  }
+
+  it('findPinsFilePath returns home when no repo file is found up the tree', () => {
+    const result = findPinsFilePath(tmpRepo);
+    expect(result.source).toBe('home');
+    expect(result.path).toBe(path.join(tmpHome, '.node9', 'mcp-pins.json'));
+  });
+
+  it('findPinsFilePath finds a pin file at the exact cwd', () => {
+    const repoPath = writeRepoPins(tmpRepo, { servers: {} });
+    const result = findPinsFilePath(tmpRepo);
+    expect(result.source).toBe('repo');
+    expect(result.path).toBe(repoPath);
+  });
+
+  it('findPinsFilePath walks up to find an ancestor pin file', () => {
+    const repoPath = writeRepoPins(tmpRepo, { servers: {} });
+    const deep = path.join(tmpRepo, 'src', 'a', 'b', 'c');
+    fs.mkdirSync(deep, { recursive: true });
+
+    const result = findPinsFilePath(deep);
+    expect(result.source).toBe('repo');
+    expect(result.path).toBe(repoPath);
+  });
+
+  it('findPinsFilePath stops at home directory and does not escape', () => {
+    // Place a pin file at $tmpHome (which is the mocked home dir).
+    // Call findPinsFilePath from a sibling that lives at the same level —
+    // walking up must NOT keep going past home into /tmp/parents.
+    const sibling = path.join(tmpHome, 'projectA', 'src');
+    fs.mkdirSync(sibling, { recursive: true });
+    // No .node9/mcp-pins.json anywhere under tmpHome; we expect the home
+    // file path to be returned (not some ancestor of tmpHome).
+    const result = findPinsFilePath(sibling);
+    expect(result.source).toBe('home');
+    expect(result.path).toBe(path.join(tmpHome, '.node9', 'mcp-pins.json'));
+  });
+
+  it('checkPin reads from repo when present, falls back to home for unknown servers', () => {
+    // Repo file pins serverA only; home file pins serverB only.
+    writeRepoPins(tmpRepo, {
+      servers: {
+        serverA: {
+          label: 'cmd-a',
+          toolsHash: 'a'.repeat(64),
+          toolNames: ['ta'],
+          toolCount: 1,
+          pinnedAt: '2026-05-01T00:00:00Z',
+        },
+      },
+    });
+    updatePin('serverB', 'cmd-b', 'b'.repeat(64), ['tb']); // writes to home
+
+    expect(checkPin('serverA', 'a'.repeat(64), tmpRepo)).toBe('match');
+    expect(checkPin('serverB', 'b'.repeat(64), tmpRepo)).toBe('match'); // home fallback
+    expect(checkPin('unknown', 'z'.repeat(64), tmpRepo)).toBe('new');
+  });
+
+  it('repo entry takes precedence over home entry for the same server', () => {
+    const repoHash = 'a'.repeat(64);
+    const homeHash = 'b'.repeat(64);
+    writeRepoPins(tmpRepo, {
+      servers: {
+        shared: {
+          label: 'cmd',
+          toolsHash: repoHash,
+          toolNames: ['t'],
+          toolCount: 1,
+          pinnedAt: '2026-05-01T00:00:00Z',
+        },
+      },
+    });
+    updatePin('shared', 'cmd', homeHash, ['t']); // home has a different hash
+
+    expect(checkPin('shared', repoHash, tmpRepo)).toBe('match');
+    expect(checkPin('shared', homeHash, tmpRepo)).toBe('mismatch');
+  });
+
+  it('updatePin writes to home even when called from inside a repo with a pin file', () => {
+    const repoPath = writeRepoPins(tmpRepo, { servers: {} });
+    const repoContentBefore = fs.readFileSync(repoPath, 'utf-8');
+
+    updatePin('newServer', 'cmd', 'c'.repeat(64), ['t']);
+
+    // Repo file is unchanged
+    expect(fs.readFileSync(repoPath, 'utf-8')).toBe(repoContentBefore);
+    // Home file has the new entry
+    const homePath = path.join(tmpHome, '.node9', 'mcp-pins.json');
+    expect(fs.existsSync(homePath)).toBe(true);
+    const home = JSON.parse(fs.readFileSync(homePath, 'utf-8'));
+    expect(home.servers.newServer.toolsHash).toBe('c'.repeat(64));
+  });
+
+  it('corrupt repo pin file fails closed — checkPin returns "corrupt" not "new"', () => {
+    const repoDotNode9 = path.join(tmpRepo, '.node9');
+    fs.mkdirSync(repoDotNode9, { recursive: true });
+    fs.writeFileSync(path.join(repoDotNode9, 'mcp-pins.json'), 'not valid json');
+
+    expect(checkPin('anykey', 'anyhash', tmpRepo)).toBe('corrupt');
+  });
+
+  // promote -------------------------------------------------------------------
+
+  it('promotePin copies an entry from home to repo when both files exist', () => {
+    writeRepoPins(tmpRepo, { servers: {} });
+    updatePin('myserver', 'cmd', 'd'.repeat(64), ['t1', 't2']);
+
+    promotePin('myserver', tmpRepo);
+
+    const repoPath = path.join(tmpRepo, '.node9', 'mcp-pins.json');
+    const repo = JSON.parse(fs.readFileSync(repoPath, 'utf-8'));
+    expect(repo.servers.myserver.toolsHash).toBe('d'.repeat(64));
+    expect(repo.servers.myserver.toolNames).toEqual(['t1', 't2']);
+  });
+
+  it('promotePin auto-creates the repo file when missing', () => {
+    updatePin('myserver', 'cmd', 'e'.repeat(64), ['t']);
+
+    promotePin('myserver', tmpRepo);
+
+    const repoPath = path.join(tmpRepo, '.node9', 'mcp-pins.json');
+    expect(fs.existsSync(repoPath)).toBe(true);
+    const repo = JSON.parse(fs.readFileSync(repoPath, 'utf-8'));
+    expect(repo.servers.myserver.toolsHash).toBe('e'.repeat(64));
+  });
+
+  it('promotePin throws when the server is not pinned in home', () => {
+    expect(() => promotePin('does-not-exist', tmpRepo)).toThrow(/not pinned/i);
+  });
+
+  it('checkPin treats a TOCTOU file-vanished as corrupt (not silent fallback to home)', () => {
+    // Scenario: findPinsFilePath's fs.existsSync says the repo file exists,
+    // but by the time readPinsFile actually opens it, the file is gone.
+    // Could be a benign concurrent `rm`, could be an attacker timing a
+    // delete to slip past the pin check. Either way we should refuse —
+    // not silently fall back to a potentially more permissive home file.
+    const repoPath = path.join(tmpRepo, '.node9', 'mcp-pins.json');
+    // Home has a clean entry that would say 'new' (server not pinned).
+    updatePin('serverX', 'cmd', 'a'.repeat(64), ['t']);
+
+    // Mock fs.existsSync to claim the repo pin file exists even though
+    // we never wrote it. readFileSync will then throw ENOENT — exactly
+    // the TOCTOU window in production.
+    const realExistsSync = fs.existsSync.bind(fs);
+    const spy = vi.spyOn(fs, 'existsSync').mockImplementation((p) => {
+      if (String(p) === repoPath) return true;
+      return realExistsSync(p);
+    });
+
+    try {
+      // checkPin would otherwise return 'new' (no entry for serverX
+      // anywhere with the relevant hash). With the TOCTOU hardening it
+      // must return 'corrupt' — refuse to evaluate when the world stops
+      // making sense.
+      expect(checkPin('serverX', 'b'.repeat(64), tmpRepo)).toBe('corrupt');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('promotePin overwrites an existing repo entry for the same server', () => {
+    writeRepoPins(tmpRepo, {
+      servers: {
+        myserver: {
+          label: 'cmd',
+          toolsHash: 'a'.repeat(64),
+          toolNames: ['t-old'],
+          toolCount: 1,
+          pinnedAt: '2026-01-01T00:00:00Z',
+        },
+      },
+    });
+    updatePin('myserver', 'cmd', 'f'.repeat(64), ['t-new']);
+
+    promotePin('myserver', tmpRepo);
+
+    const repoPath = path.join(tmpRepo, '.node9', 'mcp-pins.json');
+    const repo = JSON.parse(fs.readFileSync(repoPath, 'utf-8'));
+    expect(repo.servers.myserver.toolsHash).toBe('f'.repeat(64));
+    expect(repo.servers.myserver.toolNames).toEqual(['t-new']);
   });
 });
