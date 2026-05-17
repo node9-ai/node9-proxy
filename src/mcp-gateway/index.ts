@@ -127,6 +127,11 @@ export function tokenize(cmd: string): string[] {
 }
 
 export async function runMcpGateway(upstreamCommand: string): Promise<void> {
+  // Capture cwd once at startup so repo-local pin file resolution (#179)
+  // is stable for the lifetime of this gateway, even if the process later
+  // chdirs for any reason.
+  const gatewayCwd = process.cwd();
+
   // tokenize() performs shell-style word splitting (handles double-quoted strings
   // and backslash escapes) without spawning a shell — no injection risk.
   // The result is passed to spawn() with shell:false.
@@ -505,7 +510,7 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
       if (parsed.result && Array.isArray(parsed.result.tools)) {
         const tools = (parsed.result.tools as McpToolInfo[]) || [];
         const currentHash = hashToolDefinitions(tools);
-        const pinStatus = checkPin(serverKey, currentHash);
+        const pinStatus = checkPin(serverKey, currentHash, gatewayCwd);
         const token = getInternalToken();
 
         // 1. Notify daemon of discovery (handles drift & new servers)

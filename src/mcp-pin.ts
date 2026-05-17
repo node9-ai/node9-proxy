@@ -36,8 +36,42 @@ export interface PinsFile {
 // Paths
 // ---------------------------------------------------------------------------
 
-function getPinsFilePath(): string {
+/** Home pin file — always `~/.node9/mcp-pins.json`. The fallback / personal source. */
+function getHomePinsFilePath(): string {
   return path.join(os.homedir(), '.node9', 'mcp-pins.json');
+}
+
+/** Backward-compat alias for callers that don't care about repo-local lookup. */
+function getPinsFilePath(): string {
+  return getHomePinsFilePath();
+}
+
+/**
+ * Find the pin file to read from, given a starting cwd (#179 part 2).
+ * Walks up from `cwd` looking for a `.node9/mcp-pins.json` in any ancestor,
+ * stopping at the user's home dir (so we never escape into `/` and never
+ * treat `~` itself as a repo root). If nothing is found, returns the home
+ * pin file path.
+ *
+ * Returns `{ path, source }` so callers can render hints like `[repo]` /
+ * `[home]` in CLI output without re-deriving the source.
+ */
+export function findPinsFilePath(cwd?: string): { path: string; source: 'repo' | 'home' } {
+  const homeDir = os.homedir();
+  const homePath = getHomePinsFilePath();
+  let current = path.resolve(cwd ?? process.cwd());
+
+  while (true) {
+    if (current === homeDir) break; // don't escape past or into ~
+    const candidate = path.join(current, '.node9', 'mcp-pins.json');
+    if (fs.existsSync(candidate)) {
+      return { path: candidate, source: 'repo' };
+    }
+    const next = path.dirname(current);
+    if (next === current) break; // filesystem root
+    current = next;
+  }
+  return { path: homePath, source: 'home' };
 }
 
 // ---------------------------------------------------------------------------
@@ -75,14 +109,8 @@ export type PinsReadResult =
   | { ok: false; reason: 'missing' }
   | { ok: false; reason: 'corrupt'; detail: string };
 
-/**
- * Read the pin registry from disk with explicit error reporting.
- * - File missing (ENOENT): returns `{ ok: false, reason: 'missing' }` — genuinely new.
- * - File corrupt / unreadable: returns `{ ok: false, reason: 'corrupt' }` — fail closed.
- * - File valid: returns `{ ok: true, pins }`.
- */
-export function readMcpPinsSafe(): PinsReadResult {
-  const filePath = getPinsFilePath();
+/** Read a single pin file at `filePath`. Pure / path-agnostic. */
+function readPinsFile(filePath: string): PinsReadResult {
   try {
     const raw = fs.readFileSync(filePath, 'utf-8');
     if (!raw.trim()) {
@@ -101,22 +129,42 @@ export function readMcpPinsSafe(): PinsReadResult {
   }
 }
 
-/** Read the pin registry from disk. Returns empty servers only on missing file. Throws on corrupt. */
+/**
+ * Read the home pin file with explicit error reporting.
+ * - File missing (ENOENT): returns `{ ok: false, reason: 'missing' }`.
+ * - File corrupt / unreadable: returns `{ ok: false, reason: 'corrupt' }`.
+ * - File valid: returns `{ ok: true, pins }`.
+ *
+ * Note: this reads ONLY the home file. For repo-aware reads (#179), use
+ * `findPinsFilePath` + `readPinsFile`, or `checkPin(... , cwd)`.
+ */
+export function readMcpPinsSafe(): PinsReadResult {
+  return readPinsFile(getHomePinsFilePath());
+}
+
+/** Read the home pin registry. Returns empty servers on missing file. Throws on corrupt. */
 export function readMcpPins(): PinsFile {
   const result = readMcpPinsSafe();
   if (result.ok) return result.pins;
   if (result.reason === 'missing') return { servers: {} };
-  // Corrupt / unreadable — fail closed
   throw new Error(`[node9] MCP pin file is corrupt: ${result.detail}`);
 }
 
-/** Atomic write of the pin registry to disk. */
-function writeMcpPins(data: PinsFile): void {
-  const filePath = getPinsFilePath();
+/** Atomic write to an arbitrary pin file path. Used by both home writes and `promotePin`. */
+function writePinsFile(filePath: string, data: PinsFile): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const tmp = `${filePath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
+  // Home file holds personal trust state — chmod 0600. Repo files are
+  // committed to git and don't need exclusive permissions; let the user's
+  // umask govern.
+  const isHome = filePath === getHomePinsFilePath();
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), isHome ? { mode: 0o600 } : {});
   fs.renameSync(tmp, filePath);
+}
+
+/** Atomic write of the home pin registry. */
+function writeMcpPins(data: PinsFile): void {
+  writePinsFile(getHomePinsFilePath(), data);
 }
 
 /**
@@ -140,25 +188,54 @@ export function seedMcpPinsIfMissing(): void {
 
 /**
  * Check whether a server's tool definitions match the pinned hash.
+ *
+ * When `cwd` is provided and the call resolves a repo-local pin file via
+ * `findPinsFilePath`, both files are consulted with **per-server merge**
+ * semantics (#179):
+ *   - if the repo file has an entry for `serverKey`, that wins
+ *   - otherwise, the home file's entry is used
+ *   - if neither has it, returns 'new'
+ *
  * Returns:
- *   'new'      — no pin exists for this server (first connection, file missing)
- *   'match'    — hash matches the pinned value
- *   'mismatch' — hash differs from the pinned value (possible rug pull)
- *   'corrupt'  — pin file exists but is unreadable/malformed (fail closed)
+ *   'new'      — no pin exists for this server in either file
+ *   'match'    — winning entry's hash matches the current hash
+ *   'mismatch' — winning entry's hash differs (possible rug pull)
+ *   'corrupt'  — the resolved file (or repo file, when present) is unreadable
  */
 export function checkPin(
   serverKey: string,
-  currentHash: string
+  currentHash: string,
+  cwd?: string
 ): 'match' | 'mismatch' | 'new' | 'corrupt' {
-  const result = readMcpPinsSafe();
-  if (!result.ok) {
-    if (result.reason === 'missing') return 'new';
-    // Corrupt pin file — caller must fail closed
+  const found = findPinsFilePath(cwd);
+
+  // Repo entry (if a repo file is in play).
+  let repoEntry: PinEntry | undefined;
+  if (found.source === 'repo') {
+    const repoResult = readPinsFile(found.path);
+    if (!repoResult.ok) {
+      // Repo file present but unreadable — fail closed. Don't silently
+      // fall back to home (home may be more permissive).
+      if (repoResult.reason === 'corrupt') return 'corrupt';
+      // 'missing' shouldn't happen since findPinsFilePath only returns
+      // 'repo' when fs.existsSync returned true, but handle defensively.
+    } else {
+      repoEntry = repoResult.pins.servers[serverKey];
+    }
+  }
+  if (repoEntry) {
+    return repoEntry.toolsHash === currentHash ? 'match' : 'mismatch';
+  }
+
+  // Fall back to home for servers the repo file doesn't pin.
+  const homeResult = readPinsFile(getHomePinsFilePath());
+  if (!homeResult.ok) {
+    if (homeResult.reason === 'missing') return 'new';
     return 'corrupt';
   }
-  const entry = result.pins.servers[serverKey];
-  if (!entry) return 'new';
-  return entry.toolsHash === currentHash ? 'match' : 'mismatch';
+  const homeEntry = homeResult.pins.servers[serverKey];
+  if (!homeEntry) return 'new';
+  return homeEntry.toolsHash === currentHash ? 'match' : 'mismatch';
 }
 
 /** Save or overwrite a pin for a server. */
@@ -189,4 +266,55 @@ export function removePin(serverKey: string): void {
 /** Clear all pins (fresh start). */
 export function clearAllPins(): void {
   writeMcpPins({ servers: {} });
+}
+
+/**
+ * Promote a pin from `~/.node9/mcp-pins.json` into the repo-local pin file
+ * at `<cwd-ancestor>/.node9/mcp-pins.json` (#179 part 2).
+ *
+ * - If a repo pin file exists in any ancestor of `cwd`, write into that one.
+ * - If no repo pin file is found, create `<cwd>/.node9/mcp-pins.json` with
+ *   just this entry (auto-create on first promote).
+ * - Throws if the server isn't pinned in home.
+ * - Throws if the resolved repo file is corrupt.
+ *
+ * Does NOT auto-commit the result to git; the user is expected to review +
+ * commit the change as part of their normal workflow.
+ */
+export function promotePin(
+  serverKey: string,
+  cwd?: string
+): { repoPath: string; created: boolean } {
+  const homePins = readMcpPins(); // throws if home is corrupt
+  const homeEntry = homePins.servers[serverKey];
+  if (!homeEntry) {
+    throw new Error(
+      `[node9] Server "${serverKey}" is not pinned in ~/.node9/mcp-pins.json. ` +
+        `Run \`node9 mcp pin list\` to see what's pinned.`
+    );
+  }
+
+  const found = findPinsFilePath(cwd);
+  let repoPath: string;
+  let repoPins: PinsFile;
+  let created = false;
+
+  if (found.source === 'repo') {
+    repoPath = found.path;
+    const result = readPinsFile(repoPath);
+    if (!result.ok) {
+      const detail = result.reason === 'corrupt' ? result.detail : 'missing';
+      throw new Error(`[node9] Repo pin file at ${repoPath} is unreadable: ${detail}`);
+    }
+    repoPins = result.pins;
+  } else {
+    // No repo file in any ancestor — auto-create at the supplied cwd.
+    repoPath = path.join(cwd ?? process.cwd(), '.node9', 'mcp-pins.json');
+    repoPins = { servers: {} };
+    created = true;
+  }
+
+  repoPins.servers[serverKey] = { ...homeEntry };
+  writePinsFile(repoPath, repoPins);
+  return { repoPath, created };
 }
