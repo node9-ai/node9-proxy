@@ -15,6 +15,8 @@ import { buildNegotiationMessage } from '../../policy/negotiation';
 import { createShadowSnapshot } from '../../undo';
 import { autoStartDaemonAndWait } from '../daemon-starter';
 import { defaultSkillRoots, resolveUserSkillRoot, verifyAndPinRoots } from '../../skill-pin';
+import { scanArgs } from '../../dlp';
+import { appendLocalAudit } from '../../audit';
 
 function sanitize(value: string): string {
   // eslint-disable-next-line no-control-regex
@@ -122,6 +124,8 @@ export function registerCheckCommand(program: Command): void {
             tool_use_id?: string; // Claude-only
             permission_mode?: string; // Claude-only
             timestamp?: string; // Gemini-only
+            turn_id?: string; // Codex-only (#178 fingerprint)
+            prompt?: string; // UserPromptSubmit payload body
           };
 
           try {
@@ -141,14 +145,96 @@ export function registerCheckCommand(program: Command): void {
             process.exit(0);
           }
 
-          // UserPromptSubmit (Codex paste-into-prompt hook) carries a `prompt`
-          // field but no tool_name / tool_input, so the tool-call codepath
-          // below would reach the "tool name missing" sendBlock and exit 2 —
-          // which Codex rejects as "exited with code 2 but did not write a
-          // blocking reason to stderr". Exit 0 cleanly here.
-          // TODO(#178 follow-up): scan payload.prompt for secrets (DLP).
+          // UserPromptSubmit — paste-into-prompt DLP. The payload has `prompt`
+          // but no tool_name / tool_input, so the tool-call codepath below
+          // would reach the "tool name missing" sendBlock. Handle it here:
+          // scan the prompt for credentials and block before the prompt ever
+          // reaches the model. No tool-call config/orchestrator path needed —
+          // DLP is enabled by default for these patterns.
           if (payload.hook_event_name === 'UserPromptSubmit') {
-            process.exit(0);
+            const prompt = typeof payload.prompt === 'string' ? payload.prompt : '';
+
+            // Debug logging — sanitize the prompt before persisting so a
+            // pasted secret never lands on disk via hook-debug.log. We early-
+            // exit before the generic debug log at line ~212, so this is the
+            // only place that records UserPromptSubmit telemetry.
+            if (process.env.NODE9_DEBUG === '1') {
+              try {
+                const logPath = path.join(os.homedir(), '.node9', 'hook-debug.log');
+                if (!fs.existsSync(path.dirname(logPath)))
+                  fs.mkdirSync(path.dirname(logPath), { recursive: true });
+                const sanitized = JSON.stringify({
+                  ...payload,
+                  prompt: `<redacted, ${prompt.length} bytes>`,
+                });
+                fs.appendFileSync(logPath, `[${new Date().toISOString()}] STDIN: ${sanitized}\n`);
+              } catch {
+                // Non-fatal — debug logging is best-effort.
+              }
+            }
+
+            if (!prompt) process.exit(0);
+
+            const dlpMatch = scanArgs({ prompt });
+            if (!dlpMatch) process.exit(0);
+
+            // Audit FIRST — the block record must survive any downstream error.
+            // Force argsHash so the secret value never lands in the audit log.
+            const agent = detectAiAgent(payload);
+            const sessionId =
+              typeof payload.session_id === 'string' ? payload.session_id : undefined;
+            appendLocalAudit(
+              'UserPromptSubmit',
+              { prompt },
+              'deny',
+              'dlp-block',
+              { agent, sessionId },
+              true
+            );
+
+            const reason =
+              `🚨 Node9 DLP: ${dlpMatch.patternName} detected in prompt ` +
+              `(${dlpMatch.redactedSample}). Prompt was not submitted — ` +
+              `remove the credential and try again.`;
+
+            // /dev/tty banner for the human, mirroring sendBlock's UX. Never
+            // stderr (Codex parses stderr for the block reason and would echo
+            // the entire banner back as the LLM-visible message).
+            try {
+              const ttyFd = fs.openSync('/dev/tty', 'w');
+              fs.writeSync(
+                ttyFd,
+                chalk.bgRed.white.bold(`\n 🚨 NODE9 DLP — PROMPT BLOCKED \n`) +
+                  chalk.red(`   ${dlpMatch.patternName} detected in your prompt.\n`) +
+                  chalk.gray(`   Match: ${dlpMatch.redactedSample}\n`) +
+                  chalk.cyan(`   Edit the prompt to remove the credential and resubmit.\n\n`)
+              );
+              fs.closeSync(ttyFd);
+            } catch {
+              // /dev/tty unavailable (CI, non-interactive) — skip visual output.
+            }
+
+            // Both Codex and Claude read JSON-on-stdout with decision="block".
+            // The only shape difference is hookSpecificOutput.permissionDecision:
+            // Claude requires it ('deny'); Codex's UserPromptSubmit schema
+            // explicitly does not define it (additionalProperties: false).
+            const isCodex = agent === 'Codex';
+            process.stdout.write(
+              JSON.stringify({
+                decision: 'block',
+                reason,
+                systemMessage: reason,
+                hookSpecificOutput: isCodex
+                  ? { hookEventName: 'UserPromptSubmit' }
+                  : {
+                      hookEventName: 'UserPromptSubmit',
+                      permissionDecision: 'deny',
+                      permissionDecisionReason: reason,
+                    },
+              }) + '\n'
+            );
+            // Non-zero exit signals block to both agents.
+            process.exit(2);
           }
 
           // Pass payload.cwd directly to getConfig() instead of mutating process.chdir —

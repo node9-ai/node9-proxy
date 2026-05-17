@@ -165,7 +165,7 @@ export function teardownClaude(): void {
   // Remove hook matchers from settings.json
   const settings = readJson<ClaudeSettings>(hooksPath);
   if (settings?.hooks) {
-    for (const event of ['PreToolUse', 'PostToolUse'] as const) {
+    for (const event of ['PreToolUse', 'PostToolUse', 'UserPromptSubmit'] as const) {
       const before = settings.hooks[event]?.length ?? 0;
       settings.hooks[event] = settings.hooks[event]?.filter(
         (m) => !m.hooks.some((h) => isNode9Hook(h.command))
@@ -389,6 +389,38 @@ export async function setupClaude(): Promise<void> {
         if (isNode9 && isStaleHookCommand(cmd)) {
           h.command = fullPathCommand('log');
           console.log(chalk.yellow('  🔧 PostToolUse hook repaired (stale path → current binary)'));
+          hooksChanged = true;
+          anythingChanged = true;
+        }
+      }
+    }
+  }
+
+  // UserPromptSubmit — paste-into-prompt DLP. node9 check scans payload.prompt
+  // for credentials and blocks before the prompt ever reaches the model. Same
+  // shim as Codex; the agent-specific block response shape is selected inside
+  // check.ts via detectAiAgent.
+  const hasPromptHook = settings.hooks.UserPromptSubmit?.some((m) =>
+    m.hooks.some((h) => isNode9Hook(h.command))
+  );
+  if (!hasPromptHook) {
+    if (!settings.hooks.UserPromptSubmit) settings.hooks.UserPromptSubmit = [];
+    settings.hooks.UserPromptSubmit.push({
+      matcher: '.*',
+      hooks: [{ type: 'command', command: fullPathCommand('check'), timeout: 600 }],
+    });
+    console.log(chalk.green('  ✅ UserPromptSubmit hook added → node9 check (prompt DLP)'));
+    hooksChanged = true;
+    anythingChanged = true;
+  } else if (settings.hooks.UserPromptSubmit) {
+    for (const matcher of settings.hooks.UserPromptSubmit) {
+      for (const h of matcher.hooks) {
+        const cmd = h.command ?? '';
+        if (isNode9Hook(cmd) && isStaleHookCommand(cmd)) {
+          h.command = fullPathCommand('check');
+          console.log(
+            chalk.yellow('  🔧 UserPromptSubmit hook repaired (stale path → current binary)')
+          );
           hooksChanged = true;
           anythingChanged = true;
         }

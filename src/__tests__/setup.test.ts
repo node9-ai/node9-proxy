@@ -92,12 +92,61 @@ describe('setupClaude', () => {
     expect(written.hooks.PostToolUse[0].hooks[0].command).toBe('node9 log');
   });
 
+  it('also wires UserPromptSubmit for paste-into-prompt DLP', async () => {
+    await setupClaude();
+    const written = writtenTo(hooksPath);
+    expect(written.hooks.UserPromptSubmit).toBeDefined();
+    expect(written.hooks.UserPromptSubmit[0].hooks[0].command).toBe('node9 check');
+  });
+
+  it('does not re-add UserPromptSubmit hook if already present', async () => {
+    withExistingFiles({
+      [hooksPath]: {
+        hooks: {
+          PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] }],
+          PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
+          UserPromptSubmit: [
+            { matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] },
+          ],
+        },
+        statusLine: { type: 'command', command: 'node9 hud' },
+      },
+      [mcpPath]: { mcpServers: { node9: NODE9_MCP_ENTRY } },
+    });
+
+    await setupClaude();
+    expect(writtenTo(hooksPath)).toBeNull();
+  });
+
+  it('self-heals a stale UserPromptSubmit hook absolute path', async () => {
+    const stale =
+      '/usr/bin/node /lib/node_modules/node9-ai/node_modules/@node9/proxy/dist/cli.js check';
+    withExistingFiles({
+      [hooksPath]: {
+        hooks: {
+          PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] }],
+          PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
+          UserPromptSubmit: [{ matcher: '.*', hooks: [{ type: 'command', command: stale }] }],
+        },
+        statusLine: { type: 'command', command: 'node9 hud' },
+      },
+      [mcpPath]: { mcpServers: { node9: NODE9_MCP_ENTRY } },
+    });
+
+    await setupClaude();
+    const written = writtenTo(hooksPath);
+    expect(written.hooks.UserPromptSubmit[0].hooks[0].command).toBe('node9 check');
+  });
+
   it('does not add hooks that already exist', async () => {
     withExistingFiles({
       [hooksPath]: {
         hooks: {
           PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] }],
           PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
+          UserPromptSubmit: [
+            { matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] },
+          ],
         },
         statusLine: { type: 'command', command: 'node9 hud' },
       },
@@ -197,6 +246,9 @@ describe('setupClaude', () => {
         hooks: {
           PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] }],
           PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
+          UserPromptSubmit: [
+            { matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] },
+          ],
         },
         statusLine: { type: 'command', command: 'node9 hud' },
       },

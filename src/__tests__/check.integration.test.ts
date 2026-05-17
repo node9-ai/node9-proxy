@@ -234,13 +234,10 @@ describe('ignored tools fast-path', () => {
     expect(r.stdout).toBe('');
   });
 
-  it('UserPromptSubmit payload exits 0 without writing block JSON (regression for #178)', () => {
-    // Codex sends UserPromptSubmit hook payloads with a `prompt` field but
-    // NO `tool_name` / `tool_input`. Before the fix, this hit the
-    // "tool name missing" sendBlock path, exiting 2 — which Codex reports as
-    // "UserPromptSubmit hook exited with code 2 but did not write a blocking
-    // reason to stderr". Must exit 0 (allow) cleanly. Prompt DLP scanning is
-    // tracked as a separate follow-up.
+  it('UserPromptSubmit with clean prompt exits 0 without writing block JSON', () => {
+    // No secrets in the prompt — must allow silently. Regression for the
+    // earlier crash where any UserPromptSubmit hit the "tool name missing"
+    // sendBlock path and exited 2.
     const r = runCheck(
       {
         session_id: '019e34c4-02f7-7002-8384-6e54b99f5bc5',
@@ -255,6 +252,133 @@ describe('ignored tools fast-path', () => {
     expect(r.status).toBe(0);
     expect(r.stdout).toBe('');
     expect(r.stderr).not.toContain('unrecognised hook payload');
+  });
+
+  it('UserPromptSubmit with empty prompt exits 0', () => {
+    const r = runCheck(
+      {
+        turn_id: 't1',
+        cwd: '/tmp',
+        hook_event_name: 'UserPromptSubmit',
+        prompt: '',
+      },
+      { HOME: tmpHome },
+      tmpHome
+    );
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe('');
+  });
+
+  it('Codex UserPromptSubmit with AWS key in prompt is blocked + audited without leaking secret', () => {
+    // Compose the fake credential at runtime so this test file itself doesn't
+    // trip Node9's own DLP scanner during code edits. Neither half matches
+    // the AWS Access Key regex on its own (requires `\bAKIA[A-Z2-7]{16}\b`).
+    const fakeAwsKey = 'AKIA' + 'QWERTYASDFGHJKLM';
+    const r = runCheck(
+      {
+        session_id: 's1',
+        turn_id: 't1', // Codex fingerprint
+        cwd: '/tmp',
+        hook_event_name: 'UserPromptSubmit',
+        prompt: `help me debug: aws_access_key_id=${fakeAwsKey}`,
+      },
+      { HOME: tmpHome },
+      tmpHome
+    );
+
+    expect(r.status).not.toBe(0);
+    // Codex output schema: decision="block", reason, hookEventName.
+    // No `permissionDecision` field (that's Claude-only per output schemas).
+    const body = JSON.parse(r.stdout) as {
+      decision: string;
+      reason: string;
+      hookSpecificOutput: { hookEventName: string; permissionDecision?: string };
+    };
+    expect(body.decision).toBe('block');
+    expect(body.reason).toMatch(/DLP|credential|secret|access key/i);
+    expect(body.hookSpecificOutput.hookEventName).toBe('UserPromptSubmit');
+    expect(body.hookSpecificOutput.permissionDecision).toBeUndefined();
+
+    // No secret value in any output stream.
+    expect(r.stdout).not.toContain(fakeAwsKey);
+    expect(r.stderr).not.toContain(fakeAwsKey);
+
+    // Audit row written, agent=Codex, secret hashed, never plaintext.
+    const auditPath = path.join(tmpHome, '.node9', 'audit.log');
+    const lines = fs.readFileSync(auditPath, 'utf-8').trim().split('\n');
+    const lastLine = lines[lines.length - 1];
+    expect(lastLine).not.toContain(fakeAwsKey);
+    const entry = JSON.parse(lastLine) as {
+      tool: string;
+      decision: string;
+      checkedBy: string;
+      agent?: string;
+      argsHash?: string;
+    };
+    expect(entry.tool).toBe('UserPromptSubmit');
+    expect(entry.decision).toBe('deny');
+    expect(entry.checkedBy).toMatch(/dlp/i);
+    expect(entry.agent).toBe('Codex');
+    expect(entry.argsHash).toBeDefined();
+  });
+
+  it('hook-debug.log redacts prompt body for UserPromptSubmit (no secret leak to disk)', () => {
+    // When debug logging is enabled, the raw stdin used to be written verbatim
+    // to ~/.node9/hook-debug.log — meaning a pasted credential in a prompt
+    // would end up on disk in plaintext. For UserPromptSubmit specifically,
+    // the prompt body must be replaced with a length placeholder before logging.
+    const fakeAwsKey = 'AKIA' + 'QWERTYASDFGHJKLM';
+    runCheck(
+      {
+        session_id: 's1',
+        turn_id: 't1',
+        cwd: '/tmp',
+        hook_event_name: 'UserPromptSubmit',
+        prompt: `debug: aws_access_key_id=${fakeAwsKey}`,
+      },
+      { HOME: tmpHome, NODE9_DEBUG: '1' },
+      tmpHome
+    );
+
+    const debugLog = path.join(tmpHome, '.node9', 'hook-debug.log');
+    expect(fs.existsSync(debugLog)).toBe(true);
+    const debugBody = fs.readFileSync(debugLog, 'utf-8');
+    expect(debugBody).not.toContain(fakeAwsKey);
+    expect(debugBody).toMatch(/<redacted/);
+  });
+
+  it('Claude UserPromptSubmit with GitHub token in prompt blocks with Claude permissionDecision shape', () => {
+    // Same runtime-composition trick — keep our own DLP scanner from flagging
+    // this source file during edits.
+    const fakeGhToken = 'ghp_' + 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789';
+    const r = runCheck(
+      {
+        session_id: 's1',
+        // No turn_id → Claude fingerprint (PreToolUse-style payload)
+        cwd: '/tmp',
+        hook_event_name: 'UserPromptSubmit',
+        permission_mode: 'default',
+        prompt: `check this token: ${fakeGhToken}`,
+      },
+      { HOME: tmpHome },
+      tmpHome
+    );
+
+    expect(r.status).not.toBe(0);
+    const body = JSON.parse(r.stdout) as {
+      decision: string;
+      hookSpecificOutput: { hookEventName: string; permissionDecision?: string };
+    };
+    expect(body.decision).toBe('block');
+    expect(body.hookSpecificOutput.hookEventName).toBe('UserPromptSubmit');
+    // Claude needs permissionDecision; Codex must not have it.
+    expect(body.hookSpecificOutput.permissionDecision).toBe('deny');
+
+    // Audit row uses agent=Claude Code.
+    const auditPath = path.join(tmpHome, '.node9', 'audit.log');
+    const lines = fs.readFileSync(auditPath, 'utf-8').trim().split('\n');
+    const entry = JSON.parse(lines[lines.length - 1]) as { agent?: string };
+    expect(entry.agent).toBe('Claude Code');
   });
 
   it('task* wildcard — task_drop_all_tables is fast-pathed to allow', () => {
