@@ -239,7 +239,14 @@ export function registerCheckCommand(program: Command): void {
 
           // Pass payload.cwd directly to getConfig() instead of mutating process.chdir —
           // process.chdir is process-global and would race with concurrent hook invocations.
-          const config = getConfig(payload.cwd || undefined);
+          // CLAUDE.md: validate with path.isAbsolute() before passing to getConfig() to
+          // prevent a hook payload from steering config resolution at a traversal path.
+          // Matches the pattern already used at the other payload.cwd sites in this file.
+          const safeCwdForConfig =
+            typeof payload.cwd === 'string' && path.isAbsolute(payload.cwd)
+              ? payload.cwd
+              : undefined;
+          const config = getConfig(safeCwdForConfig);
 
           // Eagerly start the daemon for activity logging (fire-and-forget).
           // Without this, tool events never reach `node9 tail` if the daemon
