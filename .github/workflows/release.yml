@@ -26,14 +26,6 @@ jobs:
           cache: npm
           registry-url: https://registry.npmjs.org
 
-      - name: Upgrade npm for OIDC trusted-publisher support
-        # Node 22 bundles npm 10.9.x, which can SIGN provenance via OIDC
-        # but still authenticates `npm publish` with NODE_AUTH_TOKEN.
-        # Trusted-publisher auth for `npm publish` landed in npm 11.5.0,
-        # so the wrapper publish (npm package `node9-ai`, no longer covered
-        # by the granular @node9/*-scoped token) requires the bump.
-        run: npm install -g npm@latest
-
       - name: Install dependencies
         run: npm ci
 
@@ -193,9 +185,16 @@ jobs:
           git add README.md package.json
           git diff --cached --quiet || git commit -m "chore: sync README and bump version to ${VERSION}"
           git diff origin/main..HEAD --quiet || git push
-          # Publish from GITHUB_WORKSPACE so NPM_CONFIG_USERCONFIG auth applies
+          # Publish from GITHUB_WORKSPACE so NPM_CONFIG_USERCONFIG auth applies.
+          # Use npx npm@latest to invoke npm 11.5+, which is required for OIDC
+          # trusted-publisher auth on `npm publish` (Node 22 bundles npm 10.9.x
+          # which only supports OIDC for provenance signing, not auth). A
+          # full `npm install -g npm@latest` would self-clobber its running
+          # install on the corepack-managed Node 22 setup, so invoke via npx
+          # for one shot only. NODE_AUTH_TOKEN remains in env as a fallback —
+          # ignored once npm 11.5+ detects the trusted publisher.
           cd $GITHUB_WORKSPACE
-          npm publish /tmp/node9-wrapper --provenance --access public --ignore-scripts
+          npx --yes npm@latest publish /tmp/node9-wrapper --provenance --access public --ignore-scripts
 
       - name: Notify homebrew tap
         run: |
