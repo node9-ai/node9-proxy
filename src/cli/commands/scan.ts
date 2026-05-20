@@ -3020,7 +3020,15 @@ export function registerScanCommand(program: Command): void {
               '  node9 is still worth running — it monitors every tool call in real time.\n'
             )
           );
-        } else {
+        }
+
+        // Always render the dashboard, even with zero risky findings. The
+        // panel scorecard (StaticScorecard) gates risk-specific bands on
+        // findings, so Critical/High/Medium auto-collapse for clean
+        // histories while COST + ACTIVITY + SHIELDS still render with the
+        // session-level data the user does have. Bare block preserves the
+        // const declarations' scope without dragging a 180-line dedent.
+        {
           // ── Hero block ─────────────────────────────────────────────────────
           // Score-led headline — the dramatic line readers need to see in the
           // first 5 lines, not buried at the bottom. The detailed per-section
