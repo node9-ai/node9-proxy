@@ -26,6 +26,14 @@ jobs:
           cache: npm
           registry-url: https://registry.npmjs.org
 
+      - name: Upgrade npm for OIDC trusted-publisher support
+        # Node 22 bundles npm 10.9.x, which can SIGN provenance via OIDC
+        # but still authenticates `npm publish` with NODE_AUTH_TOKEN.
+        # Trusted-publisher auth for `npm publish` landed in npm 11.5.0,
+        # so the wrapper publish (npm package `node9-ai`, no longer covered
+        # by the granular @node9/*-scoped token) requires the bump.
+        run: npm install -g npm@latest
+
       - name: Install dependencies
         run: npm ci
 
