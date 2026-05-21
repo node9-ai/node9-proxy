@@ -187,6 +187,46 @@ describe('setupClaude', () => {
     expect(written.hooks.PostToolUse[0].hooks[0].command).toBe('node9 log');
   });
 
+  it('rewrites legacy backslash hooks even when their paths still exist (#185 follow-up)', async () => {
+    // Pre-1.24.2 Windows install: hooks are in the unquoted backslash form
+    // that breaks Git Bash. The cli.js file STILL exists on disk (no
+    // `npm uninstall` happened), so the original "path missing"
+    // staleness check returns false and the broken hooks survive an
+    // upgrade-then-init. We rely on a separate detector for the shape
+    // itself — backslashes are never produced by the post-fix
+    // fullPathCommand, so any backslash in a node9 hook is unambiguous
+    // evidence of a legacy format that needs rewriting.
+    const winPre =
+      'C:\\Program Files\\nodejs\\node.exe C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\node9-ai\\node_modules\\@node9\\proxy\\dist\\cli.js check';
+    const winPost = winPre.replace(/check$/, 'log');
+    const winPrompt = winPre;
+    withExistingFiles({
+      [hooksPath]: {
+        hooks: {
+          PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: winPre }] }],
+          PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: winPost }] }],
+          UserPromptSubmit: [{ matcher: '.*', hooks: [{ type: 'command', command: winPrompt }] }],
+        },
+        statusLine: { type: 'command', command: 'node9 hud' },
+      },
+      [mcpPath]: { mcpServers: { node9: NODE9_MCP_ENTRY } },
+    });
+
+    await setupClaude();
+
+    const written = writtenTo(hooksPath);
+    expect(written).not.toBeNull();
+    // Under NODE9_TESTING=1 the rewrite collapses to the bare form;
+    // production sees the quoted forward-slash form. Either way the
+    // hallmark of the bug — any backslash — must be gone.
+    expect(written.hooks.PreToolUse[0].hooks[0].command).toBe('node9 check');
+    expect(written.hooks.PostToolUse[0].hooks[0].command).toBe('node9 log');
+    expect(written.hooks.UserPromptSubmit[0].hooks[0].command).toBe('node9 check');
+    expect(written.hooks.PreToolUse[0].hooks[0].command).not.toMatch(/\\/);
+    expect(written.hooks.PostToolUse[0].hooks[0].command).not.toMatch(/\\/);
+    expect(written.hooks.UserPromptSubmit[0].hooks[0].command).not.toMatch(/\\/);
+  });
+
   it('prompts before wrapping existing MCP servers', async () => {
     withExistingFile(mcpPath, {
       mcpServers: {

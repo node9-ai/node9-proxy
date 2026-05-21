@@ -17,7 +17,13 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
-import { fullPathCommand, isStaleHookCommand, isNode9Hook } from '../setup.js';
+import {
+  fullPathCommand,
+  isStaleHookCommand,
+  isNode9Hook,
+  isLegacyHookFormat,
+  needsRewrite,
+} from '../setup.js';
 
 // process.execPath is technically settable but not writable on all
 // platforms (we run on Linux for CI, so it is). Helper to stub safely
@@ -161,5 +167,60 @@ describe('isNode9Hook', () => {
     expect(isNode9Hook('echo hi')).toBe(false);
     expect(isNode9Hook('mynode9 check')).toBe(false); // word-boundary
     expect(isNode9Hook(undefined)).toBe(false);
+  });
+});
+
+describe('isLegacyHookFormat (#185 follow-up)', () => {
+  it('flags any command containing a backslash', () => {
+    // Pre-#185 unquoted Windows hook — the exact form reported in the bug.
+    expect(
+      isLegacyHookFormat('C:\\Program Files\\nodejs\\node.exe C:\\Users\\u\\...\\cli.js check')
+    ).toBe(true);
+    // Also a quoted-but-still-backslash form (some hand-edited configs).
+    expect(isLegacyHookFormat('"C:\\path\\node.exe" "C:\\path\\cli.js" check')).toBe(true);
+  });
+
+  it('returns false for the new quoted forward-slash form (idempotence)', () => {
+    // Once self-heal rewrites a hook, running init again must not retrigger
+    // the rewrite or we'd churn settings.json on every invocation.
+    expect(
+      isLegacyHookFormat('"C:/Program Files/nodejs/node.exe" "C:/Users/u/.../cli.js" check')
+    ).toBe(false);
+  });
+
+  it('returns false for the legacy unquoted POSIX form (no churn on working hooks)', () => {
+    // POSIX users with pre-#185 hooks are still working — no backslashes
+    // means no Git Bash break. We deliberately don't rewrite cosmetic
+    // differences; only actual breakage.
+    expect(isLegacyHookFormat('/usr/bin/node /lib/node_modules/.../cli.js check')).toBe(false);
+    expect(isLegacyHookFormat('/usr/local/bin/node9 check')).toBe(false);
+  });
+
+  it('returns false for the bare "node9 check" form and empty input', () => {
+    expect(isLegacyHookFormat('node9 check')).toBe(false);
+    expect(isLegacyHookFormat('')).toBe(false);
+  });
+});
+
+describe('needsRewrite (#185 follow-up)', () => {
+  // needsRewrite ORs the two detection helpers. Spot-check that both
+  // branches feed into the result; exhaustive coverage of the
+  // underlying conditions lives in the isStaleHookCommand /
+  // isLegacyHookFormat blocks above.
+  it('returns true when the path is stale', () => {
+    vi.spyOn(fs, 'existsSync').mockReturnValue(false);
+    expect(needsRewrite('"/missing/node" "/missing/cli.js" check')).toBe(true);
+  });
+
+  it('returns true when the shape is legacy (backslashes)', () => {
+    // existsSync left at the test-file default; even if it returns true
+    // for every path, the backslash branch should still fire.
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    expect(needsRewrite('C:\\path\\node C:\\path\\cli.js check')).toBe(true);
+  });
+
+  it('returns false for a well-formed hook whose paths exist', () => {
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    expect(needsRewrite('"/usr/bin/node" "/usr/lib/cli.js" check')).toBe(false);
   });
 });
