@@ -511,6 +511,44 @@ export const DLP_PATTERNS: DlpPattern[] = [
     severity: 'block',
     keywords: ['age-secret-key-'],
   },
+
+  // ── Database connection strings ───────────────────────────────────────────
+  // Universal <scheme>://[user]:<password>@<host> shape. Covers the gap
+  // vendor-prefix patterns (AWS / GitHub / Stripe / …) leave open. Matches
+  // the whole URL so maskSecret produces `<scheme>...:****@...<host>` —
+  // the password value never appears in the redacted sample.
+  //
+  // Schemes covered: redis, rediss (TLS), postgres, postgresql,
+  // mongodb, mongodb+srv, mysql, mariadb, amqp, amqps, kafka,
+  // clickhouse, cassandra. HTTP(S) / FTP / SSH are intentionally
+  // excluded — they're not database URLs and adding them would
+  // create false positives on every basic-auth URL in the wild.
+  //
+  // Requires `:password@` (4+ char password) so user-only URLs like
+  // `redis://user@host` don't match. Stopwords ('your', '${', '<your',
+  // 'placeholder', 'changeme', etc.) keep doc/README scans clean.
+  {
+    name: 'Database Connection String',
+    regex:
+      /\b(redis|rediss|postgres|postgresql|mongodb|mongodb\+srv|mysql|mariadb|amqp|amqps|kafka|clickhouse|cassandra):\/\/[^:/\s@]*:[^@\s]{4,}@[^\s/]+/,
+    severity: 'block',
+    keywords: [
+      'redis://',
+      'rediss://',
+      'postgres://',
+      'postgresql://',
+      'mongodb://',
+      'mongodb+srv://',
+      'mysql://',
+      'mariadb://',
+      'amqp://',
+      'amqps://',
+      'kafka://',
+      'clickhouse://',
+      'cassandra://',
+    ],
+    minEntropy: 3.0,
+  },
 ];
 
 // Pre-compiled global versions of each DLP pattern regex, built once at module
