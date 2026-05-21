@@ -147,6 +147,26 @@ export function isStaleHookCommand(command: string): boolean {
   return false;
 }
 
+// A node9 hook command authored by pre-#185 code on Windows always
+// contained backslashes (`C:\\Program Files\\...`). Post-#185
+// fullPathCommand emits zero backslashes — paths get forward-slashed.
+// POSIX hook commands never contain backslashes. So any backslash in a
+// node9 hook is unambiguous evidence of a legacy format that needs
+// rewriting — even when the underlying files still exist on disk.
+export function isLegacyHookFormat(command: string): boolean {
+  if (!command) return false;
+  return command.includes('\\');
+}
+
+// Combined predicate for the self-heal branches. A hook needs rewriting
+// either because its absolute path is gone OR because its shape is
+// from pre-#185 code. Separating the two predicates keeps each name
+// describing one thing; this wrapper exists so the 6 call sites in
+// setupClaude / setupCodex don't repeat the OR.
+export function needsRewrite(command: string): boolean {
+  return isStaleHookCommand(command) || isLegacyHookFormat(command);
+}
+
 function readJson<T>(filePath: string): T | null {
   try {
     if (fs.existsSync(filePath)) {
@@ -392,7 +412,7 @@ export async function setupClaude(): Promise<void> {
       for (const h of matcher.hooks) {
         const cmd = h.command ?? '';
         const isNode9 = cmd.includes('node9 check') || cmd.includes('cli.js check');
-        if (isNode9 && isStaleHookCommand(cmd)) {
+        if (isNode9 && needsRewrite(cmd)) {
           h.command = fullPathCommand('check');
           console.log(chalk.yellow('  🔧 PreToolUse hook repaired (stale path → current binary)'));
           hooksChanged = true;
@@ -419,7 +439,7 @@ export async function setupClaude(): Promise<void> {
       for (const h of matcher.hooks) {
         const cmd = h.command ?? '';
         const isNode9 = cmd.includes('node9 log') || cmd.includes('cli.js log');
-        if (isNode9 && isStaleHookCommand(cmd)) {
+        if (isNode9 && needsRewrite(cmd)) {
           h.command = fullPathCommand('log');
           console.log(chalk.yellow('  🔧 PostToolUse hook repaired (stale path → current binary)'));
           hooksChanged = true;
@@ -449,7 +469,7 @@ export async function setupClaude(): Promise<void> {
     for (const matcher of settings.hooks.UserPromptSubmit) {
       for (const h of matcher.hooks) {
         const cmd = h.command ?? '';
-        if (isNode9Hook(cmd) && isStaleHookCommand(cmd)) {
+        if (isNode9Hook(cmd) && needsRewrite(cmd)) {
           h.command = fullPathCommand('check');
           console.log(
             chalk.yellow('  🔧 UserPromptSubmit hook repaired (stale path → current binary)')
@@ -896,7 +916,7 @@ export async function setupCodex(): Promise<void> {
       // Self-heal stale absolute paths (mirrors setupClaudeCode behavior).
       for (const h of existing.hooks) {
         const cmd = h.command ?? '';
-        if (isNode9Hook(cmd) && isStaleHookCommand(cmd)) {
+        if (isNode9Hook(cmd) && needsRewrite(cmd)) {
           h.command = fullPathCommand('check');
           hooksChanged = true;
         }
@@ -918,7 +938,7 @@ export async function setupCodex(): Promise<void> {
     for (const m of hooksFile.hooks.UserPromptSubmit) {
       for (const h of m.hooks) {
         const cmd = h.command ?? '';
-        if (isNode9Hook(cmd) && isStaleHookCommand(cmd)) {
+        if (isNode9Hook(cmd) && needsRewrite(cmd)) {
           h.command = fullPathCommand('check');
           hooksChanged = true;
         }
@@ -941,7 +961,7 @@ export async function setupCodex(): Promise<void> {
     for (const m of hooksFile.hooks.PostToolUse) {
       for (const h of m.hooks) {
         const cmd = h.command ?? '';
-        if (isNode9Hook(cmd) && isStaleHookCommand(cmd)) {
+        if (isNode9Hook(cmd) && needsRewrite(cmd)) {
           h.command = fullPathCommand('log');
           hooksChanged = true;
         }
