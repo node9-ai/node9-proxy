@@ -713,6 +713,26 @@ export function claudeDesktopConfigPath(homeDir: string = os.homedir()): string 
 }
 
 /**
+ * Returns true if `binary` is found anywhere in PATH and is executable.
+ * Used by {@link detectAgents} to catch agents that ship a CLI binary
+ * but create their config dir lazily on first launch — e.g. Opencode
+ * (issue #186), which only writes ~/.config/opencode on first run.
+ */
+function binaryInPath(binary: string): boolean {
+  const pathEnv = process.env.PATH ?? '';
+  for (const dir of pathEnv.split(path.delimiter)) {
+    if (!dir) continue;
+    try {
+      fs.accessSync(path.join(dir, binary), fs.constants.X_OK);
+      return true;
+    } catch {
+      // not in this dir — keep scanning
+    }
+  }
+  return false;
+}
+
+/**
  * Detect which AI agents are installed on this machine.
  * Used by `node9 init` to auto-wire all detected agents.
  */
@@ -746,7 +766,9 @@ export function detectAgents(homeDir: string = os.homedir()): {
     windsurf: exists(path.join(homeDir, '.codeium', 'windsurf')),
     vscode: exists(path.join(homeDir, '.vscode')),
     claudeDesktop: desktopPath !== null && exists(path.dirname(desktopPath)),
-    opencode: exists(path.join(homeDir, '.config', 'opencode')),
+    // Opencode creates ~/.config/opencode lazily on first launch — fall back
+    // to a PATH lookup so installed-but-never-launched CLIs are still wired.
+    opencode: exists(path.join(homeDir, '.config', 'opencode')) || binaryInPath('opencode'),
   };
 }
 
