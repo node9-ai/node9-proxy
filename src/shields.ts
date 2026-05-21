@@ -165,6 +165,65 @@ export function writeShieldOverride(
   writeShieldsFile({ ...current, overrides });
 }
 
+/**
+ * One-shot rename map for rule keys that have been renamed across versions.
+ * Each entry: [old key, new key]. The migration in {@link migrateRenamedRuleKeys}
+ * walks the user's `shields.json` overrides and rewrites old keys to new ones.
+ *
+ * Add a new entry every time a rule key is renamed in a builtin shield JSON.
+ * The migration is idempotent — once a user's overrides are rewritten, the
+ * old key no longer matches and subsequent runs are no-ops.
+ */
+const RULE_KEY_MIGRATIONS: ReadonlyArray<readonly [string, string]> = [
+  // 2026-05-21 — project-jail .env reads promoted review → block. Renamed
+  // so the key honestly describes the verdict. Credential-file rules
+  // (.netrc, .npmrc, .docker, .kube, gcloud) deliberately stay at `review`
+  // — see the rationale in packages/policy-engine/src/shell/index.ts
+  // around the review-read-credentials rule.
+  ['shield:project-jail:review-read-env-any-tool', 'shield:project-jail:block-read-env-any-tool'],
+];
+
+export interface RuleKeyMigration {
+  shield: string;
+  oldKey: string;
+  newKey: string;
+}
+
+/**
+ * Rewrites old rule keys in the user's shields.json overrides to their new
+ * names. Idempotent. Returns the list of renames actually applied so callers
+ * (like `node9 init`) can log them. No-ops silently when no migration applies.
+ */
+export function migrateRenamedRuleKeys(): RuleKeyMigration[] {
+  const current = readShieldsFile();
+  if (!current.overrides || Object.keys(current.overrides).length === 0) return [];
+
+  const renameMap = new Map<string, string>(RULE_KEY_MIGRATIONS);
+  const migrated: RuleKeyMigration[] = [];
+  const nextOverrides: ShieldOverrides = {};
+  let anyChange = false;
+
+  for (const [shield, rules] of Object.entries(current.overrides)) {
+    const nextRules: Record<string, ShieldVerdict> = {};
+    for (const [key, verdict] of Object.entries(rules)) {
+      const newKey = renameMap.get(key);
+      if (newKey) {
+        // If a user has both the old and new key (unlikely but possible),
+        // the new key wins — that's the more-recent intent.
+        if (!(newKey in nextRules)) nextRules[newKey] = verdict;
+        migrated.push({ shield, oldKey: key, newKey });
+        anyChange = true;
+      } else {
+        nextRules[key] = verdict;
+      }
+    }
+    if (Object.keys(nextRules).length > 0) nextOverrides[shield] = nextRules;
+  }
+
+  if (anyChange) writeShieldsFile({ ...current, overrides: nextOverrides });
+  return migrated;
+}
+
 export function clearShieldOverride(shieldName: string, ruleName: string): void {
   const current = readShieldsFile();
   // True no-op: don't touch disk if the override doesn't exist

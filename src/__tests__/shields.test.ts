@@ -20,6 +20,7 @@ import {
   readShieldOverrides,
   writeShieldOverride,
   clearShieldOverride,
+  migrateRenamedRuleKeys,
   isShieldVerdict,
   installShield,
 } from '../shields.js';
@@ -342,6 +343,135 @@ describe('shield overrides', () => {
     const written = writeFileSyncSpy.mock.calls[0][1] as string;
     const parsed = JSON.parse(written);
     expect(parsed.overrides).toBeUndefined();
+  });
+});
+
+// ── migrateRenamedRuleKeys ────────────────────────────────────────────────────
+// One-shot rewrite for rule keys renamed across versions. Triggered from
+// `node9 init`. Idempotent — running on already-migrated state is a no-op.
+describe('migrateRenamedRuleKeys', () => {
+  it('rewrites the old review-read-env-any-tool key to block-read-env-any-tool', () => {
+    readFileSyncSpy.mockReturnValueOnce(
+      JSON.stringify({
+        active: ['project-jail'],
+        overrides: {
+          'project-jail': {
+            'shield:project-jail:review-read-env-any-tool': 'review',
+          },
+        },
+      })
+    );
+    const migrated = migrateRenamedRuleKeys();
+    expect(migrated).toHaveLength(1);
+
+    const written = writeFileSyncSpy.mock.calls[0][1] as string;
+    const parsed = JSON.parse(written);
+    expect(parsed.overrides['project-jail']).toEqual({
+      'shield:project-jail:block-read-env-any-tool': 'review',
+    });
+  });
+
+  it('preserves the user-set verdict value during the rename', () => {
+    readFileSyncSpy.mockReturnValueOnce(
+      JSON.stringify({
+        active: ['project-jail'],
+        overrides: {
+          'project-jail': { 'shield:project-jail:review-read-env-any-tool': 'allow' },
+        },
+      })
+    );
+    migrateRenamedRuleKeys();
+    const written = writeFileSyncSpy.mock.calls[0][1] as string;
+    const parsed = JSON.parse(written);
+    expect(parsed.overrides['project-jail']['shield:project-jail:block-read-env-any-tool']).toBe(
+      'allow'
+    );
+  });
+
+  it('leaves credential rule overrides untouched (those rules deliberately keep their names)', () => {
+    readFileSyncSpy.mockReturnValueOnce(
+      JSON.stringify({
+        active: ['project-jail'],
+        overrides: {
+          'project-jail': {
+            'shield:project-jail:review-read-credentials-any-tool': 'review',
+            'shield:project-jail:review-read-credentials': 'allow',
+          },
+        },
+      })
+    );
+    const migrated = migrateRenamedRuleKeys();
+    // No renames apply — both keys stay as-is. The migration is a no-op.
+    expect(migrated).toEqual([]);
+    expect(writeFileSyncSpy).not.toHaveBeenCalled();
+  });
+
+  it('leaves unrelated overrides untouched', () => {
+    readFileSyncSpy.mockReturnValueOnce(
+      JSON.stringify({
+        active: ['project-jail', 'postgres'],
+        overrides: {
+          'project-jail': { 'shield:project-jail:review-read-env-any-tool': 'review' },
+          postgres: { 'shield:postgres:block-drop-table': 'review' },
+        },
+      })
+    );
+    migrateRenamedRuleKeys();
+    const written = writeFileSyncSpy.mock.calls[0][1] as string;
+    const parsed = JSON.parse(written);
+    expect(parsed.overrides.postgres).toEqual({ 'shield:postgres:block-drop-table': 'review' });
+  });
+
+  it('is idempotent — second run is a no-op when no old keys remain', () => {
+    readFileSyncSpy.mockReturnValueOnce(
+      JSON.stringify({
+        active: ['project-jail'],
+        overrides: {
+          'project-jail': { 'shield:project-jail:block-read-env-any-tool': 'review' },
+        },
+      })
+    );
+    const migrated = migrateRenamedRuleKeys();
+    expect(migrated).toEqual([]);
+    // Nothing written to disk when nothing changed
+    expect(writeFileSyncSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns empty array when no overrides exist', () => {
+    readFileSyncSpy.mockReturnValueOnce(JSON.stringify({ active: ['project-jail'] }));
+    expect(migrateRenamedRuleKeys()).toEqual([]);
+    expect(writeFileSyncSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns empty array when shields.json does not exist', () => {
+    readFileSyncSpy.mockImplementationOnce(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    expect(migrateRenamedRuleKeys()).toEqual([]);
+    expect(writeFileSyncSpy).not.toHaveBeenCalled();
+  });
+
+  it('prefers the new-key value when both old and new keys are present', () => {
+    // Unlikely but possible: a user who manually added the new key while the
+    // old key was still around. The new key reflects the more-recent intent,
+    // so it wins; the old key is dropped.
+    readFileSyncSpy.mockReturnValueOnce(
+      JSON.stringify({
+        active: ['project-jail'],
+        overrides: {
+          'project-jail': {
+            'shield:project-jail:block-read-env-any-tool': 'review',
+            'shield:project-jail:review-read-env-any-tool': 'allow',
+          },
+        },
+      })
+    );
+    migrateRenamedRuleKeys();
+    const written = writeFileSyncSpy.mock.calls[0][1] as string;
+    const parsed = JSON.parse(written);
+    expect(parsed.overrides['project-jail']).toEqual({
+      'shield:project-jail:block-read-env-any-tool': 'review',
+    });
   });
 });
 
@@ -1083,8 +1213,8 @@ describe('project-jail any-tool rules', () => {
       ));
   });
 
-  describe('review-read-env-any-tool', () => {
-    const rule = 'shield:project-jail:review-read-env-any-tool';
+  describe('block-read-env-any-tool', () => {
+    const rule = 'shield:project-jail:block-read-env-any-tool';
     it('matches /project/.env', () =>
       expect(matchesShieldRule('project-jail', rule, '/project/.env')).toBe(true));
     it('matches /project/.env.local', () =>
@@ -1097,7 +1227,7 @@ describe('project-jail any-tool rules', () => {
       expect(matchesShieldRule('project-jail', rule, '/project/.env.development')).toBe(true));
     // Next.js / Vite convention: .env.<envname>.local overrides .env.<envname>
     // locally (gitignored). These commonly hold real secrets and must be
-    // reviewed alongside their non-.local siblings.
+    // blocked alongside their non-.local siblings.
     it('matches /project/.env.production.local (Next.js double-suffix)', () =>
       expect(matchesShieldRule('project-jail', rule, '/project/.env.production.local')).toBe(true));
     it('matches /project/.env.development.local', () =>
@@ -1141,6 +1271,31 @@ describe('project-jail any-tool rules', () => {
       expect(matchesShieldRule('project-jail', rule, '/home/user/project-credentials.txt')).toBe(
         false
       ));
+  });
+});
+
+// ── project-jail verdict assertions ─────────────────────────────────────────
+// Pins the verdict on the .env read rule, promoted from `review` to `block`
+// in this hardening pass. Credential-file rules deliberately keep `review`
+// (see the rationale in packages/policy-engine/src/shell/index.ts around
+// the review-read-credentials rule — config files have legitimate
+// diagnostic reads, so hard-blocking trades safety for friction).
+
+describe('project-jail verdicts', () => {
+  const projectJail = SHIELDS['project-jail'];
+  const byName = (n: string) => projectJail?.smartRules.find((r) => r.name === n);
+
+  it('block-read-env-any-tool blocks (was review)', () => {
+    expect(byName('shield:project-jail:block-read-env-any-tool')?.verdict).toBe('block');
+  });
+
+  it('credential rules deliberately stay at review', () => {
+    expect(byName('shield:project-jail:review-read-credentials-any-tool')?.verdict).toBe('review');
+    expect(byName('shield:project-jail:review-read-credentials')?.verdict).toBe('review');
+  });
+
+  it('old review-read-env-any-tool name no longer exists (migration target)', () => {
+    expect(byName('shield:project-jail:review-read-env-any-tool')).toBeUndefined();
   });
 });
 

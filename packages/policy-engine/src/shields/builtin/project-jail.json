@@ -88,7 +88,7 @@
       "reason": "Reading AWS credentials is blocked by project-jail shield"
     },
     {
-      "name": "shield:project-jail:review-read-env-any-tool",
+      "name": "shield:project-jail:block-read-env-any-tool",
       "tool": "*",
       "conditions": [
         {
@@ -98,8 +98,8 @@
           "flags": "i"
         }
       ],
-      "verdict": "review",
-      "reason": "Reading .env files requires approval (project-jail shield)"
+      "verdict": "block",
+      "reason": "Reading .env files is blocked by project-jail shield"
     },
     {
       "name": "shield:project-jail:review-read-credentials-any-tool",

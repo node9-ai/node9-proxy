@@ -19,7 +19,7 @@ import {
   detectAgents,
   node9Version,
 } from '../../setup';
-import { readActiveShields, writeActiveShields } from '../../shields';
+import { readActiveShields, writeActiveShields, migrateRenamedRuleKeys } from '../../shields';
 import { installDaemonService, isDaemonServiceInstalled } from '../../daemon/service';
 import { autoStartDaemonAndWait, isTestingMode } from '../daemon-starter';
 
@@ -109,6 +109,18 @@ export function registerInitCommand(program: Command): void {
         recommended?: boolean;
       }) => {
         console.log(chalk.cyan.bold('\n🛡️  Node9 Init\n'));
+
+        // ── Step 0: One-shot migrations ───────────────────────────────────────
+        // Rename old rule keys in the user's shields.json overrides to their
+        // current names. Silent no-op when nothing needs rewriting; logs one
+        // line per migration when it does. Must run before any shield read so
+        // overrides resolve correctly downstream.
+        {
+          const migrated = migrateRenamedRuleKeys();
+          for (const m of migrated) {
+            console.log(chalk.dim(`  🔧 Rule renamed: ${m.oldKey} → ${m.newKey}`));
+          }
+        }
 
         // ── Step 1: Shields prompt → determines mode ───────────────────────────
         let chosenMode = options.mode.toLowerCase();
