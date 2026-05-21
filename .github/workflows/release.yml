@@ -113,10 +113,14 @@ jobs:
 
           echo "Engine files changed since $LAST_TAG — applying $BUMP bump"
 
-          # npm version writes the new version to package.json with no git op
-          NEW_VERSION=$(cd packages/policy-engine && npm version "$BUMP" --no-git-tag-version)
-          # npm prefixes the output with 'v' — strip for the commit message
-          NEW_VERSION="${NEW_VERSION#v}"
+          # npm version writes the new version to package.json with no git op.
+          # Newer npm (≥10) prints multi-line stdout from `npm version` in a
+          # workspace context: the package name, the version, then funding /
+          # audit chatter. Capturing that whole blob into NEW_VERSION broke
+          # the `git tag` invocation below (release.yml run 26249979795).
+          # Discard stdout and read the canonical version from disk instead.
+          (cd packages/policy-engine && npm version "$BUMP" --no-git-tag-version >/dev/null)
+          NEW_VERSION=$(node -p "require('./packages/policy-engine/package.json').version")
           NEW_TAG="policy-engine-v$NEW_VERSION"
 
           echo "Bumping @node9/policy-engine to $NEW_VERSION"
