@@ -1676,9 +1676,11 @@ function node9ArgvForShim(): string[] {
 /**
  * Reads the current node9 version from the installed package.json.
  * Embedded as a constant in the shim so subsequent `node9 init` runs
- * can self-heal mismatched shims.
+ * can self-heal mismatched shims. Also consumed by the init telemetry
+ * payload (process.env.npm_package_version is undefined for global
+ * installs — only npm-script invocations get it).
  */
-function node9Version(): string {
+export function node9Version(): string {
   try {
     const pkg = JSON.parse(
       fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8')
