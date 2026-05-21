@@ -10,7 +10,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "(cat|less|head|tail|bat|more|open|print|nano|vim|vi|emacs|code|type)\\s+.*?\\.ssh[\\/\\\\]",
+          "value": "(cat|less|head|tail|bat|more|open|print|nano|vim|vi|emacs|code|type|grep|egrep|fgrep|rg|ag|ack|awk|gawk|sed|cut|tr|jq|yq|od|xxd|hexdump|strings|sort|uniq|tac|nl|dd)\\s+.*?\\.ssh[\\/\\\\]",
           "flags": "i"
         }
       ],
@@ -24,7 +24,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "(cat|less|head|tail|bat|more|open|print|nano|vim|vi|emacs|code|type)\\s+.*?\\.aws[\\/\\\\]",
+          "value": "(cat|less|head|tail|bat|more|open|print|nano|vim|vi|emacs|code|type|grep|egrep|fgrep|rg|ag|ack|awk|gawk|sed|cut|tr|jq|yq|od|xxd|hexdump|strings|sort|uniq|tac|nl|dd)\\s+.*?\\.aws[\\/\\\\]",
           "flags": "i"
         }
       ],
@@ -38,7 +38,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "(cat|less|head|tail|bat|more|open|print|nano|vim|vi|emacs|code|type)\\s+.*\\.env(\\.local|\\.production|\\.staging)?\\b",
+          "value": "(cat|less|head|tail|bat|more|open|print|nano|vim|vi|emacs|code|type|grep|egrep|fgrep|rg|ag|ack|awk|gawk|sed|cut|tr|jq|yq|od|xxd|hexdump|strings|sort|uniq|tac|nl|dd)\\s+.*?\\.env(\\.(local|production|staging|development|production\\.local|staging\\.local|development\\.local))?(?=\\s|$|[;&|>)<])",
           "flags": "i"
         }
       ],
@@ -52,7 +52,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "(cat|less|head|tail|bat|more|open|print|nano|vim|vi|emacs|code|type)\\s+.*(credentials\\.json|\\.netrc|\\.npmrc|\\.docker[\\/\\\\]config\\.json|gcloud[\\/\\\\]credentials)",
+          "value": "(cat|less|head|tail|bat|more|open|print|nano|vim|vi|emacs|code|type|grep|egrep|fgrep|rg|ag|ack|awk|gawk|sed|cut|tr|jq|yq|od|xxd|hexdump|strings|sort|uniq|tac|nl|dd)\\s+.*(credentials\\.json|\\.netrc|\\.npmrc|\\.docker[\\/\\\\]config\\.json|gcloud[\\/\\\\]credentials)",
           "flags": "i"
         }
       ],

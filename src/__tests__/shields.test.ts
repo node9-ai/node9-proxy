@@ -924,6 +924,127 @@ describe('aws shield rules', () => {
   });
 });
 
+// ── project-jail bash rule patterns ─────────────────────────────────────────
+// These rules use tool="bash" + field="command". Agents commonly read files
+// via grep/awk/sed/jq/xxd alongside cat/less/head — the read-tool whitelist
+// must cover that universe or the shield is bypassable. Counter-cases below
+// also pin the .env-suffix allowlist (the prior `\b` boundary mistakenly
+// matched .env.example / .env.sample dev fixtures).
+
+describe('project-jail bash rules', () => {
+  describe('block-read-env (bash)', () => {
+    const rule = 'shield:project-jail:block-read-env';
+
+    // Regression — existing read tools still block.
+    it('matches cat .env', () =>
+      expect(matchesShieldRule('project-jail', rule, 'cat .env')).toBe(true));
+    it('matches less /home/user/.env', () =>
+      expect(matchesShieldRule('project-jail', rule, 'less /home/user/.env')).toBe(true));
+    it('matches head -1 .env.production', () =>
+      expect(matchesShieldRule('project-jail', rule, 'head -1 .env.production')).toBe(true));
+
+    // New — the bypass paths from the audit. Must block after the whitelist
+    // expansion.
+    it('matches grep PASSWORD .env', () =>
+      expect(matchesShieldRule('project-jail', rule, 'grep PASSWORD .env')).toBe(true));
+    it('matches grep -i secret /home/user/.env.local', () =>
+      expect(matchesShieldRule('project-jail', rule, 'grep -i secret /home/user/.env.local')).toBe(
+        true
+      ));
+    it('matches awk on .env', () =>
+      expect(matchesShieldRule('project-jail', rule, 'awk -F= "{print $2}" .env')).toBe(true));
+    it('matches sed -n on .env', () =>
+      expect(matchesShieldRule('project-jail', rule, "sed -n '1p' .env")).toBe(true));
+    it('matches cut on .env.production', () =>
+      expect(matchesShieldRule('project-jail', rule, 'cut -d= -f2 .env.production')).toBe(true));
+    it('matches jq on .env', () =>
+      expect(matchesShieldRule('project-jail', rule, 'jq . .env')).toBe(true));
+    it('matches xxd .env', () =>
+      expect(matchesShieldRule('project-jail', rule, 'xxd .env')).toBe(true));
+    it('matches rg PASSWORD /home/user/.env', () =>
+      expect(matchesShieldRule('project-jail', rule, 'rg PASSWORD /home/user/.env')).toBe(true));
+
+    // Counter-cases — dev fixtures and unrelated commands must NOT match.
+    // The current `\b`-based regex incorrectly matches .env.example; the
+    // suffix allowlist below fixes that.
+    it('does not match cat .env.example (dev fixture)', () =>
+      expect(matchesShieldRule('project-jail', rule, 'cat .env.example')).toBe(false));
+    it('does not match cat .env.sample', () =>
+      expect(matchesShieldRule('project-jail', rule, 'cat .env.sample')).toBe(false));
+    it('does not match cat .env.test', () =>
+      expect(matchesShieldRule('project-jail', rule, 'cat .env.test')).toBe(false));
+    it('does not match cat .envrc (direnv config)', () =>
+      expect(matchesShieldRule('project-jail', rule, 'cat .envrc')).toBe(false));
+    it('does not match echo "see .env for config" (echo not a read tool)', () =>
+      expect(matchesShieldRule('project-jail', rule, 'echo "see .env for config"')).toBe(false));
+    it('does not match git commit -m "fix .env handling"', () =>
+      expect(matchesShieldRule('project-jail', rule, 'git commit -m "fix .env handling"')).toBe(
+        false
+      ));
+  });
+
+  describe('block-read-ssh (bash)', () => {
+    const rule = 'shield:project-jail:block-read-ssh';
+
+    it('matches cat ~/.ssh/id_rsa', () =>
+      expect(matchesShieldRule('project-jail', rule, 'cat ~/.ssh/id_rsa')).toBe(true));
+    it('matches grep -r KEY /home/user/.ssh/', () =>
+      expect(matchesShieldRule('project-jail', rule, 'grep -r KEY /home/user/.ssh/')).toBe(true));
+    it('matches xxd /home/user/.ssh/id_ed25519', () =>
+      expect(matchesShieldRule('project-jail', rule, 'xxd /home/user/.ssh/id_ed25519')).toBe(true));
+    it('matches awk on .ssh/config', () =>
+      expect(matchesShieldRule('project-jail', rule, 'awk /Host/ /home/user/.ssh/config')).toBe(
+        true
+      ));
+    it('does not match cd ~/.ssh', () =>
+      expect(matchesShieldRule('project-jail', rule, 'cd ~/.ssh')).toBe(false));
+  });
+
+  describe('block-read-aws (bash)', () => {
+    const rule = 'shield:project-jail:block-read-aws';
+
+    it('matches cat ~/.aws/credentials', () =>
+      expect(matchesShieldRule('project-jail', rule, 'cat ~/.aws/credentials')).toBe(true));
+    it('matches grep aws_secret_access_key on .aws/credentials', () =>
+      expect(
+        matchesShieldRule(
+          'project-jail',
+          rule,
+          'grep aws_secret_access_key /home/user/.aws/credentials'
+        )
+      ).toBe(true));
+    it('matches awk on .aws/config', () =>
+      expect(matchesShieldRule('project-jail', rule, 'awk -F= /role/ /home/user/.aws/config')).toBe(
+        true
+      ));
+    it('matches sed on .aws/credentials', () =>
+      expect(
+        matchesShieldRule('project-jail', rule, "sed -n '1,3p' /home/user/.aws/credentials")
+      ).toBe(true));
+  });
+
+  describe('review-read-credentials (bash)', () => {
+    const rule = 'shield:project-jail:review-read-credentials';
+
+    it('matches cat credentials.json', () =>
+      expect(matchesShieldRule('project-jail', rule, 'cat /home/user/credentials.json')).toBe(
+        true
+      ));
+    it('matches grep -i token .netrc', () =>
+      expect(matchesShieldRule('project-jail', rule, 'grep -i token /home/user/.netrc')).toBe(
+        true
+      ));
+    it('matches jq .auths .docker/config.json', () =>
+      expect(
+        matchesShieldRule('project-jail', rule, 'jq .auths /home/user/.docker/config.json')
+      ).toBe(true));
+    it('matches awk on .npmrc', () =>
+      expect(matchesShieldRule('project-jail', rule, 'awk /token/ /home/user/.npmrc')).toBe(true));
+    it('does not match cat my-credentials-doc.md', () =>
+      expect(matchesShieldRule('project-jail', rule, 'cat my-credentials-doc.md')).toBe(false));
+  });
+});
+
 // ── project-jail any-tool rule patterns ─────────────────────────────────────
 // These rules use tool="*" + field="file_path" so they cover Read / Edit /
 // Write / MultiEdit (and future MCP file tools). The pre-existing bash-only
