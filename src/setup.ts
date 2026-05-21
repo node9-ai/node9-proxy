@@ -92,15 +92,27 @@ function printDaemonTip(): void {
  * Returns a shell-safe hook command that works regardless of the user's $PATH.
  * Hooks run in a restricted shell (no .bashrc / nvm init), so bare "node9"
  * is often not found. Using the full node + cli.js paths avoids this.
+ *
+ * Issue #185: Claude Code on Windows runs hooks through Git Bash. The
+ * previously-generated unquoted `C:\Program Files\nodejs\node.exe ...`
+ * form broke there — bash split on whitespace and stripped backslash
+ * escapes, producing `C:Program: command not found`. Both paths now get
+ * quoted, and backslashes normalise to forward slashes (accepted by Git
+ * Bash, cmd, PowerShell, and POSIX shells alike). Quoting unconditionally
+ * also protects POSIX users whose $HOME has a space.
  */
-function fullPathCommand(subcommand: string): string {
+export function fullPathCommand(subcommand: string): string {
   if (process.env.NODE9_TESTING === '1') return `node9 ${subcommand}`;
-  const nodeExec = process.execPath; // e.g. /home/user/.nvm/.../bin/node
-  const cliScript = process.argv[1]; // dist/cli.js (dev) or .../bin/node9 (global install)
+  const nodeExec = toForwardSlashes(process.execPath); // e.g. C:/Program Files/nodejs/node.exe
+  const cliScript = toForwardSlashes(process.argv[1]); // dist/cli.js (dev) or .../bin/node9 (global)
   // When installed globally or via npm link, argv[1] is the binary itself — a
   // self-contained executable that must not be prefixed with node.
-  if (!cliScript.endsWith('.js')) return `${cliScript} ${subcommand}`;
-  return `${nodeExec} ${cliScript} ${subcommand}`;
+  if (!cliScript.endsWith('.js')) return `"${cliScript}" ${subcommand}`;
+  return `"${nodeExec}" "${cliScript}" ${subcommand}`;
+}
+
+function toForwardSlashes(p: string): string {
+  return p.replace(/\\/g, '/');
 }
 
 /**
@@ -113,11 +125,23 @@ function fullPathCommand(subcommand: string): string {
  * no longer exists on disk. Bare commands like `node9 check` (no `/`)
  * resolve via $PATH at runtime and are never considered stale here.
  */
-function isStaleHookCommand(command: string): boolean {
+export function isStaleHookCommand(command: string): boolean {
   if (!command) return false;
-  const tokens = command.split(/\s+/);
+  // Pre-fix hook commands were unquoted (`/path/to/node /path/to/cli.js
+  // check`) so a whitespace split produced clean tokens. The post-fix
+  // form is quoted (`"/path/.../node" "/path/.../cli.js" check`) where
+  // a whitespace-split would chop a single quoted token in two if the
+  // path itself contained a space. Match both forms by walking quoted
+  // and bare runs in one pass.
+  const tokens: string[] = [];
+  const re = /"([^"]*)"|(\S+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(command)) !== null) tokens.push(m[1] ?? m[2] ?? '');
   for (const tok of tokens) {
-    if (!tok.startsWith('/')) continue;
+    // Absolute path on POSIX (`/...`) or Windows (`C:/...` after the
+    // forward-slash normalisation done by fullPathCommand). Other tokens
+    // (subcommand names like `check`, `log`) are skipped.
+    if (!tok.startsWith('/') && !/^[A-Za-z]:\//.test(tok)) continue;
     if (!fs.existsSync(tok)) return true;
   }
   return false;
@@ -145,13 +169,17 @@ function writeJson(filePath: string, data: unknown): void {
 // Matches hook commands written by node9 in any of these forms:
 //   node9 check                     (global install, NODE9_TESTING)
 //   /path/to/node9 check            (global install, full path)
-//   /path/to/node /path/to/cli.js check  (npm link / local install)
-// The word-boundary prefix (?:^|[\s/\\]) prevents false matches on
-// binaries that merely contain "node9" as a substring (e.g. mynode9).
-function isNode9Hook(cmd: string | undefined): boolean {
+//   /path/to/node /path/to/cli.js check  (npm link / local install, pre-fix)
+//   "/path/to/node" "/path/to/cli.js" check  (post-#185 quoted form)
+// The word-boundary prefix (?:^|[\s/\\"]) prevents false matches on
+// binaries that merely contain "node9" as a substring (e.g. mynode9),
+// and tolerates a closing quote sitting right before the subcommand.
+export function isNode9Hook(cmd: string | undefined): boolean {
   if (!cmd) return false;
   return (
-    /(?:^|[\s/\\])node9 (?:check|log)/.test(cmd) || /(?:^|[\s/\\])cli\.js (?:check|log)/.test(cmd)
+    /(?:^|[\s/\\"])node9 (?:check|log)/.test(cmd) ||
+    /(?:^|[\s/\\"])cli\.js" (?:check|log)/.test(cmd) ||
+    /(?:^|[\s/\\])cli\.js (?:check|log)/.test(cmd)
   );
 }
 
