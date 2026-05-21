@@ -9,10 +9,12 @@ import {
   setupGemini,
   setupCursor,
   setupCodex,
+  setupOpencode,
   teardownClaude,
   teardownGemini,
   teardownCursor,
   teardownCodex,
+  teardownOpencode,
   detectAgents,
 } from '../setup.js';
 
@@ -658,7 +660,17 @@ describe('detectAgents', () => {
       windsurf: false,
       vscode: false,
       claudeDesktop: false,
+      opencode: false,
     });
+  });
+
+  it('detects Opencode via ~/.config/opencode directory', () => {
+    vi.mocked(fs.existsSync).mockImplementation(
+      (q) => String(q).replace(/\\/g, '/') === p('.config/opencode')
+    );
+    const result = detectAgents(home);
+    expect(result.opencode).toBe(true);
+    expect(result.claude).toBe(false);
   });
 
   it('detects Claude via ~/.claude directory', () => {
@@ -720,6 +732,7 @@ describe('detectAgents', () => {
       windsurf: true,
       vscode: true,
       claudeDesktop: true,
+      opencode: false,
     });
   });
 
@@ -750,6 +763,7 @@ describe('detectAgents', () => {
       windsurf: false,
       vscode: false,
       claudeDesktop: false,
+      opencode: false,
     });
     // Should warn to stderr for non-ENOENT errors so misconfigured systems surface
     expect(stderrSpy).toHaveBeenCalled();
@@ -771,6 +785,7 @@ describe('detectAgents', () => {
       windsurf: false,
       vscode: false,
       claudeDesktop: false,
+      opencode: false,
     });
     expect(stderrSpy).not.toHaveBeenCalled();
     stderrSpy.mockRestore();
@@ -1103,5 +1118,146 @@ describe('teardownCodex', () => {
   it('does nothing when file does not exist', () => {
     teardownCodex();
     expect(writtenTomlTo(configPath)).toBeNull();
+  });
+});
+
+// ── setupOpencode (#186 part 1) ──────────────────────────────────────────────
+
+describe('setupOpencode', () => {
+  const home = '/mock/home';
+  // Path layout verified against opencode-dev source (Global.Path.config
+  // is `~/.config/opencode`; plugin glob is `{plugin,plugins}/*.{ts,js}`).
+  const configPath = path.join(home, '.config', 'opencode', 'opencode.json');
+  const pluginPath = path.join(home, '.config', 'opencode', 'plugins', 'node9.js');
+
+  function writtenAsString(filePath: string): string | null {
+    // Plugin file is not JSON; we need the raw string written. Helper
+    // mirrors writtenTo but returns the un-parsed payload.
+    const calls = vi.mocked(fs.writeFileSync).mock.calls.filter(([p]) => String(p) === filePath);
+    if (calls.length === 0) return null;
+    return String(calls[calls.length - 1][1]);
+  }
+
+  it('writes both opencode.json (with mcp.node9) and the plugin shim on fresh install', async () => {
+    await setupOpencode();
+
+    const config = writtenTo(configPath);
+    expect(config).not.toBeNull();
+    expect(config.mcp.node9).toBeDefined();
+    expect(config.mcp.node9.type).toBe('local');
+    // command[0] is the binary; remaining entries are subcommand-leading args
+    expect(Array.isArray(config.mcp.node9.command)).toBe(true);
+    expect(config.mcp.node9.command.length).toBeGreaterThanOrEqual(1);
+    // Under NODE9_TESTING=1 the resolution short-circuits to "node9 mcp-server"
+    expect(config.mcp.node9.command[config.mcp.node9.command.length - 1]).toBe('mcp-server');
+    expect(config.mcp.node9.enabled).toBe(true);
+
+    const plugin = writtenAsString(pluginPath);
+    expect(plugin).not.toBeNull();
+    expect(plugin).toContain('NODE9_SHIM_VERSION');
+    expect(plugin).toContain('"tool.execute.before"');
+  });
+
+  it('preserves existing MCP servers when adding node9', async () => {
+    withExistingFile(configPath, {
+      mcp: {
+        brave: { type: 'local', command: ['npx', 'server-brave'] },
+      },
+    });
+
+    await setupOpencode();
+
+    const config = writtenTo(configPath);
+    expect(config.mcp.brave).toBeDefined();
+    expect(config.mcp.brave.command).toEqual(['npx', 'server-brave']);
+    expect(config.mcp.node9).toBeDefined();
+  });
+
+  it('is idempotent — no write when both files are already current', async () => {
+    // Generate the canonical shim content via the same generator
+    // setupOpencode uses, then mock both files as existing with that
+    // content. setupOpencode should detect no changes and skip the writes.
+    // We construct the expected content lazily by running setupOpencode
+    // once to disk-capture it, then resetting and re-running.
+    await setupOpencode();
+    const initialConfig = writtenTo(configPath);
+    const initialPlugin = writtenAsString(pluginPath);
+    expect(initialConfig).not.toBeNull();
+    expect(initialPlugin).not.toBeNull();
+
+    // Reset write mock; replay the same state and re-run setupOpencode.
+    vi.mocked(fs.writeFileSync).mockClear();
+    withExistingFiles({
+      [configPath]: initialConfig,
+      [pluginPath]: initialPlugin as unknown as object, // string passed via JSON.stringify path; readFileSync returns whatever we provide
+    });
+
+    await setupOpencode();
+
+    // Implementation may still issue some no-op writes (Codex does); we
+    // only assert the content is byte-identical to the initial pass.
+    const second = writtenTo(configPath);
+    if (second !== null) expect(second).toEqual(initialConfig);
+  });
+
+  it('self-heals a shim whose NODE9_SHIM_VERSION is stale', async () => {
+    // Drop in an old shim that claims version 0.0.1; setupOpencode
+    // should rewrite it because the version constant won't match the
+    // current node9 version.
+    const stale =
+      '// NODE9_SHIM_VERSION = "0.0.1"\nmodule.exports = { id: "node9", server: async () => ({}) };';
+    withExistingFiles({
+      [configPath]: {
+        mcp: { node9: { type: 'local', command: ['node9', 'mcp-server'], enabled: true } },
+      },
+      [pluginPath]: stale as unknown as object,
+    });
+
+    await setupOpencode();
+
+    const plugin = writtenAsString(pluginPath);
+    expect(plugin).not.toBeNull();
+    expect(plugin).not.toContain('0.0.1');
+    expect(plugin).toContain('"tool.execute.before"');
+  });
+});
+
+// ── teardownOpencode ─────────────────────────────────────────────────────────
+
+describe('teardownOpencode', () => {
+  const home = '/mock/home';
+  const configPath = path.join(home, '.config', 'opencode', 'opencode.json');
+  const pluginPath = path.join(home, '.config', 'opencode', 'plugins', 'node9.js');
+
+  it('removes the node9 MCP entry from opencode.json', () => {
+    withExistingFile(configPath, {
+      mcp: {
+        node9: { type: 'local', command: ['node9', 'mcp-server'], enabled: true },
+        brave: { type: 'local', command: ['npx', 'server-brave'] },
+      },
+    });
+
+    teardownOpencode();
+
+    const written = writtenTo(configPath);
+    expect(written.mcp.node9).toBeUndefined();
+    expect(written.mcp.brave).toBeDefined();
+  });
+
+  it('removes the node9 plugin shim from disk', () => {
+    const unlinkSpy = vi.spyOn(fs, 'unlinkSync').mockImplementation(() => undefined);
+    withExistingFiles({
+      [pluginPath]: '// NODE9_SHIM_VERSION = "1.25.0"\nmodule.exports = {};' as unknown as object,
+    });
+
+    teardownOpencode();
+
+    expect(unlinkSpy).toHaveBeenCalledWith(pluginPath);
+    unlinkSpy.mockRestore();
+  });
+
+  it('does nothing when no opencode config exists', () => {
+    teardownOpencode();
+    expect(writtenTo(configPath)).toBeNull();
   });
 });

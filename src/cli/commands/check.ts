@@ -46,6 +46,19 @@ function sanitize(value: string): string {
  * Exported for unit testing — pure function over (payload, process.env).
  */
 export function detectAiAgent(payload: Record<string, unknown>): string {
+  // Layer 0: explicit meta.agent tag set by a node9-authored plugin
+  // shim (Opencode, Pi, and any future agent we wire up by dropping a
+  // plugin file). The shim controls both ends — it shapes the payload
+  // and sets meta.agent — so we trust the tag absolutely when present
+  // and well-formed. Must precede Layer 1 because these shims still
+  // include hook_event_name: "PreToolUse" in the payload to match the
+  // shape `node9 check` already understands.
+  const meta = payload.meta;
+  if (meta && typeof meta === 'object') {
+    const tagged = (meta as { agent?: unknown }).agent;
+    if (typeof tagged === 'string' && tagged.length > 0) return tagged;
+  }
+
   // Layer 1: payload fingerprint (existing, most reliable).
   // Codex's payload is Claude-compatible (same hook_event_name, tool_use_id,
   // permission_mode) PLUS a Codex-specific `turn_id` field per

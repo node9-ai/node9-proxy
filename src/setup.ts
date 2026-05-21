@@ -6,6 +6,7 @@ import chalk from 'chalk';
 import { confirm } from '@inquirer/prompts';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import { seedMcpPinsIfMissing } from './mcp-pin';
+import { renderOpencodeShim } from './setup-opencode-shim';
 
 interface McpServer {
   type?: string;
@@ -723,6 +724,7 @@ export function detectAgents(homeDir: string = os.homedir()): {
   windsurf: boolean;
   vscode: boolean;
   claudeDesktop: boolean;
+  opencode: boolean;
 } {
   const exists = (p: string): boolean => {
     try {
@@ -744,6 +746,7 @@ export function detectAgents(homeDir: string = os.homedir()): {
     windsurf: exists(path.join(homeDir, '.codeium', 'windsurf')),
     vscode: exists(path.join(homeDir, '.vscode')),
     claudeDesktop: desktopPath !== null && exists(path.dirname(desktopPath)),
+    opencode: exists(path.join(homeDir, '.config', 'opencode')),
   };
 }
 
@@ -1608,6 +1611,237 @@ export function teardownClaudeDesktop(): void {
   }
 }
 
+// ── Opencode (#186 part 1) ───────────────────────────────────────────────────
+//
+// Opencode integration shape (verified against
+// /home/nadav/node9/opensources/opencode-dev):
+//
+//   - Config:  ~/.config/opencode/opencode.json
+//              MCP servers under `mcp.<name>` with shape
+//              { type: "local", command: string[], enabled?, timeout? }
+//              (packages/opencode/src/config/mcp.ts).
+//
+//   - Plugins: ~/.config/opencode/plugins/*.js (or .ts)
+//              Auto-discovered via Glob.scan("{plugin,plugins}/*.{ts,js}", …)
+//              (packages/opencode/src/config/plugin.ts:29). Each plugin file
+//              default-exports an object `{ id, server }`; `server` is an
+//              async function that returns a Hooks object
+//              (packages/opencode/src/plugin/shared.ts:272 readV1Plugin).
+//
+//   - Blocking: a hook handler throwing an Error propagates through the
+//               plugin trigger (packages/opencode/src/plugin/index.ts:273)
+//               and halts the tool call.
+//
+// We write the plugin file via renderOpencodeShim (separate module) and
+// add an `mcp.node9` entry to opencode.json with the canonical local
+// command. Plugins dir is NOT auto-created by Opencode (only `data /
+// config / state / tmp / log / bin / repos` are — packages/core/src/global.ts:34),
+// so setupOpencode must mkdir -p it itself.
+
+interface OpencodeMcpEntry {
+  type?: 'local' | 'remote';
+  command?: string[];
+  environment?: Record<string, string>;
+  enabled?: boolean;
+  timeout?: number;
+  url?: string;
+}
+
+interface OpencodeConfig {
+  mcp?: Record<string, OpencodeMcpEntry>;
+  [key: string]: unknown;
+}
+
+/**
+ * Resolves the argv prefix used to invoke the node9 CLI from a child
+ * process. Two production shapes mirroring fullPathCommand's logic:
+ *
+ *   - Global npm install: argv[1] is a self-contained bin wrapper
+ *     (no .js suffix). spawnSync that path directly.
+ *
+ *   - Dev / npm-link: argv[1] is the cli.js file with a #!/usr/bin/env
+ *     node shebang. Invoke via the current node executable + cli.js.
+ *
+ * Under NODE9_TESTING=1 the resolution collapses to the bare ['node9']
+ * form so unit tests don't depend on the local filesystem layout.
+ */
+function node9ArgvForShim(): string[] {
+  if (process.env.NODE9_TESTING === '1') return ['node9'];
+  const nodeExec = process.execPath;
+  const cliScript = process.argv[1];
+  if (cliScript && cliScript.endsWith('.js')) return [nodeExec, cliScript];
+  return [cliScript];
+}
+
+/**
+ * Reads the current node9 version from the installed package.json.
+ * Embedded as a constant in the shim so subsequent `node9 init` runs
+ * can self-heal mismatched shims.
+ */
+function node9Version(): string {
+  try {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8')
+    ) as { version?: string };
+    return pkg.version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
+const OPENCODE_PLUGIN_NAME = 'node9.js';
+
+export async function setupOpencode(): Promise<void> {
+  seedMcpPinsIfMissing(); // #179: distinguish never-installed from no-pins-yet
+  const homeDir = os.homedir();
+  const configDir = path.join(homeDir, '.config', 'opencode');
+  const pluginsDir = path.join(configDir, 'plugins');
+  const configPath = path.join(configDir, 'opencode.json');
+  const pluginPath = path.join(pluginsDir, OPENCODE_PLUGIN_NAME);
+
+  // Opencode's top-level await auto-creates ~/.config/opencode/ on first
+  // run (packages/core/src/global.ts:34) but NOT the plugins/ subdir.
+  // mkdir -p so subsequent writeFileSync doesn't fail with ENOENT on
+  // users who installed Opencode but never launched it.
+  try {
+    fs.mkdirSync(pluginsDir, { recursive: true });
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'EEXIST') {
+      console.log(chalk.yellow(`  ⚠️  Could not create ${pluginsDir}: ${code ?? String(err)}`));
+      return;
+    }
+  }
+
+  const shimContent = renderOpencodeShim({
+    node9Argv: node9ArgvForShim(),
+    version: node9Version(),
+  });
+
+  // Write the shim file. Self-heal: if the on-disk content differs from
+  // what we'd write right now (different version, hand-edits, etc.),
+  // overwrite. The file lives in a directory we own — users are
+  // expected to keep their custom plugins elsewhere.
+  let pluginChanged = false;
+  const existingShim = (() => {
+    try {
+      return fs.readFileSync(pluginPath, 'utf-8');
+    } catch {
+      return null;
+    }
+  })();
+  if (existingShim !== shimContent) {
+    fs.writeFileSync(pluginPath, shimContent);
+    pluginChanged = true;
+    if (existingShim) {
+      console.log(chalk.yellow('  🔧 Opencode plugin shim updated to current version'));
+    } else {
+      console.log(
+        chalk.green('  ✅ Opencode plugin installed → tool.execute.before / after, chat.message')
+      );
+    }
+  }
+
+  // Read/update opencode.json. We use the same JSON file Opencode itself
+  // ships with; comments-preserving .jsonc support is out of scope for
+  // this first cut — Opencode merges .json + .jsonc at load time, so a
+  // user with a .jsonc keeps it untouched and our .json sits alongside.
+  const config = readJson<OpencodeConfig>(configPath) ?? {};
+  const mcp = config.mcp ?? {};
+  let configChanged = false;
+
+  // Build the canonical mcp.node9 entry. command[] is [...argv, 'mcp-server'].
+  const desiredCommand = [...node9ArgvForShim(), 'mcp-server'];
+  const desiredEntry: OpencodeMcpEntry = {
+    type: 'local',
+    command: desiredCommand,
+    enabled: true,
+  };
+
+  const existing = mcp['node9'];
+  const entryMatches =
+    existing &&
+    existing.type === 'local' &&
+    Array.isArray(existing.command) &&
+    existing.command.length === desiredCommand.length &&
+    existing.command.every((c, i) => c === desiredCommand[i]) &&
+    existing.enabled !== false;
+  if (!entryMatches) {
+    mcp['node9'] = desiredEntry;
+    config.mcp = mcp;
+    configChanged = true;
+    if (existing) {
+      console.log(chalk.yellow('  🔧 Opencode MCP entry updated (node9)'));
+    } else {
+      console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    }
+  }
+
+  // Wrap any existing third-party local MCP servers (matches the prompt
+  // flow used by setupClaude / setupGemini / setupCursor / setupCodex).
+  // Out of scope for this first cut — wiring MCP wrapping for Opencode
+  // requires the same UX flow we'd need for Pi anyway, so it can land
+  // alongside Pi support in PR2 if needed. For now, node9 is added; any
+  // existing MCP servers are left as-is.
+  // TODO(#186 PR2): MCP-wrap third-party Opencode MCP servers.
+
+  if (configChanged) writeJson(configPath, config);
+
+  if (pluginChanged || configChanged) {
+    console.log(chalk.green.bold('🛡️  Node9 is now protecting Opencode!'));
+    console.log(chalk.gray('    Restart Opencode for changes to take effect.'));
+    printDaemonTip();
+  } else {
+    console.log(chalk.blue('  ℹ️  Node9 is already fully configured for Opencode.'));
+  }
+}
+
+export function teardownOpencode(): void {
+  const homeDir = os.homedir();
+  const configDir = path.join(homeDir, '.config', 'opencode');
+  const pluginsDir = path.join(configDir, 'plugins');
+  const configPath = path.join(configDir, 'opencode.json');
+  const pluginPath = path.join(pluginsDir, OPENCODE_PLUGIN_NAME);
+
+  // 1. Remove the plugin shim if it's ours. We don't try to detect
+  // hand-edited shims via content sniffing; the file lives in a
+  // node9-owned filename (node9.js) and `node9 teardown` is an
+  // explicit user action.
+  try {
+    if (fs.existsSync(pluginPath)) {
+      fs.unlinkSync(pluginPath);
+      console.log(chalk.green('  ✅ Removed node9 plugin from ~/.config/opencode/plugins/'));
+    }
+  } catch (err) {
+    console.log(chalk.yellow(`  ⚠️  Could not remove ${pluginPath}: ${String(err)}`));
+  }
+
+  // 2. Remove mcp.node9 from opencode.json (and unwrap any node9-
+  // wrapped third-party MCP servers — same shape as the other teardowns).
+  const config = readJson<OpencodeConfig>(configPath);
+  if (!config) {
+    console.log(chalk.blue('  ℹ️  ~/.config/opencode/opencode.json not found — nothing to remove'));
+    return;
+  }
+  const mcp = config.mcp ?? {};
+  let changed = false;
+
+  if (mcp['node9']) {
+    delete mcp['node9'];
+    changed = true;
+    console.log(
+      chalk.green('  ✅ Removed node9 MCP server entry from ~/.config/opencode/opencode.json')
+    );
+  }
+
+  if (changed) {
+    config.mcp = mcp;
+    writeJson(configPath, config);
+  } else {
+    console.log(chalk.blue('  ℹ️  No node9 entries found in ~/.config/opencode/opencode.json'));
+  }
+}
+
 // ── Agent wired-status checks ─────────────────────────────────────────────────
 // Each function returns true if node9 hooks/MCP are present in the agent config.
 
@@ -1618,7 +1852,8 @@ export type AgentName =
   | 'codex'
   | 'windsurf'
   | 'vscode'
-  | 'claudeDesktop';
+  | 'claudeDesktop'
+  | 'opencode';
 
 export interface AgentStatus {
   name: AgentName;
@@ -1717,6 +1952,30 @@ export function getAgentsStatus(homeDir: string = os.homedir()): AgentStatus[] {
         return !!(cfg?.mcpServers && hasNode9McpServer(cfg.mcpServers));
       })(),
       mode: detected.claudeDesktop ? 'mcp' : null,
+    },
+    {
+      name: 'opencode',
+      label: 'Opencode',
+      installed: detected.opencode,
+      wired: (() => {
+        // Wired = plugin shim present OR mcp.node9 entry present. We
+        // accept either signal because the user might delete one and
+        // keep the other; the protection level differs (hooks-only vs
+        // MCP-only) but "wired" is binary.
+        const pluginPath = path.join(
+          homeDir,
+          '.config',
+          'opencode',
+          'plugins',
+          OPENCODE_PLUGIN_NAME
+        );
+        if (fs.existsSync(pluginPath)) return true;
+        const cfg = readJson<OpencodeConfig>(
+          path.join(homeDir, '.config', 'opencode', 'opencode.json')
+        );
+        return !!cfg?.mcp?.['node9'];
+      })(),
+      mode: detected.opencode ? 'hooks' : null,
     },
   ];
 }
