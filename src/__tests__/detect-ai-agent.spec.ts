@@ -33,6 +33,44 @@ describe('detectAiAgent', () => {
     }
   });
 
+  // ── Layer 0: explicit meta.agent tag (set by node9-authored shims) ────
+  // Plugins for Opencode / Pi / any future agent ship with the node9
+  // CLI. They tag payloads with meta.agent so detectAiAgent doesn't
+  // need a per-agent fingerprint branch. Layer-0 because it has to
+  // take precedence over the Claude/Codex/Gemini payload fingerprints
+  // (an Opencode hook still carries hook_event_name: "PreToolUse" and
+  // would otherwise be misattributed to Claude Code).
+
+  it('detects Opencode from meta.agent tag', () => {
+    expect(detectAiAgent({ hook_event_name: 'PreToolUse', meta: { agent: 'Opencode' } })).toBe(
+      'Opencode'
+    );
+  });
+
+  it('meta.agent takes precedence over hook_event_name fingerprint', () => {
+    // Without the Layer-0 branch, hook_event_name: "PreToolUse" would
+    // route to "Claude Code" by Layer-1 — the most common
+    // misattribution we want to prevent.
+    expect(detectAiAgent({ hook_event_name: 'PreToolUse', meta: { agent: 'Pi' } })).toBe('Pi');
+  });
+
+  it('meta.agent takes precedence over env vars', () => {
+    process.env.CLAUDECODE = '1';
+    expect(detectAiAgent({ meta: { agent: 'Opencode' } })).toBe('Opencode');
+  });
+
+  it('ignores meta.agent if not a non-empty string', () => {
+    // Defensive: a malformed payload with meta.agent: null or "" should
+    // fall through to existing detection rather than return a bogus
+    // empty-string agent name.
+    expect(detectAiAgent({ hook_event_name: 'PreToolUse', meta: { agent: '' } })).toBe(
+      'Claude Code'
+    );
+    expect(
+      detectAiAgent({ hook_event_name: 'PreToolUse', meta: { agent: null as unknown as string } })
+    ).toBe('Claude Code');
+  });
+
   // ── Layer 1: payload fingerprint ────────────────────────────────────
 
   it('detects Claude Code from PreToolUse hook event', () => {
