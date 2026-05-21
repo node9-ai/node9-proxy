@@ -17,8 +17,9 @@ import {
   setupClaudeDesktop,
   setupOpencode,
   detectAgents,
+  node9Version,
 } from '../../setup';
-import { readActiveShields, writeActiveShields } from '../../shields';
+import { readActiveShields, writeActiveShields, migrateRenamedRuleKeys } from '../../shields';
 import { installDaemonService, isDaemonServiceInstalled } from '../../daemon/service';
 import { autoStartDaemonAndWait, isTestingMode } from '../daemon-starter';
 
@@ -33,14 +34,34 @@ import { autoStartDaemonAndWait, isTestingMode } from '../daemon-starter';
 // default would create false positives for users who don't use those services.
 const DEFAULT_SHIELDS = ['bash-safe', 'filesystem', 'project-jail'];
 
-function fireTelemetryPing(agents: string[]): void {
+export interface TelemetryPayload {
+  event: 'init_completed';
+  agents_detected: string[];
+  os: string;
+  node9_version: string;
+  first_install: boolean;
+}
+
+/**
+ * Build the install-telemetry payload. Exported so the unit test can
+ * pin the shape — including that `node9_version` resolves to a real
+ * version string, not the literal 'unknown' (which is what the prior
+ * `process.env.npm_package_version` read returned for global CLI
+ * installs, since npm only populates that env var for `npm run …`).
+ */
+export function buildTelemetryPayload(agents: string[], firstInstall: boolean): TelemetryPayload {
+  return {
+    event: 'init_completed',
+    agents_detected: agents,
+    os: process.platform,
+    node9_version: node9Version(),
+    first_install: firstInstall,
+  };
+}
+
+function fireTelemetryPing(agents: string[], firstInstall: boolean): void {
   try {
-    const body = JSON.stringify({
-      event: 'init_completed',
-      agents_detected: agents,
-      os: process.platform,
-      node9_version: process.env.npm_package_version ?? 'unknown',
-    });
+    const body = JSON.stringify(buildTelemetryPayload(agents, firstInstall));
     const req = https.request(
       {
         hostname: 'api.node9.ai',
@@ -89,6 +110,18 @@ export function registerInitCommand(program: Command): void {
       }) => {
         console.log(chalk.cyan.bold('\n🛡️  Node9 Init\n'));
 
+        // ── Step 0: One-shot migrations ───────────────────────────────────────
+        // Rename old rule keys in the user's shields.json overrides to their
+        // current names. Silent no-op when nothing needs rewriting; logs one
+        // line per migration when it does. Must run before any shield read so
+        // overrides resolve correctly downstream.
+        {
+          const migrated = migrateRenamedRuleKeys();
+          for (const m of migrated) {
+            console.log(chalk.dim(`  🔧 Rule renamed: ${m.oldKey} → ${m.newKey}`));
+          }
+        }
+
         // ── Step 1: Shields prompt → determines mode ───────────────────────────
         let chosenMode = options.mode.toLowerCase();
         if (!['standard', 'strict', 'audit', 'observe'].includes(chosenMode)) {
@@ -133,6 +166,11 @@ export function registerInitCommand(program: Command): void {
 
         // ── Step 2: Create or update config ───────────────────────────────────
         const configPath = path.join(os.homedir(), '.node9', 'config.json');
+        // Captured BEFORE the create/update branch so the telemetry payload
+        // can distinguish first-time installs from re-runs of `node9 init`.
+        // `--force` overwrites an existing config but is still a re-install
+        // (the machine has run node9 before), so it counts as `false`.
+        const isFirstInstall = !fs.existsSync(configPath);
 
         if (fs.existsSync(configPath) && !options.force) {
           // Update mode in existing config to reflect shields choice
@@ -261,7 +299,7 @@ export function registerInitCommand(program: Command): void {
             message: 'Send anonymous usage stats to help improve node9? (no code, no args)',
             default: true,
           });
-          if (sendTelemetry) fireTelemetryPing(found);
+          if (sendTelemetry) fireTelemetryPing(found, isFirstInstall);
           console.log('');
         }
 

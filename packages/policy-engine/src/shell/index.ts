@@ -393,7 +393,7 @@ const SENSITIVE_PATH_RULES: Array<{
   },
   {
     // Mirrors the JSON shield's `.env` pattern (project-jail.json's
-    // review-read-env-any-tool) so the AST FS-op path catches the
+    // block-read-env-any-tool) so the AST FS-op path catches the
     // same set the regex shield does — including Next.js / Vite's
     // `.env.<env>.local` double-suffix overrides which are commonly
     // gitignored AND commonly contain real secrets.

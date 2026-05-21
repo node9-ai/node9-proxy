@@ -20,6 +20,7 @@ import {
   readShieldOverrides,
   writeShieldOverride,
   clearShieldOverride,
+  migrateRenamedRuleKeys,
   isShieldVerdict,
   installShield,
 } from '../shields.js';
@@ -342,6 +343,135 @@ describe('shield overrides', () => {
     const written = writeFileSyncSpy.mock.calls[0][1] as string;
     const parsed = JSON.parse(written);
     expect(parsed.overrides).toBeUndefined();
+  });
+});
+
+// ── migrateRenamedRuleKeys ────────────────────────────────────────────────────
+// One-shot rewrite for rule keys renamed across versions. Triggered from
+// `node9 init`. Idempotent — running on already-migrated state is a no-op.
+describe('migrateRenamedRuleKeys', () => {
+  it('rewrites the old review-read-env-any-tool key to block-read-env-any-tool', () => {
+    readFileSyncSpy.mockReturnValueOnce(
+      JSON.stringify({
+        active: ['project-jail'],
+        overrides: {
+          'project-jail': {
+            'shield:project-jail:review-read-env-any-tool': 'review',
+          },
+        },
+      })
+    );
+    const migrated = migrateRenamedRuleKeys();
+    expect(migrated).toHaveLength(1);
+
+    const written = writeFileSyncSpy.mock.calls[0][1] as string;
+    const parsed = JSON.parse(written);
+    expect(parsed.overrides['project-jail']).toEqual({
+      'shield:project-jail:block-read-env-any-tool': 'review',
+    });
+  });
+
+  it('preserves the user-set verdict value during the rename', () => {
+    readFileSyncSpy.mockReturnValueOnce(
+      JSON.stringify({
+        active: ['project-jail'],
+        overrides: {
+          'project-jail': { 'shield:project-jail:review-read-env-any-tool': 'allow' },
+        },
+      })
+    );
+    migrateRenamedRuleKeys();
+    const written = writeFileSyncSpy.mock.calls[0][1] as string;
+    const parsed = JSON.parse(written);
+    expect(parsed.overrides['project-jail']['shield:project-jail:block-read-env-any-tool']).toBe(
+      'allow'
+    );
+  });
+
+  it('leaves credential rule overrides untouched (those rules deliberately keep their names)', () => {
+    readFileSyncSpy.mockReturnValueOnce(
+      JSON.stringify({
+        active: ['project-jail'],
+        overrides: {
+          'project-jail': {
+            'shield:project-jail:review-read-credentials-any-tool': 'review',
+            'shield:project-jail:review-read-credentials': 'allow',
+          },
+        },
+      })
+    );
+    const migrated = migrateRenamedRuleKeys();
+    // No renames apply — both keys stay as-is. The migration is a no-op.
+    expect(migrated).toEqual([]);
+    expect(writeFileSyncSpy).not.toHaveBeenCalled();
+  });
+
+  it('leaves unrelated overrides untouched', () => {
+    readFileSyncSpy.mockReturnValueOnce(
+      JSON.stringify({
+        active: ['project-jail', 'postgres'],
+        overrides: {
+          'project-jail': { 'shield:project-jail:review-read-env-any-tool': 'review' },
+          postgres: { 'shield:postgres:block-drop-table': 'review' },
+        },
+      })
+    );
+    migrateRenamedRuleKeys();
+    const written = writeFileSyncSpy.mock.calls[0][1] as string;
+    const parsed = JSON.parse(written);
+    expect(parsed.overrides.postgres).toEqual({ 'shield:postgres:block-drop-table': 'review' });
+  });
+
+  it('is idempotent — second run is a no-op when no old keys remain', () => {
+    readFileSyncSpy.mockReturnValueOnce(
+      JSON.stringify({
+        active: ['project-jail'],
+        overrides: {
+          'project-jail': { 'shield:project-jail:block-read-env-any-tool': 'review' },
+        },
+      })
+    );
+    const migrated = migrateRenamedRuleKeys();
+    expect(migrated).toEqual([]);
+    // Nothing written to disk when nothing changed
+    expect(writeFileSyncSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns empty array when no overrides exist', () => {
+    readFileSyncSpy.mockReturnValueOnce(JSON.stringify({ active: ['project-jail'] }));
+    expect(migrateRenamedRuleKeys()).toEqual([]);
+    expect(writeFileSyncSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns empty array when shields.json does not exist', () => {
+    readFileSyncSpy.mockImplementationOnce(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    expect(migrateRenamedRuleKeys()).toEqual([]);
+    expect(writeFileSyncSpy).not.toHaveBeenCalled();
+  });
+
+  it('prefers the new-key value when both old and new keys are present', () => {
+    // Unlikely but possible: a user who manually added the new key while the
+    // old key was still around. The new key reflects the more-recent intent,
+    // so it wins; the old key is dropped.
+    readFileSyncSpy.mockReturnValueOnce(
+      JSON.stringify({
+        active: ['project-jail'],
+        overrides: {
+          'project-jail': {
+            'shield:project-jail:block-read-env-any-tool': 'review',
+            'shield:project-jail:review-read-env-any-tool': 'allow',
+          },
+        },
+      })
+    );
+    migrateRenamedRuleKeys();
+    const written = writeFileSyncSpy.mock.calls[0][1] as string;
+    const parsed = JSON.parse(written);
+    expect(parsed.overrides['project-jail']).toEqual({
+      'shield:project-jail:block-read-env-any-tool': 'review',
+    });
   });
 });
 
@@ -924,6 +1054,127 @@ describe('aws shield rules', () => {
   });
 });
 
+// ── project-jail bash rule patterns ─────────────────────────────────────────
+// These rules use tool="bash" + field="command". Agents commonly read files
+// via grep/awk/sed/jq/xxd alongside cat/less/head — the read-tool whitelist
+// must cover that universe or the shield is bypassable. Counter-cases below
+// also pin the .env-suffix allowlist (the prior `\b` boundary mistakenly
+// matched .env.example / .env.sample dev fixtures).
+
+describe('project-jail bash rules', () => {
+  describe('block-read-env (bash)', () => {
+    const rule = 'shield:project-jail:block-read-env';
+
+    // Regression — existing read tools still block.
+    it('matches cat .env', () =>
+      expect(matchesShieldRule('project-jail', rule, 'cat .env')).toBe(true));
+    it('matches less /home/user/.env', () =>
+      expect(matchesShieldRule('project-jail', rule, 'less /home/user/.env')).toBe(true));
+    it('matches head -1 .env.production', () =>
+      expect(matchesShieldRule('project-jail', rule, 'head -1 .env.production')).toBe(true));
+
+    // New — the bypass paths from the audit. Must block after the whitelist
+    // expansion.
+    it('matches grep PASSWORD .env', () =>
+      expect(matchesShieldRule('project-jail', rule, 'grep PASSWORD .env')).toBe(true));
+    it('matches grep -i secret /home/user/.env.local', () =>
+      expect(matchesShieldRule('project-jail', rule, 'grep -i secret /home/user/.env.local')).toBe(
+        true
+      ));
+    it('matches awk on .env', () =>
+      expect(matchesShieldRule('project-jail', rule, 'awk -F= "{print $2}" .env')).toBe(true));
+    it('matches sed -n on .env', () =>
+      expect(matchesShieldRule('project-jail', rule, "sed -n '1p' .env")).toBe(true));
+    it('matches cut on .env.production', () =>
+      expect(matchesShieldRule('project-jail', rule, 'cut -d= -f2 .env.production')).toBe(true));
+    it('matches jq on .env', () =>
+      expect(matchesShieldRule('project-jail', rule, 'jq . .env')).toBe(true));
+    it('matches xxd .env', () =>
+      expect(matchesShieldRule('project-jail', rule, 'xxd .env')).toBe(true));
+    it('matches rg PASSWORD /home/user/.env', () =>
+      expect(matchesShieldRule('project-jail', rule, 'rg PASSWORD /home/user/.env')).toBe(true));
+
+    // Counter-cases — dev fixtures and unrelated commands must NOT match.
+    // The current `\b`-based regex incorrectly matches .env.example; the
+    // suffix allowlist below fixes that.
+    it('does not match cat .env.example (dev fixture)', () =>
+      expect(matchesShieldRule('project-jail', rule, 'cat .env.example')).toBe(false));
+    it('does not match cat .env.sample', () =>
+      expect(matchesShieldRule('project-jail', rule, 'cat .env.sample')).toBe(false));
+    it('does not match cat .env.test', () =>
+      expect(matchesShieldRule('project-jail', rule, 'cat .env.test')).toBe(false));
+    it('does not match cat .envrc (direnv config)', () =>
+      expect(matchesShieldRule('project-jail', rule, 'cat .envrc')).toBe(false));
+    it('does not match echo "see .env for config" (echo not a read tool)', () =>
+      expect(matchesShieldRule('project-jail', rule, 'echo "see .env for config"')).toBe(false));
+    it('does not match git commit -m "fix .env handling"', () =>
+      expect(matchesShieldRule('project-jail', rule, 'git commit -m "fix .env handling"')).toBe(
+        false
+      ));
+  });
+
+  describe('block-read-ssh (bash)', () => {
+    const rule = 'shield:project-jail:block-read-ssh';
+
+    it('matches cat ~/.ssh/id_rsa', () =>
+      expect(matchesShieldRule('project-jail', rule, 'cat ~/.ssh/id_rsa')).toBe(true));
+    it('matches grep -r KEY /home/user/.ssh/', () =>
+      expect(matchesShieldRule('project-jail', rule, 'grep -r KEY /home/user/.ssh/')).toBe(true));
+    it('matches xxd /home/user/.ssh/id_ed25519', () =>
+      expect(matchesShieldRule('project-jail', rule, 'xxd /home/user/.ssh/id_ed25519')).toBe(true));
+    it('matches awk on .ssh/config', () =>
+      expect(matchesShieldRule('project-jail', rule, 'awk /Host/ /home/user/.ssh/config')).toBe(
+        true
+      ));
+    it('does not match cd ~/.ssh', () =>
+      expect(matchesShieldRule('project-jail', rule, 'cd ~/.ssh')).toBe(false));
+  });
+
+  describe('block-read-aws (bash)', () => {
+    const rule = 'shield:project-jail:block-read-aws';
+
+    it('matches cat ~/.aws/credentials', () =>
+      expect(matchesShieldRule('project-jail', rule, 'cat ~/.aws/credentials')).toBe(true));
+    it('matches grep aws_secret_access_key on .aws/credentials', () =>
+      expect(
+        matchesShieldRule(
+          'project-jail',
+          rule,
+          'grep aws_secret_access_key /home/user/.aws/credentials'
+        )
+      ).toBe(true));
+    it('matches awk on .aws/config', () =>
+      expect(matchesShieldRule('project-jail', rule, 'awk -F= /role/ /home/user/.aws/config')).toBe(
+        true
+      ));
+    it('matches sed on .aws/credentials', () =>
+      expect(
+        matchesShieldRule('project-jail', rule, "sed -n '1,3p' /home/user/.aws/credentials")
+      ).toBe(true));
+  });
+
+  describe('review-read-credentials (bash)', () => {
+    const rule = 'shield:project-jail:review-read-credentials';
+
+    it('matches cat credentials.json', () =>
+      expect(matchesShieldRule('project-jail', rule, 'cat /home/user/credentials.json')).toBe(
+        true
+      ));
+    it('matches grep -i token .netrc', () =>
+      expect(matchesShieldRule('project-jail', rule, 'grep -i token /home/user/.netrc')).toBe(
+        true
+      ));
+    it('matches jq .auths .docker/config.json', () =>
+      expect(
+        matchesShieldRule('project-jail', rule, 'jq .auths /home/user/.docker/config.json')
+      ).toBe(true));
+    it('matches awk on .npmrc', () =>
+      expect(matchesShieldRule('project-jail', rule, 'awk /token/ /home/user/.npmrc')).toBe(true));
+    it('does not match cat my-credentials-doc.md', () =>
+      expect(matchesShieldRule('project-jail', rule, 'cat my-credentials-doc.md')).toBe(false));
+  });
+});
+
 // ── project-jail any-tool rule patterns ─────────────────────────────────────
 // These rules use tool="*" + field="file_path" so they cover Read / Edit /
 // Write / MultiEdit (and future MCP file tools). The pre-existing bash-only
@@ -962,8 +1213,8 @@ describe('project-jail any-tool rules', () => {
       ));
   });
 
-  describe('review-read-env-any-tool', () => {
-    const rule = 'shield:project-jail:review-read-env-any-tool';
+  describe('block-read-env-any-tool', () => {
+    const rule = 'shield:project-jail:block-read-env-any-tool';
     it('matches /project/.env', () =>
       expect(matchesShieldRule('project-jail', rule, '/project/.env')).toBe(true));
     it('matches /project/.env.local', () =>
@@ -976,7 +1227,7 @@ describe('project-jail any-tool rules', () => {
       expect(matchesShieldRule('project-jail', rule, '/project/.env.development')).toBe(true));
     // Next.js / Vite convention: .env.<envname>.local overrides .env.<envname>
     // locally (gitignored). These commonly hold real secrets and must be
-    // reviewed alongside their non-.local siblings.
+    // blocked alongside their non-.local siblings.
     it('matches /project/.env.production.local (Next.js double-suffix)', () =>
       expect(matchesShieldRule('project-jail', rule, '/project/.env.production.local')).toBe(true));
     it('matches /project/.env.development.local', () =>
@@ -1020,6 +1271,31 @@ describe('project-jail any-tool rules', () => {
       expect(matchesShieldRule('project-jail', rule, '/home/user/project-credentials.txt')).toBe(
         false
       ));
+  });
+});
+
+// ── project-jail verdict assertions ─────────────────────────────────────────
+// Pins the verdict on the .env read rule, promoted from `review` to `block`
+// in this hardening pass. Credential-file rules deliberately keep `review`
+// (see the rationale in packages/policy-engine/src/shell/index.ts around
+// the review-read-credentials rule — config files have legitimate
+// diagnostic reads, so hard-blocking trades safety for friction).
+
+describe('project-jail verdicts', () => {
+  const projectJail = SHIELDS['project-jail'];
+  const byName = (n: string) => projectJail?.smartRules.find((r) => r.name === n);
+
+  it('block-read-env-any-tool blocks (was review)', () => {
+    expect(byName('shield:project-jail:block-read-env-any-tool')?.verdict).toBe('block');
+  });
+
+  it('credential rules deliberately stay at review', () => {
+    expect(byName('shield:project-jail:review-read-credentials-any-tool')?.verdict).toBe('review');
+    expect(byName('shield:project-jail:review-read-credentials')?.verdict).toBe('review');
+  });
+
+  it('old review-read-env-any-tool name no longer exists (migration target)', () => {
+    expect(byName('shield:project-jail:review-read-env-any-tool')).toBeUndefined();
   });
 });
 

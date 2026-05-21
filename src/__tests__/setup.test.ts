@@ -27,6 +27,13 @@ vi.spyOn(fs, 'mkdirSync').mockImplementation(() => undefined);
 // seedMcpPinsIfMissing (#179) uses an atomic write (writeFileSync → renameSync);
 // mock both so setup tests don't hit real disk on rename.
 vi.spyOn(fs, 'renameSync').mockImplementation(() => undefined);
+// detectAgents falls back to binaryInPath(...) for some agents (issue #186);
+// default to "binary not found" so existing "no agents" tests don't leak the
+// real machine's PATH into assertions. Individual tests opt-in with their own
+// mock when they want to simulate a binary being present.
+vi.spyOn(fs, 'accessSync').mockImplementation(() => {
+  throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+});
 vi.spyOn(os, 'homedir').mockReturnValue('/mock/home');
 
 async function getConfirm() {
@@ -671,6 +678,47 @@ describe('detectAgents', () => {
     const result = detectAgents(home);
     expect(result.opencode).toBe(true);
     expect(result.claude).toBe(false);
+  });
+
+  // The module-level fs.accessSync mock (top of file) throws ENOENT by
+  // default. Tests below override the impl when they need to simulate a
+  // binary being found, then restore the throwing default in finally —
+  // never mockRestore(), which would tear down the spy entirely and leak
+  // the real filesystem into later tests.
+  const enoentThrow = (): never => {
+    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+  };
+
+  // Issue #186 regression: opencode creates ~/.config/opencode lazily on
+  // first launch, NOT on install. A user who installs the `opencode` CLI
+  // but hasn't launched it yet still has the binary in PATH — we should
+  // detect it even without the config dir.
+  it('detects Opencode when binary is in PATH but config dir does not exist (issue #186)', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+    vi.mocked(fs.accessSync).mockImplementation(((target: fs.PathLike) => {
+      if (String(target).endsWith(path.sep + 'opencode')) return undefined;
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    }) as typeof fs.accessSync);
+    const oldPath = process.env.PATH;
+    process.env.PATH = ['/fake/bin', '/usr/local/bin'].join(path.delimiter);
+    try {
+      expect(detectAgents(home).opencode).toBe(true);
+    } finally {
+      process.env.PATH = oldPath;
+      vi.mocked(fs.accessSync).mockImplementation(enoentThrow);
+    }
+  });
+
+  it('does not detect Opencode when neither config dir nor binary exist', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+    // accessSync already throws ENOENT by default from the module-level mock
+    const oldPath = process.env.PATH;
+    process.env.PATH = '/usr/local/bin';
+    try {
+      expect(detectAgents(home).opencode).toBe(false);
+    } finally {
+      process.env.PATH = oldPath;
+    }
   });
 
   it('detects Claude via ~/.claude directory', () => {

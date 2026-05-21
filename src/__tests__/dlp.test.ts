@@ -98,6 +98,112 @@ describe('DLP_PATTERNS — built-in patterns', () => {
   });
 });
 
+// ── Database connection strings ──────────────────────────────────────────────
+// Universal "<scheme>://[user]:<password>@<host>" shape that vendor-prefix
+// patterns miss. Verified gap from a 2026-05 audit: a real REDIS_URL went
+// straight through DLP. Whole-URL match — masking shows the scheme + host
+// shape without exposing the password substring.
+
+describe('DLP — database connection strings', () => {
+  // Real-shape password segments concatenated so GitHub secret-scanning
+  // doesn't flag the test file itself. Each value has entropy ≥ 3.0.
+  const FAKE_PW = 'Csa' + 'df87' + '98fa' + 'sdas' + '8432' + '1huu' + 'kh43';
+
+  it('detects redis:// with embedded password', () => {
+    const match = scanArgs({ env: `REDIS_URL=redis://:${FAKE_PW}@localhost:6379` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Database Connection String');
+    expect(match!.severity).toBe('block');
+    expect(match!.redactedSample).not.toContain(FAKE_PW);
+  });
+
+  it('detects rediss:// (TLS) with embedded password', () => {
+    const match = scanArgs({ env: `rediss://:${FAKE_PW}@host:6380` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Database Connection String');
+  });
+
+  it('detects postgres:// with user:password@host', () => {
+    const match = scanArgs({ env: `postgres://nadav:${FAKE_PW}@db.host:5432/mydb` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Database Connection String');
+  });
+
+  it('detects postgresql:// (alternate scheme)', () => {
+    const match = scanArgs({ env: `postgresql://u:${FAKE_PW}@db.host:5432/x` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Database Connection String');
+  });
+
+  it('detects mongodb+srv:// (Atlas-style)', () => {
+    const match = scanArgs({ env: `mongodb+srv://admin:${FAKE_PW}@cluster.mongo.net/db` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Database Connection String');
+  });
+
+  it('detects mysql:// with embedded password', () => {
+    const match = scanArgs({ env: `mysql://root:${FAKE_PW}@127.0.0.1` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Database Connection String');
+  });
+
+  it('detects kafka:// with embedded password', () => {
+    const match = scanArgs({ env: `kafka://broker:${FAKE_PW}@bootstrap:9092` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Database Connection String');
+  });
+
+  it('detects clickhouse:// with embedded password', () => {
+    const match = scanArgs({ env: `clickhouse://default:${FAKE_PW}@ch.local:8123` });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Database Connection String');
+  });
+
+  it('walks into nested fields (URL inside an object)', () => {
+    const match = scanArgs({
+      config: { databaseUrl: `postgres://u:${FAKE_PW}@db.host:5432/x` },
+    });
+    expect(match).not.toBeNull();
+    expect(match!.patternName).toBe('Database Connection String');
+  });
+
+  it('does not match URLs without auth (just host:port)', () => {
+    expect(scanArgs({ env: 'mongodb://host:27017/db' })).toBeNull();
+    expect(scanArgs({ env: 'redis://localhost:6379' })).toBeNull();
+  });
+
+  it('does not match user-only URLs (no password)', () => {
+    expect(scanArgs({ env: 'redis://userOnly@host:6379' })).toBeNull();
+  });
+
+  it('does not match short passwords (< 4 chars)', () => {
+    expect(scanArgs({ env: 'redis://u:abc@host' })).toBeNull();
+  });
+
+  it('does not match non-database schemes', () => {
+    expect(scanArgs({ env: 'https://user:pass1234@api.example.com/' })).toBeNull();
+    expect(scanArgs({ env: 'ftp://user:pass1234@ftp.example.com/' })).toBeNull();
+  });
+
+  it('does not flag placeholder passwords (your_password, ${PASSWORD}, etc.)', () => {
+    expect(scanArgs({ env: 'redis://user:your_password@host' })).toBeNull();
+    expect(scanArgs({ env: 'postgres://u:${PASSWORD}@db' })).toBeNull();
+    expect(scanArgs({ env: 'mysql://root:<your-password>@host' })).toBeNull();
+    expect(scanArgs({ env: 'redis://user:placeholder@host' })).toBeNull();
+    expect(scanArgs({ env: 'mongodb://admin:changeme@cluster' })).toBeNull();
+  });
+
+  it('redactedSample masks the password without leaking it', () => {
+    const match = scanArgs({ env: `REDIS_URL=redis://:${FAKE_PW}@localhost:6379` });
+    expect(match).not.toBeNull();
+    // The full password value must never appear in the redacted sample
+    expect(match!.redactedSample).not.toContain(FAKE_PW);
+    // First and last 4 chars of the matched URL are visible — that's the
+    // existing maskSecret behavior, retained as a regression guard
+    expect(match!.redactedSample).toMatch(/^redi\*+/);
+  });
+});
+
 // ── User prompt scanning ──────────────────────────────────────────────────────
 
 describe('DLP — user prompt scanning via scanArgs({text})', () => {
