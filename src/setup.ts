@@ -6,6 +6,7 @@ import chalk from 'chalk';
 import { confirm } from '@inquirer/prompts';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import { seedMcpPinsIfMissing } from './mcp-pin';
+import { renderOpencodeShim } from './setup-opencode-shim';
 
 interface McpServer {
   type?: string;
@@ -1712,7 +1713,6 @@ export async function setupOpencode(): Promise<void> {
     }
   }
 
-  const { renderOpencodeShim } = await import('./setup-opencode-shim.js');
   const shimContent = renderOpencodeShim({
     node9Argv: node9ArgvForShim(),
     version: node9Version(),
