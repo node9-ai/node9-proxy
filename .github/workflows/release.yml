@@ -148,7 +148,13 @@ jobs:
             exit 0
           fi
           echo "Publishing @node9/policy-engine@$ENGINE_VERSION"
-          npm --workspace @node9/policy-engine publish
+          # Use npx npm@latest so we get npm ≥11.5 — required for OIDC
+          # trusted-publisher auth on `npm publish`. The Node 22 runner
+          # bundles npm 10.9.x which only supports OIDC for provenance
+          # signing, not auth, and gets rejected with E404 on PUT.
+          # Matches the wrapper publish invocation below for consistency.
+          cd $GITHUB_WORKSPACE
+          npx --yes npm@latest publish packages/policy-engine --provenance --access public
 
       - name: Sync and publish wrapper (node9-ai)
         env:
