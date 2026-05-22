@@ -50,111 +50,78 @@ jobs:
           NPM_CONFIG_PROVENANCE: 'true'
         run: npx semantic-release
 
-      - name: Auto-bump engine version if its files changed
-        # Runs AFTER semantic-release (which has pushed the root version bump).
-        # We pull latest main, diff packages/policy-engine/ against the last
-        # policy-engine-v* tag, and if anything changed, bump the engine and
-        # push a new commit + tag. The next step then publishes from the disk
-        # version. Empty diff → no bump, no push.
+      - name: Sync @node9/policy-engine version to @node9/proxy
+        # Replaces the previous "Auto-bump engine version if its files changed"
+        # step. That step did diff-walking against the last policy-engine-v*
+        # tag plus conventional-commit scanning for the bump type — three
+        # consecutive releases failed in different ways inside that block
+        # (multi-line npm stdout parse, OIDC auth path, GitHub-shorthand path
+        # interpretation). The recurrence pattern showed the architecture was
+        # the problem, not any individual bug.
         #
-        # First run: no policy-engine-v* tag exists yet. We tag the current
-        # version on disk as the baseline and exit. Subsequent runs use that
-        # tag as the diff base.
-        #
-        # Bump type is determined from conventional-commit subjects of commits
-        # in the range that touched engine files:
-        #   - BREAKING CHANGE: footer or `type(scope)!:` → major
-        #   - feat / feat(scope) → minor
-        #   - everything else (fix, refactor, perf, etc.) → patch
+        # New approach: engine version === proxy version, always. The proxy
+        # version is the canonical source of truth (set by semantic-release
+        # earlier in this job). We write that into the engine's package.json
+        # and tag it. No diff-walking, no commit-message scanning, no bump-
+        # type decision — the entire failure class is gone. SaaS consumers
+        # get coherent versioning across both packages.
         env:
           GITHUB_TOKEN: ${{ secrets.AUTO_PR_TOKEN }}
         run: |
           set -euo pipefail
 
-          # Sync with whatever semantic-release just pushed
+          # Pull whatever semantic-release just pushed to main
           git fetch origin main
           git reset --hard origin/main
 
-          LAST_TAG=$(git tag --list 'policy-engine-v*' --sort=-version:refname | head -1 || true)
+          PROXY_VERSION=$(node -p "require('./package.json').version")
+          ENGINE_VERSION=$(node -p "require('./packages/policy-engine/package.json').version")
 
-          # Configure auth + identity once (used by both the baseline-tag branch
-          # and the bump branch below)
+          if [ "$ENGINE_VERSION" = "$PROXY_VERSION" ]; then
+            echo "Engine already at $PROXY_VERSION — no sync needed"
+            exit 0
+          fi
+
+          echo "Syncing @node9/policy-engine: $ENGINE_VERSION → $PROXY_VERSION"
+          # Discard npm stdout (it's multi-line in workspaces and would break
+          # captures); the disk write is the source of truth.
+          (cd packages/policy-engine && npm version "$PROXY_VERSION" --no-git-tag-version --allow-same-version >/dev/null)
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
-          if [ -z "$LAST_TAG" ]; then
-            BASELINE="policy-engine-v$(node -p "require('./packages/policy-engine/package.json').version")"
-            echo "No prior engine tag — creating baseline $BASELINE"
-            git tag "$BASELINE"
-            git push origin "$BASELINE"
-            exit 0
-          fi
-
-          if git diff --quiet "$LAST_TAG" HEAD -- packages/policy-engine/; then
-            echo "No engine changes since $LAST_TAG — skipping bump"
-            exit 0
-          fi
-
-          # Determine bump type from commits touching engine files
-          BUMP="patch"
-          while IFS= read -r sha; do
-            body=$(git log -1 --format='%B' "$sha")
-            # Breaking change marker: `BREAKING CHANGE:` in body or `!:` after type/scope
-            if echo "$body" | grep -qE '(BREAKING CHANGE|^[a-z]+(\([^)]+\))?!:)'; then
-              BUMP="major"
-              break
-            fi
-            if echo "$body" | grep -qE '^feat(\([^)]+\))?:'; then
-              BUMP="minor"
-              # keep looking — a later major would override
-            fi
-          done < <(git log "$LAST_TAG"..HEAD --format='%H' -- packages/policy-engine/)
-
-          echo "Engine files changed since $LAST_TAG — applying $BUMP bump"
-
-          # npm version writes the new version to package.json with no git op.
-          # Newer npm (≥10) prints multi-line stdout from `npm version` in a
-          # workspace context: the package name, the version, then funding /
-          # audit chatter. Capturing that whole blob into NEW_VERSION broke
-          # the `git tag` invocation below (release.yml run 26249979795).
-          # Discard stdout and read the canonical version from disk instead.
-          (cd packages/policy-engine && npm version "$BUMP" --no-git-tag-version >/dev/null)
-          NEW_VERSION=$(node -p "require('./packages/policy-engine/package.json').version")
-          NEW_TAG="policy-engine-v$NEW_VERSION"
-
-          echo "Bumping @node9/policy-engine to $NEW_VERSION"
           git add packages/policy-engine/package.json
-          git commit -m "chore(engine): release $NEW_VERSION [skip ci]"
-          git tag "$NEW_TAG"
+          git commit -m "chore(engine): sync to $PROXY_VERSION [skip ci]"
+          git tag "policy-engine-v$PROXY_VERSION"
           # --atomic so commit + tag land together or not at all
-          git push --atomic origin HEAD:main "$NEW_TAG"
+          git push --atomic origin HEAD:main "policy-engine-v$PROXY_VERSION"
 
       - name: Publish @node9/policy-engine if not already on npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: 'true'
-        # Engine version is auto-bumped by the previous step when files in
-        # packages/policy-engine/ change. This step reads the current version
-        # from disk and publishes if it isn't already on the registry. The
-        # skip path handles three cases:
-        #   1. Engine was bumped this run → publishes the new version
-        #   2. No engine change since last bump → skips (registry has it)
-        #   3. First-ever run / manual override → publishes if needed
+        # Engine version was just synced to the proxy version. This step
+        # publishes if not already on the registry — idempotent across re-runs.
         run: |
+          set -euo pipefail
           ENGINE_VERSION=$(node -p "require('./packages/policy-engine/package.json').version")
           if npm view "@node9/policy-engine@$ENGINE_VERSION" version >/dev/null 2>&1; then
             echo "@node9/policy-engine@$ENGINE_VERSION already on npm — skipping engine publish"
             exit 0
           fi
           echo "Publishing @node9/policy-engine@$ENGINE_VERSION"
-          # Use npx npm@latest so we get npm ≥11.5 — required for OIDC
-          # trusted-publisher auth on `npm publish`. The Node 22 runner
-          # bundles npm 10.9.x which only supports OIDC for provenance
-          # signing, not auth, and gets rejected with E404 on PUT.
-          # Matches the wrapper publish invocation below for consistency.
+          # Use npx npm@latest for OIDC trusted-publisher auth (npm 10 bundled
+          # by Node 22 only supports OIDC for provenance signing, not for
+          # publish authentication — see commit history around 1.26.x for the
+          # E404 case that drove this).
+          #
+          # The path argument MUST start with `./` — without it, npm interprets
+          # `packages/policy-engine` as GitHub-shorthand (user/repo) and tries
+          # to `git ls-remote` against github.com/packages/policy-engine.git.
+          # Run 26271334044 hit exactly that bug.
           cd $GITHUB_WORKSPACE
-          npx --yes npm@latest publish packages/policy-engine --provenance --access public
+          npx --yes npm@latest publish ./packages/policy-engine --provenance --access public
 
       - name: Sync and publish wrapper (node9-ai)
         env:
