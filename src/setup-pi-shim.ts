@@ -68,6 +68,28 @@ export function renderPiShim(input: PiShimInput): string {
 //                  (UserBashEventResult has no block field by design)
 
 const { spawnSync } = require("node:child_process");
+const fs = require("node:fs");
+const path = require("node:path");
+const os = require("node:os");
+
+function debugLog(entry) {
+  // Best-effort write to ~/.node9/hook-debug.log so audit-log failures
+  // in the tool_result catch leave a breadcrumb. Pi has no equivalent
+  // of node9's own hook-debug.log path, and silent swallow makes
+  // misconfiguration invisible until block-rate dashboards catch on.
+  // Wrapped in try because this hook NEVER throws — see catch comment.
+  try {
+    const logPath = path.join(os.homedir(), ".node9", "hook-debug.log");
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    fs.appendFileSync(logPath, JSON.stringify({
+      ts: new Date().toISOString(),
+      source: "pi-shim",
+      ...entry,
+    }) + "\\n");
+  } catch (_) {
+    // ignore — last-resort breadcrumb is best-effort
+  }
+}
 
 // argv prefix for invoking the node9 CLI. argv[0] is the executable
 // (either the npm-installed wrapper script or the node binary); the
@@ -120,7 +142,6 @@ module.exports = function (pi) {
       hook_event_name: "PreToolUse",
       tool_name: normalizeToolName(event.toolName),
       tool_input: event.input,
-      session_id: undefined,
       cwd: ctx.cwd,
       meta: { agent: "Pi" },
     };
@@ -148,7 +169,17 @@ module.exports = function (pi) {
         timeout: LOG_TIMEOUT_MS,
       });
     } catch (e) {
-      // Swallow: audit log gaps are preferable to crashing the agent.
+      // Swallow + breadcrumb. Audit log gaps are preferable to crashing
+      // the agent, but a persistent failure here (e.g. NODE9_ARGV[0]
+      // no longer exists after a node-version bump) used to be invisible
+      // because pi has no hook-debug surface. Write a one-line entry to
+      // ~/.node9/hook-debug.log so dashboards can catch silent drift.
+      debugLog({
+        event: "tool_result-spawn-failed",
+        tool: payload.tool_name,
+        agent: "Pi",
+        error: e && e.message ? e.message : String(e),
+      });
     }
     return undefined;
   });

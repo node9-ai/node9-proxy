@@ -132,6 +132,17 @@ describe('renderPiShim', () => {
     expect(out).toContain('Edit');
   });
 
+  it('tool_result catch writes to hook-debug.log instead of silently swallowing', () => {
+    // Regression for the pre-merge review nit: pi has no hook-debug
+    // surface, so an empty `catch {}` made tool_result spawn failures
+    // (e.g. NODE9_ARGV[0] gone after a node version bump) invisible
+    // until block-rate dashboards caught on. The shim now writes a
+    // one-line breadcrumb to ~/.node9/hook-debug.log on failure.
+    const out = renderPiShim(baseInput);
+    expect(out).toContain('hook-debug.log');
+    expect(out).toMatch(/tool_result-spawn-failed/);
+  });
+
   it('user_bash hook sends a Bash-shaped PreToolUse payload (so policy rules engage)', () => {
     // user_bash event has `{ command, excludeFromContext, cwd }` — no
     // `tool_name`. The shim must synthesize tool_name: "Bash" +

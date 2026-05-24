@@ -1899,14 +1899,14 @@ export async function setupPi(): Promise<void> {
   // a Bun-compiled-binary install where ~/.pi/agent/ itself is created
   // lazily on first launch. mkdir -p so the subsequent writeFileSync
   // doesn't fail with ENOENT (design R6, mirrors the opencode pattern).
+  // recursive:true never throws EEXIST — only real fs failures (EACCES,
+  // ENOSPC, EROFS) reach the catch.
   try {
     fs.mkdirSync(extensionsDir, { recursive: true });
   } catch (err: unknown) {
     const code = (err as NodeJS.ErrnoException).code;
-    if (code !== 'EEXIST') {
-      console.log(chalk.yellow(`  ⚠️  Could not create ${extensionsDir}: ${code ?? String(err)}`));
-      return;
-    }
+    console.log(chalk.yellow(`  ⚠️  Could not create ${extensionsDir}: ${code ?? String(err)}`));
+    return;
   }
 
   const shimContent = renderPiShim({
