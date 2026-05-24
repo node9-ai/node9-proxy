@@ -10,11 +10,13 @@ import {
   setupCursor,
   setupCodex,
   setupOpencode,
+  setupPi,
   teardownClaude,
   teardownGemini,
   teardownCursor,
   teardownCodex,
   teardownOpencode,
+  teardownPi,
   detectAgents,
 } from '../setup.js';
 
@@ -668,6 +670,7 @@ describe('detectAgents', () => {
       vscode: false,
       claudeDesktop: false,
       opencode: false,
+      pi: false,
     });
   });
 
@@ -716,6 +719,53 @@ describe('detectAgents', () => {
     process.env.PATH = '/usr/local/bin';
     try {
       expect(detectAgents(home).opencode).toBe(false);
+    } finally {
+      process.env.PATH = oldPath;
+    }
+  });
+
+  // ── Pi (design doc: doc/roadmap/pi-integration.md) ─────────────────────
+  // Pi's config layout (verified against opensources/pi-main):
+  //   - CONFIG_DIR_NAME = ".pi" (packages/coding-agent/src/config.ts:449)
+  //   - getAgentDir() = ~/.pi/agent (config.ts:475-480)
+  //   - Extensions glob in ~/.pi/agent/extensions/ (loader.ts:594-600)
+
+  it('detects Pi via ~/.pi/agent directory', () => {
+    vi.mocked(fs.existsSync).mockImplementation(
+      (q) => String(q).replace(/\\/g, '/') === p('.pi/agent')
+    );
+    const result = detectAgents(home);
+    expect(result.pi).toBe(true);
+    expect(result.claude).toBe(false);
+    expect(result.opencode).toBe(false);
+  });
+
+  // Design R6: pi may ship as a Bun-compiled binary that creates
+  // ~/.pi/agent/ lazily on first launch (mirrors opencode's #186 bug).
+  // detectAgents must fall back to a PATH lookup so installed-but-never-
+  // launched pi is still wired by `node9 init`.
+  it('detects Pi when binary is in PATH but config dir does not exist (R6)', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+    vi.mocked(fs.accessSync).mockImplementation(((target: fs.PathLike) => {
+      if (String(target).endsWith(path.sep + 'pi')) return undefined;
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    }) as typeof fs.accessSync);
+    const oldPath = process.env.PATH;
+    process.env.PATH = ['/fake/bin', '/usr/local/bin'].join(path.delimiter);
+    try {
+      expect(detectAgents(home).pi).toBe(true);
+    } finally {
+      process.env.PATH = oldPath;
+      vi.mocked(fs.accessSync).mockImplementation(enoentThrow);
+    }
+  });
+
+  it('does not detect Pi when neither config dir nor binary exist', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+    const oldPath = process.env.PATH;
+    process.env.PATH = '/usr/local/bin';
+    try {
+      expect(detectAgents(home).pi).toBe(false);
     } finally {
       process.env.PATH = oldPath;
     }
@@ -781,6 +831,7 @@ describe('detectAgents', () => {
       vscode: true,
       claudeDesktop: true,
       opencode: false,
+      pi: false,
     });
   });
 
@@ -812,6 +863,7 @@ describe('detectAgents', () => {
       vscode: false,
       claudeDesktop: false,
       opencode: false,
+      pi: false,
     });
     // Should warn to stderr for non-ENOENT errors so misconfigured systems surface
     expect(stderrSpy).toHaveBeenCalled();
@@ -834,6 +886,7 @@ describe('detectAgents', () => {
       vscode: false,
       claudeDesktop: false,
       opencode: false,
+      pi: false,
     });
     expect(stderrSpy).not.toHaveBeenCalled();
     stderrSpy.mockRestore();
@@ -1307,5 +1360,120 @@ describe('teardownOpencode', () => {
   it('does nothing when no opencode config exists', () => {
     teardownOpencode();
     expect(writtenTo(configPath)).toBeNull();
+  });
+});
+
+// ── setupPi (doc/roadmap/pi-integration.md) ──────────────────────────────────
+//
+// Pi has no MCP client (verified by greppling opensources/pi-main for
+// `mcp` — only build/release config matches, no client). So setupPi
+// writes ONLY the extension shim — no opencode.json analog.
+//
+// Install target: ~/.pi/agent/extensions/node9.js
+// (pi loads .ts and .js; we ship .js because the shim is plain CJS with
+// no node_modules resolution context — same reasoning as opencode).
+
+describe('setupPi', () => {
+  const home = '/mock/home';
+  const extensionPath = path.join(home, '.pi', 'agent', 'extensions', 'node9.js');
+
+  function writtenAsString(filePath: string): string | null {
+    const calls = vi.mocked(fs.writeFileSync).mock.calls.filter(([p]) => String(p) === filePath);
+    if (calls.length === 0) return null;
+    return String(calls[calls.length - 1][1]);
+  }
+
+  it('writes the extension shim on fresh install', async () => {
+    await setupPi();
+
+    const extension = writtenAsString(extensionPath);
+    expect(extension).not.toBeNull();
+    expect(extension).toContain('NODE9_SHIM_VERSION');
+    // All four protection hooks must be wired (design R4 — forgetting
+    // user_bash is a silent prompt-escape bypass).
+    expect(extension).toContain('"tool_call"');
+    expect(extension).toContain('"tool_result"');
+    expect(extension).toContain('"input"');
+    expect(extension).toContain('"user_bash"');
+  });
+
+  it('is idempotent — no rewrite when the shim is already current', async () => {
+    await setupPi();
+    const initial = writtenAsString(extensionPath);
+    expect(initial).not.toBeNull();
+
+    vi.mocked(fs.writeFileSync).mockClear();
+    withExistingFiles({
+      [extensionPath]: initial as unknown as object,
+    });
+
+    await setupPi();
+
+    const second = writtenAsString(extensionPath);
+    // Either no write at all, or a byte-identical rewrite.
+    if (second !== null) expect(second).toBe(initial);
+  });
+
+  it('self-heals a shim whose NODE9_SHIM_VERSION is stale', async () => {
+    // Drop in an old shim claiming version 0.0.1; setupPi must rewrite
+    // because the embedded version constant won't match the current
+    // node9 version.
+    const stale =
+      '// NODE9_SHIM_VERSION = "0.0.1"\nmodule.exports = function (pi) { /* stale */ };';
+    withExistingFiles({
+      [extensionPath]: stale as unknown as object,
+    });
+
+    await setupPi();
+
+    const extension = writtenAsString(extensionPath);
+    expect(extension).not.toBeNull();
+    expect(extension).not.toContain('0.0.1');
+    expect(extension).toContain('"tool_call"');
+  });
+
+  it('creates ~/.pi/agent/extensions/ if missing (lazy-dir case)', async () => {
+    const mkdirSpy = vi.mocked(fs.mkdirSync);
+    mkdirSpy.mockClear();
+
+    await setupPi();
+
+    // mkdirSync called with the extensions dir + recursive:true. Pi's
+    // loader is responsible for ~/.pi/agent/ existence at runtime, but
+    // setupPi runs at install time and can't assume pi has been
+    // launched (design R6).
+    const extensionsDir = path.join(home, '.pi', 'agent', 'extensions');
+    const calls = mkdirSpy.mock.calls;
+    expect(calls.some(([dir]) => String(dir) === extensionsDir)).toBe(true);
+  });
+});
+
+// ── teardownPi ───────────────────────────────────────────────────────────────
+
+describe('teardownPi', () => {
+  const home = '/mock/home';
+  const extensionPath = path.join(home, '.pi', 'agent', 'extensions', 'node9.js');
+
+  it('removes the node9 extension shim from disk', () => {
+    const unlinkSpy = vi.spyOn(fs, 'unlinkSync').mockImplementation(() => undefined);
+    withExistingFiles({
+      [extensionPath]:
+        '// NODE9_SHIM_VERSION = "1.26.1"\nmodule.exports = function () {};' as unknown as object,
+    });
+
+    teardownPi();
+
+    expect(unlinkSpy).toHaveBeenCalledWith(extensionPath);
+    unlinkSpy.mockRestore();
+  });
+
+  it('does nothing when no pi extension is installed', () => {
+    const unlinkSpy = vi.spyOn(fs, 'unlinkSync').mockImplementation(() => undefined);
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+
+    teardownPi();
+
+    expect(unlinkSpy).not.toHaveBeenCalled();
+    unlinkSpy.mockRestore();
   });
 });

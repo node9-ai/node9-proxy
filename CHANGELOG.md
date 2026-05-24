@@ -8,7 +8,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## Unreleased
 
+### Added
+
+- **Pi integration** (`node9 agents add pi`). Adds Pi (https://pi.dev, `@earendil-works/pi-coding-agent`) to the set of AI coding agents Node9 protects, alongside Claude Code, Gemini, Cursor, Codex, Windsurf, VSCode, Claude Desktop, and Opencode. `node9 init` auto-detects an installed pi (via `~/.pi/agent/` or `pi` binary in PATH — covers the Bun-compiled binary case where the config dir is created lazily on first launch) and drops a CommonJS extension shim at `~/.pi/agent/extensions/node9.js`. The shim wires four pi hooks:
+  - `tool_call` — blocks via return value `{ block: true, reason }` (pi's contract, not throw — distinct from Opencode)
+  - `tool_result` — fire-and-forget audit log
+  - `input` — prompt DLP; blocks via `{ action: "handled" }` + `ctx.ui.notify`
+  - `user_bash` (`!` / `!!` prefix) — the prompt-escape side channel; synthesizes a `Bash`-shaped PreToolUse payload so the same dangerous-words and DLP rules engage, blocks by returning a synthetic failed `BashResult` (pi's `UserBashEventResult` has no `block` field by design)
+
+  Pi tool names are normalized inside the shim (`bash`→`Bash`, `read`→`Read`, …) before the payload reaches `node9 check`, so existing PascalCase policy rules engage without edits. Pi has no MCP client, so unlike Opencode setup, no `mcp.node9` entry is written — only the extension file.
+
+  Self-heal: `node9 init` rewrites the shim when its embedded `NODE9_SHIM_VERSION` differs from the installed node9. Design doc: `doc/roadmap/pi-integration.md`.
+
 ### Fixed
+
+- **PostToolUse audit rows misattributed to "Claude Code" when shim-tagged.** `src/cli/commands/log.ts` reimplemented a subset of `detectAiAgent` and skipped its Layer-0 `meta.agent` check entirely — meaning any payload from a node9-authored shim (Pi, Opencode) carrying `hook_event_name: "PostToolUse"` was misattributed to Claude Code in `~/.node9/audit.log`, even when the shim correctly tagged `meta.agent: "Pi"` / `"Opencode"`. The block decisions on PreToolUse and UserPromptSubmit were correct (those go through `check.ts` which honors Layer 0); only the `node9 log` fire-and-forget audit path was wrong. Added the Layer-0 check ahead of the existing fingerprint chain in `log.ts`, exactly mirroring `check.ts:48-60`. Surfaces dashboards' per-agent block-rate metrics correctly for shim-wired agents. Found during Pi integration live verify; defensive empty-string / non-string `meta.agent` falls through to the existing fingerprint chain.
 
 - **Activity-socket rebind loop.** The flight-recorder Unix socket's self-heal used `fs.watch` on `tmpdir()`, which fired inotify events for the daemon's own unlink-then-listen sequence. The watcher would observe the file gone (between unlink and listen completing), trigger another rebind, fire another inotify event, and so on — quickly hitting `EADDRINUSE` and tripping the circuit breaker, leaving the flight recorder down with the warning _"Activity socket repeatedly disappearing — run: node9 daemon restart"_ until manual intervention. Replaced with a 2 s `setInterval` polling probe that cannot self-trigger. Detection latency on real socket loss goes from ~instant to ≤ 2 s. Adds a regression test asserting zero rebind log lines during quiet operation.
 

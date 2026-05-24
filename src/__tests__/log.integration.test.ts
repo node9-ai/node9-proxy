@@ -261,4 +261,55 @@ describe('log PostToolUse snapshot behavior', () => {
     const entry = JSON.parse(lines[lines.length - 1]) as { tool: string; agent?: string };
     expect(entry.agent).toBe('Claude Code');
   });
+
+  it('honors meta.agent over hook_event_name fingerprint (Pi/Opencode shims)', () => {
+    // The Pi shim (and Opencode shim) tag tool_result payloads with
+    // meta.agent: "Pi"/"Opencode" — but they still ship
+    // hook_event_name: "PostToolUse" because that's the format `node9
+    // log` understands. Without a Layer-0 meta.agent check (mirroring
+    // check.ts:48-60), log.ts's local fingerprint chain misattributes
+    // these rows to "Claude Code" (regression discovered during pi
+    // integration live verify, doc/roadmap/pi-integration.md).
+    const result = runLog(
+      {
+        cwd: tmpCwd,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'echo hi' },
+        meta: { agent: 'Pi' },
+      },
+      tmpHome,
+      tmpCwd
+    );
+
+    expect(result.status).toBe(0);
+    const auditLog = path.join(tmpHome, '.node9', 'audit.log');
+    const lines = fs.readFileSync(auditLog, 'utf-8').trim().split('\n');
+    const entry = JSON.parse(lines[lines.length - 1]) as { tool: string; agent?: string };
+    expect(entry.agent).toBe('Pi');
+  });
+
+  it('ignores meta.agent if empty string or non-string (defensive)', () => {
+    // Mirrors check.ts:57-60 — a malformed payload with meta.agent: ""
+    // or meta.agent: null must fall through to the existing fingerprint
+    // chain, never tag the row with an empty-string agent name.
+    const result = runLog(
+      {
+        cwd: tmpCwd,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'echo hi' },
+        meta: { agent: '' },
+      },
+      tmpHome,
+      tmpCwd
+    );
+
+    expect(result.status).toBe(0);
+    const auditLog = path.join(tmpHome, '.node9', 'audit.log');
+    const lines = fs.readFileSync(auditLog, 'utf-8').trim().split('\n');
+    const entry = JSON.parse(lines[lines.length - 1]) as { tool: string; agent?: string };
+    // hook_event_name: "PostToolUse" → Claude Code via Layer-1 fingerprint
+    expect(entry.agent).toBe('Claude Code');
+  });
 });
