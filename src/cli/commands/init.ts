@@ -16,6 +16,7 @@ import {
   setupVSCode,
   setupClaudeDesktop,
   setupOpencode,
+  setupPi,
   detectAgents,
   node9Version,
 } from '../../setup';
@@ -242,6 +243,7 @@ export function registerInitCommand(program: Command): void {
           else if (agent === 'vscode') await setupVSCode();
           else if (agent === 'claudeDesktop') await setupClaudeDesktop();
           else if (agent === 'opencode') await setupOpencode();
+          else if (agent === 'pi') await setupPi();
           console.log('');
         }
 

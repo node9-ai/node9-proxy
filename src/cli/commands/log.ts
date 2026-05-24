@@ -68,21 +68,35 @@ export function registerLogCommand(program: Command): void {
           const rawInput = payload.tool_input ?? payload.args ?? {};
 
           // Detect agent from hook payload — must mirror check.ts detectAiAgent.
-          // turn_id is a Codex-only extension and must be checked first because
-          // Codex's payload is otherwise Claude-compatible.
+          // Layer 0: explicit meta.agent tag set by a node9-authored shim
+          // (Pi, Opencode, and any future agent). Must precede Layer 1
+          // because shim payloads still carry hook_event_name: "PostToolUse"
+          // to match the shape this command understands — without Layer 0,
+          // they'd be misattributed to "Claude Code".
+          // Layer 1 (turn_id / hook_event_name / etc.) below is unchanged.
+          const metaTag = (() => {
+            const m = (payload as { meta?: unknown }).meta;
+            if (m && typeof m === 'object') {
+              const tagged = (m as { agent?: unknown }).agent;
+              if (typeof tagged === 'string' && tagged.length > 0) return tagged;
+            }
+            return undefined;
+          })();
           const agent =
-            payload.turn_id !== undefined
-              ? 'Codex'
-              : payload.hook_event_name === 'PreToolUse' ||
-                  payload.hook_event_name === 'PostToolUse' ||
-                  payload.tool_use_id !== undefined ||
-                  payload.permission_mode !== undefined
-                ? 'Claude Code'
-                : payload.hook_event_name === 'BeforeTool' ||
-                    payload.hook_event_name === 'AfterTool' ||
-                    payload.timestamp !== undefined
-                  ? 'Gemini CLI'
-                  : undefined;
+            metaTag !== undefined
+              ? metaTag
+              : payload.turn_id !== undefined
+                ? 'Codex'
+                : payload.hook_event_name === 'PreToolUse' ||
+                    payload.hook_event_name === 'PostToolUse' ||
+                    payload.tool_use_id !== undefined ||
+                    payload.permission_mode !== undefined
+                  ? 'Claude Code'
+                  : payload.hook_event_name === 'BeforeTool' ||
+                      payload.hook_event_name === 'AfterTool' ||
+                      payload.timestamp !== undefined
+                    ? 'Gemini CLI'
+                    : undefined;
 
           // Audit write FIRST — before any config load that could fail.
           // A config error must never silently skip the audit entry.

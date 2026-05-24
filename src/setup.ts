@@ -7,6 +7,7 @@ import { confirm } from '@inquirer/prompts';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import { seedMcpPinsIfMissing } from './mcp-pin';
 import { renderOpencodeShim } from './setup-opencode-shim';
+import { renderPiShim } from './setup-pi-shim';
 
 interface McpServer {
   type?: string;
@@ -745,6 +746,7 @@ export function detectAgents(homeDir: string = os.homedir()): {
   vscode: boolean;
   claudeDesktop: boolean;
   opencode: boolean;
+  pi: boolean;
 } {
   const exists = (p: string): boolean => {
     try {
@@ -769,6 +771,13 @@ export function detectAgents(homeDir: string = os.homedir()): {
     // Opencode creates ~/.config/opencode lazily on first launch — fall back
     // to a PATH lookup so installed-but-never-launched CLIs are still wired.
     opencode: exists(path.join(homeDir, '.config', 'opencode')) || binaryInPath('opencode'),
+    // Pi (https://pi.dev): config dir is ~/.pi/agent (CONFIG_DIR_NAME=".pi"
+    // + agentDir, verified against opensources/pi-main/packages/coding-agent/
+    // src/config.ts:449,475). The Bun-compiled binary path may create this
+    // dir lazily on first launch — same class of bug as opencode's #186
+    // (design R6) — so fall back to PATH lookup for installed-but-never-
+    // launched pi.
+    pi: exists(path.join(homeDir, '.pi', 'agent')) || binaryInPath('pi'),
   };
 }
 
@@ -1866,6 +1875,94 @@ export function teardownOpencode(): void {
   }
 }
 
+// ── setupPi (doc/roadmap/pi-integration.md) ──────────────────────────────────
+//
+// Pi (https://pi.dev) is an extensible coding-agent harness. We wire
+// protection via a single extension file dropped into
+// ~/.pi/agent/extensions/node9.js — pi's loader auto-discovers files in
+// that directory at startup (verified against opensources/pi-main/packages/
+// coding-agent/src/core/extensions/loader.ts:594-600).
+//
+// Pi has NO MCP client (greppling opensources/pi-main turns up only the
+// agent's own MCP-unrelated infra), so unlike setupOpencode, there's no
+// JSON config file to update — only the extension shim.
+
+const PI_EXTENSION_NAME = 'node9.js';
+
+export async function setupPi(): Promise<void> {
+  seedMcpPinsIfMissing(); // #179: distinguish never-installed from no-pins-yet
+  const homeDir = os.homedir();
+  const extensionsDir = path.join(homeDir, '.pi', 'agent', 'extensions');
+  const extensionPath = path.join(extensionsDir, PI_EXTENSION_NAME);
+
+  // ~/.pi/agent/extensions/ may not exist on a fresh pi install, or on
+  // a Bun-compiled-binary install where ~/.pi/agent/ itself is created
+  // lazily on first launch. mkdir -p so the subsequent writeFileSync
+  // doesn't fail with ENOENT (design R6, mirrors the opencode pattern).
+  // recursive:true never throws EEXIST — only real fs failures (EACCES,
+  // ENOSPC, EROFS) reach the catch.
+  try {
+    fs.mkdirSync(extensionsDir, { recursive: true });
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException).code;
+    console.log(chalk.yellow(`  ⚠️  Could not create ${extensionsDir}: ${code ?? String(err)}`));
+    return;
+  }
+
+  const shimContent = renderPiShim({
+    node9Argv: node9ArgvForShim(),
+    version: node9Version(),
+  });
+
+  // Write the shim file. Self-heal: if the on-disk content differs from
+  // what we'd write right now (different version, hand-edits, etc.),
+  // overwrite. The file lives in a directory we own; users keep their
+  // custom extensions in adjacent files (we don't touch foo.js / bar.ts).
+  const existingShim = (() => {
+    try {
+      return fs.readFileSync(extensionPath, 'utf-8');
+    } catch {
+      return null;
+    }
+  })();
+
+  if (existingShim === shimContent) {
+    console.log(chalk.blue('  ℹ️  Node9 is already fully configured for Pi.'));
+    return;
+  }
+
+  fs.writeFileSync(extensionPath, shimContent);
+  if (existingShim) {
+    console.log(chalk.yellow('  🔧 Pi extension shim updated to current version'));
+  } else {
+    console.log(
+      chalk.green('  ✅ Pi extension installed → tool_call / tool_result / input / user_bash')
+    );
+  }
+  console.log(chalk.green.bold('🛡️  Node9 is now protecting Pi!'));
+  console.log(chalk.gray('    Restart Pi for changes to take effect.'));
+  printDaemonTip();
+}
+
+export function teardownPi(): void {
+  const homeDir = os.homedir();
+  const extensionPath = path.join(homeDir, '.pi', 'agent', 'extensions', PI_EXTENSION_NAME);
+
+  // We only remove the node9-owned file. Users' other extensions in
+  // ~/.pi/agent/extensions/ are left alone — we don't scan content,
+  // we just delete by the known filename we wrote.
+  try {
+    if (fs.existsSync(extensionPath)) {
+      fs.unlinkSync(extensionPath);
+      console.log(chalk.green('  ✅ Removed node9 extension from ~/.pi/agent/extensions/'));
+    } else {
+      console.log(chalk.blue('  ℹ️  No Pi extension installed — nothing to remove'));
+    }
+  } catch (err) {
+    console.log(chalk.yellow(`  ⚠️  Could not remove ${extensionPath}: ${String(err)}`));
+  }
+}
+
 // ── Agent wired-status checks ─────────────────────────────────────────────────
 // Each function returns true if node9 hooks/MCP are present in the agent config.
 
@@ -1877,7 +1974,8 @@ export type AgentName =
   | 'windsurf'
   | 'vscode'
   | 'claudeDesktop'
-  | 'opencode';
+  | 'opencode'
+  | 'pi';
 
 export interface AgentStatus {
   name: AgentName;
@@ -2000,6 +2098,15 @@ export function getAgentsStatus(homeDir: string = os.homedir()): AgentStatus[] {
         return !!cfg?.mcp?.['node9'];
       })(),
       mode: detected.opencode ? 'hooks' : null,
+    },
+    {
+      name: 'pi',
+      label: 'Pi',
+      installed: detected.pi,
+      // Pi has no MCP path — only the extension file. "wired" is a
+      // simple existence check on the canonical install location.
+      wired: fs.existsSync(path.join(homeDir, '.pi', 'agent', 'extensions', PI_EXTENSION_NAME)),
+      mode: detected.pi ? 'hooks' : null,
     },
   ];
 }
