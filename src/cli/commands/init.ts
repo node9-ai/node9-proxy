@@ -17,6 +17,7 @@ import {
   setupClaudeDesktop,
   setupOpencode,
   setupPi,
+  setupHermes,
   detectAgents,
   node9Version,
 } from '../../setup';
@@ -246,6 +247,7 @@ export function registerInitCommand(program: Command): void {
           else if (agent === 'claudeDesktop') await setupClaudeDesktop();
           else if (agent === 'opencode') await setupOpencode();
           else if (agent === 'pi') await setupPi();
+          else if (agent === 'hermes') setupHermes();
           console.log('');
         }
 

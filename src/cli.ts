@@ -17,6 +17,7 @@ import {
   setupWindsurf,
   setupVSCode,
   setupHud,
+  setupHermes,
   teardownClaude,
   teardownGemini,
   teardownCursor,
@@ -24,6 +25,7 @@ import {
   teardownWindsurf,
   teardownVSCode,
   teardownHud,
+  teardownHermes,
 } from './setup';
 import { stopDaemon } from './daemon/index';
 import chalk from 'chalk';
@@ -154,10 +156,11 @@ program
     if (target === 'codex') return await setupCodex();
     if (target === 'windsurf') return await setupWindsurf();
     if (target === 'vscode') return await setupVSCode();
+    if (target === 'hermes') return setupHermes();
     if (target === 'hud') return setupHud();
     console.error(
       chalk.red(
-        `Unknown target: "${target}". Supported: claude, gemini, cursor, codex, windsurf, vscode, hud`
+        `Unknown target: "${target}". Supported: claude, gemini, cursor, codex, windsurf, vscode, hermes, hud`
       )
     );
     process.exit(1);
@@ -186,6 +189,7 @@ program
       console.log('    ' + chalk.green('codex') + '     — OpenAI Codex CLI (MCP proxy)');
       console.log('    ' + chalk.green('windsurf') + '  — Windsurf (MCP proxy)');
       console.log('    ' + chalk.green('vscode') + '    — VSCode / Copilot (MCP proxy)');
+      console.log('    ' + chalk.green('hermes') + '    — Hermes Agent (hook mode)');
       process.stdout.write(
         '    ' + chalk.green('hud') + '       — Claude Code security statusline\n'
       );
@@ -199,10 +203,11 @@ program
     if (t === 'codex') return await setupCodex();
     if (t === 'windsurf') return await setupWindsurf();
     if (t === 'vscode') return await setupVSCode();
+    if (t === 'hermes') return setupHermes();
     if (t === 'hud') return setupHud();
     console.error(
       chalk.red(
-        `Unknown target: "${target}". Supported: claude, gemini, cursor, codex, windsurf, vscode, hud`
+        `Unknown target: "${target}". Supported: claude, gemini, cursor, codex, windsurf, vscode, hermes, hud`
       )
     );
     process.exit(1);
@@ -230,11 +235,12 @@ program
     else if (target === 'codex') fn = teardownCodex;
     else if (target === 'windsurf') fn = teardownWindsurf;
     else if (target === 'vscode') fn = teardownVSCode;
+    else if (target === 'hermes') fn = teardownHermes;
     else if (target === 'hud') fn = teardownHud;
     else {
       console.error(
         chalk.red(
-          `Unknown target: "${target}". Supported: claude, gemini, cursor, codex, windsurf, vscode, hud`
+          `Unknown target: "${target}". Supported: claude, gemini, cursor, codex, windsurf, vscode, hermes, hud`
         )
       );
       process.exit(1);
@@ -277,6 +283,7 @@ program
       ['Codex', teardownCodex],
       ['Windsurf', teardownWindsurf],
       ['VSCode', teardownVSCode],
+      ['Hermes', teardownHermes],
     ] as const) {
       try {
         fn();

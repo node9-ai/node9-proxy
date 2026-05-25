@@ -12,6 +12,7 @@ import {
   setupClaudeDesktop,
   setupOpencode,
   setupPi,
+  setupHermes,
   teardownClaude,
   teardownGemini,
   teardownCursor,
@@ -21,6 +22,7 @@ import {
   teardownClaudeDesktop,
   teardownOpencode,
   teardownPi,
+  teardownHermes,
   getAgentsStatus,
   type AgentName,
 } from '../../setup';
@@ -35,6 +37,7 @@ const SETUP_FN: Record<AgentName, () => Promise<void> | void> = {
   claudeDesktop: setupClaudeDesktop,
   opencode: setupOpencode,
   pi: setupPi,
+  hermes: setupHermes,
 };
 
 const TEARDOWN_FN: Record<AgentName, () => void> = {
@@ -47,6 +50,7 @@ const TEARDOWN_FN: Record<AgentName, () => void> = {
   claudeDesktop: teardownClaudeDesktop,
   opencode: teardownOpencode,
   pi: teardownPi,
+  hermes: teardownHermes,
 };
 
 const AGENT_NAMES = Object.keys(SETUP_FN) as AgentName[];
