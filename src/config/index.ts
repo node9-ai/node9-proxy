@@ -152,6 +152,13 @@ export const DEFAULT_CONFIG: Config = {
         'create_file',
         'edit',
         'replace',
+        // Claude / canonicalised Hermes — shouldSnapshot lowercases the
+        // incoming name before set-membership, so we list the lowercase
+        // forms of `Bash`/`Write`/`Edit`/`MultiEdit`. Without these,
+        // post-canonicalisation Hermes `patch` / `write_file` (which now
+        // arrive as `Edit` / `Write`) silently skipped snapshotting.
+        'write',
+        'multiedit',
       ],
       onlyPaths: [],
       ignorePaths: ['**/node_modules/**', 'dist/**', 'build/**', '.next/**', '**/*.log'],

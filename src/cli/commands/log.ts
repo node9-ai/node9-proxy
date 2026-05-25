@@ -64,7 +64,8 @@ export function registerLogCommand(program: Command): void {
             turn_id?: string; // Codex-specific
           };
 
-          const tool = canonicalToolName(sanitize(extractToolName(payload, 'unknown')));
+          const rawToolName = sanitize(extractToolName(payload, 'unknown'));
+          const tool = canonicalToolName(rawToolName);
           const rawInput = extractToolInput(payload);
 
           // Detect agent from hook payload — must mirror check.ts detectAiAgent.
@@ -111,6 +112,12 @@ export function registerLogCommand(program: Command): void {
             source: 'post-hook',
           };
           if (agent) entry.agent = agent;
+          // Preserve the agent-native tool name when canonicalisation
+          // rewrote it (e.g. Hermes `terminal` → `Bash`). Lets users
+          // grep audit.log for the name they actually see in their
+          // agent's UI without losing the canonical for shield/report
+          // aggregation.
+          if (rawToolName !== tool) entry.agentToolName = rawToolName;
           if (payload.session_id) entry.sessionId = payload.session_id;
 
           const logPath = path.join(os.homedir(), '.node9', 'audit.log');
