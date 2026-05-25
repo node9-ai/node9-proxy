@@ -10,7 +10,7 @@
 
 Node9 sits between your AI agent and the tools it can use — **discover** what it's already been doing, **protect** against risky actions in real time, and **review** what happened over any time window.
 
-Works with **Claude Code · Codex CLI · Gemini CLI · Cursor · Windsurf · any MCP server**.
+Works with **Claude Code · Codex CLI · Gemini CLI · Cursor · Windsurf · VSCode · Claude Desktop · Opencode · Pi · any MCP server**.
 
 ## What Node9 does
 
@@ -66,7 +66,7 @@ npm install -g node9-ai
 ```
 
 ```bash
-node9 init       # auto-wires Claude Code, Gemini CLI, Cursor, Codex, MCP servers
+node9 init       # auto-wires all detected agents + MCP servers
 node9 doctor     # verify everything is wired correctly
 ```
 
@@ -195,7 +195,7 @@ def run_command(cmd: str) -> str:
 ## Under the hood
 
 - **Scan** reads raw agent history from `~/.claude/projects/`, `~/.gemini/tmp/`, `~/.codex/sessions/` — no API calls, fully offline
-- **Runtime** wires PreToolUse hooks into Claude Code, Gemini CLI, and Codex — hooks write to `~/.node9/audit.log` atomically
+- **Runtime** intercepts tool calls via pre-execution hooks (Claude Code, Codex, Gemini CLI, Opencode, Pi) or via the MCP gateway (Cursor, Windsurf, VSCode, Claude Desktop). All decisions land in `~/.node9/audit.log` atomically.
 - **MCP gateway** is a stdio proxy; intercepts `tools/list` + `tools/call` JSON-RPC, forwards the rest
 - **Policy engine** uses [mvdan-sh](https://github.com/mvdan/sh) for bash AST analysis — defeats obfuscation via backslash escaping, variable substitution, eval of remote download
 - **Shadow repo** for auto-undo lives at `~/.node9/snapshots/<hash16>/` — never touches your `.git`
