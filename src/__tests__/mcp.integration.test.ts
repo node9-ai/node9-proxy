@@ -317,7 +317,15 @@ describe('log command — audit.log written when payload.cwd differs from proces
       .split('\n')
       .map((l) => JSON.parse(l) as Record<string, unknown>);
 
-    expect(entries[0]).toMatchObject({ tool: 'read_file', decision: 'allowed' });
+    // `read_file` is canonicalised to `Read` at the hook boundary (see
+    // canonicalToolName in src/utils/hook-payload.ts) so the audit row's
+    // `tool` field carries the canonical Claude name. The agent-native
+    // name is preserved separately under `agentToolName`.
+    expect(entries[0]).toMatchObject({
+      tool: 'Read',
+      agentToolName: 'read_file',
+      decision: 'allowed',
+    });
   });
 
   it('audit.log is written even when global config.json is corrupt JSON — config load must not skip audit', () => {
