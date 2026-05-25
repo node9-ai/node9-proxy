@@ -10,6 +10,7 @@ import { getConfig } from '../../config';
 import { createShadowSnapshot, getSnapshotHistory } from '../../undo';
 import { notifyTaintPropagate, isDaemonRunning, notifyActivitySocket } from '../../auth/daemon';
 import { parseCpMvOp } from '../../utils/cp-mv-parser';
+import { extractToolName, extractToolInput } from '../../utils/hook-payload';
 
 // Patterns for common test runners
 const TEST_COMMAND_RE =
@@ -63,9 +64,8 @@ export function registerLogCommand(program: Command): void {
             turn_id?: string; // Codex-specific
           };
 
-          // Handle both Claude (tool_name) and Gemini (name)
-          const tool = sanitize(payload.tool_name ?? payload.name ?? 'unknown');
-          const rawInput = payload.tool_input ?? payload.args ?? {};
+          const tool = sanitize(extractToolName(payload, 'unknown'));
+          const rawInput = extractToolInput(payload);
 
           // Detect agent from hook payload — must mirror check.ts detectAiAgent.
           // Layer 0: explicit meta.agent tag set by a node9-authored shim

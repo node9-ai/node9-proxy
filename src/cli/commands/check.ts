@@ -17,6 +17,7 @@ import { autoStartDaemonAndWait } from '../daemon-starter';
 import { defaultSkillRoots, resolveUserSkillRoot, verifyAndPinRoots } from '../../skill-pin';
 import { scanArgs } from '../../dlp';
 import { appendLocalAudit } from '../../audit';
+import { extractToolName, extractToolInput } from '../../utils/hook-payload';
 
 function sanitize(value: string): string {
   // eslint-disable-next-line no-control-regex
@@ -331,8 +332,8 @@ export function registerCheckCommand(program: Command): void {
               fs.mkdirSync(path.dirname(logPath), { recursive: true });
             fs.appendFileSync(logPath, `[${new Date().toISOString()}] STDIN: ${raw}\n`);
           }
-          const toolName = sanitize(payload.tool_name ?? payload.name ?? '');
-          const toolInput = payload.tool_input ?? payload.args ?? {};
+          const toolName = sanitize(extractToolName(payload));
+          const toolInput = extractToolInput(payload);
 
           const agent = detectAiAgent(payload);
           const mcpMatch = toolName.match(/^mcp__([^_](?:[^_]|_(?!_))*?)__/i);
