@@ -1996,9 +1996,14 @@ const HERMES_CONFIG_FILENAME = 'config.yaml';
 const HERMES_ALLOWLIST_FILENAME = 'shell-hooks-allowlist.json';
 
 function hermesHomeDir(homeDir: string = os.homedir()): string {
-  // hermes_constants.py:30 — HERMES_HOME wins, else ~/.hermes
+  // hermes_constants.py:30 — HERMES_HOME wins, else ~/.hermes.
+  // Validate the env value is absolute before trusting it: a relative
+  // HERMES_HOME would silently resolve against process.cwd() inside
+  // path.join() / fs calls, producing surprising read/write locations.
+  // Hermes itself also requires an absolute HERMES_HOME, so a silent
+  // fallback keeps node9 aligned with the agent's own behaviour.
   const env = process.env.HERMES_HOME?.trim();
-  if (env) return env;
+  if (env && path.isAbsolute(env)) return env;
   return path.join(homeDir, '.hermes');
 }
 

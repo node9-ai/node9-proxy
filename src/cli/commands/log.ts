@@ -83,6 +83,14 @@ export function registerLogCommand(program: Command): void {
             }
             return undefined;
           })();
+          // Layer 1: payload fingerprint (most reliable).
+          // Layer 2 (env-var fallback): mirrors check.ts:detectAiAgent.
+          // Currently only Hermes — gateway/cron mode can lose payload
+          // fingerprints when the dispatcher rewrites payloads but env
+          // stays intact (run_agent.py:1913 sets HERMES_SESSION_ID on
+          // every session before tool dispatch). Other agents could be
+          // added the same way; keeping the surface minimal until there
+          // is a confirmed need.
           const agent =
             metaTag !== undefined
               ? metaTag
@@ -100,7 +108,11 @@ export function registerLogCommand(program: Command): void {
                         payload.hook_event_name === 'AfterTool' ||
                         payload.timestamp !== undefined
                       ? 'Gemini CLI'
-                      : undefined;
+                      : process.env.HERMES_SESSION_ID ||
+                          process.env.HERMES_HOME ||
+                          process.env.HERMES_INTERACTIVE
+                        ? 'Hermes'
+                        : undefined;
 
           // Audit write FIRST — before any config load that could fail.
           // A config error must never silently skip the audit entry.

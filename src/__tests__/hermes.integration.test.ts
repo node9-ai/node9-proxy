@@ -251,46 +251,74 @@ describe('hermes detection via HERMES_SESSION_ID env var (no payload fingerprint
     tmpHome = makeTempHome();
   });
 
-  it('attributes audit row to Hermes when env says so but payload is bare', () => {
+  function runLogWithEnv(extraEnv: Record<string, string>, payload: object): RunResult {
     const baseEnv = { ...process.env };
     delete baseEnv.NODE9_API_KEY;
     delete baseEnv.NODE9_API_URL;
+    delete baseEnv.HERMES_SESSION_ID;
+    delete baseEnv.HERMES_HOME;
+    delete baseEnv.HERMES_INTERACTIVE;
+    const result = spawnSync(process.execPath, [CLI, 'log', JSON.stringify(payload)], {
+      encoding: 'utf-8',
+      timeout: 60000,
+      env: {
+        ...baseEnv,
+        NODE9_NO_AUTO_DAEMON: '1',
+        NODE9_TESTING: '1',
+        HOME: tmpHome,
+        USERPROFILE: tmpHome,
+        ...extraEnv,
+      },
+    });
+    return {
+      status: result.status,
+      stdout: result.stdout ?? '',
+      stderr: result.stderr ?? '',
+      error: result.error,
+    };
+  }
 
-    const result = spawnSync(
-      process.execPath,
-      [
-        CLI,
-        'log',
-        JSON.stringify({
-          tool_name: 'Bash',
-          tool_input: { command: 'echo hi' },
-          session_id: 'env-only-session',
-          cwd: '/tmp',
-        }),
-      ],
-      {
-        encoding: 'utf-8',
-        timeout: 60000,
-        env: {
-          ...baseEnv,
-          NODE9_NO_AUTO_DAEMON: '1',
-          NODE9_TESTING: '1',
-          HOME: tmpHome,
-          USERPROFILE: tmpHome,
-          HERMES_SESSION_ID: 'sess_from_env_only',
-        },
-      }
-    );
+  // Payload that carries no agent fingerprint of its own — only a
+  // generic tool_name. Without env-var fallback the agent stays
+  // undefined; with the fallback HERMES_SESSION_ID wins.
+  const bareEnvOnlyPayload = {
+    tool_name: 'Bash',
+    tool_input: { command: 'echo hi' },
+    session_id: 'env-only-session',
+    cwd: '/tmp',
+  };
 
+  it('attributes audit row to Hermes via HERMES_SESSION_ID', () => {
+    const result = runLogWithEnv({ HERMES_SESSION_ID: 'sess_xyz' }, bareEnvOnlyPayload);
     expect(result.error).toBeUndefined();
     expect(result.status).toBe(0);
-    // Note: the inline detector in log.ts uses payload-only fingerprints
-    // (it doesn't check process.env). This test documents that gap — it
-    // currently expects undefined or "Claude Code" (from PostToolUse-less
-    // payload going through the Layer-3 fallback) rather than "Hermes".
-    // When log.ts's detector grows env-var awareness, update this test
-    // to expect 'Hermes'.
     const audit = readAuditLog(tmpHome);
     expect(audit).toHaveLength(1);
+    expect(audit[0].agent).toBe('Hermes');
+  });
+
+  it('attributes audit row to Hermes via HERMES_HOME', () => {
+    const result = runLogWithEnv({ HERMES_HOME: '/tmp/hermes-fake' }, bareEnvOnlyPayload);
+    expect(result.status).toBe(0);
+    const audit = readAuditLog(tmpHome);
+    expect(audit[0].agent).toBe('Hermes');
+  });
+
+  it('attributes audit row to Hermes via HERMES_INTERACTIVE', () => {
+    const result = runLogWithEnv({ HERMES_INTERACTIVE: '1' }, bareEnvOnlyPayload);
+    expect(result.status).toBe(0);
+    const audit = readAuditLog(tmpHome);
+    expect(audit[0].agent).toBe('Hermes');
+  });
+
+  it('payload fingerprint wins over env-var fallback', () => {
+    // PreToolUse → Claude Code from payload, even with HERMES_SESSION_ID set.
+    const result = runLogWithEnv(
+      { HERMES_SESSION_ID: 'sess_xyz' },
+      { ...bareEnvOnlyPayload, hook_event_name: 'PreToolUse' }
+    );
+    expect(result.status).toBe(0);
+    const audit = readAuditLog(tmpHome);
+    expect(audit[0].agent).toBe('Claude Code');
   });
 });
