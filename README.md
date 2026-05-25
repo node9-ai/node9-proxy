@@ -10,7 +10,7 @@
 
 Node9 sits between your AI agent and the tools it can use — **discover** what it's already been doing, **protect** against risky actions in real time, and **review** what happened over any time window.
 
-Works with **Claude Code · Codex CLI · Gemini CLI · Cursor · Windsurf · VSCode · Claude Desktop · Opencode · Pi · any MCP server**.
+Works with **Claude Code · Codex CLI · Gemini CLI · Cursor · Windsurf · VSCode · Claude Desktop · Opencode · Pi · Hermes Agent · any MCP server**.
 
 ## What Node9 does
 

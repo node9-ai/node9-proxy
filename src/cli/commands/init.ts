@@ -219,12 +219,12 @@ export function registerInitCommand(program: Command): void {
         if (found.length === 0) {
           console.log(
             chalk.gray(
-              'No AI agents detected. Install one of the supported agents (Claude Code, Codex, Gemini CLI, Cursor, Windsurf, VSCode, Claude Desktop, Opencode, or Pi).'
+              'No AI agents detected. Install one of the supported agents (Claude Code, Codex, Gemini CLI, Cursor, Windsurf, VSCode, Claude Desktop, Opencode, Pi, or Hermes Agent).'
             )
           );
           console.log(
             chalk.gray(
-              'then run: node9 agents add <claude|codex|gemini|cursor|windsurf|vscode|claudeDesktop|opencode|pi>'
+              'then run: node9 agents add <claude|codex|gemini|cursor|windsurf|vscode|claudeDesktop|opencode|pi|hermes>'
             )
           );
           return;
