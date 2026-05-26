@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -87,9 +87,29 @@ function writtenTomlTo(filePath: string): any {
 /** The node9 MCP server entry that setup.ts auto-injects. */
 const NODE9_MCP_ENTRY = { command: 'node9', args: ['mcp-server'] };
 
+// Env vars that influence path resolution inside the agent setup
+// functions. CI runners (and developer shells with HERMES_HOME exported
+// for a real Hermes install) would otherwise leak a real filesystem
+// location into hermesHomeDir(), bypassing the /mock/home test fixtures.
+// Snapshot + clear before every test; restore after.
+const PATH_RESOLVING_ENV_KEYS = ['HERMES_HOME', 'HERMES_SESSION_ID', 'HERMES_INTERACTIVE'] as const;
+let savedEnv: Record<string, string | undefined> = {};
+
 beforeEach(() => {
   vi.mocked(fs.existsSync).mockReturnValue(false);
   vi.mocked(fs.writeFileSync).mockClear();
+  savedEnv = {};
+  for (const k of PATH_RESOLVING_ENV_KEYS) {
+    savedEnv[k] = process.env[k];
+    delete process.env[k];
+  }
+});
+
+afterEach(() => {
+  for (const k of PATH_RESOLVING_ENV_KEYS) {
+    if (savedEnv[k] === undefined) delete process.env[k];
+    else process.env[k] = savedEnv[k];
+  }
 });
 
 // ── setupClaude ──────────────────────────────────────────────────────────────
