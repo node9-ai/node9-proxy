@@ -1506,21 +1506,27 @@ describe('teardownPi', () => {
 
 // ── setupHermes / teardownHermes ─────────────────────────────────────────────
 
+// Keys stored in the mock filesystem in forward-slash canonical form.
+// path.join() inside setupHermes produces backslash-separated paths on
+// Windows, so all mock lookups and assertions normalise to forward
+// slashes (mirrors the helper pattern used by the detectAgents tests
+// around line 660).
 const HERMES_CONFIG_PATH = '/mock/home/.hermes/config.yaml';
 const HERMES_ALLOWLIST_PATH = '/mock/home/.hermes/shell-hooks-allowlist.json';
+const toPosix = (p: unknown): string => String(p).replace(/\\/g, '/');
 
 function withHermesConfig(yamlText: string, extraFiles: Record<string, string> = {}) {
   const all: Record<string, string> = { [HERMES_CONFIG_PATH]: yamlText, ...extraFiles };
-  vi.mocked(fs.existsSync).mockImplementation((p) => String(p) in all);
+  vi.mocked(fs.existsSync).mockImplementation((p) => toPosix(p) in all);
   vi.mocked(fs.readFileSync).mockImplementation((p) => {
-    const c = all[String(p)];
+    const c = all[toPosix(p)];
     if (c !== undefined) return c;
     throw new Error('not found');
   });
 }
 
 function writtenRaw(filePath: string): string | null {
-  const calls = vi.mocked(fs.writeFileSync).mock.calls.filter(([p]) => String(p) === filePath);
+  const calls = vi.mocked(fs.writeFileSync).mock.calls.filter(([p]) => toPosix(p) === filePath);
   if (calls.length === 0) return null;
   return String(calls[calls.length - 1][1]);
 }
