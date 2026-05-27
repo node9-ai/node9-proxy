@@ -1608,6 +1608,31 @@ describe('setupHermes', () => {
     expect(writtenRaw(HERMES_ALLOWLIST_PATH)).toBeNull();
     consoleSpy.mockRestore();
   });
+
+  it('warns and bails on a corrupt config.yaml (does not crash, does not write)', () => {
+    // yaml.parseDocument tolerates parse errors and returns a Document
+    // with errors[].length > 0. toJS() returns a partial parse; setIn()
+    // succeeds; but doc.toString() throws "Document with errors cannot
+    // be stringified". Without an explicit guard, setupHermes would
+    // crash mid-init with an unhandled stack trace. Worse, on a
+    // hypothetical lib version that DID stringify a partial parse,
+    // we'd write back content that lost the user's original.
+    const corrupt =
+      'model:\n  default: "anthropic/claude-opus-4.6"\n' +
+      'hooks:\n  pre_tool_call:\n    - command: "foo"\n' +
+      '  unclosed: {{{ this is not valid yaml';
+    withHermesConfig(corrupt);
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    // Must not throw.
+    expect(() => setupHermes()).not.toThrow();
+    // Must not write a damaged config back.
+    expect(writtenRaw(HERMES_CONFIG_PATH)).toBeNull();
+    // Must not write the allowlist either — the user's setup is in a
+    // half-state and we should bail entirely until they fix the YAML.
+    expect(writtenRaw(HERMES_ALLOWLIST_PATH)).toBeNull();
+    consoleSpy.mockRestore();
+  });
 });
 
 describe('teardownHermes', () => {

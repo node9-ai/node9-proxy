@@ -2062,6 +2062,21 @@ export function setupHermes(): void {
   // surgical YAMLMap mutation.
   const raw = fs.readFileSync(configPath, 'utf-8');
   const doc = yaml.parseDocument(raw);
+  // parseDocument is permissive: a corrupt config returns a Document
+  // with errors[].length > 0 and a partial JS view via toJS(). Writing
+  // it back would either throw ("Document with errors cannot be
+  // stringified") or silently lose user content. Bail with a hint so
+  // the user fixes their YAML rather than letting us trash it.
+  if (doc.errors.length > 0) {
+    console.log(chalk.yellow(`  ⚠️  Hermes config.yaml has YAML parse errors:`));
+    for (const err of doc.errors.slice(0, 3)) {
+      console.log(chalk.gray(`     • ${err.message}`));
+    }
+    console.log(
+      chalk.gray('     Fix the file (or run `hermes config edit`), then re-run node9 setup hermes.')
+    );
+    return;
+  }
   const current = (doc.toJS() ?? {}) as {
     hooks?: Record<string, HermesHookEntry[]>;
     hooks_auto_accept?: boolean;
@@ -2163,11 +2178,31 @@ export function teardownHermes(): void {
     return;
   }
 
-  let anythingChanged = false;
-
   // ── 1. Strip node9 entries from config.yaml ──────────────────────────────
   const raw = fs.readFileSync(configPath, 'utf-8');
   const doc = yaml.parseDocument(raw);
+  // Same parseDocument-with-errors guard as setupHermes — we can't
+  // safely round-trip a corrupt config without losing the user's
+  // content. Skip the config step but still proceed to the allowlist
+  // cleanup below, which is a separate file.
+  if (doc.errors.length > 0) {
+    console.log(
+      chalk.yellow(`  ⚠️  Skipping ${configPath} — file has YAML parse errors, fix it manually.`)
+    );
+  } else {
+    teardownHermesConfigDoc(doc, configPath);
+  }
+
+  // ── 2. Strip node9 approvals from the allowlist ──────────────────────────
+  teardownHermesAllowlist(allowlistPath);
+}
+
+// Strip node9 hook entries from a successfully-parsed config Document
+// and write the result back. Extracted so teardownHermes can skip this
+// step (but still clean the allowlist) when the config has YAML errors
+// that would make round-tripping unsafe.
+function teardownHermesConfigDoc(doc: yaml.Document.Parsed, configPath: string): void {
+  let anythingChanged = false;
   const current = (doc.toJS() ?? {}) as {
     hooks?: Record<string, HermesHookEntry[]>;
   };
@@ -2202,8 +2237,11 @@ export function teardownHermes(): void {
   } else {
     console.log(chalk.blue(`  ℹ️  No Node9 hooks found in ${configPath}`));
   }
+}
 
-  // ── 2. Strip node9 approvals from the allowlist ──────────────────────────
+// Remove node9 approvals from the allowlist file, preserving any
+// user-added entries for their own hook scripts.
+function teardownHermesAllowlist(allowlistPath: string): void {
   if (!fs.existsSync(allowlistPath)) return;
 
   try {
