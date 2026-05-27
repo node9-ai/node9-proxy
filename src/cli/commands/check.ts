@@ -17,6 +17,7 @@ import { autoStartDaemonAndWait } from '../daemon-starter';
 import { defaultSkillRoots, resolveUserSkillRoot, verifyAndPinRoots } from '../../skill-pin';
 import { scanArgs } from '../../dlp';
 import { appendLocalAudit } from '../../audit';
+import { extractToolName, extractToolInput, canonicalToolName } from '../../utils/hook-payload';
 
 function sanitize(value: string): string {
   // eslint-disable-next-line no-control-regex
@@ -83,14 +84,25 @@ export function detectAiAgent(payload: Record<string, unknown>): string {
   ) {
     return 'Gemini CLI';
   }
+  // Hermes Agent uses lowercase snake_case hook event names per
+  // agent/shell_hooks.py:_serialize_payload — distinct from Claude's
+  // PascalCase and Gemini's BeforeTool/AfterTool so no overlap.
+  if (payload.hook_event_name === 'pre_tool_call' || payload.hook_event_name === 'post_tool_call') {
+    return 'Hermes';
+  }
 
   // Layer 2: env-var fallback. Order matters — most specific first.
   // CLAUDECODE is set by the Claude Code CLI on session start. Gemini's
   // CLI sets GEMINI_API_KEY (often present) or GEMINI_CLI_VERSION (newer
   // versions). Cursor sets CURSOR_TRACE_ID for tool-call attribution.
-  // Aider sets AIDER_VERSION when running under aider.
+  // Aider sets AIDER_VERSION when running under aider. Hermes sets
+  // HERMES_SESSION_ID on every session before tool dispatch
+  // (run_agent.py:1913).
   if (process.env.CLAUDECODE === '1' || process.env.CLAUDE_CODE_SESSION_ID) {
     return 'Claude Code';
+  }
+  if (process.env.HERMES_SESSION_ID || process.env.HERMES_HOME || process.env.HERMES_INTERACTIVE) {
+    return 'Hermes';
   }
   if (process.env.GEMINI_CLI_VERSION || process.env.GEMINI_API_KEY) {
     return 'Gemini CLI';
@@ -331,8 +343,8 @@ export function registerCheckCommand(program: Command): void {
               fs.mkdirSync(path.dirname(logPath), { recursive: true });
             fs.appendFileSync(logPath, `[${new Date().toISOString()}] STDIN: ${raw}\n`);
           }
-          const toolName = sanitize(payload.tool_name ?? payload.name ?? '');
-          const toolInput = payload.tool_input ?? payload.args ?? {};
+          const toolName = canonicalToolName(sanitize(extractToolName(payload)));
+          const toolInput = extractToolInput(payload);
 
           const agent = detectAiAgent(payload);
           const mcpMatch = toolName.match(/^mcp__([^_](?:[^_]|_(?!_))*?)__/i);

@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -11,12 +11,14 @@ import {
   setupCodex,
   setupOpencode,
   setupPi,
+  setupHermes,
   teardownClaude,
   teardownGemini,
   teardownCursor,
   teardownCodex,
   teardownOpencode,
   teardownPi,
+  teardownHermes,
   detectAgents,
 } from '../setup.js';
 
@@ -85,9 +87,29 @@ function writtenTomlTo(filePath: string): any {
 /** The node9 MCP server entry that setup.ts auto-injects. */
 const NODE9_MCP_ENTRY = { command: 'node9', args: ['mcp-server'] };
 
+// Env vars that influence path resolution inside the agent setup
+// functions. CI runners (and developer shells with HERMES_HOME exported
+// for a real Hermes install) would otherwise leak a real filesystem
+// location into hermesHomeDir(), bypassing the /mock/home test fixtures.
+// Snapshot + clear before every test; restore after.
+const PATH_RESOLVING_ENV_KEYS = ['HERMES_HOME', 'HERMES_SESSION_ID', 'HERMES_INTERACTIVE'] as const;
+let savedEnv: Record<string, string | undefined> = {};
+
 beforeEach(() => {
   vi.mocked(fs.existsSync).mockReturnValue(false);
   vi.mocked(fs.writeFileSync).mockClear();
+  savedEnv = {};
+  for (const k of PATH_RESOLVING_ENV_KEYS) {
+    savedEnv[k] = process.env[k];
+    delete process.env[k];
+  }
+});
+
+afterEach(() => {
+  for (const k of PATH_RESOLVING_ENV_KEYS) {
+    if (savedEnv[k] === undefined) delete process.env[k];
+    else process.env[k] = savedEnv[k];
+  }
 });
 
 // ── setupClaude ──────────────────────────────────────────────────────────────
@@ -671,6 +693,7 @@ describe('detectAgents', () => {
       claudeDesktop: false,
       opencode: false,
       pi: false,
+      hermes: false,
     });
   });
 
@@ -832,6 +855,7 @@ describe('detectAgents', () => {
       claudeDesktop: true,
       opencode: false,
       pi: false,
+      hermes: false,
     });
   });
 
@@ -864,6 +888,7 @@ describe('detectAgents', () => {
       claudeDesktop: false,
       opencode: false,
       pi: false,
+      hermes: false,
     });
     // Should warn to stderr for non-ENOENT errors so misconfigured systems surface
     expect(stderrSpy).toHaveBeenCalled();
@@ -887,6 +912,7 @@ describe('detectAgents', () => {
       claudeDesktop: false,
       opencode: false,
       pi: false,
+      hermes: false,
     });
     expect(stderrSpy).not.toHaveBeenCalled();
     stderrSpy.mockRestore();
@@ -1475,5 +1501,214 @@ describe('teardownPi', () => {
 
     expect(unlinkSpy).not.toHaveBeenCalled();
     unlinkSpy.mockRestore();
+  });
+});
+
+// ── setupHermes / teardownHermes ─────────────────────────────────────────────
+
+// Keys stored in the mock filesystem in forward-slash canonical form.
+// path.join() inside setupHermes produces backslash-separated paths on
+// Windows, so all mock lookups and assertions normalise to forward
+// slashes (mirrors the helper pattern used by the detectAgents tests
+// around line 660).
+const HERMES_CONFIG_PATH = '/mock/home/.hermes/config.yaml';
+const HERMES_ALLOWLIST_PATH = '/mock/home/.hermes/shell-hooks-allowlist.json';
+const toPosix = (p: unknown): string => String(p).replace(/\\/g, '/');
+
+function withHermesConfig(yamlText: string, extraFiles: Record<string, string> = {}) {
+  const all: Record<string, string> = { [HERMES_CONFIG_PATH]: yamlText, ...extraFiles };
+  vi.mocked(fs.existsSync).mockImplementation((p) => toPosix(p) in all);
+  vi.mocked(fs.readFileSync).mockImplementation((p) => {
+    const c = all[toPosix(p)];
+    if (c !== undefined) return c;
+    throw new Error('not found');
+  });
+}
+
+function writtenRaw(filePath: string): string | null {
+  const calls = vi.mocked(fs.writeFileSync).mock.calls.filter(([p]) => toPosix(p) === filePath);
+  if (calls.length === 0) return null;
+  return String(calls[calls.length - 1][1]);
+}
+
+describe('setupHermes', () => {
+  it('appends pre_tool_call / post_tool_call hooks to a hooks-less config', () => {
+    withHermesConfig('model:\n  default: "anthropic/claude-opus-4.6"\n');
+
+    setupHermes();
+
+    const written = writtenRaw(HERMES_CONFIG_PATH);
+    expect(written).toBeTruthy();
+    expect(written).toContain('pre_tool_call');
+    expect(written).toContain('post_tool_call');
+    expect(written).toContain('hooks_auto_accept: true');
+    // Preserves the existing top-level model: block (Document API).
+    expect(written).toContain('default: "anthropic/claude-opus-4.6"');
+  });
+
+  it('writes the allowlist file alongside the config (Finding F1)', () => {
+    withHermesConfig('model: {}\n');
+
+    setupHermes();
+
+    const allowlistRaw = writtenRaw(HERMES_ALLOWLIST_PATH);
+    expect(allowlistRaw).toBeTruthy();
+    const allowlist = JSON.parse(allowlistRaw!);
+    expect(Array.isArray(allowlist.approvals)).toBe(true);
+    expect(allowlist.approvals).toHaveLength(2);
+    expect(allowlist.approvals.map((e: { event: string }) => e.event).sort()).toEqual([
+      'post_tool_call',
+      'pre_tool_call',
+    ]);
+    for (const e of allowlist.approvals) {
+      expect(e.command).toMatch(/node9 (check|log)/);
+      expect(e.approved_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    }
+  });
+
+  it('is idempotent — second run with same state writes no config changes', () => {
+    // Seed config that already has node9 entries + the allowlist
+    const cfg =
+      'hooks:\n  pre_tool_call:\n    - command: "node9 check"\n      timeout: 10\n' +
+      '  post_tool_call:\n    - command: "node9 log"\n      timeout: 10\n' +
+      'hooks_auto_accept: true\n';
+    const allowlist = JSON.stringify({
+      approvals: [
+        { event: 'pre_tool_call', command: 'node9 check', approved_at: '2026-01-01T00:00:00Z' },
+        { event: 'post_tool_call', command: 'node9 log', approved_at: '2026-01-01T00:00:00Z' },
+      ],
+    });
+    withHermesConfig(cfg, { [HERMES_ALLOWLIST_PATH]: allowlist });
+
+    setupHermes();
+
+    // Config shouldn't be rewritten when nothing changed.
+    expect(writtenRaw(HERMES_CONFIG_PATH)).toBeNull();
+  });
+
+  it('preserves user-added non-node9 hook entries', () => {
+    const cfg =
+      'hooks:\n  pre_tool_call:\n    - command: "/usr/local/bin/audit.sh"\n      timeout: 5\n';
+    withHermesConfig(cfg);
+
+    setupHermes();
+
+    const written = writtenRaw(HERMES_CONFIG_PATH);
+    expect(written).toContain('/usr/local/bin/audit.sh');
+    expect(written).toContain('node9 check');
+  });
+
+  it('warns and bails when ~/.hermes/config.yaml is missing', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    setupHermes();
+
+    expect(writtenRaw(HERMES_CONFIG_PATH)).toBeNull();
+    expect(writtenRaw(HERMES_ALLOWLIST_PATH)).toBeNull();
+    consoleSpy.mockRestore();
+  });
+
+  it('warns and bails on a corrupt config.yaml (does not crash, does not write)', () => {
+    // yaml.parseDocument tolerates parse errors and returns a Document
+    // with errors[].length > 0. toJS() returns a partial parse; setIn()
+    // succeeds; but doc.toString() throws "Document with errors cannot
+    // be stringified". Without an explicit guard, setupHermes would
+    // crash mid-init with an unhandled stack trace. Worse, on a
+    // hypothetical lib version that DID stringify a partial parse,
+    // we'd write back content that lost the user's original.
+    const corrupt =
+      'model:\n  default: "anthropic/claude-opus-4.6"\n' +
+      'hooks:\n  pre_tool_call:\n    - command: "foo"\n' +
+      '  unclosed: {{{ this is not valid yaml';
+    withHermesConfig(corrupt);
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    // Must not throw.
+    expect(() => setupHermes()).not.toThrow();
+    // Must not write a damaged config back.
+    expect(writtenRaw(HERMES_CONFIG_PATH)).toBeNull();
+    // Must not write the allowlist either — the user's setup is in a
+    // half-state and we should bail entirely until they fix the YAML.
+    expect(writtenRaw(HERMES_ALLOWLIST_PATH)).toBeNull();
+    consoleSpy.mockRestore();
+  });
+});
+
+describe('teardownHermes', () => {
+  it('removes node9 entries from the hooks block', () => {
+    const cfg =
+      'hooks:\n  pre_tool_call:\n    - command: "node9 check"\n      timeout: 10\n' +
+      '  post_tool_call:\n    - command: "node9 log"\n      timeout: 10\n' +
+      'hooks_auto_accept: true\n';
+    withHermesConfig(cfg);
+
+    teardownHermes();
+
+    const written = writtenRaw(HERMES_CONFIG_PATH);
+    expect(written).toBeTruthy();
+    expect(written).not.toContain('node9 check');
+    expect(written).not.toContain('node9 log');
+    // hooks_auto_accept stays — user may have set it for their own hooks.
+    expect(written).toContain('hooks_auto_accept: true');
+  });
+
+  it('removes node9 entries from the allowlist file', () => {
+    const cfg = 'hooks:\n  pre_tool_call:\n    - command: "node9 check"\n      timeout: 10\n';
+    const allowlist = JSON.stringify({
+      approvals: [
+        { event: 'pre_tool_call', command: 'node9 check', approved_at: '2026-01-01T00:00:00Z' },
+        {
+          event: 'pre_tool_call',
+          command: '/usr/local/bin/audit.sh',
+          approved_at: '2026-01-01T00:00:00Z',
+        },
+      ],
+    });
+    withHermesConfig(cfg, { [HERMES_ALLOWLIST_PATH]: allowlist });
+
+    teardownHermes();
+
+    const allowlistRaw = writtenRaw(HERMES_ALLOWLIST_PATH);
+    expect(allowlistRaw).toBeTruthy();
+    const parsed = JSON.parse(allowlistRaw!);
+    expect(parsed.approvals).toHaveLength(1);
+    expect(parsed.approvals[0].command).toBe('/usr/local/bin/audit.sh');
+  });
+
+  it('preserves user-added non-node9 hook entries on teardown', () => {
+    const cfg =
+      'hooks:\n  pre_tool_call:\n    - command: "/usr/local/bin/audit.sh"\n      timeout: 5\n' +
+      '    - command: "node9 check"\n      timeout: 10\n';
+    withHermesConfig(cfg);
+
+    teardownHermes();
+
+    const written = writtenRaw(HERMES_CONFIG_PATH);
+    expect(written).toContain('/usr/local/bin/audit.sh');
+    expect(written).not.toContain('node9 check');
+  });
+
+  it('does nothing when config.yaml is absent', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+
+    teardownHermes();
+
+    expect(writtenRaw(HERMES_CONFIG_PATH)).toBeNull();
+  });
+});
+
+describe('detectAgents includes hermes', () => {
+  it('reports hermes: true when ~/.hermes/ exists', () => {
+    withHermesConfig('model: {}\n', { '/mock/home/.hermes': '' });
+    const detected = detectAgents('/mock/home');
+    expect(detected.hermes).toBe(true);
+  });
+
+  it('reports hermes: false when neither directory nor binary present', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+    // accessSync default mock returns ENOENT so binaryInPath returns false.
+    const detected = detectAgents('/mock/home');
+    expect(detected.hermes).toBe(false);
   });
 });

@@ -81,6 +81,11 @@ export function appendLocalAudit(
      *  specific shields without having to redefine the existing
      *  checkedBy taxonomy. */
     ruleName?: string;
+    /** Agent-native tool name when canonicalisation rewrote it (e.g.
+     *  Hermes `terminal` → canonical `Bash`). Audit row's `tool` field
+     *  stays canonical so report aggregation works; this field lets
+     *  grep against the name the user actually sees in their agent. */
+    agentToolName?: string;
   },
   auditHashArgsEnabled?: boolean
 ): void {
@@ -90,9 +95,11 @@ export function appendLocalAudit(
   const testRun =
     isTestCall(toolName, args) || process.env.NODE9_TESTING === '1' ? { testRun: true } : {};
   const ruleNameField = meta?.ruleName ? { ruleName: meta.ruleName } : {};
+  const agentToolNameField = meta?.agentToolName ? { agentToolName: meta.agentToolName } : {};
   appendToLog(LOCAL_AUDIT_LOG, {
     ts: new Date().toISOString(),
     tool: toolName,
+    ...agentToolNameField,
     ...argsField,
     decision,
     checkedBy,

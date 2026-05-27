@@ -5,6 +5,7 @@ import os from 'os';
 import chalk from 'chalk';
 import { confirm } from '@inquirer/prompts';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
+import * as yaml from 'yaml';
 import { seedMcpPinsIfMissing } from './mcp-pin';
 import { renderOpencodeShim } from './setup-opencode-shim';
 import { renderPiShim } from './setup-pi-shim';
@@ -747,6 +748,7 @@ export function detectAgents(homeDir: string = os.homedir()): {
   claudeDesktop: boolean;
   opencode: boolean;
   pi: boolean;
+  hermes: boolean;
 } {
   const exists = (p: string): boolean => {
     try {
@@ -778,6 +780,12 @@ export function detectAgents(homeDir: string = os.homedir()): {
     // (design R6) — so fall back to PATH lookup for installed-but-never-
     // launched pi.
     pi: exists(path.join(homeDir, '.pi', 'agent')) || binaryInPath('pi'),
+    // Hermes Agent (https://github.com/NousResearch/hermes-agent): home dir
+    // is $HERMES_HOME (default ~/.hermes) per hermes_constants.py:30. config.yaml
+    // appears after `hermes setup` has run; the directory alone exists from
+    // install time. PATH fallback covers the rare case where the user blew
+    // away ~/.hermes but kept the binary.
+    hermes: exists(hermesHomeDir(homeDir)) || binaryInPath('hermes'),
   };
 }
 
@@ -1963,6 +1971,298 @@ export function teardownPi(): void {
   }
 }
 
+// ── Hermes Agent (https://github.com/NousResearch/hermes-agent) ─────────────
+//
+// Hermes is a Python agent with a Claude-Code-style shell-hooks system
+// (verified against opensources/hermes-agent-main/agent/shell_hooks.py).
+// Integration shape:
+//
+//   1. Append a `hooks:` block to ~/.hermes/config.yaml that pipes
+//      pre_tool_call / post_tool_call events directly to `node9 check`
+//      and `node9 log`. No bridge script — canonicalToolName() in
+//      utils/hook-payload.ts translates Hermes's vocabulary
+//      (terminal → Bash, etc.) so existing shields match.
+//
+//   2. Pre-populate ~/.hermes/shell-hooks-allowlist.json. `hooks_auto_accept`
+//      in config.yaml triggers auto-allowlisting only on Hermes startup;
+//      without a pre-populated entry the first session blocks on a TTY
+//      consent prompt (Finding F1 from the 2026-05-26 cloud smoke test,
+//      see doc/roadmap/hermes-integration/).
+//
+//   3. Set hooks_auto_accept: true so future allowlist additions
+//      (different hook commands) don't prompt either.
+
+const HERMES_CONFIG_FILENAME = 'config.yaml';
+const HERMES_ALLOWLIST_FILENAME = 'shell-hooks-allowlist.json';
+
+function hermesHomeDir(homeDir: string = os.homedir()): string {
+  // hermes_constants.py:30 — HERMES_HOME wins, else ~/.hermes.
+  // Validate the env value is absolute before trusting it: a relative
+  // HERMES_HOME would silently resolve against process.cwd() inside
+  // path.join() / fs calls, producing surprising read/write locations.
+  // Hermes itself also requires an absolute HERMES_HOME, so a silent
+  // fallback keeps node9 aligned with the agent's own behaviour.
+  const env = process.env.HERMES_HOME?.trim();
+  if (env && path.isAbsolute(env)) return env;
+  return path.join(homeDir, '.hermes');
+}
+
+function hermesConfigPath(homeDir: string = os.homedir()): string {
+  return path.join(hermesHomeDir(homeDir), HERMES_CONFIG_FILENAME);
+}
+
+function hermesAllowlistPath(homeDir: string = os.homedir()): string {
+  return path.join(hermesHomeDir(homeDir), HERMES_ALLOWLIST_FILENAME);
+}
+
+interface HermesHookEntry {
+  command?: string;
+  matcher?: string;
+  timeout?: number;
+}
+
+interface HermesAllowlistEntry {
+  event?: string;
+  command?: string;
+  approved_at?: string;
+  script_mtime_at_approval?: string;
+}
+
+interface HermesAllowlist {
+  approvals?: HermesAllowlistEntry[];
+}
+
+// One entry per hook event we wire. Subcommand label used in user-facing log
+// messages — `node9 check` / `node9 log` mirroring the Claude/Gemini output.
+const HERMES_HOOK_PLAN: Array<{
+  event: 'pre_tool_call' | 'post_tool_call';
+  subcmd: 'check' | 'log';
+}> = [
+  { event: 'pre_tool_call', subcmd: 'check' },
+  { event: 'post_tool_call', subcmd: 'log' },
+];
+
+export function setupHermes(): void {
+  const homeDir = os.homedir();
+  const configPath = hermesConfigPath(homeDir);
+  const allowlistPath = hermesAllowlistPath(homeDir);
+
+  if (!fs.existsSync(configPath)) {
+    console.log(chalk.yellow(`  ⚠️  Hermes config not found at ${configPath}`));
+    console.log(chalk.gray('     Run `hermes setup` first, then re-run node9 setup hermes.'));
+    return;
+  }
+
+  let anythingChanged = false;
+
+  // ── 1. ~/.hermes/config.yaml ─────────────────────────────────────────────
+  // Document API preserves comments and key ordering outside the hooks
+  // block. The hooks block itself we rewrite per-event, which loses any
+  // user comments inside that block — fair trade for not having to do
+  // surgical YAMLMap mutation.
+  const raw = fs.readFileSync(configPath, 'utf-8');
+  const doc = yaml.parseDocument(raw);
+  // parseDocument is permissive: a corrupt config returns a Document
+  // with errors[].length > 0 and a partial JS view via toJS(). Writing
+  // it back would either throw ("Document with errors cannot be
+  // stringified") or silently lose user content. Bail with a hint so
+  // the user fixes their YAML rather than letting us trash it.
+  if (doc.errors.length > 0) {
+    console.log(chalk.yellow(`  ⚠️  Hermes config.yaml has YAML parse errors:`));
+    for (const err of doc.errors.slice(0, 3)) {
+      console.log(chalk.gray(`     • ${err.message}`));
+    }
+    console.log(
+      chalk.gray('     Fix the file (or run `hermes config edit`), then re-run node9 setup hermes.')
+    );
+    return;
+  }
+  const current = (doc.toJS() ?? {}) as {
+    hooks?: Record<string, HermesHookEntry[]>;
+    hooks_auto_accept?: boolean;
+  };
+
+  for (const { event, subcmd } of HERMES_HOOK_PLAN) {
+    const command = fullPathCommand(subcmd);
+    const existing = current.hooks?.[event] ?? [];
+    const node9Idx = existing.findIndex(
+      (e) => typeof e?.command === 'string' && isNode9Hook(e.command)
+    );
+
+    if (node9Idx === -1) {
+      const newEntries = [...existing, { command, timeout: 10 }];
+      doc.setIn(['hooks', event], newEntries);
+      console.log(chalk.green(`  ✅ Hermes ${event} hook added → node9 ${subcmd}`));
+      anythingChanged = true;
+    } else if (
+      existing[node9Idx].command !== command ||
+      isStaleHookCommand(existing[node9Idx].command ?? '')
+    ) {
+      // Self-heal: paths change on reinstall (nvm version bumps, global
+      // → npm-link transitions, etc.) — mirror the Claude pattern.
+      const newEntries = [...existing];
+      newEntries[node9Idx] = { ...newEntries[node9Idx], command };
+      doc.setIn(['hooks', event], newEntries);
+      console.log(chalk.yellow(`  🔧 Hermes ${event} hook repaired (stale path → current binary)`));
+      anythingChanged = true;
+    }
+  }
+
+  if (current.hooks_auto_accept !== true) {
+    doc.set('hooks_auto_accept', true);
+    console.log(chalk.green('  ✅ hooks_auto_accept set to true'));
+    anythingChanged = true;
+  }
+
+  if (anythingChanged) {
+    fs.writeFileSync(configPath, doc.toString());
+  }
+
+  // ── 2. ~/.hermes/shell-hooks-allowlist.json ──────────────────────────────
+  // Finding F1 from the cloud smoke test: hooks_auto_accept gates the
+  // auto-write of allowlist entries during register_callbacks(), but
+  // doesn't back-fill on its own. Pre-populating here lets gateway/cron
+  // mode (no TTY for the consent prompt) start cleanly.
+  let allowlist: HermesAllowlist = {};
+  if (fs.existsSync(allowlistPath)) {
+    try {
+      allowlist = JSON.parse(fs.readFileSync(allowlistPath, 'utf-8'));
+    } catch {
+      // Corrupt or partial allowlist — rebuild rather than skip silently.
+      allowlist = {};
+    }
+  }
+  if (!Array.isArray(allowlist.approvals)) allowlist.approvals = [];
+
+  const nowIso = new Date().toISOString();
+  let allowlistChanged = false;
+  for (const { event, subcmd } of HERMES_HOOK_PLAN) {
+    const command = fullPathCommand(subcmd);
+    const existingIdx = allowlist.approvals.findIndex(
+      (e) => e?.event === event && typeof e?.command === 'string' && isNode9Hook(e.command)
+    );
+    if (existingIdx === -1) {
+      allowlist.approvals.push({ event, command, approved_at: nowIso });
+      allowlistChanged = true;
+    } else if (allowlist.approvals[existingIdx].command !== command) {
+      // Self-heal stale path
+      allowlist.approvals[existingIdx] = { event, command, approved_at: nowIso };
+      allowlistChanged = true;
+    }
+  }
+
+  if (allowlistChanged) {
+    fs.mkdirSync(path.dirname(allowlistPath), { recursive: true });
+    fs.writeFileSync(allowlistPath, JSON.stringify(allowlist, null, 2) + '\n');
+    console.log(chalk.green('  ✅ Hermes shell-hooks allowlist populated'));
+    anythingChanged = true;
+  }
+
+  if (anythingChanged) {
+    console.log(chalk.green.bold('🛡️  Node9 is now protecting Hermes Agent!'));
+    console.log(chalk.gray('    Restart Hermes for changes to take effect.'));
+    printDaemonTip();
+  } else {
+    console.log(chalk.blue('ℹ️  Node9 is already fully configured for Hermes Agent.'));
+    printDaemonTip();
+  }
+}
+
+export function teardownHermes(): void {
+  const homeDir = os.homedir();
+  const configPath = hermesConfigPath(homeDir);
+  const allowlistPath = hermesAllowlistPath(homeDir);
+
+  if (!fs.existsSync(configPath)) {
+    console.log(chalk.blue(`  ℹ️  ${configPath} not found — nothing to remove`));
+    return;
+  }
+
+  // ── 1. Strip node9 entries from config.yaml ──────────────────────────────
+  const raw = fs.readFileSync(configPath, 'utf-8');
+  const doc = yaml.parseDocument(raw);
+  // Same parseDocument-with-errors guard as setupHermes — we can't
+  // safely round-trip a corrupt config without losing the user's
+  // content. Skip the config step but still proceed to the allowlist
+  // cleanup below, which is a separate file.
+  if (doc.errors.length > 0) {
+    console.log(
+      chalk.yellow(`  ⚠️  Skipping ${configPath} — file has YAML parse errors, fix it manually.`)
+    );
+  } else {
+    teardownHermesConfigDoc(doc, configPath);
+  }
+
+  // ── 2. Strip node9 approvals from the allowlist ──────────────────────────
+  teardownHermesAllowlist(allowlistPath);
+}
+
+// Strip node9 hook entries from a successfully-parsed config Document
+// and write the result back. Extracted so teardownHermes can skip this
+// step (but still clean the allowlist) when the config has YAML errors
+// that would make round-tripping unsafe.
+function teardownHermesConfigDoc(doc: yaml.Document.Parsed, configPath: string): void {
+  let anythingChanged = false;
+  const current = (doc.toJS() ?? {}) as {
+    hooks?: Record<string, HermesHookEntry[]>;
+  };
+
+  for (const { event } of HERMES_HOOK_PLAN) {
+    const existing = current.hooks?.[event] ?? [];
+    const filtered = existing.filter(
+      (e) => !(typeof e?.command === 'string' && isNode9Hook(e.command))
+    );
+    if (filtered.length === existing.length) continue;
+
+    if (filtered.length === 0) {
+      // Drop the empty event key entirely so the config stays tidy.
+      doc.deleteIn(['hooks', event]);
+    } else {
+      doc.setIn(['hooks', event], filtered);
+    }
+    anythingChanged = true;
+  }
+
+  // If hooks: is now empty, drop it. Leaves hooks_auto_accept alone —
+  // user may have set it for non-node9 hooks they add later.
+  const afterHooks = doc.toJS()?.hooks;
+  if (afterHooks && typeof afterHooks === 'object' && Object.keys(afterHooks).length === 0) {
+    doc.delete('hooks');
+    anythingChanged = true;
+  }
+
+  if (anythingChanged) {
+    fs.writeFileSync(configPath, doc.toString());
+    console.log(chalk.green(`  ✅ Removed Node9 hooks from ${configPath}`));
+  } else {
+    console.log(chalk.blue(`  ℹ️  No Node9 hooks found in ${configPath}`));
+  }
+}
+
+// Remove node9 approvals from the allowlist file, preserving any
+// user-added entries for their own hook scripts.
+function teardownHermesAllowlist(allowlistPath: string): void {
+  if (!fs.existsSync(allowlistPath)) return;
+
+  try {
+    const raw = fs.readFileSync(allowlistPath, 'utf-8');
+    const allowlist = JSON.parse(raw) as HermesAllowlist;
+    if (!Array.isArray(allowlist.approvals)) return;
+
+    const before = allowlist.approvals.length;
+    allowlist.approvals = allowlist.approvals.filter(
+      (e) => !(typeof e?.command === 'string' && isNode9Hook(e.command))
+    );
+    if (allowlist.approvals.length === before) return;
+
+    fs.writeFileSync(allowlistPath, JSON.stringify(allowlist, null, 2) + '\n');
+    console.log(chalk.green(`  ✅ Removed Node9 entries from ${allowlistPath}`));
+  } catch {
+    // Corrupt allowlist on teardown — leave it alone; user can delete
+    // it themselves if they want a fresh start.
+  }
+}
+
 // ── Agent wired-status checks ─────────────────────────────────────────────────
 // Each function returns true if node9 hooks/MCP are present in the agent config.
 
@@ -1975,7 +2275,8 @@ export type AgentName =
   | 'vscode'
   | 'claudeDesktop'
   | 'opencode'
-  | 'pi';
+  | 'pi'
+  | 'hermes';
 
 export interface AgentStatus {
   name: AgentName;
@@ -2107,6 +2408,25 @@ export function getAgentsStatus(homeDir: string = os.homedir()): AgentStatus[] {
       // simple existence check on the canonical install location.
       wired: fs.existsSync(path.join(homeDir, '.pi', 'agent', 'extensions', PI_EXTENSION_NAME)),
       mode: detected.pi ? 'hooks' : null,
+    },
+    {
+      name: 'hermes',
+      label: 'Hermes Agent',
+      installed: detected.hermes,
+      // Wired = node9 hook entry exists in the parsed config.yaml.
+      // Reading the YAML cheaply via yaml.parse — we don't need the
+      // Document API for a boolean status check.
+      wired: (() => {
+        try {
+          const raw = fs.readFileSync(hermesConfigPath(homeDir), 'utf-8');
+          const cfg = yaml.parse(raw) as { hooks?: Record<string, HermesHookEntry[]> } | null;
+          const pre = cfg?.hooks?.['pre_tool_call'] ?? [];
+          return pre.some((e) => typeof e?.command === 'string' && isNode9Hook(e.command));
+        } catch {
+          return false;
+        }
+      })(),
+      mode: detected.hermes ? 'hooks' : null,
     },
   ];
 }

@@ -10,6 +10,7 @@ import { getConfig } from '../../config';
 import { createShadowSnapshot, getSnapshotHistory } from '../../undo';
 import { notifyTaintPropagate, isDaemonRunning, notifyActivitySocket } from '../../auth/daemon';
 import { parseCpMvOp } from '../../utils/cp-mv-parser';
+import { extractToolName, extractToolInput, canonicalToolName } from '../../utils/hook-payload';
 
 // Patterns for common test runners
 const TEST_COMMAND_RE =
@@ -63,9 +64,9 @@ export function registerLogCommand(program: Command): void {
             turn_id?: string; // Codex-specific
           };
 
-          // Handle both Claude (tool_name) and Gemini (name)
-          const tool = sanitize(payload.tool_name ?? payload.name ?? 'unknown');
-          const rawInput = payload.tool_input ?? payload.args ?? {};
+          const rawToolName = sanitize(extractToolName(payload, 'unknown'));
+          const tool = canonicalToolName(rawToolName);
+          const rawInput = extractToolInput(payload);
 
           // Detect agent from hook payload — must mirror check.ts detectAiAgent.
           // Layer 0: explicit meta.agent tag set by a node9-authored shim
@@ -82,21 +83,36 @@ export function registerLogCommand(program: Command): void {
             }
             return undefined;
           })();
+          // Layer 1: payload fingerprint (most reliable).
+          // Layer 2 (env-var fallback): mirrors check.ts:detectAiAgent.
+          // Currently only Hermes — gateway/cron mode can lose payload
+          // fingerprints when the dispatcher rewrites payloads but env
+          // stays intact (run_agent.py:1913 sets HERMES_SESSION_ID on
+          // every session before tool dispatch). Other agents could be
+          // added the same way; keeping the surface minimal until there
+          // is a confirmed need.
           const agent =
             metaTag !== undefined
               ? metaTag
               : payload.turn_id !== undefined
                 ? 'Codex'
-                : payload.hook_event_name === 'PreToolUse' ||
-                    payload.hook_event_name === 'PostToolUse' ||
-                    payload.tool_use_id !== undefined ||
-                    payload.permission_mode !== undefined
-                  ? 'Claude Code'
-                  : payload.hook_event_name === 'BeforeTool' ||
-                      payload.hook_event_name === 'AfterTool' ||
-                      payload.timestamp !== undefined
-                    ? 'Gemini CLI'
-                    : undefined;
+                : payload.hook_event_name === 'pre_tool_call' ||
+                    payload.hook_event_name === 'post_tool_call'
+                  ? 'Hermes'
+                  : payload.hook_event_name === 'PreToolUse' ||
+                      payload.hook_event_name === 'PostToolUse' ||
+                      payload.tool_use_id !== undefined ||
+                      payload.permission_mode !== undefined
+                    ? 'Claude Code'
+                    : payload.hook_event_name === 'BeforeTool' ||
+                        payload.hook_event_name === 'AfterTool' ||
+                        payload.timestamp !== undefined
+                      ? 'Gemini CLI'
+                      : process.env.HERMES_SESSION_ID ||
+                          process.env.HERMES_HOME ||
+                          process.env.HERMES_INTERACTIVE
+                        ? 'Hermes'
+                        : undefined;
 
           // Audit write FIRST — before any config load that could fail.
           // A config error must never silently skip the audit entry.
@@ -108,6 +124,12 @@ export function registerLogCommand(program: Command): void {
             source: 'post-hook',
           };
           if (agent) entry.agent = agent;
+          // Preserve the agent-native tool name when canonicalisation
+          // rewrote it (e.g. Hermes `terminal` → `Bash`). Lets users
+          // grep audit.log for the name they actually see in their
+          // agent's UI without losing the canonical for shield/report
+          // aggregation.
+          if (rawToolName !== tool) entry.agentToolName = rawToolName;
           if (payload.session_id) entry.sessionId = payload.session_id;
 
           const logPath = path.join(os.homedir(), '.node9', 'audit.log');

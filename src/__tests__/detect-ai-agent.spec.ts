@@ -11,6 +11,9 @@ const ENV_KEYS = [
   'CURSOR_TRACE_ID',
   'CURSOR_SESSION_ID',
   'AIDER_VERSION',
+  'HERMES_SESSION_ID',
+  'HERMES_HOME',
+  'HERMES_INTERACTIVE',
 ] as const;
 
 describe('detectAiAgent', () => {
@@ -126,6 +129,33 @@ describe('detectAiAgent', () => {
     expect(detectAiAgent({ timestamp: '2026-05-03T12:00:00Z' })).toBe('Gemini CLI');
   });
 
+  it('detects Hermes from pre_tool_call hook event', () => {
+    // Hermes uses lowercase snake_case event names per
+    // agent/shell_hooks.py:_serialize_payload — no overlap with Claude
+    // (PreToolUse) or Gemini (BeforeTool).
+    expect(detectAiAgent({ hook_event_name: 'pre_tool_call' })).toBe('Hermes');
+  });
+
+  it('detects Hermes from post_tool_call hook event', () => {
+    expect(detectAiAgent({ hook_event_name: 'post_tool_call' })).toBe('Hermes');
+  });
+
+  it('detects Hermes from a real captured pre_tool_call payload', () => {
+    // Captured 2026-05-26 during smoke-test verification on the hermes
+    // GCE VM (Hermes v0.14.0). Wire shape matches
+    // agent/shell_hooks.py:_serialize_payload byte-for-byte.
+    expect(
+      detectAiAgent({
+        hook_event_name: 'pre_tool_call',
+        tool_name: 'terminal',
+        tool_input: { command: 'ls -la' },
+        session_id: 'capture-test',
+        cwd: '/tmp',
+        extra: { task_id: 'task-1', tool_call_id: 'call-abc' },
+      })
+    ).toBe('Hermes');
+  });
+
   it('payload fingerprint takes precedence over env vars', () => {
     process.env.CURSOR_TRACE_ID = 'cursor_xyz';
     // Payload says Claude Code; env says Cursor — fingerprint wins.
@@ -147,6 +177,23 @@ describe('detectAiAgent', () => {
   it('detects Gemini CLI via GEMINI_CLI_VERSION env var', () => {
     process.env.GEMINI_CLI_VERSION = '1.0.0';
     expect(detectAiAgent({})).toBe('Gemini CLI');
+  });
+
+  it('detects Hermes via HERMES_SESSION_ID env var', () => {
+    // run_agent.py:1913 sets HERMES_SESSION_ID on every session before
+    // any tool dispatch — most reliable Hermes-side fingerprint.
+    process.env.HERMES_SESSION_ID = 'sess_hermes_abc';
+    expect(detectAiAgent({})).toBe('Hermes');
+  });
+
+  it('detects Hermes via HERMES_HOME env var', () => {
+    process.env.HERMES_HOME = '/opt/hermes';
+    expect(detectAiAgent({})).toBe('Hermes');
+  });
+
+  it('detects Hermes via HERMES_INTERACTIVE env var', () => {
+    process.env.HERMES_INTERACTIVE = '1';
+    expect(detectAiAgent({})).toBe('Hermes');
   });
 
   it('detects Cursor via CURSOR_TRACE_ID env var', () => {
