@@ -1,0 +1,2 @@
+{"type":"user","timestamp":"2026-06-01T11:00:00Z","message":{"content":[{"type":"text","text":"my key is __AWS_ACCESS_KEY__ please rotate it"}]}}
+{"type":"assistant","timestamp":"2026-06-01T11:00:01Z","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":12,"output_tokens":8,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":[{"type":"text","text":"acknowledged, rotating now"}]}}

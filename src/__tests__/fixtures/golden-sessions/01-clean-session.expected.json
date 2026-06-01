@@ -1,0 +1,9 @@
+{
+  "description": "User-assistant exchange with no tool calls and no secrets. Baseline: scan should find nothing.",
+  "filesScanned": 1,
+  "sessions": 1,
+  "totalToolCalls": 0,
+  "bashCalls": 0,
+  "dlpFindingsCount": 0,
+  "loopFindingsCount": 0
+}

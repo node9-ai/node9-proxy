@@ -1,0 +1,10 @@
+{
+  "description": "User prompt contains an AWS Access Key ID (synthetic shape, no stopwords). DLP should find exactly 1 hit attributed to user-prompt.",
+  "filesScanned": 1,
+  "sessions": 1,
+  "totalToolCalls": 0,
+  "bashCalls": 0,
+  "dlpFindingsCount": 1,
+  "dlpFindings": [{ "patternName": "AWS Access Key ID", "toolName": "user-prompt" }],
+  "loopFindingsCount": 0
+}

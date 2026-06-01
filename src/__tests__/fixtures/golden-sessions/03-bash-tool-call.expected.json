@@ -1,0 +1,9 @@
+{
+  "description": "Assistant calls Bash with 'ls -la' once, gets a tool_result with directory listing. Tests tool-call counting and bash attribution; no secrets present.",
+  "filesScanned": 1,
+  "sessions": 1,
+  "totalToolCalls": 1,
+  "bashCalls": 1,
+  "dlpFindingsCount": 0,
+  "loopFindingsCount": 0
+}
