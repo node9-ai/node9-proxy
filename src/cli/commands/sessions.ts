@@ -49,7 +49,7 @@ export interface SessionSummary {
   costUSD: number;
   hasSnapshot: boolean;
   modifiedFiles: string[]; // files touched by Write/Edit tools
-  agent?: 'claude' | 'gemini' | 'codex';
+  agent?: 'claude' | 'gemini' | 'codex' | 'antigravity';
 }
 
 interface JournalLine {
