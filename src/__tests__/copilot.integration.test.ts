@@ -164,6 +164,29 @@ describe('copilot check — deny response shape', () => {
     expect(parsed.hookSpecificOutput.permissionDecision).toBe('deny');
     expect(r.status).toBe(2);
   });
+
+  it('--agent copilot prompt-DLP block is attributed to GitHub Copilot in the audit log', () => {
+    // Regression: the UserPromptSubmit handler must honour the --agent flag
+    // like the tool-call path. Copilot's prompt payload is identical to
+    // Claude's, so without the flag the block row mis-attributes to
+    // "Claude Code" — under-counting Copilot prompt-DLP blocks. The AWS key
+    // shape is assembled so no contiguous secret literal sits in the repo.
+    const awsKey = 'AKIA' + 'QX7Z3BHDM7NPLKV5';
+    const promptPayload = {
+      hook_event_name: 'UserPromptSubmit',
+      session_id: '40a3be24-85b8-4b5a-ac50-9f71d7e1ec5a',
+      cwd: '/tmp/copilot-test',
+      prompt: `deploy with AWS_ACCESS_KEY_ID=${awsKey}`,
+    };
+    const r = run('check', ['--agent', 'copilot'], promptPayload, tmpHome);
+    // Prompt-DLP blocks via the Claude shape + exit 2 (verified live to
+    // block prompts on Copilot too).
+    expect(r.status).toBe(2);
+    const auditPath = path.join(tmpHome, '.node9', 'audit.log');
+    const entry = JSON.parse(fs.readFileSync(auditPath, 'utf-8').trim());
+    expect(entry.agent).toBe('GitHub Copilot');
+    expect(entry.decision).toBe('deny');
+  });
 });
 
 describe('copilot log — audit attribution', () => {

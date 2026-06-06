@@ -976,6 +976,221 @@ export function teardownAntigravity(): void {
   }
 }
 
+// ── GitHub Copilot CLI ────────────────────────────────────────────────────────
+// The terminal agent (`copilot`, npm @github/copilot) — distinct from the
+// VS Code Copilot extension, which stays under the `vscode` MCP target.
+// Hooks live in ~/.copilot/hooks/*.json; Copilot merges every file in that
+// dir, so node9 owns a dedicated node9.json rather than editing the
+// auto-managed settings.json. Payload is byte-identical to Claude Code, so
+// check/log need no new dialect — only the --agent copilot flag (which also
+// selects the flat permissionDecision deny shape). All verified live against
+// Copilot CLI 1.0.60 (doc/roadmap/copilot-target.md).
+
+// Copilot accepts bash / powershell / command; `command` is the
+// cross-platform fallback, so we emit a single fullPathCommand string —
+// matching how the other hook agents register.
+interface CopilotHookMatcher {
+  type?: string;
+  command?: string;
+  timeoutSec?: number;
+}
+
+interface CopilotHooksFile {
+  version?: number;
+  hooks?: {
+    PreToolUse?: CopilotHookMatcher[];
+    PostToolUse?: CopilotHookMatcher[];
+    UserPromptSubmit?: CopilotHookMatcher[];
+    [key: string]: CopilotHookMatcher[] | undefined;
+  };
+  [key: string]: unknown;
+}
+
+interface CopilotMcpConfig {
+  mcpServers?: Record<string, McpServer>;
+  [key: string]: unknown;
+}
+
+export async function setupCopilot(): Promise<void> {
+  seedMcpPinsIfMissing(); // #179
+  const homeDir = os.homedir();
+  const hooksPath = path.join(homeDir, '.copilot', 'hooks', 'node9.json');
+  const mcpPath = path.join(homeDir, '.copilot', 'mcp-config.json');
+
+  const hooksFile = readJson<CopilotHooksFile>(hooksPath) ?? { version: 1 };
+  if (!hooksFile.version) hooksFile.version = 1;
+  if (!hooksFile.hooks) hooksFile.hooks = {};
+
+  const mcpConfig = readJson<CopilotMcpConfig>(mcpPath) ?? {};
+  const servers = mcpConfig.mcpServers ?? {};
+
+  let hooksChanged = false;
+  let anythingChanged = false;
+
+  // Each event registers one node9 command hook. timeoutSec is seconds;
+  // preToolUse is fail-closed (a timeout DENIES the tool), so 600 s covers
+  // slow human approvals without spuriously blocking. --agent copilot pins
+  // attribution AND selects the flat permissionDecision deny shape in check.
+  const addHook = (
+    event: 'PreToolUse' | 'PostToolUse' | 'UserPromptSubmit',
+    subcommand: string
+  ) => {
+    const arr = Array.isArray(hooksFile.hooks![event]) ? hooksFile.hooks![event]! : [];
+    const present = arr.some((h) => isNode9Hook(h.command));
+    if (!present) {
+      arr.push({ type: 'command', command: fullPathCommand(subcommand), timeoutSec: 600 });
+      hooksFile.hooks![event] = arr;
+      console.log(chalk.green(`  ✅ ${event} hook added  → node9 ${subcommand.split(' ')[0]}`));
+      hooksChanged = true;
+      anythingChanged = true;
+    } else {
+      // Self-heal: rewrite node9 hooks whose absolute paths have vanished.
+      for (const h of arr) {
+        if (h.command && isNode9Hook(h.command) && needsRewrite(h.command)) {
+          h.command = fullPathCommand(subcommand);
+          console.log(chalk.yellow(`  🔧 ${event} hook repaired (stale path → current binary)`));
+          hooksChanged = true;
+          anythingChanged = true;
+        }
+      }
+    }
+  };
+
+  addHook('PreToolUse', 'check --agent copilot');
+  addHook('PostToolUse', 'log --agent copilot');
+  // Copilot DOES have UserPromptSubmit (unlike agy) — wire prompt DLP.
+  addHook('UserPromptSubmit', 'check --agent copilot');
+
+  if (hooksChanged) {
+    writeJson(hooksPath, hooksFile);
+    console.log('');
+  }
+
+  // Add the node9 MCP server entry if not already present (pure addition).
+  if (!hasNode9McpServer(servers)) {
+    servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+    mcpConfig.mcpServers = servers;
+    writeJson(mcpPath, mcpConfig);
+    console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    anythingChanged = true;
+  }
+
+  // Wrap existing non-node9 MCP servers.
+  const serversToWrap: Array<{ name: string; upstream: string }> = [];
+  for (const [name, server] of Object.entries(servers)) {
+    if (!server.command || server.command === 'node9') continue;
+    serversToWrap.push({ name, upstream: [server.command, ...(server.args ?? [])].join(' ') });
+  }
+
+  if (serversToWrap.length > 0) {
+    console.log(chalk.bold('The following existing entries will be modified:\n'));
+    console.log(chalk.white(`  ${mcpPath}`));
+    for (const { name, upstream } of serversToWrap) {
+      console.log(chalk.gray(`    • ${name}: "${upstream}" → node9 mcp --upstream "${upstream}"`));
+    }
+    console.log('');
+
+    const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
+    if (proceed) {
+      for (const { name, upstream } of serversToWrap) {
+        servers[name] = {
+          ...servers[name],
+          command: 'node9',
+          args: ['mcp', '--upstream', upstream],
+        };
+      }
+      mcpConfig.mcpServers = servers;
+      writeJson(mcpPath, mcpConfig);
+      console.log(chalk.green(`\n  ✅ ${serversToWrap.length} MCP server(s) wrapped`));
+      anythingChanged = true;
+    } else {
+      console.log(chalk.yellow('  Skipped MCP server wrapping.'));
+    }
+    console.log('');
+  }
+
+  if (!anythingChanged) {
+    console.log(chalk.blue('ℹ️  Node9 is already fully configured for GitHub Copilot CLI.'));
+    printDaemonTip();
+    return;
+  }
+
+  console.log(chalk.green.bold('🛡️  Node9 is now protecting GitHub Copilot CLI!'));
+  console.log(chalk.gray('    Restart Copilot CLI for changes to take effect.'));
+  printDaemonTip();
+}
+
+export function teardownCopilot(): void {
+  const homeDir = os.homedir();
+  const hooksPath = path.join(homeDir, '.copilot', 'hooks', 'node9.json');
+  const mcpPath = path.join(homeDir, '.copilot', 'mcp-config.json');
+
+  const hooksFile = readJson<CopilotHooksFile>(hooksPath);
+  let changed = false;
+  if (hooksFile?.hooks) {
+    for (const event of ['PreToolUse', 'PostToolUse', 'UserPromptSubmit'] as const) {
+      const before = hooksFile.hooks[event]?.length ?? 0;
+      hooksFile.hooks[event] = hooksFile.hooks[event]?.filter((h) => !isNode9Hook(h.command));
+      if ((hooksFile.hooks[event]?.length ?? 0) < before) changed = true;
+      if (hooksFile.hooks[event]?.length === 0) delete hooksFile.hooks[event];
+    }
+    if (changed) {
+      // If node9 authored every hook (the common case — node9.json is a
+      // dedicated file), the hooks object is now empty: remove the file
+      // entirely rather than leaving a {version:1, hooks:{}} husk.
+      if (Object.keys(hooksFile.hooks).length === 0) {
+        try {
+          fs.unlinkSync(hooksPath);
+          console.log(chalk.green('  ✅ Removed ~/.copilot/hooks/node9.json'));
+        } catch {
+          writeJson(hooksPath, hooksFile);
+        }
+      } else {
+        writeJson(hooksPath, hooksFile);
+        console.log(chalk.green('  ✅ Removed Node9 hooks from ~/.copilot/hooks/node9.json'));
+      }
+    } else {
+      console.log(chalk.blue('  ℹ️  No Node9 hooks found in ~/.copilot/hooks/node9.json'));
+    }
+  } else {
+    console.log(chalk.blue('  ℹ️  ~/.copilot/hooks/node9.json not found — nothing to remove'));
+  }
+
+  // Unwrap MCP servers.
+  const mcpConfig = readJson<CopilotMcpConfig>(mcpPath);
+  if (mcpConfig?.mcpServers) {
+    let mcpChanged = false;
+    if (removeNode9McpServer(mcpConfig.mcpServers)) {
+      mcpChanged = true;
+      console.log(
+        chalk.green('  ✅ Removed node9 MCP server entry from ~/.copilot/mcp-config.json')
+      );
+    }
+    for (const [name, server] of Object.entries(mcpConfig.mcpServers)) {
+      const args = server.args as string[] | undefined;
+      if (
+        server.command === 'node9' &&
+        Array.isArray(args) &&
+        args[0] === 'mcp' &&
+        args[1] === '--upstream' &&
+        typeof args[2] === 'string'
+      ) {
+        const [originalCmd, ...originalArgs] = args[2].split(' ');
+        mcpConfig.mcpServers[name] = {
+          ...server,
+          command: originalCmd,
+          args: originalArgs.length ? originalArgs : undefined,
+        };
+        mcpChanged = true;
+      }
+    }
+    if (mcpChanged) {
+      writeJson(mcpPath, mcpConfig);
+      console.log(chalk.green('  ✅ Unwrapped MCP servers in ~/.copilot/mcp-config.json'));
+    }
+  }
+}
+
 // ── Cursor ───────────────────────────────────────────────────────────────────
 
 interface CursorMcpConfig {
@@ -1032,6 +1247,7 @@ export function detectAgents(homeDir: string = os.homedir()): {
   claude: boolean;
   gemini: boolean;
   antigravity: boolean;
+  copilot: boolean;
   cursor: boolean;
   codex: boolean;
   windsurf: boolean;
@@ -1072,6 +1288,9 @@ export function detectAgents(homeDir: string = os.homedir()): {
       exists(path.join(homeDir, '.gemini', 'antigravity-cli')) ||
       exists(path.join(homeDir, '.gemini', 'antigravity-ide')) ||
       binaryInPath('agy'),
+    // GitHub Copilot CLI creates ~/.copilot on first launch; PATH
+    // fallback covers installed-but-never-launched (same as opencode #186).
+    copilot: exists(path.join(homeDir, '.copilot')) || binaryInPath('copilot'),
     cursor: exists(path.join(homeDir, '.cursor')),
     codex: exists(path.join(homeDir, '.codex')),
     windsurf: exists(path.join(homeDir, '.codeium', 'windsurf')),
@@ -2577,6 +2796,7 @@ export type AgentName =
   | 'claude'
   | 'gemini'
   | 'antigravity'
+  | 'copilot'
   | 'cursor'
   | 'codex'
   | 'windsurf'
@@ -2612,6 +2832,13 @@ export function getAgentsStatus(homeDir: string = os.homedir()): AgentStatus[] {
       path.join(homeDir, '.gemini', 'config', 'hooks.json')
     );
     return !!hooksFile?.hooks?.PreToolUse?.some((m) => m.hooks.some((h) => isNode9Hook(h.command)));
+  })();
+
+  const copilotWired = (() => {
+    const hooksFile = readJson<CopilotHooksFile>(
+      path.join(homeDir, '.copilot', 'hooks', 'node9.json')
+    );
+    return !!hooksFile?.hooks?.PreToolUse?.some((h) => isNode9Hook(h.command));
   })();
 
   const cursorWired = (() => {
@@ -2657,6 +2884,13 @@ export function getAgentsStatus(homeDir: string = os.homedir()): AgentStatus[] {
       installed: detected.antigravity,
       wired: antigravityWired,
       mode: detected.antigravity ? 'hooks' : null,
+    },
+    {
+      name: 'copilot',
+      label: 'GitHub Copilot',
+      installed: detected.copilot,
+      wired: copilotWired,
+      mode: detected.copilot ? 'hooks' : null,
     },
     {
       name: 'cursor',

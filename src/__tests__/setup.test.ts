@@ -8,6 +8,7 @@ import {
   setupClaude,
   setupGemini,
   setupAntigravity,
+  setupCopilot,
   setupCursor,
   setupCodex,
   setupOpencode,
@@ -16,6 +17,7 @@ import {
   teardownClaude,
   teardownGemini,
   teardownAntigravity,
+  teardownCopilot,
   teardownCursor,
   teardownCodex,
   teardownOpencode,
@@ -874,6 +876,109 @@ describe('teardownAntigravity', () => {
   });
 });
 
+// ── setupCopilot / teardownCopilot ────────────────────────────────────────────
+// GitHub Copilot CLI: node9 owns a dedicated ~/.copilot/hooks/node9.json
+// (Copilot merges every hooks/*.json), with PreToolUse/PostToolUse/
+// UserPromptSubmit hooks tagged --agent copilot. Payload is identical to
+// Claude so no dialect work; the flag pins attribution + deny shape.
+
+describe('setupCopilot', () => {
+  const hooksPath = path.join(os.homedir(), '.copilot', 'hooks', 'node9.json');
+  const mcpPath = path.join(os.homedir(), '.copilot', 'mcp-config.json');
+
+  it('writes all three hooks with --agent copilot and timeoutSec 600', async () => {
+    const confirm = await getConfirm();
+    await setupCopilot();
+
+    expect(confirm).not.toHaveBeenCalled();
+    const written = writtenTo(hooksPath);
+    expect(written.version).toBe(1);
+    expect(written.hooks.PreToolUse[0].command).toBe('node9 check --agent copilot');
+    expect(written.hooks.PostToolUse[0].command).toBe('node9 log --agent copilot');
+    // Copilot HAS UserPromptSubmit (unlike agy) — prompt DLP is wired.
+    expect(written.hooks.UserPromptSubmit[0].command).toBe('node9 check --agent copilot');
+    expect(written.hooks.PreToolUse[0].timeoutSec).toBe(600);
+  });
+
+  it('adds the node9 MCP server entry to mcp-config.json', async () => {
+    await setupCopilot();
+    expect(writtenTo(mcpPath).mcpServers.node9).toEqual(NODE9_MCP_ENTRY);
+  });
+
+  it('does not rewrite hooks that already point to node9', async () => {
+    withExistingFiles({
+      [hooksPath]: {
+        version: 1,
+        hooks: {
+          PreToolUse: [{ type: 'command', command: 'node9 check --agent copilot' }],
+          PostToolUse: [{ type: 'command', command: 'node9 log --agent copilot' }],
+          UserPromptSubmit: [{ type: 'command', command: 'node9 check --agent copilot' }],
+        },
+      },
+      [mcpPath]: { mcpServers: { node9: NODE9_MCP_ENTRY } },
+    });
+
+    await setupCopilot();
+    expect(writtenTo(hooksPath)).toBeNull();
+    expect(writtenTo(mcpPath)).toBeNull();
+  });
+
+  it('preserves foreign hooks in the same event array (additive)', async () => {
+    withExistingFiles({
+      [hooksPath]: {
+        version: 1,
+        hooks: { PreToolUse: [{ type: 'command', command: '/usr/bin/lint-gate' }] },
+      },
+    });
+
+    await setupCopilot();
+    const written = writtenTo(hooksPath);
+    expect(written.hooks.PreToolUse).toHaveLength(2);
+    expect(written.hooks.PreToolUse[0].command).toBe('/usr/bin/lint-gate');
+  });
+});
+
+describe('teardownCopilot', () => {
+  const hooksPath = path.join(os.homedir(), '.copilot', 'hooks', 'node9.json');
+
+  it('deletes node9.json when node9 authored every hook', () => {
+    const unlinkSpy = vi.spyOn(fs, 'unlinkSync').mockImplementation(() => undefined);
+    withExistingFile(hooksPath, {
+      version: 1,
+      hooks: {
+        PreToolUse: [{ type: 'command', command: 'node9 check --agent copilot' }],
+        PostToolUse: [{ type: 'command', command: 'node9 log --agent copilot' }],
+        UserPromptSubmit: [{ type: 'command', command: 'node9 check --agent copilot' }],
+      },
+    });
+
+    teardownCopilot();
+    // Empty-after-removal → file unlinked, not left as a husk.
+    expect(unlinkSpy).toHaveBeenCalledWith(hooksPath);
+    unlinkSpy.mockRestore();
+  });
+
+  it('preserves user hooks and rewrites the file when foreign hooks remain', () => {
+    const unlinkSpy = vi.spyOn(fs, 'unlinkSync').mockImplementation(() => undefined);
+    withExistingFile(hooksPath, {
+      version: 1,
+      hooks: {
+        PreToolUse: [
+          { type: 'command', command: 'node9 check --agent copilot' },
+          { type: 'command', command: '/usr/bin/lint-gate' },
+        ],
+      },
+    });
+
+    teardownCopilot();
+    const written = writtenTo(hooksPath);
+    expect(written.hooks.PreToolUse).toHaveLength(1);
+    expect(written.hooks.PreToolUse[0].command).toBe('/usr/bin/lint-gate');
+    expect(unlinkSpy).not.toHaveBeenCalled();
+    unlinkSpy.mockRestore();
+  });
+});
+
 // ── detectAgents ─────────────────────────────────────────────────────────────
 
 describe('detectAgents', () => {
@@ -887,6 +992,7 @@ describe('detectAgents', () => {
       claude: false,
       gemini: false,
       antigravity: false,
+      copilot: false,
       cursor: false,
       codex: false,
       windsurf: false,
@@ -1051,6 +1157,31 @@ describe('detectAgents', () => {
     expect(detectAgents(home).antigravity).toBe(true);
   });
 
+  it('detects Copilot CLI via ~/.copilot directory', () => {
+    vi.mocked(fs.existsSync).mockImplementation(
+      (q) => String(q).replace(/\\/g, '/') === p('.copilot')
+    );
+    const result = detectAgents(home);
+    expect(result.copilot).toBe(true);
+    expect(result.claude).toBe(false);
+  });
+
+  it('detects Copilot CLI when binary is in PATH but config dir does not exist', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+    vi.mocked(fs.accessSync).mockImplementation(((target: fs.PathLike) => {
+      if (String(target).endsWith(path.sep + 'copilot')) return undefined;
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    }) as typeof fs.accessSync);
+    const oldPath = process.env.PATH;
+    process.env.PATH = ['/fake/bin', '/usr/local/bin'].join(path.delimiter);
+    try {
+      expect(detectAgents(home).copilot).toBe(true);
+    } finally {
+      process.env.PATH = oldPath;
+      vi.mocked(fs.accessSync).mockImplementation(enoentThrow);
+    }
+  });
+
   it('detects Antigravity when agy binary is in PATH but config dir does not exist', () => {
     // Same installed-but-never-launched class as opencode #186.
     vi.mocked(fs.existsSync).mockReturnValue(false);
@@ -1113,6 +1244,7 @@ describe('detectAgents', () => {
       claude: true,
       gemini: true,
       antigravity: false,
+      copilot: false,
       cursor: true,
       codex: true,
       windsurf: true,
@@ -1147,6 +1279,7 @@ describe('detectAgents', () => {
       claude: false,
       gemini: false,
       antigravity: false,
+      copilot: false,
       cursor: false,
       codex: false,
       windsurf: false,
@@ -1172,6 +1305,7 @@ describe('detectAgents', () => {
       claude: false,
       gemini: false,
       antigravity: false,
+      copilot: false,
       cursor: false,
       codex: false,
       windsurf: false,

@@ -237,7 +237,13 @@ export function registerCheckCommand(program: Command): void {
 
             // Audit FIRST — the block record must survive any downstream error.
             // Force argsHash so the secret value never lands in the audit log.
-            const agent = detectAiAgent(payload);
+            // Honour the --agent flag (agentOverride) before fingerprinting —
+            // mirrors the tool-call sendBlock path. Without this, a blocked
+            // Copilot prompt is mis-attributed to "Claude Code" (its payload
+            // is byte-identical to Claude), under-counting prompt-DLP blocks
+            // in the SaaS breakdown. Affects any flag-registered agent whose
+            // payload collides with another's.
+            const agent = agentOverride ?? detectAiAgent(payload);
             const sessionId =
               typeof payload.session_id === 'string' ? payload.session_id : undefined;
             appendLocalAudit(

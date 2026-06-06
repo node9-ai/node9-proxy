@@ -10,6 +10,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **GitHub Copilot CLI integration** (`node9 agents add copilot`). Adds the GitHub Copilot CLI (`copilot`, npm `@github/copilot`) — the terminal agent, distinct from the VS Code Copilot extension which stays under the `vscode` MCP target — to the protected agents at the hooks tier. node9 writes a dedicated `~/.copilot/hooks/node9.json` with PreToolUse/PostToolUse/UserPromptSubmit hooks (`node9 check/log --agent copilot`, `timeoutSec: 600`) and adds/wraps the node9 MCP server in `~/.copilot/mcp-config.json`. All verified live against Copilot CLI 1.0.60:
+  - Copilot's PascalCase hook payload is byte-identical to Claude Code (`hook_event_name`/`session_id`/`cwd`/`tool_name`/`tool_input`) and its shell tool is already `bash` with `{command}` args — so node9's existing extractors, canonicalisation, shields, DLP and snapshot work unchanged. No new payload dialect.
+  - Because the payload is indistinguishable from Claude, attribution is pinned via the `--agent copilot` flag node9 registers (a hand-written hook missing the flag harmlessly attributes to Claude Code — protection is identical).
+  - Blocks emit Copilot's flat `{permissionDecision:"deny", permissionDecisionReason}` (exit 0), which surfaces the reason to the model. preToolUse is fail-closed (a node9 crash/timeout denies the tool).
+  - `node9 init` / `detectAgents` discovers Copilot via `~/.copilot` or the `copilot` binary in PATH.
+  - `node9 scan` reads Copilot session event logs (`~/.copilot/session-state/*/events.jsonl`) for offline DLP/rule/loop analysis.
+
 - **Antigravity integration** (`node9 agents add antigravity`, alias `agy`). Adds Google Antigravity — the Gemini CLI successor (consumer/free tiers stop serving 2026-06-18) — to the set of protected agents, at the hooks tier. One setup covers both the agy CLI and the Antigravity IDE: PreToolUse/PostToolUse hooks (`node9 check/log --agent antigravity`, 600 s timeout) land in the shared `~/.gemini/config/hooks.json` and the node9 MCP entry + wrapping in `~/.gemini/config/mcp_config.json`. All protocol behaviors verified live against agy 1.0.6:
   - agy's hook payload is a third dialect — tool name/args nest under `toolCall`, the shell tool is `run_command` with PascalCase `CommandLine`/`Cwd` args, and there is no `hook_event_name`. New `canonicalToolInput` maps args to Claude vocabulary at the boundary so shields, DLP and snapshot work unchanged.
   - Blocks emit `{"decision":"deny","reason":…}` — agy silently ignores the Claude block shape and runs the tool (fail-open), so the `--agent` flag pins the response shape deterministically. The deny reason reaches the model verbatim (negotiation loop intact).

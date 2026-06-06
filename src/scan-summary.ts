@@ -22,7 +22,7 @@ import { SHIELDS } from './shields';
 // Input
 // ---------------------------------------------------------------------------
 
-export type AgentId = 'claude' | 'gemini' | 'codex' | 'antigravity' | 'shell';
+export type AgentId = 'claude' | 'gemini' | 'codex' | 'antigravity' | 'copilot' | 'shell';
 
 export interface AgentScanInput {
   id: AgentId;

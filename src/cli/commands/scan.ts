@@ -79,7 +79,7 @@ interface Finding {
   timestamp: string;
   project: string;
   sessionId: string;
-  agent: 'claude' | 'gemini' | 'codex' | 'antigravity';
+  agent: 'claude' | 'gemini' | 'codex' | 'antigravity' | 'copilot';
 }
 
 interface DlpFinding {
@@ -89,7 +89,7 @@ interface DlpFinding {
   timestamp: string;
   project: string;
   sessionId: string;
-  agent: 'claude' | 'gemini' | 'codex' | 'antigravity' | 'shell';
+  agent: 'claude' | 'gemini' | 'codex' | 'antigravity' | 'copilot' | 'shell';
 }
 
 export interface LoopFinding {
@@ -99,7 +99,7 @@ export interface LoopFinding {
   timestamp: string;
   project: string;
   sessionId: string;
-  agent: 'claude' | 'gemini' | 'codex' | 'antigravity';
+  agent: 'claude' | 'gemini' | 'codex' | 'antigravity' | 'copilot';
   /**
    * Distinguishes a true cyclic agent loop (`'loop'`) from sustained iteration
    * on the same target across a session (`'long-iteration'`).
@@ -512,7 +512,7 @@ function pushFsOpAstFinding(
   timestamp: string,
   projLabel: string,
   sessionId: string,
-  agent: 'claude' | 'gemini' | 'codex' | 'antigravity',
+  agent: 'claude' | 'gemini' | 'codex' | 'antigravity' | 'copilot',
   result: ScanResult,
   dedup: ScanDedup
 ): boolean {
@@ -603,7 +603,7 @@ export function detectLoops(
   calls: Array<{ toolName: string; input: Record<string, unknown>; timestamp: string }>,
   project: string,
   sessionId: string,
-  agent: 'claude' | 'gemini' | 'codex' | 'antigravity'
+  agent: 'claude' | 'gemini' | 'codex' | 'antigravity' | 'copilot'
 ): LoopFinding[] {
   const counts = new Map<
     string,
@@ -770,6 +770,17 @@ function countScanFiles(): number {
         } catch {
           continue;
         }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  // GitHub Copilot CLI session event logs.
+  const copilotDir = path.join(os.homedir(), '.copilot', 'session-state');
+  if (fs.existsSync(copilotDir)) {
+    try {
+      for (const sid of fs.readdirSync(copilotDir)) {
+        if (fs.existsSync(path.join(copilotDir, sid, 'events.jsonl'))) total += 1;
       }
     } catch {
       /* ignore */
@@ -1884,6 +1895,251 @@ export function scanAntigravityHistory(
       }
       result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'antigravity'));
     }
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// GitHub Copilot CLI history scanner
+// ---------------------------------------------------------------------------
+// Copilot CLI stores one event-log per session at
+//   ~/.copilot/session-state/<id>/events.jsonl
+// Each line is `{type, data, id, timestamp, parentId}`. Tool calls appear
+// as `type:"tool.execution_start"` with `data:{toolName, arguments, …}`;
+// prompts as `type:"user.message"` (data.content / data.text). The cwd
+// comes from the `session.start` event's data.context.cwd. The `bash`
+// tool already uses `{command}` args, so no canonicalisation is needed.
+// Schema verified against Copilot CLI 1.0.60 (doc/roadmap/copilot-target.md §0.7).
+
+interface CopilotEvent {
+  type?: string;
+  timestamp?: string;
+  data?: {
+    toolName?: string;
+    arguments?: Record<string, unknown>;
+    context?: { cwd?: string };
+    content?: string;
+    text?: string;
+  };
+}
+
+export function scanCopilotHistory(
+  startDate: Date | null,
+  onProgress?: (done: number) => void,
+  onLine?: () => void
+): ScanResult {
+  const sessionDir = path.join(os.homedir(), '.copilot', 'session-state');
+  const result: ScanResult = {
+    filesScanned: 0,
+    sessions: 0,
+    totalToolCalls: 0,
+    bashCalls: 0,
+    findings: [],
+    dlpFindings: [],
+    loopFindings: [],
+    totalCostUSD: 0, // event logs carry no token/cost rollup
+    firstDate: null,
+    lastDate: null,
+    sessionsWithEarlySecrets: 0,
+  };
+  const dedup = emptyScanDedup();
+
+  if (!fs.existsSync(sessionDir)) return result;
+
+  let sessionIds: string[];
+  try {
+    sessionIds = fs.readdirSync(sessionDir);
+  } catch {
+    return result;
+  }
+
+  const ruleSources = buildRuleSources();
+
+  for (const sessionId of sessionIds) {
+    const eventsPath = path.join(sessionDir, sessionId, 'events.jsonl');
+    if (!fs.existsSync(eventsPath)) continue;
+
+    result.filesScanned++;
+    onProgress?.(result.filesScanned);
+
+    let raw: string;
+    try {
+      raw = fs.readFileSync(eventsPath, 'utf-8');
+    } catch {
+      continue;
+    }
+
+    let projLabel = sessionId.slice(0, 8);
+    const sessionCalls: Array<{
+      toolName: string;
+      input: Record<string, unknown>;
+      timestamp: string;
+    }> = [];
+
+    result.sessions++;
+
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      onLine?.();
+
+      let ev: CopilotEvent;
+      try {
+        ev = JSON.parse(line) as CopilotEvent;
+      } catch {
+        continue;
+      }
+
+      const timestamp = ev.timestamp ?? '';
+
+      // Project label from the session.start cwd.
+      if (ev.type === 'session.start') {
+        const cwd = ev.data?.context?.cwd;
+        if (typeof cwd === 'string' && cwd) {
+          projLabel = stripTerminalEscapes(cwd).replace(os.homedir(), '~').slice(0, 40);
+        }
+        continue;
+      }
+
+      if (startDate && timestamp && new Date(timestamp) < startDate) continue;
+
+      // ── User prompt DLP scan ─────────────────────────────────────────
+      if (ev.type === 'user.message') {
+        const text = ev.data?.content ?? ev.data?.text ?? '';
+        if (typeof text === 'string' && text) {
+          const dlpMatch = scanArgs({ text });
+          if (dlpMatch) {
+            const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
+            if (!dedup.dlpKeys.has(k)) {
+              dedup.dlpKeys.add(k);
+              result.dlpFindings.push({
+                patternName: dlpMatch.patternName,
+                redactedSample: dlpMatch.redactedSample,
+                toolName: 'user-prompt',
+                timestamp,
+                project: projLabel,
+                sessionId,
+                agent: 'copilot',
+              });
+            }
+          }
+        }
+        continue;
+      }
+
+      if (ev.type !== 'tool.execution_start') continue;
+
+      const toolName = ev.data?.toolName ?? '';
+      const toolNameLower = toolName.toLowerCase();
+      const input = (ev.data?.arguments ?? {}) as Record<string, unknown>;
+
+      result.totalToolCalls++;
+      sessionCalls.push({ toolName, input, timestamp });
+
+      const isShellTool = toolNameLower === 'bash' || toolNameLower === 'shell';
+      if (isShellTool) result.bashCalls++;
+
+      if (timestamp) {
+        if (!result.firstDate || timestamp < result.firstDate) result.firstDate = timestamp;
+        if (!result.lastDate || timestamp > result.lastDate) result.lastDate = timestamp;
+      }
+
+      const rawCmd = String(input.command ?? '').trimStart();
+      if (/^node9\s+(scan|explain|report|tail|dlp|status|sessions|audit)\b/.test(rawCmd)) continue;
+
+      const dlpMatch = scanArgs(input);
+      if (dlpMatch) {
+        const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
+        if (!dedup.dlpKeys.has(k)) {
+          dedup.dlpKeys.add(k);
+          result.dlpFindings.push({
+            patternName: dlpMatch.patternName,
+            redactedSample: dlpMatch.redactedSample,
+            toolName,
+            timestamp,
+            project: projLabel,
+            sessionId,
+            agent: 'copilot',
+          });
+        }
+      }
+
+      // ── AST filesystem-operation detection ───────────────────────────
+      let astFsMatched = false;
+      if (isShellTool) {
+        astFsMatched = pushFsOpAstFinding(
+          String(input.command ?? ''),
+          toolName,
+          input,
+          timestamp,
+          projLabel,
+          sessionId,
+          'copilot',
+          result,
+          dedup
+        );
+      }
+
+      let ruleMatched = astFsMatched;
+      for (const source of ruleSources) {
+        const { rule } = source;
+        if (rule.verdict === 'allow') continue;
+        if (rule.tool && !matchesPattern(toolNameLower, rule.tool)) continue;
+        if (isShellTool && rule.name && AST_FS_REGEX_RULES.has(rule.name)) continue;
+        if (!evaluateSmartConditions(input, rule)) continue;
+
+        const inputPreview = preview(input, 120);
+        const k = findingKey(rule.name, inputPreview, projLabel);
+        if (!dedup.findingsKeys.has(k)) {
+          dedup.findingsKeys.add(k);
+          result.findings.push({
+            source,
+            toolName,
+            input,
+            timestamp,
+            project: projLabel,
+            sessionId,
+            agent: 'copilot',
+          });
+        }
+        ruleMatched = true;
+        break;
+      }
+
+      // ── AST shell exec detection (eval/bash -c with remote download) ──
+      if (!ruleMatched && isShellTool) {
+        const shellVerdict = detectDangerousShellExec(String(input.command ?? ''));
+        if (shellVerdict) {
+          const astRule: SmartRule = {
+            name: `ast:bash-safe:${shellVerdict}-shell-exec-remote`,
+            tool: 'bash',
+            conditions: [],
+            verdict: shellVerdict,
+            reason: `Shell execution of remote download detected by AST analysis (bash-safe)`,
+          };
+          const inputPreview = preview(input, 120);
+          const k = findingKey(astRule.name, inputPreview, projLabel);
+          if (!dedup.findingsKeys.has(k)) {
+            dedup.findingsKeys.add(k);
+            result.findings.push({
+              source: {
+                shieldName: 'bash-safe',
+                shieldLabel: 'bash-safe (AST)',
+                sourceType: 'shield',
+                rule: astRule,
+              },
+              toolName,
+              input,
+              timestamp,
+              project: projLabel,
+              sessionId,
+              agent: 'copilot',
+            });
+          }
+        }
+      }
+    }
+    result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'copilot'));
   }
 
   return result;
@@ -3169,7 +3425,7 @@ export function registerScanCommand(program: Command): void {
           (done) => onProgress(claudeScan.filesScanned + geminiScan.filesScanned + done),
           onLine
         );
-        const codexScan = scanCodexHistory(
+        const copilotScan = scanCopilotHistory(
           startDate,
           (done) =>
             onProgress(
@@ -3180,8 +3436,20 @@ export function registerScanCommand(program: Command): void {
             ),
           onLine
         );
+        const codexScan = scanCodexHistory(
+          startDate,
+          (done) =>
+            onProgress(
+              claudeScan.filesScanned +
+                geminiScan.filesScanned +
+                antigravityScan.filesScanned +
+                copilotScan.filesScanned +
+                done
+            ),
+          onLine
+        );
         const scan = mergeScans(
-          mergeScans(mergeScans(claudeScan, geminiScan), antigravityScan),
+          mergeScans(mergeScans(mergeScans(claudeScan, geminiScan), antigravityScan), copilotScan),
           codexScan
         );
         scan.dlpFindings.push(...scanShellConfig());
@@ -3189,6 +3457,7 @@ export function registerScanCommand(program: Command): void {
           { id: 'claude', label: 'Claude', icon: '🤖', scan: claudeScan },
           { id: 'gemini', label: 'Gemini', icon: '♊', scan: geminiScan },
           { id: 'antigravity', label: 'Antigravity', icon: '🚀', scan: antigravityScan },
+          { id: 'copilot', label: 'Copilot', icon: '🐙', scan: copilotScan },
           { id: 'codex', label: 'Codex', icon: '🔮', scan: codexScan },
         ]);
         if (useTTY) process.stdout.write('\r' + ' '.repeat(60) + '\r');
@@ -3197,7 +3466,7 @@ export function registerScanCommand(program: Command): void {
           console.log(chalk.yellow('  No session history found.'));
           console.log(
             chalk.gray(
-              '  Supported: Claude Code (~/.claude/projects/) · Gemini CLI (~/.gemini/tmp/) · Antigravity (~/.gemini/antigravity-*/brain/)\n'
+              '  Supported: Claude Code (~/.claude/projects/) · Gemini CLI (~/.gemini/tmp/) · Antigravity (~/.gemini/antigravity-*/brain/) · Copilot CLI (~/.copilot/session-state/)\n'
             )
           );
           return;
@@ -3221,6 +3490,8 @@ export function registerScanCommand(program: Command): void {
           breakdownParts.push(
             chalk.yellow(String(antigravityScan.sessions)) + chalk.dim(' Antigravity')
           );
+        if (copilotScan.sessions > 0)
+          breakdownParts.push(chalk.green(String(copilotScan.sessions)) + chalk.dim(' Copilot'));
         if (codexScan.sessions > 0)
           breakdownParts.push(chalk.magenta(String(codexScan.sessions)) + chalk.dim(' Codex'));
         const sessionBreakdown =
