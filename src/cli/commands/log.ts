@@ -10,7 +10,13 @@ import { getConfig } from '../../config';
 import { createShadowSnapshot, getSnapshotHistory } from '../../undo';
 import { notifyTaintPropagate, isDaemonRunning, notifyActivitySocket } from '../../auth/daemon';
 import { parseCpMvOp } from '../../utils/cp-mv-parser';
-import { extractToolName, extractToolInput, canonicalToolName } from '../../utils/hook-payload';
+import {
+  extractToolName,
+  extractToolInput,
+  canonicalToolName,
+  canonicalToolInput,
+  agentLabelFromFlag,
+} from '../../utils/hook-payload';
 
 // Patterns for common test runners
 const TEST_COMMAND_RE =
@@ -45,7 +51,12 @@ export function registerLogCommand(program: Command): void {
     .command('log', { hidden: true })
     .description('PostToolUse hook — records executed tool calls')
     .argument('[data]', 'JSON string of the tool call')
-    .action(async (data) => {
+    .option(
+      '--agent <name>',
+      'Agent identity override, set by node9-authored hook registrations (e.g. antigravity)'
+    )
+    .action(async (data, opts: { agent?: string }) => {
+      const agentOverride = agentLabelFromFlag(opts?.agent);
       const logPayload = async (raw: string) => {
         try {
           if (!raw || raw.trim() === '') process.exit(0);
@@ -62,11 +73,21 @@ export function registerLogCommand(program: Command): void {
             timestamp?: string;
             session_id?: string;
             turn_id?: string; // Codex-specific
+            // Antigravity (agy) dialect — verified against agy 1.0.6:
+            toolCall?: { name?: string; args?: unknown } | null;
+            conversationId?: string; // agy's session_id equivalent
+            workspacePaths?: string[]; // agy has no top-level cwd
           };
+
+          // Antigravity fires PostToolUse on non-tool steps too (planner
+          // responses) with toolCall: null — nothing executed, nothing to
+          // audit. Without this guard every model turn writes a junk
+          // `unknown` row to audit.log.
+          if (payload.toolCall === null) process.exit(0);
 
           const rawToolName = sanitize(extractToolName(payload, 'unknown'));
           const tool = canonicalToolName(rawToolName);
-          const rawInput = extractToolInput(payload);
+          const rawInput = canonicalToolInput(rawToolName, extractToolInput(payload));
 
           // Detect agent from hook payload — must mirror check.ts detectAiAgent.
           // Layer 0: explicit meta.agent tag set by a node9-authored shim
@@ -91,28 +112,40 @@ export function registerLogCommand(program: Command): void {
           // every session before tool dispatch). Other agents could be
           // added the same way; keeping the surface minimal until there
           // is a confirmed need.
+          // --agent flag (Layer -1): node9 wrote the hook registration, so
+          // the flag is the most deterministic signal of all — mirrors the
+          // agentOverride precedence in check.ts.
+          // Antigravity branch mirrors check.ts:detectAiAgent — toolCall /
+          // conversationId fingerprint (no hook_event_name in agy payloads),
+          // ANTIGRAVITY_CONVERSATION_ID env fallback.
           const agent =
-            metaTag !== undefined
-              ? metaTag
-              : payload.turn_id !== undefined
-                ? 'Codex'
-                : payload.hook_event_name === 'pre_tool_call' ||
-                    payload.hook_event_name === 'post_tool_call'
-                  ? 'Hermes'
-                  : payload.hook_event_name === 'PreToolUse' ||
-                      payload.hook_event_name === 'PostToolUse' ||
-                      payload.tool_use_id !== undefined ||
-                      payload.permission_mode !== undefined
-                    ? 'Claude Code'
-                    : payload.hook_event_name === 'BeforeTool' ||
-                        payload.hook_event_name === 'AfterTool' ||
-                        payload.timestamp !== undefined
-                      ? 'Gemini CLI'
-                      : process.env.HERMES_SESSION_ID ||
-                          process.env.HERMES_HOME ||
-                          process.env.HERMES_INTERACTIVE
-                        ? 'Hermes'
-                        : undefined;
+            agentOverride !== undefined
+              ? agentOverride
+              : metaTag !== undefined
+                ? metaTag
+                : payload.turn_id !== undefined
+                  ? 'Codex'
+                  : payload.toolCall !== undefined || payload.conversationId !== undefined
+                    ? 'Antigravity'
+                    : payload.hook_event_name === 'pre_tool_call' ||
+                        payload.hook_event_name === 'post_tool_call'
+                      ? 'Hermes'
+                      : payload.hook_event_name === 'PreToolUse' ||
+                          payload.hook_event_name === 'PostToolUse' ||
+                          payload.tool_use_id !== undefined ||
+                          payload.permission_mode !== undefined
+                        ? 'Claude Code'
+                        : payload.hook_event_name === 'BeforeTool' ||
+                            payload.hook_event_name === 'AfterTool' ||
+                            payload.timestamp !== undefined
+                          ? 'Gemini CLI'
+                          : process.env.HERMES_SESSION_ID ||
+                              process.env.HERMES_HOME ||
+                              process.env.HERMES_INTERACTIVE
+                            ? 'Hermes'
+                            : process.env.ANTIGRAVITY_CONVERSATION_ID
+                              ? 'Antigravity'
+                              : undefined;
 
           // Audit write FIRST — before any config load that could fail.
           // A config error must never silently skip the audit entry.
@@ -130,7 +163,9 @@ export function registerLogCommand(program: Command): void {
           // agent's UI without losing the canonical for shield/report
           // aggregation.
           if (rawToolName !== tool) entry.agentToolName = rawToolName;
-          if (payload.session_id) entry.sessionId = payload.session_id;
+          // Antigravity alias: conversationId ≙ session_id.
+          const payloadSessionId = payload.session_id ?? payload.conversationId;
+          if (payloadSessionId) entry.sessionId = payloadSessionId;
 
           const logPath = path.join(os.homedir(), '.node9', 'audit.log');
           if (!fs.existsSync(path.dirname(logPath)))
@@ -204,10 +239,17 @@ export function registerLogCommand(program: Command): void {
           // Validate cwd is absolute before passing to getConfig() — prevents path
           // traversal via a crafted hook payload (e.g. cwd: "../../../../etc").
           // A relative or empty cwd falls back to ambient process.cwd().
-          const safeCwd =
-            typeof payload.cwd === 'string' && path.isAbsolute(payload.cwd)
+          // Antigravity has no top-level cwd; workspacePaths[0] is the
+          // workspace root (mirrors check.ts).
+          const payloadCwd =
+            typeof payload.cwd === 'string'
               ? payload.cwd
-              : undefined;
+              : Array.isArray(payload.workspacePaths) &&
+                  typeof payload.workspacePaths[0] === 'string'
+                ? payload.workspacePaths[0]
+                : undefined;
+          const safeCwd =
+            typeof payloadCwd === 'string' && path.isAbsolute(payloadCwd) ? payloadCwd : undefined;
 
           // Config load and snapshot run AFTER the audit write — a config failure
           // here is non-fatal and must not retroactively gap the audit trail above.

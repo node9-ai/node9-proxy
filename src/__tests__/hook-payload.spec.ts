@@ -1,7 +1,34 @@
 // src/__tests__/hook-payload.spec.ts
 // Unit tests for utils/hook-payload.ts
 import { describe, it, expect } from 'vitest';
-import { extractToolName, extractToolInput, canonicalToolName } from '../utils/hook-payload.js';
+import {
+  extractToolName,
+  extractToolInput,
+  canonicalToolName,
+  canonicalToolInput,
+  agentLabelFromFlag,
+} from '../utils/hook-payload.js';
+
+// Real PreToolUse payload captured from agy 1.0.6 via spy hook
+// (doc/roadmap/antigravity-target.md §0.3) — tool name/args nested
+// under toolCall, shell arg as PascalCase CommandLine.
+const AGY_PRE_PAYLOAD = {
+  artifactDirectoryPath:
+    '/home/nadav/.gemini/antigravity-cli/brain/6c322973-64a8-41da-b2e9-06c217bb69a1',
+  conversationId: '6c322973-64a8-41da-b2e9-06c217bb69a1',
+  stepIdx: 3,
+  toolCall: {
+    args: {
+      CommandLine: 'echo hello-node9',
+      Cwd: '/tmp/agy-hooktest',
+      WaitMsBeforeAsync: 2000,
+    },
+    name: 'run_command',
+  },
+  transcriptPath:
+    '/home/nadav/.gemini/antigravity-cli/brain/6c322973-64a8-41da-b2e9-06c217bb69a1/.system_generated/logs/transcript_full.jsonl',
+  workspacePaths: ['/tmp/agy-hooktest'],
+};
 
 describe('extractToolName', () => {
   it('returns tool_name when present (Claude shape)', () => {
@@ -37,6 +64,21 @@ describe('extractToolName', () => {
     const payload = { tool_name: null as unknown as undefined, name: 'gemini_tool' };
     expect(extractToolName(payload)).toBe('gemini_tool');
   });
+
+  // ── Antigravity (agy) dialect ─────────────────────────────────────────
+  it('returns toolCall.name for an Antigravity payload', () => {
+    expect(extractToolName(AGY_PRE_PAYLOAD)).toBe('run_command');
+  });
+
+  it('returns defaultValue for Antigravity toolCall: null (non-tool PostToolUse step)', () => {
+    expect(extractToolName({ toolCall: null }, 'unknown')).toBe('unknown');
+  });
+
+  it('prefers tool_name over toolCall.name when both are present', () => {
+    expect(extractToolName({ tool_name: 'Bash', toolCall: { name: 'should_not_win' } })).toBe(
+      'Bash'
+    );
+  });
 });
 
 describe('extractToolInput', () => {
@@ -63,6 +105,19 @@ describe('extractToolInput', () => {
     expect(extractToolInput({ tool_input: 'a string' })).toBe('a string');
     expect(extractToolInput({ tool_input: 42 })).toBe(42);
     expect(extractToolInput({ tool_input: null })).toEqual({});
+  });
+
+  // ── Antigravity (agy) dialect ─────────────────────────────────────────
+  it('returns toolCall.args for an Antigravity payload', () => {
+    expect(extractToolInput(AGY_PRE_PAYLOAD)).toEqual({
+      CommandLine: 'echo hello-node9',
+      Cwd: '/tmp/agy-hooktest',
+      WaitMsBeforeAsync: 2000,
+    });
+  });
+
+  it('returns empty object for Antigravity toolCall: null', () => {
+    expect(extractToolInput({ toolCall: null })).toEqual({});
   });
 });
 
@@ -123,5 +178,70 @@ describe('canonicalToolName', () => {
     // don't want to silently rewrite.
     expect(canonicalToolName('TERMINAL')).toBe('TERMINAL');
     expect(canonicalToolName('Terminal')).toBe('Terminal');
+  });
+
+  it('maps run_command → Bash (Antigravity shell tool)', () => {
+    expect(canonicalToolName('run_command')).toBe('Bash');
+  });
+
+  it('does not map Gemini run_shell_command (kept on its legacy allowlist path)', () => {
+    // run_shell_command predates canonicalToolName and is special-cased
+    // at orchestrator.ts / daemon/state.ts / config toolInspection —
+    // mapping it here would change the audit log's agentToolName rows
+    // for existing Gemini users.
+    expect(canonicalToolName('run_shell_command')).toBe('run_shell_command');
+  });
+});
+
+describe('canonicalToolInput', () => {
+  it('maps agy run_command CommandLine/Cwd → command/cwd', () => {
+    expect(canonicalToolInput('run_command', AGY_PRE_PAYLOAD.toolCall.args)).toEqual({
+      command: 'echo hello-node9',
+      cwd: '/tmp/agy-hooktest',
+      WaitMsBeforeAsync: 2000,
+    });
+  });
+
+  it('omits cwd when Cwd is absent or empty', () => {
+    expect(canonicalToolInput('run_command', { CommandLine: 'ls' })).toEqual({ command: 'ls' });
+    expect(canonicalToolInput('run_command', { CommandLine: 'ls', Cwd: '' })).toEqual({
+      command: 'ls',
+    });
+  });
+
+  it('passes run_command input through unchanged when CommandLine is missing', () => {
+    // Defensive: a future agy version could rename the field; better to
+    // pass the original shape through than emit { command: undefined }.
+    const input = { Script: 'ls' };
+    expect(canonicalToolInput('run_command', input)).toBe(input);
+  });
+
+  it('passes non-run_command tools through unchanged', () => {
+    const input = { CommandLine: 'should stay' };
+    expect(canonicalToolInput('Bash', input)).toBe(input);
+    expect(canonicalToolInput('write_file', input)).toBe(input);
+  });
+
+  it('passes non-object inputs through unchanged', () => {
+    expect(canonicalToolInput('run_command', 'a string')).toBe('a string');
+    expect(canonicalToolInput('run_command', null)).toBe(null);
+    expect(canonicalToolInput('run_command', [1, 2])).toEqual([1, 2]);
+  });
+});
+
+describe('agentLabelFromFlag', () => {
+  it('maps antigravity (any case) and agy alias to Antigravity', () => {
+    expect(agentLabelFromFlag('antigravity')).toBe('Antigravity');
+    expect(agentLabelFromFlag('Antigravity')).toBe('Antigravity');
+    expect(agentLabelFromFlag('agy')).toBe('Antigravity');
+  });
+
+  it('ignores unknown or non-string values (falls back to fingerprinting)', () => {
+    // The label selects block-response shapes, so arbitrary strings must
+    // not be trusted verbatim.
+    expect(agentLabelFromFlag('claude')).toBeUndefined();
+    expect(agentLabelFromFlag('')).toBeUndefined();
+    expect(agentLabelFromFlag(undefined)).toBeUndefined();
+    expect(agentLabelFromFlag(42)).toBeUndefined();
   });
 });
