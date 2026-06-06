@@ -12,6 +12,7 @@ import {
 import {
   setupClaude,
   setupGemini,
+  setupAntigravity,
   setupCursor,
   setupCodex,
   setupWindsurf,
@@ -20,6 +21,7 @@ import {
   setupHermes,
   teardownClaude,
   teardownGemini,
+  teardownAntigravity,
   teardownCursor,
   teardownCodex,
   teardownWindsurf,
@@ -143,14 +145,15 @@ program
   .description('Integrate Node9 with an AI agent')
   .addHelpText(
     'after',
-    '\n  Supported targets:  claude  gemini  cursor  codex  windsurf  vscode  hud'
+    '\n  Supported targets:  claude  antigravity  gemini  cursor  codex  windsurf  vscode  hud'
   )
   .argument(
     '<target>',
-    'The agent to protect: claude | gemini | cursor | codex | windsurf | vscode | hud'
+    'The agent to protect: claude | antigravity | gemini | cursor | codex | windsurf | vscode | hud'
   )
   .action(async (target: string) => {
     if (target === 'gemini') return await setupGemini();
+    if (target === 'antigravity' || target === 'agy') return await setupAntigravity();
     if (target === 'claude') return await setupClaude();
     if (target === 'cursor') return await setupCursor();
     if (target === 'codex') return await setupCodex();
@@ -160,7 +163,7 @@ program
     if (target === 'hud') return setupHud();
     console.error(
       chalk.red(
-        `Unknown target: "${target}". Supported: claude, gemini, cursor, codex, windsurf, vscode, hermes, hud`
+        `Unknown target: "${target}". Supported: claude, antigravity, gemini, cursor, codex, windsurf, vscode, hermes, hud`
       )
     );
     process.exit(1);
@@ -172,11 +175,11 @@ program
   .description('Alias for "addto" — integrate Node9 with an AI agent')
   .addHelpText(
     'after',
-    '\n  Supported targets:  claude  gemini  cursor  codex  windsurf  vscode  hud'
+    '\n  Supported targets:  claude  antigravity  gemini  cursor  codex  windsurf  vscode  hud'
   )
   .argument(
     '[target]',
-    'The agent to protect: claude | gemini | cursor | codex | windsurf | vscode | hud'
+    'The agent to protect: claude | antigravity | gemini | cursor | codex | windsurf | vscode | hud'
   )
   .action(async (target?: string) => {
     if (!target) {
@@ -185,6 +188,7 @@ program
       console.log('  Targets:');
       console.log('    ' + chalk.green('claude') + '    — Claude Code (hook mode)');
       console.log('    ' + chalk.green('gemini') + '    — Gemini CLI (hook mode)');
+      console.log('    ' + chalk.green('antigravity') + ' — Antigravity / agy (hook mode)');
       console.log('    ' + chalk.green('cursor') + '    — Cursor (MCP proxy)');
       console.log('    ' + chalk.green('codex') + '     — OpenAI Codex CLI (MCP proxy)');
       console.log('    ' + chalk.green('windsurf') + '  — Windsurf (MCP proxy)');
@@ -198,6 +202,7 @@ program
     }
     const t = target.toLowerCase();
     if (t === 'gemini') return await setupGemini();
+    if (t === 'antigravity' || t === 'agy') return await setupAntigravity();
     if (t === 'claude') return await setupClaude();
     if (t === 'cursor') return await setupCursor();
     if (t === 'codex') return await setupCodex();
@@ -207,7 +212,7 @@ program
     if (t === 'hud') return setupHud();
     console.error(
       chalk.red(
-        `Unknown target: "${target}". Supported: claude, gemini, cursor, codex, windsurf, vscode, hermes, hud`
+        `Unknown target: "${target}". Supported: claude, antigravity, gemini, cursor, codex, windsurf, vscode, hermes, hud`
       )
     );
     process.exit(1);
@@ -219,11 +224,11 @@ program
   .description('Remove Node9 hooks from an AI agent configuration')
   .addHelpText(
     'after',
-    '\n  Supported targets:  claude  gemini  cursor  codex  windsurf  vscode  hud'
+    '\n  Supported targets:  claude  antigravity  gemini  cursor  codex  windsurf  vscode  hud'
   )
   .argument(
     '<target>',
-    'The agent to remove from: claude | gemini | cursor | codex | windsurf | vscode | hud'
+    'The agent to remove from: claude | antigravity | gemini | cursor | codex | windsurf | vscode | hud'
   )
   .action((target: string) => {
     // Validate before logging so the target string is never interpolated
@@ -231,6 +236,7 @@ program
     let fn: (() => void) | undefined;
     if (target === 'claude') fn = teardownClaude;
     else if (target === 'gemini') fn = teardownGemini;
+    else if (target === 'antigravity' || target === 'agy') fn = teardownAntigravity;
     else if (target === 'cursor') fn = teardownCursor;
     else if (target === 'codex') fn = teardownCodex;
     else if (target === 'windsurf') fn = teardownWindsurf;
@@ -240,7 +246,7 @@ program
     else {
       console.error(
         chalk.red(
-          `Unknown target: "${target}". Supported: claude, gemini, cursor, codex, windsurf, vscode, hermes, hud`
+          `Unknown target: "${target}". Supported: claude, antigravity, gemini, cursor, codex, windsurf, vscode, hermes, hud`
         )
       );
       process.exit(1);
@@ -583,6 +589,8 @@ program
 const HOOK_BASED_AGENTS: Record<string, string> = {
   claude: 'claude',
   gemini: 'gemini',
+  antigravity: 'antigravity',
+  agy: 'antigravity',
   cursor: 'cursor',
 };
 

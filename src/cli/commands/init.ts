@@ -10,6 +10,7 @@ import { DEFAULT_CONFIG } from '../../core';
 import {
   setupClaude,
   setupGemini,
+  setupAntigravity,
   setupCursor,
   setupCodex,
   setupWindsurf,
@@ -219,12 +220,12 @@ export function registerInitCommand(program: Command): void {
         if (found.length === 0) {
           console.log(
             chalk.gray(
-              'No AI agents detected. Install one of the supported agents (Claude Code, Codex, Gemini CLI, Cursor, Windsurf, VSCode, Claude Desktop, Opencode, Pi, or Hermes Agent).'
+              'No AI agents detected. Install one of the supported agents (Claude Code, Codex, Antigravity, Gemini CLI, Cursor, Windsurf, VSCode, Claude Desktop, Opencode, Pi, or Hermes Agent).'
             )
           );
           console.log(
             chalk.gray(
-              'then run: node9 agents add <claude|codex|gemini|cursor|windsurf|vscode|claudeDesktop|opencode|pi|hermes>'
+              'then run: node9 agents add <claude|codex|antigravity|gemini|cursor|windsurf|vscode|claudeDesktop|opencode|pi|hermes>'
             )
           );
           return;
@@ -240,6 +241,7 @@ export function registerInitCommand(program: Command): void {
           console.log(chalk.bold(`Wiring ${agent}...`));
           if (agent === 'claude') await setupClaude();
           else if (agent === 'gemini') await setupGemini();
+          else if (agent === 'antigravity') await setupAntigravity();
           else if (agent === 'cursor') await setupCursor();
           else if (agent === 'codex') await setupCodex();
           else if (agent === 'windsurf') await setupWindsurf();
