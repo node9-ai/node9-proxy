@@ -24,6 +24,59 @@ import { SHIELDS } from './shields';
 
 export type AgentId = 'claude' | 'gemini' | 'codex' | 'antigravity' | 'copilot' | 'shell';
 
+// ── Agent display helpers ──────────────────────────────────────────────────
+// Single source of truth for how each agent renders in scan/sessions output.
+// Before this, every badge/label site inlined `agent === 'gemini' ? … :
+// 'codex' ? … : Claude`, so any agent that wasn't gemini/codex (antigravity,
+// copilot, shell) silently rendered as "[Claude]" — misattributing findings
+// in the security report. Add a case here, not a 6th ternary at each site.
+
+const AGENT_SHORT: Record<string, string> = {
+  claude: 'Claude',
+  gemini: 'Gemini',
+  codex: 'Codex',
+  antigravity: 'Agy',
+  copilot: 'Copilot',
+  shell: 'Shell',
+};
+
+const AGENT_LONG: Record<string, string> = {
+  claude: 'Claude Code',
+  gemini: 'Gemini CLI',
+  codex: 'Codex',
+  antigravity: 'Antigravity',
+  copilot: 'GitHub Copilot',
+  shell: 'Shell',
+};
+
+/** Full agent name for detail views (e.g. "GitHub Copilot"). */
+export function agentDisplayName(agent: string): string {
+  return AGENT_LONG[agent] ?? 'Claude Code';
+}
+
+/** Bracketed agent tag, padded to a fixed column width (default 10). */
+export function agentBadgeText(agent: string, width = 10): string {
+  return `[${AGENT_SHORT[agent] ?? 'Claude'}]`.padEnd(width);
+}
+
+/** chalk colour-function name for an agent's badge. */
+export function agentColorName(agent: string): 'cyan' | 'blue' | 'magenta' | 'yellow' | 'green' {
+  switch (agent) {
+    case 'gemini':
+      return 'blue';
+    case 'codex':
+      return 'magenta';
+    case 'antigravity':
+      return 'yellow';
+    case 'copilot':
+      return 'green';
+    case 'shell':
+      return 'yellow';
+    default:
+      return 'cyan';
+  }
+}
+
 export interface AgentScanInput {
   id: AgentId;
   label: string;

@@ -34,6 +34,8 @@ import {
 // scan flow (retired v3).
 import {
   buildScanSummary,
+  agentBadgeText,
+  agentColorName,
   type FindingRef,
   type RuleGroup,
   type ScanSummary,
@@ -2507,15 +2509,8 @@ export function printFindingRow(
   const stale = isStaleFinding(f.timestamp);
   const ts = f.timestamp ? chalk.dim(fmtTs(f.timestamp) + '  ') : '';
   const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
-  const agentLabel =
-    f.agent === 'gemini' ? '[Gemini]  ' : f.agent === 'codex' ? '[Codex]   ' : '[Claude]  ';
-  const agentBadge = stale
-    ? chalk.dim(agentLabel)
-    : f.agent === 'gemini'
-      ? chalk.blue(agentLabel)
-      : f.agent === 'codex'
-        ? chalk.magenta(agentLabel)
-        : chalk.cyan(agentLabel);
+  const agentLabel = agentBadgeText(f.agent);
+  const agentBadge = stale ? chalk.dim(agentLabel) : chalk[agentColorName(f.agent)](agentLabel);
   // FindingRef.command is already the preview; fullCommand is the untruncated form.
   let cmdText: string;
   if (drillDown) {
@@ -3823,14 +3818,7 @@ export function registerScanCommand(program: Command): void {
               const stale = isStaleFinding(f.timestamp);
               const ts = f.timestamp ? chalk.dim(fmtTs(f.timestamp) + '  ') : '';
               const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
-              const agentBadge =
-                f.agent === 'gemini'
-                  ? chalk.blue('[Gemini]  ')
-                  : f.agent === 'codex'
-                    ? chalk.magenta('[Codex]   ')
-                    : f.agent === 'shell'
-                      ? chalk.yellow('[Shell]   ')
-                      : chalk.cyan('[Claude]  ');
+              const agentBadge = chalk[agentColorName(f.agent)](agentBadgeText(f.agent));
               const sessionSuffix = f.sessionId ? chalk.dim(`  → ${f.sessionId.slice(0, 8)}`) : '';
               const recurringBadge = recurringPatterns.has(f.patternName)
                 ? chalk.red.bold(' ⚠️ recurring ')
@@ -3907,19 +3895,10 @@ export function registerScanCommand(program: Command): void {
               const stale = isStaleFinding(f.timestamp);
               const ts = f.timestamp ? chalk.dim(fmtTs(f.timestamp) + '  ') : '';
               const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
-              const agentLabel =
-                f.agent === 'gemini'
-                  ? '[Gemini]  '
-                  : f.agent === 'codex'
-                    ? '[Codex]   '
-                    : '[Claude]  ';
+              const agentLabel = agentBadgeText(f.agent);
               const agentBadge = stale
                 ? chalk.dim(agentLabel)
-                : f.agent === 'gemini'
-                  ? chalk.blue(agentLabel)
-                  : f.agent === 'codex'
-                    ? chalk.magenta(agentLabel)
-                    : chalk.cyan(agentLabel);
+                : chalk[agentColorName(f.agent)](agentLabel);
               const toolDisplay = stale ? chalk.dim(f.toolName) : chalk.yellow(f.toolName);
               const cmdDisplay = stale ? chalk.dim(f.commandPreview) : chalk.gray(f.commandPreview);
               const sessionSuffix = f.sessionId ? chalk.dim(`  → ${f.sessionId.slice(0, 8)}`) : '';

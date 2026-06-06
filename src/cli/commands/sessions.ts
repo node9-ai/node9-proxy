@@ -10,6 +10,7 @@ import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { agentDisplayName, agentColorName, agentBadgeText } from '../../scan-summary';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -940,12 +941,9 @@ function renderList(summaries: SessionSummary[], totalCost: number): void {
     const blocked =
       s.blockedCalls.length > 0 ? chalk.red('  🛑 ' + String(s.blockedCalls.length)) : '';
     const snap = s.hasSnapshot ? chalk.green('  📸') : '';
-    const agentBadge =
-      s.agent === 'gemini'
-        ? chalk.blue('  [Gemini]')
-        : s.agent === 'codex'
-          ? chalk.magenta('  [Codex]')
-          : chalk.cyan('  [Claude]');
+    const agentBadge = chalk[agentColorName(s.agent ?? 'claude')](
+      '  ' + agentBadgeText(s.agent ?? 'claude', 0)
+    );
     const sid = chalk.dim('  ' + s.sessionId.slice(0, 8));
 
     console.log(
@@ -974,12 +972,7 @@ function renderDetail(s: SessionSummary): void {
   );
   console.log(chalk.bold('  Project  ') + chalk.white(s.projectLabel));
   if (s.agent) {
-    const agentLabel =
-      s.agent === 'gemini'
-        ? chalk.blue('Gemini CLI')
-        : s.agent === 'codex'
-          ? chalk.magenta('Codex')
-          : chalk.cyan('Claude Code');
+    const agentLabel = chalk[agentColorName(s.agent)](agentDisplayName(s.agent));
     console.log(chalk.bold('  Agent    ') + agentLabel);
   }
   console.log(chalk.bold('  When     ') + chalk.white(fmtDateTime(s.startTime)));
