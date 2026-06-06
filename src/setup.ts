@@ -565,6 +565,16 @@ export async function setupClaude(): Promise<void> {
 // ── Gemini CLI ───────────────────────────────────────────────────────────────
 
 export async function setupGemini(): Promise<void> {
+  // Gemini CLI is EOL for consumer/free tiers on 2026-06-18 — replaced by
+  // Antigravity (agy). Enterprise Code Assist licenses keep working, so
+  // the target stays functional; everyone else should wire agy instead.
+  console.log(
+    chalk.yellow(
+      '  ⚠️  Gemini CLI stops serving AI Pro/Ultra and free tiers on 2026-06-18\n' +
+        '     (replaced by Antigravity). If you use agy, run: node9 agents add antigravity'
+    )
+  );
+  console.log('');
   seedMcpPinsIfMissing(); // #179: distinguish never-installed from no-pins-yet
   const homeDir = os.homedir();
   const settingsPath = path.join(homeDir, '.gemini', 'settings.json');
@@ -816,6 +826,35 @@ export async function setupAntigravity(): Promise<void> {
     writeJson(mcpPath, mcpConfig);
     console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
     anythingChanged = true;
+  }
+
+  // ── Step 1.5: Legacy Gemini CLI migration ─────────────────────────────────
+  // A machine that ran `node9 setup gemini` before migrating to agy still
+  // has node9 BeforeTool/AfterTool hooks in ~/.gemini/settings.json — a
+  // file agy never reads. They're dead config unless the user still runs
+  // the legacy Gemini CLI (enterprise Code Assist keeps working past the
+  // 2026-06-18 consumer EOL), so offer cleanup, default no.
+  const legacySettings = readJson<GeminiSettings>(path.join(homeDir, '.gemini', 'settings.json'));
+  const legacyHasNode9 = (['BeforeTool', 'AfterTool'] as const).some((ev) =>
+    legacySettings?.hooks?.[ev]?.some((m) => m.hooks.some((h) => isNode9Hook(h.command)))
+  );
+  if (legacyHasNode9) {
+    console.log(
+      chalk.yellow(
+        '  ⚠️  Found node9 hooks for the legacy Gemini CLI in ~/.gemini/settings.json.\n' +
+          '     Gemini CLI stops serving AI Pro/Ultra and free tiers on 2026-06-18.\n' +
+          '     Keep them only if you still use Gemini CLI (e.g. enterprise Code Assist).'
+      )
+    );
+    const clean = await confirm({
+      message: 'Remove the legacy Gemini CLI hooks?',
+      default: false,
+    });
+    if (clean) {
+      teardownGemini();
+      anythingChanged = true;
+    }
+    console.log('');
   }
 
   // ── Step 2: Modifications — show preview and ask ─────────────────────────

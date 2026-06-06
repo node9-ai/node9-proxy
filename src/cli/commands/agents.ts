@@ -111,6 +111,19 @@ export function registerAgentsCommand(program: Command): void {
             '\n'
         );
       }
+
+      // Gemini CLI consumer/free tiers stop serving 2026-06-18 (replaced
+      // by Antigravity). Surface the migration whenever gemini is present.
+      if (statuses.some((s) => s.name === 'gemini' && s.installed)) {
+        console.log(
+          chalk.yellow(
+            '  ⚠️  Gemini CLI stops serving AI Pro/Ultra and free tiers on 2026-06-18.\n'
+          ) +
+            chalk.gray('     Migrate to Antigravity: ') +
+            chalk.white('node9 agents add antigravity') +
+            '\n'
+        );
+      }
     });
 
   // ── add ───────────────────────────────────────────────────────────────────

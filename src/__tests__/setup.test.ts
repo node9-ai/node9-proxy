@@ -765,6 +765,57 @@ describe('setupAntigravity', () => {
     expect(written.hooks.PreToolUse).toHaveLength(2);
     expect(written.hooks.PreToolUse[0].hooks[0].command).toBe('/usr/bin/lint-gate');
   });
+
+  // ── Legacy Gemini CLI migration (Step 1.5) ──────────────────────────────
+  // node9 hooks left in ~/.gemini/settings.json by `node9 setup gemini`
+  // are dead config under agy (it never reads that file) — offer cleanup.
+
+  const legacySettingsPath = path.join(os.homedir(), '.gemini', 'settings.json');
+  const legacyGeminiSettings = {
+    hooks: {
+      BeforeTool: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] }],
+      AfterTool: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
+    },
+  };
+
+  it('offers legacy Gemini hook cleanup and removes them on confirm', async () => {
+    withExistingFiles({ [legacySettingsPath]: legacyGeminiSettings });
+    const confirm = await getConfirm();
+    confirm.mockResolvedValue(true);
+
+    await setupAntigravity();
+
+    expect(confirm).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Remove the legacy Gemini CLI hooks?', default: false })
+    );
+    const written = writtenTo(legacySettingsPath);
+    expect(written.hooks.BeforeTool).toBeUndefined();
+    expect(written.hooks.AfterTool).toBeUndefined();
+  });
+
+  it('leaves legacy Gemini hooks alone when the user declines', async () => {
+    withExistingFiles({ [legacySettingsPath]: legacyGeminiSettings });
+    const confirm = await getConfirm();
+    confirm.mockResolvedValue(false);
+
+    await setupAntigravity();
+    expect(writtenTo(legacySettingsPath)).toBeNull();
+  });
+
+  it('does not prompt for cleanup when settings.json has no node9 hooks', async () => {
+    withExistingFiles({
+      [legacySettingsPath]: {
+        hooks: {
+          BeforeTool: [{ matcher: '.*', hooks: [{ type: 'command', command: '/usr/bin/other' }] }],
+        },
+      },
+    });
+    const confirm = await getConfirm();
+
+    await setupAntigravity();
+    // No MCP servers to wrap in this fixture either — zero prompts total.
+    expect(confirm).not.toHaveBeenCalled();
+  });
 });
 
 describe('teardownAntigravity', () => {
