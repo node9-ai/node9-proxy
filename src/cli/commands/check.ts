@@ -475,6 +475,23 @@ export function registerCheckCommand(program: Command): void {
               );
               process.exit(0);
             }
+            if (agent === 'GitHub Copilot') {
+              // GitHub Copilot CLI's preToolUse decision is a flat
+              // `permissionDecision`/`permissionDecisionReason` (NOT Claude's
+              // nested hookSpecificOutput). Verified live against Copilot CLI
+              // 1.0.60: this shape with exit 0 blocks and surfaces the reason
+              // to the model as "Denied by preToolUse hook: …". The Claude
+              // shape below also blocks here (preToolUse is fail-closed on
+              // non-zero exit), but the reason then shows only as a bare
+              // warning — the native shape gives the clean negotiation UX.
+              process.stdout.write(
+                JSON.stringify({
+                  permissionDecision: 'deny',
+                  permissionDecisionReason: aiFeedbackMessage,
+                }) + '\n'
+              );
+              process.exit(0);
+            }
             process.stdout.write(
               JSON.stringify({
                 decision: 'block',

@@ -236,6 +236,14 @@ describe('agentLabelFromFlag', () => {
     expect(agentLabelFromFlag('agy')).toBe('Antigravity');
   });
 
+  it('maps copilot (any case) to GitHub Copilot', () => {
+    // Essential, not cosmetic: Copilot CLI's PascalCase payload is
+    // byte-identical to Claude Code, so the flag is the only reliable
+    // attribution signal.
+    expect(agentLabelFromFlag('copilot')).toBe('GitHub Copilot');
+    expect(agentLabelFromFlag('Copilot')).toBe('GitHub Copilot');
+  });
+
   it('ignores unknown or non-string values (falls back to fingerprinting)', () => {
     // The label selects block-response shapes, so arbitrary strings must
     // not be trusted verbatim.

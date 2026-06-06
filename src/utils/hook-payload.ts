@@ -91,6 +91,35 @@ export function canonicalToolName(name: string): string {
 }
 
 /**
+ * Map a `--agent` flag value (set by node9's own hook registrations,
+ * e.g. `node9 check --agent antigravity`) to the canonical agent label
+ * used by agent detection in check/log. Trusted like a Layer-0
+ * meta.agent tag: node9 wrote the hook entry, so the flag is
+ * deterministic where payload fingerprints could drift across agent
+ * versions. Unknown values are ignored (fall back to fingerprinting)
+ * rather than trusted verbatim — the label selects block-response
+ * shapes, so an arbitrary string is unsafe.
+ *
+ * `copilot` is essential here, not just convenient: the GitHub Copilot
+ * CLI PascalCase payload is byte-identical to Claude Code's
+ * (`hook_event_name: "PreToolUse"`, `tool_name`, `tool_input`), so it
+ * cannot be told apart by fingerprint — the flag is the only reliable
+ * signal.
+ */
+export function agentLabelFromFlag(flag: unknown): string | undefined {
+  if (typeof flag !== 'string') return undefined;
+  switch (flag.toLowerCase()) {
+    case 'antigravity':
+    case 'agy':
+      return 'Antigravity';
+    case 'copilot':
+      return 'GitHub Copilot';
+    default:
+      return undefined;
+  }
+}
+
+/**
  * Translate agent-native tool arguments to the canonical Claude shape.
  *
  * Antigravity's `run_command` args carry the shell command as
@@ -103,29 +132,9 @@ export function canonicalToolName(name: string): string {
  * Non-`run_command` tools and non-object inputs pass through unchanged.
  * Agy-specific metadata fields (`toolAction`, `toolSummary`,
  * `WaitMsBeforeAsync`, …) are preserved as-is so they stay visible in
- * the audit log.
+ * the audit log. (GitHub Copilot CLI needs no mapping — its `bash` tool
+ * args are already `{ command, description }`.)
  */
-/**
- * Map a `--agent` flag value (set by node9's own hook registrations,
- * e.g. `node9 check --agent antigravity`) to the canonical agent label
- * used by agent detection in check/log. Trusted like a Layer-0
- * meta.agent tag: node9 wrote the hook entry, so the flag is
- * deterministic where payload fingerprints could drift across agent
- * versions. Unknown values are ignored (fall back to fingerprinting)
- * rather than trusted verbatim — the label selects block-response
- * shapes, so an arbitrary string is unsafe.
- */
-export function agentLabelFromFlag(flag: unknown): string | undefined {
-  if (typeof flag !== 'string') return undefined;
-  switch (flag.toLowerCase()) {
-    case 'antigravity':
-    case 'agy':
-      return 'Antigravity';
-    default:
-      return undefined;
-  }
-}
-
 export function canonicalToolInput(rawToolName: string, input: unknown): unknown {
   if (rawToolName !== 'run_command') return input;
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return input;
