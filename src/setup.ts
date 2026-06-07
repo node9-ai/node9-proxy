@@ -2533,7 +2533,7 @@ function hermesHomeDir(homeDir: string = os.homedir()): string {
   return path.join(homeDir, '.hermes');
 }
 
-function hermesConfigPath(homeDir: string = os.homedir()): string {
+export function hermesConfigPath(homeDir: string = os.homedir()): string {
   return path.join(hermesHomeDir(homeDir), HERMES_CONFIG_FILENAME);
 }
 
