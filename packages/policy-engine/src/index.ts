@@ -25,7 +25,7 @@ export {
 } from './dlp';
 
 // Shell — AST-based detectors (mvdan-sh). Pure: input is a string, output is a verdict.
-export type { ShellCommandAnalysis, FsOpVerdict } from './shell';
+export type { ShellCommandAnalysis, FsOpVerdict, ShellDestination } from './shell';
 export {
   normalizeCommandForPolicy,
   detectDangerousShellExec,
@@ -36,7 +36,13 @@ export {
   BASH_TOOL_NAMES,
   isBashTool,
   AST_FS_REGEX_RULES,
+  extractShellDestinations,
+  parseDestHost,
 } from './shell';
+
+// Egress / destination policy (GAP-5).
+export type { EgressPolicy, EgressVerdict } from './egress';
+export { evaluateEgress, isPrivateHost, hostMatches, DEFAULT_EGRESS_ALLOWLIST } from './egress';
 
 // Policy — pure shell sub-helpers (pipe-chain, ssh, flag tables) + stateless evaluator.
 export type { PipeChainAnalysis } from './policy/pipe-chain';
@@ -121,7 +127,7 @@ export {
 // PII detection — pure regex over a string. One source of truth for both the
 // daemon watermark and the canonical extractor.
 export type { PiiPattern } from './scan/pii';
-export { detectPii } from './scan/pii';
+export { detectPii, detectArgsPii, REALTIME_PII_PATTERNS } from './scan/pii';
 
 // Canonical extractor — single detection pipeline every JSONL-scanning
 // consumer (CLI scan, daemon watermark, --upload-history backfill) calls so

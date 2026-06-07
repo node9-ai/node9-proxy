@@ -3,7 +3,8 @@
 import { randomUUID } from 'crypto';
 import { askNativePopup } from '../ui/native';
 import { computeRiskMetadata, type RiskMetadata } from '../context-sniper';
-import { scanArgs, scanFilePath, type DlpMatch } from '../dlp';
+import { scanArgs, scanFilePath, detectArgsPii, type DlpMatch } from '../dlp';
+import { extractShellDestinations, evaluateEgress } from '@node9/policy-engine';
 import { appendHookDebug, appendLocalAudit, appendToLog, HOOK_DEBUG_LOG } from '../audit';
 import { getConfig, getCredentials } from '../config';
 import { isIgnoredTool, evaluatePolicy } from '../policy';
@@ -304,6 +305,50 @@ async function _authorizeHeadlessCore(
       if (taintResult.tainted && taintResult.record) {
         const { path: taintedPath, source: taintSource } = taintResult.record;
         taintWarning = `⚠️ ${taintedPath} was flagged by ${taintSource} — this file may contain sensitive data`;
+
+        // ── Phase 4: taint × egress synergy (GAP-5) ──────────────────────────
+        // A CONFIRMED-tainted file heading to an UNTRUSTED host is the highest-
+        // confidence local exfil signal — upgrade from the soft taint review to
+        // a hard block. Only when egress is enabled and the destination isn't on
+        // the allow list / private (evaluateEgress returns non-null).
+        if (config.policy.egress?.enabled) {
+          const a =
+            args && typeof args === 'object' && !Array.isArray(args)
+              ? (args as Record<string, unknown>)
+              : {};
+          const cmd =
+            typeof a.command === 'string' ? a.command : typeof a.cmd === 'string' ? a.cmd : '';
+          const dests = cmd ? extractShellDestinations(cmd) : [];
+          const eg = dests.length > 0 ? evaluateEgress(dests, config.policy.egress) : null;
+          if (eg) {
+            if (!isManual)
+              appendLocalAudit(
+                toolName,
+                args,
+                'deny',
+                isObserveMode ? 'observe-mode-taint-egress-would-block' : 'taint-egress-block',
+                { ...meta, ruleName: `taint-egress:${eg.host}` },
+                hashAuditArgs
+              );
+            if (isObserveMode) {
+              return {
+                approved: true,
+                checkedBy: 'audit',
+                observeWouldBlock: true,
+                blockedByLabel: '🔴 Node9 Taint+Egress (Exfiltration)',
+              };
+            }
+            return {
+              approved: false,
+              reason:
+                `🔴 EXFILTRATION BLOCKED: the tainted file "${taintedPath}" is being sent to ` +
+                `untrusted host "${eg.host}". A flagged file leaving to an unrecognized ` +
+                `destination is blocked outright.`,
+              blockedBy: 'local-config',
+              blockedByLabel: '🔴 Node9 Taint+Egress (Exfiltration Blocked)',
+            };
+          }
+        }
       } else if (taintResult.daemonUnavailable) {
         // Taint service is down — cannot confirm files are clean.
         // Treat as a soft taint: the user sees a warning and must explicitly
@@ -377,6 +422,50 @@ async function _authorizeHeadlessCore(
       if (!isManual)
         appendLocalAudit(toolName, args, 'allow', 'dlp-review-flagged', meta, hashAuditArgs);
       explainableLabel = '🚨 Node9 DLP (Credential Review)';
+    }
+  }
+
+  // ── PII GATE (GAP-7) ──────────────────────────────────────────────────────
+  // Opt-in realtime block for high-signal PII (SSN, Credit Card) in tool args.
+  // Reliable on/off only — no fragile "review" routing. Default 'off' so
+  // existing behaviour is unchanged. Independent of dlp.enabled: PII gating is
+  // its own control, so disabling secret-DLP does NOT silently disable PII
+  // blocking. Honours scanIgnoredTools: ignored tools (read/grep/ls) are
+  // scanned only when that flag is on — which it is by default. Args are always
+  // hashed in the audit row (last arg true) so the PII value never lands in
+  // audit.log in clear.
+  if (
+    config.policy.dlp.pii === 'block' &&
+    (!isIgnoredTool(toolName) || config.policy.dlp.scanIgnoredTools)
+  ) {
+    const piiFound = detectArgsPii(args);
+    if (piiFound.length > 0) {
+      const piiReason =
+        `🔒 PII DETECTED: ${piiFound.join(', ')} found in tool arguments. ` +
+        `Remove or tokenize personal data before passing it to a tool.`;
+      if (!isManual)
+        appendLocalAudit(
+          toolName,
+          args,
+          'deny',
+          isObserveMode ? 'observe-mode-pii-would-block' : 'pii-block',
+          { ...meta, piiPatterns: piiFound.join(',') },
+          true
+        );
+      if (isObserveMode) {
+        return {
+          approved: true,
+          checkedBy: 'audit',
+          observeWouldBlock: true,
+          blockedByLabel: '🔒 Node9 PII (Detected)',
+        };
+      }
+      return {
+        approved: false,
+        reason: piiReason,
+        blockedBy: 'local-config',
+        blockedByLabel: '🔒 Node9 PII (Detected)',
+      };
     }
   }
 

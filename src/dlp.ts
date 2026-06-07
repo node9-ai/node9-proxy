@@ -12,8 +12,15 @@ import path from 'path';
 import { matchSensitivePath, sensitivePathMatch, type DlpMatch } from '@node9/policy-engine';
 
 // Re-exports so existing import paths (`from '../dlp'`) keep working.
-export type { DlpMatch } from '@node9/policy-engine';
-export { DLP_PATTERNS, scanArgs, scanText, redactText } from '@node9/policy-engine';
+export type { DlpMatch, PiiPattern } from '@node9/policy-engine';
+export {
+  DLP_PATTERNS,
+  scanArgs,
+  scanText,
+  redactText,
+  detectArgsPii,
+  REALTIME_PII_PATTERNS,
+} from '@node9/policy-engine';
 
 /**
  * Checks whether a file path argument targets a sensitive credential file.

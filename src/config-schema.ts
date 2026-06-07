@@ -127,6 +127,16 @@ export const ConfigFileSchema = z
           .object({
             enabled: z.boolean().optional(),
             scanIgnoredTools: z.boolean().optional(),
+            pii: z.enum(['off', 'block']).optional(),
+          })
+          .optional(),
+        egress: z
+          .object({
+            enabled: z.boolean().optional(),
+            mode: z.enum(['off', 'review', 'block']).optional(),
+            allow: z.array(z.string()).optional(),
+            deny: z.array(z.string()).optional(),
+            allowPrivate: z.boolean().optional(),
           })
           .optional(),
         loopDetection: z
