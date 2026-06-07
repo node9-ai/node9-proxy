@@ -33,3 +33,27 @@ export function detectPii(text: string): PiiPattern[] {
   if (PII_CC_RE.test(text)) found.add('Credit Card');
   return [...found];
 }
+
+// High-signal PII worth gating in REAL TIME. Email and Phone are deliberately
+// excluded — they appear constantly in normal dev work (commit author emails,
+// configs, fixtures) and would make realtime enforcement too noisy. They are
+// still surfaced by the offline scan via detectPii(). SSN and Credit Card
+// require structural delimiters and are rarely legitimate in agent tool args.
+export const REALTIME_PII_PATTERNS: readonly PiiPattern[] = ['SSN', 'Credit Card'];
+
+// Don't scan more than 100 KB of stringified args — mirrors the DLP scanner's
+// MAX_STRING_BYTES bound so a huge tool payload can't stall the regexes.
+const MAX_PII_SCAN_BYTES = 100_000;
+
+/**
+ * Realtime adapter for detectPii: walks a tool-args value (stringifying
+ * objects/arrays) and returns only the high-signal PII patterns found. Used by
+ * the authorize path to gate SSN / Credit Card in tool arguments. Pure.
+ */
+export function detectArgsPii(args: unknown): PiiPattern[] {
+  if (args === null || args === undefined) return [];
+  let text = typeof args === 'string' ? args : JSON.stringify(args);
+  if (typeof text !== 'string') return [];
+  if (text.length > MAX_PII_SCAN_BYTES) text = text.slice(0, MAX_PII_SCAN_BYTES);
+  return detectPii(text).filter((p) => REALTIME_PII_PATTERNS.includes(p));
+}

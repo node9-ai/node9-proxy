@@ -121,7 +121,7 @@ export {
 // PII detection — pure regex over a string. One source of truth for both the
 // daemon watermark and the canonical extractor.
 export type { PiiPattern } from './scan/pii';
-export { detectPii } from './scan/pii';
+export { detectPii, detectArgsPii, REALTIME_PII_PATTERNS } from './scan/pii';
 
 // Canonical extractor — single detection pipeline every JSONL-scanning
 // consumer (CLI scan, daemon watermark, --upload-history backfill) calls so

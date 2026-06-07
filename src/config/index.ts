@@ -61,6 +61,12 @@ export interface Config {
     dlp: {
       enabled: boolean;
       scanIgnoredTools: boolean;
+      // Realtime PII gating for high-signal PII (SSN, Credit Card) in tool args.
+      // 'off' (default): detect-only via the offline scan, never blocks.
+      // 'block': deny the tool call in realtime when SSN/Credit Card appears.
+      // Opt-in by design — defaulting to 'off' changes no existing behaviour and
+      // avoids false-positive blocks for orgs that legitimately handle PII.
+      pii?: 'off' | 'block';
     };
     loopDetection: {
       enabled: boolean;
@@ -307,7 +313,7 @@ export const DEFAULT_CONFIG: Config = {
           'The AI wants to download a script from the internet and run it immediately, without you seeing what it contains. This is one of the most common ways malware gets installed.',
       },
     ],
-    dlp: { enabled: true, scanIgnoredTools: true },
+    dlp: { enabled: true, scanIgnoredTools: true, pii: 'off' },
     loopDetection: { enabled: true, threshold: 5, windowSeconds: 120 },
     skillPinning: { enabled: false, mode: 'warn', roots: [] },
   },
@@ -590,6 +596,7 @@ export function getConfig(cwd?: string): Config {
       const d = p.dlp as Partial<Config['policy']['dlp']>;
       if (d.enabled !== undefined) mergedPolicy.dlp.enabled = d.enabled;
       if (d.scanIgnoredTools !== undefined) mergedPolicy.dlp.scanIgnoredTools = d.scanIgnoredTools;
+      if (d.pii !== undefined) mergedPolicy.dlp.pii = d.pii;
     }
     if (p.loopDetection) {
       const ld = p.loopDetection as Partial<Config['policy']['loopDetection']>;

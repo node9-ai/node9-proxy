@@ -124,6 +124,10 @@ export function appendLocalAudit(
      *  signal). */
     dlpPattern?: string;
     dlpSample?: string;
+    /** PII attribution — the high-signal PII pattern names that fired
+     *  (e.g. "SSN,Credit Card"). The raw args are hashed on PII rows, so
+     *  this is the only signal carried; the value itself is never logged. */
+    piiPatterns?: string;
     /** SaaS request id when this decision had a pending cloud entry
      *  (/intercept). The BE already holds an origin AuditLog row for that
      *  request; the shipper hands this id over so the BE ENRICHES that row

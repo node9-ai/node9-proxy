@@ -127,6 +127,7 @@ export const ConfigFileSchema = z
           .object({
             enabled: z.boolean().optional(),
             scanIgnoredTools: z.boolean().optional(),
+            pii: z.enum(['off', 'block']).optional(),
           })
           .optional(),
         loopDetection: z
