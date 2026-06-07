@@ -14,6 +14,32 @@ export const isTestEnv = () => {
   );
 };
 
+// Minimum time the approval dialog must be on screen before an affirmative
+// (Allow / Always Allow) is trusted. A human cannot read a security prompt and
+// click Allow faster than this; anything quicker is a non-interactive return —
+// zenity's exit-0-on-timeout (X11/XWayland), a window-manager auto-close, or a
+// headless dismiss — and MUST NOT be treated as approval. See GAP-6.
+export const MIN_INTERACTION_MS = 400;
+
+// Pure decision logic for the native popup, extracted so it can be unit-tested
+// without spawning a real dialog. Fails closed: only a non-spurious affirmative
+// resolves to allow / always_allow; everything else is deny.
+export function resolveNativeDecision(opts: {
+  code: number;
+  output: string;
+  elapsedMs: number;
+  locked: boolean;
+}): 'allow' | 'deny' | 'always_allow' {
+  const { code, output, elapsedMs, locked } = opts;
+  if (locked) return 'deny';
+  // Fail closed: an affirmative that arrives faster than a human could read the
+  // dialog and click is spurious (timeout-as-0, WM auto-close, headless dismiss).
+  const tooFast = elapsedMs < MIN_INTERACTION_MS;
+  if (output.includes('Always Allow')) return tooFast ? 'deny' : 'always_allow';
+  if (code === 0) return tooFast ? 'deny' : 'allow';
+  return 'deny';
+}
+
 export function formatArgs(
   args: unknown,
   matchedField?: string,
@@ -239,6 +265,9 @@ export async function askNativePopup(
   return new Promise((resolve) => {
     // 2. FIXED: Use ChildProcess type instead of any
     let childProcess: ChildProcess | null = null;
+    // When the dialog was launched — used to reject spurious instant returns
+    // (zenity exit-0-on-timeout, WM auto-close) that no human could have clicked.
+    const startedAt = Date.now();
 
     const onAbort = () => {
       if (childProcess && childProcess.pid) {
@@ -304,12 +333,18 @@ export async function askNativePopup(
       // 3. FIXED: Specified Buffer type for stream data
       childProcess?.stdout?.on('data', (d: Buffer) => (output += d.toString()));
 
+      // Fail closed if the dialog process can't even launch (zenity/osascript
+      // missing, or no display on a headless box). Without this handler the
+      // 'error' event was unhandled — an unattended deployment could crash or
+      // hang the hook instead of cleanly denying. See GAP-6.
+      childProcess?.on('error', () => {
+        if (signal) signal.removeEventListener('abort', onAbort);
+        resolve('deny');
+      });
+
       childProcess?.on('close', (code: number) => {
         if (signal) signal.removeEventListener('abort', onAbort);
-        if (locked) return resolve('deny');
-        if (output.includes('Always Allow')) return resolve('always_allow');
-        if (code === 0) return resolve('allow');
-        resolve('deny');
+        resolve(resolveNativeDecision({ code, output, elapsedMs: Date.now() - startedAt, locked }));
       });
     } catch {
       resolve('deny');
