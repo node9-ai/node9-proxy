@@ -52,7 +52,15 @@ const MAX_PII_SCAN_BYTES = 100_000;
  */
 export function detectArgsPii(args: unknown): PiiPattern[] {
   if (args === null || args === undefined) return [];
-  let text = typeof args === 'string' ? args : JSON.stringify(args);
+  let text: string | undefined;
+  try {
+    text = typeof args === 'string' ? args : JSON.stringify(args);
+  } catch {
+    // Circular reference or otherwise non-serializable value. Tool args from
+    // hook payloads are JSON-origin (never circular), so this is defensive for
+    // other callers — fail open to "no PII found", consistent with detectPii.
+    return [];
+  }
   if (typeof text !== 'string') return [];
   if (text.length > MAX_PII_SCAN_BYTES) text = text.slice(0, MAX_PII_SCAN_BYTES);
   return detectPii(text).filter((p) => REALTIME_PII_PATTERNS.includes(p));

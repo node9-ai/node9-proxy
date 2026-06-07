@@ -33,6 +33,13 @@ describe('detectArgsPii — high-signal PII in tool args (GAP-7)', () => {
     expect(detectArgsPii(undefined)).toEqual([]);
   });
 
+  it('fails open (returns []) on a circular / non-serializable arg', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const circular: any = { a: 1 };
+    circular.self = circular;
+    expect(detectArgsPii(circular)).toEqual([]);
+  });
+
   it('REALTIME_PII_PATTERNS is the high-signal subset only', () => {
     expect(REALTIME_PII_PATTERNS).toContain('SSN');
     expect(REALTIME_PII_PATTERNS).toContain('Credit Card');

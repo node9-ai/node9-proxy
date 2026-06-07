@@ -378,42 +378,48 @@ async function _authorizeHeadlessCore(
         appendLocalAudit(toolName, args, 'allow', 'dlp-review-flagged', meta, hashAuditArgs);
       explainableLabel = '🚨 Node9 DLP (Credential Review)';
     }
+  }
 
-    // ── PII GATE (GAP-7) ──────────────────────────────────────────────────
-    // Opt-in realtime block for high-signal PII (SSN, Credit Card) in tool
-    // args. Reliable on/off only — no fragile "review" routing. Default 'off'
-    // so existing behaviour is unchanged. Args are always hashed in the audit
-    // row (last arg true) so the PII value never lands in audit.log in clear.
-    if (config.policy.dlp.pii === 'block') {
-      const piiFound = detectArgsPii(args);
-      if (piiFound.length > 0) {
-        const piiReason =
-          `🔒 PII DETECTED: ${piiFound.join(', ')} found in tool arguments. ` +
-          `Remove or tokenize personal data before passing it to a tool.`;
-        if (!isManual)
-          appendLocalAudit(
-            toolName,
-            args,
-            'deny',
-            isObserveMode ? 'observe-mode-pii-would-block' : 'pii-block',
-            { ...meta, piiPatterns: piiFound.join(',') },
-            true
-          );
-        if (isObserveMode) {
-          return {
-            approved: true,
-            checkedBy: 'audit',
-            observeWouldBlock: true,
-            blockedByLabel: '🔒 Node9 PII (Detected)',
-          };
-        }
+  // ── PII GATE (GAP-7) ──────────────────────────────────────────────────────
+  // Opt-in realtime block for high-signal PII (SSN, Credit Card) in tool args.
+  // Reliable on/off only — no fragile "review" routing. Default 'off' so
+  // existing behaviour is unchanged. Independent of dlp.enabled: PII gating is
+  // its own control, so disabling secret-DLP does NOT silently disable PII
+  // blocking. Still respects scanIgnoredTools so read/grep/ls aren't scanned
+  // unless opted in. Args are always hashed in the audit row (last arg true)
+  // so the PII value never lands in audit.log in clear.
+  if (
+    config.policy.dlp.pii === 'block' &&
+    (!isIgnoredTool(toolName) || config.policy.dlp.scanIgnoredTools)
+  ) {
+    const piiFound = detectArgsPii(args);
+    if (piiFound.length > 0) {
+      const piiReason =
+        `🔒 PII DETECTED: ${piiFound.join(', ')} found in tool arguments. ` +
+        `Remove or tokenize personal data before passing it to a tool.`;
+      if (!isManual)
+        appendLocalAudit(
+          toolName,
+          args,
+          'deny',
+          isObserveMode ? 'observe-mode-pii-would-block' : 'pii-block',
+          { ...meta, piiPatterns: piiFound.join(',') },
+          true
+        );
+      if (isObserveMode) {
         return {
-          approved: false,
-          reason: piiReason,
-          blockedBy: 'local-config',
+          approved: true,
+          checkedBy: 'audit',
+          observeWouldBlock: true,
           blockedByLabel: '🔒 Node9 PII (Detected)',
         };
       }
+      return {
+        approved: false,
+        reason: piiReason,
+        blockedBy: 'local-config',
+        blockedByLabel: '🔒 Node9 PII (Detected)',
+      };
     }
   }
 

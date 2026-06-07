@@ -81,4 +81,12 @@ describe('GAP-7 — realtime PII enforcement', () => {
     const r = await authorizeHeadless('Bash', { command: 'git log --author=alice@example.com' });
     expect(r.approved).toBe(true);
   });
+
+  it('blocks PII even when dlp.enabled = false (PII gate is independent)', async () => {
+    // Fix 2: disabling secret-DLP must NOT silently disable PII blocking.
+    mockConfig({ dlp: { enabled: false, pii: 'block' } });
+    const r = await authorizeHeadless('Bash', { command: `echo ${SSN}` });
+    expect(r.approved).toBe(false);
+    expect(r.blockedByLabel).toMatch(/PII/);
+  });
 });
