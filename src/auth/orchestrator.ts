@@ -385,9 +385,10 @@ async function _authorizeHeadlessCore(
   // Reliable on/off only — no fragile "review" routing. Default 'off' so
   // existing behaviour is unchanged. Independent of dlp.enabled: PII gating is
   // its own control, so disabling secret-DLP does NOT silently disable PII
-  // blocking. Still respects scanIgnoredTools so read/grep/ls aren't scanned
-  // unless opted in. Args are always hashed in the audit row (last arg true)
-  // so the PII value never lands in audit.log in clear.
+  // blocking. Honours scanIgnoredTools: ignored tools (read/grep/ls) are
+  // scanned only when that flag is on — which it is by default. Args are always
+  // hashed in the audit row (last arg true) so the PII value never lands in
+  // audit.log in clear.
   if (
     config.policy.dlp.pii === 'block' &&
     (!isIgnoredTool(toolName) || config.policy.dlp.scanIgnoredTools)
