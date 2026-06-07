@@ -5,6 +5,8 @@ import chalk from 'chalk';
 import {
   setupClaude,
   setupGemini,
+  setupAntigravity,
+  setupCopilot,
   setupCursor,
   setupCodex,
   setupWindsurf,
@@ -15,6 +17,8 @@ import {
   setupHermes,
   teardownClaude,
   teardownGemini,
+  teardownAntigravity,
+  teardownCopilot,
   teardownCursor,
   teardownCodex,
   teardownWindsurf,
@@ -30,6 +34,8 @@ import {
 const SETUP_FN: Record<AgentName, () => Promise<void> | void> = {
   claude: setupClaude,
   gemini: setupGemini,
+  antigravity: setupAntigravity,
+  copilot: setupCopilot,
   cursor: setupCursor,
   codex: setupCodex,
   windsurf: setupWindsurf,
@@ -43,6 +49,8 @@ const SETUP_FN: Record<AgentName, () => Promise<void> | void> = {
 const TEARDOWN_FN: Record<AgentName, () => void> = {
   claude: teardownClaude,
   gemini: teardownGemini,
+  antigravity: teardownAntigravity,
+  copilot: teardownCopilot,
   cursor: teardownCursor,
   codex: teardownCodex,
   windsurf: teardownWindsurf,
@@ -54,6 +62,12 @@ const TEARDOWN_FN: Record<AgentName, () => void> = {
 };
 
 const AGENT_NAMES = Object.keys(SETUP_FN) as AgentName[];
+
+/** Normalise user-typed agent names — `agy` is Antigravity's binary name. */
+function resolveAgentName(agent: string): AgentName {
+  const lower = agent.toLowerCase();
+  return (lower === 'agy' ? 'antigravity' : lower) as AgentName;
+}
 
 export function registerAgentsCommand(program: Command): void {
   const agents = program.command('agents').description('List and manage AI agent integrations');
@@ -101,6 +115,19 @@ export function registerAgentsCommand(program: Command): void {
             '\n'
         );
       }
+
+      // Gemini CLI consumer/free tiers stop serving 2026-06-18 (replaced
+      // by Antigravity). Surface the migration whenever gemini is present.
+      if (statuses.some((s) => s.name === 'gemini' && s.installed)) {
+        console.log(
+          chalk.yellow(
+            '  ⚠️  Gemini CLI stops serving AI Pro/Ultra and free tiers on 2026-06-18.\n'
+          ) +
+            chalk.gray('     Migrate to Antigravity: ') +
+            chalk.white('node9 agents add antigravity') +
+            '\n'
+        );
+      }
     });
 
   // ── add ───────────────────────────────────────────────────────────────────
@@ -109,7 +136,7 @@ export function registerAgentsCommand(program: Command): void {
     .description('Wire Node9 into an agent')
     .argument('<agent>', `Agent to wire: ${AGENT_NAMES.join(' | ')}`)
     .action(async (agent: string) => {
-      const name = agent.toLowerCase() as AgentName;
+      const name = resolveAgentName(agent);
       const fn = SETUP_FN[name];
       if (!fn) {
         console.error(chalk.red(`Unknown agent: "${agent}". Supported: ${AGENT_NAMES.join(', ')}`));
@@ -124,7 +151,7 @@ export function registerAgentsCommand(program: Command): void {
     .description('Remove Node9 from an agent')
     .argument('<agent>', `Agent to unwire: ${AGENT_NAMES.join(' | ')}`)
     .action((agent: string) => {
-      const name = agent.toLowerCase() as AgentName;
+      const name = resolveAgentName(agent);
       const fn = TEARDOWN_FN[name];
       if (!fn) {
         console.error(chalk.red(`Unknown agent: "${agent}". Supported: ${AGENT_NAMES.join(', ')}`));

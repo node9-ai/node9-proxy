@@ -23,6 +23,7 @@ import {
 } from '../../policy/index';
 import { analyzeFsOperation, AST_FS_REGEX_RULES } from '@node9/policy-engine';
 import { scanArgs } from '../../dlp';
+import { canonicalToolInput } from '../../utils/hook-payload';
 import type { SmartRule } from '../../core';
 import {
   classifyRuleSeverity as engineClassifyRuleSeverity,
@@ -33,6 +34,8 @@ import {
 // scan flow (retired v3).
 import {
   buildScanSummary,
+  agentBadgeText,
+  agentColorName,
   type FindingRef,
   type RuleGroup,
   type ScanSummary,
@@ -78,7 +81,7 @@ interface Finding {
   timestamp: string;
   project: string;
   sessionId: string;
-  agent: 'claude' | 'gemini' | 'codex';
+  agent: 'claude' | 'gemini' | 'codex' | 'antigravity' | 'copilot';
 }
 
 interface DlpFinding {
@@ -88,7 +91,7 @@ interface DlpFinding {
   timestamp: string;
   project: string;
   sessionId: string;
-  agent: 'claude' | 'gemini' | 'codex' | 'shell';
+  agent: 'claude' | 'gemini' | 'codex' | 'antigravity' | 'copilot' | 'shell';
 }
 
 export interface LoopFinding {
@@ -98,7 +101,7 @@ export interface LoopFinding {
   timestamp: string;
   project: string;
   sessionId: string;
-  agent: 'claude' | 'gemini' | 'codex';
+  agent: 'claude' | 'gemini' | 'codex' | 'antigravity' | 'copilot';
   /**
    * Distinguishes a true cyclic agent loop (`'loop'`) from sustained iteration
    * on the same target across a session (`'long-iteration'`).
@@ -362,6 +365,7 @@ const LOOP_TOOLS = new Set([
   'exec_command',
   'shell',
   'run_shell_command',
+  'run_command', // Antigravity (agy)
   'write',
   'edit',
   'multiedit',
@@ -510,7 +514,7 @@ function pushFsOpAstFinding(
   timestamp: string,
   projLabel: string,
   sessionId: string,
-  agent: 'claude' | 'gemini' | 'codex',
+  agent: 'claude' | 'gemini' | 'codex' | 'antigravity' | 'copilot',
   result: ScanResult,
   dedup: ScanDedup
 ): boolean {
@@ -601,7 +605,7 @@ export function detectLoops(
   calls: Array<{ toolName: string; input: Record<string, unknown>; timestamp: string }>,
   project: string,
   sessionId: string,
-  agent: 'claude' | 'gemini' | 'codex'
+  agent: 'claude' | 'gemini' | 'codex' | 'antigravity' | 'copilot'
 ): LoopFinding[] {
   const counts = new Map<
     string,
@@ -744,6 +748,41 @@ function countScanFiles(): number {
         } catch {
           continue;
         }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  // Antigravity brain transcripts (CLI + IDE surfaces).
+  for (const surface of ['antigravity-cli', 'antigravity-ide']) {
+    const brainDir = path.join(os.homedir(), '.gemini', surface, 'brain');
+    if (!fs.existsSync(brainDir)) continue;
+    try {
+      for (const conv of fs.readdirSync(brainDir)) {
+        const convPath = path.join(brainDir, conv);
+        try {
+          if (!fs.statSync(convPath).isDirectory()) continue;
+          const logsDir = path.join(convPath, '.system_generated', 'logs');
+          if (
+            fs.existsSync(path.join(logsDir, 'transcript_full.jsonl')) ||
+            fs.existsSync(path.join(logsDir, 'transcript.jsonl'))
+          ) {
+            total += 1;
+          }
+        } catch {
+          continue;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  // GitHub Copilot CLI session event logs.
+  const copilotDir = path.join(os.homedir(), '.copilot', 'session-state');
+  if (fs.existsSync(copilotDir)) {
+    try {
+      for (const sid of fs.readdirSync(copilotDir)) {
+        if (fs.existsSync(path.join(copilotDir, sid, 'events.jsonl'))) total += 1;
       }
     } catch {
       /* ignore */
@@ -1585,6 +1624,530 @@ export function scanGeminiHistory(
 }
 
 // ---------------------------------------------------------------------------
+// Antigravity (agy) history scanner
+// ---------------------------------------------------------------------------
+// Antigravity stores per-conversation JSONL transcripts under
+//   ~/.gemini/antigravity-cli/brain/<conv-id>/.system_generated/logs/
+//   ~/.gemini/antigravity-ide/brain/<conv-id>/.system_generated/logs/
+// (CLI and IDE respectively — same layout). Each line is a step:
+//   { step_index, source: 'USER_EXPLICIT'|'SYSTEM'|'MODEL', type,
+//     status, created_at, content?, tool_calls?: [{ name, args }] }
+// We read transcript_full.jsonl — transcript.jsonl double-encodes arg
+// strings ("\"echo hi\"") — falling back to transcript.jsonl for
+// conversations that predate the full variant. Schema verified against
+// agy 1.0.6 (doc/roadmap/antigravity-target.md §0.7).
+
+interface AntigravityStep {
+  step_index?: number;
+  source?: string;
+  type?: string;
+  created_at?: string;
+  content?: string;
+  tool_calls?: Array<{ name?: string; args?: Record<string, unknown> }>;
+}
+
+/** Brain roots for both Antigravity surfaces, existing ones only. */
+function antigravityBrainDirs(): string[] {
+  return ['antigravity-cli', 'antigravity-ide']
+    .map((surface) => path.join(os.homedir(), '.gemini', surface, 'brain'))
+    .filter((p) => fs.existsSync(p));
+}
+
+/** Resolve the transcript file for one conversation dir, or null. */
+function antigravityTranscriptPath(convPath: string): string | null {
+  const logsDir = path.join(convPath, '.system_generated', 'logs');
+  for (const name of ['transcript_full.jsonl', 'transcript.jsonl']) {
+    const p = path.join(logsDir, name);
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+export function scanAntigravityHistory(
+  startDate: Date | null,
+  onProgress?: (done: number) => void,
+  onLine?: () => void
+): ScanResult {
+  const result: ScanResult = {
+    filesScanned: 0,
+    sessions: 0,
+    totalToolCalls: 0,
+    bashCalls: 0,
+    findings: [],
+    dlpFindings: [],
+    loopFindings: [],
+    totalCostUSD: 0, // transcripts carry no token/model data
+    firstDate: null,
+    lastDate: null,
+    sessionsWithEarlySecrets: 0,
+  };
+  const dedup = emptyScanDedup();
+
+  const brainDirs = antigravityBrainDirs();
+  if (brainDirs.length === 0) return result;
+
+  const ruleSources = buildRuleSources();
+
+  for (const brainDir of brainDirs) {
+    let convDirs: string[];
+    try {
+      convDirs = fs.readdirSync(brainDir);
+    } catch {
+      continue;
+    }
+
+    for (const conv of convDirs) {
+      const convPath = path.join(brainDir, conv);
+      try {
+        if (!fs.statSync(convPath).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+
+      const transcriptFile = antigravityTranscriptPath(convPath);
+      if (!transcriptFile) continue;
+
+      result.filesScanned++;
+      onProgress?.(result.filesScanned);
+
+      let raw: string;
+      try {
+        raw = fs.readFileSync(transcriptFile, 'utf-8');
+      } catch {
+        continue;
+      }
+
+      const sessionId = conv;
+      // Project label: agy transcripts carry no project-root marker; the
+      // shell tool's Cwd arg is the best available signal. Falls back to
+      // the conversation id until the first run_command is seen.
+      let projLabel = conv.slice(0, 8);
+      const sessionCalls: Array<{
+        toolName: string;
+        input: Record<string, unknown>;
+        timestamp: string;
+      }> = [];
+
+      result.sessions++;
+
+      for (const line of raw.split('\n')) {
+        if (!line.trim()) continue;
+        onLine?.();
+
+        let step: AntigravityStep;
+        try {
+          step = JSON.parse(line) as AntigravityStep;
+        } catch {
+          continue;
+        }
+
+        const timestamp = step.created_at ?? '';
+        if (startDate && timestamp && new Date(timestamp) < startDate) continue;
+
+        // ── User prompt DLP scan ─────────────────────────────────────────
+        if (step.type === 'USER_INPUT') {
+          const text = typeof step.content === 'string' ? step.content : '';
+          if (text) {
+            const dlpMatch = scanArgs({ text });
+            if (dlpMatch) {
+              const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
+              if (!dedup.dlpKeys.has(k)) {
+                dedup.dlpKeys.add(k);
+                result.dlpFindings.push({
+                  patternName: dlpMatch.patternName,
+                  redactedSample: dlpMatch.redactedSample,
+                  toolName: 'user-prompt',
+                  timestamp,
+                  project: projLabel,
+                  sessionId,
+                  agent: 'antigravity',
+                });
+              }
+            }
+          }
+          continue;
+        }
+
+        if (!Array.isArray(step.tool_calls) || step.tool_calls.length === 0) continue;
+
+        if (timestamp) {
+          if (!result.firstDate || timestamp < result.firstDate) result.firstDate = timestamp;
+          if (!result.lastDate || timestamp > result.lastDate) result.lastDate = timestamp;
+        }
+
+        for (const tc of step.tool_calls) {
+          result.totalToolCalls++;
+          const toolName = tc.name ?? '';
+          const toolNameLower = toolName.toLowerCase();
+          // Normalise agy's arg shape (CommandLine/Cwd → command/cwd) so
+          // DLP, AST and smart-rule evaluation see Claude vocabulary —
+          // same boundary mapping the live hook path uses.
+          const input = canonicalToolInput(toolName, tc.args ?? {}) as Record<string, unknown>;
+
+          sessionCalls.push({ toolName, input, timestamp });
+
+          const isShellTool = toolNameLower === 'run_command';
+          if (isShellTool) {
+            result.bashCalls++;
+            const cwd = String(input.cwd ?? '');
+            if (cwd && projLabel === conv.slice(0, 8)) {
+              projLabel = stripTerminalEscapes(cwd).replace(os.homedir(), '~').slice(0, 40);
+            }
+          }
+
+          const rawCmd = String(input.command ?? '').trimStart();
+          if (/^node9\s+(scan|explain|report|tail|dlp|status|sessions|audit)\b/.test(rawCmd))
+            continue;
+
+          const dlpMatch = scanArgs(input);
+          if (dlpMatch) {
+            const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
+            if (!dedup.dlpKeys.has(k)) {
+              dedup.dlpKeys.add(k);
+              result.dlpFindings.push({
+                patternName: dlpMatch.patternName,
+                redactedSample: dlpMatch.redactedSample,
+                toolName,
+                timestamp,
+                project: projLabel,
+                sessionId,
+                agent: 'antigravity',
+              });
+            }
+          }
+
+          // ── AST filesystem-operation detection ─────────────────────────
+          let astFsMatched = false;
+          if (isShellTool) {
+            astFsMatched = pushFsOpAstFinding(
+              String(input.command ?? ''),
+              toolName,
+              input,
+              timestamp,
+              projLabel,
+              sessionId,
+              'antigravity',
+              result,
+              dedup
+            );
+          }
+
+          let ruleMatched = astFsMatched;
+          for (const source of ruleSources) {
+            const { rule } = source;
+            if (rule.verdict === 'allow') continue;
+            // Rules target Claude vocabulary ('bash') — match the
+            // canonical name for the shell tool, the native name otherwise.
+            const ruleToolName = isShellTool ? 'bash' : toolNameLower;
+            if (rule.tool && !matchesPattern(ruleToolName, rule.tool)) continue;
+            if (isShellTool && rule.name && AST_FS_REGEX_RULES.has(rule.name)) continue;
+            if (!evaluateSmartConditions(input, rule)) continue;
+
+            const inputPreview = preview(input, 120);
+            const k = findingKey(rule.name, inputPreview, projLabel);
+            if (!dedup.findingsKeys.has(k)) {
+              dedup.findingsKeys.add(k);
+              result.findings.push({
+                source,
+                toolName,
+                input,
+                timestamp,
+                project: projLabel,
+                sessionId,
+                agent: 'antigravity',
+              });
+            }
+            ruleMatched = true;
+            break;
+          }
+
+          // ── AST shell exec detection (eval/bash -c with remote download)
+          if (!ruleMatched && isShellTool) {
+            const shellVerdict = detectDangerousShellExec(String(input.command ?? ''));
+            if (shellVerdict) {
+              const astRule: SmartRule = {
+                name: `ast:bash-safe:${shellVerdict}-shell-exec-remote`,
+                tool: 'bash',
+                conditions: [],
+                verdict: shellVerdict,
+                reason: `Shell execution of remote download detected by AST analysis (bash-safe)`,
+              };
+              const inputPreview = preview(input, 120);
+              const k = findingKey(astRule.name, inputPreview, projLabel);
+              if (!dedup.findingsKeys.has(k)) {
+                dedup.findingsKeys.add(k);
+                result.findings.push({
+                  source: {
+                    shieldName: 'bash-safe',
+                    shieldLabel: 'bash-safe (AST)',
+                    sourceType: 'shield',
+                    rule: astRule,
+                  },
+                  toolName,
+                  input,
+                  timestamp,
+                  project: projLabel,
+                  sessionId,
+                  agent: 'antigravity',
+                });
+              }
+            }
+          }
+        }
+      }
+      result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'antigravity'));
+    }
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// GitHub Copilot CLI history scanner
+// ---------------------------------------------------------------------------
+// Copilot CLI stores one event-log per session at
+//   ~/.copilot/session-state/<id>/events.jsonl
+// Each line is `{type, data, id, timestamp, parentId}`. Tool calls appear
+// as `type:"tool.execution_start"` with `data:{toolName, arguments, …}`;
+// prompts as `type:"user.message"` (data.content / data.text). The cwd
+// comes from the `session.start` event's data.context.cwd. The `bash`
+// tool already uses `{command}` args, so no canonicalisation is needed.
+// Schema verified against Copilot CLI 1.0.60 (doc/roadmap/copilot-target.md §0.7).
+
+interface CopilotEvent {
+  type?: string;
+  timestamp?: string;
+  data?: {
+    toolName?: string;
+    arguments?: Record<string, unknown>;
+    context?: { cwd?: string };
+    content?: string;
+    text?: string;
+  };
+}
+
+export function scanCopilotHistory(
+  startDate: Date | null,
+  onProgress?: (done: number) => void,
+  onLine?: () => void
+): ScanResult {
+  const sessionDir = path.join(os.homedir(), '.copilot', 'session-state');
+  const result: ScanResult = {
+    filesScanned: 0,
+    sessions: 0,
+    totalToolCalls: 0,
+    bashCalls: 0,
+    findings: [],
+    dlpFindings: [],
+    loopFindings: [],
+    totalCostUSD: 0, // event logs carry no token/cost rollup
+    firstDate: null,
+    lastDate: null,
+    sessionsWithEarlySecrets: 0,
+  };
+  const dedup = emptyScanDedup();
+
+  if (!fs.existsSync(sessionDir)) return result;
+
+  let sessionIds: string[];
+  try {
+    sessionIds = fs.readdirSync(sessionDir);
+  } catch {
+    return result;
+  }
+
+  const ruleSources = buildRuleSources();
+
+  for (const sessionId of sessionIds) {
+    const eventsPath = path.join(sessionDir, sessionId, 'events.jsonl');
+    if (!fs.existsSync(eventsPath)) continue;
+
+    result.filesScanned++;
+    onProgress?.(result.filesScanned);
+
+    let raw: string;
+    try {
+      raw = fs.readFileSync(eventsPath, 'utf-8');
+    } catch {
+      continue;
+    }
+
+    let projLabel = sessionId.slice(0, 8);
+    const sessionCalls: Array<{
+      toolName: string;
+      input: Record<string, unknown>;
+      timestamp: string;
+    }> = [];
+
+    result.sessions++;
+
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      onLine?.();
+
+      let ev: CopilotEvent;
+      try {
+        ev = JSON.parse(line) as CopilotEvent;
+      } catch {
+        continue;
+      }
+
+      const timestamp = ev.timestamp ?? '';
+
+      // Project label from the session.start cwd.
+      if (ev.type === 'session.start') {
+        const cwd = ev.data?.context?.cwd;
+        if (typeof cwd === 'string' && cwd) {
+          projLabel = stripTerminalEscapes(cwd).replace(os.homedir(), '~').slice(0, 40);
+        }
+        continue;
+      }
+
+      if (startDate && timestamp && new Date(timestamp) < startDate) continue;
+
+      // ── User prompt DLP scan ─────────────────────────────────────────
+      if (ev.type === 'user.message') {
+        const text = ev.data?.content ?? ev.data?.text ?? '';
+        if (typeof text === 'string' && text) {
+          const dlpMatch = scanArgs({ text });
+          if (dlpMatch) {
+            const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
+            if (!dedup.dlpKeys.has(k)) {
+              dedup.dlpKeys.add(k);
+              result.dlpFindings.push({
+                patternName: dlpMatch.patternName,
+                redactedSample: dlpMatch.redactedSample,
+                toolName: 'user-prompt',
+                timestamp,
+                project: projLabel,
+                sessionId,
+                agent: 'copilot',
+              });
+            }
+          }
+        }
+        continue;
+      }
+
+      if (ev.type !== 'tool.execution_start') continue;
+
+      const toolName = ev.data?.toolName ?? '';
+      const toolNameLower = toolName.toLowerCase();
+      const input = (ev.data?.arguments ?? {}) as Record<string, unknown>;
+
+      result.totalToolCalls++;
+      sessionCalls.push({ toolName, input, timestamp });
+
+      const isShellTool = toolNameLower === 'bash' || toolNameLower === 'shell';
+      if (isShellTool) result.bashCalls++;
+
+      if (timestamp) {
+        if (!result.firstDate || timestamp < result.firstDate) result.firstDate = timestamp;
+        if (!result.lastDate || timestamp > result.lastDate) result.lastDate = timestamp;
+      }
+
+      const rawCmd = String(input.command ?? '').trimStart();
+      if (/^node9\s+(scan|explain|report|tail|dlp|status|sessions|audit)\b/.test(rawCmd)) continue;
+
+      const dlpMatch = scanArgs(input);
+      if (dlpMatch) {
+        const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
+        if (!dedup.dlpKeys.has(k)) {
+          dedup.dlpKeys.add(k);
+          result.dlpFindings.push({
+            patternName: dlpMatch.patternName,
+            redactedSample: dlpMatch.redactedSample,
+            toolName,
+            timestamp,
+            project: projLabel,
+            sessionId,
+            agent: 'copilot',
+          });
+        }
+      }
+
+      // ── AST filesystem-operation detection ───────────────────────────
+      let astFsMatched = false;
+      if (isShellTool) {
+        astFsMatched = pushFsOpAstFinding(
+          String(input.command ?? ''),
+          toolName,
+          input,
+          timestamp,
+          projLabel,
+          sessionId,
+          'copilot',
+          result,
+          dedup
+        );
+      }
+
+      let ruleMatched = astFsMatched;
+      for (const source of ruleSources) {
+        const { rule } = source;
+        if (rule.verdict === 'allow') continue;
+        if (rule.tool && !matchesPattern(toolNameLower, rule.tool)) continue;
+        if (isShellTool && rule.name && AST_FS_REGEX_RULES.has(rule.name)) continue;
+        if (!evaluateSmartConditions(input, rule)) continue;
+
+        const inputPreview = preview(input, 120);
+        const k = findingKey(rule.name, inputPreview, projLabel);
+        if (!dedup.findingsKeys.has(k)) {
+          dedup.findingsKeys.add(k);
+          result.findings.push({
+            source,
+            toolName,
+            input,
+            timestamp,
+            project: projLabel,
+            sessionId,
+            agent: 'copilot',
+          });
+        }
+        ruleMatched = true;
+        break;
+      }
+
+      // ── AST shell exec detection (eval/bash -c with remote download) ──
+      if (!ruleMatched && isShellTool) {
+        const shellVerdict = detectDangerousShellExec(String(input.command ?? ''));
+        if (shellVerdict) {
+          const astRule: SmartRule = {
+            name: `ast:bash-safe:${shellVerdict}-shell-exec-remote`,
+            tool: 'bash',
+            conditions: [],
+            verdict: shellVerdict,
+            reason: `Shell execution of remote download detected by AST analysis (bash-safe)`,
+          };
+          const inputPreview = preview(input, 120);
+          const k = findingKey(astRule.name, inputPreview, projLabel);
+          if (!dedup.findingsKeys.has(k)) {
+            dedup.findingsKeys.add(k);
+            result.findings.push({
+              source: {
+                shieldName: 'bash-safe',
+                shieldLabel: 'bash-safe (AST)',
+                sourceType: 'shield',
+                rule: astRule,
+              },
+              toolName,
+              input,
+              timestamp,
+              project: projLabel,
+              sessionId,
+              agent: 'copilot',
+            });
+          }
+        }
+      }
+    }
+    result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'copilot'));
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Codex history scanner
 // ---------------------------------------------------------------------------
 
@@ -1946,15 +2509,8 @@ export function printFindingRow(
   const stale = isStaleFinding(f.timestamp);
   const ts = f.timestamp ? chalk.dim(fmtTs(f.timestamp) + '  ') : '';
   const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
-  const agentLabel =
-    f.agent === 'gemini' ? '[Gemini]  ' : f.agent === 'codex' ? '[Codex]   ' : '[Claude]  ';
-  const agentBadge = stale
-    ? chalk.dim(agentLabel)
-    : f.agent === 'gemini'
-      ? chalk.blue(agentLabel)
-      : f.agent === 'codex'
-        ? chalk.magenta(agentLabel)
-        : chalk.cyan(agentLabel);
+  const agentLabel = agentBadgeText(f.agent);
+  const agentBadge = stale ? chalk.dim(agentLabel) : chalk[agentColorName(f.agent)](agentLabel);
   // FindingRef.command is already the preview; fullCommand is the untruncated form.
   let cmdText: string;
   if (drillDown) {
@@ -2859,16 +3415,44 @@ export function registerScanCommand(program: Command): void {
           (done) => onProgress(claudeScan.filesScanned + done),
           onLine
         );
-        const codexScan = scanCodexHistory(
+        const antigravityScan = scanAntigravityHistory(
           startDate,
           (done) => onProgress(claudeScan.filesScanned + geminiScan.filesScanned + done),
           onLine
         );
-        const scan = mergeScans(mergeScans(claudeScan, geminiScan), codexScan);
+        const copilotScan = scanCopilotHistory(
+          startDate,
+          (done) =>
+            onProgress(
+              claudeScan.filesScanned +
+                geminiScan.filesScanned +
+                antigravityScan.filesScanned +
+                done
+            ),
+          onLine
+        );
+        const codexScan = scanCodexHistory(
+          startDate,
+          (done) =>
+            onProgress(
+              claudeScan.filesScanned +
+                geminiScan.filesScanned +
+                antigravityScan.filesScanned +
+                copilotScan.filesScanned +
+                done
+            ),
+          onLine
+        );
+        const scan = mergeScans(
+          mergeScans(mergeScans(mergeScans(claudeScan, geminiScan), antigravityScan), copilotScan),
+          codexScan
+        );
         scan.dlpFindings.push(...scanShellConfig());
         const summary = buildScanSummary([
           { id: 'claude', label: 'Claude', icon: '🤖', scan: claudeScan },
           { id: 'gemini', label: 'Gemini', icon: '♊', scan: geminiScan },
+          { id: 'antigravity', label: 'Antigravity', icon: '🚀', scan: antigravityScan },
+          { id: 'copilot', label: 'Copilot', icon: '🐙', scan: copilotScan },
           { id: 'codex', label: 'Codex', icon: '🔮', scan: codexScan },
         ]);
         if (useTTY) process.stdout.write('\r' + ' '.repeat(60) + '\r');
@@ -2877,7 +3461,7 @@ export function registerScanCommand(program: Command): void {
           console.log(chalk.yellow('  No session history found.'));
           console.log(
             chalk.gray(
-              '  Supported: Claude Code (~/.claude/projects/) · Gemini CLI (~/.gemini/tmp/)\n'
+              '  Supported: Claude Code (~/.claude/projects/) · Gemini CLI (~/.gemini/tmp/) · Antigravity (~/.gemini/antigravity-*/brain/) · Copilot CLI (~/.copilot/session-state/)\n'
             )
           );
           return;
@@ -2897,6 +3481,12 @@ export function registerScanCommand(program: Command): void {
           breakdownParts.push(chalk.cyan(String(claudeScan.sessions)) + chalk.dim(' Claude'));
         if (geminiScan.sessions > 0)
           breakdownParts.push(chalk.blue(String(geminiScan.sessions)) + chalk.dim(' Gemini'));
+        if (antigravityScan.sessions > 0)
+          breakdownParts.push(
+            chalk.yellow(String(antigravityScan.sessions)) + chalk.dim(' Antigravity')
+          );
+        if (copilotScan.sessions > 0)
+          breakdownParts.push(chalk.green(String(copilotScan.sessions)) + chalk.dim(' Copilot'));
         if (codexScan.sessions > 0)
           breakdownParts.push(chalk.magenta(String(codexScan.sessions)) + chalk.dim(' Codex'));
         const sessionBreakdown =
@@ -3228,14 +3818,7 @@ export function registerScanCommand(program: Command): void {
               const stale = isStaleFinding(f.timestamp);
               const ts = f.timestamp ? chalk.dim(fmtTs(f.timestamp) + '  ') : '';
               const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
-              const agentBadge =
-                f.agent === 'gemini'
-                  ? chalk.blue('[Gemini]  ')
-                  : f.agent === 'codex'
-                    ? chalk.magenta('[Codex]   ')
-                    : f.agent === 'shell'
-                      ? chalk.yellow('[Shell]   ')
-                      : chalk.cyan('[Claude]  ');
+              const agentBadge = chalk[agentColorName(f.agent)](agentBadgeText(f.agent));
               const sessionSuffix = f.sessionId ? chalk.dim(`  → ${f.sessionId.slice(0, 8)}`) : '';
               const recurringBadge = recurringPatterns.has(f.patternName)
                 ? chalk.red.bold(' ⚠️ recurring ')
@@ -3312,19 +3895,10 @@ export function registerScanCommand(program: Command): void {
               const stale = isStaleFinding(f.timestamp);
               const ts = f.timestamp ? chalk.dim(fmtTs(f.timestamp) + '  ') : '';
               const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
-              const agentLabel =
-                f.agent === 'gemini'
-                  ? '[Gemini]  '
-                  : f.agent === 'codex'
-                    ? '[Codex]   '
-                    : '[Claude]  ';
+              const agentLabel = agentBadgeText(f.agent);
               const agentBadge = stale
                 ? chalk.dim(agentLabel)
-                : f.agent === 'gemini'
-                  ? chalk.blue(agentLabel)
-                  : f.agent === 'codex'
-                    ? chalk.magenta(agentLabel)
-                    : chalk.cyan(agentLabel);
+                : chalk[agentColorName(f.agent)](agentLabel);
               const toolDisplay = stale ? chalk.dim(f.toolName) : chalk.yellow(f.toolName);
               const cmdDisplay = stale ? chalk.dim(f.commandPreview) : chalk.gray(f.commandPreview);
               const sessionSuffix = f.sessionId ? chalk.dim(`  → ${f.sessionId.slice(0, 8)}`) : '';

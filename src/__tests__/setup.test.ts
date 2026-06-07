@@ -7,6 +7,8 @@ import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import {
   setupClaude,
   setupGemini,
+  setupAntigravity,
+  setupCopilot,
   setupCursor,
   setupCodex,
   setupOpencode,
@@ -14,6 +16,8 @@ import {
   setupHermes,
   teardownClaude,
   teardownGemini,
+  teardownAntigravity,
+  teardownCopilot,
   teardownCursor,
   teardownCodex,
   teardownOpencode,
@@ -674,6 +678,307 @@ describe('teardownGemini', () => {
   });
 });
 
+// ── setupAntigravity / teardownAntigravity ───────────────────────────────────
+// Hooks live in a dedicated ~/.gemini/config/hooks.json (verified working
+// against agy 1.0.6) and MCP servers in ~/.gemini/config/mcp_config.json —
+// both shared by the agy CLI and the Antigravity IDE.
+
+describe('setupAntigravity', () => {
+  const hooksPath = path.join(os.homedir(), '.gemini', 'config', 'hooks.json');
+  const mcpPath = path.join(os.homedir(), '.gemini', 'config', 'mcp_config.json');
+
+  it('adds PreToolUse/PostToolUse hooks with --agent antigravity and 600 s timeout', async () => {
+    const confirm = await getConfirm();
+    await setupAntigravity();
+
+    expect(confirm).not.toHaveBeenCalled();
+    const written = writtenTo(hooksPath);
+    // --agent selects agy's deny response shape in check.ts — without it
+    // a block would emit the Claude shape, which agy ignores (fail-open).
+    expect(written.hooks.PreToolUse[0].hooks[0].command).toBe('node9 check --agent antigravity');
+    expect(written.hooks.PostToolUse[0].hooks[0].command).toBe('node9 log --agent antigravity');
+    // agy timeouts are seconds, and a decision after the declared timeout
+    // is ignored (fail-open) — 600 covers slow human approvals.
+    expect(written.hooks.PreToolUse[0].hooks[0].timeout).toBe(600);
+    expect(written.hooks.PostToolUse[0].hooks[0].timeout).toBe(600);
+    // agy has no UserPromptSubmit event — registering one would be dead config.
+    expect(written.hooks.UserPromptSubmit).toBeUndefined();
+  });
+
+  it('adds the node9 MCP server entry to mcp_config.json', async () => {
+    await setupAntigravity();
+    const written = writtenTo(mcpPath);
+    expect(written.mcpServers.node9).toEqual(NODE9_MCP_ENTRY);
+  });
+
+  it('does not rewrite hooks that already point to node9', async () => {
+    withExistingFiles({
+      [hooksPath]: {
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: '.*',
+              hooks: [{ type: 'command', command: 'node9 check --agent antigravity' }],
+            },
+          ],
+          PostToolUse: [
+            {
+              matcher: '.*',
+              hooks: [{ type: 'command', command: 'node9 log --agent antigravity' }],
+            },
+          ],
+        },
+      },
+      [mcpPath]: { mcpServers: { node9: NODE9_MCP_ENTRY } },
+    });
+
+    await setupAntigravity();
+    expect(writtenTo(hooksPath)).toBeNull();
+    expect(writtenTo(mcpPath)).toBeNull();
+  });
+
+  it('prompts before wrapping existing MCP servers and wraps on confirm', async () => {
+    withExistingFiles({
+      [mcpPath]: { mcpServers: { aws: { command: 'npx', args: ['server-aws'] } } },
+    });
+    const confirm = await getConfirm();
+    confirm.mockResolvedValue(true);
+
+    await setupAntigravity();
+    expect(confirm).toHaveBeenCalledTimes(1);
+    const written = writtenTo(mcpPath);
+    expect(written.mcpServers.aws.command).toBe('node9');
+    expect(written.mcpServers.aws.args).toEqual(['mcp', '--upstream', 'npx server-aws']);
+  });
+
+  it('preserves foreign hooks in hooks.json (additive, never destructive)', async () => {
+    withExistingFiles({
+      [hooksPath]: {
+        hooks: {
+          PreToolUse: [
+            { matcher: 'run_command', hooks: [{ type: 'command', command: '/usr/bin/lint-gate' }] },
+          ],
+        },
+      },
+    });
+
+    await setupAntigravity();
+    const written = writtenTo(hooksPath);
+    expect(written.hooks.PreToolUse).toHaveLength(2);
+    expect(written.hooks.PreToolUse[0].hooks[0].command).toBe('/usr/bin/lint-gate');
+  });
+
+  // ── Legacy Gemini CLI migration (Step 1.5) ──────────────────────────────
+  // node9 hooks left in ~/.gemini/settings.json by `node9 setup gemini`
+  // are dead config under agy (it never reads that file) — offer cleanup.
+
+  const legacySettingsPath = path.join(os.homedir(), '.gemini', 'settings.json');
+  const legacyGeminiSettings = {
+    hooks: {
+      BeforeTool: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 check' }] }],
+      AfterTool: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
+    },
+  };
+
+  it('offers legacy Gemini hook cleanup and removes them on confirm', async () => {
+    withExistingFiles({ [legacySettingsPath]: legacyGeminiSettings });
+    const confirm = await getConfirm();
+    confirm.mockResolvedValue(true);
+
+    await setupAntigravity();
+
+    expect(confirm).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Remove the legacy Gemini CLI hooks?', default: false })
+    );
+    const written = writtenTo(legacySettingsPath);
+    expect(written.hooks.BeforeTool).toBeUndefined();
+    expect(written.hooks.AfterTool).toBeUndefined();
+  });
+
+  it('leaves legacy Gemini hooks alone when the user declines', async () => {
+    withExistingFiles({ [legacySettingsPath]: legacyGeminiSettings });
+    const confirm = await getConfirm();
+    confirm.mockResolvedValue(false);
+
+    await setupAntigravity();
+    expect(writtenTo(legacySettingsPath)).toBeNull();
+  });
+
+  it('does not prompt for cleanup when settings.json has no node9 hooks', async () => {
+    withExistingFiles({
+      [legacySettingsPath]: {
+        hooks: {
+          BeforeTool: [{ matcher: '.*', hooks: [{ type: 'command', command: '/usr/bin/other' }] }],
+        },
+      },
+    });
+    const confirm = await getConfirm();
+
+    await setupAntigravity();
+    // No MCP servers to wrap in this fixture either — zero prompts total.
+    expect(confirm).not.toHaveBeenCalled();
+  });
+});
+
+describe('teardownAntigravity', () => {
+  const hooksPath = path.join(os.homedir(), '.gemini', 'config', 'hooks.json');
+  const mcpPath = path.join(os.homedir(), '.gemini', 'config', 'mcp_config.json');
+
+  it('removes node9 hooks but preserves user hooks', () => {
+    withExistingFiles({
+      [hooksPath]: {
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: '.*',
+              hooks: [{ type: 'command', command: 'node9 check --agent antigravity' }],
+            },
+            { matcher: 'run_command', hooks: [{ type: 'command', command: '/usr/bin/lint-gate' }] },
+          ],
+          PostToolUse: [
+            {
+              matcher: '.*',
+              hooks: [{ type: 'command', command: 'node9 log --agent antigravity' }],
+            },
+          ],
+        },
+      },
+    });
+
+    teardownAntigravity();
+    const written = writtenTo(hooksPath);
+    expect(written.hooks.PreToolUse).toHaveLength(1);
+    expect(written.hooks.PreToolUse[0].hooks[0].command).toBe('/usr/bin/lint-gate');
+    expect(written.hooks.PostToolUse).toBeUndefined();
+  });
+
+  it('removes the node9 MCP entry and unwraps wrapped servers', () => {
+    withExistingFiles({
+      [mcpPath]: {
+        mcpServers: {
+          node9: NODE9_MCP_ENTRY,
+          aws: { command: 'node9', args: ['mcp', '--upstream', 'npx server-aws'] },
+        },
+      },
+    });
+
+    teardownAntigravity();
+    const written = writtenTo(mcpPath);
+    expect(written.mcpServers.node9).toBeUndefined();
+    expect(written.mcpServers.aws.command).toBe('npx');
+    expect(written.mcpServers.aws.args).toEqual(['server-aws']);
+  });
+
+  it('is a no-op when neither config file exists', () => {
+    teardownAntigravity();
+    expect(writtenTo(hooksPath)).toBeNull();
+    expect(writtenTo(mcpPath)).toBeNull();
+  });
+});
+
+// ── setupCopilot / teardownCopilot ────────────────────────────────────────────
+// GitHub Copilot CLI: node9 owns a dedicated ~/.copilot/hooks/node9.json
+// (Copilot merges every hooks/*.json), with PreToolUse/PostToolUse/
+// UserPromptSubmit hooks tagged --agent copilot. Payload is identical to
+// Claude so no dialect work; the flag pins attribution + deny shape.
+
+describe('setupCopilot', () => {
+  const hooksPath = path.join(os.homedir(), '.copilot', 'hooks', 'node9.json');
+  const mcpPath = path.join(os.homedir(), '.copilot', 'mcp-config.json');
+
+  it('writes all three hooks with --agent copilot and timeoutSec 600', async () => {
+    const confirm = await getConfirm();
+    await setupCopilot();
+
+    expect(confirm).not.toHaveBeenCalled();
+    const written = writtenTo(hooksPath);
+    expect(written.version).toBe(1);
+    expect(written.hooks.PreToolUse[0].command).toBe('node9 check --agent copilot');
+    expect(written.hooks.PostToolUse[0].command).toBe('node9 log --agent copilot');
+    // Copilot HAS UserPromptSubmit (unlike agy) — prompt DLP is wired.
+    expect(written.hooks.UserPromptSubmit[0].command).toBe('node9 check --agent copilot');
+    expect(written.hooks.PreToolUse[0].timeoutSec).toBe(600);
+  });
+
+  it('adds the node9 MCP server entry to mcp-config.json', async () => {
+    await setupCopilot();
+    expect(writtenTo(mcpPath).mcpServers.node9).toEqual(NODE9_MCP_ENTRY);
+  });
+
+  it('does not rewrite hooks that already point to node9', async () => {
+    withExistingFiles({
+      [hooksPath]: {
+        version: 1,
+        hooks: {
+          PreToolUse: [{ type: 'command', command: 'node9 check --agent copilot' }],
+          PostToolUse: [{ type: 'command', command: 'node9 log --agent copilot' }],
+          UserPromptSubmit: [{ type: 'command', command: 'node9 check --agent copilot' }],
+        },
+      },
+      [mcpPath]: { mcpServers: { node9: NODE9_MCP_ENTRY } },
+    });
+
+    await setupCopilot();
+    expect(writtenTo(hooksPath)).toBeNull();
+    expect(writtenTo(mcpPath)).toBeNull();
+  });
+
+  it('preserves foreign hooks in the same event array (additive)', async () => {
+    withExistingFiles({
+      [hooksPath]: {
+        version: 1,
+        hooks: { PreToolUse: [{ type: 'command', command: '/usr/bin/lint-gate' }] },
+      },
+    });
+
+    await setupCopilot();
+    const written = writtenTo(hooksPath);
+    expect(written.hooks.PreToolUse).toHaveLength(2);
+    expect(written.hooks.PreToolUse[0].command).toBe('/usr/bin/lint-gate');
+  });
+});
+
+describe('teardownCopilot', () => {
+  const hooksPath = path.join(os.homedir(), '.copilot', 'hooks', 'node9.json');
+
+  it('deletes node9.json when node9 authored every hook', () => {
+    const unlinkSpy = vi.spyOn(fs, 'unlinkSync').mockImplementation(() => undefined);
+    withExistingFile(hooksPath, {
+      version: 1,
+      hooks: {
+        PreToolUse: [{ type: 'command', command: 'node9 check --agent copilot' }],
+        PostToolUse: [{ type: 'command', command: 'node9 log --agent copilot' }],
+        UserPromptSubmit: [{ type: 'command', command: 'node9 check --agent copilot' }],
+      },
+    });
+
+    teardownCopilot();
+    // Empty-after-removal → file unlinked, not left as a husk.
+    expect(unlinkSpy).toHaveBeenCalledWith(hooksPath);
+    unlinkSpy.mockRestore();
+  });
+
+  it('preserves user hooks and rewrites the file when foreign hooks remain', () => {
+    const unlinkSpy = vi.spyOn(fs, 'unlinkSync').mockImplementation(() => undefined);
+    withExistingFile(hooksPath, {
+      version: 1,
+      hooks: {
+        PreToolUse: [
+          { type: 'command', command: 'node9 check --agent copilot' },
+          { type: 'command', command: '/usr/bin/lint-gate' },
+        ],
+      },
+    });
+
+    teardownCopilot();
+    const written = writtenTo(hooksPath);
+    expect(written.hooks.PreToolUse).toHaveLength(1);
+    expect(written.hooks.PreToolUse[0].command).toBe('/usr/bin/lint-gate');
+    expect(unlinkSpy).not.toHaveBeenCalled();
+    unlinkSpy.mockRestore();
+  });
+});
+
 // ── detectAgents ─────────────────────────────────────────────────────────────
 
 describe('detectAgents', () => {
@@ -686,6 +991,8 @@ describe('detectAgents', () => {
     expect(detectAgents(home)).toEqual({
       claude: false,
       gemini: false,
+      antigravity: false,
+      copilot: false,
       cursor: false,
       codex: false,
       windsurf: false,
@@ -811,11 +1118,99 @@ describe('detectAgents', () => {
     expect(detectAgents(home).claude).toBe(true);
   });
 
-  it('detects Gemini via ~/.gemini directory', () => {
+  it('detects Gemini via ~/.gemini/settings.json (not the bare directory)', () => {
+    // The bare ~/.gemini directory is shared with Antigravity and no
+    // longer implies the legacy Gemini CLI — settings.json (created by
+    // Gemini CLI on first run, never touched by agy) is the
+    // discriminator.
     vi.mocked(fs.existsSync).mockImplementation(
-      (q) => String(q).replace(/\\/g, '/') === p('.gemini')
+      (q) => String(q).replace(/\\/g, '/') === p('.gemini/settings.json')
     );
     expect(detectAgents(home).gemini).toBe(true);
+  });
+
+  it('does NOT detect Gemini from the bare ~/.gemini directory (agy-only machine)', () => {
+    // Regression guard for the silent protection gap: an agy-only
+    // install creates ~/.gemini but NOT settings.json. Reporting gemini
+    // here would make `node9 init` write BeforeTool hooks into a file
+    // agy ignores and claim the machine protected.
+    vi.mocked(fs.existsSync).mockImplementation((q) => {
+      const s = String(q).replace(/\\/g, '/');
+      return s === p('.gemini') || s === p('.gemini/antigravity-cli');
+    });
+    const result = detectAgents(home);
+    expect(result.gemini).toBe(false);
+    expect(result.antigravity).toBe(true);
+  });
+
+  it('detects Antigravity via ~/.gemini/antigravity-cli directory', () => {
+    vi.mocked(fs.existsSync).mockImplementation(
+      (q) => String(q).replace(/\\/g, '/') === p('.gemini/antigravity-cli')
+    );
+    expect(detectAgents(home).antigravity).toBe(true);
+  });
+
+  it('detects Antigravity via ~/.gemini/antigravity-ide directory (IDE-only install)', () => {
+    vi.mocked(fs.existsSync).mockImplementation(
+      (q) => String(q).replace(/\\/g, '/') === p('.gemini/antigravity-ide')
+    );
+    expect(detectAgents(home).antigravity).toBe(true);
+  });
+
+  it('detects Copilot CLI via ~/.copilot directory', () => {
+    vi.mocked(fs.existsSync).mockImplementation(
+      (q) => String(q).replace(/\\/g, '/') === p('.copilot')
+    );
+    const result = detectAgents(home);
+    expect(result.copilot).toBe(true);
+    expect(result.claude).toBe(false);
+  });
+
+  it('detects Copilot CLI when binary is in PATH but config dir does not exist', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+    vi.mocked(fs.accessSync).mockImplementation(((target: fs.PathLike) => {
+      if (String(target).endsWith(path.sep + 'copilot')) return undefined;
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    }) as typeof fs.accessSync);
+    const oldPath = process.env.PATH;
+    process.env.PATH = ['/fake/bin', '/usr/local/bin'].join(path.delimiter);
+    try {
+      expect(detectAgents(home).copilot).toBe(true);
+    } finally {
+      process.env.PATH = oldPath;
+      vi.mocked(fs.accessSync).mockImplementation(enoentThrow);
+    }
+  });
+
+  it('detects Antigravity when agy binary is in PATH but config dir does not exist', () => {
+    // Same installed-but-never-launched class as opencode #186.
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+    vi.mocked(fs.accessSync).mockImplementation(((target: fs.PathLike) => {
+      if (String(target).endsWith(path.sep + 'agy')) return undefined;
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    }) as typeof fs.accessSync);
+    const oldPath = process.env.PATH;
+    process.env.PATH = ['/fake/bin', '/usr/local/bin'].join(path.delimiter);
+    try {
+      expect(detectAgents(home).antigravity).toBe(true);
+    } finally {
+      process.env.PATH = oldPath;
+      vi.mocked(fs.accessSync).mockImplementation(enoentThrow);
+    }
+  });
+
+  it('detects both Gemini CLI and Antigravity on a migration-window machine', () => {
+    // June 2026 reality: a user who ran Gemini CLI then installed agy
+    // has settings.json AND antigravity-cli/ — both targets get wired.
+    vi.mocked(fs.existsSync).mockImplementation((q) => {
+      const s = String(q).replace(/\\/g, '/');
+      return (
+        s === p('.gemini') || s === p('.gemini/settings.json') || s === p('.gemini/antigravity-cli')
+      );
+    });
+    const result = detectAgents(home);
+    expect(result.gemini).toBe(true);
+    expect(result.antigravity).toBe(true);
   });
 
   it('detects Cursor via ~/.cursor directory', () => {
@@ -837,7 +1232,7 @@ describe('detectAgents', () => {
       const s = String(q).replace(/\\/g, '/');
       return (
         s === p('.claude') ||
-        s === p('.gemini') ||
+        s === p('.gemini/settings.json') ||
         s === p('.cursor') ||
         s === p('.codex') ||
         s === p('.codeium/windsurf') ||
@@ -848,6 +1243,8 @@ describe('detectAgents', () => {
     expect(detectAgents(home)).toEqual({
       claude: true,
       gemini: true,
+      antigravity: false,
+      copilot: false,
       cursor: true,
       codex: true,
       windsurf: true,
@@ -881,6 +1278,8 @@ describe('detectAgents', () => {
     expect(detectAgents(home)).toEqual({
       claude: false,
       gemini: false,
+      antigravity: false,
+      copilot: false,
       cursor: false,
       codex: false,
       windsurf: false,
@@ -905,6 +1304,8 @@ describe('detectAgents', () => {
     expect(detectAgents(home)).toEqual({
       claude: false,
       gemini: false,
+      antigravity: false,
+      copilot: false,
       cursor: false,
       codex: false,
       windsurf: false,

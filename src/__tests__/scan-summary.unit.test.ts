@@ -13,8 +13,55 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildScanSummary, type AgentScanInput } from '../scan-summary';
+import {
+  buildScanSummary,
+  agentDisplayName,
+  agentBadgeText,
+  agentColorName,
+  type AgentScanInput,
+} from '../scan-summary';
 import { isNode9SelfOutput, looksLikeFixtureToken, type ScanResult } from '../cli/commands/scan';
+
+describe('agent display helpers', () => {
+  // Regression: before these, badge/label sites inlined
+  // `agent === 'gemini' ? … : 'codex' ? … : Claude`, so antigravity and
+  // copilot findings rendered as "[Claude]" — misattributing the source
+  // agent in the security report.
+  it('gives antigravity and copilot distinct names (not Claude)', () => {
+    expect(agentDisplayName('antigravity')).toBe('Antigravity');
+    expect(agentDisplayName('copilot')).toBe('GitHub Copilot');
+    expect(agentBadgeText('antigravity', 0)).toBe('[Agy]');
+    expect(agentBadgeText('copilot', 0)).toBe('[Copilot]');
+  });
+
+  it('does not fall through copilot/antigravity to the Claude colour', () => {
+    expect(agentColorName('copilot')).toBe('green');
+    expect(agentColorName('antigravity')).toBe('yellow');
+    // claude / unknown still default to cyan
+    expect(agentColorName('claude')).toBe('cyan');
+    expect(agentColorName('something-new')).toBe('cyan');
+  });
+
+  it('preserves the existing claude/gemini/codex/shell rendering', () => {
+    expect(agentDisplayName('gemini')).toBe('Gemini CLI');
+    expect(agentDisplayName('codex')).toBe('Codex');
+    expect(agentDisplayName('claude')).toBe('Claude Code');
+    expect(agentColorName('gemini')).toBe('blue');
+    expect(agentColorName('codex')).toBe('magenta');
+    expect(agentColorName('shell')).toBe('yellow');
+  });
+
+  it('pads the badge to a fixed column width for aligned scan rows', () => {
+    expect(agentBadgeText('copilot')).toBe('[Copilot] '); // width 10
+    expect(agentBadgeText('gemini')).toHaveLength(10);
+    expect(agentBadgeText('antigravity')).toHaveLength(10);
+  });
+
+  it('falls back to Claude for an unknown agent id (never throws)', () => {
+    expect(agentDisplayName('zzz')).toBe('Claude Code');
+    expect(agentBadgeText('zzz', 0)).toBe('[Claude]');
+  });
+});
 
 function finding(opts: {
   ruleName: string;

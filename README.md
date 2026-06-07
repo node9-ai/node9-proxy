@@ -10,7 +10,7 @@
 
 Node9 sits between your AI agent and the tools it can use — **discover** what it's already been doing, **protect** against risky actions in real time, and **review** what happened over any time window.
 
-Works with **Claude Code · Codex CLI · Gemini CLI · Cursor · Windsurf · VSCode · Claude Desktop · Opencode · Pi · Hermes Agent · any MCP server**.
+Works with **Claude Code · Codex CLI · Antigravity (agy) · GitHub Copilot CLI · Gemini CLI · Cursor · Windsurf · VSCode · Claude Desktop · Opencode · Pi · Hermes Agent · any MCP server**.
 
 ## What Node9 does
 
@@ -194,8 +194,8 @@ def run_command(cmd: str) -> str:
 
 ## Under the hood
 
-- **Scan** reads raw agent history from `~/.claude/projects/`, `~/.gemini/tmp/`, `~/.codex/sessions/` — no API calls, fully offline
-- **Runtime** intercepts tool calls via pre-execution hooks (Claude Code, Codex, Gemini CLI, Opencode, Pi) or via the MCP gateway (Cursor, Windsurf, VSCode, Claude Desktop). All decisions land in `~/.node9/audit.log` atomically.
+- **Scan** reads raw agent history from `~/.claude/projects/`, `~/.gemini/tmp/`, `~/.gemini/antigravity-*/brain/`, `~/.copilot/session-state/`, `~/.codex/sessions/` — no API calls, fully offline
+- **Runtime** intercepts tool calls via pre-execution hooks (Claude Code, Codex, Antigravity, GitHub Copilot CLI, Gemini CLI, Opencode, Pi) or via the MCP gateway (Cursor, Windsurf, VSCode, Claude Desktop). All decisions land in `~/.node9/audit.log` atomically.
 - **MCP gateway** is a stdio proxy; intercepts `tools/list` + `tools/call` JSON-RPC, forwards the rest
 - **Policy engine** uses [mvdan-sh](https://github.com/mvdan/sh) for bash AST analysis — defeats obfuscation via backslash escaping, variable substitution, eval of remote download
 - **Shadow repo** for auto-undo lives at `~/.node9/snapshots/<hash16>/` — never touches your `.git`

@@ -14,6 +14,7 @@ const ENV_KEYS = [
   'HERMES_SESSION_ID',
   'HERMES_HOME',
   'HERMES_INTERACTIVE',
+  'ANTIGRAVITY_CONVERSATION_ID',
 ] as const;
 
 describe('detectAiAgent', () => {
@@ -121,6 +122,48 @@ describe('detectAiAgent', () => {
     expect(detectAiAgent({ hook_event_name: 'PreToolUse', turn_id: 't_xyz' })).toBe('Codex');
   });
 
+  it('detects Antigravity from a real captured PreToolUse payload', () => {
+    // Captured 2026-06-06 from agy 1.0.6 via spy hook
+    // (doc/roadmap/antigravity-target.md §0.3). Note: NO hook_event_name
+    // field — agy's dialect nests tool name/args under toolCall.
+    expect(
+      detectAiAgent({
+        artifactDirectoryPath:
+          '/home/nadav/.gemini/antigravity-cli/brain/6c322973-64a8-41da-b2e9-06c217bb69a1',
+        conversationId: '6c322973-64a8-41da-b2e9-06c217bb69a1',
+        stepIdx: 3,
+        toolCall: {
+          args: { CommandLine: 'echo hello-node9', Cwd: '/tmp/agy-hooktest' },
+          name: 'run_command',
+        },
+        transcriptPath:
+          '/home/nadav/.gemini/antigravity-cli/brain/6c322973-64a8-41da-b2e9-06c217bb69a1/.system_generated/logs/transcript_full.jsonl',
+        workspacePaths: ['/tmp/agy-hooktest'],
+      })
+    ).toBe('Antigravity');
+  });
+
+  it('detects Antigravity from toolCall: null (non-tool PostToolUse step)', () => {
+    // agy fires PostToolUse on planner-response steps with toolCall: null —
+    // still an agy payload and must not fall through to Unknown/Terminal.
+    expect(detectAiAgent({ toolCall: null, conversationId: 'abc', stepIdx: 1 })).toBe(
+      'Antigravity'
+    );
+  });
+
+  it('detects Antigravity from conversationId alone', () => {
+    expect(detectAiAgent({ conversationId: '6c322973' })).toBe('Antigravity');
+  });
+
+  it('Codex turn_id takes precedence over Antigravity fingerprint', () => {
+    // Defensive ordering only — no known payload carries both today.
+    expect(detectAiAgent({ turn_id: 't_xyz', toolCall: { name: 'x' } })).toBe('Codex');
+  });
+
+  it('meta.agent takes precedence over Antigravity fingerprint', () => {
+    expect(detectAiAgent({ toolCall: { name: 'x' }, meta: { agent: 'Pi' } })).toBe('Pi');
+  });
+
   it('detects Gemini CLI from BeforeTool hook event', () => {
     expect(detectAiAgent({ hook_event_name: 'BeforeTool' })).toBe('Gemini CLI');
   });
@@ -194,6 +237,20 @@ describe('detectAiAgent', () => {
   it('detects Hermes via HERMES_INTERACTIVE env var', () => {
     process.env.HERMES_INTERACTIVE = '1';
     expect(detectAiAgent({})).toBe('Hermes');
+  });
+
+  it('detects Antigravity via ANTIGRAVITY_CONVERSATION_ID env var', () => {
+    // agy sets this in every hook's environment (verified, agy 1.0.6).
+    process.env.ANTIGRAVITY_CONVERSATION_ID = '6c322973-64a8-41da-b2e9-06c217bb69a1';
+    expect(detectAiAgent({})).toBe('Antigravity');
+  });
+
+  it('Antigravity env-var takes priority over Gemini env-vars', () => {
+    // A leftover GEMINI_API_KEY in the shell profile must not misattribute
+    // agy calls to the (EOL'd) Gemini CLI.
+    process.env.ANTIGRAVITY_CONVERSATION_ID = 'abc';
+    process.env.GEMINI_API_KEY = 'gem_abc';
+    expect(detectAiAgent({})).toBe('Antigravity');
   });
 
   it('detects Cursor via CURSOR_TRACE_ID env var', () => {

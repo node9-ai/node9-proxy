@@ -565,6 +565,16 @@ export async function setupClaude(): Promise<void> {
 // ── Gemini CLI ───────────────────────────────────────────────────────────────
 
 export async function setupGemini(): Promise<void> {
+  // Gemini CLI is EOL for consumer/free tiers on 2026-06-18 — replaced by
+  // Antigravity (agy). Enterprise Code Assist licenses keep working, so
+  // the target stays functional; everyone else should wire agy instead.
+  console.log(
+    chalk.yellow(
+      '  ⚠️  Gemini CLI stops serving AI Pro/Ultra and free tiers on 2026-06-18\n' +
+        '     (replaced by Antigravity). If you use agy, run: node9 agents add antigravity'
+    )
+  );
+  console.log('');
   seedMcpPinsIfMissing(); // #179: distinguish never-installed from no-pins-yet
   const homeDir = os.homedir();
   const settingsPath = path.join(homeDir, '.gemini', 'settings.json');
@@ -686,6 +696,501 @@ export async function setupGemini(): Promise<void> {
   }
 }
 
+// ── Antigravity (agy CLI + IDE) ───────────────────────────────────────────────
+// Gemini CLI's successor (consumer tiers EOL 2026-06-18). Shares the
+// ~/.gemini root with legacy Gemini CLI but reads entirely different
+// files: hooks from ~/.gemini/config/hooks.json (NOT settings.json) and
+// MCP servers from ~/.gemini/config/mcp_config.json — both shared by the
+// agy CLI and the Antigravity IDE, so one setup covers both surfaces.
+// All protocol behaviors verified live against agy 1.0.6
+// (doc/roadmap/antigravity-target.md, Phase 0 results).
+
+interface AntigravityHooksFile {
+  hooks?: {
+    PreToolUse?: GeminiHookMatcher[];
+    PostToolUse?: GeminiHookMatcher[];
+    [key: string]: GeminiHookMatcher[] | undefined;
+  };
+  [key: string]: unknown;
+}
+
+interface AntigravityMcpConfig {
+  mcpServers?: Record<string, McpServer>;
+  [key: string]: unknown;
+}
+
+export async function setupAntigravity(): Promise<void> {
+  seedMcpPinsIfMissing(); // #179: distinguish never-installed from no-pins-yet
+  const homeDir = os.homedir();
+  const hooksPath = path.join(homeDir, '.gemini', 'config', 'hooks.json');
+  const mcpPath = path.join(homeDir, '.gemini', 'config', 'mcp_config.json');
+
+  // agy creates mcp_config.json as a 0-byte file on install — readJson
+  // treats the parse failure as null, so both that and a missing file
+  // land on `{}` here.
+  const hooksFile = readJson<AntigravityHooksFile>(hooksPath) ?? {};
+  const mcpConfig = readJson<AntigravityMcpConfig>(mcpPath) ?? {};
+  const servers = mcpConfig.mcpServers ?? {};
+
+  let hooksChanged = false;
+  let anythingChanged = false;
+
+  // ── Step 1: Pure additions — apply immediately, no prompt ────────────────
+  if (!hooksFile.hooks) hooksFile.hooks = {};
+
+  // The --agent flag pins attribution and — critically — selects the
+  // agy block-response shape in check.ts: agy honours ONLY
+  // `decision:"deny"`; the Claude shape is silently ignored and the
+  // tool RUNS (fail-open, verified live). Timeout is in seconds and a
+  // decision arriving after it is ignored (fail-open), so 600 s covers
+  // slow human approvals, matching the Claude hook entry.
+  const hasPreHook = hooksFile.hooks.PreToolUse?.some((m) =>
+    m.hooks.some((h) => isNode9Hook(h.command))
+  );
+  if (!hasPreHook) {
+    if (!Array.isArray(hooksFile.hooks.PreToolUse)) hooksFile.hooks.PreToolUse = [];
+    hooksFile.hooks.PreToolUse.push({
+      matcher: '.*',
+      hooks: [
+        {
+          name: 'node9-check',
+          type: 'command',
+          command: fullPathCommand('check --agent antigravity'),
+          timeout: 600,
+        },
+      ],
+    });
+    console.log(chalk.green('  ✅ PreToolUse hook added  → node9 check'));
+    hooksChanged = true;
+    anythingChanged = true;
+  } else if (hooksFile.hooks.PreToolUse) {
+    // Self-heal: rewrite Node9 hooks whose absolute paths have vanished.
+    for (const matcher of hooksFile.hooks.PreToolUse) {
+      for (const h of matcher.hooks) {
+        const cmd = h.command ?? '';
+        if (isNode9Hook(cmd) && needsRewrite(cmd)) {
+          h.command = fullPathCommand('check --agent antigravity');
+          console.log(chalk.yellow('  🔧 PreToolUse hook repaired (stale path → current binary)'));
+          hooksChanged = true;
+          anythingChanged = true;
+        }
+      }
+    }
+  }
+
+  const hasPostHook = hooksFile.hooks.PostToolUse?.some((m) =>
+    m.hooks.some((h) => isNode9Hook(h.command))
+  );
+  if (!hasPostHook) {
+    if (!Array.isArray(hooksFile.hooks.PostToolUse)) hooksFile.hooks.PostToolUse = [];
+    hooksFile.hooks.PostToolUse.push({
+      matcher: '.*',
+      hooks: [
+        {
+          name: 'node9-log',
+          type: 'command',
+          command: fullPathCommand('log --agent antigravity'),
+          timeout: 600,
+        },
+      ],
+    });
+    console.log(chalk.green('  ✅ PostToolUse hook added → node9 log'));
+    hooksChanged = true;
+    anythingChanged = true;
+  } else if (hooksFile.hooks.PostToolUse) {
+    for (const matcher of hooksFile.hooks.PostToolUse) {
+      for (const h of matcher.hooks) {
+        const cmd = h.command ?? '';
+        if (isNode9Hook(cmd) && needsRewrite(cmd)) {
+          h.command = fullPathCommand('log --agent antigravity');
+          console.log(chalk.yellow('  🔧 PostToolUse hook repaired (stale path → current binary)'));
+          hooksChanged = true;
+          anythingChanged = true;
+        }
+      }
+    }
+  }
+  // Note: no UserPromptSubmit hook — agy 1.0.6 has no such event
+  // (binary contains only PreToolUse/PostToolUse), so paste-into-prompt
+  // DLP is not available for Antigravity.
+
+  if (hooksChanged) {
+    writeJson(hooksPath, hooksFile);
+    console.log('');
+  }
+
+  // Add the node9 MCP server entry if not already present (pure addition — no prompt)
+  if (!hasNode9McpServer(servers)) {
+    servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+    mcpConfig.mcpServers = servers;
+    writeJson(mcpPath, mcpConfig);
+    console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    anythingChanged = true;
+  }
+
+  // ── Step 1.5: Legacy Gemini CLI migration ─────────────────────────────────
+  // A machine that ran `node9 setup gemini` before migrating to agy still
+  // has node9 BeforeTool/AfterTool hooks in ~/.gemini/settings.json — a
+  // file agy never reads. They're dead config unless the user still runs
+  // the legacy Gemini CLI (enterprise Code Assist keeps working past the
+  // 2026-06-18 consumer EOL), so offer cleanup, default no.
+  const legacySettings = readJson<GeminiSettings>(path.join(homeDir, '.gemini', 'settings.json'));
+  const legacyHasNode9 = (['BeforeTool', 'AfterTool'] as const).some((ev) =>
+    legacySettings?.hooks?.[ev]?.some((m) => m.hooks.some((h) => isNode9Hook(h.command)))
+  );
+  if (legacyHasNode9) {
+    console.log(
+      chalk.yellow(
+        '  ⚠️  Found node9 hooks for the legacy Gemini CLI in ~/.gemini/settings.json.\n' +
+          '     Gemini CLI stops serving AI Pro/Ultra and free tiers on 2026-06-18.\n' +
+          '     Keep them only if you still use Gemini CLI (e.g. enterprise Code Assist).'
+      )
+    );
+    const clean = await confirm({
+      message: 'Remove the legacy Gemini CLI hooks?',
+      default: false,
+    });
+    if (clean) {
+      teardownGemini();
+      anythingChanged = true;
+    }
+    console.log('');
+  }
+
+  // ── Step 2: Modifications — show preview and ask ─────────────────────────
+  const serversToWrap: Array<{ name: string; upstream: string }> = [];
+  for (const [name, server] of Object.entries(servers)) {
+    if (!server.command || server.command === 'node9') continue;
+    serversToWrap.push({ name, upstream: [server.command, ...(server.args ?? [])].join(' ') });
+  }
+
+  if (serversToWrap.length > 0) {
+    console.log(chalk.bold('The following existing entries will be modified:\n'));
+    console.log(chalk.white(`  ${mcpPath}`));
+    for (const { name, upstream } of serversToWrap) {
+      console.log(chalk.gray(`    • ${name}: "${upstream}" → node9 mcp --upstream "${upstream}"`));
+    }
+    console.log('');
+
+    const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
+    if (proceed) {
+      for (const { name, upstream } of serversToWrap) {
+        servers[name] = {
+          ...servers[name],
+          command: 'node9',
+          args: ['mcp', '--upstream', upstream],
+        };
+      }
+      mcpConfig.mcpServers = servers;
+      writeJson(mcpPath, mcpConfig);
+      console.log(chalk.green(`\n  ✅ ${serversToWrap.length} MCP server(s) wrapped`));
+      anythingChanged = true;
+    } else {
+      console.log(chalk.yellow('  Skipped MCP server wrapping.'));
+    }
+    console.log('');
+  }
+
+  // ── Summary ───────────────────────────────────────────────────────────────
+  if (!anythingChanged && serversToWrap.length === 0) {
+    console.log(chalk.blue('ℹ️  Node9 is already fully configured for Antigravity.'));
+    printDaemonTip();
+    return;
+  }
+
+  if (anythingChanged) {
+    console.log(chalk.green.bold('🛡️  Node9 is now protecting Antigravity!'));
+    console.log(
+      chalk.gray(
+        '    Covers both the agy CLI and the Antigravity IDE (shared ~/.gemini/config).\n' +
+          '    Restart agy / the IDE for changes to take effect.'
+      )
+    );
+    printDaemonTip();
+  }
+}
+
+export function teardownAntigravity(): void {
+  const homeDir = os.homedir();
+  const hooksPath = path.join(homeDir, '.gemini', 'config', 'hooks.json');
+  const mcpPath = path.join(homeDir, '.gemini', 'config', 'mcp_config.json');
+  let changed = false;
+
+  // Remove hook matchers from hooks.json
+  const hooksFile = readJson<AntigravityHooksFile>(hooksPath);
+  if (hooksFile?.hooks) {
+    for (const event of ['PreToolUse', 'PostToolUse'] as const) {
+      const before = hooksFile.hooks[event]?.length ?? 0;
+      hooksFile.hooks[event] = hooksFile.hooks[event]?.filter(
+        (m) => !m.hooks.some((h) => isNode9Hook(h.command))
+      );
+      if ((hooksFile.hooks[event]?.length ?? 0) < before) changed = true;
+      if (hooksFile.hooks[event]?.length === 0) delete hooksFile.hooks[event];
+    }
+    if (changed) {
+      writeJson(hooksPath, hooksFile);
+      console.log(
+        chalk.green('  ✅ Removed PreToolUse / PostToolUse hooks from ~/.gemini/config/hooks.json')
+      );
+    } else {
+      console.log(chalk.blue('  ℹ️  No Node9 hooks found in ~/.gemini/config/hooks.json'));
+    }
+  } else {
+    console.log(chalk.blue('  ℹ️  ~/.gemini/config/hooks.json not found — nothing to remove'));
+  }
+
+  // Unwrap MCP servers in mcp_config.json
+  const mcpConfig = readJson<AntigravityMcpConfig>(mcpPath);
+  if (mcpConfig?.mcpServers) {
+    let mcpChanged = false;
+
+    if (removeNode9McpServer(mcpConfig.mcpServers)) {
+      mcpChanged = true;
+      console.log(
+        chalk.green('  ✅ Removed node9 MCP server entry from ~/.gemini/config/mcp_config.json')
+      );
+    }
+
+    for (const [name, server] of Object.entries(mcpConfig.mcpServers)) {
+      const args = server.args as string[] | undefined;
+      if (
+        server.command === 'node9' &&
+        Array.isArray(args) &&
+        args[0] === 'mcp' &&
+        args[1] === '--upstream' &&
+        typeof args[2] === 'string'
+      ) {
+        const [originalCmd, ...originalArgs] = args[2].split(' ');
+        mcpConfig.mcpServers[name] = {
+          ...server,
+          command: originalCmd,
+          args: originalArgs.length ? originalArgs : undefined,
+        };
+        mcpChanged = true;
+      }
+    }
+    if (mcpChanged) {
+      writeJson(mcpPath, mcpConfig);
+      console.log(chalk.green('  ✅ Unwrapped MCP servers in ~/.gemini/config/mcp_config.json'));
+    }
+  }
+}
+
+// ── GitHub Copilot CLI ────────────────────────────────────────────────────────
+// The terminal agent (`copilot`, npm @github/copilot) — distinct from the
+// VS Code Copilot extension, which stays under the `vscode` MCP target.
+// Hooks live in ~/.copilot/hooks/*.json; Copilot merges every file in that
+// dir, so node9 owns a dedicated node9.json rather than editing the
+// auto-managed settings.json. Payload is byte-identical to Claude Code, so
+// check/log need no new dialect — only the --agent copilot flag (which also
+// selects the flat permissionDecision deny shape). All verified live against
+// Copilot CLI 1.0.60 (doc/roadmap/copilot-target.md).
+
+// Copilot accepts bash / powershell / command; `command` is the
+// cross-platform fallback, so we emit a single fullPathCommand string —
+// matching how the other hook agents register.
+interface CopilotHookMatcher {
+  type?: string;
+  command?: string;
+  timeoutSec?: number;
+}
+
+interface CopilotHooksFile {
+  version?: number;
+  hooks?: {
+    PreToolUse?: CopilotHookMatcher[];
+    PostToolUse?: CopilotHookMatcher[];
+    UserPromptSubmit?: CopilotHookMatcher[];
+    [key: string]: CopilotHookMatcher[] | undefined;
+  };
+  [key: string]: unknown;
+}
+
+interface CopilotMcpConfig {
+  mcpServers?: Record<string, McpServer>;
+  [key: string]: unknown;
+}
+
+export async function setupCopilot(): Promise<void> {
+  seedMcpPinsIfMissing(); // #179
+  const homeDir = os.homedir();
+  const hooksPath = path.join(homeDir, '.copilot', 'hooks', 'node9.json');
+  const mcpPath = path.join(homeDir, '.copilot', 'mcp-config.json');
+
+  const hooksFile = readJson<CopilotHooksFile>(hooksPath) ?? { version: 1 };
+  if (!hooksFile.version) hooksFile.version = 1;
+  if (!hooksFile.hooks) hooksFile.hooks = {};
+
+  const mcpConfig = readJson<CopilotMcpConfig>(mcpPath) ?? {};
+  const servers = mcpConfig.mcpServers ?? {};
+
+  let hooksChanged = false;
+  let anythingChanged = false;
+
+  // Each event registers one node9 command hook. timeoutSec is seconds;
+  // preToolUse is fail-closed (a timeout DENIES the tool), so 600 s covers
+  // slow human approvals without spuriously blocking. --agent copilot pins
+  // attribution AND selects the flat permissionDecision deny shape in check.
+  const addHook = (
+    event: 'PreToolUse' | 'PostToolUse' | 'UserPromptSubmit',
+    subcommand: string
+  ) => {
+    const arr = Array.isArray(hooksFile.hooks![event]) ? hooksFile.hooks![event]! : [];
+    const present = arr.some((h) => isNode9Hook(h.command));
+    if (!present) {
+      arr.push({ type: 'command', command: fullPathCommand(subcommand), timeoutSec: 600 });
+      hooksFile.hooks![event] = arr;
+      console.log(chalk.green(`  ✅ ${event} hook added  → node9 ${subcommand.split(' ')[0]}`));
+      hooksChanged = true;
+      anythingChanged = true;
+    } else {
+      // Self-heal: rewrite node9 hooks whose absolute paths have vanished.
+      for (const h of arr) {
+        if (h.command && isNode9Hook(h.command) && needsRewrite(h.command)) {
+          h.command = fullPathCommand(subcommand);
+          console.log(chalk.yellow(`  🔧 ${event} hook repaired (stale path → current binary)`));
+          hooksChanged = true;
+          anythingChanged = true;
+        }
+      }
+    }
+  };
+
+  addHook('PreToolUse', 'check --agent copilot');
+  addHook('PostToolUse', 'log --agent copilot');
+  // Copilot DOES have UserPromptSubmit (unlike agy) — wire prompt DLP.
+  addHook('UserPromptSubmit', 'check --agent copilot');
+
+  if (hooksChanged) {
+    writeJson(hooksPath, hooksFile);
+    console.log('');
+  }
+
+  // Add the node9 MCP server entry if not already present (pure addition).
+  if (!hasNode9McpServer(servers)) {
+    servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+    mcpConfig.mcpServers = servers;
+    writeJson(mcpPath, mcpConfig);
+    console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
+    anythingChanged = true;
+  }
+
+  // Wrap existing non-node9 MCP servers.
+  const serversToWrap: Array<{ name: string; upstream: string }> = [];
+  for (const [name, server] of Object.entries(servers)) {
+    if (!server.command || server.command === 'node9') continue;
+    serversToWrap.push({ name, upstream: [server.command, ...(server.args ?? [])].join(' ') });
+  }
+
+  if (serversToWrap.length > 0) {
+    console.log(chalk.bold('The following existing entries will be modified:\n'));
+    console.log(chalk.white(`  ${mcpPath}`));
+    for (const { name, upstream } of serversToWrap) {
+      console.log(chalk.gray(`    • ${name}: "${upstream}" → node9 mcp --upstream "${upstream}"`));
+    }
+    console.log('');
+
+    const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
+    if (proceed) {
+      for (const { name, upstream } of serversToWrap) {
+        servers[name] = {
+          ...servers[name],
+          command: 'node9',
+          args: ['mcp', '--upstream', upstream],
+        };
+      }
+      mcpConfig.mcpServers = servers;
+      writeJson(mcpPath, mcpConfig);
+      console.log(chalk.green(`\n  ✅ ${serversToWrap.length} MCP server(s) wrapped`));
+      anythingChanged = true;
+    } else {
+      console.log(chalk.yellow('  Skipped MCP server wrapping.'));
+    }
+    console.log('');
+  }
+
+  if (!anythingChanged) {
+    console.log(chalk.blue('ℹ️  Node9 is already fully configured for GitHub Copilot CLI.'));
+    printDaemonTip();
+    return;
+  }
+
+  console.log(chalk.green.bold('🛡️  Node9 is now protecting GitHub Copilot CLI!'));
+  console.log(chalk.gray('    Restart Copilot CLI for changes to take effect.'));
+  printDaemonTip();
+}
+
+export function teardownCopilot(): void {
+  const homeDir = os.homedir();
+  const hooksPath = path.join(homeDir, '.copilot', 'hooks', 'node9.json');
+  const mcpPath = path.join(homeDir, '.copilot', 'mcp-config.json');
+
+  const hooksFile = readJson<CopilotHooksFile>(hooksPath);
+  let changed = false;
+  if (hooksFile?.hooks) {
+    for (const event of ['PreToolUse', 'PostToolUse', 'UserPromptSubmit'] as const) {
+      const before = hooksFile.hooks[event]?.length ?? 0;
+      hooksFile.hooks[event] = hooksFile.hooks[event]?.filter((h) => !isNode9Hook(h.command));
+      if ((hooksFile.hooks[event]?.length ?? 0) < before) changed = true;
+      if (hooksFile.hooks[event]?.length === 0) delete hooksFile.hooks[event];
+    }
+    if (changed) {
+      // If node9 authored every hook (the common case — node9.json is a
+      // dedicated file), the hooks object is now empty: remove the file
+      // entirely rather than leaving a {version:1, hooks:{}} husk.
+      if (Object.keys(hooksFile.hooks).length === 0) {
+        try {
+          fs.unlinkSync(hooksPath);
+          console.log(chalk.green('  ✅ Removed ~/.copilot/hooks/node9.json'));
+        } catch {
+          writeJson(hooksPath, hooksFile);
+        }
+      } else {
+        writeJson(hooksPath, hooksFile);
+        console.log(chalk.green('  ✅ Removed Node9 hooks from ~/.copilot/hooks/node9.json'));
+      }
+    } else {
+      console.log(chalk.blue('  ℹ️  No Node9 hooks found in ~/.copilot/hooks/node9.json'));
+    }
+  } else {
+    console.log(chalk.blue('  ℹ️  ~/.copilot/hooks/node9.json not found — nothing to remove'));
+  }
+
+  // Unwrap MCP servers.
+  const mcpConfig = readJson<CopilotMcpConfig>(mcpPath);
+  if (mcpConfig?.mcpServers) {
+    let mcpChanged = false;
+    if (removeNode9McpServer(mcpConfig.mcpServers)) {
+      mcpChanged = true;
+      console.log(
+        chalk.green('  ✅ Removed node9 MCP server entry from ~/.copilot/mcp-config.json')
+      );
+    }
+    for (const [name, server] of Object.entries(mcpConfig.mcpServers)) {
+      const args = server.args as string[] | undefined;
+      if (
+        server.command === 'node9' &&
+        Array.isArray(args) &&
+        args[0] === 'mcp' &&
+        args[1] === '--upstream' &&
+        typeof args[2] === 'string'
+      ) {
+        const [originalCmd, ...originalArgs] = args[2].split(' ');
+        mcpConfig.mcpServers[name] = {
+          ...server,
+          command: originalCmd,
+          args: originalArgs.length ? originalArgs : undefined,
+        };
+        mcpChanged = true;
+      }
+    }
+    if (mcpChanged) {
+      writeJson(mcpPath, mcpConfig);
+      console.log(chalk.green('  ✅ Unwrapped MCP servers in ~/.copilot/mcp-config.json'));
+    }
+  }
+}
+
 // ── Cursor ───────────────────────────────────────────────────────────────────
 
 interface CursorMcpConfig {
@@ -741,6 +1246,8 @@ function binaryInPath(binary: string): boolean {
 export function detectAgents(homeDir: string = os.homedir()): {
   claude: boolean;
   gemini: boolean;
+  antigravity: boolean;
+  copilot: boolean;
   cursor: boolean;
   codex: boolean;
   windsurf: boolean;
@@ -764,7 +1271,26 @@ export function detectAgents(homeDir: string = os.homedir()): {
   const desktopPath = claudeDesktopConfigPath(homeDir);
   return {
     claude: exists(path.join(homeDir, '.claude')) || exists(path.join(homeDir, '.claude.json')),
-    gemini: exists(path.join(homeDir, '.gemini')),
+    // Antigravity (agy) shares the ~/.gemini root, so a bare
+    // `exists(~/.gemini)` would report the (EOL'd) Gemini CLI as
+    // installed on every agy machine — and `node9 init` would then
+    // write BeforeTool hooks into settings.json, a file agy ignores,
+    // while reporting the machine protected (silent protection gap,
+    // verified live on a machine with both installed). Gemini CLI
+    // creates ~/.gemini/settings.json on first run; agy does not touch
+    // it (it uses antigravity-cli/settings.json) — that file is the
+    // legacy-CLI discriminator.
+    gemini: exists(path.join(homeDir, '.gemini', 'settings.json')) || binaryInPath('gemini'),
+    // agy creates ~/.gemini/antigravity-cli/ on first launch; the IDE
+    // creates antigravity-ide/. PATH fallback covers installed-but-
+    // never-launched (same class as opencode #186).
+    antigravity:
+      exists(path.join(homeDir, '.gemini', 'antigravity-cli')) ||
+      exists(path.join(homeDir, '.gemini', 'antigravity-ide')) ||
+      binaryInPath('agy'),
+    // GitHub Copilot CLI creates ~/.copilot on first launch; PATH
+    // fallback covers installed-but-never-launched (same as opencode #186).
+    copilot: exists(path.join(homeDir, '.copilot')) || binaryInPath('copilot'),
     cursor: exists(path.join(homeDir, '.cursor')),
     codex: exists(path.join(homeDir, '.codex')),
     windsurf: exists(path.join(homeDir, '.codeium', 'windsurf')),
@@ -2269,6 +2795,8 @@ function teardownHermesAllowlist(allowlistPath: string): void {
 export type AgentName =
   | 'claude'
   | 'gemini'
+  | 'antigravity'
+  | 'copilot'
   | 'cursor'
   | 'codex'
   | 'windsurf'
@@ -2297,6 +2825,20 @@ export function getAgentsStatus(homeDir: string = os.homedir()): AgentStatus[] {
   const geminiWired = (() => {
     const settings = readJson<GeminiSettings>(path.join(homeDir, '.gemini', 'settings.json'));
     return !!settings?.hooks?.BeforeTool?.some((m) => m.hooks.some((h) => isNode9Hook(h.command)));
+  })();
+
+  const antigravityWired = (() => {
+    const hooksFile = readJson<AntigravityHooksFile>(
+      path.join(homeDir, '.gemini', 'config', 'hooks.json')
+    );
+    return !!hooksFile?.hooks?.PreToolUse?.some((m) => m.hooks.some((h) => isNode9Hook(h.command)));
+  })();
+
+  const copilotWired = (() => {
+    const hooksFile = readJson<CopilotHooksFile>(
+      path.join(homeDir, '.copilot', 'hooks', 'node9.json')
+    );
+    return !!hooksFile?.hooks?.PreToolUse?.some((h) => isNode9Hook(h.command));
   })();
 
   const cursorWired = (() => {
@@ -2335,6 +2877,20 @@ export function getAgentsStatus(homeDir: string = os.homedir()): AgentStatus[] {
       installed: detected.gemini,
       wired: geminiWired,
       mode: detected.gemini ? 'hooks' : null,
+    },
+    {
+      name: 'antigravity',
+      label: 'Antigravity',
+      installed: detected.antigravity,
+      wired: antigravityWired,
+      mode: detected.antigravity ? 'hooks' : null,
+    },
+    {
+      name: 'copilot',
+      label: 'GitHub Copilot',
+      installed: detected.copilot,
+      wired: copilotWired,
+      mode: detected.copilot ? 'hooks' : null,
     },
     {
       name: 'cursor',

@@ -17,7 +17,13 @@ import { autoStartDaemonAndWait } from '../daemon-starter';
 import { defaultSkillRoots, resolveUserSkillRoot, verifyAndPinRoots } from '../../skill-pin';
 import { scanArgs } from '../../dlp';
 import { appendLocalAudit } from '../../audit';
-import { extractToolName, extractToolInput, canonicalToolName } from '../../utils/hook-payload';
+import {
+  extractToolName,
+  extractToolInput,
+  canonicalToolName,
+  canonicalToolInput,
+  agentLabelFromFlag,
+} from '../../utils/hook-payload';
 
 function sanitize(value: string): string {
   // eslint-disable-next-line no-control-regex
@@ -69,6 +75,15 @@ export function detectAiAgent(payload: Record<string, unknown>): string {
   if (payload.turn_id !== undefined) {
     return 'Codex';
   }
+  // Antigravity (agy) — third dialect, verified against agy 1.0.6
+  // spy-hook captures: tool name/args nest under `toolCall`, the
+  // conversation id is `conversationId`, and there is NO
+  // hook_event_name field at all — so no overlap with the Claude
+  // branch below. `toolCall !== undefined` also matches the
+  // `toolCall: null` non-tool PostToolUse payloads.
+  if (payload.toolCall !== undefined || payload.conversationId !== undefined) {
+    return 'Antigravity';
+  }
   if (
     payload.hook_event_name === 'PreToolUse' ||
     payload.hook_event_name === 'PostToolUse' ||
@@ -104,6 +119,13 @@ export function detectAiAgent(payload: Record<string, unknown>): string {
   if (process.env.HERMES_SESSION_ID || process.env.HERMES_HOME || process.env.HERMES_INTERACTIVE) {
     return 'Hermes';
   }
+  // agy sets ANTIGRAVITY_CONVERSATION_ID in every hook's environment
+  // (verified, agy 1.0.6). Must precede the Gemini check — a machine
+  // with a leftover GEMINI_API_KEY in the shell profile would otherwise
+  // misattribute agy calls to the (EOL'd) Gemini CLI.
+  if (process.env.ANTIGRAVITY_CONVERSATION_ID) {
+    return 'Antigravity';
+  }
   if (process.env.GEMINI_CLI_VERSION || process.env.GEMINI_API_KEY) {
     return 'Gemini CLI';
   }
@@ -127,7 +149,12 @@ export function registerCheckCommand(program: Command): void {
     .command('check', { hidden: true })
     .description('Hook handler — evaluates a tool call before execution')
     .argument('[data]', 'JSON string of the tool call')
-    .action(async (data) => {
+    .option(
+      '--agent <name>',
+      'Agent identity override, set by node9-authored hook registrations (e.g. antigravity)'
+    )
+    .action(async (data, opts: { agent?: string }) => {
+      const agentOverride = agentLabelFromFlag(opts?.agent);
       const processPayload = async (raw: string) => {
         try {
           if (!raw || raw.trim() === '') process.exit(0);
@@ -151,6 +178,11 @@ export function registerCheckCommand(program: Command): void {
             timestamp?: string; // Gemini-only
             turn_id?: string; // Codex-only (#178 fingerprint)
             prompt?: string; // UserPromptSubmit payload body
+            // Antigravity (agy) dialect — verified against agy 1.0.6:
+            toolCall?: { name?: string; args?: unknown } | null;
+            conversationId?: string; // agy's session_id equivalent
+            transcriptPath?: string; // agy's transcript_path equivalent
+            workspacePaths?: string[]; // agy has no top-level cwd; [0] is the workspace root
           };
 
           try {
@@ -205,7 +237,13 @@ export function registerCheckCommand(program: Command): void {
 
             // Audit FIRST — the block record must survive any downstream error.
             // Force argsHash so the secret value never lands in the audit log.
-            const agent = detectAiAgent(payload);
+            // Honour the --agent flag (agentOverride) before fingerprinting —
+            // mirrors the tool-call sendBlock path. Without this, a blocked
+            // Copilot prompt is mis-attributed to "Claude Code" (its payload
+            // is byte-identical to Claude), under-counting prompt-DLP blocks
+            // in the SaaS breakdown. Affects any flag-registered agent whose
+            // payload collides with another's.
+            const agent = agentOverride ?? detectAiAgent(payload);
             const sessionId =
               typeof payload.session_id === 'string' ? payload.session_id : undefined;
             appendLocalAudit(
@@ -262,15 +300,24 @@ export function registerCheckCommand(program: Command): void {
             process.exit(2);
           }
 
+          // Antigravity payloads carry no top-level cwd; the workspace root
+          // in workspacePaths[0] is the correct base for per-project config
+          // resolution (verified payload shape, agy 1.0.6).
+          const payloadCwd =
+            typeof payload.cwd === 'string'
+              ? payload.cwd
+              : Array.isArray(payload.workspacePaths) &&
+                  typeof payload.workspacePaths[0] === 'string'
+                ? payload.workspacePaths[0]
+                : undefined;
+
           // Pass payload.cwd directly to getConfig() instead of mutating process.chdir —
           // process.chdir is process-global and would race with concurrent hook invocations.
           // CLAUDE.md: validate with path.isAbsolute() before passing to getConfig() to
           // prevent a hook payload from steering config resolution at a traversal path.
           // Matches the pattern already used at the other payload.cwd sites in this file.
           const safeCwdForConfig =
-            typeof payload.cwd === 'string' && path.isAbsolute(payload.cwd)
-              ? payload.cwd
-              : undefined;
+            typeof payloadCwd === 'string' && path.isAbsolute(payloadCwd) ? payloadCwd : undefined;
           const config = getConfig(safeCwdForConfig);
 
           // Eagerly start the daemon for activity logging (fire-and-forget).
@@ -343,10 +390,14 @@ export function registerCheckCommand(program: Command): void {
               fs.mkdirSync(path.dirname(logPath), { recursive: true });
             fs.appendFileSync(logPath, `[${new Date().toISOString()}] STDIN: ${raw}\n`);
           }
-          const toolName = canonicalToolName(sanitize(extractToolName(payload)));
-          const toolInput = extractToolInput(payload);
+          const rawToolName = sanitize(extractToolName(payload));
+          const toolName = canonicalToolName(rawToolName);
+          // Normalise agent-native arg shapes (agy run_command:
+          // CommandLine/Cwd → command/cwd) before shields, DLP and
+          // snapshot inspect them.
+          const toolInput = canonicalToolInput(rawToolName, extractToolInput(payload));
 
-          const agent = detectAiAgent(payload);
+          const agent = agentOverride ?? detectAiAgent(payload);
           const mcpMatch = toolName.match(/^mcp__([^_](?:[^_]|_(?!_))*?)__/i);
           const mcpServer = mcpMatch?.[1];
 
@@ -417,6 +468,36 @@ export function registerCheckCommand(program: Command): void {
             );
 
             // 5. Send the structured JSON back to the LLM agent
+            if (agent === 'Antigravity') {
+              // Antigravity honours ONLY `decision: "deny"` — verified live
+              // against agy 1.0.6: the Claude shape below (`decision:
+              // "block"` + exit 2) is silently ignored and the tool RUNS
+              // (fail-open). The reason string is surfaced to the model as
+              // "Tool call denied with reason: …", so the negotiation
+              // message still works. Exit code is ignored by agy; exit 0
+              // matches the verified capture exactly.
+              process.stdout.write(
+                JSON.stringify({ decision: 'deny', reason: aiFeedbackMessage }) + '\n'
+              );
+              process.exit(0);
+            }
+            if (agent === 'GitHub Copilot') {
+              // GitHub Copilot CLI's preToolUse decision is a flat
+              // `permissionDecision`/`permissionDecisionReason` (NOT Claude's
+              // nested hookSpecificOutput). Verified live against Copilot CLI
+              // 1.0.60: this shape with exit 0 blocks and surfaces the reason
+              // to the model as "Denied by preToolUse hook: …". The Claude
+              // shape below also blocks here (preToolUse is fail-closed on
+              // non-zero exit), but the reason then shows only as a bare
+              // warning — the native shape gives the clean negotiation UX.
+              process.stdout.write(
+                JSON.stringify({
+                  permissionDecision: 'deny',
+                  permissionDecisionReason: aiFeedbackMessage,
+                }) + '\n'
+              );
+              process.exit(0);
+            }
             process.stdout.write(
               JSON.stringify({
                 decision: 'block',
@@ -436,9 +517,20 @@ export function registerCheckCommand(program: Command): void {
             return;
           }
 
-          const sessionId = typeof payload.session_id === 'string' ? payload.session_id : undefined;
+          // Antigravity aliases: conversationId ≙ session_id,
+          // transcriptPath ≙ transcript_path.
+          const sessionId =
+            typeof payload.session_id === 'string'
+              ? payload.session_id
+              : typeof payload.conversationId === 'string'
+                ? payload.conversationId
+                : undefined;
           const transcriptPath =
-            typeof payload.transcript_path === 'string' ? payload.transcript_path : undefined;
+            typeof payload.transcript_path === 'string'
+              ? payload.transcript_path
+              : typeof payload.transcriptPath === 'string'
+                ? payload.transcriptPath
+                : undefined;
           const meta = { agent, mcpServer, sessionId, transcriptPath };
 
           // ── Skill pinning — supply chain & update drift defense (AST 02 + AST 07) ──
@@ -448,7 +540,7 @@ export function registerCheckCommand(program: Command): void {
           // Per-session memoisation in ~/.node9/skill-sessions/ so hashing
           // runs at most once per Claude/Gemini session id.
           const skillPinCfg = config.policy.skillPinning;
-          const rawSessionId = typeof payload.session_id === 'string' ? payload.session_id : '';
+          const rawSessionId = sessionId ?? '';
           const safeSessionId = /^[A-Za-z0-9_\-]{1,128}$/.test(rawSessionId) ? rawSessionId : '';
           if (skillPinCfg.enabled && safeSessionId) {
             try {
@@ -516,8 +608,8 @@ export function registerCheckCommand(program: Command): void {
 
               if (!flag || (flag.state !== 'verified' && flag.state !== 'warned')) {
                 const absoluteCwd =
-                  typeof payload.cwd === 'string' && path.isAbsolute(payload.cwd)
-                    ? payload.cwd
+                  typeof payloadCwd === 'string' && path.isAbsolute(payloadCwd)
+                    ? payloadCwd
                     : undefined;
                 const extraRoots = skillPinCfg.roots;
                 const resolvedExtra = extraRoots
@@ -600,9 +692,7 @@ export function registerCheckCommand(program: Command): void {
           }
 
           const safeCwdForAuth =
-            typeof payload.cwd === 'string' && path.isAbsolute(payload.cwd)
-              ? payload.cwd
-              : undefined;
+            typeof payloadCwd === 'string' && path.isAbsolute(payloadCwd) ? payloadCwd : undefined;
           const result = await authorizeHeadless(toolName, toolInput, meta, {
             cwd: safeCwdForAuth,
           });
