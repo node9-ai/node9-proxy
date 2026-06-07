@@ -7,12 +7,13 @@ import path from 'path';
 import os from 'os';
 import { execSync } from 'child_process';
 import { isDaemonRunning, DAEMON_PORT, DAEMON_HOST } from '../../auth/daemon';
+import { getConfig } from '../../config';
 
 export function registerDoctorCommand(program: Command, version: string): void {
   program
     .command('doctor')
     .description('Check that Node9 is installed and configured correctly')
-    .action(() => {
+    .action(async () => {
       const homeDir = os.homedir();
       let failures = 0;
 
@@ -186,6 +187,52 @@ export function registerDoctorCommand(program: Command, version: string): void {
           'Daemon not running — terminal & native approvals unavailable',
           'Run: node9 daemon --background'
         );
+      }
+
+      // ── Cloud audit shipping ──────────────────────────────────────────────────
+      // The outbox shipper is what makes dashboard numbers match the local
+      // report — surface its health so "cloud shows 0" is never a mystery.
+      section('Cloud audit shipping');
+      try {
+        const { shipLagBytes, readWatermark, AUDIT_SHIP_WATERMARK } =
+          await import('../../daemon/audit-shipper.js');
+        const cfg = getConfig();
+        const creds = fs.existsSync(path.join(os.homedir(), '.node9', 'credentials.json'));
+        if (!creds) {
+          warn('Not logged in — audit rows stay local', 'Run: node9 login <api-key>');
+        } else if (!cfg.settings.approvers.cloud) {
+          warn(
+            'Cloud approvals OFF (settings.approvers.cloud=false) — nothing syncs to the dashboard',
+            'Privacy mode is a valid choice; set approvers.cloud=true to sync.'
+          );
+        } else if (cfg.settings.shipper.enabled === false) {
+          warn('Shipper disabled (settings.shipper.enabled=false) — audit rows stay local');
+        } else {
+          const lag = shipLagBytes();
+          const wm = readWatermark(AUDIT_SHIP_WATERMARK);
+          if (lag === 0) {
+            pass('Audit shipping caught up — dashboard matches the local log');
+          } else if (wm && lag !== null) {
+            const ageMin = Math.round((Date.now() - new Date(wm.updatedAt).getTime()) / 60_000);
+            if (ageMin > 5 && !isDaemonRunning()) {
+              warn(
+                `${Math.round(lag / 1024)} KB of audit rows not shipped (last ship ${ageMin}m ago)`,
+                'The daemon ships every ~20s — start it: node9 daemon --background'
+              );
+            } else {
+              pass(
+                `Shipping in progress — ${Math.round(lag / 1024)} KB queued, last ship ${ageMin}m ago`
+              );
+            }
+          } else {
+            warn(
+              'Shipper has never run on this machine — dashboard may lag the local log',
+              'Start the daemon: node9 daemon --background'
+            );
+          }
+        }
+      } catch (err) {
+        warn(`Shipping status unavailable: ${(err as Error).message}`);
       }
 
       // ── Summary ───────────────────────────────────────────────────────────────

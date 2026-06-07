@@ -136,7 +136,7 @@ interface CloudPolicyBody {
   workspaceId?: string;
 }
 
-function readCredentials(): { apiKey: string; apiUrl: string } | null {
+export function readCredentials(): { apiKey: string; apiUrl: string } | null {
   // 1. Environment variable
   if (process.env.NODE9_API_KEY) {
     return {

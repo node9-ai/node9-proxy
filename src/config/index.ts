@@ -34,6 +34,8 @@ export interface Config {
     environment?: string;
     agentPolicy?: 'require_approval' | 'block_on_rules';
     cloudSyncIntervalHours?: number;
+    /** Outbox shipper (audit.log → SaaS batch ingest). */
+    shipper: { enabled: boolean; intervalSeconds: number };
     hud?: {
       showEnvironmentCounts?: boolean;
     };
@@ -112,6 +114,7 @@ export const DEFAULT_CONFIG: Config = {
     auditHashArgs: true,
     approvers: { native: true, browser: false, cloud: false, terminal: true },
     cloudSyncIntervalHours: 5,
+    shipper: { enabled: true, intervalSeconds: 20 },
   },
   policy: {
     sandboxPaths: ['/tmp/**', '**/sandbox/**', '**/test-results/**'],
@@ -507,6 +510,7 @@ export function getConfig(cwd?: string): Config {
   const mergedSettings = {
     ...DEFAULT_CONFIG.settings,
     approvers: { ...DEFAULT_CONFIG.settings.approvers },
+    shipper: { ...DEFAULT_CONFIG.settings.shipper },
   };
   const mergedPolicy = {
     sandboxPaths: [...DEFAULT_CONFIG.policy.sandboxPaths],
@@ -539,6 +543,7 @@ export function getConfig(cwd?: string): Config {
     if (s.enableHookLogDebug !== undefined)
       mergedSettings.enableHookLogDebug = s.enableHookLogDebug;
     if (s.approvers) mergedSettings.approvers = { ...mergedSettings.approvers, ...s.approvers };
+    if (s.shipper) mergedSettings.shipper = { ...mergedSettings.shipper, ...s.shipper };
     if (s.approvalTimeoutMs !== undefined) mergedSettings.approvalTimeoutMs = s.approvalTimeoutMs;
     // approvalTimeoutSeconds is the user-facing alias; convert to ms.
     // approvalTimeoutMs takes precedence if both are present.

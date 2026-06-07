@@ -101,6 +101,7 @@ program
     existingCreds[profileName] = { apiKey, apiUrl: DEFAULT_API_URL };
     fs.writeFileSync(credPath, JSON.stringify(existingCreds, null, 2), { mode: 0o600 });
 
+    let effectiveCloud: boolean | null = null;
     if (profileName === 'default') {
       const configPath = path.join(os.homedir(), '.node9', 'config.json');
       let config: Record<string, unknown> = {};
@@ -127,14 +128,27 @@ program
       if (!fs.existsSync(path.dirname(configPath)))
         fs.mkdirSync(path.dirname(configPath), { recursive: true });
       fs.writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
+      // What is ACTUALLY in effect after the write. A pre-existing
+      // approvers object with cloud:false (or missing — the merged default
+      // is false) stays off; the success message must say so instead of
+      // claiming "agent mode" while nothing syncs.
+      effectiveCloud = approvers.cloud === true;
     }
 
     if (options.profile && profileName !== 'default') {
       console.log(chalk.green(`✅ Profile "${profileName}" saved`));
       console.log(chalk.gray(`   Switch to it per-session:  NODE9_PROFILE=${profileName} claude`));
-    } else if (options.local) {
-      console.log(chalk.green(`✅ Privacy mode 🛡️`));
-      console.log(chalk.gray(`   All decisions stay on this machine.`));
+    } else if (options.local || effectiveCloud === false) {
+      console.log(chalk.green(`✅ Key saved — Privacy mode 🛡️`));
+      console.log(chalk.gray(`   All decisions stay on this machine. Nothing syncs to the cloud.`));
+      if (!options.local) {
+        console.log(
+          chalk.yellow(`   Your config has cloud approvals OFF (settings.approvers.cloud).`)
+        );
+        console.log(
+          chalk.gray(`   To enable team policy + dashboard sync: set it to true, or re-init.`)
+        );
+      }
     } else {
       console.log(chalk.green(`✅ Logged in — agent mode`));
       console.log(chalk.gray(`   Team policy enforced for all calls via Node9 cloud.`));
