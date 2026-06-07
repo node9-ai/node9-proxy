@@ -124,6 +124,12 @@ export function appendLocalAudit(
      *  signal). */
     dlpPattern?: string;
     dlpSample?: string;
+    /** SaaS request id when this decision had a pending cloud entry
+     *  (/intercept). The BE already holds an origin AuditLog row for that
+     *  request; the shipper hands this id over so the BE ENRICHES that row
+     *  (sets clientEventId) instead of inserting a duplicate — regardless
+     *  of which racer (cloud / native / terminal) decided. */
+    cloudRequestId?: string;
   },
   auditHashArgsEnabled?: boolean
 ): void {
@@ -143,6 +149,7 @@ export function appendLocalAudit(
   const dlpFields = meta?.dlpPattern
     ? { dlpPattern: meta.dlpPattern, dlpSample: meta.dlpSample }
     : {};
+  const cloudLinkField = meta?.cloudRequestId ? { cloudRequestId: meta.cloudRequestId } : {};
   appendToLog(LOCAL_AUDIT_LOG, {
     // eid first: the outbox shipper dedups on it, and a fixed leading field
     // makes the JSONL easy to eyeball.
@@ -155,6 +162,7 @@ export function appendLocalAudit(
     checkedBy,
     ...ruleNameField,
     ...dlpFields,
+    ...cloudLinkField,
     ...testRun,
     agent: meta?.agent,
     mcpServer: meta?.mcpServer,

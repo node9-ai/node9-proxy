@@ -59,12 +59,32 @@ describe('buildWireRows', () => {
       row({ eid: undefined }) + // pre-shipper history: no eid
       row({ testRun: true }) + // test noise
       row({ checkedBy: 'ignored' }) + // read/grep noise — never synced
-      row({ checkedBy: 'cloud' }) + // BE-origin row already exists
+      row({ checkedBy: 'cloud' }) + // legacy: no cloudRequestId → BE row can't be linked
       row({ ts: undefined }) + // malformed: no event time — skip, don't fabricate
       'not-json at all\n'; // corrupt line must not wedge the shipper
     const { rows } = buildWireRows(Buffer.from(content));
     expect(rows).toHaveLength(1);
     expect(rows[0].checkedBy).toBe('local-policy');
+  });
+
+  it('ships cloud-linked rows WITH cloudRequestId so the BE enriches its origin row', () => {
+    // Any request that opened a pending cloud entry already has a BE-origin
+    // AuditLog row. Shipping the local row with its cloudRequestId lets the
+    // BE ENRICH that row (set clientEventId) instead of inserting a
+    // duplicate — regardless of which racer ultimately decided:
+    const content =
+      row({ checkedBy: 'cloud', cloudRequestId: 'req-cloud-won' }) + // cloud resolved it
+      row({ checkedBy: 'native', cloudRequestId: 'req-local-won' }); // native popup won the race
+    const { rows } = buildWireRows(Buffer.from(content));
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      checkedBy: 'cloud',
+      cloudRequestId: 'req-cloud-won',
+    });
+    expect(rows[1]).toMatchObject({
+      checkedBy: 'native',
+      cloudRequestId: 'req-local-won',
+    });
   });
 
   it('carries attribution: ruleName, dlp pattern + sample, argsHash', () => {

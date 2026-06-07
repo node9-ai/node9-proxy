@@ -1042,7 +1042,12 @@ async function _authorizeHeadlessCore(
       args,
       finalResult.approved ? 'allow' : 'deny',
       finalResult.checkedBy || finalResult.blockedBy || 'unknown',
-      meta,
+      // cloudRequestId links this row to the BE-origin AuditLog row the
+      // /intercept handshake created — the shipper hands it to the SaaS so
+      // the BE enriches that row instead of inserting a duplicate. Matters
+      // for EVERY racer outcome, not just cloud wins: a native-popup
+      // decision on a cloud-pending request would otherwise count twice.
+      cloudRequestId ? { ...meta, cloudRequestId } : meta,
       hashAuditArgs
     );
   }

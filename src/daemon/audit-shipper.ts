@@ -32,12 +32,19 @@ const FETCH_TIMEOUT_MS = 10_000;
 
 /**
  * Rows the SaaS must NOT receive:
- * - 'ignored'  — read/grep/glob noise; deliberately never synced (pre-shipper
+ * - 'ignored' — read/grep/glob noise; deliberately never synced (pre-shipper
  *   behavior, keeps cloud volume sane).
- * - 'cloud'    — the call went through /intercept, so the SaaS already has
- *   its BE-origin row; shipping the local copy would double-count it.
+ *
+ * Rows whose decision had a pending /intercept entry need linkage, not a
+ * blanket skip: the SaaS already holds a BE-origin AuditLog row for that
+ * request — true whichever racer decided it (cloud, native popup, terminal).
+ * The linkage key is cloudRequestId:
+ * - row HAS cloudRequestId  → ship it; the BE ENRICHES its origin row (sets
+ *   clientEventId) instead of inserting — exact count, no duplicate.
+ * - 'cloud' row WITHOUT it  → legacy/pre-wire row; unlinkable, skip to avoid
+ *   double-counting the BE-origin row.
  */
-const SKIP_CHECKED_BY = new Set(['ignored', 'cloud']);
+const SKIP_CHECKED_BY = new Set(['ignored']);
 
 export interface Watermark {
   /** Identity of the log file the offset belongs to — guards rotation. */
@@ -65,6 +72,9 @@ export interface WireRow {
   sessionId?: string;
   dlpPattern?: string;
   dlpSample?: string;
+  /** Linkage to the BE-origin AuditLog row written at /intercept time —
+   *  the BE enriches that row instead of inserting a duplicate. */
+  cloudRequestId?: string;
 }
 
 /** Identity of the log file, so a rotated/recreated log resets the offset
@@ -130,6 +140,11 @@ export function buildWireRows(chunk: Buffer): { rows: WireRow[]; consumed: numbe
     if (parsed.testRun === true) continue;
     const checkedBy = typeof parsed.checkedBy === 'string' ? parsed.checkedBy : undefined;
     if (checkedBy && SKIP_CHECKED_BY.has(checkedBy)) continue;
+    const cloudRequestId =
+      typeof parsed.cloudRequestId === 'string' ? parsed.cloudRequestId : undefined;
+    // Cloud-resolved row without a linkage key: the BE-origin row is the
+    // record; shipping an unlinkable copy would double-count it.
+    if (checkedBy === 'cloud' && !cloudRequestId) continue;
     rows.push({
       eid: parsed.eid,
       ts: parsed.ts,
@@ -147,6 +162,7 @@ export function buildWireRows(chunk: Buffer): { rows: WireRow[]; consumed: numbe
       ...(typeof parsed.sessionId === 'string' ? { sessionId: parsed.sessionId } : {}),
       ...(typeof parsed.dlpPattern === 'string' ? { dlpPattern: parsed.dlpPattern } : {}),
       ...(typeof parsed.dlpSample === 'string' ? { dlpSample: parsed.dlpSample } : {}),
+      ...(cloudRequestId ? { cloudRequestId } : {}),
     });
   }
   return { rows, consumed: lastNl + 1 };
