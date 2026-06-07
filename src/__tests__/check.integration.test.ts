@@ -615,16 +615,22 @@ describe('audit mode', () => {
   });
 });
 
-// ── 6. Audit mode + cloud gating (auditLocalAllow) ────────────────────────────
+// ── 6. Audit mode + cloud delivery (outbox shipper) ───────────────────────────
+// The decision path must do ZERO cloud I/O — rows land in the local outbox
+// (audit.log) and the shipper delivers them to /audit/batch. The old
+// decision-time POST to /audit was removed: it was killed by process.exit on
+// block paths and taxed every allowed call with a round-trip when awaited.
 
 describe('audit mode + cloud gating', () => {
   let tmpHome: string;
   let mockServer: http.Server;
   let auditCalls: object[];
+  let batchCalls: Array<{ rows: Array<Record<string, unknown>> }>;
   let serverPort: number;
 
   beforeEach(async () => {
     auditCalls = [];
+    batchCalls = [];
     await new Promise<void>((resolve) => {
       mockServer = http.createServer((req, res) => {
         let body = '';
@@ -638,6 +644,14 @@ describe('audit mode + cloud gating', () => {
             }
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: true }));
+          } else if (req.url === '/audit/batch' && req.method === 'POST') {
+            try {
+              batchCalls.push(JSON.parse(body));
+            } catch {
+              /* ignore */
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ accepted: 1 }));
           } else {
             res.writeHead(404);
             res.end();
@@ -671,18 +685,43 @@ describe('audit mode + cloud gating', () => {
     await new Promise<void>((resolve) => mockServer.close(() => resolve()));
   });
 
-  it('audit mode + cloud:true + API key → POSTs to /audit endpoint', async () => {
-    // auditLocalAllow is awaited in core.ts before process.exit(0), so by the
-    // time runCheckAsync resolves (process closed) the POST is already complete.
-    // No sleep needed — if it races here, it's a production bug too.
+  it('audit mode + cloud:true → no decision-time POST; row lands in the outbox and SHIPS', async () => {
     const r = await runCheckAsync(
       { tool_name: 'bash', tool_input: { command: 'mkfs.ext4 /dev/sda' } },
-      { HOME: tmpHome, NODE9_DEBUG: '1' },
+      // NODE9_TESTING=0: the suite wrapper sets it to 1, which would mark the
+      // row testRun:true — and the shipper rightly skips test noise. This
+      // test needs a "real" row to prove end-to-end delivery.
+      { HOME: tmpHome, NODE9_DEBUG: '1', NODE9_TESTING: '0' },
       tmpHome
     );
     expect(r.status).toBe(0);
     expect(r.stderr).toContain('[audit]');
-    expect(auditCalls.length).toBeGreaterThan(0);
+    // The decision path does zero cloud I/O.
+    expect(auditCalls.length).toBe(0);
+
+    // The row is in the local outbox, stamped with an event id.
+    const auditLogPath = path.join(tmpHome, '.node9', 'audit.log');
+    const lines = fs
+      .readFileSync(auditLogPath, 'utf-8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    const auditRow = lines.find((l) => l.checkedBy === 'audit-mode');
+    expect(auditRow).toBeDefined();
+    expect(typeof auditRow!.eid).toBe('string');
+    expect((auditRow!.eid as string).length).toBeGreaterThanOrEqual(8);
+
+    // ...and the shipper delivers it to /audit/batch.
+    const { shipOnce } = await import('../daemon/audit-shipper.js');
+    const res = await shipOnce({
+      auditLogPath,
+      watermarkPath: path.join(tmpHome, '.node9', 'audit-ship.json'),
+      cloudEnabled: true,
+      creds: { apiKey: 'test-key-123', apiUrl: `http://127.0.0.1:${serverPort}` },
+    });
+    expect(res.status).toBe('shipped');
+    const shippedRows = batchCalls.flatMap((b) => b.rows);
+    expect(shippedRows.some((row) => row.checkedBy === 'audit-mode')).toBe(true);
   });
 
   it('audit mode + cloud:false → does NOT POST to /audit', async () => {
