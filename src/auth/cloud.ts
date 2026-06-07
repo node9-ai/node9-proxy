@@ -55,7 +55,7 @@ const KNOWN_CHECKED_BY = new Set([
  * Returns the parsed URL on success, or null when the URL is malformed,
  * uses a non-HTTPS scheme on a non-loopback host, or contains userinfo.
  */
-function validateApiUrl(raw: string): URL | null {
+export function validateApiUrl(raw: string): URL | null {
   let u: URL;
   try {
     u = new URL(raw);

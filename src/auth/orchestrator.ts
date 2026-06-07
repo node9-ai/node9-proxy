@@ -25,7 +25,7 @@ import {
   notifyActivitySocket,
   checkStatePredicates,
 } from './daemon';
-import { auditLocalAllow, initNode9SaaS, pollNode9SaaS, resolveNode9SaaS } from './cloud';
+import { initNode9SaaS, pollNode9SaaS, resolveNode9SaaS } from './cloud';
 import { recordAndCheck } from '../loop-detector';
 import { readActiveShields } from '../shields';
 
@@ -334,27 +334,22 @@ async function _authorizeHeadlessCore(
         `🚨 DATA LOSS PREVENTION: ${dlpMatch.patternName} detected in ` +
         `field "${dlpMatch.fieldPath}" (${dlpMatch.redactedSample})`;
       if (dlpMatch.severity === 'block') {
-        // Always hash args on DLP blocks — the secret must never appear in the audit log
+        // Always hash args on DLP blocks — the secret must never appear in
+        // the audit log. The pattern + redacted sample ride on the local row;
+        // the outbox shipper carries them to the SaaS (no decision-time
+        // network call — that path used to lose events when the hook process
+        // exited before the fire-and-forget POST completed).
         if (!isManual)
           appendLocalAudit(
             toolName,
             args,
             'deny',
             isObserveMode ? 'observe-mode-dlp-would-block' : 'dlp-block',
-            meta,
-            true
-          );
-        // Sync DLP block to SaaS so org admins see credential-leak attempts in the dashboard.
-        // Fire-and-forget. containsSensitiveArgs=true strips raw args — they contain
-        // the matched secret. The pattern name and redacted sample carry the signal.
-        if (approvers.cloud && creds?.apiKey)
-          auditLocalAllow(
-            toolName,
-            args,
-            isObserveMode ? 'observe-mode-dlp-would-block' : 'dlp-block',
-            creds,
-            meta,
-            { pattern: dlpMatch.patternName, redactedSample: dlpMatch.redactedSample },
+            {
+              ...meta,
+              dlpPattern: dlpMatch.patternName,
+              dlpSample: dlpMatch.redactedSample,
+            },
             true
           );
         // Taint the destination file so future uploads of it are also blocked.
@@ -415,12 +410,10 @@ async function _authorizeHeadlessCore(
     if (!isIgnoredTool(toolName)) {
       const policyResult = await evaluatePolicy(toolName, args, meta?.agent, options?.cwd);
       if (policyResult.decision === 'review') {
+        // Local row only — the outbox shipper delivers it to the SaaS.
+        // (The old decision-time POST is gone: it was a latency tax when
+        // awaited and silently lossy when not.)
         appendLocalAudit(toolName, args, 'allow', 'audit-mode', meta, hashAuditArgs);
-        // Must await — process.exit(0) follows immediately and kills any fire-and-forget fetch.
-        // Only send to SaaS when cloud is enabled — respects privacy mode (cloud: false).
-        if (approvers.cloud && creds?.apiKey) {
-          await auditLocalAllow(toolName, args, 'audit-mode', creds, meta);
-        }
         // Note: desktop notification intentionally omitted — notify-send routes through
         // the browser on many Linux setups (Firefox as D-Bus handler), causing spurious popups.
       }
@@ -441,14 +434,11 @@ async function _authorizeHeadlessCore(
           `It looks like you've called "${toolName}" ${loopResult.count} times with identical arguments ` +
           `in the last ${ld.windowSeconds}s. Are you stuck? Step back and reconsider your approach — ` +
           `what are you actually trying to accomplish, and is there a different way to get there?`;
+        // Local row only — the outbox shipper delivers it (the old
+        // fire-and-forget POST here died with process.exit, which is why
+        // loop counts never reached the dashboard).
         if (!isManual)
           appendLocalAudit(toolName, args, 'deny', 'loop-detected', meta, hashAuditArgs);
-        // Sync loop detection to SaaS so org admins see runaway agents in the dashboard.
-        // containsSensitiveArgs=true: a loop may follow a DLP match on the same args,
-        // and we never want to exfiltrate the looping payload to the audit endpoint.
-        // The tool name + checkedBy + count signal is enough for dashboard alerting.
-        if (approvers.cloud && creds?.apiKey)
-          auditLocalAllow(toolName, args, 'loop-detected', creds, meta, undefined, true);
         return {
           approved: false,
           reason,
@@ -484,15 +474,19 @@ async function _authorizeHeadlessCore(
     }
 
     if (policyResult.decision === 'allow') {
-      if (approvers.cloud && creds?.apiKey)
-        await auditLocalAllow(toolName, args, 'local-policy', creds, meta, undefined, false, {
-          ruleName: policyResult.ruleName,
-          ruleDescription: policyResult.ruleDescription,
-          blockedByLabel: policyResult.blockedByLabel,
-          matchedField: policyResult.matchedField,
-          matchedWord: policyResult.matchedWord,
-        });
-      if (!isManual) appendLocalAudit(toolName, args, 'allow', 'local-policy', meta, hashAuditArgs);
+      // Local row only — the outbox shipper delivers it. Removing the old
+      // awaited POST also removes a cloud round-trip from EVERY allowed
+      // call (the hot path). Rule attribution rides on the row so the SaaS
+      // report classifier keeps its friendly labels.
+      if (!isManual)
+        appendLocalAudit(
+          toolName,
+          args,
+          'allow',
+          'local-policy',
+          { ...meta, ruleName: policyResult.ruleName },
+          hashAuditArgs
+        );
       return { approved: true, checkedBy: 'local-policy' };
     }
 
@@ -556,23 +550,8 @@ async function _authorizeHeadlessCore(
             { ...meta, ruleName: policyResult.ruleName },
             hashAuditArgs
           );
-        if (approvers.cloud && creds?.apiKey)
-          auditLocalAllow(
-            toolName,
-            args,
-            'smart-rule-block-override',
-            creds,
-            meta,
-            undefined,
-            false,
-            {
-              ruleName: policyResult.ruleName,
-              ruleDescription: policyResult.ruleDescription,
-              blockedByLabel: policyResult.blockedByLabel,
-              matchedField: policyResult.matchedField,
-              matchedWord: policyResult.matchedWord,
-            }
-          );
+        // (Cloud delivery: the outbox shipper picks the row up from the
+        // local audit log — no decision-time POST.)
         // Mutate the policyResult label so the race engine downstream
         // (line ~570: `explainableLabel = policyResult.blockedByLabel`) picks
         // up the override prefix. Idempotent — never double-prepends.
@@ -601,14 +580,8 @@ async function _authorizeHeadlessCore(
             { ...meta, ruleName: policyResult.ruleName },
             hashAuditArgs
           );
-        if (approvers.cloud && creds?.apiKey)
-          auditLocalAllow(toolName, args, 'smart-rule-block', creds, meta, undefined, false, {
-            ruleName: policyResult.ruleName,
-            ruleDescription: policyResult.ruleDescription,
-            blockedByLabel: policyResult.blockedByLabel,
-            matchedField: policyResult.matchedField,
-            matchedWord: policyResult.matchedWord,
-          });
+        // (Cloud delivery via the outbox shipper — the old fire-and-forget
+        // POST here was killed by the immediate process exit on block.)
         return {
           approved: false,
           reason: policyResult.reason ?? 'Action explicitly blocked by Smart Policy.',
@@ -653,8 +626,7 @@ async function _authorizeHeadlessCore(
     // See: doc/roadmap.md "Command-Scoped Persistent Approvals".
     const persistent = policyResult.ruleName ? null : getPersistentDecision(toolName);
     if (persistent === 'allow') {
-      if (approvers.cloud && creds?.apiKey)
-        await auditLocalAllow(toolName, args, 'persistent', creds, meta);
+      // Local row only — cloud delivery via the outbox shipper.
       if (!isManual) appendLocalAudit(toolName, args, 'allow', 'persistent', meta, hashAuditArgs);
       return { approved: true, checkedBy: 'persistent' };
     }
@@ -705,8 +677,7 @@ async function _authorizeHeadlessCore(
   // Trust session bypass — only for review-path calls, never for taint detection.
   // Runs after hard-block evaluation so block-verdict rules are always enforced.
   if (!taintWarning && getActiveTrustSession(toolName, args)) {
-    if (approvers.cloud && creds?.apiKey)
-      await auditLocalAllow(toolName, args, 'trust', creds, meta);
+    // Local row only — cloud delivery via the outbox shipper.
     if (!isManual) appendLocalAudit(toolName, args, 'allow', 'trust', meta, hashAuditArgs);
     return { approved: true, checkedBy: 'trust' };
   }

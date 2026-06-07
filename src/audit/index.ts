@@ -5,10 +5,21 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import crypto from 'crypto';
 import { hashArgs } from './hasher.js';
 
 export const LOCAL_AUDIT_LOG = path.join(os.homedir(), '.node9', 'audit.log');
 export const HOOK_DEBUG_LOG = path.join(os.homedir(), '.node9', 'hook-debug.log');
+
+/**
+ * Client event id (outbox shipper). Stamped on every audit row at write
+ * time; the SaaS batch-ingest endpoint dedups on it, which is what makes
+ * shipping idempotent (safe to re-send any batch). Time-prefixed so ids
+ * sort roughly chronologically when debugging.
+ */
+export function generateEventId(): string {
+  return `${Date.now().toString(36)}-${crypto.randomBytes(6).toString('hex')}`;
+}
 
 const TEST_COMMAND_RE =
   /(?:^|\s)(npm\s+(?:run\s+)?test|npx\s+(?:vitest|jest|mocha)|yarn\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|vitest|jest|mocha|pytest|py\.test|cargo\s+test|go\s+test|bundle\s+exec\s+rspec|rspec|phpunit|dotnet\s+test)\b/i;
@@ -86,6 +97,12 @@ export function appendLocalAudit(
      *  stays canonical so report aggregation works; this field lets
      *  grep against the name the user actually sees in their agent. */
     agentToolName?: string;
+    /** DLP attribution — pattern name + redacted sample. Stored on the
+     *  local row so the outbox shipper can carry the finding to the SaaS
+     *  (the raw args are redacted/hashed; these two fields are the
+     *  signal). */
+    dlpPattern?: string;
+    dlpSample?: string;
   },
   auditHashArgsEnabled?: boolean
 ): void {
@@ -96,7 +113,13 @@ export function appendLocalAudit(
     isTestCall(toolName, args) || process.env.NODE9_TESTING === '1' ? { testRun: true } : {};
   const ruleNameField = meta?.ruleName ? { ruleName: meta.ruleName } : {};
   const agentToolNameField = meta?.agentToolName ? { agentToolName: meta.agentToolName } : {};
+  const dlpFields = meta?.dlpPattern
+    ? { dlpPattern: meta.dlpPattern, dlpSample: meta.dlpSample }
+    : {};
   appendToLog(LOCAL_AUDIT_LOG, {
+    // eid first: the outbox shipper dedups on it, and a fixed leading field
+    // makes the JSONL easy to eyeball.
+    eid: generateEventId(),
     ts: new Date().toISOString(),
     tool: toolName,
     ...agentToolNameField,
@@ -104,6 +127,7 @@ export function appendLocalAudit(
     decision,
     checkedBy,
     ...ruleNameField,
+    ...dlpFields,
     ...testRun,
     agent: meta?.agent,
     mcpServer: meta?.mcpServer,

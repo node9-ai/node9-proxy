@@ -99,6 +99,14 @@ export const ConfigFileSchema = z
         auditHashArgs: z.boolean().optional(),
         agentPolicy: z.enum(['require_approval', 'block_on_rules']).optional(),
         cloudSyncIntervalHours: z.number().positive().optional(),
+        // Outbox shipper (audit.log → SaaS batch ingest). enabled defaults
+        // to true; set false to fall back to local-only auditing.
+        shipper: z
+          .object({
+            enabled: z.boolean().optional(),
+            intervalSeconds: z.number().min(5).optional(),
+          })
+          .optional(),
       })
       .optional(),
     policy: z
