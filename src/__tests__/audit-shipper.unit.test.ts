@@ -7,7 +7,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { buildWireRows, shipOnce, readWatermark, shipLagBytes } from '../daemon/audit-shipper';
-import { generateEventId } from '../audit';
+import { generateEventId, buildArgsPreview } from '../audit';
 
 const CREDS = { apiKey: 'n9_live_test', apiUrl: 'https://api.example.com/api/v1/intercept' };
 
@@ -60,6 +60,7 @@ describe('buildWireRows', () => {
       row({ testRun: true }) + // test noise
       row({ checkedBy: 'ignored' }) + // read/grep noise — never synced
       row({ checkedBy: 'cloud' }) + // BE-origin row already exists
+      row({ ts: undefined }) + // malformed: no event time — skip, don't fabricate
       'not-json at all\n'; // corrupt line must not wedge the shipper
     const { rows } = buildWireRows(Buffer.from(content));
     expect(rows).toHaveLength(1);
@@ -86,6 +87,30 @@ describe('buildWireRows', () => {
       dlpSample: 'ghp_****',
     });
     expect(rows[0].args).toBeUndefined();
+  });
+
+  it('carries the redacted preview for hash-mode rows (dashboard readability)', () => {
+    const content = row({
+      args: undefined,
+      argsHash: 'h456',
+      argsPreview: 'npm run build',
+    });
+    const { rows } = buildWireRows(Buffer.from(content));
+    expect(rows[0]).toMatchObject({ argsHash: 'h456', argsPreview: 'npm run build' });
+  });
+});
+
+describe('buildArgsPreview', () => {
+  it('prefers the primary field and redacts secrets', () => {
+    expect(buildArgsPreview({ command: 'npm test' })).toBe('npm test');
+    expect(buildArgsPreview({ file_path: '/tmp/a.txt' })).toBe('/tmp/a.txt');
+    expect(
+      buildArgsPreview({ command: 'curl -H "authorization: bearer abc123def456" https://x' })
+    ).toContain('********');
+  });
+
+  it('caps the preview at 120 chars', () => {
+    expect(buildArgsPreview({ command: 'x'.repeat(500) })?.length).toBe(120);
   });
 });
 

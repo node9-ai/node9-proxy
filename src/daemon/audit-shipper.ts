@@ -55,6 +55,8 @@ export interface WireRow {
   tool: string;
   args?: Record<string, unknown>;
   argsHash?: string;
+  /** Redacted display string for hash-mode rows (see buildArgsPreview). */
+  argsPreview?: string;
   decision: 'allow' | 'deny';
   checkedBy?: string;
   ruleName?: string;
@@ -123,17 +125,20 @@ export function buildWireRows(chunk: Buffer): { rows: WireRow[]; consumed: numbe
     if (typeof parsed.eid !== 'string' || parsed.eid.length < 8) continue;
     if (typeof parsed.tool !== 'string' || !parsed.tool) continue;
     if (parsed.decision !== 'allow' && parsed.decision !== 'deny') continue;
+    // No ts = malformed row; skipping beats fabricating an event time.
+    if (typeof parsed.ts !== 'string') continue;
     if (parsed.testRun === true) continue;
     const checkedBy = typeof parsed.checkedBy === 'string' ? parsed.checkedBy : undefined;
     if (checkedBy && SKIP_CHECKED_BY.has(checkedBy)) continue;
     rows.push({
       eid: parsed.eid,
-      ts: typeof parsed.ts === 'string' ? parsed.ts : new Date().toISOString(),
+      ts: parsed.ts,
       tool: parsed.tool,
       ...(parsed.args && typeof parsed.args === 'object'
         ? { args: parsed.args as Record<string, unknown> }
         : {}),
       ...(typeof parsed.argsHash === 'string' ? { argsHash: parsed.argsHash } : {}),
+      ...(typeof parsed.argsPreview === 'string' ? { argsPreview: parsed.argsPreview } : {}),
       decision: parsed.decision,
       ...(checkedBy ? { checkedBy } : {}),
       ...(typeof parsed.ruleName === 'string' ? { ruleName: parsed.ruleName } : {}),
@@ -243,7 +248,10 @@ export async function shipOnce(deps: ShipDeps = {}): Promise<ShipResult> {
         updatedAt: new Date().toISOString(),
       });
 
-      if (consumed < toRead || rows.length === 0) break; // drained or filtered tail
+      if (consumed < toRead) break; // partial tail line — wait for the writer
+      // consumed === toRead with zero rows = a full chunk of filtered noise
+      // (e.g. an 'ignored' backlog) — keep draining within this tick rather
+      // than degrading to one chunk per 20s. Bounded by MAX_CHUNKS_PER_TICK.
     }
   } catch (err) {
     // Network/SaaS failures are normal (offline, deploys) — log quietly and

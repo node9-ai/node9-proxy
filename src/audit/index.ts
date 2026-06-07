@@ -47,6 +47,27 @@ export function redactSecrets(text: string): string {
   return redacted;
 }
 
+/**
+ * Short, redacted, human-readable preview stored ALONGSIDE argsHash so the
+ * dashboard's Action column stays readable in hash mode (the default). The
+ * legacy decision-time POST used to send raw redacted args; the shipper
+ * ships the local row, so the row itself must carry the display string.
+ *
+ * Never built for DLP rows — the matched secret may not be covered by
+ * redactSecrets' patterns, and dlpSample already carries the safe display.
+ */
+export function buildArgsPreview(args: unknown): string | undefined {
+  try {
+    const o = args && typeof args === 'object' ? (args as Record<string, unknown>) : null;
+    const primary = o && (o.command ?? o.file_path ?? o.path ?? o.url ?? o.query);
+    const text = typeof primary === 'string' ? primary : args ? JSON.stringify(args) : '';
+    if (!text) return undefined;
+    return redactSecrets(text).slice(0, 120);
+  } catch {
+    return undefined;
+  }
+}
+
 export function appendToLog(logPath: string, entry: object): void {
   try {
     const dir = path.dirname(logPath);
@@ -106,8 +127,14 @@ export function appendLocalAudit(
   },
   auditHashArgsEnabled?: boolean
 ): void {
+  // NEVER build a preview for DLP rows: the matched secret is in the args
+  // and redactSecrets' label-based patterns don't cover every credential
+  // shape (a bare AWS key leaked through in testing). Gate on checkedBy —
+  // intrinsic to every call site — not just the optional dlpPattern meta.
+  const isDlpRow = checkedBy.toLowerCase().includes('dlp') || Boolean(meta?.dlpPattern);
+  const preview = auditHashArgsEnabled && !isDlpRow ? buildArgsPreview(args) : undefined;
   const argsField = auditHashArgsEnabled
-    ? { argsHash: hashArgs(args) }
+    ? { argsHash: hashArgs(args), ...(preview ? { argsPreview: preview } : {}) }
     : { args: args ? JSON.parse(redactSecrets(JSON.stringify(args))) : {} };
   const testRun =
     isTestCall(toolName, args) || process.env.NODE9_TESTING === '1' ? { testRun: true } : {};
@@ -140,6 +167,8 @@ export function appendLocalAudit(
  * Appends a config-change event to the local audit log.
  * Used for security-relevant CLI mutations (e.g. allow overrides) that happen
  * outside the normal tool-call flow and would otherwise be invisible in audit.
+ * Intentionally no eid: config events aren't tool calls, and the outbox
+ * shipper only ships tool-decision rows (tool + decision + eid).
  */
 export function appendConfigAudit(entry: Record<string, unknown>): void {
   appendToLog(LOCAL_AUDIT_LOG, {
