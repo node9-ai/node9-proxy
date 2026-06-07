@@ -4,6 +4,7 @@ import { randomUUID } from 'crypto';
 import { askNativePopup } from '../ui/native';
 import { computeRiskMetadata, type RiskMetadata } from '../context-sniper';
 import { scanArgs, scanFilePath, detectArgsPii, type DlpMatch } from '../dlp';
+import { extractShellDestinations, evaluateEgress } from '@node9/policy-engine';
 import { appendHookDebug, appendLocalAudit, appendToLog, HOOK_DEBUG_LOG } from '../audit';
 import { getConfig, getCredentials } from '../config';
 import { isIgnoredTool, evaluatePolicy } from '../policy';
@@ -304,6 +305,50 @@ async function _authorizeHeadlessCore(
       if (taintResult.tainted && taintResult.record) {
         const { path: taintedPath, source: taintSource } = taintResult.record;
         taintWarning = `⚠️ ${taintedPath} was flagged by ${taintSource} — this file may contain sensitive data`;
+
+        // ── Phase 4: taint × egress synergy (GAP-5) ──────────────────────────
+        // A CONFIRMED-tainted file heading to an UNTRUSTED host is the highest-
+        // confidence local exfil signal — upgrade from the soft taint review to
+        // a hard block. Only when egress is enabled and the destination isn't on
+        // the allow list / private (evaluateEgress returns non-null).
+        if (config.policy.egress?.enabled) {
+          const a =
+            args && typeof args === 'object' && !Array.isArray(args)
+              ? (args as Record<string, unknown>)
+              : {};
+          const cmd =
+            typeof a.command === 'string' ? a.command : typeof a.cmd === 'string' ? a.cmd : '';
+          const dests = cmd ? extractShellDestinations(cmd) : [];
+          const eg = dests.length > 0 ? evaluateEgress(dests, config.policy.egress) : null;
+          if (eg) {
+            if (!isManual)
+              appendLocalAudit(
+                toolName,
+                args,
+                'deny',
+                isObserveMode ? 'observe-mode-taint-egress-would-block' : 'taint-egress-block',
+                { ...meta, ruleName: `taint-egress:${eg.host}` },
+                hashAuditArgs
+              );
+            if (isObserveMode) {
+              return {
+                approved: true,
+                checkedBy: 'audit',
+                observeWouldBlock: true,
+                blockedByLabel: '🔴 Node9 Taint+Egress (Exfiltration)',
+              };
+            }
+            return {
+              approved: false,
+              reason:
+                `🔴 EXFILTRATION BLOCKED: the tainted file "${taintedPath}" is being sent to ` +
+                `untrusted host "${eg.host}". A flagged file leaving to an unrecognized ` +
+                `destination is blocked outright.`,
+              blockedBy: 'local-config',
+              blockedByLabel: '🔴 Node9 Taint+Egress (Exfiltration Blocked)',
+            };
+          }
+        }
       } else if (taintResult.daemonUnavailable) {
         // Taint service is down — cannot confirm files are clean.
         // Treat as a soft taint: the user sees a warning and must explicitly

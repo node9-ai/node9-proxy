@@ -68,6 +68,16 @@ export interface Config {
       // avoids false-positive blocks for orgs that legitimately handle PII.
       pii?: 'off' | 'block';
     };
+    // Egress / destination control (GAP-5). Gates WHERE network tools send data
+    // (curl/wget/scp/ssh/nc). Opt-in: enabled=false by default. `mode` is the
+    // verdict for an unknown host; allow/deny are host globs ("*.github.com").
+    egress: {
+      enabled: boolean;
+      mode: 'off' | 'review' | 'block';
+      allow: string[];
+      deny: string[];
+      allowPrivate: boolean;
+    };
     loopDetection: {
       enabled: boolean;
       threshold: number;
@@ -314,6 +324,7 @@ export const DEFAULT_CONFIG: Config = {
       },
     ],
     dlp: { enabled: true, scanIgnoredTools: true, pii: 'off' },
+    egress: { enabled: false, mode: 'review', allow: [], deny: [], allowPrivate: true },
     loopDetection: { enabled: true, threshold: 5, windowSeconds: 120 },
     skillPinning: { enabled: false, mode: 'warn', roots: [] },
   },
@@ -530,6 +541,11 @@ export function getConfig(cwd?: string): Config {
       ignorePaths: [...DEFAULT_CONFIG.policy.snapshot.ignorePaths],
     },
     dlp: { ...DEFAULT_CONFIG.policy.dlp },
+    egress: {
+      ...DEFAULT_CONFIG.policy.egress,
+      allow: [...DEFAULT_CONFIG.policy.egress.allow],
+      deny: [...DEFAULT_CONFIG.policy.egress.deny],
+    },
     loopDetection: { ...DEFAULT_CONFIG.policy.loopDetection },
     skillPinning: {
       ...DEFAULT_CONFIG.policy.skillPinning,
@@ -597,6 +613,14 @@ export function getConfig(cwd?: string): Config {
       if (d.enabled !== undefined) mergedPolicy.dlp.enabled = d.enabled;
       if (d.scanIgnoredTools !== undefined) mergedPolicy.dlp.scanIgnoredTools = d.scanIgnoredTools;
       if (d.pii !== undefined) mergedPolicy.dlp.pii = d.pii;
+    }
+    if (p.egress) {
+      const e = p.egress as Partial<Config['policy']['egress']>;
+      if (e.enabled !== undefined) mergedPolicy.egress.enabled = e.enabled;
+      if (e.mode !== undefined) mergedPolicy.egress.mode = e.mode;
+      if (Array.isArray(e.allow)) mergedPolicy.egress.allow.push(...e.allow);
+      if (Array.isArray(e.deny)) mergedPolicy.egress.deny.push(...e.deny);
+      if (e.allowPrivate !== undefined) mergedPolicy.egress.allowPrivate = e.allowPrivate;
     }
     if (p.loopDetection) {
       const ld = p.loopDetection as Partial<Config['policy']['loopDetection']>;
