@@ -14,6 +14,9 @@ const SYNC_INTERVAL_MS = 10 * 60 * 1000;
 // "your numbers are wrong" complaints when Anthropic / OpenAI / Google
 // ship a new model.
 import { ensurePricingLoaded, pricingFor, normalizeModel } from './pricing/litellm.js';
+// Codex cost source (GAP-3 Phase 2). Imports only types back from this module,
+// so there is no runtime circular dependency.
+import { codexSource } from './cost-codex.js';
 
 type DailyEntry = {
   date: string;
@@ -230,8 +233,9 @@ export const claudeSource: CostSource = {
   },
 };
 
-// Registry. Codex source is added in GAP-3 Phase 2.
-const COST_SOURCES: CostSource[] = [claudeSource];
+// Registry of all cost sources. Each is consulted by collectEntries() when
+// available(). Codex reads ~/.codex/log/codex-tui.log (see cost-codex.ts).
+const COST_SOURCES: CostSource[] = [claudeSource, codexSource];
 
 /**
  * Collect cost entries across all available agents. Merges by
