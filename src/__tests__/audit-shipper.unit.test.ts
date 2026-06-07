@@ -6,7 +6,13 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { buildWireRows, shipOnce, readWatermark, shipLagBytes } from '../daemon/audit-shipper';
+import {
+  buildWireRows,
+  shipOnce,
+  readWatermark,
+  shipLagBytes,
+  buildBatchEndpoint,
+} from '../daemon/audit-shipper';
 import { generateEventId, buildArgsPreview } from '../audit';
 
 const CREDS = { apiKey: 'n9_live_test', apiUrl: 'https://api.example.com/api/v1/intercept' };
@@ -117,6 +123,31 @@ describe('buildWireRows', () => {
     });
     const { rows } = buildWireRows(Buffer.from(content));
     expect(rows[0]).toMatchObject({ argsHash: 'h456', argsPreview: 'npm run build' });
+  });
+});
+
+describe('buildBatchEndpoint', () => {
+  it('builds the batch URL from the raw intercept base', () => {
+    expect(buildBatchEndpoint('https://api.node9.ai/api/v1/intercept')).toBe(
+      'https://api.node9.ai/api/v1/intercept/audit/batch'
+    );
+  });
+
+  it('strips the /policies/sync suffix readCredentials() appends for the sync route', () => {
+    // REGRESSION: the shipper reuses sync.ts readCredentials(), which
+    // rewrites the stored apiUrl to its OWN route (…/intercept →
+    // …/intercept/policies/sync). The first release shipped to
+    // …/policies/sync/audit/batch and 404'd on every tick — found live on
+    // the founder's machine; unit tests missed it because deps.creds was
+    // always injected.
+    expect(buildBatchEndpoint('https://api.node9.ai/api/v1/intercept/policies/sync')).toBe(
+      'https://api.node9.ai/api/v1/intercept/audit/batch'
+    );
+  });
+
+  it('returns null for invalid/unsafe URLs', () => {
+    expect(buildBatchEndpoint('http://evil.example.com/intercept')).toBeNull();
+    expect(buildBatchEndpoint('not a url')).toBeNull();
   });
 });
 

@@ -168,6 +168,26 @@ export function buildWireRows(chunk: Buffer): { rows: WireRow[]; consumed: numbe
   return { rows, consumed: lastNl + 1 };
 }
 
+/**
+ * Resolve the batch-ingest endpoint from a credentials apiUrl.
+ *
+ * REGRESSION GUARD: the shipper gets creds from sync.ts readCredentials(),
+ * which rewrites the stored base URL to its OWN route (`…/intercept` →
+ * `…/intercept/policies/sync`). The first release naively appended
+ * `/audit/batch` to that and 404'd on every tick — silently, forever
+ * (found live, not by tests: every unit test injected deps.creds).
+ * Normalize here so the endpoint is correct from EITHER URL shape.
+ */
+export function buildBatchEndpoint(rawApiUrl: string): string | null {
+  const validated = validateApiUrl(rawApiUrl);
+  if (!validated) return null;
+  const base = validated
+    .toString()
+    .replace(/\/$/, '')
+    .replace(/\/policies\/sync$/, '');
+  return `${base}/audit/batch`;
+}
+
 export interface ShipDeps {
   auditLogPath?: string;
   watermarkPath?: string;
@@ -203,9 +223,8 @@ export async function shipOnce(deps: ShipDeps = {}): Promise<ShipResult> {
 
   const creds = deps.creds !== undefined ? deps.creds : readCredentials();
   if (!creds?.apiKey) return { status: 'no-creds', shipped: 0 };
-  const validated = validateApiUrl(creds.apiUrl);
-  if (!validated) return { status: 'no-creds', shipped: 0 };
-  const endpoint = `${validated.toString().replace(/\/$/, '')}/audit/batch`;
+  const endpoint = buildBatchEndpoint(creds.apiUrl);
+  if (!endpoint) return { status: 'no-creds', shipped: 0 };
 
   if (!fs.existsSync(auditLogPath)) return { status: 'idle', shipped: 0 };
 
