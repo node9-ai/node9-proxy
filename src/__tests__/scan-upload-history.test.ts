@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { parseSinceCutoff, buildSessionTotals } from '../scan-upload-history.js';
+import {
+  parseSinceCutoff,
+  buildSessionTotals,
+  extractHistoricalLoops,
+} from '../scan-upload-history.js';
 import type { ScanFinding } from '@node9/policy-engine';
 
 const finding = (sessionId: string, type: ScanFinding['type'], lineIndex = 0): ScanFinding => ({
@@ -72,5 +76,50 @@ describe('buildSessionTotals', () => {
 
   it('returns empty when nothing is parsed (no findings + no tool calls)', () => {
     expect(buildSessionTotals([], {})).toEqual([]);
+  });
+});
+
+describe('extractHistoricalLoops (window semantics)', () => {
+  // REGRESSION: --upload-history used to pass the LIVE blocker's config
+  // (threshold 5, windowSeconds 120) into the historical extractor, so the
+  // cloud only saw loops that happened inside 2-minute bursts (23) while
+  // the local scan correctly counted whole-session churn (246). Historical
+  // analysis must use windowSeconds 0 — the extractor's documented
+  // "no window: the entire session is the window" mode.
+  const call = (ts: string) => ({
+    toolName: 'Edit',
+    args: { file_path: '/src/App.tsx', content: 'same edit' },
+    timestamp: ts,
+    lineIndex: 0,
+  });
+
+  it('detects a loop whose repeats are spaced FAR beyond the live 120s window', () => {
+    // 5 identical calls, 10 minutes apart — invisible to the live window,
+    // unmistakable whole-session churn.
+    const calls = [0, 10, 20, 30, 40].map((m) =>
+      call(`2026-06-07T10:${String(m).padStart(2, '0')}:00.000Z`)
+    );
+    const loops = extractHistoricalLoops(calls, {
+      sessionId: 's1',
+      project: 'p',
+      agent: 'claude',
+      threshold: 5,
+    });
+    expect(loops.length).toBe(1);
+    expect(loops[0].loopCount).toBe(5);
+  });
+
+  it('still respects the threshold (4 repeats < 5 → no finding)', () => {
+    const calls = [0, 10, 20, 30].map((m) =>
+      call(`2026-06-07T10:${String(m).padStart(2, '0')}:00.000Z`)
+    );
+    expect(
+      extractHistoricalLoops(calls, {
+        sessionId: 's1',
+        project: 'p',
+        agent: 'claude',
+        threshold: 5,
+      })
+    ).toHaveLength(0);
   });
 });

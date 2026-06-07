@@ -194,6 +194,38 @@ export function buildSessionTotals(
 }
 
 /**
+ * Historical loop extraction — ALWAYS whole-session window.
+ *
+ * REGRESSION GUARD: this used to pass the LIVE blocker's config
+ * (threshold 5, windowSeconds 120) into the extractor, so the cloud only
+ * counted loops that happened inside 2-minute bursts while the local scan
+ * counted whole-session churn — same history, wildly different numbers
+ * (23 vs 246 on the founder's machine). Historical analysis uses
+ * windowSeconds 0, the extractor's documented "no window: the entire
+ * session is the window" mode; only the threshold follows config.
+ */
+export function extractHistoricalLoops(
+  sessionCalls: SessionToolCall[],
+  ctx: {
+    sessionId: string;
+    project: string;
+    agent: Parameters<typeof extractSessionLevelFindings>[1]['agent'];
+    threshold: number;
+  }
+) {
+  return extractSessionLevelFindings(sessionCalls, {
+    sessionId: ctx.sessionId,
+    project: ctx.project,
+    agent: ctx.agent,
+    loopDetection: {
+      enabled: true,
+      threshold: ctx.threshold,
+      windowSeconds: 0, // whole session — never the live blocker's window
+    },
+  });
+}
+
+/**
  * Main entry — invoked from the CLI command. Walks JSONLs, runs the
  * engine extractor, posts sessionTotals + a workspace-level summary,
  * also pushes cost data fresh, and prints a human-friendly summary.
@@ -308,15 +340,11 @@ export async function runUploadHistory(opts: UploadHistoryOptions): Promise<void
     // canonical loop findings to ScanFinding so the dashboard's "Loops
     // Blocked" panel reflects backfilled history, not just live ticks.
     if (loopCfg.enabled && sessionCalls.length > 0) {
-      const loops = extractSessionLevelFindings(sessionCalls, {
+      const loops = extractHistoricalLoops(sessionCalls, {
         sessionId,
         project: decodeProjectDirName(projectDir),
         agent: 'claude',
-        loopDetection: {
-          enabled: loopCfg.enabled,
-          threshold: loopCfg.threshold,
-          windowSeconds: loopCfg.windowSeconds,
-        },
+        threshold: loopCfg.threshold,
       });
       for (const cf of loops) {
         const sf = toScanFinding(cf);
