@@ -9,6 +9,7 @@ node9.config.json
 # Build Artifacts (Never commit these!)
 dist
 coverage
+*.tgz
 
 # Environment & Secrets (CRITICAL)
 .env
