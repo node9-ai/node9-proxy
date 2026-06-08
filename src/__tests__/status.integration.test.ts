@@ -120,6 +120,28 @@ describe('status — Antigravity wiring', () => {
     // which is absent here — its section must not render.
     expect(stdout).not.toContain('Gemini CLI');
   });
+
+  it('shows the Antigravity section from the install dir alone (no hooks.json yet)', () => {
+    // agy creates antigravity-cli/ on first launch before node9 setup runs —
+    // the section must still appear (as ✗) off the install-dir signal.
+    fs.mkdirSync(path.join(home, '.gemini', 'antigravity-cli'), { recursive: true });
+    const { status, stdout } = runStatus(home);
+    expect(status).toBe(0);
+    expect(stdout).toContain('Antigravity');
+    expect(stdout).toContain('✗ PreToolUse  (node9 check)');
+  });
+
+  it('does not crash when a matcher entry has no hooks array', () => {
+    // A hand-edited / foreign hooks.json with a matcher missing its `hooks`
+    // field must not throw — status should render the section as unwired.
+    writeJson(path.join(home, '.gemini', 'config', 'hooks.json'), {
+      hooks: { PreToolUse: [{ matcher: '.*' }] },
+    });
+    const { status, stdout } = runStatus(home);
+    expect(status).toBe(0);
+    expect(stdout).toContain('Antigravity');
+    expect(stdout).toContain('✗ PreToolUse  (node9 check)');
+  });
 });
 
 describe('status — Hermes wiring', () => {
@@ -150,6 +172,18 @@ describe('status — Hermes wiring', () => {
     const { status, stdout } = runStatus(home);
     expect(status).toBe(0);
     expect(stdout).not.toContain('Hermes Agent');
+  });
+
+  it('still renders the Hermes section (unwired) when config.yaml is corrupt', () => {
+    // A present-but-broken config must not silently vanish the section —
+    // that is exactly when the user needs to see Hermes is unprotected.
+    fs.mkdirSync(path.join(home, '.hermes'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.hermes', 'config.yaml'), 'hooks: [: : not valid yaml');
+    const { status, stdout, stderr } = runStatus(home);
+    expect(status).toBe(0);
+    expect(stdout).toContain('Hermes Agent');
+    expect(stdout).toContain('✗ pre_tool_call  (node9 check)');
+    expect(stderr).toContain('not valid YAML');
   });
 });
 

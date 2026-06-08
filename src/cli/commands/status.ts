@@ -81,11 +81,19 @@ interface HermesHookEntry {
   [key: string]: unknown;
 }
 
-// Returns hook presence from ~/.hermes/config.yaml, or null when the file is
-// missing/unreadable (= Hermes not set up on this machine → section hidden).
+// Returns hook presence from ~/.hermes/config.yaml. null = file absent
+// (Hermes not set up → section hidden). A present-but-unparseable config
+// must NOT vanish the section — that's the one moment status matters most —
+// so we warn to stderr and render ✗ rows (pre/post both false).
 function readHermesHooks(configPath: string): { pre: boolean; post: boolean } | null {
+  if (!fs.existsSync(configPath)) return null;
+  let raw: string;
   try {
-    const raw = fs.readFileSync(configPath, 'utf-8');
+    raw = fs.readFileSync(configPath, 'utf-8');
+  } catch {
+    return null; // unreadable (perms) — treat as absent rather than half-render
+  }
+  try {
     const cfg = yaml.parse(raw) as { hooks?: Record<string, HermesHookEntry[]> } | null;
     const has = (event: string) =>
       (cfg?.hooks?.[event] ?? []).some(
@@ -93,7 +101,12 @@ function readHermesHooks(configPath: string): { pre: boolean; post: boolean } | 
       );
     return { pre: has('pre_tool_call'), post: has('post_tool_call') };
   } catch {
-    return null;
+    console.error(
+      chalk.yellow(
+        `  ⚠️  Hermes config.yaml at ${configPath} is not valid YAML — showing as unwired.`
+      )
+    );
+    return { pre: false, post: false };
   }
 }
 
@@ -102,6 +115,13 @@ function readJson<T>(filePath: string): T | null {
     if (fs.existsSync(filePath)) return JSON.parse(fs.readFileSync(filePath, 'utf-8')) as T;
   } catch {}
   return null;
+}
+
+// True if any matcher in the list carries a node9 hook. Guards against
+// matcher entries with a missing/non-array `hooks` field — a hand-edited
+// or foreign settings file must never crash `node9 status`.
+function matchersHaveNode9Hook(matchers: HookMatcher[] | undefined): boolean {
+  return (matchers ?? []).some((m) => (m.hooks ?? []).some((h) => isNode9Hook(h.command)));
 }
 
 function wrappedMcpServers(servers: Record<string, McpServer> | undefined): string[] {
@@ -257,14 +277,8 @@ export function registerStatusCommand(program: Command): void {
         console.log('');
 
         if (claudeSettings || claudeConfig) {
-          const preHook =
-            claudeSettings?.hooks?.PreToolUse?.some((m) =>
-              m.hooks.some((h) => isNode9Hook(h.command))
-            ) ?? false;
-          const postHook =
-            claudeSettings?.hooks?.PostToolUse?.some((m) =>
-              m.hooks.some((h) => isNode9Hook(h.command))
-            ) ?? false;
+          const preHook = matchersHaveNode9Hook(claudeSettings?.hooks?.PreToolUse);
+          const postHook = matchersHaveNode9Hook(claudeSettings?.hooks?.PostToolUse);
           printAgentSection(
             'Claude Code',
             [
@@ -277,14 +291,8 @@ export function registerStatusCommand(program: Command): void {
         }
 
         if (geminiSettings) {
-          const beforeHook =
-            geminiSettings.hooks?.BeforeTool?.some((m) =>
-              m.hooks.some((h) => isNode9Hook(h.command))
-            ) ?? false;
-          const afterHook =
-            geminiSettings.hooks?.AfterTool?.some((m) =>
-              m.hooks.some((h) => isNode9Hook(h.command))
-            ) ?? false;
+          const beforeHook = matchersHaveNode9Hook(geminiSettings.hooks?.BeforeTool);
+          const afterHook = matchersHaveNode9Hook(geminiSettings.hooks?.AfterTool);
           printAgentSection(
             'Gemini CLI',
             [
@@ -297,14 +305,8 @@ export function registerStatusCommand(program: Command): void {
         }
 
         if (antigravityPresent) {
-          const preHook =
-            antigravityHooks?.hooks?.PreToolUse?.some((m) =>
-              m.hooks.some((h) => isNode9Hook(h.command))
-            ) ?? false;
-          const postHook =
-            antigravityHooks?.hooks?.PostToolUse?.some((m) =>
-              m.hooks.some((h) => isNode9Hook(h.command))
-            ) ?? false;
+          const preHook = matchersHaveNode9Hook(antigravityHooks?.hooks?.PreToolUse);
+          const postHook = matchersHaveNode9Hook(antigravityHooks?.hooks?.PostToolUse);
           printAgentSection(
             'Antigravity',
             [
