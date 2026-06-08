@@ -87,6 +87,19 @@ describe('status — Copilot CLI wiring', () => {
     expect(stdout).toContain('GitHub Copilot');
     expect(stdout).toContain('✗ PreToolUse  (node9 check)');
   });
+
+  it('does not crash when a hook event is a non-array value', () => {
+    // A hand-edited node9.json with a flat event key set to a string (not an
+    // array) must not throw — status should render the section as unwired.
+    writeJson(path.join(home, '.copilot', 'hooks', 'node9.json'), {
+      version: 1,
+      hooks: { PreToolUse: 'node9 check', PostToolUse: { command: 'node9 log' } },
+    });
+    const { status, stdout } = runStatus(home);
+    expect(status).toBe(0);
+    expect(stdout).toContain('GitHub Copilot');
+    expect(stdout).toContain('✗ PreToolUse  (node9 check)');
+  });
 });
 
 describe('status — Antigravity wiring', () => {

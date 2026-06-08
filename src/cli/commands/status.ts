@@ -124,6 +124,13 @@ function matchersHaveNode9Hook(matchers: HookMatcher[] | undefined): boolean {
   return (matchers ?? []).some((m) => (m.hooks ?? []).some((h) => isNode9Hook(h.command)));
 }
 
+// Flat-array variant for agents (Copilot) whose hooks have no matcher level.
+// Array.isArray guards a hand-edited config where the event key is present
+// but not an array — `.some` on a non-array would otherwise crash status.
+function flatHaveNode9Hook(entries: HookEntry[] | undefined): boolean {
+  return (Array.isArray(entries) ? entries : []).some((h) => isNode9Hook(h.command));
+}
+
 function wrappedMcpServers(servers: Record<string, McpServer> | undefined): string[] {
   if (!servers) return [];
   return Object.entries(servers)
@@ -320,12 +327,9 @@ export function registerStatusCommand(program: Command): void {
 
         if (copilotPresent) {
           // Flat hook arrays — no matcher level (unlike Claude/Gemini/agy).
-          const preHook =
-            copilotHooks?.hooks?.PreToolUse?.some((h) => isNode9Hook(h.command)) ?? false;
-          const postHook =
-            copilotHooks?.hooks?.PostToolUse?.some((h) => isNode9Hook(h.command)) ?? false;
-          const promptHook =
-            copilotHooks?.hooks?.UserPromptSubmit?.some((h) => isNode9Hook(h.command)) ?? false;
+          const preHook = flatHaveNode9Hook(copilotHooks?.hooks?.PreToolUse);
+          const postHook = flatHaveNode9Hook(copilotHooks?.hooks?.PostToolUse);
+          const promptHook = flatHaveNode9Hook(copilotHooks?.hooks?.UserPromptSubmit);
           printAgentSection(
             'GitHub Copilot',
             [
