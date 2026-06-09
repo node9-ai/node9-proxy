@@ -124,6 +124,20 @@ describe('buildWireRows', () => {
     const { rows } = buildWireRows(Buffer.from(content));
     expect(rows[0]).toMatchObject({ argsHash: 'h456', argsPreview: 'npm run build' });
   });
+
+  it('carries context fields: workingDir, platform, shellType', () => {
+    const content = row({
+      workingDir: '/home/nadav/node9',
+      platform: 'linux',
+      shellType: 'zsh',
+    });
+    const { rows } = buildWireRows(Buffer.from(content));
+    expect(rows[0]).toMatchObject({
+      workingDir: '/home/nadav/node9',
+      platform: 'linux',
+      shellType: 'zsh',
+    });
+  });
 });
 
 describe('buildBatchEndpoint', () => {

@@ -134,6 +134,11 @@ export function appendLocalAudit(
      *  (sets clientEventId) instead of inserting a duplicate — regardless
      *  of which racer (cloud / native / terminal) decided. */
     cloudRequestId?: string;
+    /** Project directory the action ran in (orchestrator's options.cwd).
+     *  Carried to the SaaS so the event-detail Context block can show WHERE
+     *  an agent acted (blast-radius context) — and the Report's By-Project
+     *  chart attributes shipped traffic. See shipper-context-fields.md. */
+    workingDir?: string;
   },
   auditHashArgsEnabled?: boolean
 ): void {
@@ -154,6 +159,12 @@ export function appendLocalAudit(
     ? { dlpPattern: meta.dlpPattern, dlpSample: meta.dlpSample }
     : {};
   const cloudLinkField = meta?.cloudRequestId ? { cloudRequestId: meta.cloudRequestId } : {};
+  // Context fields — where the action ran. platform is always known;
+  // workingDir rides from the orchestrator's cwd; shellType is best-effort
+  // from $SHELL. The SaaS event-detail Context block reads these.
+  const workingDirField = meta?.workingDir ? { workingDir: meta.workingDir } : {};
+  const shell = process.env.SHELL ? path.basename(process.env.SHELL) : undefined;
+  const shellTypeField = shell ? { shellType: shell } : {};
   appendToLog(LOCAL_AUDIT_LOG, {
     // eid first: the outbox shipper dedups on it, and a fixed leading field
     // makes the JSONL easy to eyeball.
@@ -167,11 +178,14 @@ export function appendLocalAudit(
     ...ruleNameField,
     ...dlpFields,
     ...cloudLinkField,
+    ...workingDirField,
+    ...shellTypeField,
     ...testRun,
     agent: meta?.agent,
     mcpServer: meta?.mcpServer,
     sessionId: meta?.sessionId,
     hostname: os.hostname(),
+    platform: os.platform(),
   });
 }
 

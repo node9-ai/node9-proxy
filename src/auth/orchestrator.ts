@@ -229,7 +229,13 @@ export async function authorizeHeadless(
 async function _authorizeHeadlessCore(
   toolName: string,
   args: unknown,
-  meta?: { agent?: string; mcpServer?: string; sessionId?: string; transcriptPath?: string },
+  metaArg?: {
+    agent?: string;
+    mcpServer?: string;
+    sessionId?: string;
+    transcriptPath?: string;
+    workingDir?: string;
+  },
   options?: {
     calledFromDaemon?: boolean;
     activityId?: string;
@@ -238,6 +244,11 @@ async function _authorizeHeadlessCore(
     socketActivitySent?: boolean;
   }
 ): Promise<AuthResult> {
+  // Thread the working directory into meta so every audit row written below
+  // carries it (the SaaS event-detail Context block reads it). One place,
+  // so all decision paths inherit it. See shipper-context-fields.md.
+  const meta =
+    options?.cwd && !metaArg?.workingDir ? { ...metaArg, workingDir: options.cwd } : metaArg;
   if (process.env.NODE9_PAUSED === '1') return { approved: true, checkedBy: 'paused' };
   const pauseState = checkPause();
   if (pauseState.paused) return { approved: true, checkedBy: 'paused' };
