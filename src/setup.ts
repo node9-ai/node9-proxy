@@ -190,19 +190,23 @@ function writeJson(filePath: string, data: unknown): void {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 // Matches hook commands written by node9 in any of these forms:
-//   node9 check                     (global install, NODE9_TESTING)
-//   /path/to/node9 check            (global install, full path)
-//   /path/to/node /path/to/cli.js check  (npm link / local install, pre-fix)
-//   "/path/to/node" "/path/to/cli.js" check  (post-#185 quoted form)
-// The word-boundary prefix (?:^|[\s/\\"]) prevents false matches on
-// binaries that merely contain "node9" as a substring (e.g. mynode9),
-// and tolerates a closing quote sitting right before the subcommand.
+//   node9 check                       (global install, NODE9_TESTING)
+//   /path/to/node9 check              (global install, unquoted)
+//   "/path/to/node9" check            (global install, post-#185 quoted)
+//   /path/to/node /path/to/cli.js check       (npm link / local, pre-fix)
+//   "/path/to/node" "/path/to/cli.js" check   (npm link / local, quoted)
+// The optional `"?` after the binary/script name is the key: fullPathCommand
+// quotes paths (since #185, to survive spaces in $HOME), so a global binary
+// install emits `"/path/node9" check`. Without matching that, a freshly
+// wired install reads back as "not wired" — and setup, whose dedup check
+// uses this same predicate, appends duplicate hooks on every re-run.
+// The word-boundary prefix (?:^|[\s/\\"]) still blocks false matches on
+// binaries that merely contain "node9" (e.g. mynode9).
 export function isNode9Hook(cmd: string | undefined): boolean {
   if (!cmd) return false;
   return (
-    /(?:^|[\s/\\"])node9 (?:check|log)/.test(cmd) ||
-    /(?:^|[\s/\\"])cli\.js" (?:check|log)/.test(cmd) ||
-    /(?:^|[\s/\\])cli\.js (?:check|log)/.test(cmd)
+    /(?:^|[\s/\\"])node9"? (?:check|log)/.test(cmd) ||
+    /(?:^|[\s/\\])cli\.js"? (?:check|log)/.test(cmd)
   );
 }
 
@@ -2533,7 +2537,7 @@ function hermesHomeDir(homeDir: string = os.homedir()): string {
   return path.join(homeDir, '.hermes');
 }
 
-function hermesConfigPath(homeDir: string = os.homedir()): string {
+export function hermesConfigPath(homeDir: string = os.homedir()): string {
   return path.join(hermesHomeDir(homeDir), HERMES_CONFIG_FILENAME);
 }
 

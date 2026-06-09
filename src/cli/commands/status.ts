@@ -5,8 +5,10 @@ import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import * as yaml from 'yaml';
 import { getCredentials, getConfig, checkPause } from '../../core';
 import { isDaemonRunning, DAEMON_PORT } from '../../auth/daemon';
+import { isNode9Hook, hermesConfigPath } from '../../setup';
 
 interface McpServer {
   command?: string;
@@ -53,6 +55,61 @@ interface CursorMcpConfig {
   [key: string]: unknown;
 }
 
+// Antigravity: ~/.gemini/config/hooks.json — Gemini-style matcher arrays.
+interface AntigravityHooksFile {
+  hooks?: {
+    PreToolUse?: HookMatcher[];
+    PostToolUse?: HookMatcher[];
+    [key: string]: HookMatcher[] | undefined;
+  };
+  [key: string]: unknown;
+}
+
+// Copilot CLI: ~/.copilot/hooks/node9.json — FLAT hook arrays (no matcher level).
+interface CopilotHooksFile {
+  hooks?: {
+    PreToolUse?: HookEntry[];
+    PostToolUse?: HookEntry[];
+    UserPromptSubmit?: HookEntry[];
+    [key: string]: HookEntry[] | undefined;
+  };
+  [key: string]: unknown;
+}
+
+interface HermesHookEntry {
+  command?: string;
+  [key: string]: unknown;
+}
+
+// Returns hook presence from ~/.hermes/config.yaml. null = file absent
+// (Hermes not set up → section hidden). A present-but-unparseable config
+// must NOT vanish the section — that's the one moment status matters most —
+// so we warn to stderr and render ✗ rows (pre/post both false).
+function readHermesHooks(configPath: string): { pre: boolean; post: boolean } | null {
+  if (!fs.existsSync(configPath)) return null;
+  let raw: string;
+  try {
+    raw = fs.readFileSync(configPath, 'utf-8');
+  } catch {
+    return null; // unreadable (perms) — treat as absent rather than half-render
+  }
+  try {
+    const cfg = yaml.parse(raw) as { hooks?: Record<string, HermesHookEntry[]> } | null;
+    const has = (event: string) =>
+      (cfg?.hooks?.[event] ?? []).some(
+        (e) => typeof e?.command === 'string' && isNode9Hook(e.command)
+      );
+    return { pre: has('pre_tool_call'), post: has('post_tool_call') };
+  } catch {
+    console.error(
+      chalk.yellow(
+        `  ⚠️  Hermes config.yaml at ${configPath} is not valid YAML — showing as unwired.`
+      )
+    );
+    return { pre: false, post: false };
+  }
+}
+
 function readJson<T>(filePath: string): T | null {
   try {
     if (fs.existsSync(filePath)) return JSON.parse(fs.readFileSync(filePath, 'utf-8')) as T;
@@ -60,11 +117,18 @@ function readJson<T>(filePath: string): T | null {
   return null;
 }
 
-function isNode9Hook(cmd: string | undefined): boolean {
-  if (!cmd) return false;
-  return (
-    /(?:^|[\s/\\])node9 (?:check|log)/.test(cmd) || /(?:^|[\s/\\])cli\.js (?:check|log)/.test(cmd)
-  );
+// True if any matcher in the list carries a node9 hook. Guards against
+// matcher entries with a missing/non-array `hooks` field — a hand-edited
+// or foreign settings file must never crash `node9 status`.
+function matchersHaveNode9Hook(matchers: HookMatcher[] | undefined): boolean {
+  return (matchers ?? []).some((m) => (m.hooks ?? []).some((h) => isNode9Hook(h.command)));
+}
+
+// Flat-array variant for agents (Copilot) whose hooks have no matcher level.
+// Array.isArray guards a hand-edited config where the event key is present
+// but not an array — `.some` on a non-array would otherwise crash status.
+function flatHaveNode9Hook(entries: HookEntry[] | undefined): boolean {
+  return (Array.isArray(entries) ? entries : []).some((h) => isNode9Hook(h.command));
 }
 
 function wrappedMcpServers(servers: Record<string, McpServer> | undefined): string[] {
@@ -77,7 +141,7 @@ function wrappedMcpServers(servers: Record<string, McpServer> | undefined): stri
 function printAgentSection(
   label: string,
   hookPairs: Array<{ name: string; present: boolean }>,
-  wrapped: string[]
+  wrapped: string[] | null // null = agent has no MCP surface → omit the line
 ): void {
   console.log(chalk.bold(`  ${label}`));
   for (const { name, present } of hookPairs) {
@@ -87,6 +151,7 @@ function printAgentSection(
       console.log(chalk.red(`    ✗ ${name}`) + chalk.gray(' (not wired)'));
     }
   }
+  if (wrapped === null) return;
   if (wrapped.length > 0) {
     console.log(chalk.cyan(`    MCP proxied:`));
     for (const entry of wrapped) {
@@ -178,7 +243,40 @@ export function registerStatusCommand(program: Command): void {
       );
       const cursorConfig = readJson<CursorMcpConfig>(path.join(homeDir, '.cursor', 'mcp.json'));
 
-      const agentFound = claudeSettings || claudeConfig || geminiSettings || cursorConfig;
+      // Antigravity shares ~/.gemini with legacy Gemini CLI but reads its own
+      // files (config/hooks.json + config/mcp_config.json). Presence = hooks
+      // file readable OR an agy install dir (CLI or IDE) exists.
+      const antigravityHooks = readJson<AntigravityHooksFile>(
+        path.join(homeDir, '.gemini', 'config', 'hooks.json')
+      );
+      const antigravityMcp = readJson<CursorMcpConfig>(
+        path.join(homeDir, '.gemini', 'config', 'mcp_config.json')
+      );
+      const antigravityPresent =
+        antigravityHooks !== null ||
+        fs.existsSync(path.join(homeDir, '.gemini', 'antigravity-cli')) ||
+        fs.existsSync(path.join(homeDir, '.gemini', 'antigravity-ide'));
+
+      // Copilot CLI creates ~/.copilot on first launch.
+      const copilotHooks = readJson<CopilotHooksFile>(
+        path.join(homeDir, '.copilot', 'hooks', 'node9.json')
+      );
+      const copilotMcp = readJson<CursorMcpConfig>(
+        path.join(homeDir, '.copilot', 'mcp-config.json')
+      );
+      const copilotPresent = fs.existsSync(path.join(homeDir, '.copilot'));
+
+      // Hermes: section shown when config.yaml exists (HERMES_HOME-aware).
+      const hermesHooks = readHermesHooks(hermesConfigPath(homeDir));
+
+      const agentFound =
+        claudeSettings ||
+        claudeConfig ||
+        geminiSettings ||
+        cursorConfig ||
+        antigravityPresent ||
+        copilotPresent ||
+        hermesHooks;
 
       if (agentFound) {
         console.log('');
@@ -186,14 +284,8 @@ export function registerStatusCommand(program: Command): void {
         console.log('');
 
         if (claudeSettings || claudeConfig) {
-          const preHook =
-            claudeSettings?.hooks?.PreToolUse?.some((m) =>
-              m.hooks.some((h) => isNode9Hook(h.command))
-            ) ?? false;
-          const postHook =
-            claudeSettings?.hooks?.PostToolUse?.some((m) =>
-              m.hooks.some((h) => isNode9Hook(h.command))
-            ) ?? false;
+          const preHook = matchersHaveNode9Hook(claudeSettings?.hooks?.PreToolUse);
+          const postHook = matchersHaveNode9Hook(claudeSettings?.hooks?.PostToolUse);
           printAgentSection(
             'Claude Code',
             [
@@ -206,14 +298,8 @@ export function registerStatusCommand(program: Command): void {
         }
 
         if (geminiSettings) {
-          const beforeHook =
-            geminiSettings.hooks?.BeforeTool?.some((m) =>
-              m.hooks.some((h) => isNode9Hook(h.command))
-            ) ?? false;
-          const afterHook =
-            geminiSettings.hooks?.AfterTool?.some((m) =>
-              m.hooks.some((h) => isNode9Hook(h.command))
-            ) ?? false;
+          const beforeHook = matchersHaveNode9Hook(geminiSettings.hooks?.BeforeTool);
+          const afterHook = matchersHaveNode9Hook(geminiSettings.hooks?.AfterTool);
           printAgentSection(
             'Gemini CLI',
             [
@@ -225,8 +311,51 @@ export function registerStatusCommand(program: Command): void {
           console.log('');
         }
 
+        if (antigravityPresent) {
+          const preHook = matchersHaveNode9Hook(antigravityHooks?.hooks?.PreToolUse);
+          const postHook = matchersHaveNode9Hook(antigravityHooks?.hooks?.PostToolUse);
+          printAgentSection(
+            'Antigravity',
+            [
+              { name: 'PreToolUse  (node9 check)', present: preHook },
+              { name: 'PostToolUse (node9 log)', present: postHook },
+            ],
+            wrappedMcpServers(antigravityMcp?.mcpServers)
+          );
+          console.log('');
+        }
+
+        if (copilotPresent) {
+          // Flat hook arrays — no matcher level (unlike Claude/Gemini/agy).
+          const preHook = flatHaveNode9Hook(copilotHooks?.hooks?.PreToolUse);
+          const postHook = flatHaveNode9Hook(copilotHooks?.hooks?.PostToolUse);
+          const promptHook = flatHaveNode9Hook(copilotHooks?.hooks?.UserPromptSubmit);
+          printAgentSection(
+            'GitHub Copilot',
+            [
+              { name: 'PreToolUse  (node9 check)', present: preHook },
+              { name: 'PostToolUse (node9 log)', present: postHook },
+              { name: 'UserPromptSubmit (node9 check)', present: promptHook },
+            ],
+            wrappedMcpServers(copilotMcp?.mcpServers)
+          );
+          console.log('');
+        }
+
         if (cursorConfig) {
           printAgentSection('Cursor', [], wrappedMcpServers(cursorConfig.mcpServers));
+          console.log('');
+        }
+
+        if (hermesHooks) {
+          printAgentSection(
+            'Hermes Agent',
+            [
+              { name: 'pre_tool_call  (node9 check)', present: hermesHooks.pre },
+              { name: 'post_tool_call (node9 log)', present: hermesHooks.post },
+            ],
+            null // Hermes has no MCP surface
+          );
           console.log('');
         }
       }

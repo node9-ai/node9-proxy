@@ -155,17 +155,33 @@ describe('isNode9Hook', () => {
     expect(isNode9Hook('"/usr/local/bin/cli.js" log')).toBe(true);
   });
 
+  it('recognises the quoted bare-binary form (global install, post-#185)', () => {
+    // Regression: fullPathCommand quotes the binary path for global installs
+    // (`"/path/node9" check`), but isNode9Hook only matched the quoted cli.js
+    // form — so freshly wired agy/copilot read back as "not wired" and setup
+    // appended duplicate hooks on every re-run. The closing quote sits between
+    // `node9` and the subcommand, which the old `node9 ` pattern missed.
+    expect(
+      isNode9Hook('"/home/u/.nvm/versions/node/v25.9.0/bin/node9" check --agent antigravity')
+    ).toBe(true);
+    expect(isNode9Hook('"/usr/local/bin/node9" log --agent copilot')).toBe(true);
+    expect(isNode9Hook('"C:/Users/u/node9" check')).toBe(true);
+  });
+
   it('still recognises the legacy unquoted form (backward compat)', () => {
     // Hooks already on disk in the old unquoted form must keep being
     // recognised as node9 hooks until the next self-heal rewrites them.
     expect(isNode9Hook('/usr/bin/node /path/cli.js check')).toBe(true);
+    expect(isNode9Hook('/usr/local/bin/node9 check')).toBe(true); // unquoted bare
     expect(isNode9Hook('node9 check')).toBe(true);
     expect(isNode9Hook('node9 log')).toBe(true);
   });
 
   it('does not match unrelated commands', () => {
     expect(isNode9Hook('echo hi')).toBe(false);
+    expect(isNode9Hook('echo node9 is cool')).toBe(false); // node9 not followed by check/log
     expect(isNode9Hook('mynode9 check')).toBe(false); // word-boundary
+    expect(isNode9Hook('"/usr/bin/mynode9checker" check')).toBe(false); // substring guard
     expect(isNode9Hook(undefined)).toBe(false);
   });
 });
