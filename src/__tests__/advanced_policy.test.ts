@@ -122,8 +122,10 @@ describe('Path-Based Policy (Advanced)', () => {
     expect((await evaluatePolicy('Bash', { command: 'echo "hello" | rm' })).decision).toBe(
       'review'
     );
-    // Escaped bypass attempt
-    expect((await evaluatePolicy('Bash', { command: 'r\\m -rf /' })).decision).toBe('review');
+    // Escaped bypass attempt: `r\m -rf /` de-obfuscates to `rm -rf /`, now caught
+    // by the AST fs-op detector as a catastrophic root delete (was 'review' before
+    // command-name de-obfuscation; hard 'block' is the correct, stronger verdict).
+    expect((await evaluatePolicy('Bash', { command: 'r\\m -rf /' })).decision).toBe('block');
   });
 });
 

@@ -56,6 +56,13 @@ describe('extractCanonicalFindings — per-line detectors', () => {
     expect(ast!.shieldLabel).toBe('Node9 (AST)');
   });
 
+  it("catches an OBFUSCATED destructive op (r''m -rf ~) via normalized DESTRUCTIVE_OP_RE", () => {
+    // The raw DESTRUCTIVE_OP_RE would miss r''m; normalization collapses it to
+    // `rm -rf ~` before the test, so the destructive-op finding still fires.
+    const out = extractCanonicalFindings(call({ args: { command: "r''m -rf ~" } }), baseCtx());
+    expect(out.some((f) => f.type === 'destructive-op')).toBe(true);
+  });
+
   it('suppresses regex smart rules whose name is in AST_FS_REGEX_RULES when bash AST runs', () => {
     // Even though the project-jail block-read-ssh smart rule would match the
     // substring inside this echo, AST returns null AND the suppression list

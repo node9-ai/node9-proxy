@@ -33,6 +33,7 @@ import {
   detectDangerousShellExec,
   isBashTool,
   AST_FS_REGEX_RULES,
+  normalizeCommandForPolicy,
 } from '../shell';
 import { analyzePipeChain } from '../policy/pipe-chain';
 import { classifyRuleSeverity, type Severity } from '../severity';
@@ -200,7 +201,7 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
  * and fails CI when the hash drifts without a version bump — forgetting
  * is loud, not silent.
  */
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v4';
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v5';
 
 /**
  * SHA-256 prefix of the detector-source files
@@ -212,7 +213,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v4';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'dbe0199dae0f29f6';
+export const CANONICAL_EXTRACTOR_HASH = 'a0e2bb339fe67e19';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
@@ -414,7 +415,11 @@ export function extractCanonicalFindings(
   }
 
   // ── Destructive op (rm -rf, DROP TABLE, force push, etc.) ────────────────
-  if (DESTRUCTIVE_OP_RE.test(command)) {
+  // Normalize first so quote/escape obfuscation (r''m, \rm) is de-obfuscated
+  // before the raw-pattern test — matching the live smart-rule path, which
+  // normalizes the command field. normalizeCommandForPolicy is memoized
+  // (shared AST cache), so this reuses any earlier parse of the same command.
+  if (command !== null && DESTRUCTIVE_OP_RE.test(normalizeCommandForPolicy(command))) {
     out.push(
       makeFinding({
         type: 'destructive-op',
