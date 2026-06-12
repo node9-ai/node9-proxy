@@ -11,6 +11,7 @@ import {
   detectDangerousShellExec,
   analyzeShellCommand,
   analyzeFsOperation,
+  analyzeSqlDestructive,
   isBashTool,
   AST_FS_REGEX_RULES,
   extractShellDestinations,
@@ -263,6 +264,21 @@ export async function evaluatePolicy(
         tier: 2,
         ruleName: fsVerdict.ruleName,
         ruleDescription: fsVerdict.reason,
+      };
+    }
+
+    // SQL-DDL via a real DB CLI — AST-aware so a grep/echo of "drop table" /
+    // "|mysql" no longer false-positives (the regex smart rule is suppressed for
+    // bash via AST_FS_REGEX_RULES). Mirrors the rm/sudo/chmod AST migrations.
+    const sqlVerdict = analyzeSqlDestructive(bashCommand);
+    if (sqlVerdict) {
+      return {
+        decision: sqlVerdict.verdict,
+        blockedByLabel: `Node9 (AST): ${sqlVerdict.ruleName}`,
+        reason: sqlVerdict.reason,
+        tier: 2,
+        ruleName: sqlVerdict.ruleName,
+        ruleDescription: sqlVerdict.description,
       };
     }
   }

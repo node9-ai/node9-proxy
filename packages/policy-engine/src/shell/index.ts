@@ -510,7 +510,54 @@ export const AST_FS_REGEX_RULES = new Set<string>([
   'shield:project-jail:block-read-aws',
   'shield:project-jail:block-read-env',
   'shield:project-jail:review-read-credentials',
+  // SQL-DDL is now owned by the AST detector (analyzeSqlDestructive) so the
+  // raw-regex smart rule is suppressed for bash — its cond1 read a grep
+  // alternation's `|` as a shell pipe (`grep "…|mysql…"` → false positive).
+  'review-drop-truncate-shell',
 ]);
+
+// Database CLIs that actually execute SQL. Detection requires one of these to be
+// a REAL command (analyzeShellCommand actions) — not a word inside a quoted grep
+// pattern — which is what makes this AST-aware instead of a raw-string match.
+const SQL_DB_CLIS = new Set<string>([
+  'psql',
+  'mysql',
+  'mariadb',
+  'sqlite3',
+  'sqlplus',
+  'cockroach',
+  'clickhouse-client',
+  'mongo',
+  'mongosh',
+]);
+const SQL_DDL_RE = /\b(DROP|TRUNCATE)\s+(TABLE|DATABASE|SCHEMA|INDEX)\b/i;
+
+/**
+ * AST-aware SQL-DDL detector. Fires only when a database CLI is an actual
+ * command in the line (its first-word, via analyzeShellCommand actions) AND the
+ * command carries a DROP/TRUNCATE DDL statement. This is the structural
+ * replacement for the FP-prone `review-drop-truncate-shell` regex rule, which
+ * matched a DB-CLI name and "DROP TABLE" anywhere in the raw string — so
+ * `grep -riE "…|mysql|drop table…"` (a read-only search) tripped it.
+ *
+ * Returns a 'review' verdict (DDL via a DB shell is human-approval-worthy but
+ * not auto-block) or null. Pure.
+ */
+export function analyzeSqlDestructive(
+  command: string
+): { ruleName: string; verdict: 'review'; reason: string; description: string } | null {
+  // Cheap pre-check before parsing — most commands have no DDL keyword.
+  if (!SQL_DDL_RE.test(command)) return null;
+  const { actions } = analyzeShellCommand(command);
+  if (!actions.some((a) => SQL_DB_CLIS.has(a))) return null; // no real DB CLI command
+  return {
+    ruleName: 'review-drop-truncate-shell',
+    verdict: 'review',
+    reason: 'SQL DDL destructive statement inside a shell command',
+    description:
+      'The AI wants to drop or truncate a database table via the shell. This permanently deletes the table structure or all its data.',
+  };
+}
 
 /**
  * True when `path` is under $HOME (~ or absolute /home/* or /root) AND not in

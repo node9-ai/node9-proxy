@@ -201,7 +201,7 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
  * and fails CI when the hash drifts without a version bump — forgetting
  * is loud, not silent.
  */
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v5';
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v6';
 
 /**
  * SHA-256 prefix of the detector-source files
