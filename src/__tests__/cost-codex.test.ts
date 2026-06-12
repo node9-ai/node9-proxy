@@ -1,59 +1,54 @@
 // src/__tests__/cost-codex.test.ts
-// GAP-3 Phase 2 — Codex cost source: OTel-log parsing + normalization.
+// cost-multi-agent Phase 1 — Codex cost source reads ~/.codex/sessions
+// (repointed from the dead ~/.codex/log/codex-tui.log path).
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { parseCodexUsageLine, codexSource } from '../cost-codex';
+import { parseCodexSession, codexSource } from '../cost-codex';
 
-// Real-shape sample line from ~/.codex/log/codex-tui.log.
-const SAMPLE =
-  '2026-05-17T09:29:53.357678Z  INFO session_loop{thread_id=019e3544-7c98-7cb2-b199-6c72e6bafa08}:' +
-  'turn{otel.name="session_task.turn" thread.id=019e3544-7c98-7cb2-b199-6c72e6bafa08 ' +
-  'turn.id=019e3544-8b99-7990-bb49-3b42778595cd model=gpt-5.4 codex.turn.reasoning_effort=medium ' +
-  'codex.turn.token_usage.input_tokens=46925 codex.turn.token_usage.cached_input_tokens=30848 ' +
-  'codex.turn.token_usage.non_cached_input_tokens=16077 codex.turn.token_usage.output_tokens=463 ' +
-  'codex.turn.token_usage.reasoning_output_tokens=65 codex.turn.token_usage.total_tokens=47388}:';
+// Real-shape codex session lines. total_token_usage is CUMULATIVE — the last
+// token_count carries the session's final totals.
+const SESSION = [
+  '{"type":"session_meta","payload":{"timestamp":"2026-06-11T17:29:40.000Z","id":"sess-abc","cwd":"/home/nadav/node9"}}',
+  '{"type":"turn_context","payload":{"model":"gpt-5.4","cwd":"/home/nadav/node9"}}',
+  '{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":300,"output_tokens":50}}}}',
+  '{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2000,"cached_input_tokens":800,"output_tokens":120}}}}',
+];
 
-describe('parseCodexUsageLine', () => {
-  it('maps Codex usage to DailyEntry with correct cached/non-cached split', () => {
-    const e = parseCodexUsageLine(SAMPLE)!;
+describe('parseCodexSession', () => {
+  it('takes the final cumulative usage and attributes model/cwd/runId', () => {
+    const e = parseCodexSession(SESSION)!;
     expect(e).not.toBeNull();
-    // THE TRAP: input must be non_cached (16077), NOT input_tokens (46925),
-    // and not mis-captured from the "input_tokens" substring inside
-    // non_cached_input_tokens / cached_input_tokens.
-    expect(e.inputTokens).toBe(16077);
-    expect(e.cacheReadTokens).toBe(30848);
-    expect(e.cacheWriteTokens).toBe(0); // OpenAI has no cache-write
-    expect(e.outputTokens).toBe(463); // includes reasoning; not double-counted
-    expect(e.runId).toBe('019e3544-7c98-7cb2-b199-6c72e6bafa08');
-    expect(e.date).toBe('2026-05-17');
-    expect(e.workingDir).toBe('');
-    expect(typeof e.costUSD).toBe('number');
-    expect(e.costUSD).toBeGreaterThanOrEqual(0);
+    // Last token_count wins (cumulative): input 2000, cached 800 → fresh 1200.
+    expect(e.inputTokens).toBe(1200);
+    expect(e.cacheReadTokens).toBe(800);
+    expect(e.outputTokens).toBe(120);
+    expect(e.cacheWriteTokens).toBe(0); // OpenAI: no cache-write
+    expect(e.date).toBe('2026-06-11');
+    expect(e.runId).toBe('sess-abc');
+    expect(e.workingDir).toBe('/home/nadav/node9');
+    expect(e.model).toMatch(/gpt-5/i);
+    expect(e.costUSD).toBeGreaterThan(0);
   });
 
-  it('falls back to (total - cached) when non_cached is absent', () => {
-    const line =
-      '2026-05-01T00:00:00.0Z INFO turn{model=gpt-5.4 ' +
-      'codex.turn.token_usage.input_tokens=1000 codex.turn.token_usage.cached_input_tokens=300 ' +
-      'codex.turn.token_usage.output_tokens=20}';
-    const e = parseCodexUsageLine(line)!;
-    expect(e.inputTokens).toBe(700); // 1000 - 300
-    expect(e.cacheReadTokens).toBe(300);
-    expect(e.outputTokens).toBe(20);
-  });
-
-  it('returns null for a non-usage line', () => {
-    expect(parseCodexUsageLine('2026-05-17T09:29:53Z INFO some unrelated log line')).toBeNull();
-  });
-
-  it('returns null when timestamp or model is missing', () => {
-    expect(parseCodexUsageLine('no-timestamp model=gpt-5.4 token_usage.input_tokens=5')).toBeNull();
+  it('returns null without a session_meta timestamp or any usage', () => {
+    expect(parseCodexSession(['{"type":"turn_context","payload":{"model":"gpt-5.4"}}'])).toBeNull();
     expect(
-      parseCodexUsageLine('2026-05-17T09:29:53Z token_usage.input_tokens=5 (no model)')
-    ).toBeNull();
+      parseCodexSession([
+        '{"type":"session_meta","payload":{"timestamp":"2026-06-11T00:00:00Z","id":"s"}}',
+      ])
+    ).toBeNull(); // meta but no token_count
+  });
+
+  it('still prices a session whose model field is absent (fallback, not $0)', () => {
+    const e = parseCodexSession([
+      '{"type":"session_meta","payload":{"timestamp":"2026-06-11T00:00:00Z","id":"s2"}}',
+      '{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500,"cached_input_tokens":0,"output_tokens":40}}}}',
+    ])!;
+    expect(e.inputTokens).toBe(500);
+    expect(e.costUSD).toBeGreaterThan(0);
   });
 });
 
@@ -74,28 +69,33 @@ describe('codexSource.collect', () => {
     }
   });
 
-  function writeLog(lines: string[]) {
-    const dir = path.join(TMP, '.codex', 'log');
+  function writeSession(y: string, m: string, d: string, name: string, lines: string[]) {
+    const dir = path.join(TMP, '.codex', 'sessions', y, m, d);
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'codex-tui.log'), lines.join('\n') + '\n');
+    fs.writeFileSync(path.join(dir, name), lines.join('\n') + '\n');
   }
 
-  it('available() reflects the log file presence', () => {
+  it('available() reflects the sessions dir presence', () => {
     expect(codexSource.available()).toBe(false);
-    writeLog([SAMPLE]);
+    writeSession('2026', '06', '11', 'rollout-a.jsonl', SESSION);
     expect(codexSource.available()).toBe(true);
   });
 
-  it('aggregates usage lines per (date, model, session)', () => {
-    writeLog([SAMPLE, SAMPLE, 'unrelated noise line']);
+  it('emits one DailyEntry per session file', () => {
+    writeSession('2026', '06', '11', 'rollout-a.jsonl', SESSION);
     const entries = codexSource.collect();
-    expect(entries).toHaveLength(1); // same date/model/thread → merged
-    expect(entries[0].inputTokens).toBe(16077 * 2);
-    expect(entries[0].cacheReadTokens).toBe(30848 * 2);
-    expect(entries[0].outputTokens).toBe(463 * 2);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].inputTokens).toBe(1200);
+    expect(entries[0].runId).toBe('sess-abc');
   });
 
-  it('returns [] when no codex log exists', () => {
+  it('returns [] when no sessions dir exists', () => {
     expect(codexSource.collect()).toEqual([]);
+  });
+
+  it('respects the sinceMs mtime cutoff', () => {
+    writeSession('2026', '06', '11', 'rollout-old.jsonl', SESSION);
+    const future = Date.now() + 60_000;
+    expect(codexSource.collect(future)).toEqual([]);
   });
 });
