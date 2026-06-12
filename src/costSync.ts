@@ -18,6 +18,7 @@ import { ensurePricingLoaded, pricingFor, normalizeModel } from './pricing/litel
 // there is no runtime circular dependency. See doc/cost-multi-agent-sources.md.
 import { codexSource } from './cost-codex.js';
 import { geminiSource } from './cost-gemini.js';
+import { copilotSource } from './cost-copilot.js';
 
 type DailyEntry = {
   date: string;
@@ -236,7 +237,7 @@ export const claudeSource: CostSource = {
 
 // Registry of all cost sources. Each is consulted by collectEntries() when
 // available(). Codex reads ~/.codex/log/codex-tui.log (see cost-codex.ts).
-const COST_SOURCES: CostSource[] = [claudeSource, codexSource, geminiSource];
+const COST_SOURCES: CostSource[] = [claudeSource, codexSource, geminiSource, copilotSource];
 
 /**
  * Collect cost entries across all available agents. Merges by
