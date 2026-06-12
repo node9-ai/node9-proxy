@@ -237,7 +237,12 @@ export const claudeSource: CostSource = {
 
 // Registry of all cost sources. Each is consulted by collectEntries() when
 // available(). Codex reads ~/.codex/log/codex-tui.log (see cost-codex.ts).
-const COST_SOURCES: CostSource[] = [claudeSource, codexSource, geminiSource, copilotSource];
+// The single upload registry. Must stay in parity with the agents the local
+// dashboard reads (tui/dashboard/data.ts: claude, codex, gemini) plus copilot —
+// a parity tripwire test guards against silent drift (the exact regression that
+// hid Codex/Gemini/Copilot cost from the cloud Report). See
+// doc/cost-multi-agent-sources.md Phase 4.
+export const COST_SOURCES: CostSource[] = [claudeSource, codexSource, geminiSource, copilotSource];
 
 /**
  * Collect cost entries across all available agents. Merges by
