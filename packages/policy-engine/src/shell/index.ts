@@ -153,7 +153,12 @@ function normalizeCommandForPolicyImpl(command: string): string {
   const f = parseShared(command);
   if (f === PARSE_FAIL) return command; // fail open for FPs, not FNs
   try {
+    // Two kinds of in-place edits, applied together right-to-left so offsets
+    // stay valid: (1) message-flag value strips (-m "msg" → -m ""), and
+    // (2) intra-word de-obfuscation rewrites (r''m → rm).
     const strips: Array<[number, number]> = [];
+    const rewrites: Array<[number, number, string]> = [];
+    const msgSpans = new Set<string>();
 
     syntax.Walk(f, (node: unknown) => {
       if (!node) return false;
@@ -163,6 +168,8 @@ function normalizeCommandForPolicyImpl(command: string): string {
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const args: any[] = n.Args || [];
+
+      // ── 1. Strip message-flag values (commit messages, descriptions) ──
       for (let i = 0; i < args.length - 1; i++) {
         // Check if this arg is a known message flag (single Lit word starting with -)
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -181,8 +188,14 @@ function normalizeCommandForPolicyImpl(command: string): string {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const quotedNode = nextParts[0] as any;
         const nt: string = syntax.NodeType(quotedNode);
+        const markStrip = (): void => {
+          const s = next.Pos().Offset();
+          const e = next.End().Offset();
+          strips.push([s, e]);
+          msgSpans.add(`${s}:${e}`); // exclude from de-obfuscation below
+        };
         if (nt === 'SglQuoted') {
-          strips.push([next.Pos().Offset(), next.End().Offset()]);
+          markStrip();
         } else if (nt === 'DblQuoted') {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const innerParts: any[] = quotedNode.Parts || [];
@@ -190,25 +203,48 @@ function normalizeCommandForPolicyImpl(command: string): string {
             innerParts.length === 0 ||
             innerParts.every((p: unknown) => syntax.NodeType(p) === 'Lit');
           if (allLit) {
-            strips.push([next.Pos().Offset(), next.End().Offset()]);
+            markStrip();
           } else if (innerParts.every((p: unknown) => isCatHeredocOrLit(p))) {
             // Pattern: -m "$(cat <<'EOF' … EOF)" — common for multi-line
             // commit messages. The heredoc body is a literal that the agent
             // intends as message text, so stripping it matches user intent.
             // Only strip when every dynamic part is a cat-heredoc (no $(date),
             // no $VAR mixed in) to avoid stripping intentional dynamic values.
-            strips.push([next.Pos().Offset(), next.End().Offset()]);
+            markStrip();
           }
         }
+      }
+
+      // ── 2. De-obfuscate command/arg tokens in place (r''m, \rm, pu''sh) ──
+      // Collapse intra-word quote/escape obfuscation so destructive rules match
+      // the real token. Only words that resolve to a SINGLE structural token
+      // (no whitespace) AND differ from their source are rewritten — never
+      // multi-word data strings (those keep their quotes) and never the
+      // message-flag values stripped above. Operators/positions are preserved,
+      // so the rules' command-boundary anchoring still holds.
+      for (const arg of args) {
+        const s = arg.Pos().Offset();
+        const e = arg.End().Offset();
+        if (msgSpans.has(`${s}:${e}`)) continue; // already a stripped message value
+        const resolved = resolveWordLiteral(arg);
+        if (resolved === null) continue; // dynamic ($VAR / $(...)) — leave as-is
+        const source = command.slice(s, e);
+        if (resolved === source) continue; // not obfuscated
+        if (resolved === '' || /\s/.test(resolved)) continue; // data string, not a token
+        rewrites.push([s, e, resolved]);
       }
       return true;
     });
 
-    if (strips.length === 0) return command;
-    strips.sort((a, b) => b[0] - a[0]); // end→start so earlier offsets stay valid
+    const edits: Array<[number, number, string]> = [
+      ...strips.map(([s, e]): [number, number, string] => [s, e, '""']),
+      ...rewrites,
+    ];
+    if (edits.length === 0) return command;
+    edits.sort((a, b) => b[0] - a[0]); // end→start so earlier offsets stay valid
     let result = command;
-    for (const [start, end] of strips) {
-      result = result.slice(0, start) + '""' + result.slice(end);
+    for (const [s, e, rep] of edits) {
+      result = result.slice(0, s) + rep + result.slice(e);
     }
     return result;
   } catch {
@@ -474,7 +510,54 @@ export const AST_FS_REGEX_RULES = new Set<string>([
   'shield:project-jail:block-read-aws',
   'shield:project-jail:block-read-env',
   'shield:project-jail:review-read-credentials',
+  // SQL-DDL is now owned by the AST detector (analyzeSqlDestructive) so the
+  // raw-regex smart rule is suppressed for bash — its cond1 read a grep
+  // alternation's `|` as a shell pipe (`grep "…|mysql…"` → false positive).
+  'review-drop-truncate-shell',
 ]);
+
+// Database CLIs that actually execute SQL. Detection requires one of these to be
+// a REAL command (analyzeShellCommand actions) — not a word inside a quoted grep
+// pattern — which is what makes this AST-aware instead of a raw-string match.
+const SQL_DB_CLIS = new Set<string>([
+  'psql',
+  'mysql',
+  'mariadb',
+  'sqlite3',
+  'sqlplus',
+  'cockroach',
+  'clickhouse-client',
+  'mongo',
+  'mongosh',
+]);
+const SQL_DDL_RE = /\b(DROP|TRUNCATE)\s+(TABLE|DATABASE|SCHEMA|INDEX)\b/i;
+
+/**
+ * AST-aware SQL-DDL detector. Fires only when a database CLI is an actual
+ * command in the line (its first-word, via analyzeShellCommand actions) AND the
+ * command carries a DROP/TRUNCATE DDL statement. This is the structural
+ * replacement for the FP-prone `review-drop-truncate-shell` regex rule, which
+ * matched a DB-CLI name and "DROP TABLE" anywhere in the raw string — so
+ * `grep -riE "…|mysql|drop table…"` (a read-only search) tripped it.
+ *
+ * Returns a 'review' verdict (DDL via a DB shell is human-approval-worthy but
+ * not auto-block) or null. Pure.
+ */
+export function analyzeSqlDestructive(
+  command: string
+): { ruleName: string; verdict: 'review'; reason: string; description: string } | null {
+  // Cheap pre-check before parsing — most commands have no DDL keyword.
+  if (!SQL_DDL_RE.test(command)) return null;
+  const { actions } = analyzeShellCommand(command);
+  if (!actions.some((a) => SQL_DB_CLIS.has(a))) return null; // no real DB CLI command
+  return {
+    ruleName: 'review-drop-truncate-shell',
+    verdict: 'review',
+    reason: 'SQL DDL destructive statement inside a shell command',
+    description:
+      'The AI wants to drop or truncate a database table via the shell. This permanently deletes the table structure or all its data.',
+  };
+}
 
 /**
  * True when `path` is under $HOME (~ or absolute /home/* or /root) AND not in
@@ -821,20 +904,27 @@ const FS_OP_CACHE_MAX = 5_000;
 const fsOpCache = new Map<string, FsOpVerdict | null>();
 
 export function analyzeFsOperation(command: string): FsOpVerdict | null {
+  // De-obfuscate command tokens first (r''m → rm, \rm → rm). Without this the
+  // raw-string prescreen below — and the AST command-name match — are dodged by
+  // trivial quote/escape tricks, since block-rm-rf-home is the AST's job (the
+  // equivalent regex smart rule is suppressed for bash; see policy/index.ts).
+  // normalizeCommandForPolicy is memoized + shares the AST cache, so this is
+  // cheap, and using the normalized string as the cache key dedups raw variants.
+  const normalized = normalizeCommandForPolicy(command);
   // Fast path — skip the AST parse when no fs-op tool keyword is present.
-  if (!FS_OP_PRESCREEN_RE.test(command)) return null;
-  if (fsOpCache.has(command)) {
-    const hit = fsOpCache.get(command) ?? null;
-    fsOpCache.delete(command);
-    fsOpCache.set(command, hit);
+  if (!FS_OP_PRESCREEN_RE.test(normalized)) return null;
+  if (fsOpCache.has(normalized)) {
+    const hit = fsOpCache.get(normalized) ?? null;
+    fsOpCache.delete(normalized);
+    fsOpCache.set(normalized, hit);
     return hit;
   }
-  const computed = analyzeFsOperationImpl(command);
+  const computed = analyzeFsOperationImpl(normalized);
   if (fsOpCache.size >= FS_OP_CACHE_MAX) {
     const oldest = fsOpCache.keys().next().value;
     if (oldest !== undefined) fsOpCache.delete(oldest);
   }
-  fsOpCache.set(command, computed);
+  fsOpCache.set(normalized, computed);
   return computed;
 }
 

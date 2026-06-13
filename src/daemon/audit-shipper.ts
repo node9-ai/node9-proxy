@@ -75,6 +75,10 @@ export interface WireRow {
   /** Linkage to the BE-origin AuditLog row written at /intercept time —
    *  the BE enriches that row instead of inserting a duplicate. */
   cloudRequestId?: string;
+  /** Context — where the action ran (event-detail Context block). */
+  workingDir?: string;
+  platform?: string;
+  shellType?: string;
 }
 
 /** Identity of the log file, so a rotated/recreated log resets the offset
@@ -163,6 +167,9 @@ export function buildWireRows(chunk: Buffer): { rows: WireRow[]; consumed: numbe
       ...(typeof parsed.dlpPattern === 'string' ? { dlpPattern: parsed.dlpPattern } : {}),
       ...(typeof parsed.dlpSample === 'string' ? { dlpSample: parsed.dlpSample } : {}),
       ...(cloudRequestId ? { cloudRequestId } : {}),
+      ...(typeof parsed.workingDir === 'string' ? { workingDir: parsed.workingDir } : {}),
+      ...(typeof parsed.platform === 'string' ? { platform: parsed.platform } : {}),
+      ...(typeof parsed.shellType === 'string' ? { shellType: parsed.shellType } : {}),
     });
   }
   return { rows, consumed: lastNl + 1 };

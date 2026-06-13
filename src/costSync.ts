@@ -14,9 +14,11 @@ const SYNC_INTERVAL_MS = 10 * 60 * 1000;
 // "your numbers are wrong" complaints when Anthropic / OpenAI / Google
 // ship a new model.
 import { ensurePricingLoaded, pricingFor, normalizeModel } from './pricing/litellm.js';
-// Codex cost source (GAP-3 Phase 2). Imports only types back from this module,
-// so there is no runtime circular dependency.
+// Codex + Gemini cost sources. Import only types back from this module, so
+// there is no runtime circular dependency. See doc/cost-multi-agent-sources.md.
 import { codexSource } from './cost-codex.js';
+import { geminiSource } from './cost-gemini.js';
+import { copilotSource } from './cost-copilot.js';
 
 type DailyEntry = {
   date: string;
@@ -235,7 +237,12 @@ export const claudeSource: CostSource = {
 
 // Registry of all cost sources. Each is consulted by collectEntries() when
 // available(). Codex reads ~/.codex/log/codex-tui.log (see cost-codex.ts).
-const COST_SOURCES: CostSource[] = [claudeSource, codexSource];
+// The single upload registry. Must stay in parity with the agents the local
+// dashboard reads (tui/dashboard/data.ts: claude, codex, gemini) plus copilot —
+// a parity tripwire test guards against silent drift (the exact regression that
+// hid Codex/Gemini/Copilot cost from the cloud Report). See
+// doc/cost-multi-agent-sources.md Phase 4.
+export const COST_SOURCES: CostSource[] = [claudeSource, codexSource, geminiSource, copilotSource];
 
 /**
  * Collect cost entries across all available agents. Merges by
@@ -270,6 +277,73 @@ export function collectEntries(sinceMs?: number): DailyEntry[] {
   return [...combined.values()];
 }
 
+// The SaaS /cost-sync ingest caps each POST at 200 rows (abuse guard). A single
+// machine's ALL-HISTORY cost across 4 agents easily exceeds that (Claude alone
+// 200+), and collectEntries() returns Claude first — so one oversized POST
+// silently drops every non-Claude agent past row 200, and they never land in
+// CostEntry. Batch under the cap so every row is ingested across multiple
+// POSTs (the SaaS upserts per row, so batches accumulate). Keep it < the cap.
+// See doc/cost-multi-agent-sources.md.
+export const COST_BATCH_SIZE = 200;
+
+/** Split into chunks of at most `size`, preserving order, covering every item. */
+export function chunk<T>(arr: T[], size: number): T[][] {
+  if (size <= 0) return arr.length ? [arr] : [];
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+/**
+ * POST cost entries to /cost-sync in batches of <= COST_BATCH_SIZE so none are
+ * dropped by the SaaS's per-request cap. A failing batch is logged and does not
+ * abort the rest. Exported for unit tests.
+ */
+export async function postCostBatches(
+  apiUrl: string,
+  apiKey: string,
+  machineId: string,
+  entries: DailyEntry[]
+): Promise<void> {
+  for (const batch of chunk(entries, COST_BATCH_SIZE)) {
+    try {
+      const res = await fetch(`${apiUrl}/cost-sync`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({ machineId, entries: batch }),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) {
+        fs.appendFileSync(HOOK_DEBUG_LOG, `[cost-sync] HTTP ${res.status}\n`);
+      } else {
+        // Guard 2: the SaaS reports { received, stored }. If it stored fewer
+        // rows than we sent, rows were dropped at ingest (e.g. a future cap) —
+        // make that LOUD instead of silent. Tolerates an old SaaS with no
+        // json()/stored field (treated as no shortfall). See
+        // doc/cost-ingestion-fidelity.md.
+        let stored: unknown;
+        try {
+          const respBody =
+            typeof res.json === 'function'
+              ? ((await res.json()) as { stored?: unknown } | null)
+              : null;
+          stored = respBody?.stored;
+        } catch {
+          // non-JSON / old SaaS — no shortfall info, nothing to log
+        }
+        if (typeof stored === 'number' && stored < batch.length) {
+          fs.appendFileSync(
+            HOOK_DEBUG_LOG,
+            `[cost-sync] dropped ${batch.length - stored} of ${batch.length} rows\n`
+          );
+        }
+      }
+    } catch (err) {
+      fs.appendFileSync(HOOK_DEBUG_LOG, `[cost-sync] ${(err as Error).message}\n`);
+    }
+  }
+}
+
 async function syncCost(): Promise<void> {
   const creds = getCredentials();
   if (!creds?.apiKey || !creds?.apiUrl) return;
@@ -288,19 +362,7 @@ async function syncCost(): Promise<void> {
   } catch {}
   const machineId = `${os.hostname()}:${username}`;
 
-  try {
-    const res = await fetch(`${creds.apiUrl}/cost-sync`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${creds.apiKey}` },
-      body: JSON.stringify({ machineId, entries }),
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!res.ok) {
-      fs.appendFileSync(HOOK_DEBUG_LOG, `[cost-sync] HTTP ${res.status}\n`);
-    }
-  } catch (err) {
-    fs.appendFileSync(HOOK_DEBUG_LOG, `[cost-sync] ${(err as Error).message}\n`);
-  }
+  await postCostBatches(creds.apiUrl, creds.apiKey, machineId, entries);
 }
 
 export function startCostSync(): void {

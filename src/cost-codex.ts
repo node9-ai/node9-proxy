@@ -1,18 +1,18 @@
 // src/cost-codex.ts
-// GAP-3 Phase 2 — Codex cost source.
+// GAP-3 / cost-multi-agent Phase 1 — Codex cost source (UPLOAD path).
 //
-// Codex emits per-turn token usage as an OpenTelemetry span, persisted both in
-// ~/.codex/logs_2.sqlite and ~/.codex/log/codex-tui.log. We parse the LOG (plain
-// fs + regex) rather than the SQLite DB: it carries the identical span, avoids a
-// node:sqlite dependency (Node-version + dual-CJS/ESM-build fragility, and the
-// repo's no-require lint rule), and is trivially testable. Full-history SQLite
-// reading is a possible future enhancement.
+// Repointed from the old ~/.codex/log/codex-tui.log (a path current Codex
+// builds no longer write) to ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl —
+// the same source the local dashboard reads. Each session file carries:
+//   { type:'session_meta', payload:{ timestamp, id, cwd, model_provider } }
+//   { type:'turn_context',  payload:{ model, cwd } }
+//   { type:'event_msg', payload:{ type:'token_count',
+//       info:{ total_token_usage:{ input_tokens, cached_input_tokens,
+//       output_tokens } } } }   // CUMULATIVE — last one wins
 //
-// Normalization (why an adapter is needed — Codex reports usage unlike Claude):
-//   Codex `input_tokens` INCLUDES cached. To avoid charging cached tokens at the
-//   full input rate, we map non_cached_input_tokens → inputTokens (full rate) and
-//   cached_input_tokens → cacheReadTokens. OpenAI has no Anthropic-style cache
-//   write → cacheWriteTokens = 0. output_tokens already includes reasoning.
+// One DailyEntry per session: dated at session start, attributed to the
+// session's model + cwd + id (runId). total_token_usage is cumulative, so we
+// take the final value. See doc/cost-multi-agent-sources.md.
 
 import fs from 'fs';
 import os from 'os';
@@ -20,56 +20,116 @@ import path from 'path';
 import { pricingFor, normalizeModel } from './pricing/litellm.js';
 import type { CostSource, DailyEntry } from './costSync.js';
 
-function codexLogPath(): string {
-  return path.join(os.homedir(), '.codex', 'log', 'codex-tui.log');
+export function codexSessionsDir(): string {
+  return path.join(os.homedir(), '.codex', 'sessions');
 }
 
-// Regexes anchor on the `token_usage.` prefix so `input_tokens=` inside
-// `non_cached_input_tokens=` / `cached_input_tokens=` is never mis-captured.
-const RE_INPUT = /token_usage\.input_tokens=(\d+)/;
-const RE_CACHED = /token_usage\.cached_input_tokens=(\d+)/;
-const RE_NON_CACHED = /token_usage\.non_cached_input_tokens=(\d+)/;
-const RE_OUTPUT = /token_usage\.output_tokens=(\d+)/;
-const RE_MODEL = /\bmodel=([^\s}]+)/;
-const RE_THREAD = /\bthread\.id=([0-9a-fA-F-]+)/;
-const RE_DATE = /^(\d{4}-\d{2}-\d{2})T/;
+// Codex/gpt-5 fallback rates [input, output, cacheWrite, cacheRead] per token —
+// used when the exact model isn't in the LiteLLM table so we never undercount a
+// newer Codex model to $0. Mirrors the local reader's gpt-5 assumption.
+const CODEX_FALLBACK: readonly [number, number, number, number] = [5e-6, 15e-6, 0, 2.5e-6];
+function codexPriceFor(model: string): readonly [number, number, number, number] {
+  return pricingFor(model) ?? CODEX_FALLBACK;
+}
+
+// Walk ~/.codex/sessions/<YYYY>/<MM>/<DD>/*.jsonl → absolute paths.
+function listCodexSessionFiles(base: string): string[] {
+  const out: string[] = [];
+  for (const y of safeReaddir(base)) {
+    const yp = path.join(base, y);
+    if (!isDir(yp)) continue;
+    for (const m of safeReaddir(yp)) {
+      const mp = path.join(yp, m);
+      if (!isDir(mp)) continue;
+      for (const d of safeReaddir(mp)) {
+        const dp = path.join(mp, d);
+        if (!isDir(dp)) continue;
+        for (const f of safeReaddir(dp)) {
+          if (f.endsWith('.jsonl')) out.push(path.join(dp, f));
+        }
+      }
+    }
+  }
+  return out;
+}
+
+function safeReaddir(dir: string): string[] {
+  try {
+    return fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+}
+function isDir(p: string): boolean {
+  try {
+    return fs.statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
 
 /**
- * Parse one codex-tui.log line into a DailyEntry, or null if it isn't a
- * token-usage line (or lacks a timestamp/model). Pure — exported for unit tests.
+ * Parse the lines of one codex session file into a single DailyEntry, or null
+ * when the session has no usable token usage / timestamp. Pure — exported for
+ * unit tests.
  */
-export function parseCodexUsageLine(line: string): DailyEntry | null {
-  if (!line.includes('token_usage')) return null;
-  const date = line.match(RE_DATE)?.[1];
-  if (!date) return null;
-  const model = line.match(RE_MODEL)?.[1];
-  if (!model) return null;
+export function parseCodexSession(lines: string[]): DailyEntry | null {
+  let sessionStart = '';
+  let runId = '';
+  let cwd = '';
+  let model = '';
+  let input = 0;
+  let cached = 0;
+  let output = 0;
+  let sawUsage = false;
 
-  const num = (re: RegExp): number => {
-    const m = line.match(re);
-    return m ? Number(m[1]) : 0;
-  };
-  const totalInput = num(RE_INPUT);
-  const cached = num(RE_CACHED);
-  const nonCached = num(RE_NON_CACHED);
-  const output = num(RE_OUTPUT);
+  for (const raw of lines) {
+    if (!raw.trim()) continue;
+    let entry: { type?: string; payload?: Record<string, unknown> };
+    try {
+      entry = JSON.parse(raw) as typeof entry;
+    } catch {
+      continue;
+    }
+    const p = (entry.payload ?? {}) as Record<string, unknown>;
 
-  // Full-rate input = non_cached when present; fall back to (total - cached).
-  const inputTokens = nonCached || Math.max(0, totalInput - cached);
-  if (inputTokens === 0 && output === 0 && cached === 0) return null; // no real usage
+    if (entry.type === 'session_meta') {
+      if (!sessionStart && typeof p['timestamp'] === 'string') sessionStart = p['timestamp'];
+      if (!runId && typeof p['id'] === 'string') runId = p['id'];
+      if (!cwd && typeof p['cwd'] === 'string') cwd = p['cwd'];
+      continue;
+    }
+    if (entry.type === 'turn_context') {
+      if (typeof p['model'] === 'string') model = p['model']; // last wins
+      if (!cwd && typeof p['cwd'] === 'string') cwd = p['cwd'];
+      continue;
+    }
+    if (entry.type === 'event_msg' && p['type'] === 'token_count') {
+      const info = (p['info'] ?? {}) as Record<string, unknown>;
+      const usage = (info['total_token_usage'] ?? {}) as Record<string, number>;
+      // Cumulative totals — keep the latest defined values.
+      if (typeof usage['input_tokens'] === 'number') input = usage['input_tokens'];
+      if (typeof usage['cached_input_tokens'] === 'number') cached = usage['cached_input_tokens'];
+      if (typeof usage['output_tokens'] === 'number') output = usage['output_tokens'];
+      sawUsage = true;
+    }
+  }
 
-  const runId = line.match(RE_THREAD)?.[1] ?? '';
-  const norm = normalizeModel(model);
-  const p = pricingFor(model); // [in, out, cacheWrite, cacheRead]
-  const costUSD = p ? inputTokens * p[0] + output * p[1] + cached * p[3] : 0;
+  if (!sessionStart || !sawUsage) return null;
+  const nonCached = Math.max(0, input - cached);
+  if (nonCached === 0 && output === 0 && cached === 0) return null;
+
+  const norm = normalizeModel(model || 'gpt-5');
+  const [pin, pout, , pcr] = codexPriceFor(model || 'gpt-5');
+  const costUSD = nonCached * pin + output * pout + cached * pcr;
 
   return {
-    date,
+    date: sessionStart.slice(0, 10),
     model: norm,
-    workingDir: '', // Codex span carries no cwd — attribution is by runId (thread)
+    workingDir: cwd,
     runId,
     costUSD,
-    inputTokens,
+    inputTokens: nonCached,
     outputTokens: output,
     cacheReadTokens: cached,
     cacheWriteTokens: 0,
@@ -80,35 +140,27 @@ export const codexSource: CostSource = {
   id: 'codex',
   available(): boolean {
     try {
-      return fs.existsSync(codexLogPath());
+      return fs.existsSync(codexSessionsDir());
     } catch {
       return false;
     }
   },
   collect(sinceMs?: number): DailyEntry[] {
-    const file = codexLogPath();
-    let content: string;
-    try {
-      // Whole-file mtime cutoff (cheap). The log is appended continuously, so a
-      // recent cutoff rarely skips it; per-line filtering below is the precise gate.
-      if (sinceMs !== undefined && fs.statSync(file).mtimeMs < sinceMs) return [];
-      content = fs.readFileSync(file, 'utf8');
-    } catch {
-      return [];
-    }
-
+    const base = codexSessionsDir();
     const combined = new Map<string, DailyEntry>();
-    for (const line of content.split('\n')) {
-      if (!line.includes('token_usage')) continue;
-      // Per-line timestamp cutoff (the log spans many days in one file).
-      if (sinceMs !== undefined) {
-        const tsFull = line.match(/^(\S+)\s/)?.[1];
-        if (tsFull) {
-          const t = Date.parse(tsFull);
-          if (!Number.isNaN(t) && t < sinceMs) continue;
-        }
+    for (const file of listCodexSessionFiles(base)) {
+      try {
+        if (sinceMs !== undefined && fs.statSync(file).mtimeMs < sinceMs) continue;
+      } catch {
+        continue;
       }
-      const e = parseCodexUsageLine(line);
+      let content: string;
+      try {
+        content = fs.readFileSync(file, 'utf8');
+      } catch {
+        continue;
+      }
+      const e = parseCodexSession(content.split('\n'));
       if (!e) continue;
       const key = `${e.date}::${e.model}::${e.workingDir ?? ''}::${e.runId ?? ''}`;
       const prev = combined.get(key);
