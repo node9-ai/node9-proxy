@@ -32,7 +32,7 @@ import {
   type SessionToolCall,
 } from '@node9/policy-engine';
 import { getCredentials, getConfig } from './config/index.js';
-import { parseJSONLFile, decodeProjectDirName } from './costSync.js';
+import { collectEntries, decodeProjectDirName } from './costSync.js';
 
 interface UploadHistoryOptions {
   /** Window: '3m' | '6m' | '1y' | 'YYYY-MM-DD' | 'all'. */
@@ -256,11 +256,14 @@ export async function runUploadHistory(opts: UploadHistoryOptions): Promise<void
   let linesParsed = 0;
   let linesSkipped = 0;
 
-  // Cost path — re-uses the existing parser. Walk the same files,
-  // collect entries, post via the existing /cost-sync endpoint.
-  const dailyEntries: Array<
-    ReturnType<typeof parseJSONLFile> extends Map<string, infer T> ? T : never
-  > = [];
+  // Cost path — ALL agents (claude/codex/gemini/copilot), the same source the
+  // daemon cost-sync uses. Previously this re-parsed only ~/.claude/projects so
+  // `--upload-history` backfilled Claude cost only; collectEntries covers every
+  // agent. mtime cutoff for cheap file skipping, then the per-entry date window
+  // (entry.date is YYYY-MM-DD). See doc/cost-ingestion-fidelity.md.
+  const dailyEntries = collectEntries(cutoffMs).filter(
+    (e) => cutoffMs === 0 || Date.parse(e.date + 'T00:00:00Z') >= cutoffMs
+  );
 
   // Loop-detection settings for backfill. The live hook's config (default
   // threshold=5, windowSeconds=120) is the wrong fit for historical data:
@@ -352,16 +355,8 @@ export async function runUploadHistory(opts: UploadHistoryOptions): Promise<void
       }
     }
 
-    // Cost rows — same parser the live cost-sync uses.
-    const fallbackWorkingDir = decodeProjectDirName(projectDir);
-    const dailyMap = parseJSONLFile(filePath, fallbackWorkingDir);
-    for (const entry of dailyMap.values()) {
-      // Filter to the same time window — the entry's `date` is YYYY-MM-DD.
-      if (cutoffMs > 0 && Date.parse(entry.date + 'T00:00:00Z') < cutoffMs) {
-        continue;
-      }
-      dailyEntries.push(entry);
-    }
+    // (Cost is collected once via collectEntries() above — all agents — not
+    // re-parsed per Claude file here.)
   }
 
   if (filesScanned === 0) {

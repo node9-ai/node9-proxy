@@ -315,6 +315,28 @@ export async function postCostBatches(
       });
       if (!res.ok) {
         fs.appendFileSync(HOOK_DEBUG_LOG, `[cost-sync] HTTP ${res.status}\n`);
+      } else {
+        // Guard 2: the SaaS reports { received, stored }. If it stored fewer
+        // rows than we sent, rows were dropped at ingest (e.g. a future cap) —
+        // make that LOUD instead of silent. Tolerates an old SaaS with no
+        // json()/stored field (treated as no shortfall). See
+        // doc/cost-ingestion-fidelity.md.
+        let stored: unknown;
+        try {
+          const respBody =
+            typeof res.json === 'function'
+              ? ((await res.json()) as { stored?: unknown } | null)
+              : null;
+          stored = respBody?.stored;
+        } catch {
+          // non-JSON / old SaaS — no shortfall info, nothing to log
+        }
+        if (typeof stored === 'number' && stored < batch.length) {
+          fs.appendFileSync(
+            HOOK_DEBUG_LOG,
+            `[cost-sync] dropped ${batch.length - stored} of ${batch.length} rows\n`
+          );
+        }
       }
     } catch (err) {
       fs.appendFileSync(HOOK_DEBUG_LOG, `[cost-sync] ${(err as Error).message}\n`);

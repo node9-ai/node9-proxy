@@ -112,6 +112,54 @@ describe('cost upload batching (survives the SaaS 200-row cap)', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2); // second batch still attempted
     vi.unstubAllGlobals();
   });
+
+  // ── Guard 2: observe a server-side shortfall ────────────────────────────
+  const okWith = (body: unknown) => ({ ok: true, json: () => Promise.resolve(body) });
+  const logOf = (spy: ReturnType<typeof vi.spyOn>) =>
+    spy.mock.calls.map((c: unknown[]) => String(c[1])).join('');
+
+  it('logs a shortfall when the SaaS stored fewer rows than were sent', async () => {
+    const appendSpy = vi.spyOn(fs, 'appendFileSync').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(okWith({ received: 200, stored: 150 })));
+    await postCostBatches(
+      'https://api.example',
+      'k',
+      'mach',
+      Array.from({ length: 200 }, () => row('claude-opus-4-8'))
+    );
+    expect(logOf(appendSpy)).toMatch(/dropped 50 of 200/);
+    appendSpy.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
+  it('does not log when stored === sent', async () => {
+    const appendSpy = vi.spyOn(fs, 'appendFileSync').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(okWith({ received: 10, stored: 10 })));
+    await postCostBatches(
+      'https://api.example',
+      'k',
+      'mach',
+      Array.from({ length: 10 }, () => row('claude-opus-4-8'))
+    );
+    expect(logOf(appendSpy)).not.toMatch(/dropped/);
+    appendSpy.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
+  it('tolerates an old SaaS response with no stored field (no false shortfall)', async () => {
+    const appendSpy = vi.spyOn(fs, 'appendFileSync').mockImplementation(() => {});
+    // Old SaaS: { ok: true } with no `stored` (and historically no json()).
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }));
+    await postCostBatches(
+      'https://api.example',
+      'k',
+      'mach',
+      Array.from({ length: 5 }, () => row('claude-opus-4-8'))
+    );
+    expect(logOf(appendSpy)).not.toMatch(/dropped/);
+    appendSpy.mockRestore();
+    vi.unstubAllGlobals();
+  });
 });
 
 describe('decodeProjectDirName', () => {
