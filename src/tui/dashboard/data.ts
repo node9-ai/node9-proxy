@@ -795,12 +795,12 @@ export async function loadReportAuditAsync(period: ReportPeriod): Promise<Aggreg
   const geminiTmpDir = path.join(os.homedir(), '.gemini', 'tmp');
   const { start, end } = getDateRange(period, new Date());
   const entries = await readAuditEntriesAsync();
-  // Prime the LiteLLM pricing cache once before the cost readers so this async
-  // surface resolves prices against the SAME fresh table the upload path uses
-  // (costSync.ts also calls ensurePricingLoaded). Without this, pricingFor falls
-  // back to the bundled snapshot and could lag a LiteLLM rate change. Idempotent
-  // + fail-soft (bundled fallback) so it never blocks the dashboard.
-  await ensurePricingLoaded();
+  // Warm the LiteLLM pricing cache for the cost readers, fire-and-forget — so
+  // the dashboard NEVER blocks on a (possibly cold) network fetch. This render
+  // uses whatever's cached now (the bundled snapshot if cold); the background
+  // refresh populates memCache so the next render is fresh. `void` is safe
+  // because ensurePricingLoaded is fully fail-soft and never rejects.
+  void ensurePricingLoaded();
   const claudeCost = await loadClaudeCostAsync(start, end, claudeProjectsDir);
   const codexCost = await loadCodexCostAsync(start, end, codexSessionsDir);
   const geminiCost = await loadGeminiCostAsync(start, end, geminiTmpDir);
