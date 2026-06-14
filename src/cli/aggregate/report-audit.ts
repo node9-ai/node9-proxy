@@ -21,7 +21,8 @@ import os from 'os';
 import path from 'path';
 
 import { decodeProjectDirName } from '../../costSync';
-import { pricingFor } from '../../pricing/litellm';
+import { pricingFor, normalizeModel } from '../../pricing/litellm';
+import { codexPriceFor } from '../../cost-codex';
 import type { BuildReportJsonInput, ReportPeriod } from '../render/report-json';
 
 // ---------------------------------------------------------------------------
@@ -363,6 +364,7 @@ export interface ClaudeCostData {
 export interface CodexCostData {
   total: number;
   byDay: Map<string, number>;
+  byModel: Map<string, number>;
   toolCalls: number;
 }
 
@@ -551,6 +553,7 @@ interface CodexCostAccumulator {
   total: number;
   toolCalls: number;
   byDay: Map<string, number>;
+  byModel: Map<string, number>;
 }
 
 /** Walk one Codex session file and fold cost into `acc`. Per-file body
@@ -569,6 +572,7 @@ function processCodexCostFile(
   }
 
   let sessionStart = '';
+  let model = '';
   let lastTotalInput = 0;
   let lastTotalCached = 0;
   let lastTotalOutput = 0;
@@ -590,6 +594,12 @@ function processCodexCostFile(
       continue;
     }
 
+    // Codex carries the model on turn_context; last-wins, matching cost-codex.
+    if (entry.type === 'turn_context' && typeof p['model'] === 'string') {
+      model = p['model'];
+      continue;
+    }
+
     if (entry.type === 'event_msg' && p['type'] === 'token_count') {
       const info = (p['info'] ?? {}) as Record<string, unknown>;
       const usage = (info['total_token_usage'] ?? {}) as Record<string, number>;
@@ -607,12 +617,17 @@ function processCodexCostFile(
   const ts = new Date(sessionStart);
   if (ts < start || ts > end) return;
 
+  // Price per-model via the SHARED codexPriceFor (pricingFor + fallback) — the
+  // SAME source the upload path uses — instead of a flat hardcoded gpt-5 rate.
   const nonCached = Math.max(0, lastTotalInput - lastTotalCached);
-  const cost = nonCached * 5e-6 + lastTotalCached * 2.5e-6 + lastTotalOutput * 15e-6;
+  const [pin, pout, , pcr] = codexPriceFor(model || 'gpt-5');
+  const cost = nonCached * pin + lastTotalCached * pcr + lastTotalOutput * pout;
   acc.total += cost;
   acc.toolCalls += sessionToolCalls;
   const dateKey = sessionStart.slice(0, 10);
   acc.byDay.set(dateKey, (acc.byDay.get(dateKey) ?? 0) + cost);
+  const normModel = normalizeModel(model || 'gpt-5');
+  acc.byModel.set(normModel, (acc.byModel.get(normModel) ?? 0) + cost);
 }
 
 /** Build the flat list of session JSONL paths under `sessionsBase`. The
@@ -655,17 +670,28 @@ function listCodexSessionFiles(sessionsBase: string): string[] {
   return jsonlFiles;
 }
 
-function loadCodexCost(
-  start: Date,
-  end: Date,
-  sessionsBase: string
-): { total: number; byDay: Map<string, number>; toolCalls: number } {
-  const acc: CodexCostAccumulator = { total: 0, toolCalls: 0, byDay: new Map() };
+/** Merge per-model cost maps (e.g. Claude + Codex) into one for the report's
+ *  byModel breakdown. Keys don't collide across agents (claude vs gpt / o-series). */
+function mergeByModel(...maps: Array<Map<string, number>>): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const m of maps) {
+    for (const [k, v] of m) out.set(k, (out.get(k) ?? 0) + v);
+  }
+  return out;
+}
+
+function loadCodexCost(start: Date, end: Date, sessionsBase: string): CodexCostData {
+  const acc: CodexCostAccumulator = {
+    total: 0,
+    toolCalls: 0,
+    byDay: new Map(),
+    byModel: new Map(),
+  };
   const files = listCodexSessionFiles(sessionsBase);
   for (const filePath of files) {
     processCodexCostFile(filePath, start, end, acc);
   }
-  return { total: acc.total, byDay: acc.byDay, toolCalls: acc.toolCalls };
+  return { total: acc.total, byDay: acc.byDay, byModel: acc.byModel, toolCalls: acc.toolCalls };
 }
 
 /** Async chunked variant — yields between files. Codex sessions are
@@ -676,7 +702,12 @@ export async function loadCodexCostAsync(
   end: Date,
   sessionsBase: string
 ): Promise<CodexCostData> {
-  const acc: CodexCostAccumulator = { total: 0, toolCalls: 0, byDay: new Map() };
+  const acc: CodexCostAccumulator = {
+    total: 0,
+    toolCalls: 0,
+    byDay: new Map(),
+    byModel: new Map(),
+  };
   const files = listCodexSessionFiles(sessionsBase);
   // Yield every CHUNK_SIZE files rather than every file — per-file work is
   // small, and yielding too aggressively adds scheduling overhead.
@@ -687,7 +718,7 @@ export async function loadCodexCostAsync(
       await new Promise((resolve) => setImmediate(resolve));
     }
   }
-  return { total: acc.total, byDay: acc.byDay, toolCalls: acc.toolCalls };
+  return { total: acc.total, byDay: acc.byDay, byModel: acc.byModel, toolCalls: acc.toolCalls };
 }
 
 // ---------------------------------------------------------------------------
@@ -1167,7 +1198,7 @@ export function aggregateReportFromAudit(
       cacheWriteTokens: claudeCost.cacheWriteTokens,
       cacheReadTokens: claudeCost.cacheReadTokens + geminiCost.cacheReadTokens,
       byDay: claudeCost.byDay,
-      byModel: claudeCost.byModel,
+      byModel: mergeByModel(claudeCost.byModel, codexCost.byModel),
       byProject: claudeCost.byProject,
     },
     toolMap,

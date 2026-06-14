@@ -25,10 +25,16 @@ export function codexSessionsDir(): string {
 }
 
 // Codex/gpt-5 fallback rates [input, output, cacheWrite, cacheRead] per token —
-// used when the exact model isn't in the LiteLLM table so we never undercount a
-// newer Codex model to $0. Mirrors the local reader's gpt-5 assumption.
+// used only when the model isn't in the LiteLLM table (bundled now carries the
+// gpt-5 family + o-series), so we never undercount a brand-new Codex model to $0.
 const CODEX_FALLBACK: readonly [number, number, number, number] = [5e-6, 15e-6, 0, 2.5e-6];
-function codexPriceFor(model: string): readonly [number, number, number, number] {
+/**
+ * The SINGLE Codex per-token price source — `pricingFor` (LiteLLM) with a
+ * conservative fallback for unknown models. Used by the upload path AND by the
+ * local `node9 report` Codex reader (cli/aggregate/report-audit.ts), so both
+ * price Codex per-model the same way instead of a flat hardcoded gpt-5 rate.
+ */
+export function codexPriceFor(model: string): readonly [number, number, number, number] {
   return pricingFor(model) ?? CODEX_FALLBACK;
 }
 
