@@ -25,6 +25,7 @@ import {
   loadGeminiCostAsync,
   type AggregateResult,
 } from '../../cli/aggregate/report-audit.js';
+import { ensurePricingLoaded } from '../../pricing/litellm.js';
 import {
   scanClaudeHistoryAsync,
   scanGeminiHistory,
@@ -794,6 +795,12 @@ export async function loadReportAuditAsync(period: ReportPeriod): Promise<Aggreg
   const geminiTmpDir = path.join(os.homedir(), '.gemini', 'tmp');
   const { start, end } = getDateRange(period, new Date());
   const entries = await readAuditEntriesAsync();
+  // Prime the LiteLLM pricing cache once before the cost readers so this async
+  // surface resolves prices against the SAME fresh table the upload path uses
+  // (costSync.ts also calls ensurePricingLoaded). Without this, pricingFor falls
+  // back to the bundled snapshot and could lag a LiteLLM rate change. Idempotent
+  // + fail-soft (bundled fallback) so it never blocks the dashboard.
+  await ensurePricingLoaded();
   const claudeCost = await loadClaudeCostAsync(start, end, claudeProjectsDir);
   const codexCost = await loadCodexCostAsync(start, end, codexSessionsDir);
   const geminiCost = await loadGeminiCostAsync(start, end, geminiTmpDir);

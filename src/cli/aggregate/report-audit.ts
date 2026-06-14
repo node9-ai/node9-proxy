@@ -314,13 +314,21 @@ function isDlp(checkedBy: string | undefined): boolean {
 
 /** Claude per-token pricing, sourced from the SHARED `pricingFor` table
  *  (LiteLLM-backed) — the *same* source the upload path (`costSync`) uses, so
- *  local `node9 report` and cloud Report can never diverge on price. This used
- *  to be a hardcoded table that drifted: `claude-opus-4` read $15/M locally vs
- *  the authoritative $5/M upstream (a silent 3× gap on every opus-4 session,
- *  hidden behind the reconcile net's magnitude band). `pricingFor` also does
- *  better model-name matching (longest-key-wins + date/`@` suffix handling).
- *  Returns the `{i,o,cw,cr}` shape the cost walker expects; null when unknown.
- *  Exported for the regression test that pins it to `pricingFor`. */
+ *  local and cloud no longer carry independent price tables that drift. This
+ *  used to be a hardcoded table that did exactly that: `claude-opus-4` read
+ *  $15/M locally vs the authoritative $5/M upstream (a silent 3× gap on every
+ *  opus-4 session, hidden behind the reconcile net's magnitude band).
+ *
+ *  Caveat: `pricingFor` resolves against the in-memory LiteLLM cache when it's
+ *  been primed (`ensurePricingLoaded`), else the bundled snapshot. The upload
+ *  path and the async dashboard reader prime it; the *synchronous* CLI report
+ *  walker does not, so it resolves against the bundled snapshot. They agree as
+ *  long as the bundle tracks LiteLLM (it's the documented fallback), but a
+ *  freshly-changed LiteLLM rate could briefly differ until the bundle updates.
+ *
+ *  `pricingFor` also does better model-name matching (longest-key-wins +
+ *  date/`@` suffix handling). Returns the `{i,o,cw,cr}` shape the cost walker
+ *  expects; null when unknown. Exported for the regression test. */
 export function claudeModelPrice(
   model: string
 ): { i: number; o: number; cw: number; cr: number } | null {
