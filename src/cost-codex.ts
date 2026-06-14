@@ -38,6 +38,21 @@ export function codexPriceFor(model: string): readonly [number, number, number, 
   return pricingFor(model) ?? CODEX_FALLBACK;
 }
 
+/**
+ * The SINGLE Codex cost arithmetic — per-session USD from cumulative token
+ * totals, priced per-model via `codexPriceFor` (empty model → gpt-5). Used by
+ * the upload parser AND every local reader (`node9 report`/`scan`/`sessions`),
+ * so the price source AND the token math live in exactly one place.
+ */
+export function codexSessionCost(
+  model: string,
+  tokens: { input: number; cached: number; output: number }
+): number {
+  const nonCached = Math.max(0, tokens.input - tokens.cached);
+  const [pin, pout, , pcr] = codexPriceFor(model || 'gpt-5');
+  return nonCached * pin + tokens.cached * pcr + tokens.output * pout;
+}
+
 // Walk ~/.codex/sessions/<YYYY>/<MM>/<DD>/*.jsonl → absolute paths.
 function listCodexSessionFiles(base: string): string[] {
   const out: string[] = [];
@@ -126,8 +141,7 @@ export function parseCodexSession(lines: string[]): DailyEntry | null {
   if (nonCached === 0 && output === 0 && cached === 0) return null;
 
   const norm = normalizeModel(model || 'gpt-5');
-  const [pin, pout, , pcr] = codexPriceFor(model || 'gpt-5');
-  const costUSD = nonCached * pin + output * pout + cached * pcr;
+  const costUSD = codexSessionCost(model, { input, cached, output });
 
   return {
     date: sessionStart.slice(0, 10),

@@ -25,7 +25,7 @@ import { analyzeFsOperation, AST_FS_REGEX_RULES } from '@node9/policy-engine';
 import { scanArgs } from '../../dlp';
 import { pricingFor } from '../../pricing/litellm';
 import { geminiPriceFor } from '../../cost-gemini';
-import { codexPriceFor } from '../../cost-codex';
+import { codexSessionCost } from '../../cost-codex';
 import { canonicalToolInput } from '../../utils/hook-payload';
 import type { SmartRule } from '../../core';
 import {
@@ -2438,11 +2438,13 @@ export function scanCodexHistory(
       }
     }
 
-    // Accumulate session cost per-model via the SHARED codexPriceFor (the same
-    // source `node9 report` + upload use) instead of a flat hardcoded gpt-5 rate.
-    const nonCached = Math.max(0, lastTotalInput - lastTotalCached);
-    const [pin, pout, , pcr] = codexPriceFor(model || 'gpt-5');
-    result.totalCostUSD += nonCached * pin + lastTotalCached * pcr + lastTotalOutput * pout;
+    // Accumulate session cost via the SHARED codexSessionCost (price +
+    // arithmetic in one place) — the same source report + upload use.
+    result.totalCostUSD += codexSessionCost(model, {
+      input: lastTotalInput,
+      cached: lastTotalCached,
+      output: lastTotalOutput,
+    });
 
     result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'codex'));
   }

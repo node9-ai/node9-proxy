@@ -13,7 +13,7 @@ import os from 'os';
 import { agentDisplayName, agentColorName, agentBadgeText } from '../../scan-summary';
 import { pricingFor } from '../../pricing/litellm';
 import { geminiPriceFor } from '../../cost-gemini';
-import { codexPriceFor } from '../../cost-codex';
+import { codexSessionCost } from '../../cost-codex';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -583,9 +583,11 @@ function buildCodexSessions(
     if (!sessionId || !startTime) continue;
     if (cutoff && new Date(startTime) < cutoff) continue;
 
-    const nonCached = Math.max(0, lastTotalInput - lastTotalCached);
-    const [pin, pout, , pcr] = codexPriceFor(model || 'gpt-5');
-    const costUSD = nonCached * pin + lastTotalCached * pcr + lastTotalOutput * pout;
+    const costUSD = codexSessionCost(model, {
+      input: lastTotalInput,
+      cached: lastTotalCached,
+      output: lastTotalOutput,
+    });
 
     const windowEnd = new Date(
       Math.max(new Date(startTime).getTime(), lastToolTs ? new Date(lastToolTs).getTime() : 0) +

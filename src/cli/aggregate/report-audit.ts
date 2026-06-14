@@ -22,7 +22,7 @@ import path from 'path';
 
 import { decodeProjectDirName } from '../../costSync';
 import { pricingFor, normalizeModel } from '../../pricing/litellm';
-import { codexPriceFor } from '../../cost-codex';
+import { codexSessionCost } from '../../cost-codex';
 import type { BuildReportJsonInput, ReportPeriod } from '../render/report-json';
 
 // ---------------------------------------------------------------------------
@@ -617,11 +617,13 @@ function processCodexCostFile(
   const ts = new Date(sessionStart);
   if (ts < start || ts > end) return;
 
-  // Price per-model via the SHARED codexPriceFor (pricingFor + fallback) — the
-  // SAME source the upload path uses — instead of a flat hardcoded gpt-5 rate.
-  const nonCached = Math.max(0, lastTotalInput - lastTotalCached);
-  const [pin, pout, , pcr] = codexPriceFor(model || 'gpt-5');
-  const cost = nonCached * pin + lastTotalCached * pcr + lastTotalOutput * pout;
+  // Per-model cost via the SHARED codexSessionCost (price + arithmetic in one
+  // place) — the SAME source the upload path uses, not a flat gpt-5 rate.
+  const cost = codexSessionCost(model, {
+    input: lastTotalInput,
+    cached: lastTotalCached,
+    output: lastTotalOutput,
+  });
   acc.total += cost;
   acc.toolCalls += sessionToolCalls;
   const dateKey = sessionStart.slice(0, 10);

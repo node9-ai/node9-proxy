@@ -53,16 +53,16 @@ describe('scanCodexHistory cost — per-model via codexPriceFor (not flat gpt-5)
   });
 });
 
-// Cross-surface tripwire (reconcile-net style): Codex price must be derived
-// ONCE via codexPriceFor, never re-implemented as a flat hardcoded rate in a
-// command. The bug was the flat `nonCached*5e-6 + cached*2.5e-6 + output*15e-6`
-// formula copied into scan.ts AND sessions.ts (sessions' loop isn't exported,
-// so this guards it). Catches a re-introduced hardcoded Codex rate in either.
+// Cross-surface tripwire (reconcile-net style): Codex cost must be derived
+// ONCE via codexSessionCost (price + arithmetic), never re-implemented as a
+// flat hardcoded rate in a command. The bug was the flat
+// `nonCached*5e-6 + cached*2.5e-6 + output*15e-6` formula copied into scan.ts
+// AND sessions.ts (sessions' loop isn't exported, so this guards it).
 describe('no command re-implements flat Codex pricing', () => {
   for (const rel of ['src/cli/commands/scan.ts', 'src/cli/commands/sessions.ts']) {
-    it(`${rel} delegates to codexPriceFor (no flat output*15e-6 formula)`, () => {
+    it(`${rel} delegates to codexSessionCost (no flat output*15e-6 formula)`, () => {
       const src = fs.readFileSync(rel, 'utf8');
-      expect(src).toContain('codexPriceFor');
+      expect(src).toContain('codexSessionCost');
       // The exact signature of the old flat Codex formula.
       expect(src).not.toMatch(/lastTotalOutput \* 15e-6/);
     });
