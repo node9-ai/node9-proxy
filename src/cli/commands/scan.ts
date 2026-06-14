@@ -1401,16 +1401,27 @@ export function scanGeminiHistory(
 
     let chatFiles: string[];
     try {
-      chatFiles = fs.readdirSync(chatsDir).filter((f) => f.endsWith('.json'));
+      // Gemini CLI migrated from a single-object `.json` per session to the
+      // current line-delimited `.jsonl`. Read BOTH — reading only `.json`
+      // silently missed every current-format session (cost AND findings),
+      // which is why scan's Gemini cost was $0 while `node9 report` (reads
+      // `.jsonl`) showed it. Prefer `.jsonl` so the dedup keeps it if a
+      // session somehow has both.
+      chatFiles = fs
+        .readdirSync(chatsDir)
+        .filter((f) => f.endsWith('.json') || f.endsWith('.jsonl'))
+        .sort((a, b) => Number(b.endsWith('.jsonl')) - Number(a.endsWith('.jsonl')));
     } catch {
       continue;
     }
 
+    const seenSessions = new Set<string>();
     for (const chatFile of chatFiles) {
+      const sessionId = chatFile.replace(/\.jsonl?$/, '');
+      if (seenSessions.has(sessionId)) continue; // same session in both formats
+      seenSessions.add(sessionId);
       result.filesScanned++;
       onProgress?.(result.filesScanned);
-
-      const sessionId = chatFile.replace(/\.json$/, '');
 
       let raw: string;
       try {
@@ -1427,7 +1438,25 @@ export function scanGeminiHistory(
 
       let session: GeminiSessionFile;
       try {
-        session = JSON.parse(raw) as GeminiSessionFile;
+        if (chatFile.endsWith('.jsonl')) {
+          // One JSON message per line. The first line is a session header
+          // (kind/projectHash) whose type isn't 'user'/'gemini', so the
+          // message loop below ignores it. Same message shape otherwise.
+          const messages = raw
+            .split('\n')
+            .filter((l) => l.trim())
+            .map((l): unknown => {
+              try {
+                return JSON.parse(l);
+              } catch {
+                return null;
+              }
+            })
+            .filter((m) => m !== null);
+          session = { messages: messages as GeminiSessionFile['messages'] };
+        } else {
+          session = JSON.parse(raw) as GeminiSessionFile;
+        }
       } catch {
         continue;
       }
