@@ -101,6 +101,10 @@ interface PricingCache {
  */
 let memCache: Record<string, PricingTuple> | null = null;
 let memCacheAt = 0;
+// Whether pricingFor has already tried the on-disk cache this process. Lets the
+// synchronous CLI path read the live LiteLLM table once without re-stat'ing the
+// file on every model lookup.
+let diskChecked = false;
 
 /**
  * Strip the date suffix Anthropic appends to model IDs (e.g. `-20251101`)
@@ -274,6 +278,20 @@ export function pricingFor(model: string): PricingTuple | null {
   const cached = lookupCache.get(norm);
   if (cached !== undefined) return cached;
 
+  // If the async prime (ensurePricingLoaded) hasn't run — e.g. the synchronous
+  // `node9 report` CLI path — read the on-disk LiteLLM cache ONCE, synchronously.
+  // It's the SAME table the upload/cloud path uses, so local prices match the
+  // cloud instead of falling back to the (lagging) bundled snapshot. readCache
+  // is TTL-checked, so a stale/missing cache just leaves us on bundled.
+  if (memCache === null && !diskChecked) {
+    diskChecked = true;
+    const disk = readCache();
+    if (disk && Object.keys(disk).length > 0) {
+      memCache = disk;
+      memCacheAt = Date.now();
+    }
+  }
+
   const sources: Array<Record<string, PricingTuple>> = [];
   if (memCache) sources.push(memCache);
   sources.push(BUNDLED_PRICING);
@@ -304,6 +322,7 @@ export function pricingFor(model: string): PricingTuple | null {
 export function _resetPricingCache(): void {
   memCache = null;
   memCacheAt = 0;
+  diskChecked = false;
   lookupCache.clear();
 }
 
