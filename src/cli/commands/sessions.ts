@@ -619,11 +619,14 @@ function buildCodexSessions(
 export function buildSessions(days: number | null, historyPath?: string): SessionSummary[] {
   const hPath = historyPath ?? path.join(os.homedir(), '.claude', 'history.jsonl');
 
-  let historyRaw: string;
+  // Claude history is OPTIONAL — a Codex/Gemini-only user has no
+  // ~/.claude/history.jsonl. Continue with an empty Claude history so their
+  // Codex/Gemini sessions (merged below) still show, instead of bailing.
+  let historyRaw = '';
   try {
     historyRaw = fs.readFileSync(hPath, 'utf-8');
   } catch {
-    return [];
+    /* no Claude history — Codex/Gemini sessions are still merged below */
   }
 
   const cutoff =
@@ -1041,13 +1044,9 @@ export function registerSessionsCommand(program: Command): void {
       console.log(chalk.cyan.bold('📋  node9 sessions') + chalk.dim('  — what your AI agent did'));
       console.log('');
 
-      const historyPath = path.join(os.homedir(), '.claude', 'history.jsonl');
-      if (!fs.existsSync(historyPath)) {
-        console.log(chalk.yellow('  No Claude session history found at ~/.claude/history.jsonl'));
-        console.log(chalk.gray('  Install Claude Code, run a few sessions, then try again.\n'));
-        return;
-      }
-
+      // Claude history is no longer a hard gate — buildSessions merges Codex
+      // and Gemini sessions too, so a Codex/Gemini-only user still sees their
+      // work. renderList shows a friendly empty state when nothing is found.
       // --detail always loads all sessions so the session-id can be found regardless of age
       const days =
         options.detail || options.all ? null : Math.max(1, parseInt(options.days, 10) || 7);
