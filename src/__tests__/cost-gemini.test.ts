@@ -5,7 +5,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { parseGeminiSession, geminiSource } from '../cost-gemini';
+import { parseGeminiSession, geminiSource, geminiPriceFor } from '../cost-gemini';
+import { _resetPricingCache } from '../pricing/litellm';
 
 // Gemini writes each turn TWICE with identical id+tokens (partial + final).
 const META =
@@ -90,5 +91,50 @@ describe('geminiSource.collect', () => {
 
   it('returns [] when no gemini tmp exists', () => {
     expect(geminiSource.collect()).toEqual([]);
+  });
+});
+
+// Regression: Gemini price is single-sourced through geminiPriceFor (the same
+// fn the local `node9 sessions`/`scan` readers now delegate to). The local
+// readers previously carried a stale hardcoded table where gemini-2.5-flash
+// read $0.15/$0.60 — ~4x under the real $0.30/$2.50 — so local and cloud Gemini
+// cost diverged. These pin the resolved rate to the LiteLLM value (now in the
+// bundled snapshot) so that drift can't silently return.
+describe('geminiPriceFor — single Gemini price source (no stale local copy)', () => {
+  beforeEach(() => {
+    // Resolve against the deterministic bundled snapshot (no primed memCache).
+    _resetPricingCache();
+  });
+
+  it('prices gemini-2.5-flash at the LiteLLM rate $0.30/$2.50, not the old $0.15/$0.60', () => {
+    const p = geminiPriceFor('gemini-2.5-flash');
+    expect(p).not.toBeNull();
+    expect(p!.input).toBe(0.3e-6);
+    expect(p!.output).toBe(2.5e-6);
+    // The stale local values must be gone.
+    expect(p!.input).not.toBe(0.15e-6);
+    expect(p!.output).not.toBe(0.6e-6);
+  });
+
+  it('prices gemini-2.5-pro at $1.25/$10', () => {
+    const p = geminiPriceFor('gemini-2.5-pro');
+    expect(p).toEqual({ input: 1.25e-6, output: 10e-6, cacheRead: 0.125e-6 });
+  });
+
+  it('resolves preview/dated model ids to the same rate (no matching regression)', () => {
+    expect(geminiPriceFor('gemini-2.5-flash-preview-05-20')).toEqual(
+      geminiPriceFor('gemini-2.5-flash')
+    );
+  });
+
+  it('falls back (not null) for a gemini model absent from the table, e.g. gemini-3-flash', () => {
+    // LiteLLM has no gemini-3-flash; the fallback chain lands on gemini-2.5-flash
+    // — the SAME fallback the upload path uses, so local and cloud still agree.
+    const p = geminiPriceFor('gemini-3-flash');
+    expect(p).toEqual(geminiPriceFor('gemini-2.5-flash'));
+  });
+
+  it('returns null for a genuinely unknown non-gemini model', () => {
+    expect(geminiPriceFor('totally-not-a-model-xyz')).toBeNull();
   });
 });

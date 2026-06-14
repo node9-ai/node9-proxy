@@ -25,11 +25,32 @@ export function codexSessionsDir(): string {
 }
 
 // Codex/gpt-5 fallback rates [input, output, cacheWrite, cacheRead] per token —
-// used when the exact model isn't in the LiteLLM table so we never undercount a
-// newer Codex model to $0. Mirrors the local reader's gpt-5 assumption.
+// used only when the model isn't in the LiteLLM table (bundled now carries the
+// gpt-5 family + o-series), so we never undercount a brand-new Codex model to $0.
 const CODEX_FALLBACK: readonly [number, number, number, number] = [5e-6, 15e-6, 0, 2.5e-6];
-function codexPriceFor(model: string): readonly [number, number, number, number] {
+/**
+ * The SINGLE Codex per-token price source — `pricingFor` (LiteLLM) with a
+ * conservative fallback for unknown models. Used by the upload path AND by the
+ * local `node9 report` Codex reader (cli/aggregate/report-audit.ts), so both
+ * price Codex per-model the same way instead of a flat hardcoded gpt-5 rate.
+ */
+export function codexPriceFor(model: string): readonly [number, number, number, number] {
   return pricingFor(model) ?? CODEX_FALLBACK;
+}
+
+/**
+ * The SINGLE Codex cost arithmetic — per-session USD from cumulative token
+ * totals, priced per-model via `codexPriceFor` (empty model → gpt-5). Used by
+ * the upload parser AND every local reader (`node9 report`/`scan`/`sessions`),
+ * so the price source AND the token math live in exactly one place.
+ */
+export function codexSessionCost(
+  model: string,
+  tokens: { input: number; cached: number; output: number }
+): number {
+  const nonCached = Math.max(0, tokens.input - tokens.cached);
+  const [pin, pout, , pcr] = codexPriceFor(model || 'gpt-5');
+  return nonCached * pin + tokens.cached * pcr + tokens.output * pout;
 }
 
 // Walk ~/.codex/sessions/<YYYY>/<MM>/<DD>/*.jsonl → absolute paths.
@@ -120,8 +141,7 @@ export function parseCodexSession(lines: string[]): DailyEntry | null {
   if (nonCached === 0 && output === 0 && cached === 0) return null;
 
   const norm = normalizeModel(model || 'gpt-5');
-  const [pin, pout, , pcr] = codexPriceFor(model || 'gpt-5');
-  const costUSD = nonCached * pin + output * pout + cached * pcr;
+  const costUSD = codexSessionCost(model, { input, cached, output });
 
   return {
     date: sessionStart.slice(0, 10),

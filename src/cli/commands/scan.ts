@@ -23,6 +23,9 @@ import {
 } from '../../policy/index';
 import { analyzeFsOperation, AST_FS_REGEX_RULES } from '@node9/policy-engine';
 import { scanArgs } from '../../dlp';
+import { pricingFor } from '../../pricing/litellm';
+import { geminiPriceFor } from '../../cost-gemini';
+import { codexSessionCost } from '../../cost-codex';
 import { canonicalToolInput } from '../../utils/hook-payload';
 import type { SmartRule } from '../../core';
 import {
@@ -160,50 +163,29 @@ export interface ScanResult {
 // Pricing (for all-time cost summary)
 // ---------------------------------------------------------------------------
 
-const CLAUDE_PRICING: Record<string, { i: number; o: number; cw: number; cr: number }> = {
-  'claude-opus-4-6': { i: 5e-6, o: 25e-6, cw: 6.25e-6, cr: 0.5e-6 },
-  'claude-opus-4-5': { i: 5e-6, o: 25e-6, cw: 6.25e-6, cr: 0.5e-6 },
-  'claude-opus-4': { i: 15e-6, o: 75e-6, cw: 18.75e-6, cr: 1.5e-6 },
-  'claude-sonnet-4-6': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
-  'claude-sonnet-4-5': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
-  'claude-sonnet-4': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
-  'claude-3-7-sonnet': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
-  'claude-3-5-sonnet': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
-  'claude-haiku-4-5': { i: 1e-6, o: 5e-6, cw: 1.25e-6, cr: 0.1e-6 },
-  'claude-3-5-haiku': { i: 0.8e-6, o: 4e-6, cw: 1e-6, cr: 0.08e-6 },
-};
-
+// Single-sourced from `pricingFor` (LiteLLM) — the SAME table the upload path
+// and `node9 report` use, so every cost surface agrees on price. (Was a
+// hardcoded copy where claude-opus-4 drifted to $15/M vs the authoritative
+// $5/M.)
 function claudeModelPrice(model: string): { i: number; o: number; cw: number; cr: number } | null {
-  const base = model.replace(/@.*$/, '').replace(/-\d{8}$/, '');
-  for (const [key, p] of Object.entries(CLAUDE_PRICING)) {
-    if (base === key || base.startsWith(key)) return p;
-  }
-  return null;
+  const t = pricingFor(model);
+  if (!t) return null;
+  const [i, o, cw, cr] = t;
+  return { i, o, cw, cr };
 }
 
 // ---------------------------------------------------------------------------
 // Gemini pricing
 // ---------------------------------------------------------------------------
 
-const GEMINI_PRICING: Record<string, { i: number; o: number; cr: number }> = {
-  'gemini-2.5-pro': { i: 1.25e-6, o: 10e-6, cr: 0.31e-6 },
-  'gemini-2.5-flash': { i: 0.15e-6, o: 0.6e-6, cr: 0.0375e-6 },
-  'gemini-2.0-flash': { i: 0.1e-6, o: 0.4e-6, cr: 0.025e-6 },
-  'gemini-1.5-pro': { i: 1.25e-6, o: 5e-6, cr: 0.3125e-6 },
-  'gemini-1.5-flash': { i: 0.075e-6, o: 0.3e-6, cr: 0.01875e-6 },
-  'gemini-3-flash': { i: 0.1e-6, o: 0.4e-6, cr: 0.025e-6 },
-};
-
+// Single-sourced from `geminiPriceFor` (cost-gemini.ts) — the SAME LiteLLM-backed
+// source + fallback chain the upload path uses, so every cost surface agrees on
+// Gemini price. (Was a stale hardcoded copy where gemini-2.5-flash read
+// $0.15/$0.60 vs the real $0.30/$2.50.)
 function geminiModelPrice(model: string): { i: number; o: number; cr: number } | null {
-  const base = model
-    .replace(/-preview$/, '')
-    .replace(/-exp$/, '')
-    .replace(/-\d{4}-\d{2}-\d{2}$/, '');
-  for (const [key, p] of Object.entries(GEMINI_PRICING)) {
-    if (base === key || base.startsWith(key)) return p;
-  }
-  if (base.includes('flash')) return GEMINI_PRICING['gemini-2.0-flash']!;
-  return null;
+  const p = geminiPriceFor(model);
+  if (!p) return null;
+  return { i: p.input, o: p.output, cr: p.cacheRead };
 }
 
 // ---------------------------------------------------------------------------
@@ -1419,16 +1401,27 @@ export function scanGeminiHistory(
 
     let chatFiles: string[];
     try {
-      chatFiles = fs.readdirSync(chatsDir).filter((f) => f.endsWith('.json'));
+      // Gemini CLI migrated from a single-object `.json` per session to the
+      // current line-delimited `.jsonl`. Read BOTH — reading only `.json`
+      // silently missed every current-format session (cost AND findings),
+      // which is why scan's Gemini cost was $0 while `node9 report` (reads
+      // `.jsonl`) showed it. Prefer `.jsonl` so the dedup keeps it if a
+      // session somehow has both.
+      chatFiles = fs
+        .readdirSync(chatsDir)
+        .filter((f) => f.endsWith('.json') || f.endsWith('.jsonl'))
+        .sort((a, b) => Number(b.endsWith('.jsonl')) - Number(a.endsWith('.jsonl')));
     } catch {
       continue;
     }
 
+    const seenSessions = new Set<string>();
     for (const chatFile of chatFiles) {
+      const sessionId = chatFile.replace(/\.jsonl?$/, '');
+      if (seenSessions.has(sessionId)) continue; // same session in both formats
+      seenSessions.add(sessionId);
       result.filesScanned++;
       onProgress?.(result.filesScanned);
-
-      const sessionId = chatFile.replace(/\.json$/, '');
 
       let raw: string;
       try {
@@ -1445,7 +1438,25 @@ export function scanGeminiHistory(
 
       let session: GeminiSessionFile;
       try {
-        session = JSON.parse(raw) as GeminiSessionFile;
+        if (chatFile.endsWith('.jsonl')) {
+          // One JSON message per line. The first line is a session header
+          // (kind/projectHash) whose type isn't 'user'/'gemini', so the
+          // message loop below ignores it. Same message shape otherwise.
+          const messages = raw
+            .split('\n')
+            .filter((l) => l.trim())
+            .map((l): unknown => {
+              try {
+                return JSON.parse(l);
+              } catch {
+                return null;
+              }
+            })
+            .filter((m) => m !== null);
+          session = { messages: messages as GeminiSessionFile['messages'] };
+        } else {
+          session = JSON.parse(raw) as GeminiSessionFile;
+        }
       } catch {
         continue;
       }
@@ -2236,6 +2247,7 @@ export function scanCodexHistory(
     let lastTotalInput = 0;
     let lastTotalCached = 0;
     let lastTotalOutput = 0;
+    let model = ''; // turn_context.model, last-wins — for per-model pricing
 
     for (const line of lines) {
       if (!line.trim()) continue;
@@ -2254,6 +2266,11 @@ export function scanCodexHistory(
         startTime = String(payload['timestamp'] ?? '');
         const cwd = String(payload['cwd'] ?? '');
         projLabel = stripTerminalEscapes(cwd.replace(os.homedir(), '~')).slice(0, 40);
+        continue;
+      }
+
+      if (entry.type === 'turn_context' && typeof payload['model'] === 'string') {
+        model = payload['model'];
         continue;
       }
 
@@ -2421,9 +2438,13 @@ export function scanCodexHistory(
       }
     }
 
-    // Accumulate session cost using GPT-4o pricing as proxy for codex-1/GPT-5
-    const nonCached = Math.max(0, lastTotalInput - lastTotalCached);
-    result.totalCostUSD += nonCached * 5e-6 + lastTotalCached * 2.5e-6 + lastTotalOutput * 15e-6;
+    // Accumulate session cost via the SHARED codexSessionCost (price +
+    // arithmetic in one place) — the same source report + upload use.
+    result.totalCostUSD += codexSessionCost(model, {
+      input: lastTotalInput,
+      cached: lastTotalCached,
+      output: lastTotalOutput,
+    });
 
     result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'codex'));
   }

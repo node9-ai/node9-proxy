@@ -64,11 +64,24 @@ const BUNDLED_PRICING: Record<string, PricingTuple> = {
   'claude-3-5-sonnet': [3e-6, 15e-6, 3.75e-6, 0.3e-6],
   'claude-3-5-haiku': [0.8e-6, 4e-6, 1e-6, 0.08e-6],
   'claude-3-haiku': [0.25e-6, 1.25e-6, 0.3e-6, 0.03e-6],
-  // OpenAI
+  // OpenAI. gpt-5 family + o-series copied from the live LiteLLM table
+  // (verified 2026-06-14) — the bundled gpt-5 was stale at $10/$30 vs the real
+  // $1.25/$10, and Codex models (gpt-5-codex etc.) were absent, so the offline
+  // fallback mispriced every Codex session. See cost-codex.codexPriceFor.
   'gpt-4o': [5e-6, 15e-6, 0, 2.5e-6],
   'gpt-4o-mini': [0.15e-6, 0.6e-6, 0, 0.075e-6],
-  'gpt-5': [10e-6, 30e-6, 0, 5e-6],
-  // Google
+  'gpt-5': [1.25e-6, 10e-6, 0, 0.125e-6],
+  'gpt-5-codex': [1.25e-6, 10e-6, 0, 0.125e-6],
+  'gpt-5-mini': [0.25e-6, 2e-6, 0, 0.025e-6],
+  o3: [2e-6, 8e-6, 0, 0.5e-6],
+  'o4-mini': [1.1e-6, 4.4e-6, 0, 0.275e-6],
+  // Google. Values copied from the live LiteLLM table (verified 2026-06-14)
+  // so the bundled fallback prices the current Gemini tiers correctly offline
+  // — the local cost readers were carrying a stale hardcoded copy where
+  // gemini-2.5-flash read $0.15/$0.60 vs the real $0.30/$2.50 (~4× under on
+  // output). See cost-gemini.geminiPriceFor (the single Gemini price source).
+  'gemini-2.5-pro': [1.25e-6, 10e-6, 0, 0.125e-6],
+  'gemini-2.5-flash': [0.3e-6, 2.5e-6, 0, 0.03e-6],
   'gemini-2.0-flash': [0.075e-6, 0.3e-6, 0, 0],
   'gemini-1.5-pro': [1.25e-6, 5e-6, 0, 0],
 };
@@ -88,6 +101,10 @@ interface PricingCache {
  */
 let memCache: Record<string, PricingTuple> | null = null;
 let memCacheAt = 0;
+// Whether pricingFor has already tried the on-disk cache this process. Lets the
+// synchronous CLI path read the live LiteLLM table once without re-stat'ing the
+// file on every model lookup.
+let diskChecked = false;
 
 /**
  * Strip the date suffix Anthropic appends to model IDs (e.g. `-20251101`)
@@ -261,6 +278,20 @@ export function pricingFor(model: string): PricingTuple | null {
   const cached = lookupCache.get(norm);
   if (cached !== undefined) return cached;
 
+  // If the async prime (ensurePricingLoaded) hasn't run — e.g. the synchronous
+  // `node9 report` CLI path — read the on-disk LiteLLM cache ONCE, synchronously.
+  // It's the SAME table the upload/cloud path uses, so local prices match the
+  // cloud instead of falling back to the (lagging) bundled snapshot. readCache
+  // is TTL-checked, so a stale/missing cache just leaves us on bundled.
+  if (memCache === null && !diskChecked) {
+    diskChecked = true;
+    const disk = readCache();
+    if (disk && Object.keys(disk).length > 0) {
+      memCache = disk;
+      memCacheAt = Date.now();
+    }
+  }
+
   const sources: Array<Record<string, PricingTuple>> = [];
   if (memCache) sources.push(memCache);
   sources.push(BUNDLED_PRICING);
@@ -291,6 +322,7 @@ export function pricingFor(model: string): PricingTuple | null {
 export function _resetPricingCache(): void {
   memCache = null;
   memCacheAt = 0;
+  diskChecked = false;
   lookupCache.clear();
 }
 

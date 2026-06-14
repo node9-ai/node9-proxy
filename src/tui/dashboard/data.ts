@@ -25,6 +25,7 @@ import {
   loadGeminiCostAsync,
   type AggregateResult,
 } from '../../cli/aggregate/report-audit.js';
+import { ensurePricingLoaded } from '../../pricing/litellm.js';
 import {
   scanClaudeHistoryAsync,
   scanGeminiHistory,
@@ -794,6 +795,12 @@ export async function loadReportAuditAsync(period: ReportPeriod): Promise<Aggreg
   const geminiTmpDir = path.join(os.homedir(), '.gemini', 'tmp');
   const { start, end } = getDateRange(period, new Date());
   const entries = await readAuditEntriesAsync();
+  // Warm the LiteLLM pricing cache for the cost readers, fire-and-forget — so
+  // the dashboard NEVER blocks on a (possibly cold) network fetch. This render
+  // uses whatever's cached now (the bundled snapshot if cold); the background
+  // refresh populates memCache so the next render is fresh. `void` is safe
+  // because ensurePricingLoaded is fully fail-soft and never rejects.
+  void ensurePricingLoaded();
   const claudeCost = await loadClaudeCostAsync(start, end, claudeProjectsDir);
   const codexCost = await loadCodexCostAsync(start, end, codexSessionsDir);
   const geminiCost = await loadGeminiCostAsync(start, end, geminiTmpDir);

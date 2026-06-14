@@ -24,7 +24,15 @@ export function geminiTmpDir(): string {
 }
 
 const GEMINI_FALLBACK_MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash'];
-function geminiPriceFor(
+/**
+ * The SINGLE Gemini per-token price source — `pricingFor` (LiteLLM) plus a
+ * gemini-only fallback chain (2.5-flash → 2.0-flash) for models LiteLLM lacks
+ * (e.g. gemini-3-flash). Used by the upload path AND, via the local
+ * `geminiModelPrice` adapters in cli/commands/{sessions,scan}.ts, by every
+ * local cost surface — so `node9 report`/`sessions`/`scan` and cloud Report
+ * resolve Gemini price the same way. Returns null only for non-gemini unknowns.
+ */
+export function geminiPriceFor(
   model: string
 ): { input: number; output: number; cacheRead: number } | null {
   let tuple = pricingFor(model);

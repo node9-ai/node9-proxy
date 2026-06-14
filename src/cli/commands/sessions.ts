@@ -11,6 +11,9 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { agentDisplayName, agentColorName, agentBadgeText } from '../../scan-summary';
+import { pricingFor } from '../../pricing/litellm';
+import { geminiPriceFor } from '../../cost-gemini';
+import { codexSessionCost } from '../../cost-codex';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -69,49 +72,27 @@ interface JournalLine {
 }
 
 // ---------------------------------------------------------------------------
-// Pricing (same table as scan.ts)
+// Pricing — single-sourced from `pricingFor` (LiteLLM), the SAME table the
+// upload path uses, so `node9 sessions`, `node9 report`, and cloud Report
+// agree on price. (Was a hardcoded copy where claude-opus-4 drifted to $15/M
+// vs the authoritative $5/M.)
 // ---------------------------------------------------------------------------
 
-const CLAUDE_PRICING: Record<string, { i: number; o: number; cw: number; cr: number }> = {
-  'claude-opus-4-6': { i: 5e-6, o: 25e-6, cw: 6.25e-6, cr: 0.5e-6 },
-  'claude-opus-4-5': { i: 5e-6, o: 25e-6, cw: 6.25e-6, cr: 0.5e-6 },
-  'claude-opus-4': { i: 15e-6, o: 75e-6, cw: 18.75e-6, cr: 1.5e-6 },
-  'claude-sonnet-4-6': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
-  'claude-sonnet-4-5': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
-  'claude-sonnet-4': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
-  'claude-3-7-sonnet': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
-  'claude-3-5-sonnet': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
-  'claude-haiku-4-5': { i: 1e-6, o: 5e-6, cw: 1.25e-6, cr: 0.1e-6 },
-  'claude-3-5-haiku': { i: 0.8e-6, o: 4e-6, cw: 1e-6, cr: 0.08e-6 },
-};
-
 function modelPrice(model: string): { i: number; o: number; cw: number; cr: number } | null {
-  const base = model.replace(/@.*$/, '').replace(/-\d{8}$/, '');
-  for (const [key, p] of Object.entries(CLAUDE_PRICING)) {
-    if (base === key || base.startsWith(key)) return p;
-  }
-  return null;
+  const t = pricingFor(model);
+  if (!t) return null;
+  const [i, o, cw, cr] = t;
+  return { i, o, cw, cr };
 }
 
-const GEMINI_PRICING: Record<string, { i: number; o: number; cr: number }> = {
-  'gemini-2.5-pro': { i: 1.25e-6, o: 10e-6, cr: 0.31e-6 },
-  'gemini-2.5-flash': { i: 0.15e-6, o: 0.6e-6, cr: 0.0375e-6 },
-  'gemini-2.0-flash': { i: 0.1e-6, o: 0.4e-6, cr: 0.025e-6 },
-  'gemini-1.5-pro': { i: 1.25e-6, o: 5e-6, cr: 0.3125e-6 },
-  'gemini-1.5-flash': { i: 0.075e-6, o: 0.3e-6, cr: 0.01875e-6 },
-  'gemini-3-flash': { i: 0.1e-6, o: 0.4e-6, cr: 0.025e-6 },
-};
-
+// Single-sourced from `geminiPriceFor` (cost-gemini.ts) — the SAME LiteLLM-backed
+// source + fallback chain the upload path uses, so `node9 sessions`/`report`/
+// `scan` and cloud Report agree on Gemini price. (Was a stale hardcoded copy
+// where gemini-2.5-flash read $0.15/$0.60 vs the real $0.30/$2.50.)
 function geminiModelPrice(model: string): { i: number; o: number; cr: number } | null {
-  const base = model
-    .replace(/-preview$/, '')
-    .replace(/-exp$/, '')
-    .replace(/-\d{4}-\d{2}-\d{2}$/, '');
-  for (const [key, p] of Object.entries(GEMINI_PRICING)) {
-    if (base === key || base.startsWith(key)) return p;
-  }
-  if (base.includes('flash')) return GEMINI_PRICING['gemini-2.0-flash']!;
-  return null;
+  const p = geminiPriceFor(model);
+  if (!p) return null;
+  return { i: p.input, o: p.output, cr: p.cacheRead };
 }
 
 // ---------------------------------------------------------------------------
@@ -548,6 +529,7 @@ function buildCodexSessions(
     let lastTotalInput = 0;
     let lastTotalCached = 0;
     let lastTotalOutput = 0;
+    let model = ''; // turn_context.model, last-wins — for per-model pricing
 
     for (const line of lines) {
       if (!line.trim()) continue;
@@ -564,6 +546,11 @@ function buildCodexSessions(
         sessionId = String(p['id'] ?? '');
         startTime = String(p['timestamp'] ?? '');
         cwd = String(p['cwd'] ?? '');
+        continue;
+      }
+
+      if (entry.type === 'turn_context' && typeof p['model'] === 'string') {
+        model = p['model'];
         continue;
       }
 
@@ -596,8 +583,11 @@ function buildCodexSessions(
     if (!sessionId || !startTime) continue;
     if (cutoff && new Date(startTime) < cutoff) continue;
 
-    const nonCached = Math.max(0, lastTotalInput - lastTotalCached);
-    const costUSD = nonCached * 5e-6 + lastTotalCached * 2.5e-6 + lastTotalOutput * 15e-6;
+    const costUSD = codexSessionCost(model, {
+      input: lastTotalInput,
+      cached: lastTotalCached,
+      output: lastTotalOutput,
+    });
 
     const windowEnd = new Date(
       Math.max(new Date(startTime).getTime(), lastToolTs ? new Date(lastToolTs).getTime() : 0) +
@@ -631,11 +621,14 @@ function buildCodexSessions(
 export function buildSessions(days: number | null, historyPath?: string): SessionSummary[] {
   const hPath = historyPath ?? path.join(os.homedir(), '.claude', 'history.jsonl');
 
-  let historyRaw: string;
+  // Claude history is OPTIONAL — a Codex/Gemini-only user has no
+  // ~/.claude/history.jsonl. Continue with an empty Claude history so their
+  // Codex/Gemini sessions (merged below) still show, instead of bailing.
+  let historyRaw = '';
   try {
     historyRaw = fs.readFileSync(hPath, 'utf-8');
   } catch {
-    return [];
+    /* no Claude history — Codex/Gemini sessions are still merged below */
   }
 
   const cutoff =
@@ -1053,13 +1046,9 @@ export function registerSessionsCommand(program: Command): void {
       console.log(chalk.cyan.bold('📋  node9 sessions') + chalk.dim('  — what your AI agent did'));
       console.log('');
 
-      const historyPath = path.join(os.homedir(), '.claude', 'history.jsonl');
-      if (!fs.existsSync(historyPath)) {
-        console.log(chalk.yellow('  No Claude session history found at ~/.claude/history.jsonl'));
-        console.log(chalk.gray('  Install Claude Code, run a few sessions, then try again.\n'));
-        return;
-      }
-
+      // Claude history is no longer a hard gate — buildSessions merges Codex
+      // and Gemini sessions too, so a Codex/Gemini-only user still sees their
+      // work. renderList shows a friendly empty state when nothing is found.
       // --detail always loads all sessions so the session-id can be found regardless of age
       const days =
         options.detail || options.all ? null : Math.max(1, parseInt(options.days, 10) || 7);
