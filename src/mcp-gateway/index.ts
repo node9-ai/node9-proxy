@@ -124,6 +124,62 @@ export function reportPinMismatchToCloud(serverKey: string, agent?: string): voi
 }
 
 /**
+ * B-Tier2 — report an MCP server's tool inventory to the SaaS (informational,
+ * AUTO_ALLOWED). Surfaces "this server exposes N tools" in the dashboard's MCP
+ * card. Same hardened fire-and-forget contract as reportPinMismatchToCloud.
+ *
+ * Exported for unit testing.
+ */
+export function reportInventoryToCloud(serverKey: string, toolCount: number, agent?: string): void {
+  try {
+    const creds = getCredentials();
+    if (!creds) return;
+    void auditLocalAllow(
+      `mcp-server:${serverKey}`,
+      { serverKey, toolCount },
+      'mcp-discovered',
+      creds,
+      { mcpServer: serverKey, agent },
+      undefined,
+      false,
+      { mcpToolCount: toolCount }
+    );
+  } catch {
+    /* never let cloud reporting affect the gateway */
+  }
+}
+
+/**
+ * B-Tier2 — report an oversized MCP tool response to the SaaS (informational,
+ * AUTO_ALLOWED). Surfaces context-window bloat in the dashboard's MCP card.
+ * Same hardened fire-and-forget contract.
+ *
+ * Exported for unit testing.
+ */
+export function reportLargeResponseToCloud(
+  serverKey: string,
+  responseBytes: number,
+  agent?: string
+): void {
+  try {
+    const creds = getCredentials();
+    if (!creds) return;
+    void auditLocalAllow(
+      `mcp-server:${serverKey}`,
+      { serverKey, responseBytes },
+      'mcp-large-response',
+      creds,
+      { mcpServer: serverKey, agent },
+      undefined,
+      false,
+      { mcpResponseBytes: responseBytes }
+    );
+  } catch {
+    /* never let cloud reporting affect the gateway */
+  }
+}
+
+/**
  * Shell-style tokenizer: splits on whitespace, respects double-quoted strings
  * and backslash escapes. Does NOT spawn a shell — no injection risk.
  * Example: `node "/path with spaces/server.js"` → `['node', '/path with spaces/server.js']`
@@ -552,6 +608,10 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
         const pinStatus = checkPin(serverKey, currentHash, gatewayCwd);
         const token = getInternalToken();
 
+        // B-Tier2: report the tool inventory to the SaaS ("server exposes N
+        // tools"). Informational, fire-and-forget — independent of the daemon.
+        reportInventoryToCloud(serverKey, tools.length, clientName);
+
         // 1. Notify daemon of discovery (handles drift & new servers)
         if (isDaemonRunning() && process.env.NODE9_TESTING !== '1') {
           const toolSummary = tools.map((t) => ({ name: t.name, description: t.description }));
@@ -705,6 +765,9 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
           `⚡ Node9: Large MCP response from '${toolName}' (${(line.length / 1024).toFixed(0)}KB) — context window enlarged`
         )
       );
+      // B-Tier2: report the context-bloat to the SaaS. Informational,
+      // fire-and-forget — independent of the daemon.
+      reportLargeResponseToCloud(serverKey, line.length, clientName);
       if (isDaemonRunning() && process.env.NODE9_TESTING !== '1') {
         const token = getInternalToken();
         fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/mcp/large-response`, {
