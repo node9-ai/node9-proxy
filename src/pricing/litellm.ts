@@ -68,7 +68,13 @@ const BUNDLED_PRICING: Record<string, PricingTuple> = {
   'gpt-4o': [5e-6, 15e-6, 0, 2.5e-6],
   'gpt-4o-mini': [0.15e-6, 0.6e-6, 0, 0.075e-6],
   'gpt-5': [10e-6, 30e-6, 0, 5e-6],
-  // Google
+  // Google. Values copied from the live LiteLLM table (verified 2026-06-14)
+  // so the bundled fallback prices the current Gemini tiers correctly offline
+  // — the local cost readers were carrying a stale hardcoded copy where
+  // gemini-2.5-flash read $0.15/$0.60 vs the real $0.30/$2.50 (~4× under on
+  // output). See cost-gemini.geminiPriceFor (the single Gemini price source).
+  'gemini-2.5-pro': [1.25e-6, 10e-6, 0, 0.125e-6],
+  'gemini-2.5-flash': [0.3e-6, 2.5e-6, 0, 0.03e-6],
   'gemini-2.0-flash': [0.075e-6, 0.3e-6, 0, 0],
   'gemini-1.5-pro': [1.25e-6, 5e-6, 0, 0],
 };

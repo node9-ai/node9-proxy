@@ -24,6 +24,7 @@ import {
 import { analyzeFsOperation, AST_FS_REGEX_RULES } from '@node9/policy-engine';
 import { scanArgs } from '../../dlp';
 import { pricingFor } from '../../pricing/litellm';
+import { geminiPriceFor } from '../../cost-gemini';
 import { canonicalToolInput } from '../../utils/hook-payload';
 import type { SmartRule } from '../../core';
 import {
@@ -176,25 +177,14 @@ function claudeModelPrice(model: string): { i: number; o: number; cw: number; cr
 // Gemini pricing
 // ---------------------------------------------------------------------------
 
-const GEMINI_PRICING: Record<string, { i: number; o: number; cr: number }> = {
-  'gemini-2.5-pro': { i: 1.25e-6, o: 10e-6, cr: 0.31e-6 },
-  'gemini-2.5-flash': { i: 0.15e-6, o: 0.6e-6, cr: 0.0375e-6 },
-  'gemini-2.0-flash': { i: 0.1e-6, o: 0.4e-6, cr: 0.025e-6 },
-  'gemini-1.5-pro': { i: 1.25e-6, o: 5e-6, cr: 0.3125e-6 },
-  'gemini-1.5-flash': { i: 0.075e-6, o: 0.3e-6, cr: 0.01875e-6 },
-  'gemini-3-flash': { i: 0.1e-6, o: 0.4e-6, cr: 0.025e-6 },
-};
-
+// Single-sourced from `geminiPriceFor` (cost-gemini.ts) — the SAME LiteLLM-backed
+// source + fallback chain the upload path uses, so every cost surface agrees on
+// Gemini price. (Was a stale hardcoded copy where gemini-2.5-flash read
+// $0.15/$0.60 vs the real $0.30/$2.50.)
 function geminiModelPrice(model: string): { i: number; o: number; cr: number } | null {
-  const base = model
-    .replace(/-preview$/, '')
-    .replace(/-exp$/, '')
-    .replace(/-\d{4}-\d{2}-\d{2}$/, '');
-  for (const [key, p] of Object.entries(GEMINI_PRICING)) {
-    if (base === key || base.startsWith(key)) return p;
-  }
-  if (base.includes('flash')) return GEMINI_PRICING['gemini-2.0-flash']!;
-  return null;
+  const p = geminiPriceFor(model);
+  if (!p) return null;
+  return { i: p.input, o: p.output, cr: p.cacheRead };
 }
 
 // ---------------------------------------------------------------------------
