@@ -312,25 +312,22 @@ function isDlp(checkedBy: string | undefined): boolean {
 // Claude Code cost tracking (reads ~/.claude/projects/**/*.jsonl)
 // ---------------------------------------------------------------------------
 
-const CLAUDE_PRICING: Record<string, { i: number; o: number; cw: number; cr: number }> = {
-  'claude-opus-4-6': { i: 5e-6, o: 25e-6, cw: 6.25e-6, cr: 0.5e-6 },
-  'claude-opus-4-5': { i: 5e-6, o: 25e-6, cw: 6.25e-6, cr: 0.5e-6 },
-  'claude-opus-4': { i: 15e-6, o: 75e-6, cw: 18.75e-6, cr: 1.5e-6 },
-  'claude-sonnet-4-6': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
-  'claude-sonnet-4-5': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
-  'claude-sonnet-4': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
-  'claude-3-7-sonnet': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
-  'claude-3-5-sonnet': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
-  'claude-haiku-4-5': { i: 1e-6, o: 5e-6, cw: 1.25e-6, cr: 0.1e-6 },
-  'claude-3-5-haiku': { i: 0.8e-6, o: 4e-6, cw: 1e-6, cr: 0.08e-6 },
-};
-
-function claudeModelPrice(model: string): { i: number; o: number; cw: number; cr: number } | null {
-  const base = model.replace(/@.*$/, '').replace(/-\d{8}$/, '');
-  for (const [key, p] of Object.entries(CLAUDE_PRICING)) {
-    if (base === key || base.startsWith(key + '-') || base.startsWith(key)) return p;
-  }
-  return null;
+/** Claude per-token pricing, sourced from the SHARED `pricingFor` table
+ *  (LiteLLM-backed) — the *same* source the upload path (`costSync`) uses, so
+ *  local `node9 report` and cloud Report can never diverge on price. This used
+ *  to be a hardcoded table that drifted: `claude-opus-4` read $15/M locally vs
+ *  the authoritative $5/M upstream (a silent 3× gap on every opus-4 session,
+ *  hidden behind the reconcile net's magnitude band). `pricingFor` also does
+ *  better model-name matching (longest-key-wins + date/`@` suffix handling).
+ *  Returns the `{i,o,cw,cr}` shape the cost walker expects; null when unknown.
+ *  Exported for the regression test that pins it to `pricingFor`. */
+export function claudeModelPrice(
+  model: string
+): { i: number; o: number; cw: number; cr: number } | null {
+  const t = pricingFor(model);
+  if (!t) return null;
+  const [i, o, cw, cr] = t;
+  return { i, o, cw, cr };
 }
 
 /** Per-project cost / token rollup. Key = decoded working directory

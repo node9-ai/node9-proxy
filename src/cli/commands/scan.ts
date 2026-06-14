@@ -23,6 +23,7 @@ import {
 } from '../../policy/index';
 import { analyzeFsOperation, AST_FS_REGEX_RULES } from '@node9/policy-engine';
 import { scanArgs } from '../../dlp';
+import { pricingFor } from '../../pricing/litellm';
 import { canonicalToolInput } from '../../utils/hook-payload';
 import type { SmartRule } from '../../core';
 import {
@@ -160,25 +161,15 @@ export interface ScanResult {
 // Pricing (for all-time cost summary)
 // ---------------------------------------------------------------------------
 
-const CLAUDE_PRICING: Record<string, { i: number; o: number; cw: number; cr: number }> = {
-  'claude-opus-4-6': { i: 5e-6, o: 25e-6, cw: 6.25e-6, cr: 0.5e-6 },
-  'claude-opus-4-5': { i: 5e-6, o: 25e-6, cw: 6.25e-6, cr: 0.5e-6 },
-  'claude-opus-4': { i: 15e-6, o: 75e-6, cw: 18.75e-6, cr: 1.5e-6 },
-  'claude-sonnet-4-6': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
-  'claude-sonnet-4-5': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
-  'claude-sonnet-4': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
-  'claude-3-7-sonnet': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
-  'claude-3-5-sonnet': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
-  'claude-haiku-4-5': { i: 1e-6, o: 5e-6, cw: 1.25e-6, cr: 0.1e-6 },
-  'claude-3-5-haiku': { i: 0.8e-6, o: 4e-6, cw: 1e-6, cr: 0.08e-6 },
-};
-
+// Single-sourced from `pricingFor` (LiteLLM) — the SAME table the upload path
+// and `node9 report` use, so every cost surface agrees on price. (Was a
+// hardcoded copy where claude-opus-4 drifted to $15/M vs the authoritative
+// $5/M.)
 function claudeModelPrice(model: string): { i: number; o: number; cw: number; cr: number } | null {
-  const base = model.replace(/@.*$/, '').replace(/-\d{8}$/, '');
-  for (const [key, p] of Object.entries(CLAUDE_PRICING)) {
-    if (base === key || base.startsWith(key)) return p;
-  }
-  return null;
+  const t = pricingFor(model);
+  if (!t) return null;
+  const [i, o, cw, cr] = t;
+  return { i, o, cw, cr };
 }
 
 // ---------------------------------------------------------------------------

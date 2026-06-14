@@ -17,7 +17,12 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { aggregateReportFromAudit, getDateRange } from '../cli/aggregate/report-audit';
+import {
+  aggregateReportFromAudit,
+  getDateRange,
+  claudeModelPrice,
+} from '../cli/aggregate/report-audit';
+import { pricingFor } from '../pricing/litellm';
 
 const NOW = new Date('2026-05-10T15:00:00Z');
 
@@ -789,5 +794,49 @@ describe('aggregateReportFromAudit', () => {
       expect(result.data.blockMap.get('local-decision')).toBe(1);
       expect(result.data.blockMap.size).toBe(1);
     });
+  });
+});
+
+// Regression: the local cost reader must source price from the SAME table as
+// the upload path (`pricingFor`), not a hardcoded copy. The copy had drifted —
+// claude-opus-4 read $15/M locally vs the authoritative $5/M upload (a silent
+// 3× gap on every opus-4 session). claudeModelPrice now delegates to
+// pricingFor, so local `node9 report` and cloud Report agree on price.
+describe('claudeModelPrice — single-sourced from pricingFor (no drift)', () => {
+  it('prices claude-opus-4 from pricingFor ($5/M), not the old hardcoded $15/M', () => {
+    const p = claudeModelPrice('claude-opus-4');
+    expect(p).not.toBeNull();
+    // The bug: i was 15e-6. Authoritative (pricingFor / LiteLLM) is 5e-6.
+    expect(p!.i).toBe(5e-6);
+    expect(p!.i).not.toBe(15e-6);
+  });
+
+  it('returns exactly what pricingFor returns, for every Claude tier', () => {
+    for (const model of [
+      'claude-opus-4',
+      'claude-opus-4-5',
+      'claude-opus-4-6',
+      'claude-sonnet-4',
+      'claude-sonnet-4-5',
+      'claude-haiku-4-5',
+      'claude-3-5-haiku',
+    ]) {
+      const t = pricingFor(model);
+      const p = claudeModelPrice(model);
+      expect(t).not.toBeNull();
+      expect(p).toEqual({ i: t![0], o: t![1], cw: t![2], cr: t![3] });
+    }
+  });
+
+  it('still resolves dated / @-suffixed model ids (no matching regression)', () => {
+    // The old reader stripped `-\d{8}` and `@...`; pricingFor must too.
+    expect(claudeModelPrice('claude-opus-4-20250514')).toEqual(claudeModelPrice('claude-opus-4'));
+    expect(claudeModelPrice('claude-opus-4-6@anthropic')).toEqual(
+      claudeModelPrice('claude-opus-4-6')
+    );
+  });
+
+  it('returns null for a genuinely unknown model (cost dropped, not guessed)', () => {
+    expect(claudeModelPrice('totally-not-a-model-xyz')).toBeNull();
   });
 });

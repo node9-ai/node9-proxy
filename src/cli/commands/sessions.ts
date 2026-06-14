@@ -11,6 +11,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { agentDisplayName, agentColorName, agentBadgeText } from '../../scan-summary';
+import { pricingFor } from '../../pricing/litellm';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -69,28 +70,17 @@ interface JournalLine {
 }
 
 // ---------------------------------------------------------------------------
-// Pricing (same table as scan.ts)
+// Pricing — single-sourced from `pricingFor` (LiteLLM), the SAME table the
+// upload path uses, so `node9 sessions`, `node9 report`, and cloud Report
+// agree on price. (Was a hardcoded copy where claude-opus-4 drifted to $15/M
+// vs the authoritative $5/M.)
 // ---------------------------------------------------------------------------
 
-const CLAUDE_PRICING: Record<string, { i: number; o: number; cw: number; cr: number }> = {
-  'claude-opus-4-6': { i: 5e-6, o: 25e-6, cw: 6.25e-6, cr: 0.5e-6 },
-  'claude-opus-4-5': { i: 5e-6, o: 25e-6, cw: 6.25e-6, cr: 0.5e-6 },
-  'claude-opus-4': { i: 15e-6, o: 75e-6, cw: 18.75e-6, cr: 1.5e-6 },
-  'claude-sonnet-4-6': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
-  'claude-sonnet-4-5': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
-  'claude-sonnet-4': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
-  'claude-3-7-sonnet': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
-  'claude-3-5-sonnet': { i: 3e-6, o: 15e-6, cw: 3.75e-6, cr: 0.3e-6 },
-  'claude-haiku-4-5': { i: 1e-6, o: 5e-6, cw: 1.25e-6, cr: 0.1e-6 },
-  'claude-3-5-haiku': { i: 0.8e-6, o: 4e-6, cw: 1e-6, cr: 0.08e-6 },
-};
-
 function modelPrice(model: string): { i: number; o: number; cw: number; cr: number } | null {
-  const base = model.replace(/@.*$/, '').replace(/-\d{8}$/, '');
-  for (const [key, p] of Object.entries(CLAUDE_PRICING)) {
-    if (base === key || base.startsWith(key)) return p;
-  }
-  return null;
+  const t = pricingFor(model);
+  if (!t) return null;
+  const [i, o, cw, cr] = t;
+  return { i, o, cw, cr };
 }
 
 const GEMINI_PRICING: Record<string, { i: number; o: number; cr: number }> = {
