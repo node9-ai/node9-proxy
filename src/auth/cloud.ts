@@ -40,6 +40,12 @@ const KNOWN_CHECKED_BY = new Set([
   'trust',
   'observe-mode',
   'observe-mode-would-block',
+  // MCP supply-chain: the gateway pinned a server's tool definitions and they
+  // changed since (possible tool poisoning / rug pull). Emitted as a synthetic
+  // audit row so the SaaS surfaces it as a blocked event. The firewall maps
+  // this checkedBy to AUTO_BLOCKED. See doc/roadmap/active/saas-value-first.md
+  // (workstream B-Tier2).
+  'mcp-pin-mismatch',
 ]);
 
 /**
