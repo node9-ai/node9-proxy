@@ -13,6 +13,7 @@ import os from 'os';
 import { agentDisplayName, agentColorName, agentBadgeText } from '../../scan-summary';
 import { pricingFor } from '../../pricing/litellm';
 import { geminiPriceFor } from '../../cost-gemini';
+import { codexPriceFor } from '../../cost-codex';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -528,6 +529,7 @@ function buildCodexSessions(
     let lastTotalInput = 0;
     let lastTotalCached = 0;
     let lastTotalOutput = 0;
+    let model = ''; // turn_context.model, last-wins — for per-model pricing
 
     for (const line of lines) {
       if (!line.trim()) continue;
@@ -544,6 +546,11 @@ function buildCodexSessions(
         sessionId = String(p['id'] ?? '');
         startTime = String(p['timestamp'] ?? '');
         cwd = String(p['cwd'] ?? '');
+        continue;
+      }
+
+      if (entry.type === 'turn_context' && typeof p['model'] === 'string') {
+        model = p['model'];
         continue;
       }
 
@@ -577,7 +584,8 @@ function buildCodexSessions(
     if (cutoff && new Date(startTime) < cutoff) continue;
 
     const nonCached = Math.max(0, lastTotalInput - lastTotalCached);
-    const costUSD = nonCached * 5e-6 + lastTotalCached * 2.5e-6 + lastTotalOutput * 15e-6;
+    const [pin, pout, , pcr] = codexPriceFor(model || 'gpt-5');
+    const costUSD = nonCached * pin + lastTotalCached * pcr + lastTotalOutput * pout;
 
     const windowEnd = new Date(
       Math.max(new Date(startTime).getTime(), lastToolTs ? new Date(lastToolTs).getTime() : 0) +

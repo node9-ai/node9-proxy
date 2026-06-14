@@ -25,6 +25,7 @@ import { analyzeFsOperation, AST_FS_REGEX_RULES } from '@node9/policy-engine';
 import { scanArgs } from '../../dlp';
 import { pricingFor } from '../../pricing/litellm';
 import { geminiPriceFor } from '../../cost-gemini';
+import { codexPriceFor } from '../../cost-codex';
 import { canonicalToolInput } from '../../utils/hook-payload';
 import type { SmartRule } from '../../core';
 import {
@@ -2217,6 +2218,7 @@ export function scanCodexHistory(
     let lastTotalInput = 0;
     let lastTotalCached = 0;
     let lastTotalOutput = 0;
+    let model = ''; // turn_context.model, last-wins — for per-model pricing
 
     for (const line of lines) {
       if (!line.trim()) continue;
@@ -2235,6 +2237,11 @@ export function scanCodexHistory(
         startTime = String(payload['timestamp'] ?? '');
         const cwd = String(payload['cwd'] ?? '');
         projLabel = stripTerminalEscapes(cwd.replace(os.homedir(), '~')).slice(0, 40);
+        continue;
+      }
+
+      if (entry.type === 'turn_context' && typeof payload['model'] === 'string') {
+        model = payload['model'];
         continue;
       }
 
@@ -2402,9 +2409,11 @@ export function scanCodexHistory(
       }
     }
 
-    // Accumulate session cost using GPT-4o pricing as proxy for codex-1/GPT-5
+    // Accumulate session cost per-model via the SHARED codexPriceFor (the same
+    // source `node9 report` + upload use) instead of a flat hardcoded gpt-5 rate.
     const nonCached = Math.max(0, lastTotalInput - lastTotalCached);
-    result.totalCostUSD += nonCached * 5e-6 + lastTotalCached * 2.5e-6 + lastTotalOutput * 15e-6;
+    const [pin, pout, , pcr] = codexPriceFor(model || 'gpt-5');
+    result.totalCostUSD += nonCached * pin + lastTotalCached * pcr + lastTotalOutput * pout;
 
     result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'codex'));
   }
