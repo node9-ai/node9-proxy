@@ -12,6 +12,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import * as yaml from 'yaml';
+import { parse as parseToml } from 'smol-toml';
 import { isNode9Hook, hermesConfigPath, detectAgents } from './setup';
 
 // ── Low-level detectors (this module is now the shared home for them) ─────────
@@ -83,20 +84,41 @@ interface McpServer {
   args?: string[];
 }
 
+type McpFormat = 'json' | 'toml';
+
 // node9 wraps an upstream server as { command: 'node9', args: [...] } and also
 // installs a standalone { command: 'node9', args: ['mcp-server'] } entry — both
 // have command 'node9'. `present` = any node9-owned entry; `wrapped` = the
 // human-readable list ("name → args") shown by status.
-function readMcp(filePath: string): { wrapped: string[]; present: boolean } {
-  const parsed = readJson<{ mcpServers?: Record<string, McpServer> }>(filePath);
-  if (parsed === null || parsed === 'invalid') return { wrapped: [], present: false };
-  const servers = parsed.mcpServers ?? {};
-  const entries = Object.entries(servers);
+function detectMcp(servers: Record<string, McpServer> | undefined): {
+  wrapped: string[];
+  present: boolean;
+} {
+  const entries = Object.entries(servers ?? {});
   const present = entries.some(([, s]) => s?.command === 'node9');
   const wrapped = entries
     .filter(([, s]) => s?.command === 'node9' && Array.isArray(s.args) && s.args.length > 0)
     .map(([name, s]) => `${name} → ${(s.args as string[]).join(' ')}`);
   return { wrapped, present };
+}
+
+// Reads an agent's MCP config. JSON agents key it under `mcpServers`; Codex
+// uses TOML (`config.toml`) keyed under `mcp_servers`. Malformed/absent → none.
+function readMcp(filePath: string, format: McpFormat): { wrapped: string[]; present: boolean } {
+  if (!fs.existsSync(filePath)) return { wrapped: [], present: false };
+  try {
+    if (format === 'toml') {
+      const parsed = parseToml(fs.readFileSync(filePath, 'utf-8')) as {
+        mcp_servers?: Record<string, McpServer>;
+      };
+      return detectMcp(parsed?.mcp_servers);
+    }
+    const parsed = readJson<{ mcpServers?: Record<string, McpServer> }>(filePath);
+    if (parsed === null || parsed === 'invalid') return { wrapped: [], present: false };
+    return detectMcp(parsed.mcpServers);
+  } catch {
+    return { wrapped: [], present: false };
+  }
 }
 
 // ── Registry ──────────────────────────────────────────────────────────────────
@@ -111,6 +133,10 @@ interface AgentSpec {
   hookEvents: HookEvent[];
   // Present → the agent has an MCP surface node9 can wrap (path to its config).
   mcpFile?: (home: string) => string;
+  mcpFormat?: McpFormat; // defaults to 'json'; Codex is 'toml'
+  // Plugin-shim agents (OpenCode, Pi) — node9 protects them via a node9-authored
+  // plugin/extension file rather than hooks or MCP. Presence of this file = wired.
+  shimFile?: (home: string) => string;
   // Deterministic "this agent has a footprint on the machine" — a config file
   // or install dir, NOT a $PATH probe. Drives whether `status` shows the agent.
   present: (home: string) => boolean;
@@ -136,9 +162,8 @@ const DEFAULT_LABEL_PAD = 11; // width of 'PostToolUse'
 const hookLabelOf = (ev: HookEvent, pad: number): string =>
   `${ev.key.padEnd(pad)} (node9 ${ev.kind})`;
 
-// Only agents with verifiable wiring are listed. Plugin-shim agents (OpenCode,
-// Pi) are intentionally omitted until their shim detection is encoded — better
-// silent than wrong.
+// All nine supported agents. Most are hook-wired; Cursor is MCP-only;
+// OpenCode and Pi are plugin-shim agents (wired = a node9-authored file exists).
 //
 // Cursor is MCP-ONLY: node9 does NOT wire it via hooks (setup.ts:1334 —
 // "Cursor does not yet support a pre-execution hooks file"); its protection is
@@ -172,6 +197,8 @@ export const AGENT_SPECS: AgentSpec[] = [
     hookFile: (h) => path.join(h, '.codex', 'hooks.json'),
     hookFormat: 'matcher',
     hookEvents: [ck('PreToolUse'), ck('UserPromptSubmit')],
+    mcpFile: (h) => path.join(h, '.codex', 'config.toml'),
+    mcpFormat: 'toml',
     present: (h) => exists(path.join(h, '.codex')),
   },
   {
@@ -217,6 +244,30 @@ export const AGENT_SPECS: AgentSpec[] = [
     labelPad: 14, // 'post_tool_call' is wider than the default
     present: (h) => exists(hermesConfigPath(h)),
   },
+  {
+    // Plugin-shim agents — protected by a node9-authored plugin/extension file
+    // (no hooks, no MCP). hookFormat is unused for these (shimFile drives it).
+    id: 'opencode',
+    label: 'OpenCode',
+    setupCommand: 'node9 setup opencode',
+    hookFormat: 'flat',
+    hookEvents: [],
+    shimFile: (h) => path.join(h, '.config', 'opencode', 'plugins', 'node9.js'),
+    present: (h) =>
+      exists(path.join(h, '.config', 'opencode')) ||
+      exists(path.join(h, '.config', 'opencode', 'plugins', 'node9.js')),
+  },
+  {
+    id: 'pi',
+    label: 'Pi',
+    setupCommand: 'node9 setup pi',
+    hookFormat: 'flat',
+    hookEvents: [],
+    shimFile: (h) => path.join(h, '.pi', 'agent', 'extensions', 'node9.js'),
+    present: (h) =>
+      exists(path.join(h, '.pi', 'agent')) ||
+      exists(path.join(h, '.pi', 'agent', 'extensions', 'node9.js')),
+  },
 ];
 
 export type WireState = 'wired' | 'unwired' | 'invalid' | 'absent';
@@ -254,26 +305,41 @@ export interface AgentWiringRow {
 export function getAgentWiring(home: string = os.homedir()): AgentWiringRow[] {
   const detected = detectAgents(home);
   return AGENT_SPECS.map((spec) => {
-    const root: HookRoot = spec.hookFile
-      ? readHookRoot(spec.hookFile(home), spec.hookFormat)
-      : 'absent';
-    const primary = spec.hookEvents[0];
-    const rootPresent = root !== 'absent' && root !== 'invalid';
-
-    // Always list every event (wired:false when the file is absent/invalid) so
-    // a present-but-unwired agent still renders ✗ rows in status.
+    const present = spec.present(home);
     const pad = spec.labelPad ?? DEFAULT_LABEL_PAD;
-    const hooks = spec.hookEvents.map((ev) => ({
-      label: hookLabelOf(ev, pad),
-      wired: rootPresent && eventWired(root as Record<string, unknown>, ev, spec.hookFormat),
-    }));
 
+    let hooks: Array<{ label: string; wired: boolean }>;
     let wireState: WireState;
-    if (root === 'absent') wireState = 'absent';
-    else if (root === 'invalid') wireState = 'invalid';
-    else wireState = primary && eventWired(root, primary, spec.hookFormat) ? 'wired' : 'unwired';
+    let hookLabel: string;
+    let settingsPath: string;
 
-    const mcp = spec.mcpFile ? readMcp(spec.mcpFile(home)) : null;
+    if (spec.shimFile) {
+      // Plugin-shim agent — presence of the node9-authored file is the wiring.
+      const shimWired = exists(spec.shimFile(home));
+      hooks = [{ label: 'node9 plugin (node9 check)', wired: shimWired }];
+      wireState = shimWired ? 'wired' : present ? 'unwired' : 'absent';
+      hookLabel = 'node9 plugin';
+      settingsPath = spec.shimFile(home);
+    } else {
+      const root: HookRoot = spec.hookFile
+        ? readHookRoot(spec.hookFile(home), spec.hookFormat)
+        : 'absent';
+      const primary = spec.hookEvents[0];
+      const rootPresent = root !== 'absent' && root !== 'invalid';
+      // Always list every event (wired:false when absent/invalid) so a
+      // present-but-unwired agent still renders ✗ rows in status.
+      hooks = spec.hookEvents.map((ev) => ({
+        label: hookLabelOf(ev, pad),
+        wired: rootPresent && eventWired(root as Record<string, unknown>, ev, spec.hookFormat),
+      }));
+      if (root === 'absent') wireState = 'absent';
+      else if (root === 'invalid') wireState = 'invalid';
+      else wireState = primary && eventWired(root, primary, spec.hookFormat) ? 'wired' : 'unwired';
+      hookLabel = primary ? `${primary.key} hook` : 'MCP proxy';
+      settingsPath = spec.hookFile ? spec.hookFile(home) : spec.mcpFile ? spec.mcpFile(home) : '';
+    }
+
+    const mcp = spec.mcpFile ? readMcp(spec.mcpFile(home), spec.mcpFormat ?? 'json') : null;
     const anyHookWired = hooks.some((h) => h.wired);
 
     return {
@@ -281,11 +347,11 @@ export function getAgentWiring(home: string = os.homedir()): AgentWiringRow[] {
       label: spec.label,
       setupCommand: spec.setupCommand,
       installed: detected[spec.id],
-      present: spec.present(home),
+      present,
       hooks,
       wireState,
-      hookLabel: primary ? `${primary.key} hook` : 'MCP proxy',
-      settingsPath: spec.hookFile ? spec.hookFile(home) : spec.mcpFile ? spec.mcpFile(home) : '',
+      hookLabel,
+      settingsPath,
       configFormat: spec.hookFormat === 'yaml' ? 'YAML' : 'JSON',
       mcpServers: mcp ? mcp.wrapped : null,
       mcpProtected: mcp ? mcp.present : false,
