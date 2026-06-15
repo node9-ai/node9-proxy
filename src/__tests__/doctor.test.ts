@@ -119,12 +119,12 @@ describe('node9 doctor — agent hooks section', () => {
     expect(exitCode).toBe(1);
   });
 
-  it('warns (not fails) when Claude settings.json is absent', () => {
+  it('lists Claude in the "Not configured" summary (not a failure) when absent', () => {
     const home = path.join(tmpBase, 'claude-absent');
     fs.mkdirSync(home, { recursive: true });
     const { output } = runDoctor(home);
-    expect(output).toMatch(/Claude Code.*not configured/);
-    // Absent = warning only, not ❌
+    // Absent agents collapse into one summary line, never an ❌.
+    expect(output).toMatch(/Not configured:.*Claude Code/);
     expect(output).not.toMatch(/❌.*Claude/);
   });
 

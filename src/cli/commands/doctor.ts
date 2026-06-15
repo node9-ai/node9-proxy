@@ -8,6 +8,7 @@ import os from 'os';
 import { execSync } from 'child_process';
 import { isDaemonRunning, DAEMON_PORT, DAEMON_HOST } from '../../auth/daemon';
 import { getConfig } from '../../config';
+import { getAgentWiring } from '../../agent-wiring';
 
 export function registerDoctorCommand(program: Command, version: string): void {
   program
@@ -105,75 +106,33 @@ export function registerDoctorCommand(program: Command, version: string): void {
       }
 
       // ── Hooks ────────────────────────────────────────────────────────────────
+      // Every supported agent comes from the shared agent-wiring registry, so
+      // doctor and status can't drift (doctor used to check only 3 of them).
       section('Agent Hooks');
 
-      // Claude
-      const claudeSettingsPath = path.join(homeDir, '.claude', 'settings.json');
-      if (fs.existsSync(claudeSettingsPath)) {
-        try {
-          const cs = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf-8')) as {
-            hooks?: { PreToolUse?: Array<{ hooks: Array<{ command?: string }> }> };
-          };
-          const hasHook = cs.hooks?.PreToolUse?.some((m) =>
-            m.hooks.some((h) => h.command?.includes('node9') || h.command?.includes('cli.js'))
-          );
-          if (hasHook) pass('Claude Code — PreToolUse hook active');
-          else
-            fail(
-              'Claude Code — hooks file found but node9 hook missing',
-              'Run: node9 setup claude'
-            );
-        } catch {
-          fail('Claude Code — ~/.claude/settings.json is invalid JSON');
+      // Driven purely by each agent's settings file (wireState) — deterministic
+      // and machine-independent (no PATH probing). Absent agents collapse into
+      // one summary line so a fresh machine isn't a wall of warnings.
+      const notConfigured: string[] = [];
+      for (const a of getAgentWiring(homeDir)) {
+        if (a.wireState === 'wired') {
+          pass(`${a.label} — ${a.hookLabel} active`);
+        } else if (a.wireState === 'unwired') {
+          // Settings file exists but the node9 hook is missing — a real
+          // protection gap, so fail (matches the old "hook missing" behavior).
+          fail(`${a.label} — settings found but node9 hook missing`, `Run: ${a.setupCommand}`);
+        } else if (a.wireState === 'invalid') {
+          fail(`${a.label} — settings file is invalid JSON`, a.settingsPath);
+        } else {
+          notConfigured.push(a.label); // absent
         }
-      } else {
-        warn('Claude Code — not configured', 'Run: node9 setup claude');
       }
-
-      // Gemini
-      const geminiSettingsPath = path.join(homeDir, '.gemini', 'settings.json');
-      if (fs.existsSync(geminiSettingsPath)) {
-        try {
-          const gs = JSON.parse(fs.readFileSync(geminiSettingsPath, 'utf-8')) as {
-            hooks?: { BeforeTool?: Array<{ hooks: Array<{ command?: string }> }> };
-          };
-          const hasHook = gs.hooks?.BeforeTool?.some((m) =>
-            m.hooks.some((h) => h.command?.includes('node9') || h.command?.includes('cli.js'))
-          );
-          if (hasHook) pass('Gemini CLI  — BeforeTool hook active');
-          else
-            fail(
-              'Gemini CLI  — hooks file found but node9 hook missing',
-              'Run: node9 setup gemini'
-            );
-        } catch {
-          fail('Gemini CLI  — ~/.gemini/settings.json is invalid JSON');
-        }
-      } else {
-        warn('Gemini CLI  — not configured', 'Run: node9 setup gemini  (skip if not using Gemini)');
-      }
-
-      // Cursor
-      const cursorHooksPath = path.join(homeDir, '.cursor', 'hooks.json');
-      if (fs.existsSync(cursorHooksPath)) {
-        try {
-          const cur = JSON.parse(fs.readFileSync(cursorHooksPath, 'utf-8')) as {
-            hooks?: { preToolUse?: Array<{ command?: string }> };
-          };
-          const hasHook = cur.hooks?.preToolUse?.some(
-            (h) => h.command?.includes('node9') || h.command?.includes('cli.js')
-          );
-          if (hasHook) pass('Cursor      — preToolUse hook active');
-          else
-            fail(
-              'Cursor      — hooks file found but node9 hook missing',
-              'Run: node9 setup cursor'
-            );
-        } catch {
-          fail('Cursor      — ~/.cursor/hooks.json is invalid JSON');
-        }
-      } else {
-        warn('Cursor      — not configured', 'Run: node9 setup cursor  (skip if not using Cursor)');
+      if (notConfigured.length > 0) {
+        console.log(
+          chalk.gray(
+            `     · Not configured: ${notConfigured.join(', ')} — run \`node9 setup <agent>\` if you use one`
+          )
+        );
       }
 
       // ── Daemon ───────────────────────────────────────────────────────────────
