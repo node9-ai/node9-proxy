@@ -17,6 +17,22 @@ const TIER_LABEL: Record<PostureResult['tier'], string> = {
   critical: chalk.red('Critical'),
 };
 
+/** Greedy word-wrap for the headline narrative (plain text, no ANSI). */
+function wrap(text: string, width: number): string[] {
+  const out: string[] = [];
+  let cur = '';
+  for (const word of text.split(' ')) {
+    if (cur && (cur + ' ' + word).length > width) {
+      out.push(cur);
+      cur = word;
+    } else {
+      cur = cur ? cur + ' ' + word : word;
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
 /** Pad a category label to a fixed column so detail lines align. */
 const LABEL_WIDTH = 14;
 function label(category: string): string {
@@ -44,6 +60,15 @@ export function renderPosture(result: PostureResult): string {
       `        ${chalk.bold(`Score: ${result.score}/100`)}  (${tier})`
   );
   lines.push('');
+
+  if (result.headline) {
+    const indent = '     ';
+    lines.push(`  ${chalk.red.bold('🔥 Biggest risk')}`);
+    for (const l of wrap(result.headline.risk, 74)) lines.push(indent + chalk.white(l));
+    const action = wrap(`Do this first: ${result.headline.action}`, 72);
+    action.forEach((l, i) => lines.push(indent + chalk.cyan(i === 0 ? '→ ' + l : '  ' + l)));
+    lines.push('');
+  }
 
   for (const f of result.findings) {
     lines.push(...renderFinding(f));

@@ -70,6 +70,9 @@ describe('node9 posture (integration)', () => {
     expect(Array.isArray(parsed.findings)).toBe(true);
     expect(typeof parsed.tier).toBe('string');
     expect(parsed.checksRun).toBe(8);
+    // Bare home is not wired → the headline's #1 action is to wire node9.
+    expect(parsed.headline).toBeTruthy();
+    expect(parsed.headline.action).toMatch(/node9 setup/i);
   });
 
   it('reports critical + exits 2 when node9 is not wired (bare home)', () => {

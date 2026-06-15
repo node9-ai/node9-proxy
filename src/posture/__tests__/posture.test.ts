@@ -14,7 +14,17 @@ import { checkSecrets } from '../secrets';
 import { parseListeners, classifyListener } from '../inbound';
 import { checkSupplyChain } from '../supply-chain';
 import { checkCoverage } from '../coverage';
-import type { Finding } from '../types';
+import { deriveHeadline } from '../headline';
+import type { Finding, Severity } from '../types';
+
+// Compact finding builder for headline tests.
+const f = (category: string, severity: Severity = 'high'): Finding => ({
+  category,
+  severity,
+  title: `${category} finding`,
+  detail: [],
+  fix: `fix ${category}`,
+});
 
 // A fake token assembled at runtime — matches the DLP "GitHub Token" pattern
 // once joined, but no secret-shaped literal appears in this source file.
@@ -206,6 +216,41 @@ describe('checkSupplyChain', () => {
 
   it('returns no findings when no MCP servers are configured', () => {
     expect(checkSupplyChain({ home, cwd: home })).toEqual([]);
+  });
+});
+
+describe('deriveHeadline', () => {
+  it('narrates the exfiltration chain when secrets + egress are both open', () => {
+    const h = deriveHeadline([f('Secrets', 'critical'), f('Egress'), f('Isolation', 'advisory')]);
+    expect(h).not.toBeNull();
+    expect(h?.risk).toMatch(/read the credentials/i);
+    expect(h?.risk).toMatch(/send them to any host/i);
+    expect(h?.risk).toMatch(/no container/i); // isolation woven in
+  });
+
+  it('makes egress the first action (close the exit breaks the chain)', () => {
+    const h = deriveHeadline([f('Secrets', 'critical'), f('Egress')]);
+    expect(h?.action).toMatch(/lock egress/i);
+  });
+
+  it('prioritizes "node9 setup" when node9 is not wired, over any other fix', () => {
+    const h = deriveHeadline([f('Secrets', 'critical'), f('Egress'), f('Coverage', 'critical')]);
+    expect(h?.action).toMatch(/node9 setup/i);
+  });
+
+  it('calls out observe mode as the action when node9 only watches', () => {
+    const h = deriveHeadline([f('Egress'), f('Coverage', 'high')]);
+    expect(h?.action).toMatch(/enforcing mode/i);
+  });
+
+  it('returns null when only advisory findings exist (no scary chain)', () => {
+    expect(
+      deriveHeadline([f('Isolation', 'advisory'), f('Network exposure', 'advisory')])
+    ).toBeNull();
+  });
+
+  it('returns null for a clean run', () => {
+    expect(deriveHeadline([])).toBeNull();
   });
 });
 

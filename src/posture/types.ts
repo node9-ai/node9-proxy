@@ -39,8 +39,17 @@ export interface PostureResult {
   findings: Finding[];
   /** Categories that ran clean (no findings) — shown as ✅ rows. */
   passedCategories: string[];
+  /** The single scariest true story + the one next step, or null when clean. */
+  headline: Headline | null;
   score: number;
   tier: 'good' | 'at-risk' | 'critical';
   /** Number of checks evaluated — the score denominator. */
   checksRun: number;
+}
+
+export interface Headline {
+  /** The attack narrative — the one risk that matters most, in plain English. */
+  risk: string;
+  /** The single highest-leverage next step (self-contained, names node9 where it can act). */
+  action: string;
 }

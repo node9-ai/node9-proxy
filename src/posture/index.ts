@@ -12,6 +12,7 @@ import { checkContainment } from './containment';
 import { checkInbound } from './inbound';
 import { checkCoverage } from './coverage';
 import { scorePosture } from './score';
+import { deriveHeadline } from './headline';
 import type { CheckContext, Finding, PostureCheck, PostureResult } from './types';
 
 export const POSTURE_CHECKS: PostureCheck[] = [
@@ -56,6 +57,7 @@ export async function runPosture(opts: RunPostureOptions = {}): Promise<PostureR
     agent: opts.agent ? `${opts.agent} on this host` : 'agent on this host',
     findings,
     passedCategories,
+    headline: deriveHeadline(findings),
     score,
     tier,
     checksRun: POSTURE_CHECKS.length,
