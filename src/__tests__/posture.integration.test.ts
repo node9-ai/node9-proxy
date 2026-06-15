@@ -85,4 +85,19 @@ describe('node9 posture (integration)', () => {
     expect(r.status).toBe(2);
     expect(parsed.findings.some((f: { category: string }) => f.category === 'Coverage')).toBe(true);
   });
+
+  it('--ship with no credentials nudges on stderr, keeps stdout clean JSON, exits 2', () => {
+    // No NODE9_API_KEY and a bare HOME → no credentials. --ship must not break
+    // the command: the login nudge goes to stderr so --json stdout stays a
+    // clean, parseable document, and the critical exit code is unchanged.
+    const r = runPosture(['--ship', '--json'], home);
+    // stdout is still a single valid JSON document (no status text mixed in).
+    const parsed = JSON.parse(r.stdout);
+    expect(typeof parsed.score).toBe('number');
+    // The ship status / nudge is on stderr, not stdout.
+    expect(r.stdout).not.toMatch(/node9 login/i);
+    expect(r.stderr).toMatch(/node9 login/i);
+    // --ship is best-effort and never changes the exit semantics.
+    expect(r.status).toBe(2);
+  });
 });
