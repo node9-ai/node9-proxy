@@ -15,7 +15,8 @@ import { parseListeners, classifyListener } from '../inbound';
 import { checkSupplyChain } from '../supply-chain';
 import { checkCoverage } from '../coverage';
 import { deriveHeadline } from '../headline';
-import type { Finding, Severity } from '../types';
+import { renderPosture } from '../render';
+import type { Finding, PostureResult, Severity } from '../types';
 
 // Compact finding builder for headline tests.
 const f = (category: string, severity: Severity = 'high'): Finding => ({
@@ -251,6 +252,32 @@ describe('deriveHeadline', () => {
 
   it('returns null for a clean run', () => {
     expect(deriveHeadline([])).toBeNull();
+  });
+});
+
+describe('renderPosture grouping', () => {
+  const result = (findings: Finding[]): PostureResult => ({
+    agent: 'agent on this host',
+    findings,
+    passedCategories: [],
+    headline: deriveHeadline(findings),
+    score: 50,
+    tier: 'at-risk',
+    checksRun: 8,
+  });
+
+  it('groups into the exfiltration chain when secrets + egress are both present', () => {
+    const out = renderPosture(result([f('Secrets', 'critical'), f('Egress'), f('Privilege')]));
+    expect(out).toContain('── the exfiltration chain ──');
+    expect(out).toContain('── other findings ──');
+    // Chain (Secrets, Egress) renders before the other finding (Privilege).
+    expect(out.indexOf('Secrets')).toBeLessThan(out.indexOf('Egress'));
+    expect(out.indexOf('Egress')).toBeLessThan(out.indexOf('Privilege'));
+  });
+
+  it('does not group (flat list) when the chain is not active', () => {
+    const out = renderPosture(result([f('Egress'), f('Privilege')]));
+    expect(out).not.toContain('exfiltration chain');
   });
 });
 

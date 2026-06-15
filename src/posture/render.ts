@@ -33,6 +33,9 @@ function wrap(text: string, width: number): string[] {
   return out;
 }
 
+// The exfiltration chain, in narrative order: the prize → the exit → the wall.
+const CHAIN_ORDER = ['Secrets', 'Egress', 'Isolation'];
+
 /** Pad a category label to a fixed column so detail lines align. */
 const LABEL_WIDTH = 14;
 function label(category: string): string {
@@ -70,9 +73,27 @@ export function renderPosture(result: PostureResult): string {
     lines.push('');
   }
 
-  for (const f of result.findings) {
-    lines.push(...renderFinding(f));
+  // When the exfiltration chain is active (readable secrets + open egress),
+  // group the evidence so it visually backs the headline: the chain first
+  // (prize → exit → wall), then everything else.
+  const chainActive =
+    result.findings.some((f) => f.category === 'Secrets') &&
+    result.findings.some((f) => f.category === 'Egress');
+
+  if (chainActive) {
+    const chain = CHAIN_ORDER.flatMap((cat) => result.findings.filter((f) => f.category === cat));
+    const others = result.findings.filter((f) => !CHAIN_ORDER.includes(f.category));
+    lines.push('  ' + chalk.gray('── the exfiltration chain ──'));
+    for (const f of chain) lines.push(...renderFinding(f));
+    if (others.length > 0) {
+      lines.push('');
+      lines.push('  ' + chalk.gray('── other findings ──'));
+      for (const f of others) lines.push(...renderFinding(f));
+    }
+  } else {
+    for (const f of result.findings) lines.push(...renderFinding(f));
   }
+
   for (const cat of result.passedCategories) {
     lines.push(`  ${chalk.green('✅')} ${label(cat)}${chalk.gray('no issues found')}`);
   }
