@@ -11,6 +11,9 @@ import path from 'path';
 import { evaluateEgressConfig } from '../egress';
 import { scorePosture } from '../score';
 import { checkSecrets } from '../secrets';
+import { parsePublicListeners } from '../containment';
+import { checkSupplyChain } from '../supply-chain';
+import { checkCoverage } from '../coverage';
 import type { Finding } from '../types';
 
 // A fake token assembled at runtime — matches the DLP "GitHub Token" pattern
@@ -106,5 +109,94 @@ describe('checkSecrets', () => {
   it('returns no findings on a clean home', () => {
     const findings = checkSecrets({ home, cwd: home });
     expect(findings).toEqual([]);
+  });
+});
+
+describe('parsePublicListeners', () => {
+  it('extracts ports bound to 0.0.0.0 in LISTEN state', () => {
+    const text = [
+      '  sl  local_address rem_address   st',
+      '   0: 00000000:1F90 00000000:0000 0A 00000000:00000000', // 0.0.0.0:8080 LISTEN
+      '   1: 0100007F:0050 00000000:0000 0A 00000000:00000000', // 127.0.0.1:80 LISTEN (loopback → excluded)
+      '   2: 00000000:0016 00000000:0000 01 00000000:00000000', // 0.0.0.0:22 ESTABLISHED (not LISTEN → excluded)
+    ].join('\n');
+    expect(parsePublicListeners(text)).toEqual([8080]); // 0x1F90
+  });
+
+  it('handles the tcp6 all-zero address form', () => {
+    const text = [
+      'header',
+      '   0: 00000000000000000000000000000000:13A4 00000000000000000000000000000000:0000 0A x',
+    ].join('\n');
+    expect(parsePublicListeners(text)).toEqual([5028]); // 0x13A4
+  });
+
+  it('returns [] on empty or malformed input', () => {
+    expect(parsePublicListeners('')).toEqual([]);
+    expect(parsePublicListeners('header only\nshort line')).toEqual([]);
+  });
+});
+
+describe('checkSupplyChain', () => {
+  let home: string;
+  // claude's MCP config path (from the agent-wiring registry).
+  const mcpFile = () => path.join(home, '.claude.json');
+
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'posture-mcp-'));
+  });
+  afterEach(() => {
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it('flags an unmanaged MCP server (runs outside node9) as medium', () => {
+    fs.writeFileSync(
+      mcpFile(),
+      JSON.stringify({ mcpServers: { weather: { command: 'node', args: ['s.js'] } } })
+    );
+    const findings = checkSupplyChain({ home, cwd: home });
+    const f = findings.find((x) => x.category === 'Supply chain' && x.severity === 'medium');
+    expect(f).toBeDefined();
+    expect(f?.title).toContain('run outside node9');
+  });
+
+  it('does not flag a node9-wrapped MCP server', () => {
+    fs.writeFileSync(
+      mcpFile(),
+      JSON.stringify({ mcpServers: { safe: { command: 'node9', args: ['mcp-wrap'] } } })
+    );
+    expect(checkSupplyChain({ home, cwd: home })).toEqual([]);
+  });
+
+  it('flags a server launched from an untrusted path (/tmp) as high', () => {
+    fs.writeFileSync(
+      mcpFile(),
+      JSON.stringify({ mcpServers: { sketchy: { command: '/tmp/mcp-server' } } })
+    );
+    const findings = checkSupplyChain({ home, cwd: home });
+    expect(findings.some((f) => f.severity === 'high' && /untrusted path/.test(f.title))).toBe(
+      true
+    );
+  });
+
+  it('returns no findings when no MCP servers are configured', () => {
+    expect(checkSupplyChain({ home, cwd: home })).toEqual([]);
+  });
+});
+
+describe('checkCoverage', () => {
+  let home: string;
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'posture-cov-'));
+  });
+  afterEach(() => {
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it('reports critical when node9 is not in-path for any agent', () => {
+    const findings = checkCoverage({ home, cwd: home });
+    expect(findings).toHaveLength(1);
+    expect(findings[0].category).toBe('Coverage');
+    expect(findings[0].severity).toBe('critical');
   });
 });

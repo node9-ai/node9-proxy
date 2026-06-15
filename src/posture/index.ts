@@ -6,6 +6,10 @@ import os from 'os';
 import { checkSecrets } from './secrets';
 import { checkEgress } from './egress';
 import { checkGate } from './gate';
+import { checkSupplyChain } from './supply-chain';
+import { checkPrivilege } from './privilege';
+import { checkContainment } from './containment';
+import { checkCoverage } from './coverage';
 import { scorePosture } from './score';
 import type { CheckContext, Finding, PostureCheck, PostureResult } from './types';
 
@@ -13,6 +17,10 @@ export const POSTURE_CHECKS: PostureCheck[] = [
   { category: 'Secrets', run: checkSecrets },
   { category: 'Egress', run: checkEgress },
   { category: 'Approval gate', run: checkGate },
+  { category: 'Supply chain', run: checkSupplyChain },
+  { category: 'Privilege', run: checkPrivilege },
+  { category: 'Containment', run: checkContainment },
+  { category: 'Coverage', run: checkCoverage },
 ];
 
 export interface RunPostureOptions {

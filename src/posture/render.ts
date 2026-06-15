@@ -54,10 +54,12 @@ export function renderPosture(result: PostureResult): string {
   const crit = result.findings.filter((f) => f.severity === 'critical').length;
   const high = result.findings.filter((f) => f.severity === 'high').length;
   const med = result.findings.filter((f) => f.severity === 'medium').length;
+  const adv = result.findings.filter((f) => f.severity === 'advisory').length;
   const parts: string[] = [];
   if (crit) parts.push(chalk.red(`${crit} critical`));
   if (high) parts.push(chalk.red(`${high} high`));
   if (med) parts.push(chalk.yellow(`${med} medium`));
+  if (adv) parts.push(chalk.gray(`${adv} advisory`));
   const summary = parts.length ? parts.join(' · ') : chalk.green('no findings');
   lines.push(`  ${summary}  ·  ${chalk.gray('track your fleet at app.node9.ai/posture')}`);
   lines.push('');
