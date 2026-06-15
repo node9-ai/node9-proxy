@@ -30,10 +30,66 @@ describe('agent-wiring registry', () => {
     fs.rmSync(home, { recursive: true, force: true });
   });
 
-  it('covers all seven hook-wired agents', () => {
+  it('covers all nine supported agents', () => {
     expect(AGENT_SPECS.map((s) => s.id).sort()).toEqual(
-      ['antigravity', 'claude', 'codex', 'copilot', 'cursor', 'gemini', 'hermes'].sort()
+      [
+        'antigravity',
+        'claude',
+        'codex',
+        'copilot',
+        'cursor',
+        'gemini',
+        'hermes',
+        'opencode',
+        'pi',
+      ].sort()
     );
+  });
+
+  // ── Codex MCP via TOML (#3) ──────────────────────────────────────────────
+  it('detects node9 in Codex config.toml (mcp_servers, TOML)', () => {
+    const p = path.join(home, '.codex', 'config.toml');
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, '[mcp_servers.node9]\ncommand = "node9"\nargs = ["mcp-server"]\n');
+    const codex = getAgentWiring(home).find((a) => a.id === 'codex');
+    expect(codex?.mcpProtected).toBe(true);
+    expect(codex?.mcpServers).toContain('node9 → mcp-server');
+    expect(codex?.isProtected).toBe(true); // protected via MCP even with no hooks
+  });
+
+  it('reports no Codex MCP when config.toml lacks a node9 entry', () => {
+    const p = path.join(home, '.codex', 'config.toml');
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, '[mcp_servers.github]\ncommand = "npx"\n');
+    const codex = getAgentWiring(home).find((a) => a.id === 'codex');
+    expect(codex?.mcpProtected).toBe(false);
+  });
+
+  // ── Shim agents: OpenCode + Pi (#3) ──────────────────────────────────────
+  it('wires OpenCode/Pi by the presence of the node9 plugin/extension file', () => {
+    fs.mkdirSync(path.join(home, '.config', 'opencode', 'plugins'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.config', 'opencode', 'plugins', 'node9.js'),
+      '// node9 shim'
+    );
+    fs.mkdirSync(path.join(home, '.pi', 'agent', 'extensions'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.pi', 'agent', 'extensions', 'node9.js'), '// node9 shim');
+
+    const oc = getAgentWiring(home).find((a) => a.id === 'opencode');
+    expect(oc?.isProtected).toBe(true);
+    expect(oc?.hooks).toEqual([{ label: 'node9 plugin (node9 check)', wired: true }]);
+    expect(oc?.mcpServers).toBeNull(); // no MCP surface
+
+    const pi = getAgentWiring(home).find((a) => a.id === 'pi');
+    expect(pi?.isProtected).toBe(true);
+  });
+
+  it('reports a shim agent unwired when its config dir exists but the shim is missing', () => {
+    fs.mkdirSync(path.join(home, '.config', 'opencode'), { recursive: true });
+    const oc = getAgentWiring(home).find((a) => a.id === 'opencode');
+    expect(oc?.present).toBe(true);
+    expect(oc?.wireState).toBe('unwired');
+    expect(oc?.isProtected).toBe(false);
   });
 
   it('reports every agent as absent on an empty home', () => {
