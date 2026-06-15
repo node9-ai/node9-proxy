@@ -89,7 +89,7 @@ describe('agent-wiring registry', () => {
     });
     const claude = getAgentWiring(home).find((a) => a.id === 'claude');
     expect(claude?.hooks).toEqual([
-      { label: 'PreToolUse (node9 check)', wired: true },
+      { label: 'PreToolUse  (node9 check)', wired: true }, // status-aligned label
       { label: 'PostToolUse (node9 log)', wired: false },
     ]);
     expect(claude?.isProtected).toBe(true);

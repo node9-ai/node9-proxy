@@ -111,10 +111,24 @@ interface AgentSpec {
   hookEvents: HookEvent[];
   // Present → the agent has an MCP surface node9 can wrap (path to its config).
   mcpFile?: (home: string) => string;
+  // Deterministic "this agent has a footprint on the machine" — a config file
+  // or install dir, NOT a $PATH probe. Drives whether `status` shows the agent.
+  present: (home: string) => boolean;
 }
 
-const pre = (label = 'PreToolUse'): HookEvent => ({ key: label, label: `${label} (node9 check)` });
-const post = (label = 'PostToolUse'): HookEvent => ({ key: label, label: `${label} (node9 log)` });
+const exists = (p: string): boolean => {
+  try {
+    return fs.existsSync(p);
+  } catch {
+    return false;
+  }
+};
+
+// Hook-row display labels are the EXACT strings `status` renders (with their
+// alignment padding) — the registry is the single source of those literals.
+// `check` events guard tools (PreToolUse); `log` events record them (PostToolUse).
+const ck = (key: string, label: string): HookEvent => ({ key, label: `${label} (node9 check)` });
+const lg = (key: string, label: string): HookEvent => ({ key, label: `${label} (node9 log)` });
 
 // Only agents with verifiable wiring are listed. Plugin-shim agents (OpenCode,
 // Pi) are intentionally omitted until their shim detection is encoded — better
@@ -130,8 +144,10 @@ export const AGENT_SPECS: AgentSpec[] = [
     setupCommand: 'node9 setup claude',
     hookFile: (h) => path.join(h, '.claude', 'settings.json'),
     hookFormat: 'matcher',
-    hookEvents: [pre(), post()],
+    hookEvents: [ck('PreToolUse', 'PreToolUse '), lg('PostToolUse', 'PostToolUse')],
     mcpFile: (h) => path.join(h, '.claude.json'),
+    present: (h) =>
+      exists(path.join(h, '.claude', 'settings.json')) || exists(path.join(h, '.claude.json')),
   },
   {
     id: 'gemini',
@@ -139,8 +155,9 @@ export const AGENT_SPECS: AgentSpec[] = [
     setupCommand: 'node9 setup gemini',
     hookFile: (h) => path.join(h, '.gemini', 'settings.json'),
     hookFormat: 'matcher',
-    hookEvents: [pre('BeforeTool'), post('AfterTool')],
+    hookEvents: [ck('BeforeTool', 'BeforeTool '), lg('AfterTool', 'AfterTool  ')],
     mcpFile: (h) => path.join(h, '.gemini', 'settings.json'),
+    present: (h) => exists(path.join(h, '.gemini', 'settings.json')),
   },
   {
     id: 'codex',
@@ -148,7 +165,8 @@ export const AGENT_SPECS: AgentSpec[] = [
     setupCommand: 'node9 setup codex',
     hookFile: (h) => path.join(h, '.codex', 'hooks.json'),
     hookFormat: 'matcher',
-    hookEvents: [pre(), pre('UserPromptSubmit')],
+    hookEvents: [ck('PreToolUse', 'PreToolUse '), ck('UserPromptSubmit', 'UserPromptSubmit')],
+    present: (h) => exists(path.join(h, '.codex')),
   },
   {
     id: 'antigravity',
@@ -156,8 +174,12 @@ export const AGENT_SPECS: AgentSpec[] = [
     setupCommand: 'node9 setup antigravity',
     hookFile: (h) => path.join(h, '.gemini', 'config', 'hooks.json'),
     hookFormat: 'matcher',
-    hookEvents: [pre(), post()],
+    hookEvents: [ck('PreToolUse', 'PreToolUse '), lg('PostToolUse', 'PostToolUse')],
     mcpFile: (h) => path.join(h, '.gemini', 'config', 'mcp_config.json'),
+    present: (h) =>
+      exists(path.join(h, '.gemini', 'config', 'hooks.json')) ||
+      exists(path.join(h, '.gemini', 'antigravity-cli')) ||
+      exists(path.join(h, '.gemini', 'antigravity-ide')),
   },
   {
     id: 'copilot',
@@ -165,8 +187,13 @@ export const AGENT_SPECS: AgentSpec[] = [
     setupCommand: 'node9 setup copilot',
     hookFile: (h) => path.join(h, '.copilot', 'hooks', 'node9.json'),
     hookFormat: 'flat',
-    hookEvents: [pre(), post(), pre('UserPromptSubmit')],
+    hookEvents: [
+      ck('PreToolUse', 'PreToolUse '),
+      lg('PostToolUse', 'PostToolUse'),
+      ck('UserPromptSubmit', 'UserPromptSubmit'),
+    ],
     mcpFile: (h) => path.join(h, '.copilot', 'mcp-config.json'),
+    present: (h) => exists(path.join(h, '.copilot')),
   },
   {
     id: 'cursor',
@@ -176,6 +203,7 @@ export const AGENT_SPECS: AgentSpec[] = [
     hookFormat: 'flat',
     hookEvents: [],
     mcpFile: (h) => path.join(h, '.cursor', 'mcp.json'),
+    present: (h) => exists(path.join(h, '.cursor', 'mcp.json')),
   },
   {
     id: 'hermes',
@@ -183,7 +211,8 @@ export const AGENT_SPECS: AgentSpec[] = [
     setupCommand: 'node9 setup hermes',
     hookFile: (h) => hermesConfigPath(h),
     hookFormat: 'yaml',
-    hookEvents: [pre('pre_tool_call'), post('post_tool_call')],
+    hookEvents: [ck('pre_tool_call', 'pre_tool_call '), lg('post_tool_call', 'post_tool_call')],
+    present: (h) => exists(hermesConfigPath(h)),
   },
 ];
 
@@ -194,6 +223,8 @@ export interface AgentWiringRow {
   label: string;
   setupCommand: string;
   installed: boolean;
+  /** Deterministic footprint (config file / install dir). Drives status display. */
+  present: boolean;
   // ── Hooks ──
   /** Per-event wiring. Empty when the hook file is absent/invalid. */
   hooks: Array<{ label: string; wired: boolean }>;
@@ -201,6 +232,8 @@ export interface AgentWiringRow {
   wireState: WireState;
   hookLabel: string; // e.g. 'PreToolUse hook'
   settingsPath: string; // the hook file
+  /** Format of the hook config — for "not valid JSON/YAML" messages. */
+  configFormat: 'JSON' | 'YAML';
   // ── MCP ──
   /** node9-wrapped servers ("name → args"); null when the agent has no MCP surface. */
   mcpServers: string[] | null;
@@ -222,20 +255,19 @@ export function getAgentWiring(home: string = os.homedir()): AgentWiringRow[] {
       ? readHookRoot(spec.hookFile(home), spec.hookFormat)
       : 'absent';
     const primary = spec.hookEvents[0];
+    const rootPresent = root !== 'absent' && root !== 'invalid';
+
+    // Always list every event (wired:false when the file is absent/invalid) so
+    // a present-but-unwired agent still renders ✗ rows in status.
+    const hooks = spec.hookEvents.map((ev) => ({
+      label: ev.label,
+      wired: rootPresent && eventWired(root as Record<string, unknown>, ev, spec.hookFormat),
+    }));
 
     let wireState: WireState;
-    let hooks: Array<{ label: string; wired: boolean }> = [];
-    if (root === 'absent') {
-      wireState = 'absent';
-    } else if (root === 'invalid') {
-      wireState = 'invalid';
-    } else {
-      hooks = spec.hookEvents.map((ev) => ({
-        label: ev.label,
-        wired: eventWired(root, ev, spec.hookFormat),
-      }));
-      wireState = primary && eventWired(root, primary, spec.hookFormat) ? 'wired' : 'unwired';
-    }
+    if (root === 'absent') wireState = 'absent';
+    else if (root === 'invalid') wireState = 'invalid';
+    else wireState = primary && eventWired(root, primary, spec.hookFormat) ? 'wired' : 'unwired';
 
     const mcp = spec.mcpFile ? readMcp(spec.mcpFile(home)) : null;
     const anyHookWired = hooks.some((h) => h.wired);
@@ -245,10 +277,12 @@ export function getAgentWiring(home: string = os.homedir()): AgentWiringRow[] {
       label: spec.label,
       setupCommand: spec.setupCommand,
       installed: detected[spec.id],
+      present: spec.present(home),
       hooks,
       wireState,
       hookLabel: primary ? `${primary.key} hook` : 'MCP proxy',
       settingsPath: spec.hookFile ? spec.hookFile(home) : spec.mcpFile ? spec.mcpFile(home) : '',
+      configFormat: spec.hookFormat === 'yaml' ? 'YAML' : 'JSON',
       mcpServers: mcp ? mcp.wrapped : null,
       mcpProtected: mcp ? mcp.present : false,
       isProtected: anyHookWired || (mcp?.present ?? false),
