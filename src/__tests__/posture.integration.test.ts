@@ -69,7 +69,7 @@ describe('node9 posture (integration)', () => {
     expect(typeof parsed.score).toBe('number');
     expect(Array.isArray(parsed.findings)).toBe(true);
     expect(typeof parsed.tier).toBe('string');
-    expect(parsed.checksRun).toBe(7);
+    expect(parsed.checksRun).toBe(8);
   });
 
   it('reports critical + exits 2 when node9 is not wired (bare home)', () => {

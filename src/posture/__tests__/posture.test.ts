@@ -11,7 +11,7 @@ import path from 'path';
 import { evaluateEgressConfig } from '../egress';
 import { scorePosture } from '../score';
 import { checkSecrets } from '../secrets';
-import { parsePublicListeners } from '../containment';
+import { parseListeners, classifyListener } from '../inbound';
 import { checkSupplyChain } from '../supply-chain';
 import { checkCoverage } from '../coverage';
 import type { Finding } from '../types';
@@ -112,28 +112,53 @@ describe('checkSecrets', () => {
   });
 });
 
-describe('parsePublicListeners', () => {
-  it('extracts ports bound to 0.0.0.0 in LISTEN state', () => {
+describe('parseListeners', () => {
+  // Real /proc/net/tcp columns: sl local rem st tx:rx tr:tm retr uid timeout inode
+  const row = (local: string, st: string, inode: string) =>
+    `   0: ${local} 00000000:0000 ${st} 00000000:00000000 00:00000000 00000000  1000        0 ${inode} 1 ...`;
+
+  it('extracts {port, inode} for 0.0.0.0 LISTEN sockets only', () => {
     const text = [
-      '  sl  local_address rem_address   st',
-      '   0: 00000000:1F90 00000000:0000 0A 00000000:00000000', // 0.0.0.0:8080 LISTEN
-      '   1: 0100007F:0050 00000000:0000 0A 00000000:00000000', // 127.0.0.1:80 LISTEN (loopback → excluded)
-      '   2: 00000000:0016 00000000:0000 01 00000000:00000000', // 0.0.0.0:22 ESTABLISHED (not LISTEN → excluded)
+      '  sl  local_address rem_address   st ...',
+      row('00000000:1F90', '0A', '54321'), // 0.0.0.0:8080 LISTEN → kept
+      row('0100007F:0050', '0A', '11111'), // 127.0.0.1:80 LISTEN → loopback excluded
+      row('00000000:0016', '01', '22222'), // 0.0.0.0:22 ESTABLISHED → not LISTEN excluded
     ].join('\n');
-    expect(parsePublicListeners(text)).toEqual([8080]); // 0x1F90
+    expect(parseListeners(text)).toEqual([{ port: 8080, inode: '54321' }]); // 0x1F90
   });
 
   it('handles the tcp6 all-zero address form', () => {
-    const text = [
-      'header',
-      '   0: 00000000000000000000000000000000:13A4 00000000000000000000000000000000:0000 0A x',
-    ].join('\n');
-    expect(parsePublicListeners(text)).toEqual([5028]); // 0x13A4
+    const text = ['header', row('00000000000000000000000000000000:13A4', '0A', '99999')].join('\n');
+    expect(parseListeners(text)).toEqual([{ port: 5028, inode: '99999' }]); // 0x13A4
   });
 
   it('returns [] on empty or malformed input', () => {
-    expect(parsePublicListeners('')).toEqual([]);
-    expect(parsePublicListeners('header only\nshort line')).toEqual([]);
+    expect(parseListeners('')).toEqual([]);
+    expect(parseListeners('header only\nshort line')).toEqual([]);
+  });
+});
+
+describe('classifyListener', () => {
+  it('labels a known service port even when the process is unknown', () => {
+    expect(classifyListener(5432, null)).toEqual({ kind: 'service', label: 'PostgreSQL on :5432' });
+    expect(classifyListener(6379, null)).toEqual({ kind: 'service', label: 'Redis on :6379' });
+  });
+
+  it('labels a DB by process name on a non-standard port', () => {
+    const c = classifyListener(7777, { comm: 'postgres', cmdline: '/usr/bin/postgres' });
+    expect(c).toEqual({ kind: 'service', label: 'PostgreSQL on :7777' });
+  });
+
+  it('claims "agent" only when a listener ties to the named agent', () => {
+    const proc = { comm: 'python3', cmdline: 'python3 /opt/hermes/bot.py --webhook' };
+    expect(classifyListener(8443, proc, 'hermes').kind).toBe('agent');
+    // same process, no agent name → not an agent claim
+    expect(classifyListener(8443, proc).kind).toBe('unknown');
+  });
+
+  it('falls back to unknown (no pilot claim) for an unrecognized listener', () => {
+    const c = classifyListener(9999, { comm: 'myserver', cmdline: 'myserver' });
+    expect(c).toEqual({ kind: 'unknown', label: 'myserver on :9999' });
   });
 });
 

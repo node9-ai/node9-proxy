@@ -20,7 +20,9 @@ const TIER_LABEL: Record<PostureResult['tier'], string> = {
 /** Pad a category label to a fixed column so detail lines align. */
 const LABEL_WIDTH = 14;
 function label(category: string): string {
-  return chalk.bold(category.padEnd(LABEL_WIDTH));
+  // Pad to the column, but always leave ≥1 space so a category wider than the
+  // column (e.g. 'Network exposure') doesn't butt up against the title.
+  return chalk.bold(category.padEnd(Math.max(LABEL_WIDTH, category.length + 1)));
 }
 
 function renderFinding(f: Finding): string[] {

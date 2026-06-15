@@ -9,6 +9,7 @@ import { checkGate } from './gate';
 import { checkSupplyChain } from './supply-chain';
 import { checkPrivilege } from './privilege';
 import { checkContainment } from './containment';
+import { checkInbound } from './inbound';
 import { checkCoverage } from './coverage';
 import { scorePosture } from './score';
 import type { CheckContext, Finding, PostureCheck, PostureResult } from './types';
@@ -19,7 +20,8 @@ export const POSTURE_CHECKS: PostureCheck[] = [
   { category: 'Approval gate', run: checkGate },
   { category: 'Supply chain', run: checkSupplyChain },
   { category: 'Privilege', run: checkPrivilege },
-  { category: 'Containment', run: checkContainment },
+  { category: 'Isolation', run: checkContainment },
+  { category: 'Inbound', run: checkInbound },
   { category: 'Coverage', run: checkCoverage },
 ];
 
