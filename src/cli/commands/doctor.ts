@@ -115,16 +115,18 @@ export function registerDoctorCommand(program: Command, version: string): void {
       // one summary line so a fresh machine isn't a wall of warnings.
       const notConfigured: string[] = [];
       for (const a of getAgentWiring(homeDir)) {
-        if (a.wireState === 'wired') {
-          pass(`${a.label} — ${a.hookLabel} active`);
-        } else if (a.wireState === 'unwired') {
-          // Settings file exists but the node9 hook is missing — a real
-          // protection gap, so fail (matches the old "hook missing" behavior).
-          fail(`${a.label} — settings found but node9 hook missing`, `Run: ${a.setupCommand}`);
+        const anyHookWired = a.hooks.some((h) => h.wired);
+        if (a.isProtected) {
+          // Protected via hooks OR an MCP proxy entry — name which so an
+          // MCP-only agent (Cursor) reads correctly instead of "not configured".
+          pass(`${a.label} — ${anyHookWired ? `${a.hookLabel} active` : 'MCP proxy active'}`);
         } else if (a.wireState === 'invalid') {
           fail(`${a.label} — settings file is invalid JSON`, a.settingsPath);
+        } else if (a.wireState === 'unwired') {
+          // Hook file exists but the node9 hook is missing — a real gap.
+          fail(`${a.label} — settings found but node9 hook missing`, `Run: ${a.setupCommand}`);
         } else {
-          notConfigured.push(a.label); // absent
+          notConfigured.push(a.label); // absent and not MCP-protected
         }
       }
       if (notConfigured.length > 0) {
