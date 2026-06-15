@@ -167,6 +167,18 @@ describe('classifyListener', () => {
     expect(classifyListener(8443, proc).kind).toBe('unknown');
   });
 
+  it('does not over-claim agent for a short/generic --agent name', () => {
+    const node = { comm: 'node', cmdline: 'node server.js' };
+    // 'js' is < 4 chars → too generic to attribute
+    expect(classifyListener(3000, node, 'js').kind).not.toBe('agent');
+  });
+
+  it('requires a word/path boundary, not a bare substring, to attribute', () => {
+    const thermal = { comm: 'thermald', cmdline: '/usr/sbin/thermald' };
+    // 'herm' is inside 'thermald' but not a token boundary → no agent claim
+    expect(classifyListener(7000, thermal, 'herm').kind).not.toBe('agent');
+  });
+
   it('falls back to unknown (no pilot claim) for an unrecognized listener', () => {
     const c = classifyListener(9999, { comm: 'myserver', cmdline: 'myserver' });
     expect(c).toEqual({ kind: 'unknown', label: 'myserver on :9999' });

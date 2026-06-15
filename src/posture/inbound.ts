@@ -77,6 +77,21 @@ export function parseListeners(procText: string): Listener[] {
 }
 
 /**
+ * True only when the listening process can be confidently tied to the named
+ * agent. Guards against re-introducing the "anyone can pilot your agent"
+ * over-claim: a generic name (e.g. --agent node) must not match every node
+ * process. Requires a reasonably specific name (≥4 chars) matched on a
+ * word/path boundary, not a bare substring (so 'herm' won't match 'thermal').
+ */
+function tiesToAgent(proc: ProcInfo, agentName: string): boolean {
+  const needle = agentName.trim().toLowerCase();
+  if (needle.length < 4) return false;
+  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const boundary = new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`);
+  return boundary.test(proc.comm.toLowerCase()) || boundary.test(proc.cmdline.toLowerCase());
+}
+
+/**
  * Classify one listener. Pure + exported for testing. We only claim "agent"
  * when the process can be tied to the named agent — otherwise it's exposure.
  */
@@ -85,11 +100,8 @@ export function classifyListener(
   proc: ProcInfo | null,
   agentName?: string
 ): { kind: 'agent' | 'service' | 'unknown'; label: string } {
-  if (agentName && proc) {
-    const needle = agentName.toLowerCase();
-    if (proc.comm.toLowerCase().includes(needle) || proc.cmdline.toLowerCase().includes(needle)) {
-      return { kind: 'agent', label: `${proc.comm} on :${port}` };
-    }
+  if (agentName && proc && tiesToAgent(proc, agentName)) {
+    return { kind: 'agent', label: `${proc.comm} on :${port}` };
   }
   const service = KNOWN_SERVICE_PORTS[port] ?? (proc ? KNOWN_SERVICE_COMMS[proc.comm] : undefined);
   if (service) return { kind: 'service', label: `${service} on :${port}` };
