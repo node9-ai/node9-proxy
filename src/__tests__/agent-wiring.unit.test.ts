@@ -73,4 +73,47 @@ describe('agent-wiring registry', () => {
     const claude = getAgentWiring(home).find((a) => a.id === 'claude');
     expect(claude?.installed).toBe(true);
   });
+
+  // ── Multi-hook (workstream A) ────────────────────────────────────────────
+  it('reports each hook event independently (pre wired, post not)', () => {
+    const noNode9 = { matcher: '*', hooks: [{ command: 'other-tool' }] };
+    writeJson('.claude/settings.json', {
+      hooks: { PreToolUse: [matcher], PostToolUse: [noNode9] },
+    });
+    const claude = getAgentWiring(home).find((a) => a.id === 'claude');
+    expect(claude?.hooks).toEqual([
+      { label: 'PreToolUse (node9 check)', wired: true },
+      { label: 'PostToolUse (node9 log)', wired: false },
+    ]);
+    expect(claude?.isProtected).toBe(true);
+  });
+
+  // ── MCP surface (workstream A) ───────────────────────────────────────────
+  it('detects node9 MCP wrapping and marks the agent protected', () => {
+    writeJson('.cursor/mcp.json', {
+      mcpServers: {
+        node9: { command: 'node9', args: ['mcp-server'] },
+        github: { command: 'node9', args: ['npx', '-y', '@mcp/github'] },
+      },
+    });
+    const cursor = getAgentWiring(home).find((a) => a.id === 'cursor');
+    // No hooks.json → legacy hook state absent…
+    expect(cursor?.wireState).toBe('absent');
+    // …but node9 IS protecting Cursor via MCP — the correctness win.
+    expect(cursor?.mcpProtected).toBe(true);
+    expect(cursor?.mcpServers).toContain('github → npx -y @mcp/github');
+    expect(cursor?.isProtected).toBe(true);
+  });
+
+  it('exposes mcpServers=[] for an MCP-capable agent with no config, null for one without a surface', () => {
+    const rows = getAgentWiring(home); // empty home
+    expect(rows.find((a) => a.id === 'cursor')?.mcpServers).toEqual([]); // has surface, no file
+    expect(rows.find((a) => a.id === 'cursor')?.mcpProtected).toBe(false);
+    expect(rows.find((a) => a.id === 'hermes')?.mcpServers).toBeNull(); // no MCP surface
+  });
+
+  it('isProtected is false for a fully unconfigured agent', () => {
+    const claude = getAgentWiring(home).find((a) => a.id === 'claude');
+    expect(claude?.isProtected).toBe(false);
+  });
 });
