@@ -40,6 +40,18 @@ const KNOWN_CHECKED_BY = new Set([
   'trust',
   'observe-mode',
   'observe-mode-would-block',
+  // MCP supply-chain: the gateway pinned a server's tool definitions and they
+  // changed since (possible tool poisoning / rug pull). Emitted as a synthetic
+  // audit row so the SaaS surfaces it as a blocked event. The firewall maps
+  // this checkedBy to AUTO_BLOCKED. See doc/roadmap/active/saas-value-first.md
+  // (workstream B-Tier2).
+  'mcp-pin-mismatch',
+  // MCP visibility (B-Tier2, informational — NOT blocks): the gateway
+  // discovered a server's tool inventory (mcp-discovered) or saw an oversized
+  // tool response that bloats the context window (mcp-large-response). Stored
+  // AUTO_ALLOWED; carries mcpToolCount / mcpResponseBytes in riskMetadata.
+  'mcp-discovered',
+  'mcp-large-response',
 ]);
 
 /**
@@ -104,6 +116,10 @@ export function auditLocalAllow(
     blockedByLabel?: string;
     matchedField?: string;
     matchedWord?: string;
+    // Numeric MCP-visibility fields (B-Tier2). Validated by the firewall's
+    // RiskMetadataSchema; kept through the number-aware cleaner below.
+    mcpToolCount?: number;
+    mcpResponseBytes?: number;
   }
 ): Promise<void> {
   // SSRF / key-leak guard: refuse to send the bearer token to anything that
@@ -135,7 +151,10 @@ export function auditLocalAllow(
   // doesn't reject the payload. Only forward keys that have a real value.
   const cleanedRiskMetadata = riskMetadata
     ? Object.fromEntries(
-        Object.entries(riskMetadata).filter(([, v]) => typeof v === 'string' && v.length > 0)
+        Object.entries(riskMetadata).filter(
+          ([, v]) =>
+            (typeof v === 'string' && v.length > 0) || (typeof v === 'number' && Number.isFinite(v))
+        )
       )
     : undefined;
   const hasRiskMetadata = cleanedRiskMetadata && Object.keys(cleanedRiskMetadata).length > 0;

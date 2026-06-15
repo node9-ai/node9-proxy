@@ -19,6 +19,8 @@ import chalk from 'chalk';
 import { spawn } from 'child_process';
 import { execa } from 'execa';
 import { authorizeHeadless } from '../auth/orchestrator';
+import { auditLocalAllow } from '../auth/cloud';
+import { getCredentials } from '../config';
 import { buildNegotiationMessage } from '../policy/negotiation';
 import { checkProvenance } from '../utils/provenance.js';
 import { hashToolDefinitions, getServerKey, checkPin, updatePin } from '../mcp-pin';
@@ -82,6 +84,99 @@ export function normalizeClientName(name: unknown): string | undefined {
   if (lower.includes('continue')) return 'Continue';
   const sanitized = sanitize(name).slice(0, 40);
   return sanitized.length > 0 ? sanitized : undefined;
+}
+
+/**
+ * B-Tier2 — surface an MCP rug-pull (a server's pinned tool definitions
+ * changed) to the SaaS as a synthetic audit row. The firewall maps the
+ * `mcp-pin-mismatch` checkedBy to AUTO_BLOCKED, so it shows up as a blocked
+ * event + a Case in the dashboard.
+ *
+ * Hardened fire-and-forget: credential-gated (skipped when not logged in),
+ * wrapped in try/catch, and auditLocalAllow swallows its own fetch errors.
+ * Cloud reporting must NEVER affect the local quarantine or the JSON-RPC path.
+ *
+ * Exported for unit testing.
+ */
+export function reportPinMismatchToCloud(serverKey: string, agent?: string): void {
+  try {
+    const creds = getCredentials();
+    if (!creds) return;
+    void auditLocalAllow(
+      `mcp-server:${serverKey}`,
+      { serverKey, reason: 'tool-pin-mismatch' },
+      'mcp-pin-mismatch',
+      creds,
+      { mcpServer: serverKey, agent },
+      undefined,
+      false,
+      {
+        ruleName: 'MCP tool definitions changed (possible rug pull)',
+        ruleDescription:
+          `The MCP server "${serverKey}" changed its tool definitions since they were pinned. ` +
+          `This can indicate a supply-chain attack (tool poisoning). The session was quarantined. ` +
+          `Review with: node9 mcp pin update ${serverKey}`,
+      }
+    );
+  } catch {
+    /* never let cloud reporting affect the gateway */
+  }
+}
+
+/**
+ * B-Tier2 — report an MCP server's tool inventory to the SaaS (informational,
+ * AUTO_ALLOWED). Surfaces "this server exposes N tools" in the dashboard's MCP
+ * card. Same hardened fire-and-forget contract as reportPinMismatchToCloud.
+ *
+ * Exported for unit testing.
+ */
+export function reportInventoryToCloud(serverKey: string, toolCount: number, agent?: string): void {
+  try {
+    const creds = getCredentials();
+    if (!creds) return;
+    void auditLocalAllow(
+      `mcp-server:${serverKey}`,
+      { serverKey, toolCount },
+      'mcp-discovered',
+      creds,
+      { mcpServer: serverKey, agent },
+      undefined,
+      false,
+      { mcpToolCount: toolCount }
+    );
+  } catch {
+    /* never let cloud reporting affect the gateway */
+  }
+}
+
+/**
+ * B-Tier2 — report an oversized MCP tool response to the SaaS (informational,
+ * AUTO_ALLOWED). Surfaces context-window bloat in the dashboard's MCP card.
+ * Same hardened fire-and-forget contract.
+ *
+ * Exported for unit testing.
+ */
+export function reportLargeResponseToCloud(
+  serverKey: string,
+  responseBytes: number,
+  agent?: string
+): void {
+  try {
+    const creds = getCredentials();
+    if (!creds) return;
+    void auditLocalAllow(
+      `mcp-server:${serverKey}`,
+      { serverKey, responseBytes },
+      'mcp-large-response',
+      creds,
+      { mcpServer: serverKey, agent },
+      undefined,
+      false,
+      { mcpResponseBytes: responseBytes }
+    );
+  } catch {
+    /* never let cloud reporting affect the gateway */
+  }
 }
 
 /**
@@ -513,6 +608,10 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
         const pinStatus = checkPin(serverKey, currentHash, gatewayCwd);
         const token = getInternalToken();
 
+        // B-Tier2: report the tool inventory to the SaaS ("server exposes N
+        // tools"). Informational, fire-and-forget — independent of the daemon.
+        reportInventoryToCloud(serverKey, tools.length, clientName);
+
         // 1. Notify daemon of discovery (handles drift & new servers)
         if (isDaemonRunning() && process.env.NODE9_TESTING !== '1') {
           const toolSummary = tools.map((t) => ({ name: t.name, description: t.description }));
@@ -601,6 +700,11 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
           );
           console.error(chalk.red('   Session quarantined — all tool calls blocked.'));
           console.error(chalk.yellow(`   Run: node9 mcp pin update ${serverKey}\n`));
+          // B-Tier2: surface the rug-pull to the SaaS as a synthetic audit row.
+          // Fire-and-forget (auditLocalAllow swallows its own errors) — the
+          // cloud send must never affect the local quarantine/JSON-RPC path.
+          // Skipped silently when not logged in (getCredentials → null).
+          reportPinMismatchToCloud(serverKey, clientName);
           const errorResponse = {
             jsonrpc: '2.0',
             id: parsed.id,
@@ -661,6 +765,9 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
           `⚡ Node9: Large MCP response from '${toolName}' (${(line.length / 1024).toFixed(0)}KB) — context window enlarged`
         )
       );
+      // B-Tier2: report the context-bloat to the SaaS. Informational,
+      // fire-and-forget — independent of the daemon.
+      reportLargeResponseToCloud(serverKey, line.length, clientName);
       if (isDaemonRunning() && process.env.NODE9_TESTING !== '1') {
         const token = getInternalToken();
         fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/mcp/large-response`, {
