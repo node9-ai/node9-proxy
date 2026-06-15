@@ -47,7 +47,7 @@ type HookRoot = Record<string, unknown> | 'absent' | 'invalid';
 
 interface HookEvent {
   key: string; // the settings key, e.g. 'PreToolUse' / 'pre_tool_call'
-  label: string; // status-style display, e.g. 'PreToolUse (node9 check)'
+  kind: 'check' | 'log'; // guards (check) vs records (log) the tool call
 }
 
 // Read an agent's hook file and return its `hooks` root, or a sentinel.
@@ -114,6 +114,9 @@ interface AgentSpec {
   // Deterministic "this agent has a footprint on the machine" — a config file
   // or install dir, NOT a $PATH probe. Drives whether `status` shows the agent.
   present: (home: string) => boolean;
+  // Column width the event keys are padded to so the "(node9 …)" suffixes align
+  // in status. Defaults to DEFAULT_LABEL_PAD; Hermes' longer keys need more.
+  labelPad?: number;
 }
 
 const exists = (p: string): boolean => {
@@ -124,11 +127,14 @@ const exists = (p: string): boolean => {
   }
 };
 
-// Hook-row display labels are the EXACT strings `status` renders (with their
-// alignment padding) — the registry is the single source of those literals.
-// `check` events guard tools (PreToolUse); `log` events record them (PostToolUse).
-const ck = (key: string, label: string): HookEvent => ({ key, label: `${label} (node9 check)` });
-const lg = (key: string, label: string): HookEvent => ({ key, label: `${label} (node9 log)` });
+const ck = (key: string): HookEvent => ({ key, kind: 'check' });
+const lg = (key: string): HookEvent => ({ key, kind: 'log' });
+
+// Hook-row labels are computed (key padded to labelPad, then the suffix) rather
+// than stored with literal trailing spaces — robust against formatters.
+const DEFAULT_LABEL_PAD = 11; // width of 'PostToolUse'
+const hookLabelOf = (ev: HookEvent, pad: number): string =>
+  `${ev.key.padEnd(pad)} (node9 ${ev.kind})`;
 
 // Only agents with verifiable wiring are listed. Plugin-shim agents (OpenCode,
 // Pi) are intentionally omitted until their shim detection is encoded — better
@@ -144,7 +150,7 @@ export const AGENT_SPECS: AgentSpec[] = [
     setupCommand: 'node9 setup claude',
     hookFile: (h) => path.join(h, '.claude', 'settings.json'),
     hookFormat: 'matcher',
-    hookEvents: [ck('PreToolUse', 'PreToolUse '), lg('PostToolUse', 'PostToolUse')],
+    hookEvents: [ck('PreToolUse'), lg('PostToolUse')],
     mcpFile: (h) => path.join(h, '.claude.json'),
     present: (h) =>
       exists(path.join(h, '.claude', 'settings.json')) || exists(path.join(h, '.claude.json')),
@@ -155,7 +161,7 @@ export const AGENT_SPECS: AgentSpec[] = [
     setupCommand: 'node9 setup gemini',
     hookFile: (h) => path.join(h, '.gemini', 'settings.json'),
     hookFormat: 'matcher',
-    hookEvents: [ck('BeforeTool', 'BeforeTool '), lg('AfterTool', 'AfterTool  ')],
+    hookEvents: [ck('BeforeTool'), lg('AfterTool')],
     mcpFile: (h) => path.join(h, '.gemini', 'settings.json'),
     present: (h) => exists(path.join(h, '.gemini', 'settings.json')),
   },
@@ -165,7 +171,7 @@ export const AGENT_SPECS: AgentSpec[] = [
     setupCommand: 'node9 setup codex',
     hookFile: (h) => path.join(h, '.codex', 'hooks.json'),
     hookFormat: 'matcher',
-    hookEvents: [ck('PreToolUse', 'PreToolUse '), ck('UserPromptSubmit', 'UserPromptSubmit')],
+    hookEvents: [ck('PreToolUse'), ck('UserPromptSubmit')],
     present: (h) => exists(path.join(h, '.codex')),
   },
   {
@@ -174,7 +180,7 @@ export const AGENT_SPECS: AgentSpec[] = [
     setupCommand: 'node9 setup antigravity',
     hookFile: (h) => path.join(h, '.gemini', 'config', 'hooks.json'),
     hookFormat: 'matcher',
-    hookEvents: [ck('PreToolUse', 'PreToolUse '), lg('PostToolUse', 'PostToolUse')],
+    hookEvents: [ck('PreToolUse'), lg('PostToolUse')],
     mcpFile: (h) => path.join(h, '.gemini', 'config', 'mcp_config.json'),
     present: (h) =>
       exists(path.join(h, '.gemini', 'config', 'hooks.json')) ||
@@ -187,11 +193,7 @@ export const AGENT_SPECS: AgentSpec[] = [
     setupCommand: 'node9 setup copilot',
     hookFile: (h) => path.join(h, '.copilot', 'hooks', 'node9.json'),
     hookFormat: 'flat',
-    hookEvents: [
-      ck('PreToolUse', 'PreToolUse '),
-      lg('PostToolUse', 'PostToolUse'),
-      ck('UserPromptSubmit', 'UserPromptSubmit'),
-    ],
+    hookEvents: [ck('PreToolUse'), lg('PostToolUse'), ck('UserPromptSubmit')],
     mcpFile: (h) => path.join(h, '.copilot', 'mcp-config.json'),
     present: (h) => exists(path.join(h, '.copilot')),
   },
@@ -211,7 +213,8 @@ export const AGENT_SPECS: AgentSpec[] = [
     setupCommand: 'node9 setup hermes',
     hookFile: (h) => hermesConfigPath(h),
     hookFormat: 'yaml',
-    hookEvents: [ck('pre_tool_call', 'pre_tool_call '), lg('post_tool_call', 'post_tool_call')],
+    hookEvents: [ck('pre_tool_call'), lg('post_tool_call')],
+    labelPad: 14, // 'post_tool_call' is wider than the default
     present: (h) => exists(hermesConfigPath(h)),
   },
 ];
@@ -259,8 +262,9 @@ export function getAgentWiring(home: string = os.homedir()): AgentWiringRow[] {
 
     // Always list every event (wired:false when the file is absent/invalid) so
     // a present-but-unwired agent still renders ✗ rows in status.
+    const pad = spec.labelPad ?? DEFAULT_LABEL_PAD;
     const hooks = spec.hookEvents.map((ev) => ({
-      label: ev.label,
+      label: hookLabelOf(ev, pad),
       wired: rootPresent && eventWired(root as Record<string, unknown>, ev, spec.hookFormat),
     }));
 
