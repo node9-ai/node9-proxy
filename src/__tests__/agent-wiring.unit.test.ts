@@ -47,13 +47,20 @@ describe('agent-wiring registry', () => {
     expect(stateOf('claude')).toBe('wired');
   });
 
-  it('detects a wired Codex (matcher-format) and Copilot/Cursor (flat-format)', () => {
+  it('detects a wired Codex (matcher-format) and Copilot (flat-format)', () => {
     writeJson('.codex/hooks.json', { hooks: { PreToolUse: [matcher] } });
     writeJson('.copilot/hooks/node9.json', { hooks: { PreToolUse: [NODE9_HOOK] } });
-    writeJson('.cursor/hooks.json', { hooks: { preToolUse: [NODE9_HOOK] } });
     expect(stateOf('codex')).toBe('wired');
     expect(stateOf('copilot')).toBe('wired');
-    expect(stateOf('cursor')).toBe('wired');
+  });
+
+  it('treats Cursor as MCP-only — no hook file, protection comes from MCP', () => {
+    // Even if a stray hooks.json exists, Cursor is not hook-wired by node9.
+    writeJson('.cursor/hooks.json', { hooks: { preToolUse: [NODE9_HOOK] } });
+    const cursor = getAgentWiring(home).find((a) => a.id === 'cursor');
+    expect(cursor?.wireState).toBe('absent'); // hooks ignored
+    expect(cursor?.hooks).toEqual([]);
+    expect(cursor?.isProtected).toBe(false); // no node9 MCP server present
   });
 
   it('reports unwired when the settings file exists but has no node9 hook', () => {

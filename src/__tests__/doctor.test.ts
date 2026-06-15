@@ -139,14 +139,13 @@ describe('node9 doctor — agent hooks section', () => {
     expect(output).toMatch(/Gemini CLI.*BeforeTool hook active/);
   });
 
-  it('passes Cursor hook check when preToolUse contains node9', () => {
+  it('passes Cursor via MCP (node9 wraps it through ~/.cursor/mcp.json, not a hook)', () => {
     const home = path.join(tmpBase, 'cursor-ok');
-    writeJson(path.join(home, '.cursor', 'hooks.json'), {
-      version: 1,
-      hooks: { preToolUse: [{ command: 'node9 check' }] },
+    writeJson(path.join(home, '.cursor', 'mcp.json'), {
+      mcpServers: { node9: { command: 'node9', args: ['mcp-server'] } },
     });
     const { output } = runDoctor(home);
-    expect(output).toMatch(/Cursor.*preToolUse hook active/);
+    expect(output).toMatch(/Cursor.*MCP proxy active/);
   });
 });
 
@@ -169,9 +168,8 @@ describe('node9 doctor — summary', () => {
         BeforeTool: [{ matcher: '.*', hooks: [{ command: 'node9 check' }] }],
       },
     });
-    writeJson(path.join(home, '.cursor', 'hooks.json'), {
-      version: 1,
-      hooks: { preToolUse: [{ command: 'node9 check' }] },
+    writeJson(path.join(home, '.cursor', 'mcp.json'), {
+      mcpServers: { node9: { command: 'node9', args: ['mcp-server'] } },
     });
 
     const { output, exitCode } = runDoctor(home);

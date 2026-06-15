@@ -105,7 +105,8 @@ interface AgentSpec {
   id: keyof ReturnType<typeof detectAgents>;
   label: string;
   setupCommand: string;
-  hookFile: (home: string) => string;
+  // Absent for MCP-only agents (Cursor) that node9 protects via MCP, not hooks.
+  hookFile?: (home: string) => string;
   hookFormat: HookFormat;
   hookEvents: HookEvent[];
   // Present → the agent has an MCP surface node9 can wrap (path to its config).
@@ -119,12 +120,9 @@ const post = (label = 'PostToolUse'): HookEvent => ({ key: label, label: `${labe
 // Pi) are intentionally omitted until their shim detection is encoded — better
 // silent than wrong.
 //
-// NOTE (B-Tier follow-up): Cursor still carries a `~/.cursor/hooks.json`
-// preToolUse entry here for backward-compat with the current doctor + its test,
-// but node9 does NOT wire Cursor via hooks (setup.ts:1334 — "Cursor does not
-// yet support a pre-execution hooks file"); its real protection is the MCP
-// surface below. The phantom hook is removed when doctor migrates to
-// `isProtected`. See doc/roadmap/active/agent-wiring-unification.md.
+// Cursor is MCP-ONLY: node9 does NOT wire it via hooks (setup.ts:1334 —
+// "Cursor does not yet support a pre-execution hooks file"); its protection is
+// the MCP surface. It has no hookFile, so `isProtected` comes from MCP alone.
 export const AGENT_SPECS: AgentSpec[] = [
   {
     id: 'claude',
@@ -174,9 +172,9 @@ export const AGENT_SPECS: AgentSpec[] = [
     id: 'cursor',
     label: 'Cursor',
     setupCommand: 'node9 setup cursor',
-    hookFile: (h) => path.join(h, '.cursor', 'hooks.json'),
+    // MCP-only — no hook file (see note above).
     hookFormat: 'flat',
-    hookEvents: [{ key: 'preToolUse', label: 'preToolUse (node9 check)' }],
+    hookEvents: [],
     mcpFile: (h) => path.join(h, '.cursor', 'mcp.json'),
   },
   {
@@ -220,7 +218,9 @@ export interface AgentWiringRow {
 export function getAgentWiring(home: string = os.homedir()): AgentWiringRow[] {
   const detected = detectAgents(home);
   return AGENT_SPECS.map((spec) => {
-    const root = readHookRoot(spec.hookFile(home), spec.hookFormat);
+    const root: HookRoot = spec.hookFile
+      ? readHookRoot(spec.hookFile(home), spec.hookFormat)
+      : 'absent';
     const primary = spec.hookEvents[0];
 
     let wireState: WireState;
@@ -247,8 +247,8 @@ export function getAgentWiring(home: string = os.homedir()): AgentWiringRow[] {
       installed: detected[spec.id],
       hooks,
       wireState,
-      hookLabel: primary ? `${primary.key} hook` : 'hook',
-      settingsPath: spec.hookFile(home),
+      hookLabel: primary ? `${primary.key} hook` : 'MCP proxy',
+      settingsPath: spec.hookFile ? spec.hookFile(home) : spec.mcpFile ? spec.mcpFile(home) : '',
       mcpServers: mcp ? mcp.wrapped : null,
       mcpProtected: mcp ? mcp.present : false,
       isProtected: anyHookWired || (mcp?.present ?? false),
