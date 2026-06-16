@@ -371,6 +371,25 @@ describe('annotateCoverage (enforcement gate)', () => {
     fs.rmSync(home, { recursive: true, force: true });
   });
 
+  it('egress: NOT covered when block-mode is set but node9 is not wired (no false green)', async () => {
+    // Project config locks egress, but no agent is wired in this temp home.
+    fs.writeFileSync(
+      path.join(home, 'node9.config.json'),
+      JSON.stringify({ policy: { egress: { enabled: true, mode: 'block' } } })
+    );
+    const findings: Finding[] = [
+      {
+        category: 'Egress',
+        severity: 'high',
+        title: 't',
+        detail: [],
+        coverageProbe: { kind: 'egress' },
+      },
+    ];
+    await annotateCoverage(findings, { home, cwd: home });
+    expect(findings[0].coverage?.state).toBe('open'); // not enforcing → open, not covered
+  });
+
   it('marks cantFix as cant-fix, and gates command/fileRead to OPEN when node9 is not wired', async () => {
     const findings: Finding[] = [
       {

@@ -63,9 +63,12 @@ export async function annotateCoverage(findings: Finding[], ctx: CheckContext): 
     }
 
     if (probe.kind === 'egress') {
-      f.coverage = env.egressBlocking
-        ? { state: 'covered', via: 'node9 egress' }
-        : { state: 'open' };
+      // Covered only when egress is blocking AND node9 is actually enforcing
+      // (wired + not observe) — otherwise the policy isn't in the loop.
+      f.coverage =
+        env.egressBlocking && env.enforcing
+          ? { state: 'covered', via: 'node9 egress' }
+          : { state: 'open' };
       continue;
     }
 

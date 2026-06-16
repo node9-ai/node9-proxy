@@ -26,7 +26,7 @@ export function evaluateEgressConfig(egress: EgressConfig): Finding | null {
       why: 'Egress is in `review` mode, not `block`.',
       who: 'A compromised agent can still send your data to any host.',
       detail: [],
-      fix: 'node9 can switch egress to `block` with a host allowlist.',
+      fix: 'Run `node9 egress lock` to block, or `node9 egress allow <host>` to widen the list.',
       coverageProbe: { kind: 'egress' },
     };
   }
@@ -40,7 +40,7 @@ export function evaluateEgressConfig(egress: EgressConfig): Finding | null {
     why: "node9 isn't restricting where its network tools (curl, wget, ssh) can reach.",
     who: 'If the agent is ever tricked, nothing stops it sending your data out.',
     detail: [],
-    fix: 'node9 can lock egress to an allowlist (policy.egress.mode = block).',
+    fix: 'Fix it now: run `node9 egress watch` (or `node9 egress lock` to hard-block).',
     coverageProbe: { kind: 'egress' },
   };
 }
