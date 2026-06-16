@@ -77,6 +77,22 @@ export function renderPosture(result: PostureResult): string {
       chalk.gray(` — ${result.agent}`) +
       `        ${chalk.bold(`Score: ${result.score}/100`)}  (${tier})`
   );
+  // Advisories are shown but never deduct (OS-level — node9 can't enforce them).
+  // Say so under the score so a perfect number doesn't read as "nothing to review".
+  const advisories = result.findings.filter(
+    (f) => f.severity === 'advisory' && f.coverage?.state !== 'covered'
+  ).length;
+  if (advisories > 0) {
+    const word = advisories === 1 ? 'advisory' : 'advisories';
+    const verb = advisories === 1 ? "doesn't" : "don't";
+    lines.push(
+      '  ' +
+        chalk.gray(
+          `${advisories} ${word} below ${verb} affect the score — ` +
+            "OS-level exposure node9 can't enforce, yours to weigh."
+        )
+    );
+  }
   lines.push('');
 
   if (result.headline) {

@@ -333,6 +333,20 @@ describe('renderPosture grouping', () => {
     checksRun: 8,
   });
 
+  it('notes that advisories do not affect the score, only when present', () => {
+    // The "why is it 100/100 with warnings?" fix — advisories don't deduct, so
+    // say so under the score; never show the note when there are none.
+    const withAdvisory = renderPosture(
+      result([{ category: 'Isolation', severity: 'advisory', title: 'i', detail: [], owner: 'os' }])
+    );
+    expect(withAdvisory).toContain('affect the score');
+
+    const noAdvisory = renderPosture(
+      result([{ category: 'Egress', severity: 'high', title: 'e', detail: [], owner: 'node9' }])
+    );
+    expect(noAdvisory).not.toContain('affect the score');
+  });
+
   it('groups open findings by owner — node9-fixable before only-you', () => {
     const out = renderPosture(
       result([
