@@ -22,12 +22,13 @@ const result: PostureResult = {
       title: '3 credential files readable by the agent',
       detail: ['~/.ssh/id_rsa', '~/.aws/credentials'], // must NOT be shipped
       fix: 'node9 can block reads of sensitive paths.', // must NOT be shipped
+      coverage: { state: 'covered', via: 'node9 DLP', level: 'block' },
     },
   ],
 };
 
 describe('buildShipBody (redaction)', () => {
-  it('ships score/tier/agent/headline + finding category/severity/title only', () => {
+  it('ships score/tier/agent/headline + finding category/severity/title/coverage-state only', () => {
     const body = buildShipBody(result);
     expect(body.score).toBe(58);
     expect(body.tier).toBe('at-risk');
@@ -37,8 +38,17 @@ describe('buildShipBody (redaction)', () => {
         category: 'Secrets',
         severity: 'critical',
         title: '3 credential files readable by the agent',
+        coverage: 'covered', // the state ships so the SaaS counts open-only
       },
     ]);
+  });
+
+  it('defaults coverage to "open" for an unannotated finding', () => {
+    const body = buildShipBody({
+      ...result,
+      findings: [{ category: 'Egress', severity: 'high', title: 'open', detail: [] }],
+    });
+    expect(body.findings[0].coverage).toBe('open');
   });
 
   it('drops finding detail[] and fix (paths/locations never leave the box)', () => {

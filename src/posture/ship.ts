@@ -24,7 +24,7 @@ export function buildShipBody(result: PostureResult): {
   tier: string;
   agent: string;
   headline: PostureResult['headline'];
-  findings: Array<{ category: string; severity: string; title: string }>;
+  findings: Array<{ category: string; severity: string; title: string; coverage: string }>;
 } {
   return {
     score: result.score,
@@ -35,6 +35,9 @@ export function buildShipBody(result: PostureResult): {
       category: f.category,
       severity: f.severity,
       title: f.title,
+      // Coverage state so the SaaS counts OPEN-only (matching the local score).
+      // A non-sensitive enum — no values or paths. Default 'open' if unannotated.
+      coverage: f.coverage?.state ?? 'open',
     })),
   };
 }
