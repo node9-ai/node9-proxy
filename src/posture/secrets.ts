@@ -104,7 +104,7 @@ export function checkSecrets(ctx: CheckContext): Finding[] {
       why: 'They were saved in plaintext config / .env files.',
       who: 'A tricked agent (or any program you run) could read and leak them.',
       detail: plaintext,
-      fix: 'node9 can gate reads of these files in-path (DLP block).',
+      fix: 'Fix it now: run `node9 shield enable project-jail` (blocks credential-file reads in-path).',
       // Coverage is decided at the DLP layer — does node9 block the agent
       // reading these? (See enforcement.ts.)
       coverageProbe: { kind: 'fileRead', paths: plaintextPaths },
@@ -133,7 +133,7 @@ export function checkSecrets(ctx: CheckContext): Finding[] {
       why: 'They sit unlocked in your home folder.',
       who: 'An unsandboxed agent could read them and use them to reach your servers / cloud.',
       detail: creds,
-      fix: 'node9 can block reads of sensitive paths (~/.ssh, ~/.aws) in-path.',
+      fix: 'Fix it now: run `node9 shield enable project-jail` (blocks ~/.ssh, ~/.aws, .env reads in-path).',
       coverageProbe: { kind: 'fileRead', paths: credPaths },
     });
   }

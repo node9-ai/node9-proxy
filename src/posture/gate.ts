@@ -59,7 +59,7 @@ export async function checkGate(ctx: CheckContext): Promise<Finding[]> {
         why: 'No enforcing policy is gating Bash — even `rm -rf /` is allowed.',
         who: 'A tricked agent could wipe files or damage the machine with one command.',
         detail: [],
-        fix: 'node9 enforces destructive-command blocking in-path (enforcing mode).',
+        fix: 'Fix it now: run `node9 shield enable bash-safe` to block destructive commands in-path.',
       },
     ];
   }
