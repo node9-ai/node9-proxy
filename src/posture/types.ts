@@ -39,6 +39,9 @@ export interface PostureResult {
   findings: Finding[];
   /** Categories that ran clean (no findings) — shown as ✅ rows. */
   passedCategories: string[];
+  /** Categories whose check threw — shown as a muted "could not be checked"
+   *  row, excluded from the score so a tool error never skews the verdict. */
+  erroredCategories: string[];
   /** The single scariest true story + the one next step, or null when clean. */
   headline: Headline | null;
   score: number;

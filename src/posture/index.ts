@@ -32,6 +32,37 @@ export interface RunPostureOptions {
   agent?: string;
 }
 
+/**
+ * Run a set of checks with per-check isolation: a check that throws is recorded
+ * in `erroredCategories` and never crashes the report. Exported so the
+ * isolation is directly testable.
+ */
+export async function runChecks(
+  checks: PostureCheck[],
+  ctx: CheckContext
+): Promise<{ findings: Finding[]; passedCategories: string[]; erroredCategories: string[] }> {
+  const findings: Finding[] = [];
+  const passedCategories: string[] = [];
+  const erroredCategories: string[] = [];
+
+  for (const check of checks) {
+    try {
+      const result = await check.run(ctx);
+      if (result.length === 0) passedCategories.push(check.category);
+      else findings.push(...result);
+    } catch (err) {
+      // One bad check (e.g. a malformed config reaching the policy engine)
+      // must not nuke the whole scorecard — the report is the product.
+      erroredCategories.push(check.category);
+      if (process.env.NODE9_DEBUG) {
+        console.error(`[posture] check "${check.category}" failed:`, (err as Error)?.message);
+      }
+    }
+  }
+
+  return { findings, passedCategories, erroredCategories };
+}
+
 export async function runPosture(opts: RunPostureOptions = {}): Promise<PostureResult> {
   const ctx: CheckContext = {
     home: opts.home ?? os.homedir(),
@@ -39,17 +70,7 @@ export async function runPosture(opts: RunPostureOptions = {}): Promise<PostureR
     agent: opts.agent,
   };
 
-  const findings: Finding[] = [];
-  const passedCategories: string[] = [];
-
-  for (const check of POSTURE_CHECKS) {
-    const result = await check.run(ctx);
-    if (result.length === 0) {
-      passedCategories.push(check.category);
-    } else {
-      findings.push(...result);
-    }
-  }
+  const { findings, passedCategories, erroredCategories } = await runChecks(POSTURE_CHECKS, ctx);
 
   const { score, tier } = scorePosture(findings, POSTURE_CHECKS.length);
 
@@ -57,6 +78,7 @@ export async function runPosture(opts: RunPostureOptions = {}): Promise<PostureR
     agent: opts.agent ? `${opts.agent} on this host` : 'agent on this host',
     findings,
     passedCategories,
+    erroredCategories,
     headline: deriveHeadline(findings),
     score,
     tier,

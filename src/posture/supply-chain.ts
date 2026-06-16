@@ -10,6 +10,7 @@
 
 import fs from 'fs';
 import os from 'os';
+import path from 'path';
 import { parse as parseToml } from 'smol-toml';
 import { checkProvenance } from '../utils/provenance';
 import { AGENT_SPECS } from '../agent-wiring';
@@ -18,7 +19,31 @@ import type { CheckContext, Finding } from './types';
 interface McpEntry {
   name: string;
   command?: string;
+  args?: string[];
   agent: string;
+}
+
+interface McpServerConfig {
+  command?: string;
+  args?: string[];
+}
+
+// Package-runner wrappers that launch a tool by name from args.
+const PACKAGE_RUNNERS = new Set(['npx', 'pnpx', 'bunx', 'dlx', 'yarn', 'pnpm', 'bun']);
+
+/**
+ * True when a server is launched THROUGH node9 (so its calls are gated).
+ * Matches the bare `node9` binary, an absolute/relative path to it
+ * (`/usr/local/bin/node9`), and `npx node9 …` style wrappers — so a wrapped
+ * server isn't mislabeled "runs outside node9".
+ */
+export function isNode9Managed(command?: string, args: string[] = []): boolean {
+  if (!command) return false;
+  if (path.basename(command).toLowerCase() === 'node9') return true;
+  if (PACKAGE_RUNNERS.has(path.basename(command).toLowerCase())) {
+    return args.some((a) => a === 'node9' || path.basename(a).toLowerCase() === 'node9');
+  }
+  return false;
 }
 
 // Agent config files are normally small, but Claude's `.claude.json` (its MCP
@@ -34,11 +59,16 @@ function readServers(file: string, format: 'json' | 'toml', agent: string): McpE
     const text = fs.readFileSync(file, 'utf8');
     const map = (
       format === 'toml'
-        ? (parseToml(text) as { mcp_servers?: Record<string, { command?: string }> })?.mcp_servers
-        : (JSON.parse(text) as { mcpServers?: Record<string, { command?: string }> })?.mcpServers
-    ) as Record<string, { command?: string }> | undefined;
+        ? (parseToml(text) as { mcp_servers?: Record<string, McpServerConfig> })?.mcp_servers
+        : (JSON.parse(text) as { mcpServers?: Record<string, McpServerConfig> })?.mcpServers
+    ) as Record<string, McpServerConfig> | undefined;
     if (!map || typeof map !== 'object') return [];
-    return Object.entries(map).map(([name, v]) => ({ name, command: v?.command, agent }));
+    return Object.entries(map).map(([name, v]) => ({
+      name,
+      command: v?.command,
+      args: Array.isArray(v?.args) ? v.args : undefined,
+      agent,
+    }));
   } catch {
     return [];
   }
@@ -56,8 +86,8 @@ export function checkSupplyChain(ctx: CheckContext): Finding[] {
 
   const findings: Finding[] = [];
 
-  // node9-wrapped servers launch as `node9` (gated). Anything else runs direct.
-  const unmanaged = servers.filter((s) => s.command && s.command !== 'node9');
+  // node9-wrapped servers are gated; anything else runs direct (bypasses node9).
+  const unmanaged = servers.filter((s) => s.command && !isNode9Managed(s.command, s.args));
 
   // Launch binaries in /tmp or world-writable dirs = anyone on the box can swap them.
   const suspect = unmanaged.filter(

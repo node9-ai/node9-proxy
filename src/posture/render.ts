@@ -97,6 +97,9 @@ export function renderPosture(result: PostureResult): string {
   for (const cat of result.passedCategories) {
     lines.push(`  ${chalk.green('✅')} ${label(cat)}${chalk.gray('no issues found')}`);
   }
+  for (const cat of result.erroredCategories) {
+    lines.push(`  ${chalk.gray('•')}  ${label(cat)}${chalk.gray('could not be checked')}`);
+  }
 
   lines.push('');
   const crit = result.findings.filter((f) => f.severity === 'critical').length;

@@ -12,11 +12,12 @@ import { evaluateEgressConfig } from '../egress';
 import { scorePosture } from '../score';
 import { checkSecrets } from '../secrets';
 import { parseListeners, classifyListener } from '../inbound';
-import { checkSupplyChain } from '../supply-chain';
+import { checkSupplyChain, isNode9Managed } from '../supply-chain';
 import { checkCoverage } from '../coverage';
 import { deriveHeadline } from '../headline';
 import { renderPosture } from '../render';
-import type { Finding, PostureResult, Severity } from '../types';
+import { runChecks } from '../index';
+import type { CheckContext, Finding, PostureCheck, PostureResult, Severity } from '../types';
 
 // Compact finding builder for headline tests.
 const f = (category: string, severity: Severity = 'high'): Finding => ({
@@ -216,6 +217,19 @@ describe('checkSupplyChain', () => {
     expect(checkSupplyChain({ home, cwd: home })).toEqual([]);
   });
 
+  it('does not flag an absolute-path or npx node9 wrap as unmanaged', () => {
+    fs.writeFileSync(
+      mcpFile(),
+      JSON.stringify({
+        mcpServers: {
+          abs: { command: '/usr/local/bin/node9', args: ['mcp-wrap'] },
+          viaNpx: { command: 'npx', args: ['node9', 'mcp-wrap'] },
+        },
+      })
+    );
+    expect(checkSupplyChain({ home, cwd: home })).toEqual([]);
+  });
+
   it('flags a server launched from an untrusted path (/tmp) as high', () => {
     fs.writeFileSync(
       mcpFile(),
@@ -272,6 +286,7 @@ describe('renderPosture grouping', () => {
     agent: 'agent on this host',
     findings,
     passedCategories: [],
+    erroredCategories: [],
     headline: deriveHeadline(findings),
     score: 50,
     tier: 'at-risk',
@@ -290,6 +305,56 @@ describe('renderPosture grouping', () => {
   it('does not group (flat list) when the chain is not active', () => {
     const out = renderPosture(result([f('Egress'), f('Privilege')]));
     expect(out).not.toContain('exfiltration chain');
+  });
+});
+
+describe('runChecks (error isolation)', () => {
+  const ctx: CheckContext = { home: '/tmp', cwd: '/tmp' };
+
+  it('records a throwing check without crashing; other checks still run', async () => {
+    const checks: PostureCheck[] = [
+      {
+        category: 'Good',
+        run: () => [{ category: 'Good', severity: 'high', title: 't', detail: [] }],
+      },
+      {
+        category: 'Boom',
+        run: () => {
+          throw new Error('kaboom');
+        },
+      },
+      { category: 'Clean', run: () => [] },
+    ];
+    const res = await runChecks(checks, ctx);
+    expect(res.findings).toHaveLength(1);
+    expect(res.passedCategories).toEqual(['Clean']);
+    expect(res.erroredCategories).toEqual(['Boom']);
+  });
+
+  it('isolates an async (rejected promise) check too', async () => {
+    const checks: PostureCheck[] = [
+      { category: 'AsyncBoom', run: async () => Promise.reject(new Error('async fail')) },
+      { category: 'Clean', run: () => [] },
+    ];
+    const res = await runChecks(checks, ctx);
+    expect(res.erroredCategories).toEqual(['AsyncBoom']);
+    expect(res.passedCategories).toEqual(['Clean']);
+  });
+});
+
+describe('isNode9Managed', () => {
+  it('treats the bare and absolute-path node9 binary as managed', () => {
+    expect(isNode9Managed('node9', ['mcp-wrap'])).toBe(true);
+    expect(isNode9Managed('/usr/local/bin/node9', [])).toBe(true);
+  });
+
+  it('treats an npx node9 wrapper as managed', () => {
+    expect(isNode9Managed('npx', ['node9', 'mcp-wrap'])).toBe(true);
+  });
+
+  it('does not treat an unrelated binary as managed', () => {
+    expect(isNode9Managed('node', ['server.js'])).toBe(false);
+    expect(isNode9Managed(undefined)).toBe(false);
   });
 });
 

@@ -13,6 +13,7 @@ const result: PostureResult = {
   tier: 'at-risk',
   checksRun: 8,
   passedCategories: ['Supply chain'],
+  erroredCategories: [],
   headline: { risk: 'An agent here can read your credentials.', action: 'lock egress.' },
   findings: [
     {
