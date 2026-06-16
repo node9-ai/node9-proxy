@@ -40,18 +40,26 @@ export function evaluateEgressConfig(egress: EgressConfig): Finding {
     };
   }
 
+  // Review (watch): node9 approval-gates outbound to unknown hosts — at runtime
+  // a non-allowlisted destination routes to the approval race engine, so the
+  // user catches exfil. When node9 is enforcing this is 🟢 covered (level
+  // 'review' → "approval-gating"); only when node9 ISN'T enforcing does it
+  // surface as open (and drops, since Coverage already reports the wiring gap).
   if (egress.enabled && egress.mode === 'review') {
     return {
       category: 'Egress',
       severity: 'medium',
-      title: 'Egress is logged but not blocked',
-      what: 'Outbound connections are recorded, but not stopped.',
-      why: 'Egress is in `review` mode, not `block`.',
-      who: 'A compromised agent can still send your data to any host.',
+      title: 'Egress is in review, but node9 is not enforcing it',
+      what: 'Egress is set to review (approval-gate), but node9 is not applying the policy.',
+      why: "node9 isn't wired in (or is in observe mode), so the gate has no effect.",
+      who: 'Nothing gates outbound until node9 is enforcing in-path.',
       owner: 'node9',
       detail: [],
-      fix: 'Run `node9 egress lock` to block, or `node9 egress allow <host>` to widen the list.',
+      fix: 'Run `node9 setup` and ensure node9 is in enforcing mode.',
       coverageProbe: { kind: 'egress' },
+      // Open here means only "node9 isn't enforcing" — Coverage already says
+      // that, so drop this row when open to avoid double-surfacing.
+      redundantWhenOpen: true,
     };
   }
 

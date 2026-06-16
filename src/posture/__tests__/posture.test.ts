@@ -17,7 +17,7 @@ import { checkCoverage } from '../coverage';
 import { deriveHeadline } from '../headline';
 import { renderPosture } from '../render';
 import { runChecks, dropEnforcementRedundant } from '../index';
-import { coverageFromVerdict, annotateCoverage } from '../enforcement';
+import { coverageFromVerdict, annotateCoverage, egressCoverage } from '../enforcement';
 import type { CheckContext, Finding, PostureCheck, PostureResult, Severity } from '../types';
 
 // Compact finding builder for headline tests.
@@ -45,9 +45,14 @@ describe('evaluateEgressConfig', () => {
     expect(f?.severity).toBe('high');
   });
 
-  it('flags MEDIUM in review mode (logged, not blocked)', () => {
+  it('review mode emits a covered-candidate finding (approval-gated when enforcing)', () => {
+    // Review approval-gates outbound at runtime, so like the block finding it's
+    // a coverage-probed candidate that drops when open (not-enforcing) — never a
+    // standalone "logged but not blocked" red row.
     const f = evaluateEgressConfig({ enabled: true, mode: 'review' });
     expect(f?.severity).toBe('medium');
+    expect(f.coverageProbe).toEqual({ kind: 'egress' });
+    expect(f.redundantWhenOpen).toBe(true);
   });
 
   it('emits a covered-candidate finding when locked to block (consistency fix)', () => {
@@ -410,7 +415,7 @@ describe('renderPosture grouping', () => {
 });
 
 describe('coverageFromVerdict', () => {
-  const enf = { enforcing: true, egressBlocking: false };
+  const enf = { enforcing: true, egressBlocking: false, egressReviewing: false };
 
   it('block + enforcing → covered (block)', () => {
     expect(coverageFromVerdict('block', enf, 'project-jail shield')).toEqual({
@@ -430,9 +435,43 @@ describe('coverageFromVerdict', () => {
   });
 
   it('NOT enforcing → open even on a block verdict (observe mode = false green guard)', () => {
-    expect(coverageFromVerdict('block', { enforcing: false, egressBlocking: false })).toEqual({
+    expect(
+      coverageFromVerdict('block', {
+        enforcing: false,
+        egressBlocking: false,
+        egressReviewing: false,
+      })
+    ).toEqual({
       state: 'open',
     });
+  });
+});
+
+describe('egressCoverage', () => {
+  it('block + enforcing → covered (blocking)', () => {
+    expect(
+      egressCoverage({ enforcing: true, egressBlocking: true, egressReviewing: false })
+    ).toEqual({ state: 'covered', level: 'block', via: 'node9 egress' });
+  });
+
+  it('review + enforcing → covered (approval-gating) — watch is NOT "open"', () => {
+    // The bug this fixes: review mode approval-gates outbound to unknown hosts
+    // at runtime, exactly like a review-verdict command, so it must be covered.
+    expect(
+      egressCoverage({ enforcing: true, egressBlocking: false, egressReviewing: true })
+    ).toEqual({ state: 'covered', level: 'review', via: 'node9 egress' });
+  });
+
+  it('review but NOT enforcing → open (gate has no effect until node9 is wired)', () => {
+    expect(
+      egressCoverage({ enforcing: false, egressBlocking: false, egressReviewing: true })
+    ).toEqual({ state: 'open' });
+  });
+
+  it('off (neither blocking nor reviewing) → open', () => {
+    expect(
+      egressCoverage({ enforcing: true, egressBlocking: false, egressReviewing: false })
+    ).toEqual({ state: 'open' });
   });
 });
 

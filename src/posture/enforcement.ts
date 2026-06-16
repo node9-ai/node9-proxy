@@ -18,6 +18,23 @@ interface EnforceEnv {
   /** node9 is actually enforcing (not observe/audit) AND wired into an agent. */
   enforcing: boolean;
   egressBlocking: boolean;
+  egressReviewing: boolean;
+}
+
+/**
+ * Egress coverage. `review` counts as COVERED (approval-gated) exactly like a
+ * review-verdict command: at runtime an outbound to an unknown host routes to
+ * the approval race engine, so the user gates exfil — it is NOT "logged but
+ * not stopped". Only `off` / not-enforcing is open. Exported for tests.
+ */
+export function egressCoverage(env: EnforceEnv): Coverage {
+  if (env.enforcing && env.egressBlocking) {
+    return { state: 'covered', level: 'block', via: 'node9 egress' };
+  }
+  if (env.enforcing && env.egressReviewing) {
+    return { state: 'covered', level: 'review', via: 'node9 egress' };
+  }
+  return { state: 'open' };
 }
 
 /** A gate verdict, normalised. 'review' counts as GATED (it prompts the user). */
@@ -51,6 +68,7 @@ export async function annotateCoverage(findings: Finding[], ctx: CheckContext): 
   const env: EnforceEnv = {
     enforcing: wired && mode !== 'observe' && mode !== 'audit',
     egressBlocking: config.policy.egress.enabled && config.policy.egress.mode === 'block',
+    egressReviewing: config.policy.egress.enabled && config.policy.egress.mode === 'review',
   };
 
   for (const f of findings) {
@@ -63,12 +81,7 @@ export async function annotateCoverage(findings: Finding[], ctx: CheckContext): 
     }
 
     if (probe.kind === 'egress') {
-      // Covered only when egress is blocking AND node9 is actually enforcing
-      // (wired + not observe) — otherwise the policy isn't in the loop.
-      f.coverage =
-        env.egressBlocking && env.enforcing
-          ? { state: 'covered', via: 'node9 egress' }
-          : { state: 'open' };
+      f.coverage = egressCoverage(env);
       continue;
     }
 
