@@ -100,7 +100,10 @@ export function checkSecrets(ctx: CheckContext): Finding[] {
       category: 'Secrets',
       severity: 'critical',
       title: `${plaintext.length} plaintext secret${plaintext.length === 1 ? '' : 's'} on disk`,
-      detail: [...plaintext, 'A leaked key = full account compromise.'],
+      what: 'API keys/tokens are sitting unencrypted in files on disk.',
+      why: 'They were saved in plaintext config / .env files.',
+      who: 'A tricked agent (or any program you run) could read and leak them.',
+      detail: plaintext,
       fix: 'node9 can gate reads of these files in-path (DLP block).',
       // Coverage is decided at the DLP layer — does node9 block the agent
       // reading these? (See enforcement.ts.)
@@ -126,7 +129,10 @@ export function checkSecrets(ctx: CheckContext): Finding[] {
       category: 'Secrets',
       severity: 'high',
       title: `${creds.length} credential file${creds.length === 1 ? '' : 's'} readable by the agent`,
-      detail: [...creds, 'An unsandboxed agent can read and exfiltrate these.'],
+      what: 'Your SSH keys / cloud login files can be read by programs you run.',
+      why: 'They sit unlocked in your home folder.',
+      who: 'An unsandboxed agent could read them and use them to reach your servers / cloud.',
+      detail: creds,
       fix: 'node9 can block reads of sensitive paths (~/.ssh, ~/.aws) in-path.',
       coverageProbe: { kind: 'fileRead', paths: credPaths },
     });

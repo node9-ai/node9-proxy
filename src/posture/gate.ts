@@ -55,10 +55,10 @@ export async function checkGate(ctx: CheckContext): Promise<Finding[]> {
         category: 'Approval gate',
         severity: 'critical',
         title: 'Destructive commands are not blocked',
-        detail: [
-          'Even `rm -rf /` is allowed by the current policy.',
-          'The agent has no guardrail on destructive shell commands.',
-        ],
+        what: 'Dangerous shell commands run unchecked.',
+        why: 'No enforcing policy is gating Bash — even `rm -rf /` is allowed.',
+        who: 'A tricked agent could wipe files or damage the machine with one command.',
+        detail: [],
         fix: 'node9 enforces destructive-command blocking in-path (enforcing mode).',
       },
     ];
@@ -71,10 +71,10 @@ export async function checkGate(ctx: CheckContext): Promise<Finding[]> {
         category: 'Approval gate',
         severity: 'high',
         title: `Catches \`rm -rf\` but misses ${slipped.length} of ${results.length} obfuscations`,
-        detail: [
-          ...slipped.map((s) => `slips through: ${s.technique}`),
-          'Pattern heuristics are not a security boundary.',
-        ],
+        what: 'node9 blocks obvious destructive commands, but a few disguised ones slip past.',
+        why: "Pattern-matching can't catch every obfuscation.",
+        who: 'A cleverly-worded destructive command could still run.',
+        detail: slipped.map((s) => `slips through: ${s.technique}`),
         fix: 'node9 enforces in-path — but the OS/container is the real boundary.',
       },
     ];

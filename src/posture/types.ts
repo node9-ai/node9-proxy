@@ -35,6 +35,10 @@ export interface Finding {
   severity: Severity;
   /** One-line headline, e.g. '3 plaintext secrets on disk'. */
   title: string;
+  /** Plain language, shown under the title for OPEN findings (Phase B). */
+  what?: string; // what this means, in everyday terms
+  why?: string; // why you have it
+  who?: string; // what could go wrong / who's affected
   /** Specifics — secret *types* + locations, never values. */
   detail: string[];
   /** The enforcement bridge: what node9 can do about it (the free→paid hook). */

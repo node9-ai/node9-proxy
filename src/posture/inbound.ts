@@ -198,11 +198,10 @@ export function checkInbound(ctx: CheckContext): Finding[] {
       title: `Your agent is reachable on 0.0.0.0 (port${agentPorts.length === 1 ? '' : 's'} ${agentPorts
         .map((a) => a.port)
         .join(', ')})`,
-      detail: [
-        ...agentPorts.map((a) => a.label),
-        'Anyone who can reach this port can send the agent instructions (pilot it).',
-        'Confirm it requires an auth token / shared secret.',
-      ],
+      what: 'Your agent itself is listening for incoming network connections.',
+      why: "It's bound to 0.0.0.0, so other devices on the network can reach it.",
+      who: 'Anyone who can reach the port could send it instructions (pilot it). Confirm it requires an auth token.',
+      detail: agentPorts.map((a) => a.label),
       fix: 'Bind the agent port to 127.0.0.1, or require an auth token on inbound requests.',
       coverageProbe: { kind: 'cantFix' },
     });
@@ -215,13 +214,14 @@ export function checkInbound(ctx: CheckContext): Finding[] {
       category: 'Network exposure',
       severity: 'advisory',
       title: `${exposed.length} service${exposed.length === 1 ? '' : 's'} reachable on 0.0.0.0`,
-      detail: [
-        ...exposed.map((e) => e.label),
-        'Bound to all interfaces — reachable from other hosts on the network.',
-        ...(hasDb
-          ? ['An unauthenticated database on a public interface is a direct data/RCE path.']
-          : []),
-      ],
+      what: 'These services accept connections from your whole network, not just this laptop.',
+      why: 'They listen on 0.0.0.0 (all interfaces) instead of 127.0.0.1 (this machine only).',
+      // Calibrated: 0.0.0.0 = your local network (WiFi), not the public internet
+      // unless the box has a public IP.
+      who:
+        'Other devices on your network (e.g. your WiFi) can connect — usually not the whole internet unless this box has a public IP.' +
+        (hasDb ? ' An open, unauthenticated database is a direct data-theft path.' : ''),
+      detail: exposed.map((e) => e.label),
       fix: 'Bind to 127.0.0.1 or firewall the port; node9 gates the agent, not the socket.',
       coverageProbe: { kind: 'cantFix' },
     });

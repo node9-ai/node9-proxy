@@ -54,6 +54,13 @@ describe('evaluateEgressConfig', () => {
     const f = evaluateEgressConfig({ enabled: true, mode: 'block' });
     expect(f).toBeNull();
   });
+
+  it('carries plain-language what/why/who (Phase B)', () => {
+    const f = evaluateEgressConfig({ enabled: false, mode: 'off' });
+    expect(f?.what).toBeTruthy();
+    expect(f?.why).toBeTruthy();
+    expect(f?.who).toBeTruthy();
+  });
 });
 
 describe('scorePosture', () => {

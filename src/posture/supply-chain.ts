@@ -99,10 +99,10 @@ export function checkSupplyChain(ctx: CheckContext): Finding[] {
       category: 'Supply chain',
       severity: 'high',
       title: `${suspect.length} MCP server${suspect.length === 1 ? '' : 's'} launched from an untrusted path`,
-      detail: [
-        ...suspect.map((s) => `${s.name} → ${s.command} (${s.agent})`),
-        'A binary in /tmp or a world-writable dir can be replaced by anything on the host.',
-      ],
+      what: 'An MCP tool-server runs from an untrusted location.',
+      why: 'Its binary lives in /tmp or a world-writable directory.',
+      who: 'Anything on the machine could swap that binary for malware the agent then runs.',
+      detail: suspect.map((s) => `${s.name} → ${s.command} (${s.agent})`),
       fix: 'node9 can pin + provenance-check MCP servers before they run.',
     });
   }
@@ -112,10 +112,10 @@ export function checkSupplyChain(ctx: CheckContext): Finding[] {
       category: 'Supply chain',
       severity: 'medium',
       title: `${unmanaged.length} of ${servers.length} MCP server${servers.length === 1 ? '' : 's'} run outside node9`,
-      detail: [
-        ...unmanaged.slice(0, 5).map((s) => `${s.name} (${s.agent})`),
-        'Their tool calls execute without node9 gating — tool-poisoning / rug-pull risk.',
-      ],
+      what: 'Some MCP tool-servers run without node9 watching their tool calls.',
+      why: "They're launched directly, not wrapped by node9.",
+      who: 'A poisoned or silently-updated server could act freely (tool-poisoning / rug-pull).',
+      detail: unmanaged.slice(0, 5).map((s) => `${s.name} (${s.agent})`),
       fix: 'node9 can wrap MCP servers so every tool call is gated + pinned.',
     });
   }

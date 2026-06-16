@@ -21,10 +21,10 @@ export function checkCoverage(ctx: CheckContext): Finding[] {
       category: 'Coverage',
       severity: 'critical',
       title: 'node9 is not in-path for any agent',
-      detail: [
-        'No agent on this host has node9 hooks or MCP wired.',
-        'Every finding above is unenforced — node9 can only report, not block.',
-      ],
+      what: "node9 isn't actually in the loop for any agent on this machine.",
+      why: 'No agent has node9 hooks or MCP wired in.',
+      who: 'Everything else here is unenforced — node9 can only report, not block.',
+      detail: [],
       fix: 'Run `node9 setup` to put node9 in-path for your agent.',
     });
     return findings; // nothing downstream matters if node9 isn't wired
@@ -37,10 +37,10 @@ export function checkCoverage(ctx: CheckContext): Finding[] {
       category: 'Coverage',
       severity: 'high',
       title: `node9 is in ${mode} mode — watching, not blocking`,
-      detail: [
-        'Risky actions are logged but allowed through.',
-        'The guardrails above are observed, not enforced.',
-      ],
+      what: 'node9 is watching but not actually blocking anything.',
+      why: `It's in ${mode} mode, which logs risky actions but lets them through.`,
+      who: 'The guardrails above are observed, not enforced.',
+      detail: [],
       fix: 'Set mode to `standard` (or `strict`) to enforce in-path.',
     });
   }

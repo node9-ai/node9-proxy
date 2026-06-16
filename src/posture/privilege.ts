@@ -23,10 +23,10 @@ export async function checkPrivilege(ctx: CheckContext): Promise<Finding[]> {
       category: 'Privilege',
       severity: 'high',
       title: 'Running as root',
-      detail: [
-        'The agent process is uid 0 — every command runs with full system rights.',
-        'One bad command can modify any file, user, or service on the host.',
-      ],
+      what: 'The agent process is running as root (full system rights).',
+      why: 'It was started as uid 0.',
+      who: 'One bad command can change any file, user, or service on the machine.',
+      detail: [],
       fix: 'node9 can block privileged commands (sudo, system-path writes) in-path.',
     });
   }
@@ -37,11 +37,12 @@ export async function checkPrivilege(ctx: CheckContext): Promise<Finding[]> {
       category: 'Privilege',
       severity: isRoot ? 'high' : 'medium',
       title: 'Privilege escalation is not gated',
-      detail: [
-        '`sudo` commands are not blocked by the current policy.',
-        'An agent can escalate to root and step around file/command guards.',
-      ],
-      fix: 'node9 can block sudo / privilege-escalation in-path.',
+      what: "node9 isn't gating `sudo`.",
+      why: 'No sudo rule is active in the current policy.',
+      // Calibrated: don't claim the agent CAN become root — it depends on sudo config.
+      who: 'If `sudo` is passwordless (NOPASSWD), an agent could become root; with a password prompt the risk is lower.',
+      detail: [],
+      fix: 'node9 can gate sudo / privilege-escalation in-path.',
       // Coverage probes the real policy: block OR review = gated (covered).
       coverageProbe: { kind: 'command', command: SUDO_PROBE },
     });

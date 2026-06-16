@@ -48,8 +48,20 @@ function renderFinding(f: Finding): string[] {
   const lines: string[] = [];
   lines.push(`  ${ICON[f.severity]} ${label(f.category)}${f.title}`);
   const indent = ' '.repeat(2 + 3 + LABEL_WIDTH);
+  // Plain-language explanation first (what / why / who), wrapped so that
+  // indent + text stays under ~80 columns.
+  const width = 80 - indent.length;
+  for (const s of [f.what, f.why, f.who]) {
+    if (s) for (const l of wrap(s, width)) lines.push(indent + chalk.gray(l));
+  }
+  // Then hard specifics (file lists, ports) — kept on one line each — then the
+  // fix prose, wrapped with its continuation aligned under the text.
   for (const d of f.detail) lines.push(indent + chalk.gray(d));
-  if (f.fix) lines.push(indent + chalk.cyan('→ ' + f.fix));
+  if (f.fix) {
+    wrap(f.fix, width - 2).forEach((l, i) =>
+      lines.push(indent + chalk.cyan(i === 0 ? '→ ' + l : '  ' + l))
+    );
+  }
   return lines;
 }
 

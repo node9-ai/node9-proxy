@@ -22,10 +22,10 @@ export function evaluateEgressConfig(egress: EgressConfig): Finding | null {
       category: 'Egress',
       severity: 'medium',
       title: 'Egress is logged but not blocked',
-      detail: [
-        'Mode is `review`: outbound destinations are recorded, not stopped.',
-        'A compromised agent can still exfiltrate to any host.',
-      ],
+      what: 'Outbound connections are recorded, but not stopped.',
+      why: 'Egress is in `review` mode, not `block`.',
+      who: 'A compromised agent can still send your data to any host.',
+      detail: [],
       fix: 'node9 can switch egress to `block` with a host allowlist.',
       coverageProbe: { kind: 'egress' },
     };
@@ -36,7 +36,10 @@ export function evaluateEgressConfig(egress: EgressConfig): Finding | null {
     category: 'Egress',
     severity: 'high',
     title: 'Egress is open',
-    detail: ['The agent can reach any host on the internet — an open exfiltration path.'],
+    what: 'Your agent can connect to any server on the internet.',
+    why: "node9 isn't restricting where its network tools (curl, wget, ssh) can reach.",
+    who: 'If the agent is ever tricked, nothing stops it sending your data out.',
+    detail: [],
     fix: 'node9 can lock egress to an allowlist (policy.egress.mode = block).',
     coverageProbe: { kind: 'egress' },
   };
