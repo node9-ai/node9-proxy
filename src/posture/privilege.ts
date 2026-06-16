@@ -42,6 +42,8 @@ export async function checkPrivilege(ctx: CheckContext): Promise<Finding[]> {
         'An agent can escalate to root and step around file/command guards.',
       ],
       fix: 'node9 can block sudo / privilege-escalation in-path.',
+      // Coverage probes the real policy: block OR review = gated (covered).
+      coverageProbe: { kind: 'command', command: SUDO_PROBE },
     });
   }
 

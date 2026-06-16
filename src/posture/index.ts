@@ -13,6 +13,7 @@ import { checkInbound } from './inbound';
 import { checkCoverage } from './coverage';
 import { scorePosture } from './score';
 import { deriveHeadline } from './headline';
+import { annotateCoverage } from './enforcement';
 import type { CheckContext, Finding, PostureCheck, PostureResult } from './types';
 
 export const POSTURE_CHECKS: PostureCheck[] = [
@@ -71,6 +72,9 @@ export async function runPosture(opts: RunPostureOptions = {}): Promise<PostureR
   };
 
   const { findings, passedCategories, erroredCategories } = await runChecks(POSTURE_CHECKS, ctx);
+
+  // Decide what node9 is already enforcing — at the real gating layer.
+  await annotateCoverage(findings, ctx);
 
   const { score, tier } = scorePosture(findings, POSTURE_CHECKS.length);
 

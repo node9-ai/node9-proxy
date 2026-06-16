@@ -27,6 +27,7 @@ export function evaluateEgressConfig(egress: EgressConfig): Finding | null {
         'A compromised agent can still exfiltrate to any host.',
       ],
       fix: 'node9 can switch egress to `block` with a host allowlist.',
+      coverageProbe: { kind: 'egress' },
     };
   }
 
@@ -37,6 +38,7 @@ export function evaluateEgressConfig(egress: EgressConfig): Finding | null {
     title: 'Egress is open',
     detail: ['The agent can reach any host on the internet — an open exfiltration path.'],
     fix: 'node9 can lock egress to an allowlist (policy.egress.mode = block).',
+    coverageProbe: { kind: 'egress' },
   };
 }
 

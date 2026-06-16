@@ -84,6 +84,7 @@ export function checkSecrets(ctx: CheckContext): Finding[] {
 
   // ── Plaintext secrets in readable files (critical) ──────────────────────
   const plaintext: string[] = [];
+  const plaintextPaths: string[] = [];
   for (const file of candidateFiles(home, ctx.cwd)) {
     const text = safeRead(file);
     if (!text) continue;
@@ -91,6 +92,7 @@ export function checkSecrets(ctx: CheckContext): Finding[] {
     if (match) {
       // Type + location only — never the value.
       plaintext.push(`${match.patternName} in ${displayPath(file, home)}`);
+      plaintextPaths.push(file);
     }
   }
   if (plaintext.length > 0) {
@@ -100,14 +102,21 @@ export function checkSecrets(ctx: CheckContext): Finding[] {
       title: `${plaintext.length} plaintext secret${plaintext.length === 1 ? '' : 's'} on disk`,
       detail: [...plaintext, 'A leaked key = full account compromise.'],
       fix: 'node9 can gate reads of these files in-path (DLP block).',
+      // Coverage is decided at the DLP layer — does node9 block the agent
+      // reading these? (See enforcement.ts.)
+      coverageProbe: { kind: 'fileRead', paths: plaintextPaths },
     });
   }
 
   // ── Credential material the agent can read (high) ───────────────────────
   const creds: string[] = [];
+  const credPaths: string[] = [];
   for (const file of credentialMaterial(home)) {
     try {
-      if (fs.statSync(file).isFile()) creds.push(displayPath(file, home));
+      if (fs.statSync(file).isFile()) {
+        creds.push(displayPath(file, home));
+        credPaths.push(file);
+      }
     } catch {
       /* absent — good */
     }
@@ -119,6 +128,7 @@ export function checkSecrets(ctx: CheckContext): Finding[] {
       title: `${creds.length} credential file${creds.length === 1 ? '' : 's'} readable by the agent`,
       detail: [...creds, 'An unsandboxed agent can read and exfiltrate these.'],
       fix: 'node9 can block reads of sensitive paths (~/.ssh, ~/.aws) in-path.',
+      coverageProbe: { kind: 'fileRead', paths: credPaths },
     });
   }
 

@@ -204,6 +204,7 @@ export function checkInbound(ctx: CheckContext): Finding[] {
         'Confirm it requires an auth token / shared secret.',
       ],
       fix: 'Bind the agent port to 127.0.0.1, or require an auth token on inbound requests.',
+      coverageProbe: { kind: 'cantFix' },
     });
   }
 
@@ -222,6 +223,7 @@ export function checkInbound(ctx: CheckContext): Finding[] {
           : []),
       ],
       fix: 'Bind to 127.0.0.1 or firewall the port; node9 gates the agent, not the socket.',
+      coverageProbe: { kind: 'cantFix' },
     });
   }
 

@@ -13,7 +13,12 @@ export function scorePosture(
   findings: Finding[],
   checksRun: number
 ): { score: number; tier: 'good' | 'at-risk' | 'critical' } {
-  const count = (sev: Severity) => findings.filter((f) => f.severity === sev).length;
+  // Covered findings (node9 is already enforcing) and can't-fix advisories are
+  // not OPEN risks — the score measures what's still open, not what's on disk.
+  const open = findings.filter(
+    (f) => f.coverage?.state !== 'covered' && f.coverage?.state !== 'cant-fix'
+  );
+  const count = (sev: Severity) => open.filter((f) => f.severity === sev).length;
   return computeSecurityScore({
     critical: count('critical'),
     high: count('high'),

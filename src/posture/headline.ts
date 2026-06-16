@@ -23,10 +23,16 @@ function worstFinding(findings: Finding[]): Finding | undefined {
  * Pick the scariest TRUE story + the one next step. Returns null when there's
  * nothing real to narrate (no findings, or only advisory ones node9 can't fix).
  */
-export function deriveHeadline(findings: Finding[]): Headline | null {
+export function deriveHeadline(allFindings: Finding[]): Headline | null {
+  // Only OPEN findings tell the story — a covered Secrets must never feed
+  // "an agent can read your credentials." Exclude covered + can't-fix.
+  const findings = allFindings.filter(
+    (f) => f.coverage?.state !== 'covered' && f.coverage?.state !== 'cant-fix'
+  );
+
   // Advisory-only (isolation/inbound) → no scary chain to call out; the score
   // and the rows speak for themselves.
-  if (findings.every((f) => f.severity === 'advisory')) return null;
+  if (findings.length === 0 || findings.every((f) => f.severity === 'advisory')) return null;
 
   const has = (category: string) => findings.some((f) => f.category === category);
   const secrets = has('Secrets');

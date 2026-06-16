@@ -7,6 +7,28 @@
 
 export type Severity = 'critical' | 'high' | 'medium' | 'advisory';
 
+/** node9's relationship to a finding — is it already enforcing a mitigation? */
+export type CoverageState = 'covered' | 'partial' | 'open' | 'cant-fix';
+
+export interface Coverage {
+  state: CoverageState;
+  /** Strength when covered/partial — from the real gate verdict. */
+  level?: 'block' | 'review';
+  /** What's enforcing it, e.g. 'project-jail shield', 'node9 DLP'. */
+  via?: string;
+}
+
+/**
+ * How a check declares its coverage test, run by `annotateCoverage` at the
+ * REAL gating layer (DLP for file reads, policy for commands) — never trusted
+ * from a single tier. Internal: not rendered, not shipped.
+ */
+export type CoverageProbe =
+  | { kind: 'fileRead'; paths: string[] } // → scanFilePath (DLP layer)
+  | { kind: 'command'; command: string } // → evaluatePolicy (policy layer)
+  | { kind: 'egress' } // → config.policy.egress
+  | { kind: 'cantFix' }; // → always advisory (OS/infra)
+
 export interface Finding {
   /** Scorecard row this finding belongs to, e.g. 'Secrets'. */
   category: string;
@@ -17,6 +39,10 @@ export interface Finding {
   detail: string[];
   /** The enforcement bridge: what node9 can do about it (the free→paid hook). */
   fix?: string;
+  /** Set by `annotateCoverage` — node9's enforcement relationship to this finding. */
+  coverage?: Coverage;
+  /** How to assess coverage for this finding (internal; not rendered/shipped). */
+  coverageProbe?: CoverageProbe;
 }
 
 export interface CheckContext {

@@ -73,16 +73,31 @@ export function renderPosture(result: PostureResult): string {
     lines.push('');
   }
 
+  // 🟢 What node9 is already enforcing — shown first as reassurance, never as
+  // a risk. (Covered findings are excluded from the open-findings render below.)
+  const covered = result.findings.filter((f) => f.coverage?.state === 'covered');
+  const open = result.findings.filter((f) => f.coverage?.state !== 'covered');
+  if (covered.length > 0) {
+    lines.push('  ' + chalk.green('🟢 node9 is already protecting you'));
+    for (const f of covered) {
+      const gated = f.coverage?.level === 'review' ? 'approval-gating' : 'blocking';
+      const via = f.coverage?.via ?? 'node9';
+      lines.push(
+        `  ${chalk.green('✅')} ${label(f.category)}${chalk.gray(`${via} is ${gated} this`)}`
+      );
+    }
+    lines.push('');
+  }
+
   // When the exfiltration chain is active (readable secrets + open egress),
   // group the evidence so it visually backs the headline: the chain first
   // (prize → exit → wall), then everything else.
   const chainActive =
-    result.findings.some((f) => f.category === 'Secrets') &&
-    result.findings.some((f) => f.category === 'Egress');
+    open.some((f) => f.category === 'Secrets') && open.some((f) => f.category === 'Egress');
 
   if (chainActive) {
-    const chain = CHAIN_ORDER.flatMap((cat) => result.findings.filter((f) => f.category === cat));
-    const others = result.findings.filter((f) => !CHAIN_ORDER.includes(f.category));
+    const chain = CHAIN_ORDER.flatMap((cat) => open.filter((f) => f.category === cat));
+    const others = open.filter((f) => !CHAIN_ORDER.includes(f.category));
     lines.push('  ' + chalk.gray('── the exfiltration chain ──'));
     for (const f of chain) lines.push(...renderFinding(f));
     if (others.length > 0) {
@@ -91,7 +106,7 @@ export function renderPosture(result: PostureResult): string {
       for (const f of others) lines.push(...renderFinding(f));
     }
   } else {
-    for (const f of result.findings) lines.push(...renderFinding(f));
+    for (const f of open) lines.push(...renderFinding(f));
   }
 
   for (const cat of result.passedCategories) {
@@ -102,10 +117,11 @@ export function renderPosture(result: PostureResult): string {
   }
 
   lines.push('');
-  const crit = result.findings.filter((f) => f.severity === 'critical').length;
-  const high = result.findings.filter((f) => f.severity === 'high').length;
-  const med = result.findings.filter((f) => f.severity === 'medium').length;
-  const adv = result.findings.filter((f) => f.severity === 'advisory').length;
+  // Footer counts reflect what's still OPEN, not what node9 already covers.
+  const crit = open.filter((f) => f.severity === 'critical').length;
+  const high = open.filter((f) => f.severity === 'high').length;
+  const med = open.filter((f) => f.severity === 'medium').length;
+  const adv = open.filter((f) => f.severity === 'advisory').length;
   const parts: string[] = [];
   if (crit) parts.push(chalk.red(`${crit} critical`));
   if (high) parts.push(chalk.red(`${high} high`));

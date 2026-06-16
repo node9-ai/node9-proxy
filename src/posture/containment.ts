@@ -39,6 +39,7 @@ export function checkContainment(_ctx: CheckContext): Finding[] {
         'node9 can enforce inside a container, but cannot create the boundary.',
       ],
       fix: 'Run the agent in a container/VM; node9 enforces the policy within it.',
+      coverageProbe: { kind: 'cantFix' },
     },
   ];
 }

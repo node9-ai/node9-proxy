@@ -17,6 +17,7 @@ import { checkCoverage } from '../coverage';
 import { deriveHeadline } from '../headline';
 import { renderPosture } from '../render';
 import { runChecks } from '../index';
+import { coverageFromVerdict, annotateCoverage } from '../enforcement';
 import type { CheckContext, Finding, PostureCheck, PostureResult, Severity } from '../types';
 
 // Compact finding builder for headline tests.
@@ -305,6 +306,126 @@ describe('renderPosture grouping', () => {
   it('does not group (flat list) when the chain is not active', () => {
     const out = renderPosture(result([f('Egress'), f('Privilege')]));
     expect(out).not.toContain('exfiltration chain');
+  });
+
+  it('renders the "already protecting you" section and keeps covered out of the open list', () => {
+    const out = renderPosture(
+      result([
+        {
+          category: 'Secrets',
+          severity: 'critical',
+          title: 'SCARY SECRETS TITLE',
+          detail: [],
+          coverage: { state: 'covered', via: 'node9 DLP', level: 'block' },
+        },
+        f('Egress'),
+      ])
+    );
+    expect(out).toContain('node9 is already protecting you');
+    expect(out).toContain('node9 DLP is blocking this');
+    // The scary title is suppressed for a covered finding.
+    expect(out).not.toContain('SCARY SECRETS TITLE');
+  });
+});
+
+describe('coverageFromVerdict', () => {
+  const enf = { enforcing: true, egressBlocking: false };
+
+  it('block + enforcing → covered (block)', () => {
+    expect(coverageFromVerdict('block', enf, 'project-jail shield')).toEqual({
+      state: 'covered',
+      level: 'block',
+      via: 'project-jail shield',
+    });
+  });
+
+  it('review + enforcing → covered (review = approval-gated, still covered)', () => {
+    expect(coverageFromVerdict('review', enf).state).toBe('covered');
+    expect(coverageFromVerdict('review', enf).level).toBe('review');
+  });
+
+  it('allow → open', () => {
+    expect(coverageFromVerdict('allow', enf)).toEqual({ state: 'open' });
+  });
+
+  it('NOT enforcing → open even on a block verdict (observe mode = false green guard)', () => {
+    expect(coverageFromVerdict('block', { enforcing: false, egressBlocking: false })).toEqual({
+      state: 'open',
+    });
+  });
+});
+
+describe('annotateCoverage (enforcement gate)', () => {
+  let home: string;
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'posture-cov-'));
+  });
+  afterEach(() => {
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it('marks cantFix as cant-fix, and gates command/fileRead to OPEN when node9 is not wired', async () => {
+    const findings: Finding[] = [
+      {
+        category: 'Isolation',
+        severity: 'advisory',
+        title: 't',
+        detail: [],
+        coverageProbe: { kind: 'cantFix' },
+      },
+      {
+        category: 'Privilege',
+        severity: 'medium',
+        title: 't',
+        detail: [],
+        coverageProbe: { kind: 'command', command: 'sudo chmod 777 /etc/passwd' },
+      },
+    ];
+    // Bare temp home → no agent wired → not enforcing → covered downgrades to open.
+    await annotateCoverage(findings, { home, cwd: home });
+    expect(findings[0].coverage).toEqual({ state: 'cant-fix' });
+    expect(findings[1].coverage?.state).toBe('open');
+  });
+});
+
+describe('scorePosture (coverage-aware)', () => {
+  it('excludes a covered finding from the score', () => {
+    const covered: Finding = {
+      category: 'Secrets',
+      severity: 'critical',
+      title: 't',
+      detail: [],
+      coverage: { state: 'covered' },
+    };
+    expect(scorePosture([covered], 8)).toEqual({ score: 100, tier: 'good' });
+  });
+
+  it('still counts an open finding', () => {
+    const open: Finding = {
+      category: 'Egress',
+      severity: 'high',
+      title: 't',
+      detail: [],
+      coverage: { state: 'open' },
+    };
+    expect(scorePosture([open], 8).tier).toBe('at-risk');
+  });
+});
+
+describe('deriveHeadline (coverage-aware)', () => {
+  it('does not chain a COVERED Secrets — no "read your credentials" story', () => {
+    const h = deriveHeadline([
+      {
+        category: 'Secrets',
+        severity: 'critical',
+        title: 't',
+        detail: [],
+        coverage: { state: 'covered' },
+      },
+      { category: 'Egress', severity: 'high', title: 't', detail: [], coverage: { state: 'open' } },
+    ]);
+    expect(h?.risk).not.toMatch(/credentials/i);
+    expect(h?.risk).toMatch(/any host/i); // egress-only story
   });
 });
 
