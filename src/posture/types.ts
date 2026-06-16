@@ -48,6 +48,13 @@ export interface Finding {
   /** Whose job it is to fix this. node9 (a command) or os (your infra).
    *  Unset → treated as 'os' (don't falsely claim node9 can fix it). */
   owner?: Owner;
+  /** node9 has an ADJACENT lever that reduces this risk, even though fully
+   *  closing it stays the user's job (owner remains 'os'). Renders under the
+   *  🔒 "node9 reduces these" tier — between 🔧 and 🧱. Distinct from coverage:
+   *  coverage = in-path enforcement of THIS finding; node9Reduces = a separate
+   *  shield/command that shrinks the blast radius (project-jail for isolation,
+   *  db-shields for an exposed Postgres/Redis). */
+  node9Reduces?: boolean;
   /** The enforcement bridge: what node9 can do about it (the free→paid hook). */
   fix?: string;
   /** Set by `annotateCoverage` — node9's enforcement relationship to this finding. */

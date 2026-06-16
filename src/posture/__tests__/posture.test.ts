@@ -11,7 +11,7 @@ import path from 'path';
 import { evaluateEgressConfig } from '../egress';
 import { scorePosture } from '../score';
 import { checkSecrets } from '../secrets';
-import { parseListeners, classifyListener } from '../inbound';
+import { parseListeners, classifyListener, buildNetworkFix } from '../inbound';
 import { checkSupplyChain, isNode9Managed } from '../supply-chain';
 import { checkCoverage } from '../coverage';
 import { deriveHeadline } from '../headline';
@@ -198,6 +198,29 @@ describe('classifyListener', () => {
   });
 });
 
+describe('buildNetworkFix', () => {
+  it('surfaces the db-shield command + rebind line for a shielded service, and flags reduces', () => {
+    const { fix, reduces } = buildNetworkFix(['PostgreSQL on :5432', 'Redis on :6379']);
+    expect(reduces).toBe(true);
+    expect(fix).toContain('node9 shield enable postgres');
+    expect(fix).toContain('node9 shield enable redis');
+    expect(fix).toContain("listen_addresses='localhost'");
+    expect(fix).toContain('bind 127.0.0.1');
+  });
+
+  it('does NOT flag reduces for bare dev servers node9 has no shield for', () => {
+    const { fix, reduces } = buildNetworkFix(['node on :3000', 'node on :4000']);
+    expect(reduces).toBe(false);
+    expect(fix).not.toContain('shield enable');
+    expect(fix).toContain('Bind to 127.0.0.1'); // plain rebind only
+  });
+
+  it('dedupes a shield when the same service is exposed twice', () => {
+    const { fix } = buildNetworkFix(['PostgreSQL on :5432', 'PostgreSQL on :5433']);
+    expect(fix.match(/shield enable postgres/g)).toHaveLength(1);
+  });
+});
+
 describe('checkSupplyChain', () => {
   let home: string;
   // claude's MCP config path (from the agent-wiring registry).
@@ -322,6 +345,48 @@ describe('renderPosture grouping', () => {
     const out = renderPosture(result([f('Mystery')])); // f() sets no owner
     expect(out).toContain('Only you can fix these');
     expect(out).not.toContain('node9 can fix these');
+  });
+
+  it('renders the 🔒 middle tier for an os-owned finding node9 can reduce, between fix-it and only-you', () => {
+    const out = renderPosture(
+      result([
+        { category: 'Egress', severity: 'high', title: 'e', detail: [], owner: 'node9' },
+        {
+          category: 'Isolation',
+          severity: 'advisory',
+          title: 'i',
+          detail: [],
+          owner: 'os',
+          node9Reduces: true,
+        },
+        { category: 'Mystery', severity: 'advisory', title: 'm', detail: [], owner: 'os' },
+      ])
+    );
+    expect(out).toContain('node9 reduces these');
+    // order: 🔧 fix-it < 🔒 reduces < 🧱 only-you
+    expect(out.indexOf('node9 can fix these')).toBeLessThan(out.indexOf('node9 reduces these'));
+    expect(out.indexOf('node9 reduces these')).toBeLessThan(out.indexOf('Only you can fix these'));
+  });
+
+  it('preserves explicit line breaks in a multi-line fix (bulleted options stay on their own lines)', () => {
+    const out = renderPosture(
+      result([
+        {
+          category: 'Isolation',
+          severity: 'advisory',
+          title: 'i',
+          detail: [],
+          owner: 'os',
+          node9Reduces: true,
+          fix: 'First line\n  • bullet one\n  • bullet two',
+        },
+      ])
+    );
+    const lines = out.split('\n');
+    // The two bullets land on separate output lines (not collapsed into one wrap).
+    expect(lines.filter((l) => l.includes('• bullet one'))).toHaveLength(1);
+    expect(lines.filter((l) => l.includes('• bullet two'))).toHaveLength(1);
+    expect(lines.some((l) => l.includes('• bullet one') && l.includes('• bullet two'))).toBe(false);
   });
 
   it('renders the "already protecting you" section and keeps covered out of the open list', () => {

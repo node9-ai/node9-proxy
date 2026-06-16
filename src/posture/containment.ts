@@ -39,7 +39,12 @@ export function checkContainment(_ctx: CheckContext): Finding[] {
       who: 'If it gets tricked, the damage reaches every file and program — not one room.',
       detail: [],
       owner: 'os',
-      fix: 'Run the agent in a container/VM; node9 enforces the policy within it.',
+      node9Reduces: true,
+      fix:
+        'node9 can shrink the blast radius without a container — you keep every tool:\n' +
+        '  • node9 shield enable project-jail — block credential reads\n' +
+        '  • node9 egress lock — block data exfil\n' +
+        'A container/VM adds full isolation, but you lose host access.',
       coverageProbe: { kind: 'cantFix' },
     },
   ];

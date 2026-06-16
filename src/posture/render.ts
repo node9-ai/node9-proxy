@@ -55,9 +55,15 @@ function renderFinding(f: Finding): string[] {
   // fix prose, wrapped with its continuation aligned under the text.
   for (const d of f.detail) lines.push(indent + chalk.gray(d));
   if (f.fix) {
-    wrap(f.fix, width - 2).forEach((l, i) =>
-      lines.push(indent + chalk.cyan(i === 0 ? '→ ' + l : '  ' + l))
-    );
+    // Preserve intentional line breaks (the fix may carry a bulleted option
+    // list); wrap each segment, and only the first physical line gets the arrow.
+    let first = true;
+    for (const seg of f.fix.split('\n')) {
+      for (const l of wrap(seg, width - 2)) {
+        lines.push(indent + chalk.cyan(first ? '→ ' + l : '  ' + l));
+        first = false;
+      }
+    }
   }
   return lines;
 }
@@ -102,14 +108,24 @@ export function renderPosture(result: PostureResult): string {
   // vs only-you (OS/infra — node9 can detect but not fix). Unset owner → 'os'
   // (don't falsely claim node9 can fix it).
   const node9Open = open.filter((f) => f.owner === 'node9');
-  const osOpen = open.filter((f) => f.owner !== 'node9');
+  // 🔒 middle tier: owner is still the user's, but node9 has an adjacent lever
+  // that reduces the risk (a runnable command). Sits between fix-it and only-you.
+  const reduceOpen = open.filter((f) => f.owner !== 'node9' && f.node9Reduces);
+  const osOpen = open.filter((f) => f.owner !== 'node9' && !f.node9Reduces);
 
   if (node9Open.length > 0) {
     lines.push('  ' + chalk.cyan.bold('🔧 node9 can fix these — run the command'));
     for (const f of node9Open) lines.push(...renderFinding(f));
   }
-  if (osOpen.length > 0) {
+  if (reduceOpen.length > 0) {
     if (node9Open.length > 0) lines.push('');
+    lines.push(
+      '  ' + chalk.yellow.bold('🔒 node9 reduces these — run the command, the rest is yours')
+    );
+    for (const f of reduceOpen) lines.push(...renderFinding(f));
+  }
+  if (osOpen.length > 0) {
+    if (node9Open.length > 0 || reduceOpen.length > 0) lines.push('');
     lines.push('  ' + chalk.bold("🧱 Only you can fix these — node9 can't"));
     for (const f of osOpen) lines.push(...renderFinding(f));
   }

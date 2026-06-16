@@ -55,6 +55,62 @@ const KNOWN_SERVICE_COMMS: Record<string, string> = {
 
 const DB_LABEL = /PostgreSQL|Redis|MySQL|MariaDB|MongoDB/;
 
+// Exposed services node9 has a shield for: enabling it stops the AGENT from
+// destroying the DB even while the port stays open (the socket itself is still
+// the user's to rebind). Postgres/Redis shield rules are verified; keep this
+// to shields that actually exist so the fix never names a missing command.
+const SHIELD_FOR_SERVICE: Record<string, { shield: string; blocks: string; rebind: string }> = {
+  PostgreSQL: {
+    shield: 'postgres',
+    blocks: 'DROP TABLE / TRUNCATE',
+    rebind: "PostgreSQL → listen_addresses='localhost'",
+  },
+  Redis: { shield: 'redis', blocks: 'FLUSHALL / FLUSHDB', rebind: 'Redis → bind 127.0.0.1' },
+};
+
+/**
+ * Build the Network-exposure fix from the detected service labels. When an
+ * exposed service has a node9 shield (Postgres/Redis), surface the shield
+ * command (protects the AGENT from destroying the DB) + the service-specific
+ * rebind line, and flag `reduces` so it renders under the 🔒 tier. Bare dev
+ * servers (no shield) keep the plain rebind line and stay purely the user's.
+ * Exported pure for tests (checkInbound itself reads /proc). Deduped by shield.
+ */
+export function buildNetworkFix(labels: string[]): { fix: string; reduces: boolean } {
+  const shielded = [
+    ...new Map(
+      labels
+        .map((label) => {
+          const key = Object.keys(SHIELD_FOR_SERVICE).find((k) => label.includes(k));
+          return key ? SHIELD_FOR_SERVICE[key] : null;
+        })
+        .filter((s): s is (typeof SHIELD_FOR_SERVICE)[string] => s !== null)
+        .map((s) => [s.shield, s] as const)
+    ).values(),
+  ];
+
+  if (shielded.length === 0) {
+    return {
+      fix: 'Bind to 127.0.0.1 or firewall the port; node9 gates the agent, not the socket.',
+      reduces: false,
+    };
+  }
+
+  const protectLines = shielded
+    .map((s) => `  • node9 shield enable ${s.shield}  — blocks ${s.blocks}`)
+    .join('\n');
+  const rebindLines = shielded.map((s) => `  • ${s.rebind}`).join('\n');
+  return {
+    fix:
+      'Protect the agent now — node9 blocks destructive DB ops:\n' +
+      protectLines +
+      '\nClose the port to other machines (your part):\n' +
+      rebindLines +
+      '\n  • or firewall the port',
+    reduces: true,
+  };
+}
+
 /**
  * Parse `/proc/net/tcp(6)` into the listeners bound to all interfaces
  * (0.0.0.0 / ::), with their socket inode. Exported pure for testing.
@@ -211,6 +267,8 @@ export function checkInbound(ctx: CheckContext): Finding[] {
   const exposed = classified.filter((c) => c.kind !== 'agent');
   if (exposed.length > 0) {
     const hasDb = exposed.some((e) => DB_LABEL.test(e.label));
+    const { fix, reduces } = buildNetworkFix(exposed.map((e) => e.label));
+
     findings.push({
       category: 'Network exposure',
       severity: 'advisory',
@@ -224,7 +282,10 @@ export function checkInbound(ctx: CheckContext): Finding[] {
         (hasDb ? ' An open, unauthenticated database is a direct data-theft path.' : ''),
       detail: exposed.map((e) => e.label),
       owner: 'os',
-      fix: 'Bind to 127.0.0.1 or firewall the port; node9 gates the agent, not the socket.',
+      // Only when node9 actually has a shield for an exposed service — otherwise
+      // (bare dev servers) it stays purely the user's to rebind.
+      node9Reduces: reduces,
+      fix,
       coverageProbe: { kind: 'cantFix' },
     });
   }
