@@ -5,8 +5,11 @@
 //
 // Redaction (the safety boundary): only score, tier, agent label, the headline
 // (risk + action — both generic prose, no values/paths), and per-finding
-// { category, severity, title } leave the box. Finding detail[] (which holds
-// file paths, MCP server names, ports) and fix text are dropped.
+// { category, severity, title, coverage, what, why, who, fix, owner } leave the
+// box. what/why/who are generic plain-language prose; fix is a command or an OS
+// action ("bind to 127.0.0.1") — none carry paths. Finding detail[] (which holds
+// file paths, MCP server names, ports) is STILL dropped — the only path-bearing
+// field never leaves the box.
 
 import http from 'http';
 import https from 'https';
@@ -24,7 +27,17 @@ export function buildShipBody(result: PostureResult): {
   tier: string;
   agent: string;
   headline: PostureResult['headline'];
-  findings: Array<{ category: string; severity: string; title: string; coverage: string }>;
+  findings: Array<{
+    category: string;
+    severity: string;
+    title: string;
+    coverage: string;
+    what?: string;
+    why?: string;
+    who?: string;
+    fix?: string;
+    owner: string;
+  }>;
 } {
   return {
     score: result.score,
@@ -38,6 +51,14 @@ export function buildShipBody(result: PostureResult): {
       // Coverage state so the SaaS counts OPEN-only (matching the local score).
       // A non-sensitive enum — no values or paths. Default 'open' if unannotated.
       coverage: f.coverage?.state ?? 'open',
+      // Plain-language parity with the CLI report. Prose only, no paths.
+      what: f.what,
+      why: f.why,
+      who: f.who,
+      // The runnable fix / OS action — commands + advice, never a path.
+      fix: f.fix,
+      // Whose job it is. Default 'os' so the SaaS never falsely claims node9 can fix it.
+      owner: f.owner ?? 'os',
     })),
   };
 }
