@@ -59,6 +59,7 @@ export async function checkGate(ctx: CheckContext): Promise<Finding[]> {
         why: 'No enforcing policy is gating Bash — even `rm -rf /` is allowed.',
         who: 'A tricked agent could wipe files or damage the machine with one command.',
         detail: [],
+        owner: 'node9',
         fix: 'Fix it now: run `node9 shield enable bash-safe` to block destructive commands in-path.',
       },
     ];
@@ -75,6 +76,7 @@ export async function checkGate(ctx: CheckContext): Promise<Finding[]> {
         why: "Pattern-matching can't catch every obfuscation.",
         who: 'A cleverly-worded destructive command could still run.',
         detail: slipped.map((s) => `slips through: ${s.technique}`),
+        owner: 'os',
         fix: 'node9 enforces in-path — but the OS/container is the real boundary.',
       },
     ];

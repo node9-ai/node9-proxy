@@ -27,6 +27,7 @@ export async function checkPrivilege(ctx: CheckContext): Promise<Finding[]> {
       why: 'It was started as uid 0.',
       who: 'One bad command can change any file, user, or service on the machine.',
       detail: [],
+      owner: 'node9',
       fix: 'node9 can block privileged commands (sudo, system-path writes) in-path.',
     });
   }
@@ -44,6 +45,7 @@ export async function checkPrivilege(ctx: CheckContext): Promise<Finding[]> {
       detail: [],
       fix: 'node9 can gate sudo / privilege-escalation in-path.',
       // Coverage probes the real policy: block OR review = gated (covered).
+      owner: 'node9',
       coverageProbe: { kind: 'command', command: SUDO_PROBE },
     });
   }

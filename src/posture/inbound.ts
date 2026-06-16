@@ -202,6 +202,7 @@ export function checkInbound(ctx: CheckContext): Finding[] {
       why: "It's bound to 0.0.0.0, so other devices on the network can reach it.",
       who: 'Anyone who can reach the port could send it instructions (pilot it). Confirm it requires an auth token.',
       detail: agentPorts.map((a) => a.label),
+      owner: 'os',
       fix: 'Bind the agent port to 127.0.0.1, or require an auth token on inbound requests.',
       coverageProbe: { kind: 'cantFix' },
     });
@@ -222,6 +223,7 @@ export function checkInbound(ctx: CheckContext): Finding[] {
         'Other devices on your network (e.g. your WiFi) can connect — usually not the whole internet unless this box has a public IP.' +
         (hasDb ? ' An open, unauthenticated database is a direct data-theft path.' : ''),
       detail: exposed.map((e) => e.label),
+      owner: 'os',
       fix: 'Bind to 127.0.0.1 or firewall the port; node9 gates the agent, not the socket.',
       coverageProbe: { kind: 'cantFix' },
     });

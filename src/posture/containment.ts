@@ -38,6 +38,7 @@ export function checkContainment(_ctx: CheckContext): Finding[] {
       why: "It's started on the bare host, not inside a container or VM.",
       who: 'If it gets tricked, the damage reaches every file and program — not one room.',
       detail: [],
+      owner: 'os',
       fix: 'Run the agent in a container/VM; node9 enforces the policy within it.',
       coverageProbe: { kind: 'cantFix' },
     },

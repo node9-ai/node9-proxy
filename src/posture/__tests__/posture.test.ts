@@ -16,7 +16,7 @@ import { checkSupplyChain, isNode9Managed } from '../supply-chain';
 import { checkCoverage } from '../coverage';
 import { deriveHeadline } from '../headline';
 import { renderPosture } from '../render';
-import { runChecks } from '../index';
+import { runChecks, dropEnforcementRedundant } from '../index';
 import { coverageFromVerdict, annotateCoverage } from '../enforcement';
 import type { CheckContext, Finding, PostureCheck, PostureResult, Severity } from '../types';
 
@@ -50,9 +50,13 @@ describe('evaluateEgressConfig', () => {
     expect(f?.severity).toBe('medium');
   });
 
-  it('passes (null) when locked to block', () => {
+  it('emits a covered-candidate finding when locked to block (consistency fix)', () => {
+    // Always returns a finding now; coverage (annotateCoverage) decides
+    // covered-vs-open so a locked + enforcing egress renders 🟢 covered.
     const f = evaluateEgressConfig({ enabled: true, mode: 'block' });
-    expect(f).toBeNull();
+    expect(f.category).toBe('Egress');
+    expect(f.coverageProbe).toEqual({ kind: 'egress' });
+    expect(f.owner).toBe('node9');
   });
 
   it('carries plain-language what/why/who (Phase B)', () => {
@@ -301,18 +305,23 @@ describe('renderPosture grouping', () => {
     checksRun: 8,
   });
 
-  it('groups into the exfiltration chain when secrets + egress are both present', () => {
-    const out = renderPosture(result([f('Secrets', 'critical'), f('Egress'), f('Privilege')]));
-    expect(out).toContain('── the exfiltration chain ──');
-    expect(out).toContain('── other findings ──');
-    // Chain (Secrets, Egress) renders before the other finding (Privilege).
-    expect(out.indexOf('Secrets')).toBeLessThan(out.indexOf('Egress'));
-    expect(out.indexOf('Egress')).toBeLessThan(out.indexOf('Privilege'));
+  it('groups open findings by owner — node9-fixable before only-you', () => {
+    const out = renderPosture(
+      result([
+        { category: 'Egress', severity: 'high', title: 'e', detail: [], owner: 'node9' },
+        { category: 'Isolation', severity: 'advisory', title: 'i', detail: [], owner: 'os' },
+      ])
+    );
+    expect(out).toContain('node9 can fix these');
+    expect(out).toContain('Only you can fix these');
+    // The node9 group renders before the only-you group.
+    expect(out.indexOf('node9 can fix these')).toBeLessThan(out.indexOf('Only you can fix these'));
   });
 
-  it('does not group (flat list) when the chain is not active', () => {
-    const out = renderPosture(result([f('Egress'), f('Privilege')]));
-    expect(out).not.toContain('exfiltration chain');
+  it('puts an unset-owner finding in the "only you" bucket (conservative, no false node9 claim)', () => {
+    const out = renderPosture(result([f('Mystery')])); // f() sets no owner
+    expect(out).toContain('Only you can fix these');
+    expect(out).not.toContain('node9 can fix these');
   });
 
   it('renders the "already protecting you" section and keeps covered out of the open list', () => {
@@ -452,6 +461,40 @@ describe('deriveHeadline (coverage-aware)', () => {
     ]);
     expect(h?.risk).not.toMatch(/credentials/i);
     expect(h?.risk).toMatch(/any host/i); // egress-only story
+  });
+});
+
+describe('dropEnforcementRedundant', () => {
+  const redundantOpen: Finding = {
+    category: 'Egress',
+    severity: 'high',
+    title: 'locked but not enforcing',
+    detail: [],
+    coverage: { state: 'open' },
+    redundantWhenOpen: true,
+  };
+  const coverage: Finding = {
+    category: 'Coverage',
+    severity: 'high',
+    title: 'observe mode',
+    detail: [],
+    coverage: { state: 'open' },
+  };
+
+  it('drops the redundant-open finding when Coverage is present', () => {
+    const out = dropEnforcementRedundant([redundantOpen, coverage]);
+    expect(out.map((f) => f.category)).toEqual(['Coverage']);
+  });
+
+  it("keeps it when Coverage is NOT present (don't lose the only signal)", () => {
+    const out = dropEnforcementRedundant([redundantOpen]);
+    expect(out).toHaveLength(1);
+  });
+
+  it('keeps a redundant finding that is COVERED (not open)', () => {
+    const covered: Finding = { ...redundantOpen, coverage: { state: 'covered' } };
+    const out = dropEnforcementRedundant([covered, coverage]);
+    expect(out).toHaveLength(2);
   });
 });
 

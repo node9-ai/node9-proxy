@@ -7,6 +7,10 @@
 
 export type Severity = 'critical' | 'high' | 'medium' | 'advisory';
 
+/** Whose job it is to fix a finding. `node9` = there's a lever (a command);
+ *  `os` = node9 can only detect it, the fix is your OS/infra. */
+export type Owner = 'node9' | 'os';
+
 /** node9's relationship to a finding — is it already enforcing a mitigation? */
 export type CoverageState = 'covered' | 'partial' | 'open' | 'cant-fix';
 
@@ -41,12 +45,19 @@ export interface Finding {
   who?: string; // what could go wrong / who's affected
   /** Specifics — secret *types* + locations, never values. */
   detail: string[];
+  /** Whose job it is to fix this. node9 (a command) or os (your infra).
+   *  Unset → treated as 'os' (don't falsely claim node9 can fix it). */
+  owner?: Owner;
   /** The enforcement bridge: what node9 can do about it (the free→paid hook). */
   fix?: string;
   /** Set by `annotateCoverage` — node9's enforcement relationship to this finding. */
   coverage?: Coverage;
   /** How to assess coverage for this finding (internal; not rendered/shipped). */
   coverageProbe?: CoverageProbe;
+  /** Internal: this finding is only OPEN because node9 isn't enforcing — the
+   *  Coverage check already reports that gap, so drop it when open to avoid
+   *  double-surfacing the same root cause. (e.g. egress locked but not wired.) */
+  redundantWhenOpen?: boolean;
 }
 
 export interface CheckContext {

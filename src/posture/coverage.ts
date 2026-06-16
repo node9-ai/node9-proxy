@@ -25,6 +25,7 @@ export function checkCoverage(ctx: CheckContext): Finding[] {
       why: 'No agent has node9 hooks or MCP wired in.',
       who: 'Everything else here is unenforced — node9 can only report, not block.',
       detail: [],
+      owner: 'node9',
       fix: 'Run `node9 setup` to put node9 in-path for your agent.',
     });
     return findings; // nothing downstream matters if node9 isn't wired
@@ -41,6 +42,7 @@ export function checkCoverage(ctx: CheckContext): Finding[] {
       why: `It's in ${mode} mode, which logs risky actions but lets them through.`,
       who: 'The guardrails above are observed, not enforced.',
       detail: [],
+      owner: 'node9',
       fix: 'Set mode to `standard` (or `strict`) to enforce in-path.',
     });
   }

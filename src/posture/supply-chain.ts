@@ -103,6 +103,7 @@ export function checkSupplyChain(ctx: CheckContext): Finding[] {
       why: 'Its binary lives in /tmp or a world-writable directory.',
       who: 'Anything on the machine could swap that binary for malware the agent then runs.',
       detail: suspect.map((s) => `${s.name} → ${s.command} (${s.agent})`),
+      owner: 'node9',
       fix: 'node9 can pin + provenance-check MCP servers before they run.',
     });
   }
@@ -116,6 +117,7 @@ export function checkSupplyChain(ctx: CheckContext): Finding[] {
       why: "They're launched directly, not wrapped by node9.",
       who: 'A poisoned or silently-updated server could act freely (tool-poisoning / rug-pull).',
       detail: unmanaged.slice(0, 5).map((s) => `${s.name} (${s.agent})`),
+      owner: 'node9',
       fix: 'node9 can wrap MCP servers so every tool call is gated + pinned.',
     });
   }

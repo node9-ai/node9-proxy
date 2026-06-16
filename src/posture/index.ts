@@ -34,6 +34,18 @@ export interface RunPostureOptions {
 }
 
 /**
+ * Drop findings flagged `redundantWhenOpen` that ended up OPEN — but only when
+ * a Coverage finding is present to carry the "node9 isn't enforcing" message.
+ * Avoids double-surfacing the same root cause (e.g. egress locked but not
+ * wired → Coverage already reports the enforcement gap). Exported for tests.
+ */
+export function dropEnforcementRedundant(findings: Finding[]): Finding[] {
+  const coveragePresent = findings.some((f) => f.category === 'Coverage');
+  if (!coveragePresent) return findings;
+  return findings.filter((f) => !(f.redundantWhenOpen && f.coverage?.state === 'open'));
+}
+
+/**
  * Run a set of checks with per-check isolation: a check that throws is recorded
  * in `erroredCategories` and never crashes the report. Exported so the
  * isolation is directly testable.
@@ -71,10 +83,18 @@ export async function runPosture(opts: RunPostureOptions = {}): Promise<PostureR
     agent: opts.agent,
   };
 
-  const { findings, passedCategories, erroredCategories } = await runChecks(POSTURE_CHECKS, ctx);
+  const {
+    findings: rawFindings,
+    passedCategories,
+    erroredCategories,
+  } = await runChecks(POSTURE_CHECKS, ctx);
 
   // Decide what node9 is already enforcing — at the real gating layer.
-  await annotateCoverage(findings, ctx);
+  await annotateCoverage(rawFindings, ctx);
+
+  // Drop findings that are open ONLY because node9 isn't enforcing (Coverage
+  // already reports that gap) — no double-surfacing.
+  const findings = dropEnforcementRedundant(rawFindings);
 
   const { score, tier } = scorePosture(findings, POSTURE_CHECKS.length);
 

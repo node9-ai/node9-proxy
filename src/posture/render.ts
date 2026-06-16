@@ -33,9 +33,6 @@ function wrap(text: string, width: number): string[] {
   return out;
 }
 
-// The exfiltration chain, in narrative order: the prize → the exit → the wall.
-const CHAIN_ORDER = ['Secrets', 'Egress', 'Isolation'];
-
 /** Pad a category label to a fixed column so detail lines align. */
 const LABEL_WIDTH = 14;
 function label(category: string): string {
@@ -101,24 +98,20 @@ export function renderPosture(result: PostureResult): string {
     lines.push('');
   }
 
-  // When the exfiltration chain is active (readable secrets + open egress),
-  // group the evidence so it visually backs the headline: the chain first
-  // (prize → exit → wall), then everything else.
-  const chainActive =
-    open.some((f) => f.category === 'Secrets') && open.some((f) => f.category === 'Egress');
+  // Group OPEN findings by WHOSE JOB it is: node9 has a lever (run a command),
+  // vs only-you (OS/infra — node9 can detect but not fix). Unset owner → 'os'
+  // (don't falsely claim node9 can fix it).
+  const node9Open = open.filter((f) => f.owner === 'node9');
+  const osOpen = open.filter((f) => f.owner !== 'node9');
 
-  if (chainActive) {
-    const chain = CHAIN_ORDER.flatMap((cat) => open.filter((f) => f.category === cat));
-    const others = open.filter((f) => !CHAIN_ORDER.includes(f.category));
-    lines.push('  ' + chalk.gray('── the exfiltration chain ──'));
-    for (const f of chain) lines.push(...renderFinding(f));
-    if (others.length > 0) {
-      lines.push('');
-      lines.push('  ' + chalk.gray('── other findings ──'));
-      for (const f of others) lines.push(...renderFinding(f));
-    }
-  } else {
-    for (const f of open) lines.push(...renderFinding(f));
+  if (node9Open.length > 0) {
+    lines.push('  ' + chalk.cyan.bold('🔧 node9 can fix these — run the command'));
+    for (const f of node9Open) lines.push(...renderFinding(f));
+  }
+  if (osOpen.length > 0) {
+    if (node9Open.length > 0) lines.push('');
+    lines.push('  ' + chalk.bold("🧱 Only you can fix these — node9 can't"));
+    for (const f of osOpen) lines.push(...renderFinding(f));
   }
 
   for (const cat of result.passedCategories) {
