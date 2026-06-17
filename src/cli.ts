@@ -57,6 +57,8 @@ import { registerMcpPinCommand } from './cli/commands/mcp-pin';
 import { registerSyncCommand } from './cli/commands/sync';
 import { registerAgentsCommand } from './cli/commands/agents';
 import { registerScanCommand } from './cli/commands/scan';
+import { registerPostureCommand } from './cli/commands/posture';
+import { registerEgressCommand } from './cli/commands/egress';
 import { registerSessionsCommand } from './cli/commands/sessions';
 import { registerSkillPinCommand } from './cli/commands/skill-pin';
 import { registerDecisionsCommand } from './cli/commands/decisions';
@@ -359,7 +361,7 @@ program
       console.error(chalk.red('\n  ⚠️  Some hooks could not be removed — see errors above.'));
       process.exit(1);
     }
-    console.log(chalk.green.bold('\n🛡️  Node9 removed. Run: npm uninstall -g @node9/proxy'));
+    console.log(chalk.green.bold('\n🛡️  Node9 removed. Run: npm uninstall -g node9-ai'));
     console.log(chalk.gray('   Restart any open AI agent sessions for changes to take effect.\n'));
   });
 
@@ -702,6 +704,12 @@ registerAgentsCommand(program);
 
 // Retrospective scan
 registerScanCommand(program);
+
+// Security posture scorecard
+registerPostureCommand(program);
+
+// Egress control (the posture remediation on-ramp)
+registerEgressCommand(program);
 
 // Session history
 registerSessionsCommand(program);

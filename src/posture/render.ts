@@ -1,0 +1,171 @@
+// src/posture/render.ts
+// Doctor-style chalk rendering of a PostureResult — the shareable scorecard.
+
+import chalk from 'chalk';
+import type { Finding, PostureResult, Severity } from './types';
+
+const ICON: Record<Severity, string> = {
+  critical: chalk.red('❌'),
+  high: chalk.red('❌'),
+  medium: chalk.yellow('⚠️ '),
+  advisory: chalk.gray('⚠️ '),
+};
+
+const TIER_LABEL: Record<PostureResult['tier'], string> = {
+  good: chalk.green('Good'),
+  'at-risk': chalk.yellow('At risk'),
+  critical: chalk.red('Critical'),
+};
+
+/** Greedy word-wrap for the headline narrative (plain text, no ANSI). */
+function wrap(text: string, width: number): string[] {
+  const out: string[] = [];
+  let cur = '';
+  for (const word of text.split(' ')) {
+    if (cur && (cur + ' ' + word).length > width) {
+      out.push(cur);
+      cur = word;
+    } else {
+      cur = cur ? cur + ' ' + word : word;
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+/** Pad a category label to a fixed column so detail lines align. */
+const LABEL_WIDTH = 14;
+function label(category: string): string {
+  // Pad to the column, but always leave ≥1 space so a category wider than the
+  // column (e.g. 'Network exposure') doesn't butt up against the title.
+  return chalk.bold(category.padEnd(Math.max(LABEL_WIDTH, category.length + 1)));
+}
+
+function renderFinding(f: Finding): string[] {
+  const lines: string[] = [];
+  lines.push(`  ${ICON[f.severity]} ${label(f.category)}${f.title}`);
+  const indent = ' '.repeat(2 + 3 + LABEL_WIDTH);
+  // Plain-language explanation first (what / why / who), wrapped so that
+  // indent + text stays under ~80 columns.
+  const width = 80 - indent.length;
+  for (const s of [f.what, f.why, f.who]) {
+    if (s) for (const l of wrap(s, width)) lines.push(indent + chalk.gray(l));
+  }
+  // Then hard specifics (file lists, ports) — kept on one line each — then the
+  // fix prose, wrapped with its continuation aligned under the text.
+  for (const d of f.detail) lines.push(indent + chalk.gray(d));
+  if (f.fix) {
+    // Preserve intentional line breaks (the fix may carry a bulleted option
+    // list); wrap each segment, and only the first physical line gets the arrow.
+    let first = true;
+    for (const seg of f.fix.split('\n')) {
+      for (const l of wrap(seg, width - 2)) {
+        lines.push(indent + chalk.cyan(first ? '→ ' + l : '  ' + l));
+        first = false;
+      }
+    }
+  }
+  return lines;
+}
+
+export function renderPosture(result: PostureResult): string {
+  const lines: string[] = [];
+  const tier = TIER_LABEL[result.tier];
+  lines.push('');
+  lines.push(
+    chalk.cyan.bold(`🛡️  Node9 Posture`) +
+      chalk.gray(` — ${result.agent}`) +
+      `        ${chalk.bold(`Score: ${result.score}/100`)}  (${tier})`
+  );
+  // Advisories are shown but never deduct (OS-level — node9 can't enforce them).
+  // Say so under the score so a perfect number doesn't read as "nothing to review".
+  const advisories = result.findings.filter(
+    (f) => f.severity === 'advisory' && f.coverage?.state !== 'covered'
+  ).length;
+  if (advisories > 0) {
+    const word = advisories === 1 ? 'advisory' : 'advisories';
+    const verb = advisories === 1 ? "doesn't" : "don't";
+    lines.push(
+      '  ' +
+        chalk.gray(
+          `${advisories} ${word} below ${verb} affect the score — ` +
+            "OS-level exposure node9 can't enforce, yours to weigh."
+        )
+    );
+  }
+  lines.push('');
+
+  if (result.headline) {
+    const indent = '     ';
+    lines.push(`  ${chalk.red.bold('🔥 Biggest risk')}`);
+    for (const l of wrap(result.headline.risk, 74)) lines.push(indent + chalk.white(l));
+    const action = wrap(`Do this first: ${result.headline.action}`, 72);
+    action.forEach((l, i) => lines.push(indent + chalk.cyan(i === 0 ? '→ ' + l : '  ' + l)));
+    lines.push('');
+  }
+
+  // 🟢 What node9 is already enforcing — shown first as reassurance, never as
+  // a risk. (Covered findings are excluded from the open-findings render below.)
+  const covered = result.findings.filter((f) => f.coverage?.state === 'covered');
+  const open = result.findings.filter((f) => f.coverage?.state !== 'covered');
+  if (covered.length > 0) {
+    lines.push('  ' + chalk.green('🟢 node9 is already protecting you'));
+    for (const f of covered) {
+      const gated = f.coverage?.level === 'review' ? 'approval-gating' : 'blocking';
+      const via = f.coverage?.via ?? 'node9';
+      lines.push(
+        `  ${chalk.green('✅')} ${label(f.category)}${chalk.gray(`${via} is ${gated} this`)}`
+      );
+    }
+    lines.push('');
+  }
+
+  // Group OPEN findings by WHOSE JOB it is: node9 has a lever (run a command),
+  // vs only-you (OS/infra — node9 can detect but not fix). Unset owner → 'os'
+  // (don't falsely claim node9 can fix it).
+  const node9Open = open.filter((f) => f.owner === 'node9');
+  // 🔒 middle tier: owner is still the user's, but node9 has an adjacent lever
+  // that reduces the risk (a runnable command). Sits between fix-it and only-you.
+  const reduceOpen = open.filter((f) => f.owner !== 'node9' && f.node9Reduces);
+  const osOpen = open.filter((f) => f.owner !== 'node9' && !f.node9Reduces);
+
+  if (node9Open.length > 0) {
+    lines.push('  ' + chalk.cyan.bold('🔧 node9 can fix these — run the command'));
+    for (const f of node9Open) lines.push(...renderFinding(f));
+  }
+  if (reduceOpen.length > 0) {
+    if (node9Open.length > 0) lines.push('');
+    lines.push(
+      '  ' + chalk.yellow.bold('🔒 node9 reduces these — run the command, the rest is yours')
+    );
+    for (const f of reduceOpen) lines.push(...renderFinding(f));
+  }
+  if (osOpen.length > 0) {
+    if (node9Open.length > 0 || reduceOpen.length > 0) lines.push('');
+    lines.push('  ' + chalk.bold("🧱 Only you can fix these — node9 can't"));
+    for (const f of osOpen) lines.push(...renderFinding(f));
+  }
+
+  for (const cat of result.passedCategories) {
+    lines.push(`  ${chalk.green('✅')} ${label(cat)}${chalk.gray('no issues found')}`);
+  }
+  for (const cat of result.erroredCategories) {
+    lines.push(`  ${chalk.gray('•')}  ${label(cat)}${chalk.gray('could not be checked')}`);
+  }
+
+  lines.push('');
+  // Footer counts reflect what's still OPEN, not what node9 already covers.
+  const crit = open.filter((f) => f.severity === 'critical').length;
+  const high = open.filter((f) => f.severity === 'high').length;
+  const med = open.filter((f) => f.severity === 'medium').length;
+  const adv = open.filter((f) => f.severity === 'advisory').length;
+  const parts: string[] = [];
+  if (crit) parts.push(chalk.red(`${crit} critical`));
+  if (high) parts.push(chalk.red(`${high} high`));
+  if (med) parts.push(chalk.yellow(`${med} medium`));
+  if (adv) parts.push(chalk.gray(`${adv} advisory`));
+  const summary = parts.length ? parts.join(' · ') : chalk.green('no findings');
+  lines.push(`  ${summary}  ·  ${chalk.gray('track your fleet at app.node9.ai/posture')}`);
+  lines.push('');
+  return lines.join('\n');
+}

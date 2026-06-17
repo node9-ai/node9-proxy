@@ -172,7 +172,7 @@ export const AGENT_SPECS: AgentSpec[] = [
   {
     id: 'claude',
     label: 'Claude Code',
-    setupCommand: 'node9 setup claude',
+    setupCommand: 'node9 agents add claude',
     hookFile: (h) => path.join(h, '.claude', 'settings.json'),
     hookFormat: 'matcher',
     hookEvents: [ck('PreToolUse'), lg('PostToolUse')],
@@ -183,7 +183,7 @@ export const AGENT_SPECS: AgentSpec[] = [
   {
     id: 'gemini',
     label: 'Gemini CLI',
-    setupCommand: 'node9 setup gemini',
+    setupCommand: 'node9 agents add gemini',
     hookFile: (h) => path.join(h, '.gemini', 'settings.json'),
     hookFormat: 'matcher',
     hookEvents: [ck('BeforeTool'), lg('AfterTool')],
@@ -193,7 +193,7 @@ export const AGENT_SPECS: AgentSpec[] = [
   {
     id: 'codex',
     label: 'Codex',
-    setupCommand: 'node9 setup codex',
+    setupCommand: 'node9 agents add codex',
     hookFile: (h) => path.join(h, '.codex', 'hooks.json'),
     hookFormat: 'matcher',
     hookEvents: [ck('PreToolUse'), ck('UserPromptSubmit')],
@@ -204,7 +204,7 @@ export const AGENT_SPECS: AgentSpec[] = [
   {
     id: 'antigravity',
     label: 'Antigravity',
-    setupCommand: 'node9 setup antigravity',
+    setupCommand: 'node9 agents add antigravity',
     hookFile: (h) => path.join(h, '.gemini', 'config', 'hooks.json'),
     hookFormat: 'matcher',
     hookEvents: [ck('PreToolUse'), lg('PostToolUse')],
@@ -217,7 +217,7 @@ export const AGENT_SPECS: AgentSpec[] = [
   {
     id: 'copilot',
     label: 'GitHub Copilot',
-    setupCommand: 'node9 setup copilot',
+    setupCommand: 'node9 agents add copilot',
     hookFile: (h) => path.join(h, '.copilot', 'hooks', 'node9.json'),
     hookFormat: 'flat',
     hookEvents: [ck('PreToolUse'), lg('PostToolUse'), ck('UserPromptSubmit')],
@@ -227,7 +227,7 @@ export const AGENT_SPECS: AgentSpec[] = [
   {
     id: 'cursor',
     label: 'Cursor',
-    setupCommand: 'node9 setup cursor',
+    setupCommand: 'node9 agents add cursor',
     // MCP-only — no hook file (see note above).
     hookFormat: 'flat',
     hookEvents: [],
@@ -237,7 +237,7 @@ export const AGENT_SPECS: AgentSpec[] = [
   {
     id: 'hermes',
     label: 'Hermes Agent',
-    setupCommand: 'node9 setup hermes',
+    setupCommand: 'node9 agents add hermes',
     hookFile: (h) => hermesConfigPath(h),
     hookFormat: 'yaml',
     hookEvents: [ck('pre_tool_call'), lg('post_tool_call')],
@@ -249,7 +249,7 @@ export const AGENT_SPECS: AgentSpec[] = [
     // (no hooks, no MCP). hookFormat is unused for these (shimFile drives it).
     id: 'opencode',
     label: 'OpenCode',
-    setupCommand: 'node9 setup opencode',
+    setupCommand: 'node9 agents add opencode',
     hookFormat: 'flat',
     hookEvents: [],
     shimFile: (h) => path.join(h, '.config', 'opencode', 'plugins', 'node9.js'),
@@ -260,7 +260,7 @@ export const AGENT_SPECS: AgentSpec[] = [
   {
     id: 'pi',
     label: 'Pi',
-    setupCommand: 'node9 setup pi',
+    setupCommand: 'node9 agents add pi',
     hookFormat: 'flat',
     hookEvents: [],
     shimFile: (h) => path.join(h, '.pi', 'agent', 'extensions', 'node9.js'),

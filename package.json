@@ -120,7 +120,8 @@
     "vitest": "4.1.2"
   },
   "overrides": {
-    "undici": "^7.24.0"
+    "undici": "^7.24.0",
+    "ws": "^8.21.0"
   },
   "publishConfig": {
     "access": "public"

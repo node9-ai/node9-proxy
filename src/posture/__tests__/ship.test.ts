@@ -1,0 +1,120 @@
+// Tests for the posture snapshot shipper: redaction (no values/paths leave the
+// box) + URL derivation + a real round-trip against a local HTTP server.
+
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import http from 'http';
+import type { AddressInfo } from 'net';
+import { buildShipBody, postureUrlFrom, shipPosture } from '../ship';
+import type { PostureResult } from '../types';
+
+const result: PostureResult = {
+  agent: 'hermes on this host',
+  score: 58,
+  tier: 'at-risk',
+  checksRun: 8,
+  passedCategories: ['Supply chain'],
+  erroredCategories: [],
+  headline: { risk: 'An agent here can read your credentials.', action: 'lock egress.' },
+  findings: [
+    {
+      category: 'Secrets',
+      severity: 'critical',
+      title: '3 credential files readable by the agent',
+      what: 'Plaintext credentials live where the agent can read them.',
+      why: 'They were saved to disk by other tools.',
+      who: 'A tricked agent could read and exfiltrate them.',
+      detail: ['~/.ssh/id_rsa', '~/.aws/credentials'], // paths — must NOT be shipped
+      fix: 'Run `node9 shield enable project-jail`.', // prose/command — ships (no path)
+      owner: 'node9',
+      coverage: { state: 'covered', via: 'node9 DLP', level: 'block' },
+    },
+  ],
+};
+
+describe('buildShipBody (redaction)', () => {
+  it('ships category/severity/title/coverage + the plain-language what/why/who/fix/owner', () => {
+    const body = buildShipBody(result);
+    expect(body.score).toBe(58);
+    expect(body.tier).toBe('at-risk');
+    expect(body.headline?.action).toBe('lock egress.');
+    expect(body.findings).toEqual([
+      {
+        category: 'Secrets',
+        severity: 'critical',
+        title: '3 credential files readable by the agent',
+        coverage: 'covered', // the state ships so the SaaS counts open-only
+        what: 'Plaintext credentials live where the agent can read them.',
+        why: 'They were saved to disk by other tools.',
+        who: 'A tricked agent could read and exfiltrate them.',
+        fix: 'Run `node9 shield enable project-jail`.',
+        owner: 'node9',
+      },
+    ]);
+  });
+
+  it('defaults coverage to "open" and owner to "os" for an unannotated finding', () => {
+    const body = buildShipBody({
+      ...result,
+      findings: [{ category: 'Egress', severity: 'high', title: 'open', detail: [] }],
+    });
+    expect(body.findings[0].coverage).toBe('open');
+    expect(body.findings[0].owner).toBe('os'); // never falsely claim node9 can fix it
+  });
+
+  it('drops finding detail[] — the only path-bearing field never leaves the box', () => {
+    const serialized = JSON.stringify(buildShipBody(result));
+    expect(serialized).not.toContain('id_rsa');
+    expect(serialized).not.toContain('.aws/credentials');
+  });
+});
+
+describe('postureUrlFrom', () => {
+  it('derives /posture/report from the policies/sync base', () => {
+    expect(postureUrlFrom('https://api.node9.ai/api/v1/intercept/policies/sync')).toBe(
+      'https://api.node9.ai/api/v1/intercept/posture/report'
+    );
+  });
+
+  it('returns null for a URL that is not a policies/sync base', () => {
+    expect(postureUrlFrom('https://api.node9.ai/something/else')).toBeNull();
+  });
+});
+
+describe('shipPosture', () => {
+  let server: http.Server;
+  let received: { auth?: string; body?: unknown } = {};
+  let baseUrl = '';
+
+  beforeEach(async () => {
+    received = {};
+    server = http.createServer((req, res) => {
+      let raw = '';
+      req.on('data', (c) => (raw += c));
+      req.on('end', () => {
+        received.auth = req.headers.authorization;
+        received.body = JSON.parse(raw);
+        res.statusCode = 200;
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const { port } = server.address() as AddressInfo;
+    baseUrl = `http://127.0.0.1:${port}/api/v1/intercept/policies/sync`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it('POSTs the redacted body with the Bearer key and resolves true on 2xx', async () => {
+    const ok = await shipPosture(result, { apiKey: 'n9_live_test', apiUrl: baseUrl });
+    expect(ok).toBe(true);
+    expect(received.auth).toBe('Bearer n9_live_test');
+    expect(received.body).toMatchObject({ score: 58, tier: 'at-risk' });
+  });
+
+  it('resolves false (never throws) when the URL is not a policies/sync base', async () => {
+    const ok = await shipPosture(result, { apiKey: 'n9_live_test', apiUrl: 'https://x/y' });
+    expect(ok).toBe(false);
+  });
+});
