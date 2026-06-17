@@ -361,7 +361,7 @@ program
       console.error(chalk.red('\n  ⚠️  Some hooks could not be removed — see errors above.'));
       process.exit(1);
     }
-    console.log(chalk.green.bold('\n🛡️  Node9 removed. Run: npm uninstall -g @node9/proxy'));
+    console.log(chalk.green.bold('\n🛡️  Node9 removed. Run: npm uninstall -g node9-ai'));
     console.log(chalk.gray('   Restart any open AI agent sessions for changes to take effect.\n'));
   });
 

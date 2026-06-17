@@ -32,7 +32,7 @@ export function evaluateEgressConfig(egress: EgressConfig): Finding {
       who: 'The lock protects nothing until node9 is enforcing in-path.',
       owner: 'node9',
       detail: [],
-      fix: 'Run `node9 setup` and ensure node9 is in enforcing mode.',
+      fix: 'Run `node9 init` and ensure node9 is in enforcing mode.',
       coverageProbe: { kind: 'egress' },
       // Open here means only "node9 isn't enforcing" — Coverage already says
       // that, so drop this row when open to avoid double-surfacing.
@@ -55,7 +55,7 @@ export function evaluateEgressConfig(egress: EgressConfig): Finding {
       who: 'Nothing gates outbound until node9 is enforcing in-path.',
       owner: 'node9',
       detail: [],
-      fix: 'Run `node9 setup` and ensure node9 is in enforcing mode.',
+      fix: 'Run `node9 init` and ensure node9 is in enforcing mode.',
       coverageProbe: { kind: 'egress' },
       // Open here means only "node9 isn't enforcing" — Coverage already says
       // that, so drop this row when open to avoid double-surfacing.

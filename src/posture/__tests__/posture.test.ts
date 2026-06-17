@@ -300,9 +300,9 @@ describe('deriveHeadline', () => {
     expect(h?.action).toMatch(/lock egress/i);
   });
 
-  it('prioritizes "node9 setup" when node9 is not wired, over any other fix', () => {
+  it('prioritizes "node9 init" when node9 is not wired, over any other fix', () => {
     const h = deriveHeadline([f('Secrets', 'critical'), f('Egress'), f('Coverage', 'critical')]);
-    expect(h?.action).toMatch(/node9 setup/i);
+    expect(h?.action).toMatch(/node9 init/i);
   });
 
   it('calls out observe mode as the action when node9 only watches', () => {

@@ -42,10 +42,7 @@ export function registerDoctorCommand(program: Command, version: string): void {
         const which = execSync('which node9', { encoding: 'utf-8', timeout: 3000 }).trim();
         pass(`node9 found at ${which}`);
       } catch {
-        warn(
-          'node9 not found in $PATH — hooks may not find it',
-          'Run: npm install -g @node9/proxy'
-        );
+        warn('node9 not found in $PATH — hooks may not find it', 'Run: npm install -g node9-ai');
       }
 
       const nodeMajor = parseInt(process.versions.node.split('.')[0], 10);
@@ -132,7 +129,7 @@ export function registerDoctorCommand(program: Command, version: string): void {
       if (notConfigured.length > 0) {
         console.log(
           chalk.gray(
-            `     · Not configured: ${notConfigured.join(', ')} — run \`node9 setup <agent>\` if you use one`
+            `     · Not configured: ${notConfigured.join(', ')} — run \`node9 agents add <agent>\` if you use one`
           )
         );
       }

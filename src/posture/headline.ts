@@ -70,7 +70,7 @@ export function deriveHeadline(allFindings: Finding[]): Headline | null {
   // ── The one next step: highest leverage first ────────────────────────────
   let action: string;
   if (notWired) {
-    action = 'Run `node9 setup` — node9 is not in-path yet, so nothing here is enforced.';
+    action = 'Run `node9 init` — node9 is not in-path yet, so nothing here is enforced.';
   } else if (observeOnly) {
     action = 'Switch node9 to enforcing mode — right now it is only watching, not blocking.';
   } else if (egressOpen) {

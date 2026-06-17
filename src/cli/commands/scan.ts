@@ -4080,7 +4080,7 @@ export function registerScanCommand(program: Command): void {
           console.log('');
           console.log(
             '    ' +
-              chalk.cyan('npm install -g @node9/proxy') +
+              chalk.cyan('npm install -g node9-ai') +
               chalk.dim('  &&  ') +
               chalk.cyan('node9 init --recommended')
           );

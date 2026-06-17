@@ -2579,7 +2579,7 @@ export function setupHermes(): void {
 
   if (!fs.existsSync(configPath)) {
     console.log(chalk.yellow(`  ⚠️  Hermes config not found at ${configPath}`));
-    console.log(chalk.gray('     Run `hermes setup` first, then re-run node9 setup hermes.'));
+    console.log(chalk.gray('     Run `hermes setup` first, then re-run node9 agents add hermes.'));
     return;
   }
 
@@ -2603,7 +2603,9 @@ export function setupHermes(): void {
       console.log(chalk.gray(`     • ${err.message}`));
     }
     console.log(
-      chalk.gray('     Fix the file (or run `hermes config edit`), then re-run node9 setup hermes.')
+      chalk.gray(
+        '     Fix the file (or run `hermes config edit`), then re-run node9 agents add hermes.'
+      )
     );
     return;
   }

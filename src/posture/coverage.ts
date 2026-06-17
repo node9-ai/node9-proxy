@@ -26,7 +26,7 @@ export function checkCoverage(ctx: CheckContext): Finding[] {
       who: 'Everything else here is unenforced — node9 can only report, not block.',
       detail: [],
       owner: 'node9',
-      fix: 'Run `node9 setup` to put node9 in-path for your agent.',
+      fix: 'Run `node9 init` to put node9 in-path for your agents.',
     });
     return findings; // nothing downstream matters if node9 isn't wired
   }
