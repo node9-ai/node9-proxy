@@ -2,7 +2,7 @@
 // Unit tests for TaintStore: taint, check, propagate, expiry, prune.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import path from 'path';
-import { TaintStore } from '../daemon/taint-store.js';
+import { TaintStore, SessionTaintStore } from '../daemon/taint-store.js';
 
 // Resolve helper — mirrors TaintStore._resolve for non-existent paths
 function abs(p: string) {
@@ -178,5 +178,57 @@ describe('TaintStore — list', () => {
     expect(list).toHaveLength(2);
     const sources = list.map((r) => r.source).sort();
     expect(sources).toEqual(['DLP:A', 'DLP:B']);
+  });
+});
+
+describe('SessionTaintStore (gap1 — session taint)', () => {
+  let store: SessionTaintStore;
+
+  beforeEach(() => {
+    store = new SessionTaintStore();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('returns null for an untainted session', () => {
+    expect(store.check('sess-1')).toBeNull();
+  });
+
+  it('taints a session and returns the record with the source', () => {
+    store.taint('sess-1', 'output-secret:GitHubToken');
+    const rec = store.check('sess-1');
+    expect(rec?.sessionId).toBe('sess-1');
+    expect(rec?.source).toBe('output-secret:GitHubToken');
+  });
+
+  it('ignores an empty session id (taint is a no-op; check is null)', () => {
+    store.taint('', 'output-secret:X');
+    expect(store.check('')).toBeNull();
+  });
+
+  it('expires after the TTL and prunes on access', () => {
+    vi.useFakeTimers();
+    store.taint('sess-1', 'output-secret:X', 1000);
+    expect(store.check('sess-1')).not.toBeNull();
+    vi.advanceTimersByTime(1001);
+    expect(store.check('sess-1')).toBeNull();
+  });
+
+  it('clearSession removes an active taint (user resolved it)', () => {
+    store.taint('sess-1', 'output-secret:X');
+    store.clearSession('sess-1');
+    expect(store.check('sess-1')).toBeNull();
+  });
+
+  it('prune drops only expired records', () => {
+    vi.useFakeTimers();
+    store.taint('old', 'x', 1000);
+    store.taint('new', 'y', 60_000);
+    vi.advanceTimersByTime(1001);
+    store.prune();
+    expect(store.check('old')).toBeNull();
+    expect(store.check('new')).not.toBeNull();
   });
 });

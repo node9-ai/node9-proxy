@@ -12,14 +12,14 @@ import { RiskMetadata } from '../context-sniper';
 import { DAEMON_PORT, DAEMON_HOST } from '../auth/daemon';
 import type { ScanFinding } from '@node9/policy-engine';
 import { SuggestionTracker, type Suggestion } from './suggestion-tracker.js';
-import { TaintStore } from './taint-store.js';
+import { TaintStore, SessionTaintStore } from './taint-store.js';
 import { sessionCounters } from './session-counters.js';
 import { sessionHistory } from './session-history.js';
 export { sessionCounters, sessionHistory };
 export type { HudStatus } from './session-counters.js';
 
 export type { Suggestion };
-export { TaintStore };
+export { TaintStore, SessionTaintStore };
 
 export { DAEMON_PORT, DAEMON_HOST };
 
@@ -82,6 +82,9 @@ export const sseClients = new Set<SseClient>();
 export const suggestionTracker = new SuggestionTracker(3);
 export const suggestions = new Map<string, Suggestion>();
 export const taintStore = new TaintStore();
+/** Session-scoped taint (gap1): a session that just consumed flagged tool
+ *  output; its next high-risk call is routed to review until the taint expires. */
+export const sessionTaintStore = new SessionTaintStore();
 /** Cumulative per-tool allow count for the 💡 insight line.
  *  Unlike suggestionTracker, this never resets after the suggestion threshold —
  *  only on deny. Used by all approval channels (terminal, browser, native popup).

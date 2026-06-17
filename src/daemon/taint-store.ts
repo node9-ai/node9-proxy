@@ -96,3 +96,68 @@ export class TaintStore {
     }
   }
 }
+
+// ── Session taint (gap1 — tool-output enforcement) ──────────────────────────
+// A SESSION-scoped taint, distinct from the path-keyed TaintStore above. When a
+// tool's OUTPUT is flagged (a secret surfaced, or — later — an injected
+// instruction), node9 can't always redact it (Claude/Codex post-tool hooks are
+// observe-only), so it taints the whole session: the next high-risk tool call
+// (network/write) is routed to human review until the taint expires. Keyed by
+// the agent's session id; per-session TTL, auto-expires (deliberately short —
+// the risk is "this session just saw something poisoned", not a durable fact).
+
+export interface SessionTaintRecord {
+  sessionId: string;
+  source: string; // e.g. "output-secret:GitHubToken"
+  createdAt: number;
+  expiresAt: number;
+}
+
+const SESSION_TAINT_TTL_MS = 30 * 60 * 1000; // 30 min — roughly one working session
+
+export class SessionTaintStore {
+  private records = new Map<string, SessionTaintRecord>();
+
+  /** Taint a session (or refresh an existing taint). No-op on an empty id. */
+  taint(sessionId: string, source: string, ttlMs = SESSION_TAINT_TTL_MS): void {
+    if (!sessionId) return;
+    const now = Date.now();
+    this.records.set(sessionId, {
+      sessionId,
+      source,
+      createdAt: now,
+      expiresAt: now + ttlMs,
+    });
+  }
+
+  /** Return the taint record if the session is currently tainted, else null.
+   *  Expired records are pruned on access. */
+  check(sessionId: string): SessionTaintRecord | null {
+    if (!sessionId) return null;
+    const record = this.records.get(sessionId);
+    if (!record) return null;
+    if (Date.now() > record.expiresAt) {
+      this.records.delete(sessionId);
+      return null;
+    }
+    return record;
+  }
+
+  /** Clear a session's taint (e.g. the user resolved it). */
+  clearSession(sessionId: string): void {
+    this.records.delete(sessionId);
+  }
+
+  /** Remove all expired records. Called periodically by the daemon. */
+  prune(): void {
+    const now = Date.now();
+    for (const [key, record] of this.records) {
+      if (now > record.expiresAt) this.records.delete(key);
+    }
+  }
+
+  /** Remove all records. Used by tests to reset state between runs. */
+  clear(): void {
+    this.records.clear();
+  }
+}

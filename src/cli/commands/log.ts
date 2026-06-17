@@ -8,7 +8,13 @@ import os from 'os';
 import { redactSecrets, appendToLog, LOCAL_AUDIT_LOG } from '../../audit';
 import { getConfig } from '../../config';
 import { createShadowSnapshot, getSnapshotHistory } from '../../undo';
-import { notifyTaintPropagate, isDaemonRunning, notifyActivitySocket } from '../../auth/daemon';
+import {
+  notifyTaintPropagate,
+  isDaemonRunning,
+  notifyActivitySocket,
+  notifySessionTaint,
+} from '../../auth/daemon';
+import { scanText } from '../../dlp';
 import { parseCpMvOp } from '../../utils/cp-mv-parser';
 import {
   extractToolName,
@@ -231,6 +237,39 @@ export function registerLogCommand(program: Command): void {
                     tool: tool,
                     status: testResult === 'pass' ? 'test_pass' : 'test_fail',
                   });
+                }
+              }
+            }
+          }
+
+          // ── gap1: response-channel DLP — scan what the tool RETURNED ─────────
+          // The output is about to enter (or, on observe-only agents, has just
+          // entered) the model's context. On a secret hit we taint the session
+          // so the next high-risk call is routed to review, and — on Claude/Codex
+          // (their post-tool hook can inject context) — warn the model directly.
+          // We can't redact post-hoc on these agents, but we stop the leaked
+          // secret from being acted on / exfiltrated.
+          {
+            const toolOutput = payload.tool_response?.output;
+            if (typeof toolOutput === 'string' && toolOutput.length > 0) {
+              const hit = scanText(toolOutput);
+              if (hit) {
+                await notifySessionTaint(
+                  payloadSessionId ?? '',
+                  `output-secret:${hit.patternName}`
+                );
+                if (agent === 'Claude Code' || agent === 'Codex') {
+                  process.stdout.write(
+                    JSON.stringify({
+                      hookSpecificOutput: {
+                        hookEventName: 'PostToolUse',
+                        additionalContext:
+                          `⚠️ node9: this tool output contained a credential (${hit.patternName}). ` +
+                          `Do not echo, store, or transmit it — treat it as compromised and rotate it. ` +
+                          `node9 has flagged this session: the next network or write action will require approval.`,
+                      },
+                    }) + '\n'
+                  );
                 }
               }
             }

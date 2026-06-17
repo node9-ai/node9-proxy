@@ -53,6 +53,7 @@ import {
   type SseClient,
   type Decision,
   taintStore,
+  sessionTaintStore,
   insightCounts,
   loadInsightCounts,
   saveInsightCounts,
@@ -937,6 +938,46 @@ export function startDaemon(): void {
         taintStore.propagate(body.src, body.dest, clearSource);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ ok: true }));
+      } catch {
+        res.writeHead(400).end();
+        return;
+      }
+    }
+
+    // ── Session taint (gap1) — flag a session that consumed poisoned tool
+    // output, so its next high-risk call is routed to review. Set by the
+    // PostToolUse `log` hook; queried by the next PreToolUse `check`.
+    if (req.method === 'POST' && pathname === '/session-taint') {
+      try {
+        const body = JSON.parse(await readBody(req)) as {
+          sessionId?: unknown;
+          source?: unknown;
+          ttlMs?: unknown;
+        };
+        if (typeof body.sessionId !== 'string' || typeof body.source !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'sessionId and source are required strings' }));
+        }
+        const ttlMs = typeof body.ttlMs === 'number' ? body.ttlMs : undefined;
+        sessionTaintStore.taint(body.sessionId, body.source, ttlMs);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ ok: true }));
+      } catch {
+        res.writeHead(400).end();
+        return;
+      }
+    }
+
+    if (req.method === 'POST' && pathname === '/session-taint/check') {
+      try {
+        const body = JSON.parse(await readBody(req)) as { sessionId?: unknown };
+        if (typeof body.sessionId !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'sessionId must be a string' }));
+        }
+        const record = sessionTaintStore.check(body.sessionId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify(record ? { tainted: true, record } : { tainted: false }));
       } catch {
         res.writeHead(400).end();
         return;
