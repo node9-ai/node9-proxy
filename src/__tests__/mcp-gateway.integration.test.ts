@@ -143,7 +143,10 @@ function parseResponses(stdout: string): GatewayResponse[] {
 function runGateway(
   inputLines: string[],
   homeDir: string,
-  timeoutMs = 5000,
+  // 15s (not 5s): each call cold-starts a gateway subprocess; under parallel CI
+  // load 5s was too tight and flaked with ETIMEDOUT. Still well under the 30s
+  // vitest test budget.
+  timeoutMs = 15000,
   upstreamScript = mockScriptPath
 ): { stdout: string; stderr: string; status: number | null } {
   // Strip vars that could inject code into the gateway subprocess:
@@ -780,7 +783,7 @@ rl.on('line', (line) => {
   function runPinGateway(
     inputLines: string[],
     homeDir: string,
-    timeoutMs = 5000
+    timeoutMs = 15000 // headroom under CI load (was 5s) — see runGateway
   ): { stdout: string; stderr: string; status: number | null } {
     return runGateway(inputLines, homeDir, timeoutMs, pinMockScriptPath);
   }
