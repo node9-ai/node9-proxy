@@ -2,7 +2,7 @@
 //  - broadcastForensic: ScanFinding → ForensicEvent SSE payload + severity mapping
 //  - tickForensicBroadcast: read-only JSONL scan with in-memory offsets that
 //    never touches the persistent watermark used by the SaaS sync path.
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -24,10 +24,16 @@ describe('broadcastForensic', () => {
   let tmpHome: string;
   let homeSpy: ReturnType<typeof vi.spyOn>;
 
-  beforeEach(async () => {
+  // Cold dynamic import of the daemon module tree can exceed the default 10s
+  // hook timeout under parallel CI load — load it ONCE here with headroom, not
+  // per-test, so the suite stops flaking on `beforeEach` timeouts.
+  beforeAll(async () => {
+    stateModule = await import('../daemon/state.js');
+  }, 30_000);
+
+  beforeEach(() => {
     tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'fb-state-'));
     homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(tmpHome);
-    stateModule = await import('../daemon/state.js');
 
     written = [];
     const mockClient = {
@@ -152,12 +158,18 @@ describe('tickForensicBroadcast', () => {
   let scanWatermark: typeof import('../daemon/scan-watermark.js');
   let projectDir: string;
 
-  beforeEach(async () => {
+  // Hoisted out of beforeEach: the cold module-tree import is the slow part and
+  // doesn't need to run per-test — load once with headroom so a CI-load spike
+  // can't blow the 10s hook timeout.
+  beforeAll(async () => {
+    scanWatermark = await import('../daemon/scan-watermark.js');
+  }, 30_000);
+
+  beforeEach(() => {
     tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'fb-tick-'));
     homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(tmpHome);
     projectDir = path.join(tmpHome, '.claude', 'projects', 'proj1');
     fs.mkdirSync(projectDir, { recursive: true });
-    scanWatermark = await import('../daemon/scan-watermark.js');
   });
 
   afterEach(() => {

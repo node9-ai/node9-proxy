@@ -9,11 +9,16 @@
  *   - `npm run build` must be run before these tests
  */
 
-import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import { spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+
+// Each test cold-starts 4–5 `node9 check` subprocesses; under parallel CI load
+// the cumulative time can exceed the 30s global test budget and flake. Give this
+// file 60s so a load spike can't trip a false timeout (each spawn is still capped).
+vi.setConfig({ testTimeout: 60000 });
 
 const CLI = path.resolve(__dirname, '../../dist/cli.js');
 
