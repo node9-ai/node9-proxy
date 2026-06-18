@@ -19,11 +19,15 @@ const CLI = path.resolve(__dirname, '../../dist/cli.js');
 // (node9's own DLP would otherwise flag it). Matches the GitHubToken pattern.
 const FAKE_TOKEN = ['ghp', '_', 'A1b2C3d4E5f6', 'G7h8I9j0K1l2', 'M3n4O5p6Q7r8'].join('');
 
-function runLog(payload: object, home: string): { stdout: string; status: number | null } {
+function runLog(
+  payload: object,
+  home: string,
+  extraArgs: string[] = []
+): { stdout: string; status: number | null } {
   const baseEnv = { ...process.env };
   delete baseEnv.NODE9_API_KEY;
   delete baseEnv.NODE9_API_URL;
-  const r = spawnSync(process.execPath, [CLI, 'log', JSON.stringify(payload)], {
+  const r = spawnSync(process.execPath, [CLI, 'log', ...extraArgs, JSON.stringify(payload)], {
     encoding: 'utf-8',
     timeout: 15000,
     env: {
@@ -86,5 +90,52 @@ describe('log — response-channel DLP (gap1)', () => {
     );
     expect(status).toBe(0);
     expect(stdout.trim()).toBe('');
+  });
+});
+
+describe('log --redact-output (gap1 Mode A — for output-mutating shims)', () => {
+  let home: string;
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'log-redact-'));
+  });
+  afterEach(() => {
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it('returns { redacted, found } with the secret masked out', () => {
+    const { stdout, status } = runLog(
+      {
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Read',
+        meta: { agent: 'Opencode' },
+        session_id: 's1',
+        tool_response: { output: `token=${FAKE_TOKEN} rest-of-output` },
+      },
+      home,
+      ['--redact-output']
+    );
+    expect(status).toBe(0);
+    const resp = JSON.parse(stdout.trim()) as { redacted: string; found: string[] };
+    expect(resp.found.length).toBeGreaterThan(0);
+    expect(resp.redacted).not.toContain(FAKE_TOKEN); // secret removed
+    expect(resp.redacted).toContain('rest-of-output'); // surrounding text preserved
+  });
+
+  it('returns found: [] and the unchanged text for clean output', () => {
+    const { stdout, status } = runLog(
+      {
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Read',
+        meta: { agent: 'Opencode' },
+        session_id: 's2',
+        tool_response: { output: 'just ordinary output, nothing secret' },
+      },
+      home,
+      ['--redact-output']
+    );
+    expect(status).toBe(0);
+    const resp = JSON.parse(stdout.trim()) as { redacted: string; found: string[] };
+    expect(resp.found).toEqual([]);
+    expect(resp.redacted).toBe('just ordinary output, nothing secret');
   });
 });

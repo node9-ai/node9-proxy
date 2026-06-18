@@ -14,7 +14,7 @@ import {
   notifyActivitySocket,
   notifySessionTaint,
 } from '../../auth/daemon';
-import { scanText } from '../../dlp';
+import { scanText, redactText } from '../../dlp';
 import { parseCpMvOp } from '../../utils/cp-mv-parser';
 import {
   extractToolName,
@@ -61,8 +61,14 @@ export function registerLogCommand(program: Command): void {
       '--agent <name>',
       'Agent identity override, set by node9-authored hook registrations (e.g. antigravity)'
     )
-    .action(async (data, opts: { agent?: string }) => {
+    .option(
+      '--redact-output',
+      'gap1 Mode A: redact secrets in tool_response.output and print { redacted, found } JSON ' +
+        'on stdout so an output-mutating shim (OpenCode/Pi/Hermes) can replace the result'
+    )
+    .action(async (data, opts: { agent?: string; redactOutput?: boolean }) => {
       const agentOverride = agentLabelFromFlag(opts?.agent);
+      const redactOutputMode = opts?.redactOutput === true;
       const logPayload = async (raw: string) => {
         try {
           if (!raw || raw.trim() === '') process.exit(0);
@@ -252,24 +258,37 @@ export function registerLogCommand(program: Command): void {
           {
             const toolOutput = payload.tool_response?.output;
             if (typeof toolOutput === 'string' && toolOutput.length > 0) {
-              const hit = scanText(toolOutput);
-              if (hit) {
-                await notifySessionTaint(
-                  payloadSessionId ?? '',
-                  `output-secret:${hit.patternName}`
-                );
-                if (agent === 'Claude Code' || agent === 'Codex') {
-                  process.stdout.write(
-                    JSON.stringify({
-                      hookSpecificOutput: {
-                        hookEventName: 'PostToolUse',
-                        additionalContext:
-                          `⚠️ node9: this tool output contained a credential (${hit.patternName}). ` +
-                          `Do not echo, store, or transmit it — treat it as compromised and rotate it. ` +
-                          `node9 has flagged this session: the next network or write action will require approval.`,
-                      },
-                    }) + '\n'
+              if (redactOutputMode) {
+                // Mode A (OpenCode/Pi/Hermes): the calling shim CAN mutate the
+                // result, so redact the secret out before the model sees it and
+                // hand the cleaned text back. No session taint — the secret is
+                // removed, so there's nothing to contain downstream.
+                const { result, found } = redactText(toolOutput);
+                process.stdout.write(JSON.stringify({ redacted: result, found }) + '\n');
+              } else {
+                // Mode B (Claude/Codex): the model already received the output and
+                // the hook can't suppress it. Detect → warn the model via
+                // additionalContext + taint the session so the next high-risk call
+                // is routed to review (the leaked secret can't then be exfiltrated).
+                const hit = scanText(toolOutput);
+                if (hit) {
+                  await notifySessionTaint(
+                    payloadSessionId ?? '',
+                    `output-secret:${hit.patternName}`
                   );
+                  if (agent === 'Claude Code' || agent === 'Codex') {
+                    process.stdout.write(
+                      JSON.stringify({
+                        hookSpecificOutput: {
+                          hookEventName: 'PostToolUse',
+                          additionalContext:
+                            `⚠️ node9: this tool output contained a credential (${hit.patternName}). ` +
+                            `Do not echo, store, or transmit it — treat it as compromised and rotate it. ` +
+                            `node9 has flagged this session: the next network or write action will require approval.`,
+                        },
+                      }) + '\n'
+                    );
+                  }
                 }
               }
             }
