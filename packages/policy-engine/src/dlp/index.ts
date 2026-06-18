@@ -11,6 +11,14 @@ import safeRegex from 'safe-regex2';
 import type { DlpMatch } from '../types';
 export type { DlpMatch } from '../types';
 
+// gap1 v2 — indirect-injection detector for tool output (sibling module).
+export {
+  scanInjection,
+  type InjectionMatch,
+  type InjectionContext,
+  type InjectionConfidence,
+} from './injection';
+
 interface DlpPattern {
   name: string;
   regex: RegExp;
