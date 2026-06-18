@@ -165,7 +165,12 @@ export function renderPosture(result: PostureResult): string {
   if (med) parts.push(chalk.yellow(`${med} medium`));
   if (adv) parts.push(chalk.gray(`${adv} advisory`));
   const summary = parts.length ? parts.join(' · ') : chalk.green('no findings');
-  lines.push(`  ${summary}  ·  ${chalk.gray('track your fleet at app.node9.ai/posture')}`);
+  lines.push(`  ${summary}`);
+  lines.push('');
+  lines.push('  ' + chalk.bold('Track this across your fleet & keep it green:'));
+  lines.push(
+    '  ' + chalk.dim('→ ') + chalk.cyan.underline('https://node9.ai/auth/signup?ref=cli_posture')
+  );
   lines.push('');
   return lines.join('\n');
 }

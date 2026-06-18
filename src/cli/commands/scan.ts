@@ -3815,6 +3815,12 @@ export function registerScanCommand(program: Command): void {
                 chalk.cyan('node9 scan --drill-down') +
                 chalk.dim('    full commands + session IDs')
             );
+            console.log(
+              '  ' +
+                chalk.dim('→ ') +
+                chalk.cyan.underline('https://node9.ai/auth/signup?ref=cli_scan') +
+                chalk.dim('   track your fleet')
+            );
             console.log('');
             return;
           }
@@ -4090,7 +4096,13 @@ export function registerScanCommand(program: Command): void {
               '  Hooks into Claude Code automatically. Every tool call checked before it runs.'
             )
           );
-          console.log('  ' + chalk.dim('→ ') + chalk.underline('https://node9.ai'));
+          console.log('');
+          console.log('  ' + chalk.bold('See the full report & track your fleet:'));
+          console.log(
+            '  ' +
+              chalk.dim('→ ') +
+              chalk.cyan.underline('https://node9.ai/auth/signup?ref=cli_scan')
+          );
         }
         console.log('');
 

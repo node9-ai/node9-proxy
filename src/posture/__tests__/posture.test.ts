@@ -347,6 +347,16 @@ describe('renderPosture grouping', () => {
     expect(noAdvisory).not.toContain('affect the score');
   });
 
+  it('ends with a tracked signup CTA and drops the stale app.node9.ai/posture link (Phase-1 capture)', () => {
+    const out = renderPosture(
+      result([{ category: 'Egress', severity: 'high', title: 'e', detail: [], owner: 'node9' }])
+    );
+    expect(out).toContain('https://node9.ai/auth/signup?ref=cli_posture');
+    expect(out).toContain('Track this across your fleet');
+    // The old link pointed at a route that doesn't exist (/posture) — must be gone.
+    expect(out).not.toContain('app.node9.ai/posture');
+  });
+
   it('groups open findings by owner — node9-fixable before only-you', () => {
     const out = renderPosture(
       result([
