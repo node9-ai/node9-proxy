@@ -143,9 +143,16 @@ export class SessionTaintStore {
     return record;
   }
 
-  /** Clear a session's taint (e.g. the user resolved it). */
-  clearSession(sessionId: string): void {
-    this.records.delete(sessionId);
+  /** Clear a session's taint (e.g. the user resolved it). Returns true if a
+   *  record was actually removed (false if the session wasn't tainted). */
+  clearSession(sessionId: string): boolean {
+    return this.records.delete(sessionId);
+  }
+
+  /** Return all non-expired session taint records (for `node9 session-taint list`). */
+  list(): SessionTaintRecord[] {
+    this.prune();
+    return [...this.records.values()];
   }
 
   /** Remove all expired records. Called periodically by the daemon. */

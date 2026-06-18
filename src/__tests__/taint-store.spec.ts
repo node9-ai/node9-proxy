@@ -216,10 +216,32 @@ describe('SessionTaintStore (gap1 — session taint)', () => {
     expect(store.check('sess-1')).toBeNull();
   });
 
-  it('clearSession removes an active taint (user resolved it)', () => {
+  it('clearSession removes an active taint (user resolved it) and reports it', () => {
     store.taint('sess-1', 'output-secret:X');
-    store.clearSession('sess-1');
+    expect(store.clearSession('sess-1')).toBe(true);
     expect(store.check('sess-1')).toBeNull();
+  });
+
+  it('clearSession returns false when the session was not tainted', () => {
+    expect(store.clearSession('never')).toBe(false);
+  });
+
+  it('list returns all non-expired tainted sessions', () => {
+    store.taint('a', 'output-secret:X');
+    store.taint('b', 'output-injection:override-instructions');
+    const ids = store
+      .list()
+      .map((r) => r.sessionId)
+      .sort();
+    expect(ids).toEqual(['a', 'b']);
+  });
+
+  it('list prunes expired records', () => {
+    vi.useFakeTimers();
+    store.taint('old', 'x', 1000);
+    store.taint('new', 'y', 60_000);
+    vi.advanceTimersByTime(1001);
+    expect(store.list().map((r) => r.sessionId)).toEqual(['new']);
   });
 
   it('prune drops only expired records', () => {

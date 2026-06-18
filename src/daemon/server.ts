@@ -984,6 +984,35 @@ export function startDaemon(): void {
       }
     }
 
+    if (req.method === 'GET' && pathname === '/session-taint/list') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ records: sessionTaintStore.list() }));
+    }
+
+    if (req.method === 'POST' && pathname === '/session-taint/clear') {
+      try {
+        const body = JSON.parse(await readBody(req)) as { sessionId?: unknown; all?: unknown };
+        if (body.all === true) {
+          const cleared = sessionTaintStore.list().length;
+          sessionTaintStore.clear();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ ok: true, cleared }));
+        }
+        if (typeof body.sessionId !== 'string' || body.sessionId.length === 0) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(
+            JSON.stringify({ error: 'sessionId (non-empty) or all:true is required' })
+          );
+        }
+        const cleared = sessionTaintStore.clearSession(body.sessionId) ? 1 : 0;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ ok: true, cleared }));
+      } catch {
+        res.writeHead(400).end();
+        return;
+      }
+    }
+
     // ── MCP Tools — list and configure disabled tools ────────────────────────
     if (req.method === 'GET' && pathname === '/mcp/tools') {
       if (!validToken(req)) return res.writeHead(403).end();

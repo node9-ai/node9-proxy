@@ -441,6 +441,48 @@ export async function checkSessionTaint(sessionId: string): Promise<SessionTaint
   }
 }
 
+/**
+ * List currently tainted sessions (gap1). Taint lives in daemon memory, so a
+ * stopped daemon means there are no active taints — returns []. For `node9
+ * session-taint list` / the clear command's prefix resolution.
+ */
+export async function listSessionTaints(): Promise<SessionTaintRecord[]> {
+  if (!isDaemonRunning()) return [];
+  const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
+  try {
+    const res = await fetch(`${base}/session-taint/list`, { signal: AbortSignal.timeout(2000) });
+    const json = (await res.json()) as { records?: SessionTaintRecord[] };
+    return json.records ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Clear a session taint (or all). For `node9 session-taint clear` — lets a user
+ * who has resolved a flagged output release the session so its next high-risk
+ * action isn't held for review. daemonUnavailable distinguishes "no daemon"
+ * (nothing to clear) from "cleared 0" (daemon up, id wasn't tainted).
+ */
+export async function clearSessionTaint(opts: {
+  sessionId?: string;
+  all?: boolean;
+}): Promise<{ ok: boolean; cleared: number; daemonUnavailable?: boolean }> {
+  if (!isDaemonRunning()) return { ok: false, cleared: 0, daemonUnavailable: true };
+  const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
+  try {
+    const res = await fetch(`${base}/session-taint/clear`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(opts),
+      signal: AbortSignal.timeout(2000),
+    });
+    return (await res.json()) as { ok: boolean; cleared: number };
+  } catch {
+    return { ok: false, cleared: 0, daemonUnavailable: true };
+  }
+}
+
 /** Clear a viewer-mode card from the daemon once Slack has decided.
  *  Also used by the Event Bridge to notify the daemon when native popup or
  *  cloud wins the race — so SuggestionTracker sees every human decision. */
