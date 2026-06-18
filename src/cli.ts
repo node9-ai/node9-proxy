@@ -36,6 +36,7 @@ import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { spawn } from 'child_process';
 import { confirm } from '@inquirer/prompts';
 import { parseDuration } from './utils/duration';
 import { runProxy } from './proxy';
@@ -156,6 +157,35 @@ program
       console.log(chalk.green(`✅ Logged in — agent mode`));
       console.log(chalk.gray(`   Team policy enforced for all calls via Node9 cloud.`));
     }
+  });
+
+// 1b. SIGNUP — open the node9 dashboard signup/login in the browser (Phase-1 capture).
+program
+  .command('signup')
+  .description('Create your node9 account / open the dashboard in your browser')
+  .option('--login', 'Open the login page instead of signup')
+  .action((options: { login?: boolean }) => {
+    const route = options.login ? 'auth/login' : 'auth/signup';
+    const url = `https://node9.ai/${route}?ref=cli_cmd`;
+    console.log('');
+    console.log('  ' + chalk.dim('Opening ') + chalk.cyan.underline(url));
+    // Best-effort open — must never fail. On headless/SSH/VM the printed URL is the fallback.
+    const opener =
+      process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
+    try {
+      const child = spawn(opener, [url], {
+        stdio: 'ignore',
+        detached: true,
+        shell: process.platform === 'win32',
+      });
+      child.on('error', () => {
+        /* no browser available — the URL above is the fallback */
+      });
+      child.unref();
+    } catch {
+      /* headless — URL already printed */
+    }
+    console.log('');
   });
 
 // 2. ADDTO
