@@ -154,4 +154,13 @@ describe('renderPiShim', () => {
     // the synthetic PreToolUse shape.
     expect(out).toMatch(/tool_name:\s*"Bash"/);
   });
+
+  it('wires gap1 Mode A redaction in tool_result (redact each text block, return { content })', () => {
+    const out = renderPiShim(baseInput);
+    // Forwards each text block to `log --redact-output` and returns the redacted
+    // content array back to the host (which applies it to the model).
+    expect(out).toContain('"log", "--redact-output"');
+    expect(out).toContain('tool_response: { output: block.text }');
+    expect(out).toContain('return { content: newContent, isError: event.isError }');
+  });
 });
