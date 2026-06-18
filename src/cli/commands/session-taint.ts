@@ -47,6 +47,14 @@ function fmtRemaining(expiresAt: number): string {
   return `${mins}m`;
 }
 
+// Trailing gap after the source column. padEnd would add NOTHING when the
+// source already exceeds the column (e.g. a multi-signal injection source),
+// jamming it against the next column — so always leave at least 2 spaces.
+const SOURCE_COL = 30;
+export function sourceGap(source: string): string {
+  return ' '.repeat(Math.max(2, SOURCE_COL - source.length));
+}
+
 export function registerSessionTaintCommand(program: Command): void {
   const cmd = program
     .command('session-taint')
@@ -73,7 +81,8 @@ export function registerSessionTaintCommand(program: Command): void {
         console.log(
           '  ' +
             chalk.yellow(r.sessionId.slice(0, 8).padEnd(10)) +
-            chalk.red(r.source.padEnd(28)) +
+            chalk.red(r.source) +
+            sourceGap(r.source) +
             chalk.dim('clears in ' + fmtRemaining(r.expiresAt))
         );
       }
