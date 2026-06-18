@@ -23,6 +23,7 @@ import {
   resolveViaDaemon,
   notifyTaint,
   checkTaint,
+  checkSessionTaint,
   notifyActivitySocket,
   checkStatePredicates,
 } from './daemon';
@@ -367,6 +368,26 @@ async function _authorizeHeadlessCore(
         // exfiltration checks.
         taintWarning = `⚠️ Taint service unavailable — cannot verify if ${filePaths.join(', ')} is clean`;
       }
+    }
+  }
+
+  // ── SESSION TAINT (gap1) ──────────────────────────────────────────────────
+  // If an earlier tool's OUTPUT in this session was flagged (a secret surfaced;
+  // later, an injected instruction), route the session's next high-risk call —
+  // network or write — to human review. Soft (review, not a hard block): tool
+  // output containing a secret-shaped string is common and often benign, so we
+  // confirm rather than block. `!taintWarning` keeps the file-taint above (with
+  // its egress hard-block synergy) as the higher-precedence signal.
+  if (
+    !taintWarning &&
+    meta?.sessionId &&
+    (isNetworkTool(toolName, args) || isWriteTool(toolName))
+  ) {
+    const sessionTaint = await checkSessionTaint(meta.sessionId);
+    if (sessionTaint.tainted && sessionTaint.record) {
+      taintWarning =
+        `⚠️ node9 flagged this session — earlier tool output contained ${sessionTaint.record.source}. ` +
+        `Approve this ${isWriteTool(toolName) ? 'write' : 'network'} action before it proceeds.`;
     }
   }
 

@@ -18,9 +18,11 @@ export {
   scanArgs,
   scanText,
   redactText,
+  scanInjection,
   detectArgsPii,
   REALTIME_PII_PATTERNS,
 } from '@node9/policy-engine';
+export type { InjectionMatch, InjectionContext, InjectionConfidence } from '@node9/policy-engine';
 
 /**
  * Checks whether a file path argument targets a sensitive credential file.

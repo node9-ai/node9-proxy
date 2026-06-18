@@ -83,6 +83,16 @@ export interface Config {
       threshold: number;
       windowSeconds: number;
     };
+    // Indirect-prompt-injection scanning of TOOL OUTPUT (gap1 v2). Opt-in:
+    // enabled=false by default — shipping it changes no behavior until a user
+    // turns it on. `minConfidence` is the actionable threshold (low is by
+    // design never actionable, so it is not a valid gate). `allow` exempts
+    // specific canonical tool names whose output should never be scanned.
+    injectionScan: {
+      enabled: boolean;
+      minConfidence: 'medium' | 'high';
+      allow: string[];
+    };
     skillPinning: {
       enabled: boolean;
       mode: 'warn' | 'block';
@@ -326,6 +336,7 @@ export const DEFAULT_CONFIG: Config = {
     dlp: { enabled: true, scanIgnoredTools: true, pii: 'off' },
     egress: { enabled: false, mode: 'review', allow: [], deny: [], allowPrivate: true },
     loopDetection: { enabled: true, threshold: 5, windowSeconds: 120 },
+    injectionScan: { enabled: false, minConfidence: 'medium', allow: [] },
     skillPinning: { enabled: false, mode: 'warn', roots: [] },
   },
   environments: {},
@@ -547,6 +558,10 @@ export function getConfig(cwd?: string): Config {
       deny: [...DEFAULT_CONFIG.policy.egress.deny],
     },
     loopDetection: { ...DEFAULT_CONFIG.policy.loopDetection },
+    injectionScan: {
+      ...DEFAULT_CONFIG.policy.injectionScan,
+      allow: [...DEFAULT_CONFIG.policy.injectionScan.allow],
+    },
     skillPinning: {
       ...DEFAULT_CONFIG.policy.skillPinning,
       roots: [...DEFAULT_CONFIG.policy.skillPinning.roots],
@@ -628,6 +643,17 @@ export function getConfig(cwd?: string): Config {
       if (ld.threshold !== undefined) mergedPolicy.loopDetection.threshold = ld.threshold;
       if (ld.windowSeconds !== undefined)
         mergedPolicy.loopDetection.windowSeconds = ld.windowSeconds;
+    }
+    if (p.injectionScan && typeof p.injectionScan === 'object') {
+      const is = p.injectionScan as Partial<Config['policy']['injectionScan']>;
+      if (is.enabled !== undefined) mergedPolicy.injectionScan.enabled = is.enabled;
+      if (is.minConfidence !== undefined)
+        mergedPolicy.injectionScan.minConfidence = is.minConfidence;
+      if (Array.isArray(is.allow)) {
+        for (const t of is.allow) {
+          if (typeof t === 'string' && t.length > 0) mergedPolicy.injectionScan.allow.push(t);
+        }
+      }
     }
     if (p.skillPinning && typeof p.skillPinning === 'object') {
       const sp = p.skillPinning as Partial<Config['policy']['skillPinning']>;

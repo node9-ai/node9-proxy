@@ -111,24 +111,35 @@ module.exports = {
       throw new Error("[node9] " + reason);
     },
 
-    "tool.execute.after": async (ctx) => {
-      // Fire-and-forget audit log — failures here must NEVER throw,
-      // or we'd retroactively "block" a tool call that already ran.
+    "tool.execute.after": async (ctx, out) => {
+      // Audit + gap1 Mode A response-channel DLP: scan the tool OUTPUT and, on a
+      // secret, redact it before the model consumes it. The host returns this
+      // same \`out\` object after the hook (opencode session/tools.ts), so
+      // mutating out.output replaces what the model sees. Must NEVER throw — the
+      // tool already ran.
+      const toolOutput = out && typeof out.output === "string" ? out.output : "";
       const payload = {
         hook_event_name: "PostToolUse",
         tool_name: ctx.tool,
         session_id: ctx.sessionID,
         cwd: input.directory,
+        tool_response: { output: toolOutput },
         meta: { agent: "Opencode" },
       };
       try {
-        spawnSync(NODE9_ARGV[0], [...NODE9_ARGV.slice(1), "log"], {
+        const r = spawnSync(NODE9_ARGV[0], [...NODE9_ARGV.slice(1), "log", "--redact-output"], {
           input: JSON.stringify(payload),
           encoding: "utf-8",
           timeout: LOG_TIMEOUT_MS,
         });
+        if (r.status === 0 && r.stdout && out && typeof out.output === "string") {
+          const resp = JSON.parse(r.stdout);
+          if (resp && Array.isArray(resp.found) && resp.found.length > 0 && typeof resp.redacted === "string") {
+            out.output = resp.redacted;
+          }
+        }
       } catch (e) {
-        // Swallow: audit log gaps are preferable to crashing the agent.
+        // Swallow: a redaction/audit failure must not crash the agent.
       }
     },
 

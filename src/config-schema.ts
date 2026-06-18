@@ -146,6 +146,13 @@ export const ConfigFileSchema = z
             windowSeconds: z.number().min(10).optional(),
           })
           .optional(),
+        injectionScan: z
+          .object({
+            enabled: z.boolean().optional(),
+            minConfidence: z.enum(['medium', 'high']).optional(),
+            allow: z.array(z.string()).optional(),
+          })
+          .optional(),
         skillPinning: z
           .object({
             enabled: z.boolean().optional(),

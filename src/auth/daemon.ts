@@ -341,7 +341,14 @@ export async function notifyTaintPropagate(
 
 // Re-export TaintRecord so callers share one canonical type instead of an inline duplicate.
 export type { TaintRecord } from '../daemon/taint-store.js';
-import type { TaintRecord } from '../daemon/taint-store.js';
+import type { TaintRecord, SessionTaintRecord } from '../daemon/taint-store.js';
+
+export interface SessionTaintCheckResult {
+  tainted: boolean;
+  record?: SessionTaintRecord;
+  /** True when the daemon was unreachable — caller treats as untainted (fail-open). */
+  daemonUnavailable?: boolean;
+}
 
 export interface TaintCheckResult {
   tainted: boolean;
@@ -390,6 +397,89 @@ export async function checkTaint(paths: string[]): Promise<TaintCheckResult> {
       /* audit write failure is non-fatal */
     }
     return { tainted: false, daemonUnavailable: true };
+  }
+}
+
+/**
+ * Taint a session after its tool output was flagged (gap1). Best-effort, must be
+ * awaited before the PostToolUse hook exits (same reason as notifyTaint).
+ */
+export async function notifySessionTaint(sessionId: string, source: string): Promise<void> {
+  if (!sessionId || !isDaemonRunning()) return;
+  const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
+  try {
+    await fetch(`${base}/session-taint`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId, source }),
+      signal: AbortSignal.timeout(1000),
+    });
+  } catch {
+    // Session taint is best-effort — daemon unreachable is non-fatal.
+  }
+}
+
+/**
+ * Ask the daemon whether a session is tainted (gap1). Fail-open: a daemon blip
+ * returns { tainted: false } so it never stalls the agent — same contract as
+ * checkTaint.
+ */
+export async function checkSessionTaint(sessionId: string): Promise<SessionTaintCheckResult> {
+  if (!sessionId || !isDaemonRunning()) return { tainted: false };
+  const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
+  try {
+    const res = await fetch(`${base}/session-taint/check`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId }),
+      signal: AbortSignal.timeout(2000),
+    });
+    return (await res.json()) as SessionTaintCheckResult;
+  } catch {
+    // Fail-open: a session-taint check failure must not block the agent.
+    return { tainted: false, daemonUnavailable: true };
+  }
+}
+
+/**
+ * List currently tainted sessions (gap1). Taint lives in daemon memory, so a
+ * stopped daemon means there are no active taints — returns []. For `node9
+ * session-taint list` / the clear command's prefix resolution.
+ */
+export async function listSessionTaints(): Promise<SessionTaintRecord[]> {
+  if (!isDaemonRunning()) return [];
+  const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
+  try {
+    const res = await fetch(`${base}/session-taint/list`, { signal: AbortSignal.timeout(2000) });
+    const json = (await res.json()) as { records?: SessionTaintRecord[] };
+    return json.records ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Clear a session taint (or all). For `node9 session-taint clear` — lets a user
+ * who has resolved a flagged output release the session so its next high-risk
+ * action isn't held for review. daemonUnavailable distinguishes "no daemon"
+ * (nothing to clear) from "cleared 0" (daemon up, id wasn't tainted).
+ */
+export async function clearSessionTaint(opts: {
+  sessionId?: string;
+  all?: boolean;
+}): Promise<{ ok: boolean; cleared: number; daemonUnavailable?: boolean }> {
+  if (!isDaemonRunning()) return { ok: false, cleared: 0, daemonUnavailable: true };
+  const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
+  try {
+    const res = await fetch(`${base}/session-taint/clear`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(opts),
+      signal: AbortSignal.timeout(2000),
+    });
+    return (await res.json()) as { ok: boolean; cleared: number };
+  } catch {
+    return { ok: false, cleared: 0, daemonUnavailable: true };
   }
 }
 

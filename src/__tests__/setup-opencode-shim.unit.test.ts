@@ -88,11 +88,21 @@ describe('renderOpencodeShim', () => {
 
   it('wires all three protection hooks (pre, post, prompt)', () => {
     // Pre-execution: block via throw
-    // Post-execution: fire-and-forget audit log
+    // Post-execution: audit + gap1 output redaction
     // Chat message: prompt DLP (matches Claude's UserPromptSubmit)
     const out = renderOpencodeShim(baseInput);
     expect(out).toContain('"tool.execute.before"');
     expect(out).toContain('"tool.execute.after"');
     expect(out).toContain('"chat.message"');
+  });
+
+  it('wires gap1 Mode A redaction in the after-hook (receives output, redact round-trip, mutates)', () => {
+    const out = renderOpencodeShim(baseInput);
+    // The after-hook must take the second (output) arg, forward the output to
+    // `log --redact-output`, and write the redacted text back into out.output.
+    expect(out).toMatch(/"tool\.execute\.after":\s*async\s*\(ctx,\s*out\)/);
+    expect(out).toContain('"log", "--redact-output"');
+    expect(out).toContain('tool_response: { output: toolOutput }');
+    expect(out).toContain('out.output = resp.redacted');
   });
 });

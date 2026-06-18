@@ -152,31 +152,58 @@ module.exports = function (pi) {
   });
 
   pi.on("tool_result", async (event, ctx) => {
-    // Fire-and-forget audit log. Failures here must NEVER throw or
-    // return an error result — we'd retroactively "fail" a tool call
-    // that already completed.
-    const payload = {
+    // Audit + gap1 Mode A response-channel DLP: redact secrets in each text
+    // content block before the model consumes the result. Pi's content is an
+    // array of blocks; the host applies the handler's returned { content, isError }
+    // back to the model (coding-agent agent-session.ts). Must NEVER throw or
+    // return an error — the tool already completed.
+    const auditPayload = {
       hook_event_name: "PostToolUse",
       tool_name: normalizeToolName(event.toolName),
       tool_input: event.input,
       cwd: ctx.cwd,
       meta: { agent: "Pi" },
     };
+    const blocks = Array.isArray(event.content) ? event.content : [];
+    const hasText = blocks.some(
+      (b) => b && b.type === "text" && typeof b.text === "string" && b.text.length > 0
+    );
     try {
-      spawnSync(NODE9_ARGV[0], [...NODE9_ARGV.slice(1), "log"], {
-        input: JSON.stringify(payload),
-        encoding: "utf-8",
-        timeout: LOG_TIMEOUT_MS,
+      if (!hasText) {
+        // No text to scan/redact — still record the tool call (audit-always).
+        spawnSync(NODE9_ARGV[0], [...NODE9_ARGV.slice(1), "log"], {
+          input: JSON.stringify(auditPayload),
+          encoding: "utf-8",
+          timeout: LOG_TIMEOUT_MS,
+        });
+        return undefined;
+      }
+      let mutated = false;
+      const newContent = blocks.map((block) => {
+        if (!block || block.type !== "text" || typeof block.text !== "string" || block.text.length === 0) {
+          return block;
+        }
+        const r = spawnSync(NODE9_ARGV[0], [...NODE9_ARGV.slice(1), "log", "--redact-output"], {
+          input: JSON.stringify({ ...auditPayload, tool_response: { output: block.text } }),
+          encoding: "utf-8",
+          timeout: LOG_TIMEOUT_MS,
+        });
+        if (r.status === 0 && r.stdout) {
+          const resp = JSON.parse(r.stdout);
+          if (resp && Array.isArray(resp.found) && resp.found.length > 0 && typeof resp.redacted === "string") {
+            mutated = true;
+            return { ...block, text: resp.redacted };
+          }
+        }
+        return block;
       });
+      if (mutated) return { content: newContent, isError: event.isError };
     } catch (e) {
-      // Swallow + breadcrumb. Audit log gaps are preferable to crashing
-      // the agent, but a persistent failure here (e.g. NODE9_ARGV[0]
-      // no longer exists after a node-version bump) used to be invisible
-      // because pi has no hook-debug surface. Write a one-line entry to
-      // ~/.node9/hook-debug.log so dashboards can catch silent drift.
+      // Swallow + breadcrumb to ~/.node9/hook-debug.log (pi has no hook-debug
+      // surface). A redaction/audit failure must not crash the agent.
       debugLog({
         event: "tool_result-spawn-failed",
-        tool: payload.tool_name,
+        tool: auditPayload.tool_name,
         agent: "Pi",
         error: e && e.message ? e.message : String(e),
       });

@@ -60,6 +60,7 @@ import { registerScanCommand } from './cli/commands/scan';
 import { registerPostureCommand } from './cli/commands/posture';
 import { registerEgressCommand } from './cli/commands/egress';
 import { registerSessionsCommand } from './cli/commands/sessions';
+import { registerSessionTaintCommand } from './cli/commands/session-taint';
 import { registerSkillPinCommand } from './cli/commands/skill-pin';
 import { registerDecisionsCommand } from './cli/commands/decisions';
 import { registerDlpCommand } from './cli/commands/dlp';
@@ -713,6 +714,7 @@ registerEgressCommand(program);
 
 // Session history
 registerSessionsCommand(program);
+registerSessionTaintCommand(program);
 
 // Response DLP findings
 registerDlpCommand(program);
