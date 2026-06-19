@@ -1,10 +1,10 @@
 // src/posture/containment.ts
 // Check — Isolation (ADVISORY).
 //
-// Detect-only: node9 can read this but cannot fix it (the remediation is a
-// container/VM, not node9), so the finding is `advisory` severity and does NOT
-// deduct from the score. It's the honest line that sets up the enforcement
-// story: node9 protects what runs INSIDE the box you still have to harden.
+// Advisory severity (does NOT deduct from the score). node9 now offers the full
+// remediation — `node9 sandbox run` jails the agent in a disposable container,
+// governed + audited inside — alongside the without-a-container mitigations
+// (project-jail, egress lock). The fix text leads with the sandbox on-ramp.
 //
 // (Inbound exposure moved to inbound.ts so it can identify the listening
 // process and avoid over-claiming. See inbound.ts.)
@@ -41,10 +41,11 @@ export function checkContainment(_ctx: CheckContext): Finding[] {
       owner: 'os',
       node9Reduces: true,
       fix:
-        'node9 can shrink the blast radius without a container — you keep every tool:\n' +
+        'Full isolation — jail the agent in a disposable container, governed + audited inside:\n' +
+        '  • node9 sandbox run <agent> — kernel-enforced egress + scoped mounts + node9 inside\n' +
+        'Or shrink the blast radius without a container (you keep full host access):\n' +
         '  • node9 shield enable project-jail — block credential reads\n' +
-        '  • node9 egress lock — block data exfil\n' +
-        'A container/VM adds full isolation, but you lose host access.',
+        '  • node9 egress lock — block data exfil',
       coverageProbe: { kind: 'cantFix' },
     },
   ];
