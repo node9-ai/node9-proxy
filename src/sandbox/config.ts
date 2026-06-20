@@ -29,7 +29,11 @@ export function defaultSandboxConfig(agent: SandboxAgent): SandboxConfig {
     // Provider key only — NODE9_API_KEY intentionally absent (fix #1).
     env: { pass: [agent === 'codex' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY'] },
     // Terminal-only approval in the MVP; cloud/native/browser off (fix #1).
-    node9: { approvals: { terminal: true, native: false, browser: false, cloud: false } },
+    node9: {
+      approvals: { terminal: true, native: false, browser: false, cloud: false },
+      // Mount the agent's OAuth/creds dir so it can authenticate in the box.
+      mountAgentCredentials: true,
+    },
   };
 }
 
@@ -81,6 +85,7 @@ export function mergeSandboxConfig(raw: unknown, fallbackAgent: SandboxAgent): S
         browser: appr.browser === true,
         cloud: appr.cloud === true,
       },
+      mountAgentCredentials: n9.mountAgentCredentials !== false,
     },
   };
 }

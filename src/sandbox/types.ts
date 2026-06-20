@@ -55,6 +55,13 @@ export interface SandboxApprovals {
 
 export interface SandboxNode9 {
   approvals: SandboxApprovals;
+  /** Mount the agent's host credential dir (~/.claude or ~/.codex) into the box so
+   *  it can authenticate. Default true — without it, Claude (OAuth) and Codex have
+   *  no way to log in inside the jail. This is a deliberate exposure of the agent's
+   *  own credentials (the "vendor model key" residual): the egress wall confines
+   *  that token to the provider host. Set false to instead rely on an env key
+   *  passed via env.pass (e.g. ANTHROPIC_API_KEY). */
+  mountAgentCredentials: boolean;
 }
 
 export interface SandboxConfig {

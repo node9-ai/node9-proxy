@@ -742,7 +742,7 @@ registerPostureCommand(program);
 
 // Egress control (the posture remediation on-ramp)
 registerEgressCommand(program);
-registerSandboxCommand(program);
+registerSandboxCommand(program, version);
 
 // Session history
 registerSessionsCommand(program);

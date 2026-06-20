@@ -26,6 +26,17 @@ export function detectEngine(engine: 'docker' | 'podman'): {
   return { available: false };
 }
 
+/** The agent's host credential dir → its mount point inside the box. Mounting this
+ *  is how Claude (OAuth in ~/.claude) / Codex (~/.codex) authenticate in the jail.
+ *  RW because both refresh their token + persist session state mid-run. */
+export function agentCredentialsMount(agent: SandboxConfig['agent']): {
+  hostPath: string;
+  target: string;
+} {
+  const dir = agent === 'codex' ? '.codex' : '.claude';
+  return { hostPath: path.join(os.homedir(), dir), target: `/home/${RUN_AS_USER}/${dir}` };
+}
+
 export interface RunArgsOpts {
   config: SandboxConfig;
   /** Resolved host path of the mounted workspace. */
@@ -53,6 +64,16 @@ export function buildRunArgs(opts: RunArgsOpts): string[] {
   args.push('-v', `${workspaceHostPath}:${config.workspace.target}:${config.workspace.mode}`);
   args.push('-v', `${dataHostPath}:/home/${RUN_AS_USER}/.node9`);
   args.push('-v', `${allowlistHostPath}:${ALLOWED_DOMAINS_PATH}:ro`);
+
+  // Agent credentials — so Claude (OAuth) / Codex can authenticate in the box.
+  // RW: both refresh their token + write session state. Skipped when the host dir
+  // is absent (the agent must then auth via an env key in env.pass).
+  if (config.node9.mountAgentCredentials) {
+    const creds = agentCredentialsMount(config.agent);
+    if (fs.existsSync(creds.hostPath)) {
+      args.push('-v', `${creds.hostPath}:${creds.target}`);
+    }
+  }
 
   // Env pass-through (only vars that are actually set on the host).
   for (const key of config.env.pass) {

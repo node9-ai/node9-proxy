@@ -1,7 +1,10 @@
 // Unit tests for the pure docker-run arg builder.
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { buildRunArgs } from '../runtime';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { buildRunArgs, agentCredentialsMount } from '../runtime';
 import { defaultSandboxConfig } from '../config';
 
 const mk = (overrides: Partial<Parameters<typeof buildRunArgs>[0]> = {}) =>
@@ -55,5 +58,34 @@ describe('buildRunArgs', () => {
     expect(a).toContain('--rm');
     expect(a).toContain('-it');
     expect(a[0]).toBe('run');
+  });
+
+  it('mounts the agent credential dir (rw) when it exists on the host', () => {
+    const credPath = path.join(os.homedir(), '.claude');
+    vi.spyOn(fs, 'existsSync').mockImplementation((p) => p === credPath);
+    const a = mk().join(' ');
+    expect(a).toContain(`${credPath}:/home/agent/.claude`);
+    // rw (no :ro suffix on the creds mount)
+    expect(a).not.toContain(`${credPath}:/home/agent/.claude:ro`);
+  });
+
+  it('skips the credential mount when the host dir is absent', () => {
+    vi.spyOn(fs, 'existsSync').mockReturnValue(false);
+    expect(mk().join(' ')).not.toContain('/home/agent/.claude');
+  });
+
+  it('skips the credential mount when mountAgentCredentials is false', () => {
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    const cfg = defaultSandboxConfig('claude');
+    cfg.node9.mountAgentCredentials = false;
+    expect(mk({ config: cfg }).join(' ')).not.toContain('/home/agent/.claude');
+  });
+});
+
+describe('agentCredentialsMount', () => {
+  it('maps each agent to its host cred dir', () => {
+    expect(agentCredentialsMount('claude').target).toBe('/home/agent/.claude');
+    expect(agentCredentialsMount('codex').target).toBe('/home/agent/.codex');
+    expect(agentCredentialsMount('claude').hostPath).toBe(path.join(os.homedir(), '.claude'));
   });
 });

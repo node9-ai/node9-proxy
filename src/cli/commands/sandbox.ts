@@ -16,8 +16,9 @@ import {
   SANDBOX_CONFIG_FILE,
 } from '../../sandbox/config';
 import { compileAllowlist } from '../../sandbox/firewall';
-import { renderDockerfile, renderEntrypoint } from '../../sandbox/templates';
+import { renderDockerfile, renderEntrypoint, pinnedNode9Version } from '../../sandbox/templates';
 import {
+  agentCredentialsMount,
   buildRunArgs,
   detectEngine,
   imageContentHash,
@@ -27,17 +28,6 @@ import {
   writeAllowlist,
   writeBuildContext,
 } from '../../sandbox/runtime';
-
-function node9Version(): string {
-  try {
-    const pkg = JSON.parse(
-      fs.readFileSync(path.join(__dirname, '..', '..', '..', 'package.json'), 'utf-8')
-    ) as { version: string };
-    return pkg.version;
-  } catch {
-    return 'latest';
-  }
-}
 
 /** Seed the mounted node9 data dir's config so the in-box daemon is terminal-only
  *  (fix #1: no native popup, no cloud approval — the box has no SaaS key). */
@@ -57,7 +47,11 @@ function seedDataDirConfig(dataDir: string, sandbox: SandboxConfig): void {
   fs.writeFileSync(configPath, JSON.stringify(seed, null, 2), { mode: 0o600 });
 }
 
-export function registerSandboxCommand(program: Command): void {
+export function registerSandboxCommand(program: Command, version: string): void {
+  // Pin the in-box node9 to the host version (single source of truth — the bundled
+  // dist flattens paths, so don't resolve package.json by __dirname here).
+  const node9Version = pinnedNode9Version(version);
+
   const cmd = program
     .command('sandbox')
     .description('Run an agent in a disposable, jailed container — governed + audited inside');
@@ -123,7 +117,7 @@ export function registerSandboxCommand(program: Command): void {
       const allowlistPath = writeAllowlist(cwd, compiled.allow);
 
       // 2. Render artifacts + build context.
-      const dockerfile = renderDockerfile(sandbox, node9Version());
+      const dockerfile = renderDockerfile(sandbox, node9Version);
       const entrypoint = renderEntrypoint(sandbox);
       const buildDir = writeBuildContext(cwd, dockerfile, entrypoint);
       const hash = imageContentHash(dockerfile, entrypoint);
@@ -162,6 +156,17 @@ export function registerSandboxCommand(program: Command): void {
         allowlistHostPath: allowlistPath,
         agentArgs: passthru,
       });
+      if (sandbox.node9.mountAgentCredentials) {
+        const creds = agentCredentialsMount(sandbox.agent);
+        if (fs.existsSync(creds.hostPath)) {
+          console.log(chalk.dim(`  mounting ${creds.hostPath} (agent credentials, rw)`));
+        } else {
+          console.log(
+            chalk.yellow(`  ⚠ ${creds.hostPath} not found — `) +
+              chalk.dim(`the agent must auth via an env key in env.pass.`)
+          );
+        }
+      }
       console.log(
         chalk.green(`  🛡️  ${sandbox.agent} jailed — ${compiled.allow.length} hosts allowed\n`)
       );

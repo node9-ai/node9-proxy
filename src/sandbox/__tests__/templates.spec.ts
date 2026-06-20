@@ -2,7 +2,7 @@
 // the rendered strings (no Docker needed in CI).
 
 import { describe, it, expect } from 'vitest';
-import { renderDockerfile, renderEntrypoint } from '../templates';
+import { renderDockerfile, renderEntrypoint, pinnedNode9Version } from '../templates';
 import { defaultSandboxConfig } from '../config';
 
 const claude = defaultSandboxConfig('claude');
@@ -20,6 +20,24 @@ describe('renderDockerfile', () => {
 
   it('uses the codex package for codex', () => {
     expect(renderDockerfile(codex, '1.39.0')).toContain('@openai/codex');
+  });
+
+  it('never renders node9-ai@undefined (dogfood regression)', () => {
+    // The bug: an unresolved host version interpolated as the string "undefined".
+    expect(renderDockerfile(claude, pinnedNode9Version(undefined))).not.toContain('@undefined');
+    expect(renderDockerfile(claude, pinnedNode9Version(undefined))).toContain('node9-ai@latest');
+  });
+});
+
+describe('pinnedNode9Version', () => {
+  it('keeps a clean published semver', () => {
+    expect(pinnedNode9Version('1.39.0')).toBe('1.39.0');
+  });
+  it('falls back to latest for undefined / empty / dev versions', () => {
+    expect(pinnedNode9Version(undefined)).toBe('latest');
+    expect(pinnedNode9Version('')).toBe('latest');
+    expect(pinnedNode9Version('1.40.0-dev')).toBe('latest');
+    expect(pinnedNode9Version('undefined')).toBe('latest');
   });
 
   it('runs the agent as a non-root user', () => {

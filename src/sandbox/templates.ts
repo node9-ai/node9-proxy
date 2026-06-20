@@ -15,6 +15,13 @@ const AGENT_NPM_PACKAGE: Record<SandboxAgent, string> = {
   codex: '@openai/codex',
 };
 
+/** Pin the in-box node9-ai to the host version when it's a clean published semver;
+ *  otherwise fall back to `latest`. Guards against an unresolved/dev version
+ *  rendering `node9-ai@undefined` in the Dockerfile (caught in dogfood). */
+export function pinnedNode9Version(hostVersion: string | undefined): string {
+  return hostVersion && /^\d+\.\d+\.\d+$/.test(hostVersion) ? hostVersion : 'latest';
+}
+
 /** The binary the agent user execs. */
 const AGENT_BIN: Record<SandboxAgent, string> = {
   claude: 'claude',
@@ -43,8 +50,12 @@ RUN npm install -g ${agentPkg}
 # The guard (node9), pinned to the host version.
 RUN npm install -g node9-ai@${node9Version}
 
-# Non-root runtime user.
-RUN useradd --create-home --uid 1000 --shell /bin/bash ${RUN_AS_USER}
+# Non-root runtime user at uid 1000 (matches the typical single-user host so the
+# mounted ~/.claude / ~/.codex / project are read/writable). The node base image
+# already claims uid 1000 for the 'node' user — free it first (cf. Isag/ubuntu).
+RUN userdel -r node 2>/dev/null || true; \\
+    userdel -r ubuntu 2>/dev/null || true; \\
+    useradd --create-home --uid 1000 --shell /bin/bash ${RUN_AS_USER}
 
 # Wire the agent's node9 hooks into the runtime user's home (build-time, static).
 RUN gosu ${RUN_AS_USER} node9 agents add ${config.agent} || true
