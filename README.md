@@ -31,6 +31,17 @@ node9 scan          # after installation, same output
   <img src="https://github.com/user-attachments/assets/7c5b30f1-1ca1-40b4-bfd5-d6671002e98e" width="720" alt="Node9 scan scorecard" />
 </p>
 
+## Security posture scorecard
+
+`node9 posture` grades how exposed this machine is to a compromised agent — isolation, egress, secrets on disk, supply chain, privilege — and hands you the exact command to fix each finding.
+
+```bash
+node9 posture          # scorecard with the #1 risk and a fix for every finding
+node9 posture --ship   # send a redacted snapshot to your node9 dashboard (fleet view)
+```
+
+Findings are grouped by **who can fix them**: 🔒 the ones node9 reduces (just run the command) and 🧱 the ones only you can. Each carries a plain-language what / why / who and a real remediation — e.g. the "agent runs unsandboxed on the host" finding points straight at `node9 sandbox run` (below).
+
 ## Live monitoring
 
 <p align="center">
@@ -103,6 +114,23 @@ node9 shield list    # show all shields + status
 - **Response DLP** — background scanner reads Claude's conversation history and alerts you if Claude _wrote_ a secret in its response text
 - **Auto-undo** — git snapshot before every AI file edit → `node9 undo` to revert
 - **Skills pinning** — SHA-256 verification of installed Claude skills / plugins between sessions
+
+## Sandbox — run an agent in a jail
+
+When watching isn't enough, **`node9 sandbox`** runs the agent inside a disposable container with a **kernel-enforced egress allowlist** and **scoped mounts** — while node9's hooks govern and audit every tool call _inside_ the box. The hard version of protection: the agent can only touch the folder you mount and reach the hosts you allow; everything else is dropped at the kernel.
+
+```bash
+cd ~/my-project
+node9 sandbox new        # write node9.sandbox.yaml — what to mount + which hosts to allow
+node9 sandbox run        # build + boot the jailed agent (your project at /workspace)
+node9 sandbox tail       # watch the agent's actions live, from the host
+```
+
+- **Disposable** — the container is destroyed on exit; your project edits land on your real disk, nothing else survives.
+- **Same policy** — your existing shields / egress rules / approvals apply inside the box, streamed to the same audit log and dashboard.
+- **Closes the posture loop** — running it flips the Isolation / Egress findings green.
+
+Honest scope (Phase 1): single container, **Claude first** (Codex next); the agent still holds its _own_ credentials in the box (the egress wall confines them to the allowed hosts) — _"the agent never holds a secret"_ is the credential-broker phase on the roadmap. Requires Docker.
 
 ## MCP gateway
 
@@ -199,6 +227,7 @@ def run_command(cmd: str) -> str:
 - **MCP gateway** is a stdio proxy; intercepts `tools/list` + `tools/call` JSON-RPC, forwards the rest
 - **Policy engine** uses [mvdan-sh](https://github.com/mvdan/sh) for bash AST analysis — defeats obfuscation via backslash escaping, variable substitution, eval of remote download
 - **Shadow repo** for auto-undo lives at `~/.node9/snapshots/<hash16>/` — never touches your `.git`
+- **Sandbox** generates a Dockerfile + entrypoint that seal an `ipset`/`iptables` deny-by-default egress wall, then drop to a non-root agent with node9's daemon + hooks running inside; only the agent's credential file is mounted, never your whole `~/.claude`
 
 ## Full docs
 
