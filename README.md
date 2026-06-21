@@ -42,6 +42,32 @@ node9 posture --ship   # send a redacted snapshot to your node9 dashboard (fleet
 
 Findings are grouped by **who can fix them**: 🔒 the ones node9 reduces (just run the command) and 🧱 the ones only you can. Each carries a plain-language what / why / who and a real remediation — e.g. the "agent runs unsandboxed on the host" finding points straight at `node9 sandbox run` (below).
 
+```text
+🛡️  Node9 Posture — agent on this host        Score: 100/100  (Good)
+  2 advisories below don't affect the score — OS-level exposure, yours to weigh.
+
+  🟢 node9 is already protecting you
+  ✅ Secrets        node9 DLP is blocking this
+  ✅ Egress         node9 egress is approval-gating this
+  ✅ Approval gate  node9 is blocking this
+  ✅ Privilege      node9 is approval-gating this
+
+  🔒 node9 reduces these — run the command, the rest is yours
+  ⚠️  Isolation     Running directly on the host — no container
+                   The agent runs loose on your whole machine, not in a sandbox.
+                   → node9 sandbox run <agent>   — jail it: kernel egress + scoped mounts + node9 inside
+                   → node9 shield enable project-jail   — or shrink the blast radius, keep host access
+  ⚠️  Network exposure  4 services on 0.0.0.0 (node :3000/:4000, PostgreSQL :5432, Redis :6379)
+                   Reachable from your whole network, not just this laptop.
+                   → node9 shield enable postgres|redis   — node9 blocks DROP TABLE / FLUSHALL
+                   → bind to 127.0.0.1 / firewall the port   (your part)
+
+  ✅ Supply chain   no issues found
+  ✅ Coverage       no issues found
+
+  Track this across your fleet & keep it green → node9.ai
+```
+
 ## Live monitoring
 
 <p align="center">
