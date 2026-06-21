@@ -84,6 +84,7 @@ export function registerSandboxCommand(program: Command, version: string): void 
     .command('run [agent]')
     .description('Build (if needed) + run the agent jailed. Extra args after -- go to the agent.')
     .allowUnknownOption(true)
+    .allowExcessArguments(true) // pass `-- <flags>` through to the agent (e.g. --resume)
     .action((agentArg: string | undefined, _opts: unknown, command: Command) => {
       const cwd = process.cwd();
       const sandbox = loadSandboxConfig(cwd, (agentArg as SandboxAgent) || 'claude');
