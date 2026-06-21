@@ -26,15 +26,20 @@ export function detectEngine(engine: 'docker' | 'podman'): {
   return { available: false };
 }
 
-/** The agent's host credential dir → its mount point inside the box. Mounting this
- *  is how Claude (OAuth in ~/.claude) / Codex (~/.codex) authenticate in the jail.
- *  RW because both refresh their token + persist session state mid-run. */
+/** The agent's host credential FILE → its mount point inside the box. Mount ONLY the
+ *  credential file, never the whole ~/.claude / ~/.codex dir, because the full dir:
+ *    (a) exposes the user's entire agent history (all projects) to the box, and
+ *    (b) MASKS the box's build-time node9 hook wiring with the host's settings.json,
+ *        whose hooks point at the HOST node9 path (absent in the box) — silently
+ *        disabling node9 governance inside the jail.
+ *  RW so the agent can refresh its token mid-run; session state goes to the box's own
+ *  ephemeral ~/.claude (gone on exit). */
 export function agentCredentialsMount(agent: SandboxConfig['agent']): {
   hostPath: string;
   target: string;
 } {
-  const dir = agent === 'codex' ? '.codex' : '.claude';
-  return { hostPath: path.join(os.homedir(), dir), target: `/home/${RUN_AS_USER}/${dir}` };
+  const rel = agent === 'codex' ? '.codex/auth.json' : '.claude/.credentials.json';
+  return { hostPath: path.join(os.homedir(), rel), target: `/home/${RUN_AS_USER}/${rel}` };
 }
 
 export interface RunArgsOpts {

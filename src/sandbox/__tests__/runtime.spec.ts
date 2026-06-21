@@ -60,32 +60,36 @@ describe('buildRunArgs', () => {
     expect(a[0]).toBe('run');
   });
 
-  it('mounts the agent credential dir (rw) when it exists on the host', () => {
-    const credPath = path.join(os.homedir(), '.claude');
+  it('mounts ONLY the credential file (rw) — not the whole ~/.claude dir', () => {
+    const credPath = path.join(os.homedir(), '.claude', '.credentials.json');
     vi.spyOn(fs, 'existsSync').mockImplementation((p) => p === credPath);
     const a = mk().join(' ');
-    expect(a).toContain(`${credPath}:/home/agent/.claude`);
-    // rw (no :ro suffix on the creds mount)
-    expect(a).not.toContain(`${credPath}:/home/agent/.claude:ro`);
+    expect(a).toContain(`${credPath}:/home/agent/.claude/.credentials.json`);
+    // The whole dir must NOT be mounted (that would mask the box's node9 hooks).
+    expect(a).not.toContain(`${path.join(os.homedir(), '.claude')}:/home/agent/.claude `);
+    // rw (no :ro suffix)
+    expect(a).not.toContain(`${credPath}:/home/agent/.claude/.credentials.json:ro`);
   });
 
-  it('skips the credential mount when the host dir is absent', () => {
+  it('skips the credential mount when the host file is absent', () => {
     vi.spyOn(fs, 'existsSync').mockReturnValue(false);
-    expect(mk().join(' ')).not.toContain('/home/agent/.claude');
+    expect(mk().join(' ')).not.toContain('.credentials.json');
   });
 
   it('skips the credential mount when mountAgentCredentials is false', () => {
     vi.spyOn(fs, 'existsSync').mockReturnValue(true);
     const cfg = defaultSandboxConfig('claude');
     cfg.node9.mountAgentCredentials = false;
-    expect(mk({ config: cfg }).join(' ')).not.toContain('/home/agent/.claude');
+    expect(mk({ config: cfg }).join(' ')).not.toContain('.credentials.json');
   });
 });
 
 describe('agentCredentialsMount', () => {
-  it('maps each agent to its host cred dir', () => {
-    expect(agentCredentialsMount('claude').target).toBe('/home/agent/.claude');
-    expect(agentCredentialsMount('codex').target).toBe('/home/agent/.codex');
-    expect(agentCredentialsMount('claude').hostPath).toBe(path.join(os.homedir(), '.claude'));
+  it('maps each agent to its credential FILE (not the whole dir)', () => {
+    expect(agentCredentialsMount('claude').target).toBe('/home/agent/.claude/.credentials.json');
+    expect(agentCredentialsMount('codex').target).toBe('/home/agent/.codex/auth.json');
+    expect(agentCredentialsMount('claude').hostPath).toBe(
+      path.join(os.homedir(), '.claude', '.credentials.json')
+    );
   });
 });
