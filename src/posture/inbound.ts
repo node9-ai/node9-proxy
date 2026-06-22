@@ -19,6 +19,10 @@
 import fs from 'fs';
 import type { CheckContext, Finding } from './types';
 
+/** Points an exposed DB that node9 can shield deducts while open — smaller than
+ *  Isolation: it's a narrower, lower-blast-radius gap. */
+export const DB_EXPOSURE_WEIGHT = 4;
+
 interface Listener {
   port: number;
   inode: string;
@@ -285,8 +289,17 @@ export function checkInbound(ctx: CheckContext): Finding[] {
       // Only when node9 actually has a shield for an exposed service — otherwise
       // (bare dev servers) it stays purely the user's to rebind.
       node9Reduces: reduces,
+      // When a db-shield applies this is real, node9-addressable hardening → it
+      // scores (and stays OPEN, no cantFix probe). Bare dev servers node9 can't
+      // touch stay can't-fix / your-part / unscored.
+      ...(reduces
+        ? {
+            scoreWeight: DB_EXPOSURE_WEIGHT,
+            gain: 'blocks DROP TABLE / TRUNCATE / FLUSHALL on the exposed DB',
+            cost: 'you confirm legit destructive migrations',
+          }
+        : { coverageProbe: { kind: 'cantFix' as const } }),
       fix,
-      coverageProbe: { kind: 'cantFix' },
     });
   }
 

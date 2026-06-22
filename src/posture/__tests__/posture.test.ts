@@ -4,12 +4,13 @@
 // a planted fake secret in an isolated temp HOME — including the invariant
 // that the secret VALUE is never surfaced in a finding.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { evaluateEgressConfig } from '../egress';
-import { scorePosture } from '../score';
+import { evaluateEgressConfig, checkEgress, sandboxEgressWallActive } from '../egress';
+import { ALLOWED_DOMAINS_PATH } from '../../sandbox/templates';
+import { scorePosture, openHeadroom } from '../score';
 import { checkSecrets } from '../secrets';
 import { parseListeners, classifyListener, buildNetworkFix } from '../inbound';
 import { checkSupplyChain, isNode9Managed } from '../supply-chain';
@@ -72,6 +73,38 @@ describe('evaluateEgressConfig', () => {
   });
 });
 
+describe('checkEgress — sandbox kernel wall', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('detects the wall via the allowlist marker file', () => {
+    vi.spyOn(fs, 'existsSync').mockImplementation((p) => p === ALLOWED_DOMAINS_PATH);
+    expect(sandboxEgressWallActive()).toBe(true);
+  });
+
+  it('credits egress as COVERED inside a sandbox (no false "Egress open")', () => {
+    // Regression: in-box posture used to read node9 config only and miss the
+    // kernel ipset wall, wrongly scoring the box "At risk".
+    vi.spyOn(fs, 'existsSync').mockImplementation((p) => p === ALLOWED_DOMAINS_PATH);
+    const [f] = checkEgress({ home: '/h', cwd: '/c' } as CheckContext);
+    expect(f.category).toBe('Egress');
+    expect(f.coverage?.state).toBe('covered');
+    expect(f.coverage?.via).toContain('sandbox');
+    // It must NOT carry an egress probe — annotateCoverage would re-open it from
+    // the (minimal) in-box config and clobber the kernel-wall credit.
+    expect(f.coverageProbe).toBeUndefined();
+  });
+
+  it('falls back to the config-based check off the host (no marker file)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'posture-egress-'));
+    const [f] = checkEgress({ home: dir, cwd: dir } as CheckContext);
+    expect(f.category).toBe('Egress');
+    // Not the kernel-wall credit — the normal config path (coverage left for
+    // annotateCoverage to decide).
+    expect(f.coverage?.via).not.toBe('sandbox egress wall');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 describe('scorePosture', () => {
   const mk = (severity: Finding['severity']): Finding => ({
     category: 'X',
@@ -96,6 +129,54 @@ describe('scorePosture', () => {
 
   it('advisory findings do not deduct', () => {
     expect(scorePosture([mk('advisory')], 3)).toEqual({ score: 100, tier: 'good' });
+  });
+});
+
+describe('scorePosture — additive hardening weights', () => {
+  const hardening = (category: string, scoreWeight: number): Finding => ({
+    category,
+    severity: 'advisory',
+    title: 't',
+    detail: [],
+    owner: 'os',
+    node9Reduces: true,
+    scoreWeight,
+  });
+
+  it('an open scoreWeight deducts that many points (Isolation 12 → 88)', () => {
+    // The core "100-with-issues" fix: a fully-covered-but-unsandboxed host is no
+    // longer a perfect 100.
+    expect(scorePosture([hardening('Isolation', 12)], 8)).toEqual({ score: 88, tier: 'good' });
+  });
+
+  it('multiple weights are additive (Isolation 12 + DB 4 → 84)', () => {
+    const { score } = scorePosture(
+      [hardening('Isolation', 12), hardening('Network exposure', 4)],
+      8
+    );
+    expect(score).toBe(84);
+  });
+
+  it('a covered hardening finding stops deducting (sandbox adopted → +12 back)', () => {
+    const covered: Finding = { ...hardening('Isolation', 12), coverage: { state: 'covered' } };
+    expect(scorePosture([covered], 8)).toEqual({ score: 100, tier: 'good' });
+  });
+
+  it('a weighted finding is NOT also counted in the severity bucket (no double-count)', () => {
+    // medium severity + scoreWeight must deduct ONLY the weight, not a bucket hit.
+    const weightedMedium: Finding = { ...hardening('X', 12), severity: 'medium' };
+    expect(scorePosture([weightedMedium], 8).score).toBe(88);
+  });
+
+  it('a genuine critical still dominates the tier despite hardening weights', () => {
+    const crit: Finding = { category: 'Secrets', severity: 'critical', title: 't', detail: [] };
+    expect(scorePosture([crit, hardening('Isolation', 12)], 8).tier).toBe('critical');
+  });
+
+  it('openHeadroom sums open weights and ignores covered/cant-fix', () => {
+    const covered: Finding = { ...hardening('Isolation', 12), coverage: { state: 'covered' } };
+    const cantFix: Finding = { ...hardening('Ports', 5), coverage: { state: 'cant-fix' } };
+    expect(openHeadroom([hardening('A', 12), hardening('B', 4), covered, cantFix])).toBe(16);
   });
 });
 
@@ -333,18 +414,29 @@ describe('renderPosture grouping', () => {
     checksRun: 8,
   });
 
-  it('notes that advisories do not affect the score, only when present', () => {
-    // The "why is it 100/100 with warnings?" fix — advisories don't deduct, so
-    // say so under the score; never show the note when there are none.
-    const withAdvisory = renderPosture(
-      result([{ category: 'Isolation', severity: 'advisory', title: 'i', detail: [], owner: 'os' }])
+  it('shows the headroom note when scored hardening is open, not otherwise', () => {
+    // The "why 100/100 with warnings?" fix — a scored hardening finding (a
+    // scoreWeight) means the number has visible headroom; say so under the score.
+    const withHeadroom = renderPosture(
+      result([
+        {
+          category: 'Isolation',
+          severity: 'advisory',
+          title: 'i',
+          detail: [],
+          owner: 'os',
+          node9Reduces: true,
+          scoreWeight: 12,
+        },
+      ])
     );
-    expect(withAdvisory).toContain('affect the score');
+    expect(withHeadroom).toContain('pts of headroom');
 
-    const noAdvisory = renderPosture(
+    // No scoreWeight → no headroom note (a genuine exposure isn't "headroom").
+    const noHeadroom = renderPosture(
       result([{ category: 'Egress', severity: 'high', title: 'e', detail: [], owner: 'node9' }])
     );
-    expect(noAdvisory).not.toContain('affect the score');
+    expect(noHeadroom).not.toContain('pts of headroom');
   });
 
   it('ends with a tracked signup CTA and drops the stale app.node9.ai/posture link (Phase-1 capture)', () => {
@@ -365,14 +457,14 @@ describe('renderPosture grouping', () => {
       ])
     );
     expect(out).toContain('node9 can fix these');
-    expect(out).toContain('Only you can fix these');
+    expect(out).toContain('YOUR PART');
     // The node9 group renders before the only-you group.
-    expect(out.indexOf('node9 can fix these')).toBeLessThan(out.indexOf('Only you can fix these'));
+    expect(out.indexOf('node9 can fix these')).toBeLessThan(out.indexOf('YOUR PART'));
   });
 
   it('puts an unset-owner finding in the "only you" bucket (conservative, no false node9 claim)', () => {
     const out = renderPosture(result([f('Mystery')])); // f() sets no owner
-    expect(out).toContain('Only you can fix these');
+    expect(out).toContain('YOUR PART');
     expect(out).not.toContain('node9 can fix these');
   });
 
@@ -391,10 +483,33 @@ describe('renderPosture grouping', () => {
         { category: 'Mystery', severity: 'advisory', title: 'm', detail: [], owner: 'os' },
       ])
     );
-    expect(out).toContain('node9 reduces these');
-    // order: 🔧 fix-it < 🔒 reduces < 🧱 only-you
-    expect(out.indexOf('node9 can fix these')).toBeLessThan(out.indexOf('node9 reduces these'));
-    expect(out.indexOf('node9 reduces these')).toBeLessThan(out.indexOf('Only you can fix these'));
+    expect(out).toContain('AVAILABLE');
+    // order: 🔧 fix-it < 🔒 AVAILABLE < 🧱 your-part
+    expect(out.indexOf('node9 can fix these')).toBeLessThan(out.indexOf('AVAILABLE'));
+    expect(out.indexOf('AVAILABLE')).toBeLessThan(out.indexOf('YOUR PART'));
+  });
+
+  it('shows +N and the gain/cost tradeoff for an AVAILABLE hardening finding', () => {
+    const out = renderPosture(
+      result([
+        {
+          category: 'Isolation',
+          severity: 'advisory',
+          title: 'no container',
+          detail: [],
+          owner: 'os',
+          node9Reduces: true,
+          scoreWeight: 12,
+          gain: 'jailed container',
+          cost: 'works inside /workspace',
+        },
+      ])
+    );
+    expect(out).toContain('+12');
+    expect(out).toContain('gain:');
+    expect(out).toContain('jailed container');
+    expect(out).toContain('cost:');
+    expect(out).toContain('works inside /workspace');
   });
 
   it('preserves explicit line breaks in a multi-line fix (bulleted options stay on their own lines)', () => {
@@ -431,7 +546,7 @@ describe('renderPosture grouping', () => {
         f('Egress'),
       ])
     );
-    expect(out).toContain('node9 is already protecting you');
+    expect(out).toContain('ON NOW');
     expect(out).toContain('node9 DLP is blocking this');
     // The scary title is suppressed for a covered finding.
     expect(out).not.toContain('SCARY SECRETS TITLE');

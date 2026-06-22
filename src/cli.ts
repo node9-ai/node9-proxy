@@ -60,6 +60,7 @@ import { registerAgentsCommand } from './cli/commands/agents';
 import { registerScanCommand } from './cli/commands/scan';
 import { registerPostureCommand } from './cli/commands/posture';
 import { registerEgressCommand } from './cli/commands/egress';
+import { registerSandboxCommand } from './cli/commands/sandbox';
 import { registerSessionsCommand } from './cli/commands/sessions';
 import { registerSessionTaintCommand } from './cli/commands/session-taint';
 import { registerSkillPinCommand } from './cli/commands/skill-pin';
@@ -741,6 +742,7 @@ registerPostureCommand(program);
 
 // Egress control (the posture remediation on-ramp)
 registerEgressCommand(program);
+registerSandboxCommand(program, version);
 
 // Session history
 registerSessionsCommand(program);
