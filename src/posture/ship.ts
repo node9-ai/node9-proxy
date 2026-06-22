@@ -37,6 +37,9 @@ export function buildShipBody(result: PostureResult): {
     who?: string;
     fix?: string;
     owner: string;
+    scoreWeight?: number;
+    gain?: string;
+    cost?: string;
   }>;
 } {
   return {
@@ -59,6 +62,11 @@ export function buildShipBody(result: PostureResult): {
       fix: f.fix,
       // Whose job it is. Default 'os' so the SaaS never falsely claims node9 can fix it.
       owner: f.owner ?? 'os',
+      // Hardening weight + the flexibility tradeoff (generic prose / a number —
+      // no values or paths), so the fleet view can show the same headroom story.
+      scoreWeight: f.scoreWeight,
+      gain: f.gain,
+      cost: f.cost,
     })),
   };
 }

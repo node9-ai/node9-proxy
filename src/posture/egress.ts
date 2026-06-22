@@ -4,12 +4,30 @@
 // Reads the SAME egress-control state the in-path gate enforces
 // (`config.policy.egress`). No live network probing — config inspection only.
 
+import fs from 'fs';
 import { getConfig } from '../config';
+import { ALLOWED_DOMAINS_PATH } from '../sandbox/templates';
 import type { CheckContext, Finding } from './types';
 
 interface EgressConfig {
   enabled: boolean;
   mode: 'off' | 'review' | 'block';
+}
+
+/**
+ * True when running INSIDE a node9 sandbox whose kernel egress wall is active.
+ * The entrypoint writes the resolved allowlist to ALLOWED_DOMAINS_PATH before
+ * sealing the ipset/iptables wall (deny-by-default), so the file's presence
+ * marks a hard, OS-level egress block that the config-based check below is
+ * blind to. Without this, in-box posture wrongly reports "Egress open" even
+ * though the box is locked tighter than any host config. Exported for tests.
+ */
+export function sandboxEgressWallActive(): boolean {
+  try {
+    return fs.existsSync(ALLOWED_DOMAINS_PATH);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -79,6 +97,26 @@ export function evaluateEgressConfig(egress: EgressConfig): Finding {
 }
 
 export function checkEgress(ctx: CheckContext): Finding[] {
+  // Inside the sandbox, egress is hard-blocked at the kernel (deny-by-default
+  // ipset wall) — stricter than any node9 config and invisible to the check
+  // below. Credit it as covered so in-box posture tells the truth instead of
+  // over-reporting "Egress open".
+  if (sandboxEgressWallActive()) {
+    return [
+      {
+        category: 'Egress',
+        severity: 'advisory',
+        title: 'Egress is hard-blocked by the sandbox kernel wall',
+        what: 'Outbound is deny-by-default at the kernel; only the allowlist is reachable.',
+        why: 'The sandbox seals egress with an ipset/iptables wall before the agent starts.',
+        who: 'Even a compromised agent can only reach the allowlisted hosts.',
+        owner: 'node9',
+        detail: [],
+        coverage: { state: 'covered', level: 'block', via: 'sandbox egress wall' },
+      },
+    ];
+  }
+
   const config = getConfig(ctx.cwd);
   const egress = config.policy.egress;
   return [evaluateEgressConfig({ enabled: egress.enabled, mode: egress.mode })];

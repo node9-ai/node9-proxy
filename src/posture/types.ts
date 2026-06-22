@@ -50,11 +50,21 @@ export interface Finding {
   owner?: Owner;
   /** node9 has an ADJACENT lever that reduces this risk, even though fully
    *  closing it stays the user's job (owner remains 'os'). Renders under the
-   *  🔒 "node9 reduces these" tier — between 🔧 and 🧱. Distinct from coverage:
-   *  coverage = in-path enforcement of THIS finding; node9Reduces = a separate
-   *  shield/command that shrinks the blast radius (project-jail for isolation,
-   *  db-shields for an exposed Postgres/Redis). */
+   *  🔒 "AVAILABLE — turn on to harden" tier — between 🔧 and 🧱. Distinct from
+   *  coverage: coverage = in-path enforcement of THIS finding; node9Reduces = a
+   *  separate shield/command that shrinks the blast radius (sandbox/project-jail
+   *  for isolation, db-shields for an exposed Postgres/Redis). */
   node9Reduces?: boolean;
+  /** Points this finding deducts from 100 while OPEN — used ONLY for the
+   *  hardening opportunities node9 offers (Isolation, db-shields), which the
+   *  severity-bucket score intentionally ignores. Genuine exposures leave this
+   *  unset and are scored by severity instead. The number doubles as the "+N"
+   *  the AVAILABLE tier shows ("enable this → +N to your score"). */
+  scoreWeight?: number;
+  /** The flexibility tradeoff of the primary fix, rendered as gain/cost lines
+   *  so the security↔flexibility cost is explicit, not just asserted. */
+  gain?: string;
+  cost?: string;
   /** The enforcement bridge: what node9 can do about it (the free→paid hook). */
   fix?: string;
   /** Set by `annotateCoverage` — node9's enforcement relationship to this finding. */

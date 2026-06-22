@@ -14,6 +14,11 @@
 import fs from 'fs';
 import type { CheckContext, Finding } from './types';
 
+/** Points the unsandboxed-host gap deducts while open. The biggest single
+ *  hardening lever (sandbox closes it); tuned so a clean-but-unsandboxed host
+ *  reads ~84 "Good — hardening available", not a contradictory 100. */
+export const ISOLATION_WEIGHT = 12;
+
 /** True when the process appears to run inside a container. */
 function inContainer(): boolean {
   if (fs.existsSync('/.dockerenv') || fs.existsSync('/run/.containerenv')) return true;
@@ -40,13 +45,22 @@ export function checkContainment(_ctx: CheckContext): Finding[] {
       detail: [],
       owner: 'os',
       node9Reduces: true,
+      // The single biggest hardening gap, and node9 now fully remedies it
+      // (`node9 sandbox run`). Deducts while open; closing it is the headline
+      // payoff. No coverageProbe → stays OPEN (scored) until adopted; live
+      // partial-credit for the lighter shield path is a fast-follow.
+      scoreWeight: ISOLATION_WEIGHT,
+      gain: 'jailed container · kernel egress wall · scoped mounts · governed inside',
+      cost: 'the agent works inside /workspace, not your live host',
       fix:
-        'Full isolation — jail the agent in a disposable container, governed + audited inside:\n' +
-        '  • node9 sandbox run <agent> — kernel-enforced egress + scoped mounts + node9 inside\n' +
-        'Or shrink the blast radius without a container (you keep full host access):\n' +
-        '  • node9 shield enable project-jail — block credential reads\n' +
+        'Two ways to shrink the blast radius — pick by how much flexibility you need:\n' +
+        `Strongest — jail it (closes this gap, +${ISOLATION_WEIGHT}):\n` +
+        '  • node9 sandbox run <agent>\n' +
+        `Lighter — harden in place, keep full host access (about +${Math.round(
+          ISOLATION_WEIGHT / 2
+        )}):\n` +
+        '  • node9 shield enable project-jail — block stray credential reads\n' +
         '  • node9 egress lock — block data exfil',
-      coverageProbe: { kind: 'cantFix' },
     },
   ];
 }

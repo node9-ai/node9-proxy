@@ -3,7 +3,7 @@
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import fs from 'fs';
-import { checkContainment } from '../containment';
+import { checkContainment, ISOLATION_WEIGHT } from '../containment';
 import type { CheckContext } from '../types';
 
 const ctx = {} as CheckContext;
@@ -22,6 +22,20 @@ describe('checkContainment', () => {
     expect(findings[0].fix).toContain('node9 sandbox run');
     // still keeps the without-a-container mitigations
     expect(findings[0].fix).toContain('project-jail');
+  });
+
+  it('scores as hardening headroom — weight + gain/cost, and stays OPEN (no cantFix probe)', () => {
+    vi.spyOn(fs, 'existsSync').mockReturnValue(false);
+    vi.spyOn(fs, 'readFileSync').mockReturnValue('0::/\n' as unknown as string);
+
+    const f = checkContainment(ctx)[0];
+    // Deducts the isolation weight while open (the "100-with-issues" fix).
+    expect(f.scoreWeight).toBe(ISOLATION_WEIGHT);
+    expect(f.gain).toBeTruthy();
+    expect(f.cost).toBeTruthy();
+    // Must NOT be can't-fix — node9 now fully remedies this, so it has to remain
+    // an OPEN, scored finding (a cantFix probe would zero its weight).
+    expect(f.coverageProbe).toBeUndefined();
   });
 
   it('returns no Isolation finding when already inside a container', () => {

@@ -3,6 +3,7 @@
 
 import chalk from 'chalk';
 import type { Finding, PostureResult, Severity } from './types';
+import { openHeadroom } from './score';
 
 const ICON: Record<Severity, string> = {
   critical: chalk.red('❌'),
@@ -41,9 +42,12 @@ function label(category: string): string {
   return chalk.bold(category.padEnd(Math.max(LABEL_WIDTH, category.length + 1)));
 }
 
-function renderFinding(f: Finding): string[] {
+function renderFinding(f: Finding, showWeight = false): string[] {
   const lines: string[] = [];
-  lines.push(`  ${ICON[f.severity]} ${label(f.category)}${f.title}`);
+  // In the AVAILABLE tier, lead with the score gain (+N) so the value of turning
+  // the layer on is the first thing read.
+  const wt = showWeight && f.scoreWeight ? chalk.cyan.bold(`+${f.scoreWeight} `) : '';
+  lines.push(`  ${ICON[f.severity]} ${label(f.category)}${wt}${f.title}`);
   const indent = ' '.repeat(2 + 3 + LABEL_WIDTH);
   // Plain-language explanation first (what / why / who), wrapped so that
   // indent + text stays under ~80 columns.
@@ -65,6 +69,18 @@ function renderFinding(f: Finding): string[] {
       }
     }
   }
+  // The security↔flexibility tradeoff, made explicit on both axes. Only the
+  // first wrapped line carries the label; continuations align under the text.
+  const tradeoff: Array<[string | undefined, string, (s: string) => string]> = [
+    [f.gain, 'gain: ', chalk.green],
+    [f.cost, 'cost: ', chalk.yellow],
+  ];
+  for (const [text, lbl, color] of tradeoff) {
+    if (!text) continue;
+    wrap(text, width - 6).forEach((l, i) => {
+      lines.push(indent + (i === 0 ? color(lbl) : '      ') + chalk.gray(l));
+    });
+  }
   return lines;
 }
 
@@ -77,19 +93,16 @@ export function renderPosture(result: PostureResult): string {
       chalk.gray(` — ${result.agent}`) +
       `        ${chalk.bold(`Score: ${result.score}/100`)}  (${tier})`
   );
-  // Advisories are shown but never deduct (OS-level — node9 can't enforce them).
-  // Say so under the score so a perfect number doesn't read as "nothing to review".
-  const advisories = result.findings.filter(
-    (f) => f.severity === 'advisory' && f.coverage?.state !== 'covered'
-  ).length;
-  if (advisories > 0) {
-    const word = advisories === 1 ? 'advisory' : 'advisories';
-    const verb = advisories === 1 ? "doesn't" : "don't";
+  // The headroom line: a sub-100 score isn't a failure — it's hardening you
+  // can choose to turn on. Naming the points (and that each costs flexibility)
+  // is what keeps the number honest AND non-nagging.
+  const headroom = openHeadroom(result.findings);
+  if (headroom > 0) {
     lines.push(
       '  ' +
         chalk.gray(
-          `${advisories} ${word} below ${verb} affect the score — ` +
-            "OS-level exposure node9 can't enforce, yours to weigh."
+          `${headroom} pts of headroom below — each layer adds security at some ` +
+            'cost to flexibility. You choose which to close.'
         )
     );
   }
@@ -109,7 +122,7 @@ export function renderPosture(result: PostureResult): string {
   const covered = result.findings.filter((f) => f.coverage?.state === 'covered');
   const open = result.findings.filter((f) => f.coverage?.state !== 'covered');
   if (covered.length > 0) {
-    lines.push('  ' + chalk.green('🟢 node9 is already protecting you'));
+    lines.push('  ' + chalk.green('🟢 ON NOW — node9 is enforcing these (your floor)'));
     for (const f of covered) {
       const gated = f.coverage?.level === 'review' ? 'approval-gating' : 'blocking';
       const via = f.coverage?.via ?? 'node9';
@@ -131,18 +144,16 @@ export function renderPosture(result: PostureResult): string {
 
   if (node9Open.length > 0) {
     lines.push('  ' + chalk.cyan.bold('🔧 node9 can fix these — run the command'));
-    for (const f of node9Open) lines.push(...renderFinding(f));
+    for (const f of node9Open) lines.push(...renderFinding(f, true));
   }
   if (reduceOpen.length > 0) {
     if (node9Open.length > 0) lines.push('');
-    lines.push(
-      '  ' + chalk.yellow.bold('🔒 node9 reduces these — run the command, the rest is yours')
-    );
-    for (const f of reduceOpen) lines.push(...renderFinding(f));
+    lines.push('  ' + chalk.yellow.bold('🔒 AVAILABLE — turn on to harden (each has a tradeoff)'));
+    for (const f of reduceOpen) lines.push(...renderFinding(f, true));
   }
   if (osOpen.length > 0) {
     if (node9Open.length > 0 || reduceOpen.length > 0) lines.push('');
-    lines.push('  ' + chalk.bold("🧱 Only you can fix these — node9 can't"));
+    lines.push('  ' + chalk.bold("🧱 YOUR PART — node9 can't fix these (OS-level)"));
     for (const f of osOpen) lines.push(...renderFinding(f));
   }
 

@@ -18,14 +18,38 @@ export function scorePosture(
   const open = findings.filter(
     (f) => f.coverage?.state !== 'covered' && f.coverage?.state !== 'cant-fix'
   );
-  const count = (sev: Severity) => open.filter((f) => f.severity === sev).length;
-  return computeSecurityScore({
+
+  // Two scoring tracks, combined:
+  //
+  // 1. GENUINE EXPOSURES (open Secrets/Egress/Gate/Coverage…) → the existing
+  //    severity-bucket formula, unchanged. Any critical still forces the
+  //    critical tier; this is the well-tested behavior we must not regress.
+  //    Hardening findings carry a scoreWeight and are excluded here so they're
+  //    never double-counted.
+  const count = (sev: Severity) => open.filter((f) => f.severity === sev && !f.scoreWeight).length;
+  const base = computeSecurityScore({
     critical: count('critical'),
     high: count('high'),
     medium: count('medium'),
-    // Denominator = number of checks evaluated. With computeSecurityScore's
-    // caps this makes any critical → critical tier, any high → at-risk, and a
-    // fully clean run (0 findings, checksRun > 0) → 100/good.
     total: Math.max(checksRun, 1),
   });
+
+  // 2. HARDENING OPPORTUNITIES node9 offers but the bucket formula ignores
+  //    (Isolation → sandbox, an exposed DB → db-shields). Each deducts a fixed
+  //    weight while open, so a fully-covered-but-unsandboxed host reads ~84
+  //    (headroom you choose to close), not a contradictory 100.
+  const headroom = open.reduce((sum, f) => sum + (f.scoreWeight ?? 0), 0);
+
+  const score = Math.max(0, base.score - headroom);
+  const tier: 'good' | 'at-risk' | 'critical' =
+    score >= 80 ? 'good' : score >= 50 ? 'at-risk' : 'critical';
+  return { score, tier };
+}
+
+/** Total open hardening headroom (Σ scoreWeight) — the "N pts you can close"
+ *  the renderer shows under the score. Exported so the render + tests share it. */
+export function openHeadroom(findings: Finding[]): number {
+  return findings
+    .filter((f) => f.coverage?.state !== 'covered' && f.coverage?.state !== 'cant-fix')
+    .reduce((sum, f) => sum + (f.scoreWeight ?? 0), 0);
 }
