@@ -91,6 +91,23 @@ function printDaemonTip(): void {
   console.log(chalk.cyan('\n   💡 Node9 will protect you automatically using Native OS popups.'));
 }
 
+// Notice for the two agents that can render node9's review prompt inline
+// (Claude Code, GitHub Copilot). Inline review is ON by default — surface it
+// at setup so the behavior isn't a surprise, and point at how to opt out.
+function printInlineAskNotice(): void {
+  console.log(
+    chalk.cyan(
+      '   💬 Review prompts appear inline in your agent (approve/deny in the chat) by default.'
+    )
+  );
+  console.log(
+    chalk.gray(
+      '      Prefer node9’s own approver? Set "reviewChannel": "approver" in config, or add --no-ask to the hook.\n' +
+        '      (Inline prompts are auto-disabled when a cloud approver is configured.)'
+    )
+  );
+}
+
 /**
  * Returns a shell-safe hook command that works regardless of the user's $PATH.
  * Hooks run in a restricted shell (no .bashrc / nvm init), so bare "node9"
@@ -563,6 +580,7 @@ export async function setupClaude(): Promise<void> {
     console.log(chalk.green.bold('🛡️  Node9 is now protecting Claude Code!'));
     console.log(chalk.gray('    Restart Claude Code for changes to take effect.'));
     printDaemonTip();
+    printInlineAskNotice();
   }
 }
 
@@ -1122,6 +1140,7 @@ export async function setupCopilot(): Promise<void> {
   console.log(chalk.green.bold('🛡️  Node9 is now protecting GitHub Copilot CLI!'));
   console.log(chalk.gray('    Restart Copilot CLI for changes to take effect.'));
   printDaemonTip();
+  printInlineAskNotice();
 }
 
 export function teardownCopilot(): void {

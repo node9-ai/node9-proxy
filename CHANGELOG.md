@@ -10,6 +10,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Inline review prompts** (`reviewChannel` / `--ask`). On a `review` verdict, node9 now routes the approve/deny prompt to the agent's **own inline prompt** instead of node9's separate approver — no frozen session, no 60 s hook-timeout race, no terminal context-switch (resolves node9-ai/node9-proxy#209). Verified live against the agents whose hook contract supports it: **Claude Code** (`hookSpecificOutput.permissionDecision:"ask"`) and **GitHub Copilot CLI** (flat `permissionDecision:"ask"`).
+  - Config: `settings.reviewChannel: "ask" | "approver"`; CLI override `--ask` / `--no-ask`. **Default is `"ask"`** for the two supported agents **except when a cloud approver is configured** — node9 never bypasses SaaS org-policy / second-party approval (matches the orchestrator's defer guard). All other agents (Codex, Antigravity, Gemini, Hermes, Cursor, OpenCode, Pi) keep node9's own approver — they either error on or fail open to `ask`, so node9 never sends them one.
+  - node9 stays the decision-maker — the full evaluator waterfall runs unchanged; only the prompt _surface_ moves. The short-circuit happens before the SaaS handshake, so no orphaned dashboard/Slack approval is created. `node9 monitor` shows these as a `review` activity.
+  - Taint/exfil-driven reviews are excluded from inline `ask` (forced to the routed approver — self-approval is weakest exactly where exfiltration risk is highest).
+
+### Changed
+
+- **Review prompts are inline by default for Claude Code + GitHub Copilot** (see above). Existing users get this on upgrade with no re-setup; add `--no-ask` or set `"reviewChannel":"approver"` to keep node9's own approver. No change for any other agent or for cloud-approver setups.
+
 - **GitHub Copilot CLI integration** (`node9 agents add copilot`). Adds the GitHub Copilot CLI (`copilot`, npm `@github/copilot`) — the terminal agent, distinct from the VS Code Copilot extension which stays under the `vscode` MCP target — to the protected agents at the hooks tier. node9 writes a dedicated `~/.copilot/hooks/node9.json` with PreToolUse/PostToolUse/UserPromptSubmit hooks (`node9 check/log --agent copilot`, `timeoutSec: 600`) and adds/wraps the node9 MCP server in `~/.copilot/mcp-config.json`. All verified live against Copilot CLI 1.0.60:
   - Copilot's PascalCase hook payload is byte-identical to Claude Code (`hook_event_name`/`session_id`/`cwd`/`tool_name`/`tool_input`) and its shell tool is already `bash` with `{command}` args — so node9's existing extractors, canonicalisation, shields, DLP and snapshot work unchanged. No new payload dialect.
   - Because the payload is indistinguishable from Claude, attribution is pinned via the `--agent copilot` flag node9 registers (a hand-written hook missing the flag harmlessly attributes to Claude Code — protection is identical).
