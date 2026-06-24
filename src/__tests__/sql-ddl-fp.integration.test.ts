@@ -24,7 +24,12 @@ function makeHome(): string {
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(
     path.join(dir, 'config.json'),
-    JSON.stringify({ version: '1.0', settings: { mode: 'standard', approvalTimeoutMs: 0 } })
+    // reviewChannel:'approver' — this test asserts a review hard-blocks (exit 2)
+    // with no approver; default-on would otherwise route it to the agent's ask prompt.
+    JSON.stringify({
+      version: '1.0',
+      settings: { mode: 'standard', approvalTimeoutMs: 0, reviewChannel: 'approver' },
+    })
   );
   return home;
 }

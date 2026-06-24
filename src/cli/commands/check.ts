@@ -9,7 +9,7 @@ import path from 'path';
 import os from 'os';
 import { authorizeHeadless } from '../../auth/orchestrator';
 import { isDaemonRunning } from '../../auth/daemon';
-import { getConfig } from '../../config';
+import { getConfig, type Config } from '../../config';
 import { shouldSnapshot } from '../../policy';
 import { buildNegotiationMessage, buildReviewMessage } from '../../policy/negotiation';
 import { createShadowSnapshot } from '../../undo';
@@ -154,12 +154,22 @@ function agentSupportsAsk(agent: string): boolean {
   return agent === 'Claude Code' || agent === 'GitHub Copilot';
 }
 
-// Whether a `review` verdict for this call should be deferred to the agent's
-// inline prompt (true) vs. node9's own approver race (false).
-// PHASE 2: opt-in only via `--ask`. (Config + safe default-on land in phase 3.)
-function resolveAskMode(agent: string, opts: { ask?: boolean }): boolean {
+// Whether a `review` verdict for this call is deferred to the agent's inline
+// prompt (true) vs. node9's own approver (false). Precedence:
+//   1. agent not ask-capable          → approver (false)
+//   2. cloud approver configured       → approver (v1: never bypass SaaS
+//      org-policy / second-party approval; matches the orchestrator defer guard)
+//   3. --ask / --no-ask flag           → wins
+//   4. settings.reviewChannel          → 'ask' | 'approver'
+//   5. default                         → ASK (cloud already excluded at step 2)
+function resolveAskMode(agent: string, opts: { ask?: boolean }, config: Config): boolean {
   if (!agentSupportsAsk(agent)) return false;
-  return opts.ask === true;
+  if (config.settings.approvers.cloud === true) return false;
+  if (opts.ask === true) return true;
+  if (opts.ask === false) return false;
+  if (config.settings.reviewChannel === 'ask') return true;
+  if (config.settings.reviewChannel === 'approver') return false;
+  return true;
 }
 
 export function registerCheckCommand(program: Command): void {
@@ -175,6 +185,7 @@ export function registerCheckCommand(program: Command): void {
       '--ask',
       'Route review verdicts to the agent’s native inline approve/deny prompt (Claude Code / GitHub Copilot only)'
     )
+    .option('--no-ask', 'Force node9’s own approver for review verdicts (override default-on)')
     .action(async (data, opts: { agent?: string; ask?: boolean }) => {
       const agentOverride = agentLabelFromFlag(opts?.agent);
       const processPayload = async (raw: string) => {
@@ -755,7 +766,7 @@ export function registerCheckCommand(program: Command): void {
 
           const safeCwdForAuth =
             typeof payloadCwd === 'string' && path.isAbsolute(payloadCwd) ? payloadCwd : undefined;
-          const askMode = resolveAskMode(agent, opts);
+          const askMode = resolveAskMode(agent, opts, config);
           const result = await authorizeHeadless(toolName, toolInput, meta, {
             cwd: safeCwdForAuth,
             deferReview: askMode,

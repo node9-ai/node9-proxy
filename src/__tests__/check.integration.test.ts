@@ -509,6 +509,7 @@ describe('dangerous words', () => {
         autoStartDaemon: false,
         approvalTimeoutMs: 0,
         approvers: { native: false, browser: false, cloud: false, terminal: false },
+        reviewChannel: 'approver', // assert the block path; default-on would route review→ask
       },
       policy: {
         dangerousWords: ['mkfs', 'shred'],
@@ -556,6 +557,7 @@ describe('no approval mechanism', () => {
         autoStartDaemon: false,
         approvalTimeoutMs: 0,
         approvers: { native: false, browser: false, cloud: false, terminal: false },
+        reviewChannel: 'approver', // assert the block path; default-on would route review→ask
       },
       policy: {
         dangerousWords: ['mkfs'],
@@ -644,8 +646,17 @@ describe('inline-ask (--ask routes review verdicts to the agent prompt)', () => 
     expect(body.hookSpecificOutput.permissionDecision).toBe('ask');
   });
 
-  it('Claude Code WITHOUT --ask → review still routes to approver (no ask emitted)', () => {
+  it('Claude Code WITHOUT --ask → emits ask by DEFAULT (phase 3 default-on, cloud off)', () => {
     const r = runCheckArgs([], claudePayload, { HOME: tmpHome });
+    expect(r.status).toBe(0);
+    const body = JSON.parse(r.stdout.trim()) as {
+      hookSpecificOutput: { permissionDecision: string };
+    };
+    expect(body.hookSpecificOutput.permissionDecision).toBe('ask');
+  });
+
+  it('Claude Code + --no-ask → forces node9 approver (overrides default-on, no ask)', () => {
+    const r = runCheckArgs(['--no-ask'], claudePayload, { HOME: tmpHome });
     expect(r.stdout).not.toContain('"permissionDecision":"ask"');
   });
 
@@ -670,6 +681,56 @@ describe('inline-ask (--ask routes review verdicts to the agent prompt)', () => 
     };
     expect(body.permissionDecision).toBe('ask'); // flat, not nested
     expect(body.hookSpecificOutput).toBeUndefined();
+  });
+
+  const reviewRule = {
+    name: 'review-git-push',
+    tool: 'bash',
+    conditions: [{ field: 'command', op: 'matches', value: '\\bgit\\b.*\\bpush\\b' }],
+    conditionMode: 'all',
+    verdict: 'review',
+    reason: 'git push sends changes to a shared remote',
+  };
+
+  it('reviewChannel:"approver" → no ask even without a flag (setting overrides default)', () => {
+    cleanupHome(tmpHome);
+    tmpHome = makeTempHome({
+      settings: {
+        mode: 'standard',
+        autoStartDaemon: false,
+        approvalTimeoutMs: 0,
+        reviewChannel: 'approver',
+        approvers: { native: false, browser: false, cloud: false, terminal: false },
+      },
+      policy: { smartRules: [reviewRule] },
+    });
+    const r = runCheckArgs([], claudePayload, { HOME: tmpHome });
+    expect(r.stdout).not.toContain('"permissionDecision":"ask"');
+  });
+
+  it('cloud approver configured → no ask (carve-out: never bypass routed approval)', () => {
+    cleanupHome(tmpHome);
+    tmpHome = makeTempHome({
+      settings: {
+        mode: 'standard',
+        autoStartDaemon: false,
+        approvalTimeoutMs: 0,
+        approvers: { native: false, browser: false, cloud: true, terminal: false },
+      },
+      policy: { smartRules: [reviewRule] },
+    });
+    const r = runCheckArgs([], claudePayload, { HOME: tmpHome });
+    expect(r.stdout).not.toContain('"permissionDecision":"ask"');
+  });
+
+  it('Codex WITHOUT --ask → no ask (default-on must NOT leak to fail-open agents)', () => {
+    const codexPayload = {
+      turn_id: 't1',
+      tool_name: 'bash',
+      tool_input: { command: 'git push origin main' },
+    };
+    const r = runCheckArgs([], codexPayload, { HOME: tmpHome });
+    expect(r.stdout).not.toContain('"permissionDecision":"ask"');
   });
 });
 
