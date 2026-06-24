@@ -11,7 +11,7 @@ import { authorizeHeadless } from '../../auth/orchestrator';
 import { isDaemonRunning } from '../../auth/daemon';
 import { getConfig } from '../../config';
 import { shouldSnapshot } from '../../policy';
-import { buildNegotiationMessage } from '../../policy/negotiation';
+import { buildNegotiationMessage, buildReviewMessage } from '../../policy/negotiation';
 import { createShadowSnapshot } from '../../undo';
 import { autoStartDaemonAndWait } from '../daemon-starter';
 import { defaultSkillRoots, resolveUserSkillRoot, verifyAndPinRoots } from '../../skill-pin';
@@ -144,6 +144,24 @@ export function detectAiAgent(payload: Record<string, unknown>): string {
   return 'Terminal';
 }
 
+// Agents whose PreToolUse hook contract can render an inline approve/deny prompt
+// from a `permissionDecision:"ask"` verdict. EMPIRICALLY VERIFIED (2026-06-23):
+// Claude Code (nested envelope) and GitHub Copilot (flat envelope). Codex errors
+// on "ask", Antigravity/Gemini/Hermes fail open or have no ask verdict — they must
+// NEVER receive an ask (it would silently bypass the review); they fall back to the
+// routed approver. See doc/roadmap/active/review-ask-inline-v1-spec.md §8.
+function agentSupportsAsk(agent: string): boolean {
+  return agent === 'Claude Code' || agent === 'GitHub Copilot';
+}
+
+// Whether a `review` verdict for this call should be deferred to the agent's
+// inline prompt (true) vs. node9's own approver race (false).
+// PHASE 2: opt-in only via `--ask`. (Config + safe default-on land in phase 3.)
+function resolveAskMode(agent: string, opts: { ask?: boolean }): boolean {
+  if (!agentSupportsAsk(agent)) return false;
+  return opts.ask === true;
+}
+
 export function registerCheckCommand(program: Command): void {
   program
     .command('check', { hidden: true })
@@ -153,7 +171,11 @@ export function registerCheckCommand(program: Command): void {
       '--agent <name>',
       'Agent identity override, set by node9-authored hook registrations (e.g. antigravity)'
     )
-    .action(async (data, opts: { agent?: string }) => {
+    .option(
+      '--ask',
+      'Route review verdicts to the agent’s native inline approve/deny prompt (Claude Code / GitHub Copilot only)'
+    )
+    .action(async (data, opts: { agent?: string; ask?: boolean }) => {
       const agentOverride = agentLabelFromFlag(opts?.agent);
       const processPayload = async (raw: string) => {
         try {
@@ -512,6 +534,46 @@ export function registerCheckCommand(program: Command): void {
             // Exit code 2 signals a block to Claude Code. Exit 0 = allow, non-zero = block.
             process.exit(2);
           };
+
+          // Inline-ask: route a `review` verdict to the agent's native approve/deny
+          // prompt instead of node9's own approver. Only reached for ask-capable
+          // agents (Claude Code / GitHub Copilot) — see resolveAskMode/agentSupportsAsk.
+          const sendAsk = (result: { blockedByLabel?: string; ruleDescription?: string }) => {
+            const msg = buildReviewMessage(result.blockedByLabel, result.ruleDescription);
+            // Human-terminal breadcrumb (parity with sendBlock). Never stderr —
+            // Claude Code treats any stderr output as a hook error and fails open.
+            try {
+              const ttyFd = fs.openSync('/dev/tty', 'w');
+              fs.writeSync(
+                ttyFd,
+                chalk.yellow(
+                  `\n⚠️  Node9: review requested for "${toolName}" — answer in the prompt.\n`
+                )
+              );
+              fs.closeSync(ttyFd);
+            } catch {
+              // /dev/tty unavailable (CI, non-interactive) — skip visual output.
+            }
+            if (agent === 'GitHub Copilot') {
+              // Copilot honours a FLAT permissionDecision (verified live 2026-06-23).
+              process.stdout.write(
+                JSON.stringify({ permissionDecision: 'ask', permissionDecisionReason: msg }) + '\n'
+              );
+            } else {
+              // Claude Code: nested hookSpecificOutput (verified live, incl. bypass mode).
+              process.stdout.write(
+                JSON.stringify({
+                  hookSpecificOutput: {
+                    hookEventName: 'PreToolUse',
+                    permissionDecision: 'ask',
+                    permissionDecisionReason: msg,
+                  },
+                }) + '\n'
+              );
+            }
+            // Exit 0 = hand the prompt to the agent (NOT a block).
+            process.exit(0);
+          };
           if (!toolName) {
             sendBlock('Node9: unrecognised hook payload — tool name missing.');
             return;
@@ -693,8 +755,10 @@ export function registerCheckCommand(program: Command): void {
 
           const safeCwdForAuth =
             typeof payloadCwd === 'string' && path.isAbsolute(payloadCwd) ? payloadCwd : undefined;
+          const askMode = resolveAskMode(agent, opts);
           const result = await authorizeHeadless(toolName, toolInput, meta, {
             cwd: safeCwdForAuth,
+            deferReview: askMode,
           });
 
           if (result.approved) {
@@ -703,6 +767,14 @@ export function registerCheckCommand(program: Command): void {
             if (result.checkedBy && process.env.NODE9_DEBUG === '1')
               process.stderr.write(`✓ node9 [${result.checkedBy}]: "${toolName}" allowed\n`);
             process.exit(0);
+          }
+
+          // Inline-ask: a deferred review → hand the approve/deny prompt to the
+          // agent (only set when askMode + ask-capable agent; orchestrator excludes
+          // taint/cloud paths by construction). Must precede the block path below.
+          if (result.review) {
+            sendAsk(result);
+            return;
           }
 
           // Auto-start daemon if allowed

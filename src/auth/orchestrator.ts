@@ -216,13 +216,15 @@ export async function authorizeHeadless(
         tool: toolName,
         args,
         ts: actTs,
-        status: result.approved
-          ? 'allow'
-          : result.blockedByLabel?.includes('DLP')
-            ? 'dlp'
-            : result.blockedByLabel?.includes('Taint')
-              ? 'taint'
-              : 'block',
+        status: result.review
+          ? 'review'
+          : result.approved
+            ? 'allow'
+            : result.blockedByLabel?.includes('DLP')
+              ? 'dlp'
+              : result.blockedByLabel?.includes('Taint')
+                ? 'taint'
+                : 'block',
         label: result.blockedByLabel,
         ruleHit: result.ruleHit,
         observeWouldBlock: result.observeWouldBlock,

@@ -576,6 +576,103 @@ describe('no approval mechanism', () => {
   });
 });
 
+// ── Inline-ask (phase 2): review → agent's native permissionDecision:"ask" ──────
+
+describe('inline-ask (--ask routes review verdicts to the agent prompt)', () => {
+  let tmpHome: string;
+
+  // Runner variant that passes extra CLI args (e.g. --ask, --agent) before the payload.
+  function runCheckArgs(args: string[], payload: object, env: Record<string, string>): RunResult {
+    const baseEnv = { ...process.env };
+    delete baseEnv.NODE9_API_KEY;
+    delete baseEnv.NODE9_API_URL;
+    const result = spawnSync(process.execPath, [CLI, 'check', ...args, JSON.stringify(payload)], {
+      encoding: 'utf-8',
+      timeout: 60000,
+      cwd: tmpHome,
+      env: {
+        ...baseEnv,
+        NODE9_NO_AUTO_DAEMON: '1',
+        NODE9_TESTING: '1',
+        ...env,
+        ...(env.HOME != null ? { USERPROFILE: env.HOME } : {}),
+      },
+    });
+    return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
+  }
+
+  beforeEach(() => {
+    // A git-push review rule, all approvers OFF + timeout 0: without --ask a review
+    // has nowhere to go and hard-blocks fast — so any "ask" output proves the defer fired.
+    tmpHome = makeTempHome({
+      settings: {
+        mode: 'standard',
+        autoStartDaemon: false,
+        approvalTimeoutMs: 0,
+        approvers: { native: false, browser: false, cloud: false, terminal: false },
+      },
+      policy: {
+        smartRules: [
+          {
+            name: 'review-git-push',
+            tool: 'bash',
+            conditions: [{ field: 'command', op: 'matches', value: '\\bgit\\b.*\\bpush\\b' }],
+            conditionMode: 'all',
+            verdict: 'review',
+            reason: 'git push sends changes to a shared remote',
+          },
+        ],
+      },
+    });
+  });
+  afterEach(() => cleanupHome(tmpHome));
+
+  const claudePayload = {
+    hook_event_name: 'PreToolUse',
+    tool_name: 'bash',
+    tool_input: { command: 'git push origin main' },
+    session_id: 's1',
+    tool_use_id: 'u1',
+  };
+
+  it('Claude Code + --ask → emits nested permissionDecision:"ask", exit 0', () => {
+    const r = runCheckArgs(['--ask'], claudePayload, { HOME: tmpHome });
+    expect(r.status).toBe(0);
+    const body = JSON.parse(r.stdout.trim()) as {
+      hookSpecificOutput: { hookEventName: string; permissionDecision: string };
+    };
+    expect(body.hookSpecificOutput.permissionDecision).toBe('ask');
+  });
+
+  it('Claude Code WITHOUT --ask → review still routes to approver (no ask emitted)', () => {
+    const r = runCheckArgs([], claudePayload, { HOME: tmpHome });
+    expect(r.stdout).not.toContain('"permissionDecision":"ask"');
+  });
+
+  it('Codex + --ask → never emits ask (excluded agent routes to approver)', () => {
+    // turn_id fingerprints the payload as Codex; Codex errors on a real "ask",
+    // so node9 must never send one — it falls back to the routed approver/block.
+    const codexPayload = {
+      turn_id: 't1',
+      tool_name: 'bash',
+      tool_input: { command: 'git push origin main' },
+    };
+    const r = runCheckArgs(['--ask'], codexPayload, { HOME: tmpHome });
+    expect(r.stdout).not.toContain('"permissionDecision":"ask"');
+  });
+
+  it('GitHub Copilot + --ask → emits FLAT permissionDecision:"ask"', () => {
+    const r = runCheckArgs(['--ask', '--agent', 'copilot'], claudePayload, { HOME: tmpHome });
+    expect(r.status).toBe(0);
+    const body = JSON.parse(r.stdout.trim()) as {
+      permissionDecision?: string;
+      hookSpecificOutput?: unknown;
+    };
+    expect(body.permissionDecision).toBe('ask'); // flat, not nested
+    expect(body.hookSpecificOutput).toBeUndefined();
+  });
+});
+
 // ── 5. Audit mode ─────────────────────────────────────────────────────────────
 
 describe('audit mode', () => {
