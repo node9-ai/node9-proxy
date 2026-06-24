@@ -7,6 +7,7 @@ import path from 'path';
 import os from 'os';
 import { redactSecrets, appendToLog, LOCAL_AUDIT_LOG } from '../../audit';
 import { getConfig } from '../../config';
+import { reviewCorrelationKey, resolvePendingReview } from '../../review-pending';
 import { createShadowSnapshot, getSnapshotHistory } from '../../undo';
 import {
   notifyTaintPropagate,
@@ -166,6 +167,16 @@ export function registerLogCommand(program: Command): void {
                               ? 'Antigravity'
                               : undefined;
 
+          // Phase 4: if this execution resolves a deferred inline-ask review, the
+          // user APPROVED it. Best-effort — must never skip/abort the audit write.
+          let reviewApproved = false;
+          try {
+            const key = reviewCorrelationKey(payload as Record<string, unknown>);
+            if (key && resolvePendingReview(key)) reviewApproved = true;
+          } catch {
+            /* outcome capture is best-effort */
+          }
+
           // Audit write FIRST — before any config load that could fail.
           // A config error must never silently skip the audit entry.
           const entry: Record<string, unknown> = {
@@ -173,7 +184,7 @@ export function registerLogCommand(program: Command): void {
             tool: tool,
             args: JSON.parse(redactSecrets(JSON.stringify(rawInput))),
             decision: 'allowed',
-            source: 'post-hook',
+            source: reviewApproved ? 'inline-review-approved' : 'post-hook',
           };
           if (agent) entry.agent = agent;
           // Preserve the agent-native tool name when canonicalisation

@@ -17,6 +17,7 @@ import { autoStartDaemonAndWait } from '../daemon-starter';
 import { defaultSkillRoots, resolveUserSkillRoot, verifyAndPinRoots } from '../../skill-pin';
 import { scanArgs } from '../../dlp';
 import { appendLocalAudit } from '../../audit';
+import { reviewCorrelationKey, recordPendingReview } from '../../review-pending';
 import {
   extractToolName,
   extractToolInput,
@@ -551,6 +552,29 @@ export function registerCheckCommand(program: Command): void {
           // agents (Claude Code / GitHub Copilot) — see resolveAskMode/agentSupportsAsk.
           const sendAsk = (result: { blockedByLabel?: string; ruleDescription?: string }) => {
             const msg = buildReviewMessage(result.blockedByLabel, result.ruleDescription);
+            // Phase 4: record a pending-review marker so the matching PostToolUse can
+            // capture the approve outcome. Best-effort — never block the ask emit.
+            try {
+              const key = reviewCorrelationKey(payload as Record<string, unknown>);
+              if (key) {
+                const sid =
+                  typeof payload.session_id === 'string'
+                    ? payload.session_id
+                    : typeof payload.conversationId === 'string'
+                      ? payload.conversationId
+                      : undefined;
+                recordPendingReview({
+                  key,
+                  agent,
+                  tool: toolName,
+                  sessionId: sid,
+                  ts: Date.now(),
+                  label: result.blockedByLabel,
+                });
+              }
+            } catch {
+              /* outcome capture is best-effort */
+            }
             // Human-terminal breadcrumb (parity with sendBlock). Never stderr —
             // Claude Code treats any stderr output as a hook error and fails open.
             try {
