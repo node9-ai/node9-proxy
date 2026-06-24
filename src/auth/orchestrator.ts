@@ -33,6 +33,10 @@ import { readActiveShields } from '../shields';
 
 export interface AuthResult {
   approved: boolean;
+  /** Verdict was "review" and the caller opted in via `deferReview`: the caller
+   *  (an ask-capable agent's hook) renders the approve/deny prompt itself. The
+   *  approver race did NOT run, and no SaaS pending entry was created. */
+  review?: boolean;
   reason?: string;
   noApprovalMechanism?: boolean;
   blockedByLabel?: string;
@@ -161,7 +165,12 @@ export async function authorizeHeadless(
   toolName: string,
   args: unknown,
   meta?: { agent?: string; mcpServer?: string; sessionId?: string; transcriptPath?: string },
-  options?: { calledFromDaemon?: boolean; cwd?: string; localSmartRuleMatched?: boolean }
+  options?: {
+    calledFromDaemon?: boolean;
+    cwd?: string;
+    localSmartRuleMatched?: boolean;
+    deferReview?: boolean;
+  }
 ): Promise<AuthResult> {
   // Skip socket notification when called from daemon — daemon already broadcasts via SSE
   if (!options?.calledFromDaemon) {
@@ -243,6 +252,7 @@ async function _authorizeHeadlessCore(
     cwd?: string;
     localSmartRuleMatched?: boolean;
     socketActivitySent?: boolean;
+    deferReview?: boolean;
   }
 ): Promise<AuthResult> {
   // Thread the working directory into meta so every audit row written below
@@ -817,6 +827,28 @@ async function _authorizeHeadlessCore(
       undefined,
       taintWarning
     );
+  }
+
+  // ── INLINE-ASK DEFER (review → caller renders the prompt) ────────────────
+  // When the caller opts in (check.ts, for an ask-capable agent), a `review`
+  // verdict short-circuits HERE — before the SaaS handshake below — so no
+  // /intercept pending entry is ever created (which would orphan in the
+  // dashboard/Slack). The caller turns this result into the agent's native
+  // `permissionDecision:"ask"` prompt.
+  //   - Excludes taint/exfil reviews (must use the routed approver — self-approval
+  //     is weakest exactly where exfiltration risk is highest).
+  //   - Excludes cloud-enforced setups (safe-by-construction): never bypass the
+  //     SaaS org-policy / routed approval; those keep the handshake + race below.
+  // No caller sets `deferReview` yet → this is inert (no behavior change).
+  const cloudEnforcedForDefer = approvers.cloud && !!creds?.apiKey;
+  if (options?.deferReview && !taintWarning && !cloudEnforcedForDefer) {
+    return {
+      approved: false,
+      review: true,
+      reason: explainableLabel || 'Node9 flagged this action for review.',
+      ruleDescription: policyRuleDescription,
+      blockedByLabel: explainableLabel,
+    };
   }
 
   // ── THE HANDSHAKE (Phase 4.1: Cloud Init) ────────────────────────────────

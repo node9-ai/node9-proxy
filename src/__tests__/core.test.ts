@@ -750,6 +750,34 @@ describe('authorizeHeadless — persistent decisions', () => {
     });
   }
 
+  // ── Inline-ask Phase 1: deferReview short-circuit ──────────────────────────
+  // When a caller opts in via `deferReview`, a `review` verdict must return early
+  // as { approved:false, review:true } WITHOUT entering the approver race or SaaS
+  // handshake — so an ask-capable agent's hook can render the native prompt.
+  it('deferReview: a review verdict returns { review: true } and skips the race engine', async () => {
+    setupReviewGitPushMocks({});
+    const result = await authorizeHeadless('Bash', { command: 'git push origin dev' }, undefined, {
+      deferReview: true,
+    });
+    expect(result.review).toBe(true);
+    expect(result.approved).toBe(false);
+    // Race engine was skipped: did NOT resolve via the timeout racer.
+    const timeoutBlockedBy: AuthResult['blockedBy'] = 'timeout';
+    expect(result.blockedBy).not.toBe(timeoutBlockedBy);
+    // Rule context is carried through for the prompt text.
+    expect(result.reason).toBeTruthy();
+  });
+
+  it('deferReview is inert for a non-review (allow) verdict', async () => {
+    setupReviewGitPushMocks({});
+    // A command matching no rule allows as usual — defer only fires on review.
+    const result = await authorizeHeadless('Bash', { command: 'echo hello' }, undefined, {
+      deferReview: true,
+    });
+    expect(result.review).toBeFalsy();
+    expect(result.approved).toBe(true);
+  });
+
   it('smart-rule review is NOT bypassed by a persistent allow — { "Bash": "allow" } must not skip review-git-push', async () => {
     // Regression: a blanket persistent allow for the Bash tool must never override
     // a smart rule with verdict "review". The user explicitly configured review-git-push
