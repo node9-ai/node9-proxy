@@ -87,3 +87,13 @@ INSTRUCTIONS:
 - Do NOT retry this exact command or attempt to bypass the rule.${recovery}
 - Inform the user which security rule was triggered and ask how to proceed.`;
 }
+
+// Builds the prompt text for an inline "ask" (review verdict routed to the
+// agent's native approve/deny prompt). Unlike buildNegotiationMessage this is
+// REQUEST-framed, not block-framed: node9 is asking the user to approve, not
+// telling the agent it was blocked. Keep it short — it renders inside the
+// agent's permission prompt.
+export function buildReviewMessage(blockedByLabel?: string, ruleDescription?: string): string {
+  const why = ruleDescription || blockedByLabel || 'this action needs your review';
+  return `Node9 flagged this for your review: ${why}. Approve to proceed, or deny to cancel.`;
+}

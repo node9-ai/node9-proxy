@@ -30,7 +30,12 @@ function makeTempHome(): string {
   // human that never comes in this headless test.
   fs.writeFileSync(
     path.join(dir, 'config.json'),
-    JSON.stringify({ version: '1.0', settings: { mode: 'standard', approvalTimeoutMs: 0 } })
+    // reviewChannel:'approver' — this test asserts a review is intercepted (exit != 0)
+    // via node9's approver path; default-on would otherwise route it to the ask prompt.
+    JSON.stringify({
+      version: '1.0',
+      settings: { mode: 'standard', approvalTimeoutMs: 0, reviewChannel: 'approver' },
+    })
   );
   return home;
 }

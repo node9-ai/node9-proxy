@@ -98,6 +98,11 @@ export const ConfigFileSchema = z
         allowGlobalPause: z.boolean().optional(),
         auditHashArgs: z.boolean().optional(),
         agentPolicy: z.enum(['require_approval', 'block_on_rules']).optional(),
+        // Where a `review` verdict's prompt is rendered: 'ask' = the agent's own
+        // inline approve/deny prompt (Claude Code / GitHub Copilot); 'approver' =
+        // node9's own approver (terminal/native/cloud). Unset → smart default
+        // (ask for ask-capable agents unless a cloud approver is configured).
+        reviewChannel: z.enum(['ask', 'approver']).optional(),
         cloudSyncIntervalHours: z.number().positive().optional(),
         // Outbox shipper (audit.log → SaaS batch ingest). enabled defaults
         // to true; set false to fall back to local-only auditing.

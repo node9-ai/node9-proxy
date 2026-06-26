@@ -33,6 +33,9 @@ export interface Config {
     approvers: { native: boolean; browser: boolean; cloud: boolean; terminal: boolean };
     environment?: string;
     agentPolicy?: 'require_approval' | 'block_on_rules';
+    /** Review-prompt delivery: 'ask' = agent's inline prompt, 'approver' = node9's
+     *  own approver. Unset → smart default (see resolveAskMode in check.ts). */
+    reviewChannel?: 'ask' | 'approver';
     cloudSyncIntervalHours?: number;
     /** Outbox shipper (audit.log → SaaS batch ingest). */
     shipper: { enabled: boolean; intervalSeconds: number };
@@ -587,6 +590,7 @@ export function getConfig(cwd?: string): Config {
     if (s.approvalTimeoutSeconds !== undefined && s.approvalTimeoutMs === undefined)
       mergedSettings.approvalTimeoutMs = s.approvalTimeoutSeconds * 1000;
     if (s.environment !== undefined) mergedSettings.environment = s.environment;
+    if (s.reviewChannel !== undefined) mergedSettings.reviewChannel = s.reviewChannel;
     if (s.cloudSyncIntervalHours !== undefined)
       mergedSettings.cloudSyncIntervalHours = s.cloudSyncIntervalHours;
     if (s.hud !== undefined) mergedSettings.hud = { ...mergedSettings.hud, ...s.hud };
