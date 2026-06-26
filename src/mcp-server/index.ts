@@ -264,6 +264,46 @@ const TOOLS = [
     },
   },
   {
+    name: 'node9_posture',
+    description:
+      'Run the node9 security posture scorecard for the agent on this host — grades how exposed ' +
+      'the machine is to a compromised agent across isolation, egress, secrets-on-disk, supply ' +
+      'chain, and privilege, with the #1 risk and a concrete fix for each finding. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agent: {
+          type: 'string',
+          description: 'Optional label / policy scope for the agent being graded.',
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'node9_explain',
+    description:
+      'Preview exactly how node9 would evaluate a tool call BEFORE running it — the full ' +
+      'allow / review / block waterfall and step-by-step policy trace. Use this to self-check a ' +
+      'command (e.g. "git push --force") and see whether it would be allowed, sent for human ' +
+      'review, or blocked, and why. Read-only — nothing executes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tool: {
+          type: 'string',
+          description: 'Tool name to evaluate. Defaults to "bash" for plain shell commands.',
+        },
+        args: {
+          type: 'string',
+          description:
+            'Tool arguments as JSON, or a plain shell command string (e.g. "git push --force").',
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: 'node9_rule_add',
     description:
       'Add a new protective smart rule to the global node9 config (~/.node9/config.json). ' +
@@ -634,6 +674,20 @@ function handleSessionMcp(args: Record<string, unknown>): string {
   return runCliCommand(cliArgs);
 }
 
+function handlePostureMcp(args: Record<string, unknown>): string {
+  const cliArgs = ['posture'];
+  if (typeof args.agent === 'string' && args.agent) cliArgs.push('--agent', args.agent);
+  return runCliCommand(cliArgs);
+}
+
+function handleExplainMcp(args: Record<string, unknown>): string {
+  // tool defaults to "bash" so an agent can pass just a shell command string in `args`.
+  const tool = typeof args.tool === 'string' && args.tool ? args.tool : 'bash';
+  const cliArgs = ['explain', tool];
+  if (typeof args.args === 'string' && args.args) cliArgs.push(args.args);
+  return runCliCommand(cliArgs);
+}
+
 function handleUndoList(args: Record<string, unknown>): string {
   const cwdFilter = typeof args.cwd === 'string' && args.cwd ? args.cwd : null;
   let history = getSnapshotHistory();
@@ -791,6 +845,10 @@ export function runMcpServer(): void {
           text = handleReportMcp(toolArgs);
         } else if (toolName === 'node9_session') {
           text = handleSessionMcp(toolArgs);
+        } else if (toolName === 'node9_posture') {
+          text = handlePostureMcp(toolArgs);
+        } else if (toolName === 'node9_explain') {
+          text = handleExplainMcp(toolArgs);
         } else {
           process.stdout.write(err(id, -32601, `Unknown tool: ${toolName}`) + '\n');
           return;
