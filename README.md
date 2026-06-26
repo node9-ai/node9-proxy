@@ -141,6 +141,23 @@ node9 shield list    # show all shields + status
 - **Auto-undo** — git snapshot before every AI file edit → `node9 undo` to revert
 - **Skills pinning** — SHA-256 verification of installed Claude skills / plugins between sessions
 
+## Review prompts — approve inline, in your agent
+
+When node9 flags an action for **review** (e.g. `git push --force`, a `DROP TABLE`), the approve/deny prompt renders **inline in the agent conversation** — no frozen session, no separate terminal, no hook-timeout race. node9 still runs the full evaluator and makes the decision; only the prompt _surface_ moves to the agent.
+
+- **On by default** for **Claude Code** and **GitHub Copilot CLI** — the agents whose hook contract honors a native `ask`. Every other agent (Codex, Gemini, Antigravity, Hermes, Cursor, OpenCode, Pi) uses node9's own approver.
+- **Control it** with `reviewChannel` in `~/.node9/config.json` (or `--no-ask` on the hook):
+
+```jsonc
+{
+  "settings": {
+    "reviewChannel": "ask", // "ask" = inline agent prompt (default) | "approver" = node9's own approver
+  },
+}
+```
+
+- **Team setups:** when a cloud/team approver is configured (`approvers.cloud: true`), reviews route to that approver instead — node9 won't let an inline self-approval bypass routed/second-party approval.
+
 ## Sandbox — run an agent in a jail
 
 When watching isn't enough, **`node9 sandbox`** runs the agent inside a disposable container with a **kernel-enforced egress allowlist** and **scoped mounts** — while node9's hooks govern and audit every tool call _inside_ the box. The hard version of protection: the agent can only touch the folder you mount and reach the hosts you allow; everything else is dropped at the kernel.
