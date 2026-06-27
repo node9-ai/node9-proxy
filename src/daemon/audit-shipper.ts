@@ -84,6 +84,9 @@ export interface WireRow {
   editFilePath?: string;
   loopCount?: number;
   transcriptPath?: string;
+  /** Phase D2 — taint provenance on taint-based block rows (causal edge). */
+  taintFromEid?: string;
+  taintSource?: string;
 }
 
 /** Identity of the log file, so a rotated/recreated log resets the offset
@@ -182,6 +185,8 @@ export function buildWireRows(chunk: Buffer): { rows: WireRow[]; consumed: numbe
       ...(typeof parsed.transcriptPath === 'string'
         ? { transcriptPath: parsed.transcriptPath }
         : {}),
+      ...(typeof parsed.taintFromEid === 'string' ? { taintFromEid: parsed.taintFromEid } : {}),
+      ...(typeof parsed.taintSource === 'string' ? { taintSource: parsed.taintSource } : {}),
     });
   }
   return { rows, consumed: lastNl + 1 };

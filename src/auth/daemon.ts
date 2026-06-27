@@ -301,14 +301,19 @@ export async function notifyDaemonViewer(
  * Must be awaited before the hook process exits — fire-and-forget loses the
  * taint because the process exits before the fetch completes.
  */
-export async function notifyTaint(filePath: string, source: string): Promise<void> {
+export async function notifyTaint(
+  filePath: string,
+  source: string,
+  fromEid?: string
+): Promise<void> {
   if (!isDaemonRunning()) return;
   const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
   try {
     await fetch(`${base}/taint`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: filePath, source }),
+      // Phase D2 — fromEid is the audit eid that created this taint (edge source).
+      body: JSON.stringify({ path: filePath, source, ...(fromEid && { fromEid }) }),
       signal: AbortSignal.timeout(1000),
     });
   } catch {

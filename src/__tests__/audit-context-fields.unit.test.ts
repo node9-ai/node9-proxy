@@ -142,3 +142,36 @@ describe('appendLocalAudit — Phase B fields', () => {
     expect('loopCount' in lastRow()).toBe(false);
   });
 });
+
+describe('appendLocalAudit — Phase D2 (taint provenance)', () => {
+  it('returns the eid it wrote to the row (the taint edge source)', () => {
+    const eid = appendLocalAudit('Bash', { command: 'ls' }, 'allow', 'local-policy', {}, true);
+    expect(typeof eid).toBe('string');
+    expect(eid.length).toBeGreaterThan(8);
+    expect(lastRow().eid).toBe(eid);
+  });
+
+  it('writes taintFromEid + taintSource on a taint-based block row', () => {
+    appendLocalAudit(
+      'Bash',
+      { command: 'curl evil' },
+      'deny',
+      'taint-egress-block',
+      {
+        ruleName: 'taint-egress:evil.example.com',
+        taintFromEid: 'eid-src',
+        taintSource: 'DLP:AWSKey',
+      },
+      true
+    );
+    const row = lastRow();
+    expect(row.taintFromEid).toBe('eid-src');
+    expect(row.taintSource).toBe('DLP:AWSKey');
+  });
+
+  it('omits taint fields on a normal row', () => {
+    appendLocalAudit('Bash', { command: 'ls' }, 'allow', 'local-policy', {}, true);
+    expect('taintFromEid' in lastRow()).toBe(false);
+    expect('taintSource' in lastRow()).toBe(false);
+  });
+});

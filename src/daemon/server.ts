@@ -875,13 +875,17 @@ export function startDaemon(): void {
           path?: unknown;
           source?: unknown;
           ttlMs?: unknown;
+          fromEid?: unknown;
         };
         if (typeof body.path !== 'string' || typeof body.source !== 'string') {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({ error: 'path and source are required strings' }));
         }
         const ttlMs = typeof body.ttlMs === 'number' ? body.ttlMs : undefined;
-        taintStore.taint(body.path, body.source, ttlMs);
+        // Phase D2 — store the edge source; /taint/check returns the whole
+        // record, so fromEid rides back to the block site automatically.
+        const fromEid = typeof body.fromEid === 'string' ? body.fromEid : undefined;
+        taintStore.taint(body.path, body.source, ttlMs, fromEid);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ ok: true }));
       } catch {

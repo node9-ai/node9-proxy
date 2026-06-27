@@ -175,9 +175,14 @@ export function appendLocalAudit(
     /** Phase B — pointer to the agent's session transcript. Flows from the
      *  authorizeHeadless meta; relinks a batch row to its session for forensics. */
     transcriptPath?: string;
+    /** Phase D2 — taint provenance. On a taint-based block, the eid of the
+     *  audit row that CREATED the taint (the causal edge source) + its redacted
+     *  source label. The SaaS draws a taint edge from taintFromEid → this row. */
+    taintFromEid?: string;
+    taintSource?: string;
   },
   auditHashArgsEnabled?: boolean
-): void {
+): string {
   // NEVER build a preview for DLP rows: the matched secret is in the args
   // and redactSecrets' label-based patterns don't cover every credential
   // shape (a bare AWS key leaked through in testing). Gate on checkedBy —
@@ -208,10 +213,20 @@ export function appendLocalAudit(
   const editFilePathField = editFilePath ? { editFilePath } : {};
   const loopCountField = typeof meta?.loopCount === 'number' ? { loopCount: meta.loopCount } : {};
   const transcriptPathField = meta?.transcriptPath ? { transcriptPath: meta.transcriptPath } : {};
+  // Phase D2 — taint provenance fields (only set on taint-based block rows).
+  const taintFields = meta?.taintFromEid
+    ? {
+        taintFromEid: meta.taintFromEid,
+        ...(meta.taintSource && { taintSource: meta.taintSource }),
+      }
+    : {};
+  // eid is captured here (not generated inline) so the caller can use it as the
+  // SOURCE of a taint edge — see notifyTaint(path, source, eid) at the DLP block.
+  const eid = generateEventId();
   appendToLog(LOCAL_AUDIT_LOG, {
     // eid first: the outbox shipper dedups on it, and a fixed leading field
     // makes the JSONL easy to eyeball.
-    eid: generateEventId(),
+    eid,
     ts: new Date().toISOString(),
     tool: toolName,
     ...agentToolNameField,
@@ -226,6 +241,7 @@ export function appendLocalAudit(
     ...editFilePathField,
     ...loopCountField,
     ...transcriptPathField,
+    ...taintFields,
     ...testRun,
     agent: meta?.agent,
     mcpServer: meta?.mcpServer,
@@ -233,6 +249,7 @@ export function appendLocalAudit(
     hostname: os.hostname(),
     platform: os.platform(),
   });
+  return eid;
 }
 
 /**

@@ -159,6 +159,19 @@ describe('buildWireRows', () => {
     expect('loopCount' in rows[0]).toBe(false);
     expect('transcriptPath' in rows[0]).toBe(false);
   });
+
+  it('carries Phase D2 taint provenance (taintFromEid, taintSource)', () => {
+    const content = row({
+      checkedBy: 'taint-egress-block',
+      taintFromEid: 'eid-src',
+      taintSource: 'DLP:AWSKey',
+    });
+    const { rows } = buildWireRows(Buffer.from(content));
+    expect(rows[0]).toMatchObject({
+      taintFromEid: 'eid-src',
+      taintSource: 'DLP:AWSKey',
+    });
+  });
 });
 
 describe('buildBatchEndpoint', () => {
