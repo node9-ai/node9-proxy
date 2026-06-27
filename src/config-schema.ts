@@ -103,6 +103,10 @@ export const ConfigFileSchema = z
         // node9's own approver (terminal/native/cloud). Unset → smart default
         // (ask for ask-capable agents unless a cloud approver is configured).
         reviewChannel: z.enum(['ask', 'approver']).optional(),
+        // When true, agents may call WEAKENING node9 MCP tools (shield_disable,
+        // approver_set). Default (unset/false): those tools refuse over MCP — a human
+        // must run them from the CLI. node9's threat model is the agent itself.
+        mcpAllowWeakening: z.boolean().optional(),
         cloudSyncIntervalHours: z.number().positive().optional(),
         // Outbox shipper (audit.log → SaaS batch ingest). enabled defaults
         // to true; set false to fall back to local-only auditing.
