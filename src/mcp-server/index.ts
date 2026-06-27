@@ -36,15 +36,37 @@ function err(id: unknown, code: number, message: string): string {
 
 // ── Tool capability tiers ─────────────────────────────────────────────────────
 // node9's threat model is the agent itself, so the MCP surface must never let an
-// agent WEAKEN its own governance. Anything unlisted is read-only.
-//   weaken — reduces protection → refused over MCP by default (see runMcpServer)
-//   add    — only adds protection / restorative → always allowed
-const TOOL_CAPABILITY: Record<string, 'readonly' | 'add' | 'weaken'> = {
+// agent WEAKEN its own governance.
+//   weaken   — reduces protection → refused over MCP by default (see runMcpServer)
+//   add      — only adds protection / restorative → always allowed
+//   readonly — no mutation → always allowed
+// IMPORTANT: EVERY tool in TOOLS must be classified here — this is enforced by
+// mcp-capability.unit.test.ts (an unlisted tool fails the build). When adding a
+// tool, if it can reduce protection in ANY way, mark it 'weaken' — never leave a
+// mutating tool unclassified (it would otherwise default to readonly and bypass
+// the gate).
+export const TOOL_CAPABILITY: Record<string, 'readonly' | 'add' | 'weaken'> = {
+  // weaken — gated over MCP
   node9_shield_disable: 'weaken',
   node9_approver_set: 'weaken',
+  // add / restorative — always allowed
   node9_shield_enable: 'add',
   node9_rule_add: 'add', // already block/review-only — handleRuleAdd rejects "allow"
   node9_undo_revert: 'add', // restorative
+  // readonly
+  node9_status: 'readonly',
+  node9_config_get: 'readonly',
+  node9_policy_get: 'readonly',
+  node9_audit_get: 'readonly',
+  node9_session: 'readonly',
+  node9_scan: 'readonly',
+  node9_report: 'readonly',
+  node9_posture: 'readonly',
+  node9_explain: 'readonly',
+  node9_shield_list: 'readonly',
+  node9_approver_list: 'readonly',
+  node9_undo_list: 'readonly',
+  node9_undo_detail: 'readonly',
 };
 
 function capabilityOf(tool: string): 'readonly' | 'add' | 'weaken' {
@@ -53,7 +75,7 @@ function capabilityOf(tool: string): 'readonly' | 'add' | 'weaken' {
 
 // ── Tool definitions ──────────────────────────────────────────────────────────
 
-const TOOLS = [
+export const TOOLS = [
   {
     name: 'node9_status',
     description:
@@ -790,6 +812,12 @@ function handleUndoRevert(args: Record<string, unknown>): string {
 
 // ── Protocol loop ─────────────────────────────────────────────────────────────
 
+// LIFECYCLE GOTCHA: this server is LONG-LIVED — the MCP client (Claude Code,
+// Cursor, …) spawns it once and keeps it alive for the session. So new node9 code
+// AND config changes (incl. settings.mcpAllowWeakening, read via cached getConfig())
+// take effect only when the client RECONNECTS and re-spawns this process.
+// Rebuilding node9 or restarting the node9 daemon does NOT reload a running server —
+// restart the agent app to pick up changes.
 export function runMcpServer(): void {
   const rl = readline.createInterface({ input: process.stdin, terminal: false });
 

@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## Unreleased
 
+### Security
+
+- **MCP weakening tools are gated.** node9's MCP server now refuses _weakening_ tools — `node9_shield_disable` and `node9_approver_set` — over MCP **by default**, so a compromised agent can't disarm node9 through node9's own MCP server. A human runs them from the CLI; opt in with `settings.mcpAllowWeakening: true`. Every MCP tool is now explicitly classified (`readonly` / `add` / `weaken`), enforced by a test so a newly added tool can't silently default to `readonly` and bypass the gate.
+  - **Operational note:** `node9 mcp-server` is **long-lived** — your agent app (Claude Code, Cursor, …) spawns it once and keeps it running. After updating node9 (or changing `mcpAllowWeakening`), **restart the agent app** (or reconnect MCP) so it re-spawns the server with the new code/config. Rebuilding node9 or restarting the node9 daemon does **not** reload a running server.
+
 ### Added
 
 - **Inline review prompts** (`reviewChannel` / `--ask`). On a `review` verdict, node9 now routes the approve/deny prompt to the agent's **own inline prompt** instead of node9's separate approver — no frozen session, no 60 s hook-timeout race, no terminal context-switch (resolves node9-ai/node9-proxy#209). Verified live against the agents whose hook contract supports it: **Claude Code** (`hookSpecificOutput.permissionDecision:"ask"`) and **GitHub Copilot CLI** (flat `permissionDecision:"ask"`).
