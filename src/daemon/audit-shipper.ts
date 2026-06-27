@@ -79,6 +79,11 @@ export interface WireRow {
   workingDir?: string;
   platform?: string;
   shellType?: string;
+  /** Phase B — rich per-event detail for batch-only rows: touched file path,
+   *  loop magnitude, and the session transcript pointer. */
+  editFilePath?: string;
+  loopCount?: number;
+  transcriptPath?: string;
 }
 
 /** Identity of the log file, so a rotated/recreated log resets the offset
@@ -170,6 +175,13 @@ export function buildWireRows(chunk: Buffer): { rows: WireRow[]; consumed: numbe
       ...(typeof parsed.workingDir === 'string' ? { workingDir: parsed.workingDir } : {}),
       ...(typeof parsed.platform === 'string' ? { platform: parsed.platform } : {}),
       ...(typeof parsed.shellType === 'string' ? { shellType: parsed.shellType } : {}),
+      // Phase B — rich detail; forwarded only when the writer recorded it
+      // (older audit.log rows simply omit them).
+      ...(typeof parsed.editFilePath === 'string' ? { editFilePath: parsed.editFilePath } : {}),
+      ...(typeof parsed.loopCount === 'number' ? { loopCount: parsed.loopCount } : {}),
+      ...(typeof parsed.transcriptPath === 'string'
+        ? { transcriptPath: parsed.transcriptPath }
+        : {}),
     });
   }
   return { rows, consumed: lastNl + 1 };

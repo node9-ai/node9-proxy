@@ -571,7 +571,15 @@ async function _authorizeHeadlessCore(
         // fire-and-forget POST here died with process.exit, which is why
         // loop counts never reached the dashboard).
         if (!isManual)
-          appendLocalAudit(toolName, args, 'deny', 'loop-detected', meta, hashAuditArgs);
+          appendLocalAudit(
+            toolName,
+            args,
+            'deny',
+            'loop-detected',
+            // Phase B — carry the loop magnitude so the SaaS shows "looped Nx".
+            { ...meta, loopCount: loopResult.count },
+            hashAuditArgs
+          );
         return {
           approved: false,
           reason,
