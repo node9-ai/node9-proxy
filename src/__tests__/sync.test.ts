@@ -20,28 +20,41 @@ process.env.NODE9_TESTING = '1';
 // we need to assert it's invoked / skipped based on NODE9_BLAST_DISABLE.
 // vi.hoisted lets us reference the mock from inside vi.mock's hoisted
 // factory without TDZ errors.
-const { mockRunBlast, mockTickScanWatcher, mockMarkUploadComplete, mockHttpsRequest } = vi.hoisted(
-  () => ({
-    mockRunBlast: vi.fn().mockReturnValue({
-      reachable: [],
-      envFindings: [],
-      score: 100,
-    }),
-    mockTickScanWatcher: vi.fn().mockResolvedValue({
-      findings: [],
-      totalToolCalls: 0,
-      filesScanned: 0,
-      filesNew: 0,
-      filesSkipped: 0,
-      uploadAs: 'deltas',
-      schemaFuture: false,
-    }),
-    mockMarkUploadComplete: vi.fn(),
-    mockHttpsRequest: vi.fn(),
-  })
-);
+const {
+  mockRunBlast,
+  mockTickScanWatcher,
+  mockMarkUploadComplete,
+  mockHttpsRequest,
+  mockRunPosture,
+  mockShipPosture,
+} = vi.hoisted(() => ({
+  mockRunBlast: vi.fn().mockReturnValue({
+    reachable: [],
+    envFindings: [],
+    score: 100,
+  }),
+  mockTickScanWatcher: vi.fn().mockResolvedValue({
+    findings: [],
+    totalToolCalls: 0,
+    filesScanned: 0,
+    filesNew: 0,
+    filesSkipped: 0,
+    uploadAs: 'deltas',
+    schemaFuture: false,
+  }),
+  mockMarkUploadComplete: vi.fn(),
+  mockHttpsRequest: vi.fn(),
+  mockRunPosture: vi.fn().mockResolvedValue({ score: 100, tier: 'good', findings: [] }),
+  mockShipPosture: vi.fn().mockResolvedValue(true),
+}));
 vi.mock('../cli/commands/blast.js', () => ({
   runBlast: mockRunBlast,
+}));
+vi.mock('../posture/index.js', () => ({
+  runPosture: mockRunPosture,
+}));
+vi.mock('../posture/ship.js', () => ({
+  shipPosture: mockShipPosture,
 }));
 vi.mock('../daemon/scan-watermark.js', () => ({
   tickScanWatcher: mockTickScanWatcher,
@@ -322,6 +335,57 @@ describe('blast piggyback on cloud sync', () => {
     await runCloudSync();
     await new Promise((resolve) => setImmediate(resolve));
     expect(mockRunBlast).not.toHaveBeenCalled();
+  });
+});
+
+// ── P1: posture piggyback on cloud sync ────────────────────────────────
+
+describe('posture piggyback on cloud sync', () => {
+  const CREDS = {
+    [CRED_PATH]: JSON.stringify({
+      default: {
+        apiKey: 'n9_live_abc123',
+        apiUrl: 'https://localhost:1/api/v1/intercept',
+      },
+    }),
+  };
+
+  beforeEach(() => {
+    mockRunPosture.mockClear();
+    mockShipPosture.mockClear();
+    delete process.env.NODE9_POSTURE_DISABLE;
+  });
+
+  it('invokes runPosture + shipPosture when sync runs and NODE9_POSTURE_DISABLE is unset', async () => {
+    mockFiles(CREDS);
+    await runCloudSync();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockRunPosture).toHaveBeenCalled();
+    expect(mockShipPosture).toHaveBeenCalled();
+  });
+
+  it('skips posture when NODE9_POSTURE_DISABLE=1 (opt-out)', async () => {
+    process.env.NODE9_POSTURE_DISABLE = '1';
+    mockFiles(CREDS);
+    await runCloudSync();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockRunPosture).not.toHaveBeenCalled();
+  });
+
+  it('skips posture when there are no credentials', async () => {
+    mockFiles({});
+    await runCloudSync();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockRunPosture).not.toHaveBeenCalled();
+  });
+
+  it('a posture push failure never breaks the sync loop (fail-open)', async () => {
+    mockRunPosture.mockRejectedValueOnce(new Error('boom'));
+    mockFiles(CREDS);
+    // Must resolve normally despite the rejection inside the fire-and-forget push.
+    await runCloudSync();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockRunPosture).toHaveBeenCalled();
   });
 });
 
