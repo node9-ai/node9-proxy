@@ -34,6 +34,23 @@ function err(id: unknown, code: number, message: string): string {
   return JSON.stringify({ jsonrpc: '2.0', id: id ?? null, error: { code, message } });
 }
 
+// ── Tool capability tiers ─────────────────────────────────────────────────────
+// node9's threat model is the agent itself, so the MCP surface must never let an
+// agent WEAKEN its own governance. Anything unlisted is read-only.
+//   weaken — reduces protection → refused over MCP by default (see runMcpServer)
+//   add    — only adds protection / restorative → always allowed
+const TOOL_CAPABILITY: Record<string, 'readonly' | 'add' | 'weaken'> = {
+  node9_shield_disable: 'weaken',
+  node9_approver_set: 'weaken',
+  node9_shield_enable: 'add',
+  node9_rule_add: 'add', // already block/review-only — handleRuleAdd rejects "allow"
+  node9_undo_revert: 'add', // restorative
+};
+
+function capabilityOf(tool: string): 'readonly' | 'add' | 'weaken' {
+  return TOOL_CAPABILITY[tool] ?? 'readonly';
+}
+
 // ── Tool definitions ──────────────────────────────────────────────────────────
 
 const TOOLS = [
@@ -78,7 +95,9 @@ const TOOLS = [
   },
   {
     name: 'node9_shield_disable',
-    description: 'Disable a node9 shield. Use node9_shield_list to see currently active shields.',
+    description:
+      'Disable a node9 shield. WEAKENING action — refused over MCP by default (a human must run ' +
+      '"node9 shield disable <name>" from the CLI). Use node9_shield_list to see active shields.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -104,6 +123,7 @@ const TOOLS = [
       'Enable or disable a specific node9 approver channel in the global config (~/.node9/config.json). ' +
       'Use this to turn individual channels on or off without touching other settings. ' +
       'Channels: native, browser, cloud, terminal. ' +
+      'WEAKENING action — refused over MCP by default (a human must run it from the CLI). ' +
       'WARNING: disabling all approvers means node9 cannot prompt for human approval — use with care.',
     inputSchema: {
       type: 'object',
@@ -810,6 +830,31 @@ export function runMcpServer(): void {
       const p = (params ?? {}) as Record<string, unknown>;
       const toolName = p.name as string | undefined;
       const toolArgs = (p.arguments ?? {}) as Record<string, unknown>;
+
+      // Security gate: a WEAKENING tool (shield_disable / approver_set) must never be
+      // driven by the agent over MCP by default — that would let a compromised agent
+      // disarm its own governor. A human runs these from the CLI; opt in with
+      // settings.mcpAllowWeakening to re-enable agent-driven weakening.
+      if (capabilityOf(toolName ?? '') === 'weaken') {
+        let allowed = false;
+        try {
+          allowed = getConfig().settings.mcpAllowWeakening === true;
+        } catch {
+          allowed = false; // config error → fail-closed
+        }
+        if (!allowed) {
+          process.stdout.write(
+            err(
+              id,
+              -32000,
+              `${toolName} weakens node9 and is disabled over MCP. A human must run it from the ` +
+                `CLI (e.g. "node9 shield disable <name>"), or set "mcpAllowWeakening": true in ` +
+                `~/.node9/config.json to allow agent-driven weakening.`
+            ) + '\n'
+          );
+          return;
+        }
+      }
 
       try {
         let text: string;

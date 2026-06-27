@@ -36,6 +36,9 @@ export interface Config {
     /** Review-prompt delivery: 'ask' = agent's inline prompt, 'approver' = node9's
      *  own approver. Unset → smart default (see resolveAskMode in check.ts). */
     reviewChannel?: 'ask' | 'approver';
+    /** When true, agents may call weakening MCP tools (shield_disable, approver_set).
+     *  Default (unset): those tools refuse over MCP — a human runs them from the CLI. */
+    mcpAllowWeakening?: boolean;
     cloudSyncIntervalHours?: number;
     /** Outbox shipper (audit.log → SaaS batch ingest). */
     shipper: { enabled: boolean; intervalSeconds: number };
@@ -591,6 +594,7 @@ export function getConfig(cwd?: string): Config {
       mergedSettings.approvalTimeoutMs = s.approvalTimeoutSeconds * 1000;
     if (s.environment !== undefined) mergedSettings.environment = s.environment;
     if (s.reviewChannel !== undefined) mergedSettings.reviewChannel = s.reviewChannel;
+    if (s.mcpAllowWeakening !== undefined) mergedSettings.mcpAllowWeakening = s.mcpAllowWeakening;
     if (s.cloudSyncIntervalHours !== undefined)
       mergedSettings.cloudSyncIntervalHours = s.cloudSyncIntervalHours;
     if (s.hud !== undefined) mergedSettings.hud = { ...mergedSettings.hud, ...s.hud };
