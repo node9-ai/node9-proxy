@@ -97,6 +97,36 @@ export function appendHookDebug(
   });
 }
 
+/**
+ * Phase B — extract a touched file path from tool args (Edit/Write/Read/
+ * notebook), handling Gemini-style stringified-JSON args. Deliberately BROADER
+ * than the sniper's editFilePath (which is Edit-only): the file-risk badge
+ * wants any touched path. A path is not a secret — it's the same class of data
+ * BlastSnapshot already ships — so it rides the batch row. Returns undefined
+ * when no path key is present.
+ */
+export function filePathFromArgs(args: unknown): string | undefined {
+  let obj = args;
+  if (typeof obj === 'string') {
+    const t = obj.trim();
+    if (!t.startsWith('{') || !t.endsWith('}')) return undefined;
+    // Hot path: skip parsing large stringified args (e.g. a Gemini Write's
+    // full content) when there is no path key to extract anyway.
+    if (!t.includes('file_path') && !t.includes('notebook_path')) return undefined;
+    try {
+      obj = JSON.parse(t);
+    } catch {
+      return undefined;
+    }
+  }
+  if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+    const o = obj as Record<string, unknown>;
+    const v = o.file_path ?? o.notebook_path;
+    if (typeof v === 'string' && v) return v.slice(0, 1024);
+  }
+  return undefined;
+}
+
 export function appendLocalAudit(
   toolName: string,
   args: unknown,
@@ -139,9 +169,20 @@ export function appendLocalAudit(
      *  an agent acted (blast-radius context) — and the Report's By-Project
      *  chart attributes shipped traffic. See shipper-context-fields.md. */
     workingDir?: string;
+    /** Phase B — loop magnitude, passed only at the loop-detected call site so
+     *  the SaaS can show "looped Nx" instead of just the flag. */
+    loopCount?: number;
+    /** Phase B — pointer to the agent's session transcript. Flows from the
+     *  authorizeHeadless meta; relinks a batch row to its session for forensics. */
+    transcriptPath?: string;
+    /** Phase D2 — taint provenance. On a taint-based block, the eid of the
+     *  audit row that CREATED the taint (the causal edge source) + its redacted
+     *  source label. The SaaS draws a taint edge from taintFromEid → this row. */
+    taintFromEid?: string;
+    taintSource?: string;
   },
   auditHashArgsEnabled?: boolean
-): void {
+): string {
   // NEVER build a preview for DLP rows: the matched secret is in the args
   // and redactSecrets' label-based patterns don't cover every credential
   // shape (a bare AWS key leaked through in testing). Gate on checkedBy —
@@ -165,10 +206,27 @@ export function appendLocalAudit(
   const workingDirField = meta?.workingDir ? { workingDir: meta.workingDir } : {};
   const shell = process.env.SHELL ? path.basename(process.env.SHELL) : undefined;
   const shellTypeField = shell ? { shellType: shell } : {};
+  // Phase B — rich per-event detail for batch-only rows. editFilePath is
+  // extracted here (universal, no call-site changes); loopCount/transcriptPath
+  // ride the meta. A file path is not a secret, so it ships even on DLP rows.
+  const editFilePath = filePathFromArgs(args);
+  const editFilePathField = editFilePath ? { editFilePath } : {};
+  const loopCountField = typeof meta?.loopCount === 'number' ? { loopCount: meta.loopCount } : {};
+  const transcriptPathField = meta?.transcriptPath ? { transcriptPath: meta.transcriptPath } : {};
+  // Phase D2 — taint provenance fields (only set on taint-based block rows).
+  const taintFields = meta?.taintFromEid
+    ? {
+        taintFromEid: meta.taintFromEid,
+        ...(meta.taintSource && { taintSource: meta.taintSource }),
+      }
+    : {};
+  // eid is captured here (not generated inline) so the caller can use it as the
+  // SOURCE of a taint edge — see notifyTaint(path, source, eid) at the DLP block.
+  const eid = generateEventId();
   appendToLog(LOCAL_AUDIT_LOG, {
     // eid first: the outbox shipper dedups on it, and a fixed leading field
     // makes the JSONL easy to eyeball.
-    eid: generateEventId(),
+    eid,
     ts: new Date().toISOString(),
     tool: toolName,
     ...agentToolNameField,
@@ -180,6 +238,10 @@ export function appendLocalAudit(
     ...cloudLinkField,
     ...workingDirField,
     ...shellTypeField,
+    ...editFilePathField,
+    ...loopCountField,
+    ...transcriptPathField,
+    ...taintFields,
     ...testRun,
     agent: meta?.agent,
     mcpServer: meta?.mcpServer,
@@ -187,6 +249,7 @@ export function appendLocalAudit(
     hostname: os.hostname(),
     platform: os.platform(),
   });
+  return eid;
 }
 
 /**

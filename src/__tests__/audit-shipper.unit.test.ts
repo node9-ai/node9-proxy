@@ -138,6 +138,40 @@ describe('buildWireRows', () => {
       shellType: 'zsh',
     });
   });
+
+  it('carries Phase B detail: editFilePath, loopCount, transcriptPath', () => {
+    const content = row({
+      editFilePath: '/home/nadav/.aws/credentials',
+      loopCount: 17,
+      transcriptPath: '/home/nadav/.claude/projects/x/sess.jsonl',
+    });
+    const { rows } = buildWireRows(Buffer.from(content));
+    expect(rows[0]).toMatchObject({
+      editFilePath: '/home/nadav/.aws/credentials',
+      loopCount: 17,
+      transcriptPath: '/home/nadav/.claude/projects/x/sess.jsonl',
+    });
+  });
+
+  it('omits Phase B fields when an older audit.log row lacks them', () => {
+    const { rows } = buildWireRows(Buffer.from(row({})));
+    expect('editFilePath' in rows[0]).toBe(false);
+    expect('loopCount' in rows[0]).toBe(false);
+    expect('transcriptPath' in rows[0]).toBe(false);
+  });
+
+  it('carries Phase D2 taint provenance (taintFromEid, taintSource)', () => {
+    const content = row({
+      checkedBy: 'taint-egress-block',
+      taintFromEid: 'eid-src',
+      taintSource: 'DLP:AWSKey',
+    });
+    const { rows } = buildWireRows(Buffer.from(content));
+    expect(rows[0]).toMatchObject({
+      taintFromEid: 'eid-src',
+      taintSource: 'DLP:AWSKey',
+    });
+  });
 });
 
 describe('buildBatchEndpoint', () => {

@@ -36,6 +36,22 @@ describe('TaintStore — taint and check', () => {
     expect(record!.expiresAt).toBeGreaterThan(record!.createdAt);
   });
 
+  it('Phase D2 — round-trips fromEid (the causal edge source)', () => {
+    store.taint('/tmp/secret.txt', 'DLP:AWSKey', undefined, 'eid-123');
+    expect(store.check('/tmp/secret.txt')!.fromEid).toBe('eid-123');
+  });
+
+  it('Phase D2 — omits fromEid when not provided', () => {
+    store.taint('/tmp/secret.txt', 'DLP:AWSKey');
+    expect(store.check('/tmp/secret.txt')!.fromEid).toBeUndefined();
+  });
+
+  it('Phase D2 — propagate carries fromEid to the copy', () => {
+    store.taint('/tmp/src.txt', 'DLP:AWSKey', undefined, 'eid-src');
+    store.propagate('/tmp/src.txt', '/tmp/copy.txt');
+    expect(store.check('/tmp/copy.txt')!.fromEid).toBe('eid-src');
+  });
+
   it('respects custom TTL', () => {
     store.taint('/tmp/short.txt', 'DLP:Test', 500);
     const record = store.check('/tmp/short.txt');

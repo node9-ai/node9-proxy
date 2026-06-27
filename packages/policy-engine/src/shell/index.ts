@@ -514,6 +514,11 @@ export const AST_FS_REGEX_RULES = new Set<string>([
   // raw-regex smart rule is suppressed for bash — its cond1 read a grep
   // alternation's `|` as a shell pipe (`grep "…|mysql…"` → false positive).
   'review-drop-truncate-shell',
+  // chmod 777 is now owned by the AST detector (analyzeChmod777) so the raw-
+  // regex smart rule is suppressed for bash — it matched `chmod 777` inside a
+  // `node -e` / `python -c` string literal (a detection pattern, not a run
+  // command) → false positive.
+  'shield:filesystem:review-chmod-777',
 ]);
 
 // Database CLIs that actually execute SQL. Detection requires one of these to be
@@ -556,6 +561,110 @@ export function analyzeSqlDestructive(
     reason: 'SQL DDL destructive statement inside a shell command',
     description:
       'The AI wants to drop or truncate a database table via the shell. This permanently deletes the table structure or all its data.',
+  };
+}
+
+// Permission tokens that make a chmod a privilege-escalation concern. The
+// union of the two detection paths this consolidates: the filesystem shield's
+// raw regex matched `777`/`a+rwx`, while the scan path (canonical.ts) matched
+// `777`/`0777`/`+x`. Neither was a superset, so each missed cases the other
+// caught — the union closes both gaps and aligns live gate + CLI scan.
+const CHMOD_OPEN_PERM_TOKENS = new Set(['777', '0777', 'a+rwx', '+x']);
+
+// Command wrappers that run a wrapped command (`sudo chmod 777`, `xargs chmod
+// 777`, `env FOO=bar chmod 777`, `timeout 5 chmod 777`). mvdan-sh parses these
+// as a single CallExpr whose name is the wrapper, so `chmod` is an argument,
+// never the action. Without unwrapping, the raw regex caught `sudo chmod 777`
+// and the AST detector would not — a coverage regression. We look for `chmod`
+// anywhere in a wrapper's args. `echo chmod 777` is NOT affected: `echo` is
+// not a wrapper, so chmod as a non-wrapper argument stays unflagged.
+const COMMAND_WRAPPERS = new Set([
+  'sudo',
+  'doas',
+  'env',
+  'xargs',
+  'time',
+  'nice',
+  'ionice',
+  'nohup',
+  'setsid',
+  'stdbuf',
+  'timeout',
+  'command',
+  'exec',
+]);
+
+/**
+ * True when the command runs `chmod` (directly or via a command wrapper) with a
+ * world-open MODE argument. Walks the AST and, for each chmod invocation, reads
+ * the FIRST non-flag arg after `chmod` — the mode slot per `chmod [OPTION]...
+ * MODE FILE...` — and checks only THAT against CHMOD_OPEN_PERM_TOKENS. Binding
+ * the permission check to the mode slot (not a token-bag scan) is what keeps a
+ * safe-mode chmod on a path that merely contains "777" (e.g. `chmod 644 ./777`)
+ * from false-positiving. Quote/escape obfuscation (`c\hmod`) is still caught
+ * because resolveWordLiteral de-obfuscates each word.
+ */
+function chmodHasOpenPermMode(command: string): boolean {
+  const f = parseShared(command);
+  if (f === PARSE_FAIL) return false; // fail open for FPs, not FNs
+  let found = false;
+  try {
+    syntax.Walk(f, (node: unknown) => {
+      if (!node || found) return false;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const n = node as any;
+      if (syntax.NodeType(n) !== 'CallExpr') return true;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const words: (string | null)[] = (n.Args || []).map((a: any) => resolveWordLiteral(a));
+      if (words.length === 0) return true;
+      const name = (words[0] ?? '').toLowerCase();
+      // chmod as the command name, or as a word inside a wrapper's args.
+      let idx = -1;
+      if (name === 'chmod') idx = 0;
+      else if (COMMAND_WRAPPERS.has(name))
+        idx = words.findIndex((w, i) => i > 0 && w?.toLowerCase() === 'chmod');
+      if (idx < 0) return true;
+      // Mode = first non-flag slot after chmod (skip -R, -v, --, …). The slot is
+      // consumed once reached, literal or dynamic — a dynamic mode is unknowable
+      // so it simply doesn't match (no false positive on `chmod $MODE file`).
+      for (let i = idx + 1; i < words.length; i++) {
+        const w = words[i];
+        if (w !== null && w.startsWith('-')) continue; // chmod option flag
+        if (w !== null && CHMOD_OPEN_PERM_TOKENS.has(w.toLowerCase())) found = true;
+        break;
+      }
+      return true;
+    });
+  } catch {
+    return found; // partial result on walker error
+  }
+  return found;
+}
+
+/**
+ * AST-aware chmod-777 detector. Fires when `chmod` runs (directly or via a
+ * command wrapper like sudo/xargs/env) with a world-open mode (777/0777/a+rwx/
+ * +x) — see chmodHasOpenPermMode. This is the structural replacement for the
+ * FP-prone `shield:filesystem:review-chmod-777` regex rule, which matched
+ * `chmod 777` anywhere in the raw string — so a `node -e` / `python -c` payload
+ * whose string/regex literal merely MENTIONS `chmod 777` (a detection pattern)
+ * tripped it even though no chmod runs. Returns a 'review' verdict (world-open
+ * perms are human-approval-worthy but not auto-block) or null. Pure.
+ */
+export function analyzeChmod777(
+  command: string
+): { ruleName: string; verdict: 'review'; reason: string; description: string } | null {
+  // Cheap pre-check before parsing — most commands have no chmod at all. Strip
+  // quote/escape obfuscation first (`c\hmod`, `c''hmod`) so the fast-path-out
+  // doesn't bail before the AST resolves it; the real gate is the mode walk.
+  if (!/chmod/i.test(command.replace(/[\\'"]/g, ''))) return null;
+  if (!chmodHasOpenPermMode(command)) return null;
+  return {
+    ruleName: 'shield:filesystem:review-chmod-777',
+    verdict: 'review',
+    reason: 'chmod 777 requires human approval (filesystem shield)',
+    description:
+      'The AI wants to make a file world-writable/executable (chmod 777). This removes the permission protection on the file so any user or process can modify or run it.',
   };
 }
 

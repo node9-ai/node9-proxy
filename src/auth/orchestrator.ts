@@ -327,7 +327,11 @@ async function _authorizeHeadlessCore(
     if (filePaths.length > 0) {
       const taintResult = await checkTaint(filePaths);
       if (taintResult.tainted && taintResult.record) {
-        const { path: taintedPath, source: taintSource } = taintResult.record;
+        const {
+          path: taintedPath,
+          source: taintSource,
+          fromEid: taintFromEid,
+        } = taintResult.record;
         taintWarning = `⚠️ ${taintedPath} was flagged by ${taintSource} — this file may contain sensitive data`;
 
         // ── Phase 4: taint × egress synergy (GAP-5) ──────────────────────────
@@ -351,7 +355,9 @@ async function _authorizeHeadlessCore(
                 args,
                 'deny',
                 isObserveMode ? 'observe-mode-taint-egress-would-block' : 'taint-egress-block',
-                { ...meta, ruleName: `taint-egress:${eg.host}` },
+                // Phase D2 — the causal taint edge: from the row that created
+                // the taint (taintFromEid) to this block row.
+                { ...meta, ruleName: `taint-egress:${eg.host}`, taintFromEid, taintSource },
                 hashAuditArgs
               );
             if (isObserveMode) {
@@ -428,8 +434,11 @@ async function _authorizeHeadlessCore(
         // the outbox shipper carries them to the SaaS (no decision-time
         // network call — that path used to lose events when the hook process
         // exited before the fire-and-forget POST completed).
+        // Phase D2 — capture this row's eid so the taint it creates can point
+        // back to it (the causal edge source). Undefined under --manual (no row).
+        let dlpEid: string | undefined;
         if (!isManual)
-          appendLocalAudit(
+          dlpEid = appendLocalAudit(
             toolName,
             args,
             'deny',
@@ -443,7 +452,7 @@ async function _authorizeHeadlessCore(
           );
         // Taint the destination file so future uploads of it are also blocked.
         if (isWriteTool(toolName) && filePath) {
-          await notifyTaint(filePath, `DLP:${dlpMatch.patternName}`);
+          await notifyTaint(filePath, `DLP:${dlpMatch.patternName}`, dlpEid);
         }
         if (isObserveMode) {
           return {
@@ -571,7 +580,15 @@ async function _authorizeHeadlessCore(
         // fire-and-forget POST here died with process.exit, which is why
         // loop counts never reached the dashboard).
         if (!isManual)
-          appendLocalAudit(toolName, args, 'deny', 'loop-detected', meta, hashAuditArgs);
+          appendLocalAudit(
+            toolName,
+            args,
+            'deny',
+            'loop-detected',
+            // Phase B — carry the loop magnitude so the SaaS shows "looped Nx".
+            { ...meta, loopCount: loopResult.count },
+            hashAuditArgs
+          );
         return {
           approved: false,
           reason,

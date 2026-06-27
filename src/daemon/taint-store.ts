@@ -14,6 +14,9 @@ export interface TaintRecord {
   source: string; // e.g. "DLP:AnthropicApiKey", "DLP:GitHubToken"
   createdAt: number;
   expiresAt: number;
+  /** Phase D2 — eid of the audit row that created this taint (causal edge
+   *  source). Rides through the daemon round-trip via check()'s record. */
+  fromEid?: string;
 }
 
 const DEFAULT_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -22,7 +25,7 @@ export class TaintStore {
   private records = new Map<string, TaintRecord>();
 
   /** Add or refresh taint on an absolute path. */
-  taint(filePath: string, source: string, ttlMs = DEFAULT_TTL_MS): void {
+  taint(filePath: string, source: string, ttlMs = DEFAULT_TTL_MS, fromEid?: string): void {
     const resolved = this._resolve(filePath);
     const now = Date.now();
     this.records.set(resolved, {
@@ -30,6 +33,7 @@ export class TaintStore {
       source,
       createdAt: now,
       expiresAt: now + ttlMs,
+      ...(fromEid && { fromEid }),
     });
   }
 
@@ -61,7 +65,9 @@ export class TaintStore {
       // Strip any existing "propagated:" prefix so chained copies don't
       // produce "propagated:propagated:..." — one level of prefix is enough.
       const baseSource = taintRecord.source.replace(/^(propagated:)+/, '');
-      this.taint(destPath, `propagated:${baseSource}`, remainingMs);
+      // Phase D2 — carry fromEid through the copy so a cp/mv'd tainted file
+      // keeps its causal edge source if it's later exfiltrated.
+      this.taint(destPath, `propagated:${baseSource}`, remainingMs, taintRecord.fromEid);
     }
     if (clearSource) {
       this.records.delete(this._resolve(sourcePath));

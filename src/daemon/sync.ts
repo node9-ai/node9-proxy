@@ -10,6 +10,8 @@ import os from 'os';
 import path from 'path';
 import { getConfig } from '../config/index.js';
 import { runBlast } from '../cli/commands/blast.js';
+import { runPosture } from '../posture/index.js';
+import { shipPosture } from '../posture/ship.js';
 import {
   summarizeBlast,
   summarizeScan,
@@ -322,6 +324,13 @@ async function syncOnce(): Promise<void> {
   if (process.env.NODE9_SCAN_DISABLE !== '1') {
     void pushScanSnapshot(creds);
   }
+
+  // Same pattern for posture: run the secrets/egress/gate scorecard and POST
+  // it so the SaaS Posture tab stays fresh without a manual `node9 posture
+  // --ship`. Fire-and-forget. Opt-out via NODE9_POSTURE_DISABLE=1.
+  if (process.env.NODE9_POSTURE_DISABLE !== '1') {
+    void pushPostureSnapshot(creds);
+  }
 }
 
 /**
@@ -379,6 +388,26 @@ async function pushBlastSnapshot(creds: { apiKey: string; apiUrl: string }): Pro
     });
   } catch {
     // Silent — never break sync over a blast push.
+  }
+}
+
+/**
+ * Run the posture scorecard and POST the redacted snapshot to the SaaS.
+ * Fire-and-forget — mirrors pushBlastSnapshot's failure mode (never throws,
+ * never blocks sync). Reuses shipPosture, which derives `/posture/report`
+ * from the same `/policies/sync` creds URL — so there is no network code here.
+ *
+ * cwd is pinned to $HOME: the daemon has no project cwd, and the home-level
+ * credential checks (SSH/AWS/etc.) are the meaningful signal for a per-machine
+ * snapshot. Same redacted body as the on-demand `node9 posture --ship`.
+ */
+async function pushPostureSnapshot(creds: { apiKey: string; apiUrl: string }): Promise<void> {
+  try {
+    const home = os.homedir();
+    const result = await runPosture({ home, cwd: home });
+    await shipPosture(result, creds);
+  } catch {
+    // Silent — never break sync over a posture push.
   }
 }
 
@@ -504,6 +533,9 @@ export async function runCloudSync(): Promise<
     }
     if (process.env.NODE9_SCAN_DISABLE !== '1') {
       void pushScanSnapshot(creds);
+    }
+    if (process.env.NODE9_POSTURE_DISABLE !== '1') {
+      void pushPostureSnapshot(creds);
     }
   };
 
