@@ -12,6 +12,7 @@ import {
   analyzeShellCommand,
   analyzeFsOperation,
   analyzeSqlDestructive,
+  analyzeChmod777,
   isBashTool,
   AST_FS_REGEX_RULES,
   extractShellDestinations,
@@ -279,6 +280,24 @@ export async function evaluatePolicy(
         tier: 2,
         ruleName: sqlVerdict.ruleName,
         ruleDescription: sqlVerdict.description,
+      };
+    }
+
+    // chmod 777 / 0777 / a+rwx / +x via a real chmod command — AST-aware so
+    // `chmod 777` inside a `node -e` / `python -c` string or regex literal no
+    // longer false-positives (the regex smart rule is suppressed for bash via
+    // AST_FS_REGEX_RULES). Mirrors the SQL-DDL AST migration above. The rule
+    // name is shield-prefixed, so use the project-jail (AST) label like the
+    // fs-op branch does for shield rules.
+    const chmodVerdict = analyzeChmod777(bashCommand);
+    if (chmodVerdict) {
+      return {
+        decision: chmodVerdict.verdict,
+        blockedByLabel: `project-jail (AST): ${chmodVerdict.ruleName}`,
+        reason: chmodVerdict.reason,
+        tier: 2,
+        ruleName: chmodVerdict.ruleName,
+        ruleDescription: chmodVerdict.description,
       };
     }
   }
