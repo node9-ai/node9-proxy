@@ -9,7 +9,10 @@
  * report-audit-aggregate.unit.test.ts; here we exercise the dashboard's
  * use of it (smoke) and the scan-cache state machine.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import type { ScanResult } from '../cli/commands/scan';
 
 // Stub the scan walkers — they walk ~/.claude/projects which is slow and
@@ -37,6 +40,28 @@ vi.mock('../cli/commands/scan', () => ({
 
 import { loadReportAudit, startScanWalk } from '../tui/dashboard/data';
 import type { ScanCache } from '../tui/dashboard/types';
+
+// loadReportAudit reads ~/.node9/audit.log; isolate HOME so the test is fast and
+// deterministic regardless of this machine's real (possibly huge) audit log.
+const realHome = process.env.HOME;
+const realProfile = process.env.USERPROFILE;
+let tmpHome: string;
+beforeAll(() => {
+  tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-dash-'));
+  process.env.HOME = tmpHome;
+  process.env.USERPROFILE = tmpHome;
+});
+afterAll(() => {
+  if (realHome === undefined) delete process.env.HOME;
+  else process.env.HOME = realHome;
+  if (realProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = realProfile;
+  try {
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
+});
 
 describe('loadReportAudit', () => {
   it('returns an AggregateResult with data + hasAuditFile + responseDlpEntries', () => {
