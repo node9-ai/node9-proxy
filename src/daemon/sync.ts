@@ -12,6 +12,9 @@ import { getConfig } from '../config/index.js';
 import { runBlast } from '../cli/commands/blast.js';
 import { runPosture } from '../posture/index.js';
 import { shipPosture } from '../posture/ship.js';
+import { buildPolicySnapshot } from '../policy-snapshot/build.js';
+import { shipPolicySnapshot } from '../policy-snapshot/ship.js';
+import { readActiveShields, readShieldOverrides } from '../shields.js';
 import {
   summarizeBlast,
   summarizeScan,
@@ -331,6 +334,12 @@ async function syncOnce(): Promise<void> {
   if (process.env.NODE9_POSTURE_DISABLE !== '1') {
     void pushPostureSnapshot(creds);
   }
+
+  // Config mirror: ship the effective local policy so the dashboard can show
+  // what this machine enforces. Opt-out via NODE9_POLICY_MIRROR_DISABLE=1.
+  if (process.env.NODE9_POLICY_MIRROR_DISABLE !== '1') {
+    void pushPolicySnapshot(creds);
+  }
 }
 
 /**
@@ -408,6 +417,36 @@ async function pushPostureSnapshot(creds: { apiKey: string; apiUrl: string }): P
     await shipPosture(result, creds);
   } catch {
     // Silent — never break sync over a posture push.
+  }
+}
+
+// Config mirror (Phase 1b): ship this machine's EFFECTIVE local policy so the
+// dashboard's Machines view shows what it enforces. Fire-and-forget like the
+// other pushes; opt-out via NODE9_POLICY_MIRROR_DISABLE=1.
+async function pushPolicySnapshot(creds: { apiKey: string; apiUrl: string }): Promise<void> {
+  try {
+    const body = buildPolicySnapshot(getConfig(), readActiveShields(), readShieldOverrides());
+    await shipPolicySnapshot(body, creds);
+  } catch {
+    // Silent — never break sync over a policy-mirror push.
+  }
+}
+
+/** `node9 policy push` — mirror this machine's policy to the dashboard now. */
+export async function runPolicyPush(): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const creds = readCredentials();
+  if (!creds) {
+    return {
+      ok: false,
+      reason: 'No API key configured. Add credentials with: node9 login',
+    };
+  }
+  try {
+    const body = buildPolicySnapshot(getConfig(), readActiveShields(), readShieldOverrides());
+    const sent = await shipPolicySnapshot(body, creds);
+    return sent ? { ok: true } : { ok: false, reason: 'Push failed (network or server error)' };
+  } catch (e) {
+    return { ok: false, reason: e instanceof Error ? e.message : String(e) };
   }
 }
 
@@ -536,6 +575,9 @@ export async function runCloudSync(): Promise<
     }
     if (process.env.NODE9_POSTURE_DISABLE !== '1') {
       void pushPostureSnapshot(creds);
+    }
+    if (process.env.NODE9_POLICY_MIRROR_DISABLE !== '1') {
+      void pushPolicySnapshot(creds);
     }
   };
 
