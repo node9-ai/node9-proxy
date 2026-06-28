@@ -66,6 +66,12 @@ export interface SmartRule {
    * permanently destroy teammates' work."
    */
   description?: string;
+  /**
+   * Provenance of a synced cloud rule, e.g. "SHIELD:aws" or "USER". Shipped by
+   * the SaaS so the proxy can attribute a rule to its origin shield (so
+   * `node9 shield list` can show a shield as cloud-enabled). Absent on local rules.
+   */
+  source?: string;
 }
 
 /**
