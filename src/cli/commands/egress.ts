@@ -10,101 +10,33 @@
 
 import type { Command } from 'commander';
 import chalk from 'chalk';
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
 import { getConfig } from '../../config';
 import { DEFAULT_EGRESS_ALLOWLIST } from '@node9/policy-engine';
+import { type EgressBlock, setEgress, addEgressHost } from '../../auth/egress-config';
 
-type EgressMode = 'off' | 'review' | 'block';
-interface EgressBlock {
-  enabled: boolean;
-  mode: EgressMode;
-  allow: string[];
-  deny: string[];
-  allowPrivate: boolean;
-}
+// Re-exported so existing tests (egress.integration.test.ts) keep importing it
+// from here; the implementation now lives in the shared egress-config module
+// that the MCP egress tools also use.
+export { applyEgress } from '../../auth/egress-config';
 
-const DEFAULT_EGRESS: EgressBlock = {
-  enabled: false,
-  mode: 'review',
-  allow: [],
-  deny: [],
-  allowPrivate: true,
-};
-
-// The on-disk config is an arbitrary JSON bag; we only touch policy.egress.
-type RawConfig = { policy?: Record<string, unknown>; [key: string]: unknown };
-
-function configPath(): string {
-  return path.join(os.homedir(), '.node9', 'config.json');
-}
-
-/**
- * Read the raw config. A MISSING file → fresh `{}` (fine). A file that EXISTS
- * but isn't valid JSON → throw — we must never overwrite a config we couldn't
- * parse (that would silently destroy the user's other settings).
- */
-function readRawConfig(): RawConfig {
-  let text: string;
+/** Run an egress mutation, surfacing a malformed-config refusal cleanly (exit 1). */
+function guard(fn: () => void): boolean {
   try {
-    text = fs.readFileSync(configPath(), 'utf8');
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {};
-    throw err; // permission/other read error — don't silently clobber
-  }
-  try {
-    return JSON.parse(text) as RawConfig;
-  } catch {
-    throw new Error(
-      `${configPath()} is not valid JSON — fix it before changing egress (refusing to overwrite).`
-    );
-  }
-}
-
-function writeRawConfig(config: RawConfig): void {
-  const p = configPath();
-  fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
-}
-
-/**
- * Pure: apply a change to the egress block of a raw config (read-merge-write
- * semantics — never clobbers other config). Exported for tests.
- */
-export function applyEgress(config: RawConfig, change: Partial<EgressBlock>): RawConfig {
-  const policy = (config.policy = config.policy ?? {});
-  const existing = (policy.egress ?? {}) as Partial<EgressBlock>;
-  policy.egress = { ...DEFAULT_EGRESS, ...existing, ...change };
-  return config;
-}
-
-/** Run a config write, surfacing a malformed-config refusal cleanly (exit 1). */
-function withConfig(fn: (config: RawConfig) => void): boolean {
-  let config: RawConfig;
-  try {
-    config = readRawConfig();
+    fn();
+    return true;
   } catch (err) {
     console.error(chalk.red(`\n  ✗ ${(err as Error).message}\n`));
     process.exitCode = 1;
     return false;
   }
-  fn(config);
-  writeRawConfig(config);
-  return true;
 }
 
 function mutate(change: Partial<EgressBlock>): boolean {
-  return withConfig((config) => applyEgress(config, change));
+  return guard(() => setEgress(change));
 }
 
 function addHost(list: 'allow' | 'deny', host: string): boolean {
-  return withConfig((config) => {
-    const existing = (config.policy?.egress ?? {}) as Partial<EgressBlock>;
-    const current: EgressBlock = { ...DEFAULT_EGRESS, ...existing };
-    const updated = current[list].includes(host) ? current[list] : [...current[list], host];
-    applyEgress(config, { [list]: updated });
-  });
+  return guard(() => addEgressHost(list, host));
 }
 
 function showStatus(): void {

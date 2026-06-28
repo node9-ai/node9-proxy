@@ -8,8 +8,27 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { applyEgress } from '../cli/commands/egress';
+import { isValidEgressHost, normalizeEgressHost } from '../auth/egress-config';
 
 const CLI = path.resolve(__dirname, '../../dist/cli.js');
+
+describe('egress host validation (shared by CLI + MCP)', () => {
+  it('accepts FQDNs and wildcard globs', () => {
+    for (const h of ['app.node9.ai', 'node9.ai', '*.node9.ai', 'api.mycorp.co.uk']) {
+      expect(isValidEgressHost(h), h).toBe(true);
+    }
+  });
+
+  it('rejects non-hosts (spaces, schemes, bare words, empty)', () => {
+    for (const h of ['not a host', 'http://node9.ai', 'localhost', 'node9', '']) {
+      expect(isValidEgressHost(h), h).toBe(false);
+    }
+  });
+
+  it('normalizes case and surrounding whitespace', () => {
+    expect(normalizeEgressHost('  APP.Node9.AI  ')).toBe('app.node9.ai');
+  });
+});
 
 describe('applyEgress (read-merge-write)', () => {
   it('sets the egress block without clobbering other config', () => {

@@ -20,6 +20,8 @@ describe('MCP tool capability classification', () => {
   });
 
   it('the weakening tools are exactly shield_disable + approver_set', () => {
+    // Egress LOOSENING (allow/off) is deliberately NOT an MCP tool — it is
+    // CLI-only — so no egress tool is classified 'weaken'.
     const weaken = Object.entries(TOOL_CAPABILITY)
       .filter(([, cap]) => cap === 'weaken')
       .map(([name]) => name)

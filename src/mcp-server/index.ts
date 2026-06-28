@@ -23,6 +23,15 @@ import {
   resolveShieldName,
   getShield,
 } from '../shields';
+import {
+  type EgressMode,
+  getEgress,
+  setEgress,
+  addEgressHost,
+  normalizeEgressHost,
+  isValidEgressHost,
+} from '../auth/egress-config';
+import { DEFAULT_EGRESS_ALLOWLIST } from '@node9/policy-engine';
 
 // ── JSON-RPC helpers ──────────────────────────────────────────────────────────
 
@@ -49,10 +58,16 @@ export const TOOL_CAPABILITY: Record<string, 'readonly' | 'add' | 'weaken'> = {
   // weaken — gated over MCP
   node9_shield_disable: 'weaken',
   node9_approver_set: 'weaken',
+  // NOTE: egress LOOSENING (allow a host / turn egress off) is intentionally NOT
+  // exposed over MCP — it has no legitimate agent use case (it's exactly the
+  // exfil-exit the egress gate exists to prevent) and would be attack surface
+  // even gated. A human loosens egress at the CLI: `node9 egress allow|off`.
   // add / restorative — always allowed
   node9_shield_enable: 'add',
   node9_rule_add: 'add', // already block/review-only — handleRuleAdd rejects "allow"
   node9_undo_revert: 'add', // restorative
+  node9_egress_protect: 'add', // enable/strengthen egress (monotonic — never reduces)
+  node9_egress_deny: 'add', // add a deny host (deny always wins)
   // readonly
   node9_status: 'readonly',
   node9_config_get: 'readonly',
@@ -67,6 +82,7 @@ export const TOOL_CAPABILITY: Record<string, 'readonly' | 'add' | 'weaken'> = {
   node9_approver_list: 'readonly',
   node9_undo_list: 'readonly',
   node9_undo_detail: 'readonly',
+  node9_egress_status: 'readonly',
 };
 
 function capabilityOf(tool: string): 'readonly' | 'add' | 'weaken' {
@@ -385,6 +401,52 @@ export const TOOLS = [
       required: ['name', 'tool', 'field', 'pattern', 'verdict', 'reason'],
     },
   },
+  {
+    name: 'node9_egress_status',
+    description:
+      'Show egress (outbound network) control: whether it is enabled, the mode ' +
+      '(off / review / block), and your allow + deny host lists. Common dev/LLM hosts ' +
+      '(github, npm, pypi, anthropic, …) are always allowed by a built-in list. ' +
+      'Read-only.',
+    inputSchema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'node9_egress_protect',
+    description:
+      'Turn on egress control (or strengthen it). mode="review" prompts on unknown hosts; ' +
+      'mode="block" hard-blocks them. Monotonic — it only ever ADDS protection and never ' +
+      'reduces it (a request for review will not downgrade an existing block). Only adds ' +
+      'protection, so it is always allowed over MCP.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        mode: {
+          type: 'string',
+          enum: ['review', 'block'],
+          description:
+            'Enforcement to apply. "review" = prompt, "block" = deny. Defaults to review.',
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'node9_egress_deny',
+    description:
+      'Add a host to the egress deny list (deny always wins over allow). Only adds ' +
+      'protection, so it is always allowed over MCP. Host is an FQDN or wildcard glob ' +
+      '(e.g. evil.com or *.evil.com).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        host: { type: 'string', description: 'Host to deny (FQDN or *.glob).' },
+      },
+      required: ['host'],
+    },
+  },
+  // Egress LOOSENING (allow a host / turn egress off) is deliberately CLI-only —
+  // see the note in TOOL_CAPABILITY. The agent can see and tighten egress over
+  // MCP, but never loosen it.
 ];
 
 // ── Tool handlers ─────────────────────────────────────────────────────────────
@@ -501,6 +563,54 @@ function handleShieldDisable(args: Record<string, unknown>): string {
   }
   writeActiveShields(active.filter((s) => s !== name));
   return `Shield "${name}" disabled.`;
+}
+
+// ── Egress control handlers ───────────────────────────────────────────────────
+// Read/write through the shared egress-config module so MCP and the `node9
+// egress` CLI mutate policy.egress identically. Only status/protect/deny are
+// exposed here — all read-only or strengthening. Egress LOOSENING (allow a host
+// / turn egress off) is deliberately CLI-only and has no handler.
+
+function handleEgressStatus(): string {
+  const e = getEgress();
+  const state = !e.enabled
+    ? 'OFF — the agent can reach any host'
+    : e.mode === 'block'
+      ? 'LOCKED (block) — unknown hosts are denied'
+      : 'WATCHING (review) — unknown hosts prompt for approval';
+  const lines = [
+    `Egress control: ${state}`,
+    `${DEFAULT_EGRESS_ALLOWLIST.length} common dev/LLM hosts are always allowed (github, npm, pypi, anthropic, …).`,
+    `Your allow list: ${e.allow.length ? e.allow.join(', ') : '(none)'}`,
+    `Your deny list:  ${e.deny.length ? e.deny.join(', ') : '(none)'}`,
+  ];
+  return lines.join('\n');
+}
+
+function handleEgressProtect(args: Record<string, unknown>): string {
+  const rawMode = args.mode;
+  if (rawMode !== undefined && rawMode !== 'review' && rawMode !== 'block') {
+    throw new Error('mode must be "review" or "block".');
+  }
+  const requested: EgressMode = (rawMode as EgressMode) ?? 'review';
+  const current = getEgress();
+  // Monotonic: never downgrade. If already blocking, a "review" request keeps block.
+  const mode: EgressMode = current.enabled && current.mode === 'block' ? 'block' : requested;
+  setEgress({ enabled: true, mode });
+  return mode === 'block'
+    ? 'Egress is now LOCKED (block) — unknown hosts are denied. Routine hosts stay allowed.'
+    : 'Egress is now WATCHED (review) — unknown hosts prompt for approval.';
+}
+
+function handleEgressDeny(args: Record<string, unknown>): string {
+  const host = typeof args.host === 'string' ? normalizeEgressHost(args.host) : '';
+  if (!isValidEgressHost(host)) {
+    throw new Error(
+      `Invalid host: "${String(args.host)}". Use an FQDN or *.glob (e.g. *.evil.com).`
+    );
+  }
+  addEgressHost('deny', host);
+  return `Denied egress to ${host} (deny always wins over allow).`;
 }
 
 // ── Approver config helpers ───────────────────────────────────────────────────
@@ -922,6 +1032,12 @@ export function runMcpServer(): void {
           text = handlePostureMcp(toolArgs);
         } else if (toolName === 'node9_explain') {
           text = handleExplainMcp(toolArgs);
+        } else if (toolName === 'node9_egress_status') {
+          text = handleEgressStatus();
+        } else if (toolName === 'node9_egress_protect') {
+          text = handleEgressProtect(toolArgs);
+        } else if (toolName === 'node9_egress_deny') {
+          text = handleEgressDeny(toolArgs);
         } else {
           process.stdout.write(err(id, -32601, `Unknown tool: ${toolName}`) + '\n');
           return;

@@ -173,3 +173,125 @@ describe('node9 MCP server — weakening tools are gated (phase 1a)', () => {
     fs.rmSync(h, { recursive: true, force: true });
   });
 });
+
+describe('node9 MCP server — egress control tools', () => {
+  const egressOf = (
+    h: string
+  ): { enabled?: boolean; mode?: string; allow?: string[]; deny?: string[] } => {
+    const raw = JSON.parse(fs.readFileSync(path.join(h, '.node9', 'config.json'), 'utf-8')) as {
+      policy?: { egress?: { enabled?: boolean; mode?: string; allow?: string[]; deny?: string[] } };
+    };
+    return raw.policy?.egress ?? {};
+  };
+
+  it('tools/list exposes the three safe egress tools but NOT the loosening ones', () => {
+    const res = driveMcp([
+      { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} },
+      { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
+    ]);
+    const names = (res[2]?.result?.tools ?? []).map((t) => t.name);
+    // read + tighten only
+    for (const n of ['node9_egress_status', 'node9_egress_protect', 'node9_egress_deny']) {
+      expect(names).toContain(n);
+    }
+    // loosening egress is CLI-only — these tools must not exist on the MCP surface
+    expect(names).not.toContain('node9_egress_allow');
+    expect(names).not.toContain('node9_egress_off');
+  });
+
+  it('node9_egress_protect + node9_egress_deny (add-only) work over MCP without mcpAllowWeakening', () => {
+    const h = makeHome({ settings: { mode: 'standard' } });
+    const res = driveMcp(
+      [
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'node9_egress_protect', arguments: { mode: 'block' } },
+        },
+        {
+          jsonrpc: '2.0',
+          id: 2,
+          method: 'tools/call',
+          params: { name: 'node9_egress_deny', arguments: { host: '*.evil.com' } },
+        },
+      ],
+      h
+    );
+    expect(res[1]?.error).toBeUndefined();
+    expect(res[2]?.error).toBeUndefined();
+    const e = egressOf(h);
+    expect(e.enabled).toBe(true);
+    expect(e.mode).toBe('block');
+    expect(e.deny).toContain('*.evil.com');
+    fs.rmSync(h, { recursive: true, force: true });
+  });
+
+  it('node9_egress_protect is monotonic — review does not downgrade an existing block', () => {
+    const h = makeHome({
+      settings: { mode: 'standard' },
+      policy: { egress: { enabled: true, mode: 'block' } },
+    });
+    const res = driveMcp(
+      [
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'node9_egress_protect', arguments: { mode: 'review' } },
+        },
+      ],
+      h
+    );
+    expect(res[1]?.error).toBeUndefined();
+    expect(egressOf(h).mode).toBe('block'); // stayed locked
+    fs.rmSync(h, { recursive: true, force: true });
+  });
+
+  it('the loosening tools are not callable over MCP (unknown tool), even with mcpAllowWeakening', () => {
+    // egress_allow / egress_off were removed from the MCP surface entirely — a
+    // call must come back as an unknown-tool error, NOT silently succeed, even
+    // when the human has opted into agent-driven weakening for OTHER tools.
+    const h = makeHome({ settings: { mode: 'standard', mcpAllowWeakening: true } });
+    const res = driveMcp(
+      [
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'node9_egress_allow', arguments: { host: 'app.node9.ai' } },
+        },
+        {
+          jsonrpc: '2.0',
+          id: 2,
+          method: 'tools/call',
+          params: { name: 'node9_egress_off', arguments: {} },
+        },
+      ],
+      h
+    );
+    expect(res[1]?.error?.message ?? '').toMatch(/unknown tool/i);
+    expect(res[2]?.error?.message ?? '').toMatch(/unknown tool/i);
+    expect(egressOf(h).allow ?? []).not.toContain('app.node9.ai');
+    fs.rmSync(h, { recursive: true, force: true });
+  });
+
+  it('node9_egress_deny rejects an invalid host', () => {
+    const h = makeHome({ settings: { mode: 'standard' } });
+    const res = driveMcp(
+      [
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'node9_egress_deny', arguments: { host: 'not a host' } },
+        },
+      ],
+      h
+    );
+    // handler throws → JSON-RPC result with isError, not a transport error
+    expect(res[1]?.result?.content?.[0]?.text ?? '').toMatch(/invalid host/i);
+    expect(egressOf(h).deny ?? []).toHaveLength(0);
+    fs.rmSync(h, { recursive: true, force: true });
+  });
+});
