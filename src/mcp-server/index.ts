@@ -566,13 +566,15 @@ function handleShieldDisable(args: Record<string, unknown>): string {
 }
 
 // ── Egress control handlers ───────────────────────────────────────────────────
-// Read/write through the shared egress-config module so MCP and the `node9
-// egress` CLI mutate policy.egress identically. Only status/protect/deny are
-// exposed here — all read-only or strengthening. Egress LOOSENING (allow a host
-// / turn egress off) is deliberately CLI-only and has no handler.
+// Only status/protect/deny are exposed — all read-only or strengthening. Egress
+// LOOSENING (allow a host / turn egress off) is deliberately CLI-only and has no
+// handler. STATUS reads the merged/effective config (getConfig) so it matches
+// the CLI and reflects any project-level override; MUTATIONS go through the
+// shared egress-config module, which writes the global ~/.node9/config.json —
+// the same file (and merge layer) the `node9 egress` CLI writes.
 
 function handleEgressStatus(): string {
-  const e = getEgress();
+  const e = getConfig().policy.egress;
   const state = !e.enabled
     ? 'OFF — the agent can reach any host'
     : e.mode === 'block'

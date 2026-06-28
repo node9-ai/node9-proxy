@@ -30,12 +30,19 @@ function makeHome(config: object): string {
   return h;
 }
 
-function driveMcp(requests: object[], homeDir: string = home): Record<number, McpResponse> {
+function driveMcp(
+  requests: object[],
+  homeDir: string = home,
+  cwd?: string
+): Record<number, McpResponse> {
   const input = requests.map((r) => JSON.stringify(r)).join('\n') + '\n';
   const r = spawnSync(process.execPath, [CLI, 'mcp-server'], {
     input,
     encoding: 'utf-8',
     timeout: 60000,
+    // Default cwd is the test runner's (repo root, which has a node9.config.json);
+    // pass an override so getConfig() merges a known project layer (or none).
+    cwd,
     env: {
       ...process.env,
       HOME: homeDir,
@@ -197,6 +204,35 @@ describe('node9 MCP server — egress control tools', () => {
     // loosening egress is CLI-only — these tools must not exist on the MCP surface
     expect(names).not.toContain('node9_egress_allow');
     expect(names).not.toContain('node9_egress_off');
+  });
+
+  it('node9_egress_status reflects the effective (merged) config', () => {
+    // Status reads getConfig() (merged), not the raw global file. Spawn with cwd
+    // in the temp home (no project node9.config.json there) so the merge resolves
+    // to exactly the global config we wrote — deterministic, no repo-root config.
+    const h = makeHome({
+      settings: { mode: 'standard' },
+      policy: {
+        egress: { enabled: true, mode: 'block', allow: ['*.mycorp.com'], deny: ['evil.com'] },
+      },
+    });
+    const res = driveMcp(
+      [
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'node9_egress_status', arguments: {} },
+        },
+      ],
+      h,
+      h
+    );
+    const text = res[1]?.result?.content?.[0]?.text ?? '';
+    expect(text).toMatch(/LOCKED \(block\)/);
+    expect(text).toContain('*.mycorp.com');
+    expect(text).toContain('evil.com');
+    fs.rmSync(h, { recursive: true, force: true });
   });
 
   it('node9_egress_protect + node9_egress_deny (add-only) work over MCP without mcpAllowWeakening', () => {
