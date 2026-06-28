@@ -60,6 +60,7 @@ import { registerAgentsCommand } from './cli/commands/agents';
 import { registerScanCommand } from './cli/commands/scan';
 import { registerPostureCommand } from './cli/commands/posture';
 import { registerEgressCommand } from './cli/commands/egress';
+import { registerJailCommand } from './cli/commands/jail';
 import { registerSandboxCommand } from './cli/commands/sandbox';
 import { registerSessionsCommand } from './cli/commands/sessions';
 import { registerSessionTaintCommand } from './cli/commands/session-taint';
@@ -462,6 +463,7 @@ program
       const isFinal = step.isFinal;
       let icon: string;
       if (step.outcome === 'allow') icon = chalk.green('  ✅');
+      else if (step.outcome === 'block') icon = chalk.red('  🛑');
       else if (step.outcome === 'review') icon = chalk.red('  🔴');
       else if (step.outcome === 'skip') icon = chalk.gray('  ─ ');
       else icon = chalk.gray('  ○ ');
@@ -477,6 +479,13 @@ program
     console.log('');
     if (result.decision === 'allow') {
       console.log(chalk.green.bold('  Decision: ✅ ALLOW') + chalk.gray('  — no approval needed'));
+    } else if (result.decision === 'block') {
+      console.log(
+        chalk.red.bold('  Decision: 🛑 BLOCK') + chalk.gray('  — this action is blocked')
+      );
+      if (result.blockedByLabel) {
+        console.log(chalk.gray(`  Reason:   ${result.blockedByLabel}`));
+      }
     } else {
       console.log(
         chalk.red.bold('  Decision: 🔴 REVIEW') + chalk.gray('  — human approval required')
@@ -742,6 +751,8 @@ registerPostureCommand(program);
 
 // Egress control (the posture remediation on-ramp)
 registerEgressCommand(program);
+// Credential jail — user-extensible protected paths
+registerJailCommand(program);
 registerSandboxCommand(program, version);
 
 // Session history

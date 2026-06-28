@@ -146,7 +146,62 @@ function explainIsSqlTool(toolName: string, toolInspection: Record<string, strin
 
 const SQL_DML_KEYWORDS = new Set(['select', 'insert', 'update', 'delete', 'merge', 'upsert']);
 
-export async function explainPolicy(toolName: string, args?: unknown): Promise<ExplainResult> {
+// Non-Terminal sentinel: explain previews how node9 treats an AGENT tool call
+// (node9's threat model). The engine's bash-AST gates only run for a non-Terminal
+// agent, so explain MUST simulate one — passing 'Terminal' here would reproduce
+// the very drift this function exists to kill.
+const EXPLAIN_AGENT = 'agent';
+
+/**
+ * Diagnostic preview of how node9 would treat a tool call.
+ *
+ * The DECISION is taken from the real engine (`evaluatePolicy`) so explain can
+ * never under-report what the live hook enforces. The step-by-step trace is the
+ * human-readable re-derivation in `deriveExplainTrace`. When the two disagree —
+ * because the trace omits an engine gate (AST file-op / pipe-chain / SQL /
+ * chmod) or applies one the engine suppresses — the engine wins and we append an
+ * authoritative step stating the real verdict, plus a NODE9_DEBUG drift canary.
+ */
+export async function explainPolicy(
+  toolName: string,
+  args?: unknown,
+  agent: string = EXPLAIN_AGENT
+): Promise<ExplainResult> {
+  const derived = await deriveExplainTrace(toolName, args);
+  const engine = await evaluatePolicy(toolName, args, agent);
+  if (derived.decision === engine.decision) return derived;
+
+  // Drift canary — a gate the engine runs (and the re-derivation models
+  // differently) decided this. Loud in debug so the next added gate can't
+  // silently re-widen the gap.
+  if (process.env.NODE9_DEBUG) {
+    console.error(
+      `[node9 explain] decision drift: trace=${derived.decision} engine=${engine.decision} ` +
+        `for ${toolName} — engine wins (${engine.blockedByLabel ?? 'engine'}).`
+    );
+  }
+
+  const engineStep: ExplainStep = {
+    name: 'Engine verdict (authoritative)',
+    outcome: engine.decision,
+    detail:
+      `${engine.blockedByLabel ?? 'policy engine'}` +
+      `${engine.reason ? `: ${engine.reason}` : ''} — this is the verdict the live hook actually ` +
+      `enforces. It differs from the preview trace above, which models the policy tiers separately ` +
+      `and can drift; the engine is authoritative.`,
+    isFinal: true,
+  };
+
+  return {
+    ...derived,
+    steps: [...derived.steps, engineStep],
+    decision: engine.decision,
+    blockedByLabel: engine.blockedByLabel ?? derived.blockedByLabel,
+    ruleDescription: engine.ruleDescription ?? derived.ruleDescription,
+  };
+}
+
+async function deriveExplainTrace(toolName: string, args?: unknown): Promise<ExplainResult> {
   const steps: ExplainStep[] = [];
 
   const globalPath = path.join(os.homedir(), '.node9', 'config.json');

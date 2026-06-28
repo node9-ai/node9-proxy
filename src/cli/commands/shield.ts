@@ -3,6 +3,7 @@
 // Registered as `node9 shield` and `node9 config show` by cli.ts.
 import type { Command } from 'commander';
 import chalk from 'chalk';
+import fs from 'fs';
 import {
   getShield,
   listShields,
@@ -16,6 +17,9 @@ import {
   isShieldVerdict,
   installShield,
 } from '../../shields';
+import { buildShield } from '../../shields/build';
+import { createShield } from '../../shields/create';
+import type { ShieldDefinition } from '@node9/policy-engine';
 import { appendConfigAudit } from '../../audit';
 import { getConfig } from '../../config';
 import { httpsFetch } from '../../utils/https-fetch';
@@ -329,6 +333,100 @@ export function registerShieldCommand(program: Command): void {
           process.exit(1);
         });
     });
+
+  // ---------------------------------------------------------------------------
+  // node9 shield create — author a NEW shield from block/review tools + paths
+  // ---------------------------------------------------------------------------
+  const collect = (val: string, prev: string[]): string[] => [...prev, val];
+
+  shieldCmd
+    .command('create <name>')
+    .description('Author a new shield from block/review tools and paths')
+    .option('--desc <text>', 'Shield description')
+    .option('--block-tool <tool>', 'Block a tool entirely (repeatable)', collect, [])
+    .option('--review-tool <tool>', 'Require approval for a tool (repeatable)', collect, [])
+    .option('--block-path <path>', 'Block access to a path (repeatable)', collect, [])
+    .option('--review-path <path>', 'Require approval to access a path (repeatable)', collect, [])
+    .option('--from-file <path>', 'Build from a shield JSON file (overrides inline flags)')
+    .option('--enable', 'Activate the shield immediately')
+    .option('--overwrite', 'Replace an existing user shield of the same name')
+    .action(
+      (
+        name: string,
+        opts: {
+          desc?: string;
+          blockTool: string[];
+          reviewTool: string[];
+          blockPath: string[];
+          reviewPath: string[];
+          fromFile?: string;
+          enable?: boolean;
+          overwrite?: boolean;
+        }
+      ) => {
+        // Name guard mirrors `install` — do not echo a raw name (ANSI injection).
+        if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+          console.error(
+            chalk.red(
+              `\n❌ Invalid shield name: only alphanumeric characters, hyphens, and underscores are allowed\n`
+            )
+          );
+          process.exit(1);
+        }
+
+        let def: ShieldDefinition;
+        if (opts.fromFile) {
+          let raw: unknown;
+          try {
+            raw = JSON.parse(fs.readFileSync(opts.fromFile, 'utf-8'));
+          } catch (err) {
+            console.error(
+              chalk.red(`\n❌ Could not read/parse ${opts.fromFile}: ${String(err)}\n`)
+            );
+            process.exit(1);
+            return;
+          }
+          // Force the declared name to the CLI name so installShield's name-match
+          // check passes regardless of what the file declares.
+          def = { ...(raw as ShieldDefinition), name };
+        } else {
+          def = buildShield({
+            name,
+            description: opts.desc,
+            blockTools: opts.blockTool,
+            reviewTools: opts.reviewTool,
+            blockPaths: opts.blockPath,
+            reviewPaths: opts.reviewPath,
+          });
+        }
+
+        const res = createShield(def, {
+          enable: opts.enable,
+          overwrite: opts.overwrite,
+          viaMcp: false,
+        });
+        if (!res.ok) {
+          console.error(chalk.red(`\n❌ ${res.error}\n`));
+          process.exit(1);
+          return;
+        }
+
+        console.log(
+          chalk.green(`\n✅ Shield "${name}" created`) +
+            chalk.gray(` — ${res.ruleCount} rule(s) → ${res.path}`)
+        );
+        if (res.enabled) {
+          console.log(chalk.gray(`   Active now.`));
+        } else {
+          console.log(
+            chalk.gray(`   Activate it with: ${chalk.cyan(`node9 shield enable ${name}`)}`)
+          );
+        }
+        console.log(
+          chalk.gray(`   Preview a call:   ${chalk.cyan(`node9 explain bash "<command>"`)}\n`)
+        );
+      }
+    );
 }
 
 export function registerConfigShowCommand(program: Command): void {

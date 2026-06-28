@@ -21,7 +21,7 @@ import {
   matchesPattern,
   detectDangerousShellExec,
 } from '../../policy/index';
-import { analyzeFsOperation, AST_FS_REGEX_RULES } from '@node9/policy-engine';
+import { analyzeFsOperation, AST_FS_REGEX_RULES, BUILTIN_SHIELDS } from '@node9/policy-engine';
 import { scanArgs } from '../../dlp';
 import { pricingFor } from '../../pricing/litellm';
 import { geminiPriceFor } from '../../cost-gemini';
@@ -3250,7 +3250,10 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
   const hitShieldSet = new Set(
     shieldImpacts.filter((i) => i.totalCatches > 0).map((i) => i.shieldName)
   );
-  const zeroHitBuiltins = Object.keys(SHIELDS)
+  // Built-ins only — a user-installed shield must not appear in the "install
+  // these builtins proactively" hint, and keeping this off the user-shield
+  // registry (SHIELDS) also makes the render hermetic for snapshot tests.
+  const zeroHitBuiltins = Object.keys(BUILTIN_SHIELDS)
     .filter((name) => !hitShieldSet.has(name))
     .sort();
   if (zeroHitBuiltins.length > 0) {
