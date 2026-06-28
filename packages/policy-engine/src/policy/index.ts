@@ -87,6 +87,33 @@ export interface PolicyVerdict {
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
+const VERDICT_RANK: Record<SmartRule['verdict'], number> = {
+  allow: 0,
+  review: 1,
+  block: 2,
+};
+
+/**
+ * Resolve which of several MATCHING smart rules decides the verdict (the
+ * pinned-only conflict engine, Phase 3b). The model:
+ *   1. If any matching rule is `pinned` (a manager "keep mine" cloud rule),
+ *      only the pinned rules compete and the MOST-RESTRICTIVE pinned wins
+ *      (block > review > allow) — so a manager's locked rule can't be
+ *      overridden by a developer's local rule.
+ *   2. Otherwise the FIRST match wins — byte-for-byte the previous `.find()`
+ *      behaviour. This is the zero-regression guarantee: with nothing pinned,
+ *      nothing changes.
+ * Exported so the resolution is unit-testable in isolation.
+ */
+export function resolvePinned(matches: SmartRule[]): SmartRule | undefined {
+  if (matches.length === 0) return undefined;
+  const pinned = matches.filter((r) => r.pinned);
+  if (pinned.length === 0) return matches[0];
+  return pinned.reduce((best, r) =>
+    VERDICT_RANK[r.verdict] > VERDICT_RANK[best.verdict] ? r : best
+  );
+}
+
 function tokenize(toolName: string): string[] {
   return toolName
     .toLowerCase()
@@ -307,12 +334,16 @@ export async function evaluatePolicy(
   // AST already provides — they FP on JSON args, heredocs, and chained-command
   // segments that AST handles correctly. Mirrors scan.ts:1059.
   if (config.policy.smartRules.length > 0) {
-    const matchedRule = config.policy.smartRules.find(
+    // Pinned-only conflict engine (Phase 3b): collect all matches (same
+    // predicate as the old first-match `.find()`), then resolve — a pinned
+    // manager rule wins; otherwise the first match wins (unchanged).
+    const matches = config.policy.smartRules.filter(
       (rule) =>
         matchesPattern(toolName, rule.tool) &&
         !(bashCommand !== null && rule.name && AST_FS_REGEX_RULES.has(rule.name)) &&
         evaluateSmartConditions(args, rule)
     );
+    const matchedRule = resolvePinned(matches);
     if (matchedRule) {
       if (matchedRule.verdict === 'allow')
         return { decision: 'allow', ruleName: matchedRule.name ?? matchedRule.tool };
