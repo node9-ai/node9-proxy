@@ -707,12 +707,19 @@ export function getConfig(cwd?: string): Config {
   //                 Useful for staging a policy rollout without breaking
   //                 anyone's workflow. Local user config can still set mode
   //                 explicitly — but if the user hasn't, cloud takes effect.
+  // Shields the dashboard enforces fleet-wide (Managed Config M1). Captured from
+  // the rules-cache here and unioned with local shields in the shield layer
+  // below — additive/on: a developer can add more locally, never weaken these.
+  let cloudManagedShields: string[] = [];
   {
     const cacheFile = path.join(os.homedir(), '.node9', 'rules-cache.json');
     try {
       const raw = JSON.parse(fs.readFileSync(cacheFile, 'utf-8')) as Record<string, unknown>;
       if (Array.isArray(raw.rules) && raw.rules.length > 0) {
         applyLayer({ policy: { smartRules: raw.rules } });
+      }
+      if (Array.isArray(raw.shields)) {
+        cloudManagedShields = raw.shields.filter((s): s is string => typeof s === 'string');
       }
       if (raw.panicMode === true) {
         mergedSettings.panicMode = true;
@@ -734,7 +741,10 @@ export function getConfig(cwd?: string): Config {
   // enabling a shield never mutates the user's config file.
   // Per-rule verdict overrides (from `node9 shield set`) are applied here.
   const shieldOverrides = readShieldOverrides();
-  for (const shieldName of readActiveShields()) {
+  // Local shields ∪ cloud-managed shields (M1). Deduped so a shield enabled both
+  // locally and from the dashboard is applied once.
+  const activeShieldNames = [...new Set([...readActiveShields(), ...cloudManagedShields])];
+  for (const shieldName of activeShieldNames) {
     const shield = getShield(shieldName);
     if (!shield) continue;
     // Deduplicate smartRules by name — prevents duplicates if the user also
