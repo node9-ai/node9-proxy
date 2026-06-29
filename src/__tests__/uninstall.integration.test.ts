@@ -65,11 +65,13 @@ describe('node9 uninstall — removes plugin-shim agents (Opencode + Pi)', () =>
     fs.rmSync(h, { recursive: true, force: true });
   });
 
-  it('uninstall reports a clean leftover-scan when nothing remains', () => {
+  it('uninstall reports an accurate leftover-scan when nothing remains', () => {
     const h = makeHome();
     const r = run(h, ['uninstall']);
     expect(r.status).toBe(0);
-    expect(r.stdout).toMatch(/nothing left behind/i);
+    // Scoped claim: verifies hooks + plugin shims (the registry agents), not a
+    // blanket "nothing left behind" that would over-claim the 4 non-registry agents.
+    expect(r.stdout).toMatch(/no node9 hooks or plugin shims remain/i);
     fs.rmSync(h, { recursive: true, force: true });
   });
 });

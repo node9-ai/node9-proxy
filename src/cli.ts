@@ -330,13 +330,17 @@ program
       }
     }
 
-    // 2b. Leftover scan — confirm nothing remains wired (covers the registry's
-    //     hook + plugin-shim agents). Reports residuals rather than silently
-    //     claiming a clean removal.
+    // 2b. Leftover scan — re-read the agent-wiring registry and report any agent
+    //     still wired. Scoped wording on purpose: the registry covers node9's
+    //     hook + plugin-shim agents (the Opencode/Pi shims from #186 included),
+    //     but NOT the MCP-config / statusline edits for Windsurf, VSCode, HUD,
+    //     ClaudeDesktop — those teardowns ran above but aren't re-verified here
+    //     (verifying them = expanding the registry; tracked separately). So the
+    //     message claims only what it actually checked.
     try {
       const residual = getAgentWiring().filter((a) => a.wireState === 'wired');
       if (residual.length === 0) {
-        console.log(chalk.green('  ✅ Verified — nothing left behind'));
+        console.log(chalk.green('  ✅ Verified — no node9 hooks or plugin shims remain'));
       } else {
         teardownFailed = true;
         console.error(chalk.red('  ⚠️  Still wired after teardown:'));
