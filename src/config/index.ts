@@ -7,6 +7,7 @@ import path from 'path';
 import os from 'os';
 import { sanitizeConfig } from '../config-schema';
 import { readActiveShields, readShieldOverrides, getShield } from '../shields';
+import { resolveManagedMode } from './managed';
 
 // SmartCondition + SmartRule are now defined in @node9/policy-engine.
 // Re-exported here so existing import paths (`from '../config'`) keep
@@ -720,6 +721,16 @@ export function getConfig(cwd?: string): Config {
       }
       if (Array.isArray(raw.shields)) {
         cloudManagedShields = raw.shields.filter((s): s is string => typeof s === 'string');
+      }
+      // Managed settings (M2, baseline+lock). M2a: `mode` — applied as a floor a
+      // dev can only tighten, unless the admin locked it. Runs BEFORE the
+      // shadow/panic overrides below so those stay absolute.
+      if (raw.managedConfig && typeof raw.managedConfig === 'object') {
+        const mc = raw.managedConfig as { mode?: unknown; locked?: unknown };
+        if (typeof mc.mode === 'string') {
+          const locked = Array.isArray(mc.locked) && mc.locked.includes('mode');
+          mergedSettings.mode = resolveManagedMode(mergedSettings.mode, mc.mode, locked);
+        }
       }
       if (raw.panicMode === true) {
         mergedSettings.panicMode = true;
