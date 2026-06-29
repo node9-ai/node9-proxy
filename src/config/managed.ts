@@ -83,3 +83,39 @@ export function applyManagedEgress<T extends { enabled: boolean; mode: string }>
   }
   return next;
 }
+
+// Managed DLP fields (M2c). `enabled` is force-on; `pii` gates SSN/credit-card in
+// tool args (off = detect-only, block = deny in realtime), ordered off<block.
+export const DLP_PII_ORDER = ['off', 'block'] as const;
+export interface ManagedDlp {
+  enabled?: boolean;
+  pii?: string;
+}
+
+/**
+ * Apply managed DLP to the machine's local dlp object (baseline+lock), same
+ * model as egress: `enabled` force-on, `pii` a floor over off<block. Generic so
+ * the precise caller type is preserved; untouched fields (scanIgnoredTools)
+ * carry through.
+ */
+export function applyManagedDlp<T extends { enabled: boolean; pii?: string }>(
+  local: T,
+  managed: ManagedDlp,
+  locked: string[]
+): T {
+  const next: T = { ...local };
+  if (typeof managed.enabled === 'boolean') {
+    next.enabled = locked.includes('dlpEnabled')
+      ? managed.enabled
+      : local.enabled || managed.enabled;
+  }
+  if (typeof managed.pii === 'string') {
+    next.pii = resolveByOrder(
+      DLP_PII_ORDER,
+      local.pii ?? 'off',
+      managed.pii,
+      locked.includes('dlpPii')
+    ) as T['pii'];
+  }
+  return next;
+}

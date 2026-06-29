@@ -7,7 +7,7 @@ import path from 'path';
 import os from 'os';
 import { sanitizeConfig } from '../config-schema';
 import { readActiveShields, readShieldOverrides, getShield } from '../shields';
-import { resolveManagedMode, applyManagedEgress } from './managed';
+import { resolveManagedMode, applyManagedEgress, applyManagedDlp } from './managed';
 
 // SmartCondition + SmartRule are now defined in @node9/policy-engine.
 // Re-exported here so existing import paths (`from '../config'`) keep
@@ -729,6 +729,7 @@ export function getConfig(cwd?: string): Config {
         const mc = raw.managedConfig as {
           mode?: unknown;
           egress?: { enabled?: unknown; mode?: unknown };
+          dlp?: { enabled?: unknown; pii?: unknown };
           locked?: unknown;
         };
         const locked: string[] = Array.isArray(mc.locked)
@@ -750,6 +751,17 @@ export function getConfig(cwd?: string): Config {
             {
               enabled: typeof mc.egress.enabled === 'boolean' ? mc.egress.enabled : undefined,
               mode: typeof mc.egress.mode === 'string' ? mc.egress.mode : undefined,
+            },
+            locked
+          );
+        }
+        // M2c: policy.dlp. enabled force-on; pii floor over off<block.
+        if (mc.dlp && typeof mc.dlp === 'object') {
+          mergedPolicy.dlp = applyManagedDlp(
+            mergedPolicy.dlp,
+            {
+              enabled: typeof mc.dlp.enabled === 'boolean' ? mc.dlp.enabled : undefined,
+              pii: typeof mc.dlp.pii === 'string' ? mc.dlp.pii : undefined,
             },
             locked
           );
