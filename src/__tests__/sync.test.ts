@@ -684,6 +684,67 @@ describe('getConfig — cloud-pushed runtime flags', () => {
     expect(getConfig().settings.mode).toBe('strict');
   });
 
+  it('managed mode (M2): raises a weaker local mode up to the cloud floor', () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({ settings: { mode: 'observe' } }),
+      [CACHE_PATH]: JSON.stringify({
+        fetchedAt: '2026-06-29T00:00:00.000Z',
+        rules: [],
+        managedConfig: { mode: 'standard', locked: [] },
+      }),
+    });
+    expect(getConfig().settings.mode).toBe('standard');
+  });
+
+  it('managed mode (M2): keeps a stricter local mode (dev can be safer)', () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({ settings: { mode: 'strict' } }),
+      [CACHE_PATH]: JSON.stringify({
+        fetchedAt: '2026-06-29T00:00:00.000Z',
+        rules: [],
+        managedConfig: { mode: 'standard', locked: [] },
+      }),
+    });
+    expect(getConfig().settings.mode).toBe('strict');
+  });
+
+  it('managed mode (M2): a locked mode wins outright over a stricter local', () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({ settings: { mode: 'strict' } }),
+      [CACHE_PATH]: JSON.stringify({
+        fetchedAt: '2026-06-29T00:00:00.000Z',
+        rules: [],
+        managedConfig: { mode: 'standard', locked: ['mode'] },
+      }),
+    });
+    expect(getConfig().settings.mode).toBe('standard');
+  });
+
+  it('managed mode (M2): shadowMode still overrides to observe (absolute)', () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({ settings: { mode: 'standard' } }),
+      [CACHE_PATH]: JSON.stringify({
+        fetchedAt: '2026-06-29T00:00:00.000Z',
+        rules: [],
+        managedConfig: { mode: 'strict', locked: ['mode'] },
+        shadowMode: true,
+      }),
+    });
+    // shadow wins even over a locked managed mode
+    expect(getConfig().settings.mode).toBe('observe');
+  });
+
+  it('no managedConfig leaves mode unchanged — zero-regression', () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({ settings: { mode: 'standard' } }),
+      [CACHE_PATH]: JSON.stringify({
+        fetchedAt: '2026-06-29T00:00:00.000Z',
+        rules: [],
+      }),
+    });
+    expect(getConfig().settings.mode).toBe('standard');
+  });
+
   it('panicMode and shadowMode coexist (both apply)', () => {
     mockFiles({
       [CONFIG_PATH]: JSON.stringify({ settings: { mode: 'standard' } }),

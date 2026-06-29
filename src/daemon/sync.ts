@@ -148,6 +148,8 @@ export interface RulesCache {
   workspaceId?: string;
   /** Cloud-managed active-shield names (Managed Config M1). */
   shields?: string[];
+  /** Cloud-managed settings (Managed Config M2, baseline+lock). */
+  managedConfig?: { mode?: string; locked: string[] };
 }
 
 /**
@@ -164,6 +166,7 @@ interface CloudPolicyBody {
   syncIntervalHours?: number;
   workspaceId?: string;
   shields?: unknown[]; // cloud-managed shield names (Managed Config M1)
+  managedConfig?: { mode?: unknown; locked?: unknown }; // M2 settings
 }
 
 export function readCredentials(): { apiKey: string; apiUrl: string } | null {
@@ -308,6 +311,26 @@ export function extractShields(body: CloudPolicyBody): string[] {
 }
 
 /**
+ * Cloud-managed settings from the sync body (Managed Config M2). Returns
+ * undefined when nothing is managed so the cache stays minimal. Defensive
+ * filtering keeps junk out of the cache the proxy applies.
+ */
+export function extractManagedConfig(
+  body: CloudPolicyBody
+): { mode?: string; locked: string[] } | undefined {
+  const mc = body.managedConfig;
+  if (!mc || typeof mc !== 'object') return undefined;
+  const out: { mode?: string; locked: string[] } = {
+    locked: Array.isArray(mc.locked)
+      ? mc.locked.filter((f): f is string => typeof f === 'string')
+      : [],
+  };
+  if (typeof mc.mode === 'string') out.mode = mc.mode;
+  // Nothing actually managed → omit entirely.
+  return out.mode !== undefined ? out : undefined;
+}
+
+/**
  * Write the policy cache atomically. Best-effort: directory creation
  * failures fall through silently — the proxy will fall back to local
  * config and surface the issue via `node9 sync` if the user runs it
@@ -337,6 +360,7 @@ async function syncOnce(): Promise<void> {
         syncIntervalHours: result.body.syncIntervalHours,
         workspaceId: result.body.workspaceId,
         shields: extractShields(result.body),
+        managedConfig: extractManagedConfig(result.body),
       };
       writeCache(cache);
     }
@@ -634,6 +658,7 @@ export async function runCloudSync(): Promise<
       syncIntervalHours: result.body.syncIntervalHours,
       workspaceId: result.body.workspaceId,
       shields: extractShields(result.body),
+      managedConfig: extractManagedConfig(result.body),
     };
     writeCache(cache);
     maybePushBlast();
