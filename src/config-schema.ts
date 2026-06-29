@@ -108,6 +108,11 @@ export const ConfigFileSchema = z
         // must run them from the CLI. node9's threat model is the agent itself.
         mcpAllowWeakening: z.boolean().optional(),
         cloudSyncIntervalHours: z.number().positive().optional(),
+        // Seconds-granular override for the cloud policy sync cadence. Wins over
+        // cloudSyncIntervalHours when set. Lets you opt into fast apply (e.g. 20)
+        // for an incident; clamped to a 15s floor so it can't hammer the API.
+        // Unset → falls back to hours, then the 5h default.
+        cloudSyncIntervalSeconds: z.number().positive().optional(),
         // Outbox shipper (audit.log → SaaS batch ingest). enabled defaults
         // to true; set false to fall back to local-only auditing.
         shipper: z
