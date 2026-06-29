@@ -152,10 +152,11 @@ export interface RulesCache {
   managedConfig?: ManagedConfigCache;
 }
 
-/** Cloud-managed settings persisted in the cache (M2: mode + egress). */
+/** Cloud-managed settings persisted in the cache (M2: mode + egress + dlp). */
 export interface ManagedConfigCache {
   mode?: string;
   egress?: { enabled?: boolean; mode?: string };
+  dlp?: { enabled?: boolean; pii?: string };
   locked: string[];
 }
 
@@ -176,6 +177,7 @@ interface CloudPolicyBody {
   managedConfig?: {
     mode?: unknown;
     egress?: { enabled?: unknown; mode?: unknown };
+    dlp?: { enabled?: unknown; pii?: unknown };
     locked?: unknown;
   }; // M2 settings
 }
@@ -342,8 +344,17 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
     if (typeof mc.egress.mode === 'string') e.mode = mc.egress.mode;
     if (e.enabled !== undefined || e.mode !== undefined) out.egress = e;
   }
+  // M2c: dlp.enabled (bool) + dlp.pii (string).
+  if (mc.dlp && typeof mc.dlp === 'object') {
+    const d: { enabled?: boolean; pii?: string } = {};
+    if (typeof mc.dlp.enabled === 'boolean') d.enabled = mc.dlp.enabled;
+    if (typeof mc.dlp.pii === 'string') d.pii = mc.dlp.pii;
+    if (d.enabled !== undefined || d.pii !== undefined) out.dlp = d;
+  }
   // Nothing actually managed → omit entirely.
-  return out.mode !== undefined || out.egress !== undefined ? out : undefined;
+  return out.mode !== undefined || out.egress !== undefined || out.dlp !== undefined
+    ? out
+    : undefined;
 }
 
 /**

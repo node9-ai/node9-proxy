@@ -734,6 +734,38 @@ describe('getConfig — cloud-pushed runtime flags', () => {
     expect(getConfig().settings.mode).toBe('observe');
   });
 
+  it('managed dlp (M2c): force-on + raises pii to the cloud floor', () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({
+        settings: { mode: 'standard' },
+        policy: { dlp: { enabled: false, scanIgnoredTools: true, pii: 'off' } },
+      }),
+      [CACHE_PATH]: JSON.stringify({
+        fetchedAt: '2026-06-29T00:00:00.000Z',
+        rules: [],
+        managedConfig: { dlp: { enabled: true, pii: 'block' }, locked: [] },
+      }),
+    });
+    const dlp = getConfig().policy.dlp;
+    expect(dlp.enabled).toBe(true);
+    expect(dlp.pii).toBe('block');
+  });
+
+  it('managed dlp (M2c): a locked pii wins over a stricter local', () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({
+        settings: { mode: 'standard' },
+        policy: { dlp: { enabled: true, scanIgnoredTools: true, pii: 'block' } },
+      }),
+      [CACHE_PATH]: JSON.stringify({
+        fetchedAt: '2026-06-29T00:00:00.000Z',
+        rules: [],
+        managedConfig: { dlp: { pii: 'off' }, locked: ['dlpPii'] },
+      }),
+    });
+    expect(getConfig().policy.dlp.pii).toBe('off');
+  });
+
   it('no managedConfig leaves mode unchanged — zero-regression', () => {
     mockFiles({
       [CONFIG_PATH]: JSON.stringify({ settings: { mode: 'standard' } }),
