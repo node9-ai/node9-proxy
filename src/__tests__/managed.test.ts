@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { modeRank, resolveManagedMode, applyManagedEgress } from '../config/managed';
+import {
+  modeRank,
+  resolveManagedMode,
+  applyManagedEgress,
+  applyManagedDlp,
+} from '../config/managed';
 
 const localEgress = (over: Partial<{ enabled: boolean; mode: string }> = {}) => ({
   enabled: false,
@@ -7,6 +12,13 @@ const localEgress = (over: Partial<{ enabled: boolean; mode: string }> = {}) => 
   allow: ['local.example.com'],
   deny: [],
   allowPrivate: true,
+  ...over,
+});
+
+const localDlp = (over: Partial<{ enabled: boolean; pii: string }> = {}) => ({
+  enabled: true,
+  scanIgnoredTools: true,
+  pii: 'off' as string,
   ...over,
 });
 
@@ -88,5 +100,32 @@ describe('managed egress (baseline+lock) — M2b', () => {
   it('ignores an unrankable managed egress mode', () => {
     const out = applyManagedEgress(localEgress({ mode: 'block' }), { mode: 'garbage' }, []);
     expect(out.mode).toBe('block');
+  });
+});
+
+describe('managed dlp (baseline+lock) — M2c', () => {
+  it('enabled is force-on', () => {
+    expect(applyManagedDlp(localDlp({ enabled: false }), { enabled: true }, []).enabled).toBe(true);
+  });
+
+  it('pii: raises off → block (the cloud floor)', () => {
+    expect(applyManagedDlp(localDlp({ pii: 'off' }), { pii: 'block' }, []).pii).toBe('block');
+  });
+
+  it('pii: keeps a stricter local block over a cloud off (dev can be safer)', () => {
+    expect(applyManagedDlp(localDlp({ pii: 'block' }), { pii: 'off' }, []).pii).toBe('block');
+  });
+
+  it('pii: a locked value wins over a stricter local', () => {
+    expect(applyManagedDlp(localDlp({ pii: 'block' }), { pii: 'off' }, ['dlpPii']).pii).toBe('off');
+  });
+
+  it('leaves untouched local fields (scanIgnoredTools) intact', () => {
+    const out = applyManagedDlp(localDlp(), { enabled: true, pii: 'block' }, []);
+    expect(out.scanIgnoredTools).toBe(true);
+  });
+
+  it('ignores an unrankable managed pii', () => {
+    expect(applyManagedDlp(localDlp({ pii: 'block' }), { pii: 'garbage' }, []).pii).toBe('block');
   });
 });
