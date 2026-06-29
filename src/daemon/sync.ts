@@ -149,7 +149,14 @@ export interface RulesCache {
   /** Cloud-managed active-shield names (Managed Config M1). */
   shields?: string[];
   /** Cloud-managed settings (Managed Config M2, baseline+lock). */
-  managedConfig?: { mode?: string; locked: string[] };
+  managedConfig?: ManagedConfigCache;
+}
+
+/** Cloud-managed settings persisted in the cache (M2: mode + egress). */
+export interface ManagedConfigCache {
+  mode?: string;
+  egress?: { enabled?: boolean; mode?: string };
+  locked: string[];
 }
 
 /**
@@ -166,7 +173,11 @@ interface CloudPolicyBody {
   syncIntervalHours?: number;
   workspaceId?: string;
   shields?: unknown[]; // cloud-managed shield names (Managed Config M1)
-  managedConfig?: { mode?: unknown; locked?: unknown }; // M2 settings
+  managedConfig?: {
+    mode?: unknown;
+    egress?: { enabled?: unknown; mode?: unknown };
+    locked?: unknown;
+  }; // M2 settings
 }
 
 export function readCredentials(): { apiKey: string; apiUrl: string } | null {
@@ -315,19 +326,24 @@ export function extractShields(body: CloudPolicyBody): string[] {
  * undefined when nothing is managed so the cache stays minimal. Defensive
  * filtering keeps junk out of the cache the proxy applies.
  */
-export function extractManagedConfig(
-  body: CloudPolicyBody
-): { mode?: string; locked: string[] } | undefined {
+export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache | undefined {
   const mc = body.managedConfig;
   if (!mc || typeof mc !== 'object') return undefined;
-  const out: { mode?: string; locked: string[] } = {
+  const out: ManagedConfigCache = {
     locked: Array.isArray(mc.locked)
       ? mc.locked.filter((f): f is string => typeof f === 'string')
       : [],
   };
   if (typeof mc.mode === 'string') out.mode = mc.mode;
+  // M2b: egress.enabled (bool) + egress.mode (string). Allowlist not managed.
+  if (mc.egress && typeof mc.egress === 'object') {
+    const e: { enabled?: boolean; mode?: string } = {};
+    if (typeof mc.egress.enabled === 'boolean') e.enabled = mc.egress.enabled;
+    if (typeof mc.egress.mode === 'string') e.mode = mc.egress.mode;
+    if (e.enabled !== undefined || e.mode !== undefined) out.egress = e;
+  }
   // Nothing actually managed → omit entirely.
-  return out.mode !== undefined ? out : undefined;
+  return out.mode !== undefined || out.egress !== undefined ? out : undefined;
 }
 
 /**

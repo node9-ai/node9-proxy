@@ -1,5 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import { modeRank, resolveManagedMode } from '../config/managed';
+import { modeRank, resolveManagedMode, applyManagedEgress } from '../config/managed';
+
+const localEgress = (over: Partial<{ enabled: boolean; mode: string }> = {}) => ({
+  enabled: false,
+  mode: 'review',
+  allow: ['local.example.com'],
+  deny: [],
+  allowPrivate: true,
+  ...over,
+});
 
 describe('managed mode (baseline+lock)', () => {
   it('ranks modes weakest→strictest', () => {
@@ -36,5 +45,48 @@ describe('managed mode (baseline+lock)', () => {
   it('ignores an unrankable cloud value (never weakens/breaks enforcement)', () => {
     expect(resolveManagedMode('strict', 'garbage', false)).toBe('strict');
     expect(resolveManagedMode('strict', 'garbage', true)).toBe('strict');
+  });
+});
+
+describe('managed egress (baseline+lock) — M2b', () => {
+  it('enabled is force-on: a managed true turns egress on', () => {
+    const out = applyManagedEgress(localEgress({ enabled: false }), { enabled: true }, []);
+    expect(out.enabled).toBe(true);
+  });
+
+  it('enabled force-on never turns a locally-enabled egress off', () => {
+    // managed enabled omitted → local stays; managed true → stays on
+    expect(applyManagedEgress(localEgress({ enabled: true }), { enabled: true }, []).enabled).toBe(
+      true
+    );
+  });
+
+  it('egress mode: raises a weaker local mode up to the cloud floor', () => {
+    const out = applyManagedEgress(localEgress({ mode: 'off' }), { mode: 'review' }, []);
+    expect(out.mode).toBe('review');
+  });
+
+  it('egress mode: keeps a stricter local mode (dev can be safer)', () => {
+    const out = applyManagedEgress(localEgress({ mode: 'block' }), { mode: 'review' }, []);
+    expect(out.mode).toBe('block');
+  });
+
+  it('egress mode: a locked value wins outright over a stricter local', () => {
+    const out = applyManagedEgress(localEgress({ mode: 'block' }), { mode: 'review' }, [
+      'egressMode',
+    ]);
+    expect(out.mode).toBe('review');
+  });
+
+  it('leaves untouched local fields (allow/deny) intact', () => {
+    const out = applyManagedEgress(localEgress(), { enabled: true, mode: 'block' }, []);
+    expect(out.allow).toEqual(['local.example.com']);
+    expect(out.deny).toEqual([]);
+    expect(out.allowPrivate).toBe(true);
+  });
+
+  it('ignores an unrankable managed egress mode', () => {
+    const out = applyManagedEgress(localEgress({ mode: 'block' }), { mode: 'garbage' }, []);
+    expect(out.mode).toBe('block');
   });
 });

@@ -6,26 +6,80 @@
 // machine *weaker* than the developer chose (that's the whole point: gate, not
 // cage). shadowMode/panicMode remain absolute overrides applied above this.
 
-// `mode` strictness, weakest → strictest. observe/audit only log; standard and
-// strict actually enforce (strict being the most aggressive).
+// Strictness orderings, weakest → strictest.
+// mode: observe/audit only log; standard/strict enforce (strict most aggressive).
 export const MODE_ORDER = ['observe', 'audit', 'standard', 'strict'] as const;
+// egress mode: the verdict for an unknown host. off = no gate, block = strictest.
+export const EGRESS_MODE_ORDER = ['off', 'review', 'block'] as const;
 
-/** Strictness rank of a mode (higher = stricter). -1 for an unknown value. */
-export function modeRank(mode: string): number {
-  return MODE_ORDER.indexOf(mode as (typeof MODE_ORDER)[number]);
+/** Rank of a value within an order (higher = stricter). -1 if unknown. */
+function rankIn(order: readonly string[], value: string): number {
+  return order.indexOf(value);
 }
 
 /**
- * Resolve the effective `mode` given the local value, the cloud-managed floor,
- * and whether the admin locked it.
- *  - locked  → cloud wins outright.
- *  - else    → keep local only if it's STRICTER than the cloud floor; otherwise
- *              raise it to the floor.
- * An unknown/unrankable cloud value is ignored (returns local) so a bad managed
- * value can never weaken or break enforcement.
+ * Baseline+lock for an ORDERED enum (mode, egress.mode):
+ *  - locked → cloud wins outright.
+ *  - else   → keep local only if STRICTER than the cloud floor; otherwise raise.
+ * An unrankable cloud value is ignored (returns local) so junk never weakens or
+ * breaks enforcement.
  */
-export function resolveManagedMode(local: string, cloud: string, locked: boolean): string {
-  if (modeRank(cloud) === -1) return local; // never apply junk
+export function resolveByOrder(
+  order: readonly string[],
+  local: string,
+  cloud: string,
+  locked: boolean
+): string {
+  if (rankIn(order, cloud) === -1) return local; // never apply junk
   if (locked) return cloud;
-  return modeRank(local) > modeRank(cloud) ? local : cloud;
+  return rankIn(order, local) > rankIn(order, cloud) ? local : cloud;
+}
+
+/** Strictness rank of a mode (kept for callers/tests). -1 for unknown. */
+export function modeRank(mode: string): number {
+  return rankIn(MODE_ORDER, mode);
+}
+
+/** Resolve the effective `mode` (baseline+lock). */
+export function resolveManagedMode(local: string, cloud: string, locked: boolean): string {
+  return resolveByOrder(MODE_ORDER, local, cloud, locked);
+}
+
+// The managed-egress fields the proxy applies (M2b). `enabled` is force-on only
+// (false is the weakest, so it's never a meaningful floor); `mode` is ordered.
+// The allowlist is intentionally NOT managed here — it LOOSENS access (adds
+// reachable hosts), which doesn't fit "baseline = only tighten"; deferred.
+export interface ManagedEgress {
+  enabled?: boolean;
+  mode?: string;
+}
+/**
+ * Apply managed egress to the machine's local egress object (baseline+lock).
+ *  - enabled: force-on — locked → cloud value; else `local || cloud` (a managed
+ *    `true` turns egress on; a dev can't turn a managed-on egress off).
+ *  - mode: resolveByOrder over off<review<block.
+ * Generic over the local egress type so the precise caller type is preserved.
+ * Returns a NEW object; untouched local fields (allow/deny/allowPrivate) carry
+ * through unchanged.
+ */
+export function applyManagedEgress<T extends { enabled: boolean; mode: string }>(
+  local: T,
+  managed: ManagedEgress,
+  locked: string[]
+): T {
+  const next: T = { ...local };
+  if (typeof managed.enabled === 'boolean') {
+    next.enabled = locked.includes('egressEnabled')
+      ? managed.enabled
+      : local.enabled || managed.enabled;
+  }
+  if (typeof managed.mode === 'string') {
+    next.mode = resolveByOrder(
+      EGRESS_MODE_ORDER,
+      local.mode,
+      managed.mode,
+      locked.includes('egressMode')
+    ) as T['mode'];
+  }
+  return next;
 }

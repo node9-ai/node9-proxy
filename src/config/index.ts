@@ -7,7 +7,7 @@ import path from 'path';
 import os from 'os';
 import { sanitizeConfig } from '../config-schema';
 import { readActiveShields, readShieldOverrides, getShield } from '../shields';
-import { resolveManagedMode } from './managed';
+import { resolveManagedMode, applyManagedEgress } from './managed';
 
 // SmartCondition + SmartRule are now defined in @node9/policy-engine.
 // Re-exported here so existing import paths (`from '../config'`) keep
@@ -722,14 +722,37 @@ export function getConfig(cwd?: string): Config {
       if (Array.isArray(raw.shields)) {
         cloudManagedShields = raw.shields.filter((s): s is string => typeof s === 'string');
       }
-      // Managed settings (M2, baseline+lock). M2a: `mode` — applied as a floor a
-      // dev can only tighten, unless the admin locked it. Runs BEFORE the
-      // shadow/panic overrides below so those stay absolute.
+      // Managed settings (M2, baseline+lock) — applied as a floor a dev can only
+      // tighten, unless the admin locked it. Runs BEFORE the shadow/panic
+      // overrides below so those stay absolute.
       if (raw.managedConfig && typeof raw.managedConfig === 'object') {
-        const mc = raw.managedConfig as { mode?: unknown; locked?: unknown };
+        const mc = raw.managedConfig as {
+          mode?: unknown;
+          egress?: { enabled?: unknown; mode?: unknown };
+          locked?: unknown;
+        };
+        const locked: string[] = Array.isArray(mc.locked)
+          ? mc.locked.filter((f): f is string => typeof f === 'string')
+          : [];
+        // M2a: settings.mode.
         if (typeof mc.mode === 'string') {
-          const locked = Array.isArray(mc.locked) && mc.locked.includes('mode');
-          mergedSettings.mode = resolveManagedMode(mergedSettings.mode, mc.mode, locked);
+          mergedSettings.mode = resolveManagedMode(
+            mergedSettings.mode,
+            mc.mode,
+            locked.includes('mode')
+          );
+        }
+        // M2b: policy.egress (a policy field, not a setting). enabled is
+        // force-on; mode is off<review<block. The allowlist is NOT managed.
+        if (mc.egress && typeof mc.egress === 'object') {
+          mergedPolicy.egress = applyManagedEgress(
+            mergedPolicy.egress,
+            {
+              enabled: typeof mc.egress.enabled === 'boolean' ? mc.egress.enabled : undefined,
+              mode: typeof mc.egress.mode === 'string' ? mc.egress.mode : undefined,
+            },
+            locked
+          );
         }
       }
       if (raw.panicMode === true) {

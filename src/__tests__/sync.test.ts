@@ -745,6 +745,53 @@ describe('getConfig — cloud-pushed runtime flags', () => {
     expect(getConfig().settings.mode).toBe('standard');
   });
 
+  it('managed egress (M2b): force-on + raises mode to the cloud floor', () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({
+        settings: { mode: 'standard' },
+        policy: { egress: { enabled: false, mode: 'off' } },
+      }),
+      [CACHE_PATH]: JSON.stringify({
+        fetchedAt: '2026-06-29T00:00:00.000Z',
+        rules: [],
+        managedConfig: { egress: { enabled: true, mode: 'review' }, locked: [] },
+      }),
+    });
+    const egress = getConfig().policy.egress;
+    expect(egress.enabled).toBe(true);
+    expect(egress.mode).toBe('review');
+  });
+
+  it('managed egress (M2b): keeps a stricter local egress mode', () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({
+        settings: { mode: 'standard' },
+        policy: { egress: { enabled: true, mode: 'block' } },
+      }),
+      [CACHE_PATH]: JSON.stringify({
+        fetchedAt: '2026-06-29T00:00:00.000Z',
+        rules: [],
+        managedConfig: { egress: { mode: 'review' }, locked: [] },
+      }),
+    });
+    expect(getConfig().policy.egress.mode).toBe('block');
+  });
+
+  it('managed egress (M2b): a locked egress mode wins over a stricter local', () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({
+        settings: { mode: 'standard' },
+        policy: { egress: { enabled: true, mode: 'block' } },
+      }),
+      [CACHE_PATH]: JSON.stringify({
+        fetchedAt: '2026-06-29T00:00:00.000Z',
+        rules: [],
+        managedConfig: { egress: { mode: 'review' }, locked: ['egressMode'] },
+      }),
+    });
+    expect(getConfig().policy.egress.mode).toBe('review');
+  });
+
   it('panicMode and shadowMode coexist (both apply)', () => {
     mockFiles({
       [CONFIG_PATH]: JSON.stringify({ settings: { mode: 'standard' } }),
