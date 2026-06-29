@@ -1,7 +1,8 @@
 // src/daemon/sync.ts
 // Periodic sync of cloud policy rules to ~/.node9/rules-cache.json
 // The daemon calls startCloudSync() once on startup; it reads the configured
-// interval from ~/.node9/config.json (settings.cloudSyncIntervalHours, default 5).
+// interval from ~/.node9/config.json (cloudSyncIntervalSeconds, else
+// cloudSyncIntervalHours, else the 5h default — see resolveSyncIntervalMs).
 // The proxy reads rules-cache.json via getConfig() to enforce cloud-defined rules
 // even when offline.
 import fs from 'fs';
@@ -104,7 +105,28 @@ export function buildSessionDeltas(
 const rulesCacheFile = () => path.join(os.homedir(), '.node9', 'rules-cache.json');
 const DEFAULT_API_URL = 'https://api.node9.ai/api/v1/intercept/policies/sync';
 const DEFAULT_INTERVAL_HOURS = 5;
-const MIN_INTERVAL_HOURS = 1;
+// Floor + ceiling for the resolved sync interval. The 15s floor keeps a
+// misconfigured/aggressive value from hammering the API (the ETag/304 path
+// makes empty polls cheap, but not free); the 24h ceiling is a sane upper bound.
+const MIN_INTERVAL_SECONDS = 15;
+const MAX_INTERVAL_SECONDS = 24 * 60 * 60;
+
+/**
+ * Resolve the cloud-sync interval (ms) from config. Precedence:
+ *   cloudSyncIntervalSeconds  →  cloudSyncIntervalHours * 3600  →  default 5h.
+ * Clamped to [MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS]. Pure (no I/O) so it's
+ * unit-testable without timers.
+ */
+export function resolveSyncIntervalMs(settings: {
+  cloudSyncIntervalSeconds?: number;
+  cloudSyncIntervalHours?: number;
+}): number {
+  const rawSeconds =
+    settings.cloudSyncIntervalSeconds ??
+    (settings.cloudSyncIntervalHours ?? DEFAULT_INTERVAL_HOURS) * 3600;
+  const clamped = Math.min(Math.max(rawSeconds, MIN_INTERVAL_SECONDS), MAX_INTERVAL_SECONDS);
+  return clamped * 1000;
+}
 
 /**
  * Local cache file shape — kept backward-compatible (`rules` field name
@@ -662,10 +684,9 @@ export function getCloudRules(): unknown[] | null {
  * Called once by startDaemon(). Timer is unref'd so it doesn't prevent process exit.
  */
 export function startCloudSync(): void {
-  const rawHours = getConfig().settings.cloudSyncIntervalHours ?? DEFAULT_INTERVAL_HOURS;
-  // Clamp to a reasonable minimum so a misconfigured value of 0 doesn't hammer the API
-  const intervalHours = Math.max(rawHours, MIN_INTERVAL_HOURS);
-  const intervalMs = intervalHours * 60 * 60 * 1000;
+  // Seconds-first, then hours, then the 5h default; clamped to [15s, 24h].
+  // Read once at daemon start — a changed interval applies on the next restart.
+  const intervalMs = resolveSyncIntervalMs(getConfig().settings);
 
   // Sync once shortly after startup (30 s delay avoids slowing down daemon boot)
   const initial = setTimeout(() => void syncOnce(), 30_000);
