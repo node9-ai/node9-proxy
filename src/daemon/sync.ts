@@ -146,6 +146,8 @@ export interface RulesCache {
   shadowMode?: boolean;
   syncIntervalHours?: number;
   workspaceId?: string;
+  /** Cloud-managed active-shield names (Managed Config M1). */
+  shields?: string[];
 }
 
 /**
@@ -161,6 +163,7 @@ interface CloudPolicyBody {
   shadowMode?: boolean;
   syncIntervalHours?: number;
   workspaceId?: string;
+  shields?: unknown[]; // cloud-managed shield names (Managed Config M1)
 }
 
 export function readCredentials(): { apiKey: string; apiUrl: string } | null {
@@ -297,6 +300,13 @@ export function extractRules(body: CloudPolicyBody): unknown[] {
   return [];
 }
 
+/** Cloud-managed shield names from the sync body (Managed Config M1). */
+export function extractShields(body: CloudPolicyBody): string[] {
+  return Array.isArray(body.shields)
+    ? body.shields.filter((s): s is string => typeof s === 'string')
+    : [];
+}
+
 /**
  * Write the policy cache atomically. Best-effort: directory creation
  * failures fall through silently — the proxy will fall back to local
@@ -326,6 +336,7 @@ async function syncOnce(): Promise<void> {
         shadowMode: result.body.shadowMode,
         syncIntervalHours: result.body.syncIntervalHours,
         workspaceId: result.body.workspaceId,
+        shields: extractShields(result.body),
       };
       writeCache(cache);
     }
@@ -622,6 +633,7 @@ export async function runCloudSync(): Promise<
       shadowMode: result.body.shadowMode,
       syncIntervalHours: result.body.syncIntervalHours,
       workspaceId: result.body.workspaceId,
+      shields: extractShields(result.body),
     };
     writeCache(cache);
     maybePushBlast();

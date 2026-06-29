@@ -514,6 +514,33 @@ describe('getConfig — cloud rules cache layer', () => {
     expect(cloudRule?.verdict).toBe('block');
   });
 
+  it('enables cloud-managed shields from rules-cache.json (Managed Config M1)', () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({ settings: { mode: 'standard' } }),
+      [CACHE_PATH]: JSON.stringify({
+        fetchedAt: '2026-06-29T00:00:00.000Z',
+        rules: [],
+        shields: ['aws'], // dashboard-managed: enable the AWS shield fleet-wide
+      }),
+    });
+    const config = getConfig();
+    // The AWS shield's rules are now active even though no local shield was set.
+    const awsRule = config.policy.smartRules.find((r) => r.name?.startsWith('shield:aws:'));
+    expect(awsRule).toBeDefined();
+  });
+
+  it('no cloud shields (absent/empty) leaves shields unchanged — zero-regression', () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({ settings: { mode: 'standard' } }),
+      [CACHE_PATH]: JSON.stringify({
+        fetchedAt: '2026-06-29T00:00:00.000Z',
+        rules: [],
+      }),
+    });
+    const config = getConfig();
+    expect(config.policy.smartRules.some((r) => r.name?.startsWith('shield:aws:'))).toBe(false);
+  });
+
   it('cloud rule overrides local rule with same name (cloud wins — applied after local)', () => {
     mockFiles({
       [CONFIG_PATH]: JSON.stringify({
