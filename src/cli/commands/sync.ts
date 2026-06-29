@@ -2,10 +2,25 @@
 // Registered as `node9 policy` by cli.ts.
 import type { Command } from 'commander';
 import chalk from 'chalk';
-import { runCloudSync, getCloudSyncStatus, getCloudRules } from '../../daemon/sync';
+import { runCloudSync, getCloudSyncStatus, getCloudRules, runPolicyPush } from '../../daemon/sync';
 
 export function registerSyncCommand(program: Command): void {
   const policy = program.command('policy').description('Manage cloud policy rules');
+
+  policy
+    .command('push')
+    .description("Push this machine's effective policy to the node9 dashboard")
+    .action(async () => {
+      process.stdout.write(chalk.cyan('Pushing policy to the dashboard…'));
+      const result = await runPolicyPush();
+      process.stdout.write('\n');
+      if (!result.ok) {
+        console.error(chalk.red(`✗ ${result.reason}`));
+        process.exit(1);
+      }
+      console.log(chalk.green('✓ Policy mirrored to the dashboard'));
+      console.log(chalk.gray('  See it under Security Policy → Machines'));
+    });
 
   policy
     .command('sync')

@@ -66,6 +66,19 @@ export interface SmartRule {
    * permanently destroy teammates' work."
    */
   description?: string;
+  /**
+   * Provenance of a synced cloud rule, e.g. "SHIELD:aws" or "USER". Shipped by
+   * the SaaS so the proxy can attribute a rule to its origin shield (so
+   * `node9 shield list` can show a shield as cloud-enabled). Absent on local rules.
+   */
+  source?: string;
+  /**
+   * Manager "pinned" rule (Phase 3b): when set, this rule wins a conflict — a
+   * developer's local rule can't override it. Cloud-authored + admin-gated;
+   * local rules never set it. See resolvePinned. Default unset = a normal rule,
+   * resolved exactly as today (first match wins).
+   */
+  pinned?: boolean;
 }
 
 /**

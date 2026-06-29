@@ -63,7 +63,7 @@ export type {
   ProvenanceLookup,
   ProvenanceTrust,
 } from './policy';
-export { evaluatePolicy, isIgnoredTool, checkDangerousSql } from './policy';
+export { evaluatePolicy, resolvePinned, isIgnoredTool, checkDangerousSql } from './policy';
 
 // Smart rules — tool-name pattern match + condition evaluator.
 export { matchesPattern, getNestedValue, evaluateSmartConditions } from './rules';

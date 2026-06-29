@@ -4,6 +4,8 @@
 import type { Command } from 'commander';
 import chalk from 'chalk';
 import fs from 'fs';
+import path from 'path';
+import os from 'os';
 import {
   getShield,
   listShields,
@@ -32,6 +34,39 @@ interface CommunityEntry {
   description: string;
   author: string;
   url: string;
+}
+
+/**
+ * Shield names that are active via synced CLOUD rules (~/.node9/rules-cache.json,
+ * written by the policy sync). A shield enabled from the dashboard arrives as
+ * cloud rules tagged `source: "SHIELD:<name>"` — NOT as a local shields.json
+ * entry — so `shield list` must read the cache to report it.
+ * Prefers the explicit `source` tag; falls back to parsing the rule description
+ * for caches synced before the SaaS started shipping `source`.
+ */
+function readCloudShields(): Set<string> {
+  const out = new Set<string>();
+  try {
+    const file = path.join(os.homedir(), '.node9', 'rules-cache.json');
+    const raw = JSON.parse(fs.readFileSync(file, 'utf-8')) as {
+      rules?: unknown[];
+    };
+    for (const r of raw.rules ?? []) {
+      const rule = r as { source?: string; description?: string };
+      const fromSource = rule.source?.startsWith('SHIELD:')
+        ? rule.source.slice('SHIELD:'.length).toLowerCase()
+        : undefined;
+      const fromDesc =
+        !fromSource && rule.description
+          ? /\b([a-z0-9-]+)\s+shield/i.exec(rule.description)?.[1]?.toLowerCase()
+          : undefined;
+      const name = fromSource ?? fromDesc;
+      if (name) out.add(name);
+    }
+  } catch {
+    /* no cache / unreadable → no cloud shields */
+  }
+  return out;
 }
 
 export function registerShieldCommand(program: Command): void {
@@ -135,12 +170,24 @@ export function registerShieldCommand(program: Command): void {
       }
 
       const active = new Set(readActiveShields());
+      const cloud = readCloudShields();
       console.log(chalk.bold('\n🛡️  Available Shields\n'));
+      console.log(chalk.gray('  ● local · ☁ cloud\n'));
       for (const shield of listShields()) {
-        const status = active.has(shield.name)
-          ? chalk.green('● enabled')
-          : chalk.gray('○ disabled');
-        console.log(`  ${status}  ${chalk.cyan(shield.name.padEnd(12))} ${shield.description}`);
+        const isLocal = active.has(shield.name);
+        const isCloud = cloud.has(shield.name);
+        const status =
+          isLocal && isCloud
+            ? chalk.green('●☁ enabled ')
+            : isLocal
+              ? chalk.green('●  enabled ')
+              : isCloud
+                ? chalk.cyan('☁  cloud   ')
+                : chalk.gray('○  disabled');
+        const via = isCloud && !isLocal ? chalk.gray(' (via dashboard)') : '';
+        console.log(
+          `  ${status} ${chalk.cyan(shield.name.padEnd(12))} ${shield.description}${via}`
+        );
         if (shield.aliases.length > 0)
           console.log(chalk.gray(`              aliases: ${shield.aliases.join(', ')}`));
       }

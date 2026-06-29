@@ -20,17 +20,9 @@ import {
   setupVSCode,
   setupHud,
   setupHermes,
-  teardownClaude,
-  teardownGemini,
-  teardownAntigravity,
-  teardownCopilot,
-  teardownCursor,
-  teardownCodex,
-  teardownWindsurf,
-  teardownVSCode,
-  teardownHud,
-  teardownHermes,
 } from './setup';
+import { AGENT_TEARDOWNS, resolveAgentTeardown, agentTeardownTargets } from './agent-teardowns';
+import { getAgentWiring } from './agent-wiring';
 import { stopDaemon } from './daemon/index';
 import chalk from 'chalk';
 import fs from 'fs';
@@ -276,39 +268,23 @@ program
 program
   .command('removefrom', { hidden: true })
   .description('Remove Node9 hooks from an AI agent configuration')
-  .addHelpText(
-    'after',
-    '\n  Supported targets:  claude  antigravity  copilot  gemini  cursor  codex  windsurf  vscode  hud'
-  )
-  .argument(
-    '<target>',
-    'The agent to remove from: claude | antigravity | copilot | gemini | cursor | codex | windsurf | vscode | hud'
-  )
+  .addHelpText('after', `\n  Supported targets:  ${agentTeardownTargets().join('  ')}`)
+  .argument('<target>', `The agent to remove from: ${agentTeardownTargets().join(' | ')}`)
   .action((target: string) => {
     // Validate before logging so the target string is never interpolated
-    // into output before it has been confirmed to be a known value.
-    let fn: (() => void) | undefined;
-    if (target === 'claude') fn = teardownClaude;
-    else if (target === 'gemini') fn = teardownGemini;
-    else if (target === 'antigravity' || target === 'agy') fn = teardownAntigravity;
-    else if (target === 'copilot') fn = teardownCopilot;
-    else if (target === 'cursor') fn = teardownCursor;
-    else if (target === 'codex') fn = teardownCodex;
-    else if (target === 'windsurf') fn = teardownWindsurf;
-    else if (target === 'vscode') fn = teardownVSCode;
-    else if (target === 'hermes') fn = teardownHermes;
-    else if (target === 'hud') fn = teardownHud;
-    else {
+    // into output before it has been confirmed to be a known value. Resolved
+    // off the single AGENT_TEARDOWNS source of truth (ids + aliases).
+    const agent = resolveAgentTeardown(target);
+    if (!agent) {
       console.error(
-        chalk.red(
-          `Unknown target: "${target}". Supported: claude, antigravity, copilot, gemini, cursor, codex, windsurf, vscode, hermes, hud`
-        )
+        chalk.red(`Unknown target: "${target}". Supported: ${agentTeardownTargets().join(', ')}`)
       );
       process.exit(1);
+      return;
     }
-    console.log(chalk.cyan(`\n🛡️  Node9: removing hooks from ${target}...\n`));
+    console.log(chalk.cyan(`\n🛡️  Node9: removing hooks from ${agent.label}...\n`));
     try {
-      fn!();
+      agent.fn();
     } catch (err) {
       console.error(chalk.red(`  ⚠️  Failed: ${err instanceof Error ? err.message : String(err)}`));
       process.exit(1);
@@ -333,19 +309,15 @@ program
       console.log(chalk.blue('  ℹ️  Daemon was not running'));
     }
 
-    // 2. Remove hooks from all agents (each wrapped independently so a partial
-    //    failure does not silently skip the remaining agents)
+    // 2. Remove hooks/shims from EVERY supported agent (each wrapped
+    //    independently so a partial failure does not silently skip the rest).
+    //    Driven off the single AGENT_TEARDOWNS source of truth so a newly
+    //    supported agent can't be silently left behind (issue #186: Opencode +
+    //    Pi plugin shims used to be missed). Teardowns are no-op-safe when the
+    //    agent isn't installed.
     console.log(chalk.bold('\nRemoving hooks...'));
     let teardownFailed = false;
-    for (const [label, fn] of [
-      ['Claude', teardownClaude],
-      ['Gemini', teardownGemini],
-      ['Cursor', teardownCursor],
-      ['Codex', teardownCodex],
-      ['Windsurf', teardownWindsurf],
-      ['VSCode', teardownVSCode],
-      ['Hermes', teardownHermes],
-    ] as const) {
+    for (const { label, fn } of AGENT_TEARDOWNS) {
       try {
         fn();
       } catch (err) {
@@ -356,6 +328,29 @@ program
           )
         );
       }
+    }
+
+    // 2b. Leftover scan — re-read the agent-wiring registry and report any agent
+    //     still wired. Scoped wording on purpose: the registry covers node9's
+    //     hook + plugin-shim agents (the Opencode/Pi shims from #186 included),
+    //     but NOT the MCP-config / statusline edits for Windsurf, VSCode, HUD,
+    //     ClaudeDesktop — those teardowns ran above but aren't re-verified here
+    //     (verifying them = expanding the registry; tracked separately). So the
+    //     message claims only what it actually checked.
+    try {
+      const residual = getAgentWiring().filter((a) => a.wireState === 'wired');
+      if (residual.length === 0) {
+        console.log(chalk.green('  ✅ Verified — no node9 hooks or plugin shims remain'));
+      } else {
+        teardownFailed = true;
+        console.error(chalk.red('  ⚠️  Still wired after teardown:'));
+        for (const a of residual) {
+          console.error(chalk.red(`     • ${a.label} — ${a.settingsPath}`));
+        }
+      }
+    } catch {
+      // A scan failure must not block uninstall; the teardown loop above is
+      // the actual removal. Skip the verification line silently.
     }
 
     // 3. Optionally purge ~/.node9/ — requires explicit confirmation because the
