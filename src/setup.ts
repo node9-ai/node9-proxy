@@ -1285,15 +1285,44 @@ export function claudeDesktopConfigPath(homeDir: string = os.homedir()): string 
 }
 
 /**
- * Returns true if `binary` is found anywhere in PATH and is executable.
- * Used by {@link detectAgents} to catch agents that ship a CLI binary
- * but create their config dir lazily on first launch — e.g. Opencode
- * (issue #186), which only writes ~/.config/opencode on first run.
+ * Opencode's config dir, honoring $XDG_CONFIG_HOME (XDG spec: used only when
+ * set AND absolute; otherwise ~/.config). Single source of truth so detection
+ * (`node9 init` + doctor) and the shim write/remove paths can't drift — the
+ * root cause of #186 staying open on custom-XDG machines.
  */
-function binaryInPath(binary: string): boolean {
+export function opencodeConfigDir(home: string = os.homedir()): string {
+  const xdg = process.env.XDG_CONFIG_HOME;
+  const base = xdg && path.isAbsolute(xdg) ? xdg : path.join(home, '.config');
+  return path.join(base, 'opencode');
+}
+
+// Common install dirs that aren't always on the PATH a node9 process inherits
+// (bun, npm-global, ~/.local/bin) — agents like opencode/pi land here on
+// CachyOS/Arch and were invisible to a bare process.env.PATH scan (#186).
+function commonBinDirs(home: string): string[] {
+  return [
+    path.join(home, '.local', 'bin'),
+    path.join(home, '.bun', 'bin'),
+    path.join(home, '.npm-global', 'bin'),
+    '/usr/local/bin',
+    '/opt/homebrew/bin',
+  ];
+}
+
+/**
+ * Returns true if `binary` is found and executable on PATH or in a common
+ * install dir that isn't always on a node9 process's PATH (bun, npm-global,
+ * ~/.local/bin). Used by {@link detectAgents} to catch agents that ship a CLI
+ * binary but create their config dir lazily on first launch — e.g. Opencode
+ * (#186), installed-but-never-launched.
+ */
+function binaryInPath(binary: string, home: string = os.homedir()): boolean {
   const pathEnv = process.env.PATH ?? '';
-  for (const dir of pathEnv.split(path.delimiter)) {
-    if (!dir) continue;
+  const dirs = [...pathEnv.split(path.delimiter), ...commonBinDirs(home)];
+  const seen = new Set<string>();
+  for (const dir of dirs) {
+    if (!dir || seen.has(dir)) continue;
+    seen.add(dir);
     try {
       fs.accessSync(path.join(dir, binary), fs.constants.X_OK);
       return true;
@@ -1345,38 +1374,40 @@ export function detectAgents(homeDir: string = os.homedir()): {
     // creates ~/.gemini/settings.json on first run; agy does not touch
     // it (it uses antigravity-cli/settings.json) — that file is the
     // legacy-CLI discriminator.
-    gemini: exists(path.join(homeDir, '.gemini', 'settings.json')) || binaryInPath('gemini'),
+    gemini:
+      exists(path.join(homeDir, '.gemini', 'settings.json')) || binaryInPath('gemini', homeDir),
     // agy creates ~/.gemini/antigravity-cli/ on first launch; the IDE
     // creates antigravity-ide/. PATH fallback covers installed-but-
     // never-launched (same class as opencode #186).
     antigravity:
       exists(path.join(homeDir, '.gemini', 'antigravity-cli')) ||
       exists(path.join(homeDir, '.gemini', 'antigravity-ide')) ||
-      binaryInPath('agy'),
+      binaryInPath('agy', homeDir),
     // GitHub Copilot CLI creates ~/.copilot on first launch; PATH
     // fallback covers installed-but-never-launched (same as opencode #186).
-    copilot: exists(path.join(homeDir, '.copilot')) || binaryInPath('copilot'),
+    copilot: exists(path.join(homeDir, '.copilot')) || binaryInPath('copilot', homeDir),
     cursor: exists(path.join(homeDir, '.cursor')),
     codex: exists(path.join(homeDir, '.codex')),
     windsurf: exists(path.join(homeDir, '.codeium', 'windsurf')),
     vscode: exists(path.join(homeDir, '.vscode')),
     claudeDesktop: desktopPath !== null && exists(path.dirname(desktopPath)),
-    // Opencode creates ~/.config/opencode lazily on first launch — fall back
-    // to a PATH lookup so installed-but-never-launched CLIs are still wired.
-    opencode: exists(path.join(homeDir, '.config', 'opencode')) || binaryInPath('opencode'),
+    // Opencode creates its config dir lazily on first launch — fall back to a
+    // PATH lookup so installed-but-never-launched CLIs are still wired. Config
+    // dir honors $XDG_CONFIG_HOME via opencodeConfigDir (#186, custom-XDG).
+    opencode: exists(opencodeConfigDir(homeDir)) || binaryInPath('opencode', homeDir),
     // Pi (https://pi.dev): config dir is ~/.pi/agent (CONFIG_DIR_NAME=".pi"
     // + agentDir, verified against opensources/pi-main/packages/coding-agent/
     // src/config.ts:449,475). The Bun-compiled binary path may create this
     // dir lazily on first launch — same class of bug as opencode's #186
     // (design R6) — so fall back to PATH lookup for installed-but-never-
     // launched pi.
-    pi: exists(path.join(homeDir, '.pi', 'agent')) || binaryInPath('pi'),
+    pi: exists(path.join(homeDir, '.pi', 'agent')) || binaryInPath('pi', homeDir),
     // Hermes Agent (https://github.com/NousResearch/hermes-agent): home dir
     // is $HERMES_HOME (default ~/.hermes) per hermes_constants.py:30. config.yaml
     // appears after `hermes setup` has run; the directory alone exists from
     // install time. PATH fallback covers the rare case where the user blew
     // away ~/.hermes but kept the binary.
-    hermes: exists(hermesHomeDir(homeDir)) || binaryInPath('hermes'),
+    hermes: exists(hermesHomeDir(homeDir)) || binaryInPath('hermes', homeDir),
   };
 }
 
@@ -2326,7 +2357,7 @@ const OPENCODE_PLUGIN_NAME = 'node9.js';
 export async function setupOpencode(): Promise<void> {
   seedMcpPinsIfMissing(); // #179: distinguish never-installed from no-pins-yet
   const homeDir = os.homedir();
-  const configDir = path.join(homeDir, '.config', 'opencode');
+  const configDir = opencodeConfigDir(homeDir);
   const pluginsDir = path.join(configDir, 'plugins');
   const configPath = path.join(configDir, 'opencode.json');
   const pluginPath = path.join(pluginsDir, OPENCODE_PLUGIN_NAME);
@@ -2430,7 +2461,7 @@ export async function setupOpencode(): Promise<void> {
 
 export function teardownOpencode(): void {
   const homeDir = os.homedir();
-  const configDir = path.join(homeDir, '.config', 'opencode');
+  const configDir = opencodeConfigDir(homeDir);
   const pluginsDir = path.join(configDir, 'plugins');
   const configPath = path.join(configDir, 'opencode.json');
   const pluginPath = path.join(pluginsDir, OPENCODE_PLUGIN_NAME);

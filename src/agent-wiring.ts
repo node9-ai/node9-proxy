@@ -13,7 +13,7 @@ import path from 'path';
 import os from 'os';
 import * as yaml from 'yaml';
 import { parse as parseToml } from 'smol-toml';
-import { isNode9Hook, hermesConfigPath, detectAgents } from './setup';
+import { isNode9Hook, hermesConfigPath, detectAgents, opencodeConfigDir } from './setup';
 
 // ── Low-level detectors (this module is now the shared home for them) ─────────
 
@@ -252,10 +252,10 @@ export const AGENT_SPECS: AgentSpec[] = [
     setupCommand: 'node9 agents add opencode',
     hookFormat: 'flat',
     hookEvents: [],
-    shimFile: (h) => path.join(h, '.config', 'opencode', 'plugins', 'node9.js'),
+    shimFile: (h) => path.join(opencodeConfigDir(h), 'plugins', 'node9.js'),
     present: (h) =>
-      exists(path.join(h, '.config', 'opencode')) ||
-      exists(path.join(h, '.config', 'opencode', 'plugins', 'node9.js')),
+      exists(opencodeConfigDir(h)) ||
+      exists(path.join(opencodeConfigDir(h), 'plugins', 'node9.js')),
   },
   {
     id: 'pi',

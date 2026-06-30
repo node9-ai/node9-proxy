@@ -25,6 +25,7 @@ describe('agent-wiring registry', () => {
   beforeEach(() => {
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'n9-wiring-'));
     delete process.env.HERMES_HOME; // deterministic Hermes path under `home`
+    delete process.env.XDG_CONFIG_HOME; // deterministic opencode config path
   });
   afterEach(() => {
     fs.rmSync(home, { recursive: true, force: true });
@@ -90,6 +91,37 @@ describe('agent-wiring registry', () => {
     expect(oc?.present).toBe(true);
     expect(oc?.wireState).toBe('unwired');
     expect(oc?.isProtected).toBe(false);
+  });
+
+  // Issue #186 (still open for custom XDG): opencode honors $XDG_CONFIG_HOME,
+  // so its config dir is $XDG_CONFIG_HOME/opencode. doctor's present() must
+  // respect XDG or it reports opencode absent on a custom-XDG machine.
+  it('detects opencode present under a custom $XDG_CONFIG_HOME (issue #186)', () => {
+    const xdg = path.join(home, 'custom-xdg');
+    fs.mkdirSync(path.join(xdg, 'opencode'), { recursive: true });
+    process.env.XDG_CONFIG_HOME = xdg;
+    try {
+      const oc = getAgentWiring(home).find((a) => a.id === 'opencode');
+      expect(oc?.present).toBe(true);
+    } finally {
+      delete process.env.XDG_CONFIG_HOME;
+    }
+  });
+
+  // Write/remove path: the opencode shim is written to (setupOpencode) and
+  // removed from (teardownOpencode) shimFile(home). It MUST resolve under a
+  // custom $XDG_CONFIG_HOME too, or detection (present) and the write path
+  // would disagree — node9 would detect opencode under XDG but write the hook
+  // to ~/.config (detected-but-not-protected). Closes the #186 loop.
+  it('locates the opencode shim under a custom $XDG_CONFIG_HOME (write path, #186)', () => {
+    const xdg = path.join(home, 'custom-xdg');
+    process.env.XDG_CONFIG_HOME = xdg;
+    try {
+      const spec = AGENT_SPECS.find((s) => s.id === 'opencode');
+      expect(spec?.shimFile?.(home)).toBe(path.join(xdg, 'opencode', 'plugins', 'node9.js'));
+    } finally {
+      delete process.env.XDG_CONFIG_HOME;
+    }
   });
 
   it('reports every agent as absent on an empty home', () => {

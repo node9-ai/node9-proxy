@@ -986,6 +986,18 @@ describe('detectAgents', () => {
   const home = '/mock/home';
   const p = (name: string) => path.join(home, name).replace(/\\/g, '/');
 
+  // XDG determinism: snapshot + clear XDG_CONFIG_HOME so a CI runner that
+  // happens to set it doesn't change which opencode config path is checked.
+  let savedXdg: string | undefined;
+  beforeEach(() => {
+    savedXdg = process.env.XDG_CONFIG_HOME;
+    delete process.env.XDG_CONFIG_HOME;
+  });
+  afterEach(() => {
+    if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = savedXdg;
+  });
+
   it('returns all false when no agent directories exist', () => {
     vi.mocked(fs.existsSync).mockReturnValue(false);
     expect(detectAgents(home)).toEqual({
@@ -1098,6 +1110,40 @@ describe('detectAgents', () => {
       expect(detectAgents(home).pi).toBe(false);
     } finally {
       process.env.PATH = oldPath;
+    }
+  });
+
+  // ── Issue #186 (still open for custom XDG / non-PATH installs) ──────────
+  // Opencode honors $XDG_CONFIG_HOME: its config dir is
+  // $XDG_CONFIG_HOME/opencode, NOT ~/.config/opencode. detectAgents must
+  // respect XDG or it misses opencode on machines with a custom
+  // XDG_CONFIG_HOME (e.g. CachyOS/zsh — the reporter's setup).
+  it('detects Opencode via $XDG_CONFIG_HOME/opencode (XDG override)', () => {
+    const xdg = '/mock/xdg';
+    process.env.XDG_CONFIG_HOME = xdg;
+    vi.mocked(fs.existsSync).mockImplementation(
+      (q) => String(q).replace(/\\/g, '/') === `${xdg}/opencode`
+    );
+    expect(detectAgents(home).opencode).toBe(true);
+  });
+
+  // Opencode/Pi are commonly installed via bun or npm-global into
+  // ~/.bun/bin or ~/.local/bin, which aren't always on the PATH node9's
+  // process sees. binaryInPath must also probe common install dirs so
+  // `node9 init` detects an installed-but-not-on-process-PATH binary.
+  it('detects Opencode when binary is in ~/.bun/bin but not on process PATH (#186)', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+    vi.mocked(fs.accessSync).mockImplementation(((target: fs.PathLike) => {
+      if (String(target).replace(/\\/g, '/') === `${home}/.bun/bin/opencode`) return undefined;
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    }) as typeof fs.accessSync);
+    const oldPath = process.env.PATH;
+    process.env.PATH = '/usr/bin'; // deliberately excludes ~/.bun/bin
+    try {
+      expect(detectAgents(home).opencode).toBe(true);
+    } finally {
+      process.env.PATH = oldPath;
+      vi.mocked(fs.accessSync).mockImplementation(enoentThrow);
     }
   });
 
