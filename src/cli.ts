@@ -23,6 +23,7 @@ import {
 } from './setup';
 import { AGENT_TEARDOWNS, resolveAgentTeardown, agentTeardownTargets } from './agent-teardowns';
 import { getAgentWiring } from './agent-wiring';
+import { writeCredentialsAndConfig } from './credentials';
 import { stopDaemon } from './daemon/index';
 import chalk from 'chalk';
 import fs from 'fs';
@@ -76,62 +77,10 @@ program
   .option('--local', 'Save key for audit/logging only — local config still controls all decisions')
   .option('--profile <name>', 'Save as a named profile (default: "default")')
   .action((apiKey, options: { local?: boolean; profile?: string }) => {
-    const DEFAULT_API_URL = 'https://api.node9.ai/api/v1/intercept';
-    const credPath = path.join(os.homedir(), '.node9', 'credentials.json');
-    if (!fs.existsSync(path.dirname(credPath)))
-      fs.mkdirSync(path.dirname(credPath), { recursive: true });
-
-    const profileName = options.profile || 'default';
-    let existingCreds: Record<string, unknown> = {};
-    try {
-      if (fs.existsSync(credPath)) {
-        const raw = JSON.parse(fs.readFileSync(credPath, 'utf-8')) as Record<string, unknown>;
-        if (raw.apiKey) {
-          existingCreds = {
-            default: { apiKey: raw.apiKey, apiUrl: raw.apiUrl || DEFAULT_API_URL },
-          };
-        } else {
-          existingCreds = raw;
-        }
-      }
-    } catch {}
-
-    existingCreds[profileName] = { apiKey, apiUrl: DEFAULT_API_URL };
-    fs.writeFileSync(credPath, JSON.stringify(existingCreds, null, 2), { mode: 0o600 });
-
-    let effectiveCloud: boolean | null = null;
-    if (profileName === 'default') {
-      const configPath = path.join(os.homedir(), '.node9', 'config.json');
-      let config: Record<string, unknown> = {};
-      try {
-        if (fs.existsSync(configPath))
-          config = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
-      } catch {}
-      if (!config.settings || typeof config.settings !== 'object') config.settings = {};
-      const s = config.settings as Record<string, unknown>;
-      const approvers = (s.approvers as Record<string, unknown>) || {
-        native: true,
-        browser: true,
-        cloud: true,
-        terminal: true,
-      };
-      // Only change cloud setting when --local is explicitly passed.
-      // Without --local, preserve whatever the user had before so that
-      // re-running `node9 login` to refresh an API key doesn't silently
-      // re-enable cloud approvals for users who had turned them off.
-      if (options.local) {
-        approvers.cloud = false;
-      }
-      s.approvers = approvers;
-      if (!fs.existsSync(path.dirname(configPath)))
-        fs.mkdirSync(path.dirname(configPath), { recursive: true });
-      fs.writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
-      // What is ACTUALLY in effect after the write. A pre-existing
-      // approvers object with cloud:false (or missing — the merged default
-      // is false) stays off; the success message must say so instead of
-      // claiming "agent mode" while nothing syncs.
-      effectiveCloud = approvers.cloud === true;
-    }
+    const { profileName, effectiveCloud } = writeCredentialsAndConfig(apiKey, {
+      profileName: options.profile,
+      isLocal: options.local,
+    });
 
     if (options.profile && profileName !== 'default') {
       console.log(chalk.green(`✅ Profile "${profileName}" saved`));
