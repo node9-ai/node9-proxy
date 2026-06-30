@@ -7,22 +7,7 @@ import path from 'path';
 import os from 'os';
 import https from 'https';
 import { DEFAULT_CONFIG } from '../../core';
-import {
-  setupClaude,
-  setupGemini,
-  setupAntigravity,
-  setupCopilot,
-  setupCursor,
-  setupCodex,
-  setupWindsurf,
-  setupVSCode,
-  setupClaudeDesktop,
-  setupOpencode,
-  setupPi,
-  setupHermes,
-  detectAgents,
-  node9Version,
-} from '../../setup';
+import { setupAgent, detectAgents, node9Version } from '../../setup';
 import { readActiveShields, writeActiveShields, migrateRenamedRuleKeys } from '../../shields';
 import { installDaemonService, isDaemonServiceInstalled } from '../../daemon/service';
 import { autoStartDaemonAndWait, isTestingMode } from '../daemon-starter';
@@ -240,18 +225,7 @@ export function registerInitCommand(program: Command): void {
 
         for (const agent of found) {
           console.log(chalk.bold(`Wiring ${agent}...`));
-          if (agent === 'claude') await setupClaude();
-          else if (agent === 'gemini') await setupGemini();
-          else if (agent === 'antigravity') await setupAntigravity();
-          else if (agent === 'copilot') await setupCopilot();
-          else if (agent === 'cursor') await setupCursor();
-          else if (agent === 'codex') await setupCodex();
-          else if (agent === 'windsurf') await setupWindsurf();
-          else if (agent === 'vscode') await setupVSCode();
-          else if (agent === 'claudeDesktop') await setupClaudeDesktop();
-          else if (agent === 'opencode') await setupOpencode();
-          else if (agent === 'pi') await setupPi();
-          else if (agent === 'hermes') setupHermes();
+          await setupAgent(agent);
           console.log('');
         }
 
