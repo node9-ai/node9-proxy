@@ -565,7 +565,12 @@ export async function setupClaude(): Promise<void> {
     | undefined;
   const existingStatusCommand =
     typeof existingStatusLine === 'object' ? existingStatusLine?.command : existingStatusLine;
-  if (existingStatusCommand !== hudCommand) {
+  // Only set node9's HUD when there's no statusLine yet, or the existing one is
+  // already node9's (e.g. self-heal a stale path). NEVER overwrite a statusLine
+  // the user set themselves (e.g. ccstatusline) — silently doing so destroys
+  // their config, and uninstall then leaves them with nothing.
+  const isNode9OrEmpty = !existingStatusCommand || String(existingStatusCommand).includes('node9');
+  if (isNode9OrEmpty && existingStatusCommand !== hudCommand) {
     settings.statusLine = statusLineObj as unknown as string;
     hooksChanged = true;
     anythingChanged = true;
@@ -1827,13 +1832,18 @@ export function setupHud(): void {
     return;
   }
 
-  if (existing && existingCommand !== hudCommand) {
+  // Never overwrite a statusLine the user set themselves (e.g. ccstatusline).
+  // Only set node9's HUD when the slot is empty or already a node9 HUD (stale
+  // path → self-heal). Otherwise leave it and tell the user how to opt in.
+  if (existing && existingCommand !== hudCommand && !String(existingCommand).includes('node9')) {
     console.log(
       chalk.yellow(
         `  ⚠️  statusLine is already set to: "${existingCommand}"\n` +
-          `     Overwriting with node9 HUD.`
+          `     Leaving it as-is — node9 won't overwrite a statusLine you configured.\n` +
+          `     Remove it from ~/.claude/settings.json first if you want the node9 HUD.`
       )
     );
+    return;
   }
 
   settings.statusLine = statusLineObj as unknown as string;

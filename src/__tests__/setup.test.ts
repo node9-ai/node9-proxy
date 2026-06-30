@@ -14,6 +14,7 @@ import {
   setupOpencode,
   setupPi,
   setupHermes,
+  setupHud,
   teardownClaude,
   teardownGemini,
   teardownAntigravity,
@@ -142,6 +143,22 @@ describe('setupClaude', () => {
     const written = writtenTo(hooksPath);
     expect(written.hooks.UserPromptSubmit).toBeDefined();
     expect(written.hooks.UserPromptSubmit[0].hooks[0].command).toBe('node9 check');
+  });
+
+  // Regression: `node9 init` must NOT overwrite a statusLine it didn't set.
+  // A user with e.g. ccstatusline who ran `node9 init` had it silently replaced
+  // by node9's HUD — and then lost entirely on uninstall. node9 must leave a
+  // non-node9 statusLine alone.
+  it('preserves a non-node9 statusLine instead of clobbering it (ccstatusline)', async () => {
+    const userStatusLine = { type: 'command', command: 'npx -y ccstatusline@latest' };
+    withExistingFiles({
+      [hooksPath]: { statusLine: userStatusLine }, // user's statusLine, no node9 hooks yet
+      [mcpPath]: { mcpServers: { node9: NODE9_MCP_ENTRY } }, // node9 MCP present → no wrap prompt
+    });
+    await setupClaude();
+    const written = writtenTo(hooksPath);
+    expect(written).not.toBeNull(); // hooks were added → file written
+    expect(written.statusLine).toEqual(userStatusLine); // preserved, NOT replaced by node9 HUD
   });
 
   it('does not re-add UserPromptSubmit hook if already present', async () => {
@@ -371,6 +388,26 @@ describe('setupClaude', () => {
     const allOutput = consoleSpy.mock.calls.map(([msg]) => String(msg)).join('\n');
     expect(allOutput).not.toMatch(/--openui/);
     consoleSpy.mockRestore();
+  });
+});
+
+// ── setupHud ─────────────────────────────────────────────────────────────────
+
+describe('setupHud', () => {
+  const hooksPath = path.join(os.homedir(), '.claude', 'settings.json');
+
+  it('does not overwrite a user-set (non-node9) statusLine', () => {
+    const userStatusLine = { type: 'command', command: 'npx -y ccstatusline@latest' };
+    withExistingFiles({ [hooksPath]: { statusLine: userStatusLine } });
+    setupHud();
+    expect(writtenTo(hooksPath)).toBeNull(); // nothing written → the user's statusLine is preserved
+  });
+
+  it('sets the node9 HUD when no statusLine exists', () => {
+    withExistingFiles({ [hooksPath]: {} });
+    setupHud();
+    const written = writtenTo(hooksPath);
+    expect(String(written.statusLine.command)).toContain('hud');
   });
 });
 
