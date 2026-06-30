@@ -237,6 +237,43 @@ function readCachedEtag(): string | undefined {
   }
 }
 
+/**
+ * The cloud-pushed sync cadence (hours) from the last sync, if any. Silent
+ * fallback on a missing/corrupt cache. Used so the dashboard's admin-set
+ * interval — not just the local config — controls how often this device polls.
+ */
+function readCachedSyncIntervalHours(): number | undefined {
+  try {
+    const raw = JSON.parse(fs.readFileSync(rulesCacheFile(), 'utf-8')) as Record<string, unknown>;
+    return typeof raw.syncIntervalHours === 'number' ? raw.syncIntervalHours : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Pick the sync interval (ms): the cloud-pushed cadence wins (the dashboard
+ * decides), else the local config. Both routed through resolveSyncIntervalMs so
+ * the [15s, 24h] clamp always applies. Pure — no I/O — so it's unit-testable.
+ */
+export function pickSyncIntervalMs(
+  cloudHours: number | undefined,
+  localSettings: {
+    cloudSyncIntervalSeconds?: number;
+    cloudSyncIntervalHours?: number;
+  }
+): number {
+  if (typeof cloudHours === 'number' && Number.isFinite(cloudHours)) {
+    return resolveSyncIntervalMs({ cloudSyncIntervalHours: cloudHours });
+  }
+  return resolveSyncIntervalMs(localSettings);
+}
+
+/** The effective interval now: cloud-cached cadence over local config. */
+export function effectiveSyncIntervalMs(): number {
+  return pickSyncIntervalMs(readCachedSyncIntervalHours(), getConfig().settings);
+}
+
 function fetchCloudPolicy(
   apiKey: string,
   apiUrl: string,
@@ -748,17 +785,22 @@ export function getCloudRules(): unknown[] | null {
  * Called once by startDaemon(). Timer is unref'd so it doesn't prevent process exit.
  */
 export function startCloudSync(): void {
-  // Seconds-first, then hours, then the 5h default; clamped to [15s, 24h].
-  // Read once at daemon start — a changed interval applies on the next restart.
-  const intervalMs = resolveSyncIntervalMs(getConfig().settings);
+  // Self-rescheduling: re-resolve the interval after every sync so a changed
+  // cloud cadence (pushed on the last sync) takes effect on the next cycle, not
+  // only on daemon restart. The cloud value wins over local config.
+  const scheduleNext = (ms: number): void => {
+    const t = setTimeout(() => {
+      // syncOnce handles its own errors; reschedule regardless so the loop
+      // never dies on a transient failure.
+      void syncOnce()
+        .catch(() => {})
+        .finally(() => scheduleNext(effectiveSyncIntervalMs()));
+    }, ms);
+    t.unref();
+  };
 
-  // Sync once shortly after startup (30 s delay avoids slowing down daemon boot)
-  const initial = setTimeout(() => void syncOnce(), 30_000);
-  initial.unref();
-
-  // Then on the configured interval
-  const recurring = setInterval(() => void syncOnce(), intervalMs);
-  recurring.unref();
+  // First sync 30 s after boot (avoids slowing daemon boot), then on the interval.
+  scheduleNext(30_000);
 }
 
 // Local-broadcast cadence for forensic findings. Decoupled from the SaaS
