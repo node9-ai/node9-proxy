@@ -3,12 +3,54 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import chalk from 'chalk';
-import { confirm } from '@inquirer/prompts';
+import { confirm as rawConfirm } from '@inquirer/prompts';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import * as yaml from 'yaml';
 import { seedMcpPinsIfMissing } from './mcp-pin';
 import { renderOpencodeShim } from './setup-opencode-shim';
 import { renderPiShim } from './setup-pi-shim';
+
+// Non-interactive guard for setup prompts. Under `curl | sh` (no TTY) or when a
+// caller (e.g. `node9 connect`, or an installer one-liner) sets
+// NODE9_NONINTERACTIVE=1, every confirm() resolves to its declared `default`
+// instead of hanging on stdin. Every prompt's default is the safe choice
+// (wrap=true; remove-legacy-hooks=false), so this preserves intent while making
+// setup runnable unattended. Gated on the explicit flag only — a missing TTY is
+// NOT a reliable signal (test runners lack one).
+export function isNonInteractive(): boolean {
+  return process.env.NODE9_NONINTERACTIVE === '1';
+}
+async function confirm(opts: { message: string; default?: boolean }): Promise<boolean> {
+  if (isNonInteractive()) return opts.default ?? false;
+  return rawConfirm(opts);
+}
+
+// Wire one agent by key (the dispatch shared by `init` and `connect`).
+export async function setupAgent(agent: string): Promise<void> {
+  if (agent === 'claude') await setupClaude();
+  else if (agent === 'gemini') await setupGemini();
+  else if (agent === 'antigravity') await setupAntigravity();
+  else if (agent === 'copilot') await setupCopilot();
+  else if (agent === 'cursor') await setupCursor();
+  else if (agent === 'codex') await setupCodex();
+  else if (agent === 'windsurf') await setupWindsurf();
+  else if (agent === 'vscode') await setupVSCode();
+  else if (agent === 'claudeDesktop') await setupClaudeDesktop();
+  else if (agent === 'opencode') await setupOpencode();
+  else if (agent === 'pi') await setupPi();
+  else if (agent === 'hermes') setupHermes();
+}
+
+// Detect installed agents and wire each (non-interactive when the caller sets
+// NODE9_NONINTERACTIVE / there's no TTY). Returns the wired agent keys.
+export async function setupDetectedAgents(): Promise<string[]> {
+  const detected = detectAgents();
+  const found = (Object.keys(detected) as Array<keyof typeof detected>).filter((k) => detected[k]);
+  for (const agent of found) {
+    await setupAgent(agent as string);
+  }
+  return found;
+}
 
 interface McpServer {
   type?: string;
