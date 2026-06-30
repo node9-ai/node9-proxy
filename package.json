@@ -1,6 +1,6 @@
 {
   "name": "@node9/proxy",
-  "version": "1.52.0",
+  "version": "1.53.0",
   "description": "The Sudo Command for AI Agents. Execution Security for Claude Code, Codex, Gemini, Cursor, Opencode, Pi, and any MCP server.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
