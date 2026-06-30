@@ -43,6 +43,7 @@ import { registerReportCommand } from './cli/commands/report';
 import { registerDaemonCommand } from './cli/commands/daemon-cmd';
 import { registerStatusCommand } from './cli/commands/status';
 import { registerInitCommand } from './cli/commands/init';
+import { registerConnectCommand } from './cli/commands/connect';
 import { registerUndoCommand } from './cli/commands/undo';
 import { registerMcpGatewayCommand } from './cli/commands/mcp-gateway';
 import { registerMcpServerCommand } from './cli/commands/mcp-server';
@@ -443,6 +444,7 @@ program
 
 // 3. INIT
 registerInitCommand(program);
+registerConnectCommand(program);
 
 // 4. AUDIT
 registerAuditCommand(program);
