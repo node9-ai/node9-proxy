@@ -79,4 +79,39 @@ describe('node9 uninstall — removes plugin-shim agents (Opencode + Pi)', () =>
     expect(r.stdout).toMatch(/no node9 hooks or plugin shims remain/i);
     fs.rmSync(h, { recursive: true, force: true });
   });
+
+  // Full-flow regression for the statusLine bug: uninstall must remove node9's
+  // hooks but NEVER delete a statusLine the user set (e.g. ccstatusline). #186.
+  it('uninstall removes node9 hooks but preserves a user statusLine', () => {
+    const h = makeHome();
+    const settingsPath = path.join(h, '.claude', 'settings.json');
+    const userStatusLine = { type: 'command', command: 'npx -y ccstatusline@latest' };
+    write(
+      settingsPath,
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: 'node9 check' }] }],
+          PostToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: 'node9 log' }] }],
+        },
+        statusLine: userStatusLine,
+      })
+    );
+    const r = run(h, ['uninstall']);
+    expect(r.status).toBe(0);
+    const after = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+    expect(after.statusLine).toEqual(userStatusLine); // user's statusLine preserved
+    expect(JSON.stringify(after.hooks ?? {})).not.toContain('node9'); // node9 hooks removed
+    fs.rmSync(h, { recursive: true, force: true });
+  });
+
+  it("uninstall removes node9's own HUD from statusLine", () => {
+    const h = makeHome();
+    const settingsPath = path.join(h, '.claude', 'settings.json');
+    write(settingsPath, JSON.stringify({ statusLine: { type: 'command', command: 'node9 hud' } }));
+    const r = run(h, ['uninstall']);
+    expect(r.status).toBe(0);
+    const after = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+    expect(after.statusLine).toBeUndefined(); // node9 HUD removed
+    fs.rmSync(h, { recursive: true, force: true });
+  });
 });
