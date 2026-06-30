@@ -24,6 +24,8 @@ import {
   teardownOpencode,
   teardownPi,
   teardownHermes,
+  teardownHud,
+  isNode9StatusLine,
   detectAgents,
 } from '../setup.js';
 
@@ -159,6 +161,20 @@ describe('setupClaude', () => {
     const written = writtenTo(hooksPath);
     expect(written).not.toBeNull(); // hooks were added → file written
     expect(written.statusLine).toEqual(userStatusLine); // preserved, NOT replaced by node9 HUD
+  });
+
+  // Ownership check must be precise: a user statusLine whose command merely
+  // CONTAINS "node9" (e.g. in a path) but isn't the node9 HUD must be preserved.
+  it('preserves a non-node9 statusLine even when its command contains "node9"', async () => {
+    const userStatusLine = { type: 'command', command: '/home/node9dev/.local/bin/mystatusline' };
+    withExistingFiles({
+      [hooksPath]: { statusLine: userStatusLine },
+      [mcpPath]: { mcpServers: { node9: NODE9_MCP_ENTRY } },
+    });
+    await setupClaude();
+    const written = writtenTo(hooksPath);
+    expect(written).not.toBeNull();
+    expect(written.statusLine).toEqual(userStatusLine);
   });
 
   it('does not re-add UserPromptSubmit hook if already present', async () => {
@@ -408,6 +424,54 @@ describe('setupHud', () => {
     setupHud();
     const written = writtenTo(hooksPath);
     expect(String(written.statusLine.command)).toContain('hud');
+  });
+});
+
+// ── teardownHud (remove side) ─────────────────────────────────────────────────
+
+describe('teardownHud', () => {
+  const hooksPath = path.join(os.homedir(), '.claude', 'settings.json');
+
+  it('removes node9 HUD from statusLine', () => {
+    withExistingFiles({ [hooksPath]: { statusLine: { type: 'command', command: 'node9 hud' } } });
+    teardownHud();
+    const written = writtenTo(hooksPath);
+    expect(written).not.toBeNull();
+    expect(written.statusLine).toBeUndefined(); // node9's HUD removed
+  });
+
+  it('preserves a non-node9 statusLine (must NOT delete ccstatusline)', () => {
+    const userStatusLine = { type: 'command', command: 'npx -y ccstatusline@latest' };
+    withExistingFiles({ [hooksPath]: { statusLine: userStatusLine } });
+    teardownHud();
+    expect(writtenTo(hooksPath)).toBeNull(); // returned early → nothing written → preserved
+  });
+
+  it('does not delete a non-node9 statusLine that merely contains "node9"', () => {
+    const userStatusLine = { type: 'command', command: '/home/node9dev/.local/bin/mystatusline' };
+    withExistingFiles({ [hooksPath]: { statusLine: userStatusLine } });
+    teardownHud();
+    expect(writtenTo(hooksPath)).toBeNull(); // preserved
+  });
+});
+
+// ── isNode9StatusLine (shared ownership check) ────────────────────────────────
+
+describe('isNode9StatusLine', () => {
+  it('true for node9 HUD command shapes', () => {
+    expect(isNode9StatusLine('node9 hud')).toBe(true);
+    expect(isNode9StatusLine('"/usr/local/bin/node9" hud')).toBe(true);
+    expect(isNode9StatusLine('"/usr/bin/node" "/x/node9-proxy/dist/cli.js" hud')).toBe(true);
+  });
+  it('false for a user statusLine with no node9', () => {
+    expect(isNode9StatusLine('npx -y ccstatusline@latest')).toBe(false);
+  });
+  it('false for a non-hud command that merely contains "node9" (the edge)', () => {
+    expect(isNode9StatusLine('/home/node9dev/.local/bin/mystatusline')).toBe(false);
+  });
+  it('false for undefined/empty', () => {
+    expect(isNode9StatusLine(undefined)).toBe(false);
+    expect(isNode9StatusLine('')).toBe(false);
   });
 });
 

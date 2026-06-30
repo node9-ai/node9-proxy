@@ -178,6 +178,19 @@ function toForwardSlashes(p: string): string {
 }
 
 /**
+ * True if `command` is a node9 HUD statusLine command — across install shapes
+ * (`node9 hud`, a global binary path, dev `node cli.js hud`, or a stale path).
+ * Used so node9 only ever sets/removes ITS OWN statusLine and never touches one
+ * the user configured (e.g. ccstatusline). Tighter than a bare `includes('node9')`
+ * so a user statusLine that merely contains "node9" in its path isn't clobbered. (#186)
+ */
+export function isNode9StatusLine(command: string | undefined): boolean {
+  if (!command) return false;
+  const c = String(command).trim();
+  return c.includes('node9') && /(^|\s)hud$/.test(c);
+}
+
+/**
  * A previously-installed Node9 hook command can outlive the install that
  * wrote it — `npm uninstall -g node9-ai` deletes the cli.js but leaves the
  * stored command in `~/.claude/settings.json` pointing at a vanished path.
@@ -569,7 +582,7 @@ export async function setupClaude(): Promise<void> {
   // already node9's (e.g. self-heal a stale path). NEVER overwrite a statusLine
   // the user set themselves (e.g. ccstatusline) — silently doing so destroys
   // their config, and uninstall then leaves them with nothing.
-  const isNode9OrEmpty = !existingStatusCommand || String(existingStatusCommand).includes('node9');
+  const isNode9OrEmpty = !existingStatusCommand || isNode9StatusLine(existingStatusCommand);
   if (isNode9OrEmpty && existingStatusCommand !== hudCommand) {
     settings.statusLine = statusLineObj as unknown as string;
     hooksChanged = true;
@@ -1835,7 +1848,7 @@ export function setupHud(): void {
   // Never overwrite a statusLine the user set themselves (e.g. ccstatusline).
   // Only set node9's HUD when the slot is empty or already a node9 HUD (stale
   // path → self-heal). Otherwise leave it and tell the user how to opt in.
-  if (existing && existingCommand !== hudCommand && !String(existingCommand).includes('node9')) {
+  if (existing && existingCommand !== hudCommand && !isNode9StatusLine(existingCommand)) {
     console.log(
       chalk.yellow(
         `  ⚠️  statusLine is already set to: "${existingCommand}"\n` +
@@ -1866,7 +1879,7 @@ export function teardownHud(): void {
 
   const existing = settings.statusLine as { command?: string } | string | undefined;
   const existingCommand = typeof existing === 'object' ? existing?.command : existing;
-  if (!existingCommand || !String(existingCommand).includes('node9')) {
+  if (!isNode9StatusLine(existingCommand)) {
     console.log(chalk.blue('  ℹ️  node9 HUD not found in ~/.claude/settings.json'));
     return;
   }
