@@ -6,7 +6,15 @@ import {
   applyManagedDlp,
 } from '../config/managed';
 
-const localEgress = (over: Partial<{ enabled: boolean; mode: string }> = {}) => ({
+const localEgress = (
+  over: Partial<{
+    enabled: boolean;
+    mode: string;
+    allow: string[];
+    deny: string[];
+    allowPrivate: boolean;
+  }> = {}
+) => ({
   enabled: false,
   mode: 'review',
   allow: ['local.example.com'],
@@ -100,6 +108,50 @@ describe('managed egress (baseline+lock) — M2b', () => {
   it('ignores an unrankable managed egress mode', () => {
     const out = applyManagedEgress(localEgress({ mode: 'block' }), { mode: 'garbage' }, []);
     expect(out.mode).toBe('block');
+  });
+
+  it('allow: a managed allowlist REPLACES the local one (org owns it)', () => {
+    const out = applyManagedEgress(localEgress(), { allow: ['api.node9.ai'] }, []);
+    expect(out.allow).toEqual(['api.node9.ai']);
+  });
+
+  it('allow: an empty managed allowlist leaves the local one untouched', () => {
+    const out = applyManagedEgress(localEgress(), { allow: [] }, []);
+    expect(out.allow).toEqual(['local.example.com']);
+  });
+
+  it('deny: a managed denylist UNIONS with the local one (tightens)', () => {
+    const out = applyManagedEgress(
+      localEgress({ deny: ['bad.local'] }),
+      { deny: ['evil.example.com', 'bad.local'] },
+      []
+    );
+    expect(out.deny.sort()).toEqual(['bad.local', 'evil.example.com']);
+  });
+
+  it('allowPrivate: a managed false forces private access off', () => {
+    const out = applyManagedEgress(
+      localEgress({ allowPrivate: true }),
+      { allowPrivate: false },
+      []
+    );
+    expect(out.allowPrivate).toBe(false);
+  });
+
+  it('allowPrivate: a managed true leaves a stricter local false', () => {
+    const out = applyManagedEgress(
+      localEgress({ allowPrivate: false }),
+      { allowPrivate: true },
+      []
+    );
+    expect(out.allowPrivate).toBe(false);
+  });
+
+  it('allowPrivate: a locked value wins outright', () => {
+    const out = applyManagedEgress(localEgress({ allowPrivate: false }), { allowPrivate: true }, [
+      'egressAllowPrivate',
+    ]);
+    expect(out.allowPrivate).toBe(true);
   });
 });
 
