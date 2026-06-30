@@ -19,18 +19,23 @@ function write(file: string, content = '// node9 shim\n'): void {
   fs.writeFileSync(file, content);
 }
 function run(home: string, args: string[]) {
+  // opencode's config dir resolves under $XDG_CONFIG_HOME when set (CI runners
+  // set it); clear it so the shim resolves under HOME/.config, matching
+  // opencodeShim() below (#186).
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    NODE9_TESTING: '1',
+    NODE9_NO_AUTO_DAEMON: '1',
+    NO_COLOR: '1',
+  };
+  delete env.XDG_CONFIG_HOME;
   return spawnSync(process.execPath, [CLI, ...args], {
     encoding: 'utf-8',
     timeout: 60000,
     cwd: os.tmpdir(),
-    env: {
-      ...process.env,
-      HOME: home,
-      USERPROFILE: home,
-      NODE9_TESTING: '1',
-      NODE9_NO_AUTO_DAEMON: '1',
-      NO_COLOR: '1',
-    },
+    env,
   });
 }
 

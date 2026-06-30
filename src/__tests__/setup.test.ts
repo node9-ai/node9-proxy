@@ -96,7 +96,12 @@ const NODE9_MCP_ENTRY = { command: 'node9', args: ['mcp-server'] };
 // for a real Hermes install) would otherwise leak a real filesystem
 // location into hermesHomeDir(), bypassing the /mock/home test fixtures.
 // Snapshot + clear before every test; restore after.
-const PATH_RESOLVING_ENV_KEYS = ['HERMES_HOME', 'HERMES_SESSION_ID', 'HERMES_INTERACTIVE'] as const;
+const PATH_RESOLVING_ENV_KEYS = [
+  'HERMES_HOME',
+  'HERMES_SESSION_ID',
+  'HERMES_INTERACTIVE',
+  'XDG_CONFIG_HOME', // opencode config dir resolves under it; clear for deterministic ~/.config (#186)
+] as const;
 let savedEnv: Record<string, string | undefined> = {};
 
 beforeEach(() => {
@@ -985,18 +990,6 @@ describe('detectAgents', () => {
   // Normalize to forward slashes so comparisons work on Windows too
   const home = '/mock/home';
   const p = (name: string) => path.join(home, name).replace(/\\/g, '/');
-
-  // XDG determinism: snapshot + clear XDG_CONFIG_HOME so a CI runner that
-  // happens to set it doesn't change which opencode config path is checked.
-  let savedXdg: string | undefined;
-  beforeEach(() => {
-    savedXdg = process.env.XDG_CONFIG_HOME;
-    delete process.env.XDG_CONFIG_HOME;
-  });
-  afterEach(() => {
-    if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
-    else process.env.XDG_CONFIG_HOME = savedXdg;
-  });
 
   it('returns all false when no agent directories exist', () => {
     vi.mocked(fs.existsSync).mockReturnValue(false);
