@@ -728,7 +728,13 @@ export function getConfig(cwd?: string): Config {
       if (raw.managedConfig && typeof raw.managedConfig === 'object') {
         const mc = raw.managedConfig as {
           mode?: unknown;
-          egress?: { enabled?: unknown; mode?: unknown };
+          egress?: {
+            enabled?: unknown;
+            mode?: unknown;
+            allow?: unknown;
+            deny?: unknown;
+            allowPrivate?: unknown;
+          };
           dlp?: { enabled?: unknown; pii?: unknown };
           locked?: unknown;
         };
@@ -743,14 +749,20 @@ export function getConfig(cwd?: string): Config {
             locked.includes('mode')
           );
         }
-        // M2b: policy.egress (a policy field, not a setting). enabled is
-        // force-on; mode is off<review<block. The allowlist is NOT managed.
+        // M2b + Step 2: policy.egress. enabled force-on; mode off<review<block;
+        // allow replaces local; deny unions; allowPrivate floor boolean.
         if (mc.egress && typeof mc.egress === 'object') {
+          const hosts = (v: unknown): string[] | undefined =>
+            Array.isArray(v) ? v.filter((h): h is string => typeof h === 'string') : undefined;
           mergedPolicy.egress = applyManagedEgress(
             mergedPolicy.egress,
             {
               enabled: typeof mc.egress.enabled === 'boolean' ? mc.egress.enabled : undefined,
               mode: typeof mc.egress.mode === 'string' ? mc.egress.mode : undefined,
+              allow: hosts(mc.egress.allow),
+              deny: hosts(mc.egress.deny),
+              allowPrivate:
+                typeof mc.egress.allowPrivate === 'boolean' ? mc.egress.allowPrivate : undefined,
             },
             locked
           );

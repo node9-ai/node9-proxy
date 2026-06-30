@@ -155,7 +155,13 @@ export interface RulesCache {
 /** Cloud-managed settings persisted in the cache (M2: mode + egress + dlp). */
 export interface ManagedConfigCache {
   mode?: string;
-  egress?: { enabled?: boolean; mode?: string };
+  egress?: {
+    enabled?: boolean;
+    mode?: string;
+    allow?: string[];
+    deny?: string[];
+    allowPrivate?: boolean;
+  };
   dlp?: { enabled?: boolean; pii?: string };
   locked: string[];
 }
@@ -176,7 +182,13 @@ interface CloudPolicyBody {
   shields?: unknown[]; // cloud-managed shield names (Managed Config M1)
   managedConfig?: {
     mode?: unknown;
-    egress?: { enabled?: unknown; mode?: unknown };
+    egress?: {
+      enabled?: unknown;
+      mode?: unknown;
+      allow?: unknown;
+      deny?: unknown;
+      allowPrivate?: unknown;
+    };
     dlp?: { enabled?: unknown; pii?: unknown };
     locked?: unknown;
   }; // M2 settings
@@ -374,12 +386,30 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
       : [],
   };
   if (typeof mc.mode === 'string') out.mode = mc.mode;
-  // M2b: egress.enabled (bool) + egress.mode (string). Allowlist not managed.
+  // M2b + Step 2: egress.enabled (bool) + mode (string) + allow/deny (string[])
+  // + allowPrivate (bool).
   if (mc.egress && typeof mc.egress === 'object') {
-    const e: { enabled?: boolean; mode?: string } = {};
+    const e: ManagedConfigCache['egress'] = {};
     if (typeof mc.egress.enabled === 'boolean') e.enabled = mc.egress.enabled;
     if (typeof mc.egress.mode === 'string') e.mode = mc.egress.mode;
-    if (e.enabled !== undefined || e.mode !== undefined) out.egress = e;
+    const cleanHosts = (v: unknown): string[] =>
+      Array.isArray(v) ? v.filter((h): h is string => typeof h === 'string') : [];
+    const allow = cleanHosts(mc.egress.allow);
+    const deny = cleanHosts(mc.egress.deny);
+    if (allow.length) e.allow = allow;
+    if (deny.length) e.deny = deny;
+    if (typeof mc.egress.allowPrivate === 'boolean') {
+      e.allowPrivate = mc.egress.allowPrivate;
+    }
+    if (
+      e.enabled !== undefined ||
+      e.mode !== undefined ||
+      e.allow !== undefined ||
+      e.deny !== undefined ||
+      e.allowPrivate !== undefined
+    ) {
+      out.egress = e;
+    }
   }
   // M2c: dlp.enabled (bool) + dlp.pii (string).
   if (mc.dlp && typeof mc.dlp === 'object') {

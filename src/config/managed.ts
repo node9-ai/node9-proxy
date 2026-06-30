@@ -45,28 +45,37 @@ export function resolveManagedMode(local: string, cloud: string, locked: boolean
   return resolveByOrder(MODE_ORDER, local, cloud, locked);
 }
 
-// The managed-egress fields the proxy applies (M2b). `enabled` is force-on only
-// (false is the weakest, so it's never a meaningful floor); `mode` is ordered.
-// The allowlist is intentionally NOT managed here — it LOOSENS access (adds
-// reachable hosts), which doesn't fit "baseline = only tighten"; deferred.
+// The managed-egress fields the proxy applies (M2b + Step 2 lists). `enabled` is
+// force-on; `mode` is ordered; `allow` REPLACES the local allowlist (the org owns
+// it — a dev can't widen past it); `deny` UNIONS with local (only tightens);
+// `allowPrivate` is a floor boolean (managed `false` forces private nets off).
 export interface ManagedEgress {
   enabled?: boolean;
   mode?: string;
+  allow?: string[];
+  deny?: string[];
+  allowPrivate?: boolean;
 }
 /**
  * Apply managed egress to the machine's local egress object (baseline+lock).
  *  - enabled: force-on — locked → cloud value; else `local || cloud` (a managed
  *    `true` turns egress on; a dev can't turn a managed-on egress off).
  *  - mode: resolveByOrder over off<review<block.
+ *  - allow: managed list, when non-empty, REPLACES local (org owns the allowlist).
+ *  - deny: union of local + managed (always tightens).
+ *  - allowPrivate: locked → cloud; else `local && managed` so a managed `false`
+ *    forces private access off, while `true` leaves the dev's stricter choice.
  * Generic over the local egress type so the precise caller type is preserved.
- * Returns a NEW object; untouched local fields (allow/deny/allowPrivate) carry
- * through unchanged.
  */
-export function applyManagedEgress<T extends { enabled: boolean; mode: string }>(
-  local: T,
-  managed: ManagedEgress,
-  locked: string[]
-): T {
+export function applyManagedEgress<
+  T extends {
+    enabled: boolean;
+    mode: string;
+    allow?: string[];
+    deny?: string[];
+    allowPrivate?: boolean;
+  },
+>(local: T, managed: ManagedEgress, locked: string[]): T {
   const next: T = { ...local };
   if (typeof managed.enabled === 'boolean') {
     next.enabled = locked.includes('egressEnabled')
@@ -80,6 +89,19 @@ export function applyManagedEgress<T extends { enabled: boolean; mode: string }>
       managed.mode,
       locked.includes('egressMode')
     ) as T['mode'];
+  }
+  if (Array.isArray(managed.allow) && managed.allow.length > 0) {
+    next.allow = [...managed.allow] as T['allow'];
+  }
+  if (Array.isArray(managed.deny) && managed.deny.length > 0) {
+    next.deny = [...new Set([...(local.deny ?? []), ...managed.deny])] as T['deny'];
+  }
+  if (typeof managed.allowPrivate === 'boolean') {
+    next.allowPrivate = (
+      locked.includes('egressAllowPrivate')
+        ? managed.allowPrivate
+        : (local.allowPrivate ?? true) && managed.allowPrivate
+    ) as T['allowPrivate'];
   }
   return next;
 }
