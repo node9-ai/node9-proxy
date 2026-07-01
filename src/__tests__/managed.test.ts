@@ -224,6 +224,26 @@ describe('extractManagedConfig — reviewChannel + approvalTimeoutMs (Preference
     });
   });
 
+  it('keeps loopDetection + skillPinning (coerced)', () => {
+    const out = extractManagedConfig({
+      managedConfig: {
+        loopDetection: { enabled: true, threshold: 99999, windowSeconds: 0 },
+        skillPinning: { enabled: true, mode: 'bogus', roots: ['a', ' ', 'b'] },
+        locked: [],
+      },
+    });
+    expect(out?.loopDetection).toEqual({
+      enabled: true,
+      threshold: 1000,
+      windowSeconds: 1,
+    });
+    expect(out?.skillPinning).toEqual({
+      enabled: true,
+      mode: 'warn',
+      roots: ['a', ' ', 'b'], // string-filtered only; BE resolver dedupes/trims
+    });
+  });
+
   it('drops an invalid reviewChannel and a negative timeout', () => {
     const out = extractManagedConfig({
       managedConfig: { reviewChannel: 'bogus', approvalTimeoutMs: -1, locked: [] },

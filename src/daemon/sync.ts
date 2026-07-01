@@ -167,6 +167,8 @@ export interface ManagedConfigCache {
   reviewChannel?: string;
   approvalTimeoutMs?: number;
   injectionScan?: { enabled: boolean; minConfidence: string; allow: string[] };
+  loopDetection?: { enabled: boolean; threshold: number; windowSeconds: number };
+  skillPinning?: { enabled: boolean; mode: string; roots: string[] };
   locked: string[];
 }
 
@@ -198,6 +200,8 @@ interface CloudPolicyBody {
     reviewChannel?: unknown;
     approvalTimeoutMs?: unknown;
     injectionScan?: { enabled?: unknown; minConfidence?: unknown; allow?: unknown };
+    loopDetection?: { enabled?: unknown; threshold?: unknown; windowSeconds?: unknown };
+    skillPinning?: { enabled?: unknown; mode?: unknown; roots?: unknown };
     locked?: unknown;
   }; // M2 settings
 }
@@ -385,6 +389,12 @@ export function extractShields(body: CloudPolicyBody): string[] {
  * undefined when nothing is managed so the cache stays minimal. Defensive
  * filtering keeps junk out of the cache the proxy applies.
  */
+function coerceInt(v: unknown, min: number, max: number, dflt: number): number {
+  return typeof v === 'number' && Number.isFinite(v)
+    ? Math.min(Math.max(Math.round(v), min), max)
+    : dflt;
+}
+
 export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache | undefined {
   const mc = body.managedConfig;
   if (!mc || typeof mc !== 'object') return undefined;
@@ -452,6 +462,25 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
         : [],
     };
   }
+  // Detection: loopDetection + skillPinning — coerced.
+  if (mc.loopDetection && typeof mc.loopDetection === 'object') {
+    const l = mc.loopDetection;
+    out.loopDetection = {
+      enabled: l.enabled === true,
+      threshold: coerceInt(l.threshold, 1, 1000, 5),
+      windowSeconds: coerceInt(l.windowSeconds, 1, 3600, 120),
+    };
+  }
+  if (mc.skillPinning && typeof mc.skillPinning === 'object') {
+    const sk = mc.skillPinning;
+    out.skillPinning = {
+      enabled: sk.enabled === true,
+      mode: sk.mode === 'block' ? 'block' : 'warn',
+      roots: Array.isArray(sk.roots)
+        ? sk.roots.filter((x): x is string => typeof x === 'string')
+        : [],
+    };
+  }
   // Nothing actually managed → omit entirely.
   return out.mode !== undefined ||
     out.egress !== undefined ||
@@ -459,7 +488,9 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
     out.approvers !== undefined ||
     out.reviewChannel !== undefined ||
     out.approvalTimeoutMs !== undefined ||
-    out.injectionScan !== undefined
+    out.injectionScan !== undefined ||
+    out.loopDetection !== undefined ||
+    out.skillPinning !== undefined
     ? out
     : undefined;
 }
