@@ -384,16 +384,18 @@ export function extractShields(body: CloudPolicyBody): string[] {
     : [];
 }
 
-/**
- * Cloud-managed settings from the sync body (Managed Config M2). Returns
- * undefined when nothing is managed so the cache stays minimal. Defensive
- * filtering keeps junk out of the cache the proxy applies.
- */
+/** Clamp to a positive int in [min,max]; default when unusable (mirrors the service). */
 function coerceInt(v: unknown, min: number, max: number, dflt: number): number {
   return typeof v === 'number' && Number.isFinite(v)
     ? Math.min(Math.max(Math.round(v), min), max)
     : dflt;
 }
+
+/**
+ * Cloud-managed settings from the sync body (Managed Config M2). Returns
+ * undefined when nothing is managed so the cache stays minimal. Defensive
+ * filtering keeps junk out of the cache the proxy applies.
+ */
 
 export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache | undefined {
   const mc = body.managedConfig;
