@@ -497,7 +497,12 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
     if (jail.length) out.jailPaths = jail;
   }
   if (Array.isArray(mc.trustedHosts)) {
-    const hosts = mc.trustedHosts.filter((h): h is string => typeof h === 'string');
+    // Drop broad single-label wildcards (*.com) — matches the BE + local
+    // addTrustedHost guard so a hand-edited/legacy list can't neuter exfil
+    // detection fleet-wide.
+    const hosts = mc.trustedHosts.filter(
+      (h): h is string => typeof h === 'string' && (!h.startsWith('*.') || h.slice(2).includes('.'))
+    );
     if (hosts.length) out.trustedHosts = hosts;
   }
   // Nothing actually managed → omit entirely.
