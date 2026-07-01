@@ -11,9 +11,12 @@
 import type { Config } from '../config/index.js';
 import type { ShieldOverrides } from '@node9/policy-engine';
 import { ENGINE_VERSION } from '@node9/policy-engine';
+import type { McpToolsConfig } from '../daemon/mcp-tools.js';
 
 const MAX_RULES = 500;
 const MAX_EGRESS = 200;
+const MAX_MCP_SERVERS = 100;
+const MAX_MCP_TOOLS = 200;
 
 export interface PolicySnapshotBody {
   mode: string;
@@ -31,12 +34,22 @@ export interface PolicySnapshotBody {
   egress: { enabled: boolean; mode: string; allow: string[] };
   dlpEnabled: boolean;
   engineVersion: string;
+  // SEE-tier MCP inventory (Phase 1): which MCP apps this machine can reach + the
+  // tools each exposes. `key` is the pin serverKey (sha256(cmd)[:16]); tool names
+  // are bare (from the upstream tools/list). Policy, not secrets.
+  mcpServers: Array<{
+    key: string;
+    tools: string[];
+    toolCount: number;
+    status: string;
+  }>;
 }
 
 export function buildPolicySnapshot(
   config: Config,
   activeShields: string[],
-  overrides: ShieldOverrides
+  overrides: ShieldOverrides,
+  mcpTools: McpToolsConfig = {}
 ): PolicySnapshotBody {
   const p = config.policy;
   return {
@@ -61,5 +74,13 @@ export function buildPolicySnapshot(
     },
     dlpEnabled: p.dlp.enabled,
     engineVersion: ENGINE_VERSION,
+    mcpServers: Object.entries(mcpTools)
+      .slice(0, MAX_MCP_SERVERS)
+      .map(([key, cfg]) => ({
+        key,
+        tools: cfg.tools.map((t) => t.name).slice(0, MAX_MCP_TOOLS),
+        toolCount: cfg.tools.length,
+        status: cfg.status,
+      })),
   };
 }

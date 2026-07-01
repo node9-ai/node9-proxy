@@ -14,6 +14,7 @@ import { runBlast } from '../cli/commands/blast.js';
 import { runPosture } from '../posture/index.js';
 import { shipPosture } from '../posture/ship.js';
 import { buildPolicySnapshot } from '../policy-snapshot/build.js';
+import { readMcpToolsConfig } from './mcp-tools.js';
 import { shipPolicySnapshot } from '../policy-snapshot/ship.js';
 import { readActiveShields, readShieldOverrides } from '../shields.js';
 import {
@@ -673,7 +674,12 @@ async function pushPostureSnapshot(creds: { apiKey: string; apiUrl: string }): P
 // other pushes; opt-out via NODE9_POLICY_MIRROR_DISABLE=1.
 async function pushPolicySnapshot(creds: { apiKey: string; apiUrl: string }): Promise<void> {
   try {
-    const body = buildPolicySnapshot(getConfig(), readActiveShields(), readShieldOverrides());
+    const body = buildPolicySnapshot(
+      getConfig(),
+      readActiveShields(),
+      readShieldOverrides(),
+      readMcpToolsConfig()
+    );
     await shipPolicySnapshot(body, creds);
   } catch {
     // Silent — never break sync over a policy-mirror push.
@@ -690,7 +696,12 @@ export async function runPolicyPush(): Promise<{ ok: true } | { ok: false; reaso
     };
   }
   try {
-    const body = buildPolicySnapshot(getConfig(), readActiveShields(), readShieldOverrides());
+    const body = buildPolicySnapshot(
+      getConfig(),
+      readActiveShields(),
+      readShieldOverrides(),
+      readMcpToolsConfig()
+    );
     const sent = await shipPolicySnapshot(body, creds);
     return sent ? { ok: true } : { ok: false, reason: 'Push failed (network or server error)' };
   } catch (e) {

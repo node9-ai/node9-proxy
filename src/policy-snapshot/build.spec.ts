@@ -78,4 +78,31 @@ describe('buildPolicySnapshot', () => {
     expect(body.egress.mode).toBe('block');
     expect(body.egress.allow).toHaveLength(200);
   });
+
+  it('maps the MCP inventory (key, tools, count, status)', () => {
+    const body = buildPolicySnapshot(
+      cfg(),
+      [],
+      {},
+      {
+        srv123: {
+          tools: [{ name: 'slack_post' }, { name: 'slack_delete' }],
+          disabled: [],
+          status: 'approved',
+        },
+      }
+    );
+    expect(body.mcpServers).toEqual([
+      {
+        key: 'srv123',
+        tools: ['slack_post', 'slack_delete'],
+        toolCount: 2,
+        status: 'approved',
+      },
+    ]);
+  });
+
+  it('defaults mcpServers to [] when no inventory is passed', () => {
+    expect(buildPolicySnapshot(cfg(), [], {}).mcpServers).toEqual([]);
+  });
 });
