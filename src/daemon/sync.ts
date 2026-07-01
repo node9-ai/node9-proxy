@@ -163,6 +163,14 @@ export interface ManagedConfigCache {
     allowPrivate?: boolean;
   };
   dlp?: { enabled?: boolean; pii?: string };
+  approvers?: { native?: boolean; browser?: boolean; cloud?: boolean; terminal?: boolean };
+  reviewChannel?: string;
+  approvalTimeoutMs?: number;
+  injectionScan?: { enabled: boolean; minConfidence: string; allow: string[] };
+  loopDetection?: { enabled: boolean; threshold: number; windowSeconds: number };
+  skillPinning?: { enabled: boolean; mode: string; roots: string[] };
+  jailPaths?: { path: string; verdict: string }[];
+  trustedHosts?: string[];
   locked: string[];
 }
 
@@ -190,6 +198,14 @@ interface CloudPolicyBody {
       allowPrivate?: unknown;
     };
     dlp?: { enabled?: unknown; pii?: unknown };
+    approvers?: { native?: unknown; browser?: unknown; cloud?: unknown; terminal?: unknown };
+    reviewChannel?: unknown;
+    approvalTimeoutMs?: unknown;
+    injectionScan?: { enabled?: unknown; minConfidence?: unknown; allow?: unknown };
+    loopDetection?: { enabled?: unknown; threshold?: unknown; windowSeconds?: unknown };
+    skillPinning?: { enabled?: unknown; mode?: unknown; roots?: unknown };
+    jailPaths?: { path?: unknown; verdict?: unknown }[];
+    trustedHosts?: unknown;
     locked?: unknown;
   }; // M2 settings
 }
@@ -372,11 +388,19 @@ export function extractShields(body: CloudPolicyBody): string[] {
     : [];
 }
 
+/** Clamp to a positive int in [min,max]; default when unusable (mirrors the service). */
+function coerceInt(v: unknown, min: number, max: number, dflt: number): number {
+  return typeof v === 'number' && Number.isFinite(v)
+    ? Math.min(Math.max(Math.round(v), min), max)
+    : dflt;
+}
+
 /**
  * Cloud-managed settings from the sync body (Managed Config M2). Returns
  * undefined when nothing is managed so the cache stays minimal. Defensive
  * filtering keeps junk out of the cache the proxy applies.
  */
+
 export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache | undefined {
   const mc = body.managedConfig;
   if (!mc || typeof mc !== 'object') return undefined;
@@ -418,8 +442,81 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
     if (typeof mc.dlp.pii === 'string') d.pii = mc.dlp.pii;
     if (d.enabled !== undefined || d.pii !== undefined) out.dlp = d;
   }
+  // Preferences: approvers (4 bools — where approvals may happen).
+  if (mc.approvers && typeof mc.approvers === 'object') {
+    const a: NonNullable<ManagedConfigCache['approvers']> = {};
+    for (const k of ['native', 'browser', 'cloud', 'terminal'] as const) {
+      if (typeof mc.approvers[k] === 'boolean') a[k] = mc.approvers[k] as boolean;
+    }
+    if (Object.keys(a).length > 0) out.approvers = a;
+  }
+  // Preferences v2: reviewChannel ('ask'|'approver') + approvalTimeoutMs (number).
+  if (mc.reviewChannel === 'ask' || mc.reviewChannel === 'approver') {
+    out.reviewChannel = mc.reviewChannel;
+  }
+  if (typeof mc.approvalTimeoutMs === 'number' && mc.approvalTimeoutMs >= 0) {
+    out.approvalTimeoutMs = mc.approvalTimeoutMs;
+  }
+  // Detection: injectionScan { enabled, minConfidence, allow } — coerced.
+  if (mc.injectionScan && typeof mc.injectionScan === 'object') {
+    const i = mc.injectionScan;
+    out.injectionScan = {
+      enabled: i.enabled === true,
+      minConfidence: i.minConfidence === 'high' ? 'high' : 'medium',
+      allow: Array.isArray(i.allow)
+        ? i.allow.filter((x): x is string => typeof x === 'string')
+        : [],
+    };
+  }
+  // Detection: loopDetection + skillPinning — coerced.
+  if (mc.loopDetection && typeof mc.loopDetection === 'object') {
+    const l = mc.loopDetection;
+    out.loopDetection = {
+      enabled: l.enabled === true,
+      threshold: coerceInt(l.threshold, 1, 1000, 5),
+      windowSeconds: coerceInt(l.windowSeconds, 1, 3600, 120),
+    };
+  }
+  if (mc.skillPinning && typeof mc.skillPinning === 'object') {
+    const sk = mc.skillPinning;
+    out.skillPinning = {
+      enabled: sk.enabled === true,
+      mode: sk.mode === 'block' ? 'block' : 'warn',
+      roots: Array.isArray(sk.roots)
+        ? sk.roots.filter((x): x is string => typeof x === 'string')
+        : [],
+    };
+  }
+  if (Array.isArray(mc.jailPaths)) {
+    const jail = mc.jailPaths
+      .map((jp) => ({
+        path: typeof jp?.path === 'string' ? jp.path.trim() : '',
+        verdict: jp?.verdict === 'review' ? 'review' : 'block',
+      }))
+      .filter((jp) => jp.path);
+    if (jail.length) out.jailPaths = jail;
+  }
+  if (Array.isArray(mc.trustedHosts)) {
+    // Drop broad single-label wildcards (*.com) — matches the BE + local
+    // addTrustedHost guard so a hand-edited/legacy list can't neuter exfil
+    // detection fleet-wide.
+    const hosts = mc.trustedHosts.filter(
+      (h): h is string => typeof h === 'string' && (!h.startsWith('*.') || h.slice(2).includes('.'))
+    );
+    if (hosts.length) out.trustedHosts = hosts;
+  }
   // Nothing actually managed → omit entirely.
-  return out.mode !== undefined || out.egress !== undefined || out.dlp !== undefined
+  return out.mode !== undefined ||
+    out.egress !== undefined ||
+    out.dlp !== undefined ||
+    out.approvers !== undefined ||
+    out.reviewChannel !== undefined ||
+    out.approvalTimeoutMs !== undefined ||
+    out.injectionScan !== undefined ||
+    out.loopDetection !== undefined ||
+    out.skillPinning !== undefined ||
+    out.jailPaths !== undefined ||
+    out.trustedHosts !== undefined
     ? out
     : undefined;
 }

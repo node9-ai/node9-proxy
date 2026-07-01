@@ -4,7 +4,9 @@ import {
   resolveManagedMode,
   applyManagedEgress,
   applyManagedDlp,
+  applyManagedApprovers,
 } from '../config/managed';
+import { extractManagedConfig } from '../daemon/sync';
 
 const localEgress = (
   over: Partial<{
@@ -179,5 +181,101 @@ describe('managed dlp (baseline+lock) — M2c', () => {
 
   it('ignores an unrankable managed pii', () => {
     expect(applyManagedDlp(localDlp({ pii: 'block' }), { pii: 'garbage' }, []).pii).toBe('block');
+  });
+});
+
+describe('managed approvers (Preferences)', () => {
+  const local = { native: true, browser: false, cloud: false, terminal: true };
+
+  it('replaces present managed fields, keeps the rest (org owns the surface)', () => {
+    const out = applyManagedApprovers(local, { cloud: true, terminal: false });
+    expect(out).toEqual({ native: true, browser: false, cloud: true, terminal: false });
+  });
+
+  it('an empty managed object leaves local untouched', () => {
+    expect(applyManagedApprovers(local, {})).toEqual(local);
+  });
+
+  it('a managed false forces a surface off', () => {
+    expect(applyManagedApprovers(local, { terminal: false }).terminal).toBe(false);
+  });
+});
+
+describe('extractManagedConfig — reviewChannel + approvalTimeoutMs (Preferences v2)', () => {
+  it('keeps a valid reviewChannel + numeric timeout', () => {
+    const out = extractManagedConfig({
+      managedConfig: { reviewChannel: 'ask', approvalTimeoutMs: 30000, locked: [] },
+    });
+    expect(out?.reviewChannel).toBe('ask');
+    expect(out?.approvalTimeoutMs).toBe(30000);
+  });
+
+  it('keeps a valid injectionScan (coerced to known fields)', () => {
+    const out = extractManagedConfig({
+      managedConfig: {
+        injectionScan: { enabled: true, minConfidence: 'high', allow: ['Bash'] },
+        locked: [],
+      },
+    });
+    expect(out?.injectionScan).toEqual({
+      enabled: true,
+      minConfidence: 'high',
+      allow: ['Bash'],
+    });
+  });
+
+  it('keeps trustedHosts (string-filtered)', () => {
+    const out = extractManagedConfig({
+      managedConfig: {
+        trustedHosts: ['*.corp.com', 42 as unknown as string, 'api.corp.com', '*.com'],
+        locked: [],
+      },
+    });
+    // *.com dropped (too broad); non-strings dropped
+    expect(out?.trustedHosts).toEqual(['*.corp.com', 'api.corp.com']);
+  });
+
+  it('keeps jailPaths (coerced, empty-path + junk-verdict handled)', () => {
+    const out = extractManagedConfig({
+      managedConfig: {
+        jailPaths: [
+          { path: '~/.secrets', verdict: 'review' },
+          { path: '  ', verdict: 'block' },
+          { path: '~/.aws', verdict: 'bogus' },
+        ],
+        locked: [],
+      },
+    });
+    expect(out?.jailPaths).toEqual([
+      { path: '~/.secrets', verdict: 'review' },
+      { path: '~/.aws', verdict: 'block' },
+    ]);
+  });
+
+  it('keeps loopDetection + skillPinning (coerced)', () => {
+    const out = extractManagedConfig({
+      managedConfig: {
+        loopDetection: { enabled: true, threshold: 99999, windowSeconds: 0 },
+        skillPinning: { enabled: true, mode: 'bogus', roots: ['a', ' ', 'b'] },
+        locked: [],
+      },
+    });
+    expect(out?.loopDetection).toEqual({
+      enabled: true,
+      threshold: 1000,
+      windowSeconds: 1,
+    });
+    expect(out?.skillPinning).toEqual({
+      enabled: true,
+      mode: 'warn',
+      roots: ['a', ' ', 'b'], // string-filtered only; BE resolver dedupes/trims
+    });
+  });
+
+  it('drops an invalid reviewChannel and a negative timeout', () => {
+    const out = extractManagedConfig({
+      managedConfig: { reviewChannel: 'bogus', approvalTimeoutMs: -1, locked: [] },
+    });
+    expect(out).toBeUndefined();
   });
 });

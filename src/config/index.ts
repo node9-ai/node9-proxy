@@ -7,7 +7,14 @@ import path from 'path';
 import os from 'os';
 import { sanitizeConfig } from '../config-schema';
 import { readActiveShields, readShieldOverrides, getShield } from '../shields';
-import { resolveManagedMode, applyManagedEgress, applyManagedDlp } from './managed';
+import {
+  resolveManagedMode,
+  applyManagedEgress,
+  applyManagedDlp,
+  applyManagedApprovers,
+} from './managed';
+import { pathRules } from '../shields/build';
+import { readTrustedHosts } from '../auth/trusted-hosts';
 
 // SmartCondition + SmartRule are now defined in @node9/policy-engine.
 // Re-exported here so existing import paths (`from '../config'`) keep
@@ -105,6 +112,9 @@ export interface Config {
       mode: 'warn' | 'block';
       roots: string[];
     };
+    // Pipe-chain trusted hosts — downgrades secret|curl-host exfil verdicts.
+    // Seeded from ~/.node9/trusted-hosts.json; a managed list REPLACES it.
+    trustedHosts: string[];
   };
   environments: Record<string, EnvironmentConfig>;
 }
@@ -345,6 +355,7 @@ export const DEFAULT_CONFIG: Config = {
     loopDetection: { enabled: true, threshold: 5, windowSeconds: 120 },
     injectionScan: { enabled: false, minConfidence: 'medium', allow: [] },
     skillPinning: { enabled: false, mode: 'warn', roots: [] },
+    trustedHosts: [],
   },
   environments: {},
 };
@@ -573,6 +584,8 @@ export function getConfig(cwd?: string): Config {
       ...DEFAULT_CONFIG.policy.skillPinning,
       roots: [...DEFAULT_CONFIG.policy.skillPinning.roots],
     },
+    // Seed from the local trusted-hosts file; a managed list REPLACES it below.
+    trustedHosts: readTrustedHosts().map((e) => e.host),
   };
   const mergedEnvironments: Record<string, EnvironmentConfig> = { ...DEFAULT_CONFIG.environments };
 
@@ -736,6 +749,27 @@ export function getConfig(cwd?: string): Config {
             allowPrivate?: unknown;
           };
           dlp?: { enabled?: unknown; pii?: unknown };
+          approvers?: {
+            native?: unknown;
+            browser?: unknown;
+            cloud?: unknown;
+            terminal?: unknown;
+          };
+          reviewChannel?: unknown;
+          approvalTimeoutMs?: unknown;
+          injectionScan?: {
+            enabled?: unknown;
+            minConfidence?: unknown;
+            allow?: unknown;
+          };
+          loopDetection?: {
+            enabled?: unknown;
+            threshold?: unknown;
+            windowSeconds?: unknown;
+          };
+          skillPinning?: { enabled?: unknown; mode?: unknown; roots?: unknown };
+          jailPaths?: { path?: unknown; verdict?: unknown }[];
+          trustedHosts?: unknown;
           locked?: unknown;
         };
         const locked: string[] = Array.isArray(mc.locked)
@@ -776,6 +810,87 @@ export function getConfig(cwd?: string): Config {
               pii: typeof mc.dlp.pii === 'string' ? mc.dlp.pii : undefined,
             },
             locked
+          );
+        }
+        // Preferences: settings.approvers — the org owns where approvals happen,
+        // so a managed value replaces the local surface per-field.
+        if (mc.approvers && typeof mc.approvers === 'object') {
+          const bool = (v: unknown): boolean | undefined =>
+            typeof v === 'boolean' ? v : undefined;
+          mergedSettings.approvers = applyManagedApprovers(mergedSettings.approvers, {
+            native: bool(mc.approvers.native),
+            browser: bool(mc.approvers.browser),
+            cloud: bool(mc.approvers.cloud),
+            terminal: bool(mc.approvers.terminal),
+          });
+        }
+        // Preferences v2: reviewChannel + approvalTimeoutMs — plain scalars, the
+        // org's value replaces local when set (admin owns these approval knobs).
+        if (mc.reviewChannel === 'ask' || mc.reviewChannel === 'approver') {
+          mergedSettings.reviewChannel = mc.reviewChannel;
+        }
+        if (typeof mc.approvalTimeoutMs === 'number' && mc.approvalTimeoutMs >= 0) {
+          mergedSettings.approvalTimeoutMs = mc.approvalTimeoutMs;
+        }
+        // Detection: injectionScan replaces the local config per-field (the org
+        // owns which protections run).
+        if (mc.injectionScan && typeof mc.injectionScan === 'object') {
+          const i = mc.injectionScan;
+          const cur = mergedPolicy.injectionScan;
+          mergedPolicy.injectionScan = {
+            enabled: typeof i.enabled === 'boolean' ? i.enabled : cur.enabled,
+            minConfidence:
+              i.minConfidence === 'high' || i.minConfidence === 'medium'
+                ? i.minConfidence
+                : cur.minConfidence,
+            allow: Array.isArray(i.allow)
+              ? i.allow.filter((x): x is string => typeof x === 'string')
+              : cur.allow,
+          };
+        }
+        if (mc.loopDetection && typeof mc.loopDetection === 'object') {
+          const l = mc.loopDetection;
+          const cur = mergedPolicy.loopDetection;
+          mergedPolicy.loopDetection = {
+            enabled: typeof l.enabled === 'boolean' ? l.enabled : cur.enabled,
+            threshold:
+              typeof l.threshold === 'number' && Number.isFinite(l.threshold)
+                ? l.threshold
+                : cur.threshold,
+            windowSeconds:
+              typeof l.windowSeconds === 'number' && Number.isFinite(l.windowSeconds)
+                ? l.windowSeconds
+                : cur.windowSeconds,
+          };
+        }
+        if (mc.skillPinning && typeof mc.skillPinning === 'object') {
+          const sk = mc.skillPinning;
+          const cur = mergedPolicy.skillPinning;
+          mergedPolicy.skillPinning = {
+            enabled: typeof sk.enabled === 'boolean' ? sk.enabled : cur.enabled,
+            mode: sk.mode === 'block' || sk.mode === 'warn' ? sk.mode : cur.mode,
+            roots: Array.isArray(sk.roots)
+              ? sk.roots.filter((x): x is string => typeof x === 'string')
+              : cur.roots,
+          };
+        }
+        // Managed credential-jail paths → synthesized smartRules (org:-prefixed
+        // for attribution + to avoid colliding with the local user-jail shield).
+        if (Array.isArray(mc.jailPaths)) {
+          for (const jp of mc.jailPaths) {
+            const path = typeof jp?.path === 'string' ? jp.path.trim() : '';
+            if (!path) continue;
+            const verdict = jp?.verdict === 'review' ? 'review' : 'block';
+            for (const r of pathRules(path, verdict, 'org-managed jail')) {
+              mergedPolicy.smartRules.push({ ...r, name: `org:${r.name}` });
+            }
+          }
+        }
+        // Managed trusted hosts REPLACE the local list (the org owns the
+        // pipe-chain trust set — a dev can't silently widen it).
+        if (Array.isArray(mc.trustedHosts) && mc.trustedHosts.length) {
+          mergedPolicy.trustedHosts = mc.trustedHosts.filter(
+            (h): h is string => typeof h === 'string'
           );
         }
       }
