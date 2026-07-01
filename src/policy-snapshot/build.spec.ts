@@ -86,6 +86,7 @@ describe('buildPolicySnapshot', () => {
       {},
       {
         srv123: {
+          name: 'slack',
           tools: [{ name: 'slack_post' }, { name: 'slack_delete' }],
           disabled: [],
           status: 'approved',
@@ -95,6 +96,7 @@ describe('buildPolicySnapshot', () => {
     expect(body.mcpServers).toEqual([
       {
         key: 'srv123',
+        name: 'slack',
         tools: ['slack_post', 'slack_delete'],
         toolCount: 2,
         status: 'approved',

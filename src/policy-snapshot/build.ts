@@ -39,6 +39,7 @@ export interface PolicySnapshotBody {
   // are bare (from the upstream tools/list). Policy, not secrets.
   mcpServers: Array<{
     key: string;
+    name?: string;
     tools: string[];
     toolCount: number;
     status: string;
@@ -78,6 +79,7 @@ export function buildPolicySnapshot(
       .slice(0, MAX_MCP_SERVERS)
       .map(([key, cfg]) => ({
         key,
+        ...(cfg.name && { name: cfg.name }),
         tools: cfg.tools.map((t) => t.name).slice(0, MAX_MCP_TOOLS),
         toolCount: cfg.tools.length,
         status: cfg.status,

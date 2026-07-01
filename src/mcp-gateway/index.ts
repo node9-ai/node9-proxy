@@ -25,7 +25,7 @@ import { buildNegotiationMessage } from '../policy/negotiation';
 import { checkProvenance } from '../utils/provenance.js';
 import { hashToolDefinitions, getServerKey, checkPin, updatePin } from '../mcp-pin';
 import type { McpToolInfo } from '../daemon/mcp-tools';
-import { getServerConfig } from '../daemon/mcp-tools';
+import { getServerConfig, deriveServerName } from '../daemon/mcp-tools';
 import {
   DAEMON_PORT,
   DAEMON_HOST,
@@ -624,7 +624,12 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
               'Content-Type': 'application/json',
               ...(token && { 'x-node9-internal': token }),
             },
-            body: JSON.stringify({ serverKey, tools: toolSummary }),
+            // Friendly name derived from the launch command (display-only).
+            body: JSON.stringify({
+              serverKey,
+              tools: toolSummary,
+              name: deriveServerName(upstreamCommand),
+            }),
           }).catch(() => {
             /* silent */
           });

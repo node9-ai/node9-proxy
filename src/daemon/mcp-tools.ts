@@ -11,6 +11,45 @@ export interface McpServerConfig {
   tools: McpToolInfo[];
   disabled: string[];
   status: 'pending' | 'approved';
+  /** Friendly server name derived from the upstream launch command (e.g.
+   *  "filesystem"). Display-only — the serverKey stays the identity. */
+  name?: string;
+}
+
+/**
+ * Derive a friendly server name from an MCP upstream launch command, e.g.
+ * `npx -y @modelcontextprotocol/server-filesystem /home` → "filesystem".
+ * Best-effort + display-only; falls back to "MCP Server".
+ */
+export function deriveServerName(cmd: string): string {
+  if (!cmd || typeof cmd !== 'string') return 'MCP Server';
+  const strip = (s: string) =>
+    s.replace(/^(mcp-server|server|mcp)-/i, '').replace(/-(mcp-server|server|mcp)$/i, '') || s;
+  // Scoped npm package: @scope/server-filesystem → filesystem
+  const scoped = cmd.match(/@[\w.-]+\/([\w.-]+)/);
+  if (scoped) return strip(scoped[1]);
+  // Otherwise the first non-flag, non-runner token's basename.
+  const runners = new Set([
+    'npx',
+    'node',
+    'uvx',
+    'uv',
+    'python',
+    'python3',
+    'bunx',
+    'bun',
+    'deno',
+    'run',
+    'sh',
+    '-c',
+  ]);
+  const bin = cmd
+    .split(/\s+/)
+    .filter(Boolean)
+    .find((p) => !p.startsWith('-') && !runners.has(p.toLowerCase()));
+  if (!bin) return 'MCP Server';
+  const base = (bin.split('/').pop() || bin).replace(/\.(js|mjs|cjs|ts|py)$/i, '');
+  return strip(base) || 'MCP Server';
 }
 
 export type McpToolsConfig = Record<string, McpServerConfig>;
@@ -52,7 +91,8 @@ export function getServerConfig(serverKey: string): McpServerConfig | undefined 
 
 export function updateServerDiscovery(
   serverKey: string,
-  tools: McpToolInfo[]
+  tools: McpToolInfo[],
+  name?: string
 ): 'new' | 'drift' | 'match' {
   const config = readMcpToolsConfig();
   const existing = config[serverKey];
@@ -62,9 +102,17 @@ export function updateServerDiscovery(
       tools,
       disabled: [],
       status: 'pending',
+      ...(name && { name }),
     };
     writeMcpToolsConfig(config);
     return 'new';
+  }
+
+  // Backfill the name on an existing entry that predates name capture.
+  let dirty = false;
+  if (name && !existing.name) {
+    existing.name = name;
+    dirty = true;
   }
 
   // Check for drift (new tools added)
@@ -78,6 +126,7 @@ export function updateServerDiscovery(
     return 'drift';
   }
 
+  if (dirty) writeMcpToolsConfig(config); // persist a backfilled name
   return 'match';
 }
 
