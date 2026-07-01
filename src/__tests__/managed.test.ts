@@ -224,6 +224,23 @@ describe('extractManagedConfig — reviewChannel + approvalTimeoutMs (Preference
     });
   });
 
+  it('keeps jailPaths (coerced, empty-path + junk-verdict handled)', () => {
+    const out = extractManagedConfig({
+      managedConfig: {
+        jailPaths: [
+          { path: '~/.secrets', verdict: 'review' },
+          { path: '  ', verdict: 'block' },
+          { path: '~/.aws', verdict: 'bogus' },
+        ],
+        locked: [],
+      },
+    });
+    expect(out?.jailPaths).toEqual([
+      { path: '~/.secrets', verdict: 'review' },
+      { path: '~/.aws', verdict: 'block' },
+    ]);
+  });
+
   it('keeps loopDetection + skillPinning (coerced)', () => {
     const out = extractManagedConfig({
       managedConfig: {

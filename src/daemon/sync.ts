@@ -169,6 +169,7 @@ export interface ManagedConfigCache {
   injectionScan?: { enabled: boolean; minConfidence: string; allow: string[] };
   loopDetection?: { enabled: boolean; threshold: number; windowSeconds: number };
   skillPinning?: { enabled: boolean; mode: string; roots: string[] };
+  jailPaths?: { path: string; verdict: string }[];
   locked: string[];
 }
 
@@ -202,6 +203,7 @@ interface CloudPolicyBody {
     injectionScan?: { enabled?: unknown; minConfidence?: unknown; allow?: unknown };
     loopDetection?: { enabled?: unknown; threshold?: unknown; windowSeconds?: unknown };
     skillPinning?: { enabled?: unknown; mode?: unknown; roots?: unknown };
+    jailPaths?: { path?: unknown; verdict?: unknown }[];
     locked?: unknown;
   }; // M2 settings
 }
@@ -483,6 +485,15 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
         : [],
     };
   }
+  if (Array.isArray(mc.jailPaths)) {
+    const jail = mc.jailPaths
+      .map((jp) => ({
+        path: typeof jp?.path === 'string' ? jp.path.trim() : '',
+        verdict: jp?.verdict === 'review' ? 'review' : 'block',
+      }))
+      .filter((jp) => jp.path);
+    if (jail.length) out.jailPaths = jail;
+  }
   // Nothing actually managed → omit entirely.
   return out.mode !== undefined ||
     out.egress !== undefined ||
@@ -492,7 +503,8 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
     out.approvalTimeoutMs !== undefined ||
     out.injectionScan !== undefined ||
     out.loopDetection !== undefined ||
-    out.skillPinning !== undefined
+    out.skillPinning !== undefined ||
+    out.jailPaths !== undefined
     ? out
     : undefined;
 }
