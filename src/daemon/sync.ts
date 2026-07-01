@@ -163,6 +163,7 @@ export interface ManagedConfigCache {
     allowPrivate?: boolean;
   };
   dlp?: { enabled?: boolean; pii?: string };
+  approvers?: { native?: boolean; browser?: boolean; cloud?: boolean; terminal?: boolean };
   locked: string[];
 }
 
@@ -190,6 +191,7 @@ interface CloudPolicyBody {
       allowPrivate?: unknown;
     };
     dlp?: { enabled?: unknown; pii?: unknown };
+    approvers?: { native?: unknown; browser?: unknown; cloud?: unknown; terminal?: unknown };
     locked?: unknown;
   }; // M2 settings
 }
@@ -418,8 +420,19 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
     if (typeof mc.dlp.pii === 'string') d.pii = mc.dlp.pii;
     if (d.enabled !== undefined || d.pii !== undefined) out.dlp = d;
   }
+  // Preferences: approvers (4 bools — where approvals may happen).
+  if (mc.approvers && typeof mc.approvers === 'object') {
+    const a: NonNullable<ManagedConfigCache['approvers']> = {};
+    for (const k of ['native', 'browser', 'cloud', 'terminal'] as const) {
+      if (typeof mc.approvers[k] === 'boolean') a[k] = mc.approvers[k] as boolean;
+    }
+    if (Object.keys(a).length > 0) out.approvers = a;
+  }
   // Nothing actually managed → omit entirely.
-  return out.mode !== undefined || out.egress !== undefined || out.dlp !== undefined
+  return out.mode !== undefined ||
+    out.egress !== undefined ||
+    out.dlp !== undefined ||
+    out.approvers !== undefined
     ? out
     : undefined;
 }

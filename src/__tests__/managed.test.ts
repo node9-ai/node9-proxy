@@ -4,6 +4,7 @@ import {
   resolveManagedMode,
   applyManagedEgress,
   applyManagedDlp,
+  applyManagedApprovers,
 } from '../config/managed';
 
 const localEgress = (
@@ -179,5 +180,22 @@ describe('managed dlp (baseline+lock) — M2c', () => {
 
   it('ignores an unrankable managed pii', () => {
     expect(applyManagedDlp(localDlp({ pii: 'block' }), { pii: 'garbage' }, []).pii).toBe('block');
+  });
+});
+
+describe('managed approvers (Preferences)', () => {
+  const local = { native: true, browser: false, cloud: false, terminal: true };
+
+  it('replaces present managed fields, keeps the rest (org owns the surface)', () => {
+    const out = applyManagedApprovers(local, { cloud: true, terminal: false });
+    expect(out).toEqual({ native: true, browser: false, cloud: true, terminal: false });
+  });
+
+  it('an empty managed object leaves local untouched', () => {
+    expect(applyManagedApprovers(local, {})).toEqual(local);
+  });
+
+  it('a managed false forces a surface off', () => {
+    expect(applyManagedApprovers(local, { terminal: false }).terminal).toBe(false);
   });
 });

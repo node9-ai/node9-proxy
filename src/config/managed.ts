@@ -141,3 +141,24 @@ export function applyManagedDlp<T extends { enabled: boolean; pii?: string }>(
   }
   return next;
 }
+
+// Managed approver surfaces (Preferences v1). The org owns WHERE approvals happen
+// (force cloud, forbid terminal self-approve), so a present managed value
+// REPLACES the local one per-field.
+export interface ManagedApprovers {
+  native?: boolean;
+  browser?: boolean;
+  cloud?: boolean;
+  terminal?: boolean;
+}
+export function applyManagedApprovers<
+  T extends { native: boolean; browser: boolean; cloud: boolean; terminal: boolean },
+>(local: T, managed: ManagedApprovers): T {
+  return {
+    ...local,
+    native: typeof managed.native === 'boolean' ? managed.native : local.native,
+    browser: typeof managed.browser === 'boolean' ? managed.browser : local.browser,
+    cloud: typeof managed.cloud === 'boolean' ? managed.cloud : local.cloud,
+    terminal: typeof managed.terminal === 'boolean' ? managed.terminal : local.terminal,
+  };
+}
