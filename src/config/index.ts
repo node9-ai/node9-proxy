@@ -7,7 +7,12 @@ import path from 'path';
 import os from 'os';
 import { sanitizeConfig } from '../config-schema';
 import { readActiveShields, readShieldOverrides, getShield } from '../shields';
-import { resolveManagedMode, applyManagedEgress, applyManagedDlp } from './managed';
+import {
+  resolveManagedMode,
+  applyManagedEgress,
+  applyManagedDlp,
+  applyManagedApprovers,
+} from './managed';
 
 // SmartCondition + SmartRule are now defined in @node9/policy-engine.
 // Re-exported here so existing import paths (`from '../config'`) keep
@@ -736,6 +741,12 @@ export function getConfig(cwd?: string): Config {
             allowPrivate?: unknown;
           };
           dlp?: { enabled?: unknown; pii?: unknown };
+          approvers?: {
+            native?: unknown;
+            browser?: unknown;
+            cloud?: unknown;
+            terminal?: unknown;
+          };
           locked?: unknown;
         };
         const locked: string[] = Array.isArray(mc.locked)
@@ -777,6 +788,18 @@ export function getConfig(cwd?: string): Config {
             },
             locked
           );
+        }
+        // Preferences: settings.approvers — the org owns where approvals happen,
+        // so a managed value replaces the local surface per-field.
+        if (mc.approvers && typeof mc.approvers === 'object') {
+          const bool = (v: unknown): boolean | undefined =>
+            typeof v === 'boolean' ? v : undefined;
+          mergedSettings.approvers = applyManagedApprovers(mergedSettings.approvers, {
+            native: bool(mc.approvers.native),
+            browser: bool(mc.approvers.browser),
+            cloud: bool(mc.approvers.cloud),
+            terminal: bool(mc.approvers.terminal),
+          });
         }
       }
       if (raw.panicMode === true) {
