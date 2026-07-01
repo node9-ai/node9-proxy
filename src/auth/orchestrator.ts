@@ -588,7 +588,16 @@ async function _authorizeHeadlessCore(
     const decision = config.policy.appPermissions?.[meta.serverKey]?.[bareTool];
     if (decision === 'block' || decision === 'review') {
       if (!isManual)
-        appendLocalAudit(toolName, args, 'deny', `app-permission-${decision}`, meta, hashAuditArgs);
+        appendLocalAudit(
+          toolName,
+          args,
+          'deny',
+          `app-permission-${decision}`,
+          // ruleName gives the dashboard row its "why" (rule attribution), the
+          // same channel shield fires use; mcpServer (in meta) gives the app chip.
+          { ...meta, ruleName: `app-permission:${bareTool}` },
+          hashAuditArgs
+        );
       return {
         approved: false,
         blockedBy: 'local-config',

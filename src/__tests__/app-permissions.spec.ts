@@ -3,7 +3,7 @@
 // enforced in the authorize path. Keyed by (serverKey, bareTool). A tightening
 // gate: block/review deny; allow/unset fall through to normal policy.
 // Mirrors trust-managed.spec.ts (managedConfig via rules-cache.json).
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -125,5 +125,31 @@ describe('managed appPermissions apply + enforce (P3 Phase 2)', () => {
       { agent: 'Claude Code' } // no serverKey → gate skipped
     );
     expect(r.blockedByLabel ?? '').not.toContain('App Permission');
+  });
+
+  it('the blocked audit row carries MCP attribution + rule name (not anonymous)', async () => {
+    // LOCAL_AUDIT_LOG resolves os.homedir() at import time (before this suite's
+    // HOME swap), so observe the write via a spy instead of reading a file path.
+    const spy = vi.spyOn(fs, 'appendFileSync');
+    try {
+      // The fixed gateway resolves a friendly label even for bare tool names and
+      // passes it as mcpServer — this is the exact meta shape it sends.
+      const r = await authorizeHeadless(
+        'write_file',
+        { path: '/x' },
+        { agent: 'MCP-Gateway', mcpServer: 'gmail-autoauth', serverKey: 'srv1' }
+      );
+      expect(r.approved).toBe(false);
+      const line = spy.mock.calls
+        .map((c) => String(c[1]))
+        .find((s) => s.includes('"tool":"write_file"') && s.includes('"decision":"deny"'));
+      expect(line).toBeDefined();
+      const row = JSON.parse(line!);
+      expect(row.checkedBy).toBe('app-permission-block');
+      expect(row.mcpServer).toBe('gmail-autoauth'); // the app chip on the dashboard
+      expect(row.ruleName).toBe('app-permission:write_file'); // the "why"
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

@@ -64,6 +64,26 @@ function extractMcpServer(toolName: string): string | undefined {
 }
 
 /**
+ * Server label for audit/display. A stdio gateway forwards BARE tool names
+ * (`read_file`), so extractMcpServer is usually undefined here — without a
+ * fallback the BLOCKED audit row ships with no MCP attribution while the
+ * hook's allowed row (namespaced) gets the chip. Fall back to the inventory's
+ * friendly name, then to a name derived from the launch command.
+ * Exported for unit testing.
+ */
+export function resolveServerLabel(
+  toolName: string,
+  serverKey: string,
+  upstreamCommand: string
+): string {
+  return (
+    extractMcpServer(toolName) ??
+    getServerConfig(serverKey)?.name ??
+    deriveServerName(upstreamCommand)
+  );
+}
+
+/**
  * Normalize a client's `clientInfo.name` (from the MCP initialize handshake)
  * to a friendly agent label used in tail/audit/dashboard surfaces.
  *
@@ -450,7 +470,7 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
           String(message.params?.name ?? message.params?.tool_name ?? 'unknown')
         );
         const toolArgs = (message.params?.arguments ?? message.params?.tool_input ?? {}) as unknown;
-        const mcpServer = extractMcpServer(toolName);
+        const mcpServer = resolveServerLabel(toolName, serverKey, upstreamCommand);
 
         const result = await authorizeHeadless(toolName, toolArgs, {
           agent: clientName ?? 'MCP-Gateway',
