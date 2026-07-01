@@ -4,7 +4,9 @@ import {
   resolveManagedMode,
   applyManagedEgress,
   applyManagedDlp,
+  applyManagedApprovers,
 } from '../config/managed';
+import { extractManagedConfig } from '../daemon/sync';
 
 const localEgress = (
   over: Partial<{
@@ -179,5 +181,39 @@ describe('managed dlp (baseline+lock) — M2c', () => {
 
   it('ignores an unrankable managed pii', () => {
     expect(applyManagedDlp(localDlp({ pii: 'block' }), { pii: 'garbage' }, []).pii).toBe('block');
+  });
+});
+
+describe('managed approvers (Preferences)', () => {
+  const local = { native: true, browser: false, cloud: false, terminal: true };
+
+  it('replaces present managed fields, keeps the rest (org owns the surface)', () => {
+    const out = applyManagedApprovers(local, { cloud: true, terminal: false });
+    expect(out).toEqual({ native: true, browser: false, cloud: true, terminal: false });
+  });
+
+  it('an empty managed object leaves local untouched', () => {
+    expect(applyManagedApprovers(local, {})).toEqual(local);
+  });
+
+  it('a managed false forces a surface off', () => {
+    expect(applyManagedApprovers(local, { terminal: false }).terminal).toBe(false);
+  });
+});
+
+describe('extractManagedConfig — reviewChannel + approvalTimeoutMs (Preferences v2)', () => {
+  it('keeps a valid reviewChannel + numeric timeout', () => {
+    const out = extractManagedConfig({
+      managedConfig: { reviewChannel: 'ask', approvalTimeoutMs: 30000, locked: [] },
+    });
+    expect(out?.reviewChannel).toBe('ask');
+    expect(out?.approvalTimeoutMs).toBe(30000);
+  });
+
+  it('drops an invalid reviewChannel and a negative timeout', () => {
+    const out = extractManagedConfig({
+      managedConfig: { reviewChannel: 'bogus', approvalTimeoutMs: -1, locked: [] },
+    });
+    expect(out).toBeUndefined();
   });
 });
