@@ -747,6 +747,8 @@ export function getConfig(cwd?: string): Config {
             cloud?: unknown;
             terminal?: unknown;
           };
+          reviewChannel?: unknown;
+          approvalTimeoutMs?: unknown;
           locked?: unknown;
         };
         const locked: string[] = Array.isArray(mc.locked)
@@ -800,6 +802,14 @@ export function getConfig(cwd?: string): Config {
             cloud: bool(mc.approvers.cloud),
             terminal: bool(mc.approvers.terminal),
           });
+        }
+        // Preferences v2: reviewChannel + approvalTimeoutMs — plain scalars, the
+        // org's value replaces local when set (admin owns these approval knobs).
+        if (mc.reviewChannel === 'ask' || mc.reviewChannel === 'approver') {
+          mergedSettings.reviewChannel = mc.reviewChannel;
+        }
+        if (typeof mc.approvalTimeoutMs === 'number' && mc.approvalTimeoutMs >= 0) {
+          mergedSettings.approvalTimeoutMs = mc.approvalTimeoutMs;
         }
       }
       if (raw.panicMode === true) {
