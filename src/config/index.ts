@@ -14,6 +14,7 @@ import {
   applyManagedApprovers,
 } from './managed';
 import { pathRules } from '../shields/build';
+import { readTrustedHosts } from '../auth/trusted-hosts';
 
 // SmartCondition + SmartRule are now defined in @node9/policy-engine.
 // Re-exported here so existing import paths (`from '../config'`) keep
@@ -111,6 +112,9 @@ export interface Config {
       mode: 'warn' | 'block';
       roots: string[];
     };
+    // Pipe-chain trusted hosts — downgrades secret|curl-host exfil verdicts.
+    // Seeded from ~/.node9/trusted-hosts.json; a managed list REPLACES it.
+    trustedHosts: string[];
   };
   environments: Record<string, EnvironmentConfig>;
 }
@@ -351,6 +355,7 @@ export const DEFAULT_CONFIG: Config = {
     loopDetection: { enabled: true, threshold: 5, windowSeconds: 120 },
     injectionScan: { enabled: false, minConfidence: 'medium', allow: [] },
     skillPinning: { enabled: false, mode: 'warn', roots: [] },
+    trustedHosts: [],
   },
   environments: {},
 };
@@ -579,6 +584,8 @@ export function getConfig(cwd?: string): Config {
       ...DEFAULT_CONFIG.policy.skillPinning,
       roots: [...DEFAULT_CONFIG.policy.skillPinning.roots],
     },
+    // Seed from the local trusted-hosts file; a managed list REPLACES it below.
+    trustedHosts: readTrustedHosts().map((e) => e.host),
   };
   const mergedEnvironments: Record<string, EnvironmentConfig> = { ...DEFAULT_CONFIG.environments };
 
@@ -762,6 +769,7 @@ export function getConfig(cwd?: string): Config {
           };
           skillPinning?: { enabled?: unknown; mode?: unknown; roots?: unknown };
           jailPaths?: { path?: unknown; verdict?: unknown }[];
+          trustedHosts?: unknown;
           locked?: unknown;
         };
         const locked: string[] = Array.isArray(mc.locked)
@@ -877,6 +885,13 @@ export function getConfig(cwd?: string): Config {
               mergedPolicy.smartRules.push({ ...r, name: `org:${r.name}` });
             }
           }
+        }
+        // Managed trusted hosts REPLACE the local list (the org owns the
+        // pipe-chain trust set — a dev can't silently widen it).
+        if (Array.isArray(mc.trustedHosts) && mc.trustedHosts.length) {
+          mergedPolicy.trustedHosts = mc.trustedHosts.filter(
+            (h): h is string => typeof h === 'string'
+          );
         }
       }
       if (raw.panicMode === true) {

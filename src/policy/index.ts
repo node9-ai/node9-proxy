@@ -16,7 +16,7 @@ import pm from 'picomatch';
 import { scanArgs, scanFilePath } from '../dlp';
 import { type Config, getConfig, getActiveEnvironment } from '../config';
 import { checkProvenance } from '../utils/provenance.js';
-import { isTrustedHost } from '../auth/trusted-hosts.js';
+import { matchesTrustedHost } from '../auth/trusted-hosts.js';
 import {
   evaluatePolicy as engineEvaluatePolicy,
   isIgnoredTool as engineIsIgnoredTool,
@@ -74,7 +74,10 @@ export async function evaluatePolicy(
     toolName,
     args,
     { agent, cwd, activeEnvironment },
-    { checkProvenance, isTrustedHost }
+    {
+      checkProvenance,
+      isTrustedHost: (host: string) => matchesTrustedHost(host, config.policy.trustedHosts),
+    }
   );
 }
 
