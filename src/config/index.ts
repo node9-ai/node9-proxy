@@ -13,6 +13,7 @@ import {
   applyManagedDlp,
   applyManagedApprovers,
 } from './managed';
+import { pathRules } from '../shields/build';
 
 // SmartCondition + SmartRule are now defined in @node9/policy-engine.
 // Re-exported here so existing import paths (`from '../config'`) keep
@@ -760,6 +761,7 @@ export function getConfig(cwd?: string): Config {
             windowSeconds?: unknown;
           };
           skillPinning?: { enabled?: unknown; mode?: unknown; roots?: unknown };
+          jailPaths?: { path?: unknown; verdict?: unknown }[];
           locked?: unknown;
         };
         const locked: string[] = Array.isArray(mc.locked)
@@ -863,6 +865,18 @@ export function getConfig(cwd?: string): Config {
               ? sk.roots.filter((x): x is string => typeof x === 'string')
               : cur.roots,
           };
+        }
+        // Managed credential-jail paths → synthesized smartRules (org:-prefixed
+        // for attribution + to avoid colliding with the local user-jail shield).
+        if (Array.isArray(mc.jailPaths)) {
+          for (const jp of mc.jailPaths) {
+            const path = typeof jp?.path === 'string' ? jp.path.trim() : '';
+            if (!path) continue;
+            const verdict = jp?.verdict === 'review' ? 'review' : 'block';
+            for (const r of pathRules(path, verdict, 'org-managed jail')) {
+              mergedPolicy.smartRules.push({ ...r, name: `org:${r.name}` });
+            }
+          }
         }
       }
       if (raw.panicMode === true) {
