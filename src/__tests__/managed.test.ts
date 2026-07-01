@@ -6,6 +6,7 @@ import {
   applyManagedDlp,
   applyManagedApprovers,
 } from '../config/managed';
+import { extractManagedConfig } from '../daemon/sync';
 
 const localEgress = (
   over: Partial<{
@@ -197,5 +198,22 @@ describe('managed approvers (Preferences)', () => {
 
   it('a managed false forces a surface off', () => {
     expect(applyManagedApprovers(local, { terminal: false }).terminal).toBe(false);
+  });
+});
+
+describe('extractManagedConfig — reviewChannel + approvalTimeoutMs (Preferences v2)', () => {
+  it('keeps a valid reviewChannel + numeric timeout', () => {
+    const out = extractManagedConfig({
+      managedConfig: { reviewChannel: 'ask', approvalTimeoutMs: 30000, locked: [] },
+    });
+    expect(out?.reviewChannel).toBe('ask');
+    expect(out?.approvalTimeoutMs).toBe(30000);
+  });
+
+  it('drops an invalid reviewChannel and a negative timeout', () => {
+    const out = extractManagedConfig({
+      managedConfig: { reviewChannel: 'bogus', approvalTimeoutMs: -1, locked: [] },
+    });
+    expect(out).toBeUndefined();
   });
 });

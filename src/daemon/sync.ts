@@ -164,6 +164,8 @@ export interface ManagedConfigCache {
   };
   dlp?: { enabled?: boolean; pii?: string };
   approvers?: { native?: boolean; browser?: boolean; cloud?: boolean; terminal?: boolean };
+  reviewChannel?: string;
+  approvalTimeoutMs?: number;
   locked: string[];
 }
 
@@ -192,6 +194,8 @@ interface CloudPolicyBody {
     };
     dlp?: { enabled?: unknown; pii?: unknown };
     approvers?: { native?: unknown; browser?: unknown; cloud?: unknown; terminal?: unknown };
+    reviewChannel?: unknown;
+    approvalTimeoutMs?: unknown;
     locked?: unknown;
   }; // M2 settings
 }
@@ -428,11 +432,20 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
     }
     if (Object.keys(a).length > 0) out.approvers = a;
   }
+  // Preferences v2: reviewChannel ('ask'|'approver') + approvalTimeoutMs (number).
+  if (mc.reviewChannel === 'ask' || mc.reviewChannel === 'approver') {
+    out.reviewChannel = mc.reviewChannel;
+  }
+  if (typeof mc.approvalTimeoutMs === 'number' && mc.approvalTimeoutMs >= 0) {
+    out.approvalTimeoutMs = mc.approvalTimeoutMs;
+  }
   // Nothing actually managed → omit entirely.
   return out.mode !== undefined ||
     out.egress !== undefined ||
     out.dlp !== undefined ||
-    out.approvers !== undefined
+    out.approvers !== undefined ||
+    out.reviewChannel !== undefined ||
+    out.approvalTimeoutMs !== undefined
     ? out
     : undefined;
 }
