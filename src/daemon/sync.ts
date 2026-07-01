@@ -172,6 +172,7 @@ export interface ManagedConfigCache {
   skillPinning?: { enabled: boolean; mode: string; roots: string[] };
   jailPaths?: { path: string; verdict: string }[];
   trustedHosts?: string[];
+  appPermissions?: Record<string, Record<string, string>>;
   locked: string[];
 }
 
@@ -207,6 +208,7 @@ interface CloudPolicyBody {
     skillPinning?: { enabled?: unknown; mode?: unknown; roots?: unknown };
     jailPaths?: { path?: unknown; verdict?: unknown }[];
     trustedHosts?: unknown;
+    appPermissions?: unknown;
     locked?: unknown;
   }; // M2 settings
 }
@@ -506,6 +508,22 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
     );
     if (hosts.length) out.trustedHosts = hosts;
   }
+  if (
+    mc.appPermissions &&
+    typeof mc.appPermissions === 'object' &&
+    !Array.isArray(mc.appPermissions)
+  ) {
+    const ap: Record<string, Record<string, string>> = {};
+    for (const [srv, tools] of Object.entries(mc.appPermissions)) {
+      if (!tools || typeof tools !== 'object' || Array.isArray(tools)) continue;
+      const m: Record<string, string> = {};
+      for (const [t, d] of Object.entries(tools as Record<string, unknown>)) {
+        if (d === 'allow' || d === 'review' || d === 'block') m[t] = d;
+      }
+      if (Object.keys(m).length) ap[srv] = m;
+    }
+    if (Object.keys(ap).length) out.appPermissions = ap;
+  }
   // Nothing actually managed → omit entirely.
   return out.mode !== undefined ||
     out.egress !== undefined ||
@@ -517,7 +535,8 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
     out.loopDetection !== undefined ||
     out.skillPinning !== undefined ||
     out.jailPaths !== undefined ||
-    out.trustedHosts !== undefined
+    out.trustedHosts !== undefined ||
+    out.appPermissions !== undefined
     ? out
     : undefined;
 }

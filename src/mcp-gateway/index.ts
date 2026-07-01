@@ -455,6 +455,9 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
         const result = await authorizeHeadless(toolName, toolArgs, {
           agent: clientName ?? 'MCP-Gateway',
           mcpServer,
+          // Managed per-tool app permissions are keyed by serverKey (the pin
+          // hash) — pass it so authorizeHeadless can enforce block/review.
+          serverKey,
         });
 
         if (!result.approved) {

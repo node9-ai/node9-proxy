@@ -115,6 +115,9 @@ export interface Config {
     // Pipe-chain trusted hosts — downgrades secret|curl-host exfil verdicts.
     // Seeded from ~/.node9/trusted-hosts.json; a managed list REPLACES it.
     trustedHosts: string[];
+    // Managed MCP per-tool permissions { serverKey: { bareTool: allow|review|block } }.
+    // Applied from the managed cache; enforced in the gateway authorize path.
+    appPermissions: Record<string, Record<string, 'allow' | 'review' | 'block'>>;
   };
   environments: Record<string, EnvironmentConfig>;
 }
@@ -356,6 +359,7 @@ export const DEFAULT_CONFIG: Config = {
     injectionScan: { enabled: false, minConfidence: 'medium', allow: [] },
     skillPinning: { enabled: false, mode: 'warn', roots: [] },
     trustedHosts: [],
+    appPermissions: {},
   },
   environments: {},
 };
@@ -586,6 +590,7 @@ export function getConfig(cwd?: string): Config {
     },
     // Seed from the local trusted-hosts file; a managed list REPLACES it below.
     trustedHosts: readTrustedHosts().map((e) => e.host),
+    appPermissions: {},
   };
   const mergedEnvironments: Record<string, EnvironmentConfig> = { ...DEFAULT_CONFIG.environments };
 
@@ -770,6 +775,7 @@ export function getConfig(cwd?: string): Config {
           skillPinning?: { enabled?: unknown; mode?: unknown; roots?: unknown };
           jailPaths?: { path?: unknown; verdict?: unknown }[];
           trustedHosts?: unknown;
+          appPermissions?: unknown;
           locked?: unknown;
         };
         const locked: string[] = Array.isArray(mc.locked)
@@ -892,6 +898,24 @@ export function getConfig(cwd?: string): Config {
           mergedPolicy.trustedHosts = mc.trustedHosts.filter(
             (h): h is string => typeof h === 'string'
           );
+        }
+        // Managed MCP app permissions REPLACE the local map (coerced to known
+        // decisions). Enforced by the gateway authorize path.
+        if (
+          mc.appPermissions &&
+          typeof mc.appPermissions === 'object' &&
+          !Array.isArray(mc.appPermissions)
+        ) {
+          const coerced: Record<string, Record<string, 'allow' | 'review' | 'block'>> = {};
+          for (const [srv, tools] of Object.entries(mc.appPermissions)) {
+            if (!tools || typeof tools !== 'object' || Array.isArray(tools)) continue;
+            const m: Record<string, 'allow' | 'review' | 'block'> = {};
+            for (const [tool, d] of Object.entries(tools as Record<string, unknown>)) {
+              if (d === 'allow' || d === 'review' || d === 'block') m[tool] = d;
+            }
+            if (Object.keys(m).length) coerced[srv] = m;
+          }
+          mergedPolicy.appPermissions = coerced;
         }
       }
       if (raw.panicMode === true) {

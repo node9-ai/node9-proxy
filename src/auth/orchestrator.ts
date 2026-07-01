@@ -164,7 +164,13 @@ function notifyActivity(data: {
 export async function authorizeHeadless(
   toolName: string,
   args: unknown,
-  meta?: { agent?: string; mcpServer?: string; sessionId?: string; transcriptPath?: string },
+  meta?: {
+    agent?: string;
+    mcpServer?: string;
+    serverKey?: string;
+    sessionId?: string;
+    transcriptPath?: string;
+  },
   options?: {
     calledFromDaemon?: boolean;
     cwd?: string;
@@ -244,6 +250,7 @@ async function _authorizeHeadlessCore(
   metaArg?: {
     agent?: string;
     mcpServer?: string;
+    serverKey?: string;
     sessionId?: string;
     transcriptPath?: string;
     workingDir?: string;
@@ -561,6 +568,35 @@ async function _authorizeHeadlessCore(
       }
     }
     return { approved: true, checkedBy: 'audit' };
+  }
+
+  // ── MCP APP PERMISSIONS (P3 Phase 2 — GOVERN) ─────────────────────────────
+  // Per-tool block/review for a gatewayed MCP server, keyed by (serverKey,
+  // bareTool). Both come from the gateway's namespaced call (serverKey passed in
+  // meta; bareTool = the call name minus the `mcp__<name>__` prefix, using the
+  // exact matched name — no fragile regex). Enforced in the standard/strict path
+  // only (observe/audit already returned above). A tightening gate: 'allow' is
+  // NOT a bypass — it falls through to DLP/egress/smart-rules like an unset tool.
+  if (meta?.serverKey && meta?.mcpServer) {
+    const prefix = `mcp__${meta.mcpServer}__`;
+    const bareTool = toolName.startsWith(prefix) ? toolName.slice(prefix.length) : toolName;
+    const decision = config.policy.appPermissions?.[meta.serverKey]?.[bareTool];
+    if (decision === 'block' || decision === 'review') {
+      if (!isManual)
+        appendLocalAudit(toolName, args, 'deny', `app-permission-${decision}`, meta, hashAuditArgs);
+      return {
+        approved: false,
+        blockedBy: 'local-config',
+        reason:
+          decision === 'block'
+            ? `App permission: "${meta.mcpServer} / ${bareTool}" is set to block by your workspace.`
+            : `App permission: "${meta.mcpServer} / ${bareTool}" is set to review — a human must approve this tool.`,
+        blockedByLabel:
+          decision === 'block'
+            ? '🔒 Node9 App Permission (Blocked)'
+            : '🔒 Node9 App Permission (Review)',
+      };
+    }
   }
 
   // Fast Paths (Ignore, Trust, Policy Allow)
