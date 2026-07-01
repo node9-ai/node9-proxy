@@ -141,10 +141,15 @@ export function normalizeHost(raw: string): string {
  * - Protocol/path/port are stripped before comparison.
  * - "api.mycompany.com" does NOT match a bare "mycompany.com" entry.
  */
-export function isTrustedHost(host: string): boolean {
+/**
+ * Match a host against a list of trusted-host patterns (glob `*.domain` or exact).
+ * Extracted so both the local file (isTrustedHost) and the config-sourced list
+ * (managed trust, via config.policy.trustedHosts) share one matcher.
+ */
+export function matchesTrustedHost(host: string, list: string[]): boolean {
   const normalized = normalizeHost(host);
-  return getCachedHosts().some((entry) => {
-    const entryHost = entry.host.toLowerCase();
+  return list.some((raw) => {
+    const entryHost = raw.toLowerCase();
     if (entryHost.startsWith('*.')) {
       const domain = entryHost.slice(2);
       // Must be a proper subdomain: "foo.domain" matches, bare "domain" does not.
@@ -152,4 +157,11 @@ export function isTrustedHost(host: string): boolean {
     }
     return normalized === entryHost;
   });
+}
+
+export function isTrustedHost(host: string): boolean {
+  return matchesTrustedHost(
+    host,
+    getCachedHosts().map((entry) => entry.host)
+  );
 }

@@ -224,6 +224,16 @@ describe('extractManagedConfig — reviewChannel + approvalTimeoutMs (Preference
     });
   });
 
+  it('keeps trustedHosts (string-filtered)', () => {
+    const out = extractManagedConfig({
+      managedConfig: {
+        trustedHosts: ['*.corp.com', 42 as unknown as string, 'api.corp.com'],
+        locked: [],
+      },
+    });
+    expect(out?.trustedHosts).toEqual(['*.corp.com', 'api.corp.com']);
+  });
+
   it('keeps jailPaths (coerced, empty-path + junk-verdict handled)', () => {
     const out = extractManagedConfig({
       managedConfig: {
