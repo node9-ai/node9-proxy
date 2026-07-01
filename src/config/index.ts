@@ -754,6 +754,12 @@ export function getConfig(cwd?: string): Config {
             minConfidence?: unknown;
             allow?: unknown;
           };
+          loopDetection?: {
+            enabled?: unknown;
+            threshold?: unknown;
+            windowSeconds?: unknown;
+          };
+          skillPinning?: { enabled?: unknown; mode?: unknown; roots?: unknown };
           locked?: unknown;
         };
         const locked: string[] = Array.isArray(mc.locked)
@@ -830,6 +836,32 @@ export function getConfig(cwd?: string): Config {
             allow: Array.isArray(i.allow)
               ? i.allow.filter((x): x is string => typeof x === 'string')
               : cur.allow,
+          };
+        }
+        if (mc.loopDetection && typeof mc.loopDetection === 'object') {
+          const l = mc.loopDetection;
+          const cur = mergedPolicy.loopDetection;
+          mergedPolicy.loopDetection = {
+            enabled: typeof l.enabled === 'boolean' ? l.enabled : cur.enabled,
+            threshold:
+              typeof l.threshold === 'number' && Number.isFinite(l.threshold)
+                ? l.threshold
+                : cur.threshold,
+            windowSeconds:
+              typeof l.windowSeconds === 'number' && Number.isFinite(l.windowSeconds)
+                ? l.windowSeconds
+                : cur.windowSeconds,
+          };
+        }
+        if (mc.skillPinning && typeof mc.skillPinning === 'object') {
+          const sk = mc.skillPinning;
+          const cur = mergedPolicy.skillPinning;
+          mergedPolicy.skillPinning = {
+            enabled: typeof sk.enabled === 'boolean' ? sk.enabled : cur.enabled,
+            mode: sk.mode === 'block' || sk.mode === 'warn' ? sk.mode : cur.mode,
+            roots: Array.isArray(sk.roots)
+              ? sk.roots.filter((x): x is string => typeof x === 'string')
+              : cur.roots,
           };
         }
       }
