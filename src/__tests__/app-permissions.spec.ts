@@ -283,4 +283,88 @@ describe('managed appPermissions apply + enforce (P3 Phase 2)', () => {
       spy.mockRestore();
     }
   });
+
+  // ── Corrected design (2026-07-02) — the 7 adversarial-review fixes ────────
+
+  it('fix #3: a smart-rule BLOCK wins over review — review cannot loosen a block', async () => {
+    // review composes with policy: evaluatePolicy still runs, and a hard block
+    // hard-blocks (with its attribution) rather than becoming an approvable card.
+    fs.writeFileSync(
+      path.join(tmpHome, '.node9', 'config.json'),
+      JSON.stringify({
+        settings: {
+          mode: 'standard',
+          approvalTimeoutMs: 0,
+          approvers: { native: false, browser: false, cloud: false, terminal: false },
+        },
+        policy: {
+          smartRules: [
+            {
+              name: 'block-edit',
+              tool: 'edit_file',
+              conditions: [{ field: 'path', op: 'contains', value: '/x' }],
+              verdict: 'block',
+              reason: 'blocked by shield',
+            },
+          ],
+        },
+      })
+    );
+    _resetConfigCache();
+    _resetCore();
+    const r = await call('edit_file'); // edit_file is set to review AND smart-blocked
+    expect(r.approved).toBe(false);
+    expect(r.noApprovalMechanism).toBeUndefined(); // hard block, NOT the race
+    expect(r.blockedByLabel ?? '').not.toContain('App Permission (Review)');
+  });
+
+  it('fix #2: a SaaS shadowMode response does NOT bypass a review (review > shadow)', async () => {
+    writeSettings({ approvers: { native: false, browser: false, cloud: true, terminal: false } });
+    process.env.NODE9_API_KEY = 'test-key';
+    mockInitSaaS.mockResolvedValue({ pending: false, shadowMode: true });
+    const r = await call('edit_file');
+    expect(r.approved).toBe(false); // falls to the race; no channel → denied
+    expect(r.noApprovalMechanism).toBe(true);
+  });
+
+  it('fix #4: an approver-less review deny still WRITES an audit row (not invisible)', async () => {
+    const spy = vi.spyOn(fs, 'appendFileSync');
+    try {
+      const r = await call('edit_file'); // all approvers off → noApprovalMechanism
+      expect(r.noApprovalMechanism).toBe(true);
+      const line = spy.mock.calls
+        .map((c) => String(c[1]))
+        .find((s) => s.includes('"tool":"edit_file"') && s.includes('"decision":"deny"'));
+      expect(line).toBeDefined();
+      const row = JSON.parse(line!);
+      expect(row.checkedBy).toBe('app-permission-review');
+      expect(row.ruleName).toBe('app-permission:edit_file');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('fix #6: a race-resolved deny row carries app-permission attribution', async () => {
+    writeSettings({ approvers: { native: false, browser: false, cloud: true, terminal: false } });
+    process.env.NODE9_API_KEY = 'test-key';
+    mockInitSaaS.mockResolvedValue({ pending: true, requestId: 'req-9' });
+    mockPollSaaS.mockResolvedValue({ approved: false, reason: 'denied by admin' });
+    const spy = vi.spyOn(fs, 'appendFileSync');
+    try {
+      const r = await call('edit_file');
+      expect(r.approved).toBe(false);
+      const line = spy.mock.calls
+        .map((c) => String(c[1]))
+        .find((s) => s.includes('"tool":"edit_file"') && s.includes('"decision":"deny"'));
+      expect(line).toBeDefined();
+      expect(JSON.parse(line!).ruleName).toBe('app-permission:edit_file');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // fix #1 (daemon skipBackgroundAuth) is NOT unit-testable here: the vitest
+  // test-env silencer forces approvers.terminal=false, so the terminal racer
+  // that calls registerDaemonEntry never runs. Verified by design reasoning +
+  // the live e2e (daemon running). See mcp-review-approver-design.md fix #1.
 });
