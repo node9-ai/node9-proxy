@@ -749,6 +749,11 @@ export function getConfig(cwd?: string): Config {
           };
           reviewChannel?: unknown;
           approvalTimeoutMs?: unknown;
+          injectionScan?: {
+            enabled?: unknown;
+            minConfidence?: unknown;
+            allow?: unknown;
+          };
           locked?: unknown;
         };
         const locked: string[] = Array.isArray(mc.locked)
@@ -810,6 +815,22 @@ export function getConfig(cwd?: string): Config {
         }
         if (typeof mc.approvalTimeoutMs === 'number' && mc.approvalTimeoutMs >= 0) {
           mergedSettings.approvalTimeoutMs = mc.approvalTimeoutMs;
+        }
+        // Detection: injectionScan replaces the local config per-field (the org
+        // owns which protections run).
+        if (mc.injectionScan && typeof mc.injectionScan === 'object') {
+          const i = mc.injectionScan;
+          const cur = mergedPolicy.injectionScan;
+          mergedPolicy.injectionScan = {
+            enabled: typeof i.enabled === 'boolean' ? i.enabled : cur.enabled,
+            minConfidence:
+              i.minConfidence === 'high' || i.minConfidence === 'medium'
+                ? i.minConfidence
+                : cur.minConfidence,
+            allow: Array.isArray(i.allow)
+              ? i.allow.filter((x): x is string => typeof x === 'string')
+              : cur.allow,
+          };
         }
       }
       if (raw.panicMode === true) {

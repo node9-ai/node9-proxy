@@ -210,6 +210,20 @@ describe('extractManagedConfig — reviewChannel + approvalTimeoutMs (Preference
     expect(out?.approvalTimeoutMs).toBe(30000);
   });
 
+  it('keeps a valid injectionScan (coerced to known fields)', () => {
+    const out = extractManagedConfig({
+      managedConfig: {
+        injectionScan: { enabled: true, minConfidence: 'high', allow: ['Bash'] },
+        locked: [],
+      },
+    });
+    expect(out?.injectionScan).toEqual({
+      enabled: true,
+      minConfidence: 'high',
+      allow: ['Bash'],
+    });
+  });
+
   it('drops an invalid reviewChannel and a negative timeout', () => {
     const out = extractManagedConfig({
       managedConfig: { reviewChannel: 'bogus', approvalTimeoutMs: -1, locked: [] },

@@ -166,6 +166,7 @@ export interface ManagedConfigCache {
   approvers?: { native?: boolean; browser?: boolean; cloud?: boolean; terminal?: boolean };
   reviewChannel?: string;
   approvalTimeoutMs?: number;
+  injectionScan?: { enabled: boolean; minConfidence: string; allow: string[] };
   locked: string[];
 }
 
@@ -196,6 +197,7 @@ interface CloudPolicyBody {
     approvers?: { native?: unknown; browser?: unknown; cloud?: unknown; terminal?: unknown };
     reviewChannel?: unknown;
     approvalTimeoutMs?: unknown;
+    injectionScan?: { enabled?: unknown; minConfidence?: unknown; allow?: unknown };
     locked?: unknown;
   }; // M2 settings
 }
@@ -439,13 +441,25 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
   if (typeof mc.approvalTimeoutMs === 'number' && mc.approvalTimeoutMs >= 0) {
     out.approvalTimeoutMs = mc.approvalTimeoutMs;
   }
+  // Detection: injectionScan { enabled, minConfidence, allow } — coerced.
+  if (mc.injectionScan && typeof mc.injectionScan === 'object') {
+    const i = mc.injectionScan;
+    out.injectionScan = {
+      enabled: i.enabled === true,
+      minConfidence: i.minConfidence === 'high' ? 'high' : 'medium',
+      allow: Array.isArray(i.allow)
+        ? i.allow.filter((x): x is string => typeof x === 'string')
+        : [],
+    };
+  }
   // Nothing actually managed → omit entirely.
   return out.mode !== undefined ||
     out.egress !== undefined ||
     out.dlp !== undefined ||
     out.approvers !== undefined ||
     out.reviewChannel !== undefined ||
-    out.approvalTimeoutMs !== undefined
+    out.approvalTimeoutMs !== undefined ||
+    out.injectionScan !== undefined
     ? out
     : undefined;
 }
