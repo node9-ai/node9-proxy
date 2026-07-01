@@ -312,6 +312,7 @@ async function _authorizeHeadlessCore(
   const isObserveMode = config.settings.mode === 'observe';
 
   let explainableLabel = 'Local Config';
+  let dlpReviewFlagged = false; // a credential was found at DLP 'review' severity
   let policyMatchedField: string | undefined;
   let policyMatchedWord: string | undefined;
   let policyRuleDescription: string | undefined;
@@ -482,6 +483,7 @@ async function _authorizeHeadlessCore(
       if (!isManual)
         appendLocalAudit(toolName, args, 'allow', 'dlp-review-flagged', meta, hashAuditArgs);
       explainableLabel = '🚨 Node9 DLP (Credential Review)';
+      dlpReviewFlagged = true;
     }
   }
 
@@ -634,8 +636,13 @@ async function _authorizeHeadlessCore(
   // guarded with `!appPermReview` so a review-marked tool can't auto-allow.
   if (!taintWarning && !isIgnoredTool(toolName)) {
     // ── LOOP DETECTION ────────────────────────────────────────────────────
+    // Skipped for an org-set review (re-review regression fix): reopening this
+    // block for fix #3 re-enabled loop detection, which would hard-deny a
+    // review-marked tool BEFORE its approval card ever shows (an agent retrying
+    // after a human deny trips the threshold). A review must always reach the
+    // human; the human's own deny is the throttle.
     const ld = config.policy.loopDetection;
-    if (ld.enabled) {
+    if (ld.enabled && !appPermReview) {
       const loopResult = recordAndCheck(toolName, args, ld.threshold, ld.windowSeconds * 1000);
       if (loopResult.looping) {
         const reason =
@@ -922,15 +929,30 @@ async function _authorizeHeadlessCore(
     // Org-set per-tool review (MCP app permission) — same fall-through-to-race
     // shape as taint, at elevated (not maximum) tier. The reason string rides as
     // ruleName so every approval surface says WHICH tool needs sign-off.
-    explainableLabel = '🔒 Node9 App Permission (Review)';
-    riskMetadata = computeRiskMetadata(
-      args,
-      5,
-      explainableLabel,
-      undefined,
-      undefined,
-      appPermReview
-    );
+    // Re-review fix: when a DLP credential-review ALSO applies, combine (don't
+    // overwrite) so the approver still sees the secret context — same pattern as
+    // fix #7 (taint+review).
+    if (dlpReviewFlagged) {
+      explainableLabel = '🚨 Node9 DLP (Credential Review) + 🔒 App Permission (Review)';
+      riskMetadata = computeRiskMetadata(
+        args,
+        6,
+        explainableLabel,
+        undefined,
+        undefined,
+        `A credential was detected in this call (DLP review).\n${appPermReview}`
+      );
+    } else {
+      explainableLabel = '🔒 Node9 App Permission (Review)';
+      riskMetadata = computeRiskMetadata(
+        args,
+        5,
+        explainableLabel,
+        undefined,
+        undefined,
+        appPermReview
+      );
+    }
   }
 
   // ── INLINE-ASK DEFER (review → caller renders the prompt) ────────────────

@@ -363,6 +363,36 @@ describe('managed appPermissions apply + enforce (P3 Phase 2)', () => {
     }
   });
 
+  it('re-review: loop detection does NOT pre-empt a review — it always reaches the human', async () => {
+    // Reopening the policy block (fix #3) re-enabled loop detection for review
+    // tools; a retried review must still reach the approver, not be loop-blocked.
+    for (let i = 0; i < 8; i++) {
+      const r = await call('edit_file'); // identical args, > default threshold (5)
+      expect(r.blockedBy).not.toBe('loop-detection');
+      expect(r.noApprovalMechanism).toBe(true); // reached the race (no approver)
+    }
+  });
+
+  it('re-review: DLP credential-review + app-perm review COMBINE on the card (no context loss)', async () => {
+    // A review-marked tool whose args carry a secret at DLP review severity must
+    // surface BOTH concerns, not just the app-permission one (same class as #7).
+    writeSettings({ dlp: { enabled: true, pii: 'off' } });
+    // rules-cache already sets read_email → review; a JWT is DLP severity 'review'
+    // (an AWS key is 'block' and would return early before the combine).
+    const jwt =
+      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ.dozjgNryP4J3jVmNHl0w5NabcdEfghIJKL';
+    const r = await authorizeHeadless(
+      'read_email',
+      { note: `token ${jwt}` },
+      { agent: 'MCP-Gateway', serverKey: 'srv1' }
+    );
+    expect(r.approved).toBe(false);
+    expect(r.noApprovalMechanism).toBe(true); // still reaches the race
+    // the card label carries BOTH the DLP and the App Permission context
+    expect(r.blockedByLabel).toContain('DLP');
+    expect(r.blockedByLabel).toContain('App Permission');
+  });
+
   // fix #1 (daemon skipBackgroundAuth) is NOT unit-testable here: the vitest
   // test-env silencer forces approvers.terminal=false, so the terminal racer
   // that calls registerDaemonEntry never runs. Verified by design reasoning +
