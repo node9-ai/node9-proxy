@@ -1,7 +1,8 @@
 // src/__tests__/app-permissions.spec.ts
 // P3 Phase 2 (GOVERN) — managed MCP per-tool permissions applied to config +
 // enforced in the authorize path. Keyed by (serverKey, bareTool). A tightening
-// gate: block/review deny; allow/unset fall through to normal policy.
+// gate: block hard-denies; review routes to the approver race (Phase 2.5);
+// allow/unset fall through to normal policy.
 // Mirrors trust-managed.spec.ts (managedConfig via rules-cache.json).
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
@@ -9,6 +10,26 @@ import os from 'os';
 import path from 'path';
 import { getConfig, _resetConfigCache } from '../config';
 import { authorizeHeadless, _resetConfigCache as _resetCore } from '../core.js';
+
+// Controllable mocks for the review→approver race tests. Defaults are inert:
+// no trust session (same as an empty trust file) and a cloud that's never
+// consulted (cloud is only enforced when approvers.cloud && an API key exist,
+// which the base config doesn't provide).
+const { mockTrustSession, mockInitSaaS, mockPollSaaS } = vi.hoisted(() => ({
+  mockTrustSession: vi.fn((..._a: unknown[]): unknown => null),
+  mockInitSaaS: vi.fn(async (..._a: unknown[]): Promise<unknown> => ({ pending: false })),
+  mockPollSaaS: vi.fn(async (..._a: unknown[]): Promise<unknown> => ({ approved: false })),
+}));
+vi.mock('../auth/state', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../auth/state')>()),
+  getActiveTrustSession: (...a: unknown[]) => mockTrustSession(...a),
+}));
+vi.mock('../auth/cloud', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../auth/cloud')>()),
+  initNode9SaaS: (...a: unknown[]) => mockInitSaaS(...a),
+  pollNode9SaaS: (...a: unknown[]) => mockPollSaaS(...a),
+  resolveNode9SaaS: vi.fn(async () => undefined),
+}));
 
 describe('managed appPermissions apply + enforce (P3 Phase 2)', () => {
   let tmpHome: string;
@@ -42,7 +63,13 @@ describe('managed appPermissions apply + enforce (P3 Phase 2)', () => {
         rules: [],
         managedConfig: {
           appPermissions: {
-            srv1: { read_file: 'allow', write_file: 'block', edit_file: 'review' },
+            srv1: {
+              read_file: 'allow',
+              write_file: 'block',
+              edit_file: 'review',
+              // review on an IGNORED-pattern tool (read_*) — must still race.
+              read_email: 'review',
+            },
           },
           locked: [],
         },
@@ -50,6 +77,10 @@ describe('managed appPermissions apply + enforce (P3 Phase 2)', () => {
     );
     _resetConfigCache();
     _resetCore();
+    // Inert defaults — individual tests override.
+    mockTrustSession.mockReturnValue(null);
+    mockInitSaaS.mockResolvedValue({ pending: false });
+    mockPollSaaS.mockResolvedValue({ approved: false });
   });
 
   afterEach(() => {
@@ -72,7 +103,12 @@ describe('managed appPermissions apply + enforce (P3 Phase 2)', () => {
 
   it('applies the managed map to config.policy.appPermissions (coerced)', () => {
     expect(getConfig().policy.appPermissions).toEqual({
-      srv1: { read_file: 'allow', write_file: 'block', edit_file: 'review' },
+      srv1: {
+        read_file: 'allow',
+        write_file: 'block',
+        edit_file: 'review',
+        read_email: 'review',
+      },
     });
   });
 
@@ -82,10 +118,13 @@ describe('managed appPermissions apply + enforce (P3 Phase 2)', () => {
     expect(r.blockedByLabel).toContain('App Permission');
   });
 
-  it('DENIES a tool set to review (human must approve)', async () => {
+  it('review REACHES THE RACE (deny here only because no approver exists)', async () => {
     const r = await call('edit_file');
     expect(r.approved).toBe(false);
-    expect(r.blockedByLabel).toContain('Review');
+    // noApprovalMechanism proves it entered the race engine and found no
+    // channel — NOT the old hard-deny return in the gate.
+    expect(r.noApprovalMechanism).toBe(true);
+    expect(r.blockedByLabel).toContain('App Permission (Review)');
   });
 
   it('does NOT app-permission-block a tool set to allow (falls through)', async () => {
@@ -125,6 +164,98 @@ describe('managed appPermissions apply + enforce (P3 Phase 2)', () => {
       { agent: 'Claude Code' } // no serverKey → gate skipped
     );
     expect(r.blockedByLabel ?? '').not.toContain('App Permission');
+  });
+
+  // ── Phase 2.5: review → the live approver race ────────────────────────────
+  const writeSettings = (settings: Record<string, unknown>) => {
+    fs.writeFileSync(
+      path.join(tmpHome, '.node9', 'config.json'),
+      JSON.stringify({
+        settings: {
+          mode: 'standard',
+          approvalTimeoutMs: 0,
+          approvers: { native: false, browser: false, cloud: false, terminal: false },
+          ...settings,
+        },
+        policy: {},
+      })
+    );
+    _resetConfigCache();
+    _resetCore();
+  };
+
+  it('review on an IGNORED-pattern tool (read_*) still races — not auto-allowed', async () => {
+    // read_email matches the read_* ignoredTools fast path, which would
+    // auto-allow before the race — the same failure class as the dead gate.
+    const r = await call('read_email');
+    expect(r.approved).toBe(false);
+    expect(r.noApprovalMechanism).toBe(true);
+    expect(r.blockedByLabel).toContain('App Permission (Review)');
+  });
+
+  it('an active trust session does NOT bypass an org-set review', async () => {
+    mockTrustSession.mockReturnValue({ pattern: 'edit_file', expiresAt: Date.now() + 60_000 });
+    const r = await call('edit_file');
+    expect(r.approved).toBe(false); // would be approved-via-trust without the guard
+    expect(r.checkedBy).not.toBe('trust');
+  });
+
+  it('human APPROVAL via the cloud approver allows the call through', async () => {
+    writeSettings({ approvers: { native: false, browser: false, cloud: true, terminal: false } });
+    process.env.NODE9_API_KEY = 'test-key';
+    mockInitSaaS.mockResolvedValue({ pending: true, requestId: 'req-1' });
+    mockPollSaaS.mockResolvedValue({ approved: true });
+    const r = await call('edit_file');
+    expect(r.approved).toBe(true);
+    expect(r.checkedBy).toBe('cloud');
+    // the SaaS was forced to create a genuine PENDING entry (forceReview)
+    expect(mockInitSaaS.mock.calls[0][6]).toBe(true);
+  });
+
+  it('human DENIAL via the cloud approver blocks the call', async () => {
+    writeSettings({ approvers: { native: false, browser: false, cloud: true, terminal: false } });
+    process.env.NODE9_API_KEY = 'test-key';
+    mockInitSaaS.mockResolvedValue({ pending: true, requestId: 'req-2' });
+    mockPollSaaS.mockResolvedValue({ approved: false, reason: 'denied by admin' });
+    const r = await call('edit_file');
+    expect(r.approved).toBe(false);
+    expect(r.blockedBy).toBe('team-policy');
+  });
+
+  it('a stale BE answering immediate-allow cannot bypass the review', async () => {
+    writeSettings({ approvers: { native: false, browser: false, cloud: true, terminal: false } });
+    process.env.NODE9_API_KEY = 'test-key';
+    // An older BE that ignores forceReview: pending:false + approved:true.
+    mockInitSaaS.mockResolvedValue({ pending: false, approved: true });
+    const r = await call('edit_file');
+    expect(r.approved).toBe(false); // falls to the race; no channel → denied
+    expect(r.noApprovalMechanism).toBe(true);
+  });
+
+  it('panic mode upgrades review to a hard block (no race)', async () => {
+    // panicMode is cloud-pushed via the rules-cache (never local settings).
+    const cache = JSON.parse(
+      fs.readFileSync(path.join(tmpHome, '.node9', 'rules-cache.json'), 'utf-8')
+    );
+    cache.panicMode = true;
+    fs.writeFileSync(path.join(tmpHome, '.node9', 'rules-cache.json'), JSON.stringify(cache));
+    _resetConfigCache();
+    _resetCore();
+    const r = await call('edit_file');
+    expect(r.approved).toBe(false);
+    expect(r.noApprovalMechanism).toBeUndefined(); // gate return, not the race
+    expect(r.blockedByLabel).toContain('Panic mode');
+  });
+
+  it('deferReview (inline ask) is EXCLUDED for app-perm reviews', async () => {
+    const r = await authorizeHeadless(
+      'edit_file',
+      { path: '/x' },
+      { agent: 'MCP-Gateway', serverKey: 'srv1' },
+      { deferReview: true }
+    );
+    expect(r.review).not.toBe(true); // must not hand the prompt to the agent
+    expect(r.approved).toBe(false);
   });
 
   it('the blocked audit row carries MCP attribution + rule name (not anonymous)', async () => {
