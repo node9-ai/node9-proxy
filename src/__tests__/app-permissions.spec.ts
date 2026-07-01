@@ -62,12 +62,13 @@ describe('managed appPermissions apply + enforce (P3 Phase 2)', () => {
     _resetCore();
   });
 
+  // The REAL gateway path: a stdio MCP gateway forwards the BARE upstream tool
+  // name (`write_file`, not namespaced) and serverKey — mcpServer is undefined
+  // (extractMcpServer only matches `mcp__server__`). The gate must fire on
+  // serverKey alone. (An earlier version gated on serverKey && mcpServer, which
+  // is never both-truthy here → the gate was dead in production.)
   const call = (tool: string) =>
-    authorizeHeadless(
-      `mcp__fs__${tool}`,
-      { path: '/x' },
-      { agent: 'MCP-Gateway', mcpServer: 'fs', serverKey: 'srv1' }
-    );
+    authorizeHeadless(tool, { path: '/x' }, { agent: 'MCP-Gateway', serverKey: 'srv1' });
 
   it('applies the managed map to config.policy.appPermissions (coerced)', () => {
     expect(getConfig().policy.appPermissions).toEqual({
@@ -100,9 +101,28 @@ describe('managed appPermissions apply + enforce (P3 Phase 2)', () => {
 
   it('ignores app permissions for a different serverKey', async () => {
     const r = await authorizeHeadless(
+      'write_file',
+      { path: '/x' },
+      { agent: 'MCP-Gateway', serverKey: 'OTHER' }
+    );
+    expect(r.blockedByLabel ?? '').not.toContain('App Permission');
+  });
+
+  it('also strips an mcp__<name>__ prefix if a namespaced caller appears (defensive)', async () => {
+    const r = await authorizeHeadless(
       'mcp__fs__write_file',
       { path: '/x' },
-      { agent: 'MCP-Gateway', mcpServer: 'fs', serverKey: 'OTHER' }
+      { agent: 'MCP-Gateway', mcpServer: 'fs', serverKey: 'srv1' }
+    );
+    expect(r.approved).toBe(false);
+    expect(r.blockedByLabel).toContain('App Permission');
+  });
+
+  it('does not enforce without a serverKey (non-gateway hook path)', async () => {
+    const r = await authorizeHeadless(
+      'write_file',
+      { path: '/x' },
+      { agent: 'Claude Code' } // no serverKey → gate skipped
     );
     expect(r.blockedByLabel ?? '').not.toContain('App Permission');
   });

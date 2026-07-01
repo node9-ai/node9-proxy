@@ -572,14 +572,19 @@ async function _authorizeHeadlessCore(
 
   // ── MCP APP PERMISSIONS (P3 Phase 2 — GOVERN) ─────────────────────────────
   // Per-tool block/review for a gatewayed MCP server, keyed by (serverKey,
-  // bareTool). Both come from the gateway's namespaced call (serverKey passed in
-  // meta; bareTool = the call name minus the `mcp__<name>__` prefix, using the
-  // exact matched name — no fragile regex). Enforced in the standard/strict path
-  // only (observe/audit already returned above). A tightening gate: 'allow' is
-  // NOT a bypass — it falls through to DLP/egress/smart-rules like an unset tool.
-  if (meta?.serverKey && meta?.mcpServer) {
-    const prefix = `mcp__${meta.mcpServer}__`;
-    const bareTool = toolName.startsWith(prefix) ? toolName.slice(prefix.length) : toolName;
+  // bareTool). Gated on serverKey ALONE — only the mcp-gateway passes it, and
+  // there the tools/call name is ALREADY the bare upstream tool name (a stdio
+  // gateway wraps one upstream; `write_file` is not namespaced), so mcpServer
+  // (extractMcpServer) is undefined for the real path. We still defensively
+  // strip an `mcp__<name>__` prefix if a namespaced caller ever appears. bareTool
+  // then matches the SEE inventory's bare names — what the dashboard keyed by.
+  // Enforced in the standard/strict path only (observe/audit already returned
+  // above). Tightening gate: 'allow' is NOT a bypass — it falls through to
+  // DLP/egress/smart-rules like an unset tool.
+  if (meta?.serverKey) {
+    const prefix = meta.mcpServer ? `mcp__${meta.mcpServer}__` : '';
+    const bareTool =
+      prefix && toolName.startsWith(prefix) ? toolName.slice(prefix.length) : toolName;
     const decision = config.policy.appPermissions?.[meta.serverKey]?.[bareTool];
     if (decision === 'block' || decision === 'review') {
       if (!isManual)
@@ -589,8 +594,8 @@ async function _authorizeHeadlessCore(
         blockedBy: 'local-config',
         reason:
           decision === 'block'
-            ? `App permission: "${meta.mcpServer} / ${bareTool}" is set to block by your workspace.`
-            : `App permission: "${meta.mcpServer} / ${bareTool}" is set to review — a human must approve this tool.`,
+            ? `App permission: "${bareTool}" is set to block by your workspace.`
+            : `App permission: "${bareTool}" is set to review by your workspace — currently denied (a workspace admin must change it to allow).`,
         blockedByLabel:
           decision === 'block'
             ? '🔒 Node9 App Permission (Blocked)'
