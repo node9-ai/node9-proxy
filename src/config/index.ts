@@ -48,6 +48,12 @@ export interface Config {
      *  Default (unset): those tools refuse over MCP — a human runs them from the CLI. */
     mcpAllowWeakening?: boolean;
     cloudSyncIntervalHours?: number;
+    /** Auto-wire reconciler (P3 2.6): when true, a newly-detected ungoverned MCP
+     *  server is auto-wrapped through the gateway; default (false) = nudge only. */
+    mcpAutoWrap?: boolean;
+    /** Reconcile scan cadence in minutes (default 60, clamp 5-1440). A managed
+     *  value from the dashboard overrides this. */
+    mcpReconcileIntervalMinutes?: number;
     /** Outbox shipper (audit.log → SaaS batch ingest). */
     shipper: { enabled: boolean; intervalSeconds: number };
     hud?: {
@@ -616,6 +622,9 @@ export function getConfig(cwd?: string): Config {
     if (s.mcpAllowWeakening !== undefined) mergedSettings.mcpAllowWeakening = s.mcpAllowWeakening;
     if (s.cloudSyncIntervalHours !== undefined)
       mergedSettings.cloudSyncIntervalHours = s.cloudSyncIntervalHours;
+    if (s.mcpAutoWrap !== undefined) mergedSettings.mcpAutoWrap = s.mcpAutoWrap === true;
+    if (s.mcpReconcileIntervalMinutes !== undefined)
+      mergedSettings.mcpReconcileIntervalMinutes = s.mcpReconcileIntervalMinutes;
     if (s.hud !== undefined) mergedSettings.hud = { ...mergedSettings.hud, ...s.hud };
 
     if (p.sandboxPaths) mergedPolicy.sandboxPaths.push(...p.sandboxPaths);

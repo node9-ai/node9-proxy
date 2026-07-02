@@ -107,6 +107,10 @@ export const ConfigFileSchema = z
         // approver_set). Default (unset/false): those tools refuse over MCP — a human
         // must run them from the CLI. node9's threat model is the agent itself.
         mcpAllowWeakening: z.boolean().optional(),
+        // Auto-wire reconciler (P3 2.6): auto-wrap new ungoverned MCP servers vs
+        // nudge-only (default), and the scan cadence in minutes.
+        mcpAutoWrap: z.boolean().optional(),
+        mcpReconcileIntervalMinutes: z.number().positive().optional(),
         cloudSyncIntervalHours: z.number().positive().optional(),
         // Seconds-granular override for the cloud policy sync cadence. Wins over
         // cloudSyncIntervalHours when set. Lets you opt into fast apply (e.g. 20)
