@@ -88,16 +88,26 @@ export function registerMcpGatewayCommand(mcp: Command): void {
         return;
       }
       const agents = new Set<string>();
+      let failed = 0;
       for (const e of wrappable) {
-        wrapEntry(e);
-        agents.add(e.agentLabel);
-        console.error(chalk.green(`✓ governed ${e.name}`) + chalk.gray(` (${e.agentLabel})`));
+        try {
+          wrapEntry(e); // can throw if the config changed/broke since inventory (TOCTOU)
+          agents.add(e.agentLabel);
+          console.error(chalk.green(`✓ governed ${e.name}`) + chalk.gray(` (${e.agentLabel})`));
+        } catch (err) {
+          failed++;
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(chalk.red(`✗ failed ${e.name}`) + chalk.gray(` (${e.agentLabel}): ${msg}`));
+        }
       }
-      console.error(
-        chalk.gray(`\nBacked up originals to <config>.node9-bak. `) +
-          chalk.bold(`Restart ${[...agents].join(', ')}`) +
-          chalk.gray(' to activate.')
-      );
+      if (failed > 0) process.exitCode = 1;
+      if (agents.size > 0) {
+        console.error(
+          chalk.gray(`\nBacked up originals to <config>.node9-bak. `) +
+            chalk.bold(`Restart ${[...agents].join(', ')}`) +
+            chalk.gray(' to activate.')
+        );
+      }
     });
 
   mcp
@@ -123,7 +133,14 @@ export function registerMcpGatewayCommand(mcp: Command): void {
         process.exitCode = 1;
         return;
       }
-      writeMcpEntry(e.mcpFile, e.format, e.name, orig);
+      try {
+        writeMcpEntry(e.mcpFile, e.format, e.name, orig);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(chalk.red(`Failed to restore "${name}": ${msg}`));
+        process.exitCode = 1;
+        return;
+      }
       console.error(
         chalk.green(`✓ restored ${e.name}`) +
           chalk.gray(` (${e.agentLabel}) — restart ${e.agentLabel} to apply.`)

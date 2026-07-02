@@ -14,42 +14,31 @@ import { AUDIT_LOG_FILE } from './state';
 const INDEX_FILE = path.join(os.homedir(), '.node9', 'dlp-index.json');
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 
-// filePath → last scanned byte offset, plus a rolling seen-set of already-notified
-// findings so a single legitimate session doesn't fire N popups for the same secret.
-interface DlpIndex {
-  offsets: Record<string, number>;
-  seen: string[]; // `${patternName}|${redactedSample}` keys already notified
-}
-const SEEN_CAP = 500; // bound the persisted set (drop-oldest)
+// filePath → last scanned byte offset. Dedup of the popup storm is PER-PASS
+// (a local set below), NOT persisted — persisting it would permanently suppress a
+// re-leak of the same secret across passes/restarts (a real security regression:
+// ongoing exfiltration would produce one lifetime popup). One pass = one
+// delta-scan of the new bytes, which is where the N-identical-matches storm lives.
+type DlpIndex = Record<string, number>;
 
 function loadIndex(): DlpIndex {
   try {
     const raw = JSON.parse(fs.readFileSync(INDEX_FILE, 'utf-8')) as unknown;
     if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
       const r = raw as Record<string, unknown>;
-      // New shape: { offsets, seen }.
-      if (r.offsets && typeof r.offsets === 'object') {
-        return {
-          offsets: r.offsets as Record<string, number>,
-          seen: Array.isArray(r.seen) ? (r.seen as string[]) : [],
-        };
-      }
-      // Legacy flat map (filePath → offset) — treat as offsets, seen starts empty.
-      return { offsets: r as Record<string, number>, seen: [] };
+      // Tolerate the earlier {offsets, seen} shape a prior build may have written.
+      if (r.offsets && typeof r.offsets === 'object') return r.offsets as DlpIndex;
+      return r as DlpIndex; // flat filePath → offset map
     }
   } catch {
     /* fall through to empty */
   }
-  return { offsets: {}, seen: [] };
+  return {};
 }
 
 function saveIndex(index: DlpIndex): void {
   try {
-    fs.writeFileSync(
-      INDEX_FILE,
-      JSON.stringify({ offsets: index.offsets, seen: index.seen.slice(-SEEN_CAP) }),
-      { encoding: 'utf-8', mode: 0o600 }
-    );
+    fs.writeFileSync(INDEX_FILE, JSON.stringify(index), { encoding: 'utf-8', mode: 0o600 });
   } catch {}
 }
 
@@ -63,7 +52,7 @@ export function runDlpScan(): void {
   if (!fs.existsSync(PROJECTS_DIR)) return;
 
   const index = loadIndex();
-  const seen = new Set(index.seen);
+  const seenThisPass = new Set<string>(); // dedup within THIS pass only
   // Collected across the whole pass so we emit ONE notification, not one per match.
   const newFindings: { patternName: string; redactedSample: string; project: string }[] = [];
   let updated = false;
@@ -99,7 +88,7 @@ export function runDlpScan(): void {
 
     for (const file of files) {
       const filePath = path.join(projPath, file);
-      const lastOffset = index.offsets[filePath] ?? 0;
+      const lastOffset = index[filePath] ?? 0;
 
       let size: number;
       try {
@@ -170,8 +159,8 @@ export function runDlpScan(): void {
 
             // Notify only for a finding not seen before — dedup the popup storm.
             const seenKey = `${match.patternName}|${match.redactedSample}`;
-            if (!seen.has(seenKey)) {
-              seen.add(seenKey);
+            if (!seenThisPass.has(seenKey)) {
+              seenThisPass.add(seenKey);
               newFindings.push({
                 patternName: match.patternName,
                 redactedSample: match.redactedSample,
@@ -181,7 +170,7 @@ export function runDlpScan(): void {
           }
         }
 
-        index.offsets[filePath] = size;
+        index[filePath] = size;
         updated = true;
       } finally {
         try {
@@ -205,10 +194,7 @@ export function runDlpScan(): void {
     );
   }
 
-  if (updated) {
-    index.seen = [...seen];
-    saveIndex(index);
-  }
+  if (updated) saveIndex(index);
 }
 
 export function startDlpScanner(): void {

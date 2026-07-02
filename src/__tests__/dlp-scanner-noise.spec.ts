@@ -71,15 +71,17 @@ describe('dlp-scanner noise fix', () => {
     expect(dlpAuditRows()).toHaveLength(5);
   });
 
-  it('same secret in a LATER pass → 0 new notifications, +1 audit row', () => {
+  it('a re-leak in a LATER pass RE-NOTIFIES (dedup is per-pass, NOT permanent)', () => {
+    // Security: persisting the seen-set would suppress an ongoing re-leak forever.
+    // A new leak event (new bytes in a later pass) must alert again.
     writeTranscript('a.jsonl', [JWT]);
     runDlpScan();
     expect(sendSpy).toHaveBeenCalledTimes(1);
     sendSpy.mockClear();
-    writeTranscript('a.jsonl', [JWT], true); // append new bytes, same secret
+    writeTranscript('a.jsonl', [JWT], true); // append: the secret leaks again
     runDlpScan();
-    expect(sendSpy).toHaveBeenCalledTimes(0); // deduped — no second popup
-    expect(dlpAuditRows()).toHaveLength(2); // but both audited
+    expect(sendSpy).toHaveBeenCalledTimes(1); // re-alerted, not silently suppressed
+    expect(dlpAuditRows()).toHaveLength(2);
   });
 
   it('two DIFFERENT secrets in one pass → 1 SUMMARY notification, 2 audit rows', () => {
@@ -90,22 +92,21 @@ describe('dlp-scanner noise fix', () => {
     expect(dlpAuditRows()).toHaveLength(2);
   });
 
-  it('zero NEW findings (all already seen) → no popup at all', () => {
+  it('no NEW bytes since last pass → no popup (offset skip)', () => {
     writeTranscript('a.jsonl', [JWT]);
-    runDlpScan(); // seeds the seen-set
+    runDlpScan();
     sendSpy.mockClear();
-    runDlpScan(); // no new bytes → nothing new
+    runDlpScan(); // same file, no appended bytes → nothing to scan
     expect(sendSpy).toHaveBeenCalledTimes(0);
   });
 
-  it('a legacy flat-map index loads as offsets without crashing', () => {
+  it('a legacy flat-map index loads without crashing (index stays a flat map)', () => {
     fs.writeFileSync(indexFile, JSON.stringify({ '/old/path.jsonl': 999 }));
     writeTranscript('a.jsonl', [JWT]);
     expect(() => runDlpScan()).not.toThrow();
     expect(sendSpy).toHaveBeenCalledTimes(1);
-    // index rewritten to the new shape
     const idx = JSON.parse(fs.readFileSync(indexFile, 'utf-8'));
-    expect(idx).toHaveProperty('offsets');
-    expect(idx).toHaveProperty('seen');
+    expect(idx).not.toHaveProperty('seen'); // no persisted seen-set anymore
+    expect(typeof idx[path.join(projDir, 'a.jsonl')]).toBe('number'); // flat offset
   });
 });

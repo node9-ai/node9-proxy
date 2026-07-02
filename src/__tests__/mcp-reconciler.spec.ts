@@ -70,6 +70,32 @@ describe('mcp reconcile pass', () => {
     expect(wrapped.env).toEqual({ A: '1' }); // preserved
   });
 
+  it('a failed auto-wrap is NOT baselined (retried next tick) and NOT counted (fix #3)', () => {
+    writeConfig({ mode: 'standard', mcpAutoWrap: true });
+    writeClaude({ gmail: { command: 'npx', args: ['gmail-mcp'] } });
+    // Make the write fail: chmod the config file read-only so writeMcpEntry's
+    // rename into place throws.
+    const f = path.join(home, '.claude.json');
+    fs.chmodSync(f, 0o400);
+    // Also make the dir read-only so the tmp+rename can't succeed.
+    fs.chmodSync(home, 0o500);
+    try {
+      runMcpReconcile();
+    } finally {
+      fs.chmodSync(home, 0o700);
+      fs.chmodSync(f, 0o600);
+    }
+    // baseline must be empty (so it retries) — the server wasn't governed.
+    const baselineFile = path.join(home, '.node9', 'mcp-baseline.json');
+    const baseline = fs.existsSync(baselineFile)
+      ? JSON.parse(fs.readFileSync(baselineFile, 'utf-8'))
+      : [];
+    expect(baseline).toHaveLength(0);
+    // no "Wrapped N" success notification for a failed wrap
+    const wrapped = sendSpy.mock.calls.some((c) => /Wrapped/.test(String(c[1])));
+    expect(wrapped).toBe(false);
+  });
+
   it('does nothing (no notification) when everything is already governed / self', () => {
     writeConfig({ mode: 'standard' });
     writeClaude({

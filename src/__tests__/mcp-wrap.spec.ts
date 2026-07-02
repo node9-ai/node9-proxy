@@ -28,6 +28,14 @@ describe('classifyMcp', () => {
     expect(classifyMcp({ url: 'https://x/mcp' } as unknown as McpServer)).toBe('remote');
     expect(classifyMcp({ command: '', args: [] })).toBe('remote');
   });
+
+  it('does NOT double-wrap an entry launched via an absolute node9 path (fix #7)', () => {
+    // args[0]==='mcp-gateway' means already governed, regardless of command path.
+    expect(
+      classifyMcp({ command: '/usr/local/bin/node9', args: ['mcp-gateway', '--upstream', 'x'] })
+    ).toBe('gatewayed');
+    expect(classifyMcp({ command: '/opt/node9', args: ['mcp-server'] })).toBe('node9-self');
+  });
 });
 
 describe('toGateway / fromGateway round-trip', () => {
@@ -35,6 +43,7 @@ describe('toGateway / fromGateway round-trip', () => {
     { command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', '/home'] },
     { command: 'npx', args: ['@gongrzhe/server-gmail-autoauth-mcp'] },
     { command: 'node', args: ['/opt/tools/a server/server.js'] }, // arg with a space
+    { command: 'srv', args: ['serve', '', '--port', '3000'] }, // empty-string arg (fix #4)
     { command: 'uvx', args: [] },
   ];
   it.each(cases)('round-trips %j (incl. spaces)', (orig) => {

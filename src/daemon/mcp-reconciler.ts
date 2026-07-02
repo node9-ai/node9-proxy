@@ -46,10 +46,14 @@ function saveBaseline(keys: Set<string>): void {
 }
 
 // Dashboard event — same channel reportInventoryToCloud uses for mcp-discovered.
-function reportToCloud(e: McpEntry, autoWrapped: boolean): void {
+// creds read ONCE per pass by the caller (fix #10) and passed in.
+function reportToCloud(
+  e: McpEntry,
+  autoWrapped: boolean,
+  creds: { apiKey: string; apiUrl: string } | null
+): void {
+  if (!creds) return;
   try {
-    const creds = getCredentials();
-    if (!creds) return;
     void auditLocalAllow(
       `mcp-server:${e.name}`,
       { agent: e.agent, name: e.name, command: e.command },
@@ -66,35 +70,49 @@ function reportToCloud(e: McpEntry, autoWrapped: boolean): void {
 
 /** One reconcile pass. Exported for tests. */
 export function runMcpReconcile(): void {
+  // Auto-wrap does NOT touch TOML (Codex): smol-toml.stringify would reformat the
+  // whole file (drop comments, risk value-shape drift on other tables). Codex is
+  // nudge-only unattended; the user can wrap it explicitly via the CLI (which
+  // backs the file up). (fix #8)
   const autoWrap = getConfig().settings.mcpAutoWrap === true;
   const baseline = loadBaseline();
+  const creds = getCredentials(); // once per pass (fix #10)
   const fresh = inventoryMcp().filter((e) => e.state === 'ungoverned' && !baseline.has(idKey(e)));
   if (fresh.length === 0) return;
 
   const wrappedAgents = new Set<string>();
+  let wrappedCount = 0;
+  let nudgedCount = 0;
   for (const e of fresh) {
-    if (autoWrap) {
+    const doWrap = autoWrap && e.format !== 'toml';
+    if (doWrap) {
       try {
         writeMcpEntry(e.mcpFile, e.format, e.name, toGateway(e.raw));
         wrappedAgents.add(e.agentLabel);
+        wrappedCount++;
       } catch {
-        /* a bad config never stops the pass */
+        // Write failed — do NOT baseline it (retry next tick) and do NOT count
+        // it as wrapped (fix #3). Skip the rest of this entry's handling.
+        continue;
       }
+    } else {
+      nudgedCount++;
     }
-    baseline.add(idKey(e)); // notify-once, whether wrapped or nudged
-    reportToCloud(e, autoWrap);
+    baseline.add(idKey(e)); // notify-once, only for entries we actually handled
+    reportToCloud(e, doWrap, creds);
   }
 
-  // ONE aggregated desktop notification (the DLP-style warning).
-  if (autoWrap) {
+  // ONE aggregated desktop notification — only about what actually happened.
+  if (wrappedCount > 0) {
     sendDesktopNotification(
       'node9: MCP servers governed',
-      `Wrapped ${fresh.length} new MCP server(s) — restart ${[...wrappedAgents].join(', ')} to activate.`
+      `Wrapped ${wrappedCount} new MCP server(s) — restart ${[...wrappedAgents].join(', ')} to activate.`
     );
-  } else {
+  }
+  if (nudgedCount > 0) {
     sendDesktopNotification(
       '⚠️ node9: ungoverned MCP server',
-      `${fresh.length} new ungoverned MCP server(s) — run: node9 mcp gateway --all`
+      `${nudgedCount} new ungoverned MCP server(s) — run: node9 mcp gateway --all`
     );
   }
   saveBaseline(baseline);
