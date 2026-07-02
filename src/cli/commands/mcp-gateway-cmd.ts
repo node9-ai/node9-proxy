@@ -103,9 +103,10 @@ export function registerMcpGatewayCommand(mcp: Command): void {
       if (failed > 0) process.exitCode = 1;
       if (agents.size > 0) {
         console.error(
-          chalk.gray(`\nBacked up originals to <config>.node9-bak. `) +
-            chalk.bold(`Restart ${[...agents].join(', ')}`) +
-            chalk.gray(' to activate.')
+          chalk.bold(`\nRestart ${[...agents].join(', ')}`) +
+            chalk.gray(' to activate. Undo any server with ') +
+            chalk.cyan('node9 mcp ungateway <name>') +
+            chalk.gray('.')
         );
       }
     });

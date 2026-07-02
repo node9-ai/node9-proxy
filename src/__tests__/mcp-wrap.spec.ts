@@ -43,6 +43,21 @@ describe('classifyMcp', () => {
       'ungoverned'
     );
   });
+
+  it('recognizes Windows node9.exe/.cmd + backslash paths (re-review)', () => {
+    expect(classifyMcp({ command: 'node9.cmd', args: ['mcp-gateway', '--upstream', 'x'] })).toBe(
+      'gatewayed'
+    );
+    expect(
+      classifyMcp({ command: 'C:\\tools\\node9.exe', args: ['mcp-gateway', '--upstream', 'x'] })
+    ).toBe('gatewayed');
+    expect(classifyMcp({ command: 'mynode9', args: [] })).toBe('ungoverned'); // no false-match
+  });
+
+  it('fromGateway declines (null) a corrupt gateway entry with no --upstream (re-review)', () => {
+    expect(fromGateway({ command: 'node9', args: ['mcp-gateway'] })).toBeNull();
+    expect(fromGateway({ command: 'node9', args: ['mcp-gateway', '--upstream', ''] })).toBeNull();
+  });
 });
 
 describe('toGateway / fromGateway round-trip', () => {

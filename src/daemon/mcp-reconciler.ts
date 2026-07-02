@@ -86,22 +86,25 @@ export function runMcpReconcile(): void {
   let failedCount = 0;
   for (const e of fresh) {
     const doWrap = autoWrap && e.format !== 'toml';
+    let wrapped = false;
     if (doWrap) {
       try {
         writeMcpEntry(e.mcpFile, e.format, e.name, toGateway(e.raw));
         wrappedAgents.add(e.agentLabel);
         wrappedCount++;
+        wrapped = true;
       } catch {
-        // Write failed — do NOT baseline it (retry next tick) and do NOT count
-        // it as wrapped (fix #3). Track it so the pass still alerts (below).
-        failedCount++;
-        continue;
+        failedCount++; // not counted as wrapped; alerted as ungoverned below
       }
     } else {
       nudgedCount++;
     }
-    baseline.add(idKey(e)); // notify-once, only for entries we actually handled
-    reportToCloud(e, doWrap, creds);
+    // Baseline EVERY fresh entry — including a failed wrap (re-review): NOT
+    // baselining it re-detects it as "new" every tick and re-fires the popup
+    // forever (a notification storm on a durable failure e.g. a read-only config).
+    // Nudge-once instead; the alert tells the user to run `node9 mcp gateway --all`.
+    baseline.add(idKey(e));
+    reportToCloud(e, wrapped, creds);
   }
 
   // ONE aggregated desktop notification per outcome. The `nudgedCount + failedCount`

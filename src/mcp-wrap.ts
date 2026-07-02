@@ -26,9 +26,11 @@ export interface McpEntry {
   raw: McpServer; // the FULL original entry (env/type/…) — wrap/unwrap must preserve it
 }
 
-/** Is this entry launched via the node9 binary (bare or an absolute path)? */
+/** Is this entry launched via the node9 binary (bare, an absolute path, or a
+ *  Windows node9.exe/.cmd/.ps1/.bat)? The `(^|[\\/])` anchor avoids matching
+ *  `mynode9` / `notnode9`. */
 function isNode9Command(command: string | undefined): boolean {
-  return command === 'node9' || /(^|\/)node9$/.test(command ?? '');
+  return /(^|[\\/])node9(\.(exe|cmd|ps1|bat))?$/i.test(command ?? '');
 }
 
 /** ungoverned = a spawnable upstream to wrap · gatewayed = already governed ·
@@ -60,8 +62,12 @@ export function fromGateway(s: McpServer): McpServer | null {
   if (!isNode9Command(s.command) || (s.args ?? [])[0] !== 'mcp-gateway') return null;
   const args = s.args ?? [];
   const i = args.indexOf('--upstream');
-  const [command, ...rest] = tokenize(i >= 0 ? (args[i + 1] ?? '') : '');
-  return { ...s, command: command ?? '', args: rest };
+  // A gatewayed entry with no (or empty) --upstream is corrupt/hand-edited — can't
+  // reverse it, so decline rather than write back an empty command (re-review).
+  if (i < 0 || !args[i + 1]) return null;
+  const [command, ...rest] = tokenize(args[i + 1]);
+  if (!command) return null;
+  return { ...s, command, args: rest };
 }
 
 /** Every MCP server across all agent configs, classified. */

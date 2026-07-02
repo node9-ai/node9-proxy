@@ -90,13 +90,18 @@ describe('mcp reconcile pass', () => {
     const baseline = fs.existsSync(baselineFile)
       ? JSON.parse(fs.readFileSync(baselineFile, 'utf-8'))
       : [];
-    expect(baseline).toHaveLength(0);
-    // no "Wrapped N" success notification for a failed wrap ...
+    // A failed wrap IS baselined (nudge-once) so it doesn't storm the popup every
+    // tick — but it's not counted as "Wrapped" and the user is still alerted once.
+    expect(baseline).toHaveLength(1);
     const wrapped = sendSpy.mock.calls.some((c) => /Wrapped/.test(String(c[1])));
     expect(wrapped).toBe(false);
-    // ... but the user is still told there's a new ungoverned server (fix #3 re-review)
     const alerted = sendSpy.mock.calls.some((c) => /ungoverned/.test(String(c[1])));
     expect(alerted).toBe(true);
+
+    // second tick with the same (still read-only) config → NO repeat popup (no storm)
+    sendSpy.mockClear();
+    runMcpReconcile();
+    expect(sendSpy).toHaveBeenCalledTimes(0);
   });
 
   it('does nothing (no notification) when everything is already governed / self', () => {
