@@ -24,6 +24,7 @@ import { getCredentials } from '../config';
 import { buildNegotiationMessage } from '../policy/negotiation';
 import { checkProvenance } from '../utils/provenance.js';
 import { hashToolDefinitions, getServerKey, checkPin, updatePin } from '../mcp-pin';
+import { tokenize } from '../mcp-cmd';
 import type { McpToolInfo } from '../daemon/mcp-tools';
 import { getServerConfig, deriveServerName } from '../daemon/mcp-tools';
 import {
@@ -199,47 +200,10 @@ export function reportLargeResponseToCloud(
   }
 }
 
-/**
- * Shell-style tokenizer: splits on whitespace, respects double-quoted strings
- * and backslash escapes. Does NOT spawn a shell — no injection risk.
- * Example: `node "/path with spaces/server.js"` → `['node', '/path with spaces/server.js']`
- *
- * Exported for unit testing — callers outside this module should not use it directly.
- */
-export function tokenize(cmd: string): string[] {
-  const tokens: string[] = [];
-  let current = '';
-  let inDouble = false;
-  let i = 0;
-  while (i < cmd.length) {
-    const ch = cmd[i];
-    if (inDouble) {
-      if (ch === '"') {
-        inDouble = false;
-      } else if (ch === '\\' && i + 1 < cmd.length) {
-        current += cmd[++i];
-      } else {
-        current += ch;
-      }
-    } else {
-      if (ch === '"') {
-        inDouble = true;
-      } else if (ch === ' ' || ch === '\t') {
-        if (current) {
-          tokens.push(current);
-          current = '';
-        }
-      } else if (ch === '\\' && i + 1 < cmd.length) {
-        current += cmd[++i];
-      } else {
-        current += ch;
-      }
-    }
-    i++;
-  }
-  if (current) tokens.push(current);
-  return tokens;
-}
+// tokenize now lives in ../mcp-cmd (shared with the config-side wrap/unwrap so the
+// two can't drift — a wrapped server must launch with the args the config implies).
+// Imported above for internal use (spawn path); re-exported for existing callers/tests.
+export { tokenize };
 
 export async function runMcpGateway(upstreamCommand: string): Promise<void> {
   // Capture cwd once at startup so repo-local pin file resolution (#179)

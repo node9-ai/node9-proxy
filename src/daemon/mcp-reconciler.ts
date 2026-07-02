@@ -83,6 +83,7 @@ export function runMcpReconcile(): void {
   const wrappedAgents = new Set<string>();
   let wrappedCount = 0;
   let nudgedCount = 0;
+  let failedCount = 0;
   for (const e of fresh) {
     const doWrap = autoWrap && e.format !== 'toml';
     if (doWrap) {
@@ -92,7 +93,8 @@ export function runMcpReconcile(): void {
         wrappedCount++;
       } catch {
         // Write failed — do NOT baseline it (retry next tick) and do NOT count
-        // it as wrapped (fix #3). Skip the rest of this entry's handling.
+        // it as wrapped (fix #3). Track it so the pass still alerts (below).
+        failedCount++;
         continue;
       }
     } else {
@@ -102,17 +104,20 @@ export function runMcpReconcile(): void {
     reportToCloud(e, doWrap, creds);
   }
 
-  // ONE aggregated desktop notification — only about what actually happened.
+  // ONE aggregated desktop notification per outcome. The `nudgedCount + failedCount`
+  // fallback ensures we NEVER go silent about new ungoverned servers even when
+  // every auto-wrap failed (fix #3 re-review) — the user is always told.
   if (wrappedCount > 0) {
     sendDesktopNotification(
       'node9: MCP servers governed',
       `Wrapped ${wrappedCount} new MCP server(s) — restart ${[...wrappedAgents].join(', ')} to activate.`
     );
   }
-  if (nudgedCount > 0) {
+  const stillUngoverned = nudgedCount + failedCount;
+  if (stillUngoverned > 0) {
     sendDesktopNotification(
       '⚠️ node9: ungoverned MCP server',
-      `${nudgedCount} new ungoverned MCP server(s) — run: node9 mcp gateway --all`
+      `${stillUngoverned} new ungoverned MCP server(s) — run: node9 mcp gateway --all`
     );
   }
   saveBaseline(baseline);

@@ -8,7 +8,9 @@ import fs from 'fs';
 import os from 'os';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import { AGENT_SPECS, readMcpServers, type McpServer, type McpFormat } from './agent-wiring';
+import { tokenize, quoteArg } from './mcp-cmd';
 export type { McpServer, McpFormat } from './agent-wiring';
+export { tokenize } from './mcp-cmd';
 
 export type McpServerState = 'ungoverned' | 'gatewayed' | 'node9-self' | 'remote';
 
@@ -24,58 +26,21 @@ export interface McpEntry {
   raw: McpServer; // the FULL original entry (env/type/…) — wrap/unwrap must preserve it
 }
 
-// Mirrors mcp-gateway/index.ts `tokenize` (double-quote + backslash aware) so the
-// `--upstream` string we write round-trips with what the gateway parses at runtime.
-// Kept local (not imported) to avoid pulling the gateway into the CLI; a round-trip
-// test guards against drift.
-export function tokenize(cmd: string): string[] {
-  const tokens: string[] = [];
-  let current = '';
-  let inDouble = false;
-  let quoted = false; // this token had an explicit quote → push even if empty (fix #4)
-  let i = 0;
-  while (i < cmd.length) {
-    const ch = cmd[i];
-    if (inDouble) {
-      if (ch === '"') inDouble = false;
-      else if (ch === '\\' && i + 1 < cmd.length) current += cmd[++i];
-      else current += ch;
-    } else if (ch === '"') {
-      inDouble = true;
-      quoted = true;
-    } else if (ch === ' ' || ch === '\t') {
-      if (current || quoted) {
-        tokens.push(current);
-        current = '';
-        quoted = false;
-      }
-    } else if (ch === '\\' && i + 1 < cmd.length) {
-      current += cmd[++i];
-    } else {
-      current += ch;
-    }
-    i++;
-  }
-  if (current || quoted) tokens.push(current);
-  return tokens;
-}
-
-function quoteArg(s: string): string {
-  if (s === '') return '""';
-  if (/[\s"\\]/.test(s)) return `"${s.replace(/(["\\])/g, '\\$1')}"`;
-  return s;
+/** Is this entry launched via the node9 binary (bare or an absolute path)? */
+function isNode9Command(command: string | undefined): boolean {
+  return command === 'node9' || /(^|\/)node9$/.test(command ?? '');
 }
 
 /** ungoverned = a spawnable upstream to wrap · gatewayed = already governed ·
  *  node9-self = node9's OWN mcp-server entry (never wrap) · remote = URL/SSE
  *  server with no command (can't be gatewayed via --upstream — never wrap). */
 export function classifyMcp(s: McpServer): McpServerState {
-  // Recognize a node9 wrap by its ARGS, not just a bare 'node9' command — an entry
-  // launched via an absolute path (/usr/local/bin/node9 mcp-gateway …) must not be
-  // double-wrapped (fix #7). args[0] === 'mcp-gateway' ⟹ already governed.
-  if ((s.args ?? [])[0] === 'mcp-gateway') return 'gatewayed';
-  const isNode9 = s.command === 'node9' || /(^|\/)node9$/.test(s.command ?? '');
-  if (isNode9) return 'node9-self'; // node9's own (mcp-server etc.) — never wrap
+  // A node9 wrap = the node9 binary (bare OR absolute path, fix #7) AND
+  // args[0]==='mcp-gateway'. Requiring node9 avoids misclassifying a NON-node9
+  // server that merely takes 'mcp-gateway' as its first arg as "already governed".
+  if (isNode9Command(s.command)) {
+    return (s.args ?? [])[0] === 'mcp-gateway' ? 'gatewayed' : 'node9-self';
+  }
   // No spawnable command (remote HTTP/SSE server, or a malformed entry) → not
   // wrappable; wrapping it would produce a broken `--upstream ""`.
   if (typeof s.command !== 'string' || s.command.trim() === '') return 'remote';
@@ -90,7 +55,9 @@ export function toGateway(s: McpServer): McpServer {
 
 /** Reverse toGateway. null when not a gateway-wrapped entry. */
 export function fromGateway(s: McpServer): McpServer | null {
-  if (s.command !== 'node9' || (s.args ?? [])[0] !== 'mcp-gateway') return null;
+  // Accept an absolute-path node9 too (fix #7 asymmetry) so `ungateway` can
+  // reverse exactly the entries classifyMcp now surfaces as 'gatewayed'.
+  if (!isNode9Command(s.command) || (s.args ?? [])[0] !== 'mcp-gateway') return null;
   const args = s.args ?? [];
   const i = args.indexOf('--upstream');
   const [command, ...rest] = tokenize(i >= 0 ? (args[i + 1] ?? '') : '');
@@ -145,12 +112,13 @@ export function writeMcpEntry(
   if (fs.existsSync(mcpFile)) {
     const raw = fs.readFileSync(mcpFile, 'utf-8');
     root = (format === 'toml' ? parseToml(raw) : JSON.parse(raw)) as Record<string, unknown>;
-    // Refresh the backup on EVERY write (fix #9): a write-once backup goes stale
-    // after later edits. This keeps <mcpFile>.node9-bak = the state immediately
-    // before node9's most recent modification — a reliable one-step undo.
-    // (Per-server reversibility is separate: fromGateway reads the original out
-    // of the embedded --upstream string.)
-    fs.writeFileSync(`${mcpFile}.node9-bak`, raw, { mode: 0o600 });
+    // Back up ONCE, on the first node9 write to this file, so the backup is the
+    // user's PRISTINE original. (Re-review corrected the earlier "refresh every
+    // write" — for a file with 2+ servers, the 2nd wrap would back up the
+    // already-wrapped file, losing the true original.) Per-server reversibility
+    // is separate: fromGateway reads the original out of the embedded --upstream.
+    const bak = `${mcpFile}.node9-bak`;
+    if (!fs.existsSync(bak)) fs.writeFileSync(bak, raw, { mode: 0o600 });
   }
   const existing = root[key];
   const servers: Record<string, McpServer> =

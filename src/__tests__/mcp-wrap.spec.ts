@@ -36,6 +36,13 @@ describe('classifyMcp', () => {
     ).toBe('gatewayed');
     expect(classifyMcp({ command: '/opt/node9', args: ['mcp-server'] })).toBe('node9-self');
   });
+
+  it('a NON-node9 server whose first arg is literally "mcp-gateway" is still ungoverned (fix #7)', () => {
+    // Must require the node9 binary — else a real server escapes governance.
+    expect(classifyMcp({ command: 'python', args: ['mcp-gateway', 'server.py'] })).toBe(
+      'ungoverned'
+    );
+  });
 });
 
 describe('toGateway / fromGateway round-trip', () => {

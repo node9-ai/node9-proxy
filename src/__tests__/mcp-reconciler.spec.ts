@@ -91,9 +91,12 @@ describe('mcp reconcile pass', () => {
       ? JSON.parse(fs.readFileSync(baselineFile, 'utf-8'))
       : [];
     expect(baseline).toHaveLength(0);
-    // no "Wrapped N" success notification for a failed wrap
+    // no "Wrapped N" success notification for a failed wrap ...
     const wrapped = sendSpy.mock.calls.some((c) => /Wrapped/.test(String(c[1])));
     expect(wrapped).toBe(false);
+    // ... but the user is still told there's a new ungoverned server (fix #3 re-review)
+    const alerted = sendSpy.mock.calls.some((c) => /ungoverned/.test(String(c[1])));
+    expect(alerted).toBe(true);
   });
 
   it('does nothing (no notification) when everything is already governed / self', () => {
