@@ -10,7 +10,7 @@ import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import { AGENT_SPECS, readMcpServers, type McpServer, type McpFormat } from './agent-wiring';
 export type { McpServer, McpFormat } from './agent-wiring';
 
-export type McpServerState = 'ungoverned' | 'gatewayed' | 'node9-self';
+export type McpServerState = 'ungoverned' | 'gatewayed' | 'node9-self' | 'remote';
 
 export interface McpEntry {
   agent: string; // AgentSpec.id
@@ -63,12 +63,16 @@ function quoteArg(s: string): string {
   return s;
 }
 
-/** ungoverned = a real upstream to wrap · gatewayed = already governed · node9-self
- *  = node9's OWN mcp-server entry (never wrap it). */
+/** ungoverned = a spawnable upstream to wrap · gatewayed = already governed ·
+ *  node9-self = node9's OWN mcp-server entry (never wrap) · remote = URL/SSE
+ *  server with no command (can't be gatewayed via --upstream — never wrap). */
 export function classifyMcp(s: McpServer): McpServerState {
   if (s.command === 'node9') {
     return (s.args ?? [])[0] === 'mcp-gateway' ? 'gatewayed' : 'node9-self';
   }
+  // No spawnable command (remote HTTP/SSE server, or a malformed entry) → not
+  // wrappable; wrapping it would produce a broken `--upstream ""`.
+  if (typeof s.command !== 'string' || s.command.trim() === '') return 'remote';
   return 'ungoverned';
 }
 

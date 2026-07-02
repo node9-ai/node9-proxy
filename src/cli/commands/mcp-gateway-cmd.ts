@@ -10,6 +10,7 @@ import { inventoryMcp, toGateway, fromGateway, writeMcpEntry, type McpEntry } fr
 function stateChip(state: McpEntry['state']): string {
   if (state === 'gatewayed') return chalk.green('governed');
   if (state === 'node9-self') return chalk.gray('node9');
+  if (state === 'remote') return chalk.gray('remote (n/a)');
   return chalk.yellow('UNGOVERNED');
 }
 

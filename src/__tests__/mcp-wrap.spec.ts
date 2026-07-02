@@ -22,6 +22,12 @@ describe('classifyMcp', () => {
     expect(classifyMcp({ command: 'node9', args: ['mcp-server'] })).toBe('node9-self');
     expect(classifyMcp({ command: 'npx', args: ['@scope/pkg'] })).toBe('ungoverned');
   });
+
+  it('classifies a remote (URL/SSE, no command) server as "remote" — never wrapped', () => {
+    // A commandless remote server must NOT be wrapped (would produce --upstream "").
+    expect(classifyMcp({ url: 'https://x/mcp' } as unknown as McpServer)).toBe('remote');
+    expect(classifyMcp({ command: '', args: [] })).toBe('remote');
+  });
 });
 
 describe('toGateway / fromGateway round-trip', () => {
