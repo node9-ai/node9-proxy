@@ -79,12 +79,12 @@ function eventWired(root: Record<string, unknown>, ev: HookEvent, format: HookFo
 
 // ── MCP-surface model ─────────────────────────────────────────────────────────
 
-interface McpServer {
+export interface McpServer {
   command?: string;
   args?: string[];
 }
 
-type McpFormat = 'json' | 'toml';
+export type McpFormat = 'json' | 'toml';
 
 // node9 wraps an upstream server as { command: 'node9', args: [...] } and also
 // installs a standalone { command: 'node9', args: ['mcp-server'] } entry — both
@@ -100,6 +100,25 @@ function detectMcp(servers: Record<string, McpServer> | undefined): {
     .filter(([, s]) => s?.command === 'node9' && Array.isArray(s.args) && s.args.length > 0)
     .map(([name, s]) => `${name} → ${(s.args as string[]).join(' ')}`);
   return { wrapped, present };
+}
+
+// Raw MCP server map for the reconciler (name → {command,args,...}), across both
+// formats. Malformed/absent → {}. The reconciler classifies + wraps these.
+export function readMcpServers(filePath: string, format: McpFormat): Record<string, McpServer> {
+  if (!fs.existsSync(filePath)) return {};
+  try {
+    if (format === 'toml') {
+      const parsed = parseToml(fs.readFileSync(filePath, 'utf-8')) as {
+        mcp_servers?: Record<string, McpServer>;
+      };
+      return parsed?.mcp_servers ?? {};
+    }
+    const parsed = readJson<{ mcpServers?: Record<string, McpServer> }>(filePath);
+    if (parsed === null || parsed === 'invalid') return {};
+    return parsed.mcpServers ?? {};
+  } catch {
+    return {};
+  }
 }
 
 // Reads an agent's MCP config. JSON agents key it under `mcpServers`; Codex
