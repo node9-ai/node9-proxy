@@ -93,10 +93,37 @@ export function resolveEntryStatus(
   if (e.state === 'remote') return { ...base, connection: 'remote' };
   if (e.state === 'ungoverned') return { ...base, connection: 'ungoverned' };
 
-  // gatewayed → resolve the upstream, lint env, then join by serverKey.
+  // Build the connected/stale result for a matched mcp-tools.json entry. Shared by
+  // the identity-join and the (legacy) serverKey-join so the two never drift.
+  const connectedRow = (serverKey: string, connected: (typeof tools)[string]): McpStatusEntry => {
+    const lastSeenAt = connected.lastSeenAt;
+    const stale = typeof lastSeenAt === 'number' && now - lastSeenAt > STALE_MS;
+    return {
+      ...base,
+      connection: stale ? 'stale' : 'connected',
+      lastSeenAt,
+      connectedTools: connected.tools.length,
+      serverKey,
+    };
+  };
+
   const upstream = upstreamOf(e);
   if (!upstream) return { ...base, connection: 'pending-launch' };
 
+  // IDENTITY JOIN (R1 Layer 1) — the ROBUST path. A launched server the gateway
+  // stamped with THIS config key (`--config-name`, so mcp-tools name === e.name)
+  // is ground truth: connected, using its real serverKey, WITHOUT resolving env.
+  // This kills the daemon-env-differs phantom at the source (before the env lint
+  // below can mis-return `unlaunchable`), and on EVERY resolveMcpStatus surface —
+  // the snapshot AND `node9 mcp status` — not just the snapshot's build.ts dedup.
+  // An unstamped server (name still command-derived, ≠ e.name) falls through to
+  // the legacy env path unchanged (no regression); the reconciler refresh pass
+  // migrates it. (L1 imprecision: the key is a name string — see L2's identity map.)
+  const stamped = Object.entries(tools).find(([, cfg]) => cfg.name === e.name);
+  if (stamped) return connectedRow(stamped[0], stamped[1]);
+
+  // Legacy env path — only reached when there is NO stamped identity match, so it
+  // classifies a genuinely-not-connected server and can't collide with a real one.
   const { resolved, missing } = substituteEnv(upstream, env);
   if (missing.length > 0) {
     return { ...base, connection: 'unlaunchable', missingEnv: missing };
@@ -105,18 +132,7 @@ export function resolveEntryStatus(
   const serverKey = getServerKey(resolved);
   const connected = tools[serverKey];
   if (!connected) return { ...base, connection: 'pending-launch', serverKey };
-
-  // Present in mcp-tools.json → it launched at least once. Undated legacy entries
-  // count as connected (they DID launch; we just didn't stamp the time).
-  const lastSeenAt = connected.lastSeenAt;
-  const stale = typeof lastSeenAt === 'number' && now - lastSeenAt > STALE_MS;
-  return {
-    ...base,
-    connection: stale ? 'stale' : 'connected',
-    lastSeenAt,
-    connectedTools: connected.tools.length,
-    serverKey,
-  };
+  return connectedRow(serverKey, connected);
 }
 
 /** The full merged status across every agent's MCP servers. */

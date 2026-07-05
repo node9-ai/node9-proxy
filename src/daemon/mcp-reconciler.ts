@@ -8,10 +8,11 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { inventoryMcp, toGateway, writeMcpEntry, type McpEntry } from '../mcp-wrap';
+import { inventoryMcp, toGateway, fromGateway, writeMcpEntry, type McpEntry } from '../mcp-wrap';
 import { sendDesktopNotification } from '../ui/native';
 import { getConfig, getCredentials } from '../config';
 import { auditLocalAllow } from '../auth/cloud';
+import { appendToLog, HOOK_DEBUG_LOG } from '../audit/index.js';
 
 const BASELINE_FILE = path.join(os.homedir(), '.node9', 'mcp-baseline.json');
 const BASELINE_CAP = 500;
@@ -75,9 +76,45 @@ export function runMcpReconcile(): void {
   // nudge-only unattended; the user can wrap it explicitly via the CLI (which
   // backs the file up). (fix #8)
   const autoWrap = getConfig().settings.mcpAutoWrap === true;
+  const inv = inventoryMcp(); // once per pass — refresh + wrap read the same snapshot
+
+  // ── R1 Layer 1: refresh the `--config-name` stamp on governed servers ──────────
+  // A governed server wrapped before `--config-name` existed has no stable identity,
+  // so the config-vs-connected join guesses env and phantoms (redis-prod). Re-wrap it
+  // WITH the stamp — `toGateway(fromGateway(raw), configKey)` — reusing the same
+  // primitives `--rewrap` uses. serverKey is unchanged (pins/app-perm rules survive),
+  // writeMcpEntry backs up, and it's reversible via `ungateway`. Constraints:
+  //   • SILENT — no desktop popup (R2 notification fatigue); a hook-debug line instead.
+  //   • JSON only — never auto-rewrite TOML/Codex (smol-toml reformats the file, fix #8).
+  //   • MISSING-only — never touch a user's deliberate custom `--config-name` (don't
+  //     fight the user); already-stamped entries don't match, so it's idempotent.
+  for (const e of inv) {
+    if (e.state !== 'gatewayed' || e.format === 'toml') continue;
+    if (e.args.includes('--config-name')) continue;
+    const orig = fromGateway(e.raw);
+    if (!orig) continue; // corrupt wrapper (no parseable --upstream) — leave it
+    try {
+      writeMcpEntry(e.mcpFile, e.format, e.name, toGateway(orig, e.name));
+      appendToLog(HOOK_DEBUG_LOG, {
+        event: 'mcp-config-name-refreshed',
+        agent: e.agent,
+        name: e.name,
+      });
+    } catch (err) {
+      // Leave it; next tick retries. Never popup / crash the loop over a refresh —
+      // but log so a PERMANENT failure (e.g. read-only config) is diagnosable
+      // instead of retrying invisibly forever (CLAUDE.md: log guarded catches).
+      appendToLog(HOOK_DEBUG_LOG, {
+        event: 'mcp-config-name-refresh-failed',
+        name: e.name,
+        error: (err as Error)?.message,
+      });
+    }
+  }
+
   const baseline = loadBaseline();
   const creds = getCredentials(); // once per pass (fix #10)
-  const fresh = inventoryMcp().filter((e) => e.state === 'ungoverned' && !baseline.has(idKey(e)));
+  const fresh = inv.filter((e) => e.state === 'ungoverned' && !baseline.has(idKey(e)));
   if (fresh.length === 0) return;
 
   const wrappedAgents = new Set<string>();
