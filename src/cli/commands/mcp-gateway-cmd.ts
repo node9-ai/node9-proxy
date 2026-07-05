@@ -6,12 +6,53 @@
 import type { Command } from 'commander';
 import chalk from 'chalk';
 import { inventoryMcp, toGateway, fromGateway, writeMcpEntry, type McpEntry } from '../../mcp-wrap';
+import { resolveMcpStatus, type McpStatusEntry } from '../../mcp-status';
+
+// Plain state word, padded so the CONNECTED column lines up across colored rows
+// (chalk-wrapped strings can't be padEnd'd — pad first, colour after).
+const STATE_WORD: Record<McpEntry['state'], string> = {
+  gatewayed: 'governed',
+  'node9-self': 'node9',
+  remote: 'remote (n/a)',
+  ungoverned: 'UNGOVERNED',
+};
 
 function stateChip(state: McpEntry['state']): string {
-  if (state === 'gatewayed') return chalk.green('governed');
-  if (state === 'node9-self') return chalk.gray('node9');
-  if (state === 'remote') return chalk.gray('remote (n/a)');
-  return chalk.yellow('UNGOVERNED');
+  const w = STATE_WORD[state].padEnd(12);
+  if (state === 'gatewayed') return chalk.green(w);
+  if (state === 'node9-self') return chalk.gray(w);
+  if (state === 'remote') return chalk.gray(w);
+  return chalk.yellow(w);
+}
+
+function relativeAge(ms: number, now: number): string {
+  const s = Math.max(0, Math.round((now - ms) / 1000));
+  if (s < 60) return 'just now';
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.round(h / 24)}d ago`;
+}
+
+// The CONNECTED column — the live signal + a fix hint for the two bad states.
+function connectionChip(e: McpStatusEntry, now: number): string {
+  switch (e.connection) {
+    case 'connected':
+      return chalk.green(
+        `✓ connected${e.lastSeenAt ? ` (${relativeAge(e.lastSeenAt, now)})` : ''}`
+      );
+    case 'stale':
+      return chalk.yellow(`⚠ stale${e.lastSeenAt ? ` (${relativeAge(e.lastSeenAt, now)})` : ''}`);
+    case 'pending-launch':
+      return chalk.cyan(`… pending — restart ${e.agentLabel} to connect`);
+    case 'unlaunchable':
+      return chalk.red(
+        `✗ can't launch — ${(e.missingEnv ?? []).map((v) => `$${v}`).join(', ')} not set`
+      );
+    default:
+      return ''; // ungoverned / node9-self / remote — stateChip already says it
+  }
 }
 
 // Resolve which entries a name refers to (optionally scoped to one agent).
@@ -29,21 +70,39 @@ export function registerMcpGatewayCommand(mcp: Command): void {
     .command('status')
     .description('List every MCP server across your agents + whether node9 governs it')
     .action(() => {
-      const inv = inventoryMcp();
-      if (inv.length === 0) {
+      const now = Date.now();
+      const rows = resolveMcpStatus(undefined, process.env, now);
+      if (rows.length === 0) {
         console.error(chalk.gray('No MCP servers found in any agent config.'));
         return;
       }
-      const ungoverned = inv.filter((e) => e.state === 'ungoverned').length;
-      for (const e of inv) {
-        console.error(`  ${e.agentLabel.padEnd(14)} ${e.name.padEnd(24)} ${stateChip(e.state)}`);
+      for (const e of rows) {
+        const conn = connectionChip(e, now);
+        console.error(
+          `  ${e.agentLabel.padEnd(14)} ${e.name.padEnd(24)} ${stateChip(e.state)}${conn ? ` ${conn}` : ''}`
+        );
       }
+      const ungoverned = rows.filter((e) => e.connection === 'ungoverned').length;
+      const unlaunchable = rows.filter((e) => e.connection === 'unlaunchable').length;
+      const pending = rows.filter((e) => e.connection === 'pending-launch').length;
       if (ungoverned > 0) {
         console.error(
           chalk.yellow(
             `\n${ungoverned} ungoverned — run ` +
               chalk.bold('node9 mcp gateway --all') +
               ' to govern.'
+          )
+        );
+      }
+      if (pending > 0) {
+        console.error(
+          chalk.cyan(`${pending} governed but not yet connected — restart the agent to activate.`)
+        );
+      }
+      if (unlaunchable > 0) {
+        console.error(
+          chalk.red(
+            `${unlaunchable} can't launch — set the missing env var(s) where the agent starts (a restart alone won't fix it).`
           )
         );
       }

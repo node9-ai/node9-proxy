@@ -14,6 +14,11 @@ export interface McpServerConfig {
   /** Friendly server name derived from the upstream launch command (e.g.
    *  "filesystem"). Display-only — the serverKey stays the identity. */
   name?: string;
+  /** Epoch-ms the gateway last reported this server through discovery (i.e. the
+   *  server actually LAUNCHED and ran a tools/list). Absence = discovered by a
+   *  build that predates this field; treat as connected-but-undated, not stale.
+   *  This is the "connected" freshness signal the status resolver joins on. */
+  lastSeenAt?: number;
 }
 
 /**
@@ -96,23 +101,27 @@ export function updateServerDiscovery(
 ): 'new' | 'drift' | 'match' {
   const config = readMcpToolsConfig();
   const existing = config[serverKey];
+  const now = Date.now();
 
   if (!existing) {
     config[serverKey] = {
       tools,
       disabled: [],
       status: 'pending',
+      lastSeenAt: now,
       ...(name && { name }),
     };
     writeMcpToolsConfig(config);
     return 'new';
   }
 
+  // Every discovery report means the server just launched through the gateway —
+  // stamp freshness unconditionally (a 'match' still proves it's connected NOW).
+  existing.lastSeenAt = now;
+
   // Backfill the name on an existing entry that predates name capture.
-  let dirty = false;
   if (name && !existing.name) {
     existing.name = name;
-    dirty = true;
   }
 
   // Check for drift (new tools added)
@@ -126,7 +135,7 @@ export function updateServerDiscovery(
     return 'drift';
   }
 
-  if (dirty) writeMcpToolsConfig(config); // persist a backfilled name
+  writeMcpToolsConfig(config); // persist the refreshed lastSeenAt (+ any backfilled name)
   return 'match';
 }
 
