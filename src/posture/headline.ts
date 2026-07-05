@@ -70,7 +70,11 @@ export function deriveHeadline(allFindings: Finding[]): Headline | null {
   // ── The one next step: highest leverage first ────────────────────────────
   let action: string;
   if (notWired) {
-    action = 'Run `node9 init` — node9 is not in-path yet, so nothing here is enforced.';
+    // node9 isn't in-path — and whoever's reading this may not even have it
+    // installed (e.g. they ran `npx node9-ai posture` cold), so lead with an
+    // install+init chain that works either way (`npm i -g` is a no-op if present).
+    action =
+      'Install node9 and put it in-path: `npm i -g node9-ai && node9 init` — nothing here is enforced until you do.';
   } else if (observeOnly) {
     action = 'Switch node9 to enforcing mode — right now it is only watching, not blocking.';
   } else if (egressOpen) {

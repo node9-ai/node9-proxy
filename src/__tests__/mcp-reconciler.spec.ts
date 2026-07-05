@@ -113,4 +113,60 @@ describe('mcp reconcile pass', () => {
     runMcpReconcile();
     expect(sendSpy).toHaveBeenCalledTimes(0);
   });
+
+  // R1 Layer 1 — the refresh pass: back-fill --config-name on governed servers.
+  const claudeServer = (name: string) =>
+    JSON.parse(fs.readFileSync(path.join(home, '.claude.json'), 'utf-8')).mcpServers[name];
+
+  it('refresh: back-fills --config-name on a governed server that lacks it — SILENTLY, upstream preserved', () => {
+    writeClaude({
+      redis: {
+        command: 'node9',
+        args: ['mcp-gateway', '--upstream', 'npx redis-mcp redis://h:6379'],
+      },
+    });
+    runMcpReconcile();
+    const args = claudeServer('redis').args as string[];
+    expect(args).toContain('--config-name');
+    expect(args[args.indexOf('--config-name') + 1]).toBe('redis'); // stamped with the config key
+    expect(args[args.indexOf('--upstream') + 1]).toBe('npx redis-mcp redis://h:6379'); // serverKey preserved
+    expect(sendSpy).toHaveBeenCalledTimes(0); // NO popup (R2 fatigue)
+  });
+
+  it('refresh: leaves an already-stamped server untouched (idempotent, no double)', () => {
+    writeClaude({
+      redis: {
+        command: 'node9',
+        args: ['mcp-gateway', '--config-name', 'redis', '--upstream', 'npx x'],
+      },
+    });
+    runMcpReconcile();
+    const args = claudeServer('redis').args as string[];
+    expect(args.filter((a) => a === '--config-name')).toHaveLength(1);
+  });
+
+  it("refresh: never overrides a user's custom --config-name (don't fight the user)", () => {
+    writeClaude({
+      redis: {
+        command: 'node9',
+        args: ['mcp-gateway', '--config-name', 'my-custom', '--upstream', 'npx x'],
+      },
+    });
+    runMcpReconcile();
+    const args = claudeServer('redis').args as string[];
+    expect(args[args.indexOf('--config-name') + 1]).toBe('my-custom');
+  });
+
+  it('refresh: does NOT auto-rewrite a governed TOML (Codex) server (fix #8)', () => {
+    const codexDir = path.join(home, '.codex');
+    fs.mkdirSync(codexDir, { recursive: true });
+    const toml =
+      '[mcp_servers.git]\ncommand = "node9"\nargs = ["mcp-gateway", "--upstream", "uvx git"]\n';
+    fs.writeFileSync(path.join(codexDir, 'config.toml'), toml);
+    runMcpReconcile();
+    // TOML untouched — no --config-name injected (smol-toml would reformat the file).
+    expect(fs.readFileSync(path.join(codexDir, 'config.toml'), 'utf-8')).not.toContain(
+      '--config-name'
+    );
+  });
 });

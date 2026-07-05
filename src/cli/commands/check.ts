@@ -8,6 +8,7 @@ import { spawn } from 'child_process';
 import path from 'path';
 import os from 'os';
 import { authorizeHeadless } from '../../auth/orchestrator';
+import { checkPause } from '../../auth/state';
 import { isDaemonRunning } from '../../auth/daemon';
 import { getConfig, type Config } from '../../config';
 import { shouldSnapshot } from '../../policy';
@@ -265,6 +266,12 @@ export function registerCheckCommand(program: Command): void {
             }
 
             if (!prompt) process.exit(0);
+
+            // `node9 pause` must silence this gate too — the tool-call path
+            // honors it in authorizeHeadless (orchestrator.ts:273); without
+            // this, prompts stayed BLOCKED while everything else was paused
+            // (dogfound 2026-07-05). Same guard pair as the orchestrator.
+            if (process.env.NODE9_PAUSED === '1' || checkPause().paused) process.exit(0);
 
             const dlpMatch = scanArgs({ prompt });
             if (!dlpMatch) process.exit(0);

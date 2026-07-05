@@ -128,6 +128,41 @@ describe('resolveEntryStatus', () => {
     e.args = ['mcp-gateway']; // hand-corrupted: no --upstream
     expect(resolveEntryStatus(e, {}, {}, NOW).connection).toBe('pending-launch');
   });
+
+  // R1 Layer 1 — identity-join: a launched server stamped with its config key is
+  // connected via ground truth, WITHOUT resolving env (the daemon-env-differs bug).
+  const stampedTools = (name: string, key = 'realkey123', lastSeenAt = NOW): McpToolsConfig => ({
+    [key]: { name, tools: [{ name: 'get' }], disabled: [], status: 'approved', lastSeenAt },
+  });
+
+  it('identity-join: a config-key-stamped server is CONNECTED even when env is unresolvable (R1 live repro)', () => {
+    // config upstream needs ${REDIS_PROD_URL} (unset here) — the legacy path would
+    // short-circuit to `unlaunchable`. But a connected entry is stamped "redis-prod".
+    const e = gatewayed('redis-prod', 'npx -y @x/server-redis ${REDIS_PROD_URL}');
+    const out = resolveEntryStatus(e, stampedTools('redis-prod'), {}, NOW); // env {} — no var
+    expect(out.connection).toBe('connected');
+    expect(out.serverKey).toBe('realkey123');
+    expect(out.connectedTools).toBe(1);
+  });
+
+  it('identity-join reports stale when the stamped entry is old', () => {
+    const e = gatewayed('redis-prod', 'npx -y @x/server-redis ${REDIS_PROD_URL}');
+    const out = resolveEntryStatus(
+      e,
+      stampedTools('redis-prod', 'k', NOW - (STALE_MS + 1)),
+      {},
+      NOW
+    );
+    expect(out.connection).toBe('stale');
+  });
+
+  it('UNstamped (name mismatch) falls through to the env path — no regression', () => {
+    // connected entry still carries the derived name "redis", not the config key.
+    const e = gatewayed('redis-prod', 'npx -y @x/server-redis ${REDIS_PROD_URL}');
+    const out = resolveEntryStatus(e, stampedTools('redis'), {}, NOW); // env {} → env path
+    expect(out.connection).toBe('unlaunchable');
+    expect(out.missingEnv).toContain('REDIS_PROD_URL');
+  });
 });
 
 // The freshness stamp the resolver relies on — proven against the REAL writer

@@ -70,8 +70,11 @@ describe('node9 posture (integration)', () => {
     expect(Array.isArray(parsed.findings)).toBe(true);
     expect(typeof parsed.tier).toBe('string');
     expect(parsed.checksRun).toBe(8);
-    // Bare home is not wired → the headline's #1 action is to wire node9.
+    // Bare home is not wired → the headline's #1 action is install-aware (a cold
+    // `npx node9-ai posture` reader has no `node9` on PATH), so it leads with the
+    // install so the rest of the scorecard's `node9 …` fixes actually work.
     expect(parsed.headline).toBeTruthy();
+    expect(parsed.headline.action).toMatch(/npm i -g node9-ai/i);
     expect(parsed.headline.action).toMatch(/node9 init/i);
   });
 
