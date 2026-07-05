@@ -44,8 +44,12 @@ export function runHookHeal(home?: string): void {
   for (const a of wiring) {
     const governed = !!baseline[a.id]; // node9 intends to govern it
     const wired = a.wireState === 'wired';
+    // A restorable hook/shim surface. Excludes MCP-only agents (Cursor): they
+    // have no hooks, so wireState is never 'wired' — without this they'd be a
+    // perpetual false candidate.
+    const hookSurface = a.hooks.length > 0;
 
-    if (governed && a.installed && !wired) {
+    if (governed && a.installed && hookSurface && !wired) {
       // Should be governed, the agent is present, but its node9 hooks are gone/
       // stale/invalid. Nudge ONCE per unwired episode.
       if (!notified.has(a.id)) {
@@ -64,7 +68,7 @@ export function runHookHeal(home?: string): void {
     sendDesktopNotification(
       '⚠️ node9: protection removed',
       `${newlyWiped.join(', ')} lost node9's hooks (likely an agent update). ` +
-        `Run: node9 init  to restore protection.`
+        `Run: node9 heal  to restore protection.`
     );
   }
   if (changed) saveNotified(notified);

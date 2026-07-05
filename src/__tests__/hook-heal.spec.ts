@@ -10,12 +10,19 @@ vi.mock('../ui/native', () => ({ sendDesktopNotification: vi.fn(), askNativePopu
 vi.mock('../agent-wiring', () => ({ getAgentWiring: vi.fn() }));
 vi.mock('../auth/state', () => ({ checkPause: vi.fn(() => ({ paused: false })) }));
 
-type Row = { id: string; label: string; installed: boolean; wireState: string };
+type Row = {
+  id: string;
+  label: string;
+  installed: boolean;
+  wireState: string;
+  hooks: Array<{ label: string; wired: boolean }>;
+};
 const row = (over: Partial<Row> = {}): Row => ({
   id: 'claude',
   label: 'Claude Code',
   installed: true,
   wireState: 'wired',
+  hooks: [{ label: 'PreToolUse', wired: over.wireState === 'wired' }],
   ...over,
 });
 
@@ -70,6 +77,16 @@ describe('runHookHeal (P1 detect + nudge)', () => {
 
   it('does NOT nudge for an agent node9 never governed (not in baseline)', () => {
     getAgentWiring.mockReturnValue([row({ id: 'gemini', label: 'Gemini', wireState: 'unwired' })]);
+    runHookHeal();
+    expect(sendDesktopNotification).not.toHaveBeenCalled();
+  });
+
+  it('does NOT nudge for an MCP-only agent that has no hook surface (Cursor)', () => {
+    recordHookBaseline('cursor', 1);
+    // Cursor is MCP-only: no hooks, wireState never 'wired' — must not be a candidate.
+    getAgentWiring.mockReturnValue([
+      { id: 'cursor', label: 'Cursor', installed: true, wireState: 'absent', hooks: [] },
+    ]);
     runHookHeal();
     expect(sendDesktopNotification).not.toHaveBeenCalled();
   });

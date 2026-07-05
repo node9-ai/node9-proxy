@@ -44,6 +44,7 @@ import { registerReportCommand } from './cli/commands/report';
 import { registerDaemonCommand } from './cli/commands/daemon-cmd';
 import { registerStatusCommand } from './cli/commands/status';
 import { registerInitCommand } from './cli/commands/init';
+import { registerHealCommand } from './cli/commands/heal';
 import { registerConnectCommand } from './cli/commands/connect';
 import { registerUndoCommand } from './cli/commands/undo';
 import { registerMcpGatewayCommand } from './cli/commands/mcp-gateway';
@@ -448,6 +449,7 @@ program
 
 // 3. INIT
 registerInitCommand(program);
+registerHealCommand(program);
 registerConnectCommand(program);
 
 // 4. AUDIT
