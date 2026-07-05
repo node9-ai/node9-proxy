@@ -72,6 +72,8 @@ import { startCostSync } from '../costSync.js';
 import { startCloudSync, startForensicBroadcast } from './sync.js';
 import { startAuditShipper } from './audit-shipper.js';
 import { startDlpScanner } from './dlp-scanner.js';
+import { startMcpReconciler } from './mcp-reconciler.js';
+import { startHookHeal } from './hook-heal.js';
 import { readMcpToolsConfig, updateServerDiscovery, approveServer } from './mcp-tools.js';
 
 export function startDaemon(): void {
@@ -80,6 +82,8 @@ export function startDaemon(): void {
   startForensicBroadcast();
   startAuditShipper();
   startDlpScanner();
+  startMcpReconciler();
+  startHookHeal();
   loadInsightCounts(); // restore persisted nudge counters across restarts
   // Single per-process token. Stored in ~/.node9/daemon.pid (mode 0600)
   // and read by every local CLI client (`node9 tail`, mcp-gateway,
@@ -1058,7 +1062,7 @@ export function startDaemon(): void {
       // Called by gateway, requires internal token
       if (req.headers['x-node9-internal'] !== internalToken) return res.writeHead(403).end();
       try {
-        const { serverKey, tools } = JSON.parse(await readBody(req));
+        const { serverKey, tools, name } = JSON.parse(await readBody(req));
         if (
           typeof serverKey !== 'string' ||
           serverKey.length < 1 ||
@@ -1070,7 +1074,8 @@ export function startDaemon(): void {
           return;
         }
 
-        const status = updateServerDiscovery(serverKey, tools);
+        const safeName = typeof name === 'string' && name ? name.slice(0, 80) : undefined;
+        const status = updateServerDiscovery(serverKey, tools, safeName);
         if (status === 'new' || status === 'drift') {
           appendAuditLog({
             toolName: `mcp-server:${serverKey}`,

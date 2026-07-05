@@ -7,7 +7,14 @@ import path from 'path';
 import os from 'os';
 import { sanitizeConfig } from '../config-schema';
 import { readActiveShields, readShieldOverrides, getShield } from '../shields';
-import { resolveManagedMode, applyManagedEgress, applyManagedDlp } from './managed';
+import {
+  resolveManagedMode,
+  applyManagedEgress,
+  applyManagedDlp,
+  applyManagedApprovers,
+} from './managed';
+import { pathRules } from '../shields/build';
+import { normalizeHost } from '../auth/trusted-hosts';
 
 // SmartCondition + SmartRule are now defined in @node9/policy-engine.
 // Re-exported here so existing import paths (`from '../config'`) keep
@@ -41,6 +48,12 @@ export interface Config {
      *  Default (unset): those tools refuse over MCP — a human runs them from the CLI. */
     mcpAllowWeakening?: boolean;
     cloudSyncIntervalHours?: number;
+    /** Auto-wire reconciler (P3 2.6): when true, a newly-detected ungoverned MCP
+     *  server is auto-wrapped through the gateway; default (false) = nudge only. */
+    mcpAutoWrap?: boolean;
+    /** Reconcile scan cadence in minutes (default 60, clamp 5-1440). A managed
+     *  value from the dashboard overrides this. */
+    mcpReconcileIntervalMinutes?: number;
     /** Outbox shipper (audit.log → SaaS batch ingest). */
     shipper: { enabled: boolean; intervalSeconds: number };
     hud?: {
@@ -105,6 +118,17 @@ export interface Config {
       mode: 'warn' | 'block';
       roots: string[];
     };
+    // Pipe-chain trusted hosts — downgrades secret|curl-host exfil verdicts.
+    // ONLY the managed source populates this list; when unmanaged, the policy
+    // hook reads the local file directly via the fresh (TTL+mtime) getCachedHosts
+    // path, so a `node9 trust add/remove` still propagates to long-lived
+    // authorizers (the gateway) within seconds. trustedHostsManaged flags which
+    // source is live so an empty managed list can CLEAR (not just no-op).
+    trustedHosts: string[];
+    trustedHostsManaged: boolean;
+    // Managed MCP per-tool permissions { serverKey: { bareTool: allow|review|block } }.
+    // Applied from the managed cache; enforced in the gateway authorize path.
+    appPermissions: Record<string, Record<string, 'allow' | 'review' | 'block'>>;
   };
   environments: Record<string, EnvironmentConfig>;
 }
@@ -345,6 +369,9 @@ export const DEFAULT_CONFIG: Config = {
     loopDetection: { enabled: true, threshold: 5, windowSeconds: 120 },
     injectionScan: { enabled: false, minConfidence: 'medium', allow: [] },
     skillPinning: { enabled: false, mode: 'warn', roots: [] },
+    trustedHosts: [],
+    trustedHostsManaged: false,
+    appPermissions: {},
   },
   environments: {},
 };
@@ -573,6 +600,12 @@ export function getConfig(cwd?: string): Config {
       ...DEFAULT_CONFIG.policy.skillPinning,
       roots: [...DEFAULT_CONFIG.policy.skillPinning.roots],
     },
+    // Left empty on purpose: the local file is read fresh at policy-eval time
+    // (getCachedHosts via isTrustedHost), NOT snapshotted into the frozen config
+    // here. A managed list fills this below and flips trustedHostsManaged.
+    trustedHosts: [] as string[],
+    trustedHostsManaged: false,
+    appPermissions: {},
   };
   const mergedEnvironments: Record<string, EnvironmentConfig> = { ...DEFAULT_CONFIG.environments };
 
@@ -598,6 +631,9 @@ export function getConfig(cwd?: string): Config {
     if (s.mcpAllowWeakening !== undefined) mergedSettings.mcpAllowWeakening = s.mcpAllowWeakening;
     if (s.cloudSyncIntervalHours !== undefined)
       mergedSettings.cloudSyncIntervalHours = s.cloudSyncIntervalHours;
+    if (s.mcpAutoWrap !== undefined) mergedSettings.mcpAutoWrap = s.mcpAutoWrap === true;
+    if (s.mcpReconcileIntervalMinutes !== undefined)
+      mergedSettings.mcpReconcileIntervalMinutes = s.mcpReconcileIntervalMinutes;
     if (s.hud !== undefined) mergedSettings.hud = { ...mergedSettings.hud, ...s.hud };
 
     if (p.sandboxPaths) mergedPolicy.sandboxPaths.push(...p.sandboxPaths);
@@ -736,6 +772,28 @@ export function getConfig(cwd?: string): Config {
             allowPrivate?: unknown;
           };
           dlp?: { enabled?: unknown; pii?: unknown };
+          approvers?: {
+            native?: unknown;
+            browser?: unknown;
+            cloud?: unknown;
+            terminal?: unknown;
+          };
+          reviewChannel?: unknown;
+          approvalTimeoutMs?: unknown;
+          injectionScan?: {
+            enabled?: unknown;
+            minConfidence?: unknown;
+            allow?: unknown;
+          };
+          loopDetection?: {
+            enabled?: unknown;
+            threshold?: unknown;
+            windowSeconds?: unknown;
+          };
+          skillPinning?: { enabled?: unknown; mode?: unknown; roots?: unknown };
+          jailPaths?: { path?: unknown; verdict?: unknown }[];
+          trustedHosts?: unknown;
+          appPermissions?: unknown;
           locked?: unknown;
         };
         const locked: string[] = Array.isArray(mc.locked)
@@ -777,6 +835,114 @@ export function getConfig(cwd?: string): Config {
             },
             locked
           );
+        }
+        // Preferences: settings.approvers — the org owns where approvals happen,
+        // so a managed value replaces the local surface per-field.
+        if (mc.approvers && typeof mc.approvers === 'object') {
+          const bool = (v: unknown): boolean | undefined =>
+            typeof v === 'boolean' ? v : undefined;
+          mergedSettings.approvers = applyManagedApprovers(mergedSettings.approvers, {
+            native: bool(mc.approvers.native),
+            browser: bool(mc.approvers.browser),
+            cloud: bool(mc.approvers.cloud),
+            terminal: bool(mc.approvers.terminal),
+          });
+        }
+        // Preferences v2: reviewChannel + approvalTimeoutMs — plain scalars, the
+        // org's value replaces local when set (admin owns these approval knobs).
+        if (mc.reviewChannel === 'ask' || mc.reviewChannel === 'approver') {
+          mergedSettings.reviewChannel = mc.reviewChannel;
+        }
+        // Require a POSITIVE timeout. 0 is rejected (not "wait forever"): the
+        // daemon's pending-card timer is `setTimeout(deny, ms ?? DEFAULT)`, so a
+        // stored 0 would auto-deny every card instantly (0 ?? DEFAULT === 0).
+        // Unset → daemon uses its default; a disabled timeout isn't org-settable.
+        if (typeof mc.approvalTimeoutMs === 'number' && mc.approvalTimeoutMs > 0) {
+          mergedSettings.approvalTimeoutMs = mc.approvalTimeoutMs;
+        }
+        // Detection: injectionScan replaces the local config per-field (the org
+        // owns which protections run).
+        if (mc.injectionScan && typeof mc.injectionScan === 'object') {
+          const i = mc.injectionScan;
+          const cur = mergedPolicy.injectionScan;
+          mergedPolicy.injectionScan = {
+            enabled: typeof i.enabled === 'boolean' ? i.enabled : cur.enabled,
+            minConfidence:
+              i.minConfidence === 'high' || i.minConfidence === 'medium'
+                ? i.minConfidence
+                : cur.minConfidence,
+            allow: Array.isArray(i.allow)
+              ? i.allow.filter((x): x is string => typeof x === 'string')
+              : cur.allow,
+          };
+        }
+        if (mc.loopDetection && typeof mc.loopDetection === 'object') {
+          const l = mc.loopDetection;
+          const cur = mergedPolicy.loopDetection;
+          mergedPolicy.loopDetection = {
+            enabled: typeof l.enabled === 'boolean' ? l.enabled : cur.enabled,
+            threshold:
+              typeof l.threshold === 'number' && Number.isFinite(l.threshold)
+                ? l.threshold
+                : cur.threshold,
+            windowSeconds:
+              typeof l.windowSeconds === 'number' && Number.isFinite(l.windowSeconds)
+                ? l.windowSeconds
+                : cur.windowSeconds,
+          };
+        }
+        if (mc.skillPinning && typeof mc.skillPinning === 'object') {
+          const sk = mc.skillPinning;
+          const cur = mergedPolicy.skillPinning;
+          mergedPolicy.skillPinning = {
+            enabled: typeof sk.enabled === 'boolean' ? sk.enabled : cur.enabled,
+            mode: sk.mode === 'block' || sk.mode === 'warn' ? sk.mode : cur.mode,
+            roots: Array.isArray(sk.roots)
+              ? sk.roots.filter((x): x is string => typeof x === 'string')
+              : cur.roots,
+          };
+        }
+        // Managed credential-jail paths → synthesized smartRules (org:-prefixed
+        // for attribution + to avoid colliding with the local user-jail shield).
+        if (Array.isArray(mc.jailPaths)) {
+          for (const jp of mc.jailPaths) {
+            const path = typeof jp?.path === 'string' ? jp.path.trim() : '';
+            if (!path) continue;
+            const verdict = jp?.verdict === 'review' ? 'review' : 'block';
+            for (const r of pathRules(path, verdict, 'org-managed jail')) {
+              mergedPolicy.smartRules.push({ ...r, name: `org:${r.name}` });
+            }
+          }
+        }
+        // Managed trusted hosts REPLACE the local list (the org owns the
+        // pipe-chain trust set — a dev can't silently widen it). Present-but-empty
+        // is a valid REPLACE: it CLEARS all host trust fleet-wide (hence the
+        // `Array.isArray` check, not `.length`, + the managed flag). Entries are
+        // normalized (scheme/port/path stripped) so a dashboard value like
+        // "https://api.co:443" actually matches the bare host at eval time.
+        if (Array.isArray(mc.trustedHosts)) {
+          mergedPolicy.trustedHostsManaged = true;
+          mergedPolicy.trustedHosts = mc.trustedHosts
+            .filter((h): h is string => typeof h === 'string')
+            .map((h) => normalizeHost(h));
+        }
+        // Managed MCP app permissions REPLACE the local map (coerced to known
+        // decisions). Enforced by the gateway authorize path.
+        if (
+          mc.appPermissions &&
+          typeof mc.appPermissions === 'object' &&
+          !Array.isArray(mc.appPermissions)
+        ) {
+          const coerced: Record<string, Record<string, 'allow' | 'review' | 'block'>> = {};
+          for (const [srv, tools] of Object.entries(mc.appPermissions)) {
+            if (!tools || typeof tools !== 'object' || Array.isArray(tools)) continue;
+            const m: Record<string, 'allow' | 'review' | 'block'> = {};
+            for (const [tool, d] of Object.entries(tools as Record<string, unknown>)) {
+              if (d === 'allow' || d === 'review' || d === 'block') m[tool] = d;
+            }
+            if (Object.keys(m).length) coerced[srv] = m;
+          }
+          mergedPolicy.appPermissions = coerced;
         }
       }
       if (raw.panicMode === true) {

@@ -164,7 +164,13 @@ function notifyActivity(data: {
 export async function authorizeHeadless(
   toolName: string,
   args: unknown,
-  meta?: { agent?: string; mcpServer?: string; sessionId?: string; transcriptPath?: string },
+  meta?: {
+    agent?: string;
+    mcpServer?: string;
+    serverKey?: string;
+    sessionId?: string;
+    transcriptPath?: string;
+  },
   options?: {
     calledFromDaemon?: boolean;
     cwd?: string;
@@ -244,6 +250,7 @@ async function _authorizeHeadlessCore(
   metaArg?: {
     agent?: string;
     mcpServer?: string;
+    serverKey?: string;
     sessionId?: string;
     transcriptPath?: string;
     workingDir?: string;
@@ -305,6 +312,7 @@ async function _authorizeHeadlessCore(
   const isObserveMode = config.settings.mode === 'observe';
 
   let explainableLabel = 'Local Config';
+  let dlpReviewFlagged = false; // a credential was found at DLP 'review' severity
   let policyMatchedField: string | undefined;
   let policyMatchedWord: string | undefined;
   let policyRuleDescription: string | undefined;
@@ -475,6 +483,7 @@ async function _authorizeHeadlessCore(
       if (!isManual)
         appendLocalAudit(toolName, args, 'allow', 'dlp-review-flagged', meta, hashAuditArgs);
       explainableLabel = '🚨 Node9 DLP (Credential Review)';
+      dlpReviewFlagged = true;
     }
   }
 
@@ -563,13 +572,77 @@ async function _authorizeHeadlessCore(
     return { approved: true, checkedBy: 'audit' };
   }
 
+  // ── MCP APP PERMISSIONS (P3 Phase 2 — GOVERN) ─────────────────────────────
+  // Per-tool block/review for a gatewayed MCP server, keyed by (serverKey,
+  // bareTool). Gated on serverKey ALONE — only the mcp-gateway passes it, and
+  // there the tools/call name is ALREADY the bare upstream tool name (a stdio
+  // gateway wraps one upstream; `write_file` is not namespaced), so mcpServer
+  // (extractMcpServer) is undefined for the real path. We still defensively
+  // strip an `mcp__<name>__` prefix if a namespaced caller ever appears. bareTool
+  // then matches the SEE inventory's bare names — what the dashboard keyed by.
+  // Enforced in the standard/strict path only (observe/audit already returned
+  // above). Tightening gate: 'allow' is NOT a bypass — it falls through to
+  // DLP/egress/smart-rules like an unset tool.
+  // `review` routes to the human approver race below. Unlike taintWarning it is
+  // a TIGHTENING gate that COMPOSES with policy: it does NOT skip evaluatePolicy,
+  // so a shield/smart-rule hard-block still wins (review can add friction, never
+  // remove it). `block` (and review under panic mode) hard-denies here.
+  let appPermReview: string | null = null;
+  let appPermReviewTool: string | null = null; // bareTool — for audit attribution
+  if (meta?.serverKey) {
+    const prefix = meta.mcpServer ? `mcp__${meta.mcpServer}__` : '';
+    const bareTool =
+      prefix && toolName.startsWith(prefix) ? toolName.slice(prefix.length) : toolName;
+    const decision = config.policy.appPermissions?.[meta.serverKey]?.[bareTool];
+    // Panic mode upgrades review → block, same as the policy-verdict rule below.
+    const hardBlock =
+      decision === 'block' || (decision === 'review' && config.settings.panicMode === true);
+    if (hardBlock) {
+      if (!isManual)
+        appendLocalAudit(
+          toolName,
+          args,
+          'deny',
+          'app-permission-block',
+          // ruleName gives the dashboard row its "why" (rule attribution), the
+          // same channel shield fires use; mcpServer (in meta) gives the app chip.
+          { ...meta, ruleName: `app-permission:${bareTool}` },
+          hashAuditArgs
+        );
+      return {
+        approved: false,
+        blockedBy: 'local-config',
+        reason:
+          decision === 'block'
+            ? `App permission: "${bareTool}" is set to block by your workspace.`
+            : `App permission: "${bareTool}" requires review, and the workspace is in panic mode — all review actions are blocked.`,
+        blockedByLabel:
+          decision === 'block' ? '🔒 Node9 App Permission (Blocked)' : '🚨 Panic mode (org policy)',
+      };
+    }
+    if (decision === 'review') {
+      // Fall through — but through the FULL policy block (fix #3): a hard-block
+      // verdict there still wins; only allow/review verdicts reach the race.
+      appPermReview = `App permission: "${bareTool}" requires human approval (workspace policy).`;
+      appPermReviewTool = bareTool;
+    }
+  }
+
   // Fast Paths (Ignore, Trust, Policy Allow)
   // Bypassed entirely when a taint warning is active — taint overrides trust
   // sessions and policy allows so the user always gets a chance to review.
+  // NOTE: appPermReview does NOT skip this block (fix #3) — the policy must run so
+  // a hard-block verdict still wins. The ALLOW-returns inside are individually
+  // guarded with `!appPermReview` so a review-marked tool can't auto-allow.
   if (!taintWarning && !isIgnoredTool(toolName)) {
     // ── LOOP DETECTION ────────────────────────────────────────────────────
+    // Skipped for an org-set review (re-review regression fix): reopening this
+    // block for fix #3 re-enabled loop detection, which would hard-deny a
+    // review-marked tool BEFORE its approval card ever shows (an agent retrying
+    // after a human deny trips the threshold). A review must always reach the
+    // human; the human's own deny is the throttle.
     const ld = config.policy.loopDetection;
-    if (ld.enabled) {
+    if (ld.enabled && !appPermReview) {
       const loopResult = recordAndCheck(toolName, args, ld.threshold, ld.windowSeconds * 1000);
       if (loopResult.looping) {
         const reason =
@@ -623,7 +696,9 @@ async function _authorizeHeadlessCore(
       };
     }
 
-    if (policyResult.decision === 'allow') {
+    // `!appPermReview`: a policy ALLOW must not short-circuit an org-set review
+    // (fix #3) — fall through to the race. A policy BLOCK below still wins.
+    if (policyResult.decision === 'allow' && !appPermReview) {
       // Local row only — the outbox shipper delivers it. Removing the old
       // awaited POST also removes a cloud round-trip from EVERY allowed
       // call (the hot path). Rule attribution rides on the row so the SaaS
@@ -775,7 +850,9 @@ async function _authorizeHeadlessCore(
     // pattern (e.g. first command token) so approvals are narrowly scoped.
     // See: doc/roadmap.md "Command-Scoped Persistent Approvals".
     const persistent = policyResult.ruleName ? null : getPersistentDecision(toolName);
-    if (persistent === 'allow') {
+    // `!appPermReview`: a prior "Always Allow" must not bypass an org-set review
+    // (fix #3). A persistent DENY still short-circuits (tightening is fine).
+    if (persistent === 'allow' && !appPermReview) {
       // Local row only — cloud delivery via the outbox shipper.
       if (!isManual) appendLocalAudit(toolName, args, 'allow', 'persistent', meta, hashAuditArgs);
       return { approved: true, checkedBy: 'persistent' };
@@ -790,7 +867,7 @@ async function _authorizeHeadlessCore(
         blockedByLabel: 'Persistent User Rule',
       };
     }
-  } else if (!taintWarning) {
+  } else if (!taintWarning && !appPermReview) {
     // project-jail: if the shield is active, don't fast-path Read/Grep/Glob
     // calls that target sensitive credential paths — let them fall through to
     // policy evaluation so the shield's block rules can fire.
@@ -826,7 +903,7 @@ async function _authorizeHeadlessCore(
 
   // Trust session bypass — only for review-path calls, never for taint detection.
   // Runs after hard-block evaluation so block-verdict rules are always enforced.
-  if (!taintWarning && getActiveTrustSession(toolName, args)) {
+  if (!taintWarning && !appPermReview && getActiveTrustSession(toolName, args)) {
     // Local row only — cloud delivery via the outbox shipper.
     if (!isManual) appendLocalAudit(toolName, args, 'allow', 'trust', meta, hashAuditArgs);
     return { approved: true, checkedBy: 'trust' };
@@ -838,14 +915,44 @@ async function _authorizeHeadlessCore(
     explainableLabel = '🔴 Node9 Taint (Exfiltration Prevention)';
     // tier 7 = highest valid tier; pass taintWarning as ruleName so all
     // approval channels (terminal card, browser dashboard, Slack) can render it.
+    // fix #7: when an app-perm review ALSO applies, append it to the ruleName so
+    // the approver is told BOTH concerns — the review requirement isn't dropped.
     riskMetadata = computeRiskMetadata(
       args,
       7,
       explainableLabel,
       undefined,
       undefined,
-      taintWarning
+      appPermReview ? `${taintWarning}\n${appPermReview}` : taintWarning
     );
+  } else if (appPermReview) {
+    // Org-set per-tool review (MCP app permission) — same fall-through-to-race
+    // shape as taint, at elevated (not maximum) tier. The reason string rides as
+    // ruleName so every approval surface says WHICH tool needs sign-off.
+    // Re-review fix: when a DLP credential-review ALSO applies, combine (don't
+    // overwrite) so the approver still sees the secret context — same pattern as
+    // fix #7 (taint+review).
+    if (dlpReviewFlagged) {
+      explainableLabel = '🚨 Node9 DLP (Credential Review) + 🔒 App Permission (Review)';
+      riskMetadata = computeRiskMetadata(
+        args,
+        6,
+        explainableLabel,
+        undefined,
+        undefined,
+        `A credential was detected in this call (DLP review).\n${appPermReview}`
+      );
+    } else {
+      explainableLabel = '🔒 Node9 App Permission (Review)';
+      riskMetadata = computeRiskMetadata(
+        args,
+        5,
+        explainableLabel,
+        undefined,
+        undefined,
+        appPermReview
+      );
+    }
   }
 
   // ── INLINE-ASK DEFER (review → caller renders the prompt) ────────────────
@@ -860,7 +967,7 @@ async function _authorizeHeadlessCore(
   //     SaaS org-policy / routed approval; those keep the handshake + race below.
   // No caller sets `deferReview` yet → this is inert (no behavior change).
   const cloudEnforcedForDefer = approvers.cloud && !!creds?.apiKey;
-  if (options?.deferReview && !taintWarning && !cloudEnforcedForDefer) {
+  if (options?.deferReview && !taintWarning && !appPermReview && !cloudEnforcedForDefer) {
     return {
       approved: false,
       review: true,
@@ -886,7 +993,10 @@ async function _authorizeHeadlessCore(
   // with a strict boolean check to avoid JS truthiness surprises across the API
   // boundary.
   const forceReview =
-    localSmartRuleMatched === true || options?.localSmartRuleMatched === true || undefined;
+    localSmartRuleMatched === true ||
+    options?.localSmartRuleMatched === true ||
+    !!appPermReview ||
+    undefined;
   if (cloudEnforced) {
     try {
       const initResult = await initNode9SaaS(
@@ -900,15 +1010,22 @@ async function _authorizeHeadlessCore(
       );
 
       if (!initResult.pending) {
-        // Shadow mode: allowed through, but warn the developer passively
-        if (initResult.shadowMode) {
+        // Shadow mode: allowed through, but warn the developer passively.
+        // fix #2: an org-set app-perm review WINS over shadow mode (an explicit
+        // per-tool decision beats a global observe toggle) — and this also closes
+        // a stale/compromised-BE bypass (a BE answering shadowMode to skip the
+        // review). Fall through to the race instead of auto-allowing.
+        if (initResult.shadowMode && !appPermReview) {
           return { approved: true, checkedBy: 'cloud' };
         }
         // A local smart rule with verdict "review" represents explicit user intent
         // (e.g. require-approval-before-push). Cloud's immediate-allow must not
         // bypass it — fall through to the race engine so the user sees an approval card.
         // Also respect the flag when called from the daemon's background auth pass.
-        if (!localSmartRuleMatched && !options?.localSmartRuleMatched) {
+        // appPermReview: never accept a cloud immediate-allow — a stale/older BE
+        // that ignores forceReview must not bypass an org-set review. Fall
+        // through to the race so a genuine human decision is required.
+        if (!localSmartRuleMatched && !options?.localSmartRuleMatched && !appPermReview) {
           return {
             approved: !!initResult.approved,
             reason:
@@ -931,7 +1048,7 @@ async function _authorizeHeadlessCore(
       // remoteApprovalOnly is noted but not enforced — local UI always has control.
       // Hard blocks are handled by Shields before the UI opens.
       // Don't overwrite the taint label — taint context must stay visible to the user.
-      if (!taintWarning) explainableLabel = 'Organization Policy (SaaS)';
+      if (!taintWarning && !appPermReview) explainableLabel = 'Organization Policy (SaaS)';
     } catch {
       // Cloud API handshake failed — fall through to local rules silently
     }
@@ -1004,7 +1121,13 @@ async function _authorizeHeadlessCore(
           options?.activityId,
           options?.cwd,
           statefulRecoveryCommand,
-          undefined,
+          // fix #1: for an app-perm review, tell the daemon NOT to run its own
+          // background authorizeHeadless — it re-auths WITHOUT serverKey (meta
+          // carries no serverKey), skips the app-perm gate, and silently
+          // auto-allows. This process (the long-running gateway — appPermReview
+          // only ever happens here) stays alive to run its own racers, so the
+          // daemon just holds the card and waits for the human decision.
+          appPermReview ? true : undefined,
           undefined,
           localSmartRuleMatched || options?.localSmartRuleMatched,
           options?.socketActivitySent
@@ -1070,8 +1193,16 @@ async function _authorizeHeadlessCore(
         );
 
         if (decision === 'always_allow') {
-          writeTrustSession(toolName, 3600000, args);
-          return { approved: true, checkedBy: 'trust' } as AuthResult;
+          // fix #5 (behavioral half): for an app-perm review, do NOT persist a
+          // trust session — fix #3 guards trust off for review-marked tools, so a
+          // "1h trust" would silently no-op (the button would lie). Grant this
+          // call once instead; the human is re-asked next time (correct for an
+          // org-mandated review). Hiding the button on the card = fast follow.
+          if (!appPermReview) {
+            writeTrustSession(toolName, 3600000, args);
+            return { approved: true, checkedBy: 'trust' } as AuthResult;
+          }
+          return { approved: true, checkedBy: 'daemon', decisionSource: 'native' } as AuthResult;
         }
 
         const isApproved = decision === 'allow';
@@ -1128,6 +1259,18 @@ async function _authorizeHeadlessCore(
 
   // 🏆 RESOLVE THE RACE
   if (racePromises.length === 0) {
+    // fix #4: a review deny with no approval channels used to write NO audit row
+    // (the gate no longer writes an upfront review-deny row), so the deny was
+    // invisible to the dashboard. Write one, with app-perm attribution.
+    if (!isManual && appPermReview)
+      appendLocalAudit(
+        toolName,
+        args,
+        'deny',
+        'app-permission-review',
+        { ...meta, ruleName: `app-permission:${appPermReviewTool}` },
+        hashAuditArgs
+      );
     return {
       approved: false,
       noApprovalMechanism: true,
@@ -1219,7 +1362,13 @@ async function _authorizeHeadlessCore(
       // the BE enriches that row instead of inserting a duplicate. Matters
       // for EVERY racer outcome, not just cloud wins: a native-popup
       // decision on a cloud-pending request would otherwise count twice.
-      cloudRequestId ? { ...meta, cloudRequestId } : meta,
+      // fix #6: carry app-perm attribution so a race-resolved approve/deny isn't
+      // anonymous on the dashboard (matches the block row's ruleName).
+      {
+        ...meta,
+        ...(cloudRequestId && { cloudRequestId }),
+        ...(appPermReview && { ruleName: `app-permission:${appPermReviewTool}` }),
+      },
       hashAuditArgs
     );
   }

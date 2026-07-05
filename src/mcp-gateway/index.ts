@@ -24,8 +24,9 @@ import { getCredentials } from '../config';
 import { buildNegotiationMessage } from '../policy/negotiation';
 import { checkProvenance } from '../utils/provenance.js';
 import { hashToolDefinitions, getServerKey, checkPin, updatePin } from '../mcp-pin';
+import { tokenize } from '../mcp-cmd';
 import type { McpToolInfo } from '../daemon/mcp-tools';
-import { getServerConfig } from '../daemon/mcp-tools';
+import { getServerConfig, deriveServerName } from '../daemon/mcp-tools';
 import {
   DAEMON_PORT,
   DAEMON_HOST,
@@ -61,6 +62,30 @@ function isValidId(id: unknown): id is string | number | null {
 function extractMcpServer(toolName: string): string | undefined {
   const match = toolName.match(/^mcp__([^_](?:[^_]|_(?!_))*?)__/i);
   return match?.[1];
+}
+
+/**
+ * Server label for audit/display. A stdio gateway forwards BARE tool names
+ * (`read_file`), so extractMcpServer is usually undefined here — without a
+ * fallback the BLOCKED audit row ships with no MCP attribution while the
+ * hook's allowed row (namespaced) gets the chip. Fall back to the inventory's
+ * friendly name, then to a name derived from the launch command.
+ * Exported for unit testing.
+ */
+export function resolveServerLabel(
+  toolName: string,
+  serverKey: string,
+  upstreamCommand: string,
+  configName?: string
+): string {
+  return (
+    extractMcpServer(toolName) ??
+    // Prefer the explicit config name (--config-name) so audit rows show
+    // "redis-dev" from the FIRST call, before discovery persists it.
+    (configName || undefined) ??
+    getServerConfig(serverKey)?.name ??
+    deriveServerName(upstreamCommand)
+  );
 }
 
 /**
@@ -179,49 +204,18 @@ export function reportLargeResponseToCloud(
   }
 }
 
-/**
- * Shell-style tokenizer: splits on whitespace, respects double-quoted strings
- * and backslash escapes. Does NOT spawn a shell — no injection risk.
- * Example: `node "/path with spaces/server.js"` → `['node', '/path with spaces/server.js']`
- *
- * Exported for unit testing — callers outside this module should not use it directly.
- */
-export function tokenize(cmd: string): string[] {
-  const tokens: string[] = [];
-  let current = '';
-  let inDouble = false;
-  let i = 0;
-  while (i < cmd.length) {
-    const ch = cmd[i];
-    if (inDouble) {
-      if (ch === '"') {
-        inDouble = false;
-      } else if (ch === '\\' && i + 1 < cmd.length) {
-        current += cmd[++i];
-      } else {
-        current += ch;
-      }
-    } else {
-      if (ch === '"') {
-        inDouble = true;
-      } else if (ch === ' ' || ch === '\t') {
-        if (current) {
-          tokens.push(current);
-          current = '';
-        }
-      } else if (ch === '\\' && i + 1 < cmd.length) {
-        current += cmd[++i];
-      } else {
-        current += ch;
-      }
-    }
-    i++;
-  }
-  if (current) tokens.push(current);
-  return tokens;
-}
+// tokenize now lives in ../mcp-cmd (shared with the config-side wrap/unwrap so the
+// two can't drift — a wrapped server must launch with the args the config implies).
+// Imported above for internal use (spawn path); re-exported for existing callers/tests.
+export { tokenize };
 
-export async function runMcpGateway(upstreamCommand: string): Promise<void> {
+export async function runMcpGateway(
+  upstreamCommand: string,
+  // The agent-config key (from --config-name), used as the display/audit name.
+  // Does NOT feed serverKey (that hashes only upstreamCommand), so it never
+  // rotates pins or app-permission rules.
+  configName?: string
+): Promise<void> {
   // Capture cwd once at startup so repo-local pin file resolution (#179)
   // is stable for the lifetime of this gateway, even if the process later
   // chdirs for any reason.
@@ -450,11 +444,14 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
           String(message.params?.name ?? message.params?.tool_name ?? 'unknown')
         );
         const toolArgs = (message.params?.arguments ?? message.params?.tool_input ?? {}) as unknown;
-        const mcpServer = extractMcpServer(toolName);
+        const mcpServer = resolveServerLabel(toolName, serverKey, upstreamCommand, configName);
 
         const result = await authorizeHeadless(toolName, toolArgs, {
           agent: clientName ?? 'MCP-Gateway',
           mcpServer,
+          // Managed per-tool app permissions are keyed by serverKey (the pin
+          // hash) — pass it so authorizeHeadless can enforce block/review.
+          serverKey,
         });
 
         if (!result.approved) {
@@ -621,7 +618,14 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
               'Content-Type': 'application/json',
               ...(token && { 'x-node9-internal': token }),
             },
-            body: JSON.stringify({ serverKey, tools: toolSummary }),
+            // Display name: the explicit --config-name (the agent-config key,
+            // e.g. "redis-dev") when wrapped with one, else derived from the
+            // launch command. Display-only — serverKey is the identity.
+            body: JSON.stringify({
+              serverKey,
+              tools: toolSummary,
+              name: configName || deriveServerName(upstreamCommand),
+            }),
           }).catch(() => {
             /* silent */
           });

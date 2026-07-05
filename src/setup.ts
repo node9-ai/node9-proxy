@@ -7,6 +7,7 @@ import { confirm as rawConfirm } from '@inquirer/prompts';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import * as yaml from 'yaml';
 import { seedMcpPinsIfMissing } from './mcp-pin';
+import { recordHookBaseline } from './daemon/hook-baseline';
 import { renderOpencodeShim } from './setup-opencode-shim';
 import { renderPiShim } from './setup-pi-shim';
 
@@ -39,6 +40,10 @@ export async function setupAgent(agent: string): Promise<void> {
   else if (agent === 'opencode') await setupOpencode();
   else if (agent === 'pi') await setupPi();
   else if (agent === 'hermes') setupHermes();
+  else return; // unknown key — don't record a governance intent for it
+  // Record node9's intent to govern this agent so the daemon's hook-heal pass can
+  // tell "an update wiped a server we govern" (nudge) from "never governed" (ignore).
+  recordHookBaseline(agent, Date.now());
 }
 
 // Detect installed agents and wire each (non-interactive when the caller sets

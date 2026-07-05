@@ -22,6 +22,7 @@ import {
   setupHermes,
 } from './setup';
 import { AGENT_TEARDOWNS, resolveAgentTeardown, agentTeardownTargets } from './agent-teardowns';
+import { clearHookBaseline } from './daemon/hook-baseline';
 import { getAgentWiring } from './agent-wiring';
 import { writeCredentialsAndConfig } from './credentials';
 import { stopDaemon } from './daemon/index';
@@ -43,6 +44,7 @@ import { registerReportCommand } from './cli/commands/report';
 import { registerDaemonCommand } from './cli/commands/daemon-cmd';
 import { registerStatusCommand } from './cli/commands/status';
 import { registerInitCommand } from './cli/commands/init';
+import { registerHealCommand } from './cli/commands/heal';
 import { registerConnectCommand } from './cli/commands/connect';
 import { registerUndoCommand } from './cli/commands/undo';
 import { registerMcpGatewayCommand } from './cli/commands/mcp-gateway';
@@ -279,6 +281,9 @@ program
         );
       }
     }
+    // Forget node9's intended-governance record so the daemon's hook-heal pass
+    // never nudges to re-`init` an agent the user just deliberately uninstalled.
+    clearHookBaseline();
 
     // 2b. Leftover scan — re-read the agent-wiring registry and report any agent
     //     still wired. Scoped wording on purpose: the registry covers node9's
@@ -444,6 +449,7 @@ program
 
 // 3. INIT
 registerInitCommand(program);
+registerHealCommand(program);
 registerConnectCommand(program);
 
 // 4. AUDIT

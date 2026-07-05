@@ -48,8 +48,14 @@ describe('tokenize', () => {
     expect(tokenize('  node  server.js  ')).toEqual(['node', 'server.js']);
   });
 
-  it('drops empty-string token from adjacent quotes (no real command needs empty tokens)', () => {
-    expect(tokenize('node "" arg')).toEqual(['node', 'arg']);
+  it('PRESERVES an explicitly-quoted empty-string token (so a wrapped server keeps empty args)', () => {
+    // Shared with the config-side wrap/unwrap: a server launched with an empty
+    // positional arg must round-trip AND spawn identically.
+    expect(tokenize('node "" arg')).toEqual(['node', '', 'arg']);
+  });
+
+  it('does NOT emit a spurious empty token from an unterminated quote', () => {
+    expect(tokenize('node "')).toEqual(['node']); // malformed: no phantom ''
   });
 });
 

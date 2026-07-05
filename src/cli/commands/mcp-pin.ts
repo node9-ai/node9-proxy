@@ -13,11 +13,15 @@ import {
   type PinEntry,
 } from '../../mcp-pin';
 import fs from 'fs';
+import { registerMcpGatewayCommand } from './mcp-gateway-cmd';
 
 export function registerMcpPinCommand(program: Command): void {
   const pinCmd = program
     .command('mcp')
-    .description('Manage MCP server tool definition pinning (rug pull defense)');
+    .description('Manage MCP servers — governance (gateway) + tool-definition pinning');
+
+  // `node9 mcp gateway|ungateway|status` — attach to the same `mcp` parent.
+  registerMcpGatewayCommand(pinCmd);
 
   const pinSubCmd = pinCmd.command('pin').description('Manage pinned MCP server tool definitions');
 

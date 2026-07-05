@@ -14,6 +14,8 @@ import { runBlast } from '../cli/commands/blast.js';
 import { runPosture } from '../posture/index.js';
 import { shipPosture } from '../posture/ship.js';
 import { buildPolicySnapshot } from '../policy-snapshot/build.js';
+import { readMcpToolsConfig } from './mcp-tools.js';
+import { resolveMcpStatus } from '../mcp-status.js';
 import { shipPolicySnapshot } from '../policy-snapshot/ship.js';
 import { readActiveShields, readShieldOverrides } from '../shields.js';
 import {
@@ -163,6 +165,15 @@ export interface ManagedConfigCache {
     allowPrivate?: boolean;
   };
   dlp?: { enabled?: boolean; pii?: string };
+  approvers?: { native?: boolean; browser?: boolean; cloud?: boolean; terminal?: boolean };
+  reviewChannel?: string;
+  approvalTimeoutMs?: number;
+  injectionScan?: { enabled: boolean; minConfidence: string; allow: string[] };
+  loopDetection?: { enabled: boolean; threshold: number; windowSeconds: number };
+  skillPinning?: { enabled: boolean; mode: string; roots: string[] };
+  jailPaths?: { path: string; verdict: string }[];
+  trustedHosts?: string[];
+  appPermissions?: Record<string, Record<string, string>>;
   locked: string[];
 }
 
@@ -190,6 +201,15 @@ interface CloudPolicyBody {
       allowPrivate?: unknown;
     };
     dlp?: { enabled?: unknown; pii?: unknown };
+    approvers?: { native?: unknown; browser?: unknown; cloud?: unknown; terminal?: unknown };
+    reviewChannel?: unknown;
+    approvalTimeoutMs?: unknown;
+    injectionScan?: { enabled?: unknown; minConfidence?: unknown; allow?: unknown };
+    loopDetection?: { enabled?: unknown; threshold?: unknown; windowSeconds?: unknown };
+    skillPinning?: { enabled?: unknown; mode?: unknown; roots?: unknown };
+    jailPaths?: { path?: unknown; verdict?: unknown }[];
+    trustedHosts?: unknown;
+    appPermissions?: unknown;
     locked?: unknown;
   }; // M2 settings
 }
@@ -372,11 +392,19 @@ export function extractShields(body: CloudPolicyBody): string[] {
     : [];
 }
 
+/** Clamp to a positive int in [min,max]; default when unusable (mirrors the service). */
+function coerceInt(v: unknown, min: number, max: number, dflt: number): number {
+  return typeof v === 'number' && Number.isFinite(v)
+    ? Math.min(Math.max(Math.round(v), min), max)
+    : dflt;
+}
+
 /**
  * Cloud-managed settings from the sync body (Managed Config M2). Returns
  * undefined when nothing is managed so the cache stays minimal. Defensive
  * filtering keeps junk out of the cache the proxy applies.
  */
+
 export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache | undefined {
   const mc = body.managedConfig;
   if (!mc || typeof mc !== 'object') return undefined;
@@ -418,8 +446,103 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
     if (typeof mc.dlp.pii === 'string') d.pii = mc.dlp.pii;
     if (d.enabled !== undefined || d.pii !== undefined) out.dlp = d;
   }
+  // Preferences: approvers (4 bools — where approvals may happen).
+  if (mc.approvers && typeof mc.approvers === 'object') {
+    const a: NonNullable<ManagedConfigCache['approvers']> = {};
+    for (const k of ['native', 'browser', 'cloud', 'terminal'] as const) {
+      if (typeof mc.approvers[k] === 'boolean') a[k] = mc.approvers[k] as boolean;
+    }
+    if (Object.keys(a).length > 0) out.approvers = a;
+  }
+  // Preferences v2: reviewChannel ('ask'|'approver') + approvalTimeoutMs (number).
+  if (mc.reviewChannel === 'ask' || mc.reviewChannel === 'approver') {
+    out.reviewChannel = mc.reviewChannel;
+  }
+  // Positive only — a stored 0 would auto-deny every daemon-held card instantly
+  // (daemon timer: 0 ?? DEFAULT === 0). Unset falls back to the default timeout.
+  if (typeof mc.approvalTimeoutMs === 'number' && mc.approvalTimeoutMs > 0) {
+    out.approvalTimeoutMs = mc.approvalTimeoutMs;
+  }
+  // Detection: injectionScan { enabled, minConfidence, allow } — coerced.
+  if (mc.injectionScan && typeof mc.injectionScan === 'object') {
+    const i = mc.injectionScan;
+    out.injectionScan = {
+      enabled: i.enabled === true,
+      minConfidence: i.minConfidence === 'high' ? 'high' : 'medium',
+      allow: Array.isArray(i.allow)
+        ? i.allow.filter((x): x is string => typeof x === 'string')
+        : [],
+    };
+  }
+  // Detection: loopDetection + skillPinning — coerced.
+  if (mc.loopDetection && typeof mc.loopDetection === 'object') {
+    const l = mc.loopDetection;
+    out.loopDetection = {
+      enabled: l.enabled === true,
+      threshold: coerceInt(l.threshold, 1, 1000, 5),
+      windowSeconds: coerceInt(l.windowSeconds, 1, 3600, 120),
+    };
+  }
+  if (mc.skillPinning && typeof mc.skillPinning === 'object') {
+    const sk = mc.skillPinning;
+    out.skillPinning = {
+      enabled: sk.enabled === true,
+      mode: sk.mode === 'block' ? 'block' : 'warn',
+      roots: Array.isArray(sk.roots)
+        ? sk.roots.filter((x): x is string => typeof x === 'string')
+        : [],
+    };
+  }
+  if (Array.isArray(mc.jailPaths)) {
+    const jail = mc.jailPaths
+      .map((jp) => ({
+        path: typeof jp?.path === 'string' ? jp.path.trim() : '',
+        verdict: jp?.verdict === 'review' ? 'review' : 'block',
+      }))
+      .filter((jp) => jp.path);
+    if (jail.length) out.jailPaths = jail;
+  }
+  if (Array.isArray(mc.trustedHosts)) {
+    // Drop broad single-label wildcards (*.com) — matches the BE + local
+    // addTrustedHost guard so a hand-edited/legacy list can't neuter exfil
+    // detection fleet-wide.
+    const hosts = mc.trustedHosts.filter(
+      (h): h is string => typeof h === 'string' && (!h.startsWith('*.') || h.slice(2).includes('.'))
+    );
+    // Cache even an EMPTY managed list — a present-but-empty list is a valid
+    // REPLACE that CLEARS local host trust; dropping it here would make "clear"
+    // silently no-op (the array presence is the signal, not its length).
+    out.trustedHosts = hosts;
+  }
+  if (
+    mc.appPermissions &&
+    typeof mc.appPermissions === 'object' &&
+    !Array.isArray(mc.appPermissions)
+  ) {
+    const ap: Record<string, Record<string, string>> = {};
+    for (const [srv, tools] of Object.entries(mc.appPermissions)) {
+      if (!tools || typeof tools !== 'object' || Array.isArray(tools)) continue;
+      const m: Record<string, string> = {};
+      for (const [t, d] of Object.entries(tools as Record<string, unknown>)) {
+        if (d === 'allow' || d === 'review' || d === 'block') m[t] = d;
+      }
+      if (Object.keys(m).length) ap[srv] = m;
+    }
+    if (Object.keys(ap).length) out.appPermissions = ap;
+  }
   // Nothing actually managed → omit entirely.
-  return out.mode !== undefined || out.egress !== undefined || out.dlp !== undefined
+  return out.mode !== undefined ||
+    out.egress !== undefined ||
+    out.dlp !== undefined ||
+    out.approvers !== undefined ||
+    out.reviewChannel !== undefined ||
+    out.approvalTimeoutMs !== undefined ||
+    out.injectionScan !== undefined ||
+    out.loopDetection !== undefined ||
+    out.skillPinning !== undefined ||
+    out.jailPaths !== undefined ||
+    out.trustedHosts !== undefined ||
+    out.appPermissions !== undefined
     ? out
     : undefined;
 }
@@ -576,7 +699,16 @@ async function pushPostureSnapshot(creds: { apiKey: string; apiUrl: string }): P
 // other pushes; opt-out via NODE9_POLICY_MIRROR_DISABLE=1.
 async function pushPolicySnapshot(creds: { apiKey: string; apiUrl: string }): Promise<void> {
   try {
-    const body = buildPolicySnapshot(getConfig(), readActiveShields(), readShieldOverrides());
+    const body = buildPolicySnapshot(
+      getConfig(),
+      readActiveShields(),
+      readShieldOverrides(),
+      readMcpToolsConfig(),
+      // Merged config-vs-connected status. resolveMcpStatus reads process.env to
+      // resolve ${VAR} placeholders — so this push reflects THIS process's env
+      // (daemon here, user shell in runPolicyPush); see the P2 design's two-env note.
+      resolveMcpStatus()
+    );
     await shipPolicySnapshot(body, creds);
   } catch {
     // Silent — never break sync over a policy-mirror push.
@@ -593,7 +725,16 @@ export async function runPolicyPush(): Promise<{ ok: true } | { ok: false; reaso
     };
   }
   try {
-    const body = buildPolicySnapshot(getConfig(), readActiveShields(), readShieldOverrides());
+    const body = buildPolicySnapshot(
+      getConfig(),
+      readActiveShields(),
+      readShieldOverrides(),
+      readMcpToolsConfig(),
+      // Merged config-vs-connected status. resolveMcpStatus reads process.env to
+      // resolve ${VAR} placeholders — so this push reflects THIS process's env
+      // (daemon here, user shell in runPolicyPush); see the P2 design's two-env note.
+      resolveMcpStatus()
+    );
     const sent = await shipPolicySnapshot(body, creds);
     return sent ? { ok: true } : { ok: false, reason: 'Push failed (network or server error)' };
   } catch (e) {
