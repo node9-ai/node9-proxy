@@ -73,6 +73,7 @@ import { startCloudSync, startForensicBroadcast } from './sync.js';
 import { startAuditShipper } from './audit-shipper.js';
 import { startDlpScanner } from './dlp-scanner.js';
 import { startMcpReconciler } from './mcp-reconciler.js';
+import { startHookHeal } from './hook-heal.js';
 import { readMcpToolsConfig, updateServerDiscovery, approveServer } from './mcp-tools.js';
 
 export function startDaemon(): void {
@@ -82,6 +83,7 @@ export function startDaemon(): void {
   startAuditShipper();
   startDlpScanner();
   startMcpReconciler();
+  startHookHeal();
   loadInsightCounts(); // restore persisted nudge counters across restarts
   // Single per-process token. Stored in ~/.node9/daemon.pid (mode 0600)
   // and read by every local CLI client (`node9 tail`, mcp-gateway,

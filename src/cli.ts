@@ -22,6 +22,7 @@ import {
   setupHermes,
 } from './setup';
 import { AGENT_TEARDOWNS, resolveAgentTeardown, agentTeardownTargets } from './agent-teardowns';
+import { clearHookBaseline } from './daemon/hook-baseline';
 import { getAgentWiring } from './agent-wiring';
 import { writeCredentialsAndConfig } from './credentials';
 import { stopDaemon } from './daemon/index';
@@ -279,6 +280,9 @@ program
         );
       }
     }
+    // Forget node9's intended-governance record so the daemon's hook-heal pass
+    // never nudges to re-`init` an agent the user just deliberately uninstalled.
+    clearHookBaseline();
 
     // 2b. Leftover scan — re-read the agent-wiring registry and report any agent
     //     still wired. Scoped wording on purpose: the registry covers node9's
