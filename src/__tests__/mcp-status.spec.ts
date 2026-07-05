@@ -158,4 +158,15 @@ describe('updateServerDiscovery stamps lastSeenAt', () => {
     expect(mod.updateServerDiscovery('k1', tools)).toBe('match');
     expect(mod.readMcpToolsConfig()['k1'].lastSeenAt).toBe((first as number) + 5000);
   });
+
+  // P2.2 — a re-wrap reports a config name that must REPLACE the derived one
+  // (was backfill-only; that would have made the rename silently no-op).
+  it('overwrites a previously-reported name with a newly reported one', async () => {
+    const mod = await import('../daemon/mcp-tools.js');
+    const tools = [{ name: 'get' }];
+    mod.updateServerDiscovery('k2', tools, 'redis'); // first launch: derived name
+    expect(mod.readMcpToolsConfig()['k2'].name).toBe('redis');
+    mod.updateServerDiscovery('k2', tools, 'redis-dev'); // re-wrap: config name
+    expect(mod.readMcpToolsConfig()['k2'].name).toBe('redis-dev');
+  });
 });

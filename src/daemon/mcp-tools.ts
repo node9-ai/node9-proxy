@@ -119,8 +119,15 @@ export function updateServerDiscovery(
   // stamp freshness unconditionally (a 'match' still proves it's connected NOW).
   existing.lastSeenAt = now;
 
-  // Backfill the name on an existing entry that predates name capture.
-  if (name && !existing.name) {
+  // Take the latest reported name (was backfill-only). The gateway reports the
+  // best name it knows — an explicit --config-name ("redis-dev") or the derived
+  // fallback ("redis") — so a re-wrap that adds --config-name must be able to
+  // REPLACE a previously-derived name, or the rename silently no-ops (P2.2).
+  // Per-machine, per-serverKey = one server, so newest wins. (Caveat: the SAME
+  // upstream wrapped in two agents with different config keys shares one
+  // serverKey and will flap between the two names by launch order — display-only,
+  // genuinely ambiguous, accepted.)
+  if (name && existing.name !== name) {
     existing.name = name;
   }
 

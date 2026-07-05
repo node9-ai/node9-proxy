@@ -49,10 +49,26 @@ export function classifyMcp(s: McpServer): McpServerState {
   return 'ungoverned';
 }
 
-/** Rewrite an upstream entry to launch through the gateway (preserves env/type). */
-export function toGateway(s: McpServer): McpServer {
+/**
+ * Rewrite an upstream entry to launch through the gateway (preserves env/type).
+ * `configName` (the agent-config key, e.g. "redis-dev") rides along as
+ * `--config-name` so the gateway can report a stable display name instead of the
+ * command-derived one — fixing the "redis-dev + redis-prod both show as redis"
+ * collision. It's a SEPARATE arg from --upstream, so serverKey (hashed from the
+ * upstream only) is unchanged: existing pins + app-permission rules survive a
+ * re-wrap. Passed as its own argv element (no shell, no re-tokenization), so a
+ * name with spaces needs no quoting.
+ */
+export function toGateway(s: McpServer, configName?: string): McpServer {
   const upstream = [s.command ?? '', ...(s.args ?? [])].map(quoteArg).join(' ');
-  return { ...s, command: 'node9', args: ['mcp-gateway', '--upstream', upstream] };
+  // Omit the flag when empty OR when the name starts with '-': a name like
+  // "--upstream" would make commander swallow the next token as its value.
+  const nameArgs = configName && !configName.startsWith('-') ? ['--config-name', configName] : [];
+  return {
+    ...s,
+    command: 'node9',
+    args: ['mcp-gateway', ...nameArgs, '--upstream', upstream],
+  };
 }
 
 /** Reverse toGateway. null when not a gateway-wrapped entry. */

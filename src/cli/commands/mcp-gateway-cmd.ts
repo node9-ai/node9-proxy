@@ -61,8 +61,23 @@ function resolve(name: string, agent?: string): McpEntry[] {
 }
 
 function wrapEntry(e: McpEntry): void {
-  // toGateway on the RAW entry so env/type/… are preserved through the wrap.
-  writeMcpEntry(e.mcpFile, e.format, e.name, toGateway(e.raw));
+  // toGateway on the RAW entry so env/type/… are preserved. Pass the config key
+  // as the display name (--config-name) so the dashboard/audit show "redis-dev",
+  // not the command-derived "redis".
+  writeMcpEntry(e.mcpFile, e.format, e.name, toGateway(e.raw, e.name));
+}
+
+// Re-wrap an ALREADY-gatewayed server: unwrap to the original upstream, then
+// wrap again WITH --config-name. Same upstream ⇒ same serverKey ⇒ no pin/rule
+// loss. Used by `--rewrap` to retrofit servers wrapped before --config-name.
+function rewrapEntry(e: McpEntry): void {
+  const orig = fromGateway(e.raw);
+  if (!orig) {
+    // Corrupt/hand-edited wrapper (no parseable --upstream) — refuse rather than
+    // write back a broken command.
+    throw new Error("couldn't parse the original upstream (corrupt gateway entry)");
+  }
+  writeMcpEntry(e.mcpFile, e.format, e.name, toGateway(orig, e.name));
 }
 
 export function registerMcpGatewayCommand(mcp: Command): void {
@@ -111,64 +126,83 @@ export function registerMcpGatewayCommand(mcp: Command): void {
   mcp
     .command('gateway [name]')
     .description('Route an ungoverned MCP server through node9 (wrap it). --all for every one.')
-    .option('--all', 'wrap every ungoverned server across all agents')
+    .option('--all', 'wrap every server across all agents (ungoverned, or governed with --rewrap)')
     .option('--agent <id>', 'disambiguate a server name that exists in more than one agent')
-    .action((name: string | undefined, opts: { all?: boolean; agent?: string }) => {
-      const inv = inventoryMcp();
-      let targets: McpEntry[];
-      if (opts.all) {
-        targets = inv.filter((e) => e.state === 'ungoverned');
-      } else if (name) {
-        const matches = resolve(name, opts.agent);
-        if (matches.length === 0) {
-          console.error(chalk.red(`No MCP server named "${name}" found.`));
+    .option(
+      '--rewrap',
+      're-wrap an ALREADY-governed server to refresh its display name (--config-name); serverKey + rules are preserved'
+    )
+    .action(
+      (name: string | undefined, opts: { all?: boolean; agent?: string; rewrap?: boolean }) => {
+        const inv = inventoryMcp();
+        // --rewrap operates on GOVERNED servers (refresh); the default wraps UNGOVERNED.
+        const targetState: McpEntry['state'] = opts.rewrap ? 'gatewayed' : 'ungoverned';
+        let targets: McpEntry[];
+        if (opts.all) {
+          targets = inv.filter((e) => e.state === targetState);
+        } else if (name) {
+          const matches = resolve(name, opts.agent);
+          if (matches.length === 0) {
+            console.error(chalk.red(`No MCP server named "${name}" found.`));
+            process.exitCode = 1;
+            return;
+          }
+          if (matches.length > 1) {
+            console.error(
+              chalk.red(`"${name}" exists in ${matches.length} agents — pass --agent <id> (`) +
+                matches.map((m) => m.agent).join(', ') +
+                ').'
+            );
+            process.exitCode = 1;
+            return;
+          }
+          targets = matches;
+        } else {
+          console.error(chalk.red('Pass a server name or --all. See `node9 mcp status`.'));
           process.exitCode = 1;
           return;
         }
-        if (matches.length > 1) {
-          console.error(
-            chalk.red(`"${name}" exists in ${matches.length} agents — pass --agent <id> (`) +
-              matches.map((m) => m.agent).join(', ') +
-              ').'
-          );
-          process.exitCode = 1;
-          return;
-        }
-        targets = matches;
-      } else {
-        console.error(chalk.red('Pass a server name or --all. See `node9 mcp status`.'));
-        process.exitCode = 1;
-        return;
-      }
 
-      const wrappable = targets.filter((e) => e.state === 'ungoverned');
-      if (wrappable.length === 0) {
-        console.error(chalk.gray('Nothing to do — already governed (or node9-self).'));
-        return;
-      }
-      const agents = new Set<string>();
-      let failed = 0;
-      for (const e of wrappable) {
-        try {
-          wrapEntry(e); // can throw if the config changed/broke since inventory (TOCTOU)
-          agents.add(e.agentLabel);
-          console.error(chalk.green(`✓ governed ${e.name}`) + chalk.gray(` (${e.agentLabel})`));
-        } catch (err) {
-          failed++;
-          const msg = err instanceof Error ? err.message : String(err);
-          console.error(chalk.red(`✗ failed ${e.name}`) + chalk.gray(` (${e.agentLabel}): ${msg}`));
+        const doable = targets.filter((e) => e.state === targetState);
+        if (doable.length === 0) {
+          console.error(
+            chalk.gray(
+              opts.rewrap
+                ? 'Nothing to do — no governed servers to refresh.'
+                : 'Nothing to do — already governed (or node9-self).'
+            )
+          );
+          return;
+        }
+        const agents = new Set<string>();
+        let failed = 0;
+        for (const e of doable) {
+          try {
+            // Both paths can throw if the config changed/broke since inventory (TOCTOU).
+            if (opts.rewrap) rewrapEntry(e);
+            else wrapEntry(e);
+            agents.add(e.agentLabel);
+            const verb = opts.rewrap ? 'refreshed' : 'governed';
+            console.error(chalk.green(`✓ ${verb} ${e.name}`) + chalk.gray(` (${e.agentLabel})`));
+          } catch (err) {
+            failed++;
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error(
+              chalk.red(`✗ failed ${e.name}`) + chalk.gray(` (${e.agentLabel}): ${msg}`)
+            );
+          }
+        }
+        if (failed > 0) process.exitCode = 1;
+        if (agents.size > 0) {
+          console.error(
+            chalk.bold(`\nRestart ${[...agents].join(', ')}`) +
+              chalk.gray(' to activate. Undo any server with ') +
+              chalk.cyan('node9 mcp ungateway <name>') +
+              chalk.gray('.')
+          );
         }
       }
-      if (failed > 0) process.exitCode = 1;
-      if (agents.size > 0) {
-        console.error(
-          chalk.bold(`\nRestart ${[...agents].join(', ')}`) +
-            chalk.gray(' to activate. Undo any server with ') +
-            chalk.cyan('node9 mcp ungateway <name>') +
-            chalk.gray('.')
-        );
-      }
-    });
+    );
 
   mcp
     .command('ungateway <name>')

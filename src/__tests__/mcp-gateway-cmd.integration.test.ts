@@ -78,4 +78,36 @@ describe('node9 mcp gateway (integration)', () => {
     expect(status).not.toBe(0);
     expect(out).toMatch(/No MCP server named/);
   });
+
+  // P2.2 — the wrap carries the config key as --config-name for display/audit.
+  it('wraps with --config-name = the config key', () => {
+    run(home, ['gateway', 'gmail']);
+    const w = gmail();
+    expect(w.args).toContain('--config-name');
+    expect(w.args[w.args.indexOf('--config-name') + 1]).toBe('gmail');
+    // and it still points at the same upstream (config-name sits before --upstream)
+    expect(w.args).toContain('--upstream');
+  });
+
+  it('--rewrap retrofits an already-governed server that lacks --config-name', () => {
+    // A server wrapped by the OLD format (no --config-name).
+    fs.writeFileSync(
+      claudeCfg,
+      JSON.stringify({
+        mcpServers: {
+          redis: {
+            command: 'node9',
+            args: ['mcp-gateway', '--upstream', 'npx redis-mcp redis://h:6379'],
+          },
+        },
+      })
+    );
+    const r = run(home, ['gateway', 'redis', '--rewrap']);
+    expect(r.out).toMatch(/refreshed redis/);
+    const w = JSON.parse(fs.readFileSync(claudeCfg, 'utf-8')).mcpServers.redis;
+    expect(w.args).toContain('--config-name');
+    expect(w.args[w.args.indexOf('--config-name') + 1]).toBe('redis');
+    // upstream (and therefore serverKey) preserved through the re-wrap
+    expect(w.args[w.args.indexOf('--upstream') + 1]).toBe('npx redis-mcp redis://h:6379');
+  });
 });

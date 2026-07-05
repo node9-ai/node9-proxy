@@ -89,7 +89,7 @@ export function runMcpReconcile(): void {
     let wrapped = false;
     if (doWrap) {
       try {
-        writeMcpEntry(e.mcpFile, e.format, e.name, toGateway(e.raw));
+        writeMcpEntry(e.mcpFile, e.format, e.name, toGateway(e.raw, e.name));
         wrappedAgents.add(e.agentLabel);
         wrappedCount++;
         wrapped = true;

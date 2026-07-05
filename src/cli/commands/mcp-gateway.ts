@@ -13,7 +13,11 @@ export function registerMcpGatewayCommand(program: Command): void {
       '--upstream <command>',
       'The upstream MCP server command to wrap (e.g. "npx -y @modelcontextprotocol/server-filesystem /workspace")'
     )
-    .action(async (options: { upstream: string }) => {
-      await runMcpGateway(options.upstream);
+    .option(
+      '--config-name <name>',
+      'Friendly server name (the agent-config key) for display/audit — does not affect serverKey'
+    )
+    .action(async (options: { upstream: string; configName?: string }) => {
+      await runMcpGateway(options.upstream, options.configName);
     });
 }

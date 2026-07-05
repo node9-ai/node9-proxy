@@ -75,10 +75,14 @@ function extractMcpServer(toolName: string): string | undefined {
 export function resolveServerLabel(
   toolName: string,
   serverKey: string,
-  upstreamCommand: string
+  upstreamCommand: string,
+  configName?: string
 ): string {
   return (
     extractMcpServer(toolName) ??
+    // Prefer the explicit config name (--config-name) so audit rows show
+    // "redis-dev" from the FIRST call, before discovery persists it.
+    (configName || undefined) ??
     getServerConfig(serverKey)?.name ??
     deriveServerName(upstreamCommand)
   );
@@ -205,7 +209,13 @@ export function reportLargeResponseToCloud(
 // Imported above for internal use (spawn path); re-exported for existing callers/tests.
 export { tokenize };
 
-export async function runMcpGateway(upstreamCommand: string): Promise<void> {
+export async function runMcpGateway(
+  upstreamCommand: string,
+  // The agent-config key (from --config-name), used as the display/audit name.
+  // Does NOT feed serverKey (that hashes only upstreamCommand), so it never
+  // rotates pins or app-permission rules.
+  configName?: string
+): Promise<void> {
   // Capture cwd once at startup so repo-local pin file resolution (#179)
   // is stable for the lifetime of this gateway, even if the process later
   // chdirs for any reason.
@@ -434,7 +444,7 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
           String(message.params?.name ?? message.params?.tool_name ?? 'unknown')
         );
         const toolArgs = (message.params?.arguments ?? message.params?.tool_input ?? {}) as unknown;
-        const mcpServer = resolveServerLabel(toolName, serverKey, upstreamCommand);
+        const mcpServer = resolveServerLabel(toolName, serverKey, upstreamCommand, configName);
 
         const result = await authorizeHeadless(toolName, toolArgs, {
           agent: clientName ?? 'MCP-Gateway',
@@ -608,11 +618,13 @@ export async function runMcpGateway(upstreamCommand: string): Promise<void> {
               'Content-Type': 'application/json',
               ...(token && { 'x-node9-internal': token }),
             },
-            // Friendly name derived from the launch command (display-only).
+            // Display name: the explicit --config-name (the agent-config key,
+            // e.g. "redis-dev") when wrapped with one, else derived from the
+            // launch command. Display-only — serverKey is the identity.
             body: JSON.stringify({
               serverKey,
               tools: toolSummary,
-              name: deriveServerName(upstreamCommand),
+              name: configName || deriveServerName(upstreamCommand),
             }),
           }).catch(() => {
             /* silent */

@@ -73,4 +73,16 @@ describe('resolveServerLabel', () => {
       resolveServerLabel('read_email', 'nope', 'npx -y @modelcontextprotocol/server-filesystem /h')
     ).toBe('filesystem');
   });
+
+  // P2.2 — an explicit --config-name wins over the derived name (but not over an
+  // extracted namespaced name), so audit shows "redis-dev" from the first call.
+  it('config name beats the derived name', () => {
+    expect(resolveServerLabel('get', 'nope', 'npx redis-mcp redis://h', 'redis-dev')).toBe(
+      'redis-dev'
+    );
+  });
+
+  it('an extracted namespaced name still wins over config name', () => {
+    expect(resolveServerLabel('mcp__gmail__read_email', 'srv1', 'npx x', 'cfg-name')).toBe('gmail');
+  });
 });

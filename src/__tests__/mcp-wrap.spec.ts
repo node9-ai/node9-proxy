@@ -13,6 +13,7 @@ import {
   writeMcpEntry,
   type McpServer,
 } from '../mcp-wrap';
+import { getServerKey } from '../mcp-pin';
 
 describe('classifyMcp', () => {
   it('classifies gatewayed / node9-self / ungoverned', () => {
@@ -92,6 +93,44 @@ describe('toGateway / fromGateway round-trip', () => {
 
   it('fromGateway returns null for a non-gatewayed entry', () => {
     expect(fromGateway({ command: 'npx', args: ['x'] })).toBeNull();
+  });
+});
+
+describe('toGateway --config-name (P2.2)', () => {
+  const orig: McpServer = { command: 'npx', args: ['-y', '@x/server-redis', 'redis://h:6379'] };
+
+  it('injects --config-name BEFORE --upstream when a name is given', () => {
+    const w = toGateway(orig, 'redis-dev');
+    expect(w.args).toEqual([
+      'mcp-gateway',
+      '--config-name',
+      'redis-dev',
+      '--upstream',
+      'npx -y @x/server-redis redis://h:6379',
+    ]);
+  });
+
+  it('does NOT rotate serverKey — same key with and without the name', () => {
+    const up = (w: McpServer) => (w.args ?? [])[(w.args ?? []).indexOf('--upstream') + 1];
+    expect(getServerKey(up(toGateway(orig, 'redis-dev')))).toBe(getServerKey(up(toGateway(orig))));
+  });
+
+  it('omits the flag for an empty name or a name starting with "-" (commander guard)', () => {
+    expect(toGateway(orig, '').args?.[1]).toBe('--upstream');
+    expect(toGateway(orig, '--upstream').args?.[1]).toBe('--upstream');
+  });
+
+  it('fromGateway round-trips a --config-name-wrapped entry to the pristine original', () => {
+    const back = fromGateway(toGateway(orig, 'redis-dev'));
+    expect(back).toEqual(orig); // the flag is dropped on unwrap
+  });
+
+  it('preserves env/type through a named wrap', () => {
+    const withEnv = { ...orig, env: { REDIS_URL: 'x' }, type: 'stdio' } as McpServer &
+      Record<string, unknown>;
+    const w = toGateway(withEnv, 'redis-dev') as McpServer & Record<string, unknown>;
+    expect(w.env).toEqual({ REDIS_URL: 'x' });
+    expect(w.type).toBe('stdio');
   });
 });
 
