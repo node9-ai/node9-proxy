@@ -269,6 +269,30 @@ describe('ignored tools fast-path', () => {
     expect(r.stdout).toBe('');
   });
 
+  it('UserPromptSubmit DLP is SILENCED while node9 is paused (pause bug, dogfound 2026-07-05)', () => {
+    // `node9 pause` must silence the prompt-DLP gate exactly like the tool-call
+    // path (orchestrator honors checkPause; this branch didn't) — a paused
+    // node9 that still blocks prompts reads as "pause is broken".
+    const fakeAwsKey = 'AKIA' + 'QWERTYASDFGHJKLM'; // composed so this file never trips DLP itself
+    fs.writeFileSync(
+      path.join(tmpHome, '.node9', 'PAUSED'),
+      JSON.stringify({ expiry: Date.now() + 60_000, duration: '1m' })
+    );
+    const r = runCheck(
+      {
+        session_id: 's1',
+        turn_id: 't1',
+        cwd: '/tmp',
+        hook_event_name: 'UserPromptSubmit',
+        prompt: `help me debug: aws_access_key_id=${fakeAwsKey}`,
+      },
+      { HOME: tmpHome },
+      tmpHome
+    );
+    expect(r.status).toBe(0); // allowed through — pause wins
+    expect(r.stdout).toBe(''); // no block JSON
+  });
+
   it('Codex UserPromptSubmit with AWS key in prompt is blocked + audited without leaking secret', () => {
     // Compose the fake credential at runtime so this test file itself doesn't
     // trip Node9's own DLP scanner during code edits. Neither half matches
