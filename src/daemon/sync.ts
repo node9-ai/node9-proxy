@@ -15,6 +15,7 @@ import { runPosture } from '../posture/index.js';
 import { shipPosture } from '../posture/ship.js';
 import { buildPolicySnapshot } from '../policy-snapshot/build.js';
 import { readMcpToolsConfig } from './mcp-tools.js';
+import { resolveMcpStatus } from '../mcp-status.js';
 import { shipPolicySnapshot } from '../policy-snapshot/ship.js';
 import { readActiveShields, readShieldOverrides } from '../shields.js';
 import {
@@ -697,7 +698,11 @@ async function pushPolicySnapshot(creds: { apiKey: string; apiUrl: string }): Pr
       getConfig(),
       readActiveShields(),
       readShieldOverrides(),
-      readMcpToolsConfig()
+      readMcpToolsConfig(),
+      // Merged config-vs-connected status. resolveMcpStatus reads process.env to
+      // resolve ${VAR} placeholders — so this push reflects THIS process's env
+      // (daemon here, user shell in runPolicyPush); see the P2 design's two-env note.
+      resolveMcpStatus()
     );
     await shipPolicySnapshot(body, creds);
   } catch {
@@ -719,7 +724,11 @@ export async function runPolicyPush(): Promise<{ ok: true } | { ok: false; reaso
       getConfig(),
       readActiveShields(),
       readShieldOverrides(),
-      readMcpToolsConfig()
+      readMcpToolsConfig(),
+      // Merged config-vs-connected status. resolveMcpStatus reads process.env to
+      // resolve ${VAR} placeholders — so this push reflects THIS process's env
+      // (daemon here, user shell in runPolicyPush); see the P2 design's two-env note.
+      resolveMcpStatus()
     );
     const sent = await shipPolicySnapshot(body, creds);
     return sent ? { ok: true } : { ok: false, reason: 'Push failed (network or server error)' };
