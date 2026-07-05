@@ -458,7 +458,9 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
   if (mc.reviewChannel === 'ask' || mc.reviewChannel === 'approver') {
     out.reviewChannel = mc.reviewChannel;
   }
-  if (typeof mc.approvalTimeoutMs === 'number' && mc.approvalTimeoutMs >= 0) {
+  // Positive only — a stored 0 would auto-deny every daemon-held card instantly
+  // (daemon timer: 0 ?? DEFAULT === 0). Unset falls back to the default timeout.
+  if (typeof mc.approvalTimeoutMs === 'number' && mc.approvalTimeoutMs > 0) {
     out.approvalTimeoutMs = mc.approvalTimeoutMs;
   }
   // Detection: injectionScan { enabled, minConfidence, allow } — coerced.
@@ -507,7 +509,10 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
     const hosts = mc.trustedHosts.filter(
       (h): h is string => typeof h === 'string' && (!h.startsWith('*.') || h.slice(2).includes('.'))
     );
-    if (hosts.length) out.trustedHosts = hosts;
+    // Cache even an EMPTY managed list — a present-but-empty list is a valid
+    // REPLACE that CLEARS local host trust; dropping it here would make "clear"
+    // silently no-op (the array presence is the signal, not its length).
+    out.trustedHosts = hosts;
   }
   if (
     mc.appPermissions &&

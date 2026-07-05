@@ -178,4 +178,21 @@ describe('buildPolicySnapshot', () => {
       'cfg:gemini:redis-prod',
     ]);
   });
+
+  // Review fix #4 — a daemon-env-differs push can mark an actually-connected
+  // server 'unlaunchable' (it can't env-resolve the serverKey). If a connected
+  // row shares the name (P2.2 config-name), suppress the phantom card.
+  it('suppresses a non-connected row whose name matches a connected server', () => {
+    const connected: Record<string, McpServerConfig> = {
+      srvKey: { name: 'redis-dev', tools: [{ name: 'get' }], disabled: [], status: 'approved' },
+    };
+    const body = buildPolicySnapshot(cfg(), [], {}, connected, [
+      // daemon couldn't resolve the env → no serverKey → would add an extra row,
+      // but the connected row is named 'redis-dev' → drop the duplicate.
+      status({ name: 'redis-dev', connection: 'unlaunchable', missingEnv: ['REDIS_DEV_URL'] }),
+    ]);
+    expect(body.mcpServers).toHaveLength(1);
+    expect(body.mcpServers[0].key).toBe('srvKey');
+    expect(body.mcpServers[0].connection).toBe('connected');
+  });
 });

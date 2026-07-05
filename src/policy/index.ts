@@ -16,7 +16,7 @@ import pm from 'picomatch';
 import { scanArgs, scanFilePath } from '../dlp';
 import { type Config, getConfig, getActiveEnvironment } from '../config';
 import { checkProvenance } from '../utils/provenance.js';
-import { matchesTrustedHost } from '../auth/trusted-hosts.js';
+import { matchesTrustedHost, isTrustedHost } from '../auth/trusted-hosts.js';
 import {
   evaluatePolicy as engineEvaluatePolicy,
   isIgnoredTool as engineIsIgnoredTool,
@@ -76,7 +76,13 @@ export async function evaluatePolicy(
     { agent, cwd, activeEnvironment },
     {
       checkProvenance,
-      isTrustedHost: (host: string) => matchesTrustedHost(host, config.policy.trustedHosts),
+      // Managed → match against the org list (frozen with the rest of managed
+      // config; changes arrive via cloud sync). Unmanaged → the local file via
+      // getCachedHosts (5s TTL + mtime), so a `node9 trust add/remove` still
+      // reaches a long-lived in-process authorizer (the gateway) within seconds.
+      isTrustedHost: config.policy.trustedHostsManaged
+        ? (host: string) => matchesTrustedHost(host, config.policy.trustedHosts)
+        : isTrustedHost,
     }
   );
 }

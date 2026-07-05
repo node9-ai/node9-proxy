@@ -278,4 +278,22 @@ describe('extractManagedConfig — reviewChannel + approvalTimeoutMs (Preference
     });
     expect(out).toBeUndefined();
   });
+
+  // Review fix #1 — 0 is rejected (a stored 0 auto-denies every daemon card:
+  // `0 ?? DEFAULT === 0`). Only a positive timeout is accepted; 0 → unset → default.
+  it('drops approvalTimeoutMs of 0 (would auto-deny every card)', () => {
+    const out = extractManagedConfig({
+      managedConfig: { approvalTimeoutMs: 0, locked: [] },
+    });
+    expect(out).toBeUndefined();
+  });
+
+  // Review fix #3 — a present-but-EMPTY trustedHosts list is cached (it's a valid
+  // REPLACE that clears local trust); dropping it would make "clear" a silent no-op.
+  it('caches an empty trustedHosts list (clear), not just non-empty', () => {
+    const out = extractManagedConfig({
+      managedConfig: { trustedHosts: [], locked: [] },
+    });
+    expect(out?.trustedHosts).toEqual([]);
+  });
 });

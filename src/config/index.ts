@@ -14,7 +14,7 @@ import {
   applyManagedApprovers,
 } from './managed';
 import { pathRules } from '../shields/build';
-import { readTrustedHosts } from '../auth/trusted-hosts';
+import { normalizeHost } from '../auth/trusted-hosts';
 
 // SmartCondition + SmartRule are now defined in @node9/policy-engine.
 // Re-exported here so existing import paths (`from '../config'`) keep
@@ -119,8 +119,13 @@ export interface Config {
       roots: string[];
     };
     // Pipe-chain trusted hosts — downgrades secret|curl-host exfil verdicts.
-    // Seeded from ~/.node9/trusted-hosts.json; a managed list REPLACES it.
+    // ONLY the managed source populates this list; when unmanaged, the policy
+    // hook reads the local file directly via the fresh (TTL+mtime) getCachedHosts
+    // path, so a `node9 trust add/remove` still propagates to long-lived
+    // authorizers (the gateway) within seconds. trustedHostsManaged flags which
+    // source is live so an empty managed list can CLEAR (not just no-op).
     trustedHosts: string[];
+    trustedHostsManaged: boolean;
     // Managed MCP per-tool permissions { serverKey: { bareTool: allow|review|block } }.
     // Applied from the managed cache; enforced in the gateway authorize path.
     appPermissions: Record<string, Record<string, 'allow' | 'review' | 'block'>>;
@@ -365,6 +370,7 @@ export const DEFAULT_CONFIG: Config = {
     injectionScan: { enabled: false, minConfidence: 'medium', allow: [] },
     skillPinning: { enabled: false, mode: 'warn', roots: [] },
     trustedHosts: [],
+    trustedHostsManaged: false,
     appPermissions: {},
   },
   environments: {},
@@ -594,8 +600,11 @@ export function getConfig(cwd?: string): Config {
       ...DEFAULT_CONFIG.policy.skillPinning,
       roots: [...DEFAULT_CONFIG.policy.skillPinning.roots],
     },
-    // Seed from the local trusted-hosts file; a managed list REPLACES it below.
-    trustedHosts: readTrustedHosts().map((e) => e.host),
+    // Left empty on purpose: the local file is read fresh at policy-eval time
+    // (getCachedHosts via isTrustedHost), NOT snapshotted into the frozen config
+    // here. A managed list fills this below and flips trustedHostsManaged.
+    trustedHosts: [] as string[],
+    trustedHostsManaged: false,
     appPermissions: {},
   };
   const mergedEnvironments: Record<string, EnvironmentConfig> = { ...DEFAULT_CONFIG.environments };
@@ -844,7 +853,11 @@ export function getConfig(cwd?: string): Config {
         if (mc.reviewChannel === 'ask' || mc.reviewChannel === 'approver') {
           mergedSettings.reviewChannel = mc.reviewChannel;
         }
-        if (typeof mc.approvalTimeoutMs === 'number' && mc.approvalTimeoutMs >= 0) {
+        // Require a POSITIVE timeout. 0 is rejected (not "wait forever"): the
+        // daemon's pending-card timer is `setTimeout(deny, ms ?? DEFAULT)`, so a
+        // stored 0 would auto-deny every card instantly (0 ?? DEFAULT === 0).
+        // Unset → daemon uses its default; a disabled timeout isn't org-settable.
+        if (typeof mc.approvalTimeoutMs === 'number' && mc.approvalTimeoutMs > 0) {
           mergedSettings.approvalTimeoutMs = mc.approvalTimeoutMs;
         }
         // Detection: injectionScan replaces the local config per-field (the org
@@ -902,11 +915,16 @@ export function getConfig(cwd?: string): Config {
           }
         }
         // Managed trusted hosts REPLACE the local list (the org owns the
-        // pipe-chain trust set — a dev can't silently widen it).
-        if (Array.isArray(mc.trustedHosts) && mc.trustedHosts.length) {
-          mergedPolicy.trustedHosts = mc.trustedHosts.filter(
-            (h): h is string => typeof h === 'string'
-          );
+        // pipe-chain trust set — a dev can't silently widen it). Present-but-empty
+        // is a valid REPLACE: it CLEARS all host trust fleet-wide (hence the
+        // `Array.isArray` check, not `.length`, + the managed flag). Entries are
+        // normalized (scheme/port/path stripped) so a dashboard value like
+        // "https://api.co:443" actually matches the bare host at eval time.
+        if (Array.isArray(mc.trustedHosts)) {
+          mergedPolicy.trustedHostsManaged = true;
+          mergedPolicy.trustedHosts = mc.trustedHosts
+            .filter((h): h is string => typeof h === 'string')
+            .map((h) => normalizeHost(h));
         }
         // Managed MCP app permissions REPLACE the local map (coerced to known
         // decisions). Enforced by the gateway authorize path.

@@ -93,10 +93,20 @@ export function buildPolicySnapshot(
   // NO governance surface downstream (the FE renders no per-tool selects). Skip a
   // resolvable pending server whose real key is ALREADY connected (avoids a dupe).
   const seenKeys = new Set(connectedKeys);
+  // Names of servers that ARE connected (ground truth). Used to suppress a
+  // false-positive non-connected row for a server that actually launched but that
+  // THIS process couldn't env-resolve to its serverKey — the daemon-env-differs
+  // case: the daemon lacks a shell-only ${VAR}, so resolveMcpStatus marks the
+  // server 'unlaunchable' even though mcp-tools.json shows it connected. With
+  // P2.2, connected rows carry the config name, so a name match reliably means
+  // "same server" and we drop the phantom card. (An old, not-yet-rewrapped server
+  // whose connected name is still command-derived won't match — it re-wraps away.)
+  const connectedNames = new Set(connectedRows.map((r) => r.name).filter((n): n is string => !!n));
   const extraRows: PolicySnapshotBody['mcpServers'] = [];
   for (const s of statusEntries) {
     if (s.connection !== 'pending-launch' && s.connection !== 'unlaunchable') continue;
     if (s.serverKey && connectedKeys.has(s.serverKey)) continue;
+    if (s.name && connectedNames.has(s.name)) continue; // actually connected — no phantom row
     const key = s.serverKey ?? `cfg:${s.agent}:${s.name}`;
     if (seenKeys.has(key)) continue; // dedupe (same server wired in two agents, etc.)
     seenKeys.add(key);

@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { tokenize } from '../mcp-cmd';
 
 export interface McpToolInfo {
   name: string;
@@ -48,10 +49,9 @@ export function deriveServerName(cmd: string): string {
     'sh',
     '-c',
   ]);
-  const bin = cmd
-    .split(/\s+/)
-    .filter(Boolean)
-    .find((p) => !p.startsWith('-') && !runners.has(p.toLowerCase()));
+  // tokenize (not split on whitespace) so a quoted or `sh -c "npx foo"` upstream
+  // doesn't yield a leading-quote token like `"npx` as the name.
+  const bin = tokenize(cmd).find((p) => !p.startsWith('-') && !runners.has(p.toLowerCase()));
   if (!bin) return 'MCP Server';
   const base = (bin.split('/').pop() || bin).replace(/\.(js|mjs|cjs|ts|py)$/i, '');
   return strip(base) || 'MCP Server';

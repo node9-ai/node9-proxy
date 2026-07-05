@@ -24,6 +24,15 @@ describe('deriveServerName', () => {
     expect(() => deriveServerName('--only --flags')).not.toThrow();
     expect(deriveServerName('--only --flags')).toBe('MCP Server');
   });
+
+  // Review fix #7 — tokenize (not split-on-whitespace) so a quoted upstream
+  // doesn't pick a leading-quote token as the name.
+  it('tokenizes a quoted upstream instead of splitting on whitespace', () => {
+    // split() picked `"/opt/my` → "my"; tokenize picks the real binary → "srv".
+    expect(deriveServerName('node "/opt/my server/srv.js"')).toBe('srv');
+    // `sh -c "npx foo"` must never yield a name containing a quote char.
+    expect(deriveServerName('sh -c "npx foo-server"')).not.toMatch(/"/);
+  });
 });
 
 // Server label used for the audit row's MCP attribution. The real gateway
