@@ -90,7 +90,13 @@ export async function runPosture(opts: RunPostureOptions = {}): Promise<PostureR
   } = await runChecks(POSTURE_CHECKS, ctx);
 
   // Decide what node9 is already enforcing — at the real gating layer.
-  await annotateCoverage(rawFindings, ctx);
+  // Best-effort: this runs OUTSIDE runChecks' per-check catch, so guard it — a
+  // stranger's box (npx, no config) must get a scorecard, never a stack trace.
+  try {
+    await annotateCoverage(rawFindings, ctx);
+  } catch {
+    /* coverage stays unannotated; the rest of the scorecard still renders */
+  }
 
   // Drop findings that are open ONLY because node9 isn't enforcing (Coverage
   // already reports that gap) — no double-surfacing.
