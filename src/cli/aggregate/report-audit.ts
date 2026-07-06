@@ -955,6 +955,29 @@ export async function loadGeminiCostAsync(
  * empty audit log produces a zeroed envelope rather than throwing, so
  * dashboard consumers don't need a null check.
  */
+/**
+ * Attribute an auto-block row to one governed dimension (Report UI v2 · P0).
+ * Priority-ordered and MUTUALLY EXCLUSIVE — the first match wins, so a jail
+ * hit (checkedBy `smart-rule-block` + ruleName `shield:project-jail:*`) is
+ * classified `files`, never re-counted under `toolRules`. Only called for
+ * non-user-interactive blocks; `approvals`-class rows (timeout/local-decision)
+ * and DLP/PII are already covered by the dedicated counters, so returning
+ * them here is a no-op signal to the caller.
+ */
+function dimensionOfBlock(
+  checkedBy: string,
+  ruleName: string
+): 'network' | 'data' | 'files' | 'mcp' | 'toolRules' | 'approvals' | null {
+  if (checkedBy.includes('egress')) return 'network';
+  if (checkedBy.includes('pii') || checkedBy.includes('dlp')) return 'data';
+  if (checkedBy === 'app-permission-block' || ruleName.startsWith('app-permission:')) return 'mcp';
+  if (ruleName.startsWith('shield:project-jail')) return 'files';
+  if (checkedBy === 'loop-detected') return 'toolRules';
+  if (checkedBy === 'timeout' || checkedBy === 'local-decision') return 'approvals';
+  // Any other block (smart-rule-block, persistent-deny, unknown) → tool rules.
+  return 'toolRules';
+}
+
 export function aggregateReportFromAudit(
   period: ReportPeriod,
   opts: AggregateOpts = {}
@@ -1038,7 +1061,9 @@ export function aggregateReportFromAudit(
     const ts = new Date(e.ts);
     return ts >= priorStart && ts <= priorEnd;
   });
-  const priorBlocked = priorEntries.filter((e) => !isAllow(e.decision)).length;
+  const priorBlocked = priorEntries.filter(
+    (e) => typeof e.decision === 'string' && !isAllow(e.decision)
+  ).length;
   const priorBlockRate = priorEntries.length > 0 ? priorBlocked / priorEntries.length : null;
 
   // PreToolUse entries inside the period (post-hook + response-dlp dropped)
@@ -1048,6 +1073,10 @@ export function aggregateReportFromAudit(
   const entries = allEntries.filter((e) => {
     if (e.source === 'post-hook') return false;
     if (e.source === 'response-dlp') return false;
+    // Event rows (e.g. {"event":"shield-create"}) carry no decision and are
+    // not PreToolUse tool calls — dropping them keeps isAllow(decision) and
+    // the bucket loop total-safe on a real, mixed audit log.
+    if (typeof e.decision !== 'string') return false;
     const ts = new Date(e.ts);
     if (ts < start || ts > end) return false;
     if (excludeTests && isTestEntry(e, testTs)) {
@@ -1094,6 +1123,18 @@ export function aggregateReportFromAudit(
   const dailyMap = new Map<string, { calls: number; blocked: number }>();
   const hourMap = new Map<number, number>();
 
+  // Report UI v2 · P0 — per-dimension "what happened" counters, from the
+  // same checkedBy/ruleName the loop already reads. Approvals reuse the
+  // user-interactive counters above; cost is filled from the journals at
+  // return time. Classification is priority-ordered in dimensionOfBlock so a
+  // jail hit (a smart-rule with a shield:project-jail ruleName) lands ONLY
+  // in files, never double-counted in toolRules.
+  let dimNetworkBlocked = 0;
+  let dimDataObserved = 0; // PII/DLP would-block (allowed but flagged)
+  let dimFilesBlocked = 0;
+  let dimToolRulesBlocked = 0;
+  let dimMcpBlocked = 0;
+
   for (const e of entries) {
     // Skip intermediate `smart-rule-block-override` rows that were
     // resolved by a later daemon allow. The user-approval row carries
@@ -1120,6 +1161,31 @@ export function aggregateReportFromAudit(
       else if (e.checkedBy !== 'loop-detected') hardBlocked++;
     }
     if (e.checkedBy === 'loop-detected') loopHits++;
+
+    // Dimension attribution (Report UI v2 · P0). "Observed" data findings
+    // (PII/DLP would-block) are flagged regardless of the final decision.
+    const cb = e.checkedBy ?? '';
+    if (cb.includes('would-block') && (cb.includes('pii') || cb.includes('dlp'))) {
+      dimDataObserved++;
+    }
+    if (!allow && !userInteracted) {
+      switch (dimensionOfBlock(cb, e.ruleName ?? '')) {
+        case 'network':
+          dimNetworkBlocked++;
+          break;
+        case 'files':
+          dimFilesBlocked++;
+          break;
+        case 'mcp':
+          dimMcpBlocked++;
+          break;
+        case 'toolRules':
+          dimToolRulesBlocked++;
+          break;
+        // 'data' / 'approvals' / null: covered by dlpBlocked / timedOut /
+        // userDenied — don't double-count here.
+      }
+    }
 
     const t = toolMap.get(e.tool) ?? { calls: 0, blocked: 0 };
     t.calls++;
@@ -1210,6 +1276,14 @@ export function aggregateReportFromAudit(
     mcpMap,
     dailyMap,
     hourMap,
+    dimensions: {
+      network: { blocked: dimNetworkBlocked },
+      data: { blocked: dlpBlocked, observed: dimDataObserved },
+      approvals: { approved: userApproved, denied: userDenied, timedOut },
+      files: { blocked: dimFilesBlocked },
+      toolRules: { blocked: dimToolRulesBlocked, mcp: dimMcpBlocked, loops: loopHits },
+      cost: { totalUSD: claudeCost.total + codexCost.total + geminiCost.total },
+    },
     generatedAt: now.toISOString(),
   };
 
