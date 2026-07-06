@@ -11,6 +11,13 @@ import { checkPrivilege } from './privilege';
 import { checkContainment } from './containment';
 import { checkInbound } from './inbound';
 import { checkCoverage } from './coverage';
+import {
+  checkData,
+  checkApprovalConfig,
+  checkToolGovernance,
+  checkFiles,
+  checkCost,
+} from './governance';
 import { scorePosture } from './score';
 import { deriveHeadline } from './headline';
 import { annotateCoverage } from './enforcement';
@@ -24,6 +31,12 @@ export const POSTURE_CHECKS: PostureCheck[] = [
   { category: 'Privilege', run: checkPrivilege },
   { category: 'Isolation', run: checkContainment },
   { category: 'Inbound', run: checkInbound },
+  // Report UI v2 · P3 — the governed-config dimensions (mirror PolicyStudio).
+  { category: 'Data', run: checkData },
+  { category: 'Approvals', run: checkApprovalConfig },
+  { category: 'Tool governance', run: checkToolGovernance },
+  { category: 'Files', run: checkFiles },
+  { category: 'Cost', run: checkCost },
   { category: 'Coverage', run: checkCoverage },
 ];
 
