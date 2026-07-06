@@ -3,6 +3,7 @@
 // drive the config permutations and assert the finding shape/severity.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import path from 'path';
 
 const getConfig = vi.fn();
 vi.mock('../config', () => ({ getConfig: (...a: unknown[]) => getConfig(...a) }));
@@ -67,7 +68,12 @@ describe('checkData', () => {
     getConfig.mockReturnValue(cfg({ dlp: { enabled: true, pii: 'block' } }));
     const f = checkData(ctx)[0];
     expect(f.severity).toBe('advisory');
-    expect(f.coverageProbe).toEqual({ kind: 'fileRead', paths: ['/home/u/.aws/credentials'] });
+    // Build the expected path the same way the impl does so it's correct on
+    // Windows too (path.join uses '\' there — a hard-coded POSIX path fails CI).
+    expect(f.coverageProbe).toEqual({
+      kind: 'fileRead',
+      paths: [path.join(ctx.home, '.aws', 'credentials')],
+    });
   });
 });
 
