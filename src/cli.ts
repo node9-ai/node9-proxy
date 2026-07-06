@@ -55,6 +55,7 @@ import { registerSyncCommand } from './cli/commands/sync';
 import { registerAgentsCommand } from './cli/commands/agents';
 import { registerScanCommand } from './cli/commands/scan';
 import { registerPostureCommand } from './cli/commands/posture';
+import { registerScanRepoCommand } from './cli/commands/scan-repo';
 import { registerEgressCommand } from './cli/commands/egress';
 import { registerJailCommand } from './cli/commands/jail';
 import { registerSandboxCommand } from './cli/commands/sandbox';
@@ -700,6 +701,9 @@ registerScanCommand(program);
 
 // Security posture scorecard
 registerPostureCommand(program);
+
+// Repo agent-security scan (the CI-gate front door)
+registerScanRepoCommand(program);
 
 // Egress control (the posture remediation on-ramp)
 registerEgressCommand(program);

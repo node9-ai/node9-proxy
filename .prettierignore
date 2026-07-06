@@ -1,3 +1,6 @@
 dist/
 node_modules/
 coverage/
+
+# Verbatim real-repo configs used as test fixtures — never reformat
+src/__tests__/fixtures/ci-check/
