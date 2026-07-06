@@ -249,12 +249,18 @@ function fileSize(p: string): number {
 }
 
 /**
- * Stream-read bytes [fromByte, currentSize) from `filePath`, parsing each
- * JSONL line. Calls `onLine` for each parseable JSON object. Lines longer
- * than MAX_LINE_BYTES are skipped.
+ * Stream-read the COMPLETE lines in [fromByte, currentSize) from
+ * `filePath`, parsing each JSONL line. Calls `onLine` for each parseable
+ * JSON object. Lines longer than MAX_LINE_BYTES are skipped.
  *
- * Returns the new `scannedTo` value (always equals the file size at the
- * moment we finished). If we crashed mid-read, the caller can re-run and
+ * Returns the new `scannedTo` value: the byte just AFTER the last '\n' in
+ * the delta — NOT the file size. The writer may be mid-flush, leaving a
+ * partial trailing line; only complete lines are consumed, and the partial
+ * is re-read next tick once the writer finishes it. (Advancing to `size`
+ * would skip that line permanently: its prefix falls behind the offset and
+ * the next tick starts mid-line, yielding an unparseable fragment that is
+ * also skipped — a silent detection gap. Found live by the cost runtime
+ * spike, 2026-07-05.) If we crashed mid-read, the caller can re-run and
  * pick up from the previous `scannedTo` — there's no destructive update.
  */
 export async function scanDelta(
@@ -265,6 +271,15 @@ export async function scanDelta(
   const size = fileSize(filePath);
   if (size <= fromByte) return fromByte;
 
+  // Byte-domain boundary of the last complete line. `lastNl === size - 1`
+  // means the delta ends ON a newline (every line is terminated).
+  const lastNl = findLastNewline(filePath, fromByte, size);
+  const endsWithNewline = lastNl === size - 1;
+
+  // Stream the whole delta — INCLUDING any final line that lacks a trailing
+  // newline. readline yields that last line too, so a complete-but-not-yet-
+  // terminated record (writer flushed the JSON, newline not yet appended)
+  // is still parsed and scanned, exactly as before.
   const stream = fs.createReadStream(filePath, {
     start: fromByte,
     end: size - 1,
@@ -273,19 +288,74 @@ export async function scanDelta(
   const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
 
   let lineIndex = 0;
+  // Did the FINAL yielded line parse? Only meaningful when the delta does
+  // not end on a newline — it tells a complete unterminated record apart
+  // from a genuine mid-flush partial.
+  let lastLineParsed = false;
   for await (const raw of rl) {
     lineIndex++;
-    if (raw.length > MAX_LINE_BYTES) continue;
+    lastLineParsed = false;
+    // Byte length, not raw.length: raw.length is UTF-16 code units, so a
+    // multibyte line could slip past a byte-denominated cap.
+    if (Buffer.byteLength(raw, 'utf8') > MAX_LINE_BYTES) continue;
     if (raw.length === 0) continue;
     try {
       const obj: unknown = JSON.parse(raw);
       onLine(obj, lineIndex);
+      lastLineParsed = true;
     } catch {
-      // Skip unparseable lines — could be partial writes mid-flush.
-      // The next tick will re-attempt from `size` so we don't lose them.
+      // Unparseable: either genuinely corrupt, or the final mid-flush
+      // partial. The return-offset logic below decides whether to wait.
     }
   }
-  return size;
+
+  // Where to leave the watermark:
+  //  - ends on a newline → every line was complete → advance to size.
+  //  - final line lacked a newline but PARSED → it was a complete record
+  //    we just scanned → advance past it (to size); it won't be re-read.
+  //  - final line lacked a newline and did NOT parse → genuine mid-flush
+  //    partial. Leave the offset at the last complete line so the partial
+  //    is re-read once the writer finishes it (fixes the straddle skip).
+  //    EXCEPT if that partial already exceeds a max line — treat it as
+  //    abandoned/corrupt and advance past it so ticks reach quiescence
+  //    (never re-read a multi-MB never-terminated tail forever).
+  if (endsWithNewline || lastLineParsed) return size;
+  const partialStart = lastNl === -1 ? fromByte : lastNl + 1;
+  if (size - partialStart > MAX_LINE_BYTES) return size;
+  return partialStart;
+}
+
+/**
+ * Byte index of the last '\n' in [from, size) of `filePath`, or -1 if the
+ * range contains none. Reads backward in 64 KB chunks — in the common case
+ * (file ends with a newline) this is a single small read. Buffer/byte
+ * arithmetic only: character indexes drift from byte offsets on multibyte
+ * content (emoji-heavy transcripts) and silently corrupt the watermark.
+ */
+function findLastNewline(filePath: string, from: number, size: number): number {
+  const CHUNK = 64 * 1024;
+  let fd: number;
+  try {
+    fd = fs.openSync(filePath, 'r');
+  } catch {
+    return -1;
+  }
+  try {
+    const buf = Buffer.alloc(CHUNK);
+    let end = size;
+    while (end > from) {
+      const start = Math.max(from, end - CHUNK);
+      const n = fs.readSync(fd, buf, 0, end - start, start);
+      const idx = buf.subarray(0, n).lastIndexOf(0x0a);
+      if (idx !== -1) return start + idx;
+      end = start;
+    }
+    return -1;
+  } catch {
+    return -1;
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 /**

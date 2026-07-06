@@ -706,3 +706,125 @@ describe('watermark migration — extractor version drift', () => {
     expect(after).toBe(before);
   });
 });
+
+// ── scanDelta — partial-line boundary (mid-flush) ───────────────────────
+//
+// A JSONL line that straddles the tick (writer flushed only its first
+// half) must NOT be lost. The watermark must advance to just after the
+// last COMPLETE line (the last '\n'), so the next tick re-reads the
+// partial line once the writer finishes it. Advancing to fileSize
+// permanently skips it: its prefix falls behind the offset and the next
+// tick starts mid-line, yielding an unparseable fragment that is also
+// skipped — a silent detection gap. Found live by the cost runtime
+// spike (2026-07-05): byte-level probes on a being-written transcript.
+import { scanDelta } from '../daemon/scan-watermark';
+
+describe('scanDelta — partial trailing line', () => {
+  const line = (n: number) => JSON.stringify({ type: 'user', n }) + '\n';
+
+  it('advances to the last newline, not fileSize, when the delta ends mid-line', async () => {
+    const file = path.join(projectsDir, 'partial.jsonl');
+    const whole = line(1);
+    const partial = '{"type":"user","n":2,"content":"unfini'; // no trailing \n
+    fs.writeFileSync(file, whole + partial);
+
+    const seen: unknown[] = [];
+    const newOffset = await scanDelta(file, 0, (obj) => seen.push(obj));
+
+    expect(seen).toHaveLength(1); // only the complete line
+    // Offset must sit right after line 1's '\n' — NOT at fileSize.
+    expect(newOffset).toBe(Buffer.byteLength(whole, 'utf8'));
+  });
+
+  it('re-reads and parses the straddling line once the writer completes it', async () => {
+    const file = path.join(projectsDir, 'straddle.jsonl');
+    const firstHalf = '{"type":"user","n":2,"content":"second ';
+    fs.writeFileSync(file, line(1) + firstHalf);
+
+    const seen: Array<{ n?: number }> = [];
+    const onLine = (obj: unknown) => seen.push(obj as { n?: number });
+
+    // Tick 1: writer is mid-flush.
+    const off1 = await scanDelta(file, 0, onLine);
+    // Writer finishes the line, then appends one more.
+    fs.appendFileSync(file, 'half"}\n' + line(3));
+    // Tick 2: resumes from off1.
+    await scanDelta(file, off1, onLine);
+
+    // Every line was seen exactly once — including the straddler.
+    expect(seen.map((o) => o.n)).toEqual([1, 2, 3]);
+  });
+
+  it('returns fromByte unchanged when the delta is ONLY a partial line', async () => {
+    const file = path.join(projectsDir, 'only-partial.jsonl');
+    const first = line(1);
+    fs.writeFileSync(file, first + '{"half":tru'); // grew, but no new newline
+
+    const seen: unknown[] = [];
+    const from = Buffer.byteLength(first, 'utf8');
+    const newOffset = await scanDelta(file, from, (obj) => seen.push(obj));
+
+    expect(seen).toHaveLength(0);
+    expect(newOffset).toBe(from); // wait for the writer; re-read next tick
+  });
+
+  it('offset arithmetic is byte-domain (multibyte content before the boundary)', async () => {
+    const file = path.join(projectsDir, 'emoji.jsonl');
+    // Multibyte chars make CHARACTER index ≠ BYTE offset — the exact
+    // over-count failure mode the runtime spike hit before going byte-domain.
+    const emojiLine = JSON.stringify({ type: 'user', content: '✅🟡⬜ done ×3' }) + '\n';
+    const partial = '{"type":"user","n":9,"content":"tail';
+    fs.writeFileSync(file, emojiLine + partial);
+
+    const seen: unknown[] = [];
+    const off = await scanDelta(file, 0, (obj) => seen.push(obj));
+    expect(seen).toHaveLength(1);
+    expect(off).toBe(Buffer.byteLength(emojiLine, 'utf8'));
+
+    // Completing the line from the returned offset parses cleanly.
+    fs.appendFileSync(file, '"}\n');
+    const seen2: Array<{ n?: number }> = [];
+    await scanDelta(file, off, (obj) => seen2.push(obj as { n?: number }));
+    expect(seen2.map((o) => o.n)).toEqual([9]);
+  });
+});
+
+// ── scanDelta — final line without a trailing newline ───────────────────
+//
+// Regression guard (found by the high-effort review of the straddle fix):
+// a COMPLETE json record whose terminating '\n' hasn't been written yet
+// must still be scanned, and processing must reach quiescence — advancing
+// only to the last newline would (a) never scan that record and (b) re-read
+// the tail every tick forever, inflating filesScanned.
+describe('scanDelta — final line without trailing newline', () => {
+  it('scans a complete final record lacking a trailing newline, then reaches quiescence', async () => {
+    const file = path.join(projectsDir, 'no-final-nl.jsonl');
+    const l1 = JSON.stringify({ type: 'user', n: 1 }) + '\n';
+    const l2 = JSON.stringify({ type: 'user', n: 2 }); // complete JSON, NO newline
+    fs.writeFileSync(file, l1 + l2);
+
+    const seen: Array<{ n?: number }> = [];
+    const off = await scanDelta(file, 0, (o) => seen.push(o as { n?: number }));
+    expect(seen.map((s) => s.n)).toEqual([1, 2]); // BOTH scanned
+    expect(off).toBe(Buffer.byteLength(l1 + l2, 'utf8')); // advanced to size → quiescent
+
+    // Writer later terminates record 2 and appends record 3 — no re-scan of 2.
+    fs.appendFileSync(file, '\n' + JSON.stringify({ type: 'user', n: 3 }) + '\n');
+    const seen2: Array<{ n?: number }> = [];
+    await scanDelta(file, off, (o) => seen2.push(o as { n?: number }));
+    expect(seen2.map((s) => s.n)).toEqual([3]);
+  });
+
+  it('advances past an abandoned oversized partial so ticks reach quiescence', async () => {
+    const file = path.join(projectsDir, 'abandoned.jsonl');
+    const l1 = JSON.stringify({ type: 'user', n: 1 }) + '\n';
+    // A partial line larger than MAX_LINE_BYTES (2MB) that never gets a newline.
+    const huge = '{"type":"user","blob":"' + 'x'.repeat(2 * 1024 * 1024 + 16);
+    fs.writeFileSync(file, l1 + huge);
+
+    const seen: unknown[] = [];
+    const off = await scanDelta(file, 0, (o) => seen.push(o));
+    expect(seen).toHaveLength(1); // line 1 only; the huge partial is skipped
+    expect(off).toBe(fs.statSync(file).size); // advanced to size → no perpetual re-read
+  });
+});
