@@ -65,6 +65,32 @@ describe('CI-2 workflow analyzer — the severity nuance (the moat)', () => {
     expect(SEVERITY_RANK[nvidia.severity]).toBeGreaterThan(strapiRank);
   });
 
+  it('F1 regression: a stray "write" in a label name is NOT an actor gate', () => {
+    // Dangerous workflow (pull_request_target, head→root, broad tools) whose only
+    // `if` references a label named "needs-rewrite" — must NOT be treated as gated.
+    const wf = `
+on:
+  pull_request_target:
+    types: [opened]
+jobs:
+  review:
+    if: contains(github.event.pull_request.labels.*.name, 'needs-rewrite')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_args: '--allowedTools "Bash"'
+`;
+    const f = analyzeWorkflow('danger.yml', wf)!;
+    expect(SEVERITY_RANK[f.severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+    expect(f.signals.join(' ')).toMatch(/no effective actor gate/i);
+  });
+
   it('returns null for a non-agentic workflow (no cry-wolf on plain CI)', () => {
     const plain =
       'name: ci\non:\n  pull_request_target:\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n';

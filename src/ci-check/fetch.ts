@@ -81,10 +81,24 @@ async function ghGet(url: string): Promise<{ status: number; json: unknown }> {
   return { status: res.statusCode, json };
 }
 
-/** Fetch one file's decoded content, or null if absent. */
-async function fetchOne(owner: string, repo: string, filePath: string): Promise<RepoFile | null> {
+const RATE_LIMIT_NOTE =
+  'GitHub rate limit hit — results may be INCOMPLETE (a missing file could be unread, not absent). Set GITHUB_TOKEN.';
+
+/** Fetch one file's decoded content, or null if absent. On a 403 (rate limit)
+ *  we can't distinguish absent from unread, so we record a note so a partial
+ *  scan is never mistaken for a clean one. */
+async function fetchOne(
+  owner: string,
+  repo: string,
+  filePath: string,
+  notes: string[]
+): Promise<RepoFile | null> {
   const url = `https://api.github.com/repos/${owner}/${repo}/contents/${filePath}`;
   const { status, json } = await ghGet(url);
+  if (status === 403 || status === 429) {
+    if (!notes.includes(RATE_LIMIT_NOTE)) notes.push(RATE_LIMIT_NOTE);
+    return null;
+  }
   if (status !== 200 || !json || typeof json !== 'object') return null;
   const f = json as ContentsFile;
   if (f.type !== 'file' || typeof f.content !== 'string') return null;
@@ -108,7 +122,7 @@ async function fetchWorkflows(owner: string, repo: string, notes: string[]): Pro
   const ymls = entries.filter((e) => e.type === 'file' && /\.ya?ml$/.test(e.name));
   const out: RepoFile[] = [];
   for (const e of ymls) {
-    const f = await fetchOne(owner, repo, e.path);
+    const f = await fetchOne(owner, repo, e.path, notes);
     if (f) out.push(f);
   }
   return out;
@@ -121,7 +135,7 @@ export async function fetchGitHubTree(owner: string, repo: string): Promise<Repo
   const notes: string[] = [];
   try {
     for (const p of SURFACE_FILES) {
-      const f = await fetchOne(owner, repo, p);
+      const f = await fetchOne(owner, repo, p, notes);
       if (f) files.push(f);
     }
     files.push(...(await fetchWorkflows(owner, repo, notes)));

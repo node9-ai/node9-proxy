@@ -15,7 +15,7 @@ const AGENT_ACTION_RE =
 
 // Broad, write/exfil-capable tool grants (bare or dangerous verbs).
 const BROAD_TOOL_RE =
-  /(^|["\s,])(Bash|Write|Edit)(\s|,|"|$)|Bash\(\s*\*|Bash\((curl|wget|git push|git commit|git config|rm|sh|bash|eval|npx|pip)/i;
+  /(^|["\s,])(Bash|Write|Edit)(\s|,|"|$)|Bash\(\s*\*|Bash\((curl|wget|git push|git commit|git config|git:|rm|sh|bash|eval|npx|pip)/i;
 
 interface Step {
   uses?: string;
@@ -129,11 +129,14 @@ function hasActorGate(wf: Workflow, raw: Record<string, unknown>): boolean {
     .flat()
     .map(str)
     .join(' ');
+  // Only count write/admin/maintain when it's clearly a permission/association
+  // CHECK — not a stray word in a label name (e.g. `needs-rewrite`), which would
+  // falsely mark a dangerous workflow as gated and hide it.
   const gated =
-    /author_association|FIRST_TIME|write|admin|maintain|user\.login\s*==|contains\([^)]*login/i.test(
+    /author_association|FIRST_TIME_CONTRIBUTOR|collaborator|\b(MEMBER|OWNER)\b|permission|github\.actor\s*==|user\.login\s*==|==\s*['"](write|admin|maintain)|contains\([^)]*(login|actor|association)|head\.repo\.full_name\s*==\s*github\.repository/i.test(
       ifs
     );
-  const labelGated = !!labeled && /label/i.test(ifs);
+  const labelGated = !!labeled && /event\.label|label\.name/i.test(ifs);
   return gated || labelGated;
 }
 
