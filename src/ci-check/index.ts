@@ -3,7 +3,7 @@
 // aggregate → worst-severity. Never throws: a bad file becomes a note, so a
 // scan always returns a result (fail-open on our own bugs).
 
-import { fetchTree } from './fetch';
+import { fetchTree, type OnProgress } from './fetch';
 import { analyzeWorkflow } from './workflows';
 import { analyzeAgentConfig } from './agent-config';
 import { analyzeMcp } from './mcp';
@@ -50,8 +50,11 @@ export function scanTree(tree: RepoTree): ScanResult {
   return { source: tree.source, findings, inspected, notes, worst: worstOf(findings) };
 }
 
-/** Fetch + scan a repo (URL | owner/repo | local path). */
-export async function scanRepo(input: string): Promise<ScanResult> {
-  const tree = await fetchTree(input);
+/** Fetch + scan a repo (URL | owner/repo | local path). `onProgress` is a
+ *  best-effort UX hook for a CLI spinner — the scan works without it. */
+export async function scanRepo(input: string, onProgress?: OnProgress): Promise<ScanResult> {
+  const tree = await fetchTree(input, onProgress);
   return scanTree(tree);
 }
+
+export type { OnProgress };

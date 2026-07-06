@@ -26,6 +26,25 @@ export interface ParsedRepo {
   repo: string;
 }
 
+/** Progress callback — best-effort UX only (a spinner in the CLI). */
+export type OnProgress = (p: { phase: string; done: number; total: number }) => void;
+
+/** Run async tasks with a small concurrency cap so a many-workflow repo fetches
+ *  in parallel (not one serial round-trip at a time) without hammering the API. */
+async function pooled<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i]);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
 /** Accept github.com/owner/repo, https://…, owner/repo, with optional .git /
  *  /tree/<ref>. Returns null if it doesn't look like a GitHub ref. */
 export function parseRepoUrl(input: string): ParsedRepo | null {
@@ -108,41 +127,45 @@ async function fetchOne(
   return { path: filePath, content };
 }
 
-async function fetchWorkflows(owner: string, repo: string, notes: string[]): Promise<RepoFile[]> {
+async function listWorkflowPaths(owner: string, repo: string, notes: string[]): Promise<string[]> {
   const url = `https://api.github.com/repos/${owner}/${repo}/contents/${WORKFLOW_DIR}`;
   const { status, json } = await ghGet(url);
-  if (status === 403) {
-    notes.push(
-      'GitHub rate limit hit while listing workflows — set GITHUB_TOKEN for full coverage.'
-    );
+  if (status === 403 || status === 429) {
+    if (!notes.includes(RATE_LIMIT_NOTE)) notes.push(RATE_LIMIT_NOTE);
     return [];
   }
   if (status !== 200 || !Array.isArray(json)) return [];
-  const entries = json as ContentsFile[];
-  const ymls = entries.filter((e) => e.type === 'file' && /\.ya?ml$/.test(e.name));
-  const out: RepoFile[] = [];
-  for (const e of ymls) {
-    const f = await fetchOne(owner, repo, e.path, notes);
-    if (f) out.push(f);
-  }
-  return out;
+  return (json as ContentsFile[])
+    .filter((e) => e.type === 'file' && /\.ya?ml$/.test(e.name))
+    .map((e) => e.path);
 }
 
+const FETCH_CONCURRENCY = 8;
+
 /** Fetch the agent-surface of a GitHub repo. Never throws — network/absence
- *  failures become notes; the checks run over whatever we got. */
-export async function fetchGitHubTree(owner: string, repo: string): Promise<RepoTree> {
-  const files: RepoFile[] = [];
+ *  failures become notes; the checks run over whatever we got. Fetches run
+ *  concurrently (bounded) so a many-workflow repo doesn't serialize. */
+export async function fetchGitHubTree(
+  owner: string,
+  repo: string,
+  onProgress?: OnProgress
+): Promise<RepoTree> {
   const notes: string[] = [];
   try {
-    for (const p of SURFACE_FILES) {
+    onProgress?.({ phase: 'listing workflows', done: 0, total: 1 });
+    const workflowPaths = await listWorkflowPaths(owner, repo, notes);
+    const allPaths = [...SURFACE_FILES, ...workflowPaths];
+    let done = 0;
+    const fetched = await pooled(allPaths, FETCH_CONCURRENCY, async (p) => {
       const f = await fetchOne(owner, repo, p, notes);
-      if (f) files.push(f);
-    }
-    files.push(...(await fetchWorkflows(owner, repo, notes)));
+      onProgress?.({ phase: 'fetching agent surface', done: ++done, total: allPaths.length });
+      return f;
+    });
+    return { source: `${owner}/${repo}`, files: fetched.filter((f): f is RepoFile => !!f), notes };
   } catch (err) {
     notes.push(`fetch degraded: ${(err as Error)?.message ?? 'network error'}`);
+    return { source: `${owner}/${repo}`, files: [], notes };
   }
-  return { source: `${owner}/${repo}`, files, notes };
 }
 
 /** Read the agent-surface from a local directory (no network). */
@@ -175,7 +198,7 @@ export function readLocalTree(dir: string): RepoTree {
 }
 
 /** Resolve any input (URL | owner/repo | local path) to a RepoTree. */
-export async function fetchTree(input: string): Promise<RepoTree> {
+export async function fetchTree(input: string, onProgress?: OnProgress): Promise<RepoTree> {
   if (isLocalPath(input)) return readLocalTree(input);
   const parsed = parseRepoUrl(input);
   if (!parsed) {
@@ -185,5 +208,5 @@ export async function fetchTree(input: string): Promise<RepoTree> {
       notes: [`Could not parse "${input}" as a GitHub repo or local path.`],
     };
   }
-  return fetchGitHubTree(parsed.owner, parsed.repo);
+  return fetchGitHubTree(parsed.owner, parsed.repo, onProgress);
 }
