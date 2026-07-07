@@ -47,7 +47,11 @@ export function scanTree(tree: RepoTree): ScanResult {
     (a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] || a.file.localeCompare(b.file)
   );
 
-  return { source: tree.source, findings, inspected, notes, worst: worstOf(findings) };
+  // A rate-limit / network note means we could NOT read every file — a null
+  // worst is then "we couldn't look", not "clean". Surface it so no caller (CLI
+  // header, Action, SaaS) renders a partial scan as a clean bill of health.
+  const incomplete = notes.some((nt) => /may be INCOMPLETE/i.test(nt));
+  return { source: tree.source, findings, inspected, notes, worst: worstOf(findings), incomplete };
 }
 
 /** Fetch + scan a repo (URL | owner/repo | local path). `onProgress` is a

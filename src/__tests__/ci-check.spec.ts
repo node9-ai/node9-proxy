@@ -513,6 +513,39 @@ describe('scanTree orchestration + fetch parsing', () => {
     expect(res.worst).toBe('medium');
   });
 
+  it('a rate-limited (incomplete) scan is NEVER rendered as clean', async () => {
+    const { renderScan, exitCodeFor } = await import('../ci-check/render.js');
+    // No files read + a rate-limit note = we couldn't look. This must NOT be
+    // "clean" — it's the 3x-ui case the user hit (0 files → "✅ clean").
+    const tree = {
+      source: 'MHSanaei/3x-ui',
+      notes: [
+        'GitHub rate limit hit — results may be INCOMPLETE (a missing file could be unread, not absent). Set GITHUB_TOKEN.',
+      ],
+      files: [],
+    };
+    const res = scanTree(tree);
+    expect(res.incomplete).toBe(true);
+    expect(res.worst).toBeNull();
+    expect(exitCodeFor(res)).toBe(3); // not 0 — a script must not read it as a clean pass
+    const out = renderScan(res);
+    expect(out).toMatch(/INCOMPLETE/);
+    expect(out).not.toMatch(/agent-security: clean/);
+    expect(out).not.toMatch(/No committed agent hooks/);
+  });
+
+  it('resolveGitHubToken prefers an explicit env token', async () => {
+    const { resolveGitHubToken } = await import('../ci-check/fetch.js');
+    const saved = process.env.GITHUB_TOKEN;
+    process.env.GITHUB_TOKEN = FAKE_TOKEN;
+    try {
+      expect(resolveGitHubToken()).toBe(FAKE_TOKEN);
+    } finally {
+      if (saved === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = saved;
+    }
+  });
+
   it('parseRepoUrl handles url/shorthand/tree forms', () => {
     expect(parseRepoUrl('https://github.com/milvus-io/milvus')).toEqual({
       owner: 'milvus-io',
