@@ -168,6 +168,88 @@ jobs:
     expect(f.severity).toBe('medium');
   });
 
+  it('F11: read-only token + scoped-script tools (medusa/sentry) → medium, not high', () => {
+    // Ungated issues trigger + "*" + reach + a `Write` tool, BUT the token is
+    // read-only and the Bash tools are scoped to specific scripts — an injected
+    // agent can't write to GitHub or exfil/RCE → limited blast radius → medium.
+    const wf = `
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+      id-token: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'read github.event.issue.body'
+          claude_args: '--allowedTools "Write,Bash(gh api *),Bash(python3 .claude/scripts/x.py *)"'
+`;
+    const f = analyzeWorkflow('triage.yml', wf)!;
+    expect(f.severity).toBe('medium');
+  });
+
+  it('F11: the SAME workflow but with pull-requests:write is NOT capped → high (the hyperdx case)', () => {
+    const wf = `
+on:
+  pull_request_target:
+    types: [opened]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          claude_args: '--allowedTools "Bash(gh api:*),Bash(git:*)"'
+`;
+    const f = analyzeWorkflow('review.yml', wf)!;
+    expect(SEVERITY_RANK[f.severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+  });
+
+  it('F11: write perms on a SEPARATE (non-agent) job are not credited to the agent (medusa two-job)', () => {
+    // The agent runs in a read-only job; a downstream "post the review" job has
+    // write perms. An injected agent can't use the other job's token → medium.
+    const wf = `
+on:
+  workflow_call:
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'read github.event.issue.body'
+          claude_args: '--allowedTools "Bash(bash scripts/get_pr.sh:*),Write"'
+  post:
+    needs: analyze
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write
+    steps:
+      - run: echo "post the decision"
+`;
+    const f = analyzeWorkflow('two-job.yml', wf)!;
+    expect(f.severity).toBe('medium');
+  });
+
   it('CATASTROPHIC (the genuine one): untrusted trigger + * + broad Bash + secrets → high/critical', () => {
     const wf = `
 on:

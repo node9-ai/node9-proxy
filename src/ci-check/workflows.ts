@@ -18,6 +18,14 @@ const AGENT_ACTION_RE =
 const BROAD_TOOL_RE =
   /(^|["\s,])(Bash|Write|Edit)(\s|,|"|$)|Bash\(\s*\*|Bash\((curl|wget|git push|git commit|git config|git:|rm|sh|bash|eval|npx|pip)/i;
 
+// EXFIL/RCE tools: genuinely arbitrary shell or network egress — the tools that
+// let an injected agent steal secrets or run code. Deliberately NARROWER than
+// BROAD_TOOL_RE: it EXCLUDES scoped script invocations (`Bash(bash scripts/x.sh)`,
+// `Bash(python3 x.py *)`, `Bash(gh api *)`) and bare `Write`/`Edit` (which write
+// files but can't exfil on their own). Used by the F11 damage-capability cap.
+const EXFIL_RCE_RE =
+  /(^|["\s,])Bash(\s|,|"|$)|Bash\(\s*\*|Bash\((curl|wget|sh[\s):]|eval|rm[\s):]|git push)/i;
+
 interface Step {
   uses?: string;
   run?: string;
@@ -152,7 +160,7 @@ function hasImplicitActorGate(agentSteps: Step[], bypassActive: boolean): boolea
   return agentSteps.some((s) => /anthropics\/claude-code-action@/i.test(s.uses ?? ''));
 }
 
-function permsElevated(wf: Workflow): boolean {
+function permsElevated(wf: Workflow, agentJobs: Job[]): boolean {
   const check = (p: Record<string, string> | string | undefined) => {
     const s = str(p);
     // `str` may JSON-stringify a mapping (`{"contents":"write"}`) — the key is
@@ -160,7 +168,22 @@ function permsElevated(wf: Workflow): boolean {
     // and value or the plain `key: write` YAML form.
     return /["']?(contents|id-token|packages)["']?\s*:\s*["']?write/i.test(s);
   };
-  return check(wf.permissions) || Object.values(wf.jobs ?? {}).some((j) => check(j.permissions));
+  // Only the AGENT's own job(s) matter — a separate non-agent job's write perms
+  // (e.g. a downstream "post the review" job) can't be abused by the injected agent.
+  return check(wf.permissions) || agentJobs.some((j) => check(j.permissions));
+}
+
+/** Does the workflow grant the token real GitHub WRITE power (modify the repo /
+ *  PRs / issues)? id-token:write is NOT counted — it's OIDC (cloud auth), only
+ *  exploitable with an exfil/RCE tool, which the F11 cap handles separately. */
+function hasGithubWritePerm(wf: Workflow, agentJobs: Job[]): boolean {
+  const check = (p: Record<string, string> | string | undefined) =>
+    /["']?(contents|pull-requests|issues|packages|actions|deployments)["']?\s*:\s*["']?write/i.test(
+      str(p)
+    );
+  // Scope to the agent's own job(s) — a separate job's write perms are irrelevant
+  // to what an injected agent can do (see medusa: agent in a read-only job).
+  return check(wf.permissions) || agentJobs.some((j) => check(j.permissions));
 }
 
 function usesPat(wf: Workflow): boolean {
@@ -203,6 +226,15 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   const wf = raw as Workflow;
   const steps = allSteps(wf).map((s) => s.step);
   const agentSteps = steps.filter(isAgentStep);
+  // The job(s) the agent actually runs in — permission checks scope to these, so
+  // a separate job's write perms don't get credited to the agent (the medusa bug).
+  const agentJobs = [
+    ...new Set(
+      allSteps(wf)
+        .filter((s) => isAgentStep(s.step))
+        .map((s) => s.job)
+    ),
+  ];
   if (agentSteps.length === 0) return null;
 
   const triggers = triggerKeys(wf, raw);
@@ -232,7 +264,7 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
 
   const toolsBlob = collectTools(agentSteps);
   const broadTools = BROAD_TOOL_RE.test(toolsBlob);
-  const elevated = permsElevated(wf);
+  const elevated = permsElevated(wf, agentJobs);
   const pat = usesPat(wf);
   const power = (broadTools ? 2 : 0) + (bypassActive ? 1 : 0) + (elevated ? 1 : 0) + (pat ? 1 : 0);
 
@@ -269,6 +301,17 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   // limited to scoped API ops (e.g. mcp github issue tools) — real but not
   // catastrophic → cap high/critical down to medium.
   if (!broadTools && severity && SEVERITY_RANK[severity] > SEVERITY_RANK.medium)
+    severity = 'medium';
+  // F11: catastrophe requires DAMAGE CAPABILITY. An injected agent can only cause
+  // real harm if it can WRITE to GitHub (write perms or a static PAT) or EXFIL/RCE
+  // (bare Bash / curl / wget / sh — not a scoped script). A read-only token + only
+  // scoped tools (the medusa / sentry-javascript pattern: `Write` + `Bash(python3
+  // scripts/x.py *)` + `issues: read`) is a real injection with a LIMITED blast
+  // radius → cap high/critical at medium. hyperdx (pull-requests: write) is NOT
+  // capped and correctly stays high.
+  const writePower = hasGithubWritePerm(wf, agentJobs) || pat;
+  const exfilOrRce = EXFIL_RCE_RE.test(toolsBlob);
+  if (!writePower && !exfilOrRce && severity && SEVERITY_RANK[severity] > SEVERITY_RANK.medium)
     severity = 'medium';
   if (!severity) severity = 'advisory';
 
