@@ -27,15 +27,19 @@ const ALPHA = 'abcdefghijklmnopqrstuvwxyz0123456789';
 const FAKE_TOKEN = 'ghp_' + Array.from({ length: 36 }, (_, i) => ALPHA[(i * 13 + 5) % 36]).join('');
 
 describe('CI-2 workflow analyzer — the severity nuance (the moat)', () => {
-  it('rates milvus HIGH+ (untrusted head → root, no actor gate, base secrets)', () => {
+  it('F7: rates milvus ADVISORY — claude-code-action gates to write-access by default', () => {
+    // milvus uses claude-code-action with NO allowed_non_write_users, so the
+    // action blocks untrusted authors by default → this is a hardening advisory,
+    // NOT a HIGH "any attacker" finding. (The pre-F7 HIGH was crying wolf.)
     const f = analyzeWorkflow(
       '.github/workflows/claude-code-review.yml',
       read('milvus-claude-review.yml')
     );
     expect(f).not.toBeNull();
-    expect(SEVERITY_RANK[f!.severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+    expect(SEVERITY_RANK[f!.severity]).toBeLessThanOrEqual(SEVERITY_RANK.advisory);
+    expect(f!.mitigations?.join(' ')).toMatch(/write-access users by default/i);
+    // The hardening opportunities still surface as signals.
     expect(f!.signals.join(' ')).toMatch(/root/i);
-    expect(f!.signals.join(' ')).toMatch(/no effective actor gate/i);
   });
 
   it('rates NVIDIA MEDIUM — the risky pattern is present but mitigated', () => {
@@ -56,18 +60,61 @@ describe('CI-2 workflow analyzer — the severity nuance (the moat)', () => {
     if (f) expect(SEVERITY_RANK[f.severity]).toBeLessThanOrEqual(SEVERITY_RANK.advisory);
   });
 
-  it('THE MOAT: the three are clearly separated, not flagged identically', () => {
-    const milvus = analyzeWorkflow('m.yml', read('milvus-claude-review.yml'))!;
+  it('THE MOAT: a truly-ungated workflow > a mitigated one > a gated one', () => {
+    // Post-F7 the moat is anchored honestly: only a workflow with the default
+    // gate REMOVED (allowed_non_write_users:*) is genuinely high; a mitigated one
+    // is medium; a gated one (milvus, via the implicit gate) is advisory.
+    const dangerous = `
+on:
+  pull_request_target:
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          claude_args: '--allowedTools "Bash"'
+`;
+    const danger = analyzeWorkflow('d.yml', dangerous)!;
     const nvidia = analyzeWorkflow('n.yml', read('nvidia-claude-fix.yml'))!;
-    const strapi = analyzeWorkflow('s.yml', read('strapi-needs-qa.yml'));
-    const strapiRank = strapi ? SEVERITY_RANK[strapi.severity] : 0;
-    expect(SEVERITY_RANK[milvus.severity]).toBeGreaterThan(SEVERITY_RANK[nvidia.severity]);
-    expect(SEVERITY_RANK[nvidia.severity]).toBeGreaterThan(strapiRank);
+    const milvus = analyzeWorkflow('m.yml', read('milvus-claude-review.yml'))!;
+    expect(SEVERITY_RANK[danger.severity]).toBeGreaterThan(SEVERITY_RANK[nvidia.severity]);
+    expect(SEVERITY_RANK[nvidia.severity]).toBeGreaterThan(SEVERITY_RANK[milvus.severity]);
+  });
+
+  it('F7: allowed_non_write_users:* REMOVES the implicit gate → HIGH', () => {
+    const wf = `
+on:
+  pull_request_target:
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+`;
+    const f = analyzeWorkflow('x.yml', wf)!;
+    expect(SEVERITY_RANK[f.severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+    expect(f.mitigations?.join(' ') ?? '').not.toMatch(/write-access users by default/i);
   });
 
   it('F1 regression: a stray "write" in a label name is NOT an actor gate', () => {
-    // Dangerous workflow (pull_request_target, head→root, broad tools) whose only
-    // `if` references a label named "needs-rewrite" — must NOT be treated as gated.
+    // Dangerous workflow whose only `if` references a label named "needs-rewrite"
+    // — must NOT be treated as an explicit gate. allowed_non_write_users:* removes
+    // the implicit gate too, so the only gate question is the (bogus) label if.
     const wf = `
 on:
   pull_request_target:
@@ -84,6 +131,7 @@ jobs:
           ref: \${{ github.event.pull_request.head.sha }}
       - uses: anthropics/claude-code-action@v1
         with:
+          allowed_non_write_users: "*"
           claude_args: '--allowedTools "Bash"'
 `;
     const f = analyzeWorkflow('danger.yml', wf)!;
@@ -193,8 +241,15 @@ describe('scanTree orchestration + fetch parsing', () => {
     };
     const res = scanTree(tree);
     expect(res.findings.length).toBeGreaterThanOrEqual(2);
+    // worst-first: findings[0] is the worst, and every later finding is <= it.
     expect(res.worst).toBe(res.findings[0].severity);
-    expect(SEVERITY_RANK[res.findings[0].severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+    for (let i = 1; i < res.findings.length; i++) {
+      expect(SEVERITY_RANK[res.findings[i].severity]).toBeLessThanOrEqual(
+        SEVERITY_RANK[res.findings[0].severity]
+      );
+    }
+    // Post-F7 milvus is advisory (implicit gate); glances' hook (medium) is the worst.
+    expect(res.worst).toBe('medium');
   });
 
   it('parseRepoUrl handles url/shorthand/tree forms', () => {

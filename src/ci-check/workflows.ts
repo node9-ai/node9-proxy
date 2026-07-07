@@ -140,6 +140,17 @@ function hasActorGate(wf: Workflow, raw: Record<string, unknown>): boolean {
   return gated || labelGated;
 }
 
+/** `anthropics/claude-code-action` (the higher-level action — NOT the lower-level
+ *  `claude-code-base-action`) runs the agent ONLY for users with WRITE access by
+ *  default. `allowed_non_write_users: "*"` removes that gate; anything else keeps
+ *  it. So a workflow using it, without the "*" bypass, has an effective IMPLICIT
+ *  actor gate — the anonymous-attacker vector is blocked even without an explicit
+ *  `if:`. Missing this = crying wolf on the most common claude-code-action setup. */
+function hasImplicitActorGate(agentSteps: Step[], nonWriteStar: boolean): boolean {
+  if (nonWriteStar) return false; // bypass on → the default gate is off
+  return agentSteps.some((s) => /anthropics\/claude-code-action@/i.test(s.uses ?? ''));
+}
+
 function permsElevated(wf: Workflow): boolean {
   const check = (p: Record<string, string> | string | undefined) => {
     const s = str(p);
@@ -217,7 +228,9 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   const pat = usesPat(wf);
   const power = (broadTools ? 2 : 0) + (nonWriteStar ? 1 : 0) + (elevated ? 1 : 0) + (pat ? 1 : 0);
 
-  const gate = hasActorGate(wf, raw);
+  const explicitGate = hasActorGate(wf, raw);
+  const implicitGate = hasImplicitActorGate(agentSteps, nonWriteStar);
+  const gate = explicitGate || implicitGate;
   const envDeny = hasEnvDeny(agentSteps);
   const pinned = agentActionsPinned(agentSteps);
 
@@ -254,7 +267,9 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   if (!gate && reach > 0) signals.push('no effective actor gate');
 
   const mitigations: string[] = [];
-  if (gate) mitigations.push('actor-gated (maintainer/label/write-user required)');
+  if (explicitGate) mitigations.push('actor-gated (maintainer/label/write-user required)');
+  else if (implicitGate)
+    mitigations.push('claude-code-action gates the agent to write-access users by default');
   if (head === 'subdir') mitigations.push('untrusted head isolated in a subdir, not root');
   if (envDeny) mitigations.push('secrets env-denied from the agent subprocess');
   if (pinned) mitigations.push('agent action pinned to a commit SHA');
