@@ -149,9 +149,15 @@ function hasActorGate(wf: Workflow, raw: Record<string, unknown>): boolean {
   const on = (wf.on ?? raw['on'] ?? raw[true as unknown as string]) as
     | Record<string, unknown>
     | undefined;
-  const prt = on?.['pull_request_target'] as { types?: unknown } | undefined;
+  // F14a: a label gate is a gate whether on pull_request_target OR pull_request
+  // (metabase gates a `pull_request: types:[labeled]` job on the label name).
+  const prTypes = (t: unknown): string[] =>
+    t && Array.isArray((t as { types?: unknown }).types)
+      ? (t as { types: unknown[] }).types.map(String)
+      : [];
   const labeled =
-    prt && Array.isArray(prt.types) && (prt.types as unknown[]).map(String).includes('labeled');
+    prTypes(on?.['pull_request_target']).includes('labeled') ||
+    prTypes(on?.['pull_request']).includes('labeled');
   const ifs = [
     wf.jobs ? Object.values(wf.jobs).map((j) => j.if) : [],
     allSteps(wf).map((s) => s.step.if),
@@ -261,6 +267,15 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   const triggers = triggerKeys(wf, raw);
   const secretExposed = triggers.some((t) => /pull_request_target|workflow_run/i.test(t));
   const forkInput = triggers.some((t) => /issue|pull_request|workflow_call/i.test(t));
+  // F14: privilege of an untrusted trigger. A PRIVILEGED trigger runs the untrusted
+  // actor with the base-repo write token + secrets (pull_request_target/workflow_run/
+  // issues/comments/reviews/discussions). `workflow_call` is privileged too — a
+  // reusable workflow inherits its CALLER's (possibly privileged) context, so we
+  // can't prove it's sandboxed. ONLY plain `pull_request` is non-privileged — fork
+  // PRs get a READ-ONLY token and no secrets, so injection is sandboxed.
+  const privileged = triggers.some((t) =>
+    /pull_request_target|pull_request_review|workflow_run|workflow_call|issue|discussion/i.test(t)
+  );
 
   const nonWrite = str(agentSteps.map((s) => s.with?.['allowed_non_write_users']).find(Boolean));
   const nonWriteStar = nonWrite === '*';
@@ -335,6 +350,12 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   const githubWriteTool = GH_WRITE_TOOL_RE.test(toolsBlob);
   const canDamage = exfilOrRce || ((hasGithubWritePerm(wf, agentJobs) || pat) && githubWriteTool);
   if (!canDamage && severity && SEVERITY_RANK[severity] > SEVERITY_RANK.medium) severity = 'medium';
+  // F14b: untrusted reach via a NON-privileged trigger (plain `pull_request` only) is
+  // sandboxed — fork PRs run with a read-only token and no secrets, so an injected
+  // agent can't write to the repo or exfil (worst case = an ephemeral runner). That's
+  // normal CI, not a vulnerability → hardening advisory. (The real risk only appears
+  // if it's ever switched to pull_request_target.)
+  if (untrustedTrigger && !privileged && severity && severity !== 'advisory') severity = 'advisory';
   if (!severity) severity = 'advisory';
 
   // Build the transparent record of WHY this severity.
@@ -344,6 +365,10 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
       `runs with base-repo secrets (${triggers.filter((t) => /target|workflow_run/i.test(t)).join(', ')})`
     );
   else if (forkInput) signals.push(`triggered by untrusted input (${triggers.join(', ')})`);
+  if (untrustedTrigger && !privileged)
+    signals.push(
+      'triggered by `pull_request` — fork PRs run with a read-only token (lower risk than pull_request_target)'
+    );
   if (head === 'root') signals.push('checks out the untrusted PR head into the workspace root');
   if (head === 'subdir') signals.push('checks out the untrusted PR head into an isolated subdir');
   if (promptUntrusted) signals.push('feeds untrusted PR/issue text to the agent');
