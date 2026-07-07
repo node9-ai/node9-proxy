@@ -1,0 +1,15 @@
+# node9 dogfood: scan this repo's agent-security surface on every PR.
+# Report-only for now (fail-on: never) — flip to a threshold to gate merges.
+name: node9 agent-security
+on: pull_request
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: node9-ai/agent-security-action@0d55b80556dbcc14630c1dc9274924d16a43666a # v1
+        with:
+          fail-on: never
