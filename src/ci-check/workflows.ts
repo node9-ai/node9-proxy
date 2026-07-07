@@ -31,7 +31,7 @@ const EXFIL_RCE_RE =
 // are the write ones (view/diff/list are reads); `git push` / `Bash(git:*)` can
 // push. Used by the F12 damage-capability check.
 const GH_WRITE_TOOL_RE =
-  /Bash\(\s*(gh api|gh (pr|issue) (comment|edit|merge|close|review|create|ready|lock|reopen)|git push|git:)/i;
+  /Bash\(\s*(gh api|gh:|gh (pr|issue) (comment|edit|merge|close|review|create|ready|lock|reopen)|git push|git:)/i;
 
 interface Step {
   uses?: string;
@@ -89,11 +89,25 @@ function isAgentStep(step: Step): boolean {
 /** All tool grants declared for the agent steps (from claude_args / allowed_tools
  *  / settings blob) as one string to pattern-match. */
 function collectTools(steps: Step[]): string {
+  // F13: strip DENYLIST clauses first. `--disallowedTools "Bash,Write"` (or a
+  // settings `"disallowedTools":[...]`) BLOCKS those tools — the opposite of
+  // granting them. Reading the raw string would match "Bash"/"Write" and flag a
+  // safe workflow as broad (repomix documents exactly this pattern).
+  const stripDeny = (x: string) =>
+    x
+      .replace(/--disallowed[-_]?tools\s+("[^"]*"|'[^']*'|\S+)/gi, ' ')
+      .replace(/["']disallowed[_]?[tT]ools["']\s*:\s*\[[^\]]*\]/g, ' ');
   let s = '';
   for (const st of steps) {
     const w = st.with ?? {};
-    s += ' ' + str(w['claude_args']) + ' ' + str(w['allowed_tools']) + ' ' + str(w['allowedTools']);
-    s += ' ' + str(w['settings']); // settings JSON often carries allowedTools[]
+    s +=
+      ' ' +
+      stripDeny(str(w['claude_args'])) +
+      ' ' +
+      str(w['allowed_tools']) +
+      ' ' +
+      str(w['allowedTools']);
+    s += ' ' + stripDeny(str(w['settings'])); // settings JSON often carries allowedTools[]
   }
   return s;
 }

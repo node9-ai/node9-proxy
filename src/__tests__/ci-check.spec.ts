@@ -298,6 +298,31 @@ jobs:
     expect(SEVERITY_RANK[f.severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
   });
 
+  it('F13: --disallowedTools denylist must NOT be read as granted tools (repomix) → not high', () => {
+    // repomix: ungated issues trigger + "*", read-only job, and a DENYLIST that
+    // blocks Bash/Write/network. The blocked names must not be counted as broad.
+    const wf = `
+on:
+  issues:
+    types: [opened]
+jobs:
+  find:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'read github.event.issue.body'
+          claude_args: '--disallowedTools "Bash,Edit,Write,MultiEdit,WebFetch,WebSearch,Task"'
+`;
+    const f = analyzeWorkflow('repomix.yml', wf)!;
+    expect(SEVERITY_RANK[f.severity]).toBeLessThanOrEqual(SEVERITY_RANK.medium);
+    expect(f.signals.join(' ')).not.toMatch(/broad\/write-capable/i);
+  });
+
   it('CATASTROPHIC (the genuine one): untrusted trigger + * + broad Bash + secrets → high/critical', () => {
     const wf = `
 on:
