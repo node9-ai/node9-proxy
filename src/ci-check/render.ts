@@ -41,12 +41,18 @@ export function renderScan(res: ScanResult): string {
           : chalk.green('✅ agent-security: clean');
   L.push(`🛡️  ${chalk.bold('node9 scan-repo')}  ·  ${res.source}  ·  ${head}`);
   L.push(chalk.gray(`   inspected ${res.inspected.length} config file(s), ${n} finding(s)`));
-  if (res.incomplete)
+  if (res.incomplete) {
+    // State the ACTUAL cause — a rate limit and a network timeout need different
+    // advice (a token fixes the former, not the latter).
+    const rateLimited = res.notes.some((nt) => /rate limit/i.test(nt));
     L.push(
       chalk.yellow.bold(
-        '   ⚠️  This scan was rate-limited and is NOT a clean bill of health — set GITHUB_TOKEN and re-run.'
+        rateLimited
+          ? '   ⚠️  Rate-limited — some files were unread. NOT a clean bill of health; set GITHUB_TOKEN (or run `gh auth login`) and re-run.'
+          : '   ⚠️  A network error left some files unread. NOT a clean bill of health; re-run.'
       )
     );
+  }
   L.push('');
 
   for (const f of res.findings) {

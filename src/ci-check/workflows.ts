@@ -403,8 +403,10 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
     signals,
     mitigations: mitigations.length ? mitigations : undefined,
     fix:
-      head === 'root'
-        ? 'Do not check out the PR head into the workspace root under pull_request_target — check out the base ref, or isolate the head in a subdir (--add-dir). Add an actor gate and scope the agent tools.'
-        : 'Add/verify an actor gate, scope the agent tools to read-only, and env-deny secrets. See Anthropic’s claude-code-action security doc.',
+      head === 'root' && privileged
+        ? 'Do not check out the untrusted PR head into the workspace root under a privileged trigger (pull_request_target/workflow_run) — check out the base ref, or isolate the head in a subdir (--add-dir). Add an actor gate and scope the agent tools.'
+        : head === 'root'
+          ? 'This runs under `pull_request` (fork PRs get a read-only token), so the head checkout is low-risk today — keep it on `pull_request` (not `pull_request_target`) and keep the actor gate + scoped tools.'
+          : 'Add/verify an actor gate, scope the agent tools to read-only, and env-deny secrets. See Anthropic’s claude-code-action security doc.',
   };
 }
