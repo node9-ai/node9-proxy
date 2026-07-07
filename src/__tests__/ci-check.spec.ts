@@ -27,15 +27,19 @@ const ALPHA = 'abcdefghijklmnopqrstuvwxyz0123456789';
 const FAKE_TOKEN = 'ghp_' + Array.from({ length: 36 }, (_, i) => ALPHA[(i * 13 + 5) % 36]).join('');
 
 describe('CI-2 workflow analyzer — the severity nuance (the moat)', () => {
-  it('rates milvus HIGH+ (untrusted head → root, no actor gate, base secrets)', () => {
+  it('F7: rates milvus ADVISORY — claude-code-action gates to write-access by default', () => {
+    // milvus uses claude-code-action with NO allowed_non_write_users, so the
+    // action blocks untrusted authors by default → this is a hardening advisory,
+    // NOT a HIGH "any attacker" finding. (The pre-F7 HIGH was crying wolf.)
     const f = analyzeWorkflow(
       '.github/workflows/claude-code-review.yml',
       read('milvus-claude-review.yml')
     );
     expect(f).not.toBeNull();
-    expect(SEVERITY_RANK[f!.severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+    expect(SEVERITY_RANK[f!.severity]).toBeLessThanOrEqual(SEVERITY_RANK.advisory);
+    expect(f!.mitigations?.join(' ')).toMatch(/write-access users by default/i);
+    // The hardening opportunities still surface as signals.
     expect(f!.signals.join(' ')).toMatch(/root/i);
-    expect(f!.signals.join(' ')).toMatch(/no effective actor gate/i);
   });
 
   it('rates NVIDIA MEDIUM — the risky pattern is present but mitigated', () => {
@@ -56,18 +60,322 @@ describe('CI-2 workflow analyzer — the severity nuance (the moat)', () => {
     if (f) expect(SEVERITY_RANK[f.severity]).toBeLessThanOrEqual(SEVERITY_RANK.advisory);
   });
 
-  it('THE MOAT: the three are clearly separated, not flagged identically', () => {
-    const milvus = analyzeWorkflow('m.yml', read('milvus-claude-review.yml'))!;
+  it('THE MOAT: a truly-ungated workflow > a mitigated one > a gated one', () => {
+    // Post-F7 the moat is anchored honestly: only a workflow with the default
+    // gate REMOVED (allowed_non_write_users:*) is genuinely high; a mitigated one
+    // is medium; a gated one (milvus, via the implicit gate) is advisory.
+    const dangerous = `
+on:
+  pull_request_target:
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          claude_args: '--allowedTools "Bash"'
+`;
+    const danger = analyzeWorkflow('d.yml', dangerous)!;
     const nvidia = analyzeWorkflow('n.yml', read('nvidia-claude-fix.yml'))!;
-    const strapi = analyzeWorkflow('s.yml', read('strapi-needs-qa.yml'));
-    const strapiRank = strapi ? SEVERITY_RANK[strapi.severity] : 0;
-    expect(SEVERITY_RANK[milvus.severity]).toBeGreaterThan(SEVERITY_RANK[nvidia.severity]);
-    expect(SEVERITY_RANK[nvidia.severity]).toBeGreaterThan(strapiRank);
+    const milvus = analyzeWorkflow('m.yml', read('milvus-claude-review.yml'))!;
+    expect(SEVERITY_RANK[danger.severity]).toBeGreaterThan(SEVERITY_RANK[nvidia.severity]);
+    expect(SEVERITY_RANK[nvidia.severity]).toBeGreaterThan(SEVERITY_RANK[milvus.severity]);
+  });
+
+  it('F8: a GATED workflow with dangerous tools but no untrusted reach is advisory, not HIGH', () => {
+    // The NVIDIA claude-copy-to-main pattern: gated (claude-code-action's default),
+    // a static PAT + broad tools + id-token, but the untrusted comment body never
+    // reaches the agent prompt. Gated → not externally exploitable → advisory, with
+    // the static-PAT hardening concern still surfaced as a signal.
+    const wf = `
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  copy:
+    if: contains(github.event.comment.body, '/claude copy')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          github_token: \${{ secrets.PAT }}
+          claude_args: '--allowedTools "Bash(curl *),Write"'
+          prompt: 'copy this PR to main'
+`;
+    const f = analyzeWorkflow('copy.yml', wf)!;
+    expect(f.severity).toBe('advisory');
+    expect(f.signals.join(' ')).toMatch(/static PAT/i);
+    expect(f.mitigations?.join(' ')).toMatch(/write-access users by default/i);
+  });
+
+  it('F10: allowed_non_write_users:* on a SCHEDULED job is moot → advisory (no untrusted trigger)', () => {
+    // lobehub claude-auto-testing pattern: schedule + workflow_dispatch, broad
+    // tools, "*" — but no untrusted user can trigger a cron, so it's not injectable.
+    const wf = `
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          github_token: \${{ secrets.PAT }}
+          allowed_non_write_users: "*"
+          claude_args: '--allowedTools "Bash,Write,Edit"'
+`;
+    const f = analyzeWorkflow('sched.yml', wf)!;
+    expect(SEVERITY_RANK[f.severity]).toBeLessThanOrEqual(SEVERITY_RANK.advisory);
+  });
+
+  it('F9: ungated + reach but only SCOPED tools (no Bash) → medium, not high', () => {
+    // umbraco pattern: issues trigger + "*" bypass + untrusted reach, but the
+    // agent only has scoped mcp github issue tools — limited blast radius.
+    const wf = `
+on:
+  issues:
+    types: [opened]
+jobs:
+  dedupe:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'read github.event.issue.body and dedupe'
+          claude_args: '--allowedTools "mcp__github__get_issue,mcp__github__add_issue_comment"'
+`;
+    const f = analyzeWorkflow('dedupe.yml', wf)!;
+    expect(f.severity).toBe('medium');
+  });
+
+  it('F11: read-only token + scoped-script tools (medusa/sentry) → medium, not high', () => {
+    // Ungated issues trigger + "*" + reach + a `Write` tool, BUT the token is
+    // read-only and the Bash tools are scoped to specific scripts — an injected
+    // agent can't write to GitHub or exfil/RCE → limited blast radius → medium.
+    const wf = `
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+      id-token: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'read github.event.issue.body'
+          claude_args: '--allowedTools "Write,Bash(gh api *),Bash(python3 .claude/scripts/x.py *)"'
+`;
+    const f = analyzeWorkflow('triage.yml', wf)!;
+    expect(f.severity).toBe('medium');
+  });
+
+  it('F11: the SAME workflow but with pull-requests:write is NOT capped → high (the hyperdx case)', () => {
+    const wf = `
+on:
+  pull_request_target:
+    types: [opened]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          claude_args: '--allowedTools "Bash(gh api:*),Bash(git:*)"'
+`;
+    const f = analyzeWorkflow('review.yml', wf)!;
+    expect(SEVERITY_RANK[f.severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+  });
+
+  it('F11: write perms on a SEPARATE (non-agent) job are not credited to the agent (medusa two-job)', () => {
+    // The agent runs in a read-only job; a downstream "post the review" job has
+    // write perms. An injected agent can't use the other job's token → medium.
+    const wf = `
+on:
+  workflow_call:
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'read github.event.issue.body'
+          claude_args: '--allowedTools "Bash(bash scripts/get_pr.sh:*),Write"'
+  post:
+    needs: analyze
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write
+    steps:
+      - run: echo "post the decision"
+`;
+    const f = analyzeWorkflow('two-job.yml', wf)!;
+    expect(f.severity).toBe('medium');
+  });
+
+  it('F12: write perms but NO tool to use them (read-only git + Read/Write) → medium (UKGov)', () => {
+    // pull-requests:write + id-token, ungated PR trigger, reach — BUT the tools
+    // are read-only git + Read/Write with no gh api / gh pr comment / git push,
+    // so the agent can't actually modify GitHub or exfil → medium.
+    const wf = `
+on:
+  pull_request_target:
+    types: [opened]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'review github.event.pull_request.title'
+          claude_args: '--allowedTools "Bash(git diff *),Bash(git log *),Read,Write,GrepTool"'
+`;
+    const f = analyzeWorkflow('ro.yml', wf)!;
+    expect(f.severity).toBe('medium');
+  });
+
+  it('F12: the SAME + a gh-api tool (can use the write token) → high/critical (hyperdx)', () => {
+    const wf = `
+on:
+  pull_request_target:
+    types: [opened]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'review github.event.pull_request.title'
+          claude_args: '--allowedTools "Bash(gh api:*),Bash(git:*)"'
+`;
+    const f = analyzeWorkflow('hyperdx.yml', wf)!;
+    expect(SEVERITY_RANK[f.severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+  });
+
+  it('F13: --disallowedTools denylist must NOT be read as granted tools (repomix) → not high', () => {
+    // repomix: ungated issues trigger + "*", read-only job, and a DENYLIST that
+    // blocks Bash/Write/network. The blocked names must not be counted as broad.
+    const wf = `
+on:
+  issues:
+    types: [opened]
+jobs:
+  find:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'read github.event.issue.body'
+          claude_args: '--disallowedTools "Bash,Edit,Write,MultiEdit,WebFetch,WebSearch,Task"'
+`;
+    const f = analyzeWorkflow('repomix.yml', wf)!;
+    expect(SEVERITY_RANK[f.severity]).toBeLessThanOrEqual(SEVERITY_RANK.medium);
+    expect(f.signals.join(' ')).not.toMatch(/broad\/write-capable/i);
+  });
+
+  it('CATASTROPHIC (the genuine one): untrusted trigger + * + broad Bash + secrets → high/critical', () => {
+    const wf = `
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          github_token: \${{ secrets.PAT }}
+          allowed_non_write_users: "*"
+          prompt: 'process github.event.comment.body'
+          claude_args: '--allowedTools "Bash,Write,curl"'
+`;
+    const f = analyzeWorkflow('bad.yml', wf)!;
+    expect(SEVERITY_RANK[f.severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+  });
+
+  it('F7: allowed_non_write_users:* REMOVES the implicit gate → HIGH', () => {
+    const wf = `
+on:
+  pull_request_target:
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          claude_args: '--allowedTools "Bash"'
+`;
+    const f = analyzeWorkflow('x.yml', wf)!;
+    expect(SEVERITY_RANK[f.severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+    expect(f.mitigations?.join(' ') ?? '').not.toMatch(/write-access users by default/i);
   });
 
   it('F1 regression: a stray "write" in a label name is NOT an actor gate', () => {
-    // Dangerous workflow (pull_request_target, head→root, broad tools) whose only
-    // `if` references a label named "needs-rewrite" — must NOT be treated as gated.
+    // Dangerous workflow whose only `if` references a label named "needs-rewrite"
+    // — must NOT be treated as an explicit gate. allowed_non_write_users:* removes
+    // the implicit gate too, so the only gate question is the (bogus) label if.
     const wf = `
 on:
   pull_request_target:
@@ -84,6 +392,7 @@ jobs:
           ref: \${{ github.event.pull_request.head.sha }}
       - uses: anthropics/claude-code-action@v1
         with:
+          allowed_non_write_users: "*"
           claude_args: '--allowedTools "Bash"'
 `;
     const f = analyzeWorkflow('danger.yml', wf)!;
@@ -193,8 +502,15 @@ describe('scanTree orchestration + fetch parsing', () => {
     };
     const res = scanTree(tree);
     expect(res.findings.length).toBeGreaterThanOrEqual(2);
+    // worst-first: findings[0] is the worst, and every later finding is <= it.
     expect(res.worst).toBe(res.findings[0].severity);
-    expect(SEVERITY_RANK[res.findings[0].severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+    for (let i = 1; i < res.findings.length; i++) {
+      expect(SEVERITY_RANK[res.findings[i].severity]).toBeLessThanOrEqual(
+        SEVERITY_RANK[res.findings[0].severity]
+      );
+    }
+    // Post-F7 milvus is advisory (implicit gate); glances' hook (medium) is the worst.
+    expect(res.worst).toBe('medium');
   });
 
   it('parseRepoUrl handles url/shorthand/tree forms', () => {

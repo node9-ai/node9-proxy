@@ -8,6 +8,7 @@
 
 import { parse as parseYaml } from 'yaml';
 import type { CiFinding, Severity } from './types';
+import { SEVERITY_RANK } from './types';
 
 // Known agent actions — a step using one of these runs an LLM with tools.
 const AGENT_ACTION_RE =
@@ -16,6 +17,21 @@ const AGENT_ACTION_RE =
 // Broad, write/exfil-capable tool grants (bare or dangerous verbs).
 const BROAD_TOOL_RE =
   /(^|["\s,])(Bash|Write|Edit)(\s|,|"|$)|Bash\(\s*\*|Bash\((curl|wget|git push|git commit|git config|git:|rm|sh|bash|eval|npx|pip)/i;
+
+// EXFIL/RCE tools: genuinely arbitrary shell or network egress — the tools that
+// let an injected agent steal secrets or run code. Deliberately NARROWER than
+// BROAD_TOOL_RE: it EXCLUDES scoped script invocations (`Bash(bash scripts/x.sh)`,
+// `Bash(python3 x.py *)`, `Bash(gh api *)`) and bare `Write`/`Edit` (which write
+// files but can't exfil on their own). Used by the F11 damage-capability cap.
+const EXFIL_RCE_RE =
+  /(^|["\s,])Bash(\s|,|"|$)|Bash\(\s*\*|Bash\((curl|wget|sh[\s):]|eval|rm[\s):]|git push)/i;
+
+// A tool that can MODIFY GitHub — needed (alongside a write token) to abuse write
+// permissions. `Bash(gh api …)` is arbitrary API; the enumerated pr/issue verbs
+// are the write ones (view/diff/list are reads); `git push` / `Bash(git:*)` can
+// push. Used by the F12 damage-capability check.
+const GH_WRITE_TOOL_RE =
+  /Bash\(\s*(gh api|gh:|gh (pr|issue) (comment|edit|merge|close|review|create|ready|lock|reopen)|git push|git:)/i;
 
 interface Step {
   uses?: string;
@@ -73,11 +89,25 @@ function isAgentStep(step: Step): boolean {
 /** All tool grants declared for the agent steps (from claude_args / allowed_tools
  *  / settings blob) as one string to pattern-match. */
 function collectTools(steps: Step[]): string {
+  // F13: strip DENYLIST clauses first. `--disallowedTools "Bash,Write"` (or a
+  // settings `"disallowedTools":[...]`) BLOCKS those tools — the opposite of
+  // granting them. Reading the raw string would match "Bash"/"Write" and flag a
+  // safe workflow as broad (repomix documents exactly this pattern).
+  const stripDeny = (x: string) =>
+    x
+      .replace(/--disallowed[-_]?tools\s+("[^"]*"|'[^']*'|\S+)/gi, ' ')
+      .replace(/["']disallowed[_]?[tT]ools["']\s*:\s*\[[^\]]*\]/g, ' ');
   let s = '';
   for (const st of steps) {
     const w = st.with ?? {};
-    s += ' ' + str(w['claude_args']) + ' ' + str(w['allowed_tools']) + ' ' + str(w['allowedTools']);
-    s += ' ' + str(w['settings']); // settings JSON often carries allowedTools[]
+    s +=
+      ' ' +
+      stripDeny(str(w['claude_args'])) +
+      ' ' +
+      str(w['allowed_tools']) +
+      ' ' +
+      str(w['allowedTools']);
+    s += ' ' + stripDeny(str(w['settings'])); // settings JSON often carries allowedTools[]
   }
   return s;
 }
@@ -140,7 +170,18 @@ function hasActorGate(wf: Workflow, raw: Record<string, unknown>): boolean {
   return gated || labelGated;
 }
 
-function permsElevated(wf: Workflow): boolean {
+/** `anthropics/claude-code-action` (the higher-level action — NOT the lower-level
+ *  `claude-code-base-action`) runs the agent ONLY for users with WRITE access by
+ *  default. `allowed_non_write_users: "*"` removes that gate; anything else keeps
+ *  it. So a workflow using it, without the "*" bypass, has an effective IMPLICIT
+ *  actor gate — the anonymous-attacker vector is blocked even without an explicit
+ *  `if:`. Missing this = crying wolf on the most common claude-code-action setup. */
+function hasImplicitActorGate(agentSteps: Step[], bypassActive: boolean): boolean {
+  if (bypassActive) return false; // bypass on (and reachable) → the default gate is off
+  return agentSteps.some((s) => /anthropics\/claude-code-action@/i.test(s.uses ?? ''));
+}
+
+function permsElevated(wf: Workflow, agentJobs: Job[]): boolean {
   const check = (p: Record<string, string> | string | undefined) => {
     const s = str(p);
     // `str` may JSON-stringify a mapping (`{"contents":"write"}`) — the key is
@@ -148,7 +189,22 @@ function permsElevated(wf: Workflow): boolean {
     // and value or the plain `key: write` YAML form.
     return /["']?(contents|id-token|packages)["']?\s*:\s*["']?write/i.test(s);
   };
-  return check(wf.permissions) || Object.values(wf.jobs ?? {}).some((j) => check(j.permissions));
+  // Only the AGENT's own job(s) matter — a separate non-agent job's write perms
+  // (e.g. a downstream "post the review" job) can't be abused by the injected agent.
+  return check(wf.permissions) || agentJobs.some((j) => check(j.permissions));
+}
+
+/** Does the workflow grant the token real GitHub WRITE power (modify the repo /
+ *  PRs / issues)? id-token:write is NOT counted — it's OIDC (cloud auth), only
+ *  exploitable with an exfil/RCE tool, which the F11 cap handles separately. */
+function hasGithubWritePerm(wf: Workflow, agentJobs: Job[]): boolean {
+  const check = (p: Record<string, string> | string | undefined) =>
+    /["']?(contents|pull-requests|issues|packages|actions|deployments)["']?\s*:\s*["']?write/i.test(
+      str(p)
+    );
+  // Scope to the agent's own job(s) — a separate job's write perms are irrelevant
+  // to what an injected agent can do (see medusa: agent in a read-only job).
+  return check(wf.permissions) || agentJobs.some((j) => check(j.permissions));
 }
 
 function usesPat(wf: Workflow): boolean {
@@ -191,6 +247,15 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   const wf = raw as Workflow;
   const steps = allSteps(wf).map((s) => s.step);
   const agentSteps = steps.filter(isAgentStep);
+  // The job(s) the agent actually runs in — permission checks scope to these, so
+  // a separate job's write perms don't get credited to the agent (the medusa bug).
+  const agentJobs = [
+    ...new Set(
+      allSteps(wf)
+        .filter((s) => isAgentStep(s.step))
+        .map((s) => s.job)
+    ),
+  ];
   if (agentSteps.length === 0) return null;
 
   const triggers = triggerKeys(wf, raw);
@@ -201,23 +266,32 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   const nonWriteStar = nonWrite === '*';
   const nonWriteList = !!nonWrite && nonWrite !== '*';
 
+  // F10: `allowed_non_write_users: "*"` only MATTERS when an untrusted user can
+  // actually trigger the workflow — i.e. an issue/comment/PR event. On a
+  // schedule/workflow_dispatch/push there is no untrusted actor to gate, so the
+  // "*" is a moot copy-paste and must not inflate severity.
+  const untrustedTrigger = secretExposed || forkInput;
+  const bypassActive = nonWriteStar && untrustedTrigger;
+
   const head = untrustedHeadCheckout(wf);
   const promptUntrusted = promptTakesUntrusted(agentSteps);
-  // `allowed_non_write_users: "*"` means an untrusted actor can drive the agent
-  // directly — that IS untrusted reach even if we don't spot a head checkout.
+  // Untrusted reach: a checked-out fork head, untrusted text in the prompt, or an
+  // active "*" bypass on an untrustable trigger.
   const reach = Math.max(
     head === 'root' ? 3 : head === 'subdir' ? 1 : 0,
     promptUntrusted ? 2 : 0,
-    nonWriteStar ? 2 : 0
+    bypassActive ? 2 : 0
   );
 
   const toolsBlob = collectTools(agentSteps);
   const broadTools = BROAD_TOOL_RE.test(toolsBlob);
-  const elevated = permsElevated(wf);
+  const elevated = permsElevated(wf, agentJobs);
   const pat = usesPat(wf);
-  const power = (broadTools ? 2 : 0) + (nonWriteStar ? 1 : 0) + (elevated ? 1 : 0) + (pat ? 1 : 0);
+  const power = (broadTools ? 2 : 0) + (bypassActive ? 1 : 0) + (elevated ? 1 : 0) + (pat ? 1 : 0);
 
-  const gate = hasActorGate(wf, raw);
+  const explicitGate = hasActorGate(wf, raw);
+  const implicitGate = hasImplicitActorGate(agentSteps, bypassActive);
+  const gate = explicitGate || implicitGate;
   const envDeny = hasEnvDeny(agentSteps);
   const pinned = agentActionsPinned(agentSteps);
 
@@ -232,9 +306,35 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   if (score === 0 && !secretExposed) return null;
 
   let severity = severityFromScore(score);
-  // An effective actor gate on a risky trigger caps it at advisory: a maintainer
-  // must approve each run, so it's worth a note but not an alarm (the strapi case).
-  if (gate && reach > 0 && severity && severity !== 'advisory') severity = 'advisory';
+  // F8: a GATED workflow (explicit `if:` OR claude-code-action's default write-
+  // access gate) is not externally exploitable — an untrusted user can't trigger
+  // the agent — so it's a hardening ADVISORY regardless of how powerful its tools
+  // are or whether untrusted content is checked out. Injection needs an UNTRUSTED
+  // TRIGGER, which the gate blocks. The signals still name what to harden (static
+  // PAT, broad tools, id-token). Only a genuinely UNGATED workflow stays high.
+  if (gate && severity && severity !== 'advisory') severity = 'advisory';
+  // Reach-required: injection needs untrusted input to REACH the agent. With no
+  // reach (e.g. a scheduled job, or a "*" bypass on a non-untrustable trigger),
+  // the workflow isn't injectable regardless of tool power → hardening advisory.
+  if (reach === 0 && severity && severity !== 'advisory') severity = 'advisory';
+  // F9: tool scope caps the blast radius. Without a broad/write-capable tool
+  // (bare Bash / curl / wget / git push / Write / Edit), an injected agent is
+  // limited to scoped API ops (e.g. mcp github issue tools) — real but not
+  // catastrophic → cap high/critical down to medium.
+  if (!broadTools && severity && SEVERITY_RANK[severity] > SEVERITY_RANK.medium)
+    severity = 'medium';
+  // F11 + F12: catastrophe requires DAMAGE CAPABILITY = a permission AND a tool to
+  // exercise it. An injected agent can only cause real harm if it can EXFIL/RCE
+  // (bare Bash / curl / wget / sh — not a scoped script), OR modify GitHub, which
+  // needs BOTH a write token/PAT AND a tool that can use it (`gh api` / `gh pr
+  // comment` / `git push`). UKGov has pull-requests:write + id-token but only
+  // read-only git + Read/Write tools — no way to touch GitHub or exfil → medium.
+  // medusa/sentry (read-only token + scoped scripts) → medium. hyperdx (write +
+  // `Bash(gh api:*)`) → correctly stays high/critical.
+  const exfilOrRce = EXFIL_RCE_RE.test(toolsBlob);
+  const githubWriteTool = GH_WRITE_TOOL_RE.test(toolsBlob);
+  const canDamage = exfilOrRce || ((hasGithubWritePerm(wf, agentJobs) || pat) && githubWriteTool);
+  if (!canDamage && severity && SEVERITY_RANK[severity] > SEVERITY_RANK.medium) severity = 'medium';
   if (!severity) severity = 'advisory';
 
   // Build the transparent record of WHY this severity.
@@ -248,13 +348,15 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   if (head === 'subdir') signals.push('checks out the untrusted PR head into an isolated subdir');
   if (promptUntrusted) signals.push('feeds untrusted PR/issue text to the agent');
   if (broadTools) signals.push('agent has broad/write-capable tools (Bash/Write/curl/git push)');
-  if (nonWriteStar) signals.push('allowed_non_write_users: "*" — any user can trigger the agent');
+  if (bypassActive) signals.push('allowed_non_write_users: "*" — any user can trigger the agent');
   if (elevated) signals.push('elevated permissions (contents/id-token: write)');
   if (pat) signals.push('a static PAT is exposed to the agent (recoverable via injection)');
   if (!gate && reach > 0) signals.push('no effective actor gate');
 
   const mitigations: string[] = [];
-  if (gate) mitigations.push('actor-gated (maintainer/label/write-user required)');
+  if (explicitGate) mitigations.push('actor-gated (maintainer/label/write-user required)');
+  else if (implicitGate)
+    mitigations.push('claude-code-action gates the agent to write-access users by default');
   if (head === 'subdir') mitigations.push('untrusted head isolated in a subdir, not root');
   if (envDeny) mitigations.push('secrets env-denied from the agent subprocess');
   if (pinned) mitigations.push('agent action pinned to a commit SHA');
