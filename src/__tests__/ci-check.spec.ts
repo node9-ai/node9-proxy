@@ -534,6 +534,18 @@ describe('scanTree orchestration + fetch parsing', () => {
     expect(out).not.toMatch(/No committed agent hooks/);
   });
 
+  it('resolveGitHubToken prefers an explicit env token', async () => {
+    const { resolveGitHubToken } = await import('../ci-check/fetch.js');
+    const saved = process.env.GITHUB_TOKEN;
+    process.env.GITHUB_TOKEN = FAKE_TOKEN;
+    try {
+      expect(resolveGitHubToken()).toBe(FAKE_TOKEN);
+    } finally {
+      if (saved === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = saved;
+    }
+  });
+
   it('parseRepoUrl handles url/shorthand/tree forms', () => {
     expect(parseRepoUrl('https://github.com/milvus-io/milvus')).toEqual({
       owner: 'milvus-io',

@@ -6,8 +6,35 @@
 
 import fs from 'fs';
 import path from 'path';
+import { execFileSync } from 'node:child_process';
 import { request } from 'undici';
 import type { RepoTree, RepoFile } from './types';
+
+// gh-CLI token is resolved at most once per process (spawning gh is expensive).
+let cachedGhToken: string | null | undefined;
+
+/** A GitHub token to lift the 60/hr unauthenticated limit to 5000/hr. Prefers an
+ *  explicit env var; otherwise falls back to the `gh` CLI's stored credentials so
+ *  a developer with `gh auth login` gets working scans with zero setup. The token
+ *  is read via execFileSync (args array, NO shell) and is NEVER logged or put in
+ *  an error/command string. */
+export function resolveGitHubToken(): string | undefined {
+  const env = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+  if (env) return env;
+  if (cachedGhToken === undefined) {
+    try {
+      cachedGhToken =
+        execFileSync('gh', ['auth', 'token'], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+          timeout: 3000,
+        }).trim() || null;
+    } catch {
+      cachedGhToken = null; // gh missing / not authed → stay unauthenticated
+    }
+  }
+  return cachedGhToken ?? undefined;
+}
 
 /** The committed files that make up the agent-security surface. Fixed list —
  *  we never fetch arbitrary repo content. Workflows are enumerated separately. */
@@ -74,8 +101,8 @@ function ghHeaders(): Record<string, string> {
     'User-Agent': 'node9-scan-repo',
     'X-GitHub-Api-Version': '2022-11-28',
   };
-  // Optional token lifts the 60/hr unauthenticated limit to 5000/hr.
-  const tok = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+  // Token (env or gh CLI) lifts the 60/hr unauthenticated limit to 5000/hr.
+  const tok = resolveGitHubToken();
   if (tok) h.Authorization = `Bearer ${tok}`;
   return h;
 }
@@ -113,7 +140,7 @@ async function ghGet(url: string): Promise<{ status: number; json: unknown }> {
 }
 
 const RATE_LIMIT_NOTE =
-  'GitHub rate limit hit — results may be INCOMPLETE (a missing file could be unread, not absent). Set GITHUB_TOKEN.';
+  'GitHub rate limit hit — results may be INCOMPLETE (a missing file could be unread, not absent). Set GITHUB_TOKEN or run `gh auth login`.';
 const NETWORK_NOTE =
   'A network error/timeout occurred — results may be INCOMPLETE (some files were not fetched).';
 
