@@ -245,9 +245,13 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   if (score === 0 && !secretExposed) return null;
 
   let severity = severityFromScore(score);
-  // An effective actor gate on a risky trigger caps it at advisory: a maintainer
-  // must approve each run, so it's worth a note but not an alarm (the strapi case).
-  if (gate && reach > 0 && severity && severity !== 'advisory') severity = 'advisory';
+  // F8: a GATED workflow (explicit `if:` OR claude-code-action's default write-
+  // access gate) is not externally exploitable — an untrusted user can't trigger
+  // the agent — so it's a hardening ADVISORY regardless of how powerful its tools
+  // are or whether untrusted content is checked out. Injection needs an UNTRUSTED
+  // TRIGGER, which the gate blocks. The signals still name what to harden (static
+  // PAT, broad tools, id-token). Only a genuinely UNGATED workflow stays high.
+  if (gate && severity && severity !== 'advisory') severity = 'advisory';
   if (!severity) severity = 'advisory';
 
   // Build the transparent record of WHY this severity.

@@ -89,6 +89,35 @@ jobs:
     expect(SEVERITY_RANK[nvidia.severity]).toBeGreaterThan(SEVERITY_RANK[milvus.severity]);
   });
 
+  it('F8: a GATED workflow with dangerous tools but no untrusted reach is advisory, not HIGH', () => {
+    // The NVIDIA claude-copy-to-main pattern: gated (claude-code-action's default),
+    // a static PAT + broad tools + id-token, but the untrusted comment body never
+    // reaches the agent prompt. Gated → not externally exploitable → advisory, with
+    // the static-PAT hardening concern still surfaced as a signal.
+    const wf = `
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  copy:
+    if: contains(github.event.comment.body, '/claude copy')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          github_token: \${{ secrets.PAT }}
+          claude_args: '--allowedTools "Bash(curl *),Write"'
+          prompt: 'copy this PR to main'
+`;
+    const f = analyzeWorkflow('copy.yml', wf)!;
+    expect(f.severity).toBe('advisory');
+    expect(f.signals.join(' ')).toMatch(/static PAT/i);
+    expect(f.mitigations?.join(' ')).toMatch(/write-access users by default/i);
+  });
+
   it('F7: allowed_non_write_users:* REMOVES the implicit gate → HIGH', () => {
     const wf = `
 on:
