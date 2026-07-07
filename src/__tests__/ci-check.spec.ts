@@ -323,6 +323,83 @@ jobs:
     expect(f.signals.join(' ')).not.toMatch(/broad\/write-capable/i);
   });
 
+  it('F14a: pull_request (labeled) + label-name gate → advisory, and NOT "no actor gate" (metabase)', () => {
+    // metabase resolve-backport-conflicts: a maintainer must apply the label
+    // (needs write access) — an effective actor gate on `pull_request` (not _target).
+    const wf = `
+on:
+  pull_request:
+    types: [labeled]
+jobs:
+  resolve:
+    if: github.event.label.name == 'auto-resolve-conflicts'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.ref }}
+      - uses: anthropics/claude-code-base-action@v1
+        with:
+          allowed_tools: "Read,Edit,Write,Bash(git:*)"
+`;
+    const f = analyzeWorkflow('backport.yml', wf)!;
+    expect(f.severity).toBe('advisory');
+    expect(f.signals.join(' ')).not.toMatch(/no effective actor gate/i);
+  });
+
+  it('F14b: an UNGATED plain pull_request is sandboxed (read-only fork token) → advisory, not high', () => {
+    // Same power, but plain `pull_request` — fork PRs get a read-only token + no
+    // secrets, so injection can't write to the repo or exfil. Not a vuln.
+    const wf = `
+on:
+  pull_request:
+    types: [opened]
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha }}
+      - uses: anthropics/claude-code-base-action@v1
+        with:
+          allowed_tools: "Bash,Write,Edit"
+`;
+    const f = analyzeWorkflow('pr.yml', wf)!;
+    expect(f.severity).toBe('advisory');
+    expect(f.signals.join(' ')).toMatch(/read-only token/i);
+  });
+
+  it('F14 regression: the SAME shape but pull_request_TARGET stays high/critical (privileged)', () => {
+    const wf = `
+on:
+  pull_request_target:
+    types: [opened]
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha }}
+      - uses: anthropics/claude-code-base-action@v1
+        with:
+          allowed_tools: "Bash,Write,Edit"
+`;
+    const f = analyzeWorkflow('prt.yml', wf)!;
+    expect(SEVERITY_RANK[f.severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+  });
+
   it('CATASTROPHIC (the genuine one): untrusted trigger + * + broad Bash + secrets → high/critical', () => {
     const wf = `
 on:
