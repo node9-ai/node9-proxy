@@ -118,6 +118,82 @@ jobs:
     expect(f.mitigations?.join(' ')).toMatch(/write-access users by default/i);
   });
 
+  it('F10: allowed_non_write_users:* on a SCHEDULED job is moot → advisory (no untrusted trigger)', () => {
+    // lobehub claude-auto-testing pattern: schedule + workflow_dispatch, broad
+    // tools, "*" — but no untrusted user can trigger a cron, so it's not injectable.
+    const wf = `
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          github_token: \${{ secrets.PAT }}
+          allowed_non_write_users: "*"
+          claude_args: '--allowedTools "Bash,Write,Edit"'
+`;
+    const f = analyzeWorkflow('sched.yml', wf)!;
+    expect(SEVERITY_RANK[f.severity]).toBeLessThanOrEqual(SEVERITY_RANK.advisory);
+  });
+
+  it('F9: ungated + reach but only SCOPED tools (no Bash) → medium, not high', () => {
+    // umbraco pattern: issues trigger + "*" bypass + untrusted reach, but the
+    // agent only has scoped mcp github issue tools — limited blast radius.
+    const wf = `
+on:
+  issues:
+    types: [opened]
+jobs:
+  dedupe:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'read github.event.issue.body and dedupe'
+          claude_args: '--allowedTools "mcp__github__get_issue,mcp__github__add_issue_comment"'
+`;
+    const f = analyzeWorkflow('dedupe.yml', wf)!;
+    expect(f.severity).toBe('medium');
+  });
+
+  it('CATASTROPHIC (the genuine one): untrusted trigger + * + broad Bash + secrets → high/critical', () => {
+    const wf = `
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          github_token: \${{ secrets.PAT }}
+          allowed_non_write_users: "*"
+          prompt: 'process github.event.comment.body'
+          claude_args: '--allowedTools "Bash,Write,curl"'
+`;
+    const f = analyzeWorkflow('bad.yml', wf)!;
+    expect(SEVERITY_RANK[f.severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+  });
+
   it('F7: allowed_non_write_users:* REMOVES the implicit gate → HIGH', () => {
     const wf = `
 on:
@@ -134,6 +210,7 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         with:
           allowed_non_write_users: "*"
+          claude_args: '--allowedTools "Bash"'
 `;
     const f = analyzeWorkflow('x.yml', wf)!;
     expect(SEVERITY_RANK[f.severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high);

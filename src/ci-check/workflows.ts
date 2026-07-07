@@ -8,6 +8,7 @@
 
 import { parse as parseYaml } from 'yaml';
 import type { CiFinding, Severity } from './types';
+import { SEVERITY_RANK } from './types';
 
 // Known agent actions — a step using one of these runs an LLM with tools.
 const AGENT_ACTION_RE =
@@ -146,8 +147,8 @@ function hasActorGate(wf: Workflow, raw: Record<string, unknown>): boolean {
  *  it. So a workflow using it, without the "*" bypass, has an effective IMPLICIT
  *  actor gate — the anonymous-attacker vector is blocked even without an explicit
  *  `if:`. Missing this = crying wolf on the most common claude-code-action setup. */
-function hasImplicitActorGate(agentSteps: Step[], nonWriteStar: boolean): boolean {
-  if (nonWriteStar) return false; // bypass on → the default gate is off
+function hasImplicitActorGate(agentSteps: Step[], bypassActive: boolean): boolean {
+  if (bypassActive) return false; // bypass on (and reachable) → the default gate is off
   return agentSteps.some((s) => /anthropics\/claude-code-action@/i.test(s.uses ?? ''));
 }
 
@@ -212,24 +213,31 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   const nonWriteStar = nonWrite === '*';
   const nonWriteList = !!nonWrite && nonWrite !== '*';
 
+  // F10: `allowed_non_write_users: "*"` only MATTERS when an untrusted user can
+  // actually trigger the workflow — i.e. an issue/comment/PR event. On a
+  // schedule/workflow_dispatch/push there is no untrusted actor to gate, so the
+  // "*" is a moot copy-paste and must not inflate severity.
+  const untrustedTrigger = secretExposed || forkInput;
+  const bypassActive = nonWriteStar && untrustedTrigger;
+
   const head = untrustedHeadCheckout(wf);
   const promptUntrusted = promptTakesUntrusted(agentSteps);
-  // `allowed_non_write_users: "*"` means an untrusted actor can drive the agent
-  // directly — that IS untrusted reach even if we don't spot a head checkout.
+  // Untrusted reach: a checked-out fork head, untrusted text in the prompt, or an
+  // active "*" bypass on an untrustable trigger.
   const reach = Math.max(
     head === 'root' ? 3 : head === 'subdir' ? 1 : 0,
     promptUntrusted ? 2 : 0,
-    nonWriteStar ? 2 : 0
+    bypassActive ? 2 : 0
   );
 
   const toolsBlob = collectTools(agentSteps);
   const broadTools = BROAD_TOOL_RE.test(toolsBlob);
   const elevated = permsElevated(wf);
   const pat = usesPat(wf);
-  const power = (broadTools ? 2 : 0) + (nonWriteStar ? 1 : 0) + (elevated ? 1 : 0) + (pat ? 1 : 0);
+  const power = (broadTools ? 2 : 0) + (bypassActive ? 1 : 0) + (elevated ? 1 : 0) + (pat ? 1 : 0);
 
   const explicitGate = hasActorGate(wf, raw);
-  const implicitGate = hasImplicitActorGate(agentSteps, nonWriteStar);
+  const implicitGate = hasImplicitActorGate(agentSteps, bypassActive);
   const gate = explicitGate || implicitGate;
   const envDeny = hasEnvDeny(agentSteps);
   const pinned = agentActionsPinned(agentSteps);
@@ -252,6 +260,16 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   // TRIGGER, which the gate blocks. The signals still name what to harden (static
   // PAT, broad tools, id-token). Only a genuinely UNGATED workflow stays high.
   if (gate && severity && severity !== 'advisory') severity = 'advisory';
+  // Reach-required: injection needs untrusted input to REACH the agent. With no
+  // reach (e.g. a scheduled job, or a "*" bypass on a non-untrustable trigger),
+  // the workflow isn't injectable regardless of tool power → hardening advisory.
+  if (reach === 0 && severity && severity !== 'advisory') severity = 'advisory';
+  // F9: tool scope caps the blast radius. Without a broad/write-capable tool
+  // (bare Bash / curl / wget / git push / Write / Edit), an injected agent is
+  // limited to scoped API ops (e.g. mcp github issue tools) — real but not
+  // catastrophic → cap high/critical down to medium.
+  if (!broadTools && severity && SEVERITY_RANK[severity] > SEVERITY_RANK.medium)
+    severity = 'medium';
   if (!severity) severity = 'advisory';
 
   // Build the transparent record of WHY this severity.
@@ -265,7 +283,7 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   if (head === 'subdir') signals.push('checks out the untrusted PR head into an isolated subdir');
   if (promptUntrusted) signals.push('feeds untrusted PR/issue text to the agent');
   if (broadTools) signals.push('agent has broad/write-capable tools (Bash/Write/curl/git push)');
-  if (nonWriteStar) signals.push('allowed_non_write_users: "*" — any user can trigger the agent');
+  if (bypassActive) signals.push('allowed_non_write_users: "*" — any user can trigger the agent');
   if (elevated) signals.push('elevated permissions (contents/id-token: write)');
   if (pat) signals.push('a static PAT is exposed to the agent (recoverable via injection)');
   if (!gate && reach > 0) signals.push('no effective actor gate');
