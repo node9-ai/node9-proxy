@@ -26,6 +26,13 @@ const BROAD_TOOL_RE =
 const EXFIL_RCE_RE =
   /(^|["\s,])Bash(\s|,|"|$)|Bash\(\s*\*|Bash\((curl|wget|sh[\s):]|eval|rm[\s):]|git push)/i;
 
+// A tool that can MODIFY GitHub — needed (alongside a write token) to abuse write
+// permissions. `Bash(gh api …)` is arbitrary API; the enumerated pr/issue verbs
+// are the write ones (view/diff/list are reads); `git push` / `Bash(git:*)` can
+// push. Used by the F12 damage-capability check.
+const GH_WRITE_TOOL_RE =
+  /Bash\(\s*(gh api|gh (pr|issue) (comment|edit|merge|close|review|create|ready|lock|reopen)|git push|git:)/i;
+
 interface Step {
   uses?: string;
   run?: string;
@@ -302,17 +309,18 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   // catastrophic → cap high/critical down to medium.
   if (!broadTools && severity && SEVERITY_RANK[severity] > SEVERITY_RANK.medium)
     severity = 'medium';
-  // F11: catastrophe requires DAMAGE CAPABILITY. An injected agent can only cause
-  // real harm if it can WRITE to GitHub (write perms or a static PAT) or EXFIL/RCE
-  // (bare Bash / curl / wget / sh — not a scoped script). A read-only token + only
-  // scoped tools (the medusa / sentry-javascript pattern: `Write` + `Bash(python3
-  // scripts/x.py *)` + `issues: read`) is a real injection with a LIMITED blast
-  // radius → cap high/critical at medium. hyperdx (pull-requests: write) is NOT
-  // capped and correctly stays high.
-  const writePower = hasGithubWritePerm(wf, agentJobs) || pat;
+  // F11 + F12: catastrophe requires DAMAGE CAPABILITY = a permission AND a tool to
+  // exercise it. An injected agent can only cause real harm if it can EXFIL/RCE
+  // (bare Bash / curl / wget / sh — not a scoped script), OR modify GitHub, which
+  // needs BOTH a write token/PAT AND a tool that can use it (`gh api` / `gh pr
+  // comment` / `git push`). UKGov has pull-requests:write + id-token but only
+  // read-only git + Read/Write tools — no way to touch GitHub or exfil → medium.
+  // medusa/sentry (read-only token + scoped scripts) → medium. hyperdx (write +
+  // `Bash(gh api:*)`) → correctly stays high/critical.
   const exfilOrRce = EXFIL_RCE_RE.test(toolsBlob);
-  if (!writePower && !exfilOrRce && severity && SEVERITY_RANK[severity] > SEVERITY_RANK.medium)
-    severity = 'medium';
+  const githubWriteTool = GH_WRITE_TOOL_RE.test(toolsBlob);
+  const canDamage = exfilOrRce || ((hasGithubWritePerm(wf, agentJobs) || pat) && githubWriteTool);
+  if (!canDamage && severity && SEVERITY_RANK[severity] > SEVERITY_RANK.medium) severity = 'medium';
   if (!severity) severity = 'advisory';
 
   // Build the transparent record of WHY this severity.

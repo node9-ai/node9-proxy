@@ -250,6 +250,54 @@ jobs:
     expect(f.severity).toBe('medium');
   });
 
+  it('F12: write perms but NO tool to use them (read-only git + Read/Write) → medium (UKGov)', () => {
+    // pull-requests:write + id-token, ungated PR trigger, reach — BUT the tools
+    // are read-only git + Read/Write with no gh api / gh pr comment / git push,
+    // so the agent can't actually modify GitHub or exfil → medium.
+    const wf = `
+on:
+  pull_request_target:
+    types: [opened]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'review github.event.pull_request.title'
+          claude_args: '--allowedTools "Bash(git diff *),Bash(git log *),Read,Write,GrepTool"'
+`;
+    const f = analyzeWorkflow('ro.yml', wf)!;
+    expect(f.severity).toBe('medium');
+  });
+
+  it('F12: the SAME + a gh-api tool (can use the write token) → high/critical (hyperdx)', () => {
+    const wf = `
+on:
+  pull_request_target:
+    types: [opened]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'review github.event.pull_request.title'
+          claude_args: '--allowedTools "Bash(gh api:*),Bash(git:*)"'
+`;
+    const f = analyzeWorkflow('hyperdx.yml', wf)!;
+    expect(SEVERITY_RANK[f.severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+  });
+
   it('CATASTROPHIC (the genuine one): untrusted trigger + * + broad Bash + secrets → high/critical', () => {
     const wf = `
 on:
