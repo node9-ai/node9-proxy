@@ -91,6 +91,29 @@ jobs:
     expect(f.signals.join(' ')).toMatch(/no effective actor gate/i);
   });
 
+  it('B1 regression: elevated permissions (id-token: write) are actually detected', () => {
+    // Guards the permsElevated regex against the JSON-stringify quote bug: the
+    // "elevated permissions" signal MUST fire for a workflow whose only escalator
+    // is id-token/contents: write (otherwise it silently dies again).
+    const wf = `
+on:
+  pull_request_target:
+jobs:
+  review:
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha }}
+          path: pr-head
+      - uses: anthropics/claude-code-action@v1
+`;
+    const f = analyzeWorkflow('perms.yml', wf)!;
+    expect(f.signals.join(' ')).toMatch(/elevated permissions/i);
+  });
+
   it('returns null for a non-agentic workflow (no cry-wolf on plain CI)', () => {
     const plain =
       'name: ci\non:\n  pull_request_target:\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n';

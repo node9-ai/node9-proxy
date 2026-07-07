@@ -143,7 +143,10 @@ function hasActorGate(wf: Workflow, raw: Record<string, unknown>): boolean {
 function permsElevated(wf: Workflow): boolean {
   const check = (p: Record<string, string> | string | undefined) => {
     const s = str(p);
-    return /contents:\s*write|id-token:\s*write|packages:\s*write/i.test(s);
+    // `str` may JSON-stringify a mapping (`{"contents":"write"}`) — the key is
+    // then quoted (`contents":"write`), so allow optional quotes around the key
+    // and value or the plain `key: write` YAML form.
+    return /["']?(contents|id-token|packages)["']?\s*:\s*["']?write/i.test(s);
   };
   return check(wf.permissions) || Object.values(wf.jobs ?? {}).some((j) => check(j.permissions));
 }

@@ -89,8 +89,20 @@ interface ContentsFile {
 }
 
 async function ghGet(url: string): Promise<{ status: number; json: unknown }> {
-  const res = await request(url, { headers: ghHeaders() });
-  const body = await res.body.text();
+  // Bound each request so a hung connection can't hang the command (or spin the
+  // spinner) forever — critical in CI. status 0 = network error/timeout; callers
+  // treat it as "couldn't fetch" (a note), so one slow file never aborts the batch.
+  let res;
+  try {
+    res = await request(url, {
+      headers: ghHeaders(),
+      headersTimeout: 10_000,
+      bodyTimeout: 10_000,
+    });
+  } catch {
+    return { status: 0, json: null };
+  }
+  const body = await res.body.text().catch(() => '');
   let json: unknown = null;
   try {
     json = JSON.parse(body);
@@ -102,6 +114,8 @@ async function ghGet(url: string): Promise<{ status: number; json: unknown }> {
 
 const RATE_LIMIT_NOTE =
   'GitHub rate limit hit — results may be INCOMPLETE (a missing file could be unread, not absent). Set GITHUB_TOKEN.';
+const NETWORK_NOTE =
+  'A network error/timeout occurred — results may be INCOMPLETE (some files were not fetched).';
 
 /** Fetch one file's decoded content, or null if absent. On a 403 (rate limit)
  *  we can't distinguish absent from unread, so we record a note so a partial
@@ -116,6 +130,10 @@ async function fetchOne(
   const { status, json } = await ghGet(url);
   if (status === 403 || status === 429) {
     if (!notes.includes(RATE_LIMIT_NOTE)) notes.push(RATE_LIMIT_NOTE);
+    return null;
+  }
+  if (status === 0) {
+    if (!notes.includes(NETWORK_NOTE)) notes.push(NETWORK_NOTE);
     return null;
   }
   if (status !== 200 || !json || typeof json !== 'object') return null;
