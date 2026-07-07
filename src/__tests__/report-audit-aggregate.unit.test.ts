@@ -32,6 +32,7 @@ interface AuditLine {
   decision: string;
   source?: string;
   checkedBy?: string;
+  ruleName?: string;
   agent?: string;
   mcpServer?: string;
   args?: Record<string, unknown>;
@@ -838,5 +839,147 @@ describe('claudeModelPrice — single-sourced from pricingFor (no drift)', () =>
 
   it('returns null for a genuinely unknown model (cost dropped, not guessed)', () => {
     expect(claudeModelPrice('totally-not-a-model-xyz')).toBeNull();
+  });
+});
+
+// ── Dimension buckets (Report UI v2 · P0) ───────────────────────────────
+//
+// The control plane governs six dimensions (network/data/approvals/files/
+// tool-rules/cost) but the report collapsed every block into one generic
+// bucket + leaked raw checkedBy strings. These assert that the SAME audit
+// rows the loop already reads are attributed to their dimension. Data
+// source per dimension is REAL (verified 2026-07-05): egress blocks carry
+// checkedBy 'taint-egress-block'; MCP denials 'app-permission-block' (+
+// ruleName 'app-permission:<tool>'); jail hits ruleName 'shield:project-
+// jail:*'; PII 'observe-mode-pii-would-block'; approvals source 'daemon'.
+describe('aggregateReportFromAudit — dimension buckets', () => {
+  const at = (t: string) => `2026-05-10T${t}Z`;
+
+  it('attributes egress blocks to the network dimension', () => {
+    writeLog([
+      {
+        ts: at('10:00:00'),
+        tool: 'Bash',
+        decision: 'block',
+        checkedBy: 'taint-egress-block',
+        ruleName: 'taint-egress:evil.com',
+        agent: 'claude',
+      },
+    ]);
+    const { data } = aggregateReportFromAudit('7d', makeOpts());
+    expect(data.dimensions.network.blocked).toBe(1);
+  });
+
+  it('attributes PII would-block to the data dimension (observed)', () => {
+    writeLog([
+      {
+        ts: at('10:01:00'),
+        tool: 'Bash',
+        decision: 'allow',
+        checkedBy: 'observe-mode-pii-would-block',
+        agent: 'claude',
+      },
+    ]);
+    const { data } = aggregateReportFromAudit('7d', makeOpts());
+    expect(data.dimensions.data.observed).toBe(1);
+  });
+
+  it('attributes a jail hit to the files dimension', () => {
+    writeLog([
+      {
+        ts: at('10:02:00'),
+        tool: 'Read',
+        decision: 'block',
+        checkedBy: 'smart-rule-block',
+        ruleName: 'shield:project-jail:block-read-ssh',
+        agent: 'claude',
+      },
+    ]);
+    const { data } = aggregateReportFromAudit('7d', makeOpts());
+    expect(data.dimensions.files.blocked).toBe(1);
+  });
+
+  it('attributes an MCP app-permission block to the tool-rules dimension', () => {
+    writeLog([
+      {
+        ts: at('10:03:00'),
+        tool: 'mcp__redis__set',
+        decision: 'block',
+        checkedBy: 'app-permission-block',
+        ruleName: 'app-permission:set',
+        mcpServer: 'redis',
+        agent: 'claude',
+      },
+    ]);
+    const { data } = aggregateReportFromAudit('7d', makeOpts());
+    expect(data.dimensions.toolRules.mcp).toBe(1);
+  });
+
+  it('surfaces approvals (approved / denied / timed-out) as their own dimension', () => {
+    writeLog([
+      { ts: at('10:04:00'), tool: 'Bash', decision: 'allow', source: 'daemon', agent: 'claude' },
+      { ts: at('10:05:00'), tool: 'Bash', decision: 'block', source: 'daemon', agent: 'claude' },
+      {
+        ts: at('10:06:00'),
+        tool: 'Bash',
+        decision: 'block',
+        checkedBy: 'timeout',
+        agent: 'claude',
+      },
+    ]);
+    const { data } = aggregateReportFromAudit('7d', makeOpts());
+    expect(data.dimensions.approvals.approved).toBe(1);
+    expect(data.dimensions.approvals.denied).toBe(1);
+    expect(data.dimensions.approvals.timedOut).toBe(1);
+  });
+
+  it('does not double-count a jail hit into tool-rules', () => {
+    writeLog([
+      {
+        ts: at('10:07:00'),
+        tool: 'Read',
+        decision: 'block',
+        checkedBy: 'smart-rule-block',
+        ruleName: 'shield:project-jail:block-read-ssh',
+        agent: 'claude',
+      },
+    ]);
+    const { data } = aggregateReportFromAudit('7d', makeOpts());
+    expect(data.dimensions.files.blocked).toBe(1);
+    expect(data.dimensions.toolRules.blocked).toBe(0);
+  });
+});
+
+// ── Resilience: non-tool event rows must not crash the report ────────────
+//
+// The audit log interleaves tool-call rows with EVENT rows (e.g.
+// {"event":"shield-create",...}) that carry no `decision`. isAllow(decision)
+// assumed a string and threw `undefined.startsWith` on the first such row,
+// crashing `node9 report` entirely on any machine that had run e.g.
+// `node9 shield create`. Found live 2026-07-06. Event rows are not
+// PreToolUse tool calls → drop them; count only real rows.
+describe('aggregateReportFromAudit — malformed / event rows', () => {
+  it('skips rows with no decision (event rows) instead of throwing', () => {
+    fs.writeFileSync(
+      auditLogPath,
+      [
+        JSON.stringify({ ts: '2026-05-10T10:00:00Z', tool: 'Bash', decision: 'allow' }),
+        // A shield-create-style event row: no decision, no tool.
+        JSON.stringify({ ts: '2026-05-10T10:01:00Z', event: 'shield-create', shield: 'gmail' }),
+        JSON.stringify({
+          ts: '2026-05-10T10:02:00Z',
+          tool: 'Bash',
+          decision: 'block',
+          checkedBy: 'smart-rule-block',
+        }),
+      ].join('\n') + '\n'
+    );
+    let result!: ReturnType<typeof aggregateReportFromAudit>;
+    expect(() => {
+      result = aggregateReportFromAudit('7d', makeOpts());
+    }).not.toThrow();
+    // Only the two real tool-call rows counted; the event row dropped.
+    expect(result.data.total).toBe(2);
+    expect(result.data.dimensions.toolRules.blocked).toBe(1);
   });
 });

@@ -27,6 +27,14 @@ const BLOCK_REASON_LABELS: Record<string, string> = {
   'local-decision': 'User denied',
   'dlp-block': 'DLP block',
   'loop-detected': 'Loop detected',
+  // Report UI v2 · P0 — these were leaking as raw checkedBy strings in
+  // Top Blocks (no label) despite the audit already recording them.
+  'taint-egress-block': 'Egress blocked',
+  'observe-mode-taint-egress-would-block': 'Egress (observe)',
+  'app-permission-block': 'MCP tool blocked',
+  'app-permission-review': 'MCP tool (review)',
+  'observe-mode-pii-would-block': 'PII (observe)',
+  'pii-block': 'PII block',
 };
 
 function humanBlockReason(reason: string): string {
@@ -164,6 +172,7 @@ function renderTerminalReport(
     mcpMap,
     dailyMap,
     hourMap,
+    dimensions,
   } = data;
 
   const costUSD = claudeUSD + codexUSD + geminiUSD;
@@ -306,6 +315,43 @@ function renderTerminalReport(
   if (trendLabel || ratioLabel || testPasses + testFails > 0) {
     console.log('');
     console.log('  ' + ratioLabel + '   ' + testLabel + trendLabel);
+  }
+  console.log('');
+
+  // ── By dimension (Report UI v2 · P0) ──
+  // The control plane governs six dimensions; show "what happened" in each,
+  // from the same audit rows. A zero dimension renders dimmed (measured, not
+  // hidden) so an empty section never reads as "nothing to see".
+  {
+    const d = dimensions;
+    console.log('  ' + chalk.bold('By dimension') + chalk.dim('   what fired, per governed area'));
+    console.log('  ' + chalk.dim('─'.repeat(Math.min(50, W - 4))));
+    const dimRow = (icon: string, label: string, active: boolean, detail: string) => {
+      const l = active ? chalk.white(label.padEnd(14)) : chalk.dim(label.padEnd(14));
+      const v = active ? detail : chalk.dim(detail);
+      console.log('    ' + (active ? icon : chalk.dim(icon)) + '  ' + l + v);
+    };
+    dimRow('🌐', 'Network', d.network.blocked > 0, `${num(d.network.blocked)} egress blocked`);
+    dimRow(
+      '🔒',
+      'Data',
+      d.data.blocked + d.data.observed > 0,
+      `${num(d.data.blocked)} blocked · ${num(d.data.observed)} observed (DLP/PII)`
+    );
+    dimRow(
+      '✋',
+      'Approvals',
+      d.approvals.approved + d.approvals.denied + d.approvals.timedOut > 0,
+      `${num(d.approvals.approved)} approved · ${num(d.approvals.denied)} denied · ${num(d.approvals.timedOut)} timed-out→deny`
+    );
+    dimRow('📁', 'Files', d.files.blocked > 0, `${num(d.files.blocked)} jail-path reads blocked`);
+    dimRow(
+      '🛠',
+      'Tool rules',
+      d.toolRules.blocked + d.toolRules.mcp + d.toolRules.loops > 0,
+      `${num(d.toolRules.blocked)} shields/rules · ${num(d.toolRules.mcp)} MCP · ${num(d.toolRules.loops)} loops`
+    );
+    dimRow('💰', 'Cost', d.cost.totalUSD > 0, `${fmtCost(d.cost.totalUSD)} this period`);
   }
   console.log('');
 

@@ -1,0 +1,14 @@
+{
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "turn_id": "00000000-0000-4000-8000-000000000002",
+  "transcript_path": "/home/user/.codex/sessions/2026/06/18/rollout-fixture.jsonl",
+  "cwd": "/home/user/node9",
+  "hook_event_name": "PreToolUse",
+  "model": "gpt-5.5",
+  "permission_mode": "default",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "rg -n \"@Get\\('cases|@Patch\\('cases|audit/batch|posture|blast|scan|report|audit-log|policies|shields|panic|shadow|workspace\" /home/user/node9/node9Firewall/be/src/firewall /home/user/node9/node9Firewall/be/src/workspaces /home/user/node9/node9Firewall/be/src/policy-sync"
+  },
+  "tool_use_id": "toolu_fixture_0001"
+}

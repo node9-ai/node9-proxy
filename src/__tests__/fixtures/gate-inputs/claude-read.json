@@ -1,0 +1,18 @@
+{
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "transcript_path": "/home/user/.claude/projects/-home-user-node9/00000000-0000-4000-8000-000000000001.jsonl",
+  "cwd": "/home/user/node9/node9-proxy",
+  "prompt_id": "00000000-0000-4000-8000-000000000001",
+  "permission_mode": "bypassPermissions",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Read",
+  "tool_input": {
+    "file_path": "/home/user/node9/node9-proxy/src/daemon/scan-watermark.ts",
+    "offset": 690,
+    "limit": 45
+  },
+  "tool_use_id": "toolu_fixture_0001"
+}

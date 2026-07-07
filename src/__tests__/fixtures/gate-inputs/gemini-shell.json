@@ -1,0 +1,13 @@
+{
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "transcript_path": "/home/user/.gemini/tmp/node9/chats/session-fixture.json",
+  "cwd": "/home/user/node9",
+  "hook_event_name": "BeforeTool",
+  "timestamp": "2026-05-03T20:26:53.100Z",
+  "tool_name": "run_shell_command",
+  "tool_input": {
+    "command": "git log -n 50 --oneline",
+    "description": "Checking the commit history for agentic signatures or patterns.",
+    "dir_path": "node9-proxy"
+  }
+}

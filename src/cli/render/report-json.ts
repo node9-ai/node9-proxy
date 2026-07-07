@@ -17,6 +17,29 @@
 
 export type ReportPeriod = 'today' | '7d' | '30d' | '90d' | 'month';
 
+/**
+ * "What happened" per governed dimension (Report UI v2 · P0). Mirrors the
+ * PolicyStudio taxonomy so report ≈ policy. Every count comes from audit
+ * rows the aggregation already reads — this is surfacing, not new capture.
+ */
+export interface ReportDimensions {
+  /** Egress blocks (checkedBy contains `egress`, e.g. taint-egress-block). */
+  network: { blocked: number };
+  /** DLP/PII. `blocked` = hard DLP blocks; `observed` = would-block (DLP or
+   *  PII) that was allowed but flagged. */
+  data: { blocked: number; observed: number };
+  /** Human-in-the-loop decisions. Timed-out = auto-denied. */
+  approvals: { approved: number; denied: number; timedOut: number };
+  /** Credential-jail path reads blocked/reviewed (ruleName shield:project-jail:*). */
+  files: { blocked: number };
+  /** Shields / smart rules (`blocked`, excluding jail), MCP app-permission
+   *  governance events (`mcp` — block AND review, since a review is a tool
+   *  rule firing), and loop-detection hits (`loops`). */
+  toolRules: { blocked: number; mcp: number; loops: number };
+  /** Period spend across agents (from the cost journals). */
+  cost: { totalUSD: number };
+}
+
 export interface BuildReportJsonInput {
   period: ReportPeriod;
   start: Date;
@@ -66,6 +89,12 @@ export interface BuildReportJsonInput {
    *  checkedBy tag. Drives the [2] Report SHIELDS panel's per-shield
    *  attribution. */
   ruleMap: Map<string, number>;
+  /** Report UI v2 · P0 — "what happened" per governed dimension, derived
+   *  from the SAME audit rows (checkedBy/ruleName). Not a strict partition:
+   *  each field counts events matching that dimension's markers; a jail hit
+   *  lands ONLY in files (never re-counted in toolRules). Cost is the period
+   *  spend (from the cost journals), the one dimension with no audit rows. */
+  dimensions: ReportDimensions;
   agentMap: Map<string, number>;
   mcpMap: Map<string, number>;
   dailyMap: Map<string, { calls: number; blocked: number }>;
@@ -119,6 +148,9 @@ export interface ReportJsonOutput {
     byModel: Array<{ model: string; usd: number }>;
   };
 
+  /** Report UI v2 · P0 — "what happened" per governed dimension. */
+  dimensions: ReportDimensions;
+
   byTool: Array<{ tool: string; calls: number; blocked: number }>;
   byBlock: Array<{ rule: string; count: number }>;
   byAgent: Array<{ agent: string; calls: number }>;
@@ -170,6 +202,8 @@ export function buildReportJson(input: BuildReportJsonInput): ReportJsonOutput {
       passes: input.testPasses,
       fails: input.testFails,
     },
+
+    dimensions: input.dimensions,
 
     cost: {
       totalUSD: input.cost.claudeUSD + input.cost.codexUSD + input.cost.geminiUSD,

@@ -1,0 +1,17 @@
+{
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "transcript_path": "/home/user/.claude/projects/-home-user-node9/00000000-0000-4000-8000-000000000001.jsonl",
+  "cwd": "/home/user/node9",
+  "prompt_id": "00000000-0000-4000-8000-000000000001",
+  "permission_mode": "bypassPermissions",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "cd /home/user/node9\ngrep -n \"all 4 servers stamped\" doc/roadmap/ROADMAP.md",
+    "description": "Relocate the R1 note line"
+  },
+  "tool_use_id": "toolu_fixture_0001"
+}
