@@ -29,14 +29,24 @@ function ownedHint(source: string): boolean {
 export function renderScan(res: ScanResult): string {
   const L: string[] = [];
   const n = res.findings.length;
+  // An incomplete scan (rate limit / network) can never be "clean" — it didn't
+  // read every file. Say so loudly instead of implying a clean bill of health.
   const head =
     res.worst === 'critical' || res.worst === 'high'
       ? chalk.red.bold('⚠️  agent-security risk found')
       : res.worst
         ? chalk.yellow('agent-security notes')
-        : chalk.green('✅ agent-security: clean');
+        : res.incomplete
+          ? chalk.yellow.bold('⚠️  INCOMPLETE — could not read all files')
+          : chalk.green('✅ agent-security: clean');
   L.push(`🛡️  ${chalk.bold('node9 scan-repo')}  ·  ${res.source}  ·  ${head}`);
   L.push(chalk.gray(`   inspected ${res.inspected.length} config file(s), ${n} finding(s)`));
+  if (res.incomplete)
+    L.push(
+      chalk.yellow.bold(
+        '   ⚠️  This scan was rate-limited and is NOT a clean bill of health — set GITHUB_TOKEN and re-run.'
+      )
+    );
   L.push('');
 
   for (const f of res.findings) {
@@ -50,7 +60,7 @@ export function renderScan(res: ScanResult): string {
     L.push('');
   }
 
-  if (n === 0) {
+  if (n === 0 && !res.incomplete) {
     L.push(
       chalk.gray('   No committed agent hooks, injectable workflows, or unpinned MCP servers.')
     );
@@ -75,7 +85,14 @@ export function renderScan(res: ScanResult): string {
 
 export function renderScanMarkdown(res: ScanResult): string {
   const L: string[] = [];
-  const status = res.worst === 'critical' || res.worst === 'high' ? '⚠️' : res.worst ? '🟡' : '✅';
+  const status =
+    res.worst === 'critical' || res.worst === 'high'
+      ? '⚠️'
+      : res.worst
+        ? '🟡'
+        : res.incomplete
+          ? '⚠️'
+          : '✅';
   L.push(`### 🛡️ node9 agent-security · \`${res.source}\` · ${status}`);
   L.push('');
   L.push(
@@ -100,6 +117,7 @@ export function renderScanMarkdown(res: ScanResult): string {
 export function exitCodeFor(res: ScanResult): number {
   if (res.worst === 'critical' || res.worst === 'high') return 2;
   if (res.worst === 'medium') return 1;
+  if (res.incomplete) return 3; // couldn't read every file — not a clean pass
   return 0;
 }
 

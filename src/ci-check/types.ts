@@ -57,6 +57,9 @@ export interface ScanResult {
   notes: string[];
   /** Worst severity present, or null when clean. Drives exit code + headline. */
   worst: Severity | null;
+  /** True when a fetch was rate-limited / errored — the scan could NOT read every
+   *  file, so `worst: null` must NOT be presented as "clean" (false assurance). */
+  incomplete: boolean;
 }
 
 /** Severity rank for comparison / worst-of. Higher = worse. */
