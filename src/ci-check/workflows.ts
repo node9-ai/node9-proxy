@@ -410,3 +410,126 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
           : 'Add/verify an actor gate, scope the agent tools to read-only, and env-deny secrets. See Anthropic’s claude-code-action security doc.',
   };
 }
+
+// ─── CI-4: agent-reachable secrets ───────────────────────────────────────────
+// The agent's OWN credential (its API key / the default GITHUB_TOKEN) is expected
+// fuel — not a finding. CI-4 fires on EXTRA secrets an agent can reach (cloud OIDC,
+// static PATs, DB creds, other API keys) which an injected agent with a shell could
+// exfiltrate. Reuses analyzeWorkflow's reachability model — same danger shape.
+const AGENT_FUEL_RE =
+  /^(ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_BASE_URL|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY|OPENAI_BASE_URL|GEMINI_API_KEY|GOOGLE_API_KEY|GITHUB_TOKEN)$/i;
+
+function classifySecret(name: string): string {
+  if (/AWS_|AZURE_|GCP_|GOOGLE_APPLICATION|GCLOUD/i.test(name)) return 'cloud';
+  if (/_PAT\b|PAT$|_TOKEN$|GH_TOKEN/i.test(name)) return 'pat';
+  if (/DATABASE|_DB_|POSTGRES|MYSQL|REDIS|MONGO|CONNECTION_STRING/i.test(name)) return 'db';
+  if (/API_KEY|_KEY$|SECRET|PASSWORD|PASSWD/i.test(name)) return 'api-key';
+  return 'generic';
+}
+
+interface ReachableSecret {
+  name: string;
+  kind: string;
+}
+
+/** EXTRA secrets (beyond the agent's own fuel) reachable in the agent's job/step
+ *  env, plus cloud OIDC when id-token:write is granted. */
+function agentReachableSecrets(
+  wf: Workflow,
+  agentSteps: Step[],
+  agentJobs: Job[]
+): ReachableSecret[] {
+  const blobs: string[] = [];
+  for (const st of agentSteps) blobs.push(str(st.env), str(st.with));
+  for (const j of agentJobs) blobs.push(str(j.env));
+  blobs.push(str((wf as { env?: unknown }).env));
+  const found = new Map<string, string>();
+  for (const b of blobs) {
+    for (const m of b.matchAll(/secrets\.([A-Za-z_][A-Za-z0-9_]*)/gi)) {
+      const name = m[1];
+      if (AGENT_FUEL_RE.test(name)) continue;
+      found.set(name, classifySecret(name));
+    }
+  }
+  const idToken =
+    /["']?id-token["']?\s*:\s*["']?write/i.test(str(wf.permissions)) ||
+    agentJobs.some((j) => /["']?id-token["']?\s*:\s*["']?write/i.test(str(j.permissions)));
+  const out: ReachableSecret[] = [...found].map(([name, kind]) => ({ name, kind }));
+  if (idToken) out.push({ name: 'id-token (cloud OIDC)', kind: 'cloud-oidc' });
+  return out;
+}
+
+/** CI-4 — secrets an injectable agent could exfiltrate. Sibling of analyzeWorkflow
+ *  (reuses its reachability model). Null when the agent only holds its own fuel or
+ *  the secrets aren't attacker-reachable. Never throws. */
+export function analyzeWorkflowSecrets(path: string, content: string): CiFinding | null {
+  let raw: Record<string, unknown>;
+  try {
+    raw = (parseYaml(content) ?? {}) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const wf = raw as Workflow;
+  const all = allSteps(wf);
+  const agentSteps = all.map((s) => s.step).filter(isAgentStep);
+  if (agentSteps.length === 0) return null;
+  const agentJobs = [...new Set(all.filter((s) => isAgentStep(s.step)).map((s) => s.job))];
+  const secrets = agentReachableSecrets(wf, agentSteps, agentJobs);
+  if (secrets.length === 0) return null;
+
+  const triggers = triggerKeys(wf, raw);
+  const untrustedTrigger = triggers.some((t) =>
+    /pull_request_target|workflow_run|issue|pull_request|workflow_call/i.test(t)
+  );
+  const nonWriteStar =
+    str(agentSteps.map((s) => s.with?.['allowed_non_write_users']).find(Boolean)) === '*';
+  const bypassActive = nonWriteStar && untrustedTrigger;
+  const head = untrustedHeadCheckout(wf);
+  const reach = Math.max(
+    head === 'root' ? 3 : head === 'subdir' ? 1 : 0,
+    promptTakesUntrusted(agentSteps) ? 2 : 0,
+    bypassActive ? 2 : 0
+  );
+  const gate = hasActorGate(wf, raw) || hasImplicitActorGate(agentSteps, bypassActive);
+  const injectable = untrustedTrigger && !gate && reach > 0;
+  const canReadEnv = EXFIL_RCE_RE.test(collectTools(agentSteps)); // bare shell = read env + exfil
+
+  // Anti-noise: `id-token:write` (cloud OIDC) is extremely common and, on its own,
+  // is only a risk when an injectable agent can actually run a shell to use it. So:
+  //  - EXPLOITABLE (injectable + bare shell): report, incl. id-token → critical.
+  //  - NOT exploitable: only report if there's a REAL secret env-var (a static PAT,
+  //    DB cred, API key…) as a hardening advisory. id-token-ONLY here → null (skip).
+  const realSecrets = secrets.filter((s) => s.kind !== 'cloud-oidc');
+  const hasOidc = secrets.some((s) => s.kind === 'cloud-oidc');
+  let severity: Severity;
+  if (injectable && canReadEnv) {
+    severity =
+      hasOidc || realSecrets.some((s) => ['cloud', 'pat', 'db'].includes(s.kind))
+        ? 'critical'
+        : 'high';
+  } else if (realSecrets.length > 0) {
+    severity = 'advisory';
+  } else {
+    return null; // only id-token OIDC and not exploitable — too common to be a finding
+  }
+  return {
+    check: 'CI-4',
+    dimension: 'data',
+    severity,
+    title:
+      severity === 'advisory'
+        ? 'Secrets reachable by the agent — hardening'
+        : 'Exfiltratable secrets reachable by an injectable agent',
+    file: path,
+    signals: [
+      `agent can reach: ${secrets.map((s) => s.name).join(', ')}`,
+      injectable
+        ? 'the agent is externally triggerable (untrusted trigger, no gate)'
+        : 'gated / not externally triggerable — latent risk only',
+      canReadEnv
+        ? 'agent has arbitrary shell (bare Bash) → can read env and exfiltrate'
+        : 'no arbitrary-shell tool — not exfiltratable today, but one tool-add away',
+    ],
+    fix: 'Move extra secrets to a separate trusted job the agent cannot reach; drop id-token:write if unused; scope the agent tools to read-only and gate the trigger.',
+  };
+}

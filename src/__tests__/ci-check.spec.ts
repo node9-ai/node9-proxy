@@ -9,7 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
-import { analyzeWorkflow } from '../ci-check/workflows';
+import { analyzeWorkflow, analyzeWorkflowSecrets } from '../ci-check/workflows';
 import { analyzeAgentConfig } from '../ci-check/agent-config';
 import { analyzeMcp } from '../ci-check/mcp';
 import { scanTree } from '../ci-check';
@@ -561,6 +561,102 @@ describe('CI-3 mcp', () => {
       mcpServers: { pw: { command: 'npx', args: ['playwright@1.2.3'] } },
     });
     expect(analyzeMcp('.mcp.json', cfg)).toEqual([]);
+  });
+});
+
+describe('CI-4 — agent-reachable secrets', () => {
+  const base = (env: string, tools: string, extra = '') => `
+on:
+  issues:
+    types: [opened]
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    ${extra}
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        env:
+${env}
+        with:
+          allowed_non_write_users: "*"
+          anthropic_api_key: \${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: 'read github.event.issue.body'
+          claude_args: '--allowedTools "${tools}"'
+`;
+
+  it('extra CLOUD secret + injectable + bare Bash → critical', () => {
+    const f = analyzeWorkflowSecrets(
+      'w.yml',
+      base('          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}', 'Bash,Read')
+    )!;
+    expect(f.check).toBe('CI-4');
+    expect(f.severity).toBe('critical');
+    expect(f.signals.join(' ')).toMatch(/AWS_SECRET_ACCESS_KEY/);
+  });
+
+  it('id-token:write (cloud OIDC) + injectable + bare Bash → critical', () => {
+    const f = analyzeWorkflowSecrets(
+      'w.yml',
+      base('          FOO: bar', 'Bash', 'permissions:\n      id-token: write')
+    )!;
+    expect(f.severity).toBe('critical');
+    expect(f.signals.join(' ')).toMatch(/cloud OIDC/i);
+  });
+
+  it('a plain extra API key + injectable + bare Bash → high (not critical)', () => {
+    const f = analyzeWorkflowSecrets(
+      'w.yml',
+      base('          SERVICE_API_KEY: ${{ secrets.SERVICE_API_KEY }}', 'Bash')
+    )!;
+    expect(f.severity).toBe('high');
+  });
+
+  it('extra secret but only SCOPED tools (no bare shell) → advisory (agent can’t read env)', () => {
+    const f = analyzeWorkflowSecrets(
+      'w.yml',
+      base(
+        '          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}',
+        'Bash(gh:*),Read'
+      )
+    )!;
+    expect(f.severity).toBe('advisory');
+  });
+
+  it('only the agent’s own fuel (ANTHROPIC_API_KEY / GITHUB_TOKEN) → no CI-4 finding', () => {
+    const wf = `
+on:
+  issues:
+    types: [opened]
+jobs:
+  x:
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          anthropic_api_key: \${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: \${{ secrets.GITHUB_TOKEN }}
+          claude_args: '--allowedTools "Bash"'
+`;
+    expect(analyzeWorkflowSecrets('w.yml', wf)).toBeNull();
+  });
+
+  it('extra secret but GATED (claude-code-action default, no *) → advisory', () => {
+    const wf = `
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  x:
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        env:
+          AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        with:
+          anthropic_api_key: \${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: '--allowedTools "Bash"'
+`;
+    const f = analyzeWorkflowSecrets('w.yml', wf)!;
+    expect(f.severity).toBe('advisory');
   });
 });
 
