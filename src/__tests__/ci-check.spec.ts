@@ -658,6 +658,70 @@ jobs:
     const f = analyzeWorkflowSecrets('w.yml', wf)!;
     expect(f.severity).toBe('advisory');
   });
+
+  // ── Fix A: per-agent-job scoping (no cross-job conflation) ──
+  // The exfiltratable-secret danger (untrusted reach + a real secret + a shell) must
+  // all land in the SAME job. A secret + bare Bash sitting in a job that ISN'T
+  // externally reachable must NOT combine with a DIFFERENT job's untrusted trigger.
+  it('cross-job: injectable job has only fuel, the secret+bare-Bash job is NOT reachable → advisory, not critical', () => {
+    const wf = `
+on:
+  issues:
+    types: [opened]
+jobs:
+  respond:            # injectable ('*' + untrusted prompt) but only fuel — no extra secret
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          anthropic_api_key: \${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: 'respond to github.event.issue.body'
+          claude_args: '--allowedTools "Bash(gh:*),Read"'
+  deploy:             # has the real secret + bare Bash, but NOT externally reachable (no *, no untrusted input)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        env:
+          AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        with:
+          anthropic_api_key: \${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: 'run the deploy'
+          claude_args: '--allowedTools "Bash"'
+`;
+    const f = analyzeWorkflowSecrets('w.yml', wf)!;
+    expect(f.severity).toBe('advisory'); // was 'critical' pre-fix (conflated across jobs)
+  });
+
+  it('cross-job: injectable job holds the real secret but only SCOPED tools; a separate job has bare Bash → advisory (netwrix/rnikitin shape)', () => {
+    const wf = `
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  triage:                    # injectable + real secret, but SCOPED tools (no shell to exfil it)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        env:
+          SERVICE_API_KEY: \${{ secrets.SERVICE_API_KEY }}
+        with:
+          allowed_non_write_users: "*"
+          anthropic_api_key: \${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: 'triage github.event.comment.body'
+          claude_args: '--allowedTools "Bash(gh:*),Read,Grep"'
+  build:                     # bare Bash but no extra secret (and gated by the default)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: \${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: 'build'
+          claude_args: '--allowedTools "Bash"'
+`;
+    const f = analyzeWorkflowSecrets('w.yml', wf)!;
+    expect(f.severity).toBe('advisory'); // was 'high' pre-fix (bare Bash borrowed from the build job)
+  });
 });
 
 describe('scanTree orchestration + fetch parsing', () => {

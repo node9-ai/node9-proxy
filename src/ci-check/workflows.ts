@@ -113,9 +113,10 @@ function collectTools(steps: Step[]): string {
 }
 
 /** Where (if anywhere) an untrusted PR head is checked out. 'root' = into the
- *  workspace (dangerous under pull_request_target); 'subdir' = isolated path. */
-function untrustedHeadCheckout(wf: Workflow): 'root' | 'subdir' | null {
-  for (const { step } of allSteps(wf)) {
+ *  workspace (dangerous under pull_request_target); 'subdir' = isolated path.
+ *  Takes a step list so callers can scope it to a single job (CI-4 per-job). */
+function untrustedHeadCheckout(steps: Step[]): 'root' | 'subdir' | null {
+  for (const step of steps) {
     if (!step.uses || !/actions\/checkout/.test(step.uses)) continue;
     const ref = str(step.with?.['ref']);
     // Also catch reusable-workflow inputs that carry the fork head
@@ -143,21 +144,40 @@ function promptTakesUntrusted(steps: Step[]): boolean {
   return false;
 }
 
-/** An effective actor gate: a label gate (maintainer must apply) or an if that
- *  checks author_association / write permission / specific logins. */
-function hasActorGate(wf: Workflow, raw: Record<string, unknown>): boolean {
+// An `if:` that clearly CHECKS the actor's identity/permission — not a stray word
+// in a label name (e.g. `needs-rewrite`), which would falsely mark a dangerous
+// workflow as gated and hide it.
+const ACTOR_GATE_RE =
+  /author_association|FIRST_TIME_CONTRIBUTOR|collaborator|\b(MEMBER|OWNER)\b|permission|github\.actor\s*==|user\.login\s*==|==\s*['"](write|admin|maintain)|contains\([^)]*(login|actor|association)|head\.repo\.full_name\s*==\s*github\.repository/i;
+
+/** Is a label-type gate configured on an untrusted trigger? F14a: a label gate
+ *  counts on pull_request_target OR pull_request (metabase gates a
+ *  `pull_request: types:[labeled]` job on the label name). */
+function labelTypeConfigured(wf: Workflow, raw: Record<string, unknown>): boolean {
   const on = (wf.on ?? raw['on'] ?? raw[true as unknown as string]) as
     | Record<string, unknown>
     | undefined;
-  // F14a: a label gate is a gate whether on pull_request_target OR pull_request
-  // (metabase gates a `pull_request: types:[labeled]` job on the label name).
   const prTypes = (t: unknown): string[] =>
     t && Array.isArray((t as { types?: unknown }).types)
       ? (t as { types: unknown[] }).types.map(String)
       : [];
-  const labeled =
+  return (
     prTypes(on?.['pull_request_target']).includes('labeled') ||
-    prTypes(on?.['pull_request']).includes('labeled');
+    prTypes(on?.['pull_request']).includes('labeled')
+  );
+}
+
+/** Do these joined `if:` expressions constitute an actor gate? */
+function ifsAreGated(ifs: string, labelConfigured: boolean): boolean {
+  const gated = ACTOR_GATE_RE.test(ifs);
+  const labelGated = labelConfigured && /event\.label|label\.name/i.test(ifs);
+  return gated || labelGated;
+}
+
+/** An effective actor gate anywhere in the workflow: a label gate (maintainer must
+ *  apply) or an if that checks author_association / write permission / specific
+ *  logins. Whole-workflow scope — used by CI-2. */
+function hasActorGate(wf: Workflow, raw: Record<string, unknown>): boolean {
   const ifs = [
     wf.jobs ? Object.values(wf.jobs).map((j) => j.if) : [],
     allSteps(wf).map((s) => s.step.if),
@@ -165,15 +185,15 @@ function hasActorGate(wf: Workflow, raw: Record<string, unknown>): boolean {
     .flat()
     .map(str)
     .join(' ');
-  // Only count write/admin/maintain when it's clearly a permission/association
-  // CHECK — not a stray word in a label name (e.g. `needs-rewrite`), which would
-  // falsely mark a dangerous workflow as gated and hide it.
-  const gated =
-    /author_association|FIRST_TIME_CONTRIBUTOR|collaborator|\b(MEMBER|OWNER)\b|permission|github\.actor\s*==|user\.login\s*==|==\s*['"](write|admin|maintain)|contains\([^)]*(login|actor|association)|head\.repo\.full_name\s*==\s*github\.repository/i.test(
-      ifs
-    );
-  const labelGated = !!labeled && /event\.label|label\.name/i.test(ifs);
-  return gated || labelGated;
+  return ifsAreGated(ifs, labelTypeConfigured(wf, raw));
+}
+
+/** Actor gate scoped to a SINGLE job (its own `if:` + its steps' `if:`s). CI-4
+ *  evaluates each agent job independently, so a gate on a DIFFERENT job must not
+ *  be credited to this one (and vice-versa). */
+function jobActorGate(job: Job, wf: Workflow, raw: Record<string, unknown>): boolean {
+  const ifs = [job.if, ...(job.steps ?? []).map((s) => s.if)].map(str).join(' ');
+  return ifsAreGated(ifs, labelTypeConfigured(wf, raw));
 }
 
 /** `anthropics/claude-code-action` (the higher-level action — NOT the lower-level
@@ -288,7 +308,7 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   const untrustedTrigger = secretExposed || forkInput;
   const bypassActive = nonWriteStar && untrustedTrigger;
 
-  const head = untrustedHeadCheckout(wf);
+  const head = untrustedHeadCheckout(steps);
   const promptUntrusted = promptTakesUntrusted(agentSteps);
   // Untrusted reach: a checked-out fork head, untrusted text in the prompt, or an
   // active "*" bypass on an untrustable trigger.
@@ -459,40 +479,43 @@ function agentReachableSecrets(
   return out;
 }
 
-/** CI-4 — secrets an injectable agent could exfiltrate. Sibling of analyzeWorkflow
- *  (reuses its reachability model). Null when the agent only holds its own fuel or
- *  the secrets aren't attacker-reachable. Never throws. */
-export function analyzeWorkflowSecrets(path: string, content: string): CiFinding | null {
-  let raw: Record<string, unknown>;
-  try {
-    raw = (parseYaml(content) ?? {}) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-  const wf = raw as Workflow;
-  const all = allSteps(wf);
-  const agentSteps = all.map((s) => s.step).filter(isAgentStep);
-  if (agentSteps.length === 0) return null;
-  const agentJobs = [...new Set(all.filter((s) => isAgentStep(s.step)).map((s) => s.job))];
-  const secrets = agentReachableSecrets(wf, agentSteps, agentJobs);
+interface JobEval {
+  severity: Severity;
+  secrets: ReachableSecret[];
+  injectable: boolean;
+  canReadEnv: boolean;
+}
+
+/** Evaluate ONE agent job in isolation. The exfiltratable-secret danger — untrusted
+ *  reach + a real secret + a shell — must all land in the SAME job, so everything
+ *  here is scoped to `job` (its own agent steps, its own env/permissions, its own
+ *  gate, its own checkout). Returns null if this job holds no extra secret or its
+ *  secrets aren't a finding. This is CI-2's agent-job scoping (F11b) applied to CI-4. */
+function evalAgentJob(
+  job: Job,
+  wf: Workflow,
+  raw: Record<string, unknown>,
+  untrustedTrigger: boolean
+): JobEval | null {
+  const jobSteps = job.steps ?? [];
+  const jobAgentSteps = jobSteps.filter(isAgentStep);
+  if (jobAgentSteps.length === 0) return null;
+
+  const secrets = agentReachableSecrets(wf, jobAgentSteps, [job]);
   if (secrets.length === 0) return null;
 
-  const triggers = triggerKeys(wf, raw);
-  const untrustedTrigger = triggers.some((t) =>
-    /pull_request_target|workflow_run|issue|pull_request|workflow_call/i.test(t)
-  );
   const nonWriteStar =
-    str(agentSteps.map((s) => s.with?.['allowed_non_write_users']).find(Boolean)) === '*';
+    str(jobAgentSteps.map((s) => s.with?.['allowed_non_write_users']).find(Boolean)) === '*';
   const bypassActive = nonWriteStar && untrustedTrigger;
-  const head = untrustedHeadCheckout(wf);
+  const head = untrustedHeadCheckout(jobSteps);
   const reach = Math.max(
     head === 'root' ? 3 : head === 'subdir' ? 1 : 0,
-    promptTakesUntrusted(agentSteps) ? 2 : 0,
+    promptTakesUntrusted(jobAgentSteps) ? 2 : 0,
     bypassActive ? 2 : 0
   );
-  const gate = hasActorGate(wf, raw) || hasImplicitActorGate(agentSteps, bypassActive);
+  const gate = jobActorGate(job, wf, raw) || hasImplicitActorGate(jobAgentSteps, bypassActive);
   const injectable = untrustedTrigger && !gate && reach > 0;
-  const canReadEnv = EXFIL_RCE_RE.test(collectTools(agentSteps)); // bare shell = read env + exfil
+  const canReadEnv = EXFIL_RCE_RE.test(collectTools(jobAgentSteps)); // bare shell = read env + exfil
 
   // Anti-noise: `id-token:write` (cloud OIDC) is extremely common and, on its own,
   // is only a risk when an injectable agent can actually run a shell to use it. So:
@@ -512,21 +535,54 @@ export function analyzeWorkflowSecrets(path: string, content: string): CiFinding
   } else {
     return null; // only id-token OIDC and not exploitable — too common to be a finding
   }
+  return { severity, secrets, injectable, canReadEnv };
+}
+
+/** CI-4 — secrets an injectable agent could exfiltrate. Sibling of analyzeWorkflow
+ *  (reuses its reachability model). Evaluates each agent JOB independently and
+ *  reports the worst — a secret + shell in a NON-reachable job must not conflate
+ *  with a DIFFERENT job's untrusted trigger. Null when no job is a finding. Never
+ *  throws. */
+export function analyzeWorkflowSecrets(path: string, content: string): CiFinding | null {
+  let raw: Record<string, unknown>;
+  try {
+    raw = (parseYaml(content) ?? {}) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const wf = raw as Workflow;
+  const all = allSteps(wf);
+  if (!all.some((s) => isAgentStep(s.step))) return null;
+
+  const triggers = triggerKeys(wf, raw);
+  const untrustedTrigger = triggers.some((t) =>
+    /pull_request_target|workflow_run|issue|pull_request|workflow_call/i.test(t)
+  );
+
+  // Per-agent-job: a secret is only exfiltratable if the SAME job is injectable and
+  // has a shell. Evaluate each independently, keep the worst.
+  const agentJobs = [...new Set(all.filter((s) => isAgentStep(s.step)).map((s) => s.job))];
+  const worst = agentJobs
+    .map((job) => evalAgentJob(job, wf, raw, untrustedTrigger))
+    .filter((e): e is JobEval => e !== null)
+    .sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity])[0];
+  if (!worst) return null;
+
   return {
     check: 'CI-4',
     dimension: 'data',
-    severity,
+    severity: worst.severity,
     title:
-      severity === 'advisory'
+      worst.severity === 'advisory'
         ? 'Secrets reachable by the agent — hardening'
         : 'Exfiltratable secrets reachable by an injectable agent',
     file: path,
     signals: [
-      `agent can reach: ${secrets.map((s) => s.name).join(', ')}`,
-      injectable
+      `agent can reach: ${worst.secrets.map((s) => s.name).join(', ')}`,
+      worst.injectable
         ? 'the agent is externally triggerable (untrusted trigger, no gate)'
         : 'gated / not externally triggerable — latent risk only',
-      canReadEnv
+      worst.canReadEnv
         ? 'agent has arbitrary shell (bare Bash) → can read env and exfiltrate'
         : 'no arbitrary-shell tool — not exfiltratable today, but one tool-add away',
     ],
