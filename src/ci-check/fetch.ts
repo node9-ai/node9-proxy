@@ -44,6 +44,14 @@ const SURFACE_FILES = [
   '.mcp.json',
   '.cursor/mcp.json',
   '.codex/config.toml',
+  // CI-6: agent instruction files (auto-loaded into the agent's system prompt).
+  'CLAUDE.md',
+  'AGENTS.md',
+  'GEMINI.md',
+  '.cursorrules',
+  '.github/copilot-instructions.md',
+  '.windsurfrules',
+  '.clinerules',
 ];
 
 const WORKFLOW_DIR = '.github/workflows';

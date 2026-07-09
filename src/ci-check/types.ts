@@ -12,7 +12,7 @@ import type { Severity } from '../posture/types';
 export type { Severity };
 
 /** The six governed dimensions (same taxonomy as PolicyStudio / posture). */
-export type Dimension = 'workflows' | 'toolRules' | 'mcp' | 'data' | 'files';
+export type Dimension = 'workflows' | 'toolRules' | 'mcp' | 'data' | 'files' | 'instructions';
 
 export interface CiFinding {
   /** Which check produced it, e.g. 'CI-2'. */
