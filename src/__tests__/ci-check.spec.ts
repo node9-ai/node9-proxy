@@ -799,3 +799,57 @@ describe('scanTree orchestration + fetch parsing', () => {
     expect(isLocalPath('owner/repo')).toBe(false);
   });
 });
+
+describe('scan-repo closing CTA (presentation only — no scan logic)', () => {
+  // Minimal ScanResult builders so we test the renderer in isolation.
+  const finding = (severity: import('../ci-check/types').Severity) => ({
+    check: 'CI-1',
+    dimension: 'workflows' as const,
+    severity,
+    title: 'test finding',
+    file: '.github/workflows/x.yml',
+    signals: ['sig'],
+    fix: 'fix it',
+  });
+  const result = (
+    over: Partial<import('../ci-check/types').ScanResult>
+  ): import('../ci-check/types').ScanResult => ({
+    source: 'owner/repo',
+    findings: [],
+    inspected: ['.github/workflows/x.yml'],
+    notes: [],
+    worst: null,
+    incomplete: false,
+    ...over,
+  });
+
+  it('a clean scan closes with the "keep it green" Action CTA', async () => {
+    const { renderScan } = await import('../ci-check/render.js');
+    const out = renderScan(result({ worst: null }));
+    expect(out).toMatch(/Keep it green/);
+    expect(out).toContain('marketplace/actions/node9-agent-security-check');
+    expect(out).toContain('ref=cli_scan_repo'); // attribution param present
+  });
+
+  it('a HIGH scan closes with a fix-then-cover CTA (not the green line)', async () => {
+    const { renderScan } = await import('../ci-check/render.js');
+    const out = renderScan(result({ worst: 'high', findings: [finding('high')] }));
+    expect(out).toMatch(/to fix — then stop the next at the PR/);
+    expect(out).toContain('marketplace/actions/node9-agent-security-check');
+    expect(out).not.toMatch(/well-configured/);
+  });
+
+  it('an incomplete scan CTA never claims clean/green (anti-false-assurance)', async () => {
+    const { renderScan } = await import('../ci-check/render.js');
+    const out = renderScan(result({ incomplete: true, worst: null }));
+    expect(out).toMatch(/not a clean bill of health/i);
+    expect(out).not.toMatch(/Keep it green/);
+    expect(out).not.toMatch(/well-configured/);
+  });
+
+  it('the PR-comment markdown renderer has NO Action CTA (avoid in-PR spam)', async () => {
+    const { renderScanMarkdown } = await import('../ci-check/render.js');
+    const out = renderScanMarkdown(result({ worst: null }));
+    expect(out).not.toContain('marketplace/actions/node9-agent-security-check');
+  });
+});
