@@ -86,28 +86,40 @@ function isAgentStep(step: Step): boolean {
   return false;
 }
 
-/** All tool grants declared for the agent steps (from claude_args / allowed_tools
- *  / settings blob) as one string to pattern-match. */
+// G-c: pull ONLY the --allowedTools / --allowed-tools value(s) from a claude_args
+// blob. Everything else (`--append-system-prompt`, `--model`, free text) is PROSE and
+// must NOT reach the tool regexes — else a safety instruction like "never edit code or
+// push commits" reads as an Edit/push grant (the luci-theme-family FP). Extracting only
+// the grant flag also naturally excludes `--disallowedTools` (never extracted).
+function allowedToolsFromArgs(claudeArgs: string): string {
+  let out = '';
+  for (const m of claudeArgs.matchAll(/--allowed[-_]?tools[=\s]+("[^"]*"|'[^']*'|\S+)/gi))
+    out += ' ' + m[1];
+  return out;
+}
+
+// Only the allowedTools[] / permissions.allow[] arrays from a settings JSON string —
+// never the whole blob (which can carry a systemPrompt full of prose). disallowedTools
+// / deny are naturally excluded (not extracted).
+function allowedToolsFromSettings(settings: string): string {
+  let out = '';
+  for (const key of ['allowedTools', 'allow']) {
+    for (const m of settings.matchAll(new RegExp(`"${key}"\\s*:\\s*(\\[[^\\]]*\\])`, 'gi')))
+      out += ' ' + m[1];
+  }
+  return out;
+}
+
+/** All tool grants declared for the agent steps — ONLY from real tool-grant sources
+ *  (`--allowedTools`, the `allowed_tools`/`allowedTools` keys, `settings.allowedTools`),
+ *  never prose. See G-c. */
 function collectTools(steps: Step[]): string {
-  // F13: strip DENYLIST clauses first. `--disallowedTools "Bash,Write"` (or a
-  // settings `"disallowedTools":[...]`) BLOCKS those tools — the opposite of
-  // granting them. Reading the raw string would match "Bash"/"Write" and flag a
-  // safe workflow as broad (repomix documents exactly this pattern).
-  const stripDeny = (x: string) =>
-    x
-      .replace(/--disallowed[-_]?tools\s+("[^"]*"|'[^']*'|\S+)/gi, ' ')
-      .replace(/["']disallowed[_]?[tT]ools["']\s*:\s*\[[^\]]*\]/g, ' ');
   let s = '';
   for (const st of steps) {
     const w = st.with ?? {};
-    s +=
-      ' ' +
-      stripDeny(str(w['claude_args'])) +
-      ' ' +
-      str(w['allowed_tools']) +
-      ' ' +
-      str(w['allowedTools']);
-    s += ' ' + stripDeny(str(w['settings'])); // settings JSON often carries allowedTools[]
+    s += ' ' + allowedToolsFromArgs(str(w['claude_args']));
+    s += ' ' + str(w['allowed_tools']) + ' ' + str(w['allowedTools']);
+    s += ' ' + allowedToolsFromSettings(str(w['settings']));
   }
   return s;
 }
