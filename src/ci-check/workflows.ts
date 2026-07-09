@@ -311,12 +311,17 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   const head = untrustedHeadCheckout(steps);
   const promptUntrusted = promptTakesUntrusted(agentSteps);
   // Untrusted reach: a checked-out fork head, untrusted text in the prompt, or an
-  // active "*" bypass on an untrustable trigger.
-  const reach = Math.max(
-    head === 'root' ? 3 : head === 'subdir' ? 1 : 0,
-    promptUntrusted ? 2 : 0,
-    bypassActive ? 2 : 0
-  );
+  // active "*" bypass. B (F10 generalized): reach REQUIRES an untrusted trigger — you
+  // can only check out an attacker's head (or feed attacker text) under an untrusted
+  // event. A cron/dispatch/push release job that checks out an internal head_sha
+  // (JetBrains/youtrackdb) has no attacker to supply a malicious head → reach 0.
+  const reach = untrustedTrigger
+    ? Math.max(
+        head === 'root' ? 3 : head === 'subdir' ? 1 : 0,
+        promptUntrusted ? 2 : 0,
+        bypassActive ? 2 : 0
+      )
+    : 0;
 
   const toolsBlob = collectTools(agentSteps);
   const broadTools = BROAD_TOOL_RE.test(toolsBlob);
@@ -439,6 +444,27 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
 const AGENT_FUEL_RE =
   /^(ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_BASE_URL|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY|OPENAI_BASE_URL|GEMINI_API_KEY|GOOGLE_API_KEY|GITHUB_TOKEN)$/i;
 
+// A1: the agent-action INPUT keys that take the LLM credential/endpoint. A secret
+// bound to one of these is fuel regardless of its NAME (nvidia_inference_key,
+// MY_CLAUDE_KEY, …). Deliberately EXCLUDES `github_token` — a non-default token
+// passed there is a recoverable PAT (usesPat/CI-2 already treats it as a real secret).
+const FUEL_INPUT_KEYS =
+  /^(anthropic_api_key|anthropic_auth_token|anthropic_base_url|claude_code_oauth_token|openai_api_key|openai_base_url|gemini_api_key|google_api_key)$/i;
+
+/** Secret names that are the agent's own fuel by ASSIGNMENT: bound to a fuel input
+ *  key (`with:`) or to a fuel-named env var. */
+function fuelSecretNames(agentSteps: Step[]): Set<string> {
+  const out = new Set<string>();
+  const add = (v: unknown) => {
+    for (const m of str(v).matchAll(/secrets\.([A-Za-z_][A-Za-z0-9_]*)/gi)) out.add(m[1]);
+  };
+  for (const st of agentSteps) {
+    for (const [k, v] of Object.entries(st.with ?? {})) if (FUEL_INPUT_KEYS.test(k)) add(v);
+    for (const [k, v] of Object.entries(st.env ?? {})) if (AGENT_FUEL_RE.test(k)) add(v);
+  }
+  return out;
+}
+
 function classifySecret(name: string): string {
   if (/AWS_|AZURE_|GCP_|GOOGLE_APPLICATION|GCLOUD/i.test(name)) return 'cloud';
   if (/_PAT\b|PAT$|_TOKEN$|GH_TOKEN/i.test(name)) return 'pat';
@@ -463,11 +489,12 @@ function agentReachableSecrets(
   for (const st of agentSteps) blobs.push(str(st.env), str(st.with));
   for (const j of agentJobs) blobs.push(str(j.env));
   blobs.push(str((wf as { env?: unknown }).env));
+  const fuel = fuelSecretNames(agentSteps); // A1: fuel-by-assignment, not just by-name
   const found = new Map<string, string>();
   for (const b of blobs) {
     for (const m of b.matchAll(/secrets\.([A-Za-z_][A-Za-z0-9_]*)/gi)) {
       const name = m[1];
-      if (AGENT_FUEL_RE.test(name)) continue;
+      if (AGENT_FUEL_RE.test(name) || fuel.has(name)) continue;
       found.set(name, classifySecret(name));
     }
   }

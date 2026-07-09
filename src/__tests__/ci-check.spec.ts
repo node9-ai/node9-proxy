@@ -509,6 +509,34 @@ jobs:
   it('does not throw on unparseable YAML', () => {
     expect(analyzeWorkflow('bad.yml', ':::not: yaml: [')).toBeNull();
   });
+
+  // B: a head-checkout only means untrusted REACH under an untrusted trigger. A cron /
+  // workflow_dispatch release job that checks out an internal head_sha has no attacker to
+  // supply a malicious head → advisory, not high. (JetBrains/youtrackdb shape.)
+  it('B: schedule/dispatch release with a head_sha checkout + bare Bash → advisory, not high', () => {
+    const wf = `
+on:
+  schedule:
+    - cron: '0 6 * * 6'
+  workflow_dispatch:
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ needs.classify.outputs.head_sha }}
+      - uses: anthropics/claude-code-base-action@v1
+        with:
+          anthropic_api_key: \${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: 'summarize release notes'
+          claude_args: '--allowedTools "Bash"'
+`;
+    const f = analyzeWorkflow('weekly.yml', wf)!;
+    expect(SEVERITY_RANK[f.severity]).toBeLessThanOrEqual(SEVERITY_RANK.advisory); // was high pre-fix
+  });
 });
 
 describe('CI-1 agent-config', () => {
@@ -721,6 +749,54 @@ jobs:
 `;
     const f = analyzeWorkflowSecrets('w.yml', wf)!;
     expect(f.severity).toBe('advisory'); // was 'high' pre-fix (bare Bash borrowed from the build job)
+  });
+
+  // ── A1: fuel-by-assignment (NVIDIA/Megatron-LM shape) ──
+  // A secret assigned to a fuel INPUT (anthropic_api_key / ANTHROPIC_BASE_URL) is the
+  // agent's own fuel regardless of the secret's NAME — not an exfiltratable extra secret.
+  it('custom-named key assigned to anthropic_api_key is fuel → no CI-4 finding (NVIDIA shape)', () => {
+    const wf = `
+on:
+  issues:
+    types: [opened]
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        env:
+          ANTHROPIC_BASE_URL: \${{ secrets.MY_INFERENCE_URL }}
+        with:
+          allowed_non_write_users: "*"
+          anthropic_api_key: \${{ secrets.MY_INFERENCE_KEY }}
+          prompt: 'read github.event.issue.body'
+          claude_args: '--allowedTools "Bash"'
+`;
+    expect(analyzeWorkflowSecrets('w.yml', wf)).toBeNull(); // was 'high' pre-fix (custom key counted as a secret)
+  });
+
+  it('A1 negative: a REAL extra secret alongside the custom fuel key still fires critical', () => {
+    const wf = `
+on:
+  issues:
+    types: [opened]
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        env:
+          DATABASE_URL: \${{ secrets.DATABASE_URL }}
+        with:
+          allowed_non_write_users: "*"
+          anthropic_api_key: \${{ secrets.MY_INFERENCE_KEY }}
+          prompt: 'read github.event.issue.body'
+          claude_args: '--allowedTools "Bash"'
+`;
+    const f = analyzeWorkflowSecrets('w.yml', wf)!;
+    expect(f.severity).toBe('critical'); // only the fuel key is excluded; the DB cred remains
+    expect(f.signals.join(' ')).toMatch(/DATABASE_URL/);
+    expect(f.signals.join(' ')).not.toMatch(/MY_INFERENCE_KEY/);
   });
 });
 
