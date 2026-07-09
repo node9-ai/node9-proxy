@@ -205,7 +205,14 @@ function hasActorGate(wf: Workflow, raw: Record<string, unknown>): boolean {
  *  be credited to this one (and vice-versa). */
 function jobActorGate(job: Job, wf: Workflow, raw: Record<string, unknown>): boolean {
   const ifs = [job.if, ...(job.steps ?? []).map((s) => s.if)].map(str).join(' ');
-  return ifsAreGated(ifs, labelTypeConfigured(wf, raw));
+  // G-d′: an `assignee.login == '…'` gate (only someone with triage/write access can
+  // assign an issue) counts too. Kept in the JOB-scoped check only — NOT in the shared
+  // ACTOR_GATE_RE / whole-workflow hasActorGate, so a gated sibling job can't mask an
+  // ungated injectable one.
+  return (
+    ifsAreGated(ifs, labelTypeConfigured(wf, raw)) ||
+    /assignee\.login\s*==|event\.assignee\b/i.test(ifs)
+  );
 }
 
 /** `anthropics/claude-code-action` (the higher-level action — NOT the lower-level
@@ -217,6 +224,28 @@ function jobActorGate(job: Job, wf: Workflow, raw: Record<string, unknown>): boo
 function hasImplicitActorGate(agentSteps: Step[], bypassActive: boolean): boolean {
   if (bypassActive) return false; // bypass on (and reachable) → the default gate is off
   return agentSteps.some((s) => /anthropics\/claude-code-action@/i.test(s.uses ?? ''));
+}
+
+/** G-d: agent steps whose OWN job is injectable — i.e. not actor-gated and not held
+ *  by the claude-code-action default gate. Only these contribute to blast radius: a
+ *  gated sibling job's tools (chmonitor's `assignee == duyetbot` bare-Bash job) can't
+ *  be reached by the untrusted trigger, so they must not inflate the injectable job.
+ *  Falls back to all agent steps if none qualify (never blank). */
+function injectableAgentSteps(
+  wf: Workflow,
+  raw: Record<string, unknown>,
+  untrustedTrigger: boolean
+): Step[] {
+  const out: Step[] = [];
+  for (const job of Object.values(wf.jobs ?? {})) {
+    const a = (job.steps ?? []).filter(isAgentStep);
+    if (!a.length) continue;
+    const jobStar = str(a.map((s) => s.with?.['allowed_non_write_users']).find(Boolean)) === '*';
+    const jobBypass = jobStar && untrustedTrigger;
+    if (jobActorGate(job, wf, raw) || hasImplicitActorGate(a, jobBypass)) continue; // gated → skip
+    out.push(...a);
+  }
+  return out;
 }
 
 function permsElevated(wf: Workflow, agentJobs: Job[]): boolean {
@@ -335,7 +364,11 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
       )
     : 0;
 
-  const toolsBlob = collectTools(agentSteps);
+  // G-d: blast radius comes only from the injectable job(s) — a gated sibling job's
+  // tools can't be reached by the untrusted trigger (chmonitor's duyetbot bare-Bash job).
+  const powerSteps = injectableAgentSteps(wf, raw, untrustedTrigger);
+  const scopedSteps = powerSteps.length ? powerSteps : agentSteps; // fallback: never blank
+  const toolsBlob = collectTools(scopedSteps);
   const broadTools = BROAD_TOOL_RE.test(toolsBlob);
   const elevated = permsElevated(wf, agentJobs);
   const pat = usesPat(wf);

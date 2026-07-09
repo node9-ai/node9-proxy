@@ -584,6 +584,65 @@ jobs:
     const f = analyzeWorkflow('real.yml', wf)!;
     expect(SEVERITY_RANK[f.severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high); // real grant unaffected
   });
+
+  // G-d: tools count only from the INJECTABLE job. chmonitor has an injectable triage
+  // job (opened + "*", scoped tools) and a bare-Bash job GATED to a specific assignee.
+  // CI-2 was merging both jobs' tools → attributing the gated job's bare Bash to the
+  // injectable one → high.
+  it('G-d: gated bare-Bash job does not inflate a separate injectable scoped job → not high', () => {
+    const wf = `
+on:
+  issues:
+jobs:
+  triage:
+    if: github.event.action == 'opened'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'label github.event.issue.body'
+          claude_args: '--allowedTools "Bash(gh:*)"'
+  resolve:
+    if: github.event.action == 'assigned' && github.event.assignee.login == 'mybot'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          prompt: 'resolve the issue'
+          claude_args: '--allowedTools "Read,Write,Edit,Bash,Glob,Grep"'
+`;
+    const f = analyzeWorkflow('chmon.yml', wf)!;
+    expect(SEVERITY_RANK[f.severity]).toBeLessThanOrEqual(SEVERITY_RANK.medium); // was high (borrowed bare Bash)
+  });
+
+  it('G-d negative: a bare-Bash tool in a SECOND injectable job still counts → high', () => {
+    const wf = `
+on:
+  issues:
+jobs:
+  a:
+    if: github.event.action == 'opened'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'read github.event.issue.body'
+          claude_args: '--allowedTools "Bash(gh:*)"'
+  b:
+    if: github.event.action == 'opened'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'read github.event.issue.body'
+          claude_args: '--allowedTools "Bash"'
+`;
+    const f = analyzeWorkflow('twojob.yml', wf)!;
+    expect(SEVERITY_RANK[f.severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high); // both jobs reachable
+  });
 });
 
 describe('CI-1 agent-config', () => {
