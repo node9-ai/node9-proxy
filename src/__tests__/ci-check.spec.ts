@@ -644,6 +644,68 @@ jobs:
     const f = analyzeWorkflow('twojob.yml', wf)!;
     expect(SEVERITY_RANK[f.severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high); // both jobs reachable
   });
+
+  // F15: write-scope granularity. pull-requests/issues:write + scoped gh/git tools =
+  // PR/issue manipulation (comment/approve), NOT code-push or RCE → high, not critical.
+  // (hyperdx shape: no contents:write, no PAT, no bare Bash.)
+  const hyperdxLike = (perms: string, tools: string, token = 'GITHUB_TOKEN') => `
+on:
+  pull_request_target:
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+${perms}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          github_token: \${{ secrets.${token} }}
+          prompt: 'review github.event.pull_request.body'
+          claude_args: '--allowedTools "${tools}"'
+`;
+
+  it('F15: pull-requests/issues:write + scoped gh/git tools → high, not critical', () => {
+    const f = analyzeWorkflow(
+      'deep-review.yml',
+      hyperdxLike(
+        '      pull-requests: write\n      issues: write\n      id-token: write',
+        'Bash(gh api:*),Bash(gh pr view:*),Bash(git:*)'
+      )
+    )!;
+    expect(f.severity).toBe('high'); // was 'critical' pre-F15
+  });
+
+  it('F15 negative: contents:write (code push) stays critical', () => {
+    const f = analyzeWorkflow(
+      'w.yml',
+      hyperdxLike('      contents: write\n      pull-requests: write', 'Bash(git:*),Bash(gh api:*)')
+    )!;
+    expect(f.severity).toBe('critical');
+  });
+
+  it('F15 negative: a static PAT (unknown scope) stays critical', () => {
+    const f = analyzeWorkflow(
+      'w.yml',
+      hyperdxLike(
+        '      pull-requests: write\n      issues: write',
+        'Bash(gh api:*),Bash(git:*)',
+        'MY_PAT'
+      )
+    )!;
+    expect(f.severity).toBe('critical');
+  });
+
+  it('F15 negative: bare Bash (RCE) stays critical', () => {
+    const f = analyzeWorkflow(
+      'w.yml',
+      hyperdxLike('      pull-requests: write\n      issues: write', 'Bash')
+    )!;
+    expect(f.severity).toBe('critical');
+  });
 });
 
 describe('CI-1 agent-config', () => {

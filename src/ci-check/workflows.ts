@@ -261,17 +261,20 @@ function permsElevated(wf: Workflow, agentJobs: Job[]): boolean {
   return check(wf.permissions) || agentJobs.some((j) => check(j.permissions));
 }
 
-/** Does the workflow grant the token real GitHub WRITE power (modify the repo /
- *  PRs / issues)? id-token:write is NOT counted — it's OIDC (cloud auth), only
- *  exploitable with an exfil/RCE tool, which the F11 cap handles separately. */
-function hasGithubWritePerm(wf: Workflow, agentJobs: Job[]): boolean {
-  const check = (p: Record<string, string> | string | undefined) =>
-    /["']?(contents|pull-requests|issues|packages|actions|deployments)["']?\s*:\s*["']?write/i.test(
-      str(p)
-    );
-  // Scope to the agent's own job(s) — a separate job's write perms are irrelevant
-  // to what an injected agent can do (see medusa: agent in a read-only job).
-  return check(wf.permissions) || agentJobs.some((j) => check(j.permissions));
+/** F15: `contents`/`packages`/`actions`/`deployments : write` — CATASTROPHIC write
+ *  power (push code, publish a package, deploy). With a push/API tool this is code
+ *  execution on the repo → critical. (id-token:write is OIDC, handled by F11.) */
+function hasCodeWritePerm(wf: Workflow, agentJobs: Job[]): boolean {
+  const rx = /["']?(contents|packages|actions|deployments)["']?\s*:\s*["']?write/i;
+  return rx.test(str(wf.permissions)) || agentJobs.some((j) => rx.test(str(j.permissions)));
+}
+
+/** F15: `pull-requests`/`issues : write` — BOUNDED write power. An injected agent can
+ *  comment / label / approve / close, but CANNOT push code (that needs contents:write).
+ *  Real damage (self-approve a malicious PR, spam) but not catastrophic → capped at high. */
+function hasMetaWritePerm(wf: Workflow, agentJobs: Job[]): boolean {
+  const rx = /["']?(pull-requests|issues)["']?\s*:\s*["']?write/i;
+  return rx.test(str(wf.permissions)) || agentJobs.some((j) => rx.test(str(j.permissions)));
 }
 
 function usesPat(wf: Workflow): boolean {
@@ -418,8 +421,19 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   // `Bash(gh api:*)`) → correctly stays high/critical.
   const exfilOrRce = EXFIL_RCE_RE.test(toolsBlob);
   const githubWriteTool = GH_WRITE_TOOL_RE.test(toolsBlob);
-  const canDamage = exfilOrRce || ((hasGithubWritePerm(wf, agentJobs) || pat) && githubWriteTool);
+  // F15: three damage tiers, not one. RCE (bare Bash/curl) and CODE-WRITE (contents:write
+  // + a git/gh tool, or a static PAT of unknown scope) are catastrophic → critical-capable.
+  // METADATA-WRITE (pull-requests/issues:write + gh tool) is bounded — comment/label/approve,
+  // no code push, no shell, no secret exfil → high at most.
+  const rce = exfilOrRce;
+  const codeWrite = pat || (hasCodeWritePerm(wf, agentJobs) && githubWriteTool);
+  const metaWrite = hasMetaWritePerm(wf, agentJobs) && githubWriteTool;
+  const canDamage = rce || codeWrite || metaWrite;
   if (!canDamage && severity && SEVERITY_RANK[severity] > SEVERITY_RANK.medium) severity = 'medium';
+  // F15: metadata-write-ONLY (no RCE, no code-write) can't be catastrophic → cap critical to high.
+  // hyperdx: pull-requests/issues:write + Bash(gh api:*)/Bash(git:*), no bare Bash, no PAT — an
+  // injected agent manipulates PRs/issues but can't push code (needs contents:write) → high.
+  if (canDamage && !rce && !codeWrite && severity === 'critical') severity = 'high';
   // F14b: untrusted reach via a NON-privileged trigger (plain `pull_request` only) is
   // sandboxed — fork PRs run with a read-only token and no secrets, so an injected
   // agent can't write to the repo or exfil (worst case = an ephemeral runner). That's
