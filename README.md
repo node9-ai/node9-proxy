@@ -68,6 +68,53 @@ Findings are grouped by **who can fix them**: 🔒 the ones node9 reduces (just 
   Track this across your fleet & keep it green → node9.ai
 ```
 
+## Scan a repo — agent-CI security
+
+`node9 scan-repo` checks any repo (or a local folder) for ways an AI agent wired into GitHub Actions could be **hijacked by an outsider** — injectable workflows, agent-reachable secrets, unpinned MCP servers, over-broad agent config, and poisoned instruction files. Static and parse-only: it reads only committed config, never executes repo code. No install or token needed for public repos.
+
+```bash
+npx node9-ai scan-repo <owner/repo>   # any public repo, no install
+node9 scan-repo .                      # a local checkout — no network
+node9 scan-repo <owner/repo> --json    # machine-readable
+```
+
+```text
+🛡️  node9 scan-repo · node9-ai/agent-security-demo · ⚠️ agent-security risk found
+   inspected 2 config file(s), 2 finding(s)
+
+🔴 CRITICAL  Injectable agent workflow — untrusted input reaches a tool-using agent with secrets
+   .github/workflows/vulnerable-example.yml · CI-2
+     • runs with base-repo secrets (pull_request_target)
+     • checks out the untrusted PR head into the workspace root
+     • allowed_non_write_users: "*" — any user can trigger the agent
+     • no effective actor gate
+
+🔴 CRITICAL  Exfiltratable secrets reachable by an injectable agent
+   .github/workflows/vulnerable-example.yml · CI-4
+     • agent has arbitrary shell (bare Bash) → can read env and exfiltrate
+```
+
+What it checks:
+
+| Check    | Flags                                                                        |
+| -------- | ---------------------------------------------------------------------------- |
+| **CI-1** | committed agent config that pre-authorizes broad tools or runs remote hooks  |
+| **CI-2** | injectable agent workflows — an outsider can trigger the agent and hijack it |
+| **CI-3** | unpinned / `@latest` MCP servers or inline credentials (supply chain)        |
+| **CI-4** | secrets an injected agent could exfiltrate                                   |
+| **CI-6** | poisoned or dangerous instructions in `CLAUDE.md` / `AGENTS.md` / skills     |
+
+**Gate every PR** — the same engine as a GitHub Action, so a hijackable config can't get merged:
+
+```yaml
+# .github/workflows/agent-security.yml
+- uses: node9-ai/agent-security-action@v1
+  with:
+    fail-on: high # or 'never' to just comment
+```
+
+Marketplace: **[node9 Agent Security Check](https://github.com/marketplace/actions/node9-agent-security-check)**
+
 ## Live monitoring
 
 <p align="center">
