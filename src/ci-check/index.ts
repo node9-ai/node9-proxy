@@ -4,9 +4,10 @@
 // scan always returns a result (fail-open on our own bugs).
 
 import { fetchTree, type OnProgress } from './fetch';
-import { analyzeWorkflow } from './workflows';
+import { analyzeWorkflow, analyzeWorkflowSecrets } from './workflows';
 import { analyzeAgentConfig } from './agent-config';
 import { analyzeMcp } from './mcp';
+import { analyzeInstructionFile } from './instructions';
 import type { CiFinding, ScanResult, Severity, RepoTree } from './types';
 import { SEVERITY_RANK } from './types';
 
@@ -32,10 +33,18 @@ export function scanTree(tree: RepoTree): ScanResult {
       if (/\.github\/workflows\/.+\.ya?ml$/.test(file.path)) {
         const f = analyzeWorkflow(file.path, file.content);
         if (f) findings.push(f);
+        const s = analyzeWorkflowSecrets(file.path, file.content); // CI-4
+        if (s) findings.push(s);
       } else if (/\.claude\/settings(\.local)?\.json$/.test(file.path)) {
         findings.push(...analyzeAgentConfig(file.path, file.content));
       } else if (/\.mcp\.json$|\.cursor\/mcp\.json$/.test(file.path)) {
         findings.push(...analyzeMcp(file.path, file.content));
+      } else if (
+        /(^|\/)(CLAUDE|AGENTS|GEMINI)\.md$|(^|\/)\.cursorrules$|copilot-instructions\.md$|(^|\/)\.(windsurf|cline)rules$/.test(
+          file.path
+        )
+      ) {
+        findings.push(...analyzeInstructionFile(file.path, file.content)); // CI-6
       }
     } catch (err) {
       notes.push(`checker degraded on ${file.path}: ${(err as Error)?.message ?? 'error'}`);
