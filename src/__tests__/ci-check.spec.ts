@@ -1107,6 +1107,119 @@ jobs:
   });
 });
 
+// Round-4 follow-up — the `write-all` / default-permissions blind spot. The per-scope
+// permission checks match only the literal `contents: write` string, so GitHub's
+// `permissions: write-all` shorthand (which grants strictly MORE) read as LESS dangerous
+// than the explicit form → a genuine false-negative on the catastrophe tier.
+describe('CI-2 — write-all / default-permissions coverage (FN fix)', () => {
+  const injectableGitPush = (perms: string) => `
+on: pull_request_target
+${perms}
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'review \${{ github.event.pull_request.title }}'
+          claude_args: '--allowedTools "Bash(git:*),Read"'
+`;
+
+  // The FN: `write-all` grants contents:write (→ git push), so an injected agent with
+  // Bash(git:*) can push malicious code. Must match the explicit contents:write verdict.
+  it('write-all + Bash(git:*) + untrusted head → critical (was medium)', () => {
+    const wa = analyzeWorkflow('wa.yml', injectableGitPush('permissions: write-all'))!;
+    const explicit = analyzeWorkflow(
+      'ex.yml',
+      injectableGitPush('permissions:\n  contents: write')
+    )!;
+    expect(wa.severity).toBe('critical');
+    expect(wa.severity).toBe(explicit.severity); // write-all is not weaker than contents:write
+  });
+
+  // write-all is NOT issue-only (it holds pull-requests:write + contents:write), so the
+  // R4-4 issue-only→medium cap must NOT apply to it.
+  it('write-all is not treated as issue-only write', () => {
+    const f = analyzeWorkflow('wa.yml', injectableGitPush('permissions: write-all'))!;
+    expect(SEVERITY_RANK[f.severity]).toBeGreaterThan(SEVERITY_RANK.medium);
+  });
+
+  // Guard: write-all must NOT override a real actor gate. A gated workflow is not
+  // externally injectable regardless of how broad its permissions are → advisory.
+  it('write-all under an actor gate stays advisory (does not inflate a gated workflow)', () => {
+    const wf = `
+on: pull_request_target
+permissions: write-all
+jobs:
+  review:
+    if: github.event.pull_request.author_association == 'MEMBER'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'review \${{ github.event.pull_request.title }}'
+          claude_args: '--allowedTools "Bash(git:*)"'
+`;
+    const f = analyzeWorkflow('gated-wa.yml', wf)!;
+    expect(SEVERITY_RANK[f.severity]).toBeLessThanOrEqual(SEVERITY_RANK.advisory);
+  });
+
+  // The ambiguous case: NO explicit permissions block. The token defaults to the
+  // repo/org setting, which MAY be write — we can't prove it, so we don't inflate the
+  // severity (avoid FP on read-default repos) but we MUST surface the ambiguity.
+  it('no explicit permissions → advisory signal about the default token scope', () => {
+    const f = analyzeWorkflow('noperms.yml', injectableGitPush(''))!;
+    expect(f.signals.some((s) => /no explicit .?permissions/i.test(s))).toBe(true);
+  });
+
+  // Code-review finding #1: an empty sibling job (`notify:` with no body) parses to null.
+  // A bare `.steps`/`.permissions` deref throws, the caller swallows it, and the finding is
+  // SILENTLY SUPPRESSED — an attacker disables CI-2 for the file with one empty job.
+  it('an empty sibling job does not crash the analyzer (detection-bypass guard)', () => {
+    const wf = injectableGitPush('permissions: write-all') + '  notify:\n';
+    let f: ReturnType<typeof analyzeWorkflow> = null;
+    expect(() => {
+      f = analyzeWorkflow('withempty.yml', wf);
+    }).not.toThrow();
+    expect(f!.severity).toBe('critical'); // the real vuln is still reported
+  });
+
+  // Code-review finding #2: GitHub REPLACES top-level permissions when a job declares its
+  // own. A top-level `write-all` must NOT be credited to an agent job that scoped ITSELF
+  // down to read-only — that job's token genuinely cannot push → not critical (FP guard).
+  it('top-level write-all + job-level read-only scope is not credited to that job', () => {
+    const wf = `
+on: pull_request_target
+permissions: write-all
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'review \${{ github.event.pull_request.title }}'
+          claude_args: '--allowedTools "Bash(git:*),Read"'
+`;
+    const f = analyzeWorkflow('override.yml', wf)!;
+    expect(SEVERITY_RANK[f.severity]).toBeLessThanOrEqual(SEVERITY_RANK.medium);
+  });
+});
+
 describe('CI-1 agent-config', () => {
   it('flags the glances npx hook (pinned → medium, not overclaimed as high)', () => {
     const findings = analyzeAgentConfig('.claude/settings.json', read('glances-settings.json'));

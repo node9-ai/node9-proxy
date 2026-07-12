@@ -159,9 +159,17 @@ function triggerReach(wf: Workflow, raw: Record<string, unknown>) {
   return { keys, untrusted, reusable, secretExposed, privileged };
 }
 
+/** Job values, dropping null entries. An empty job block (`notify:` with no body) parses
+ *  to `null`; a bare `.steps`/`.permissions`/`.if` deref on it throws, and since the caller
+ *  (scanTree) try/catches analyzeWorkflow, the throw SILENTLY SUPPRESSES the finding — an
+ *  attacker can disable CI-2 for the whole file by adding one empty job. Filter once here. */
+function jobList(wf: Workflow): Job[] {
+  return Object.values(wf.jobs ?? {}).filter((j): j is Job => j != null);
+}
+
 function allSteps(wf: Workflow): { job: Job; step: Step }[] {
   const out: { job: Job; step: Step }[] = [];
-  for (const job of Object.values(wf.jobs ?? {})) {
+  for (const job of jobList(wf)) {
     for (const step of job.steps ?? []) out.push({ job, step });
   }
   return out;
@@ -283,10 +291,7 @@ function ifsAreGated(ifs: string, labelConfigured: boolean): boolean {
  *  apply) or an if that checks author_association / write permission / specific
  *  logins. Whole-workflow scope — used by CI-2. */
 function hasActorGate(wf: Workflow, raw: Record<string, unknown>): boolean {
-  const ifs = [
-    wf.jobs ? Object.values(wf.jobs).map((j) => j.if) : [],
-    allSteps(wf).map((s) => s.step.if),
-  ]
+  const ifs = [jobList(wf).map((j) => j.if), allSteps(wf).map((s) => s.step.if)]
     .flat()
     .map(str)
     .join(' ');
@@ -357,7 +362,7 @@ function injectableJobs(
   untrustedTrigger: boolean
 ): Job[] {
   const out: Job[] = [];
-  for (const job of Object.values(wf.jobs ?? {})) {
+  for (const job of jobList(wf)) {
     const a = (job.steps ?? []).filter(isAgentStep);
     if (!a.length) continue;
     const jobStar = str(a.map((s) => s.with?.['allowed_non_write_users']).find(Boolean)) === '*';
@@ -379,10 +384,32 @@ function usesPatIn(jobs: Job[]): boolean {
   return false;
 }
 
-/** R4-3: `id-token:write` (cloud OIDC). Scoped to the given jobs (+ top-level). */
+/** Effective permissions text for a job. GitHub REPLACES (not merges) the workflow-level
+ *  `permissions:` when a job declares its OWN block — so a job with its own permissions is
+ *  evaluated on THAT alone (a top-level `write-all` does NOT leak into a job that scoped
+ *  itself down to `contents: read`); a job with no block inherits the workflow top-level. */
+function jobPerms(wf: Workflow, job: Job): string {
+  return job.permissions != null ? str(job.permissions) : str(wf.permissions);
+}
+
+/** Does any of `jobs` hold a write scope matching `rx` under its EFFECTIVE (job-override-
+ *  aware) permissions? GitHub's `permissions: write-all` shorthand grants WRITE to every
+ *  scope, so it satisfies every per-scope write check too — matching only the literal
+ *  `contents: write` form would read `write-all` (strictly MORE dangerous) as LESS
+ *  dangerous, a false negative on the catastrophe tier. */
+function jobsHaveWrite(wf: Workflow, jobs: Job[], rx: RegExp): boolean {
+  return jobs.some((j) => {
+    const p = jobPerms(wf, j);
+    return /\bwrite-all\b/i.test(p) || rx.test(p);
+  });
+}
+
+/** R4-3: `id-token:write` (cloud OIDC), job-override-aware. NOTE: `write-all` is
+ *  deliberately NOT credited — GitHub requires `id-token: write` to be granted explicitly
+ *  even under `write-all`, so a `write-all` grant does NOT enable OIDC. */
 function hasIdTokenWrite(wf: Workflow, jobs: Job[]): boolean {
   const rx = /["']?id-token["']?\s*:\s*["']?write/i;
-  return rx.test(str(wf.permissions)) || jobs.some((j) => rx.test(str(j.permissions)));
+  return jobs.some((j) => rx.test(jobPerms(wf, j)));
 }
 
 /** R4-4: `pull-requests:write` — lets an injected agent `gh pr review --approve` a malicious PR,
@@ -390,24 +417,25 @@ function hasIdTokenWrite(wf: Workflow, jobs: Job[]): boolean {
  *  actual merge COMMIT still needs `contents:write`; the risk here is the self-approve, not the
  *  merge.) Distinguished from `issues:write` (comment/label an issue) which is weaker → medium. */
 function hasPrWritePerm(wf: Workflow, jobs: Job[]): boolean {
-  const rx = /["']?pull-requests["']?\s*:\s*["']?write/i;
-  return rx.test(str(wf.permissions)) || jobs.some((j) => rx.test(str(j.permissions)));
+  return jobsHaveWrite(wf, jobs, /["']?pull-requests["']?\s*:\s*["']?write/i);
 }
 
 /** F15: `contents`/`packages`/`actions`/`deployments : write` — CATASTROPHIC write
  *  power (push code, publish a package, deploy). With a push/API tool this is code
  *  execution on the repo → critical. (id-token:write is OIDC, handled by F11.) */
 function hasCodeWritePerm(wf: Workflow, agentJobs: Job[]): boolean {
-  const rx = /["']?(contents|packages|actions|deployments)["']?\s*:\s*["']?write/i;
-  return rx.test(str(wf.permissions)) || agentJobs.some((j) => rx.test(str(j.permissions)));
+  return jobsHaveWrite(
+    wf,
+    agentJobs,
+    /["']?(contents|packages|actions|deployments)["']?\s*:\s*["']?write/i
+  );
 }
 
 /** F15: `pull-requests`/`issues : write` — BOUNDED write power. An injected agent can
  *  comment / label / approve / close, but CANNOT push code (that needs contents:write).
  *  Real damage (self-approve a malicious PR, spam) but not catastrophic → capped at high. */
 function hasMetaWritePerm(wf: Workflow, agentJobs: Job[]): boolean {
-  const rx = /["']?(pull-requests|issues)["']?\s*:\s*["']?write/i;
-  return rx.test(str(wf.permissions)) || agentJobs.some((j) => rx.test(str(j.permissions)));
+  return jobsHaveWrite(wf, agentJobs, /["']?(pull-requests|issues)["']?\s*:\s*["']?write/i);
 }
 
 function hasEnvDeny(steps: Step[]): boolean {
@@ -516,9 +544,7 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   // gated (injJobs empty), so we never imply a reachable sibling is safe.
   const membershipGated =
     injJobs.length === 0 &&
-    Object.values(wf.jobs ?? {}).some(
-      (j) => (j.steps ?? []).some(isAgentStep) && hasStepMembershipGate(j)
-    );
+    jobList(wf).some((j) => (j.steps ?? []).some(isAgentStep) && hasStepMembershipGate(j));
   const gate = explicitGate || implicitGate;
   const envDeny = hasEnvDeny(agentSteps);
   const pinned = agentActionsPinned(agentSteps);
@@ -622,6 +648,16 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   if (elevated) signals.push('elevated permissions (contents/id-token: write)');
   if (pat) signals.push('a static PAT is exposed to the agent (recoverable via injection)');
   if (!gate && reach > 0) signals.push('no effective actor gate');
+  // The ambiguous case: NO explicit `permissions:` anywhere. The GITHUB_TOKEN then
+  // defaults to the repo/org setting, which MAY be write-all (the legacy default). We
+  // can't prove it from the file, so we don't inflate severity (that would false-positive
+  // on read-default repos) — but when an injectable agent has a write-capable tool, we
+  // surface the ambiguity so the reader pins it down.
+  const noExplicitPerms = wf.permissions == null && jobList(wf).every((j) => j.permissions == null);
+  if (noExplicitPerms && reach > 0 && (broadTools || githubWriteTool))
+    signals.push(
+      'no explicit `permissions:` — the token defaults to the repo/org setting, which may grant write; set it explicitly to read-only'
+    );
 
   const mitigations: string[] = [];
   if (explicitGate || membershipGated)
