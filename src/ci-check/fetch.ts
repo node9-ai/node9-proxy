@@ -56,6 +56,34 @@ const SURFACE_FILES = [
 
 const WORKFLOW_DIR = '.github/workflows';
 
+// 1c-B: the instruction-file + config surface, matchable at ANY depth (a monorepo keeps its
+// agent surface in sub-packages: `packages/api/CLAUDE.md`, `apps/web/.claude/settings.json`).
+// Workflows are NOT here — `.github/workflows` is only valid at the repo root (enumerated
+// separately). Mirrors the dispatch regexes in index.ts so anything discovered is analyzed.
+const SURFACE_BASENAME =
+  /(^|\/)(CLAUDE|AGENTS|GEMINI)\.md$|(^|\/)\.cursorrules$|(^|\/)\.(windsurf|cline)rules$|(^|\/)copilot-instructions\.md$|(^|\/)\.claude\/settings(\.local)?\.json$|(^|\/)\.mcp\.json$|(^|\/)\.cursor\/mcp\.json$|(^|\/)\.codex\/config\.toml$/;
+// Paths under these segments are dependencies / build output, not the repo's OWN agent
+// surface — skip them (a vendored `node_modules/**/CLAUDE.md` is noise, not the repo's risk).
+const IGNORE_SEG =
+  /(^|\/)(node_modules|vendor|\.git|dist|build|out|\.next|target|\.venv|site-packages)\//;
+const MAX_SURFACE_FILES = 200;
+
+/** Pure: from a flat list of repo file paths, pick the agent-surface files at any depth,
+ *  skipping dependency/build dirs, capped at MAX_SURFACE_FILES. Pushes a note (marked
+ *  INCOMPLETE so `scanTree` flips `incomplete`) if the tree was truncated or the cap was hit —
+ *  a large monorepo must never be silently under-scanned. Shared by the GitHub Trees path and
+ *  local recursion. */
+export function pickSurfacePaths(paths: string[], truncated: boolean, notes: string[]): string[] {
+  const matched = paths.filter((p) => SURFACE_BASENAME.test(p) && !IGNORE_SEG.test(p));
+  const capped = matched.slice(0, MAX_SURFACE_FILES);
+  if (truncated || matched.length > MAX_SURFACE_FILES) {
+    notes.push(
+      `repo tree is large/truncated — some agent-surface files may be INCOMPLETE (scanned ${capped.length} of ${matched.length}${truncated ? '+' : ''}).`
+    );
+  }
+  return capped;
+}
+
 export interface ParsedRepo {
   owner: string;
   repo: string;
@@ -193,6 +221,34 @@ async function listWorkflowPaths(owner: string, repo: string, notes: string[]): 
     .map((e) => e.path);
 }
 
+/** 1c-B: discover agent-surface files at ANY depth via the Git Trees API (one recursive
+ *  call — `HEAD` resolves directly, verified). Returns the picked paths, or `null` on a
+ *  fetch failure so the caller can FALL BACK to the fixed root list (never worse than the
+ *  old root-only behavior). Never throws. */
+async function listSurfacePaths(
+  owner: string,
+  repo: string,
+  notes: string[]
+): Promise<string[] | null> {
+  const url = `https://api.github.com/repos/${owner}/${repo}/git/trees/HEAD?recursive=1`;
+  const { status, json } = await ghGet(url);
+  if (status === 403 || status === 429) {
+    if (!notes.includes(RATE_LIMIT_NOTE)) notes.push(RATE_LIMIT_NOTE);
+    return null; // couldn't discover → fall back to the root list
+  }
+  if (status === 0) {
+    if (!notes.includes(NETWORK_NOTE)) notes.push(NETWORK_NOTE);
+    return null;
+  }
+  if (status !== 200 || !json || typeof json !== 'object') return null;
+  const tree = json as { tree?: { path?: string; type?: string }[]; truncated?: boolean };
+  if (!Array.isArray(tree.tree)) return null;
+  const paths = tree.tree
+    .filter((e) => e.type === 'blob' && typeof e.path === 'string')
+    .map((e) => e.path as string);
+  return pickSurfacePaths(paths, !!tree.truncated, notes);
+}
+
 const FETCH_CONCURRENCY = 8;
 
 /** Fetch the agent-surface of a GitHub repo. Never throws — network/absence
@@ -207,7 +263,11 @@ export async function fetchGitHubTree(
   try {
     onProgress?.({ phase: 'listing workflows', done: 0, total: 1 });
     const workflowPaths = await listWorkflowPaths(owner, repo, notes);
-    const allPaths = [...SURFACE_FILES, ...workflowPaths];
+    // 1c-B: discover the surface at any depth; fall back to the fixed root list if the
+    // Trees call failed (rate-limit / network), so we're never worse than root-only.
+    const discovered = await listSurfacePaths(owner, repo, notes);
+    const surfacePaths = discovered ?? SURFACE_FILES;
+    const allPaths = [...new Set([...surfacePaths, ...workflowPaths])];
     let done = 0;
     const fetched = await pooled(allPaths, FETCH_CONCURRENCY, async (p) => {
       const f = await fetchOne(owner, repo, p, notes);
@@ -236,7 +296,35 @@ export function readLocalTree(dir: string): RepoTree {
       /* unreadable → skip */
     }
   };
-  for (const p of SURFACE_FILES) add(p);
+  // 1c-B: recurse for agent-surface files at any depth (bounded, skip dep/build dirs), the
+  // local twin of the Trees-API discovery. POSIX-separator rel paths so SURFACE_BASENAME /
+  // IGNORE_SEG match identically to the GitHub side.
+  const matches: string[] = [];
+  const walk = (relDir: string) => {
+    if (matches.length >= MAX_SURFACE_FILES) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(path.join(root, relDir), { withFileTypes: true });
+    } catch {
+      return; // unreadable dir → skip
+    }
+    for (const e of entries) {
+      if (matches.length >= MAX_SURFACE_FILES) return;
+      const rel = relDir ? `${relDir}/${e.name}` : e.name;
+      if (e.isDirectory()) {
+        if (IGNORE_SEG.test(`${rel}/`)) continue;
+        walk(rel);
+      } else if (e.isFile() && SURFACE_BASENAME.test(rel)) {
+        matches.push(rel);
+      }
+    }
+  };
+  walk('');
+  if (matches.length >= MAX_SURFACE_FILES)
+    notes.push(
+      `repo is large — some agent-surface files may be INCOMPLETE (capped at ${MAX_SURFACE_FILES}).`
+    );
+  for (const rel of matches) add(rel);
   const wfDir = path.join(root, WORKFLOW_DIR);
   try {
     if (fs.existsSync(wfDir)) {
