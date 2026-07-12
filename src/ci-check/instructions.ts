@@ -9,13 +9,55 @@
 
 import type { CiFinding, Severity } from './types';
 
-// ── Tier 1: structural, near-zero-FP → high/critical ──────────────────────────
-// Hidden / invisible / bidi / Unicode-tag characters — used to conceal instructions
-// from a human reviewer while the model still reads them. Deliberately EXCLUDES
-// U+200C/U+200D (emoji ZWNJ/ZWJ) and U+FEFF (BOM) to avoid FPs on legitimate emoji.
-//   U+200B zero-width space · U+2060 word joiner · U+202A–202E bidi · U+2066–2069
-//   bidi isolates · U+E0000–E007F Unicode tag chars.
-const HIDDEN_CHARS = /[\u200B\u2060\u202A-\u202E\u2066-\u2069]|[\u{E0000}-\u{E007F}]/u;
+// ── Tier 1: structural concealment — classified by LEGITIMACY, not "is it invisible" ──
+// Presence of an invisible/formatting char ≠ concealment. Four classes, distinct handling
+// (round-5 follow-up; live FP: a lone U+200B between Khmer syllables in a translated
+// AGENTS.md is the legitimate word separator, not hidden text):
+//   A — Unicode TAG chars (U+E0000–E007F): no legitimate use in prose → critical.
+//   B — Bidi OVERRIDE (U+202D/202E): Trojan-Source visual reordering → critical.
+//   C — Bidi embed/isolate (U+202A–202C, U+2066–2069): legit in RTL docs → advisory (surfaced,
+//       not over-claimed as high/critical).
+//   D — Zero-width (U+200B word-break, U+2060 word-joiner): legit in SE-Asian/CJK scripts →
+//       fire ONLY on the concealment SIGNATURE (splits a visible Latin word; escalate to
+//       critical only when de-hiding REVEALS a directive — mirrors decodeSuspiciousBase64).
+const TAG_CHARS = /[\u{E0000}-\u{E007F}]/u; // A
+const BIDI_OVERRIDE = /[‭‮]/; // B
+const BIDI_EMBED_ISOLATE = /[‪-‬⁦-⁩]/; // C
+
+// D allow-list: scripts where a zero-width space is a legitimate word/line-break hint (no
+// inter-word spacing). Thai / Lao / Myanmar / Khmer / Kana / CJK / Hangul.
+function isZwLegitScript(cp: number | undefined): boolean {
+  if (cp === undefined) return false;
+  return (
+    (cp >= 0x0e00 && cp <= 0x0e7f) ||
+    (cp >= 0x0e80 && cp <= 0x0eff) ||
+    (cp >= 0x1000 && cp <= 0x109f) ||
+    (cp >= 0x1780 && cp <= 0x17ff) ||
+    (cp >= 0x3040 && cp <= 0x30ff) ||
+    (cp >= 0x3400 && cp <= 0x9fff) ||
+    (cp >= 0xac00 && cp <= 0xd7af)
+  );
+}
+const isAsciiWordChar = (ch: string | undefined): boolean => !!ch && /[A-Za-z0-9]/.test(ch);
+
+/** D: count zero-width chars (U+200B/U+2060) that SPLIT a visible Latin word — the concealment
+ *  shape. Skips a neighbor in a ZW-legit script (word-break typography) and whitespace/edge
+ *  boundaries (formatting). */
+function suspiciousZeroWidth(text: string): number {
+  let n = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c !== 0x200b && c !== 0x2060) continue;
+    if (isZwLegitScript(text.codePointAt(i - 1)) || isZwLegitScript(text.codePointAt(i + 1)))
+      continue;
+    const prev = text[i - 1];
+    const next = text[i + 1];
+    if (!prev || !next || /\s/.test(prev) || /\s/.test(next)) continue;
+    if (isAsciiWordChar(prev) && isAsciiWordChar(next)) n++;
+  }
+  return n;
+}
+const stripZeroWidth = (t: string): string => t.replace(/[​⁠]/g, '');
 
 // Prompt-override / role-impersonation directives. The classic phrases only — no bare
 // "system:" (too FP-prone in docs).
@@ -86,16 +128,56 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
   const findings: CiFinding[] = [];
   const decoded = decodeSuspiciousBase64(content);
 
-  // Tier 1 — structural
-  if (HIDDEN_CHARS.test(content)) {
+  // Tier 1 — structural concealment, classified by legitimacy (A/B/C/D).
+  if (TAG_CHARS.test(content))
     findings.push(
       mk(
         'critical',
-        'Hidden characters in an agent instruction file',
+        'Unicode tag characters in an agent instruction file',
         [
-          'contains zero-width / bidi / Unicode-tag characters — a technique to hide instructions from human review while the agent still reads them',
+          'contains Unicode tag characters (U+E0000–E007F) — an invisible instruction-smuggling channel with no legitimate use in text',
         ],
-        'Remove the hidden characters. Instruction files must be plain, reviewable text.',
+        'Remove the tag characters. Instruction files must be plain, reviewable text.',
+        path
+      )
+    );
+  if (BIDI_OVERRIDE.test(content))
+    findings.push(
+      mk(
+        'critical',
+        'Bidirectional override characters in an agent instruction file',
+        [
+          'contains a bidi override (U+202D/U+202E) — a Trojan-Source technique that visually reorders text so a human reads something different from what the agent parses',
+        ],
+        'Remove the bidi override characters.',
+        path
+      )
+    );
+  else if (BIDI_EMBED_ISOLATE.test(content))
+    findings.push(
+      mk(
+        'advisory',
+        'Bidirectional formatting characters in an agent instruction file',
+        [
+          'contains bidi embed/isolate characters (U+202A–202C / U+2066–2069) — legitimate in right-to-left text, but confirm they are not being used to hide or reorder instructions',
+        ],
+        'Confirm the bidi marks are legitimate RTL formatting; remove otherwise.',
+        path
+      )
+    );
+  const zw = suspiciousZeroWidth(content);
+  if (zw > 0) {
+    const revealed = OVERRIDE_RE.test(stripZeroWidth(content)) && !OVERRIDE_RE.test(content);
+    findings.push(
+      mk(
+        revealed ? 'critical' : 'medium',
+        'Zero-width characters splitting text in an agent instruction file',
+        [
+          revealed
+            ? 'a zero-width character conceals a prompt-override directive that only appears once the hidden characters are stripped'
+            : 'a zero-width character splits a visible Latin word — a concealment technique (hides text from human review while the agent reads it as contiguous)',
+        ],
+        'Remove the zero-width characters. Instruction files must be plain, reviewable text.',
         path
       )
     );

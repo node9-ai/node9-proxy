@@ -7,6 +7,7 @@ import { fetchTree, type OnProgress } from './fetch';
 import { analyzeWorkflow, analyzeWorkflowSecrets } from './workflows';
 import { analyzeAgentConfig } from './agent-config';
 import { analyzeMcp } from './mcp';
+import { analyzeCodexConfig } from './codex';
 import { analyzeInstructionFile } from './instructions';
 import type { CiFinding, ScanResult, Severity, RepoTree } from './types';
 import { SEVERITY_RANK } from './types';
@@ -39,6 +40,8 @@ export function scanTree(tree: RepoTree): ScanResult {
         findings.push(...analyzeAgentConfig(file.path, file.content));
       } else if (/\.mcp\.json$|\.cursor\/mcp\.json$/.test(file.path)) {
         findings.push(...analyzeMcp(file.path, file.content));
+      } else if (/(^|\/)\.codex\/config\.toml$/.test(file.path)) {
+        findings.push(...analyzeCodexConfig(file.path, file.content)); // CI-3 + CI-1 (1c-A)
       } else if (
         /(^|\/)(CLAUDE|AGENTS|GEMINI)\.md$|(^|\/)\.cursorrules$|copilot-instructions\.md$|(^|\/)\.(windsurf|cline)rules$/.test(
           file.path
