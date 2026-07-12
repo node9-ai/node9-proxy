@@ -43,13 +43,17 @@ describe('CI-2 workflow analyzer — the severity nuance (the moat)', () => {
     expect(f!.signals.join(' ')).toMatch(/root/i);
   });
 
-  it('rates NVIDIA MEDIUM — the risky pattern is present but mitigated', () => {
+  it('rates NVIDIA <= MEDIUM — reusable (workflow_call), capped at medium + mitigated', () => {
+    // R4-1a + round2#5: NVIDIA is `on: workflow_call:` — a reusable workflow with no
+    // stranger trigger of its own. It is scored as potentially-untrusted but CAPPED at
+    // medium (its real reachability lives in the unseen caller); its mitigation signals
+    // (subdir head, env-deny, pinned) remain. Not hidden as advisory, not over-claimed high.
     const f = analyzeWorkflow(
       '.github/workflows/_claude-fix-attempt.yml',
       read('nvidia-claude-fix.yml')
     );
     expect(f).not.toBeNull();
-    expect(f!.severity).toBe('medium');
+    expect(SEVERITY_RANK[f!.severity]).toBeLessThanOrEqual(SEVERITY_RANK.medium);
     expect(f!.mitigations?.join(' ')).toMatch(/subdir|env-denied|pinned/i);
   });
 
@@ -83,11 +87,30 @@ jobs:
           allowed_non_write_users: "*"
           claude_args: '--allowedTools "Bash"'
 `;
+    // Middle tier: a non-reusable, ungated-but-scoped workflow → genuinely medium.
+    // (NVIDIA is no longer usable here — as a reusable workflow it's now advisory, R4-1a.)
+    const mitigated = `
+on:
+  issues:
+    types: [opened]
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'read \${{ github.event.issue.body }}'
+          claude_args: '--allowedTools "mcp__github__get_issue,mcp__github__add_issue_comment"'
+`;
     const danger = analyzeWorkflow('d.yml', dangerous)!;
-    const nvidia = analyzeWorkflow('n.yml', read('nvidia-claude-fix.yml'))!;
+    const medium = analyzeWorkflow('mid.yml', mitigated)!;
     const milvus = analyzeWorkflow('m.yml', read('milvus-claude-review.yml'))!;
-    expect(SEVERITY_RANK[danger.severity]).toBeGreaterThan(SEVERITY_RANK[nvidia.severity]);
-    expect(SEVERITY_RANK[nvidia.severity]).toBeGreaterThan(SEVERITY_RANK[milvus.severity]);
+    expect(SEVERITY_RANK[danger.severity]).toBeGreaterThan(SEVERITY_RANK[medium.severity]);
+    expect(SEVERITY_RANK[medium.severity]).toBeGreaterThan(SEVERITY_RANK[milvus.severity]);
   });
 
   it('F8: a GATED workflow with dangerous tools but no untrusted reach is advisory, not HIGH', () => {
@@ -225,7 +248,8 @@ jobs:
     // write perms. An injected agent can't use the other job's token → medium.
     const wf = `
 on:
-  workflow_call:
+  issues:
+    types: [opened]
 jobs:
   analyze:
     runs-on: ubuntu-latest
@@ -478,10 +502,11 @@ jobs:
     expect(f.signals.join(' ')).toMatch(/no effective actor gate/i);
   });
 
-  it('B1 regression: elevated permissions (id-token: write) are actually detected', () => {
-    // Guards the permsElevated regex against the JSON-stringify quote bug: the
-    // "elevated permissions" signal MUST fire for a workflow whose only escalator
-    // is id-token/contents: write (otherwise it silently dies again).
+  it('B1 regression: elevated permissions (id-token: write) are detected WHEN reachable', () => {
+    // Guards the id-token perm regex against the JSON-stringify quote bug: the
+    // "elevated permissions" signal MUST fire for a workflow with id-token:write.
+    // R4-3: id-token is only "elevated" with an egress tool (bare Bash here), so the
+    // fixture declares one — the quote-regex guard AND the reachability gate both hold.
     const wf = `
 on:
   pull_request_target:
@@ -496,6 +521,9 @@ jobs:
           ref: \${{ github.event.pull_request.head.sha }}
           path: pr-head
       - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          claude_args: '--allowedTools "Bash"'
 `;
     const f = analyzeWorkflow('perms.yml', wf)!;
     expect(f.signals.join(' ')).toMatch(/elevated permissions/i);
@@ -705,6 +733,377 @@ ${perms}
       hyperdxLike('      pull-requests: write\n      issues: write', 'Bash')
     )!;
     expect(f.severity).toBe('critical');
+  });
+});
+
+// Round-4 calibration — each keyed to a real false-positive from the 2026-07-11
+// verify pass. See doc/roadmap/active/ci-check-calibration-round4-*.md.
+describe('CI-2 calibration round 4 — verify-pass false positives', () => {
+  // R4-1a: a workflow whose only trigger is workflow_call is a reusable/internal
+  // definition — no stranger can fire it; reachability lives in the caller.
+  it('R4-1a: workflow_call-only reusable workflow → <= medium, not high (openmrs/LifeTeachUs)', () => {
+    const wf = `
+on:
+  workflow_call:
+    inputs:
+      mode: { type: string }
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'do task for mode \${{ inputs.mode }}'
+          claude_args: '--allowedTools "Bash,Write,Edit"'
+`;
+    const f = analyzeWorkflow('reusable.yml', wf)!;
+    expect(SEVERITY_RANK[f.severity]).toBeLessThanOrEqual(SEVERITY_RANK.medium);
+  });
+
+  // R4-1b: issues:[labeled] fires only when a triage/write user applies a label —
+  // a stranger cannot fire it, so it is not an untrusted trigger.
+  it('R4-1b: issues:[labeled] (privileged type) is not stranger-firable → <= medium (student-benefits)', () => {
+    const wf = `
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+jobs:
+  add:
+    if: github.event.label.name == 'new-benefit'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'process \${{ github.event.issue.body }}'
+          claude_args: '--allowedTools "Bash(gh:*),Write"'
+`;
+    const f = analyzeWorkflow('add-benefit.yml', wf)!;
+    expect(SEVERITY_RANK[f.severity]).toBeLessThanOrEqual(SEVERITY_RANK.medium);
+  });
+
+  // R4-2: a power signal (contents:write / PAT) in an actor-GATED job must not
+  // inflate a DIFFERENT ungated job. The gated `mention` job's contents:write +
+  // PAT must not make the ungated handle-pr job critical. lucx-ui → high, NOT critical.
+  it('R4-2: power in a gated job does not inflate the ungated injectable job (lucx-ui) → high not critical', () => {
+    const wf = `
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened]
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+jobs:
+  handle-pr:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
+          allowed_non_write_users: "*"
+          prompt: 'review \${{ github.event.pull_request.title }}'
+          claude_args: '--allowedTools "Bash(gh:*),Bash(git:*),Read"'
+  mention:
+    if: github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          github_token: \${{ secrets.CLAUDE_BOT_PAT }}
+          prompt: 'address \${{ github.event.comment.body }}'
+          claude_args: '--allowedTools "Bash(gh:*),Bash(git:*),Edit,Write"'
+`;
+    const f = analyzeWorkflow('claude-bot.yml', wf)!;
+    expect(f.severity).toBe('high'); // not critical: contents:write lives in the gated job
+  });
+
+  // R4-3: id-token:write is inert without an egress tool (bare Bash/curl/WebFetch).
+  // With only scoped gh + Read/Write it can't be minted/exfiltrated.
+  it('R4-3: id-token:write with no egress tool is not "elevated" (healerbook)', () => {
+    const wf = `
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'triage \${{ github.event.issue.title }}'
+          claude_args: '--allowedTools "Bash(gh issue view:*),Bash(gh label list:*),Read"'
+`;
+    const f = analyzeWorkflow('triage.yml', wf)!;
+    expect(SEVERITY_RANK[f.severity]).toBeLessThanOrEqual(SEVERITY_RANK.medium);
+    expect(f.signals.join(' ')).not.toMatch(/elevated permissions/i);
+  });
+
+  // R4-4: issues:write (comment/label an issue) is bounded lower than
+  // pull-requests:write (approve a malicious PR). Issue-only → medium.
+  it('R4-4: issues:write-only + gh issue edit → medium, not high (healerbook)', () => {
+    const wf = `
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'triage \${{ github.event.issue.title }}'
+          claude_args: '--allowedTools "Bash(gh issue view:*),Bash(gh issue edit:*),Bash(gh issue comment:*),Write,Read"'
+`;
+    const f = analyzeWorkflow('triage.yml', wf)!;
+    expect(f.severity).toBe('medium');
+  });
+
+  // R4-4 guard: the SAME shape but with pull-requests:write (can approve a PR) stays high.
+  it('R4-4 guard: pull-requests:write + gh tool stays high (not capped to medium)', () => {
+    const wf = `
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'triage \${{ github.event.issue.title }}'
+          claude_args: '--allowedTools "Bash(gh:*),Bash(git:*),Read"'
+`;
+    const f = analyzeWorkflow('pr.yml', wf)!;
+    expect(f.severity).toBe('high');
+  });
+
+  // R4-5: a fail-closed actor gate implemented as a job STEP (org-membership API
+  // check whose output guards the agent step) counts as an actor gate.
+  it('R4-5: step-based org-membership gate is credited → advisory (openmrs)', () => {
+    const wf = `
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - id: gate
+        run: |
+          gh api /orgs/myorg/teams/dev-3/memberships/\${{ github.actor }} --jq '.state' > s.txt
+          echo "allowed=true" >> "$GITHUB_OUTPUT"
+      - uses: anthropics/claude-code-action@v1
+        if: steps.gate.outputs.allowed == 'true'
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'review \${{ github.event.comment.body }}'
+          claude_args: '--allowedTools "Bash"'
+`;
+    const f = analyzeWorkflow('gated.yml', wf)!;
+    expect(SEVERITY_RANK[f.severity]).toBeLessThanOrEqual(SEVERITY_RANK.advisory);
+  });
+});
+
+// Round-4 ROUND 2 — regression guards for the false-negatives the adversarial
+// /code-review found. Each MUST have been silenced by the round-1 fix and restored here.
+describe('CI-2 calibration round 4 (round 2) — adversarial-review false-negative guards', () => {
+  // #3: an issue/PR author can fire `closed` on their OWN issue/PR — it IS stranger-firable.
+  it('R2-3: pull_request_target:[closed] is stranger-firable → high/critical, not hidden', () => {
+    const wf = `
+on:
+  pull_request_target:
+    types: [closed]
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'review \${{ github.event.pull_request.title }}'
+          claude_args: '--allowedTools "Bash"'
+`;
+    const f = analyzeWorkflow('closed.yml', wf)!;
+    expect(SEVERITY_RANK[f.severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+  });
+
+  // #2: a spoofed gate — a bare member listing + an agent `if:` referencing an UNRELATED
+  // step output — must NOT be credited as an actor gate.
+  it('R2-2: spoofed membership gate (unrelated output / bare listing) is NOT a gate → stays high+', () => {
+    const wf = `
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - id: build
+        run: echo "ok=true" >> "$GITHUB_OUTPUT"
+      - id: members
+        run: gh api /orgs/acme/members
+      - uses: anthropics/claude-code-action@v1
+        if: steps.build.outputs.ok == 'true'
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'review \${{ github.event.comment.body }}'
+          claude_args: '--allowedTools "Bash"'
+`;
+    const f = analyzeWorkflow('spoof.yml', wf)!;
+    expect(SEVERITY_RANK[f.severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+  });
+
+  // #1: a membership gate on ONE job must NOT mask a genuinely ungated sibling agent job.
+  it('R2-1: gated sibling job does not mask an ungated bare-Bash job → stays critical', () => {
+    const wf = `
+on:
+  pull_request_target:
+    types: [opened]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'review \${{ github.event.pull_request.title }}'
+          claude_args: '--allowedTools "Bash"'
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - id: gate
+        run: gh api /orgs/acme/memberships/\${{ github.actor }} --jq .state
+      - uses: anthropics/claude-code-action@v1
+        if: steps.gate.outputs.allowed == 'true'
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'triage'
+          claude_args: '--allowedTools "Bash(gh issue view:*)"'
+`;
+    const f = analyzeWorkflow('two.yml', wf)!;
+    expect(f.severity).toBe('critical'); // the ungated review job must not be masked
+  });
+
+  // #6: id-token:write is reachable via a scoped INTERPRETER (python3/node/…), not just bare Bash.
+  it('R2-6: scoped interpreter tool counts as an egress channel for id-token', () => {
+    const wf = `
+on:
+  issues:
+    types: [opened]
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'triage \${{ github.event.issue.title }}'
+          claude_args: '--allowedTools "Bash(python3 build.py),Read"'
+`;
+    const f = analyzeWorkflow('interp.yml', wf)!;
+    expect(f.signals.join(' ')).toMatch(/elevated permissions/i);
+  });
+
+  // #7: a plain push/schedule agent workflow is NOT "reusable" and must NOT cry-wolf.
+  it('R2-7: push-only agent workflow with scoped tools returns null (no reusable cry-wolf)', () => {
+    const wf = `
+on:
+  push:
+    branches: [main]
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          claude_args: '--allowedTools "Bash(gh issue view:*),Read"'
+`;
+    const f = analyzeWorkflow('push.yml', wf);
+    expect(f).toBeNull();
+  });
+
+  // #5: a DANGEROUS reusable (head-into-root + bare Bash + contents:write) must be VISIBLE
+  // as medium — not hidden as advisory (and not over-claimed high without a confirmed caller).
+  it('R2-5: dangerous reusable (workflow_call) surfaces as medium, not advisory', () => {
+    const wf = `
+on:
+  workflow_call:
+    inputs:
+      head_ref: { type: string }
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ inputs.head_ref }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'build'
+          claude_args: '--allowedTools "Bash"'
+`;
+    const f = analyzeWorkflow('reusable-danger.yml', wf)!;
+    expect(f.severity).toBe('medium');
   });
 });
 
@@ -966,6 +1365,30 @@ jobs:
     expect(f.severity).toBe('critical'); // only the fuel key is excluded; the DB cred remains
     expect(f.signals.join(' ')).toMatch(/DATABASE_URL/);
     expect(f.signals.join(' ')).not.toMatch(/MY_INFERENCE_KEY/);
+  });
+
+  // R4-round2#5 (CI-4↔CI-2 consistency): the SAME exfil shape but on a reusable
+  // (workflow_call) trigger is capped at MEDIUM — reachability lives in the unseen caller,
+  // so it's visible but not over-claimed critical (matches CI-2's reusable cap).
+  it('reusable (workflow_call) with an exfiltratable secret → medium, not critical (CI-4)', () => {
+    const wf = `
+on:
+  workflow_call:
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        env:
+          DATABASE_URL: \${{ secrets.DATABASE_URL }}
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'build'
+          claude_args: '--allowedTools "Bash"'
+`;
+    const f = analyzeWorkflowSecrets('reusable.yml', wf)!;
+    expect(f.severity).toBe('medium'); // was 'advisory' before the consistency fix
+    expect(f.signals.join(' ')).toMatch(/DATABASE_URL/);
   });
 
   // G-c (CI-4 side): prose "bash" in the system prompt must not make canReadEnv true.
