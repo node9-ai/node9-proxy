@@ -5,7 +5,7 @@
 import { scanText } from '@node9/policy-engine';
 import type { CiFinding } from './types';
 
-interface McpServer {
+export interface McpServerSpec {
   command?: string;
   args?: unknown[];
   url?: string;
@@ -14,14 +14,25 @@ interface McpServer {
 }
 
 export function analyzeMcp(path: string, content: string): CiFinding[] {
-  let cfg: { mcpServers?: Record<string, McpServer> };
+  let cfg: { mcpServers?: Record<string, McpServerSpec> };
   try {
     cfg = JSON.parse(content);
   } catch {
     return [];
   }
+  return analyzeMcpServers(cfg.mcpServers ?? {}, path);
+}
+
+/** Score a normalized MCP server map. Shared by `.mcp.json` (CI-3) and Codex's
+ *  `.codex/config.toml` `[mcp_servers.*]` (1c-A) — same danger model, different
+ *  container: an unpinned executable server = supply-chain risk; an inline credential
+ *  in `env` = an agent-reachable secret committed to the repo. */
+export function analyzeMcpServers(
+  servers: Record<string, McpServerSpec>,
+  path: string
+): CiFinding[] {
   const findings: CiFinding[] = [];
-  for (const [name, srv] of Object.entries(cfg.mcpServers ?? {})) {
+  for (const [name, srv] of Object.entries(servers ?? {})) {
     if (!srv || srv.disabled) continue;
     const argv = [srv.command, ...(Array.isArray(srv.args) ? srv.args.map(String) : [])].join(' ');
 

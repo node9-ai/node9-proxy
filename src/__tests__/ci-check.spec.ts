@@ -12,6 +12,7 @@ import path from 'path';
 import { analyzeWorkflow, analyzeWorkflowSecrets } from '../ci-check/workflows';
 import { analyzeAgentConfig } from '../ci-check/agent-config';
 import { analyzeMcp } from '../ci-check/mcp';
+import { analyzeCodexConfig } from '../ci-check/codex';
 import { analyzeInstructionFile } from '../ci-check/instructions';
 import { scanTree } from '../ci-check';
 import { SEVERITY_RANK } from '../ci-check/types';
@@ -1344,6 +1345,77 @@ describe('CI-3 mcp', () => {
       mcpServers: { pw: { command: 'npx', args: ['playwright@1.2.3'] } },
     });
     expect(analyzeMcp('.mcp.json', cfg)).toEqual([]);
+  });
+});
+
+// 1c-A — `.codex/config.toml` was fetched by the surface crawler but never analyzed (a dead
+// fetch = coverage false-negative). It carries MCP servers (same CI-3 danger model) AND Codex
+// autonomy settings (sandbox_mode / approval_policy).
+describe('CI-3/CI-1 — .codex/config.toml (1c-A)', () => {
+  it('unpinned MCP server in config.toml → medium (parity with .mcp.json)', () => {
+    const toml = `
+[mcp_servers.tools]
+command = "npx"
+args = ["-y", "some-pkg"]
+`;
+    const fs = analyzeCodexConfig('.codex/config.toml', toml);
+    expect(fs.some((f) => f.check === 'CI-3' && /unpinned/i.test(f.title))).toBe(true);
+    expect(fs.find((f) => /unpinned/i.test(f.title))!.severity).toBe('medium');
+  });
+
+  it('inline credential in an MCP server env → high', () => {
+    // Build the secret at runtime so no matching-shape literal is committed (DLP-commit rule).
+    const key = 'AKIA' + 'QX7Z3BHDM7NPLKV5';
+    const toml = `
+[mcp_servers.aws]
+command = "node"
+args = ["server.js"]
+[mcp_servers.aws.env]
+AWS_ACCESS_KEY_ID = "${key}"
+`;
+    const fs = analyzeCodexConfig('.codex/config.toml', toml);
+    expect(fs.some((f) => f.check === 'CI-3' && /inline credential/i.test(f.title))).toBe(true);
+    expect(fs.find((f) => /inline credential/i.test(f.title))!.severity).toBe('high');
+  });
+
+  it('sandbox_mode = danger-full-access → high (CI-1)', () => {
+    const fs = analyzeCodexConfig('.codex/config.toml', 'sandbox_mode = "danger-full-access"\n');
+    const f = fs.find((x) => x.check === 'CI-1')!;
+    expect(f.severity).toBe('high');
+  });
+
+  it('approval_policy = never alone → medium (CI-1)', () => {
+    const fs = analyzeCodexConfig('.codex/config.toml', 'approval_policy = "never"\n');
+    const f = fs.find((x) => x.check === 'CI-1')!;
+    expect(f.severity).toBe('medium');
+  });
+
+  it('a least-privilege config produces no finding (FP guard)', () => {
+    const toml = 'sandbox_mode = "read-only"\napproval_policy = "on-request"\n';
+    expect(analyzeCodexConfig('.codex/config.toml', toml)).toEqual([]);
+  });
+
+  it('malformed TOML does not throw → returns []', () => {
+    expect(() =>
+      analyzeCodexConfig('.codex/config.toml', 'this is [not valid = toml')
+    ).not.toThrow();
+    expect(analyzeCodexConfig('.codex/config.toml', 'this is [not valid = toml')).toEqual([]);
+  });
+
+  it('scanTree now WIRES the config.toml branch (the dead fetch is live)', () => {
+    const tree = {
+      source: 'x/y',
+      notes: [] as string[],
+      files: [
+        {
+          path: '.codex/config.toml',
+          content: 'sandbox_mode = "danger-full-access"\napproval_policy = "never"\n',
+        },
+      ],
+    };
+    const res = scanTree(tree);
+    expect(res.findings.length).toBeGreaterThan(0);
+    expect(res.worst).toBe('high');
   });
 });
 
