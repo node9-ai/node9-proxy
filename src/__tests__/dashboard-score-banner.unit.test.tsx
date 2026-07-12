@@ -61,9 +61,11 @@ function makeAudit(spend: number = 0): AggregateResult {
     dimensions: {
       network: { blocked: 0 },
       data: { blocked: 0, observed: 0 },
+      detection: { loops: 0, pinMismatches: 0, injections: 0 },
       approvals: { approved: 0, denied: 0, timedOut: 0 },
       files: { blocked: 0 },
-      toolRules: { blocked: 0, mcp: 0, loops: 0 },
+      toolRules: { blocked: 0 },
+      apps: { blocked: 0 },
       cost: { totalUSD: 0 },
     },
     generatedAt: '2026-05-10T15:00:00Z',
