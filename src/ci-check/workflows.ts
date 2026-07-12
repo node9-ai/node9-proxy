@@ -654,11 +654,14 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   // workflow isn't "plain pull_request"; it has its own medium cap below.
   if (untrustedTrigger && !privileged && !reusable && severity && severity !== 'advisory')
     severity = 'advisory';
-  // R4-round2#5: a reusable (workflow_call) agent workflow is scored as potentially
-  // untrusted, but its real reachability lives in the unseen caller — cap at MEDIUM so a
-  // dangerous reusable (broad tools + write) is VISIBLE (not hidden as advisory) yet
-  // never over-claimed as high/critical (which would need a confirmed untrusted caller).
-  if (reusable && severity && SEVERITY_RANK[severity] > SEVERITY_RANK.medium) severity = 'medium';
+  // R4-round2#5 + [6]: a reusable (workflow_call) agent workflow's reachability lives in the
+  // unseen caller, so by default we cap it at MEDIUM (visible, not over-claimed). EXCEPTION —
+  // a "loaded gun": a reusable that ITSELF checks out an untrusted head to root or ingests
+  // untrusted prompt text is built to process attacker input; a caller almost certainly wires
+  // it to a fork trigger (the pattern's purpose), so keep its power-derived high/critical.
+  const reusableLoadedGun = reusable && (head === 'root' || promptUntrusted);
+  if (reusable && !reusableLoadedGun && severity && SEVERITY_RANK[severity] > SEVERITY_RANK.medium)
+    severity = 'medium';
   if (!severity) severity = 'advisory';
 
   // Build the transparent record of WHY this severity.
@@ -670,7 +673,9 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   else if (forkInput) signals.push(`triggered by untrusted input (${triggers.join(', ')})`);
   else if (reusable)
     signals.push(
-      `reusable workflow (${triggers.join(', ')}) — no untrusted trigger of its own; reachability depends on the caller's trigger + actor gate`
+      reusableLoadedGun
+        ? `reusable workflow (${triggers.join(', ')}) that checks out an untrusted head / ingests untrusted input — exploitable the moment a caller wires a fork trigger (reachability depends on the caller, but this workflow is built to process attacker input)`
+        : `reusable workflow (${triggers.join(', ')}) — no untrusted trigger of its own; reachability depends on the caller's trigger + actor gate`
     );
   if (forkInput && !privileged && !reusable)
     signals.push(
@@ -854,10 +859,11 @@ function evalAgentJob(
   } else {
     return null; // only id-token OIDC and not exploitable — too common to be a finding
   }
-  // R4-round2#5 (consistency with CI-2): a reusable (workflow_call) workflow is scored
-  // as potentially-untrusted but its real reachability lives in the unseen caller — cap
-  // at medium (visible, not over-claimed critical, not hidden as advisory).
-  if (reusable && SEVERITY_RANK[severity] > SEVERITY_RANK.medium) severity = 'medium';
+  // R4-round2#5 + [6] (consistency with CI-2): cap a reusable at medium UNLESS it is a
+  // "loaded gun" — it itself checks out an untrusted head to root or ingests untrusted prompt
+  // text, so it is exploitable the moment a caller wires a fork trigger.
+  const loadedGun = head === 'root' || promptTakesUntrusted(jobAgentSteps);
+  if (reusable && !loadedGun && SEVERITY_RANK[severity] > SEVERITY_RANK.medium) severity = 'medium';
   return { severity, secrets, injectable, canReadEnv };
 }
 

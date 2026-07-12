@@ -62,23 +62,37 @@ const WORKFLOW_DIR = '.github/workflows';
 // separately). Mirrors the dispatch regexes in index.ts so anything discovered is analyzed.
 const SURFACE_BASENAME =
   /(^|\/)(CLAUDE|AGENTS|GEMINI)\.md$|(^|\/)\.cursorrules$|(^|\/)\.(windsurf|cline)rules$|(^|\/)copilot-instructions\.md$|(^|\/)\.claude\/settings(\.local)?\.json$|(^|\/)\.mcp\.json$|(^|\/)\.cursor\/mcp\.json$|(^|\/)\.codex\/config\.toml$/;
-// Paths under these segments are dependencies / build output, not the repo's OWN agent
-// surface — skip them (a vendored `node_modules/**/CLAUDE.md` is noise, not the repo's risk).
-const IGNORE_SEG =
-  /(^|\/)(node_modules|vendor|\.git|dist|build|out|\.next|target|\.venv|site-packages)\//;
+// Dependency / framework-output dirs that are NEVER a repo's own agent surface — a vendored
+// `node_modules/**/CLAUDE.md` is noise. Skipped SILENTLY.
+const IGNORE_HARD = /(^|\/)(node_modules|vendor|\.git|\.next|\.venv|site-packages)\//;
+// Build-output dirs — USUALLY generated, occasionally a real source package. Skipped from
+// findings (avoid stale-generated-copy noise), but a surface file found here is NOTED (not
+// silently dropped) so a genuinely-committed config isn't invisible. ([7])
+const IGNORE_SOFT = /(^|\/)(dist|build|out|target)\//;
+const isIgnoredDir = (relSlash: string) => IGNORE_HARD.test(relSlash) || IGNORE_SOFT.test(relSlash);
 const MAX_SURFACE_FILES = 200;
 
 /** Pure: from a flat list of repo file paths, pick the agent-surface files at any depth,
  *  skipping dependency/build dirs, capped at MAX_SURFACE_FILES. Pushes a note (marked
  *  INCOMPLETE so `scanTree` flips `incomplete`) if the tree was truncated or the cap was hit —
- *  a large monorepo must never be silently under-scanned. Shared by the GitHub Trees path and
- *  local recursion. */
+ *  a large monorepo must never be silently under-scanned. A surface file under a build-output
+ *  dir is excluded but NOTED (not silently dropped). Shared by the GitHub Trees path and local
+ *  recursion. */
 export function pickSurfacePaths(paths: string[], truncated: boolean, notes: string[]): string[] {
-  const matched = paths.filter((p) => SURFACE_BASENAME.test(p) && !IGNORE_SEG.test(p));
+  const surface = paths.filter((p) => SURFACE_BASENAME.test(p) && !IGNORE_HARD.test(p));
+  const matched = surface.filter((p) => !IGNORE_SOFT.test(p));
+  const softSkipped = surface.filter((p) => IGNORE_SOFT.test(p));
   const capped = matched.slice(0, MAX_SURFACE_FILES);
   if (truncated || matched.length > MAX_SURFACE_FILES) {
     notes.push(
       `repo tree is large/truncated — some agent-surface files may be INCOMPLETE (scanned ${capped.length} of ${matched.length}${truncated ? '+' : ''}).`
+    );
+  }
+  if (softSkipped.length) {
+    // NB: deliberately NO "INCOMPLETE" marker — skipping build output is intentional, not a
+    // partial scan; we just surface it so a real committed config there isn't invisible.
+    notes.push(
+      `skipped ${softSkipped.length} agent-surface file(s) under a build-output dir (dist/build/out/target), e.g. ${softSkipped.slice(0, 3).join(', ')} — if any is a real committed config, move it out of the build dir to have it scanned.`
     );
   }
   return capped;
@@ -221,20 +235,24 @@ async function listWorkflowPaths(owner: string, repo: string, notes: string[]): 
     .map((e) => e.path);
 }
 
-/** 1c-B: discover agent-surface files at ANY depth via the Git Trees API (one recursive
- *  call — `HEAD` resolves directly, verified). Returns the picked paths, or `null` on a
- *  fetch failure so the caller can FALL BACK to the fixed root list (never worse than the
- *  old root-only behavior). Never throws. */
-async function listSurfacePaths(
+// ROOT-only workflow yaml (GitHub ignores nested `.github/workflows`).
+const ROOT_WORKFLOW_RE = /^\.github\/workflows\/[^/]+\.ya?ml$/;
+
+/** 1c-B: discover the agent surface at ANY depth via ONE recursive Git Trees call (`HEAD`
+ *  resolves directly, verified). Returns BOTH the picked surface paths AND the root workflow
+ *  paths from the SAME response ([9] — no separate listWorkflowPaths round-trip on the success
+ *  path), or `null` on a fetch failure so the caller FALLS BACK to the fixed root list +
+ *  listWorkflowPaths (never worse than the old behavior). Never throws. */
+async function listSurfaceTree(
   owner: string,
   repo: string,
   notes: string[]
-): Promise<string[] | null> {
+): Promise<{ surface: string[]; workflows: string[] } | null> {
   const url = `https://api.github.com/repos/${owner}/${repo}/git/trees/HEAD?recursive=1`;
   const { status, json } = await ghGet(url);
   if (status === 403 || status === 429) {
     if (!notes.includes(RATE_LIMIT_NOTE)) notes.push(RATE_LIMIT_NOTE);
-    return null; // couldn't discover → fall back to the root list
+    return null; // couldn't discover → fall back
   }
   if (status === 0) {
     if (!notes.includes(NETWORK_NOTE)) notes.push(NETWORK_NOTE);
@@ -243,10 +261,13 @@ async function listSurfacePaths(
   if (status !== 200 || !json || typeof json !== 'object') return null;
   const tree = json as { tree?: { path?: string; type?: string }[]; truncated?: boolean };
   if (!Array.isArray(tree.tree)) return null;
-  const paths = tree.tree
+  const blobs = tree.tree
     .filter((e) => e.type === 'blob' && typeof e.path === 'string')
     .map((e) => e.path as string);
-  return pickSurfacePaths(paths, !!tree.truncated, notes);
+  return {
+    surface: pickSurfacePaths(blobs, !!tree.truncated, notes),
+    workflows: blobs.filter((p) => ROOT_WORKFLOW_RE.test(p)),
+  };
 }
 
 const FETCH_CONCURRENCY = 8;
@@ -261,14 +282,19 @@ export async function fetchGitHubTree(
 ): Promise<RepoTree> {
   const notes: string[] = [];
   try {
-    onProgress?.({ phase: 'listing workflows', done: 0, total: 1 });
-    const workflowPaths = await listWorkflowPaths(owner, repo, notes);
-    // 1c-B: discover the surface at ANY depth, then ALWAYS union the fixed ROOT list. On the
-    // success path `discovered` is a superset of the root files (the union just dedups); on a
-    // TRUNCATED tree / cap / Trees failure the union guarantees the root files are still
-    // fetched — so a deep scan can never look at LESS than the old root-only baseline.
-    const discovered = await listSurfacePaths(owner, repo, notes);
-    const allPaths = [...new Set([...SURFACE_FILES, ...(discovered ?? []), ...workflowPaths])];
+    onProgress?.({ phase: 'discovering agent surface', done: 0, total: 1 });
+    // 1c-B: discover the surface + workflows in ONE recursive Trees call ([9]). ALWAYS union
+    // the fixed ROOT list: on success `discovered.surface` is a superset (the union just
+    // dedups); on a TRUNCATED tree / cap / Trees failure the union guarantees the root files
+    // are still fetched — so a deep scan can never look at LESS than the old root-only baseline
+    // ([3]). On a Trees failure (null) fall back to the separate root workflow listing.
+    const discovered = await listSurfaceTree(owner, repo, notes);
+    const workflowPaths = discovered
+      ? discovered.workflows
+      : await listWorkflowPaths(owner, repo, notes);
+    const allPaths = [
+      ...new Set([...SURFACE_FILES, ...(discovered?.surface ?? []), ...workflowPaths]),
+    ];
     let done = 0;
     const fetched = await pooled(allPaths, FETCH_CONCURRENCY, async (p) => {
       const f = await fetchOne(owner, repo, p, notes);
@@ -312,7 +338,7 @@ export function readLocalTree(dir: string): RepoTree {
   for (const p of SURFACE_FILES) collect(p);
   // Recurse for agent-surface files at any depth (bounded, skip dep/build dirs), the local
   // twin of the Trees-API discovery. POSIX-separator rel paths so SURFACE_BASENAME /
-  // IGNORE_SEG match identically to the GitHub side. Symlinked dirs are skipped (Dirent
+  // isIgnoredDir match identically to the GitHub side. Symlinked dirs are skipped (Dirent
   // .isDirectory() is false for a symlink) so there is no symlink-loop risk.
   const matches: string[] = [];
   const MAX_DIRS = 5000; // dir-visit budget so a huge tree can't turn a scan into a full crawl
@@ -330,7 +356,7 @@ export function readLocalTree(dir: string): RepoTree {
       if (matches.length >= MAX_SURFACE_FILES || dirsVisited >= MAX_DIRS) return;
       const rel = relDir ? `${relDir}/${e.name}` : e.name;
       if (e.isDirectory()) {
-        if (IGNORE_SEG.test(`${rel}/`)) continue;
+        if (isIgnoredDir(`${rel}/`)) continue;
         walk(rel);
       } else if (e.isFile() && SURFACE_BASENAME.test(rel)) {
         matches.push(rel);

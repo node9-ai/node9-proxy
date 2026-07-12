@@ -40,22 +40,30 @@ export function analyzeAgentConfig(path: string, content: string): CiFinding[] {
 
   // Hooks that fetch+run third-party code on every agent action.
   for (const cmd of hookCommands(cfg.hooks)) {
-    const remote = /\b(npx|curl|wget|iwr|irm)\b/.test(cmd) || /\|\s*(sh|bash)\b/.test(cmd);
-    if (!remote) continue;
-    const unpinned = /@latest\b/.test(cmd) || (/\bnpx\b/.test(cmd) && !/@\d/.test(cmd));
+    // fetch-and-run: a `curl|wget … | sh/bash` or a bare fetch tool → remote code that CANNOT be
+    // pinned; an npx invocation is remote but pinnable.
+    const remoteExec = /\|\s*(sh|bash|zsh)\b/.test(cmd) || /\b(curl|wget|iwr|irm)\b/.test(cmd);
+    const isNpx = /\bnpx\b/.test(cmd);
+    if (!remoteExec && !isNpx) continue;
+    const unpinned = /@latest\b/.test(cmd) || (isNpx && !/@\d/.test(cmd));
+    // 1d: unpinnable remote-exec (curl|bash) is high regardless of pinning; an unpinned npx is
+    // high; a PINNED npx is a standing supply-chain dependency → medium.
+    const high = remoteExec || unpinned;
     findings.push({
       check: 'CI-1',
       dimension: 'toolRules',
-      severity: unpinned ? 'high' : 'medium',
-      title: unpinned
-        ? 'Agent hook runs UNPINNED third-party code on every action'
+      severity: high ? 'high' : 'medium',
+      title: high
+        ? 'Agent hook runs UNPINNED/remote third-party code on every action'
         : 'Agent hook runs third-party code in the agent hot path',
       file: path,
       signals: [
         `hook command: \`${cmd.slice(0, 120)}\``,
-        unpinned
-          ? 'unpinned — a compromised/yanked package = code execution on every contributor'
-          : 'pinned, but still a standing supply-chain dependency in the agent hot path',
+        remoteExec
+          ? 'fetch-and-run (curl|wget / pipe-to-shell) — unpinnable remote code execution on every contributor'
+          : unpinned
+            ? 'unpinned — a compromised/yanked package = code execution on every contributor'
+            : 'pinned, but still a standing supply-chain dependency in the agent hot path',
       ],
       fix: 'Vendor the command as a committed local script, or pin an exact version and treat updates as security-reviewed.',
     });
@@ -68,17 +76,25 @@ export function analyzeAgentConfig(path: string, content: string): CiFinding[] {
     /^Bash$|^Bash\(\s*\*|^Bash\(git:|^Write\(\s*\*|^Write$|^Edit$/.test(a)
   );
   if (broad.length > 0) {
+    // 1d: a broad allow with NO `deny` backstop covering the dangerous verbs is a standing,
+    // catastrophic pre-authorization for EVERY contributor's agent → high. A `deny` that names
+    // Bash/Write/Edit backstops it → medium.
+    const hasBackstop = deny.some((d) => /Bash|Write|Edit/.test(d));
     findings.push({
       check: 'CI-1',
       dimension: 'toolRules',
-      severity: 'medium',
-      title: 'Committed agent config pre-authorizes broad tools',
+      severity: hasBackstop ? 'medium' : 'high',
+      title: hasBackstop
+        ? 'Committed agent config pre-authorizes broad tools'
+        : 'Committed agent config pre-authorizes broad tools with no deny backstop',
       file: path,
       signals: [
         `broad allow(s): ${broad.slice(0, 5).join(', ')}`,
-        ...(deny.length === 0 ? ['no `deny` entries to backstop it'] : []),
+        hasBackstop
+          ? 'a `deny` list backstops the broad allow'
+          : 'no `deny` entry covers Bash/Write/Edit — every contributor is pre-authorized for catastrophic tools',
       ],
-      fix: 'Scope the allow-list to specific read-only subcommands (e.g. `Bash(gh pr view:*)`); avoid bare `Bash`/`git:`/`Write`.',
+      fix: 'Scope the allow-list to specific read-only subcommands (e.g. `Bash(gh pr view:*)`); avoid bare `Bash`/`git:`/`Write`, or add a `deny` backstop.',
     });
   }
 
