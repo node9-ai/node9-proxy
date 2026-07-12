@@ -1294,6 +1294,34 @@ jobs:
   it('github.actor == a trusted login is a gate → advisory', () => {
     expect(sev("github.actor == 'trusted-maintainer'")).toBe('advisory');
   });
+
+  // Batch /code-review follow-ups on the polarity rewrite.
+  // Finding [1]: a NEGATED inclusion `!contains(privileged, actor)` runs for everyone EXCEPT
+  // the set (an anti-gate) — must NOT be credited as a gate.
+  // Real workflows wrap a leading `!` in `${{ }}` — a bare `if: !contains(...)` is invalid YAML.
+  it('!contains(list, github.actor) (negated inclusion) is NOT a gate', () => {
+    expect(
+      SEVERITY_RANK[sev('${{ !contains(fromJson(\'["dependabot[bot]"]\'), github.actor) }}')]
+    ).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+  });
+  it('! contains(...) and !(contains(...)) variants are also not gates', () => {
+    expect(
+      SEVERITY_RANK[sev('${{ ! contains(fromJson(\'["OWNER","MEMBER"]\'), github.actor) }}')]
+    ).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+    expect(
+      SEVERITY_RANK[sev('${{ !(contains(fromJson(\'["OWNER"]\'), github.actor)) }}')]
+    ).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+  });
+  // Finding [2]: a positive permission-check STEP OUTPUT gate (marketplace `uses:` action)
+  // must be credited (the round-5 bare-`permission` token drop lost this real gate shape).
+  it('steps.<id>.outputs.<permission> == true is a gate → advisory', () => {
+    expect(sev("steps.check.outputs.has-permission == 'true'")).toBe('advisory');
+  });
+  it('but an inverted permission-output check (== false) is NOT a gate', () => {
+    expect(
+      SEVERITY_RANK[sev("steps.check.outputs.has-permission == 'false'")]
+    ).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+  });
 });
 
 describe('CI-1 agent-config', () => {
@@ -1777,6 +1805,35 @@ describe('CI deep discovery — monorepo surface at any depth (1c-B)', () => {
       expect(picked.length).toBe(200);
       expect(notes.some((n) => /may be INCOMPLETE/i.test(n))).toBe(true); // flips scanTree.incomplete
     });
+
+    // Finding [10]: the discovery matcher (fetch) and the dispatch matchers (index.ts) are two
+    // sources of truth for "what is an agent-surface file". This locks them: EVERY surface type
+    // scanTree dispatches on must be discoverable, else it's fetched-never or discovered-never.
+    it('discovers every surface type that scanTree dispatches on (sync guard vs index.ts)', () => {
+      const oneOfEach = [
+        'CLAUDE.md',
+        'AGENTS.md',
+        'GEMINI.md',
+        '.cursorrules',
+        '.windsurfrules',
+        '.clinerules',
+        '.github/copilot-instructions.md',
+        '.claude/settings.json',
+        '.claude/settings.local.json',
+        '.mcp.json',
+        '.cursor/mcp.json',
+        '.codex/config.toml',
+      ];
+      // all picked at root AND at depth (nothing silently undiscoverable)
+      expect(pickSurfacePaths(oneOfEach, false, [])).toEqual(oneOfEach);
+      expect(
+        pickSurfacePaths(
+          oneOfEach.map((p) => `packages/x/${p}`),
+          false,
+          []
+        )
+      ).toEqual(oneOfEach.map((p) => `packages/x/${p}`));
+    });
   });
 
   describe('readLocalTree recursion', () => {
@@ -1813,6 +1870,23 @@ describe('CI deep discovery — monorepo surface at any depth (1c-B)', () => {
         expect(res.findings.some((f) => f.check === 'CI-1' && f.file.startsWith('apps/web'))).toBe(
           true
         );
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    // Finding [4]: root surface files must ALWAYS be included (seeded before the bounded
+    // walk), so a deep scan never looks at LESS than the old root-only baseline even if the
+    // recursive walk hits its cap inside a subtree.
+    it('always includes root surface files alongside nested ones', () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-1cb-root-'));
+      try {
+        fs.writeFileSync(path.join(root, '.mcp.json'), JSON.stringify({ mcpServers: {} }));
+        fs.mkdirSync(path.join(root, 'packages/x'), { recursive: true });
+        fs.writeFileSync(path.join(root, 'packages/x/CLAUDE.md'), 'hi');
+        const paths = readLocalTree(root).files.map((f) => f.path);
+        expect(paths).toContain('.mcp.json'); // root, unconditional
+        expect(paths).toContain('packages/x/CLAUDE.md'); // nested, discovered
       } finally {
         fs.rmSync(root, { recursive: true, force: true });
       }

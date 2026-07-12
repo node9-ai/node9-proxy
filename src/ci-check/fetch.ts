@@ -263,11 +263,12 @@ export async function fetchGitHubTree(
   try {
     onProgress?.({ phase: 'listing workflows', done: 0, total: 1 });
     const workflowPaths = await listWorkflowPaths(owner, repo, notes);
-    // 1c-B: discover the surface at any depth; fall back to the fixed root list if the
-    // Trees call failed (rate-limit / network), so we're never worse than root-only.
+    // 1c-B: discover the surface at ANY depth, then ALWAYS union the fixed ROOT list. On the
+    // success path `discovered` is a superset of the root files (the union just dedups); on a
+    // TRUNCATED tree / cap / Trees failure the union guarantees the root files are still
+    // fetched — so a deep scan can never look at LESS than the old root-only baseline.
     const discovered = await listSurfacePaths(owner, repo, notes);
-    const surfacePaths = discovered ?? SURFACE_FILES;
-    const allPaths = [...new Set([...surfacePaths, ...workflowPaths])];
+    const allPaths = [...new Set([...SURFACE_FILES, ...(discovered ?? []), ...workflowPaths])];
     let done = 0;
     const fetched = await pooled(allPaths, FETCH_CONCURRENCY, async (p) => {
       const f = await fetchOne(owner, repo, p, notes);
@@ -276,7 +277,11 @@ export async function fetchGitHubTree(
     });
     return { source: `${owner}/${repo}`, files: fetched.filter((f): f is RepoFile => !!f), notes };
   } catch (err) {
-    notes.push(`fetch degraded: ${(err as Error)?.message ?? 'network error'}`);
+    // "may be INCOMPLETE" is load-bearing — index.ts keys `incomplete` off it, so a total
+    // fetch failure is never rendered as a clean bill of health.
+    notes.push(
+      `fetch degraded: ${(err as Error)?.message ?? 'network error'} — results may be INCOMPLETE (the repo could not be fetched).`
+    );
     return { source: `${owner}/${repo}`, files: [], notes };
   }
 }
@@ -296,12 +301,25 @@ export function readLocalTree(dir: string): RepoTree {
       /* unreadable → skip */
     }
   };
-  // 1c-B: recurse for agent-surface files at any depth (bounded, skip dep/build dirs), the
-  // local twin of the Trees-API discovery. POSIX-separator rel paths so SURFACE_BASENAME /
-  // IGNORE_SEG match identically to the GitHub side.
+  const seen = new Set<string>();
+  const collect = (rel: string) => {
+    if (seen.has(rel)) return;
+    seen.add(rel);
+    add(rel);
+  };
+  // Always include the fixed ROOT surface files first (never scan LESS than the old
+  // baseline), THEN recurse for NESTED ones (1c-B). The caps bound only the recursive walk.
+  for (const p of SURFACE_FILES) collect(p);
+  // Recurse for agent-surface files at any depth (bounded, skip dep/build dirs), the local
+  // twin of the Trees-API discovery. POSIX-separator rel paths so SURFACE_BASENAME /
+  // IGNORE_SEG match identically to the GitHub side. Symlinked dirs are skipped (Dirent
+  // .isDirectory() is false for a symlink) so there is no symlink-loop risk.
   const matches: string[] = [];
+  const MAX_DIRS = 5000; // dir-visit budget so a huge tree can't turn a scan into a full crawl
+  let dirsVisited = 0;
   const walk = (relDir: string) => {
-    if (matches.length >= MAX_SURFACE_FILES) return;
+    if (matches.length >= MAX_SURFACE_FILES || dirsVisited >= MAX_DIRS) return;
+    dirsVisited++;
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(path.join(root, relDir), { withFileTypes: true });
@@ -309,7 +327,7 @@ export function readLocalTree(dir: string): RepoTree {
       return; // unreadable dir → skip
     }
     for (const e of entries) {
-      if (matches.length >= MAX_SURFACE_FILES) return;
+      if (matches.length >= MAX_SURFACE_FILES || dirsVisited >= MAX_DIRS) return;
       const rel = relDir ? `${relDir}/${e.name}` : e.name;
       if (e.isDirectory()) {
         if (IGNORE_SEG.test(`${rel}/`)) continue;
@@ -320,11 +338,11 @@ export function readLocalTree(dir: string): RepoTree {
     }
   };
   walk('');
-  if (matches.length >= MAX_SURFACE_FILES)
+  if (matches.length >= MAX_SURFACE_FILES || dirsVisited >= MAX_DIRS)
     notes.push(
-      `repo is large — some agent-surface files may be INCOMPLETE (capped at ${MAX_SURFACE_FILES}).`
+      `repo is large — some agent-surface files may be INCOMPLETE (capped at ${MAX_SURFACE_FILES} files / ${MAX_DIRS} dirs).`
     );
-  for (const rel of matches) add(rel);
+  for (const rel of matches) collect(rel);
   const wfDir = path.join(root, WORKFLOW_DIR);
   try {
     if (fs.existsSync(wfDir)) {

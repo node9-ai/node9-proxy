@@ -269,20 +269,32 @@ function promptTakesUntrusted(steps: Step[]): boolean {
 //  · same-repo (`head.repo.full_name == github.repository`, i.e. not a fork).
 // An inverted (`!=`) or unprivileged-target (`== NONE`) check no longer matches — the bare
 // `author_association` / `FIRST_TIME_CONTRIBUTOR` / `MEMBER` / `permission` tokens are gone.
-const ACTOR_GATE_RE = new RegExp(
+// Positive, restrictive clauses that do NOT use contains() (which needs a polarity check —
+// see below). Each RESTRICTS the agent to a trusted actor.
+const NONCONTAINS_GATE_RE = new RegExp(
   [
     String.raw`==\s*['"]?(OWNER|MEMBER|COLLABORATOR)\b`,
     String.raw`==\s*['"](write|admin|maintain)`,
-    // positive inclusion — allow ONE level of nested parens (e.g. `contains(fromJson('[…]'),
-    // …author_association)`) so the nested `)` from fromJson() doesn't truncate the match,
-    // but stay INSIDE the outer contains() so a later inverted clause isn't captured.
-    String.raw`contains\((?:[^()]|\([^()]*\))*(login|actor|association|OWNER|MEMBER|COLLABORATOR)`,
     String.raw`github\.actor\s*==`,
     String.raw`user\.login\s*==`,
     String.raw`head\.repo\.full_name\s*==\s*github\.repository`,
   ].join('|'),
   'i'
 );
+// A permission/authorization STEP OUTPUT compared POSITIVELY — a marketplace permission-check
+// action whose boolean output guards the agent step (a `uses:` action, so hasStepMembershipGate's
+// `run:`-only check misses it). `== 'false'` is an anti-gate, not matched. JOB-SCOPED ONLY (used
+// in jobActorGate, NOT the whole-workflow hasActorGate) — a step output is produced in ONE job, so
+// crediting it workflow-wide would let a gated job mask an ungated sibling (the R2-1 bug).
+const PERMISSION_OUTPUT_GATE_RE =
+  /steps\.[\w-]+\.outputs\.[\w-]*(permission|allowed|authoriz|is[_-]?(admin|member|maintainer|collaborator))[\w-]*\s*==\s*['"]?(true|admin|write|maintain)/i;
+// A contains()-based inclusion of a privileged set — one level of nested parens for
+// `contains(fromJson('[…]'), …)`. POLARITY: `contains(…)` is a positive inclusion (gate), but
+// `!contains(…)` runs for everyone EXCEPT the set (an anti-gate) — credit only the former.
+const CONTAINS_GATE_RE =
+  /contains\((?:[^()]|\([^()]*\))*(login|actor|association|OWNER|MEMBER|COLLABORATOR)/i;
+const NEGATED_CONTAINS_RE =
+  /!\s*\(?\s*contains\((?:[^()]|\([^()]*\))*(login|actor|association|OWNER|MEMBER|COLLABORATOR)/i;
 
 /** Is a label-type gate configured on an untrusted trigger? F14a: a label gate
  *  counts on pull_request_target OR pull_request (metabase gates a
@@ -303,7 +315,9 @@ function labelTypeConfigured(wf: Workflow, raw: Record<string, unknown>): boolea
 
 /** Do these joined `if:` expressions constitute an actor gate? */
 function ifsAreGated(ifs: string, labelConfigured: boolean): boolean {
-  const gated = ACTOR_GATE_RE.test(ifs);
+  // Credit a contains() inclusion ONLY when it is not negated (`!contains(…)` = anti-gate).
+  const containsGate = CONTAINS_GATE_RE.test(ifs) && !NEGATED_CONTAINS_RE.test(ifs);
+  const gated = NONCONTAINS_GATE_RE.test(ifs) || containsGate;
   const labelGated = labelConfigured && /event\.label|label\.name/i.test(ifs);
   return gated || labelGated;
 }
@@ -357,6 +371,7 @@ function jobActorGate(job: Job, wf: Workflow, raw: Record<string, unknown>): boo
   return (
     ifsAreGated(ifs, labelTypeConfigured(wf, raw)) ||
     /assignee\.login\s*==|event\.assignee\b/i.test(ifs) ||
+    PERMISSION_OUTPUT_GATE_RE.test(ifs) || // [2] job-scoped permission-check-output gate
     hasStepMembershipGate(job) // R4-5
   );
 }
