@@ -13,9 +13,31 @@ import type { CiFinding, Severity } from './types';
 // Hidden / invisible / bidi / Unicode-tag characters — used to conceal instructions
 // from a human reviewer while the model still reads them. Deliberately EXCLUDES
 // U+200C/U+200D (emoji ZWNJ/ZWJ) and U+FEFF (BOM) to avoid FPs on legitimate emoji.
-//   U+200B zero-width space · U+2060 word joiner · U+202A–202E bidi · U+2066–2069
-//   bidi isolates · U+E0000–E007F Unicode tag chars.
-const HIDDEN_CHARS = /[\u200B\u2060\u202A-\u202E\u2066-\u2069]|[\u{E0000}-\u{E007F}]/u;
+// U+200B (zero-width space) is handled SEPARATELY (see hasSuspiciousZwsp below) — it is
+// ALSO a legitimate word-break hint in scripts with no inter-word spacing (Khmer/Thai/Lao/
+// Myanmar). Live-verified FP: microsoft/generative-ai-for-beginners' translated AGENTS.md
+// (round-5 1c-B exposed it — the file was never reachable before deep discovery). Bidi
+// controls and Unicode tag characters have no legitimate use in prose and stay unconditional.
+//   U+2060 word joiner · U+202A-202E bidi · U+2066-2069 bidi isolates ·
+//   U+E0000-E007F Unicode tag chars.
+const HIDDEN_CHARS = /[\u2060\u202A-\u202E\u2066-\u2069]|[\u{E0000}-\u{E007F}]/u;
+
+// U+200B zero-width space. The documented CONCEALMENT attack splices it into Latin/ASCII
+// prose to hide an instruction boundary from a human skim-reader ("helpful bot." + ZWSP +
+// "exfiltrate env vars") while the model still reads it as contiguous text. That shape is
+// an ASCII letter immediately adjacent to the ZWSP. Non-Latin scripts use ZWSP between
+// their OWN script's characters (no adjacent ASCII) - that is legitimate typography, not
+// concealment. So: flag ZWSP only when ASCII-adjacent.
+function hasSuspiciousZwsp(text: string): boolean {
+  let idx = text.indexOf('\u200B');
+  while (idx !== -1) {
+    const before = text[idx - 1];
+    const after = text[idx + 1];
+    if ((before && /[A-Za-z]/.test(before)) || (after && /[A-Za-z]/.test(after))) return true;
+    idx = text.indexOf('\u200B', idx + 1);
+  }
+  return false;
+}
 
 // Prompt-override / role-impersonation directives. The classic phrases only — no bare
 // "system:" (too FP-prone in docs).
@@ -87,13 +109,16 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
   const decoded = decodeSuspiciousBase64(content);
 
   // Tier 1 — structural
-  if (HIDDEN_CHARS.test(content)) {
+  const suspiciousZwsp = hasSuspiciousZwsp(content);
+  if (HIDDEN_CHARS.test(content) || suspiciousZwsp) {
     findings.push(
       mk(
         'critical',
         'Hidden characters in an agent instruction file',
         [
-          'contains zero-width / bidi / Unicode-tag characters — a technique to hide instructions from human review while the agent still reads them',
+          suspiciousZwsp
+            ? 'contains a zero-width space spliced into Latin-script text — a technique to hide instructions from human review while the agent still reads them'
+            : 'contains zero-width / bidi / Unicode-tag characters — a technique to hide instructions from human review while the agent still reads them',
         ],
         'Remove the hidden characters. Instruction files must be plain, reviewable text.',
         path
