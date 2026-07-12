@@ -385,8 +385,10 @@ function hasIdTokenWrite(wf: Workflow, jobs: Job[]): boolean {
   return rx.test(str(wf.permissions)) || jobs.some((j) => rx.test(str(j.permissions)));
 }
 
-/** R4-4: `pull-requests:write` — can approve/merge a malicious PR (bounded but real).
- *  Distinguished from `issues:write` (comment/label an issue) which is weaker. */
+/** R4-4: `pull-requests:write` — lets an injected agent `gh pr review --approve` a malicious PR,
+ *  which BYPASSES a required-review branch-protection gate (a code-integrity path) → high. (An
+ *  actual merge COMMIT still needs `contents:write`; the risk here is the self-approve, not the
+ *  merge.) Distinguished from `issues:write` (comment/label an issue) which is weaker → medium. */
 function hasPrWritePerm(wf: Workflow, jobs: Job[]): boolean {
   const rx = /["']?pull-requests["']?\s*:\s*["']?write/i;
   return rx.test(str(wf.permissions)) || jobs.some((j) => rx.test(str(j.permissions)));
