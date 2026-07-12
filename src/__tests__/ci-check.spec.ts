@@ -1220,6 +1220,80 @@ jobs:
   });
 });
 
+// Round-5 · 1a — actor-gate POLARITY. `ACTOR_GATE_RE` matched author_association / MEMBER /
+// OWNER as bare substrings, so an INVERTED check — `!= 'MEMBER'` (runs for everyone else) or
+// `== 'NONE'` / `== 'FIRST_TIME_CONTRIBUTOR'` (runs ONLY for untrusted actors) — read as a
+// gate and hid a wide-open workflow. The dangerous FN class: a critical that LOOKS gated.
+describe('CI-2 calibration round 5 — actor-gate polarity (1a)', () => {
+  const g = (ifExpr: string) => `
+on: pull_request_target
+permissions: write-all
+jobs:
+  review:
+    if: ${ifExpr}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'review \${{ github.event.pull_request.title }}'
+          claude_args: '--allowedTools "Bash(git:*)"'
+`;
+  const sev = (expr: string) => analyzeWorkflow('x.yml', g(expr))!.severity;
+
+  // INVERTED / anti-gates — must NOT be credited as a gate → stay high/critical.
+  it('author_association != MEMBER (runs for non-members) is NOT a gate', () => {
+    expect(
+      SEVERITY_RANK[sev("github.event.pull_request.author_association != 'MEMBER'")]
+    ).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+  });
+  it('author_association != OWNER is NOT a gate', () => {
+    expect(
+      SEVERITY_RANK[sev("github.event.pull_request.author_association != 'OWNER'")]
+    ).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+  });
+  it('author_association == NONE (targets strangers) is NOT a gate', () => {
+    expect(
+      SEVERITY_RANK[sev("github.event.pull_request.author_association == 'NONE'")]
+    ).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+  });
+  it('author_association == FIRST_TIME_CONTRIBUTOR is NOT a gate', () => {
+    expect(
+      SEVERITY_RANK[sev("github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'")]
+    ).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+  });
+  it('github.actor != a bot (excludes one actor) is NOT a gate', () => {
+    expect(SEVERITY_RANK[sev("github.actor != 'dependabot[bot]'")]).toBeGreaterThanOrEqual(
+      SEVERITY_RANK.high
+    );
+  });
+
+  // GENUINE positive gates — must STAY credited (advisory), no regression.
+  it('author_association == MEMBER is a genuine gate → advisory', () => {
+    expect(sev("github.event.pull_request.author_association == 'MEMBER'")).toBe('advisory');
+  });
+  it('== OWNER || == MEMBER (positive inclusion) is a gate → advisory', () => {
+    expect(
+      sev(
+        "github.event.pull_request.author_association == 'OWNER' || github.event.pull_request.author_association == 'MEMBER'"
+      )
+    ).toBe('advisory');
+  });
+  it('contains(fromJson(\'["OWNER","MEMBER"]\'), association) is a gate → advisory', () => {
+    expect(
+      sev(
+        'contains(fromJson(\'["OWNER","MEMBER","COLLABORATOR"]\'), github.event.pull_request.author_association)'
+      )
+    ).toBe('advisory');
+  });
+  it('github.actor == a trusted login is a gate → advisory', () => {
+    expect(sev("github.actor == 'trusted-maintainer'")).toBe('advisory');
+  });
+});
+
 describe('CI-1 agent-config', () => {
   it('flags the glances npx hook (pinned → medium, not overclaimed as high)', () => {
     const findings = analyzeAgentConfig('.claude/settings.json', read('glances-settings.json'));

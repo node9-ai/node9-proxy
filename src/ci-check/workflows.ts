@@ -257,11 +257,32 @@ function promptTakesUntrusted(steps: Step[]): boolean {
   return false;
 }
 
-// An `if:` that clearly CHECKS the actor's identity/permission — not a stray word
-// in a label name (e.g. `needs-rewrite`), which would falsely mark a dangerous
-// workflow as gated and hide it.
-const ACTOR_GATE_RE =
-  /author_association|FIRST_TIME_CONTRIBUTOR|collaborator|\b(MEMBER|OWNER)\b|permission|github\.actor\s*==|user\.login\s*==|==\s*['"](write|admin|maintain)|contains\([^)]*(login|actor|association)|head\.repo\.full_name\s*==\s*github\.repository/i;
+// An `if:` that clearly RESTRICTS the agent to a trusted actor. POLARITY matters (round 5,
+// 1a): matching `author_association` / `MEMBER` as a bare substring credited an INVERTED
+// check — `!= 'MEMBER'` (runs for everyone else) or `== 'NONE'` / `== 'FIRST_TIME_CONTRIBUTOR'`
+// (runs ONLY for untrusted actors) — as a gate, hiding a wide-open workflow (a critical that
+// LOOKS gated). So we credit ONLY genuinely-restrictive shapes:
+//  · association compared POSITIVELY to a privileged value (`== OWNER|MEMBER|COLLABORATOR`),
+//  · a permission level `== 'write'|'admin'|'maintain'`,
+//  · `contains(<…>, login|actor|association)` positive-inclusion of a privileged set,
+//  · an explicit login allowlist (`github.actor == …`, `user.login == …`),
+//  · same-repo (`head.repo.full_name == github.repository`, i.e. not a fork).
+// An inverted (`!=`) or unprivileged-target (`== NONE`) check no longer matches — the bare
+// `author_association` / `FIRST_TIME_CONTRIBUTOR` / `MEMBER` / `permission` tokens are gone.
+const ACTOR_GATE_RE = new RegExp(
+  [
+    String.raw`==\s*['"]?(OWNER|MEMBER|COLLABORATOR)\b`,
+    String.raw`==\s*['"](write|admin|maintain)`,
+    // positive inclusion — allow ONE level of nested parens (e.g. `contains(fromJson('[…]'),
+    // …author_association)`) so the nested `)` from fromJson() doesn't truncate the match,
+    // but stay INSIDE the outer contains() so a later inverted clause isn't captured.
+    String.raw`contains\((?:[^()]|\([^()]*\))*(login|actor|association|OWNER|MEMBER|COLLABORATOR)`,
+    String.raw`github\.actor\s*==`,
+    String.raw`user\.login\s*==`,
+    String.raw`head\.repo\.full_name\s*==\s*github\.repository`,
+  ].join('|'),
+  'i'
+);
 
 /** Is a label-type gate configured on an untrusted trigger? F14a: a label gate
  *  counts on pull_request_target OR pull_request (metabase gates a
