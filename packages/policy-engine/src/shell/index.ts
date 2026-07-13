@@ -569,7 +569,10 @@ export function analyzeSqlDestructive(
 // raw regex matched `777`/`a+rwx`, while the scan path (canonical.ts) matched
 // `777`/`0777`/`+x`. Neither was a superset, so each missed cases the other
 // caught — the union closes both gaps and aligns live gate + CLI scan.
-const CHMOD_OPEN_PERM_TOKENS = new Set(['777', '0777', 'a+rwx', '+x']);
+// World-WRITABLE modes only. `+x` is intentionally excluded: it grants execute
+// (→ 775 under a normal umask), never write, so `chmod +x script.sh` is NOT
+// world-writable and must not trip the "any user can modify it" review.
+const CHMOD_OPEN_PERM_TOKENS = new Set(['777', '0777', 'a+rwx']);
 
 // Command wrappers that run a wrapped command (`sudo chmod 777`, `xargs chmod
 // 777`, `env FOO=bar chmod 777`, `timeout 5 chmod 777`). mvdan-sh parses these
@@ -643,8 +646,9 @@ function chmodHasOpenPermMode(command: string): boolean {
 
 /**
  * AST-aware chmod-777 detector. Fires when `chmod` runs (directly or via a
- * command wrapper like sudo/xargs/env) with a world-open mode (777/0777/a+rwx/
- * +x) — see chmodHasOpenPermMode. This is the structural replacement for the
+ * command wrapper like sudo/xargs/env) with a world-WRITABLE mode
+ * (777/0777/a+rwx) — see chmodHasOpenPermMode. `+x` (execute-only) is excluded:
+ * it is not world-writable. This is the structural replacement for the
  * FP-prone `shield:filesystem:review-chmod-777` regex rule, which matched
  * `chmod 777` anywhere in the raw string — so a `node -e` / `python -c` payload
  * whose string/regex literal merely MENTIONS `chmod 777` (a detection pattern)

@@ -202,8 +202,8 @@ describe('AST-aware chmod 777 detection (filesystem shield)', () => {
     expect(r.ruleName).toBe(CHMOD_RULE);
   });
 
-  it('REVIEWS the union token set the two paths previously split (0777, a+rwx, +x)', async () => {
-    for (const cmd of ['chmod 0777 /tmp/x', 'chmod a+rwx /tmp/x', 'chmod +x ./script.sh']) {
+  it('REVIEWS the genuinely world-writable token set (777, 0777, a+rwx)', async () => {
+    for (const cmd of ['chmod 777 /tmp/x', 'chmod 0777 /tmp/x', 'chmod a+rwx /tmp/x']) {
       const r = await evaluatePolicy(
         filesystemShieldedConfig,
         'bash',
@@ -212,6 +212,26 @@ describe('AST-aware chmod 777 detection (filesystem shield)', () => {
       );
       expect(r.decision, cmd).toBe('review');
       expect(r.ruleName, cmd).toBe(CHMOD_RULE);
+    }
+  });
+
+  it('does NOT review `chmod +x` — execute-only (→ 775) is not world-writable', async () => {
+    // Regression: `+x` was wrongly in CHMOD_OPEN_PERM_TOKENS, so making a
+    // self-authored throwaway script executable prompted "world-writable…
+    // any user can modify it" — factually false (+x grants zero write).
+    for (const cmd of [
+      'chmod +x ./script.sh',
+      'chmod +x /tmp/run.sh',
+      'chmod u+x a',
+      'chmod g+w a',
+    ]) {
+      const r = await evaluatePolicy(
+        filesystemShieldedConfig,
+        'bash',
+        { command: cmd },
+        { agent: 'claude' }
+      );
+      expect(r.decision, cmd).toBe('allow');
     }
   });
 

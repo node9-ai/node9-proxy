@@ -310,7 +310,8 @@ export async function evaluatePolicy(
       };
     }
 
-    // chmod 777 / 0777 / a+rwx / +x via a real chmod command — AST-aware so
+    // chmod 777 / 0777 / a+rwx (world-writable only; +x is execute-only and
+    // excluded) via a real chmod command — AST-aware so
     // `chmod 777` inside a `node -e` / `python -c` string or regex literal no
     // longer false-positives (the regex smart rule is suppressed for bash via
     // AST_FS_REGEX_RULES). Mirrors the SQL-DDL AST migration above. The rule
