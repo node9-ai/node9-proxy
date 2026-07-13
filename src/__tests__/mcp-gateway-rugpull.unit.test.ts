@@ -25,28 +25,33 @@ const CREDS = { apiKey: 'n9_live_abc', apiUrl: 'https://api.node9.ai/api/v1/inte
 describe('reportPinMismatchToCloud (B-Tier2 rug-pull alert)', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('emits a synthetic audit row with checkedBy mcp-pin-mismatch when logged in', () => {
+  it('emits mcp-pin-mismatch with the FRIENDLY label as mcpServer, serverKey kept as identity (F4b)', () => {
     vi.mocked(getCredentials).mockReturnValue(CREDS);
 
-    reportPinMismatchToCloud('github', 'Claude');
+    // Production sends a 16-hex serverKey — the display label rides separately.
+    reportPinMismatchToCloud('0c654ece65fb5d6f', 'github', 'Claude');
 
     expect(auditLocalAllow).toHaveBeenCalledTimes(1);
     const call = vi.mocked(auditLocalAllow).mock.calls[0];
-    expect(call[0]).toBe('mcp-server:github'); // toolName
+    expect(call[0]).toBe('mcp-server:0c654ece65fb5d6f'); // resource keeps the KEY (identity)
     expect(call[2]).toBe('mcp-pin-mismatch'); // checkedBy → firewall maps to AUTO_BLOCKED
     expect(call[3]).toEqual(CREDS); // creds
-    expect(call[4]).toEqual({ mcpServer: 'github', agent: 'Claude' }); // meta → shellType mcp::github
-    // riskMetadata (8th positional arg) carries the rule attribution
+    // meta → shellType mcp::github — the dashboard shows the NAME, never the hash
+    expect(call[4]).toEqual({ mcpServer: 'github', agent: 'Claude' });
+    // riskMetadata carries the rule attribution; the remediation command
+    // needs the KEY (the CLI takes a serverKey, not a label).
     expect(call[7]).toMatchObject({
       ruleName: expect.stringContaining('rug pull'),
-      ruleDescription: expect.stringContaining('github'),
+      ruleDescription: expect.stringContaining('node9 mcp pin update 0c654ece65fb5d6f'),
     });
+    // The display sentence names the server by its label.
+    expect((call[7] as { ruleDescription: string }).ruleDescription).toContain('"github"');
   });
 
   it('does nothing when not logged in (no credentials)', () => {
     vi.mocked(getCredentials).mockReturnValue(undefined as unknown as typeof CREDS);
 
-    reportPinMismatchToCloud('github', 'Claude');
+    reportPinMismatchToCloud('github', 'github', 'Claude');
 
     expect(auditLocalAllow).not.toHaveBeenCalled();
   });
@@ -56,7 +61,7 @@ describe('reportPinMismatchToCloud (B-Tier2 rug-pull alert)', () => {
       throw new Error('cred read failed');
     });
 
-    expect(() => reportPinMismatchToCloud('github')).not.toThrow();
+    expect(() => reportPinMismatchToCloud('github', 'github')).not.toThrow();
     expect(auditLocalAllow).not.toHaveBeenCalled();
   });
 });
@@ -67,25 +72,27 @@ describe('reportInventoryToCloud (B-Tier2 tool inventory)', () => {
   it('emits an mcp-discovered row carrying mcpToolCount when logged in', () => {
     vi.mocked(getCredentials).mockReturnValue(CREDS);
 
-    reportInventoryToCloud('github', 12, 'Claude');
+    // The "hash · N tools, 0 calls" dashboard rows came from THIS reporter
+    // sending the raw serverKey as mcpServer (F4b root cause).
+    reportInventoryToCloud('0c654ece65fb5d6f', 'redis-dev', 12, 'Claude');
 
     expect(auditLocalAllow).toHaveBeenCalledTimes(1);
     const call = vi.mocked(auditLocalAllow).mock.calls[0];
-    expect(call[0]).toBe('mcp-server:github'); // toolName
+    expect(call[0]).toBe('mcp-server:0c654ece65fb5d6f'); // resource keeps the KEY
     expect(call[2]).toBe('mcp-discovered'); // checkedBy (informational, AUTO_ALLOWED)
-    expect(call[4]).toEqual({ mcpServer: 'github', agent: 'Claude' });
+    expect(call[4]).toEqual({ mcpServer: 'redis-dev', agent: 'Claude' }); // label, not hash
     expect(call[7]).toEqual({ mcpToolCount: 12 }); // numeric riskMetadata
   });
 
   it('skips when not logged in and never throws', () => {
     vi.mocked(getCredentials).mockReturnValue(undefined as unknown as typeof CREDS);
-    reportInventoryToCloud('github', 12);
+    reportInventoryToCloud('github', 'github', 12);
     expect(auditLocalAllow).not.toHaveBeenCalled();
 
     vi.mocked(getCredentials).mockImplementation(() => {
       throw new Error('boom');
     });
-    expect(() => reportInventoryToCloud('github', 12)).not.toThrow();
+    expect(() => reportInventoryToCloud('github', 'github', 12)).not.toThrow();
   });
 });
 
@@ -95,22 +102,23 @@ describe('reportLargeResponseToCloud (B-Tier2 context-bloat)', () => {
   it('emits an mcp-large-response row carrying mcpResponseBytes', () => {
     vi.mocked(getCredentials).mockReturnValue(CREDS);
 
-    reportLargeResponseToCloud('github', 800_000, 'Claude');
+    reportLargeResponseToCloud('0c654ece65fb5d6f', 'redis-dev', 800_000, 'Claude');
 
     const call = vi.mocked(auditLocalAllow).mock.calls[0];
-    expect(call[0]).toBe('mcp-server:github');
+    expect(call[0]).toBe('mcp-server:0c654ece65fb5d6f'); // resource keeps the KEY
     expect(call[2]).toBe('mcp-large-response');
+    expect(call[4]).toEqual({ mcpServer: 'redis-dev', agent: 'Claude' }); // label, not hash (F4b)
     expect(call[7]).toEqual({ mcpResponseBytes: 800_000 });
   });
 
   it('skips when not logged in and never throws', () => {
     vi.mocked(getCredentials).mockReturnValue(undefined as unknown as typeof CREDS);
-    reportLargeResponseToCloud('github', 800_000);
+    reportLargeResponseToCloud('github', 'github', 800_000);
     expect(auditLocalAllow).not.toHaveBeenCalled();
 
     vi.mocked(getCredentials).mockImplementation(() => {
       throw new Error('boom');
     });
-    expect(() => reportLargeResponseToCloud('github', 1)).not.toThrow();
+    expect(() => reportLargeResponseToCloud('github', 'github', 1)).not.toThrow();
   });
 });
