@@ -28,14 +28,19 @@ export interface ReportDimensions {
   /** DLP/PII. `blocked` = hard DLP blocks; `observed` = would-block (DLP or
    *  PII) that was allowed but flagged. */
   data: { blocked: number; observed: number };
+  /** Report v3 canon — the Detection policy area: loop-detection hits, MCP
+   *  pin mismatches, and injection detections. These report HERE (where the
+   *  user configures them), not under Tool Rules. */
+  detection: { loops: number; pinMismatches: number; injections: number };
   /** Human-in-the-loop decisions. Timed-out = auto-denied. */
   approvals: { approved: number; denied: number; timedOut: number };
   /** Credential-jail path reads blocked/reviewed (ruleName shield:project-jail:*). */
   files: { blocked: number };
-  /** Shields / smart rules (`blocked`, excluding jail), MCP app-permission
-   *  governance events (`mcp` — block AND review, since a review is a tool
-   *  rule firing), and loop-detection hits (`loops`). */
-  toolRules: { blocked: number; mcp: number; loops: number };
+  /** Shields / smart rules, excluding jail (files), MCP (apps), and loops
+   *  (detection). */
+  toolRules: { blocked: number };
+  /** MCP app-permission governance events (block AND review). Was `toolRules.mcp`. */
+  apps: { blocked: number };
   /** Period spend across agents (from the cost journals). */
   cost: { totalUSD: number };
 }

@@ -899,7 +899,7 @@ describe('aggregateReportFromAudit — dimension buckets', () => {
     expect(data.dimensions.files.blocked).toBe(1);
   });
 
-  it('attributes an MCP app-permission block to the tool-rules dimension', () => {
+  it('attributes an MCP app-permission block to the apps dimension (canon)', () => {
     writeLog([
       {
         ts: at('10:03:00'),
@@ -912,7 +912,24 @@ describe('aggregateReportFromAudit — dimension buckets', () => {
       },
     ]);
     const { data } = aggregateReportFromAudit('7d', makeOpts());
-    expect(data.dimensions.toolRules.mcp).toBe(1);
+    expect(data.dimensions.apps.blocked).toBe(1);
+    // canon: NOT in toolRules anymore
+    expect(data.dimensions.toolRules.blocked).toBe(0);
+  });
+
+  it('REGROUP: a loop-detected block lands in Detection, never Tool Rules', () => {
+    writeLog([
+      {
+        ts: at('10:03:30'),
+        tool: 'Bash',
+        decision: 'block',
+        checkedBy: 'loop-detected',
+        agent: 'claude',
+      },
+    ]);
+    const { data } = aggregateReportFromAudit('7d', makeOpts());
+    expect(data.dimensions.detection.loops).toBe(1);
+    expect(data.dimensions.toolRules.blocked).toBe(0);
   });
 
   it('surfaces approvals (approved / denied / timed-out) as their own dimension', () => {

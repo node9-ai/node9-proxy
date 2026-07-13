@@ -967,12 +967,19 @@ export async function loadGeminiCostAsync(
 function dimensionOfBlock(
   checkedBy: string,
   ruleName: string
-): 'network' | 'data' | 'files' | 'mcp' | 'toolRules' | 'approvals' | null {
+): 'network' | 'data' | 'detection' | 'files' | 'apps' | 'toolRules' | 'approvals' | null {
   if (checkedBy.includes('egress')) return 'network';
   if (checkedBy.includes('pii') || checkedBy.includes('dlp')) return 'data';
-  if (checkedBy === 'app-permission-block' || ruleName.startsWith('app-permission:')) return 'mcp';
+  // Report v3 canon: loops/pin/injection report under Detection (where the
+  // user configures them), NOT Tool Rules. Mirrors node9Firewall canon-taxonomy.ts.
+  if (
+    checkedBy === 'loop-detected' ||
+    checkedBy === 'mcp-pin-mismatch' ||
+    checkedBy.startsWith('injection')
+  )
+    return 'detection';
+  if (checkedBy === 'app-permission-block' || ruleName.startsWith('app-permission:')) return 'apps';
   if (ruleName.startsWith('shield:project-jail')) return 'files';
-  if (checkedBy === 'loop-detected') return 'toolRules';
   if (checkedBy === 'timeout' || checkedBy === 'local-decision') return 'approvals';
   // Any other block (smart-rule-block, persistent-deny, unknown) → tool rules.
   return 'toolRules';
@@ -1133,7 +1140,10 @@ export function aggregateReportFromAudit(
   let dimDataObserved = 0; // PII/DLP would-block (allowed but flagged)
   let dimFilesBlocked = 0;
   let dimToolRulesBlocked = 0;
-  let dimMcpBlocked = 0;
+  let dimAppsBlocked = 0; // MCP app-permission blocks (canon 'apps')
+  // Detection area (Report v3 canon) — loops/pin/injection.
+  let dimPinMismatch = 0;
+  let dimInjectionBlocked = 0;
 
   for (const e of entries) {
     // Skip intermediate `smart-rule-block-override` rows that were
@@ -1162,9 +1172,14 @@ export function aggregateReportFromAudit(
     }
     if (e.checkedBy === 'loop-detected') loopHits++;
 
-    // Dimension attribution (Report UI v2 · P0). "Observed" data findings
-    // (PII/DLP would-block) are flagged regardless of the final decision.
+    // Detection-area attribution (Report v3 canon) — pin/injection alongside
+    // loops, action-agnostic (a signal counts whether or not it hard-blocked).
     const cb = e.checkedBy ?? '';
+    if (cb === 'mcp-pin-mismatch') dimPinMismatch++;
+    if (cb.startsWith('injection')) dimInjectionBlocked++;
+
+    // "Observed" data findings (PII/DLP would-block) flagged regardless of
+    // the final decision.
     if (cb.includes('would-block') && (cb.includes('pii') || cb.includes('dlp'))) {
       dimDataObserved++;
     }
@@ -1176,14 +1191,14 @@ export function aggregateReportFromAudit(
         case 'files':
           dimFilesBlocked++;
           break;
-        case 'mcp':
-          dimMcpBlocked++;
+        case 'apps':
+          dimAppsBlocked++;
           break;
         case 'toolRules':
           dimToolRulesBlocked++;
           break;
-        // 'data' / 'approvals' / null: covered by dlpBlocked / timedOut /
-        // userDenied — don't double-count here.
+        // 'data' / 'detection' / 'approvals' / null: covered by dlpBlocked /
+        // loopHits+pin+injection / timedOut / userDenied — no double-count.
       }
     }
 
@@ -1279,9 +1294,15 @@ export function aggregateReportFromAudit(
     dimensions: {
       network: { blocked: dimNetworkBlocked },
       data: { blocked: dlpBlocked, observed: dimDataObserved },
+      detection: {
+        loops: loopHits,
+        pinMismatches: dimPinMismatch,
+        injections: dimInjectionBlocked,
+      },
       approvals: { approved: userApproved, denied: userDenied, timedOut },
       files: { blocked: dimFilesBlocked },
-      toolRules: { blocked: dimToolRulesBlocked, mcp: dimMcpBlocked, loops: loopHits },
+      toolRules: { blocked: dimToolRulesBlocked },
+      apps: { blocked: dimAppsBlocked },
       cost: { totalUSD: claudeCost.total + codexCost.total + geminiCost.total },
     },
     generatedAt: now.toISOString(),
