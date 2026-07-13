@@ -339,6 +339,12 @@ function renderTerminalReport(
       `${num(d.data.blocked)} blocked · ${num(d.data.observed)} observed (DLP/PII)`
     );
     dimRow(
+      '🔁',
+      'Detection',
+      d.detection.loops + d.detection.pinMismatches + d.detection.injections > 0,
+      `${num(d.detection.loops)} loops · ${num(d.detection.pinMismatches)} pin · ${num(d.detection.injections)} injection`
+    );
+    dimRow(
       '✋',
       'Approvals',
       d.approvals.approved + d.approvals.denied + d.approvals.timedOut > 0,
@@ -348,9 +354,10 @@ function renderTerminalReport(
     dimRow(
       '🛠',
       'Tool rules',
-      d.toolRules.blocked + d.toolRules.mcp + d.toolRules.loops > 0,
-      `${num(d.toolRules.blocked)} shields/rules · ${num(d.toolRules.mcp)} MCP · ${num(d.toolRules.loops)} loops`
+      d.toolRules.blocked > 0,
+      `${num(d.toolRules.blocked)} shields/rules`
     );
+    dimRow('🧩', 'Apps (MCP)', d.apps.blocked > 0, `${num(d.apps.blocked)} app-permission blocks`);
     dimRow('💰', 'Cost', d.cost.totalUSD > 0, `${fmtCost(d.cost.totalUSD)} this period`);
   }
   console.log('');
