@@ -569,7 +569,10 @@ export function analyzeSqlDestructive(
 // raw regex matched `777`/`a+rwx`, while the scan path (canonical.ts) matched
 // `777`/`0777`/`+x`. Neither was a superset, so each missed cases the other
 // caught — the union closes both gaps and aligns live gate + CLI scan.
-const CHMOD_OPEN_PERM_TOKENS = new Set(['777', '0777', 'a+rwx', '+x']);
+// World-WRITABLE modes only. `+x` is intentionally excluded: it grants execute
+// (→ 775 under a normal umask), never write, so `chmod +x script.sh` is NOT
+// world-writable and must not trip the "any user can modify it" review.
+const CHMOD_OPEN_PERM_TOKENS = new Set(['777', '0777', 'a+rwx']);
 
 // Command wrappers that run a wrapped command (`sudo chmod 777`, `xargs chmod
 // 777`, `env FOO=bar chmod 777`, `timeout 5 chmod 777`). mvdan-sh parses these
@@ -643,8 +646,9 @@ function chmodHasOpenPermMode(command: string): boolean {
 
 /**
  * AST-aware chmod-777 detector. Fires when `chmod` runs (directly or via a
- * command wrapper like sudo/xargs/env) with a world-open mode (777/0777/a+rwx/
- * +x) — see chmodHasOpenPermMode. This is the structural replacement for the
+ * command wrapper like sudo/xargs/env) with a world-WRITABLE mode
+ * (777/0777/a+rwx) — see chmodHasOpenPermMode. `+x` (execute-only) is excluded:
+ * it is not world-writable. This is the structural replacement for the
  * FP-prone `shield:filesystem:review-chmod-777` regex rule, which matched
  * `chmod 777` anywhere in the raw string — so a `node -e` / `python -c` payload
  * whose string/regex literal merely MENTIONS `chmod 777` (a detection pattern)
@@ -1035,6 +1039,175 @@ export function analyzeFsOperation(command: string): FsOpVerdict | null {
   }
   fsOpCache.set(normalized, computed);
   return computed;
+}
+
+// ── rm same-command create-then-delete waiver ──────────────────────────────
+//
+// The founder's recurring rm FP is a write→run→cleanup loop in ONE command:
+//   cat > fn-probe.ts <<'EOF' … EOF
+//   npx tsx fn-probe.ts; rm -f fn-probe.ts          ← review-rm prompts here
+// The file was created in this very command and never existed before, so the
+// delete protects nothing. isRmCreatedInCommandCleanup returns true for exactly
+// that shape; the orchestrator then skips ONLY the `review-rm` advisory for this
+// command (block-rm-rf-home, allow-rm-safe-paths, and USER rules still apply —
+// see policy/index.ts). Everything else keeps reviewing.
+
+const stripDotSlash = (p: string): string => p.replace(/^\.\//, '');
+
+// Sensitive filenames never qualify — even if written this command — so
+// `cat > .env <<EOF…; rm .env` still reviews (closes overwrite-then-delete for
+// the highest-value targets). A BACKSTOP, not an exhaustive list: it guards the
+// files where an already-ungated overwrite plus a silent delete would be worst
+// (secrets/keys/vcs). Ordinary source files rely on the overwrite being the real
+// (already-ungated) damage — deleting the emptied file adds little.
+// NOTE: intentionally a small local list, not dlp's SENSITIVE_PATH_PATTERNS —
+// that set targets credential READS by absolute path; this guards relative
+// in-cwd cleanup DELETES. Keep the credential-extension overlap roughly aligned.
+function isSensitiveCleanupName(p: string): boolean {
+  const base = p.replace(/^.*[\\/]/, '');
+  return (
+    /^\.env(\.|$)/i.test(base) ||
+    /(?:^|[\\/])\.(?:ssh|aws|gnupg|git)(?:[\\/]|$)/i.test(p) ||
+    /\.(?:pem|key|p12|pfx|crt)$/i.test(base) ||
+    /^\.?(?:netrc|npmrc|pgpass|htpasswd)$/i.test(base) ||
+    /^id_(?:rsa|dsa|ecdsa|ed25519)/i.test(base) ||
+    /credential/i.test(p) ||
+    /secret/i.test(base)
+  );
+}
+
+// A same-command creation can waive review only for a relative, in-cwd, non-glob,
+// non-sensitive target. Absolute / home / `..` / glob / brace never qualify.
+function isWaivableCleanupTarget(p: string): boolean {
+  if (/^[/~]/.test(p) || /^\$/.test(p)) return false;
+  if (/(?:^|[\\/])\.\.(?:[\\/]|$)/.test(p)) return false;
+  if (/[*?[{]/.test(p)) return false;
+  if (isSensitiveCleanupName(p)) return false;
+  return true;
+}
+
+// mvdan-sh exposes redirect operators only as opaque numeric enums (no named
+// exports). Derive the ones we need ONCE from known samples so this survives a
+// library version bump; on any failure the sets stay empty → no file is ever
+// classed as "created" → the waiver never fires (safe degrade to review).
+function deriveRedirOp(sample: string): number {
+  try {
+    const f = sharedParser.Parse(sample, 'cmd');
+    let op = -1;
+    syntax.Walk(f, (node: unknown) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const n = node as any;
+      if (n && syntax.NodeType(n) === 'Redirect' && op < 0) op = n.Op;
+      return true;
+    });
+    return op;
+  } catch {
+    return -1;
+  }
+}
+// `>` truncates/creates a file; `<<` / `<<-` are heredocs. Note: an EMPTY heredoc
+// has a null `.Hdoc`, so detect heredocs by OPERATOR, not by heredoc-body presence.
+// `>>` (append) is intentionally NOT here — append PRESERVES a pre-existing file's
+// content, so `cat >> victim <<E; rm victim` would delete an intact file (same
+// class as touch). Only a `>` truncate counts.
+const REDIR_TRUNCATE_OPS = new Set<number>([deriveRedirOp('>_f')]);
+const REDIR_HEREDOC_OPS = new Set<number>([
+  deriveRedirOp('cat <<X\nX'),
+  deriveRedirOp('cat <<-X\nX'),
+]);
+
+// Files written with content in this command via a heredoc (`cat > f <<EOF`).
+// A "created" file is the target of a `>` truncate redirect on the DEFAULT fd
+// (stdout, `r.N == null`) belonging to a statement that also carries a heredoc.
+// Deliberately narrow — this is the founder's actual probe pattern. Excluded:
+//  - `>>` append (op not in REDIR_TRUNCATE_OPS) — preserves pre-existing content;
+//  - `2>` / `1>` (explicit fd, `r.N != null`) — a stderr/fd sink, not the heredoc
+//    content file, and a redirect target that may pre-exist;
+//  - a bare `> f` / `echo … > f` with no heredoc, and `touch`/`tee`.
+// RESIDUAL (accepted, documented): a `>` truncate of a PRE-EXISTING file
+// (`cat > existing <<E…; rm existing`) still counts — the check is pure (no fs)
+// and can't tell new from overwritten. That truncate destroys the content and is
+// itself already ungated, so the waiver only changes "left empty" → "removed".
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function collectSameCommandCreations(f: any): Set<string> {
+  const created = new Set<string>();
+  try {
+    // Only UNCONDITIONAL top-level simple commands count. Iterating `f.Stmts` and
+    // requiring `stmt.Cmd` to be a CallExpr is a safe allowlist: a create nested
+    // in a `&&`/`||` (BinaryCmd), if/for/while/case, or function body is control-
+    // flow-dependent — it may never run at runtime, which would leave the rm
+    // target an INTACT pre-existing file (a data-loss bypass). This deliberately
+    // also misses subshell / `&&`-left-operand creates — those just fall through
+    // to review; it never over-counts a create a branch could skip.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const stmts: any[] = Array.isArray(f?.Stmts) ? f.Stmts : [];
+    for (const stmt of stmts) {
+      if (!stmt || !stmt.Cmd || syntax.NodeType(stmt.Cmd) !== 'CallExpr') continue;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const redirs: any[] = stmt.Redirs || [];
+      if (!redirs.some((r) => r && REDIR_HEREDOC_OPS.has(r.Op))) continue;
+      for (const r of redirs) {
+        if (r && REDIR_TRUNCATE_OPS.has(r.Op) && r.N == null) {
+          const w = resolveWordLiteral(r.Word);
+          if (w) created.add(stripDotSlash(w));
+        }
+      }
+    }
+  } catch {
+    return created;
+  }
+  return created;
+}
+
+/**
+ * True when EVERY `rm` in the command targets only files this same command just
+ * wrote via a heredoc and that are safe to waive (relative, in-cwd, non-glob,
+ * non-sensitive). A dynamic/unresolved target, a non-created sibling, or a
+ * sensitive/out-of-cwd target ⇒ false (⇒ review-rm still fires). Pure.
+ */
+export function isRmCreatedInCommandCleanup(command: string): boolean {
+  if (!/\brm\b/.test(command)) return false;
+  const f = parseShared(command);
+  if (f === PARSE_FAIL) return false;
+  const created = collectSameCommandCreations(f);
+  if (created.size === 0) return false;
+
+  let sawRm = false;
+  let ok = true;
+  try {
+    syntax.Walk(f, (node: unknown) => {
+      if (!node || !ok) return false;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const n = node as any;
+      if (syntax.NodeType(n) !== 'CallExpr') return true;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const args: any[] = n.Args || [];
+      const name = (resolveWordLiteral(args[0]) ?? '').toLowerCase();
+      if (name !== 'rm') return true;
+      sawRm = true;
+      const { flags, paths } = extractLiteralArgs(n);
+      // A dropped positional arg = a dynamic/unresolved target → can't prove safe.
+      if (args.length - 1 > flags.length + paths.length) {
+        ok = false;
+        return false;
+      }
+      if (paths.length === 0) {
+        ok = false;
+        return false;
+      }
+      for (const p of paths) {
+        const np = stripDotSlash(p);
+        if (!created.has(np) || !isWaivableCleanupTarget(np)) {
+          ok = false;
+          return false;
+        }
+      }
+      return true;
+    });
+  } catch {
+    return false;
+  }
+  return sawRm && ok;
 }
 
 function analyzeFsOperationImpl(command: string): FsOpVerdict | null {
