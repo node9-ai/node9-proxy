@@ -94,4 +94,20 @@ describe('resolveServerLabel', () => {
   it('an extracted namespaced name still wins over config name', () => {
     expect(resolveServerLabel('mcp__gmail__read_email', 'srv1', 'npx x', 'cfg-name')).toBe('gmail');
   });
+
+  // F4b — the fire-and-forget cloud reporters have NO tool name; they resolve
+  // with an empty toolName at REPORT time, so a name persisted by discovery
+  // AFTER gateway startup is still picked up (mcp-tools.json read per call).
+  it('empty tool name (reporter path) → config name → persisted name → derived, at call time', () => {
+    // Late discovery: srv2 has no name at first call…
+    expect(resolveServerLabel('', 'srv2', 'uvx mcp-server-git --repo .')).toBe('git');
+    // …then discovery persists one — the SAME call now resolves to it.
+    const file = path.join(tmpHome, '.node9', 'mcp-tools.json');
+    const cfg = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    cfg.srv2.name = 'my-git';
+    fs.writeFileSync(file, JSON.stringify(cfg));
+    expect(resolveServerLabel('', 'srv2', 'uvx mcp-server-git --repo .')).toBe('my-git');
+    // configName still beats both.
+    expect(resolveServerLabel('', 'srv2', 'uvx mcp-server-git', 'git-prod')).toBe('git-prod');
+  });
 });

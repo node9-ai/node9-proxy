@@ -123,7 +123,14 @@ export function normalizeClientName(name: unknown): string | undefined {
  *
  * Exported for unit testing.
  */
-export function reportPinMismatchToCloud(serverKey: string, agent?: string): void {
+export function reportPinMismatchToCloud(
+  serverKey: string,
+  // Display label (F4b) — the dashboard groups MCP rows by this. serverKey
+  // stays the IDENTITY (resource string, riskMetadata, the CLI remediation);
+  // the label only fixes what gets printed. Enforcement never reads it.
+  serverLabel: string,
+  agent?: string
+): void {
   try {
     const creds = getCredentials();
     if (!creds) return;
@@ -132,14 +139,15 @@ export function reportPinMismatchToCloud(serverKey: string, agent?: string): voi
       { serverKey, reason: 'tool-pin-mismatch' },
       'mcp-pin-mismatch',
       creds,
-      { mcpServer: serverKey, agent },
+      { mcpServer: serverLabel, agent },
       undefined,
       false,
       {
         ruleName: 'MCP tool definitions changed (possible rug pull)',
         ruleDescription:
-          `The MCP server "${serverKey}" changed its tool definitions since they were pinned. ` +
+          `The MCP server "${serverLabel}" changed its tool definitions since they were pinned. ` +
           `This can indicate a supply-chain attack (tool poisoning). The session was quarantined. ` +
+          // The CLI command takes the serverKey, not the label — keep it.
           `Review with: node9 mcp pin update ${serverKey}`,
       }
     );
@@ -155,7 +163,14 @@ export function reportPinMismatchToCloud(serverKey: string, agent?: string): voi
  *
  * Exported for unit testing.
  */
-export function reportInventoryToCloud(serverKey: string, toolCount: number, agent?: string): void {
+export function reportInventoryToCloud(
+  serverKey: string,
+  // Display label (F4b) — this reporter created the dashboard's
+  // "0c654ece… · N tools, 0 calls" hash rows. See reportPinMismatchToCloud.
+  serverLabel: string,
+  toolCount: number,
+  agent?: string
+): void {
   try {
     const creds = getCredentials();
     if (!creds) return;
@@ -164,7 +179,7 @@ export function reportInventoryToCloud(serverKey: string, toolCount: number, age
       { serverKey, toolCount },
       'mcp-discovered',
       creds,
-      { mcpServer: serverKey, agent },
+      { mcpServer: serverLabel, agent },
       undefined,
       false,
       { mcpToolCount: toolCount }
@@ -183,6 +198,8 @@ export function reportInventoryToCloud(serverKey: string, toolCount: number, age
  */
 export function reportLargeResponseToCloud(
   serverKey: string,
+  // Display label (F4b) — see reportPinMismatchToCloud.
+  serverLabel: string,
   responseBytes: number,
   agent?: string
 ): void {
@@ -194,7 +211,7 @@ export function reportLargeResponseToCloud(
       { serverKey, responseBytes },
       'mcp-large-response',
       creds,
-      { mcpServer: serverKey, agent },
+      { mcpServer: serverLabel, agent },
       undefined,
       false,
       { mcpResponseBytes: responseBytes }
@@ -607,7 +624,15 @@ export async function runMcpGateway(
 
         // B-Tier2: report the tool inventory to the SaaS ("server exposes N
         // tools"). Informational, fire-and-forget — independent of the daemon.
-        reportInventoryToCloud(serverKey, tools.length, clientName);
+        // F4b: the display label resolves AT REPORT TIME (empty toolName →
+        // configName → mcp-tools.json name → derived), so a name persisted
+        // by discovery after startup is picked up. serverKey stays identity.
+        reportInventoryToCloud(
+          serverKey,
+          resolveServerLabel('', serverKey, upstreamCommand, configName),
+          tools.length,
+          clientName
+        );
 
         // 1. Notify daemon of discovery (handles drift & new servers)
         if (isDaemonRunning() && process.env.NODE9_TESTING !== '1') {
@@ -708,7 +733,11 @@ export async function runMcpGateway(
           // Fire-and-forget (auditLocalAllow swallows its own errors) — the
           // cloud send must never affect the local quarantine/JSON-RPC path.
           // Skipped silently when not logged in (getCredentials → null).
-          reportPinMismatchToCloud(serverKey, clientName);
+          reportPinMismatchToCloud(
+            serverKey,
+            resolveServerLabel('', serverKey, upstreamCommand, configName),
+            clientName
+          );
           const errorResponse = {
             jsonrpc: '2.0',
             id: parsed.id,
@@ -771,7 +800,12 @@ export async function runMcpGateway(
       );
       // B-Tier2: report the context-bloat to the SaaS. Informational,
       // fire-and-forget — independent of the daemon.
-      reportLargeResponseToCloud(serverKey, line.length, clientName);
+      reportLargeResponseToCloud(
+        serverKey,
+        resolveServerLabel('', serverKey, upstreamCommand, configName),
+        line.length,
+        clientName
+      );
       if (isDaemonRunning() && process.env.NODE9_TESTING !== '1') {
         const token = getInternalToken();
         fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/mcp/large-response`, {
