@@ -13,6 +13,7 @@ import {
   analyzeFsOperation,
   analyzeSqlDestructive,
   analyzeChmod777,
+  isRmCreatedInCommandCleanup,
   isBashTool,
   AST_FS_REGEX_RULES,
   extractShellDestinations,
@@ -338,10 +339,19 @@ export async function evaluatePolicy(
     // Pinned-only conflict engine (Phase 3b): collect all matches (same
     // predicate as the old first-match `.find()`), then resolve — a pinned
     // manager rule wins; otherwise the first match wins (unchanged).
+    // Waive the built-in `review-rm` advisory for a same-command create-then-
+    // delete scratch cleanup (`cat > f <<EOF…; rm -f f`). Gated on
+    // verdict==='review' so the waiver can ONLY drop a review prompt, never a
+    // block — a user/org rule that reuses the name `review-rm` but BLOCKS is
+    // still enforced. block-rm-rf-home (earlier tier), allow-rm-safe-paths, and
+    // all other user rules are unaffected. (Name coupling to the proxy-side
+    // ADVISORY_SMART_RULES 'review-rm' is intentional; see src/config/index.ts.)
+    const rmCleanupWaiver = bashCommand !== null && isRmCreatedInCommandCleanup(bashCommand);
     const matches = config.policy.smartRules.filter(
       (rule) =>
         matchesPattern(toolName, rule.tool) &&
         !(bashCommand !== null && rule.name && AST_FS_REGEX_RULES.has(rule.name)) &&
+        !(rmCleanupWaiver && rule.name === 'review-rm' && rule.verdict === 'review') &&
         evaluateSmartConditions(args, rule)
     );
     const matchedRule = resolvePinned(matches);
