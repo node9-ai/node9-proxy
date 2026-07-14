@@ -1,6 +1,6 @@
 // P3 Phase 2 polish — friendly MCP server name derived from the launch command,
 // reported in the SEE inventory so the dashboard shows "Filesystem" not a hash.
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -47,6 +47,13 @@ describe('resolveServerLabel', () => {
     tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-srvlabel-'));
     origHome = process.env.HOME;
     process.env.HOME = tmpHome;
+    // readMcpToolsConfig resolves the config path via os.homedir(), which
+    // ignores $HOME on Windows (it uses USERPROFILE) — so the HOME override
+    // alone left the code reading the runner's real home, and the one test
+    // with a stored name that differs from the derived fallback fell through
+    // to the derived name (Windows CI: 'git' ≠ 'my-git'). Spy os.homedir
+    // directly — the cross-platform pattern already used in mcp-status.spec.
+    vi.spyOn(os, 'homedir').mockReturnValue(tmpHome);
     fs.mkdirSync(path.join(tmpHome, '.node9'), { recursive: true });
     fs.writeFileSync(
       path.join(tmpHome, '.node9', 'mcp-tools.json'),
@@ -58,6 +65,7 @@ describe('resolveServerLabel', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     if (origHome !== undefined) process.env.HOME = origHome;
     else delete process.env.HOME;
     fs.rmSync(tmpHome, { recursive: true, force: true });
