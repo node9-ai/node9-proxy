@@ -306,6 +306,130 @@ export function effectiveSyncIntervalMs(): number {
   return pickSyncIntervalMs(readCachedSyncIntervalHours(), getConfig().settings);
 }
 
+// ─── Sync health (fix spec D3: policy-sync-fix-spec.md) ───────────────────────
+// Persisted in a SIBLING file (not rules-cache.json) so we don't rewrite the
+// policy cache on every tick. The key distinction: `lastCheckedAt` = last time a
+// request COMPLETED (200 OR 304) — the health signal; `lastChangedAt` = last time
+// content actually changed (mirrors rules-cache `fetchedAt`). A healthy daemon
+// getting 304s advances lastCheckedAt but not lastChangedAt, so "healthy but
+// unchanged" is finally distinguishable from "broken for days".
+export interface SyncHealth {
+  /** Last COMPLETED request (200 or 304). Absent = never successfully synced. */
+  lastCheckedAt?: string;
+  /** Last content change (200 with new body). */
+  lastChangedAt?: string;
+  lastError?: string;
+  lastErrorAt?: string;
+  consecutiveFailures: number;
+}
+
+const syncHealthFile = () => path.join(os.homedir(), '.node9', 'sync-health.json');
+
+/** Read the health record; defaults to zero-failures when absent/corrupt. */
+export function readSyncHealth(): SyncHealth {
+  try {
+    const raw = JSON.parse(fs.readFileSync(syncHealthFile(), 'utf-8')) as Partial<SyncHealth>;
+    return {
+      lastCheckedAt: typeof raw.lastCheckedAt === 'string' ? raw.lastCheckedAt : undefined,
+      lastChangedAt: typeof raw.lastChangedAt === 'string' ? raw.lastChangedAt : undefined,
+      lastError: typeof raw.lastError === 'string' ? raw.lastError : undefined,
+      lastErrorAt: typeof raw.lastErrorAt === 'string' ? raw.lastErrorAt : undefined,
+      consecutiveFailures:
+        typeof raw.consecutiveFailures === 'number' && raw.consecutiveFailures >= 0
+          ? raw.consecutiveFailures
+          : 0,
+    };
+  } catch {
+    return { consecutiveFailures: 0 };
+  }
+}
+
+function writeSyncHealth(h: SyncHealth): void {
+  try {
+    const file = syncHealthFile();
+    const dir = path.dirname(file);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    // Atomic write: a concurrent reader (status/doctor while the daemon writes)
+    // must see either the old or the new complete file, never a truncated one —
+    // a torn read would parse-fail and flash a false "never synced / STALE".
+    // pid in the temp name so daemon + CLI writers don't collide on the temp file.
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(h, null, 2) + '\n', 'utf-8');
+    fs.renameSync(tmp, file); // atomic on the same filesystem
+  } catch {
+    /* health is best-effort telemetry — never let it break the sync loop.
+       (Residual: two writers doing read-modify-write can still lose an update —
+       acceptable here because the next sync tick re-records the true state.) */
+  }
+}
+
+/** The cache's own fetchedAt — a fallback "last known good" for machines that
+ *  synced before sync-health existed (upgrade) or whose health file is briefly
+ *  unreadable. Never throws. */
+function readCacheFetchedAt(): string | undefined {
+  try {
+    const raw = JSON.parse(fs.readFileSync(rulesCacheFile(), 'utf-8')) as Record<string, unknown>;
+    return typeof raw.fetchedAt === 'string' ? raw.fetchedAt : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Record the outcome of one sync attempt.
+ *  - `{ ok: true }`        → 304: stamp lastCheckedAt, reset failures, clear error.
+ *  - `{ ok: true, changed }`→ 200: also stamp lastChangedAt.
+ *  - `{ ok: false, error }` → failure: ++consecutiveFailures, set lastError.
+ *    Deliberately does NOT touch lastCheckedAt — health (did we reach the server)
+ *    is a different question from freshness (did content change).
+ */
+export function recordSyncHealth(
+  result: { ok: true; changed?: boolean } | { ok: false; error: string }
+): void {
+  const h = readSyncHealth();
+  const now = new Date().toISOString();
+  if (result.ok) {
+    h.lastCheckedAt = now;
+    if (result.changed) h.lastChangedAt = now;
+    h.consecutiveFailures = 0;
+    h.lastError = undefined;
+    h.lastErrorAt = undefined;
+  } else {
+    h.consecutiveFailures += 1;
+    h.lastError = result.error;
+    h.lastErrorAt = now;
+  }
+  writeSyncHealth(h);
+}
+
+const STALE_MIN_MS = 3 * 60 * 60 * 1000; // never flag before 3h
+const STALE_MAX_MS = 24 * 60 * 60 * 1000; // always flag by 24h
+const STALE_FACTOR = 3;
+
+/** Staleness threshold: 3× the sync interval, clamped to [3h, 24h]. Pure. */
+export function stalenessThresholdMs(intervalMs: number): number {
+  return Math.min(STALE_MAX_MS, Math.max(STALE_MIN_MS, intervalMs * STALE_FACTOR));
+}
+
+/**
+ * Is the cached policy stale — i.e. we HAD a cloud policy and it has gone old?
+ * "Stale" requires a last-known-good reference: the last successful contact
+ * (`lastCheckedAt`), falling back to the cache's `fetchedAt` for machines that
+ * synced before sync-health existed. With NEITHER (a truly uninitialised /
+ * first-run machine), there is nothing to be stale about → false, so a freshly
+ * logged-in machine doesn't flash STALE before its first sync tick.
+ * `health`/`nowMs` are injectable so callers that already read the record don't
+ * re-read it. Never throws.
+ */
+export function isPolicyStale(nowMs: number = Date.now(), health?: SyncHealth): boolean {
+  const h = health ?? readSyncHealth();
+  const lastKnownGood = h.lastCheckedAt ?? readCacheFetchedAt();
+  if (!lastKnownGood) return false; // never synced + no cached policy — not stale, uninitialised
+  const last = Date.parse(lastKnownGood);
+  if (Number.isNaN(last)) return false;
+  return nowMs - last > stalenessThresholdMs(effectiveSyncIntervalMs());
+}
+
 function fetchCloudPolicy(
   apiKey: string,
   apiUrl: string,
@@ -567,6 +691,7 @@ async function syncOnce(): Promise<void> {
     const result = await fetchCloudPolicy(creds.apiKey, creds.apiUrl, readCachedEtag());
     if (result.kind === 'unchanged') {
       // 304 — keep existing cache as-is. Server confirmed nothing changed.
+      recordSyncHealth({ ok: true });
     } else {
       const cache: RulesCache = {
         fetchedAt: new Date().toISOString(),
@@ -580,9 +705,23 @@ async function syncOnce(): Promise<void> {
         managedConfig: extractManagedConfig(result.body),
       };
       writeCache(cache);
+      recordSyncHealth({ ok: true, changed: true });
     }
-  } catch {
-    // Best-effort — stale cache (or no cache) is fine; proxy falls back to local config
+  } catch (err) {
+    // Stale cache continues to enforce (NEVER fail open) — but the failure must
+    // leave a trace. A silent catch here is exactly what let this machine enforce
+    // a 7-day-stale policy unnoticed (fix spec D3). Record + log it.
+    const msg = err instanceof Error ? err.message : String(err);
+    recordSyncHealth({ ok: false, error: msg });
+    try {
+      appendToLog(HOOK_DEBUG_LOG, {
+        ts: new Date().toISOString(),
+        kind: 'policy-sync-error',
+        error: msg,
+      });
+    } catch {
+      /* logging is best-effort — never break the sync loop */
+    }
   }
 
   // After the policy fetch (success or 304), push a fresh blast snapshot
@@ -879,6 +1018,7 @@ export async function runCloudSync(): Promise<
       // 304 — keep existing cache. Report success against the cached
       // counts so the CLI still tells the user how many rules are active.
       const status = getCloudSyncStatus();
+      recordSyncHealth({ ok: true });
       maybePushBlast();
       return status.cached
         ? { ok: true, rules: status.rules, fetchedAt: status.fetchedAt, unchanged: true }
@@ -896,11 +1036,17 @@ export async function runCloudSync(): Promise<
       managedConfig: extractManagedConfig(result.body),
     };
     writeCache(cache);
+    recordSyncHealth({ ok: true, changed: true });
     maybePushBlast();
     return { ok: true, rules: cache.rules.length, fetchedAt: cache.fetchedAt };
   } catch (err) {
+    // Record the failure so a manual sync that can't reach the server counts
+    // toward consecutiveFailures too (the CLI surfaces the reason to the user,
+    // so no extra hook-debug log here). Never fail open — cache is untouched.
+    const msg = err instanceof Error ? err.message : String(err);
+    recordSyncHealth({ ok: false, error: msg });
     maybePushBlast();
-    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    return { ok: false, reason: msg };
   }
 }
 

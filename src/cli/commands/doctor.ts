@@ -9,6 +9,8 @@ import { execSync } from 'child_process';
 import { isDaemonRunning, DAEMON_PORT, DAEMON_HOST } from '../../auth/daemon';
 import { getConfig } from '../../config';
 import { getAgentWiring } from '../../agent-wiring';
+import { readSyncHealth, isPolicyStale } from '../../daemon/sync';
+import { agoLabel } from '../../lib/relative-time';
 
 export function registerDoctorCommand(program: Command, version: string): void {
   program
@@ -145,6 +147,40 @@ export function registerDoctorCommand(program: Command, version: string): void {
           'Daemon not running — terminal & native approvals unavailable',
           'Run: node9 daemon --background'
         );
+      }
+
+      // ── Policy sync freshness ─────────────────────────────────────────────────
+      // A daemon that isn't running (or a sync that keeps failing) means this
+      // machine can enforce a days-old cloud policy with no signal. Keyed off
+      // lastCheckedAt (last successful contact) — NOT the cache's fetchedAt, which
+      // is ambiguous under 304s (policy-sync-fix-spec.md D3).
+      // Only when this machine actually enforces cloud policy (approvers.cloud) —
+      // a privacy-mode user (approvers.cloud=false) intentionally never syncs, so
+      // "STALE" would be a false alarm contradicting the privacy-mode-is-fine
+      // message below. Mirrors status.ts's gating.
+      if (
+        fs.existsSync(path.join(os.homedir(), '.node9', 'credentials.json')) &&
+        getConfig().settings.approvers?.cloud
+      ) {
+        section('Policy sync');
+        const health = readSyncHealth();
+        if (isPolicyStale(Date.now(), health)) {
+          const when = health.lastCheckedAt
+            ? `last reached the cloud ${agoLabel(health.lastCheckedAt)}`
+            : 'never reached the cloud';
+          const fails =
+            health.consecutiveFailures > 0
+              ? ` (${health.consecutiveFailures} consecutive failure${
+                  health.consecutiveFailures === 1 ? '' : 's'
+                }${health.lastError ? `: ${health.lastError}` : ''})`
+              : '';
+          warn(
+            `Cloud policy is STALE — ${when}${fails}. The cached policy is still enforced, but changes from the dashboard are not reaching this machine.`,
+            'Run: node9 policy sync   (and ensure the daemon autostarts: systemctl --user enable --now node9-daemon)'
+          );
+        } else if (health.lastCheckedAt) {
+          pass(`Cloud policy fresh — last synced ${agoLabel(health.lastCheckedAt)}`);
+        }
       }
 
       // ── Cloud audit shipping ──────────────────────────────────────────────────

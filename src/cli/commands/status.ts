@@ -8,6 +8,8 @@ import os from 'os';
 import { getCredentials, getConfig, checkPause } from '../../core';
 import { isDaemonRunning, DAEMON_PORT } from '../../auth/daemon';
 import { getAgentWiring } from '../../agent-wiring';
+import { readSyncHealth, isPolicyStale } from '../../daemon/sync';
+import { agoLabel } from '../../lib/relative-time';
 
 // Renders one agent's wiring: a header, ✓/✗ rows for each hook event, and the
 // MCP-proxied server list (omitted when the agent has no MCP surface). Hook +
@@ -53,6 +55,25 @@ export function registerStatusCommand(program: Command): void {
       // ── Policy authority ────────────────────────────────────────────────────
       if (creds && settings.approvers.cloud) {
         console.log(chalk.green('  ● Agent mode') + chalk.gray(' — cloud team policy enforced'));
+        // Policy-sync freshness: a stale/failing sync means this machine may be
+        // enforcing an out-of-date cloud policy. Surfacing it is the whole point
+        // of the sync-health fix (policy-sync-fix-spec.md D3).
+        const health = readSyncHealth();
+        if (isPolicyStale(Date.now(), health)) {
+          const when = health.lastCheckedAt
+            ? `last synced ${agoLabel(health.lastCheckedAt)}`
+            : 'never synced';
+          const fails =
+            health.consecutiveFailures > 0
+              ? ` · ${health.consecutiveFailures} failed attempt${
+                  health.consecutiveFailures === 1 ? '' : 's'
+                }${health.lastError ? ` (${health.lastError})` : ''}`
+              : '';
+          console.log(chalk.yellow('    ⚠ Policy sync STALE') + chalk.gray(` — ${when}${fails}`));
+          console.log(chalk.gray('      the cached policy is still enforced — run: node9 doctor'));
+        } else if (health.lastCheckedAt) {
+          console.log(chalk.gray(`    ↳ policy synced ${agoLabel(health.lastCheckedAt)}`));
+        }
       } else if (creds && !settings.approvers.cloud) {
         console.log(
           chalk.blue('  ● Privacy mode 🛡️') + chalk.gray(' — all decisions stay on this machine')
