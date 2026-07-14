@@ -40,6 +40,16 @@ describe('Path-Based Policy (Advanced)', () => {
     expect(result.ruleName).toBe('review-rm');
   });
 
+  it('allows a same-command create-then-delete scratch cleanup (real advisory-rules path)', async () => {
+    // Exercises the waiver through the REAL built-in ADVISORY_SMART_RULES (not a
+    // hand-built copy), so it also guards against a silent rename of the
+    // `review-rm` advisory that the waiver couples to by name.
+    const cleanup =
+      "cat > fn-probe.ts <<'EOF'\nconsole.log(1)\nEOF\nnpx tsx fn-probe.ts; rm -f fn-probe.ts";
+    const result = await evaluatePolicy('Bash', { command: cleanup });
+    expect(result.decision).toBe('allow');
+  });
+
   it('Layer 1 invariant — user allow rule cannot bypass a built-in block', async () => {
     // Security-critical: even if a project adds a broad allow rule, built-in
     // block rules (Layer 1) must fire first and cannot be overridden.

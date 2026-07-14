@@ -63,6 +63,43 @@ const filesystemShieldedConfig: PolicyConfig = {
   },
 };
 
+// Config WITH the proxy-side rm advisory rules (src/config/index.ts
+// ADVISORY_SMART_RULES), appended LAST as getConfig() does. The `review-rm`
+// advisory reviews every rm; the same-command create-then-delete waiver must
+// skip it ONLY for a scratch-file cleanup (`cat > f <<EOF …; rm -f f`) while
+// leaving `.env`, cross-command, dynamic, and out-of-cwd deletes at review.
+const rmAdvisoryConfig: PolicyConfig = {
+  ...astOnlyConfig,
+  policy: {
+    ...astOnlyConfig.policy,
+    smartRules: [
+      {
+        name: 'allow-rm-safe-paths',
+        tool: '*',
+        conditionMode: 'all',
+        conditions: [
+          { field: 'command', op: 'matches', value: '(^|&&|\\|\\||;)\\s*rm\\b' },
+          {
+            field: 'command',
+            op: 'matches',
+            value:
+              '(node_modules|\\bdist\\b|\\.next|\\bcoverage\\b|\\.cache|\\btmp\\b|\\btemp\\b|\\.DS_Store)(\\/|\\s|$)',
+          },
+        ],
+        verdict: 'allow',
+        reason: 'Deleting a known-safe build artifact path',
+      },
+      {
+        name: 'review-rm',
+        tool: '*',
+        conditions: [{ field: 'command', op: 'matches', value: '(^|&&|\\|\\||;)\\s*rm\\b' }],
+        verdict: 'review',
+        reason: 'rm can permanently delete files — confirm the target path',
+      },
+    ] as SmartRule[],
+  },
+};
+
 describe('Hook-side AST FS-op detection (Step 0)', () => {
   it('blocks `cat ~/.ssh/id_rsa` via AST tier alone (no smart rules)', async () => {
     const r = await evaluatePolicy(
@@ -305,5 +342,88 @@ describe('AST-aware chmod 777 detection (filesystem shield)', () => {
       );
       expect(r.ruleName, cmd).not.toBe(CHMOD_RULE);
     }
+  });
+});
+
+describe('rm same-command create-then-delete waiver', () => {
+  const decide = async (command: string) => {
+    const r = await evaluatePolicy(rmAdvisoryConfig, 'bash', { command }, { agent: 'claude' });
+    return r.decision;
+  };
+  // NB: `review-rm` only fires when rm follows `;`/`&&`/`||`/start, so every
+  // case below keeps rm in that position — matching the founder's real command
+  // (`… tail -4; rm -f fn-probe.ts`) — so the waiver is what changes the outcome.
+  const HD = "cat > fn-probe.ts <<'EOF'\nconsole.log(1)\nEOF\n";
+
+  // WAIVED → allow (these all review today — fail-first). Heredoc-write only.
+  it.each([
+    HD + 'npx tsx fn-probe.ts 2>&1 | tail -4; rm -f fn-probe.ts',
+    "cat > probe.mjs <<'EOF'\nx\nEOF\nnode probe.mjs; rm -f probe.mjs",
+    "cat > a.ts <<'EOF'\nEOF\ncat > b.ts <<'EOF'\nEOF\necho ok; rm -f a.ts b.ts",
+    "cat > sub/p.ts <<'EOF'\nEOF\necho ok; rm -f ./sub/p.ts", // ./ vs bare path normalize
+  ])('ALLOWS created-then-deleted cleanup #%#', async (cmd) => {
+    expect(await decide(cmd)).toBe('allow');
+  });
+
+  // NOT waived → still review (regression guards)
+  it.each([
+    ['echo hi; rm -f fn-probe.ts', 'cross-command: no create in this command'],
+    ["cat > .env <<'EOF'\nEOF\necho x; rm -f .env", 'sensitive name'],
+    ["cat > x.ts <<'EOF'\nEOF\necho x; rm -f /etc/x", 'target != created, out-of-cwd'],
+    ['echo hi > note.txt; rm -f note.txt', 'bare > (no heredoc) is not a creation'],
+    // touch/tee do NOT count as creation — they operate on files that may
+    // pre-exist, so this must stay a review (closes the touch-first bypass).
+    ['touch victim.ts; cat victim.ts; rm -f victim.ts', 'touch is not a creation'],
+    ['echo x | tee data.txt; rm -f data.txt', 'tee is not a creation'],
+    // `>>` APPENDS (preserves pre-existing content) — must not count as creation.
+    ["cat >> victim.ts <<'EOF'\nEOF\necho x; rm -f victim.ts", 'append preserves content'],
+    // A non-stdout fd redirect (`2>`) is not the heredoc content sink.
+    ["cat > p.ts 2> victim.ts <<'EOF'\nEOF\necho x; rm -f victim.ts", 'stderr redirect target'],
+    // Control-flow: a create in an unexecuted branch never runs, so the target
+    // is an intact pre-existing file — must stay a review.
+    ["false && cat > victim.ts <<'EOF'\nEOF\necho x; rm -f victim.ts", 'create in dead && branch'],
+    [
+      "if false; then cat > victim.ts <<'EOF'\nEOF\nfi\necho x; rm -f victim.ts",
+      'create in dead if-branch',
+    ],
+    [HD + 'echo x; rm -rf $HOME', 'dynamic target, not created'],
+    [HD + 'echo x; rm -f fn-probe.ts $VAR', 'a dynamic arg alongside the created file'],
+    [HD + 'echo x; rm -f fn-probe.ts secrets.txt', 'a non-created sibling target'],
+    ['rm .env', 'plain sensitive delete (posture unchanged)'],
+    ['rm secrets.txt', 'plain delete (posture unchanged)'],
+  ])('REVIEWS: %s (%s)', async (cmd) => {
+    expect(await decide(cmd)).toBe('review');
+  });
+
+  // NOT waived → still block (block tier wins regardless)
+  it('BLOCKS a create-then-`rm -rf ~` (block tier unaffected)', async () => {
+    expect(await decide("cat > x <<'EOF'\nEOF\necho x; rm -rf ~")).toBe('block');
+  });
+
+  // The waiver removes ONLY a `review` verdict. A user/org rule that happens to be
+  // named `review-rm` but BLOCKS must NOT be waived on a cleanup command.
+  it('does NOT waive a user rule named `review-rm` with verdict block', async () => {
+    const cfg: PolicyConfig = {
+      ...astOnlyConfig,
+      policy: {
+        ...astOnlyConfig.policy,
+        smartRules: [
+          {
+            name: 'review-rm',
+            tool: '*',
+            conditions: [{ field: 'command', op: 'matches', value: '(^|&&|\\|\\||;)\\s*rm\\b' }],
+            verdict: 'block',
+            reason: 'org: never rm',
+          },
+        ] as SmartRule[],
+      },
+    };
+    const r = await evaluatePolicy(
+      cfg,
+      'bash',
+      { command: "cat > a.ts <<'EOF'\nEOF\necho x; rm -f a.ts" },
+      { agent: 'claude' }
+    );
+    expect(r.decision).toBe('block');
   });
 });
