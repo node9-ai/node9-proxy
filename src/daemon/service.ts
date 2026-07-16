@@ -318,3 +318,37 @@ export function isDaemonServiceInstalled(): boolean {
   if (process.platform === 'linux') return isSystemdInstalled();
   return false;
 }
+
+/**
+ * Is the autostart service ENABLED (will start on boot/login)? The state that
+ * silently staled policy for 6 days is INSTALLED but not enabled — a unit file on
+ * disk that never runs. `isDaemonServiceInstalled()` alone can't see it.
+ *
+ * Linux: `systemctl --user is-enabled node9-daemon` prints "enabled" / exits 0 only
+ * when DURABLY enabled. Deliberately strict — "enabled-runtime" exits 0 too but does
+ * NOT survive a reboot (the exact failure mode), and "static"/"indirect" aren't
+ * durable either, so we require the literal "enabled".
+ * Darwin: `launchctl list <label>` exits 0 iff the agent is loaded.
+ * Never throws.
+ */
+export function isDaemonServiceEnabled(): boolean {
+  try {
+    if (process.platform === 'linux') {
+      const r = spawnSync('systemctl', ['--user', 'is-enabled', 'node9-daemon'], {
+        encoding: 'utf8',
+        timeout: 3000,
+      });
+      return r.status === 0 && (r.stdout ?? '').trim() === 'enabled';
+    }
+    if (process.platform === 'darwin') {
+      const r = spawnSync('launchctl', ['list', LAUNCHD_LABEL], {
+        encoding: 'utf8',
+        timeout: 3000,
+      });
+      return r.status === 0;
+    }
+  } catch {
+    /* probe failure → treat as not-enabled; never throw */
+  }
+  return false;
+}
