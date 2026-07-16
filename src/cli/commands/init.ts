@@ -9,7 +9,13 @@ import https from 'https';
 import { DEFAULT_CONFIG } from '../../core';
 import { setupAgent, detectAgents, node9Version } from '../../setup';
 import { readActiveShields, writeActiveShields, migrateRenamedRuleKeys } from '../../shields';
-import { installDaemonService, isDaemonServiceInstalled } from '../../daemon/service';
+import {
+  installDaemonService,
+  isDaemonServiceInstalled,
+  isDaemonServiceEnabled,
+  ensureAutostartHealthy,
+} from '../../daemon/service';
+import { getConfig } from '../../core';
 import { autoStartDaemonAndWait, isTestingMode } from '../daemon-starter';
 
 // Three universally-applicable shields. Why these specifically:
@@ -254,8 +260,18 @@ export function registerInitCommand(program: Command): void {
                 console.log(chalk.gray('     You can try again later with: node9 daemon install'));
               }
             }
+          } else if (isDaemonServiceEnabled()) {
+            console.log(chalk.green('  ✓ Daemon login service already installed & enabled'));
           } else {
-            console.log(chalk.green('  ✓ Daemon login service already installed'));
+            // Installed but DISABLED — the exact stale-policy trigger. Re-enable it
+            // non-disruptively (no restart), but only if the user still wants
+            // autostart (ensureAutostartHealthy respects the autoStartDaemon opt-out).
+            const healed = ensureAutostartHealthy(!!getConfig().settings.autoStartDaemon);
+            console.log(
+              healed === 'repaired'
+                ? chalk.green('  ✓ Re-enabled daemon login service (was installed but disabled)')
+                : chalk.gray('  · Daemon login service is disabled (autostart off) — left as-is')
+            );
           }
 
           // Start the daemon right now so protection is immediate — don't make

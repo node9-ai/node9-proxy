@@ -34,7 +34,8 @@ import { spawn } from 'child_process';
 import { confirm } from '@inquirer/prompts';
 import { parseDuration } from './utils/duration';
 import { runProxy } from './proxy';
-import { autoStartDaemonAndWait } from './cli/daemon-starter';
+import { autoStartDaemonAndWait, isTestingMode } from './cli/daemon-starter';
+import { ensureAutostartHealthy } from './daemon/service';
 import { registerCheckCommand } from './cli/commands/check';
 import { registerLogCommand } from './cli/commands/log';
 import { registerShieldCommand, registerConfigShowCommand } from './cli/commands/shield';
@@ -103,6 +104,14 @@ program
     } else {
       console.log(chalk.green(`✅ Logged in — agent mode`));
       console.log(chalk.gray(`   Team policy enforced for all calls via Node9 cloud.`));
+      // Self-heal autostart: a missing/disabled service (the stale-policy trigger)
+      // gets (re)enabled at the moment the machine becomes cloud-enabled, so cloud
+      // policy keeps syncing across reboots. Best-effort, only when opted in.
+      if (!isTestingMode()) {
+        const healed = ensureAutostartHealthy(!!getConfig().settings.autoStartDaemon);
+        if (healed === 'repaired')
+          console.log(chalk.green(`   ✓ Re-enabled daemon autostart (survives reboot)`));
+      }
     }
   });
 

@@ -10,6 +10,11 @@ import { isDaemonRunning, DAEMON_PORT, DAEMON_HOST } from '../../auth/daemon';
 import { getConfig } from '../../config';
 import { getAgentWiring } from '../../agent-wiring';
 import { readSyncHealth, isPolicyStale } from '../../daemon/sync';
+import {
+  isDaemonServiceInstalled,
+  isDaemonServiceEnabled,
+  autostartAdvice,
+} from '../../daemon/service';
 import { agoLabel } from '../../lib/relative-time';
 
 export function registerDoctorCommand(program: Command, version: string): void {
@@ -148,6 +153,15 @@ export function registerDoctorCommand(program: Command, version: string): void {
           'Run: node9 daemon --background'
         );
       }
+      // Autostart health — the installed-but-disabled state that silently staled
+      // policy for 6 days. warn (not fail) so a still-enforcing machine's doctor
+      // exit code doesn't flip red; Commit 1's `Policy sync STALE` is the "now" signal.
+      const autostart = autostartAdvice({
+        installed: isDaemonServiceInstalled(),
+        enabled: isDaemonServiceEnabled(),
+        cloudEnabled: !!getConfig().settings.approvers?.cloud,
+      });
+      if (autostart) warn(autostart.message, autostart.hint);
 
       // ── Policy sync freshness ─────────────────────────────────────────────────
       // A daemon that isn't running (or a sync that keeps failing) means this

@@ -74,17 +74,33 @@ import { startAuditShipper } from './audit-shipper.js';
 import { startDlpScanner } from './dlp-scanner.js';
 import { startMcpReconciler } from './mcp-reconciler.js';
 import { startHookHeal } from './hook-heal.js';
+import { logDaemonStartup } from './startup-log.js';
 import { readMcpToolsConfig, updateServerDiscovery, approveServer } from './mcp-tools.js';
 
 export function startDaemon(): void {
-  startCostSync();
-  startCloudSync();
-  startForensicBroadcast();
-  startAuditShipper();
-  startDlpScanner();
-  startMcpReconciler();
-  startHookHeal();
-  loadInsightCounts(); // restore persisted nudge counters across restarts
+  // A4c: a synchronous throw in these inits used to exit the process silently
+  // (stdio:'ignore' on the auto-start path). Record it so a startup death is
+  // diagnosable. NOTE: this does NOT catch a module-LOAD crash (e.g. ERR_REQUIRE_ESM)
+  // — that throws at import time, before this runs; A4b (child stderr → the same log)
+  // is what captures those.
+  try {
+    startCostSync();
+    startCloudSync();
+    startForensicBroadcast();
+    startAuditShipper();
+    startDlpScanner();
+    startMcpReconciler();
+    startHookHeal();
+    loadInsightCounts(); // restore persisted nudge counters across restarts
+  } catch (err) {
+    // Preserve the FULL stack: to stderr (captured by the auto-start path's fd
+    // redirect → daemon-startup.log, and shown for a foreground `node9 daemon`),
+    // and a one-line breadcrumb to the structured log.
+    const stack = err instanceof Error ? (err.stack ?? err.message) : String(err);
+    console.error('\n🛑 Node9 daemon startup failed:\n' + stack);
+    logDaemonStartup('startup-throw', err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
   // Single per-process token. Stored in ~/.node9/daemon.pid (mode 0600)
   // and read by every local CLI client (`node9 tail`, mcp-gateway,
   // orchestrator) via auth/daemon.ts:getInternalToken.
@@ -1190,6 +1206,7 @@ export function startDaemon(): void {
         if (fs.existsSync(DAEMON_PID_FILE)) {
           const { pid } = JSON.parse(fs.readFileSync(DAEMON_PID_FILE, 'utf-8'));
           process.kill(pid, 0); // Throws if process is dead
+          logDaemonStartup('port-in-use', `another daemon (pid ${pid}) owns :${DAEMON_PORT}`);
           return process.exit(0);
         }
       } catch {
@@ -1251,6 +1268,7 @@ export function startDaemon(): void {
         });
       return;
     }
+    logDaemonStartup('bind-failed', e.message);
     console.error(chalk.red('\n🛑 Node9 Daemon Error:'), e.message);
     process.exit(1);
   });

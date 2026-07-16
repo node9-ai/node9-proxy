@@ -319,6 +319,104 @@ export function isDaemonServiceInstalled(): boolean {
   return false;
 }
 
+/** Pure decision for the self-heal. `repair` = re-enable an already-installed but
+ *  DISABLED unit (the incident state) — deliberately NOT when the unit is absent:
+ *  we never silently INSTALL a new service from login/init (that surprised users),
+ *  we only re-enable one the user already had. No I/O — testable. */
+export function autostartRepairDecision(opts: {
+  installed: boolean;
+  enabled: boolean;
+  autoStartDaemon: boolean;
+}): 'ok' | 'repair' | 'skip' | 'unsupported' {
+  if (!opts.autoStartDaemon) return 'skip'; // user opted out — never touch the service
+  if (process.platform !== 'linux' && process.platform !== 'darwin') return 'unsupported';
+  if (!opts.installed) return 'skip'; // no unit → advise (doctor), don't auto-install
+  return opts.enabled ? 'ok' : 'repair'; // installed-but-disabled → re-enable
+}
+
+/**
+ * Re-enable an already-installed autostart unit for next boot, WITHOUT stopping or
+ * restarting the currently-running daemon. Unlike `installDaemonService()` (which
+ * stops + `enable --now`), this is non-disruptive — safe to call from `login`.
+ * Linux: `systemctl --user enable node9-daemon` (no `--now`). Darwin: launchd units
+ * installed via `load -w` are already persistent, so a no-op. Never throws.
+ */
+function enableDaemonServiceQuiet(): boolean {
+  try {
+    if (process.platform === 'linux') {
+      const r = spawnSync('systemctl', ['--user', 'enable', 'node9-daemon'], {
+        encoding: 'utf8',
+        timeout: 3000,
+      });
+      return r.status === 0;
+    }
+    // darwin: `load -w` (done at install) already sets RunAtLoad persistently.
+    return process.platform === 'darwin';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Best-effort, NON-DISRUPTIVE self-heal called from `init`/`login`: if autostart is
+ * wanted and the service is installed-but-DISABLED (the state that silently staled
+ * policy for 6 days), re-enable it for next boot without restarting the running
+ * daemon. Does NOT install a missing unit and does NOT stop a live daemon. Respects
+ * the `autoStartDaemon` opt-out. Never throws. Returns what happened.
+ */
+export function ensureAutostartHealthy(
+  autoStartDaemon: boolean
+): 'ok' | 'repaired' | 'skipped' | 'unsupported' {
+  const decision = autostartRepairDecision({
+    installed: isDaemonServiceInstalled(),
+    enabled: isDaemonServiceEnabled(),
+    autoStartDaemon,
+  });
+  if (decision === 'repair') return enableDaemonServiceQuiet() ? 'repaired' : 'skipped';
+  return decision === 'ok' ? 'ok' : decision === 'unsupported' ? 'unsupported' : 'skipped';
+}
+
+/** Advice line for the daemon-autostart health, rendered by `doctor` and `status`.
+ *  Pure (no I/O) so it's testable without the host's real systemd state. */
+export type AutostartAdvice = { level: 'warn'; message: string; hint: string } | null;
+
+/**
+ * Decide what to surface about daemon autostart. This advice is entirely about
+ * CLOUD-POLICY freshness, so it only applies when cloud policy is enforced
+ * (`cloudEnabled`) and autostart is actually installable on this platform — a
+ * privacy-mode user never syncs, and a win32 user can't `node9 daemon install`, so
+ * neither should be nagged. Returns null (say nothing) otherwise.
+ */
+export function autostartAdvice(opts: {
+  installed: boolean;
+  enabled: boolean;
+  cloudEnabled: boolean;
+}): AutostartAdvice {
+  const installable = process.platform === 'linux' || process.platform === 'darwin';
+  if (!opts.cloudEnabled || !installable) return null;
+  const installHint =
+    process.platform === 'linux'
+      ? 'Run: systemctl --user enable --now node9-daemon   (or: node9 daemon install)'
+      : 'Run: node9 daemon install';
+  if (opts.installed && !opts.enabled) {
+    return {
+      level: 'warn',
+      message:
+        'Daemon autostart is INSTALLED but DISABLED — it will NOT survive a reboot, so cloud policy can silently go stale.',
+      hint: installHint,
+    };
+  }
+  if (!opts.installed) {
+    return {
+      level: 'warn',
+      message:
+        'No daemon autostart installed — the daemon only runs when an agent happens to spawn it; cloud policy may lag.',
+      hint: installHint,
+    };
+  }
+  return null;
+}
+
 /**
  * Is the autostart service ENABLED (will start on boot/login)? The state that
  * silently staled policy for 6 days is INSTALLED but not enabled — a unit file on

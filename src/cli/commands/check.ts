@@ -10,11 +10,16 @@ import os from 'os';
 import { authorizeHeadless } from '../../auth/orchestrator';
 import { checkPause } from '../../auth/state';
 import { isDaemonRunning } from '../../auth/daemon';
+import { openStartupLogFd } from '../../daemon/startup-log';
 import { getConfig, type Config } from '../../config';
 import { shouldSnapshot } from '../../policy';
 import { buildNegotiationMessage, buildReviewMessage } from '../../policy/negotiation';
 import { createShadowSnapshot } from '../../undo';
-import { autoStartDaemonAndWait } from '../daemon-starter';
+import {
+  autoStartDaemonAndWait,
+  isTestingMode,
+  logAutostartSkipThrottled,
+} from '../daemon-starter';
 import { defaultSkillRoots, resolveUserSkillRoot, verifyAndPinRoots } from '../../skill-pin';
 import { scanArgs } from '../../dlp';
 import { appendLocalAudit } from '../../audit';
@@ -364,11 +369,10 @@ export function registerCheckCommand(program: Command): void {
           // Eagerly start the daemon for activity logging (fire-and-forget).
           // Without this, tool events never reach `node9 tail` if the daemon
           // wasn't already running when the Claude Code session started.
-          if (
-            config.settings.autoStartDaemon &&
-            !isDaemonRunning() &&
-            !process.env.NODE9_NO_AUTO_DAEMON
-          ) {
+          // Probe once — isDaemonRunning() reads the pid file + process.kill and
+          // self-cleans a stale pid, so avoid calling it twice per tool call.
+          const daemonDown = !isDaemonRunning();
+          if (config.settings.autoStartDaemon && daemonDown && !process.env.NODE9_NO_AUTO_DAEMON) {
             try {
               const scriptPath = process.argv[1];
               if (typeof scriptPath !== 'string' || !path.isAbsolute(scriptPath))
@@ -402,12 +406,32 @@ export function registerCheckCommand(program: Command): void {
               ]) {
                 delete safeEnv[key];
               }
-              const d = spawn(process.execPath, [scriptPath, 'daemon'], {
-                detached: true,
-                stdio: 'ignore',
-                env: { ...safeEnv, NODE9_AUTO_STARTED: '1' },
-              });
-              d.unref();
+              // A4b (policy-sync-commit2-liveness): capture the child's STDERR to
+              // daemon-startup.log instead of 'ignore'. A daemon that dies during
+              // startup — e.g. an ERR_REQUIRE_ESM at module-load, before any in-daemon
+              // try/catch — prints its stack to stderr before exiting; routing that fd
+              // here is the only way it leaves a trace. openStartupLogFd caps the file
+              // so a crash loop can't grow it without bound. SAFE to close in the parent
+              // right after spawn(): spawn() does fork/exec + fd-dup synchronously, so the
+              // child already holds its own copy. Close in finally so a spawn() throw
+              // (→ outer catch) can't leak the fd.
+              const startupFd = openStartupLogFd();
+              try {
+                const d = spawn(process.execPath, [scriptPath, 'daemon'], {
+                  detached: true,
+                  stdio: ['ignore', 'ignore', startupFd ?? 'ignore'],
+                  env: { ...safeEnv, NODE9_AUTO_STARTED: '1' },
+                });
+                d.unref();
+              } finally {
+                if (startupFd !== undefined) {
+                  try {
+                    fs.closeSync(startupFd);
+                  } catch {
+                    /* non-fatal */
+                  }
+                }
+              }
             } catch (spawnErr) {
               // Log spawn failures so they're visible in hook-debug.log instead
               // of silently swallowed — makes install-path mismatches diagnosable.
@@ -422,6 +446,16 @@ export function registerCheckCommand(program: Command): void {
                 /* non-fatal */
               }
             }
+          } else if (daemonDown && !isTestingMode()) {
+            // A4a: daemon is down but we will NOT auto-start it — record WHY
+            // (throttled), so "why didn't the daemon come up?" is answerable.
+            logAutostartSkipThrottled(
+              !config.settings.autoStartDaemon
+                ? 'autoStartDaemon=false'
+                : process.env.NODE9_NO_AUTO_DAEMON
+                  ? 'NODE9_NO_AUTO_DAEMON'
+                  : 'unknown'
+            );
           }
 
           // Debug logging — controlled by Env Var OR new Settings config

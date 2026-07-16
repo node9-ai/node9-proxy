@@ -9,6 +9,11 @@ import { getCredentials, getConfig, checkPause } from '../../core';
 import { isDaemonRunning, DAEMON_PORT } from '../../auth/daemon';
 import { getAgentWiring } from '../../agent-wiring';
 import { readSyncHealth, isPolicyStale } from '../../daemon/sync';
+import {
+  isDaemonServiceInstalled,
+  isDaemonServiceEnabled,
+  autostartAdvice,
+} from '../../daemon/service';
 import { agoLabel } from '../../lib/relative-time';
 
 // Renders one agent's wiring: a header, ✓/✗ rows for each hook event, and the
@@ -92,6 +97,19 @@ export function registerStatusCommand(program: Command): void {
         );
       } else {
         console.log(chalk.gray('  ○ Daemon stopped'));
+      }
+      // Autostart health — same DECISION as doctor (autostartAdvice: gated on
+      // cloud + installable platform), rendered compactly here to avoid drift.
+      const autostart = autostartAdvice({
+        installed: isDaemonServiceInstalled(),
+        enabled: isDaemonServiceEnabled(),
+        cloudEnabled: !!(creds && settings.approvers.cloud),
+      });
+      if (autostart) {
+        console.log(
+          chalk.yellow('    ⚠ daemon autostart not active') +
+            chalk.gray(" — won't survive reboot; run: node9 doctor")
+        );
       }
 
       if (settings.enableUndo) {
