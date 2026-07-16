@@ -361,7 +361,11 @@ export function computeAgentDeviceScore(opts: {
   posture: number | null;
 }): { score: number | null; tier: ScoreTier | null } {
   const { audit } = opts;
-  const posture = opts.posture === null ? null : Math.max(0, Math.min(100, opts.posture));
+  // Clamp to [0,100]; a non-finite posture (NaN/Infinity from a buggy caller)
+  // degrades to null — runtime-only / not-enough-data — never a rendered NaN.
+  const posture = Number.isFinite(opts.posture)
+    ? Math.max(0, Math.min(100, opts.posture as number))
+    : null;
 
   const tierOf = (s: number): ScoreTier => (s >= 80 ? 'good' : s >= 50 ? 'at-risk' : 'critical');
 

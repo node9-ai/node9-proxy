@@ -489,6 +489,20 @@ describe('computeAgentDeviceScore (Score 1 — live + posture)', () => {
     ).toEqual({ score: 49, tier: 'critical' });
   });
 
+  // 7b. Non-finite posture (NaN/Infinity) degrades to null — never renders
+  //     NaN to the user (review finding: clamp alone lets NaN through).
+  it('non-finite posture is treated as null', () => {
+    const emptyAuditL = { critical: 0, high: 0, medium: 0, total: 0 };
+    expect(computeAgentDeviceScore({ audit: emptyAuditL, posture: NaN })).toEqual({
+      score: null,
+      tier: null,
+    });
+    const audit = { critical: 1, high: 2, medium: 3, total: 100 };
+    expect(computeAgentDeviceScore({ audit, posture: Infinity })).toEqual(
+      computeSecurityScore(audit) // degrades to runtime-only
+    );
+  });
+
   // 7. Defensive clamp — a hostile/buggy posture input never distorts range.
   it('posture is clamped to [0,100]', () => {
     expect(computeAgentDeviceScore({ audit: emptyAudit, posture: 150 })).toEqual({
