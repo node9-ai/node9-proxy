@@ -225,6 +225,53 @@ function collectTools(steps: Step[]): string {
   return s;
 }
 
+/** Split a collected-tools blob into individual grant tokens. Grants are comma/space
+ *  separated; a `Bash(...)` group may itself contain a comma, so we DON'T split inside
+ *  parens — tracked as a boolean toggle (NOT a depth counter) so an unbalanced paren in
+ *  one malformed grant can't swallow every following grant into one token. Each token is
+ *  stripped of the syntax cruft the extractors leave behind (JSON array brackets/quotes
+ *  from `settings.allowedTools`, wrapping quotes from `--allowedTools`) and of any char
+ *  that could break out of the code span the signal renders it in (backtick, newline). */
+function toolTokens(blob: string): string[] {
+  const out: string[] = [];
+  let buf = '';
+  let inParen = false;
+  const flush = () => {
+    const t = buf.replace(/[[\]"'`\r\n]/g, '').trim();
+    if (t) out.push(t);
+    buf = '';
+  };
+  for (const ch of blob) {
+    if (ch === '(') inParen = true;
+    else if (ch === ')') inParen = false;
+    if (!inParen && (ch === ',' || /\s/.test(ch))) {
+      flush();
+      continue;
+    }
+    buf += ch;
+  }
+  flush();
+  return out;
+}
+
+/** The SPECIFIC grant(s) that make a tool-set "broad" (each individually matches
+ *  BROAD_TOOL_RE), deduped + readable. The signal names what actually fired — never a
+ *  canned exemplar that could list tools the workflow doesn't grant (the honesty fix:
+ *  a finding must not misdescribe the file). Dedup keys on the FULL token so two long
+ *  grants that share a 40-char prefix aren't collapsed; truncation is display-only. */
+function matchedBroadTools(blob: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const tok of toolTokens(blob)) {
+    // Wrap in delimiters so BROAD_TOOL_RE's bare-name branch can anchor on a lone token.
+    if (!BROAD_TOOL_RE.test(`,${tok},`)) continue;
+    if (seen.has(tok)) continue;
+    seen.add(tok);
+    out.push(tok.length > 40 ? tok.slice(0, 40) + '…' : tok);
+  }
+  return out;
+}
+
 /** Where (if anywhere) an untrusted PR head is checked out. 'root' = into the
  *  workspace (dangerous under pull_request_target); 'subdir' = isolated path.
  *  Takes a step list so callers can scope it to a single job (CI-4 per-job). */
@@ -684,7 +731,18 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   if (head === 'root') signals.push('checks out the untrusted PR head into the workspace root');
   if (head === 'subdir') signals.push('checks out the untrusted PR head into an isolated subdir');
   if (promptUntrusted) signals.push('feeds untrusted PR/issue text to the agent');
-  if (broadTools) signals.push('agent has broad/write-capable tools (Bash/Write/curl/git push)');
+  if (broadTools) {
+    // Names embed scanned-file text that flows into the Action's PR comment (render.ts).
+    // Wrap each in a backtick code span (the repo convention, cf. agent-config's hook
+    // signal) — combined with toolTokens stripping backticks/newlines, attacker-controlled
+    // grant text cannot inject markdown into the trusted comment.
+    const names = matchedBroadTools(toolsBlob);
+    signals.push(
+      names.length
+        ? `agent has broad/write-capable tools: ${names.map((n) => `\`${n}\``).join(', ')}`
+        : 'agent has broad/write-capable tool grants'
+    );
+  }
   if (bypassActive) signals.push('allowed_non_write_users: "*" — any user can trigger the agent');
   if (elevated) signals.push('elevated permissions (contents/id-token: write)');
   if (pat) signals.push('a static PAT is exposed to the agent (recoverable via injection)');

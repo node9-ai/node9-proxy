@@ -350,6 +350,175 @@ jobs:
     expect(f.signals.join(' ')).not.toMatch(/broad\/write-capable/i);
   });
 
+  it('T1.1: the broad-tools signal names the ACTUAL granted tool, never a canned curl/git-push exemplar (lobehub migration-support)', () => {
+    // lobehub claude-migration-support.yml: the only broad tool is bare `Write`. The
+    // signal must SAY `Write` and must NOT claim curl / git push (which aren't granted)
+    // — a finding that misdescribes the file is the credibility-killing defect.
+    const wf = `
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  support:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'reply to github.event.comment.body'
+          claude_args: '--allowedTools "Bash(gh issue:*),Bash(cat docs/*),Bash(echo *),Read,Write"'
+`;
+    const f = analyzeWorkflow('support.yml', wf)!;
+    // Isolate the tool LIST (after "tools:") so the assertion can't trip on the
+    // literal "write-capable" in the signal prefix.
+    const list = (f.signals.find((s) => /broad\/write-capable tools:/i.test(s)) ?? '').replace(
+      /.*tools:/i,
+      ''
+    );
+    expect(list).toMatch(/\bWrite\b/i); // names the real granted tool
+    expect(list).not.toMatch(/curl|git push/i); // never fabricates tools not granted
+  });
+
+  it('T1.1: the broad-tools signal names a dangerous Bash verb when THAT is what fired (not Write)', () => {
+    // Where the broad grant is `Bash(curl ...)`, the signal must name it — proving the
+    // helper reports the real matched grant, not a fixed string.
+    const wf = `
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'read github.event.issue.body'
+          claude_args: '--allowedTools "Bash(curl example.com:*),Read"'
+`;
+    const f = analyzeWorkflow('curl.yml', wf)!;
+    const list = (f.signals.find((s) => /broad\/write-capable tools:/i.test(s)) ?? '').replace(
+      /.*tools:/i,
+      ''
+    );
+    expect(list).toMatch(/curl/i); // names the real matched grant
+    expect(list).not.toMatch(/\bWrite\b|git push/i);
+  });
+
+  it('T1.1/F1: a `*`-bearing grant is wrapped in a backtick code span so it cannot inject markdown into the PR comment', () => {
+    const wf = `
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'read github.event.issue.body'
+          claude_args: '--allowedTools "Bash(curl a:*),Read"'
+`;
+    const f = analyzeWorkflow('inject.yml', wf)!;
+    const sig = f.signals.find((s) => /broad\/write-capable tools:/i.test(s))!;
+    // The grant (with its `*`) must sit INSIDE a backtick pair — markdown-inert.
+    expect(sig).toMatch(/`[^`]*curl[^`]*\*[^`]*`/);
+  });
+
+  it('T1.1/F2: an unbalanced paren in one grant must NOT swallow the following grants (still names them distinctly)', () => {
+    const wf = `
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'read github.event.issue.body'
+          claude_args: '--allowedTools "Bash(echo (:*),Write,Read"'
+`;
+    const f = analyzeWorkflow('unbalanced.yml', wf)!;
+    const list = (f.signals.find((s) => /broad\/write-capable tools:/i.test(s)) ?? '').replace(
+      /.*tools:/i,
+      ''
+    );
+    // `Write` must be named as its own token, not merged into the malformed Bash grant.
+    expect(list).toMatch(/`Write`/);
+  });
+
+  it('T1.1/F3: settings.allowedTools JSON array cruft (brackets/quotes) is stripped from the named tools', () => {
+    const wf = `
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'read github.event.issue.body'
+          settings: '{"allowedTools":["Bash","Write"]}'
+`;
+    const f = analyzeWorkflow('settings.yml', wf)!;
+    const list = (f.signals.find((s) => /broad\/write-capable tools:/i.test(s)) ?? '').replace(
+      /.*tools:/i,
+      ''
+    );
+    // Clean `Bash` / `Write`, never `["Bash` / `Write"]`.
+    expect(list).toMatch(/`Bash`/);
+    expect(list).not.toMatch(/[[\]]/); // no stray JSON brackets
+  });
+
+  it('T1.1/F4: two distinct grants sharing a 40-char prefix are both reported, not deduped away', () => {
+    const long1 = 'Bash(curl aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1:*)';
+    const long2 = 'Bash(curl aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2:*)';
+    const wf = `
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          prompt: 'read github.event.issue.body'
+          claude_args: '--allowedTools "${long1},${long2},Read"'
+`;
+    const f = analyzeWorkflow('dup.yml', wf)!;
+    const list = (f.signals.find((s) => /broad\/write-capable tools:/i.test(s)) ?? '').replace(
+      /.*tools:/i,
+      ''
+    );
+    // Both distinct grants survive dedup (keyed on the full token) → two code spans.
+    expect((list.match(/`/g) ?? []).length).toBe(4);
+  });
+
   it('F14a: pull_request (labeled) + label-name gate → advisory, and NOT "no actor gate" (metabase)', () => {
     // metabase resolve-backport-conflicts: a maintainer must apply the label
     // (needs write access) — an effective actor gate on `pull_request` (not _target).
