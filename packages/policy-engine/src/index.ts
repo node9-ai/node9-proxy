@@ -95,6 +95,7 @@ export {
   computeSecurityScore,
   classifyScanSignal,
   computeBlendedSecurityScore,
+  computeAgentDeviceScore,
 } from './severity';
 
 // Blast summarization — per-machine "what's reachable on disk" reduced to

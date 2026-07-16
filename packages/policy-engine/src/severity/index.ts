@@ -262,6 +262,13 @@ export function classifyScanSignal(key: keyof ScanSignals): Severity {
 }
 
 /**
+ * @deprecated Score-1 redesign (2026-07): the Report score is now LIVE +
+ * POSTURE via {@link computeAgentDeviceScore}; session-scan findings moved to
+ * the onboarding forecast and no longer feed a "current risk" number (they
+ * are lifetime data — blending them inflated the score with pre-install
+ * history). Kept exported for npm back-compat (removal = breaking major);
+ * do not add new callers.
+ *
  * Compute a 0-100 risk-posture score that blends audit-log severity counts
  * with forward-only scan signal counts.
  *
@@ -317,4 +324,53 @@ export function computeBlendedSecurityScore(opts: {
   }
 
   return computeSecurityScore({ critical, high, medium, total });
+}
+
+// ---------------------------------------------------------------------------
+// Score 1 — Agent/device risk (live + posture)
+// ---------------------------------------------------------------------------
+
+/**
+ * The Report's "how at-risk am I RIGHT NOW?" score: a 0.5/0.5 blend of
+ *
+ *   runtime = computeSecurityScore(live audit counts)  — what node9 CAUGHT
+ *             in the window (rate-based, unchanged math);
+ *   posture = the fleet-average machine posture score  — how exposed the
+ *             machines are NOW (already includes disk/secret exposure via
+ *             the posture scorecard's secrets check).
+ *
+ * Session-scan (lifetime) findings deliberately do NOT feed this score —
+ * they are pre-install history, not current risk (they surface in the
+ * onboarding forecast instead).
+ *
+ * Missing-data semantics (the day-1 false-100 fix):
+ *   - no activity AND no posture → { score: null, tier: null } — the caller
+ *     renders "not enough data", NEVER an invented 100/healthy;
+ *   - no activity, posture known → posture IS the risk (a fresh machine that
+ *     can read ~/.aws scores badly regardless of activity);
+ *   - activity, no posture yet   → the pure runtime score;
+ *   - both → round(0.5·runtime + 0.5·posture).
+ *
+ * An EARNED 100 (real activity, nothing caught) blends normally — only the
+ * no-data 100 is suppressed. Pure; posture defensively clamped to [0,100].
+ */
+export function computeAgentDeviceScore(opts: {
+  /** LIVE audit-window severity counts — scan never feeds this score. */
+  audit: { critical: number; high: number; medium: number; total: number };
+  /** Fleet-average machine posture score, or null when no machine reports. */
+  posture: number | null;
+}): { score: number | null; tier: ScoreTier | null } {
+  const { audit } = opts;
+  const posture = opts.posture === null ? null : Math.max(0, Math.min(100, opts.posture));
+
+  const tierOf = (s: number): ScoreTier => (s >= 80 ? 'good' : s >= 50 ? 'at-risk' : 'critical');
+
+  if (audit.total === 0 && posture === null) return { score: null, tier: null };
+  if (audit.total === 0) return { score: posture!, tier: tierOf(posture!) };
+
+  const runtime = computeSecurityScore(audit);
+  if (posture === null) return runtime;
+
+  const score = Math.round(0.5 * runtime.score + 0.5 * posture);
+  return { score, tier: tierOf(score) };
 }

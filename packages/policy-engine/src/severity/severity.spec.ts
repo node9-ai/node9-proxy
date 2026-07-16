@@ -6,6 +6,7 @@ import {
   computeSecurityScore,
   classifyScanSignal,
   computeBlendedSecurityScore,
+  computeAgentDeviceScore,
 } from './index';
 import type { ScanSignals } from '../scan';
 
@@ -421,5 +422,82 @@ describe('computeBlendedSecurityScore', () => {
     // 2 critical / 2 high / 2 medium, total 200 — ought to land at-risk or
     // critical. Pin only the tier so weight tweaks don't break this test.
     expect(['at-risk', 'critical']).toContain(result.tier);
+  });
+});
+
+describe('computeAgentDeviceScore (Score 1 — live + posture)', () => {
+  const emptyAudit = { critical: 0, high: 0, medium: 0, total: 0 };
+
+  // 1. The old path returned 100/good on a truly empty workspace — the new
+  //    score refuses to invent health: no activity AND no posture → null.
+  it('no activity + no posture → { null, null } — never a false-healthy 100', () => {
+    expect(computeAgentDeviceScore({ audit: emptyAudit, posture: null })).toEqual({
+      score: null,
+      tier: null,
+    });
+  });
+
+  // 2. Day-1: a machine that can read ~/.aws scores badly regardless of
+  //    activity — posture IS the risk when there's nothing live yet.
+  it('no activity + posture 55 → { 55, at-risk } — day-1 is posture, not 100', () => {
+    expect(computeAgentDeviceScore({ audit: emptyAudit, posture: 55 })).toEqual({
+      score: 55,
+      tier: 'at-risk',
+    });
+  });
+
+  // 3. Earned 100 blends normally: real activity with nothing caught is a
+  //    genuine runtime 100 — only the NO-DATA 100 is suppressed.
+  it('clean activity + posture 60 → { 80, good } (boundary: (100+60)/2)', () => {
+    expect(
+      computeAgentDeviceScore({
+        audit: { critical: 0, high: 0, medium: 0, total: 500 },
+        posture: 60,
+      })
+    ).toEqual({ score: 80, tier: 'good' });
+  });
+
+  // 4. Weighted math exact against the runtime rate formula.
+  it('runtime 40 + posture 90 → { 65, at-risk } (0.5/0.5 weighted)', () => {
+    // 2 crit / 100 → deduction min(0.02·3000,60)=60 → runtime 40.
+    const audit = { critical: 2, high: 0, medium: 0, total: 100 };
+    expect(computeSecurityScore(audit).score).toBe(40); // precondition
+    expect(computeAgentDeviceScore({ audit, posture: 90 })).toEqual({
+      score: 65,
+      tier: 'at-risk',
+    });
+  });
+
+  // 5. Posture missing → identical to the pure runtime score (back-compat).
+  it('activity + no posture ≡ computeSecurityScore(audit)', () => {
+    const audit = { critical: 1, high: 2, medium: 3, total: 100 };
+    expect(computeAgentDeviceScore({ audit, posture: null })).toEqual(computeSecurityScore(audit));
+  });
+
+  // 6. Tier thresholds on the COMBINED value (≥80 good · ≥50 at-risk).
+  it('combined tier boundaries: 80→good, 50→at-risk, 49→critical', () => {
+    // runtime 100 (clean activity) + posture p → (100+p)/2
+    const clean = { critical: 0, high: 0, medium: 0, total: 100 };
+    expect(computeAgentDeviceScore({ audit: clean, posture: 60 }).tier).toBe('good'); // 80
+    expect(computeAgentDeviceScore({ audit: clean, posture: 0 }).tier).toBe('at-risk'); // 50
+    // runtime 40 (2 crit/100) + posture 58 → 49 → critical
+    expect(
+      computeAgentDeviceScore({
+        audit: { critical: 2, high: 0, medium: 0, total: 100 },
+        posture: 58,
+      })
+    ).toEqual({ score: 49, tier: 'critical' });
+  });
+
+  // 7. Defensive clamp — a hostile/buggy posture input never distorts range.
+  it('posture is clamped to [0,100]', () => {
+    expect(computeAgentDeviceScore({ audit: emptyAudit, posture: 150 })).toEqual({
+      score: 100,
+      tier: 'good',
+    });
+    expect(computeAgentDeviceScore({ audit: emptyAudit, posture: -5 })).toEqual({
+      score: 0,
+      tier: 'critical',
+    });
   });
 });
