@@ -36,6 +36,10 @@ describe('autostartAdvice', () => {
   });
 
   it('info-warns on NOT installed only when cloud policy is enforced', () => {
+    // Pinned to a real installable platform — on win32 this branch is silent by
+    // design (see the sibling win32 test), so this assertion must not depend on
+    // whatever platform the test runner happens to be (the bug that broke Windows CI).
+    setPlatform('linux');
     const cloud = autostartAdvice({ installed: false, enabled: false, cloudEnabled: true });
     expect(cloud?.message).toMatch(/No daemon autostart installed/i);
     // privacy mode (no cloud) doesn't need autostart → silent
