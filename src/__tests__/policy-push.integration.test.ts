@@ -20,6 +20,9 @@ describe('node9 policy push (integration)', () => {
     const env: Record<string, string> = {
       ...process.env,
       HOME: home,
+      // os.homedir() reads USERPROFILE on Windows, not HOME — set both so the
+      // spawned CLI resolves ~/.node9 to the temp dir on every OS.
+      USERPROFILE: home,
       NODE9_TESTING: '1',
       NODE9_NO_AUTO_DAEMON: '1',
       NO_COLOR: '1',

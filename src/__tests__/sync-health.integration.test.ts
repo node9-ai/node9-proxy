@@ -36,6 +36,10 @@ const run = (args: string[], env: Record<string, string> = {}) =>
     env: {
       ...process.env,
       HOME: home,
+      // os.homedir() reads USERPROFILE on Windows, not HOME — set both so the
+      // spawned dist/cli.js resolves ~/.node9 to the temp dir on every OS
+      // (matches the convention in check.integration.test.ts).
+      USERPROFILE: home,
       // isolate: no side-channel pushes, no daemon spawn during the test
       NODE9_BLAST_DISABLE: '1',
       NODE9_SCAN_DISABLE: '1',
