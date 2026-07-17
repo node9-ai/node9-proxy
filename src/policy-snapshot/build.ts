@@ -13,6 +13,7 @@ import type { ShieldOverrides } from '@node9/policy-engine';
 import { ENGINE_VERSION } from '@node9/policy-engine';
 import type { McpToolsConfig } from '../daemon/mcp-tools.js';
 import type { McpStatusEntry } from '../mcp-status.js';
+import type { SyncHealth } from '../daemon/sync.js';
 
 const MAX_RULES = 500;
 const MAX_EGRESS = 200;
@@ -51,6 +52,15 @@ export interface PolicySnapshotBody {
     connection?: string;
     missingEnv?: string[];
   }>;
+  // fleet-ship Step 2: the proxy's own cloud-policy sync health, so the dashboard
+  // can show "sync failing" badges. The SaaS schema treats consecutiveFailures as
+  // the load-bearing signal; lastErrorAt is stripped by the SaaS schema (.strip()).
+  syncHealth?: {
+    lastCheckedAt?: string;
+    lastChangedAt?: string;
+    lastError?: string;
+    consecutiveFailures: number;
+  };
 }
 
 export function buildPolicySnapshot(
@@ -61,7 +71,11 @@ export function buildPolicySnapshot(
   // Merged config-vs-connected status (P2.1). Computed by the CALLER (sync.ts) so
   // build.ts stays a pure builder — it does no inventory/env reads. Empty = the
   // pre-P2 behavior (connected rows only, no connection field, no extra rows).
-  statusEntries: McpStatusEntry[] = []
+  statusEntries: McpStatusEntry[] = [],
+  // fleet-ship Step 2: the proxy's own sync health. Passed in by the caller
+  // (readSyncHealth() in sync.ts) — build.ts imports nothing runtime from sync
+  // (sync imports build → circular if reversed). undefined = old call site / omit.
+  syncHealth?: SyncHealth
 ): PolicySnapshotBody {
   const p = config.policy;
 
@@ -145,5 +159,15 @@ export function buildPolicySnapshot(
     engineVersion: ENGINE_VERSION,
     // Connected rows first so they win the cap; non-connected SEE rows fill the rest.
     mcpServers: [...connectedRows, ...extraRows].slice(0, MAX_MCP_SERVERS),
+    // fleet-ship Step 2: ship the proxy's own sync health so the dashboard can
+    // derive a "sync failing" badge. Only included when the caller passes it.
+    ...(syncHealth && {
+      syncHealth: {
+        lastCheckedAt: syncHealth.lastCheckedAt,
+        lastChangedAt: syncHealth.lastChangedAt,
+        lastError: syncHealth.lastError,
+        consecutiveFailures: syncHealth.consecutiveFailures,
+      },
+    }),
   };
 }

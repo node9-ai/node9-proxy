@@ -4,6 +4,7 @@ import { ENGINE_VERSION } from '@node9/policy-engine';
 import type { Config } from '../config/index';
 import type { McpStatusEntry } from '../mcp-status';
 import type { McpServerConfig } from '../daemon/mcp-tools';
+import type { SyncHealth } from '../daemon/sync';
 
 // A connected mcp-tools.json entry (2 tools, approved).
 const mkCfg = (): McpServerConfig => ({
@@ -194,5 +195,52 @@ describe('buildPolicySnapshot', () => {
     expect(body.mcpServers).toHaveLength(1);
     expect(body.mcpServers[0].key).toBe('srvKey');
     expect(body.mcpServers[0].connection).toBe('connected');
+  });
+
+  // ── fleet-ship Step 2: syncHealth ──────────────────────────────────────────
+
+  it('includes syncHealth when passed (fleet-ship Step 2)', () => {
+    const health: SyncHealth = {
+      lastCheckedAt: '2026-07-17T10:00:00Z',
+      lastChangedAt: '2026-07-17T09:00:00Z',
+      lastError: 'connect ETIMEDOUT',
+      consecutiveFailures: 5,
+    };
+    const body = buildPolicySnapshot(cfg(), [], {}, {}, [], health);
+    expect(body.syncHealth).toEqual({
+      lastCheckedAt: '2026-07-17T10:00:00Z',
+      lastChangedAt: '2026-07-17T09:00:00Z',
+      lastError: 'connect ETIMEDOUT',
+      consecutiveFailures: 5,
+    });
+  });
+
+  it('ships a healthy syncHealth (consecutiveFailures:0) — clears a prior failing badge', () => {
+    const health: SyncHealth = {
+      lastCheckedAt: '2026-07-17T10:00:00Z',
+      consecutiveFailures: 0,
+    };
+    const body = buildPolicySnapshot(cfg(), [], {}, {}, [], health);
+    expect(body.syncHealth?.consecutiveFailures).toBe(0);
+  });
+
+  it('omits syncHealth when not passed (backward-compat with pre-Step-2 callers)', () => {
+    const body = buildPolicySnapshot(cfg(), [], {}, {});
+    expect(body.syncHealth).toBeUndefined();
+  });
+
+  it('strips lastErrorAt from the shipped syncHealth (SaaS schema does not accept it)', () => {
+    // readSyncHealth returns lastErrorAt but the SaaS Zod schema .strip()s it.
+    // build.ts explicitly maps only the 4 fields the SaaS expects, so lastErrorAt
+    // never leaves the machine. Verify it's not in the output.
+    const health: SyncHealth = {
+      lastCheckedAt: '2026-07-17T10:00:00Z',
+      lastError: 'x',
+      lastErrorAt: '2026-07-17T10:00:00Z',
+      consecutiveFailures: 1,
+    };
+    const body = buildPolicySnapshot(cfg(), [], {}, {}, [], health);
+    expect(body.syncHealth).toBeDefined();
+    expect('lastErrorAt' in (body.syncHealth as object)).toBe(false);
   });
 });
