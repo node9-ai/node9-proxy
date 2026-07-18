@@ -267,7 +267,7 @@ export function loadAuditEntries(auditPath?: string): RawAuditEntry[] {
       // Skip allow/allowed — we only want intercepted calls
       // Shared mapper — a fourth hand-rolled copy of this rule is how the
       // readers drifted apart in the first place.
-      if (classifyDecision(e.decision, e.checkedBy).outcome === 'allow') continue;
+      if (classifyDecision(e).outcome === 'allow') continue;
       entries.push(e);
     } catch {
       // skip malformed lines

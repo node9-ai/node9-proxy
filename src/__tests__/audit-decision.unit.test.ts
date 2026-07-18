@@ -124,3 +124,58 @@ describe('robustness', () => {
     expect(counts.unknown).toBeUndefined();
   });
 });
+
+/**
+ * The row form exists because the pair form let each caller pick where the
+ * second argument came from — and five callers made three different choices.
+ * The gate writes `checkedBy`; the PostToolUse hook and the daemon write
+ * `source`. Callers that read only `checkedBy` saw `undefined` on 37,576 rows
+ * of one real log, so a human APPROVING an action rendered "Auto-allowed" and a
+ * human REFUSING one rendered "Blocked".
+ */
+describe('row form — attribution comes from checkedBy OR source', () => {
+  // Shapes taken from the live log, with their real row counts.
+  const LIVE_ROWS: Array<[Record<string, unknown>, string, string]> = [
+    [{ decision: 'allowed', source: 'post-hook' }, 'allow', 'Ran'],
+    [{ decision: 'allow', source: 'daemon' }, 'allow', 'Approved'],
+    [{ decision: 'deny', source: 'daemon' }, 'deny', 'Denied'],
+    [{ decision: 'auto-deny', source: 'daemon' }, 'deny', 'Denied'],
+    [{ decision: 'allowed', source: 'inline-review-approved' }, 'allow', 'Approved'],
+    [{ decision: 'deny', source: 'timeout' }, 'deny', 'Timed out'],
+  ];
+
+  for (const [row, outcome, label] of LIVE_ROWS) {
+    it(`${row.decision}/${row.source} → ${label}`, () => {
+      const v = classifyDecision(row);
+      expect(v.outcome).toBe(outcome);
+      expect(v.label).toBe(label);
+    });
+  }
+
+  it('a source-only row classifies identically to the same row with checkedBy', () => {
+    for (const [row] of LIVE_ROWS) {
+      const viaSource = classifyDecision(row);
+      const viaCheckedBy = classifyDecision({ decision: row.decision, checkedBy: row.source });
+      expect(viaSource).toEqual(viaCheckedBy);
+    }
+  });
+
+  it('prefers checkedBy when a row carries both', () => {
+    expect(
+      classifyDecision({ decision: 'deny', checkedBy: 'timeout', source: 'daemon' }).label
+    ).toBe('Timed out');
+  });
+
+  // A row with neither field must still bucket correctly — the outcome is
+  // driven by `decision`, so attribution only ever costs the nuance.
+  it('classifies a row with no attribution at all', () => {
+    expect(classifyDecision({ decision: 'deny' }).outcome).toBe('deny');
+    expect(classifyDecision({ decision: 'allow' }).outcome).toBe('allow');
+  });
+
+  // A bare string is NOT a row — it must keep taking the legacy path.
+  it('still accepts the legacy (decision, checkedBy) pair', () => {
+    expect(classifyDecision('deny', 'timeout').label).toBe('Timed out');
+    expect(classifyDecision('allow').label).toBe('Auto-allowed');
+  });
+});

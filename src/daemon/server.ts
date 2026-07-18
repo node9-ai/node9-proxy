@@ -735,12 +735,8 @@ export function startDaemon(): void {
           // "blocked" — so DLP findings, MCP-discovery events and, worst, all
           // the observe-mode "would have blocked" rows inflated the blocked
           // count with things that were never refusals.
-          allowed: entries.filter(
-            (e) => classifyDecision(e.decision, e.checkedBy).outcome === 'allow'
-          ).length,
-          blocked: entries.filter(
-            (e) => classifyDecision(e.decision, e.checkedBy).outcome === 'deny'
-          ).length,
+          allowed: entries.filter((e) => classifyDecision(e).outcome === 'allow').length,
+          blocked: entries.filter((e) => classifyDecision(e).outcome === 'deny').length,
           dlp: entries.filter((e) => e.checkedBy && e.checkedBy.includes('dlp')).length,
           loops: entries.filter((e) => e.checkedBy === 'loop-detected').length,
         };
@@ -759,14 +755,14 @@ export function startDaemon(): void {
             const key = String(hour).padStart(2, '0') + ':00';
             const d = dailyMap.get(key)!;
             d.calls++;
-            if (classifyDecision(e.decision, e.checkedBy).outcome === 'deny') d.blocked++;
+            if (classifyDecision(e).outcome === 'deny') d.blocked++;
           }
         } else {
           for (const e of entries) {
             const date = e.ts.slice(0, 10);
             const d = dailyMap.get(date) || { date, calls: 0, blocked: 0 };
             d.calls++;
-            if (classifyDecision(e.decision, e.checkedBy).outcome === 'deny') d.blocked++;
+            if (classifyDecision(e).outcome === 'deny') d.blocked++;
             dailyMap.set(date, d);
           }
         }

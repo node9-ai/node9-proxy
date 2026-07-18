@@ -49,16 +49,43 @@ const TIMEOUT_SOURCES = new Set(['timeout']);
 
 const has = (s: string, needle: string) => s.includes(needle);
 
+/** The subset of an audit row this needs. Anything row-shaped satisfies it. */
+export interface AuditRowLike {
+  decision?: unknown;
+  checkedBy?: unknown;
+  /** The gate writes `checkedBy`; the PostToolUse hook writes `source`. */
+  source?: unknown;
+}
+
 /**
- * Classify one audit row.
+ * Classify one audit row. PASS THE ROW.
  *
- * `checkedBy` carries the nuance the dashboard shows — whether an allow was
- * automatic or human-approved, whether a refusal was a rule, a person, or a
- * timeout — so both fields are needed to produce an honest label.
+ * The attribution field is NOT uniform: the gate writes `checkedBy`, while the
+ * PostToolUse hook and the daemon write `source`. In one real log that is
+ * 37,576 rows with `source` and no `checkedBy`.
+ *
+ * An earlier signature took `(decision, checkedBy)` and left each caller to
+ * decide where the second argument came from — five callers made three
+ * different choices, so a human approving an action displayed as "Auto-allowed"
+ * and a human REFUSING one displayed as "Blocked". That is the same
+ * reader-drift this module exists to prevent, just moved one level up into the
+ * call sites. Taking the row removes the choice.
+ *
+ * The two-argument form is kept for callers that genuinely hold only the pair
+ * (and for tests), but prefer the row form.
  */
-export function classifyDecision(decision: unknown, checkedBy?: unknown): DecisionView {
+export function classifyDecision(row: AuditRowLike): DecisionView;
+export function classifyDecision(decision: unknown, checkedBy?: unknown): DecisionView;
+export function classifyDecision(a: unknown, b?: unknown): DecisionView {
+  // A row-shaped first argument carries its own attribution field; anything
+  // else is the legacy (decision, checkedBy) pair.
+  const isRow =
+    !!a && typeof a === 'object' && ('decision' in a || 'checkedBy' in a || 'source' in a);
+  const decision = isRow ? (a as AuditRowLike).decision : a;
+  const attribution = isRow ? ((a as AuditRowLike).checkedBy ?? (a as AuditRowLike).source) : b;
+
   const raw = typeof decision === 'string' ? decision : String(decision ?? '');
-  const src = typeof checkedBy === 'string' ? checkedBy.toLowerCase() : '';
+  const src = typeof attribution === 'string' ? attribution.toLowerCase() : '';
   const d = raw.toLowerCase();
 
   // Shadow mode first: the row's own decision is unreliable here (one observe

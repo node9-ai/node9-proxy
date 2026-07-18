@@ -53,7 +53,9 @@ export function registerAuditCommand(program: Command): void {
         // `startsWith('allow') ? allow : deny` this replaces bucketed `dlp` and
         // `mcp-discovered` — findings, not verdicts — as DENY, inventing
         // refusals that never happened.
-        view: classifyDecision(e.decision, e.checkedBy),
+        // Pass the ROW, never a field pair — the attribution key differs by
+        // producer (`checkedBy` from the gate, `source` from the hook/daemon).
+        view: classifyDecision(e),
       }));
 
       if (options.tool) entries = entries.filter((e) => String(e.tool).includes(options.tool!));

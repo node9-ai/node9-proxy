@@ -715,7 +715,7 @@ function handleAuditGet(args: Record<string, unknown>): string {
       // classifyDecision is the ONE mapper (audit/decision.ts). This used to be
       // an inline `!== 'block' ? '[allow]'`, which reported every one of the
       // log's `deny` rows as ALLOWED.
-      const view = classifyDecision(e.decision, e.checkedBy ?? e.source);
+      const view = classifyDecision(e);
       if (wanted && view.outcome !== wanted) continue;
 
       // The gate stores `argsPreview` (its args are redacted/hashed); only the
