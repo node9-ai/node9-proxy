@@ -43,8 +43,20 @@ describe('redis shield — must still catch real Redis operations', () => {
     ['block-flushall', 'echo FLUSHALL | redis-cli'],
     // MCP: the tool sends the bare keyword as the whole command field
     ['block-flushall', 'FLUSHALL'],
+    // Client LIBRARY calls in one-liners. The first cut of this fix dropped
+    // these — a review caught it by running old vs new patterns side by side.
+    // A literal dot+paren is self-limiting (the same property mongodb's rules
+    // rely on: `.dropDatabase(`), so it costs no false positives.
+    ['block-flushall', 'python3 -c "import redis; r = redis.Redis(); r.flushall()"'],
+    ['block-flushall', 'node -e "await client.flushAll()"'],
+    ['block-flushall', 'redis.flushall()'],
     ['block-flushdb', 'redis-cli FLUSHDB'],
     ['block-flushdb', 'FLUSHDB'],
+    ['block-flushdb', 'python3 -c "r.flushdb()"'],
+    // Whitespace: the CLOUD path (BE matchesParamsFilter) tests the raw value
+    // with NO whitespace collapsing, so these rules keep \s+ rather than a
+    // literal space.
+    ['review-config-set', 'redis-cli CONFIG  SET maxmemory 0'],
     ['block-config-resetstat', 'redis-cli CONFIG RESETSTAT'],
     ['block-config-resetstat', 'CONFIG RESETSTAT'],
     ['review-config-set', 'redis-cli CONFIG SET maxmemory 0'],

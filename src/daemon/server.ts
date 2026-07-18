@@ -71,6 +71,7 @@ import { extractCommandPattern } from '../auth/state.js';
 import { startCostSync } from '../costSync.js';
 import { startCloudSync, startForensicBroadcast } from './sync.js';
 import { startAuditShipper } from './audit-shipper.js';
+import { classifyDecision } from '../audit/decision.js';
 import { startDlpScanner } from './dlp-scanner.js';
 import { startMcpReconciler } from './mcp-reconciler.js';
 import { startHookHeal } from './hook-heal.js';
@@ -729,8 +730,17 @@ export function startDaemon(): void {
 
         const summary = {
           total: entries.length,
-          allowed: entries.filter((e) => e.decision && e.decision.startsWith('allow')).length,
-          blocked: entries.filter((e) => e.decision && !e.decision.startsWith('allow')).length,
+          // classifyDecision is THE mapper (audit/decision.ts). The inline
+          // startsWith('allow') this replaces counted every non-allow row as
+          // "blocked" — so DLP findings, MCP-discovery events and, worst, all
+          // the observe-mode "would have blocked" rows inflated the blocked
+          // count with things that were never refusals.
+          allowed: entries.filter(
+            (e) => classifyDecision(e.decision, e.checkedBy).outcome === 'allow'
+          ).length,
+          blocked: entries.filter(
+            (e) => classifyDecision(e.decision, e.checkedBy).outcome === 'deny'
+          ).length,
           dlp: entries.filter((e) => e.checkedBy && e.checkedBy.includes('dlp')).length,
           loops: entries.filter((e) => e.checkedBy === 'loop-detected').length,
         };
@@ -749,14 +759,14 @@ export function startDaemon(): void {
             const key = String(hour).padStart(2, '0') + ':00';
             const d = dailyMap.get(key)!;
             d.calls++;
-            if (e.decision && !e.decision.startsWith('allow')) d.blocked++;
+            if (classifyDecision(e.decision, e.checkedBy).outcome === 'deny') d.blocked++;
           }
         } else {
           for (const e of entries) {
             const date = e.ts.slice(0, 10);
             const d = dailyMap.get(date) || { date, calls: 0, blocked: 0 };
             d.calls++;
-            if (e.decision && !e.decision.startsWith('allow')) d.blocked++;
+            if (classifyDecision(e.decision, e.checkedBy).outcome === 'deny') d.blocked++;
             dailyMap.set(date, d);
           }
         }

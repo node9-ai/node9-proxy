@@ -11,7 +11,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "(redis|valkey)-cli.*\\bFLUSHALL\\b|\\bFLUSHALL\\b.*(redis|valkey)-cli|^ ?FLUSHALL\\b",
+          "value": "(redis|valkey)-cli.*\\bFLUSHALL\\b|\\bFLUSHALL\\b.*(redis|valkey)-cli|^ ?FLUSHALL\\b|\\.flushall\\s*\\(",
           "flags": "i"
         }
       ],
@@ -25,7 +25,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "(redis|valkey)-cli.*\\bFLUSHDB\\b|\\bFLUSHDB\\b.*(redis|valkey)-cli|^ ?FLUSHDB\\b",
+          "value": "(redis|valkey)-cli.*\\bFLUSHDB\\b|\\bFLUSHDB\\b.*(redis|valkey)-cli|^ ?FLUSHDB\\b|\\.flushdb\\s*\\(",
           "flags": "i"
         }
       ],
@@ -39,7 +39,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "(redis|valkey)-cli.*CONFIG RESETSTAT|CONFIG RESETSTAT.*(redis|valkey)-cli|^ ?CONFIG RESETSTAT",
+          "value": "(redis|valkey)-cli.*CONFIG\\s+RESETSTAT|^ ?CONFIG\\s+RESETSTAT",
           "flags": "i"
         }
       ],
@@ -53,7 +53,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "(redis|valkey)-cli.*\\bCONFIG SET\\b|\\bCONFIG SET\\b.*(redis|valkey)-cli|^ ?CONFIG SET\\b",
+          "value": "(redis|valkey)-cli.*\\bCONFIG\\s+SET\\b|\\bCONFIG\\s+SET\\b.*(redis|valkey)-cli|^ ?CONFIG\\s+SET\\b",
           "flags": "i"
         }
       ],
