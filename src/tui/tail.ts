@@ -6,6 +6,7 @@ import os from 'os';
 import path from 'path';
 import readline from 'readline';
 import { spawn } from 'child_process';
+import { openStartupLogFd, recordStartupState } from '../daemon/startup-log';
 import { DAEMON_PORT } from '../daemon';
 import { getInternalToken } from '../auth/daemon';
 
@@ -364,12 +365,27 @@ async function ensureDaemon(): Promise<number> {
 
   // Not running — start it in the background
   console.log(chalk.dim('🛡️  Starting Node9 daemon...'));
+  // Same spawner contract as the other three: capture the child's stderr so a
+  // module-load crash leaves a trace, mark the attempt so a child that never runs
+  // our code is still visible to `doctor`, and attach an 'error' listener — an
+  // 'error' event with no listener is an uncaught exception. The 5s poll below
+  // means the listener reliably outlives the event here.
+  const startupFd = openStartupLogFd();
+  recordStartupState('starting');
   const child = spawn(process.execPath, [process.argv[1], 'daemon'], {
     detached: true,
-    stdio: 'ignore',
+    stdio: ['ignore', 'ignore', startupFd ?? 'ignore'],
     env: { ...process.env, NODE9_AUTO_STARTED: '1' },
   });
+  child.on('error', (err: Error) => recordStartupState('failed', 'spawn-failed', err.message));
   child.unref();
+  if (startupFd !== undefined) {
+    try {
+      fs.closeSync(startupFd);
+    } catch {
+      /* non-fatal */
+    }
+  }
 
   // Wait up to 5s for it to be ready
   for (let i = 0; i < 20; i++) {

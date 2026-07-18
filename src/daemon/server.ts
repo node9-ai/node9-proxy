@@ -74,7 +74,7 @@ import { startAuditShipper } from './audit-shipper.js';
 import { startDlpScanner } from './dlp-scanner.js';
 import { startMcpReconciler } from './mcp-reconciler.js';
 import { startHookHeal } from './hook-heal.js';
-import { logDaemonStartup } from './startup-log.js';
+import { logDaemonStartup, recordStartupState } from './startup-log.js';
 import { readMcpToolsConfig, updateServerDiscovery, approveServer } from './mcp-tools.js';
 
 export function startDaemon(): void {
@@ -99,6 +99,7 @@ export function startDaemon(): void {
     const stack = err instanceof Error ? (err.stack ?? err.message) : String(err);
     console.error('\n🛑 Node9 daemon startup failed:\n' + stack);
     logDaemonStartup('startup-throw', err instanceof Error ? err.message : String(err));
+    recordStartupState('failed', 'startup-throw', err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
   // Single per-process token. Stored in ~/.node9/daemon.pid (mode 0600)
@@ -1200,6 +1201,31 @@ export function startDaemon(): void {
   setDaemonServer(server);
 
   // ── Port Conflict Resolution ─────────────────────────────────────────────
+  //
+  // The retry below MUST be bounded. Unbounded, a foreign process on the port (a
+  // dev server, a rebound socket) puts this daemon in a permanent ~1 Hz loop:
+  //   EADDRINUSE → no pid file → probe /settings → not a daemon → listen() → …
+  // never serving, never exiting, and never recording anything beyond 'starting'.
+  let bindAttempts = 0;
+  const MAX_BIND_ATTEMPTS = 3;
+  function retryListen(): void {
+    if (++bindAttempts >= MAX_BIND_ATTEMPTS) {
+      logDaemonStartup(
+        'port-unavailable',
+        `:${DAEMON_PORT} is held by something that is not a node9 daemon`
+      );
+      recordStartupState(
+        'failed',
+        'port-unavailable',
+        `:${DAEMON_PORT} is held by another process that is not a node9 daemon — free the port, then: node9 daemon --background`
+      );
+      // exit 0, NOT 1: under Restart=on-failure a non-zero exit turns a permanently
+      // occupied port into a restart storm. This is a stable, explained condition.
+      return process.exit(0);
+    }
+    server.listen(DAEMON_PORT, DAEMON_HOST);
+  }
+
   server.on('error', (e: NodeJS.ErrnoException) => {
     if (e.code === 'EADDRINUSE') {
       try {
@@ -1207,13 +1233,21 @@ export function startDaemon(): void {
           const { pid } = JSON.parse(fs.readFileSync(DAEMON_PID_FILE, 'utf-8'));
           process.kill(pid, 0); // Throws if process is dead
           logDaemonStartup('port-in-use', `another daemon (pid ${pid}) owns :${DAEMON_PORT}`);
+          // A healthy daemon owns the port and its pid file names it — nothing wrong.
+          recordStartupState('ok-elsewhere');
           return process.exit(0);
         }
       } catch {
+        // The pid file names a dead process (or is corrupt): drop it and retry.
+        // BOUNDED, via retryListen: the unlink can FAIL (read-only dir, permissions)
+        // and is swallowed here, in which case the next EADDRINUSE lands back on
+        // this same branch — an infinite loop. An earlier version of this fix left
+        // this site unbounded, reasoning that removing the pid file makes it
+        // converge; that assumed an operation that can fail.
         try {
           fs.unlinkSync(DAEMON_PID_FILE);
         } catch {}
-        server.listen(DAEMON_PORT, DAEMON_HOST);
+        retryListen();
         return;
       }
 
@@ -1226,6 +1260,7 @@ export function startDaemon(): void {
             // Try to recover the orphan's PID and re-create the PID file so
             // future stop/status calls can find it. Try `ss` first (Linux,
             // fast); fall back to `lsof` (macOS + portable Linux).
+            let adopted = false;
             try {
               let orphanPid: number | null = null;
               const ss = spawnSync('ss', ['-Htnp', `sport = :${DAEMON_PORT}`], {
@@ -1256,19 +1291,53 @@ export function startDaemon(): void {
                   JSON.stringify({ pid: orphanPid, port: DAEMON_PORT, internalToken, autoStarted }),
                   { mode: 0o600 }
                 );
+                adopted = true;
               }
             } catch {}
+            // The two outcomes here are NOT the same, and recording them
+            // identically is how a silent failure loop gets built:
+            if (adopted) {
+              // A healthy daemon owns the port and the pid file now names it.
+              logDaemonStartup(
+                'port-in-use-orphan',
+                `adopted the daemon already on :${DAEMON_PORT}`
+              );
+              recordStartupState('ok-elsewhere');
+            } else {
+              // Something holds the port but we could not identify it (no ss/lsof,
+              // or the pid is not ours to signal), so NO pid file was written —
+              // and every CLI keeps reporting "daemon not running" while each new
+              // start exits 0 right here. That loop is invisible unless it is
+              // recorded as the failure it is.
+              // NB: this branch is gated on /settings answering OK, so the daemon
+              // on the port is provably HEALTHY — it just could not be identified
+              // (no `ss`/`lsof`, or its pid is not ours to signal). Telling the
+              // user to kill it would be wrong; the problem is only that every
+              // pid-file-based command will keep reporting "not running".
+              logDaemonStartup(
+                'orphan-unidentified',
+                `healthy daemon on :${DAEMON_PORT} could not be identified — no pid file written`
+              );
+              recordStartupState(
+                'failed',
+                'orphan-unidentified',
+                `a healthy daemon is running on :${DAEMON_PORT} but its process could not be identified, so node9 cannot track it — install \`ss\` or \`lsof\`, or restart it with: node9 daemon --background`
+              );
+            }
             process.exit(0);
           } else {
-            server.listen(DAEMON_PORT, DAEMON_HOST);
+            // Something answered on the port but it is not a healthy daemon.
+            retryListen();
           }
         })
         .catch(() => {
-          server.listen(DAEMON_PORT, DAEMON_HOST);
+          // Nothing answered (timeout / refused) — the holder is not a daemon.
+          retryListen();
         });
       return;
     }
     logDaemonStartup('bind-failed', e.message);
+    recordStartupState('failed', 'bind-failed', e.message);
     console.error(chalk.red('\n🛑 Node9 Daemon Error:'), e.message);
     process.exit(1);
   });
@@ -1290,6 +1359,13 @@ export function startDaemon(): void {
       { mode: 0o600 }
     );
     console.error(chalk.green(`🛡️  Node9 Guard LIVE on 127.0.0.1:${DAEMON_PORT}`));
+    // Record the SUCCESS, not just the failures. daemon-startup.log is append-only
+    // and the auto-start path pipes this process's stderr into it, so without a
+    // terminating "it worked" entry an old crash stays the newest recognisable
+    // line forever — and doctor would blame a months-dead ERR_REQUIRE_ESM for a
+    // daemon that has started cleanly a hundred times since.
+    logDaemonStartup('ok', `listening on ${DAEMON_HOST}:${DAEMON_PORT}`);
+    recordStartupState('ok');
   });
 
   // ── Flight Recorder ──────────────────────────────────────────────────────
