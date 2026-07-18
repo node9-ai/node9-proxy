@@ -14,6 +14,7 @@ import os from 'os';
 import path from 'path';
 import { spawnSync } from 'child_process';
 import { getSnapshotHistory, applyUndo } from '../undo';
+import { classifyDecision, decisionTag } from '../audit/decision';
 import { getConfig, checkPause } from '../core';
 import { isDaemonRunning } from '../auth/daemon';
 import {
@@ -238,9 +239,11 @@ export const TOOLS = [
   {
     name: 'node9_audit_get',
     description:
-      'Read recent entries from the node9 audit log (~/.node9/audit.log). ' +
-      'Each entry shows timestamp, tool name, decision (allow/block/review), command/args, and agent. ' +
-      'Use this to review what AI actions have been taken recently, especially blocked or reviewed ops.',
+      'Read recent entries from the node9 audit log (~/.node9/audit.log). Each entry shows ' +
+      'timestamp, outcome, tool name, the command, and the rule that fired. Outcomes use the ' +
+      'same words as the dashboard: Auto-allowed, Approved, Ran, Blocked, Denied (a human ' +
+      'refused), Timed out (nobody answered), Would block (shadow mode let it through), ' +
+      'Finding, Info. Use this to review what AI actions were taken, especially refused ones.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -250,8 +253,11 @@ export const TOOLS = [
         },
         filter: {
           type: 'string',
-          enum: ['all', 'block', 'review'],
-          description: 'Filter by decision. Omit or use "all" to show every entry.',
+          enum: ['all', 'allow', 'deny', 'observe', 'info', 'block'],
+          description:
+            'Filter by outcome. "deny" covers every refusal (rule block, human denial, ' +
+            'timeout); "observe" is shadow-mode would-blocks; "block" is an alias for "deny". ' +
+            'Omit or use "all" for every entry.',
         },
       },
       required: [],
@@ -696,41 +702,54 @@ function handleAuditGet(args: Record<string, unknown>): string {
 
   const rawLines = fs.readFileSync(auditPath, 'utf-8').trim().split('\n').filter(Boolean);
 
-  // Parse all, filter by decision if requested, then take the last N
-  const parsed: Array<{ raw: string; decision: string; formatted: string }> = [];
+  // `block` is kept as an alias for `deny`: this tool's published schema
+  // advertised it, and a client may already be sending it. It matched nothing
+  // before — the log writes `deny`, never `block`.
+  const wanted = filter === 'block' ? 'deny' : filter;
+
+  // Parse all, filter by outcome if requested, then take the last N
+  const parsed: Array<{ raw: string; outcome: string; formatted: string }> = [];
   for (const line of rawLines) {
     try {
       const e = JSON.parse(line) as Record<string, unknown>;
-      const decision = String(e.decision ?? 'allow');
-      if (filter && decision !== filter) continue;
+      // classifyDecision is the ONE mapper (audit/decision.ts). This used to be
+      // an inline `!== 'block' ? '[allow]'`, which reported every one of the
+      // log's `deny` rows as ALLOWED.
+      const view = classifyDecision(e.decision, e.checkedBy ?? e.source);
+      if (wanted && view.outcome !== wanted) continue;
 
-      // Extract the most useful arg: command for Bash, file_path for Edit/Write, sql for DB tools
+      // The gate stores `argsPreview` (its args are redacted/hashed); only the
+      // PostToolUse hook stores `args`. Reading just `args` left every BLOCKED
+      // action with an empty detail column.
       const argsObj = e.args as Record<string, unknown> | undefined;
       let detail = '';
       if (argsObj) {
         const cmd = argsObj.command ?? argsObj.file_path ?? argsObj.path ?? argsObj.sql;
-        if (typeof cmd === 'string' && cmd) {
-          detail = cmd.length > 80 ? cmd.slice(0, 80) + '…' : cmd;
-        }
+        if (typeof cmd === 'string' && cmd) detail = cmd;
       }
+      if (!detail && typeof e.argsPreview === 'string') detail = e.argsPreview;
+      detail = detail.replace(/\s+/g, ' ').trim();
+      if (detail.length > 80) detail = detail.slice(0, 80) + '…';
 
-      const decisionPad =
-        decision === 'block' ? '[BLOCK] ' : decision === 'review' ? '[review]' : '[allow] ';
+      // Name the rule that fired — a refusal the reader can't attribute is
+      // half an audit trail.
+      const why = typeof e.ruleName === 'string' && e.ruleName ? `  (${e.ruleName})` : '';
       const toolPad = String(e.tool ?? '').padEnd(20);
-      const line2 = `${e.ts}  ${decisionPad}  ${toolPad}  ${detail}`;
-      parsed.push({ raw: line, decision, formatted: line2 });
+      const line2 = `${e.ts}  ${decisionTag(view)}  ${toolPad}  ${detail}${why}`;
+      parsed.push({ raw: line, outcome: view.outcome, formatted: line2 });
     } catch {
-      parsed.push({ raw: line, decision: 'allow', formatted: line });
+      // An unparseable row is NOT an allow — surface it rather than bury it.
+      parsed.push({ raw: line, outcome: 'unknown', formatted: `[? unparseable]  ${line}` });
     }
   }
 
   const recent = parsed.slice(-limit);
   if (recent.length === 0) {
-    return filter ? `No ${filter} entries found in audit log.` : 'Audit log is empty.';
+    return filter ? `No ${wanted} entries found in audit log.` : 'Audit log is empty.';
   }
 
   const header = filter
-    ? `Last ${recent.length} ${filter.toUpperCase()} entries:`
+    ? `Last ${recent.length} ${String(wanted).toUpperCase()} entries:`
     : `Last ${recent.length} audit entries:`;
 
   return `${header}\n\n${recent.map((e) => e.formatted).join('\n')}`;
