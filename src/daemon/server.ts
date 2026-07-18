@@ -78,6 +78,122 @@ import { startHookHeal } from './hook-heal.js';
 import { logDaemonStartup, recordStartupState } from './startup-log.js';
 import { readMcpToolsConfig, updateServerDiscovery, approveServer } from './mcp-tools.js';
 
+export type DaemonReportPeriod = 'today' | '7d' | '30d' | 'month';
+
+export interface DaemonReportBody {
+  summary: { total: number; allowed: number; blocked: number; dlp: number; loops: number };
+  daily: Array<{ date: string; calls: number; blocked: number }>;
+  topTools: Array<{ name: string; value: number }>;
+  topBlockedTools: Array<{ name: string; value: number }>;
+  byAgent: Array<{ agent: string; total: number; blocked: number; dlp: number }>;
+}
+
+/**
+ * Aggregate GET /report from raw audit rows.
+ *
+ * Extracted from the route handler so the one invariant that matters here can
+ * be tested: EVERY blocked count in the response comes from the same mapper.
+ * When this lived inline, `summary.blocked` was converged onto
+ * `classifyDecision` while `topBlockedTools` and `byAgent.blocked` kept their
+ * own `startsWith('allow')` rule twelve lines below — so a single response
+ * disagreed with itself by 950 rows on a real log, and there was no seam to
+ * write a test against.
+ */
+export function buildDaemonReport(
+  allEntries: Array<Record<string, unknown>>,
+  period: DaemonReportPeriod,
+  now: Date
+): DaemonReportBody {
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  let start = new Date(todayStart);
+  if (period === '7d') start.setDate(start.getDate() - 6);
+  else if (period === '30d') start.setDate(start.getDate() - 29);
+  else if (period === 'month') start = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  const entries = allEntries.filter((e) => {
+    if (e.source === 'post-hook' || e.source === 'response-dlp') return false;
+    return new Date(e.ts as string) >= start;
+  });
+
+  // THE rule for this endpoint. Every blocked count below calls this and
+  // nothing else — that is the whole point of the extraction.
+  const isBlocked = (e: Record<string, unknown>) => classifyDecision(e).outcome === 'deny';
+  const checkedBy = (e: Record<string, unknown>) =>
+    typeof e.checkedBy === 'string' ? e.checkedBy : undefined;
+
+  const summary = {
+    total: entries.length,
+    // The inline `startsWith('allow')` this replaces counted every non-allow
+    // row as "blocked" — so DLP findings, MCP-discovery events and, worst, all
+    // the observe-mode "would have blocked" rows inflated the blocked count
+    // with things that were never refusals.
+    allowed: entries.filter((e) => classifyDecision(e).outcome === 'allow').length,
+    blocked: entries.filter(isBlocked).length,
+    dlp: entries.filter((e) => checkedBy(e)?.includes('dlp')).length,
+    loops: entries.filter((e) => checkedBy(e) === 'loop-detected').length,
+  };
+
+  // For "today" we group by hour (00-23) so the chart has real shape.
+  // Other periods group by calendar day.
+  const dailyMap = new Map<string, { date: string; calls: number; blocked: number }>();
+  if (period === 'today') {
+    // Pre-populate 24 hour buckets so the chart always shows a full day
+    for (let h = 0; h < 24; h++) {
+      const key = String(h).padStart(2, '0') + ':00';
+      dailyMap.set(key, { date: key, calls: 0, blocked: 0 });
+    }
+    for (const e of entries) {
+      const hour = new Date(e.ts as string).getHours();
+      const key = String(hour).padStart(2, '0') + ':00';
+      const d = dailyMap.get(key)!;
+      d.calls++;
+      if (isBlocked(e)) d.blocked++;
+    }
+  } else {
+    for (const e of entries) {
+      const date = (e.ts as string).slice(0, 10);
+      const d = dailyMap.get(date) || { date, calls: 0, blocked: 0 };
+      d.calls++;
+      if (isBlocked(e)) d.blocked++;
+      dailyMap.set(date, d);
+    }
+  }
+
+  const topToolsMap = new Map<string, number>();
+  const topBlockedMap = new Map<string, number>();
+  for (const e of entries) {
+    const tool = String(e.tool ?? '');
+    topToolsMap.set(tool, (topToolsMap.get(tool) || 0) + 1);
+    if (isBlocked(e)) topBlockedMap.set(tool, (topBlockedMap.get(tool) || 0) + 1);
+  }
+  const top5 = (m: Map<string, number>) =>
+    [...m.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([name, value]) => ({ name, value }));
+
+  const agentMap = new Map<
+    string,
+    { agent: string; total: number; blocked: number; dlp: number }
+  >();
+  for (const e of entries) {
+    const key = (e.agent as string) || 'unknown';
+    const a = agentMap.get(key) ?? { agent: key, total: 0, blocked: 0, dlp: 0 };
+    a.total++;
+    if (isBlocked(e)) a.blocked++;
+    if (checkedBy(e)?.includes('dlp')) a.dlp++;
+    agentMap.set(key, a);
+  }
+
+  return {
+    summary,
+    daily: [...dailyMap.values()].sort((a, b) => a.date.localeCompare(b.date)),
+    topTools: top5(topToolsMap),
+    topBlockedTools: top5(topBlockedMap),
+    byAgent: [...agentMap.values()].sort((a, b) => b.total - a.total),
+  };
+}
+
 export function startDaemon(): void {
   // A4c: a synchronous throw in these inits used to exit the process silently
   // (stdio:'ignore' on the auto-start path). Record it so a startup death is
@@ -716,98 +832,8 @@ export function startDaemon(): void {
           }
         });
 
-        const now = new Date();
-        const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-        let start = new Date(todayStart);
-        if (period === '7d') start.setDate(start.getDate() - 6);
-        else if (period === '30d') start.setDate(start.getDate() - 29);
-        else if (period === 'month') start = new Date(now.getFullYear(), now.getMonth(), 1);
-
-        const entries = allEntries.filter((e) => {
-          if (e.source === 'post-hook' || e.source === 'response-dlp') return false;
-          return new Date(e.ts) >= start;
-        });
-
-        const summary = {
-          total: entries.length,
-          // classifyDecision is THE mapper (audit/decision.ts). The inline
-          // startsWith('allow') this replaces counted every non-allow row as
-          // "blocked" — so DLP findings, MCP-discovery events and, worst, all
-          // the observe-mode "would have blocked" rows inflated the blocked
-          // count with things that were never refusals.
-          allowed: entries.filter((e) => classifyDecision(e).outcome === 'allow').length,
-          blocked: entries.filter((e) => classifyDecision(e).outcome === 'deny').length,
-          dlp: entries.filter((e) => e.checkedBy && e.checkedBy.includes('dlp')).length,
-          loops: entries.filter((e) => e.checkedBy === 'loop-detected').length,
-        };
-
-        // For "today" we group by hour (00-23) so the chart has real shape.
-        // Other periods group by calendar day.
-        const dailyMap = new Map();
-        if (period === 'today') {
-          // Pre-populate 24 hour buckets so the chart always shows a full day
-          for (let h = 0; h < 24; h++) {
-            const key = String(h).padStart(2, '0') + ':00';
-            dailyMap.set(key, { date: key, calls: 0, blocked: 0 });
-          }
-          for (const e of entries) {
-            const hour = new Date(e.ts).getHours();
-            const key = String(hour).padStart(2, '0') + ':00';
-            const d = dailyMap.get(key)!;
-            d.calls++;
-            if (classifyDecision(e).outcome === 'deny') d.blocked++;
-          }
-        } else {
-          for (const e of entries) {
-            const date = e.ts.slice(0, 10);
-            const d = dailyMap.get(date) || { date, calls: 0, blocked: 0 };
-            d.calls++;
-            if (classifyDecision(e).outcome === 'deny') d.blocked++;
-            dailyMap.set(date, d);
-          }
-        }
-
-        const topToolsMap = new Map();
-        const topBlockedMap = new Map();
-        for (const e of entries) {
-          topToolsMap.set(e.tool, (topToolsMap.get(e.tool) || 0) + 1);
-          if (e.decision && !e.decision.startsWith('allow')) {
-            topBlockedMap.set(e.tool, (topBlockedMap.get(e.tool) || 0) + 1);
-          }
-        }
-        const topTools = [...topToolsMap.entries()]
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 5)
-          .map(([name, value]) => ({ name, value }));
-        const topBlockedTools = [...topBlockedMap.entries()]
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 5)
-          .map(([name, value]) => ({ name, value }));
-
-        const agentMap = new Map<
-          string,
-          { agent: string; total: number; blocked: number; dlp: number }
-        >();
-        for (const e of entries) {
-          const key = (e.agent as string) || 'unknown';
-          const a = agentMap.get(key) ?? { agent: key, total: 0, blocked: 0, dlp: 0 };
-          a.total++;
-          if (e.decision && !(e.decision as string).startsWith('allow')) a.blocked++;
-          if ((e.checkedBy as string | undefined)?.includes('dlp')) a.dlp++;
-          agentMap.set(key, a);
-        }
-        const byAgent = [...agentMap.values()].sort((a, b) => b.total - a.total);
-
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(
-          JSON.stringify({
-            summary,
-            daily: [...dailyMap.values()].sort((a, b) => a.date.localeCompare(b.date)),
-            topTools,
-            topBlockedTools,
-            byAgent,
-          })
-        );
+        return res.end(JSON.stringify(buildDaemonReport(allEntries, period, new Date())));
       } catch {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ error: 'Failed to parse report' }));

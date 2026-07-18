@@ -77,10 +77,13 @@ export interface AuditRowLike {
 export function classifyDecision(row: AuditRowLike): DecisionView;
 export function classifyDecision(decision: unknown, checkedBy?: unknown): DecisionView;
 export function classifyDecision(a: unknown, b?: unknown): DecisionView {
-  // A row-shaped first argument carries its own attribution field; anything
-  // else is the legacy (decision, checkedBy) pair.
-  const isRow =
-    !!a && typeof a === 'object' && ('decision' in a || 'checkedBy' in a || 'source' in a);
+  // Any object is a row; anything else is the legacy (decision, checkedBy)
+  // pair. Do NOT sniff for specific keys — an event row
+  // (`{"event":"shield-create"}`) carries none of them, fell through to the
+  // legacy branch, and got stringified into the decision itself, so the MCP
+  // audit reader printed `? [object Object]`. A decision is never an object,
+  // which makes the type alone a sufficient test.
+  const isRow = !!a && typeof a === 'object';
   const decision = isRow ? (a as AuditRowLike).decision : a;
   const attribution = isRow ? ((a as AuditRowLike).checkedBy ?? (a as AuditRowLike).source) : b;
 

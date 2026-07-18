@@ -173,6 +173,18 @@ describe('row form — attribution comes from checkedBy OR source', () => {
     expect(classifyDecision({ decision: 'allow' }).outcome).toBe('allow');
   });
 
+  // Regression: the row detector used to sniff for decision/checkedBy/source
+  // keys. An event row has NONE of them, so it fell through to the legacy
+  // branch and the whole object became the decision — the MCP audit reader
+  // printed `? [object Object]`. 2 such rows in a real log, unfiltered.
+  it('treats a keyless event row as a row, not as a decision value', () => {
+    const eventRow = { ts: '2026-05-10T10:00:00Z', event: 'shield-create', shield: 'gmail' };
+    const v = classifyDecision(eventRow);
+    expect(v.raw).toBe('');
+    expect(v.label).not.toContain('[object Object]');
+    expect(v.outcome).toBe('unknown'); // never an allow
+  });
+
   // A bare string is NOT a row — it must keep taking the legacy path.
   it('still accepts the legacy (decision, checkedBy) pair', () => {
     expect(classifyDecision('deny', 'timeout').label).toBe('Timed out');
