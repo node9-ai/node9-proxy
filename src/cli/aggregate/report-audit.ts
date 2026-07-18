@@ -24,6 +24,7 @@ import { decodeProjectDirName } from '../../costSync';
 import { pricingFor, normalizeModel } from '../../pricing/litellm';
 import { codexSessionCost } from '../../cost-codex';
 import type { BuildReportJsonInput, ReportPeriod } from '../render/report-json';
+import { classifyDecision } from '../../audit/decision';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -301,8 +302,43 @@ function parseAuditLog(logPath: string): AuditEntry[] {
   });
 }
 
-function isAllow(decision: string): boolean {
-  return decision.startsWith('allow');
+/**
+ * How one row counts in this report. The fifth hand-rolled copy of this rule
+ * used to live here as `decision.startsWith('allow')`, which asked only "does
+ * the word begin with allow" and so bucketed everything else as a BLOCK —
+ * including 913 shadow-mode rows that RAN and 5 MCP-discovery events that were
+ * never verdicts at all.
+ *
+ * It cannot simply delegate to `classifyDecision`, because `outcome === 'allow'`
+ * alone is also wrong here: shadow mode writes `allow`/observe-mode-would-block
+ * for actions that ran, and a straight swap would have moved 8,217 of them into
+ * the block path. This report needs THREE questions, not one:
+ *
+ *   ran      — the action executed (a plain allow, or observe mode letting it
+ *              through after flagging it). Never a block.
+ *   blocked  — the action was refused. Only this feeds block counts.
+ *   info     — a finding or a discovery event. Neither; counted as a call but
+ *              never as a verdict.
+ *
+ * `unknown` counts as blocked, preserving the previous fail-toward-visible
+ * behaviour: an unrecognised decision should show up, not vanish into allows.
+ */
+interface RowView {
+  ran: boolean;
+  blocked: boolean;
+  info: boolean;
+  observed: boolean;
+}
+
+function viewOf(e: { decision?: unknown; checkedBy?: unknown; source?: unknown }): RowView {
+  const outcome = classifyDecision(e).outcome;
+  const observed = outcome === 'observe';
+  return {
+    observed,
+    ran: outcome === 'allow' || observed,
+    blocked: outcome === 'deny' || outcome === 'unknown',
+    info: outcome === 'info',
+  };
 }
 
 function isDlp(checkedBy: string | undefined): boolean {
@@ -1063,14 +1099,19 @@ export function aggregateReportFromAudit(
   const periodMs = end.getTime() - start.getTime();
   const priorEnd = new Date(start.getTime() - 1);
   const priorStart = new Date(start.getTime() - periodMs);
+  // The prior-period population must match the current one below, or the trend
+  // arrow compares two different denominators. `response-dlp` and event rows
+  // were previously dropped from the current period only — so the same log
+  // scored a higher block RATE in the past than in the present purely by which
+  // rows each filter let through.
   const priorEntries = allEntries.filter((e) => {
     if (e.source === 'post-hook') return false;
+    if (e.source === 'response-dlp') return false;
+    if (typeof e.decision !== 'string') return false;
     const ts = new Date(e.ts);
     return ts >= priorStart && ts <= priorEnd;
   });
-  const priorBlocked = priorEntries.filter(
-    (e) => typeof e.decision === 'string' && !isAllow(e.decision)
-  ).length;
+  const priorBlocked = priorEntries.filter((e) => viewOf(e).blocked).length;
   const priorBlockRate = priorEntries.length > 0 ? priorBlocked / priorEntries.length : null;
 
   // PreToolUse entries inside the period (post-hook + response-dlp dropped)
@@ -1152,16 +1193,24 @@ export function aggregateReportFromAudit(
     // misattributes a single decision to two different outcomes.
     if (superseded.has(supersedeKey(e))) continue;
 
-    const allow = isAllow(e.decision);
+    const view = viewOf(e);
     const dateKey = e.ts.slice(0, 10);
     const userInteracted = e.source === 'daemon';
 
-    if (userInteracted) {
-      if (allow) userApproved++;
+    // Shadow mode is neither an approval nor a refusal: node9 flagged the
+    // action and it ran anyway. It gets its own counter and is kept out of
+    // every block bucket below.
+    if (view.observed) {
+      if (e.checkedBy === 'observe-mode-dlp-would-block') observeDlp++;
+    } else if (view.info) {
+      // A finding or an MCP-discovery event — not a verdict. These carry
+      // source='daemon', so the branch below would have scored all 5 of them
+      // as the USER denying an action they never saw.
+    } else if (userInteracted) {
+      if (view.ran) userApproved++;
       else userDenied++;
-    } else if (!allow) {
+    } else if (view.blocked) {
       if (e.checkedBy === 'timeout') timedOut++;
-      else if (e.checkedBy === 'observe-mode-dlp-would-block') observeDlp++;
       else if (isDlp(e.checkedBy)) dlpBlocked++;
       // A native-OS popup deny — the user clicked Block. Same intent
       // as a SaaS-approver deny (source=daemon), just a different
@@ -1183,7 +1232,7 @@ export function aggregateReportFromAudit(
     if (cb.includes('would-block') && (cb.includes('pii') || cb.includes('dlp'))) {
       dimDataObserved++;
     }
-    if (!allow && !userInteracted) {
+    if (view.blocked && !userInteracted) {
       switch (dimensionOfBlock(cb, e.ruleName ?? '')) {
         case 'network':
           dimNetworkBlocked++;
@@ -1204,10 +1253,10 @@ export function aggregateReportFromAudit(
 
     const t = toolMap.get(e.tool) ?? { calls: 0, blocked: 0 };
     t.calls++;
-    if (!allow) t.blocked++;
+    if (view.blocked) t.blocked++;
     toolMap.set(e.tool, t);
 
-    if (!allow) {
+    if (view.blocked) {
       // SaaS-approver denials (source=daemon, no checkedBy tag) are
       // user-initiated denies — the same conceptual bucket as native-
       // popup denies (checkedBy=local-decision). Without this fold,
@@ -1220,10 +1269,12 @@ export function aggregateReportFromAudit(
         blockMap.set(key, (blockMap.get(key) ?? 0) + 1);
       }
     }
-    // Specific-rule attribution: only present on smart-rule paths.
-    // Counts both block and review fires (everything that wasn't an
-    // explicit allow).
-    if (!allow && e.ruleName) {
+    // Specific-rule attribution: only present on smart-rule paths. Counts
+    // block and review fires — and observe fires, because a rule that matched
+    // in shadow mode still FIRED; excluding them would make a shield look dead
+    // in exactly the mode you turn on to see whether it works. (No observe row
+    // carries a ruleName today, so this is intent, not a live delta.)
+    if ((view.blocked || view.observed) && e.ruleName) {
       ruleMap.set(e.ruleName, (ruleMap.get(e.ruleName) ?? 0) + 1);
     }
 
@@ -1235,7 +1286,7 @@ export function aggregateReportFromAudit(
 
     const d = dailyMap.get(dateKey) ?? { calls: 0, blocked: 0 };
     d.calls++;
-    if (!allow) d.blocked++;
+    if (view.blocked) d.blocked++;
     dailyMap.set(dateKey, d);
   }
 
