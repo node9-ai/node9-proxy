@@ -747,6 +747,8 @@ export function getConfig(cwd?: string): Config {
   // Shields the dashboard enforces fleet-wide (Managed Config M1). Captured from
   // the rules-cache here and unioned with local shields in the shield layer
   // below — additive/on: a developer can add more locally, never weaken these.
+  // Enforced at the override loop below (`cloudManagedSet`), where a local
+  // per-rule override is skipped for any shield in this set (B1).
   let cloudManagedShields: string[] = [];
   {
     const cacheFile = path.join(os.homedir(), '.node9', 'rules-cache.json');
@@ -968,13 +970,25 @@ export function getConfig(cwd?: string): Config {
   // Local shields ∪ cloud-managed shields (M1). Deduped so a shield enabled both
   // locally and from the dashboard is applied once.
   const activeShieldNames = [...new Set([...readActiveShields(), ...cloudManagedShields])];
+  // B1: a cloud-mandated shield is enforced EXACTLY as the cloud defines it —
+  // local per-rule overrides (`node9 shield set`) do not apply to it, weakening
+  // OR tightening. This is what the comment above the union has always promised
+  // ("a developer can add more locally, never weaken these") and, until this
+  // set existed, did not enforce: the override loop below applied to every
+  // shield in the union, so `node9 shield set redis <rule> allow` weakened a
+  // fleet-mandated redis shield. A shield that is both locally-enabled AND
+  // cloud-mandated resolves to cloud — a mandate is not opt-out-able by having
+  // enabled the same shield first.
+  const cloudManagedSet = new Set(cloudManagedShields);
   for (const shieldName of activeShieldNames) {
     const shield = getShield(shieldName);
     if (!shield) continue;
     // Deduplicate smartRules by name — prevents duplicates if the user also
     // has the same rule name in their config (shouldn't happen, but be safe).
     const existingRuleNames = new Set(mergedPolicy.smartRules.map((r) => r.name));
-    const ruleOverrides = shieldOverrides[shieldName] ?? {};
+    const ruleOverrides = cloudManagedSet.has(shieldName)
+      ? {}
+      : (shieldOverrides[shieldName] ?? {});
     for (const rule of shield.smartRules) {
       if (!existingRuleNames.has(rule.name)) {
         const overrideVerdict = rule.name ? ruleOverrides[rule.name] : undefined;
