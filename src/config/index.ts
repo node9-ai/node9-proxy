@@ -22,6 +22,10 @@ import { normalizeHost } from '../auth/trusted-hosts';
 // the rest of this file reference SmartRule by bare name.
 export type { SmartCondition, SmartRule } from '@node9/policy-engine';
 import type { SmartRule } from '@node9/policy-engine';
+// The trusted shield catalog. A cloud-mandated shield resolves its body from
+// here directly, never a user ~/.node9/shields/<name>.json that shadows the
+// builtin (B1: a mandate's rules must come from the fleet, not the dev's file).
+import { BUILTIN_SHIELDS } from '@node9/policy-engine';
 
 export interface EnvironmentConfig {
   requireApproval?: boolean;
@@ -753,6 +757,12 @@ export function getConfig(cwd?: string): Config {
   // Enforced at the override loop below (`cloudManagedSet`), where a local
   // per-rule override is skipped for any shield in this set (B1).
   let cloudManagedShields: string[] = [];
+  // B1 (#1): true once the cloud has SET or LOCKED the mode. When true, the
+  // NODE9_MODE env var (applied last, below) must not override it — otherwise a
+  // single `NODE9_MODE=observe` defeats a `locked:['mode']` mandate and turns
+  // every block into a would-block. Where the cloud hasn't spoken, the env var
+  // stays a dev convenience.
+  let modeCloudControlled = false;
   {
     const cacheFile = path.join(os.homedir(), '.node9', 'rules-cache.json');
     try {
@@ -811,6 +821,11 @@ export function getConfig(cwd?: string): Config {
             mc.mode,
             locked.includes('mode')
           );
+        }
+        // The cloud has spoken about mode iff it set one or locked it — NODE9_MODE
+        // must not override either (B1 #1).
+        if (typeof mc.mode === 'string' || locked.includes('mode')) {
+          modeCloudControlled = true;
         }
         // M2b + Step 2: policy.egress. enabled force-on; mode off<review<block;
         // allow replaces local; deny unions; allowPrivate floor boolean.
@@ -984,26 +999,34 @@ export function getConfig(cwd?: string): Config {
   // enabled the same shield first.
   const cloudManagedSet = new Set(cloudManagedShields);
   for (const shieldName of activeShieldNames) {
-    const shield = getShield(shieldName);
+    const isCloudMandated = cloudManagedSet.has(shieldName);
+    // B1 (#2): a cloud-mandated shield resolves its BODY from the trusted
+    // builtin catalog, never getShield() — which returns a user
+    // ~/.node9/shields/<name>.json shadowing the same name (its rules could be
+    // empty or all-allow). A local/self-enabled shield keeps full user-shadow
+    // power (power-user customisation); only a mandate is locked to the fleet.
+    const shield = isCloudMandated
+      ? (BUILTIN_SHIELDS[shieldName] ?? getShield(shieldName))
+      : getShield(shieldName);
     if (!shield) continue;
     // Deduplicate smartRules by name — prevents duplicates if the user also
     // has the same rule name in their config.
     const existingRuleNames = new Set(mergedPolicy.smartRules.map((r) => r.name));
-    const isCloudMandated = cloudManagedSet.has(shieldName);
     const ruleOverrides = isCloudMandated ? {} : (shieldOverrides[shieldName] ?? {});
     for (const rule of shield.smartRules) {
       const collides = rule.name ? existingRuleNames.has(rule.name) : false;
-      // B1 (part 2): a cloud-mandated shield rule must WIN a name collision.
-      // User config (global config.json AND a repo-checked-in project
-      // node9.config.json) is merged into mergedPolicy.smartRules *before* this
-      // loop, so a rule named `shield:redis:block-flushall` verdict `allow`
-      // would otherwise SUPPRESS the shield's block version as a "duplicate" —
-      // the config.json twin of the `node9 shield set` override hole, and worse
-      // because a cloned repo can carry it. Drop the pre-empting rule and
-      // install the cloud verdict.
-      if (isCloudMandated && collides) {
-        mergedPolicy.smartRules = mergedPolicy.smartRules.filter((r) => r.name !== rule.name);
-        mergedPolicy.smartRules.push(rule);
+      if (isCloudMandated) {
+        // A mandate is un-weakenable. Its rule WINS a name collision (part 2 —
+        // a config.json twin of `node9 shield set`, and worse because a cloned
+        // repo can carry it) AND is PINNED (#1): the engine's resolvePinned
+        // makes the strictest pinned verdict win regardless of array order, so
+        // a DIFFERENTLY-named local `allow` rule sitting earlier in smartRules
+        // can no longer out-precede the shield's `block` (the first-match hole
+        // the earlier B1 review wrongly believed closed).
+        if (collides) {
+          mergedPolicy.smartRules = mergedPolicy.smartRules.filter((r) => r.name !== rule.name);
+        }
+        mergedPolicy.smartRules.push({ ...rule, pinned: true });
       } else if (!collides) {
         const overrideVerdict = rule.name ? ruleOverrides[rule.name] : undefined;
         mergedPolicy.smartRules.push(
@@ -1024,7 +1047,29 @@ export function getConfig(cwd?: string): Config {
     if (!existingAdvisoryNames.has(rule.name)) mergedPolicy.smartRules.push(rule);
   }
 
-  if (process.env.NODE9_MODE) mergedSettings.mode = process.env.NODE9_MODE as string;
+  // NODE9_MODE is a local dev convenience — honoured only when the cloud hasn't
+  // set/locked the mode (B1 #1), and only for a valid value (a garbage value was
+  // previously stored verbatim and then enforced).
+  const envMode = process.env.NODE9_MODE;
+  if (
+    envMode &&
+    !modeCloudControlled &&
+    (['observe', 'audit', 'standard', 'strict'] as const).includes(envMode as never)
+  ) {
+    mergedSettings.mode = envMode;
+  }
+
+  // B1 (#3/#5/#6): local ignoredTools / sandboxPaths must not fast-path a tool
+  // to allow BEFORE a mandated shield runs (the engine's ignored-tool and
+  // sandbox short-circuits return allow ahead of the smart-rule tier). When the
+  // fleet mandates shields, discard local (global + repo-carried) additions and
+  // keep only the safe read-only defaults — a coarse but absolute guard, matching
+  // the mandate-is-not-opt-out-able principle. A dev loses custom local ignores
+  // ONLY while their org mandates shields.
+  if (cloudManagedShields.length > 0) {
+    mergedPolicy.ignoredTools = [...DEFAULT_CONFIG.policy.ignoredTools];
+    mergedPolicy.sandboxPaths = [...DEFAULT_CONFIG.policy.sandboxPaths];
+  }
 
   mergedPolicy.sandboxPaths = [...new Set(mergedPolicy.sandboxPaths)];
   mergedPolicy.dangerousWords = [...new Set(mergedPolicy.dangerousWords)];

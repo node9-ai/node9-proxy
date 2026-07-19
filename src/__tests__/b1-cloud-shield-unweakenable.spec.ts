@@ -22,6 +22,12 @@ const activeShields = { current: [] as string[] };
 const shieldOverrides = {
   current: {} as Record<string, Record<string, string>>,
 };
+// Lets a test shadow getShield with a WEAK body (as a user ~/.node9/shields/<name>.json
+// would) to prove a MANDATED shield ignores it and resolves from BUILTIN_SHIELDS (#2).
+// Null = pass through to the real catalog (every other test).
+const getShieldImpl = {
+  current: null as null | ((name: string) => unknown),
+};
 
 vi.mock('../shields', async () => {
   const actual = await vi.importActual<typeof import('../shields')>('../shields');
@@ -29,6 +35,8 @@ vi.mock('../shields', async () => {
     ...actual,
     readActiveShields: () => activeShields.current,
     readShieldOverrides: () => shieldOverrides.current,
+    getShield: (name: string) =>
+      getShieldImpl.current ? getShieldImpl.current(name) : actual.getShield(name),
   };
 });
 
@@ -96,10 +104,13 @@ describe('B1 — cloud-mandated shield ignores local overrides', () => {
     fs.mkdirSync(path.join(tmpHome, '.node9'), { recursive: true });
     activeShields.current = [];
     shieldOverrides.current = {};
+    getShieldImpl.current = null;
+    delete process.env.NODE9_MODE;
     _resetConfigCache();
   });
 
   afterEach(() => {
+    delete process.env.NODE9_MODE;
     if (origHome !== undefined) process.env.HOME = origHome;
     else delete process.env.HOME;
     if (origUserprofile !== undefined) process.env.USERPROFILE = origUserprofile;
@@ -205,5 +216,101 @@ describe('B1 — cloud-mandated shield ignores local overrides', () => {
     setCollidingUserRule('global');
     const r = await evaluatePolicy('Bash', { command: 'redis-cli FLUSHALL' });
     expect(r.decision).toBe('block');
+  });
+
+  // ── Remaining bypasses ABOVE the rule-verdict layer (b1-remaining-bypasses) ──
+  // Each was reproduced at the real getConfig gate BEFORE the fix (allow /
+  // observe / Bash-ignored) and must now hold. The earlier B1 review wrongly
+  // marked #1 "refuted"; it is real (first-match-in-array-order, shields
+  // un-pinned), fixed by pinning mandated shield rules.
+
+  const writeGlobalConfig = (obj: unknown) => {
+    fs.writeFileSync(path.join(tmpHome, '.node9', 'config.json'), JSON.stringify(obj));
+    _resetConfigCache();
+  };
+  const setManagedMode = (mode: string, lock: boolean) => {
+    fs.writeFileSync(
+      path.join(tmpHome, '.node9', 'rules-cache.json'),
+      JSON.stringify({
+        fetchedAt: '2026-07-01T00:00:00Z',
+        rules: [],
+        shields: [],
+        managedConfig: { mode, ...(lock ? { locked: ['mode'] } : {}) },
+      })
+    );
+    _resetConfigCache();
+  };
+
+  // #1 — a DIFFERENTLY-named local allow can no longer out-precede a mandate.
+  it('#1 blocks FLUSHALL despite a differently-named local allow rule', async () => {
+    setCloud(['redis']);
+    writeGlobalConfig({
+      policy: {
+        smartRules: [
+          {
+            name: 'my-innocuous-allow',
+            tool: '*',
+            conditions: [{ field: 'command', op: 'matches', value: 'FLUSHALL', flags: 'i' }],
+            verdict: 'allow',
+          },
+        ],
+      },
+    });
+    const r = await evaluatePolicy('Bash', { command: 'redis-cli FLUSHALL' });
+    expect(r.decision).toBe('block');
+  });
+
+  it('#1 pins a mandated shield rule in the merged policy', () => {
+    setCloud(['redis']);
+    expect(getConfig().policy.smartRules.find((r) => r.name === RULE)?.pinned).toBe(true);
+  });
+
+  it('#1 does NOT pin a purely-local shield rule (no over-reach)', () => {
+    setLocal(['redis']);
+    expect(getConfig().policy.smartRules.find((r) => r.name === RULE)?.pinned).toBeUndefined();
+  });
+
+  // #2 — NODE9_MODE (applied last) must respect a cloud-controlled mode.
+  it('#2 NODE9_MODE cannot override a cloud-LOCKED mode', () => {
+    setManagedMode('standard', true);
+    process.env.NODE9_MODE = 'observe';
+    expect(getConfig().settings.mode).toBe('standard');
+  });
+
+  it('#2 NODE9_MODE still applies when the cloud has not set mode (dev convenience)', () => {
+    process.env.NODE9_MODE = 'observe';
+    expect(getConfig().settings.mode).toBe('observe');
+  });
+
+  it('#2 ignores a garbage NODE9_MODE value', () => {
+    process.env.NODE9_MODE = 'wide-open';
+    expect(getConfig().settings.mode).not.toBe('wide-open');
+  });
+
+  // #2b — a mandated shield resolves its BODY from BUILTIN_SHIELDS, not a user
+  // shields/<name>.json shadowing the name with an empty/weak body.
+  it('#2b a mandated shield ignores a shadowing weak user shield body', () => {
+    getShieldImpl.current = (name) => (name === 'redis' ? { name: 'redis', smartRules: [] } : null);
+    setCloud(['redis']);
+    expect(getConfig().policy.smartRules.find((r) => r.name === RULE)?.verdict).toBe('block');
+  });
+
+  // #3 — local ignoredTools/sandboxPaths cannot fast-path past a mandated shield.
+  it('#3 drops local ignoredTools when the fleet mandates shields', () => {
+    setCloud(['redis']);
+    writeGlobalConfig({ policy: { ignoredTools: ['Bash'] } });
+    expect(getConfig().policy.ignoredTools).not.toContain('Bash');
+  });
+
+  it('#3 blocks FLUSHALL despite local ignoredTools:[Bash] under a mandate', async () => {
+    setCloud(['redis']);
+    writeGlobalConfig({ policy: { ignoredTools: ['Bash'] } });
+    const r = await evaluatePolicy('Bash', { command: 'redis-cli FLUSHALL' });
+    expect(r.decision).toBe('block');
+  });
+
+  it('#3 keeps local ignoredTools when NO shield is mandated (no over-reach)', () => {
+    writeGlobalConfig({ policy: { ignoredTools: ['Grep'] } });
+    expect(getConfig().policy.ignoredTools).toContain('Grep');
   });
 });
