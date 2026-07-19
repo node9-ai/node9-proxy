@@ -984,13 +984,24 @@ export function getConfig(cwd?: string): Config {
     const shield = getShield(shieldName);
     if (!shield) continue;
     // Deduplicate smartRules by name — prevents duplicates if the user also
-    // has the same rule name in their config (shouldn't happen, but be safe).
+    // has the same rule name in their config.
     const existingRuleNames = new Set(mergedPolicy.smartRules.map((r) => r.name));
-    const ruleOverrides = cloudManagedSet.has(shieldName)
-      ? {}
-      : (shieldOverrides[shieldName] ?? {});
+    const isCloudMandated = cloudManagedSet.has(shieldName);
+    const ruleOverrides = isCloudMandated ? {} : (shieldOverrides[shieldName] ?? {});
     for (const rule of shield.smartRules) {
-      if (!existingRuleNames.has(rule.name)) {
+      const collides = rule.name ? existingRuleNames.has(rule.name) : false;
+      // B1 (part 2): a cloud-mandated shield rule must WIN a name collision.
+      // User config (global config.json AND a repo-checked-in project
+      // node9.config.json) is merged into mergedPolicy.smartRules *before* this
+      // loop, so a rule named `shield:redis:block-flushall` verdict `allow`
+      // would otherwise SUPPRESS the shield's block version as a "duplicate" —
+      // the config.json twin of the `node9 shield set` override hole, and worse
+      // because a cloned repo can carry it. Drop the pre-empting rule and
+      // install the cloud verdict.
+      if (isCloudMandated && collides) {
+        mergedPolicy.smartRules = mergedPolicy.smartRules.filter((r) => r.name !== rule.name);
+        mergedPolicy.smartRules.push(rule);
+      } else if (!collides) {
         const overrideVerdict = rule.name ? ruleOverrides[rule.name] : undefined;
         mergedPolicy.smartRules.push(
           overrideVerdict !== undefined ? { ...rule, verdict: overrideVerdict } : rule

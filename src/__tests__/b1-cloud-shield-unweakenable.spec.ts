@@ -62,9 +62,30 @@ describe('B1 — cloud-mandated shield ignores local overrides', () => {
     _resetConfigCache();
   };
 
-  /** The enforced verdict for RULE, read off the merged policy. */
-  const enforcedVerdict = (): string | undefined =>
-    getConfig().policy.smartRules.find((r) => r.name === RULE)?.verdict;
+  /** A user rule that COLLIDES with the shield's rule name, verdict allow. The
+   *  second B1 hole: this used to suppress the cloud shield's block rule as a
+   *  "duplicate". `where` = 'global' (~/.node9/config.json) or 'project'
+   *  (a repo-checked-in node9.config.json — the supply-chain vector). */
+  const setCollidingUserRule = (where: 'global' | 'project') => {
+    const rule = {
+      name: RULE,
+      tool: '*',
+      conditions: [{ field: 'command', op: 'matches', value: 'FLUSHALL', flags: 'i' }],
+      verdict: 'allow',
+    };
+    const body = JSON.stringify({ policy: { smartRules: [rule] } });
+    const file =
+      where === 'global'
+        ? path.join(tmpHome, '.node9', 'config.json')
+        : path.join(tmpHome, 'node9.config.json');
+    fs.writeFileSync(file, body);
+    _resetConfigCache();
+  };
+
+  /** The enforced verdict for RULE, read off the merged policy. `cwd` is needed
+   *  for the project-config case, whose path is cwd-relative. */
+  const enforcedVerdict = (cwd?: string): string | undefined =>
+    getConfig(cwd).policy.smartRules.find((r) => r.name === RULE)?.verdict;
 
   beforeEach(() => {
     tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-b1-'));
@@ -129,6 +150,35 @@ describe('B1 — cloud-mandated shield ignores local overrides', () => {
     expect(enforcedVerdict()).toBe('block');
   });
 
+  // ── Part 2: the name-collision hole (found in review of the part-1 commit) ─
+  // User config is merged into the policy BEFORE the shield loop, so a rule
+  // named exactly like a shield rule used to SUPPRESS the shield's version as a
+  // "duplicate". Part 1 (no override) did not close this — the rule never
+  // reached the override path; it pre-empted it.
+  it('a global config.json rule cannot suppress a cloud shield rule', () => {
+    setCloud(['redis']);
+    setCollidingUserRule('global');
+    expect(enforcedVerdict()).toBe('block');
+  });
+
+  // The higher-severity vector: NOT self-inflicted. A cloned repo ships a
+  // node9.config.json naming a fleet-mandated shield rule; running an agent in
+  // that directory would weaken the victim's cloud mandate.
+  it('a repo project node9.config.json cannot suppress a cloud shield rule', () => {
+    setCloud(['redis']);
+    setCollidingUserRule('project');
+    expect(enforcedVerdict(tmpHome)).toBe('block');
+  });
+
+  // A local (non-cloud) shield keeps today's behaviour: the user owns both
+  // their local shield and their config, so a same-named config rule may still
+  // win. The fix must not over-reach into legitimate local composition.
+  it('a config rule still wins over a purely-LOCAL shield rule (no over-reach)', () => {
+    setLocal(['redis']);
+    setCollidingUserRule('global');
+    expect(enforcedVerdict()).toBe('allow');
+  });
+
   // ── At the real gate ──────────────────────────────────────────────────────
   // Reading the merged verdict field is the merge output; this proves the
   // ENGINE acts on it. A FLUSHALL, with the shield cloud-mandated and a local
@@ -146,5 +196,14 @@ describe('B1 — cloud-mandated shield ignores local overrides', () => {
     setLocal(['redis'], { redis: { [RULE]: 'allow' } });
     const r = await evaluatePolicy('Bash', { command: 'redis-cli FLUSHALL' });
     expect(r.decision).not.toBe('block');
+  });
+
+  // The collision hole, at the gate: a global config rule that suppressed the
+  // shield rule must NOT let FLUSHALL through once the shield is cloud-mandated.
+  it('blocks FLUSHALL through the engine despite a colliding config rule', async () => {
+    setCloud(['redis']);
+    setCollidingUserRule('global');
+    const r = await evaluatePolicy('Bash', { command: 'redis-cli FLUSHALL' });
+    expect(r.decision).toBe('block');
   });
 });
