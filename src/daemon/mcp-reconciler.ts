@@ -8,11 +8,19 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { inventoryMcp, toGateway, fromGateway, writeMcpEntry, type McpEntry } from '../mcp-wrap';
+import {
+  inventoryMcp,
+  inventoryServerKeys,
+  toGateway,
+  fromGateway,
+  writeMcpEntry,
+  type McpEntry,
+} from '../mcp-wrap';
 import { sendDesktopNotification } from '../ui/native';
 import { getConfig, getCredentials } from '../config';
 import { auditLocalAllow } from '../auth/cloud';
 import { appendToLog, HOOK_DEBUG_LOG } from '../audit/index.js';
+import { readMcpPins, writeMcpPins, type PinsFile } from '../mcp-pin';
 
 const BASELINE_FILE = path.join(os.homedir(), '.node9', 'mcp-baseline.json');
 const BASELINE_CAP = 500;
@@ -114,6 +122,10 @@ export function runMcpReconcile(): void {
 
   const baseline = loadBaseline();
   const creds = getCredentials(); // once per pass (fix #10)
+
+  // ── Orphan detection + stale removal (runs every tick, before early-return) ──
+  reconcileStale(inv, creds);
+
   const fresh = inv.filter((e) => e.state === 'ungoverned' && !baseline.has(idKey(e)));
   if (fresh.length === 0) return;
 
@@ -161,6 +173,90 @@ export function runMcpReconcile(): void {
     );
   }
   saveBaseline(baseline);
+}
+
+const DEFAULT_STALE_DAYS = 7;
+
+/** Stamp lastSeen on active pins, auto-remove pins stale beyond threshold. */
+export function reconcileStale(
+  inv: McpEntry[],
+  creds: { apiKey: string; apiUrl: string } | null
+): void {
+  let pins: PinsFile;
+  try {
+    pins = readMcpPins();
+  } catch {
+    return; // corrupt pin file — don't crash the daemon
+  }
+  const serverKeys = Object.keys(pins.servers);
+  if (serverKeys.length === 0) return;
+
+  const liveKeys = inventoryServerKeys(inv);
+  const now = new Date().toISOString();
+  let dirty = false;
+
+  for (const sk of serverKeys) {
+    const pin = pins.servers[sk];
+    if (liveKeys.has(sk)) {
+      if (pin.lastSeen !== now) {
+        pin.lastSeen = now;
+        dirty = true;
+      }
+    } else if (!pin.lastSeen) {
+      pin.lastSeen = pin.pinnedAt;
+      dirty = true;
+    }
+  }
+
+  const staleDays = getConfig().settings.mcpStaleAfterDays ?? DEFAULT_STALE_DAYS;
+  if (staleDays > 0) {
+    const staleMs = staleDays * 86_400_000;
+    for (const sk of serverKeys) {
+      const pin = pins.servers[sk];
+      if (liveKeys.has(sk)) continue;
+      const age = Date.now() - Date.parse(pin.lastSeen ?? pin.pinnedAt);
+      if (age >= staleMs) {
+        appendToLog(HOOK_DEBUG_LOG, {
+          event: 'mcp-pin-auto-removed',
+          serverKey: sk,
+          label: pin.label,
+          lastSeen: pin.lastSeen,
+          pinnedAt: pin.pinnedAt,
+        });
+        if (creds) {
+          try {
+            void auditLocalAllow(
+              `mcp-server:${sk}`,
+              {
+                serverKey: sk,
+                label: pin.label,
+                lastSeen: pin.lastSeen,
+                reason: 'stale',
+                staleDays,
+              },
+              'mcp-server-removed',
+              creds,
+              { mcpServer: pin.label },
+              undefined,
+              false
+            );
+          } catch {
+            /* cloud reporting must never affect the reconcile */
+          }
+        }
+        delete pins.servers[sk];
+        dirty = true;
+      }
+    }
+  }
+
+  if (dirty) {
+    try {
+      writeMcpPins(pins);
+    } catch {
+      /* never crash daemon on a pin write */
+    }
+  }
 }
 
 /** Start the reconcile loop: once at daemon start, then on the configured

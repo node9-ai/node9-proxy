@@ -54,6 +54,8 @@ export interface Config {
     /** Reconcile scan cadence in minutes (default 60, clamp 5-1440). A managed
      *  value from the dashboard overrides this. */
     mcpReconcileIntervalMinutes?: number;
+    /** Days before an orphaned MCP pin is auto-removed (default 7, 0 = never). */
+    mcpStaleAfterDays?: number;
     /** Outbox shipper (audit.log → SaaS batch ingest). */
     shipper: { enabled: boolean; intervalSeconds: number };
     hud?: {
@@ -634,6 +636,7 @@ export function getConfig(cwd?: string): Config {
     if (s.mcpAutoWrap !== undefined) mergedSettings.mcpAutoWrap = s.mcpAutoWrap === true;
     if (s.mcpReconcileIntervalMinutes !== undefined)
       mergedSettings.mcpReconcileIntervalMinutes = s.mcpReconcileIntervalMinutes;
+    if (s.mcpStaleAfterDays !== undefined) mergedSettings.mcpStaleAfterDays = s.mcpStaleAfterDays;
     if (s.hud !== undefined) mergedSettings.hud = { ...mergedSettings.hud, ...s.hud };
 
     if (p.sandboxPaths) mergedPolicy.sandboxPaths.push(...p.sandboxPaths);

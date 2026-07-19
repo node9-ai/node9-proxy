@@ -26,6 +26,8 @@ export interface PinEntry {
   toolCount: number;
   /** ISO 8601 timestamp of when the pin was created */
   pinnedAt: string;
+  /** ISO 8601 timestamp of when the reconciler last saw this server in agent configs */
+  lastSeen?: string;
 }
 
 export interface PinsFile {
@@ -163,7 +165,7 @@ function writePinsFile(filePath: string, data: PinsFile): void {
 }
 
 /** Atomic write of the home pin registry. */
-function writeMcpPins(data: PinsFile): void {
+export function writeMcpPins(data: PinsFile): void {
   writePinsFile(getHomePinsFilePath(), data);
 }
 

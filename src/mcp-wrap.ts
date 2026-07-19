@@ -9,6 +9,7 @@ import os from 'os';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import { AGENT_SPECS, readMcpServers, type McpServer, type McpFormat } from './agent-wiring';
 import { tokenize, quoteArg } from './mcp-cmd';
+import { getServerKey } from './mcp-pin';
 export type { McpServer, McpFormat } from './agent-wiring';
 export { tokenize } from './mcp-cmd';
 
@@ -110,6 +111,33 @@ export function inventoryMcp(home: string = os.homedir()): McpEntry[] {
     }
   }
   return out;
+}
+
+/**
+ * Derive the set of serverKeys (pin identities) from an inventory snapshot.
+ * For gatewayed entries: hashes the --upstream value (matching how the gateway pins).
+ * For ungoverned entries: hashes the upstream string the gateway WOULD build on
+ * wrapping — which is `toGateway`'s `[command, ...args].map(quoteArg).join(' ')`,
+ * NOT a naive join. A naive join diverges the moment an arg needs quoting (a path
+ * with a space), producing a different serverKey than the pin the gateway created,
+ * so a still-configured server would look orphaned. Used by both the reconciler
+ * and the CLI forget command.
+ */
+export function inventoryServerKeys(inv: McpEntry[]): Set<string> {
+  const keys = new Set<string>();
+  for (const e of inv) {
+    if (e.state === 'gatewayed') {
+      const i = e.args.indexOf('--upstream');
+      if (i >= 0 && e.args[i + 1]) {
+        keys.add(getServerKey(e.args[i + 1]));
+      }
+    } else if (e.state === 'ungoverned') {
+      // Mirror toGateway exactly — quoteArg each token before joining.
+      const cmd = [e.command, ...e.args].map(quoteArg).join(' ');
+      keys.add(getServerKey(cmd));
+    }
+  }
+  return keys;
 }
 
 /**
