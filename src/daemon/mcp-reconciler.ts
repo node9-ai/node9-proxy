@@ -209,7 +209,13 @@ export function reconcileStale(
   }
 
   const staleDays = getConfig().settings.mcpStaleAfterDays ?? DEFAULT_STALE_DAYS;
-  if (staleDays > 0) {
+  // A1: only auto-remove when we POSITIVELY saw live servers this tick. An empty
+  // liveKeys can't distinguish "no servers configured" from "every agent config
+  // was unreadable" — and a wrongly-removed pin re-pins to whatever tools the
+  // server presents next, silently resetting the rug-pull baseline. Fail closed:
+  // keep the pins (lastSeen was still stamped/backfilled above; they age out
+  // once inventory reads cleanly again).
+  if (staleDays > 0 && liveKeys.size > 0) {
     const staleMs = staleDays * 86_400_000;
     for (const sk of serverKeys) {
       const pin = pins.servers[sk];

@@ -13,6 +13,7 @@ vi.mock('../ui/native', () => ({
 describe('mcp lifecycle — stale detection & removal', () => {
   let home: string;
   let runMcpReconcile: () => void;
+  let forgetAllStale: () => void;
   let getServerKey: typeof import('../mcp-pin').getServerKey;
   let quoteArg: typeof import('../mcp-cmd').quoteArg;
 
@@ -40,6 +41,7 @@ describe('mcp lifecycle — stale detection & removal', () => {
     const pinMod = await import('../mcp-pin.js');
     getServerKey = pinMod.getServerKey;
     quoteArg = (await import('../mcp-cmd.js')).quoteArg;
+    forgetAllStale = (await import('../cli/commands/mcp-pin.js')).forgetAllStale;
   });
   afterEach(() => {
     fs.rmSync(home, { recursive: true, force: true });
@@ -70,15 +72,16 @@ describe('mcp lifecycle — stale detection & removal', () => {
     expect(new Date(pins.servers[sk].lastSeen).getTime()).toBeGreaterThan(Date.parse('2026-01-01'));
   });
 
-  it('does NOT remove orphan pins within the grace period', () => {
+  // A live server keeps the inventory non-empty, so removal genuinely runs and
+  // this exercises the grace period — not the A1 empty-inventory guard (which
+  // would keep the pin for a different reason).
+  it('does NOT remove an orphan pin within the grace period', () => {
     writeConfig({ mode: 'standard', mcpStaleAfterDays: 7 });
-    const upstreamCmd = 'npx old-server';
-    const sk = getServerKey(upstreamCmd);
-    // Pin exists but server was removed from config recently (lastSeen = 2 days ago)
+    const sk = getServerKey('npx old-server');
     const twoDaysAgo = new Date(Date.now() - 2 * 86_400_000).toISOString();
     writePins({
       [sk]: {
-        label: upstreamCmd,
+        label: 'npx old-server',
         toolsHash: 'abc',
         toolNames: ['tool1'],
         toolCount: 1,
@@ -86,22 +89,19 @@ describe('mcp lifecycle — stale detection & removal', () => {
         lastSeen: twoDaysAgo,
       },
     });
-    writeClaude({}); // empty — server is gone from config
+    writeClaude({ live: { command: 'npx', args: ['live-server'] } });
 
     runMcpReconcile();
-    const pins = readPins();
-    expect(pins.servers[sk]).toBeDefined(); // still present, within grace period
+    expect(readPins().servers[sk]).toBeDefined(); // within grace
   });
 
-  it('auto-removes orphan pins beyond the grace period', () => {
+  it('auto-removes an orphan pin beyond the grace period (live server present)', () => {
     writeConfig({ mode: 'standard', mcpStaleAfterDays: 7 });
-    const upstreamCmd = 'npx old-server';
-    const sk = getServerKey(upstreamCmd);
-    // Pin exists, lastSeen = 10 days ago (beyond 7-day threshold)
+    const sk = getServerKey('npx old-server');
     const tenDaysAgo = new Date(Date.now() - 10 * 86_400_000).toISOString();
     writePins({
       [sk]: {
-        label: upstreamCmd,
+        label: 'npx old-server',
         toolsHash: 'abc',
         toolNames: ['tool1'],
         toolCount: 1,
@@ -109,11 +109,34 @@ describe('mcp lifecycle — stale detection & removal', () => {
         lastSeen: tenDaysAgo,
       },
     });
-    writeClaude({}); // server gone from config
+    writeClaude({ live: { command: 'npx', args: ['live-server'] } });
 
     runMcpReconcile();
-    const pins = readPins();
-    expect(pins.servers[sk]).toBeUndefined(); // removed
+    expect(readPins().servers[sk]).toBeUndefined(); // removed
+  });
+
+  // A1: an EMPTY inventory (no live server detected — a missing/unreadable agent
+  // config is indistinguishable from "no servers configured") must NOT trigger
+  // removal, even beyond the grace period. A wrongly-removed pin re-pins to
+  // whatever the server presents next, silently resetting the rug-pull baseline.
+  it('does NOT auto-remove when the inventory is empty (A1 fail-closed)', () => {
+    writeConfig({ mode: 'standard', mcpStaleAfterDays: 7 });
+    const sk = getServerKey('npx gone-server');
+    const tenDaysAgo = new Date(Date.now() - 10 * 86_400_000).toISOString();
+    writePins({
+      [sk]: {
+        label: 'npx gone-server',
+        toolsHash: 'abc',
+        toolNames: ['tool1'],
+        toolCount: 1,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+        lastSeen: tenDaysAgo,
+      },
+    });
+    writeClaude({}); // EMPTY inventory — can't confirm the server is gone
+
+    runMcpReconcile();
+    expect(readPins().servers[sk]).toBeDefined(); // kept
   });
 
   it('respects mcpStaleAfterDays=0 (never auto-remove)', () => {
@@ -234,5 +257,65 @@ describe('mcp lifecycle — stale detection & removal', () => {
     expect(pins.servers[activeSk]).toBeDefined();
     expect(pins.servers[activeSk].lastSeen).toBeDefined();
     expect(pins.servers[staleSk]).toBeUndefined(); // removed (stale > 7d)
+  });
+
+  // ── `node9 mcp forget --stale` (forgetAllStale) ─────────────────────────────
+  const pinBody = (label: string) => ({
+    label,
+    toolsHash: 'abc',
+    toolNames: ['tool1'],
+    toolCount: 1,
+    pinnedAt: '2026-01-01T00:00:00.000Z',
+  });
+
+  it('forget --stale removes an orphan when a live server is present', () => {
+    writeConfig({ mode: 'standard' });
+    const orphan = getServerKey('npx old-server');
+    writePins({ [orphan]: pinBody('npx old-server') });
+    writeClaude({ live: { command: 'npx', args: ['live-server'] } });
+
+    forgetAllStale();
+    expect(readPins().servers[orphan]).toBeUndefined();
+  });
+
+  // A1 at the manual path: an empty inventory must NOT wipe every pin — it exits
+  // non-zero and keeps them (a wrongly-forgotten pin resets the rug-pull baseline
+  // on the server's next connection).
+  it('forget --stale refuses to wipe pins when the inventory is empty (A1)', () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('process.exit');
+    }) as never);
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    writeConfig({ mode: 'standard' });
+    const orphan = getServerKey('npx gone-server');
+    writePins({ [orphan]: pinBody('npx gone-server') });
+    writeClaude({}); // EMPTY inventory
+
+    expect(() => forgetAllStale()).toThrow('process.exit');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(readPins().servers[orphan]).toBeDefined(); // kept, not wiped
+    errSpy.mockRestore();
+    exitSpy.mockRestore();
+  });
+
+  // B1: removing N orphans is one read-modify-write, not N. Functionally, all
+  // orphans go and the live server's pin stays — in a single pass.
+  it('forget --stale removes all orphans and keeps the live one', () => {
+    writeConfig({ mode: 'standard' });
+    const orphanA = getServerKey('npx old-a');
+    const orphanB = getServerKey('npx old-b');
+    const live = getServerKey('npx live-server'); // matches the config below
+    writePins({
+      [orphanA]: pinBody('npx old-a'),
+      [orphanB]: pinBody('npx old-b'),
+      [live]: pinBody('npx live-server'),
+    });
+    writeClaude({ live: { command: 'npx', args: ['live-server'] } });
+
+    forgetAllStale();
+    const servers = readPins().servers;
+    expect(servers[orphanA]).toBeUndefined();
+    expect(servers[orphanB]).toBeUndefined();
+    expect(servers[live]).toBeDefined();
   });
 });
