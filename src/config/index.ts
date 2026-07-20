@@ -662,12 +662,18 @@ export function getConfig(cwd?: string): Config {
       // override the default (user rule wins), rather than stacking on top of it.
       // This prevents rules 1-N in DEFAULT_CONFIG from appearing twice when a user's
       // config.json was seeded with the same rule names.
-      const userRuleNames = new Set(p.smartRules.filter((r) => r.name).map((r) => r.name));
+      // B1 (#3): local rules may never be `pinned` — pinning is a
+      // cloud-mandate-only property (a pinned local `allow` would compete with a
+      // cloud rule in the engine's resolvePinned). zod already drops the unknown
+      // key in sanitizeConfig, but strip it explicitly so this security property
+      // survives a future schema change (a `.passthrough()` or an added field).
+      const localRules = p.smartRules.map(({ pinned: _pinned, ...r }) => r);
+      const userRuleNames = new Set(localRules.filter((r) => r.name).map((r) => r.name));
       const filteredBlocks = defaultBlocks.filter((r) => !r.name || !userRuleNames.has(r.name));
       const filteredNonBlocks = defaultNonBlocks.filter(
         (r) => !r.name || !userRuleNames.has(r.name)
       );
-      mergedPolicy.smartRules = [...filteredBlocks, ...p.smartRules, ...filteredNonBlocks];
+      mergedPolicy.smartRules = [...filteredBlocks, ...localRules, ...filteredNonBlocks];
     }
     if (p.snapshot) {
       const s = p.snapshot as Partial<Config['policy']['snapshot']>;
@@ -763,6 +769,10 @@ export function getConfig(cwd?: string): Config {
   // every block into a would-block. Where the cloud hasn't spoken, the env var
   // stays a dev convenience.
   let modeCloudControlled = false;
+  // B1 (#1): true when the CLOUD chose observe (shadowMode staged rollout). A
+  // shield mandate floors LOCAL observe/audit to standard, but honors a cloud
+  // staged observe — the fleet chose that.
+  let modeCloudStaged = false;
   {
     const cacheFile = path.join(os.homedir(), '.node9', 'rules-cache.json');
     try {
@@ -973,6 +983,7 @@ export function getConfig(cwd?: string): Config {
         // proxy in observe mode locally — admin can flip it without each
         // user editing their config.
         mergedSettings.mode = 'observe';
+        modeCloudStaged = true; // cloud chose observe — a shield mandate honors it
       }
     } catch {
       /* cache absent or corrupted — silent fallback to local config */
@@ -1001,13 +1012,14 @@ export function getConfig(cwd?: string): Config {
   for (const shieldName of activeShieldNames) {
     const isCloudMandated = cloudManagedSet.has(shieldName);
     // B1 (#2): a cloud-mandated shield resolves its BODY from the trusted
-    // builtin catalog, never getShield() — which returns a user
+    // builtin catalog ONLY — never getShield(), which returns a user
     // ~/.node9/shields/<name>.json shadowing the same name (its rules could be
-    // empty or all-allow). A local/self-enabled shield keeps full user-shadow
-    // power (power-user customisation); only a mandate is locked to the fleet.
-    const shield = isCloudMandated
-      ? (BUILTIN_SHIELDS[shieldName] ?? getShield(shieldName))
-      : getShield(shieldName);
+    // empty or all-allow). A mandated name absent from the catalog fails CLOSED
+    // (dropped) rather than falling back to a shadowable local body — no trusted
+    // body means don't pretend to enforce. A local/self-enabled shield keeps
+    // full user-shadow power (power-user customisation); only a mandate is
+    // locked to the fleet.
+    const shield = isCloudMandated ? BUILTIN_SHIELDS[shieldName] : getShield(shieldName);
     if (!shield) continue;
     // Deduplicate smartRules by name — prevents duplicates if the user also
     // has the same rule name in their config.
@@ -1057,6 +1069,22 @@ export function getConfig(cwd?: string): Config {
     (['observe', 'audit', 'standard', 'strict'] as const).includes(envMode as never)
   ) {
     mergedSettings.mode = envMode;
+  }
+
+  // B1 (#1): a mandated shield must actually enforce. observe and audit modes
+  // make the orchestrator return approved:true for every call (no enforcement),
+  // so a LOCAL observe/audit (from config.json settings.mode OR NODE9_MODE)
+  // would disable every mandated shield. Under a mandate, floor it to standard.
+  // A CLOUD staged observe (shadowMode) or a cloud-controlled/locked mode is
+  // left alone — the fleet chose that. Floor to standard, not strict: enough to
+  // enforce, no over-tightening.
+  if (
+    cloudManagedShields.length > 0 &&
+    !modeCloudControlled &&
+    !modeCloudStaged &&
+    (mergedSettings.mode === 'observe' || mergedSettings.mode === 'audit')
+  ) {
+    mergedSettings.mode = 'standard';
   }
 
   // B1 (#3/#5/#6): local ignoredTools / sandboxPaths must not fast-path a tool

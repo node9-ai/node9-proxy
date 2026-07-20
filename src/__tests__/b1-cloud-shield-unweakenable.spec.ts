@@ -313,4 +313,105 @@ describe('B1 — cloud-mandated shield ignores local overrides', () => {
     writeGlobalConfig({ policy: { ignoredTools: ['Grep'] } });
     expect(getConfig().policy.ignoredTools).toContain('Grep');
   });
+
+  // ── 2nd review: mode floor under a mandate + two hardenings ──────────────────
+  // b1-mode-floor-and-hardening-design.md. observe/audit make the orchestrator
+  // return approved:true (no enforcement), so a LOCAL one disables every mandated
+  // shield. Reproduced at the real getConfig gate before the fix.
+  const writeRulesCache = (obj: Record<string, unknown>) => {
+    fs.writeFileSync(
+      path.join(tmpHome, '.node9', 'rules-cache.json'),
+      JSON.stringify({
+        fetchedAt: '2026-07-01T00:00:00Z',
+        rules: [],
+        shields: [],
+        ...obj,
+      })
+    );
+    _resetConfigCache();
+  };
+
+  // FINDING 1 — floor LOCAL observe/audit to standard under a shield mandate.
+  it('F1 floors NODE9_MODE=observe to standard under a shield mandate', () => {
+    setCloud(['redis']);
+    process.env.NODE9_MODE = 'observe';
+    expect(getConfig().settings.mode).toBe('standard');
+  });
+
+  it('F1 floors NODE9_MODE=audit to standard under a shield mandate', () => {
+    setCloud(['redis']);
+    process.env.NODE9_MODE = 'audit';
+    expect(getConfig().settings.mode).toBe('standard');
+  });
+
+  it('F1 floors a local config.json observe mode to standard under a mandate', () => {
+    setCloud(['redis']);
+    writeGlobalConfig({ settings: { mode: 'observe' } });
+    expect(getConfig().settings.mode).toBe('standard');
+  });
+
+  // The fleet's OWN observe decision is honored — floor is for LOCAL input only.
+  // (A cloud-LOCKED observe: the fleet deliberately forces observe, e.g. a staged
+  // trial. An UNLOCKED managed observe is only a floor the dev's standard already
+  // exceeds, so it correctly resolves to standard — a different case.)
+  it('F1 HONORS a cloud-LOCKED observe mode under a mandate', () => {
+    writeRulesCache({
+      shields: ['redis'],
+      managedConfig: { mode: 'observe', locked: ['mode'] },
+    });
+    expect(getConfig().settings.mode).toBe('observe');
+  });
+
+  it('F1 HONORS a cloud shadowMode staged observe under a mandate', () => {
+    writeRulesCache({ shields: ['redis'], shadowMode: true });
+    expect(getConfig().settings.mode).toBe('observe');
+  });
+
+  it('F1 leaves local observe alone when NO shield is mandated (dev convenience)', () => {
+    process.env.NODE9_MODE = 'observe';
+    expect(getConfig().settings.mode).toBe('observe');
+  });
+
+  // FINDING 2 — a mandated name absent from the builtin catalog fails closed
+  // (dropped), never a shadowable local body.
+  it('F2 drops a non-builtin mandated shield instead of trusting a local body', () => {
+    getShieldImpl.current = (name) =>
+      name === 'corp-secrets'
+        ? {
+            name: 'corp-secrets',
+            smartRules: [
+              {
+                name: 'shield:corp-secrets:leak',
+                tool: '*',
+                conditions: [],
+                verdict: 'allow',
+              },
+            ],
+          }
+        : null;
+    setCloud(['corp-secrets']);
+    expect(
+      getConfig().policy.smartRules.find((r) => r.name === 'shield:corp-secrets:leak')
+    ).toBeUndefined();
+  });
+
+  // FINDING 3 — pinned is stripped from applyLayer rules (local config AND the
+  // locally-writable rules-cache). rules-cache bypasses zod, so this proves the
+  // explicit strip, not zod's incidental drop of the unknown key.
+  it('F3 strips pinned from a locally-writable rules-cache rule', () => {
+    writeRulesCache({
+      rules: [
+        {
+          name: 'attacker-pinned-allow',
+          tool: '*',
+          conditions: [{ field: 'command', op: 'matches', value: 'FLUSHALL', flags: 'i' }],
+          verdict: 'allow',
+          pinned: true,
+        },
+      ],
+    });
+    const rule = getConfig().policy.smartRules.find((r) => r.name === 'attacker-pinned-allow');
+    expect(rule).toBeDefined();
+    expect((rule as { pinned?: boolean }).pinned).toBeUndefined();
+  });
 });
