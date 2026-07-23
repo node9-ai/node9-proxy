@@ -559,6 +559,61 @@ export function getActiveEnvironment(config: Config): EnvironmentConfig | null {
   return config.environments[env] ?? null;
 }
 
+let cacheReadFailureLogged = false;
+
+/**
+ * Read + parse rules-cache.json defensively.
+ *
+ * The daemon rewrites this file on every policy change (sync.ts writeCache).
+ * A hook's getConfig() reading it concurrently used to `JSON.parse` a single
+ * `readFileSync` inside a fail-OPEN catch: a torn/partial read threw and the
+ * catch silently dropped ALL cloud enforcement (shields, managed mode) for
+ * that call — a non-deterministic fail-open. `writeCache` is now atomic
+ * (temp+rename), so a reader never sees a partial file; this reader adds
+ * defense in depth: retry a torn read (belt-and-suspenders for any other
+ * writer), distinguish an ABSENT cache (no cloud policy — normal) from a
+ * PRESENT-but-corrupt one, and never drop enforcement without a trace.
+ *
+ * Returns the parsed object, or `{}` when there is nothing usable — callers
+ * guard every field (`Array.isArray(raw.rules)` etc.), so `{}` is a safe
+ * "no cloud layer" without special-casing.
+ */
+export function readRulesCacheResilient(cacheFile: string): Record<string, unknown> {
+  let existed = false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let content: string;
+    try {
+      content = fs.readFileSync(cacheFile, 'utf-8');
+      existed = true;
+    } catch (err) {
+      // ENOENT = no cloud policy configured — normal, not an error.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {};
+      continue; // transient FS error — retry
+    }
+    try {
+      return JSON.parse(content) as Record<string, unknown>;
+    } catch {
+      /* partial/torn read — retry; atomic writeCache means the next read is whole */
+    }
+  }
+  // Present but unparseable after retries: cloud enforcement is EXPECTED (the
+  // file exists) yet unreadable. Never let that vanish silently — log once.
+  // We still fall back rather than hard-block every call; fail-closed-on-corrupt
+  // is a separate policy decision (see daemon-enforcement-nondeterminism-design).
+  if (existed && !cacheReadFailureLogged) {
+    cacheReadFailureLogged = true;
+    try {
+      fs.appendFileSync(
+        path.join(os.homedir(), '.node9', 'hook-debug.log'),
+        `[${new Date().toISOString()}] RULES_CACHE_UNREADABLE ${cacheFile} — cloud enforcement skipped this read\n`
+      );
+    } catch {
+      /* logging is best-effort — never break config loading */
+    }
+  }
+  return {};
+}
+
 export function getConfig(cwd?: string): Config {
   // When an explicit cwd is provided (hook commands passing payload.cwd), skip
   // the cache entirely — each project directory may have its own node9.config.json,
@@ -776,7 +831,9 @@ export function getConfig(cwd?: string): Config {
   {
     const cacheFile = path.join(os.homedir(), '.node9', 'rules-cache.json');
     try {
-      const raw = JSON.parse(fs.readFileSync(cacheFile, 'utf-8')) as Record<string, unknown>;
+      // Resilient read: retries a torn read and, on a present-but-corrupt
+      // cache, logs instead of silently dropping cloud enforcement (fail-open).
+      const raw = readRulesCacheResilient(cacheFile);
       if (Array.isArray(raw.rules) && raw.rules.length > 0) {
         applyLayer({ policy: { smartRules: raw.rules } });
       }
@@ -986,7 +1043,8 @@ export function getConfig(cwd?: string): Config {
         modeCloudStaged = true; // cloud chose observe — a shield mandate honors it
       }
     } catch {
-      /* cache absent or corrupted — silent fallback to local config */
+      /* malformed field shape within an otherwise-valid cache — skip cloud
+         layer. (Absent/corrupt FILE is handled by readRulesCacheResilient.) */
     }
   }
 

@@ -15,6 +15,7 @@ import { runPosture } from '../posture/index.js';
 import { shipPosture } from '../posture/ship.js';
 import { buildPolicySnapshot } from '../policy-snapshot/build.js';
 import { readMcpToolsConfig } from './mcp-tools.js';
+import { atomicWriteSync } from './state.js';
 import { resolveMcpStatus } from '../mcp-status.js';
 import { shipPolicySnapshot } from '../policy-snapshot/ship.js';
 import { readActiveShields, readShieldOverrides } from '../shields.js';
@@ -672,16 +673,26 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
 }
 
 /**
- * Write the policy cache atomically. Best-effort: directory creation
- * failures fall through silently — the proxy will fall back to local
- * config and surface the issue via `node9 sync` if the user runs it
- * explicitly.
+ * Write the policy cache atomically (temp file + rename).
+ *
+ * This MUST be atomic. The previous plain `fs.writeFileSync` truncated
+ * rules-cache.json in place, so a hook process reading it via getConfig()
+ * mid-write got a partial file → JSON.parse threw → the reader's fail-open
+ * catch dropped ALL cloud enforcement (shields, managed mode) for that call,
+ * silently allowing a command a shield should have blocked. Non-deterministic
+ * (depended on read/write overlap) and fail-open. `atomicWriteSync` writes to
+ * a sibling `.tmp` and renames — a POSIX-atomic swap, so a concurrent reader
+ * always sees either the complete old file or the complete new one.
+ *
+ * Best-effort: creation/write failures fall through silently — the proxy
+ * falls back to local config and surfaces the issue via `node9 sync`.
  */
 function writeCache(cache: RulesCache): void {
-  const dir = path.dirname(rulesCacheFile());
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(rulesCacheFile(), JSON.stringify(cache, null, 2) + '\n', 'utf-8');
+  atomicWriteSync(rulesCacheFile(), JSON.stringify(cache, null, 2) + '\n', 'utf-8');
 }
+
+/** Exported for the atomic-write regression test. */
+export const __writeCacheForTest = writeCache;
 
 async function syncOnce(): Promise<void> {
   const creds = readCredentials();
