@@ -822,7 +822,20 @@ async function _authorizeHeadlessCore(
     explainableLabel = policyResult.blockedByLabel || 'Local Config';
     policyMatchedField = policyResult.matchedField;
     policyMatchedWord = policyResult.matchedWord;
-    if (policyResult.ruleName) localSmartRuleMatched = true;
+    // B1 (#6): the tier-7 strict fallback reviews with NO ruleName (it is a
+    // mode, not a rule) — keying this guard on ruleName alone let the SaaS
+    // gate's immediate-allow for an unmatched tool ("no org rule matched",
+    // NOT an approval) resolve the call, silently bypassing a cloud-managed
+    // strict mode. Strict says "unmatched requires a human"; cloud's no-match
+    // allow must never pre-empt that.
+    // Deliberately tier-7-only: other rule-less reviews (e.g. dangerous-word)
+    // stay cloud-resolvable — pinned by core.test.ts ("calls cloud API and
+    // returns approved:true") and a semantics change that wide needs its own
+    // decision, not a rider on this fix.
+    // (The name `localSmartRuleMatched` is kept — it crosses the daemon HTTP
+    // boundary (auth/daemon.ts → daemon/server.ts) and renaming the wire field
+    // would silently drop the guard on a hook↔daemon version skew.)
+    if (policyResult.ruleName || policyResult.tier === 7) localSmartRuleMatched = true;
     // Capture the human-readable description so it survives through the race
     // engine and appears in sendBlock even when the user denies at the daemon.
     if (policyResult.ruleDescription) policyRuleDescription = policyResult.ruleDescription;
