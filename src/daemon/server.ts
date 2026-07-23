@@ -35,6 +35,7 @@ import {
   setAbandonTimer,
   getHadBrowserClient,
   setHadBrowserClient,
+  hasInteractiveClient,
   daemonRejectionHandlerRegistered,
   markRejectionHandlerRegistered,
   atomicWriteSync,
@@ -700,6 +701,16 @@ export function startDaemon(): void {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ error: 'internal' }));
       }
+    }
+
+    // Is a genuine human approver reachable RIGHT NOW — i.e. is a `node9 tail`
+    // (or other input-capable client) connected to the daemon? The orchestrator
+    // uses this to decide whether a shield hard-block may be downgraded to a
+    // review: with no reachable human it must stay a hard block (fail closed),
+    // never a review the cloud racer can auto-allow in a non-interactive context.
+    if (req.method === 'GET' && pathname === '/approver') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ interactive: hasInteractiveClient() }));
     }
 
     if (req.method === 'GET' && pathname === '/state/check') {

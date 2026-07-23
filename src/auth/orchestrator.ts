@@ -16,6 +16,7 @@ import {
 } from './state';
 import {
   isDaemonRunning,
+  daemonHasInteractiveApprover,
   getInternalToken,
   registerDaemonEntry,
   waitForDaemonDecision,
@@ -159,6 +160,31 @@ function notifyActivity(data: {
   sessionId?: string;
 }): Promise<boolean> {
   return notifyActivitySocket(data);
+}
+
+/**
+ * Is a genuine HUMAN approver reachable right now, for the purpose of softening
+ * a hard block into a review? (task #17, fail-closed gate.)
+ *
+ *  - native GUI popup: reachable iff a display is present AND this is the HOOK
+ *    process (the daemon's own background pass never opens a dialog, so a
+ *    display does not help there).
+ *  - terminal (`node9 tail`): reachable iff an input-capable client is connected
+ *    to the daemon (asked over HTTP; that call fails closed on error/timeout).
+ *
+ * Cloud is deliberately NOT a "human" here — it can auto-resolve a client-side
+ * shield the SaaS has no rule for. Returns false on any uncertainty so a hard
+ * block stays hard rather than becoming an auto-allowable review.
+ */
+export async function hasReachableHumanApprover(opts: {
+  approvers: { native?: boolean; terminal?: boolean };
+  calledFromDaemon?: boolean;
+}): Promise<boolean> {
+  const hasDisplay = !!(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
+  const nativeReachable = !opts.calledFromDaemon && opts.approvers.native !== false && hasDisplay;
+  // Short-circuit: only pay the daemon round-trip when native can't reach a human.
+  if (nativeReachable) return true;
+  return opts.approvers.terminal !== false && (await daemonHasInteractiveApprover());
 }
 
 export async function authorizeHeadless(
@@ -717,6 +743,22 @@ async function _authorizeHeadlessCore(
 
     // Hard block from smart rules — skip the race engine entirely
     if (policyResult.decision === 'block') {
+      // Fail-closed gate for the block→review downgrade below. A hard block may
+      // only soften to a review when a genuine HUMAN approver is actually
+      // reachable — a GUI popup can be shown, or a `node9 tail` is connected.
+      // With NO reachable human (CI, headless, a piped non-interactive agent)
+      // the block STAYS a block, so the approver race can never resolve it to
+      // allow (e.g. a cloud immediate-allow of a client-side shield the SaaS
+      // has no rule for). Cloud is deliberately NOT a "human" here — it can
+      // auto-resolve. Fails closed: any uncertainty keeps the hard block.
+      const daemonUp = isDaemonRunning();
+      let humanApproverReachable = false;
+      if (!policyResult.dependsOnStatePredicates?.length && daemonUp && !isTestEnv) {
+        humanApproverReachable = await hasReachableHumanApprover({
+          approvers,
+          calledFromDaemon: options?.calledFromDaemon,
+        });
+      }
       // If block has dependsOnState predicates, check them via the daemon.
       // If predicates are not all satisfied (or daemon unreachable), downgrade
       // to review so the user can decide rather than being hard-blocked.
@@ -752,10 +794,12 @@ async function _authorizeHeadlessCore(
         if (predicatesMet && policyResult.recoveryCommand) {
           statefulRecoveryCommand = policyResult.recoveryCommand;
         }
-      } else if (isDaemonRunning() && !isTestEnv) {
-        // Local development: daemon is running and not in a test/CI environment,
-        // so a human is at the keyboard. Downgrade hard-block to review — the user
-        // gets a popup and can approve or deny. Hard blocks stay hard in CI.
+      } else if (daemonUp && !isTestEnv && humanApproverReachable) {
+        // A genuine human approver is reachable (GUI popup or connected tail),
+        // so downgrade hard-block to review — the user gets a card and can
+        // approve or deny. Without a reachable human this branch is skipped and
+        // the block stays hard (the `else` below): never a review a non-human
+        // channel could auto-allow. Hard blocks also stay hard in CI/test.
         //
         // Make the downgrade visible. Two changes vs. a regular review:
         //   1. Audit `checkedBy` is 'smart-rule-block-override' — the dashboard

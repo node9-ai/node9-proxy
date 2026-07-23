@@ -168,6 +168,27 @@ export async function isDaemonReachable(timeoutMs = 500): Promise<boolean> {
 }
 
 /**
+ * Is a genuine human approver reachable right now — i.e. is an input-capable
+ * client (`node9 tail`) connected to the daemon? Used by the orchestrator to
+ * decide whether a shield hard-block may be downgraded to a review. Fails
+ * CLOSED (returns false) on any error/timeout: if we can't confirm a human is
+ * watching, a hard block must stay hard rather than become an auto-allowable
+ * review in a non-interactive context.
+ */
+export async function daemonHasInteractiveApprover(timeoutMs = 400): Promise<boolean> {
+  try {
+    const res = await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/approver`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return false;
+    const body = (await res.json()) as { interactive?: unknown };
+    return body.interactive === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Register a new approval entry with the daemon and return its ID.
  * Both the browser racer (GET /wait) and the terminal racer (POST /decision)
  * share this entry — it must be created before the race starts.
