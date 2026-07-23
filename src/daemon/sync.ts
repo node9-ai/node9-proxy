@@ -106,6 +106,9 @@ export function buildSessionDeltas(
 
 // Computed lazily so tests can mock os.homedir() before any call
 const rulesCacheFile = () => path.join(os.homedir(), '.node9', 'rules-cache.json');
+// Last-known-good sibling — the reader falls back to it when the primary is
+// present but unparseable (external corruption). Kept in sync by writeCache.
+const rulesCacheBackupFile = () => path.join(os.homedir(), '.node9', 'rules-cache.last-good.json');
 const DEFAULT_API_URL = 'https://api.node9.ai/api/v1/intercept/policies/sync';
 const DEFAULT_INTERVAL_HOURS = 5;
 // Floor + ceiling for the resolved sync interval. The 15s floor keeps a
@@ -688,7 +691,19 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
  * falls back to local config and surfaces the issue via `node9 sync`.
  */
 function writeCache(cache: RulesCache): void {
-  atomicWriteSync(rulesCacheFile(), JSON.stringify(cache, null, 2) + '\n', 'utf-8');
+  const data = JSON.stringify(cache, null, 2) + '\n';
+  atomicWriteSync(rulesCacheFile(), data, 'utf-8');
+  // Keep a last-known-good copy alongside the primary. If the primary is later
+  // corrupted by anything OTHER than our (atomic) writer — a disk fault, a crash
+  // during an external edit — getConfig falls back to this instead of silently
+  // dropping ALL cloud enforcement (shields, managed mode) for the call.
+  // Best-effort: the primary is the source of truth; a backup-write failure
+  // never blocks the sync.
+  try {
+    atomicWriteSync(rulesCacheBackupFile(), data, 'utf-8');
+  } catch {
+    /* best-effort */
+  }
 }
 
 /** Exported for the atomic-write regression test. */

@@ -596,22 +596,40 @@ export function readRulesCacheResilient(cacheFile: string): Record<string, unkno
       /* partial/torn read — retry; atomic writeCache means the next read is whole */
     }
   }
-  // Present but unparseable after retries: cloud enforcement is EXPECTED (the
-  // file exists) yet unreadable. Never let that vanish silently — log once.
-  // We still fall back rather than hard-block every call; fail-closed-on-corrupt
-  // is a separate policy decision (see daemon-enforcement-nondeterminism-design).
-  if (existed && !cacheReadFailureLogged) {
-    cacheReadFailureLogged = true;
-    try {
-      fs.appendFileSync(
-        path.join(os.homedir(), '.node9', 'hook-debug.log'),
-        `[${new Date().toISOString()}] RULES_CACHE_UNREADABLE ${cacheFile} — cloud enforcement skipped this read\n`
-      );
-    } catch {
-      /* logging is best-effort — never break config loading */
+  // Present but unparseable after retries. Before dropping ALL cloud
+  // enforcement (a fail-open), fall back to the last-known-good copy the daemon
+  // keeps beside the primary — so an externally-corrupted primary still
+  // enforces the last policy we successfully read, not nothing.
+  if (existed) {
+    const backup = path.join(path.dirname(cacheFile), 'rules-cache.last-good.json');
+    if (backup !== cacheFile) {
+      try {
+        const raw = JSON.parse(fs.readFileSync(backup, 'utf-8')) as Record<string, unknown>;
+        logCacheReadIssue(cacheFile, 'RULES_CACHE_CORRUPT_USED_BACKUP');
+        return raw;
+      } catch {
+        /* no usable backup either — fall through to the empty (logged) result */
+      }
     }
+    // Cloud enforcement is EXPECTED (the file exists) yet neither the primary
+    // nor the backup is readable. Never let that vanish silently — log it.
+    logCacheReadIssue(cacheFile, 'RULES_CACHE_UNREADABLE');
   }
   return {};
+}
+
+/** Log a rules-cache read problem once per process (avoids hot-path spam). */
+function logCacheReadIssue(cacheFile: string, kind: string): void {
+  if (cacheReadFailureLogged) return;
+  cacheReadFailureLogged = true;
+  try {
+    fs.appendFileSync(
+      path.join(os.homedir(), '.node9', 'hook-debug.log'),
+      `[${new Date().toISOString()}] ${kind} ${cacheFile}\n`
+    );
+  } catch {
+    /* logging is best-effort — never break config loading */
+  }
 }
 
 export function getConfig(cwd?: string): Config {

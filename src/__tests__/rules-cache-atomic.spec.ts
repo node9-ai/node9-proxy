@@ -147,4 +147,54 @@ describe('readRulesCacheResilient — no silent fail-open on a torn/corrupt read
     );
     expect(loggedUnreadable).toBe(true); // ...but never silently
   });
+
+  it('falls back to the last-known-good copy when the primary is corrupt (no fail-open)', async () => {
+    // Primary corrupt, but the daemon's last-good sibling holds the real policy.
+    fs.writeFileSync(cacheOf(), '{ truncated');
+    fs.writeFileSync(
+      path.join(tmpHome, '.node9', 'rules-cache.last-good.json'),
+      JSON.stringify({ shields: ['aws'], rules: [] })
+    );
+    const raw = readRulesCacheResilient(cacheOf());
+    // The whole point: enforcement is PRESERVED from the last-good copy, not
+    // silently dropped to {} (fail-open). (The one-per-process fallback log is
+    // best-effort and covered by the corrupt-log test above.)
+    expect(raw.shields).toEqual(['aws']);
+  });
+});
+
+describe('writeCache maintains a last-known-good backup', () => {
+  let tmpHome: string;
+  let origHome: string | undefined;
+
+  beforeEach(() => {
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-lastgood-'));
+    origHome = process.env.HOME;
+    process.env.HOME = tmpHome;
+    process.env.USERPROFILE = tmpHome;
+    fs.mkdirSync(path.join(tmpHome, '.node9'), { recursive: true });
+  });
+  afterEach(() => {
+    if (origHome !== undefined) process.env.HOME = origHome;
+    else delete process.env.HOME;
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  it('writes both the primary and rules-cache.last-good.json with the same content', () => {
+    __writeCacheForTest({
+      fetchedAt: '2026-07-01T00:00:00Z',
+      rules: [],
+      shields: ['aws'],
+      workspaceId: 'ws-1',
+    } as unknown as Parameters<typeof __writeCacheForTest>[0]);
+    const primary = JSON.parse(
+      fs.readFileSync(path.join(tmpHome, '.node9', 'rules-cache.json'), 'utf-8')
+    );
+    const backup = JSON.parse(
+      fs.readFileSync(path.join(tmpHome, '.node9', 'rules-cache.last-good.json'), 'utf-8')
+    );
+    expect(backup).toEqual(primary);
+    expect(backup.shields).toEqual(['aws']);
+  });
 });

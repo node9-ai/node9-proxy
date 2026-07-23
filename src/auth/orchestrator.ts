@@ -759,9 +759,47 @@ async function _authorizeHeadlessCore(
           calledFromDaemon: options?.calledFromDaemon,
         });
       }
-      // If block has dependsOnState predicates, check them via the daemon.
-      // If predicates are not all satisfied (or daemon unreachable), downgrade
-      // to review so the user can decide rather than being hard-blocked.
+      // A hard block softens into a review/recovery card ONLY when a genuine
+      // human approver is reachable (GUI popup or connected tail). With none —
+      // CI, headless, a piped non-interactive agent — it stays hard so the
+      // approver race can never resolve it to allow (a cloud immediate-allow of
+      // a client-side shield the SaaS has no rule for). Fails closed.
+      const mayDowngrade = daemonUp && !isTestEnv && humanApproverReachable;
+
+      // The audit row + hard-block result, shared by every non-softening path so
+      // a fail-closed decision is a single call.
+      const hardBlock = (): AuthResult => {
+        // Include policyResult.ruleName so the [2] Report SHIELDS panel can
+        // attribute this block to its specific shield via the rule→shield map.
+        if (!isManual)
+          appendLocalAudit(
+            toolName,
+            args,
+            'deny',
+            'smart-rule-block',
+            { ...meta, ruleName: policyResult.ruleName },
+            hashAuditArgs
+          );
+        return {
+          approved: false,
+          reason: policyResult.reason ?? 'Action explicitly blocked by Smart Policy.',
+          blockedBy: 'local-config',
+          blockedByLabel: policyResult.blockedByLabel,
+          ruleHit: policyResult.ruleName,
+          ...(policyResult.recoveryCommand && { recoveryCommand: policyResult.recoveryCommand }),
+          ...(policyResult.ruleDescription && { ruleDescription: policyResult.ruleDescription }),
+        };
+      };
+
+      // Stateful (dependsOnState) rules keep their DELIBERATE downgrade-to-review
+      // semantics: when predicates are unknown / the daemon can't check them,
+      // they soften into the STATE GUARD recovery card rather than hard-blocking
+      // a legitimate action (e.g. a deploy) just because state is unavailable —
+      // an availability choice for that feature, tested in stateful-rules.spec.
+      // The fail-closed human-reachability gate applies to PLAIN blocks only
+      // (below). KNOWN RESIDUAL: a stateful block can still soften in a fully
+      // non-interactive context — tracked as its own decision (design doc §2b),
+      // not ridden onto the shield fix.
       if (policyResult.dependsOnStatePredicates?.length) {
         const stateResults = await checkStatePredicates(policyResult.dependsOnStatePredicates);
         // Strict === true check: undefined (missing key) and false are both treated
@@ -794,7 +832,7 @@ async function _authorizeHeadlessCore(
         if (predicatesMet && policyResult.recoveryCommand) {
           statefulRecoveryCommand = policyResult.recoveryCommand;
         }
-      } else if (daemonUp && !isTestEnv && humanApproverReachable) {
+      } else if (mayDowngrade) {
         // A genuine human approver is reachable (GUI popup or connected tail),
         // so downgrade hard-block to review — the user gets a card and can
         // approve or deny. Without a reachable human this branch is skipped and
@@ -834,32 +872,9 @@ async function _authorizeHeadlessCore(
         }
         // Fall through to the race engine with the override label visible.
       } else {
-        if (!isManual)
-          appendLocalAudit(
-            toolName,
-            args,
-            'deny',
-            'smart-rule-block',
-            // Include policyResult.ruleName so the [2] Report SHIELDS
-            // panel can attribute this block to its specific shield
-            // (e.g. `shield:project-jail:block-read-ssh`) via the
-            // rule→shield map. checkedBy stays as the generic
-            // `smart-rule-block` for backward compat with existing
-            // log readers.
-            { ...meta, ruleName: policyResult.ruleName },
-            hashAuditArgs
-          );
-        // (Cloud delivery via the outbox shipper — the old fire-and-forget
-        // POST here was killed by the immediate process exit on block.)
-        return {
-          approved: false,
-          reason: policyResult.reason ?? 'Action explicitly blocked by Smart Policy.',
-          blockedBy: 'local-config',
-          blockedByLabel: policyResult.blockedByLabel,
-          ruleHit: policyResult.ruleName,
-          ...(policyResult.recoveryCommand && { recoveryCommand: policyResult.recoveryCommand }),
-          ...(policyResult.ruleDescription && { ruleDescription: policyResult.ruleDescription }),
-        };
+        // No reachable human → the block stays hard (fail closed). Cloud
+        // delivery of the deny rides the outbox shipper from the audit row.
+        return hardBlock();
       }
     }
 
