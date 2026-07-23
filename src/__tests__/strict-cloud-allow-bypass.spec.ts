@@ -153,6 +153,40 @@ describe('cloud immediate-allow vs managed strict (B1 #6)', () => {
     expect(mockInitSaaS).not.toHaveBeenCalled();
   });
 
+  it('managed strict: a prior "Always Allow" must not pre-satisfy the review', async () => {
+    // Same defect shape as the cloud guard: the persistent consult was keyed on
+    // ruleName, so a tier-7 review fell through to decisions.json. One click
+    // granted BEFORE the org mandated strict would permanently exempt the tool
+    // — and the call never reaches the cloud, so the BE floor can't catch it.
+    writeRulesCache(tmpHome, { managedMode: 'strict' });
+    fs.writeFileSync(
+      path.join(tmpHome, '.node9', 'decisions.json'),
+      JSON.stringify({ TotallyUnknownTool: 'allow' })
+    );
+
+    const result = await authorizeHeadless('TotallyUnknownTool', { note: 'probe' });
+
+    expect(result.approved).toBe(false);
+    expect(result.checkedBy).not.toBe('persistent');
+  });
+
+  it('standard mode: a prior "Always Allow" still works for reviewed tools (pinned)', async () => {
+    // No managed mode; make the tool reach the persistent consult by turning
+    // cloud off (otherwise a standard-mode unmatched tool is allowed earlier).
+    writeRulesCache(tmpHome, {});
+    fs.writeFileSync(
+      path.join(tmpHome, '.node9', 'decisions.json'),
+      JSON.stringify({ mkfs_data: 'allow' })
+    );
+
+    // mkfs_data trips the dangerous-word review (no ruleName, tier < 7) — the
+    // exact shape that must STAY persistent-resolvable.
+    const result = await authorizeHeadless('mkfs_data', { note: 'probe' });
+
+    expect(result.approved).toBe(true);
+    expect(result.checkedBy).toBe('persistent');
+  });
+
   it('smart-rule review: still falls to the race, never resolved by cloud allow (pinned)', async () => {
     writeRulesCache(tmpHome, {
       rules: [

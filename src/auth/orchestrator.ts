@@ -862,7 +862,14 @@ async function _authorizeHeadlessCore(
     // commands not covered by a smart rule. Future work: key by command-level
     // pattern (e.g. first command token) so approvals are narrowly scoped.
     // See: doc/roadmap.md "Command-Scoped Persistent Approvals".
-    const persistent = policyResult.ruleName ? null : getPersistentDecision(toolName);
+    //
+    // B1 (#6): tier-7 strict reviews skip the consult too — same key-on-
+    // ruleName defect as the cloud guard above. An "Always Allow" clicked
+    // BEFORE the org mandated strict would permanently exempt that tool, and
+    // the call never reaches the cloud, so the BE floor can't compensate.
+    // Rule-less sub-tier-7 reviews (dangerous-word) stay persistent-resolvable.
+    const persistent =
+      policyResult.ruleName || policyResult.tier === 7 ? null : getPersistentDecision(toolName);
     // `!appPermReview`: a prior "Always Allow" must not bypass an org-set review
     // (fix #3). A persistent DENY still short-circuits (tightening is fine).
     if (persistent === 'allow' && !appPermReview) {
