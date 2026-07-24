@@ -20,7 +20,7 @@ import {
   type ScanResult,
 } from '../cli/commands/scan';
 import { buildScanSummary } from '../scan-summary';
-import { CURRENT_BUILD, buildIdString } from './build-id';
+import { CURRENT_BUILD, buildIdString, parseBuildId, compareBuild } from './build-id';
 import {
   DAEMON_PORT,
   DAEMON_HOST,
@@ -719,6 +719,30 @@ export function startDaemon(): void {
       return res.end(JSON.stringify({ interactive: hasInteractiveClient() }));
     }
 
+    // Cooperative takeover (task #18): a STRICTLY newer build asks this daemon
+    // to yield the port. internalToken-gated — the token lives in the 0600
+    // pidfile, so only the same-uid owner can trigger it; a random local
+    // process cannot shut the enforcement daemon down. Responds BEFORE exiting
+    // so the caller sees the ack, then closes on the next tick.
+    if (req.method === 'POST' && pathname === '/shutdown') {
+      if (!validToken(req)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'unauthorized' }));
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+      logDaemonStartup('shutdown', 'yielding on authenticated /shutdown (takeover or restart)');
+      setImmediate(() => {
+        try {
+          server.close();
+        } catch {
+          /* already closing */
+        }
+        process.exit(0);
+      });
+      return;
+    }
+
     // Which BUILD is serving this port (task #18). Unauthenticated read, same
     // trust class as /status and /approver (localhost metadata only). Serves
     // the module-load CURRENT_BUILD — a fresh stat here would read a rebuilt
@@ -1293,16 +1317,104 @@ export function startDaemon(): void {
     server.listen(DAEMON_PORT, DAEMON_HOST);
   }
 
+  // Task #18 commit (b) — the takeover decision against a LIVE pidfile holder.
+  // Rule (rogue-daemon-code-design.md §4): strictly newer build → cooperative
+  // /shutdown + take the port; same-or-newer holder → yield exactly as before;
+  // holder without /health (pre-#18 build) → yield (startup NEVER signals a
+  // process; clearing legacy rogues is `node9 daemon restart`'s job, G1).
+  async function decideAgainstHolder(holderPid: number, holderToken: string | null): Promise<void> {
+    let holderBuildId: string | null = null;
+    try {
+      const res = await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/health`, {
+        signal: AbortSignal.timeout(800),
+      });
+      if (res.ok) {
+        const j = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+        if (j && typeof j.buildId === 'string') holderBuildId = j.buildId;
+      }
+    } catch {
+      /* port held but /health unreachable — treat as unknown build, yield */
+    }
+    const holderBuild = holderBuildId ? parseBuildId(holderBuildId) : null;
+
+    if (holderBuild && compareBuild(CURRENT_BUILD, holderBuild) > 0 && holderToken) {
+      // I am strictly newer and can authenticate — ask the holder to yield.
+      try {
+        const r = await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/shutdown`, {
+          method: 'POST',
+          headers: { 'x-node9-internal': holderToken },
+          signal: AbortSignal.timeout(2000),
+        });
+        if (r.ok) {
+          // Bounded wait for the port to actually free, then bind. retryListen
+          // keeps its MAX_BIND_ATTEMPTS cap, so even a holder that acked but
+          // never exited cannot loop us.
+          for (let i = 0; i < 10; i++) {
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            const stillUp = await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/health`, {
+              signal: AbortSignal.timeout(300),
+            }).then(
+              () => true,
+              () => false
+            );
+            if (!stillUp) break;
+          }
+          logDaemonStartup(
+            'takeover',
+            `took over :${DAEMON_PORT} from older build ${holderBuildId} (pid ${holderPid})`
+          );
+          retryListen();
+          return;
+        }
+        // 401: the pidfile token doesn't authenticate the holder (fabricated by
+        // an old adopt-write, G2). Never escalate to a signal from startup.
+        recordStartupState(
+          'failed',
+          'version-skew-unauthenticated',
+          `an older-build daemon (${holderBuildId}) holds :${DAEMON_PORT} but could not be authenticated for takeover — run: node9 daemon restart`
+        );
+        logDaemonStartup('port-in-use', `older build on :${DAEMON_PORT}, /shutdown refused`);
+        return process.exit(0);
+      } catch {
+        /* /shutdown unreachable mid-flight — fall through to yield */
+      }
+    }
+
+    // Yield: same build, newer holder, unknown build, or no token. Same
+    // stable exit-0 contract as before (no restart storm), but a NEWER holder
+    // is surfaced distinctly — a stale start yielding to newer code is worth
+    // recording, not hiding.
+    if (holderBuild && compareBuild(holderBuild, CURRENT_BUILD) > 0) {
+      logDaemonStartup(
+        'port-in-use',
+        `a NEWER daemon (${holderBuildId}, pid ${holderPid}) owns :${DAEMON_PORT} — yielding`
+      );
+      recordStartupState('ok-elsewhere', 'newer-daemon-running');
+      return process.exit(0);
+    }
+    logDaemonStartup('port-in-use', `another daemon (pid ${holderPid}) owns :${DAEMON_PORT}`);
+    recordStartupState('ok-elsewhere');
+    return process.exit(0);
+  }
+
   server.on('error', (e: NodeJS.ErrnoException) => {
     if (e.code === 'EADDRINUSE') {
       try {
         if (fs.existsSync(DAEMON_PID_FILE)) {
-          const { pid } = JSON.parse(fs.readFileSync(DAEMON_PID_FILE, 'utf-8'));
-          process.kill(pid, 0); // Throws if process is dead
-          logDaemonStartup('port-in-use', `another daemon (pid ${pid}) owns :${DAEMON_PORT}`);
-          // A healthy daemon owns the port and its pid file names it — nothing wrong.
-          recordStartupState('ok-elsewhere');
-          return process.exit(0);
+          const parsed = JSON.parse(fs.readFileSync(DAEMON_PID_FILE, 'utf-8')) as Record<
+            string,
+            unknown
+          >;
+          const pid = parsed.pid as number;
+          process.kill(pid, 0); // Throws if process is dead → dead-pidfile branch below
+          // Task #18: a live holder is no longer blindly yielded to — decide by
+          // BUILD. Async (needs /health + possibly /shutdown); every path in
+          // the decision ends in retryListen(), exit(0), or bounded yield.
+          void decideAgainstHolder(
+            pid,
+            typeof parsed.internalToken === 'string' ? parsed.internalToken : null
+          );
+          return;
         }
       } catch {
         // The pid file names a dead process (or is corrupt): drop it and retry.
@@ -1353,9 +1465,18 @@ export function startDaemon(): void {
               }
               if (orphanPid !== null) {
                 process.kill(orphanPid, 0);
+                // G2 (task #18): internalToken is null, NOT this process's token
+                // — the holder never knew our token, and writing it would make
+                // a later /shutdown 401 against a healthy daemon. null tells
+                // readers "cannot token-auth; use the pid" (restart's fallback).
                 atomicWriteSync(
                   DAEMON_PID_FILE,
-                  JSON.stringify({ pid: orphanPid, port: DAEMON_PORT, internalToken, autoStarted }),
+                  JSON.stringify({
+                    pid: orphanPid,
+                    port: DAEMON_PORT,
+                    internalToken: null,
+                    autoStarted,
+                  }),
                   { mode: 0o600 }
                 );
                 adopted = true;

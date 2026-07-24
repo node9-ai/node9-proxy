@@ -63,6 +63,21 @@ export function logAutostartSkipThrottled(reason: string): void {
 }
 
 export async function autoStartDaemonAndWait(): Promise<boolean> {
+  // Task #18: if ANY daemon is already serving the port — whatever build,
+  // whether or not the pidfile knows it — never spawn a competitor. The hook
+  // autostart is a fallback for "nothing is running", not a reconciler; racing
+  // spawns are exactly how rogue daemons were born. Version reconciliation
+  // belongs to explicit starts (systemd, `node9 daemon restart`).
+  let alreadyServing = false;
+  try {
+    alreadyServing = await isDaemonReachable();
+  } catch {
+    /* a throwing probe must never break the hook — treat as not serving */
+  }
+  if (alreadyServing) {
+    logAutostartSkipThrottled('already-serving');
+    return true;
+  }
   if (isTestingMode()) return false;
   if (!path.isAbsolute(process.argv[1])) return false;
   let resolvedArgv1: string;

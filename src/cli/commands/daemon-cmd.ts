@@ -3,6 +3,7 @@
 import type { Command } from 'commander';
 import chalk from 'chalk';
 import { spawn } from 'child_process';
+import { isDaemonReachable } from '../../auth/daemon';
 import fs from 'fs';
 import { openStartupLogFd, recordStartupState } from '../../daemon/startup-log';
 import {
@@ -63,7 +64,13 @@ export function registerDaemonCommand(program: Command): void {
         // ── restart ───────────────────────────────────────────────────────────
         if (cmd === 'restart') {
           stopDaemon();
-          await new Promise((r) => setTimeout(r, 500));
+          // Task #18: wait for the port to actually free (bounded ~3s), not a
+          // fixed 500ms — else the fresh daemon can hit EADDRINUSE on the dying
+          // holder, adopt it, exit… and the holder then dies: zero daemons.
+          for (let i = 0; i < 15; i++) {
+            if (!(await isDaemonReachable(300))) break;
+            await new Promise((r) => setTimeout(r, 200));
+          }
           // Same spawner contract as --background: capture the child's stderr, mark
           // the attempt, and ALWAYS attach an 'error' listener (an 'error' event with
           // no listener is an uncaught exception).
