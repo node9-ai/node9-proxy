@@ -232,4 +232,25 @@ describe('real-gate: downgraded ruleName-less hard block (round-2 F1/F3)', () =>
     // allow; the poller never resolves, so the timeout racer denies.
     expect(res.approved).toBe(false);
   });
+
+  it('F: interactive downgrade + inline-ask requested — a downgraded block routes to the OUT-OF-BAND approver, not the agent inline prompt (F1d hardening)', async () => {
+    process.env.DISPLAY = ':0'; // downgrade path (human reachable → mayDowngrade)
+    // deferReview = the caller (check.ts) asking to hand a `review` to the
+    // agent's own inline `permissionDecision:"ask"` — default-on for cloud-less
+    // Claude Code / Copilot. For an ordinary review verdict that is fine, but a
+    // downgraded HARD block (intrinsic exfil/RCE) must use the routed approver,
+    // like taint does — the agent's session prompt is spoofable exactly where
+    // exfil risk is highest.
+    const res = await authorizeHeadless('Bash', { command: 'echo hello' }, undefined, {
+      deferReview: true,
+    });
+
+    // Before F1d: the inline-ask short-circuit returns {review:true} and NEVER
+    // reaches the handshake — registerDaemonEntry is not called. After F1d the
+    // `!hardBlockDowngraded` guard skips the short-circuit, so the block flows
+    // to the routed-approver race (registerDaemonEntry called) and, with no one
+    // answering, the timeout racer denies.
+    expect(H.registerDaemonEntry).toHaveBeenCalled();
+    expect(res.approved).toBe(false);
+  });
 });
