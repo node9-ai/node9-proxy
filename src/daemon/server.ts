@@ -1299,19 +1299,38 @@ export function startDaemon(): void {
   // never serving, never exiting, and never recording anything beyond 'starting'.
   let bindAttempts = 0;
   const MAX_BIND_ATTEMPTS = 3;
+  // Set once we have deliberately shut a holder down for takeover: if the
+  // rebind then EXHAUSTS, we removed the running enforcer and failed to
+  // replace it — a distinct, louder condition than "a stranger holds the
+  // port", and worth surfacing so it isn't mistaken for the benign case.
+  let tookDownHolder = false;
   function retryListen(): void {
     if (++bindAttempts >= MAX_BIND_ATTEMPTS) {
-      logDaemonStartup(
-        'port-unavailable',
-        `:${DAEMON_PORT} is held by something that is not a node9 daemon`
-      );
-      recordStartupState(
-        'failed',
-        'port-unavailable',
-        `:${DAEMON_PORT} is held by another process that is not a node9 daemon — free the port, then: node9 daemon --background`
-      );
+      if (tookDownHolder) {
+        logDaemonStartup(
+          'takeover-bind-failed',
+          `shut down the previous daemon but could not bind :${DAEMON_PORT} — the port was taken during handover`
+        );
+        recordStartupState(
+          'failed',
+          'takeover-bind-failed',
+          `took over :${DAEMON_PORT} but could not rebind (the port was claimed during handover) — no daemon is serving; run: node9 daemon restart`
+        );
+      } else {
+        logDaemonStartup(
+          'port-unavailable',
+          `:${DAEMON_PORT} is held by something that is not a node9 daemon`
+        );
+        recordStartupState(
+          'failed',
+          'port-unavailable',
+          `:${DAEMON_PORT} is held by another process that is not a node9 daemon — free the port, then: node9 daemon --background`
+        );
+      }
       // exit 0, NOT 1: under Restart=on-failure a non-zero exit turns a permanently
       // occupied port into a restart storm. This is a stable, explained condition.
+      // (The next tool call's autostart re-spawns; enforcement is in-process and
+      // fails closed meanwhile — the daemon gap affects approvals/activity only.)
       return process.exit(0);
     }
     server.listen(DAEMON_PORT, DAEMON_HOST);
@@ -1363,6 +1382,7 @@ export function startDaemon(): void {
             'takeover',
             `took over :${DAEMON_PORT} from older build ${holderBuildId} (pid ${holderPid})`
           );
+          tookDownHolder = true; // rebind exhaustion now records the loud fail-state
           retryListen();
           return;
         }
@@ -1405,7 +1425,13 @@ export function startDaemon(): void {
             string,
             unknown
           >;
-          const pid = parsed.pid as number;
+          const pid = parsed.pid;
+          // Range-validate before signalling — same guard as stopDaemon /
+          // isDaemonRunning (index.ts, service.ts). A corrupt pid (0/-1/huge)
+          // must fall to the dead-pidfile branch, never reach process.kill.
+          if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0 || pid > 4_194_304) {
+            throw new Error('invalid pid in daemon.pid');
+          }
           process.kill(pid, 0); // Throws if process is dead → dead-pidfile branch below
           // Task #18: a live holder is no longer blindly yielded to — decide by
           // BUILD. Async (needs /health + possibly /shutdown); every path in

@@ -20,6 +20,15 @@ const PID_FILE = path.join(os.homedir(), '.node9', 'daemon.pid');
  *
  * Example: `/home/nadav/node9/fe/src/pages/DocsTab.tsx` → `…/pages/DocsTab.tsx`
  */
+/** SSE connect URL for the daemon event stream. `capabilities=input` is
+ *  advertised ONLY when this process can actually approve (TTY stdio) — the
+ *  daemon's GET /approver counts input-capable clients as reachable humans,
+ *  and a phantom one lets a shield hard-block soften into a review nobody can
+ *  answer (round-2 F2, /code-review finding #4). Exported for tests. */
+export function eventsUrl(port: number, canApprove: boolean): string {
+  return `http://127.0.0.1:${port}/events${canApprove ? '?capabilities=input' : ''}`;
+}
+
 export function shortenPathSummary(s: string): string {
   if (!s || !s.startsWith('/')) return s;
   const parts = s.split('/').filter(Boolean);
@@ -1022,9 +1031,9 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
   }, STALL_THRESHOLD_MS / 2);
   stallWatchdog.unref();
 
-  // Connect with capabilities=input so the daemon knows this is an interactive terminal.
+  // Input capability only when a human can actually answer — see eventsUrl.
   // Auth token in header (v3 sprint #9 — /events now requires it).
-  const sseUrl = `http://127.0.0.1:${port}/events?capabilities=input`;
+  const sseUrl = eventsUrl(port, canApprove);
   const req = http.get(
     sseUrl,
     {

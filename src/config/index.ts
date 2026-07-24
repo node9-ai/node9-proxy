@@ -559,8 +559,6 @@ export function getActiveEnvironment(config: Config): EnvironmentConfig | null {
   return config.environments[env] ?? null;
 }
 
-let cacheReadFailureLogged = false;
-
 /**
  * Read + parse rules-cache.json defensively.
  *
@@ -580,6 +578,7 @@ let cacheReadFailureLogged = false;
  */
 export function readRulesCacheResilient(cacheFile: string): Record<string, unknown> {
   let existed = false;
+  let sawReadError = false;
   for (let attempt = 0; attempt < 3; attempt++) {
     let content: string;
     try {
@@ -588,28 +587,44 @@ export function readRulesCacheResilient(cacheFile: string): Record<string, unkno
     } catch (err) {
       // ENOENT = no cloud policy configured — normal, not an error.
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {};
+      // Round-2 F4 (#7): EACCES/EIO/EMFILE mean the cache is PRESENT but
+      // unreadable — that must reach the backup/log path below, not silently
+      // return {} (which drops every mandated shield with no trace).
+      sawReadError = true;
       continue; // transient FS error — retry
     }
     try {
-      return JSON.parse(content) as Record<string, unknown>;
+      const parsed = JSON.parse(content) as Record<string, unknown>;
+      lastParsedRulesCache = parsed;
+      return parsed;
     } catch {
       /* partial/torn read — retry; atomic writeCache means the next read is whole */
     }
   }
-  // Present but unparseable after retries. Before dropping ALL cloud
-  // enforcement (a fail-open), fall back to the last-known-good copy the daemon
-  // keeps beside the primary — so an externally-corrupted primary still
+  // Present (or present-but-unreadable) after retries. Before dropping ALL
+  // cloud enforcement (a fail-open), fall back to the last-known-good copy the
+  // daemon keeps beside the primary — so an externally-corrupted primary still
   // enforces the last policy we successfully read, not nothing.
-  if (existed) {
+  if (existed || sawReadError) {
     const backup = path.join(path.dirname(cacheFile), 'rules-cache.last-good.json');
     if (backup !== cacheFile) {
       try {
         const raw = JSON.parse(fs.readFileSync(backup, 'utf-8')) as Record<string, unknown>;
         logCacheReadIssue(cacheFile, 'RULES_CACHE_CORRUPT_USED_BACKUP');
+        lastParsedRulesCache = raw;
         return raw;
       } catch {
-        /* no usable backup either — fall through to the empty (logged) result */
+        /* no usable backup either — fall through */
       }
+    }
+    // Round-2 F4 (#2 partial): in a long-lived process (the daemon — where
+    // most enforcement runs) fall back to the last successfully-parsed cache
+    // held in memory. A fresh hook process has no memo — accepted residual:
+    // {} + the loud log below (full fail-closed here would be an availability
+    // cliff; atomic writes + last-good + this memo make the window ~vanish).
+    if (lastParsedRulesCache) {
+      logCacheReadIssue(cacheFile, 'RULES_CACHE_USED_MEMORY');
+      return lastParsedRulesCache;
     }
     // Cloud enforcement is EXPECTED (the file exists) yet neither the primary
     // nor the backup is readable. Never let that vanish silently — log it.
@@ -618,10 +633,26 @@ export function readRulesCacheResilient(cacheFile: string): Record<string, unkno
   return {};
 }
 
-/** Log a rules-cache read problem once per process (avoids hot-path spam). */
+/** Last successfully-parsed rules cache in THIS process — the daemon's
+ *  in-memory fallback when disk turns unreadable (round-2 F4). */
+let lastParsedRulesCache: Record<string, unknown> | null = null;
+
+/** Test-only: clear the memo + the log rate-limit (both module-level, they
+ *  leak across vitest cases in one file otherwise). */
+export function __resetRulesCacheStateForTest(): void {
+  lastParsedRulesCache = null;
+  cacheReadLastLoggedAt = 0;
+}
+
+/** Log a rules-cache read problem, rate-limited to once per 5 minutes —
+ *  round-2 F4 (#3): a once-per-PROCESS latch silenced every recurrence in the
+ *  long-lived daemon, exactly where repeated corruption matters most. */
+const CACHE_LOG_REARM_MS = 5 * 60 * 1000;
+let cacheReadLastLoggedAt = 0;
 function logCacheReadIssue(cacheFile: string, kind: string): void {
-  if (cacheReadFailureLogged) return;
-  cacheReadFailureLogged = true;
+  const now = Date.now();
+  if (now - cacheReadLastLoggedAt < CACHE_LOG_REARM_MS) return;
+  cacheReadLastLoggedAt = now;
   try {
     fs.appendFileSync(
       path.join(os.homedir(), '.node9', 'hook-debug.log'),

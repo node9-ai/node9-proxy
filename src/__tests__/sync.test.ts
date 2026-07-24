@@ -155,7 +155,8 @@ function mockFiles(files: Record<string, string>) {
   existsSpy.mockImplementation((p) => p.toString() in files);
   readSpy.mockImplementation((p: unknown) => {
     const content = files[p!.toString()];
-    if (content === undefined) throw new Error(`ENOENT: ${String(p)}`);
+    if (content === undefined)
+      throw Object.assign(new Error(`ENOENT: ${String(p)}`), { code: 'ENOENT' });
     return content;
   });
 }
@@ -169,7 +170,7 @@ beforeEach(() => {
   // Default: no files exist
   existsSpy.mockReturnValue(false);
   readSpy.mockImplementation(() => {
-    throw new Error('ENOENT');
+    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
   });
 });
 

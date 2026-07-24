@@ -349,6 +349,11 @@ async function _authorizeHeadlessCore(
   // Set when a local smart rule with verdict "review" matched — prevents cloud's
   // immediate-allow from bypassing the human approval card.
   let localSmartRuleMatched = false;
+  // Round-2 F1: set when a hard BLOCK verdict was downgraded to review (a
+  // reachable human, or a stateful rule's availability downgrade). Guards the
+  // ruleName-less intrinsic blocks (pipe-chain/eval-remote/suspect-binary,
+  // tier 3, no ruleName) from being resolved by any non-human channel.
+  let hardBlockDowngraded = false;
 
   // ── TAINT CHECK ───────────────────────────────────────────────────────────
   // Before DLP: if this is a network/upload operation touching a previously
@@ -743,6 +748,15 @@ async function _authorizeHeadlessCore(
 
     // Hard block from smart rules — skip the race engine entirely
     if (policyResult.decision === 'block') {
+      // Round-2 F1: any BLOCK verdict that survives this handler (i.e. was
+      // downgraded to a review rather than returned as hardBlock()) must be
+      // un-resolvable by every NON-HUMAN channel downstream. The guards there
+      // key on ruleName/tier-7 — but the engine's intrinsic AST blocks
+      // (pipe-chain exfiltration, eval-remote-exec, suspect-binary) carry NO
+      // ruleName at tier 3, which let a prior "Always Allow <tool>" or the
+      // cloud no-match immediate-allow silently resolve a hard block. Key the
+      // protection on "this was a block", not on how the rule is named.
+      hardBlockDowngraded = true;
       // Fail-closed gate for the block→review downgrade below. A hard block may
       // only soften to a review when a genuine HUMAN approver is actually
       // reachable — a GUI popup can be shown, or a `node9 tail` is connected.
@@ -894,7 +908,10 @@ async function _authorizeHeadlessCore(
     // (The name `localSmartRuleMatched` is kept — it crosses the daemon HTTP
     // boundary (auth/daemon.ts → daemon/server.ts) and renaming the wire field
     // would silently drop the guard on a hook↔daemon version skew.)
-    if (policyResult.ruleName || policyResult.tier === 7) localSmartRuleMatched = true;
+    // Round-2 F1: `hardBlockDowngraded` joins the guard — a downgraded block
+    // is always a local match, whether or not the verdict carries a ruleName.
+    if (policyResult.ruleName || policyResult.tier === 7 || hardBlockDowngraded)
+      localSmartRuleMatched = true;
     // Capture the human-readable description so it survives through the race
     // engine and appears in sendBlock even when the user denies at the daemon.
     if (policyResult.ruleDescription) policyRuleDescription = policyResult.ruleDescription;
@@ -927,8 +944,12 @@ async function _authorizeHeadlessCore(
     // BEFORE the org mandated strict would permanently exempt that tool, and
     // the call never reaches the cloud, so the BE floor can't compensate.
     // Rule-less sub-tier-7 reviews (dangerous-word) stay persistent-resolvable.
+    // Round-2 F1: a downgraded hard block also skips the consult — a blanket
+    // "Always Allow Bash" must never resolve an intrinsic exfil/RCE block.
     const persistent =
-      policyResult.ruleName || policyResult.tier === 7 ? null : getPersistentDecision(toolName);
+      policyResult.ruleName || policyResult.tier === 7 || hardBlockDowngraded
+        ? null
+        : getPersistentDecision(toolName);
     // `!appPermReview`: a prior "Always Allow" must not bypass an org-set review
     // (fix #3). A persistent DENY still short-circuits (tightening is fine).
     if (persistent === 'allow' && !appPermReview) {
