@@ -25,6 +25,9 @@ const H = vi.hoisted(() => ({
   daemonRunning: vi.fn<() => boolean>(),
   interactiveApprover: vi.fn<() => Promise<boolean>>(),
   persistentDecision: vi.fn<() => 'allow' | 'deny' | null>(),
+  trustSession: vi.fn<() => boolean>(),
+  cloudEnabled: vi.fn<() => boolean>(),
+  initSaaS: vi.fn(),
   evaluatePolicy: vi.fn(),
   registerDaemonEntry: vi.fn(),
 }));
@@ -41,7 +44,7 @@ vi.mock('../config', () => ({
       // terminate via timeout-deny, never hang the spec.
       approvalTimeoutMs: 80,
       auditHashArgs: false,
-      approvers: { native: true, terminal: true, cloud: false },
+      approvers: { native: true, terminal: true, cloud: H.cloudEnabled() },
       mode: 'standard',
       panicMode: false,
       enableHookLogDebug: false,
@@ -53,12 +56,12 @@ vi.mock('../config', () => ({
       appPermissions: {},
     },
   }),
-  getCredentials: () => null, // no cloud — the SaaS handshake is skipped
+  getCredentials: () => (H.cloudEnabled() ? { apiKey: 'n9_live_test' } : null),
 }));
 
 vi.mock('../auth/state', () => ({
   checkPause: () => ({ paused: false }),
-  getActiveTrustSession: () => null,
+  getActiveTrustSession: () => (H.trustSession() ? { toolName: 'Bash' } : null),
   writeTrustSession: vi.fn(),
   getPersistentDecision: () => H.persistentDecision(),
 }));
@@ -95,8 +98,9 @@ vi.mock('../audit', () => ({
 }));
 
 vi.mock('../auth/cloud', () => ({
-  initNode9SaaS: vi.fn(),
-  pollNode9SaaS: vi.fn(),
+  initNode9SaaS: (...a: unknown[]) => H.initSaaS(...a),
+  // Never resolves — the cloud poller must not win; the timeout racer decides.
+  pollNode9SaaS: () => new Promise(() => {}),
   resolveNode9SaaS: vi.fn(),
 }));
 
@@ -147,6 +151,9 @@ describe('real-gate: downgraded ruleName-less hard block (round-2 F1/F3)', () =>
     H.daemonRunning.mockReturnValue(true);
     H.interactiveApprover.mockResolvedValue(false);
     H.persistentDecision.mockReturnValue(null);
+    H.trustSession.mockReturnValue(false);
+    H.cloudEnabled.mockReturnValue(false);
+    H.initSaaS.mockResolvedValue({ pending: true, requestId: 'req-1' });
     H.evaluatePolicy.mockResolvedValue(RULENAME_LESS_BLOCK);
     H.registerDaemonEntry.mockResolvedValue({ id: 'entry-1', allowCount: 1 });
   });
@@ -194,5 +201,35 @@ describe('real-gate: downgraded ruleName-less hard block (round-2 F1/F3)', () =>
     expect(H.registerDaemonEntry).toHaveBeenCalled();
     const args = H.registerDaemonEntry.mock.calls[0];
     expect(args[9]).toBe(true);
+  });
+
+  it('D: interactive downgrade + active trust session — trust must NOT resolve a hard block (round-3 F1b)', async () => {
+    process.env.DISPLAY = ':0'; // downgrade path
+    H.trustSession.mockReturnValue(true); // a prior "always allow" grant matches
+
+    const res = await authorizeHeadless('Bash', { command: 'echo hello' });
+
+    // Before F1b: {approved:true, checkedBy:'trust'} — the trust bypass at
+    // orchestrator.ts:1006 resolved a downgraded intrinsic block with no human.
+    // After F1b the trust check is skipped for a downgraded block; the review
+    // reaches no one and the timeout racer denies.
+    expect(res.checkedBy).not.toBe('trust');
+    expect(res.approved).toBe(false);
+  });
+
+  it('E: interactive downgrade + cloud shadowMode — shadowMode must NOT resolve a hard block (round-3 F1c)', async () => {
+    process.env.DISPLAY = ':0'; // downgrade path
+    H.cloudEnabled.mockReturnValue(true);
+    // A shadow/observe org (or a stale BE ignoring forceReview) answers the
+    // handshake with a non-pending shadowMode allow.
+    H.initSaaS.mockResolvedValue({ pending: false, shadowMode: true });
+
+    const res = await authorizeHeadless('Bash', { command: 'echo hello' });
+
+    // Before F1c: {approved:true, checkedBy:'cloud'} — shadowMode short-circuit
+    // resolved a downgraded intrinsic block. After F1c a local review match
+    // (localSmartRuleMatched, set via hardBlockDowngraded) blocks the shadowMode
+    // allow; the poller never resolves, so the timeout racer denies.
+    expect(res.approved).toBe(false);
   });
 });

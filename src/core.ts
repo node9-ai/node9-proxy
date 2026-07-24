@@ -10,6 +10,7 @@ export {
   DANGEROUS_WORDS,
   DEFAULT_CONFIG,
   _resetConfigCache,
+  __resetRulesCacheStateForTest,
   getGlobalSettings,
   getCredentials,
   hasSlack,

