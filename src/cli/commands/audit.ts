@@ -4,6 +4,7 @@ import type { Command } from 'commander';
 import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
+import { classifyDecision } from '../../audit/decision';
 import os from 'os';
 
 function formatRelativeTime(timestamp: string): string {
@@ -48,11 +49,19 @@ export function registerAuditCommand(program: Command): void {
       // Normalize decision field — some older entries use "allowed"/"denied"
       entries = entries.map((e) => ({
         ...e,
-        decision: String(e.decision).startsWith('allow') ? 'allow' : 'deny',
+        // classifyDecision is the ONE mapper (audit/decision.ts). The inline
+        // `startsWith('allow') ? allow : deny` this replaces bucketed `dlp` and
+        // `mcp-discovered` — findings, not verdicts — as DENY, inventing
+        // refusals that never happened.
+        // Pass the ROW, never a field pair — the attribution key differs by
+        // producer (`checkedBy` from the gate, `source` from the hook/daemon).
+        view: classifyDecision(e),
       }));
 
       if (options.tool) entries = entries.filter((e) => String(e.tool).includes(options.tool!));
-      if (options.deny) entries = entries.filter((e) => e.decision === 'deny');
+      // `--deny` means every refusal: a rule block, a human denial, AND a
+      // timeout. Matching the literal string missed `auto-deny` and `block`.
+      if (options.deny) entries = entries.filter((e) => e.view.outcome === 'deny');
 
       const limit = Math.max(1, parseInt(options.tail, 10) || 20);
       entries = entries.slice(-limit);
@@ -80,7 +89,13 @@ export function registerAuditCommand(program: Command): void {
         const time = formatRelativeTime(String(e.ts)).padEnd(12);
         const tool = String(e.tool).slice(0, 17).padEnd(18);
         const result =
-          e.decision === 'allow' ? chalk.green('ALLOW'.padEnd(10)) : chalk.red('DENY'.padEnd(10));
+          e.view.outcome === 'allow'
+            ? chalk.green(e.view.label.padEnd(14))
+            : e.view.outcome === 'deny'
+              ? chalk.red(e.view.label.padEnd(14))
+              : e.view.outcome === 'observe'
+                ? chalk.yellow(e.view.label.padEnd(14))
+                : chalk.gray(e.view.label.padEnd(14));
         const checker = String(e.checkedBy || 'unknown')
           .slice(0, 14)
           .padEnd(15);
@@ -88,8 +103,8 @@ export function registerAuditCommand(program: Command): void {
         console.log(`  ${time} ${tool} ${result} ${checker} ${agent}`);
       }
 
-      const allowed = entries.filter((e) => e.decision === 'allow').length;
-      const denied = entries.filter((e) => e.decision === 'deny').length;
+      const allowed = entries.filter((e) => e.view.outcome === 'allow').length;
+      const denied = entries.filter((e) => e.view.outcome === 'deny').length;
       console.log(chalk.dim('  ' + '─'.repeat(65)));
       console.log(
         `  ${entries.length} entries  |  ${chalk.green(allowed + ' allowed')}  |  ${chalk.red(denied + ' denied')}\n`

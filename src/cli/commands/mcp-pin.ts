@@ -7,6 +7,7 @@ import {
   readMcpPins,
   readMcpPinsSafe,
   removePin,
+  writeMcpPins,
   clearAllPins,
   findPinsFilePath,
   promotePin,
@@ -14,6 +15,7 @@ import {
 } from '../../mcp-pin';
 import fs from 'fs';
 import { registerMcpGatewayCommand } from './mcp-gateway-cmd';
+import { inventoryMcp, inventoryServerKeys } from '../../mcp-wrap';
 
 export function registerMcpPinCommand(program: Command): void {
   const pinCmd = program
@@ -160,4 +162,104 @@ export function registerMcpPinCommand(program: Command): void {
       console.log(chalk.green(`\n🔓 Cleared ${count} MCP pin(s).`));
       console.log(chalk.gray('   Next connection to each server will re-pin.\n'));
     });
+
+  // ── node9 mcp forget ────────────────────────────────────────────────────────
+  pinCmd
+    .command('forget [serverKey]')
+    .option('--stale', 'Remove all stale (orphaned) servers at once')
+    .description('Remove a server pin that is no longer configured in any agent')
+    .action((serverKey: string | undefined, opts: { stale?: boolean }) => {
+      if (opts.stale) {
+        forgetAllStale();
+        return;
+      }
+      if (!serverKey) {
+        console.error(
+          chalk.red('\n❌ Please provide a server key, or use --stale to remove all orphans.\n')
+        );
+        process.exit(1);
+      }
+
+      let pins;
+      try {
+        pins = readMcpPins();
+      } catch {
+        console.error(chalk.red('\n❌ Pin file is corrupt.'));
+        console.error(chalk.yellow('   Run: node9 mcp pin reset\n'));
+        process.exit(1);
+      }
+      if (!pins.servers[serverKey]) {
+        console.error(chalk.red(`\n❌ No pin found for server key "${serverKey}"\n`));
+        console.error(`Run ${chalk.cyan('node9 mcp pin list')} to see pinned servers.\n`);
+        process.exit(1);
+      }
+
+      // Guard: refuse to forget a server still in an agent config.
+      const inv = inventoryMcp();
+      const liveKeys = inventoryServerKeys(inv);
+
+      if (liveKeys.has(serverKey)) {
+        const agent = 'an agent config';
+        console.error(chalk.red(`\n❌ Server "${serverKey}" is still configured in ${agent}.`));
+        console.error(
+          chalk.yellow(
+            `   Remove it from the agent config first, then run: node9 mcp forget ${serverKey}\n`
+          )
+        );
+        process.exit(1);
+      }
+
+      const label = pins.servers[serverKey].label;
+      removePin(serverKey);
+      console.log(chalk.green(`\n✓ Forgot server ${chalk.cyan(serverKey)}`));
+      console.log(chalk.gray(`   Was: ${label}`));
+      console.log(chalk.gray('   Pin removed — server will no longer appear in the dashboard.\n'));
+    });
+}
+
+// Exported for unit testing (A1 empty-inventory guard + B1 single write).
+export function forgetAllStale(): void {
+  let pins;
+  try {
+    pins = readMcpPins();
+  } catch {
+    console.error(chalk.red('\n❌ Pin file is corrupt.'));
+    console.error(chalk.yellow('   Run: node9 mcp pin reset\n'));
+    process.exit(1);
+  }
+
+  const inv = inventoryMcp();
+  const liveKeys = inventoryServerKeys(inv);
+
+  // A1: refuse to mass-remove when NO live server is detected. An empty
+  // inventory can't distinguish "no servers configured" from "every agent
+  // config was missing/unreadable", and a wrongly-forgotten pin silently
+  // re-pins to whatever tools the server presents next — resetting the rug-pull
+  // baseline. Fail closed: keep the pins, tell the user, remove one at a time.
+  if (liveKeys.size === 0) {
+    console.error(chalk.red('\n❌ No live MCP servers detected — refusing to remove every pin.'));
+    console.error(
+      chalk.yellow(
+        '   This usually means an agent config is missing or unreadable, not that\n' +
+          '   every server is gone. Check your agent configs, or remove one at a\n' +
+          '   time: node9 mcp forget <key>\n'
+      )
+    );
+    process.exit(1);
+  }
+
+  const stale = Object.entries(pins.servers).filter(([sk]) => !liveKeys.has(sk));
+  if (stale.length === 0) {
+    console.log(chalk.gray('\nNo stale servers to remove.\n'));
+    return;
+  }
+
+  // B1: one read-modify-write, not N removePin() calls (each re-reads the file
+  // and re-writes it — N windows for a concurrent gateway/daemon write to lose).
+  for (const [sk, pin] of stale) {
+    delete pins.servers[sk];
+    console.log(chalk.green(`  ✓ ${chalk.cyan(sk)}  ${chalk.gray(pin.label)}`));
+  }
+  writeMcpPins(pins);
+  console.log(chalk.green(`\nRemoved ${stale.length} stale server(s).\n`));
 }

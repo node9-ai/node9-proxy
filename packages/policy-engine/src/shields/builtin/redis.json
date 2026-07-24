@@ -2,6 +2,7 @@
   "name": "redis",
   "description": "Protects Redis instances from destructive AI operations",
   "aliases": [],
+  "_scopeNote": "Every rule requires Redis to actually be involved: a client in the command (redis-cli / valkey-cli, in either order — `redis-cli FLUSHALL` and `echo FLUSHALL | redis-cli` are both real), OR the command field holding the bare keyword, which is what the MCP redis_command tool sends ({ command: 'FLUSHALL', args: [] }). Without the client requirement these rules matched the WORD anywhere — including prose in a heredoc writing a file — which produced two observed false positives: a test fixture describing the shield, and a commit message naming the rule. Every other builtin shield already scopes this way (aws s3, docker system prune, kubectl delete, gh repo delete). See redis-scope.spec.ts.",
   "smartRules": [
     {
       "name": "shield:redis:block-flushall",
@@ -10,7 +11,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "\\bFLUSHALL\\b",
+          "value": "(redis|valkey)-cli.*\\bFLUSHALL\\b|\\bFLUSHALL\\b.*(redis|valkey)-cli|^ ?FLUSHALL\\b|\\.flushall\\s*\\(",
           "flags": "i"
         }
       ],
@@ -24,7 +25,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "\\bFLUSHDB\\b",
+          "value": "(redis|valkey)-cli.*\\bFLUSHDB\\b|\\bFLUSHDB\\b.*(redis|valkey)-cli|^ ?FLUSHDB\\b|\\.flushdb\\s*\\(",
           "flags": "i"
         }
       ],
@@ -38,7 +39,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "\\bCONFIG\\s+RESETSTAT\\b",
+          "value": "(redis|valkey)-cli.*CONFIG\\s+RESETSTAT|^ ?CONFIG\\s+RESETSTAT",
           "flags": "i"
         }
       ],
@@ -52,7 +53,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "\\bCONFIG\\s+SET\\b",
+          "value": "(redis|valkey)-cli.*\\bCONFIG\\s+SET\\b|\\bCONFIG\\s+SET\\b.*(redis|valkey)-cli|^ ?CONFIG\\s+SET\\b",
           "flags": "i"
         }
       ],
@@ -66,7 +67,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "\\bDEL\\b.*[*?\\[]|redis-cli.*--scan.*\\|.*xargs.*del",
+          "value": "(redis|valkey)-cli.*\\bDEL\\b.*[*?\\[]|^ ?DEL\\b.*[*?\\[]|-cli.*--scan.*xargs.*del",
           "flags": "i"
         }
       ],

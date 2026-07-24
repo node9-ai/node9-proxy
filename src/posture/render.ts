@@ -42,12 +42,25 @@ function label(category: string): string {
   return chalk.bold(category.padEnd(Math.max(LABEL_WIDTH, category.length + 1)));
 }
 
-function renderFinding(f: Finding, showWeight = false): string[] {
+/** What a covered row is guarding, from the finding's own detail — data-first,
+ *  first entry + a count (the P1 cap rule). 'this' when it has no specifics. */
+function guardedWhat(f: Finding): string {
+  if (f.detail.length === 0) return 'this';
+  const reads = f.coverageProbe?.kind === 'fileRead' ? 'reads of ' : '';
+  const more = f.detail.length > 1 ? ` and ${f.detail.length - 1} more` : '';
+  return `${reads}${f.detail[0]}${more}`;
+}
+
+function renderFinding(
+  f: Finding,
+  showWeight = false,
+  displayLabel: string = f.category
+): string[] {
   const lines: string[] = [];
   // In the AVAILABLE tier, lead with the score gain (+N) so the value of turning
   // the layer on is the first thing read.
   const wt = showWeight && f.scoreWeight ? chalk.cyan.bold(`+${f.scoreWeight} `) : '';
-  lines.push(`  ${ICON[f.severity]} ${label(f.category)}${wt}${f.title}`);
+  lines.push(`  ${ICON[f.severity]} ${label(displayLabel)}${wt}${f.title}`);
   const indent = ' '.repeat(2 + 3 + LABEL_WIDTH);
   // Plain-language explanation first (what / why / who), wrapped so that
   // indent + text stays under ~80 columns.
@@ -94,17 +107,27 @@ export function renderPosture(result: PostureResult): string {
       `        ${chalk.bold(`Score: ${result.score}/100`)}  (${tier})`
   );
   // The headroom line: a sub-100 score isn't a failure — it's hardening you
-  // can choose to turn on. Naming the points (and that each costs flexibility)
-  // is what keeps the number honest AND non-nagging.
+  // can choose to turn on. When genuine exposures are ALSO open, name both
+  // buckets — otherwise the reader computes score+headroom≠100 and mistrusts
+  // the number. Advisories never deduct (score.ts), so they don't count as
+  // the "rest".
   const headroom = openHeadroom(result.findings);
   if (headroom > 0) {
-    lines.push(
-      '  ' +
-        chalk.gray(
-          `${headroom} pts of headroom below — each layer adds security at some ` +
-            'cost to flexibility. You choose which to close.'
-        )
-    );
+    const openExposures = result.findings.filter(
+      (f) =>
+        f.coverage?.state !== 'covered' &&
+        f.coverage?.state !== 'cant-fix' &&
+        !f.scoreWeight &&
+        f.severity !== 'advisory'
+    ).length;
+    const note =
+      openExposures > 0
+        ? `Of the gap to 100: ${headroom} pts is optional hardening you can choose ` +
+          'to turn on (the 🔒 tier below, each at some cost to flexibility); the ' +
+          'rest is the open findings — the flagged rows below. Fix those first.'
+        : `${headroom} pts of headroom — optional hardening you can choose to ` +
+          'turn on (the 🔒 tier below), each at some cost to flexibility.';
+    for (const l of wrap(note, 76)) lines.push('  ' + chalk.gray(l));
   }
   lines.push('');
 
@@ -121,13 +144,22 @@ export function renderPosture(result: PostureResult): string {
   // a risk. (Covered findings are excluded from the open-findings render below.)
   const covered = result.findings.filter((f) => f.coverage?.state === 'covered');
   const open = result.findings.filter((f) => f.coverage?.state !== 'covered');
+  // A category present in BOTH lists reads as a contradiction (✅ Secrets six
+  // lines above ❌ Secrets) — qualify the labels ONLY then; a category on one
+  // side keeps its bare name.
+  const collision = new Set(
+    covered.map((f) => f.category).filter((c) => open.some((o) => o.category === c))
+  );
+  const openLabel = (f: Finding) =>
+    collision.has(f.category) ? `${f.category} (exposed)` : f.category;
   if (covered.length > 0) {
     lines.push('  ' + chalk.green('🟢 ON NOW — node9 is enforcing these (your floor)'));
     for (const f of covered) {
       const gated = f.coverage?.level === 'review' ? 'approval-gating' : 'blocking';
       const via = f.coverage?.via ?? 'node9';
+      const lbl = collision.has(f.category) ? `${f.category} (guarded)` : f.category;
       lines.push(
-        `  ${chalk.green('✅')} ${label(f.category)}${chalk.gray(`${via} is ${gated} this`)}`
+        `  ${chalk.green('✅')} ${label(lbl)}${chalk.gray(`${via} is ${gated} ${guardedWhat(f)}`)}`
       );
     }
     lines.push('');
@@ -144,17 +176,17 @@ export function renderPosture(result: PostureResult): string {
 
   if (node9Open.length > 0) {
     lines.push('  ' + chalk.cyan.bold('🔧 node9 can fix these — run the command'));
-    for (const f of node9Open) lines.push(...renderFinding(f, true));
+    for (const f of node9Open) lines.push(...renderFinding(f, true, openLabel(f)));
   }
   if (reduceOpen.length > 0) {
     if (node9Open.length > 0) lines.push('');
     lines.push('  ' + chalk.yellow.bold('🔒 AVAILABLE — turn on to harden (each has a tradeoff)'));
-    for (const f of reduceOpen) lines.push(...renderFinding(f, true));
+    for (const f of reduceOpen) lines.push(...renderFinding(f, true, openLabel(f)));
   }
   if (osOpen.length > 0) {
     if (node9Open.length > 0 || reduceOpen.length > 0) lines.push('');
     lines.push('  ' + chalk.bold("🧱 YOUR PART — node9 can't fix these (OS-level)"));
-    for (const f of osOpen) lines.push(...renderFinding(f));
+    for (const f of osOpen) lines.push(...renderFinding(f, false, openLabel(f)));
   }
 
   for (const cat of result.passedCategories) {

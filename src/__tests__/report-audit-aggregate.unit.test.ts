@@ -190,11 +190,14 @@ describe('aggregateReportFromAudit', () => {
         source: 'local-policy',
         checkedBy: 'dlp-block',
       },
-      // DLP observe
+      // DLP observe. The producer (orchestrator.ts:453) writes `deny` here and
+      // then returns approved:true — the action RAN. This fixture said `allow`,
+      // a shape that occurs 0 times in a real 101k-row log; the assertion below
+      // was written to match it and so encoded the bug.
       {
         ts: '2026-05-10T10:00:05Z',
         tool: 'Bash',
-        decision: 'allow',
+        decision: 'deny',
         source: 'local-policy',
         checkedBy: 'observe-mode-dlp-would-block',
       },
@@ -213,7 +216,9 @@ describe('aggregateReportFromAudit', () => {
     expect(result.data.timedOut).toBe(1);
     expect(result.data.hardBlocked).toBe(1);
     expect(result.data.dlpBlocked).toBe(1);
-    expect(result.data.observeDlp).toBe(0); // observeDlp is for blocked observe-mode entries; allow path ≠ block path
+    // An observe-DLP row is an observe-DLP row: counted here, and in NO block
+    // bucket, because shadow mode let the action through.
+    expect(result.data.observeDlp).toBe(1);
     expect(result.data.loopHits).toBe(1);
   });
 
@@ -998,5 +1003,94 @@ describe('aggregateReportFromAudit — malformed / event rows', () => {
     // Only the two real tool-call rows counted; the event row dropped.
     expect(result.data.total).toBe(2);
     expect(result.data.dimensions.toolRules.blocked).toBe(1);
+  });
+});
+
+/**
+ * Regression — the fifth hand-rolled decision rule.
+ *
+ * `isAllow = decision.startsWith('allow')` asked one question ("does the word
+ * begin with allow") of rows that need three. Everything else counted as a
+ * BLOCK, so `node9 report` scored shadow-mode rows that RAN and MCP-discovery
+ * events that were never verdicts as refusals. Measured against a real
+ * 101k-row log: 918 phantom blocks (913 observe-DLP + 5 discovery).
+ *
+ * The shapes below are taken from that log, not invented — including the
+ * detail that observe mode writes `allow` on one path and `deny` on another
+ * for the same concept, which is why a straight swap to
+ * `classifyDecision(...).outcome === 'allow'` was NOT the fix: it would have
+ * moved 8,217 observe rows the other way, into the block path.
+ */
+describe('aggregateReportFromAudit — shadow mode and findings are not blocks', () => {
+  const TS = '2026-05-10T10:00:00Z';
+
+  it('does not count observe-mode rows as blocks (they ran)', () => {
+    writeLog([
+      { ts: TS, tool: 'Bash', decision: 'allow' },
+      // Shadow mode, path 1: writes `allow`. The action RAN.
+      { ts: TS, tool: 'Bash', decision: 'allow', checkedBy: 'observe-mode-would-block' },
+      // Shadow mode, path 2: writes `deny` for the same concept. Also RAN.
+      { ts: TS, tool: 'Bash', decision: 'deny', checkedBy: 'observe-mode-dlp-would-block' },
+    ]);
+    const { data } = aggregateReportFromAudit('7d', makeOpts());
+
+    // The observe rows are surfaced by their own counter…
+    expect(data.observeDlp).toBe(1);
+    // …and by NEITHER block counter. Before the fix the deny-flavoured row
+    // landed in toolMap/dailyMap/blockMap as a real refusal.
+    expect(data.hardBlocked).toBe(0);
+    expect(data.dlpBlocked).toBe(0);
+    expect(data.toolMap.get('Bash')?.blocked).toBe(0);
+    expect(data.dailyMap.get('2026-05-10')?.blocked).toBe(0);
+    expect(data.blockMap.size).toBe(0);
+  });
+
+  it('does not count an MCP-discovery event as a user denial', () => {
+    writeLog([
+      // Real shape: decision=mcp-discovered, source=daemon, no checkedBy.
+      // `source === 'daemon'` means "the user interacted", so the old rule
+      // scored this as the user DENYING something they were never shown.
+      { ts: TS, tool: 'mcp__redis__redis_get', decision: 'mcp-discovered', source: 'daemon' },
+      { ts: TS, tool: 'Bash', decision: 'allow', source: 'daemon' },
+    ]);
+    const { data } = aggregateReportFromAudit('7d', makeOpts());
+
+    expect(data.userDenied).toBe(0);
+    expect(data.userApproved).toBe(1);
+    expect(data.toolMap.get('mcp__redis__redis_get')?.blocked).toBe(0);
+  });
+
+  it('still counts real refusals, including an unrecognised decision', () => {
+    writeLog([
+      { ts: TS, tool: 'Bash', decision: 'deny', checkedBy: 'smart-rule-block' },
+      { ts: TS, tool: 'Bash', decision: 'deny', checkedBy: 'timeout' },
+      { ts: TS, tool: 'Bash', decision: 'deny', source: 'daemon' },
+      // An unknown verb must stay VISIBLE as a block rather than silently
+      // becoming an allow — the failure mode this whole thread started with.
+      { ts: TS, tool: 'Bash', decision: 'quarantined', checkedBy: 'future-producer' },
+    ]);
+    const { data } = aggregateReportFromAudit('7d', makeOpts());
+
+    expect(data.timedOut).toBe(1);
+    expect(data.userDenied).toBe(1);
+    expect(data.hardBlocked).toBe(2); // smart-rule-block + quarantined
+    expect(data.toolMap.get('Bash')?.blocked).toBe(4);
+  });
+
+  it('scores the prior period on the same population as the current one', () => {
+    // priorEntries previously kept response-dlp and event rows that the
+    // current-period filter dropped, so the trend arrow compared two
+    // different denominators. 7d window → prior window is the 7 days before.
+    writeLog([
+      { ts: '2026-04-28T10:00:00Z', tool: 'Bash', decision: 'allow' },
+      { ts: '2026-04-28T10:01:00Z', tool: 'Bash', decision: 'deny', checkedBy: 'smart-rule-block' },
+      // Neither of these belongs in a block rate: a finding, and an event row.
+      { ts: '2026-04-28T10:02:00Z', tool: 'Bash', decision: 'dlp', source: 'response-dlp' },
+      { ts: '2026-05-10T10:00:00Z', tool: 'Bash', decision: 'allow' },
+    ]);
+    const { data } = aggregateReportFromAudit('7d', makeOpts());
+
+    // 1 block of 2 comparable prior rows — not 1 of 3, and not 2 of 3.
+    expect(data.priorBlockRate).toBe(0.5);
   });
 });

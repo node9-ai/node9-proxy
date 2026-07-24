@@ -9,6 +9,7 @@ import type { Command } from 'commander';
 import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
+import { classifyDecision } from '../../audit/decision';
 import os from 'os';
 import { agentDisplayName, agentColorName, agentBadgeText } from '../../scan-summary';
 import { pricingFor } from '../../pricing/litellm';
@@ -264,7 +265,9 @@ export function loadAuditEntries(auditPath?: string): RawAuditEntry[] {
       const e = JSON.parse(line) as RawAuditEntry;
       if (!e.ts || !e.tool || !e.decision) continue;
       // Skip allow/allowed — we only want intercepted calls
-      if (e.decision === 'allow' || e.decision === 'allowed') continue;
+      // Shared mapper — a fourth hand-rolled copy of this rule is how the
+      // readers drifted apart in the first place.
+      if (classifyDecision(e).outcome === 'allow') continue;
       entries.push(e);
     } catch {
       // skip malformed lines

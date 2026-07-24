@@ -16,6 +16,7 @@ import {
   autostartAdvice,
 } from '../../daemon/service';
 import { agoLabel } from '../../lib/relative-time';
+import { readStartupCause } from '../../daemon/startup-log';
 
 export function registerDoctorCommand(program: Command, version: string): void {
   program
@@ -152,6 +153,36 @@ export function registerDoctorCommand(program: Command, version: string): void {
           'Daemon not running — terminal & native approvals unavailable',
           'Run: node9 daemon --background'
         );
+        // …and WHY, if the last start attempt left a trace. Without this the crash
+        // capture in daemon-startup.log has no reader: the diagnostic exists but
+        // stays undiscovered, which is most of the way back to a silent failure.
+        // A detail line on the warning above — deliberately not a second warn()
+        // (it isn't a second finding) and never a fail() (a dead daemon still
+        // enforces cached policy, so doctor's exit code must not flip).
+        const cause = readStartupCause();
+        if (cause) {
+          // Carry the age: the window is 24h, so without it a cause from
+          // yesterday morning reads as though it just happened.
+          // `detail` is optional on a recorded failure, so only append the dash when
+          // there is something after it.
+          const suffix = cause.detail ? ` — ${cause.detail}` : '';
+          // No parentheses around the age: the label supplies its own grammar
+          // ("last start attempt 5 min ago" / "start attempts failing since 5 min
+          // ago"), and a fixed "(…)" reads wrong for the second.
+          console.log(
+            chalk.gray(
+              `       ${cause.label} ${agoLabel(cause.at.toISOString())}: ${cause.kind}${suffix}`
+            )
+          );
+        }
+        // Deliberately NOT reporting "autostart is enabled but the daemon is down"
+        // as a startup failure: after a clean `systemctl --user stop` or the 12h
+        // idle-exit the state correctly reads 'ok', so that message would accuse a
+        // failure that provably did not happen. A daemon killed at module load
+        // under systemd is genuinely indistinguishable from a deliberate stop by
+        // this file alone — its stack is in the journal
+        // (`journalctl --user -u node9-daemon`), not here. A known gap is better
+        // than a confident wrong answer.
       }
       // Autostart health — the installed-but-disabled state that silently staled
       // policy for 6 days. warn (not fail) so a still-enforcing machine's doctor

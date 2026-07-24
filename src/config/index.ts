@@ -22,6 +22,10 @@ import { normalizeHost } from '../auth/trusted-hosts';
 // the rest of this file reference SmartRule by bare name.
 export type { SmartCondition, SmartRule } from '@node9/policy-engine';
 import type { SmartRule } from '@node9/policy-engine';
+// The trusted shield catalog. A cloud-mandated shield resolves its body from
+// here directly, never a user ~/.node9/shields/<name>.json that shadows the
+// builtin (B1: a mandate's rules must come from the fleet, not the dev's file).
+import { BUILTIN_SHIELDS } from '@node9/policy-engine';
 
 export interface EnvironmentConfig {
   requireApproval?: boolean;
@@ -54,6 +58,8 @@ export interface Config {
     /** Reconcile scan cadence in minutes (default 60, clamp 5-1440). A managed
      *  value from the dashboard overrides this. */
     mcpReconcileIntervalMinutes?: number;
+    /** Days before an orphaned MCP pin is auto-removed (default 7, 0 = never). */
+    mcpStaleAfterDays?: number;
     /** Outbox shipper (audit.log → SaaS batch ingest). */
     shipper: { enabled: boolean; intervalSeconds: number };
     hud?: {
@@ -553,6 +559,79 @@ export function getActiveEnvironment(config: Config): EnvironmentConfig | null {
   return config.environments[env] ?? null;
 }
 
+let cacheReadFailureLogged = false;
+
+/**
+ * Read + parse rules-cache.json defensively.
+ *
+ * The daemon rewrites this file on every policy change (sync.ts writeCache).
+ * A hook's getConfig() reading it concurrently used to `JSON.parse` a single
+ * `readFileSync` inside a fail-OPEN catch: a torn/partial read threw and the
+ * catch silently dropped ALL cloud enforcement (shields, managed mode) for
+ * that call — a non-deterministic fail-open. `writeCache` is now atomic
+ * (temp+rename), so a reader never sees a partial file; this reader adds
+ * defense in depth: retry a torn read (belt-and-suspenders for any other
+ * writer), distinguish an ABSENT cache (no cloud policy — normal) from a
+ * PRESENT-but-corrupt one, and never drop enforcement without a trace.
+ *
+ * Returns the parsed object, or `{}` when there is nothing usable — callers
+ * guard every field (`Array.isArray(raw.rules)` etc.), so `{}` is a safe
+ * "no cloud layer" without special-casing.
+ */
+export function readRulesCacheResilient(cacheFile: string): Record<string, unknown> {
+  let existed = false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let content: string;
+    try {
+      content = fs.readFileSync(cacheFile, 'utf-8');
+      existed = true;
+    } catch (err) {
+      // ENOENT = no cloud policy configured — normal, not an error.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {};
+      continue; // transient FS error — retry
+    }
+    try {
+      return JSON.parse(content) as Record<string, unknown>;
+    } catch {
+      /* partial/torn read — retry; atomic writeCache means the next read is whole */
+    }
+  }
+  // Present but unparseable after retries. Before dropping ALL cloud
+  // enforcement (a fail-open), fall back to the last-known-good copy the daemon
+  // keeps beside the primary — so an externally-corrupted primary still
+  // enforces the last policy we successfully read, not nothing.
+  if (existed) {
+    const backup = path.join(path.dirname(cacheFile), 'rules-cache.last-good.json');
+    if (backup !== cacheFile) {
+      try {
+        const raw = JSON.parse(fs.readFileSync(backup, 'utf-8')) as Record<string, unknown>;
+        logCacheReadIssue(cacheFile, 'RULES_CACHE_CORRUPT_USED_BACKUP');
+        return raw;
+      } catch {
+        /* no usable backup either — fall through to the empty (logged) result */
+      }
+    }
+    // Cloud enforcement is EXPECTED (the file exists) yet neither the primary
+    // nor the backup is readable. Never let that vanish silently — log it.
+    logCacheReadIssue(cacheFile, 'RULES_CACHE_UNREADABLE');
+  }
+  return {};
+}
+
+/** Log a rules-cache read problem once per process (avoids hot-path spam). */
+function logCacheReadIssue(cacheFile: string, kind: string): void {
+  if (cacheReadFailureLogged) return;
+  cacheReadFailureLogged = true;
+  try {
+    fs.appendFileSync(
+      path.join(os.homedir(), '.node9', 'hook-debug.log'),
+      `[${new Date().toISOString()}] ${kind} ${cacheFile}\n`
+    );
+  } catch {
+    /* logging is best-effort — never break config loading */
+  }
+}
+
 export function getConfig(cwd?: string): Config {
   // When an explicit cwd is provided (hook commands passing payload.cwd), skip
   // the cache entirely — each project directory may have its own node9.config.json,
@@ -634,6 +713,7 @@ export function getConfig(cwd?: string): Config {
     if (s.mcpAutoWrap !== undefined) mergedSettings.mcpAutoWrap = s.mcpAutoWrap === true;
     if (s.mcpReconcileIntervalMinutes !== undefined)
       mergedSettings.mcpReconcileIntervalMinutes = s.mcpReconcileIntervalMinutes;
+    if (s.mcpStaleAfterDays !== undefined) mergedSettings.mcpStaleAfterDays = s.mcpStaleAfterDays;
     if (s.hud !== undefined) mergedSettings.hud = { ...mergedSettings.hud, ...s.hud };
 
     if (p.sandboxPaths) mergedPolicy.sandboxPaths.push(...p.sandboxPaths);
@@ -655,12 +735,18 @@ export function getConfig(cwd?: string): Config {
       // override the default (user rule wins), rather than stacking on top of it.
       // This prevents rules 1-N in DEFAULT_CONFIG from appearing twice when a user's
       // config.json was seeded with the same rule names.
-      const userRuleNames = new Set(p.smartRules.filter((r) => r.name).map((r) => r.name));
+      // B1 (#3): local rules may never be `pinned` — pinning is a
+      // cloud-mandate-only property (a pinned local `allow` would compete with a
+      // cloud rule in the engine's resolvePinned). zod already drops the unknown
+      // key in sanitizeConfig, but strip it explicitly so this security property
+      // survives a future schema change (a `.passthrough()` or an added field).
+      const localRules = p.smartRules.map(({ pinned: _pinned, ...r }) => r);
+      const userRuleNames = new Set(localRules.filter((r) => r.name).map((r) => r.name));
       const filteredBlocks = defaultBlocks.filter((r) => !r.name || !userRuleNames.has(r.name));
       const filteredNonBlocks = defaultNonBlocks.filter(
         (r) => !r.name || !userRuleNames.has(r.name)
       );
-      mergedPolicy.smartRules = [...filteredBlocks, ...p.smartRules, ...filteredNonBlocks];
+      mergedPolicy.smartRules = [...filteredBlocks, ...localRules, ...filteredNonBlocks];
     }
     if (p.snapshot) {
       const s = p.snapshot as Partial<Config['policy']['snapshot']>;
@@ -747,11 +833,25 @@ export function getConfig(cwd?: string): Config {
   // Shields the dashboard enforces fleet-wide (Managed Config M1). Captured from
   // the rules-cache here and unioned with local shields in the shield layer
   // below — additive/on: a developer can add more locally, never weaken these.
+  // Enforced at the override loop below (`cloudManagedSet`), where a local
+  // per-rule override is skipped for any shield in this set (B1).
   let cloudManagedShields: string[] = [];
+  // B1 (#1): true once the cloud has SET or LOCKED the mode. When true, the
+  // NODE9_MODE env var (applied last, below) must not override it — otherwise a
+  // single `NODE9_MODE=observe` defeats a `locked:['mode']` mandate and turns
+  // every block into a would-block. Where the cloud hasn't spoken, the env var
+  // stays a dev convenience.
+  let modeCloudControlled = false;
+  // B1 (#1): true when the CLOUD chose observe (shadowMode staged rollout). A
+  // shield mandate floors LOCAL observe/audit to standard, but honors a cloud
+  // staged observe — the fleet chose that.
+  let modeCloudStaged = false;
   {
     const cacheFile = path.join(os.homedir(), '.node9', 'rules-cache.json');
     try {
-      const raw = JSON.parse(fs.readFileSync(cacheFile, 'utf-8')) as Record<string, unknown>;
+      // Resilient read: retries a torn read and, on a present-but-corrupt
+      // cache, logs instead of silently dropping cloud enforcement (fail-open).
+      const raw = readRulesCacheResilient(cacheFile);
       if (Array.isArray(raw.rules) && raw.rules.length > 0) {
         applyLayer({ policy: { smartRules: raw.rules } });
       }
@@ -806,6 +906,11 @@ export function getConfig(cwd?: string): Config {
             mc.mode,
             locked.includes('mode')
           );
+        }
+        // The cloud has spoken about mode iff it set one or locked it — NODE9_MODE
+        // must not override either (B1 #1).
+        if (typeof mc.mode === 'string' || locked.includes('mode')) {
+          modeCloudControlled = true;
         }
         // M2b + Step 2: policy.egress. enabled force-on; mode off<review<block;
         // allow replaces local; deny unions; allowPrivate floor boolean.
@@ -953,9 +1058,11 @@ export function getConfig(cwd?: string): Config {
         // proxy in observe mode locally — admin can flip it without each
         // user editing their config.
         mergedSettings.mode = 'observe';
+        modeCloudStaged = true; // cloud chose observe — a shield mandate honors it
       }
     } catch {
-      /* cache absent or corrupted — silent fallback to local config */
+      /* malformed field shape within an otherwise-valid cache — skip cloud
+         layer. (Absent/corrupt FILE is handled by readRulesCacheResilient.) */
     }
   }
 
@@ -968,15 +1075,47 @@ export function getConfig(cwd?: string): Config {
   // Local shields ∪ cloud-managed shields (M1). Deduped so a shield enabled both
   // locally and from the dashboard is applied once.
   const activeShieldNames = [...new Set([...readActiveShields(), ...cloudManagedShields])];
+  // B1: a cloud-mandated shield is enforced EXACTLY as the cloud defines it —
+  // local per-rule overrides (`node9 shield set`) do not apply to it, weakening
+  // OR tightening. This is what the comment above the union has always promised
+  // ("a developer can add more locally, never weaken these") and, until this
+  // set existed, did not enforce: the override loop below applied to every
+  // shield in the union, so `node9 shield set redis <rule> allow` weakened a
+  // fleet-mandated redis shield. A shield that is both locally-enabled AND
+  // cloud-mandated resolves to cloud — a mandate is not opt-out-able by having
+  // enabled the same shield first.
+  const cloudManagedSet = new Set(cloudManagedShields);
   for (const shieldName of activeShieldNames) {
-    const shield = getShield(shieldName);
+    const isCloudMandated = cloudManagedSet.has(shieldName);
+    // B1 (#2): a cloud-mandated shield resolves its BODY from the trusted
+    // builtin catalog ONLY — never getShield(), which returns a user
+    // ~/.node9/shields/<name>.json shadowing the same name (its rules could be
+    // empty or all-allow). A mandated name absent from the catalog fails CLOSED
+    // (dropped) rather than falling back to a shadowable local body — no trusted
+    // body means don't pretend to enforce. A local/self-enabled shield keeps
+    // full user-shadow power (power-user customisation); only a mandate is
+    // locked to the fleet.
+    const shield = isCloudMandated ? BUILTIN_SHIELDS[shieldName] : getShield(shieldName);
     if (!shield) continue;
     // Deduplicate smartRules by name — prevents duplicates if the user also
-    // has the same rule name in their config (shouldn't happen, but be safe).
+    // has the same rule name in their config.
     const existingRuleNames = new Set(mergedPolicy.smartRules.map((r) => r.name));
-    const ruleOverrides = shieldOverrides[shieldName] ?? {};
+    const ruleOverrides = isCloudMandated ? {} : (shieldOverrides[shieldName] ?? {});
     for (const rule of shield.smartRules) {
-      if (!existingRuleNames.has(rule.name)) {
+      const collides = rule.name ? existingRuleNames.has(rule.name) : false;
+      if (isCloudMandated) {
+        // A mandate is un-weakenable. Its rule WINS a name collision (part 2 —
+        // a config.json twin of `node9 shield set`, and worse because a cloned
+        // repo can carry it) AND is PINNED (#1): the engine's resolvePinned
+        // makes the strictest pinned verdict win regardless of array order, so
+        // a DIFFERENTLY-named local `allow` rule sitting earlier in smartRules
+        // can no longer out-precede the shield's `block` (the first-match hole
+        // the earlier B1 review wrongly believed closed).
+        if (collides) {
+          mergedPolicy.smartRules = mergedPolicy.smartRules.filter((r) => r.name !== rule.name);
+        }
+        mergedPolicy.smartRules.push({ ...rule, pinned: true });
+      } else if (!collides) {
         const overrideVerdict = rule.name ? ruleOverrides[rule.name] : undefined;
         mergedPolicy.smartRules.push(
           overrideVerdict !== undefined ? { ...rule, verdict: overrideVerdict } : rule
@@ -996,7 +1135,71 @@ export function getConfig(cwd?: string): Config {
     if (!existingAdvisoryNames.has(rule.name)) mergedPolicy.smartRules.push(rule);
   }
 
-  if (process.env.NODE9_MODE) mergedSettings.mode = process.env.NODE9_MODE as string;
+  // NODE9_MODE is a local dev convenience — honoured only when the cloud hasn't
+  // set/locked the mode (B1 #1), and only for a valid value (a garbage value was
+  // previously stored verbatim and then enforced).
+  const envMode = process.env.NODE9_MODE;
+  if (
+    envMode &&
+    !modeCloudControlled &&
+    (['observe', 'audit', 'standard', 'strict'] as const).includes(envMode as never)
+  ) {
+    mergedSettings.mode = envMode;
+  }
+
+  // B1 (#1): a mandated shield must actually enforce. observe and audit modes
+  // make the orchestrator return approved:true for every call (no enforcement),
+  // so a LOCAL observe/audit (from config.json settings.mode OR NODE9_MODE)
+  // would disable every mandated shield. Under a mandate, floor it to standard.
+  // A CLOUD staged observe (shadowMode) or a cloud-controlled/locked mode is
+  // left alone — the fleet chose that. Floor to standard, not strict: enough to
+  // enforce, no over-tightening.
+  if (
+    cloudManagedShields.length > 0 &&
+    !modeCloudControlled &&
+    !modeCloudStaged &&
+    (mergedSettings.mode === 'observe' || mergedSettings.mode === 'audit')
+  ) {
+    mergedSettings.mode = 'standard';
+  }
+
+  // Task #16: a CLOUD-managed enforcement floor must not be silently weakened by
+  // local/repo config — the same config-home law already applied to mode/egress/
+  // dlp: the org's decision wins, local config may only tighten. The floor is
+  // active whenever the fleet has imposed one: a mandated shield OR a
+  // cloud-controlled strict mode. (A LOCALLY-chosen strict is NOT a floor — a dev
+  // keeps their own escapes; this is gated on modeCloudControlled so we never
+  // over-tighten a self-chosen posture.)
+  const managedFloorActive =
+    cloudManagedShields.length > 0 || (modeCloudControlled && mergedSettings.mode === 'strict');
+
+  // Vector A (task #16): under a managed strict, neutralise the engine's strict
+  // ESCAPE (`activeEnvironment.requireApproval === false` at policy/index.ts,
+  // which turns strict's catch-all review into a blanket allow). A cloned repo's
+  // node9.config.json must not be able to define an environment that disables a
+  // cloud-mandated strict. Strip the escape from every merged environment; a
+  // locally-chosen strict is untouched (modeCloudControlled is false there).
+  if (modeCloudControlled && mergedSettings.mode === 'strict') {
+    for (const name of Object.keys(mergedEnvironments)) {
+      if (mergedEnvironments[name]?.requireApproval === false) {
+        const cleaned = { ...mergedEnvironments[name] };
+        delete cleaned.requireApproval;
+        mergedEnvironments[name] = cleaned;
+      }
+    }
+  }
+
+  // Vector B (task #16) + B1 (#3/#5/#6): local ignoredTools / sandboxPaths must
+  // not fast-path a tool to allow BEFORE the managed floor runs (the engine's
+  // ignored-tool and sandbox short-circuits return allow ahead of the smart-rule
+  // AND strict-fallback tiers). Under any managed floor — mandated shields OR a
+  // cloud strict — discard local (global + repo-carried) additions and keep only
+  // the safe read-only defaults. A dev loses custom local ignores ONLY while
+  // their org imposes a floor.
+  if (managedFloorActive) {
+    mergedPolicy.ignoredTools = [...DEFAULT_CONFIG.policy.ignoredTools];
+    mergedPolicy.sandboxPaths = [...DEFAULT_CONFIG.policy.sandboxPaths];
+  }
 
   mergedPolicy.sandboxPaths = [...new Set(mergedPolicy.sandboxPaths)];
   mergedPolicy.dangerousWords = [...new Set(mergedPolicy.dangerousWords)];

@@ -376,9 +376,56 @@ describe('deriveHeadline', () => {
     expect(h?.risk).toMatch(/no container/i); // isolation woven in
   });
 
-  it('makes egress the first action (close the exit breaks the chain)', () => {
+  it('makes egress the first action, derived from the Egress finding (close the exit breaks the chain)', () => {
     const h = deriveHeadline([f('Secrets', 'critical'), f('Egress')]);
-    expect(h?.action).toMatch(/lock egress/i);
+    // The action comes from the EGRESS finding (ladder order), not the secrets one…
+    expect(h?.action).toContain('fix Egress');
+    // …and keeps the chain rationale the ladder is built on.
+    expect(h?.action).toContain('exfiltration chain');
+  });
+
+  it("egress action carries the finding's real command + the chain rationale", () => {
+    const egress: Finding = {
+      category: 'Egress',
+      severity: 'high',
+      title: 'Egress is open',
+      detail: [],
+      fix: 'Fix it now: run `node9 egress watch` (or `node9 egress lock` to hard-block).',
+    };
+    const h = deriveHeadline([egress]);
+    expect(h?.action).toContain('node9 egress watch');
+    expect(h?.action).toContain('exfiltration chain');
+    expect(h?.action).not.toMatch(/fix it now:/i);
+  });
+
+  it('egress falls back to the allowlist generic when the finding has no fix', () => {
+    const h = deriveHeadline([
+      { category: 'Egress', severity: 'high', title: 'Egress is open', detail: [] },
+    ]);
+    expect(h?.action).toMatch(/lock egress to an allowlist/i);
+  });
+
+  it("gate action carries the finding's real command", () => {
+    const gate: Finding = {
+      category: 'Approval gate',
+      severity: 'critical',
+      title: 'No approval gate is active — destructive commands run unchecked',
+      detail: [],
+      fix:
+        'Turn on the gate: run `node9 shield enable bash-safe` (or add a smart rule). ' +
+        "node9 then blocks dangerous commands and the negotiation loop tells the agent what's allowed.",
+    };
+    const h = deriveHeadline([gate]);
+    expect(h?.action).toContain('Turn on the gate');
+    expect(h?.action).toContain('node9 shield enable bash-safe');
+  });
+
+  it('gate falls back to a command-bearing generic when the finding has no fix', () => {
+    const h = deriveHeadline([
+      { category: 'Approval gate', severity: 'critical', title: 'No approval gate', detail: [] },
+    ]);
+    expect(h?.action).toContain('destructive-command blocking');
+    expect(h?.action).toContain('node9 shield enable bash-safe');
   });
 
   it('prioritizes "node9 init" when node9 is not wired, over any other fix', () => {
@@ -399,6 +446,77 @@ describe('deriveHeadline', () => {
 
   it('returns null for a clean run', () => {
     expect(deriveHeadline([])).toBeNull();
+  });
+
+  // ── P1: the action derives from the FINDING, never a canned exemplar ──────
+  // Repro 2026-07-23: the secrets branch printed hardcoded "~/.ssh, ~/.aws"
+  // while the actual finding was a DB connection string in ~/.claude.json.
+  const plaintextSecret = (over: Partial<Finding> = {}): Finding => ({
+    category: 'Secrets',
+    severity: 'critical',
+    title: '1 plaintext secret on disk',
+    detail: ['Database Connection String in ~/.claude.json'],
+    fix: 'Fix it now: run `node9 shield enable project-jail` (blocks credential-file reads in-path).',
+    ...over,
+  });
+
+  it("secrets action carries the finding's own command + location, not a canned path list", () => {
+    const h = deriveHeadline([plaintextSecret()]);
+    expect(h?.action).toContain('node9 shield enable project-jail');
+    expect(h?.action).toContain('~/.claude.json');
+    expect(h?.action).not.toContain('~/.ssh'); // the canned exemplar must be gone
+  });
+
+  it('strips the "Fix it now:" prefix so render\'s "Do this first:" composes cleanly', () => {
+    const h = deriveHeadline([plaintextSecret()]);
+    expect(h?.action).not.toMatch(/fix it now:/i);
+  });
+
+  it('caps locations at the first + a count, never the full list', () => {
+    const h = deriveHeadline([
+      plaintextSecret({ detail: ['A in ~/.claude.json', 'B in ~/.env', 'C in ~/x'] }),
+    ]);
+    expect(h?.action).toContain('A in ~/.claude.json');
+    expect(h?.action).toContain('and 2 more');
+    expect(h?.action).not.toContain('B in ~/.env');
+  });
+
+  it('falls back to a command-bearing generic — with NO path claims — when the finding has no fix', () => {
+    const h = deriveHeadline([plaintextSecret({ fix: undefined, detail: [] })]);
+    expect(h?.action).toContain('node9 shield enable project-jail');
+    expect(h?.action).not.toContain('~/.ssh'); // a fallback may not assert specifics
+  });
+
+  it('the worstFinding fallback branch also normalizes the prefix', () => {
+    // A category outside every ladder branch → the fallback path.
+    const other: Finding = {
+      category: 'Supply chain',
+      severity: 'high',
+      title: 's',
+      detail: [],
+      fix: 'Fix it now: run `node9 mcp gateway --all`.',
+    };
+    const h = deriveHeadline([other]);
+    expect(h?.action).toContain('node9 mcp gateway --all');
+    expect(h?.action).not.toMatch(/fix it now:/i);
+  });
+
+  it('a same-severity fallback pick is deterministic regardless of input order', () => {
+    const a: Finding = {
+      category: 'Supply chain',
+      severity: 'high',
+      title: 'a',
+      detail: [],
+      fix: 'fix a',
+    };
+    const b: Finding = {
+      category: 'Tool governance',
+      severity: 'high',
+      title: 'b',
+      detail: [],
+      fix: 'fix b',
+    };
+    expect(deriveHeadline([a, b])?.action).toBe(deriveHeadline([b, a])?.action);
   });
 });
 
@@ -447,6 +565,153 @@ describe('renderPosture grouping', () => {
     expect(out).toContain('Track this across your fleet');
     // The old link pointed at a route that doesn't exist (/posture) — must be gone.
     expect(out).not.toContain('app.node9.ai/posture');
+  });
+
+  // ── P3: D3 collision labels + D4 headroom copy ────────────────────────────
+  // The new headroom sentence word-wraps, so phrase assertions run on a
+  // whitespace-flattened copy to avoid straddling a line break.
+  const flat = (s: string) => s.replace(/\s+/g, ' ');
+
+  it('a category both covered and open gets (guarded)/(exposed) + names what is guarded', () => {
+    const out = renderPosture(
+      result([
+        {
+          category: 'Secrets',
+          severity: 'high',
+          title: '2 credential files readable by the agent',
+          detail: ['~/.ssh/id_rsa', '~/.aws/credentials'],
+          coverage: { state: 'covered', level: 'block', via: 'node9 DLP' },
+          coverageProbe: { kind: 'fileRead', paths: ['/x'] },
+        },
+        {
+          category: 'Secrets',
+          severity: 'critical',
+          title: '1 plaintext secret on disk',
+          detail: ['Database Connection String in ~/.claude.json'],
+          owner: 'node9',
+          fix: 'Fix it now: run `node9 shield enable project-jail`.',
+        },
+      ])
+    );
+    expect(out).toContain('Secrets (guarded)');
+    expect(out).toContain('Secrets (exposed)');
+    expect(out).toContain('reads of ~/.ssh/id_rsa and 1 more');
+  });
+
+  it('a covered-only category keeps its bare label (no qualifier outside a collision)', () => {
+    const out = renderPosture(
+      result([
+        {
+          category: 'Egress',
+          severity: 'high',
+          title: 'e',
+          detail: [],
+          coverage: { state: 'covered', level: 'review', via: 'node9 egress' },
+        },
+      ])
+    );
+    expect(out).not.toContain('(guarded)');
+    expect(out).not.toContain('(exposed)');
+  });
+
+  it('a covered row without detail falls back to "…this"', () => {
+    const out = renderPosture(
+      result([
+        {
+          category: 'Egress',
+          severity: 'high',
+          title: 'e',
+          detail: [],
+          coverage: { state: 'covered', level: 'review', via: 'node9 egress' },
+        },
+      ])
+    );
+    expect(out).toContain('node9 egress is approval-gating this');
+  });
+
+  it('headroom line names both buckets when genuine exposures are open', () => {
+    const out = flat(
+      renderPosture(
+        result([
+          { category: 'Egress', severity: 'high', title: 'e', detail: [], owner: 'node9' },
+          {
+            category: 'Isolation',
+            severity: 'advisory',
+            title: 'i',
+            detail: [],
+            owner: 'os',
+            node9Reduces: true,
+            scoreWeight: 12,
+          },
+        ])
+      )
+    );
+    expect(out).toContain('Of the gap to 100');
+    expect(out).toContain('the rest is the open findings');
+  });
+
+  it('headroom line stays single-bucket when only optional hardening is open', () => {
+    const out = flat(
+      renderPosture(
+        result([
+          {
+            category: 'Isolation',
+            severity: 'advisory',
+            title: 'i',
+            detail: [],
+            owner: 'os',
+            node9Reduces: true,
+            scoreWeight: 12,
+          },
+        ])
+      )
+    );
+    expect(out).toContain('pts of headroom');
+    expect(out).not.toContain('the rest is');
+  });
+
+  it('advisory-only exposures do not trigger the both-buckets variant (advisories never deduct)', () => {
+    const out = flat(
+      renderPosture(
+        result([
+          {
+            category: 'Network exposure',
+            severity: 'advisory',
+            title: 'n',
+            detail: [],
+            owner: 'os',
+          },
+          {
+            category: 'Isolation',
+            severity: 'advisory',
+            title: 'i',
+            detail: [],
+            owner: 'os',
+            node9Reduces: true,
+            scoreWeight: 12,
+          },
+        ])
+      )
+    );
+    expect(out).toContain('pts of headroom');
+    expect(out).not.toContain('the rest is');
+  });
+
+  it('the rendered headline composes ONE prefix — never "Do this first: Fix it now:"', () => {
+    const out = renderPosture(
+      result([
+        {
+          category: 'Secrets',
+          severity: 'critical',
+          title: '1 plaintext secret on disk',
+          detail: ['Database Connection String in ~/.claude.json'],
+          owner: 'node9',
+          fix: 'Fix it now: run `node9 shield enable project-jail` (blocks credential-file reads in-path).',
+        },
+      ])
+    );
+    expect(out).toContain('Do this first: run');
+    expect(out).not.toMatch(/do this first: fix it now/i);
   });
 
   it('groups open findings by owner — node9-fixable before only-you', () => {

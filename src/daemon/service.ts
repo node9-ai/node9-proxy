@@ -126,6 +126,15 @@ function isLaunchdInstalled(): boolean {
 
 // ── Linux systemd ──────────────────────────────────────────────────────────
 
+// DO NOT add `StandardError=append:%h/.node9/daemon-startup.log` to the unit below.
+// It looks like the systemd equivalent of the auto-start path's stderr capture, but
+// systemd opens that file ITSELF and does not create parent directories: with
+// ~/.node9 absent (e.g. after the documented `rm -rf ~/.node9` reset) the unit fails
+// with status=222/STDERR *before exec*, and Restart=on-failure then crash-loops it to
+// the start limit and leaves it permanently dead. That is precisely the
+// silent-stale-policy incident this diagnostic exists to prevent — caused by the
+// diagnostic. Verified on systemd 255, 2026-07-18. A module-load crash under systemd
+// goes to the journal instead: `journalctl --user -u node9-daemon`.
 function systemdUnit(binaryPath: string): string {
   // Use the Node.js runtime + script path explicitly so the unit works correctly
   // when node9 is installed via nvm, volta, or any version manager whose shims

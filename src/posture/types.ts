@@ -69,7 +69,8 @@ export interface Finding {
   fix?: string;
   /** Set by `annotateCoverage` — node9's enforcement relationship to this finding. */
   coverage?: Coverage;
-  /** How to assess coverage for this finding (internal; not rendered/shipped). */
+  /** How to assess coverage for this finding (internal; not shipped — render
+   *  may read `kind` for phrasing, e.g. "reads of" on fileRead). */
   coverageProbe?: CoverageProbe;
   /** Internal: this finding is only OPEN because node9 isn't enforcing — the
    *  Coverage check already reports that gap, so drop it when open to avoid

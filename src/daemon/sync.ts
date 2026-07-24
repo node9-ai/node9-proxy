@@ -15,6 +15,7 @@ import { runPosture } from '../posture/index.js';
 import { shipPosture } from '../posture/ship.js';
 import { buildPolicySnapshot } from '../policy-snapshot/build.js';
 import { readMcpToolsConfig } from './mcp-tools.js';
+import { atomicWriteSync } from './state.js';
 import { resolveMcpStatus } from '../mcp-status.js';
 import { shipPolicySnapshot } from '../policy-snapshot/ship.js';
 import { readActiveShields, readShieldOverrides } from '../shields.js';
@@ -105,6 +106,9 @@ export function buildSessionDeltas(
 
 // Computed lazily so tests can mock os.homedir() before any call
 const rulesCacheFile = () => path.join(os.homedir(), '.node9', 'rules-cache.json');
+// Last-known-good sibling — the reader falls back to it when the primary is
+// present but unparseable (external corruption). Kept in sync by writeCache.
+const rulesCacheBackupFile = () => path.join(os.homedir(), '.node9', 'rules-cache.last-good.json');
 const DEFAULT_API_URL = 'https://api.node9.ai/api/v1/intercept/policies/sync';
 const DEFAULT_INTERVAL_HOURS = 5;
 // Floor + ceiling for the resolved sync interval. The 15s floor keeps a
@@ -672,16 +676,38 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
 }
 
 /**
- * Write the policy cache atomically. Best-effort: directory creation
- * failures fall through silently — the proxy will fall back to local
- * config and surface the issue via `node9 sync` if the user runs it
- * explicitly.
+ * Write the policy cache atomically (temp file + rename).
+ *
+ * This MUST be atomic. The previous plain `fs.writeFileSync` truncated
+ * rules-cache.json in place, so a hook process reading it via getConfig()
+ * mid-write got a partial file → JSON.parse threw → the reader's fail-open
+ * catch dropped ALL cloud enforcement (shields, managed mode) for that call,
+ * silently allowing a command a shield should have blocked. Non-deterministic
+ * (depended on read/write overlap) and fail-open. `atomicWriteSync` writes to
+ * a sibling `.tmp` and renames — a POSIX-atomic swap, so a concurrent reader
+ * always sees either the complete old file or the complete new one.
+ *
+ * Best-effort: creation/write failures fall through silently — the proxy
+ * falls back to local config and surfaces the issue via `node9 sync`.
  */
 function writeCache(cache: RulesCache): void {
-  const dir = path.dirname(rulesCacheFile());
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(rulesCacheFile(), JSON.stringify(cache, null, 2) + '\n', 'utf-8');
+  const data = JSON.stringify(cache, null, 2) + '\n';
+  atomicWriteSync(rulesCacheFile(), data, 'utf-8');
+  // Keep a last-known-good copy alongside the primary. If the primary is later
+  // corrupted by anything OTHER than our (atomic) writer — a disk fault, a crash
+  // during an external edit — getConfig falls back to this instead of silently
+  // dropping ALL cloud enforcement (shields, managed mode) for the call.
+  // Best-effort: the primary is the source of truth; a backup-write failure
+  // never blocks the sync.
+  try {
+    atomicWriteSync(rulesCacheBackupFile(), data, 'utf-8');
+  } catch {
+    /* best-effort */
+  }
 }
+
+/** Exported for the atomic-write regression test. */
+export const __writeCacheForTest = writeCache;
 
 async function syncOnce(): Promise<void> {
   const creds = readCredentials();

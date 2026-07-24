@@ -35,6 +35,7 @@ import {
   setAbandonTimer,
   getHadBrowserClient,
   setHadBrowserClient,
+  hasInteractiveClient,
   daemonRejectionHandlerRegistered,
   markRejectionHandlerRegistered,
   atomicWriteSync,
@@ -71,11 +72,128 @@ import { extractCommandPattern } from '../auth/state.js';
 import { startCostSync } from '../costSync.js';
 import { startCloudSync, startForensicBroadcast } from './sync.js';
 import { startAuditShipper } from './audit-shipper.js';
+import { classifyDecision } from '../audit/decision.js';
 import { startDlpScanner } from './dlp-scanner.js';
 import { startMcpReconciler } from './mcp-reconciler.js';
 import { startHookHeal } from './hook-heal.js';
-import { logDaemonStartup } from './startup-log.js';
+import { logDaemonStartup, recordStartupState } from './startup-log.js';
 import { readMcpToolsConfig, updateServerDiscovery, approveServer } from './mcp-tools.js';
+
+export type DaemonReportPeriod = 'today' | '7d' | '30d' | 'month';
+
+export interface DaemonReportBody {
+  summary: { total: number; allowed: number; blocked: number; dlp: number; loops: number };
+  daily: Array<{ date: string; calls: number; blocked: number }>;
+  topTools: Array<{ name: string; value: number }>;
+  topBlockedTools: Array<{ name: string; value: number }>;
+  byAgent: Array<{ agent: string; total: number; blocked: number; dlp: number }>;
+}
+
+/**
+ * Aggregate GET /report from raw audit rows.
+ *
+ * Extracted from the route handler so the one invariant that matters here can
+ * be tested: EVERY blocked count in the response comes from the same mapper.
+ * When this lived inline, `summary.blocked` was converged onto
+ * `classifyDecision` while `topBlockedTools` and `byAgent.blocked` kept their
+ * own `startsWith('allow')` rule twelve lines below — so a single response
+ * disagreed with itself by 950 rows on a real log, and there was no seam to
+ * write a test against.
+ */
+export function buildDaemonReport(
+  allEntries: Array<Record<string, unknown>>,
+  period: DaemonReportPeriod,
+  now: Date
+): DaemonReportBody {
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  let start = new Date(todayStart);
+  if (period === '7d') start.setDate(start.getDate() - 6);
+  else if (period === '30d') start.setDate(start.getDate() - 29);
+  else if (period === 'month') start = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  const entries = allEntries.filter((e) => {
+    if (e.source === 'post-hook' || e.source === 'response-dlp') return false;
+    return new Date(e.ts as string) >= start;
+  });
+
+  // THE rule for this endpoint. Every blocked count below calls this and
+  // nothing else — that is the whole point of the extraction.
+  const isBlocked = (e: Record<string, unknown>) => classifyDecision(e).outcome === 'deny';
+  const checkedBy = (e: Record<string, unknown>) =>
+    typeof e.checkedBy === 'string' ? e.checkedBy : undefined;
+
+  const summary = {
+    total: entries.length,
+    // The inline `startsWith('allow')` this replaces counted every non-allow
+    // row as "blocked" — so DLP findings, MCP-discovery events and, worst, all
+    // the observe-mode "would have blocked" rows inflated the blocked count
+    // with things that were never refusals.
+    allowed: entries.filter((e) => classifyDecision(e).outcome === 'allow').length,
+    blocked: entries.filter(isBlocked).length,
+    dlp: entries.filter((e) => checkedBy(e)?.includes('dlp')).length,
+    loops: entries.filter((e) => checkedBy(e) === 'loop-detected').length,
+  };
+
+  // For "today" we group by hour (00-23) so the chart has real shape.
+  // Other periods group by calendar day.
+  const dailyMap = new Map<string, { date: string; calls: number; blocked: number }>();
+  if (period === 'today') {
+    // Pre-populate 24 hour buckets so the chart always shows a full day
+    for (let h = 0; h < 24; h++) {
+      const key = String(h).padStart(2, '0') + ':00';
+      dailyMap.set(key, { date: key, calls: 0, blocked: 0 });
+    }
+    for (const e of entries) {
+      const hour = new Date(e.ts as string).getHours();
+      const key = String(hour).padStart(2, '0') + ':00';
+      const d = dailyMap.get(key)!;
+      d.calls++;
+      if (isBlocked(e)) d.blocked++;
+    }
+  } else {
+    for (const e of entries) {
+      const date = (e.ts as string).slice(0, 10);
+      const d = dailyMap.get(date) || { date, calls: 0, blocked: 0 };
+      d.calls++;
+      if (isBlocked(e)) d.blocked++;
+      dailyMap.set(date, d);
+    }
+  }
+
+  const topToolsMap = new Map<string, number>();
+  const topBlockedMap = new Map<string, number>();
+  for (const e of entries) {
+    const tool = String(e.tool ?? '');
+    topToolsMap.set(tool, (topToolsMap.get(tool) || 0) + 1);
+    if (isBlocked(e)) topBlockedMap.set(tool, (topBlockedMap.get(tool) || 0) + 1);
+  }
+  const top5 = (m: Map<string, number>) =>
+    [...m.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([name, value]) => ({ name, value }));
+
+  const agentMap = new Map<
+    string,
+    { agent: string; total: number; blocked: number; dlp: number }
+  >();
+  for (const e of entries) {
+    const key = (e.agent as string) || 'unknown';
+    const a = agentMap.get(key) ?? { agent: key, total: 0, blocked: 0, dlp: 0 };
+    a.total++;
+    if (isBlocked(e)) a.blocked++;
+    if (checkedBy(e)?.includes('dlp')) a.dlp++;
+    agentMap.set(key, a);
+  }
+
+  return {
+    summary,
+    daily: [...dailyMap.values()].sort((a, b) => a.date.localeCompare(b.date)),
+    topTools: top5(topToolsMap),
+    topBlockedTools: top5(topBlockedMap),
+    byAgent: [...agentMap.values()].sort((a, b) => b.total - a.total),
+  };
+}
 
 export function startDaemon(): void {
   // A4c: a synchronous throw in these inits used to exit the process silently
@@ -99,6 +217,7 @@ export function startDaemon(): void {
     const stack = err instanceof Error ? (err.stack ?? err.message) : String(err);
     console.error('\n🛑 Node9 daemon startup failed:\n' + stack);
     logDaemonStartup('startup-throw', err instanceof Error ? err.message : String(err));
+    recordStartupState('failed', 'startup-throw', err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
   // Single per-process token. Stored in ~/.node9/daemon.pid (mode 0600)
@@ -584,6 +703,16 @@ export function startDaemon(): void {
       }
     }
 
+    // Is a genuine human approver reachable RIGHT NOW — i.e. is a `node9 tail`
+    // (or other input-capable client) connected to the daemon? The orchestrator
+    // uses this to decide whether a shield hard-block may be downgraded to a
+    // review: with no reachable human it must stay a hard block (fail closed),
+    // never a review the cloud racer can auto-allow in a non-interactive context.
+    if (req.method === 'GET' && pathname === '/approver') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ interactive: hasInteractiveClient() }));
+    }
+
     if (req.method === 'GET' && pathname === '/state/check') {
       const predicatesParam = reqUrl.searchParams.get('predicates') ?? '';
       const predicates = predicatesParam.split(',').filter(Boolean);
@@ -714,93 +843,8 @@ export function startDaemon(): void {
           }
         });
 
-        const now = new Date();
-        const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-        let start = new Date(todayStart);
-        if (period === '7d') start.setDate(start.getDate() - 6);
-        else if (period === '30d') start.setDate(start.getDate() - 29);
-        else if (period === 'month') start = new Date(now.getFullYear(), now.getMonth(), 1);
-
-        const entries = allEntries.filter((e) => {
-          if (e.source === 'post-hook' || e.source === 'response-dlp') return false;
-          return new Date(e.ts) >= start;
-        });
-
-        const summary = {
-          total: entries.length,
-          allowed: entries.filter((e) => e.decision && e.decision.startsWith('allow')).length,
-          blocked: entries.filter((e) => e.decision && !e.decision.startsWith('allow')).length,
-          dlp: entries.filter((e) => e.checkedBy && e.checkedBy.includes('dlp')).length,
-          loops: entries.filter((e) => e.checkedBy === 'loop-detected').length,
-        };
-
-        // For "today" we group by hour (00-23) so the chart has real shape.
-        // Other periods group by calendar day.
-        const dailyMap = new Map();
-        if (period === 'today') {
-          // Pre-populate 24 hour buckets so the chart always shows a full day
-          for (let h = 0; h < 24; h++) {
-            const key = String(h).padStart(2, '0') + ':00';
-            dailyMap.set(key, { date: key, calls: 0, blocked: 0 });
-          }
-          for (const e of entries) {
-            const hour = new Date(e.ts).getHours();
-            const key = String(hour).padStart(2, '0') + ':00';
-            const d = dailyMap.get(key)!;
-            d.calls++;
-            if (e.decision && !e.decision.startsWith('allow')) d.blocked++;
-          }
-        } else {
-          for (const e of entries) {
-            const date = e.ts.slice(0, 10);
-            const d = dailyMap.get(date) || { date, calls: 0, blocked: 0 };
-            d.calls++;
-            if (e.decision && !e.decision.startsWith('allow')) d.blocked++;
-            dailyMap.set(date, d);
-          }
-        }
-
-        const topToolsMap = new Map();
-        const topBlockedMap = new Map();
-        for (const e of entries) {
-          topToolsMap.set(e.tool, (topToolsMap.get(e.tool) || 0) + 1);
-          if (e.decision && !e.decision.startsWith('allow')) {
-            topBlockedMap.set(e.tool, (topBlockedMap.get(e.tool) || 0) + 1);
-          }
-        }
-        const topTools = [...topToolsMap.entries()]
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 5)
-          .map(([name, value]) => ({ name, value }));
-        const topBlockedTools = [...topBlockedMap.entries()]
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 5)
-          .map(([name, value]) => ({ name, value }));
-
-        const agentMap = new Map<
-          string,
-          { agent: string; total: number; blocked: number; dlp: number }
-        >();
-        for (const e of entries) {
-          const key = (e.agent as string) || 'unknown';
-          const a = agentMap.get(key) ?? { agent: key, total: 0, blocked: 0, dlp: 0 };
-          a.total++;
-          if (e.decision && !(e.decision as string).startsWith('allow')) a.blocked++;
-          if ((e.checkedBy as string | undefined)?.includes('dlp')) a.dlp++;
-          agentMap.set(key, a);
-        }
-        const byAgent = [...agentMap.values()].sort((a, b) => b.total - a.total);
-
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(
-          JSON.stringify({
-            summary,
-            daily: [...dailyMap.values()].sort((a, b) => a.date.localeCompare(b.date)),
-            topTools,
-            topBlockedTools,
-            byAgent,
-          })
-        );
+        return res.end(JSON.stringify(buildDaemonReport(allEntries, period, new Date())));
       } catch {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ error: 'Failed to parse report' }));
@@ -1200,6 +1244,31 @@ export function startDaemon(): void {
   setDaemonServer(server);
 
   // ── Port Conflict Resolution ─────────────────────────────────────────────
+  //
+  // The retry below MUST be bounded. Unbounded, a foreign process on the port (a
+  // dev server, a rebound socket) puts this daemon in a permanent ~1 Hz loop:
+  //   EADDRINUSE → no pid file → probe /settings → not a daemon → listen() → …
+  // never serving, never exiting, and never recording anything beyond 'starting'.
+  let bindAttempts = 0;
+  const MAX_BIND_ATTEMPTS = 3;
+  function retryListen(): void {
+    if (++bindAttempts >= MAX_BIND_ATTEMPTS) {
+      logDaemonStartup(
+        'port-unavailable',
+        `:${DAEMON_PORT} is held by something that is not a node9 daemon`
+      );
+      recordStartupState(
+        'failed',
+        'port-unavailable',
+        `:${DAEMON_PORT} is held by another process that is not a node9 daemon — free the port, then: node9 daemon --background`
+      );
+      // exit 0, NOT 1: under Restart=on-failure a non-zero exit turns a permanently
+      // occupied port into a restart storm. This is a stable, explained condition.
+      return process.exit(0);
+    }
+    server.listen(DAEMON_PORT, DAEMON_HOST);
+  }
+
   server.on('error', (e: NodeJS.ErrnoException) => {
     if (e.code === 'EADDRINUSE') {
       try {
@@ -1207,13 +1276,21 @@ export function startDaemon(): void {
           const { pid } = JSON.parse(fs.readFileSync(DAEMON_PID_FILE, 'utf-8'));
           process.kill(pid, 0); // Throws if process is dead
           logDaemonStartup('port-in-use', `another daemon (pid ${pid}) owns :${DAEMON_PORT}`);
+          // A healthy daemon owns the port and its pid file names it — nothing wrong.
+          recordStartupState('ok-elsewhere');
           return process.exit(0);
         }
       } catch {
+        // The pid file names a dead process (or is corrupt): drop it and retry.
+        // BOUNDED, via retryListen: the unlink can FAIL (read-only dir, permissions)
+        // and is swallowed here, in which case the next EADDRINUSE lands back on
+        // this same branch — an infinite loop. An earlier version of this fix left
+        // this site unbounded, reasoning that removing the pid file makes it
+        // converge; that assumed an operation that can fail.
         try {
           fs.unlinkSync(DAEMON_PID_FILE);
         } catch {}
-        server.listen(DAEMON_PORT, DAEMON_HOST);
+        retryListen();
         return;
       }
 
@@ -1226,6 +1303,7 @@ export function startDaemon(): void {
             // Try to recover the orphan's PID and re-create the PID file so
             // future stop/status calls can find it. Try `ss` first (Linux,
             // fast); fall back to `lsof` (macOS + portable Linux).
+            let adopted = false;
             try {
               let orphanPid: number | null = null;
               const ss = spawnSync('ss', ['-Htnp', `sport = :${DAEMON_PORT}`], {
@@ -1256,19 +1334,53 @@ export function startDaemon(): void {
                   JSON.stringify({ pid: orphanPid, port: DAEMON_PORT, internalToken, autoStarted }),
                   { mode: 0o600 }
                 );
+                adopted = true;
               }
             } catch {}
+            // The two outcomes here are NOT the same, and recording them
+            // identically is how a silent failure loop gets built:
+            if (adopted) {
+              // A healthy daemon owns the port and the pid file now names it.
+              logDaemonStartup(
+                'port-in-use-orphan',
+                `adopted the daemon already on :${DAEMON_PORT}`
+              );
+              recordStartupState('ok-elsewhere');
+            } else {
+              // Something holds the port but we could not identify it (no ss/lsof,
+              // or the pid is not ours to signal), so NO pid file was written —
+              // and every CLI keeps reporting "daemon not running" while each new
+              // start exits 0 right here. That loop is invisible unless it is
+              // recorded as the failure it is.
+              // NB: this branch is gated on /settings answering OK, so the daemon
+              // on the port is provably HEALTHY — it just could not be identified
+              // (no `ss`/`lsof`, or its pid is not ours to signal). Telling the
+              // user to kill it would be wrong; the problem is only that every
+              // pid-file-based command will keep reporting "not running".
+              logDaemonStartup(
+                'orphan-unidentified',
+                `healthy daemon on :${DAEMON_PORT} could not be identified — no pid file written`
+              );
+              recordStartupState(
+                'failed',
+                'orphan-unidentified',
+                `a healthy daemon is running on :${DAEMON_PORT} but its process could not be identified, so node9 cannot track it — install \`ss\` or \`lsof\`, or restart it with: node9 daemon --background`
+              );
+            }
             process.exit(0);
           } else {
-            server.listen(DAEMON_PORT, DAEMON_HOST);
+            // Something answered on the port but it is not a healthy daemon.
+            retryListen();
           }
         })
         .catch(() => {
-          server.listen(DAEMON_PORT, DAEMON_HOST);
+          // Nothing answered (timeout / refused) — the holder is not a daemon.
+          retryListen();
         });
       return;
     }
     logDaemonStartup('bind-failed', e.message);
+    recordStartupState('failed', 'bind-failed', e.message);
     console.error(chalk.red('\n🛑 Node9 Daemon Error:'), e.message);
     process.exit(1);
   });
@@ -1290,6 +1402,13 @@ export function startDaemon(): void {
       { mode: 0o600 }
     );
     console.error(chalk.green(`🛡️  Node9 Guard LIVE on 127.0.0.1:${DAEMON_PORT}`));
+    // Record the SUCCESS, not just the failures. daemon-startup.log is append-only
+    // and the auto-start path pipes this process's stderr into it, so without a
+    // terminating "it worked" entry an old crash stays the newest recognisable
+    // line forever — and doctor would blame a months-dead ERR_REQUIRE_ESM for a
+    // daemon that has started cleanly a hundred times since.
+    logDaemonStartup('ok', `listening on ${DAEMON_HOST}:${DAEMON_PORT}`);
+    recordStartupState('ok');
   });
 
   // ── Flight Recorder ──────────────────────────────────────────────────────

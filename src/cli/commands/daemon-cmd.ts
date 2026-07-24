@@ -3,6 +3,8 @@
 import type { Command } from 'commander';
 import chalk from 'chalk';
 import { spawn } from 'child_process';
+import fs from 'fs';
+import { openStartupLogFd, recordStartupState } from '../../daemon/startup-log';
 import {
   startDaemon,
   stopDaemon,
@@ -62,14 +64,31 @@ export function registerDaemonCommand(program: Command): void {
         if (cmd === 'restart') {
           stopDaemon();
           await new Promise((r) => setTimeout(r, 500));
+          // Same spawner contract as --background: capture the child's stderr, mark
+          // the attempt, and ALWAYS attach an 'error' listener (an 'error' event with
+          // no listener is an uncaught exception).
+          const restartFd = openStartupLogFd();
+          recordStartupState('starting');
           const child = spawn(process.execPath, [process.argv[1], 'daemon'], {
             detached: true,
-            stdio: 'ignore',
+            stdio: ['ignore', 'ignore', restartFd ?? 'ignore'],
             env: { ...process.env, NODE9_AUTO_STARTED: '1' },
           });
+          child.on('error', (err: Error) =>
+            recordStartupState('failed', 'spawn-failed', err.message)
+          );
           child.unref();
+          if (restartFd !== undefined) {
+            try {
+              fs.closeSync(restartFd);
+            } catch {
+              /* non-fatal */
+            }
+          }
           if (child.pid) {
-            console.log(chalk.green(`✓ Daemon restarted (PID ${child.pid})`));
+            // Same caveat as --background: the child may not survive startup.
+            console.log(chalk.green(`✓ Daemon relaunching (PID ${child.pid})`));
+            console.log(chalk.gray('   Confirm with: node9 status'));
           } else {
             console.error(chalk.red('✗ Failed to restart daemon — spawn returned no PID'));
             process.exit(1);
@@ -99,12 +118,43 @@ export function registerDaemonCommand(program: Command): void {
         }
 
         if (options.background) {
-          const child = spawn(process.execPath, [process.argv[1], 'daemon'], {
-            detached: true,
-            stdio: 'ignore',
-          });
-          child.unref();
-          console.log(chalk.green(`\n🛡️  Node9 daemon started in background  (PID ${child.pid})`));
+          // This is the command `doctor` tells users to run, so it must follow the
+          // same contract as the other two spawners — otherwise the fix we recommend
+          // fails silently and doctor keeps showing the PREVIOUS cause, i.e. the tool
+          // appears to lie about a repair it just suggested.
+          const startupFd = openStartupLogFd();
+          try {
+            recordStartupState('starting');
+            const child = spawn(process.execPath, [process.argv[1], 'daemon'], {
+              detached: true,
+              // Capture the child's stderr: a module-load crash prints its stack there
+              // and dies before it can record anything itself.
+              stdio: ['ignore', 'ignore', startupFd ?? 'ignore'],
+            });
+            // An 'error' event with NO listener is an uncaught exception. It may not
+            // fire before the exit below — that is fine, the 'starting' marker is the
+            // backstop and doctor reports it — but it must never crash this command.
+            child.on('error', (err: Error) =>
+              recordStartupState('failed', 'spawn-failed', err.message)
+            );
+            child.unref();
+            // "started" would assert something we cannot know here: the child may
+            // still exit during startup (import crash, or a port held by a foreign
+            // process). Say what actually happened — it was launched — and point at
+            // the command that reports the truth.
+            console.log(
+              chalk.green(`\n🛡️  Node9 daemon launching in background  (PID ${child.pid})`)
+            );
+            console.log(chalk.gray('   Confirm with: node9 status'));
+          } finally {
+            if (startupFd !== undefined) {
+              try {
+                fs.closeSync(startupFd);
+              } catch {
+                /* non-fatal */
+              }
+            }
+          }
           process.exit(0);
         }
 

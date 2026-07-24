@@ -16,6 +16,7 @@ import {
 } from './state';
 import {
   isDaemonRunning,
+  daemonHasInteractiveApprover,
   getInternalToken,
   registerDaemonEntry,
   waitForDaemonDecision,
@@ -159,6 +160,31 @@ function notifyActivity(data: {
   sessionId?: string;
 }): Promise<boolean> {
   return notifyActivitySocket(data);
+}
+
+/**
+ * Is a genuine HUMAN approver reachable right now, for the purpose of softening
+ * a hard block into a review? (task #17, fail-closed gate.)
+ *
+ *  - native GUI popup: reachable iff a display is present AND this is the HOOK
+ *    process (the daemon's own background pass never opens a dialog, so a
+ *    display does not help there).
+ *  - terminal (`node9 tail`): reachable iff an input-capable client is connected
+ *    to the daemon (asked over HTTP; that call fails closed on error/timeout).
+ *
+ * Cloud is deliberately NOT a "human" here — it can auto-resolve a client-side
+ * shield the SaaS has no rule for. Returns false on any uncertainty so a hard
+ * block stays hard rather than becoming an auto-allowable review.
+ */
+export async function hasReachableHumanApprover(opts: {
+  approvers: { native?: boolean; terminal?: boolean };
+  calledFromDaemon?: boolean;
+}): Promise<boolean> {
+  const hasDisplay = !!(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
+  const nativeReachable = !opts.calledFromDaemon && opts.approvers.native !== false && hasDisplay;
+  // Short-circuit: only pay the daemon round-trip when native can't reach a human.
+  if (nativeReachable) return true;
+  return opts.approvers.terminal !== false && (await daemonHasInteractiveApprover());
 }
 
 export async function authorizeHeadless(
@@ -717,9 +743,63 @@ async function _authorizeHeadlessCore(
 
     // Hard block from smart rules — skip the race engine entirely
     if (policyResult.decision === 'block') {
-      // If block has dependsOnState predicates, check them via the daemon.
-      // If predicates are not all satisfied (or daemon unreachable), downgrade
-      // to review so the user can decide rather than being hard-blocked.
+      // Fail-closed gate for the block→review downgrade below. A hard block may
+      // only soften to a review when a genuine HUMAN approver is actually
+      // reachable — a GUI popup can be shown, or a `node9 tail` is connected.
+      // With NO reachable human (CI, headless, a piped non-interactive agent)
+      // the block STAYS a block, so the approver race can never resolve it to
+      // allow (e.g. a cloud immediate-allow of a client-side shield the SaaS
+      // has no rule for). Cloud is deliberately NOT a "human" here — it can
+      // auto-resolve. Fails closed: any uncertainty keeps the hard block.
+      const daemonUp = isDaemonRunning();
+      let humanApproverReachable = false;
+      if (!policyResult.dependsOnStatePredicates?.length && daemonUp && !isTestEnv) {
+        humanApproverReachable = await hasReachableHumanApprover({
+          approvers,
+          calledFromDaemon: options?.calledFromDaemon,
+        });
+      }
+      // A hard block softens into a review/recovery card ONLY when a genuine
+      // human approver is reachable (GUI popup or connected tail). With none —
+      // CI, headless, a piped non-interactive agent — it stays hard so the
+      // approver race can never resolve it to allow (a cloud immediate-allow of
+      // a client-side shield the SaaS has no rule for). Fails closed.
+      const mayDowngrade = daemonUp && !isTestEnv && humanApproverReachable;
+
+      // The audit row + hard-block result, shared by every non-softening path so
+      // a fail-closed decision is a single call.
+      const hardBlock = (): AuthResult => {
+        // Include policyResult.ruleName so the [2] Report SHIELDS panel can
+        // attribute this block to its specific shield via the rule→shield map.
+        if (!isManual)
+          appendLocalAudit(
+            toolName,
+            args,
+            'deny',
+            'smart-rule-block',
+            { ...meta, ruleName: policyResult.ruleName },
+            hashAuditArgs
+          );
+        return {
+          approved: false,
+          reason: policyResult.reason ?? 'Action explicitly blocked by Smart Policy.',
+          blockedBy: 'local-config',
+          blockedByLabel: policyResult.blockedByLabel,
+          ruleHit: policyResult.ruleName,
+          ...(policyResult.recoveryCommand && { recoveryCommand: policyResult.recoveryCommand }),
+          ...(policyResult.ruleDescription && { ruleDescription: policyResult.ruleDescription }),
+        };
+      };
+
+      // Stateful (dependsOnState) rules keep their DELIBERATE downgrade-to-review
+      // semantics: when predicates are unknown / the daemon can't check them,
+      // they soften into the STATE GUARD recovery card rather than hard-blocking
+      // a legitimate action (e.g. a deploy) just because state is unavailable —
+      // an availability choice for that feature, tested in stateful-rules.spec.
+      // The fail-closed human-reachability gate applies to PLAIN blocks only
+      // (below). KNOWN RESIDUAL: a stateful block can still soften in a fully
+      // non-interactive context — tracked as its own decision (design doc §2b),
+      // not ridden onto the shield fix.
       if (policyResult.dependsOnStatePredicates?.length) {
         const stateResults = await checkStatePredicates(policyResult.dependsOnStatePredicates);
         // Strict === true check: undefined (missing key) and false are both treated
@@ -752,10 +832,12 @@ async function _authorizeHeadlessCore(
         if (predicatesMet && policyResult.recoveryCommand) {
           statefulRecoveryCommand = policyResult.recoveryCommand;
         }
-      } else if (isDaemonRunning() && !isTestEnv) {
-        // Local development: daemon is running and not in a test/CI environment,
-        // so a human is at the keyboard. Downgrade hard-block to review — the user
-        // gets a popup and can approve or deny. Hard blocks stay hard in CI.
+      } else if (mayDowngrade) {
+        // A genuine human approver is reachable (GUI popup or connected tail),
+        // so downgrade hard-block to review — the user gets a card and can
+        // approve or deny. Without a reachable human this branch is skipped and
+        // the block stays hard (the `else` below): never a review a non-human
+        // channel could auto-allow. Hard blocks also stay hard in CI/test.
         //
         // Make the downgrade visible. Two changes vs. a regular review:
         //   1. Audit `checkedBy` is 'smart-rule-block-override' — the dashboard
@@ -790,39 +872,29 @@ async function _authorizeHeadlessCore(
         }
         // Fall through to the race engine with the override label visible.
       } else {
-        if (!isManual)
-          appendLocalAudit(
-            toolName,
-            args,
-            'deny',
-            'smart-rule-block',
-            // Include policyResult.ruleName so the [2] Report SHIELDS
-            // panel can attribute this block to its specific shield
-            // (e.g. `shield:project-jail:block-read-ssh`) via the
-            // rule→shield map. checkedBy stays as the generic
-            // `smart-rule-block` for backward compat with existing
-            // log readers.
-            { ...meta, ruleName: policyResult.ruleName },
-            hashAuditArgs
-          );
-        // (Cloud delivery via the outbox shipper — the old fire-and-forget
-        // POST here was killed by the immediate process exit on block.)
-        return {
-          approved: false,
-          reason: policyResult.reason ?? 'Action explicitly blocked by Smart Policy.',
-          blockedBy: 'local-config',
-          blockedByLabel: policyResult.blockedByLabel,
-          ruleHit: policyResult.ruleName,
-          ...(policyResult.recoveryCommand && { recoveryCommand: policyResult.recoveryCommand }),
-          ...(policyResult.ruleDescription && { ruleDescription: policyResult.ruleDescription }),
-        };
+        // No reachable human → the block stays hard (fail closed). Cloud
+        // delivery of the deny rides the outbox shipper from the audit row.
+        return hardBlock();
       }
     }
 
     explainableLabel = policyResult.blockedByLabel || 'Local Config';
     policyMatchedField = policyResult.matchedField;
     policyMatchedWord = policyResult.matchedWord;
-    if (policyResult.ruleName) localSmartRuleMatched = true;
+    // B1 (#6): the tier-7 strict fallback reviews with NO ruleName (it is a
+    // mode, not a rule) — keying this guard on ruleName alone let the SaaS
+    // gate's immediate-allow for an unmatched tool ("no org rule matched",
+    // NOT an approval) resolve the call, silently bypassing a cloud-managed
+    // strict mode. Strict says "unmatched requires a human"; cloud's no-match
+    // allow must never pre-empt that.
+    // Deliberately tier-7-only: other rule-less reviews (e.g. dangerous-word)
+    // stay cloud-resolvable — pinned by core.test.ts ("calls cloud API and
+    // returns approved:true") and a semantics change that wide needs its own
+    // decision, not a rider on this fix.
+    // (The name `localSmartRuleMatched` is kept — it crosses the daemon HTTP
+    // boundary (auth/daemon.ts → daemon/server.ts) and renaming the wire field
+    // would silently drop the guard on a hook↔daemon version skew.)
+    if (policyResult.ruleName || policyResult.tier === 7) localSmartRuleMatched = true;
     // Capture the human-readable description so it survives through the race
     // engine and appears in sendBlock even when the user denies at the daemon.
     if (policyResult.ruleDescription) policyRuleDescription = policyResult.ruleDescription;
@@ -849,7 +921,14 @@ async function _authorizeHeadlessCore(
     // commands not covered by a smart rule. Future work: key by command-level
     // pattern (e.g. first command token) so approvals are narrowly scoped.
     // See: doc/roadmap.md "Command-Scoped Persistent Approvals".
-    const persistent = policyResult.ruleName ? null : getPersistentDecision(toolName);
+    //
+    // B1 (#6): tier-7 strict reviews skip the consult too — same key-on-
+    // ruleName defect as the cloud guard above. An "Always Allow" clicked
+    // BEFORE the org mandated strict would permanently exempt that tool, and
+    // the call never reaches the cloud, so the BE floor can't compensate.
+    // Rule-less sub-tier-7 reviews (dangerous-word) stay persistent-resolvable.
+    const persistent =
+      policyResult.ruleName || policyResult.tier === 7 ? null : getPersistentDecision(toolName);
     // `!appPermReview`: a prior "Always Allow" must not bypass an org-set review
     // (fix #3). A persistent DENY still short-circuits (tightening is fine).
     if (persistent === 'allow' && !appPermReview) {

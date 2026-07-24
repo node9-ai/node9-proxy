@@ -10,7 +10,7 @@ import os from 'os';
 import { authorizeHeadless } from '../../auth/orchestrator';
 import { checkPause } from '../../auth/state';
 import { isDaemonRunning } from '../../auth/daemon';
-import { openStartupLogFd } from '../../daemon/startup-log';
+import { openStartupLogFd, recordStartupState } from '../../daemon/startup-log';
 import { getConfig, type Config } from '../../config';
 import { shouldSnapshot } from '../../policy';
 import { buildNegotiationMessage, buildReviewMessage } from '../../policy/negotiation';
@@ -416,11 +416,28 @@ export function registerCheckCommand(program: Command): void {
               // child already holds its own copy. Close in finally so a spawn() throw
               // (→ outer catch) can't leak the fd.
               const startupFd = openStartupLogFd();
+              // Mark the attempt BEFORE spawning. If the child dies at module load
+              // (the ERR_REQUIRE_ESM class), it never runs a line of our code and
+              // cannot report anything itself — this marker plus "daemon still
+              // down" is the only evidence that a start was even attempted.
+              recordStartupState('starting');
               try {
                 const d = spawn(process.execPath, [scriptPath, 'daemon'], {
                   detached: true,
                   stdio: ['ignore', 'ignore', startupFd ?? 'ignore'],
                   env: { ...safeEnv, NODE9_AUTO_STARTED: '1' },
+                });
+                // MANDATORY, and not merely for diagnostics: spawn() reports exec
+                // failures (EMFILE/EAGAIN under load) on this event, and an 'error'
+                // event with NO listener is an uncaught exception. That would print a
+                // stack to stderr — and this file's own comments (:515, :634) record
+                // that Claude Code treats ANY stderr from the hook as a hook error and
+                // FAILS OPEN, letting the tool call through unenforced. Without this
+                // listener a transient resource failure becomes an enforcement bypass.
+                d.on('error', (err: Error) => {
+                  // Best-effort: the hook may exit before this runs, which is why the
+                  // 'starting' marker remains the real backstop on this path.
+                  recordStartupState('failed', 'spawn-failed', err.message);
                 });
                 d.unref();
               } finally {
@@ -437,6 +454,23 @@ export function registerCheckCommand(program: Command): void {
               // of silently swallowed — makes install-path mismatches diagnosable.
               const logPath = path.join(os.homedir(), '.node9', 'hook-debug.log');
               const msg = spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
+              // The validation throws above (argv[1] not absolute, or resolving
+              // outside the package dist — a real install-path mismatch) happen
+              // BEFORE the 'starting' marker is written, so without this an aborted
+              // start leaves no state at all and doctor says nothing. Record it as
+              // the conclusive failure it is; 'starting' would be a lie, since no
+              // spawn was ever attempted.
+              recordStartupState('failed', 'spawn-aborted', msg);
+              // NOTE: deliberately no recordStartupState() for the SPAWN itself here.
+              // spawn() reports exec
+              // failures on the child's 'error' event, not by throwing, so this catch
+              // only sees synchronous TypeErrors — a recording here looked like a
+              // safety net while being unreachable for every failure it named. An
+              // 'error' listener is no better on this path: the target is
+              // process.execPath (so ENOENT is near-impossible) and the hook exits
+              // abruptly at several points, so the listener may never run. The
+              // 'starting' marker is the backstop — nothing resolves it, and doctor
+              // reports the start did not come up once the grace window passes.
               try {
                 fs.appendFileSync(
                   logPath,
