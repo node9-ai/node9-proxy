@@ -567,6 +567,136 @@ describe('renderPosture grouping', () => {
     expect(out).not.toContain('app.node9.ai/posture');
   });
 
+  // ── P3: D3 collision labels + D4 headroom copy ────────────────────────────
+  // The new headroom sentence word-wraps, so phrase assertions run on a
+  // whitespace-flattened copy to avoid straddling a line break.
+  const flat = (s: string) => s.replace(/\s+/g, ' ');
+
+  it('a category both covered and open gets (guarded)/(exposed) + names what is guarded', () => {
+    const out = renderPosture(
+      result([
+        {
+          category: 'Secrets',
+          severity: 'high',
+          title: '2 credential files readable by the agent',
+          detail: ['~/.ssh/id_rsa', '~/.aws/credentials'],
+          coverage: { state: 'covered', level: 'block', via: 'node9 DLP' },
+          coverageProbe: { kind: 'fileRead', paths: ['/x'] },
+        },
+        {
+          category: 'Secrets',
+          severity: 'critical',
+          title: '1 plaintext secret on disk',
+          detail: ['Database Connection String in ~/.claude.json'],
+          owner: 'node9',
+          fix: 'Fix it now: run `node9 shield enable project-jail`.',
+        },
+      ])
+    );
+    expect(out).toContain('Secrets (guarded)');
+    expect(out).toContain('Secrets (exposed)');
+    expect(out).toContain('reads of ~/.ssh/id_rsa and 1 more');
+  });
+
+  it('a covered-only category keeps its bare label (no qualifier outside a collision)', () => {
+    const out = renderPosture(
+      result([
+        {
+          category: 'Egress',
+          severity: 'high',
+          title: 'e',
+          detail: [],
+          coverage: { state: 'covered', level: 'review', via: 'node9 egress' },
+        },
+      ])
+    );
+    expect(out).not.toContain('(guarded)');
+    expect(out).not.toContain('(exposed)');
+  });
+
+  it('a covered row without detail falls back to "…this"', () => {
+    const out = renderPosture(
+      result([
+        {
+          category: 'Egress',
+          severity: 'high',
+          title: 'e',
+          detail: [],
+          coverage: { state: 'covered', level: 'review', via: 'node9 egress' },
+        },
+      ])
+    );
+    expect(out).toContain('node9 egress is approval-gating this');
+  });
+
+  it('headroom line names both buckets when genuine exposures are open', () => {
+    const out = flat(
+      renderPosture(
+        result([
+          { category: 'Egress', severity: 'high', title: 'e', detail: [], owner: 'node9' },
+          {
+            category: 'Isolation',
+            severity: 'advisory',
+            title: 'i',
+            detail: [],
+            owner: 'os',
+            node9Reduces: true,
+            scoreWeight: 12,
+          },
+        ])
+      )
+    );
+    expect(out).toContain('Of the gap to 100');
+    expect(out).toContain('the rest is the open findings');
+  });
+
+  it('headroom line stays single-bucket when only optional hardening is open', () => {
+    const out = flat(
+      renderPosture(
+        result([
+          {
+            category: 'Isolation',
+            severity: 'advisory',
+            title: 'i',
+            detail: [],
+            owner: 'os',
+            node9Reduces: true,
+            scoreWeight: 12,
+          },
+        ])
+      )
+    );
+    expect(out).toContain('pts of headroom');
+    expect(out).not.toContain('the rest is');
+  });
+
+  it('advisory-only exposures do not trigger the both-buckets variant (advisories never deduct)', () => {
+    const out = flat(
+      renderPosture(
+        result([
+          {
+            category: 'Network exposure',
+            severity: 'advisory',
+            title: 'n',
+            detail: [],
+            owner: 'os',
+          },
+          {
+            category: 'Isolation',
+            severity: 'advisory',
+            title: 'i',
+            detail: [],
+            owner: 'os',
+            node9Reduces: true,
+            scoreWeight: 12,
+          },
+        ])
+      )
+    );
+    expect(out).toContain('pts of headroom');
+    expect(out).not.toContain('the rest is');
+  });
+
   it('the rendered headline composes ONE prefix — never "Do this first: Fix it now:"', () => {
     const out = renderPosture(
       result([
