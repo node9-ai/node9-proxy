@@ -167,6 +167,28 @@ export async function isDaemonReachable(timeoutMs = 500): Promise<boolean> {
   }
 }
 
+/** GET /health outcome, three-valued because the CASES mean different things
+ *  (task #18): a daemon that answers /health names its build; a daemon that
+ *  serves but 404s /health is provably OLDER than this (installed) build,
+ *  which implements it; unreachable says nothing about builds at all. */
+export type DaemonHealthProbe =
+  | { kind: 'health'; health: { version?: unknown; buildId?: unknown; pid?: unknown } }
+  | { kind: 'no-health' }
+  | { kind: 'unreachable' };
+
+export async function probeDaemonHealth(timeoutMs = 800): Promise<DaemonHealthProbe> {
+  try {
+    const res = await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/health`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return { kind: 'no-health' };
+    const j = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+    return j && typeof j === 'object' ? { kind: 'health', health: j } : { kind: 'no-health' };
+  } catch {
+    return { kind: 'unreachable' };
+  }
+}
+
 /**
  * Is a genuine human approver reachable right now — i.e. is an input-capable
  * client (`node9 tail`) connected to the daemon? Used by the orchestrator to

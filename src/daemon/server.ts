@@ -20,6 +20,7 @@ import {
   type ScanResult,
 } from '../cli/commands/scan';
 import { buildScanSummary } from '../scan-summary';
+import { CURRENT_BUILD, buildIdString } from './build-id';
 import {
   DAEMON_PORT,
   DAEMON_HOST,
@@ -235,6 +236,11 @@ export function startDaemon(): void {
   const validToken = (req: http.IncomingMessage) =>
     req.headers['x-node9-internal'] === internalToken ||
     req.headers['x-node9-token'] === internalToken;
+
+  // Build identity (task #18): captured HERE, once, at daemon start — never
+  // re-stat'd. CURRENT_BUILD is a module-load constant, so /health reports the
+  // code this process LOADED even after a rebuild overwrites dist on disk.
+  const startedAt = new Date().toISOString();
 
   // ── Graceful Idle Timeout ────────────────────────────────────────────────
   const IDLE_TIMEOUT_MS = 12 * 60 * 60 * 1000; // 12 hours
@@ -711,6 +717,24 @@ export function startDaemon(): void {
     if (req.method === 'GET' && pathname === '/approver') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ interactive: hasInteractiveClient() }));
+    }
+
+    // Which BUILD is serving this port (task #18). Unauthenticated read, same
+    // trust class as /status and /approver (localhost metadata only). Serves
+    // the module-load CURRENT_BUILD — a fresh stat here would read a rebuilt
+    // dist and misreport the running code as current, making same-version
+    // takeover impossible (G3 in rogue-daemon-code-design.md).
+    if (req.method === 'GET' && pathname === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(
+        JSON.stringify({
+          version: CURRENT_BUILD.version,
+          buildId: buildIdString(CURRENT_BUILD),
+          pid: process.pid,
+          startedAt,
+          autoStarted,
+        })
+      );
     }
 
     if (req.method === 'GET' && pathname === '/state/check') {
@@ -1396,9 +1420,21 @@ export function startDaemon(): void {
   }
 
   server.listen(DAEMON_PORT, DAEMON_HOST, () => {
+    // NB: the orphan-adopt write above deliberately does NOT stamp version/
+    // buildId — the adopter is not the holder, and stamping the adopter's
+    // identity onto a foreign daemon's pidfile would lie about which code is
+    // serving (the same class of bug as the fabricated internalToken, G2).
     atomicWriteSync(
       DAEMON_PID_FILE,
-      JSON.stringify({ pid: process.pid, port: DAEMON_PORT, internalToken, autoStarted }),
+      JSON.stringify({
+        pid: process.pid,
+        port: DAEMON_PORT,
+        internalToken,
+        autoStarted,
+        version: CURRENT_BUILD.version,
+        buildId: buildIdString(CURRENT_BUILD),
+        startedAt,
+      }),
       { mode: 0o600 }
     );
     console.error(chalk.green(`🛡️  Node9 Guard LIVE on 127.0.0.1:${DAEMON_PORT}`));
