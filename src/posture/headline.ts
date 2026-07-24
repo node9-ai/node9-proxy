@@ -104,8 +104,15 @@ export function deriveHeadline(allFindings: Finding[]): Headline | null {
   } else if (observeOnly) {
     action = 'Switch node9 to enforcing mode — right now it is only watching, not blocking.';
   } else if (egressOpen) {
-    action =
-      'lock egress to an allowlist (node9 can enforce it) — it closes the exit the exfiltration needs.';
+    // Finding-first + keep the chain rationale the ladder is built on: egress
+    // outranks secrets because closing the exit breaks the exfiltration chain —
+    // the finding's fix names the command but not WHY it goes first.
+    const egressFix = actionFromFinding(
+      worstFinding(findings.filter((f) => f.category === 'Egress'))
+    );
+    action = egressFix
+      ? `${egressFix} Closing the exit breaks the exfiltration chain.`
+      : 'lock egress to an allowlist (node9 can enforce it) — it closes the exit the exfiltration needs.';
   } else if (secrets) {
     // The finding is the source of truth — its fix names the exact command and
     // its detail names the actual file. The fallback carries the command but
@@ -115,7 +122,9 @@ export function deriveHeadline(allFindings: Finding[]): Headline | null {
       actionFromFinding(worstFinding(findings.filter((f) => f.category === 'Secrets'))) ??
       'node9 can block reads of sensitive credential files in-path (`node9 shield enable project-jail`).';
   } else if (gateWeak) {
-    action = 'node9 can enforce destructive-command blocking in-path.';
+    action =
+      actionFromFinding(worstFinding(findings.filter((f) => f.category === 'Approval gate'))) ??
+      'node9 can enforce destructive-command blocking in-path (`node9 shield enable bash-safe`).';
   } else {
     action = actionFromFinding(worstFinding(findings)) ?? 'Review the findings below.';
   }

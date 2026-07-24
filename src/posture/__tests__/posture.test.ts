@@ -376,9 +376,56 @@ describe('deriveHeadline', () => {
     expect(h?.risk).toMatch(/no container/i); // isolation woven in
   });
 
-  it('makes egress the first action (close the exit breaks the chain)', () => {
+  it('makes egress the first action, derived from the Egress finding (close the exit breaks the chain)', () => {
     const h = deriveHeadline([f('Secrets', 'critical'), f('Egress')]);
-    expect(h?.action).toMatch(/lock egress/i);
+    // The action comes from the EGRESS finding (ladder order), not the secrets one…
+    expect(h?.action).toContain('fix Egress');
+    // …and keeps the chain rationale the ladder is built on.
+    expect(h?.action).toContain('exfiltration chain');
+  });
+
+  it("egress action carries the finding's real command + the chain rationale", () => {
+    const egress: Finding = {
+      category: 'Egress',
+      severity: 'high',
+      title: 'Egress is open',
+      detail: [],
+      fix: 'Fix it now: run `node9 egress watch` (or `node9 egress lock` to hard-block).',
+    };
+    const h = deriveHeadline([egress]);
+    expect(h?.action).toContain('node9 egress watch');
+    expect(h?.action).toContain('exfiltration chain');
+    expect(h?.action).not.toMatch(/fix it now:/i);
+  });
+
+  it('egress falls back to the allowlist generic when the finding has no fix', () => {
+    const h = deriveHeadline([
+      { category: 'Egress', severity: 'high', title: 'Egress is open', detail: [] },
+    ]);
+    expect(h?.action).toMatch(/lock egress to an allowlist/i);
+  });
+
+  it("gate action carries the finding's real command", () => {
+    const gate: Finding = {
+      category: 'Approval gate',
+      severity: 'critical',
+      title: 'No approval gate is active — destructive commands run unchecked',
+      detail: [],
+      fix:
+        'Turn on the gate: run `node9 shield enable bash-safe` (or add a smart rule). ' +
+        "node9 then blocks dangerous commands and the negotiation loop tells the agent what's allowed.",
+    };
+    const h = deriveHeadline([gate]);
+    expect(h?.action).toContain('Turn on the gate');
+    expect(h?.action).toContain('node9 shield enable bash-safe');
+  });
+
+  it('gate falls back to a command-bearing generic when the finding has no fix', () => {
+    const h = deriveHeadline([
+      { category: 'Approval gate', severity: 'critical', title: 'No approval gate', detail: [] },
+    ]);
+    expect(h?.action).toContain('destructive-command blocking');
+    expect(h?.action).toContain('node9 shield enable bash-safe');
   });
 
   it('prioritizes "node9 init" when node9 is not wired, over any other fix', () => {
