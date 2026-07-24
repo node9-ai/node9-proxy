@@ -16,7 +16,33 @@ const SEVERITY_RANK: Record<Severity, number> = {
 };
 
 function worstFinding(findings: Finding[]): Finding | undefined {
-  return [...findings].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity])[0];
+  // Tie-break beyond severity: the headline surfaces finding CONTENT, so the
+  // pick must not depend on check execution order.
+  return [...findings].sort(
+    (a, b) =>
+      SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] ||
+      a.category.localeCompare(b.category) ||
+      a.title.localeCompare(b.title)
+  )[0];
+}
+
+/**
+ * Self-contained action text derived from a finding: its own `fix` minus any
+ * "Fix it now:" prefix (render prepends "Do this first:"), plus the first
+ * concrete location so the CTA names the actual evidence — never a canned
+ * exemplar (a headline that mislabels the mechanism is worse than silence).
+ * `detail` holds secret types + locations only, never values (see secrets.ts).
+ */
+function actionFromFinding(f: Finding | undefined): string | null {
+  if (!f?.fix) return null;
+  const fix = f.fix.replace(/^fix it now:\s*/i, '');
+  const where =
+    f.detail.length === 0
+      ? ''
+      : f.detail.length === 1
+        ? ` — found: ${f.detail[0]}`
+        : ` — found: ${f.detail[0]} and ${f.detail.length - 1} more`;
+  return fix + where;
 }
 
 /**
@@ -81,11 +107,17 @@ export function deriveHeadline(allFindings: Finding[]): Headline | null {
     action =
       'lock egress to an allowlist (node9 can enforce it) — it closes the exit the exfiltration needs.';
   } else if (secrets) {
-    action = 'node9 can block reads of sensitive paths (~/.ssh, ~/.aws) in-path.';
+    // The finding is the source of truth — its fix names the exact command and
+    // its detail names the actual file. The fallback carries the command but
+    // asserts NO specifics (a canned path list here is how the 07-23 repro
+    // showed "~/.ssh, ~/.aws" against a secret living in ~/.claude.json).
+    action =
+      actionFromFinding(worstFinding(findings.filter((f) => f.category === 'Secrets'))) ??
+      'node9 can block reads of sensitive credential files in-path (`node9 shield enable project-jail`).';
   } else if (gateWeak) {
     action = 'node9 can enforce destructive-command blocking in-path.';
   } else {
-    action = worstFinding(findings)?.fix ?? 'Review the findings below.';
+    action = actionFromFinding(worstFinding(findings)) ?? 'Review the findings below.';
   }
 
   return { risk, action };
