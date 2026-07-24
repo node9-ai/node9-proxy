@@ -458,6 +458,11 @@ let cachedConfig: Config | null = null;
 
 export function _resetConfigCache(): void {
   cachedConfig = null;
+  // Round-2 F4: the rules-cache memo + log rate-limit are module-level state
+  // too — clear them here so every test that resets the config cache also
+  // clears them (otherwise the memo leaks cloud flags across test files).
+  lastParsedRulesCache = null;
+  cacheReadLastLoggedAt = 0;
 }
 
 /**
@@ -634,15 +639,9 @@ export function readRulesCacheResilient(cacheFile: string): Record<string, unkno
 }
 
 /** Last successfully-parsed rules cache in THIS process — the daemon's
- *  in-memory fallback when disk turns unreadable (round-2 F4). */
+ *  in-memory fallback when disk turns unreadable (round-2 F4). Reset via
+ *  _resetConfigCache (tests) so it never leaks across contexts. */
 let lastParsedRulesCache: Record<string, unknown> | null = null;
-
-/** Test-only: clear the memo + the log rate-limit (both module-level, they
- *  leak across vitest cases in one file otherwise). */
-export function __resetRulesCacheStateForTest(): void {
-  lastParsedRulesCache = null;
-  cacheReadLastLoggedAt = 0;
-}
 
 /** Log a rules-cache read problem, rate-limited to once per 5 minutes —
  *  round-2 F4 (#3): a once-per-PROCESS latch silenced every recurrence in the

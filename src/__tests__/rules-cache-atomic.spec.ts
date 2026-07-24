@@ -19,7 +19,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { __writeCacheForTest } from '../daemon/sync';
-import { readRulesCacheResilient, __resetRulesCacheStateForTest } from '../config';
+import { readRulesCacheResilient, _resetConfigCache } from '../config';
 
 describe('writeCache — atomic write (no partial file visible)', () => {
   let tmpHome: string;
@@ -32,7 +32,7 @@ describe('writeCache — atomic write (no partial file visible)', () => {
     origUserprofile = process.env.USERPROFILE;
     process.env.HOME = tmpHome;
     process.env.USERPROFILE = tmpHome;
-    __resetRulesCacheStateForTest();
+    _resetConfigCache();
     fs.mkdirSync(path.join(tmpHome, '.node9'), { recursive: true });
   });
 
@@ -94,7 +94,7 @@ describe('readRulesCacheResilient — no silent fail-open on a torn/corrupt read
     origHome = process.env.HOME;
     process.env.HOME = tmpHome;
     process.env.USERPROFILE = tmpHome;
-    __resetRulesCacheStateForTest();
+    _resetConfigCache();
     fs.mkdirSync(path.join(tmpHome, '.node9'), { recursive: true });
   });
 
@@ -174,7 +174,7 @@ describe('writeCache maintains a last-known-good backup', () => {
     origHome = process.env.HOME;
     process.env.HOME = tmpHome;
     process.env.USERPROFILE = tmpHome;
-    __resetRulesCacheStateForTest();
+    _resetConfigCache();
     fs.mkdirSync(path.join(tmpHome, '.node9'), { recursive: true });
   });
   afterEach(() => {
@@ -214,7 +214,7 @@ describe('readRulesCacheResilient — round-2 F4 hardening (/code-review #7, #2,
     origUserprofile = process.env.USERPROFILE;
     process.env.HOME = tmpHome;
     process.env.USERPROFILE = tmpHome;
-    __resetRulesCacheStateForTest();
+    _resetConfigCache();
     n9 = path.join(tmpHome, '.node9');
     fs.mkdirSync(n9, { recursive: true });
   });
