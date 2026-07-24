@@ -1163,14 +1163,40 @@ export function getConfig(cwd?: string): Config {
     mergedSettings.mode = 'standard';
   }
 
-  // B1 (#3/#5/#6): local ignoredTools / sandboxPaths must not fast-path a tool
-  // to allow BEFORE a mandated shield runs (the engine's ignored-tool and
-  // sandbox short-circuits return allow ahead of the smart-rule tier). When the
-  // fleet mandates shields, discard local (global + repo-carried) additions and
-  // keep only the safe read-only defaults — a coarse but absolute guard, matching
-  // the mandate-is-not-opt-out-able principle. A dev loses custom local ignores
-  // ONLY while their org mandates shields.
-  if (cloudManagedShields.length > 0) {
+  // Task #16: a CLOUD-managed enforcement floor must not be silently weakened by
+  // local/repo config — the same config-home law already applied to mode/egress/
+  // dlp: the org's decision wins, local config may only tighten. The floor is
+  // active whenever the fleet has imposed one: a mandated shield OR a
+  // cloud-controlled strict mode. (A LOCALLY-chosen strict is NOT a floor — a dev
+  // keeps their own escapes; this is gated on modeCloudControlled so we never
+  // over-tighten a self-chosen posture.)
+  const managedFloorActive =
+    cloudManagedShields.length > 0 || (modeCloudControlled && mergedSettings.mode === 'strict');
+
+  // Vector A (task #16): under a managed strict, neutralise the engine's strict
+  // ESCAPE (`activeEnvironment.requireApproval === false` at policy/index.ts,
+  // which turns strict's catch-all review into a blanket allow). A cloned repo's
+  // node9.config.json must not be able to define an environment that disables a
+  // cloud-mandated strict. Strip the escape from every merged environment; a
+  // locally-chosen strict is untouched (modeCloudControlled is false there).
+  if (modeCloudControlled && mergedSettings.mode === 'strict') {
+    for (const name of Object.keys(mergedEnvironments)) {
+      if (mergedEnvironments[name]?.requireApproval === false) {
+        const cleaned = { ...mergedEnvironments[name] };
+        delete cleaned.requireApproval;
+        mergedEnvironments[name] = cleaned;
+      }
+    }
+  }
+
+  // Vector B (task #16) + B1 (#3/#5/#6): local ignoredTools / sandboxPaths must
+  // not fast-path a tool to allow BEFORE the managed floor runs (the engine's
+  // ignored-tool and sandbox short-circuits return allow ahead of the smart-rule
+  // AND strict-fallback tiers). Under any managed floor — mandated shields OR a
+  // cloud strict — discard local (global + repo-carried) additions and keep only
+  // the safe read-only defaults. A dev loses custom local ignores ONLY while
+  // their org imposes a floor.
+  if (managedFloorActive) {
     mergedPolicy.ignoredTools = [...DEFAULT_CONFIG.policy.ignoredTools];
     mergedPolicy.sandboxPaths = [...DEFAULT_CONFIG.policy.sandboxPaths];
   }
