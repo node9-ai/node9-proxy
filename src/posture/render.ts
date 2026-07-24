@@ -124,7 +124,7 @@ export function renderPosture(result: PostureResult): string {
       openExposures > 0
         ? `Of the gap to 100: ${headroom} pts is optional hardening you can choose ` +
           'to turn on (the 🔒 tier below, each at some cost to flexibility); the ' +
-          'rest is the open findings — the ❌ rows below. Fix those first.'
+          'rest is the open findings — the flagged rows below. Fix those first.'
         : `${headroom} pts of headroom — optional hardening you can choose to ` +
           'turn on (the 🔒 tier below), each at some cost to flexibility.';
     for (const l of wrap(note, 76)) lines.push('  ' + chalk.gray(l));

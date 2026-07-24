@@ -17,12 +17,15 @@ const SEVERITY_RANK: Record<Severity, number> = {
 
 function worstFinding(findings: Finding[]): Finding | undefined {
   // Tie-break beyond severity: the headline surfaces finding CONTENT, so the
-  // pick must not depend on check execution order.
+  // pick must not depend on check execution order. Code-point compare, not
+  // localeCompare — host-locale collation must not pick different findings on
+  // different machines.
+  const cmp = (x: string, y: string) => (x < y ? -1 : x > y ? 1 : 0);
   return [...findings].sort(
     (a, b) =>
       SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] ||
-      a.category.localeCompare(b.category) ||
-      a.title.localeCompare(b.title)
+      cmp(a.category, b.category) ||
+      cmp(a.title, b.title)
   )[0];
 }
 
