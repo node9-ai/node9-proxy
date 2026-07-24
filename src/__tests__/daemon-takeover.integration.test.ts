@@ -170,19 +170,22 @@ describe('startup takeover + /shutdown (task #18 commit b)', () => {
 });
 
 describe('autostart reachability gate (task #18 commit b)', () => {
-  it('does not spawn a competing daemon when one is already serving', async () => {
-    // Works BOTH locally (a real daemon holds :7391) and in CI (we bind a stub).
-    let stub: net.Server | null = null;
-    if (free) {
-      const http = await import('http');
-      stub = http
-        .createServer((_req, res) => {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end('{}');
-        })
-        .listen(PORT, HOST) as unknown as net.Server;
-      await new Promise((r) => setTimeout(r, 200));
-    }
+  it('does not spawn a competing daemon when one is already serving', async (ctx) => {
+    // Must own a CONTROLLED /settings→200 stub on :7391. Relying on an
+    // uncontrolled occupant (a sibling test file's daemon, mid-setup/teardown)
+    // was flaky in CI — parallel workers contend for the one hardcoded port.
+    // Bind our own; if a sibling holds it, SKIP (the file's port-guard rule).
+    const http = await import('http');
+    const stub = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{}');
+    });
+    const bound = await new Promise<boolean>((resolve) => {
+      stub.once('error', () => resolve(false)); // EADDRINUSE — a sibling owns it
+      stub.listen(PORT, HOST, () => resolve(true));
+    });
+    if (!bound) return ctx.skip();
+
     // Observable-effects assertion (ESM namespaces can't be spied): with an
     // isolated HOME, the gate must (1) return true, (2) log the skip, and
     // (3) NEVER record a 'starting' attempt — 'starting' is written strictly
@@ -194,7 +197,7 @@ describe('autostart reachability gate (task #18 commit b)', () => {
     process.env.USERPROFILE = home;
     try {
       const result = await autoStartDaemonAndWait();
-      expect(result).toBe(true); // a daemon IS serving
+      expect(result).toBe(true); // our stub IS serving → gate returns true
       const dbg = path.join(home, '.node9', 'hook-debug.log');
       expect(fs.existsSync(dbg) && fs.readFileSync(dbg, 'utf-8')).toContain('already-serving');
       expect(fs.existsSync(path.join(home, '.node9', 'daemon-startup-state.json'))).toBe(false);
@@ -204,7 +207,7 @@ describe('autostart reachability gate (task #18 commit b)', () => {
       if (prev.u !== undefined) process.env.USERPROFILE = prev.u;
       else delete process.env.USERPROFILE;
       fs.rmSync(home, { recursive: true, force: true });
-      if (stub) await new Promise((r) => stub!.close(r));
+      await new Promise((r) => stub.close(r));
     }
   }, 15000);
 });
