@@ -93,7 +93,7 @@ import {
   pushScanSnapshot,
 } from '../daemon/sync.js';
 import { CANONICAL_EXTRACTOR_VERSION } from '@node9/policy-engine';
-import { getConfig, _resetConfigCache } from '../core.js';
+import { getConfig, _resetConfigCache, __resetRulesCacheStateForTest } from '../core.js';
 
 // ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -155,7 +155,8 @@ function mockFiles(files: Record<string, string>) {
   existsSpy.mockImplementation((p) => p.toString() in files);
   readSpy.mockImplementation((p: unknown) => {
     const content = files[p!.toString()];
-    if (content === undefined) throw new Error(`ENOENT: ${String(p)}`);
+    if (content === undefined)
+      throw Object.assign(new Error(`ENOENT: ${String(p)}`), { code: 'ENOENT' });
     return content;
   });
 }
@@ -163,13 +164,17 @@ function mockFiles(files: Record<string, string>) {
 beforeEach(() => {
   homeSpy.mockReturnValue(MOCK_HOME);
   _resetConfigCache();
+  // The rules-cache memo persists across _resetConfigCache in prod (daemon
+  // fallback); clear it explicitly between tests so a prior file's parsed cache
+  // can't leak cloud flags into these assertions (round-3).
+  __resetRulesCacheStateForTest();
   delete process.env.NODE9_API_KEY;
   delete process.env.NODE9_API_URL;
   delete process.env.NODE9_PROFILE;
   // Default: no files exist
   existsSpy.mockReturnValue(false);
   readSpy.mockImplementation(() => {
-    throw new Error('ENOENT');
+    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
   });
 });
 

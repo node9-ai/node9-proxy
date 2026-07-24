@@ -19,7 +19,11 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { __writeCacheForTest } from '../daemon/sync';
-import { readRulesCacheResilient } from '../config';
+import {
+  readRulesCacheResilient,
+  _resetConfigCache,
+  __resetRulesCacheStateForTest,
+} from '../config';
 
 describe('writeCache — atomic write (no partial file visible)', () => {
   let tmpHome: string;
@@ -32,6 +36,8 @@ describe('writeCache — atomic write (no partial file visible)', () => {
     origUserprofile = process.env.USERPROFILE;
     process.env.HOME = tmpHome;
     process.env.USERPROFILE = tmpHome;
+    _resetConfigCache();
+    __resetRulesCacheStateForTest();
     fs.mkdirSync(path.join(tmpHome, '.node9'), { recursive: true });
   });
 
@@ -93,6 +99,8 @@ describe('readRulesCacheResilient — no silent fail-open on a torn/corrupt read
     origHome = process.env.HOME;
     process.env.HOME = tmpHome;
     process.env.USERPROFILE = tmpHome;
+    _resetConfigCache();
+    __resetRulesCacheStateForTest();
     fs.mkdirSync(path.join(tmpHome, '.node9'), { recursive: true });
   });
 
@@ -172,6 +180,8 @@ describe('writeCache maintains a last-known-good backup', () => {
     origHome = process.env.HOME;
     process.env.HOME = tmpHome;
     process.env.USERPROFILE = tmpHome;
+    _resetConfigCache();
+    __resetRulesCacheStateForTest();
     fs.mkdirSync(path.join(tmpHome, '.node9'), { recursive: true });
   });
   afterEach(() => {
@@ -196,5 +206,98 @@ describe('writeCache maintains a last-known-good backup', () => {
     );
     expect(backup).toEqual(primary);
     expect(backup.shields).toEqual(['aws']);
+  });
+});
+
+describe('readRulesCacheResilient — round-2 F4 hardening (/code-review #7, #2, #3)', () => {
+  let tmpHome: string;
+  let origHome: string | undefined;
+  let origUserprofile: string | undefined;
+  let n9: string;
+
+  beforeEach(() => {
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-f4-'));
+    origHome = process.env.HOME;
+    origUserprofile = process.env.USERPROFILE;
+    process.env.HOME = tmpHome;
+    process.env.USERPROFILE = tmpHome;
+    _resetConfigCache();
+    __resetRulesCacheStateForTest();
+    n9 = path.join(tmpHome, '.node9');
+    fs.mkdirSync(n9, { recursive: true });
+  });
+
+  afterEach(() => {
+    if (origHome !== undefined) process.env.HOME = origHome;
+    else delete process.env.HOME;
+    if (origUserprofile !== undefined) process.env.USERPROFILE = origUserprofile;
+    else delete process.env.USERPROFILE;
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('#7: a present-but-UNREADABLE primary (EACCES) reaches the last-good backup instead of silently dropping enforcement', () => {
+    const primary = path.join(n9, 'rules-cache.json');
+    const backup = path.join(n9, 'rules-cache.last-good.json');
+    fs.writeFileSync(primary, '{"shields":["aws"]}');
+    fs.writeFileSync(backup, '{"shields":["aws"],"from":"backup"}');
+
+    const realRead = fs.readFileSync.bind(fs);
+    vi.spyOn(fs, 'readFileSync').mockImplementation(((p: fs.PathOrFileDescriptor, o?: unknown) => {
+      if (String(p) === primary) {
+        throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+      }
+      return realRead(p as never, o as never);
+    }) as typeof fs.readFileSync);
+
+    const out = readRulesCacheResilient(primary);
+    // Before F4: existed stayed false on a read THROW, so the backup and the
+    // log were both skipped and {} silently dropped every mandated shield.
+    expect(out).toEqual({ shields: ['aws'], from: 'backup' });
+  });
+
+  it('#2: the daemon falls back to the last parsed cache — and the memo SURVIVES the per-/check _resetConfigCache', () => {
+    const primary = path.join(n9, 'rules-cache.json');
+    // 1. A successful parse seeds the in-process memo (the daemon's normal state).
+    fs.writeFileSync(primary, '{"shields":["memo-shield"]}');
+    expect(readRulesCacheResilient(primary)).toEqual({ shields: ['memo-shield'] });
+    // 2. Model the REAL daemon caller: POST /check calls _resetConfigCache() at
+    //    the top of every request (daemon/server.ts). The memo MUST persist
+    //    across it — round-3 caught that folding the reset into _resetConfigCache
+    //    made this fallback dead in the daemon (the exact process it protects).
+    _resetConfigCache();
+    // 3. Disk turns hostile: primary corrupt, no backup.
+    fs.writeFileSync(primary, '{"shields":['); // torn/corrupt
+    const out = readRulesCacheResilient(primary);
+    // Before the round-3 fix: {} — the config-cache reset wiped the memo, the
+    // mandated shield vanished. Now: the memo holds the line across the reset.
+    expect(out).toEqual({ shields: ['memo-shield'] });
+  });
+
+  it('#3: the corruption log re-arms after 5 minutes instead of latching once per process', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-24T12:00:00Z'));
+    const primary = path.join(n9, 'rules-cache.json');
+    const debugLog = path.join(n9, 'hook-debug.log');
+    const logLines = () =>
+      fs.existsSync(debugLog)
+        ? fs.readFileSync(debugLog, 'utf-8').trim().split('\n').filter(Boolean).length
+        : 0;
+
+    fs.writeFileSync(primary, '{"broken":'); // corrupt, no backup, no memo hit needed — any kind logs
+    readRulesCacheResilient(primary);
+    const afterFirst = logLines();
+    expect(afterFirst).toBeGreaterThan(0);
+
+    // Within the window: silent.
+    vi.setSystemTime(new Date('2026-07-24T12:02:00Z'));
+    readRulesCacheResilient(primary);
+    expect(logLines()).toBe(afterFirst);
+
+    // Past the window: logs again (recurring corruption stays visible).
+    vi.setSystemTime(new Date('2026-07-24T12:06:00Z'));
+    readRulesCacheResilient(primary);
+    expect(logLines()).toBeGreaterThan(afterFirst);
   });
 });

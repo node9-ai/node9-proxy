@@ -6,7 +6,8 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { execSync } from 'child_process';
-import { isDaemonRunning, DAEMON_PORT, DAEMON_HOST } from '../../auth/daemon';
+import { isDaemonRunning, probeDaemonHealth, DAEMON_PORT, DAEMON_HOST } from '../../auth/daemon';
+import { CURRENT_BUILD, describeBuildDrift } from '../../daemon/build-id';
 import { getConfig } from '../../config';
 import { getAgentWiring } from '../../agent-wiring';
 import { readSyncHealth, isPolicyStale } from '../../daemon/sync';
@@ -148,6 +149,21 @@ export function registerDoctorCommand(program: Command, version: string): void {
         pass(
           `Daemon running on ${DAEMON_HOST}:${DAEMON_PORT} — terminal & native approvals enabled`
         );
+        // Build drift (task #18): the running daemon may predate the installed
+        // build — then it is ENFORCING old code, and `systemctl restart`
+        // silently no-ops because the port is held. Surface it here; the
+        // takeover/restart fix lands in commit (b).
+        const probe = await probeDaemonHealth();
+        const drift = describeBuildDrift(
+          probe.kind === 'health' ? probe.health : probe.kind === 'no-health' ? 'no-health' : null,
+          CURRENT_BUILD
+        );
+        if (drift) {
+          warn(
+            drift,
+            'Stop the running daemon (pid in ~/.node9/daemon.pid), then: node9 daemon --background'
+          );
+        }
       } else {
         warn(
           'Daemon not running — terminal & native approvals unavailable',

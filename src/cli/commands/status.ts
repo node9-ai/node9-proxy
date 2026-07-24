@@ -6,7 +6,8 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { getCredentials, getConfig, checkPause } from '../../core';
-import { isDaemonRunning, DAEMON_PORT } from '../../auth/daemon';
+import { isDaemonRunning, probeDaemonHealth, DAEMON_PORT } from '../../auth/daemon';
+import { CURRENT_BUILD, describeBuildDrift } from '../../daemon/build-id';
 import { getAgentWiring } from '../../agent-wiring';
 import { readSyncHealth, isPolicyStale } from '../../daemon/sync';
 import {
@@ -47,7 +48,7 @@ export function registerStatusCommand(program: Command): void {
   program
     .command('status')
     .description('Show current Node9 mode, policy source, and persistent decisions')
-    .action(() => {
+    .action(async () => {
       const creds = getCredentials();
       const daemonRunning = isDaemonRunning();
 
@@ -95,6 +96,16 @@ export function registerStatusCommand(program: Command): void {
         console.log(
           chalk.green('  ● Daemon running') + chalk.gray(` → http://127.0.0.1:${DAEMON_PORT}/`)
         );
+        // Build drift (task #18) — same inference as doctor: a serving daemon
+        // that predates the installed build is enforcing OLD code.
+        const probe = await probeDaemonHealth();
+        const drift = describeBuildDrift(
+          probe.kind === 'health' ? probe.health : probe.kind === 'no-health' ? 'no-health' : null,
+          CURRENT_BUILD
+        );
+        if (drift) {
+          console.log(chalk.yellow(`    ⚠ ${drift}`) + chalk.gray(' — run: node9 doctor'));
+        }
       } else {
         console.log(chalk.gray('  ○ Daemon stopped'));
       }

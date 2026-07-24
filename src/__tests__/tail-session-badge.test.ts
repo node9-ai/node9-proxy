@@ -7,11 +7,13 @@ vi.mock('../daemon', () => ({ DAEMON_PORT: 7391 }));
 
 let sessionTag: (id: string | undefined) => string;
 let agentLabel: (a: string | undefined, m?: string, s?: string) => string;
+let eventsUrl: (port: number, canApprove: boolean) => string;
 
 beforeAll(async () => {
   const mod = await import('../tui/tail.js');
   sessionTag = mod.sessionTag;
   agentLabel = mod.agentLabel;
+  eventsUrl = mod.eventsUrl;
 });
 
 // Strip ANSI color codes so tests assert on visible text only.
@@ -80,5 +82,18 @@ describe('agentLabel — renders session tag inline', () => {
     expect(a).toContain('aaaa');
     expect(b).toContain('bbbb');
     expect(a).not.toBe(b);
+  });
+});
+
+describe('eventsUrl — input capability only for a real approver (round-2 F2)', () => {
+  it('a TTY tail advertises capabilities=input', () => {
+    expect(eventsUrl(7391, true)).toBe('http://127.0.0.1:7391/events?capabilities=input');
+  });
+
+  it('a piped/redirected tail must NOT register as an interactive approver', () => {
+    // The daemon's GET /approver counts input-capable clients as reachable
+    // humans; a phantom one lets a shield hard-block soften to a review
+    // nobody can answer (/code-review finding #4).
+    expect(eventsUrl(7391, false)).toBe('http://127.0.0.1:7391/events');
   });
 });

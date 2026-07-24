@@ -690,8 +690,31 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
  * Best-effort: creation/write failures fall through silently — the proxy
  * falls back to local config and surfaces the issue via `node9 sync`.
  */
+/** Round-2 F5: a SIGKILL/power-loss between atomicWriteSync's write and rename
+ *  orphans a `rules-cache.json.<uuid>.tmp` sibling with no cleanup path.
+ *  Sweep stale ones (>5 min — never a write in flight) on each cache write.
+ *  Best-effort: readers never parse `.tmp` names, this is hygiene only. */
+function sweepStaleTmp(target: string): void {
+  try {
+    const dir = path.dirname(target);
+    const prefix = `${path.basename(target)}.`;
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.startsWith(prefix) || !name.endsWith('.tmp')) continue;
+      const full = path.join(dir, name);
+      try {
+        if (Date.now() - fs.statSync(full).mtimeMs > 5 * 60 * 1000) fs.unlinkSync(full);
+      } catch {
+        /* raced away / unreadable — skip */
+      }
+    }
+  } catch {
+    /* best-effort */
+  }
+}
+
 function writeCache(cache: RulesCache): void {
   const data = JSON.stringify(cache, null, 2) + '\n';
+  sweepStaleTmp(rulesCacheFile());
   atomicWriteSync(rulesCacheFile(), data, 'utf-8');
   // Keep a last-known-good copy alongside the primary. If the primary is later
   // corrupted by anything OTHER than our (atomic) writer — a disk fault, a crash
