@@ -33,7 +33,13 @@ export interface PolicyConfig {
     ignoredTools: string[];
     toolInspection: Record<string, string>;
     smartRules: SmartRule[];
-    dlp: { enabled: boolean; scanIgnoredTools: boolean };
+    dlp: {
+      enabled: boolean;
+      scanIgnoredTools: boolean;
+      /** Inline-ask v2: 'block' upgrades review-severity DLP matches to a hard
+       *  block. Optional for back-compat with callers that don't set it. */
+      reviewAction?: 'review' | 'block';
+    };
     /** Egress / destination control (GAP-5). Optional for back-compat with
      *  callers/tests that build a PolicyConfig without it. */
     egress?: EgressPolicy;
@@ -251,7 +257,13 @@ export async function evaluatePolicy(
     const dlpMatch = args !== undefined ? scanArgs(args) : null;
     if (dlpMatch) {
       return {
-        decision: dlpMatch.severity,
+        // reviewAction:'block' (inline-ask v2): the admin upgraded
+        // review-severity matches to a hard block — every evaluatePolicy
+        // caller (orchestrator, explain, gateway) must agree with the gate.
+        decision:
+          dlpMatch.severity === 'block' || config.policy.dlp.reviewAction === 'block'
+            ? 'block'
+            : 'review',
         blockedByLabel: `DLP: ${dlpMatch.patternName}`,
         reason: `${dlpMatch.patternName} detected in ${dlpMatch.fieldPath}`,
       };

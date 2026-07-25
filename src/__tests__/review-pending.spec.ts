@@ -91,4 +91,29 @@ describe('prune', () => {
     resolvePendingReview('something-else', now);
     expect(resolvePendingReview('old', now)).toBeNull();
   });
+
+  // /code-review fix: per-key TTL. tuid: keys are collision-proof (a
+  // tool_use_id never matches a DIFFERENT call), so an over-a-work-gap approval
+  // (Friday ask → Monday approve, 63h) must survive intervening prunes — losing
+  // the marker silently loses the shipped inline-review outcome row.
+  it('a tuid: marker survives a work-gap (63h) despite intervening prunes', () => {
+    const now = Date.now();
+    recordPendingReview({ key: 'tuid:friday', tool: 'Bash', ts: now - 63 * 60 * 60 * 1000 });
+    resolvePendingReview('something-else', now); // intervening prune-on-miss
+    expect(resolvePendingReview('tuid:friday', now)?.key).toBe('tuid:friday');
+  });
+
+  it('a tuid: marker still expires past 72h', () => {
+    const now = Date.now();
+    recordPendingReview({ key: 'tuid:ancient', tool: 'Bash', ts: now - 73 * 60 * 60 * 1000 });
+    resolvePendingReview('something-else', now);
+    expect(resolvePendingReview('tuid:ancient', now)).toBeNull();
+  });
+
+  it('heuristic (h:) keys keep the tight 6h TTL — bounds Copilot stale-marker misattribution', () => {
+    const now = Date.now();
+    recordPendingReview({ key: 'h:s1|Bash|abc', tool: 'Bash', ts: now - 7 * 60 * 60 * 1000 });
+    resolvePendingReview('something-else', now);
+    expect(resolvePendingReview('h:s1|Bash|abc', now)).toBeNull();
+  });
 });

@@ -43,7 +43,15 @@ export interface DecisionView {
 }
 
 /** checkedBy values meaning a HUMAN made the call (vs a rule firing). */
-const HUMAN_SOURCES = new Set(['daemon', 'cloud', 'local-decision', 'inline-review-approved']);
+// 'inline-review' = the v2 shippable outcome row (log.ts): the dev explicitly
+// approved the agent's inline ask — a human decision, not an auto-allow.
+const HUMAN_SOURCES = new Set([
+  'daemon',
+  'cloud',
+  'local-decision',
+  'inline-review-approved',
+  'inline-review',
+]);
 
 const TIMEOUT_SOURCES = new Set(['timeout']);
 

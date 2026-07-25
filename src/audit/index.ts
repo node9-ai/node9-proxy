@@ -35,8 +35,14 @@ export function redactSecrets(text: string): string {
   let redacted = text;
 
   // Refined Patterns: Only redact when attached to a known label to avoid masking hashes/paths
+  // NOTE: no backslash in the token class. This runs on JSON-STRINGIFIED text
+  // (log.ts wraps rawInput), where a trailing `\"` is an escape sequence — a
+  // class with `\\` consumed the escaping backslash and produced unparseable
+  // JSON, silently skipping the ENTIRE audit row for any executed call whose
+  // args contained an Authorization header (pre-existing audit gap, found by
+  // the inline-ask v2 /code-review). Real tokens never contain backslashes.
   redacted = redacted.replace(
-    /(authorization:\s*(?:bearer|basic)\s+)[a-zA-Z0-9._\-\/\\=]+/gi,
+    /(authorization:\s*(?:bearer|basic)\s+)[a-zA-Z0-9._\-\/=]+/gi,
     '$1********'
   );
   redacted = redacted.replace(
@@ -187,7 +193,13 @@ export function appendLocalAudit(
   // and redactSecrets' label-based patterns don't cover every credential
   // shape (a bare AWS key leaked through in testing). Gate on checkedBy —
   // intrinsic to every call site — not just the optional dlpPattern meta.
-  const isDlpRow = checkedBy.toLowerCase().includes('dlp') || Boolean(meta?.dlpPattern);
+  // ruleName is checked too (inline-ask v2): an 'inline-review' outcome row
+  // carries the review label as ruleName — a DLP/taint-flagged review means
+  // the args may contain the very credential that triggered it.
+  const isDlpRow =
+    checkedBy.toLowerCase().includes('dlp') ||
+    Boolean(meta?.dlpPattern) ||
+    /dlp|taint/i.test(String(meta?.ruleName ?? ''));
   const preview = auditHashArgsEnabled && !isDlpRow ? buildArgsPreview(args) : undefined;
   const argsField = auditHashArgsEnabled
     ? { argsHash: hashArgs(args), ...(preview ? { argsPreview: preview } : {}) }

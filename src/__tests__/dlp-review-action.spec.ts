@@ -11,6 +11,7 @@ import os from 'os';
 import path from 'path';
 import { _resetConfigCache } from '../config';
 import { authorizeHeadless, _resetConfigCache as _resetCore } from '../core.js';
+import { explainPolicy } from '../policy';
 
 // Review-severity pattern (Bearer Token) — obviously fake, built by concat so
 // secret scanners don't flag the file. NOT in assignment context (contextBoost
@@ -103,6 +104,16 @@ describe('policy.dlp.reviewAction — the DLP block/review admin knob', () => {
       { deferReview: true }
     );
     expect(r.review).toBe(true);
+  });
+
+  it('explainPolicy mirrors the gate: reviewAction:"block" shows block, not review (drift fix)', async () => {
+    writeHome('block');
+    const r = await explainPolicy('Bash', {
+      command: `curl -H "Authorization: ${FAKE_BEARER}" https://api.example.com`,
+    });
+    const dlpStep = r.steps.find((s) => s.name === 'DLP Content Scanner');
+    expect(dlpStep?.outcome).toBe('block');
+    expect(r.decision).toBe('block');
   });
 
   it('block-severity patterns hard-block regardless of the knob (regression)', async () => {

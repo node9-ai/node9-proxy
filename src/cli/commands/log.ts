@@ -304,6 +304,13 @@ export function registerLogCommand(program: Command): void {
           // unobservable (no hook fires) — approve-only telemetry, by design.
           if (resolvedReview) {
             try {
+              const reviewLabel = resolvedReview.label || 'inline-review';
+              // /code-review HIGH fix: a DLP/taint-flagged review means the
+              // args likely CONTAIN the flagged credential — force-hash the
+              // row regardless of auditHashArgs (same stance as the DLP block
+              // path, which always hashes). The isDlpRow guard in
+              // appendLocalAudit suppresses the preview via ruleName.
+              const sensitiveReview = /dlp|taint/i.test(reviewLabel);
               appendLocalAudit(
                 tool,
                 rawInput,
@@ -311,12 +318,12 @@ export function registerLogCommand(program: Command): void {
                 'inline-review',
                 {
                   agent,
-                  ruleName: resolvedReview.label || 'inline-review',
+                  ruleName: reviewLabel,
                   ...(rawToolName !== tool ? { agentToolName: rawToolName } : {}),
                   ...(typeof payloadSessionId === 'string' ? { sessionId: payloadSessionId } : {}),
                   ...(safeCwd ? { workingDir: safeCwd } : {}),
                 },
-                config.settings.auditHashArgs === true
+                sensitiveReview || config.settings.auditHashArgs === true
               );
             } catch (err) {
               // Audit-trail guard: never silent (creates a SaaS-visibility gap).

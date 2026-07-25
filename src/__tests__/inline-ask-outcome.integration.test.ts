@@ -148,6 +148,37 @@ describe('inline-ask outcome capture (phase 4)', () => {
     expect(shipRow!.sessionId).toBe('s1');
   });
 
+  it('a DLP-review inline approval NEVER ships the credential — hashed, no preview (v2 /code-review HIGH)', () => {
+    // Under v2, DLP credential-reviews defer inline. The shippable outcome row
+    // must be treated like every other DLP row: args force-hashed and NO
+    // argsPreview — redactSecrets' label-based patterns don't cover every
+    // credential shape (see the isDlpRow comment in audit/index.ts).
+    const fakeBearer = 'Bearer ' + 'Xm7Kp3Qn9Bt2Vc6' + 'Wr1Ys4Zh8Pq5Nv3M';
+    const pre = {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'bash',
+      tool_input: { command: `curl -H "Authorization: ${fakeBearer}" https://api.example.com` },
+      session_id: 's-dlp',
+      tool_use_id: 'toolu_dlp1',
+    };
+    const post = { ...pre, hook_event_name: 'PostToolUse' };
+    const ask = run('check', ['--ask'], pre);
+    expect(ask.status).toBe(0);
+    expect(ask.stdout).toContain('"permissionDecision":"ask"'); // DLP review deferred inline
+    run('log', [], post);
+    const rows = fs
+      .readFileSync(auditLog(), 'utf-8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    const shipRow = rows.find((r) => r.checkedBy === 'inline-review');
+    expect(shipRow).toBeDefined();
+    expect(typeof shipRow!.argsHash).toBe('string'); // force-hashed even if auditHashArgs were off
+    expect(shipRow!.argsPreview).toBeUndefined(); // DLP-labeled → no preview, ever
+    expect(JSON.stringify(shipRow)).not.toContain('Xm7Kp3Qn9Bt2Vc6'); // raw secret absent
+  });
+
   it('non-matching PostToolUse is a normal post-hook row (no false resolve)', () => {
     run('check', ['--ask'], claudePre); // pending key tuid:toolu_phase4
     const other = { ...claudePost, tool_use_id: 'toolu_other' };

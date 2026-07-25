@@ -18,7 +18,16 @@ function storePath(): string {
     process.env.NODE9_PENDING_STORE || path.join(os.homedir(), '.node9', 'pending-reviews.json')
   );
 }
-const TTL_MS = 6 * 60 * 60 * 1000; // 6h — a review older than this is treated as abandoned
+// Per-key TTL (/code-review fix): an over-a-work-gap approval (Friday ask →
+// Monday approve) used to lose its shipped outcome row because ANY intervening
+// marker operation pruned the 6h-old entry.
+//   - `tuid:` keys (Claude Code) are collision-proof — a tool_use_id can never
+//     falsely match a DIFFERENT call — so a long TTL is safe: 72h.
+//   - `h:` heuristic keys (Copilot: session|tool|args-hash) CAN falsely match a
+//     later identical command decided by another channel; keep 6h to bound that
+//     misattribution window.
+const TTL_TUID_MS = 72 * 60 * 60 * 1000;
+const TTL_MS = 6 * 60 * 60 * 1000; // heuristic keys — abandoned after this
 const MAX_ENTRIES = 500; // hard cap so the file can't grow unbounded without a deny-sweep
 
 export interface PendingReview {
@@ -78,9 +87,11 @@ function write(store: Store): void {
   }
 }
 
-/** Drop expired entries, then cap to the most-recent MAX_ENTRIES. */
+/** Drop expired entries (per-key TTL), then cap to the most-recent MAX_ENTRIES. */
 function prune(entries: PendingReview[], now: number): PendingReview[] {
-  const fresh = entries.filter((e) => now - e.ts < TTL_MS);
+  const fresh = entries.filter(
+    (e) => now - e.ts < (e.key.startsWith('tuid:') ? TTL_TUID_MS : TTL_MS)
+  );
   return fresh.length > MAX_ENTRIES ? fresh.slice(fresh.length - MAX_ENTRIES) : fresh;
 }
 
