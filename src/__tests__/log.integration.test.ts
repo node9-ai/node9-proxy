@@ -22,6 +22,7 @@ interface RunResult {
   status: number | null;
   stdout: string;
   stderr: string;
+  error?: Error;
 }
 
 function runLog(payload: object, tmpHome: string, tmpCwd: string): RunResult {
@@ -44,6 +45,7 @@ function runLog(payload: object, tmpHome: string, tmpCwd: string): RunResult {
     status: result.status,
     stdout: result.stdout ?? '',
     stderr: result.stderr ?? '',
+    error: result.error,
   };
 }
 
@@ -311,5 +313,95 @@ describe('log PostToolUse snapshot behavior', () => {
     const entry = JSON.parse(lines[lines.length - 1]) as { tool: string; agent?: string };
     // hook_event_name: "PostToolUse" → Claude Code via Layer-1 fingerprint
     expect(entry.agent).toBe('Claude Code');
+  });
+});
+
+/**
+ * Regression: bare (label-less) credentials in PostToolUse args.
+ *
+ * `redactSecrets` only masks LABEL-ATTACHED secrets (`Authorization:`,
+ * `token=`, `api_key=`). A credential passed as a positional CLI argument —
+ * `./deploy.sh --token <jwt>` — sailed straight through it and was written to
+ * ~/.node9/audit.log in the clear. log.ts now runs the DLP scanner over the
+ * args and stores a hash on any hit.
+ *
+ * The JWT is built here at runtime, so no credential-shaped literal is ever
+ * committed to this file.
+ */
+describe('log PostToolUse args — bare credential redaction', () => {
+  let tmpHome: string;
+  let tmpCwd: string;
+
+  beforeEach(() => {
+    tmpHome = makeTempHome();
+    tmpCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-log-cwd-'));
+  });
+
+  function makeJwt(): string {
+    const seg = (o: object) => Buffer.from(JSON.stringify(o)).toString('base64url');
+    const header = seg({ alg: 'HS256', typ: 'JWT' });
+    const payload = seg({ sub: '1234567890', iat: 1516239022, role: 'deploy' });
+    return `${header}.${payload}.9dQ7fbKm2LpVsXcNwRtYuIoPa1bC3dE5`;
+  }
+
+  function lastEntry(tmpHome: string): Record<string, unknown> {
+    const auditLog = path.join(tmpHome, '.node9', 'audit.log');
+    const lines = fs.readFileSync(auditLog, 'utf-8').trim().split('\n');
+    return JSON.parse(lines[lines.length - 1]) as Record<string, unknown>;
+  }
+
+  it('hashes args instead of writing a bare JWT positional argument in the clear', () => {
+    const jwt = makeJwt();
+    const result = runLog(
+      {
+        cwd: tmpCwd,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: `./deploy.sh --token ${jwt}` },
+      },
+      tmpHome,
+      tmpCwd
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+
+    // The whole file, not just the parsed row — the token must not appear
+    // anywhere, including in fields added later.
+    const auditLog = path.join(tmpHome, '.node9', 'audit.log');
+    const raw = fs.readFileSync(auditLog, 'utf-8');
+    expect(raw).not.toContain(jwt);
+
+    const entry = lastEntry(tmpHome);
+    // Row is still written — audit trail must never gap.
+    expect(entry.tool).toBe('Bash');
+    expect(entry.decision).toBe('allowed');
+    // Args are replaced by the hash + safe DLP attribution, mirroring
+    // appendLocalAudit's DLP-row stance (argsHash, no plaintext preview).
+    expect(entry.args).toBeUndefined();
+    expect(entry.argsHash).toMatch(/^[0-9a-f]{32}$/);
+    expect(entry.dlpPattern).toBe('JWT');
+    expect(String(entry.dlpSample)).not.toContain(jwt);
+  });
+
+  it('keeps plaintext args for a clean command (no needless readability loss)', () => {
+    const result = runLog(
+      {
+        cwd: tmpCwd,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'ls -la /tmp' },
+      },
+      tmpHome,
+      tmpCwd
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+
+    const entry = lastEntry(tmpHome);
+    expect((entry.args as { command?: string }).command).toBe('ls -la /tmp');
+    expect(entry.argsHash).toBeUndefined();
+    expect(entry.dlpPattern).toBeUndefined();
   });
 });
