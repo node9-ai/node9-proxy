@@ -162,16 +162,15 @@ function agentSupportsAsk(agent: string): boolean {
 }
 
 // Whether a `review` verdict for this call is deferred to the agent's inline
-// prompt (true) vs. node9's own approver (false). Precedence:
+// prompt (true) vs. node9's own approver (false). Precedence (v2 — the cloud
+// carve-out is deleted, see review-ask-inline-v2-spec.md: cloud is the record,
+// not a gate; admins force routed approval via managed reviewChannel):
 //   1. agent not ask-capable          → approver (false)
-//   2. cloud approver configured       → approver (v1: never bypass SaaS
-//      org-policy / second-party approval; matches the orchestrator defer guard)
-//   3. --ask / --no-ask flag           → wins
-//   4. settings.reviewChannel          → 'ask' | 'approver'
-//   5. default                         → ASK (cloud already excluded at step 2)
+//   2. --ask / --no-ask flag           → wins
+//   3. settings.reviewChannel          → 'ask' | 'approver'
+//   4. default                         → ASK
 function resolveAskMode(agent: string, opts: { ask?: boolean }, config: Config): boolean {
   if (!agentSupportsAsk(agent)) return false;
-  if (config.settings.approvers.cloud === true) return false;
   if (opts.ask === true) return true;
   if (opts.ask === false) return false;
   if (config.settings.reviewChannel === 'ask') return true;
@@ -625,8 +624,16 @@ export function registerCheckCommand(program: Command): void {
           // Inline-ask: route a `review` verdict to the agent's native approve/deny
           // prompt instead of node9's own approver. Only reached for ask-capable
           // agents (Claude Code / GitHub Copilot) — see resolveAskMode/agentSupportsAsk.
-          const sendAsk = (result: { blockedByLabel?: string; ruleDescription?: string }) => {
-            const msg = buildReviewMessage(result.blockedByLabel, result.ruleDescription);
+          const sendAsk = (result: {
+            blockedByLabel?: string;
+            ruleDescription?: string;
+            reason?: string;
+          }) => {
+            const msg = buildReviewMessage(
+              result.blockedByLabel,
+              result.ruleDescription,
+              result.reason
+            );
             // Phase 4: record a pending-review marker so the matching PostToolUse can
             // capture the approve outcome. Best-effort — never block the ask emit.
             try {
@@ -880,8 +887,9 @@ export function registerCheckCommand(program: Command): void {
           }
 
           // Inline-ask: a deferred review → hand the approve/deny prompt to the
-          // agent (only set when askMode + ask-capable agent; orchestrator excludes
-          // taint/cloud paths by construction). Must precede the block path below.
+          // agent (only set when askMode + ask-capable agent; v2 defers every
+          // review verdict except a downgraded hard block — see the orchestrator
+          // defer guard). Must precede the block path below.
           if (result.review) {
             sendAsk(result);
             return;

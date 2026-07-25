@@ -73,6 +73,26 @@ describe('buildWireRows', () => {
     expect(rows[0].checkedBy).toBe('local-policy');
   });
 
+  it('ships the inline-review outcome row; still skips the raw post-hook row (v2)', () => {
+    // Inline-ask v2: the dev's inline approve must reach the dashboard. log.ts
+    // writes a standard decision row (eid + allow + checkedBy:'inline-review');
+    // the legacy post-hook row (decision:'allowed', no eid) stays local-only.
+    const content =
+      row({ checkedBy: 'inline-review', ruleName: '⚠️ Smart Rule (review-git-push)' }) +
+      JSON.stringify({
+        ts: '2026-07-25T00:00:00Z',
+        tool: 'bash',
+        args: { command: 'git push' },
+        decision: 'allowed', // post-hook shape — not a wire decision
+        source: 'inline-review-approved',
+      }) +
+      '\n';
+    const { rows } = buildWireRows(Buffer.from(content));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].checkedBy).toBe('inline-review');
+    expect(rows[0].ruleName).toBe('⚠️ Smart Rule (review-git-push)');
+  });
+
   it('ships cloud-linked rows WITH cloudRequestId so the BE enriches its origin row', () => {
     // Any request that opened a pending cloud entry already has a BE-origin
     // AuditLog row. Shipping the local row with its cloudRequestId lets the

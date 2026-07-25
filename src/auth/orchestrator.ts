@@ -467,7 +467,11 @@ async function _authorizeHeadlessCore(
       const dlpReason =
         `🚨 DATA LOSS PREVENTION: ${dlpMatch.patternName} detected in ` +
         `field "${dlpMatch.fieldPath}" (${dlpMatch.redactedSample})`;
-      if (dlpMatch.severity === 'block') {
+      // reviewAction:'block' (review-ask-inline-v2-spec.md): the admin's "if
+      // DLP matters, set it to block" lever — review-severity matches take the
+      // same hard-block path as block-severity ones. Default 'review' keeps
+      // today's behavior (fall through to the review path below).
+      if (dlpMatch.severity === 'block' || config.policy.dlp.reviewAction === 'block') {
         // Always hash args on DLP blocks — the secret must never appear in
         // the audit log. The pattern + redacted sample ride on the local row;
         // the outbox shipper carries them to the SaaS (no decision-time
@@ -1072,30 +1076,31 @@ async function _authorizeHeadlessCore(
   // /intercept pending entry is ever created (which would orphan in the
   // dashboard/Slack). The caller turns this result into the agent's native
   // `permissionDecision:"ask"` prompt.
-  //   - Excludes taint/exfil reviews (must use the routed approver — self-approval
-  //     is weakest exactly where exfiltration risk is highest).
-  //   - Excludes a DOWNGRADED HARD BLOCK (F1d): an intrinsic block (pipe-chain
-  //     exfil / eval-remote, ruleName-less) softened to review here must use the
-  //     out-of-band approver like taint — same risk class, and the agent's own
-  //     inline prompt is the weakest surface exactly where it matters most.
-  //     `ask` DOES reach a human (so this is hardening, not a fail-open fix), but
-  //     the routed approver is the channel node9 controls and the agent can't spoof.
-  //   - Excludes cloud-enforced setups (safe-by-construction): never bypass the
-  //     SaaS org-policy / routed approval; those keep the handshake + race below.
-  // Set by check.ts (`deferReview: askMode`) for ask-capable agents (Claude Code /
-  // Copilot), default-on for cloud-less setups.
-  const cloudEnforcedForDefer = approvers.cloud && !!creds?.apiKey;
-  if (
-    options?.deferReview &&
-    !hardBlockDowngraded &&
-    !taintWarning &&
-    !appPermReview &&
-    !cloudEnforcedForDefer
-  ) {
+  //
+  // v2 (review-ask-inline-v2-spec.md): block = stop, review = THE DEV DECIDES,
+  // inline is the dev's seat. Every review verdict defers — smart-rule, taint,
+  // DLP credential-review, app-permission — with EXACTLY ONE exclusion:
+  //   - a DOWNGRADED HARD BLOCK (F1d): an intrinsic block (pipe-chain exfil /
+  //     eval-remote) softened to review only because a human is reachable is
+  //     NOT an admin-chosen review verdict — "block = stop" keeps it on the
+  //     routed approver, the channel node9 controls and the agent can't spoof.
+  // The v1 cloud-enforced carve-out is deleted: cloud is the RECORD, not a
+  // gate — the inline outcome ships to the SaaS as audit (checkedBy
+  // 'inline-review' via log.ts); an admin who wants routed approvals sets
+  // managed reviewChannel:'approver' (workspace, one click).
+  // Set by check.ts (`deferReview: askMode`) for ask-capable agents (Claude
+  // Code / Copilot), default-on.
+  if (options?.deferReview && !hardBlockDowngraded) {
     return {
       approved: false,
       review: true,
-      reason: explainableLabel || 'Node9 flagged this action for review.',
+      // The prompt must say WHY: the taint / app-permission sentence beats the
+      // bare label so the dev sees the actual risk context inline.
+      reason:
+        taintWarning ||
+        appPermReview ||
+        explainableLabel ||
+        'Node9 flagged this action for review.',
       ruleDescription: policyRuleDescription,
       blockedByLabel: explainableLabel,
     };

@@ -247,14 +247,17 @@ describe('managed appPermissions apply + enforce (P3 Phase 2)', () => {
     expect(r.blockedByLabel).toContain('Panic mode');
   });
 
-  it('deferReview (inline ask) is EXCLUDED for app-perm reviews', async () => {
+  it('deferReview (inline ask) DEFERS an app-perm review to the agent prompt (v2)', async () => {
+    // v1 excluded app-perm reviews from inline-ask. v2 removes the exclusion:
+    // an org-set `review` means "the dev decides" — inline is the dev's seat.
+    // (Full v2 guard matrix: inline-ask-v2-defer.spec.ts.)
     const r = await authorizeHeadless(
       'edit_file',
       { path: '/x' },
       { agent: 'MCP-Gateway', serverKey: 'srv1' },
       { deferReview: true }
     );
-    expect(r.review).not.toBe(true); // must not hand the prompt to the agent
+    expect(r.review).toBe(true);
     expect(r.approved).toBe(false);
   });
 

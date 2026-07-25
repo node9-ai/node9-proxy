@@ -732,7 +732,10 @@ describe('inline-ask (--ask routes review verdicts to the agent prompt)', () => 
     expect(r.stdout).not.toContain('"permissionDecision":"ask"');
   });
 
-  it('cloud approver configured → no ask (carve-out: never bypass routed approval)', () => {
+  it('cloud approver configured → ask STILL fires (v2: cloud is the record, not a gate)', () => {
+    // v1 carved cloud-enforced setups out of inline-ask. v2 (review-ask-inline-
+    // v2-spec.md) deletes that veto: review = the dev decides, inline; the SaaS
+    // receives the outcome as audit instead of gating the review.
     cleanupHome(tmpHome);
     tmpHome = makeTempHome({
       settings: {
@@ -744,7 +747,11 @@ describe('inline-ask (--ask routes review verdicts to the agent prompt)', () => 
       policy: { smartRules: [reviewRule] },
     });
     const r = runCheckArgs([], claudePayload, { HOME: tmpHome });
-    expect(r.stdout).not.toContain('"permissionDecision":"ask"');
+    expect(r.status).toBe(0);
+    const body = JSON.parse(r.stdout.trim()) as {
+      hookSpecificOutput: { permissionDecision: string };
+    };
+    expect(body.hookSpecificOutput.permissionDecision).toBe('ask');
   });
 
   it('Codex WITHOUT --ask → no ask (default-on must NOT leak to fail-open agents)', () => {
@@ -1090,6 +1097,9 @@ describe('cloud race engine', () => {
         autoStartDaemon: false,
         approvers: { native: false, browser: false, cloud: true, terminal: false },
         approvalTimeoutMs: 3000,
+        // v2: reviews defer inline by default even with cloud on — this suite
+        // exercises the routed CLOUD RACER, so pin the approver channel.
+        reviewChannel: 'approver',
       },
       policy: { dangerousWords: ['mkfs'] },
     });
@@ -1121,6 +1131,8 @@ describe('cloud race engine', () => {
         autoStartDaemon: false,
         approvers: { native: false, browser: false, cloud: true, terminal: false },
         approvalTimeoutMs: 3000,
+        // v2: pin the routed approver channel (see the approve variant above).
+        reviewChannel: 'approver',
       },
       policy: { dangerousWords: ['mkfs'] },
     });

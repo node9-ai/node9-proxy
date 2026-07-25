@@ -93,7 +93,18 @@ INSTRUCTIONS:
 // REQUEST-framed, not block-framed: node9 is asking the user to approve, not
 // telling the agent it was blocked. Keep it short — it renders inside the
 // agent's permission prompt.
-export function buildReviewMessage(blockedByLabel?: string, ruleDescription?: string): string {
-  const why = ruleDescription || blockedByLabel || 'this action needs your review';
+export function buildReviewMessage(
+  blockedByLabel?: string,
+  ruleDescription?: string,
+  reason?: string
+): string {
+  // Priority: the rule's own description (most specific), then the verdict's
+  // human sentence (v2: taint / app-permission context — the dev must see WHY
+  // in the inline prompt, not just a label), then the bare label.
+  const why =
+    ruleDescription ||
+    (reason && reason !== blockedByLabel ? reason : undefined) ||
+    blockedByLabel ||
+    'this action needs your review';
   return `Node9 flagged this for your review: ${why}. Approve to proceed, or deny to cancel.`;
 }

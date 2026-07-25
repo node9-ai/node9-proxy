@@ -112,9 +112,40 @@ describe('inline-ask outcome capture (phase 4)', () => {
     run('check', ['--ask'], claudePre); // writes pending
     const post = run('log', [], claudePost); // resolves it
     expect(post.status).toBe(0);
-    expect(lastAuditRow().source).toBe('inline-review-approved');
+    // v2 writes a second (shippable) row after the post-hook row, so search
+    // instead of assuming the post-hook row is last.
+    const rows = fs
+      .readFileSync(auditLog(), 'utf-8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(rows.some((r) => r.source === 'inline-review-approved')).toBe(true);
     // Marker consumed.
     expect(readJson(pendingStore()).entries).toHaveLength(0);
+  });
+
+  it('resolved inline review ALSO writes a SHIPPABLE decision row (v2: cloud is the record)', () => {
+    // The post-hook `source:'inline-review-approved'` row has no eid and
+    // decision:'allowed' — buildWireRows skips it by design. The dashboard only
+    // sees the inline outcome via a second, standard decision row.
+    run('check', ['--ask'], claudePre);
+    run('log', [], claudePost);
+    const rows = fs
+      .readFileSync(auditLog(), 'utf-8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    const shipRow = rows.find((r) => r.checkedBy === 'inline-review');
+    expect(shipRow).toBeDefined();
+    expect(shipRow!.decision).toBe('allow');
+    expect(typeof shipRow!.eid).toBe('string');
+    expect((shipRow!.eid as string).length).toBeGreaterThanOrEqual(8);
+    // Attribution: the review label recorded at defer time rides as ruleName so
+    // the SaaS report can say WHICH review the dev approved inline.
+    expect(shipRow!.ruleName).toBeDefined();
+    expect(shipRow!.sessionId).toBe('s1');
   });
 
   it('non-matching PostToolUse is a normal post-hook row (no false resolve)', () => {
