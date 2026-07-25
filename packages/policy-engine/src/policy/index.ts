@@ -43,10 +43,60 @@ export interface PolicyConfig {
     /** Egress / destination control (GAP-5). Optional for back-compat with
      *  callers/tests that build a PolicyConfig without it. */
     egress?: EgressPolicy;
+    /** Command-checks governance (command-checks-governance-spec.md): admin
+     *  knobs for the built-in detections' REVIEW-severity findings only.
+     *  Block-severity findings (pipe-critical, eval-remote, rm-rf-home,
+     *  nuclear, suspect binary) have NO key here — non-weakenable by
+     *  construction. Class-B keys (evalDynamic, pipeChainHigh) exclude 'off'.
+     *  rmAdvisory is consumed by the PROXY at advisory-rule injection. */
+    commandChecks?: {
+      inlineExec?: 'off' | 'review' | 'block';
+      rmAdvisory?: 'off' | 'review' | 'block';
+      chmod?: 'off' | 'review' | 'block';
+      sqlDdl?: 'off' | 'review' | 'block';
+      evalDynamic?: 'review' | 'block';
+      pipeChainHigh?: 'review' | 'block';
+    };
   };
   settings: {
     mode: string;
   };
+}
+
+/** Resolve a command-check knob: unknown/absent → 'review' (today's default). */
+function resolveCheck(v: string | undefined): 'off' | 'review' | 'block' {
+  return v === 'off' || v === 'block' ? v : 'review';
+}
+
+/** Class-B variant — 'off' is not a legal outcome for tighten-only checks. */
+function resolveCheckTight(v: string | undefined): 'review' | 'block' {
+  return v === 'block' ? 'block' : 'review';
+}
+
+// ── Inline-execution detection (the policy-bypass tunnel) ────────────────────
+// `python3 -c "<code>"` hides the real action inside a program command-level
+// rules can't see. THREE spellings of the same tunnel (an agent that can pick
+// its spelling picks the unchecked one — verified live 2026-07-25: the heredoc
+// form sailed past the old -c-only pattern):
+//   1. code as argument:  python3 -c / -e / -eval
+//   2. code via stdin:    python3 - <<'PY' … (heredoc / redirected stdin)
+//   3. code via pipe:     echo "code" | python3
+// bash/sh are EXCLUDED from the pipe form: `curl | bash` is eval-remote /
+// pipe-chain territory (stricter families that run earlier).
+// Flag-tolerant (/review-pr finding): `python3 -u -c "x"` and
+// `echo x | python3 -u` are the same tunnel with an interpreter flag mixed in —
+// a fixed-position regex was trivially bypassable. `(?:\s+-[\w-]+)*` absorbs
+// any run of single-dash flags before the decisive token.
+const INLINE_EXEC_ARG =
+  /^(python3?|bash|sh|zsh|perl|ruby|node|php|lua)(?:\s+-[\w-]+)*\s+(-c|-e|-eval)\s/i;
+const INLINE_EXEC_STDIN =
+  /^(python3?|bash|sh|zsh|perl|ruby|node|php|lua)(?:\s+-[\w-]+)*\s+-\s*(<<|<|$)/i;
+const INLINE_EXEC_PIPE =
+  /\|\s*(python3?|perl|ruby|node|php|lua)(?:\s+-[\w-]+)*\s*(\s-\s*)?($|\n)/im;
+
+export function detectInlineExec(command: string): boolean {
+  const c = command.trim();
+  return INLINE_EXEC_ARG.test(c) || INLINE_EXEC_STDIN.test(c) || INLINE_EXEC_PIPE.test(c);
 }
 
 export interface PolicyContext {
@@ -181,7 +231,10 @@ export function checkDangerousSql(sql: string): string | null {
  */
 function pipeChainVerdict(
   command: string,
-  isTrustedHost?: (host: string) => boolean
+  isTrustedHost?: (host: string) => boolean,
+  // Class B tighten-only knob (commandChecks.pipeChainHigh): floor verdict for
+  // the HIGH tier's untrusted-sink case. Critical tier is Class A — untouched.
+  highAction: 'review' | 'block' = 'review'
 ): PolicyVerdict | null {
   const pipeAnalysis = analyzePipeChain(command);
   if (!pipeAnalysis.isPipeline) return null;
@@ -219,7 +272,7 @@ function pipeChainVerdict(
     };
   }
   return {
-    decision: 'review',
+    decision: highAction,
     blockedByLabel: 'Node9: Pipe-Chain Exfiltration (high)',
     reason: `Sensitive file piped to network sink: ${pipeAnalysis.sourceFiles.join(', ')} → ${sinks.join(', ')}`,
     tier: 3,
@@ -291,7 +344,11 @@ export async function evaluatePolicy(
   // https://trusted.com) can still downgrade AST's block — trust list is an
   // explicit user opt-in. See core.test.ts:1763 and v1.4.0-trusted-hosts.
   if (bashCommand !== null) {
-    const pipeVerdict = pipeChainVerdict(bashCommand, isTrustedHost);
+    const pipeVerdict = pipeChainVerdict(
+      bashCommand,
+      isTrustedHost,
+      resolveCheckTight(config.policy.commandChecks?.pipeChainHigh)
+    );
     if (pipeVerdict) return pipeVerdict;
 
     const fsVerdict = analyzeFsOperation(bashCommand);
@@ -311,10 +368,12 @@ export async function evaluatePolicy(
     // SQL-DDL via a real DB CLI — AST-aware so a grep/echo of "drop table" /
     // "|mysql" no longer false-positives (the regex smart rule is suppressed for
     // bash via AST_FS_REGEX_RULES). Mirrors the rm/sudo/chmod AST migrations.
-    const sqlVerdict = analyzeSqlDestructive(bashCommand);
+    const sqlAction = resolveCheck(config.policy.commandChecks?.sqlDdl);
+    const sqlVerdict = sqlAction === 'off' ? null : analyzeSqlDestructive(bashCommand);
     if (sqlVerdict) {
       return {
-        decision: sqlVerdict.verdict,
+        // analyzeSqlDestructive is typed review-only, so the knob maps 1:1.
+        decision: sqlAction === 'block' ? 'block' : 'review',
         blockedByLabel: `Node9 (AST): ${sqlVerdict.ruleName}`,
         reason: sqlVerdict.reason,
         tier: 2,
@@ -330,10 +389,12 @@ export async function evaluatePolicy(
     // AST_FS_REGEX_RULES). Mirrors the SQL-DDL AST migration above. The rule
     // name is shield-prefixed, so use the project-jail (AST) label like the
     // fs-op branch does for shield rules.
-    const chmodVerdict = analyzeChmod777(bashCommand);
+    const chmodAction = resolveCheck(config.policy.commandChecks?.chmod);
+    const chmodVerdict = chmodAction === 'off' ? null : analyzeChmod777(bashCommand);
     if (chmodVerdict) {
       return {
-        decision: chmodVerdict.verdict,
+        // analyzeChmod777 is typed review-only, so the knob maps 1:1.
+        decision: chmodAction === 'block' ? 'block' : 'review',
         blockedByLabel: `project-jail (AST): ${chmodVerdict.ruleName}`,
         reason: chmodVerdict.reason,
         tier: 2,
@@ -401,11 +462,14 @@ export async function evaluatePolicy(
     allTokens = analyzed.allTokens;
     pathTokens = analyzed.paths;
 
-    // Inline arbitrary code execution is always a review
-    const INLINE_EXEC_PATTERN = /^(python3?|bash|sh|zsh|perl|ruby|node|php|lua)\s+(-c|-e|-eval)\s/i;
-    if (INLINE_EXEC_PATTERN.test(shellCommand.trim())) {
+    // Inline arbitrary code execution — governed by commandChecks.inlineExec
+    // ('off' | 'review' (default) | 'block'). detectInlineExec covers all
+    // three spellings of the tunnel; pipe-chain and eval-remote run EARLIER,
+    // so their stricter verdicts still own sensitive pipes and remote fetches.
+    const inlineAction = resolveCheck(config.policy.commandChecks?.inlineExec);
+    if (inlineAction !== 'off' && detectInlineExec(shellCommand)) {
       return {
-        decision: 'review',
+        decision: inlineAction === 'block' ? 'block' : 'review',
         blockedByLabel: 'Node9 Standard (Inline Execution)',
         ruleDescription:
           'The AI is running code directly from the command line. Review the full script below before allowing it to execute.',
@@ -427,7 +491,10 @@ export async function evaluatePolicy(
     }
     if (evalVerdict === 'review') {
       return {
-        decision: 'review',
+        // Class B tighten-only: commandChecks.evalDynamic may upgrade to
+        // block but can never turn this off (eval-remote above is Class A —
+        // no knob at all).
+        decision: resolveCheckTight(config.policy.commandChecks?.evalDynamic),
         blockedByLabel: 'Node9: Eval Dynamic Content',
         reason: 'eval of dynamic content (variable or subshell expansion) requires approval',
         ruleDescription:
@@ -441,7 +508,11 @@ export async function evaluatePolicy(
     // Re-runs here for tools whose command field is exposed via toolInspection
     // but whose name is not in BASH_TOOL_NAMES. analyzePipeChain is cheap on
     // non-pipe input.
-    const ptVerdict = pipeChainVerdict(shellCommand, isTrustedHost);
+    const ptVerdict = pipeChainVerdict(
+      shellCommand,
+      isTrustedHost,
+      resolveCheckTight(config.policy.commandChecks?.pipeChainHigh)
+    );
     if (ptVerdict) return ptVerdict;
 
     // ── Egress / destination control (GAP-5) ────────────────────────────────

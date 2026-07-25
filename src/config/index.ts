@@ -12,6 +12,7 @@ import {
   applyManagedEgress,
   applyManagedDlp,
   applyManagedApprovers,
+  applyManagedCommandChecks,
 } from './managed';
 import { pathRules } from '../shields/build';
 import { normalizeHost } from '../auth/trusted-hosts';
@@ -102,6 +103,18 @@ export interface Config {
       // 'block': upgrade to a hard block at the DLP gate — the admin's "if DLP
       // matters, set it to block" lever. Block-severity patterns always block.
       reviewAction?: 'review' | 'block';
+    };
+    // Command-checks governance (command-checks-governance-spec.md): knobs for
+    // the built-in detections' REVIEW-severity findings only. Absent = today's
+    // defaults (review). Class-B keys (evalDynamic, pipeChainHigh) have no
+    // 'off'. Block-severity findings have NO key — non-weakenable.
+    commandChecks?: {
+      inlineExec?: 'off' | 'review' | 'block';
+      rmAdvisory?: 'off' | 'review' | 'block';
+      chmod?: 'off' | 'review' | 'block';
+      sqlDdl?: 'off' | 'review' | 'block';
+      evalDynamic?: 'review' | 'block';
+      pipeChainHigh?: 'review' | 'block';
     };
     // Egress / destination control (GAP-5). Gates WHERE network tools send data
     // (curl/wget/scp/ssh/nc). Opt-in: enabled=false by default. `mode` is the
@@ -704,7 +717,7 @@ export function getConfig(cwd?: string): Config {
     approvers: { ...DEFAULT_CONFIG.settings.approvers },
     shipper: { ...DEFAULT_CONFIG.settings.shipper },
   };
-  const mergedPolicy = {
+  const mergedPolicy: Config['policy'] = {
     sandboxPaths: [...DEFAULT_CONFIG.policy.sandboxPaths],
     dangerousWords: [...DEFAULT_CONFIG.policy.dangerousWords],
     ignoredTools: [...DEFAULT_CONFIG.policy.ignoredTools],
@@ -811,6 +824,24 @@ export function getConfig(cwd?: string): Config {
       if (d.scanIgnoredTools !== undefined) mergedPolicy.dlp.scanIgnoredTools = d.scanIgnoredTools;
       if (d.pii !== undefined) mergedPolicy.dlp.pii = d.pii;
       if (d.reviewAction !== undefined) mergedPolicy.dlp.reviewAction = d.reviewAction;
+    }
+    if (p.commandChecks && typeof p.commandChecks === 'object') {
+      // Per-key validated merge — zod already enum-checks, but this path also
+      // takes project-level configs, so validate again (junk dropped, and a
+      // Class-B 'off' can never land).
+      const src = p.commandChecks as Record<string, unknown>;
+      const cc: NonNullable<Config['policy']['commandChecks']> = {
+        ...mergedPolicy.commandChecks,
+      };
+      for (const k of ['inlineExec', 'rmAdvisory', 'chmod', 'sqlDdl'] as const) {
+        const v = src[k];
+        if (v === 'off' || v === 'review' || v === 'block') cc[k] = v;
+      }
+      for (const k of ['evalDynamic', 'pipeChainHigh'] as const) {
+        const v = src[k];
+        if (v === 'review' || v === 'block') cc[k] = v;
+      }
+      if (Object.keys(cc).length > 0) mergedPolicy.commandChecks = cc;
     }
     if (p.egress) {
       const e = p.egress as Partial<Config['policy']['egress']>;
@@ -924,6 +955,7 @@ export function getConfig(cwd?: string): Config {
             allowPrivate?: unknown;
           };
           dlp?: { enabled?: unknown; pii?: unknown; reviewAction?: unknown };
+          commandChecks?: Record<string, unknown>;
           approvers?: {
             native?: unknown;
             browser?: unknown;
@@ -995,6 +1027,16 @@ export function getConfig(cwd?: string): Config {
                   ? mc.dlp.reviewAction
                   : undefined,
             },
+            locked
+          );
+        }
+        // Command-checks governance: per-key floor over off<review<block +
+        // per-key locks (applyManagedCommandChecks validates and enforces the
+        // Class-B no-'off' rule even against a hostile cloud value).
+        if (mc.commandChecks && typeof mc.commandChecks === 'object') {
+          mergedPolicy.commandChecks = applyManagedCommandChecks(
+            mergedPolicy.commandChecks ?? {},
+            mc.commandChecks as Record<string, string>,
             locked
           );
         }
@@ -1193,8 +1235,25 @@ export function getConfig(cwd?: string): Config {
   // Advisory rm rules are always appended last so user-defined rules (project/global/shield)
   // are evaluated first and can override default rm behaviour.
   const existingAdvisoryNames = new Set(mergedPolicy.smartRules.map((r) => r.name));
+  // Command-checks governance at the injection point: rmAdvisory governs
+  // `review-rm`; sqlDdl governs the three SQL advisories. Only REVIEW-verdict
+  // advisories are governable — `allow-rm-safe-paths` (allow) is untouched,
+  // and user-defined same-name rules still pre-empt injection entirely.
+  // 'off' → don't inject; 'block' → inject with a block verdict. NOTE
+  // (documented in the FE tooltip): under 'block', the engine's same-command
+  // scratch-cleanup waiver no longer waives review-rm — the waiver is gated
+  // verdict==='review' by design (it may drop a prompt, never a block).
+  const cc = mergedPolicy.commandChecks ?? {};
+  const advisoryKnob = (name: string | undefined): string | undefined => {
+    if (name === 'review-rm') return cc.rmAdvisory;
+    if (name?.endsWith('-sql')) return cc.sqlDdl;
+    return undefined;
+  };
   for (const rule of ADVISORY_SMART_RULES) {
-    if (!existingAdvisoryNames.has(rule.name)) mergedPolicy.smartRules.push(rule);
+    if (existingAdvisoryNames.has(rule.name)) continue;
+    const knob = rule.verdict === 'review' ? advisoryKnob(rule.name) : undefined;
+    if (knob === 'off') continue;
+    mergedPolicy.smartRules.push(knob === 'block' ? { ...rule, verdict: 'block' as const } : rule);
   }
 
   // NODE9_MODE is a local dev convenience — honoured only when the cloud hasn't

@@ -5,6 +5,8 @@ import {
   applyManagedEgress,
   applyManagedDlp,
   applyManagedApprovers,
+  applyManagedCommandChecks,
+  type ManagedCommandChecks,
 } from '../config/managed';
 import { extractManagedConfig } from '../daemon/sync';
 
@@ -249,6 +251,21 @@ describe('extractManagedConfig — reviewChannel + approvalTimeoutMs (Preference
     expect(junk?.dlp?.reviewAction).toBeUndefined();
   });
 
+  it('keeps commandChecks only for legal per-key values (junk + Class-B off dropped)', () => {
+    const out = extractManagedConfig({
+      managedConfig: {
+        commandChecks: {
+          inlineExec: 'block',
+          chmod: 'off',
+          evalDynamic: 'off', // Class B — illegal at the wire
+          sqlDdl: 'nuke', // junk
+        },
+        locked: [],
+      },
+    });
+    expect(out?.commandChecks).toEqual({ inlineExec: 'block', chmod: 'off' });
+  });
+
   it('keeps a valid injectionScan (coerced to known fields)', () => {
     const out = extractManagedConfig({
       managedConfig: {
@@ -334,5 +351,54 @@ describe('extractManagedConfig — reviewChannel + approvalTimeoutMs (Preference
       managedConfig: { trustedHosts: [], locked: [] },
     });
     expect(out?.trustedHosts).toEqual([]);
+  });
+});
+
+// Command-checks governance — same floor/lock model as dlp, six keys at once.
+describe('managed commandChecks (floor + per-key locks)', () => {
+  it('raises review → block (the cloud floor) and leaves unset keys alone', () => {
+    const out = applyManagedCommandChecks({} as ManagedCommandChecks, { inlineExec: 'block' }, []);
+    expect(out.inlineExec).toBe('block');
+    expect(out.chmod).toBeUndefined();
+  });
+
+  it("keeps a stricter local 'block' over a cloud 'review'", () => {
+    const out = applyManagedCommandChecks({ sqlDdl: 'block' }, { sqlDdl: 'review' }, []);
+    expect(out.sqlDdl).toBe('block');
+  });
+
+  it("cloud 'review' floors a local 'off' (off < review)", () => {
+    const out = applyManagedCommandChecks(
+      { chmod: 'off' } as ManagedCommandChecks,
+      { chmod: 'review' },
+      []
+    );
+    expect(out.chmod).toBe('review');
+  });
+
+  it('a per-key lock forces the exact value over a stricter local', () => {
+    const out = applyManagedCommandChecks({ inlineExec: 'block' }, { inlineExec: 'review' }, [
+      'commandChecksInlineExec',
+    ]);
+    expect(out.inlineExec).toBe('review');
+  });
+
+  it("Class-B keys can NEVER land 'off' — even a hostile locked cloud value", () => {
+    const out = applyManagedCommandChecks(
+      { evalDynamic: 'block' } as ManagedCommandChecks,
+      { evalDynamic: 'off', pipeChainHigh: 'off' },
+      ['commandChecksEvalDynamic', 'commandChecksPipeChainHigh']
+    );
+    expect(out.evalDynamic).toBe('block'); // untouched
+    expect(out.pipeChainHigh).toBeUndefined();
+  });
+
+  it('ignores an unrankable managed value', () => {
+    const out = applyManagedCommandChecks(
+      { rmAdvisory: 'block' } as ManagedCommandChecks,
+      { rmAdvisory: 'garbage' },
+      []
+    );
+    expect(out.rmAdvisory).toBe('block');
   });
 });

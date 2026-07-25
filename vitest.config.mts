@@ -10,6 +10,10 @@ export default defineConfig({
     // before the child process completes, causing false timeouts. 30s is generous
     // enough for any CI machine while still catching genuinely hanging tests.
     testTimeout: 30000,
+    // Claude Code worktrees (parallel agent sessions) are full repo copies
+    // inside the repo — without this, `npm test` runs THEIR suites too
+    // (~3x the tests) and their in-progress failures gate OUR commits.
+    exclude: ['**/node_modules/**', '**/dist/**', '.claude/worktrees/**'],
   },
   coverage: {
     provider: 'v8',
