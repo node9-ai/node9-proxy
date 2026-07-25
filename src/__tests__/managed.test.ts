@@ -25,7 +25,7 @@ const localEgress = (
   ...over,
 });
 
-const localDlp = (over: Partial<{ enabled: boolean; pii: string }> = {}) => ({
+const localDlp = (over: Partial<{ enabled: boolean; pii: string; reviewAction: string }> = {}) => ({
   enabled: true,
   scanIgnoredTools: true,
   pii: 'off' as string,
@@ -182,6 +182,34 @@ describe('managed dlp (baseline+lock) — M2c', () => {
   it('ignores an unrankable managed pii', () => {
     expect(applyManagedDlp(localDlp({ pii: 'block' }), { pii: 'garbage' }, []).pii).toBe('block');
   });
+
+  // reviewAction (inline-ask v2): floor over review<block — the org's 'block'
+  // can't be loosened locally; a member may tighten a cloud 'review' to block.
+  it('reviewAction: raises review → block (the cloud floor)', () => {
+    expect(applyManagedDlp(localDlp(), { reviewAction: 'block' }, []).reviewAction).toBe('block');
+  });
+
+  it('reviewAction: keeps a stricter local block over a cloud review', () => {
+    expect(
+      applyManagedDlp(localDlp({ reviewAction: 'block' }), { reviewAction: 'review' }, [])
+        .reviewAction
+    ).toBe('block');
+  });
+
+  it('reviewAction: a locked value wins over a stricter local', () => {
+    expect(
+      applyManagedDlp(localDlp({ reviewAction: 'block' }), { reviewAction: 'review' }, [
+        'dlpReviewAction',
+      ]).reviewAction
+    ).toBe('review');
+  });
+
+  it('reviewAction: ignores an unrankable managed value', () => {
+    expect(
+      applyManagedDlp(localDlp({ reviewAction: 'block' }), { reviewAction: 'garbage' }, [])
+        .reviewAction
+    ).toBe('block');
+  });
 });
 
 describe('managed approvers (Preferences)', () => {
@@ -208,6 +236,17 @@ describe('extractManagedConfig — reviewChannel + approvalTimeoutMs (Preference
     });
     expect(out?.reviewChannel).toBe('ask');
     expect(out?.approvalTimeoutMs).toBe(30000);
+  });
+
+  it('keeps dlp.reviewAction only when it is a legal value (inline-ask v2)', () => {
+    const out = extractManagedConfig({
+      managedConfig: { dlp: { reviewAction: 'block' }, locked: [] },
+    });
+    expect(out?.dlp?.reviewAction).toBe('block');
+    const junk = extractManagedConfig({
+      managedConfig: { dlp: { reviewAction: 'nuke-it' }, locked: [] },
+    });
+    expect(junk?.dlp?.reviewAction).toBeUndefined();
   });
 
   it('keeps a valid injectionScan (coerced to known fields)', () => {

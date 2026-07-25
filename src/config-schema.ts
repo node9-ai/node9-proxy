@@ -147,6 +147,7 @@ export const ConfigFileSchema = z
             enabled: z.boolean().optional(),
             scanIgnoredTools: z.boolean().optional(),
             pii: z.enum(['off', 'block']).optional(),
+            reviewAction: z.enum(['review', 'block']).optional(),
           })
           .optional(),
         egress: z

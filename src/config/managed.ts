@@ -108,23 +108,26 @@ export function applyManagedEgress<
 
 // Managed DLP fields (M2c). `enabled` is force-on; `pii` gates SSN/credit-card in
 // tool args (off = detect-only, block = deny in realtime), ordered off<block.
+// `reviewAction` (inline-ask v2) upgrades review-severity matches to a hard
+// block, ordered review<block — a floor, so a member may tighten but the org's
+// 'block' can never be loosened locally.
 export const DLP_PII_ORDER = ['off', 'block'] as const;
+export const DLP_REVIEW_ACTION_ORDER = ['review', 'block'] as const;
 export interface ManagedDlp {
   enabled?: boolean;
   pii?: string;
+  reviewAction?: string;
 }
 
 /**
  * Apply managed DLP to the machine's local dlp object (baseline+lock), same
- * model as egress: `enabled` force-on, `pii` a floor over off<block. Generic so
- * the precise caller type is preserved; untouched fields (scanIgnoredTools)
- * carry through.
+ * model as egress: `enabled` force-on, `pii` a floor over off<block,
+ * `reviewAction` a floor over review<block. Generic so the precise caller type
+ * is preserved; untouched fields (scanIgnoredTools) carry through.
  */
-export function applyManagedDlp<T extends { enabled: boolean; pii?: string }>(
-  local: T,
-  managed: ManagedDlp,
-  locked: string[]
-): T {
+export function applyManagedDlp<
+  T extends { enabled: boolean; pii?: string; reviewAction?: string },
+>(local: T, managed: ManagedDlp, locked: string[]): T {
   const next: T = { ...local };
   if (typeof managed.enabled === 'boolean') {
     next.enabled = locked.includes('dlpEnabled')
@@ -138,6 +141,14 @@ export function applyManagedDlp<T extends { enabled: boolean; pii?: string }>(
       managed.pii,
       locked.includes('dlpPii')
     ) as T['pii'];
+  }
+  if (typeof managed.reviewAction === 'string') {
+    next.reviewAction = resolveByOrder(
+      DLP_REVIEW_ACTION_ORDER,
+      local.reviewAction ?? 'review',
+      managed.reviewAction,
+      locked.includes('dlpReviewAction')
+    ) as T['reviewAction'];
   }
   return next;
 }
