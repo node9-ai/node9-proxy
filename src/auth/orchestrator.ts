@@ -1074,11 +1074,24 @@ async function _authorizeHeadlessCore(
   // `permissionDecision:"ask"` prompt.
   //   - Excludes taint/exfil reviews (must use the routed approver — self-approval
   //     is weakest exactly where exfiltration risk is highest).
+  //   - Excludes a DOWNGRADED HARD BLOCK (F1d): an intrinsic block (pipe-chain
+  //     exfil / eval-remote, ruleName-less) softened to review here must use the
+  //     out-of-band approver like taint — same risk class, and the agent's own
+  //     inline prompt is the weakest surface exactly where it matters most.
+  //     `ask` DOES reach a human (so this is hardening, not a fail-open fix), but
+  //     the routed approver is the channel node9 controls and the agent can't spoof.
   //   - Excludes cloud-enforced setups (safe-by-construction): never bypass the
   //     SaaS org-policy / routed approval; those keep the handshake + race below.
-  // No caller sets `deferReview` yet → this is inert (no behavior change).
+  // Set by check.ts (`deferReview: askMode`) for ask-capable agents (Claude Code /
+  // Copilot), default-on for cloud-less setups.
   const cloudEnforcedForDefer = approvers.cloud && !!creds?.apiKey;
-  if (options?.deferReview && !taintWarning && !appPermReview && !cloudEnforcedForDefer) {
+  if (
+    options?.deferReview &&
+    !hardBlockDowngraded &&
+    !taintWarning &&
+    !appPermReview &&
+    !cloudEnforcedForDefer
+  ) {
     return {
       approved: false,
       review: true,

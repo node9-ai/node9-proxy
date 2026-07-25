@@ -134,14 +134,26 @@ describe('task #17 Phase 0 — a mandated shield block never fails open (real ga
       // And it genuinely enforced (blocked/held), not errored into some other code.
       expect(statuses.every((s) => s === 2)).toBe(true);
     } finally {
-      if (thrasher?.pid) {
+      // Stop the thrasher and WAIT for it to actually exit before removing the
+      // dir — on Windows process.kill is not synchronous and the child still
+      // holds the cache file open, so an immediate rmSync races into ENOTEMPTY.
+      if (thrasher) {
+        const exited = new Promise((res) => thrasher!.once('exit', res));
         try {
-          process.kill(thrasher.pid, 'SIGKILL');
+          thrasher.kill('SIGKILL');
         } catch {
           /* already gone */
         }
+        await Promise.race([exited, new Promise((r) => setTimeout(r, 3000))]);
       }
-      fs.rmSync(home, { recursive: true, force: true });
+      // A still-locked temp dir is harmless (leaked in CI) — tolerate the
+      // Windows file-lock codes, same convention as daemon.integration.test.ts.
+      try {
+        fs.rmSync(home, { recursive: true, force: true });
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code !== 'EBUSY' && code !== 'ENOTEMPTY' && code !== 'EPERM') throw e;
+      }
     }
   }, 120000);
 });
