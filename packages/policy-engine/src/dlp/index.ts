@@ -684,6 +684,22 @@ const MAX_STRING_BYTES = 100_000; // don't scan more than 100 KB of a single fie
 const MAX_JSON_PARSE_BYTES = 10_000; // only attempt JSON parse on small strings
 
 /**
+ * The bounds scanArgs works within, published so callers can tell "scanned
+ * clean" apart from "never looked". A caller that must FAIL CLOSED on an
+ * unscanned value (e.g. the audit writer, which would otherwise persist an
+ * unexamined credential in plaintext) needs these to decide whether the scan
+ * actually covered its input. Exported rather than duplicated at the call
+ * site so the two can never drift apart.
+ */
+export const DLP_SCAN_LIMITS = {
+  /** Max characters examined per individual string field; the remainder of an
+   *  oversized string is NOT scanned. */
+  maxStringBytes: MAX_STRING_BYTES,
+  /** Max nesting depth walked; anything deeper is NOT scanned. */
+  maxDepth: MAX_DEPTH,
+} as const;
+
+/**
  * Recursively scans an args value for known secret patterns.
  * Handles nested objects, arrays, and JSON-encoded strings.
  * Returns the first match found, or null if clean.
