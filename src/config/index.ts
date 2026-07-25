@@ -48,6 +48,10 @@ export interface Config {
     /** Review-prompt delivery: 'ask' = agent's inline prompt, 'approver' = node9's
      *  own approver. Unset → smart default (see resolveAskMode in check.ts). */
     reviewChannel?: 'ask' | 'approver';
+    /** True when reviewChannel came from the org's managed config (cloud sync).
+     *  An admin-set value outranks the local --ask/--no-ask hook flag in
+     *  resolveAskMode — the org lever must not be defeatable per-machine. */
+    reviewChannelManaged?: boolean;
     /** When true, agents may call weakening MCP tools (shield_disable, approver_set).
      *  Default (unset): those tools refuse over MCP — a human runs them from the CLI. */
     mcpAllowWeakening?: boolean;
@@ -93,6 +97,11 @@ export interface Config {
       // Opt-in by design — defaulting to 'off' changes no existing behaviour and
       // avoids false-positive blocks for orgs that legitimately handle PII.
       pii?: 'off' | 'block';
+      // What a REVIEW-severity DLP match does (review-ask-inline-v2-spec.md):
+      // 'review' (default): flag for human review (v2: inline ask by default).
+      // 'block': upgrade to a hard block at the DLP gate — the admin's "if DLP
+      // matters, set it to block" lever. Block-severity patterns always block.
+      reviewAction?: 'review' | 'block';
     };
     // Egress / destination control (GAP-5). Gates WHERE network tools send data
     // (curl/wget/scp/ssh/nc). Opt-in: enabled=false by default. `mode` is the
@@ -801,6 +810,7 @@ export function getConfig(cwd?: string): Config {
       if (d.enabled !== undefined) mergedPolicy.dlp.enabled = d.enabled;
       if (d.scanIgnoredTools !== undefined) mergedPolicy.dlp.scanIgnoredTools = d.scanIgnoredTools;
       if (d.pii !== undefined) mergedPolicy.dlp.pii = d.pii;
+      if (d.reviewAction !== undefined) mergedPolicy.dlp.reviewAction = d.reviewAction;
     }
     if (p.egress) {
       const e = p.egress as Partial<Config['policy']['egress']>;
@@ -913,7 +923,7 @@ export function getConfig(cwd?: string): Config {
             deny?: unknown;
             allowPrivate?: unknown;
           };
-          dlp?: { enabled?: unknown; pii?: unknown };
+          dlp?: { enabled?: unknown; pii?: unknown; reviewAction?: unknown };
           approvers?: {
             native?: unknown;
             browser?: unknown;
@@ -972,13 +982,18 @@ export function getConfig(cwd?: string): Config {
             locked
           );
         }
-        // M2c: policy.dlp. enabled force-on; pii floor over off<block.
+        // M2c: policy.dlp. enabled force-on; pii floor over off<block;
+        // reviewAction floor over review<block (inline-ask v2).
         if (mc.dlp && typeof mc.dlp === 'object') {
           mergedPolicy.dlp = applyManagedDlp(
             mergedPolicy.dlp,
             {
               enabled: typeof mc.dlp.enabled === 'boolean' ? mc.dlp.enabled : undefined,
               pii: typeof mc.dlp.pii === 'string' ? mc.dlp.pii : undefined,
+              reviewAction:
+                mc.dlp.reviewAction === 'review' || mc.dlp.reviewAction === 'block'
+                  ? mc.dlp.reviewAction
+                  : undefined,
             },
             locked
           );
@@ -997,8 +1012,13 @@ export function getConfig(cwd?: string): Config {
         }
         // Preferences v2: reviewChannel + approvalTimeoutMs — plain scalars, the
         // org's value replaces local when set (admin owns these approval knobs).
+        // reviewChannelManaged marks the value as ADMIN-SET so resolveAskMode
+        // ranks it above the local --ask/--no-ask hook flag (/code-review fix:
+        // the org's routing lever — and the documented v2 rollback — must not
+        // be defeatable by editing the hook registration on one machine).
         if (mc.reviewChannel === 'ask' || mc.reviewChannel === 'approver') {
           mergedSettings.reviewChannel = mc.reviewChannel;
+          mergedSettings.reviewChannelManaged = true;
         }
         // Require a POSITIVE timeout. 0 is rejected (not "wait forever"): the
         // daemon's pending-card timer is `setTimeout(deny, ms ?? DEFAULT)`, so a

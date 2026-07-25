@@ -5,7 +5,13 @@ import type { Command } from 'commander';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { redactSecrets, appendToLog, LOCAL_AUDIT_LOG } from '../../audit';
+import {
+  redactSecrets,
+  appendToLog,
+  appendLocalAudit,
+  LOCAL_AUDIT_LOG,
+  HOOK_DEBUG_LOG,
+} from '../../audit';
 import { getConfig } from '../../config';
 import { reviewCorrelationKey, resolvePendingReview } from '../../review-pending';
 import { createShadowSnapshot, getSnapshotHistory } from '../../undo';
@@ -169,10 +175,14 @@ export function registerLogCommand(program: Command): void {
 
           // Phase 4: if this execution resolves a deferred inline-ask review, the
           // user APPROVED it. Best-effort — must never skip/abort the audit write.
+          // v2: the resolved marker (with its review label) is kept so a SHIPPABLE
+          // decision row can be written after the config load below.
           let reviewApproved = false;
+          let resolvedReview: ReturnType<typeof resolvePendingReview> = null;
           try {
             const key = reviewCorrelationKey(payload as Record<string, unknown>);
-            if (key && resolvePendingReview(key)) reviewApproved = true;
+            if (key) resolvedReview = resolvePendingReview(key);
+            if (resolvedReview) reviewApproved = true;
           } catch {
             /* outcome capture is best-effort */
           }
@@ -285,6 +295,46 @@ export function registerLogCommand(program: Command): void {
           // non-fatal and must not retroactively gap the audit trail above. It is
           // hoisted above the gap1 block (below) so injectionScan can read its flag.
           const config = getConfig(safeCwd);
+
+          // v2 (review-ask-inline-v2-spec.md): the dev's inline approve is a real
+          // DECISION and must reach the dashboard — the post-hook row above has no
+          // eid (deliberately unshipped), so write a standard decision row the
+          // outbox shipper picks up. The defer-time review label rides as ruleName
+          // so the SaaS says WHICH review was approved inline. Denials stay
+          // unobservable (no hook fires) — approve-only telemetry, by design.
+          if (resolvedReview) {
+            try {
+              const reviewLabel = resolvedReview.label || 'inline-review';
+              // /code-review HIGH fix: a DLP/taint-flagged review means the
+              // args likely CONTAIN the flagged credential — force-hash the
+              // row regardless of auditHashArgs (same stance as the DLP block
+              // path, which always hashes). The isDlpRow guard in
+              // appendLocalAudit suppresses the preview via ruleName.
+              const sensitiveReview = /dlp|taint/i.test(reviewLabel);
+              appendLocalAudit(
+                tool,
+                rawInput,
+                'allow',
+                'inline-review',
+                {
+                  agent,
+                  ruleName: reviewLabel,
+                  ...(rawToolName !== tool ? { agentToolName: rawToolName } : {}),
+                  ...(typeof payloadSessionId === 'string' ? { sessionId: payloadSessionId } : {}),
+                  ...(safeCwd ? { workingDir: safeCwd } : {}),
+                },
+                sensitiveReview || config.settings.auditHashArgs === true
+              );
+            } catch (err) {
+              // Audit-trail guard: never silent (creates a SaaS-visibility gap).
+              appendToLog(HOOK_DEBUG_LOG, {
+                ts: new Date().toISOString(),
+                event: 'inline-review-ship-row-fail',
+                tool,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
+          }
 
           // ── gap1: response-channel DLP — scan what the tool RETURNED ─────────
           // The output is about to enter (or, on observe-only agents, has just

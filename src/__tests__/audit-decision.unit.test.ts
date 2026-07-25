@@ -32,6 +32,9 @@ const LIVE_PAIRS: Array<[string | null, string, string, string]> = [
   ['auto-deny', 'daemon', 'deny', 'Denied'], //                        11
   ['mcp-discovered', 'daemon', 'info', 'Info'], //                      5
   ['allowed', 'inline-review-approved', 'allow', 'Approved'], //        1
+  // inline-ask v2: the SHIPPABLE outcome row (log.ts) — an explicit human
+  // approval must classify as Approved, not Auto-allowed.
+  ['allow', 'inline-review', 'allow', 'Approved'],
 ];
 
 describe('classifyDecision — every pair in a real log', () => {
@@ -120,7 +123,7 @@ describe('robustness', () => {
       const o = classifyDecision(d, cb).outcome;
       counts[o] = (counts[o] ?? 0) + 1;
     }
-    expect(counts).toEqual({ allow: 7, deny: 12, observe: 3, info: 2 });
+    expect(counts).toEqual({ allow: 8, deny: 12, observe: 3, info: 2 }); // +1: inline-review (v2)
     expect(counts.unknown).toBeUndefined();
   });
 });

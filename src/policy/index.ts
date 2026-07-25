@@ -266,13 +266,17 @@ async function deriveExplainTrace(toolName: string, args?: unknown): Promise<Exp
     const dlpMatch =
       (filePathE ? scanFilePath(filePathE) : null) ?? (args !== undefined ? scanArgs(args) : null);
     if (dlpMatch) {
+      // Mirror the real gate (orchestrator DLP section): reviewAction:'block'
+      // upgrades review-severity matches — explain must not say 'review'
+      // where the gate would block.
+      const dlpBlocks = dlpMatch.severity === 'block' || config.policy.dlp.reviewAction === 'block';
       steps.push({
         name: 'DLP Content Scanner',
-        outcome: dlpMatch.severity === 'block' ? 'block' : 'review',
+        outcome: dlpBlocks ? 'block' : 'review',
         detail: `🚨 ${dlpMatch.patternName} detected in ${dlpMatch.fieldPath} — sample: ${dlpMatch.redactedSample}`,
-        isFinal: dlpMatch.severity === 'block',
+        isFinal: dlpBlocks,
       });
-      if (dlpMatch.severity === 'block') {
+      if (dlpBlocks) {
         return { tool: toolName, args, waterfall, steps, decision: 'block' };
       }
     } else {

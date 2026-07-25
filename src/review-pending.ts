@@ -18,7 +18,16 @@ function storePath(): string {
     process.env.NODE9_PENDING_STORE || path.join(os.homedir(), '.node9', 'pending-reviews.json')
   );
 }
-const TTL_MS = 6 * 60 * 60 * 1000; // 6h — a review older than this is treated as abandoned
+// Per-key TTL (/code-review fix): an over-a-work-gap approval (Friday ask →
+// Monday approve) used to lose its shipped outcome row because ANY intervening
+// marker operation pruned the 6h-old entry.
+//   - `tuid:` keys (Claude Code) are collision-proof — a tool_use_id can never
+//     falsely match a DIFFERENT call — so a long TTL is safe: 72h.
+//   - `h:` heuristic keys (Copilot: session|tool|args-hash) CAN falsely match a
+//     later identical command decided by another channel; keep 6h to bound that
+//     misattribution window.
+const TTL_TUID_MS = 72 * 60 * 60 * 1000;
+const TTL_MS = 6 * 60 * 60 * 1000; // heuristic keys — abandoned after this
 const MAX_ENTRIES = 500; // hard cap so the file can't grow unbounded without a deny-sweep
 
 export interface PendingReview {
@@ -78,9 +87,11 @@ function write(store: Store): void {
   }
 }
 
-/** Drop expired entries, then cap to the most-recent MAX_ENTRIES. */
+/** Drop expired entries (per-key TTL), then cap to the most-recent MAX_ENTRIES. */
 function prune(entries: PendingReview[], now: number): PendingReview[] {
-  const fresh = entries.filter((e) => now - e.ts < TTL_MS);
+  const fresh = entries.filter(
+    (e) => now - e.ts < (e.key.startsWith('tuid:') ? TTL_TUID_MS : TTL_MS)
+  );
   return fresh.length > MAX_ENTRIES ? fresh.slice(fresh.length - MAX_ENTRIES) : fresh;
 }
 
@@ -103,17 +114,40 @@ export function recordPendingReview(entry: PendingReview): void {
  */
 export function resolvePendingReview(key: string, now: number = Date.now()): PendingReview | null {
   try {
+    // Prune FIRST (/code-review fix): findIndex used to match before pruning,
+    // so an expired marker still resolved when its key was hit directly —
+    // turning a long-stale (possibly denied) ask into a false approval record.
     const store = read();
-    const idx = store.entries.findIndex((e) => e.key === key);
+    const live = prune(store.entries, now);
+    const idx = live.findIndex((e) => e.key === key);
     if (idx === -1) {
-      const pruned = prune(store.entries, now);
-      if (pruned.length !== store.entries.length) write({ entries: pruned });
+      if (live.length !== store.entries.length) write({ entries: live });
       return null;
     }
-    const [match] = store.entries.splice(idx, 1);
-    write({ entries: prune(store.entries, now) });
+    const [match] = live.splice(idx, 1);
+    write({ entries: live });
     return match;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Remove ALL pending markers for a key. Called by check.ts when a call is
+ * decided by any channel OTHER than an inline defer (/code-review fix): a
+ * later identical Copilot command allowed on the ordinary path must not
+ * resolve a stale marker from an earlier (possibly DENIED) ask — that would
+ * ship a fabricated "dev approved inline" row. Best-effort, never throws.
+ */
+export function discardPendingReview(key: string, now: number = Date.now()): void {
+  try {
+    const store = read();
+    const kept = prune(
+      store.entries.filter((e) => e.key !== key),
+      now
+    );
+    if (kept.length !== store.entries.length) write({ entries: kept });
+  } catch {
+    /* best-effort */
   }
 }

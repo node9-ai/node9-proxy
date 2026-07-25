@@ -150,7 +150,7 @@ function printInlineAskNotice(): void {
   console.log(
     chalk.gray(
       '      Prefer node9’s own approver? Set "reviewChannel": "approver" in config, or add --no-ask to the hook.\n' +
-        '      (Inline prompts are auto-disabled when a cloud approver is configured.)'
+        '      (Inline is the default for every review; with a cloud workspace the outcome ships to the dashboard as audit.)'
     )
   );
 }

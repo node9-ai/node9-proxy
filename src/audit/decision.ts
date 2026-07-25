@@ -43,9 +43,34 @@ export interface DecisionView {
 }
 
 /** checkedBy values meaning a HUMAN made the call (vs a rule firing). */
-const HUMAN_SOURCES = new Set(['daemon', 'cloud', 'local-decision', 'inline-review-approved']);
+// 'inline-review' = the v2 shippable outcome row (log.ts): the dev explicitly
+// approved the agent's inline ask — a human decision, not an auto-allow.
+const HUMAN_SOURCES = new Set([
+  'daemon',
+  'cloud',
+  'local-decision',
+  'inline-review-approved',
+  'inline-review',
+]);
 
 const TIMEOUT_SOURCES = new Set(['timeout']);
+
+/**
+ * `source` values that mark a row as an EXECUTION/finding record, not a
+ * PreToolUse decision. Every local counter (report, TUI, daemon stats) must
+ * drop these or a single tool call counts twice:
+ *   - 'post-hook'              — the PostToolUse execution record
+ *   - 'inline-review-approved' — the SAME record when it resolved an inline
+ *     ask (v2 also writes a separate eid-bearing decision row alongside it)
+ *   - 'response-dlp'           — an output-scan finding, not a call
+ * ONE set shared by all readers (/code-review fix: four hand-copied filters
+ * each knew about two of the three values).
+ */
+export const NON_DECISION_SOURCES = new Set([
+  'post-hook',
+  'inline-review-approved',
+  'response-dlp',
+]);
 
 const has = (s: string, needle: string) => s.includes(needle);
 

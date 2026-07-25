@@ -6,7 +6,12 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { reviewCorrelationKey, recordPendingReview, resolvePendingReview } from '../review-pending';
+import {
+  reviewCorrelationKey,
+  recordPendingReview,
+  resolvePendingReview,
+  discardPendingReview,
+} from '../review-pending';
 
 let store: string;
 beforeEach(() => {
@@ -90,5 +95,49 @@ describe('prune', () => {
     // A resolve for a different key should prune the stale 'old' entry.
     resolvePendingReview('something-else', now);
     expect(resolvePendingReview('old', now)).toBeNull();
+  });
+
+  // /code-review fix: per-key TTL. tuid: keys are collision-proof (a
+  // tool_use_id never matches a DIFFERENT call), so an over-a-work-gap approval
+  // (Friday ask → Monday approve, 63h) must survive intervening prunes — losing
+  // the marker silently loses the shipped inline-review outcome row.
+  it('a tuid: marker survives a work-gap (63h) despite intervening prunes', () => {
+    const now = Date.now();
+    recordPendingReview({ key: 'tuid:friday', tool: 'Bash', ts: now - 63 * 60 * 60 * 1000 });
+    resolvePendingReview('something-else', now); // intervening prune-on-miss
+    expect(resolvePendingReview('tuid:friday', now)?.key).toBe('tuid:friday');
+  });
+
+  it('a tuid: marker still expires past 72h', () => {
+    const now = Date.now();
+    recordPendingReview({ key: 'tuid:ancient', tool: 'Bash', ts: now - 73 * 60 * 60 * 1000 });
+    resolvePendingReview('something-else', now);
+    expect(resolvePendingReview('tuid:ancient', now)).toBeNull();
+  });
+
+  it('heuristic (h:) keys keep the tight 6h TTL — bounds Copilot stale-marker misattribution', () => {
+    const now = Date.now();
+    recordPendingReview({ key: 'h:s1|Bash|abc', tool: 'Bash', ts: now - 7 * 60 * 60 * 1000 });
+    resolvePendingReview('something-else', now);
+    expect(resolvePendingReview('h:s1|Bash|abc', now)).toBeNull();
+  });
+
+  it('an EXPIRED entry never resolves even when matched directly (no prune ran first)', () => {
+    // /code-review fix: findIndex used to match BEFORE pruning, so an expired
+    // marker still resolved if its key was hit first — turning a long-stale
+    // (possibly denied) ask into a shipped "approved inline" row.
+    const now = Date.now();
+    recordPendingReview({ key: 'h:s1|Bash|stale', tool: 'Bash', ts: now - 7 * 60 * 60 * 1000 });
+    expect(resolvePendingReview('h:s1|Bash|stale', now)).toBeNull();
+    recordPendingReview({ key: 'tuid:stale', tool: 'Bash', ts: now - 73 * 60 * 60 * 1000 });
+    expect(resolvePendingReview('tuid:stale', now)).toBeNull();
+  });
+
+  it('discardPendingReview removes ALL entries for a key (decision by another channel supersedes)', () => {
+    const now = Date.now();
+    recordPendingReview({ key: 'h:s1|Bash|x', tool: 'Bash', ts: now - 1000 });
+    recordPendingReview({ key: 'h:s1|Bash|x', tool: 'Bash', ts: now - 500 });
+    discardPendingReview('h:s1|Bash|x');
+    expect(resolvePendingReview('h:s1|Bash|x', now)).toBeNull();
   });
 });

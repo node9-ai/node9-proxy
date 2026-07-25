@@ -168,7 +168,7 @@ export interface ManagedConfigCache {
     deny?: string[];
     allowPrivate?: boolean;
   };
-  dlp?: { enabled?: boolean; pii?: string };
+  dlp?: { enabled?: boolean; pii?: string; reviewAction?: string };
   approvers?: { native?: boolean; browser?: boolean; cloud?: boolean; terminal?: boolean };
   reviewChannel?: string;
   approvalTimeoutMs?: number;
@@ -204,7 +204,7 @@ interface CloudPolicyBody {
       deny?: unknown;
       allowPrivate?: unknown;
     };
-    dlp?: { enabled?: unknown; pii?: unknown };
+    dlp?: { enabled?: unknown; pii?: unknown; reviewAction?: unknown };
     approvers?: { native?: unknown; browser?: unknown; cloud?: unknown; terminal?: unknown };
     reviewChannel?: unknown;
     approvalTimeoutMs?: unknown;
@@ -567,12 +567,15 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
       out.egress = e;
     }
   }
-  // M2c: dlp.enabled (bool) + dlp.pii (string).
+  // M2c: dlp.enabled (bool) + dlp.pii (string) + dlp.reviewAction (enum,
+  // inline-ask v2 — validated to the two legal values, junk dropped).
   if (mc.dlp && typeof mc.dlp === 'object') {
-    const d: { enabled?: boolean; pii?: string } = {};
+    const d: { enabled?: boolean; pii?: string; reviewAction?: string } = {};
     if (typeof mc.dlp.enabled === 'boolean') d.enabled = mc.dlp.enabled;
     if (typeof mc.dlp.pii === 'string') d.pii = mc.dlp.pii;
-    if (d.enabled !== undefined || d.pii !== undefined) out.dlp = d;
+    if (mc.dlp.reviewAction === 'review' || mc.dlp.reviewAction === 'block')
+      d.reviewAction = mc.dlp.reviewAction;
+    if (d.enabled !== undefined || d.pii !== undefined || d.reviewAction !== undefined) out.dlp = d;
   }
   // Preferences: approvers (4 bools — where approvals may happen).
   if (mc.approvers && typeof mc.approvers === 'object') {

@@ -100,8 +100,10 @@ export const ConfigFileSchema = z
         agentPolicy: z.enum(['require_approval', 'block_on_rules']).optional(),
         // Where a `review` verdict's prompt is rendered: 'ask' = the agent's own
         // inline approve/deny prompt (Claude Code / GitHub Copilot); 'approver' =
-        // node9's own approver (terminal/native/cloud). Unset → smart default
-        // (ask for ask-capable agents unless a cloud approver is configured).
+        // node9's own approver (terminal/native/cloud). Unset → default ASK for
+        // ask-capable agents (v2: cloud no longer disables inline — the outcome
+        // ships to the dashboard as audit; admins force routing via managed
+        // reviewChannel, which outranks the local --ask flag).
         reviewChannel: z.enum(['ask', 'approver']).optional(),
         // When true, agents may call WEAKENING node9 MCP tools (shield_disable,
         // approver_set). Default (unset/false): those tools refuse over MCP — a human
@@ -147,6 +149,7 @@ export const ConfigFileSchema = z
             enabled: z.boolean().optional(),
             scanIgnoredTools: z.boolean().optional(),
             pii: z.enum(['off', 'block']).optional(),
+            reviewAction: z.enum(['review', 'block']).optional(),
           })
           .optional(),
         egress: z

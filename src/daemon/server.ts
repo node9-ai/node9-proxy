@@ -73,7 +73,7 @@ import { extractCommandPattern } from '../auth/state.js';
 import { startCostSync } from '../costSync.js';
 import { startCloudSync, startForensicBroadcast } from './sync.js';
 import { startAuditShipper } from './audit-shipper.js';
-import { classifyDecision } from '../audit/decision.js';
+import { classifyDecision, NON_DECISION_SOURCES } from '../audit/decision.js';
 import { startDlpScanner } from './dlp-scanner.js';
 import { startMcpReconciler } from './mcp-reconciler.js';
 import { startHookHeal } from './hook-heal.js';
@@ -113,7 +113,7 @@ export function buildDaemonReport(
   else if (period === 'month') start = new Date(now.getFullYear(), now.getMonth(), 1);
 
   const entries = allEntries.filter((e) => {
-    if (e.source === 'post-hook' || e.source === 'response-dlp') return false;
+    if (typeof e.source === 'string' && NON_DECISION_SOURCES.has(e.source)) return false;
     return new Date(e.ts as string) >= start;
   });
 

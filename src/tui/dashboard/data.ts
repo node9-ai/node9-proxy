@@ -16,6 +16,7 @@ import { runBlast } from '../../cli/commands/blast.js';
 import { DAEMON_HOST, DAEMON_PORT, getInternalToken } from '../../auth/daemon.js';
 import { parseJSONLFile, type DailyEntry } from '../../costSync.js';
 import { SHIELDS, readActiveShields } from '../../shields.js';
+import { NON_DECISION_SOURCES } from '../../audit/decision.js';
 import { extractFindingsFromLine } from '../../daemon/scan-watermark.js';
 import {
   aggregateReportFromAudit,
@@ -167,7 +168,7 @@ export function aggregateAudit(
   endMs: number = Date.now()
 ): AuditAggregates {
   const inWindow = entries.filter((e) => {
-    if (e.source === 'post-hook' || e.source === 'response-dlp') return false;
+    if (typeof e.source === 'string' && NON_DECISION_SOURCES.has(e.source)) return false;
     const t = Date.parse(e.ts);
     return t >= startMs && t <= endMs;
   });
@@ -367,7 +368,7 @@ export function compactPathsInCommand(cmd: string): string {
 export function buildLiveBackfill(n: number): ActivityEvent[] {
   if (n <= 0) return [];
   const all = readAuditEntries().filter(
-    (e) => e.source !== 'post-hook' && e.source !== 'response-dlp'
+    (e) => !(typeof e.source === 'string' && NON_DECISION_SOURCES.has(e.source))
   );
   const tail = all.slice(-n);
   return tail.map((e, i) => auditEntryToActivityEvent(e, i));

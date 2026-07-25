@@ -42,4 +42,21 @@ describe('redactSecrets', () => {
     const output = redactSecrets(input);
     expect(output).toContain('Bearer ********');
   });
+
+  it('keeps JSON-escaped text PARSEABLE after redaction (audit-gap regression)', () => {
+    // log.ts does JSON.parse(redactSecrets(JSON.stringify(rawInput))). The old
+    // token class included `\\`, so it consumed the escaping backslash of a
+    // trailing `\"` — the parse threw and the ENTIRE audit row was skipped for
+    // any executed call carrying an Authorization header. The round-trip is
+    // the contract, not just the masking.
+    const obj = {
+      command:
+        'curl -H "Authorization: Bearer Xm7Kp3Qn9Bt2Vc6Wr1Ys4Zh8Pq5Nv3M" https://api.example.com',
+    };
+    const output = redactSecrets(JSON.stringify(obj));
+    const parsed = JSON.parse(output) as { command: string }; // must not throw
+    expect(parsed.command).toContain('Bearer ********');
+    expect(parsed.command).toContain('https://api.example.com'); // tail survives
+    expect(output).not.toContain('Xm7Kp3Qn9Bt2Vc6');
+  });
 });
