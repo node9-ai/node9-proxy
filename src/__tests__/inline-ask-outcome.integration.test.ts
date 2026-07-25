@@ -179,6 +179,46 @@ describe('inline-ask outcome capture (phase 4)', () => {
     expect(JSON.stringify(shipRow)).not.toContain('Xm7Kp3Qn9Bt2Vc6'); // raw secret absent
   });
 
+  it('a DENIED Copilot ask never becomes a shipped approval when the same command is later allowed (fabrication fix)', () => {
+    // Copilot has no tool_use_id — the marker key is session|tool|args-hash,
+    // which an identical later command REUSES. Scenario: ask → dev denies (no
+    // hook fires, marker survives) → policy changes (taint expired / rule
+    // removed) → same command runs, allowed on the ordinary path. The PRE-side
+    // discard must remove the stale marker so PostToolUse cannot resolve it
+    // into a fabricated checkedBy:'inline-review' approval row.
+    const copilotPre = {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'bash',
+      tool_input: { command: 'git push origin main' },
+      session_id: 'cp-s1',
+    };
+    const ask = run('check', ['--ask', '--agent', 'copilot'], copilotPre);
+    expect(ask.status).toBe(0);
+    expect(ask.stdout).toContain('"permissionDecision":"ask"');
+    expect(readJson(pendingStore()).entries).toHaveLength(1); // marker recorded; dev "denies" (no hook)
+
+    // The review rule disappears (stand-in for taint expiry / rule change) —
+    // the same command is now plainly allowed.
+    const cfgPath = path.join(tmpHome, '.node9', 'config.json');
+    const cfg = readJson(cfgPath);
+    cfg.policy.smartRules = [];
+    fs.writeFileSync(cfgPath, JSON.stringify(cfg));
+
+    const allowed = run('check', ['--ask', '--agent', 'copilot'], copilotPre);
+    expect(allowed.status).toBe(0);
+    expect(allowed.stdout).not.toContain('"permissionDecision":"ask"');
+
+    run('log', ['--agent', 'copilot'], { ...copilotPre, hook_event_name: 'PostToolUse' });
+    const rows = fs
+      .readFileSync(auditLog(), 'utf-8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(rows.some((r) => r.checkedBy === 'inline-review')).toBe(false); // no fabricated approval
+    expect(readJson(pendingStore()).entries).toHaveLength(0); // stale marker discarded at PRE time
+  });
+
   it('non-matching PostToolUse is a normal post-hook row (no false resolve)', () => {
     run('check', ['--ask'], claudePre); // pending key tuid:toolu_phase4
     const other = { ...claudePost, tool_use_id: 'toolu_other' };

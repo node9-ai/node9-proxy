@@ -48,6 +48,10 @@ export interface Config {
     /** Review-prompt delivery: 'ask' = agent's inline prompt, 'approver' = node9's
      *  own approver. Unset → smart default (see resolveAskMode in check.ts). */
     reviewChannel?: 'ask' | 'approver';
+    /** True when reviewChannel came from the org's managed config (cloud sync).
+     *  An admin-set value outranks the local --ask/--no-ask hook flag in
+     *  resolveAskMode — the org lever must not be defeatable per-machine. */
+    reviewChannelManaged?: boolean;
     /** When true, agents may call weakening MCP tools (shield_disable, approver_set).
      *  Default (unset): those tools refuse over MCP — a human runs them from the CLI. */
     mcpAllowWeakening?: boolean;
@@ -1008,8 +1012,13 @@ export function getConfig(cwd?: string): Config {
         }
         // Preferences v2: reviewChannel + approvalTimeoutMs — plain scalars, the
         // org's value replaces local when set (admin owns these approval knobs).
+        // reviewChannelManaged marks the value as ADMIN-SET so resolveAskMode
+        // ranks it above the local --ask/--no-ask hook flag (/code-review fix:
+        // the org's routing lever — and the documented v2 rollback — must not
+        // be defeatable by editing the hook registration on one machine).
         if (mc.reviewChannel === 'ask' || mc.reviewChannel === 'approver') {
           mergedSettings.reviewChannel = mc.reviewChannel;
+          mergedSettings.reviewChannelManaged = true;
         }
         // Require a POSITIVE timeout. 0 is rejected (not "wait forever"): the
         // daemon's pending-card timer is `setTimeout(deny, ms ?? DEFAULT)`, so a

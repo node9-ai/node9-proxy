@@ -24,7 +24,7 @@ import { decodeProjectDirName } from '../../costSync';
 import { pricingFor, normalizeModel } from '../../pricing/litellm';
 import { codexSessionCost } from '../../cost-codex';
 import type { BuildReportJsonInput, ReportPeriod } from '../render/report-json';
-import { classifyDecision } from '../../audit/decision';
+import { classifyDecision, NON_DECISION_SOURCES } from '../../audit/decision';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1105,8 +1105,7 @@ export function aggregateReportFromAudit(
   // scored a higher block RATE in the past than in the present purely by which
   // rows each filter let through.
   const priorEntries = allEntries.filter((e) => {
-    if (e.source === 'post-hook') return false;
-    if (e.source === 'response-dlp') return false;
+    if (typeof e.source === 'string' && NON_DECISION_SOURCES.has(e.source)) return false;
     if (typeof e.decision !== 'string') return false;
     const ts = new Date(e.ts);
     return ts >= priorStart && ts <= priorEnd;
@@ -1119,8 +1118,7 @@ export function aggregateReportFromAudit(
   const testTs = excludeTests ? buildTestTimestamps(allEntries) : new Set<number>();
   let excludedTests = 0;
   const entries = allEntries.filter((e) => {
-    if (e.source === 'post-hook') return false;
-    if (e.source === 'response-dlp') return false;
+    if (typeof e.source === 'string' && NON_DECISION_SOURCES.has(e.source)) return false;
     // Event rows (e.g. {"event":"shield-create"}) carry no decision and are
     // not PreToolUse tool calls — dropping them keeps isAllow(decision) and
     // the bucket loop total-safe on a real, mixed audit log.

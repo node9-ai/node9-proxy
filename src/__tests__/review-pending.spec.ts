@@ -6,7 +6,12 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { reviewCorrelationKey, recordPendingReview, resolvePendingReview } from '../review-pending';
+import {
+  reviewCorrelationKey,
+  recordPendingReview,
+  resolvePendingReview,
+  discardPendingReview,
+} from '../review-pending';
 
 let store: string;
 beforeEach(() => {
@@ -115,5 +120,24 @@ describe('prune', () => {
     recordPendingReview({ key: 'h:s1|Bash|abc', tool: 'Bash', ts: now - 7 * 60 * 60 * 1000 });
     resolvePendingReview('something-else', now);
     expect(resolvePendingReview('h:s1|Bash|abc', now)).toBeNull();
+  });
+
+  it('an EXPIRED entry never resolves even when matched directly (no prune ran first)', () => {
+    // /code-review fix: findIndex used to match BEFORE pruning, so an expired
+    // marker still resolved if its key was hit first — turning a long-stale
+    // (possibly denied) ask into a shipped "approved inline" row.
+    const now = Date.now();
+    recordPendingReview({ key: 'h:s1|Bash|stale', tool: 'Bash', ts: now - 7 * 60 * 60 * 1000 });
+    expect(resolvePendingReview('h:s1|Bash|stale', now)).toBeNull();
+    recordPendingReview({ key: 'tuid:stale', tool: 'Bash', ts: now - 73 * 60 * 60 * 1000 });
+    expect(resolvePendingReview('tuid:stale', now)).toBeNull();
+  });
+
+  it('discardPendingReview removes ALL entries for a key (decision by another channel supersedes)', () => {
+    const now = Date.now();
+    recordPendingReview({ key: 'h:s1|Bash|x', tool: 'Bash', ts: now - 1000 });
+    recordPendingReview({ key: 'h:s1|Bash|x', tool: 'Bash', ts: now - 500 });
+    discardPendingReview('h:s1|Bash|x');
+    expect(resolvePendingReview('h:s1|Bash|x', now)).toBeNull();
   });
 });

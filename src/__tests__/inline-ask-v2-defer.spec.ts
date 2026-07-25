@@ -121,20 +121,23 @@ describe('inline-ask v2: the defer guard has ONE exclusion (downgraded hard bloc
     expect(mockInitSaaS).not.toHaveBeenCalled();
   });
 
-  it('APP-PERMISSION review → defers inline, and the prompt reason names the tool', async () => {
+  it('APP-PERMISSION review: the REAL caller (mcp-gateway) never defers — it races', async () => {
+    // Test-honesty fix (/code-review round 2): the ONLY producer of serverKey
+    // is src/mcp-gateway/index.ts, and it does NOT pass deferReview — the
+    // gateway answers JSON-RPC and has no inline-ask channel to render. So
+    // "app-perm reviews defer inline" is principle-level only; in production
+    // they always take the approver race. This pins the real caller shape
+    // (per CLAUDE.md: tests must use the inputs the real caller produces).
     writeHome({ appPermissions: { srv1: { edit_file: 'review' } } });
     const r = await authorizeHeadless(
       'edit_file',
       { path: '/x' },
-      { agent: 'MCP-Gateway', serverKey: 'srv1' },
-      { deferReview: true }
+      { agent: 'MCP-Gateway', serverKey: 'srv1' }
+      // no options — the gateway passes none
     );
-    expect(r.review).toBe(true);
+    expect(r.review).not.toBe(true);
     expect(r.approved).toBe(false);
-    // The dev must see WHY in the inline prompt — the workspace-policy sentence
-    // rides on reason (v1 returned only the label).
-    expect(r.reason).toContain('edit_file');
-    expect(r.reason).toContain('human approval');
+    expect(r.noApprovalMechanism).toBe(true); // reached the race, no channel in tests
   });
 
   it('SESSION-TAINT review → defers inline, and the prompt reason carries the taint sentence', async () => {

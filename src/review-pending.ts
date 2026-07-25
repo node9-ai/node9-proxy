@@ -114,17 +114,40 @@ export function recordPendingReview(entry: PendingReview): void {
  */
 export function resolvePendingReview(key: string, now: number = Date.now()): PendingReview | null {
   try {
+    // Prune FIRST (/code-review fix): findIndex used to match before pruning,
+    // so an expired marker still resolved when its key was hit directly —
+    // turning a long-stale (possibly denied) ask into a false approval record.
     const store = read();
-    const idx = store.entries.findIndex((e) => e.key === key);
+    const live = prune(store.entries, now);
+    const idx = live.findIndex((e) => e.key === key);
     if (idx === -1) {
-      const pruned = prune(store.entries, now);
-      if (pruned.length !== store.entries.length) write({ entries: pruned });
+      if (live.length !== store.entries.length) write({ entries: live });
       return null;
     }
-    const [match] = store.entries.splice(idx, 1);
-    write({ entries: prune(store.entries, now) });
+    const [match] = live.splice(idx, 1);
+    write({ entries: live });
     return match;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Remove ALL pending markers for a key. Called by check.ts when a call is
+ * decided by any channel OTHER than an inline defer (/code-review fix): a
+ * later identical Copilot command allowed on the ordinary path must not
+ * resolve a stale marker from an earlier (possibly DENIED) ask — that would
+ * ship a fabricated "dev approved inline" row. Best-effort, never throws.
+ */
+export function discardPendingReview(key: string, now: number = Date.now()): void {
+  try {
+    const store = read();
+    const kept = prune(
+      store.entries.filter((e) => e.key !== key),
+      now
+    );
+    if (kept.length !== store.entries.length) write({ entries: kept });
+  } catch {
+    /* best-effort */
   }
 }

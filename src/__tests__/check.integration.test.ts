@@ -754,6 +754,47 @@ describe('inline-ask (--ask routes review verdicts to the agent prompt)', () => 
     expect(body.hookSpecificOutput.permissionDecision).toBe('ask');
   });
 
+  it('ADMIN-SET reviewChannel:"approver" beats a local --ask flag (org lever not defeatable)', () => {
+    // /code-review fix: the managed value is the org's routing lever and the
+    // documented v2 rollback — a per-machine hook edit must not override it.
+    cleanupHome(tmpHome);
+    tmpHome = makeTempHome({
+      settings: {
+        mode: 'standard',
+        autoStartDaemon: false,
+        approvalTimeoutMs: 0,
+        approvers: { native: false, browser: false, cloud: true, terminal: false },
+      },
+      policy: { smartRules: [reviewRule] },
+    });
+    fs.writeFileSync(
+      path.join(tmpHome, '.node9', 'rules-cache.json'),
+      JSON.stringify({
+        fetchedAt: '2026-07-01T00:00:00Z',
+        rules: [],
+        managedConfig: { reviewChannel: 'approver', locked: [] },
+      })
+    );
+    const r = runCheckArgs(['--ask'], claudePayload, { HOME: tmpHome });
+    expect(r.stdout).not.toContain('"permissionDecision":"ask"');
+  });
+
+  it('LOCAL reviewChannel:"approver" is still overridable by --ask (debug lever intact)', () => {
+    cleanupHome(tmpHome);
+    tmpHome = makeTempHome({
+      settings: {
+        mode: 'standard',
+        autoStartDaemon: false,
+        approvalTimeoutMs: 0,
+        reviewChannel: 'approver',
+        approvers: { native: false, browser: false, cloud: false, terminal: false },
+      },
+      policy: { smartRules: [reviewRule] },
+    });
+    const r = runCheckArgs(['--ask'], claudePayload, { HOME: tmpHome });
+    expect(r.stdout).toContain('"permissionDecision":"ask"');
+  });
+
   it('Codex WITHOUT --ask → no ask (default-on must NOT leak to fail-open agents)', () => {
     const codexPayload = {
       turn_id: 't1',

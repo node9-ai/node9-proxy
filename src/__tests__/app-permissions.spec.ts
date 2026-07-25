@@ -247,17 +247,17 @@ describe('managed appPermissions apply + enforce (P3 Phase 2)', () => {
     expect(r.blockedByLabel).toContain('Panic mode');
   });
 
-  it('deferReview (inline ask) DEFERS an app-perm review to the agent prompt (v2)', async () => {
-    // v1 excluded app-perm reviews from inline-ask. v2 removes the exclusion:
-    // an org-set `review` means "the dev decides" — inline is the dev's seat.
-    // (Full v2 guard matrix: inline-ask-v2-defer.spec.ts.)
+  it('app-perm review takes the approver race — the gateway (the only serverKey producer) never defers', async () => {
+    // Test-honesty (/code-review round 2): deferReview is set ONLY by check.ts
+    // (agent hooks), whose meta never carries serverKey; the mcp-gateway
+    // carries serverKey but passes no deferReview (JSON-RPC has no ask
+    // channel). This is the real caller shape — see inline-ask-v2-defer.spec.
     const r = await authorizeHeadless(
       'edit_file',
       { path: '/x' },
-      { agent: 'MCP-Gateway', serverKey: 'srv1' },
-      { deferReview: true }
+      { agent: 'MCP-Gateway', serverKey: 'srv1' }
     );
-    expect(r.review).toBe(true);
+    expect(r.review).not.toBe(true);
     expect(r.approved).toBe(false);
   });
 

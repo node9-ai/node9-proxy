@@ -1079,7 +1079,10 @@ async function _authorizeHeadlessCore(
   //
   // v2 (review-ask-inline-v2-spec.md): block = stop, review = THE DEV DECIDES,
   // inline is the dev's seat. Every review verdict defers — smart-rule, taint,
-  // DLP credential-review, app-permission — with EXACTLY ONE exclusion:
+  // DLP credential-review — with EXACTLY ONE exclusion. (App-permission
+  // reviews are inline-eligible in PRINCIPLE only: serverKey comes solely from
+  // the mcp-gateway, which passes no deferReview — JSON-RPC has no ask channel
+  // — so in production they always take the race below.)
   //   - a DOWNGRADED HARD BLOCK (F1d): an intrinsic block (pipe-chain exfil /
   //     eval-remote) softened to review only because a human is reachable is
   //     NOT an admin-chosen review verdict — "block = stop" keeps it on the
@@ -1094,13 +1097,10 @@ async function _authorizeHeadlessCore(
     return {
       approved: false,
       review: true,
-      // The prompt must say WHY: the taint / app-permission sentence beats the
-      // bare label so the dev sees the actual risk context inline.
-      reason:
-        taintWarning ||
-        appPermReview ||
-        explainableLabel ||
-        'Node9 flagged this action for review.',
+      // The prompt must say WHY: the taint sentence beats the bare label so
+      // the dev sees the actual risk context inline. (No appPermReview term:
+      // deferReview and serverKey never co-occur in production — see above.)
+      reason: taintWarning || explainableLabel || 'Node9 flagged this action for review.',
       ruleDescription: policyRuleDescription,
       blockedByLabel: explainableLabel,
     };

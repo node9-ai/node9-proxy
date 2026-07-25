@@ -23,7 +23,11 @@ import {
 import { defaultSkillRoots, resolveUserSkillRoot, verifyAndPinRoots } from '../../skill-pin';
 import { scanArgs } from '../../dlp';
 import { appendLocalAudit } from '../../audit';
-import { reviewCorrelationKey, recordPendingReview } from '../../review-pending';
+import {
+  reviewCorrelationKey,
+  recordPendingReview,
+  discardPendingReview,
+} from '../../review-pending';
 import {
   extractToolName,
   extractToolInput,
@@ -165,12 +169,19 @@ function agentSupportsAsk(agent: string): boolean {
 // prompt (true) vs. node9's own approver (false). Precedence (v2 — the cloud
 // carve-out is deleted, see review-ask-inline-v2-spec.md: cloud is the record,
 // not a gate; admins force routed approval via managed reviewChannel):
-//   1. agent not ask-capable          → approver (false)
-//   2. --ask / --no-ask flag           → wins
-//   3. settings.reviewChannel          → 'ask' | 'approver'
-//   4. default                         → ASK
+//   1. agent not ask-capable            → approver (false)
+//   2. ADMIN-SET (managed) reviewChannel → wins — the org's routing lever (and
+//      the documented v2 rollback) must not be defeatable by a --ask flag in a
+//      per-machine hook registration (/code-review fix)
+//   3. --ask / --no-ask flag             → wins (local/debug override)
+//   4. local settings.reviewChannel      → 'ask' | 'approver'
+//   5. default                           → ASK
 function resolveAskMode(agent: string, opts: { ask?: boolean }, config: Config): boolean {
   if (!agentSupportsAsk(agent)) return false;
+  if (config.settings.reviewChannelManaged === true) {
+    if (config.settings.reviewChannel === 'ask') return true;
+    if (config.settings.reviewChannel === 'approver') return false;
+  }
   if (opts.ask === true) return true;
   if (opts.ask === false) return false;
   if (config.settings.reviewChannel === 'ask') return true;
@@ -877,6 +888,22 @@ export function registerCheckCommand(program: Command): void {
             cwd: safeCwdForAuth,
             deferReview: askMode,
           });
+
+          // A decision by any channel OTHER than an inline defer supersedes any
+          // stale pending-ask marker for this correlation key (/code-review
+          // fix): without this, a Copilot command denied at an earlier inline
+          // ask and later allowed on the ordinary path (taint expired, rule
+          // changed) resolves the old marker in PostToolUse and ships a
+          // fabricated "dev approved inline" row. Claude Code's tuid keys are
+          // per-call unique, so this is a no-op there. Best-effort.
+          if (!result.review) {
+            try {
+              const key = reviewCorrelationKey(payload as Record<string, unknown>);
+              if (key) discardPendingReview(key);
+            } catch {
+              /* marker hygiene must never affect the decision */
+            }
+          }
 
           if (result.approved) {
             // Only write to stderr in debug mode — Claude Code treats any stderr
