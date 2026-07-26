@@ -733,6 +733,9 @@ async function _authorizeHeadlessCore(
 
     // `!appPermReview`: a policy ALLOW must not short-circuit an org-set review
     // (fix #3) — fall through to the race. A policy BLOCK below still wins.
+    // (No `!taintWarning` term needed: this whole policy block is already inside
+    // `if (!taintWarning && !isIgnoredTool(...))` above, so a tainted call never
+    // reaches here — verified by revert experiment, task #16 vector C.)
     if (policyResult.decision === 'allow' && !appPermReview) {
       // Local row only — the outbox shipper delivers it. Removing the old
       // awaited POST also removes a cloud round-trip from EVERY allowed
@@ -1125,6 +1128,12 @@ async function _authorizeHeadlessCore(
     localSmartRuleMatched === true ||
     options?.localSmartRuleMatched === true ||
     !!appPermReview ||
+    // Task #16 vector C: a taint review needs a GENUINE pending entry. Taint is
+    // a client-side heuristic the SaaS has no rule for, so without forceReview
+    // its checkRule answers "no org rule matched" → {approved:true}, which is
+    // not an approval of an exfiltration risk. Measured against the live BE:
+    // {approved:true} without this flag, {pending:true} with it.
+    !!taintWarning ||
     undefined;
   if (cloudEnforced) {
     try {
@@ -1164,7 +1173,16 @@ async function _authorizeHeadlessCore(
         // appPermReview: never accept a cloud immediate-allow — a stale/older BE
         // that ignores forceReview must not bypass an org-set review. Fall
         // through to the race so a genuine human decision is required.
-        if (!localSmartRuleMatched && !options?.localSmartRuleMatched && !appPermReview) {
+        // `!taintWarning` (task #16 vector C): never accept a cloud
+        // immediate-allow for an exfiltration review either — same reasoning as
+        // appPermReview above, and it also covers a stale/older BE that ignores
+        // the forceReview flag we now send.
+        if (
+          !localSmartRuleMatched &&
+          !options?.localSmartRuleMatched &&
+          !appPermReview &&
+          !taintWarning
+        ) {
           return {
             approved: !!initResult.approved,
             reason:
