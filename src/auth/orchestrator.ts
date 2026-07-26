@@ -1158,11 +1158,16 @@ async function _authorizeHeadlessCore(
         // via hardBlockDowngraded) means forceReview was sent; a shadowMode
         // response must not resolve it. Without this, a shadow/observe org (or a
         // stale BE ignoring forceReview) auto-allows a downgraded intrinsic block.
+        // `!taintWarning` (task #16 vector C): a taint review is in exactly the
+        // class this guard already protects — we now send forceReview for it, so
+        // a shadowMode answer (from a shadow/observe org, or a stale BE ignoring
+        // that flag) must not resolve an exfiltration review either.
         if (
           initResult.shadowMode &&
           !localSmartRuleMatched &&
           !options?.localSmartRuleMatched &&
-          !appPermReview
+          !appPermReview &&
+          !taintWarning
         ) {
           return { approved: true, checkedBy: 'cloud' };
         }

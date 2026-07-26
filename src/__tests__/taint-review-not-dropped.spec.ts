@@ -35,7 +35,22 @@ const { mockCheckTaint, mockInitSaaS, mockPollSaaS } = vi.hoisted(() => ({
     tainted: true,
     record: { path: '/tmp/secret.env', source: 'dlp', fromEid: 'e1' },
   })),
-  mockInitSaaS: vi.fn(async (..._a: unknown[]) => ({ pending: false, approved: true })),
+  // Typed to the REAL initNode9SaaS response so a test can express every branch
+  // the orchestrator reads (notably shadowMode) — an under-typed mock silently
+  // makes those branches untestable.
+  mockInitSaaS: vi.fn(
+    async (
+      ..._a: unknown[]
+    ): Promise<{
+      pending: boolean;
+      requestId?: string;
+      approved?: boolean;
+      reason?: string;
+      remoteApprovalOnly?: boolean;
+      shadowMode?: boolean;
+      shadowReason?: string;
+    }> => ({ pending: false, approved: true })
+  ),
   mockPollSaaS: vi.fn(async () => ({ approved: false })),
 }));
 
@@ -140,6 +155,20 @@ describe('taint review is never resolved by a non-human channel (task #16 vector
     expect(mockInitSaaS).toHaveBeenCalled();
     // initNode9SaaS(toolName, args, creds, meta, riskMetadata, agentPolicy, forceReview)
     expect(mockInitSaaS.mock.calls[0][6]).toBe(true);
+  });
+
+  // Found by enumerating every `approved:true` return reachable after the taint
+  // block, rather than re-reading the diff: the SHADOW-MODE branch sits six lines
+  // above the immediate-allow guard and had the same omission. A shadow/observe
+  // workspace (or a stale BE that answers shadowMode while ignoring the
+  // forceReview we now send) auto-allowed the exfiltration review. Its own
+  // comment already stated the principle — "a shadowMode response must not
+  // resolve it" — for smart rules and app-perms; taint belongs in that class.
+  it('a shadowMode response does NOT resolve a tainted call either', async () => {
+    mockInitSaaS.mockResolvedValue({ pending: false, shadowMode: true, approved: true });
+    const result = await authorizeHeadless('Bash', EXFIL_ARGS, { agent: 'MCP' }, {});
+    expect(result.approved).toBe(false);
+    expect(result.checkedBy).not.toBe('cloud');
   });
 
   // ── Guards against over-tightening ────────────────────────────────────────
