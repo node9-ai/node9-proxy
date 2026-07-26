@@ -79,24 +79,70 @@ function resolveCheckTight(v: string | undefined): 'review' | 'block' {
 // its spelling picks the unchecked one — verified live 2026-07-25: the heredoc
 // form sailed past the old -c-only pattern):
 //   1. code as argument:  python3 -c / -e / -eval
-//   2. code via stdin:    python3 - <<'PY' … (heredoc / redirected stdin)
-//   3. code via pipe:     echo "code" | python3
-// bash/sh are EXCLUDED from the pipe form: `curl | bash` is eval-remote /
-// pipe-chain territory (stricter families that run earlier).
-// Flag-tolerant (/review-pr finding): `python3 -u -c "x"` and
-// `echo x | python3 -u` are the same tunnel with an interpreter flag mixed in —
-// a fixed-position regex was trivially bypassable. `(?:\s+-[\w-]+)*` absorbs
-// any run of single-dash flags before the decisive token.
-const INLINE_EXEC_ARG =
-  /^(python3?|bash|sh|zsh|perl|ruby|node|php|lua)(?:\s+-[\w-]+)*\s+(-c|-e|-eval)\s/i;
-const INLINE_EXEC_STDIN =
-  /^(python3?|bash|sh|zsh|perl|ruby|node|php|lua)(?:\s+-[\w-]+)*\s+-\s*(<<|<|$)/i;
-const INLINE_EXEC_PIPE =
-  /\|\s*(python3?|perl|ruby|node|php|lua)(?:\s+-[\w-]+)*\s*(\s-\s*)?($|\n)/im;
+//   2. code via stdin:    python3 - <<'PY' / python3 < file (heredoc/redirect)
+//   3. code via pipe:     echo "code" | python3   (bare interpreter, no script)
+//
+// SEGMENT-BASED (/code-review round 2): the earlier ^-anchored regexes missed
+// every chained/env-prefixed/path-qualified/versioned spelling (`cd x &&
+// python3 -c`, `FOO=1 python3 -c`, `./venv/bin/python -c`, `python3.11 -c`).
+// We split into simple-command segments, strip env assignments, normalize the
+// interpreter to its basename, then reason about ARGS — which also fixes the
+// pipe form's semantics: `cat data | node process.js` runs a SCRIPT (not
+// inline), `cat data | node` executes its stdin (inline).
+// Known limitation (accepted, same as the regex smart rules): splitting is
+// quote-blind, so a separator INSIDE a quoted string can fabricate a segment;
+// real quote-awareness means the mvdan AST — tracked as a follow-up.
+const INLINE_INTERP = /^(python[\d.]*|bash|sh|zsh|perl|ruby|node|php|lua)$/i;
+// Shells participate ONLY via the explicit forms (-c/-e, the bare `-` stdin
+// marker). The implicit-stdin rules must exclude them: `curl … | bash` is
+// eval-remote's BLOCK (running after this branch — flagging it here would
+// DOWNGRADE a Class-A block to review), and `bash <<'EOF'` is the everyday
+// multi-command idiom, not an inline-code tunnel.
+const INLINE_SHELL = /^(bash|sh|zsh)$/i;
 
 export function detectInlineExec(command: string): boolean {
-  const c = command.trim();
-  return INLINE_EXEC_ARG.test(c) || INLINE_EXEC_STDIN.test(c) || INLINE_EXEC_PIPE.test(c);
+  const pipeFed = command.includes('|');
+  // Simple-command boundaries: pipes, chains, subshells, backticks, newlines.
+  const segments = command.split(/\|\||&&|;|\||\n|\$\(|`|\(/);
+  for (const rawSeg of segments) {
+    const tokens = rawSeg.trim().split(/\s+/).filter(Boolean);
+    // Strip leading env assignments (FOO=1 BAR=x python3 …).
+    let i = 0;
+    while (i < tokens.length && /^[A-Za-z_]\w*=/.test(tokens[i])) i++;
+    if (i >= tokens.length) continue;
+    // Basename: /usr/bin/python3 and ./venv/bin/python are the interpreter too.
+    const base = tokens[i].split('/').pop() ?? tokens[i];
+    if (!INLINE_INTERP.test(base)) continue;
+    const args = tokens.slice(i + 1);
+
+    let hadRedirect = false;
+    const positionals: string[] = [];
+    for (let j = 0; j < args.length; j++) {
+      const a = args[j];
+      // 2a. explicit stdin marker: `python3 -` (with or without heredoc)
+      if (a === '-') return true;
+      if (a.startsWith('<')) {
+        // `< file`, `<<EOF`, `<<'PY'` — skip the operator (and a detached target)
+        hadRedirect = true;
+        if (a === '<' || a === '<<') j++;
+        continue;
+      }
+      if (a.startsWith('-')) {
+        // 1. code as argument
+        if (/^-(c|e|eval)$/i.test(a)) return true;
+        continue;
+      }
+      positionals.push(a);
+    }
+    // 2b/3. no script argument + code arriving via redirect or a pipe:
+    // `python3 < payload.py`, `echo "code" | python3 -u`. A script WITH an
+    // input redirect (`python3 app.py < data.txt`) has positionals → not
+    // inline. Shells are excluded here (see INLINE_SHELL above).
+    if (positionals.length === 0 && (hadRedirect || pipeFed) && !INLINE_SHELL.test(base)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export interface PolicyContext {
