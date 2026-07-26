@@ -152,6 +152,18 @@ export const ConfigFileSchema = z
             reviewAction: z.enum(['review', 'block']).optional(),
           })
           .optional(),
+        // Command-checks governance. Class-B keys (evalDynamic, pipeChainHigh)
+        // deliberately exclude 'off' — tighten-only.
+        commandChecks: z
+          .object({
+            inlineExec: z.enum(['off', 'review', 'block']).optional(),
+            rmAdvisory: z.enum(['off', 'review', 'block']).optional(),
+            chmod: z.enum(['off', 'review', 'block']).optional(),
+            sqlDdl: z.enum(['off', 'review', 'block']).optional(),
+            evalDynamic: z.enum(['review', 'block']).optional(),
+            pipeChainHigh: z.enum(['review', 'block']).optional(),
+          })
+          .optional(),
         egress: z
           .object({
             enabled: z.boolean().optional(),

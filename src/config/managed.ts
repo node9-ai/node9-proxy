@@ -153,6 +153,47 @@ export function applyManagedDlp<
   return next;
 }
 
+// Command-checks governance (command-checks-governance-spec.md). Every key is
+// a floor over off<review<block (member may tighten, the org's value can't be
+// loosened locally); per-key lock `commandChecks<Key>` forces the exact value.
+// Class-B keys (evalDynamic, pipeChainHigh) are validated upstream to the
+// 2-value set — the order still ranks them correctly here.
+export const COMMAND_CHECK_ORDER = ['off', 'review', 'block'] as const;
+export const COMMAND_CHECK_KEYS = [
+  'inlineExec',
+  'rmAdvisory',
+  'chmod',
+  'sqlDdl',
+  'evalDynamic',
+  'pipeChainHigh',
+] as const;
+export type CommandCheckKey = (typeof COMMAND_CHECK_KEYS)[number];
+export type ManagedCommandChecks = Partial<Record<CommandCheckKey, string>>;
+
+export function applyManagedCommandChecks<T extends Partial<Record<CommandCheckKey, string>>>(
+  local: T,
+  managed: ManagedCommandChecks,
+  locked: string[]
+): T {
+  const next: T = { ...local };
+  for (const key of COMMAND_CHECK_KEYS) {
+    const m = managed[key];
+    if (typeof m !== 'string') continue;
+    const lockKey = `commandChecks${key[0].toUpperCase()}${key.slice(1)}`;
+    const resolved = resolveByOrder(
+      COMMAND_CHECK_ORDER as unknown as string[],
+      local[key] ?? 'review',
+      m,
+      locked.includes(lockKey)
+    );
+    // Class-B safety: never store 'off' for tighten-only keys even if a
+    // hostile/buggy cloud value slips past upstream validation.
+    if ((key === 'evalDynamic' || key === 'pipeChainHigh') && resolved === 'off') continue;
+    next[key] = resolved as T[CommandCheckKey];
+  }
+  return next;
+}
+
 // Managed approver surfaces (Preferences v1). The org owns WHERE approvals happen
 // (force cloud, forbid terminal self-approve), so a present managed value
 // REPLACES the local one per-field.

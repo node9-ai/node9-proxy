@@ -169,6 +169,7 @@ export interface ManagedConfigCache {
     allowPrivate?: boolean;
   };
   dlp?: { enabled?: boolean; pii?: string; reviewAction?: string };
+  commandChecks?: Record<string, string>;
   approvers?: { native?: boolean; browser?: boolean; cloud?: boolean; terminal?: boolean };
   reviewChannel?: string;
   approvalTimeoutMs?: number;
@@ -205,6 +206,7 @@ interface CloudPolicyBody {
       allowPrivate?: unknown;
     };
     dlp?: { enabled?: unknown; pii?: unknown; reviewAction?: unknown };
+    commandChecks?: Record<string, unknown>;
     approvers?: { native?: unknown; browser?: unknown; cloud?: unknown; terminal?: unknown };
     reviewChannel?: unknown;
     approvalTimeoutMs?: unknown;
@@ -577,6 +579,20 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
       d.reviewAction = mc.dlp.reviewAction;
     if (d.enabled !== undefined || d.pii !== undefined || d.reviewAction !== undefined) out.dlp = d;
   }
+  // Command-checks governance — per-key enum validation, junk dropped. Class-B
+  // keys (evalDynamic, pipeChainHigh) reject 'off' at the wire.
+  if (mc.commandChecks && typeof mc.commandChecks === 'object') {
+    const cc: Record<string, string> = {};
+    for (const k of ['inlineExec', 'rmAdvisory', 'chmod', 'sqlDdl']) {
+      const v = (mc.commandChecks as Record<string, unknown>)[k];
+      if (v === 'off' || v === 'review' || v === 'block') cc[k] = v;
+    }
+    for (const k of ['evalDynamic', 'pipeChainHigh']) {
+      const v = (mc.commandChecks as Record<string, unknown>)[k];
+      if (v === 'review' || v === 'block') cc[k] = v;
+    }
+    if (Object.keys(cc).length > 0) out.commandChecks = cc;
+  }
   // Preferences: approvers (4 bools — where approvals may happen).
   if (mc.approvers && typeof mc.approvers === 'object') {
     const a: NonNullable<ManagedConfigCache['approvers']> = {};
@@ -665,6 +681,7 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
   return out.mode !== undefined ||
     out.egress !== undefined ||
     out.dlp !== undefined ||
+    out.commandChecks !== undefined ||
     out.approvers !== undefined ||
     out.reviewChannel !== undefined ||
     out.approvalTimeoutMs !== undefined ||

@@ -21,7 +21,8 @@ import {
   notifyActivitySocket,
   notifySessionTaint,
 } from '../../auth/daemon';
-import { scanText, redactText, scanInjection, type InjectionConfidence } from '../../dlp';
+import { scanArgs, scanText, redactText, scanInjection, type InjectionConfidence } from '../../dlp';
+import { hashArgs } from '../../audit/hasher';
 import { parseCpMvOp } from '../../utils/cp-mv-parser';
 import {
   extractToolName,
@@ -64,6 +65,42 @@ function atLeastConfidence(c: InjectionConfidence, min: 'medium' | 'high'): bool
 function sanitize(value: string): string {
   // eslint-disable-next-line no-control-regex
   return value.replace(/[\x00-\x1F\x7F]/g, '');
+}
+
+/**
+ * Build the `args` field of the PostToolUse row without leaking credentials.
+ *
+ * `redactSecrets` only masks LABEL-ATTACHED secrets (`Authorization:`,
+ * `token=`, `api_key=`, `password=`). A credential passed BARE — e.g. a JWT
+ * as a positional CLI argument (`./deploy.sh --token <jwt>`) — sails straight
+ * through it and lands in ~/.node9/audit.log in the clear. So run the real DLP
+ * scanner (the same one the PreToolUse gate uses) and, on ANY hit, store a hash
+ * instead of the value — the stance appendLocalAudit already takes for DLP rows
+ * (argsHash, never a plaintext preview).
+ *
+ * Never throws: this feeds the audit write, which must not be skipped
+ * (CLAUDE.md). Failures fall back to the hash rather than to plaintext — if we
+ * can't prove the args are clean, we don't store them raw. That also hardens a
+ * pre-existing hazard: `JSON.parse(redactSecrets(JSON.stringify(args)))` throws
+ * on unserialisable args, which used to drop the ENTIRE row.
+ */
+function buildArgsField(rawInput: unknown): Record<string, unknown> {
+  let hashed: Record<string, unknown> = {};
+  try {
+    hashed = { argsHash: hashArgs(rawInput) };
+  } catch {
+    /* hashing is itself best-effort — an unhashable arg still gets a row */
+  }
+  try {
+    const hit = scanArgs(rawInput);
+    // patternName/redactedSample are the same safe attribution fields
+    // appendLocalAudit stores; the sample is masked (first4…last4) by the
+    // scanner, so it identifies the finding without reproducing the secret.
+    if (hit) return { ...hashed, dlpPattern: hit.patternName, dlpSample: hit.redactedSample };
+    return { args: JSON.parse(redactSecrets(JSON.stringify(rawInput))) as unknown };
+  } catch {
+    return hashed;
+  }
 }
 
 export function registerLogCommand(program: Command): void {
@@ -192,7 +229,7 @@ export function registerLogCommand(program: Command): void {
           const entry: Record<string, unknown> = {
             ts: new Date().toISOString(),
             tool: tool,
-            args: JSON.parse(redactSecrets(JSON.stringify(rawInput))),
+            ...buildArgsField(rawInput),
             decision: 'allowed',
             source: reviewApproved ? 'inline-review-approved' : 'post-hook',
           };
