@@ -134,6 +134,21 @@ async function bootDaemon(home: string, build: string): Promise<void> {
   if (!up) throw new Error(`daemon (${build}) did not serve /health in 15s`);
 }
 
+/**
+ * ONE definition of "a drift warning", used by both the positive cases and the
+ * negative control — so all three tests agree on what they are asserting.
+ *
+ * An earlier draft matched the positive cases on a looser pattern than the
+ * control (bare `enforcing` passed a positive test but was not in the negative
+ * one). Harmless today — no non-drift line prints those words — but the
+ * asymmetry meant a copy change could satisfy "it warned" on unrelated text
+ * while the control still read silent. Both phrasings below come from
+ * describeBuildDrift (build-id.ts), the only producer of this text:
+ *   • version known  → "…it is enforcing a different build"
+ *   • no /health     → "…(no /health — older than vX) — it is enforcing OLD code"
+ */
+const DRIFT_WARNING = /enforcing (?:a )?different build|older than v|enforcing old code/;
+
 describe('task #18 G-A — status/doctor surface build drift (real daemon)', () => {
   it('status warns when the running daemon is a DIFFERENT build than installed', async (ctx) => {
     if (!free) return ctx.skip();
@@ -141,10 +156,11 @@ describe('task #18 G-A — status/doctor surface build drift (real daemon)', () 
     homes.push(home);
     await bootDaemon(home, '1.0.0+1'); // an OLD daemon holds the port
     const out = runCli('status', home, '9.9.9+9'); // CLI thinks the installed build is newer
-    // The daemon section must flag the mismatch — assert on structure/intent,
-    // not the exact sentence (copy-change resilient).
-    expect(out.toLowerCase()).toMatch(/different build|older|enforcing/);
-    expect(out).toContain('1.0.0'); // names the running build
+    // Assert on the warning's structure, not its exact sentence (copy-resilient),
+    // and that it NAMES the running build — a warning that omits which build is
+    // stale doesn't tell the user what to do.
+    expect(out.toLowerCase()).toMatch(DRIFT_WARNING);
+    expect(out).toContain('1.0.0');
   });
 
   it('doctor warns on the same drift', async (ctx) => {
@@ -153,7 +169,8 @@ describe('task #18 G-A — status/doctor surface build drift (real daemon)', () 
     homes.push(home);
     await bootDaemon(home, '1.0.0+1');
     const out = runCli('doctor', home, '9.9.9+9');
-    expect(out.toLowerCase()).toMatch(/different build|older|enforcing/);
+    expect(out.toLowerCase()).toMatch(DRIFT_WARNING);
+    expect(out).toContain('1.0.0');
   });
 
   it('status does NOT warn when the running build matches installed', async (ctx) => {
@@ -162,6 +179,6 @@ describe('task #18 G-A — status/doctor surface build drift (real daemon)', () 
     homes.push(home);
     await bootDaemon(home, '5.5.5+5');
     const out = runCli('status', home, '5.5.5+5'); // same build → no drift
-    expect(out.toLowerCase()).not.toMatch(/different build|enforcing (?:a )?different|older than/);
+    expect(out.toLowerCase()).not.toMatch(DRIFT_WARNING);
   });
 });
