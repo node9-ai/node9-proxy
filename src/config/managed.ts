@@ -180,12 +180,23 @@ export function applyManagedCommandChecks<T extends Partial<Record<CommandCheckK
     const m = managed[key];
     if (typeof m !== 'string') continue;
     const lockKey = `commandChecks${key[0].toUpperCase()}${key.slice(1)}`;
-    const resolved = resolveByOrder(
-      COMMAND_CHECK_ORDER as unknown as string[],
-      local[key] ?? 'review',
-      m,
-      locked.includes(lockKey)
-    );
+    const localValue = local[key];
+    // NO local opinion → the org's value applies verbatim. The floor compares
+    // an admin value against a DEV'S CHOICE; treating an absent choice as the
+    // default 'review' made the default masquerade as a deliberate local
+    // setting, and since off < review the floor silently discarded every
+    // admin 'off' (founder QA 2026-07-26: dashboard said off, gate stayed
+    // review). Only dlp.pii escaped this because its default is the WEAKEST
+    // value, so an absent local could never out-rank the managed one.
+    const resolved =
+      localValue === undefined
+        ? m
+        : resolveByOrder(
+            COMMAND_CHECK_ORDER as unknown as string[],
+            localValue,
+            m,
+            locked.includes(lockKey)
+          );
     // Class-B safety: never store 'off' for tighten-only keys even if a
     // hostile/buggy cloud value slips past upstream validation.
     if ((key === 'evalDynamic' || key === 'pipeChainHigh') && resolved === 'off') continue;
