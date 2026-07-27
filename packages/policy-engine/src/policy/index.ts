@@ -155,6 +155,15 @@ export interface PolicyContext {
    * If `requireApproval === false`, strict mode skips the catch-all review.
    */
   activeEnvironment?: { requireApproval?: boolean };
+  /**
+   * Task #20: evaluate the full rule chain even for an ignoredTools match.
+   * Set by the orchestrator's jail guard AFTER it has already found a
+   * jailed/sensitive path in a file-tool call — without this, the tier-1
+   * fast path below returns 'allow' before the jail shield's `tool:'*'`
+   * rules are ever consulted, making the jail engine-invisible to
+   * Read/Grep/Glob. Opt-in per call; never set on the hot path.
+   */
+  skipIgnoredFastPath?: boolean;
 }
 
 export type ProvenanceTrust = 'system' | 'managed' | 'user' | 'suspect' | 'unknown';
@@ -370,7 +379,9 @@ export async function evaluatePolicy(
   }
 
   // 1. Ignored tools (Fast Path) - Always allow these first
-  if (wouldBeIgnored) return { decision: 'allow' };
+  // Task #20: the jail guard sets skipIgnoredFastPath after finding a jailed
+  // path in a file-tool call — the shield's rules must get to speak.
+  if (wouldBeIgnored && !context.skipIgnoredFastPath) return { decision: 'allow' };
 
   // AST FS-op gate — only fires for AI-driven calls on bash-shaped tools.
   // node9 is AI-driven; manual (Terminal) users are trusted and reach the

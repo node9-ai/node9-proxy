@@ -64,8 +64,33 @@ export function toolRule(tool: string, verdict: Verdict, reason?: string): Smart
 }
 
 /**
- * Jail a path in BOTH dimensions: a bash `command` regex AND an any-tool
- * `file_path` regex. Returns [] for a path that yields no fragment.
+ * Test a candidate string against a jailable path using the SAME regex the
+ * shield rules embed (task #20: the orchestrator's file-tool guard must never
+ * disagree with the engine about what counts as a jailed path — one matcher).
+ * Returns false for a path that yields no fragment.
+ */
+export function pathMatchesFragment(candidate: string, rawPath: string): boolean {
+  const value = pathToRegexFragment(rawPath);
+  if (!value || !candidate) return false;
+  try {
+    return new RegExp(value).test(candidate);
+  } catch {
+    // Fail toward "matched" is wrong here (would block everything on a bad
+    // fragment); the fragment is built from escaped segments so this is
+    // unreachable in practice — mirror the engine's invalid-regex → no-match.
+    return false;
+  }
+}
+
+/**
+ * Jail a path in BOTH dimensions: a bash `command` regex AND any-tool rules
+ * for the arg fields file tools actually send. Returns [] for a path that
+ * yields no fragment.
+ *
+ * Task #20: the engine resolves condition fields by exact name (a missing
+ * field FAILS the condition), so a single `file_path` rule can never match
+ * `Grep {pattern, path}` or `Glob {pattern}` — the jail was engine-invisible
+ * to every file tool except Read. One rule per field, OR-ed at the rule level.
  */
 export function pathRules(rawPath: string, verdict: Verdict, reason?: string): SmartRule[] {
   const value = pathToRegexFragment(rawPath);
@@ -80,10 +105,26 @@ export function pathRules(rawPath: string, verdict: Verdict, reason?: string): S
       verdict,
       reason: why,
     },
+    // Keep the historical `-anytool` name for the file_path rule: the
+    // rule→shield attribution maps (Report SHIELDS panel) key on rule names.
     {
       name: `${verdict}-path-${s}-anytool`,
       tool: '*',
       conditions: [{ field: 'file_path', op: 'matches', value }],
+      verdict,
+      reason: why,
+    },
+    {
+      name: `${verdict}-path-${s}-anytool-path`,
+      tool: '*',
+      conditions: [{ field: 'path', op: 'matches', value }],
+      verdict,
+      reason: why,
+    },
+    {
+      name: `${verdict}-path-${s}-anytool-pattern`,
+      tool: '*',
+      conditions: [{ field: 'pattern', op: 'matches', value }],
       verdict,
       reason: why,
     },

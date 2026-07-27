@@ -7,7 +7,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { buildShield, pathToRegexFragment } from './build';
+import { buildShield, pathMatchesFragment, pathToRegexFragment } from './build';
 import {
   installShield,
   readActiveShields,
@@ -72,6 +72,21 @@ export function addJailPath(rawPath: string, verdict: JailVerdict): JailPath[] {
   const next = [...readJailPaths().filter((p) => p.path !== norm), { path: norm, verdict }];
   writeJailPaths(next);
   return next;
+}
+
+/**
+ * Does a candidate string (a file_path / path / pattern arg from a file tool)
+ * hit a jailed path? Uses the SAME regex fragment the shield rules embed, so
+ * the orchestrator's fast-path guard and the policy engine can never disagree
+ * about what counts as jailed (task #20). Returns the matching entry (its
+ * verdict decides block vs review) or null.
+ */
+export function findJailedPath(candidate: string): JailPath | null {
+  if (!candidate) return null;
+  for (const entry of readJailPaths()) {
+    if (pathMatchesFragment(candidate, entry.path)) return entry;
+  }
+  return null;
 }
 
 /** Remove a path (exact match). Returns whether it was present + the new list. */

@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from 'vitest';
 import safeRegex from 'safe-regex2';
-import { toolRule, pathRules, buildShield } from '../shields/build';
+import { toolRule, pathRules, pathMatchesFragment, buildShield } from '../shields/build';
 import { validateShieldDefinition } from '@node9/policy-engine';
 
 describe('toolRule', () => {
@@ -24,13 +24,22 @@ describe('toolRule', () => {
 });
 
 describe('pathRules', () => {
-  it('emits two rules — bash command + any-tool file_path — for one path', () => {
+  it('emits four rules — bash command + any-tool file_path/path/pattern — for one path', () => {
+    // Task #20: one rule per arg field the file tools actually send. The
+    // engine resolves condition fields by exact name (missing = fail), so a
+    // lone file_path rule can never match Grep {pattern, path} or Glob
+    // {pattern} — that gap made the jail engine-invisible to file tools.
     const rules = pathRules('~/.gmail-mcp', 'block');
-    expect(rules).toHaveLength(2);
+    expect(rules).toHaveLength(4);
     const bash = rules.find((r) => r.tool === 'bash')!;
-    const anytool = rules.find((r) => r.tool === '*')!;
     expect(bash.conditions[0].field).toBe('command');
-    expect(anytool.conditions[0].field).toBe('file_path');
+    const anytoolFields = rules.filter((r) => r.tool === '*').map((r) => r.conditions[0].field);
+    expect(anytoolFields.sort()).toEqual(['file_path', 'path', 'pattern']);
+    // The historical `-anytool` name stays on the file_path rule — the
+    // rule→shield attribution maps key on rule names.
+    expect(rules.find((r) => r.conditions[0].field === 'file_path')!.name).toBe(
+      'block-path-gmail-mcp-anytool'
+    );
     for (const r of rules) {
       expect(r.verdict).toBe('block');
       expect(r.conditions[0].op).toBe('matches');
@@ -58,6 +67,25 @@ describe('pathRules', () => {
   });
 });
 
+describe('pathMatchesFragment (task #20 — the guard-side half of the one matcher)', () => {
+  it('agrees with the shield rule regex on hits and misses', () => {
+    // tilde-stored path vs absolute candidate — the exact prod shape
+    expect(pathMatchesFragment('/home/u/.gmail-mcp/creds.json', '~/.gmail-mcp')).toBe(true);
+    expect(pathMatchesFragment('/tmp/x/.secrets/key.txt', '/tmp/x/.secrets')).toBe(true);
+    // the dir itself and a glob over it (Glob {pattern: '<dir>/*'})
+    expect(pathMatchesFragment('/tmp/x/.secrets', '/tmp/x/.secrets')).toBe(true);
+    expect(pathMatchesFragment('/tmp/x/.secrets/*', '/tmp/x/.secrets')).toBe(true);
+    // no prefix-matching, no substring noise
+    expect(pathMatchesFragment('/home/u/.gmail-mcphost/x', '~/.gmail-mcp')).toBe(false);
+    expect(pathMatchesFragment('/tmp/other/file.txt', '/tmp/x/.secrets')).toBe(false);
+  });
+
+  it('is false for empty candidate or a too-broad path (no usable fragment)', () => {
+    expect(pathMatchesFragment('', '~/.gmail-mcp')).toBe(false);
+    expect(pathMatchesFragment('/anything', '~')).toBe(false);
+  });
+});
+
 describe('buildShield', () => {
   it('assembles a complete, valid ShieldDefinition from inline inputs', () => {
     const def = buildShield({
@@ -69,8 +97,8 @@ describe('buildShield', () => {
     expect(def.name).toBe('my-gmail');
     expect(def.aliases).toEqual([]);
     expect(def.dangerousWords).toEqual([]);
-    // 2 path rules + 1 tool rule
-    expect(def.smartRules).toHaveLength(3);
+    // 4 path rules (bash + file_path/path/pattern, task #20) + 1 tool rule
+    expect(def.smartRules).toHaveLength(5);
     // must pass the engine validator (what installShield runs)
     const v = validateShieldDefinition(def);
     expect('ok' in v).toBe(true);

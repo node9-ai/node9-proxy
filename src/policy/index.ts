@@ -65,7 +65,11 @@ export async function evaluatePolicy(
   toolName: string,
   args?: unknown,
   agent?: string,
-  cwd?: string
+  cwd?: string,
+  // Task #20: the orchestrator's jail guard needs the engine to evaluate the
+  // full rule chain for a file tool that would otherwise take the ignored
+  // fast path (it has already found a jailed/sensitive path in the args).
+  opts?: { skipIgnoredFastPath?: boolean }
 ): Promise<PolicyVerdict> {
   const config = getConfig();
   const activeEnvironment = getActiveEnvironment(config) ?? undefined;
@@ -73,7 +77,7 @@ export async function evaluatePolicy(
     config,
     toolName,
     args,
-    { agent, cwd, activeEnvironment },
+    { agent, cwd, activeEnvironment, skipIgnoredFastPath: opts?.skipIgnoredFastPath },
     {
       checkProvenance,
       // Managed → match against the org list (frozen with the rest of managed

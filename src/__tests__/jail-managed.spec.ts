@@ -47,7 +47,7 @@ describe('managed jailPaths apply', () => {
     const jail = getConfig().policy.smartRules.filter(
       (r) => r.name?.startsWith('org:') && r.name.includes('-path-')
     );
-    expect(jail.length).toBe(2); // -bash + -anytool
+    expect(jail.length).toBe(4); // -bash + -anytool + -anytool-path + -anytool-pattern (task #20)
     expect(jail.every((r) => r.verdict === 'block')).toBe(true);
     expect(jail.some((r) => r.name?.endsWith('-bash'))).toBe(true);
   });

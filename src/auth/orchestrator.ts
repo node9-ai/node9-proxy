@@ -31,6 +31,7 @@ import {
 import { initNode9SaaS, pollNode9SaaS, resolveNode9SaaS } from './cloud';
 import { recordAndCheck } from '../loop-detector';
 import { readActiveShields } from '../shields';
+import { findJailedPath, USER_JAIL_SHIELD } from '../shields/jail';
 
 export interface AuthResult {
   approved: boolean;
@@ -975,9 +976,16 @@ async function _authorizeHeadlessCore(
       };
     }
   } else if (!taintWarning && !appPermReview) {
-    // project-jail: if the shield is active, don't fast-path Read/Grep/Glob
-    // calls that target sensitive credential paths — let them fall through to
-    // policy evaluation so the shield's block rules can fire.
+    // Jail guard (task #20): when a jail shield is armed, Read/Grep/Glob calls
+    // that target a jailed or sensitive path must NOT take the ignoredTools
+    // fast path — the jail's whole point is stopping file-tool reads.
+    //
+    // History: this guard used to check ONLY 'project-jail' while `jail add`
+    // enables 'user-jail' (shields/jail.ts USER_JAIL_SHIELD), and its inner
+    // test was scanFilePath — which knows built-in DLP paths, never user-added
+    // jail paths. Net effect: the jail blocked Bash but was INERT for the file
+    // tools (the primary way an agent reads a file), while `jail add` printed
+    // "reads now BLOCK". Found by the jail gauntlet on its first probe.
     const toolLower = toolName.toLowerCase();
     const isFileTool =
       toolLower === 'read' ||
@@ -986,16 +994,56 @@ async function _authorizeHeadlessCore(
       toolLower === 'read_file' ||
       toolLower === 'grep_search' ||
       toolLower === 'list_files';
-    if (isFileTool && readActiveShields().includes('project-jail')) {
+    const activeShields = isFileTool ? readActiveShields() : [];
+    if (
+      isFileTool &&
+      (activeShields.includes('project-jail') || activeShields.includes(USER_JAIL_SHIELD))
+    ) {
       const argsObj =
         args && typeof args === 'object' && !Array.isArray(args)
           ? (args as Record<string, unknown>)
           : {};
-      const filePath = String(
-        argsObj.file_path ?? argsObj.path ?? argsObj.pattern ?? argsObj.filename ?? ''
-      );
-      if (filePath && scanFilePath(filePath)) {
-        // Sensitive path — skip fast-path, fall through to policy evaluation
+      // ALL candidate fields, not the first non-empty one: Grep sends the
+      // jailed directory in `path` while `pattern` also exists, Glob the
+      // reverse — a first-match pick can check the wrong field.
+      const candidates = ['file_path', 'path', 'pattern', 'filename']
+        .map((k) => argsObj[k])
+        .filter((v): v is string => typeof v === 'string' && v.length > 0);
+      const jailHit = candidates.map(findJailedPath).find(Boolean) ?? null;
+      const sensitiveHit = candidates.some((c) => scanFilePath(c));
+      if (jailHit || sensitiveHit) {
+        // Let THE ENGINE decide — the shield's own rules carry the verdict and
+        // the rule name (one matcher, one decision-maker; no guard-local
+        // verdict logic to drift out of sync). skipIgnoredFastPath: without it
+        // the engine's tier-1 ignored fast path returns 'allow' before the
+        // shield's `tool:'*'` rules are consulted (the second half of #20).
+        const policyResult = await evaluatePolicy(toolName, args, meta?.agent, options?.cwd, {
+          skipIgnoredFastPath: true,
+        });
+        if (policyResult.decision === 'block') {
+          // Mirror the branch-1 hardBlock() shape so the block row is
+          // attributed to its rule (Report SHIELDS panel keys on ruleName).
+          if (!isManual)
+            appendLocalAudit(
+              toolName,
+              args,
+              'deny',
+              'smart-rule-block',
+              { ...meta, ruleName: policyResult.ruleName },
+              hashAuditArgs
+            );
+          return {
+            approved: false,
+            reason: policyResult.reason ?? 'Action explicitly blocked by Smart Policy.',
+            blockedBy: 'local-config',
+            blockedByLabel: policyResult.blockedByLabel,
+            ruleHit: policyResult.ruleName,
+          };
+        }
+        // Review verdict, or a hit the engine has no matching rule for (e.g. a
+        // filename-only hit, or a pre-fix user-jail.json not yet regenerated
+        // with path/pattern rules): fall through to the approver race — fail
+        // toward a human, never to allow.
       } else {
         if (!isManual) appendLocalAudit(toolName, args, 'allow', 'ignored', meta, hashAuditArgs);
         return { approved: true };
