@@ -31,7 +31,7 @@ import {
 import { initNode9SaaS, pollNode9SaaS, resolveNode9SaaS } from './cloud';
 import { recordAndCheck } from '../loop-detector';
 import { readActiveShields } from '../shields';
-import { findJailedPath, USER_JAIL_SHIELD } from '../shields/jail';
+import { findJailedPath, findJailedPathIn, USER_JAIL_SHIELD } from '../shields/jail';
 
 export interface AuthResult {
   approved: boolean;
@@ -995,9 +995,15 @@ async function _authorizeHeadlessCore(
       toolLower === 'grep_search' ||
       toolLower === 'list_files';
     const activeShields = isFileTool ? readActiveShields() : [];
+    // Task #22: an ORG-managed jail (managedConfig.jailPaths) enables no shield
+    // — it only injects org:-prefixed rules — so arming on shields alone let
+    // the managed route keep task #20's bypass. Arm on the managed paths too.
+    const managedJail = isFileTool ? (config.policy.managedJailPaths ?? []) : [];
     if (
       isFileTool &&
-      (activeShields.includes('project-jail') || activeShields.includes(USER_JAIL_SHIELD))
+      (activeShields.includes('project-jail') ||
+        activeShields.includes(USER_JAIL_SHIELD) ||
+        managedJail.length > 0)
     ) {
       const argsObj =
         args && typeof args === 'object' && !Array.isArray(args)
@@ -1009,7 +1015,10 @@ async function _authorizeHeadlessCore(
       const candidates = ['file_path', 'path', 'pattern', 'filename']
         .map((k) => argsObj[k])
         .filter((v): v is string => typeof v === 'string' && v.length > 0);
-      const jailHit = candidates.map(findJailedPath).find(Boolean) ?? null;
+      const jailHit =
+        (candidates.map(findJailedPath).find(Boolean) ??
+          candidates.map((c) => findJailedPathIn(c, managedJail)).find(Boolean)) ||
+        null;
       const sensitiveHit = candidates.some((c) => scanFilePath(c));
       if (jailHit || sensitiveHit) {
         // Let THE ENGINE decide — the shield's own rules carry the verdict and

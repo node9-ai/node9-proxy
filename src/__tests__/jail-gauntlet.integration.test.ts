@@ -26,7 +26,16 @@
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import fs from 'fs';
 import path from 'path';
-import { CLI, makeHome, runCli, probe, explain, cleanup } from './helpers/gauntlet';
+import {
+  CLI,
+  makeHome,
+  runCli,
+  probe,
+  explain,
+  cleanup,
+  writeConfig,
+  writeCloudCache,
+} from './helpers/gauntlet';
 
 const homes: string[] = [];
 function jailedHome(): { home: string; jailed: string } {
@@ -37,6 +46,34 @@ function jailedHome(): { home: string; jailed: string } {
   const r = runCli(home, ['jail', 'add', jailed]);
   expect(r.error).toBeUndefined();
   expect(r.status).toBe(0);
+  return { home, jailed };
+}
+
+/**
+ * The ORG-managed jail (task #22): managedConfig.jailPaths, no `jail add`.
+ * It enables no shield and writes no local path store — it only injects
+ * org:-prefixed rules — which is why it kept task #20's file-tool bypass after
+ * the local jail was fixed. Local mode is `observe` here on purpose: that is
+ * the exact production shape (task #21) and it must not soften the mandate.
+ */
+function orgJailedHome(): { home: string; jailed: string } {
+  const home = makeHome('node9-jail-gauntlet-org-');
+  homes.push(home);
+  const jailed = path.join(home, '.secrets');
+  fs.mkdirSync(jailed, { recursive: true });
+  writeConfig(home, {
+    settings: {
+      mode: 'observe',
+      approvalTimeoutMs: 0,
+      approvers: { native: false, browser: false, cloud: false, terminal: false },
+    },
+    policy: {},
+  });
+  writeCloudCache(home, {
+    fetchedAt: '2026-07-01T00:00:00Z',
+    rules: [],
+    managedConfig: { jailPaths: [{ path: jailed, verdict: 'block' }] },
+  });
   return { home, jailed };
 }
 
@@ -91,6 +128,41 @@ describe('jail gauntlet — the credential jail holds at the real gate', () => {
 
   it('an unjailed Read still takes the fast path (no blanket regression)', () => {
     const { home } = jailedHome();
+    const r = probe(home, 'Read', { file_path: '/tmp/harmless.txt' });
+    expect(r.verdict).toBe('allow');
+  });
+
+  // ── The ORG-managed jail (task #22) ───────────────────────────────────────
+  // Found by the real `node9 check` e2e AFTER task #20 shipped and every unit
+  // test was green: Bash blocked, Read allowed. The managed route enables no
+  // shield, so the guard never armed — and the existing jail-managed.spec only
+  // ever asserted Bash, the same blind spot that hid #20 in the first place.
+  it('CONTROL: an org-managed jail blocks a shell read (mandate armed)', () => {
+    const { home, jailed } = orgJailedHome();
+    const r = probe(home, 'Bash', { command: `cat ${jailed}/key.txt` });
+    expect(r.verdict).toBe('block');
+  });
+
+  it('an org-managed jail blocks the Read tool', () => {
+    const { home, jailed } = orgJailedHome();
+    const r = probe(home, 'Read', { file_path: path.join(jailed, 'key.txt') });
+    expect(r.verdict).toBe('block');
+  });
+
+  it('an org-managed jail blocks Grep on the jailed dir', () => {
+    const { home, jailed } = orgJailedHome();
+    const r = probe(home, 'Grep', { pattern: '.*', path: jailed });
+    expect(r.verdict).toBe('block');
+  });
+
+  it('an org-managed jail blocks Glob over the jailed dir', () => {
+    const { home, jailed } = orgJailedHome();
+    const r = probe(home, 'Glob', { pattern: path.join(jailed, '*') });
+    expect(r.verdict).toBe('block');
+  });
+
+  it('CONTROL: an org-managed jail still allows an unjailed Read', () => {
+    const { home } = orgJailedHome();
     const r = probe(home, 'Read', { file_path: '/tmp/harmless.txt' });
     expect(r.verdict).toBe('allow');
   });

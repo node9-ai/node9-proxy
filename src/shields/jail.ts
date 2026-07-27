@@ -82,8 +82,18 @@ export function addJailPath(rawPath: string, verdict: JailVerdict): JailPath[] {
  * verdict decides block vs review) or null.
  */
 export function findJailedPath(candidate: string): JailPath | null {
+  return findJailedPathIn(candidate, readJailPaths());
+}
+
+/**
+ * Same match, against an explicit list — used for the ORG-managed jail
+ * (config.policy.managedJailPaths), which has no local store. Task #22: the
+ * managed route reintroduced task #20's file-tool bypass because the guard
+ * could only see the local store; both now go through this one matcher.
+ */
+export function findJailedPathIn(candidate: string, paths: JailPath[]): JailPath | null {
   if (!candidate) return null;
-  for (const entry of readJailPaths()) {
+  for (const entry of paths) {
     if (pathMatchesFragment(candidate, entry.path)) return entry;
   }
   return null;
