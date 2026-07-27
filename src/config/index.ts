@@ -157,6 +157,11 @@ export interface Config {
     // Managed MCP per-tool permissions { serverKey: { bareTool: allow|review|block } }.
     // Applied from the managed cache; enforced in the gateway authorize path.
     appPermissions: Record<string, Record<string, 'allow' | 'review' | 'block'>>;
+    // Task #22: org-mandated credential-jail paths (managedConfig.jailPaths).
+    // They also expand into org:-prefixed smartRules, but the orchestrator's
+    // file-tool guard needs the PATHS themselves: rules alone can't tell it
+    // whether to stop a Read/Grep/Glob from taking the ignoredTools fast path.
+    managedJailPaths: Array<{ path: string; verdict: 'block' | 'review' }>;
   };
   environments: Record<string, EnvironmentConfig>;
 }
@@ -400,6 +405,7 @@ export const DEFAULT_CONFIG: Config = {
     trustedHosts: [],
     trustedHostsManaged: false,
     appPermissions: {},
+    managedJailPaths: [],
   },
   environments: {},
 };
@@ -749,6 +755,7 @@ export function getConfig(cwd?: string): Config {
     trustedHosts: [] as string[],
     trustedHostsManaged: false,
     appPermissions: {},
+    managedJailPaths: [] as Array<{ path: string; verdict: 'block' | 'review' }>,
   };
   const mergedEnvironments: Record<string, EnvironmentConfig> = { ...DEFAULT_CONFIG.environments };
 
@@ -929,6 +936,12 @@ export function getConfig(cwd?: string): Config {
   // shield mandate floors LOCAL observe/audit to standard, but honors a cloud
   // staged observe — the fleet chose that.
   let modeCloudStaged = false;
+  // Task #21: true when the ORG mandated ANY enforcement — not just a shield.
+  // Read from `mc` (the cloud layer) and never from the merged config, so a
+  // dev's OWN local egress/dlp opt-in can't drag their self-chosen observe up
+  // to standard. See cloudMandatesEnforcement's use at the mode floor below.
+  let cloudMandatesEnforcement = false;
+  let cloudMandatesAppPerm = false;
   {
     const cacheFile = path.join(os.homedir(), '.node9', 'rules-cache.json');
     try {
@@ -1121,6 +1134,12 @@ export function getConfig(cwd?: string): Config {
             for (const r of pathRules(path, verdict, 'org-managed jail')) {
               mergedPolicy.smartRules.push({ ...r, name: `org:${r.name}` });
             }
+            // Task #22: keep the PATHS too. The rules above are invisible to a
+            // Read/Grep/Glob that takes the ignoredTools fast path before any
+            // rule is consulted — the orchestrator's jail guard needs the paths
+            // to know it must stop that fast path (the same bypass task #20
+            // fixed for the local jail, which this managed route reintroduced).
+            mergedPolicy.managedJailPaths.push({ path, verdict });
           }
         }
         // Managed trusted hosts REPLACE the local list (the org owns the
@@ -1152,7 +1171,43 @@ export function getConfig(cwd?: string): Config {
             if (Object.keys(m).length) coerced[srv] = m;
           }
           mergedPolicy.appPermissions = coerced;
+          // Task #21 input, taken from the CLOUD-derived map by construction:
+          // reading mergedPolicy here would also see any future LOCAL
+          // appPermissions merge and start flooring a dev's own observe.
+          cloudMandatesAppPerm = Object.values(coerced).some((tools) =>
+            Object.values(tools).some((d) => d === 'block' || d === 'review')
+          );
         }
+        // Task #21: does the org mandate ANY enforcement? observe/audit make
+        // the orchestrator approve every call before a gate runs, so a mandate
+        // that doesn't floor the mode is silently unenforced — B1 #1 already
+        // established this for shields ("a mandated shield must actually
+        // enforce"); the same reasoning covers every mandate type below.
+        //
+        // A mandate counts only when it is actually switched ON: an all-`allow`
+        // appPermissions map, `dlp:{enabled:false}` or a `'off'` command check
+        // mandates nothing and must not tighten a dev's own observe.
+        //
+        // Deliberately EXCLUDED: approvers / reviewChannel / approvalTimeoutMs
+        // (they route a review, they don't enforce), trustedHosts (it LOOSENS —
+        // flooring on it would be perverse), and mode (already
+        // modeCloudControlled).
+        const on = (v: unknown): boolean =>
+          !!v && typeof v === 'object' && (v as { enabled?: unknown }).enabled === true;
+        cloudMandatesEnforcement =
+          cloudMandatesAppPerm ||
+          (Array.isArray(mc.jailPaths) &&
+            mc.jailPaths.some((jp) => typeof jp?.path === 'string' && jp.path.trim() !== '')) ||
+          on(mc.egress) ||
+          on(mc.dlp) ||
+          on(mc.injectionScan) ||
+          on(mc.skillPinning) ||
+          on(mc.loopDetection) ||
+          (!!mc.commandChecks &&
+            typeof mc.commandChecks === 'object' &&
+            Object.values(mc.commandChecks as Record<string, unknown>).some(
+              (v) => typeof v === 'string' && v !== 'off'
+            ));
       }
       if (raw.panicMode === true) {
         mergedSettings.panicMode = true;
@@ -1275,8 +1330,16 @@ export function getConfig(cwd?: string): Config {
   // A CLOUD staged observe (shadowMode) or a cloud-controlled/locked mode is
   // left alone — the fleet chose that. Floor to standard, not strict: enough to
   // enforce, no over-tightening.
+  //
+  // Task #21: the same argument holds for EVERY org mandate, but this was keyed
+  // on shields alone — so an org's app permissions, jail paths, egress, DLP,
+  // command checks, injection scan, skill pinning and loop detection were all
+  // silently unenforced on a device that set observe locally (verified at the
+  // gate: real ALLOWS with checkedBy:'audit'). Reachable in production because
+  // the SaaS ships those mandates with NO mode, leaving modeCloudControlled
+  // false. cloudMandatesEnforcement covers the whole set.
   if (
-    cloudManagedShields.length > 0 &&
+    (cloudManagedShields.length > 0 || cloudMandatesEnforcement) &&
     !modeCloudControlled &&
     !modeCloudStaged &&
     (mergedSettings.mode === 'observe' || mergedSettings.mode === 'audit')
