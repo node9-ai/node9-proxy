@@ -362,6 +362,33 @@ describe('managed commandChecks (floor + per-key locks)', () => {
     expect(out.chmod).toBeUndefined();
   });
 
+  // Founder QA 2026-07-26: the dashboard said inlineExec=off, the gate stayed
+  // at review. The floor compared the admin value against the DEFAULT ('review')
+  // as if the dev had chosen it, and off < review, so every admin 'off' was
+  // silently discarded. An absent local opinion must not out-rank the org.
+  it("an admin 'off' APPLIES when the device has no local opinion", () => {
+    const out = applyManagedCommandChecks({} as ManagedCommandChecks, { inlineExec: 'off' }, []);
+    expect(out.inlineExec).toBe('off');
+  });
+
+  it("an explicit local 'review' still out-ranks an admin 'off' (real floor)", () => {
+    const out = applyManagedCommandChecks(
+      { inlineExec: 'review' } as ManagedCommandChecks,
+      { inlineExec: 'off' },
+      []
+    );
+    expect(out.inlineExec).toBe('review');
+  });
+
+  it("a LOCKED admin 'off' beats even an explicit local 'review'", () => {
+    const out = applyManagedCommandChecks(
+      { inlineExec: 'review' } as ManagedCommandChecks,
+      { inlineExec: 'off' },
+      ['commandChecksInlineExec']
+    );
+    expect(out.inlineExec).toBe('off');
+  });
+
   it("keeps a stricter local 'block' over a cloud 'review'", () => {
     const out = applyManagedCommandChecks({ sqlDdl: 'block' }, { sqlDdl: 'review' }, []);
     expect(out.sqlDdl).toBe('block');
