@@ -1,3 +1,5 @@
+[![MCP Toplist](https://mcptoplist.com/badge/glama%2Fnode9-ai%2Fnode9-proxy.svg)](https://mcptoplist.com/server/glama%2Fnode9-ai%2Fnode9-proxy)
+
 <h1 align="center">🛡️ Node9</h1>
 <p align="center"><strong>What did your AI agent actually do? Find out.</strong></p>
 <p align="center">
