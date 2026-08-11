@@ -126,13 +126,24 @@ export interface ManagedDlp {
  * is preserved; untouched fields (scanIgnoredTools) carry through.
  */
 export function applyManagedDlp<
-  T extends { enabled: boolean; pii?: string; reviewAction?: string },
+  T extends { enabled: boolean; pii?: string; reviewAction?: string; scanIgnoredTools?: boolean },
 >(local: T, managed: ManagedDlp, locked: string[]): T {
   const next: T = { ...local };
   if (typeof managed.enabled === 'boolean') {
     next.enabled = locked.includes('dlpEnabled')
       ? managed.enabled
       : local.enabled || managed.enabled;
+  }
+  // Task #23: when the org turns DLP ON, a local `scanIgnoredTools:false` must
+  // not switch it back off for the whole ignoredTools class (read/grep/glob/ls
+  // — the most common agent operations). That is a LOOSENING, and the
+  // config-home law lets local config only tighten. The org cannot express this
+  // knob at all (ResolvedManagedConfig.dlp carries only enabled/pii/
+  // reviewAction), so without this floor the local value always won and the
+  // mandate was silently hollow. Measured exposure: secret-in-args for ignored
+  // tools; path-based sensitive reads stayed covered by the project-jail shield.
+  if (managed.enabled === true) {
+    next.scanIgnoredTools = true;
   }
   if (typeof managed.pii === 'string') {
     next.pii = resolveByOrder(
