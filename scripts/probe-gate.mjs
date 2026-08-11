@@ -65,7 +65,9 @@ function cfg(commandChecks, mode) {
 }
 
 const config = cfg(spec.commandChecks, spec.mode);
-console.log(`=== ${spec.label || 'probe'}  commandChecks=${JSON.stringify(spec.commandChecks || {})}  mode=${config.settings.mode}`);
+console.log(
+  `=== ${spec.label || 'probe'}  commandChecks=${JSON.stringify(spec.commandChecks || {})}  mode=${config.settings.mode}`
+);
 
 for (const command of cases) {
   let v;
@@ -78,5 +80,7 @@ for (const command of cases) {
   const why = v.blockedByLabel || v.ruleName || '';
   const tier = v.tier ? ` [t${v.tier}]` : '';
   // Single line per case: decision, the exact input, and what decided it.
-  console.log(`${String(v.decision).padEnd(6)} ${JSON.stringify(command).padEnd(64)} ${why}${tier}`);
+  console.log(
+    `${String(v.decision).padEnd(6)} ${JSON.stringify(command).padEnd(64)} ${why}${tier}`
+  );
 }
