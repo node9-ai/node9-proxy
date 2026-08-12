@@ -94,10 +94,11 @@ function resolveCheckTight(v: string | undefined): 'review' | 'block' {
 // real quote-awareness means the mvdan AST — tracked as a follow-up.
 const INLINE_INTERP = /^(python[\d.]*|bash|sh|zsh|perl|ruby|node|php|lua)$/i;
 // Shells participate ONLY via the explicit forms (-c/-e, the bare `-` stdin
-// marker). The implicit-stdin rules must exclude them: `curl … | bash` is
-// eval-remote's BLOCK (running after this branch — flagging it here would
-// DOWNGRADE a Class-A block to review), and `bash <<'EOF'` is the everyday
-// multi-command idiom, not an inline-code tunnel.
+// marker). The implicit-stdin rules must exclude them: `curl … | bash` belongs
+// to the pipe-to-shell/eval-remote family (Class A — those tiers now run
+// BEFORE this branch, but the exclusion stays so inline-exec never claims the
+// shape), and `bash <<'EOF'` is the everyday multi-command idiom, not an
+// inline-code tunnel.
 const INLINE_SHELL = /^(bash|sh|zsh)$/i;
 
 export function detectInlineExec(command: string): boolean {
@@ -244,6 +245,15 @@ function extractShellCommand(
   const fieldPath = toolInspection[matchingPattern];
   const value = getNestedValue(args, fieldPath);
   return typeof value === 'string' ? value : null;
+}
+
+/** Returns true when a tool's inspected field is a shell command — i.e. the
+ *  tool is shell-shaped even though its name is outside BASH_TOOL_NAMES
+ *  (e.g. `terminal.execute`). Mirrors isSqlTool below. */
+function inspectsShellCommand(toolName: string, toolInspection: Record<string, string>): boolean {
+  const patterns = Object.keys(toolInspection);
+  const matchingPattern = patterns.find((p) => matchesPattern(toolName, p));
+  return matchingPattern !== undefined && toolInspection[matchingPattern] === 'command';
 }
 
 /** Returns true when a tool's inspected field is SQL (sql or query). */
@@ -477,10 +487,37 @@ export async function evaluatePolicy(
     // all other user rules are unaffected. (Name coupling to the proxy-side
     // ADVISORY_SMART_RULES 'review-rm' is intentional; see src/config/index.ts.)
     const rmCleanupWaiver = bashCommand !== null && isRmCreatedInCommandCleanup(bashCommand);
+    // AST suppression is knob- and PIN-aware. Family-off semantics: a Class-C
+    // knob 'off' silences the whole family INCLUDING its regex twin (deliberate
+    // — sqlDdl:'off' must not resurrect the raw-regex rule and its FPs). The
+    // one exception is a cloud-PINNED (mandated) rule: the org mandated that
+    // shield on purpose, so a knob 'off' — reachable from a repo-carried
+    // config file — must not kill it. With the AST tier knob-disabled, the
+    // pinned rule is the only remaining guard and must speak.
+    const astSuppressed = (rule: SmartRule): boolean => {
+      if (bashCommand === null || !rule.name || !AST_FS_REGEX_RULES.has(rule.name)) return false;
+      const knob =
+        rule.name === 'review-drop-truncate-shell'
+          ? resolveCheck(config.policy.commandChecks?.sqlDdl)
+          : rule.name === 'shield:filesystem:review-chmod-777'
+            ? resolveCheck(config.policy.commandChecks?.chmod)
+            : undefined;
+      if (knob === 'off' && rule.pinned) return false;
+      return true;
+    };
+    // Bypass-by-spelling closure: rules written for `bash` (the six default
+    // shell-safety rules, shield rules like bash-safe) must cover EVERY tool
+    // that carries a shell command — `shell`, `run_shell_command`,
+    // `execute_bash`, `terminal.execute` (via toolInspection) — or an agent's
+    // tool-name spelling silently voids sudo/pipe-to-shell/force-push coverage
+    // (verified live 2026-08-12: all four read `allow` on defaults).
+    const shellShaped =
+      isBashTool(toolName) || inspectsShellCommand(toolName, config.policy.toolInspection);
     const matches = config.policy.smartRules.filter(
       (rule) =>
-        matchesPattern(toolName, rule.tool) &&
-        !(bashCommand !== null && rule.name && AST_FS_REGEX_RULES.has(rule.name)) &&
+        (matchesPattern(toolName, rule.tool) ||
+          (shellShaped && matchesPattern('bash', rule.tool))) &&
+        !astSuppressed(rule) &&
         !(rmCleanupWaiver && rule.name === 'review-rm' && rule.verdict === 'review') &&
         evaluateSmartConditions(args, rule)
     );
@@ -519,21 +556,6 @@ export async function evaluatePolicy(
     allTokens = analyzed.allTokens;
     pathTokens = analyzed.paths;
 
-    // Inline arbitrary code execution — governed by commandChecks.inlineExec
-    // ('off' | 'review' (default) | 'block'). detectInlineExec covers all
-    // three spellings of the tunnel; pipe-chain and eval-remote run EARLIER,
-    // so their stricter verdicts still own sensitive pipes and remote fetches.
-    const inlineAction = resolveCheck(config.policy.commandChecks?.inlineExec);
-    if (inlineAction !== 'off' && detectInlineExec(shellCommand)) {
-      return {
-        decision: inlineAction === 'block' ? 'block' : 'review',
-        blockedByLabel: 'Node9 Standard (Inline Execution)',
-        ruleDescription:
-          'The AI is running code directly from the command line. Review the full script below before allowing it to execute.',
-        tier: 3,
-      };
-    }
-
     // AST-based eval detection — structurally accurate, not fooled by string content
     const evalVerdict = detectDangerousShellExec(shellCommand);
     if (evalVerdict === 'block') {
@@ -571,6 +593,25 @@ export async function evaluatePolicy(
       resolveCheckTight(config.policy.commandChecks?.pipeChainHigh)
     );
     if (ptVerdict) return ptVerdict;
+
+    // Inline arbitrary code execution — governed by commandChecks.inlineExec
+    // ('off' | 'review' (default) | 'block'). MUST run AFTER eval-remote and
+    // pipe-chain above: this Class-C tier defaults to review, and for tools
+    // outside BASH_TOOL_NAMES (e.g. terminal.execute via toolInspection) the
+    // early Layer-1 block never ran — with inline-exec first, a Class-A
+    // pipe-chain CRITICAL exfil was downgraded to review, and 'off' perversely
+    // restored the block (found by /code-review 2026-08-12; the bash path was
+    // always safe because Layer-1 runs pipe-chain first).
+    const inlineAction = resolveCheck(config.policy.commandChecks?.inlineExec);
+    if (inlineAction !== 'off' && detectInlineExec(shellCommand)) {
+      return {
+        decision: inlineAction === 'block' ? 'block' : 'review',
+        blockedByLabel: 'Node9 Standard (Inline Execution)',
+        ruleDescription:
+          'The AI is running code directly from the command line. Review the full script below before allowing it to execute.',
+        tier: 3,
+      };
+    }
 
     // ── Egress / destination control (GAP-5) ────────────────────────────────
     // Gate WHERE network tools send data (curl/wget/scp/ssh/nc) against the

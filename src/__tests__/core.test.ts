@@ -1253,7 +1253,7 @@ describe('evaluatePolicy — smart rules', () => {
     expect(result.decision).toBe('block');
   });
 
-  it('smart rule does not match different tool', async () => {
+  it('smart rule does not match a different (non-shell) tool', async () => {
     mockProjectConfig({
       policy: {
         smartRules: [
@@ -1265,10 +1265,18 @@ describe('evaluatePolicy — smart rules', () => {
         ],
       },
     });
-    // Tool is 'shell', not 'bash' — rule should not match
-    const result = await evaluatePolicy('shell', { command: 'rm -rf /tmp/old' });
-    // Falls through to normal policy — /tmp/ is in sandboxPaths so it's allowed
+    // 'notebook_run' is not bash-shaped and not shell-inspected, so the
+    // bash-scoped rule must not match even though the arg text would.
+    // (A SHELL-shaped tool — shell/run_shell_command/terminal.execute — now
+    // DOES inherit bash rules via the shell-shape alias: an agent's tool-name
+    // spelling must not void sudo/pipe-to-shell coverage. See
+    // command-checks.spec.ts "Bypass-by-spelling".)
+    const result = await evaluatePolicy('notebook_run', { command: 'rm -rf /tmp/old' });
     expect(result.decision).toBe('allow');
+
+    // And the alias direction: 'shell' now matches the bash-scoped rule.
+    const shell = await evaluatePolicy('shell', { command: 'rm -rf /tmp/old' });
+    expect(shell.decision).toBe('block');
   });
 
   it('user smartRules are appended to defaults (both active)', async () => {
