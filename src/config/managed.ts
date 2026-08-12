@@ -75,7 +75,7 @@ export function applyManagedEgress<
     deny?: string[];
     allowPrivate?: boolean;
   },
->(local: T, managed: ManagedEgress, locked: string[]): T {
+>(local: T, managed: ManagedEgress, locked: string[], localModeUserSet = true): T {
   const next: T = { ...local };
   if (typeof managed.enabled === 'boolean') {
     next.enabled = locked.includes('egressEnabled')
@@ -83,11 +83,14 @@ export function applyManagedEgress<
       : local.enabled || managed.enabled;
   }
   if (typeof managed.mode === 'string') {
-    next.mode = resolveByOrder(
-      EGRESS_MODE_ORDER,
-      local.mode,
-      managed.mode,
-      locked.includes('egressMode')
+    // When the dev never set a mode, `local.mode` is the seeded default
+    // 'review', not a deliberate choice — the org value applies verbatim (a
+    // managed 'off' would otherwise always lose to the seeded 'review').
+    // Mirrors applyManagedCommandChecks' absent-local rule.
+    next.mode = (
+      localModeUserSet
+        ? resolveByOrder(EGRESS_MODE_ORDER, local.mode, managed.mode, locked.includes('egressMode'))
+        : managed.mode
     ) as T['mode'];
   }
   if (Array.isArray(managed.allow) && managed.allow.length > 0) {

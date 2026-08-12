@@ -759,7 +759,7 @@ export function getConfig(cwd?: string): Config {
   };
   const mergedEnvironments: Record<string, EnvironmentConfig> = { ...DEFAULT_CONFIG.environments };
 
-  const applyLayer = (source: Record<string, unknown> | null) => {
+  const applyLayer = (source: Record<string, unknown> | null, isProject = false) => {
     if (!source) return;
     const s = (source.settings || {}) as Partial<Config['settings']>;
     const p = (source.policy || {}) as Partial<Config['policy']>;
@@ -840,9 +840,21 @@ export function getConfig(cwd?: string): Config {
       const cc: NonNullable<Config['policy']['commandChecks']> = {
         ...mergedPolicy.commandChecks,
       };
+      // A repo-carried node9.config.json (the project layer) is agent-writable
+      // in-session, so it may only TIGHTEN command-checks, never weaken them:
+      // without this, an attacker-authored repo file could set inlineExec/chmod/
+      // sqlDdl to 'off' and disable four detection families with no managed
+      // floor present (/code-review wf_0ff1bc3d). The global (~/.node9) layer is
+      // the user's own home and keeps full control. Floor is over off<review<
+      // block; the incoming default when a key is unset in the global layer is
+      // 'review' (the engine's resolveCheck default), so a repo 'off' is clamped
+      // up to 'review'.
+      const rank = (v: string | undefined): number => (v === 'block' ? 2 : v === 'off' ? 0 : 1); // undefined/'review' → 1
       for (const k of ['inlineExec', 'rmAdvisory', 'chmod', 'sqlDdl'] as const) {
         const v = src[k];
-        if (v === 'off' || v === 'review' || v === 'block') cc[k] = v;
+        if (v !== 'off' && v !== 'review' && v !== 'block') continue;
+        if (isProject && rank(v) < rank(cc[k])) continue; // repo may not weaken
+        cc[k] = v;
       }
       for (const k of ['evalDynamic', 'pipeChainHigh'] as const) {
         const v = src[k];
@@ -853,7 +865,10 @@ export function getConfig(cwd?: string): Config {
     if (p.egress) {
       const e = p.egress as Partial<Config['policy']['egress']>;
       if (e.enabled !== undefined) mergedPolicy.egress.enabled = e.enabled;
-      if (e.mode !== undefined) mergedPolicy.egress.mode = e.mode;
+      if (e.mode !== undefined) {
+        mergedPolicy.egress.mode = e.mode;
+        egressModeUserSet = true;
+      }
       if (Array.isArray(e.allow)) mergedPolicy.egress.allow.push(...e.allow);
       if (Array.isArray(e.deny)) mergedPolicy.egress.deny.push(...e.deny);
       if (e.allowPrivate !== undefined) mergedPolicy.egress.allowPrivate = e.allowPrivate;
@@ -902,8 +917,17 @@ export function getConfig(cwd?: string): Config {
     }
   };
 
+  // True once a local layer (global or project) actually set egress.mode. The
+  // default 'review' is seeded into mergedPolicy.egress before any merge, so
+  // applyManagedEgress otherwise can't tell "dev chose review" from "dev never
+  // spoke" — and a managed 'off' always lost to the seeded 'review'
+  // (/code-review wf_0ff1bc3d, same shape as the c09f7c4 floor bug). When the
+  // dev never set mode, the org value applies verbatim. Declared before the
+  // applyLayer calls that write it (closure TDZ).
+  let egressModeUserSet = false;
+
   applyLayer(globalConfig);
-  applyLayer(projectConfig);
+  applyLayer(projectConfig, /* isProject */ true);
 
   // ── Cloud rules cache layer ───────────────────────────────────────────────
   // Rules synced from the cloud dashboard are applied after local config so
@@ -926,6 +950,13 @@ export function getConfig(cwd?: string): Config {
   // Enforced at the override loop below (`cloudManagedSet`), where a local
   // per-rule override is skipped for any shield in this set (B1).
   let cloudManagedShields: string[] = [];
+  // Command-check keys the CLOUD set (managed), and the subset it LOCKED. The
+  // advisory-rule injection below consults these to PIN a managed
+  // rmAdvisory/sqlDdl 'block' so a local same-named rule can't pre-empt it and
+  // an earlier unpinned `allow-rm-safe-paths` can't out-precede it (both
+  // reachable from a repo-carried config file). Empty when unmanaged — the
+  // dev's own rules keep full control.
+  const managedCommandCheckKeys = new Set<string>();
   // B1 (#1): true once the cloud has SET or LOCKED the mode. When true, the
   // NODE9_MODE env var (applied last, below) must not override it — otherwise a
   // single `NODE9_MODE=observe` defeats a `locked:['mode']` mandate and turns
@@ -1024,7 +1055,8 @@ export function getConfig(cwd?: string): Config {
               allowPrivate:
                 typeof mc.egress.allowPrivate === 'boolean' ? mc.egress.allowPrivate : undefined,
             },
-            locked
+            locked,
+            egressModeUserSet
           );
         }
         // M2c: policy.dlp. enabled force-on; pii floor over off<block;
@@ -1052,6 +1084,11 @@ export function getConfig(cwd?: string): Config {
             mc.commandChecks as Record<string, string>,
             locked
           );
+          // Remember which advisory knobs the ORG set/locked so the injection
+          // loop can pin them (see managedCommandCheckKeys declaration).
+          for (const [key, val] of Object.entries(mc.commandChecks)) {
+            if (typeof val === 'string') managedCommandCheckKeys.add(key);
+          }
         }
         // Preferences: settings.approvers — the org owns where approvals happen,
         // so a managed value replaces the local surface per-field.
@@ -1292,23 +1329,45 @@ export function getConfig(cwd?: string): Config {
   const existingAdvisoryNames = new Set(mergedPolicy.smartRules.map((r) => r.name));
   // Command-checks governance at the injection point: rmAdvisory governs
   // `review-rm`; sqlDdl governs the three SQL advisories. Only REVIEW-verdict
-  // advisories are governable — `allow-rm-safe-paths` (allow) is untouched,
-  // and user-defined same-name rules still pre-empt injection entirely.
+  // advisories are governable — `allow-rm-safe-paths` (allow) is untouched.
   // 'off' → don't inject; 'block' → inject with a block verdict. NOTE
   // (documented in the FE tooltip): under 'block', the engine's same-command
   // scratch-cleanup waiver no longer waives review-rm — the waiver is gated
   // verdict==='review' by design (it may drop a prompt, never a block).
+  //
+  // GOVERNANCE INTEGRITY (/code-review wf_0ff1bc3d): when the knob is MANAGED
+  // (org-set), the injected rule is PINNED and any same-named local rule is
+  // EVICTED first. Without this, a repo-carried config could defeat a locked
+  // rmAdvisory='block' two ways: (1) a local rule named `review-rm` pre-empted
+  // injection outright; (2) the unpinned `allow-rm-safe-paths` (injected at
+  // array-index 0) out-ranked an unpinned block by first-match. Pinning makes
+  // the strictest pinned verdict win regardless of order or a local twin. When
+  // the knob is UNMANAGED (a dev's own preference), behaviour is unchanged:
+  // local same-name rules still pre-empt, nothing is pinned.
   const cc = mergedPolicy.commandChecks ?? {};
-  const advisoryKnob = (name: string | undefined): string | undefined => {
-    if (name === 'review-rm') return cc.rmAdvisory;
-    if (name?.endsWith('-sql')) return cc.sqlDdl;
+  const advisoryKnobKey = (name: string | undefined): string | undefined => {
+    if (name === 'review-rm') return 'rmAdvisory';
+    if (name?.endsWith('-sql')) return 'sqlDdl';
     return undefined;
   };
   for (const rule of ADVISORY_SMART_RULES) {
-    if (existingAdvisoryNames.has(rule.name)) continue;
-    const knob = rule.verdict === 'review' ? advisoryKnob(rule.name) : undefined;
+    const knobKey = rule.verdict === 'review' ? advisoryKnobKey(rule.name) : undefined;
+    const knob = knobKey ? (cc as Record<string, string | undefined>)[knobKey] : undefined;
     if (knob === 'off') continue;
-    mergedPolicy.smartRules.push(knob === 'block' ? { ...rule, verdict: 'block' as const } : rule);
+    const managed = knobKey ? managedCommandCheckKeys.has(knobKey) : false;
+    // Unmanaged (or ungoverned allow rule): a local same-name rule pre-empts.
+    if (!managed && existingAdvisoryNames.has(rule.name)) continue;
+    if (managed && existingAdvisoryNames.has(rule.name)) {
+      // Evict the local twin so the org's mandate can't be shadowed by name.
+      mergedPolicy.smartRules = mergedPolicy.smartRules.filter((r) => r.name !== rule.name);
+    }
+    const injected = knob === 'block' ? { ...rule, verdict: 'block' as const } : { ...rule };
+    // Pin only a managed BLOCK: it must out-rank the earlier unpinned
+    // allow-rm-safe-paths so `rm node_modules` also blocks under an org
+    // mandate. A managed 'review' stays unpinned so the safe-path allow keeps
+    // reducing false positives (eviction above already defeats a local twin).
+    if (managed && injected.verdict === 'block') injected.pinned = true;
+    mergedPolicy.smartRules.push(injected);
   }
 
   // NODE9_MODE is a local dev convenience — honoured only when the cloud hasn't

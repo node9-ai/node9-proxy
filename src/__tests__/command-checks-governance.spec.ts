@@ -1,0 +1,212 @@
+// src/__tests__/command-checks-governance.spec.ts
+//
+// /code-review wf_0ff1bc3d — governance integrity for the command-checks arc.
+// Three holes let a repo-carried config or a local smart rule defeat an admin:
+//
+//  3a. A managed rmAdvisory/sqlDdl 'block' was defeated by a local smart rule:
+//      a local rule named `review-rm` pre-empted injection outright, and the
+//      unpinned `allow-rm-safe-paths` out-ranked an unpinned block by
+//      first-match. The injected advisory is now EVICTED-and-PINNED when the
+//      knob is org-managed.
+//  3b. A repo `node9.config.json` (agent-writable) could set inlineExec/chmod/
+//      sqlDdl to 'off' with no managed floor present. The project layer is now
+//      tighten-only for command-checks.
+//  3c. A managed egress mode 'off' was discarded when the dev never set a mode
+//      (the seeded default 'review' out-ranked it). Absent-local now takes the
+//      org value verbatim.
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { getConfig, _resetConfigCache } from '../config';
+import { authorizeHeadless, _resetConfigCache as _resetCore } from '../core.js';
+
+const APPROVERS_OFF = { native: false, browser: false, cloud: false, terminal: false };
+const BASE_SETTINGS = { mode: 'standard', approvalTimeoutMs: 0, approvers: APPROVERS_OFF };
+
+describe('command-checks governance integrity (/code-review wf_0ff1bc3d)', () => {
+  let tmpHome: string;
+  let tmpProj: string;
+  let origHome: string | undefined;
+  let origUserprofile: string | undefined;
+
+  beforeEach(() => {
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-ccgov-home-'));
+    tmpProj = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-ccgov-proj-'));
+    origHome = process.env.HOME;
+    origUserprofile = process.env.USERPROFILE;
+    process.env.HOME = tmpHome;
+    process.env.USERPROFILE = tmpHome;
+    delete process.env.NODE9_API_KEY;
+    fs.mkdirSync(path.join(tmpHome, '.node9'), { recursive: true });
+    _resetConfigCache();
+    _resetCore();
+  });
+
+  afterEach(() => {
+    if (origHome !== undefined) process.env.HOME = origHome;
+    else delete process.env.HOME;
+    if (origUserprofile !== undefined) process.env.USERPROFILE = origUserprofile;
+    else delete process.env.USERPROFILE;
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+    fs.rmSync(tmpProj, { recursive: true, force: true });
+    _resetConfigCache();
+    _resetCore();
+  });
+
+  /** Global ~/.node9/config.json + a cloud rules-cache (managedConfig). */
+  function seedHome(policy: object, cache?: object): void {
+    fs.writeFileSync(
+      path.join(tmpHome, '.node9', 'config.json'),
+      JSON.stringify({ settings: BASE_SETTINGS, policy })
+    );
+    if (cache)
+      fs.writeFileSync(path.join(tmpHome, '.node9', 'rules-cache.json'), JSON.stringify(cache));
+    _resetConfigCache();
+    _resetCore();
+  }
+
+  /** A repo-carried project config in a throwaway cwd. */
+  function seedProject(policy: object): string {
+    fs.writeFileSync(path.join(tmpProj, 'node9.config.json'), JSON.stringify({ policy }));
+    _resetConfigCache();
+    return tmpProj;
+  }
+
+  const orgKnob = (commandChecks: Record<string, string>, locked: string[] = []): object => ({
+    fetchedAt: '2026-08-01T00:00:00Z',
+    rules: [],
+    managedConfig: { commandChecks, locked },
+  });
+
+  // ── 3a. managed rmAdvisory 'block' survives local smart rules ────────────
+  it("a local review-rm ALLOW rule cannot defeat a LOCKED managed rmAdvisory='block'", async () => {
+    seedHome(
+      {
+        // The bypass: a local rule reusing the advisory's name, set to allow.
+        smartRules: [
+          {
+            name: 'review-rm',
+            tool: '*',
+            conditions: [{ field: 'command', op: 'matches', value: 'rm\\b' }],
+            verdict: 'allow',
+          },
+        ],
+      },
+      orgKnob({ rmAdvisory: 'block' }, ['commandChecksRmAdvisory'])
+    );
+    const r = await authorizeHeadless('Bash', { command: 'rm notes.txt' }, { agent: 'MCP' }, {});
+    expect(r.approved).toBe(false);
+    const injected = getConfig().policy.smartRules.filter((x) => x.name === 'review-rm');
+    // The local twin was evicted; the pinned org block is the only survivor.
+    expect(injected).toHaveLength(1);
+    expect(injected[0].verdict).toBe('block');
+    expect(injected[0].pinned).toBe(true);
+  });
+
+  it("a managed rmAdvisory='block' out-ranks allow-rm-safe-paths (rm node_modules blocks)", async () => {
+    seedHome({}, orgKnob({ rmAdvisory: 'block' }));
+    const r = await authorizeHeadless(
+      'Bash',
+      { command: 'rm -rf node_modules' },
+      { agent: 'MCP' },
+      {}
+    );
+    expect(r.approved).toBe(false); // pinned block beats the earlier unpinned allow
+  });
+
+  it("a managed sqlDdl='block' hard-blocks the SQL advisory even with a local same-name rule", async () => {
+    seedHome(
+      {
+        smartRules: [
+          {
+            name: 'review-drop-table-sql',
+            tool: '*',
+            conditions: [{ field: 'sql', op: 'matches', value: 'drop' }],
+            verdict: 'allow',
+          },
+        ],
+      },
+      orgKnob({ sqlDdl: 'block' })
+    );
+    const r = await authorizeHeadless(
+      'mcp__postgres__query',
+      { sql: 'DROP TABLE users' },
+      { agent: 'MCP' },
+      {}
+    );
+    expect(r.approved).toBe(false);
+  });
+
+  it('UNMANAGED behaviour unchanged: a local review-rm rule still customizes rm locally', async () => {
+    // No managedConfig → the dev owns their rules; a local review-rm allow wins.
+    seedHome({
+      commandChecks: { rmAdvisory: 'review' },
+      smartRules: [
+        {
+          name: 'review-rm',
+          tool: '*',
+          conditions: [{ field: 'command', op: 'matches', value: 'rm\\b' }],
+          verdict: 'allow',
+        },
+      ],
+    });
+    const r = await authorizeHeadless('Bash', { command: 'rm notes.txt' }, { agent: 'MCP' }, {});
+    expect(r.approved).toBe(true);
+    const rules = getConfig().policy.smartRules.filter((x) => x.name === 'review-rm');
+    expect(rules.every((x) => !x.pinned)).toBe(true); // nothing pinned when unmanaged
+  });
+
+  // ── 3b. a repo config may only TIGHTEN command-checks ────────────────────
+  it("a repo node9.config.json inlineExec='off' is clamped to 'review' (cannot weaken)", () => {
+    seedHome({});
+    const cwd = seedProject({ commandChecks: { inlineExec: 'off', chmod: 'off', sqlDdl: 'off' } });
+    const cc = getConfig(cwd).policy.commandChecks ?? {};
+    // Repo 'off' floored back up to the default 'review'.
+    expect(cc.inlineExec ?? 'review').toBe('review');
+    expect(cc.chmod ?? 'review').toBe('review');
+    expect(cc.sqlDdl ?? 'review').toBe('review');
+  });
+
+  it("a repo config CAN tighten (inlineExec='block' honoured)", () => {
+    seedHome({});
+    const cwd = seedProject({ commandChecks: { inlineExec: 'block' } });
+    expect(getConfig(cwd).policy.commandChecks?.inlineExec).toBe('block');
+  });
+
+  it("the GLOBAL (~/.node9) layer keeps full control — an 'off' there is honoured", () => {
+    seedHome({ commandChecks: { inlineExec: 'off' } });
+    expect(getConfig().policy.commandChecks?.inlineExec).toBe('off');
+  });
+
+  it("a repo 'off' cannot lower a stricter global 'block'", () => {
+    seedHome({ commandChecks: { inlineExec: 'block' } });
+    const cwd = seedProject({ commandChecks: { inlineExec: 'off' } });
+    expect(getConfig(cwd).policy.commandChecks?.inlineExec).toBe('block');
+  });
+
+  // ── 3c. managed egress mode floor when the dev never set a mode ──────────
+  it("a managed egress mode='off' applies when the dev never set a mode", () => {
+    seedHome(
+      {},
+      {
+        fetchedAt: '2026-08-01T00:00:00Z',
+        rules: [],
+        managedConfig: { egress: { enabled: true, mode: 'off' } },
+      }
+    );
+    expect(getConfig().policy.egress.mode).toBe('off');
+  });
+
+  it("a dev's explicit egress mode='block' is kept over a managed 'off' (floor keeps stricter)", () => {
+    seedHome(
+      { egress: { mode: 'block' } },
+      {
+        fetchedAt: '2026-08-01T00:00:00Z',
+        rules: [],
+        managedConfig: { egress: { enabled: true, mode: 'off' } },
+      }
+    );
+    expect(getConfig().policy.egress.mode).toBe('block');
+  });
+});

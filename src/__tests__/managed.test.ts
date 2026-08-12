@@ -102,6 +102,18 @@ describe('managed egress (baseline+lock) — M2b', () => {
     expect(out.mode).toBe('review');
   });
 
+  it('egress mode: absent-local (dev never set mode) takes the org value verbatim — even a weaker off', () => {
+    // localModeUserSet=false: the seeded default 'review' is not a real choice,
+    // so a managed 'off' must apply (the /code-review wf_0ff1bc3d floor bug).
+    const out = applyManagedEgress(localEgress({ mode: 'review' }), { mode: 'off' }, [], false);
+    expect(out.mode).toBe('off');
+  });
+
+  it("egress mode: a dev's real choice still floors over the org value (localModeUserSet=true)", () => {
+    const out = applyManagedEgress(localEgress({ mode: 'block' }), { mode: 'off' }, [], true);
+    expect(out.mode).toBe('block'); // stricter dev choice preserved
+  });
+
   it('leaves untouched local fields (allow/deny) intact', () => {
     const out = applyManagedEgress(localEgress(), { enabled: true, mode: 'block' }, []);
     expect(out.allow).toEqual(['local.example.com']);
