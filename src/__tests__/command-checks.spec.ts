@@ -165,6 +165,70 @@ describe('policy.commandChecks — governance for built-in detections', () => {
     }
   });
 
+  it('WRAPPED / keyword-nested / herestring spellings do not dodge it (/code-review wf_0ff1bc3d)', async () => {
+    // Every relay wrapper defeated the head-token detector (verified live via
+    // the probe harness 2026-08-12: all of these read `allow`).
+    writeHome();
+    for (const command of [
+      'env python3 -c "print(1)"',
+      'timeout 5 python3 -c "print(1)"',
+      'nice -n 5 python3 -c "print(1)"',
+      'sudo python3 -c "print(1)"',
+      'sudo -u www python3 -c "print(1)"',
+      'xargs python3 -c "print(1)"',
+      'stdbuf -o0 python3 -c "print(1)"',
+      'nohup python3 -c "print(1)"',
+      'setsid python3 -c "print(1)"',
+      'exec python3 -c "print(1)"',
+      'command python3 -c "print(1)"',
+      'sudo env FOO=1 timeout 5 python3 -c "print(1)"',
+      'if true; then python3 -c "print(1)"; fi',
+      'while true; do node -e "1"; done',
+      'python3 <<< "print(1)"',
+    ]) {
+      const r = await authorizeHeadless('Bash', { command }, undefined, { deferReview: true });
+      // sudo forms surface as the (stricter-positioned) review-sudo smart rule
+      // on default config; everything else must be the inline-exec tier.
+      expect(r.review, command).toBe(true);
+    }
+  });
+
+  it('mainstream interpreter spellings are covered (deno/bun/pwsh/node --eval/perl -pe/attached -c)', async () => {
+    writeHome();
+    for (const command of [
+      'node --eval "console.log(1)"',
+      'node -p "6*7"',
+      'deno eval "console.log(1)"',
+      'bun -e "console.log(1)"',
+      'pwsh -Command "Get-Process"',
+      'powershell -c "Get-Process"',
+      'osascript -e \'display dialog "hi"\'',
+      'Rscript -e "print(1)"',
+      'perl -pe "s/x/y/"',
+      'ruby -ne "puts $_"',
+      'python3 -c"print(1)"',
+    ]) {
+      const r = await authorizeHeadless('Bash', { command }, undefined, { deferReview: true });
+      expect(r.review, command).toBe(true);
+      expect(r.blockedByLabel, command).toContain('Inline Execution');
+    }
+  });
+
+  it('per-stage pipe reasoning kills the coexisting-pipe FP', async () => {
+    writeHome();
+    for (const command of [
+      // interpreter-with-flags in a NON-pipe-fed stage of a piped command —
+      // the old whole-command pipeFed flagged all of these.
+      'python3 --version | grep 3',
+      'node --version | tee v.txt',
+      'cat data.json | node process.js',
+      'ls | grep py',
+    ]) {
+      const r = await authorizeHeadless('Bash', { command }, undefined, { deferReview: true });
+      expect(r.approved, command).toBe(true);
+    }
+  });
+
   it('pipe RHS with a SCRIPT argument is not inline (cat data | node process.js)', async () => {
     writeHome();
     const r = await authorizeHeadless(
