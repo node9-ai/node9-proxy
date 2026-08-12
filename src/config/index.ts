@@ -1354,8 +1354,17 @@ export function getConfig(cwd?: string): Config {
   // cloud-controlled strict mode. (A LOCALLY-chosen strict is NOT a floor — a dev
   // keeps their own escapes; this is gated on modeCloudControlled so we never
   // over-tighten a self-chosen posture.)
+  // Task #24: `cloudMandatesEnforcement` belongs here for the same reason it
+  // belongs in the mode floor above. Everything enforced INSIDE the policy
+  // block — egress, org jail rules, loop detection, command checks, smart
+  // rules — sits behind the ignoredTools fast path, so an org that mandates
+  // egress (but not strict, and no shields) was skippable with one line of
+  // local config: `ignoredTools:['Bash']`. Measured at the gate, and reachable
+  // in production because the SaaS ships an egress mandate with no mode.
   const managedFloorActive =
-    cloudManagedShields.length > 0 || (modeCloudControlled && mergedSettings.mode === 'strict');
+    cloudManagedShields.length > 0 ||
+    cloudMandatesEnforcement ||
+    (modeCloudControlled && mergedSettings.mode === 'strict');
 
   // Vector A (task #16): under a managed strict, neutralise the engine's strict
   // ESCAPE (`activeEnvironment.requireApproval === false` at policy/index.ts,
