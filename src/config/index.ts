@@ -13,6 +13,7 @@ import {
   applyManagedDlp,
   applyManagedApprovers,
   applyManagedCommandChecks,
+  COMMAND_CHECK_ORDER,
 } from './managed';
 import { pathRules } from '../shields/build';
 import { normalizeHost } from '../auth/trusted-hosts';
@@ -759,6 +760,14 @@ export function getConfig(cwd?: string): Config {
   };
   const mergedEnvironments: Record<string, EnvironmentConfig> = { ...DEFAULT_CONFIG.environments };
 
+  // Strictness rank over the shared off<review<block ordering (the same ladder
+  // applyManagedCommandChecks floors against — reused rather than re-declared).
+  // An absent/unknown value ranks as 'review', the engine's resolveCheck default.
+  const rank = (v: string | undefined): number => {
+    const i = (COMMAND_CHECK_ORDER as readonly string[]).indexOf(v ?? '');
+    return i === -1 ? 1 : i;
+  };
+
   const applyLayer = (source: Record<string, unknown> | null, isProject = false) => {
     if (!source) return;
     const s = (source.settings || {}) as Partial<Config['settings']>;
@@ -849,7 +858,6 @@ export function getConfig(cwd?: string): Config {
       // block; the incoming default when a key is unset in the global layer is
       // 'review' (the engine's resolveCheck default), so a repo 'off' is clamped
       // up to 'review'.
-      const rank = (v: string | undefined): number => (v === 'block' ? 2 : v === 'off' ? 0 : 1); // undefined/'review' → 1
       for (const k of ['inlineExec', 'rmAdvisory', 'chmod', 'sqlDdl'] as const) {
         const v = src[k];
         if (v !== 'off' && v !== 'review' && v !== 'block') continue;
@@ -864,14 +872,24 @@ export function getConfig(cwd?: string): Config {
     }
     if (p.egress) {
       const e = p.egress as Partial<Config['policy']['egress']>;
-      if (e.enabled !== undefined) mergedPolicy.egress.enabled = e.enabled;
+      // A repo-carried node9.config.json is agent-writable in-session, so — like
+      // commandChecks above — it may only TIGHTEN egress: it can turn the gate
+      // ON but not off, raise the mode but not lower it, and add DENY entries
+      // but never widen the ALLOW list. (An org-managed egress policy is
+      // re-floored after this merge regardless; this closes the local case.)
+      if (e.enabled !== undefined && !(isProject && e.enabled === false))
+        mergedPolicy.egress.enabled = e.enabled;
       if (e.mode !== undefined) {
-        mergedPolicy.egress.mode = e.mode;
-        egressModeUserSet = true;
+        const weaker = isProject && rank(e.mode) < rank(mergedPolicy.egress.mode);
+        if (!weaker) {
+          mergedPolicy.egress.mode = e.mode;
+          egressModeUserSet = true;
+        }
       }
-      if (Array.isArray(e.allow)) mergedPolicy.egress.allow.push(...e.allow);
+      if (Array.isArray(e.allow) && !isProject) mergedPolicy.egress.allow.push(...e.allow);
       if (Array.isArray(e.deny)) mergedPolicy.egress.deny.push(...e.deny);
-      if (e.allowPrivate !== undefined) mergedPolicy.egress.allowPrivate = e.allowPrivate;
+      if (e.allowPrivate !== undefined && !(isProject && e.allowPrivate === true))
+        mergedPolicy.egress.allowPrivate = e.allowPrivate;
     }
     if (p.loopDetection) {
       const ld = p.loopDetection as Partial<Config['policy']['loopDetection']>;
@@ -957,6 +975,9 @@ export function getConfig(cwd?: string): Config {
   // reachable from a repo-carried config file). Empty when unmanaged — the
   // dev's own rules keep full control.
   const managedCommandCheckKeys = new Set<string>();
+  // Which of those the admin LOCKED. Eviction semantics differ: an unlocked
+  // managed value is a FLOOR (may only tighten), a locked one wins outright.
+  const lockedCommandCheckKeys = new Set<string>();
   // B1 (#1): true once the cloud has SET or LOCKED the mode. When true, the
   // NODE9_MODE env var (applied last, below) must not override it — otherwise a
   // single `NODE9_MODE=observe` defeats a `locked:['mode']` mandate and turns
@@ -1087,7 +1108,10 @@ export function getConfig(cwd?: string): Config {
           // Remember which advisory knobs the ORG set/locked so the injection
           // loop can pin them (see managedCommandCheckKeys declaration).
           for (const [key, val] of Object.entries(mc.commandChecks)) {
-            if (typeof val === 'string') managedCommandCheckKeys.add(key);
+            if (typeof val !== 'string') continue;
+            managedCommandCheckKeys.add(key);
+            const lockKey = `commandChecks${key[0].toUpperCase()}${key.slice(1)}`;
+            if (locked.includes(lockKey)) lockedCommandCheckKeys.add(key);
           }
         }
         // Preferences: settings.approvers — the org owns where approvals happen,
@@ -1350,14 +1374,34 @@ export function getConfig(cwd?: string): Config {
     if (name?.endsWith('-sql')) return 'sqlDdl';
     return undefined;
   };
+  const VERDICT_STRENGTH: Record<string, number> = { allow: 0, review: 1, block: 2 };
   for (const rule of ADVISORY_SMART_RULES) {
     const knobKey = rule.verdict === 'review' ? advisoryKnobKey(rule.name) : undefined;
     const knob = knobKey ? (cc as Record<string, string | undefined>)[knobKey] : undefined;
     if (knob === 'off') continue;
     const managed = knobKey ? managedCommandCheckKeys.has(knobKey) : false;
-    // Unmanaged (or ungoverned allow rule): a local same-name rule pre-empts.
-    if (!managed && existingAdvisoryNames.has(rule.name)) continue;
-    if (managed && existingAdvisoryNames.has(rule.name)) {
+    const locked = knobKey ? lockedCommandCheckKeys.has(knobKey) : false;
+    const twin = existingAdvisoryNames.has(rule.name)
+      ? mergedPolicy.smartRules.find((r) => r.name === rule.name)
+      : undefined;
+
+    // Unmanaged (or an ungoverned allow rule): a local same-name rule pre-empts
+    // injection entirely — the dev owns their own rules.
+    if (!managed && twin) continue;
+
+    // MANAGED. Eviction must never WEAKEN what the developer chose. The floor
+    // law for this whole subsystem is "a member may tighten, never loosen", and
+    // an unlocked managed value is a FLOOR — so it may only replace a twin that
+    // is weaker than the mandate. /code-review 2026-08-13 caught the inverse:
+    // an admin setting rmAdvisory to its DEFAULT 'review' (intending no change)
+    // deleted a dev's `review-rm: block` rule and left a review prompt, so the
+    // WEAKER org value was the one that destroyed local strictness. A LOCKED
+    // value still wins outright — that is what a lock means.
+    if (managed && twin && !locked) {
+      const mandate = knob === 'block' ? 2 : 1; // 'review' unless explicitly block
+      if (VERDICT_STRENGTH[twin.verdict] >= mandate) continue; // dev is >= org: leave it
+    }
+    if (managed && twin) {
       // Evict the local twin so the org's mandate can't be shadowed by name.
       mergedPolicy.smartRules = mergedPolicy.smartRules.filter((r) => r.name !== rule.name);
     }
@@ -1365,7 +1409,7 @@ export function getConfig(cwd?: string): Config {
     // Pin only a managed BLOCK: it must out-rank the earlier unpinned
     // allow-rm-safe-paths so `rm node_modules` also blocks under an org
     // mandate. A managed 'review' stays unpinned so the safe-path allow keeps
-    // reducing false positives (eviction above already defeats a local twin).
+    // reducing false positives (eviction above already defeats a weaker twin).
     if (managed && injected.verdict === 'block') injected.pinned = true;
     mergedPolicy.smartRules.push(injected);
   }

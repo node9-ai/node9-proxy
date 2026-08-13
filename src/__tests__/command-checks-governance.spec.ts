@@ -198,6 +198,88 @@ describe('command-checks governance integrity (/code-review wf_0ff1bc3d)', () =>
     expect(getConfig().policy.egress.mode).toBe('off');
   });
 
+  // ── 3a-bis. eviction must never WEAKEN the developer's own rule ──────────
+  // The floor law is "a member may tighten, never loosen". An admin setting the
+  // knob to its DEFAULT 'review' intends no change — it must not delete a
+  // stricter local rule (/code-review 2026-08-13: it did, block → prompt).
+  const localRm = (verdict: string) => ({
+    name: 'review-rm',
+    tool: '*',
+    conditionMode: 'all',
+    conditions: [{ field: 'command', op: 'matches', value: '(^|&&|\\|\\||;)\\s*rm\\b' }],
+    verdict,
+    reason: 'dev choice',
+  });
+
+  it("an UNLOCKED managed 'review' does not weaken a dev's stricter block rule", async () => {
+    seedHome({ smartRules: [localRm('block')] }, orgKnob({ rmAdvisory: 'review' }));
+    const r = await authorizeHeadless('Bash', { command: 'rm notes.txt' }, { agent: 'MCP' }, {});
+    expect(r.approved).toBe(false);
+    expect(r.review).not.toBe(true); // still a hard block, not a prompt
+    const rules = getConfig().policy.smartRules.filter((x) => x.name === 'review-rm');
+    expect(rules).toHaveLength(1);
+    expect(rules[0].verdict).toBe('block');
+  });
+
+  it("a LOCKED managed 'review' DOES win outright over a stricter dev rule (that is what a lock means)", async () => {
+    seedHome(
+      { smartRules: [localRm('block')] },
+      orgKnob({ rmAdvisory: 'review' }, ['commandChecksRmAdvisory'])
+    );
+    const r = await authorizeHeadless(
+      'Bash',
+      { command: 'rm notes.txt' },
+      { agent: 'MCP' },
+      {
+        deferReview: true,
+      }
+    );
+    expect(r.review).toBe(true);
+  });
+
+  it("an unlocked managed 'review' still replaces a WEAKER (allow) dev twin", async () => {
+    seedHome({ smartRules: [localRm('allow')] }, orgKnob({ rmAdvisory: 'review' }));
+    const r = await authorizeHeadless(
+      'Bash',
+      { command: 'rm notes.txt' },
+      { agent: 'MCP' },
+      {
+        deferReview: true,
+      }
+    );
+    expect(r.review).toBe(true);
+  });
+
+  it("a managed 'off' leaves the dev's own rule untouched", async () => {
+    seedHome({ smartRules: [localRm('block')] }, orgKnob({ rmAdvisory: 'off' }));
+    const r = await authorizeHeadless('Bash', { command: 'rm notes.txt' }, { agent: 'MCP' }, {});
+    expect(r.approved).toBe(false);
+    expect(r.review).not.toBe(true);
+  });
+
+  // ── 3b-bis. the repo layer may not weaken EGRESS either ──────────────────
+  it('a repo config cannot disable egress, widen the allow-list, or lower the mode', () => {
+    seedHome({
+      egress: { enabled: true, mode: 'block', allow: ['api.github.com'], allowPrivate: false },
+    });
+    const cwd = seedProject({
+      egress: { enabled: false, mode: 'off', allow: ['evil.example.com'], allowPrivate: true },
+    });
+    const eg = getConfig(cwd).policy.egress;
+    expect(eg.enabled).toBe(true); // repo cannot turn the gate off
+    expect(eg.mode).toBe('block'); // repo cannot lower the mode
+    expect(eg.allow).not.toContain('evil.example.com'); // repo cannot widen allow
+    expect(eg.allowPrivate).not.toBe(true); // repo cannot re-open private nets
+  });
+
+  it('a repo config CAN still tighten egress (deny entries, stricter mode)', () => {
+    seedHome({ egress: { enabled: true, mode: 'review' } });
+    const cwd = seedProject({ egress: { mode: 'block', deny: ['bad.example.com'] } });
+    const eg = getConfig(cwd).policy.egress;
+    expect(eg.mode).toBe('block');
+    expect(eg.deny).toContain('bad.example.com');
+  });
+
   it("a dev's explicit egress mode='block' is kept over a managed 'off' (floor keeps stricter)", () => {
     seedHome(
       { egress: { mode: 'block' } },
