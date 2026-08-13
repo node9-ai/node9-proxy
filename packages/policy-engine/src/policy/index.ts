@@ -15,12 +15,13 @@ import {
   analyzeChmod777,
   isRmCreatedInCommandCleanup,
   isBashTool,
+  detectInlineExec,
   AST_FS_REGEX_RULES,
   extractShellDestinations,
   type ShellCommandAnalysis,
 } from '../shell';
 import { matchesPattern, evaluateSmartConditions, getNestedValue } from '../rules';
-import { analyzePipeChain, splitOnPipe } from './pipe-chain';
+import { analyzePipeChain } from './pipe-chain';
 import { extractAllSshHosts } from './ssh-parser';
 import { evaluateEgress, type EgressPolicy } from '../egress';
 
@@ -71,177 +72,6 @@ function resolveCheck(v: string | undefined): 'off' | 'review' | 'block' {
 /** Class-B variant — 'off' is not a legal outcome for tighten-only checks. */
 function resolveCheckTight(v: string | undefined): 'review' | 'block' {
   return v === 'block' ? 'block' : 'review';
-}
-
-// ── Inline-execution detection (the policy-bypass tunnel) ────────────────────
-// `python3 -c "<code>"` hides the real action inside a program command-level
-// rules can't see. THREE spellings of the same tunnel (an agent that can pick
-// its spelling picks the unchecked one — verified live 2026-07-25: the heredoc
-// form sailed past the old -c-only pattern):
-//   1. code as argument:  python3 -c / -e / -eval
-//   2. code via stdin:    python3 - <<'PY' / python3 < file (heredoc/redirect)
-//   3. code via pipe:     echo "code" | python3   (bare interpreter, no script)
-//
-// SEGMENT-BASED (/code-review round 2): the earlier ^-anchored regexes missed
-// every chained/env-prefixed/path-qualified/versioned spelling (`cd x &&
-// python3 -c`, `FOO=1 python3 -c`, `./venv/bin/python -c`, `python3.11 -c`).
-// We split into simple-command segments, strip env assignments, normalize the
-// interpreter to its basename, then reason about ARGS — which also fixes the
-// pipe form's semantics: `cat data | node process.js` runs a SCRIPT (not
-// inline), `cat data | node` executes its stdin (inline).
-// Known limitation (accepted, same as the regex smart rules): splitting is
-// quote-blind, so a separator INSIDE a quoted string can fabricate a segment;
-// real quote-awareness means the mvdan AST — tracked as a follow-up.
-const INLINE_INTERP =
-  /^(python[\d.]*|bash|sh|zsh|perl|ruby|node|php|lua|deno|bun|pwsh|powershell(?:\.exe)?|osascript|rscript|irb)$/i;
-// Shells participate ONLY via the explicit forms (-c/-e, the bare `-` stdin
-// marker). The implicit-stdin rules must exclude them: `curl … | bash` belongs
-// to the pipe-to-shell/eval-remote family (Class A — those tiers now run
-// BEFORE this branch, but the exclusion stays so inline-exec never claims the
-// shape), and `bash <<'EOF'` is the everyday multi-command idiom, not an
-// inline-code tunnel.
-const INLINE_SHELL = /^(bash|sh|zsh)$/i;
-
-// Relay wrappers: they execute their operand command, so the interpreter hides
-// one token deeper (`sudo python3 -c`, `timeout 5 python3 -c`). Verified live
-// 2026-08-12: every one of these defeated the detector when it only looked at
-// the segment head. Wrapper flags are consumed; the arg-taking ones also
-// consume a duration/priority operand.
-const INLINE_WRAPPERS = new Set([
-  'env',
-  'sudo',
-  'doas',
-  'command',
-  'exec',
-  'nohup',
-  'setsid',
-  'time',
-  'xargs',
-  'stdbuf',
-  'timeout',
-  'nice',
-  'ionice',
-]);
-// Wrapper flags that take a SEPARATE operand (sudo -u www python3 …).
-const WRAPPER_FLAG_ARG: Record<string, RegExp> = {
-  sudo: /^-(u|g)$/,
-  doas: /^-u$/,
-  nice: /^-n$/,
-  ionice: /^-(c|n)$/,
-  timeout: /^-(k|s)$/,
-};
-// Wrappers whose first bare operand is numeric/duration (timeout 5, nice 10).
-const WRAPPER_NUMERIC_ARG = new Set(['timeout', 'nice', 'ionice']);
-// Shell keywords that can precede a simple command inside a segment
-// (`if true; then python3 -c …; fi` — the `then` segment hid the interpreter).
-const SHELL_KEYWORDS = new Set([
-  'if',
-  'then',
-  'else',
-  'elif',
-  'fi',
-  'do',
-  'done',
-  'while',
-  'until',
-  '!',
-  '{',
-  '}',
-]);
-// Perl/ruby bundle single-letter options, and the code flag rides the bundle:
-// `perl -pe 's/x/y/'`, `ruby -ne '…'`, attached `perl -pe's/…/'`.
-const PERLISH = /^(perl|ruby)$/i;
-
-/** One simple-command segment: does it execute inline code? */
-function inlineExecSegment(rawSeg: string, pipeFed: boolean): boolean {
-  const tokens = rawSeg.trim().split(/\s+/).filter(Boolean);
-  let i = 0;
-  // Peel env assignments, shell keywords, and relay wrappers until the real
-  // command head surfaces (each layer can repeat: `sudo env FOO=1 timeout 5 …`).
-  for (;;) {
-    while (i < tokens.length && /^[A-Za-z_]\w*=/.test(tokens[i])) i++;
-    if (i >= tokens.length) return false;
-    if (SHELL_KEYWORDS.has(tokens[i])) {
-      i++;
-      continue;
-    }
-    const headBase = (tokens[i].split('/').pop() ?? tokens[i]).toLowerCase();
-    if (INLINE_WRAPPERS.has(headBase)) {
-      i++;
-      while (i < tokens.length) {
-        const t = tokens[i];
-        if (t.startsWith('-')) {
-          i += WRAPPER_FLAG_ARG[headBase]?.test(t) ? 2 : 1;
-          continue;
-        }
-        if (WRAPPER_NUMERIC_ARG.has(headBase) && /^\d+(\.\d+)?[smhd]?$/.test(t)) {
-          i++;
-          continue;
-        }
-        break;
-      }
-      continue;
-    }
-    break;
-  }
-  // Basename: /usr/bin/python3 and ./venv/bin/python are the interpreter too.
-  const base = tokens[i].split('/').pop() ?? tokens[i];
-  if (!INLINE_INTERP.test(base)) return false;
-  const args = tokens.slice(i + 1);
-  // deno spells its code form as a subcommand, not a flag.
-  if (/^deno$/i.test(base) && /^eval$/i.test(args[0] ?? '')) return true;
-
-  let hadRedirect = false;
-  const positionals: string[] = [];
-  for (let j = 0; j < args.length; j++) {
-    const a = args[j];
-    // 2a. explicit stdin marker: `python3 -` (with or without heredoc)
-    if (a === '-') return true;
-    if (a.startsWith('<')) {
-      // `< file`, `<<EOF`, `<<'PY'`, `<<< "code"` — skip the operator (and a
-      // detached target). The herestring is the same tunnel as the heredoc.
-      hadRedirect = true;
-      if (a === '<' || a === '<<' || a === '<<<') j++;
-      continue;
-    }
-    if (a.startsWith('-')) {
-      // 1. code as argument — detached flag, every mainstream spelling.
-      if (/^--?(c|e|eval|command|enc|encodedcommand|print)$/i.test(a)) return true;
-      // node's expression-print flag is code execution too.
-      if (/^node$/i.test(base) && /^-p$/i.test(a)) return true;
-      // attached code: `python3 -c'code'` / `-cCODE` (single-dash only).
-      if (/^-[ce][^-\s]/.test(a)) return true;
-      // perl/ruby option bundles ending in the code flag: -pe, -ne, -lane,
-      // detached or attached-quoted (`perl -pe's/x/y/'`).
-      if (PERLISH.test(base) && (/^-[a-z0-9]*e$/i.test(a) || /^-[a-z0-9]*e['"]/i.test(a)))
-        return true;
-      continue;
-    }
-    positionals.push(a);
-  }
-  // 2b/3. no script argument + code arriving via redirect or a pipe:
-  // `python3 < payload.py`, `echo "code" | python3 -u`. A script WITH an
-  // input redirect (`python3 app.py < data.txt`) has positionals → not
-  // inline. Shells are excluded here (see INLINE_SHELL above).
-  return positionals.length === 0 && (hadRedirect || pipeFed) && !INLINE_SHELL.test(base);
-}
-
-export function detectInlineExec(command: string): boolean {
-  // Outer split: quote-aware pipe stages, so pipe-fed status is PER STAGE —
-  // computing it over the whole command flagged any interpreter-with-flags
-  // that merely coexisted with a pipe (`python3 --version | grep 3`).
-  const stages = splitOnPipe(command);
-  for (let s = 0; s < stages.length; s++) {
-    // Inner split: remaining simple-command boundaries (quote-blind, same
-    // accepted limitation as before — real quote-awareness is the mvdan AST,
-    // tracked as a follow-up). Only the FIRST inner segment of a stage
-    // receives the previous stage's stdin.
-    const segments = stages[s].split(/\|\||&&|;|\n|\$\(|`|\(/);
-    for (let k = 0; k < segments.length; k++) {
-      if (inlineExecSegment(segments[k], s > 0 && k === 0)) return true;
-    }
-  }
-  return false;
 }
 
 export interface PolicyContext {

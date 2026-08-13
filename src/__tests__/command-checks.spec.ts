@@ -214,6 +214,75 @@ describe('policy.commandChecks — governance for built-in detections', () => {
     }
   });
 
+  it('AST detector: option BUNDLES are not code flags (the -euo pipefail FP)', async () => {
+    // The regex predecessor tested only that a flag STARTED with -c/-e, so the
+    // single most common shell idiom prompted on every run (/code-review
+    // 2026-08-13). Code-flag letters are per-interpreter: `c` for shells and
+    // python, `e` for perl/ruby/node — so perl's `-cw` (syntax check) is NOT code.
+    writeHome();
+    for (const command of [
+      'bash -eu ./deploy.sh',
+      'bash -euo pipefail ./run.sh',
+      'bash -ex build.sh prod',
+      'sh -e install.sh',
+      'perl -cw script.pl',
+      'python3 -m pytest',
+      'ruby -w app.rb',
+      'node --experimental-modules app.js',
+    ]) {
+      const r = await authorizeHeadless('Bash', { command }, undefined, { deferReview: true });
+      expect(r.approved, command).toBe(true);
+    }
+  });
+
+  it('AST detector: bundled code flags still flag (-xc / -uc / -pe)', async () => {
+    writeHome();
+    for (const command of [
+      'bash -xc "echo hi"',
+      'python3 -uc "print(1)"',
+      'perl -pe "s/x/y/"',
+      'ruby -ne "puts $_"',
+    ]) {
+      const r = await authorizeHeadless('Bash', { command }, undefined, { deferReview: true });
+      expect(r.review, command).toBe(true);
+      expect(r.blockedByLabel, command).toContain('Inline Execution');
+    }
+  });
+
+  it('AST detector: an escaped quote cannot hide a real pipe', async () => {
+    // The quote-aware string splitter mis-tracked backslash-escaped quotes and
+    // treated the pipe as quoted, losing pipe-into-interpreter entirely.
+    writeHome();
+    for (const command of [
+      'sed "s/\\"/x/" f.txt | python3',
+      'grep -o "a\\"b" f | python3',
+      'cat payload.py | python3',
+    ]) {
+      const r = await authorizeHeadless('Bash', { command }, undefined, { deferReview: true });
+      expect(r.review, command).toBe(true);
+      expect(r.blockedByLabel, command).toContain('Inline Execution');
+    }
+  });
+
+  it('AST detector: runner front-ends and nested-command flags do not hide it', async () => {
+    writeHome();
+    for (const command of [
+      'env -u FOO python3 -c "print(1)"',
+      'xargs -I {} python3 -c "print(1)"',
+      'uv run python -c "print(1)"',
+      'poetry run python -c "print(1)"',
+      'conda run -n base python -c "print(1)"',
+      'npx tsx -e "console.log(1)"',
+      'pnpm dlx tsx -e "console.log(1)"',
+      'find . -exec python3 -c "print(1)" ;',
+      'script -c "python3 -c \'print(1)\'" /dev/null',
+      'python3 \\\n -c "print(1)"',
+    ]) {
+      const r = await authorizeHeadless('Bash', { command }, undefined, { deferReview: true });
+      expect(r.review, command).toBe(true);
+    }
+  });
+
   it('per-stage pipe reasoning kills the coexisting-pipe FP', async () => {
     writeHome();
     for (const command of [
