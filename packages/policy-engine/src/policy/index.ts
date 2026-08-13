@@ -491,16 +491,30 @@ export async function evaluatePolicy(
   // path in a file-tool call — the shield's rules must get to speak.
   if (wouldBeIgnored && !context.skipIgnoredFastPath) return { decision: 'allow' };
 
-  // AST FS-op gate — only fires for AI-driven calls on bash-shaped tools.
-  // node9 is AI-driven; manual (Terminal) users are trusted and reach the
-  // tier-4 manual auto-allow without AST/regex interference. Mirrors the
-  // CLI scan's per-agent gates (scan.ts:1037, 1319, 1614).
-  const bashCommand =
-    agent !== 'Terminal' && isBashTool(toolName) && args && typeof args === 'object'
+  // ONE definition of "this tool carries a shell command": a BASH_TOOL_NAMES
+  // spelling, or a toolInspection 'command' field (terminal.execute). Every
+  // shell-facing decision below keys off this — the AST tiers, the rm waiver,
+  // AST suppression, and the smart-rule alias. Keeping them in sync is
+  // load-bearing: /code-review 2026-08-13 found that matching rules by
+  // shell-shape while gating AST tiers on isBashTool alone left
+  // `terminal.execute` running the AST-superseded REGEX twins with no AST to
+  // correct them — resurrecting the `grep "drop table"` false positive and
+  // making commandChecks.chmod/sqlDdl inoperative for that tool.
+  const shellShaped =
+    isBashTool(toolName) || inspectsShellCommand(toolName, config.policy.toolInspection);
+  const shellShapedCommand = shellShaped
+    ? isBashTool(toolName) && args && typeof args === 'object'
       ? typeof (args as Record<string, unknown>).command === 'string'
         ? ((args as Record<string, unknown>).command as string)
         : null
-      : null;
+      : extractShellCommand(toolName, args, config.policy.toolInspection)
+    : null;
+
+  // AST FS-op gate — only fires for AI-driven calls. node9 is AI-driven; manual
+  // (Terminal) users are trusted and reach the tier-4 manual auto-allow without
+  // AST/regex interference. Mirrors the CLI scan's per-agent gates
+  // (scan.ts:1037, 1319, 1614).
+  const bashCommand = agent !== 'Terminal' ? shellShapedCommand : null;
 
   // Layer-1 invariant: built-in AST blocks (block-rm-rf-home, project-jail
   // sensitive-file reads) must fire BEFORE user smart rules so a permissive
@@ -609,8 +623,7 @@ export async function evaluatePolicy(
     // `execute_bash`, `terminal.execute` (via toolInspection) — or an agent's
     // tool-name spelling silently voids sudo/pipe-to-shell/force-push coverage
     // (verified live 2026-08-12: all four read `allow` on defaults).
-    const shellShaped =
-      isBashTool(toolName) || inspectsShellCommand(toolName, config.policy.toolInspection);
+    // `shellShaped` is computed once above and shared with the AST tiers.
     const matches = config.policy.smartRules.filter(
       (rule) =>
         (matchesPattern(toolName, rule.tool) ||
@@ -666,19 +679,9 @@ export async function evaluatePolicy(
         tier: 3,
       };
     }
-    if (evalVerdict === 'review') {
-      return {
-        // Class B tighten-only: commandChecks.evalDynamic may upgrade to
-        // block but can never turn this off (eval-remote above is Class A —
-        // no knob at all).
-        decision: resolveCheckTight(config.policy.commandChecks?.evalDynamic),
-        blockedByLabel: 'Node9: Eval Dynamic Content',
-        reason: 'eval of dynamic content (variable or subshell expansion) requires approval',
-        ruleDescription:
-          'The AI is running a command that includes a variable or subshell expansion. The actual command executed at runtime may differ from what is shown here.',
-        tier: 3,
-      };
-    }
+    // NOTE: the eval-DYNAMIC (review) branch deliberately runs LAST, after
+    // pipe-chain and inline-exec — see the end of this block. Only the
+    // eval-REMOTE block above is Class A and must pre-empt everything.
 
     // ── Pipe-chain exfiltration detection ────────────────────────────────────
     // Already evaluated for bash-tool calls in the early Layer-1 block above.
@@ -707,6 +710,23 @@ export async function evaluatePolicy(
         blockedByLabel: 'Node9 Standard (Inline Execution)',
         ruleDescription:
           'The AI is running code directly from the command line. Review the full script below before allowing it to execute.',
+        tier: 3,
+      };
+    }
+
+    // Eval of DYNAMIC content (variable / subshell expansion) — Class B,
+    // tighten-only: commandChecks.evalDynamic may upgrade to block but can
+    // never turn this off. Runs AFTER inline-exec by design: it defaults to
+    // 'review', so evaluating it first silently downgraded an org's
+    // inlineExec:'block' to a prompt for `bash -c "$(…)"` — the strictly MORE
+    // dangerous spelling of the same tunnel (/code-review 2026-08-13).
+    if (evalVerdict === 'review') {
+      return {
+        decision: resolveCheckTight(config.policy.commandChecks?.evalDynamic),
+        blockedByLabel: 'Node9: Eval Dynamic Content',
+        reason: 'eval of dynamic content (variable or subshell expansion) requires approval',
+        ruleDescription:
+          'The AI is running a command that includes a variable or subshell expansion. The actual command executed at runtime may differ from what is shown here.',
         tier: 3,
       };
     }
