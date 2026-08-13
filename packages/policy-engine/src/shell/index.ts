@@ -821,6 +821,13 @@ function unwrapCommandHead(words: (string | null)[]): number {
         continue;
       } // dynamic token — keep scanning
       const lt = t.toLowerCase();
+      // `env FOO=1 python3 -c` — an assignment given as a WRAPPER ARG (mvdan
+      // only puts assignments in cmd.Assigns when they lead the command, so
+      // these arrive as ordinary args and would otherwise stop the peel).
+      if (/^[A-Za-z_]\w*=/.test(t)) {
+        i++;
+        continue;
+      }
       if (t.startsWith('-')) {
         i++;
         // `-u FOO`, `-n 5`, `-I {}`, `-c base`: if the NEXT token is not itself a

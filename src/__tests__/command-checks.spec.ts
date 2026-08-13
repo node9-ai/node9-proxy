@@ -171,25 +171,61 @@ describe('policy.commandChecks — governance for built-in detections', () => {
     writeHome();
     for (const command of [
       'env python3 -c "print(1)"',
+      'env FOO=1 python3 -c "print(1)"',
       'timeout 5 python3 -c "print(1)"',
       'nice -n 5 python3 -c "print(1)"',
-      'sudo python3 -c "print(1)"',
-      'sudo -u www python3 -c "print(1)"',
       'xargs python3 -c "print(1)"',
       'stdbuf -o0 python3 -c "print(1)"',
       'nohup python3 -c "print(1)"',
       'setsid python3 -c "print(1)"',
       'exec python3 -c "print(1)"',
       'command python3 -c "print(1)"',
-      'sudo env FOO=1 timeout 5 python3 -c "print(1)"',
       'if true; then python3 -c "print(1)"; fi',
       'while true; do node -e "1"; done',
       'python3 <<< "print(1)"',
     ]) {
       const r = await authorizeHeadless('Bash', { command }, undefined, { deferReview: true });
-      // sudo forms surface as the (stricter-positioned) review-sudo smart rule
-      // on default config; everything else must be the inline-exec tier.
       expect(r.review, command).toBe(true);
+      // Assert the TIER, not just "something reviewed". Without this the two
+      // sudo cases passed via the default `review-sudo` smart rule (tier 2,
+      // ahead of inline-exec), so deleting 'sudo'/'doas' from the wrapper set
+      // left the test green — it could not prove sudo peeling existed at all
+      // (/code-review 2026-08-13).
+      expect(r.blockedByLabel ?? '', command).toContain('Inline Execution');
+    }
+  });
+
+  it('sudo peeling is proven independently of the review-sudo smart rule', async () => {
+    // Neutralize the default review-sudo (a local rule of the same name
+    // replaces it) so the sudo spellings MUST be caught by the wrapper peel.
+    writeHome(undefined, [
+      {
+        name: 'review-sudo',
+        tool: 'bash',
+        conditionMode: 'all',
+        conditions: [{ field: 'command', op: 'matches', value: 'ZZZ_NEVER_MATCHES' }],
+        verdict: 'review',
+        reason: 'neutralized for this test',
+      },
+    ]);
+    // Control: plain sudo now falls through (proves the neutralization works).
+    const control = await authorizeHeadless(
+      'Bash',
+      { command: 'sudo systemctl restart nginx' },
+      undefined,
+      { deferReview: true }
+    );
+    expect(control.approved).toBe(true);
+
+    for (const command of [
+      'sudo python3 -c "print(1)"',
+      'sudo -u www python3 -c "print(1)"',
+      'doas python3 -c "print(1)"',
+      'sudo env FOO=1 timeout 5 python3 -c "print(1)"',
+    ]) {
+      const r = await authorizeHeadless('Bash', { command }, undefined, { deferReview: true });
+      expect(r.review, command).toBe(true);
+      expect(r.blockedByLabel ?? '', command).toContain('Inline Execution');
     }
   });
 

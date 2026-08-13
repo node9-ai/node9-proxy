@@ -162,10 +162,26 @@ describe('command-checks governance integrity (/code-review wf_0ff1bc3d)', () =>
     seedHome({});
     const cwd = seedProject({ commandChecks: { inlineExec: 'off', chmod: 'off', sqlDdl: 'off' } });
     const cc = getConfig(cwd).policy.commandChecks ?? {};
-    // Repo 'off' floored back up to the default 'review'.
+    // The clamp works by NOT writing the key, so `?? 'review'` is the correct
+    // read — but on its own it would also pass if the project file were never
+    // loaded at all. The per-key tighten controls below are what make these
+    // assertions mean something (/code-review 2026-08-13).
     expect(cc.inlineExec ?? 'review').toBe('review');
     expect(cc.chmod ?? 'review').toBe('review');
     expect(cc.sqlDdl ?? 'review').toBe('review');
+  });
+
+  it('CONTROL: the project file IS read for each clamped key (tighten works per key)', () => {
+    // Without this, the clamp assertions above are indistinguishable from a
+    // fixture that was never loaded (wrong path, parse error swallowed).
+    seedHome({});
+    const cwd = seedProject({
+      commandChecks: { inlineExec: 'block', chmod: 'block', sqlDdl: 'block' },
+    });
+    const cc = getConfig(cwd).policy.commandChecks ?? {};
+    expect(cc.inlineExec).toBe('block');
+    expect(cc.chmod).toBe('block');
+    expect(cc.sqlDdl).toBe('block');
   });
 
   it("a repo config CAN tighten (inlineExec='block' honoured)", () => {
