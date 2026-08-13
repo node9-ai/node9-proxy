@@ -33,6 +33,7 @@ import {
   detectDangerousShellExec,
   isBashTool,
   AST_FS_REGEX_RULES,
+  toolMatchesRule,
   normalizeCommandForPolicy,
 } from '../shell';
 import { analyzePipeChain } from '../policy/pipe-chain';
@@ -201,7 +202,14 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
  * and fails CI when the hash drifts without a version bump — forgetting
  * is loud, not silent.
  */
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v6';
+// v7 (2026-08-13): rule/tool matching gained the shell-shape alias
+// (toolMatchesRule), so scan now reports the bash-scoped rules for `shell`,
+// `run_shell_command`, `execute_bash` and `terminal.execute` — spellings it
+// silently skipped before, while the live gate enforced them. This CHANGES
+// detector output (new findings on existing history), so the version bumps and
+// daemons re-scan through the new pipeline rather than leaving old verdicts
+// frozen.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v7';
 
 /**
  * SHA-256 prefix of the detector-source files
@@ -213,7 +221,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v6';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'a0e2bb339fe67e19';
+export const CANONICAL_EXTRACTOR_HASH = 'ad693c1296a32a71';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
@@ -351,7 +359,8 @@ export function extractCanonicalFindings(
   for (const source of ctx.rules) {
     const r = source.rule;
     if (r.verdict === 'allow') continue;
-    if (r.tool && !matchesPattern(toolNameLower, r.tool)) continue;
+    // Shell-shape alias so scan agrees with the gate about which rules apply.
+    if (!toolMatchesRule(toolNameLower, r.tool, ctx.toolInspection)) continue;
     if (r.name && AST_FS_REGEX_RULES.has(r.name)) continue;
     if (!evaluateSmartConditions(call.args, r)) continue;
 

@@ -13,6 +13,7 @@
 // All inputs are strings; no fs/path/os/process imports.
 
 import mvdanSh from 'mvdan-sh';
+import { matchesPattern } from '../rules';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const { syntax } = mvdanSh as any;
@@ -642,6 +643,42 @@ function chmodHasOpenPermMode(command: string): boolean {
     return found; // partial result on walker error
   }
   return found;
+}
+
+/**
+ * Does `toolName` carry a shell command? True for BASH_TOOL_NAMES spellings and
+ * for any tool whose toolInspection field is `command` (e.g. `terminal.execute`).
+ *
+ * THE definition of "shell-shaped" — the gate, the CLI scan, and `explain` must
+ * all use this one, or they disagree about which rules apply to which tool
+ * (/code-review 2026-08-13: the gate reviewed `sudo …` on `shell` while scan
+ * reported nothing, so the customer-facing report under-counted).
+ */
+export function isShellShapedTool(
+  toolName: string,
+  toolInspection?: Record<string, string>
+): boolean {
+  if (isBashTool(toolName)) return true;
+  if (!toolInspection) return false;
+  const pattern = Object.keys(toolInspection).find((p) => matchesPattern(toolName, p));
+  return pattern !== undefined && toolInspection[pattern] === 'command';
+}
+
+/**
+ * Does a smart rule's `tool` scope cover this tool? Adds the shell-shape alias:
+ * the six default shell-safety rules and shield bundles are written
+ * `tool:'bash'`, and an agent's choice of tool-name spelling (`shell`,
+ * `run_shell_command`, `execute_bash`, `terminal.execute`) must not silently
+ * void them. An absent rule scope matches everything (callers' prior semantics).
+ */
+export function toolMatchesRule(
+  toolName: string,
+  ruleTool: string | string[] | undefined,
+  toolInspection?: Record<string, string>
+): boolean {
+  if (!ruleTool) return true;
+  if (matchesPattern(toolName, ruleTool)) return true;
+  return isShellShapedTool(toolName, toolInspection) && matchesPattern('bash', ruleTool);
 }
 
 // ── Inline-execution detection (the policy-bypass tunnel) ───────────────────

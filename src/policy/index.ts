@@ -34,7 +34,9 @@ export {
   detectDangerousShellExec,
   detectDangerousEval,
   checkDangerousSql,
+  detectInlineExec,
 } from '@node9/policy-engine';
+import { detectInlineExec } from '@node9/policy-engine';
 
 // ── shouldSnapshot — Config-aware undo gate (host concern) ──────────────────
 
@@ -369,8 +371,13 @@ async function deriveExplainTrace(toolName: string, args?: unknown): Promise<Exp
     });
 
     // ── 3. Inline exec ────────────────────────────────────────────────────
-    const INLINE_EXEC_PATTERN = /^(python3?|bash|sh|zsh|perl|ruby|node|php|lua)\s+(-c|-e|-eval)\s/i;
-    if (INLINE_EXEC_PATTERN.test(shellCommand.trim())) {
+    // Uses the SAME detector as the gate. explain previously carried its own
+    // ^-anchored regex, so it reported "no inline execution" for every wrapped,
+    // piped, heredoc or non-python spelling the gate reviews — anyone debugging
+    // a prompt with `node9 explain` got the wrong answer (/code-review
+    // 2026-08-13). Drift here is worse than a miss: it teaches the user the
+    // gate is wrong.
+    if (detectInlineExec(shellCommand)) {
       steps.push({
         name: 'Inline execution',
         outcome: 'review',

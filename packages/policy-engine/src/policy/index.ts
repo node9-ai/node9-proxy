@@ -16,6 +16,7 @@ import {
   isRmCreatedInCommandCleanup,
   isBashTool,
   detectInlineExec,
+  toolMatchesRule,
   AST_FS_REGEX_RULES,
   extractShellDestinations,
   type ShellCommandAnalysis,
@@ -456,8 +457,7 @@ export async function evaluatePolicy(
     // `shellShaped` is computed once above and shared with the AST tiers.
     const matches = config.policy.smartRules.filter(
       (rule) =>
-        (matchesPattern(toolName, rule.tool) ||
-          (shellShaped && matchesPattern('bash', rule.tool))) &&
+        toolMatchesRule(toolName, rule.tool, config.policy.toolInspection) &&
         !astSuppressed(rule) &&
         !(rmCleanupWaiver && rule.name === 'review-rm' && rule.verdict === 'review') &&
         evaluateSmartConditions(args, rule)
