@@ -26,7 +26,7 @@
 // JSONL entries in.
 
 import { scanArgs } from '../dlp';
-import { matchesPattern, evaluateSmartConditions } from '../rules';
+import { evaluateSmartConditions } from '../rules';
 import {
   analyzeFsOperation,
   analyzeShellCommand,
@@ -221,7 +221,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v7';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'ad693c1296a32a71';
+export const CANONICAL_EXTRACTOR_HASH = '8339606c97318fe7';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
