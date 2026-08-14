@@ -156,6 +156,26 @@ export function resolvePinned(matches: SmartRule[]): SmartRule | undefined {
   );
 }
 
+/**
+ * Resolve competing BUILT-IN detector verdicts for one command: the strictest
+ * wins, ties keep the first (which fixes the label, so report attribution is
+ * stable). Returns undefined when no detector claimed the command.
+ *
+ * This is the built-in counterpart to `resolvePinned` above — deliberately a
+ * DIFFERENT law. User smart rules resolve first-match, because a user's early
+ * `allow` rule is an intentional exception and allow-lists depend on it.
+ * Built-in detectors have no authored order to respect: they are independent
+ * opinions about the same command, so the only defensible answer is the
+ * strictest one. Encoding their precedence as statement order instead is what
+ * produced two inverted-verdict bugs in this arc (see the collection site).
+ */
+export function strictestVerdict(candidates: PolicyVerdict[]): PolicyVerdict | undefined {
+  if (candidates.length === 0) return undefined;
+  return candidates.reduce((best, c) =>
+    VERDICT_RANK[c.decision] > VERDICT_RANK[best.decision] ? c : best
+  );
+}
+
 function tokenize(toolName: string): string[] {
   return toolName
     .toLowerCase()
@@ -497,7 +517,30 @@ export async function evaluatePolicy(
     allTokens = analyzed.allTokens;
     pathTokens = analyzed.paths;
 
-    // AST-based eval detection — structurally accurate, not fooled by string content
+    // ── Built-in command detectors: COLLECT, then resolve by strictness ─────
+    //
+    // More than one detector can claim the SAME command — `bash -c "$(cat x)"`
+    // is inline-exec AND eval-dynamic; a sensitive pipe is pipe-chain AND
+    // inline-exec. While these were ordered early-returns, whichever ran FIRST
+    // won, so their relative precedence was encoded in statement order and
+    // moving a block silently changed verdicts. That produced the same class of
+    // bug twice, in opposite directions:
+    //   - inline-exec before pipe-chain downgraded a Class-A critical exfil to
+    //     a review, and `inlineExec:'off'` perversely restored the block;
+    //   - eval-dynamic before inline-exec downgraded an org's
+    //     `inlineExec:'block'` to a prompt for the strictly MORE dangerous
+    //     dynamic spelling.
+    // No ordering is correct for both, because the two knobs are independent.
+    // Collecting candidates and taking the STRICTEST removes the question: a
+    // detector can only ever make a verdict stricter, never weaker, and a
+    // knob set to 'off' can no longer strengthen anything by stepping aside.
+    //
+    // Note this deliberately does NOT change `resolvePinned` for user smart
+    // rules — there the law is first-match, and allow-lists depend on it.
+    const candidates: PolicyVerdict[] = [];
+
+    // Eval-remote — Class A, no knob. Kept as an immediate return: it is the
+    // one built-in that can never be softened, so nothing later can raise it.
     const evalVerdict = detectDangerousShellExec(shellCommand);
     if (evalVerdict === 'block') {
       return {
@@ -509,57 +552,44 @@ export async function evaluatePolicy(
         tier: 3,
       };
     }
-    // NOTE: the eval-DYNAMIC (review) branch deliberately runs LAST, after
-    // pipe-chain and inline-exec — see the end of this block. Only the
-    // eval-REMOTE block above is Class A and must pre-empt everything.
 
-    // ── Pipe-chain exfiltration detection ────────────────────────────────────
-    // Already evaluated for bash-tool calls in the early Layer-1 block above.
-    // Re-runs here for tools whose command field is exposed via toolInspection
-    // but whose name is not in BASH_TOOL_NAMES. analyzePipeChain is cheap on
-    // non-pipe input.
+    // Pipe-chain. A trusted-host downgrade is an explicit user opt-in and still
+    // short-circuits — it is a deliberate ALLOW, not an opinion to be out-voted.
     const ptVerdict = pipeChainVerdict(
       shellCommand,
       isTrustedHost,
       resolveCheckTight(config.policy.commandChecks?.pipeChainHigh)
     );
-    if (ptVerdict) return ptVerdict;
+    if (ptVerdict?.decision === 'allow') return ptVerdict;
+    if (ptVerdict) candidates.push(ptVerdict);
 
-    // Inline arbitrary code execution — governed by commandChecks.inlineExec
-    // ('off' | 'review' (default) | 'block'). MUST run AFTER eval-remote and
-    // pipe-chain above: this Class-C tier defaults to review, and for tools
-    // outside BASH_TOOL_NAMES (e.g. terminal.execute via toolInspection) the
-    // early Layer-1 block never ran — with inline-exec first, a Class-A
-    // pipe-chain CRITICAL exfil was downgraded to review, and 'off' perversely
-    // restored the block (found by /code-review 2026-08-12; the bash path was
-    // always safe because Layer-1 runs pipe-chain first).
+    // Inline execution — Class C (off | review | block).
     const inlineAction = resolveCheck(config.policy.commandChecks?.inlineExec);
     if (inlineAction !== 'off' && detectInlineExec(shellCommand)) {
-      return {
+      candidates.push({
         decision: inlineAction === 'block' ? 'block' : 'review',
         blockedByLabel: 'Node9 Standard (Inline Execution)',
         ruleDescription:
           'The AI is running code directly from the command line. Review the full script below before allowing it to execute.',
         tier: 3,
-      };
+      });
     }
 
-    // Eval of DYNAMIC content (variable / subshell expansion) — Class B,
-    // tighten-only: commandChecks.evalDynamic may upgrade to block but can
-    // never turn this off. Runs AFTER inline-exec by design: it defaults to
-    // 'review', so evaluating it first silently downgraded an org's
-    // inlineExec:'block' to a prompt for `bash -c "$(…)"` — the strictly MORE
-    // dangerous spelling of the same tunnel (/code-review 2026-08-13).
+    // Eval of DYNAMIC content — Class B, tighten-only (may upgrade to block,
+    // can never be turned off).
     if (evalVerdict === 'review') {
-      return {
+      candidates.push({
         decision: resolveCheckTight(config.policy.commandChecks?.evalDynamic),
         blockedByLabel: 'Node9: Eval Dynamic Content',
         reason: 'eval of dynamic content (variable or subshell expansion) requires approval',
         ruleDescription:
           'The AI is running a command that includes a variable or subshell expansion. The actual command executed at runtime may differ from what is shown here.',
         tier: 3,
-      };
+      });
     }
+
+    const builtin = strictestVerdict(candidates);
+    if (builtin) return builtin;
 
     // ── Egress / destination control (GAP-5) ────────────────────────────────
     // Gate WHERE network tools send data (curl/wget/scp/ssh/nc) against the
