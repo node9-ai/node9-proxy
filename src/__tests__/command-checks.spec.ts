@@ -271,6 +271,57 @@ describe('policy.commandChecks — governance for built-in detections', () => {
     }
   });
 
+  it('AST detector: an ATTACHED flag value is not scanned for code letters', async () => {
+    // `bundle.includes(letter)` over the whole token read the VALUE as option
+    // letters — `-MData::Dumper` contains an 'e' from "Dumper" — turning six
+    // ordinary script runs into approval prompts (/code-review round 3).
+    writeHome();
+    for (const command of [
+      'perl -MData::Dumper script.pl',
+      'perl -MExtUtils::MakeMaker Makefile.PL',
+      'ruby -rbundler/setup app.rb',
+      'ruby -Ilib -rminitest/autorun test.rb',
+      'python3 -Werror::DeprecationWarning app.py',
+      'node -rts-node/register app.js',
+      'deno run -c deno.json --allow-net main.ts',
+    ]) {
+      const r = await authorizeHeadless('Bash', { command }, undefined, { deferReview: true });
+      expect(r.approved, command).toBe(true);
+    }
+  });
+
+  it("AST detector: a SCRIPT's own flags are not the interpreter's code flags", async () => {
+    writeHome();
+    for (const command of [
+      'python3 manage.py runserver -c settings.cfg',
+      'node scripts/build.js -p production',
+      'bash scripts/deploy.sh -c prod.conf',
+      'ruby bin/rails -e test',
+      'python3 -m black -', // `-` after -m is the module's stdin DATA
+    ]) {
+      const r = await authorizeHeadless('Bash', { command }, undefined, { deferReview: true });
+      expect(r.approved, command).toBe(true);
+    }
+  });
+
+  it('AST detector: target-taking wrappers still reach the interpreter', async () => {
+    writeHome();
+    for (const command of [
+      'chroot /mnt python3 -c "print(1)"',
+      'su deploy -c "print(1)"',
+      'runuser -u app python3 -c "print(1)"',
+      'unshare -n python3 -c "print(1)"',
+    ]) {
+      const r = await authorizeHeadless('Bash', { command }, undefined, { deferReview: true });
+      expect(r.review, command).toBe(true);
+    }
+    // …without swallowing the command when there is no inline code.
+    for (const command of ['chroot /mnt /bin/ls', 'su deploy whoami']) {
+      const r = await authorizeHeadless('Bash', { command }, undefined, { deferReview: true });
+      expect(r.approved, command).toBe(true);
+    }
+  });
+
   it('AST detector: bundled code flags still flag (-xc / -uc / -pe)', async () => {
     writeHome();
     for (const command of [

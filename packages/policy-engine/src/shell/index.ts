@@ -697,7 +697,7 @@ export function toolMatchesRule(
 // construction: flags are whole words, pipes/redirects are structure, and
 // wrapper unwrapping reuses the one COMMAND_WRAPPERS set.
 const INLINE_INTERPRETER =
-  /^(python[\d.]*|perl|ruby|node|tsx|ts-node|php|lua|deno|bun|pwsh|powershell(?:\.exe)?|osascript|rscript|irb|bash|sh|zsh|script)$/i;
+  /^(python[\d.]*|perl|ruby|node|tsx|ts-node|php|lua|deno|bun|pwsh|powershell(?:\.exe)?|osascript|rscript|irb|bash|sh|zsh|script|su)$/i;
 
 // Runner front-ends that exec an interpreter from their own argv
 // (`uv run python -c …`, `npx tsx -e …`). Distinct from COMMAND_WRAPPERS: these
@@ -723,7 +723,6 @@ const RUNNER_WRAPPERS = new Set([
   'chroot',
   'unshare',
   'runuser',
-  'su',
 ]);
 
 /**
@@ -737,12 +736,34 @@ function isInlineCodeFlag(interp: string, w: string): boolean {
   if (lw === '--eval' || lw === '--command' || lw === '--print') return true;
   if (/^(pwsh|powershell)/.test(interp)) return /^-(c|command|e|ec|enc|encodedcommand)$/i.test(lw);
   if (!w.startsWith('-') || w.startsWith('--')) return false;
-  const bundle = lw.slice(1);
-  if (/^(perl|ruby|lua|bun|osascript|rscript|irb)$/.test(interp)) return bundle.includes('e');
-  if (/^(node|tsx|ts-node)$/.test(interp)) return bundle.includes('e') || bundle.includes('p');
-  if (interp === 'php') return bundle.includes('r');
-  // python*, bash, sh, zsh: -c (possibly bundled, e.g. -uc / -xc)
-  return bundle.includes('c');
+
+  // Which single letter means "the next thing is CODE", per interpreter.
+  const codeLetters = /^(perl|ruby|lua|bun|osascript|rscript|irb)$/.test(interp)
+    ? 'e'
+    : /^(node|tsx|ts-node)$/.test(interp)
+      ? 'ep'
+      : interp === 'php'
+        ? 'r'
+        : 'c'; // python*, bash, sh, zsh
+
+  // Option BUNDLE only — everything up to an attached VALUE. Single-letter
+  // options cluster (`bash -xc`, `python3 -uc`, `perl -pe`), but several
+  // interpreters also take a value attached to the flag: `perl -MData::Dumper`,
+  // `ruby -rbundler/setup`, `ruby -Ilib`, `python3 -Werror::Deprecation`,
+  // `node -rts-node/register`. Testing `.includes(letter)` over the WHOLE token
+  // read those VALUES as option letters — `-MData::Dumper` contains an 'e' from
+  // "Dumper" — and turned six ordinary script runs into approval prompts
+  // (/code-review round 3). The bundle therefore stops at the first
+  // value-taking option letter, and only pure a-z0-9 clusters are scanned.
+  const body = lw.slice(1);
+  // Cut at the first value-taking option letter OR the first non-alphanumeric
+  // character (quote, slash, colon — where an attached value always begins).
+  // Cutting at BOTH matters: `perl -pe's/x/y/'` must still read as the bundle
+  // `pe` (code), while `perl -MData::Dumper` must read as the empty bundle.
+  const cutAt = /^(perl|ruby|node|tsx|ts-node)$/.test(interp) ? /[mirw]|[^a-z0-9]/ : /[^a-z0-9]/;
+  const cut = body.search(cutAt);
+  const bundle = cut >= 0 ? body.slice(0, cut) : body;
+  return [...codeLetters].some((l) => bundle.includes(l));
 }
 
 // Redirect operators that feed a command's STDIN — the heredoc/herestring/file
@@ -790,9 +811,22 @@ function listOps(): Set<number> {
   return _listOps;
 }
 
+// Wrappers whose first BARE operand is a target, with the real command after it
+// (`chroot /mnt python3 -c …`). Consumed exactly ONCE per wrapper — consuming
+// every bare operand would swallow the interpreter itself. `runuser -u app …`
+// and `unshare -n …` take their target via a FLAG, so the flag path already
+// handles them and they must NOT be listed here. `su` is not a wrapper at all:
+// its `-c` takes a command string, so it is an INLINE_INTERPRETER instead.
+const WRAPPER_TAKES_TARGET = new Set(['chroot']);
+
+// Interpreters whose LEADING bare operand names a target rather than a program
+// (`su USER -c CODE`). Their real code flag follows that operand.
+const INTERP_LEADING_TARGET = new Set(['su']);
+
 /** Strip leading wrappers/runners from a resolved arg list, returning the index
  *  of the real command head. Handles `sudo -u www python3`, `env -u FOO python3`,
- *  `timeout 5 python3`, `uv run python`, `conda run -n env python`. */
+ *  `timeout 5 python3`, `uv run python`, `conda run -n env python`,
+ *  `chroot /mnt python3`. */
 function unwrapCommandHead(words: (string | null)[]): number {
   let i = 0;
   while (i < words.length) {
@@ -809,6 +843,7 @@ function unwrapCommandHead(words: (string | null)[]): number {
     }
     if (!COMMAND_WRAPPERS.has(head) && !RUNNER_WRAPPERS.has(head)) break;
     i++;
+    let targetConsumed = false;
     // Skip this wrapper's own flags and their operands. A flag's operand is
     // unknowable per-flag across every wrapper, so consume a following non-flag
     // token only for the runner `run`/`exec` subcommand forms and for numeric
@@ -849,6 +884,14 @@ function unwrapCommandHead(words: (string | null)[]): number {
         i++;
         continue;
       }
+      // A target operand (`chroot /mnt CMD`) — consumed exactly ONCE, then the
+      // next bare token is the real command head. Without the one-shot guard
+      // this swallows the interpreter too.
+      if (!targetConsumed && WRAPPER_TAKES_TARGET.has(head)) {
+        targetConsumed = true;
+        i++;
+        continue;
+      }
       break;
     }
   }
@@ -874,19 +917,43 @@ function inlineExecStmt(stmt: any, pipeFed: boolean): boolean {
   const interp = (rawHead.split('/').pop() ?? '').toLowerCase();
   if (!INLINE_INTERPRETER.test(interp)) return false;
 
-  const args = words.slice(headIdx + 1);
+  let args = words.slice(headIdx + 1);
   // `deno eval "code"` spells the code form as a subcommand.
   if (interp === 'deno' && (args[0] ?? '').toLowerCase() === 'eval') return true;
 
+  // `su USER -c CODE` — the leading bare operand is a TARGET (a user), not a
+  // program, so it must not trip the "a program was selected" rule below (which
+  // otherwise stops the code-flag scan before ever reaching `-c`).
+  if (INTERP_LEADING_TARGET.has(interp)) {
+    const firstFlag = args.findIndex((a) => a == null || a.startsWith('-'));
+    args = firstFlag >= 0 ? args.slice(firstFlag) : [];
+  }
+
   let positionals = 0;
+  let selectedProgram = false; // a script operand or `-m module` was chosen
   for (const a of args) {
     if (a == null) {
       positionals++; // dynamic arg — treat as a script operand
+      selectedProgram = true;
       continue;
     }
-    if (a === '-') return true; // explicit stdin marker
-    if (isInlineCodeFlag(interp, a)) return true;
-    if (!a.startsWith('-')) positionals++;
+    // Once a SCRIPT has been selected, later flags belong to that script, not
+    // to the interpreter: `python3 manage.py runserver -c settings.cfg` is a
+    // Django option, not `python3 -c CODE` (/code-review round 3 — this scan
+    // used to keep matching code flags past the script and flagged every
+    // `node scripts/build.js -p production`).
+    if (!selectedProgram && isInlineCodeFlag(interp, a)) return true;
+    // `-m module` selects a program too, so a trailing `-` after it is that
+    // module's stdin DATA (`python3 -m black -`), not the interpreter reading code.
+    if (a === '-m') {
+      selectedProgram = true;
+      continue;
+    }
+    if (a === '-' && !selectedProgram) return true; // bare interpreter reading code from stdin
+    if (!a.startsWith('-')) {
+      positionals++;
+      selectedProgram = true;
+    }
   }
 
   // No script operand + code arriving over stdin (heredoc, herestring,
