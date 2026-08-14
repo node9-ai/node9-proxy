@@ -14,6 +14,7 @@ import {
   applyManagedApprovers,
   applyManagedCommandChecks,
   COMMAND_CHECK_ORDER,
+  strictestOf,
 } from './managed';
 import { pathRules } from '../shields/build';
 import { normalizeHost } from '../auth/trusted-hosts';
@@ -411,6 +412,19 @@ export const DEFAULT_CONFIG: Config = {
   environments: {},
 };
 
+// Known-safe build-artifact paths for `rm`. ONE definition, shared by the
+// `allow-rm-safe-paths` waiver rule and — when the rm advisory is org-managed
+// and therefore pinned — by the injected advisory's own `notMatches` condition.
+// A pinned rule defeats array order, so the waiver can no longer shade it as a
+// separate competing rule; folding the same pattern in keeps the false-positive
+// reduction without a race (/code-review round 3).
+const RM_SAFE_PATH_PATTERN =
+  '(node_modules|\\bdist\\b|\\.next|\\bcoverage\\b|\\.cache|\\btmp\\b|\\btemp\\b|\\.DS_Store)(\\/|\\s|$)';
+
+// Verdict strictness order — the one ladder for smart-rule verdicts, shared with
+// the engine's VERDICT_RANK semantics (allow < review < block).
+const VERDICT_ORDER = ['allow', 'review', 'block'] as const;
+
 // Advisory rules — appended LAST in getConfig() so user-defined smart rules
 // (project/global/shield) are evaluated first and can override them.
 // This is the "Safe by Default" safety net: operations that are dangerous enough
@@ -427,13 +441,7 @@ const ADVISORY_SMART_RULES: SmartRule[] = [
     conditionMode: 'all',
     conditions: [
       { field: 'command', op: 'matches', value: '(^|&&|\\|\\||;)\\s*rm\\b' },
-      {
-        field: 'command',
-        op: 'matches',
-        // Matches known-safe build artifact paths in the command.
-        value:
-          '(node_modules|\\bdist\\b|\\.next|\\bcoverage\\b|\\.cache|\\btmp\\b|\\btemp\\b|\\.DS_Store)(\\/|\\s|$)',
-      },
+      { field: 'command', op: 'matches', value: RM_SAFE_PATH_PATTERN },
     ],
     verdict: 'allow',
     reason: 'Deleting a known-safe build artifact path',
@@ -886,7 +894,17 @@ export function getConfig(cwd?: string): Config {
           egressModeUserSet = true;
         }
       }
-      if (Array.isArray(e.allow) && !isProject) mergedPolicy.egress.allow.push(...e.allow);
+      // ALLOW entries widen, so a repo layer may only contribute them when no
+      // OUTER layer (global config) has declared an allowlist of its own —
+      // otherwise a repo could widen past what the user chose. Dropping them
+      // unconditionally was wrong: with no outer egress config the repo is the
+      // ONLY source, so `enabled:true, mode:'block', allow:[...]` became
+      // deny-everything including the repo's own declared hosts (/code-review
+      // round 3). An org-managed allowlist still REPLACES this later.
+      if (Array.isArray(e.allow) && (!isProject || !egressAllowUserSet)) {
+        mergedPolicy.egress.allow.push(...e.allow);
+      }
+      if (Array.isArray(e.allow) && !isProject) egressAllowUserSet = true;
       if (Array.isArray(e.deny)) mergedPolicy.egress.deny.push(...e.deny);
       if (e.allowPrivate !== undefined && !(isProject && e.allowPrivate === true))
         mergedPolicy.egress.allowPrivate = e.allowPrivate;
@@ -943,6 +961,10 @@ export function getConfig(cwd?: string): Config {
   // dev never set mode, the org value applies verbatim. Declared before the
   // applyLayer calls that write it (closure TDZ).
   let egressModeUserSet = false;
+  // True once an OUTER (global ~/.node9) layer declared an egress allowlist. A
+  // repo layer may contribute allow entries only when this is false — see the
+  // merge below.
+  let egressAllowUserSet = false;
 
   applyLayer(globalConfig);
   applyLayer(projectConfig, /* isProject */ true);
@@ -1374,7 +1396,6 @@ export function getConfig(cwd?: string): Config {
     if (name?.endsWith('-sql')) return 'sqlDdl';
     return undefined;
   };
-  const VERDICT_STRENGTH: Record<string, number> = { allow: 0, review: 1, block: 2 };
   for (const rule of ADVISORY_SMART_RULES) {
     const knobKey = rule.verdict === 'review' ? advisoryKnobKey(rule.name) : undefined;
     const knob = knobKey ? (cc as Record<string, string | undefined>)[knobKey] : undefined;
@@ -1385,32 +1406,63 @@ export function getConfig(cwd?: string): Config {
       ? mergedPolicy.smartRules.find((r) => r.name === rule.name)
       : undefined;
 
-    // Unmanaged (or an ungoverned allow rule): a local same-name rule pre-empts
-    // injection entirely — the dev owns their own rules.
-    if (!managed && twin) continue;
+    // The knob's verdict for this advisory. `undefined` knob (or an ungoverned
+    // allow rule like allow-rm-safe-paths) keeps the rule's own verdict.
+    const knobVerdict: SmartRule['verdict'] =
+      knob === 'block' ? 'block' : (rule.verdict as SmartRule['verdict']);
 
-    // MANAGED. Eviction must never WEAKEN what the developer chose. The floor
-    // law for this whole subsystem is "a member may tighten, never loosen", and
-    // an unlocked managed value is a FLOOR — so it may only replace a twin that
-    // is weaker than the mandate. /code-review 2026-08-13 caught the inverse:
-    // an admin setting rmAdvisory to its DEFAULT 'review' (intending no change)
-    // deleted a dev's `review-rm: block` rule and left a review prompt, so the
-    // WEAKER org value was the one that destroyed local strictness. A LOCKED
-    // value still wins outright — that is what a lock means.
-    if (managed && twin && !locked) {
-      const mandate = knob === 'block' ? 2 : 1; // 'review' unless explicitly block
-      if (VERDICT_STRENGTH[twin.verdict] >= mandate) continue; // dev is >= org: leave it
+    // UNMANAGED: a local same-name rule pre-empts injection — the dev owns
+    // their own rules. Otherwise inject at the knob's verdict, unpinned.
+    // (A local `rmAdvisory:'block'` must still swap the verdict — this is the
+    // dev's own knob, not an org mandate.)
+    if (!managed) {
+      if (!twin) mergedPolicy.smartRules.push({ ...rule, verdict: knobVerdict });
+      continue;
     }
-    if (managed && twin) {
-      // Evict the local twin so the org's mandate can't be shadowed by name.
+
+    // MANAGED. The advisory is ALWAYS injected, ALWAYS pinned. No inspection of
+    // the local twin decides whether to inject.
+    //
+    // Two earlier designs both failed here, in opposite directions:
+    //   - evict-then-inject deleted a dev's STRICTER same-name rule when the
+    //     org merely set the default 'review' (the weaker org value destroyed
+    //     local strictness);
+    //   - skip-if-twin-is-stronger compared only the twin's VERDICT, so a decoy
+    //     rule named `review-rm` with verdict 'block' and conditions that match
+    //     NOTHING made the mandate skip injection entirely — `rm -rf src` ran
+    //     unguarded (/code-review round 3, reproduced at the gate).
+    // Both vanish once injection is unconditional: a decoy cannot suppress what
+    // is always injected, and a pinned rule cannot be out-ranked by array order.
+    //
+    // The knob itself is ALREADY floored against the dev's local knob by
+    // applyManagedCommandChecks before we get here, so dev-tightening is
+    // preserved at the knob layer. The strictestOf below additionally preserves
+    // a stricter same-name RULE, which the knob floor cannot see.
+    const effective = locked
+      ? knobVerdict // a lock is absolute — the cloud value wins outright
+      : (strictestOf(VERDICT_ORDER, knobVerdict, twin?.verdict) ?? knobVerdict);
+
+    // Drop the local twin so the same name doesn't resolve twice; its strictness
+    // has already been folded into `effective` above.
+    if (twin) {
       mergedPolicy.smartRules = mergedPolicy.smartRules.filter((r) => r.name !== rule.name);
     }
-    const injected = knob === 'block' ? { ...rule, verdict: 'block' as const } : { ...rule };
-    // Pin only a managed BLOCK: it must out-rank the earlier unpinned
-    // allow-rm-safe-paths so `rm node_modules` also blocks under an org
-    // mandate. A managed 'review' stays unpinned so the safe-path allow keeps
-    // reducing false positives (eviction above already defeats a weaker twin).
-    if (managed && injected.verdict === 'block') injected.pinned = true;
+
+    const injected: SmartRule = { ...rule, verdict: effective, pinned: true };
+    // Pinning defeats array order — which also means the unpinned
+    // `allow-rm-safe-paths` (array index 0) can no longer shade this rule. For a
+    // managed REVIEW that would be a regression (the safe-path waiver is a
+    // deliberate false-positive reducer), so fold the waiver into this rule's
+    // own conditions instead of leaving it to race as a separate rule. A managed
+    // BLOCK deliberately keeps blocking safe paths too — the admin's explicit
+    // escalation, as locked in round 2.
+    if (rule.name === 'review-rm' && effective !== 'block') {
+      injected.conditions = [
+        ...(rule.conditions ?? []),
+        { field: 'command', op: 'notMatches', value: RM_SAFE_PATH_PATTERN },
+      ];
+      injected.conditionMode = 'all';
+    }
     mergedPolicy.smartRules.push(injected);
   }
 

@@ -201,6 +201,84 @@ describe('command-checks governance integrity (/code-review wf_0ff1bc3d)', () =>
     expect(getConfig(cwd).policy.commandChecks?.inlineExec).toBe('block');
   });
 
+  // ── R3: the DECOY bypass — the reason the eviction table was deleted ─────
+  // A same-named rule with a strong verdict but conditions that match NOTHING
+  // made the old "skip if the twin is already >= the mandate" guard skip
+  // injection entirely, so the org's mandate was never applied and `rm -rf src`
+  // ran unguarded. Injection is now unconditional under a managed knob.
+  const decoyRm = {
+    name: 'review-rm',
+    tool: '*',
+    conditionMode: 'all',
+    conditions: [{ field: 'command', op: 'matches', value: 'ZZZ_NEVER_MATCHES' }],
+    verdict: 'block',
+    reason: 'decoy: strong verdict, impossible condition',
+  };
+
+  it('a DECOY same-name rule cannot suppress a managed mandate (unlocked)', async () => {
+    seedHome({ smartRules: [decoyRm] }, orgKnob({ rmAdvisory: 'block' }));
+    for (const command of ['rm -rf src', 'rm notes.txt']) {
+      const r = await authorizeHeadless('Bash', { command }, { agent: 'MCP' }, {});
+      expect(r.approved, command).toBe(false);
+    }
+    // The injected rule carries the REAL rm condition, not the decoy's.
+    const rules = getConfig().policy.smartRules.filter((x) => x.name === 'review-rm');
+    expect(rules).toHaveLength(1);
+    expect(rules[0].pinned).toBe(true);
+    expect(JSON.stringify(rules[0].conditions)).not.toContain('ZZZ_NEVER_MATCHES');
+  });
+
+  it('a DECOY cannot suppress a managed mandate when LOCKED either', async () => {
+    seedHome(
+      { smartRules: [decoyRm] },
+      orgKnob({ rmAdvisory: 'block' }, ['commandChecksRmAdvisory'])
+    );
+    const r = await authorizeHeadless('Bash', { command: 'rm -rf src' }, { agent: 'MCP' }, {});
+    expect(r.approved).toBe(false);
+  });
+
+  // The pin defeats array order, so the safe-path waiver can no longer shade
+  // the advisory as a separate rule — it is folded into the injected rule's own
+  // conditions for REVIEW, while BLOCK deliberately still blocks safe paths.
+  it("managed rmAdvisory='review' still honours the safe-path waiver", async () => {
+    seedHome({}, orgKnob({ rmAdvisory: 'review' }));
+    for (const safe of ['rm -rf node_modules', 'rm -rf dist']) {
+      const r = await authorizeHeadless('Bash', { command: safe }, { agent: 'MCP' }, {});
+      expect(r.approved, safe).toBe(true);
+    }
+    const risky = await authorizeHeadless('Bash', { command: 'rm -rf src' }, { agent: 'MCP' }, {});
+    expect(risky.approved).toBe(false);
+  });
+
+  it("managed rmAdvisory='block' blocks safe paths too (admin escalation)", async () => {
+    seedHome({}, orgKnob({ rmAdvisory: 'block' }));
+    const r = await authorizeHeadless(
+      'Bash',
+      { command: 'rm -rf node_modules' },
+      { agent: 'MCP' },
+      {}
+    );
+    expect(r.approved).toBe(false);
+  });
+
+  // ── R3: a repo egress policy as the ONLY source must not self-deny ───────
+  it('a repo egress policy works when no outer layer declared egress', () => {
+    seedHome({});
+    const cwd = seedProject({
+      egress: { enabled: true, mode: 'block', allow: ['api.github.com', 'registry.internal'] },
+    });
+    const eg = getConfig(cwd).policy.egress;
+    expect(eg.enabled).toBe(true);
+    expect(eg.mode).toBe('block');
+    expect(eg.allow).toContain('api.github.com'); // was [] → deny-everything
+  });
+
+  it('a repo still cannot WIDEN an allowlist the global layer declared', () => {
+    seedHome({ egress: { enabled: true, mode: 'block', allow: ['api.github.com'] } });
+    const cwd = seedProject({ egress: { allow: ['evil.example.com'] } });
+    expect(getConfig(cwd).policy.egress.allow).not.toContain('evil.example.com');
+  });
+
   // ── 3c. managed egress mode floor when the dev never set a mode ──────────
   it("a managed egress mode='off' applies when the dev never set a mode", () => {
     seedHome(
