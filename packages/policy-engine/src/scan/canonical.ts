@@ -31,7 +31,7 @@ import {
   analyzeFsOperation,
   analyzeShellCommand,
   detectDangerousShellExec,
-  isBashTool,
+  isShellShapedTool,
   AST_FS_REGEX_RULES,
   toolMatchesRule,
   normalizeCommandForPolicy,
@@ -202,13 +202,17 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
  * and fails CI when the hash drifts without a version bump — forgetting
  * is loud, not silent.
  */
-// v7 (2026-08-13): rule/tool matching gained the shell-shape alias
-// (toolMatchesRule), so scan now reports the bash-scoped rules for `shell`,
-// `run_shell_command`, `execute_bash` and `terminal.execute` — spellings it
-// silently skipped before, while the live gate enforced them. This CHANGES
-// detector output (new findings on existing history), so the version bumps and
-// daemons re-scan through the new pipeline rather than leaving old verdicts
-// frozen.
+// v7 (2026-08-14): scan now reports the bash-scoped rules for EVERY shell-shaped
+// spelling — `shell`, `run_shell_command`, `execute_bash` and `terminal.execute`
+// — which it silently skipped before while the live gate enforced them. This
+// CHANGES detector output (new findings on existing history), so daemons re-scan
+// through the new pipeline rather than leaving old verdicts frozen.
+//
+// v7 was first cut on 2026-08-13 covering only the rule loop; `terminal.execute`
+// still returned early at the isBashTool guard above it, so the version
+// documented coverage it did not deliver (/code-review round 3). Both the guard
+// and the loop now key on isShellShapedTool. v7 was never released, so this is
+// corrected in place rather than minted as a v8 — the field is still on v6.
 export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v7';
 
 /**
@@ -221,7 +225,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v7';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '8339606c97318fe7';
+export const CANONICAL_EXTRACTOR_HASH = '2e0efa0e160e8dc1';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
@@ -236,7 +240,13 @@ export function extractCanonicalFindings(
   const ts = call.timestamp;
   const toolNameLower = call.toolName.toLowerCase();
   const command = typeof call.args.command === 'string' ? (call.args.command as string) : null;
-  const isBash = isBashTool(call.toolName) && command !== null;
+  // Shell-shaped, not just BASH_TOOL_NAMES: `terminal.execute` carries a shell
+  // command via toolInspection and must reach the AST detectors below, or the
+  // regex twins those detectors supersede fire uncorrected in the rule loop.
+  // Keyed on the SAME predicate the rule loop uses (toolMatchesRule) so the two
+  // cannot drift — the round-3 review found them disagreeing, which is what let
+  // `grep "drop table"` false-positive for that tool.
+  const isShell = isShellShapedTool(call.toolName, ctx.toolInspection) && command !== null;
 
   // ── Long output redacted (per-line, no rule needed) ──────────────────────
   if (call.outputBytes !== undefined && call.outputBytes > LONG_OUTPUT_THRESHOLD_BYTES) {
@@ -324,7 +334,7 @@ export function extractCanonicalFindings(
     }
   }
 
-  if (!isBash || command === null) {
+  if (!isShell || command === null) {
     return out;
   }
 

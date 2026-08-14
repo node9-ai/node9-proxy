@@ -32,6 +32,7 @@ import {
   AST_FS_REGEX_RULES,
   BUILTIN_SHIELDS,
   toolMatchesRule,
+  isShellShapedTool,
 } from '@node9/policy-engine';
 import { scanArgs } from '../../dlp';
 import { pricingFor } from '../../pricing/litellm';
@@ -1066,7 +1067,12 @@ function processClaudeFile(
       // Runs FIRST so AST-resolved verdicts win over the regex rules,
       // which can FP on JSON args, heredocs, and chained commands.
       let astFsMatched = false;
-      const astRanForBash = toolNameLower === 'bash' || toolNameLower === 'execute_bash';
+      // isShellShapedTool — the SAME predicate toolMatchesRule uses, so a rule
+      // matching a tool and the AST suppression for that tool can never
+      // disagree. Hardcoded per-agent literal lists drifted from the rule
+      // matcher and resurrected the `grep "drop table"` false positive that
+      // AST_FS_REGEX_RULES exists to suppress (/code-review round 3).
+      const astRanForBash = isShellShapedTool(toolNameLower, toolInspectionMap);
       if (astRanForBash) {
         astFsMatched = pushFsOpAstFinding(
           String(input.command ?? ''),
@@ -1560,7 +1566,7 @@ export function scanGeminiHistory(
 
           // ── AST filesystem-operation detection (gemini) ────────────────
           let astFsMatched = false;
-          const astRanForBash = toolNameLower === 'run_shell_command' || toolNameLower === 'shell';
+          const astRanForBash = isShellShapedTool(toolNameLower, toolInspectionMap);
           if (astRanForBash) {
             astFsMatched = pushFsOpAstFinding(
               String(input.command ?? ''),
@@ -2060,7 +2066,7 @@ export function scanCopilotHistory(
       result.totalToolCalls++;
       sessionCalls.push({ toolName, input, timestamp });
 
-      const isShellTool = toolNameLower === 'bash' || toolNameLower === 'shell';
+      const isShellTool = isShellShapedTool(toolNameLower, toolInspectionMap);
       if (isShellTool) result.bashCalls++;
 
       if (timestamp) {
@@ -2371,7 +2377,7 @@ export function scanCodexHistory(
 
       // ── AST filesystem-operation detection (codex) ─────────────────────
       let astFsMatched = false;
-      const astRanForBash = toolNameLower === 'exec_command' || toolNameLower === 'bash';
+      const astRanForBash = isShellShapedTool(toolNameLower, toolInspectionMap);
       if (astRanForBash) {
         astFsMatched = pushFsOpAstFinding(
           String(input['command'] ?? ''),

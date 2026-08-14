@@ -19,6 +19,7 @@ import os from 'os';
 import path from 'path';
 import readline from 'readline';
 import { scanArgs } from '../dlp.js';
+import { DEFAULT_CONFIG } from '../config/index.js';
 import {
   detectPii,
   extractCanonicalFindings,
@@ -441,7 +442,11 @@ export function extractFindingsFromLine(
     project: '',
     agent: 'claude',
     rules: [],
-    toolInspection: { bash: 'command', execute_bash: 'command' },
+    // Must match the DEFAULT toolInspection the gate uses, or a shell-shaped
+    // tool (notably `terminal.execute`) is invisible to the extractor here
+    // while the live gate enforces on it — the CLI scan and the dashboard then
+    // disagree with each other (/code-review round 3).
+    toolInspection: { ...DEFAULT_CONFIG.policy.toolInspection },
     dlpEnabled: false, // line-level DLP runs above already
   };
   const message = (line as Record<string, unknown>).message;

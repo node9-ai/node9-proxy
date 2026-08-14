@@ -386,3 +386,44 @@ describe('command-checks governance integrity (/code-review wf_0ff1bc3d)', () =>
     expect(getConfig().policy.egress.mode).toBe('block');
   });
 });
+
+// ── Contract 2: ONE shell-shape definition across gate / scan / explain ─────
+// These three answered "is this tool shell-shaped?" differently, so a rule the
+// gate enforced could be missing from the report and denied by explain
+// (/code-review round 3).
+describe('shell-shape consistency across gate, scan and explain', () => {
+  const SUDO = { command: 'sudo systemctl restart nginx' };
+  const REVIEW_SUDO = {
+    rule: {
+      name: 'review-sudo',
+      tool: 'bash',
+      conditionMode: 'all' as const,
+      conditions: [{ field: 'command', op: 'matches' as const, value: '\\bsudo\\s', flags: 'i' }],
+      verdict: 'review' as const,
+      reason: 'sudo',
+    },
+    sourceType: 'default' as const,
+  };
+
+  it('the canonical extractor covers every shell-shaped spelling the gate does', async () => {
+    const { extractCanonicalFindings } = await import('@node9/policy-engine');
+    for (const toolName of ['Bash', 'shell', 'run_shell_command', 'terminal.execute']) {
+      const found = extractCanonicalFindings(
+        { toolName, args: SUDO, timestamp: '2026-08-14T00:00:00Z' },
+        {
+          sessionId: 's',
+          lineIndex: 0,
+          project: 'p',
+          agent: 'claude',
+          rules: [REVIEW_SUDO],
+          toolInspection: { bash: 'command', 'terminal.execute': 'command' },
+          dlpEnabled: false,
+        }
+      );
+      expect(
+        found.map((f) => f.ruleName),
+        toolName
+      ).toContain('review-sudo');
+    }
+  });
+});

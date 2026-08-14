@@ -36,7 +36,7 @@ export {
   checkDangerousSql,
   detectInlineExec,
 } from '@node9/policy-engine';
-import { detectInlineExec } from '@node9/policy-engine';
+import { detectInlineExec, toolMatchesRule } from '@node9/policy-engine';
 
 // ── shouldSnapshot — Config-aware undo gate (host concern) ──────────────────
 
@@ -312,8 +312,15 @@ async function deriveExplainTrace(toolName: string, args?: unknown): Promise<Exp
 
   // ── 2. Smart Rules ────────────────────────────────────────────────────────
   if (config.policy.smartRules.length > 0) {
+    // Same matcher as the gate (toolMatchesRule), including the shell-shape
+    // alias. A raw matchesPattern here printed 'No smart rule matched "shell"'
+    // for every shell-shaped spelling the gate actually reviews — explain
+    // contradicting the gate is worse than explain being silent, because it
+    // teaches the user the gate is wrong (/code-review round 3).
     const matchedRule = config.policy.smartRules.find(
-      (rule) => matchesPattern(toolName, rule.tool) && evaluateSmartConditions(args, rule)
+      (rule) =>
+        toolMatchesRule(toolName, rule.tool, config.policy.toolInspection) &&
+        evaluateSmartConditions(args, rule)
     );
     if (matchedRule) {
       const label = `Smart Rule: ${matchedRule.name ?? matchedRule.tool}`;
