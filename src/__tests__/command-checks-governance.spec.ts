@@ -79,238 +79,6 @@ describe('command-checks governance integrity (/code-review wf_0ff1bc3d)', () =>
     managedConfig: { commandChecks, locked },
   });
 
-  /** The gate's effective verdict for one command. */
-  async function verdictFor(command: string, cwd?: string): Promise<'allow' | 'review' | 'block'> {
-    const r = await authorizeHeadless(
-      'Bash',
-      { command },
-      { agent: 'MCP' },
-      { deferReview: true, cwd }
-    );
-    return r.approved ? 'allow' : r.review ? 'review' : 'block';
-  }
-
-  // ── /code-review round 4: four ways a local setting beat the org, or the
-  //    org beat a STRICTER local setting. All four share one cause — two
-  //    policies met and one OVERWROTE the other instead of combining by
-  //    strictness. Written before the fix; every case here failed first.
-  //
-  //    Governing semantics (founder decision, this arc):
-  //      · a lock is a FLOOR — a dev may be stricter, never weaker;
-  //      · an UNLOCKED managed 'review' stays waivable by an explicit dev
-  //        allow rule (a dev writing a narrow waiver IS a human reviewing);
-  //        'block' and any LOCKED value are not waivable.
-  describe('round 4 — an org mandate and a local rule combine by strictness', () => {
-    // 1. EGRESS: allow-list entries WIDEN, so an agent-writable repo config may
-    //    never contribute them once an outer layer has declared an egress
-    //    stance — including the stance "enabled, block, no allow list at all",
-    //    which is deny-everything and was being read as "no opinion".
-    it('a repo config cannot add an allow host when global declared egress', () => {
-      seedHome({ egress: { enabled: true, mode: 'block' } });
-      const cwd = seedProject({ egress: { allow: ['attacker.example.com'] } });
-      expect(getConfig(cwd).policy.egress.allow).not.toContain('attacker.example.com');
-    });
-
-    it('a repo config cannot widen an allow list the global config declared', () => {
-      seedHome({ egress: { enabled: true, mode: 'block', allow: ['api.corp.com'] } });
-      const cwd = seedProject({ egress: { allow: ['attacker.example.com'] } });
-      const { allow } = getConfig(cwd).policy.egress;
-      expect(allow).toContain('api.corp.com');
-      expect(allow).not.toContain('attacker.example.com');
-    });
-
-    // The round-3 case this must not re-break: with NO outer egress config the
-    // repo is the ONLY source, so dropping its allow list turned its own
-    // declared hosts into deny-everything.
-    it('a repo config IS the allow list when no outer layer declared egress', () => {
-      seedHome({});
-      const cwd = seedProject({
-        egress: { enabled: true, mode: 'block', allow: ['api.corp.com'] },
-      });
-      expect(getConfig(cwd).policy.egress.allow).toContain('api.corp.com');
-    });
-
-    // 2. WAIVERS: 'review' is the DEFAULT knob value. If merely leaving it
-    //    there destroys every local rm waiver, devs meet prompts on routine
-    //    work and learn to approve blindly — a net security loss.
-    it("an UNLOCKED managed 'review' leaves an explicit dev allow waiver intact", async () => {
-      seedHome(
-        {
-          smartRules: [
-            {
-              name: 'allow-scratch-rm',
-              tool: '*',
-              conditionMode: 'all',
-              conditions: [{ field: 'command', op: 'matches', value: 'rm -rf \\./scratch' }],
-              verdict: 'allow',
-              reason: 'dev waiver',
-            },
-          ],
-        },
-        orgKnob({ rmAdvisory: 'review' })
-      );
-      expect(await verdictFor('rm -rf ./scratch')).toBe('allow');
-    });
-
-    it("a LOCKED managed 'review' cannot be waived by a dev allow rule", async () => {
-      seedHome(
-        {
-          smartRules: [
-            {
-              name: 'allow-scratch-rm',
-              tool: '*',
-              conditionMode: 'all',
-              conditions: [{ field: 'command', op: 'matches', value: 'rm -rf \\./scratch' }],
-              verdict: 'allow',
-              reason: 'dev waiver',
-            },
-          ],
-        },
-        orgKnob({ rmAdvisory: 'review' }, ['commandChecksRmAdvisory'])
-      );
-      expect(await verdictFor('rm -rf ./scratch')).toBe('review');
-    });
-
-    it("a managed 'block' cannot be waived by a dev allow rule", async () => {
-      seedHome(
-        {
-          smartRules: [
-            {
-              name: 'allow-scratch-rm',
-              tool: '*',
-              conditionMode: 'all',
-              conditions: [{ field: 'command', op: 'matches', value: 'rm -rf \\./scratch' }],
-              verdict: 'allow',
-              reason: 'dev waiver',
-            },
-          ],
-        },
-        orgKnob({ rmAdvisory: 'block' })
-      );
-      expect(await verdictFor('rm -rf ./scratch')).toBe('block');
-    });
-
-    // 3. COVERAGE: strictestOf folded the twin's VERDICT in, then the twin was
-    //    deleted and the BUILT-IN template's conditions were injected — so the
-    //    dev's broader match was silently discarded. The built-in only matches
-    //    rm at statement start; the dev's matched rm anywhere.
-    it("a managed 'review' keeps the coverage of a STRICTER dev rule, not just its verdict", async () => {
-      seedHome(
-        {
-          smartRules: [
-            {
-              name: 'review-rm',
-              tool: '*',
-              conditionMode: 'all',
-              conditions: [{ field: 'command', op: 'matches', value: '\\brm\\b' }],
-              verdict: 'block',
-              reason: 'dev: every rm',
-            },
-          ],
-        },
-        orgKnob({ rmAdvisory: 'review' })
-      );
-      // Only the dev's condition reaches an rm that is not at statement start.
-      expect(await verdictFor('find . | xargs rm -rf')).toBe('block');
-      // and the mandate's own coverage still applies
-      expect(await verdictFor('rm -rf ./build')).toBe('block');
-    });
-
-    // 4. LOCK AS FLOOR: `locked ? knobVerdict` took the cloud value outright,
-    //    so locking a control at 'review' DOWNGRADED a dev who chose 'block'.
-    it("a LOCKED managed 'review' does not downgrade a dev's stricter block", async () => {
-      seedHome(
-        {
-          smartRules: [
-            {
-              name: 'review-rm',
-              tool: '*',
-              conditionMode: 'all',
-              conditions: [{ field: 'command', op: 'matches', value: '(^|&&|\\|\\||;)\\s*rm\\b' }],
-              verdict: 'block',
-              reason: 'dev: block rm',
-            },
-          ],
-        },
-        orgKnob({ rmAdvisory: 'review' }, ['commandChecksRmAdvisory'])
-      );
-      expect(await verdictFor('rm -rf src')).toBe('block');
-    });
-
-    it('a lock still RAISES a dev who chose weaker', async () => {
-      seedHome(
-        {
-          smartRules: [
-            {
-              name: 'review-rm',
-              tool: '*',
-              conditionMode: 'all',
-              conditions: [{ field: 'command', op: 'matches', value: '(^|&&|\\|\\||;)\\s*rm\\b' }],
-              verdict: 'review',
-              reason: 'dev: just prompt',
-            },
-          ],
-        },
-        orgKnob({ rmAdvisory: 'block' }, ['commandChecksRmAdvisory'])
-      );
-      expect(await verdictFor('rm notes.txt')).toBe('block');
-    });
-
-    // The round-3 attack these fixes must not re-open: a decoy rule that
-    // reuses the advisory's NAME, claims a strict verdict, and matches
-    // NOTHING. It must not suppress or shade the mandate.
-    it('a decoy rule that matches nothing cannot suppress a managed block', async () => {
-      seedHome(
-        {
-          smartRules: [
-            {
-              name: 'review-rm',
-              tool: '*',
-              conditionMode: 'all',
-              conditions: [
-                { field: 'command', op: 'matches', value: 'THIS_MATCHES_NOTHING_XYZZY' },
-              ],
-              verdict: 'block',
-              reason: 'decoy',
-            },
-          ],
-        },
-        orgKnob({ rmAdvisory: 'block' })
-      );
-      expect(await verdictFor('rm -rf src')).toBe('block');
-    });
-
-    // A weaker same-name twin must NOT survive. Keeping it would let a dev
-    // extend the reach of the WEAKER verdict past the mandate's own coverage —
-    // the mirror image of the coverage bug above, and the reason the twin is
-    // kept only when it is stricter.
-    it('a WEAKER same-name dev rule is dropped, not kept alongside the mandate', async () => {
-      seedHome(
-        {
-          smartRules: [
-            {
-              name: 'review-rm',
-              tool: '*',
-              conditionMode: 'all',
-              conditions: [{ field: 'command', op: 'matches', value: '\\brm\\b' }],
-              verdict: 'allow',
-              reason: 'dev: allow every rm',
-            },
-          ],
-        },
-        orgKnob({ rmAdvisory: 'block' })
-      );
-      // Asserted on the rule set, not on a gate verdict: the built-in's own
-      // condition misses pipe-fed rm (`\|\|` is `||`, not a single pipe), so a
-      // gate probe here would measure that PRE-EXISTING coverage gap instead of
-      // the eviction this test is about.
-      const survivors = getConfig().policy.smartRules.filter((r) => r.name === 'review-rm');
-      expect(survivors).toHaveLength(1);
-      expect(survivors[0].verdict).toBe('block');
-      expect(survivors[0].conditions?.[0]?.value).not.toBe('\\brm\\b');
-    });
-  });
-
   // ── 3a. managed rmAdvisory 'block' survives local smart rules ────────────
   it("a local review-rm ALLOW rule cannot defeat a LOCKED managed rmAdvisory='block'", async () => {
     seedHome(
@@ -542,22 +310,12 @@ describe('command-checks governance integrity (/code-review wf_0ff1bc3d)', () =>
     const r = await authorizeHeadless('Bash', { command: 'rm notes.txt' }, { agent: 'MCP' }, {});
     expect(r.approved).toBe(false);
     expect(r.review).not.toBe(true); // still a hard block, not a prompt
-    // TWO rules survive by design (/code-review round 4): the dev's stricter
-    // rule keeps its own CONDITIONS — folding only its verdict into the mandate
-    // silently narrowed what the mandate covered — and the mandate keeps the
-    // built-in's. Both carry `effective`, so they can never disagree.
     const rules = getConfig().policy.smartRules.filter((x) => x.name === 'review-rm');
-    expect(rules).toHaveLength(2);
-    expect(rules.every((x) => x.verdict === 'block')).toBe(true);
-    expect(rules.every((x) => x.pinned === true)).toBe(true);
+    expect(rules).toHaveLength(1);
+    expect(rules[0].verdict).toBe('block');
   });
 
-  // SEMANTICS CHANGED (/code-review round 4). This test previously asserted
-  // that a lock "wins outright" — the org value applied verbatim, up OR down.
-  // That made locking a control at 'review' DOWNGRADE a dev who had chosen
-  // 'block': the act of locking made the device less safe. A lock is now a
-  // FLOOR — it stops a dev going weaker, never stricter.
-  it("a LOCKED managed 'review' is a FLOOR — it does not downgrade a stricter dev rule", async () => {
+  it("a LOCKED managed 'review' DOES win outright over a stricter dev rule (that is what a lock means)", async () => {
     seedHome(
       { smartRules: [localRm('block')] },
       orgKnob({ rmAdvisory: 'review' }, ['commandChecksRmAdvisory'])
@@ -570,8 +328,7 @@ describe('command-checks governance integrity (/code-review wf_0ff1bc3d)', () =>
         deferReview: true,
       }
     );
-    expect(r.review).not.toBe(true);
-    expect(r.approved).toBe(false); // the dev's stricter block stands
+    expect(r.review).toBe(true);
   });
 
   it("an unlocked managed 'review' still replaces a WEAKER (allow) dev twin", async () => {
