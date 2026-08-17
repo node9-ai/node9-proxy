@@ -870,11 +870,17 @@ function unwrapCommandHead(words: (string | null)[]): number {
         continue;
       }
       if (t.startsWith('-')) {
+        const selfContained = t.includes('='); // `--userspec=app` carries its value
         i++;
         // `-u FOO`, `-n 5`, `-I {}`, `-c base`: if the NEXT token is not itself a
         // flag and not a plausible command, treat it as this flag's operand.
+        // A `--flag=value` never takes a SEPARATE operand — without this the
+        // lookahead ate chroot's target (`--userspec=app /mnt python3 -c`), the
+        // one-shot target rule then swallowed the interpreter, and the whole
+        // detector went silent.
         const nxt = words[i];
         if (
+          !selfContained &&
           nxt != null &&
           !nxt.startsWith('-') &&
           !INLINE_INTERPRETER.test(nxt.split('/').pop() ?? '') &&
@@ -1770,28 +1776,44 @@ function resolveArgToken(w: any): ArgToken {
   return { text: s, quoted };
 }
 
-const EMPTY_FACTS: ShellFacts = {
-  commands: '',
-  chmodMode: null,
-  sqlDdl: null,
-  readsPaths: '',
-  rmRecursive: '',
-  interpreter: null,
-  inlineExec: 'none',
-  evalKind: 'none',
-  pipeSources: '',
-  pipeSinks: '',
-  pipeObfuscated: 'false',
-};
-
 const FACTS_CACHE_MAX = 5000;
 const factsCache = new Map<string, ShellFacts>();
 
+// Cheap prescreens. An mvdan parse costs ~700µs, and the gate today runs at
+// ~16µs for a typical command because it SHORT-CIRCUITS before ever parsing —
+// pipe-chain answers from a string split and returns. Computing facts eagerly
+// therefore made the hot path ~100x slower (measured), so every fact is lazy
+// behind a substring test, exactly as the existing detectors already do
+// (`if (!/chmod/i.test(command)) return null`). A prescreen may over-match
+// freely; it may never under-match, or the fact silently disappears.
+const PRESCREEN_CHMOD = /chmod/i;
+const PRESCREEN_RM = /\brm\b/i;
+const PRESCREEN_EVAL = /\beval\b|-c|-e\b|--eval|\$\(|`/i;
+const PRESCREEN_INTERP =
+  /\b(python[\d.]*|perl|ruby|node|tsx|ts-node|php|lua|deno|bun|pwsh|powershell|osascript|rscript|irb|bash|sh|zsh|script|su)\b/i;
+const PRESCREEN_READ = new RegExp(`\\b(${[...FS_READ_TOOLS].join('|')})\\b`, 'i');
+
+/** The AST-derived half of ShellFacts — everything one walk produces. */
+export interface WalkFacts {
+  commands: string;
+  chmodMode: string | null;
+  readsPaths: string;
+  rmRecursive: string;
+  interpreter: string | null;
+  inlineExec: ShellFacts['inlineExec'];
+}
+
 /**
- * Derive every AST fact about a shell command in ONE pass, LRU-cached by the
- * command string. The cache is what lets `resolveField` call this per rule
- * without threading a parameter through all 8 call sites — and it also cuts the
- * 4-6 parses a single evaluatePolicy currently performs down to one.
+ * AST facts about a shell command, LRU-cached by the command string and
+ * computed LAZILY per fact.
+ *
+ * Two properties matter and both are load-bearing:
+ *  - The cache lets `resolveField` call this once per rule without threading a
+ *    parameter through all 8 call sites.
+ *  - The laziness keeps the gate fast. Asking for `ast.chmodMode` on a command
+ *    with no "chmod" in it costs one regex test and never parses; the single
+ *    AST walk happens only when a fact actually needs it, and is then shared by
+ *    every other AST-derived fact on the same command.
  */
 export function shellFacts(command: string): ShellFacts {
   const hit = factsCache.get(command);
@@ -1800,7 +1822,55 @@ export function shellFacts(command: string): ShellFacts {
     factsCache.set(command, hit);
     return hit;
   }
-  const facts = computeShellFacts(command);
+
+  let walked: WalkFacts | null = null;
+  const walk = (): WalkFacts => (walked ??= __walkFactsUnguarded(command));
+  let pipe: ReturnType<typeof analyzePipeChain> | null = null;
+  const pipeOf = () => (pipe ??= analyzePipeChain(command)); // string-split, ~10µs
+  let evalV: 'block' | 'review' | null | undefined;
+  const evalOf = () => (evalV === undefined ? (evalV = detectDangerousShellExec(command)) : evalV);
+
+  const facts: ShellFacts = {
+    get commands() {
+      return walk().commands;
+    },
+    get chmodMode() {
+      return PRESCREEN_CHMOD.test(command) ? walk().chmodMode : null;
+    },
+    get sqlDdl() {
+      const ddl = SQL_DDL_RE.exec(command);
+      if (!ddl) return null;
+      const cmds = walk().commands.split(' ');
+      return cmds.some((c) => SQL_DB_CLIS.has(c)) ? ddl[0].toLowerCase() : null;
+    },
+    get readsPaths() {
+      return PRESCREEN_READ.test(command) ? walk().readsPaths : '';
+    },
+    get rmRecursive() {
+      return PRESCREEN_RM.test(command) ? walk().rmRecursive : '';
+    },
+    get interpreter() {
+      return PRESCREEN_INTERP.test(command) ? walk().interpreter : null;
+    },
+    get inlineExec() {
+      return PRESCREEN_INTERP.test(command) ? walk().inlineExec : 'none';
+    },
+    get evalKind() {
+      if (!PRESCREEN_EVAL.test(command)) return 'none';
+      const v = evalOf();
+      return v === 'block' ? 'remote' : v === 'review' ? 'dynamic' : 'none';
+    },
+    get pipeSources() {
+      return pipeOf().sourceFiles.join('\n');
+    },
+    get pipeSinks() {
+      return pipeOf().sinkTargets.join('\n');
+    },
+    get pipeObfuscated() {
+      return pipeOf().hasObfuscation ? 'true' : 'false';
+    },
+  };
+
   if (factsCache.size >= FACTS_CACHE_MAX) {
     const oldest = factsCache.keys().next().value;
     if (oldest !== undefined) factsCache.delete(oldest);
@@ -1809,13 +1879,27 @@ export function shellFacts(command: string): ShellFacts {
   return facts;
 }
 
-function computeShellFacts(command: string): ShellFacts {
+/** The single AST walk. Called at most once per command (memoized by the
+ *  caller) and only when some fact actually needs structural analysis.
+ *
+ *  Exported ONLY so tests can compare the prescreen-gated facts against the
+ *  unguarded walk — a prescreen that under-matches would otherwise hide a fact
+ *  with no test able to notice. Not part of the public contract.
+ */
+export function __walkFactsUnguarded(command: string): WalkFacts {
   const f = parseShared(command);
   if (f === PARSE_FAIL) {
-    // Unparseable input is exactly where we must not go quiet: report the
-    // interpreter as unknown and inline-exec as UNCERTAIN so a rule keyed on
-    // `^(yes|uncertain)$` still asks a human.
-    return { ...EMPTY_FACTS, inlineExec: 'uncertain' };
+    // Unparseable input is exactly where we must not go quiet: inline-exec
+    // reports UNCERTAIN so a rule keyed on `^(yes|uncertain)$` still asks a
+    // human rather than silently allowing.
+    return {
+      commands: '',
+      chmodMode: null,
+      readsPaths: '',
+      rmRecursive: '',
+      interpreter: null,
+      inlineExec: 'uncertain',
+    };
   }
 
   const commands: string[] = [];
@@ -1863,11 +1947,17 @@ function computeShellFacts(command: string): ShellFacts {
       for (const p of positional) readsPaths.push(p.text as string);
     }
     if (name === 'rm') {
-      const flagChars = args
-        .filter((a) => a.text?.startsWith('-'))
-        .map((a) => (a.text as string).toLowerCase())
-        .join('');
-      if (/r/.test(flagChars) && /f/.test(flagChars)) {
+      // Parse flags PER TOKEN, not as one joined string. Joining lets a long
+      // flag donate its letters: `rm --force x` reads as both -r and -f, and
+      // `rm -f --preserve-root x` reads as recursive. Short clusters (-rf)
+      // contribute letters; long flags only match by full name.
+      const flags = args
+        .filter((a) => a.text !== null && a.text.startsWith('-'))
+        .map((a) => (a.text as string).toLowerCase());
+      const short = (ch: string) => flags.some((f) => /^-[a-z]+$/.test(f) && f.includes(ch));
+      const recursive = short('r') || flags.includes('--recursive');
+      const force = short('f') || flags.includes('--force');
+      if (recursive && force) {
         for (const p of positional) rmRecursive.push(p.text as string);
       }
     }
@@ -1932,31 +2022,13 @@ function computeShellFacts(command: string): ShellFacts {
     if (inline === 'none' || inline === 'no') inline = 'uncertain';
   }
 
-  // ── SQL DDL: regex finds the statement, the AST proves a real DB CLI ran ──
-  let sqlDdl: string | null = null;
-  const ddl = SQL_DDL_RE.exec(command);
-  if (ddl && commands.some((c) => SQL_DB_CLIS.has(c))) sqlDdl = ddl[0].toLowerCase();
-
-  // ── pipe-chain: reuse the existing analyzer verbatim ─────────────────────
-  const pipe = analyzePipeChain(command);
-
   return {
     commands: commands.join(' '),
     chmodMode,
-    sqlDdl,
     readsPaths: readsPaths.join('\n'),
     rmRecursive: rmRecursive.join('\n'),
     interpreter,
     inlineExec: inline,
-    evalKind:
-      detectDangerousShellExec(command) === 'block'
-        ? 'remote'
-        : detectDangerousShellExec(command) === 'review'
-          ? 'dynamic'
-          : 'none',
-    pipeSources: pipe.sourceFiles.join('\n'),
-    pipeSinks: pipe.sinkTargets.join('\n'),
-    pipeObfuscated: pipe.hasObfuscation ? 'true' : 'false',
   };
 }
 
