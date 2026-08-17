@@ -38,8 +38,6 @@ export {
   BASH_TOOL_NAMES,
   isBashTool,
   isShellShapedTool,
-  shellFacts,
-  type ShellFacts,
   toolMatchesRule,
   detectInlineExec,
   AST_FS_REGEX_RULES,
