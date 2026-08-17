@@ -880,6 +880,9 @@ export function getConfig(cwd?: string): Config {
     }
     if (p.egress) {
       const e = p.egress as Partial<Config['policy']['egress']>;
+      // Record the outer stance BEFORE merging: any egress block in a non-repo
+      // layer counts, even one that names no hosts.
+      if (!isProject) egressDeclaredOutside = true;
       // A repo-carried node9.config.json is agent-writable in-session, so — like
       // commandChecks above — it may only TIGHTEN egress: it can turn the gate
       // ON but not off, raise the mode but not lower it, and add DENY entries
@@ -895,16 +898,21 @@ export function getConfig(cwd?: string): Config {
         }
       }
       // ALLOW entries widen, so a repo layer may only contribute them when no
-      // OUTER layer (global config) has declared an allowlist of its own —
+      // OUTER layer (global config) has declared an egress policy of its own —
       // otherwise a repo could widen past what the user chose. Dropping them
       // unconditionally was wrong: with no outer egress config the repo is the
       // ONLY source, so `enabled:true, mode:'block', allow:[...]` became
       // deny-everything including the repo's own declared hosts (/code-review
       // round 3). An org-managed allowlist still REPLACES this later.
-      if (Array.isArray(e.allow) && (!isProject || !egressAllowUserSet)) {
+      //
+      // The gate is "did an outer layer declare egress AT ALL", not "did it
+      // declare an allow list". A global `{enabled:true, mode:'block'}` with no
+      // allow key is deny-everything; keying on the `allow` key alone read that
+      // as silence and let an agent-writable repo config add its own host
+      // (/code-review round 4, reproduced at the gate).
+      if (Array.isArray(e.allow) && (!isProject || !egressDeclaredOutside)) {
         mergedPolicy.egress.allow.push(...e.allow);
       }
-      if (Array.isArray(e.allow) && !isProject) egressAllowUserSet = true;
       if (Array.isArray(e.deny)) mergedPolicy.egress.deny.push(...e.deny);
       if (e.allowPrivate !== undefined && !(isProject && e.allowPrivate === true))
         mergedPolicy.egress.allowPrivate = e.allowPrivate;
@@ -961,10 +969,12 @@ export function getConfig(cwd?: string): Config {
   // dev never set mode, the org value applies verbatim. Declared before the
   // applyLayer calls that write it (closure TDZ).
   let egressModeUserSet = false;
-  // True once an OUTER (global ~/.node9) layer declared an egress allowlist. A
-  // repo layer may contribute allow entries only when this is false — see the
-  // merge below.
-  let egressAllowUserSet = false;
+  // True once an OUTER (global ~/.node9) layer declared an egress POLICY of any
+  // shape. A repo layer may contribute allow entries only when this is false —
+  // see the merge below. Keyed on the egress BLOCK, not on the `allow` key:
+  // `{enabled:true, mode:'block'}` with no allow list is a deliberate
+  // deny-everything stance, and reading it as "no opinion" let a repo widen it.
+  let egressDeclaredOutside = false;
 
   applyLayer(globalConfig);
   applyLayer(projectConfig, /* isProject */ true);
@@ -1438,17 +1448,48 @@ export function getConfig(cwd?: string): Config {
     // applyManagedCommandChecks before we get here, so dev-tightening is
     // preserved at the knob layer. The strictestOf below additionally preserves
     // a stricter same-name RULE, which the knob floor cannot see.
-    const effective = locked
-      ? knobVerdict // a lock is absolute — the cloud value wins outright
-      : (strictestOf(VERDICT_ORDER, knobVerdict, twin?.verdict) ?? knobVerdict);
+    //
+    // A LOCK IS A FLOOR, NOT AN EXACT VALUE (/code-review round 4). `locked ?
+    // knobVerdict` took the cloud value outright, so an admin locking rm at
+    // 'review' DOWNGRADED a dev who had chosen 'block' — a lock made the device
+    // less safe than it was. Both branches combine by strictness; a lock stops a
+    // dev going WEAKER, never stricter.
+    const effective = strictestOf(VERDICT_ORDER, knobVerdict, twin?.verdict) ?? knobVerdict;
 
-    // Drop the local twin so the same name doesn't resolve twice; its strictness
-    // has already been folded into `effective` above.
-    if (twin) {
-      mergedPolicy.smartRules = mergedPolicy.smartRules.filter((r) => r.name !== rule.name);
+    const verdictRank = (v: string | undefined): number =>
+      (VERDICT_ORDER as readonly string[]).indexOf(v ?? '');
+    // Compared against the KNOB, not against `effective` — `effective` has
+    // already absorbed the twin's own verdict, so comparing to it would make a
+    // stricter twin never register as stricter.
+    const twinIsStricter =
+      twin !== undefined && verdictRank(twin.verdict) > verdictRank(knobVerdict);
+
+    // The twin's VERDICT is folded into `effective` above — but its CONDITIONS
+    // are not, and injecting the built-in template discarded them. A dev rule
+    // matching `\brm\b` was replaced by the built-in's statement-start-only
+    // match, so `find . | xargs rm -rf` came back ALLOW under a mandate
+    // (/code-review round 4). A STRICTER twin therefore survives as its own
+    // pinned rule, contributing its coverage; the mandate contributes the
+    // built-in's. Union of coverage, strictest verdict.
+    //
+    // A weaker-or-equal twin is still dropped: keeping it would let a dev
+    // extend the reach of the WEAKER verdict past the mandate's coverage.
+    mergedPolicy.smartRules = mergedPolicy.smartRules.filter((r) => r.name !== rule.name);
+    if (twin && twinIsStricter) {
+      mergedPolicy.smartRules.push({ ...twin, pinned: true });
     }
 
-    const injected: SmartRule = { ...rule, verdict: effective, pinned: true };
+    // PIN ONLY WHAT IS UNWAIVABLE (/code-review round 4). Pinning defeats array
+    // order, which also defeats a dev's own explicit allow waiver. 'review' is
+    // the DEFAULT knob value, so pinning it meant an org that never touched the
+    // setting silently destroyed every local rm waiver on every machine — and
+    // devs who meet prompts on routine work learn to approve blindly. An
+    // UNLOCKED 'review' stays unpinned and remains waivable by an explicit dev
+    // allow rule (a dev writing a narrow waiver IS a human reviewing). A
+    // 'block', or anything the org LOCKED, stays pinned and unwaivable.
+    const unwaivable = effective === 'block' || locked;
+    const injected: SmartRule = { ...rule, verdict: effective };
+    if (unwaivable) injected.pinned = true;
     // Pinning defeats array order — which also means the unpinned
     // `allow-rm-safe-paths` (array index 0) can no longer shade this rule. For a
     // managed REVIEW that would be a regression (the safe-path waiver is a
