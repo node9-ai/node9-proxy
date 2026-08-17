@@ -7,7 +7,7 @@
 
 import pm from 'picomatch';
 import type { SmartRule } from '../types';
-import { normalizeCommandForPolicy, shellFacts, type ShellFacts } from '../shell';
+import { normalizeCommandForPolicy } from '../shell';
 import { getCompiledRegex } from '../utils/regex';
 
 /**
@@ -76,28 +76,6 @@ export function evaluateSmartConditions(args: unknown, rule: SmartRule): boolean
     // on every condition. Don't drop the has() guard without rewriting
     // the cache to use a sentinel value.
     if (fieldCache.has(field)) return fieldCache.get(field) ?? null;
-
-    // ── `ast.*` — AST-derived FACTS about the shell command ────────────────
-    // A condition can ask `{field:'ast.chmodMode', op:'matches', value:'777'}`
-    // instead of pattern-matching the raw string. This is what lets a shield
-    // rule express things no regex can — "chmod actually RUNS", "777 is in the
-    // MODE slot, not a filename" — and therefore what removes the need for a
-    // code detector to shadow the rule and be suppressed.
-    //
-    // No signature change and no threading through the 8 call sites: shellFacts
-    // is LRU-cached by command string, so calling it once per rule is free
-    // after the first. Facts are strings, so every operator below works
-    // unchanged. A tool with no string `command` yields null → fails closed,
-    // matching the existing semantics for an absent field.
-    if (field.startsWith('ast.')) {
-      const cmd = getNestedValue(args, 'command');
-      const key = field.slice(4) as keyof ShellFacts;
-      const fact = typeof cmd === 'string' ? shellFacts(cmd)[key] : null;
-      const astVal = fact === null || fact === undefined || fact === '' ? null : String(fact);
-      fieldCache.set(field, astVal);
-      return astVal;
-    }
-
     const rawVal = getNestedValue(args, field);
     const rawStr = rawVal !== null && rawVal !== undefined ? String(rawVal) : null;
     // For command fields, strip quoted string arguments (commit messages,
