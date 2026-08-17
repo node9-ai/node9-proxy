@@ -14,6 +14,9 @@
 
 import mvdanSh from 'mvdan-sh';
 import { matchesPattern } from '../rules';
+// pipe-chain.ts is a LEAF (zero imports), so this direction creates no cycle —
+// the reverse (pipe-chain importing shell) would.
+import { analyzePipeChain } from '../policy/pipe-chain';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const { syntax } = mvdanSh as any;
@@ -738,6 +741,9 @@ function isInlineCodeFlag(interp: string, w: string): boolean {
   if (!w.startsWith('-') || w.startsWith('--')) return false;
 
   // Which single letter means "the next thing is CODE", per interpreter.
+  // deno's inline form is the `eval` SUBCOMMAND; its `-c` is --config, so deno
+  // has no code LETTER at all and must not fall through to the default 'c'.
+  if (interp === 'deno') return false;
   const codeLetters = /^(perl|ruby|lua|bun|osascript|rscript|irb)$/.test(interp)
     ? 'e'
     : /^(node|tsx|ts-node)$/.test(interp)
@@ -1652,6 +1658,306 @@ function analyzeFsOperationImpl(command: string): FsOpVerdict | null {
   } catch {
     return null;
   }
+}
+
+// ── AST FACTS — one walk, consumed by smart rules via `ast.*` ───────────────
+//
+// WHY THIS EXISTS. node9 ran the same protection twice: once as a shield RULE
+// (regex over the raw string) and once as a code DETECTOR (AST). Something then
+// had to silence one of them — `AST_FS_REGEX_RULES` — and that suppression
+// layer produced whole families of bugs (a rule matching a tool while its
+// suppression did not; a knob turning off the detector AND its twin).
+//
+// A rule can only ask about text, which is why the detectors were written in the
+// first place: no regex can express "chmod actually RUNS" or "777 is in the MODE
+// slot, not a filename". So instead of picking a winner, the detector publishes
+// FACTS and the rule asks about those. One protection, one implementation, and
+// nothing left to suppress.
+//
+// Everything here is a STRING (or null) on purpose: `evaluateSmartConditions`
+// coerces field values with String() and every operator — matches / contains /
+// glob — assumes a string. Facts-as-strings therefore need zero operator
+// changes. Lists join with \n because a path may contain spaces.
+export interface ShellFacts {
+  /** Command heads actually invoked, after peeling wrappers. Space-joined. */
+  commands: string;
+  /** The chmod MODE SLOT only — never a filename that happens to be "777". */
+  chmodMode: string | null;
+  /** e.g. 'drop table' — only when a REAL database CLI runs it. */
+  sqlDdl: string | null;
+  /** Paths handed to a file-reading tool (cat/less/grep/…). \n-joined. */
+  readsPaths: string;
+  /** Paths handed to a recursive+force rm. \n-joined. */
+  rmRecursive: string;
+  /** The interpreter, if one runs (python3, perl, bash…). */
+  interpreter: string | null;
+  /**
+   * Does this run code supplied on the command line / stdin / a pipe?
+   *
+   * The ladder below is the whole point of this rewrite. Four rounds of review
+   * were lost trying to answer this from per-interpreter FLAG semantics ("does
+   * -w take a value?"), which is an unbounded table that failed in both
+   * directions — 9 false positives on ordinary script runs, then 11 silent
+   * bypasses of an explicit org block.
+   *
+   * The AST already carries the signal that actually separates the two, and
+   * `resolveWordLiteral` was throwing it away: QUOTING. `perl -e 'system(1)'`
+   * has a quoted operand; `perl -MData::Dumper script.pl` has a bare one that
+   * looks like a path. Verified 10/10 on the exact corpus that defeated the
+   * flag tables — without knowing a single flag letter.
+   *
+   * ORDER IS LOAD-BEARING. Rule 2 must precede rule 3 or every ordinary
+   * `perl -Mstrict script.pl` starts prompting again.
+   *   1. a recognised code flag (-c/-e/--eval)      → 'yes'
+   *   2. a bare operand shaped like a path          → 'no'
+   *   3. a quoted or dynamic operand                → 'uncertain'
+   *   4. bare interpreter fed by stdin/heredoc/pipe → 'yes'
+   *   5. no interpreter at all                      → 'none'
+   *
+   * 'uncertain' is the safety net: a spelling we misparse becomes a REVIEW
+   * (visible, annoying) instead of an ALLOW (silent, dangerous). Rules opt in
+   * with `^(yes|uncertain)$`.
+   */
+  inlineExec: 'yes' | 'uncertain' | 'no' | 'none';
+  /** 'remote' = eval of a download (Class A); 'dynamic' = eval of $VAR/$(…). */
+  evalKind: 'remote' | 'dynamic' | 'none';
+  /** Pipe-chain exfil components. \n-joined / 'true'|'false'. */
+  pipeSources: string;
+  pipeSinks: string;
+  pipeObfuscated: 'true' | 'false';
+}
+
+/** A token as the AST saw it — the quoting is the signal, so keep it. */
+interface ArgToken {
+  /** Resolved literal text, or null when the token is dynamic ($VAR, $(…)). */
+  text: string | null;
+  /** Was any part of this word quoted? Strong "this is code" signal. */
+  quoted: boolean;
+}
+
+/** Looks like a file to run rather than code to evaluate: has an extension or
+ *  a path separator. `script.pl`, `./run.sh`, `scripts/build.js` → true;
+ *  `system("id")`, `ignore`, `utf8` → false. */
+function looksLikePath(t: string): boolean {
+  return /\.[a-z0-9]{1,6}$/i.test(t) || t.includes('/');
+}
+
+/** Resolve one Word into {text, quoted}, preserving the quoting that
+ *  resolveWordLiteral discards. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function resolveArgToken(w: any): ArgToken {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const parts: any[] = w?.Parts || [];
+  let s = '';
+  let quoted = false;
+  for (const p of parts) {
+    const t = syntax.NodeType(p);
+    if (t === 'Lit') s += (p.Value ?? '').replace(/\\(.)/g, '$1');
+    else if (t === 'SglQuoted') {
+      quoted = true;
+      s += p.Value ?? '';
+    } else if (t === 'DblQuoted') {
+      quoted = true;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const inner: any[] = p.Parts || [];
+      if (!inner.every((ip: unknown) => syntax.NodeType(ip) === 'Lit'))
+        return { text: null, quoted: true };
+      s += inner.map((ip: { Value?: string }) => ip.Value ?? '').join('');
+    } else {
+      return { text: null, quoted }; // dynamic
+    }
+  }
+  return { text: s, quoted };
+}
+
+const EMPTY_FACTS: ShellFacts = {
+  commands: '',
+  chmodMode: null,
+  sqlDdl: null,
+  readsPaths: '',
+  rmRecursive: '',
+  interpreter: null,
+  inlineExec: 'none',
+  evalKind: 'none',
+  pipeSources: '',
+  pipeSinks: '',
+  pipeObfuscated: 'false',
+};
+
+const FACTS_CACHE_MAX = 5000;
+const factsCache = new Map<string, ShellFacts>();
+
+/**
+ * Derive every AST fact about a shell command in ONE pass, LRU-cached by the
+ * command string. The cache is what lets `resolveField` call this per rule
+ * without threading a parameter through all 8 call sites — and it also cuts the
+ * 4-6 parses a single evaluatePolicy currently performs down to one.
+ */
+export function shellFacts(command: string): ShellFacts {
+  const hit = factsCache.get(command);
+  if (hit !== undefined) {
+    factsCache.delete(command);
+    factsCache.set(command, hit);
+    return hit;
+  }
+  const facts = computeShellFacts(command);
+  if (factsCache.size >= FACTS_CACHE_MAX) {
+    const oldest = factsCache.keys().next().value;
+    if (oldest !== undefined) factsCache.delete(oldest);
+  }
+  factsCache.set(command, facts);
+  return facts;
+}
+
+function computeShellFacts(command: string): ShellFacts {
+  const f = parseShared(command);
+  if (f === PARSE_FAIL) {
+    // Unparseable input is exactly where we must not go quiet: report the
+    // interpreter as unknown and inline-exec as UNCERTAIN so a rule keyed on
+    // `^(yes|uncertain)$` still asks a human.
+    return { ...EMPTY_FACTS, inlineExec: 'uncertain' };
+  }
+
+  const commands: string[] = [];
+  const readsPaths: string[] = [];
+  const rmRecursive: string[] = [];
+  let chmodMode: string | null = null;
+  let interpreter: string | null = null;
+  let inline: ShellFacts['inlineExec'] = 'none';
+
+  // Strictness ladder for inlineExec — a later statement may only raise it.
+  const rank = { none: 0, no: 1, uncertain: 2, yes: 3 } as const;
+  const raise = (v: ShellFacts['inlineExec']) => {
+    if (rank[v] > rank[inline]) inline = v;
+  };
+
+  const visitStmt = (stmt: unknown, pipeFed: boolean): void => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const s = stmt as any;
+    const cmd = s?.Cmd;
+    if (!cmd || syntax.NodeType(cmd) !== 'CallExpr') return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const toks: ArgToken[] = (cmd.Args || []).map((a: any) => resolveArgToken(a));
+    if (toks.length === 0) return;
+
+    const headIdx = unwrapCommandHead(toks.map((t) => t.text));
+    const rawHead = toks[headIdx]?.text;
+    if (rawHead == null) return;
+    const name = (rawHead.split('/').pop() ?? '').toLowerCase();
+    commands.push(name);
+    const args = toks.slice(headIdx + 1);
+
+    // ── chmod: the MODE SLOT only (first non-flag arg after chmod) ──────────
+    if (name === 'chmod') {
+      for (const a of args) {
+        if (a.text === null) break; // dynamic mode — unknowable, no match
+        if (a.text.startsWith('-')) continue;
+        if (CHMOD_OPEN_PERM_TOKENS.has(a.text.toLowerCase())) chmodMode = a.text;
+        break;
+      }
+    }
+
+    // ── file reads / recursive rm ───────────────────────────────────────────
+    const positional = args.filter((a) => a.text !== null && !a.text.startsWith('-'));
+    if (FS_READ_TOOLS.has(name)) {
+      for (const p of positional) readsPaths.push(p.text as string);
+    }
+    if (name === 'rm') {
+      const flagChars = args
+        .filter((a) => a.text?.startsWith('-'))
+        .map((a) => (a.text as string).toLowerCase())
+        .join('');
+      if (/r/.test(flagChars) && /f/.test(flagChars)) {
+        for (const p of positional) rmRecursive.push(p.text as string);
+      }
+    }
+
+    // ── inline execution — the ladder documented on ShellFacts.inlineExec ────
+    if (INLINE_INTERPRETER.test(name)) {
+      if (interpreter === null) interpreter = name;
+      let scan = args;
+      if (INTERP_LEADING_TARGET.has(name)) {
+        const firstFlag = scan.findIndex((a) => a.text === null || a.text.startsWith('-'));
+        scan = firstFlag >= 0 ? scan.slice(firstFlag) : [];
+      }
+      // `deno eval "code"` spells the code form as a SUBCOMMAND; deno's `-c` is
+      // --config, so it must not be read as a code flag.
+      const denoEval = name === 'deno' && (scan[0]?.text ?? '').toLowerCase() === 'eval';
+
+      // Index of the first bare operand that looks like a program to run.
+      // A code flag only counts BEFORE it: in `python3 manage.py runserver -c
+      // settings.cfg` the `-c` is Django's, not the interpreter's.
+      const programIdx = scan.findIndex(
+        (a) => a.text !== null && !a.quoted && !a.text.startsWith('-') && looksLikePath(a.text)
+      );
+      const hasProgram = programIdx >= 0;
+      const hasCodeFlag =
+        denoEval ||
+        scan.some(
+          (a, i) =>
+            a.text !== null && (!hasProgram || i < programIdx) && isInlineCodeFlag(name, a.text)
+        );
+      const hasQuotedOrDynamic = scan.some(
+        (a) => a.text === null || (a.quoted && !a.text.startsWith('-'))
+      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const redirs: any[] = s.Redirs || cmd.Redirs || [];
+      const stdinFed = redirs.some((r) => r && redirStdinOps().has(r.Op));
+      const explicitStdin = scan.some((a) => a.text === '-') && !hasProgram;
+
+      if (hasCodeFlag || explicitStdin) raise('yes');
+      else if (hasProgram) raise('no');
+      else if (hasQuotedOrDynamic) raise('uncertain');
+      else if (positional.length === 0 && (stdinFed || pipeFed) && !/^(bash|sh|zsh)$/i.test(name))
+        raise('yes');
+      else raise('no');
+    }
+  };
+
+  try {
+    syntax.Walk(f, (node: unknown) => {
+      if (!node) return false;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const n = node as any;
+      const t = syntax.NodeType(n);
+      // A pipeline's RHS reads the LHS's stdout. Judged HERE because the mvdan
+      // JS binding returns a NEW wrapper on every property access, so node
+      // identity never survives into a Set (`Y === Y` is false).
+      if (t === 'BinaryCmd' && n.Y && !listOps().has(n.Op)) visitStmt(n.Y, true);
+      if (t === 'Stmt') visitStmt(n, false);
+      return true;
+    });
+  } catch {
+    // Partial walk — keep what we have but never report a confident 'no'.
+    if (inline === 'none' || inline === 'no') inline = 'uncertain';
+  }
+
+  // ── SQL DDL: regex finds the statement, the AST proves a real DB CLI ran ──
+  let sqlDdl: string | null = null;
+  const ddl = SQL_DDL_RE.exec(command);
+  if (ddl && commands.some((c) => SQL_DB_CLIS.has(c))) sqlDdl = ddl[0].toLowerCase();
+
+  // ── pipe-chain: reuse the existing analyzer verbatim ─────────────────────
+  const pipe = analyzePipeChain(command);
+
+  return {
+    commands: commands.join(' '),
+    chmodMode,
+    sqlDdl,
+    readsPaths: readsPaths.join('\n'),
+    rmRecursive: rmRecursive.join('\n'),
+    interpreter,
+    inlineExec: inline,
+    evalKind:
+      detectDangerousShellExec(command) === 'block'
+        ? 'remote'
+        : detectDangerousShellExec(command) === 'review'
+          ? 'dynamic'
+          : 'none',
+    pipeSources: pipe.sourceFiles.join('\n'),
+    pipeSinks: pipe.sinkTargets.join('\n'),
+    pipeObfuscated: pipe.hasObfuscation ? 'true' : 'false',
+  };
 }
 
 export interface ShellCommandAnalysis {
