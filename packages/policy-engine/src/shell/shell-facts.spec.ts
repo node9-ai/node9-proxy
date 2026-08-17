@@ -70,6 +70,17 @@ describe('shellFacts.inlineExec', () => {
     expect(shellFacts('python3 app.py -c cfg.ini').inlineExec).toBe('no');
   });
 
+  it('python -m selects a program; bash -m is job control, not a selector', () => {
+    // `-m module` runs a library module as the script, so a trailing `-` is
+    // that module's stdin DATA. For bash/sh/zsh `-m` is monitor mode — treating
+    // it as a program selector there is how `bash -m -c` became a bypass.
+    expect(shellFacts('python3 -m black -').inlineExec).toBe('no');
+    expect(shellFacts('python3 -m pytest').inlineExec).toBe('no');
+    expect(shellFacts('python3 -m pytest -c setup.cfg').inlineExec).toBe('no');
+    expect(shellFacts('bash -m -c "whoami"').inlineExec).toBe('yes');
+    expect(shellFacts('sh -m -c "whoami"').inlineExec).toBe('yes');
+  });
+
   it('an unparseable command is uncertain, never a silent allow', () => {
     expect(shellFacts('python3 -c "unclosed').inlineExec).toBe('uncertain');
   });

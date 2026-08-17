@@ -911,125 +911,24 @@ function unwrapCommandHead(words: (string | null)[]): number {
 }
 
 /**
- * Does this ONE statement execute inline code? `pipeFed` says whether it reads
- * another command's stdout (decided by the caller at the pipeline node).
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function inlineExecStmt(stmt: any, pipeFed: boolean): boolean {
-  const cmd = stmt?.Cmd;
-  if (!cmd || syntax.NodeType(cmd) !== 'CallExpr') return false;
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const words: (string | null)[] = (cmd.Args || []).map((a: any) => resolveWordLiteral(a));
-  if (words.length === 0) return false;
-
-  const headIdx = unwrapCommandHead(words);
-  const rawHead = words[headIdx];
-  if (rawHead == null) return false;
-  const interp = (rawHead.split('/').pop() ?? '').toLowerCase();
-  if (!INLINE_INTERPRETER.test(interp)) return false;
-
-  let args = words.slice(headIdx + 1);
-  // `deno eval "code"` spells the code form as a subcommand.
-  if (interp === 'deno' && (args[0] ?? '').toLowerCase() === 'eval') return true;
-
-  // `su USER -c CODE` — the leading bare operand is a TARGET (a user), not a
-  // program, so it must not trip the "a program was selected" rule below (which
-  // otherwise stops the code-flag scan before ever reaching `-c`).
-  if (INTERP_LEADING_TARGET.has(interp)) {
-    const firstFlag = args.findIndex((a) => a == null || a.startsWith('-'));
-    args = firstFlag >= 0 ? args.slice(firstFlag) : [];
-  }
-
-  let positionals = 0;
-  let selectedProgram = false; // a script operand or `-m module` was chosen
-  for (const a of args) {
-    if (a == null) {
-      positionals++; // dynamic arg — treat as a script operand
-      selectedProgram = true;
-      continue;
-    }
-    // Once a SCRIPT has been selected, later flags belong to that script, not
-    // to the interpreter: `python3 manage.py runserver -c settings.cfg` is a
-    // Django option, not `python3 -c CODE` (/code-review round 3 — this scan
-    // used to keep matching code flags past the script and flagged every
-    // `node scripts/build.js -p production`).
-    if (!selectedProgram && isInlineCodeFlag(interp, a)) return true;
-    // `-m module` selects a program too, so a trailing `-` after it is that
-    // module's stdin DATA (`python3 -m black -`), not the interpreter reading code.
-    if (a === '-m') {
-      selectedProgram = true;
-      continue;
-    }
-    if (a === '-' && !selectedProgram) return true; // bare interpreter reading code from stdin
-    if (!a.startsWith('-')) {
-      positionals++;
-      selectedProgram = true;
-    }
-  }
-
-  // No script operand + code arriving over stdin (heredoc, herestring,
-  // `< file`) or a pipe → the interpreter executes whatever it is fed.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const redirs: any[] = stmt.Redirs || cmd.Redirs || [];
-  const stdinFed = redirs.some((r) => r && redirStdinOps().has(r.Op));
-  if (positionals === 0 && (stdinFed || pipeFed)) {
-    // Shells are excluded from the IMPLICIT forms: `curl … | bash` belongs to
-    // the eval-remote / pipe-to-shell family (Class A tiers that own it, and
-    // flagging it here would DOWNGRADE their block to a review), and
-    // `bash <<'EOF'` is the everyday multi-command idiom.
-    if (!/^(bash|sh|zsh)$/i.test(interp)) return true;
-  }
-  return false;
-}
-
-/**
  * AST-aware inline-execution detector. Returns true when the command runs code
  * supplied on the command line, via stdin, or via a pipe into a bare
  * interpreter. Structural, so it is not fooled by quoting, escapes, option
  * bundles, or wrapper nesting. Pure.
  */
 export function detectInlineExec(command: string): boolean {
-  const f = parseShared(command);
-  if (f === PARSE_FAIL) {
-    // Conservative fallback: the plain `interp -c CODE` form, anchored per
-    // simple-command. A command mvdan cannot parse is unlikely to run, but this
-    // detector gates a bypass tunnel — degrade to the old narrow check, never
-    // to silence.
-    return /(^|[|;&]|&&)\s*(?:[\w./-]*\/)?(python[\d.]*|perl|ruby|node|php|lua|deno|bun|pwsh|osascript|rscript|bash|sh|zsh)\s+-{1,2}[a-z]*[ceEr]/i.test(
-      command
-    );
-  }
-
-  let found = false;
-  try {
-    syntax.Walk(f, (node: unknown) => {
-      if (!node || found) return false;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const n = node as any;
-      const t = syntax.NodeType(n);
-      // A pipeline's RHS reads the LHS's stdout. It must be judged HERE, at the
-      // BinaryCmd, and not via a set of "pipe-fed statements": the mvdan JS
-      // binding hands out a NEW wrapper object on every property access, so
-      // `n.Y` is never identity-equal to the Stmt the walker later visits
-      // (verified: `Y === Y` is false). `&&`/`||` are BinaryCmds too — only a
-      // non-list operator is a pipe.
-      if (t === 'BinaryCmd' && n.Y && !listOps().has(n.Op)) {
-        if (inlineExecStmt(n.Y, true)) {
-          found = true;
-          return false;
-        }
-      }
-      if (t === 'Stmt' && inlineExecStmt(n, false)) {
-        found = true;
-        return false;
-      }
-      return true;
-    });
-  } catch {
-    return found; // partial result on walker error
-  }
-  return found;
+  // ONE definition, delegating to shellFacts. Every caller — the gate tier and
+  // `node9 explain` — therefore inherits the same classifier AND its safety net.
+  //
+  // 'uncertain' counts as a hit on purpose. Four review rounds were lost trying
+  // to decide inline-exec from per-interpreter FLAG semantics, and the failure
+  // was always silent: a spelling we misparsed returned false, so an org's
+  // `inlineExec:'block'` was defeated by adding one flag (`perl -we`,
+  // `bash -m -c`, `python3 -W ignore -c` — 11 confirmed bypasses). Treating
+  // "not sure" as a hit converts every future misparse into a REVIEW the user
+  // can see, instead of an ALLOW nobody notices.
+  const v = shellFacts(command).inlineExec;
+  return v === 'yes' || v === 'uncertain';
 }
 
 /**
@@ -1974,12 +1873,18 @@ export function __walkFactsUnguarded(command: string): WalkFacts {
       // --config, so it must not be read as a code flag.
       const denoEval = name === 'deno' && (scan[0]?.text ?? '').toLowerCase() === 'eval';
 
-      // Index of the first bare operand that looks like a program to run.
-      // A code flag only counts BEFORE it: in `python3 manage.py runserver -c
-      // settings.cfg` the `-c` is Django's, not the interpreter's.
-      const programIdx = scan.findIndex(
+      // Where a PROGRAM gets selected. Two spellings:
+      //  - a bare operand shaped like a path (`manage.py`, `./run.sh`)
+      //  - python's `-m module`, which runs a library module as the script
+      // `-m` is python-family ONLY: for bash/sh/zsh `-m` is job-control
+      // (monitor) mode, and treating it as a program selector there is exactly
+      // how `bash -m -c "whoami"` became a silent bypass in round 4.
+      const pathIdx = scan.findIndex(
         (a) => a.text !== null && !a.quoted && !a.text.startsWith('-') && looksLikePath(a.text)
       );
+      const moduleIdx = /^python[\d.]*$/i.test(name) ? scan.findIndex((a) => a.text === '-m') : -1;
+      const candidates = [pathIdx, moduleIdx].filter((i) => i >= 0);
+      const programIdx = candidates.length ? Math.min(...candidates) : -1;
       const hasProgram = programIdx >= 0;
       const hasCodeFlag =
         denoEval ||
