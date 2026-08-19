@@ -8,6 +8,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { buildShield, pathMatchesFragment, pathToRegexFragment } from './build';
+import { validateRegex } from '@node9/policy-engine';
 import {
   installShield,
   readActiveShields,
@@ -64,9 +65,20 @@ export function writeJailPaths(paths: JailPath[]): void {
  */
 export function addJailPath(rawPath: string, verdict: JailVerdict): JailPath[] {
   const norm = rawPath.trim();
-  if (!pathToRegexFragment(norm)) {
+  const fragment = pathToRegexFragment(norm);
+  if (!fragment) {
     throw new Error(
       `"${rawPath}" is too broad to jail — give a specific path (e.g. ~/.gmail-mcp), not a home or root directory.`
+    );
+  }
+  // The engine is the arbiter of what a rule may contain. A fragment it
+  // rejects (e.g. over its regex length cap) would install a rule that
+  // SILENTLY allows while `jail add` prints "reads now BLOCK" — the Windows
+  // fail-open of 2026-08-19. Refuse loudly instead of lying quietly.
+  const rejection = validateRegex(fragment);
+  if (rejection !== null) {
+    throw new Error(
+      `"${rawPath}" cannot be jailed: the generated match pattern was rejected by the policy engine (${rejection}). Try a shorter or more specific path.`
     );
   }
   const next = [...readJailPaths().filter((p) => p.path !== norm), { path: norm, verdict }];

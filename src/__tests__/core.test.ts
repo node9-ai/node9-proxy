@@ -2296,7 +2296,12 @@ describe('validateRegex', () => {
   });
 
   it('rejects patterns exceeding max length', () => {
-    expect(validateRegex('a'.repeat(101))).not.toBeNull();
+    // Cap is 256, not 100: at 100 it silently killed legitimate jail-path
+    // fragments (a Windows profile path exceeds 100 escaped chars), and a
+    // rule whose regex fails validation reads as NO MATCH — a fail-open.
+    // Both sides of the boundary pinned so the cap can't drift silently.
+    expect(validateRegex('a'.repeat(256))).toBeNull();
+    expect(validateRegex('a'.repeat(257))).not.toBeNull();
   });
 
   it('rejects ReDoS patterns — syntactically valid but caught by safe-regex2 NFA analysis', () => {

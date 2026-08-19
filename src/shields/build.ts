@@ -4,6 +4,7 @@
 // path-rule generator (pathRules) is the exact primitive `node9 jail add` reuses.
 
 import type { ShieldDefinition, SmartRule } from '@node9/policy-engine';
+import { getCompiledRegex } from '@node9/policy-engine';
 
 type Verdict = 'block' | 'review';
 
@@ -42,6 +43,11 @@ export function pathToRegexFragment(rawPath: string): string {
     .replace(/^~[\\/]?/, '')
     .replace(/^\$\{?HOME\}?[\\/]?/, '')
     .replace(/^\/(?:home|Users)\/[^\\/]+[\\/]?/, '')
+    // Windows twin of the rule above: C:\Users\<name>\... (any drive letter,
+    // either slash). Without this the fragment keeps drive+username — longer
+    // (it blew the engine's regex length cap and died silently) and less
+    // portable (~/.aws and C:\Users\x\.aws should denote the same jail).
+    .replace(/^[A-Za-z]:[\\/]Users[\\/][^\\/]+[\\/]?/, '')
     .replace(/^[\\/]+/, '')
     .replace(/[\\/]+$/, '');
   const segments = tail
@@ -72,14 +78,14 @@ export function toolRule(tool: string, verdict: Verdict, reason?: string): Smart
 export function pathMatchesFragment(candidate: string, rawPath: string): boolean {
   const value = pathToRegexFragment(rawPath);
   if (!value || !candidate) return false;
-  try {
-    return new RegExp(value).test(candidate);
-  } catch {
-    // Fail toward "matched" is wrong here (would block everything on a bad
-    // fragment); the fragment is built from escaped segments so this is
-    // unreachable in practice — mirror the engine's invalid-regex → no-match.
-    return false;
-  }
+  // Compile through the ENGINE's pipeline — cap, ReDoS analysis and all. This
+  // guard once used a raw `new RegExp(value)` while the engine used its capped
+  // getCompiledRegex, so on a long (Windows) fragment the guard said "jailed"
+  // while the engine said "no match" and allowed: the two arbiters disagreed,
+  // which is the exact split task #20 forbade. One compiler, one answer.
+  const re = getCompiledRegex(value);
+  if (!re) return false; // engine would no-match → the guard must agree
+  return re.test(candidate);
 }
 
 /**

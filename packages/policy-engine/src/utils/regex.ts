@@ -2,7 +2,15 @@
 // Pure utility — no fs/process/os imports. Errors return null silently.
 import safeRegex from 'safe-regex2';
 
-const MAX_REGEX_LENGTH = 100;
+// 256, not 100: the length cap is a crude ReDoS proxy — the real analysis is
+// safe-regex2 below. At 100 it silently killed LEGITIMATE shield rules: a
+// jail-path fragment built from a Windows profile path
+// (C:\Users\<name>\AppData\...) exceeds 100 escaped chars, getCompiledRegex
+// returned null, and the `matches` operator read null as NO MATCH — so a rule
+// that promised "block" silently allowed (the 2026-08-19 Windows CI red, and a
+// live product bug for every Windows jail user). Escaped-literal fragments
+// cannot backtrack; 256 keeps a hard ceiling while fitting real paths.
+const MAX_REGEX_LENGTH = 256;
 const REGEX_CACHE_MAX = 500;
 const regexCache = new Map<string, RegExp>();
 
