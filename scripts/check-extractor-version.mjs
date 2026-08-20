@@ -27,11 +27,6 @@ const ROOT = path.resolve(__dirname, '..');
 // extractor changes there are also gated by this check.
 const SOURCES = [
   'packages/policy-engine/src/scan/canonical.ts',
-  // shell/index.ts feeds canonical.ts (normalizeCommandForPolicy runs before
-  // DESTRUCTIVE_OP_RE) — a normalizer change alters scan verdicts, so it must
-  // trip this check like any detector source. Added after the Windows-path
-  // fix changed scan output with NO hash trip (2026-08-20).
-  'packages/policy-engine/src/shell/index.ts',
   'packages/policy-engine/src/scan/pii.ts',
   'packages/policy-engine/src/scan/destructive-regex.ts',
 ];
