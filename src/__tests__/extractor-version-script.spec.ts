@@ -28,6 +28,10 @@ const SOURCE_FILES = [
   'packages/policy-engine/src/scan/canonical.ts',
   'packages/policy-engine/src/scan/pii.ts',
   'packages/policy-engine/src/scan/destructive-regex.ts',
+  // Must mirror the script's SOURCE_FILES exactly, or every row here dies on
+  // ENOENT rather than on the drift it means to test.
+  'packages/policy-engine/src/rules/index.ts',
+  'packages/policy-engine/src/shell/index.ts',
 ];
 
 describe('check-extractor-version.mjs', () => {

@@ -211,9 +211,18 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // v7 was first cut on 2026-08-13 covering only the rule loop; `terminal.execute`
 // still returned early at the isBashTool guard above it, so the version
 // documented coverage it did not deliver (/code-review round 3). Both the guard
-// and the loop now key on isShellShapedTool. v7 was never released, so this is
-// corrected in place rather than minted as a v8 — the field is still on v6.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v7';
+// and the loop now key on isShellShapedTool. v7 was corrected in place rather
+// than minted separately, because it was never released.
+//
+// v8 (2026-08-20): a command now resolves to a SET of readings and a `matches`
+// condition fires if ANY of them matches (shell/index.ts → commandReadings,
+// rules/index.ts). Smart-rule findings therefore fire on Windows-shaped
+// commands that the single POSIX reading silently missed, so historical
+// verdicts must be re-scanned. rules/index.ts and shell/index.ts joined the
+// hashed source set in the same change: canonical.ts runs
+// evaluateSmartConditions, so a matcher change alters scan output, and the
+// old three-file set would have let this through with no bump.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v8';
 
 /**
  * SHA-256 prefix of the detector-source files
@@ -225,7 +234,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v7';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '2e0efa0e160e8dc1';
+export const CANONICAL_EXTRACTOR_HASH = '80f40f974263b281';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

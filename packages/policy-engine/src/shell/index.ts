@@ -92,7 +92,14 @@ function isCatHeredocOrLit(part: any): boolean {
 // re-parses each command ~30-60 times (one per condition across all rules).
 // Bounded LRU keeps memory in check on long-running daemons.
 const NORMALIZE_CACHE_MAX = 5_000;
-const normalizeCache = new Map<string, string>();
+interface CommandReadings {
+  /** POSIX word resolution — reveals `\rm` / `r''m`. Historic behaviour. */
+  posix: string;
+  /** Quote-obfuscation removed, separators preserved — the Windows reading. */
+  separator: string;
+}
+
+const normalizeCache = new Map<string, CommandReadings>();
 
 // Shared parsed-AST cache. Both normalizeCommandForPolicy and
 // analyzeFsOperation parse the same command via mvdan-sh; without sharing,
@@ -128,7 +135,7 @@ function parseShared(command: string): any | typeof PARSE_FAIL {
   return parsed;
 }
 
-function cachedNormalize(command: string, compute: () => string): string {
+function cachedNormalize(command: string, compute: () => CommandReadings): CommandReadings {
   const hit = normalizeCache.get(command);
   if (hit !== undefined) {
     // Move to most-recent on access (Map iteration order = insertion order).
@@ -146,19 +153,57 @@ function cachedNormalize(command: string, compute: () => string): string {
   return result;
 }
 
+/**
+ * The POSIX reading of a command. Kept as the single-string API every existing
+ * caller (canonical.ts, the detectors, `explain`) already depends on.
+ */
 export function normalizeCommandForPolicy(command: string): string {
+  return commandReadingsImpl(command).posix;
+}
+
+/**
+ * Every reading of a command that a rule must be tested against.
+ *
+ * `\` is an ESCAPE in POSIX and a SEPARATOR in cmd/PowerShell, and nothing at
+ * rule-evaluation time knows which shell will run the command — `Bash` on
+ * Windows may be Git Bash or cmd. Collapsing to one reading therefore destroys
+ * matches that exist in the text, and a destroyed match is a silent ALLOW: of 7
+ * realistic Windows shapes of the same jailed path, the POSIX reading alone
+ * caught 3.
+ *
+ * So both readings are returned and `matches` fires if ANY of them matches —
+ * the repo's `combine by strictness` rule (two checks on one input resolve by
+ * MAX, never by order). De-duplicated, so an ordinary POSIX command still costs
+ * exactly one regex test.
+ *
+ * This deliberately replaces guessing the shell from a token prefix (reverted
+ * in 5985b5a, which exempted whole tokens from de-obfuscation and opened a
+ * bypass). Guessing from a prefix and assuming POSIX always are the same
+ * mistake in opposite directions; evaluating both readings removes the guess.
+ */
+export function commandReadings(command: string): string[] {
+  const r = commandReadingsImpl(command);
+  return r.separator === r.posix ? [r.posix] : [r.posix, r.separator];
+}
+
+function commandReadingsImpl(command: string): CommandReadings {
   return cachedNormalize(command, () => normalizeCommandForPolicyImpl(command));
 }
 
-function normalizeCommandForPolicyImpl(command: string): string {
+function normalizeCommandForPolicyImpl(command: string): CommandReadings {
   const f = parseShared(command);
-  if (f === PARSE_FAIL) return command; // fail open for FPs, not FNs
+  // fail open for FPs, not FNs — both readings fall back to the raw text
+  if (f === PARSE_FAIL) return { posix: command, separator: command };
   try {
     // Two kinds of in-place edits, applied together right-to-left so offsets
     // stay valid: (1) message-flag value strips (-m "msg" → -m ""), and
     // (2) intra-word de-obfuscation rewrites (r''m → rm).
     const strips: Array<[number, number]> = [];
     const rewrites: Array<[number, number, string]> = [];
+    // The SEPARATOR reading's rewrites: quote-obfuscation removed, but every
+    // other character (crucially `\`) left exactly as written. See
+    // commandReadings() for why one reading is not enough.
+    const quoteOnlyRewrites: Array<[number, number, string]> = [];
     const msgSpans = new Set<string>();
 
     syntax.Walk(f, (node: unknown) => {
@@ -233,23 +278,30 @@ function normalizeCommandForPolicyImpl(command: string): string {
         if (resolved === source) continue; // not obfuscated
         if (resolved === '' || /\s/.test(resolved)) continue; // data string, not a token
         rewrites.push([s, e, resolved]);
+        // Same token, but resolving ONLY the quote obfuscation. For `r''m` this
+        // equals `resolved` (rm); for `C:\Users\x\.aw''s` it yields
+        // `C:\Users\x\.aws` — de-obfuscated AND still a path.
+        const quoteOnly = source.replace(/['"]/g, '');
+        if (quoteOnly !== source) quoteOnlyRewrites.push([s, e, quoteOnly]);
       }
       return true;
     });
 
-    const edits: Array<[number, number, string]> = [
-      ...strips.map(([s, e]): [number, number, string] => [s, e, '""']),
-      ...rewrites,
-    ];
-    if (edits.length === 0) return command;
-    edits.sort((a, b) => b[0] - a[0]); // end→start so earlier offsets stay valid
-    let result = command;
-    for (const [s, e, rep] of edits) {
-      result = result.slice(0, s) + rep + result.slice(e);
-    }
-    return result;
+    const stripEdits = strips.map(([s, e]): [number, number, string] => [s, e, '""']);
+    const apply = (extra: Array<[number, number, string]>): string => {
+      const edits = [...stripEdits, ...extra];
+      if (edits.length === 0) return command;
+      edits.sort((a, b) => b[0] - a[0]); // end→start so earlier offsets stay valid
+      let out = command;
+      for (const [s, e, rep] of edits) out = out.slice(0, s) + rep + out.slice(e);
+      return out;
+    };
+    // Both readings carry the message-flag strips, so the widening reading can
+    // never resurrect text the strip exists to hide.
+    return { posix: apply(rewrites), separator: apply(quoteOnlyRewrites) };
   } catch {
-    return command; // parse error → return unchanged (fail open for FPs, not FNs)
+    // parse error → return unchanged (fail open for FPs, not FNs)
+    return { posix: command, separator: command };
   }
 }
 

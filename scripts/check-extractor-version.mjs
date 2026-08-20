@@ -27,6 +27,12 @@ const ROOT = path.resolve(__dirname, '..');
 // extractor changes there are also gated by this check.
 const SOURCES = [
   'packages/policy-engine/src/scan/canonical.ts',
+  // canonical.ts runs evaluateSmartConditions (rules/index.ts), which resolves
+  // the command through shell/index.ts. A change in either alters smart-rule
+  // scan verdicts, so both must trip this gate — the three-file set let the
+  // 2026-08-20 matcher change through with no version bump.
+  'packages/policy-engine/src/rules/index.ts',
+  'packages/policy-engine/src/shell/index.ts',
   'packages/policy-engine/src/scan/pii.ts',
   'packages/policy-engine/src/scan/destructive-regex.ts',
 ];
