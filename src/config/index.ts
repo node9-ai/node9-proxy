@@ -199,7 +199,14 @@ export const DEFAULT_CONFIG: Config = {
   settings: {
     mode: 'standard',
     autoStartDaemon: true,
-    enableUndo: true, // 🔥 ALWAYS TRUE BY DEFAULT for the safety net
+    // OFF by default. The snapshot store is a per-project bare git repo with
+    // no size ceiling, and eviction drops the index row without deleting the
+    // objects — on one machine it reached 378G (352G of it orphaned tmp_pack_*
+    // from interrupted `git gc`) and filled the disk. A security tool must not
+    // be what fills a customer's disk. Re-enable per install with
+    // `{"settings":{"enableUndo":true}}`; the default flips back when the
+    // bounded copy-store lands (doc/undo-v2-copy-store-design.md).
+    enableUndo: false,
     enableHookLogDebug: true,
     approvalTimeoutMs: 120_000, // 120-second auto-deny timeout
     flightRecorder: true,

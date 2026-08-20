@@ -6,6 +6,7 @@ import chalk from 'chalk';
 import { applyUndo, getSnapshotHistory, computeUndoDiff } from '../../undo.js';
 import type { SnapshotEntry } from '../../undo.js';
 import { runUndoNavigator } from '../../tui/undo-navigator.js';
+import { getConfig } from '../../config/index.js';
 
 /**
  * Walks up from startDir until it finds a directory that appears as a snapshot
@@ -42,6 +43,19 @@ export function registerUndoCommand(program: Command): void {
     .option('--list', 'Print snapshot history as a table and exit')
     .option('--all', 'Include snapshots from all directories, not just the current one')
     .action(async (options: { steps?: string; list?: boolean; all?: boolean }) => {
+      // Distinguish "disabled" from "nothing captured yet": the old message
+      // sent users hunting for a broken hook when the feature was simply off.
+      if (getConfig().settings.enableUndo === false) {
+        console.log(
+          chalk.yellow('\nℹ️  Snapshots are disabled, so there is nothing to undo.\n') +
+            chalk.gray(
+              '    Enable with `"settings": { "enableUndo": true }` in ~/.node9/config.json.\n' +
+                '    Off by default while the snapshot store is rebuilt with a size ceiling.\n'
+            )
+        );
+        return;
+      }
+
       const allHistory = getSnapshotHistory();
       const matchedCwd = options.all ? null : findMatchingCwd(process.cwd(), allHistory);
       const history = options.all ? allHistory : allHistory.filter((s) => s.cwd === matchedCwd);

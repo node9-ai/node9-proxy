@@ -2055,7 +2055,17 @@ describe('evaluateSmartConditions — notMatches with no flags field', () => {
 
 // ── shouldSnapshot ────────────────────────────────────────────────────────────
 describe('shouldSnapshot', () => {
-  const baseConfig = () => JSON.parse(JSON.stringify(DEFAULT_CONFIG)) as typeof DEFAULT_CONFIG;
+  // These rows exercise the TOOL and PATH filters, so they must enable the
+  // engine explicitly rather than inherit it. `enableUndo` now ships OFF (the
+  // snapshot store filled a disk), and a fixture that silently depended on the
+  // old default would have turned every row below into a vacuous `false`.
+  // The dedicated 'returns false when enableUndo is false' row still pins the
+  // flag itself.
+  const baseConfig = () => {
+    const c = JSON.parse(JSON.stringify(DEFAULT_CONFIG)) as typeof DEFAULT_CONFIG;
+    c.settings.enableUndo = true;
+    return c;
+  };
 
   it('returns true for a default snapshot tool', () => {
     const config = baseConfig();
