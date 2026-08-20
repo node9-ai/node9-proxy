@@ -232,6 +232,17 @@ function normalizeCommandForPolicyImpl(command: string): string {
         const source = command.slice(s, e);
         if (resolved === source) continue; // not obfuscated
         if (resolved === '' || /\s/.test(resolved)) continue; // data string, not a token
+        // A Windows ABSOLUTE path is data, not obfuscation: its POSIX
+        // "resolution" strips the very separators a path rule needs
+        // (D:\a\x → D:ax), which silently killed every command-field path
+        // rule — the credential jail first — for unquoted Windows paths.
+        // Drive-anchored (`X:\` / `X:/`) or UNC (`\\host\…`) tokens are left
+        // exactly as written; rules already match `\` via their [/\\] class.
+        // The anchor is what keeps de-obfuscation intact: `\rm` and `r''m`
+        // match neither shape, so they are still rewritten. Known residue:
+        // a RELATIVE Windows path (`..\secrets`) still resolves POSIX-style —
+        // jail paths are absolute, so nothing the jail protects rides on it.
+        if (/^[A-Za-z]:[\\/]/.test(source) || /^\\\\[^\\]/.test(source)) continue;
         rewrites.push([s, e, resolved]);
       }
       return true;

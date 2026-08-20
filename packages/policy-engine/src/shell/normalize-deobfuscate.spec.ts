@@ -57,3 +57,39 @@ describe('normalizeCommandForPolicy — intra-word de-obfuscation', () => {
     expect(normalizeCommandForPolicy(input)).toBe(input);
   });
 });
+
+// ── Windows absolute paths are DATA, not obfuscation ─────────────────────────
+// The de-obfuscation rewrite resolves each token's POSIX semantics, where `\\`
+// is an escape — so an UNQUOTED Windows path "resolved" to a separator-less
+// string (D:\\a\\x → D:ax) and every command-field path rule (the credential
+// jail above all) silently stopped matching. Found by the Windows CI on
+// 2026-08-19: `jail add` promised BLOCK while `cat D:\\...\\key.txt` ALLOWED.
+// A drive-anchored or UNC token cannot be `\\rm`-style obfuscation, so it is
+// left exactly as written; the jail regex matches `\\` via its [/\\] class.
+describe('windows absolute paths survive normalization', () => {
+  const WIN = 'D:\\a\\_temp\\7628637e-da97\\node9-jail\\.secrets\\key.txt';
+
+  it('an unquoted drive-anchored path keeps its separators', () => {
+    expect(normalizeCommandForPolicy(`cat ${WIN}`)).toBe(`cat ${WIN}`);
+  });
+
+  it('a UNC path keeps its separators', () => {
+    const unc = '\\\\fileserver\\secrets\\key.txt';
+    expect(normalizeCommandForPolicy(`type ${unc}`)).toBe(`type ${unc}`);
+  });
+
+  it('a lowercase drive letter is a drive too', () => {
+    expect(normalizeCommandForPolicy('cat c:\\temp\\x.txt')).toBe('cat c:\\temp\\x.txt');
+  });
+
+  it('drive-anchoring does NOT shelter real obfuscation', () => {
+    // The skip is anchored on `<letter>:[\\/]` / UNC — a bare `\\rm` matches
+    // neither, so the de-obfuscation this rewrite exists for is untouched.
+    expect(normalizeCommandForPolicy('\\rm -rf /tmp/x')).toBe('rm -rf /tmp/x');
+    expect(normalizeCommandForPolicy("r''m -rf /tmp/x")).toBe('rm -rf /tmp/x');
+  });
+
+  it('a POSIX escaped space is still honoured (not mistaken for a path)', () => {
+    expect(normalizeCommandForPolicy('cat foo\\ bar')).toBe('cat foo\\ bar');
+  });
+});

@@ -28,6 +28,11 @@ const SOURCE_FILES = [
   'packages/policy-engine/src/scan/canonical.ts',
   'packages/policy-engine/src/scan/pii.ts',
   'packages/policy-engine/src/scan/destructive-regex.ts',
+  // In the hashed set since the Windows-path normalizer fix: shell/index.ts
+  // feeds canonical.ts (normalizeCommandForPolicy → DESTRUCTIVE_OP_RE), so a
+  // normalizer change alters scan verdicts and must trip the hash gate. The
+  // fixture must mirror the script's list or every row here fails on ENOENT.
+  'packages/policy-engine/src/shell/index.ts',
 ];
 
 describe('check-extractor-version.mjs', () => {
