@@ -13,6 +13,7 @@
 // All inputs are strings; no fs/path/os/process imports.
 
 import mvdanSh from 'mvdan-sh';
+import { matchesPattern } from '../rules';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const { syntax } = mvdanSh as any;
@@ -91,7 +92,14 @@ function isCatHeredocOrLit(part: any): boolean {
 // re-parses each command ~30-60 times (one per condition across all rules).
 // Bounded LRU keeps memory in check on long-running daemons.
 const NORMALIZE_CACHE_MAX = 5_000;
-const normalizeCache = new Map<string, string>();
+interface CommandReadings {
+  /** POSIX word resolution — reveals `\rm` / `r''m`. Historic behaviour. */
+  posix: string;
+  /** Quote-obfuscation removed, separators preserved — the Windows reading. */
+  separator: string;
+}
+
+const normalizeCache = new Map<string, CommandReadings>();
 
 // Shared parsed-AST cache. Both normalizeCommandForPolicy and
 // analyzeFsOperation parse the same command via mvdan-sh; without sharing,
@@ -127,7 +135,7 @@ function parseShared(command: string): any | typeof PARSE_FAIL {
   return parsed;
 }
 
-function cachedNormalize(command: string, compute: () => string): string {
+function cachedNormalize(command: string, compute: () => CommandReadings): CommandReadings {
   const hit = normalizeCache.get(command);
   if (hit !== undefined) {
     // Move to most-recent on access (Map iteration order = insertion order).
@@ -145,19 +153,57 @@ function cachedNormalize(command: string, compute: () => string): string {
   return result;
 }
 
+/**
+ * The POSIX reading of a command. Kept as the single-string API every existing
+ * caller (canonical.ts, the detectors, `explain`) already depends on.
+ */
 export function normalizeCommandForPolicy(command: string): string {
+  return commandReadingsImpl(command).posix;
+}
+
+/**
+ * Every reading of a command that a rule must be tested against.
+ *
+ * `\` is an ESCAPE in POSIX and a SEPARATOR in cmd/PowerShell, and nothing at
+ * rule-evaluation time knows which shell will run the command — `Bash` on
+ * Windows may be Git Bash or cmd. Collapsing to one reading therefore destroys
+ * matches that exist in the text, and a destroyed match is a silent ALLOW: of 7
+ * realistic Windows shapes of the same jailed path, the POSIX reading alone
+ * caught 3.
+ *
+ * So both readings are returned and `matches` fires if ANY of them matches —
+ * the repo's `combine by strictness` rule (two checks on one input resolve by
+ * MAX, never by order). De-duplicated, so an ordinary POSIX command still costs
+ * exactly one regex test.
+ *
+ * This deliberately replaces guessing the shell from a token prefix (reverted
+ * in 5985b5a, which exempted whole tokens from de-obfuscation and opened a
+ * bypass). Guessing from a prefix and assuming POSIX always are the same
+ * mistake in opposite directions; evaluating both readings removes the guess.
+ */
+export function commandReadings(command: string): string[] {
+  const r = commandReadingsImpl(command);
+  return r.separator === r.posix ? [r.posix] : [r.posix, r.separator];
+}
+
+function commandReadingsImpl(command: string): CommandReadings {
   return cachedNormalize(command, () => normalizeCommandForPolicyImpl(command));
 }
 
-function normalizeCommandForPolicyImpl(command: string): string {
+function normalizeCommandForPolicyImpl(command: string): CommandReadings {
   const f = parseShared(command);
-  if (f === PARSE_FAIL) return command; // fail open for FPs, not FNs
+  // fail open for FPs, not FNs — both readings fall back to the raw text
+  if (f === PARSE_FAIL) return { posix: command, separator: command };
   try {
     // Two kinds of in-place edits, applied together right-to-left so offsets
     // stay valid: (1) message-flag value strips (-m "msg" → -m ""), and
     // (2) intra-word de-obfuscation rewrites (r''m → rm).
     const strips: Array<[number, number]> = [];
     const rewrites: Array<[number, number, string]> = [];
+    // The SEPARATOR reading's rewrites: quote-obfuscation removed, but every
+    // other character (crucially `\`) left exactly as written. See
+    // commandReadings() for why one reading is not enough.
+    const quoteOnlyRewrites: Array<[number, number, string]> = [];
     const msgSpans = new Set<string>();
 
     syntax.Walk(f, (node: unknown) => {
@@ -232,23 +278,30 @@ function normalizeCommandForPolicyImpl(command: string): string {
         if (resolved === source) continue; // not obfuscated
         if (resolved === '' || /\s/.test(resolved)) continue; // data string, not a token
         rewrites.push([s, e, resolved]);
+        // Same token, but resolving ONLY the quote obfuscation. For `r''m` this
+        // equals `resolved` (rm); for `C:\Users\x\.aw''s` it yields
+        // `C:\Users\x\.aws` — de-obfuscated AND still a path.
+        const quoteOnly = source.replace(/['"]/g, '');
+        if (quoteOnly !== source) quoteOnlyRewrites.push([s, e, quoteOnly]);
       }
       return true;
     });
 
-    const edits: Array<[number, number, string]> = [
-      ...strips.map(([s, e]): [number, number, string] => [s, e, '""']),
-      ...rewrites,
-    ];
-    if (edits.length === 0) return command;
-    edits.sort((a, b) => b[0] - a[0]); // end→start so earlier offsets stay valid
-    let result = command;
-    for (const [s, e, rep] of edits) {
-      result = result.slice(0, s) + rep + result.slice(e);
-    }
-    return result;
+    const stripEdits = strips.map(([s, e]): [number, number, string] => [s, e, '""']);
+    const apply = (extra: Array<[number, number, string]>): string => {
+      const edits = [...stripEdits, ...extra];
+      if (edits.length === 0) return command;
+      edits.sort((a, b) => b[0] - a[0]); // end→start so earlier offsets stay valid
+      let out = command;
+      for (const [s, e, rep] of edits) out = out.slice(0, s) + rep + out.slice(e);
+      return out;
+    };
+    // Both readings carry the message-flag strips, so the widening reading can
+    // never resurrect text the strip exists to hide.
+    return { posix: apply(rewrites), separator: apply(quoteOnlyRewrites) };
   } catch {
-    return command; // parse error → return unchanged (fail open for FPs, not FNs)
+    // parse error → return unchanged (fail open for FPs, not FNs)
+    return { posix: command, separator: command };
   }
 }
 
@@ -635,6 +688,381 @@ function chmodHasOpenPermMode(command: string): boolean {
         if (w !== null && w.startsWith('-')) continue; // chmod option flag
         if (w !== null && CHMOD_OPEN_PERM_TOKENS.has(w.toLowerCase())) found = true;
         break;
+      }
+      return true;
+    });
+  } catch {
+    return found; // partial result on walker error
+  }
+  return found;
+}
+
+/**
+ * Does `toolName` carry a shell command? True for BASH_TOOL_NAMES spellings and
+ * for any tool whose toolInspection field is `command` (e.g. `terminal.execute`).
+ *
+ * THE definition of "shell-shaped" — the gate, the CLI scan, and `explain` must
+ * all use this one, or they disagree about which rules apply to which tool
+ * (/code-review 2026-08-13: the gate reviewed `sudo …` on `shell` while scan
+ * reported nothing, so the customer-facing report under-counted).
+ */
+export function isShellShapedTool(
+  toolName: string,
+  toolInspection?: Record<string, string>
+): boolean {
+  if (isBashTool(toolName)) return true;
+  if (!toolInspection) return false;
+  const pattern = Object.keys(toolInspection).find((p) => matchesPattern(toolName, p));
+  return pattern !== undefined && toolInspection[pattern] === 'command';
+}
+
+/**
+ * Does a smart rule's `tool` scope cover this tool? Adds the shell-shape alias:
+ * the six default shell-safety rules and shield bundles are written
+ * `tool:'bash'`, and an agent's choice of tool-name spelling (`shell`,
+ * `run_shell_command`, `execute_bash`, `terminal.execute`) must not silently
+ * void them. An absent rule scope matches everything (callers' prior semantics).
+ */
+export function toolMatchesRule(
+  toolName: string,
+  ruleTool: string | string[] | undefined,
+  toolInspection?: Record<string, string>
+): boolean {
+  if (!ruleTool) return true;
+  if (matchesPattern(toolName, ruleTool)) return true;
+  return isShellShapedTool(toolName, toolInspection) && matchesPattern('bash', ruleTool);
+}
+
+// ── Inline-execution detection (the policy-bypass tunnel) ───────────────────
+// `python3 -c "<code>"` hides the real action inside a program that
+// command-level rules can't see. THREE spellings of the same tunnel:
+//   1. code as an argument:  python3 -c / node -e / perl -pe
+//   2. code via stdin:       python3 - <<'PY' / python3 < f / python3 <<< "code"
+//   3. code via a pipe:      echo "code" | python3   (bare interpreter, no script)
+//
+// AST-BASED (/code-review 2026-08-13). The previous regex/hand-split version
+// produced three separate defects in one commit: `bash -euo pipefail script.sh`
+// false-positived (it tested only that a flag STARTED with -c/-e), a
+// backslash-escaped quote before a pipe hid the pipe entirely, and its
+// hand-copied wrapper list was both incomplete (`env -u`, `xargs -I`) and a
+// duplicate of COMMAND_WRAPPERS. Walking the real AST fixes all three by
+// construction: flags are whole words, pipes/redirects are structure, and
+// wrapper unwrapping reuses the one COMMAND_WRAPPERS set.
+const INLINE_INTERPRETER =
+  /^(python[\d.]*|perl|ruby|node|tsx|ts-node|php|lua|deno|bun|pwsh|powershell(?:\.exe)?|osascript|rscript|irb|bash|sh|zsh|script|su)$/i;
+
+// Runner front-ends that exec an interpreter from their own argv
+// (`uv run python -c …`, `npx tsx -e …`). Distinct from COMMAND_WRAPPERS: these
+// take a subcommand before the real command, so the interpreter can sit deeper.
+const RUNNER_WRAPPERS = new Set([
+  'uv',
+  'uvx',
+  'poetry',
+  'pipenv',
+  'pdm',
+  'rye',
+  'hatch',
+  'conda',
+  'mamba',
+  'micromamba',
+  'npx',
+  'pnpm',
+  'yarn',
+  'bunx',
+  'watch',
+  'strace',
+  'ltrace',
+  'chroot',
+  'unshare',
+  'runuser',
+]);
+
+/**
+ * True when `w` is the interpreter's CODE flag (vs an ordinary option).
+ * Per-interpreter letters — this is what separates `bash -c CODE` (code) from
+ * `bash -euo pipefail` (options) and `perl -e CODE` (code) from `perl -cw`
+ * (syntax check). Bundles count (`bash -xc`, `python3 -uc`, `perl -pe`).
+ */
+function isInlineCodeFlag(interp: string, w: string): boolean {
+  const lw = w.toLowerCase();
+  if (lw === '--eval' || lw === '--command' || lw === '--print') return true;
+  if (/^(pwsh|powershell)/.test(interp)) return /^-(c|command|e|ec|enc|encodedcommand)$/i.test(lw);
+  if (!w.startsWith('-') || w.startsWith('--')) return false;
+
+  // Which single letter means "the next thing is CODE", per interpreter.
+  const codeLetters = /^(perl|ruby|lua|bun|osascript|rscript|irb)$/.test(interp)
+    ? 'e'
+    : /^(node|tsx|ts-node)$/.test(interp)
+      ? 'ep'
+      : interp === 'php'
+        ? 'r'
+        : 'c'; // python*, bash, sh, zsh
+
+  // Option BUNDLE only — everything up to an attached VALUE. Single-letter
+  // options cluster (`bash -xc`, `python3 -uc`, `perl -pe`), but several
+  // interpreters also take a value attached to the flag: `perl -MData::Dumper`,
+  // `ruby -rbundler/setup`, `ruby -Ilib`, `python3 -Werror::Deprecation`,
+  // `node -rts-node/register`. Testing `.includes(letter)` over the WHOLE token
+  // read those VALUES as option letters — `-MData::Dumper` contains an 'e' from
+  // "Dumper" — and turned six ordinary script runs into approval prompts
+  // (/code-review round 3). The bundle therefore stops at the first
+  // value-taking option letter, and only pure a-z0-9 clusters are scanned.
+  const body = lw.slice(1);
+  // Cut at the first value-taking option letter OR the first non-alphanumeric
+  // character (quote, slash, colon — where an attached value always begins).
+  // Cutting at BOTH matters: `perl -pe's/x/y/'` must still read as the bundle
+  // `pe` (code), while `perl -MData::Dumper` must read as the empty bundle.
+  const cutAt = /^(perl|ruby|node|tsx|ts-node)$/.test(interp) ? /[mirw]|[^a-z0-9]/ : /[^a-z0-9]/;
+  const cut = body.search(cutAt);
+  const bundle = cut >= 0 ? body.slice(0, cut) : body;
+  return [...codeLetters].some((l) => bundle.includes(l));
+}
+
+// Redirect operators that feed a command's STDIN — the heredoc/herestring/file
+// forms of the same tunnel. Derived from samples (like REDIR_HEREDOC_OPS) so a
+// library version bump can't silently break them.
+let _redirStdinOps: Set<number> | null = null;
+function redirStdinOps(): Set<number> {
+  if (_redirStdinOps) return _redirStdinOps;
+  _redirStdinOps = new Set<number>(
+    [
+      deriveRedirOp('cat <<X\nX'),
+      deriveRedirOp('cat <<-X\nX'),
+      deriveRedirOp('cat < f'),
+      deriveRedirOp('cat <<< x'),
+    ].filter((op) => op >= 0)
+  );
+  return _redirStdinOps;
+}
+
+// `&&` / `||` operator codes — a BinaryCmd carrying either is a LIST, not a
+// pipeline, so its RHS does not read the LHS's stdout. Derived once from
+// samples for the same version-robustness reason; on failure the set stays
+// empty and every BinaryCmd RHS is treated as pipe-fed (fails toward review).
+function deriveBinaryOp(sample: string): number {
+  try {
+    const f = sharedParser.Parse(sample, 'cmd');
+    let op = -1;
+    syntax.Walk(f, (node: unknown) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const n = node as any;
+      if (n && syntax.NodeType(n) === 'BinaryCmd' && op < 0) op = n.Op;
+      return true;
+    });
+    return op;
+  } catch {
+    return -1;
+  }
+}
+let _listOps: Set<number> | null = null;
+function listOps(): Set<number> {
+  if (_listOps) return _listOps;
+  _listOps = new Set<number>(
+    [deriveBinaryOp('a && b'), deriveBinaryOp('a || b')].filter((o) => o >= 0)
+  );
+  return _listOps;
+}
+
+// Wrappers whose first BARE operand is a target, with the real command after it
+// (`chroot /mnt python3 -c …`). Consumed exactly ONCE per wrapper — consuming
+// every bare operand would swallow the interpreter itself. `runuser -u app …`
+// and `unshare -n …` take their target via a FLAG, so the flag path already
+// handles them and they must NOT be listed here. `su` is not a wrapper at all:
+// its `-c` takes a command string, so it is an INLINE_INTERPRETER instead.
+const WRAPPER_TAKES_TARGET = new Set(['chroot']);
+
+// Interpreters whose LEADING bare operand names a target rather than a program
+// (`su USER -c CODE`). Their real code flag follows that operand.
+const INTERP_LEADING_TARGET = new Set(['su']);
+
+/** Strip leading wrappers/runners from a resolved arg list, returning the index
+ *  of the real command head. Handles `sudo -u www python3`, `env -u FOO python3`,
+ *  `timeout 5 python3`, `uv run python`, `conda run -n env python`,
+ *  `chroot /mnt python3`. */
+function unwrapCommandHead(words: (string | null)[]): number {
+  let i = 0;
+  while (i < words.length) {
+    const head = (words[i] ?? '').toLowerCase().split('/').pop() ?? '';
+    // `find … -exec CMD …` / `-execdir` run CMD per match — the real command
+    // head sits after the flag, and mvdan parses it as ordinary find operands.
+    if (head === 'find') {
+      const x = words.findIndex(
+        (w, k) => k > i && (w === '-exec' || w === '-execdir' || w === '-ok')
+      );
+      if (x < 0) break;
+      i = x + 1;
+      continue;
+    }
+    if (!COMMAND_WRAPPERS.has(head) && !RUNNER_WRAPPERS.has(head)) break;
+    i++;
+    let targetConsumed = false;
+    // Skip this wrapper's own flags and their operands. A flag's operand is
+    // unknowable per-flag across every wrapper, so consume a following non-flag
+    // token only for the runner `run`/`exec` subcommand forms and for numeric
+    // operands (timeout 5, nice 10). Everything else stops the skip, which is
+    // the SAFE direction: we stop on the interpreter, never past it.
+    while (i < words.length) {
+      const t = words[i];
+      if (t === null) {
+        i++;
+        continue;
+      } // dynamic token — keep scanning
+      const lt = t.toLowerCase();
+      // `env FOO=1 python3 -c` — an assignment given as a WRAPPER ARG (mvdan
+      // only puts assignments in cmd.Assigns when they lead the command, so
+      // these arrive as ordinary args and would otherwise stop the peel).
+      if (/^[A-Za-z_]\w*=/.test(t)) {
+        i++;
+        continue;
+      }
+      if (t.startsWith('-')) {
+        i++;
+        // `-u FOO`, `-n 5`, `-I {}`, `-c base`: if the NEXT token is not itself a
+        // flag and not a plausible command, treat it as this flag's operand.
+        const nxt = words[i];
+        if (
+          nxt != null &&
+          !nxt.startsWith('-') &&
+          !INLINE_INTERPRETER.test(nxt.split('/').pop() ?? '') &&
+          !COMMAND_WRAPPERS.has(nxt.toLowerCase()) &&
+          !RUNNER_WRAPPERS.has(nxt.toLowerCase())
+        )
+          i++;
+        continue;
+      }
+      // Runner subcommands and numeric operands are consumed; anything else is
+      // the command head.
+      if (lt === 'run' || lt === 'exec' || lt === 'dlx' || /^\d+(\.\d+)?[smhd]?$/.test(lt)) {
+        i++;
+        continue;
+      }
+      // A target operand (`chroot /mnt CMD`) — consumed exactly ONCE, then the
+      // next bare token is the real command head. Without the one-shot guard
+      // this swallows the interpreter too.
+      if (!targetConsumed && WRAPPER_TAKES_TARGET.has(head)) {
+        targetConsumed = true;
+        i++;
+        continue;
+      }
+      break;
+    }
+  }
+  return i;
+}
+
+/**
+ * Does this ONE statement execute inline code? `pipeFed` says whether it reads
+ * another command's stdout (decided by the caller at the pipeline node).
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function inlineExecStmt(stmt: any, pipeFed: boolean): boolean {
+  const cmd = stmt?.Cmd;
+  if (!cmd || syntax.NodeType(cmd) !== 'CallExpr') return false;
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const words: (string | null)[] = (cmd.Args || []).map((a: any) => resolveWordLiteral(a));
+  if (words.length === 0) return false;
+
+  const headIdx = unwrapCommandHead(words);
+  const rawHead = words[headIdx];
+  if (rawHead == null) return false;
+  const interp = (rawHead.split('/').pop() ?? '').toLowerCase();
+  if (!INLINE_INTERPRETER.test(interp)) return false;
+
+  let args = words.slice(headIdx + 1);
+  // `deno eval "code"` spells the code form as a subcommand.
+  if (interp === 'deno' && (args[0] ?? '').toLowerCase() === 'eval') return true;
+
+  // `su USER -c CODE` — the leading bare operand is a TARGET (a user), not a
+  // program, so it must not trip the "a program was selected" rule below (which
+  // otherwise stops the code-flag scan before ever reaching `-c`).
+  if (INTERP_LEADING_TARGET.has(interp)) {
+    const firstFlag = args.findIndex((a) => a == null || a.startsWith('-'));
+    args = firstFlag >= 0 ? args.slice(firstFlag) : [];
+  }
+
+  let positionals = 0;
+  let selectedProgram = false; // a script operand or `-m module` was chosen
+  for (const a of args) {
+    if (a == null) {
+      positionals++; // dynamic arg — treat as a script operand
+      selectedProgram = true;
+      continue;
+    }
+    // Once a SCRIPT has been selected, later flags belong to that script, not
+    // to the interpreter: `python3 manage.py runserver -c settings.cfg` is a
+    // Django option, not `python3 -c CODE` (/code-review round 3 — this scan
+    // used to keep matching code flags past the script and flagged every
+    // `node scripts/build.js -p production`).
+    if (!selectedProgram && isInlineCodeFlag(interp, a)) return true;
+    // `-m module` selects a program too, so a trailing `-` after it is that
+    // module's stdin DATA (`python3 -m black -`), not the interpreter reading code.
+    if (a === '-m') {
+      selectedProgram = true;
+      continue;
+    }
+    if (a === '-' && !selectedProgram) return true; // bare interpreter reading code from stdin
+    if (!a.startsWith('-')) {
+      positionals++;
+      selectedProgram = true;
+    }
+  }
+
+  // No script operand + code arriving over stdin (heredoc, herestring,
+  // `< file`) or a pipe → the interpreter executes whatever it is fed.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const redirs: any[] = stmt.Redirs || cmd.Redirs || [];
+  const stdinFed = redirs.some((r) => r && redirStdinOps().has(r.Op));
+  if (positionals === 0 && (stdinFed || pipeFed)) {
+    // Shells are excluded from the IMPLICIT forms: `curl … | bash` belongs to
+    // the eval-remote / pipe-to-shell family (Class A tiers that own it, and
+    // flagging it here would DOWNGRADE their block to a review), and
+    // `bash <<'EOF'` is the everyday multi-command idiom.
+    if (!/^(bash|sh|zsh)$/i.test(interp)) return true;
+  }
+  return false;
+}
+
+/**
+ * AST-aware inline-execution detector. Returns true when the command runs code
+ * supplied on the command line, via stdin, or via a pipe into a bare
+ * interpreter. Structural, so it is not fooled by quoting, escapes, option
+ * bundles, or wrapper nesting. Pure.
+ */
+export function detectInlineExec(command: string): boolean {
+  const f = parseShared(command);
+  if (f === PARSE_FAIL) {
+    // Conservative fallback: the plain `interp -c CODE` form, anchored per
+    // simple-command. A command mvdan cannot parse is unlikely to run, but this
+    // detector gates a bypass tunnel — degrade to the old narrow check, never
+    // to silence.
+    return /(^|[|;&]|&&)\s*(?:[\w./-]*\/)?(python[\d.]*|perl|ruby|node|php|lua|deno|bun|pwsh|osascript|rscript|bash|sh|zsh)\s+-{1,2}[a-z]*[ceEr]/i.test(
+      command
+    );
+  }
+
+  let found = false;
+  try {
+    syntax.Walk(f, (node: unknown) => {
+      if (!node || found) return false;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const n = node as any;
+      const t = syntax.NodeType(n);
+      // A pipeline's RHS reads the LHS's stdout. It must be judged HERE, at the
+      // BinaryCmd, and not via a set of "pipe-fed statements": the mvdan JS
+      // binding hands out a NEW wrapper object on every property access, so
+      // `n.Y` is never identity-equal to the Stmt the walker later visits
+      // (verified: `Y === Y` is false). `&&`/`||` are BinaryCmds too — only a
+      // non-list operator is a pipe.
+      if (t === 'BinaryCmd' && n.Y && !listOps().has(n.Op)) {
+        if (inlineExecStmt(n.Y, true)) {
+          found = true;
+          return false;
+        }
+      }
+      if (t === 'Stmt' && inlineExecStmt(n, false)) {
+        found = true;
+        return false;
       }
       return true;
     });

@@ -90,6 +90,14 @@ describe('log PostToolUse snapshot behavior', () => {
     // deduplicates and returns the prior hash without writing a new stack entry.
     // What we care about here is that createShadowSnapshot was CALLED at all,
     // which we verify by checking that the shadow repo directory was initialized.
+    // The engine ships OFF (enableUndo defaults to false — the snapshot store
+    // filled a disk), and log.ts gates the Bash snapshot on it. This row is
+    // about the PRIOR-SNAPSHOT condition, so it states the precondition rather
+    // than inheriting whatever the default happens to be.
+    fs.writeFileSync(
+      path.join(tmpHome, '.node9', 'config.json'),
+      JSON.stringify({ settings: { enableUndo: true } })
+    );
     writeSnapshotStack(tmpHome, [
       {
         hash: 'prior000',
@@ -140,6 +148,14 @@ describe('log PostToolUse snapshot behavior', () => {
 
   it('does NOT create a snapshot for Edit tool PostToolUse (avoids unknown duplicates)', () => {
     // Seed a prior Edit snapshot so the tool isn't skipped on cold-start grounds
+    // The engine ships OFF (enableUndo defaults to false — the snapshot store
+    // filled a disk), and log.ts gates the Bash snapshot on it. This row is
+    // about the PRIOR-SNAPSHOT condition, so it states the precondition rather
+    // than inheriting whatever the default happens to be.
+    fs.writeFileSync(
+      path.join(tmpHome, '.node9', 'config.json'),
+      JSON.stringify({ settings: { enableUndo: true } })
+    );
     writeSnapshotStack(tmpHome, [
       {
         hash: 'prior000',

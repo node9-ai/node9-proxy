@@ -7,7 +7,8 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { buildShield, pathToRegexFragment } from './build';
+import { buildShield, pathMatchesFragment, pathToRegexFragment } from './build';
+import { validateRegex } from '@node9/policy-engine';
 import {
   installShield,
   readActiveShields,
@@ -64,14 +65,50 @@ export function writeJailPaths(paths: JailPath[]): void {
  */
 export function addJailPath(rawPath: string, verdict: JailVerdict): JailPath[] {
   const norm = rawPath.trim();
-  if (!pathToRegexFragment(norm)) {
+  const fragment = pathToRegexFragment(norm);
+  if (!fragment) {
     throw new Error(
       `"${rawPath}" is too broad to jail — give a specific path (e.g. ~/.gmail-mcp), not a home or root directory.`
+    );
+  }
+  // The engine is the arbiter of what a rule may contain. A fragment it
+  // rejects (e.g. over its regex length cap) would install a rule that
+  // SILENTLY allows while `jail add` prints "reads now BLOCK" — the Windows
+  // fail-open of 2026-08-19. Refuse loudly instead of lying quietly.
+  const rejection = validateRegex(fragment);
+  if (rejection !== null) {
+    throw new Error(
+      `"${rawPath}" cannot be jailed: the generated match pattern was rejected by the policy engine (${rejection}). Try a shorter or more specific path.`
     );
   }
   const next = [...readJailPaths().filter((p) => p.path !== norm), { path: norm, verdict }];
   writeJailPaths(next);
   return next;
+}
+
+/**
+ * Does a candidate string (a file_path / path / pattern arg from a file tool)
+ * hit a jailed path? Uses the SAME regex fragment the shield rules embed, so
+ * the orchestrator's fast-path guard and the policy engine can never disagree
+ * about what counts as jailed (task #20). Returns the matching entry (its
+ * verdict decides block vs review) or null.
+ */
+export function findJailedPath(candidate: string): JailPath | null {
+  return findJailedPathIn(candidate, readJailPaths());
+}
+
+/**
+ * Same match, against an explicit list — used for the ORG-managed jail
+ * (config.policy.managedJailPaths), which has no local store. Task #22: the
+ * managed route reintroduced task #20's file-tool bypass because the guard
+ * could only see the local store; both now go through this one matcher.
+ */
+export function findJailedPathIn(candidate: string, paths: JailPath[]): JailPath | null {
+  if (!candidate) return null;
+  for (const entry of paths) {
+    if (pathMatchesFragment(candidate, entry.path)) return entry;
+  }
+  return null;
 }
 
 /** Remove a path (exact match). Returns whether it was present + the new list. */

@@ -12,17 +12,60 @@ export const MODE_ORDER = ['observe', 'audit', 'standard', 'strict'] as const;
 // egress mode: the verdict for an unknown host. off = no gate, block = strictest.
 export const EGRESS_MODE_ORDER = ['off', 'review', 'block'] as const;
 
-/** Rank of a value within an order (higher = stricter). -1 if unknown. */
-function rankIn(order: readonly string[], value: string): number {
-  return order.indexOf(value);
+/** Rank of a value within an order (higher = stricter). -1 if unknown/absent. */
+function rankIn(order: readonly string[], value: string | undefined): number {
+  return value === undefined ? -1 : order.indexOf(value);
 }
 
 /**
- * Baseline+lock for an ORDERED enum (mode, egress.mode):
- *  - locked → cloud wins outright.
- *  - else   → keep local only if STRICTER than the cloud floor; otherwise raise.
- * An unrankable cloud value is ignored (returns local) so junk never weakens or
- * breaks enforcement.
+ * THE floor primitive — every governance field goes through this one function.
+ *
+ * The law: "a member may TIGHTEN, never LOOSEN." Three cases, and the third is
+ * the one that kept being re-implemented by hand and getting it wrong:
+ *   - junk cloud value  → ignored entirely (never weakens, never breaks)
+ *   - locked            → cloud wins outright (that is what a lock means)
+ *   - NO local opinion  → cloud applies VERBATIM. Treating an absent choice as
+ *                         the schema default made the default masquerade as a
+ *                         deliberate setting, and since off < review the floor
+ *                         then silently discarded every admin 'off' (founder QA
+ *                         2026-07-26). `localWasSet` lets a caller whose default
+ *                         is pre-seeded into the object (egress.mode) say so.
+ *   - otherwise         → keep local only if STRICTER than the cloud floor.
+ *
+ * Before this existed the same law lived in 14 hand-rolled places and three
+ * separate strictness tables; every re-implementation was a chance to invert it.
+ */
+export function floorValue<T extends string>(
+  order: readonly T[],
+  local: T | undefined,
+  cloud: T | undefined,
+  opts: { locked?: boolean; localWasSet?: boolean } = {}
+): T | undefined {
+  if (cloud === undefined || rankIn(order, cloud) === -1) return local; // never apply junk
+  if (opts.locked) return cloud;
+  const localSet = opts.localWasSet ?? local !== undefined;
+  if (!localSet || rankIn(order, local) === -1) return cloud; // no real local opinion
+  return rankIn(order, local) > rankIn(order, cloud) ? local : cloud;
+}
+
+/** The strictest of several values on one order. Unknown/absent values are
+ *  skipped; returns undefined only when nothing ranks. Used where two sources
+ *  both have a say and NEITHER may weaken the other (advisory injection). */
+export function strictestOf<T extends string>(
+  order: readonly T[],
+  ...values: (T | undefined)[]
+): T | undefined {
+  let best: T | undefined;
+  for (const v of values) {
+    if (rankIn(order, v) === -1) continue;
+    if (best === undefined || rankIn(order, v) > rankIn(order, best)) best = v;
+  }
+  return best;
+}
+
+/**
+ * Baseline+lock for an ORDERED enum. Thin wrapper over floorValue kept for the
+ * existing callers/tests that always pass a concrete local value.
  */
 export function resolveByOrder(
   order: readonly string[],
@@ -30,9 +73,7 @@ export function resolveByOrder(
   cloud: string,
   locked: boolean
 ): string {
-  if (rankIn(order, cloud) === -1) return local; // never apply junk
-  if (locked) return cloud;
-  return rankIn(order, local) > rankIn(order, cloud) ? local : cloud;
+  return floorValue(order as readonly string[], local, cloud, { locked }) ?? local;
 }
 
 /** Strictness rank of a mode (kept for callers/tests). -1 for unknown. */
@@ -75,7 +116,7 @@ export function applyManagedEgress<
     deny?: string[];
     allowPrivate?: boolean;
   },
->(local: T, managed: ManagedEgress, locked: string[]): T {
+>(local: T, managed: ManagedEgress, locked: string[], localModeUserSet = true): T {
   const next: T = { ...local };
   if (typeof managed.enabled === 'boolean') {
     next.enabled = locked.includes('egressEnabled')
@@ -83,12 +124,16 @@ export function applyManagedEgress<
       : local.enabled || managed.enabled;
   }
   if (typeof managed.mode === 'string') {
-    next.mode = resolveByOrder(
-      EGRESS_MODE_ORDER,
-      local.mode,
-      managed.mode,
-      locked.includes('egressMode')
-    ) as T['mode'];
+    // When the dev never set a mode, `local.mode` is the seeded default
+    // 'review', not a deliberate choice — the org value applies verbatim (a
+    // managed 'off' would otherwise always lose to the seeded 'review').
+    // Mirrors applyManagedCommandChecks' absent-local rule.
+    next.mode = (floorValue(EGRESS_MODE_ORDER, local.mode as never, managed.mode as never, {
+      locked: locked.includes('egressMode'),
+      // The default 'review' is seeded into egress before any merge, so absence
+      // is invisible from `local.mode` alone — the caller tracks it for us.
+      localWasSet: localModeUserSet,
+    }) ?? local.mode) as T['mode'];
   }
   if (Array.isArray(managed.allow) && managed.allow.length > 0) {
     next.allow = [...managed.allow] as T['allow'];
@@ -126,13 +171,24 @@ export interface ManagedDlp {
  * is preserved; untouched fields (scanIgnoredTools) carry through.
  */
 export function applyManagedDlp<
-  T extends { enabled: boolean; pii?: string; reviewAction?: string },
+  T extends { enabled: boolean; pii?: string; reviewAction?: string; scanIgnoredTools?: boolean },
 >(local: T, managed: ManagedDlp, locked: string[]): T {
   const next: T = { ...local };
   if (typeof managed.enabled === 'boolean') {
     next.enabled = locked.includes('dlpEnabled')
       ? managed.enabled
       : local.enabled || managed.enabled;
+  }
+  // Task #23: when the org turns DLP ON, a local `scanIgnoredTools:false` must
+  // not switch it back off for the whole ignoredTools class (read/grep/glob/ls
+  // — the most common agent operations). That is a LOOSENING, and the
+  // config-home law lets local config only tighten. The org cannot express this
+  // knob at all (ResolvedManagedConfig.dlp carries only enabled/pii/
+  // reviewAction), so without this floor the local value always won and the
+  // mandate was silently hollow. Measured exposure: secret-in-args for ignored
+  // tools; path-based sensitive reads stayed covered by the project-jail shield.
+  if (managed.enabled === true) {
+    next.scanIgnoredTools = true;
   }
   if (typeof managed.pii === 'string') {
     next.pii = resolveByOrder(
@@ -180,23 +236,11 @@ export function applyManagedCommandChecks<T extends Partial<Record<CommandCheckK
     const m = managed[key];
     if (typeof m !== 'string') continue;
     const lockKey = `commandChecks${key[0].toUpperCase()}${key.slice(1)}`;
-    const localValue = local[key];
-    // NO local opinion → the org's value applies verbatim. The floor compares
-    // an admin value against a DEV'S CHOICE; treating an absent choice as the
-    // default 'review' made the default masquerade as a deliberate local
-    // setting, and since off < review the floor silently discarded every
-    // admin 'off' (founder QA 2026-07-26: dashboard said off, gate stayed
-    // review). Only dlp.pii escaped this because its default is the WEAKEST
-    // value, so an absent local could never out-rank the managed one.
-    const resolved =
-      localValue === undefined
-        ? m
-        : resolveByOrder(
-            COMMAND_CHECK_ORDER as unknown as string[],
-            localValue,
-            m,
-            locked.includes(lockKey)
-          );
+    // The absent-local rule lives in floorValue now (see its doc comment) —
+    // this used to be a hand-rolled ternary here, one of three copies.
+    const resolved = floorValue(COMMAND_CHECK_ORDER as readonly string[], local[key], m, {
+      locked: locked.includes(lockKey),
+    });
     // Class-B safety: never store 'off' for tighten-only keys even if a
     // hostile/buggy cloud value slips past upstream validation.
     if ((key === 'evalDynamic' || key === 'pipeChainHigh') && resolved === 'off') continue;

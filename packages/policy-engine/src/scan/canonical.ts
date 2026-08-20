@@ -26,13 +26,14 @@
 // JSONL entries in.
 
 import { scanArgs } from '../dlp';
-import { matchesPattern, evaluateSmartConditions } from '../rules';
+import { evaluateSmartConditions } from '../rules';
 import {
   analyzeFsOperation,
   analyzeShellCommand,
   detectDangerousShellExec,
-  isBashTool,
+  isShellShapedTool,
   AST_FS_REGEX_RULES,
+  toolMatchesRule,
   normalizeCommandForPolicy,
 } from '../shell';
 import { analyzePipeChain } from '../policy/pipe-chain';
@@ -201,7 +202,27 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
  * and fails CI when the hash drifts without a version bump — forgetting
  * is loud, not silent.
  */
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v6';
+// v7 (2026-08-14): scan now reports the bash-scoped rules for EVERY shell-shaped
+// spelling — `shell`, `run_shell_command`, `execute_bash` and `terminal.execute`
+// — which it silently skipped before while the live gate enforced them. This
+// CHANGES detector output (new findings on existing history), so daemons re-scan
+// through the new pipeline rather than leaving old verdicts frozen.
+//
+// v7 was first cut on 2026-08-13 covering only the rule loop; `terminal.execute`
+// still returned early at the isBashTool guard above it, so the version
+// documented coverage it did not deliver (/code-review round 3). Both the guard
+// and the loop now key on isShellShapedTool. v7 was corrected in place rather
+// than minted separately, because it was never released.
+//
+// v8 (2026-08-20): a command now resolves to a SET of readings and a `matches`
+// condition fires if ANY of them matches (shell/index.ts → commandReadings,
+// rules/index.ts). Smart-rule findings therefore fire on Windows-shaped
+// commands that the single POSIX reading silently missed, so historical
+// verdicts must be re-scanned. rules/index.ts and shell/index.ts joined the
+// hashed source set in the same change: canonical.ts runs
+// evaluateSmartConditions, so a matcher change alters scan output, and the
+// old three-file set would have let this through with no bump.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v8';
 
 /**
  * SHA-256 prefix of the detector-source files
@@ -213,7 +234,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v6';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'a0e2bb339fe67e19';
+export const CANONICAL_EXTRACTOR_HASH = '80f40f974263b281';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
@@ -228,7 +249,13 @@ export function extractCanonicalFindings(
   const ts = call.timestamp;
   const toolNameLower = call.toolName.toLowerCase();
   const command = typeof call.args.command === 'string' ? (call.args.command as string) : null;
-  const isBash = isBashTool(call.toolName) && command !== null;
+  // Shell-shaped, not just BASH_TOOL_NAMES: `terminal.execute` carries a shell
+  // command via toolInspection and must reach the AST detectors below, or the
+  // regex twins those detectors supersede fire uncorrected in the rule loop.
+  // Keyed on the SAME predicate the rule loop uses (toolMatchesRule) so the two
+  // cannot drift — the round-3 review found them disagreeing, which is what let
+  // `grep "drop table"` false-positive for that tool.
+  const isShell = isShellShapedTool(call.toolName, ctx.toolInspection) && command !== null;
 
   // ── Long output redacted (per-line, no rule needed) ──────────────────────
   if (call.outputBytes !== undefined && call.outputBytes > LONG_OUTPUT_THRESHOLD_BYTES) {
@@ -316,7 +343,7 @@ export function extractCanonicalFindings(
     }
   }
 
-  if (!isBash || command === null) {
+  if (!isShell || command === null) {
     return out;
   }
 
@@ -351,7 +378,8 @@ export function extractCanonicalFindings(
   for (const source of ctx.rules) {
     const r = source.rule;
     if (r.verdict === 'allow') continue;
-    if (r.tool && !matchesPattern(toolNameLower, r.tool)) continue;
+    // Shell-shape alias so scan agrees with the gate about which rules apply.
+    if (!toolMatchesRule(toolNameLower, r.tool, ctx.toolInspection)) continue;
     if (r.name && AST_FS_REGEX_RULES.has(r.name)) continue;
     if (!evaluateSmartConditions(call.args, r)) continue;
 

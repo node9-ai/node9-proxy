@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolvePinned } from './index';
+import { resolvePinned, evaluatePolicy } from './index';
 import type { SmartRule } from '../types';
 
 const rule = (over: Partial<SmartRule>): SmartRule => ({
@@ -56,5 +56,50 @@ describe('resolvePinned (pinned-only conflict engine)', () => {
       rule({ name: 'second', verdict: 'block', pinned: true }),
     ]);
     expect(r?.name).toBe('first');
+  });
+});
+
+describe('AST suppression vs a pinned mandate (evaluatePolicy)', () => {
+  const cfg = (chmod: 'off' | undefined, pinned: boolean) => ({
+    policy: {
+      sandboxPaths: [],
+      dangerousWords: [],
+      ignoredTools: [],
+      toolInspection: { bash: 'command' },
+      smartRules: [
+        {
+          name: 'shield:filesystem:review-chmod-777',
+          tool: 'bash',
+          conditions: [
+            { field: 'command', op: 'matches', value: 'chmod\\s+(777|a\\+rwx)', flags: 'i' },
+          ],
+          conditionMode: 'all',
+          verdict: 'review',
+          reason: 'world-writable chmod requires review',
+          ...(pinned ? { pinned: true } : {}),
+        } as SmartRule,
+      ],
+      dlp: { enabled: false, scanIgnoredTools: false },
+      ...(chmod ? { commandChecks: { chmod } } : {}),
+    },
+    settings: { mode: 'standard' },
+  });
+  const CHMOD = { command: 'chmod 777 /tmp/x' };
+
+  it("chmod:'off' + PINNED shield rule → the mandate outlives the knob and speaks", async () => {
+    const v = await evaluatePolicy(cfg('off', true), 'bash', CHMOD, { agent: 'claude' }, {});
+    expect(v.decision).toBe('review');
+    expect(v.ruleName).toBe('shield:filesystem:review-chmod-777');
+  });
+
+  it("chmod:'off' + unpinned twin → family-off silences BOTH tiers (no FP resurrection)", async () => {
+    const v = await evaluatePolicy(cfg('off', false), 'bash', CHMOD, { agent: 'claude' }, {});
+    expect(v.decision).toBe('allow');
+  });
+
+  it('chmod active → AST owns it; even a pinned twin stays suppressed (no double-fire)', async () => {
+    const v = await evaluatePolicy(cfg(undefined, true), 'bash', CHMOD, { agent: 'claude' }, {});
+    expect(v.decision).toBe('review');
+    expect(v.blockedByLabel ?? '').toContain('AST');
   });
 });

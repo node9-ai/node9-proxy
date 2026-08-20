@@ -34,7 +34,9 @@ export {
   detectDangerousShellExec,
   detectDangerousEval,
   checkDangerousSql,
+  detectInlineExec,
 } from '@node9/policy-engine';
+import { detectInlineExec, toolMatchesRule } from '@node9/policy-engine';
 
 // ── shouldSnapshot — Config-aware undo gate (host concern) ──────────────────
 
@@ -65,7 +67,11 @@ export async function evaluatePolicy(
   toolName: string,
   args?: unknown,
   agent?: string,
-  cwd?: string
+  cwd?: string,
+  // Task #20: the orchestrator's jail guard needs the engine to evaluate the
+  // full rule chain for a file tool that would otherwise take the ignored
+  // fast path (it has already found a jailed/sensitive path in the args).
+  opts?: { skipIgnoredFastPath?: boolean }
 ): Promise<PolicyVerdict> {
   const config = getConfig();
   const activeEnvironment = getActiveEnvironment(config) ?? undefined;
@@ -73,7 +79,7 @@ export async function evaluatePolicy(
     config,
     toolName,
     args,
-    { agent, cwd, activeEnvironment },
+    { agent, cwd, activeEnvironment, skipIgnoredFastPath: opts?.skipIgnoredFastPath },
     {
       checkProvenance,
       // Managed → match against the org list (frozen with the rest of managed
@@ -306,8 +312,15 @@ async function deriveExplainTrace(toolName: string, args?: unknown): Promise<Exp
 
   // ── 2. Smart Rules ────────────────────────────────────────────────────────
   if (config.policy.smartRules.length > 0) {
+    // Same matcher as the gate (toolMatchesRule), including the shell-shape
+    // alias. A raw matchesPattern here printed 'No smart rule matched "shell"'
+    // for every shell-shaped spelling the gate actually reviews — explain
+    // contradicting the gate is worse than explain being silent, because it
+    // teaches the user the gate is wrong (/code-review round 3).
     const matchedRule = config.policy.smartRules.find(
-      (rule) => matchesPattern(toolName, rule.tool) && evaluateSmartConditions(args, rule)
+      (rule) =>
+        toolMatchesRule(toolName, rule.tool, config.policy.toolInspection) &&
+        evaluateSmartConditions(args, rule)
     );
     if (matchedRule) {
       const label = `Smart Rule: ${matchedRule.name ?? matchedRule.tool}`;
@@ -365,8 +378,13 @@ async function deriveExplainTrace(toolName: string, args?: unknown): Promise<Exp
     });
 
     // ── 3. Inline exec ────────────────────────────────────────────────────
-    const INLINE_EXEC_PATTERN = /^(python3?|bash|sh|zsh|perl|ruby|node|php|lua)\s+(-c|-e|-eval)\s/i;
-    if (INLINE_EXEC_PATTERN.test(shellCommand.trim())) {
+    // Uses the SAME detector as the gate. explain previously carried its own
+    // ^-anchored regex, so it reported "no inline execution" for every wrapped,
+    // piped, heredoc or non-python spelling the gate reviews — anyone debugging
+    // a prompt with `node9 explain` got the wrong answer (/code-review
+    // 2026-08-13). Drift here is worse than a miss: it teaches the user the
+    // gate is wrong.
+    if (detectInlineExec(shellCommand)) {
       steps.push({
         name: 'Inline execution',
         outcome: 'review',

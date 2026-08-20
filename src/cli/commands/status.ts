@@ -128,6 +128,13 @@ export function registerStatusCommand(program: Command): void {
           chalk.magenta('  ● Undo Engine') +
             chalk.gray(`    → Auto-snapshotting Git repos on AI change`)
         );
+      } else {
+        // Printed even when off: omitting the line made "disabled" look
+        // identical to "this build has no undo feature".
+        console.log(
+          chalk.gray('  ○ Undo Engine') +
+            chalk.gray('    → off (enableUndo: false) — no snapshots are being taken')
+        );
       }
 
       // ── Configuration State ──────────────────────────────────────────────────

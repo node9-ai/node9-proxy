@@ -4,6 +4,7 @@
 // path-rule generator (pathRules) is the exact primitive `node9 jail add` reuses.
 
 import type { ShieldDefinition, SmartRule } from '@node9/policy-engine';
+import { getCompiledRegex } from '@node9/policy-engine';
 
 type Verdict = 'block' | 'review';
 
@@ -42,6 +43,11 @@ export function pathToRegexFragment(rawPath: string): string {
     .replace(/^~[\\/]?/, '')
     .replace(/^\$\{?HOME\}?[\\/]?/, '')
     .replace(/^\/(?:home|Users)\/[^\\/]+[\\/]?/, '')
+    // Windows twin of the rule above: C:\Users\<name>\... (any drive letter,
+    // either slash). Without this the fragment keeps drive+username — longer
+    // (it blew the engine's regex length cap and died silently) and less
+    // portable (~/.aws and C:\Users\x\.aws should denote the same jail).
+    .replace(/^[A-Za-z]:[\\/]Users[\\/][^\\/]+[\\/]?/, '')
     .replace(/^[\\/]+/, '')
     .replace(/[\\/]+$/, '');
   const segments = tail
@@ -64,8 +70,33 @@ export function toolRule(tool: string, verdict: Verdict, reason?: string): Smart
 }
 
 /**
- * Jail a path in BOTH dimensions: a bash `command` regex AND an any-tool
- * `file_path` regex. Returns [] for a path that yields no fragment.
+ * Test a candidate string against a jailable path using the SAME regex the
+ * shield rules embed (task #20: the orchestrator's file-tool guard must never
+ * disagree with the engine about what counts as a jailed path — one matcher).
+ * Returns false for a path that yields no fragment.
+ */
+export function pathMatchesFragment(candidate: string, rawPath: string): boolean {
+  const value = pathToRegexFragment(rawPath);
+  if (!value || !candidate) return false;
+  // Compile through the ENGINE's pipeline — cap, ReDoS analysis and all. This
+  // guard once used a raw `new RegExp(value)` while the engine used its capped
+  // getCompiledRegex, so on a long (Windows) fragment the guard said "jailed"
+  // while the engine said "no match" and allowed: the two arbiters disagreed,
+  // which is the exact split task #20 forbade. One compiler, one answer.
+  const re = getCompiledRegex(value);
+  if (!re) return false; // engine would no-match → the guard must agree
+  return re.test(candidate);
+}
+
+/**
+ * Jail a path in BOTH dimensions: a bash `command` regex AND any-tool rules
+ * for the arg fields file tools actually send. Returns [] for a path that
+ * yields no fragment.
+ *
+ * Task #20: the engine resolves condition fields by exact name (a missing
+ * field FAILS the condition), so a single `file_path` rule can never match
+ * `Grep {pattern, path}` or `Glob {pattern}` — the jail was engine-invisible
+ * to every file tool except Read. One rule per field, OR-ed at the rule level.
  */
 export function pathRules(rawPath: string, verdict: Verdict, reason?: string): SmartRule[] {
   const value = pathToRegexFragment(rawPath);
@@ -80,10 +111,26 @@ export function pathRules(rawPath: string, verdict: Verdict, reason?: string): S
       verdict,
       reason: why,
     },
+    // Keep the historical `-anytool` name for the file_path rule: the
+    // rule→shield attribution maps (Report SHIELDS panel) key on rule names.
     {
       name: `${verdict}-path-${s}-anytool`,
       tool: '*',
       conditions: [{ field: 'file_path', op: 'matches', value }],
+      verdict,
+      reason: why,
+    },
+    {
+      name: `${verdict}-path-${s}-anytool-path`,
+      tool: '*',
+      conditions: [{ field: 'path', op: 'matches', value }],
+      verdict,
+      reason: why,
+    },
+    {
+      name: `${verdict}-path-${s}-anytool-pattern`,
+      tool: '*',
+      conditions: [{ field: 'pattern', op: 'matches', value }],
       verdict,
       reason: why,
     },

@@ -9,6 +9,7 @@ import pm from 'picomatch';
 import type { SmartRule } from '../types';
 import { normalizeCommandForPolicy } from '../shell';
 import { getCompiledRegex } from '../utils/regex';
+import { commandReadings } from '../shell';
 
 /**
  * Glob match a tool name against one pattern or a list, with case-insensitive
@@ -90,6 +91,31 @@ export function evaluateSmartConditions(args: unknown, rule: SmartRule): boolean
     return val;
   };
 
+  // Every reading of the field a regex must be tested against. Only `command`
+  // has more than one (see commandReadings): `\` is an escape in POSIX and a
+  // separator in cmd/PowerShell, and nothing here knows which shell will run.
+  // Testing a single reading silently drops matches that exist in the text.
+  const readingsCache = new Map<string, string[]>();
+  const resolveFieldReadings = (field: string): string[] => {
+    const cached = readingsCache.get(field);
+    if (cached) return cached;
+    const primary = resolveField(field);
+    if (primary === null) {
+      readingsCache.set(field, []);
+      return [];
+    }
+    let out = [primary];
+    if (field === 'command') {
+      const raw = getNestedValue(args, field);
+      if (typeof raw === 'string') {
+        const collapsed = commandReadings(raw).map((r) => r.replace(/\s+/g, ' ').trim());
+        out = [...new Set([primary, ...collapsed])];
+      }
+    }
+    readingsCache.set(field, out);
+    return out;
+  };
+
   const results = rule.conditions.map((cond) => {
     const val = resolveField(cond.field);
 
@@ -106,14 +132,18 @@ export function evaluateSmartConditions(args: unknown, rule: SmartRule): boolean
         if (val === null || !cond.value) return false;
         const reM = getCompiledRegex(cond.value, cond.flags ?? '');
         if (!reM) return false; // invalid/dangerous pattern → fail closed
-        return reM.test(val);
+        // ANY reading matching is a match — strictest wins, never first-wins.
+        return resolveFieldReadings(cond.field).some((v) => reM.test(v));
       }
       case 'notMatches': {
         if (!cond.value) return false; // no pattern → fail closed
         if (val === null) return true; // field absent → condition passes (preserve original)
         const reN = getCompiledRegex(cond.value, cond.flags ?? '');
         if (!reN) return false; // invalid/dangerous pattern → fail closed
-        return !reN.test(val);
+        // Mirror of `matches`: this condition holds only when NO reading
+        // matches, so an allow-rule cannot be satisfied by the reading that
+        // happens to miss.
+        return !resolveFieldReadings(cond.field).some((v) => reN.test(v));
       }
       case 'matchesGlob':
         return val !== null && cond.value ? pm.isMatch(val, cond.value) : false;

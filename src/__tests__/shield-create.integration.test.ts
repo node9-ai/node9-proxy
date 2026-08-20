@@ -65,7 +65,7 @@ describe('node9 shield create', () => {
     expect(fs.existsSync(file)).toBe(true);
     const def = JSON.parse(fs.readFileSync(file, 'utf-8'));
     expect('ok' in validateShieldDefinition(def)).toBe(true);
-    expect(def.smartRules).toHaveLength(3); // 2 path rules + 1 tool rule
+    expect(def.smartRules).toHaveLength(5); // 4 path rules (task #20) + 1 tool rule
     expect(activeList(h)).not.toContain('my-gmail'); // no --enable
     expect(r.stdout).toMatch(/created/i);
     fs.rmSync(h, { recursive: true, force: true });

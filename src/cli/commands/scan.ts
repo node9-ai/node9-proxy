@@ -16,12 +16,24 @@ import path from 'path';
 import os from 'os';
 import { SHIELDS } from '../../shields';
 import { DEFAULT_CONFIG } from '../../config';
+
+// Scan forecasts DEFAULT protection (see the note in the rule-source builder),
+// so rule/tool matching keys off the DEFAULT toolInspection map. Shared with the
+// gate via toolMatchesRule so `node9 scan` and the live gate agree on which
+// rules cover which tool spelling (/code-review 2026-08-13).
+const toolInspectionMap: Record<string, string> = DEFAULT_CONFIG.policy.toolInspection;
 import {
   evaluateSmartConditions,
   matchesPattern,
   detectDangerousShellExec,
 } from '../../policy/index';
-import { analyzeFsOperation, AST_FS_REGEX_RULES, BUILTIN_SHIELDS } from '@node9/policy-engine';
+import {
+  analyzeFsOperation,
+  AST_FS_REGEX_RULES,
+  BUILTIN_SHIELDS,
+  toolMatchesRule,
+  isShellShapedTool,
+} from '@node9/policy-engine';
 import { scanArgs } from '../../dlp';
 import { pricingFor } from '../../pricing/litellm';
 import { geminiPriceFor } from '../../cost-gemini';
@@ -1055,7 +1067,12 @@ function processClaudeFile(
       // Runs FIRST so AST-resolved verdicts win over the regex rules,
       // which can FP on JSON args, heredocs, and chained commands.
       let astFsMatched = false;
-      const astRanForBash = toolNameLower === 'bash' || toolNameLower === 'execute_bash';
+      // isShellShapedTool — the SAME predicate toolMatchesRule uses, so a rule
+      // matching a tool and the AST suppression for that tool can never
+      // disagree. Hardcoded per-agent literal lists drifted from the rule
+      // matcher and resurrected the `grep "drop table"` false positive that
+      // AST_FS_REGEX_RULES exists to suppress (/code-review round 3).
+      const astRanForBash = isShellShapedTool(toolNameLower, toolInspectionMap);
       if (astRanForBash) {
         astFsMatched = pushFsOpAstFinding(
           String(input.command ?? ''),
@@ -1076,7 +1093,7 @@ function processClaudeFile(
         const { rule } = source;
 
         if (rule.verdict === 'allow') continue;
-        if (rule.tool && !matchesPattern(toolNameLower, rule.tool)) continue;
+        if (!toolMatchesRule(toolNameLower, rule.tool, toolInspectionMap)) continue;
         // Suppress regex rules that AST already covers (correctly).
         if (astRanForBash && rule.name && AST_FS_REGEX_RULES.has(rule.name)) continue;
         if (!evaluateSmartConditions(input, rule)) continue;
@@ -1549,7 +1566,7 @@ export function scanGeminiHistory(
 
           // ── AST filesystem-operation detection (gemini) ────────────────
           let astFsMatched = false;
-          const astRanForBash = toolNameLower === 'run_shell_command' || toolNameLower === 'shell';
+          const astRanForBash = isShellShapedTool(toolNameLower, toolInspectionMap);
           if (astRanForBash) {
             astFsMatched = pushFsOpAstFinding(
               String(input.command ?? ''),
@@ -1568,7 +1585,7 @@ export function scanGeminiHistory(
           for (const source of ruleSources) {
             const { rule } = source;
             if (rule.verdict === 'allow') continue;
-            if (rule.tool && !matchesPattern(toolNameLower, rule.tool)) continue;
+            if (!toolMatchesRule(toolNameLower, rule.tool, toolInspectionMap)) continue;
             if (astRanForBash && rule.name && AST_FS_REGEX_RULES.has(rule.name)) continue;
             if (!evaluateSmartConditions(input, rule)) continue;
 
@@ -2049,7 +2066,7 @@ export function scanCopilotHistory(
       result.totalToolCalls++;
       sessionCalls.push({ toolName, input, timestamp });
 
-      const isShellTool = toolNameLower === 'bash' || toolNameLower === 'shell';
+      const isShellTool = isShellShapedTool(toolNameLower, toolInspectionMap);
       if (isShellTool) result.bashCalls++;
 
       if (timestamp) {
@@ -2097,7 +2114,7 @@ export function scanCopilotHistory(
       for (const source of ruleSources) {
         const { rule } = source;
         if (rule.verdict === 'allow') continue;
-        if (rule.tool && !matchesPattern(toolNameLower, rule.tool)) continue;
+        if (!toolMatchesRule(toolNameLower, rule.tool, toolInspectionMap)) continue;
         if (isShellTool && rule.name && AST_FS_REGEX_RULES.has(rule.name)) continue;
         if (!evaluateSmartConditions(input, rule)) continue;
 
@@ -2360,7 +2377,7 @@ export function scanCodexHistory(
 
       // ── AST filesystem-operation detection (codex) ─────────────────────
       let astFsMatched = false;
-      const astRanForBash = toolNameLower === 'exec_command' || toolNameLower === 'bash';
+      const astRanForBash = isShellShapedTool(toolNameLower, toolInspectionMap);
       if (astRanForBash) {
         astFsMatched = pushFsOpAstFinding(
           String(input['command'] ?? ''),
@@ -2379,11 +2396,7 @@ export function scanCodexHistory(
       for (const source of ruleSources) {
         const { rule } = source;
         if (rule.verdict === 'allow') continue;
-        if (
-          rule.tool &&
-          !matchesPattern(toolNameLower === 'exec_command' ? 'bash' : toolNameLower, rule.tool)
-        )
-          continue;
+        if (rule.tool && !toolMatchesRule(toolNameLower, rule.tool, toolInspectionMap)) continue;
         if (astRanForBash && rule.name && AST_FS_REGEX_RULES.has(rule.name)) continue;
         if (!evaluateSmartConditions(input, rule)) continue;
 

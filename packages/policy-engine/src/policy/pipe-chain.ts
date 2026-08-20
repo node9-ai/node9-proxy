@@ -82,8 +82,10 @@ function isSensitivePath(p: string): boolean {
 /**
  * Splits a shell command string on unquoted `|` characters.
  * Respects single and double quotes; does NOT handle backticks or $().
+ * Exported for detectInlineExec, whose pipe-fed reasoning must be per-stage
+ * (a `|` inside a quoted string used to mark the whole command pipe-fed).
  */
-function splitOnPipe(cmd: string): string[] {
+export function splitOnPipe(cmd: string): string[] {
   const segments: string[] = [];
   let current = '';
   let inSingle = false;

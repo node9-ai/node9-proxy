@@ -31,6 +31,7 @@ import {
 import { initNode9SaaS, pollNode9SaaS, resolveNode9SaaS } from './cloud';
 import { recordAndCheck } from '../loop-detector';
 import { readActiveShields } from '../shields';
+import { findJailedPath, findJailedPathIn, USER_JAIL_SHIELD } from '../shields/jail';
 
 export interface AuthResult {
   approved: boolean;
@@ -733,6 +734,9 @@ async function _authorizeHeadlessCore(
 
     // `!appPermReview`: a policy ALLOW must not short-circuit an org-set review
     // (fix #3) — fall through to the race. A policy BLOCK below still wins.
+    // (No `!taintWarning` term needed: this whole policy block is already inside
+    // `if (!taintWarning && !isIgnoredTool(...))` above, so a tainted call never
+    // reaches here — verified by revert experiment, task #16 vector C.)
     if (policyResult.decision === 'allow' && !appPermReview) {
       // Local row only — the outbox shipper delivers it. Removing the old
       // awaited POST also removes a cloud round-trip from EVERY allowed
@@ -972,9 +976,16 @@ async function _authorizeHeadlessCore(
       };
     }
   } else if (!taintWarning && !appPermReview) {
-    // project-jail: if the shield is active, don't fast-path Read/Grep/Glob
-    // calls that target sensitive credential paths — let them fall through to
-    // policy evaluation so the shield's block rules can fire.
+    // Jail guard (task #20): when a jail shield is armed, Read/Grep/Glob calls
+    // that target a jailed or sensitive path must NOT take the ignoredTools
+    // fast path — the jail's whole point is stopping file-tool reads.
+    //
+    // History: this guard used to check ONLY 'project-jail' while `jail add`
+    // enables 'user-jail' (shields/jail.ts USER_JAIL_SHIELD), and its inner
+    // test was scanFilePath — which knows built-in DLP paths, never user-added
+    // jail paths. Net effect: the jail blocked Bash but was INERT for the file
+    // tools (the primary way an agent reads a file), while `jail add` printed
+    // "reads now BLOCK". Found by the jail gauntlet on its first probe.
     const toolLower = toolName.toLowerCase();
     const isFileTool =
       toolLower === 'read' ||
@@ -983,16 +994,65 @@ async function _authorizeHeadlessCore(
       toolLower === 'read_file' ||
       toolLower === 'grep_search' ||
       toolLower === 'list_files';
-    if (isFileTool && readActiveShields().includes('project-jail')) {
+    const activeShields = isFileTool ? readActiveShields() : [];
+    // Task #22: an ORG-managed jail (managedConfig.jailPaths) enables no shield
+    // — it only injects org:-prefixed rules — so arming on shields alone let
+    // the managed route keep task #20's bypass. Arm on the managed paths too.
+    const managedJail = isFileTool ? (config.policy.managedJailPaths ?? []) : [];
+    if (
+      isFileTool &&
+      (activeShields.includes('project-jail') ||
+        activeShields.includes(USER_JAIL_SHIELD) ||
+        managedJail.length > 0)
+    ) {
       const argsObj =
         args && typeof args === 'object' && !Array.isArray(args)
           ? (args as Record<string, unknown>)
           : {};
-      const filePath = String(
-        argsObj.file_path ?? argsObj.path ?? argsObj.pattern ?? argsObj.filename ?? ''
-      );
-      if (filePath && scanFilePath(filePath)) {
-        // Sensitive path — skip fast-path, fall through to policy evaluation
+      // ALL candidate fields, not the first non-empty one: Grep sends the
+      // jailed directory in `path` while `pattern` also exists, Glob the
+      // reverse — a first-match pick can check the wrong field.
+      const candidates = ['file_path', 'path', 'pattern', 'filename']
+        .map((k) => argsObj[k])
+        .filter((v): v is string => typeof v === 'string' && v.length > 0);
+      const jailHit =
+        (candidates.map(findJailedPath).find(Boolean) ??
+          candidates.map((c) => findJailedPathIn(c, managedJail)).find(Boolean)) ||
+        null;
+      const sensitiveHit = candidates.some((c) => scanFilePath(c));
+      if (jailHit || sensitiveHit) {
+        // Let THE ENGINE decide — the shield's own rules carry the verdict and
+        // the rule name (one matcher, one decision-maker; no guard-local
+        // verdict logic to drift out of sync). skipIgnoredFastPath: without it
+        // the engine's tier-1 ignored fast path returns 'allow' before the
+        // shield's `tool:'*'` rules are consulted (the second half of #20).
+        const policyResult = await evaluatePolicy(toolName, args, meta?.agent, options?.cwd, {
+          skipIgnoredFastPath: true,
+        });
+        if (policyResult.decision === 'block') {
+          // Mirror the branch-1 hardBlock() shape so the block row is
+          // attributed to its rule (Report SHIELDS panel keys on ruleName).
+          if (!isManual)
+            appendLocalAudit(
+              toolName,
+              args,
+              'deny',
+              'smart-rule-block',
+              { ...meta, ruleName: policyResult.ruleName },
+              hashAuditArgs
+            );
+          return {
+            approved: false,
+            reason: policyResult.reason ?? 'Action explicitly blocked by Smart Policy.',
+            blockedBy: 'local-config',
+            blockedByLabel: policyResult.blockedByLabel,
+            ruleHit: policyResult.ruleName,
+          };
+        }
+        // Review verdict, or a hit the engine has no matching rule for (e.g. a
+        // filename-only hit, or a pre-fix user-jail.json not yet regenerated
+        // with path/pattern rules): fall through to the approver race — fail
+        // toward a human, never to allow.
       } else {
         if (!isManual) appendLocalAudit(toolName, args, 'allow', 'ignored', meta, hashAuditArgs);
         return { approved: true };
@@ -1125,6 +1185,12 @@ async function _authorizeHeadlessCore(
     localSmartRuleMatched === true ||
     options?.localSmartRuleMatched === true ||
     !!appPermReview ||
+    // Task #16 vector C: a taint review needs a GENUINE pending entry. Taint is
+    // a client-side heuristic the SaaS has no rule for, so without forceReview
+    // its checkRule answers "no org rule matched" → {approved:true}, which is
+    // not an approval of an exfiltration risk. Measured against the live BE:
+    // {approved:true} without this flag, {pending:true} with it.
+    !!taintWarning ||
     undefined;
   if (cloudEnforced) {
     try {
@@ -1149,11 +1215,16 @@ async function _authorizeHeadlessCore(
         // via hardBlockDowngraded) means forceReview was sent; a shadowMode
         // response must not resolve it. Without this, a shadow/observe org (or a
         // stale BE ignoring forceReview) auto-allows a downgraded intrinsic block.
+        // `!taintWarning` (task #16 vector C): a taint review is in exactly the
+        // class this guard already protects — we now send forceReview for it, so
+        // a shadowMode answer (from a shadow/observe org, or a stale BE ignoring
+        // that flag) must not resolve an exfiltration review either.
         if (
           initResult.shadowMode &&
           !localSmartRuleMatched &&
           !options?.localSmartRuleMatched &&
-          !appPermReview
+          !appPermReview &&
+          !taintWarning
         ) {
           return { approved: true, checkedBy: 'cloud' };
         }
@@ -1164,7 +1235,16 @@ async function _authorizeHeadlessCore(
         // appPermReview: never accept a cloud immediate-allow — a stale/older BE
         // that ignores forceReview must not bypass an org-set review. Fall
         // through to the race so a genuine human decision is required.
-        if (!localSmartRuleMatched && !options?.localSmartRuleMatched && !appPermReview) {
+        // `!taintWarning` (task #16 vector C): never accept a cloud
+        // immediate-allow for an exfiltration review either — same reasoning as
+        // appPermReview above, and it also covers a stale/older BE that ignores
+        // the forceReview flag we now send.
+        if (
+          !localSmartRuleMatched &&
+          !options?.localSmartRuleMatched &&
+          !appPermReview &&
+          !taintWarning
+        ) {
           return {
             approved: !!initResult.approved,
             reason:

@@ -1253,7 +1253,7 @@ describe('evaluatePolicy — smart rules', () => {
     expect(result.decision).toBe('block');
   });
 
-  it('smart rule does not match different tool', async () => {
+  it('smart rule does not match a different (non-shell) tool', async () => {
     mockProjectConfig({
       policy: {
         smartRules: [
@@ -1265,10 +1265,18 @@ describe('evaluatePolicy — smart rules', () => {
         ],
       },
     });
-    // Tool is 'shell', not 'bash' — rule should not match
-    const result = await evaluatePolicy('shell', { command: 'rm -rf /tmp/old' });
-    // Falls through to normal policy — /tmp/ is in sandboxPaths so it's allowed
+    // 'notebook_run' is not bash-shaped and not shell-inspected, so the
+    // bash-scoped rule must not match even though the arg text would.
+    // (A SHELL-shaped tool — shell/run_shell_command/terminal.execute — now
+    // DOES inherit bash rules via the shell-shape alias: an agent's tool-name
+    // spelling must not void sudo/pipe-to-shell coverage. See
+    // command-checks.spec.ts "Bypass-by-spelling".)
+    const result = await evaluatePolicy('notebook_run', { command: 'rm -rf /tmp/old' });
     expect(result.decision).toBe('allow');
+
+    // And the alias direction: 'shell' now matches the bash-scoped rule.
+    const shell = await evaluatePolicy('shell', { command: 'rm -rf /tmp/old' });
+    expect(shell.decision).toBe('block');
   });
 
   it('user smartRules are appended to defaults (both active)', async () => {
@@ -2047,7 +2055,17 @@ describe('evaluateSmartConditions — notMatches with no flags field', () => {
 
 // ── shouldSnapshot ────────────────────────────────────────────────────────────
 describe('shouldSnapshot', () => {
-  const baseConfig = () => JSON.parse(JSON.stringify(DEFAULT_CONFIG)) as typeof DEFAULT_CONFIG;
+  // These rows exercise the TOOL and PATH filters, so they must enable the
+  // engine explicitly rather than inherit it. `enableUndo` now ships OFF (the
+  // snapshot store filled a disk), and a fixture that silently depended on the
+  // old default would have turned every row below into a vacuous `false`.
+  // The dedicated 'returns false when enableUndo is false' row still pins the
+  // flag itself.
+  const baseConfig = () => {
+    const c = JSON.parse(JSON.stringify(DEFAULT_CONFIG)) as typeof DEFAULT_CONFIG;
+    c.settings.enableUndo = true;
+    return c;
+  };
 
   it('returns true for a default snapshot tool', () => {
     const config = baseConfig();
@@ -2288,7 +2306,12 @@ describe('validateRegex', () => {
   });
 
   it('rejects patterns exceeding max length', () => {
-    expect(validateRegex('a'.repeat(101))).not.toBeNull();
+    // Cap is 256, not 100: at 100 it silently killed legitimate jail-path
+    // fragments (a Windows profile path exceeds 100 escaped chars), and a
+    // rule whose regex fails validation reads as NO MATCH — a fail-open.
+    // Both sides of the boundary pinned so the cap can't drift silently.
+    expect(validateRegex('a'.repeat(256))).toBeNull();
+    expect(validateRegex('a'.repeat(257))).not.toBeNull();
   });
 
   it('rejects ReDoS patterns — syntactically valid but caught by safe-regex2 NFA analysis', () => {
