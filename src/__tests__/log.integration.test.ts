@@ -49,6 +49,36 @@ function runLog(payload: object, tmpHome: string, tmpCwd: string): RunResult {
   };
 }
 
+/**
+ * Same as runLog but feeds the payload on STDIN instead of argv. Required for
+ * payloads over ~128KB, where spawning with the JSON as an argument fails with
+ * E2BIG — and it is the channel the real hook uses anyway.
+ */
+function runLogStdin(payload: object, tmpHome: string, tmpCwd: string): RunResult {
+  const baseEnv = { ...process.env };
+  delete baseEnv.NODE9_API_KEY;
+  delete baseEnv.NODE9_API_URL;
+  const result = spawnSync(process.execPath, [CLI, 'log'], {
+    encoding: 'utf-8',
+    input: JSON.stringify(payload),
+    timeout: 60000,
+    cwd: tmpCwd,
+    env: {
+      ...baseEnv,
+      NODE9_NO_AUTO_DAEMON: '1',
+      NODE9_TESTING: '1',
+      HOME: tmpHome,
+      USERPROFILE: tmpHome,
+    },
+  });
+  return {
+    status: result.status,
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
+    error: result.error,
+  };
+}
+
 function makeTempHome(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-log-test-'));
   fs.mkdirSync(path.join(dir, '.node9'), { recursive: true });
@@ -419,5 +449,97 @@ describe('log PostToolUse args — bare credential redaction', () => {
     expect((entry.args as { command?: string }).command).toBe('ls -la /tmp');
     expect(entry.argsHash).toBeUndefined();
     expect(entry.dlpPattern).toBeUndefined();
+  });
+
+  // ── Scanner-bound cases ────────────────────────────────────────────────
+  // scanArgs is bounded: it truncates a single string at 100KB and stops
+  // descending past depth 5. Outside those bounds a null result means "never
+  // looked", NOT "clean" — and the first cut of this fix treated them the
+  // same, so a credential past either bound still landed in audit.log
+  // verbatim. Both cases below were reproduced against dist/cli.js before the
+  // fail-closed guard existed. They go through STDIN because a 150KB payload
+  // as an argv string exceeds E2BIG — which is also how the real hook feeds
+  // this command.
+
+  it('fails closed when a credential sits past the scanner byte window', () => {
+    const jwt = makeJwt();
+    const result = runLogStdin(
+      {
+        cwd: tmpCwd,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Write',
+        // 150KB of filler, then the token — beyond DLP_SCAN_LIMITS.maxStringBytes,
+        // so scanArgs never sees it and returns null.
+        tool_input: { file_path: '/tmp/big.txt', content: `${'x'.repeat(150_000)}\n${jwt}` },
+      },
+      tmpHome,
+      tmpCwd
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+
+    const raw = fs.readFileSync(path.join(tmpHome, '.node9', 'audit.log'), 'utf-8');
+    expect(raw).not.toContain(jwt);
+
+    const entry = lastEntry(tmpHome);
+    expect(entry.tool).toBe('Write');
+    expect(entry.args).toBeUndefined();
+    expect(entry.argsHash).toMatch(/^[0-9a-f]{32}$/);
+    // Flagged as unscanned rather than as a DLP match — we never proved a hit,
+    // we only proved we couldn't look.
+    expect(entry.argsUnscanned).toBe(true);
+    expect(entry.dlpPattern).toBeUndefined();
+  });
+
+  it('fails closed when a credential sits below the scanner depth limit', () => {
+    const jwt = makeJwt();
+    const result = runLogStdin(
+      {
+        cwd: tmpCwd,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'mcp__deploy__run',
+        // Depth 8 — past DLP_SCAN_LIMITS.maxDepth. Realistic for MCP payloads.
+        tool_input: { a: { b: { c: { d: { e: { f: { g: { token: jwt } } } } } } } },
+      },
+      tmpHome,
+      tmpCwd
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+
+    const raw = fs.readFileSync(path.join(tmpHome, '.node9', 'audit.log'), 'utf-8');
+    expect(raw).not.toContain(jwt);
+
+    const entry = lastEntry(tmpHome);
+    expect(entry.args).toBeUndefined();
+    expect(entry.argsHash).toMatch(/^[0-9a-f]{32}$/);
+    expect(entry.argsUnscanned).toBe(true);
+  });
+
+  it('keeps plaintext args for large-but-scannable content (bound is not over-eager)', () => {
+    // Just under the byte window: the scanner saw all of it, so there is no
+    // reason to hash. Guards against the fail-closed check degrading every
+    // sizable Write into an unreadable row.
+    const content = 'const x = 1;\n'.repeat(1000); // ~13KB, well within bounds
+    const result = runLogStdin(
+      {
+        cwd: tmpCwd,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Write',
+        tool_input: { file_path: '/tmp/ok.txt', content },
+      },
+      tmpHome,
+      tmpCwd
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+
+    const entry = lastEntry(tmpHome);
+    expect((entry.args as { content?: string }).content).toBe(content);
+    expect(entry.argsUnscanned).toBeUndefined();
+    expect(entry.argsHash).toBeUndefined();
   });
 });

@@ -15,6 +15,7 @@ import { matchSensitivePath, sensitivePathMatch, type DlpMatch } from '@node9/po
 export type { DlpMatch, PiiPattern } from '@node9/policy-engine';
 export {
   DLP_PATTERNS,
+  DLP_SCAN_LIMITS,
   scanArgs,
   scanText,
   redactText,
