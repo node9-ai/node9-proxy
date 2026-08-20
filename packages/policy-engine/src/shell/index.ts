@@ -411,6 +411,19 @@ export const detectDangerousEval = detectDangerousShellExec;
 //   - $HOME root (with allow-list for tool-managed cache paths)
 // returning a structured verdict per call.
 
+// Every command that puts a file's CONTENTS where the agent can see them.
+//
+// This set had 14 entries while the project-jail shield's regex rule named 36,
+// and since that rule is suppressed for bash (AST_FS_REGEX_RULES) this set was
+// the only gate — so the 22-name delta was ungated for every AI agent and
+// `strings .env` read a credential file with no verdict at all.
+//
+// The membership test is "does it emit file contents", not "is it a pager":
+// `strings`/`xxd`/`od`/`hexdump` dump bytes, `jq`/`yq` parse and print,
+// `sort`/`uniq`/`tac`/`nl` echo lines, `sed`/`awk`/`cut`/`tr` transform to
+// stdout, and the grep family prints matching lines — which is all an
+// exfiltrator needs. Adding a name here widens EVERY SENSITIVE_PATH_RULES entry
+// (.ssh, .aws, .env, credentials), not just the one being repaired.
 const FS_READ_TOOLS = new Set([
   'cat',
   'less',
@@ -426,6 +439,29 @@ const FS_READ_TOOLS = new Set([
   'emacs',
   'code',
   'type',
+  // — the 22 that were missing —
+  'grep',
+  'egrep',
+  'fgrep',
+  'rg',
+  'ag',
+  'ack',
+  'awk',
+  'gawk',
+  'sed',
+  'cut',
+  'tr',
+  'jq',
+  'yq',
+  'od',
+  'xxd',
+  'hexdump',
+  'strings',
+  'sort',
+  'uniq',
+  'tac',
+  'nl',
+  'dd',
 ]);
 
 // Fast-path screen: the AST detector only fires when one of these tools is
@@ -437,8 +473,24 @@ const FS_READ_TOOLS = new Set([
 // argument string / hyphenated token / commit message" wasted parses
 // (e.g. `git log | head -20` still matches; `npm run type-check` no longer
 // passes prescreen because `type` is mid-token, never a CallExpr name).
-const FS_OP_PRESCREEN_RE =
-  /(?:^|[\s|;&(`\n])(?:rm|cat|less|head|tail|bat|more|open|print|nano|vim|vi|emacs|code|type)\b/;
+//
+// DERIVED from FS_READ_TOOLS, never hand-written beside it. It used to be a
+// second copy of the same fourteen names, and two lists that must agree but are
+// maintained separately is how a widening ships half-applied: adding a reader to
+// the Set alone changes nothing, because this prescreen returns before the AST
+// is ever parsed — the diff looks complete and the gate stays open. Deriving it
+// makes that failure unrepresentable.
+//
+// `rm` is joined in because the detector also handles deletion; it is not a
+// reader and deliberately does not live in FS_READ_TOOLS.
+const FS_OP_PRESCREEN_RE = new RegExp(
+  `(?:^|[\\s|;&(\`\\n])(?:rm|${[...FS_READ_TOOLS]
+    // Escape defensively: every current name is bare word characters, but a
+    // future addition with a `.` or `+` would otherwise become a wildcard and
+    // silently widen the prescreen.
+    .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|')})\\b`
+);
 
 // Cache directories under $HOME that are tool-managed. Deleting them is safe
 // (the tool re-populates), so `rm -rf` of these paths must not block.
@@ -492,10 +544,38 @@ const SENSITIVE_PATH_RULES: Array<{
     // for the canonical test-asserted contract.
     rule: 'shield:project-jail:block-read-env',
     reason: 'Reading .env files is blocked by project-jail shield',
+    // Structural, not a list. The previous form enumerated seven suffixes and
+    // anchored on `$`, so `.env.prod`, `.env.ci` and `.env.local.bak` — all
+    // gitignored, all routinely holding real secrets — were never covered. A
+    // hand-written list of what to protect is only ever as complete as the day
+    // it was typed; this says "`.env` plus any suffix chain" and then names the
+    // exceptions, which is the direction that fails safe.
+    //
+    //   \.env          the segment itself
+    //   (?![\w-])      a boundary, so `.environment` and `.envrc` are NOT .env
+    //                  files. Without it a flat suffix class swallows both.
+    //   (?![\w-])      a boundary, so `.environment` and `.envrc` are NOT .env
+    //   [\w.-]*$       any suffix chain. Flat class, no nested quantifier —
+    //                  `(\.[\w-]+)*` reads the same but is rejected by
+    //                  safe-regex2, and this pattern runs on the hook hot path.
+    //
+    // The two exclusions are NOT the same shape, because the words do not mean
+    // the same thing:
+    //
+    //   (?!\.(?:example|sample|template)\b)  — "this file is a fixture", and it
+    //     stays a fixture whatever follows, so `.env.example.md` is allowed too.
+    //     These are checked into git by convention: already public, so blocking
+    //     them buys nothing and costs the most common legitimate agent read.
+    //
+    //   (?!\.test$)  — anchored, because `test` names an ENVIRONMENT, not a
+    //     fixture. `.env.test` is the committed template and stays allowed, but
+    //     `.env.test.local` is gitignored by the `.env*.local` convention and
+    //     holds real values, so it must block. Using `\b` here — the obvious
+    //     symmetry — silently exempts every `.env.test.*` file.
+    //
+    // shields.test.ts:983-995 is the canonical contract; keep both in step.
     match: (p) =>
-      /(?:^|[\\/])\.env(?:\.(?:local|production|staging|development|production\.local|staging\.local|development\.local))?$/i.test(
-        p
-      ),
+      /(?:^|[\\/])\.env(?![\w-])(?!\.(?:example|sample|template)\b)(?!\.test$)[\w.-]*$/i.test(p),
   },
   {
     // verdict: 'review' (not 'block') is a deliberate design choice

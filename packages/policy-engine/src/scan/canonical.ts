@@ -222,7 +222,24 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // hashed source set in the same change: canonical.ts runs
 // evaluateSmartConditions, so a matcher change alters scan output, and the
 // old three-file set would have let this through with no bump.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v8';
+//
+// v9 (2026-08-20): FS_READ_TOOLS grew from 14 reader commands to 36, and the
+// `.env` matcher became structural instead of a seven-suffix list. Both change
+// what `ast-fs-op` emits on history that was already scanned — measured before
+// bumping rather than assumed, because a bump costs every daemon in the fleet a
+// full re-scan:
+//
+//   command                   v8        v9
+//   strings .env              (none) →  ast-fs-op block/high
+//   grep -i secret .env       (none) →  ast-fs-op block/high
+//   xxd ~/.aws/credentials    (none) →  ast-fs-op block/critical
+//   cat .env.prod             (none) →  ast-fs-op block/high
+//   cat .env                  block  →  block            (control, unmoved)
+//   cat .env.example          (none) →  (none)           (fixture, still clean)
+//
+// The re-scan is the point: those reads happened on real machines and produced
+// no finding at all, so the history a user sees today under-reports them.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v9';
 
 /**
  * SHA-256 prefix of the detector-source files
@@ -234,7 +251,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v8';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '80f40f974263b281';
+export const CANONICAL_EXTRACTOR_HASH = '4ebf40dfe1d7c0a1';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
