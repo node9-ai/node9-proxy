@@ -386,11 +386,7 @@ describe('rm same-command create-then-delete waiver', () => {
       "if false; then cat > victim.ts <<'EOF'\nEOF\nfi\necho x; rm -f victim.ts",
       'create in dead if-branch',
     ],
-    // `rm -rf $HOME` used to live here, asserting 'review'. It now BLOCKS and
-    // has moved to the block section below — `$HOME` resolves to `~`, so
-    // block-rm-rf-home finally sees the target it always claimed to cover.
-    // The intent of this row (a dynamic target must not be waived) is still
-    // held by the `$VAR` row underneath it.
+    [HD + 'echo x; rm -rf $HOME', 'dynamic target, not created'],
     [HD + 'echo x; rm -f fn-probe.ts $VAR', 'a dynamic arg alongside the created file'],
     [HD + 'echo x; rm -f fn-probe.ts secrets.txt', 'a non-created sibling target'],
     ['rm .env', 'plain sensitive delete (posture unchanged)'],
@@ -400,30 +396,8 @@ describe('rm same-command create-then-delete waiver', () => {
   });
 
   // NOT waived → still block (block tier wins regardless)
-  it.each([
-    ['rm -rf ~', "cat > x <<'EOF'\nEOF\necho x; rm -rf ~"],
-    // Same file, a different spelling. This asserted 'review' until #51,
-    // because the extractor discarded any word containing a `$VAR` — so the
-    // home-protection rule was never handed the path it exists to protect,
-    // and `rm -rf $HOME` degraded to the generic rm review.
-    ['rm -rf $HOME', HD + 'echo x; rm -rf $HOME'],
-    ['rm -rf ${HOME}', HD + 'echo x; rm -rf ${HOME}'],
-  ])('BLOCKS a create-then-%s (block tier unaffected)', async (_n, cmd) => {
-    expect(await decide(cmd)).toBe('block');
-  });
-
-  it('the three spellings all resolve to the same rule', async () => {
-    // Verdict parity is not enough — a row that blocks for an unrelated reason
-    // would look identical. Ten rows in the parity corpus do exactly that.
-    for (const cmd of ['rm -rf ~', 'rm -rf $HOME', 'rm -rf ${HOME}']) {
-      const r = await evaluatePolicy(
-        rmAdvisoryConfig,
-        'bash',
-        { command: cmd },
-        { agent: 'claude' }
-      );
-      expect(r.ruleName, cmd).toBe('block-rm-rf-home');
-    }
+  it('BLOCKS a create-then-`rm -rf ~` (block tier unaffected)', async () => {
+    expect(await decide("cat > x <<'EOF'\nEOF\necho x; rm -rf ~")).toBe('block');
   });
 
   // The waiver removes ONLY a `review` verdict. A user/org rule that happens to be

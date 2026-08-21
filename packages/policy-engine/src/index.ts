@@ -42,8 +42,6 @@ export {
   toolMatchesRule,
   detectInlineExec,
   AST_FS_REGEX_RULES,
-  SENSITIVE_PATH_RULES,
-  PATH_SEGMENT_SENTINEL,
   extractShellDestinations,
   parseDestHost,
 } from './shell';

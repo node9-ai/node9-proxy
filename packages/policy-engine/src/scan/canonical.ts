@@ -239,31 +239,7 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 //
 // The re-scan is the point: those reads happened on real machines and produced
 // no finding at all, so the history a user sees today under-reports them.
-//
-// v10 (2026-08-20): a word is no longer discarded because part of it is a
-// variable. `extractLiteralArgs` resolves the literal segments and substitutes
-// PATH_SEGMENT_SENTINEL for the rest, and `$HOME`/`${HOME}` resolve to `~`.
-// Measured before bumping, because a bump costs every daemon a full re-scan:
-//
-//   command                          v9                       v10
-//   cat $HOME/.ssh/id_rsa            (none)                 → ast-fs-op block/critical
-//   strings $HOME/.aws/credentials   (none)                 → ast-fs-op block/critical
-//   rm -rf $HOME/projects            destructive-op review  → + ast-fs-op block/critical
-//   cat $PREFIX.env                  (none)                 → (none)   (unknown prefix)
-//   cat build.env                    (none)                 → (none)   (control)
-//
-//   cat < ~/.ssh/id_rsa              (none)                 → ast-fs-op block/critical
-//   md5sum < ~/.aws/credentials      (none)                 → ast-fs-op block/critical
-//   cat < build.env                  (none)                 → (none)   (control)
-//
-// The last three arrived in a later commit (`< file` redirects, whose path
-// lives on the Stmt and never in Args). v10 was CORRECTED IN PLACE rather than
-// minted as v11, because it had not been released — users are on v9, so this is
-// still exactly one re-scan for them either way. Same precedent as v7 above.
-//
-// Those reads happened on real machines and produced no ast-fs-op finding at
-// all, so history under-reports them — which is the point of the re-scan.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v10';
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v9';
 
 /**
  * SHA-256 prefix of the detector-source files
@@ -275,7 +251,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v10';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '4e0a92e8ecaf8760';
+export const CANONICAL_EXTRACTOR_HASH = '4ebf40dfe1d7c0a1';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

@@ -511,34 +511,7 @@ const HOME_CACHE_ALLOWLIST = [
   '.rustup/downloads',
 ];
 
-/**
- * Stands in for a word segment whose text we could not resolve — a `$VAR`, a
- * command substitution, an arithmetic expansion. NUL, deliberately: it cannot
- * occur in a filename on any supported platform, so it can never be confused
- * with real path text. A space would be wrong — a space is legal in a filename
- * (`C:\\Users\\John Smith\\...`).
- *
- * It is load-bearing rather than cosmetic. Sensitive-path matchers anchor on
- * `^` or a separator, so a sentinel that is NEITHER makes the widening
- * self-limiting: `$HOME/.ssh/id_rsa` still matches (the `/` before `.ssh` is
- * literal), while `$PREFIX.env` does not (nothing separates the unknown text
- * from `.env`, and we genuinely do not know what `$PREFIX` holds).
- */
-export const PATH_SEGMENT_SENTINEL = '\0';
-
-/**
- * Exported so an invariant spec can iterate the LIVE rule set rather than a
- * copy that goes stale. Mirrors `SENSITIVE_PATH_REGEXES` in dlp/index.ts,
- * exported for the same reason.
- *
- * The invariant being guarded (see PATH_SEGMENT_SENTINEL): every matcher here
- * must anchor its sensitive segment on `^` or a path separator. Resolution of
- * a partially-dynamic word depends on it — `$PREFIX.env` must NOT read as a
- * `.env` file, and the only thing that distinguishes it from `$HOME/.env` is
- * whether a separator precedes the segment. An unanchored matcher would lose
- * that distinction silently, so the property is asserted, not assumed.
- */
-export const SENSITIVE_PATH_RULES: Array<{
+const SENSITIVE_PATH_RULES: Array<{
   rule: string;
   reason: string;
   match: (p: string) => boolean;
@@ -635,27 +608,6 @@ export const SENSITIVE_PATH_RULES: Array<{
       ),
   },
 ];
-
-/**
- * Render a resolved path for a HUMAN. The sentinel is an internal matching
- * marker and must never leave this layer wearing its raw form.
- *
- * NUL is invisible in a terminal, so `<NUL>/.netrc` displays as `/.netrc` — a
- * file at the filesystem root that the agent never touched. A report that names
- * the WRONG file is worse than one that says "I could not resolve this part",
- * so the unknown segment is made to look unknown.
- *
- * Reach, checked rather than assumed: FsOpVerdict.path flows to
- * CanonicalFinding.subjectPath and from there into the local report render.
- * toScanFinding drops subjectPath and maps ast-fs-op to null, so the SaaS never
- * receives it — which matters, because Postgres rejects a 0x00 byte in a text
- * column and this would have been a failed insert rather than a bad string.
- * evaluatePolicy does not carry `path` into the verdict at all, so the live
- * gate was never affected.
- */
-function displayPath(resolved: string): string {
-  return resolved.split(PATH_SEGMENT_SENTINEL).join('$?');
-}
 
 export interface FsOpVerdict {
   ruleName: string;
@@ -1260,116 +1212,46 @@ export function isProtectedHomePath(rawPath: string): boolean {
   return true;
 }
 
-/** How completely a word resolved to text we can reason about. */
-export type WordResolution = 'literal' | 'partial';
-
-export interface ResolvedWord {
-  /** Path text, with each unresolvable part replaced by PATH_SEGMENT_SENTINEL. */
-  value: string;
-  /** 'partial' when at least one part was dynamic. */
-  resolution: WordResolution;
-}
-
 /**
- * Resolve one shell word to text, substituting a sentinel for the parts we
- * cannot know.
- *
- * This used to return `null` for the WHOLE word as soon as any part was
- * dynamic, and the caller then skipped it — so `cat $HOME/.ssh/id_rsa` reached
- * the sensitive-path matcher with no path at all and was ALLOWED, while
- * `cat ~/.ssh/id_rsa`, the same file, blocked. A `null` meaning "I could not
- * resolve this" was being read as "there is nothing here".
- *
- * `$HOME` / `${HOME}` resolve to `~` rather than to the sentinel. That is not a
- * lookup table waiting to grow: HOME is the one variable whose value this
- * engine already claims to know — isProtectedHomePath handles `$HOME`,
- * `${HOME}` and `~` and returns the same answer for all three. It has simply
- * never been reachable, because the extractor discarded the argument first.
- *
- * The neighbouring extractNetworkTargets already documents this exact stance
- * ("the host is literal even when the body is not"); this brings the two into
- * line.
+ * Extract literal-text positional arguments from a CallExpr. Skips flags
+ * (anything starting with `-`) and ParamExp/CmdSubst (dynamic) parts. Returns
+ * the resolved string for each arg that is purely literal text.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function resolveWordParts(w: any): ResolvedWord {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const parts: any[] = w?.Parts || [];
-  let s = '';
-  let partial = false;
-  const dynamic = (): void => {
-    s += PATH_SEGMENT_SENTINEL;
-    partial = true;
-  };
-  for (const p of parts) {
-    const t = syntax.NodeType(p);
-    if (t === 'Lit') s += (p.Value ?? '').replace(/\\(.)/g, '$1');
-    else if (t === 'SglQuoted') s += p.Value ?? '';
-    else if (t === 'DblQuoted') {
-      // Resolve the literal INNER parts and sentinel the rest, rather than
-      // discarding the whole quoted run — `"$HOME/.ssh/id_rsa"` is the same
-      // file as its unquoted twin.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      for (const ip of (p.Parts || []) as any[]) {
-        if (syntax.NodeType(ip) === 'Lit') s += (ip as { Value?: string }).Value ?? '';
-        else if (syntax.NodeType(ip) === 'ParamExp' && paramName(ip) === 'HOME') s += '~';
-        else dynamic();
-      }
-    } else if (t === 'ParamExp' && paramName(p) === 'HOME') s += '~';
-    else dynamic();
-  }
-  return { value: s, resolution: partial ? 'partial' : 'literal' };
-}
-
-/** The variable name of a ParamExp, or '' when the shape is unexpected. */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function paramName(p: any): string {
-  return typeof p?.Param?.Value === 'string' ? p.Param.Value : '';
-}
-
-export interface ExtractedArgs {
-  name: string;
-  flags: string[];
-  paths: string[];
-  /**
-   * True when any word did not resolve fully.
-   *
-   * The rm-cleanup waiver used to derive this by COUNTING how many arguments
-   * the extractor had silently dropped. That signal disappears the moment
-   * words stop being dropped, so it is stated here instead of inferred — and
-   * it is strictly stronger than the count, which could be satisfied by a word
-   * that still produced one path (`rm -f out$N.log`).
-   */
-  hasUnresolved: boolean;
-}
-
-/**
- * Extract positional arguments from a CallExpr, separating flags from paths.
- * A word whose parts are all literal yields its exact text; a word with any
- * dynamic part yields the literal segments with PATH_SEGMENT_SENTINEL standing
- * in for the rest, and sets `hasUnresolved`.
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function extractLiteralArgs(callExpr: any): ExtractedArgs {
+function extractLiteralArgs(callExpr: any): { name: string; flags: string[]; paths: string[] } {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const args: any[] = callExpr.Args || [];
-  if (args.length === 0) return { name: '', flags: [], paths: [], hasUnresolved: false };
-  const head = resolveWordParts(args[0]);
-  // A dynamic COMMAND NAME (`$CMD -rf ~`) is not a command we can identify, so
-  // it stays empty exactly as before — matching a sentinel against tool names
-  // would be meaningless.
-  const name = head.resolution === 'literal' ? head.value.toLowerCase() : '';
+  if (args.length === 0) return { name: '', flags: [], paths: [] };
+  const litFromWord = (w: unknown): string | null => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const parts: any[] = (w as any)?.Parts || [];
+    let s = '';
+    for (const p of parts) {
+      const t = syntax.NodeType(p);
+      if (t === 'Lit') s += (p.Value ?? '').replace(/\\(.)/g, '$1');
+      else if (t === 'SglQuoted') s += p.Value ?? '';
+      else if (t === 'DblQuoted') {
+        // Only accept pure-literal double-quoted (no expansion)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const inner: any[] = p.Parts || [];
+        if (!inner.every((ip: unknown) => syntax.NodeType(ip) === 'Lit')) return null;
+        s += inner.map((ip: { Value?: string }) => ip.Value ?? '').join('');
+      } else {
+        return null; // dynamic — can't resolve safely
+      }
+    }
+    return s;
+  };
+  const name = (litFromWord(args[0]) || '').toLowerCase();
   const flags: string[] = [];
   const paths: string[] = [];
-  let hasUnresolved = head.resolution === 'partial';
   for (let i = 1; i < args.length; i++) {
-    const r = resolveWordParts(args[i]);
-    if (r.resolution === 'partial') hasUnresolved = true;
-    // A flag is recognised only when its text is fully known — a sentinel could
-    // otherwise be read as a flag and quietly removed from the path list.
-    if (r.resolution === 'literal' && r.value.startsWith('-')) flags.push(r.value);
-    else paths.push(r.value);
+    const v = litFromWord(args[i]);
+    if (v === null) continue;
+    if (v.startsWith('-')) flags.push(v);
+    else paths.push(v);
   }
-  return { name, flags, paths, hasUnresolved };
+  return { name, flags, paths };
 }
 
 // ── Network egress destination extraction (GAP-5) ───────────────────────────
@@ -1651,20 +1533,7 @@ export function analyzeFsOperation(command: string): FsOpVerdict | null {
   // cheap, and using the normalized string as the cache key dedups raw variants.
   const normalized = normalizeCommandForPolicy(command);
   // Fast path — skip the AST parse when no fs-op tool keyword is present.
-  // ⭐ TWO reasons to parse, because there are two ways to reach a file.
-  //
-  // The name prescreen alone made the Stmt/redirect branch dead code for any
-  // command outside the reader set: `md5sum < ~/.ssh/id_rsa` bailed here and
-  // never reached the AST. Measured — the redirect rows passed for `cat` and
-  // `grep` (both readers) and failed for `md5sum` and `wc`, which is exactly
-  // the half-applied widening this file was already bitten by once today, when
-  // FS_OP_PRESCREEN_RE was a hand-written copy of FS_READ_TOOLS.
-  //
-  // `<(?!<)` is a single `<` — a file redirect. It excludes `<<` and `<<<`
-  // (heredoc/herestring), whose Word is inline content rather than a path and
-  // which the redirect branch ignores anyway, so the extra parses are bounded
-  // to commands that genuinely redirect from a file.
-  if (!FS_OP_PRESCREEN_RE.test(normalized) && !/<(?!<)/.test(normalized)) return null;
+  if (!FS_OP_PRESCREEN_RE.test(normalized)) return null;
   if (fsOpCache.has(normalized)) {
     const hit = fsOpCache.get(normalized) ?? null;
     fsOpCache.delete(normalized);
@@ -1749,18 +1618,6 @@ function deriveRedirOp(sample: string): number {
 // `>>` (append) is intentionally NOT here — append PRESERVES a pre-existing file's
 // content, so `cat >> victim <<E; rm victim` would delete an intact file (same
 // class as touch). Only a `>` truncate counts.
-// The `< file` redirect ONLY — the form whose Word is a PATH.
-//
-// Deliberately not redirStdinOps(): that set bundles heredoc and herestring,
-// whose Word is inline CONTENT rather than a path, and matching them here would
-// read the document body as a filename. Two sets with different meanings beat
-// one set every caller has to remember to narrow.
-//
-// Writes (`>`, `>>`, `2>`) are excluded by decision, not oversight. Gating a
-// write to a credential path is worth doing and is a SCOPE question; this is a
-// bug fix for a read the mechanism could not see.
-const REDIR_STDIN_FILE_OPS = new Set<number>([deriveRedirOp('cat < f')].filter((op) => op >= 0));
-
 const REDIR_TRUNCATE_OPS = new Set<number>([deriveRedirOp('>_f')]);
 const REDIR_HEREDOC_OPS = new Set<number>([
   deriveRedirOp('cat <<X\nX'),
@@ -1836,21 +1693,9 @@ export function isRmCreatedInCommandCleanup(command: string): boolean {
       const name = (resolveWordLiteral(args[0]) ?? '').toLowerCase();
       if (name !== 'rm') return true;
       sawRm = true;
-      const { paths, hasUnresolved } = extractLiteralArgs(n);
-      // A target we could not fully resolve → can't prove this rm only removes
-      // what this command created.
-      //
-      // This used to be inferred by COUNTING dropped arguments
-      // (`args.length - 1 > flags.length + paths.length`). Once words stop
-      // being dropped that count is always zero, and the guard would silently
-      // stop firing — it would then fail only by accident, because the sentinel
-      // text is absent from `created`. A guard that works by accident is a
-      // guard that stops working silently, so the signal is now stated by the
-      // extractor rather than derived from what it discarded.
-      //
-      // Strictly stronger than the count: `rm -f out$N.log` produced ONE path
-      // and satisfied the old comparison; it sets hasUnresolved.
-      if (hasUnresolved) {
+      const { flags, paths } = extractLiteralArgs(n);
+      // A dropped positional arg = a dynamic/unresolved target → can't prove safe.
+      if (args.length - 1 > flags.length + paths.length) {
         ok = false;
         return false;
       }
@@ -1882,31 +1727,6 @@ function analyzeFsOperationImpl(command: string): FsOpVerdict | null {
       if (!node || result) return false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
-      // A `< file` redirect is a READ, and its path lives on the enclosing
-      // Stmt — never in Args — so the CallExpr branch below can never see it.
-      // The shell delivers the file's bytes to the process before the program
-      // runs, so the COMMAND NAME is the wrong thing to condition on: this
-      // fires for `md5sum < ~/.ssh/id_rsa` as much as for `cat < …`.
-      if (syntax.NodeType(n) === 'Stmt') {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        for (const r of (n.Redirs || []) as any[]) {
-          if (!r || !REDIR_STDIN_FILE_OPS.has(r.Op)) continue;
-          const p = resolveWordParts(r.Word).value;
-          if (!p) continue;
-          for (const sp of SENSITIVE_PATH_RULES) {
-            if (sp.match(p)) {
-              result = {
-                ruleName: sp.rule,
-                verdict: sp.verdict ?? 'block',
-                reason: sp.reason,
-                path: displayPath(p),
-              };
-              return false;
-            }
-          }
-        }
-        return true;
-      }
       if (syntax.NodeType(n) !== 'CallExpr') return true;
       const { name, flags, paths } = extractLiteralArgs(n);
       if (!name) return true;
@@ -1923,7 +1743,7 @@ function analyzeFsOperationImpl(command: string): FsOpVerdict | null {
                 ruleName: 'block-rm-rf-home',
                 verdict: 'block',
                 reason: 'Recursive delete of home directory is irreversible',
-                path: displayPath(p),
+                path: p,
               };
               return false;
             }
@@ -1933,7 +1753,7 @@ function analyzeFsOperationImpl(command: string): FsOpVerdict | null {
                 ruleName: 'block-rm-rf-home',
                 verdict: 'block',
                 reason: 'Recursive delete of root is catastrophic',
-                path: displayPath(p),
+                path: p,
               };
               return false;
             }
@@ -1950,7 +1770,7 @@ function analyzeFsOperationImpl(command: string): FsOpVerdict | null {
                 ruleName: sp.rule,
                 verdict: sp.verdict ?? 'block',
                 reason: sp.reason,
-                path: displayPath(p),
+                path: p,
               };
               return false;
             }
