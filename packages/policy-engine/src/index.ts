@@ -16,6 +16,7 @@ export type { SmartCondition, SmartRule, DlpMatch, RiskMetadata } from './types'
 // DLP — pure scanners. Path-resolving I/O wraps matchSensitivePath in the proxy.
 export {
   DLP_PATTERNS,
+  DLP_SCAN_LIMITS,
   scanArgs,
   scanText,
   redactText,

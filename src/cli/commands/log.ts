@@ -21,7 +21,14 @@ import {
   notifyActivitySocket,
   notifySessionTaint,
 } from '../../auth/daemon';
-import { scanArgs, scanText, redactText, scanInjection, type InjectionConfidence } from '../../dlp';
+import {
+  scanArgs,
+  scanText,
+  redactText,
+  scanInjection,
+  DLP_SCAN_LIMITS,
+  type InjectionConfidence,
+} from '../../dlp';
 import { hashArgs } from '../../audit/hasher';
 import { parseCpMvOp } from '../../utils/cp-mv-parser';
 import {
@@ -68,21 +75,49 @@ function sanitize(value: string): string {
 }
 
 /**
+ * True when `scanArgs` was able to examine EVERY value in `args`.
+ *
+ * scanArgs is bounded (DLP_SCAN_LIMITS): it truncates any single string at
+ * maxStringBytes and stops descending past maxDepth. Outside those bounds a
+ * `null` result means "never looked", not "looked and found nothing" — and
+ * treating the two the same is how a credential sitting at byte 120_000 of a
+ * large Write, or nested 8 levels down in an MCP payload, ends up in
+ * audit.log in the clear. Callers that must fail closed use this to tell them
+ * apart. Mirrors the traversal shape of scanArgs itself (objects, arrays,
+ * strings); anything else is a scalar and always fully seen.
+ */
+function scanCoveredEverything(value: unknown, depth = 0): boolean {
+  if (value === null || value === undefined) return true;
+  if (typeof value === 'string') return value.length <= DLP_SCAN_LIMITS.maxStringBytes;
+  if (typeof value !== 'object') return true;
+  // One level deeper than the scanner would go — anything here was unscanned.
+  if (depth >= DLP_SCAN_LIMITS.maxDepth) return false;
+  const children = Array.isArray(value) ? value : Object.values(value as Record<string, unknown>);
+  return children.every((child) => scanCoveredEverything(child, depth + 1));
+}
+
+/**
  * Build the `args` field of the PostToolUse row without leaking credentials.
  *
  * `redactSecrets` only masks LABEL-ATTACHED secrets (`Authorization:`,
  * `token=`, `api_key=`, `password=`). A credential passed BARE — e.g. a JWT
  * as a positional CLI argument (`./deploy.sh --token <jwt>`) — sails straight
  * through it and lands in ~/.node9/audit.log in the clear. So run the real DLP
- * scanner (the same one the PreToolUse gate uses) and, on ANY hit, store a hash
- * instead of the value — the stance appendLocalAudit already takes for DLP rows
- * (argsHash, never a plaintext preview).
+ * scanner (the same one the PreToolUse gate uses) and store a hash instead of
+ * the value — the stance appendLocalAudit already takes for DLP rows (argsHash,
+ * never a plaintext preview) — whenever the args either MATCH a pattern or
+ * could not be fully scanned.
  *
  * Never throws: this feeds the audit write, which must not be skipped
  * (CLAUDE.md). Failures fall back to the hash rather than to plaintext — if we
  * can't prove the args are clean, we don't store them raw. That also hardens a
  * pre-existing hazard: `JSON.parse(redactSecrets(JSON.stringify(args)))` throws
  * on unserialisable args, which used to drop the ENTIRE row.
+ *
+ * Cost of failing closed: a >100KB Write or a deeply nested payload loses its
+ * plaintext args in the log even when clean. That is the correct side of the
+ * trade — argsHash still correlates the row, and an unreadable row beats a row
+ * that persists someone's credential at rest.
  */
 function buildArgsField(rawInput: unknown): Record<string, unknown> {
   let hashed: Record<string, unknown> = {};
@@ -97,6 +132,8 @@ function buildArgsField(rawInput: unknown): Record<string, unknown> {
     // appendLocalAudit stores; the sample is masked (first4…last4) by the
     // scanner, so it identifies the finding without reproducing the secret.
     if (hit) return { ...hashed, dlpPattern: hit.patternName, dlpSample: hit.redactedSample };
+    // Clean, but only meaningful if the scanner actually saw all of it.
+    if (!scanCoveredEverything(rawInput)) return { ...hashed, argsUnscanned: true };
     return { args: JSON.parse(redactSecrets(JSON.stringify(rawInput))) as unknown };
   } catch {
     return hashed;
