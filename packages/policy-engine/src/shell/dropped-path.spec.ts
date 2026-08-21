@@ -259,3 +259,53 @@ describe('#51 caller 2: the rm-cleanup waiver must stay fail-closed', () => {
     expect(isRmCreatedInCommandCleanup(CREATE + 'rm -f other.log')).toBe(false);
   });
 });
+
+describe('the sentinel is an internal marker and must never be shown to a human', () => {
+  // Found by tracing my own change rather than by a test failing, which is why
+  // it is written down as a row now.
+  //
+  // FsOpVerdict.path flows to CanonicalFinding.subjectPath (canonical.ts) and
+  // from there into the LOCAL report render. toScanFinding drops subjectPath and
+  // maps ast-fs-op to null, so the SaaS and Postgres never see it — Postgres
+  // rejects a 0x00 byte in text, so that projection is the only reason this was
+  // not a failed insert. The live gate is clean too: evaluatePolicy does not
+  // propagate `path` at all.
+  //
+  // What IS broken: NUL is INVISIBLE in a terminal, so `<NUL>/.netrc` renders as
+  // `/.netrc` — the report names a file at the filesystem root that the agent
+  // never touched. A report that names the wrong file is worse than one that
+  // says "unknown", so the unknown segment has to LOOK unknown.
+  const dyn = [
+    'cat $CFG/.netrc',
+    'cat < $CFG/.netrc',
+    'strings $X/.aws/credentials',
+    // Measured shapes, not invented ones. `rm -rf $Y/../.ssh` was the first
+    // row here and produced NO verdict at all — rm is not a reader, and a
+    // sentinel-prefixed path is not under $HOME — so it asserted nothing about
+    // the sentinel. These two do carry one into a real verdict.
+    'rm -rf $HOME/$X',
+    'cat "$HOME/$X/.ssh/id_rsa"',
+  ];
+
+  it.each(dyn)('%s reports a path with no control characters', (command) => {
+    const v = analyzeFsOperation(command);
+    expect(v, 'expected a verdict for this row').toBeTruthy();
+    // eslint-disable-next-line no-control-regex
+    expect(/[\x00-\x1f]/.test(v!.path), `path was ${JSON.stringify(v!.path)}`).toBe(false);
+  });
+
+  it('an unknown segment is visibly unknown, not silently empty', () => {
+    const v = analyzeFsOperation('cat $CFG/.netrc');
+    // The literal part must survive — that is what made the match — and the
+    // unknown part must be legible rather than absent, or the reader concludes
+    // the path was absolute.
+    expect(v!.path).toContain('/.netrc');
+    expect(v!.path.startsWith('/')).toBe(false);
+  });
+
+  it('a fully literal path is reported exactly as written', () => {
+    // The display transform must not touch the ordinary case.
+    expect(analyzeFsOperation('cat ~/.ssh/id_rsa')!.path).toBe('~/.ssh/id_rsa');
+    expect(analyzeFsOperation('cat < ~/.aws/credentials')!.path).toBe('~/.aws/credentials');
+  });
+});

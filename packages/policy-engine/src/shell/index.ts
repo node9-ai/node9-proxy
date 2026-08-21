@@ -636,6 +636,27 @@ export const SENSITIVE_PATH_RULES: Array<{
   },
 ];
 
+/**
+ * Render a resolved path for a HUMAN. The sentinel is an internal matching
+ * marker and must never leave this layer wearing its raw form.
+ *
+ * NUL is invisible in a terminal, so `<NUL>/.netrc` displays as `/.netrc` — a
+ * file at the filesystem root that the agent never touched. A report that names
+ * the WRONG file is worse than one that says "I could not resolve this part",
+ * so the unknown segment is made to look unknown.
+ *
+ * Reach, checked rather than assumed: FsOpVerdict.path flows to
+ * CanonicalFinding.subjectPath and from there into the local report render.
+ * toScanFinding drops subjectPath and maps ast-fs-op to null, so the SaaS never
+ * receives it — which matters, because Postgres rejects a 0x00 byte in a text
+ * column and this would have been a failed insert rather than a bad string.
+ * evaluatePolicy does not carry `path` into the verdict at all, so the live
+ * gate was never affected.
+ */
+function displayPath(resolved: string): string {
+  return resolved.split(PATH_SEGMENT_SENTINEL).join('$?');
+}
+
 export interface FsOpVerdict {
   ruleName: string;
   verdict: 'block' | 'review';
@@ -1878,7 +1899,7 @@ function analyzeFsOperationImpl(command: string): FsOpVerdict | null {
                 ruleName: sp.rule,
                 verdict: sp.verdict ?? 'block',
                 reason: sp.reason,
-                path: p,
+                path: displayPath(p),
               };
               return false;
             }
@@ -1902,7 +1923,7 @@ function analyzeFsOperationImpl(command: string): FsOpVerdict | null {
                 ruleName: 'block-rm-rf-home',
                 verdict: 'block',
                 reason: 'Recursive delete of home directory is irreversible',
-                path: p,
+                path: displayPath(p),
               };
               return false;
             }
@@ -1912,7 +1933,7 @@ function analyzeFsOperationImpl(command: string): FsOpVerdict | null {
                 ruleName: 'block-rm-rf-home',
                 verdict: 'block',
                 reason: 'Recursive delete of root is catastrophic',
-                path: p,
+                path: displayPath(p),
               };
               return false;
             }
@@ -1929,7 +1950,7 @@ function analyzeFsOperationImpl(command: string): FsOpVerdict | null {
                 ruleName: sp.rule,
                 verdict: sp.verdict ?? 'block',
                 reason: sp.reason,
-                path: p,
+                path: displayPath(p),
               };
               return false;
             }
