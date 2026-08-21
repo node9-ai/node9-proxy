@@ -511,7 +511,34 @@ const HOME_CACHE_ALLOWLIST = [
   '.rustup/downloads',
 ];
 
-const SENSITIVE_PATH_RULES: Array<{
+/**
+ * Stands in for a word segment whose text we could not resolve — a `$VAR`, a
+ * command substitution, an arithmetic expansion. NUL, deliberately: it cannot
+ * occur in a filename on any supported platform, so it can never be confused
+ * with real path text. A space would be wrong — a space is legal in a filename
+ * (`C:\\Users\\John Smith\\...`).
+ *
+ * It is load-bearing rather than cosmetic. Sensitive-path matchers anchor on
+ * `^` or a separator, so a sentinel that is NEITHER makes the widening
+ * self-limiting: `$HOME/.ssh/id_rsa` still matches (the `/` before `.ssh` is
+ * literal), while `$PREFIX.env` does not (nothing separates the unknown text
+ * from `.env`, and we genuinely do not know what `$PREFIX` holds).
+ */
+export const PATH_SEGMENT_SENTINEL = '\0';
+
+/**
+ * Exported so an invariant spec can iterate the LIVE rule set rather than a
+ * copy that goes stale. Mirrors `SENSITIVE_PATH_REGEXES` in dlp/index.ts,
+ * exported for the same reason.
+ *
+ * The invariant being guarded (see PATH_SEGMENT_SENTINEL): every matcher here
+ * must anchor its sensitive segment on `^` or a path separator. Resolution of
+ * a partially-dynamic word depends on it — `$PREFIX.env` must NOT read as a
+ * `.env` file, and the only thing that distinguishes it from `$HOME/.env` is
+ * whether a separator precedes the segment. An unanchored matcher would lose
+ * that distinction silently, so the property is asserted, not assumed.
+ */
+export const SENSITIVE_PATH_RULES: Array<{
   rule: string;
   reason: string;
   match: (p: string) => boolean;
