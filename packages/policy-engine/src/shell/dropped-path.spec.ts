@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { SENSITIVE_PATH_RULES, PATH_SEGMENT_SENTINEL as SENT } from './index';
+import {
+  SENSITIVE_PATH_RULES,
+  PATH_SEGMENT_SENTINEL as SENT,
+  analyzeFsOperation,
+  isRmCreatedInCommandCleanup,
+} from './index';
 
 // #51 — a path is not gone because part of it is a variable.
 //
@@ -18,6 +23,15 @@ import { SENSITIVE_PATH_RULES, PATH_SEGMENT_SENTINEL as SENT } from './index';
 // The fix resolves the literal segments and substitutes a SENTINEL for the
 // unknown ones. The two describes below are the two halves of that claim, and
 // the first is the one that keeps the second honest.
+
+const rank = { allow: 0, review: 1, block: 2 } as const;
+function verdictOf(command: string): 'allow' | 'review' | 'block' {
+  const v = analyzeFsOperation(command);
+  return v ? v.verdict : 'allow';
+}
+function ruleOf(command: string): string {
+  return analyzeFsOperation(command)?.ruleName ?? '';
+}
 
 describe('the invariant the sentinel rests on: every matcher is anchored', () => {
   // This is the load-bearing spec of #51, and it exists because the safety of
@@ -112,5 +126,104 @@ describe('the invariant the sentinel rests on: every matcher is anchored', () =>
     // the sentinel away — this is the measurement that chose the design.
     expect(SENSITIVE_PATH_RULES.some((r) => r.match('.env'))).toBe(true);
     expect(SENSITIVE_PATH_RULES.some((r) => r.match(SENT + '.env'))).toBe(false);
+  });
+});
+
+describe('#51 must-fire — the same file, a different spelling', () => {
+  it.each([
+    ['$HOME/.ssh/id_rsa', 'cat $HOME/.ssh/id_rsa', 'block'],
+    ['${HOME} braces', 'cat ${HOME}/.ssh/id_rsa', 'block'],
+    ['$HOME + a widened reader', 'strings $HOME/.aws/credentials', 'block'],
+    ['$HOME/.env', 'cat $HOME/.env', 'block'],
+    ['an unknown var, separator literal', 'cat $CFG/.netrc', 'review'],
+    // Quoted forms take a different AST branch (DblQuoted with an inner
+    // ParamExp). A mutation that broke ONLY the quoted branch survived the
+    // first pass because every row here was unquoted — the corpus, not the
+    // fix, was the gap.
+    ['quoted var read', 'cat "$HOME/.ssh/id_rsa"', 'block'],
+    ['quoted var rm', 'rm -rf "$HOME/projects"', 'block'],
+    ['quoted bare home', 'rm -rf "$HOME"', 'block'],
+  ])('%s', (_name, command, want) => {
+    expect(rank[verdictOf(command)]).toBeGreaterThanOrEqual(rank[want as 'block']);
+  });
+
+  it('names the rule, not just the verdict', () => {
+    // Ten rows in the parity corpus pass for an unrelated reason — bash-safe's
+    // rm guard rescues `${HOME}`, the inline-exec tier decides `sh -c`. A row
+    // asserting only the decision looks healthy while proving nothing, and lets
+    // a mutation through CI.
+    expect(ruleOf('cat $HOME/.ssh/id_rsa')).toBe('shield:project-jail:block-read-ssh');
+  });
+
+  it.todo('a redirect target is a path (lands with the redirect commit)');
+
+  it('rm -rf $HOME reaches the guard that already knows about $HOME', () => {
+    // isProtectedHomePath('$HOME/projects') is already true. This row proves
+    // the value now arrives there.
+    expect(verdictOf('rm -rf $HOME/projects')).toBe('block');
+    expect(verdictOf('rm -rf ${HOME}/projects')).toBe('block');
+  });
+});
+
+describe('#51 must-allow — the half that makes the widening honest', () => {
+  it.each([
+    ['unknown prefix, no separator', 'cat $PREFIX.env'],
+    ['unknown prefix, no separator (ssh)', 'cat $X.ssh/id_rsa'],
+    ['printing a variable is not a read', 'echo $HOME'],
+    ['an ordinary relative file', 'cat build.env'],
+    ['a dynamic build output path', 'cat $DIST/bundle.js'],
+    ['the cache allow-list still applies', 'rm -rf $HOME/.cache'],
+  ])('%s', (_name, command) => {
+    expect(verdictOf(command)).toBe('allow');
+  });
+
+  it('the false positive suppression exists to kill stays dead', () => {
+    // `echo '{"command":"cat .env"}'` is the row AST_FS_REGEX_RULES was built
+    // for. Resolving more paths must not resurrect it.
+    expect(verdictOf('echo \'{"command":"cat ~/.ssh/id_rsa"}\'')).toBe('allow');
+  });
+});
+
+describe('#51 caller 2: the rm-cleanup waiver must stay fail-closed', () => {
+  // ⭐ The reason this fix could not be a one-line change to the extractor.
+  //
+  // The waiver used the DROP ITSELF as its fail-closed signal:
+  //   if (args.length - 1 > flags.length + paths.length) { refuse }
+  // i.e. "an argument was unresolvable, so I cannot prove this rm is safe".
+  // Correct and deliberate. Stop dropping, and that count stops firing — the
+  // waiver would proceed on a path it never actually resolved, and fail later
+  // only BY ACCIDENT because the sentinel text is not in the created-set. A
+  // guard that works by accident is a guard that stops working silently.
+  //
+  // So the signal moves from inferred-by-counting to stated: hasUnresolved.
+  //
+  // These are REGRESSION guards, not proof of the fix — the refusals are
+  // already correct today, and the point is that they stay correct once the
+  // count they were derived from no longer exists. The positive row is what
+  // proves the feature was not collaterally killed.
+  //
+  // Input shape matters here and was measured, not assumed: a file counts as
+  // "created" only when its statement carries BOTH a heredoc and a truncate
+  // redirect, at top level. `touch x && rm x` and `echo hi > x && rm x` are
+  // both false today — the first has no redirect, the second is inside a
+  // BinaryCmd, which the collector deliberately skips.
+  const CREATE = 'cat > out.log <<EOF\nhi\nEOF\n';
+
+  it('still waives a genuine same-command cleanup', () => {
+    expect(isRmCreatedInCommandCleanup(CREATE + 'rm -f out.log')).toBe(true);
+  });
+
+  it('refuses when a target could not be resolved at all', () => {
+    expect(isRmCreatedInCommandCleanup(CREATE + 'rm -f $TMP/out.log')).toBe(false);
+  });
+
+  it('refuses when only PART of the word is unresolvable', () => {
+    // The counting check could be satisfied by a word that still produced one
+    // path. The stated flag cannot — this is where the two differ.
+    expect(isRmCreatedInCommandCleanup(CREATE + 'rm -f out$N.log')).toBe(false);
+  });
+
+  it('still refuses a file this command did not create', () => {
+    expect(isRmCreatedInCommandCleanup(CREATE + 'rm -f other.log')).toBe(false);
   });
 });

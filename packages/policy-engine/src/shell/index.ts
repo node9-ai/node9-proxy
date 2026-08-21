@@ -1239,46 +1239,116 @@ export function isProtectedHomePath(rawPath: string): boolean {
   return true;
 }
 
+/** How completely a word resolved to text we can reason about. */
+export type WordResolution = 'literal' | 'partial';
+
+export interface ResolvedWord {
+  /** Path text, with each unresolvable part replaced by PATH_SEGMENT_SENTINEL. */
+  value: string;
+  /** 'partial' when at least one part was dynamic. */
+  resolution: WordResolution;
+}
+
 /**
- * Extract literal-text positional arguments from a CallExpr. Skips flags
- * (anything starting with `-`) and ParamExp/CmdSubst (dynamic) parts. Returns
- * the resolved string for each arg that is purely literal text.
+ * Resolve one shell word to text, substituting a sentinel for the parts we
+ * cannot know.
+ *
+ * This used to return `null` for the WHOLE word as soon as any part was
+ * dynamic, and the caller then skipped it — so `cat $HOME/.ssh/id_rsa` reached
+ * the sensitive-path matcher with no path at all and was ALLOWED, while
+ * `cat ~/.ssh/id_rsa`, the same file, blocked. A `null` meaning "I could not
+ * resolve this" was being read as "there is nothing here".
+ *
+ * `$HOME` / `${HOME}` resolve to `~` rather than to the sentinel. That is not a
+ * lookup table waiting to grow: HOME is the one variable whose value this
+ * engine already claims to know — isProtectedHomePath handles `$HOME`,
+ * `${HOME}` and `~` and returns the same answer for all three. It has simply
+ * never been reachable, because the extractor discarded the argument first.
+ *
+ * The neighbouring extractNetworkTargets already documents this exact stance
+ * ("the host is literal even when the body is not"); this brings the two into
+ * line.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function extractLiteralArgs(callExpr: any): { name: string; flags: string[]; paths: string[] } {
+function resolveWordParts(w: any): ResolvedWord {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const parts: any[] = w?.Parts || [];
+  let s = '';
+  let partial = false;
+  const dynamic = (): void => {
+    s += PATH_SEGMENT_SENTINEL;
+    partial = true;
+  };
+  for (const p of parts) {
+    const t = syntax.NodeType(p);
+    if (t === 'Lit') s += (p.Value ?? '').replace(/\\(.)/g, '$1');
+    else if (t === 'SglQuoted') s += p.Value ?? '';
+    else if (t === 'DblQuoted') {
+      // Resolve the literal INNER parts and sentinel the rest, rather than
+      // discarding the whole quoted run — `"$HOME/.ssh/id_rsa"` is the same
+      // file as its unquoted twin.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      for (const ip of (p.Parts || []) as any[]) {
+        if (syntax.NodeType(ip) === 'Lit') s += (ip as { Value?: string }).Value ?? '';
+        else if (syntax.NodeType(ip) === 'ParamExp' && paramName(ip) === 'HOME') s += '~';
+        else dynamic();
+      }
+    } else if (t === 'ParamExp' && paramName(p) === 'HOME') s += '~';
+    else dynamic();
+  }
+  return { value: s, resolution: partial ? 'partial' : 'literal' };
+}
+
+/** The variable name of a ParamExp, or '' when the shape is unexpected. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function paramName(p: any): string {
+  return typeof p?.Param?.Value === 'string' ? p.Param.Value : '';
+}
+
+export interface ExtractedArgs {
+  name: string;
+  flags: string[];
+  paths: string[];
+  /**
+   * True when any word did not resolve fully.
+   *
+   * The rm-cleanup waiver used to derive this by COUNTING how many arguments
+   * the extractor had silently dropped. That signal disappears the moment
+   * words stop being dropped, so it is stated here instead of inferred — and
+   * it is strictly stronger than the count, which could be satisfied by a word
+   * that still produced one path (`rm -f out$N.log`).
+   */
+  hasUnresolved: boolean;
+}
+
+/**
+ * Extract positional arguments from a CallExpr, separating flags from paths.
+ * A word whose parts are all literal yields its exact text; a word with any
+ * dynamic part yields the literal segments with PATH_SEGMENT_SENTINEL standing
+ * in for the rest, and sets `hasUnresolved`.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function extractLiteralArgs(callExpr: any): ExtractedArgs {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const args: any[] = callExpr.Args || [];
-  if (args.length === 0) return { name: '', flags: [], paths: [] };
-  const litFromWord = (w: unknown): string | null => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const parts: any[] = (w as any)?.Parts || [];
-    let s = '';
-    for (const p of parts) {
-      const t = syntax.NodeType(p);
-      if (t === 'Lit') s += (p.Value ?? '').replace(/\\(.)/g, '$1');
-      else if (t === 'SglQuoted') s += p.Value ?? '';
-      else if (t === 'DblQuoted') {
-        // Only accept pure-literal double-quoted (no expansion)
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const inner: any[] = p.Parts || [];
-        if (!inner.every((ip: unknown) => syntax.NodeType(ip) === 'Lit')) return null;
-        s += inner.map((ip: { Value?: string }) => ip.Value ?? '').join('');
-      } else {
-        return null; // dynamic — can't resolve safely
-      }
-    }
-    return s;
-  };
-  const name = (litFromWord(args[0]) || '').toLowerCase();
+  if (args.length === 0) return { name: '', flags: [], paths: [], hasUnresolved: false };
+  const head = resolveWordParts(args[0]);
+  // A dynamic COMMAND NAME (`$CMD -rf ~`) is not a command we can identify, so
+  // it stays empty exactly as before — matching a sentinel against tool names
+  // would be meaningless.
+  const name = head.resolution === 'literal' ? head.value.toLowerCase() : '';
   const flags: string[] = [];
   const paths: string[] = [];
+  let hasUnresolved = head.resolution === 'partial';
   for (let i = 1; i < args.length; i++) {
-    const v = litFromWord(args[i]);
-    if (v === null) continue;
-    if (v.startsWith('-')) flags.push(v);
-    else paths.push(v);
+    const r = resolveWordParts(args[i]);
+    if (r.resolution === 'partial') hasUnresolved = true;
+    // A flag is recognised only when its text is fully known — a sentinel could
+    // otherwise be read as a flag and quietly removed from the path list.
+    if (r.resolution === 'literal' && r.value.startsWith('-')) flags.push(r.value);
+    else paths.push(r.value);
   }
-  return { name, flags, paths };
+  return { name, flags, paths, hasUnresolved };
 }
 
 // ── Network egress destination extraction (GAP-5) ───────────────────────────
@@ -1720,9 +1790,21 @@ export function isRmCreatedInCommandCleanup(command: string): boolean {
       const name = (resolveWordLiteral(args[0]) ?? '').toLowerCase();
       if (name !== 'rm') return true;
       sawRm = true;
-      const { flags, paths } = extractLiteralArgs(n);
-      // A dropped positional arg = a dynamic/unresolved target → can't prove safe.
-      if (args.length - 1 > flags.length + paths.length) {
+      const { paths, hasUnresolved } = extractLiteralArgs(n);
+      // A target we could not fully resolve → can't prove this rm only removes
+      // what this command created.
+      //
+      // This used to be inferred by COUNTING dropped arguments
+      // (`args.length - 1 > flags.length + paths.length`). Once words stop
+      // being dropped that count is always zero, and the guard would silently
+      // stop firing — it would then fail only by accident, because the sentinel
+      // text is absent from `created`. A guard that works by accident is a
+      // guard that stops working silently, so the signal is now stated by the
+      // extractor rather than derived from what it discarded.
+      //
+      // Strictly stronger than the count: `rm -f out$N.log` produced ONE path
+      // and satisfied the old comparison; it sets hasUnresolved.
+      if (hasUnresolved) {
         ok = false;
         return false;
       }

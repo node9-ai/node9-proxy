@@ -239,7 +239,22 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 //
 // The re-scan is the point: those reads happened on real machines and produced
 // no finding at all, so the history a user sees today under-reports them.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v9';
+//
+// v10 (2026-08-20): a word is no longer discarded because part of it is a
+// variable. `extractLiteralArgs` resolves the literal segments and substitutes
+// PATH_SEGMENT_SENTINEL for the rest, and `$HOME`/`${HOME}` resolve to `~`.
+// Measured before bumping, because a bump costs every daemon a full re-scan:
+//
+//   command                          v9                       v10
+//   cat $HOME/.ssh/id_rsa            (none)                 → ast-fs-op block/critical
+//   strings $HOME/.aws/credentials   (none)                 → ast-fs-op block/critical
+//   rm -rf $HOME/projects            destructive-op review  → + ast-fs-op block/critical
+//   cat $PREFIX.env                  (none)                 → (none)   (unknown prefix)
+//   cat build.env                    (none)                 → (none)   (control)
+//
+// Those reads happened on real machines and produced no ast-fs-op finding at
+// all, so history under-reports them — which is the point of the re-scan.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v10';
 
 /**
  * SHA-256 prefix of the detector-source files
@@ -251,7 +266,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v9';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '6af1c7e81262b58b';
+export const CANONICAL_EXTRACTOR_HASH = 'f1c16fb23ea5f5f3';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
