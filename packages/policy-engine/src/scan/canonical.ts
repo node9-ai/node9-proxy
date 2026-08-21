@@ -252,6 +252,15 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 //   cat $PREFIX.env                  (none)                 → (none)   (unknown prefix)
 //   cat build.env                    (none)                 → (none)   (control)
 //
+//   cat < ~/.ssh/id_rsa              (none)                 → ast-fs-op block/critical
+//   md5sum < ~/.aws/credentials      (none)                 → ast-fs-op block/critical
+//   cat < build.env                  (none)                 → (none)   (control)
+//
+// The last three arrived in a later commit (`< file` redirects, whose path
+// lives on the Stmt and never in Args). v10 was CORRECTED IN PLACE rather than
+// minted as v11, because it had not been released — users are on v9, so this is
+// still exactly one re-scan for them either way. Same precedent as v7 above.
+//
 // Those reads happened on real machines and produced no ast-fs-op finding at
 // all, so history under-reports them — which is the point of the re-scan.
 export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v10';
@@ -266,7 +275,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v10';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'f1c16fb23ea5f5f3';
+export const CANONICAL_EXTRACTOR_HASH = '17d0bf4984c23386';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

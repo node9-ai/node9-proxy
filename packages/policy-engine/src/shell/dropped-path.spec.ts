@@ -155,7 +155,29 @@ describe('#51 must-fire — the same file, a different spelling', () => {
     expect(ruleOf('cat $HOME/.ssh/id_rsa')).toBe('shield:project-jail:block-read-ssh');
   });
 
-  it.todo('a redirect target is a path (lands with the redirect commit)');
+  it('a redirect target is a path', () => {
+    // `cat < ~/.ssh/id_rsa` — the path lives in a Redir node on the enclosing
+    // Stmt, never in Args, so the CallExpr loop never sees it.
+    expect(ruleOf('cat < ~/.ssh/id_rsa')).toBe('shield:project-jail:block-read-ssh');
+    expect(ruleOf('grep KEY < ~/.aws/credentials')).toBe('shield:project-jail:block-read-aws');
+  });
+
+  it('a redirect read carries commit 2 with it', () => {
+    expect(ruleOf('cat < $HOME/.ssh/id_rsa')).toBe('shield:project-jail:block-read-ssh');
+  });
+
+  it('the redirect IS the read, whatever the command is', () => {
+    // The shell delivers the bytes before the program runs, so the command
+    // name is the wrong thing to condition on. ⚠️ This deliberately makes the
+    // redirect path WIDER than the argument path: `md5sum < ~/.ssh/id_rsa`
+    // blocks while `md5sum ~/.ssh/id_rsa` still allows, because md5sum is not
+    // in FS_READ_TOOLS. That asymmetry is a symptom of the reader set being a
+    // hand-maintained list — the same shape as the 22-reader gap — and belongs
+    // to that calibration thread, not to this bug. Pinned so it reads as a
+    // decision rather than an accident.
+    expect(ruleOf('md5sum < ~/.ssh/id_rsa')).toBe('shield:project-jail:block-read-ssh');
+    expect(ruleOf('wc -l < ~/.aws/credentials')).toBe('shield:project-jail:block-read-aws');
+  });
 
   it('rm -rf $HOME reaches the guard that already knows about $HOME', () => {
     // isProtectedHomePath('$HOME/projects') is already true. This row proves
@@ -174,6 +196,16 @@ describe('#51 must-allow — the half that makes the widening honest', () => {
     ['a dynamic build output path', 'cat $DIST/bundle.js'],
     ['the cache allow-list still applies', 'rm -rf $HOME/.cache'],
   ])('%s', (_name, command) => {
+    expect(verdictOf(command)).toBe('allow');
+  });
+
+  it.each([
+    ['a heredoc is content, not a path', 'cat <<EOF\n~/.ssh/id_rsa\nEOF'],
+    ['a herestring is content, not a path', 'cat <<< "~/.ssh/id_rsa"'],
+    ['a WRITE redirect is out of scope by decision', 'echo x > ~/.ssh/note'],
+    ['an ordinary file redirect', 'cat < build.env'],
+    ['an unknown prefix through a redirect', 'cat < $PREFIX.env'],
+  ])('redirect must-allow: %s', (_name, command) => {
     expect(verdictOf(command)).toBe('allow');
   });
 

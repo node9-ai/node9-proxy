@@ -1630,7 +1630,20 @@ export function analyzeFsOperation(command: string): FsOpVerdict | null {
   // cheap, and using the normalized string as the cache key dedups raw variants.
   const normalized = normalizeCommandForPolicy(command);
   // Fast path — skip the AST parse when no fs-op tool keyword is present.
-  if (!FS_OP_PRESCREEN_RE.test(normalized)) return null;
+  // ⭐ TWO reasons to parse, because there are two ways to reach a file.
+  //
+  // The name prescreen alone made the Stmt/redirect branch dead code for any
+  // command outside the reader set: `md5sum < ~/.ssh/id_rsa` bailed here and
+  // never reached the AST. Measured — the redirect rows passed for `cat` and
+  // `grep` (both readers) and failed for `md5sum` and `wc`, which is exactly
+  // the half-applied widening this file was already bitten by once today, when
+  // FS_OP_PRESCREEN_RE was a hand-written copy of FS_READ_TOOLS.
+  //
+  // `<(?!<)` is a single `<` — a file redirect. It excludes `<<` and `<<<`
+  // (heredoc/herestring), whose Word is inline content rather than a path and
+  // which the redirect branch ignores anyway, so the extra parses are bounded
+  // to commands that genuinely redirect from a file.
+  if (!FS_OP_PRESCREEN_RE.test(normalized) && !/<(?!<)/.test(normalized)) return null;
   if (fsOpCache.has(normalized)) {
     const hit = fsOpCache.get(normalized) ?? null;
     fsOpCache.delete(normalized);
@@ -1715,6 +1728,18 @@ function deriveRedirOp(sample: string): number {
 // `>>` (append) is intentionally NOT here — append PRESERVES a pre-existing file's
 // content, so `cat >> victim <<E; rm victim` would delete an intact file (same
 // class as touch). Only a `>` truncate counts.
+// The `< file` redirect ONLY — the form whose Word is a PATH.
+//
+// Deliberately not redirStdinOps(): that set bundles heredoc and herestring,
+// whose Word is inline CONTENT rather than a path, and matching them here would
+// read the document body as a filename. Two sets with different meanings beat
+// one set every caller has to remember to narrow.
+//
+// Writes (`>`, `>>`, `2>`) are excluded by decision, not oversight. Gating a
+// write to a credential path is worth doing and is a SCOPE question; this is a
+// bug fix for a read the mechanism could not see.
+const REDIR_STDIN_FILE_OPS = new Set<number>([deriveRedirOp('cat < f')].filter((op) => op >= 0));
+
 const REDIR_TRUNCATE_OPS = new Set<number>([deriveRedirOp('>_f')]);
 const REDIR_HEREDOC_OPS = new Set<number>([
   deriveRedirOp('cat <<X\nX'),
@@ -1836,6 +1861,31 @@ function analyzeFsOperationImpl(command: string): FsOpVerdict | null {
       if (!node || result) return false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
+      // A `< file` redirect is a READ, and its path lives on the enclosing
+      // Stmt — never in Args — so the CallExpr branch below can never see it.
+      // The shell delivers the file's bytes to the process before the program
+      // runs, so the COMMAND NAME is the wrong thing to condition on: this
+      // fires for `md5sum < ~/.ssh/id_rsa` as much as for `cat < …`.
+      if (syntax.NodeType(n) === 'Stmt') {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        for (const r of (n.Redirs || []) as any[]) {
+          if (!r || !REDIR_STDIN_FILE_OPS.has(r.Op)) continue;
+          const p = resolveWordParts(r.Word).value;
+          if (!p) continue;
+          for (const sp of SENSITIVE_PATH_RULES) {
+            if (sp.match(p)) {
+              result = {
+                ruleName: sp.rule,
+                verdict: sp.verdict ?? 'block',
+                reason: sp.reason,
+                path: p,
+              };
+              return false;
+            }
+          }
+        }
+        return true;
+      }
       if (syntax.NodeType(n) !== 'CallExpr') return true;
       const { name, flags, paths } = extractLiteralArgs(n);
       if (!name) return true;
