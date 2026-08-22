@@ -6,15 +6,13 @@
 // This file:
 //   - calls getConfig() / getActiveEnvironment() / readActiveShields()
 //   - injects checkProvenance + isTrustedHost as host hooks
-//   - keeps shouldSnapshot (Config-aware, hook-side concern)
 //   - keeps the explainPolicy waterfall (heavy fs/os/process I/O)
 
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import pm from 'picomatch';
 import { scanArgs, scanFilePath } from '../dlp';
-import { type Config, getConfig, getActiveEnvironment } from '../config';
+import { getConfig, getActiveEnvironment } from '../config';
 import { checkProvenance } from '../utils/provenance.js';
 import { matchesTrustedHost, isTrustedHost } from '../auth/trusted-hosts.js';
 import {
@@ -37,29 +35,6 @@ export {
   detectInlineExec,
 } from '@node9/policy-engine';
 import { detectInlineExec, toolMatchesRule } from '@node9/policy-engine';
-
-// ── shouldSnapshot — Config-aware undo gate (host concern) ──────────────────
-
-/**
- * Returns true if a snapshot should be taken for this tool call.
- * Checks: tool name match → ignorePaths → onlyPaths (if specified).
- */
-export function shouldSnapshot(toolName: string, args: unknown, config: Config): boolean {
-  if (!config.settings.enableUndo) return false;
-
-  const snap = config.policy.snapshot;
-  if (!snap.tools.includes(toolName.toLowerCase())) return false;
-
-  const a = args && typeof args === 'object' ? (args as Record<string, unknown>) : {};
-  const filePath = String(a.file_path ?? a.path ?? a.filename ?? '');
-
-  if (filePath) {
-    if (snap.ignorePaths.length && pm(snap.ignorePaths)(filePath)) return false;
-    if (snap.onlyPaths.length && !pm(snap.onlyPaths)(filePath)) return false;
-  }
-
-  return true;
-}
 
 // ── evaluatePolicy — host wrapper that injects config + I/O hooks ───────────
 

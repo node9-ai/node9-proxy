@@ -12,9 +12,7 @@ import { checkPause } from '../../auth/state';
 import { isDaemonRunning } from '../../auth/daemon';
 import { openStartupLogFd, recordStartupState } from '../../daemon/startup-log';
 import { getConfig, type Config } from '../../config';
-import { shouldSnapshot } from '../../policy';
 import { buildNegotiationMessage, buildReviewMessage } from '../../policy/negotiation';
-import { createShadowSnapshot } from '../../undo';
 import {
   autoStartDaemonAndWait,
   isTestingMode,
@@ -872,13 +870,6 @@ export function registerCheckCommand(program: Command): void {
                 }
               }
             }
-          }
-
-          // Snapshot BEFORE the tool runs (PreToolUse) so undo can restore to
-          // the state prior to this change. Snapshotting after (PostToolUse)
-          // captures the changed state, making undo a no-op.
-          if (shouldSnapshot(toolName, toolInput, config)) {
-            await createShadowSnapshot(toolName, toolInput, config.policy.snapshot.ignorePaths);
           }
 
           const safeCwdForAuth =

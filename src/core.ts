@@ -20,7 +20,6 @@ export {
 export { validateRegex, getCompiledRegex } from './utils/regex';
 export {
   matchesPattern,
-  shouldSnapshot,
   evaluateSmartConditions,
   normalizeCommandForPolicy,
   detectDangerousShellExec,

@@ -1212,20 +1212,6 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
       renderPending(data);
     }
 
-    if (event === 'snapshot') {
-      const time = new Date(data.ts).toLocaleTimeString([], { hour12: false });
-      const hash = (data as unknown as { hash: string }).hash ?? '';
-      const rawSummary = (data as unknown as { argsSummary: string }).argsSummary ?? data.tool;
-      const summary = shortenPathSummary(rawSummary);
-      const fileCount = (data as unknown as { fileCount: number }).fileCount ?? 0;
-      const files =
-        fileCount > 0 ? chalk.dim(` · ${fileCount} file${fileCount === 1 ? '' : 's'}`) : '';
-      process.stdout.write(
-        `${chalk.dim(time)}  ${chalk.cyan('📸 snapshot')}  ${chalk.dim(hash)}  ${summary}${files}\n`
-      );
-      return;
-    }
-
     if (event === 'activity-result') {
       const original = activityPending.get(data.id);
       if (original) {

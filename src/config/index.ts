@@ -39,7 +39,6 @@ export interface Config {
   settings: {
     mode: string;
     autoStartDaemon?: boolean;
-    enableUndo?: boolean;
     enableHookLogDebug?: boolean;
     approvalTimeoutMs?: number;
     approvalTimeoutSeconds?: number;
@@ -86,11 +85,6 @@ export interface Config {
     ignoredTools: string[];
     toolInspection: Record<string, string>;
     smartRules: SmartRule[];
-    snapshot: {
-      tools: string[];
-      onlyPaths: string[];
-      ignorePaths: string[];
-    };
     dlp: {
       enabled: boolean;
       scanIgnoredTools: boolean;
@@ -199,19 +193,6 @@ export const DEFAULT_CONFIG: Config = {
   settings: {
     mode: 'standard',
     autoStartDaemon: true,
-    // The undo feature was REMOVED. This default is one of two places that say
-    // so; the other is the pin further down, which overwrites whatever a config
-    // file, the dashboard or the cloud supplies. Setting `enableUndo` anywhere
-    // has no effect — do not restore the advice that used to live here, because
-    // a comment recommending a knob that is silently discarded is the same lie
-    // on disk the pin exists to prevent.
-    //
-    // Why it went: the store was a per-project bare git repo with no size
-    // ceiling, and eviction dropped the index row without deleting the objects.
-    // On one machine it reached 378G (352G of it orphaned tmp_pack_* from an
-    // interrupted `git gc`) and filled the disk. A security tool must not be
-    // what fills a customer's disk. Leftovers: `node9 undo --purge`.
-    enableUndo: false,
     enableHookLogDebug: true,
     approvalTimeoutMs: 120_000, // 120-second auto-deny timeout
     flightRecorder: true,
@@ -250,25 +231,6 @@ export const DEFAULT_CONFIG: Config = {
       run_shell_command: 'command',
       'terminal.execute': 'command',
       'postgres:query': 'sql',
-    },
-    snapshot: {
-      tools: [
-        'str_replace_based_edit_tool',
-        'write_file',
-        'edit_file',
-        'create_file',
-        'edit',
-        'replace',
-        // Claude / canonicalised Hermes — shouldSnapshot lowercases the
-        // incoming name before set-membership, so we list the lowercase
-        // forms of `Bash`/`Write`/`Edit`/`MultiEdit`. Without these,
-        // post-canonicalisation Hermes `patch` / `write_file` (which now
-        // arrive as `Edit` / `Write`) silently skipped snapshotting.
-        'write',
-        'multiedit',
-      ],
-      onlyPaths: [],
-      ignorePaths: ['**/node_modules/**', 'dist/**', 'build/**', '.next/**', '**/*.log'],
     },
     smartRules: [
       // ── rm safety (critical — always evaluated first) ──────────────────────
@@ -750,11 +712,6 @@ export function getConfig(cwd?: string): Config {
     ignoredTools: [...DEFAULT_CONFIG.policy.ignoredTools],
     toolInspection: { ...DEFAULT_CONFIG.policy.toolInspection },
     smartRules: [...DEFAULT_CONFIG.policy.smartRules],
-    snapshot: {
-      tools: [...DEFAULT_CONFIG.policy.snapshot.tools],
-      onlyPaths: [...DEFAULT_CONFIG.policy.snapshot.onlyPaths],
-      ignorePaths: [...DEFAULT_CONFIG.policy.snapshot.ignorePaths],
-    },
     dlp: { ...DEFAULT_CONFIG.policy.dlp },
     egress: {
       ...DEFAULT_CONFIG.policy.egress,
@@ -848,12 +805,6 @@ export function getConfig(cwd?: string): Config {
         (r) => !r.name || !userRuleNames.has(r.name)
       );
       mergedPolicy.smartRules = [...filteredBlocks, ...localRules, ...filteredNonBlocks];
-    }
-    if (p.snapshot) {
-      const s = p.snapshot as Partial<Config['policy']['snapshot']>;
-      if (s.tools) mergedPolicy.snapshot.tools.push(...s.tools);
-      if (s.onlyPaths) mergedPolicy.snapshot.onlyPaths.push(...s.onlyPaths);
-      if (s.ignorePaths) mergedPolicy.snapshot.ignorePaths.push(...s.ignorePaths);
     }
     if (p.dlp) {
       const d = p.dlp as Partial<Config['policy']['dlp']>;
@@ -1566,26 +1517,6 @@ export function getConfig(cwd?: string): Config {
   mergedPolicy.dangerousWords = [...new Set(mergedPolicy.dangerousWords)];
   mergedPolicy.ignoredTools = [...new Set(mergedPolicy.ignoredTools)];
   mergedPolicy.skillPinning.roots = [...new Set(mergedPolicy.skillPinning.roots)];
-  mergedPolicy.snapshot.tools = [...new Set(mergedPolicy.snapshot.tools)];
-  mergedPolicy.snapshot.onlyPaths = [...new Set(mergedPolicy.snapshot.onlyPaths)];
-  mergedPolicy.snapshot.ignorePaths = [...new Set(mergedPolicy.snapshot.ignorePaths)];
-
-  // ── Undo removed ──────────────────────────────────────────────────────────
-  // The undo/snapshot feature was removed: its store had no size ceiling and
-  // took a machine to 378 GB (~19 MB per minute of active agent work).
-  //
-  // ⭐ Pinned HERE — after every layer, managed override and env clamp — and
-  // deliberately NOT inside applyLayer. applyLayer runs once per config layer
-  // and early-returns on a null one, so on a machine with no config file it
-  // never executes at all: a pin placed there would leave the merged value
-  // coming solely from DEFAULT_CONFIG, an unrelated line that any later cleanup
-  // could delete without connecting it to this. At this point no input path
-  // remains — not global config, not a project node9.config.json, not the
-  // dashboard via the daemon, not cloud sync. A stored `true` from before the
-  // removal is honoured by the file writer and ignored here on purpose;
-  // `node9 undo` / `status` / `doctor` say so rather than failing silently.
-  // Guarded by src/__tests__/undo-pin.spec.ts (R1 is the no-config row).
-  mergedSettings.enableUndo = false;
 
   const result: Config = {
     settings: mergedSettings,

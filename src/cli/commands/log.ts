@@ -14,7 +14,6 @@ import {
 } from '../../audit';
 import { getConfig } from '../../config';
 import { reviewCorrelationKey, resolvePendingReview } from '../../review-pending';
-import { createShadowSnapshot, getSnapshotHistory } from '../../undo';
 import {
   notifyTaintPropagate,
   isDaemonRunning,
@@ -492,40 +491,6 @@ export function registerLogCommand(program: Command): void {
                     }) + '\n'
                   );
                 }
-              }
-            }
-          }
-
-          // PostToolUse: snapshot Bash commands only.
-          // Edit/Write tools are already snapshotted by PreToolUse in check.ts with full
-          // metadata. Snapshotting them here again creates duplicate 'unknown' entries.
-          // For Bash, we capture post-execution state so that sed -i, echo >, tee etc.
-          // are reversible. Guard: only snapshot if a prior snapshot exists for this cwd —
-          // avoids cold-start overhead on projects where undo was never used.
-          // `=== true`, never `!== false`: `undefined !== false` is TRUE, so an
-          // absent field read as ENABLED and this write path opened itself on
-          // any machine whose merge did not supply the flag. The flag is now
-          // pinned false (config/index.ts), so this branch is dead — but the
-          // polarity is fixed here rather than left to the pin, because an
-          // absent value must never be the one that turns a writer on.
-          if ((tool === 'Bash' || tool === 'bash') && config.settings.enableUndo === true) {
-            const bashCommand =
-              typeof rawInput === 'object' &&
-              rawInput !== null &&
-              'command' in rawInput &&
-              typeof (rawInput as Record<string, unknown>).command === 'string'
-                ? ((rawInput as Record<string, unknown>).command as string)
-                : null;
-            if (bashCommand) {
-              const effectiveCwd = safeCwd ?? process.cwd();
-              const history = getSnapshotHistory();
-              const hasPrior = history.some((e) => e.cwd === effectiveCwd);
-              if (hasPrior) {
-                await createShadowSnapshot(
-                  'Bash',
-                  { command: bashCommand },
-                  config.policy.snapshot.ignorePaths
-                );
               }
             }
           }

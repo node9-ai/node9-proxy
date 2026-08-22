@@ -34,7 +34,6 @@ import {
   mapResultStatus,
   readAuditEntriesAsync,
   subtractCostBaseline,
-  toActivityEvent,
 } from '../tui/dashboard/data';
 import {
   EMPTY_SESSION_ACTIVITY,
@@ -566,41 +565,6 @@ describe('readAuditEntriesAsync', () => {
   });
 });
 
-describe('toActivityEvent · snapshot path compaction', () => {
-  it('compacts a long argsSummary path so the live row stays in column budget', () => {
-    const e = toActivityEvent('snapshot', {
-      ts: '2026-05-08T08:00:00.000Z',
-      hash: 'abc1234',
-      argsSummary: '/home/u/repo/src/tui/dashboard/data.ts',
-      fileCount: 2,
-    });
-    if (!e || e.kind !== 'snapshot') throw new Error('expected snapshot event');
-    expect(e.summary).toBe('.../dashboard/data.ts');
-  });
-
-  it('leaves short paths unchanged', () => {
-    const e = toActivityEvent('snapshot', {
-      ts: '2026-05-08T08:00:00.000Z',
-      hash: 'abc1234',
-      argsSummary: '/etc/hosts',
-      fileCount: 1,
-    });
-    if (!e || e.kind !== 'snapshot') throw new Error('expected snapshot event');
-    expect(e.summary).toBe('/etc/hosts');
-  });
-
-  it('falls back to tool name when argsSummary is missing', () => {
-    const e = toActivityEvent('snapshot', {
-      ts: '2026-05-08T08:00:00.000Z',
-      hash: 'abc1234',
-      tool: 'write_file',
-      fileCount: 1,
-    });
-    if (!e || e.kind !== 'snapshot') throw new Error('expected snapshot event');
-    expect(e.summary).toBe('write_file');
-  });
-});
-
 describe('auditEntryToActivityEvent · preview compaction', () => {
   it('compacts long file_path in preview', () => {
     const e = auditEntryToActivityEvent(
@@ -837,20 +801,6 @@ describe('applyActivityEvent', () => {
     agg = applyActivityEvent(agg, toolEvent({ checkedBy: 'loop-detected' }));
     agg = applyActivityEvent(agg, toolEvent({ checkedBy: 'something-else' }));
     expect(agg.loops).toBe(1);
-  });
-
-  it('ignores snapshot events', () => {
-    const before = { ...EMPTY_SESSION_ACTIVITY, tools: { Bash: 5 }, shell: { git: 5 } };
-    const snapshotEvent: ActivityEvent = {
-      kind: 'snapshot',
-      id: 'snap_1',
-      ts: '2026-05-10T00:00:00.000Z',
-      hash: 'abc',
-      summary: '/tmp/x',
-      fileCount: 1,
-    };
-    const after = applyActivityEvent(before, snapshotEvent);
-    expect(after).toBe(before);
   });
 
   it('does not mutate input', () => {
