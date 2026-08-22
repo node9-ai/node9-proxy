@@ -336,8 +336,13 @@ program
     if (options.purge) {
       const node9Dir = path.join(os.homedir(), '.node9');
       if (fs.existsSync(node9Dir)) {
+        // The prompt must name everything it removes. Snapshots from the removed
+        // undo feature also live here and can run to hundreds of gigabytes of
+        // copies of the user's own source — someone agreeing to drop "config,
+        // audit log, credentials" is not agreeing to that.
+        const alsoSnapshots = undoLeftoverPaths().length > 0 ? ', old undo snapshots' : '';
         const confirmed = await confirm({
-          message: `Permanently delete ${node9Dir} (config, audit log, credentials)?`,
+          message: `Permanently delete ${node9Dir} (config, audit log, credentials${alsoSnapshots})?`,
           default: false,
         });
         if (confirmed) {
@@ -349,10 +354,18 @@ program
               chalk.red('\n  ⚠️  ~/.node9/ could not be fully deleted — remove it manually.')
             );
           } else {
-            console.log(chalk.green('\n  ✅ Deleted ~/.node9/ (config, audit log, credentials)'));
+            console.log(
+              chalk.green(
+                `\n  ✅ Deleted ~/.node9/ (config, audit log, credentials${alsoSnapshots})`
+              )
+            );
           }
         } else {
-          console.log(chalk.yellow('\n  Skipped — ~/.node9/ was not deleted.'));
+          // Declining is the one case where the leftover note is actionable:
+          // node9 is going away, so this is the last chance to mention it.
+          console.log(
+            chalk.yellow(`\n  Skipped — ~/.node9/ was not deleted.${undoLeftoverNote()}`)
+          );
         }
       } else {
         console.log(chalk.blue('\n  ℹ️  ~/.node9/ not found — nothing to delete'));

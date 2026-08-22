@@ -199,13 +199,18 @@ export const DEFAULT_CONFIG: Config = {
   settings: {
     mode: 'standard',
     autoStartDaemon: true,
-    // OFF by default. The snapshot store is a per-project bare git repo with
-    // no size ceiling, and eviction drops the index row without deleting the
-    // objects — on one machine it reached 378G (352G of it orphaned tmp_pack_*
-    // from interrupted `git gc`) and filled the disk. A security tool must not
-    // be what fills a customer's disk. Re-enable per install with
-    // `{"settings":{"enableUndo":true}}`; the default flips back when the
-    // bounded copy-store lands (doc/undo-v2-copy-store-design.md).
+    // The undo feature was REMOVED. This default is one of two places that say
+    // so; the other is the pin further down, which overwrites whatever a config
+    // file, the dashboard or the cloud supplies. Setting `enableUndo` anywhere
+    // has no effect — do not restore the advice that used to live here, because
+    // a comment recommending a knob that is silently discarded is the same lie
+    // on disk the pin exists to prevent.
+    //
+    // Why it went: the store was a per-project bare git repo with no size
+    // ceiling, and eviction dropped the index row without deleting the objects.
+    // On one machine it reached 378G (352G of it orphaned tmp_pack_* from an
+    // interrupted `git gc`) and filled the disk. A security tool must not be
+    // what fills a customer's disk. Leftovers: `node9 undo --purge`.
     enableUndo: false,
     enableHookLogDebug: true,
     approvalTimeoutMs: 120_000, // 120-second auto-deny timeout
