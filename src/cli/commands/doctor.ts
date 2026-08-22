@@ -18,7 +18,7 @@ import {
 } from '../../daemon/service';
 import { agoLabel } from '../../lib/relative-time';
 import { readStartupCause } from '../../daemon/startup-log';
-import { findUndoLeftovers, formatLeftovers, cleanupCommand } from '../../utils/undo-leftovers';
+import { undoLeftoverPaths } from '../../utils/undo-leftovers';
 
 export function registerDoctorCommand(program: Command, version: string): void {
   program
@@ -93,11 +93,13 @@ export function registerDoctorCommand(program: Command, version: string): void {
       // who had git installed — i.e. to every user the feature ever worked for,
       // including the one whose disk it filled. A leftover store is exactly what
       // someone runs `doctor` to find, so it must not hide behind a branch.
-      const undoLeftovers = findUndoLeftovers(homeDir);
-      if (undoLeftovers) {
+      const undoLeftovers = undoLeftoverPaths(homeDir);
+      if (undoLeftovers.length > 0) {
         warn(
-          `undo removed — ${formatLeftovers(undoLeftovers)} of old snapshots still on disk`,
-          `Delete them yourself when ready: ${cleanupCommand(undoLeftovers)}`
+          `undo removed — ${undoLeftovers.length} leftover snapshot ${
+            undoLeftovers.length === 1 ? 'path' : 'paths'
+          } still on disk`,
+          'Remove them when ready: node9 undo --purge'
         );
       }
 

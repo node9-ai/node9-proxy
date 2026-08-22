@@ -16,7 +16,7 @@ import {
   autostartAdvice,
 } from '../../daemon/service';
 import { agoLabel } from '../../lib/relative-time';
-import { findUndoLeftovers, formatLeftovers } from '../../utils/undo-leftovers';
+import { undoLeftoverPaths } from '../../utils/undo-leftovers';
 
 // Renders one agent's wiring: a header, ✓/✗ rows for each hook event, and the
 // MCP-proxied server list (omitted when the agent has no MCP surface). Hook +
@@ -129,13 +129,10 @@ export function registerStatusCommand(program: Command): void {
       // full needs to be told where it went. A machine that never enabled the
       // feature has no leftovers and sees nothing — silence is correct there,
       // because "off" would imply a switch that no longer exists.
-      const undoLeftovers = findUndoLeftovers();
-      if (undoLeftovers) {
+      if (undoLeftoverPaths().length > 0) {
         console.log(
           chalk.gray('  ○ Undo Engine') +
-            chalk.gray(
-              `    → removed — ${formatLeftovers(undoLeftovers)} of old snapshots remain (node9 undo)`
-            )
+            chalk.gray('    → removed — old snapshot files remain (node9 undo --purge)')
         );
       }
 

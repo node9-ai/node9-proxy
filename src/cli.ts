@@ -67,7 +67,7 @@ import { registerDecisionsCommand } from './cli/commands/decisions';
 import { registerDlpCommand } from './cli/commands/dlp';
 import { registerMaskCommand } from './cli/commands/mask';
 import { registerBlastCommand } from './cli/commands/blast';
-import { findUndoLeftovers, formatLeftovers, cleanupCommand } from './utils/undo-leftovers';
+import { undoLeftoverPaths } from './utils/undo-leftovers';
 
 const { version } = JSON.parse(
   fs.readFileSync(path.join(__dirname, '../package.json'), 'utf-8')
@@ -260,11 +260,10 @@ program
 // and audit log" while up to hundreds of gigabytes of shadow git repos stay
 // behind under a path we just described as holding a config file.
 function undoLeftoverNote(): string {
-  const left = findUndoLeftovers();
-  if (!left) return '';
+  if (undoLeftoverPaths().length === 0) return '';
   return (
-    `\n  ${formatLeftovers(left)} of snapshots from the removed undo feature also remain.` +
-    `\n  Delete them with: ${cleanupCommand(left)}`
+    '\n  Snapshots from the removed undo feature also remain.' +
+    '\n  Remove them with: node9 undo --purge'
   );
 }
 
