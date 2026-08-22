@@ -85,123 +85,19 @@ function makeTempHome(): string {
   return dir;
 }
 
-function snapshotStackPath(tmpHome: string): string {
-  return path.join(tmpHome, '.node9', 'snapshots.json');
-}
-
-function writeSnapshotStack(tmpHome: string, entries: object[]): void {
-  fs.writeFileSync(snapshotStackPath(tmpHome), JSON.stringify(entries));
-}
-
-function readSnapshotStack(tmpHome: string): object[] {
-  const p = snapshotStackPath(tmpHome);
-  if (!fs.existsSync(p)) return [];
-  return JSON.parse(fs.readFileSync(p, 'utf-8')) as object[];
-}
-
 beforeAll(() => {
   if (!fs.existsSync(CLI)) {
     throw new Error(`dist/cli.js not found — run 'npm run build' first`);
   }
 });
 
-describe('log PostToolUse snapshot behavior', () => {
+describe('log PostToolUse — audit trail and agent attribution', () => {
   let tmpHome: string;
   let tmpCwd: string;
 
   beforeEach(() => {
     tmpHome = makeTempHome();
     tmpCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-log-cwd-'));
-  });
-
-  // The row that used to live here asserted createShadowSnapshot IS invoked for
-  // Bash when a prior snapshot exists. The undo feature is removed and the flag
-  // is pinned false, so that behaviour is gone by design. Its inverse — no write
-  // even with a stored `enableUndo: true` AND a prior entry — is R6 in
-  // undo-removed.integration.test.ts.
-
-  it('does NOT create a snapshot when no prior snapshot exists for the cwd', () => {
-    // Stack is empty — no prior snapshot for this cwd
-    const result = runLog(
-      {
-        tool_name: 'Bash',
-        tool_input: { command: 'echo hello > output.txt' },
-        cwd: tmpCwd,
-      },
-      tmpHome,
-      tmpCwd
-    );
-
-    expect(result.status).toBe(0);
-    // No snapshot file should be written at all
-    const stack = readSnapshotStack(tmpHome);
-    expect(stack).toHaveLength(0);
-  });
-
-  it('does NOT create a snapshot for Edit tool PostToolUse (avoids unknown duplicates)', () => {
-    // Seed a prior Edit snapshot so the tool isn't skipped on cold-start grounds
-    // The engine ships OFF (enableUndo defaults to false — the snapshot store
-    // filled a disk), and log.ts gates the Bash snapshot on it. This row is
-    // about the PRIOR-SNAPSHOT condition, so it states the precondition rather
-    // than inheriting whatever the default happens to be.
-    fs.writeFileSync(
-      path.join(tmpHome, '.node9', 'config.json'),
-      JSON.stringify({ settings: { enableUndo: true } })
-    );
-    writeSnapshotStack(tmpHome, [
-      {
-        hash: 'prior000',
-        tool: 'Edit',
-        argsSummary: 'src/app.ts',
-        cwd: tmpCwd,
-        timestamp: Date.now() - 1000,
-      },
-    ]);
-
-    const result = runLog(
-      {
-        tool_name: 'Edit',
-        tool_input: { file_path: 'src/app.ts', old_string: 'foo', new_string: 'bar' },
-        cwd: tmpCwd,
-      },
-      tmpHome,
-      tmpCwd
-    );
-
-    expect(result.status).toBe(0);
-    // Stack should still have only the one seeded entry — no new 'unknown' duplicate
-    const stack = readSnapshotStack(tmpHome) as Array<{ tool: string }>;
-    expect(stack).toHaveLength(1);
-    expect(stack[0].tool).toBe('Edit');
-    // No entry with tool='unknown' should ever appear
-    expect(stack.find((e) => e.tool === 'unknown')).toBeUndefined();
-  });
-
-  it('does NOT create a snapshot for Write tool PostToolUse', () => {
-    writeSnapshotStack(tmpHome, [
-      {
-        hash: 'prior000',
-        tool: 'Write',
-        argsSummary: 'src/new.ts',
-        cwd: tmpCwd,
-        timestamp: Date.now() - 1000,
-      },
-    ]);
-
-    const result = runLog(
-      {
-        tool_name: 'Write',
-        tool_input: { file_path: 'src/new.ts', content: 'hello' },
-        cwd: tmpCwd,
-      },
-      tmpHome,
-      tmpCwd
-    );
-
-    expect(result.status).toBe(0);
-    const stack = readSnapshotStack(tmpHome) as Array<{ tool: string }>;
-    expect(stack).toHaveLength(1);
-    expect(stack.find((e) => e.tool === 'unknown')).toBeUndefined();
   });
 
   it('still writes to audit.log regardless of snapshot path', () => {

@@ -659,16 +659,6 @@ function bindActivitySocket(): void {
           sessionHistory.recordTestFail(data.ts);
           return;
         }
-        if (data.status === 'snapshot') {
-          broadcast('snapshot', {
-            hash: data.hash,
-            tool: data.tool,
-            argsSummary: data.argsSummary,
-            fileCount: data.fileCount,
-            ts: data.ts,
-          });
-          return;
-        }
 
         if (data.status === 'execution-completed') {
           // Emitted by the MCP gateway when an upstream tool call response

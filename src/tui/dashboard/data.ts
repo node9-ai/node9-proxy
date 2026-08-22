@@ -1336,23 +1336,6 @@ export function toActivityEvent(eventName: string, data: SsePayload): ActivityEv
   const payload = data.activity ?? data;
   const ts = normalizeTs(payload.ts);
 
-  if (eventName === 'snapshot') {
-    // Mirrors the format `node9 tail` uses (see src/tui/tail.ts).
-    // argsSummary is typically a file path ("/home/.../src/foo.ts"); compactPath
-    // collapses long absolutes to ".../parent/file" so the live row stays inside
-    // the column budget. Tool name and the literal 'snapshot' fallback are left
-    // alone — compactPath is a no-op on non-path strings anyway.
-    const rawSummary = payload.argsSummary ?? payload.tool ?? 'snapshot';
-    return {
-      kind: 'snapshot',
-      id: payload.id ?? `${ts}-snapshot`,
-      ts,
-      hash: payload.hash ?? '',
-      summary: compactPath(rawSummary),
-      fileCount: typeof payload.fileCount === 'number' ? payload.fileCount : 0,
-    };
-  }
-
   if (eventName !== 'activity' && eventName !== 'add') return null;
   // 'activity' events carry `tool`; 'add' events (queued approvals)
   // carry `toolName`. Without this fallback, every 'add' SSE event was

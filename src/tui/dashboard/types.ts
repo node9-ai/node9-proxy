@@ -56,39 +56,29 @@ export function windowStartMs(window: TimeWindow, openedAt: number): number {
  *                  no verdict) and different visual; matches what
  *                  `node9 tail` already prints.
  */
-export type ActivityEvent =
-  | {
-      kind: 'tool';
-      id: string;
-      ts: string; // ISO 8601
-      agent?: string; // 'claude' | 'gemini' | 'codex' | ...
-      tool: string;
-      /** First ~70 chars of the tool's command/path arg. */
-      preview: string;
-      verdict: 'allow' | 'block' | 'review' | 'pending';
-      reason?: string;
-      /** Rule that fired (`block-force-push`, `dlp-block`, `loop-detected`, …). */
-      checkedBy?: string;
-      sessionId?: string;
-      mcpServer?: string;
-      /**
-       * True only for SSE 'add' events — the daemon broadcasts those to
-       * approval listeners, so they represent real "queued for human
-       * approval" requests. Plain 'activity' events with status:'pending'
-       * also lack a decision but are transient (sub-second) and must
-       * NOT trigger the APPROVAL notification flash.
-       */
-      isApprovalRequest?: boolean;
-    }
-  | {
-      kind: 'snapshot';
-      id: string;
-      ts: string;
-      hash: string;
-      /** Short summary line (path or tool name). */
-      summary: string;
-      fileCount: number;
-    };
+export type ActivityEvent = {
+  kind: 'tool';
+  id: string;
+  ts: string; // ISO 8601
+  agent?: string; // 'claude' | 'gemini' | 'codex' | ...
+  tool: string;
+  /** First ~70 chars of the tool's command/path arg. */
+  preview: string;
+  verdict: 'allow' | 'block' | 'review' | 'pending';
+  reason?: string;
+  /** Rule that fired (`block-force-push`, `dlp-block`, `loop-detected`, …). */
+  checkedBy?: string;
+  sessionId?: string;
+  mcpServer?: string;
+  /**
+   * True only for SSE 'add' events — the daemon broadcasts those to
+   * approval listeners, so they represent real "queued for human
+   * approval" requests. Plain 'activity' events with status:'pending'
+   * also lack a decision but are transient (sub-second) and must
+   * NOT trigger the APPROVAL notification flash.
+   */
+  isApprovalRequest?: boolean;
+};
 
 export interface AuditAggregates {
   total: number;

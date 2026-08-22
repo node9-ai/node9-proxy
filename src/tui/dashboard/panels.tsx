@@ -504,14 +504,11 @@ export function LiveLog(props: {
 }
 
 /** Substring match (case-insensitive) on tool, agent, preview, checkedBy.
- *  Matches snapshot rows on hash + summary too. Empty filter passes everything. */
+ *  Empty filter passes everything. */
 function applyFilter(events: ActivityEvent[], filter: string): ActivityEvent[] {
   if (!filter) return events;
   const needle = filter.toLowerCase();
   return events.filter((e) => {
-    if (e.kind === 'snapshot') {
-      return e.hash.toLowerCase().includes(needle) || e.summary.toLowerCase().includes(needle);
-    }
     if (e.tool.toLowerCase().includes(needle)) return true;
     if (e.agent && e.agent.toLowerCase().includes(needle)) return true;
     if (e.preview.toLowerCase().includes(needle)) return true;
@@ -526,23 +523,6 @@ function ActivityRow({ event }: { event: ActivityEvent }): React.ReactElement {
   // timestamp to the user's wall-clock time. Returns '--:--:--' on
   // malformed input as a defensive placeholder.
   const t = localTimeOf(event.ts);
-
-  // Snapshot rows have a different shape (no agent, no verdict, no
-  // command preview) — render them in a distinct one-line format that
-  // matches `node9 tail`'s output: `📸 snapshot  <hash>  <summary> · N files`.
-  if (event.kind === 'snapshot') {
-    const filesSuffix =
-      event.fileCount > 0 ? ` · ${event.fileCount} file${event.fileCount === 1 ? '' : 's'}` : '';
-    return (
-      <Text wrap="truncate-end">
-        <Text dimColor>{t} </Text>
-        <Text color={COL.agentClaude}>📸 snapshot</Text>
-        <Text dimColor>{`  ${event.hash}  `}</Text>
-        <Text>{event.summary}</Text>
-        <Text dimColor>{filesSuffix}</Text>
-      </Text>
-    );
-  }
 
   // Truncate agent name so the LIVE column stays aligned even when
   // the daemon emits long agent labels like "Claude Code" or
