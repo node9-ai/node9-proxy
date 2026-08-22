@@ -7,7 +7,7 @@ export function registerMcpServerCommand(program: Command): void {
   program
     .command('mcp-server')
     .description(
-      'Run the Node9 MCP server — exposes node9 tools (undo, rules, …) to Claude, Cursor, and Gemini'
+      'Run the Node9 MCP server — exposes node9 tools (rules, status, scan, …) to Claude, Cursor, and Gemini'
     )
     .action(() => {
       runMcpServer();

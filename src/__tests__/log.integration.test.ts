@@ -114,49 +114,11 @@ describe('log PostToolUse snapshot behavior', () => {
     tmpCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-log-cwd-'));
   });
 
-  it('invokes createShadowSnapshot for Bash when a prior snapshot exists for the cwd', () => {
-    // Seed the stack with an existing snapshot for this cwd.
-    // We use a fake hash — git diff will fail to find it, so createShadowSnapshot
-    // deduplicates and returns the prior hash without writing a new stack entry.
-    // What we care about here is that createShadowSnapshot was CALLED at all,
-    // which we verify by checking that the shadow repo directory was initialized.
-    // The engine ships OFF (enableUndo defaults to false — the snapshot store
-    // filled a disk), and log.ts gates the Bash snapshot on it. This row is
-    // about the PRIOR-SNAPSHOT condition, so it states the precondition rather
-    // than inheriting whatever the default happens to be.
-    fs.writeFileSync(
-      path.join(tmpHome, '.node9', 'config.json'),
-      JSON.stringify({ settings: { enableUndo: true } })
-    );
-    writeSnapshotStack(tmpHome, [
-      {
-        hash: 'prior000',
-        tool: 'Edit',
-        argsSummary: 'src/app.ts',
-        cwd: tmpCwd,
-        timestamp: Date.now() - 1000,
-      },
-    ]);
-
-    const result = runLog(
-      {
-        tool_name: 'Bash',
-        tool_input: { command: 'echo hello > output.txt' },
-        cwd: tmpCwd,
-      },
-      tmpHome,
-      tmpCwd
-    );
-
-    expect(result.status).toBe(0);
-    // The shadow repo dir for tmpCwd is created by ensureShadowRepo inside
-    // createShadowSnapshot — its existence proves the function was invoked.
-    const shadowsDir = path.join(tmpHome, '.node9', 'snapshots');
-    expect(fs.existsSync(shadowsDir)).toBe(true);
-    // At least one shadow repo subdirectory should have been created
-    const subdirs = fs.readdirSync(shadowsDir);
-    expect(subdirs.length).toBeGreaterThan(0);
-  });
+  // The row that used to live here asserted createShadowSnapshot IS invoked for
+  // Bash when a prior snapshot exists. The undo feature is removed and the flag
+  // is pinned false, so that behaviour is gone by design. Its inverse — no write
+  // even with a stored `enableUndo: true` AND a prior entry — is R6 in
+  // undo-removed.integration.test.ts.
 
   it('does NOT create a snapshot when no prior snapshot exists for the cwd', () => {
     // Stack is empty — no prior snapshot for this cwd

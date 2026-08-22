@@ -790,7 +790,8 @@ export function getConfig(cwd?: string): Config {
 
     if (s.mode !== undefined) mergedSettings.mode = s.mode;
     if (s.autoStartDaemon !== undefined) mergedSettings.autoStartDaemon = s.autoStartDaemon;
-    if (s.enableUndo !== undefined) mergedSettings.enableUndo = s.enableUndo;
+    // enableUndo is deliberately NOT merged here — the undo feature was removed.
+    // It is pinned false below, after every layer. See the "Undo removed" block.
     if (s.enableHookLogDebug !== undefined)
       mergedSettings.enableHookLogDebug = s.enableHookLogDebug;
     if (s.approvers) mergedSettings.approvers = { ...mergedSettings.approvers, ...s.approvers };
@@ -1563,6 +1564,23 @@ export function getConfig(cwd?: string): Config {
   mergedPolicy.snapshot.tools = [...new Set(mergedPolicy.snapshot.tools)];
   mergedPolicy.snapshot.onlyPaths = [...new Set(mergedPolicy.snapshot.onlyPaths)];
   mergedPolicy.snapshot.ignorePaths = [...new Set(mergedPolicy.snapshot.ignorePaths)];
+
+  // ── Undo removed ──────────────────────────────────────────────────────────
+  // The undo/snapshot feature was removed: its store had no size ceiling and
+  // took a machine to 378 GB (~19 MB per minute of active agent work).
+  //
+  // ⭐ Pinned HERE — after every layer, managed override and env clamp — and
+  // deliberately NOT inside applyLayer. applyLayer runs once per config layer
+  // and early-returns on a null one, so on a machine with no config file it
+  // never executes at all: a pin placed there would leave the merged value
+  // coming solely from DEFAULT_CONFIG, an unrelated line that any later cleanup
+  // could delete without connecting it to this. At this point no input path
+  // remains — not global config, not a project node9.config.json, not the
+  // dashboard via the daemon, not cloud sync. A stored `true` from before the
+  // removal is honoured by the file writer and ignored here on purpose;
+  // `node9 undo` / `status` / `doctor` say so rather than failing silently.
+  // Guarded by src/__tests__/undo-pin.spec.ts (R1 is the no-config row).
+  mergedSettings.enableUndo = false;
 
   const result: Config = {
     settings: mergedSettings,

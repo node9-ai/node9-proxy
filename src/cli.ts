@@ -67,6 +67,7 @@ import { registerDecisionsCommand } from './cli/commands/decisions';
 import { registerDlpCommand } from './cli/commands/dlp';
 import { registerMaskCommand } from './cli/commands/mask';
 import { registerBlastCommand } from './cli/commands/blast';
+import { findUndoLeftovers, formatLeftovers, cleanupCommand } from './utils/undo-leftovers';
 
 const { version } = JSON.parse(
   fs.readFileSync(path.join(__dirname, '../package.json'), 'utf-8')
@@ -254,6 +255,19 @@ program
     console.log(chalk.gray('\n  Restart the agent for changes to take effect.'));
   });
 
+// The last thing a user removing node9 ever sees from us. `preuninstall` runs
+// `node9 uninstall` WITHOUT --purge, so without this the message says "config
+// and audit log" while up to hundreds of gigabytes of shadow git repos stay
+// behind under a path we just described as holding a config file.
+function undoLeftoverNote(): string {
+  const left = findUndoLeftovers();
+  if (!left) return '';
+  return (
+    `\n  ${formatLeftovers(left)} of snapshots from the removed undo feature also remain.` +
+    `\n  Delete them with: ${cleanupCommand(left)}`
+  );
+}
+
 // 2d. UNINSTALL
 program
   .command('uninstall')
@@ -346,7 +360,9 @@ program
       }
     } else {
       console.log(
-        chalk.gray('\n  ~/.node9/ kept — run with --purge to delete config and audit log')
+        chalk.gray(
+          `\n  ~/.node9/ kept — run with --purge to delete config and audit log${undoLeftoverNote()}`
+        )
       );
     }
 

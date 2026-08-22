@@ -185,7 +185,6 @@ node9 shield list    # show all shields + status
 - **Shell** — catches `curl | bash`, unauthorized `sudo`
 - **DLP** — flags AWS keys, GitHub tokens, Stripe keys, PEM private keys in any tool argument, file contents, or shell config (`~/.zshrc`, `~/.bashrc`)
 - **Response DLP** — background scanner reads Claude's conversation history and alerts you if Claude _wrote_ a secret in its response text
-- **Auto-undo** — git snapshot before every AI file edit → `node9 undo` to revert
 - **Skills pinning** — SHA-256 verification of installed Claude skills / plugins between sessions
 
 ## Review prompts — approve inline, in your agent
@@ -266,7 +265,7 @@ Beyond the three flow commands above (`scan` / `monitor` / `report`):
 | ---------------- | --------------------------------------------------------- | --------------------------------------- |
 | `node9 blast`    | What an AI agent can reach right now — files, creds, env  | First thing to run on any machine       |
 | `node9 tail`     | Live stream of every tool call (text-only, no TUI)        | Piping into other tools, CI, logs       |
-| `node9 sessions` | Session history with prompt, tool trace, cost, snapshot   | Reviewing a handoff or past work        |
+| `node9 sessions` | Session history with prompt, tool trace, and cost         | Reviewing a handoff or past work        |
 | `node9 dlp`      | Credential-leak findings in Claude response text          | Any time a DLP desktop alert fires      |
 | `node9 mask`     | Redact plaintext secrets from local session history files | After a DLP finding — cleans local disk |
 
@@ -316,7 +315,6 @@ def run_command(cmd: str) -> str:
 - **Runtime** intercepts tool calls via pre-execution hooks (Claude Code, Codex, Antigravity, GitHub Copilot CLI, Gemini CLI, Opencode, Pi) or via the MCP gateway (Cursor, Windsurf, VSCode, Claude Desktop). All decisions land in `~/.node9/audit.log` atomically.
 - **MCP gateway** is a stdio proxy; intercepts `tools/list` + `tools/call` JSON-RPC, forwards the rest
 - **Policy engine** uses [mvdan-sh](https://github.com/mvdan/sh) for bash AST analysis — defeats obfuscation via backslash escaping, variable substitution, eval of remote download
-- **Shadow repo** for auto-undo lives at `~/.node9/snapshots/<hash16>/` — never touches your `.git`
 - **Sandbox** generates a Dockerfile + entrypoint that seal an `ipset`/`iptables` deny-by-default egress wall, then drop to a non-root agent with node9's daemon + hooks running inside; only the agent's credential file is mounted, never your whole `~/.claude`
 
 ## Full docs

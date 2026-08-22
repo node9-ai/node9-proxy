@@ -502,7 +502,13 @@ export function registerLogCommand(program: Command): void {
           // For Bash, we capture post-execution state so that sed -i, echo >, tee etc.
           // are reversible. Guard: only snapshot if a prior snapshot exists for this cwd —
           // avoids cold-start overhead on projects where undo was never used.
-          if ((tool === 'Bash' || tool === 'bash') && config.settings.enableUndo !== false) {
+          // `=== true`, never `!== false`: `undefined !== false` is TRUE, so an
+          // absent field read as ENABLED and this write path opened itself on
+          // any machine whose merge did not supply the flag. The flag is now
+          // pinned false (config/index.ts), so this branch is dead — but the
+          // polarity is fixed here rather than left to the pin, because an
+          // absent value must never be the one that turns a writer on.
+          if ((tool === 'Bash' || tool === 'bash') && config.settings.enableUndo === true) {
             const bashCommand =
               typeof rawInput === 'object' &&
               rawInput !== null &&
