@@ -1,177 +1,113 @@
 // src/cli/commands/undo.ts
 // Registered as `node9 undo` by cli.ts.
-import path from 'path';
+//
+// The undo feature is REMOVED. This command survives to say so and to clean up:
+// a command that vanished would print "unknown command", which reads as a broken
+// install rather than a decision. The old flags (--list / --steps / --all) are
+// still accepted for the same reason — a user or a script that runs one should
+// get an explanation, not a commander parse error.
+//
+// Exit codes follow one rule: a flag that asked us to DO something exits
+// non-zero when it did not happen; a flag that asked a QUESTION exits 0 with the
+// answer. So `--steps 2` exits 1 (no revert occurred, and exiting 0 would claim
+// otherwise) while `--list` exits 0 (asked, answered: there is nothing).
+//
+// Why it went: the snapshot store had no size ceiling. It grew ~19 MB per minute
+// of active agent work and took one machine to 378 GB.
 import type { Command } from 'commander';
 import chalk from 'chalk';
-import { applyUndo, getSnapshotHistory, computeUndoDiff } from '../../undo.js';
-import type { SnapshotEntry } from '../../undo.js';
-import { runUndoNavigator } from '../../tui/undo-navigator.js';
-import { getConfig } from '../../config/index.js';
+import { confirm } from '@inquirer/prompts';
+import { undoLeftoverPaths, purgeUndoLeftovers } from '../../utils/undo-leftovers.js';
 
-/**
- * Walks up from startDir until it finds a directory that appears as a snapshot
- * cwd. This lets `node9 undo` work from any subdirectory of a project, the same
- * way `git` finds .git by traversing up.
- */
-function findMatchingCwd(startDir: string, history: SnapshotEntry[]): string | null {
-  const cwds = new Set(history.map((e) => e.cwd));
-  let dir = startDir;
-  while (true) {
-    if (cwds.has(dir)) return dir;
-    const parent = path.dirname(dir);
-    if (parent === dir) return null;
-    dir = parent;
-  }
+function removalNotice(): string {
+  return (
+    chalk.yellow('\nℹ️  The undo feature has been removed.\n') +
+    chalk.gray(
+      '    Its snapshot store had no size ceiling — it grew by roughly 19 MB per\n' +
+        '    minute of agent work and took one machine to 378 GB. Snapshots are no\n' +
+        '    longer taken, and no setting turns them back on.\n'
+    )
+  );
 }
 
-function formatAge(timestamp: number): string {
-  const age = Math.round((Date.now() - timestamp) / 1000);
-  if (age < 60) return `${age}s ago`;
-  if (age < 3600) return `${Math.round(age / 60)}m ago`;
-  if (age < 86400) return `${Math.round(age / 3600)}h ago`;
-  return `${Math.round(age / 86400)}d ago`;
+function leftoverNotice(paths: string[]): string {
+  if (paths.length === 0) return '';
+  return (
+    chalk.gray('\n    Files the feature left behind are still on disk:\n') +
+    paths.map((p) => chalk.gray(`      ${p}\n`)).join('') +
+    chalk.gray('\n    node9 does not delete them for you. To remove them:\n') +
+    chalk.cyan('      node9 undo --purge\n')
+  );
+}
+
+async function runPurge(assumeYes: boolean): Promise<void> {
+  const paths = undoLeftoverPaths();
+
+  if (paths.length === 0) {
+    console.log(chalk.green('\n✅ Nothing to remove — the undo store is already gone.\n'));
+    return;
+  }
+
+  console.log(chalk.yellow('\n⚠️  This will permanently delete:\n'));
+  for (const p of paths) console.log(chalk.gray(`      ${p}`));
+  console.log(
+    chalk.gray(
+      '\n    These hold snapshots of your own source code. Nothing else in\n' +
+        '    ~/.node9 is touched (config, audit log and credentials stay).\n'
+    )
+  );
+
+  if (!assumeYes) {
+    // An unattended run must never delete a user's data. `preuninstall` runs
+    // node9 without a TTY, and so does CI.
+    if (!process.stdin.isTTY) {
+      console.error(
+        chalk.red('\n  Refusing to delete without confirmation.') +
+          chalk.gray('\n  No terminal is attached — re-run with --yes to confirm.\n')
+      );
+      process.exitCode = 1;
+      return;
+    }
+    const ok = await confirm({ message: 'Delete these files?', default: false });
+    if (!ok) {
+      console.log(chalk.gray('\n  Skipped — nothing was deleted.\n'));
+      return;
+    }
+  }
+
+  const result = purgeUndoLeftovers();
+
+  for (const p of result.deleted) console.log(chalk.green(`  ✅ removed ${p}`));
+  for (const s of result.skipped)
+    console.log(chalk.yellow(`  ⚠️  skipped ${s.path} — ${s.reason}`));
+  for (const f of result.failed) console.error(chalk.red(`  ❌ ${f.path} — ${f.reason}`));
+
+  if (result.skipped.length > 0 || result.failed.length > 0) {
+    console.error(chalk.red('\n  Some files remain — see above.\n'));
+    process.exitCode = 1;
+  } else {
+    console.log(chalk.green('\n  Done.\n'));
+  }
 }
 
 export function registerUndoCommand(program: Command): void {
   program
     .command('undo')
-    .description(
-      'Browse and restore pre-AI snapshots. Arrow keys to navigate, Enter to restore. ' +
-        'Use --steps N to go back N actions non-interactively, --list to print history.'
-    )
-    .option('--steps <n>', 'Non-interactive: restore N steps back (default: 1)')
-    .option('--list', 'Print snapshot history as a table and exit')
-    .option('--all', 'Include snapshots from all directories, not just the current one')
-    .action(async (options: { steps?: string; list?: boolean; all?: boolean }) => {
-      // Distinguish "disabled" from "nothing captured yet": the old message
-      // sent users hunting for a broken hook when the feature was simply off.
-      if (getConfig().settings.enableUndo === false) {
-        console.log(
-          chalk.yellow('\nℹ️  Snapshots are disabled, so there is nothing to undo.\n') +
-            chalk.gray(
-              '    Enable with `"settings": { "enableUndo": true }` in ~/.node9/config.json.\n' +
-                '    Off by default while the snapshot store is rebuilt with a size ceiling.\n'
-            )
-        );
+    .description('Removed — the snapshot store had no size ceiling. Use --purge to clean up.')
+    .option('--purge', 'Delete the files the removed feature left on disk')
+    .option('--yes', 'Skip the confirmation prompt (required when there is no terminal)')
+    .option('--list', 'Removed — kept so an existing script gets an explanation')
+    .option('--all', 'Removed — kept so an existing script gets an explanation')
+    .option('--steps <n>', 'Removed — kept so an existing script gets an explanation')
+    .action(async (options: { purge?: boolean; yes?: boolean; steps?: string }) => {
+      if (options.purge) {
+        await runPurge(options.yes === true);
         return;
       }
 
-      const allHistory = getSnapshotHistory();
-      const matchedCwd = options.all ? null : findMatchingCwd(process.cwd(), allHistory);
-      const history = options.all ? allHistory : allHistory.filter((s) => s.cwd === matchedCwd);
+      console.log(removalNotice() + leftoverNotice(undoLeftoverPaths()));
 
-      if (history.length === 0) {
-        if (!options.all && allHistory.length > 0) {
-          console.log(
-            chalk.yellow(
-              `\nℹ️  No snapshots found for the current directory (${process.cwd()}).\n` +
-                `    Run ${chalk.cyan('node9 undo --all')} to see snapshots from all projects.\n`
-            )
-          );
-        } else {
-          console.log(chalk.yellow('\nℹ️  No undo snapshots found.\n'));
-        }
-        return;
-      }
-
-      // ── --list mode ─────────────────────────────────────────────────────
-      if (options.list) {
-        console.log(chalk.magenta.bold('\n⏪  Snapshot History\n'));
-        console.log(
-          chalk.gray(
-            `  ${'#'.padEnd(3)}  ${'File / Command'.padEnd(30)}  ${'Tool'.padEnd(8)}  ${'When'.padEnd(10)}  Dir`
-          )
-        );
-        console.log(chalk.gray('  ' + '─'.repeat(80)));
-
-        // Display newest first
-        const display = [...history].reverse();
-        let prevTs: number | null = null;
-        for (let i = 0; i < display.length; i++) {
-          const e = display[i];
-          const isGap = prevTs !== null && prevTs - e.timestamp > 60_000;
-          if (isGap) console.log(chalk.gray('  ── earlier ──'));
-          const label = (e.argsSummary || e.files?.[0] || '—').slice(0, 30).padEnd(30);
-          const tool = e.tool.slice(0, 8).padEnd(8);
-          const when = formatAge(e.timestamp).padEnd(10);
-          const dir = e.cwd.length > 30 ? '…' + e.cwd.slice(-29) : e.cwd;
-          console.log(
-            chalk.white(
-              `  ${String(i + 1).padEnd(3)}  ${label}  ${chalk.cyan(tool)}  ${chalk.gray(when)}  ${chalk.gray(dir)}`
-            )
-          );
-          prevTs = e.timestamp;
-        }
-        console.log('');
-        return;
-      }
-
-      // ── --steps mode (non-interactive, backward compat) ─────────────────
-      if (options.steps !== undefined) {
-        const steps = Math.max(1, parseInt(options.steps, 10) || 1);
-        const idx = history.length - steps;
-        if (idx < 0) {
-          console.log(
-            chalk.yellow(
-              `\nℹ️  Only ${history.length} snapshot(s) available, cannot go back ${steps}.\n`
-            )
-          );
-          return;
-        }
-        const snapshot = history[idx];
-        const ageStr = formatAge(snapshot.timestamp);
-
-        console.log(
-          chalk.magenta.bold(`\n⏪  Node9 Undo${steps > 1 ? ` (${steps} steps back)` : ''}`)
-        );
-        console.log(
-          chalk.white(
-            `    Tool:  ${chalk.cyan(snapshot.tool)}${snapshot.argsSummary ? chalk.gray(' → ' + snapshot.argsSummary) : ''}`
-          )
-        );
-        console.log(chalk.white(`    When:  ${chalk.gray(ageStr)}`));
-        console.log(chalk.white(`    Dir:   ${chalk.gray(snapshot.cwd)}`));
-        if (steps > 1)
-          console.log(
-            chalk.yellow(`    Note:  This will also undo the ${steps - 1} action(s) after it.`)
-          );
-        console.log('');
-
-        // Show diff: prefer stored diff, fall back to computed
-        const diff = snapshot.diff ?? computeUndoDiff(snapshot.hash, snapshot.cwd);
-        if (diff) {
-          const lines = diff
-            .split('\n')
-            .filter((l) => !l.startsWith('diff --git') && !l.startsWith('index '));
-          for (const line of lines) {
-            if (line.startsWith('+++') || line.startsWith('---')) console.log(chalk.bold(line));
-            else if (line.startsWith('+')) console.log(chalk.green(line));
-            else if (line.startsWith('-')) console.log(chalk.red(line));
-            else if (line.startsWith('@@')) console.log(chalk.cyan(line));
-            else console.log(chalk.gray(line));
-          }
-          console.log('');
-        } else {
-          console.log(
-            chalk.gray('    (no diff available — working tree may already match snapshot)\n')
-          );
-        }
-
-        const { confirm } = await import('@inquirer/prompts');
-        const proceed = await confirm({ message: `Revert to this snapshot?`, default: false });
-        if (proceed) {
-          if (applyUndo(snapshot.hash, snapshot.cwd)) {
-            console.log(chalk.green('\n✅ Reverted successfully.\n'));
-          } else {
-            console.error(chalk.red('\n❌ Undo failed. Ensure you are in a Git repository.\n'));
-          }
-        } else {
-          console.log(chalk.gray('\nCancelled.\n'));
-        }
-        return;
-      }
-
-      // ── Interactive navigator (default) ─────────────────────────────────
-      await runUndoNavigator(history);
+      // `--steps N` asked for a revert. It did not happen, so we do not exit 0.
+      if (options.steps !== undefined) process.exitCode = 1;
     });
 }

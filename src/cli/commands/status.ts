@@ -16,6 +16,7 @@ import {
   autostartAdvice,
 } from '../../daemon/service';
 import { agoLabel } from '../../lib/relative-time';
+import { undoLeftoverPaths } from '../../utils/undo-leftovers';
 
 // Renders one agent's wiring: a header, ✓/✗ rows for each hook event, and the
 // MCP-proxied server list (omitted when the agent has no MCP surface). Hook +
@@ -123,17 +124,15 @@ export function registerStatusCommand(program: Command): void {
         );
       }
 
-      if (settings.enableUndo) {
-        console.log(
-          chalk.magenta('  ● Undo Engine') +
-            chalk.gray(`    → Auto-snapshotting Git repos on AI change`)
-        );
-      } else {
-        // Printed even when off: omitting the line made "disabled" look
-        // identical to "this build has no undo feature".
+      // The undo feature is removed, so there is no engine line to print. The
+      // only reason to mention it at all is leftover data: a user whose disk is
+      // full needs to be told where it went. A machine that never enabled the
+      // feature has no leftovers and sees nothing — silence is correct there,
+      // because "off" would imply a switch that no longer exists.
+      if (undoLeftoverPaths().length > 0) {
         console.log(
           chalk.gray('  ○ Undo Engine') +
-            chalk.gray('    → off (enableUndo: false) — no snapshots are being taken')
+            chalk.gray('    → removed — old snapshot files remain (node9 undo --purge)')
         );
       }
 

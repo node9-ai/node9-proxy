@@ -782,7 +782,11 @@ export function startDaemon(): void {
         if (data.slackEnabled !== undefined) writeGlobalSetting('slackEnabled', data.slackEnabled);
         if (data.enableTrustSessions !== undefined)
           writeGlobalSetting('enableTrustSessions', data.enableTrustSessions);
-        if (data.enableUndo !== undefined) writeGlobalSetting('enableUndo', data.enableUndo);
+        // enableUndo is deliberately NOT accepted: the undo feature was removed
+        // and the flag is pinned false at read time. Persisting it here would
+        // write `"enableUndo": true` into the user's config.json, answer
+        // {ok:true}, and then be ignored — a lie on disk, acknowledged as
+        // success. Dropping the key makes the write a no-op instead.
         if (data.enableHookLogDebug !== undefined)
           writeGlobalSetting('enableHookLogDebug', data.enableHookLogDebug);
         if (data.approvers !== undefined) writeGlobalSetting('approvers', data.approvers);

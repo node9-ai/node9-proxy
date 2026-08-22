@@ -199,13 +199,18 @@ export const DEFAULT_CONFIG: Config = {
   settings: {
     mode: 'standard',
     autoStartDaemon: true,
-    // OFF by default. The snapshot store is a per-project bare git repo with
-    // no size ceiling, and eviction drops the index row without deleting the
-    // objects — on one machine it reached 378G (352G of it orphaned tmp_pack_*
-    // from interrupted `git gc`) and filled the disk. A security tool must not
-    // be what fills a customer's disk. Re-enable per install with
-    // `{"settings":{"enableUndo":true}}`; the default flips back when the
-    // bounded copy-store lands (doc/undo-v2-copy-store-design.md).
+    // The undo feature was REMOVED. This default is one of two places that say
+    // so; the other is the pin further down, which overwrites whatever a config
+    // file, the dashboard or the cloud supplies. Setting `enableUndo` anywhere
+    // has no effect — do not restore the advice that used to live here, because
+    // a comment recommending a knob that is silently discarded is the same lie
+    // on disk the pin exists to prevent.
+    //
+    // Why it went: the store was a per-project bare git repo with no size
+    // ceiling, and eviction dropped the index row without deleting the objects.
+    // On one machine it reached 378G (352G of it orphaned tmp_pack_* from an
+    // interrupted `git gc`) and filled the disk. A security tool must not be
+    // what fills a customer's disk. Leftovers: `node9 undo --purge`.
     enableUndo: false,
     enableHookLogDebug: true,
     approvalTimeoutMs: 120_000, // 120-second auto-deny timeout
@@ -790,7 +795,8 @@ export function getConfig(cwd?: string): Config {
 
     if (s.mode !== undefined) mergedSettings.mode = s.mode;
     if (s.autoStartDaemon !== undefined) mergedSettings.autoStartDaemon = s.autoStartDaemon;
-    if (s.enableUndo !== undefined) mergedSettings.enableUndo = s.enableUndo;
+    // enableUndo is deliberately NOT merged here — the undo feature was removed.
+    // It is pinned false below, after every layer. See the "Undo removed" block.
     if (s.enableHookLogDebug !== undefined)
       mergedSettings.enableHookLogDebug = s.enableHookLogDebug;
     if (s.approvers) mergedSettings.approvers = { ...mergedSettings.approvers, ...s.approvers };
@@ -1563,6 +1569,23 @@ export function getConfig(cwd?: string): Config {
   mergedPolicy.snapshot.tools = [...new Set(mergedPolicy.snapshot.tools)];
   mergedPolicy.snapshot.onlyPaths = [...new Set(mergedPolicy.snapshot.onlyPaths)];
   mergedPolicy.snapshot.ignorePaths = [...new Set(mergedPolicy.snapshot.ignorePaths)];
+
+  // ── Undo removed ──────────────────────────────────────────────────────────
+  // The undo/snapshot feature was removed: its store had no size ceiling and
+  // took a machine to 378 GB (~19 MB per minute of active agent work).
+  //
+  // ⭐ Pinned HERE — after every layer, managed override and env clamp — and
+  // deliberately NOT inside applyLayer. applyLayer runs once per config layer
+  // and early-returns on a null one, so on a machine with no config file it
+  // never executes at all: a pin placed there would leave the merged value
+  // coming solely from DEFAULT_CONFIG, an unrelated line that any later cleanup
+  // could delete without connecting it to this. At this point no input path
+  // remains — not global config, not a project node9.config.json, not the
+  // dashboard via the daemon, not cloud sync. A stored `true` from before the
+  // removal is honoured by the file writer and ignored here on purpose;
+  // `node9 undo` / `status` / `doctor` say so rather than failing silently.
+  // Guarded by src/__tests__/undo-pin.spec.ts (R1 is the no-config row).
+  mergedSettings.enableUndo = false;
 
   const result: Config = {
     settings: mergedSettings,

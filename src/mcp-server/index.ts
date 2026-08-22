@@ -1,5 +1,5 @@
 // src/mcp-server/index.ts
-// Node9 MCP Server — exposes node9 capabilities (undo, rules, …) as MCP tools
+// Node9 MCP Server — exposes node9 capabilities (rules, status, scan, …) as MCP tools
 // over stdio (newline-delimited JSON-RPC 2.0).
 //
 // Architecture:
@@ -7,13 +7,12 @@
 //     ↓ stdin/stdout
 //   Node9 MCP Server  ← this file
 //     ↓ direct function calls
-//   node9 internals (undo.ts, config, …)
+//   node9 internals (config, shields, …)
 import readline from 'readline';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { spawnSync } from 'child_process';
-import { getSnapshotHistory, applyUndo } from '../undo';
 import { classifyDecision, decisionTag } from '../audit/decision';
 import { getConfig, checkPause } from '../core';
 import { isDaemonRunning } from '../auth/daemon';
@@ -66,7 +65,6 @@ export const TOOL_CAPABILITY: Record<string, 'readonly' | 'add' | 'weaken'> = {
   // add / restorative — always allowed
   node9_shield_enable: 'add',
   node9_rule_add: 'add', // already block/review-only — handleRuleAdd rejects "allow"
-  node9_undo_revert: 'add', // restorative
   node9_egress_protect: 'add', // enable/strengthen egress (monotonic — never reduces)
   node9_egress_deny: 'add', // add a deny host (deny always wins)
   // readonly
@@ -81,8 +79,6 @@ export const TOOL_CAPABILITY: Record<string, 'readonly' | 'add' | 'weaken'> = {
   node9_explain: 'readonly',
   node9_shield_list: 'readonly',
   node9_approver_list: 'readonly',
-  node9_undo_list: 'readonly',
-  node9_undo_detail: 'readonly',
   node9_egress_status: 'readonly',
 };
 
@@ -96,7 +92,7 @@ export const TOOLS = [
   {
     name: 'node9_status',
     description:
-      'Show the current node9 protection status: mode, daemon state, undo engine, pause state, ' +
+      'Show the current node9 protection status: mode, daemon state, pause state, ' +
       'active shields, and whether agent hooks are wired. Use this to understand what protection ' +
       'is active before doing risky work.',
     inputSchema: { type: 'object', properties: {}, required: [] },
@@ -178,62 +174,6 @@ export const TOOLS = [
         },
       },
       required: ['channel', 'enabled'],
-    },
-  },
-  {
-    name: 'node9_undo_list',
-    description:
-      'List the node9 snapshot history. Each entry shows the git hash, tool that triggered it, ' +
-      'a short summary, affected files, working directory, and timestamp. ' +
-      'Use this to find a hash before calling node9_undo_revert or node9_undo_detail.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        cwd: {
-          type: 'string',
-          description:
-            'Filter to snapshots for a specific project directory. Omit to show all projects.',
-        },
-      },
-      required: [],
-    },
-  },
-  {
-    name: 'node9_undo_detail',
-    description:
-      'Show the full details of a specific node9 snapshot: unified diff, exact files changed, ' +
-      'tool that triggered it, command summary, working directory, and timestamp. ' +
-      'Use this to understand exactly what a snapshot contains before deciding to revert.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        hash: {
-          type: 'string',
-          description: 'The git commit hash (full or 7-char prefix) from node9_undo_list.',
-        },
-      },
-      required: ['hash'],
-    },
-  },
-  {
-    name: 'node9_undo_revert',
-    description:
-      'Revert the working directory to a specific node9 snapshot. ' +
-      'Call node9_undo_list first to find the hash you want to restore. ' +
-      'WARNING: this overwrites current files — any unsaved work will be lost.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        hash: {
-          type: 'string',
-          description: 'The full git commit hash from node9_undo_list.',
-        },
-        cwd: {
-          type: 'string',
-          description: 'Absolute path to the project directory. Defaults to process.cwd().',
-        },
-      },
-      required: ['hash'],
     },
   },
   {
@@ -468,7 +408,6 @@ function handleStatus(): string {
 
   lines.push(`Mode: ${settings.mode}`);
   lines.push(`Daemon: ${daemonUp ? 'running' : 'stopped'}`);
-  lines.push(`Undo engine: ${settings.enableUndo ? 'enabled' : 'disabled'}`);
 
   if (paused.paused) {
     const until = paused.expiresAt
@@ -500,7 +439,6 @@ function handleConfigGet(): string {
   const s = config.settings;
   const lines: string[] = [
     `mode: ${s.mode}`,
-    `enableUndo: ${s.enableUndo}`,
     `flightRecorder: ${s.flightRecorder}`,
     `approvalTimeoutMs: ${s.approvalTimeoutMs}`,
     `approvers:`,
@@ -861,86 +799,6 @@ function handleExplainMcp(args: Record<string, unknown>): string {
   return runCliCommand(cliArgs);
 }
 
-function handleUndoList(args: Record<string, unknown>): string {
-  const cwdFilter = typeof args.cwd === 'string' && args.cwd ? args.cwd : null;
-  let history = getSnapshotHistory();
-  if (cwdFilter) {
-    history = history.filter((e) => e.cwd === cwdFilter);
-  }
-  if (history.length === 0) {
-    const hint = cwdFilter ? ` for cwd: ${cwdFilter}` : '';
-    return `No snapshots found${hint}. Node9 captures snapshots automatically before file edits.`;
-  }
-  const lines = history
-    .slice()
-    .reverse()
-    .map((entry, i) => {
-      const date = new Date(entry.timestamp).toLocaleString();
-      const files = entry.files?.length ? `${entry.files.length} file(s)` : 'unknown files';
-      const summary = entry.argsSummary ? ` — ${entry.argsSummary}` : '';
-      return `[${i + 1}] ${entry.hash.slice(0, 7)}  ${date}  ${entry.tool}${summary}  (${files})  cwd: ${entry.cwd}\n    full hash: ${entry.hash}`;
-    });
-  const header = cwdFilter
-    ? `${lines.length} snapshot(s) for ${cwdFilter}:`
-    : `${lines.length} snapshot(s) across all projects:`;
-  return `${header}\n\n${lines.join('\n\n')}`;
-}
-
-function handleUndoDetail(args: Record<string, unknown>): string {
-  const hash = args.hash;
-  if (typeof hash !== 'string' || !hash) {
-    throw new Error('hash is required');
-  }
-  const history = getSnapshotHistory();
-  // Match full hash or 7-char prefix
-  const entry = history.find((e) => e.hash === hash || e.hash.startsWith(hash));
-  if (!entry) {
-    throw new Error(`Snapshot ${hash} not found. Run node9_undo_list to see available snapshots.`);
-  }
-
-  const lines: string[] = [];
-  lines.push(`Hash:    ${entry.hash}`);
-  lines.push(`Tool:    ${entry.tool}`);
-  lines.push(`Summary: ${entry.argsSummary || '(none)'}`);
-  lines.push(`CWD:     ${entry.cwd}`);
-  lines.push(`Time:    ${new Date(entry.timestamp).toLocaleString()}`);
-  lines.push(`Files:   ${entry.files?.length ? entry.files.join(', ') : '(none recorded)'}`);
-
-  if (entry.diff) {
-    lines.push('');
-    lines.push('── Diff ─────────────────────────────────────────────────');
-    lines.push(entry.diff);
-  } else {
-    lines.push('');
-    lines.push(
-      'No diff available (first snapshot for this project, or snapshot predates diff capture).'
-    );
-  }
-
-  return lines.join('\n');
-}
-
-function handleUndoRevert(args: Record<string, unknown>): string {
-  const hash = args.hash;
-  if (typeof hash !== 'string' || !hash) {
-    throw new Error('hash is required and must be a non-empty string');
-  }
-  // Basic hash format check — hex chars only, 7-40 length
-  if (!/^[0-9a-f]{7,40}$/i.test(hash)) {
-    throw new Error(`Invalid hash format: ${hash}`);
-  }
-
-  const cwd = typeof args.cwd === 'string' && args.cwd ? args.cwd : process.cwd();
-
-  const success = applyUndo(hash, cwd);
-  if (!success) {
-    throw new Error(
-      `Revert failed for hash ${hash}. The snapshot may not exist for this directory, or git encountered an error.`
-    );
-  }
-  return `Successfully reverted to snapshot ${hash.slice(0, 7)} in ${cwd}.`;
-}
-
 // ── Protocol loop ─────────────────────────────────────────────────────────────
 
 // LIFECYCLE GOTCHA: this server is LONG-LIVED — the MCP client (Claude Code,
@@ -1031,12 +889,6 @@ export function runMcpServer(): void {
           text = handleApproverList();
         } else if (toolName === 'node9_approver_set') {
           text = handleApproverSet(toolArgs);
-        } else if (toolName === 'node9_undo_list') {
-          text = handleUndoList(toolArgs);
-        } else if (toolName === 'node9_undo_detail') {
-          text = handleUndoDetail(toolArgs);
-        } else if (toolName === 'node9_undo_revert') {
-          text = handleUndoRevert(toolArgs);
         } else if (toolName === 'node9_audit_get') {
           text = handleAuditGet(toolArgs);
         } else if (toolName === 'node9_policy_get') {

@@ -18,6 +18,7 @@ import {
 } from '../../daemon/service';
 import { agoLabel } from '../../lib/relative-time';
 import { readStartupCause } from '../../daemon/startup-log';
+import { undoLeftoverPaths } from '../../utils/undo-leftovers';
 
 export function registerDoctorCommand(program: Command, version: string): void {
   program
@@ -68,10 +69,9 @@ export function registerDoctorCommand(program: Command, version: string): void {
         const gitVersion = execSync('git --version', { encoding: 'utf-8', timeout: 3000 }).trim();
         pass(gitVersion);
       } catch {
-        warn(
-          'git not found — Undo Engine will be disabled',
-          'Install git to enable snapshot-based undo'
-        );
+        // The undo wording that used to live here recommended git for a feature
+        // that no longer exists. git is still checked on its own merits.
+        warn('git not found', 'Install git — node9 reads repo state for scans and reports');
       }
 
       // ── Config ───────────────────────────────────────────────────────────────
@@ -86,6 +86,21 @@ export function registerDoctorCommand(program: Command, version: string): void {
         }
       } else {
         warn('~/.node9/config.json not found (using defaults)', 'Run: node9 init');
+      }
+
+      // ⚠️ A TOP-LEVEL check on purpose. The undo notice used to live inside the
+      // `catch` of the git probe above, which meant it was invisible to anyone
+      // who had git installed — i.e. to every user the feature ever worked for,
+      // including the one whose disk it filled. A leftover store is exactly what
+      // someone runs `doctor` to find, so it must not hide behind a branch.
+      const undoLeftovers = undoLeftoverPaths(homeDir);
+      if (undoLeftovers.length > 0) {
+        warn(
+          `undo removed — ${undoLeftovers.length} leftover snapshot ${
+            undoLeftovers.length === 1 ? 'path' : 'paths'
+          } still on disk`,
+          'Remove them when ready: node9 undo --purge'
+        );
       }
 
       const projectConfigPath = path.join(process.cwd(), 'node9.config.json');

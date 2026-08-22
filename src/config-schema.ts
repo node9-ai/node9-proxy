@@ -79,7 +79,11 @@ export const ConfigFileSchema = z
       .object({
         mode: z.enum(['standard', 'strict', 'audit', 'observe']).optional(),
         autoStartDaemon: z.boolean().optional(),
-        enableUndo: z.boolean().optional(),
+        // enableUndo / policy.snapshot: removed with the undo feature. The
+        // schema strips undeclared keys silently (plain zod object — no
+        // .strict(), no .passthrough()), so a config still carrying them stays
+        // valid and simply loses them. Keeping the fields would instead make
+        // `node9_config_get` advertise a removed feature as a live knob.
         enableHookLogDebug: z.boolean().optional(),
         approvalTimeoutMs: z.number().nonnegative().optional(),
         approvalTimeoutSeconds: z.number().nonnegative().optional(),
@@ -137,13 +141,6 @@ export const ConfigFileSchema = z
         ignoredTools: z.array(z.string()).optional(),
         toolInspection: z.record(z.string()).optional(),
         smartRules: z.array(SmartRuleSchema).optional(),
-        snapshot: z
-          .object({
-            tools: z.array(z.string()).optional(),
-            onlyPaths: z.array(z.string()).optional(),
-            ignorePaths: z.array(z.string()).optional(),
-          })
-          .optional(),
         dlp: z
           .object({
             enabled: z.boolean().optional(),
