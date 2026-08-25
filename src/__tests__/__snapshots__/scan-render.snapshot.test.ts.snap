@@ -200,7 +200,7 @@ $9025.15 AI spend  ·  4 risky operations
 
 🔑  4   credential leak     (GitHub Token ×2, AWS Access Key, JWT)
 🛑  8   would have blocked  (force-push ×5, eval-remote)
-🔁  1   agent loops         (1% wasted  ·  ~$0.2460)
+🔁  1   agent loops         (125 wasted calls (1% of all calls)  ·  ~$0.2460)
 📂  1   long iterations     (deep work — not waste)
 👁  56  flagged for review  (rm)
 
@@ -235,7 +235,7 @@ exports[`renderNarrativeScorecard — output snapshots > rich fixture (critical 
      • 5 credential files reachable on disk
 
   🟢  MEDIUM     3 findings
-     • 2 agent loops (2% of calls, ~$0.2460 wasted)
+     • 2 agent loops (225 wasted calls, 2% of calls, ~$0.2460 wasted)
      • rm calls
 
 →  npx node9-ai scan       run this on your machine
@@ -256,7 +256,7 @@ exports[`renderPanelScorecard — output snapshots > panel fixture (critical sco
 "  ╭─ TOP FINDINGS ───────────────────────────────────────────────────────────╮
   │ 🚨 2 credential leaks in tool input  (latest: 2d ago, GitHub Token)      │
   │ 🛑 2 ops node9 would have blocked  (block-read-ssh, block-eval-remote)   │
-  │ 🔁 1 agent loops detected  (Edit dominates, 1% wasted)                   │
+  │ 🔁 1 agent loops detected  (Edit dominates, 125 wasted calls · 1% of calls) │
   │ 🔭 5 secrets reachable on disk  → enable project-jail (+53 pts)          │
   ╰──────────────────────────────────────────────────────────────────────────╯
 
@@ -276,7 +276,7 @@ exports[`renderPanelScorecard — output snapshots > panel fixture (critical sco
   │ 👁️  review-read-credentials  ×3    needs shield:project-jail             │
   ╰──────────────────────────────────────────────────────────────────────────╯
 
-  ╭─ AGENT LOOPS  ·  1 repeated patterns  ·  1% wasted ──────────────────────╮
+  ╭─ AGENT LOOPS  ·  1 pattern  ·  125 wasted calls (1% of all calls) ───────╮
   │ Edit      ×125 repeats    (100%)                                         │
   │                                                                          │
   │ Top stuck patterns:                                                      │
@@ -336,23 +336,23 @@ exports[`renderScanScorecardInk — output snapshots > panel fixture (critical s
 │                                          │ │ Tools / session ~385                     │
 │                                          │ │ Cost / session  ~$372                    │
 ╰──────────────────────────────────────────╯ ╰──────────────────────────────────────────╯
-━━━━━━━━━━━━━━━━━━━━━━ Critical (2 secrets leaked + 2 ops blocked) ━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━ Critical (2 secrets leaked + 2 ops would be blocked) ━━━━━━━━━━━━━━━━━━
 ╭──────────────────────────────────────────╮ ╭──────────────────────────────────────────╮
 │ CREDENTIAL LEAKS                         │ │ WOULD HAVE BLOCKED                       │
 │   2d GitHub Token   [Bash]        claude │ │ ✗ block-read-ssh   ×1 needs shield:proj… │
 │  19d GCP API Key    [user-prompt] gemini │ │ ✗ block-eval-remote ×1  needs shield:ba… │
 │ → DLP · node9 mask (runtime + cleanup)   │ │ → install node9 + enable shields above   │
 ╰──────────────────────────────────────────╯ ╰──────────────────────────────────────────╯
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━ High (5 paths reachable on disk) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ High (5 paths reachable) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ╭────────────────────────────────────────────────────────────────────────────────────────╮
-│ BLAST RADIUS                                                                           │
+│ BLAST RADIUS · top 4 of 5                                                              │
 │ ✗  ~/.ssh/id_rsa                       RSA private key                                 │
 │ ✗  ~/.ssh/id_ed25519                   Ed25519 private key                             │
 │ ✗  ~/.config/gcloud/credentials.db     GCP credentials                                 │
 │ ✗  ~/.npmrc                            npm auth token                                  │
 │ → project-jail shield blocks agent reads of these paths                                │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
-━━━━━━━━━━━━━━━━━━━━━━ Medium (37 ops flagged · 1 loop · 1% wasted) ━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━ Medium (37 ops flagged · 1 loop · 125 wasted calls (1% of all calls)) ━━━━━━━━━━
 ╭──────────────────────────────────────────╮ ╭──────────────────────────────────────────╮
 │ REVIEW QUEUE                             │ │ AGENT LOOPS                              │
 │ review-git-destructive×22   default      │ │ Edit      ×125          100%             │

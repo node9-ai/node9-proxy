@@ -14,6 +14,7 @@ import { Box, Text } from 'ink';
 
 import type { ScanSummary } from '../../../../scan-summary.js';
 import { relativeDate } from '../../scan-derive.js';
+import { topOf } from './title-count.js';
 
 interface Props {
   summary: ScanSummary;
@@ -24,10 +25,10 @@ interface Props {
   now?: Date;
 }
 
-/** Max leak rows shown individually. Anything past this collapses to
- *  a `… +N more` line so the panel stays bounded on heavy-leak
- *  machines. 4 keeps the panel tight against BLOCKED in the side-by-
- *  side Critical band — the +N more line handles overflow. */
+/** Max leak rows shown individually. 4 keeps the panel tight against
+ *  BLOCKED in the side-by-side Critical band. Overflow is signalled in
+ *  the panel TITLE (`· top 4 of N`, see title-count.ts) — a `+N more`
+ *  row was tried and removed to save vertical space. */
 const ROW_LIMIT = 4;
 
 export function LeaksPanel({ summary, width, now = new Date() }: Props): React.ReactElement | null {
@@ -38,6 +39,7 @@ export function LeaksPanel({ summary, width, now = new Date() }: Props): React.R
     <Box borderStyle="round" borderColor="red" paddingX={1} flexDirection="column" width={width}>
       <Text bold color="red">
         CREDENTIAL LEAKS
+        <Text dimColor>{topOf(Math.min(leaks.length, ROW_LIMIT), leaks.length)}</Text>
       </Text>
 
       {leaks.slice(0, ROW_LIMIT).map((leak, i) => (
@@ -59,9 +61,9 @@ export function LeaksPanel({ summary, width, now = new Date() }: Props): React.R
         </Box>
       ))}
 
-      {/* No `… +N more` line — the severity-band header already
-       *  reports the total count, e.g. "Critical (5 secrets leaked)".
-       *  Keeping the panel one row tighter saves vertical space. */}
+      {/* No `… +N more` row — the subset signal lives in the panel
+       *  title (`· top 4 of N`) so the panel stays one row tighter.
+       *  The severity band above carries the total as well. */}
       <Box>
         <Text dimColor>{'→ '}</Text>
         <Text bold color="cyan">

@@ -2693,9 +2693,11 @@ export function renderCompactScorecard(input: CompactInput): void {
   const longIterations = scan.loopFindings.filter((l) => l.kind === 'long-iteration');
 
   if (realLoops.length > 0) {
-    const { wastePct } = computeLoopWaste(realLoops, scan.totalToolCalls);
+    const { wastePct, wastedCalls } = computeLoopWaste(realLoops, scan.totalToolCalls);
     const wasteParts: string[] = [];
-    if (wastePct > 0) wasteParts.push(`${wastePct}% wasted`);
+    // "% of all calls", never bare "% wasted": the percentage is a share of
+    // tool CALLS, and unlabeled it reads as a share of the cost beside it.
+    if (wastedCalls > 0) wasteParts.push(`${wastedCalls} wasted calls (${wastePct}% of all calls)`);
     if (summary.loopWastedUSD > 0) wasteParts.push('~' + fmtCost(summary.loopWastedUSD));
     const wasteSummary = wasteParts.length ? `(${wasteParts.join('  ·  ')})` : '';
     console.log(
@@ -2822,10 +2824,10 @@ export function renderNarrativeScorecard(input: CompactInput): void {
 
   // ── Loops → medium ──────────────────────────────────────────────────
   if (scan.loopFindings.length > 0) {
-    const { wastePct } = computeLoopWaste(scan.loopFindings, scan.totalToolCalls);
+    const { wastePct, wastedCalls } = computeLoopWaste(scan.loopFindings, scan.totalToolCalls);
     const cost = summary.loopWastedUSD > 0 ? `, ~${fmtCost(summary.loopWastedUSD)} wasted` : '';
     medium.push({
-      label: `${scan.loopFindings.length} agent loops (${wastePct}% of calls${cost})`,
+      label: `${scan.loopFindings.length} agent loops (${wastedCalls} wasted calls, ${wastePct}% of calls${cost})`,
       count: scan.loopFindings.length,
     });
   }
@@ -3018,7 +3020,7 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
     );
   }
   if (scan.loopFindings.length > 0) {
-    const { wastePct } = computeLoopWaste(scan.loopFindings, scan.totalToolCalls);
+    const { wastePct, wastedCalls } = computeLoopWaste(scan.loopFindings, scan.totalToolCalls);
     // Surface the dominant tool name inline — more useful than
     // "repeated patterns" filler and lets the line fit in 72 cols.
     const byTool = new Map<string, number>();
@@ -3026,7 +3028,8 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
       byTool.set(f.toolName, (byTool.get(f.toolName) ?? 0) + Math.max(0, f.count - 1));
     }
     const top = [...byTool.entries()].sort((a, b) => b[1] - a[1])[0];
-    const wasteSuffix = wastePct > 0 ? `, ${wastePct}% wasted` : '';
+    const wasteSuffix =
+      wastedCalls > 0 ? `, ${wastedCalls} wasted calls · ${wastePct}% of calls` : '';
     const detail = top ? `(${top[0]} dominates${wasteSuffix})` : '';
     topLines.push(
       mkLine(
@@ -3141,7 +3144,7 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
   // Efficiency, not severity. Split off from REVIEW so the eye isn't
   // confused about what "needs approval" vs "is wasteful but harmless".
   if (scan.loopFindings.length > 0) {
-    const { wastePct } = computeLoopWaste(scan.loopFindings, scan.totalToolCalls);
+    const { wastePct, wastedCalls } = computeLoopWaste(scan.loopFindings, scan.totalToolCalls);
 
     // Group loop findings by toolName to compute the breakdown.
     const byTool = new Map<string, number>();
@@ -3179,8 +3182,9 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
       }
     }
 
-    const wasteSuffix = wastePct > 0 ? `  ·  ${wastePct}% wasted` : '';
-    const title = `AGENT LOOPS  ·  ${scan.loopFindings.length} repeated patterns${wasteSuffix}`;
+    const wasteSuffix =
+      wastedCalls > 0 ? `  ·  ${wastedCalls} wasted calls (${wastePct}% of all calls)` : '';
+    const title = `AGENT LOOPS  ·  ${scan.loopFindings.length} pattern${scan.loopFindings.length !== 1 ? 's' : ''}${wasteSuffix}`;
     for (const ln of boxPanel(title, loopLines)) console.log('  ' + ln);
     // Earlier the "N repeated calls (~N × cost-per-iteration)" line
     // printed below the panel, but it sat outside the frame and read
@@ -3711,7 +3715,7 @@ export function registerScanCommand(program: Command): void {
           }
           if (scan.loopFindings.length > 0) {
             const { wastePct } = computeLoopWaste(scan.loopFindings, scan.totalToolCalls);
-            const wasteSuffix = wastePct > 0 ? chalk.dim(` (${wastePct}% wasted)`) : '';
+            const wasteSuffix = wastePct > 0 ? chalk.dim(` (${wastePct}% of calls)`) : '';
             cardParts.push(
               chalk.yellow('🔁 ') +
                 chalk.yellow.bold(String(scan.loopFindings.length)) +

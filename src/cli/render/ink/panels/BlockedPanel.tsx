@@ -16,6 +16,7 @@ import { Box, Text } from 'ink';
 
 import type { ScanSummary } from '../../../../scan-summary.js';
 import { topRulesByVerdict } from '../../scan-derive.js';
+import { topOf } from './title-count.js';
 
 interface Props {
   summary: ScanSummary;
@@ -40,17 +41,20 @@ function originForRule(ruleName: string, sections: ScanSummary['sections']): str
   return '';
 }
 
-/** Cap on rule rows. Above this, append a `… +N more` line. */
+/** Cap on rule rows. Overflow is signalled in the panel title
+ *  (`· top N of M`, see title-count.ts) rather than a `+N more` row. */
 const ROW_LIMIT = 12;
 
 export function BlockedPanel({ summary, width }: Props): React.ReactElement | null {
-  const rules = topRulesByVerdict(summary.sections, 'block', ROW_LIMIT);
+  const allRules = topRulesByVerdict(summary.sections, 'block', Number.MAX_SAFE_INTEGER);
+  const rules = allRules.slice(0, ROW_LIMIT);
   if (rules.length === 0) return null;
 
   return (
     <Box borderStyle="round" borderColor="red" paddingX={1} flexDirection="column" width={width}>
       <Text bold color="red">
         WOULD HAVE BLOCKED
+        <Text dimColor>{topOf(rules.length, allRules.length)}</Text>
       </Text>
 
       {rules.map((rule, i) => (
