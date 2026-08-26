@@ -1,5 +1,107 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
+exports[`N6 — state-aware phrasing (enabledShields injected) > chalk panel: an enabled shield is never recommended, tags flip to ✓ 1`] = `
+"  ╭─ TOP FINDINGS ───────────────────────────────────────────────────────────╮
+  │ 🚨 2 credential leaks in tool input  (latest: 2d ago, GitHub Token)      │
+  │ 🛑 2 ops node9 would have blocked  (block-read-ssh, block-eval-remote)   │
+  │ 🔁 1 agent loops detected  (Edit dominates, 125 wasted calls · 1% of calls) │
+  │ 🔭 5 secrets reachable on disk  → agent reads blocked in-path (project-jail ✓) │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+
+  ╭─ LEAKS  ·  2 secrets in plain text ──────────────────────────────────────╮
+  │   2d  GitHub Token   ghp_****7iD8         [Bash]          claude         │
+  │  19d  GCP API Key    AIza****4its         [user-prompt]   gemini         │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+
+  ╭─ BLOCKED  ·  2 ops node9 would have stopped ─────────────────────────────╮
+  │ ✗ block-read-ssh           ×1    ✓ shield:project-jail                   │
+  │ ✗ block-eval-remote        ×1    needs shield:bash-safe                  │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+
+  ╭─ REVIEW QUEUE  ·  37 ops flagged for approval ───────────────────────────╮
+  │ 👁️  review-git-destructive   ×22   default                               │
+  │ 👁️  review-sudo              ×12   default                               │
+  │ 👁️  review-read-credentials  ×3    ✓ shield:project-jail                 │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+
+  ╭─ AGENT LOOPS  ·  1 pattern  ·  125 wasted calls (1% of all calls) ───────╮
+  │ Edit      ×125 repeats    (100%)                                         │
+  │                                                                          │
+  │ Top stuck patterns:                                                      │
+  │ ×126  /home/u/node9/src/scan.ts                                          │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+
+  ╭─ BLAST RADIUS  ·  5 paths reachable right now ───────────────────────────╮
+  │ ✗  ~/.ssh/id_rsa                       RSA private key                   │
+  │ ✗  ~/.ssh/id_ed25519                   Ed25519 private key               │
+  │ ✗  ~/.config/gcloud/credentials.db     GCP credentials                   │
+  │ ✗  ~/.npmrc                            npm auth token                    │
+  │ ✗  ~/.node9/credentials.json           Node9 cloud API key               │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+
+  ╭─ SHIELDS  ·  your coverage vs what we found ─────────────────────────────╮
+  │ 🛡️  project-jail  catches 4 ops         ✓ enabled — enforcing in-path    │
+  │       review-read-credentials ×3, block-read-ssh                         │
+  │ ☐   bash-safe     catches 1 op                                           │
+  │       block-eval-remote                                                  │
+  │                                                                          │
+  │ ✓ active: postgres  (no hits in this history)                            │
+  │                                                                          │
+  │ aws · docker · filesystem · github · k8s · mongodb · redis               │
+  │       no hits in your history — install proactively                      │
+  │                                                                          │
+  │ ✓ recommended shields are enabled                                        │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+"
+`;
+
+exports[`N6 — state-aware phrasing (enabledShields injected) > ink scorecard: same state law through StaticScorecard 1`] = `
+"
+🛡  node9 dashboard  ·  scanned last 90 days
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Spend & activity ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+╭──────────────────────────────────────────╮ ╭──────────────────────────────────────────╮
+│ COST                                     │ │ ACTIVITY                                 │
+│ Total           $14.5K                   │ │ Sessions        39                       │
+│ Wasted on loops ~$0.25                   │ │ Tools           15,000                   │
+│                                          │ │   Shell         7,500                    │
+│                                          │ │ Tools / session ~385                     │
+│                                          │ │ Cost / session  ~$372                    │
+╰──────────────────────────────────────────╯ ╰──────────────────────────────────────────╯
+━━━━━━━━━━━━━━━━━━ Critical (2 secrets leaked + 2 ops would be blocked) ━━━━━━━━━━━━━━━━━━
+╭──────────────────────────────────────────╮ ╭──────────────────────────────────────────╮
+│ CREDENTIAL LEAKS                         │ │ WOULD HAVE BLOCKED                       │
+│   2d GitHub Token   [Bash]        claude │ │ ✗ block-read-ssh    ×1  ✓ shield:projec… │
+│  19d GCP API Key    [user-prompt] gemini │ │ ✗ block-eval-remote ×1  needs shield:ba… │
+│ → DLP · node9 mask (runtime + cleanup)   │ │ → ✓ rules are enforced in-path · enable… │
+╰──────────────────────────────────────────╯ ╰──────────────────────────────────────────╯
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ High (5 paths reachable) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+╭────────────────────────────────────────────────────────────────────────────────────────╮
+│ BLAST RADIUS · top 4 of 5                                                              │
+│ ✗  ~/.ssh/id_rsa                       RSA private key                                 │
+│ ✗  ~/.ssh/id_ed25519                   Ed25519 private key                             │
+│ ✗  ~/.config/gcloud/credentials.db     GCP credentials                                 │
+│ ✗  ~/.npmrc                            npm auth token                                  │
+│ → project-jail shield blocks agent reads of these paths                                │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+━━━━━━━━━ Medium (37 ops flagged · 1 loop · 125 wasted calls (1% of all calls)) ━━━━━━━━━━
+╭──────────────────────────────────────────╮ ╭──────────────────────────────────────────╮
+│ REVIEW QUEUE                             │ │ AGENT LOOPS                              │
+│ review-git-destructive×22   default      │ │ Edit      ×125          100%             │
+│ review-sudo           ×12   default      │ │ Top stuck:                               │
+│ review-read-cred… ×3  ✓ shield:project-… │ │ ×126    /home/u/node9/src/scan.ts        │
+│ → runtime approval                       │ │ → live loop-detector                     │
+╰──────────────────────────────────────────╯ ╰──────────────────────────────────────────╯
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Recommended action ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+╭────────────────────────────────────────────────────────────────────────────────────────╮
+│ SHIELDS                                                                                │
+│ project-jail    catches 4 ops       ✓ enabled — enforcing in-path                      │
+│ bash-safe       catches 1 op                                                           │
+│ ✓ active: postgres  (no hits in this history)                                          │
+│ aws · docker · filesystem · github · k8s · mongodb · redis  (no hits — install proact… │
+│ ✓ recommended shields are enabled                                                      │
+╰────────────────────────────────────────────────────────────────────────────────────────╯"
+`;
+
 exports[`buildScanJson — envelope snapshot > rich fixture 1`] = `
 "{
   "schemaVersion": 1,
@@ -257,7 +359,7 @@ exports[`renderPanelScorecard — output snapshots > panel fixture (critical sco
   │ 🚨 2 credential leaks in tool input  (latest: 2d ago, GitHub Token)      │
   │ 🛑 2 ops node9 would have blocked  (block-read-ssh, block-eval-remote)   │
   │ 🔁 1 agent loops detected  (Edit dominates, 125 wasted calls · 1% of calls) │
-  │ 🔭 5 secrets reachable on disk  → enable project-jail (+53 pts)          │
+  │ 🔭 5 secrets reachable on disk  → enable project-jail                    │
   ╰──────────────────────────────────────────────────────────────────────────╯
 
   ╭─ LEAKS  ·  2 secrets in plain text ──────────────────────────────────────╮
@@ -292,15 +394,15 @@ exports[`renderPanelScorecard — output snapshots > panel fixture (critical sco
   ╰──────────────────────────────────────────────────────────────────────────╯
 
   ╭─ SHIELDS  ·  install node9 + enable these to catch what we found ────────╮
-  │ 🛡️  project-jail  would catch 4 ops       →  +53 pts  (25 → 78)          │
+  │ 🛡️  project-jail  catches 4 ops         → blocks these reads in-path     │
   │       review-read-credentials ×3, block-read-ssh                         │
-  │ ☐   bash-safe     would catch 1 op                                       │
+  │ ☐   bash-safe     catches 1 op                                           │
   │       block-eval-remote                                                  │
   │                                                                          │
   │ aws · docker · filesystem · github · k8s · mongodb · postgres · redis    │
   │       no hits in your history — install proactively                      │
   │                                                                          │
-  │ → node9 shield enable project-jail   (start here — +53 pts)              │
+  │ → node9 shield enable project-jail   (start here — widest coverage)      │
   ╰──────────────────────────────────────────────────────────────────────────╯
 "
 `;

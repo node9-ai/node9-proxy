@@ -226,6 +226,37 @@ export function boxPanel(
 }
 
 /**
+ * Origin tag for a rule row in the BLOCKED / REVIEW QUEUE panels:
+ *   'default'                — built-in default rule
+ *   '✓ shield:<key>'         — shield-sourced AND that shield is enforcing
+ *   'needs shield:<key>'     — shield-sourced, shield not enabled
+ *
+ * `enabled` is the gate's testimony (policy.appliedShields, N6) — an
+ * empty set is a real answer (pre-install machine), so the caller must
+ * pass what it was given, never invent a default from disk.
+ *
+ * Was duplicated in three renderers (chalk renderPanelScorecard,
+ * BlockedPanel, ReviewQueuePanel); extracted here when it became
+ * state-aware so the phrasing cannot drift between them.
+ */
+export function originForRule(
+  ruleName: string,
+  sections: ReadonlyArray<Section>,
+  enabled: ReadonlySet<string>
+): string {
+  for (const section of sections) {
+    if (section.rules.some((r) => r.name === ruleName)) {
+      if (section.sourceType === 'default') return 'default';
+      if (section.sourceType === 'shield') {
+        const key = section.shieldKey ?? section.id;
+        return enabled.has(key) ? `✓ shield:${key}` : `needs shield:${key}`;
+      }
+    }
+  }
+  return '';
+}
+
+/**
  * Render a relative-time label for the panel renderer:
  *   "today" / "1d" / "30d" / "90d+"
  *

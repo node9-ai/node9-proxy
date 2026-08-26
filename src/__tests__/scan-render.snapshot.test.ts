@@ -661,3 +661,68 @@ describe('renderScanScorecardInk — output snapshots', () => {
     expect(stripTerminalEscapes(lastFrame() ?? '')).toMatchSnapshot();
   });
 });
+
+// ---------------------------------------------------------------------------
+// N6 — state-aware phrasing. Same fixture, enabledShields injected: the
+// renderers must stop recommending what is already enforcing, flip origin
+// tags to ✓, and move enabled zero-hit shields off the "install
+// proactively" pitch. The un-injected snapshots above are the S1 guard:
+// pre-install output must not change.
+// ---------------------------------------------------------------------------
+
+describe('N6 — state-aware phrasing (enabledShields injected)', () => {
+  const NOW = new Date('2026-05-12T00:00:00Z');
+  // project-jail has hits in panelFixture; postgres has none — covers
+  // both the row path and the zero-hit path.
+  const withState = (): CompactInput => ({
+    ...panelFixture(),
+    enabledShields: ['postgres', 'project-jail'],
+  });
+
+  it('chalk panel: an enabled shield is never recommended, tags flip to ✓', () => {
+    renderPanelScorecard(withState(), NOW);
+    const out = captureOutput();
+    // S2 — the founder's bug: CTA for an enabled shield.
+    expect(out).not.toContain('shield enable project-jail');
+    expect(out).toContain('✓ enabled — enforcing in-path');
+    expect(out).toContain('✓ recommended shields are enabled');
+    // S2 — origin tags follow the same state.
+    expect(out).toContain('✓ shield:project-jail');
+    expect(out).not.toContain('needs shield:project-jail');
+    // S4 — enabled zero-hit shield moves off the upsell line.
+    expect(out).toContain('✓ active: postgres');
+    const proactive = out.split('\n').filter((l) => l.includes('·') && l.includes('redis'));
+    for (const line of proactive) expect(line).not.toContain('postgres');
+    expect(out).toMatchSnapshot();
+  });
+
+  it('ink scorecard: same state law through StaticScorecard', async () => {
+    const ORIG_COLUMNS = process.stdout.columns;
+    Object.defineProperty(process.stdout, 'columns', { value: 90, configurable: true });
+    try {
+      const { render } = await import('ink-testing-library');
+      const { StaticScorecard } = await import('../cli/render/ink/StaticScorecard.js');
+      const React = await import('react');
+      const { lastFrame } = render(
+        React.createElement(StaticScorecard, {
+          input: withState(),
+          rangeLabel: 'last 90 days',
+          now: NOW,
+        })
+      );
+      const out = stripTerminalEscapes(lastFrame() ?? '');
+      expect(out).not.toContain('shield enable project-jail');
+      expect(out).toContain('✓ enabled — enforcing in-path');
+      // Ink truncates the origin column (`✓ shield:projec…`), so both the
+      // positive AND the negative assertion must use truncation-surviving
+      // prefixes — `not.toContain('needs shield:project-jail')` would pass
+      // vacuously against a truncated tag (a false witness).
+      expect(out).toContain('✓ shield:proje');
+      expect(out).not.toContain('needs shield:pr');
+      expect(out).toContain('✓ active: postgres');
+      expect(out).toMatchSnapshot();
+    } finally {
+      Object.defineProperty(process.stdout, 'columns', { value: ORIG_COLUMNS, configurable: true });
+    }
+  });
+});

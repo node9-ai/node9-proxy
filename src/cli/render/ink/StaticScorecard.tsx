@@ -105,7 +105,11 @@ export function StaticScorecard({ input, rangeLabel, now }: Props): React.ReactE
           <SeverityBand label={criticalLabel} width={width} />
           <Box flexDirection="row" gap={1}>
             <LeaksPanel summary={summary} width={halfWidth} now={now} />
-            <BlockedPanel summary={summary} width={halfWidth} />
+            <BlockedPanel
+              summary={summary}
+              width={halfWidth}
+              enabledShields={input.enabledShields}
+            />
           </Box>
         </>
       ) : null}
@@ -154,7 +158,11 @@ export function StaticScorecard({ input, rangeLabel, now }: Props): React.ReactE
           <>
             <SeverityBand label={`Medium (${parts.join(' · ')})`} width={width} />
             <Box flexDirection="row" gap={1}>
-              <ReviewQueuePanel summary={input.summary} width={halfWidth} />
+              <ReviewQueuePanel
+                summary={input.summary}
+                width={halfWidth}
+                enabledShields={input.enabledShields}
+              />
               <AgentLoopsPanel loopFindings={input.scan.loopFindings} width={halfWidth} />
             </Box>
           </>
@@ -162,7 +170,7 @@ export function StaticScorecard({ input, rangeLabel, now }: Props): React.ReactE
       })()}
 
       <SeverityBand label="Recommended action" width={width} />
-      <ShieldsPanel summary={input.summary} width={width} />
+      <ShieldsPanel summary={input.summary} width={width} enabledShields={input.enabledShields} />
     </Box>
   );
 }

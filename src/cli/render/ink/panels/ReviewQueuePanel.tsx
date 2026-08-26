@@ -12,28 +12,24 @@ import React from 'react';
 import { Box, Text } from 'ink';
 
 import type { ScanSummary } from '../../../../scan-summary.js';
-import { topRulesByVerdict } from '../../scan-derive.js';
+import { originForRule, topRulesByVerdict } from '../../scan-derive.js';
 
 interface Props {
   summary: ScanSummary;
   width: number;
-}
-
-function originForRule(ruleName: string, sections: ScanSummary['sections']): string {
-  for (const section of sections) {
-    if (section.rules.some((r) => r.name === ruleName)) {
-      if (section.sourceType === 'default') return 'default';
-      if (section.sourceType === 'shield') {
-        return `needs shield:${section.shieldKey ?? section.id}`;
-      }
-    }
-  }
-  return '';
+  /** Gate testimony (policy.appliedShields, N6). Empty/omitted =
+   *  pre-install machine → forecast phrasing, unchanged. */
+  enabledShields?: string[];
 }
 
 const ROW_LIMIT = 5;
 
-export function ReviewQueuePanel({ summary, width }: Props): React.ReactElement | null {
+export function ReviewQueuePanel({
+  summary,
+  width,
+  enabledShields = [],
+}: Props): React.ReactElement | null {
+  const enabled = new Set(enabledShields);
   const rules = topRulesByVerdict(summary.sections, 'review', ROW_LIMIT);
   if (rules.length === 0) return null;
 
@@ -49,7 +45,7 @@ export function ReviewQueuePanel({ summary, width }: Props): React.ReactElement 
             <Text bold>{`×${rule.count}`}</Text>
           </Box>
           <Text dimColor wrap="truncate-end">
-            {originForRule(rule.name, summary.sections)}
+            {originForRule(rule.name, summary.sections, enabled)}
           </Text>
         </Box>
       ))}

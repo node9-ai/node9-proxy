@@ -15,7 +15,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { SHIELDS } from '../../shields';
-import { DEFAULT_CONFIG } from '../../config';
+import { DEFAULT_CONFIG, getConfig } from '../../config';
 
 // Scan forecasts DEFAULT protection (see the note in the rule-source builder),
 // so rule/tool matching keys off the DEFAULT toolInspection map. Shared with the
@@ -61,6 +61,7 @@ import {
   boxPanel,
   classifyScore,
   computeLoopWaste,
+  originForRule,
   relativeDate,
   rollupByShield,
   topDlpPatterns,
@@ -2620,6 +2621,14 @@ export interface CompactInput {
   blastExposures: number;
   blockedCount: number;
   reviewCount: number;
+  /** Shields the gate is ACTUALLY enforcing right now — read off
+   *  `getConfig().policy.appliedShields` (the apply loop's own testimony,
+   *  N6). Renderers use it to phrase recommendations: an enabled shield
+   *  must never be offered as `shield enable X` / "install proactively".
+   *  Absent or empty = pre-install machine → pure-forecast phrasing
+   *  (today's output, unchanged). Snapshot fixtures omit it, so tests
+   *  stay hermetic and pin the pre-install shape by default. */
+  enabledShields?: string[];
 }
 
 export function renderCompactScorecard(input: CompactInput): void {
@@ -2992,6 +3001,9 @@ function shortRule(name: string, width: number): string {
 
 export function renderPanelScorecard(input: CompactInput, now: Date = new Date()): void {
   const { scan, summary, blast, blastExposures, blockedCount, reviewCount } = input;
+  // Gate testimony (policy.appliedShields, N6). Empty = pre-install
+  // machine → forecast phrasing, unchanged.
+  const enabledSet = new Set(input.enabledShields ?? []);
 
   // ── TOP FINDINGS ─────────────────────────────────────────────────────
   // Auto-derived: pick the highest-impact one fact per category. Each
@@ -3050,10 +3062,12 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
     );
   }
   if (blastExposures > 0) {
-    const exposed = Math.max(0, 100 - blast.score);
-    const pjDiscount = PROTECTIVE_SHIELD_DISCOUNTS['project-jail'] ?? 0;
-    const pjBonus = Math.round(exposed * pjDiscount);
-    const cta = pjBonus > 0 ? `  → enable project-jail (+${pjBonus} pts)` : '';
+    // Option B (N1): no `+N pts` — the points were exposed × discount, a
+    // figure the reader cannot check. State-aware CTA (N6): never tell
+    // the user to enable a shield that is already enforcing.
+    const cta = enabledSet.has('project-jail')
+      ? '  → agent reads blocked in-path (project-jail ✓)'
+      : '  → enable project-jail';
     topLines.push(
       mkLine(
         ['🔭 ', chalk.red],
@@ -3106,7 +3120,7 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
     const blockedLines: Line[] = [];
     const ruleEntries = topRulesByVerdict(summary.sections, 'block', 12);
     for (const r of ruleEntries) {
-      const origin = originForRule(r.name, summary.sections);
+      const origin = originForRule(r.name, summary.sections, enabledSet);
       blockedLines.push(
         mkLine(
           ['✗ ', chalk.red],
@@ -3130,7 +3144,7 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
     const reviewLines: Line[] = [];
     const ruleEntries = topRulesByVerdict(summary.sections, 'review', 12);
     for (const r of ruleEntries) {
-      const origin = originForRule(r.name, summary.sections);
+      const origin = originForRule(r.name, summary.sections, enabledSet);
       reviewLines.push(
         mkLine(
           // VS-16 (U+FE0F) forces emoji-presentation so string-width
@@ -3238,7 +3252,6 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
   // shields (project-jail today; future protective shields auto-extend
   // via PROTECTIVE_SHIELD_DISCOUNTS).
   const shieldImpacts = rollupByShield(summary.sections);
-  const exposed = Math.max(0, 100 - blast.score);
   const shieldLines: Line[] = [];
 
   // Sort: protective shields with score impact first, then by hit count.
@@ -3252,17 +3265,24 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
   for (const impact of ranked) {
     if (impact.totalCatches === 0) continue; // hit shields only — zero-hits go to footer
     const discount = PROTECTIVE_SHIELD_DISCOUNTS[impact.shieldName] ?? 0;
-    const bonus = Math.round(exposed * discount);
+    const isOn = enabledSet.has(impact.shieldName);
     const icon = discount > 0 ? '🛡️  ' : '☐   ';
-    const wouldCatch = `would catch ${impact.totalCatches} op${impact.totalCatches !== 1 ? 's' : ''}`;
-    const deltaSuffix =
-      bonus > 0 ? `  →  +${bonus} pts  (${blast.score} → ${blast.score + bonus})` : '';
+    const wouldCatch = `catches ${impact.totalCatches} op${impact.totalCatches !== 1 ? 's' : ''}`;
+    // Option B (N1): no `+N pts (5 → 72)` — score arithmetic the reader
+    // cannot check (this chalk twin lagged the ink fix in 3c10119).
+    // Tense honesty (N6): `✓ enabled` is a statement about NOW; whether
+    // PAST events were blocked is report's claim to make, not scan's.
+    const suffix = isOn
+      ? '✓ enabled — enforcing in-path'
+      : discount > 0
+        ? '→ blocks these reads in-path'
+        : '';
     shieldLines.push(
       mkLine(
         [icon, discount > 0 ? chalk.cyan : chalk.dim],
         [impact.shieldName.padEnd(14), chalk.bold],
         [wouldCatch.padEnd(22), chalk.dim],
-        [deltaSuffix, bonus > 0 ? chalk.green.bold : chalk.dim]
+        [suffix, isOn || discount > 0 ? chalk.green.bold : chalk.dim]
       )
     );
     // Top rule descriptions on a sub-line.
@@ -3280,49 +3300,67 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
   // Built-ins only — a user-installed shield must not appear in the "install
   // these builtins proactively" hint, and keeping this off the user-shield
   // registry (SHIELDS) also makes the render hermetic for snapshot tests.
-  const zeroHitBuiltins = Object.keys(BUILTIN_SHIELDS)
+  // Zero-hit builtins split by state (N6): only a shield that is NOT
+  // already enforcing may be pitched as "install proactively" — the
+  // founder's machine showed an ACTIVE postgres shield under that line.
+  const zeroHitAll = Object.keys(BUILTIN_SHIELDS)
     .filter((name) => !hitShieldSet.has(name))
     .sort();
+  const zeroHitBuiltins = zeroHitAll.filter((name) => !enabledSet.has(name));
+  const zeroHitEnabled = zeroHitAll.filter((name) => enabledSet.has(name));
+  if (zeroHitEnabled.length > 0) {
+    shieldLines.push(mkLine([''])); // blank separator
+    shieldLines.push(
+      mkLine([
+        `✓ active: ${zeroHitEnabled.join(' · ')}  (no hits in this history)`,
+        chalk.green.dim,
+      ])
+    );
+  }
   if (zeroHitBuiltins.length > 0) {
     shieldLines.push(mkLine([''])); // blank separator
     shieldLines.push(mkLine([zeroHitBuiltins.join(' · '), chalk.dim]));
     shieldLines.push(mkLine(['      no hits in your history — install proactively', chalk.dim]));
   }
 
-  // Final CTA line inside the panel: highest-impact recommendation.
+  // Final CTA line: highest-impact protective shield NOT already enabled
+  // (N6 — never hand the user a command that is already true). Option B
+  // (N1): "widest coverage", not `+N pts` (chalk twin of ink 3c10119).
   const topRec = ranked.find(
-    (r) => r.totalCatches > 0 && (PROTECTIVE_SHIELD_DISCOUNTS[r.shieldName] ?? 0) > 0
+    (r) =>
+      r.totalCatches > 0 &&
+      (PROTECTIVE_SHIELD_DISCOUNTS[r.shieldName] ?? 0) > 0 &&
+      !enabledSet.has(r.shieldName)
   );
+  const allCovered =
+    !topRec &&
+    ranked.some(
+      (r) =>
+        r.totalCatches > 0 &&
+        (PROTECTIVE_SHIELD_DISCOUNTS[r.shieldName] ?? 0) > 0 &&
+        enabledSet.has(r.shieldName)
+    );
   if (topRec) {
-    const bonus = Math.round(exposed * (PROTECTIVE_SHIELD_DISCOUNTS[topRec.shieldName] ?? 0));
-    const cta = `→ node9 shield enable ${topRec.shieldName}   (start here — +${bonus} pts)`;
+    const cta = `→ node9 shield enable ${topRec.shieldName}   (start here — widest coverage)`;
     shieldLines.push(mkLine([''])); // blank separator
     shieldLines.push(mkLine([cta, chalk.cyan]));
+  } else if (allCovered) {
+    shieldLines.push(mkLine([''])); // blank separator
+    shieldLines.push(mkLine(['✓ recommended shields are enabled', chalk.green.bold]));
   }
 
   if (shieldLines.length > 0) {
-    const title = 'SHIELDS  ·  install node9 + enable these to catch what we found';
+    const title =
+      enabledSet.size > 0
+        ? 'SHIELDS  ·  your coverage vs what we found'
+        : 'SHIELDS  ·  install node9 + enable these to catch what we found';
     for (const ln of boxPanel(title, shieldLines)) console.log('  ' + ln);
     console.log('');
   }
 }
 
-/** Find which origin tag (e.g. `default` or `needs shield:project-jail`)
- *  applies to a given rule name. The lookup walks the summary sections
- *  to find which one owns the rule. Used by BLOCKED + REVIEW QUEUE
- *  panels to render the rightmost origin column. */
-function originForRule(
-  ruleName: string,
-  sections: ReadonlyArray<ScanSummary['sections'][number]>
-): string {
-  for (const section of sections) {
-    if (section.rules.some((r) => r.name === ruleName)) {
-      if (section.sourceType === 'default') return 'default';
-      if (section.sourceType === 'shield') return `needs shield:${section.shieldKey ?? section.id}`;
-    }
-  }
-  return '';
-}
+// originForRule moved to scan-derive.ts when it became state-aware (N6) —
+// one law shared with BlockedPanel/ReviewQueuePanel so phrasing can't drift.
 
 // ---------------------------------------------------------------------------
 // Registered command
@@ -3401,6 +3439,13 @@ export function registerScanCommand(program: Command): void {
         // for ~/.node9/audit.log alone falsely treats npx users as installed
         // after their first run.
         const isWired = getAgentsStatus().some((a) => a.wired);
+
+        // What the gate is ACTUALLY enforcing (N6) — the apply loop's own
+        // testimony, never shields.json / rules-cache.json directly (the
+        // two files can diverge; the testimony can't). Read once here,
+        // threaded to every renderer via CompactInput.
+        const enabledShields = getConfig().policy.appliedShields ?? [];
+        const enabledShieldSet = new Set(enabledShields);
 
         // Compact / narrative modes print their own self-contained scorecard —
         // suppress the verbose preamble (banner + "scanning..." line) so the
@@ -3624,6 +3669,7 @@ export function registerScanCommand(program: Command): void {
             blastExposures,
             blockedCount,
             reviewCount,
+            enabledShields,
           });
           return;
         }
@@ -3640,6 +3686,7 @@ export function registerScanCommand(program: Command): void {
             blastExposures,
             blockedCount,
             reviewCount,
+            enabledShields,
           });
           return;
         }
@@ -3809,6 +3856,7 @@ export function registerScanCommand(program: Command): void {
                   blastExposures,
                   blockedCount,
                   reviewCount,
+                  enabledShields,
                 },
                 rangeLabel
               );
@@ -3825,6 +3873,7 @@ export function registerScanCommand(program: Command): void {
                 blastExposures,
                 blockedCount,
                 reviewCount,
+                enabledShields,
               });
             }
             // Footer CTAs — distinct from the legacy footer at end of
@@ -4002,7 +4051,9 @@ export function registerScanCommand(program: Command): void {
             const reviewRules = section.rules.filter((r) => r.verdict !== 'block');
             if (reviewRules.length === 0) continue;
             const enableHint = section.shieldKey
-              ? chalk.dim(`  →  node9 shield enable ${section.shieldKey}`)
+              ? enabledShieldSet.has(section.shieldKey)
+                ? chalk.green(`  ✓  ${section.shieldKey} enabled — enforcing in-path`)
+                : chalk.dim(`  →  node9 shield enable ${section.shieldKey}`)
               : '';
             console.log('  ' + chalk.dim('─'.repeat(70)));
             console.log(
@@ -4020,14 +4071,30 @@ export function registerScanCommand(program: Command): void {
           }
 
           // ── Inactive Shields — upsell, always last ─────────────────────────
-          const activeShieldIds = new Set(
+          // hitShieldIds = shields with FINDINGS in this history (they render
+          // their own sections above); this footer covers the rest. Split by
+          // gate state (N6): "Inactive" must mean not-enabled — an ENABLED
+          // shield with no hits is coverage, not an upsell target.
+          const hitShieldIds = new Set(
             summary.sections
               .filter((s) => s.sourceType === 'shield' && s.shieldKey)
               .map((s) => s.shieldKey!)
           );
-          const emptyShields = Object.keys(SHIELDS)
-            .filter((n) => !activeShieldIds.has(n))
+          const noHitShields = Object.keys(SHIELDS)
+            .filter((n) => !hitShieldIds.has(n))
             .sort();
+          const quietEnabled = noHitShields.filter((n) => enabledShieldSet.has(n));
+          const emptyShields = noHitShields.filter((n) => !enabledShieldSet.has(n));
+          if (quietEnabled.length > 0) {
+            console.log('  ' + chalk.dim('─'.repeat(70)));
+            console.log(
+              '  ' +
+                chalk.bold('🛡  Active Shields') +
+                chalk.dim('  ·  enabled, no hits in this history')
+            );
+            console.log('  ' + chalk.green('✓ ') + chalk.dim(quietEnabled.join(' · ')));
+            console.log('');
+          }
           if (emptyShields.length > 0) {
             console.log('  ' + chalk.dim('─'.repeat(70)));
             console.log(
