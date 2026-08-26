@@ -8,6 +8,7 @@
 // reads `allow` there while the real gate BLOCKS it via DLP. We mirror the
 // orchestrator's layering with the PURE functions (no side effects).
 
+import path from 'path';
 import { scanFilePath } from '../dlp';
 import { evaluatePolicy } from '../policy';
 import { getConfig } from '../config';
@@ -53,6 +54,16 @@ export function coverageFromVerdict(verdict: Verdict, env: EnforceEnv, via?: str
   return { state: 'open' };
 }
 
+/** Render an absolute path as `~/…` for a fix string (twin of
+ *  displayPath in secrets.ts — same `home + sep` boundary rule so a
+ *  sibling dir sharing the prefix is not mis-rendered as `~foo`). */
+function tildePath(p: string, home: string): string {
+  if (!home) return p;
+  if (p === home) return '~';
+  const prefix = home.endsWith(path.sep) ? home : home + path.sep;
+  return p.startsWith(prefix) ? '~' + path.sep + p.slice(prefix.length) : p;
+}
+
 /** Shorten a rule name like `shield:project-jail:block-read-ssh` → `project-jail shield`. */
 function viaFromRule(ruleName?: string): string | undefined {
   if (!ruleName) return undefined;
@@ -86,13 +97,52 @@ export async function annotateCoverage(findings: Finding[], ctx: CheckContext): 
     }
 
     if (probe.kind === 'fileRead') {
-      // DLP layer — the one that actually gates the agent's Read tool.
-      const verdicts = probe.paths.map((p) => scanFilePath(p)?.severity ?? null);
-      if (verdicts.length === 0 || verdicts.some((v) => v === null)) {
-        f.coverage = coverageFromVerdict('allow', env); // any unblocked path → open
+      // The real gate for an agent file read is DLP ∪ the policy path
+      // rules: `node9 jail add` creates `block-path-*` smartRules on
+      // file_path that DLP knows nothing about, so probing DLP alone
+      // reported a jail-added file as uncovered forever (N6). Mirror the
+      // orchestrator: DLP answers first (it gates first at runtime); a
+      // DLP-silent path falls through to the policy layer's Read verdict.
+      const perPath: Array<{ path: string; verdict: Verdict; via?: string }> = [];
+      for (const p of probe.paths) {
+        const dlpSev = scanFilePath(p)?.severity ?? null;
+        if (dlpSev) {
+          perPath.push({ path: p, verdict: dlpSev as Verdict, via: 'node9 DLP' });
+          continue;
+        }
+        const pv = await evaluatePolicy('Read', { file_path: p }, ctx.agent, ctx.cwd);
+        perPath.push({ path: p, verdict: pv.decision as Verdict, via: viaFromRule(pv.ruleName) });
+      }
+      const uncovered = perPath.filter((x) => x.verdict !== 'block' && x.verdict !== 'review');
+      if (perPath.length === 0 || uncovered.length > 0) {
+        f.coverage = coverageFromVerdict('allow', env); // any ungated path → open
+        // N6 fix-string honesty: the static fix says "enable
+        // project-jail" — if the gate testimony says it is already
+        // applied, that command is already true and the honest next step
+        // is jail-adding the specific uncovered files. Rewritten HERE,
+        // from the SAME per-path evaluation the coverage came from —
+        // never a second judge in the finding builder.
+        if (
+          uncovered.length > 0 &&
+          (config.policy.appliedShields ?? []).includes('project-jail') &&
+          f.fix?.includes('shield enable project-jail')
+        ) {
+          const first = tildePath(uncovered[0].path, ctx.home || '');
+          const rest = uncovered.length - 1;
+          f.fix =
+            `project-jail is already enabled but does not cover ${rest > 0 ? 'these files' : 'this file'}. ` +
+            `Fix it now: run \`node9 jail add ${first}\`` +
+            (rest > 0 ? ` (+${rest} more — see detail)` : '') +
+            ' to block agent reads in-path.';
+        }
       } else {
-        const worst: Verdict = verdicts.some((v) => v === 'review') ? 'review' : 'block';
-        f.coverage = coverageFromVerdict(worst, env, 'node9 DLP');
+        const worst: Verdict = perPath.some((x) => x.verdict === 'review') ? 'review' : 'block';
+        const vias = [...new Set(perPath.map((x) => x.via).filter((v): v is string => !!v))];
+        f.coverage = coverageFromVerdict(
+          worst,
+          env,
+          vias.length > 0 ? vias.join(' + ') : undefined
+        );
       }
       continue;
     }
