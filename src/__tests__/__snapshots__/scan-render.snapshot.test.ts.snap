@@ -183,7 +183,7 @@ exports[`buildScanJson — envelope snapshot > rich fixture 1`] = `
 exports[`renderCompactScorecard — output snapshots > clean fixture (good score, no findings) 1`] = `
 "🛡  Node9 Scan  ·  5 sessions  ·  200 tool calls  ·  May 1, 2026 – May 7, 2026
 
-Security Score: 95/100  ·  Good
+Exposure: 0 paths reachable by the agent
 $1.50 AI spend  ·  0 risky operations
 
 
@@ -195,7 +195,7 @@ $1.50 AI spend  ·  0 risky operations
 exports[`renderCompactScorecard — output snapshots > rich fixture (critical score) 1`] = `
 "🛡  Node9 Scan  ·  39 sessions  ·  12,481 tool calls  ·  Apr 6, 2026 – May 7, 2026
 
-Security Score: 25/100  ·  Critical
+Exposure: 5 paths reachable by the agent
 $9025.15 AI spend  ·  4 risky operations
 
 🔑  4   credential leak     (GitHub Token ×2, AWS Access Key, JWT)
@@ -214,7 +214,7 @@ $9025.15 AI spend  ·  4 risky operations
 exports[`renderNarrativeScorecard — output snapshots > clean fixture (good score, no findings) 1`] = `
 "🛡  Node9 Scan  ·  5 sessions  ·  $1.50 spend  ·  May 1, 2026 – May 7, 2026
 
-Security Score: 95/100  ·  Good
+Exposure: 0 paths reachable by the agent
 
 →  npx node9-ai scan       run this on your machine
 →  github.com/node9-ai/node9-proxy
@@ -224,7 +224,7 @@ Security Score: 95/100  ·  Good
 exports[`renderNarrativeScorecard — output snapshots > rich fixture (critical score) 1`] = `
 "🛡  Node9 Scan  ·  39 sessions  ·  $9025.15 spend  ·  Apr 6, 2026 – May 7, 2026
 
-⚠  Security Score: 25/100  ·  Critical
+⚠  Exposure: 5 paths reachable by the agent
 
   🔴  CRITICAL  5 findings
      • 4 credential leaks (GitHub Token ×2, AWS Access Key, JWT)
@@ -363,9 +363,9 @@ exports[`renderScanScorecardInk — output snapshots > panel fixture (critical s
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Recommended action ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ╭────────────────────────────────────────────────────────────────────────────────────────╮
 │ SHIELDS                                                                                │
-│ project-jail    catches 4 ops       → +53 pts (25 → 78)                                │
+│ project-jail    catches 4 ops       → blocks these reads in-path                       │
 │ bash-safe       catches 1 op                                                           │
 │ aws · docker · filesystem · github · k8s · mongodb · postgres · redis  (no hits — ins… │
-│ → node9 shield enable project-jail   (start here — +53 pts)                            │
+│ → node9 shield enable project-jail   (start here — widest coverage)                    │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯"
 `;

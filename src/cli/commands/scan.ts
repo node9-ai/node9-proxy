@@ -2640,13 +2640,20 @@ export function renderCompactScorecard(input: CompactInput): void {
   );
   console.log('');
 
-  // ── Score + risky count ──────────────────────────────────────────────
-  const score = classifyScore(blast.score);
+  // ── Exposure + risky count ───────────────────────────────────────────
+  // Option B (BUGS.md N1): scan reports COUNTS, not an N/100. Two different
+  // formulas both rendered as "score" made scan and posture contradict each
+  // other on one machine; a count and a score cannot. posture owns the only
+  // N/100, and blast.score itself still ships unchanged (SaaS, --json, trend).
+  const exposurePaths = blast.reachable.length;
+  const exposureEnvs = blast.envFindings.length;
   console.log(
-    chalk.bold('Security Score: ') +
-      score.color.bold(`${blast.score}/100`) +
-      chalk.dim('  ·  ') +
-      score.color(score.label)
+    chalk.bold('Exposure: ') +
+      (exposurePaths > 0 ? chalk.red.bold : chalk.green.bold)(
+        `${exposurePaths} path${exposurePaths !== 1 ? 's' : ''}` +
+          (exposureEnvs > 0 ? ` + ${exposureEnvs} env var${exposureEnvs !== 1 ? 's' : ''}` : '')
+      ) +
+      chalk.dim(' reachable by the agent')
   );
   if (scan.totalCostUSD > 0) {
     console.log(
@@ -2856,14 +2863,17 @@ export function renderNarrativeScorecard(input: CompactInput): void {
   );
   console.log('');
 
-  // ── Score ──────────────────────────────────────────────────────────
-  const score = classifyScore(blast.score);
+  // ── Exposure (option B — counts, not a second N/100; see N1) ────────
+  const nPaths = blast.reachable.length;
+  const nEnvs = blast.envFindings.length;
   console.log(
-    (score.band === 'critical' ? chalk.red.bold('⚠  ') : '') +
-      chalk.bold('Security Score: ') +
-      score.color.bold(`${blast.score}/100`) +
-      chalk.dim('  ·  ') +
-      score.color(score.label)
+    (nPaths > 0 ? chalk.red.bold('⚠  ') : '') +
+      chalk.bold('Exposure: ') +
+      (nPaths > 0 ? chalk.red.bold : chalk.green.bold)(
+        `${nPaths} path${nPaths !== 1 ? 's' : ''}` +
+          (nEnvs > 0 ? ` + ${nEnvs} env var${nEnvs !== 1 ? 's' : ''}` : '')
+      ) +
+      chalk.dim(' reachable by the agent')
   );
   console.log('');
 

@@ -162,7 +162,7 @@ export function StaticScorecard({ input, rangeLabel, now }: Props): React.ReactE
       })()}
 
       <SeverityBand label="Recommended action" width={width} />
-      <ShieldsPanel summary={input.summary} blastScore={input.blast.score} width={width} />
+      <ShieldsPanel summary={input.summary} width={width} />
     </Box>
   );
 }

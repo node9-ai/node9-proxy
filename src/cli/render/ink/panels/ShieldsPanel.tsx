@@ -20,15 +20,18 @@ import { BUILTIN_SHIELDS } from '@node9/policy-engine';
 
 interface Props {
   summary: ScanSummary;
-  blastScore: number;
   width: number;
 }
 
-export function ShieldsPanel({ summary, blastScore, width }: Props): React.ReactElement {
+export function ShieldsPanel({ summary, width }: Props): React.ReactElement {
   const impacts = rollupByShield(summary.sections);
-  const exposed = Math.max(0, 100 - blastScore);
 
-  // Sort: protective shields with score impact first, then by hit count.
+  // Option B (BUGS.md N1): no score arithmetic in the recommendation — the
+  // "+N pts" was exposed × discount, a figure the reader cannot check against
+  // anything on screen. The DISCOUNT still ranks protective shields first (it
+  // is the sort key and encodes real protective value); it is just never
+  // rendered as points.
+  // Sort: protective shields first, then by hit count.
   const ranked = [...impacts].sort((a, b) => {
     const aDiscount = PROTECTIVE_SHIELD_DISCOUNTS[a.shieldName] ?? 0;
     const bDiscount = PROTECTIVE_SHIELD_DISCOUNTS[b.shieldName] ?? 0;
@@ -43,9 +46,6 @@ export function ShieldsPanel({ summary, blastScore, width }: Props): React.React
     .sort();
 
   const topRec = hitShields.find((r) => (PROTECTIVE_SHIELD_DISCOUNTS[r.shieldName] ?? 0) > 0);
-  const topRecBonus = topRec
-    ? Math.round(exposed * (PROTECTIVE_SHIELD_DISCOUNTS[topRec.shieldName] ?? 0))
-    : 0;
 
   return (
     <Box borderStyle="round" borderColor="cyan" paddingX={1} flexDirection="column" width={width}>
@@ -55,7 +55,6 @@ export function ShieldsPanel({ summary, blastScore, width }: Props): React.React
 
       {hitShields.map((impact) => {
         const discount = PROTECTIVE_SHIELD_DISCOUNTS[impact.shieldName] ?? 0;
-        const bonus = Math.round(exposed * discount);
         const noun = `op${impact.totalCatches !== 1 ? 's' : ''}`;
         // No icon column — emoji variation-selector widths caused
         // the protective-shield row to overflow the right border on
@@ -71,12 +70,7 @@ export function ShieldsPanel({ summary, blastScore, width }: Props): React.React
             <Box width={20}>
               <Text dimColor>{`catches ${impact.totalCatches} ${noun}`}</Text>
             </Box>
-            {bonus > 0 ? (
-              <Text
-                bold
-                color="green"
-              >{`→ +${bonus} pts (${blastScore} → ${blastScore + bonus})`}</Text>
-            ) : null}
+            {discount > 0 ? <Text bold color="green">{`→ blocks these reads in-path`}</Text> : null}
           </Box>
         );
       })}
@@ -92,7 +86,7 @@ export function ShieldsPanel({ summary, blastScore, width }: Props): React.React
       {topRec ? (
         <Box>
           <Text color="cyan" bold>
-            {`→ node9 shield enable ${topRec.shieldName}   (start here — +${topRecBonus} pts)`}
+            {`→ node9 shield enable ${topRec.shieldName}   (start here — widest coverage)`}
           </Text>
         </Box>
       ) : null}
