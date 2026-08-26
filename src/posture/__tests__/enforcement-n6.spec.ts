@@ -39,11 +39,24 @@ vi.mock('../../agent-wiring', () => ({
   getAgentWiring: () => [{ isProtected: true }],
 }));
 
+import path from 'path';
 import { annotateCoverage } from '../enforcement';
 import type { Finding } from '../types';
 
 const STATIC_FIX =
   'Fix it now: run `node9 shield enable project-jail` (blocks credential-file reads in-path).';
+
+// Platform-native paths: tildePath splits on `home + path.sep` (the same
+// boundary rule as displayPath in secrets.ts), so a hardcoded posix HOME
+// broke exactly one assertion on the Windows CI legs. Build every path
+// with path.join and derive the expected `~`-form with the same sep.
+const HOME = path.sep === '\\' ? 'C:\\Users\\u' : '/home/u';
+const P = {
+  claude: path.join(HOME, '.claude.json'),
+  codex: path.join(HOME, '.codex', 'config.toml'),
+  aws: path.join(HOME, '.aws', 'credentials'),
+};
+const TILDE_CLAUDE = '~' + path.sep + '.claude.json';
 
 function fileReadFinding(paths: string[]): Finding {
   return {
@@ -56,7 +69,7 @@ function fileReadFinding(paths: string[]): Finding {
   };
 }
 
-const CTX = { home: '/home/u', cwd: '/home/u' };
+const CTX = { home: HOME, cwd: HOME };
 
 describe('N6 — fileRead probe consults the POLICY gate, not DLP alone', () => {
   beforeEach(() => {
@@ -66,26 +79,26 @@ describe('N6 — fileRead probe consults the POLICY gate, not DLP alone', () => 
   });
 
   it('a jail-added file (DLP-silent, policy BLOCK) counts as covered — fails on pre-N6 code', async () => {
-    policyVerdicts.current.set('/home/u/.claude.json', {
+    policyVerdicts.current.set(P.claude, {
       decision: 'block',
       ruleName: 'block-path-home-u-claude-json-anytool',
     });
-    const f = fileReadFinding(['/home/u/.claude.json']);
+    const f = fileReadFinding([P.claude]);
     await annotateCoverage([f], CTX);
     expect(f.coverage?.state).toBe('covered');
     expect(f.fix).toBe(STATIC_FIX); // covered → no rewrite
   });
 
   it('a DLP-covered file is still covered via node9 DLP (no regression)', async () => {
-    dlpHits.current.add('/home/u/.aws/credentials');
-    const f = fileReadFinding(['/home/u/.aws/credentials']);
+    dlpHits.current.add(P.aws);
+    const f = fileReadFinding([P.aws]);
     await annotateCoverage([f], CTX);
     expect(f.coverage).toEqual({ state: 'covered', level: 'block', via: 'node9 DLP' });
   });
 
   it('one gated + one open path → the FINDING is open (any ungated path is the hole)', async () => {
-    dlpHits.current.add('/home/u/.aws/credentials');
-    const f = fileReadFinding(['/home/u/.aws/credentials', '/home/u/.claude.json']);
+    dlpHits.current.add(P.aws);
+    const f = fileReadFinding([P.aws, P.claude]);
     await annotateCoverage([f], CTX);
     expect(f.coverage?.state).toBe('open');
   });
@@ -100,17 +113,17 @@ describe('N6 — fix-string honesty (the founder bug)', () => {
 
   it('project-jail applied + uncovered file → fix becomes `node9 jail add <path>`, never re-enables', async () => {
     applied.current = ['project-jail'];
-    const f = fileReadFinding(['/home/u/.claude.json', '/home/u/.codex/config.toml']);
+    const f = fileReadFinding([P.claude, P.codex]);
     await annotateCoverage([f], CTX);
     expect(f.coverage?.state).toBe('open');
-    expect(f.fix).toContain('node9 jail add ~/.claude.json');
+    expect(f.fix).toContain('node9 jail add ' + TILDE_CLAUDE);
     expect(f.fix).toContain('+1 more');
     expect(f.fix).not.toContain('shield enable project-jail');
     expect(f.fix).toContain('already enabled');
   });
 
   it('project-jail NOT applied → the static enable advice stands (pre-install machines keep the right CTA)', async () => {
-    const f = fileReadFinding(['/home/u/.claude.json']);
+    const f = fileReadFinding([P.claude]);
     await annotateCoverage([f], CTX);
     expect(f.coverage?.state).toBe('open');
     expect(f.fix).toBe(STATIC_FIX);
@@ -118,7 +131,7 @@ describe('N6 — fix-string honesty (the founder bug)', () => {
 
   it('rewrite only touches findings whose fix actually recommends project-jail', async () => {
     applied.current = ['project-jail'];
-    const f = fileReadFinding(['/home/u/.claude.json']);
+    const f = fileReadFinding([P.claude]);
     f.fix = 'Rotate this credential.'; // some other finding style
     await annotateCoverage([f], CTX);
     expect(f.fix).toBe('Rotate this credential.');
