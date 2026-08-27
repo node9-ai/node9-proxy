@@ -1,30 +1,33 @@
-// N6 — posture's fileRead coverage probe and fix-string honesty.
+// N6 — posture's fileRead coverage semantics and fix-string honesty.
 //
-// Two bugs, one evaluation:
-// 1. The probe consulted DLP ONLY, but `node9 jail add` creates
-//    `block-path-*` policy rules on file_path that DLP knows nothing
-//    about — a jail-added file read as "uncovered" forever.
-// 2. The static fix said "run `node9 shield enable project-jail`" even
-//    when the gate testimony (policy.appliedShields) showed it already
-//    enabled — the founder's machine recommended enabling an enabled
-//    shield for two files it doesn't even cover.
+// History matters here. The first version of this spec certified a policy
+// fallthrough that was DEAD at the real gate (evaluatePolicy('Read',…)
+// without the orchestrator's arming + skipIgnoredFastPath always answers
+// 'allow' — the engine's ignored fast path fires first). The mock hid it
+// because it keyed on file_path and discarded the tool argument. That
+// fallthrough was reverted; what this spec now pins is:
 //
-// Fully hermetic: every gate the probe consults is mocked, so results
-// do not depend on the machine's real ~/.node9 (the suite must pass
-// identically on the founder's 7-shield machine and a bare CI runner).
+//   1. fileRead coverage is DLP-only, and that UNDER-claims by design
+//      (documented limitation: a jail-added path reads as open) — the
+//      safe direction until a shared gate resolver exists
+//      (doc/n6-f1-fix-plan.md).
+//   2. The fix-string rewrite: when project-jail is already applied, the
+//      static "enable project-jail" advice is replaced by a jail-add
+//      pointer that NEVER carries a file path (ship.ts contract: `fix`
+//      ships to the SaaS; detail[], which lists files, never leaves the
+//      machine).
+//
+// Hermetic: config/dlp/agent-wiring are mocked so results are identical
+// on the founder's 7-shield machine and a bare CI runner. The REAL-gate
+// behavior (what the orchestrator actually blocks) is exercised by the
+// jail gauntlet, not here — a mock cannot testify about the gate.
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 const dlpHits = { current: new Set<string>() };
-const policyVerdicts = { current: new Map<string, { decision: string; ruleName?: string }>() };
 const applied = { current: [] as string[] };
 
 vi.mock('../../dlp', () => ({
   scanFilePath: (p: string) => (dlpHits.current.has(p) ? { severity: 'block' } : null),
-}));
-vi.mock('../../policy', () => ({
-  evaluatePolicy: vi.fn(async (_tool: string, args: { file_path?: string }) => {
-    return policyVerdicts.current.get(args.file_path ?? '') ?? { decision: 'allow' };
-  }),
 }));
 vi.mock('../../config', () => ({
   getConfig: () => ({
@@ -46,17 +49,12 @@ import type { Finding } from '../types';
 const STATIC_FIX =
   'Fix it now: run `node9 shield enable project-jail` (blocks credential-file reads in-path).';
 
-// Platform-native paths: tildePath splits on `home + path.sep` (the same
-// boundary rule as displayPath in secrets.ts), so a hardcoded posix HOME
-// broke exactly one assertion on the Windows CI legs. Build every path
-// with path.join and derive the expected `~`-form with the same sep.
 const HOME = path.sep === '\\' ? 'C:\\Users\\u' : '/home/u';
 const P = {
   claude: path.join(HOME, '.claude.json'),
   codex: path.join(HOME, '.codex', 'config.toml'),
   aws: path.join(HOME, '.aws', 'credentials'),
 };
-const TILDE_CLAUDE = '~' + path.sep + '.claude.json';
 
 function fileReadFinding(paths: string[]): Finding {
   return {
@@ -71,29 +69,27 @@ function fileReadFinding(paths: string[]): Finding {
 
 const CTX = { home: HOME, cwd: HOME };
 
-describe('N6 — fileRead probe consults the POLICY gate, not DLP alone', () => {
+describe('N6 — fileRead coverage is DLP-only and under-claims by design', () => {
   beforeEach(() => {
     dlpHits.current = new Set();
-    policyVerdicts.current = new Map();
     applied.current = [];
   });
 
-  it('a jail-added file (DLP-silent, policy BLOCK) counts as covered — fails on pre-N6 code', async () => {
-    policyVerdicts.current.set(P.claude, {
-      decision: 'block',
-      ruleName: 'block-path-home-u-claude-json-anytool',
-    });
-    const f = fileReadFinding([P.claude]);
-    await annotateCoverage([f], CTX);
-    expect(f.coverage?.state).toBe('covered');
-    expect(f.fix).toBe(STATIC_FIX); // covered → no rewrite
-  });
-
-  it('a DLP-covered file is still covered via node9 DLP (no regression)', async () => {
+  it('a DLP-covered file is covered via node9 DLP', async () => {
     dlpHits.current.add(P.aws);
     const f = fileReadFinding([P.aws]);
     await annotateCoverage([f], CTX);
     expect(f.coverage).toEqual({ state: 'covered', level: 'block', via: 'node9 DLP' });
+  });
+
+  it('a DLP-silent path is OPEN — even one the policy layer would gate (the documented limitation)', async () => {
+    // If this row starts failing because coverage became 'covered', someone
+    // re-added a policy consult. That is only correct if it goes through a
+    // SHARED gate resolver proven against dist/cli.js check (see the plan
+    // doc) — a direct evaluatePolicy call here is the dead code we removed.
+    const f = fileReadFinding([P.claude]);
+    await annotateCoverage([f], CTX);
+    expect(f.coverage?.state).toBe('open');
   });
 
   it('one gated + one open path → the FINDING is open (any ungated path is the hole)', async () => {
@@ -104,22 +100,34 @@ describe('N6 — fileRead probe consults the POLICY gate, not DLP alone', () => 
   });
 });
 
-describe('N6 — fix-string honesty (the founder bug)', () => {
+describe('N6 — fix-string honesty (the founder bug) + ship privacy contract', () => {
   beforeEach(() => {
     dlpHits.current = new Set();
-    policyVerdicts.current = new Map();
     applied.current = [];
   });
 
-  it('project-jail applied + uncovered file → fix becomes `node9 jail add <path>`, never re-enables', async () => {
+  it('project-jail applied + uncovered files → fix points at jail add, never re-enables', async () => {
     applied.current = ['project-jail'];
     const f = fileReadFinding([P.claude, P.codex]);
     await annotateCoverage([f], CTX);
     expect(f.coverage?.state).toBe('open');
-    expect(f.fix).toContain('node9 jail add ' + TILDE_CLAUDE);
-    expect(f.fix).toContain('+1 more');
-    expect(f.fix).not.toContain('shield enable project-jail');
+    expect(f.fix).toContain('node9 jail add');
     expect(f.fix).toContain('already enabled');
+    expect(f.fix).not.toContain('shield enable project-jail');
+  });
+
+  it('the rewritten fix NEVER carries a file path — fix ships to the SaaS, detail[] does not', async () => {
+    applied.current = ['project-jail'];
+    const f = fileReadFinding([P.claude, P.codex]);
+    await annotateCoverage([f], CTX);
+    // No separator-bearing path fragments: not the absolute inputs, no
+    // tilde-form, and no home fragment. `<file>` is the only allowed
+    // angle-bracket placeholder.
+    expect(f.fix).not.toContain(P.claude);
+    expect(f.fix).not.toContain(P.codex);
+    expect(f.fix).not.toContain('~' + path.sep);
+    expect(f.fix).not.toContain(HOME);
+    expect(f.fix).not.toContain('.claude.json');
   });
 
   it('project-jail NOT applied → the static enable advice stands (pre-install machines keep the right CTA)', async () => {
@@ -135,5 +143,14 @@ describe('N6 — fix-string honesty (the founder bug)', () => {
     f.fix = 'Rotate this credential.'; // some other finding style
     await annotateCoverage([f], CTX);
     expect(f.fix).toBe('Rotate this credential.');
+  });
+
+  it('covered finding → fix untouched (no rewrite on a green)', async () => {
+    applied.current = ['project-jail'];
+    dlpHits.current.add(P.aws);
+    const f = fileReadFinding([P.aws]);
+    await annotateCoverage([f], CTX);
+    expect(f.coverage?.state).toBe('covered');
+    expect(f.fix).toBe(STATIC_FIX);
   });
 });

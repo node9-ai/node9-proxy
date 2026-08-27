@@ -49,8 +49,8 @@ export function BlockedPanel({
     enabled.size === 0
       ? '→ install node9 + enable shields above'
       : anyNeeds
-        ? '→ ✓ rules are enforced in-path · enable the remaining shields above'
-        : '→ ✓ enforced in-path by your enabled shields';
+        ? '→ ✓ marks rules from enabled shields · enable the rest above'
+        : '→ ✓ all these rules come from enabled shields';
 
   return (
     <Box borderStyle="round" borderColor="red" paddingX={1} flexDirection="column" width={width}>

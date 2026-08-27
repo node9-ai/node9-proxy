@@ -684,7 +684,7 @@ describe('N6 — state-aware phrasing (enabledShields injected)', () => {
     const out = captureOutput();
     // S2 — the founder's bug: CTA for an enabled shield.
     expect(out).not.toContain('shield enable project-jail');
-    expect(out).toContain('✓ enabled — enforcing in-path');
+    expect(out).toContain('✓ enabled');
     expect(out).toContain('✓ recommended shields are enabled');
     // S2 — origin tags follow the same state.
     expect(out).toContain('✓ shield:project-jail');
@@ -712,7 +712,7 @@ describe('N6 — state-aware phrasing (enabledShields injected)', () => {
       );
       const out = stripTerminalEscapes(lastFrame() ?? '');
       expect(out).not.toContain('shield enable project-jail');
-      expect(out).toContain('✓ enabled — enforcing in-path');
+      expect(out).toContain('✓ enabled');
       // Ink truncates the origin column (`✓ shield:projec…`), so both the
       // positive AND the negative assertion must use truncation-surviving
       // prefixes — `not.toContain('needs shield:project-jail')` would pass

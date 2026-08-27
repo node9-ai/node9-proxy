@@ -5,7 +5,7 @@ exports[`N6 — state-aware phrasing (enabledShields injected) > chalk panel: an
   │ 🚨 2 credential leaks in tool input  (latest: 2d ago, GitHub Token)      │
   │ 🛑 2 ops node9 would have blocked  (block-read-ssh, block-eval-remote)   │
   │ 🔁 1 agent loops detected  (Edit dominates, 125 wasted calls · 1% of calls) │
-  │ 🔭 5 secrets reachable on disk  → agent reads blocked in-path (project-jail ✓) │
+  │ 🔭 5 secrets reachable on disk  → project-jail ✓ enabled                 │
   ╰──────────────────────────────────────────────────────────────────────────╯
 
   ╭─ LEAKS  ·  2 secrets in plain text ──────────────────────────────────────╮
@@ -40,7 +40,7 @@ exports[`N6 — state-aware phrasing (enabledShields injected) > chalk panel: an
   ╰──────────────────────────────────────────────────────────────────────────╯
 
   ╭─ SHIELDS  ·  your coverage vs what we found ─────────────────────────────╮
-  │ 🛡️  project-jail  catches 4 ops         ✓ enabled — enforcing in-path    │
+  │ 🛡️  project-jail  catches 4 ops         ✓ enabled                        │
   │       review-read-credentials ×3, block-read-ssh                         │
   │ ☐   bash-safe     catches 1 op                                           │
   │       block-eval-remote                                                  │
@@ -72,7 +72,7 @@ exports[`N6 — state-aware phrasing (enabledShields injected) > ink scorecard: 
 │ CREDENTIAL LEAKS                         │ │ WOULD HAVE BLOCKED                       │
 │   2d GitHub Token   [Bash]        claude │ │ ✗ block-read-ssh    ×1  ✓ shield:projec… │
 │  19d GCP API Key    [user-prompt] gemini │ │ ✗ block-eval-remote ×1  needs shield:ba… │
-│ → DLP · node9 mask (runtime + cleanup)   │ │ → ✓ rules are enforced in-path · enable… │
+│ → DLP · node9 mask (runtime + cleanup)   │ │ → ✓ marks rules from enabled shields · … │
 ╰──────────────────────────────────────────╯ ╰──────────────────────────────────────────╯
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ High (5 paths reachable) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ╭────────────────────────────────────────────────────────────────────────────────────────╮
@@ -94,7 +94,7 @@ exports[`N6 — state-aware phrasing (enabledShields injected) > ink scorecard: 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Recommended action ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ╭────────────────────────────────────────────────────────────────────────────────────────╮
 │ SHIELDS                                                                                │
-│ project-jail    catches 4 ops       ✓ enabled — enforcing in-path                      │
+│ project-jail    catches 4 ops       ✓ enabled                                          │
 │ bash-safe       catches 1 op                                                           │
 │ ✓ active: postgres  (no hits in this history)                                          │
 │ aws · docker · filesystem · github · k8s · mongodb · redis  (no hits — install proact… │

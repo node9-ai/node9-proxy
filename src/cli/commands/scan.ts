@@ -3066,7 +3066,7 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
     // figure the reader cannot check. State-aware CTA (N6): never tell
     // the user to enable a shield that is already enforcing.
     const cta = enabledSet.has('project-jail')
-      ? '  → agent reads blocked in-path (project-jail ✓)'
+      ? '  → project-jail ✓ enabled'
       : '  → enable project-jail';
     topLines.push(
       mkLine(
@@ -3272,11 +3272,7 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
     // cannot check (this chalk twin lagged the ink fix in 3c10119).
     // Tense honesty (N6): `✓ enabled` is a statement about NOW; whether
     // PAST events were blocked is report's claim to make, not scan's.
-    const suffix = isOn
-      ? '✓ enabled — enforcing in-path'
-      : discount > 0
-        ? '→ blocks these reads in-path'
-        : '';
+    const suffix = isOn ? '✓ enabled' : discount > 0 ? '→ blocks these reads in-path' : '';
     shieldLines.push(
       mkLine(
         [icon, discount > 0 ? chalk.cyan : chalk.dim],
@@ -4052,7 +4048,7 @@ export function registerScanCommand(program: Command): void {
             if (reviewRules.length === 0) continue;
             const enableHint = section.shieldKey
               ? enabledShieldSet.has(section.shieldKey)
-                ? chalk.green(`  ✓  ${section.shieldKey} enabled — enforcing in-path`)
+                ? chalk.green(`  ✓  ${section.shieldKey} enabled`)
                 : chalk.dim(`  →  node9 shield enable ${section.shieldKey}`)
               : '';
             console.log('  ' + chalk.dim('─'.repeat(70)));

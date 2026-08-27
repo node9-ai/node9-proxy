@@ -81,9 +81,11 @@ export function ShieldsPanel({ summary, width, enabledShields = [] }: Props): Re
         // some terminals. The shield name styling (bold cyan for
         // protective, dim otherwise) carries the same signal.
         //
-        // Tense honesty (N6): an enabled shield gets `✓ enabled` — a
-        // statement about NOW. Never "blocked these" — whether PAST
-        // events were blocked is report's claim to make, not scan's.
+        // Tense honesty (N6): an enabled shield gets `✓ enabled` and
+        // nothing stronger. Not "enforcing in-path" — that claim also
+        // needs wiring + a non-observe mode, which this renderer does
+        // not know (review F2). And never "blocked these" — whether
+        // PAST events were blocked is report's claim, not scan's.
         return (
           <Box key={impact.shieldName}>
             <Box width={16}>
@@ -95,7 +97,7 @@ export function ShieldsPanel({ summary, width, enabledShields = [] }: Props): Re
               <Text dimColor>{`catches ${impact.totalCatches} ${noun}`}</Text>
             </Box>
             {isOn ? (
-              <Text bold color="green">{`✓ enabled — enforcing in-path`}</Text>
+              <Text bold color="green">{`✓ enabled`}</Text>
             ) : discount > 0 ? (
               <Text bold color="green">{`→ blocks these reads in-path`}</Text>
             ) : null}
