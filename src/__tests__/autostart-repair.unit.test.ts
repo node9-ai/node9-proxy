@@ -20,8 +20,20 @@ describe('autostartRepairDecision', () => {
     ).toBe('skip');
   });
 
-  it('unsupported on a non linux/darwin platform', () => {
+  it('win32 is a supported platform since the schtasks backend', () => {
     setPlatform('win32');
+    // Not installed → skip (advise, never silently install) — same law as
+    // linux/darwin. Installed-but-disabled → repair, also same law.
+    expect(
+      autostartRepairDecision({ installed: false, enabled: false, autoStartDaemon: true })
+    ).toBe('skip');
+    expect(
+      autostartRepairDecision({ installed: true, enabled: false, autoStartDaemon: true })
+    ).toBe('repair');
+  });
+
+  it('unsupported on a platform with no service backend (freebsd)', () => {
+    setPlatform('freebsd');
     expect(
       autostartRepairDecision({ installed: false, enabled: false, autoStartDaemon: true })
     ).toBe('unsupported');

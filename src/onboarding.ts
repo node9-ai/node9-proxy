@@ -115,7 +115,7 @@ export async function onboardMachine(
           ? 'running'
           : healed === 'unsupported'
             ? 'no background service on this platform: starts on agent activity'
-            : 'starts on agent activity';
+            : 'starts on agent activity (make it survive reboots: node9 daemon install)';
     steps.push({ name: 'daemon', ok: true, detail });
   }
 
