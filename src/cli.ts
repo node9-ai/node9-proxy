@@ -34,8 +34,8 @@ import { spawn } from 'child_process';
 import { confirm } from '@inquirer/prompts';
 import { parseDuration } from './utils/duration';
 import { runProxy } from './proxy';
-import { autoStartDaemonAndWait, isTestingMode } from './cli/daemon-starter';
-import { ensureAutostartHealthy } from './daemon/service';
+import { autoStartDaemonAndWait } from './cli/daemon-starter';
+import { onboardMachine, renderOnboardOutcome } from './onboarding';
 import { registerCheckCommand } from './cli/commands/check';
 import { registerLogCommand } from './cli/commands/log';
 import { registerShieldCommand, registerConfigShowCommand } from './cli/commands/shield';
@@ -82,38 +82,32 @@ program
   .argument('<apiKey>')
   .option('--local', 'Save key for audit/logging only — local config still controls all decisions')
   .option('--profile <name>', 'Save as a named profile (default: "default")')
-  .action((apiKey, options: { local?: boolean; profile?: string }) => {
-    const { profileName, effectiveCloud } = writeCredentialsAndConfig(apiKey, {
-      profileName: options.profile,
-      isLocal: options.local,
-    });
-
-    if (options.profile && profileName !== 'default') {
+  .action(async (apiKey, options: { local?: boolean; profile?: string }) => {
+    // Named profile / --local keep their narrow legacy behavior: write the key,
+    // say what happened, no cloud onboarding. Profiles are on a deprecation
+    // path (login-v2 §6); --local is the explicit privacy-mode switch.
+    if (options.profile && options.profile !== 'default') {
+      const { profileName } = writeCredentialsAndConfig(apiKey, {
+        profileName: options.profile,
+        isLocal: options.local,
+      });
       console.log(chalk.green(`✅ Profile "${profileName}" saved`));
       console.log(chalk.gray(`   Switch to it per-session:  NODE9_PROFILE=${profileName} claude`));
-    } else if (options.local || effectiveCloud === false) {
+      return;
+    }
+    if (options.local) {
+      writeCredentialsAndConfig(apiKey, { isLocal: true });
       console.log(chalk.green(`✅ Key saved — Privacy mode 🛡️`));
       console.log(chalk.gray(`   All decisions stay on this machine. Nothing syncs to the cloud.`));
-      if (!options.local) {
-        console.log(
-          chalk.yellow(`   Your config has cloud approvals OFF (settings.approvers.cloud).`)
-        );
-        console.log(
-          chalk.gray(`   To enable team policy + dashboard sync: set it to true, or re-init.`)
-        );
-      }
-    } else {
-      console.log(chalk.green(`✅ Logged in — agent mode`));
-      console.log(chalk.gray(`   Team policy enforced for all calls via Node9 cloud.`));
-      // Self-heal autostart: a missing/disabled service (the stale-policy trigger)
-      // gets (re)enabled at the moment the machine becomes cloud-enabled, so cloud
-      // policy keeps syncing across reboots. Best-effort, only when opted in.
-      if (!isTestingMode()) {
-        const healed = ensureAutostartHealthy(!!getConfig().settings.autoStartDaemon);
-        if (healed === 'repaired')
-          console.log(chalk.green(`   ✓ Re-enabled daemon autostart (survives reboot)`));
-      }
+      return;
     }
+
+    // Default profile, cloud mode: run THE shared onboarding routine
+    // (onboarding.ts) — same steps and same scorecard as `node9 connect`, so a
+    // manually-entered key ends with a machine the dashboard can actually see.
+    const outcome = await onboardMachine(apiKey);
+    console.log(renderOnboardOutcome(outcome));
+    if (!outcome.ok) process.exitCode = 1;
   });
 
 // 1b. SIGNUP — open the node9 dashboard signup/login in the browser (Phase-1 capture).

@@ -87,9 +87,34 @@ export async function annotateCoverage(findings: Finding[], ctx: CheckContext): 
 
     if (probe.kind === 'fileRead') {
       // DLP layer — the one that actually gates the agent's Read tool.
+      //
+      // KNOWN LIMITATION (doc/n6-f1-fix-plan.md): a `node9 jail add` path is
+      // gated by policy `block-path-*` rules that DLP knows nothing about, so
+      // it reads as uncovered here forever. An attempted fix that consulted
+      // evaluatePolicy('Read', …) directly was REVERTED as dead code: without
+      // the orchestrator's arming + skipIgnoredFastPath the engine's ignored
+      // fast path answers 'allow' before any path rule is consulted — and
+      // copying the arming here would be a second judge that drifts (it
+      // already changed twice: tasks #20, #22). Until the gate decision is
+      // extracted into one shared resolver, DLP-only UNDER-claims, which is
+      // the safe direction: a false "open" nags, a false "covered" lies.
       const verdicts = probe.paths.map((p) => scanFilePath(p)?.severity ?? null);
       if (verdicts.length === 0 || verdicts.some((v) => v === null)) {
         f.coverage = coverageFromVerdict('allow', env); // any unblocked path → open
+        // N6 fix-string honesty: when project-jail is already applied, the
+        // static "enable project-jail" advice is already true — point at
+        // `jail add` instead. ⛔ No file path in this string: `fix` ships
+        // to the SaaS and ship.ts's contract is that fix never carries
+        // paths (detail[], which lists the files, deliberately never
+        // leaves the machine).
+        if (
+          (config.policy.appliedShields ?? []).includes('project-jail') &&
+          f.fix?.includes('shield enable project-jail')
+        ) {
+          f.fix =
+            'project-jail is already enabled but does not cover the file(s) listed here. ' +
+            'Fix it now: run `node9 jail add <file>` for each file above.';
+        }
       } else {
         const worst: Verdict = verdicts.some((v) => v === 'review') ? 'review' : 'block';
         f.coverage = coverageFromVerdict(worst, env, 'node9 DLP');

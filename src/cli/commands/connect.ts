@@ -3,15 +3,14 @@ import http from 'http';
 import https from 'https';
 import { URL } from 'url';
 import chalk from 'chalk';
-import { writeCredentialsAndConfig } from '../../credentials';
-import { setupDetectedAgents } from '../../setup';
-import { runCloudSync } from '../../daemon/sync';
-import { isTestingMode } from '../daemon-starter';
+import { onboardMachine, renderOnboardOutcome } from '../../onboarding';
 
 // node9 connect <token> — the onboarding bridge. Exchanges a dashboard connect
-// token for a workspace key (POST /cli/connect), writes credentials + config,
-// wires detected agents non-interactively, and fires one sync so the machine
-// shows up in the dashboard. No raw key is ever copy-pasted by the user.
+// token for a workspace key (POST /cli/connect), then hands off to THE shared
+// onboarding routine (onboarding.ts): credentials, agent wiring, policy sync,
+// and the acked snapshot push that makes the machine exist in the dashboard.
+// No raw key is ever copy-pasted by the user. Exit 1 when any required step
+// fails — a machine the cloud never acked must not hear "Connected".
 const DEFAULT_CONNECT_URL = 'https://api.node9.ai/api/v1/cli/connect';
 
 interface ConnectResponse {
@@ -96,35 +95,8 @@ export function registerConnectCommand(program: Command): void {
         return;
       }
 
-      // Reuse login's writer (credentials.json + config.json approvers).
-      writeCredentialsAndConfig(resp.apiKey, { profileName: options.profile });
-
-      // Wire detected agents without prompting (curl | sh has no TTY).
-      process.env.NODE9_NONINTERACTIVE = '1';
-      let wired: string[] = [];
-      try {
-        wired = await setupDetectedAgents();
-      } catch {
-        // Agent wiring is best-effort; the connection itself already succeeded.
-      }
-
-      // Register the machine with the cloud so the dashboard shows it. Skipped
-      // under the test runner (no live cloud).
-      if (!isTestingMode()) {
-        try {
-          await runCloudSync();
-        } catch {
-          // Best-effort — the first hook call will sync anyway.
-        }
-      }
-
-      console.log(chalk.green(`✅ Connected to ${resp.workspaceName}`));
-      if (wired.length) {
-        console.log(chalk.gray(`   Wired: ${wired.join(', ')}`));
-      } else {
-        console.log(
-          chalk.gray('   No agents detected yet — run `node9 init` after installing one.')
-        );
-      }
+      const outcome = await onboardMachine(resp.apiKey, { profileName: options.profile });
+      console.log(renderOnboardOutcome(outcome, { workspaceName: resp.workspaceName }));
+      if (!outcome.ok) process.exitCode = 1;
     });
 }

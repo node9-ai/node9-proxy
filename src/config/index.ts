@@ -85,6 +85,17 @@ export interface Config {
     ignoredTools: string[];
     toolInspection: Record<string, string>;
     smartRules: SmartRule[];
+    /**
+     * RESOLVED output, never user input: the shields the shield layer
+     * actually applied to smartRules on this load (local ∪ cloud-mandated,
+     * minus any whose body failed to resolve — a fail-closed mandate is
+     * deliberately absent). This is the gate's own testimony of "what is
+     * running"; renderers (scan/posture) must read THIS, never
+     * shields.json or rules-cache.json directly, or local/cloud divergence
+     * re-creates the false "needs shield" (N6). Overwritten on every
+     * getConfig(); a value in a config file is ignored by construction.
+     */
+    appliedShields?: string[];
     dlp: {
       enabled: boolean;
       scanIgnoredTools: boolean;
@@ -1281,6 +1292,8 @@ export function getConfig(cwd?: string): Config {
   // Local shields ∪ cloud-managed shields (M1). Deduped so a shield enabled both
   // locally and from the dashboard is applied once.
   const activeShieldNames = [...new Set([...readActiveShields(), ...cloudManagedShields])];
+  // Filled by the apply loop below; becomes policy.appliedShields (N6).
+  const appliedShields: string[] = [];
   // B1: a cloud-mandated shield is enforced EXACTLY as the cloud defines it —
   // local per-rule overrides (`node9 shield set`) do not apply to it, weakening
   // OR tightening. This is what the comment above the union has always promised
@@ -1303,6 +1316,9 @@ export function getConfig(cwd?: string): Config {
     // locked to the fleet.
     const shield = isCloudMandated ? BUILTIN_SHIELDS[shieldName] : getShield(shieldName);
     if (!shield) continue;
+    // The applier testifies (N6): only a shield whose body resolved — and
+    // whose rules are therefore about to be injected — counts as running.
+    appliedShields.push(shieldName);
     // Deduplicate smartRules by name — prevents duplicates if the user also
     // has the same rule name in their config.
     const existingRuleNames = new Set(mergedPolicy.smartRules.map((r) => r.name));
@@ -1333,6 +1349,9 @@ export function getConfig(cwd?: string): Config {
       if (!existingWords.has(word)) mergedPolicy.dangerousWords.push(word);
     }
   }
+  // Always assigned (even when empty) so a stale value can never leak in
+  // from a config file — this field is resolver output, not user input.
+  mergedPolicy.appliedShields = appliedShields.sort();
 
   // Advisory rm rules are always appended last so user-defined rules (project/global/shield)
   // are evaluated first and can override default rm behaviour.

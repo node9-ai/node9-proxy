@@ -82,7 +82,10 @@ export function StaticScorecard({ input, rangeLabel, now }: Props): React.ReactE
       parts.push(`${leakCount} secret${leakCount !== 1 ? 's' : ''} leaked`);
     }
     if (blockedCount > 0) {
-      parts.push(`${blockedCount} op${blockedCount !== 1 ? 's' : ''} blocked`);
+      // "would be blocked", never "blocked": the panel beneath is WOULD HAVE
+      // BLOCKED (shields not yet enabled). The header must not claim an action
+      // node9 did not take.
+      parts.push(`${blockedCount} op${blockedCount !== 1 ? 's' : ''} would be blocked`);
     }
     return `Critical (${parts.join(' + ')})`;
   })();
@@ -102,7 +105,11 @@ export function StaticScorecard({ input, rangeLabel, now }: Props): React.ReactE
           <SeverityBand label={criticalLabel} width={width} />
           <Box flexDirection="row" gap={1}>
             <LeaksPanel summary={summary} width={halfWidth} now={now} />
-            <BlockedPanel summary={summary} width={halfWidth} />
+            <BlockedPanel
+              summary={summary}
+              width={halfWidth}
+              enabledShields={input.enabledShields}
+            />
           </Box>
         </>
       ) : null}
@@ -110,7 +117,15 @@ export function StaticScorecard({ input, rangeLabel, now }: Props): React.ReactE
       {input.blastExposures > 0 ? (
         <>
           <SeverityBand
-            label={`High (${input.blastExposures} path${input.blastExposures !== 1 ? 's' : ''} reachable on disk)`}
+            label={(() => {
+              // blastExposures = paths + env vars; calling the sum "paths" made
+              // the band disagree with the panel's row groups. Name each part.
+              const paths = input.blast.reachable.length;
+              const envs = input.blast.envFindings.length;
+              const pathPart = `${paths} path${paths !== 1 ? 's' : ''}`;
+              const envPart = envs > 0 ? ` + ${envs} env var${envs !== 1 ? 's' : ''}` : '';
+              return `High (${pathPart}${envPart} reachable)`;
+            })()}
             width={width}
           />
           <BlastRadiusPanel
@@ -125,18 +140,29 @@ export function StaticScorecard({ input, rangeLabel, now }: Props): React.ReactE
         const reviewCount = input.reviewCount;
         const loopCount = input.scan.loopFindings.length;
         if (reviewCount === 0 && loopCount === 0) return null;
-        const { wastePct } = computeLoopWaste(input.scan.loopFindings, input.scan.totalToolCalls);
+        const { wastePct, wastedCalls } = computeLoopWaste(
+          input.scan.loopFindings,
+          input.scan.totalToolCalls
+        );
         const parts: string[] = [];
         if (reviewCount > 0) parts.push(`${reviewCount} op${reviewCount !== 1 ? 's' : ''} flagged`);
         if (loopCount > 0)
+          // loops = repeated PATTERNS; wasted calls = repeats inside them. The
+          // % is a share of ALL TOOL CALLS — never render it as a cost share.
           parts.push(
-            `${loopCount} loop${loopCount !== 1 ? 's' : ''}${wastePct > 0 ? ` · ${wastePct}% wasted` : ''}`
+            `${loopCount} loop${loopCount !== 1 ? 's' : ''}${
+              wastedCalls > 0 ? ` · ${wastedCalls} wasted calls (${wastePct}% of all calls)` : ''
+            }`
           );
         return (
           <>
             <SeverityBand label={`Medium (${parts.join(' · ')})`} width={width} />
             <Box flexDirection="row" gap={1}>
-              <ReviewQueuePanel summary={input.summary} width={halfWidth} />
+              <ReviewQueuePanel
+                summary={input.summary}
+                width={halfWidth}
+                enabledShields={input.enabledShields}
+              />
               <AgentLoopsPanel loopFindings={input.scan.loopFindings} width={halfWidth} />
             </Box>
           </>
@@ -144,7 +170,7 @@ export function StaticScorecard({ input, rangeLabel, now }: Props): React.ReactE
       })()}
 
       <SeverityBand label="Recommended action" width={width} />
-      <ShieldsPanel summary={input.summary} blastScore={input.blast.score} width={width} />
+      <ShieldsPanel summary={input.summary} width={width} enabledShields={input.enabledShields} />
     </Box>
   );
 }

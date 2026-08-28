@@ -12,6 +12,7 @@ import React from 'react';
 import { Box, Text } from 'ink';
 
 import type { LoopFinding } from '../../../commands/scan.js';
+import { topOf } from './title-count.js';
 
 interface Props {
   loopFindings: LoopFinding[];
@@ -51,7 +52,10 @@ export function AgentLoopsPanel({ loopFindings, width }: Props): React.ReactElem
 
   return (
     <Box borderStyle="round" borderColor="gray" paddingX={1} flexDirection="column" width={width}>
-      <Text bold>AGENT LOOPS</Text>
+      <Text bold>
+        AGENT LOOPS
+        <Text dimColor>{topOf(toolEntries.length, byTool.size)}</Text>
+      </Text>
 
       {toolEntries.map(([tool, repeats]) => {
         const pct = totalRepeats > 0 ? Math.round((repeats / totalRepeats) * 100) : 0;

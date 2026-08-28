@@ -55,7 +55,8 @@ describe('node9 connect (integration)', () => {
   afterEach(() => fs.rmSync(tmpHome, { recursive: true, force: true }));
 
   function runConnect(
-    token: string
+    token: string,
+    envOverride: Record<string, string | undefined> = {}
   ): Promise<{ status: number | null; stdout: string; stderr: string }> {
     return new Promise((resolve) => {
       const child = spawn(
@@ -68,6 +69,7 @@ describe('node9 connect (integration)', () => {
             NODE9_NO_AUTO_DAEMON: '1',
             HOME: tmpHome,
             USERPROFILE: tmpHome,
+            ...envOverride,
           },
         }
       );
@@ -96,5 +98,28 @@ describe('node9 connect (integration)', () => {
     expect(r.status).toBe(1);
     expect(r.stderr).toMatch(/expired or was already used/);
     expect(fs.existsSync(credsPath())).toBe(false);
+  });
+
+  it('fails LOUDLY with exit 1 when the cloud never acks (B0 regression)', async () => {
+    // The old connect ignored runCloudSync's { ok: false } and printed
+    // "✅ Connected" while the machine never registered. Real spawn path,
+    // NODE9_TESTING unset so the cloud steps actually run; creds env points at
+    // a closed port so sync + the snapshot ack both fail hermetically.
+    mode = 'ok';
+    const r = await runConnect('n9_connect_valid', {
+      NODE9_TESTING: undefined,
+      NODE9_API_KEY: 'n9_live_env',
+      NODE9_API_URL: 'https://127.0.0.1:9/api/v1/intercept/policies/sync',
+      NODE9_BLAST_DISABLE: '1',
+      NODE9_SCAN_DISABLE: '1',
+      NODE9_POSTURE_DISABLE: '1',
+    });
+    expect(r.status).toBe(1);
+    // Not the success headline (agent-setup may print its own ✅ per agent).
+    expect(r.stdout).not.toMatch(/✅ Connected/);
+    expect(r.stdout).toMatch(/Connection incomplete/);
+    // Credentials ARE written (the key exchange succeeded) — only the cloud
+    // verification failed, and the scorecard must say which step.
+    expect(fs.existsSync(credsPath())).toBe(true);
   });
 });

@@ -15,42 +15,48 @@ import React from 'react';
 import { Box, Text } from 'ink';
 
 import type { ScanSummary } from '../../../../scan-summary.js';
-import { topRulesByVerdict } from '../../scan-derive.js';
+import { originForRule, topRulesByVerdict } from '../../scan-derive.js';
+import { topOf } from './title-count.js';
 
 interface Props {
   summary: ScanSummary;
   width: number;
+  /** Gate testimony (policy.appliedShields, N6). Empty/omitted =
+   *  pre-install machine → forecast phrasing, unchanged. */
+  enabledShields?: string[];
 }
 
-/** Find which origin tag (e.g. `default` or `needs shield:project-jail`)
- *  applies to a given rule name. Walks summary sections to find which
- *  one owns the rule. Mirrors the helper that lives inline inside
- *  the chalk renderPanelScorecard — kept duplicated for now to avoid
- *  touching scan.ts; can extract to scan-derive when commit #8
- *  consolidates the helpers. */
-function originForRule(ruleName: string, sections: ScanSummary['sections']): string {
-  for (const section of sections) {
-    if (section.rules.some((r) => r.name === ruleName)) {
-      if (section.sourceType === 'default') return 'default';
-      if (section.sourceType === 'shield') {
-        return `needs shield:${section.shieldKey ?? section.id}`;
-      }
-    }
-  }
-  return '';
-}
-
-/** Cap on rule rows. Above this, append a `… +N more` line. */
+/** Cap on rule rows. Overflow is signalled in the panel title
+ *  (`· top N of M`, see title-count.ts) rather than a `+N more` row. */
 const ROW_LIMIT = 12;
 
-export function BlockedPanel({ summary, width }: Props): React.ReactElement | null {
-  const rules = topRulesByVerdict(summary.sections, 'block', ROW_LIMIT);
+export function BlockedPanel({
+  summary,
+  width,
+  enabledShields = [],
+}: Props): React.ReactElement | null {
+  const enabled = new Set(enabledShields);
+  const allRules = topRulesByVerdict(summary.sections, 'block', Number.MAX_SAFE_INTEGER);
+  const rules = allRules.slice(0, ROW_LIMIT);
   if (rules.length === 0) return null;
+
+  // Footer phrasing follows the ROWS' own origin tags, so the two can
+  // never disagree: any `needs shield:` row → keep the enable CTA; all
+  // rows enforced (or default) with shields on → state the coverage.
+  const origins = rules.map((r) => originForRule(r.name, summary.sections, enabled));
+  const anyNeeds = origins.some((o) => o.startsWith('needs shield:'));
+  const footer =
+    enabled.size === 0
+      ? '→ install node9 + enable shields above'
+      : anyNeeds
+        ? '→ ✓ marks rules from enabled shields · enable the rest above'
+        : '→ ✓ all these rules come from enabled shields';
 
   return (
     <Box borderStyle="round" borderColor="red" paddingX={1} flexDirection="column" width={width}>
       <Text bold color="red">
         WOULD HAVE BLOCKED
+        <Text dimColor>{topOf(rules.length, allRules.length)}</Text>
       </Text>
 
       {rules.map((rule, i) => (
@@ -67,14 +73,14 @@ export function BlockedPanel({ summary, width }: Props): React.ReactElement | nu
             <Text bold>{`×${rule.count}`}</Text>
           </Box>
           <Text dimColor wrap="truncate-end">
-            {originForRule(rule.name, summary.sections)}
+            {originForRule(rule.name, summary.sections, enabled)}
           </Text>
         </Box>
       ))}
 
       <Box>
         <Text dimColor wrap="truncate-end">
-          {'→ install node9 + enable shields above'}
+          {footer}
         </Text>
       </Box>
     </Box>

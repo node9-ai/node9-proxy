@@ -14,6 +14,7 @@ import React from 'react';
 import { Box, Text } from 'ink';
 
 import type { CompactInput } from '../../../commands/scan.js';
+import { topOf } from './title-count.js';
 
 // CompactInput.blast carries the BlastResult shape (envFindings is an
 // array, not a count). Don't use BlastSnapshot — that's a separate
@@ -26,10 +27,13 @@ interface Props {
   width: number;
 }
 
-/** Max path rows shown individually. Above this, append a `… +N more`
- *  line. 4 keeps the panel tight; typical dev machines have ≤5 paths
- *  and the +N more roll-up handles longer lists. */
+/** Max path rows shown individually. 4 keeps the panel tight; typical
+ *  dev machines have ≤5 paths. Overflow is signalled in the panel TITLE
+ *  (`· top N of M`, see title-count.ts) — a `+N more` row was tried and
+ *  removed to save vertical space. Env rows carry their own cap below. */
 const ROW_LIMIT = 4;
+/** Max env-var rows (matches the slice(0, 3) in the render). */
+const ENV_ROW_LIMIT = 3;
 
 export function BlastRadiusPanel({
   blast,
@@ -38,10 +42,14 @@ export function BlastRadiusPanel({
 }: Props): React.ReactElement | null {
   if (blastExposures === 0) return null;
 
+  const shown =
+    Math.min(blast.reachable.length, ROW_LIMIT) + Math.min(blast.envFindings.length, ENV_ROW_LIMIT);
+
   return (
     <Box borderStyle="round" borderColor="yellow" paddingX={1} flexDirection="column" width={width}>
       <Text bold color="yellow">
         BLAST RADIUS
+        <Text dimColor>{topOf(shown, blastExposures)}</Text>
       </Text>
 
       {blast.reachable.slice(0, ROW_LIMIT).map((path, i) => {
@@ -69,10 +77,9 @@ export function BlastRadiusPanel({
         </Box>
       ))}
 
-      {/* No `… +N more` line — the severity-band header already
-       *  reports the total count, e.g. "High (5 paths reachable on
-       *  disk)". Keeping the panel one row tighter saves vertical
-       *  space. */}
+      {/* No `… +N more` row — the subset signal lives in the panel
+       *  title (`· top N of M`) so the panel stays one row tighter.
+       *  The severity band above carries the totals as well. */}
       <Box>
         <Text dimColor>{'→ '}</Text>
         <Text bold color="cyan">
