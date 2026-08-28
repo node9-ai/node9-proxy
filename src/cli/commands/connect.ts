@@ -4,6 +4,7 @@ import https from 'https';
 import { URL } from 'url';
 import chalk from 'chalk';
 import { onboardMachine, renderOnboardOutcome } from '../../onboarding';
+import { resolveCloudEndpoint } from '../../auth/cloud-endpoints';
 
 // node9 connect <token> — the onboarding bridge. Exchanges a dashboard connect
 // token for a workspace key (POST /cli/connect), then hands off to THE shared
@@ -11,7 +12,6 @@ import { onboardMachine, renderOnboardOutcome } from '../../onboarding';
 // and the acked snapshot push that makes the machine exist in the dashboard.
 // No raw key is ever copy-pasted by the user. Exit 1 when any required step
 // fails — a machine the cloud never acked must not hear "Connected".
-const DEFAULT_CONNECT_URL = 'https://api.node9.ai/api/v1/cli/connect';
 
 interface ConnectResponse {
   apiKey: string;
@@ -22,10 +22,7 @@ interface ConnectResponse {
 // --api-url wins; else derive from NODE9_API_URL (the intercept base) so a dev
 // pointing the daemon at staging also connects there; else prod default.
 export function resolveConnectUrl(apiUrl?: string): string {
-  if (apiUrl) return apiUrl;
-  const base = process.env.NODE9_API_URL;
-  if (base) return base.replace(/\/intercept\/?$/, '') + '/cli/connect';
-  return DEFAULT_CONNECT_URL;
+  return resolveCloudEndpoint('/cli/connect', apiUrl);
 }
 
 function postConnect(url: string, token: string): Promise<ConnectResponse> {

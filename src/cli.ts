@@ -30,12 +30,13 @@ import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { spawn } from 'child_process';
 import { confirm } from '@inquirer/prompts';
 import { parseDuration } from './utils/duration';
 import { runProxy } from './proxy';
 import { autoStartDaemonAndWait } from './cli/daemon-starter';
 import { onboardMachine, renderOnboardOutcome } from './onboarding';
+import { runDeviceLogin } from './auth/device-login';
+import { openBrowser } from './utils/open-browser';
 import { registerCheckCommand } from './cli/commands/check';
 import { registerLogCommand } from './cli/commands/log';
 import { registerShieldCommand, registerConfigShowCommand } from './cli/commands/shield';
@@ -76,39 +77,97 @@ const { version } = JSON.parse(
 const program = new Command();
 program.name('node9').description('The Sudo Command for AI Agents').version(version);
 
-// 1. LOGIN
+// 1. LOGIN — with no argument, the browser device-auth flow (login-v2 B1):
+// auth + workspace choice happen in the browser and the machine key is
+// delivered over the wire, never through a human. With a raw key argument,
+// the legacy/service path.
 program
   .command('login')
-  .argument('<apiKey>')
+  .argument('[apiKey]', 'Service/legacy key. Omit to log in via your browser.')
   .option('--local', 'Save key for audit/logging only — local config still controls all decisions')
   .option('--profile <name>', 'Save as a named profile (default: "default")')
-  .action(async (apiKey, options: { local?: boolean; profile?: string }) => {
-    // Named profile / --local keep their narrow legacy behavior: write the key,
-    // say what happened, no cloud onboarding. Profiles are on a deprecation
-    // path (login-v2 §6); --local is the explicit privacy-mode switch.
-    if (options.profile && options.profile !== 'default') {
-      const { profileName } = writeCredentialsAndConfig(apiKey, {
-        profileName: options.profile,
-        isLocal: options.local,
-      });
-      console.log(chalk.green(`✅ Profile "${profileName}" saved`));
-      console.log(chalk.gray(`   Switch to it per-session:  NODE9_PROFILE=${profileName} claude`));
-      return;
+  .option('--no-browser', "Don't auto-open the browser — just print the link")
+  .option('--force', 'Allow interactive login even when CI is detected')
+  .option('--api-url <url>', 'Override the device-auth endpoint (self-host / dev)')
+  .action(
+    async (
+      apiKey: string | undefined,
+      options: {
+        local?: boolean;
+        profile?: string;
+        browser?: boolean;
+        force?: boolean;
+        apiUrl?: string;
+      }
+    ) => {
+      if (!apiKey) {
+        // CI runners must not device-login: no browser, no human, and an
+        // ephemeral "machine". They get service keys via NODE9_API_KEY.
+        if (
+          (process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true') &&
+          !options.force
+        ) {
+          console.error(chalk.red('✗ CI environment detected.'));
+          console.error(
+            chalk.gray(
+              '  Interactive login is for human machines. In CI, create a service key in\n' +
+                '  the dashboard and set it as the NODE9_API_KEY secret. (Override: --force)'
+            )
+          );
+          process.exitCode = 1;
+          return;
+        }
+        if (options.local) {
+          console.error(chalk.red('✗ --local needs a key: node9 login <apiKey> --local'));
+          process.exitCode = 1;
+          return;
+        }
+        const res = await runDeviceLogin({
+          apiUrl: options.apiUrl,
+          noBrowser: options.browser === false,
+          cliVersion: version,
+        });
+        if (!res.ok) {
+          console.error(chalk.red(`✗ ${res.reason}`));
+          process.exitCode = 1;
+          return;
+        }
+        const outcome = await onboardMachine(res.apiKey);
+        console.log(renderOnboardOutcome(outcome, { workspaceName: res.workspaceName }));
+        if (!outcome.ok) process.exitCode = 1;
+        return;
+      }
+      await runKeyLogin(apiKey, options);
     }
-    if (options.local) {
-      writeCredentialsAndConfig(apiKey, { isLocal: true });
-      console.log(chalk.green(`✅ Key saved — Privacy mode 🛡️`));
-      console.log(chalk.gray(`   All decisions stay on this machine. Nothing syncs to the cloud.`));
-      return;
-    }
+  );
 
-    // Default profile, cloud mode: run THE shared onboarding routine
-    // (onboarding.ts) — same steps and same scorecard as `node9 connect`, so a
-    // manually-entered key ends with a machine the dashboard can actually see.
-    const outcome = await onboardMachine(apiKey);
-    console.log(renderOnboardOutcome(outcome));
-    if (!outcome.ok) process.exitCode = 1;
-  });
+async function runKeyLogin(apiKey: string, options: { local?: boolean; profile?: string }) {
+  // Named profile / --local keep their narrow legacy behavior: write the key,
+  // say what happened, no cloud onboarding. Profiles are on a deprecation
+  // path (login-v2 §6); --local is the explicit privacy-mode switch.
+  if (options.profile && options.profile !== 'default') {
+    const { profileName } = writeCredentialsAndConfig(apiKey, {
+      profileName: options.profile,
+      isLocal: options.local,
+    });
+    console.log(chalk.green(`✅ Profile "${profileName}" saved`));
+    console.log(chalk.gray(`   Switch to it per-session:  NODE9_PROFILE=${profileName} claude`));
+    return;
+  }
+  if (options.local) {
+    writeCredentialsAndConfig(apiKey, { isLocal: true });
+    console.log(chalk.green(`✅ Key saved — Privacy mode 🛡️`));
+    console.log(chalk.gray(`   All decisions stay on this machine. Nothing syncs to the cloud.`));
+    return;
+  }
+
+  // Default profile, cloud mode: run THE shared onboarding routine
+  // (onboarding.ts) — same steps and same scorecard as `node9 connect`, so a
+  // manually-entered key ends with a machine the dashboard can actually see.
+  const outcome = await onboardMachine(apiKey);
+  console.log(renderOnboardOutcome(outcome));
+  if (!outcome.ok) process.exitCode = 1;
+}
 
 // 1b. SIGNUP — open the node9 dashboard signup/login in the browser (Phase-1 capture).
 program
@@ -120,22 +179,8 @@ program
     const url = `https://node9.ai/${route}?ref=cli_cmd`;
     console.log('');
     console.log('  ' + chalk.dim('Opening ') + chalk.cyan.underline(url));
-    // Best-effort open — must never fail. On headless/SSH/VM the printed URL is the fallback.
-    const opener =
-      process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
-    try {
-      const child = spawn(opener, [url], {
-        stdio: 'ignore',
-        detached: true,
-        shell: process.platform === 'win32',
-      });
-      child.on('error', () => {
-        /* no browser available — the URL above is the fallback */
-      });
-      child.unref();
-    } catch {
-      /* headless — URL already printed */
-    }
+    // Best-effort open — on headless/SSH/VM the printed URL is the fallback.
+    openBrowser(url);
     console.log('');
   });
 

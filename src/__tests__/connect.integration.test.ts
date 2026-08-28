@@ -123,3 +123,20 @@ describe('node9 connect (integration)', () => {
     expect(fs.existsSync(credsPath())).toBe(true);
   });
 });
+
+// ── node9 login: CI guard (real spawn path) ───────────────────────────────
+// Appended here to reuse the built-CLI harness rather than duplicating it.
+describe('node9 login CI guard (integration)', () => {
+  it('refuses interactive login when CI is detected, points at service keys', async () => {
+    const { spawnSync } = await import('child_process');
+    const r = spawnSync(process.execPath, [CLI, 'login'], {
+      env: { ...process.env, CI: 'true', NODE9_TESTING: '1' },
+      encoding: 'utf-8',
+      timeout: 15000,
+    });
+    expect(r.error).toBeUndefined();
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/CI environment detected/);
+    expect(r.stderr).toMatch(/NODE9_API_KEY/);
+  });
+});
