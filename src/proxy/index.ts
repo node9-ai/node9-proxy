@@ -9,6 +9,7 @@ import { execa } from 'execa';
 import { parseCommandString } from 'execa';
 import { authorizeHeadless } from '../auth/orchestrator';
 import { buildNegotiationMessage } from '../policy/negotiation';
+import { locatorCommand, shellInvocation } from '../utils/platform-shell';
 
 function sanitize(value: string): string {
   // eslint-disable-next-line no-control-regex
@@ -23,8 +24,13 @@ export async function runProxy(targetCommand: string) {
   let executable = cmd;
   let useShell = false;
   try {
-    const { stdout } = await execa('which', [cmd]);
-    if (stdout) executable = stdout.trim();
+    // `where` on Windows, `which` elsewhere — a hardcoded `which` there fails
+    // for EVERY command, sending all of them down the shell path.
+    const { stdout } = await execa(locatorCommand(), [cmd]);
+    // `where` can return several matches, one per line; the first is what a
+    // shell would resolve.
+    const first = stdout.split(/\r?\n/)[0]?.trim();
+    if (first) executable = first;
   } catch {
     // Command not found as a standalone binary — may be a shell builtin or alias.
     // Fall back to shell mode so the system shell can resolve it.
@@ -34,12 +40,13 @@ export async function runProxy(targetCommand: string) {
   // stderr only — stdout must stay clean for stdio protocols (JSON-RPC, MCP)
   console.error(chalk.green(`🚀 Node9 Proxy Active: Monitoring [${targetCommand}]`));
 
-  // Spawn the MCP Server / Shell command.
-  // Use bash (not /bin/sh) for shell fallback so that bash builtins and
-  // bash-specific syntax work correctly — /bin/sh is dash on many systems.
+  // Spawn the MCP Server / Shell command. The shell is platform-resolved:
+  // bash on POSIX (not /bin/sh — that is dash on many systems), ComSpec on
+  // Windows, where a hardcoded /bin/bash was a guaranteed ENOENT crash.
   const spawnEnv = { ...process.env, FORCE_COLOR: '1' };
+  const shell = shellInvocation(targetCommand);
   const child = useShell
-    ? spawn('/bin/bash', ['-c', targetCommand], {
+    ? spawn(shell.file, shell.args, {
         stdio: ['pipe', 'pipe', 'inherit'],
         shell: false,
         env: spawnEnv,
@@ -134,6 +141,23 @@ export async function runProxy(targetCommand: string) {
   // ── FORWARD OUTPUT (Server -> Agent) ──
   // We just pass the server's responses back to the agent as-is
   child.stdout.pipe(process.stdout);
+
+  // A failed spawn arrives as an 'error' EVENT, never as a throw from spawn().
+  // With no listener Node re-raises it as an unhandled 'error' and the process
+  // dies with a raw stack trace — which is exactly what a Windows user saw
+  // ("Error: spawn /bin/bash ENOENT" plus 12 lines of internals). Report the
+  // command that failed and exit like a shell would for "not found".
+  child.on('error', (err: NodeJS.ErrnoException) => {
+    const what = useShell ? shell.file : executable;
+    console.error(
+      chalk.red(
+        err.code === 'ENOENT'
+          ? `\n❌ Node9 could not run "${targetCommand}": ${what} was not found on this machine.`
+          : `\n❌ Node9 could not run "${targetCommand}": ${err.message}`
+      )
+    );
+    process.exit(127); // conventional shell exit code for command-not-found
+  });
 
   child.on('exit', (code) => process.exit(code || 0));
 }
