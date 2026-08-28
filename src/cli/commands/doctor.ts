@@ -19,6 +19,7 @@ import {
 import { agoLabel } from '../../lib/relative-time';
 import { readStartupCause } from '../../daemon/startup-log';
 import { undoLeftoverPaths } from '../../utils/undo-leftovers';
+import { locatorCommand } from '../../utils/platform-shell';
 
 export function registerDoctorCommand(program: Command, version: string): void {
   program
@@ -55,8 +56,10 @@ export function registerDoctorCommand(program: Command, version: string): void {
         // printed a cmd error and claimed node9 was missing on a machine that
         // was literally running it). `where` may return several matches — the
         // first is what a shell would resolve.
-        const locator = process.platform === 'win32' ? 'where node9' : 'which node9';
-        const found = execSync(locator, { encoding: 'utf-8', timeout: 3000 })
+        const found = execSync(`${locatorCommand()} node9`, {
+          encoding: 'utf-8',
+          timeout: 3000,
+        })
           .split(/\r?\n/)[0]
           .trim();
         pass(`node9 found at ${found}`);
