@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { DEFAULT_CONFIG } from './config';
 
 // Shared credential + config writer — used by both `node9 login` and the
 // onboarding `node9 connect`. Writes ~/.node9/credentials.json (profile-merged,
@@ -52,26 +53,34 @@ export function writeCredentialsAndConfig(
       config.settings = {};
     }
     const s = config.settings as Record<string, unknown>;
-    const approvers = (s.approvers as Record<string, unknown>) || {
-      native: true,
-      browser: true,
-      cloud: true,
-      terminal: true,
+    // ONE approvers seed (login-v2 §5, B0). Defaults derive from DEFAULT_CONFIG
+    // so an init-written config and a login-written config can never disagree
+    // again — the old dual seed plus preserve-on-login locked cloud:false
+    // forever for anyone who ran `init` before `login`.
+    //
+    // `cloud` is ALWAYS set from the caller's intent: connecting a machine to
+    // the cloud MEANS cloud approvals unless --local says otherwise. A stale
+    // seeded value must not win; --local remains the explicit off switch.
+    //
+    // The legacy `browser` approver (local dashboard removed in v3) is dropped
+    // from the block on every write so it stops resurfacing in configs.
+    const existing =
+      s.approvers && typeof s.approvers === 'object'
+        ? (s.approvers as Record<string, unknown>)
+        : {};
+    const d = DEFAULT_CONFIG.settings.approvers;
+    s.approvers = {
+      native: typeof existing.native === 'boolean' ? existing.native : d.native,
+      terminal: typeof existing.terminal === 'boolean' ? existing.terminal : d.terminal,
+      cloud: !opts.isLocal,
     };
-    // Only force cloud off when --local is explicit; otherwise preserve the
-    // user's prior choice (re-running login to refresh a key must not silently
-    // re-enable cloud approvals for someone who turned them off).
-    if (opts.isLocal) {
-      approvers.cloud = false;
-    }
-    s.approvers = approvers;
     if (!fs.existsSync(path.dirname(configPath))) {
       fs.mkdirSync(path.dirname(configPath), { recursive: true });
     }
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2), {
       mode: 0o600,
     });
-    effectiveCloud = approvers.cloud === true;
+    effectiveCloud = !opts.isLocal;
   }
 
   return { profileName, effectiveCloud };
