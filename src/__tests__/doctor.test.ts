@@ -154,7 +154,11 @@ describe('node9 doctor — agent hooks section', () => {
 describe('node9 doctor — summary', () => {
   // runDoctor spawns a subprocess that calls `ss` for port checking — can be slow
   // on CI runners. Raise Vitest timeout to 20s to avoid flaky failures.
-  it('exits 0 and prints "All checks passed" when everything is configured', () => {
+  // Since the verdict-honesty change (founder QA 2026-08-28), a configured
+  // machine with NO RUNNING DAEMON gets the warnings verdict, not the green
+  // one — the test env can't run a daemon, so that is the expected outcome
+  // here. Exit code stays 0: warnings never flip doctor red.
+  it('exits 0 with the warnings verdict when configured but the daemon is down', () => {
     const home = path.join(tmpBase, 'all-good');
     writeJson(path.join(home, '.node9', 'config.json'), { settings: { mode: 'standard' } });
     writeJson(path.join(home, '.node9', 'credentials.json'), { default: { apiKey: 'k' } });
@@ -173,7 +177,8 @@ describe('node9 doctor — summary', () => {
     });
 
     const { output, exitCode } = runDoctor(home);
-    expect(output).toMatch(/All checks passed/);
+    expect(output).toMatch(/warning\(s\)/);
+    expect(output).not.toMatch(/All checks passed/);
     expect(exitCode).toBe(0);
   }, 20000);
 
@@ -194,5 +199,55 @@ describe('node9 doctor — summary', () => {
     fs.mkdirSync(home, { recursive: true });
     const { output } = runDoctor(home);
     expect(output).toMatch(/Node9 Doctor\s+v\d+\.\d+\.\d+/);
+  });
+});
+
+// ── Verdict honesty (founder QA 2026-08-28) ──────────────────────────────────
+// A Windows machine with no daemon and an empty dashboard got:
+//   ⚠️ Daemon not running … ⚠️ node9 not in PATH … "All checks passed."
+// The verdict may not contradict the findings, and zero ship-lag without a
+// daemon may not claim the dashboard "matches".
+describe('node9 doctor — verdict honesty', () => {
+  function cloudHome(name: string): string {
+    const home = path.join(tmpBase, name);
+    writeJson(path.join(home, '.node9', 'config.json'), {
+      settings: { approvers: { native: true, terminal: true, cloud: true } },
+    });
+    writeJson(path.join(home, '.node9', 'credentials.json'), {
+      default: { apiKey: 'n9_live_doctor_test', apiUrl: 'https://api.node9.ai/api/v1/intercept' },
+    });
+    return home;
+  }
+
+  it('never prints "All checks passed" when any warning fired', () => {
+    // Isolated HOME guarantees at least one warning (daemon not running).
+    const { output, exitCode } = runDoctor(cloudHome('verdict-warn'));
+    expect(output).toMatch(/⚠️/);
+    expect(output).not.toMatch(/All checks passed/);
+    expect(output).toMatch(/warning\(s\)/);
+    // Warnings still exit 0 — a warned machine keeps enforcing.
+    expect(exitCode).toBe(0);
+  });
+
+  it('zero ship-lag without a daemon is NOT "caught up"', () => {
+    const { output } = runDoctor(cloudHome('verdict-lag'));
+    expect(output).not.toMatch(/dashboard matches the local log/);
+    expect(output).toMatch(/daemon is not running — new activity will not reach the dashboard/);
+  });
+
+  it('with cloud on, the daemon section is not labelled optional', () => {
+    const { output } = runDoctor(cloudHome('verdict-header'));
+    expect(output).toMatch(/\nDaemon\n|\bDaemon\b(?! \(optional\))/);
+    expect(output).not.toMatch(/Daemon \(optional\)/);
+  });
+
+  it('the binary locator never leaks a missing-command shell error', () => {
+    // On win32 the old code ran `which`, which does not exist — cmd printed
+    // "'which' is not recognized" above a false "not found" warning. Runs on
+    // every platform; the Windows CI runner is the one that proves the fix.
+    const home = path.join(tmpBase, 'locator');
+    fs.mkdirSync(home, { recursive: true });
+    const { output } = runDoctor(home);
+    expect(output).not.toMatch(/is not recognized as an internal or external command/);
   });
 });

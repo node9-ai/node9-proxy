@@ -27,6 +27,7 @@ export function registerDoctorCommand(program: Command, version: string): void {
     .action(async () => {
       const homeDir = os.homedir();
       let failures = 0;
+      let warnings = 0;
 
       function pass(msg: string) {
         console.log(chalk.green('  ✅ ') + msg);
@@ -39,6 +40,7 @@ export function registerDoctorCommand(program: Command, version: string): void {
       function warn(msg: string, hint?: string) {
         console.log(chalk.yellow('  ⚠️  ') + msg);
         if (hint) console.log(chalk.gray('       ' + hint));
+        warnings++;
       }
       function section(title: string) {
         console.log('\n' + chalk.bold(title));
@@ -49,8 +51,15 @@ export function registerDoctorCommand(program: Command, version: string): void {
       // ── Binary ───────────────────────────────────────────────────────────────
       section('Binary');
       try {
-        const which = execSync('which node9', { encoding: 'utf-8', timeout: 3000 }).trim();
-        pass(`node9 found at ${which}`);
+        // `which` does not exist on Windows (founder QA 2026-08-28: doctor
+        // printed a cmd error and claimed node9 was missing on a machine that
+        // was literally running it). `where` may return several matches — the
+        // first is what a shell would resolve.
+        const locator = process.platform === 'win32' ? 'where node9' : 'which node9';
+        const found = execSync(locator, { encoding: 'utf-8', timeout: 3000 })
+          .split(/\r?\n/)[0]
+          .trim();
+        pass(`node9 found at ${found}`);
       } catch {
         warn('node9 not found in $PATH — hooks may not find it', 'Run: npm install -g node9-ai');
       }
@@ -158,8 +167,15 @@ export function registerDoctorCommand(program: Command, version: string): void {
         );
       }
 
-      // ── Daemon ───────────────────────────────────────────────────────────────
-      section('Daemon (optional)');
+      // ── Daemon ────────────────────────────────────────────────────────────────
+      // "(optional)" only when this machine doesn't ship to the cloud. With
+      // cloud on, the daemon carries policy sync AND the audit shipper — calling
+      // it optional next to an empty dashboard is how a real outage read as
+      // "all checks passed" (founder QA 2026-08-28).
+      const cloudOn =
+        fs.existsSync(path.join(homeDir, '.node9', 'credentials.json')) &&
+        !!getConfig().settings.approvers?.cloud;
+      section(cloudOn ? 'Daemon' : 'Daemon (optional)');
       if (isDaemonRunning()) {
         pass(
           `Daemon running on ${DAEMON_HOST}:${DAEMON_PORT} — terminal & native approvals enabled`
@@ -181,7 +197,9 @@ export function registerDoctorCommand(program: Command, version: string): void {
         }
       } else {
         warn(
-          'Daemon not running — terminal & native approvals unavailable',
+          cloudOn
+            ? 'Daemon not running — approvals unavailable AND nothing ships to the dashboard until it starts (it auto-starts on agent activity)'
+            : 'Daemon not running — terminal & native approvals unavailable',
           'Run: node9 daemon --background'
         );
         // …and WHY, if the last start attempt left a trace. Without this the crash
@@ -280,8 +298,17 @@ export function registerDoctorCommand(program: Command, version: string): void {
         } else {
           const lag = shipLagBytes();
           const wm = readWatermark(AUDIT_SHIP_WATERMARK);
-          if (lag === 0) {
+          if (lag === 0 && isDaemonRunning()) {
             pass('Audit shipping caught up — dashboard matches the local log');
+          } else if (lag === 0) {
+            // Zero lag without a daemon is NOT "caught up" — nobody is
+            // shipping. The claim "dashboard matches the local log" next to a
+            // stopped daemon is how an empty dashboard read as healthy
+            // (founder QA 2026-08-28). Say what is actually true.
+            warn(
+              'Nothing queued, but the daemon is not running — new activity will not reach the dashboard until it starts',
+              'It auto-starts on agent activity, or run: node9 daemon --background'
+            );
           } else if (wm && lag !== null) {
             const ageMin = Math.round((Date.now() - new Date(wm.updatedAt).getTime()) / 60_000);
             if (ageMin > 5 && !isDaemonRunning()) {
@@ -306,12 +333,22 @@ export function registerDoctorCommand(program: Command, version: string): void {
       }
 
       // ── Summary ───────────────────────────────────────────────────────────────
+      // Warnings must reach the verdict line. "All checks passed" above two ⚠️
+      // rows taught a founder that a machine with no daemon and no dashboard
+      // data was healthy. Warnings still exit 0 — a warned machine keeps
+      // enforcing — but the verdict may not contradict the findings.
       console.log('');
-      if (failures === 0) {
-        console.log(chalk.green.bold('  All checks passed. Node9 is ready.\n'));
-      } else {
+      if (failures > 0) {
         console.log(chalk.red.bold(`  ${failures} check(s) failed. See hints above.\n`));
         process.exit(1);
+      } else if (warnings > 0) {
+        console.log(
+          chalk.yellow.bold(
+            `  ${warnings} warning(s) — Node9 is working, but see the hints above.\n`
+          )
+        );
+      } else {
+        console.log(chalk.green.bold('  All checks passed. Node9 is ready.\n'));
       }
     });
 }
