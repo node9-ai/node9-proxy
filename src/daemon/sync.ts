@@ -29,6 +29,7 @@ import {
 import { tickScanWatcher, markUploadComplete, tickForensicBroadcast } from './scan-watermark.js';
 import { broadcastForensic } from './state.js';
 import { appendToLog, HOOK_DEBUG_LOG } from '../audit/index.js';
+import { getMachineId } from '../machine-id.js';
 
 // One row per session delta sent on /scan/report. The BE stores
 // these in ScanSessionSignals using INSERT-ON-CONFLICT INCREMENT, so
@@ -918,7 +919,10 @@ async function pushPolicySnapshot(creds: { apiKey: string; apiUrl: string }): Pr
       resolveMcpStatus(),
       // fleet-ship Step 2: ship this machine's sync health so the dashboard can
       // show "sync failing" badges. readSyncHealth is local (same module, no circular).
-      readSyncHealth()
+      readSyncHealth(),
+      // Machine identity — heals legacy machineId-less keys on the SaaS side
+      // (login-v2 duplicate-key fix). getMachineId mints on first need.
+      { machineId: getMachineId(), platform: process.platform }
     );
     await shipPolicySnapshot(body, creds);
   } catch {
@@ -945,7 +949,8 @@ export async function runPolicyPush(): Promise<{ ok: true } | { ok: false; reaso
       // resolve ${VAR} placeholders — so this push reflects THIS process's env
       // (daemon here, user shell in runPolicyPush); see the P2 design's two-env note.
       resolveMcpStatus(),
-      readSyncHealth()
+      readSyncHealth(),
+      { machineId: getMachineId(), platform: process.platform }
     );
     const sent = await shipPolicySnapshot(body, creds);
     return sent ? { ok: true } : { ok: false, reason: 'Push failed (network or server error)' };

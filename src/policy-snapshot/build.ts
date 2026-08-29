@@ -61,6 +61,13 @@ export interface PolicySnapshotBody {
     lastError?: string;
     consecutiveFailures: number;
   };
+  // Machine identity (login-v2, duplicate-key healing). Keys minted before the
+  // machineId era have machineId NULL in the cloud, so a re-login MINTS a new
+  // key instead of rotating — a ghost machine per legacy key. Shipping the
+  // durable local id here lets the SaaS bind it to the reporting key, healing
+  // every legacy machine on its next snapshot with no migration guesswork.
+  machineId?: string;
+  platform?: string;
 }
 
 export function buildPolicySnapshot(
@@ -75,7 +82,10 @@ export function buildPolicySnapshot(
   // fleet-ship Step 2: the proxy's own sync health. Passed in by the caller
   // (readSyncHealth() in sync.ts) — build.ts imports nothing runtime from sync
   // (sync imports build → circular if reversed). undefined = old call site / omit.
-  syncHealth?: SyncHealth
+  syncHealth?: SyncHealth,
+  // Machine identity, passed by the caller (getMachineId() does disk I/O and
+  // build.ts stays pure). undefined = omit, the SaaS then changes nothing.
+  identity?: { machineId: string; platform: string }
 ): PolicySnapshotBody {
   const p = config.policy;
 
@@ -169,5 +179,7 @@ export function buildPolicySnapshot(
         consecutiveFailures: syncHealth.consecutiveFailures,
       },
     }),
+    // Machine identity — heals legacy machineId-less keys on the SaaS side.
+    ...(identity && { machineId: identity.machineId, platform: identity.platform }),
   };
 }
