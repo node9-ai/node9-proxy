@@ -239,7 +239,9 @@ export function registerInitCommand(program: Command): void {
         // Only prompt on platforms that support it and when not already installed.
         // In non-interactive environments (CI, pipes) we skip silently.
         if (
-          (process.platform === 'darwin' || process.platform === 'linux') &&
+          (process.platform === 'darwin' ||
+            process.platform === 'linux' ||
+            process.platform === 'win32') &&
           process.stdout.isTTY
         ) {
           const alreadyInstalled = isDaemonServiceInstalled();

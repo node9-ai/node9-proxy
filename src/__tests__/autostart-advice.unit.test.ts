@@ -26,8 +26,18 @@ describe('autostartAdvice', () => {
     expect(autostartAdvice({ installed: true, enabled: false, cloudEnabled: false })).toBeNull();
   });
 
-  it('stays silent on an uninstallable platform (win32) even for a cloud user', () => {
+  it('win32 is INSTALLABLE since the schtasks backend — a cloud user gets the advice', () => {
+    // The old contract (silent on win32) described the gap, not a design: a
+    // Windows machine with no service means an empty dashboard (QA 2026-08-28).
     setPlatform('win32');
+    const a = autostartAdvice({ installed: false, enabled: false, cloudEnabled: true });
+    expect(a?.level).toBe('warn');
+    expect(a?.hint).toMatch(/node9 daemon install/);
+    expect(a?.hint).not.toMatch(/systemctl/); // never a Linux command on Windows
+  });
+
+  it('stays silent on a genuinely uninstallable platform (freebsd)', () => {
+    setPlatform('freebsd');
     expect(autostartAdvice({ installed: false, enabled: false, cloudEnabled: true })).toBeNull();
   });
 

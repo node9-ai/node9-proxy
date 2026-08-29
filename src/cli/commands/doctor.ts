@@ -15,6 +15,7 @@ import {
   isDaemonServiceInstalled,
   isDaemonServiceEnabled,
   autostartAdvice,
+  autostartInstallHint,
 } from '../../daemon/service';
 import { agoLabel } from '../../lib/relative-time';
 import { readStartupCause } from '../../daemon/startup-log';
@@ -273,7 +274,9 @@ export function registerDoctorCommand(program: Command, version: string): void {
               : '';
           warn(
             `Cloud policy is STALE — ${when}${fails}. The cached policy is still enforced, but changes from the dashboard are not reaching this machine.`,
-            'Run: node9 policy sync   (and ensure the daemon autostarts: systemctl --user enable --now node9-daemon)'
+            // Platform-aware: this hint hardcoded systemctl and told a Windows
+            // founder to run a Linux command (QA 2026-08-28).
+            `Run: node9 policy sync   (then keep it fresh across reboots — ${autostartInstallHint()})`
           );
         } else if (health.lastCheckedAt) {
           pass(`Cloud policy fresh — last synced ${agoLabel(health.lastCheckedAt)}`);

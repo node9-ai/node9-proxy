@@ -74,9 +74,35 @@ describe('isDaemonServiceEnabled — darwin (launchctl)', () => {
   });
 });
 
+describe('isDaemonServiceEnabled — win32 (schtasks)', () => {
+  beforeEach(() => setPlatform('win32'));
+
+  it('probes the task XML and reads <Enabled>false</Enabled> as disabled', () => {
+    mockSpawn.mockReturnValue(ret(0, '<Task><Settings><Enabled>false</Enabled></Settings></Task>'));
+    expect(isDaemonServiceEnabled()).toBe(false);
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'schtasks',
+      ['/Query', '/TN', 'Node9Daemon', '/XML'],
+      expect.anything()
+    );
+  });
+
+  it('an existing task with no <Enabled>false</> reads as enabled (the default)', () => {
+    mockSpawn.mockReturnValue(ret(0, '<Task><Settings></Settings></Task>'));
+    expect(isDaemonServiceEnabled()).toBe(true);
+  });
+
+  it('a missing task (query exits non-zero) is not enabled', () => {
+    mockSpawn.mockReturnValue(ret(1, ''));
+    expect(isDaemonServiceEnabled()).toBe(false);
+  });
+});
+
 describe('isDaemonServiceEnabled — robustness', () => {
-  it('false on an unsupported platform without probing', () => {
-    setPlatform('win32');
+  it('false on an unsupported platform without probing (freebsd)', () => {
+    // win32 used to sit here as "unsupported" — that contract described the
+    // Windows gap, not a design. It now has the schtasks probe above.
+    setPlatform('freebsd');
     expect(isDaemonServiceEnabled()).toBe(false);
     expect(mockSpawn).not.toHaveBeenCalled();
   });
