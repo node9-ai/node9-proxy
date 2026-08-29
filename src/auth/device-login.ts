@@ -1,11 +1,9 @@
-import * as http from 'http';
-import * as https from 'https';
 import * as os from 'os';
-import { URL } from 'url';
 import chalk from 'chalk';
 import { resolveCloudEndpoint } from './cloud-endpoints';
 import { getMachineId } from '../machine-id';
 import { openBrowser } from '../utils/open-browser';
+import { postJson } from '../utils/post-json';
 
 // The CLI half of device-auth login (login-v2 B1). Start an authorization,
 // hand the human a URL + short code, then poll until the browser approves —
@@ -32,52 +30,6 @@ interface PollResponse {
 export type DeviceLoginResult =
   | { ok: true; apiKey: string; workspaceName: string; machineName: string }
   | { ok: false; reason: string };
-
-// Plain JSON POST; http for tests, https in production (same pattern as
-// connect's postConnect — the URL's protocol picks the lib).
-function postJson<T>(url: string, body: unknown): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const payload = JSON.stringify(body);
-    const u = new URL(url);
-    const lib = u.protocol === 'http:' ? http : https;
-    const req = lib.request(
-      {
-        method: 'POST',
-        hostname: u.hostname,
-        port: u.port || (u.protocol === 'http:' ? 80 : 443),
-        path: u.pathname + u.search,
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(payload),
-        },
-        timeout: 15000,
-      },
-      (res) => {
-        let data = '';
-        res.on('data', (c) => (data += c));
-        res.on('end', () => {
-          const code = res.statusCode ?? 0;
-          if (code >= 200 && code < 300) {
-            try {
-              resolve(JSON.parse(data) as T);
-            } catch {
-              reject(new Error('Unexpected response from the server.'));
-            }
-          } else {
-            reject(new Error(`Server returned HTTP ${code}.`));
-          }
-        });
-      }
-    );
-    req.on('error', (e) => reject(e));
-    req.on('timeout', () => {
-      req.destroy();
-      reject(new Error('Connection timed out.'));
-    });
-    req.write(payload);
-    req.end();
-  });
-}
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 

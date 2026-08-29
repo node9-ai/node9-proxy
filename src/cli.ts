@@ -36,6 +36,7 @@ import { runProxy } from './proxy';
 import { autoStartDaemonAndWait } from './cli/daemon-starter';
 import { onboardMachine, renderOnboardOutcome } from './onboarding';
 import { runDeviceLogin } from './auth/device-login';
+import { registerLogoutCommand, revokeSelf } from './cli/commands/logout';
 import { openBrowser } from './utils/open-browser';
 import { registerCheckCommand } from './cli/commands/check';
 import { registerLogCommand } from './cli/commands/log';
@@ -314,6 +315,41 @@ program
   .action(async (options: { purge?: boolean }) => {
     console.log(chalk.cyan('\n🛡️  Node9 Uninstall\n'));
 
+    // 0. Cloud disconnect — FIRST, while the key still exists locally
+    //    (--purge deletes credentials below; a machine that uninstalls without
+    //    this stays listed in the dashboard forever). Best-effort: an offline
+    //    uninstall proceeds, but says what remains.
+    try {
+      const credRaw = fs.readFileSync(
+        path.join(os.homedir(), '.node9', 'credentials.json'),
+        'utf-8'
+      );
+      const prof = (JSON.parse(credRaw) as Record<string, { apiKey?: string; apiUrl?: string }>)[
+        process.env.NODE9_PROFILE || 'default'
+      ];
+      if (prof?.apiKey) {
+        console.log(chalk.bold('Disconnecting from the cloud...'));
+        const r = await revokeSelf({
+          apiKey: prof.apiKey,
+          apiUrl: prof.apiUrl || 'https://api.node9.ai/api/v1/intercept',
+        });
+        if (r.outcome === 'revoked') {
+          console.log(chalk.green('  ✅ Machine disconnected — its key is revoked'));
+        } else if (r.outcome === 'already') {
+          console.log(chalk.blue('  ℹ️  Machine was already disconnected'));
+        } else {
+          console.log(
+            chalk.yellow(
+              '  ⚠️  Could not reach the cloud — the machine is still listed in the dashboard.'
+            )
+          );
+          console.log(chalk.gray('     Disconnect it there: Enforcement › Devices › Disconnect.'));
+        }
+      }
+    } catch {
+      /* no credentials — nothing to disconnect */
+    }
+
     // 1. Stop the daemon
     console.log(chalk.bold('Stopping daemon...'));
     try {
@@ -528,6 +564,7 @@ program
 registerInitCommand(program);
 registerHealCommand(program);
 registerConnectCommand(program);
+registerLogoutCommand(program);
 
 // 4. AUDIT
 registerAuditCommand(program);
