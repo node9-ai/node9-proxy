@@ -1301,7 +1301,9 @@ export function claudeDesktopConfigPath(homeDir: string = os.homedir()): string 
     return path.join(homeDir, '.config', 'Claude', 'claude_desktop_config.json');
   }
   if (process.platform === 'win32') {
-    const appData = process.env.APPDATA ?? path.join(homeDir, 'AppData', 'Roaming');
+    // `||`, not `??` (repo rule): an empty APPDATA passes a ?? guard and makes
+    // this path RELATIVE, so the config would be read/written in the cwd.
+    const appData = process.env.APPDATA || path.join(homeDir, 'AppData', 'Roaming');
     return path.join(appData, 'Claude', 'claude_desktop_config.json');
   }
   return null;
