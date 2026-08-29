@@ -202,31 +202,98 @@ function isSystemdInstalled(): boolean {
   return fs.existsSync(SYSTEMD_UNIT);
 }
 
-// ── Windows Task Scheduler ─────────────────────────────────────────────────
-// A logon task that runs the daemon through a VBS launcher. The launcher is
-// what keeps the daemon INVISIBLE: a console app started by an ONLOGON task
-// opens a console window that would sit in the user's taskbar for the entire
-// session. `Wscript.Shell.Run` with window style 0 starts it hidden — the
-// same battle-tested pattern launchd's plist and systemd's unit play on the
-// other platforms, translated into what Windows actually offers.
+// ── Windows logon startup ──────────────────────────────────────────────────
+// The per-user Startup folder, NOT Task Scheduler.
+//
+// schtasks was the first attempt and it is the wrong tool: `schtasks /Create`
+// writes to the root task folder, which requires elevation. On a normal user
+// account every install failed with `ERROR: Access is denied.` — reproduced
+// on a founder machine with a bare `/TR notepad.exe`, so it was the mechanism,
+// not our arguments (2026-08-29). Asking a developer to run an elevated shell
+// to make logging work is not an onboarding step we are willing to ship.
+//
+// The Startup folder needs no privileges at all and is the true analogue of a
+// launchd USER agent / `systemd --user` unit: per-user, at interactive logon.
+// The trade is no restart-on-failure — acceptable, because the agent hooks
+// already respawn a dead daemon on the next tool call.
+//
+// A .vbs there (rather than a .cmd or a shortcut to node) is what keeps the
+// daemon INVISIBLE: a console app launched at logon parks a console window in
+// the taskbar for the whole session. `Wscript.Shell.Run … , 0` starts it hidden.
 
-const SCHTASKS_TASK = 'Node9Daemon';
-const WIN_LAUNCHER = () => path.join(os.homedir(), '.node9', 'daemon-launcher.vbs');
+const STARTUP_FILE = 'node9-daemon.vbs';
 
 /**
- * The hidden-window launcher. VBS string escaping doubles the quote character;
- * Windows paths cannot legally contain `"`, so embedding them is safe — the
- * guard below is for the impossible case reaching us from a corrupted argv.
- * NODE9_AUTO_STARTED rides the launcher's process environment (Task Scheduler
- * itself cannot set per-task env vars), matching the plist/unit files.
+ * Turn a failed spawnSync into a sentence a user can act on.
+ *
+ * The first Windows install reported `schtasks /Create failed: unknown error`
+ * because the message only read stderr/stdout — but a command that never RAN
+ * (missing binary, blocked, timed out) leaves both empty and reports itself in
+ * `.error` / `.status: null`. A diagnostic that can print "unknown error" is
+ * not a diagnostic. Exported for tests.
+ */
+export function describeSpawnFailure(
+  what: string,
+  r: {
+    status: number | null;
+    signal?: NodeJS.Signals | null;
+    stdout?: string;
+    stderr?: string;
+    error?: Error;
+  }
+): string {
+  const parts: string[] = [];
+  const out = `${r.stderr ?? ''}${r.stdout ?? ''}`.trim();
+  if (out) parts.push(out);
+  if (r.error) {
+    const code = (r.error as NodeJS.ErrnoException).code;
+    parts.push(
+      code === 'ENOENT' ? `${what.split(' ')[0]} not found on this machine` : r.error.message
+    );
+  }
+  if (r.signal) parts.push(`killed by ${r.signal}`);
+  if (!parts.length) {
+    parts.push(
+      r.status === null
+        ? 'the command did not run (timed out or was blocked)'
+        : `exit code ${r.status}`
+    );
+  }
+  return `${what} failed: ${parts.join(' — ')}`;
+}
+
+/** The per-user Startup folder. Honours APPDATA (roaming/redirected profiles)
+ *  before falling back to the conventional location. */
+export function windowsStartupDir(homeDir: string = os.homedir()): string {
+  // `||`, not `??` (repo rule): an APPDATA set to "" passes a ?? guard and
+  // yields a RELATIVE path — the Startup entry would land somewhere random
+  // and autostart would silently never happen. Caught by the unit test below.
+  const appData = process.env.APPDATA || path.join(homeDir, 'AppData', 'Roaming');
+  return path.join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
+}
+
+const WIN_LAUNCHER = () => path.join(windowsStartupDir(), STARTUP_FILE);
+
+/**
+ * The hidden-window launcher.
+ *
+ * ASCII ONLY. Windows Script Host reads a .vbs as ANSI unless it carries a
+ * UTF-16 BOM, so a UTF-8 em dash in the first version rendered as `â€"` on the
+ * founder's machine. It was only a comment that time; in a path it would have
+ * broken the launch outright.
+ *
+ * VBS escapes a quote by doubling it. Windows paths cannot legally contain `"`,
+ * so embedding them is safe — the guard is for a corrupted argv reaching us.
+ * NODE9_AUTO_STARTED rides the launcher's process environment, matching what
+ * the plist and the systemd unit set.
  */
 export function windowsLauncherVbs(nodePath: string, scriptPath: string): string {
   for (const p of [nodePath, scriptPath]) {
     if (p.includes('"')) throw new Error(`Illegal quote in path: ${p}`);
   }
   return [
-    "' Auto-generated by node9 — starts the approval daemon with no console window.",
-    "' Recreated on every `node9 daemon install`; safe to delete (uninstall does).",
+    "' Auto-generated by node9 - starts the approval daemon with no console window.",
+    "' Recreated by `node9 daemon install`; removed by `node9 daemon uninstall`.",
     'Set sh = CreateObject("Wscript.Shell")',
     'sh.Environment("PROCESS")("NODE9_AUTO_STARTED") = "1"',
     `sh.Run """${nodePath}"" ""${scriptPath}"" daemon", 0, False`,
@@ -234,86 +301,32 @@ export function windowsLauncherVbs(nodePath: string, scriptPath: string): string
   ].join('\r\n');
 }
 
-/** Pure builders for the schtasks invocations — exported so the exact argv can
- *  be unit-tested on any platform; the exec wrappers below stay two-liners. */
-export function schtasksCreateArgs(launcherPath: string): string[] {
-  // Array-form spawn (no shell), so the only quoting that matters is inside
-  // /TR, which schtasks parses itself. /F replaces an existing task (install
-  // is documented idempotent); ONLOGON without /RU = current user, at logon —
-  // the same "user agent" semantics as launchd/systemd-user.
-  return [
-    '/Create',
-    '/TN',
-    SCHTASKS_TASK,
-    '/TR',
-    `wscript.exe //B "${launcherPath}"`,
-    '/SC',
-    'ONLOGON',
-    '/F',
-  ];
-}
-
-function installSchtasks(binaryPath: string): void {
-  const launcher = WIN_LAUNCHER();
-  const dir = path.dirname(launcher);
+function installWindowsStartup(binaryPath: string): void {
+  const target = WIN_LAUNCHER();
+  const dir = path.dirname(target);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(launcher, windowsLauncherVbs(process.execPath, binaryPath), 'utf-8');
-  const create = spawnSync('schtasks', schtasksCreateArgs(launcher), {
-    encoding: 'utf8',
-    timeout: 10_000,
-  });
-  if (create.status !== 0) {
-    throw new Error(
-      `schtasks /Create failed: ${create.stderr || create.stdout || 'unknown error'}`
-    );
-  }
+  fs.writeFileSync(target, windowsLauncherVbs(process.execPath, binaryPath), 'utf-8');
   // Start it now — parity with systemd's `enable --now` and launchd's `load`.
-  // Best-effort: the task itself is installed either way.
-  spawnSync('schtasks', ['/Run', '/TN', SCHTASKS_TASK], { encoding: 'utf8', timeout: 10_000 });
+  // Best-effort: the logon entry is installed either way.
+  spawnSync('wscript.exe', ['//B', target], { encoding: 'utf8', timeout: 10_000 });
 }
 
-function uninstallSchtasks(): void {
-  // /F suppresses the confirmation prompt; a missing task exits non-zero,
-  // which is the desired no-op.
-  spawnSync('schtasks', ['/Delete', '/TN', SCHTASKS_TASK, '/F'], {
-    encoding: 'utf8',
-    timeout: 10_000,
-  });
-  const launcher = WIN_LAUNCHER();
-  if (fs.existsSync(launcher)) {
-    try {
-      fs.unlinkSync(launcher);
-    } catch {
-      /* non-fatal */
-    }
-  }
+function uninstallWindowsStartup(): void {
+  const target = WIN_LAUNCHER();
+  if (fs.existsSync(target)) fs.unlinkSync(target);
 }
 
-function isSchtasksInstalled(): boolean {
-  const r = spawnSync('schtasks', ['/Query', '/TN', SCHTASKS_TASK], {
-    encoding: 'utf8',
-    timeout: 5000,
-  });
-  return r.status === 0;
-}
-
-/** A disabled task still answers /Query — only the XML says so. Absent or
- *  unparseable XML while the task exists reads as ENABLED: the failure mode
- *  we surface is installed-but-disabled, and guessing "disabled" on a probe
- *  hiccup would nag healthy machines. */
-function isSchtasksEnabled(): boolean {
-  const r = spawnSync('schtasks', ['/Query', '/TN', SCHTASKS_TASK, '/XML'], {
-    encoding: 'utf8',
-    timeout: 5000,
-  });
-  if (r.status !== 0) return false; // not installed at all
-  return !/<Enabled>\s*false\s*<\/Enabled>/i.test(r.stdout ?? '');
+/** Installed and enabled are the same thing here: the file is in Startup or it
+ *  is not. There is no disabled-but-present state to detect, unlike a systemd
+ *  unit or a scheduled task. */
+function isWindowsStartupInstalled(): boolean {
+  return fs.existsSync(WIN_LAUNCHER());
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
 export type ServiceInstallResult =
-  | { ok: true; platform: 'launchd' | 'systemd' | 'schtasks'; alreadyInstalled: boolean }
+  | { ok: true; platform: 'launchd' | 'systemd' | 'startup-folder'; alreadyInstalled: boolean }
   | { ok: false; reason: string };
 
 /**
@@ -396,9 +409,9 @@ export function installDaemonService(): ServiceInstallResult {
     }
 
     if (process.platform === 'win32') {
-      const alreadyInstalled = isSchtasksInstalled();
-      installSchtasks(binary);
-      return { ok: true, platform: 'schtasks', alreadyInstalled };
+      const alreadyInstalled = isWindowsStartupInstalled();
+      installWindowsStartup(binary);
+      return { ok: true, platform: 'startup-folder', alreadyInstalled };
     }
 
     return {
@@ -427,8 +440,8 @@ export function uninstallDaemonService(): ServiceInstallResult {
       return { ok: true, platform: 'systemd', alreadyInstalled: false };
     }
     if (process.platform === 'win32') {
-      uninstallSchtasks();
-      return { ok: true, platform: 'schtasks', alreadyInstalled: false };
+      uninstallWindowsStartup();
+      return { ok: true, platform: 'startup-folder', alreadyInstalled: false };
     }
     return {
       ok: false,
@@ -448,7 +461,7 @@ export function uninstallDaemonService(): ServiceInstallResult {
 export function isDaemonServiceInstalled(): boolean {
   if (process.platform === 'darwin') return isLaunchdInstalled();
   if (process.platform === 'linux') return isSystemdInstalled();
-  if (process.platform === 'win32') return isSchtasksInstalled();
+  if (process.platform === 'win32') return isWindowsStartupInstalled();
   return false;
 }
 
@@ -490,13 +503,10 @@ function enableDaemonServiceQuiet(): boolean {
       return r.status === 0;
     }
     if (process.platform === 'win32') {
-      // Re-enables the task for next logon without touching a live daemon —
-      // /Change /ENABLE is the schtasks analogue of `systemctl enable`.
-      const r = spawnSync('schtasks', ['/Change', '/TN', SCHTASKS_TASK, '/ENABLE'], {
-        encoding: 'utf8',
-        timeout: 5000,
-      });
-      return r.status === 0;
+      // Nothing to re-enable: the Startup entry is present or absent, and
+      // installing a missing one is deliberately not this function's job
+      // (see autostartRepairDecision — we never silently install).
+      return isWindowsStartupInstalled();
     }
     // darwin: `load -w` (done at install) already sets RunAtLoad persistently.
     return process.platform === 'darwin';
@@ -601,7 +611,7 @@ export function isDaemonServiceEnabled(): boolean {
       return r.status === 0;
     }
     if (process.platform === 'win32') {
-      return isSchtasksEnabled();
+      return isWindowsStartupInstalled();
     }
   } catch {
     /* probe failure → treat as not-enabled; never throw */
