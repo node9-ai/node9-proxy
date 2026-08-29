@@ -251,3 +251,134 @@ describe('node9 doctor — verdict honesty', () => {
     expect(output).not.toMatch(/is not recognized as an internal or external command/);
   });
 });
+
+// ── Stalled shipping + rejected key (founder QA 2026-08-29) ──────────────────
+// A running daemon that CANNOT ship printed "Shipping in progress" over 334 KB
+// stuck for 12 hours, while Policy sync showed "API returned 401" — the raw
+// code, leaving the reader to work out it meant "this machine is disconnected".
+describe('node9 doctor — stalled shipping and rejected keys', () => {
+  /** A cloud-enabled HOME with an audit log, a watermark of a given age, and
+   *  an optional sync-health record. `lagBytes` sits past the watermark
+   *  offset, which is exactly how shipLagBytes computes a real lag. */
+  function stalledHome(
+    name: string,
+    opts: {
+      ageMin: number;
+      lagBytes: number;
+      lastError?: string;
+      /** Fake a LIVE daemon: isDaemonRunning() reads this pid file and probes
+       *  the pid with signal 0, so our own (definitely alive) pid satisfies it.
+       *  Without this the suite can only ever observe a DEAD daemon, which is
+       *  how the first version of these tests passed against the old
+       *  daemon-coupled condition. */
+      daemonRunning?: boolean;
+    }
+  ): string {
+    const home = path.join(tmpBase, name);
+    const dir = path.join(home, '.node9');
+    fs.mkdirSync(dir, { recursive: true });
+    writeJson(path.join(dir, 'config.json'), {
+      settings: { approvers: { native: true, terminal: true, cloud: true } },
+    });
+    writeJson(path.join(dir, 'credentials.json'), {
+      default: { apiKey: 'n9_live_probe', apiUrl: 'https://api.node9.ai/api/v1/intercept' },
+    });
+    const auditLog = path.join(dir, 'audit.log');
+    fs.writeFileSync(auditLog, 'x'.repeat(opts.lagBytes));
+    // fileSig must match what the shipper computes, else lag = whole file —
+    // which is still a lag, and is the state we want either way.
+    writeJson(path.join(dir, 'audit-ship.json'), {
+      fileSig: 'stale-signature',
+      offset: 0,
+      updatedAt: new Date(Date.now() - opts.ageMin * 60_000).toISOString(),
+    });
+    if (opts.daemonRunning) {
+      writeJson(path.join(dir, 'daemon.pid'), { pid: process.pid, port: 7391 });
+    }
+    if (opts.lastError) {
+      writeJson(path.join(dir, 'sync-health.json'), {
+        lastCheckedAt: new Date(Date.now() - opts.ageMin * 60_000).toISOString(),
+        consecutiveFailures: 2,
+        lastError: opts.lastError,
+      });
+    }
+    return home;
+  }
+
+  it('a long-stalled queue is a WARNING even though the queue is moving-looking', () => {
+    const { output } = runDoctor(stalledHome('stalled', { ageMin: 765, lagBytes: 40_000 }));
+    expect(output).not.toMatch(/Shipping in progress/);
+    expect(output).toMatch(/NOT shipped \(last ship 765m ago\)/);
+  });
+
+  it('warns on a stalled queue even when the daemon IS running (the founder case)', () => {
+    // The exact reported state: daemon up, 334 KB queued, last ship 765m ago,
+    // and doctor said "Shipping in progress". The old condition only warned
+    // when the daemon was DOWN, so this is the case that proves the fix.
+    const { output } = runDoctor(
+      stalledHome('stalled-live-daemon', {
+        ageMin: 765,
+        lagBytes: 40_000,
+        daemonRunning: true,
+      })
+    );
+    expect(output).not.toMatch(/Shipping in progress/);
+    expect(output).toMatch(/NOT shipped/);
+    // …and the hint addresses a RUNNING daemon, not "start it".
+    expect(output).toMatch(/daemon is running but/i);
+    expect(output).not.toMatch(/start it: node9 daemon --background/);
+  });
+
+  it('names the revoked key as the reason when the daemon is up and shipping fails', () => {
+    const { output } = runDoctor(
+      stalledHome('stalled-401-live', {
+        ageMin: 765,
+        lagBytes: 40_000,
+        lastError: 'API returned 401',
+        daemonRunning: true,
+      })
+    );
+    expect(output).toMatch(/rejects this machine's key/);
+    expect(output).toMatch(/node9 login/);
+  });
+
+  it('a FRESH lag still reads as in-progress — no nagging a healthy machine', () => {
+    const { output } = runDoctor(stalledHome('fresh-lag', { ageMin: 2, lagBytes: 40_000 }));
+    expect(output).toMatch(/Shipping in progress/);
+  });
+
+  it('a 401 in sync-health is named: disconnected, with `node9 login` as the fix', () => {
+    const { output } = runDoctor(
+      stalledHome('rejected', { ageMin: 765, lagBytes: 40_000, lastError: 'API returned 401' })
+    );
+    // Policy sync stops calling it merely STALE…
+    expect(output).toMatch(/DISCONNECTED/);
+    expect(output).toMatch(/node9 login/);
+    // …and never suggests the command that cannot fix a revoked key.
+    expect(output).not.toMatch(/Run: node9 policy sync/);
+  });
+
+  it('a non-401 failure is NOT called disconnected — 401 is the only special case', () => {
+    // 12h of ETIMEDOUT is a network problem, not a revoked key. (It is also
+    // under the staleness threshold, so Policy sync stays green here — the
+    // point of this case is that the DISCONNECTED verdict is reserved.)
+    const { output } = runDoctor(
+      stalledHome('etimedout', { ageMin: 765, lagBytes: 40_000, lastError: 'ETIMEDOUT' })
+    );
+    expect(output).not.toMatch(/DISCONNECTED/);
+    expect(output).not.toMatch(/node9 login/);
+    // The stalled QUEUE is still reported — that half does not depend on why.
+    expect(output).toMatch(/NOT shipped/);
+  });
+
+  it('a 401 is called out even when the sync is too RECENT to be stale', () => {
+    // The first version of this fix nested the check inside the staleness
+    // branch, so a machine disconnected an hour ago still read "Cloud policy
+    // fresh" until the staleness clock (up to 15h) caught up.
+    const { output } = runDoctor(
+      stalledHome('fresh-401', { ageMin: 20, lagBytes: 40_000, lastError: 'API returned 401' })
+    );
+    expect(output).toMatch(/DISCONNECTED/);
+    expect(output).not.toMatch(/Cloud policy fresh/);
+  });
+});

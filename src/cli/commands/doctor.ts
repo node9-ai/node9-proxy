@@ -22,6 +22,18 @@ import { readStartupCause } from '../../daemon/startup-log';
 import { undoLeftoverPaths } from '../../utils/undo-leftovers';
 import { locatorCommand } from '../../utils/platform-shell';
 
+/**
+ * Did the cloud REJECT this machine's key? A 401 in the sync-health record is
+ * not a network problem — the key was revoked (disconnected from the
+ * dashboard, the member removed from the workspace, or `node9 logout`), and
+ * every cloud channel using it fails together. doctor already had this
+ * evidence and printed it as a raw "API returned 401", leaving the founder to
+ * work out that it meant "this machine is disconnected" (QA 2026-08-29).
+ */
+function keyRejected(health: { consecutiveFailures: number; lastError?: string }): boolean {
+  return health.consecutiveFailures > 0 && /\b401\b/.test(health.lastError ?? '');
+}
+
 export function registerDoctorCommand(program: Command, version: string): void {
   program
     .command('doctor')
@@ -262,7 +274,22 @@ export function registerDoctorCommand(program: Command, version: string): void {
       ) {
         section('Policy sync');
         const health = readSyncHealth();
-        if (isPolicyStale(Date.now(), health)) {
+        // A REJECTED key is checked before staleness, and independently of it:
+        // being revoked is not a function of elapsed time. Nested inside the
+        // stale branch (the first version of this fix), a machine disconnected
+        // an hour ago still reported "Cloud policy fresh" until the staleness
+        // clock — up to 15h — finally caught up.
+        if (keyRejected(health)) {
+          const when = health.lastCheckedAt
+            ? `last reached the cloud ${agoLabel(health.lastCheckedAt)}`
+            : 'never reached the cloud';
+          warn(
+            `This machine is DISCONNECTED — the cloud rejected its key (${when}, ` +
+              `${health.consecutiveFailures} consecutive failure${health.consecutiveFailures === 1 ? '' : 's'}). ` +
+              'It still enforces the cached policy, but nothing reaches or leaves the dashboard.',
+            'Someone disconnected it from the dashboard, removed you from the workspace, or ran `node9 logout`. Reconnect with: node9 login'
+          );
+        } else if (isPolicyStale(Date.now(), health)) {
           const when = health.lastCheckedAt
             ? `last reached the cloud ${agoLabel(health.lastCheckedAt)}`
             : 'never reached the cloud';
@@ -317,10 +344,24 @@ export function registerDoctorCommand(program: Command, version: string): void {
             );
           } else if (wm && lag !== null) {
             const ageMin = Math.round((Date.now() - new Date(wm.updatedAt).getTime()) / 60_000);
-            if (ageMin > 5 && !isDaemonRunning()) {
+            // STALLED is about the QUEUE, not the daemon. The old condition
+            // warned only when the daemon was DOWN, so a running daemon that
+            // could not ship printed "Shipping in progress" over 334 KB stuck
+            // for 12 hours (founder QA 2026-08-29) — the same lie as the
+            // caught-up branch above, one else-if over.
+            // 15 min ≈ 45 failed 20s cycles: long enough that a laptop waking
+            // from sleep mid-flush is never accused.
+            const stalled = ageMin > 15;
+            if (stalled) {
+              const rejected = keyRejected(readSyncHealth());
               warn(
-                `${Math.round(lag / 1024)} KB of audit rows not shipped (last ship ${ageMin}m ago)`,
-                'The daemon ships every ~20s — start it: node9 daemon --background'
+                `${Math.round(lag / 1024)} KB of audit rows NOT shipped (last ship ${ageMin}m ago)`,
+                // The daemon's state decides the fix, not whether to warn.
+                !isDaemonRunning()
+                  ? 'The daemon ships every ~20s — start it: node9 daemon --background'
+                  : rejected
+                    ? "The daemon is running but the cloud rejects this machine's key — run: node9 login"
+                    : 'The daemon is running but shipping is failing — see Policy sync above for the reason'
               );
             } else {
               pass(
