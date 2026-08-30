@@ -84,6 +84,43 @@ jobs:
           NODE9_TESTING: '1'
         run: npm test
 
+  e2e:
+    # The release used to be the FIRST place `test:e2e` ever ran: CI checked
+    # format/lint/typecheck/build/test, and `npm run validate` (the
+    # prepublishOnly gate) was alone in running the e2e suite. So a broken
+    # e2e could not surface until semantic-release was already mid-publish —
+    # which is exactly how v2.6.0 got a commit and a tag on main while npm
+    # stayed on 2.5.0. This job moves that gate in front of the merge.
+    #
+    # ubuntu + Node 22 deliberately mirrors the Release runner: the point is
+    # to reproduce what `validate` sees, and scripts/e2e.sh is bash-only.
+    name: e2e
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build workspace engine
+        run: npm --workspace @node9/policy-engine run build
+
+      # No explicit build step: `pretest:e2e` builds, so the suite can never
+      # run against a stale dist no matter who invokes it (the failure mode
+      # that faked two green gates in c38d9d9).
+      - name: E2E
+        env:
+          # Prevents native popup dialogs and daemon auto-start in spawned child processes.
+          NODE9_TESTING: '1'
+        run: npm run test:e2e
+
   coverage:
     # Dedicated job so branch protection can require it by name without fragile matrix selectors.
     # Enforces the thresholds defined in vitest.config.mts. Must be listed in branch protection
