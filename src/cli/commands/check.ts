@@ -21,6 +21,7 @@ import {
 import { defaultSkillRoots, resolveUserSkillRoot, verifyAndPinRoots } from '../../skill-pin';
 import { scanArgs } from '../../dlp';
 import { appendLocalAudit } from '../../audit';
+import { isKeyedForPolicy } from '../../config/keyed-guard';
 import {
   reviewCorrelationKey,
   recordPendingReview,
@@ -529,9 +530,13 @@ export function registerCheckCommand(program: Command): void {
               ruleDescription?: string;
             }
           ) => {
-            // 1. Determine the context (User vs Policy)
+            // 1. Determine the context (User vs Policy). I6: the fallback
+            // names where the verdict came from — on a workspace-governed
+            // machine that is the workspace policy, not a local one.
             const blockedByContext =
-              result?.blockedByLabel || result?.blockedBy || 'Local Security Policy';
+              result?.blockedByLabel ||
+              result?.blockedBy ||
+              (isKeyedForPolicy() ? 'Workspace Policy' : 'Local Security Policy');
 
             // 2. Identify if it was a human decision or an automated rule
             const isHumanDecision =

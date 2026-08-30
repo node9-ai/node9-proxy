@@ -198,20 +198,33 @@ async function deriveExplainTrace(toolName: string, args?: unknown): Promise<Exp
   const projectPath = path.join(process.cwd(), 'node9.config.json');
   const credsPath = path.join(os.homedir(), '.node9', 'credentials.json');
 
+  const config = getConfig();
+  // I4: the waterfall must tell the PR-2 truth. On a workspace-governed
+  // machine the local tiers exist on disk but are inert for policy, and the
+  // env-var mode override is ignored too — labeling them 'active' would
+  // describe a merge that no longer happens.
+  const wsGoverned = config.policySource === 'workspace';
+
   // ── Waterfall tiers ───────────────────────────────────────────────────────
   const waterfall: WaterfallTier[] = [
     {
       tier: 1,
       label: 'Env vars',
       status: 'env',
-      note: process.env.NODE9_MODE ? `NODE9_MODE=${process.env.NODE9_MODE}` : 'not set',
+      note: process.env.NODE9_MODE
+        ? wsGoverned
+          ? `NODE9_MODE=${process.env.NODE9_MODE} — ignored (workspace config controls mode)`
+          : `NODE9_MODE=${process.env.NODE9_MODE}`
+        : 'not set',
     },
     {
       tier: 2,
-      label: 'Cloud policy',
+      label: wsGoverned ? 'Workspace config' : 'Cloud policy',
       status: fs.existsSync(credsPath) ? 'active' : 'missing',
       note: fs.existsSync(credsPath)
-        ? 'credentials found (not evaluated in explain mode)'
+        ? wsGoverned
+          ? 'authoritative — this machine follows the workspace configuration (app.node9.ai)'
+          : 'credentials found (not evaluated in explain mode)'
         : 'not connected — run: node9 login',
     },
     {
@@ -219,12 +232,18 @@ async function deriveExplainTrace(toolName: string, args?: unknown): Promise<Exp
       label: 'Project config',
       status: fs.existsSync(projectPath) ? 'active' : 'missing',
       path: projectPath,
+      ...(wsGoverned && fs.existsSync(projectPath)
+        ? { note: 'present — ignored (workspace config governs policy)' }
+        : {}),
     },
     {
       tier: 4,
       label: 'Global config',
       status: fs.existsSync(globalPath) ? 'active' : 'missing',
       path: globalPath,
+      ...(wsGoverned && fs.existsSync(globalPath)
+        ? { note: 'present — ignored (workspace config governs policy)' }
+        : {}),
     },
     {
       tier: 5,
@@ -233,8 +252,6 @@ async function deriveExplainTrace(toolName: string, args?: unknown): Promise<Exp
       note: 'always active',
     },
   ];
-
-  const config = getConfig();
 
   // ── 0. DLP Content Scanner ────────────────────────────────────────────────
   const wouldBeIgnored = matchesPattern(toolName, config.policy.ignoredTools);

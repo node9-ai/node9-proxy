@@ -101,14 +101,29 @@ export function registerDoctorCommand(program: Command, version: string): void {
 
       // ── Config ───────────────────────────────────────────────────────────────
       section('Configuration');
+      // I3: name the policy source first — every "found and valid" line below
+      // is about a file that a workspace-governed machine does NOT read for
+      // policy, and doctor must not imply otherwise.
+      const wsGoverned = getConfig().policySource === 'workspace';
+      if (wsGoverned) {
+        pass(
+          'Policy source: workspace config (app.node9.ai) — local config files govern operational settings only'
+        );
+      }
       const globalConfigPath = path.join(homeDir, '.node9', 'config.json');
       if (fs.existsSync(globalConfigPath)) {
         try {
           JSON.parse(fs.readFileSync(globalConfigPath, 'utf-8'));
-          pass('~/.node9/config.json found and valid');
+          pass(
+            wsGoverned
+              ? '~/.node9/config.json found and valid (policy fields ignored — workspace governs)'
+              : '~/.node9/config.json found and valid'
+          );
         } catch {
           fail('~/.node9/config.json is invalid JSON', 'Run: node9 init --force');
         }
+      } else if (wsGoverned) {
+        pass('~/.node9/config.json not present (workspace config governs)');
       } else {
         warn('~/.node9/config.json not found (using defaults)', 'Run: node9 init');
       }
@@ -322,9 +337,14 @@ export function registerDoctorCommand(program: Command, version: string): void {
         if (!creds) {
           warn('Not logged in — audit rows stay local', 'Run: node9 login <api-key>');
         } else if (!cfg.settings.approvers.cloud) {
+          // I3: "set approvers.cloud=true" is LOCAL-FILE advice — on a
+          // workspace-governed machine that file is inert for policy, so
+          // point at the actual control instead.
           warn(
             'Cloud approvals OFF (settings.approvers.cloud=false) — nothing syncs to the dashboard',
-            'Privacy mode is a valid choice; set approvers.cloud=true to sync.'
+            cfg.policySource === 'workspace'
+              ? 'The workspace config turned this off — change it at app.node9.ai (Enforcement).'
+              : 'Privacy mode is a valid choice; set approvers.cloud=true to sync.'
           );
         } else if (cfg.settings.shipper.enabled === false) {
           warn('Shipper disabled (settings.shipper.enabled=false) — audit rows stay local');

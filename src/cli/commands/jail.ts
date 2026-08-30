@@ -5,6 +5,7 @@ import type { Command } from 'commander';
 import chalk from 'chalk';
 import { readJailPaths, addJailPath, removeJailPath, regenerateUserJail } from '../../shields/jail';
 import { appendConfigAudit } from '../../audit';
+import { cliGuardPolicyWrite, isKeyedForPolicy } from '../../config/keyed-guard';
 
 // Built-in jail coverage (mirrors project-jail.json + the engine's
 // SENSITIVE_PATH_RULES). Display-only — always on, not removable.
@@ -25,6 +26,7 @@ export function registerJailCommand(program: Command): void {
     .description('Add a path to the jail (default: block reads; --review to soften)')
     .option('--review', 'Require human approval instead of hard-blocking reads')
     .action((p: string, opts: { review?: boolean }) => {
+      if (!cliGuardPolicyWrite(`jail add ${p}`)) return;
       const verdict = opts.review ? 'review' : 'block';
       try {
         const paths = addJailPath(p, verdict);
@@ -48,6 +50,7 @@ export function registerJailCommand(program: Command): void {
     .command('remove <path>')
     .description('Remove a user-added jail path (built-in paths are not removable)')
     .action((p: string) => {
+      if (!cliGuardPolicyWrite(`jail remove ${p}`)) return;
       let result: { removed: boolean; paths: ReturnType<typeof readJailPaths> };
       try {
         result = removeJailPath(p);
@@ -90,15 +93,29 @@ export function registerJailCommand(program: Command): void {
         process.exit(1);
         return;
       }
+      // I10: the user-jail shield only enforces when the workspace mandates
+      // it — on a workspace-governed machine, locally-added paths are inert.
+      const wsGoverned = isKeyedForPolicy();
       if (user.length === 0) {
         console.log(
-          chalk.gray('  Your paths: (none) — add one with ') + chalk.cyan('node9 jail add <path>')
+          wsGoverned
+            ? chalk.gray(
+                '  Your paths: (none) — workspace config governs; add paths at app.node9.ai'
+              )
+            : chalk.gray('  Your paths: (none) — add one with ') +
+                chalk.cyan('node9 jail add <path>')
         );
       } else {
-        console.log(chalk.gray('  Your paths (removable):'));
+        console.log(
+          wsGoverned
+            ? chalk.gray('  Your paths — ignored (workspace config governs):')
+            : chalk.gray('  Your paths (removable):')
+        );
         for (const u of user) {
           const v = u.verdict === 'block' ? chalk.red('block ') : chalk.yellow('review');
-          console.log(`    ${v}  ${chalk.cyan(u.path)}`);
+          console.log(
+            `    ${v}  ${chalk.cyan(u.path)}${wsGoverned ? chalk.gray('  (ignored)') : ''}`
+          );
         }
       }
       console.log('');

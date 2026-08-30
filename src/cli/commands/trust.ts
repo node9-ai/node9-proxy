@@ -10,6 +10,7 @@ import {
   removeTrustedHost,
   normalizeHost,
 } from '../../auth/trusted-hosts.js';
+import { cliGuardPolicyWrite } from '../../config/keyed-guard';
 
 /** Loose hostname validator: FQDN or wildcard glob (*.example.com). */
 function isValidHost(host: string): boolean {
@@ -26,6 +27,7 @@ export function registerTrustCommand(program: Command): void {
     .command('add <host>')
     .description('Add a trusted host — pipe-chain blocks targeting this host are downgraded')
     .action((host: string) => {
+      if (!cliGuardPolicyWrite(`trust add ${host}`)) return;
       const normalized = normalizeHost(host.trim());
       if (!isValidHost(normalized)) {
         console.error(
@@ -46,6 +48,7 @@ export function registerTrustCommand(program: Command): void {
     .command('remove <host>')
     .description('Remove a trusted host')
     .action((host: string) => {
+      if (!cliGuardPolicyWrite(`trust remove ${host}`)) return;
       const normalized = normalizeHost(host.trim());
       const removed = removeTrustedHost(normalized);
       if (!removed) {

@@ -15,6 +15,7 @@ import path from 'path';
 import { spawnSync } from 'child_process';
 import { classifyDecision, decisionTag } from '../audit/decision';
 import { getConfig, checkPause } from '../core';
+import { isKeyedForPolicy, KEYED_POLICY_WRITE_REASON } from '../config/keyed-guard';
 import { isDaemonRunning } from '../auth/daemon';
 import {
   listShields,
@@ -402,11 +403,19 @@ function handleStatus(): string {
   const settings = config.settings;
   const paused = checkPause();
   const daemonUp = isDaemonRunning();
-  const activeShields = readActiveShields();
+  // I7: report the shields the engine ACTUALLY applied on this load — on a
+  // workspace-governed machine the local enable store is not that list.
+  const wsGoverned = config.policySource === 'workspace';
+  const activeShields = wsGoverned ? (config.policy.appliedShields ?? []) : readActiveShields();
 
   const lines: string[] = [];
 
   lines.push(`Mode: ${settings.mode}`);
+  if (wsGoverned) {
+    lines.push(
+      'Policy source: workspace config (app.node9.ai) — local config files are ignored for policy'
+    );
+  }
   lines.push(`Daemon: ${daemonUp ? 'running' : 'stopped'}`);
 
   if (paused.paused) {
@@ -424,11 +433,12 @@ function handleStatus(): string {
 
   const projectConfig = path.join(process.cwd(), 'node9.config.json');
   const globalConfig = path.join(os.homedir(), '.node9', 'config.json');
+  const presentLabel = wsGoverned ? 'present — ignored (workspace config governs)' : 'present';
   lines.push(
-    `Project config (node9.config.json): ${fs.existsSync(projectConfig) ? 'present' : 'not found'}`
+    `Project config (node9.config.json): ${fs.existsSync(projectConfig) ? presentLabel : 'not found'}`
   );
   lines.push(
-    `Global config (~/.node9/config.json): ${fs.existsSync(globalConfig) ? 'present' : 'not found'}`
+    `Global config (~/.node9/config.json): ${fs.existsSync(globalConfig) ? presentLabel : 'not found'}`
   );
 
   return lines.join('\n');
@@ -438,6 +448,7 @@ function handleConfigGet(): string {
   const config = getConfig();
   const s = config.settings;
   const lines: string[] = [
+    `source: ${config.policySource === 'workspace' ? 'workspace config (app.node9.ai) — local policy fields ignored' : 'local config'}`,
     `mode: ${s.mode}`,
     `flightRecorder: ${s.flightRecorder}`,
     `approvalTimeoutMs: ${s.approvalTimeoutMs}`,
@@ -456,17 +467,33 @@ function handleConfigGet(): string {
 
 function handleShieldList(): string {
   const all = listShields();
-  const active = new Set(readActiveShields());
+  // I8: what's ENFORCED is config.policy.appliedShields. On a
+  // workspace-governed machine the local enable store is inert — a shield
+  // enabled only locally must not display as active.
+  const cfg = getConfig();
+  const wsGoverned = cfg.policySource === 'workspace';
+  const active = new Set(wsGoverned ? (cfg.policy.appliedShields ?? []) : readActiveShields());
+  const localOnly = wsGoverned
+    ? new Set(readActiveShields().filter((n) => !active.has(n)))
+    : new Set<string>();
 
   if (all.length === 0) return 'No shields available.';
 
   const lines = all.map((shield) => {
     const on = active.has(shield.name);
+    const ignored = localOnly.has(shield.name);
+    const state = on
+      ? '[active]'
+      : ignored
+        ? '[off — enabled locally, ignored (workspace governs)]'
+        : '[off]   ';
     const ruleCount = shield.smartRules.length;
-    return `${on ? '[active]' : '[off]   '} ${shield.name.padEnd(12)} — ${shield.description ?? ''} (${ruleCount} rule${ruleCount === 1 ? '' : 's'})`;
+    return `${state} ${shield.name.padEnd(12)} — ${shield.description ?? ''} (${ruleCount} rule${ruleCount === 1 ? '' : 's'})`;
   });
 
-  lines.unshift(`${active.size} of ${all.length} shields active:\n`);
+  lines.unshift(
+    `${active.size} of ${all.length} shields active${wsGoverned ? ' (workspace config governs)' : ''}:\n`
+  );
   return lines.join('\n');
 }
 
@@ -518,7 +545,8 @@ function handleShieldDisable(args: Record<string, unknown>): string {
 // the same file (and merge layer) the `node9 egress` CLI writes.
 
 function handleEgressStatus(): string {
-  const e = getConfig().policy.egress;
+  const cfgEgress = getConfig();
+  const e = cfgEgress.policy.egress;
   const state = !e.enabled
     ? 'OFF — the agent can reach any host'
     : e.mode === 'block'
@@ -526,6 +554,11 @@ function handleEgressStatus(): string {
       : 'WATCHING (review) — unknown hosts prompt for approval';
   const lines = [
     `Egress control: ${state}`,
+    // I5: name the source — on a workspace-governed machine these values
+    // come from the workspace config, and local egress edits are inert.
+    ...(cfgEgress.policySource === 'workspace'
+      ? ['Source: workspace config (app.node9.ai) — local egress settings are ignored']
+      : []),
     `${DEFAULT_EGRESS_ALLOWLIST.length} common dev/LLM hosts are always allowed (github, npm, pypi, anthropic, …).`,
     `Your allow list: ${e.allow.length ? e.allow.join(', ') : '(none)'}`,
     `Your deny list:  ${e.deny.length ? e.deny.join(', ') : '(none)'}`,
@@ -847,6 +880,26 @@ export function runMcpServer(): void {
       const p = (params ?? {}) as Record<string, unknown>;
       const toolName = p.name as string | undefined;
       const toolArgs = (p.arguments ?? {}) as Record<string, unknown>;
+
+      // PR-2 write-guard (§0.8): on a machine that follows the workspace
+      // configuration, EVERY local policy write — weaken AND add — is inert
+      // (getConfig ignores the local stores it targets), so refuse it with a
+      // pointer to the dashboard instead of no-opping green. This runs BEFORE
+      // the weaken gate so a keyed machine never sees that gate's advice to
+      // set mcpAllowWeakening in ~/.node9/config.json — a file that machine
+      // does not read for policy. Keyedness is as-at-spawn, like every other
+      // config read in this process (see the header note on reconnects).
+      if (capabilityOf(toolName ?? '') !== 'readonly' && isKeyedForPolicy()) {
+        process.stdout.write(
+          err(
+            id,
+            -32000,
+            `${toolName} changes local policy, and this machine's local policy is inert. ` +
+              `${KEYED_POLICY_WRITE_REASON} Edit policy at https://app.node9.ai (Enforcement).`
+          ) + '\n'
+        );
+        return;
+      }
 
       // Security gate: a WEAKENING tool (shield_disable / approver_set) must never be
       // driven by the agent over MCP by default — that would let a compromised agent

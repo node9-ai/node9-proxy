@@ -11,6 +11,7 @@
 import type { Command } from 'commander';
 import chalk from 'chalk';
 import { getConfig } from '../../config';
+import { cliGuardPolicyWrite } from '../../config/keyed-guard';
 import { DEFAULT_EGRESS_ALLOWLIST } from '@node9/policy-engine';
 import { type EgressBlock, setEgress, addEgressHost } from '../../auth/egress-config';
 
@@ -31,16 +32,19 @@ function guard(fn: () => void): boolean {
   }
 }
 
-function mutate(change: Partial<EgressBlock>): boolean {
+function mutate(action: string, change: Partial<EgressBlock>): boolean {
+  if (!cliGuardPolicyWrite(action)) return false;
   return guard(() => setEgress(change));
 }
 
 function addHost(list: 'allow' | 'deny', host: string): boolean {
+  if (!cliGuardPolicyWrite(`egress ${list} ${host}`)) return false;
   return guard(() => addEgressHost(list, host));
 }
 
 function showStatus(): void {
-  const e = getConfig().policy.egress;
+  const cfg = getConfig();
+  const e = cfg.policy.egress;
   const state = !e.enabled
     ? chalk.red('OFF — your agent can reach any host')
     : e.mode === 'block'
@@ -48,6 +52,11 @@ function showStatus(): void {
       : chalk.yellow('WATCHING (review) — unknown hosts prompt you');
   console.log(chalk.cyan.bold('\n🌐 Egress control'));
   console.log('  State: ' + state);
+  if (cfg.policySource === 'workspace') {
+    console.log(
+      chalk.gray('  Source: workspace config (app.node9.ai) — local egress settings are ignored')
+    );
+  }
   console.log(
     chalk.gray(
       `  ${DEFAULT_EGRESS_ALLOWLIST.length} common dev/LLM hosts are always allowed (github, npm, pypi, anthropic, …).`
@@ -71,7 +80,7 @@ export function registerEgressCommand(program: Command): void {
     .command('watch')
     .description('Prompt before the agent reaches an unknown host (review mode)')
     .action(() => {
-      if (!mutate({ enabled: true, mode: 'review' })) return;
+      if (!mutate('egress watch', { enabled: true, mode: 'review' })) return;
       console.log(chalk.green('\n✓ Egress is now watched (review mode).'));
       console.log(
         chalk.gray('  Routine hosts (LLM APIs, package registries, localhost) are allowed.')
@@ -85,7 +94,7 @@ export function registerEgressCommand(program: Command): void {
     .command('lock')
     .description('Block the agent from reaching unknown hosts (block mode)')
     .action(() => {
-      if (!mutate({ enabled: true, mode: 'block' })) return;
+      if (!mutate('egress lock', { enabled: true, mode: 'block' })) return;
       console.log(chalk.green('\n✓ Egress is now locked (block mode).'));
       console.log(chalk.gray('  Routine hosts are still allowed; unknown hosts are denied.'));
       console.log(chalk.gray('  Allow a specific host with `node9 egress allow <host>`.\n'));
@@ -111,7 +120,7 @@ export function registerEgressCommand(program: Command): void {
     .command('off')
     .description('Turn egress control off')
     .action(() => {
-      if (!mutate({ enabled: false })) return;
+      if (!mutate('egress off', { enabled: false })) return;
       console.log(
         chalk.yellow('\n✓ Egress control is off — the agent can reach any host again.\n')
       );

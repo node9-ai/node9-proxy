@@ -146,13 +146,32 @@ export function registerStatusCommand(program: Command): void {
             : chalk.white('standard');
       console.log(`  Mode:    ${modeLabel}`);
 
+      // I1: on a keyed machine the local config files are present but INERT
+      // for policy — saying "Active" here would be a lie the user acts on.
+      const wsGoverned = mergedConfig.policySource === 'workspace';
+      if (wsGoverned) {
+        console.log(`  Policy:  ${chalk.cyan('Workspace config (app.node9.ai)')}`);
+      }
+      const ignoredLabel = chalk.gray('Present — ignored (workspace config governs)');
       const projectConfig = path.join(process.cwd(), 'node9.config.json');
       const globalConfig = path.join(os.homedir(), '.node9', 'config.json');
       console.log(
-        `  Local:   ${fs.existsSync(projectConfig) ? chalk.green('Active (node9.config.json)') : chalk.gray('Not present')}`
+        `  Local:   ${
+          fs.existsSync(projectConfig)
+            ? wsGoverned
+              ? ignoredLabel
+              : chalk.green('Active (node9.config.json)')
+            : chalk.gray('Not present')
+        }`
       );
       console.log(
-        `  Global:  ${fs.existsSync(globalConfig) ? chalk.green('Active (~/.node9/config.json)') : chalk.gray('Not present')}`
+        `  Global:  ${
+          fs.existsSync(globalConfig)
+            ? wsGoverned
+              ? ignoredLabel
+              : chalk.green('Active (~/.node9/config.json)')
+            : chalk.gray('Not present')
+        }`
       );
 
       if (mergedConfig.policy.sandboxPaths.length > 0) {
