@@ -19,6 +19,7 @@ import chalk from 'chalk';
 import { spawn } from 'child_process';
 import { execa } from 'execa';
 import { authorizeHeadless } from '../auth/orchestrator';
+import { _resetConfigCache } from '../config';
 import { auditLocalAllow } from '../auth/cloud';
 import { getCredentials } from '../config';
 import { buildNegotiationMessage } from '../policy/negotiation';
@@ -463,6 +464,11 @@ export async function runMcpGateway(
         const toolArgs = (message.params?.arguments ?? message.params?.tool_input ?? {}) as unknown;
         const mcpServer = resolveServerLabel(toolName, serverKey, upstreamCommand, configName);
 
+        // PR-2 §0.10: the gateway is long-lived and getConfig caches ambient
+        // calls — without this reset, a login/logout that flips the ENTIRE
+        // policy source (local ↔ workspace) goes unnoticed until restart.
+        // The daemon already resets per-check; the gateway now matches.
+        _resetConfigCache();
         const result = await authorizeHeadless(toolName, toolArgs, {
           agent: clientName ?? 'MCP-Gateway',
           mcpServer,

@@ -908,9 +908,15 @@ async function pushPostureSnapshot(creds: { apiKey: string; apiUrl: string }): P
 // other pushes; opt-out via NODE9_POLICY_MIRROR_DISABLE=1.
 async function pushPolicySnapshot(creds: { apiKey: string; apiUrl: string }): Promise<void> {
   try {
+    const cfg = getConfig();
     const body = buildPolicySnapshot(
-      getConfig(),
-      readActiveShields(),
+      // PR-2 §0.5: ship what the CONFIG APPLIED (appliedShields), not the
+      // local enable store — a keyed machine ignores shields.json, and
+      // shipping the file made every keyed machine show permanent false
+      // "not-applied" drift in Devices. cfg is built once and reused so the
+      // snapshot and the shipped list can never disagree.
+      cfg,
+      cfg.policy.appliedShields ?? readActiveShields(),
       readShieldOverrides(),
       readMcpToolsConfig(),
       // Merged config-vs-connected status. resolveMcpStatus reads process.env to
@@ -940,9 +946,15 @@ export async function runPolicyPush(): Promise<{ ok: true } | { ok: false; reaso
     };
   }
   try {
+    const cfg = getConfig();
     const body = buildPolicySnapshot(
-      getConfig(),
-      readActiveShields(),
+      // PR-2 §0.5: ship what the CONFIG APPLIED (appliedShields), not the
+      // local enable store — a keyed machine ignores shields.json, and
+      // shipping the file made every keyed machine show permanent false
+      // "not-applied" drift in Devices. cfg is built once and reused so the
+      // snapshot and the shipped list can never disagree.
+      cfg,
+      cfg.policy.appliedShields ?? readActiveShields(),
       readShieldOverrides(),
       readMcpToolsConfig(),
       // Merged config-vs-connected status. resolveMcpStatus reads process.env to

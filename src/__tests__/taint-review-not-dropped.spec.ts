@@ -91,17 +91,23 @@ describe('taint review is never resolved by a non-human channel (task #16 vector
     process.env.USERPROFILE = tmpHome;
     delete process.env.NODE9_API_KEY;
     fs.mkdirSync(path.join(tmpHome, '.node9'), { recursive: true });
-    // Standard mode, every LOCAL approver off so a fall-through can't prompt;
-    // cloud ON so the cloud-resolve path is the one under test.
+    // PR-2 replace-mode (§F disposition): credentials.json makes this fixture
+    // KEYED, so the policy knobs (mode / approvalTimeoutMs / approvers) must
+    // arrive via the CLOUD cache — a keyed machine's local config.json policy
+    // is inert. Same intent as before: standard mode, every LOCAL approver off
+    // so a fall-through can't prompt, cloud ON so the cloud-resolve path is
+    // the one under test, and a short timeout so the race resolves.
     fs.writeFileSync(
-      path.join(tmpHome, '.node9', 'config.json'),
+      path.join(tmpHome, '.node9', 'rules-cache.json'),
       JSON.stringify({
-        settings: {
+        fetchedAt: '2026-07-01T00:00:00Z',
+        rules: [],
+        managedConfig: {
           mode: 'standard',
           approvalTimeoutMs: 50,
           approvers: { native: false, browser: false, cloud: true, terminal: false },
+          locked: [],
         },
-        policy: {},
       })
     );
     fs.writeFileSync(

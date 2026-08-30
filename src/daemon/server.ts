@@ -684,9 +684,12 @@ export function startDaemon(): void {
 
     if (req.method === 'GET' && pathname === '/status') {
       try {
-        const s = getGlobalSettings();
         const counters = sessionCounters.get();
-        const mode = (s.mode ?? 'standard') as HudStatus['mode'];
+        // PR-2 §0.6: the HUD's mode is the EFFECTIVE mode from the full
+        // merge — getGlobalSettings reads the raw local file (default
+        // 'audit'), which on a keyed machine is exactly the value the
+        // machine ignores.
+        const mode = getConfig().settings.mode as HudStatus['mode'];
         const status: HudStatus = {
           mode,
           session: {

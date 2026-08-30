@@ -171,6 +171,9 @@ export interface Config {
     managedJailPaths: Array<{ path: string; verdict: 'block' | 'review' }>;
   };
   environments: Record<string, EnvironmentConfig>;
+  /** PR-2: 'workspace' = keyed (policy from the cloud); 'local' = the
+   *  local stack (unkeyed, --local, named profiles). */
+  policySource: 'workspace' | 'local';
 }
 
 // Default Enterprise Posture
@@ -201,6 +204,7 @@ export const DANGEROUS_WORDS = [
 // 2. The Master Default Config
 export const DEFAULT_CONFIG: Config = {
   version: '1.0',
+  policySource: 'local',
   settings: {
     mode: 'standard',
     autoStartDaemon: true,
@@ -527,7 +531,16 @@ export function getGlobalSettings(): {
   };
 }
 
-export function getCredentials() {
+export function getCredentials(): {
+  apiKey: string;
+  apiUrl: string;
+  /** `node9 login --local` — the key is for audit/telemetry only and the
+   *  machine PROMISED local policy control (PR-2 §0.1). A named profile is
+   *  localOnly too (§0.11): profiles never policy-sync, so treating them as
+   *  fully keyed would strand them on shipped defaults forever. Env keys
+   *  (CI) have no localOnly channel — always fully keyed. */
+  localOnly?: boolean;
+} | null {
   const DEFAULT_API_URL = 'https://api.node9.ai/api/v1/intercept';
   if (process.env.NODE9_API_KEY) {
     return {
@@ -546,12 +559,14 @@ export function getCredentials() {
         return {
           apiKey: profile.apiKey as string,
           apiUrl: (profile.apiUrl as string) || DEFAULT_API_URL,
+          localOnly: profile.localOnly === true || profileName !== 'default',
         };
       }
       if (creds.apiKey) {
         return {
           apiKey: creds.apiKey as string,
           apiUrl: (creds.apiUrl as string) || DEFAULT_API_URL,
+          localOnly: creds.localOnly === true,
         };
       }
     }
@@ -756,19 +771,51 @@ export function getConfig(cwd?: string): Config {
     return i === -1 ? 1 : i;
   };
 
-  const applyLayer = (source: Record<string, unknown> | null, isProject = false) => {
+  // ── THE PR-2 FORK (one keyed check, one place) ────────────────────────────
+  // Two working modes (the founder's model): local without server sync, or
+  // full sync through the SaaS. A keyed machine builds POLICY from
+  // DEFAULT_CONFIG + the cloud config only — the local layers below apply
+  // their OPERATIONAL settings and then stop. localOnly keys (`login
+  // --local`, named profiles) keep the local promise and stay unkeyed here.
+  const pr2Creds = getCredentials();
+  const keyed = !!pr2Creds?.apiKey && pr2Creds.localOnly !== true;
+
+  const applyLayer = (
+    source: Record<string, unknown> | null,
+    isProject = false,
+    isCloud = false
+  ) => {
     if (!source) return;
     const s = (source.settings || {}) as Partial<Config['settings']>;
     const p = (source.policy || {}) as Partial<Config['policy']>;
 
-    if (s.mode !== undefined) mergedSettings.mode = s.mode;
+    // ── OPERATIONAL settings — machine plumbing, applied on EVERY machine
+    //    (the dashboard cannot express these; they are not policy) ──
     if (s.autoStartDaemon !== undefined) mergedSettings.autoStartDaemon = s.autoStartDaemon;
     // enableUndo is deliberately NOT merged here — the undo feature was removed.
     // It is pinned false below, after every layer. See the "Undo removed" block.
     if (s.enableHookLogDebug !== undefined)
       mergedSettings.enableHookLogDebug = s.enableHookLogDebug;
-    if (s.approvers) mergedSettings.approvers = { ...mergedSettings.approvers, ...s.approvers };
     if (s.shipper) mergedSettings.shipper = { ...mergedSettings.shipper, ...s.shipper };
+    if (s.cloudSyncIntervalHours !== undefined)
+      mergedSettings.cloudSyncIntervalHours = s.cloudSyncIntervalHours;
+    if (s.mcpAutoWrap !== undefined) mergedSettings.mcpAutoWrap = s.mcpAutoWrap === true;
+    if (s.mcpReconcileIntervalMinutes !== undefined)
+      mergedSettings.mcpReconcileIntervalMinutes = s.mcpReconcileIntervalMinutes;
+    if (s.mcpStaleAfterDays !== undefined) mergedSettings.mcpStaleAfterDays = s.mcpStaleAfterDays;
+    if (s.hud !== undefined) mergedSettings.hud = { ...mergedSettings.hud, ...s.hud };
+
+    // ── THE FORK: on a keyed machine the local POLICY layers are inert.
+    //    Everything below this line is policy (mode, approvers, review knobs,
+    //    rules, egress, dlp, jail, environments…) and comes from
+    //    DEFAULT_CONFIG + the cloud only. mcpAllowWeakening is POLICY
+    //    (§0.9): it is the switch that re-enables agent-driven weakening.
+    //    The CLOUD layer (rules-cache smartRules) is the one caller that must
+    //    pass — it IS the workspace policy a keyed machine follows (K13c). ──
+    if (keyed && !isCloud) return;
+
+    if (s.mode !== undefined) mergedSettings.mode = s.mode;
+    if (s.approvers) mergedSettings.approvers = { ...mergedSettings.approvers, ...s.approvers };
     if (s.approvalTimeoutMs !== undefined) mergedSettings.approvalTimeoutMs = s.approvalTimeoutMs;
     // approvalTimeoutSeconds is the user-facing alias; convert to ms.
     // approvalTimeoutMs takes precedence if both are present.
@@ -777,13 +824,6 @@ export function getConfig(cwd?: string): Config {
     if (s.environment !== undefined) mergedSettings.environment = s.environment;
     if (s.reviewChannel !== undefined) mergedSettings.reviewChannel = s.reviewChannel;
     if (s.mcpAllowWeakening !== undefined) mergedSettings.mcpAllowWeakening = s.mcpAllowWeakening;
-    if (s.cloudSyncIntervalHours !== undefined)
-      mergedSettings.cloudSyncIntervalHours = s.cloudSyncIntervalHours;
-    if (s.mcpAutoWrap !== undefined) mergedSettings.mcpAutoWrap = s.mcpAutoWrap === true;
-    if (s.mcpReconcileIntervalMinutes !== undefined)
-      mergedSettings.mcpReconcileIntervalMinutes = s.mcpReconcileIntervalMinutes;
-    if (s.mcpStaleAfterDays !== undefined) mergedSettings.mcpStaleAfterDays = s.mcpStaleAfterDays;
-    if (s.hud !== undefined) mergedSettings.hud = { ...mergedSettings.hud, ...s.hud };
 
     if (p.sandboxPaths) mergedPolicy.sandboxPaths.push(...p.sandboxPaths);
     if (p.ignoredTools) mergedPolicy.ignoredTools.push(...p.ignoredTools);
@@ -944,6 +984,16 @@ export function getConfig(cwd?: string): Config {
   applyLayer(globalConfig);
   applyLayer(projectConfig, /* isProject */ true);
 
+  // §0.3 — login writes approvers.cloud=true into the LOCAL file, which a
+  // keyed machine no longer reads. Without this line, replace-mode would
+  // silently stop audit shipping (audit-shipper gates on approvers.cloud)
+  // and dashboard approvals on every keyed machine whose workspace never
+  // set approvers. Keyed default = cloud approvals ON; the managed
+  // approvers block below still replaces per-field if the org says so.
+  if (keyed) {
+    mergedSettings.approvers = { ...mergedSettings.approvers, cloud: true };
+  }
+
   // ── Cloud rules cache layer ───────────────────────────────────────────────
   // Rules synced from the cloud dashboard are applied after local config so
   // admin-defined policy takes precedence over per-user overrides.
@@ -998,7 +1048,7 @@ export function getConfig(cwd?: string): Config {
       // cache, logs instead of silently dropping cloud enforcement (fail-open).
       const raw = readRulesCacheResilient(cacheFile);
       if (Array.isArray(raw.rules) && raw.rules.length > 0) {
-        applyLayer({ policy: { smartRules: raw.rules } });
+        applyLayer({ policy: { smartRules: raw.rules } }, false, /* isCloud */ true);
       }
       if (Array.isArray(raw.shields)) {
         cloudManagedShields = raw.shields.filter((s): s is string => typeof s === 'string');
@@ -1046,12 +1096,21 @@ export function getConfig(cwd?: string): Config {
           ? mc.locked.filter((f): f is string => typeof f === 'string')
           : [];
         // M2a: settings.mode.
+        // §0.2 — keyed applies the cloud VERBATIM (validated): the floor
+        // helper treats the seeded DEFAULT 'standard' as a local opinion and
+        // silently discards a cloud observe/audit. Unkeyed keeps the floor.
         if (typeof mc.mode === 'string') {
-          mergedSettings.mode = resolveManagedMode(
-            mergedSettings.mode,
-            mc.mode,
-            locked.includes('mode')
-          );
+          if (keyed) {
+            if (['observe', 'audit', 'standard', 'strict'].includes(mc.mode)) {
+              mergedSettings.mode = mc.mode as Config['settings']['mode'];
+            }
+          } else {
+            mergedSettings.mode = resolveManagedMode(
+              mergedSettings.mode,
+              mc.mode,
+              locked.includes('mode')
+            );
+          }
         }
         // The cloud has spoken about mode iff it set one or locked it — NODE9_MODE
         // must not override either (B1 #1).
@@ -1063,45 +1122,84 @@ export function getConfig(cwd?: string): Config {
         if (mc.egress && typeof mc.egress === 'object') {
           const hosts = (v: unknown): string[] | undefined =>
             Array.isArray(v) ? v.filter((h): h is string => typeof h === 'string') : undefined;
-          mergedPolicy.egress = applyManagedEgress(
-            mergedPolicy.egress,
-            {
-              enabled: typeof mc.egress.enabled === 'boolean' ? mc.egress.enabled : undefined,
-              mode: typeof mc.egress.mode === 'string' ? mc.egress.mode : undefined,
-              allow: hosts(mc.egress.allow),
-              deny: hosts(mc.egress.deny),
-              allowPrivate:
-                typeof mc.egress.allowPrivate === 'boolean' ? mc.egress.allowPrivate : undefined,
-            },
-            locked,
-            egressModeUserSet
-          );
+          if (keyed) {
+            // §0.2 keyed verbatim: the workspace value IS the value — no
+            // force-on ratchet, no floors, no lock arithmetic. Validated
+            // field-by-field (the cache file can be hand-edited).
+            const e = mc.egress;
+            if (typeof e.enabled === 'boolean') mergedPolicy.egress.enabled = e.enabled;
+            if (e.mode === 'off' || e.mode === 'review' || e.mode === 'block')
+              mergedPolicy.egress.mode = e.mode;
+            const allow = hosts(e.allow);
+            if (allow) mergedPolicy.egress.allow = allow;
+            const deny = hosts(e.deny);
+            if (deny) mergedPolicy.egress.deny = deny;
+            if (typeof e.allowPrivate === 'boolean')
+              mergedPolicy.egress.allowPrivate = e.allowPrivate;
+          } else {
+            mergedPolicy.egress = applyManagedEgress(
+              mergedPolicy.egress,
+              {
+                enabled: typeof mc.egress.enabled === 'boolean' ? mc.egress.enabled : undefined,
+                mode: typeof mc.egress.mode === 'string' ? mc.egress.mode : undefined,
+                allow: hosts(mc.egress.allow),
+                deny: hosts(mc.egress.deny),
+                allowPrivate:
+                  typeof mc.egress.allowPrivate === 'boolean' ? mc.egress.allowPrivate : undefined,
+              },
+              locked,
+              egressModeUserSet
+            );
+          }
         }
         // M2c: policy.dlp. enabled force-on; pii floor over off<block;
         // reviewAction floor over review<block (inline-ask v2).
         if (mc.dlp && typeof mc.dlp === 'object') {
-          mergedPolicy.dlp = applyManagedDlp(
-            mergedPolicy.dlp,
-            {
-              enabled: typeof mc.dlp.enabled === 'boolean' ? mc.dlp.enabled : undefined,
-              pii: typeof mc.dlp.pii === 'string' ? mc.dlp.pii : undefined,
-              reviewAction:
-                mc.dlp.reviewAction === 'review' || mc.dlp.reviewAction === 'block'
-                  ? mc.dlp.reviewAction
-                  : undefined,
-            },
-            locked
-          );
+          if (keyed) {
+            // §0.2 keyed verbatim: the force-on ratchet made a cloud
+            // dlp.enabled:false impossible — the exact value PR-1's UI gained
+            // an `off` option to set (X-12).
+            if (typeof mc.dlp.enabled === 'boolean') mergedPolicy.dlp.enabled = mc.dlp.enabled;
+            if (mc.dlp.pii === 'off' || mc.dlp.pii === 'block') mergedPolicy.dlp.pii = mc.dlp.pii;
+            if (mc.dlp.reviewAction === 'review' || mc.dlp.reviewAction === 'block')
+              mergedPolicy.dlp.reviewAction = mc.dlp.reviewAction;
+          } else {
+            mergedPolicy.dlp = applyManagedDlp(
+              mergedPolicy.dlp,
+              {
+                enabled: typeof mc.dlp.enabled === 'boolean' ? mc.dlp.enabled : undefined,
+                pii: typeof mc.dlp.pii === 'string' ? mc.dlp.pii : undefined,
+                reviewAction:
+                  mc.dlp.reviewAction === 'review' || mc.dlp.reviewAction === 'block'
+                    ? mc.dlp.reviewAction
+                    : undefined,
+              },
+              locked
+            );
+          }
         }
         // Command-checks governance: per-key floor over off<review<block +
         // per-key locks (applyManagedCommandChecks validates and enforces the
         // Class-B no-'off' rule even against a hostile cloud value).
         if (mc.commandChecks && typeof mc.commandChecks === 'object') {
-          mergedPolicy.commandChecks = applyManagedCommandChecks(
-            mergedPolicy.commandChecks ?? {},
-            mc.commandChecks as Record<string, string>,
-            locked
-          );
+          if (keyed) {
+            // §0.2 keyed verbatim, per key. Class-B keys stay tighten-only
+            // even against a hand-edited cache file.
+            const CLASS_B = new Set(['evalDynamic', 'pipeChainHigh']);
+            const next: Record<string, string> = { ...(mergedPolicy.commandChecks ?? {}) };
+            for (const [key, val] of Object.entries(mc.commandChecks)) {
+              if (val !== 'off' && val !== 'review' && val !== 'block') continue;
+              if (val === 'off' && CLASS_B.has(key)) continue;
+              next[key] = val;
+            }
+            mergedPolicy.commandChecks = next;
+          } else {
+            mergedPolicy.commandChecks = applyManagedCommandChecks(
+              mergedPolicy.commandChecks ?? {},
+              mc.commandChecks as Record<string, string>,
+              locked
+            );
+          }
           // Remember which advisory knobs the ORG set/locked so the injection
           // loop can pin them (see managedCommandCheckKeys declaration).
           for (const [key, val] of Object.entries(mc.commandChecks)) {
@@ -1291,7 +1389,19 @@ export function getConfig(cwd?: string): Config {
   const shieldOverrides = readShieldOverrides();
   // Local shields ∪ cloud-managed shields (M1). Deduped so a shield enabled both
   // locally and from the dashboard is applied once.
-  const activeShieldNames = [...new Set([...readActiveShields(), ...cloudManagedShields])];
+  // PR-2 §B: on a keyed machine the trust list is exactly the cloud's —
+  // even when the cloud is silent (empty list). Without this, the gateway's
+  // fresh isTrustedHost read of the LOCAL trusted-hosts.json (5s TTL) leaks
+  // a `node9 trust add` past the skipped local layer into enforcement.
+  if (keyed) mergedPolicy.trustedHostsManaged = true;
+
+  // One listening point (PR-2): a keyed machine runs the CLOUD-mandated
+  // shields only — shields.json is the unkeyed machine's enable store. The
+  // Devices "Add this device's setup to the workspace" import is the paved
+  // path for bringing a machine's local shields up before flipping.
+  const activeShieldNames = keyed
+    ? [...new Set(cloudManagedShields)]
+    : [...new Set([...readActiveShields(), ...cloudManagedShields])];
   // Filled by the apply loop below; becomes policy.appliedShields (N6).
   const appliedShields: string[] = [];
   // B1: a cloud-mandated shield is enforced EXACTLY as the cloud defines it —
@@ -1456,6 +1566,9 @@ export function getConfig(cwd?: string): Config {
   if (
     envMode &&
     !modeCloudControlled &&
+    // PR-2: one listening point includes the env var — a keyed machine's
+    // mode comes from the workspace (or the shipped default), never the shell.
+    !keyed &&
     (['observe', 'audit', 'standard', 'strict'] as const).includes(envMode as never)
   ) {
     mergedSettings.mode = envMode;
@@ -1541,6 +1654,10 @@ export function getConfig(cwd?: string): Config {
     settings: mergedSettings,
     policy: mergedPolicy,
     environments: mergedEnvironments,
+    // PR-2 — the one truth introspection reads: which of the two working
+    // modes this machine is in. 'workspace' = keyed, policy from the cloud;
+    // 'local' = the local stack (incl. --local / named-profile keys).
+    policySource: keyed ? 'workspace' : 'local',
   };
 
   // Only populate the cache when using the ambient cwd — explicit cwd calls are

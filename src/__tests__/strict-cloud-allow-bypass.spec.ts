@@ -39,23 +39,13 @@ vi.mock('../auth/cloud', async (importOriginal) => ({
   resolveNode9SaaS: vi.fn(async () => undefined),
 }));
 
-/** Base local config: standard mode, cloud is the ONLY approver surface.
- *  Native/browser/terminal stay off so a guarded fall-through resolves
- *  deterministically as no-approval-mechanism instead of opening UI. */
-function writeLocalConfig(tmpHome: string): void {
-  fs.writeFileSync(
-    path.join(tmpHome, '.node9', 'config.json'),
-    JSON.stringify({
-      settings: {
-        mode: 'standard',
-        approvalTimeoutMs: 0,
-        approvers: { native: false, browser: false, cloud: true, terminal: false },
-      },
-      policy: {},
-    })
-  );
-}
-
+/** PR-2 replace-mode (§F disposition): this fixture writes credentials.json,
+ *  so it is KEYED — local config.json policy is inert. The approval-surface
+ *  knobs therefore ride in the CLOUD cache's managedConfig (exactly what a
+ *  real keyed machine gets from sync): cloud is the ONLY approver surface,
+ *  native/browser/terminal off so a guarded fall-through resolves
+ *  deterministically as no-approval-mechanism instead of opening UI, and a
+ *  short positive timeout (a managed 0 is rejected by design — index.ts). */
 function writeRulesCache(
   tmpHome: string,
   opts: { managedMode?: string; rules?: unknown[] } = {}
@@ -65,7 +55,12 @@ function writeRulesCache(
     JSON.stringify({
       fetchedAt: '2026-07-01T00:00:00Z',
       rules: opts.rules ?? [],
-      ...(opts.managedMode ? { managedConfig: { mode: opts.managedMode, locked: [] } } : {}),
+      managedConfig: {
+        approvalTimeoutMs: 50,
+        approvers: { native: false, browser: false, cloud: true, terminal: false },
+        ...(opts.managedMode ? { mode: opts.managedMode } : {}),
+        locked: [],
+      },
     })
   );
 }
@@ -84,7 +79,9 @@ describe('cloud immediate-allow vs managed strict (B1 #6)', () => {
     delete process.env.NODE9_API_KEY;
     delete process.env.NODE9_MODE;
     fs.mkdirSync(path.join(tmpHome, '.node9'), { recursive: true });
-    writeLocalConfig(tmpHome);
+    // Every test writes its own rules-cache; seed the default shape so a test
+    // that forgets still has the approver surface configured.
+    writeRulesCache(tmpHome);
     // cloudEnforced requires a real credential on disk (approvers.cloud && apiKey).
     fs.writeFileSync(
       path.join(tmpHome, '.node9', 'credentials.json'),
@@ -118,15 +115,14 @@ describe('cloud immediate-allow vs managed strict (B1 #6)', () => {
 
     // The bug resolved this as { approved: true, checkedBy: 'cloud' }. A tier-7
     // strict review must fall through to the race; with every local surface off
-    // and no cloud PENDING entry, that is a deterministic deny.
+    // and no cloud PENDING entry, that is a deterministic deny. PR-2 note: a
+    // KEYED machine always runs the timeout racer (DEFAULT/managed
+    // approvalTimeoutMs is always > 0 — a managed 0 is rejected by design), so
+    // the deny arrives as an auto-deny timeout, not no-approval-mechanism (the
+    // old local `approvalTimeoutMs:0` no-racer shape is not cloud-expressible).
     expect(result.approved).toBe(false);
     expect(result.checkedBy).not.toBe('cloud');
-    expect(result.blockedBy).toBe('no-approval-mechanism');
-    // Label convention: once cloud is enforced, the orchestrator stamps
-    // 'Organization Policy (SaaS)' over the local label (orchestrator.ts —
-    // same for smart-rule reviews today). The managed strict floor IS org
-    // policy, so either attribution is honest; assert only that a label exists.
-    expect(result.blockedByLabel).toMatch(/strict|organization policy/i);
+    expect(result.blockedBy).toBe('timeout');
   });
 
   it('managed strict: the SaaS is told forceReview so it creates a genuine PENDING', async () => {
@@ -171,8 +167,8 @@ describe('cloud immediate-allow vs managed strict (B1 #6)', () => {
   });
 
   it('standard mode: a prior "Always Allow" still works for reviewed tools (pinned)', async () => {
-    // No managed mode; make the tool reach the persistent consult by turning
-    // cloud off (otherwise a standard-mode unmatched tool is allowed earlier).
+    // No managed mode (keyed default = standard). The persistent consult
+    // resolves the dangerous-word review before any cloud round-trip.
     writeRulesCache(tmpHome, {});
     fs.writeFileSync(
       path.join(tmpHome, '.node9', 'decisions.json'),
@@ -188,18 +184,15 @@ describe('cloud immediate-allow vs managed strict (B1 #6)', () => {
   });
 
   it('smart-rule review: still falls to the race, never resolved by cloud allow (pinned)', async () => {
-    writeRulesCache(tmpHome, {
-      rules: [
-        {
-          name: 'review-unknown',
-          tool: 'TotallyUnknownTool',
-          verdict: 'review',
-          conditions: [],
-        },
-      ],
-    });
+    // PR-2 note: this row used a CACHE-delivered review rule; cloud cache
+    // `rules` are currently dropped on keyed machines (prod bug pinned as
+    // K13c in keyed-replace.spec.ts), so the probe uses a SHIPPED DEFAULT
+    // review rule instead — `review-sudo` survives keyed by construction.
+    // The property under test is unchanged: a smart-rule review (ruleName
+    // present) must never be resolved by the SaaS immediate-allow.
+    writeRulesCache(tmpHome, {});
 
-    const result = await authorizeHeadless('TotallyUnknownTool', { note: 'probe' });
+    const result = await authorizeHeadless('Bash', { command: 'sudo whoami' });
 
     expect(result.approved).toBe(false);
     expect(result.checkedBy).not.toBe('cloud');

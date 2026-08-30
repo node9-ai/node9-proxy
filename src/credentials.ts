@@ -32,7 +32,16 @@ export function writeCredentialsAndConfig(
   } catch {
     // Corrupt creds file — overwrite rather than fail the login/connect.
   }
-  existingCreds[profileName] = { apiKey, apiUrl: DEFAULT_API_URL };
+  // PR-2 §0.1 — the `--local` promise ("all decisions stay on this machine")
+  // is finally PERSISTED where keyedness is decided: getCredentials reads
+  // localOnly and such a machine keeps the LOCAL policy stack (audit/telemetry
+  // still ship on the key). Without this flag the promise evaporated the
+  // moment replace-mode keyed on the bare apiKey.
+  existingCreds[profileName] = {
+    apiKey,
+    apiUrl: DEFAULT_API_URL,
+    ...(opts.isLocal ? { localOnly: true } : {}),
+  };
   fs.writeFileSync(credPath, JSON.stringify(existingCreds, null, 2), {
     mode: 0o600,
   });

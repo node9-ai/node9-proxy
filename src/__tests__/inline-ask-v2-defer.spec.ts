@@ -50,7 +50,16 @@ describe('inline-ask v2: the defer guard has ONE exclusion (downgraded hard bloc
     reason: 'git push sends changes to a shared remote',
   };
 
-  function writeHome(opts: { cloud?: boolean; appPermissions?: Record<string, unknown> }): void {
+  // PR-2 replace-mode (§F disposition): when a test sets NODE9_API_KEY the
+  // process is KEYED and the local config.json policy below is inert — a keyed
+  // test passes `keyed: true` so the review rule and the approval knobs ride
+  // in the CLOUD cache instead (rules + managedConfig), exactly what a real
+  // keyed machine gets from sync. Unkeyed tests keep the local delivery.
+  function writeHome(opts: {
+    cloud?: boolean;
+    appPermissions?: Record<string, unknown>;
+    keyed?: boolean;
+  }): void {
     fs.writeFileSync(
       path.join(tmpHome, '.node9', 'config.json'),
       JSON.stringify({
@@ -72,9 +81,22 @@ describe('inline-ask v2: the defer guard has ONE exclusion (downgraded hard bloc
       path.join(tmpHome, '.node9', 'rules-cache.json'),
       JSON.stringify({
         fetchedAt: '2026-07-01T00:00:00Z',
-        rules: [],
+        rules: opts.keyed ? [reviewGitPushRule] : [],
         managedConfig: {
           ...(opts.appPermissions ? { appPermissions: opts.appPermissions } : {}),
+          ...(opts.keyed
+            ? {
+                // A managed 0 is rejected by design (index.ts) — 50ms keeps a
+                // race, if ever reached, deterministic instead of hanging.
+                approvalTimeoutMs: 50,
+                approvers: {
+                  native: false,
+                  browser: false,
+                  cloud: opts.cloud === true,
+                  terminal: false,
+                },
+              }
+            : {}),
           locked: [],
         },
       })
@@ -109,9 +131,14 @@ describe('inline-ask v2: the defer guard has ONE exclusion (downgraded hard bloc
   });
 
   it('CLOUD-ENFORCED + ordinary review → defers inline; no SaaS pending entry is created', async () => {
-    writeHome({ cloud: true });
-    process.env.NODE9_API_KEY = 'nk_test_v2';
-    const r = await authorizeHeadless('Bash', { command: 'git push origin dev' }, undefined, {
+    writeHome({ cloud: true, keyed: true });
+    process.env.NODE9_API_KEY = 'nk_test_v2'; // env key => KEYED process
+    // PR-2: keyed drops the local review-git-push rule, and cloud cache
+    // `rules` are currently dropped keyed too (prod bug pinned as K13c in
+    // keyed-replace.spec.ts) — so the probe rides the SHIPPED DEFAULT
+    // `review-sudo` rule, which survives keyed by construction. The property
+    // under test is unchanged: cloud-enforced + ordinary review defers inline.
+    const r = await authorizeHeadless('Bash', { command: 'sudo make install' }, undefined, {
       deferReview: true,
     });
     expect(r.review).toBe(true);

@@ -994,7 +994,13 @@ async function _authorizeHeadlessCore(
       toolLower === 'read_file' ||
       toolLower === 'grep_search' ||
       toolLower === 'list_files';
-    const activeShields = isFileTool ? readActiveShields() : [];
+    // PR-2 §0.4 — arm from the CONFIG'S OWN TESTIMONY of what is running
+    // (policy.appliedShields, the N6 resolver output), never the local
+    // shields.json: a keyed machine ignores that file, and arming from it
+    // left cloud-mandated jail shields unarmed — Read/Grep/Glob of jailed
+    // paths took the ignoredTools fast path (the task-#20 bypass reborn).
+    // Fallback to the file only when the config predates appliedShields.
+    const activeShields = isFileTool ? (config.policy.appliedShields ?? readActiveShields()) : [];
     // Task #22: an ORG-managed jail (managedConfig.jailPaths) enables no shield
     // — it only injects org:-prefixed rules — so arming on shields alone let
     // the managed route keep task #20's bypass. Arm on the managed paths too.
