@@ -151,10 +151,23 @@ npm install -g node9-ai
 
 ```bash
 node9 init       # auto-wires all detected agents + MCP servers
-node9 doctor     # verify everything is wired correctly
+node9 login      # connect this machine to your workspace (approve it in the browser)
+node9 doctor     # verify everything is wired and reporting
 ```
 
 Requires Node.js 18+.
+
+`init` on its own gives you full local enforcement: rules, shields, DLP and
+approvals all work offline, on this machine.
+
+`login` is what puts the machine on your dashboard. It prints a code, opens
+the browser, and you approve the machine there; if you don't have an account
+yet, signing up mid-flow returns you to the same approval with the code
+intact. Until you run it, everything is enforced locally but nothing reaches
+Mission Control, so the dashboard stays empty.
+
+`node9 logout` disconnects a machine again. It revokes that machine's key;
+local enforcement keeps running.
 
 ## Shields — curated rule packs
 
