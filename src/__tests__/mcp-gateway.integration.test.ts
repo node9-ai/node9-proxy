@@ -21,6 +21,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { keySafeEnv } from './helpers/env';
 
 const CLI = path.resolve(__dirname, '../../dist/cli.js');
 const NODE = process.execPath;
@@ -554,7 +555,7 @@ rl.on('line', (line) => {
           input: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }) + '\n',
           encoding: 'utf-8',
           timeout: 8000,
-          env: { ...process.env, HOME: home, USERPROFILE: home, NODE9_TESTING: '1' },
+          env: keySafeEnv({ HOME: home, USERPROFILE: home, NODE9_TESTING: '1' }),
         }
       );
       expect(result.error).toBeUndefined();
@@ -650,8 +651,7 @@ rl.on('line', (line) => {
           input: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }) + '\n',
           encoding: 'utf-8',
           timeout: 8000,
-          env: {
-            ...process.env,
+          env: keySafeEnv({
             HOME: home,
             USERPROFILE: home,
             NODE9_TESTING: '1',
@@ -662,7 +662,7 @@ rl.on('line', (line) => {
             PERL5OPT: '-M/evil',
             RUBYLIB: '/evil/ruby',
             RUBYOPT: '-r/evil',
-          },
+          }),
         }
       );
       expect(result.error).toBeUndefined();

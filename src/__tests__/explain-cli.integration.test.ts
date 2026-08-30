@@ -7,6 +7,7 @@ import { spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { keySafeEnv } from './helpers/env';
 
 const CLI = path.resolve(__dirname, '../../dist/cli.js');
 
@@ -15,7 +16,7 @@ function explain(command: string): string {
     encoding: 'utf-8',
     timeout: 60000,
     cwd: os.tmpdir(), // no project node9.config.json — built-in gates only
-    env: { ...process.env, NODE9_NO_AUTO_DAEMON: '1', NODE9_TESTING: '1', NO_COLOR: '1' },
+    env: keySafeEnv({ NODE9_NO_AUTO_DAEMON: '1', NODE9_TESTING: '1', NO_COLOR: '1' }),
   });
   return `${r.stdout ?? ''}${r.stderr ?? ''}`;
 }

@@ -184,6 +184,28 @@ describe('managed appPermissions apply + enforce (P3 Phase 2)', () => {
     _resetCore();
   };
 
+  // PR-2 replace-mode (§F disposition): the cloud-approver tests set
+  // NODE9_API_KEY, which makes the process KEYED — local config.json policy
+  // (approvers, approvalTimeoutMs) is inert. Those knobs must ride in the
+  // CLOUD cache's managedConfig instead (what a real keyed machine gets from
+  // sync). The appPermissions block from beforeEach is preserved; the timeout
+  // is a short POSITIVE value (a managed 0 is rejected by design, index.ts).
+  const writeManagedSettings = (managed: Record<string, unknown> = {}) => {
+    const cachePath = path.join(tmpHome, '.node9', 'rules-cache.json');
+    const cache = JSON.parse(fs.readFileSync(cachePath, 'utf-8')) as {
+      managedConfig: Record<string, unknown>;
+    };
+    cache.managedConfig = {
+      ...cache.managedConfig,
+      approvalTimeoutMs: 50,
+      approvers: { native: false, browser: false, cloud: true, terminal: false },
+      ...managed,
+    };
+    fs.writeFileSync(cachePath, JSON.stringify(cache));
+    _resetConfigCache();
+    _resetCore();
+  };
+
   it('review on an IGNORED-pattern tool (read_*) still races — not auto-allowed', async () => {
     // read_email matches the read_* ignoredTools fast path, which would
     // auto-allow before the race — the same failure class as the dead gate.
@@ -201,8 +223,8 @@ describe('managed appPermissions apply + enforce (P3 Phase 2)', () => {
   });
 
   it('human APPROVAL via the cloud approver allows the call through', async () => {
-    writeSettings({ approvers: { native: false, browser: false, cloud: true, terminal: false } });
-    process.env.NODE9_API_KEY = 'test-key';
+    writeManagedSettings();
+    process.env.NODE9_API_KEY = 'test-key'; // env key => KEYED process
     mockInitSaaS.mockResolvedValue({ pending: true, requestId: 'req-1' });
     mockPollSaaS.mockResolvedValue({ approved: true });
     const r = await call('edit_file');
@@ -213,8 +235,8 @@ describe('managed appPermissions apply + enforce (P3 Phase 2)', () => {
   });
 
   it('human DENIAL via the cloud approver blocks the call', async () => {
-    writeSettings({ approvers: { native: false, browser: false, cloud: true, terminal: false } });
-    process.env.NODE9_API_KEY = 'test-key';
+    writeManagedSettings();
+    process.env.NODE9_API_KEY = 'test-key'; // env key => KEYED process
     mockInitSaaS.mockResolvedValue({ pending: true, requestId: 'req-2' });
     mockPollSaaS.mockResolvedValue({ approved: false, reason: 'denied by admin' });
     const r = await call('edit_file');
@@ -223,13 +245,16 @@ describe('managed appPermissions apply + enforce (P3 Phase 2)', () => {
   });
 
   it('a stale BE answering immediate-allow cannot bypass the review', async () => {
-    writeSettings({ approvers: { native: false, browser: false, cloud: true, terminal: false } });
-    process.env.NODE9_API_KEY = 'test-key';
+    writeManagedSettings();
+    process.env.NODE9_API_KEY = 'test-key'; // env key => KEYED process
     // An older BE that ignores forceReview: pending:false + approved:true.
     mockInitSaaS.mockResolvedValue({ pending: false, approved: true });
     const r = await call('edit_file');
-    expect(r.approved).toBe(false); // falls to the race; no channel → denied
-    expect(r.noApprovalMechanism).toBe(true);
+    expect(r.approved).toBe(false); // falls to the race → denied
+    // PR-2: a keyed machine always runs the timeout racer (approvalTimeoutMs
+    // is always > 0 keyed — managed 0 rejected, default 120s), so the deny is
+    // an auto-deny timeout, not the old no-approval-mechanism instant return.
+    expect(r.blockedBy).toBe('timeout');
   });
 
   it('panic mode upgrades review to a hard block (no race)', async () => {
@@ -322,12 +347,13 @@ describe('managed appPermissions apply + enforce (P3 Phase 2)', () => {
   });
 
   it('fix #2: a SaaS shadowMode response does NOT bypass a review (review > shadow)', async () => {
-    writeSettings({ approvers: { native: false, browser: false, cloud: true, terminal: false } });
-    process.env.NODE9_API_KEY = 'test-key';
+    writeManagedSettings();
+    process.env.NODE9_API_KEY = 'test-key'; // env key => KEYED process
     mockInitSaaS.mockResolvedValue({ pending: false, shadowMode: true });
     const r = await call('edit_file');
-    expect(r.approved).toBe(false); // falls to the race; no channel → denied
-    expect(r.noApprovalMechanism).toBe(true);
+    expect(r.approved).toBe(false); // falls to the race → denied
+    // PR-2: keyed ⇒ the timeout racer always exists (see 'stale BE' above).
+    expect(r.blockedBy).toBe('timeout');
   });
 
   it('fix #4: an approver-less review deny still WRITES an audit row (not invisible)', async () => {
@@ -348,8 +374,8 @@ describe('managed appPermissions apply + enforce (P3 Phase 2)', () => {
   });
 
   it('fix #6: a race-resolved deny row carries app-permission attribution', async () => {
-    writeSettings({ approvers: { native: false, browser: false, cloud: true, terminal: false } });
-    process.env.NODE9_API_KEY = 'test-key';
+    writeManagedSettings();
+    process.env.NODE9_API_KEY = 'test-key'; // env key => KEYED process
     mockInitSaaS.mockResolvedValue({ pending: true, requestId: 'req-9' });
     mockPollSaaS.mockResolvedValue({ approved: false, reason: 'denied by admin' });
     const spy = vi.spyOn(fs, 'appendFileSync');

@@ -138,21 +138,46 @@ export function registerStatusCommand(program: Command): void {
 
       // ── Configuration State ──────────────────────────────────────────────────
       console.log('');
+      // F5: `observe` is the mode where node9 enforces NOTHING (every
+      // block becomes a would-block), and a keyed machine applies a cloud
+      // observe verbatim — so an `else → standard` here reports the exact
+      // opposite of the truth on the one surface people check.
       const modeLabel =
         settings.mode === 'audit'
           ? chalk.blue('audit')
           : settings.mode === 'strict'
             ? chalk.red('strict')
-            : chalk.white('standard');
+            : settings.mode === 'observe'
+              ? chalk.magenta('observe (nothing is enforced)')
+              : chalk.white('standard');
       console.log(`  Mode:    ${modeLabel}`);
 
+      // I1: on a keyed machine the local config files are present but INERT
+      // for policy — saying "Active" here would be a lie the user acts on.
+      const wsGoverned = mergedConfig.policySource === 'workspace';
+      if (wsGoverned) {
+        console.log(`  Policy:  ${chalk.cyan('Workspace config (app.node9.ai)')}`);
+      }
+      const ignoredLabel = chalk.gray('Present — ignored (workspace config governs)');
       const projectConfig = path.join(process.cwd(), 'node9.config.json');
       const globalConfig = path.join(os.homedir(), '.node9', 'config.json');
       console.log(
-        `  Local:   ${fs.existsSync(projectConfig) ? chalk.green('Active (node9.config.json)') : chalk.gray('Not present')}`
+        `  Local:   ${
+          fs.existsSync(projectConfig)
+            ? wsGoverned
+              ? ignoredLabel
+              : chalk.green('Active (node9.config.json)')
+            : chalk.gray('Not present')
+        }`
       );
       console.log(
-        `  Global:  ${fs.existsSync(globalConfig) ? chalk.green('Active (~/.node9/config.json)') : chalk.gray('Not present')}`
+        `  Global:  ${
+          fs.existsSync(globalConfig)
+            ? wsGoverned
+              ? ignoredLabel
+              : chalk.green('Active (~/.node9/config.json)')
+            : chalk.gray('Not present')
+        }`
       );
 
       if (mergedConfig.policy.sandboxPaths.length > 0) {

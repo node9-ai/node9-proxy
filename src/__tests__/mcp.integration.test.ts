@@ -17,6 +17,7 @@ import { spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { keySafeEnv } from './helpers/env';
 
 // echo is a shell builtin on Windows — the proxy tests that spawn /usr/bin/echo
 // via `node9 echo` only work on Linux/macOS where echo is an executable on PATH.
@@ -69,7 +70,7 @@ const BASE_ENV = {
  *  Windows uses USERPROFILE; Unix uses HOME. Setting both ensures os.homedir() resolves
  *  to the isolated directory on every platform. */
 function makeEnv(home: string): NodeJS.ProcessEnv {
-  return { ...process.env, ...BASE_ENV, HOME: home, USERPROFILE: home };
+  return keySafeEnv({ ...BASE_ENV, HOME: home, USERPROFILE: home });
 }
 
 beforeAll(() => {

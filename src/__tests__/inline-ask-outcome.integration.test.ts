@@ -14,6 +14,7 @@ import { spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { keySafeEnv } from './helpers/env';
 
 const CLI = path.resolve(__dirname, '../../dist/cli.js');
 
@@ -24,7 +25,7 @@ function run(
   args: string[],
   payload: object
 ): { status: number | null; stdout: string } {
-  const baseEnv = { ...process.env };
+  const baseEnv = keySafeEnv();
   delete baseEnv.NODE9_API_KEY;
   delete baseEnv.NODE9_API_URL;
   const r = spawnSync(process.execPath, [CLI, cmd, ...args, JSON.stringify(payload)], {

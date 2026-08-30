@@ -28,6 +28,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **A machine connected to a workspace now follows the workspace configuration for policy — one configuration, one place to change it.** Previously a connected machine merged its local files with the workspace's and kept whichever was stricter. Now, if the machine is logged in with a workspace key, its policy is the workspace configuration plus node9's shipped defaults; the local files stop deciding policy. `node9 status`, `doctor`, `explain`, `shield list/status`, `egress`, `jail list` and the node9 MCP tools all name the source and mark local files "present — ignored", and local policy commands (`shield enable/disable/set`, `egress watch/lock/allow/deny/off`, `jail add/remove`, `trust add/remove`) refuse with a non-zero exit and point at the dashboard instead of writing a file nobody reads.
+
+  **Read this before upgrading a connected machine.** Anything your local files add that the workspace does not say is dropped, and some of it is invisible because there is no dashboard field for it yet. What goes away on a connected machine:
+  - **shields you enabled locally** (`~/.node9/shields.json`) — only workspace-mandated shields run, _including the credential jails_ (`project-jail`, `user-jail`)
+  - **jail paths** added with `node9 jail add`, and **trusted hosts** added with `node9 trust add`
+  - **local egress settings** — if the workspace has no egress policy, egress control is off
+  - **rules and word lists in your local config**: `smartRules`, `dangerousWords`, `ignoredTools`, `sandboxPaths`, `toolInspection`, `environments` — none of these are expressible in the workspace configuration today, so they are dropped with no dashboard equivalent
+  - `NODE9_MODE` no longer overrides the mode on a connected machine
+
+  **Do this first:** open the dashboard → Devices → **"Add this device's setup to the workspace"** on the machine whose setup should govern the fleet, and confirm the workspace carries your shields and egress settings. Then upgrade. Verify with `node9 status` (it names the policy source) and `node9 shield status` (it lists what is actually enforced).
+
+  **Want a machine to keep deciding for itself?** Connect it with `node9 login --local`. It ships audit and telemetry to the dashboard as before, and its policy stays local. Named profiles (`NODE9_PROFILE`) behave the same way. `node9 logout` also returns full local control.
+
 - **Review prompts are inline by default for Claude Code + GitHub Copilot** (see above). Existing users get this on upgrade with no re-setup; add `--no-ask` or set `"reviewChannel":"approver"` to keep node9's own approver. No change for any other agent or for cloud-approver setups.
 
 - **GitHub Copilot CLI integration** (`node9 agents add copilot`). Adds the GitHub Copilot CLI (`copilot`, npm `@github/copilot`) — the terminal agent, distinct from the VS Code Copilot extension which stays under the `vscode` MCP target — to the protected agents at the hooks tier. node9 writes a dedicated `~/.copilot/hooks/node9.json` with PreToolUse/PostToolUse/UserPromptSubmit hooks (`node9 check/log --agent copilot`, `timeoutSec: 600`) and adds/wraps the node9 MCP server in `~/.copilot/mcp-config.json`. All verified live against Copilot CLI 1.0.60:

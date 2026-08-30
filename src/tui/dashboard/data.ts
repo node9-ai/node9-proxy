@@ -16,6 +16,7 @@ import { runBlast } from '../../cli/commands/blast.js';
 import { DAEMON_HOST, DAEMON_PORT, getInternalToken } from '../../auth/daemon.js';
 import { parseJSONLFile, type DailyEntry } from '../../costSync.js';
 import { SHIELDS, readActiveShields } from '../../shields.js';
+import { getConfig } from '../../config/index.js';
 import { NON_DECISION_SOURCES } from '../../audit/decision.js';
 import { extractFindingsFromLine } from '../../daemon/scan-watermark.js';
 import {
@@ -716,7 +717,12 @@ async function walkClaudeJsonlsForSignals(): Promise<Omit<ScanSignalsSnapshot, '
 export function loadShieldStatus(): ShieldStatus {
   try {
     const all = Object.keys(SHIELDS).sort();
-    const activeSet = new Set(readActiveShields());
+    // I8: a workspace-governed machine enforces the cloud-mandated set —
+    // the local enable store would misreport both lists here.
+    const cfg = getConfig();
+    const activeSet = new Set(
+      cfg.policySource === 'workspace' ? (cfg.policy.appliedShields ?? []) : readActiveShields()
+    );
     const active = all.filter((n) => activeSet.has(n));
     const inactive = all.filter((n) => !activeSet.has(n));
     return { active, inactive };

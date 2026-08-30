@@ -9,6 +9,7 @@ import { randomUUID } from 'crypto';
 import { spawnSync } from 'child_process';
 import chalk from 'chalk';
 import { authorizeHeadless, getGlobalSettings, getConfig, _resetConfigCache } from '../core';
+import { isKeyedForPolicy } from '../config/keyed-guard';
 // SHIELDS / readActiveShields no longer used in server.ts after the
 // /shields route was removed (v3 browser-removal). CLI shield commands
 // import these directly.
@@ -684,9 +685,12 @@ export function startDaemon(): void {
 
     if (req.method === 'GET' && pathname === '/status') {
       try {
-        const s = getGlobalSettings();
         const counters = sessionCounters.get();
-        const mode = (s.mode ?? 'standard') as HudStatus['mode'];
+        // PR-2 §0.6: the HUD's mode is the EFFECTIVE mode from the full
+        // merge — getGlobalSettings reads the raw local file (default
+        // 'audit'), which on a keyed machine is exactly the value the
+        // machine ignores.
+        const mode = getConfig().settings.mode as HudStatus['mode'];
         const status: HudStatus = {
           mode,
           session: {
@@ -789,7 +793,14 @@ export function startDaemon(): void {
         // success. Dropping the key makes the write a no-op instead.
         if (data.enableHookLogDebug !== undefined)
           writeGlobalSetting('enableHookLogDebug', data.enableHookLogDebug);
-        if (data.approvers !== undefined) writeGlobalSetting('approvers', data.approvers);
+        // F7 (adversarial review): `approvers` is POLICY. On a
+        // workspace-governed machine getConfig rebuilds it from the workspace
+        // (plus the forced cloud:true) and never reads the local value, so
+        // writing it here is the same "lie on disk, acknowledged as success"
+        // the enableUndo comment above describes. Drop it rather than
+        // pretending — the MCP twin (node9_approver_set) is already guarded.
+        if (data.approvers !== undefined && !isKeyedForPolicy())
+          writeGlobalSetting('approvers', data.approvers);
         res.writeHead(200);
         return res.end(JSON.stringify({ ok: true }));
       } catch {

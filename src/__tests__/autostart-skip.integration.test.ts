@@ -20,6 +20,7 @@ import { spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { keySafeEnv } from './helpers/env';
 
 const CLI = path.resolve(__dirname, '../../dist/cli.js');
 const PAYLOAD = JSON.stringify({
@@ -43,7 +44,7 @@ afterEach(() => {
 
 /** Run `node9 check` against the isolated HOME. NODE9_TESTING is intentionally absent. */
 function runCheck(env: Record<string, string> = {}) {
-  const baseEnv = { ...process.env };
+  const baseEnv = keySafeEnv();
   delete baseEnv.NODE9_API_KEY;
   delete baseEnv.NODE9_API_URL;
   delete baseEnv.NODE9_TESTING; // would short-circuit the branch under test

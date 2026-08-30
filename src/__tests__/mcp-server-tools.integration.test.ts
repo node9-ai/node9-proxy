@@ -9,6 +9,7 @@ import { spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { keySafeEnv } from './helpers/env';
 
 const CLI = path.resolve(__dirname, '../../dist/cli.js');
 
@@ -43,14 +44,13 @@ function driveMcp(
     // Default cwd is the test runner's (repo root, which has a node9.config.json);
     // pass an override so getConfig() merges a known project layer (or none).
     cwd,
-    env: {
-      ...process.env,
+    env: keySafeEnv({
       HOME: homeDir,
       USERPROFILE: homeDir,
       NODE9_TESTING: '1',
       NODE9_NO_AUTO_DAEMON: '1',
       NO_COLOR: '1',
-    },
+    }),
   });
   const byId: Record<number, McpResponse> = {};
   for (const line of (r.stdout ?? '').split('\n').filter(Boolean)) {

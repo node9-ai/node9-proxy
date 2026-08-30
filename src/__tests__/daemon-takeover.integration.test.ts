@@ -18,6 +18,7 @@ import fs from 'fs';
 import net from 'net';
 import os from 'os';
 import path from 'path';
+import { keySafeEnv } from './helpers/env';
 
 const CLI = path.resolve(__dirname, '../../dist/cli.js');
 const PORT = 7391;
@@ -44,13 +45,12 @@ function makeTempHome(): string {
 
 function startDaemon(home: string, buildOverride: string): ChildProcess {
   return spawn(process.execPath, [CLI, 'daemon'], {
-    env: {
-      ...process.env,
+    env: keySafeEnv({
       HOME: home,
       USERPROFILE: home,
       NODE9_TESTING: '1',
       NODE9_BUILD_ID_OVERRIDE: buildOverride,
-    },
+    }),
     stdio: 'ignore',
     detached: false,
   });

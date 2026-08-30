@@ -23,6 +23,7 @@ import { buildShield } from '../../shields/build';
 import { createShield } from '../../shields/create';
 import type { ShieldDefinition } from '@node9/policy-engine';
 import { appendConfigAudit } from '../../audit';
+import { cliGuardPolicyWrite } from '../../config/keyed-guard';
 import { getConfig } from '../../config';
 import { httpsFetch } from '../../utils/https-fetch';
 
@@ -85,6 +86,7 @@ export function registerShieldCommand(program: Command): void {
     .command('enable <service>')
     .description('Enable a security shield for a specific service')
     .action((service: string) => {
+      if (!cliGuardPolicyWrite(`shield enable ${service}`)) return;
       const name = resolveShieldName(service);
       if (!name) {
         console.error(chalk.red(`\n❌ Unknown shield: "${service}"\n`));
@@ -119,6 +121,7 @@ export function registerShieldCommand(program: Command): void {
     .command('disable <service>')
     .description('Disable a security shield')
     .action((service: string) => {
+      if (!cliGuardPolicyWrite(`shield disable ${service}`)) return;
       const name = resolveShieldName(service);
       if (!name) {
         console.error(chalk.red(`\n❌ Unknown shield: "${service}"\n`));
@@ -170,21 +173,49 @@ export function registerShieldCommand(program: Command): void {
       }
 
       const active = new Set(readActiveShields());
-      const cloud = readCloudShields();
+      // I8: on a workspace-governed machine only the cloud set is enforced —
+      // a locally-enabled shield must not display as enabled. What is ENFORCED
+      // is the resolver's own testimony (policy.appliedShields), the same
+      // source `shield status`, the MCP list and the TUI use. readCloudShields
+      // is a legacy heuristic over SHIELD:-tagged cache RULES and misses a
+      // shield mandated through the cache's `shields` array — it stays the
+      // unkeyed "☁ cloud" column only.
+      const cfgForList = getConfig();
+      const wsGoverned = cfgForList.policySource === 'workspace';
+      const cloud = wsGoverned
+        ? new Set(cfgForList.policy.appliedShields ?? [])
+        : readCloudShields();
       console.log(chalk.bold('\n🛡️  Available Shields\n'));
-      console.log(chalk.gray('  ● local · ☁ cloud\n'));
+      if (wsGoverned) {
+        console.log(chalk.gray('  Workspace config governs — local enables are ignored.\n'));
+      } else {
+        console.log(chalk.gray('  ● local · ☁ cloud\n'));
+      }
       for (const shield of listShields()) {
         const isLocal = active.has(shield.name);
         const isCloud = cloud.has(shield.name);
-        const status =
-          isLocal && isCloud
+        const status = wsGoverned
+          ? isCloud
+            ? chalk.green('☁  enabled ')
+            : isLocal
+              ? chalk.gray('○  ignored ')
+              : chalk.gray('○  disabled')
+          : isLocal && isCloud
             ? chalk.green('●☁ enabled ')
             : isLocal
               ? chalk.green('●  enabled ')
               : isCloud
                 ? chalk.cyan('☁  cloud   ')
                 : chalk.gray('○  disabled');
-        const via = isCloud && !isLocal ? chalk.gray(' (via dashboard)') : '';
+        const via = wsGoverned
+          ? isCloud
+            ? chalk.gray(' (workspace)')
+            : isLocal
+              ? chalk.gray(' (enabled locally — workspace config governs)')
+              : ''
+          : isCloud && !isLocal
+            ? chalk.gray(' (via dashboard)')
+            : '';
         console.log(
           `  ${status} ${chalk.cyan(shield.name.padEnd(12))} ${shield.description}${via}`
         );
@@ -201,7 +232,12 @@ export function registerShieldCommand(program: Command): void {
     .command('status')
     .description('Show active shields and their individual rules with verdicts')
     .action(() => {
-      const active = readActiveShields();
+      // I8: show what is ENFORCED. Workspace-governed machines run the
+      // cloud-mandated set (config.policy.appliedShields), not the local
+      // enable store.
+      const cfgForStatus = getConfig();
+      const wsGoverned = cfgForStatus.policySource === 'workspace';
+      const active = wsGoverned ? (cfgForStatus.policy.appliedShields ?? []) : readActiveShields();
       if (active.length === 0) {
         console.error(chalk.yellow('\nℹ️  No shields are active.\n'));
         console.error(`Run ${chalk.cyan('node9 shield list')} to see available shields.\n`);
@@ -209,6 +245,9 @@ export function registerShieldCommand(program: Command): void {
       }
       const overrides = readShieldOverrides();
       console.error(chalk.bold('\n🛡️  Active Shields\n'));
+      if (wsGoverned) {
+        console.error(chalk.gray('  Source: workspace config (app.node9.ai)\n'));
+      }
       for (const name of active) {
         const shield = getShield(name);
         if (!shield) continue;
@@ -250,6 +289,7 @@ export function registerShieldCommand(program: Command): void {
     .description('Override the verdict for a specific shield rule (block, review, or allow)')
     .option('--force', 'Required when setting verdict to allow (silences a block rule)')
     .action((service: string, rule: string, verdict: string, opts: { force?: boolean }) => {
+      if (!cliGuardPolicyWrite(`shield set ${service}`)) return;
       const name = resolveShieldName(service);
       if (!name) {
         console.error(chalk.red(`\n❌ Unknown shield: "${service}"\n`));
@@ -318,6 +358,7 @@ export function registerShieldCommand(program: Command): void {
     .command('unset <service> <rule>')
     .description('Remove a verdict override, restoring the shield default')
     .action((service: string, rule: string) => {
+      if (!cliGuardPolicyWrite(`shield unset ${service}`)) return;
       const name = resolveShieldName(service);
       if (!name) {
         console.error(chalk.red(`\n❌ Unknown shield: "${service}"\n`));
@@ -339,6 +380,7 @@ export function registerShieldCommand(program: Command): void {
     .command('install <name>')
     .description('Install a shield from the community marketplace into ~/.node9/shields/')
     .action((name: string) => {
+      if (!cliGuardPolicyWrite('shield install')) return;
       if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
         // Do not echo the raw name — it may contain ANSI escape sequences (terminal injection)
         console.error(
@@ -411,6 +453,19 @@ export function registerShieldCommand(program: Command): void {
           overwrite?: boolean;
         }
       ) => {
+        // F3 (adversarial review): `create --enable` calls writeActiveShields,
+        // so it is a policy write the guard enumeration missed — it printed
+        // "Active now." on a workspace-governed machine while enforcing
+        // nothing. Only the ENABLE half is refused: authoring a definition
+        // locally and then mandating it from the dashboard is a real flow.
+        if (opts.enable && !cliGuardPolicyWrite(`shield create --enable ${name}`)) {
+          console.error(
+            chalk.gray(
+              '   Re-run without --enable to author the file, then mandate it from the dashboard.\n'
+            )
+          );
+          return;
+        }
         // Name guard mirrors `install` — do not echo a raw name (ANSI injection).
         if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
           console.error(
@@ -484,18 +539,31 @@ export function registerConfigShowCommand(program: Command): void {
     )
     .action(() => {
       const config = getConfig();
-      const active = readActiveShields();
+      // I8: "effective configuration" must show the ENFORCED shield set.
+      const wsGoverned = config.policySource === 'workspace';
+      const active = wsGoverned ? (config.policy.appliedShields ?? []) : readActiveShields();
       const overrides = readShieldOverrides();
 
       console.error(chalk.bold('\n🔍  Node9 Effective Configuration\n'));
+      if (wsGoverned) {
+        console.error(
+          chalk.gray('  Source: workspace config (app.node9.ai) — local policy files are ignored\n')
+        );
+      }
 
       // ── Mode ────────────────────────────────────────────────────────────────
+      // F5: `observe` is the mode where node9 enforces NOTHING (every
+      // block becomes a would-block), and a keyed machine applies a cloud
+      // observe verbatim — so an `else → standard` here reports the exact
+      // opposite of the truth on the one surface people check.
       const modeLabel =
         config.settings.mode === 'audit'
           ? chalk.blue('audit')
           : config.settings.mode === 'strict'
             ? chalk.red('strict')
-            : chalk.white('standard');
+            : config.settings.mode === 'observe'
+              ? chalk.magenta('observe (nothing is enforced)')
+              : chalk.white('standard');
       console.error(`  Mode: ${modeLabel}\n`);
 
       // ── Active Shields ───────────────────────────────────────────────────────
