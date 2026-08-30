@@ -74,6 +74,23 @@ export HOME="$TEST_HOME"
 # config source depending on whose machine runs this script.
 unset NODE9_API_KEY NODE9_API_URL NODE9_PROFILE
 
+# Client-identity hygiene — the same class of leak as the key above, and the
+# reason v2.6.0 got a tag on main while npm stayed at 2.5.0.
+#
+# A review verdict only surfaces as an inline ask when the CLIENT can render
+# one; node9 detects Claude Code from CLAUDECODE / CLAUDE_CODE_SESSION_ID
+# (src/cli/commands/check.ts). Without it a review fails CLOSED to a block,
+# which is correct.
+#
+# This suite's Part 1 heading claims it simulates a Claude Code hook, but it
+# never set the variable that makes it one: it inherited it from the shell.
+# That made it pass on any developer box (always inside a Claude Code
+# session) and fail on every CI runner. Pin the identity so the suite tests
+# what it says it tests, and drop the second signal so exactly one thing
+# drives the branch.
+export CLAUDECODE=1
+unset CLAUDE_CODE_SESSION_ID
+
 # =============================================================================
 # PART 1 — node9 check  (simulates Claude Code's PreToolUse hook)
 # Claude Code pipes JSON to stdin: { tool_name, tool_input }
@@ -150,6 +167,19 @@ check_review "Bash: purge /opt/data"   '{"tool_name":"Bash","tool_input":{"comma
 
 # 6. Test 'find -delete' (the parser finds the "delete" token which is often a rule action)
 check_review "Bash: find . -delete"    '{"tool_name":"Bash","tool_input":{"command":"find . -name tmp -delete"}}'
+
+# The inverse of every assertion above, and the behaviour that made this suite
+# environment-dependent in the first place: with NO inline-ask-capable client,
+# a review verdict must fail CLOSED to a block rather than sail through. Real
+# security behaviour that nothing verified until v2.6.0 failed to publish.
+echo -e "\n  ${YELLOW}No inline-ask-capable client — review must fail closed:${RESET}"
+out=$(env -u CLAUDECODE -u CLAUDE_CODE_SESSION_ID sh -c \
+  'echo '"'"'{"tool_name":"delete_user","tool_input":{"id":1}}'"'"' | '"$NODE9"' check' 2>/dev/null) || true
+if echo "$out" | grep -q '"decision":"block"'; then
+  pass "FAIL-CLOSED → review becomes a block with no client to ask"
+else
+  fail "Review did not fail closed without a client  (got: '$out')"
+fi
 
 
 echo -e "\n  ${YELLOW}Claude Code Bash tool — safe commands (must NOT be blocked):${RESET}"
