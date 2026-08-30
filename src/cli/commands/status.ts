@@ -138,12 +138,18 @@ export function registerStatusCommand(program: Command): void {
 
       // ── Configuration State ──────────────────────────────────────────────────
       console.log('');
+      // F5: `observe` is the mode where node9 enforces NOTHING (every
+      // block becomes a would-block), and a keyed machine applies a cloud
+      // observe verbatim — so an `else → standard` here reports the exact
+      // opposite of the truth on the one surface people check.
       const modeLabel =
         settings.mode === 'audit'
           ? chalk.blue('audit')
           : settings.mode === 'strict'
             ? chalk.red('strict')
-            : chalk.white('standard');
+            : settings.mode === 'observe'
+              ? chalk.magenta('observe (nothing is enforced)')
+              : chalk.white('standard');
       console.log(`  Mode:    ${modeLabel}`);
 
       // I1: on a keyed machine the local config files are present but INERT

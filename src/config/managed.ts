@@ -224,6 +224,14 @@ export const COMMAND_CHECK_KEYS = [
   'pipeChainHigh',
 ] as const;
 export type CommandCheckKey = (typeof COMMAND_CHECK_KEYS)[number];
+
+/** Class-B checks are TIGHTEN-ONLY: 'off' is never storable for these, on any
+ *  path (local layer, managed floor, or the keyed verbatim branch). ONE
+ *  definition — a second copy is a security invariant waiting to drift. */
+export const CLASS_B_COMMAND_CHECKS: ReadonlySet<string> = new Set([
+  'evalDynamic',
+  'pipeChainHigh',
+]);
 export type ManagedCommandChecks = Partial<Record<CommandCheckKey, string>>;
 
 export function applyManagedCommandChecks<T extends Partial<Record<CommandCheckKey, string>>>(
@@ -243,7 +251,7 @@ export function applyManagedCommandChecks<T extends Partial<Record<CommandCheckK
     });
     // Class-B safety: never store 'off' for tighten-only keys even if a
     // hostile/buggy cloud value slips past upstream validation.
-    if ((key === 'evalDynamic' || key === 'pipeChainHigh') && resolved === 'off') continue;
+    if (CLASS_B_COMMAND_CHECKS.has(key) && resolved === 'off') continue;
     next[key] = resolved as T[CommandCheckKey];
   }
   return next;

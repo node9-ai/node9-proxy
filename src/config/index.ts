@@ -14,6 +14,8 @@ import {
   applyManagedApprovers,
   applyManagedCommandChecks,
   COMMAND_CHECK_ORDER,
+  COMMAND_CHECK_KEYS,
+  CLASS_B_COMMAND_CHECKS,
   strictestOf,
 } from './managed';
 import { pathRules } from '../shields/build';
@@ -1185,11 +1187,17 @@ export function getConfig(cwd?: string): Config {
           if (keyed) {
             // §0.2 keyed verbatim, per key. Class-B keys stay tighten-only
             // even against a hand-edited cache file.
-            const CLASS_B = new Set(['evalDynamic', 'pipeChainHigh']);
+            // F8: iterate the KNOWN key list (as applyManagedCommandChecks
+            // does) rather than whatever keys the cache happens to carry — a
+            // hand-edited cache must not seed arbitrary keys into the policy
+            // object. Class-B ('off' is never storable) comes from the shared
+            // list so this invariant has ONE definition, not a second copy.
+            const src = mc.commandChecks as Record<string, unknown>;
             const next: Record<string, string> = { ...(mergedPolicy.commandChecks ?? {}) };
-            for (const [key, val] of Object.entries(mc.commandChecks)) {
+            for (const key of COMMAND_CHECK_KEYS) {
+              const val = src[key];
               if (val !== 'off' && val !== 'review' && val !== 'block') continue;
-              if (val === 'off' && CLASS_B.has(key)) continue;
+              if (val === 'off' && CLASS_B_COMMAND_CHECKS.has(key)) continue;
               next[key] = val;
             }
             mergedPolicy.commandChecks = next;

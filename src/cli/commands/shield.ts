@@ -453,6 +453,19 @@ export function registerShieldCommand(program: Command): void {
           overwrite?: boolean;
         }
       ) => {
+        // F3 (adversarial review): `create --enable` calls writeActiveShields,
+        // so it is a policy write the guard enumeration missed — it printed
+        // "Active now." on a workspace-governed machine while enforcing
+        // nothing. Only the ENABLE half is refused: authoring a definition
+        // locally and then mandating it from the dashboard is a real flow.
+        if (opts.enable && !cliGuardPolicyWrite(`shield create --enable ${name}`)) {
+          console.error(
+            chalk.gray(
+              '   Re-run without --enable to author the file, then mandate it from the dashboard.\n'
+            )
+          );
+          return;
+        }
         // Name guard mirrors `install` — do not echo a raw name (ANSI injection).
         if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
           console.error(
@@ -539,12 +552,18 @@ export function registerConfigShowCommand(program: Command): void {
       }
 
       // ── Mode ────────────────────────────────────────────────────────────────
+      // F5: `observe` is the mode where node9 enforces NOTHING (every
+      // block becomes a would-block), and a keyed machine applies a cloud
+      // observe verbatim — so an `else → standard` here reports the exact
+      // opposite of the truth on the one surface people check.
       const modeLabel =
         config.settings.mode === 'audit'
           ? chalk.blue('audit')
           : config.settings.mode === 'strict'
             ? chalk.red('strict')
-            : chalk.white('standard');
+            : config.settings.mode === 'observe'
+              ? chalk.magenta('observe (nothing is enforced)')
+              : chalk.white('standard');
       console.error(`  Mode: ${modeLabel}\n`);
 
       // ── Active Shields ───────────────────────────────────────────────────────
