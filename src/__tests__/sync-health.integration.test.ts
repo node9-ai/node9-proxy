@@ -13,6 +13,7 @@ import { spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { keySafeEnv } from './helpers/env';
 
 const CLI = path.resolve(__dirname, '../../dist/cli.js');
 
@@ -33,8 +34,7 @@ afterEach(() => {
 const run = (args: string[], env: Record<string, string> = {}) =>
   spawnSync(process.execPath, [CLI, ...args], {
     encoding: 'utf-8',
-    env: {
-      ...process.env,
+    env: keySafeEnv({
       HOME: home,
       // os.homedir() reads USERPROFILE on Windows, not HOME — set both so the
       // spawned dist/cli.js resolves ~/.node9 to the temp dir on every OS
@@ -47,7 +47,7 @@ const run = (args: string[], env: Record<string, string> = {}) =>
       NODE9_POLICY_MIRROR_DISABLE: '1',
       NODE9_NO_AUTO_DAEMON: '1',
       ...env,
-    },
+    }),
   });
 
 describe('policy sync — health record + never-fail-open (real dist/cli.js)', () => {

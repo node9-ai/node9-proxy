@@ -16,6 +16,7 @@ import { spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { keySafeEnv } from './helpers/env';
 
 const CLI = path.resolve(__dirname, '../../dist/cli.js');
 
@@ -46,7 +47,7 @@ function check(home: string, command: string): { status: number | null; stdout: 
     tool_name: 'Bash',
     tool_input: { command },
   });
-  const env = { ...process.env } as Record<string, string>;
+  const env = keySafeEnv() as Record<string, string>;
   delete env.NODE9_API_KEY;
   delete env.NODE9_API_URL;
   const r = spawnSync(process.execPath, [CLI, 'check', payload], {

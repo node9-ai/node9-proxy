@@ -20,6 +20,7 @@ import { spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { keySafeEnv } from './helpers/env';
 
 const CLI = path.resolve(__dirname, '../../dist/cli.js');
 // Linux only, not merely "not Windows": the fixtures below fake systemd
@@ -92,7 +93,7 @@ const seedStartupState = (state: object, msAgo = 60_000) =>
   );
 
 function runDoctor() {
-  const baseEnv = { ...process.env };
+  const baseEnv = keySafeEnv();
   delete baseEnv.NODE9_API_KEY;
   delete baseEnv.NODE9_API_URL;
   const r = spawnSync(process.execPath, [CLI, 'doctor'], {

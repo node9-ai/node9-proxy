@@ -22,6 +22,7 @@ import { spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { keySafeEnv } from './env';
 
 export const CLI = path.resolve(__dirname, '../../../dist/cli.js');
 
@@ -60,14 +61,13 @@ export function runCli(home: string, args: string[], timeoutMs = 60000) {
     encoding: 'utf-8',
     timeout: timeoutMs,
     cwd: os.tmpdir(),
-    env: {
-      ...process.env,
+    env: keySafeEnv({
       HOME: home,
       USERPROFILE: home,
       NODE9_TESTING: '1',
       NODE9_NO_AUTO_DAEMON: '1',
       NO_COLOR: '1',
-    },
+    }),
   });
 }
 
@@ -95,8 +95,7 @@ export function probe(
     encoding: 'utf-8',
     timeout: opts.timeoutMs ?? 15000,
     cwd: os.tmpdir(),
-    env: {
-      ...process.env,
+    env: keySafeEnv({
       HOME: home,
       USERPROFILE: home,
       NODE9_TESTING: '1',
@@ -105,7 +104,7 @@ export function probe(
       // No GUI/tail → no human approver reachable, so a review resolves
       // deterministically (fail-closed) instead of waiting on a dialog.
       ...opts.env,
-    },
+    }),
   });
   // A killed-by-timeout probe means the gate held the call for a human.
   const held = r.signal !== null || r.status === null;

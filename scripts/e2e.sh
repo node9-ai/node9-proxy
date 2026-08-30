@@ -69,6 +69,10 @@ export NODE9_NO_AUTO_DAEMON=1
 node "$REPO_ROOT/dist/cli.js" daemon stop 2>/dev/null || true
 # Use an isolated HOME so credentials.json and decisions.json don't affect results
 export HOME="$TEST_HOME"
+# Keyedness hygiene (PR-2 §0.12): never inherit the developer machine's real
+# key — a keyed run would build policy from the CLOUD and test a different
+# config source depending on whose machine runs this script.
+unset NODE9_API_KEY NODE9_API_URL NODE9_PROFILE
 
 # =============================================================================
 # PART 1 — node9 check  (simulates Claude Code's PreToolUse hook)
