@@ -173,10 +173,18 @@ export function registerShieldCommand(program: Command): void {
       }
 
       const active = new Set(readActiveShields());
-      const cloud = readCloudShields();
       // I8: on a workspace-governed machine only the cloud set is enforced —
-      // a locally-enabled shield must not display as enabled.
-      const wsGoverned = getConfig().policySource === 'workspace';
+      // a locally-enabled shield must not display as enabled. What is ENFORCED
+      // is the resolver's own testimony (policy.appliedShields), the same
+      // source `shield status`, the MCP list and the TUI use. readCloudShields
+      // is a legacy heuristic over SHIELD:-tagged cache RULES and misses a
+      // shield mandated through the cache's `shields` array — it stays the
+      // unkeyed "☁ cloud" column only.
+      const cfgForList = getConfig();
+      const wsGoverned = cfgForList.policySource === 'workspace';
+      const cloud = wsGoverned
+        ? new Set(cfgForList.policy.appliedShields ?? [])
+        : readCloudShields();
       console.log(chalk.bold('\n🛡️  Available Shields\n'));
       if (wsGoverned) {
         console.log(chalk.gray('  Workspace config governs — local enables are ignored.\n'));

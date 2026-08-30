@@ -106,34 +106,50 @@ check_allowed() {
   fi
 }
 
-echo -e "\n  ${YELLOW}MCP tool names:${RESET}"
-check_blocked "delete_user"         '{"tool_name":"delete_user","tool_input":{"id":1}}'
-check_blocked "drop_table"          '{"tool_name":"drop_table","tool_input":{"table":"users"}}'
-check_blocked "remove_file"         '{"tool_name":"remove_file","tool_input":{"path":"/tmp/x"}}'
-check_blocked "aws.rds.rm_database" '{"tool_name":"aws.rds.rm_database","tool_input":{}}'
-check_blocked "purge_queue"         '{"tool_name":"purge_queue","tool_input":{}}'
-check_blocked "destroy_cluster"     '{"tool_name":"destroy_cluster","tool_input":{}}'
+# Review-tier verdicts surface as an inline ASK since inline-ask v2
+# (permissionDecision:"ask") — the agent UI shows the approval prompt. The old
+# expectation here (decision:"block") predates that release; only Layer-1
+# block rules (e.g. rm -rf /) still hard-deny.
+check_review() {
+  local label="$1"
+  local payload="$2"
+  local out
+  out=$(echo "$payload" | $NODE9 check 2>/dev/null) || true
+  if echo "$out" | grep -q '"permissionDecision":"ask"'; then
+    pass "REVIEW   → $label"
+  else
+    fail "Expected inline ask for: $label  (got: '$out')"
+  fi
+}
 
-echo -e "\n  ${YELLOW}Claude Code Bash tool — dangerous commands:${RESET}"
+echo -e "\n  ${YELLOW}MCP tool names:${RESET}"
+check_review "delete_user"         '{"tool_name":"delete_user","tool_input":{"id":1}}'
+check_review "drop_table"          '{"tool_name":"drop_table","tool_input":{"table":"users"}}'
+check_review "remove_file"         '{"tool_name":"remove_file","tool_input":{"path":"/tmp/x"}}'
+check_review "aws.rds.rm_database" '{"tool_name":"aws.rds.rm_database","tool_input":{}}'
+check_review "purge_queue"         '{"tool_name":"purge_queue","tool_input":{}}'
+check_review "destroy_cluster"     '{"tool_name":"destroy_cluster","tool_input":{}}'
+
+echo -e "\n  ${YELLOW}Claude Code Bash tool — dangerous commands (review-tier → inline ask):${RESET}"
 
 # 1. Test 'rm' on a SENSITIVE path (not in allowPaths and not in /tmp)
-check_blocked "Bash: rm /etc/passwd"    '{"tool_name":"Bash","tool_input":{"command":"rm /etc/passwd"}}'
+check_review "Bash: rm /etc/passwd"    '{"tool_name":"Bash","tool_input":{"command":"rm /etc/passwd"}}'
 
 # 2. Test a "Nuke" word (drop) inside the sandbox (Nukes should be blocked everywhere)
-check_blocked "Bash: drop /tmp/db"      '{"tool_name":"Bash","tool_input":{"command":"psql -c \"drop table users\""}}'
+check_review "Bash: drop /tmp/db"      '{"tool_name":"Bash","tool_input":{"command":"psql -c \"drop table users\""}}'
 
 # 3. Existing passing tests
 check_blocked "Bash: rm -rf /"          '{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}'
-check_blocked "Bash: sudo rm -rf /home" '{"tool_name":"Bash","tool_input":{"command":"sudo rm -rf /home/user"}}'
+check_review "Bash: sudo rm -rf /home" '{"tool_name":"Bash","tool_input":{"command":"sudo rm -rf /home/user"}}'
 
 # 4. Test 'docker' (a Nuke word)
-check_blocked "Bash: docker rm -f"      '{"tool_name":"Bash","tool_input":{"command":"docker rm -f container_id"}}'
+check_review "Bash: docker rm -f"      '{"tool_name":"Bash","tool_input":{"command":"docker rm -f container_id"}}'
 
 # 5. Test 'purge' (a Nuke word)
-check_blocked "Bash: purge /opt/data"   '{"tool_name":"Bash","tool_input":{"command":"purge /opt/data"}}'
+check_review "Bash: purge /opt/data"   '{"tool_name":"Bash","tool_input":{"command":"purge /opt/data"}}'
 
 # 6. Test 'find -delete' (the parser finds the "delete" token which is often a rule action)
-check_blocked "Bash: find . -delete"    '{"tool_name":"Bash","tool_input":{"command":"find . -name tmp -delete"}}'
+check_review "Bash: find . -delete"    '{"tool_name":"Bash","tool_input":{"command":"find . -name tmp -delete"}}'
 
 
 echo -e "\n  ${YELLOW}Claude Code Bash tool — safe commands (must NOT be blocked):${RESET}"
@@ -212,19 +228,26 @@ fi
 # =============================================================================
 section "Part 4 · Response format"
 
-RESPONSE=$(echo '{"tool_name":"delete_user","tool_input":{"id":1}}' | $NODE9 check 2>/dev/null) || true
+# The DENY wire shape needs a Layer-1 block rule (delete_user is review-tier
+# and surfaces as an inline ask since inline-ask v2).
+RESPONSE=$(echo '{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}' | $NODE9 check 2>/dev/null) || true
 
 echo "$RESPONSE" | grep -q '"decision":"block"' \
-  && pass 'Response has decision:"block"' \
-  || fail 'Response missing decision field'
+  && pass 'Block response has decision:"block"' \
+  || fail 'Block response missing decision field'
 
 echo "$RESPONSE" | grep -q '"hookSpecificOutput"' \
-  && pass "Response has hookSpecificOutput (Claude Code field)" \
-  || fail "Response missing hookSpecificOutput"
+  && pass "Block response has hookSpecificOutput (Claude Code field)" \
+  || fail "Block response missing hookSpecificOutput"
 
 echo "$RESPONSE" | grep -q '"permissionDecision":"deny"' \
-  && pass 'Response has permissionDecision:"deny" (Claude Code field)' \
-  || fail "Response missing permissionDecision"
+  && pass 'Block response has permissionDecision:"deny" (Claude Code field)' \
+  || fail "Block response missing permissionDecision"
+
+ASK_RESPONSE=$(echo '{"tool_name":"delete_user","tool_input":{"id":1}}' | $NODE9 check 2>/dev/null) || true
+echo "$ASK_RESPONSE" | grep -q '"permissionDecision":"ask"' \
+  && pass 'Review response has permissionDecision:"ask" (inline-ask v2 wire)' \
+  || fail "Review response missing permissionDecision:ask"
 
 # =============================================================================
 # PART 5 — Global config (~/.node9/config.json)
@@ -252,10 +275,10 @@ EOF
 NOPROJECT=$(mktemp -d)
 
 out=$(cd "$NOPROJECT" && echo '{"tool_name":"nuke_everything","tool_input":{}}' | HOME="$GLOBAL_HOME" $NODE9 check 2>/dev/null) || true
-if echo "$out" | grep -q '"decision":"block"'; then
-  pass "Global config: custom dangerous word 'nuke' is blocked"
+if echo "$out" | grep -q '"permissionDecision":"ask"'; then
+  pass "Global config: custom dangerous word 'nuke' flags for review (inline ask)"
 else
-  fail "Global config not applied: 'nuke_everything' not blocked (got: '$out')"
+  fail "Global config not applied: 'nuke_everything' not flagged (got: '$out')"
 fi
 
 out=$(cd "$NOPROJECT" && echo '{"tool_name":"list_users","tool_input":{}}' | HOME="$GLOBAL_HOME" $NODE9 check 2>/dev/null) || true
@@ -286,6 +309,122 @@ else
 fi
 
 rm -rf "$GLOBAL_HOME" "$NOPROJECT"
+
+# =============================================================================
+# PART 6 — Keyed machine (PR-2 replace-mode): the workspace config governs
+# Fixture = credentials.json with an UNROUTABLE apiUrl (no network) + a
+# rules-cache.json standing in for the synced workspace config. The local
+# config.json carries a 'nuke' dangerous word that MUST be inert while keyed
+# and MUST come back under login --local (localOnly).
+# =============================================================================
+section "Part 6 · Keyed machine — workspace config governs (PR-2)"
+
+KEYED_HOME=$(mktemp -d)
+KEYED_DIR=$(mktemp -d)   # run dir with NO project config
+mkdir -p "$KEYED_HOME/.node9"
+
+cat > "$KEYED_HOME/.node9/credentials.json" << 'EOF'
+{ "default": { "apiKey": "n9_live_e2e_keyed_fixture", "apiUrl": "http://127.0.0.1:1" } }
+EOF
+
+# The synced workspace policy: one org block rule; managed settings keep the
+# run deterministic (all approver channels off + 50ms timeout → no waits).
+cat > "$KEYED_HOME/.node9/rules-cache.json" << 'EOF'
+{
+  "fetchedAt": "2026-08-01T00:00:00Z",
+  "rules": [
+    {
+      "name": "org-block-frobnicate",
+      "tool": "bash",
+      "conditions": [{ "field": "command", "op": "contains", "value": "frobnicate" }],
+      "conditionMode": "all",
+      "verdict": "block",
+      "reason": "org rule (e2e keyed fixture)"
+    }
+  ],
+  "shields": [],
+  "managedConfig": {
+    "mode": "standard",
+    "approvalTimeoutMs": 50,
+    "approvers": { "native": false, "browser": false, "cloud": false, "terminal": false },
+    "locked": []
+  }
+}
+EOF
+
+cat > "$KEYED_HOME/.node9/config.json" << 'EOF'
+{
+  "settings": { "mode": "standard" },
+  "policy": { "dangerousWords": ["nuke"] }
+}
+EOF
+
+# 6.1 — the workspace rule is enforced (the K13c bug, live at the real gate)
+out=$(cd "$KEYED_DIR" && echo '{"tool_name":"Bash","tool_input":{"command":"frobnicate --all"}}' | HOME="$KEYED_HOME" $NODE9 check 2>/dev/null) || true
+if echo "$out" | grep -q '"decision":"block"'; then
+  pass "Keyed: workspace (cloud cache) rule blocks at the gate"
+else
+  fail "Keyed: workspace rule NOT enforced (got: '$out')"
+fi
+
+# 6.2 — the local dangerousWords list is INERT while keyed
+out=$(cd "$KEYED_DIR" && echo '{"tool_name":"nuke_everything","tool_input":{}}' | HOME="$KEYED_HOME" $NODE9 check 2>/dev/null) || true
+if [ -z "$out" ]; then
+  pass "Keyed: local config.json dangerousWords are inert"
+else
+  fail "Keyed: local dangerousWords still enforced (got: '$out')"
+fi
+
+# 6.3 — local policy writes are refused with a non-zero exit and touch nothing
+guard_refused() {
+  local label="$1"; shift
+  local ec=0
+  local out
+  out=$(cd "$KEYED_DIR" && HOME="$KEYED_HOME" $NODE9 "$@" 2>&1) || ec=$?
+  if [ "$ec" -ne 0 ] && echo "$out" | grep -qi "workspace configuration"; then
+    pass "Keyed write-guard: '$label' refused (exit $ec, points at the dashboard)"
+  else
+    fail "Keyed write-guard: '$label' NOT refused (exit $ec, out: '$out')"
+  fi
+}
+guard_refused "shield enable postgres" shield enable postgres
+guard_refused "egress off"             egress off
+guard_refused "trust add"              trust add api.example.com
+guard_refused "jail add"               jail add /tmp/e2e-jail-probe
+
+if [ ! -f "$KEYED_HOME/.node9/shields.json" ] && [ ! -f "$KEYED_HOME/.node9/trusted-hosts.json" ]; then
+  pass "Keyed write-guard: refused writes left no store files behind"
+else
+  fail "Keyed write-guard: a refused write still created a store file"
+fi
+
+# 6.4 — introspection tells the truth
+out=$(cd "$KEYED_DIR" && HOME="$KEYED_HOME" $NODE9 status 2>/dev/null) || true
+if echo "$out" | grep -q "Workspace config"; then
+  pass "Keyed: 'node9 status' names the workspace as the policy source"
+else
+  fail "Keyed: 'node9 status' does not name the workspace source"
+fi
+
+# 6.5 — the localOnly promise (login --local): same key, local policy governs again
+cat > "$KEYED_HOME/.node9/credentials.json" << 'EOF'
+{ "default": { "apiKey": "n9_live_e2e_keyed_fixture", "apiUrl": "http://127.0.0.1:1", "localOnly": true } }
+EOF
+out=$(cd "$KEYED_DIR" && echo '{"tool_name":"nuke_everything","tool_input":{}}' | HOME="$KEYED_HOME" $NODE9 check 2>/dev/null) || true
+if echo "$out" | grep -q '"permissionDecision":"ask"'; then
+  pass "localOnly: local dangerousWords govern again (the --local promise)"
+else
+  fail "localOnly: local config still inert (got: '$out')"
+fi
+ec=0
+out=$(cd "$KEYED_DIR" && HOME="$KEYED_HOME" $NODE9 trust add api.example.com 2>&1) || ec=$?
+if [ "$ec" -eq 0 ] && [ -f "$KEYED_HOME/.node9/trusted-hosts.json" ]; then
+  pass "localOnly: local policy writes proceed (trust add wrote the store)"
+else
+  fail "localOnly: trust add refused or wrote nothing (exit $ec, out: '$out')"
+fi
+
+rm -rf "$KEYED_HOME" "$KEYED_DIR"
 
 # =============================================================================
 # SUMMARY

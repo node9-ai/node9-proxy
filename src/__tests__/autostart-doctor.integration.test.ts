@@ -72,9 +72,14 @@ function installUnitFile() {
 }
 
 function cloudEnabled(enabled = true) {
+  // PR-2 §0.1: cloud-disabled = privacy mode = `node9 login --local`, which
+  // persists localOnly so the machine stays unkeyed-for-policy and its local
+  // approvers.cloud:false keeps governing. A bare key would be KEYED, and the
+  // keyed defaults force approvers.cloud=true (matrix §0.3) — the machine this
+  // row describes no longer exists without the flag.
   fs.writeFileSync(
     path.join(home, '.node9', 'credentials.json'),
-    JSON.stringify({ default: { apiKey: 'fake' } }),
+    JSON.stringify({ default: { apiKey: 'fake', ...(enabled ? {} : { localOnly: true }) } }),
     'utf-8'
   );
   fs.writeFileSync(

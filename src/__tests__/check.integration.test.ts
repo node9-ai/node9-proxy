@@ -916,6 +916,18 @@ describe('audit mode + cloud gating', () => {
   });
 
   it('audit mode + cloud:true → no decision-time POST; row lands in the outbox and SHIPS', async () => {
+    // PR-2 replace-mode: the mock credentials above make this machine KEYED,
+    // so the LOCAL settings.mode:'audit' is inert. The workspace mandates
+    // audit mode through the synced cache instead (matrix K1c — a cloud mode
+    // applies verbatim on a keyed machine).
+    fs.writeFileSync(
+      path.join(tmpHome, '.node9', 'rules-cache.json'),
+      JSON.stringify({
+        fetchedAt: new Date().toISOString(),
+        rules: [],
+        managedConfig: { mode: 'audit', locked: [] },
+      })
+    );
     const r = await runCheckAsync(
       { tool_name: 'bash', tool_input: { command: 'mkfs.ext4 /dev/sda' } },
       // NODE9_TESTING=0: the suite wrapper sets it to 1, which would mark the
@@ -965,6 +977,19 @@ describe('audit mode + cloud gating', () => {
           approvers: { native: false, browser: false, cloud: false, terminal: false },
         },
         policy: { dangerousWords: ['mkfs'] },
+      })
+    );
+    // PR-2 §0.1: "keyed but never POSTs" is privacy mode — `node9 login
+    // --local` persists localOnly, which keeps the machine unkeyed-for-policy
+    // so the local audit mode + approvers.cloud:false above keep governing.
+    // Without it, replace-mode would force the keyed defaults (cloud:true,
+    // mode standard) and this row would test a machine that no longer exists.
+    fs.writeFileSync(
+      path.join(tmpHome, '.node9', 'credentials.json'),
+      JSON.stringify({
+        apiKey: 'test-key-123',
+        apiUrl: `http://127.0.0.1:${serverPort}`,
+        localOnly: true,
       })
     );
 
@@ -1096,6 +1121,26 @@ describe('cloud race engine', () => {
   let mockServer: http.Server;
   let serverPort: number;
 
+  /** PR-2 replace-mode: a keyed machine ignores its local approval knobs, so
+   *  the workspace mandates the cloud-racer routing through the synced cache
+   *  (reviewChannel 'approver', short timeout, cloud-only approvers). */
+  function writeCloudRacerCache(home: string): void {
+    fs.writeFileSync(
+      path.join(home, '.node9', 'rules-cache.json'),
+      JSON.stringify({
+        fetchedAt: new Date().toISOString(),
+        rules: [],
+        managedConfig: {
+          mode: 'standard',
+          reviewChannel: 'approver',
+          approvalTimeoutMs: 3000,
+          approvers: { native: false, browser: false, cloud: true, terminal: false },
+          locked: [],
+        },
+      })
+    );
+  }
+
   function startMockSaas(decision: 'allow' | 'deny'): Promise<void> {
     return new Promise((resolve) => {
       mockServer = http.createServer((req, res) => {
@@ -1150,6 +1195,11 @@ describe('cloud race engine', () => {
       JSON.stringify({ apiKey: 'test-key', apiUrl: `http://127.0.0.1:${serverPort}` })
     );
 
+    // PR-2 replace-mode: the mock credentials make this machine KEYED, so the
+    // LOCAL approval knobs above (reviewChannel/approvalTimeoutMs/approvers)
+    // are inert. This suite exercises the routed CLOUD RACER, so the workspace
+    // pins the same knobs through the synced cache (matrix K5b/K5d/K5e).
+    writeCloudRacerCache(tmpHome);
     const r = await runCheckAsync(
       { tool_name: 'bash', tool_input: { command: 'mkfs.ext4 /dev/sda' } },
       { HOME: tmpHome, NODE9_DEBUG: '1' },
@@ -1183,6 +1233,9 @@ describe('cloud race engine', () => {
       JSON.stringify({ apiKey: 'test-key', apiUrl: `http://127.0.0.1:${serverPort}` })
     );
 
+    // PR-2 replace-mode: same as the approve variant — the workspace, not the
+    // (inert) local config, pins the cloud-racer approval knobs.
+    writeCloudRacerCache(tmpHome);
     const r = await runCheckAsync(
       { tool_name: 'bash', tool_input: { command: 'mkfs.ext4 /dev/sda' } },
       { HOME: tmpHome },
