@@ -1198,6 +1198,29 @@ async function _authorizeHeadlessCore(
     // {approved:true} without this flag, {pending:true} with it.
     !!taintWarning ||
     undefined;
+  // Round-3 F1e: a DOWNGRADED HARD BLOCK must not be resolvable by the cloud
+  // racer. This is the sixth non-human channel — rows B/D/E/F of
+  // shield-block-downgrade-realgate.spec.ts closed persistent, trust,
+  // shadowMode and the inline prompt, and the immediate-allow guard below
+  // closed the !pending branch. The pending branch stayed open: the poller was
+  // enrolled unconditionally, and the SaaS resolved it with nobody clicking.
+  // Measured 2026-08-31: 143 real deny→allow pairs on the founder's machine.
+  //
+  // Deliberately keyed on `hardBlockDowngraded` and NOT on `forceReview`.
+  // They are boolean-equivalent for the block case but mean opposite things:
+  // forceReview asks the SaaS to create a genuine PENDING entry so a HUMAN
+  // must click, which is a legitimate cloud channel for an admin-chosen review
+  // (app-permission, taint). Gating on it removed that human path and broke
+  // two app-permission rows. Only node9's own floor — a block softened solely
+  // because a human happened to be reachable — is off-limits to the cloud, per
+  // the `mayDowngrade` comment above: "Cloud is deliberately NOT a 'human'
+  // here — it can auto-resolve. Fails closed."
+  //
+  // Gates the VOTE only. `cloudRequestId` is still assigned, because two other
+  // consumers need it: resolveNode9SaaS (so Mission Control does not sit on
+  // PENDING forever) and the audit row's BE linkage (so the shipper enriches
+  // the existing row instead of inserting a duplicate).
+  const cloudMayVote = !hardBlockDowngraded;
   if (cloudEnforced) {
     try {
       const initResult = await initNode9SaaS(
@@ -1245,12 +1268,14 @@ async function _authorizeHeadlessCore(
         // immediate-allow for an exfiltration review either — same reasoning as
         // appPermReview above, and it also covers a stale/older BE that ignores
         // the forceReview flag we now send.
-        if (
-          !localSmartRuleMatched &&
-          !options?.localSmartRuleMatched &&
-          !appPermReview &&
-          !taintWarning
-        ) {
+        // `!forceReview` is exactly the four-term condition this guard used to
+        // restate inline (localSmartRuleMatched / options.localSmartRuleMatched
+        // / appPermReview / taintWarning) — forceReview is built from the same
+        // four a few lines above, so deriving it here removes the duplicate
+        // without changing behaviour. NOT `cloudMayVote`: that one is narrower
+        // (downgraded hard blocks only) and using it here would let a cloud
+        // immediate-allow through for app-permission and taint reviews.
+        if (!forceReview) {
           return {
             approved: !!initResult.approved,
             reason:
@@ -1369,7 +1394,7 @@ async function _authorizeHeadlessCore(
   // Cloud is a valid racer even for local smart rule matches — with forceReview,
   // the SaaS always creates a PENDING entry requiring a real human click in
   // Mission Control, so an approval there is a genuine human decision.
-  if (cloudEnforced && cloudRequestId) {
+  if (cloudEnforced && cloudRequestId && cloudMayVote) {
     racePromises.push(
       (async () => {
         try {
