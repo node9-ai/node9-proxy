@@ -207,7 +207,7 @@ describe('U0 — unkeyed golden: the local stack resolves EXACTLY as today', () 
 // rules-cache PRESENT and no credentials, so a `keyed = cache file exists`
 // mutant flips them to cloud-replace behavior and they fail.
 // ───────────────────────────────────────────────────────────────────────────
-describe('§U — unkeyed byte-parity rows (U1-U15)', () => {
+describe('§U — unkeyed byte-parity rows (U1-U17)', () => {
   let home: string;
   let proj: string;
   const savedEnv: Record<string, string | undefined> = {};
@@ -421,5 +421,20 @@ describe('§U — unkeyed byte-parity rows (U1-U15)', () => {
     expect(c.settings.enableHookLogDebug).toBe(false);
     expect(c.settings.shipper.intervalSeconds).toBe(99);
     expect(c.settings.mcpReconcileIntervalMinutes).toBe(30);
+  });
+
+  it('U16: hook-debug logging is OFF when the config does not mention it', () => {
+    // The DEBUG facility must not be on by default: when on, every tool call
+    // appends to ~/.node9/hook-debug.log, which has no production reader and
+    // no size ceiling. Absent key ⇒ off.
+    writeGlobal({ settings: { mode: 'standard' } });
+    expect(cfg().settings.enableHookLogDebug).toBe(false);
+  });
+
+  it('U17: an explicit enableHookLogDebug:true is still honored', () => {
+    // Flipping the DEFAULT must not take the knob away from someone who asked
+    // for it on purpose — that would be a second bug wearing the first's coat.
+    writeGlobal({ settings: { mode: 'standard', enableHookLogDebug: true } });
+    expect(cfg().settings.enableHookLogDebug).toBe(true);
   });
 });
