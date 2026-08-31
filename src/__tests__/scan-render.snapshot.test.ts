@@ -68,6 +68,7 @@ function emptyScan(overrides: Partial<ScanResult> = {}): ScanResult {
     firstDate: null,
     lastDate: null,
     sessionsWithEarlySecrets: 0,
+    perSession: [],
     ...overrides,
   };
 }

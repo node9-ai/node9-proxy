@@ -944,6 +944,7 @@ export function startDaemon(): void {
           firstDate: null,
           lastDate: null,
           sessionsWithEarlySecrets: 0,
+          perSession: [],
         };
         let claude: ScanResult = EMPTY_SCAN;
         let gemini: ScanResult = EMPTY_SCAN;

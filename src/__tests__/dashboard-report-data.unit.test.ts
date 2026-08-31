@@ -29,6 +29,7 @@ const emptyScan: ScanResult = {
   firstDate: null,
   lastDate: null,
   sessionsWithEarlySecrets: 0,
+  perSession: [],
 };
 
 vi.mock('../cli/commands/scan', () => ({
