@@ -386,7 +386,7 @@ export interface StuckTool {
   toolName: string;
   /** Wasted calls = sum of (count - 1) across all loop findings for this tool. */
   waste: number;
-  /** Share of total wasted calls across all tools, rounded to nearest %. */
+  /** Share of total repeat calls across all tools, rounded to nearest %. */
   pct: number;
 }
 
@@ -2713,7 +2713,7 @@ export function renderCompactScorecard(input: CompactInput): void {
     const wasteParts: string[] = [];
     // "% of all calls", never bare "% wasted": the percentage is a share of
     // tool CALLS, and unlabeled it reads as a share of the cost beside it.
-    if (wastedCalls > 0) wasteParts.push(`${wastedCalls} wasted calls (${wastePct}% of all calls)`);
+    if (wastedCalls > 0) wasteParts.push(`${wastedCalls} repeat calls (${wastePct}% of all calls)`);
     if (summary.loopWastedUSD > 0) wasteParts.push('~' + fmtCost(summary.loopWastedUSD));
     const wasteSummary = wasteParts.length ? `(${wasteParts.join('  ·  ')})` : '';
     console.log(
@@ -2843,7 +2843,7 @@ export function renderNarrativeScorecard(input: CompactInput): void {
     const { wastePct, wastedCalls } = computeLoopWaste(scan.loopFindings, scan.totalToolCalls);
     const cost = summary.loopWastedUSD > 0 ? `, ~${fmtCost(summary.loopWastedUSD)} wasted` : '';
     medium.push({
-      label: `${scan.loopFindings.length} agent loops (${wastedCalls} wasted calls, ${wastePct}% of calls${cost})`,
+      label: `${scan.loopFindings.length} agent loops (${wastedCalls} repeat calls, ${wastePct}% of calls${cost})`,
       count: scan.loopFindings.length,
     });
   }
@@ -3051,7 +3051,7 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
     }
     const top = [...byTool.entries()].sort((a, b) => b[1] - a[1])[0];
     const wasteSuffix =
-      wastedCalls > 0 ? `, ${wastedCalls} wasted calls · ${wastePct}% of calls` : '';
+      wastedCalls > 0 ? `, ${wastedCalls} repeat calls · ${wastePct}% of calls` : '';
     const detail = top ? `(${top[0]} dominates${wasteSuffix})` : '';
     topLines.push(
       mkLine(
@@ -3207,7 +3207,7 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
     }
 
     const wasteSuffix =
-      wastedCalls > 0 ? `  ·  ${wastedCalls} wasted calls (${wastePct}% of all calls)` : '';
+      wastedCalls > 0 ? `  ·  ${wastedCalls} repeat calls (${wastePct}% of all calls)` : '';
     const title = `AGENT LOOPS  ·  ${scan.loopFindings.length} pattern${scan.loopFindings.length !== 1 ? 's' : ''}${wasteSuffix}`;
     for (const ln of boxPanel(title, loopLines)) console.log('  ' + ln);
     // Earlier the "N repeated calls (~N × cost-per-iteration)" line
@@ -4021,7 +4021,7 @@ export function registerScanCommand(program: Command): void {
             }
 
             // ── Most stuck tools (top 3 by wasted-call share) ──────────────
-            // Aggregate wasted calls (count - 1 per finding) by toolName, so
+            // Aggregate repeat calls (count - 1 per finding) by toolName, so
             // a heavy user can see at a glance which tool is burning their
             // tokens. Hidden when total waste is trivial (<5) to avoid noise.
             const stuckTools = computeStuckTools(scan.loopFindings);
