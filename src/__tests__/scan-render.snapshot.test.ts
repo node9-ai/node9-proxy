@@ -89,6 +89,7 @@ function emptySummary(overrides: Partial<ScanSummary> = {}): ScanSummary {
     leaks: [],
     loops: [],
     loopWastedUSD: 0,
+    loopWaste: { usd: 0, pricedIterations: 0, unpricedIterations: 0 },
     ...overrides,
   };
 }
@@ -298,6 +299,7 @@ function richFixture(): CompactInput {
       },
     ],
     loopWastedUSD: 0.246,
+    loopWaste: { usd: 0.246, pricedIterations: 1, unpricedIterations: 0 },
   });
 
   return {
@@ -489,6 +491,7 @@ function panelFixture(): CompactInput {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     leaks: scan.dlpFindings as any,
     loopWastedUSD: 0.25,
+    loopWaste: { usd: 0.25, pricedIterations: 1, unpricedIterations: 0 },
   });
 
   return {

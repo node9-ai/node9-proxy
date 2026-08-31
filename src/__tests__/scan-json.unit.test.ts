@@ -48,6 +48,7 @@ function emptySummary(overrides: Partial<ScanSummary> = {}): ScanSummary {
     leaks: [],
     loops: [],
     loopWastedUSD: 0,
+    loopWaste: { usd: 0, pricedIterations: 0, unpricedIterations: 0 },
     ...overrides,
   };
 }
@@ -140,6 +141,7 @@ describe('buildScanJson', () => {
     const summary = emptySummary({
       byVerdict: { blocked: 1, supervised: 2, leaks: 3, loops: 4 },
       loopWastedUSD: 0.5,
+      loopWaste: { usd: 0.5, pricedIterations: 1, unpricedIterations: 0 },
     });
     const out = buildScanJson({
       scan: emptyScan(),

@@ -241,7 +241,12 @@ exports[`buildScanJson — envelope snapshot > rich fixture 1`] = `
     ],
     "leaks": [],
     "loops": [],
-    "loopWastedUSD": 0.246
+    "loopWastedUSD": 0.246,
+    "loopWaste": {
+      "usd": 0.246,
+      "pricedIterations": 1,
+      "unpricedIterations": 0
+    }
   },
   "blast": {
     "score": 25,
