@@ -70,6 +70,7 @@ import {
 import { PROTECTIVE_SHIELD_DISCOUNTS } from '../../protection';
 import stringWidth from 'string-width';
 import { buildScanJson } from '../render/scan-json';
+import { listSessionFiles, sessionIdOf } from '../../session-files';
 import {
   appendScanHistory,
   computeScanDelta,
@@ -821,7 +822,9 @@ function countScanFiles(): number {
                 const dp = path.join(mp, day);
                 try {
                   if (!fs.statSync(dp).isDirectory()) continue;
-                  total += fs.readdirSync(dp).filter((f) => f.endsWith('.jsonl')).length;
+                  // Must match the walker below, or the progress bar counts
+                  // fewer files than actually get scanned.
+                  total += listSessionFiles(dp).length;
                 } catch {
                   continue;
                 }
@@ -887,7 +890,9 @@ function processClaudeFile(
   result.sessions++;
   onProgress?.(result.filesScanned);
 
-  const sessionId = file.replace(/\.jsonl$/, '');
+  // basename, not the whole relative path: a nested transcript would
+  // otherwise get a session id like 'subagents/agent-x'.
+  const sessionId = sessionIdOf(file);
   // Per-session totals, so loop waste can be priced at THIS session's rate
   // instead of a fleet average. Pushed once at the end of the file.
   const session: SessionCost = { sessionId, costUSD: 0, toolCalls: 0 };
@@ -1222,7 +1227,7 @@ function processClaudeProject(
 
   let files: string[];
   try {
-    files = fs.readdirSync(projPath).filter((f) => f.endsWith('.jsonl') && !f.startsWith('agent-'));
+    files = listSessionFiles(projPath);
   } catch {
     return;
   }
@@ -1273,7 +1278,7 @@ async function processClaudeProjectAsync(
 
   let files: string[];
   try {
-    files = fs.readdirSync(projPath).filter((f) => f.endsWith('.jsonl') && !f.startsWith('agent-'));
+    files = listSessionFiles(projPath);
   } catch {
     return;
   }

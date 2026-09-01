@@ -19,6 +19,7 @@ import { ensurePricingLoaded, pricingFor, normalizeModel } from './pricing/litel
 import { codexSource } from './cost-codex.js';
 import { geminiSource } from './cost-gemini.js';
 import { copilotSource } from './cost-copilot.js';
+import { listSessionFiles } from './session-files.js';
 
 type DailyEntry = {
   date: string;
@@ -196,7 +197,9 @@ export const claudeSource: CostSource = {
 
       let files: string[];
       try {
-        files = fs.readdirSync(dirPath).filter((f) => f.endsWith('.jsonl'));
+        // Recursive: sub-agent and workflow transcripts live below the top
+        // level and were never counted. See src/session-files.ts.
+        files = listSessionFiles(dirPath);
       } catch {
         continue;
       }
