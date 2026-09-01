@@ -25,6 +25,7 @@ import { pricingFor, normalizeModel } from '../../pricing/litellm';
 import { codexSessionCost } from '../../cost-codex';
 import type { BuildReportJsonInput, ReportPeriod } from '../render/report-json';
 import { classifyDecision, NON_DECISION_SOURCES } from '../../audit/decision';
+import { listSessionFiles } from '../../session-files';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -457,7 +458,10 @@ function processClaudeCostProject(
   try {
     const stat = fs.statSync(projPath);
     if (!stat.isDirectory()) return;
-    files = fs.readdirSync(projPath).filter((f) => f.endsWith('.jsonl') && !f.startsWith('agent-'));
+    // Recursive, and WITHOUT the old `!agent-` filter: that filter was
+    // written for a layout where agent transcripts sat at depth 1 (zero there
+    // today, 458 nested) and would now exclude exactly what we came for.
+    files = listSessionFiles(projPath);
   } catch {
     return;
   }

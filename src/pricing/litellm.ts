@@ -120,7 +120,7 @@ export function normalizeModel(raw: string): string {
  * older than TTL_MS. Silent failure: pricing is non-critical — we'd
  * rather fall back to bundled defaults than throw.
  */
-function readCache(): Record<string, PricingTuple> | null {
+function readCache(opts: { requireFresh: boolean }): Record<string, PricingTuple> | null {
   try {
     const raw = JSON.parse(fs.readFileSync(CACHE_FILE(), 'utf-8')) as PricingCache;
     if (
@@ -131,7 +131,9 @@ function readCache(): Record<string, PricingTuple> | null {
       return null;
     }
     const ageMs = Date.now() - new Date(raw.fetchedAt).getTime();
-    if (ageMs < 0 || ageMs > TTL_MS) return null;
+    // A clock skewed into the future means we cannot reason about age at all.
+    if (!Number.isFinite(ageMs) || ageMs < 0) return null;
+    if (opts.requireFresh && ageMs > TTL_MS) return null;
     return raw.prices;
   } catch {
     return null;
@@ -232,7 +234,7 @@ export async function fetchLiteLLMPricing(): Promise<Record<string, PricingTuple
 export async function ensurePricingLoaded(): Promise<void> {
   if (memCache !== null && Date.now() - memCacheAt < TTL_MS) return;
 
-  const fromDisk = readCache();
+  const fromDisk = readCache({ requireFresh: true });
   if (fromDisk && Object.keys(fromDisk).length > 0) {
     memCache = fromDisk;
     memCacheAt = Date.now();
@@ -285,7 +287,17 @@ export function pricingFor(model: string): PricingTuple | null {
   // is TTL-checked, so a stale/missing cache just leaves us on bundled.
   if (memCache === null && !diskChecked) {
     diskChecked = true;
-    const disk = readCache();
+    // requireFresh: false. An EXPIRED cache is still vastly better than the
+    // bundled table, and discarding it was a live bug: on 2026-09-01 the cache
+    // was 29h old, the CLI fell back to BUNDLED_PRICING (which stops at
+    // claude-opus-4-7), and every opus-5 / fable-5 row priced at nothing —
+    // $10,504 of 30-day spend reported as $466. Same data, same code, 95% gone.
+    //
+    // Only ensurePricingLoaded (async, daemon + upload path) enforces the TTL,
+    // and it refetches when it trips. So the freshest thing on disk is always
+    // on its way; the synchronous CLI should read what is there rather than
+    // reach past it for something older still.
+    const disk = readCache({ requireFresh: false });
     if (disk && Object.keys(disk).length > 0) {
       memCache = disk;
       memCacheAt = Date.now();
