@@ -296,7 +296,9 @@ describe('extractSessionLevelFindings — loop detection', () => {
     expect(out).toHaveLength(1);
     expect(out[0].type).toBe('loop');
     expect(out[0].loopCount).toBeGreaterThanOrEqual(4);
-    expect(out[0].costUsd).toBeGreaterThan(0);
+    // The extractor must not price anything: it sees tool calls, never spend.
+    // A flat constant here looked like a measurement and was read as one.
+    expect(out[0]).not.toHaveProperty('costUsd');
     expect(out[0].commandPreview).toContain('npm test');
   });
 
@@ -406,7 +408,7 @@ describe('dedupeCanonicalFindings', () => {
     expect(merged).toHaveLength(2);
   });
 
-  it('sums costUsd across loop occurrences', () => {
+  it('sums loopCount across loop occurrences', () => {
     const base: CanonicalFinding = {
       type: 'loop',
       ruleName: 'loop',
@@ -422,12 +424,11 @@ describe('dedupeCanonicalFindings', () => {
       firstSeenAt: 'x',
       lastSeenAt: 'x',
       occurrenceCount: 1,
-      costUsd: 0.05,
       loopCount: 5,
     };
     const merged = dedupeCanonicalFindings([base, base]);
-    expect(merged[0].costUsd).toBeCloseTo(0.1);
     expect(merged[0].loopCount).toBe(10);
+    expect(merged[0]).not.toHaveProperty('costUsd');
   });
 });
 

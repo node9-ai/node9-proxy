@@ -103,6 +103,7 @@ function emptyScan(overrides: Partial<ScanResult> = {}): ScanResult {
     firstDate: null,
     lastDate: null,
     sessionsWithEarlySecrets: 0,
+    perSession: [],
     ...overrides,
   };
 }
@@ -304,9 +305,35 @@ describe('buildScanSummary', () => {
         },
       ],
     });
+    scan.perSession = [{ sessionId: 's', costUSD: 200, toolCalls: 100 }];
     const s = buildScanSummary([claudeAgent(scan)]);
-    // Total wasted = 9 iters × $0.006 = $0.054
-    expect(s.loopWastedUSD).toBeCloseTo(9 * 0.006);
+    // 9 wasted iterations, priced at that session's own rate ($2.00/call).
+    // The flat $0.006 this replaced would have called the same work $0.054.
+    expect(s.loopWaste.pricedIterations).toBe(9);
+    expect(s.loopWastedUSD).toBeCloseTo(9 * 2);
+  });
+
+  it('reports waste it cannot price as unpriced, never as free', () => {
+    const scan = emptyScan({
+      loopFindings: [
+        {
+          toolName: 'edit',
+          commandPreview: 'edit /a',
+          count: 10,
+          timestamp: '',
+          project: '~/p',
+          sessionId: 's',
+          agent: 'claude',
+        },
+      ],
+    });
+    // No perSession row: Antigravity and Copilot transcripts carry no token
+    // data, so this is the real shape for those agents — and $0.00 next to 7
+    // wasted iterations reads as "nothing happened".
+    const s = buildScanSummary([claudeAgent(scan)]);
+    expect(s.loopWastedUSD).toBe(0);
+    expect(s.loopWaste.pricedIterations).toBe(0);
+    expect(s.loopWaste.unpricedIterations).toBe(7);
   });
 
   it('sorts sections: most blocked first, then by total findings', () => {
@@ -457,10 +484,13 @@ describe('loopWastedUSD excludes long-iteration findings', () => {
         },
       ],
     });
+    scan.perSession = [{ sessionId: 'sess1', costUSD: 100, toolCalls: 100 }];
     const s = buildScanSummary([claudeAgent(scan)]);
-    // Only 7 wasted iters (10 loop - 3 threshold), at $0.006/iter = $0.042.
-    // The 97 long-iteration iters above threshold contribute ZERO.
-    expect(s.loopWastedUSD).toBeCloseTo(7 * 0.006, 4);
+    // Only 7 wasted iters (10 loop - 3 threshold) at $1.00/call. The 97
+    // long-iteration iterations above threshold contribute ZERO: that is
+    // sustained work on one target, not a stuck loop.
+    expect(s.loopWaste.pricedIterations).toBe(7);
+    expect(s.loopWastedUSD).toBeCloseTo(7, 4);
   });
 
   it('treats missing kind as a real loop (backwards compat)', () => {
@@ -479,8 +509,10 @@ describe('loopWastedUSD excludes long-iteration findings', () => {
         },
       ],
     });
+    scan.perSession = [{ sessionId: 'sess1', costUSD: 100, toolCalls: 100 }];
     const s = buildScanSummary([claudeAgent(scan)]);
-    expect(s.loopWastedUSD).toBeCloseTo(7 * 0.006, 4);
+    expect(s.loopWaste.pricedIterations).toBe(7);
+    expect(s.loopWastedUSD).toBeCloseTo(7, 4);
   });
 });
 

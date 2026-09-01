@@ -41,7 +41,6 @@ import { classifyRuleSeverity, type Severity } from '../severity';
 import { DESTRUCTIVE_OP_RE, SENSITIVE_PATH_RE, FILE_TOOLS } from './destructive-regex';
 import { detectPii } from './pii';
 import { evaluateLoopWindow, type ToolCallRecord } from '../loop';
-import { COST_PER_LOOP_ITER_USD } from './index';
 import type { SmartRule } from '../types';
 import type { ScanFinding } from './index';
 
@@ -102,8 +101,10 @@ export interface CanonicalFinding {
 
   /** AST findings: the path that triggered the verdict. */
   subjectPath?: string;
-  /** Loop findings: dollar cost so far. Loop-only today; optional everywhere. */
-  costUsd?: number;
+  // No costUsd here. This extractor sees a session's tool calls and nothing
+  // about spend (SessionExtractContext carries sessionId/project/agent only),
+  // so any price it attached was a flat constant wearing the costume of a
+  // measurement. Callers that DO know the rate attach it themselves.
   /** Loop findings: number of iterations. */
   loopCount?: number;
   loopKind?: 'loop' | 'long-iteration';
@@ -251,7 +252,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v9';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '92d7a05d6db84a39';
+export const CANONICAL_EXTRACTOR_HASH = '0d6c1ddb9a5af5b7';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
@@ -595,7 +596,6 @@ export function extractSessionLevelFindings(
       loopCount: verdict.count,
       loopKind: 'loop',
       commandPreview: previewArgs(call.args, DEDUPE_PREVIEW_LEN),
-      costUsd: verdict.count * COST_PER_LOOP_ITER_USD,
     });
   }
 
@@ -629,10 +629,6 @@ export function dedupeCanonicalFindings(
     }
     if (f.lastSeenAt && f.lastSeenAt > prev.lastSeenAt) {
       prev.lastSeenAt = f.lastSeenAt;
-    }
-    // Sum cost across loop occurrences; leave undefined otherwise.
-    if (f.costUsd !== undefined) {
-      prev.costUsd = (prev.costUsd ?? 0) + f.costUsd;
     }
     if (f.loopCount !== undefined) {
       prev.loopCount = (prev.loopCount ?? 0) + f.loopCount;
