@@ -210,7 +210,14 @@ export const DEFAULT_CONFIG: Config = {
   settings: {
     mode: 'standard',
     autoStartDaemon: true,
-    enableHookLogDebug: true,
+    // Off by default: this is a DEBUG facility, not part of the product's job.
+    // When on, every tool call appends a row to ~/.node9/hook-debug.log, which
+    // has no production reader and no size ceiling. Turn it on deliberately
+    // (this setting, or NODE9_DEBUG=1) while investigating something.
+    // Error breadcrumbs written from catch blocks are NOT gated by this and
+    // keep working when it is off — see CLAUDE.md "Always write to
+    // hook-debug.log in catch blocks that guard audit trail".
+    enableHookLogDebug: false,
     approvalTimeoutMs: 120_000, // 120-second auto-deny timeout
     flightRecorder: true,
     auditHashArgs: true,

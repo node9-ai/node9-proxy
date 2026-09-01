@@ -30,6 +30,11 @@ const H = vi.hoisted(() => ({
   initSaaS: vi.fn(),
   evaluatePolicy: vi.fn(),
   registerDaemonEntry: vi.fn(),
+  // Round-3 F1e: the cloud poller is controllable so a row can prove whether
+  // the cloud was ENROLLED as a racer, not merely whether it won. The default
+  // (set in beforeEach) is the original never-resolves promise, so rows A-F
+  // keep their meaning: the timeout racer decides.
+  pollSaaS: vi.fn(),
 }));
 
 vi.mock('../policy', () => ({
@@ -99,8 +104,9 @@ vi.mock('../audit', () => ({
 
 vi.mock('../auth/cloud', () => ({
   initNode9SaaS: (...a: unknown[]) => H.initSaaS(...a),
-  // Never resolves — the cloud poller must not win; the timeout racer decides.
-  pollNode9SaaS: () => new Promise(() => {}),
+  // Delegated so a row can control it. Default (beforeEach) never resolves —
+  // the cloud poller must not win; the timeout racer decides.
+  pollNode9SaaS: (...a: unknown[]) => H.pollSaaS(...a),
   resolveNode9SaaS: vi.fn(),
 }));
 
@@ -156,6 +162,9 @@ describe('real-gate: downgraded ruleName-less hard block (round-2 F1/F3)', () =>
     H.initSaaS.mockResolvedValue({ pending: true, requestId: 'req-1' });
     H.evaluatePolicy.mockResolvedValue(RULENAME_LESS_BLOCK);
     H.registerDaemonEntry.mockResolvedValue({ id: 'entry-1', allowCount: 1 });
+    // Preserves the original module-mock behaviour for every row that does not
+    // override it: the poll never settles, so it can never win the race.
+    H.pollSaaS.mockImplementation(() => new Promise(() => {}));
   });
 
   afterEach(() => {
@@ -252,5 +261,54 @@ describe('real-gate: downgraded ruleName-less hard block (round-2 F1/F3)', () =>
     // answering, the timeout racer denies.
     expect(H.registerDaemonEntry).toHaveBeenCalled();
     expect(res.approved).toBe(false);
+  });
+
+  // ── Round-3 F1e: the cloud as a RACER ────────────────────────────────────
+  // The sixth non-human channel. Rows B/D/E/F closed persistent, trust,
+  // shadowMode and the inline prompt; the immediate-allow guard closed the
+  // !pending branch. The pending branch stayed open: `cloudRequestId` was set
+  // unconditionally, which enrolled the cloud poller in the race.
+  //
+  // Measured on the founder's machine 2026-08-31 — 143 real deny→allow pairs,
+  // e.g. `cat ~/.ssh/id_rsa` recorded as smart-rule-block-override (deny) and
+  // then, 8.7s later, allow with a cloudRequestId and nobody having clicked.
+  it('G: interactive downgrade + cloud PENDING — the cloud must not race a hard block', async () => {
+    process.env.DISPLAY = ':0'; // human reachable → mayDowngrade
+    H.cloudEnabled.mockReturnValue(true);
+    H.initSaaS.mockResolvedValue({ pending: true, requestId: 'req-1' });
+    // The measured BE shape: the pending entry resolves to "no org rule
+    // matched" with no human click. Resolving immediately here means the cloud
+    // WINS the race if it is enrolled at all — which is exactly the bug.
+    H.pollSaaS.mockResolvedValue({ approved: true });
+
+    const res = await authorizeHeadless('Bash', { command: 'echo hello' });
+
+    // Enrolment, not just outcome: the poller must never be reached.
+    expect(H.pollSaaS).not.toHaveBeenCalled();
+    expect(res.checkedBy).not.toBe('cloud');
+    // Nobody answers the popup, so the timeout racer denies. Fails closed.
+    expect(res.approved).toBe(false);
+  });
+
+  it('H: cloud PENDING with NO local match — the cloud still races (normal path intact)', async () => {
+    process.env.DISPLAY = ':0';
+    H.cloudEnabled.mockReturnValue(true);
+    // A plain review: no ruleName, tier != 7, decision != 'block' — so
+    // hardBlockDowngraded stays false and localSmartRuleMatched is never set.
+    // This is the case the cloud SHOULD decide; the fix must not touch it.
+    H.evaluatePolicy.mockResolvedValue({
+      decision: 'review',
+      tier: 1,
+      blockedByLabel: 'Ordinary review',
+      reason: 'ordinary review verdict',
+    });
+    H.initSaaS.mockResolvedValue({ pending: true, requestId: 'req-2' });
+    H.pollSaaS.mockResolvedValue({ approved: true });
+
+    const res = await authorizeHeadless('Bash', { command: 'echo hello' });
+
+    expect(H.pollSaaS).toHaveBeenCalled();
+    expect(res.approved).toBe(true);
+    expect(res.checkedBy).toBe('cloud');
   });
 });
