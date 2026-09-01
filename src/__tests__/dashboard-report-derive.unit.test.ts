@@ -26,6 +26,7 @@ function emptyResult(): ScanResult {
     firstDate: null,
     lastDate: null,
     sessionsWithEarlySecrets: 0,
+    perSession: [],
   };
 }
 

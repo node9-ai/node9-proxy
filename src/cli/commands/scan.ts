@@ -170,6 +170,29 @@ export interface ScanResult {
   firstDate: string | null;
   lastDate: string | null;
   sessionsWithEarlySecrets: number;
+  /**
+   * Cost and tool-call volume per session, so a loop can be priced by the
+   * session it actually ran in.
+   *
+   * The aggregates above cannot do this. Measured on the founder's history,
+   * the per-call rate swings 11x across sessions ($0.11 to $1.21) because the
+   * model differs (opus-4-8 / opus-5 / fable-5) and context grows through a
+   * session. Any single average erases exactly the variation that matters:
+   * 99.2% of his spend sits in the 19 sessions that looped.
+   *
+   * Claude only for now. Antigravity and Copilot transcripts carry no token
+   * data at all (totalCostUSD is a structural 0), so a rate for them would be
+   * unknown, not cheap — and callers must render that difference.
+   */
+  perSession: SessionCost[];
+}
+
+/** Per-session totals. `toolCalls` counts tool_use blocks, matching the
+ *  denominator scan-upload-history.ts uses when it builds SessionToolCall. */
+export interface SessionCost {
+  sessionId: string;
+  costUSD: number;
+  toolCalls: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -386,7 +409,7 @@ export interface StuckTool {
   toolName: string;
   /** Wasted calls = sum of (count - 1) across all loop findings for this tool. */
   waste: number;
-  /** Share of total wasted calls across all tools, rounded to nearest %. */
+  /** Share of total repeat calls across all tools, rounded to nearest %. */
   pct: number;
 }
 
@@ -865,6 +888,9 @@ function processClaudeFile(
   onProgress?.(result.filesScanned);
 
   const sessionId = file.replace(/\.jsonl$/, '');
+  // Per-session totals, so loop waste can be priced at THIS session's rate
+  // instead of a fleet average. Pushed once at the end of the file.
+  const session: SessionCost = { sessionId, costUSD: 0, toolCalls: 0 };
 
   let raw: string;
   try {
@@ -992,11 +1018,13 @@ function processClaudeFile(
     if (usage && model) {
       const p = claudeModelPrice(model);
       if (p) {
-        result.totalCostUSD +=
+        const rowCost =
           (usage.input_tokens ?? 0) * p.i +
           (usage.output_tokens ?? 0) * p.o +
           (usage.cache_creation_input_tokens ?? 0) * p.cw +
           (usage.cache_read_input_tokens ?? 0) * p.cr;
+        result.totalCostUSD += rowCost;
+        session.costUSD += rowCost;
       }
     }
 
@@ -1007,6 +1035,7 @@ function processClaudeFile(
     for (const block of content) {
       if (block.type !== 'tool_use') continue;
       result.totalToolCalls++;
+      session.toolCalls++;
 
       const toolName = block.name ?? '';
       const toolNameLower = toolName.toLowerCase();
@@ -1158,6 +1187,11 @@ function processClaudeFile(
   if (firstDlpTs !== null && (firstEditTs === null || firstDlpTs < firstEditTs)) {
     result.sessionsWithEarlySecrets++;
   }
+
+  // Record the session even at zero cost: an empty record says "we looked and
+  // this session priced at nothing", which a consumer must be able to tell
+  // apart from "we have no record of this session at all".
+  result.perSession.push(session);
 }
 
 /**
@@ -1279,6 +1313,7 @@ function emptyClaudeScan(): ScanResult {
     firstDate: null,
     lastDate: null,
     sessionsWithEarlySecrets: 0,
+    perSession: [],
   };
 }
 
@@ -1383,6 +1418,7 @@ export function scanGeminiHistory(
     firstDate: null,
     lastDate: null,
     sessionsWithEarlySecrets: 0,
+    perSession: [],
   };
   const dedup = emptyScanDedup();
 
@@ -1709,6 +1745,7 @@ export function scanAntigravityHistory(
     firstDate: null,
     lastDate: null,
     sessionsWithEarlySecrets: 0,
+    perSession: [],
   };
   const dedup = emptyScanDedup();
 
@@ -1973,6 +2010,7 @@ export function scanCopilotHistory(
     firstDate: null,
     lastDate: null,
     sessionsWithEarlySecrets: 0,
+    perSession: [],
   };
   const dedup = emptyScanDedup();
 
@@ -2198,6 +2236,7 @@ export function scanCodexHistory(
     firstDate: null,
     lastDate: null,
     sessionsWithEarlySecrets: 0,
+    perSession: [],
   };
   const dedup = emptyScanDedup();
 
@@ -2521,6 +2560,7 @@ function mergeScans(a: ScanResult, b: ScanResult): ScanResult {
     firstDate: dates.length ? dates.sort()[0] : null,
     lastDate: lastDates.length ? lastDates.sort().at(-1)! : null,
     sessionsWithEarlySecrets: a.sessionsWithEarlySecrets + b.sessionsWithEarlySecrets,
+    perSession: [...a.perSession, ...b.perSession],
   };
 }
 
@@ -2713,7 +2753,7 @@ export function renderCompactScorecard(input: CompactInput): void {
     const wasteParts: string[] = [];
     // "% of all calls", never bare "% wasted": the percentage is a share of
     // tool CALLS, and unlabeled it reads as a share of the cost beside it.
-    if (wastedCalls > 0) wasteParts.push(`${wastedCalls} wasted calls (${wastePct}% of all calls)`);
+    if (wastedCalls > 0) wasteParts.push(`${wastedCalls} repeat calls (${wastePct}% of all calls)`);
     if (summary.loopWastedUSD > 0) wasteParts.push('~' + fmtCost(summary.loopWastedUSD));
     const wasteSummary = wasteParts.length ? `(${wasteParts.join('  ·  ')})` : '';
     console.log(
@@ -2843,7 +2883,7 @@ export function renderNarrativeScorecard(input: CompactInput): void {
     const { wastePct, wastedCalls } = computeLoopWaste(scan.loopFindings, scan.totalToolCalls);
     const cost = summary.loopWastedUSD > 0 ? `, ~${fmtCost(summary.loopWastedUSD)} wasted` : '';
     medium.push({
-      label: `${scan.loopFindings.length} agent loops (${wastedCalls} wasted calls, ${wastePct}% of calls${cost})`,
+      label: `${scan.loopFindings.length} agent loops (${wastedCalls} repeat calls, ${wastePct}% of calls${cost})`,
       count: scan.loopFindings.length,
     });
   }
@@ -3051,7 +3091,7 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
     }
     const top = [...byTool.entries()].sort((a, b) => b[1] - a[1])[0];
     const wasteSuffix =
-      wastedCalls > 0 ? `, ${wastedCalls} wasted calls · ${wastePct}% of calls` : '';
+      wastedCalls > 0 ? `, ${wastedCalls} repeat calls · ${wastePct}% of calls` : '';
     const detail = top ? `(${top[0]} dominates${wasteSuffix})` : '';
     topLines.push(
       mkLine(
@@ -3207,7 +3247,7 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
     }
 
     const wasteSuffix =
-      wastedCalls > 0 ? `  ·  ${wastedCalls} wasted calls (${wastePct}% of all calls)` : '';
+      wastedCalls > 0 ? `  ·  ${wastedCalls} repeat calls (${wastePct}% of all calls)` : '';
     const title = `AGENT LOOPS  ·  ${scan.loopFindings.length} pattern${scan.loopFindings.length !== 1 ? 's' : ''}${wasteSuffix}`;
     for (const ln of boxPanel(title, loopLines)) console.log('  ' + ln);
     // Earlier the "N repeated calls (~N × cost-per-iteration)" line
@@ -4021,7 +4061,7 @@ export function registerScanCommand(program: Command): void {
             }
 
             // ── Most stuck tools (top 3 by wasted-call share) ──────────────
-            // Aggregate wasted calls (count - 1 per finding) by toolName, so
+            // Aggregate repeat calls (count - 1 per finding) by toolName, so
             // a heavy user can see at a glance which tool is burning their
             // tokens. Hidden when total waste is trivial (<5) to avoid noise.
             const stuckTools = computeStuckTools(scan.loopFindings);
