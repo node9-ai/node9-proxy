@@ -29,7 +29,13 @@ export function CostPanel({ summary, width }: Props): React.ReactElement {
   const total = summary.stats.totalCostUSD;
   return (
     <Box borderStyle="round" borderColor="gray" paddingX={1} flexDirection="column" width={width}>
-      <Text bold>COST</Text>
+      {/* "API value", not "spend": this is tokens x list price. A user on a
+          flat monthly plan pays their plan, not this — and today the product
+          has no concept of a plan at all, so an unqualified "Total" asserts
+          something false for every subscriber. The number is right; the word
+          was wrong. It is also the better story once labelled: this much
+          value consumed, against whatever the plan actually costs. */}
+      <Text bold>COST · API value</Text>
 
       <Box>
         <Box width={LABEL_W}>

@@ -147,11 +147,13 @@ export function StaticScorecard({ input, rangeLabel, now }: Props): React.ReactE
         const parts: string[] = [];
         if (reviewCount > 0) parts.push(`${reviewCount} op${reviewCount !== 1 ? 's' : ''} flagged`);
         if (loopCount > 0)
-          // loops = repeated PATTERNS; wasted calls = repeats inside them. The
+          // loops = repeated PATTERNS; repeat calls = the repeats inside them,
+          // NOT a waste claim: this list is unfiltered, so sustained work on one
+          // file (kind: long-iteration) is counted here too. The
           // % is a share of ALL TOOL CALLS — never render it as a cost share.
           parts.push(
             `${loopCount} loop${loopCount !== 1 ? 's' : ''}${
-              wastedCalls > 0 ? ` · ${wastedCalls} wasted calls (${wastePct}% of all calls)` : ''
+              wastedCalls > 0 ? ` · ${wastedCalls} repeat calls (${wastePct}% of all calls)` : ''
             }`
           );
         return (

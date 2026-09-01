@@ -15,7 +15,7 @@
 //
 // This module is PURE: no fs, no network. Any I/O (scanning JSONL) lives
 // in cli/commands/scan.ts; this module only consumes ScanResult instances.
-import type { ScanResult } from './cli/commands/scan';
+import type { ScanResult, SessionCost } from './cli/commands/scan';
 import { SHIELDS } from './shields';
 
 // ---------------------------------------------------------------------------
@@ -108,6 +108,9 @@ export interface ScanSummary {
   leaks: LeakRef[];
   loops: LoopRef[];
   loopWastedUSD: number;
+  /** Coverage behind loopWastedUSD — see LoopWaste. Absent dollars are not
+   *  zero dollars, and a renderer needs to be able to say so. */
+  loopWaste: LoopWaste;
 }
 
 export interface AgentSummary {
@@ -176,12 +179,84 @@ export interface LoopRef {
 // compute the same loop-waste figure without copying values across packages.
 // ---------------------------------------------------------------------------
 
-export { LOOP_THRESHOLD_FOR_WASTE, COST_PER_LOOP_ITER_USD } from '@node9/policy-engine';
-import { LOOP_THRESHOLD_FOR_WASTE, COST_PER_LOOP_ITER_USD } from '@node9/policy-engine';
+// COST_PER_LOOP_ITER_USD is deliberately NOT imported or re-exported here any
+// more. Loop dollars come from computeLoopWaste and the session that produced
+// them; a reachable constant is how six competing loop-waste formulas grew in
+// the first place — whoever needed a price multiplied by the nearest one.
+export { LOOP_THRESHOLD_FOR_WASTE } from '@node9/policy-engine';
+import { LOOP_THRESHOLD_FOR_WASTE } from '@node9/policy-engine';
 
 // ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
+
+/**
+ * Highest believable price for one tool call, in USD.
+ *
+ * Real rates measured across live sessions span $0.11 to $1.21. A basis above
+ * this ceiling means the denominator is wrong (a session whose tool calls were
+ * not counted), not that a call truly cost that much — and 40 iterations times
+ * a bad basis renders a six-figure "finding". Reject instead: unknown is
+ * recoverable, a fabricated headline number is not.
+ */
+export const MAX_PLAUSIBLE_RATE_USD = 50;
+
+export interface LoopWaste {
+  /** Dollars for the iterations we could price. Never includes a guess. */
+  usd: number;
+  /** Iterations priced from their own session's real cost. */
+  pricedIterations: number;
+  /**
+   * Iterations we could not price. NOT zero dollars — the session carried no
+   * usable cost (Antigravity and Copilot transcripts have no token data at
+   * all). Renderers must show `usd` as a floor when this is > 0.
+   */
+  unpricedIterations: number;
+}
+
+/**
+ * Price loop waste at the rate of the session each loop actually ran in.
+ *
+ * Per session, never blended. With a single average over a mixed set the
+ * arithmetic is not merely imprecise, it inverts: 10 iterations at $1.015 plus
+ * 10,000 at $0.001 is $20.15, while the same iterations against a blended
+ * $0.504 basis reads $5,049.
+ *
+ * Exported for its unit test — this is the one place a count becomes money.
+ */
+export function computeLoopWaste(
+  loops: ReadonlyArray<LoopRef>,
+  perSession: ReadonlyArray<SessionCost>
+): LoopWaste {
+  const rate = new Map<string, number>();
+  for (const s of perSession) {
+    // Every rejection below must land on "unknown", never on 0. A zero basis
+    // is a finite number, so it survives an isFinite guard and then prices
+    // real waste at $0.00 — which reads as "nothing to see here".
+    if (!(s.toolCalls > 0) || !(s.costUSD > 0)) continue;
+    const r = s.costUSD / s.toolCalls;
+    if (!Number.isFinite(r) || r <= 0 || r > MAX_PLAUSIBLE_RATE_USD) continue;
+    rate.set(s.sessionId, r);
+  }
+
+  let usd = 0;
+  let pricedIterations = 0;
+  let unpricedIterations = 0;
+  for (const l of loops) {
+    // Long iterations are sustained work on one target, not a stuck loop.
+    if (l.kind === 'long-iteration') continue;
+    const wasted = Math.max(0, l.count - LOOP_THRESHOLD_FOR_WASTE);
+    if (!Number.isFinite(wasted) || wasted === 0) continue;
+    const r = rate.get(l.sessionId);
+    if (r === undefined) {
+      unpricedIterations += wasted;
+      continue;
+    }
+    usd += wasted * r;
+    pricedIterations += wasted;
+  }
+  return { usd, pricedIterations, unpricedIterations };
+}
 
 export function buildScanSummary(agents: AgentScanInput[]): ScanSummary {
   // Aggregate stats across all agents
@@ -255,12 +330,15 @@ export function buildScanSummary(agents: AgentScanInput[]): ScanSummary {
   // Build sections — group findings by (sourceType, shieldName)
   const sections = buildSections(allFindings);
 
-  // Loop savings estimate — only true loops count toward waste, not long
-  // iterations (sustained deep work on one target across the session).
-  const wastedIters = allLoops
-    .filter((l) => l.kind !== 'long-iteration')
-    .reduce((sum, l) => sum + Math.max(0, l.count - LOOP_THRESHOLD_FOR_WASTE), 0);
-  const loopWastedUSD = wastedIters * COST_PER_LOOP_ITER_USD;
+  // Loop waste, priced per session. The flat COST_PER_LOOP_ITER_USD it
+  // replaced assumed ~2K Sonnet tokens for every iteration; against measured
+  // rates that is 100x to 200x low, and it reported $0.24 where the same
+  // iterations priced at their own sessions come to roughly $35.
+  const loopWaste = computeLoopWaste(
+    allLoops,
+    agents.flatMap((a) => a.scan.perSession)
+  );
+  const loopWastedUSD = loopWaste.usd;
 
   return {
     stats,
@@ -270,6 +348,7 @@ export function buildScanSummary(agents: AgentScanInput[]): ScanSummary {
     leaks: allLeaks,
     loops: allLoops,
     loopWastedUSD,
+    loopWaste,
   };
 }
 

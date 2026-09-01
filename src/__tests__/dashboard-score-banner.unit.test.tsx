@@ -101,6 +101,7 @@ const READY: ScanCache = {
       firstDate: null,
       lastDate: null,
       sessionsWithEarlySecrets: 0,
+      perSession: [],
     },
     gemini: {
       filesScanned: 0,
@@ -114,6 +115,7 @@ const READY: ScanCache = {
       firstDate: null,
       lastDate: null,
       sessionsWithEarlySecrets: 0,
+      perSession: [],
     },
     codex: {
       filesScanned: 0,
@@ -127,6 +129,7 @@ const READY: ScanCache = {
       firstDate: null,
       lastDate: null,
       sessionsWithEarlySecrets: 0,
+      perSession: [],
     },
   },
 };

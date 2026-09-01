@@ -59,7 +59,8 @@ export function Cost({ audit }: { audit: AggregateResult | null }): React.ReactE
       flexGrow={1}
       flexBasis={0}
     >
-      <Text bold>COST</Text>
+      {/* See CostPanel: tokens x list price, not what the user is billed. */}
+      <Text bold>COST · API value</Text>
       {audit === null ? (
         <Text dimColor>loading…</Text>
       ) : (

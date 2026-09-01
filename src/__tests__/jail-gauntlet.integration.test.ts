@@ -26,6 +26,7 @@
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import fs from 'fs';
 import path from 'path';
+import { FS_READ_TOOLS, analyzeFsOperation } from '@node9/policy-engine';
 import {
   CLI,
   makeHome,
@@ -181,5 +182,176 @@ describe('jail gauntlet — the credential jail holds at the real gate', () => {
     expect({ gate: gate.verdict, explainSaysAllow }, 'jail add promised reads BLOCK').toMatchObject(
       { gate: expect.not.stringMatching(/^allow$/) }
     );
+  });
+});
+
+/**
+ * The VERB axis (added 2026-08-31).
+ *
+ * Everything above varies WHICH TOOL carries the path — Read, Grep, Glob,
+ * shell. Every shell case is `cat`. That single hard-coded verb is why
+ * `base64 ~/.ssh/id_rsa` shipped undetected: it prints a file exactly like
+ * `cat` does, it simply was never in the suite because nobody thought to add
+ * it. A hand-written case list only ever covers what its author imagined.
+ *
+ * So this block DERIVES its cases from `FS_READ_TOOLS` — the same set the
+ * engine consults at `shell/index.ts:1765`. Add a name to that set and it gains
+ * jail coverage for free; remove one and the deletion shows up in the diff.
+ * Identical rule to the one the regex beside the set already follows:
+ * "DERIVED from FS_READ_TOOLS, never hand-written beside it."
+ */
+describe('jail gauntlet — the verb axis, derived from FS_READ_TOOLS', () => {
+  for (const verb of [...FS_READ_TOOLS].sort()) {
+    it(`shell: \`${verb}\` on a jailed path is blocked`, () => {
+      const { home, jailed } = jailedHome();
+      const r = probe(home, 'Bash', { command: `${verb} ${jailed}/key.txt` });
+      expect(r.verdict, `${verb} reads file contents — the jail must stop it`).toBe('block');
+    });
+  }
+});
+
+/** Build a command that MOVES rather than prints, per verb. */
+function copyCmd(verb: string, src: string): string {
+  if (verb === 'tar') return `tar cf /tmp/n9-gauntlet.tar ${src}`;
+  if (verb === 'ln') return `ln -s ${src} /tmp/n9-gauntlet-link`;
+  return `${verb} ${src} /tmp/n9-gauntlet-copy`;
+}
+const COPY_VERBS = ['cp', 'install', 'ln', 'rsync', 'tar'];
+
+/**
+ * ⭐ The two jails do NOT share a mechanism, and it decides copy coverage.
+ *
+ * Written 2026-08-31 after this suite refuted the assumption behind
+ * `BUGS.md` § A. § A says copy verbs escape the jail. That is true of the
+ * BUILT-IN baseline only — a `jail add` / fleet path covers them fine:
+ *
+ *   user + org jail  →  `pathRules` emits a bash rule matching the PATH
+ *                       anywhere in the command (shields/build.ts:107).
+ *                       Verb-agnostic, so `cp`/`tar`/`rsync` are caught.
+ *   built-in baseline → `analyzeFsOperation`, which resolves the VERB first
+ *                       and only then its target paths. A verb outside
+ *                       `FS_READ_TOOLS` is never reached, so copying escapes.
+ *
+ * Same promise, two implementations, opposite coverage — the four-list problem
+ * in miniature. These blocks pin both halves so the difference can't drift.
+ */
+describe('jail gauntlet — copy verbs ARE covered by a user/org jail', () => {
+  for (const verb of COPY_VERBS) {
+    it(`\`${verb}\` out of a user-jailed dir is blocked`, () => {
+      const { home, jailed } = jailedHome();
+      const r = probe(home, 'Bash', { command: copyCmd(verb, `${jailed}/key.txt`) });
+      expect(r.verdict, `the path rule matches ${verb} regardless of verb`).toBe('block');
+    });
+  }
+});
+
+/**
+ * KNOWN UNCOVERED — the real, narrowed `BUGS.md` § A.
+ *
+ * The baseline paths (`~/.ssh`, `~/.aws`, `.env`) are guarded by the AST tier,
+ * which asks "which command PRINTS a file". `cp`/`tar`/`rsync` don't print,
+ * they move — and once the secret sits at /tmp every rule is gone, because they
+ * all key on the original path.
+ *
+ * ⚠️ These assertions are deliberately INVERTED: they assert the gap still
+ * exists. Until now it lived only in a doc — nothing told a reader it was
+ * there, nothing failed if someone half-fixed it, nothing would catch a later
+ * regression. As a test it is a fact CI reads every run.
+ *
+ * ✅ WHEN YOU FIX ONE this test FAILS. That is success — move the verb up into
+ * the covered block and delete its line here. Never silence it by loosening
+ * the assertion.
+ *
+ * ⚠️ WINDOWS — skipped, because the premise itself is absent there.
+ * `path.join` yields backslashes on win32, and mvdan-sh parses `\` as a POSIX
+ * escape and EATS it, so the literal reaching the matcher has no separators
+ * left at all:
+ *
+ *   POSIX    paths ["/home/x/.ssh/id_rsa"]   6 tokens  → block
+ *   win32    paths ["C:Usersx.sshid_rsa"]    2 tokens  → NULL
+ *
+ * So on Windows the built-in baseline never fires for ANY verb, and both the
+ * "copy escapes" rows and their CONTROL become vacuous — the rows would pass
+ * for the wrong reason and the CONTROL fails outright. That is a real product
+ * gap, not a test bug; it is pinned platform-independently by the engine-level
+ * block below so skipping here hides nothing.
+ *
+ * `pathRules` (user + fleet jail) is unaffected — it is a regex over raw
+ * command text with `[\s/\\]` separators and never meets the parser. The
+ * derived read-verb suite above therefore still runs everywhere.
+ */
+describe.skipIf(process.platform === 'win32')(
+  'jail gauntlet — copy verbs escape the BUILT-IN baseline (BUGS.md § A)',
+  () => {
+    for (const verb of COPY_VERBS) {
+      it(`⚠️ \`${verb}\` on ~/.ssh still escapes — read the block comment before fixing`, () => {
+        const { home } = jailedHome();
+        const ssh = path.join(home, '.ssh');
+        fs.mkdirSync(ssh, { recursive: true });
+        const r = probe(home, 'Bash', { command: copyCmd(verb, path.join(ssh, 'id_rsa')) });
+        expect(r.verdict, `${verb} moves the baseline secret out unnoticed`).toBe('allow');
+      });
+    }
+
+    it('CONTROL: a PRINTING verb on the same baseline path IS blocked', () => {
+      const { home } = jailedHome();
+      const ssh = path.join(home, '.ssh');
+      fs.mkdirSync(ssh, { recursive: true });
+      const r = probe(home, 'Bash', { command: `cat ${path.join(ssh, 'id_rsa')}` });
+      expect(r.verdict, 'without this the block above proves nothing').toBe('block');
+    });
+  }
+);
+
+/**
+ * ⚠️ KNOWN UNCOVERED — the AST tier is blind to Windows backslash paths.
+ *
+ * Pure-function assertions, so they run on EVERY platform: the gap stays
+ * visible on Linux CI instead of only surfacing when a Windows runner happens
+ * to execute the integration block above.
+ *
+ * `mvdan-sh` treats `\` as a POSIX escape and removes it, so a real Windows
+ * path arrives at the matcher with no separators. Consequence on a real
+ * Windows box: the built-in jail (`~/.ssh`, `~/.aws`, `.env`) never fires —
+ * not merely for copy verbs, for everything.
+ *
+ * ⛔ Bigger and NOT yet measured: the destructive AST rules (rm / mkfs / dd)
+ * very likely go blind the same way, since this is a parse-level loss rather
+ * than a matcher-level one.
+ *
+ * ⭐ These use `it.fails`, NOT an assertion that the gap exists. The difference
+ * matters. Asserting the broken value (`toBeNull()`) would write the bug into
+ * the suite as if it were the spec: a reader sees the wrong expectation, and
+ * whoever fixes the parser gets a red test whose easiest "fix" is to edit the
+ * assertion — silently re-hiding the gap. With `it.fails` the body states the
+ * DESIRED behaviour and only the marker says "known broken", so a fix makes
+ * vitest raise `Expect test to fail`, which cannot be satisfied by weakening
+ * an assertion — only by deleting the marker. Verified, not assumed.
+ */
+describe('AST tier — Windows path blindness (known gap)', () => {
+  const WIN_CASES: Array<[string, string]> = [
+    ['~/.ssh', 'cat C:\\Users\\x\\.ssh\\id_rsa'],
+    ['~/.aws', 'cat C:\\Users\\x\\.aws\\credentials'],
+    ['.env', 'cat C:\\proj\\.env'],
+    [
+      'quoted — quotes do not help, POSIX escapes apply inside them too',
+      'cat "C:\\Users\\x\\.ssh\\id_rsa"',
+    ],
+  ];
+  for (const [label, cmd] of WIN_CASES) {
+    // Body = what SHOULD happen. Marker = it does not yet. Delete the marker
+    // when the parse is fixed; never touch the expectation.
+    it.fails(`a Windows backslash path should be detected: ${label}`, () => {
+      expect(analyzeFsOperation(cmd)?.verdict).toBe('block');
+    });
+  }
+
+  it('CONTROL: the same Windows path with FORWARD slashes IS detected', () => {
+    const r = analyzeFsOperation('cat C:/Users/x/.ssh/id_rsa');
+    expect(r?.verdict, 'proves the matcher is fine — only the separator breaks it').toBe('block');
+  });
+
+  it('CONTROL: the POSIX equivalent IS detected', () => {
+    expect(analyzeFsOperation('cat /home/x/.ssh/id_rsa')?.verdict).toBe('block');
   });
 });
