@@ -424,7 +424,11 @@ export const detectDangerousEval = detectDangerousShellExec;
 // stdout, and the grep family prints matching lines — which is all an
 // exfiltrator needs. Adding a name here widens EVERY SENSITIVE_PATH_RULES entry
 // (.ssh, .aws, .env, credentials), not just the one being repaired.
-const FS_READ_TOOLS = new Set([
+// Exported so the jail gauntlet can DERIVE its shell cases from this set
+// instead of hand-writing them. Same rule the regex below already follows
+// ("DERIVED from FS_READ_TOOLS, never hand-written beside it") — a name added
+// here must gain coverage for free, or the set and its tests drift apart.
+export const FS_READ_TOOLS = new Set([
   'cat',
   'less',
   'head',

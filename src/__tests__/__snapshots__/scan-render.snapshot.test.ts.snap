@@ -60,7 +60,7 @@ exports[`N6 — state-aware phrasing (enabledShields injected) > ink scorecard: 
 🛡  node9 dashboard  ·  scanned last 90 days
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Spend & activity ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ╭──────────────────────────────────────────╮ ╭──────────────────────────────────────────╮
-│ COST                                     │ │ ACTIVITY                                 │
+│ COST · API value                         │ │ ACTIVITY                                 │
 │ Total           $14.5K                   │ │ Sessions        39                       │
 │ Wasted on loops ~$0.25                   │ │ Tools           15,000                   │
 │                                          │ │   Shell         7,500                    │
@@ -412,7 +412,7 @@ exports[`renderScanScorecardInk — output snapshots > clean fixture (good score
 🛡  node9 dashboard  ·  scanned last 90 days
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Spend & activity ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ╭──────────────────────────────────────────╮ ╭──────────────────────────────────────────╮
-│ COST                                     │ │ ACTIVITY                                 │
+│ COST · API value                         │ │ ACTIVITY                                 │
 │ Total           $1.50                    │ │ Sessions        5                        │
 │                                          │ │ Tools           200                      │
 │                                          │ │   Shell         80                       │
@@ -431,7 +431,7 @@ exports[`renderScanScorecardInk — output snapshots > panel fixture (critical s
 🛡  node9 dashboard  ·  scanned last 90 days
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Spend & activity ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ╭──────────────────────────────────────────╮ ╭──────────────────────────────────────────╮
-│ COST                                     │ │ ACTIVITY                                 │
+│ COST · API value                         │ │ ACTIVITY                                 │
 │ Total           $14.5K                   │ │ Sessions        39                       │
 │ Wasted on loops ~$0.25                   │ │ Tools           15,000                   │
 │                                          │ │   Shell         7,500                    │

@@ -42,6 +42,7 @@ export {
   toolMatchesRule,
   detectInlineExec,
   AST_FS_REGEX_RULES,
+  FS_READ_TOOLS,
   extractShellDestinations,
   parseDestHost,
 } from './shell';
