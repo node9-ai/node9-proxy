@@ -2496,13 +2496,41 @@ export function scanCodexHistory(
       }
     }
 
-    // Accumulate session cost via the SHARED codexSessionCost (price +
-    // arithmetic in one place) — the same source report + upload use.
-    result.totalCostUSD += codexSessionCost(model, {
-      input: lastTotalInput,
-      cached: lastTotalCached,
-      output: lastTotalOutput,
-    });
+    // Window the cost at SESSION level, matching report-audit.ts:658.
+    //
+    // Codex reports total_token_usage cumulatively — last row wins — so the
+    // figure below is the session's whole lifetime, not the part inside the
+    // window. The per-row guard above cannot help: it compares `startTime`
+    // (the session's own start) and only runs for `function_call` rows, so it
+    // filters findings and loops while token_count rows sail past it.
+    //
+    // Result before this: `node9 scan --days 30` reported every Codex session
+    // ever recorded. Measured on the founder's machine — 41 sessions, $13.69 —
+    // against `node9 report --period 30d` at 25 sessions, $1.04. Same data,
+    // same shared pricing function, 13x apart, because one of them windowed
+    // and the other did not.
+    //
+    // Deliberately NOT the ccusage per-event delta approach here. That is the
+    // more correct model for a session straddling the boundary, but measured:
+    // ZERO of 41 sessions straddle. Building it now would solve a case this
+    // data does not contain while leaving the actual gap — a missing filter —
+    // open. Recorded in doc/roadmap/active/cost-accuracy-and-plans.md instead.
+    // A session with no session_meta timestamp is EXCLUDED once a window is
+    // set, matching report-audit.ts:656 (`if (!sessionStart) return`). We
+    // cannot place it in time, and the point of this change is that the two
+    // paths agree. `new Date('')` is Invalid Date and every comparison against
+    // it is false, so the explicit `!== ''` documents the intent rather than
+    // relying on NaN semantics to carry it.
+    const withinWindow = !startDate || (startTime !== '' && new Date(startTime) >= startDate);
+    if (withinWindow) {
+      // Accumulate session cost via the SHARED codexSessionCost (price +
+      // arithmetic in one place) — the same source report + upload use.
+      result.totalCostUSD += codexSessionCost(model, {
+        input: lastTotalInput,
+        cached: lastTotalCached,
+        output: lastTotalOutput,
+      });
+    }
 
     result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'codex'));
   }
