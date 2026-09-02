@@ -38,6 +38,7 @@ import { scanArgs } from '../../dlp';
 import { pricingFor } from '../../pricing/litellm';
 import { geminiPriceFor } from '../../cost-gemini';
 import { codexSessionCost } from '../../cost-codex';
+import { parseCopilotSession } from '../../cost-copilot';
 import { canonicalToolInput } from '../../utils/hook-payload';
 import type { SmartRule } from '../../core';
 import {
@@ -2052,6 +2053,25 @@ export function scanCopilotHistory(
     }> = [];
 
     result.sessions++;
+
+    // Cost via the SHARED parseCopilotSession — the same function the upload
+    // path uses, so scan agrees with report and the cloud instead of inventing
+    // its own arithmetic. (The Codex mistake, one agent over.)
+    //
+    // This used to be a hardcoded `totalCostUSD: 0` with the comment "event
+    // logs carry no token/cost rollup". That was wrong: session.shutdown
+    // carries a modelMetrics rollup with inputTokens / outputTokens /
+    // cacheReadTokens / cacheWriteTokens, and costSync has been pricing it all
+    // along — $0.0426 of gpt-5-mini on this machine. `scan` was the only
+    // surface showing $0, and a $0 next to a real agent reads as "free",
+    // which is a conclusion the opposite of the truth.
+    //
+    // Windowed per row date, matching the Codex fix: rows carry their own
+    // `date`, so no session-level guard is needed here.
+    for (const row of parseCopilotSession(raw.split('\n'))) {
+      if (startDate && row.date && new Date(row.date) < startDate) continue;
+      result.totalCostUSD += row.costUSD;
+    }
 
     for (const line of raw.split('\n')) {
       if (!line.trim()) continue;
