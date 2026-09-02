@@ -19,7 +19,6 @@ import { COL } from '../../panels.js';
 import { computeProtection } from '../../data.js';
 import type { BlastSnapshot, ReportPeriod, ScanCache, ShieldStatus } from '../../types.js';
 import type { AggregateResult } from '../../../../cli/aggregate/report-audit.js';
-import { COST_PER_LOOP_ITER_USD } from '@node9/policy-engine';
 
 import { Protection } from './panels/Protection.js';
 import { Cost } from './panels/Cost.js';
@@ -295,7 +294,7 @@ interface Headline {
 
 /** Priority cascade — first match wins. Returns null while there's no
  *  data to assess (e.g. scan still loading and audit/blast both empty). */
-function computeHeadline(
+export function computeHeadline(
   scanCache: ScanCache,
   filtered: FilteredScan,
   blast: BlastSnapshot | null
@@ -326,9 +325,25 @@ function computeHeadline(
     };
   }
   if (filtered.loops.length > 100) {
-    const wasted = filtered.loops.reduce((s, l) => s + (l.count ?? 0) * COST_PER_LOOP_ITER_USD, 0);
+    // Counts, no dollars. This line used to read
+    // `Σ(count) × COST_PER_LOOP_ITER_USD`, which was wrong three ways at once:
+    // it priced the first legitimate call as waste, it counted
+    // `long-iteration` findings (sustained work on one file) as loops, and it
+    // used the flat constant measured at ~170x too low. Two errors inflated
+    // and one deflated, landing on a plausible number — $9.73 against the
+    // $48.66 `node9 scan` reports from the same data. A number that looks
+    // reasonable and is built from three mistakes gets believed.
+    //
+    // Priced correctly needs per-session rates (computeLoopWaste), which this
+    // screen has no access to. Rather than thread that through three layers
+    // for one headline, the money lives on the one screen that computes it
+    // properly. A third dollar figure is a third chance to disagree with
+    // itself.
+    //
+    // "repeated patterns", not "loops": most of these are not loops.
+    const stuck = filtered.loops.filter((l) => l.kind !== 'long-iteration').length;
     return {
-      text: `📌 ${filtered.loops.length} loops · ~${fmtCost(wasted)} wasted`,
+      text: `📌 ${filtered.loops.length} repeated patterns · ${stuck} stuck`,
       color: 'yellow',
     };
   }
