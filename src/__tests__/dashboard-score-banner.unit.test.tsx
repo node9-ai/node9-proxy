@@ -377,7 +377,7 @@ describe('ScoreBanner headline cascade', () => {
     expect(lastFrame()).toContain('3 leaks this period');
   });
 
-  it('headline tier 3 — loops > 100 with cost estimate', () => {
+  it('headline tier 3 — loops > 100, counts and no cost estimate', () => {
     const loops = Array.from({ length: 150 }, () => ({
       toolName: 'Edit',
       commandPreview: '/x',
@@ -399,10 +399,20 @@ describe('ScoreBanner headline cascade', () => {
         filtered={filtered}
       />
     );
-    expect(lastFrame()).toContain('150 loops');
-    expect(lastFrame()).toContain('wasted');
-    // 150 loops * count 10 * COST_PER_LOOP_ITER_USD (0.006) = $9 → "$9.00"
-    expect(lastFrame()).toContain('$9.00');
+    // Was: `150 loops · ~$9.00 wasted`, from Σ(count) × COST_PER_LOOP_ITER_USD.
+    // Wrong three ways — it billed the first legitimate call, counted
+    // long-iteration findings as loops, and used a constant measured ~170x
+    // low. Two inflations and one deflation landed on a believable number
+    // while `node9 scan` reported five times more from the same data.
+    //
+    // The headline now states what it counted. Dollars live on the one screen
+    // that prices them per session.
+    expect(lastFrame()).toContain('150 repeated patterns');
+    expect(lastFrame()).not.toContain('wasted');
+    // Scoped to the headline: the banner has its own spend indicator, so a
+    // bare "no $ anywhere" assertion would fail on unrelated output.
+    const headline = (lastFrame() ?? '').split('📌')[1]?.split('💰')[0] ?? '';
+    expect(headline).not.toContain('$');
   });
 
   it('headline tier 4 — exposed blast paths (when no leaks/loops/early-secrets)', () => {
