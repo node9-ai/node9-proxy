@@ -26,3 +26,6 @@ CHANGELOG.md
 .claude/
 .nvmrc
 .env*
+
+# Badge / contributor docs (not part of the published package)
+docs/
