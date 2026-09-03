@@ -2722,6 +2722,11 @@ export interface CompactInput {
    *  (today's output, unchanged). Snapshot fixtures omit it, so tests
    *  stay hermetic and pin the pre-install shape by default. */
   enabledShields?: string[];
+  /** Whether this machine follows a workspace (config.policySource). Decides
+   *  the COST panel's note: a connected machine is pointed at the dashboard,
+   *  an unconnected one at `node9 login`. Absent = unconnected — snapshot
+   *  fixtures omit it and stay hermetic (no config read during a render). */
+  keyed?: boolean;
 }
 
 export function renderCompactScorecard(input: CompactInput): void {
