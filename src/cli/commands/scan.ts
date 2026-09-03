@@ -10,6 +10,7 @@
 //   scan   = day-0 forecast from raw agent history (no audit.log needed)
 
 import type { Command } from 'commander';
+import { isKeyedForPolicy } from '../../config/keyed-guard';
 import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
@@ -2722,6 +2723,11 @@ export interface CompactInput {
    *  (today's output, unchanged). Snapshot fixtures omit it, so tests
    *  stay hermetic and pin the pre-install shape by default. */
   enabledShields?: string[];
+  /** Whether this machine follows a workspace (config.policySource). Decides
+   *  the COST panel's note: a connected machine is pointed at the dashboard,
+   *  an unconnected one at `node9 login`. Absent = unconnected — snapshot
+   *  fixtures omit it and stay hermetic (no config read during a render). */
+  keyed?: boolean;
 }
 
 export function renderCompactScorecard(input: CompactInput): void {
@@ -3534,6 +3540,9 @@ export function registerScanCommand(program: Command): void {
         // two files can diverge; the testimony can't). Read once here,
         // threaded to every renderer via CompactInput.
         const enabledShields = getConfig().policy.appliedShields ?? [];
+        // Decides the COST panel's note (dashboard vs `node9 login`). Read once
+        // here so a render never touches the config — snapshot fixtures omit it.
+        const keyed = isKeyedForPolicy();
         const enabledShieldSet = new Set(enabledShields);
 
         // Compact / narrative modes print their own self-contained scorecard —
@@ -3759,6 +3768,7 @@ export function registerScanCommand(program: Command): void {
             blockedCount,
             reviewCount,
             enabledShields,
+            keyed,
           });
           return;
         }
@@ -3776,6 +3786,7 @@ export function registerScanCommand(program: Command): void {
             blockedCount,
             reviewCount,
             enabledShields,
+            keyed,
           });
           return;
         }
@@ -3946,6 +3957,7 @@ export function registerScanCommand(program: Command): void {
                   blockedCount,
                   reviewCount,
                   enabledShields,
+                  keyed,
                 },
                 rangeLabel
               );
@@ -3963,6 +3975,7 @@ export function registerScanCommand(program: Command): void {
                 blockedCount,
                 reviewCount,
                 enabledShields,
+                keyed,
               });
             }
             // Footer CTAs — distinct from the legacy footer at end of

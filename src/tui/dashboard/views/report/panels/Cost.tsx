@@ -24,6 +24,10 @@ import { Box, Text } from 'ink';
 import { COL } from '../../../panels.js';
 import type { AggregateResult } from '../../../../../cli/aggregate/report-audit.js';
 import { formatCost, formatTokens } from '../../../format.js';
+import {
+  COST_LABEL,
+  costNoteLinesForThisMachine,
+} from '../../../../../cli/render/ink/panels/cost-note.js';
 import { sparkline } from '../util.js';
 
 const LABEL_W = 10;
@@ -60,7 +64,7 @@ export function Cost({ audit }: { audit: AggregateResult | null }): React.ReactE
       flexBasis={0}
     >
       {/* See CostPanel: tokens x list price, not what the user is billed. */}
-      <Text bold>COST · API value</Text>
+      <Text bold>{COST_LABEL}</Text>
       {audit === null ? (
         <Text dimColor>loading…</Text>
       ) : (
@@ -101,6 +105,13 @@ export function Cost({ audit }: { audit: AggregateResult | null }): React.ReactE
             </Box>
             <Text>{trend || <Text dimColor>(no data)</Text>}</Text>
           </Box>
+          {costNoteLinesForThisMachine().map((line) => (
+            <Box key={line} height={1}>
+              <Text dimColor wrap="truncate-end">
+                {line}
+              </Text>
+            </Box>
+          ))}
         </>
       )}
     </Box>

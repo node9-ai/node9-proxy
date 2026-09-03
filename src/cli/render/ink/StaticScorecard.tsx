@@ -96,7 +96,7 @@ export function StaticScorecard({ input, rangeLabel, now }: Props): React.ReactE
 
       <SeverityBand label="Spend & activity" width={width} />
       <Box flexDirection="row" gap={1}>
-        <CostPanel summary={summary} width={halfWidth} />
+        <CostPanel summary={summary} width={halfWidth} keyed={input.keyed} />
         <ActivityPanel summary={summary} scan={input.scan} width={halfWidth} />
       </Box>
 

@@ -60,11 +60,11 @@ exports[`N6 — state-aware phrasing (enabledShields injected) > ink scorecard: 
 🛡  node9 dashboard  ·  scanned last 90 days
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Spend & activity ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ╭──────────────────────────────────────────╮ ╭──────────────────────────────────────────╮
-│ COST · API value                         │ │ ACTIVITY                                 │
+│ COST · based on API value                │ │ ACTIVITY                                 │
 │ Total           $14.5K                   │ │ Sessions        39                       │
 │ Wasted on loops ~$0.25                   │ │ Tools           15,000                   │
-│                                          │ │   Shell         7,500                    │
-│                                          │ │ Tools / session ~385                     │
+│ To see your plan or exact spend, connec… │ │   Shell         7,500                    │
+│ node9 login (for free)                   │ │ Tools / session ~385                     │
 │                                          │ │ Cost / session  ~$372                    │
 ╰──────────────────────────────────────────╯ ╰──────────────────────────────────────────╯
 ━━━━━━━━━━━━━━━━━━ Critical (2 secrets leaked + 2 ops would be blocked) ━━━━━━━━━━━━━━━━━━
@@ -417,10 +417,10 @@ exports[`renderScanScorecardInk — output snapshots > clean fixture (good score
 🛡  node9 dashboard  ·  scanned last 90 days
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Spend & activity ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ╭──────────────────────────────────────────╮ ╭──────────────────────────────────────────╮
-│ COST · API value                         │ │ ACTIVITY                                 │
+│ COST · based on API value                │ │ ACTIVITY                                 │
 │ Total           $1.50                    │ │ Sessions        5                        │
-│                                          │ │ Tools           200                      │
-│                                          │ │   Shell         80                       │
+│ To see your plan or exact spend, connec… │ │ Tools           200                      │
+│ node9 login (for free)                   │ │   Shell         80                       │
 │                                          │ │ Tools / session ~40                      │
 │                                          │ │ Cost / session  ~$0                      │
 ╰──────────────────────────────────────────╯ ╰──────────────────────────────────────────╯
@@ -436,11 +436,11 @@ exports[`renderScanScorecardInk — output snapshots > panel fixture (critical s
 🛡  node9 dashboard  ·  scanned last 90 days
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Spend & activity ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ╭──────────────────────────────────────────╮ ╭──────────────────────────────────────────╮
-│ COST · API value                         │ │ ACTIVITY                                 │
+│ COST · based on API value                │ │ ACTIVITY                                 │
 │ Total           $14.5K                   │ │ Sessions        39                       │
 │ Wasted on loops ~$0.25                   │ │ Tools           15,000                   │
-│                                          │ │   Shell         7,500                    │
-│                                          │ │ Tools / session ~385                     │
+│ To see your plan or exact spend, connec… │ │   Shell         7,500                    │
+│ node9 login (for free)                   │ │ Tools / session ~385                     │
 │                                          │ │ Cost / session  ~$372                    │
 ╰──────────────────────────────────────────╯ ╰──────────────────────────────────────────╯
 ━━━━━━━━━━━━━━━━━━ Critical (2 secrets leaked + 2 ops would be blocked) ━━━━━━━━━━━━━━━━━━

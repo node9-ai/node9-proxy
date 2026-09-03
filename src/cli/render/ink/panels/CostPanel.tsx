@@ -17,25 +17,29 @@ import { Box, Text } from 'ink';
 
 import type { ScanSummary } from '../../../../scan-summary.js';
 import { formatCost } from '../../../../tui/dashboard/format.js';
+import { COST_LABEL, costNoteLines } from './cost-note.js';
 
 interface Props {
   summary: ScanSummary;
   width: number;
+  /** Whether this machine follows a workspace (decides the note). The CLI
+   *  passes the config's answer; absent = not connected, which is also what
+   *  keeps snapshot fixtures hermetic (no config read inside a render). */
+  keyed?: boolean;
 }
 
 const LABEL_W = 16;
 
-export function CostPanel({ summary, width }: Props): React.ReactElement {
+export function CostPanel({ summary, width, keyed }: Props): React.ReactElement {
   const total = summary.stats.totalCostUSD;
   return (
     <Box borderStyle="round" borderColor="gray" paddingX={1} flexDirection="column" width={width}>
-      {/* "API value", not "spend": this is tokens x list price. A user on a
-          flat monthly plan pays their plan, not this — and today the product
-          has no concept of a plan at all, so an unqualified "Total" asserts
-          something false for every subscriber. The number is right; the word
-          was wrong. It is also the better story once labelled: this much
-          value consumed, against whatever the plan actually costs. */}
-      <Text bold>COST · API value</Text>
+      {/* "based on API value", not "spend": this is tokens x list price. A
+          user on a flat monthly plan pays their plan, not this. The CLI has
+          no concept of a plan on purpose — a plan is a fact about a person,
+          and only the cloud knows who is behind a key — so the panel says
+          what its number is and where the exact one lives (cost-note.ts). */}
+      <Text bold>{COST_LABEL}</Text>
 
       <Box>
         <Box width={LABEL_W}>
@@ -61,6 +65,12 @@ export function CostPanel({ summary, width }: Props): React.ReactElement {
           <Text color="yellow">{'~' + formatCost(summary.loopWastedUSD)}</Text>
         </Box>
       ) : null}
+
+      {costNoteLines(keyed ?? false).map((line) => (
+        <Text key={line} dimColor wrap="truncate-end">
+          {line}
+        </Text>
+      ))}
     </Box>
   );
 }
