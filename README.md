@@ -113,7 +113,7 @@ What it checks:
     fail-on: high # or 'never' to just comment
 ```
 
-Marketplace: **[node9 Agent Security Check](https://github.com/marketplace/actions/node9-agent-security-check)**
+Marketplace: **[node9 Agent Security](https://github.com/marketplace/actions/node9-agent-security)**
 
 ## Live monitoring
 
