@@ -158,14 +158,20 @@ describe('HUD render — offline indicator', () => {
 // ── Environment line (countConfigs + renderEnvironmentLine) ──────────────────
 
 describe('countConfigs', () => {
-  it('returns zeros when cwd has no config files', async () => {
+  it('a cwd with no config files adds nothing over user scope', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-hud-test-'));
     try {
       const { countConfigs } = await import('../cli/hud.js');
+      // countConfigs always counts USER scope (~/.claude) on top of the cwd, and
+      // os.homedir() is not injectable — so absolute zeros are not the contract
+      // and asserting them made this test pass or fail on whether the developer
+      // happens to have ~/.claude/CLAUDE.md. Compare against the no-cwd baseline
+      // instead: an empty project directory must contribute exactly nothing.
+      const baseline = countConfigs(undefined);
       const counts = countConfigs(tmp);
-      // hooksCount may be > 0 from the real user ~/.claude/settings.json
-      expect(counts.claudeMdCount).toBe(0);
-      expect(counts.rulesCount).toBe(0);
+      expect(counts.claudeMdCount).toBe(baseline.claudeMdCount);
+      expect(counts.rulesCount).toBe(baseline.rulesCount);
+      expect(counts.mcpCount).toBe(baseline.mcpCount);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
