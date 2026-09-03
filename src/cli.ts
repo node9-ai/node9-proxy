@@ -85,7 +85,10 @@ program.name('node9').description('The Sudo Command for AI Agents').version(vers
 program
   .command('login')
   .argument('[apiKey]', 'Service/legacy key. Omit to log in via your browser.')
-  .option('--local', 'Save key for audit/logging only — local config still controls all decisions')
+  .option(
+    '--local',
+    'Keep policy decisions local — the cloud never overrides them (cost data still syncs)'
+  )
   .option('--profile <name>', 'Save as a named profile (default: "default")')
   .option('--no-browser', "Don't auto-open the browser — just print the link")
   .option('--force', 'Allow interactive login even when CI is detected')
@@ -145,7 +148,10 @@ program
 async function runKeyLogin(apiKey: string, options: { local?: boolean; profile?: string }) {
   // Named profile / --local keep their narrow legacy behavior: write the key,
   // say what happened, no cloud onboarding. Profiles are on a deprecation
-  // path (login-v2 §6); --local is the explicit privacy-mode switch.
+  // path (login-v2 §6). `--local` sets approvers.cloud=false, so it keeps POLICY
+  // AUTHORITY local and turns the audit shipper off — it is NOT a no-egress
+  // switch: costSync gates on neither localOnly nor approvers.cloud, so cost
+  // rows (which carry `workingDir`) still ship. Do not call it "privacy mode".
   if (options.profile && options.profile !== 'default') {
     const { profileName } = writeCredentialsAndConfig(apiKey, {
       profileName: options.profile,
@@ -157,8 +163,12 @@ async function runKeyLogin(apiKey: string, options: { local?: boolean; profile?:
   }
   if (options.local) {
     writeCredentialsAndConfig(apiKey, { isLocal: true });
-    console.log(chalk.green(`✅ Key saved — Privacy mode 🛡️`));
-    console.log(chalk.gray(`   All decisions stay on this machine. Nothing syncs to the cloud.`));
+    console.log(chalk.green(`✅ Key saved. Local control mode.`));
+    console.log(
+      chalk.gray(`   Policy decisions stay on this machine; the cloud cannot override them.`)
+    );
+    console.log(chalk.gray(`   Audit shipping is off. Cost and usage data still sync to node9,`));
+    console.log(chalk.gray(`   including the project directory each session ran in.`));
     return;
   }
 
