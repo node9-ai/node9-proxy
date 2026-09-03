@@ -97,6 +97,27 @@ jobs:
           # --atomic so commit + tag land together or not at all
           git push --atomic origin HEAD:main "policy-engine-v$PROXY_VERSION"
 
+      - name: Move the floating major tag (v2) to this release
+        # Consumers of the GitHub Action write `uses: node9-ai/node9-proxy@v2`
+        # — the Actions convention (pipelock moves v3 the same way). A floating
+        # major tag has to be re-pointed on every release; semantic-release only
+        # creates the immutable vX.Y.Z tag. Idempotent when nothing was released.
+        env:
+          GITHUB_TOKEN: ${{ secrets.AUTO_PR_TOKEN }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --quiet origin
+          VERSION=$(node -p "require('./package.json').version")
+          MAJOR="v${VERSION%%.*}"
+          if ! git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "no tag v$VERSION on origin — nothing was released, leaving $MAJOR where it is"
+            exit 0
+          fi
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git tag -f "$MAJOR" "v$VERSION"
+          git push -f origin "refs/tags/$MAJOR"
+          echo "$MAJOR -> v$VERSION"
+
       - name: Publish @node9/policy-engine if not already on npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

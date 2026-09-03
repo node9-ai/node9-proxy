@@ -11,6 +11,10 @@ export default tseslint.config(
   },
   {
     ignores: [
+      // The GitHub Action's gate/comment script: plain CommonJS run by `node`
+      // from action.yml, outside the TS build. Covered by its own selftest
+      // (src/__tests__/action-comment.integration.test.ts).
+      'comment.js',
       'dist/**',
       'node_modules/**',
       'coverage/**',
