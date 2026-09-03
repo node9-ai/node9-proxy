@@ -31,19 +31,22 @@ REQUIRED ACTIONS:
 1. Remove the hardcoded credential from your command or code.
 2. Use an environment variable or a dedicated secrets manager instead.
 3. Treat the leaked credential as compromised and rotate it immediately.
-Do NOT attempt to bypass this check or pass the credential through another tool.`;
+Do NOT attempt to bypass this check or pass the credential through another tool.
+- Tell the user node9 blocked this and why, then ask how to proceed.`;
   }
 
   if (label.includes('sql safety') && label.includes('delete without where')) {
     return `NODE9: Blocked — DELETE without WHERE clause would wipe the entire table.
 INSTRUCTION: Add a WHERE clause to scope the deletion (e.g. WHERE id = <value>).
-Do NOT retry without a WHERE clause.`;
+Do NOT retry without a WHERE clause.
+- Tell the user node9 blocked this and why, then ask how to proceed.`;
   }
 
   if (label.includes('sql safety') && label.includes('update without where')) {
     return `NODE9: Blocked — UPDATE without WHERE clause would update every row.
 INSTRUCTION: Add a WHERE clause to scope the update (e.g. WHERE id = <value>).
-Do NOT retry without a WHERE clause.`;
+Do NOT retry without a WHERE clause.
+- Tell the user node9 blocked this and why, then ask how to proceed.`;
   }
 
   if (label.includes('dangerous word')) {
@@ -51,18 +54,21 @@ Do NOT retry without a WHERE clause.`;
     const word = match?.[1] ?? 'a dangerous keyword';
     return `NODE9: Blocked — command contains forbidden keyword "${word}".
 INSTRUCTION: Do NOT use "${word}". Use a non-destructive alternative.
-Do NOT attempt to bypass this with shell tricks or aliases — it will be blocked again.`;
+Do NOT attempt to bypass this with shell tricks or aliases — it will be blocked again.
+- Tell the user node9 blocked this and why, then ask how to proceed.`;
   }
 
   if (label.includes('path blocked') || label.includes('sandbox')) {
     return `NODE9: Blocked — operation targets a path outside the allowed sandbox.
 INSTRUCTION: Move your output to an allowed directory such as /tmp/ or the project directory.
-Do NOT retry on the same path.`;
+Do NOT retry on the same path.
+- Tell the user node9 blocked this and why, then ask how to proceed.`;
   }
 
   if (label.includes('inline execution')) {
     return `NODE9: Blocked — inline code execution (e.g. bash -c "...") is not allowed.
-INSTRUCTION: Use individual tool calls instead of embedding code in a shell string.`;
+INSTRUCTION: Use individual tool calls instead of embedding code in a shell string.
+- Tell the user node9 blocked this and why, then ask how to proceed.`;
   }
 
   if (label.includes('strict mode')) {
@@ -75,7 +81,8 @@ INSTRUCTION: Inform the user this action is pending approval. Wait for them to a
     const rule = match?.[1] ?? 'a policy rule';
     return `NODE9: Blocked — action "${rule}" is forbidden by security policy.
 INSTRUCTION: Do NOT use "${rule}". Find a read-only or non-destructive alternative.
-Do NOT attempt to bypass this rule.`;
+Do NOT attempt to bypass this rule.
+- Tell the user node9 blocked this and why, then ask how to proceed.`;
   }
 
   // Generic fallback
