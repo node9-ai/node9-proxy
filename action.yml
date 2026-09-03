@@ -1,4 +1,4 @@
-name: 'node9 Agent Security Check'
+name: 'node9 Agent Security'
 description: 'Scan a repo for agent-security risks (injectable CI workflows, unsafe agent configs, MCP) and comment on the PR.'
 author: 'node9'
 branding:

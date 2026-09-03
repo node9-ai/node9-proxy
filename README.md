@@ -108,12 +108,12 @@ What it checks:
 
 ```yaml
 # .github/workflows/agent-security.yml
-- uses: node9-ai/agent-security-action@v1
+- uses: node9-ai/node9-proxy@v2
   with:
     fail-on: high # or 'never' to just comment
 ```
 
-Marketplace: **[node9 Agent Security Check](https://github.com/marketplace/actions/node9-agent-security-check)**
+Marketplace: **[node9 Agent Security](https://github.com/marketplace/actions/node9-agent-security)**
 
 ## Live monitoring
 
