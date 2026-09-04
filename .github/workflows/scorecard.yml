@@ -42,8 +42,10 @@ jobs:
       - name: Run Scorecard
         uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
         with:
-          results_file: results.sarif
-          results_format: sarif
+          # JSON, not SARIF: SARIF carries only the findings, JSON carries every
+          # check's score, which is what a quiet run exists to show us.
+          results_file: results.json
+          results_format: json
           publish_results: false
 
       # The grade lives here and nowhere else while publishing is off. Download
@@ -52,5 +54,5 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: scorecard-results
-          path: results.sarif
+          path: results.json
           retention-days: 30
