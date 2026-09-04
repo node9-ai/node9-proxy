@@ -100,7 +100,7 @@
     "mvdan-sh"
   ],
   "devDependencies": {
-    "@anthropic-ai/sdk": "^0.78.0",
+    "@anthropic-ai/sdk": "^0.123.0",
     "@octokit/rest": "^22.0.1",
     "@semantic-release/commit-analyzer": "^13.0.1",
     "@semantic-release/git": "^10.0.1",
@@ -110,7 +110,7 @@
     "@types/node": "^25.3.1",
     "@types/picomatch": "^4.0.2",
     "@types/react": "^19.2.14",
-    "@vitest/coverage-v8": "4.1.2",
+    "@vitest/coverage-v8": "4.1.11",
     "cross-env": "^10.1.0",
     "ink-testing-library": "^4.0.0",
     "prettier": "^3.4.2",
@@ -119,7 +119,7 @@
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.20.0",
-    "vitest": "4.1.2"
+    "vitest": "4.1.11"
   },
   "overrides": {
     "undici": "^7.24.0",
