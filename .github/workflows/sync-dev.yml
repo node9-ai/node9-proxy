@@ -12,7 +12,7 @@ permissions:
 jobs:
   sync:
     permissions:
-    contents: write
+      contents: write
     name: Merge main → dev
     runs-on: ubuntu-latest
     # Skip the release bot's own commits to avoid infinite loops

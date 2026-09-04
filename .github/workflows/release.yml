@@ -11,10 +11,10 @@ jobs:
   release:
     # The write set lives on the job that needs it, not on the workflow.
     permissions:
-    contents: write # create tags + commits
-    issues: write # comment on issues
-    pull-requests: write # comment on PRs
-    id-token: write # npm provenance
+      contents: write # create tags + commits
+      issues: write # comment on issues
+      pull-requests: write # comment on PRs
+      id-token: write # npm provenance
     name: Semantic Release
     runs-on: ubuntu-latest
     steps:
