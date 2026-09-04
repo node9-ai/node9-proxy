@@ -1,0 +1,56 @@
+# OpenSSF Scorecard — QUIET MODE.
+#
+# `publish_results: false` on purpose. Scorecard grades repository practice
+# (branch protection, pinned actions, review coverage, update tooling) and
+# publishing sends that grade to a public API that anyone can query and that
+# backs the public badge. Estimated before writing this: node9-proxy scores
+# somewhere near 5-6.5, with the losses concentrated in config files we have
+# not written yet — no dependabot, 1 of 14 actions pinned by SHA, no top-level
+# `permissions:` in ci.yml, no SAST workflow. Publishing that number before
+# fixing those is a durable public claim about a security product, made from a
+# starting line rather than a finish line.
+#
+# So: run it, read the SARIF from the build artifact, close the cheap gaps,
+# and only then flip publish_results to true and add the badge. Flipping it is
+# a one-word change; un-publishing a grade is not.
+#
+# Nothing here uploads to code scanning. A practice grade filed as dismissible
+# security alerts produces a queue that no code change can close.
+name: OpenSSF Scorecard
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 5 * * 1' # Mondays 05:00 UTC
+  branch_protection_rule: # re-grade when protection changes — the check it moves most
+
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      # id-token is only needed by publish_results (OIDC proof of authenticity).
+      # It is omitted while publishing is off, and must be added back with it.
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Run Scorecard
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: false
+
+      # The grade lives here and nowhere else while publishing is off. Download
+      # it from the run's Artifacts, or read the per-check lines in the job log.
+      - name: Upload Scorecard results
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scorecard-results
+          path: results.sarif
+          retention-days: 30
