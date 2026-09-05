@@ -5,6 +5,7 @@
   <a href="https://www.npmjs.com/package/node9-ai"><img src="https://img.shields.io/npm/dm/node9-ai.svg" alt="monthly downloads" /></a>
   <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0" /></a>
   <a href="https://node9.ai/docs"><img src="https://img.shields.io/badge/docs-node9.ai-blue" alt="Documentation" /></a>
+  <a href="https://www.bestpractices.dev/projects/14454"><img src="https://www.bestpractices.dev/projects/14454/badge" alt="OpenSSF Best Practices" /></a>
   <a href="https://github.com/node9-ai/node9-proxy/blob/main/.github/workflows/agent-security.yml"><img src="https://img.shields.io/badge/node9-self--scanned-a855f7?style=flat&labelColor=%231A1A2E&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNCAxNCI+PHBhdGggZmlsbD0iI0Y1RTlGRiIgZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik03IDAuNCAxLjYgMi41djQuMmMwIDMuMSAyLjMgNS42IDUuNCA2LjkgMy4xLTEuMyA1LjQtMy44IDUuNC02LjlWMi41TDcgMC40Wm0wIDEuNSAzLjkgMS41djMuM2MwIDIuMy0xLjYgNC4yLTMuOSA1LjMtMi4zLTEuMS0zLjktMy0zLjktNS4zVjMuNEw3IDEuOVptMCAyLjJhMS45IDEuOSAwIDAgMC0xIDMuNXYxLjZoMlY3LjZhMS45IDEuOSAwIDAgMC0xLTMuNVoiLz48L3N2Zz4K" alt="node9 self-scanned" /></a>
 </p>
 
