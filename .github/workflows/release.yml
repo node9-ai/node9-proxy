@@ -165,7 +165,12 @@ jobs:
           # Copy README — stay in $GITHUB_WORKSPACE so setup-node npm auth applies
           cp README.md /tmp/node9-wrapper/README.md
           cd /tmp/node9-wrapper
-          npm install --ignore-scripts
+          # No `npm install` here on purpose. Nothing in this job reads
+          # node_modules: `npm version`, the dependency rewrite below and
+          # `npm publish` all work from package.json alone, and the published
+          # tarball is only LICENSE, README.md, bin/node9.js and package.json.
+          # An install here would also be an unpinned dependency fetch inside
+          # the release job, which is the one job where that matters most.
           CURRENT=$(node -p "require('./package.json').version")
           if [ "$CURRENT" != "$VERSION" ]; then
             npm version "$VERSION" --no-git-tag-version
