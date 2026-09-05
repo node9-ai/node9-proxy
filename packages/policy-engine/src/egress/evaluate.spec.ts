@@ -99,3 +99,27 @@ describe('evaluateEgress', () => {
     expect(v?.verdict).toBe('block');
   });
 });
+
+describe("node9's own hosts", () => {
+  // Turning egress on used to ask the user to approve node9's own API. The
+  // control plane is on the curated default list now, and a user deny entry
+  // still beats it, so the default is not a back door nobody can close.
+  it('is allowed by default with an empty user allowlist', () => {
+    for (const host of ['api.node9.ai', 'app.node9.ai', 'dev-api.node9.ai', 'node9.ai']) {
+      expect(evaluateEgress([dest(host)], policy({ mode: 'block' }))).toBeNull();
+    }
+  });
+
+  it('is still blocked when the user denies it explicitly', () => {
+    const v = evaluateEgress([dest('api.node9.ai')], policy({ deny: ['*.node9.ai'] }));
+    expect(v?.verdict).toBe('block');
+    expect(v?.reason).toContain('deny list');
+  });
+
+  it('does not widen to look-alike domains', () => {
+    // A suffix match would let evil-node9.ai or node9.ai.evil.com through.
+    for (const host of ['evil-node9.ai', 'node9.ai.evil.com', 'notnode9.ai']) {
+      expect(evaluateEgress([dest(host)], policy({ mode: 'block' }))?.verdict).toBe('block');
+    }
+  });
+});
