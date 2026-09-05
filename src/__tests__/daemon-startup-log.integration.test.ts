@@ -151,6 +151,25 @@ function runDaemonAsync(
   });
 }
 
+/** The node_modules a /tmp copy of dist/ must be linked to. REPO_ROOT/node_modules
+ *  is the wrong answer in a git worktree with no install of its own: deps there
+ *  resolve by Node walking UP to the parent checkout, but a copy under /tmp has no
+ *  such parent chain, so the link would land on a missing or empty directory and the
+ *  copy would die with MODULE_NOT_FOUND before the code under test ran. Walk up for
+ *  the first node_modules that actually holds a dependency instead. */
+function resolveNodeModules(): string {
+  for (let dir = __dirname; ; dir = path.dirname(dir)) {
+    const candidate = path.join(dir, 'node_modules');
+    if (fs.existsSync(path.join(candidate, 'commander'))) return candidate;
+    if (path.dirname(dir) === dir) break;
+  }
+  throw new Error(
+    `no node_modules containing \`commander\` found at or above ${__dirname}. A crash-package ` +
+      "copy under /tmp cannot resolve the bundle's external deps without one, so these tests " +
+      'would mis-measure instead of failing honestly. Run `npm install` in this checkout.'
+  );
+}
+
 /** A copy of dist/ whose CLI throws at module load when run as `daemon` — the
  *  ERR_REQUIRE_ESM incident shape. node_modules is symlinked because the bundle has
  *  external deps; without it the copy dies with MODULE_NOT_FOUND and any test using
@@ -159,7 +178,7 @@ function crashPackage(condition = 'process.argv[2] === "daemon"'): string {
   const pkg = fs.mkdtempSync(path.join(os.tmpdir(), 'n9-crashpkg-'));
   fs.cpSync(path.join(REPO_ROOT, 'dist'), path.join(pkg, 'dist'), { recursive: true });
   fs.copyFileSync(path.join(REPO_ROOT, 'package.json'), path.join(pkg, 'package.json'));
-  fs.symlinkSync(path.join(REPO_ROOT, 'node_modules'), path.join(pkg, 'node_modules'), 'dir');
+  fs.symlinkSync(resolveNodeModules(), path.join(pkg, 'node_modules'), 'dir');
   // AFTER the shebang (line 2) — prepending to line 1 breaks it and the binary
   // fails to parse instead of crashing at import.
   const cliPath = path.join(pkg, 'dist', 'cli.js');
@@ -313,7 +332,7 @@ describe('A4b — a crash during startup leaves a trace', () => {
       fs.copyFileSync(path.join(REPO_ROOT, 'package.json'), path.join(pkg, 'package.json'));
       // The bundle has external deps; without node_modules the copy dies with
       // MODULE_NOT_FOUND and this test would pass for entirely the wrong reason.
-      fs.symlinkSync(path.join(REPO_ROOT, 'node_modules'), path.join(pkg, 'node_modules'), 'dir');
+      fs.symlinkSync(resolveNodeModules(), path.join(pkg, 'node_modules'), 'dir');
 
       // Inject the crash AFTER the shebang (line 2) — prepending to line 1 breaks
       // the shebang and the binary fails to parse instead of crashing at import.
