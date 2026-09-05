@@ -15,6 +15,7 @@ jobs:
       issues: write # comment on issues
       pull-requests: write # comment on PRs
       id-token: write # npm provenance
+      attestations: write # sign the GitHub release artifacts
     name: Semantic Release
     runs-on: ubuntu-latest
     steps:
@@ -52,6 +53,29 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.AUTO_PR_TOKEN }}
           NPM_CONFIG_PROVENANCE: 'true'
         run: npx semantic-release
+
+      - name: Detect whether this run cut a release
+        id: released
+        run: |
+          # Must run here, immediately after semantic-release, and not later:
+          # the engine-sync step below commits on top and moves HEAD off the
+          # release commit, so asking later would always answer "no release"
+          # and signing would skip silently for good.
+          #
+          # semantic-release tags the version-bump commit it just made, so a
+          # vX.Y.Z tag on HEAD means this run produced a release. The floating
+          # v2 tag sits on the same commit and is excluded by requiring all
+          # three version components. A run that saw only docs or chore
+          # commits leaves HEAD untagged.
+          TAG=$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+          if [ -n "$TAG" ]; then
+            echo "Release cut: $TAG"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "released=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No release cut this run — nothing to sign."
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Sync @node9/policy-engine version to @node9/proxy
         # Replaces the previous "Auto-bump engine version if its files changed"
@@ -210,3 +234,34 @@ jobs:
             -H "Accept: application/vnd.github.v3+json" \
             https://api.github.com/repos/node9-ai/homebrew-node9/dispatches \
             -d "$(jq -n --arg v "$VERSION" '{event_type:"new-release",client_payload:{version:$v}}')"
+
+      # Signing runs last on purpose. Everything above has already published,
+      # so a failure here is loud without blocking a release that shipped.
+      - name: Sign the release artifacts
+        if: steps.released.outputs.released == 'true'
+        id: attest
+        # Produces a Sigstore bundle binding each dist file to this workflow,
+        # this commit and this runner. Keyless: the signing identity is the
+        # workflow's OIDC token, so there is no key for us to hold or leak.
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.js
+            dist/*.mjs
+
+      - name: Attach the signature to the GitHub release
+        if: steps.released.outputs.released == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.AUTO_PR_TOKEN }}
+          TAG: ${{ steps.released.outputs.tag }}
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          # The same dist files are already attached to the release by
+          # semantic-release. This puts the signature next to them so anyone
+          # downloading one can verify it without knowing about the
+          # attestations API:
+          #   gh attestation verify <file> --repo node9-ai/node9-proxy
+          SIG="node9-proxy-${TAG}.intoto.jsonl"
+          cp "$BUNDLE" "$SIG"
+          gh release upload "$TAG" "$SIG" --clobber
+          echo "Signed $TAG: $SIG" >> "$GITHUB_STEP_SUMMARY"
