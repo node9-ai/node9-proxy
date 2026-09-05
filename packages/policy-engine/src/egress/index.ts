@@ -32,6 +32,10 @@ export interface EgressVerdict {
 // egress on doesn't bury the user in prompts for routine traffic. "*.x" matches
 // the apex (x) and any subdomain (see hostMatches). User `allow` adds to this.
 export const DEFAULT_EGRESS_ALLOWLIST: readonly string[] = [
+  // node9's own control plane (api, app, dev-api, staging and the apex).
+  // Without it, turning egress on asks the user to approve node9 itself.
+  // A user `deny` entry still wins over this list, see evaluateEgress.
+  '*.node9.ai',
   '*.github.com',
   '*.githubusercontent.com',
   '*.npmjs.org',
