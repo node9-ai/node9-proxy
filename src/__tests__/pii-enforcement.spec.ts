@@ -90,3 +90,68 @@ describe('GAP-7 — realtime PII enforcement', () => {
     expect(r.blockedByLabel).toMatch(/PII/);
   });
 });
+
+// ── Credit cards at the real gate ────────────────────────────────────────────
+// Split parts, not literals: see packages/policy-engine/src/scan/pii.fixtures.ts
+// for the convention. Duplicated here because that module is deliberately not
+// exported from the engine package. Every row asserts blockedByLabel so a deny
+// for some OTHER reason (the secret-DLP gate runs first) cannot pass as a PII
+// block.
+const VISA = ['4111', '1111', '1111', '1111'];
+const VISA_BAD = ['4111', '1111', '1111', '1112'];
+const AMEX = ['3782', '822463', '10005'];
+const j = (parts: string[], sep = '') => parts.join(sep);
+
+describe('GAP-7 — credit cards at the real gate', () => {
+  it('blocks a Luhn-valid Visa', async () => {
+    mockConfig({ dlp: { enabled: true, pii: 'block' } });
+    const r = await authorizeHeadless('Bash', { command: 'echo ' + j(VISA, ' ') });
+    expect(r.approved).toBe(false);
+    expect(r.blockedByLabel).toMatch(/PII/);
+  });
+
+  it('allows the same shape with the check digit changed (Luhn rejects it)', async () => {
+    mockConfig({ dlp: { enabled: true, pii: 'block' } });
+    const r = await authorizeHeadless('Bash', { command: 'echo ' + j(VISA_BAD, ' ') });
+    expect(r.approved).toBe(true);
+  });
+
+  it('blocks a 15-digit Amex (was a complete false negative)', async () => {
+    mockConfig({ dlp: { enabled: true, pii: 'block' } });
+    const r = await authorizeHeadless('Bash', { command: 'echo ' + j(AMEX, ' ') });
+    expect(r.approved).toBe(false);
+    expect(r.blockedByLabel).toMatch(/PII/);
+  });
+
+  it('blocks a valid card preceded by a decoy 4xxx token (overlapping search)', async () => {
+    mockConfig({ dlp: { enabled: true, pii: 'block' } });
+    const r = await authorizeHeadless('Bash', { command: ['4000', ' ', j(VISA, ' ')].join('') });
+    expect(r.approved).toBe(false);
+    expect(r.blockedByLabel).toMatch(/PII/);
+  });
+
+  it('blocks a card that begins a line in a multi-line Write (A5)', async () => {
+    mockConfig({ dlp: { enabled: true, pii: 'block' } });
+    const content = ['name,card', '\n', 'alice,', j(VISA), '\n'].join('');
+    const r = await authorizeHeadless('Write', { file_path: '/tmp/x.csv', content });
+    expect(r.approved).toBe(false);
+    expect(r.blockedByLabel).toMatch(/PII/);
+  });
+
+  it('observe mode: approved but observeWouldBlock, so a bare approved===false is not the witness', async () => {
+    const globalPath = path.join('/mock/home', '.node9', 'config.json');
+    existsSpy.mockImplementation((p) => String(p) === globalPath);
+    readSpy.mockImplementation((p) =>
+      String(p) === globalPath
+        ? JSON.stringify({
+            settings: { mode: 'observe', approvalTimeoutMs: 0, approvers: { native: false } },
+            policy: { dlp: { enabled: true, pii: 'block' } },
+          })
+        : ''
+    );
+    const r = await authorizeHeadless('Bash', { command: 'echo ' + j(VISA, ' ') });
+    expect(r.approved).toBe(true);
+    expect(r.observeWouldBlock).toBe(true);
+    expect(r.blockedByLabel).toMatch(/PII/);
+  });
+});

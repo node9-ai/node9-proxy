@@ -34,6 +34,7 @@ const SOURCES = [
   'packages/policy-engine/src/rules/index.ts',
   'packages/policy-engine/src/shell/index.ts',
   'packages/policy-engine/src/scan/pii.ts',
+  'packages/policy-engine/src/scan/checksums.ts',
   'packages/policy-engine/src/scan/destructive-regex.ts',
 ];
 

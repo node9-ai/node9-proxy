@@ -379,9 +379,9 @@ describe('tickScanWatcher — PII extractor', () => {
   });
 
   it('detects Credit Card PII pattern (Visa)', async () => {
-    // 4111-1111-1111-1111 is the canonical Visa test number — recognised
-    // by every payment processor as an explicit fixture.
-    const hits = await runWithMessage('card: 4111-1111-1111-1111');
+    // The canonical Visa sandbox test number, assembled from split parts so
+    // no contiguous card-shaped literal lives in the checkout.
+    const hits = await runWithMessage('card: ' + ['4111', '1111', '1111', '1111'].join('-'));
     expect(hits).toContain('Credit Card');
   });
 

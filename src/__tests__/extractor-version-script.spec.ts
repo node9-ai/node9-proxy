@@ -27,6 +27,7 @@ const SCRIPT = path.join(ROOT, 'scripts', 'check-extractor-version.mjs');
 const SOURCE_FILES = [
   'packages/policy-engine/src/scan/canonical.ts',
   'packages/policy-engine/src/scan/pii.ts',
+  'packages/policy-engine/src/scan/checksums.ts',
   'packages/policy-engine/src/scan/destructive-regex.ts',
   // Must mirror the script's SOURCE_FILES exactly, or every row here dies on
   // ENOENT rather than on the drift it means to test.
