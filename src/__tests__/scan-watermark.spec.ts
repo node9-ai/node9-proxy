@@ -28,7 +28,7 @@ import {
   loadWatermark,
   saveWatermark,
   tickScanWatcher,
-  markUploadComplete,
+  commitTotalsUpload,
   WATERMARK_SCHEMA_VERSION,
 } from '../daemon/scan-watermark';
 import { CANONICAL_EXTRACTOR_VERSION } from '@node9/policy-engine';
@@ -646,18 +646,31 @@ describe('watermark migration — extractor version drift', () => {
     expect(result.uploadAs).toBe('totals');
   });
 
-  it('after markUploadComplete(), pendingResetUploadAs flag is cleared and next tick reverts to "deltas"', async () => {
+  it('a totals tick hands back pendingWatermark and does NOT touch the disk until commitTotalsUpload()', async () => {
     writeLegacyWatermark();
     writeSession(lineWithGitHubToken(), Date.now() + 1_000);
+    const before = fs.readFileSync(wmPath(), 'utf-8');
+
     const first = await tickScanWatcher();
     expect(first.uploadAs).toBe('totals');
+    expect(first.pendingWatermark).toBeDefined();
+    // Disk byte-identical: the frontier is not committed before the upload.
+    expect(fs.readFileSync(wmPath(), 'utf-8')).toBe(before);
 
-    markUploadComplete();
+    commitTotalsUpload(first.pendingWatermark!);
 
-    // Append another finding so the next tick has something to do.
+    const after = loadWatermark();
+    expect(after.status).toBe('current');
+    if (after.status !== 'current') return;
+    expect(after.wm.pendingResetUploadAs).toBeUndefined();
+    expect(after.wm.extractorVersion).toBe(CANONICAL_EXTRACTOR_VERSION);
+
+    // Append another finding so the next tick has something to do; it
+    // must now be a normal deltas tick that saves itself.
     fs.appendFileSync(sessionPath(), lineWithGitHubToken());
     const second = await tickScanWatcher();
     expect(second.uploadAs).toBe('deltas');
+    expect(second.pendingWatermark).toBeUndefined();
   });
 
   it('NODE9_SKIP_WATERMARK_RESET=1 acknowledges the upgrade, KEEPS scannedTo offsets, marks state current', async () => {
@@ -680,30 +693,22 @@ describe('watermark migration — extractor version drift', () => {
     expect(after.wm.pendingResetUploadAs).toBeUndefined();
   });
 
-  it('markUploadComplete: bails when on-disk file flips back to extractor-stale between tick and call', () => {
-    // Race window: tick saved a 'current' watermark with advanced offsets
-    // and pendingResetUploadAs='totals'. Then a concurrent process (or
-    // the user manually) restored a legacy watermark. Without the
-    // extractor-stale guard, markUploadComplete would load the stale
-    // file, see in-memory reset offsets (scannedTo=0 for every file),
-    // delete the flag, and save — clobbering the scan progress.
-    //
-    // With the guard, markUploadComplete refuses to write; the next tick
-    // sees extractor-stale and runs the migration cleanly.
+  it('commitTotalsUpload: refuses to write when the on-disk file flipped to schema-future between tick and commit', async () => {
+    // Race window: a totals tick ran (disk still legacy), then a NEWER
+    // daemon rewrote the watermark with a schema this daemon does not
+    // understand. Committing would clobber a file we cannot parse.
+    writeLegacyWatermark();
+    writeSession(lineWithGitHubToken(), Date.now() + 1_000);
+    const first = await tickScanWatcher();
+    expect(first.uploadAs).toBe('totals');
+
     writeLegacyWatermark({
-      // Concurrent edit that brought the file BACK to legacy state.
-      // Simulates "user restored ~/.node9/scan-watermark.json from a
-      // backup made before the upgrade."
+      schemaVersion: WATERMARK_SCHEMA_VERSION + 1,
+      extractorVersion: 'canonical-v2',
     });
-
-    // Snapshot the on-disk state before markUploadComplete runs.
     const before = fs.readFileSync(wmPath(), 'utf-8');
-    markUploadComplete();
-    const after = fs.readFileSync(wmPath(), 'utf-8');
-
-    // Guard fired → file untouched. Offsets preserved for the next
-    // tick to run the actual migration on.
-    expect(after).toBe(before);
+    commitTotalsUpload(first.pendingWatermark!);
+    expect(fs.readFileSync(wmPath(), 'utf-8')).toBe(before);
   });
 });
 

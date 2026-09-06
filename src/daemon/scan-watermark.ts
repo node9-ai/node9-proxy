@@ -557,10 +557,21 @@ export interface ScanTickResult {
    *                        tick after an extractor-stale reset so
    *                        re-scanned bytes don't double-count on top of a
    *                        prior `--upload-history` baseline.
-   * Caller (sync.ts) reads this to choose the wire field, then calls
-   * `markUploadComplete()` on success to clear the flag for the next tick.
+   * Caller (sync.ts) reads this to choose the wire field. On the 'totals'
+   * path the tick does NOT persist the watermark itself; it hands the
+   * in-memory state back as `pendingWatermark` and sync.ts commits it via
+   * `commitTotalsUpload()` only after the POST returned 2xx.
    */
   uploadAs: 'deltas' | 'totals';
+  /**
+   * Present only when uploadAs === 'totals'. The watermark as it stood
+   * after the full re-scan, NOT yet written to disk. Persisting it before
+   * the upload is acknowledged was the bug: a failed POST left offsets at
+   * EOF with the flag still set, so the retry tick scanned only newly
+   * appended bytes and sent that fragment as a full-row overwrite. The
+   * history re-scan was lost for good.
+   */
+  pendingWatermark?: Watermark;
   /**
    * True when this tick ran with no work because the watermark file is
    * from a newer daemon schema (downgrade safety). sync.ts should skip
@@ -570,25 +581,23 @@ export interface ScanTickResult {
 }
 
 /**
- * Clear the `pendingResetUploadAs` flag from the persisted watermark.
- * Called by sync.ts after the first post-reset POST succeeds. Subsequent
- * ticks then revert to the normal incremental sessionDeltas path.
+ * Commit a totals tick: persist the post-re-scan watermark with the
+ * `pendingResetUploadAs` flag cleared. Called by sync.ts ONLY after the
+ * sessionTotals POST returned 2xx. This is the single write on the totals
+ * path; before the upload is acknowledged the on-disk file is untouched
+ * and still names the previous extractor version.
+ *
+ * The one guard kept is schema-future: if a newer daemon wrote the file
+ * between our tick and this commit, never write back. There is no
+ * extractor-stale guard any more, and deliberately so: on the totals path
+ * the disk IS extractor-stale by design until this commit runs, and the
+ * in-memory watermark carries the current version plus the full re-scan
+ * frontier, which is exactly what should land.
  */
-export function markUploadComplete(): void {
-  const state = loadWatermark();
-  // schema-future: never write back, current daemon doesn't understand
-  // the file's shape.
-  if (state.status === 'schema-future') return;
-  // extractor-stale: the on-disk file was concurrently rewound to a
-  // different extractorVersion between our tick and this call. Saving
-  // here would persist the in-memory `extractor-stale` state which
-  // resets all scannedTo to 0 — clobbering whatever scan progress the
-  // tick just recorded. Bail; the next tick handles the new stale
-  // state cleanly.
-  if (state.status === 'extractor-stale') return;
-  if (!state.wm.pendingResetUploadAs) return;
-  delete state.wm.pendingResetUploadAs;
-  saveWatermark(state.wm);
+export function commitTotalsUpload(wm: Watermark): void {
+  if (loadWatermark().status === 'schema-future') return;
+  delete wm.pendingResetUploadAs;
+  saveWatermark(wm);
 }
 
 /**
@@ -763,9 +772,18 @@ async function runActualTick(wm: Watermark): Promise<ScanTickResult> {
   }
 
   const uploadAs: 'deltas' | 'totals' = wm.pendingResetUploadAs === 'totals' ? 'totals' : 'deltas';
-  saveWatermark(wm);
 
-  return {
+  // Deltas path: commit the frontier now. A failed delta upload is dropped,
+  // never retried, because the BE applies deltas by increment and a retry
+  // after an ambiguous failure (BE committed, response lost) would double
+  // count. Under-counting is the safer failure for increment semantics.
+  //
+  // Totals path: do NOT save here. The on-disk file still carries the old
+  // extractor version, so if the upload fails or the daemon dies before it
+  // lands, the next tick sees extractor-stale again and repeats the full
+  // re-scan. The BE applies totals by overwrite, so a repeat is idempotent.
+  // sync.ts calls commitTotalsUpload(pendingWatermark) after 2xx.
+  const result: ScanTickResult = {
     findings,
     totalToolCalls,
     toolCallsBySession,
@@ -775,4 +793,10 @@ async function runActualTick(wm: Watermark): Promise<ScanTickResult> {
     uploadAs,
     schemaFuture: false,
   };
+  if (uploadAs === 'totals') {
+    result.pendingWatermark = wm;
+  } else {
+    saveWatermark(wm);
+  }
+  return result;
 }
