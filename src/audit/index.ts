@@ -196,9 +196,18 @@ export function appendLocalAudit(
   // ruleName is checked too (inline-ask v2): an 'inline-review' outcome row
   // carries the review label as ruleName — a DLP/taint-flagged review means
   // the args may contain the very credential that triggered it.
+  //
+  // PII rows are the same case and were missed (DLP-2): the PII gate emits
+  // checkedBy 'pii-block' / 'observe-mode-pii-would-block' with
+  // meta.piiPatterns, neither of which matched below, so the SSN / card
+  // landed in argsPreview and the shipper forwarded it. Both a checkedBy
+  // substring and the meta flag are checked, combined by strictness, so a
+  // renamed checkedBy or a caller that forgets the meta is still covered.
   const isDlpRow =
     checkedBy.toLowerCase().includes('dlp') ||
+    checkedBy.toLowerCase().includes('pii') ||
     Boolean(meta?.dlpPattern) ||
+    Boolean(meta?.piiPatterns) ||
     /dlp|taint/i.test(String(meta?.ruleName ?? ''));
   const preview = auditHashArgsEnabled && !isDlpRow ? buildArgsPreview(args) : undefined;
   const argsField = auditHashArgsEnabled

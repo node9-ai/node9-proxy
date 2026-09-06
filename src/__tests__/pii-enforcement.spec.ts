@@ -155,3 +155,35 @@ describe('GAP-7 — credit cards at the real gate', () => {
     expect(r.blockedByLabel).toMatch(/PII/);
   });
 });
+
+// ── DLP-2 at the real gate ──────────────────────────────────────────────────
+// The unit rows in audit-pii-row.unit.test.ts prove the guard; this proves the
+// seam that actually leaked: authorizeHeadless -> PII gate -> appendLocalAudit.
+// It reads mock.calls off the module-level appendFileSync spy rather than
+// re-spying, so the capture is exactly what the gate wrote and nothing leaks
+// into later tests.
+describe('DLP-2 — the PII block row written at the real gate carries no PII', () => {
+  it('argsPreview absent, argsHash present, raw SSN absent from the audit line', async () => {
+    mockConfig({ dlp: { enabled: true, pii: 'block' } });
+    const r = await authorizeHeadless('Bash', { command: `echo ${SSN}` });
+    expect(r.approved).toBe(false);
+    expect(r.blockedByLabel).toMatch(/PII/);
+
+    const calls = (fs.appendFileSync as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    expect(calls.length, 'the gate must have written at least one line').toBeGreaterThan(0);
+    const rows = calls
+      .map((c) => {
+        try {
+          return JSON.parse(String(c[1])) as Record<string, unknown>;
+        } catch {
+          return null;
+        }
+      })
+      .filter((x): x is Record<string, unknown> => x !== null);
+    const piiRow = rows.find((x) => String(x.checkedBy ?? '').includes('pii'));
+    expect(piiRow, 'a pii-block row must exist').toBeDefined();
+    expect(piiRow!.argsPreview).toBeUndefined();
+    expect(typeof piiRow!.argsHash).toBe('string');
+    expect(JSON.stringify(piiRow)).not.toContain(SSN);
+  });
+});
