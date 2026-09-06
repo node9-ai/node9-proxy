@@ -130,3 +130,75 @@ describe('detectArgsPii — high-signal PII in tool args (realtime path)', () =>
     expect(REALTIME_PII_PATTERNS).not.toContain('Phone');
   });
 });
+
+// ── IBAN (commit B) ─────────────────────────────────────────────────────────
+import { IBAN_VALID, IBAN_INVALID, IBAN_REGISTRY, asm as asmB } from '../dlp/checksum.fixtures';
+
+const ib = (id: string, rows = IBAN_VALID) => {
+  const r = rows.find((x) => x.id === id);
+  if (!r) throw new Error(`fixture ${id} missing`);
+  return r.parts;
+};
+const hasIban = (s: string) => detectPii(s).includes('IBAN');
+const argsHasIban = (v: unknown) => detectArgsPii(v).includes('IBAN');
+
+describe('detectPii — IBAN (offline path)', () => {
+  it('every published vector is detected, unspaced and spaced', () => {
+    for (const r of IBAN_VALID) {
+      expect(hasIban(asmB(r.parts)), r.id).toBe(true);
+      expect(hasIban(asmB(r.parts, ' ')), r.id + ' spaced').toBe(true);
+    }
+  });
+  it('a mod-97 failure is not detected', () => {
+    for (const r of IBAN_INVALID) expect(hasIban(asmB(r.parts)), r.id).toBe(false);
+  });
+  it('registry rows follow the validator (unknown country / too short rejected, long prefix accepted)', () => {
+    for (const r of IBAN_REGISTRY) expect(hasIban(asmB(r.parts)), r.id).toBe(r.expect);
+  });
+  it('lowercase is NOT detected (uppercase-only regex, pinned: lowercase hex-hash shapes would leak through mod-97 at 1/97)', () => {
+    expect(hasIban(asmB(ib('de-1')).toLowerCase())).toBe(false);
+  });
+  it('an IBAN followed by a BIC on the same line is still detected (length-as-minimum, F1)', () => {
+    expect(hasIban('IBAN: ' + asmB(ib('gb-1'), ' ') + ' BIC: NWBKGB2L')).toBe(true);
+  });
+  it('glued to a word it is not detected (leading \\b), pinned', () => {
+    expect(hasIban('ref' + asmB(ib('de-1')))).toBe(false);
+  });
+  it('R6: exact result set for a lone IBAN is only IBAN', () => {
+    expect(detectPii('acct ' + asmB(ib('de-1')))).toEqual(['IBAN']);
+  });
+});
+
+describe('detectArgsPii — IBAN is realtime-gated', () => {
+  it('rt-realtime-list: IBAN is in REALTIME_PII_PATTERNS', () => {
+    expect(REALTIME_PII_PATTERNS).toContain('IBAN');
+  });
+  it('rt-nested: found two levels deep', () => {
+    expect(argsHasIban({ a: { b: ['iban: ' + asmB(ib('de-1'))] } })).toBe(true);
+  });
+  it('rt-invalid: a mod-97 failure is not flagged', () => {
+    expect(argsHasIban({ a: 'iban: ' + asmB(ib('de-1-bad', IBAN_INVALID)) })).toBe(false);
+  });
+  it('rt-registry: mod-97 passes but the country is unregistered → not flagged', () => {
+    expect(argsHasIban({ a: asmB(ib('reg-unknown-cc', IBAN_REGISTRY)) })).toBe(false);
+  });
+  it('rt-overlap: an IBAN-shaped token that fails the validator, then a valid one → flagged', () => {
+    expect(argsHasIban({ a: 'XX12 ' + asmB(ib('gb-1'), ' ') })).toBe(true);
+  });
+  it('rt-multiline-a5: IBAN at line start inside a CSV value is flagged', () => {
+    const csv = [
+      'name,iban',
+      '\n',
+      'alice,',
+      asmB(ib('de-1')),
+      '\n',
+      'bob,',
+      asmB(ib('gb-1')),
+      '\n',
+    ].join('');
+    expect(argsHasIban({ content: csv })).toBe(true);
+  });
+  it('rt-line-start-spaced: a spaced IBAN alone on a line is flagged', () => {
+    expect(argsHasIban({ content: '\n' + asmB(ib('gb-1'), ' ') + '\n' })).toBe(true);
+  });
+});

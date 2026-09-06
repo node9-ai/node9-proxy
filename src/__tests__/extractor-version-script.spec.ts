@@ -26,6 +26,7 @@ const ROOT = path.resolve(__dirname, '..', '..');
 const SCRIPT = path.join(ROOT, 'scripts', 'check-extractor-version.mjs');
 const SOURCE_FILES = [
   'packages/policy-engine/src/scan/canonical.ts',
+  'packages/policy-engine/src/dlp/index.ts',
   'packages/policy-engine/src/scan/pii.ts',
   'packages/policy-engine/src/scan/checksums.ts',
   'packages/policy-engine/src/scan/destructive-regex.ts',

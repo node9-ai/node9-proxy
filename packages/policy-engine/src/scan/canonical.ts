@@ -252,7 +252,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v10';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '92f57d5f1d69728d';
+export const CANONICAL_EXTRACTOR_HASH = 'dd992b41cb910650';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

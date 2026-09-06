@@ -20,7 +20,7 @@
 // This file is part of the extractor-version hash set
 // (scripts/check-extractor-version.mjs): editing it changes detector output.
 
-import { validateLuhn } from './checksums';
+import { validateLuhn, validateIban } from './checksums';
 
 const PII_EMAIL_RE = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/;
 const PII_SSN_RE = /\b\d{3}-\d{2}-\d{4}\b/;
@@ -38,6 +38,16 @@ const PII_PHONE_RE = /\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b/;
 const PII_CC16_RE = /\b(?:4\d{3}|5[1-5]\d{2}|6\d{3})[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b/;
 // 15 digits, 4-6-5: American Express (34, 37).
 const PII_CC15_RE = /\b3[47]\d{2}[-\s]?\d{6}[-\s]?\d{5}\b/;
+
+// IBAN (ISO 13616): two letters, two check digits, then 11..30 alphanumerics
+// optionally grouped by single spaces or dashes ("GB29 NWBK 6016 1331 9268 19").
+// The natural `(?:[ -]?[A-Z0-9]){11,30}` is a nested quantifier and fails
+// safe-regex2; this alternation form passes and behaves identically. It is
+// greedy, so an IBAN followed by more text (a BIC) over-matches; validateIban
+// applies the country length as a MINIMUM and validates the prefix, so the
+// IBAN is still recognised. Uppercase only: a lowercase 22-char hex hash
+// would otherwise reach mod-97 and pass 1 time in 97.
+const PII_IBAN_RE = /\b[A-Z]{2}\d{2}(?:[A-Z0-9]|[ -][A-Z0-9]){11,30}\b/;
 
 /**
  * True if `text` contains at least one card-shaped run that also passes Luhn.
@@ -69,7 +79,18 @@ function hasValidCard(text: string): boolean {
   return false;
 }
 
-export type PiiPattern = 'Email' | 'SSN' | 'Phone' | 'Credit Card';
+/** Same overlapping-search shape as hasValidCard; validateIban strips formatting itself. */
+function hasValidIban(text: string): boolean {
+  const re = new RegExp(PII_IBAN_RE.source, 'g');
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (validateIban(m[0])) return true;
+    re.lastIndex = m.index + 1;
+  }
+  return false;
+}
+
+export type PiiPattern = 'Email' | 'SSN' | 'Phone' | 'Credit Card' | 'IBAN';
 
 /**
  * Detect PII patterns in a string. Returns a deduplicated list — one entry
@@ -83,6 +104,7 @@ export function detectPii(text: string): PiiPattern[] {
   if (/-/.test(text) && PII_SSN_RE.test(text)) found.add('SSN');
   if (PII_PHONE_RE.test(text)) found.add('Phone');
   if (hasValidCard(text)) found.add('Credit Card');
+  if (hasValidIban(text)) found.add('IBAN');
   return [...found];
 }
 
@@ -91,7 +113,11 @@ export function detectPii(text: string): PiiPattern[] {
 // configs, fixtures) and would make realtime enforcement too noisy. They are
 // still surfaced by the offline scan via detectPii(). SSN and Credit Card
 // require structural delimiters and are rarely legitimate in agent tool args.
-export const REALTIME_PII_PATTERNS: readonly PiiPattern[] = ['SSN', 'Credit Card'];
+// IBAN joins the realtime set: the country registry plus mod-97 leave a
+// residual false-positive class of roughly 1 in 97 registered-prefix
+// hex-looking tokens at exactly the right length, and 0 regex hits were
+// measured over 50,867 strings of real history.
+export const REALTIME_PII_PATTERNS: readonly PiiPattern[] = ['SSN', 'Credit Card', 'IBAN'];
 
 // Don't scan more than 100 KB of string content per call — mirrors the DLP
 // scanner's MAX_STRING_BYTES bound so a huge tool payload can't stall the
