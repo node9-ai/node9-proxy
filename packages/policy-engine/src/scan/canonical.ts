@@ -240,7 +240,7 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 //
 // The re-scan is the point: those reads happened on real machines and produced
 // no finding at all, so the history a user sees today under-reports them.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v9';
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v10';
 
 /**
  * SHA-256 prefix of the detector-source files
