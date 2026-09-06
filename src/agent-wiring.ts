@@ -194,7 +194,10 @@ export const AGENT_SPECS: AgentSpec[] = [
     setupCommand: 'node9 agents add claude',
     hookFile: (h) => path.join(h, '.claude', 'settings.json'),
     hookFormat: 'matcher',
-    hookEvents: [ck('PreToolUse'), lg('PostToolUse')],
+    // UserPromptSubmit is prompt DLP. setup.ts has written it for Claude since
+    // that shipped; the spec must name it too, or status/doctor never show the
+    // row and heal (which repairs via setupAgent) has no signal it is missing.
+    hookEvents: [ck('PreToolUse'), lg('PostToolUse'), ck('UserPromptSubmit')],
     mcpFile: (h) => path.join(h, '.claude.json'),
     present: (h) =>
       exists(path.join(h, '.claude', 'settings.json')) || exists(path.join(h, '.claude.json')),
