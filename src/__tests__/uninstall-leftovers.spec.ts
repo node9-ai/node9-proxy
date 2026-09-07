@@ -32,6 +32,8 @@ function run(args: string[]) {
     NO_COLOR: '1',
   };
   delete env.XDG_CONFIG_HOME;
+  // Keep the Windows Startup lookup inside the throwaway home (U7).
+  delete env.APPDATA;
   delete env.NODE9_API_KEY;
   const r = spawnSync(process.execPath, [CLI, ...args], {
     encoding: 'utf-8',
@@ -126,18 +128,38 @@ describe('U. uninstall removes what node9 put in the home', () => {
     expect(r.stdout).toMatch(/decoy/i);
   });
 
-  it('U7 the daemon service file is removed', () => {
-    // Both platform locations; whichever this platform uses must be gone after.
-    const plist = path.join(home, 'Library', 'LaunchAgents', 'ai.node9.daemon.plist');
-    const unit = path.join(home, '.config', 'systemd', 'user', 'node9-daemon.service');
-    for (const f of [plist, unit]) {
-      fs.mkdirSync(path.dirname(f), { recursive: true });
-      fs.writeFileSync(f, '# node9 service\n');
-    }
+  it('U7 the daemon service file is removed, on whichever mechanism this platform uses', () => {
+    // Each platform installs a DIFFERENT artefact, and only that one restarts
+    // the daemon here. An earlier version of this row created a systemd unit
+    // and asserted its removal on WINDOWS, which uses a Startup .vbs and never
+    // touches systemd: green locally, red on CI.
+    //
+    // run() deletes APPDATA from the child env, so windowsStartupDir falls back
+    // to <home>/AppData/Roaming and the row stays inside the throwaway home
+    // instead of writing into the runner's real Startup folder.
+    const target =
+      process.platform === 'darwin'
+        ? path.join(home, 'Library', 'LaunchAgents', 'ai.node9.daemon.plist')
+        : process.platform === 'win32'
+          ? path.join(
+              home,
+              'AppData',
+              'Roaming',
+              'Microsoft',
+              'Windows',
+              'Start Menu',
+              'Programs',
+              'Startup',
+              'node9-daemon.vbs'
+            )
+          : path.join(home, '.config', 'systemd', 'user', 'node9-daemon.service');
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, '# node9 autostart\n');
+    expect(fs.existsSync(target), 'instrument self-check: the fixture must exist first').toBe(true);
+
     const r = run(['uninstall']);
     expect(r.status, r.stderr).toBe(0);
-    const survivor = process.platform === 'darwin' ? plist : unit;
-    expect(fs.existsSync(survivor), 'the service that restarts the daemon must be removed').toBe(
+    expect(fs.existsSync(target), 'the artefact that restarts the daemon must be removed').toBe(
       false
     );
   });
