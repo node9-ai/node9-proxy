@@ -6,6 +6,8 @@
 // to touch the host system arrives via the hooks parameter.
 
 import type { SmartRule } from '../types';
+import { extractShellDestTokens } from '../shell/index';
+import { ssrfFloor } from '../egress/ssrf';
 import { scanArgs } from '../dlp';
 import {
   detectDangerousShellExec,
@@ -590,6 +592,35 @@ export async function evaluatePolicy(
 
     const builtin = strictestVerdict(candidates);
     if (builtin) return builtin;
+
+    // ── SSRF floor ──────────────────────────────────────────────────────────
+    // Addresses no agent tool call has a legitimate reason to reach. Runs
+    // BEFORE the egress policy and OUTSIDE its enabled guard: measured, the
+    // cloud metadata endpoint was reachable in three of the four realistic
+    // egress configurations, including the shipped default. It lives here
+    // rather than in the orchestrator so `node9 explain`, `simulate` and the
+    // posture probes, which call evaluatePolicy directly, inherit one
+    // implementation and cannot disagree with the gate.
+    //
+    // Its own token pass, not extractShellDestinations: parseDestHost requires
+    // a dot, so `curl 2852039166/latest/meta-data/` produced no destination at
+    // all and was allowed even with that exact string in egress.deny.
+    {
+      const ssrf = ssrfFloor(extractShellDestTokens(shellCommand), {
+        ssrfAllow: config.policy.egress?.ssrfAllow,
+        ssrfStrict: config.policy.egress?.ssrfStrict,
+      });
+      if (ssrf) {
+        return {
+          decision: 'block',
+          blockedByLabel: '🌐 Node9 Egress (Protected Address)',
+          reason: ssrf.reason,
+          ruleName: `ssrf:${ssrf.tier}:${ssrf.binary}:${ssrf.host}`,
+          ruleDescription: ssrf.reason,
+          tier: 3,
+        };
+      }
+    }
 
     // ── Egress / destination control (GAP-5) ────────────────────────────────
     // Gate WHERE network tools send data (curl/wget/scp/ssh/nc) against the

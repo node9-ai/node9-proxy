@@ -27,6 +27,7 @@ import { normalizeHost } from '../auth/trusted-hosts';
 // the rest of this file reference SmartRule by bare name.
 export type { SmartCondition, SmartRule } from '@node9/policy-engine';
 import type { SmartRule } from '@node9/policy-engine';
+import { classifySsrf } from '@node9/policy-engine';
 // The trusted shield catalog. A cloud-mandated shield resolves its body from
 // here directly, never a user ~/.node9/shields/<name>.json that shadows the
 // builtin (B1: a mandate's rules must come from the fleet, not the dev's file).
@@ -134,6 +135,8 @@ export interface Config {
       allow: string[];
       deny: string[];
       allowPrivate: boolean;
+      ssrfAllow?: string[];
+      ssrfStrict?: boolean;
     };
     loopDetection: {
       enabled: boolean;
@@ -398,7 +401,17 @@ export const DEFAULT_CONFIG: Config = {
       },
     ],
     dlp: { enabled: true, scanIgnoredTools: true, pii: 'off' },
-    egress: { enabled: false, mode: 'review', allow: [], deny: [], allowPrivate: true },
+    egress: {
+      enabled: false,
+      mode: 'review',
+      allow: [],
+      deny: [],
+      allowPrivate: true,
+      // The SSRF floor is always on and needs no default; these two only
+      // widen or narrow it. See doc/roadmap/active/ssrf-floor-design.md.
+      ssrfAllow: [],
+      ssrfStrict: false,
+    },
     loopDetection: { enabled: true, threshold: 5, windowSeconds: 120 },
     injectionScan: { enabled: false, minConfidence: 'medium', allow: [] },
     skillPinning: { enabled: false, mode: 'warn', roots: [] },
@@ -752,6 +765,7 @@ export function getConfig(cwd?: string): Config {
       ...DEFAULT_CONFIG.policy.egress,
       allow: [...DEFAULT_CONFIG.policy.egress.allow],
       deny: [...DEFAULT_CONFIG.policy.egress.deny],
+      ssrfAllow: [...(DEFAULT_CONFIG.policy.egress.ssrfAllow ?? [])],
     },
     loopDetection: { ...DEFAULT_CONFIG.policy.loopDetection },
     injectionScan: {
@@ -932,6 +946,30 @@ export function getConfig(cwd?: string): Config {
       if (Array.isArray(e.deny)) mergedPolicy.egress.deny.push(...e.deny);
       if (e.allowPrivate !== undefined && !(isProject && e.allowPrivate === true))
         mergedPolicy.egress.allowPrivate = e.allowPrivate;
+      // SSRF floor knobs. A repository layer may NOT touch either: ssrfAllow
+      // widens an exemption list and ssrfStrict:false would disable tier 3, so
+      // a checked-out repo could weaken the floor. Outer layers REPLACE rather
+      // than append, consistent with the ONE-config direction.
+      if (!isProject) {
+        if (Array.isArray(e.ssrfAllow)) {
+          // A tier-1 address has no allow path. Drop it and say so; never throw
+          // here, getConfig runs on every hook call and a config error that
+          // breaks every tool call is worse than the misconfiguration.
+          const kept: string[] = [];
+          for (const entry of e.ssrfAllow) {
+            const m = classifySsrf(entry);
+            if (m && !m.overridable) {
+              process.emitWarning(
+                `[node9] egress.ssrfAllow entry "${entry}" is a protected address (${m.tier}) and cannot be exempted; ignoring it.`
+              );
+              continue;
+            }
+            kept.push(entry);
+          }
+          mergedPolicy.egress.ssrfAllow = kept;
+        }
+        if (e.ssrfStrict !== undefined) mergedPolicy.egress.ssrfStrict = e.ssrfStrict;
+      }
     }
     if (p.loopDetection) {
       const ld = p.loopDetection as Partial<Config['policy']['loopDetection']>;

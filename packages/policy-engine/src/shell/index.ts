@@ -1515,6 +1515,69 @@ export function extractShellDestinations(command: string): ShellDestination[] {
   return out;
 }
 
+/** A raw destination-position token from a network binary, BEFORE parseDestHost.
+ *  The SSRF floor needs these because parseDestHost requires a dot and therefore
+ *  drops `2852039166`, which denotes a cloud metadata address (measured: that
+ *  command is allowed today at the strictest egress setting). */
+export interface ShellDestToken {
+  token: string;
+  binary: string;
+}
+
+/**
+ * Destination-position tokens for every network binary in a command, unparsed.
+ *
+ * Same walk and same flag-skipping as extractShellDestinations, so the two agree
+ * on which arguments are destinations. It exists as a sibling rather than a
+ * widening of parseDestHost because the dot requirement there is a load-bearing
+ * false-positive guard: turning every numeric token into a HOST would change
+ * egress verdicts for every user. Asking whether a token DENOTES A PROTECTED
+ * ADDRESS has no false-positive surface, because that comparison is exact.
+ */
+export function extractShellDestTokens(command: string): ShellDestToken[] {
+  const f = parseShared(command);
+  if (f === PARSE_FAIL) return []; // fail open for FPs, not FNs
+  const out: ShellDestToken[] = [];
+  const seen = new Set<string>();
+  try {
+    syntax.Walk(f, (node: unknown) => {
+      if (!node) return false;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const n = node as any;
+      if (syntax.NodeType(n) !== 'CallExpr') return true;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const callArgs: any[] = n.Args || [];
+      if (callArgs.length === 0) return true;
+      const name = (resolveWordLiteral(callArgs[0]) || '').toLowerCase();
+      if (!NET_BINARIES.has(name)) return true;
+      const rest = callArgs.slice(1).map((a) => resolveWordLiteral(a));
+      for (const raw of destTokensForBinary(name, rest)) {
+        if (!raw) continue;
+        // Strip a scheme and everything from the first path separator, so
+        // `2852039166/latest/meta-data/` yields the host part. Port and
+        // userinfo are stripped the same way parseDestHost does.
+        let tok = raw.trim();
+        const scheme = /^[a-z][a-z0-9+.-]*:\/\//i.exec(tok);
+        if (scheme) tok = tok.slice(scheme[0].length);
+        const at = tok.lastIndexOf('@');
+        if (at >= 0) tok = tok.slice(at + 1);
+        tok = tok.split('/')[0];
+        // A bracketed IPv6 literal keeps its brackets; the normalizer strips them.
+        if (!tok.startsWith('[')) tok = tok.replace(/:\d+$/, '');
+        if (!tok) continue;
+        const key = `${name}:${tok}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ token: tok, binary: name });
+      }
+      return true;
+    });
+  } catch {
+    return out; // partial result on walker error — fail open
+  }
+  return out;
+}
+
 /**
  * AST-based filesystem-operation detector. Walks each CallExpr, identifies
  * dangerous patterns by *resolved path arguments*, returns the first verdict

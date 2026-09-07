@@ -164,3 +164,10 @@ export {
 // Canary (decoy credential) matcher; pure. Registry and planting live in the proxy.
 export { matchCanary, matchCanaryArgs, CANARY_MIN_LENGTH } from './dlp/canary';
 export type { CanaryValue, CanaryHit, CanaryView } from './dlp/canary';
+
+// SSRF floor: protected addresses, checked before and independently of the
+// egress policy. See doc/roadmap/active/ssrf-floor-design.md.
+export { normalizeIpLiteral, classifySsrf, ssrfFloor, SSRF_MAX_HOST } from './egress/ssrf';
+export type { SsrfTier, SsrfMatch, SsrfVerdict, SsrfFloorOptions } from './egress/ssrf';
+export { extractShellDestTokens } from './shell/index';
+export type { ShellDestToken } from './shell/index';
