@@ -8,7 +8,12 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { evaluateEgressConfig, checkEgress, sandboxEgressWallActive } from '../egress';
+import {
+  evaluateEgressConfig,
+  checkEgress,
+  checkEgressFloor,
+  sandboxEgressWallActive,
+} from '../egress';
 import { ALLOWED_DOMAINS_PATH } from '../../sandbox/templates';
 import { scorePosture, openHeadroom } from '../score';
 import { checkSecrets } from '../secrets';
@@ -44,6 +49,96 @@ describe('evaluateEgressConfig', () => {
   it('flags HIGH when enabled but mode is off', () => {
     const f = evaluateEgressConfig({ enabled: true, mode: 'off' });
     expect(f?.severity).toBe('high');
+  });
+
+  // ── The SSRF floor in the posture narrative ────────────────────────────
+  // The floor is the one protection that is on for every machine whatever the
+  // config says, so the report must state it as a WIN and must not describe an
+  // open egress as fully open when it is not.
+
+  it('P1 an open egress no longer claims the agent can reach ANY server', () => {
+    const f = evaluateEgressConfig({ enabled: false, mode: 'off' });
+    // The old copy said "any server on the internet". That was true before the
+    // floor existed; it is an overclaim in the pessimistic direction now.
+    expect(f.what).toMatch(/protected address|metadata/i);
+  });
+
+  it('P2 the floor row is stated even when the egress policy is off', () => {
+    const rows = checkEgressFloor({
+      enabled: false,
+      mode: 'off',
+      ssrfStrict: false,
+      ssrfAllow: [],
+    });
+    const floor = rows.find((r) => /metadata/i.test(r.title));
+    expect(floor, 'the win holds regardless of the egress policy').toBeDefined();
+    // Coverage is PROBED at the real gate, never asserted here: the floor runs
+    // inside evaluatePolicy, so a machine with no hooks wired is not covered by
+    // it, whatever the config says.
+    expect(floor?.coverageProbe).toMatchObject({ kind: 'command' });
+    expect((floor?.coverageProbe as { command: string }).command).toContain('169.254.169.254');
+  });
+
+  it('P2b an unenforced machine does not see the floor under "node9 is enforcing"', () => {
+    const rows = checkEgressFloor({
+      enabled: true,
+      mode: 'block',
+      ssrfStrict: true,
+      ssrfAllow: [],
+    });
+    const floor = rows[0];
+    floor.coverage = { state: 'open' }; // what the probe returns when not in-path
+    const kept = dropEnforcementRedundant([floor, f('Coverage')]);
+    expect(kept.map((r) => r.title)).not.toContain(floor.title);
+  });
+
+  it('P3 the floor row names the attack, not the mechanism', () => {
+    const rows = checkEgressFloor({
+      enabled: true,
+      mode: 'block',
+      ssrfStrict: false,
+      ssrfAllow: [],
+    });
+    expect(rows[0].who, 'what would have happened').toMatch(/credential|key/i);
+  });
+
+  it('P3b detail[0] is the noun phrase the covered-row renderer needs', () => {
+    // The renderer prints "<via> is blocking <detail[0]>"; a detail written as
+    // a standalone sentence rendered as "… is blocking Strict tier off: loopback…".
+    const d0 = checkEgressFloor({
+      enabled: true,
+      mode: 'block',
+      ssrfStrict: false,
+      ssrfAllow: [],
+    })[0].detail[0];
+    expect(d0[0], 'lowercase noun phrase, not a sentence').toBe(d0[0].toLowerCase());
+    expect(d0).toMatch(/metadata/i);
+  });
+
+  it('P4 strict OFF is not reported as a gap', () => {
+    // Loopback is normal, wanted development traffic. Calling it a gap on every
+    // machine would be exactly the over-reporting the report is judged on.
+    const rows = checkEgressFloor({
+      enabled: true,
+      mode: 'block',
+      ssrfStrict: false,
+      ssrfAllow: [],
+    });
+    expect(
+      rows.filter((r) => r.severity !== 'advisory' && /loopback|internal/i.test(r.title))
+    ).toEqual([]);
+  });
+
+  it('P5 the strict tier, when on, is stated in the same row', () => {
+    const on = checkEgressFloor({ enabled: true, mode: 'block', ssrfStrict: true, ssrfAllow: [] });
+    expect(on[0].detail.join(' ')).toMatch(/strict tier is on/i);
+    const off = checkEgressFloor({
+      enabled: true,
+      mode: 'block',
+      ssrfStrict: false,
+      ssrfAllow: [],
+    });
+    expect(off[0].detail.join(' ')).toMatch(/strict tier is off/i);
   });
 
   it('review mode emits a covered-candidate finding (approval-gated when enforcing)', () => {
@@ -92,6 +187,16 @@ describe('checkEgress — sandbox kernel wall', () => {
     // It must NOT carry an egress probe — annotateCoverage would re-open it from
     // the (minimal) in-box config and clobber the kernel-wall credit.
     expect(f.coverageProbe).toBeUndefined();
+  });
+
+  it('P6 checkEgress actually SHIPS the floor row into the report', () => {
+    // Mutation found this gap: every P-row above called checkEgressFloor
+    // directly, so deleting the call site left the report with no floor row and
+    // nothing turned red. This row pins the wiring, not the wording.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'posture-floor-'));
+    const rows = checkEgress({ home: dir, cwd: dir } as CheckContext);
+    expect(rows.some((r) => /metadata/i.test(r.title))).toBe(true);
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
   it('falls back to the config-based check off the host (no marker file)', () => {
