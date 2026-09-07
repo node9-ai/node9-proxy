@@ -123,6 +123,53 @@ describe('C. registry', () => {
     expect(() => reg.registerCanary(newRec('C9'))).toThrow();
     expect(fs.existsSync(storeFile()), 'never leave an unjailed registry behind').toBe(false);
   });
+  it('C10 a save that fails between create and rename leaves no temp file, and no decoy value on disk', () => {
+    // The success path cannot witness the cleanup: renameSync moves the temp
+    // away, so `existsSync(tmp)` is already false and the branch is a no-op.
+    // Only a failure AFTER the write reaches it. Spying renameSync is the only
+    // way to land exactly there (a directory at the destination makes
+    // loadCanaries throw on the READ first, verified).
+    const rec = reg.registerCanary(newRec('C10'));
+    const before = fs.readdirSync(path.join(home, '.node9'));
+    // Scoped to the registry's own temp file: saveCanaries first materialises
+    // the jail shield, which ALSO renames atomically. An unscoped spy makes
+    // that throw first, so the registry write is never reached and the row
+    // passes without exercising the cleanup (verified: the mutation survived).
+    const realRename = fs.renameSync.bind(fs);
+    let sawRegistryRename = false;
+    const spy = vi.spyOn(fs, 'renameSync').mockImplementation(((
+      from: fs.PathLike,
+      to: fs.PathLike
+    ) => {
+      if (String(from).includes('canaries.json.') && String(from).endsWith('.tmp')) {
+        sawRegistryRename = true;
+        throw new Error('EXDEV: simulated rename failure');
+      }
+      return realRename(from, to);
+    }) as typeof fs.renameSync);
+    expect(() => reg.registerCanary(newRec('C10b'))).toThrow(/simulated rename failure/);
+    spy.mockRestore();
+    expect(
+      sawRegistryRename,
+      'instrument self-check: the registry rename must have been reached'
+    ).toBe(true);
+    const after = fs.readdirSync(path.join(home, '.node9'));
+    expect(
+      after.filter((f) => f.includes('.tmp')),
+      'no temp file may survive a failed save'
+    ).toEqual([]);
+    expect(after.sort()).toEqual(before.sort());
+    // and no stray file may carry a decoy value
+    for (const f of after) {
+      const full = path.join(home, '.node9', f);
+      if (!fs.statSync(full).isFile()) continue;
+      if (f === 'canaries.json') continue; // the registry legitimately holds it
+      expect(fs.readFileSync(full, 'utf-8').includes(rec.value), `${f} carries a decoy value`).toBe(
+        false
+      );
+    }
+  });
+
   it('row counts', () => {
     expect(ROW_COUNTS.C).toBe(9);
   });

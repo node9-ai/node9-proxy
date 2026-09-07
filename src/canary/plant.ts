@@ -114,11 +114,43 @@ export function plantKind(kind: CanaryKind, home = os.homedir()): PlantResult {
   return { kind, action: 'created', path: target, createdDir, recordIds };
 }
 
-export function removeKind(kind: CanaryKind): RemoveResult {
+/**
+ * The only paths a decoy of this kind may ever occupy. `remove` compares
+ * against this, not against the registry, because the registry is data an
+ * agent can reach: the jail matches paths and a language runtime that builds
+ * the path itself is not a watched binary. Exact equality against a two-element
+ * set after path.resolve, never a prefix test: a prefix test on `~/.aws/` would
+ * still permit deleting a real `~/.aws/config`.
+ */
+function allowedPathsFor(kind: CanaryKind, home: string): string[] {
+  const site = SITES[kind];
+  return [site.primary(home), site.fallback(home)].map((x) => path.resolve(x));
+}
+
+export function removeKind(kind: CanaryKind, home = os.homedir()): RemoveResult {
   const live = liveRecords(kind);
   if (live.length === 0) return { kind, action: 'absent' };
   const p = live[0].path;
   const { fileHash, createdDir } = live[0];
+
+  // Refuse before touching the filesystem. The fileHash below answers "did this
+  // file change since node9 wrote it", which is a DIFFERENT question from "is
+  // node9 entitled to delete this file" — and whoever can rewrite the registry
+  // computes the hash too, so it is not a defence on its own.
+  //
+  // Resolve the INTENDED path rather than realpath'ing what is on disk. Both are
+  // safe here (unlinkSync removes a link, not its target), so this is a
+  // robustness choice, not a second security boundary: the comparison should
+  // not depend on an attacker-chosen link target. Stated plainly because the
+  // mutation that swaps them is EQUIVALENT and no row witnesses a difference.
+  if (!allowedPathsFor(kind, home).includes(path.resolve(p))) {
+    return {
+      kind,
+      action: 'refused',
+      path: p,
+      reason: `${p} is not a path node9 plants a ${kind} decoy at; refusing to delete it. If you believe this is a decoy, remove it by hand.`,
+    };
+  }
 
   if (!fs.existsSync(p)) {
     for (const r of live) retireCanary(r.id);

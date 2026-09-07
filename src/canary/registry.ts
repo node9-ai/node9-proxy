@@ -10,7 +10,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { createHash, randomUUID } from 'crypto';
+import { createHash, randomUUID, randomBytes } from 'crypto';
 import { CANARY_MIN_LENGTH, type CanaryValue } from '@node9/policy-engine';
 import { addJailPath, regenerateUserJail } from '../shields/jail';
 
@@ -84,10 +84,35 @@ export function saveCanaries(records: CanaryRecord[]): void {
   const paths = addJailPath(p, 'block'); // throws on a malformed jail store: nothing written below
   regenerateUserJail(paths); // addJailPath alone writes the store without materialising the shield (H9)
   fs.mkdirSync(path.dirname(p), { recursive: true });
-  const tmp = p + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify({ version: 1, records }, null, 2) + '\n', { mode: 0o600 });
-  fs.chmodSync(tmp, 0o600);
-  fs.renameSync(tmp, p);
+  // The temp file is a write primitive if it is predictable: writeFileSync
+  // follows a symlink and truncates, and the temp name is NOT covered by the
+  // jail (which registers canaries.json). A symlink pre-planted at a fixed
+  // `.tmp` name turned the next save into an arbitrary overwrite, with every
+  // plaintext decoy written to the attacker's path. Two independent guards:
+  // an unpredictable name (nothing to pre-plant at) and `wx`, which is
+  // O_CREAT|O_EXCL and does not follow a final symlink. Only the FIRST is
+  // witnessed by a test: with a random name, dropping `wx` is not exploitable
+  // deterministically, so it stands as defence against a race rather than
+  // against a pre-planted link. Kept, and said so rather than faking a row.
+  const tmp = `${p}.${randomBytes(8).toString('hex')}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify({ version: 1, records }, null, 2) + '\n', {
+      mode: 0o600,
+      flag: 'wx',
+    });
+    fs.chmodSync(tmp, 0o600);
+    fs.renameSync(tmp, p);
+  } finally {
+    // A throw between create and rename would otherwise leave the decoy values
+    // lying in a stray file.
+    if (fs.existsSync(tmp)) {
+      try {
+        fs.unlinkSync(tmp);
+      } catch {
+        /* best effort */
+      }
+    }
+  }
 }
 
 export function registerCanary(rec: NewCanaryRecord): CanaryRecord {
