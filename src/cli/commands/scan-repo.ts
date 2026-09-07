@@ -11,8 +11,13 @@ import chalk from 'chalk';
 import { scanRepo, scanTree, type OnProgress } from '../../ci-check';
 import { readGitRefTree } from '../../ci-check/fetch';
 import { diffScans } from '../../ci-check/diff';
-import { renderScan, renderScanMarkdown, exitCodeFor } from '../../ci-check/render';
-import { SEVERITY_RANK, type ScanDiff } from '../../ci-check/types';
+import {
+  renderScan,
+  renderScanMarkdown,
+  exitCodeFor,
+  exitCodeForSeverity,
+} from '../../ci-check/render';
+import type { ScanDiff } from '../../ci-check/types';
 
 const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -86,14 +91,14 @@ export function registerScanRepoCommand(program: Command): void {
         }
 
         // Non-zero when a real risk is present, so CI/scripts can gate. `--fail-on-introduced`
-        // narrows that to what this change is answerable for, which is what makes the gate
-        // adoptable on a repo that is already dirty. When the base could not be read,
-        // `worstIntroduced` already carries the absolute worst, so the gate stays strict.
+        // narrows WHICH findings are judged; it does not change the severity policy, so it
+        // runs through the same exit-code law — a medium blocks (or does not) identically
+        // either way. `incomplete` is carried through: a scan that could not read every
+        // file still exits 3, because "nothing introduced" would then be a statement about
+        // what we read rather than about the change.
         process.exitCode =
           opts.failOnIntroduced && diff
-            ? diff.worstIntroduced && SEVERITY_RANK[diff.worstIntroduced] >= SEVERITY_RANK.high
-              ? 1
-              : 0
+            ? exitCodeForSeverity(diff.worstIntroduced, diff.incomplete)
             : exitCodeFor(res);
       }
     );

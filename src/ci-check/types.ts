@@ -75,6 +75,11 @@ export interface ScanDiff {
    *  `escalated` when the base is trustworthy; the HEAD's absolute worst otherwise, so a
    *  base that could not run can never be rendered as "nothing new". */
   worstIntroduced: Severity | null;
+  /** True when EITHER side could not read every file. A severity cannot express "we did
+   *  not finish looking" — `worstIntroduced: null` on an incomplete scan is a statement
+   *  about what we read, not about the change — so the third state is carried separately
+   *  and no consumer may render an incomplete diff as a pass. */
+  incomplete: boolean;
 }
 
 /** A fetched agent-surface file. `content` is the raw text (never executed). */

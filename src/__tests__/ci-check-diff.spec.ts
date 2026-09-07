@@ -225,6 +225,27 @@ describe('CI-5 · a base that could not run', () => {
     expect(d.worstIntroduced).toBe('critical');
   });
 
+  it('does not present an INCOMPLETE head scan as a clean pass', () => {
+    // The mirror of the base guard, and the one this diff originally missed: if the HEAD
+    // scan could not read every file, "nothing introduced" is not a fact about the change,
+    // it is a fact about what we managed to read. The absolute path already says this with
+    // exit code 3; the narrow path must not lose it.
+    const incompleteHead = scan([], ['GitHub rate limit — the scan may be INCOMPLETE']);
+    const d = diffScans(scan([]), incompleteHead);
+
+    expect(d.base).toBe('ok');
+    expect(d.worstIntroduced).toBeNull(); // nothing was found in what we DID read…
+    expect(d.incomplete).toBe(true); // …but the answer is not "clean"
+  });
+
+  it('marks a diff complete when both sides read everything', () => {
+    expect(diffScans(scan([]), scan([])).incomplete).toBe(false);
+  });
+
+  it('marks a diff incomplete when the base could not be read', () => {
+    expect(diffScans(null, scan([])).incomplete).toBe(true);
+  });
+
   it('reports base ok when both scans are complete', () => {
     const d = diffScans(scan([]), head());
     expect(d.base).toBe('ok');

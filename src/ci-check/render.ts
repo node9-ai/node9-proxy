@@ -252,12 +252,19 @@ export function renderScanMarkdown(res: ScanResult, diff?: ScanDiff): string {
   return L.join('\n');
 }
 
+/** The CLI's one exit-code law, in terms of a severity + whether the scan finished.
+ *  Shared by the absolute gate and the `--fail-on-introduced` gate so the same severity
+ *  can never block on one and pass on the other. */
+export function exitCodeForSeverity(worst: Severity | null, incomplete: boolean): number {
+  if (worst === 'critical' || worst === 'high') return 2;
+  if (worst === 'medium') return 1;
+  if (incomplete) return 3; // couldn't read every file — not a clean pass
+  return 0;
+}
+
 /** Shared by the CLI: pick a picked finding's exit code weight. */
 export function exitCodeFor(res: ScanResult): number {
-  if (res.worst === 'critical' || res.worst === 'high') return 2;
-  if (res.worst === 'medium') return 1;
-  if (res.incomplete) return 3; // couldn't read every file — not a clean pass
-  return 0;
+  return exitCodeForSeverity(res.worst, res.incomplete);
 }
 
 export function pickFinding(findings: CiFinding[]): CiFinding | undefined {

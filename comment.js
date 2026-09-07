@@ -19,10 +19,13 @@ const ICON = { critical: '🔴', high: '🔴', medium: '🟡', advisory: '🟢' 
 
 /** Decide the check-run conclusion + process exit from the worst severity and
  *  the fail-on threshold. `never` = report-only (never fails). */
-function decide(worst, failOn) {
+function decide(worst, failOn, incomplete = false) {
   const threshold = RANK[failOn]; // undefined for 'never'/unknown → never fail
   const fail = !!(threshold && worst && RANK[worst] >= threshold);
-  const conclusion = fail ? 'failure' : worst ? 'neutral' : 'success';
+  // A scan that could not read every file has not earned a green check. It does not FAIL
+  // the gate (we have no evidence of a problem), but it must not report success either —
+  // "nothing found" is a statement about what we read, not about the change.
+  const conclusion = fail ? 'failure' : worst || incomplete ? 'neutral' : 'success';
   return { fail, conclusion, exitCode: fail ? 1 : 0 };
 }
 
@@ -171,7 +174,8 @@ function renderComment(result) {
   const findings = trusted ? annotatable(result) : all;
   const worst = trusted ? d.worstIntroduced : result.worst;
   const L = [MARKER];
-  if (trusted && findings.length === 0) {
+  // An incomplete scan can never take the green branch, however little it found.
+  if (trusted && findings.length === 0 && !d.incomplete && !result.incomplete) {
     L.push('### 🛡️ node9 agent-security · ✅');
     L.push('');
     L.push(
@@ -187,6 +191,12 @@ function renderComment(result) {
     L.push('');
     L.push(renderDetail(result));
     return L.join('\n');
+  }
+  if (d && trusted && (d.incomplete || result.incomplete)) {
+    L.push(
+      '<sub>⚠️ This scan could not read every file, so it cannot claim the change introduced nothing — treat the list below as partial.</sub>'
+    );
+    L.push('');
   }
   if (d && !trusted) {
     L.push(
@@ -331,7 +341,11 @@ async function main() {
   const scope = (process.env.NODE9_FAIL_ON_SCOPE || 'all').toLowerCase();
   const wantComment = (process.env.NODE9_COMMENT || 'true') !== 'false';
   const { prNumber, headSha } = readEvent();
-  const { fail, conclusion, exitCode } = decide(gateWorst(result, scope), failOn);
+  const { fail, conclusion, exitCode } = decide(
+    gateWorst(result, scope),
+    failOn,
+    !!(result.incomplete || (result.diff && result.diff.incomplete))
+  );
 
   // Inline annotations, on the file the reviewer is already looking at. Printed before the
   // API calls so they still land if commenting fails.
@@ -359,7 +373,7 @@ async function main() {
       (result.diff
         ? ` · introduced=${result.diff.worstIntroduced ?? 'none'} (base ${result.diff.base})`
         : '') +
-      ` · fail-on=${failOn}/${scope} · ${fail ? 'FAILING' : 'ok'}`
+      ` · fail-on=${failOn}/${scope} · ${fail ? 'FAILING' : conclusion === 'neutral' ? conclusion : 'ok'}`
   );
   return exitCode;
 }
@@ -472,6 +486,38 @@ function selftest() {
     'critical',
     'no diff in the result → gate on the repo worst, never on nothing'
   );
+
+  // An incomplete scan must never post a green check, on either scope.
+  assert.strictEqual(
+    decide(null, 'high', true).conclusion,
+    'neutral',
+    'incomplete → neutral, never success'
+  );
+  assert.strictEqual(
+    decide(null, 'high', false).conclusion,
+    'success',
+    'complete + clean → success'
+  );
+  const partial = withDiff(
+    {
+      base: 'ok',
+      added: [],
+      escalated: [],
+      unchanged: [],
+      removed: [],
+      worstIntroduced: null,
+      incomplete: true,
+    },
+    []
+  );
+  partial.worst = null;
+  partial.incomplete = true;
+  const partialComment = renderComment(partial);
+  assert.ok(
+    !partialComment.includes('introduces no agent-security findings'),
+    'a partial scan never claims the PR introduced nothing'
+  );
+  assert.ok(partialComment.includes('could not read every file'), 'a partial scan says so');
 
   // Annotations follow the same scope.
   const introducedOnly = withDiff(

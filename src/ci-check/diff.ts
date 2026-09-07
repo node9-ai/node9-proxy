@@ -84,6 +84,7 @@ export function diffScans(base: ScanResult | null | undefined, head: ScanResult)
       unchanged: [...head.findings],
       escalated: [],
       worstIntroduced: head.worst,
+      incomplete: true,
     };
   }
 
@@ -123,5 +124,8 @@ export function diffScans(base: ScanResult | null | undefined, head: ScanResult)
     unchanged,
     escalated,
     worstIntroduced: worstOf([...added.map((f) => f.severity), ...escalated.map((e) => e.to)]),
+    // The head side of the same guard: a scan that could not read every file has not
+    // earned the word "clean", however trustworthy the base was.
+    incomplete: head.incomplete,
   };
 }
