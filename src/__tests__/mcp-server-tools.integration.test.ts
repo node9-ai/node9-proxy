@@ -235,6 +235,35 @@ describe('node9 MCP server — egress control tools', () => {
     fs.rmSync(h, { recursive: true, force: true });
   });
 
+  it('node9_egress_status states the floor, so an agent cannot infer it is absent', () => {
+    // An agent that asks about network reach and gets allow/deny only will
+    // conclude internal addresses are reachable. The floor has to be in the
+    // answer, including the part no setting releases.
+    const h = makeHome({
+      settings: { mode: 'standard' },
+      policy: {
+        egress: { enabled: true, mode: 'review', ssrfStrict: true, ssrfAllow: ['100.64.0.1'] },
+      },
+    });
+    const res = driveMcp(
+      [
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'node9_egress_status', arguments: {} },
+        },
+      ],
+      h,
+      h
+    );
+    const text = res[1]?.result?.content?.[0]?.text ?? '';
+    expect(text, 'the always-on tier').toMatch(/metadata/i);
+    expect(text, 'the strict tier and its state').toMatch(/internal addresses:\s*on/i);
+    expect(text, 'the exemptions in force').toContain('100.64.0.1');
+    fs.rmSync(h, { recursive: true, force: true });
+  });
+
   it('node9_egress_protect + node9_egress_deny (add-only) work over MCP without mcpAllowWeakening', () => {
     const h = makeHome({ settings: { mode: 'standard' } });
     const res = driveMcp(

@@ -44,6 +44,10 @@ describe('applyEgress (read-merge-write)', () => {
       allow: [],
       deny: [],
       allowPrivate: true,
+      // The floor knobs are part of the block now; a written config states
+      // them explicitly rather than leaving them to be inferred.
+      ssrfStrict: false,
+      ssrfAllow: [],
     });
     expect(config.policy.smartRules).toEqual(['keepme']); // untouched
     expect(config.settings.mode).toBe('standard'); // untouched
@@ -118,6 +122,71 @@ describe('node9 egress (integration)', () => {
     const r = run([]);
     expect(r.status).toBe(0);
     expect(r.stdout).toMatch(/Egress control/i);
+  });
+
+  // ── The SSRF floor: status surface + the two knobs ────────────────────────
+  // The floor blocks before any egress policy is consulted, and until now no
+  // screen said so. A user who runs `node9 egress` and reads four lines about
+  // allow/deny has no way to learn that some addresses are hard-blocked, which
+  // tier is on, or who decided.
+
+  it('S1 status names the always-blocked tier, unconditionally', () => {
+    const r = run([]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/Protected addresses/i);
+    expect(r.stdout, 'the always-on part is stated even with egress off').toMatch(
+      /cloud metadata|metadata endpoint/i
+    );
+  });
+
+  it('S2 status reports the strict tier as OFF by default', () => {
+    const r = run([]);
+    expect(r.stdout).toMatch(/Internal addresses:\s+off/i);
+  });
+
+  it('S3 status reports the strict tier as ON once it is set', () => {
+    run(['strict', 'on']);
+    const r = run([]);
+    expect(r.stdout).toMatch(/Internal addresses:\s+on/i);
+  });
+
+  it('S4 strict on/off round-trips through the config file', () => {
+    run(['strict', 'on']);
+    expect(readEgress().ssrfStrict).toBe(true);
+    run(['strict', 'off']);
+    expect(readEgress().ssrfStrict).toBe(false);
+  });
+
+  it('S5 strict rejects a value that is neither on nor off (exit 1)', () => {
+    const r = run(['strict', 'maybe']);
+    expect(r.status).toBe(1);
+    expect(readEgress, 'nothing written').toThrow();
+  });
+
+  it('S6 exempt adds an address to the exemption list and shows it', () => {
+    run(['exempt', '100.64.0.1']);
+    expect(readEgress().ssrfAllow).toContain('100.64.0.1');
+    expect(run([]).stdout).toMatch(/100\.64\.0\.1/);
+  });
+
+  it('S7 exempt REFUSES a protected address, at the keystroke (exit 1)', () => {
+    // The old behaviour dropped it silently at config-load time, so a user who
+    // typed it believed the exemption existed.
+    const r = run(['exempt', '169.254.169.254']);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/cannot be exempted|protected/i);
+    expect(readEgress, 'nothing written').toThrow();
+  });
+
+  it('S8 exempt rejects a non-address (exit 1)', () => {
+    const r = run(['exempt', 'not an address']);
+    expect(r.status).toBe(1);
+  });
+
+  it('S9 status says WHO governs the strict tier', () => {
+    run(['strict', 'on']);
+    const r = run([]);
+    expect(r.stdout).toMatch(/set by:\s+this machine/i);
   });
 
   it('refuses to overwrite a malformed config (exit 1, file untouched)', () => {

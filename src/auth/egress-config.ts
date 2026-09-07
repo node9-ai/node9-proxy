@@ -10,6 +10,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { classifySsrf } from '@node9/policy-engine';
 
 export type EgressMode = 'off' | 'review' | 'block';
 
@@ -19,6 +20,11 @@ export interface EgressBlock {
   allow: string[];
   deny: string[];
   allowPrivate: boolean;
+  /** SSRF floor, strict tier: also block loopback and the private ranges. */
+  ssrfStrict: boolean;
+  /** SSRF floor exemptions. Only an OVERRIDABLE tier can be exempted; a
+   *  protected address stays blocked whatever this list says. */
+  ssrfAllow: string[];
 }
 
 export const DEFAULT_EGRESS: EgressBlock = {
@@ -27,6 +33,8 @@ export const DEFAULT_EGRESS: EgressBlock = {
   allow: [],
   deny: [],
   allowPrivate: true,
+  ssrfStrict: false,
+  ssrfAllow: [],
 };
 
 // The on-disk config is an arbitrary JSON bag; we only ever touch policy.egress.
@@ -100,6 +108,30 @@ export function addEgressHost(list: 'allow' | 'deny', host: string): void {
   const current: EgressBlock = { ...DEFAULT_EGRESS, ...existing };
   const updated = current[list].includes(host) ? current[list] : [...current[list], host];
   applyEgress(config, { [list]: updated });
+  writeEgressRawConfig(config);
+}
+
+/**
+ * Append an address to the SSRF exemption list (idempotent). Refuses a
+ * protected address HERE, at the keystroke: the config layer drops such an
+ * entry at load time, which left a user who typed one believing the exemption
+ * existed. Throws on a malformed config.
+ */
+export function addSsrfExemption(address: string): void {
+  const m = classifySsrf(address);
+  if (m && !m.overridable) {
+    throw new Error(
+      `${address} is a protected address (${m.tier}) and cannot be exempted by anyone. ` +
+        `This is the one part of the floor no setting releases.`
+    );
+  }
+  const config = readEgressRawConfig();
+  const existing = (config.policy?.egress ?? {}) as Partial<EgressBlock>;
+  const current: EgressBlock = { ...DEFAULT_EGRESS, ...existing };
+  const updated = current.ssrfAllow.includes(address)
+    ? current.ssrfAllow
+    : [...current.ssrfAllow, address];
+  applyEgress(config, { ssrfAllow: updated });
   writeEgressRawConfig(config);
 }
 

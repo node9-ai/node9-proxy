@@ -354,6 +354,9 @@ export const TOOLS = [
       'Show egress (outbound network) control: whether it is enabled, the mode ' +
       '(off / review / block), and your allow + deny host lists. Common dev/LLM hosts ' +
       '(github, npm, pypi, anthropic, …) are always allowed by a built-in list. ' +
+      'Also reports the SSRF floor: the addresses blocked on every machine before ' +
+      'any policy is consulted (cloud metadata, link-local), whether the strict tier ' +
+      '(loopback + private ranges) is on, and the exemptions in force. ' +
       'Read-only.',
     inputSchema: { type: 'object', properties: {}, required: [] },
   },
@@ -562,6 +565,15 @@ function handleEgressStatus(): string {
     `${DEFAULT_EGRESS_ALLOWLIST.length} common dev/LLM hosts are always allowed (github, npm, pypi, anthropic, …).`,
     `Your allow list: ${e.allow.length ? e.allow.join(', ') : '(none)'}`,
     `Your deny list:  ${e.deny.length ? e.deny.join(', ') : '(none)'}`,
+    // The SSRF floor. Without these three lines an agent reading this answer
+    // concludes that internal addresses are reachable, because nothing said
+    // otherwise. The exemptions listed are the effective ones (getConfig has
+    // already dropped any that name a protected address).
+    'Protected addresses: cloud metadata, link-local and multicast are ALWAYS blocked, ' +
+      'before any of the above is consulted. No setting releases them.',
+    `Internal addresses: ${e.ssrfStrict ? 'on' : 'off'} — loopback and the private ranges ` +
+      `are ${e.ssrfStrict ? 'blocked too' : 'reachable'}.`,
+    `Floor exemptions: ${e.ssrfAllow?.length ? e.ssrfAllow.join(', ') : '(none)'}`,
   ];
   return lines.join('\n');
 }
