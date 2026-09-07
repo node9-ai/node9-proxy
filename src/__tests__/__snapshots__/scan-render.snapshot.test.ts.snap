@@ -113,6 +113,7 @@ exports[`buildScanJson — envelope snapshot > rich fixture 1`] = `
     "blocked": 8,
     "review": 56,
     "leaks": 4,
+    "canaries": 0,
     "loops": 289,
     "blastExposures": 5
   },
@@ -129,6 +130,7 @@ exports[`buildScanJson — envelope snapshot > rich fixture 1`] = `
       "blocked": 8,
       "supervised": 56,
       "leaks": 4,
+      "canaries": 0,
       "loops": 289
     },
     "byAgent": [],
@@ -240,6 +242,7 @@ exports[`buildScanJson — envelope snapshot > rich fixture 1`] = `
       }
     ],
     "leaks": [],
+    "canaries": [],
     "loops": [],
     "loopWastedUSD": 0.246,
     "loopWaste": {

@@ -98,6 +98,7 @@ function emptyScan(overrides: Partial<ScanResult> = {}): ScanResult {
     bashCalls: 0,
     findings: [],
     dlpFindings: [],
+    canaryFindings: [],
     loopFindings: [],
     totalCostUSD: 0,
     firstDate: null,
@@ -116,7 +117,8 @@ describe('buildScanSummary', () => {
   it('returns zeroed shape for empty input', () => {
     const s = buildScanSummary([claudeAgent(emptyScan())]);
     expect(s.stats.sessions).toBe(0);
-    expect(s.byVerdict).toEqual({ blocked: 0, supervised: 0, leaks: 0, loops: 0 });
+    expect(s.byVerdict).toEqual({ blocked: 0, supervised: 0, leaks: 0, canaries: 0, loops: 0 });
+    expect(s.canaries).toEqual([]);
     expect(s.sections).toEqual([]);
     expect(s.byAgent).toEqual([]);
     expect(s.leaks).toEqual([]);

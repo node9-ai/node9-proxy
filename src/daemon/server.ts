@@ -939,6 +939,7 @@ export function startDaemon(): void {
           bashCalls: 0,
           findings: [],
           dlpFindings: [],
+          canaryFindings: [],
           loopFindings: [],
           totalCostUSD: 0,
           firstDate: null,

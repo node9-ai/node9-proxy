@@ -19,6 +19,9 @@ export interface ScanHistoryRecord {
   blocked: number;
   review: number;
   leaks: number;
+  /** Decoys tripped. Absent on records written before the canary feature;
+   *  readers must treat a missing value as 0, never as invalid. */
+  canaries?: number;
   loops: number;
   totalCalls: number;
 }

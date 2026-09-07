@@ -30,6 +30,7 @@ import { Header } from './panels/Header.js';
 import { CostPanel } from './panels/CostPanel.js';
 import { ActivityPanel } from './panels/ActivityPanel.js';
 import { LeaksPanel } from './panels/LeaksPanel.js';
+import { DecoyPanel } from './panels/DecoyPanel.js';
 import { BlockedPanel } from './panels/BlockedPanel.js';
 import { BlastRadiusPanel } from './panels/BlastRadiusPanel.js';
 import { ReviewQueuePanel } from './panels/ReviewQueuePanel.js';
@@ -75,9 +76,15 @@ export function StaticScorecard({ input, rangeLabel, now }: Props): React.ReactE
   // Critical band shows only when there's something critical to show.
   // Hide-when-empty matches the locked design — no "0 leaks" placeholders.
   const leakCount = summary.leaks.length;
-  const hasCritical = leakCount > 0 || blockedCount > 0;
+  // A tripped decoy has no false-positive class, so it leads the band label
+  // and renders above LEAKS (doc/roadmap/active/canary-design.md 4.4).
+  const decoyCount = summary.canaries.length;
+  const hasCritical = decoyCount > 0 || leakCount > 0 || blockedCount > 0;
   const criticalLabel = (() => {
     const parts: string[] = [];
+    if (decoyCount > 0) {
+      parts.push(`${decoyCount} decoy${decoyCount !== 1 ? 's' : ''} tripped`);
+    }
     if (leakCount > 0) {
       parts.push(`${leakCount} secret${leakCount !== 1 ? 's' : ''} leaked`);
     }
@@ -103,6 +110,11 @@ export function StaticScorecard({ input, rangeLabel, now }: Props): React.ReactE
       {hasCritical ? (
         <>
           <SeverityBand label={criticalLabel} width={width} />
+          {decoyCount > 0 ? (
+            <Box flexDirection="row" gap={1}>
+              <DecoyPanel summary={summary} width={halfWidth} now={now} />
+            </Box>
+          ) : null}
           <Box flexDirection="row" gap={1}>
             <LeaksPanel summary={summary} width={halfWidth} now={now} />
             <BlockedPanel

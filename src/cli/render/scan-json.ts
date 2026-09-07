@@ -31,6 +31,7 @@ export interface ScanJsonOutput {
     blocked: number;
     review: number;
     leaks: number;
+    canaries: number;
     loops: number;
     blastExposures: number;
   };
@@ -66,6 +67,7 @@ export function buildScanJson(input: BuildScanJsonInput): ScanJsonOutput {
       blocked: summary.byVerdict.blocked,
       review: summary.byVerdict.supervised,
       leaks: summary.byVerdict.leaks,
+      canaries: summary.byVerdict.canaries,
       loops: summary.byVerdict.loops,
       blastExposures: blast.reachable.length + blast.envFindings.length,
     },

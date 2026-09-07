@@ -63,6 +63,7 @@ function emptyScan(overrides: Partial<ScanResult> = {}): ScanResult {
     bashCalls: 0,
     findings: [],
     dlpFindings: [],
+    canaryFindings: [],
     loopFindings: [],
     totalCostUSD: 0,
     firstDate: null,
@@ -83,10 +84,11 @@ function emptySummary(overrides: Partial<ScanSummary> = {}): ScanSummary {
       firstDate: null,
       lastDate: null,
     },
-    byVerdict: { blocked: 0, supervised: 0, leaks: 0, loops: 0 },
+    byVerdict: { blocked: 0, supervised: 0, leaks: 0, canaries: 0, loops: 0 },
     byAgent: [],
     sections: [],
     leaks: [],
+    canaries: [],
     loops: [],
     loopWastedUSD: 0,
     loopWaste: { usd: 0, pricedIterations: 0, unpricedIterations: 0 },
@@ -155,6 +157,7 @@ function richFixture(): CompactInput {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
       } as any,
     ],
+    canaryFindings: [],
     loopFindings: [
       {
         toolName: 'Edit',
@@ -190,7 +193,7 @@ function richFixture(): CompactInput {
       firstDate: '2026-04-06T00:00:00Z',
       lastDate: '2026-05-07T00:00:00Z',
     },
-    byVerdict: { blocked: 8, supervised: 56, leaks: 4, loops: 289 },
+    byVerdict: { blocked: 8, supervised: 56, leaks: 4, canaries: 0, loops: 289 },
     sections: [
       {
         id: 'user',
@@ -406,6 +409,7 @@ function panelFixture(): CompactInput {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       leak('GCP API Key', 'AIza****4its', 19, 'user-prompt', 'gemini') as any,
     ],
+    canaryFindings: [],
     loopFindings: [
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       {
@@ -446,7 +450,7 @@ function panelFixture(): CompactInput {
       firstDate: '2026-02-12T00:00:00Z',
       lastDate: '2026-05-12T00:00:00Z',
     },
-    byVerdict: { blocked: 2, supervised: 36, leaks: 2, loops: 1 },
+    byVerdict: { blocked: 2, supervised: 36, leaks: 2, canaries: 0, loops: 1 },
     sections: [
       {
         id: 'default',
