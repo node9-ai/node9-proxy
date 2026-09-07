@@ -37,6 +37,9 @@ const SOURCES = [
   // result as a 'dlp' extractor finding, so DLP_PATTERNS changes alter output
   // and must trip this gate too.
   'packages/policy-engine/src/dlp/index.ts',
+  // canonical.ts runs matchCanaryArgs (dlp/canary.ts) over tool args; the
+  // fixtures and spec beside it stay OUT (the hash must not depend on tests).
+  'packages/policy-engine/src/dlp/canary.ts',
   'packages/policy-engine/src/scan/pii.ts',
   'packages/policy-engine/src/scan/checksums.ts',
   'packages/policy-engine/src/scan/destructive-regex.ts',

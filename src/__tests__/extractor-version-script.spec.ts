@@ -27,6 +27,7 @@ const SCRIPT = path.join(ROOT, 'scripts', 'check-extractor-version.mjs');
 const SOURCE_FILES = [
   'packages/policy-engine/src/scan/canonical.ts',
   'packages/policy-engine/src/dlp/index.ts',
+  'packages/policy-engine/src/dlp/canary.ts',
   'packages/policy-engine/src/scan/pii.ts',
   'packages/policy-engine/src/scan/checksums.ts',
   'packages/policy-engine/src/scan/destructive-regex.ts',
@@ -37,6 +38,28 @@ const SOURCE_FILES = [
 ];
 
 describe('check-extractor-version.mjs', () => {
+  // The list below was only ever a COPY convention: it populates the drift
+  // fixture, and nothing asserted it still equals the script's own SOURCES.
+  // So the two could drift silently, and a file dropped from the script's
+  // list would stop tripping the gate with no test to notice (found while
+  // adding dlp/canary.ts, 2026-09-07). This row makes the mirror real.
+  it('the spec mirror and the script SOURCES are the same set', () => {
+    // Comments must be stripped BEFORE matching quoted strings: an apostrophe
+    // in prose ("the script's SOURCES") otherwise parses as an entry.
+    const entries = (text: string, name: string): string[] => {
+      const block = new RegExp(`const ${name} = \\[([\\s\\S]*?)\\];`).exec(text);
+      expect(block, `${name} array not found`).not.toBeNull();
+      const noComments = block![1].replace(/\/\/[^\n]*/g, '');
+      return [...noComments.matchAll(/'([^']+)'/g)].map((m) => m[1]);
+    };
+    const inScript = entries(fs.readFileSync(SCRIPT, 'utf-8'), 'SOURCES');
+    // Instrument self-check: the parser must find the file everyone agrees on.
+    expect(inScript).toContain('packages/policy-engine/src/scan/canonical.ts');
+    expect([...inScript].sort()).toEqual([...SOURCE_FILES].sort());
+    // Every listed path exists, or the gate hashes nothing and passes blind.
+    for (const rel of inScript) expect(fs.existsSync(path.join(ROOT, rel)), rel).toBe(true);
+  });
+
   it('exits 0 when CANONICAL_EXTRACTOR_HASH matches the source', () => {
     const r = spawnSync('node', [SCRIPT], { cwd: ROOT, encoding: 'utf-8' });
     expect(r.status).toBe(0);

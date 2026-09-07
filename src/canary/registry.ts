@@ -118,3 +118,16 @@ export function retireCanary(id: string): CanaryRecord | null {
 export function canaryValues(): CanaryValue[] {
   return loadCanaries().map((r) => ({ id: r.id, value: r.value, retired: Boolean(r.retiredAt) }));
 }
+
+/** The extractor's input shape (value plus kind and plant path for the finding
+ *  text). Read fresh per call; callers that loop over many lines read it once
+ *  per tick and pass it down (never cache it across ticks, H13). */
+export function canaryCtxValues(): Array<CanaryValue & { kind: CanaryKind; path: string }> {
+  return loadCanaries().map((r) => ({
+    id: r.id,
+    value: r.value,
+    retired: Boolean(r.retiredAt),
+    kind: r.kind,
+    path: r.path,
+  }));
+}

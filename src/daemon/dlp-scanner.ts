@@ -7,7 +7,8 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { scanText } from '../dlp';
+import { scanText, matchCanary } from '../dlp';
+import { canaryValues, loadCanaries, type CanaryRecord } from '../canary/registry';
 import { sendDesktopNotification } from '../ui/native';
 import { AUDIT_LOG_FILE } from './state';
 
@@ -49,6 +50,18 @@ function appendAuditEntry(entry: Record<string, unknown>): void {
 }
 
 export function runDlpScan(): void {
+  // Decoy credentials: read the registry on EVERY pass (the daemon lives for
+  // days; a rotation must be visible on the next pass, canary-design.md H13).
+  // A read failure means "no canaries"; the scan must never crash on it.
+  let canaryVals: ReturnType<typeof canaryValues> = [];
+  const canaryById = new Map<string, CanaryRecord>();
+  try {
+    canaryVals = canaryValues();
+    for (const r of loadCanaries()) canaryById.set(r.id, r);
+  } catch {
+    canaryVals = [];
+  }
+  const canaryFindings: Array<{ path: string; project: string }> = [];
   if (!fs.existsSync(PROJECTS_DIR)) return;
 
   const index = loadIndex();
@@ -140,10 +153,38 @@ export function runDlpScan(): void {
             if (typeof text !== 'string') continue;
 
             const match = scanText(text);
-            if (!match) continue;
+            const canary = canaryVals.length > 0 ? matchCanary(text, canaryVals) : null;
+            if (!match && !canary) continue;
 
             const projLabel = decodeURIComponent(proj).replace(os.homedir(), '~').slice(0, 40);
             const ts = entry.timestamp ?? new Date().toISOString();
+
+            if (canary) {
+              const rec = canaryById.get(canary.id);
+              // Attribution only, never the value (the DLP-2 lesson). `source`
+              // stays response-dlp so existing counters still see the row.
+              appendAuditEntry({
+                ts,
+                tool: 'response-text',
+                decision: 'dlp',
+                checkedBy: 'dlp-canary-response',
+                source: 'response-dlp',
+                canaryId: canary.id,
+                ...(rec?.valueHash && { canaryHash: rec.valueHash }),
+                ...(rec?.kind && { canaryKind: rec.kind }),
+                ...(rec?.path && { canaryPath: rec.path }),
+                canaryView: canary.view,
+                ...(canary.retired && { canaryRetired: true }),
+                project: projLabel,
+              });
+              // Dedup on the canary id: there is no redactedSample to key on (H14).
+              const canaryKey = `canary|${canary.id}`;
+              if (!seenThisPass.has(canaryKey)) {
+                seenThisPass.add(canaryKey);
+                canaryFindings.push({ path: rec?.path ?? 'a decoy file', project: projLabel });
+              }
+            }
+            if (!match) continue;
 
             // Audit ALWAYS — telemetry stays complete (every match recorded).
             appendAuditEntry({
@@ -181,7 +222,16 @@ export function runDlpScan(): void {
   }
 
   // ONE notification for the whole pass. Zero new findings (all duplicates) = silence.
-  if (newFindings.length === 1) {
+  // A tripped decoy outranks every regex finding: it is the one line with no
+  // false-positive class, so it is the line the user sees.
+  if (canaryFindings.length > 0) {
+    const f = canaryFindings[0];
+    const more = canaryFindings.length > 1 ? ` (+${canaryFindings.length - 1} more)` : '';
+    sendDesktopNotification(
+      '🚨 node9: decoy credential tripped',
+      `The fake credential node9 planted at ${f.path} appeared in a Claude response${more}.\nSomething read that file.\nProject: ${f.project}\nRun: node9 report --period 30d`
+    );
+  } else if (newFindings.length === 1) {
     const f = newFindings[0];
     sendDesktopNotification(
       '⚠️ node9 DLP Alert',

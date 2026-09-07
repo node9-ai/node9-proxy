@@ -26,6 +26,7 @@
 // JSONL entries in.
 
 import { scanArgs } from '../dlp';
+import { matchCanaryArgs, type CanaryValue } from '../dlp/canary';
 import { evaluateSmartConditions } from '../rules';
 import {
   analyzeFsOperation,
@@ -51,6 +52,7 @@ export type CanonicalFindingType =
   | 'ast-fs-op'
   | 'dlp'
   | 'pii'
+  | 'canary'
   | 'sensitive-file-read'
   | 'privilege-escalation'
   | 'destructive-op'
@@ -148,6 +150,10 @@ export interface ExtractContext {
   toolInspection: Record<string, string>;
   /** DLP enabled flag from PolicyConfig. */
   dlpEnabled: boolean;
+  /** Decoy credentials registered on this machine (value plus kind and plant
+   *  path for the finding text). Optional: absent or empty means no canary
+   *  pass, which keeps extractor output machine-independent in CI (H3). */
+  canaryValues?: ReadonlyArray<CanaryValue & { kind?: string; path?: string }>;
 }
 
 export interface SessionExtractContext {
@@ -252,7 +258,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v10';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'dd992b41cb910650';
+export const CANONICAL_EXTRACTOR_HASH = 'b14554efeb37a61a';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
@@ -310,6 +316,33 @@ export function extractCanonicalFindings(
           sourceType: 'engine',
           input: call.args,
           redactedSample: dlp.redactedSample,
+        })
+      );
+    }
+  }
+
+  // ── Canary (decoy credential) over args ──────────────────────────────────
+  // Independent of dlpEnabled: a value node9 planted has no legitimate path
+  // into any tool call (canary-design.md H15). Attribution only; the finding
+  // never carries the value.
+  if (ctx.canaryValues && ctx.canaryValues.length > 0) {
+    const hit = matchCanaryArgs(call.args, ctx.canaryValues);
+    if (hit) {
+      const v = ctx.canaryValues.find((x) => x.id === hit.id);
+      out.push(
+        makeFinding({
+          type: 'canary',
+          ruleName: `canary:${v?.kind ?? 'unknown'}`,
+          patternName: 'Decoy credential',
+          verdict: 'block',
+          severity: 'critical',
+          reason: `Decoy credential planted at ${v?.path ?? 'a decoy file'} appeared in ${call.toolName} args (${hit.view})`,
+          toolName: call.toolName,
+          ctx,
+          ts,
+          sourceType: 'engine',
+          // No `input`: makeFinding stores it verbatim and a finding must never
+          // carry the value (E14). The wire never copies input anyway.
         })
       );
     }
@@ -658,6 +691,9 @@ export function toScanFinding(c: CanonicalFinding): ScanFinding | null {
     'smart-rule': null,
     'ast-fs-op': null,
     dlp: 'dlp',
+    // Ships under the dlp rollup with patternName 'Decoy credential' and a
+    // canary:<kind> ruleName until the SaaS wire type gains its own value.
+    canary: 'dlp',
     pii: 'pii',
     'sensitive-file-read': 'sensitive-file-read',
     'privilege-escalation': 'privilege-escalation',

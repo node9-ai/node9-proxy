@@ -19,6 +19,7 @@ import os from 'os';
 import path from 'path';
 import readline from 'readline';
 import { scanArgs } from '../dlp.js';
+import { canaryCtxValues } from '../canary/registry.js';
 import { DEFAULT_CONFIG } from '../config/index.js';
 import {
   detectPii,
@@ -371,10 +372,20 @@ function findLastNewline(filePath: string, from: number, size: number): number {
 // Exported so the backfill path (scan-upload-history.ts) can re-use the
 // exact same per-line extraction logic. Live ticks call this internally;
 // backfill calls it directly across all bytes of the file.
+/** Registry read failure means "no canaries": the tick must never crash on it. */
+function safeCanaryCtxValues(): ReturnType<typeof canaryCtxValues> {
+  try {
+    return canaryCtxValues();
+  } catch {
+    return [];
+  }
+}
+
 export function extractFindingsFromLine(
   line: unknown,
   sessionId: string,
-  lineIndex: number
+  lineIndex: number,
+  canaryVals: ReturnType<typeof canaryCtxValues> = []
 ): ScanFinding[] {
   if (!line || typeof line !== 'object') return [];
   const findings: ScanFinding[] = [];
@@ -448,6 +459,7 @@ export function extractFindingsFromLine(
     // disagree with each other (/code-review round 3).
     toolInspection: { ...DEFAULT_CONFIG.policy.toolInspection },
     dlpEnabled: false, // line-level DLP runs above already
+    canaryValues: canaryVals,
   };
   const message = (line as Record<string, unknown>).message;
   if (message && typeof message === 'object') {
@@ -515,6 +527,7 @@ const LONG_OUTPUT_THRESHOLD_BYTES = ENGINE_LONG_OUTPUT_THRESHOLD_BYTES;
  * advances the persistent watermark and POSTs findings independently.
  */
 export async function tickForensicBroadcast(offsets: Map<string, number>): Promise<ScanFinding[]> {
+  const canaryVals = safeCanaryCtxValues(); // once per tick, passed to every line
   const out: ScanFinding[] = [];
   const files = listJsonlFiles();
   for (const file of files) {
@@ -530,7 +543,7 @@ export async function tickForensicBroadcast(offsets: Map<string, number>): Promi
 
     const sessionId = path.basename(file, '.jsonl');
     const newOffset = await scanDelta(file, offset, (obj, lineIndex) => {
-      out.push(...extractFindingsFromLine(obj, sessionId, lineIndex));
+      out.push(...extractFindingsFromLine(obj, sessionId, lineIndex, canaryVals));
     });
     offsets.set(file, newOffset);
   }
@@ -714,6 +727,7 @@ function readRawWatermarkPreservingOffsets(): Watermark | null {
 }
 
 async function runActualTick(wm: Watermark): Promise<ScanTickResult> {
+  const canaryVals = safeCanaryCtxValues(); // once per tick, passed to every line
   const watermarkCreatedAt = new Date(wm.createdAt).getTime();
   const findings: ScanFinding[] = [];
   let totalToolCalls = 0;
@@ -742,7 +756,7 @@ async function runActualTick(wm: Watermark): Promise<ScanTickResult> {
         const newScannedTo = await scanDelta(filePath, 0, (obj, lineIndex) => {
           totalToolCalls++;
           toolCallsBySession[sessionId] = (toolCallsBySession[sessionId] ?? 0) + 1;
-          findings.push(...extractFindingsFromLine(obj, sessionId, lineIndex));
+          findings.push(...extractFindingsFromLine(obj, sessionId, lineIndex, canaryVals));
         });
         wm.files[filePath] = { scannedTo: newScannedTo };
         filesScanned++;
@@ -765,7 +779,7 @@ async function runActualTick(wm: Watermark): Promise<ScanTickResult> {
     const newScannedTo = await scanDelta(filePath, known.scannedTo, (obj, lineIndex) => {
       totalToolCalls++;
       toolCallsBySession[sessionId] = (toolCallsBySession[sessionId] ?? 0) + 1;
-      findings.push(...extractFindingsFromLine(obj, sessionId, lineIndex));
+      findings.push(...extractFindingsFromLine(obj, sessionId, lineIndex, canaryVals));
     });
     wm.files[filePath] = { scannedTo: newScannedTo };
     filesScanned++;
