@@ -168,6 +168,8 @@ export interface ManagedConfigCache {
     allow?: string[];
     deny?: string[];
     allowPrivate?: boolean;
+    ssrfStrict?: boolean;
+    ssrfAllow?: string[];
   };
   dlp?: { enabled?: boolean; pii?: string; reviewAction?: string };
   commandChecks?: Record<string, string>;
@@ -205,6 +207,8 @@ interface CloudPolicyBody {
       allow?: unknown;
       deny?: unknown;
       allowPrivate?: unknown;
+      ssrfStrict?: unknown;
+      ssrfAllow?: unknown;
     };
     dlp?: { enabled?: unknown; pii?: unknown; reviewAction?: unknown };
     commandChecks?: Record<string, unknown>;
@@ -546,7 +550,8 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
   };
   if (typeof mc.mode === 'string') out.mode = mc.mode;
   // M2b + Step 2: egress.enabled (bool) + mode (string) + allow/deny (string[])
-  // + allowPrivate (bool).
+  // + allowPrivate (bool) + the SSRF floor knobs (ssrfStrict bool, ssrfAllow
+  // string[]).
   if (mc.egress && typeof mc.egress === 'object') {
     const e: ManagedConfigCache['egress'] = {};
     if (typeof mc.egress.enabled === 'boolean') e.enabled = mc.egress.enabled;
@@ -560,12 +565,21 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
     if (typeof mc.egress.allowPrivate === 'boolean') {
       e.allowPrivate = mc.egress.allowPrivate;
     }
+    // SSRF floor knobs. Dropping them here would kill the dashboard control
+    // one seam before the merge that honours it.
+    if (typeof mc.egress.ssrfStrict === 'boolean') {
+      e.ssrfStrict = mc.egress.ssrfStrict;
+    }
+    const ssrfAllow = cleanHosts(mc.egress.ssrfAllow);
+    if (ssrfAllow.length) e.ssrfAllow = ssrfAllow;
     if (
       e.enabled !== undefined ||
       e.mode !== undefined ||
       e.allow !== undefined ||
       e.deny !== undefined ||
-      e.allowPrivate !== undefined
+      e.allowPrivate !== undefined ||
+      e.ssrfStrict !== undefined ||
+      e.ssrfAllow !== undefined
     ) {
       out.egress = e;
     }

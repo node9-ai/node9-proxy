@@ -243,6 +243,46 @@ describe('managed approvers (Preferences)', () => {
   });
 });
 
+// The daemon's extractor is a strict allowlist: a field it does not name is
+// dropped here and never reaches the config merge, however correct the merge
+// is. That makes this the seam where a dashboard control silently dies.
+describe('extractManagedConfig — the SSRF floor knobs survive the cache seam', () => {
+  it('keeps ssrfStrict (both values) and ssrfAllow', () => {
+    const on = extractManagedConfig({
+      managedConfig: { egress: { ssrfStrict: true, ssrfAllow: ['100.64.0.1'] }, locked: [] },
+    });
+    expect(on?.egress?.ssrfStrict).toBe(true);
+    expect(on?.egress?.ssrfAllow).toEqual(['100.64.0.1']);
+    // A managed false is an admin decision, not "unset".
+    const off = extractManagedConfig({
+      managedConfig: { egress: { ssrfStrict: false }, locked: [] },
+    });
+    expect(off?.egress?.ssrfStrict).toBe(false);
+  });
+
+  it('an SSRF field ALONE still produces an egress block', () => {
+    const out = extractManagedConfig({
+      managedConfig: { egress: { ssrfAllow: ['100.64.0.1'] }, locked: [] },
+    });
+    expect(out?.egress).toBeDefined();
+  });
+
+  it('drops junk types instead of passing them through', () => {
+    const out = extractManagedConfig({
+      managedConfig: { egress: { ssrfStrict: 'yes', ssrfAllow: [1, {}] }, locked: [] },
+    } as Parameters<typeof extractManagedConfig>[0]);
+    expect(out?.egress?.ssrfStrict).toBeUndefined();
+    expect(out?.egress?.ssrfAllow).toBeUndefined();
+  });
+
+  it('carries the lock key through', () => {
+    const out = extractManagedConfig({
+      managedConfig: { egress: { ssrfStrict: false }, locked: ['egressSsrfStrict'] },
+    });
+    expect(out?.locked).toContain('egressSsrfStrict');
+  });
+});
+
 describe('extractManagedConfig — reviewChannel + approvalTimeoutMs (Preferences v2)', () => {
   it('keeps a valid reviewChannel + numeric timeout', () => {
     const out = extractManagedConfig({
