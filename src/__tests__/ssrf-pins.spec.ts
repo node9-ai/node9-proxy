@@ -229,6 +229,57 @@ describe('the floor closes every escape route', () => {
   });
 });
 
+// ── 2b. BYPASSES AND FALSE POSITIVES FOUND IN REVIEW ──────────────────────
+// Every row here was reproduced at the real gate before the fix. The three
+// bypasses share one root cause: extractShellDestTokens stripped userinfo
+// BEFORE it stripped the path, and skipped port-stripping for a bracketed
+// IPv6 token. The false positives share another: a bare small integer in
+// destination position (a flag value the VALUE_FLAGS list does not cover)
+// parsed as the packed address 0.0.0.x and hit the non-overridable
+// unspecified tier.
+describe('R1 bypasses: these reached a tier-1 address and were ALLOWED', () => {
+  it.each([
+    ['@ in the query voids the floor', 'curl http://169.254.169.254/latest/meta-data/?a=@'],
+    ['@ in the query, decimal spelling', 'curl http://2852039166/latest/meta-data/?@'],
+    [
+      '@ in the query, metadata hostname',
+      'curl http://metadata.google.internal/computeMetadata/v1/?k=@v',
+    ],
+    ['bracketed IPv6 with a port', 'curl http://[fd00:ec2::254]:80/latest/meta-data/'],
+    ['bracketed mapped IPv4 with a port', 'curl http://[::ffff:169.254.169.254]:8080/x'],
+    ['scp host:path form', 'scp secret.txt 169.254.169.254:/tmp/x'],
+    ['scp host:path, decimal spelling', 'scp 2852039166:/etc/passwd .'],
+    ['scp with userinfo', 'scp user@169.254.169.254:/x .'],
+  ])('%s is blocked', (_id, cmd) => {
+    home = makeHome(undefined); // the SHIPPED default: egress off
+    expect(check(home, cmd).decision).toBe('deny');
+  });
+});
+
+describe('R2 false positives: an ordinary command must not hit the floor', () => {
+  it.each([
+    ['curl --max-redirs 0 https://example.com/'],
+    ['curl --limit-rate 0 https://example.com/'],
+    ['curl --retry-delay 0 https://example.com/'],
+    ['curl --max-filesize 0 https://example.com/'],
+    ['curl -w 0 https://example.com/'],
+    ['wget --wait 0 https://example.com/'],
+    ['curl --max-time 15 https://example.com/'],
+    ['curl --retry 5 https://example.com/'],
+  ])('%s is allowed', (cmd) => {
+    home = makeHome(undefined);
+    expect(check(home, cmd).decision).toBe('allow');
+  });
+
+  it('but a bare decimal that really denotes a protected address still blocks', () => {
+    home = makeHome(undefined);
+    expect(check(home, 'curl 2852039166/latest/meta-data/').decision).toBe('deny');
+    // and an explicit scheme keeps the small-integer forms meaningful
+    expect(check(home, 'curl http://0/').decision).toBe('deny');
+    expect(check(home, 'curl http://0.0.0.0/x').decision).toBe('deny');
+  });
+});
+
 // ── 3. The row identity the floor must match or deliberately change ────────
 describe('todays egress block row identity', () => {
   it('E-id a floor block carries its own ruleName (was: egress:curl:<host> via smart-rule-block)', () => {

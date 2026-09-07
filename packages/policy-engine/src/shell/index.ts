@@ -1553,18 +1553,38 @@ export function extractShellDestTokens(command: string): ShellDestToken[] {
       const rest = callArgs.slice(1).map((a) => resolveWordLiteral(a));
       for (const raw of destTokensForBinary(name, rest)) {
         if (!raw) continue;
-        // Strip a scheme and everything from the first path separator, so
-        // `2852039166/latest/meta-data/` yields the host part. Port and
-        // userinfo are stripped the same way parseDestHost does.
+        // Reduce the token to the authority, in the order RFC 3986 defines it.
+        // ORDER IS LOAD-BEARING and three bypasses came from getting it wrong:
+        //   - the authority must be cut BEFORE userinfo, because '@' is legal
+        //     in a path or query and `…/meta-data/?a=@` otherwise ate the host
+        //   - a bracketed IPv6 literal must have its port dropped AFTER the
+        //     closing ']', or `[fd00:ec2::254]:80` never classifies
+        //   - an unbracketed token ends at the first ':', which covers both
+        //     host:port and scp's host:path form
         let tok = raw.trim();
         const scheme = /^[a-z][a-z0-9+.-]*:\/\//i.exec(tok);
-        if (scheme) tok = tok.slice(scheme[0].length);
+        const hasScheme = scheme !== null;
+        if (hasScheme) tok = tok.slice(scheme![0].length);
+        tok = tok.split(/[/?#]/)[0];
         const at = tok.lastIndexOf('@');
         if (at >= 0) tok = tok.slice(at + 1);
-        tok = tok.split('/')[0];
-        // A bracketed IPv6 literal keeps its brackets; the normalizer strips them.
-        if (!tok.startsWith('[')) tok = tok.replace(/:\d+$/, '');
+        if (tok.startsWith('[')) {
+          // Keep the brackets; normalizeIpLiteral strips them itself.
+          const close = tok.indexOf(']');
+          if (close > 0) tok = tok.slice(0, close + 1);
+        } else {
+          tok = tok.split(':')[0];
+        }
         if (!tok) continue;
+        // A bare decimal with no scheme is nearly always a numeric flag value
+        // that VALUE_FLAGS does not happen to cover (`--max-redirs 0`, `-w 0`),
+        // and `0` parses as the packed address 0.0.0.0, which is a
+        // non-overridable tier. Below 2^24 the packed form denotes 0.0.0.0/8:
+        // not routable, and not something anyone types as a destination. So
+        // requiring the full 32-bit range here loses no real destination and
+        // removes the whole false-positive class. With an explicit scheme the
+        // caller clearly means a host, so the rule does not apply.
+        if (!hasScheme && /^\d+$/.test(tok) && Number(tok) < 0x1000000) continue;
         const key = `${name}:${tok}`;
         if (seen.has(key)) continue;
         seen.add(key);
