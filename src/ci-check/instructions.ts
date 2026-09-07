@@ -114,13 +114,24 @@ function decodeSuspiciousBase64(text: string): string {
 }
 
 function mk(
+  rule: string,
   severity: Severity,
   title: string,
   signals: string[],
   fix: string,
   path: string
 ): CiFinding {
-  return { check: 'CI-6', dimension: 'instructions', severity, title, file: path, signals, fix };
+  // Every CI-6 signal fires at most once per file, so the rule id alone locates it.
+  return {
+    check: 'CI-6',
+    rule,
+    dimension: 'instructions',
+    severity,
+    title,
+    file: path,
+    signals,
+    fix,
+  };
 }
 
 /** Analyze one agent instruction file. Returns 0+ findings. Never throws. */
@@ -132,6 +143,7 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
   if (TAG_CHARS.test(content))
     findings.push(
       mk(
+        'CI-6.unicode-tag-chars',
         'critical',
         'Unicode tag characters in an agent instruction file',
         [
@@ -144,6 +156,7 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
   if (BIDI_OVERRIDE.test(content))
     findings.push(
       mk(
+        'CI-6.bidi-override',
         'critical',
         'Bidirectional override characters in an agent instruction file',
         [
@@ -156,6 +169,7 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
   else if (BIDI_EMBED_ISOLATE.test(content))
     findings.push(
       mk(
+        'CI-6.bidi-formatting',
         'advisory',
         'Bidirectional formatting characters in an agent instruction file',
         [
@@ -170,6 +184,7 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
     const revealed = OVERRIDE_RE.test(stripZeroWidth(content)) && !OVERRIDE_RE.test(content);
     findings.push(
       mk(
+        'CI-6.zero-width',
         revealed ? 'critical' : 'medium',
         'Zero-width characters splitting text in an agent instruction file',
         [
@@ -188,6 +203,7 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
     const m = (ov || ovEnc)!;
     findings.push(
       mk(
+        'CI-6.prompt-override',
         ovEnc ? 'critical' : 'high',
         'Prompt-override directive in an agent instruction file',
         [
@@ -204,6 +220,7 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
   if (fo && !inHumanSection(content, fo.index) && !isNegated(content, fo.index)) {
     findings.push(
       mk(
+        'CI-6.fetch-and-obey',
         'medium',
         'Instruction directs the agent to fetch and run remote code',
         [`\`${fo[0].slice(0, 70).trim()}\` — fetch-and-obey, outside an install/setup section`],
@@ -216,6 +233,7 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
   if (sp && !isNegated(content, sp.index)) {
     findings.push(
       mk(
+        'CI-6.secret-path',
         'medium',
         'Instruction points the agent at credential material',
         [`references \`${sp[0].slice(0, 50).trim()}\` — directs the agent toward secrets`],
@@ -228,6 +246,7 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
   if (ex && !inHumanSection(content, ex.index) && !isNegated(content, ex.index)) {
     findings.push(
       mk(
+        'CI-6.exfil-directive',
         'medium',
         'Instruction directs the agent to send data to an external endpoint',
         [`\`${ex[0].slice(0, 70).trim()}\` — possible exfiltration directive`],

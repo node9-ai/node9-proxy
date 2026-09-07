@@ -777,6 +777,8 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
 
   return {
     check: 'CI-2',
+    // One verdict per workflow file — the finding IS the file's reachability score.
+    rule: 'CI-2.injectable-workflow',
     dimension: 'workflows',
     severity,
     title,
@@ -958,6 +960,7 @@ export function analyzeWorkflowSecrets(path: string, content: string): CiFinding
 
   return {
     check: 'CI-4',
+    rule: 'CI-4.agent-reachable-secret',
     dimension: 'data',
     severity: worst.severity,
     title:

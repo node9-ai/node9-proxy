@@ -4,7 +4,7 @@
 // finding shows the signals that fired AND the mitigations seen.
 
 import chalk from 'chalk';
-import type { ScanResult, CiFinding, Severity } from './types';
+import type { ScanResult, CiFinding, ScanDiff, Severity } from './types';
 
 const ICON: Record<Severity, string> = {
   critical: '🔴',
@@ -77,7 +77,27 @@ function ownedHint(source: string): boolean {
   return source.startsWith('/') || source.startsWith('.') || source.startsWith('~');
 }
 
-export function renderScan(res: ScanResult): string {
+/** One finding, as Markdown. Shared by the absolute and the diff renderers so the two can
+ *  never drift in how a finding reads. */
+function findingMd(f: CiFinding, L: string[]): void {
+  L.push(`**${ICON[f.severity]} ${f.severity.toUpperCase()} — ${f.title}**`);
+  L.push(`\`${f.file}${f.line ? ':' + f.line : ''}\`  ·  ${f.rule}`);
+  L.push('');
+  for (const s of f.signals) L.push(`- ${s}`);
+  if (f.mitigations?.length) L.push(`- _mitigated:_ ${f.mitigations.join('; ')}`);
+  L.push('');
+  L.push(`→ **Fix:** ${f.fix}`);
+  L.push('');
+}
+
+/** Why a diff could not be trusted, in the reviewer's words. Never rendered as "clean". */
+function baseWarning(base: ScanDiff['base']): string {
+  return base === 'did-not-run'
+    ? '⚠️ **Could not read the base commit**, so nothing below can be called "new" — every finding in this repo is listed. (A shallow clone is the usual cause: fetch the base ref.)'
+    : '⚠️ **The base scan could not read every file**, so a finding missing from it would look new. Every finding in this repo is listed instead.';
+}
+
+export function renderScan(res: ScanResult, diff?: ScanDiff): string {
   const L: string[] = [];
   const n = res.findings.length;
   // An incomplete scan (rate limit / network) can never be "clean" — it didn't
@@ -92,6 +112,27 @@ export function renderScan(res: ScanResult): string {
           : chalk.green('✅ agent-security: clean');
   L.push(`🛡️  ${chalk.bold('node9 scan-repo')}  ·  ${res.source}  ·  ${head}`);
   L.push(chalk.gray(`   inspected ${res.inspected.length} config file(s), ${n} finding(s)`));
+  if (diff) {
+    const introduced = diff.added.length + diff.escalated.length;
+    L.push(
+      diff.base !== 'ok'
+        ? chalk.yellow.bold(
+            `   ⚠️  base ${diff.base === 'did-not-run' ? 'could not be read' : 'scan was incomplete'} — cannot say what is new; showing everything`
+          )
+        : introduced > 0
+          ? chalk.red.bold(
+              `   ⚠️  this change introduced ${introduced} finding(s)` +
+                (diff.escalated.length
+                  ? ` (${diff.escalated.length} by widening an existing one)`
+                  : '')
+            )
+          : chalk.green(
+              `   ✅ this change introduced nothing` +
+                (diff.unchanged.length ? ` (${diff.unchanged.length} pre-existing)` : '') +
+                (diff.removed.length ? `, and fixed ${diff.removed.length}` : '')
+            )
+    );
+  }
   if (res.incomplete) {
     // State the ACTUAL cause — a rate limit and a network timeout need different
     // advice (a token fixes the former, not the latter).
@@ -144,7 +185,7 @@ export function renderScan(res: ScanResult): string {
   return L.join('\n');
 }
 
-export function renderScanMarkdown(res: ScanResult): string {
+export function renderScanMarkdown(res: ScanResult, diff?: ScanDiff): string {
   const L: string[] = [];
   const status =
     res.worst === 'critical' || res.worst === 'high'
@@ -160,16 +201,50 @@ export function renderScanMarkdown(res: ScanResult): string {
     `Inspected ${res.inspected.length} config file(s) · **${res.findings.length} finding(s)**`
   );
   L.push('');
-  for (const f of res.findings) {
-    L.push(`**${ICON[f.severity]} ${f.severity.toUpperCase()} — ${f.title}**`);
-    L.push(`\`${f.file}${f.line ? ':' + f.line : ''}\` · ${f.check}`);
-    L.push('');
-    for (const s of f.signals) L.push(`- ${s}`);
-    if (f.mitigations?.length) L.push(`- _mitigated:_ ${f.mitigations.join('; ')}`);
-    L.push('');
-    L.push(`→ **Fix:** ${f.fix}`);
+  // CI-5: lead with what THIS change is answerable for. A reviewer cannot act on a repo's
+  // accumulated history, and burying the one new finding under twelve old ones is how a
+  // gate gets muted. Pre-existing findings stay in the comment — collapsed, not deleted.
+  if (diff && diff.base === 'ok') {
+    const introduced = [...diff.added, ...diff.escalated.map((e) => e.finding)];
+    if (introduced.length === 0) {
+      L.push(
+        `✅ **This change introduces no agent-security findings.**` +
+          (diff.removed.length ? ` It also fixes ${diff.removed.length}.` : '')
+      );
+      L.push('');
+    } else {
+      L.push(`#### ⚠️ Introduced by this change — ${introduced.length} finding(s)`);
+      L.push('');
+      for (const f of diff.added) findingMd(f, L);
+      for (const e of diff.escalated) {
+        L.push(
+          `> _Guardrail erosion: this finding already existed at **${e.from}** and this change widens it to **${e.to}**._`
+        );
+        L.push('');
+        findingMd(e.finding, L);
+      }
+    }
+    if (diff.removed.length) {
+      L.push(`✅ Fixed by this change: ${diff.removed.length} finding(s).`);
+      L.push('');
+    }
+    if (diff.unchanged.length) {
+      L.push(
+        `<details><summary>${diff.unchanged.length} pre-existing finding(s) — not introduced by this change</summary>`
+      );
+      L.push('');
+      for (const f of diff.unchanged) findingMd(f, L);
+      L.push('</details>');
+      L.push('');
+    }
+    return L.join('\n');
+  }
+
+  if (diff) {
+    L.push(baseWarning(diff.base));
     L.push('');
   }
+  for (const f of res.findings) findingMd(f, L);
   if (res.findings.length === 0) L.push('No committed agent-security issues found.');
   // NOTE: intentionally NO Action CTA here. This renders the PR comment posted
   // BY the Action itself — if it's commenting, the Action is already installed,

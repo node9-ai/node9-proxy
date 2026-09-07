@@ -9,6 +9,7 @@ import { analyzeAgentConfig } from './agent-config';
 import { analyzeMcp } from './mcp';
 import { analyzeCodexConfig } from './codex';
 import { analyzeInstructionFile } from './instructions';
+import { assignOrdinals } from './diff';
 import type { CiFinding, ScanResult, Severity, RepoTree } from './types';
 import { SEVERITY_RANK } from './types';
 
@@ -53,6 +54,10 @@ export function scanTree(tree: RepoTree): ScanResult {
       notes.push(`checker degraded on ${file.path}: ${(err as Error)?.message ?? 'error'}`);
     }
   }
+
+  // Identity before sorting: ordinals are assigned in EMISSION order so two otherwise
+  // identical findings in one file keep distinct, stable identities across scans.
+  assignOrdinals(findings);
 
   // Worst-first, then by file for stable output.
   findings.sort(

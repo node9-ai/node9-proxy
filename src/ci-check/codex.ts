@@ -48,6 +48,10 @@ export function analyzeCodexConfig(path: string, content: string): CiFinding[] {
     ].filter((s): s is string => s !== null);
     findings.push({
       check: 'CI-1',
+      // One finding per Codex config; `danger-full-access` vs `approval_policy = never`
+      // are two severities of the same statement, so tightening one is a de-escalation
+      // of THIS finding rather than the removal of one and the arrival of another.
+      rule: 'CI-1.codex-unsafe-defaults',
       dimension: 'toolRules',
       severity: fullAccess ? 'high' : 'medium',
       title: fullAccess

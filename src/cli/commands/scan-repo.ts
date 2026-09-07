@@ -8,8 +8,11 @@
 
 import type { Command } from 'commander';
 import chalk from 'chalk';
-import { scanRepo, type OnProgress } from '../../ci-check';
+import { scanRepo, scanTree, type OnProgress } from '../../ci-check';
+import { readGitRefTree } from '../../ci-check/fetch';
+import { diffScans } from '../../ci-check/diff';
 import { renderScan, renderScanMarkdown, exitCodeFor } from '../../ci-check/render';
+import { SEVERITY_RANK, type ScanDiff } from '../../ci-check/types';
 
 const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -44,22 +47,54 @@ export function registerScanRepoCommand(program: Command): void {
     .description("Scan a repo's agent-security surface (GitHub URL or local path)")
     .option('--json', 'emit the raw result as JSON')
     .option('--markdown', 'emit a Markdown report (for a PR comment)')
-    .action(async (target: string, opts: { json?: boolean; markdown?: boolean }) => {
-      const { onProgress, done } = makeProgress(target, !!(opts.json || opts.markdown));
-      let res;
-      try {
-        res = await scanRepo(target, onProgress);
-      } finally {
-        done();
+    .option(
+      '--base <ref>',
+      'also scan this git ref and report what the working tree INTRODUCED (local path targets only)'
+    )
+    .option(
+      '--fail-on-introduced',
+      'exit non-zero only for findings this change introduced (requires --base)'
+    )
+    .action(
+      async (
+        target: string,
+        opts: { json?: boolean; markdown?: boolean; base?: string; failOnIntroduced?: boolean }
+      ) => {
+        const { onProgress, done } = makeProgress(target, !!(opts.json || opts.markdown));
+        let res;
+        try {
+          res = await scanRepo(target, onProgress);
+        } finally {
+          done();
+        }
+
+        // CI-5: what did THIS change introduce? A base tree that cannot be read yields a
+        // null base, which `diffScans` degrades to the absolute answer — never to a
+        // false "nothing new".
+        let diff: ScanDiff | undefined;
+        if (opts.base) {
+          const baseTree = readGitRefTree(target, opts.base);
+          diff = diffScans(baseTree ? scanTree(baseTree) : null, res);
+        }
+
+        if (opts.json) {
+          console.log(JSON.stringify(diff ? { ...res, diff } : res, null, 2));
+        } else if (opts.markdown) {
+          console.log(renderScanMarkdown(res, diff));
+        } else {
+          console.log(renderScan(res, diff));
+        }
+
+        // Non-zero when a real risk is present, so CI/scripts can gate. `--fail-on-introduced`
+        // narrows that to what this change is answerable for, which is what makes the gate
+        // adoptable on a repo that is already dirty. When the base could not be read,
+        // `worstIntroduced` already carries the absolute worst, so the gate stays strict.
+        process.exitCode =
+          opts.failOnIntroduced && diff
+            ? diff.worstIntroduced && SEVERITY_RANK[diff.worstIntroduced] >= SEVERITY_RANK.high
+              ? 1
+              : 0
+            : exitCodeFor(res);
       }
-      if (opts.json) {
-        console.log(JSON.stringify(res, null, 2));
-      } else if (opts.markdown) {
-        console.log(renderScanMarkdown(res));
-      } else {
-        console.log(renderScan(res));
-      }
-      // Non-zero when a real risk is present, so CI/scripts can gate.
-      process.exitCode = exitCodeFor(res);
-    });
+    );
 }
