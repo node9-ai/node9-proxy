@@ -61,6 +61,7 @@ import { registerPostureCommand } from './cli/commands/posture';
 import { registerScanRepoCommand } from './cli/commands/scan-repo';
 import { registerEgressCommand } from './cli/commands/egress';
 import { registerJailCommand } from './cli/commands/jail';
+import { registerCanaryCommand } from './cli/commands/canary';
 import { registerSandboxCommand } from './cli/commands/sandbox';
 import { registerSessionsCommand } from './cli/commands/sessions';
 import { registerSessionTaintCommand } from './cli/commands/session-taint';
@@ -832,6 +833,8 @@ registerScanRepoCommand(program);
 registerEgressCommand(program);
 // Credential jail — user-extensible protected paths
 registerJailCommand(program);
+// Decoy credentials (canary)
+registerCanaryCommand(program);
 registerSandboxCommand(program, version);
 
 // Session history

@@ -160,3 +160,7 @@ export {
   CANONICAL_EXTRACTOR_VERSION,
   CANONICAL_EXTRACTOR_HASH,
 } from './scan/canonical';
+
+// Canary (decoy credential) matcher; pure. Registry and planting live in the proxy.
+export { matchCanary, matchCanaryArgs, CANARY_MIN_LENGTH } from './dlp/canary';
+export type { CanaryValue, CanaryHit, CanaryView } from './dlp/canary';

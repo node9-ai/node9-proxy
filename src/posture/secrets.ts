@@ -15,6 +15,7 @@ import os from 'os';
 import { scanText } from '@node9/policy-engine';
 import { AGENT_SPECS } from '../agent-wiring';
 import type { CheckContext, Finding } from './types';
+import { loadCanaries } from '../canary/registry';
 
 const MAX_FILE_BYTES = 256 * 1024;
 
@@ -78,14 +79,28 @@ function credentialMaterial(home: string): string[] {
   ];
 }
 
+/** Paths node9 planted as decoys (canary). A read failure means "none": posture must
+ *  never crash on the registry, and an unreadable registry is a separate finding. */
+function plantedDecoyPaths(): Set<string> {
+  try {
+    return new Set(loadCanaries({ includeRetired: false }).map((r) => r.path));
+  } catch {
+    return new Set();
+  }
+}
+
 export function checkSecrets(ctx: CheckContext): Finding[] {
   const home = ctx.home || os.homedir();
   const findings: Finding[] = [];
+  // Decoys node9 planted are not the user's secrets: excluded from both scans
+  // below, reported once as informational (design canary-design.md, H4).
+  const planted = plantedDecoyPaths();
 
   // ── Plaintext secrets in readable files (critical) ──────────────────────
   const plaintext: string[] = [];
   const plaintextPaths: string[] = [];
   for (const file of candidateFiles(home, ctx.cwd)) {
+    if (planted.has(file)) continue;
     const text = safeRead(file);
     if (!text) continue;
     const match = scanText(text);
@@ -116,6 +131,7 @@ export function checkSecrets(ctx: CheckContext): Finding[] {
   const creds: string[] = [];
   const credPaths: string[] = [];
   for (const file of credentialMaterial(home)) {
+    if (planted.has(file)) continue;
     try {
       if (fs.statSync(file).isFile()) {
         creds.push(displayPath(file, home));
@@ -137,6 +153,17 @@ export function checkSecrets(ctx: CheckContext): Finding[] {
       fix: 'Fix it now: run `node9 shield enable project-jail` (blocks ~/.ssh, ~/.aws, .env reads in-path).',
       owner: 'node9',
       coverageProbe: { kind: 'fileRead', paths: credPaths },
+    });
+  }
+  if (planted.size > 0) {
+    findings.push({
+      category: 'Secrets',
+      severity: 'advisory',
+      title: `${planted.size} decoy credential file${planted.size === 1 ? '' : 's'} planted by node9`,
+      what: 'These are fake keys node9 created on purpose. They open nothing.',
+      why: 'If one ever appears in an agent command, node9 knows the file was read.',
+      detail: [...planted].map((p) => displayPath(p, home)),
+      owner: 'node9',
     });
   }
 
