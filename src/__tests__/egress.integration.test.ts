@@ -130,6 +130,15 @@ describe('node9 egress (integration)', () => {
   // allow/deny has no way to learn that some addresses are hard-blocked, which
   // tier is on, or who decided.
 
+  it('S0 `egress status` is a synonym for the bare command, not an error', () => {
+    // The bare command shows status, but "status" is the word a user reaches
+    // for; without this it exited 1 with "too many arguments for 'egress'".
+    const bare = run([]);
+    const named = run(['status']);
+    expect(named.status, named.stderr).toBe(0);
+    expect(named.stdout).toBe(bare.stdout);
+  });
+
   it('S1 status names the always-blocked tier, unconditionally', () => {
     const r = run([]);
     expect(r.status).toBe(0);

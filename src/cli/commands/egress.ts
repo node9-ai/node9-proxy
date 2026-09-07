@@ -212,5 +212,9 @@ export function registerEgressCommand(program: Command): void {
       else console.log('');
     });
 
+  // `node9 egress` alone shows status, but `status` is the word a user reaches
+  // for, and without this it exited 1 with "too many arguments for 'egress'".
+  egress.command('status').description('Show the current egress state').action(showStatus);
+
   egress.action(showStatus);
 }
