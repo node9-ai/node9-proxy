@@ -25,6 +25,7 @@ import { normalizeHost } from '../auth/trusted-hosts';
 // Re-exported here so existing import paths (`from '../config'`) keep
 // working unchanged across the codebase. The local `import type` lets
 // the rest of this file reference SmartRule by bare name.
+
 export type { SmartCondition, SmartRule } from '@node9/policy-engine';
 import type { SmartRule } from '@node9/policy-engine';
 import { classifySsrf } from '@node9/policy-engine';
@@ -32,6 +33,30 @@ import { classifySsrf } from '@node9/policy-engine';
 // here directly, never a user ~/.node9/shields/<name>.json that shadows the
 // builtin (B1: a mandate's rules must come from the fleet, not the dev's file).
 import { BUILTIN_SHIELDS } from '@node9/policy-engine';
+
+/**
+ * A tier-1 address has no allow path, for ANY layer: not the local file, not a
+ * repository, and not the dashboard. An org admin can widen most things, but
+ * exempting the cloud metadata endpoint is the one thing the floor exists to
+ * stop, so the same filter runs on the managed values too.
+ *
+ * Never throws: getConfig runs on every hook call, and a config error that
+ * breaks every tool call is worse than the misconfiguration it reports.
+ */
+export function sanitizeSsrfAllow(entries: string[], source: string): string[] {
+  const kept: string[] = [];
+  for (const entry of entries) {
+    const m = classifySsrf(entry);
+    if (m && !m.overridable) {
+      process.emitWarning(
+        `[node9] ${source} ssrfAllow entry "${entry}" is a protected address (${m.tier}) and cannot be exempted; ignoring it.`
+      );
+      continue;
+    }
+    kept.push(entry);
+  }
+  return kept;
+}
 
 export interface EnvironmentConfig {
   requireApproval?: boolean;
@@ -952,21 +977,7 @@ export function getConfig(cwd?: string): Config {
       // than append, consistent with the ONE-config direction.
       if (!isProject) {
         if (Array.isArray(e.ssrfAllow)) {
-          // A tier-1 address has no allow path. Drop it and say so; never throw
-          // here, getConfig runs on every hook call and a config error that
-          // breaks every tool call is worse than the misconfiguration.
-          const kept: string[] = [];
-          for (const entry of e.ssrfAllow) {
-            const m = classifySsrf(entry);
-            if (m && !m.overridable) {
-              process.emitWarning(
-                `[node9] egress.ssrfAllow entry "${entry}" is a protected address (${m.tier}) and cannot be exempted; ignoring it.`
-              );
-              continue;
-            }
-            kept.push(entry);
-          }
-          mergedPolicy.egress.ssrfAllow = kept;
+          mergedPolicy.egress.ssrfAllow = sanitizeSsrfAllow(e.ssrfAllow, 'egress.');
         }
         if (e.ssrfStrict !== undefined) mergedPolicy.egress.ssrfStrict = e.ssrfStrict;
       }
@@ -1112,6 +1123,8 @@ export function getConfig(cwd?: string): Config {
             allow?: unknown;
             deny?: unknown;
             allowPrivate?: unknown;
+            ssrfStrict?: unknown;
+            ssrfAllow?: unknown;
           };
           dlp?: { enabled?: unknown; pii?: unknown; reviewAction?: unknown };
           commandChecks?: Record<string, unknown>;
@@ -1183,6 +1196,12 @@ export function getConfig(cwd?: string): Config {
             if (deny) mergedPolicy.egress.deny = deny;
             if (typeof e.allowPrivate === 'boolean')
               mergedPolicy.egress.allowPrivate = e.allowPrivate;
+            // Keyed = the workspace value IS the value; no ratchet, no locks.
+            // Still type-validated, because the cache file can be hand-edited.
+            if (typeof e.ssrfStrict === 'boolean') mergedPolicy.egress.ssrfStrict = e.ssrfStrict;
+            const ssrfAllow = hosts(e.ssrfAllow);
+            if (ssrfAllow)
+              mergedPolicy.egress.ssrfAllow = sanitizeSsrfAllow(ssrfAllow, 'managed egress.');
           } else {
             mergedPolicy.egress = applyManagedEgress(
               mergedPolicy.egress,
@@ -1193,6 +1212,12 @@ export function getConfig(cwd?: string): Config {
                 deny: hosts(mc.egress.deny),
                 allowPrivate:
                   typeof mc.egress.allowPrivate === 'boolean' ? mc.egress.allowPrivate : undefined,
+                ssrfStrict:
+                  typeof mc.egress.ssrfStrict === 'boolean' ? mc.egress.ssrfStrict : undefined,
+                ssrfAllow: (() => {
+                  const list = hosts(mc.egress.ssrfAllow);
+                  return list ? sanitizeSsrfAllow(list, 'managed egress.') : undefined;
+                })(),
               },
               locked,
               egressModeUserSet

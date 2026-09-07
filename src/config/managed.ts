@@ -96,6 +96,17 @@ export interface ManagedEgress {
   allow?: string[];
   deny?: string[];
   allowPrivate?: boolean;
+  // SSRF floor knobs, placed by the same rule as the fields above: a field
+  // that can only TIGHTEN unions or floors; a field that can LOOSEN is owned
+  // by the org and replaces.
+  //   ssrfStrict only tightens (it adds tier 3, loopback + RFC1918), so it is
+  //     force-on like `enabled`, with a lock key so an org CAN turn it off —
+  //     a Tailscale-heavy org specifically wants that.
+  //   ssrfAllow only loosens (it exempts addresses), so the managed list
+  //     REPLACES local exactly like `allow`, and needs no lock for the same
+  //     reason `allow` needs none.
+  ssrfStrict?: boolean;
+  ssrfAllow?: string[];
 }
 /**
  * Apply managed egress to the machine's local egress object (baseline+lock).
@@ -115,6 +126,8 @@ export function applyManagedEgress<
     allow?: string[];
     deny?: string[];
     allowPrivate?: boolean;
+    ssrfStrict?: boolean;
+    ssrfAllow?: string[];
   },
 >(local: T, managed: ManagedEgress, locked: string[], localModeUserSet = true): T {
   const next: T = { ...local };
@@ -140,6 +153,16 @@ export function applyManagedEgress<
   }
   if (Array.isArray(managed.deny) && managed.deny.length > 0) {
     next.deny = [...new Set([...(local.deny ?? []), ...managed.deny])] as T['deny'];
+  }
+  if (typeof managed.ssrfStrict === 'boolean') {
+    next.ssrfStrict = (
+      locked.includes('egressSsrfStrict')
+        ? managed.ssrfStrict
+        : (local.ssrfStrict ?? false) || managed.ssrfStrict
+    ) as T['ssrfStrict'];
+  }
+  if (Array.isArray(managed.ssrfAllow) && managed.ssrfAllow.length > 0) {
+    next.ssrfAllow = [...managed.ssrfAllow] as T['ssrfAllow'];
   }
   if (typeof managed.allowPrivate === 'boolean') {
     next.allowPrivate = (
