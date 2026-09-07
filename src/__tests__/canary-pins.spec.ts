@@ -185,7 +185,7 @@ describe('F3: isDlpRow substring coverage (audit/index.ts)', () => {
 
 describe('F4: cloud shipper normalises an unknown checkedBy (auth/cloud.ts KNOWN_CHECKED_BY)', () => {
   afterEach(() => vi.unstubAllGlobals());
-  it('dlp-canary-block ships as "unknown" TODAY; the canary commit must flip this row', async () => {
+  it('dlp-canary-block passes through the shipper (flipped from "unknown" by the canary seam commit, H1)', async () => {
     const fetchSpy = vi.fn(async () => ({ ok: true, status: 200 }) as Response);
     vi.stubGlobal('fetch', fetchSpy);
     await auditLocalAllow('Bash', { command: 'x' }, 'dlp-canary-block', {
@@ -199,6 +199,6 @@ describe('F4: cloud shipper normalises an unknown checkedBy (auth/cloud.ts KNOWN
           ((fetchSpy.mock.calls[0] as unknown[])[1] as { body: string }).body
       )
     ) as { checkedBy: string };
-    expect(body.checkedBy).toBe('unknown');
+    expect(body.checkedBy).toBe('dlp-canary-block');
   });
 });

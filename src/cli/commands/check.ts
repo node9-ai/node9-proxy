@@ -19,7 +19,8 @@ import {
   logAutostartSkipThrottled,
 } from '../daemon-starter';
 import { defaultSkillRoots, resolveUserSkillRoot, verifyAndPinRoots } from '../../skill-pin';
-import { scanArgs } from '../../dlp';
+import { scanArgs, matchCanaryArgs } from '../../dlp';
+import { canaryValues, loadCanaries } from '../../canary/registry';
 import { appendLocalAudit } from '../../audit';
 import { isKeyedForPolicy } from '../../config/keyed-guard';
 import {
@@ -288,7 +289,32 @@ export function registerCheckCommand(program: Command): void {
             if (process.env.NODE9_PAUSED === '1' || checkPause().paused) process.exit(0);
 
             const dlpMatch = scanArgs({ prompt });
-            if (!dlpMatch) process.exit(0);
+            // Decoy credentials: a planted value pasted into a prompt is the same
+            // value on the same path as one in a reply (canary-design.md H10).
+            // Registry read failure means "no canaries"; never crash the gate.
+            let canaryVals: ReturnType<typeof canaryValues> = [];
+            try {
+              canaryVals = canaryValues();
+            } catch {
+              canaryVals = [];
+            }
+            const canaryHit =
+              canaryVals.length > 0 ? matchCanaryArgs({ prompt }, canaryVals) : null;
+            if (!dlpMatch && !canaryHit) process.exit(0);
+            let canaryRec: ReturnType<typeof loadCanaries>[number] | null = null;
+            if (canaryHit) {
+              try {
+                canaryRec = loadCanaries().find((r) => r.id === canaryHit.id) ?? null;
+              } catch {
+                canaryRec = null;
+              }
+            }
+            const shownPattern = canaryHit
+              ? 'Decoy credential (planted by node9)'
+              : dlpMatch!.patternName;
+            const shownSample = canaryHit
+              ? (canaryRec?.path ?? 'decoy file')
+              : dlpMatch!.redactedSample;
 
             // Audit FIRST — the block record must survive any downstream error.
             // Force argsHash so the secret value never lands in the audit log.
@@ -305,14 +331,27 @@ export function registerCheckCommand(program: Command): void {
               'UserPromptSubmit',
               { prompt },
               'deny',
-              'dlp-block',
-              { agent, sessionId },
+              canaryHit ? 'dlp-canary-block' : 'dlp-block',
+              {
+                agent,
+                sessionId,
+                ...(canaryHit
+                  ? {
+                      canaryId: canaryHit.id,
+                      canaryHash: canaryRec?.valueHash,
+                      canaryKind: canaryRec?.kind,
+                      canaryPath: canaryRec?.path,
+                      canaryView: canaryHit.view,
+                      canaryRetired: canaryHit.retired,
+                    }
+                  : {}),
+              },
               true
             );
 
             const reason =
-              `🚨 Node9 DLP: ${dlpMatch.patternName} detected in prompt ` +
-              `(${dlpMatch.redactedSample}). Prompt was not submitted — ` +
+              `🚨 Node9 DLP: ${shownPattern} detected in prompt ` +
+              `(${shownSample}). Prompt was not submitted — ` +
               `remove the credential and try again.`;
 
             // /dev/tty banner for the human, mirroring sendBlock's UX. Never
@@ -323,8 +362,8 @@ export function registerCheckCommand(program: Command): void {
               fs.writeSync(
                 ttyFd,
                 chalk.bgRed.white.bold(`\n 🚨 NODE9 DLP — PROMPT BLOCKED \n`) +
-                  chalk.red(`   ${dlpMatch.patternName} detected in your prompt.\n`) +
-                  chalk.gray(`   Match: ${dlpMatch.redactedSample}\n`) +
+                  chalk.red(`   ${shownPattern} detected in your prompt.\n`) +
+                  chalk.gray(`   Match: ${shownSample}\n`) +
                   chalk.cyan(`   Edit the prompt to remove the credential and resubmit.\n\n`)
               );
               fs.closeSync(ttyFd);

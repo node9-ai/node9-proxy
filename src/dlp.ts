@@ -22,7 +22,10 @@ export {
   scanInjection,
   detectArgsPii,
   REALTIME_PII_PATTERNS,
+  matchCanary,
+  matchCanaryArgs,
 } from '@node9/policy-engine';
+export type { CanaryValue, CanaryHit, CanaryView } from '@node9/policy-engine';
 export type { InjectionMatch, InjectionContext, InjectionConfidence } from '@node9/policy-engine';
 
 /**

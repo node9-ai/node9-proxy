@@ -3,7 +3,8 @@
 import { randomUUID } from 'crypto';
 import { askNativePopup } from '../ui/native';
 import { computeRiskMetadata, type RiskMetadata } from '../context-sniper';
-import { scanArgs, scanFilePath, detectArgsPii, type DlpMatch } from '../dlp';
+import { scanArgs, scanFilePath, detectArgsPii, matchCanaryArgs, type DlpMatch } from '../dlp';
+import { canaryValues, loadCanaries } from '../canary/registry';
 import { extractShellDestinations, evaluateEgress } from '@node9/policy-engine';
 import { appendHookDebug, appendLocalAudit, appendToLog, HOOK_DEBUG_LOG } from '../audit';
 import { getConfig, getCredentials } from '../config';
@@ -446,6 +447,60 @@ async function _authorizeHeadlessCore(
       taintWarning =
         `⚠️ node9 flagged this session — earlier tool output contained ${sessionTaint.record.source}. ` +
         `Approve this ${isWriteTool(toolName) ? 'write' : 'network'} action before it proceeds.`;
+    }
+  }
+
+  // ── CANARY (DECOY CREDENTIAL) GATE ────────────────────────────────────────
+  // A value node9 planted itself has no legitimate path into any tool call.
+  // So this runs BEFORE the DLP scanner, independent of dlp.enabled and of the
+  // ignored-tool list, and a hit is a hard block even where the regex DLP
+  // would only review (design: doc/roadmap/active/canary-design.md; H15, E5).
+  // The registry is read per call; a read failure means "no canaries" so the
+  // gate can never crash a tool call.
+  const canaryVals = safeCanaryValues();
+  if (canaryVals.length > 0) {
+    const canaryHit = matchCanaryArgs(args, canaryVals);
+    if (canaryHit) {
+      const rec = canaryRecordById(canaryHit.id);
+      // Attribution only: the shape path may have fired on the same value;
+      // both attributions ride one row (E1, E6).
+      const shape = scanArgs(args);
+      const canaryReason =
+        `🚨 DECOY CREDENTIAL: the fake ${rec?.kind ?? 'credential'} node9 planted at ` +
+        `${rec?.path ?? 'a decoy file'} appeared in field "${canaryHit.fieldPath || 'args'}". ` +
+        `Something read that file; nothing legitimate does.`;
+      if (!isManual)
+        appendLocalAudit(
+          toolName,
+          args,
+          'deny',
+          isObserveMode ? 'observe-mode-dlp-canary-would-block' : 'dlp-canary-block',
+          {
+            ...meta,
+            canaryId: canaryHit.id,
+            canaryHash: rec?.valueHash,
+            canaryKind: rec?.kind,
+            canaryPath: rec?.path,
+            canaryView: canaryHit.view,
+            canaryRetired: canaryHit.retired,
+            ...(shape ? { dlpPattern: shape.patternName, dlpSample: shape.redactedSample } : {}),
+          },
+          true
+        );
+      if (isObserveMode) {
+        return {
+          approved: true,
+          checkedBy: 'audit',
+          observeWouldBlock: true,
+          blockedByLabel: '🚨 Node9 DLP (Decoy Credential)',
+        };
+      }
+      return {
+        approved: false,
+        reason: canaryReason,
+        blockedBy: 'local-config',
+        blockedByLabel: '🚨 Node9 DLP (Decoy Credential)',
+      };
     }
   }
 
@@ -1637,4 +1692,21 @@ async function _authorizeHeadlessCore(
 export async function authorizeAction(toolName: string, args: unknown): Promise<boolean> {
   const result = await authorizeHeadless(toolName, args);
   return result.approved;
+}
+
+// ── Canary registry access for the gate ─────────────────────────────────────
+/** A registry read failure means "no canaries": the gate must never throw into a tool call. */
+function safeCanaryValues() {
+  try {
+    return canaryValues();
+  } catch {
+    return [];
+  }
+}
+function canaryRecordById(id: string) {
+  try {
+    return loadCanaries().find((r) => r.id === id) ?? null;
+  } catch {
+    return null;
+  }
 }

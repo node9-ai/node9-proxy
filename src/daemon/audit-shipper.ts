@@ -72,6 +72,13 @@ export interface WireRow {
   sessionId?: string;
   dlpPattern?: string;
   dlpSample?: string;
+  /** Canary attribution (never the value). */
+  canaryId?: string;
+  canaryHash?: string;
+  canaryKind?: string;
+  canaryPath?: string;
+  canaryView?: string;
+  canaryRetired?: boolean;
   /** Linkage to the BE-origin AuditLog row written at /intercept time —
    *  the BE enriches that row instead of inserting a duplicate. */
   cloudRequestId?: string;
@@ -174,6 +181,12 @@ export function buildWireRows(chunk: Buffer): { rows: WireRow[]; consumed: numbe
       ...(typeof parsed.sessionId === 'string' ? { sessionId: parsed.sessionId } : {}),
       ...(typeof parsed.dlpPattern === 'string' ? { dlpPattern: parsed.dlpPattern } : {}),
       ...(typeof parsed.dlpSample === 'string' ? { dlpSample: parsed.dlpSample } : {}),
+      ...(typeof parsed.canaryId === 'string' ? { canaryId: parsed.canaryId } : {}),
+      ...(typeof parsed.canaryHash === 'string' ? { canaryHash: parsed.canaryHash } : {}),
+      ...(typeof parsed.canaryKind === 'string' ? { canaryKind: parsed.canaryKind } : {}),
+      ...(typeof parsed.canaryPath === 'string' ? { canaryPath: parsed.canaryPath } : {}),
+      ...(typeof parsed.canaryView === 'string' ? { canaryView: parsed.canaryView } : {}),
+      ...(parsed.canaryRetired === true ? { canaryRetired: true } : {}),
       ...(cloudRequestId ? { cloudRequestId } : {}),
       ...(typeof parsed.workingDir === 'string' ? { workingDir: parsed.workingDir } : {}),
       ...(typeof parsed.platform === 'string' ? { platform: parsed.platform } : {}),
