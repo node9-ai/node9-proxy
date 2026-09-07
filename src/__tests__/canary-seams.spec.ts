@@ -84,6 +84,23 @@ const rows = (home: string): Row[] => {
         .map((l) => JSON.parse(l) as Row)
     : [];
 };
+/** Does any string ANYWHERE in the PARSED rows contain `needle`?
+ *
+ *  Searching JSON.stringify(rows) instead is platform-dependent and was a live
+ *  CI failure: on Windows a path's backslashes are escaped in the serialization
+ *  (`C:\\Users\\...`) and never match the raw path read back from the registry.
+ *  On Linux the same assertion passed only because paths use forward slashes.
+ *  The same trap makes a NEGATIVE assertion silently pass, which is worse. */
+const someRowContains = (home: string, needle: string): boolean => {
+  const walk = (v: unknown): boolean => {
+    if (typeof v === 'string') return v.includes(needle);
+    if (Array.isArray(v)) return v.some(walk);
+    if (v && typeof v === 'object') return Object.values(v).some(walk);
+    return false;
+  };
+  return rows(home).some(walk);
+};
+
 const last = (home: string): Row => {
   const all = rows(home);
   expect(all.length, 'an audit row must exist (instrument self-check)').toBeGreaterThan(0);
@@ -153,12 +170,10 @@ describe('E. realtime seams', () => {
     const row = last(home);
     expect(row.checkedBy).toBe('dlp-canary-block');
     expect(String(row.canaryPath)).toBe(rec.path);
-    // And the reason the orchestrator produced names the file too.
-    const audit = rows(home)
-      .map((x) => JSON.stringify(x))
-      .join(' ');
-    expect(audit.includes(rec.path)).toBe(true);
-    expect(audit.includes(rec.value)).toBe(false);
+    // And the reason the orchestrator produced names the file too. Asserted on
+    // the PARSED rows, not on their serialization: see someRowContains.
+    expect(someRowContains(home, rec.path), 'an audit row must name the plant file').toBe(true);
+    expect(someRowContains(home, rec.value), 'no row may carry the decoy value').toBe(false);
   });
 
   it('E2 Write with the decoy in content: block, editFilePath on the row, taint best-effort does not change the exit', () => {
