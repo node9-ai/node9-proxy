@@ -72,13 +72,14 @@ export interface WireRow {
   sessionId?: string;
   dlpPattern?: string;
   dlpSample?: string;
-  /** Canary attribution (never the value). */
-  canaryId?: string;
-  canaryHash?: string;
-  canaryKind?: string;
-  canaryPath?: string;
-  canaryView?: string;
-  canaryRetired?: boolean;
+  // Canary attribution is deliberately NOT on the wire. The SaaS
+  // AuditBatchRowSchema is `.strict()`, so an unknown key makes the whole
+  // batch a 400; `shipOnce` treats that like a network error and returns
+  // before writeWatermark, which wedges shipping for that machine
+  // permanently — the rows before and after the canary row stop shipping
+  // too. The attribution lives in the local audit row and in `node9 scan`.
+  // Adding it to the wire requires the BE schema to land and deploy FIRST.
+  // See the parity test in src/__tests__/wire-schema-parity.spec.ts.
   /** Linkage to the BE-origin AuditLog row written at /intercept time —
    *  the BE enriches that row instead of inserting a duplicate. */
   cloudRequestId?: string;
@@ -181,12 +182,6 @@ export function buildWireRows(chunk: Buffer): { rows: WireRow[]; consumed: numbe
       ...(typeof parsed.sessionId === 'string' ? { sessionId: parsed.sessionId } : {}),
       ...(typeof parsed.dlpPattern === 'string' ? { dlpPattern: parsed.dlpPattern } : {}),
       ...(typeof parsed.dlpSample === 'string' ? { dlpSample: parsed.dlpSample } : {}),
-      ...(typeof parsed.canaryId === 'string' ? { canaryId: parsed.canaryId } : {}),
-      ...(typeof parsed.canaryHash === 'string' ? { canaryHash: parsed.canaryHash } : {}),
-      ...(typeof parsed.canaryKind === 'string' ? { canaryKind: parsed.canaryKind } : {}),
-      ...(typeof parsed.canaryPath === 'string' ? { canaryPath: parsed.canaryPath } : {}),
-      ...(typeof parsed.canaryView === 'string' ? { canaryView: parsed.canaryView } : {}),
-      ...(parsed.canaryRetired === true ? { canaryRetired: true } : {}),
       ...(cloudRequestId ? { cloudRequestId } : {}),
       ...(typeof parsed.workingDir === 'string' ? { workingDir: parsed.workingDir } : {}),
       ...(typeof parsed.platform === 'string' ? { platform: parsed.platform } : {}),
