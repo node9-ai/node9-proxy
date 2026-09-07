@@ -332,24 +332,6 @@ export function isNode9SelfOutput(text: string): boolean {
   return false;
 }
 
-// Token shapes that are clearly test/example fixtures rather than real secrets.
-// These appear in tutorials, regex docs, gitleaks rules, and node9's own debug
-// scripts. Demoting them to skip avoids polluting credential-leak counts.
-const FIXTURE_TOKEN_PATTERNS: RegExp[] = [
-  /(.)\1{5,}/, // 6+ repeated characters (aaaaaa, 000000)
-  /(?:EXAMPLE|FAKE|DUMMY|PLACEHOLDER|XXXXX)/i,
-  /abcdefghijklmn/i, // long alpha sequence — fixture, not entropy
-  /1234567890/, // long digit sequence — fixture, not entropy
-  /qwerty/i,
-];
-
-export function looksLikeFixtureToken(sample: string): boolean {
-  for (const re of FIXTURE_TOKEN_PATTERNS) {
-    if (re.test(sample)) return true;
-  }
-  return false;
-}
-
 function num(n: number): string {
   return n.toLocaleString();
 }
@@ -599,15 +581,15 @@ function recordCanaries(
   result: ScanResult,
   dedup: ScanDedup,
   values: readonly CanaryScanValue[]
-): boolean {
-  if (values.length === 0) return false;
+): string[] {
+  if (values.length === 0) return [];
   let pool = [...values];
-  let matched = false;
+  const matched: string[] = [];
   for (let guard = 0; guard < 8 && pool.length > 0; guard++) {
     const hit = matchCanaryArgs(scanned, pool);
     if (!hit) break;
-    matched = true;
     const v = pool.find((x) => x.id === hit.id);
+    if (v) matched.push(v.value);
     pool = pool.filter((x) => x.id !== hit.id);
     const key = `canary|${hit.id}|${sessionId}|${agent}`;
     const existing = dedup.canaryIndex.get(key);
@@ -637,6 +619,42 @@ function recordCanaries(
     result.canaryFindings.push(finding);
   }
   return matched;
+}
+
+/**
+ * Replace exact decoy values with a neutral marker before the regex pass.
+ *
+ * Removing the canary suppression outright was wrong in the other direction: a
+ * decoy is DELIBERATELY credential-shaped (defence in depth, so a decoy in args
+ * still blocks by shape if the registry is unreadable), so the regex pass then
+ * reported node9's own decoy as a leak. Neither "suppress the whole item" nor
+ * "report everything" is right; the rule is per VALUE. A real credential that
+ * shares an item with a decoy is still found, and the decoy is counted once, as
+ * a canary.
+ *
+ * A marker rather than an empty string: deleting the bytes could join the
+ * neighbouring text into a new accidental match.
+ */
+function scrubDecoys<T>(subject: T, values: readonly string[]): T {
+  if (values.length === 0) return subject;
+  const scrubText = (s: string): string => {
+    let out = s;
+    for (const v of values) if (v) out = out.split(v).join('[node9-decoy]');
+    return out;
+  };
+  const walk = (v: unknown, depth: number): unknown => {
+    if (depth > 6) return v;
+    if (typeof v === 'string') return scrubText(v);
+    if (Array.isArray(v)) return v.map((x) => walk(x, depth + 1));
+    if (v && typeof v === 'object') {
+      const out: Record<string, unknown> = {};
+      for (const [k, child] of Object.entries(v as Record<string, unknown>))
+        out[k] = walk(child, depth + 1);
+      return out;
+    }
+    return v;
+  };
+  return walk(subject, 0) as T;
 }
 
 function pushFsOpAstFinding(
@@ -1065,7 +1083,7 @@ function processClaudeFile(
           .map((b) => (b as Record<string, unknown>)['text'] ?? '')
           .join('\n');
         if (text) {
-          const canaryHit0 = recordCanaries(
+          const decoysHere0 = recordCanaries(
             { text },
             'user-prompt',
             entry.timestamp ?? '',
@@ -1076,7 +1094,7 @@ function processClaudeFile(
             dedup,
             canaryVals
           );
-          const dlpMatch = canaryHit0 ? null : scanArgs({ text });
+          const dlpMatch = scanArgs(scrubDecoys({ text }, decoysHere0));
           if (dlpMatch) {
             const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
             if (!dedup.dlpKeys.has(k)) {
@@ -1117,7 +1135,7 @@ function processClaudeFile(
           // (DLP verdict struct, security alert text). Otherwise the
           // scanner re-detects its own redactor output as a "leak".
           if (isNode9SelfOutput(resultText)) continue;
-          const canaryHit1 = recordCanaries(
+          const decoysHere1 = recordCanaries(
             { text: resultText },
             'tool-result',
             entry.timestamp ?? '',
@@ -1128,11 +1146,16 @@ function processClaudeFile(
             dedup,
             canaryVals
           );
-          const dlpMatch = canaryHit1 ? null : scanArgs({ text: resultText });
+          const dlpMatch = scanArgs(scrubDecoys({ text: resultText }, decoysHere1));
           if (dlpMatch) {
-            // Demote test-fixture-shape tokens — these are tutorial
-            // examples, regex docs, or debug fixtures, not real secrets.
-            if (looksLikeFixtureToken(dlpMatch.redactedSample)) continue;
+            // NO fixture demotion here. It ran on dlpMatch.redactedSample, i.e. on
+            // maskSecret's OUTPUT, whose asterisks are themselves "6+ repeated
+            // characters", so every credential of 14 characters or more was silently
+            // dropped: 75 of 75 real tool-result findings on measured history. It
+            // could not be repaired in place either, because only four leading and
+            // four trailing characters of the secret survive the mask. The job it
+            // attempted is done one layer down and on the RAW value, by DLP_STOPWORDS
+            // in the engine, before scanArgs returns at all.
             if (firstDlpTs === null) firstDlpTs = entry.timestamp ?? null;
             const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
             if (!dedup.dlpKeys.has(k)) {
@@ -1218,7 +1241,7 @@ function processClaudeFile(
       // because source contains auth-SHAPED text which is not a secret; a
       // decoy is not a shape, it is the exact value node9 planted, so the
       // skip must not hide it (corpus S6/S6b).
-      const canaryHit2 = recordCanaries(
+      const canaryInInput = recordCanaries(
         input,
         toolName,
         entry.timestamp ?? '',
@@ -1229,9 +1252,9 @@ function processClaudeFile(
         dedup,
         canaryVals
       );
-      if (!canaryHit2 && CODE_EXTENSIONS.has(inputFileExt)) continue;
+      if (canaryInInput.length === 0 && CODE_EXTENSIONS.has(inputFileExt)) continue;
 
-      const dlpMatch = canaryHit2 ? null : scanArgs(input);
+      const dlpMatch = scanArgs(scrubDecoys(input, canaryInInput));
       if (dlpMatch) {
         if (firstDlpTs === null) firstDlpTs = entry.timestamp ?? null;
         const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
@@ -1697,7 +1720,7 @@ export function scanGeminiHistory(
               ? content
               : '';
           if (text) {
-            const canaryHit3 = recordCanaries(
+            const decoysHere3 = recordCanaries(
               { text },
               'user-prompt',
               msg.timestamp ?? '',
@@ -1708,7 +1731,7 @@ export function scanGeminiHistory(
               dedup,
               canaryVals
             );
-            const dlpMatch = canaryHit3 ? null : scanArgs({ text });
+            const dlpMatch = scanArgs(scrubDecoys({ text }, decoysHere3));
             if (dlpMatch) {
               const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
               if (!dedup.dlpKeys.has(k)) {
@@ -1764,7 +1787,7 @@ export function scanGeminiHistory(
           if (/^node9\s+(scan|explain|report|tail|dlp|status|sessions|audit)\b/.test(rawCmd))
             continue;
 
-          const canaryHit4 = recordCanaries(
+          const decoysHere4 = recordCanaries(
             input,
             toolName,
             msg.timestamp ?? '',
@@ -1775,7 +1798,7 @@ export function scanGeminiHistory(
             dedup,
             canaryVals
           );
-          const dlpMatch = canaryHit4 ? null : scanArgs(input);
+          const dlpMatch = scanArgs(scrubDecoys(input, decoysHere4));
           if (dlpMatch) {
             const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
             if (!dedup.dlpKeys.has(k)) {
@@ -2007,7 +2030,7 @@ export function scanAntigravityHistory(
         if (step.type === 'USER_INPUT') {
           const text = typeof step.content === 'string' ? step.content : '';
           if (text) {
-            const canaryHitB0 = recordCanaries(
+            const decoysHere5 = recordCanaries(
               { text },
               'user-prompt',
               timestamp,
@@ -2018,7 +2041,7 @@ export function scanAntigravityHistory(
               dedup,
               canaryVals
             );
-            const dlpMatch = canaryHitB0 ? null : scanArgs({ text });
+            const dlpMatch = scanArgs(scrubDecoys({ text }, decoysHere5));
             if (dlpMatch) {
               const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
               if (!dedup.dlpKeys.has(k)) {
@@ -2069,7 +2092,7 @@ export function scanAntigravityHistory(
           if (/^node9\s+(scan|explain|report|tail|dlp|status|sessions|audit)\b/.test(rawCmd))
             continue;
 
-          const canaryHitB1 = recordCanaries(
+          const decoysHere6 = recordCanaries(
             input,
             toolName,
             timestamp,
@@ -2080,7 +2103,7 @@ export function scanAntigravityHistory(
             dedup,
             canaryVals
           );
-          const dlpMatch = canaryHitB1 ? null : scanArgs(input);
+          const dlpMatch = scanArgs(scrubDecoys(input, decoysHere6));
           if (dlpMatch) {
             const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
             if (!dedup.dlpKeys.has(k)) {
@@ -2312,7 +2335,7 @@ export function scanCopilotHistory(
       if (ev.type === 'user.message') {
         const text = ev.data?.content ?? ev.data?.text ?? '';
         if (typeof text === 'string' && text) {
-          const canaryHitB2 = recordCanaries(
+          const decoysHere7 = recordCanaries(
             { text },
             'user-prompt',
             timestamp,
@@ -2323,7 +2346,7 @@ export function scanCopilotHistory(
             dedup,
             canaryVals
           );
-          const dlpMatch = canaryHitB2 ? null : scanArgs({ text });
+          const dlpMatch = scanArgs(scrubDecoys({ text }, decoysHere7));
           if (dlpMatch) {
             const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
             if (!dedup.dlpKeys.has(k)) {
@@ -2363,7 +2386,7 @@ export function scanCopilotHistory(
       const rawCmd = String(input.command ?? '').trimStart();
       if (/^node9\s+(scan|explain|report|tail|dlp|status|sessions|audit)\b/.test(rawCmd)) continue;
 
-      const canaryHitB3 = recordCanaries(
+      const decoysHere8 = recordCanaries(
         input,
         toolName,
         timestamp,
@@ -2374,7 +2397,7 @@ export function scanCopilotHistory(
         dedup,
         canaryVals
       );
-      const dlpMatch = canaryHitB3 ? null : scanArgs(input);
+      const dlpMatch = scanArgs(scrubDecoys(input, decoysHere8));
       if (dlpMatch) {
         const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
         if (!dedup.dlpKeys.has(k)) {
@@ -2604,7 +2627,7 @@ export function scanCodexHistory(
       if (entry.type === 'event_msg' && payload['type'] === 'user_message') {
         const text = String(payload['message'] ?? '');
         if (text) {
-          const canaryHit5 = recordCanaries(
+          const decoysHere9 = recordCanaries(
             { text },
             'user-prompt',
             entry.timestamp ?? startTime,
@@ -2615,7 +2638,7 @@ export function scanCodexHistory(
             dedup,
             canaryVals
           );
-          const dlpMatch = canaryHit5 ? null : scanArgs({ text });
+          const dlpMatch = scanArgs(scrubDecoys({ text }, decoysHere9));
           if (dlpMatch) {
             const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
             if (!dedup.dlpKeys.has(k)) {
@@ -2669,7 +2692,7 @@ export function scanCodexHistory(
       const rawCmd = String(input['command'] ?? '').trimStart();
       if (/^node9\s+(scan|explain|report|tail|dlp|status|sessions|audit)\b/.test(rawCmd)) continue;
 
-      const canaryHit6 = recordCanaries(
+      const decoysHere10 = recordCanaries(
         input,
         toolName,
         ts,
@@ -2680,7 +2703,7 @@ export function scanCodexHistory(
         dedup,
         canaryVals
       );
-      const dlpMatch = canaryHit6 ? null : scanArgs(input);
+      const dlpMatch = scanArgs(scrubDecoys(input, decoysHere10));
       if (dlpMatch) {
         const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
         if (!dedup.dlpKeys.has(k)) {

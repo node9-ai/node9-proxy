@@ -20,7 +20,7 @@ import {
   agentColorName,
   type AgentScanInput,
 } from '../scan-summary';
-import { isNode9SelfOutput, looksLikeFixtureToken, type ScanResult } from '../cli/commands/scan';
+import { isNode9SelfOutput, type ScanResult } from '../cli/commands/scan';
 
 describe('agent display helpers', () => {
   // Regression: before these, badge/label sites inlined
@@ -518,18 +518,11 @@ describe('loopWastedUSD excludes long-iteration findings', () => {
   });
 });
 
-describe('looksLikeFixtureToken', () => {
-  it.each([
-    ['ghp_aaaaaaaa', true],
-    ['ghp_aaaaaaaaaaaaaaaaaaaa', true],
-    ['ghp_abcdefghijklmnop', true],
-    ['ghp_1234567890abcdef', true],
-    ['ghp_***EXAMPLE', true],
-    ['AIzaSyAbcdefghijklmn0123456', true],
-    ['ghp_***GJSn', false], // realistic redaction
-    ['AKIA****5XYZ', false],
-    ['sk-proj-realLooking123', false],
-  ])('looksLikeFixtureToken(%s) → %s', (sample, expected) => {
-    expect(looksLikeFixtureToken(sample)).toBe(expected);
-  });
-});
+// looksLikeFixtureToken was REMOVED (see doc/roadmap/active/tool-result-dlp-design.md).
+// It ran on maskSecret's OUTPUT, whose asterisks are themselves "6+ repeated
+// characters", so it silently dropped every credential of 14 characters or more
+// found in a tool result: 75 of 75 on real history. This test could not catch
+// that because it pinned hand-written samples ('AKIA****5XYZ', 4 asterisks) that
+// the real masker never produces; maskSecret emits up to 12. The repo rule it
+// broke is its own: tests must use the inputs the REAL caller produces. The job
+// it attempted is done one layer down on the raw value by DLP_STOPWORDS.
