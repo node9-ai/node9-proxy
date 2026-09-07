@@ -142,6 +142,25 @@ describe('E. realtime seams', () => {
     expect(JSON.stringify(row)).not.toContain(rec.value);
   });
 
+  it('E1b the human-facing block names the plant file (the promise `canary plant` prints)', () => {
+    home = makeHome(STD);
+    plant(home);
+    const rec = awsId(home);
+    const r = check(home, pre(home, 'Bash', { command: 'echo ' + rec.value }));
+    const out = JSON.parse(r.stdout) as { hookSpecificOutput?: { permissionDecision?: string } };
+    expect(out.hookSpecificOutput?.permissionDecision).toBe('deny');
+    // ruleDescription is what the /dev/tty banner prints under "Triggered by".
+    const row = last(home);
+    expect(row.checkedBy).toBe('dlp-canary-block');
+    expect(String(row.canaryPath)).toBe(rec.path);
+    // And the reason the orchestrator produced names the file too.
+    const audit = rows(home)
+      .map((x) => JSON.stringify(x))
+      .join(' ');
+    expect(audit.includes(rec.path)).toBe(true);
+    expect(audit.includes(rec.value)).toBe(false);
+  });
+
   it('E2 Write with the decoy in content: block, editFilePath on the row, taint best-effort does not change the exit', () => {
     home = makeHome(STD);
     plant(home);

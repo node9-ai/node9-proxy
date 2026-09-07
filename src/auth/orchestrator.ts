@@ -500,6 +500,12 @@ async function _authorizeHeadlessCore(
         reason: canaryReason,
         blockedBy: 'local-config',
         blockedByLabel: '🚨 Node9 DLP (Decoy Credential)',
+        // The /dev/tty banner renders ruleDescription under "Triggered by".
+        // Without it the terminal said only "Decoy Credential" and never named
+        // the file, while `node9 canary plant` promises node9 tells you which
+        // file was read. Witnessed by canary-block-message.spec.ts, which calls
+        // the orchestrator directly: this field never reaches the hook stdout.
+        ruleDescription: `The fake credential node9 planted in ${rec?.path ?? 'a decoy file'} just left that file. Nothing legitimate reads it.`,
       };
     }
   }
