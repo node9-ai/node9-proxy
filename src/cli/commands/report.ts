@@ -351,12 +351,7 @@ function renderTerminalReport(
       `${num(d.approvals.approved)} approved · ${num(d.approvals.denied)} denied · ${num(d.approvals.timedOut)} timed-out→deny`
     );
     dimRow('📁', 'Files', d.files.blocked > 0, `${num(d.files.blocked)} jail-path reads blocked`);
-    dimRow(
-      '🛠',
-      'Tool rules',
-      d.toolRules.blocked > 0,
-      `${num(d.toolRules.blocked)} shields/rules`
-    );
+    dimRow('🛠', 'Tool rules', d.toolRules.blocked > 0, `${num(d.toolRules.blocked)} shields/rules`);
     dimRow('🧩', 'Apps (MCP)', d.apps.blocked > 0, `${num(d.apps.blocked)} app-permission blocks`);
     dimRow('💰', 'Cost', d.cost.totalUSD > 0, `${fmtCost(d.cost.totalUSD)} this period`);
   }

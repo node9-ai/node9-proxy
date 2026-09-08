@@ -9,8 +9,7 @@ import type { SmartRule } from '../config/index.js';
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export type SuggestedRulePayload =
-  | { type: 'smartRule'; rule: SmartRule }
-  | { type: 'ignoredTool'; toolName: string };
+  { type: 'smartRule'; rule: SmartRule } | { type: 'ignoredTool'; toolName: string };
 
 export interface Suggestion {
   id: string;

@@ -10,12 +10,7 @@
 // justified by that rule or by an RFC, never by what this file returns.
 
 export type SsrfTier =
-  | 'metadata'
-  | 'link-local'
-  | 'multicast'
-  | 'unspecified'
-  | 'cgnat'
-  | 'private';
+  'metadata' | 'link-local' | 'multicast' | 'unspecified' | 'cgnat' | 'private';
 
 export interface SsrfMatch {
   tier: SsrfTier;

@@ -99,8 +99,7 @@ function triggerKeys(wf: Workflow, raw: Record<string, unknown>): string[] {
 
 function onObject(wf: Workflow, raw: Record<string, unknown>): Record<string, unknown> | undefined {
   return (wf.on ?? raw['on'] ?? raw[true as unknown as string]) as
-    | Record<string, unknown>
-    | undefined;
+    Record<string, unknown> | undefined;
 }
 function activityTypes(node: unknown): string[] {
   return node && Array.isArray((node as { types?: unknown }).types)
@@ -348,8 +347,7 @@ const NEGATED_CONTAINS_RE =
  *  `pull_request: types:[labeled]` job on the label name). */
 function labelTypeConfigured(wf: Workflow, raw: Record<string, unknown>): boolean {
   const on = (wf.on ?? raw['on'] ?? raw[true as unknown as string]) as
-    | Record<string, unknown>
-    | undefined;
+    Record<string, unknown> | undefined;
   const prTypes = (t: unknown): string[] =>
     t && Array.isArray((t as { types?: unknown }).types)
       ? (t as { types: unknown[] }).types.map(String)

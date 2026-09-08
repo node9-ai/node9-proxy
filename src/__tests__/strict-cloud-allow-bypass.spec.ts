@@ -23,9 +23,10 @@ import { authorizeHeadless, _resetConfigCache as _resetCore } from '../core.js';
 
 const { mockTrustSession, mockInitSaaS, mockPollSaaS } = vi.hoisted(() => ({
   mockTrustSession: vi.fn((..._a: unknown[]): unknown => null),
-  mockInitSaaS: vi.fn(
-    async (..._a: unknown[]): Promise<unknown> => ({ pending: false, approved: true })
-  ),
+  mockInitSaaS: vi.fn(async (..._a: unknown[]): Promise<unknown> => ({
+    pending: false,
+    approved: true,
+  })),
   mockPollSaaS: vi.fn(async (..._a: unknown[]): Promise<unknown> => ({ approved: false })),
 }));
 vi.mock('../auth/state', async (importOriginal) => ({

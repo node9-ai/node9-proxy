@@ -854,8 +854,7 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
       // Map action to decision + options for the daemon
       let httpDecision: 'allow' | 'deny' | 'trust';
       let httpOpts:
-        | { persist?: boolean; trustDuration?: string; reason?: string; source?: string }
-        | undefined;
+        { persist?: boolean; trustDuration?: string; reason?: string; source?: string } | undefined;
       if (action === 'always-allow') {
         httpDecision = 'allow';
         httpOpts = { persist: true };
