@@ -106,8 +106,10 @@ const B: Array<[string, string, string | null, boolean, string]> = [
   ['B15', '239.255.255.255', 'multicast', false, 'address'],
   ['B16', '240.0.0.1', null, false, 'address'],
   ['B17', 'ff02::1', 'multicast', false, 'address'],
-  ['B18', '0.0.0.0', 'unspecified', false, 'address'],
-  ['B19', '::', 'unspecified', false, 'address'],
+  // Overridable since 2026-09-08: 0.0.0.0 as a destination reaches this host,
+  // so it is governed by the strict tier exactly as 127.0.0.1 is. See F1/F2.
+  ['B18', '0.0.0.0', 'unspecified', true, 'address'],
+  ['B19', '::', 'unspecified', true, 'address'],
   ['B20', '100.63.255.255', null, false, 'address'],
   ['B21', '100.64.0.0', 'cgnat', true, 'address'],
   ['B22', '100.127.255.255', 'cgnat', true, 'address'],
@@ -165,14 +167,18 @@ describe('B. classifySsrf tiers', () => {
   });
 
   it('C-floor2 an OVERRIDABLE tier is exempted, in any spelling', () => {
-    expect(ssrfFloor([{ token: '100.64.0.1', binary: 'curl' }], {})?.tier).toBe('cgnat');
+    // CGNAT only reaches the floor at all once the strict tier is on (F3/F4),
+    // so the exemption is exercised there. What this row pins is the exemption
+    // itself, not which tier happens to be strict-gated.
+    const strict = { ssrfStrict: true };
+    expect(ssrfFloor([{ token: '100.64.0.1', binary: 'curl' }], strict)?.tier).toBe('cgnat');
     expect(
-      ssrfFloor([{ token: '100.64.0.1', binary: 'curl' }], { ssrfAllow: ['100.64.0.1'] })
+      ssrfFloor([{ token: '100.64.0.1', binary: 'curl' }], { ...strict, ssrfAllow: ['100.64.0.1'] })
     ).toBeNull();
     // exemption is by canonical address, so a different spelling of the same
     // address is exempt too.
     expect(
-      ssrfFloor([{ token: '1678033921', binary: 'curl' }], { ssrfAllow: ['100.64.0.1'] })
+      ssrfFloor([{ token: '1678033921', binary: 'curl' }], { ...strict, ssrfAllow: ['100.64.0.1'] })
     ).toBeNull();
   });
 
@@ -181,5 +187,66 @@ describe('B. classifySsrf tiers', () => {
     expect(ssrfFloor(lo, {})).toBeNull();
     expect(ssrfFloor(lo, { ssrfStrict: true })?.tier).toBe('private');
     expect(ssrfFloor(lo, { ssrfStrict: true, ssrfAllow: ['127.0.0.1'] })).toBeNull();
+  });
+});
+
+// ── Live false positives on shipped defaults, measured 2026-09-08 ────────────
+// Found by a false-positive corpus built before any code changed. All three
+// were blocked out of the box, on every machine, with no way to reach the
+// knob from the CLI on a dashboard-governed device.
+describe('F. addresses that must be reachable by default', () => {
+  const floor = (token: string, opts: Parameters<typeof ssrfFloor>[1] = {}) =>
+    ssrfFloor([{ token, binary: 'curl' }], opts);
+
+  it('F1 0.0.0.0 is a way of saying localhost, and localhost is reachable by default', () => {
+    // `curl http://0.0.0.0:3000` connects to 127.0.0.1:3000. Blocking it while
+    // 127.0.0.1 itself is reachable (the strict tier is off by default) was
+    // incoherent, and 0.0.0.0:PORT is how a developer reaches their own dev
+    // server all day.
+    expect(floor('0.0.0.0')).toBeNull();
+    expect(floor('::')).toBeNull();
+  });
+
+  it('F2 but the strict tier still blocks it, since it IS loopback', () => {
+    // The SSRF trick of writing 0.0.0.0 to dodge a 127.0.0.1 filter still has
+    // to fail for anyone who turned the strict tier on.
+    expect(floor('0.0.0.0', { ssrfStrict: true })?.tier).toBe('unspecified');
+    expect(floor('::', { ssrfStrict: true })?.tier).toBe('unspecified');
+  });
+
+  it('F3 a Tailscale peer is reachable by default', () => {
+    // 100.64/10 is where every mesh VPN peer lives. Blocking the whole range
+    // out of the box broke ordinary work for anyone on Tailscale.
+    expect(floor('100.64.0.1')).toBeNull();
+    expect(floor('100.127.255.255')).toBeNull();
+  });
+
+  it('F4 the strict tier still blocks CGNAT', () => {
+    expect(floor('100.64.0.1', { ssrfStrict: true })?.tier).toBe('cgnat');
+  });
+
+  it('F5 the metadata endpoint INSIDE CGNAT stays non-overridable', () => {
+    // Alibaba Cloud serves instance credentials at 100.100.100.200, which the
+    // classifier saw only as CGNAT. Relaxing CGNAT without carving this out
+    // would have opened a live credential endpoint, and it was exemptable
+    // even before that.
+    const m = floor('100.100.100.200');
+    expect(m?.tier).toBe('metadata');
+    expect(floor('100.100.100.200', { ssrfAllow: ['100.100.100.200'] }), 'no allow path').not.toBe(
+      null
+    );
+    expect(floor('100.100.100.200', { ssrfStrict: false })).not.toBeNull();
+  });
+
+  it('F6 the always-on tiers are untouched', () => {
+    for (const t of [
+      '169.254.169.254',
+      '169.254.170.2',
+      '168.63.129.16',
+      '224.0.0.1',
+      'metadata',
+    ]) {
+      expect(floor(t), `${t} must still block`).not.toBeNull();
+    }
   });
 });

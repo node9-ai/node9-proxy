@@ -23,6 +23,8 @@ type Egress = {
   allow?: string[];
   deny?: string[];
   allowPrivate?: boolean;
+  ssrfStrict?: boolean;
+  ssrfAllow?: string[];
 };
 let home: string;
 
@@ -176,8 +178,21 @@ describe('the floor closes every escape route', () => {
     );
   });
 
-  it('B4 0.0.0.0 is blocked (was: allowed, isPrivateHost returns true for it)', () => {
+  it('B4 0.0.0.0 follows loopback: reachable by default, blocked under strict', () => {
+    // Changed 2026-09-08 after a false-positive corpus measured it: as a
+    // DESTINATION 0.0.0.0 reaches this host, so blocking it on every machine
+    // while 127.0.0.1 stayed reachable was incoherent, and `curl
+    // http://0.0.0.0:3000` is how a developer reaches their own dev server.
     home = makeHome({ enabled: true, mode: 'block', allow: [], deny: [], allowPrivate: true });
+    expect(check(home, 'curl http://0.0.0.0/x').decision).not.toBe('deny');
+    home = makeHome({
+      enabled: true,
+      mode: 'block',
+      allow: [],
+      deny: [],
+      allowPrivate: true,
+      ssrfStrict: true,
+    });
     expect(check(home, 'curl http://0.0.0.0/x').decision).toBe('deny');
   });
 
@@ -274,9 +289,19 @@ describe('R2 false positives: an ordinary command must not hit the floor', () =>
   it('but a bare decimal that really denotes a protected address still blocks', () => {
     home = makeHome(undefined);
     expect(check(home, 'curl 2852039166/latest/meta-data/').decision).toBe('deny');
-    // and an explicit scheme keeps the small-integer forms meaningful
-    expect(check(home, 'curl http://0/').decision).toBe('deny');
-    expect(check(home, 'curl http://0.0.0.0/x').decision).toBe('deny');
+    // The small-integer forms still resolve to 0.0.0.0, which is now the
+    // strict tier rather than an always-on one (B4), so what this row pins is
+    // the DECODING, exercised where the floor still acts on it.
+    const strictHome = makeHome({
+      enabled: true,
+      mode: 'block',
+      allow: [],
+      deny: [],
+      allowPrivate: true,
+      ssrfStrict: true,
+    });
+    expect(check(strictHome, 'curl http://0/').decision).toBe('deny');
+    expect(check(strictHome, 'curl http://0.0.0.0/x').decision).toBe('deny');
   });
 });
 
