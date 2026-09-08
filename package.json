@@ -94,7 +94,7 @@
     "smol-toml": "^1.6.1",
     "string-width": "^4.2.3",
     "yaml": "^2.9.0",
-    "zod": "^3.25.76"
+    "zod": "^4.5.4"
   },
   "bundleDependencies": [
     "mvdan-sh"
