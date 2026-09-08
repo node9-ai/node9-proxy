@@ -4364,10 +4364,7 @@ export function registerScanCommand(program: Command): void {
                 chalk.red.bold('🪤  Decoy Tripped') +
                 chalk.dim('  ·  ') +
                 chalk.red(
-                  `${num(n)} decoy credential${n !== 1 ? 's' : ''} left the file node9 plantedit in`.replace(
-                    'planted it in',
-                    'planted it in'
-                  )
+                  `${num(n)} decoy credential${n !== 1 ? 's' : ''} left the file node9 planted it in`
                 )
             );
             const shownCanaries = drillDown

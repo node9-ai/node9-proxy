@@ -89,9 +89,14 @@ export function plantKind(kind: CanaryKind, home = os.homedir()): PlantResult {
   }
 
   const dir = path.dirname(target);
-  const createdDir = !fs.existsSync(dir);
   const gen = site.generate(); // throws if the engine would not block the shape (H18)
-  if (createdDir) fs.mkdirSync(dir, { recursive: true, mode: site.dirMode });
+  // mkdirSync(recursive) returns the first path it created, or undefined when
+  // the directory was already there. Asking IT is atomic; the old
+  // existsSync-then-create pair could disagree with itself between the two
+  // calls and mis-record whether uninstall should remove the directory
+  // (CodeQL js/file-system-race). The file write below is the guard that
+  // matters and is already exclusive (`wx`).
+  const createdDir = fs.mkdirSync(dir, { recursive: true, mode: site.dirMode }) !== undefined;
   fs.writeFileSync(target, gen.text, { mode: 0o600, flag: 'wx' });
   fs.chmodSync(target, 0o600);
   const fileHash = sha256Hex(gen.text);
