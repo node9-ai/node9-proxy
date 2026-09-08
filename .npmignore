@@ -27,5 +27,6 @@ CHANGELOG.md
 .nvmrc
 .env*
 
-# Badge / contributor docs (not part of the published package)
-docs/
+# docs/ is PUBLISHED on purpose: node9.ai renders these Markdown files from the
+# package, so the documentation has one source and the tests here can check it.
+# See doc/roadmap/active/docs-single-source-design.md.
