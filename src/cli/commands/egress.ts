@@ -59,20 +59,34 @@ function exempt(address: string): boolean {
  * this block existed the floor blocked and no screen said it was there, so a
  * user only met it as a surprise at the moment of a block.
  *
- * The exemption list printed here is the EFFECTIVE one (getConfig has already
+ * Every line here was rewritten after a code review found three overclaims:
+ * the floor only sees SHELL commands (a WebFetch or an MCP fetch tool reaches
+ * the address unchecked), CGNAT is blocked by default and was named nowhere,
+ * and `node9 pause` lifts the floor along with everything else. A status
+ * screen that overstates protection is worse than none.
+ *
+ * The exemption list printed is the EFFECTIVE one (getConfig has already
  * dropped an entry that names a protected address), so a user who typed one
  * sees that it is not in force.
  */
-function showFloor(e: Config['policy']['egress'], policySource: string): void {
-  console.log(chalk.gray('\n  Protected addresses'));
+function showFloor(
+  e: Config['policy']['egress'],
+  ssrfStrictSource: Config['ssrfStrictSource']
+): void {
+  console.log(chalk.gray('\n  Protected addresses') + chalk.gray(' — in shell commands only'));
   console.log(
     chalk.gray(
-      '    always blocked: cloud metadata, link-local, multicast — no setting releases these'
+      '    always blocked: cloud metadata, link-local, multicast, CGNAT (100.64/10)\n' +
+        '    no setting releases these, though `node9 pause` suspends all enforcement'
     )
   );
   const strict = e.ssrfStrict === true;
   const by =
-    policySource === 'workspace' ? 'workspace (app.node9.ai)' : 'this machine (config.json)';
+    ssrfStrictSource === 'workspace'
+      ? 'workspace (app.node9.ai)'
+      : ssrfStrictSource === 'local'
+        ? 'this machine (config.json)'
+        : 'the shipped default';
   console.log(
     `    Internal addresses:  ${strict ? chalk.green('on') : chalk.yellow('off')}` +
       chalk.gray(
@@ -84,6 +98,12 @@ function showFloor(e: Config['policy']['egress'], policySource: string): void {
   console.log(chalk.gray(`    set by: ${by}`));
   const exemptions = e.ssrfAllow ?? [];
   console.log(chalk.gray(`    Exemptions: ${exemptions.length ? exemptions.join(', ') : 'none'}`));
+  console.log(
+    chalk.gray(
+      '    Not covered: an agent tool that fetches a URL itself (WebFetch, an MCP\n' +
+        '    fetch tool) does not pass this gate.'
+    )
+  );
 }
 
 function showStatus(): void {
@@ -106,7 +126,7 @@ function showStatus(): void {
       `  ${DEFAULT_EGRESS_ALLOWLIST.length} common dev/LLM hosts are always allowed (github, npm, pypi, anthropic, …).`
     )
   );
-  showFloor(e, cfg.policySource);
+  showFloor(e, cfg.ssrfStrictSource);
   if (e.allow.length) console.log('\n  Your allow: ' + e.allow.join(', '));
   if (e.deny.length) console.log('  Your deny:  ' + e.deny.join(', '));
   if (!e.enabled) {
@@ -192,7 +212,7 @@ export function registerEgressCommand(program: Command): void {
 
   egress
     .command('exempt <address>')
-    .description('Let one address through the floor (a mesh network or a VPN range)')
+    .description('Let ONE address through the floor (exact address, not a range)')
     .action((address: string) => {
       const a = normalizeEgressHost(address);
       // An exemption names an address or a host the floor can classify. Reject

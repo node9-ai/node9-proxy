@@ -56,13 +56,6 @@ describe('evaluateEgressConfig', () => {
   // config says, so the report must state it as a WIN and must not describe an
   // open egress as fully open when it is not.
 
-  it('P1 an open egress no longer claims the agent can reach ANY server', () => {
-    const f = evaluateEgressConfig({ enabled: false, mode: 'off' });
-    // The old copy said "any server on the internet". That was true before the
-    // floor existed; it is an overclaim in the pessimistic direction now.
-    expect(f.what).toMatch(/protected address|metadata/i);
-  });
-
   it('P2 the floor row is stated even when the egress policy is off', () => {
     const rows = checkEgressFloor({
       enabled: false,
@@ -90,6 +83,40 @@ describe('evaluateEgressConfig', () => {
     floor.coverage = { state: 'open' }; // what the probe returns when not in-path
     const kept = dropEnforcementRedundant([floor, f('Coverage')]);
     expect(kept.map((r) => r.title)).not.toContain(floor.title);
+  });
+
+  it('P7 the floor row does not claim more than shell commands', () => {
+    // Review found WebFetch and MCP fetch tools reach the metadata endpoint
+    // unchecked, while this row said "blocked on this machine".
+    const r = checkEgressFloor({
+      enabled: true,
+      mode: 'block',
+      ssrfStrict: false,
+      ssrfAllow: [],
+    })[0];
+    expect(r.title + ' ' + (r.what ?? ''), 'names the surface').toMatch(/shell command/i);
+    expect(r.detail.join(' '), 'names what bypasses it').toMatch(/WebFetch|fetch tool/i);
+  });
+
+  it('P8 the floor row is severity advisory, so a working floor is never a gap', () => {
+    // P4 could not see this: it filtered on a title that never matches.
+    const r = checkEgressFloor({
+      enabled: true,
+      mode: 'block',
+      ssrfStrict: false,
+      ssrfAllow: [],
+    })[0];
+    expect(r.severity).toBe('advisory');
+  });
+
+  it('P9 the open-egress row does not claim protection on an unwired machine', () => {
+    // Replaces P1, which pulled the other way. P1 asked this row to mention the
+    // floor so it would not overstate the exposure; review then found the row
+    // has no coverage probe, so on an unwired machine it rendered "node9 blocks
+    // these on every machine" four lines above "node9 is not in-path for any
+    // agent". The floor claim belongs to the floor row, which IS probed.
+    const f = evaluateEgressConfig({ enabled: false, mode: 'off' });
+    expect(f.what).not.toMatch(/every machine|node9 blocks/i);
   });
 
   it('P3 the floor row names the attack, not the mechanism', () => {

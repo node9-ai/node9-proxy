@@ -204,6 +204,13 @@ export interface Config {
   /** PR-2: 'workspace' = keyed (policy from the cloud); 'local' = the
    *  local stack (unkeyed, --local, named profiles). */
   policySource: 'workspace' | 'local';
+  /** Which LAYER actually set the SSRF strict tier, as opposed to which layer
+   *  governs policy in general. `node9 egress` prints this, and printing
+   *  policySource there was a lie in both directions: a keyed machine whose
+   *  workspace never mentioned the field showed the shipped default as a
+   *  workspace decision, and an org-managed unkeyed machine showed an org
+   *  decision as a local one. */
+  ssrfStrictSource: 'workspace' | 'local' | 'default';
 }
 
 // Default Enterprise Posture
@@ -235,6 +242,7 @@ export const DANGEROUS_WORDS = [
 export const DEFAULT_CONFIG: Config = {
   version: '1.0',
   policySource: 'local',
+  ssrfStrictSource: 'default',
   settings: {
     mode: 'standard',
     autoStartDaemon: true,
@@ -827,6 +835,8 @@ export function getConfig(cwd?: string): Config {
   // --local`, named profiles) keep the local promise and stay unkeyed here.
   const pr2Creds = getCredentials();
   const keyed = !!pr2Creds?.apiKey && pr2Creds.localOnly !== true;
+  // Provenance for the one field a status screen attributes out loud.
+  let ssrfStrictSource: Config['ssrfStrictSource'] = 'default';
 
   const applyLayer = (
     source: Record<string, unknown> | null,
@@ -979,7 +989,10 @@ export function getConfig(cwd?: string): Config {
         if (Array.isArray(e.ssrfAllow)) {
           mergedPolicy.egress.ssrfAllow = sanitizeSsrfAllow(e.ssrfAllow, 'egress.');
         }
-        if (e.ssrfStrict !== undefined) mergedPolicy.egress.ssrfStrict = e.ssrfStrict;
+        if (e.ssrfStrict !== undefined) {
+          mergedPolicy.egress.ssrfStrict = e.ssrfStrict;
+          ssrfStrictSource = 'local';
+        }
       }
     }
     if (p.loopDetection) {
@@ -1198,7 +1211,10 @@ export function getConfig(cwd?: string): Config {
               mergedPolicy.egress.allowPrivate = e.allowPrivate;
             // Keyed = the workspace value IS the value; no ratchet, no locks.
             // Still type-validated, because the cache file can be hand-edited.
-            if (typeof e.ssrfStrict === 'boolean') mergedPolicy.egress.ssrfStrict = e.ssrfStrict;
+            if (typeof e.ssrfStrict === 'boolean') {
+              mergedPolicy.egress.ssrfStrict = e.ssrfStrict;
+              ssrfStrictSource = 'workspace';
+            }
             const ssrfAllow = hosts(e.ssrfAllow);
             if (ssrfAllow)
               mergedPolicy.egress.ssrfAllow = sanitizeSsrfAllow(ssrfAllow, 'managed egress.');
@@ -1212,8 +1228,11 @@ export function getConfig(cwd?: string): Config {
                 deny: hosts(mc.egress.deny),
                 allowPrivate:
                   typeof mc.egress.allowPrivate === 'boolean' ? mc.egress.allowPrivate : undefined,
-                ssrfStrict:
-                  typeof mc.egress.ssrfStrict === 'boolean' ? mc.egress.ssrfStrict : undefined,
+                ssrfStrict: (() => {
+                  if (typeof mc.egress.ssrfStrict !== 'boolean') return undefined;
+                  ssrfStrictSource = 'workspace';
+                  return mc.egress.ssrfStrict;
+                })(),
                 ssrfAllow: (() => {
                   const list = hosts(mc.egress.ssrfAllow);
                   return list ? sanitizeSsrfAllow(list, 'managed egress.') : undefined;
@@ -1728,6 +1747,12 @@ export function getConfig(cwd?: string): Config {
   mergedPolicy.ignoredTools = [...new Set(mergedPolicy.ignoredTools)];
   mergedPolicy.skillPinning.roots = [...new Set(mergedPolicy.skillPinning.roots)];
 
+  // A keyed machine drops the local policy layers wholesale, so a 'local'
+  // provenance recorded before the fork cannot survive into the result. The
+  // widened local resets the narrowing TS infers across the closure above.
+  const resolvedSsrfStrictSource: Config['ssrfStrictSource'] =
+    keyed && (ssrfStrictSource as string) === 'local' ? 'default' : ssrfStrictSource;
+
   const result: Config = {
     settings: mergedSettings,
     policy: mergedPolicy,
@@ -1736,6 +1761,9 @@ export function getConfig(cwd?: string): Config {
     // modes this machine is in. 'workspace' = keyed, policy from the cloud;
     // 'local' = the local stack (incl. --local / named-profile keys).
     policySource: keyed ? 'workspace' : 'local',
+    // A keyed machine drops the local policy layers wholesale, so a 'local'
+    // provenance recorded before the fork cannot survive into the result.
+    ssrfStrictSource: resolvedSsrfStrictSource,
   };
 
   // Only populate the cache when using the ambient cwd — explicit cwd calls are

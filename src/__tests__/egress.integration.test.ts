@@ -139,6 +139,25 @@ describe('node9 egress (integration)', () => {
     expect(named.stdout).toBe(bare.stdout);
   });
 
+  // ── Truthfulness of the floor block (code review, 2026-09-08) ────────────
+  // Three claims were wrong: the floor is SHELL-ONLY (WebFetch and MCP fetch
+  // tools reach the address unchecked), CGNAT is blocked by default and was
+  // named nowhere, and `node9 pause` lifts the whole thing.
+
+  it('T1 the block says it covers shell commands, not the whole machine', () => {
+    const out = run([]).stdout;
+    expect(out, 'the surface it actually covers').toMatch(/shell command/i);
+    expect(out, 'the surface it does NOT cover').toMatch(/WebFetch|fetch tool/i);
+  });
+
+  it('T2 CGNAT is named in the always-blocked set', () => {
+    expect(run([]).stdout).toMatch(/100\.64|carrier-grade|CGNAT/i);
+  });
+
+  it('T3 the "no setting releases these" claim carries the pause caveat', () => {
+    expect(run([]).stdout).toMatch(/pause/i);
+  });
+
   it('S1 status names the always-blocked tier, unconditionally', () => {
     const r = run([]);
     expect(r.status).toBe(0);
@@ -195,7 +214,17 @@ describe('node9 egress (integration)', () => {
   it('S9 status says WHO governs the strict tier', () => {
     run(['strict', 'on']);
     const r = run([]);
+    expect(r.status).toBe(0);
     expect(r.stdout).toMatch(/set by:\s+this machine/i);
+  });
+
+  it('T4 an untouched value is attributed to the DEFAULT, not to a layer', () => {
+    // `set by` used to key on policySource, which is machine keyedness, not
+    // provenance: a machine that had never set the field claimed a layer chose
+    // it. Nobody set it here.
+    const r = run([]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/set by:\s+the shipped default/i);
   });
 
   it('refuses to overwrite a malformed config (exit 1, file untouched)', () => {

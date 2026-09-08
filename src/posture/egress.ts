@@ -92,9 +92,11 @@ export function evaluateEgressConfig(egress: EgressConfig): Finding {
     category: 'Egress',
     severity: 'high',
     title: 'Egress is open',
-    what:
-      'Your agent can connect to any server on the internet, apart from a small set of ' +
-      'protected addresses (cloud metadata, link-local) that node9 blocks on every machine.',
+    // Not "apart from the protected addresses node9 blocks on every machine":
+    // this row has no coverage probe, so it renders on a machine where node9
+    // is not in-path and blocks nothing, four lines from the Coverage row that
+    // says exactly that.
+    what: 'Your agent can connect to any server on the internet.',
     why: "node9 isn't restricting where its network tools (curl, wget, ssh) can reach.",
     who: 'If the agent is ever tricked, nothing stops it sending your data out.',
     owner: 'node9',
@@ -121,7 +123,7 @@ export function checkEgressFloor(egress: FloorConfig): Finding[] {
   // "ssrf floor is blocking Strict tier off: loopback…".
   const detail = [
     'the cloud instance-metadata endpoint',
-    'link-local, multicast and unspecified addresses',
+    'link-local, multicast, unspecified and CGNAT (100.64/10) addresses',
     egress.ssrfStrict
       ? 'the strict tier is on: loopback and the private ranges are blocked too'
       : 'the strict tier is off: loopback and the private ranges stay reachable (`node9 egress strict on`)',
@@ -129,12 +131,18 @@ export function checkEgressFloor(egress: FloorConfig): Finding[] {
   if (egress.ssrfAllow.length) {
     detail.push(`you exempted: ${egress.ssrfAllow.join(', ')}`);
   }
+  // Named as a limit, not buried: a reader who takes this row as machine-wide
+  // protection is the failure this row exists to avoid.
+  detail.push('not covered: WebFetch and MCP fetch tools reach a URL without this gate');
   return [
     {
       category: 'Egress',
       severity: 'advisory',
-      title: 'The cloud metadata endpoint is blocked on this machine',
-      what: 'node9 blocks it before any egress policy is consulted, and no setting releases it.',
+      title: 'The cloud metadata endpoint is blocked in shell commands',
+      what:
+        'node9 blocks it before any egress policy is consulted, and no setting releases it. ' +
+        'It sees shell commands (curl, wget, ssh); a tool that fetches a URL itself does not ' +
+        'pass this gate.',
       why: "One request to that address returns this machine's cloud credentials, to anyone who can make the agent send it.",
       who: 'An agent talked into fetching that address hands over the keys and cannot, here.',
       owner: 'node9',

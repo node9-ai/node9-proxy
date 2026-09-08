@@ -354,9 +354,10 @@ export const TOOLS = [
       'Show egress (outbound network) control: whether it is enabled, the mode ' +
       '(off / review / block), and your allow + deny host lists. Common dev/LLM hosts ' +
       '(github, npm, pypi, anthropic, …) are always allowed by a built-in list. ' +
-      'Also reports the SSRF floor: the addresses blocked on every machine before ' +
-      'any policy is consulted (cloud metadata, link-local), whether the strict tier ' +
-      '(loopback + private ranges) is on, and the exemptions in force. ' +
+      'Also reports the SSRF floor: the addresses blocked in SHELL COMMANDS before ' +
+      'any policy is consulted (cloud metadata, link-local, multicast, CGNAT), which ' +
+      'tools bypass it, whether the strict tier (loopback + private ranges) is on, and ' +
+      'the exemptions in force. ' +
       'Read-only.',
     inputSchema: { type: 'object', properties: {}, required: [] },
   },
@@ -565,12 +566,17 @@ function handleEgressStatus(): string {
     `${DEFAULT_EGRESS_ALLOWLIST.length} common dev/LLM hosts are always allowed (github, npm, pypi, anthropic, …).`,
     `Your allow list: ${e.allow.length ? e.allow.join(', ') : '(none)'}`,
     `Your deny list:  ${e.deny.length ? e.deny.join(', ') : '(none)'}`,
-    // The SSRF floor. Without these three lines an agent reading this answer
+    // The SSRF floor. Without these lines an agent reading this answer
     // concludes that internal addresses are reachable, because nothing said
-    // otherwise. The exemptions listed are the effective ones (getConfig has
-    // already dropped any that name a protected address).
-    'Protected addresses: cloud metadata, link-local and multicast are ALWAYS blocked, ' +
-      'before any of the above is consulted. No setting releases them.',
+    // otherwise. The LIMITS are here for the same reason and matter more on
+    // this surface than on any other: an agent treats this as ground truth,
+    // and the first version told it the floor was absolute. It is not. It sees
+    // shell commands only, and `node9 pause` suspends it.
+    'Protected addresses, IN SHELL COMMANDS ONLY: cloud metadata, link-local, multicast ' +
+      'and CGNAT (100.64/10) are blocked before any of the above is consulted. No setting ' +
+      'releases them, though `node9 pause` suspends all enforcement.',
+    'NOT covered by that: a tool that fetches a URL itself (WebFetch, an MCP fetch tool) ' +
+      'does not pass this gate at all.',
     `Internal addresses: ${e.ssrfStrict ? 'on' : 'off'} — loopback and the private ranges ` +
       `are ${e.ssrfStrict ? 'blocked too' : 'reachable'}.`,
     `Floor exemptions: ${e.ssrfAllow?.length ? e.ssrfAllow.join(', ') : '(none)'}`,

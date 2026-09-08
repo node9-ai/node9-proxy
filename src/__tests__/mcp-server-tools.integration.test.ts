@@ -259,6 +259,12 @@ describe('node9 MCP server — egress control tools', () => {
     );
     const text = res[1]?.result?.content?.[0]?.text ?? '';
     expect(text, 'the always-on tier').toMatch(/metadata/i);
+    // An agent reads this answer as ground truth, so the three limits matter
+    // more here than anywhere: shell-only, CGNAT, and pause.
+    expect(text, 'shell-only, not machine-wide').toMatch(/shell command/i);
+    expect(text, 'the tools that bypass it').toMatch(/WebFetch|fetch tool/i);
+    expect(text, 'CGNAT is blocked by default').toMatch(/100\.64|CGNAT/i);
+    expect(text, 'pause suspends it').toMatch(/pause/i);
     expect(text, 'the strict tier and its state').toMatch(/internal addresses:\s*on/i);
     expect(text, 'the exemptions in force').toContain('100.64.0.1');
     fs.rmSync(h, { recursive: true, force: true });
