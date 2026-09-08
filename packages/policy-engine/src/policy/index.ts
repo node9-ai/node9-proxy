@@ -8,6 +8,7 @@
 import type { SmartRule } from '../types';
 import { extractShellDestTokens } from '../shell/index';
 import { ssrfFloor } from '../egress/ssrf';
+import { ssrfDestinationFloor } from '../egress/destinations';
 import { scanArgs } from '../dlp';
 import {
   detectDangerousShellExec,
@@ -335,6 +336,41 @@ export async function evaluatePolicy(
             : 'review',
         blockedByLabel: `DLP: ${dlpMatch.patternName}`,
         reason: `${dlpMatch.patternName} detected in ${dlpMatch.fieldPath}`,
+      };
+    }
+  }
+
+  // ── SSRF floor, non-shell destinations ──────────────────────────────────
+  // A tool that fetches a URL itself reaches a protected address without ever
+  // producing a shell command, so the floor below would never see it. Judged
+  // by a CLOSED LIST of tool + argument paths: there is no seam that reaches
+  // WebFetch without also reaching Grep and an Agent prompt, and a
+  // false-positive corpus found six families where nothing tells a
+  // destination apart from a mention. See egress/destinations.ts.
+  //
+  // Placed BEFORE the ignoredTools fast path, for the same reason the DLP
+  // scanner above is: `webfetch`, `get_*`, `read_*` and `list_*` are all on
+  // that list, so anything after it is dead code for exactly the tools that
+  // carry this gap. Measured: with the check one block lower, WebFetch still
+  // reached the metadata endpoint while `navigate` was blocked.
+  //
+  // Here, in the engine, so `node9 explain`, `simulate` and the posture probes
+  // inherit it and cannot disagree with the gate. The orchestrator calls the
+  // same function on the live hook path, where evaluatePolicy is never reached
+  // for an ignored tool at all.
+  {
+    const dest = ssrfDestinationFloor(toolName, args, {
+      ssrfAllow: config.policy.egress?.ssrfAllow,
+      ssrfStrict: config.policy.egress?.ssrfStrict,
+    });
+    if (dest) {
+      return {
+        decision: 'block',
+        blockedByLabel: '🌐 Node9 Egress (Protected Address)',
+        reason: dest.reason,
+        ruleName: `ssrf:${dest.tier}:${toolName}:${dest.host}`,
+        ruleDescription: dest.reason,
+        tier: 3,
       };
     }
   }
