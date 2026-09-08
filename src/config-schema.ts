@@ -29,10 +29,10 @@ const SmartConditionSchema = z
         'notMatchesGlob',
       ],
       {
-        errorMap: () => ({
-          message:
-            'op must be one of: matches, notMatches, contains, notContains, exists, notExists, matchesGlob, notMatchesGlob',
-        }),
+        // zod 4 replaced errorMap with `error`. The wording is kept verbatim:
+        // it is what a user sees when their config is rejected.
+        error: () =>
+          'op must be one of: matches, notMatches, contains, notContains, exists, notExists, matchesGlob, notMatchesGlob',
       }
     ),
     value: z.string().optional(),
@@ -52,7 +52,7 @@ export const SmartRuleSchema = z.object({
   conditions: z.array(SmartConditionSchema).min(1, 'Smart rule must have at least one condition'),
   conditionMode: z.enum(['all', 'any']).optional(),
   verdict: z.enum(['allow', 'review', 'block'], {
-    errorMap: () => ({ message: 'verdict must be one of: allow, review, block' }),
+    error: () => 'verdict must be one of: allow, review, block',
   }),
   reason: z.string().optional(),
   description: z.string().optional(),
@@ -139,7 +139,7 @@ export const ConfigFileSchema = z
         sandboxPaths: z.array(z.string()).optional(),
         dangerousWords: z.array(noNewlines).optional(),
         ignoredTools: z.array(z.string()).optional(),
-        toolInspection: z.record(z.string()).optional(),
+        toolInspection: z.record(z.string(), z.string()).optional(),
         smartRules: z.array(SmartRuleSchema).optional(),
         dlp: z
           .object({
@@ -197,9 +197,13 @@ export const ConfigFileSchema = z
           .optional(),
       })
       .optional(),
-    environments: z.record(z.object({ requireApproval: z.boolean().optional() })).optional(),
+    environments: z
+      .record(z.string(), z.object({ requireApproval: z.boolean().optional() }))
+      .optional(),
   })
-  .strict({ message: 'Config contains unknown top-level keys' });
+  // zod 4: .strict() takes no parameters. The message moves onto the object
+  // itself, which is where zod 4 reports an unrecognised key.
+  .strict();
 
 export type ConfigFileInput = z.input<typeof ConfigFileSchema>;
 
