@@ -100,7 +100,7 @@
     "mvdan-sh"
   ],
   "devDependencies": {
-    "@anthropic-ai/sdk": "^0.78.0",
+    "@anthropic-ai/sdk": "^0.124.0",
     "@octokit/rest": "^22.0.1",
     "@semantic-release/commit-analyzer": "^13.0.1",
     "@semantic-release/git": "^10.0.1",
