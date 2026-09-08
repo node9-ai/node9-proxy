@@ -92,18 +92,24 @@ describe('M. managed control of the SSRF knobs', () => {
     expect(e.ssrfStrict).toBe(true);
   });
 
-  it('M2 unkeyed: managed false cannot loosen a local true without a lock', async () => {
+  it('M2 unkeyed: a managed false REPLACES a local true, with no lock', async () => {
+    // Founder call 2026-09-08, after review: the lock is gone. It was
+    // unreachable anyway — the backend 400s a `locked` key in the PUT body and
+    // no write path ever set the column, so `lockIf('egressSsrfStrict')` was
+    // dead code and the dashboard's "off" could not turn the tier off. Under
+    // ONE-config the workspace value simply governs.
     const e = await load({ local: { ssrfStrict: true }, managed: { ssrfStrict: false } });
-    expect(e.ssrfStrict, "a member's stricter choice survives").toBe(true);
+    expect(e.ssrfStrict, 'the dashboard can turn it off').toBe(false);
   });
 
-  it('M3 unkeyed: the LOCK is what lets an org loosen it', async () => {
-    const e = await load({
-      local: { ssrfStrict: true },
-      managed: { ssrfStrict: false },
-      locked: ['egressSsrfStrict'],
-    });
-    expect(e.ssrfStrict).toBe(false);
+  it('M3 unkeyed: a managed true REPLACES a local false, same rule both ways', async () => {
+    const e = await load({ local: { ssrfStrict: false }, managed: { ssrfStrict: true } });
+    expect(e.ssrfStrict).toBe(true);
+  });
+
+  it('M3b unkeyed: a workspace that says nothing leaves the local value alone', async () => {
+    const e = await load({ local: { ssrfStrict: true }, managed: { mode: 'block' } });
+    expect(e.ssrfStrict).toBe(true);
   });
 
   it('M4 unkeyed: managed ssrfAllow REPLACES local, it does not union', async () => {
@@ -114,8 +120,19 @@ describe('M. managed control of the SSRF knobs', () => {
     expect(e.ssrfAllow, 'the org owns the exemption list').toEqual(['100.64.0.1']);
   });
 
-  it('M5 unkeyed: an EMPTY managed list is "no opinion", like allow', async () => {
+  it('M5 unkeyed: an EMPTY managed list CLEARS the device exemptions', async () => {
+    // Founder call 2026-09-08. `allow` treats empty as "no opinion", but this
+    // list is the floor: an admin who removes the last exemption in the
+    // dashboard means "no address is exempt any more", and the old semantics
+    // left the hole open on every machine forever with no way to close it.
     const e = await load({ local: { ssrfAllow: ['100.64.0.9'] }, managed: { ssrfAllow: [] } });
+    expect(e.ssrfAllow, 'the org can revoke').toEqual([]);
+  });
+
+  it('M5b unkeyed: an ABSENT list still leaves the local one alone', async () => {
+    // Absent and empty must stay distinguishable, or a workspace that never
+    // touched the floor would wipe a member's exemption.
+    const e = await load({ local: { ssrfAllow: ['100.64.0.9'] }, managed: { mode: 'block' } });
     expect(e.ssrfAllow).toEqual(['100.64.0.9']);
   });
 

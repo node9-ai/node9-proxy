@@ -99,12 +99,9 @@ export interface ManagedEgress {
   // SSRF floor knobs, placed by the same rule as the fields above: a field
   // that can only TIGHTEN unions or floors; a field that can LOOSEN is owned
   // by the org and replaces.
-  //   ssrfStrict only tightens (it adds tier 3, loopback + RFC1918), so it is
-  //     force-on like `enabled`, with a lock key so an org CAN turn it off —
-  //     a Tailscale-heavy org specifically wants that.
-  //   ssrfAllow only loosens (it exempts addresses), so the managed list
-  //     REPLACES local exactly like `allow`, and needs no lock for the same
-  //     reason `allow` needs none.
+  // The two floor knobs are the exception to that rule: both REPLACE, because
+  // the floor is not a policy a member negotiates with the org. See the
+  // comment at their branch below.
   ssrfStrict?: boolean;
   ssrfAllow?: string[];
 }
@@ -154,14 +151,20 @@ export function applyManagedEgress<
   if (Array.isArray(managed.deny) && managed.deny.length > 0) {
     next.deny = [...new Set([...(local.deny ?? []), ...managed.deny])] as T['deny'];
   }
+  // Both floor knobs REPLACE rather than ratchet, unlike the fields above.
+  // Founder call 2026-09-08, after review:
+  //   - the lock key `egressSsrfStrict` is gone. It was unreachable: the
+  //     backend 400s a `locked` key in the PUT body and no write path ever set
+  //     the column, so a force-on ratchet meant the dashboard could turn the
+  //     strict tier ON and never OFF again.
+  //   - an EMPTY list is a REVOCATION, not silence. `allow` reads empty as "no
+  //     opinion", but this list is the floor: an admin who removes the last
+  //     exemption means no address is exempt any more. Absent still means
+  //     silence, so a workspace that never touched the floor changes nothing.
   if (typeof managed.ssrfStrict === 'boolean') {
-    next.ssrfStrict = (
-      locked.includes('egressSsrfStrict')
-        ? managed.ssrfStrict
-        : (local.ssrfStrict ?? false) || managed.ssrfStrict
-    ) as T['ssrfStrict'];
+    next.ssrfStrict = managed.ssrfStrict as T['ssrfStrict'];
   }
-  if (Array.isArray(managed.ssrfAllow) && managed.ssrfAllow.length > 0) {
+  if (Array.isArray(managed.ssrfAllow)) {
     next.ssrfAllow = [...managed.ssrfAllow] as T['ssrfAllow'];
   }
   if (typeof managed.allowPrivate === 'boolean') {

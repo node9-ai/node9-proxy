@@ -260,6 +260,23 @@ describe('extractManagedConfig — the SSRF floor knobs survive the cache seam',
     expect(off?.egress?.ssrfStrict).toBe(false);
   });
 
+  it('an EMPTY ssrfAllow survives the seam (it is a revocation, not silence)', () => {
+    // The extractor used to drop an empty list, which made "the admin cleared
+    // the exemptions" indistinguishable from "the admin never set any" — the
+    // hole stayed open on every machine forever.
+    const out = extractManagedConfig({
+      managedConfig: { egress: { ssrfAllow: [] }, locked: [] },
+    });
+    expect(out?.egress?.ssrfAllow).toEqual([]);
+  });
+
+  it('an ABSENT ssrfAllow stays absent (silence is not a revocation)', () => {
+    const out = extractManagedConfig({
+      managedConfig: { egress: { ssrfStrict: true }, locked: [] },
+    });
+    expect(out?.egress?.ssrfAllow).toBeUndefined();
+  });
+
   it('an SSRF field ALONE still produces an egress block', () => {
     const out = extractManagedConfig({
       managedConfig: { egress: { ssrfAllow: ['100.64.0.1'] }, locked: [] },
@@ -272,7 +289,11 @@ describe('extractManagedConfig — the SSRF floor knobs survive the cache seam',
       managedConfig: { egress: { ssrfStrict: 'yes', ssrfAllow: [1, {}] }, locked: [] },
     } as Parameters<typeof extractManagedConfig>[0]);
     expect(out?.egress?.ssrfStrict).toBeUndefined();
-    expect(out?.egress?.ssrfAllow).toBeUndefined();
+    // A junk ARRAY is present-but-unusable: every element is dropped, which
+    // leaves an empty list, and an empty list revokes. That is the tighter
+    // direction, and the right one for a floor: garbage on the wire must not
+    // silently keep an exemption alive.
+    expect(out?.egress?.ssrfAllow).toEqual([]);
   });
 
   it('carries the lock key through', () => {

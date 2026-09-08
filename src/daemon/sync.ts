@@ -570,8 +570,13 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
     if (typeof mc.egress.ssrfStrict === 'boolean') {
       e.ssrfStrict = mc.egress.ssrfStrict;
     }
-    const ssrfAllow = cleanHosts(mc.egress.ssrfAllow);
-    if (ssrfAllow.length) e.ssrfAllow = ssrfAllow;
+    // An EMPTY list must survive this seam: it is the org revoking every
+    // exemption, and dropping it made "cleared in the dashboard"
+    // indistinguishable from "never set", which left the hole open forever.
+    // Absent stays absent, so silence is still silence.
+    if (mc.egress.ssrfAllow !== undefined) {
+      e.ssrfAllow = cleanHosts(mc.egress.ssrfAllow);
+    }
     if (
       e.enabled !== undefined ||
       e.mode !== undefined ||
