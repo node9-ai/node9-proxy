@@ -181,7 +181,16 @@ const METADATA_ADDRESSES = new Set([
   '169.254.170.2', // AWS ECS task role
   '168.63.129.16', // Azure WireServer
   'fd00:ec2::254', // AWS IMDS over IPv6 (inside fc00::/7, which is NOT a tier)
+  // Alibaba Cloud IMDS. It sits INSIDE 100.64/10, so before this line it was
+  // classified as cgnat and therefore exemptable: one ssrfAllow entry opened a
+  // live credential endpoint. It has to be named here, above the range check,
+  // and it is the reason relaxing cgnat is safe.
+  '100.100.100.200',
 ]);
+
+/** The tiers the `ssrfStrict` knob governs. A tier outside this set blocks on
+ *  every machine and no setting releases it. */
+const STRICT_TIERS = new Set<SsrfTier>(['private', 'unspecified', 'cgnat']);
 
 /** Tier 1, non-overridable: the metadata names node9 cannot resolve to an address. */
 const METADATA_HOSTNAMES = new Set(['metadata.google.internal', 'metadata.goog', 'metadata']);
@@ -218,9 +227,20 @@ export function classifySsrf(host: string): SsrfMatch | null {
 
     const o = v4Octets(ip);
     if (o) {
-      if (o[0] === 0 && o[1] === 0 && o[2] === 0 && o[3] === 0) return hit('unspecified', false);
+      // 0.0.0.0 as a DESTINATION means "this host": curl http://0.0.0.0:3000
+      // reaches 127.0.0.1:3000. It is loopback by another spelling, so it is
+      // gated by the strict tier exactly as loopback is, rather than blocked
+      // on every machine while 127.0.0.1 is allowed. The SSRF trick of writing
+      // it to dodge a 127.0.0.1 filter still fails for anyone with strict on.
+      if (o[0] === 0 && o[1] === 0 && o[2] === 0 && o[3] === 0) return hit('unspecified', true);
       if (o[0] === 169 && o[1] === 254) return hit('link-local', false);
       if (o[0] >= 224 && o[0] <= 239) return hit('multicast', false);
+      // CGNAT is where every mesh-VPN peer lives (Tailscale hands out 100.64/10),
+      // so blocking the range out of the box broke ordinary work for anyone
+      // using one, on every machine, with no reachable knob on a
+      // dashboard-governed device. It is gated by the strict tier now. The
+      // metadata endpoint inside the range is carved out above and stays
+      // non-overridable, which is what makes this safe.
       if (o[0] === 100 && o[1] >= 64 && o[1] <= 127) return hit('cgnat', true);
       // Tier 3: off by default (egress.ssrfStrict), because a developer talks to
       // these constantly. 72 of 308 destinations measured on real history.
@@ -233,7 +253,7 @@ export function classifySsrf(host: string): SsrfMatch | null {
 
     const g = expandIpv6(ip);
     if (!g) return null;
-    if (g.every((x) => x === 0)) return hit('unspecified', false);
+    if (g.every((x) => x === 0)) return hit('unspecified', true); // :: — see the IPv4 note
     if ((g[0] & 0xffc0) === 0xfe80) return hit('link-local', false); // fe80::/10
     if ((g[0] & 0xff00) === 0xff00) return hit('multicast', false); // ff00::/8
     if (g.slice(0, 7).every((x) => x === 0) && g[7] === 1) return hit('private', true); // ::1
@@ -268,7 +288,7 @@ const TIER_REASON: Record<SsrfTier, string> = {
   metadata: 'a cloud instance-metadata endpoint, the classic credential-theft target',
   'link-local': 'a link-local address',
   multicast: 'a multicast address',
-  unspecified: 'the unspecified address',
+  unspecified: 'the unspecified address, which reaches this host',
   cgnat: 'a carrier-grade NAT address',
   private: 'a loopback or private address',
 };
@@ -290,7 +310,10 @@ export function ssrfFloor(
   for (const { token, binary } of tokens) {
     const m = classifySsrf(token);
     if (!m) continue;
-    if (m.tier === 'private' && !opts.ssrfStrict) continue;
+    // Tiers the strict knob governs: reachable by default, blocked when a user
+    // or an org turns the strict tier on. Everything not listed here blocks on
+    // every machine, always.
+    if (STRICT_TIERS.has(m.tier) && !opts.ssrfStrict) continue;
     // An exemption applies to overridable tiers only. Tier 1 has no allow path.
     if (m.overridable && m.normalized && exempt.has(m.normalized)) continue;
     return {
