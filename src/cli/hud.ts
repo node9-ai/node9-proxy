@@ -494,8 +494,7 @@ export async function main(): Promise<void> {
           if (!fs.existsSync(configPath)) continue;
           const cfg = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
           const hud = (cfg.settings as Record<string, unknown> | undefined)?.hud as
-            | Record<string, unknown>
-            | undefined;
+            Record<string, unknown> | undefined;
           if (hud && 'showEnvironmentCounts' in hud) return hud.showEnvironmentCounts !== false;
         }
       } catch {

@@ -17,11 +17,7 @@ export interface CanaryValue {
   retired?: boolean;
 }
 export type CanaryView =
-  | 'raw'
-  | 'url-decoded'
-  | 'base64-decoded'
-  | 'hex-decoded'
-  | 'separators-stripped';
+  'raw' | 'url-decoded' | 'base64-decoded' | 'hex-decoded' | 'separators-stripped';
 export interface CanaryHit {
   id: string;
   view: CanaryView;

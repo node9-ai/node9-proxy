@@ -8,8 +8,7 @@ import os from 'os';
 import type { SmartRule } from './index.js';
 
 export type ConfigPatch =
-  | { type: 'smartRule'; rule: SmartRule }
-  | { type: 'ignoredTool'; toolName: string };
+  { type: 'smartRule'; rule: SmartRule } | { type: 'ignoredTool'; toolName: string };
 
 export const GLOBAL_CONFIG_PATH = path.join(os.homedir(), '.node9', 'config.json');
 

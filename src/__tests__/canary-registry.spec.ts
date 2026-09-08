@@ -87,8 +87,7 @@ describe('C. registry', () => {
       'regenerateUserJail must run, not only addJailPath (H9)'
     ).toBe(true);
     const state = JSON.parse(fs.readFileSync(stateFile(), 'utf-8')) as
-      | { active?: string[] }
-      | string[];
+      { active?: string[] } | string[];
     const active = Array.isArray(state) ? state : (state.active ?? []);
     expect(JSON.stringify(state)).toContain('user-jail');
     expect(active.length >= 0).toBe(true);
