@@ -3,6 +3,8 @@
 // file proves it for the one that writes to disk. No decoy literal here: the
 // stopword-carrying candidate is built at runtime from parts.
 import { describe, it, expect } from 'vitest';
+import fs from 'fs';
+import path from 'path';
 import {
   untilBlocked,
   generateAwsProfile,
@@ -53,5 +55,29 @@ describe('generate.ts oracle', () => {
   it('labels and var names never say canary or node9', () => {
     for (const s of [...LABELS, ...STRIPE_VARS, ...DB_VARS])
       expect(s.toLowerCase()).not.toMatch(/canary|node9/);
+  });
+});
+
+// CodeQL js/biased-cryptographic-random, fixed 2026-09-08. A decoy's whole
+// value is being unguessable, so a known modulo bias is not something to leave
+// in the generator, even a small one.
+describe('the decoy alphabet is drawn without modulo bias', () => {
+  it('every character of the alphabet is reachable', () => {
+    // A cheap structural witness: with 256 % len != 0 the OLD code still
+    // reached every character, so this row alone cannot prove the fix. The row
+    // below is the one that can.
+    const seen = new Set<string>();
+    for (let i = 0; i < 60; i++)
+      for (const v of generateAwsProfile().values) for (const c of v.value) seen.add(c);
+    expect(seen.size).toBeGreaterThan(10);
+  });
+
+  it('does not consume raw bytes modulo the alphabet length', () => {
+    // Pin the MECHANISM, because the distribution itself needs a sample far
+    // larger than a unit test to separate a 1.6% skew from noise. randomInt is
+    // rejection-sampled by Node; `% alphabet.length` is not.
+    const src = fs.readFileSync(path.join(__dirname, '../canary/generate.ts'), 'utf8');
+    expect(src).not.toMatch(/bytes\[[^\]]+\]\s*%\s*alphabet\.length/);
+    expect(src).toMatch(/randomInt\(alphabet\.length\)/);
   });
 });

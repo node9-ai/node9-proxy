@@ -5,7 +5,7 @@
 // severity (design 4.3 and H18). The oracle is scanArgs, so "shape passes
 // regex DLP" is asserted on the real bytes, never assumed. No prefix that
 // could complete a credential shape appears contiguously in this source.
-import { randomBytes, randomInt } from 'crypto';
+import { randomInt } from 'crypto';
 import { scanArgs } from '../dlp';
 
 const ALPHA_B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -29,10 +29,13 @@ const DB_USERS = ['app', 'svc', 'reporter'] as const;
 const DB_HOSTS = ['db-internal', 'pg-primary.internal', 'postgres.svc.cluster.local'] as const;
 const DB_NAMES = ['app', 'prod', 'main'] as const;
 
+// randomInt, not `randomBytes[i] % alphabet.length`: modulo over 256 favours
+// the first (256 % len) characters, which biases every decoy this generates.
+// The skew is small, but a decoy's whole value is being unguessable, so it is
+// not a place to leave a known bias (CodeQL js/biased-cryptographic-random).
 const pick = (alphabet: string, n: number): string => {
-  const bytes = randomBytes(n);
   let out = '';
-  for (let i = 0; i < n; i++) out += alphabet[bytes[i] % alphabet.length];
+  for (let i = 0; i < n; i++) out += alphabet[randomInt(alphabet.length)];
   return out;
 };
 const choose = <T>(xs: readonly T[]): T => xs[randomInt(xs.length)];
