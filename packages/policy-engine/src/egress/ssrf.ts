@@ -192,6 +192,23 @@ const METADATA_ADDRESSES = new Set([
  *  every machine and no setting releases it. */
 const STRICT_TIERS = new Set<SsrfTier>(['private', 'unspecified', 'cgnat']);
 
+/** Is this tier reachable by default, waiting on the `ssrfStrict` knob?
+ *  Exported so the non-shell path asks the SAME question rather than
+ *  approximating it with `overridable`, which is a different property. */
+export function isStrictGatedTier(tier: SsrfTier): boolean {
+  return STRICT_TIERS.has(tier);
+}
+
+/** The sentence a user reads when the floor stops them. One builder, so the
+ *  shell path and the non-shell path cannot word the same block differently. */
+export function ssrfReason(m: SsrfMatch, asWritten: string): string {
+  return (
+    `Blocked: ${asWritten} is ${TIER_REASON[m.tier]}` +
+    (m.normalized && m.normalized !== asWritten ? ` (${m.normalized})` : '') +
+    (m.overridable ? '.' : '. This address cannot be allowlisted.')
+  );
+}
+
 /** Tier 1, non-overridable: the metadata names node9 cannot resolve to an address. */
 const METADATA_HOSTNAMES = new Set(['metadata.google.internal', 'metadata.goog', 'metadata']);
 
@@ -313,18 +330,10 @@ export function ssrfFloor(
     // Tiers the strict knob governs: reachable by default, blocked when a user
     // or an org turns the strict tier on. Everything not listed here blocks on
     // every machine, always.
-    if (STRICT_TIERS.has(m.tier) && !opts.ssrfStrict) continue;
+    if (isStrictGatedTier(m.tier) && !opts.ssrfStrict) continue;
     // An exemption applies to overridable tiers only. Tier 1 has no allow path.
     if (m.overridable && m.normalized && exempt.has(m.normalized)) continue;
-    return {
-      ...m,
-      host: token,
-      binary,
-      reason:
-        `Blocked: ${token} is ${TIER_REASON[m.tier]}` +
-        (m.normalized && m.normalized !== token ? ` (${m.normalized})` : '') +
-        (m.overridable ? '.' : '. This address cannot be allowlisted.'),
-    };
+    return { ...m, host: token, binary, reason: ssrfReason(m, token) };
   }
   return null;
 }
