@@ -578,9 +578,7 @@ export async function setupClaude(): Promise<void> {
   const hudCommand = fullPathCommand('hud');
   const statusLineObj = { type: 'command', command: hudCommand };
   const existingStatusLine = settings.statusLine as
-    | { type?: string; command?: string }
-    | string
-    | undefined;
+    { type?: string; command?: string } | string | undefined;
   const existingStatusCommand =
     typeof existingStatusLine === 'object' ? existingStatusLine?.command : existingStatusLine;
   // Only set node9's HUD when there's no statusLine yet, or the existing one is

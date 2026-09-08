@@ -482,8 +482,7 @@ function fetchCloudPolicy(
           }
           try {
             const body = JSON.parse(Buffer.concat(chunks).toString('utf-8')) as
-              | CloudPolicyBody
-              | unknown[];
+              CloudPolicyBody | unknown[];
             const normalized: CloudPolicyBody = Array.isArray(body) ? { policies: body } : body;
             // Strip surrounding quotes from the ETag header per RFC 7232 §
             // 2.3 — entity tags are quoted on the wire but compared as opaque

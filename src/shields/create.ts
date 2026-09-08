@@ -29,8 +29,7 @@ export interface CreateShieldOpts {
 }
 
 export type CreateShieldResult =
-  | { ok: true; path: string; enabled: boolean; ruleCount: number }
-  | { ok: false; error: string };
+  { ok: true; path: string; enabled: boolean; ruleCount: number } | { ok: false; error: string };
 
 // Built-in shield names AND their aliases. A user shield with one of these names
 // would SHADOW the built-in (the loader merges {...BUILTIN_SHIELDS, ...user}), so

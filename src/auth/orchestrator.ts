@@ -53,14 +53,7 @@ export interface AuthResult {
     | 'timeout';
   changeHint?: string;
   checkedBy?:
-    | 'cloud'
-    | 'daemon'
-    | 'terminal'
-    | 'local-policy'
-    | 'persistent'
-    | 'trust'
-    | 'paused'
-    | 'audit';
+    'cloud' | 'daemon' | 'terminal' | 'local-policy' | 'persistent' | 'trust' | 'paused' | 'audit';
   /** Structured decision source from the winning racer — used for cloud audit reporting. */
   decisionSource?: 'terminal' | 'browser' | 'native' | 'cloud' | 'timeout' | 'local';
   /** Name of the smart rule that fired (for HUD lastRuleHit tracking). */

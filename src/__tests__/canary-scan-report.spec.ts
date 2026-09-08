@@ -387,8 +387,7 @@ describe('S. node9 scan report', () => {
     expect([0, 2]).toContain(cli(['scan', '--days=0']).status);
     const hp = path.join(home, '.node9', 'scan-history.json');
     const hist = JSON.parse(fs.readFileSync(hp, 'utf-8')) as
-      | { records?: Array<Record<string, number>> }
-      | Array<Record<string, number>>;
+      { records?: Array<Record<string, number>> } | Array<Record<string, number>>;
     const recs = Array.isArray(hist) ? hist : (hist.records ?? []);
     expect(recs.length).toBeGreaterThan(0);
     expect(recs[recs.length - 1].canaries).toBe(1);
