@@ -150,7 +150,6 @@ describe('startScanWalk', () => {
 
   it('emits error state when a walker throws', async () => {
     const scanModule = await import('../cli/commands/scan.js');
-    const original = scanModule.scanClaudeHistoryAsync;
     vi.mocked(scanModule.scanClaudeHistoryAsync).mockImplementationOnce(async () => {
       throw new Error('boom');
     });
@@ -164,6 +163,9 @@ describe('startScanWalk', () => {
       expect(last.error.message).toBe('boom');
     }
 
-    vi.mocked(scanModule.scanClaudeHistoryAsync).mockImplementation(original);
+    // vitest 5: the old restore captured the mock itself and re-installed it as
+    // its own implementation, which self-references and threw "Cyclic __proto__
+    // value". Reinstate the stub the module-level vi.mock declares instead.
+    vi.mocked(scanModule.scanClaudeHistoryAsync).mockImplementation(async () => emptyScan);
   });
 });
