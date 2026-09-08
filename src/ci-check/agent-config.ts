@@ -51,6 +51,10 @@ export function analyzeAgentConfig(path: string, content: string): CiFinding[] {
     const high = remoteExec || unpinned;
     findings.push({
       check: 'CI-1',
+      rule: 'CI-1.hook-remote-code',
+      // Identity is the command itself: the same hook keeps its identity when its
+      // severity changes (pinned → unpinned), and two different hooks stay distinct.
+      locator: cmd,
       dimension: 'toolRules',
       severity: high ? 'high' : 'medium',
       title: high
@@ -82,6 +86,9 @@ export function analyzeAgentConfig(path: string, content: string): CiFinding[] {
     const hasBackstop = deny.some((d) => /Bash|Write|Edit/.test(d));
     findings.push({
       check: 'CI-1',
+      rule: 'CI-1.broad-allow',
+      // File-level: one finding per config file. Adding a SECOND broad allow makes the
+      // same statement about the same file, so it must not read as a new finding.
       dimension: 'toolRules',
       severity: hasBackstop ? 'medium' : 'high',
       title: hasBackstop

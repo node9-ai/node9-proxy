@@ -17,6 +17,11 @@ export type Dimension = 'workflows' | 'toolRules' | 'mcp' | 'data' | 'files' | '
 export interface CiFinding {
   /** Which check produced it, e.g. 'CI-2'. */
   check: string;
+  /** Stable rule id, e.g. 'CI-3.mcp-unpinned'. Unlike `check` this is granular enough
+   *  to identify ONE finding kind, and unlike `title` it never changes with severity or
+   *  wording — so it is the half of the identity that survives a rewrite of the copy.
+   *  CI-5 diffing, suppression and any external report format key off this. */
+  rule: string;
   dimension: Dimension;
   severity: Severity;
   /** One-line headline naming the exposure, e.g.
@@ -32,6 +37,49 @@ export interface CiFinding {
   mitigations?: string[];
   /** The concrete fix. */
   fix: string;
+  /** What this finding points at WITHIN the file — an MCP server name, a hook command.
+   *  Empty for a file-level finding (one per file). Together with `rule` and `file` this
+   *  is the finding's identity across two scans. MUST be derived from repo content only:
+   *  a blob SHA, a PR number or a run id would break the identity on rebase and would not
+   *  port to a non-GitHub host. */
+  locator?: string;
+  /** Disambiguates two findings that are otherwise identical within one file (e.g. the
+   *  same hook command registered twice). 0 for the first occurrence; assigned by the
+   *  scan, never by a check. */
+  ordinal?: number;
+}
+
+/** How one finding relates to the base scan. `escalated` is a finding that already
+ *  existed and got WORSE — guardrail erosion, which is the thing CI-5 was designed to
+ *  catch and which neither `added` nor `unchanged` describes. */
+export type DiffStatus = 'added' | 'removed' | 'unchanged' | 'escalated';
+
+export interface EscalatedFinding {
+  finding: CiFinding;
+  from: Severity;
+  to: Severity;
+}
+
+/** Whether the base side of a diff is trustworthy. `incomplete` (the base scan ran but
+ *  could not read every file) and `did-not-run` are NOT the same as a clean base: both
+ *  make every unseen finding look introduced, so both degrade to the absolute answer. */
+export type BaseState = 'ok' | 'incomplete' | 'did-not-run';
+
+export interface ScanDiff {
+  base: BaseState;
+  added: CiFinding[];
+  removed: CiFinding[];
+  unchanged: CiFinding[];
+  escalated: EscalatedFinding[];
+  /** Worst severity this PR is answerable for — the gate input. Worst of `added` +
+   *  `escalated` when the base is trustworthy; the HEAD's absolute worst otherwise, so a
+   *  base that could not run can never be rendered as "nothing new". */
+  worstIntroduced: Severity | null;
+  /** True when EITHER side could not read every file. A severity cannot express "we did
+   *  not finish looking" — `worstIntroduced: null` on an incomplete scan is a statement
+   *  about what we read, not about the change — so the third state is carried separately
+   *  and no consumer may render an incomplete diff as a pass. */
+  incomplete: boolean;
 }
 
 /** A fetched agent-surface file. `content` is the raw text (never executed). */

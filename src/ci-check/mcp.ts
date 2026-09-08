@@ -40,6 +40,8 @@ export function analyzeMcpServers(
     if (/\bnpx\b/.test(argv) && (/@latest\b/.test(argv) || !/@\d/.test(argv))) {
       findings.push({
         check: 'CI-3',
+        rule: 'CI-3.mcp-unpinned',
+        locator: name,
         dimension: 'mcp',
         severity: 'medium',
         title: `MCP server "${name}" runs an unpinned executable`,
@@ -56,6 +58,8 @@ export function analyzeMcpServers(
       if (hit) {
         findings.push({
           check: 'CI-3',
+          rule: 'CI-3.mcp-inline-credential',
+          locator: `${name}.env.${k}`,
           dimension: 'mcp',
           severity: 'high',
           title: `MCP server "${name}" has an inline credential`,
