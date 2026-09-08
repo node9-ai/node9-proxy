@@ -75,10 +75,12 @@ describe('node9 egress (integration)', () => {
     fs.rmSync(home, { recursive: true, force: true });
   });
 
+  /** Every row goes through here, so the spawn-failure guard lives here once:
+   *  a silent ENOENT or timeout must never read as a passing assertion. */
   function run(args: string[]) {
     const baseEnv = { ...process.env };
     delete baseEnv.NODE9_API_KEY;
-    return spawnSync(process.execPath, [CLI, 'egress', ...args], {
+    const r = spawnSync(process.execPath, [CLI, 'egress', ...args], {
       encoding: 'utf-8',
       timeout: 60000,
       cwd: os.tmpdir(),
@@ -90,6 +92,9 @@ describe('node9 egress (integration)', () => {
         USERPROFILE: home,
       },
     });
+    expect(r.error, `spawn failed: ${r.error?.message}`).toBeUndefined();
+    expect(r.status, 'the CLI did not exit').not.toBeNull();
+    return r;
   }
   const readEgress = () =>
     JSON.parse(fs.readFileSync(path.join(home, '.node9', 'config.json'), 'utf8')).policy.egress;
@@ -186,9 +191,13 @@ describe('node9 egress (integration)', () => {
   });
 
   it('S5 strict rejects a value that is neither on nor off (exit 1)', () => {
+    // A pre-existing file, so "no file" cannot masquerade as "refused": the
+    // old form passed in a fresh HOME where the config never existed at all.
+    run(['watch']);
+    const before = fs.readFileSync(path.join(home, '.node9', 'config.json'), 'utf8');
     const r = run(['strict', 'maybe']);
     expect(r.status).toBe(1);
-    expect(readEgress, 'nothing written').toThrow();
+    expect(fs.readFileSync(path.join(home, '.node9', 'config.json'), 'utf8')).toBe(before);
   });
 
   it('S6 exempt adds an address to the exemption list and shows it', () => {
@@ -200,10 +209,28 @@ describe('node9 egress (integration)', () => {
   it('S7 exempt REFUSES a protected address, at the keystroke (exit 1)', () => {
     // The old behaviour dropped it silently at config-load time, so a user who
     // typed it believed the exemption existed.
+    run(['watch']);
+    const before = fs.readFileSync(path.join(home, '.node9', 'config.json'), 'utf8');
     const r = run(['exempt', '169.254.169.254']);
     expect(r.status).toBe(1);
     expect(r.stderr).toMatch(/cannot be exempted|protected/i);
-    expect(readEgress, 'nothing written').toThrow();
+    expect(fs.readFileSync(path.join(home, '.node9', 'config.json'), 'utf8')).toBe(before);
+  });
+
+  it('S7b a protected address already IN the file is dropped from the effective list', () => {
+    // The local call site of sanitizeSsrfAllow had no test at all: deleting it
+    // left every row green, and `node9 egress` then advertised a protected
+    // address as an exemption in force. The status block claims to print the
+    // EFFECTIVE list, so this is the row that makes the claim true.
+    const cfgPath = path.join(home, '.node9', 'config.json');
+    fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+    fs.writeFileSync(
+      cfgPath,
+      JSON.stringify({ policy: { egress: { ssrfAllow: ['169.254.169.254', '100.64.0.1'] } } })
+    );
+    const out = run([]).stdout;
+    expect(out).toMatch(/Exemptions:.*100\.64\.0\.1/);
+    expect(out, 'the protected one is not advertised').not.toMatch(/169\.254\.169\.254/);
   });
 
   it('S8 exempt rejects a non-address (exit 1)', () => {

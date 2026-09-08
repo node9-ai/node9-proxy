@@ -270,6 +270,32 @@ describe('node9 MCP server — egress control tools', () => {
     fs.rmSync(h, { recursive: true, force: true });
   });
 
+  it('node9_egress_status reports the strict tier OFF as off', () => {
+    // The row above only ever exercised the ON state, so hardcoding "on" in
+    // the handler stayed green and an agent would be told loopback and the
+    // private ranges are blocked while they are reachable.
+    const h = makeHome({
+      settings: { mode: 'standard' },
+      policy: { egress: { enabled: true, mode: 'review', ssrfStrict: false } },
+    });
+    const res = driveMcp(
+      [
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'node9_egress_status', arguments: {} },
+        },
+      ],
+      h,
+      h
+    );
+    const text = res[1]?.result?.content?.[0]?.text ?? '';
+    expect(text).toMatch(/internal addresses:\s*off/i);
+    expect(text).toMatch(/reachable/i);
+    fs.rmSync(h, { recursive: true, force: true });
+  });
+
   it('node9_egress_protect + node9_egress_deny (add-only) work over MCP without mcpAllowWeakening', () => {
     const h = makeHome({ settings: { mode: 'standard' } });
     const res = driveMcp(

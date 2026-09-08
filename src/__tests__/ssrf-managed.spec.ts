@@ -154,17 +154,32 @@ describe('M. managed control of the SSRF knobs', () => {
     expect(e.ssrfStrict).toBe(true);
   });
 
-  it('M7 KEYED: a workspace that sets neither must not blank them', async () => {
+  it('M7 KEYED: a workspace that sets neither leaves the DEFAULTS, not the local values', async () => {
+    // The old M7 could not fail: it asserted `typeof … === 'boolean'` and
+    // `Array.isArray`, both guaranteed by the merge's own initialisation for
+    // every input on every path, and its title claimed the local values
+    // survive. They do not: a keyed machine drops the whole local policy layer
+    // (config/index.ts, `if (keyed && !isCloud) return`), so what a workspace
+    // does not set falls back to the shipped default.
     const e = await load({
       keyed: true,
       local: { ssrfStrict: true, ssrfAllow: ['100.64.0.9'] },
       managed: { mode: 'block' },
     });
-    // Keyed means the workspace governs, so a local value the workspace does not
-    // mention is NOT resurrected; what matters is that the merge does not crash
-    // or invent a value. Pin whatever it is, so a change is visible.
-    expect(typeof e.ssrfStrict).toBe('boolean');
-    expect(Array.isArray(e.ssrfAllow)).toBe(true);
+    expect(e.ssrfStrict, 'the shipped default, not the local true').toBe(false);
+    expect(e.ssrfAllow, 'the shipped default, not the local list').toEqual([]);
+  });
+
+  it('M7b KEYED: junk in a hand-edited cache is rejected per field', async () => {
+    // The keyed branch has its own type validation, and M9 only exercised the
+    // unkeyed one: dropping the keyed guard stayed green because managed.ts
+    // re-guards the same field one layer down.
+    const e = await load({
+      keyed: true,
+      managed: { ssrfStrict: 'yes', ssrfAllow: [1, {}] } as never,
+    });
+    expect(e.ssrfStrict).toBe(false);
+    expect(e.ssrfAllow).toEqual([]);
   });
 
   it('M8 the org CANNOT exempt a tier-1 address, on either path', async () => {
