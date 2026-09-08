@@ -18,7 +18,6 @@ import {
   setEgress,
   addEgressHost,
   addSsrfExemption,
-  isValidEgressHost,
   normalizeEgressHost,
 } from '../../auth/egress-config';
 
@@ -231,10 +230,17 @@ export function registerEgressCommand(program: Command): void {
     .description('Let ONE address through the floor (exact address, not a range)')
     .action((address: string) => {
       const a = normalizeEgressHost(address);
-      // An exemption names an address or a host the floor can classify. Reject
-      // anything that is neither, rather than writing a line that can never match.
-      if (!normalizeIpLiteral(a) && !isValidEgressHost(a)) {
-        console.error(chalk.red(`\n  ✗ "${address}" is not an address or a hostname.\n`));
+      // An exemption is compared against a NORMALIZED IP LITERAL, so only an
+      // address can ever match: an FQDN entry is written dead. The first
+      // version accepted one and printed a note, which also put this command
+      // at odds with the dashboard editor, where it is refused.
+      if (!normalizeIpLiteral(a)) {
+        console.error(
+          chalk.red(`\n  ✗ "${address}" is not an address.`) +
+            chalk.gray(
+              '\n    Exemptions are matched as one exact address, not a name or a range.\n'
+            )
+        );
         process.exitCode = 1;
         return;
       }

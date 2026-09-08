@@ -238,6 +238,16 @@ describe('node9 egress (integration)', () => {
     expect(r.status).toBe(1);
   });
 
+  it('S8b exempt rejects a HOSTNAME: the engine matches addresses only', () => {
+    // Found by the post-fix verification pass, not by the review: this command
+    // accepted an FQDN and printed a note, while the dashboard refused it. The
+    // engine compares an exemption against a normalized IP literal, so a
+    // hostname entry can never match anything and is written dead.
+    const r = run(['exempt', 'tailscale.example.com']);
+    expect(r.status, r.stdout).toBe(1);
+    expect(r.stderr).toMatch(/address/i);
+  });
+
   it('S9 status says WHO governs the strict tier', () => {
     run(['strict', 'on']);
     const r = run([]);
