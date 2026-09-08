@@ -164,6 +164,16 @@ export function appendLocalAudit(
      *  (e.g. "SSN,Credit Card"). The raw args are hashed on PII rows, so
      *  this is the only signal carried; the value itself is never logged. */
     piiPatterns?: string;
+    /** Canary (decoy credential) attribution: registry id, sha256 of the value,
+     *  kind, plant path, the view that matched, and whether the value was
+     *  retired. The value itself never reaches a row (design canary-design.md
+     *  4.2; the DLP-2 lesson applied before the bug exists). */
+    canaryId?: string;
+    canaryHash?: string;
+    canaryKind?: string;
+    canaryPath?: string;
+    canaryView?: string;
+    canaryRetired?: boolean;
     /** SaaS request id when this decision had a pending cloud entry
      *  (/intercept). The BE already holds an origin AuditLog row for that
      *  request; the shipper hands this id over so the BE ENRICHES that row
@@ -196,9 +206,19 @@ export function appendLocalAudit(
   // ruleName is checked too (inline-ask v2): an 'inline-review' outcome row
   // carries the review label as ruleName — a DLP/taint-flagged review means
   // the args may contain the very credential that triggered it.
+  //
+  // PII rows are the same case and were missed (DLP-2): the PII gate emits
+  // checkedBy 'pii-block' / 'observe-mode-pii-would-block' with
+  // meta.piiPatterns, neither of which matched below, so the SSN / card
+  // landed in argsPreview and the shipper forwarded it. Both a checkedBy
+  // substring and the meta flag are checked, combined by strictness, so a
+  // renamed checkedBy or a caller that forgets the meta is still covered.
   const isDlpRow =
     checkedBy.toLowerCase().includes('dlp') ||
+    checkedBy.toLowerCase().includes('pii') ||
     Boolean(meta?.dlpPattern) ||
+    Boolean(meta?.piiPatterns) ||
+    Boolean(meta?.canaryId) ||
     /dlp|taint/i.test(String(meta?.ruleName ?? ''));
   const preview = auditHashArgsEnabled && !isDlpRow ? buildArgsPreview(args) : undefined;
   const argsField = auditHashArgsEnabled
@@ -210,6 +230,16 @@ export function appendLocalAudit(
   const agentToolNameField = meta?.agentToolName ? { agentToolName: meta.agentToolName } : {};
   const dlpFields = meta?.dlpPattern
     ? { dlpPattern: meta.dlpPattern, dlpSample: meta.dlpSample }
+    : {};
+  const canaryFields = meta?.canaryId
+    ? {
+        canaryId: meta.canaryId,
+        ...(meta.canaryHash && { canaryHash: meta.canaryHash }),
+        ...(meta.canaryKind && { canaryKind: meta.canaryKind }),
+        ...(meta.canaryPath && { canaryPath: meta.canaryPath }),
+        ...(meta.canaryView && { canaryView: meta.canaryView }),
+        ...(meta.canaryRetired && { canaryRetired: true }),
+      }
     : {};
   const cloudLinkField = meta?.cloudRequestId ? { cloudRequestId: meta.cloudRequestId } : {};
   // Context fields — where the action ran. platform is always known;
@@ -247,6 +277,7 @@ export function appendLocalAudit(
     checkedBy,
     ...ruleNameField,
     ...dlpFields,
+    ...canaryFields,
     ...cloudLinkField,
     ...workingDirField,
     ...shellTypeField,

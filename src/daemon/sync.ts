@@ -26,7 +26,7 @@ import {
   type ScanFinding,
   type ScanSignals,
 } from '@node9/policy-engine';
-import { tickScanWatcher, markUploadComplete, tickForensicBroadcast } from './scan-watermark.js';
+import { tickScanWatcher, commitTotalsUpload, tickForensicBroadcast } from './scan-watermark.js';
 import { broadcastForensic } from './state.js';
 import { appendToLog, HOOK_DEBUG_LOG } from '../audit/index.js';
 import { getMachineId } from '../machine-id.js';
@@ -168,6 +168,8 @@ export interface ManagedConfigCache {
     allow?: string[];
     deny?: string[];
     allowPrivate?: boolean;
+    ssrfStrict?: boolean;
+    ssrfAllow?: string[];
   };
   dlp?: { enabled?: boolean; pii?: string; reviewAction?: string };
   commandChecks?: Record<string, string>;
@@ -205,6 +207,8 @@ interface CloudPolicyBody {
       allow?: unknown;
       deny?: unknown;
       allowPrivate?: unknown;
+      ssrfStrict?: unknown;
+      ssrfAllow?: unknown;
     };
     dlp?: { enabled?: unknown; pii?: unknown; reviewAction?: unknown };
     commandChecks?: Record<string, unknown>;
@@ -546,7 +550,8 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
   };
   if (typeof mc.mode === 'string') out.mode = mc.mode;
   // M2b + Step 2: egress.enabled (bool) + mode (string) + allow/deny (string[])
-  // + allowPrivate (bool).
+  // + allowPrivate (bool) + the SSRF floor knobs (ssrfStrict bool, ssrfAllow
+  // string[]).
   if (mc.egress && typeof mc.egress === 'object') {
     const e: ManagedConfigCache['egress'] = {};
     if (typeof mc.egress.enabled === 'boolean') e.enabled = mc.egress.enabled;
@@ -560,12 +565,26 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
     if (typeof mc.egress.allowPrivate === 'boolean') {
       e.allowPrivate = mc.egress.allowPrivate;
     }
+    // SSRF floor knobs. Dropping them here would kill the dashboard control
+    // one seam before the merge that honours it.
+    if (typeof mc.egress.ssrfStrict === 'boolean') {
+      e.ssrfStrict = mc.egress.ssrfStrict;
+    }
+    // An EMPTY list must survive this seam: it is the org revoking every
+    // exemption, and dropping it made "cleared in the dashboard"
+    // indistinguishable from "never set", which left the hole open forever.
+    // Absent stays absent, so silence is still silence.
+    if (mc.egress.ssrfAllow !== undefined) {
+      e.ssrfAllow = cleanHosts(mc.egress.ssrfAllow);
+    }
     if (
       e.enabled !== undefined ||
       e.mode !== undefined ||
       e.allow !== undefined ||
       e.deny !== undefined ||
-      e.allowPrivate !== undefined
+      e.allowPrivate !== undefined ||
+      e.ssrfStrict !== undefined ||
+      e.ssrfAllow !== undefined
     ) {
       out.egress = e;
     }
@@ -996,6 +1015,12 @@ export async function pushScanSnapshot(creds: { apiKey: string; apiUrl: string }
     // Skip the network round-trip when there's nothing new to report —
     // empty summaries waste an API call and inflate the SaaS rate limit.
     if (tick.findings.length === 0 && tick.totalToolCalls === 0) {
+      // An empty totals tick (every JSONL is empty) has nothing to send
+      // but must still commit, or the reset flag never clears and every
+      // subsequent tick re-runs the reset.
+      if (tick.uploadAs === 'totals' && tick.pendingWatermark) {
+        commitTotalsUpload(tick.pendingWatermark);
+      }
       return;
     }
     const summary = summarizeScan(tick.findings, {
@@ -1059,12 +1084,15 @@ export async function pushScanSnapshot(creds: { apiKey: string; apiUrl: string }
       req.end();
     });
 
-    // Clear the one-shot post-reset flag only after the overwrite POST
-    // landed. If the network failed, a future tick re-tries with
-    // sessionTotals — safe because the BE upsert is idempotent on the
-    // overwrite path.
-    if (posted && tick.uploadAs === 'totals') {
-      markUploadComplete();
+    // Commit the totals tick only after the overwrite POST landed. Until
+    // then the watermark on disk is untouched and still names the OLD
+    // extractor version, so a failed POST (non-2xx, socket error, timeout)
+    // or a crash in this window makes the next tick re-run the full
+    // re-scan and resend complete totals. The BE overwrite is idempotent
+    // only when the retry payload equals the original; deferring the
+    // commit is what makes that true.
+    if (posted && tick.uploadAs === 'totals' && tick.pendingWatermark) {
+      commitTotalsUpload(tick.pendingWatermark);
     }
   } catch {
     // Silent — never break sync over a scan push.

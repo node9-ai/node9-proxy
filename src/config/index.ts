@@ -25,12 +25,38 @@ import { normalizeHost } from '../auth/trusted-hosts';
 // Re-exported here so existing import paths (`from '../config'`) keep
 // working unchanged across the codebase. The local `import type` lets
 // the rest of this file reference SmartRule by bare name.
+
 export type { SmartCondition, SmartRule } from '@node9/policy-engine';
 import type { SmartRule } from '@node9/policy-engine';
+import { classifySsrf } from '@node9/policy-engine';
 // The trusted shield catalog. A cloud-mandated shield resolves its body from
 // here directly, never a user ~/.node9/shields/<name>.json that shadows the
 // builtin (B1: a mandate's rules must come from the fleet, not the dev's file).
 import { BUILTIN_SHIELDS } from '@node9/policy-engine';
+
+/**
+ * A tier-1 address has no allow path, for ANY layer: not the local file, not a
+ * repository, and not the dashboard. An org admin can widen most things, but
+ * exempting the cloud metadata endpoint is the one thing the floor exists to
+ * stop, so the same filter runs on the managed values too.
+ *
+ * Never throws: getConfig runs on every hook call, and a config error that
+ * breaks every tool call is worse than the misconfiguration it reports.
+ */
+export function sanitizeSsrfAllow(entries: string[], source: string): string[] {
+  const kept: string[] = [];
+  for (const entry of entries) {
+    const m = classifySsrf(entry);
+    if (m && !m.overridable) {
+      process.emitWarning(
+        `[node9] ${source} ssrfAllow entry "${entry}" is a protected address (${m.tier}) and cannot be exempted; ignoring it.`
+      );
+      continue;
+    }
+    kept.push(entry);
+  }
+  return kept;
+}
 
 export interface EnvironmentConfig {
   requireApproval?: boolean;
@@ -134,6 +160,8 @@ export interface Config {
       allow: string[];
       deny: string[];
       allowPrivate: boolean;
+      ssrfAllow?: string[];
+      ssrfStrict?: boolean;
     };
     loopDetection: {
       enabled: boolean;
@@ -176,6 +204,13 @@ export interface Config {
   /** PR-2: 'workspace' = keyed (policy from the cloud); 'local' = the
    *  local stack (unkeyed, --local, named profiles). */
   policySource: 'workspace' | 'local';
+  /** Which LAYER actually set the SSRF strict tier, as opposed to which layer
+   *  governs policy in general. `node9 egress` prints this, and printing
+   *  policySource there was a lie in both directions: a keyed machine whose
+   *  workspace never mentioned the field showed the shipped default as a
+   *  workspace decision, and an org-managed unkeyed machine showed an org
+   *  decision as a local one. */
+  ssrfStrictSource: 'workspace' | 'local' | 'default';
 }
 
 // Default Enterprise Posture
@@ -207,6 +242,7 @@ export const DANGEROUS_WORDS = [
 export const DEFAULT_CONFIG: Config = {
   version: '1.0',
   policySource: 'local',
+  ssrfStrictSource: 'default',
   settings: {
     mode: 'standard',
     autoStartDaemon: true,
@@ -398,7 +434,17 @@ export const DEFAULT_CONFIG: Config = {
       },
     ],
     dlp: { enabled: true, scanIgnoredTools: true, pii: 'off' },
-    egress: { enabled: false, mode: 'review', allow: [], deny: [], allowPrivate: true },
+    egress: {
+      enabled: false,
+      mode: 'review',
+      allow: [],
+      deny: [],
+      allowPrivate: true,
+      // The SSRF floor is always on and needs no default; these two only
+      // widen or narrow it. See doc/roadmap/active/ssrf-floor-design.md.
+      ssrfAllow: [],
+      ssrfStrict: false,
+    },
     loopDetection: { enabled: true, threshold: 5, windowSeconds: 120 },
     injectionScan: { enabled: false, minConfidence: 'medium', allow: [] },
     skillPinning: { enabled: false, mode: 'warn', roots: [] },
@@ -752,6 +798,7 @@ export function getConfig(cwd?: string): Config {
       ...DEFAULT_CONFIG.policy.egress,
       allow: [...DEFAULT_CONFIG.policy.egress.allow],
       deny: [...DEFAULT_CONFIG.policy.egress.deny],
+      ssrfAllow: [...(DEFAULT_CONFIG.policy.egress.ssrfAllow ?? [])],
     },
     loopDetection: { ...DEFAULT_CONFIG.policy.loopDetection },
     injectionScan: {
@@ -788,6 +835,8 @@ export function getConfig(cwd?: string): Config {
   // --local`, named profiles) keep the local promise and stay unkeyed here.
   const pr2Creds = getCredentials();
   const keyed = !!pr2Creds?.apiKey && pr2Creds.localOnly !== true;
+  // Provenance for the one field a status screen attributes out loud.
+  let ssrfStrictSource: Config['ssrfStrictSource'] = 'default';
 
   const applyLayer = (
     source: Record<string, unknown> | null,
@@ -932,6 +981,19 @@ export function getConfig(cwd?: string): Config {
       if (Array.isArray(e.deny)) mergedPolicy.egress.deny.push(...e.deny);
       if (e.allowPrivate !== undefined && !(isProject && e.allowPrivate === true))
         mergedPolicy.egress.allowPrivate = e.allowPrivate;
+      // SSRF floor knobs. A repository layer may NOT touch either: ssrfAllow
+      // widens an exemption list and ssrfStrict:false would disable tier 3, so
+      // a checked-out repo could weaken the floor. Outer layers REPLACE rather
+      // than append, consistent with the ONE-config direction.
+      if (!isProject) {
+        if (Array.isArray(e.ssrfAllow)) {
+          mergedPolicy.egress.ssrfAllow = sanitizeSsrfAllow(e.ssrfAllow, 'egress.');
+        }
+        if (e.ssrfStrict !== undefined) {
+          mergedPolicy.egress.ssrfStrict = e.ssrfStrict;
+          ssrfStrictSource = 'local';
+        }
+      }
     }
     if (p.loopDetection) {
       const ld = p.loopDetection as Partial<Config['policy']['loopDetection']>;
@@ -1074,6 +1136,8 @@ export function getConfig(cwd?: string): Config {
             allow?: unknown;
             deny?: unknown;
             allowPrivate?: unknown;
+            ssrfStrict?: unknown;
+            ssrfAllow?: unknown;
           };
           dlp?: { enabled?: unknown; pii?: unknown; reviewAction?: unknown };
           commandChecks?: Record<string, unknown>;
@@ -1145,6 +1209,15 @@ export function getConfig(cwd?: string): Config {
             if (deny) mergedPolicy.egress.deny = deny;
             if (typeof e.allowPrivate === 'boolean')
               mergedPolicy.egress.allowPrivate = e.allowPrivate;
+            // Keyed = the workspace value IS the value; no ratchet, no locks.
+            // Still type-validated, because the cache file can be hand-edited.
+            if (typeof e.ssrfStrict === 'boolean') {
+              mergedPolicy.egress.ssrfStrict = e.ssrfStrict;
+              ssrfStrictSource = 'workspace';
+            }
+            const ssrfAllow = hosts(e.ssrfAllow);
+            if (ssrfAllow)
+              mergedPolicy.egress.ssrfAllow = sanitizeSsrfAllow(ssrfAllow, 'managed egress.');
           } else {
             mergedPolicy.egress = applyManagedEgress(
               mergedPolicy.egress,
@@ -1155,6 +1228,15 @@ export function getConfig(cwd?: string): Config {
                 deny: hosts(mc.egress.deny),
                 allowPrivate:
                   typeof mc.egress.allowPrivate === 'boolean' ? mc.egress.allowPrivate : undefined,
+                ssrfStrict: (() => {
+                  if (typeof mc.egress.ssrfStrict !== 'boolean') return undefined;
+                  ssrfStrictSource = 'workspace';
+                  return mc.egress.ssrfStrict;
+                })(),
+                ssrfAllow: (() => {
+                  const list = hosts(mc.egress.ssrfAllow);
+                  return list ? sanitizeSsrfAllow(list, 'managed egress.') : undefined;
+                })(),
               },
               locked,
               egressModeUserSet
@@ -1665,6 +1747,12 @@ export function getConfig(cwd?: string): Config {
   mergedPolicy.ignoredTools = [...new Set(mergedPolicy.ignoredTools)];
   mergedPolicy.skillPinning.roots = [...new Set(mergedPolicy.skillPinning.roots)];
 
+  // A keyed machine drops the local policy layers wholesale, so a 'local'
+  // provenance recorded before the fork cannot survive into the result. The
+  // widened local resets the narrowing TS infers across the closure above.
+  const resolvedSsrfStrictSource: Config['ssrfStrictSource'] =
+    keyed && (ssrfStrictSource as string) === 'local' ? 'default' : ssrfStrictSource;
+
   const result: Config = {
     settings: mergedSettings,
     policy: mergedPolicy,
@@ -1673,6 +1761,9 @@ export function getConfig(cwd?: string): Config {
     // modes this machine is in. 'workspace' = keyed, policy from the cloud;
     // 'local' = the local stack (incl. --local / named-profile keys).
     policySource: keyed ? 'workspace' : 'local',
+    // A keyed machine drops the local policy layers wholesale, so a 'local'
+    // provenance recorded before the fork cannot survive into the result.
+    ssrfStrictSource: resolvedSsrfStrictSource,
   };
 
   // Only populate the cache when using the ambient cwd — explicit cwd calls are

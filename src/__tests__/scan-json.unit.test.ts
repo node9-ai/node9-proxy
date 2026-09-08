@@ -22,6 +22,7 @@ function emptyScan(overrides: Partial<ScanResult> = {}): ScanResult {
     bashCalls: 0,
     findings: [],
     dlpFindings: [],
+    canaryFindings: [],
     loopFindings: [],
     totalCostUSD: 0,
     firstDate: null,
@@ -42,10 +43,11 @@ function emptySummary(overrides: Partial<ScanSummary> = {}): ScanSummary {
       firstDate: null,
       lastDate: null,
     },
-    byVerdict: { blocked: 0, supervised: 0, leaks: 0, loops: 0 },
+    byVerdict: { blocked: 0, supervised: 0, leaks: 0, canaries: 0, loops: 0 },
     byAgent: [],
     sections: [],
     leaks: [],
+    canaries: [],
     loops: [],
     loopWastedUSD: 0,
     loopWaste: { usd: 0, pricedIterations: 0, unpricedIterations: 0 },
@@ -115,7 +117,7 @@ describe('buildScanJson', () => {
     const out = buildScanJson({
       scan: emptyScan(),
       summary: emptySummary({
-        byVerdict: { blocked: 8, supervised: 56, leaks: 4, loops: 290 },
+        byVerdict: { blocked: 8, supervised: 56, leaks: 4, canaries: 0, loops: 290 },
       }),
       blast: blastWith(25, {
         reachable: [
@@ -131,6 +133,7 @@ describe('buildScanJson', () => {
       blocked: 8,
       review: 56,
       leaks: 4,
+      canaries: 0,
       loops: 290,
       blastExposures: 3, // 2 reachable + 1 envFinding
     });
@@ -139,7 +142,7 @@ describe('buildScanJson', () => {
 
   it('embeds the supplied summary verbatim (no field rewrite)', () => {
     const summary = emptySummary({
-      byVerdict: { blocked: 1, supervised: 2, leaks: 3, loops: 4 },
+      byVerdict: { blocked: 1, supervised: 2, leaks: 3, canaries: 0, loops: 4 },
       loopWastedUSD: 0.5,
       loopWaste: { usd: 0.5, pricedIterations: 1, unpricedIterations: 0 },
     });

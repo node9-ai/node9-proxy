@@ -24,6 +24,7 @@ const emptyScan: ScanResult = {
   bashCalls: 0,
   findings: [],
   dlpFindings: [],
+  canaryFindings: [],
   loopFindings: [],
   totalCostUSD: 0,
   firstDate: null,

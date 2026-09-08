@@ -170,15 +170,34 @@ describe('agent-wiring registry', () => {
   });
 
   // ── Multi-hook (workstream A) ────────────────────────────────────────────
-  it('reports each hook event independently (pre wired, post not)', () => {
+  it('S2 reports each hook event independently (pre wired, post not, prompt absent)', () => {
     const noNode9 = { matcher: '*', hooks: [{ command: 'other-tool' }] };
     writeJson('.claude/settings.json', {
       hooks: { PreToolUse: [matcher], PostToolUse: [noNode9] },
     });
     const claude = getAgentWiring(home).find((a) => a.id === 'claude');
+    // The spec must list UserPromptSubmit for Claude: setup.ts has written that
+    // hook since prompt DLP shipped, but the spec did not name it, so status and
+    // doctor never showed the row and could not report it missing.
     expect(claude?.hooks).toEqual([
       { label: 'PreToolUse  (node9 check)', wired: true }, // status-aligned label
       { label: 'PostToolUse (node9 log)', wired: false },
+      { label: 'UserPromptSubmit (node9 check)', wired: false },
+    ]);
+    expect(claude?.hooks?.[0]?.wired).toBe(true); // known-true: primary row unchanged
+    expect(claude?.isProtected).toBe(true);
+  });
+
+  it('S1 all three Claude hooks report wired when settings.json carries them', () => {
+    const logMatcher = { matcher: '*', hooks: [{ command: 'node9 log' }] };
+    writeJson('.claude/settings.json', {
+      hooks: { PreToolUse: [matcher], PostToolUse: [logMatcher], UserPromptSubmit: [matcher] },
+    });
+    const claude = getAgentWiring(home).find((a) => a.id === 'claude');
+    expect(claude?.hooks).toEqual([
+      { label: 'PreToolUse  (node9 check)', wired: true },
+      { label: 'PostToolUse (node9 log)', wired: true },
+      { label: 'UserPromptSubmit (node9 check)', wired: true },
     ]);
     expect(claude?.isProtected).toBe(true);
   });

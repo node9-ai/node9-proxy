@@ -19,6 +19,14 @@ export interface EgressPolicy {
   deny: string[];
   /** Auto-allow localhost / RFC1918 / *.local. Default true. */
   allowPrivate: boolean;
+  /** SSRF floor: exempts OVERRIDABLE tiers only (carrier-grade NAT, and
+   *  loopback/RFC1918 when ssrfStrict is on). A tier-1 entry is ignored here
+   *  and rejected at config load with a reason. */
+  ssrfAllow?: readonly string[];
+  /** SSRF floor tier 3: also block loopback and RFC1918. Off by default,
+   *  because a developer talks to those constantly (72 of 308 destinations on
+   *  measured real history). */
+  ssrfStrict?: boolean;
 }
 
 export interface EgressVerdict {
@@ -110,7 +118,10 @@ export function evaluateEgress(
         reason: `Egress to ${d.host} is on the deny list.`,
       };
     }
-    // Private / loopback — never an exfil target when allowPrivate is on.
+    // Private / loopback: allowed when the operator opts in. This is NOT a
+    // judgement that they are safe destinations. Link-local, multicast and the
+    // cloud metadata endpoints are handled BEFORE this by the SSRF floor
+    // (egress/ssrf.ts), which allowPrivate cannot reach.
     if (policy.allowPrivate && isPrivateHost(d.host)) continue;
     // Known-good (user allowlist or the curated defaults).
     if (matchesAny(d.host, policy.allow) || matchesAny(d.host, DEFAULT_EGRESS_ALLOWLIST)) continue;

@@ -21,6 +21,7 @@ function emptyResult(): ScanResult {
     bashCalls: 0,
     findings: [],
     dlpFindings: [],
+    canaryFindings: [],
     loopFindings: [],
     totalCostUSD: 0,
     firstDate: null,
@@ -92,6 +93,7 @@ describe('filterScanByPeriod', () => {
           agent: 'claude',
         },
       ],
+      canaryFindings: [],
     };
     const out = filterScanByPeriod(readyCache({ claude }), '7d', NOW);
     expect(out.leaks).toHaveLength(1);
@@ -112,6 +114,7 @@ describe('filterScanByPeriod', () => {
           agent: 'claude',
         },
       ],
+      canaryFindings: [],
     };
     const out = filterScanByPeriod(readyCache({ claude }), '7d', NOW);
     expect(out.leaks).toHaveLength(0);
@@ -168,6 +171,7 @@ describe('filterScanByPeriod', () => {
           agent: 'claude',
         },
       ],
+      canaryFindings: [],
     };
     const out = filterScanByPeriod(readyCache({ claude }), '7d', NOW);
     expect(out.leaksByType).toEqual([
@@ -318,6 +322,7 @@ describe('filterScanByPeriod', () => {
           agent: 'claude',
         },
       ],
+      canaryFindings: [],
     };
     const gemini: ScanResult = {
       ...emptyResult(),
@@ -334,6 +339,7 @@ describe('filterScanByPeriod', () => {
           agent: 'gemini',
         },
       ],
+      canaryFindings: [],
     };
     const codex: ScanResult = {
       ...emptyResult(),
@@ -350,6 +356,7 @@ describe('filterScanByPeriod', () => {
           agent: 'codex',
         },
       ],
+      canaryFindings: [],
     };
     const out = filterScanByPeriod(readyCache({ claude, gemini, codex }), '7d', NOW);
     expect(out.totalToolCalls).toBe(175);

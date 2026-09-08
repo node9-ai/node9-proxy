@@ -1009,6 +1009,10 @@ function dimensionOfBlock(
   ruleName: string
 ): 'network' | 'data' | 'detection' | 'files' | 'apps' | 'toolRules' | 'approvals' | null {
   if (checkedBy.includes('egress')) return 'network';
+  // SSRF floor blocks route through the policy path, so checkedBy is
+  // smart-rule-block; the ruleName is what identifies them. Mirrors the rule
+  // added to node9Firewall canon-taxonomy.ts.
+  if (ruleName.startsWith('ssrf:')) return 'network';
   if (checkedBy.includes('pii') || checkedBy.includes('dlp')) return 'data';
   // Report v3 canon: loops/pin/injection report under Detection (where the
   // user configures them), NOT Tool Rules. Mirrors node9Firewall canon-taxonomy.ts.

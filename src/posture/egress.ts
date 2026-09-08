@@ -14,6 +14,15 @@ interface EgressConfig {
   mode: 'off' | 'review' | 'block';
 }
 
+/** The egress state plus the SSRF floor knobs, for the floor row. */
+export interface FloorConfig extends EgressConfig {
+  ssrfStrict: boolean;
+  ssrfAllow: string[];
+  /** Which layer governs policy here. The remediation line depends on it: the
+   *  CLI command is refused on a workspace-governed machine. */
+  policySource: 'workspace' | 'local';
+}
+
 /**
  * True when running INSIDE a node9 sandbox whose kernel egress wall is active.
  * The entrypoint writes the resolved allowlist to ALLOWED_DOMAINS_PATH before
@@ -86,6 +95,10 @@ export function evaluateEgressConfig(egress: EgressConfig): Finding {
     category: 'Egress',
     severity: 'high',
     title: 'Egress is open',
+    // Not "apart from the protected addresses node9 blocks on every machine":
+    // this row has no coverage probe, so it renders on a machine where node9
+    // is not in-path and blocks nothing, four lines from the Coverage row that
+    // says exactly that.
     what: 'Your agent can connect to any server on the internet.',
     why: "node9 isn't restricting where its network tools (curl, wget, ssh) can reach.",
     who: 'If the agent is ever tricked, nothing stops it sending your data out.',
@@ -94,6 +107,67 @@ export function evaluateEgressConfig(egress: EgressConfig): Finding {
     fix: 'Fix it now: run `node9 egress watch` (or `node9 egress lock` to hard-block).',
     coverageProbe: { kind: 'egress' },
   };
+}
+
+/**
+ * The SSRF floor, as a posture row. It is the one protection that holds on
+ * every machine whatever the config says, so it belongs in the report as a
+ * WIN, stated in terms of the attack it closes rather than the mechanism.
+ *
+ * Deliberately NOT a gap row when the strict tier is off. Loopback and the
+ * private ranges carry ordinary, wanted development traffic; flagging that on
+ * every machine would be over-reporting, and the report is judged on not doing
+ * it. The strict tier is mentioned inside this row instead, as a detail line.
+ */
+export function checkEgressFloor(egress: FloorConfig): Finding[] {
+  // detail[0] is read by the covered-row renderer as the OBJECT of the
+  // sentence "<via> is blocking <detail[0]>", so it has to be a noun phrase.
+  // Written as a standalone sentence it rendered as
+  // "ssrf floor is blocking Strict tier off: loopback…".
+  const detail = [
+    'the cloud instance-metadata endpoint',
+    'link-local, multicast, unspecified and CGNAT (100.64/10) addresses',
+    egress.ssrfStrict
+      ? 'the strict tier is on: loopback and the private ranges are blocked too'
+      : `the strict tier is off: loopback and the private ranges stay reachable (${
+          egress.policySource === 'workspace'
+            ? 'turn it on in the dashboard, Enforcement → Network'
+            : '`node9 egress strict on`'
+        })`,
+  ];
+  if (egress.ssrfAllow.length) {
+    detail.push(`you exempted: ${egress.ssrfAllow.join(', ')}`);
+  }
+  // Named as a limit, not buried: a reader who takes this row as machine-wide
+  // protection is the failure this row exists to avoid.
+  detail.push('not covered: WebFetch and MCP fetch tools reach a URL without this gate');
+  return [
+    {
+      category: 'Egress',
+      severity: 'advisory',
+      title: 'The cloud metadata endpoint is blocked in shell commands',
+      what:
+        'node9 blocks it before any egress policy is consulted, and no setting releases it. ' +
+        'It sees shell commands (curl, wget, ssh); a tool that fetches a URL itself does not ' +
+        'pass this gate.',
+      why: "One request to that address returns this machine's cloud credentials, to anyone who can make the agent send it.",
+      who: 'An agent talked into fetching that address hands over the keys and cannot, here.',
+      owner: 'node9',
+      detail,
+      // Probed at the REAL gate rather than asserted here. The floor lives in
+      // evaluatePolicy, which only runs when node9 is in-path, so a machine
+      // with no hooks wired must NOT see this row under "node9 is enforcing
+      // these" — it did, next to "node9 is not in-path for any agent".
+      // coverageFromVerdict returns open when not enforcing, and
+      // redundantWhenOpen then drops the row, because Coverage already
+      // reports the wiring gap and this row would only repeat it.
+      coverageProbe: {
+        kind: 'command',
+        command: 'curl http://169.254.169.254/latest/meta-data/',
+      },
+      redundantWhenOpen: true,
+    },
+  ];
 }
 
 export function checkEgress(ctx: CheckContext): Finding[] {
@@ -119,5 +193,14 @@ export function checkEgress(ctx: CheckContext): Finding[] {
 
   const config = getConfig(ctx.cwd);
   const egress = config.policy.egress;
-  return [evaluateEgressConfig({ enabled: egress.enabled, mode: egress.mode })];
+  return [
+    evaluateEgressConfig({ enabled: egress.enabled, mode: egress.mode }),
+    ...checkEgressFloor({
+      enabled: egress.enabled,
+      mode: egress.mode,
+      ssrfStrict: egress.ssrfStrict === true,
+      ssrfAllow: egress.ssrfAllow ?? [],
+      policySource: config.policySource,
+    }),
+  ];
 }

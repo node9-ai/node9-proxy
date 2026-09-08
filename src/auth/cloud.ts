@@ -25,6 +25,11 @@ const DLP_PATTERN_MAX_LEN = 100;
 const KNOWN_CHECKED_BY = new Set([
   'dlp-block',
   'observe-mode-dlp-would-block',
+  // Decoy credentials (canary): a planted value appeared in tool args, a
+  // prompt, or (response variant) an assistant reply. See canary-design.md H1.
+  'dlp-canary-block',
+  'observe-mode-dlp-canary-would-block',
+  'dlp-canary-response',
   'dlp-review-flagged',
   'loop-detected',
   'audit-mode',

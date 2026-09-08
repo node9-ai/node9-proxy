@@ -61,6 +61,10 @@ import { registerPostureCommand } from './cli/commands/posture';
 import { registerScanRepoCommand } from './cli/commands/scan-repo';
 import { registerEgressCommand } from './cli/commands/egress';
 import { registerJailCommand } from './cli/commands/jail';
+import { registerCanaryCommand } from './cli/commands/canary';
+import { removeKind } from './canary/plant';
+import { ALL_KINDS } from './canary/sites';
+import { uninstallDaemonService } from './daemon/index';
 import { registerSandboxCommand } from './cli/commands/sandbox';
 import { registerSessionsCommand } from './cli/commands/sessions';
 import { registerSessionTaintCommand } from './cli/commands/session-taint';
@@ -369,6 +373,23 @@ program
       console.log(chalk.blue('  ℹ️  Daemon was not running'));
     }
 
+    // 1b. Remove the auto-start service. stopDaemon above kills the RUNNING
+    //     process; the launchd plist / systemd unit is what starts it again at
+    //     next login, and it was never on the teardown list. On macOS that
+    //     leaves launchd trying to run a binary the user may have just
+    //     npm-uninstalled. uninstallDaemonService is a no-op when nothing is
+    //     installed.
+    try {
+      uninstallDaemonService();
+      console.log(chalk.green('  ✅ Auto-start service removed'));
+    } catch (err) {
+      console.error(
+        chalk.yellow(
+          `  ⚠️  Could not remove the auto-start service: ${err instanceof Error ? err.message : String(err)}`
+        )
+      );
+    }
+
     // 2. Remove hooks/shims from EVERY supported agent (each wrapped
     //    independently so a partial failure does not silently skip the rest).
     //    Driven off the single AGENT_TEARDOWNS source of truth so a newly
@@ -416,6 +437,44 @@ program
       // the actual removal. Skip the verification line silently.
     }
 
+    // 2c. Remove the decoy credential files node9 planted, BEFORE any purge.
+    //     Order is the whole point: --purge deletes ~/.node9 including
+    //     canaries.json, which is the ONLY record that those files are fake.
+    //     Deleting the map while keeping the treasure leaves three files every
+    //     secret scanner flags as a critical leak, and no way for a tool or a
+    //     human to tell them from real credentials — node9 itself then reports
+    //     them as `absent`.
+    //
+    //     Removed on EVERY uninstall, with or without --purge: these are files
+    //     node9 created in the user's home, which is a different question from
+    //     whether to delete node9's own directory.
+    let decoysLeft: string[] = [];
+    try {
+      const results = ALL_KINDS.map((k) => removeKind(k));
+      const removed = results.filter((r) => r.action === 'removed' || r.action === 'already-gone');
+      const refused = results.filter((r) => r.action === 'refused');
+      if (removed.length > 0 || refused.length > 0) {
+        console.log(chalk.bold('\nRemoving decoy credentials...'));
+        for (const r of removed) {
+          if (r.path) console.log(chalk.green(`  ✅ ${r.path.replace(os.homedir(), '~')}`));
+        }
+        // A refusal must not fail the uninstall, and must not be silent: the
+        // user has to know exactly what is still on disk and why.
+        for (const r of refused) {
+          decoysLeft.push(r.path ?? '(unknown path)');
+          console.error(chalk.yellow(`  ⚠️  Left in place: ${r.path}`));
+          if (r.reason) console.error(chalk.gray(`     ${r.reason}`));
+        }
+      }
+    } catch (err) {
+      console.error(
+        chalk.yellow(
+          `  ⚠️  Could not remove decoy credentials: ${err instanceof Error ? err.message : String(err)}`
+        )
+      );
+      decoysLeft = ['(the decoy registry could not be read)'];
+    }
+
     // 3. Optionally purge ~/.node9/ — requires explicit confirmation because the
     //    directory may contain credentials and cannot be recovered after deletion.
     if (options.purge) {
@@ -426,6 +485,19 @@ program
         // copies of the user's own source — someone agreeing to drop "config,
         // audit log, credentials" is not agreeing to that.
         const alsoSnapshots = undoLeftoverPaths().length > 0 ? ', old undo snapshots' : '';
+        // Never orphan a decoy: the registry is the only record that those
+        // files are fake, so deleting it while one is still on disk makes it
+        // permanently indistinguishable from a real credential.
+        if (decoysLeft.length > 0) {
+          console.error(chalk.red('\n  ⚠️  Decoy credential files are still on disk:'));
+          for (const d of decoysLeft) console.error(chalk.red(`     • ${d}`));
+          console.error(
+            chalk.yellow(
+              '     Deleting ~/.node9/ now would remove the only record that these are fake.\n' +
+                '     Delete them yourself first, or keep ~/.node9/ so `node9 canary status` can still identify them.'
+            )
+          );
+        }
         const confirmed = await confirm({
           message: `Permanently delete ${node9Dir} (config, audit log, credentials${alsoSnapshots})?`,
           default: false,
@@ -832,6 +904,8 @@ registerScanRepoCommand(program);
 registerEgressCommand(program);
 // Credential jail — user-extensible protected paths
 registerJailCommand(program);
+// Decoy credentials (canary)
+registerCanaryCommand(program);
 registerSandboxCommand(program, version);
 
 // Session history

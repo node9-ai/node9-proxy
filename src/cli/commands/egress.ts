@@ -10,10 +10,16 @@
 
 import type { Command } from 'commander';
 import chalk from 'chalk';
-import { getConfig } from '../../config';
+import { getConfig, _resetConfigCache, type Config } from '../../config';
 import { cliGuardPolicyWrite } from '../../config/keyed-guard';
-import { DEFAULT_EGRESS_ALLOWLIST } from '@node9/policy-engine';
-import { type EgressBlock, setEgress, addEgressHost } from '../../auth/egress-config';
+import { DEFAULT_EGRESS_ALLOWLIST, classifySsrf, normalizeIpLiteral } from '@node9/policy-engine';
+import {
+  type EgressBlock,
+  setEgress,
+  addEgressHost,
+  addSsrfExemption,
+  normalizeEgressHost,
+} from '../../auth/egress-config';
 
 // Re-exported so existing tests (egress.integration.test.ts) keep importing it
 // from here; the implementation now lives in the shared egress-config module
@@ -42,11 +48,68 @@ function addHost(list: 'allow' | 'deny', host: string): boolean {
   return guard(() => addEgressHost(list, host));
 }
 
+function exempt(address: string): boolean {
+  if (!cliGuardPolicyWrite(`egress exempt ${address}`)) return false;
+  return guard(() => addSsrfExemption(address));
+}
+
+/**
+ * The SSRF floor, stated before the allow/deny lists: strongest first. Until
+ * this block existed the floor blocked and no screen said it was there, so a
+ * user only met it as a surprise at the moment of a block.
+ *
+ * Every line here was rewritten after a code review found three overclaims:
+ * the floor only sees SHELL commands (a WebFetch or an MCP fetch tool reaches
+ * the address unchecked), CGNAT is blocked by default and was named nowhere,
+ * and `node9 pause` lifts the floor along with everything else. A status
+ * screen that overstates protection is worse than none.
+ *
+ * The exemption list printed is the EFFECTIVE one (getConfig has already
+ * dropped an entry that names a protected address), so a user who typed one
+ * sees that it is not in force.
+ */
+function showFloor(
+  e: Config['policy']['egress'],
+  ssrfStrictSource: Config['ssrfStrictSource']
+): void {
+  console.log(chalk.gray('\n  Protected addresses') + chalk.gray(' — in shell commands only'));
+  console.log(
+    chalk.gray(
+      '    always blocked: cloud metadata, link-local, multicast, CGNAT (100.64/10)\n' +
+        '    no setting releases these, though `node9 pause` suspends all enforcement'
+    )
+  );
+  const strict = e.ssrfStrict === true;
+  const by =
+    ssrfStrictSource === 'workspace'
+      ? 'workspace (app.node9.ai)'
+      : ssrfStrictSource === 'local'
+        ? 'this machine (config.json)'
+        : 'the shipped default';
+  console.log(
+    `    Internal addresses:  ${strict ? chalk.green('on') : chalk.yellow('off')}` +
+      chalk.gray(
+        strict
+          ? '  loopback and 10/172.16/192.168 are blocked too'
+          : '  loopback and 10/172.16/192.168 are reachable'
+      )
+  );
+  console.log(chalk.gray(`    set by: ${by}`));
+  const exemptions = e.ssrfAllow ?? [];
+  console.log(chalk.gray(`    Exemptions: ${exemptions.length ? exemptions.join(', ') : 'none'}`));
+  console.log(
+    chalk.gray(
+      '    Not covered: an agent tool that fetches a URL itself (WebFetch, an MCP\n' +
+        '    fetch tool) does not pass this gate.'
+    )
+  );
+}
+
 function showStatus(): void {
   const cfg = getConfig();
   const e = cfg.policy.egress;
   const state = !e.enabled
-    ? chalk.red('OFF — your agent can reach any host')
+    ? chalk.red('OFF — your agent can reach any host, except the protected ones below')
     : e.mode === 'block'
       ? chalk.green('LOCKED (block) — unknown hosts are denied')
       : chalk.yellow('WATCHING (review) — unknown hosts prompt you');
@@ -62,7 +125,8 @@ function showStatus(): void {
       `  ${DEFAULT_EGRESS_ALLOWLIST.length} common dev/LLM hosts are always allowed (github, npm, pypi, anthropic, …).`
     )
   );
-  if (e.allow.length) console.log('  Your allow: ' + e.allow.join(', '));
+  showFloor(e, cfg.ssrfStrictSource);
+  if (e.allow.length) console.log('\n  Your allow: ' + e.allow.join(', '));
   if (e.deny.length) console.log('  Your deny:  ' + e.deny.join(', '));
   if (!e.enabled) {
     console.log(chalk.gray('\n  Turn it on:  node9 egress watch   (prompt on unknown hosts)'));
@@ -127,5 +191,72 @@ export function registerEgressCommand(program: Command): void {
     });
 
   // `node9 egress` with no subcommand → status.
+  egress
+    .command('strict <on|off>')
+    .description('Also block loopback and private ranges (the strict SSRF tier)')
+    .action((value: string) => {
+      const v = value.trim().toLowerCase();
+      if (v !== 'on' && v !== 'off') {
+        console.error(chalk.red(`\n  ✗ Expected "on" or "off", got "${value}".\n`));
+        process.exitCode = 1;
+        return;
+      }
+      if (!mutate(`egress strict ${v}`, { ssrfStrict: v === 'on' })) return;
+      // The write landed in config.json, which is not the same as the value
+      // taking effect: on an org-managed machine the merge replaces it. Read
+      // the EFFECTIVE config back and report what is actually in force, rather
+      // than reporting that a file was written.
+      _resetConfigCache();
+      const effective = getConfig().policy.egress.ssrfStrict === true;
+      if (effective !== (v === 'on')) {
+        console.log(
+          chalk.yellow(
+            `\n  ⚠ Saved, but not in effect: your workspace sets the strict tier ` +
+              `${effective ? 'ON' : 'OFF'} and that governs this machine.\n` +
+              `    Change it in the dashboard, Enforcement → Network.\n`
+          )
+        );
+        return;
+      }
+      console.log(
+        v === 'on'
+          ? chalk.green('\n  ✓ Strict tier on — loopback and private ranges are blocked.\n')
+          : chalk.yellow('\n  ✓ Strict tier off — loopback and private ranges are reachable.\n')
+      );
+    });
+
+  egress
+    .command('exempt <address>')
+    .description('Let ONE address through the floor (exact address, not a range)')
+    .action((address: string) => {
+      const a = normalizeEgressHost(address);
+      // An exemption is compared against a NORMALIZED IP LITERAL, so only an
+      // address can ever match: an FQDN entry is written dead. The first
+      // version accepted one and printed a note, which also put this command
+      // at odds with the dashboard editor, where it is refused.
+      if (!normalizeIpLiteral(a)) {
+        console.error(
+          chalk.red(`\n  ✗ "${address}" is not an address.`) +
+            chalk.gray(
+              '\n    Exemptions are matched as one exact address, not a name or a range.\n'
+            )
+        );
+        process.exitCode = 1;
+        return;
+      }
+      if (!exempt(a)) return;
+      const m = classifySsrf(a);
+      console.log(chalk.green(`\n  ✓ ${a} is exempt from the floor.`));
+      if (!m)
+        console.log(
+          chalk.gray('    Note: this address is not on the floor anyway — nothing changes.\n')
+        );
+      else console.log('');
+    });
+
+  // `node9 egress` alone shows status, but `status` is the word a user reaches
+  // for, and without this it exited 1 with "too many arguments for 'egress'".
+  egress.command('status').description('Show the current egress state').action(showStatus);
+
   egress.action(showStatus);
 }

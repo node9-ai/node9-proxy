@@ -33,7 +33,15 @@ const SOURCES = [
   // 2026-08-20 matcher change through with no version bump.
   'packages/policy-engine/src/rules/index.ts',
   'packages/policy-engine/src/shell/index.ts',
+  // canonical.ts:297 runs scanArgs (dlp/index.ts) over tool args and ships the
+  // result as a 'dlp' extractor finding, so DLP_PATTERNS changes alter output
+  // and must trip this gate too.
+  'packages/policy-engine/src/dlp/index.ts',
+  // canonical.ts runs matchCanaryArgs (dlp/canary.ts) over tool args; the
+  // fixtures and spec beside it stay OUT (the hash must not depend on tests).
+  'packages/policy-engine/src/dlp/canary.ts',
   'packages/policy-engine/src/scan/pii.ts',
+  'packages/policy-engine/src/scan/checksums.ts',
   'packages/policy-engine/src/scan/destructive-regex.ts',
 ];
 

@@ -23,7 +23,7 @@ process.env.NODE9_TESTING = '1';
 const {
   mockRunBlast,
   mockTickScanWatcher,
-  mockMarkUploadComplete,
+  mockCommitTotalsUpload,
   mockHttpsRequest,
   mockRunPosture,
   mockShipPosture,
@@ -42,7 +42,7 @@ const {
     uploadAs: 'deltas',
     schemaFuture: false,
   }),
-  mockMarkUploadComplete: vi.fn(),
+  mockCommitTotalsUpload: vi.fn(),
   mockHttpsRequest: vi.fn(),
   mockRunPosture: vi.fn().mockResolvedValue({ score: 100, tier: 'good', findings: [] }),
   mockShipPosture: vi.fn().mockResolvedValue(true),
@@ -58,7 +58,7 @@ vi.mock('../posture/ship.js', () => ({
 }));
 vi.mock('../daemon/scan-watermark.js', () => ({
   tickScanWatcher: mockTickScanWatcher,
-  markUploadComplete: mockMarkUploadComplete,
+  commitTotalsUpload: mockCommitTotalsUpload,
 }));
 // Mock https so pushScanSnapshot's network round-trip doesn't escape the
 // test. The factory delegates to the per-test mockHttpsRequest fn so each
@@ -104,7 +104,7 @@ import { getConfig, _resetConfigCache, __resetRulesCacheStateForTest } from '../
  *
  * Uses fake creds so the fetch contract URL is well-formed; the mock
  * intercepts before any network IO. Synthesizes a 2xx response so the
- * post-success hook (markUploadComplete) on the totals path runs.
+ * post-success hook (commitTotalsUpload) on the totals path runs.
  */
 async function captureScanReportPost(): Promise<Record<string, unknown> | null> {
   let captured: Record<string, unknown> | null = null;
@@ -145,7 +145,7 @@ async function captureScanReportPost(): Promise<Record<string, unknown> | null> 
     apiUrl: 'https://api.example.com/policies/sync',
   });
   // Two flushes: one for end()'s setImmediate response synthesis,
-  // one for res.on('end') firing markUploadComplete.
+  // one for res.on('end') firing commitTotalsUpload.
   await new Promise((r) => setImmediate(r));
   await new Promise((r) => setImmediate(r));
   return captured;
@@ -896,7 +896,7 @@ describe('extractRules', () => {
 //
 // We mock https.request to capture the body the daemon would have sent,
 // rather than running a real HTTP server. The contract lives in the body
-// shape and the markUploadComplete() call after a 2xx; both are
+// shape and the commitTotalsUpload() call after a 2xx; both are
 // observable through mocks.
 
 describe('pushScanSnapshot — POST body dispatches on tick.uploadAs', () => {
@@ -923,7 +923,7 @@ describe('pushScanSnapshot — POST body dispatches on tick.uploadAs', () => {
     expect(captured!.sessionDeltas).toBeDefined();
     expect(captured!.sessionTotals).toBeUndefined();
     expect(captured!.extractorVersion).toBe(CANONICAL_EXTRACTOR_VERSION);
-    expect(mockMarkUploadComplete).not.toHaveBeenCalled();
+    expect(mockCommitTotalsUpload).not.toHaveBeenCalled();
   });
 
   it('uploadAs="totals" → body carries sessionTotals (overwrite path) and clears the flag on 2xx', async () => {
@@ -941,6 +941,14 @@ describe('pushScanSnapshot — POST body dispatches on tick.uploadAs', () => {
       filesSkipped: 0,
       uploadAs: 'totals' as const,
       schemaFuture: false,
+      // A real totals tick hands its uncommitted watermark back; the commit
+      // is gated on its presence.
+      pendingWatermark: {
+        schemaVersion: 2,
+        extractorVersion: CANONICAL_EXTRACTOR_VERSION,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        files: {},
+      },
     });
 
     const captured = await captureScanReportPost();
@@ -951,7 +959,10 @@ describe('pushScanSnapshot — POST body dispatches on tick.uploadAs', () => {
     expect(captured!.extractorVersion).toBe(CANONICAL_EXTRACTOR_VERSION);
     // Flag-clear must happen exactly once after the successful POST so a
     // future tick reverts to the normal sessionDeltas path.
-    expect(mockMarkUploadComplete).toHaveBeenCalledTimes(1);
+    expect(mockCommitTotalsUpload).toHaveBeenCalledTimes(1);
+    expect(mockCommitTotalsUpload).toHaveBeenCalledWith(
+      expect.objectContaining({ extractorVersion: CANONICAL_EXTRACTOR_VERSION })
+    );
   });
 
   it('schemaFuture=true → no POST is made (defensive skip on downgrade)', async () => {

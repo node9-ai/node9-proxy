@@ -195,6 +195,8 @@ describe('§K — keyed replace-mode: policy = DEFAULT_CONFIG ⊕ cloud only', (
         allow: [],
         deny: [],
         allowPrivate: true,
+        ssrfAllow: [],
+        ssrfStrict: false,
       });
     });
 

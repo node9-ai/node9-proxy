@@ -101,11 +101,16 @@ export interface ScanSummary {
     blocked: number; // any verdict === 'block' (regardless of source)
     supervised: number; // any verdict === 'review' (regardless of source)
     leaks: number;
+    /** Decoys tripped. Deliberately NOT folded into `leaks`: a decoy is a
+     *  different claim (something read the file) and folding it in would
+     *  inflate the leak count and the scan-history delta. */
+    canaries: number;
     loops: number;
   };
   byAgent: AgentSummary[];
   sections: Section[];
   leaks: LeakRef[];
+  canaries: CanaryRef[];
   loops: LoopRef[];
   loopWastedUSD: number;
   /** Coverage behind loopWastedUSD — see LoopWaste. Absent dollars are not
@@ -160,6 +165,23 @@ export interface LeakRef {
   project: string;
   sessionId: string;
   agent: AgentId;
+}
+
+/** A registered decoy credential seen in history. No sample field: there is no
+ *  safe excerpt of a decoy, and the value must never reach a report. */
+export interface CanaryRef {
+  canaryId: string;
+  kind: string;
+  field: string;
+  path: string;
+  view: string;
+  retired: boolean;
+  toolName: string;
+  timestamp: string;
+  project: string;
+  sessionId: string;
+  agent: AgentId;
+  count: number;
 }
 
 export interface LoopRef {
@@ -294,6 +316,22 @@ export function buildScanSummary(agents: AgentScanInput[]): ScanSummary {
       agent: f.agent,
     }))
   );
+  const allCanaries: CanaryRef[] = agents.flatMap((a) =>
+    a.scan.canaryFindings.map((f) => ({
+      canaryId: f.canaryId,
+      kind: f.kind,
+      field: f.field,
+      path: f.path,
+      view: f.view,
+      retired: f.retired,
+      toolName: f.toolName,
+      timestamp: f.timestamp,
+      project: f.project,
+      sessionId: f.sessionId,
+      agent: f.agent,
+      count: f.count,
+    }))
+  );
   const allLoops: LoopRef[] = agents.flatMap((a) =>
     a.scan.loopFindings.map((f) => ({
       toolName: f.toolName,
@@ -312,6 +350,7 @@ export function buildScanSummary(agents: AgentScanInput[]): ScanSummary {
     blocked: allFindings.filter((f) => f.source.rule.verdict === 'block').length,
     supervised: allFindings.filter((f) => f.source.rule.verdict === 'review').length,
     leaks: allLeaks.length,
+    canaries: allCanaries.length,
     loops: allLoops.length,
   };
 
@@ -346,6 +385,7 @@ export function buildScanSummary(agents: AgentScanInput[]): ScanSummary {
     byAgent,
     sections,
     leaks: allLeaks,
+    canaries: allCanaries,
     loops: allLoops,
     loopWastedUSD,
     loopWaste,

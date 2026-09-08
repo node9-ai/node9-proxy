@@ -168,6 +168,10 @@ export const ConfigFileSchema = z
             allow: z.array(z.string()).optional(),
             deny: z.array(z.string()).optional(),
             allowPrivate: z.boolean().optional(),
+            // SSRF floor. `ssrfAllow` exempts OVERRIDABLE tiers only; a tier-1
+            // entry is dropped with a warning at load, never silently honoured.
+            ssrfAllow: z.array(z.string()).optional(),
+            ssrfStrict: z.boolean().optional(),
           })
           .optional(),
         loopDetection: z

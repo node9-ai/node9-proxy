@@ -19,6 +19,7 @@ import os from 'os';
 import path from 'path';
 import readline from 'readline';
 import { scanArgs } from '../dlp.js';
+import { canaryCtxValues } from '../canary/registry.js';
 import { DEFAULT_CONFIG } from '../config/index.js';
 import {
   detectPii,
@@ -371,10 +372,20 @@ function findLastNewline(filePath: string, from: number, size: number): number {
 // Exported so the backfill path (scan-upload-history.ts) can re-use the
 // exact same per-line extraction logic. Live ticks call this internally;
 // backfill calls it directly across all bytes of the file.
+/** Registry read failure means "no canaries": the tick must never crash on it. */
+function safeCanaryCtxValues(): ReturnType<typeof canaryCtxValues> {
+  try {
+    return canaryCtxValues();
+  } catch {
+    return [];
+  }
+}
+
 export function extractFindingsFromLine(
   line: unknown,
   sessionId: string,
-  lineIndex: number
+  lineIndex: number,
+  canaryVals: ReturnType<typeof canaryCtxValues> = []
 ): ScanFinding[] {
   if (!line || typeof line !== 'object') return [];
   const findings: ScanFinding[] = [];
@@ -448,6 +459,7 @@ export function extractFindingsFromLine(
     // disagree with each other (/code-review round 3).
     toolInspection: { ...DEFAULT_CONFIG.policy.toolInspection },
     dlpEnabled: false, // line-level DLP runs above already
+    canaryValues: canaryVals,
   };
   const message = (line as Record<string, unknown>).message;
   if (message && typeof message === 'object') {
@@ -515,6 +527,7 @@ const LONG_OUTPUT_THRESHOLD_BYTES = ENGINE_LONG_OUTPUT_THRESHOLD_BYTES;
  * advances the persistent watermark and POSTs findings independently.
  */
 export async function tickForensicBroadcast(offsets: Map<string, number>): Promise<ScanFinding[]> {
+  const canaryVals = safeCanaryCtxValues(); // once per tick, passed to every line
   const out: ScanFinding[] = [];
   const files = listJsonlFiles();
   for (const file of files) {
@@ -530,7 +543,7 @@ export async function tickForensicBroadcast(offsets: Map<string, number>): Promi
 
     const sessionId = path.basename(file, '.jsonl');
     const newOffset = await scanDelta(file, offset, (obj, lineIndex) => {
-      out.push(...extractFindingsFromLine(obj, sessionId, lineIndex));
+      out.push(...extractFindingsFromLine(obj, sessionId, lineIndex, canaryVals));
     });
     offsets.set(file, newOffset);
   }
@@ -557,10 +570,21 @@ export interface ScanTickResult {
    *                        tick after an extractor-stale reset so
    *                        re-scanned bytes don't double-count on top of a
    *                        prior `--upload-history` baseline.
-   * Caller (sync.ts) reads this to choose the wire field, then calls
-   * `markUploadComplete()` on success to clear the flag for the next tick.
+   * Caller (sync.ts) reads this to choose the wire field. On the 'totals'
+   * path the tick does NOT persist the watermark itself; it hands the
+   * in-memory state back as `pendingWatermark` and sync.ts commits it via
+   * `commitTotalsUpload()` only after the POST returned 2xx.
    */
   uploadAs: 'deltas' | 'totals';
+  /**
+   * Present only when uploadAs === 'totals'. The watermark as it stood
+   * after the full re-scan, NOT yet written to disk. Persisting it before
+   * the upload is acknowledged was the bug: a failed POST left offsets at
+   * EOF with the flag still set, so the retry tick scanned only newly
+   * appended bytes and sent that fragment as a full-row overwrite. The
+   * history re-scan was lost for good.
+   */
+  pendingWatermark?: Watermark;
   /**
    * True when this tick ran with no work because the watermark file is
    * from a newer daemon schema (downgrade safety). sync.ts should skip
@@ -570,25 +594,23 @@ export interface ScanTickResult {
 }
 
 /**
- * Clear the `pendingResetUploadAs` flag from the persisted watermark.
- * Called by sync.ts after the first post-reset POST succeeds. Subsequent
- * ticks then revert to the normal incremental sessionDeltas path.
+ * Commit a totals tick: persist the post-re-scan watermark with the
+ * `pendingResetUploadAs` flag cleared. Called by sync.ts ONLY after the
+ * sessionTotals POST returned 2xx. This is the single write on the totals
+ * path; before the upload is acknowledged the on-disk file is untouched
+ * and still names the previous extractor version.
+ *
+ * The one guard kept is schema-future: if a newer daemon wrote the file
+ * between our tick and this commit, never write back. There is no
+ * extractor-stale guard any more, and deliberately so: on the totals path
+ * the disk IS extractor-stale by design until this commit runs, and the
+ * in-memory watermark carries the current version plus the full re-scan
+ * frontier, which is exactly what should land.
  */
-export function markUploadComplete(): void {
-  const state = loadWatermark();
-  // schema-future: never write back, current daemon doesn't understand
-  // the file's shape.
-  if (state.status === 'schema-future') return;
-  // extractor-stale: the on-disk file was concurrently rewound to a
-  // different extractorVersion between our tick and this call. Saving
-  // here would persist the in-memory `extractor-stale` state which
-  // resets all scannedTo to 0 — clobbering whatever scan progress the
-  // tick just recorded. Bail; the next tick handles the new stale
-  // state cleanly.
-  if (state.status === 'extractor-stale') return;
-  if (!state.wm.pendingResetUploadAs) return;
-  delete state.wm.pendingResetUploadAs;
-  saveWatermark(state.wm);
+export function commitTotalsUpload(wm: Watermark): void {
+  if (loadWatermark().status === 'schema-future') return;
+  delete wm.pendingResetUploadAs;
+  saveWatermark(wm);
 }
 
 /**
@@ -705,6 +727,7 @@ function readRawWatermarkPreservingOffsets(): Watermark | null {
 }
 
 async function runActualTick(wm: Watermark): Promise<ScanTickResult> {
+  const canaryVals = safeCanaryCtxValues(); // once per tick, passed to every line
   const watermarkCreatedAt = new Date(wm.createdAt).getTime();
   const findings: ScanFinding[] = [];
   let totalToolCalls = 0;
@@ -733,7 +756,7 @@ async function runActualTick(wm: Watermark): Promise<ScanTickResult> {
         const newScannedTo = await scanDelta(filePath, 0, (obj, lineIndex) => {
           totalToolCalls++;
           toolCallsBySession[sessionId] = (toolCallsBySession[sessionId] ?? 0) + 1;
-          findings.push(...extractFindingsFromLine(obj, sessionId, lineIndex));
+          findings.push(...extractFindingsFromLine(obj, sessionId, lineIndex, canaryVals));
         });
         wm.files[filePath] = { scannedTo: newScannedTo };
         filesScanned++;
@@ -756,16 +779,25 @@ async function runActualTick(wm: Watermark): Promise<ScanTickResult> {
     const newScannedTo = await scanDelta(filePath, known.scannedTo, (obj, lineIndex) => {
       totalToolCalls++;
       toolCallsBySession[sessionId] = (toolCallsBySession[sessionId] ?? 0) + 1;
-      findings.push(...extractFindingsFromLine(obj, sessionId, lineIndex));
+      findings.push(...extractFindingsFromLine(obj, sessionId, lineIndex, canaryVals));
     });
     wm.files[filePath] = { scannedTo: newScannedTo };
     filesScanned++;
   }
 
   const uploadAs: 'deltas' | 'totals' = wm.pendingResetUploadAs === 'totals' ? 'totals' : 'deltas';
-  saveWatermark(wm);
 
-  return {
+  // Deltas path: commit the frontier now. A failed delta upload is dropped,
+  // never retried, because the BE applies deltas by increment and a retry
+  // after an ambiguous failure (BE committed, response lost) would double
+  // count. Under-counting is the safer failure for increment semantics.
+  //
+  // Totals path: do NOT save here. The on-disk file still carries the old
+  // extractor version, so if the upload fails or the daemon dies before it
+  // lands, the next tick sees extractor-stale again and repeats the full
+  // re-scan. The BE applies totals by overwrite, so a repeat is idempotent.
+  // sync.ts calls commitTotalsUpload(pendingWatermark) after 2xx.
+  const result: ScanTickResult = {
     findings,
     totalToolCalls,
     toolCallsBySession,
@@ -775,4 +807,10 @@ async function runActualTick(wm: Watermark): Promise<ScanTickResult> {
     uploadAs,
     schemaFuture: false,
   };
+  if (uploadAs === 'totals') {
+    result.pendingWatermark = wm;
+  } else {
+    saveWatermark(wm);
+  }
+  return result;
 }
