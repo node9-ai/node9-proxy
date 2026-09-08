@@ -62,6 +62,7 @@ describe('evaluateEgressConfig', () => {
       mode: 'off',
       ssrfStrict: false,
       ssrfAllow: [],
+      policySource: 'local',
     });
     const floor = rows.find((r) => /metadata/i.test(r.title));
     expect(floor, 'the win holds regardless of the egress policy').toBeDefined();
@@ -78,6 +79,7 @@ describe('evaluateEgressConfig', () => {
       mode: 'block',
       ssrfStrict: true,
       ssrfAllow: [],
+      policySource: 'local',
     });
     const floor = rows[0];
     floor.coverage = { state: 'open' }; // what the probe returns when not in-path
@@ -93,8 +95,16 @@ describe('evaluateEgressConfig', () => {
       mode: 'block',
       ssrfStrict: false,
       ssrfAllow: [],
+      policySource: 'local',
     })[0];
-    expect(r.title + ' ' + (r.what ?? ''), 'names the surface').toMatch(/shell command/i);
+    // The TITLE is the line most readers stop at, so it carries the limit on
+    // its own. Checking title+what together let the title go back to "on this
+    // machine" while `what` quietly carried the caveat (mutation survived).
+    expect(r.title, 'the title alone must not claim the machine').not.toMatch(
+      /on this machine|every machine/i
+    );
+    expect(r.title, 'the title names the surface').toMatch(/shell command/i);
+    expect(r.what, 'so does the body').toMatch(/shell command/i);
     expect(r.detail.join(' '), 'names what bypasses it').toMatch(/WebFetch|fetch tool/i);
   });
 
@@ -105,6 +115,7 @@ describe('evaluateEgressConfig', () => {
       mode: 'block',
       ssrfStrict: false,
       ssrfAllow: [],
+      policySource: 'local',
     })[0];
     expect(r.severity).toBe('advisory');
   });
@@ -119,12 +130,36 @@ describe('evaluateEgressConfig', () => {
     expect(f.what).not.toMatch(/every machine|node9 blocks/i);
   });
 
+  it('P10 the strict-tier advice is dropped on a workspace-governed machine', () => {
+    // cliGuardPolicyWrite refuses `node9 egress strict on` with exit 1 whenever
+    // the workspace governs policy, so advising it there sends the reader into
+    // a wall. Point at the dashboard instead.
+    const managed = checkEgressFloor({
+      enabled: true,
+      mode: 'block',
+      ssrfStrict: false,
+      ssrfAllow: [],
+      policySource: 'workspace',
+    })[0];
+    expect(managed.detail.join(' ')).not.toMatch(/node9 egress strict on/);
+    expect(managed.detail.join(' '), 'says where it CAN be changed').toMatch(/dashboard/i);
+    const own = checkEgressFloor({
+      enabled: true,
+      mode: 'block',
+      ssrfStrict: false,
+      ssrfAllow: [],
+      policySource: 'local',
+    })[0];
+    expect(own.detail.join(' ')).toMatch(/node9 egress strict on/);
+  });
+
   it('P3 the floor row names the attack, not the mechanism', () => {
     const rows = checkEgressFloor({
       enabled: true,
       mode: 'block',
       ssrfStrict: false,
       ssrfAllow: [],
+      policySource: 'local',
     });
     expect(rows[0].who, 'what would have happened').toMatch(/credential|key/i);
   });
@@ -137,6 +172,7 @@ describe('evaluateEgressConfig', () => {
       mode: 'block',
       ssrfStrict: false,
       ssrfAllow: [],
+      policySource: 'local',
     })[0].detail[0];
     expect(d0[0], 'lowercase noun phrase, not a sentence').toBe(d0[0].toLowerCase());
     expect(d0).toMatch(/metadata/i);
@@ -150,6 +186,7 @@ describe('evaluateEgressConfig', () => {
       mode: 'block',
       ssrfStrict: false,
       ssrfAllow: [],
+      policySource: 'local',
     });
     expect(
       rows.filter((r) => r.severity !== 'advisory' && /loopback|internal/i.test(r.title))
@@ -157,13 +194,20 @@ describe('evaluateEgressConfig', () => {
   });
 
   it('P5 the strict tier, when on, is stated in the same row', () => {
-    const on = checkEgressFloor({ enabled: true, mode: 'block', ssrfStrict: true, ssrfAllow: [] });
+    const on = checkEgressFloor({
+      enabled: true,
+      mode: 'block',
+      ssrfStrict: true,
+      ssrfAllow: [],
+      policySource: 'local',
+    });
     expect(on[0].detail.join(' ')).toMatch(/strict tier is on/i);
     const off = checkEgressFloor({
       enabled: true,
       mode: 'block',
       ssrfStrict: false,
       ssrfAllow: [],
+      policySource: 'local',
     });
     expect(off[0].detail.join(' ')).toMatch(/strict tier is off/i);
   });

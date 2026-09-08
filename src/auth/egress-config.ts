@@ -127,6 +127,15 @@ export function addSsrfExemption(address: string): void {
   }
   const config = readEgressRawConfig();
   const existing = (config.policy?.egress ?? {}) as Partial<EgressBlock>;
+  // A hand-edited scalar here used to be spread per CHARACTER: "10.0.0.1"
+  // became ["1","0",".",…] and the command still reported success. Refuse and
+  // say so rather than rewriting a file we cannot read as intended.
+  if (existing.ssrfAllow !== undefined && !Array.isArray(existing.ssrfAllow)) {
+    throw new Error(
+      `${egressConfigPath()} has policy.egress.ssrfAllow set to something that is not a list — ` +
+        `fix it before adding an exemption (refusing to overwrite).`
+    );
+  }
   const current: EgressBlock = { ...DEFAULT_EGRESS, ...existing };
   const updated = current.ssrfAllow.includes(address)
     ? current.ssrfAllow

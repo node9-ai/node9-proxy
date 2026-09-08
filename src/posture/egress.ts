@@ -18,6 +18,9 @@ interface EgressConfig {
 export interface FloorConfig extends EgressConfig {
   ssrfStrict: boolean;
   ssrfAllow: string[];
+  /** Which layer governs policy here. The remediation line depends on it: the
+   *  CLI command is refused on a workspace-governed machine. */
+  policySource: 'workspace' | 'local';
 }
 
 /**
@@ -126,7 +129,11 @@ export function checkEgressFloor(egress: FloorConfig): Finding[] {
     'link-local, multicast, unspecified and CGNAT (100.64/10) addresses',
     egress.ssrfStrict
       ? 'the strict tier is on: loopback and the private ranges are blocked too'
-      : 'the strict tier is off: loopback and the private ranges stay reachable (`node9 egress strict on`)',
+      : `the strict tier is off: loopback and the private ranges stay reachable (${
+          egress.policySource === 'workspace'
+            ? 'turn it on in the dashboard, Enforcement → Network'
+            : '`node9 egress strict on`'
+        })`,
   ];
   if (egress.ssrfAllow.length) {
     detail.push(`you exempted: ${egress.ssrfAllow.join(', ')}`);
@@ -193,6 +200,7 @@ export function checkEgress(ctx: CheckContext): Finding[] {
       mode: egress.mode,
       ssrfStrict: egress.ssrfStrict === true,
       ssrfAllow: egress.ssrfAllow ?? [],
+      policySource: config.policySource,
     }),
   ];
 }

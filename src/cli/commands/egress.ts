@@ -10,7 +10,7 @@
 
 import type { Command } from 'commander';
 import chalk from 'chalk';
-import { getConfig, type Config } from '../../config';
+import { getConfig, _resetConfigCache, type Config } from '../../config';
 import { cliGuardPolicyWrite } from '../../config/keyed-guard';
 import { DEFAULT_EGRESS_ALLOWLIST, classifySsrf, normalizeIpLiteral } from '@node9/policy-engine';
 import {
@@ -203,6 +203,22 @@ export function registerEgressCommand(program: Command): void {
         return;
       }
       if (!mutate(`egress strict ${v}`, { ssrfStrict: v === 'on' })) return;
+      // The write landed in config.json, which is not the same as the value
+      // taking effect: on an org-managed machine the merge replaces it. Read
+      // the EFFECTIVE config back and report what is actually in force, rather
+      // than reporting that a file was written.
+      _resetConfigCache();
+      const effective = getConfig().policy.egress.ssrfStrict === true;
+      if (effective !== (v === 'on')) {
+        console.log(
+          chalk.yellow(
+            `\n  ⚠ Saved, but not in effect: your workspace sets the strict tier ` +
+              `${effective ? 'ON' : 'OFF'} and that governs this machine.\n` +
+              `    Change it in the dashboard, Enforcement → Network.\n`
+          )
+        );
+        return;
+      }
       console.log(
         v === 'on'
           ? chalk.green('\n  ✓ Strict tier on — loopback and private ranges are blocked.\n')

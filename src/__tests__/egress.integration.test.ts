@@ -218,6 +218,49 @@ describe('node9 egress (integration)', () => {
     expect(r.stdout).toMatch(/set by:\s+this machine/i);
   });
 
+  it('T5 a workspace-set value is attributed to the WORKSPACE', () => {
+    // The keyed provenance branch had no row at all: deleting the assignment
+    // left every other row green (mutation survived).
+    fs.mkdirSync(path.join(home, '.node9'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.node9', 'credentials.json'),
+      JSON.stringify({ default: { apiKey: 'k-not-real', apiUrl: 'https://example.invalid/api' } })
+    );
+    fs.writeFileSync(
+      path.join(home, '.node9', 'rules-cache.json'),
+      JSON.stringify({
+        rules: [],
+        shields: [],
+        managedConfig: { egress: { ssrfStrict: true }, locked: [] },
+        fetchedAt: '2026-09-08T00:00:00Z',
+      })
+    );
+    const r = run([]);
+    expect(r.error).toBeUndefined();
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toMatch(/Internal addresses:\s+on/i);
+    expect(r.stdout).toMatch(/set by:\s+workspace/i);
+  });
+
+  it('T6 an UNKEYED org-managed machine also attributes it to the workspace', () => {
+    // The two managed branches record provenance separately, and T5 only
+    // covers the keyed one: deleting the unkeyed assignment stayed green.
+    fs.mkdirSync(path.join(home, '.node9'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.node9', 'rules-cache.json'),
+      JSON.stringify({
+        rules: [],
+        shields: [],
+        managedConfig: { egress: { ssrfStrict: true }, locked: [] },
+        fetchedAt: '2026-09-08T00:00:00Z',
+      })
+    );
+    const r = run([]);
+    expect(r.error).toBeUndefined();
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toMatch(/set by:\s+workspace/i);
+  });
+
   it('T4 an untouched value is attributed to the DEFAULT, not to a layer', () => {
     // `set by` used to key on policySource, which is machine keyedness, not
     // provenance: a machine that had never set the field claimed a layer chose
@@ -225,6 +268,44 @@ describe('node9 egress (integration)', () => {
     const r = run([]);
     expect(r.status).toBe(0);
     expect(r.stdout).toMatch(/set by:\s+the shipped default/i);
+  });
+
+  // ── Bugs the review found in the two new subcommands ─────────────────────
+
+  it('U1 exempt refuses a non-array ssrfAllow instead of shredding it', () => {
+    // `[...current.ssrfAllow]` on a STRING spreads it per character, so a
+    // hand-edited "10.0.0.1" became ["1","0",".","0",…] and the command still
+    // exited 0. Same shape as the pre-existing addEgressHost.
+    const cfgPath = path.join(home, '.node9', 'config.json');
+    fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+    const before = JSON.stringify({ policy: { egress: { ssrfAllow: '10.0.0.1' } } });
+    fs.writeFileSync(cfgPath, before);
+    const r = run(['exempt', '10.0.0.2']);
+    expect(r.error).toBeUndefined();
+    expect(r.status, r.stderr).toBe(1);
+    expect(fs.readFileSync(cfgPath, 'utf8'), 'not rewritten').toBe(before);
+  });
+
+  it('U2 strict off does not claim success when the workspace overrides it', () => {
+    // On an org-managed machine the write lands in config.json and the merge
+    // then replaces it, so the old code printed "✓ Strict tier off" while the
+    // very next status line said "on".
+    fs.mkdirSync(path.join(home, '.node9'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.node9', 'rules-cache.json'),
+      JSON.stringify({
+        rules: [],
+        shields: [],
+        managedConfig: { egress: { ssrfStrict: true }, locked: [] },
+        fetchedAt: '2026-09-08T00:00:00Z',
+      })
+    );
+    const r = run(['strict', 'off']);
+    expect(r.error).toBeUndefined();
+    expect(r.stdout + r.stderr, 'says the workspace still governs').toMatch(
+      /workspace|not in effect|still on/i
+    );
+    expect(run([]).stdout).toMatch(/Internal addresses:\s+on/i);
   });
 
   it('refuses to overwrite a malformed config (exit 1, file untouched)', () => {
