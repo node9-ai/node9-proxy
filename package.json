@@ -1,6 +1,6 @@
 {
   "name": "@node9/proxy",
-  "version": "2.10.0",
+  "version": "2.11.0",
   "description": "The Sudo Command for AI Agents. Execution Security for Claude Code, Codex, Gemini, Cursor, Opencode, Pi, and any MCP server.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -54,7 +54,6 @@
   "license": "Apache-2.0",
   "files": [
     "dist",
-    "docs",
     "README.md",
     "LICENSE"
   ],
@@ -77,7 +76,7 @@
     "test": "cross-env NODE9_TESTING=1 vitest --run",
     "test:coverage": "cross-env NODE9_TESTING=1 vitest --run --coverage",
     "test:watch": "cross-env NODE9_TESTING=1 vitest",
-    "preuninstall": "node9 uninstall || echo 'node9 uninstall failed — remove hooks manually from ~/.claude/settings.json'",
+    "preuninstall": "node9 uninstall || echo 'node9 uninstall failed \u2014 remove hooks manually from ~/.claude/settings.json'",
     "prepublishOnly": "npm run validate",
     "test:ui": "vitest --ui",
     "dev:tail": "node -e \"try{const d=JSON.parse(require('fs').readFileSync(require('os').homedir()+'/.node9/daemon.pid','utf8'));const pid=d.pid;if(Number.isInteger(pid)&&pid>0&&pid<4194304)process.kill(pid)}catch(e){if(e.code!=='ESRCH'&&e.code!=='ENOENT')process.stderr.write(e.message+'\\n')}\" && npm run build && node dist/cli.js tail"
