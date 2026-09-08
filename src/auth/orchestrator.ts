@@ -5,6 +5,7 @@ import { askNativePopup } from '../ui/native';
 import { computeRiskMetadata, type RiskMetadata } from '../context-sniper';
 import { scanArgs, scanFilePath, detectArgsPii, matchCanaryArgs, type DlpMatch } from '../dlp';
 import { canaryValues, loadCanaries } from '../canary/registry';
+import { ssrfDestinationFloor } from '@node9/policy-engine';
 import { extractShellDestinations, evaluateEgress } from '@node9/policy-engine';
 import { appendHookDebug, appendLocalAudit, appendToLog, HOOK_DEBUG_LOG } from '../audit';
 import { getConfig, getCredentials } from '../config';
@@ -499,6 +500,40 @@ async function _authorizeHeadlessCore(
         // file was read. Witnessed by canary-block-message.spec.ts, which calls
         // the orchestrator directly: this field never reaches the hook stdout.
         ruleDescription: `The fake credential node9 planted in ${rec?.path ?? 'a decoy file'} just left that file. Nothing legitimate reads it.`,
+      };
+    }
+  }
+
+  // ── SSRF FLOOR, NON-SHELL DESTINATIONS ────────────────────────────────────
+  // A tool that fetches a URL itself never produces a shell command, so the
+  // floor inside evaluatePolicy cannot see it — and WebFetch, get_*, read_*
+  // and list_* are on the ignoredTools list, so it never reaches evaluatePolicy
+  // at all. Measured: `curl http://<metadata>/` blocked while the same address
+  // through WebFetch was allowed.
+  //
+  // So this runs here, beside the canary gate and before the ignored-tool fast
+  // path, on the same principle: a protected address in a declared destination
+  // argument has no legitimate path into a tool call. It calls the SAME engine
+  // function evaluatePolicy calls, so the gate and `node9 explain` cannot
+  // disagree. A closed list of tool + argument paths, never a scan: see
+  // egress/destinations.ts for why that is the only safe shape.
+  {
+    const dest = ssrfDestinationFloor(toolName, args, {
+      ssrfAllow: config.policy.egress?.ssrfAllow,
+      ssrfStrict: config.policy.egress?.ssrfStrict,
+    });
+    if (dest && !isObserveMode) {
+      if (!isManual)
+        appendLocalAudit(toolName, args, 'deny', 'ssrf-destination', meta, hashAuditArgs);
+      return {
+        approved: false,
+        checkedBy: 'local-policy',
+        blockedByLabel: '🌐 Node9 Egress (Protected Address)',
+        reason: dest.reason,
+        // AuthResult carries no ruleName; the rule identity the audit row needs
+        // travels in ruleHit, as it does for a smart-rule block.
+        ruleHit: `ssrf:${dest.tier}:${toolName}:${dest.host}`,
+        ruleDescription: dest.reason,
       };
     }
   }

@@ -167,7 +167,15 @@ export type { CanaryValue, CanaryHit, CanaryView } from './dlp/canary';
 
 // SSRF floor: protected addresses, checked before and independently of the
 // egress policy. See doc/roadmap/active/ssrf-floor-design.md.
-export { normalizeIpLiteral, classifySsrf, ssrfFloor, SSRF_MAX_HOST } from './egress/ssrf';
+export {
+  normalizeIpLiteral,
+  classifySsrf,
+  ssrfFloor,
+  isStrictGatedTier,
+  ssrfReason,
+  SSRF_MAX_HOST,
+} from './egress/ssrf';
+export { ssrfDestinationFloor, DESTINATION_ARGS } from './egress/destinations';
 export type { SsrfTier, SsrfMatch, SsrfVerdict, SsrfFloorOptions } from './egress/ssrf';
 export { extractShellDestTokens } from './shell/index';
 export type { ShellDestToken } from './shell/index';
