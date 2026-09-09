@@ -441,17 +441,80 @@ export function isPolicyStale(nowMs: number = Date.now(), health?: SyncHealth): 
   return nowMs - last > stalenessThresholdMs(effectiveSyncIntervalMs());
 }
 
+/**
+ * This machine's CLI version, for the X-Node9-Version header.
+ *
+ * Deliberately reads package.json here rather than importing node9Version()
+ * from setup.ts: setup.ts already imports from daemon/, so pulling it in from
+ * this direction would close an import cycle. Never throws -- an unresolved
+ * version returns undefined and the header is simply dropped, because a
+ * telemetry field must not be able to stop a policy pull.
+ */
+export function safeNode9Version(): string | undefined {
+  // Walk up looking for OUR package.json, instead of guessing a fixed depth.
+  // The depth genuinely differs: from source this file sits in src/daemon/,
+  // but tsup bundles everything into dist/, so a hardcoded '..' or '../..'
+  // is correct in one layout and silently wrong in the other. Getting it
+  // wrong ships an empty header to every user while unit tests that inject
+  // the version stay green.
+  let dir = __dirname;
+  for (let up = 0; up < 5; up++) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf-8')) as {
+        name?: string;
+        version?: string;
+      };
+      if (pkg.name === '@node9/proxy' || pkg.name === 'node9-ai') {
+        return pkg.version;
+      }
+    } catch {
+      // Not here, or unreadable. Keep walking.
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return undefined;
+}
+
+/**
+ * Headers for the policy pull. Exported so the wire shape can be asserted
+ * directly: fetchCloudPolicy itself opens a socket, so a test that went
+ * through it would be proving the header exists by mocking the thing that
+ * carries it.
+ *
+ * X-Node9-Version is how the SaaS learns which CLI a machine runs. It has to
+ * be a header because this is a GET with no body, and turning it into a POST
+ * would break every client already in the field. A CLI too old to send it
+ * simply omits it, and the server leaves the stored value untouched.
+ *
+ * An unresolved version drops the header rather than sending a placeholder:
+ * a machine must never fail to pull its security policy over a telemetry
+ * field, and 'unknown' stored as a version is worse than a null.
+ */
+export function buildPolicyPullHeaders(
+  apiKey: string,
+  ifNoneMatch?: string,
+  proxyVersion?: string
+): Record<string, string> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+  };
+  if (ifNoneMatch) headers['If-None-Match'] = `"${ifNoneMatch}"`;
+  if (proxyVersion && proxyVersion !== 'unknown') {
+    headers['X-Node9-Version'] = proxyVersion;
+  }
+  return headers;
+}
+
 function fetchCloudPolicy(
   apiKey: string,
   apiUrl: string,
   ifNoneMatch?: string
 ): Promise<FetchResult> {
   const parsed = new URL(apiUrl);
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${apiKey}`,
-    'Content-Type': 'application/json',
-  };
-  if (ifNoneMatch) headers['If-None-Match'] = `"${ifNoneMatch}"`;
+  const headers = buildPolicyPullHeaders(apiKey, ifNoneMatch, safeNode9Version());
 
   return new Promise((resolve, reject) => {
     const req = https.request(
