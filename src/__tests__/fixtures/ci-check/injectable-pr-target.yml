@@ -1,0 +1,20 @@
+# The critical tier of CI-2, in the shape the scanner was built for: an anonymous
+# stranger's PR text steers an agent that holds base-repo secrets and a shell.
+# Mirrors `node9-ai/agent-security-demo`'s vulnerable-example.yml.
+name: claude review
+on:
+  pull_request_target:
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: "*"
+          claude_args: '--allowedTools "Bash"'

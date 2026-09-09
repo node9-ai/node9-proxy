@@ -10,6 +10,18 @@ inputs:
     description: 'Fail the check when the worst finding is at least this severity: never | medium | high | critical'
     required: false
     default: 'never'
+  fail-on-scope:
+    description: >-
+      Which findings the gate judges: "all" (the repo as it stands, the default and the
+      pre-CI-5 behaviour) or "introduced" (only what this PR added or made worse). Use
+      "introduced" to turn the gate on for a repository that is already dirty. When the
+      base commit cannot be read the scan falls back to "all" rather than passing.
+    required: false
+    default: 'all'
+  annotate:
+    description: 'Annotate the findings inline on the PR diff'
+    required: false
+    default: 'true'
   comment:
     description: 'Post a sticky comment on the PR with the findings'
     required: false
@@ -36,15 +48,33 @@ runs:
       with:
         node-version: '20'
 
+    # CI-5: the base side. `actions/checkout` fetches depth 1, so the PR's base commit is
+    # NOT in the object store — one extra shallow fetch of that single SHA is all the diff
+    # needs. A failure here is deliberately non-fatal: the scan then reports that it could
+    # not read the base, which degrades the gate to the strict absolute answer.
+    - name: Fetch the base commit
+      if: github.event.pull_request.base.sha != ''
+      shell: bash
+      run: |
+        git -C "$GITHUB_WORKSPACE" fetch --no-tags --depth=1 origin \
+          "${{ github.event.pull_request.base.sha }}" 2>/dev/null \
+          || echo "node9: could not fetch the base commit — the scan will report every finding."
+
     - name: Run node9 agent-security scan
       id: scan
       shell: bash
+      env:
+        NODE9_BASE_SHA: ${{ github.event.pull_request.base.sha }}
       run: |
         set -euo pipefail
         # Static, config-only scan of the checked-out workspace. Never fails this
         # step on a finding (the gate is applied by comment.js per fail-on).
-        npx -y "node9-ai@${{ inputs.node9-version }}" scan-repo "$GITHUB_WORKSPACE" --json \
-          > "${RUNNER_TEMP}/node9-result.json" || true
+        # `--base` is passed whenever the event has one, INCLUDING when the fetch above
+        # failed: an unreadable base must be reported as such, not silently skipped.
+        BASE_ARGS=()
+        if [ -n "${NODE9_BASE_SHA:-}" ]; then BASE_ARGS=(--base "$NODE9_BASE_SHA"); fi
+        npx -y "node9-ai@${{ inputs.node9-version }}" scan-repo "$GITHUB_WORKSPACE" \
+          "${BASE_ARGS[@]}" --json > "${RUNNER_TEMP}/node9-result.json" || true
         echo "result=${RUNNER_TEMP}/node9-result.json" >> "$GITHUB_OUTPUT"
 
     - name: Comment + gate
@@ -53,5 +83,7 @@ runs:
         GITHUB_TOKEN: ${{ inputs.github-token }}
         NODE9_RESULT: ${{ steps.scan.outputs.result }}
         NODE9_FAIL_ON: ${{ inputs.fail-on }}
+        NODE9_FAIL_ON_SCOPE: ${{ inputs.fail-on-scope }}
         NODE9_COMMENT: ${{ inputs.comment }}
+        NODE9_ANNOTATE: ${{ inputs.annotate }}
       run: node "${GITHUB_ACTION_PATH}/comment.js"

@@ -382,6 +382,77 @@ export function readLocalTree(dir: string): RepoTree {
   return { source: root, files, notes };
 }
 
+/** Read the agent surface as it exists at a git REF, without touching the working tree.
+ *
+ *  CI-5's base side. `git ls-tree` + `git show` are read-only plumbing: no checkout, no
+ *  second worktree, no network — so scanning the base of a pull request costs one extra
+ *  process per surface file and cannot disturb whatever the caller has checked out.
+ *
+ *  Returns `null` when the ref cannot be resolved at all (not a git repo, unknown ref,
+ *  a shallow clone that does not contain the base commit). A null base is the
+ *  "did-not-run" state — the caller MUST NOT treat it as an empty/clean base, which
+ *  would report the whole repo as introduced. Selection mirrors `readLocalTree`
+ *  predicate-for-predicate so base and head can never disagree about WHAT was scanned. */
+export function readGitRefTree(dir: string, ref: string): RepoTree | null {
+  const root = dir.replace(/^~/, process.env.HOME ?? '~');
+  // A ref beginning with "-" would be read by git as a flag. Reject rather than sanitize.
+  if (!ref || ref.startsWith('-')) return null;
+
+  const git = (args: string[]): string | null => {
+    try {
+      return execFileSync('git', ['-C', root, ...args], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        maxBuffer: 32 * 1024 * 1024,
+        timeout: 20000,
+      });
+    } catch {
+      return null;
+    }
+  };
+
+  // Resolve first: this is what separates "the base could not be read" from "the base
+  // genuinely had no agent surface". Only the former is did-not-run.
+  const sha = git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])?.trim();
+  if (!sha) return null;
+  const listing = git(['ls-tree', '-r', '--name-only', '-z', sha]);
+  if (listing === null) return null;
+
+  const all = listing.split('\0').filter(Boolean);
+  const notes: string[] = [];
+  const files: RepoFile[] = [];
+  const seen = new Set<string>();
+  const present = new Set(all);
+
+  const add = (rel: string) => {
+    if (seen.has(rel) || !present.has(rel)) return;
+    seen.add(rel);
+    const content = git(['show', `${sha}:${rel}`]);
+    if (content !== null) files.push({ path: rel, content });
+  };
+
+  // Same order as readLocalTree: the fixed root surface first (never scan LESS than the
+  // old baseline), then nested matches, then root workflows.
+  for (const rel of SURFACE_FILES) add(rel);
+  const nested = all.filter((rel) => SURFACE_BASENAME.test(rel) && !isIgnoredDir(rel));
+  if (nested.length > MAX_SURFACE_FILES) {
+    notes.push(
+      `repo is large — some agent-surface files may be INCOMPLETE (capped at ${MAX_SURFACE_FILES} files).`
+    );
+  }
+  for (const rel of nested.slice(0, MAX_SURFACE_FILES)) add(rel);
+  for (const rel of all) {
+    if (
+      rel.startsWith(`${WORKFLOW_DIR}/`) &&
+      /\.ya?ml$/.test(rel) &&
+      !rel.slice(WORKFLOW_DIR.length + 1).includes('/')
+    )
+      add(rel);
+  }
+
+  return { source: `${root}@${ref}`, files, notes };
+}
+
 /** Resolve any input (URL | owner/repo | local path) to a RepoTree. */
 export async function fetchTree(input: string, onProgress?: OnProgress): Promise<RepoTree> {
   if (isLocalPath(input)) return readLocalTree(input);

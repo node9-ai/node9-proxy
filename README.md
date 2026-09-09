@@ -97,13 +97,13 @@ node9 scan-repo <owner/repo> --json    # machine-readable
 
 What it checks:
 
-| Check    | Flags                                                                        |
-| -------- | ---------------------------------------------------------------------------- |
-| **CI-1** | committed agent config that pre-authorizes broad tools or runs remote hooks  |
-| **CI-2** | injectable agent workflows — an outsider can trigger the agent and hijack it |
-| **CI-3** | unpinned / `@latest` MCP servers or inline credentials (supply chain)        |
-| **CI-4** | secrets an injected agent could exfiltrate                                   |
-| **CI-6** | poisoned or dangerous instructions in `CLAUDE.md` / `AGENTS.md` / skills     |
+| Check    | Flags                                                                            |
+| -------- | -------------------------------------------------------------------------------- |
+| **CI-1** | committed agent config that pre-authorizes broad tools or runs remote hooks      |
+| **CI-2** | injectable agent workflows — an outsider can trigger the agent and hijack it     |
+| **CI-3** | unpinned / `@latest` MCP servers or inline credentials (supply chain)            |
+| **CI-4** | secrets an injected agent could exfiltrate                                       |
+| **CI-6** | poisoned or dangerous instructions in `CLAUDE.md` / `AGENTS.md` / `.cursorrules` |
 
 **Gate every PR** — the same engine as a GitHub Action, so a hijackable config can't get merged:
 
@@ -112,7 +112,13 @@ What it checks:
 - uses: node9-ai/node9-proxy@v2
   with:
     fail-on: high # or 'never' to just comment
+    fail-on-scope: introduced # only what THIS PR added; 'all' (default) judges the whole repo
 ```
+
+`fail-on-scope: introduced` is what makes the gate adoptable on a repository that already
+has findings: the PR comment leads with what the change introduced, pre-existing findings
+stay listed but do not block, and a base commit that cannot be read falls back to judging
+everything rather than passing.
 
 Marketplace: **[node9 Agent Security](https://github.com/marketplace/actions/node9-agent-security)**
 

@@ -19,11 +19,46 @@ const ICON = { critical: '🔴', high: '🔴', medium: '🟡', advisory: '🟢' 
 
 /** Decide the check-run conclusion + process exit from the worst severity and
  *  the fail-on threshold. `never` = report-only (never fails). */
-function decide(worst, failOn) {
+function decide(worst, failOn, incomplete = false) {
   const threshold = RANK[failOn]; // undefined for 'never'/unknown → never fail
   const fail = !!(threshold && worst && RANK[worst] >= threshold);
-  const conclusion = fail ? 'failure' : worst ? 'neutral' : 'success';
+  // A scan that could not read every file has not earned a green check. It does not FAIL
+  // the gate (we have no evidence of a problem), but it must not report success either —
+  // "nothing found" is a statement about what we read, not about the change.
+  const conclusion = fail ? 'failure' : worst || incomplete ? 'neutral' : 'success';
   return { fail, conclusion, exitCode: fail ? 1 : 0 };
+}
+
+/** Which severity the gate judges. `all` (the default) keeps the pre-CI-5 behaviour
+ *  exactly: the repo's worst finding. `introduced` narrows it to what THIS change is
+ *  answerable for, which is what lets a repo that is already dirty turn the gate on today.
+ *
+ *  The scan already degrades `worstIntroduced` to the head's absolute worst when the base
+ *  could not be read, so an unreadable base falls back to the strict answer here rather
+ *  than passing as "nothing new". Missing diff (an older CLI than this action) → `all`. */
+function gateWorst(result, scope) {
+  if (scope !== 'introduced' || !result.diff) return result.worst;
+  return result.diff.worstIntroduced ?? null;
+}
+
+/** The findings a reviewer should be annotated about: what this change introduced, or
+ *  everything when there is no trustworthy diff. */
+function annotatable(result) {
+  const d = result.diff;
+  if (!d || d.base !== 'ok') return Array.isArray(result.findings) ? result.findings : [];
+  return [...(d.added || []), ...(d.escalated || []).map((e) => e.finding)];
+}
+
+/** GitHub workflow commands: one annotation per finding, on the file in the PR diff.
+ *  No API call and no `checks: write` permission needed — the runner parses stdout.
+ *  Findings carry no line number today, so these anchor at the file (line 1); adding
+ *  real line numbers to the checks upgrades these in place. */
+function annotationLines(result) {
+  const level = { critical: 'error', high: 'error', medium: 'warning', advisory: 'notice' };
+  return annotatable(result).map(
+    (f) =>
+      `::${level[f.severity] || 'notice'} file=${f.file},line=${f.line || 1},title=node9 ${f.rule || f.check}::${String(f.title).replace(/\r?\n/g, ' ')}`
+  );
 }
 
 /** Derive a one-line, severity-TIERED threat sentence from the anchor finding (+ its
@@ -129,9 +164,48 @@ function renderDetail(result) {
 /** Render the sticky comment: lead with the ATTACK STORY (threat → mechanism → single fix),
  *  raw findings collapsed into <details>. Same ScanResult data, reframed for impact. */
 function renderComment(result) {
-  const findings = Array.isArray(result.findings) ? result.findings : [];
-  const worst = result.worst;
+  const all = Array.isArray(result.findings) ? result.findings : [];
+  const d = result.diff;
+  const trusted = d && d.base === 'ok';
+  // CI-5: when we know what this change introduced, the comment is about THAT. A reviewer
+  // cannot act on the repo's accumulated history, and burying the one new finding under
+  // twelve old ones is how a gate gets muted. Pre-existing findings stay in the comment —
+  // collapsed inside <details>, never deleted.
+  const findings = trusted ? annotatable(result) : all;
+  const worst = trusted ? d.worstIntroduced : result.worst;
   const L = [MARKER];
+  // An incomplete scan can never take the green branch, however little it found.
+  if (trusted && findings.length === 0 && !d.incomplete && !result.incomplete) {
+    L.push('### 🛡️ node9 agent-security · ✅');
+    L.push('');
+    L.push(
+      `**This PR introduces no agent-security findings.**` +
+        ((d.removed || []).length ? ` It also fixes ${d.removed.length}.` : '')
+    );
+    if ((d.unchanged || []).length) {
+      L.push('');
+      L.push(
+        `<sub>${d.unchanged.length} pre-existing finding(s) in this repo were not introduced here and are not gated.</sub>`
+      );
+    }
+    L.push('');
+    L.push(renderDetail(result));
+    return L.join('\n');
+  }
+  if (d && trusted && (d.incomplete || result.incomplete)) {
+    L.push(
+      '<sub>⚠️ This scan could not read every file, so it cannot claim the change introduced nothing — treat the list below as partial.</sub>'
+    );
+    L.push('');
+  }
+  if (d && !trusted) {
+    L.push(
+      d.base === 'did-not-run'
+        ? '<sub>⚠️ Could not read the base commit, so nothing below can be called new — every finding in this repo is listed. A shallow clone is the usual cause.</sub>'
+        : '<sub>⚠️ The base scan could not read every file, so a finding missing from it would look new — every finding in this repo is listed.</sub>'
+    );
+    L.push('');
+  }
   if (findings.length === 0) {
     L.push('### 🛡️ node9 agent-security · ✅');
     L.push('');
@@ -151,7 +225,16 @@ function renderComment(result) {
           ? 'Medium — hardening'
           : 'Advisory — note';
 
-  L.push(`### 🛡️ node9 agent-security · ${ICON[worst] ?? '🟢'} ${tier}`);
+  L.push(
+    `### 🛡️ node9 agent-security · ${ICON[worst] ?? '🟢'} ${tier}` +
+      (trusted ? ` · introduced by this PR` : '')
+  );
+  if (trusted && (d.escalated || []).length) {
+    L.push('');
+    L.push(
+      `_${d.escalated.length} of these already existed and this PR widens them — a guardrail was removed, not added._`
+    );
+  }
   L.push('');
   L.push(`**${threatLine(anchor, companions)}**`);
   const mech = mechanism(anchor, companions);
@@ -255,9 +338,20 @@ async function main() {
 
   const repo = process.env.GITHUB_REPOSITORY;
   const failOn = (process.env.NODE9_FAIL_ON || 'never').toLowerCase();
+  const scope = (process.env.NODE9_FAIL_ON_SCOPE || 'all').toLowerCase();
   const wantComment = (process.env.NODE9_COMMENT || 'true') !== 'false';
   const { prNumber, headSha } = readEvent();
-  const { fail, conclusion, exitCode } = decide(result.worst, failOn);
+  const { fail, conclusion, exitCode } = decide(
+    gateWorst(result, scope),
+    failOn,
+    !!(result.incomplete || (result.diff && result.diff.incomplete))
+  );
+
+  // Inline annotations, on the file the reviewer is already looking at. Printed before the
+  // API calls so they still land if commenting fails.
+  if ((process.env.NODE9_ANNOTATE || 'true') !== 'false') {
+    for (const line of annotationLines(result)) console.log(line);
+  }
 
   if (wantComment && prNumber) {
     try {
@@ -275,7 +369,11 @@ async function main() {
   }
 
   console.log(
-    `node9 agent-security: worst=${result.worst ?? 'clean'} · fail-on=${failOn} · ${fail ? 'FAILING' : 'ok'}`
+    `node9 agent-security: worst=${result.worst ?? 'clean'}` +
+      (result.diff
+        ? ` · introduced=${result.diff.worstIntroduced ?? 'none'} (base ${result.diff.base})`
+        : '') +
+      ` · fail-on=${failOn}/${scope} · ${fail ? 'FAILING' : conclusion === 'neutral' ? conclusion : 'ok'}`
   );
   return exitCode;
 }
@@ -310,6 +408,193 @@ function selftest() {
     renderComment({ worst: null, findings: [] }).includes('No agent-security findings'),
     'clean copy'
   );
+
+  // ── CI-5 scoping ──────────────────────────────────────────────────────────
+  const f = (severity, over = {}) => ({
+    severity,
+    title: 'X',
+    file: 'w.yml',
+    check: 'CI-2',
+    rule: 'CI-2.injectable-workflow',
+    signals: ['s'],
+    fix: 'do y',
+    ...over,
+  });
+  const withDiff = (diff, findings) => ({ worst: 'critical', findings, inspected: ['a'], diff });
+
+  // The default scope must behave EXACTLY as it did before CI-5 existed.
+  assert.strictEqual(
+    gateWorst(
+      withDiff(
+        {
+          base: 'ok',
+          added: [],
+          escalated: [],
+          unchanged: [f('critical')],
+          removed: [],
+          worstIntroduced: null,
+        },
+        [f('critical')]
+      ),
+      'all'
+    ),
+    'critical',
+    'scope=all still gates on the repo worst (no behaviour change for existing users)'
+  );
+  // A dirty repo whose PR introduces nothing must pass — the whole adoptability argument.
+  assert.strictEqual(
+    gateWorst(
+      withDiff(
+        {
+          base: 'ok',
+          added: [],
+          escalated: [],
+          unchanged: [f('critical')],
+          removed: [],
+          worstIntroduced: null,
+        },
+        [f('critical')]
+      ),
+      'introduced'
+    ),
+    null,
+    'scope=introduced ignores pre-existing findings'
+  );
+  // An unreadable base must NOT read as "nothing new": the scan degrades worstIntroduced
+  // to the absolute worst, and the gate must honour it.
+  assert.strictEqual(
+    gateWorst(
+      withDiff(
+        {
+          base: 'did-not-run',
+          added: [],
+          escalated: [],
+          unchanged: [f('critical')],
+          removed: [],
+          worstIntroduced: 'critical',
+        },
+        [f('critical')]
+      ),
+      'introduced'
+    ),
+    'critical',
+    'an unreadable base falls back to the strict answer'
+  );
+  // An older CLI emits no diff; asking for the narrow gate must not silently open it.
+  assert.strictEqual(
+    gateWorst({ worst: 'critical', findings: [f('critical')] }, 'introduced'),
+    'critical',
+    'no diff in the result → gate on the repo worst, never on nothing'
+  );
+
+  // An incomplete scan must never post a green check, on either scope.
+  assert.strictEqual(
+    decide(null, 'high', true).conclusion,
+    'neutral',
+    'incomplete → neutral, never success'
+  );
+  assert.strictEqual(
+    decide(null, 'high', false).conclusion,
+    'success',
+    'complete + clean → success'
+  );
+  const partial = withDiff(
+    {
+      base: 'ok',
+      added: [],
+      escalated: [],
+      unchanged: [],
+      removed: [],
+      worstIntroduced: null,
+      incomplete: true,
+    },
+    []
+  );
+  partial.worst = null;
+  partial.incomplete = true;
+  const partialComment = renderComment(partial);
+  assert.ok(
+    !partialComment.includes('introduces no agent-security findings'),
+    'a partial scan never claims the PR introduced nothing'
+  );
+  assert.ok(partialComment.includes('could not read every file'), 'a partial scan says so');
+
+  // Annotations follow the same scope.
+  const introducedOnly = withDiff(
+    {
+      base: 'ok',
+      added: [f('high', { file: 'new.yml' })],
+      escalated: [],
+      unchanged: [f('critical')],
+      removed: [],
+      worstIntroduced: 'high',
+    },
+    [f('critical'), f('high', { file: 'new.yml' })]
+  );
+  const anns = annotationLines(introducedOnly);
+  assert.strictEqual(anns.length, 1, 'only the introduced finding is annotated');
+  assert.match(
+    anns[0],
+    /^::error file=new\.yml,line=1,title=node9 CI-2\.injectable-workflow::/,
+    'workflow-command shape'
+  );
+  assert.strictEqual(
+    annotationLines({ worst: 'high', findings: [f('high'), f('medium')] }).length,
+    2,
+    'no diff → annotate everything'
+  );
+
+  // A clean PR on a dirty repo reads GREEN, and still shows the pile collapsed.
+  const cleanPr = renderComment(
+    withDiff(
+      {
+        base: 'ok',
+        added: [],
+        escalated: [],
+        unchanged: [f('critical')],
+        removed: [f('medium')],
+        worstIntroduced: null,
+      },
+      [f('critical')]
+    )
+  );
+  assert.ok(cleanPr.includes('introduces no agent-security findings'), 'clean-PR headline');
+  assert.ok(cleanPr.includes('It also fixes 1'), 'fixes are credited');
+  assert.ok(cleanPr.includes('pre-existing'), 'the pile is still disclosed');
+  assert.ok(cleanPr.includes('<details>'), 'the pile is still listed, collapsed');
+
+  // An untrustworthy base must never render as clean.
+  const blind = renderComment(
+    withDiff(
+      {
+        base: 'did-not-run',
+        added: [],
+        escalated: [],
+        unchanged: [f('critical')],
+        removed: [],
+        worstIntroduced: 'critical',
+      },
+      [f('critical')]
+    )
+  );
+  assert.ok(!blind.includes('introduces no agent-security findings'), 'no false all-clear');
+  assert.ok(blind.includes('Could not read the base commit'), 'says why it cannot compare');
+
+  // Erosion is named as erosion.
+  const eroded = renderComment(
+    withDiff(
+      {
+        base: 'ok',
+        added: [],
+        escalated: [{ finding: f('high'), from: 'medium', to: 'high' }],
+        unchanged: [],
+        removed: [],
+        worstIntroduced: 'high',
+      },
+      [f('high')]
+    )
+  );
+  assert.ok(eroded.includes('widens them'), 'escalation is called out as a removed guardrail');
 
   // threatLine() — LOAD-BEARING honesty guards (overclaiming here undoes the trust the
   // scanner calibration bought). Derived + severity-tiered.

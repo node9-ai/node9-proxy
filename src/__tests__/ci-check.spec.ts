@@ -2307,6 +2307,7 @@ describe('scan-repo closing CTA (presentation only — no scan logic)', () => {
   // Minimal ScanResult builders so we test the renderer in isolation.
   const finding = (severity: import('../ci-check/types').Severity) => ({
     check: 'CI-1',
+    rule: 'CI-1.broad-allow',
     dimension: 'workflows' as const,
     severity,
     title: 'test finding',
