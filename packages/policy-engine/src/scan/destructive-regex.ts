@@ -39,8 +39,28 @@ export const PRIVILEGE_ESCALATION_RE = /\bchmod\s+(0?777|\+x)\b|\bchown\s+root\b
  * patterns assume the proxy normalises ~ in inputs (which it does
  * via path expansion before we see them).
  */
+// ⚠️ THE FIFTH CARRIER of the credential jail, and the one the 2026-09-10
+// alignment first missed -- the design doc said four. This one feeds the
+// canonical extractor (canonical.ts:411, gated to FILE_TOOLS), so it decides
+// what the HISTORICAL scan reports, not what the live gate blocks.
+//
+// Two corrections, both measured:
+//   `.ssh/(id_rsa|...)` named only four key filenames, so `Read ~/.ssh` (the
+//   directory) and `~/.ssh/config` produced no finding at all -- the same
+//   container-vs-contents bug fixed in the other carriers. Now uses the same
+//   rooted anchor: a file inside matches anywhere, the directory itself only
+//   when the path is rooted, so a search PATTERN is not read as a path.
+//
+//   `.env(\.|$|\b)` had no exemptions, so it reported `.env.example` and
+//   `.env.test` as critical file reads while every other carrier allowed them.
+//   Now carries the shared `.env` semantics verbatim.
+//
+// ⚠️ Known and NOT fixed here: canonical.ts:411 also feeds `args.pattern` into
+// this regex, so `Grep {pattern: '.env'}` is reported as a file read of a
+// secret. That is an input-contract bug in the caller, not in this pattern --
+// see stage 5 of doc/credential-jail-architecture.md.
 export const SENSITIVE_PATH_RE =
-  /\.aws\/(credentials|config)\b|\.ssh\/(id_rsa|id_ed25519|id_ecdsa|id_dsa)\b|\.env(\.|$|\b)|\.config\/gcloud\/credentials\.db\b|\.docker\/config\.json\b|\.netrc\b|\.npmrc\b|\.node9\/credentials\.json\b/i;
+  /[\\/]\.aws(?:[\\/]|$)|^\.aws[\\/]|[\\/]\.ssh(?:[\\/]|$)|^\.ssh[\\/]|(?:^|[\\/])\.env(?![\w-])(?:[\w.-]*\.local$|(?!\.(?:example|sample|template)\b)(?!\.test$)[\w.-]*$)|\.config\/gcloud\/credentials\.db\b|\.docker\/config\.json\b|\.netrc\b|\.npmrc\b|\.node9\/credentials\.json\b/i;
 
 /**
  * Tool names that read or grep file contents. Used to gate SENSITIVE_PATH_RE
