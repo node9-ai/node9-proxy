@@ -460,6 +460,10 @@ export const FS_READ_TOOLS = new Set([
   'od',
   'xxd',
   'hexdump',
+  // Emits the file's bytes, re-encoded, so it is a read by the set's own test
+  // ("does it emit file contents"). Absent until 2026-09-10, which is why
+  // `base64 ~/.ssh/id_rsa` printed a private key with no verdict.
+  'base64',
   'strings',
   'sort',
   'uniq',
@@ -515,6 +519,40 @@ const HOME_CACHE_ALLOWLIST = [
   '.rustup/downloads',
 ];
 
+// ⚠️ Each matcher accepts a separator OR END-OF-STRING after the jail name,
+// but only when a separator is present SOMEWHERE -- `[/\\].ssh(sep|$)` or
+// `^.ssh sep`, never `^…$`.
+//
+// Requiring a TRAILING separator jailed the files inside a credential
+// directory and not the directory itself: measured at the real gate,
+// `grep -r TODO ~/.ssh` and `Grep {path:'~/.ssh'}` were ALLOWED while
+// `cat ~/.ssh/id_rsa` was blocked -- one call read every key.
+//
+// The obvious repair, "separator or end", regressed harder: with `^` already
+// allowed at the front, the bare token `.ssh` matched ITSELF, so
+// `grep -r .ssh ~/project` -- a search for the STRING -- became a hard block.
+// "A search pattern never carries a separator" is ALSO false, measured: the
+// second repair turned `rg /.ssh src/` and `grep -rn config/.ssh .` into hard
+// blocks, both allowed on shipped code. `extractLiteralArgs` discards argument
+// POSITION, so a search pattern and a path are the same token here.
+//
+// What survives measurement: the read worth blocking is ROOTED. A credential
+// directory is reached as `~/.ssh` or `/home/u/.ssh`, never as `config/.ssh`.
+// So "ends at the jail name" fires only after `~`, `/` or a drive letter AND a
+// parent segment; `/.ssh` alone stays allowed. A path with a TRAILING
+// separator keeps the shipped, position-free rule -- a file inside the
+// directory is unambiguous wherever it appears.
+//
+// Cost, stated: `cp -r config/.ssh /tmp`, a RELATIVE copy of a credential
+// directory, stays allowed. The DLP tier does not need any of this -- it is
+// handed an already-RESOLVED path and never sees a search pattern, which is
+// why its list keeps the simpler `([/\\]|$)`.
+//
+// The same bug lived independently in dlp/'s SENSITIVE_PATH_PATTERNS, in
+// project-jail.json's *-any-tool rules, and in pipe-chain.ts's own reader
+// list. FOUR copies of one rule, each with a different escaping dialect and a
+// different input contract. Fixed together here; the split itself is a
+// standing finding, not something this change closes.
 const SENSITIVE_PATH_RULES: Array<{
   rule: string;
   reason: string;
@@ -529,12 +567,12 @@ const SENSITIVE_PATH_RULES: Array<{
   {
     rule: 'shield:project-jail:block-read-ssh',
     reason: 'Reading SSH private keys is blocked by project-jail shield',
-    match: (p) => /(^|[\\/])\.ssh[\\/]/i.test(p),
+    match: (p) => /([\\/]\.ssh[\\/]|^\.ssh[\\/]|^(?:[~/]|[A-Za-z]:).*[\\/]\.ssh$)/i.test(p),
   },
   {
     rule: 'shield:project-jail:block-read-aws',
     reason: 'Reading AWS credentials is blocked by project-jail shield',
-    match: (p) => /(^|[\\/])\.aws[\\/]/i.test(p),
+    match: (p) => /([\\/]\.aws[\\/]|^\.aws[\\/]|^(?:[~/]|[A-Za-z]:).*[\\/]\.aws$)/i.test(p),
   },
   {
     // Mirrors the JSON shield's `.env` pattern (project-jail.json's
@@ -579,7 +617,9 @@ const SENSITIVE_PATH_RULES: Array<{
     //
     // shields.test.ts:983-995 is the canonical contract; keep both in step.
     match: (p) =>
-      /(?:^|[\\/])\.env(?![\w-])(?!\.(?:example|sample|template)\b)(?!\.test$)[\w.-]*$/i.test(p),
+      /(?:^|[\\/])\.env(?![\w-])(?:[\w.-]*\.local$|(?!\.(?:example|sample|template)\b)(?!\.test$)[\w.-]*$)/i.test(
+        p
+      ),
   },
   {
     // verdict: 'review' (not 'block') is a deliberate design choice
