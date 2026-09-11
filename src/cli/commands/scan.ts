@@ -40,7 +40,7 @@ import { matchCanaryArgs } from '../../dlp';
 import { canaryCtxValues } from '../../canary/registry';
 import { pricingFor } from '../../pricing/litellm';
 import { geminiPriceFor } from '../../cost-gemini';
-import { codexSessionCost } from '../../cost-codex';
+import { listCodexSessionFiles, parseCodexUsage, codexUsageInWindow } from '../../cost-codex';
 import { parseCopilotSession } from '../../cost-copilot';
 import { canonicalToolInput } from '../../utils/hook-payload';
 import type { SmartRule } from '../../core';
@@ -938,40 +938,7 @@ function countScanFiles(): number {
       /* ignore */
     }
   }
-  const codexDir = path.join(os.homedir(), '.codex', 'sessions');
-  if (fs.existsSync(codexDir)) {
-    try {
-      for (const year of fs.readdirSync(codexDir)) {
-        const yp = path.join(codexDir, year);
-        try {
-          if (!fs.statSync(yp).isDirectory()) continue;
-          for (const month of fs.readdirSync(yp)) {
-            const mp = path.join(yp, month);
-            try {
-              if (!fs.statSync(mp).isDirectory()) continue;
-              for (const day of fs.readdirSync(mp)) {
-                const dp = path.join(mp, day);
-                try {
-                  if (!fs.statSync(dp).isDirectory()) continue;
-                  // Must match the walker below, or the progress bar counts
-                  // fewer files than actually get scanned.
-                  total += listSessionFiles(dp).length;
-                } catch {
-                  continue;
-                }
-              }
-            } catch {
-              continue;
-            }
-          }
-        } catch {
-          continue;
-        }
-      }
-    } catch {
-      /* ignore */
-    }
-  }
+  total += listCodexSessionFiles().length;
   return total;
 }
 
@@ -2505,7 +2472,6 @@ export function scanCodexHistory(
   onLine?: () => void
 ): ScanResult {
   const canaryVals = safeCanaryScanValues();
-  const sessionsBase = path.join(os.homedir(), '.codex', 'sessions');
   const result: ScanResult = {
     filesScanned: 0,
     sessions: 0,
@@ -2523,41 +2489,7 @@ export function scanCodexHistory(
   };
   const dedup = emptyScanDedup();
 
-  if (!fs.existsSync(sessionsBase)) return result;
-
-  // Collect all .jsonl files under YYYY/MM/DD structure
-  const jsonlFiles: string[] = [];
-  try {
-    for (const year of fs.readdirSync(sessionsBase)) {
-      const yearPath = path.join(sessionsBase, year);
-      try {
-        if (!fs.statSync(yearPath).isDirectory()) continue;
-      } catch {
-        continue;
-      }
-      for (const month of fs.readdirSync(yearPath)) {
-        const monthPath = path.join(yearPath, month);
-        try {
-          if (!fs.statSync(monthPath).isDirectory()) continue;
-        } catch {
-          continue;
-        }
-        for (const day of fs.readdirSync(monthPath)) {
-          const dayPath = path.join(monthPath, day);
-          try {
-            if (!fs.statSync(dayPath).isDirectory()) continue;
-          } catch {
-            continue;
-          }
-          for (const file of fs.readdirSync(dayPath)) {
-            if (file.endsWith('.jsonl')) jsonlFiles.push(path.join(dayPath, file));
-          }
-        }
-      }
-    }
-  } catch {
-    return result;
-  }
+  const jsonlFiles = listCodexSessionFiles();
 
   const ruleSources = buildRuleSources();
 
@@ -2583,12 +2515,6 @@ export function scanCodexHistory(
       timestamp: string;
     }> = [];
 
-    // Track last cumulative token count for cost
-    let lastTotalInput = 0;
-    let lastTotalCached = 0;
-    let lastTotalOutput = 0;
-    let model = ''; // turn_context.model, last-wins — for per-model pricing
-
     for (const line of lines) {
       if (!line.trim()) continue;
       onLine?.();
@@ -2606,20 +2532,6 @@ export function scanCodexHistory(
         startTime = String(payload['timestamp'] ?? '');
         const cwd = String(payload['cwd'] ?? '');
         projLabel = stripTerminalEscapes(cwd.replace(os.homedir(), '~')).slice(0, 40);
-        continue;
-      }
-
-      if (entry.type === 'turn_context' && typeof payload['model'] === 'string') {
-        model = payload['model'];
-        continue;
-      }
-
-      if (entry.type === 'event_msg' && payload['type'] === 'token_count') {
-        const info = payload['info'] as Record<string, unknown> | null;
-        const usage = (info?.['total_token_usage'] ?? {}) as Record<string, number>;
-        lastTotalInput = usage['input_tokens'] ?? lastTotalInput;
-        lastTotalCached = usage['cached_input_tokens'] ?? lastTotalCached;
-        lastTotalOutput = usage['output_tokens'] ?? lastTotalOutput;
         continue;
       }
 
@@ -2796,40 +2708,8 @@ export function scanCodexHistory(
       }
     }
 
-    // Window the cost at SESSION level, matching report-audit.ts:658.
-    //
-    // Codex reports total_token_usage cumulatively — last row wins — so the
-    // figure below is the session's whole lifetime, not the part inside the
-    // window. The per-row guard above cannot help: it compares `startTime`
-    // (the session's own start) and only runs for `function_call` rows, so it
-    // filters findings and loops while token_count rows sail past it.
-    //
-    // Result before this: `node9 scan --days 30` reported every Codex session
-    // ever recorded. Measured on the founder's machine — 41 sessions, $13.69 —
-    // against `node9 report --period 30d` at 25 sessions, $1.04. Same data,
-    // same shared pricing function, 13x apart, because one of them windowed
-    // and the other did not.
-    //
-    // Deliberately NOT the ccusage per-event delta approach here. That is the
-    // more correct model for a session straddling the boundary, but measured:
-    // ZERO of 41 sessions straddle. Building it now would solve a case this
-    // data does not contain while leaving the actual gap — a missing filter —
-    // open. Recorded in doc/roadmap/active/cost-accuracy-and-plans.md instead.
-    // A session with no session_meta timestamp is EXCLUDED once a window is
-    // set, matching report-audit.ts:656 (`if (!sessionStart) return`). We
-    // cannot place it in time, and the point of this change is that the two
-    // paths agree. `new Date('')` is Invalid Date and every comparison against
-    // it is false, so the explicit `!== ''` documents the intent rather than
-    // relying on NaN semantics to carry it.
-    const withinWindow = !startDate || (startTime !== '' && new Date(startTime) >= startDate);
-    if (withinWindow) {
-      // Accumulate session cost via the SHARED codexSessionCost (price +
-      // arithmetic in one place) — the same source report + upload use.
-      result.totalCostUSD += codexSessionCost(model, {
-        input: lastTotalInput,
-        cached: lastTotalCached,
-        output: lastTotalOutput,
-      });
+    for (const event of codexUsageInWindow(parseCodexUsage(lines), startDate)) {
+      result.totalCostUSD += event.costUSD;
     }
 
     result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'codex'));

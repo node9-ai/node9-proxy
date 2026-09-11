@@ -1,3 +1,4 @@
+import { codexSessionsDir as defaultCodexSessionsDir } from '../../cost-codex';
 // src/tui/dashboard/data.ts
 //
 // Data plumbing for `node9 monitor`. No React in this file — pure
@@ -798,7 +799,7 @@ export async function loadReportAuditAsync(period: ReportPeriod): Promise<Aggreg
   // and stdin keypresses dispatch promptly. Net UX: [2] takes ~200 ms
   // longer to finish loading, but q quits ~instantly throughout.
   const claudeProjectsDir = path.join(os.homedir(), '.claude', 'projects');
-  const codexSessionsDir = path.join(os.homedir(), '.codex', 'sessions');
+  const codexSessionsDir = defaultCodexSessionsDir();
   const geminiTmpDir = path.join(os.homedir(), '.gemini', 'tmp');
   const { start, end } = getDateRange(period, new Date());
   const entries = await readAuditEntriesAsync();

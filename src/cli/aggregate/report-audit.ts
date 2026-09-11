@@ -21,8 +21,13 @@ import os from 'os';
 import path from 'path';
 
 import { decodeProjectDirName } from '../../costSync';
-import { pricingFor, normalizeModel } from '../../pricing/litellm';
-import { codexSessionCost } from '../../cost-codex';
+import { pricingFor } from '../../pricing/litellm';
+import {
+  codexSessionsDir as defaultCodexSessionsDir,
+  listCodexSessionFiles,
+  parseCodexUsage,
+  codexUsageInWindow,
+} from '../../cost-codex';
 import type { BuildReportJsonInput, ReportPeriod } from '../render/report-json';
 import { classifyDecision, NON_DECISION_SOURCES } from '../../audit/decision';
 import { listSessionFiles } from '../../session-files';
@@ -611,105 +616,22 @@ function processCodexCostFile(
     return;
   }
 
-  let sessionStart = '';
-  let model = '';
-  let lastTotalInput = 0;
-  let lastTotalCached = 0;
-  let lastTotalOutput = 0;
-  let sessionToolCalls = 0;
-
+  const parsed = parseCodexUsage(lines);
+  for (const event of codexUsageInWindow(parsed, start, end)) {
+    acc.total += event.costUSD;
+    acc.byDay.set(event.date, (acc.byDay.get(event.date) ?? 0) + event.costUSD);
+    acc.byModel.set(event.model, (acc.byModel.get(event.model) ?? 0) + event.costUSD);
+  }
   for (const line of lines) {
-    if (!line.trim()) continue;
-    let entry: { type: string; payload?: Record<string, unknown> };
     try {
-      entry = JSON.parse(line) as typeof entry;
+      const entry = JSON.parse(line);
+      if (entry?.type !== 'response_item' || entry.payload?.type !== 'function_call') continue;
+      const ts = new Date(entry.timestamp ?? parsed.sessionStart);
+      if (ts >= start && ts <= end) acc.toolCalls++;
     } catch {
-      continue;
-    }
-
-    const p = (entry.payload ?? {}) as Record<string, unknown>;
-
-    if (entry.type === 'session_meta') {
-      sessionStart = String(p['timestamp'] ?? '');
-      continue;
-    }
-
-    // Codex carries the model on turn_context; last-wins, matching cost-codex.
-    if (entry.type === 'turn_context' && typeof p['model'] === 'string') {
-      model = p['model'];
-      continue;
-    }
-
-    if (entry.type === 'event_msg' && p['type'] === 'token_count') {
-      const info = (p['info'] ?? {}) as Record<string, unknown>;
-      const usage = (info['total_token_usage'] ?? {}) as Record<string, number>;
-      lastTotalInput = usage['input_tokens'] ?? lastTotalInput;
-      lastTotalCached = usage['cached_input_tokens'] ?? lastTotalCached;
-      lastTotalOutput = usage['output_tokens'] ?? lastTotalOutput;
-    }
-
-    if (entry.type === 'response_item' && p['type'] === 'function_call') {
-      sessionToolCalls++;
+      /* malformed JSONL */
     }
   }
-
-  if (!sessionStart) return;
-  const ts = new Date(sessionStart);
-  if (ts < start || ts > end) return;
-
-  // Per-model cost via the SHARED codexSessionCost (price + arithmetic in one
-  // place) — the SAME source the upload path uses, not a flat gpt-5 rate.
-  const cost = codexSessionCost(model, {
-    input: lastTotalInput,
-    cached: lastTotalCached,
-    output: lastTotalOutput,
-  });
-  acc.total += cost;
-  acc.toolCalls += sessionToolCalls;
-  const dateKey = sessionStart.slice(0, 10);
-  acc.byDay.set(dateKey, (acc.byDay.get(dateKey) ?? 0) + cost);
-  const normModel = normalizeModel(model || 'gpt-5');
-  acc.byModel.set(normModel, (acc.byModel.get(normModel) ?? 0) + cost);
-}
-
-/** Build the flat list of session JSONL paths under `sessionsBase`. The
- *  Codex layout is YYYY/MM/DD/*.jsonl; this walks the date dirs once so
- *  both sync and async cost loaders can iterate the same path list. */
-function listCodexSessionFiles(sessionsBase: string): string[] {
-  const jsonlFiles: string[] = [];
-  if (!fs.existsSync(sessionsBase)) return jsonlFiles;
-  try {
-    for (const year of fs.readdirSync(sessionsBase)) {
-      const yearPath = path.join(sessionsBase, year);
-      try {
-        if (!fs.statSync(yearPath).isDirectory()) continue;
-      } catch {
-        continue;
-      }
-      for (const month of fs.readdirSync(yearPath)) {
-        const monthPath = path.join(yearPath, month);
-        try {
-          if (!fs.statSync(monthPath).isDirectory()) continue;
-        } catch {
-          continue;
-        }
-        for (const day of fs.readdirSync(monthPath)) {
-          const dayPath = path.join(monthPath, day);
-          try {
-            if (!fs.statSync(dayPath).isDirectory()) continue;
-          } catch {
-            continue;
-          }
-          for (const file of fs.readdirSync(dayPath)) {
-            if (file.endsWith('.jsonl')) jsonlFiles.push(path.join(dayPath, file));
-          }
-        }
-      }
-    }
-  } catch {
-    return [];
-  }
-  return jsonlFiles;
 }
 
 /** Merge per-model cost maps (e.g. Claude + Codex) into one for the report's
@@ -1037,7 +959,7 @@ export function aggregateReportFromAudit(
   const auditLogPath = opts.auditLogPath ?? path.join(os.homedir(), '.node9', 'audit.log');
   const claudeProjectsDir =
     opts.claudeProjectsDir ?? path.join(os.homedir(), '.claude', 'projects');
-  const codexSessionsDir = opts.codexSessionsDir ?? path.join(os.homedir(), '.codex', 'sessions');
+  const codexSessionsDir = opts.codexSessionsDir ?? defaultCodexSessionsDir();
   const geminiTmpDir = opts.geminiTmpDir ?? path.join(os.homedir(), '.gemini', 'tmp');
 
   const hasAuditFile = fs.existsSync(auditLogPath);
