@@ -38,3 +38,8 @@ Thumbs.db
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Documentation lives on the site; this repo keeps only the README (42b5b64).
+# A stray docs/ here would ship in the package and drift from the published
+# pages, so it stays out of git even when someone writes notes locally.
+docs/
