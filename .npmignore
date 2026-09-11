@@ -27,9 +27,3 @@ CHANGELOG.md
 .nvmrc
 .env*
 
-# Documentation is not shipped in the package. node9.ai fetches docs/ from this
-# repository at build time (a sparse clone of the latest release tag), so the
-# pages have one source and the tests here can check them without the site
-# taking a dependency on the CLI.
-# See doc/roadmap/active/docs-single-source-design.md.
-docs/
