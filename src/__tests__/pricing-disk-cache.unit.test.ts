@@ -40,16 +40,22 @@ function cacheFile(): string {
 }
 
 describe('pricingFor — reads the on-disk cache on the sync path (local == cloud)', () => {
-  it('uses the disk rate for a cache-only model (gpt-5.4-mini), not the bundled gpt-5 prefix', () => {
-    writeCache({ 'gpt-5.4-mini': [0.75e-6, 4.5e-6, 0, 0.075e-6] });
+  it('keeps exact lookup independent of memoized prefix lookup', () => {
+    expect(pricingFor('gpt-5-unknown')).not.toBeNull();
+    expect(pricingFor('gpt-5-unknown', { exact: true })).toBeNull();
+    expect(pricingFor('gpt-5-unknown')).not.toBeNull();
+  });
+
+  it('prefers a refreshed disk rate over the bundled Codex rate', () => {
+    writeCache({ 'gpt-5.4-mini': [0.8e-6, 4.8e-6, 0, 0.08e-6] });
     const p = pricingFor('gpt-5.4-mini');
-    expect(p).toEqual([0.75e-6, 4.5e-6, 0, 0.075e-6]);
+    expect(p).toEqual([0.8e-6, 4.8e-6, 0, 0.08e-6]);
     expect(p![0]).not.toBe(1.25e-6); // the bundled gpt-5 fallback ($1.25/M)
   });
 
-  it('falls back to bundled gpt-5 when there is no disk cache', () => {
+  it('uses the current bundled Codex rate when there is no disk cache', () => {
     const p = pricingFor('gpt-5.4-mini');
-    expect(p![0]).toBe(1.25e-6); // bundled gpt-5 prefix match
+    expect(p![0]).toBe(0.75e-6); // exact bundled gpt-5.4-mini rate
   });
 
   it('USES a stale disk cache rather than reaching past it for something older', () => {
@@ -69,9 +75,9 @@ describe('pricingFor — reads the on-disk cache on the sync path (local == clou
     // Safe because only ensurePricingLoaded (async — daemon and upload paths)
     // enforces the TTL, and it refetches when it trips. Fresh prices are
     // always on their way.
-    writeCache({ 'gpt-5.4-mini': [0.75e-6, 4.5e-6, 0, 0.075e-6] }, 2 * 24 * 60 * 60 * 1000);
+    writeCache({ 'gpt-5.4-mini': [0.8e-6, 4.8e-6, 0, 0.08e-6] }, 2 * 24 * 60 * 60 * 1000);
     const p = pricingFor('gpt-5.4-mini');
-    expect(p![0]).toBe(0.75e-6); // the stale disk value, not bundled gpt-5
+    expect(p![0]).toBe(0.8e-6); // stale disk value differs from the bundled rate
     expect(p![0]).not.toBe(1.25e-6);
   });
 
@@ -80,6 +86,6 @@ describe('pricingFor — reads the on-disk cache on the sync path (local == clou
     writeCache({ 'gpt-5.4-mini': [0.75e-6, 4.5e-6, 0, 0.075e-6] }, 0);
     fs.writeFileSync(cacheFile(), 'not json{{{');
     const p = pricingFor('gpt-5.4-mini');
-    expect(p![0]).toBe(1.25e-6);
+    expect(p![0]).toBe(0.75e-6);
   });
 });

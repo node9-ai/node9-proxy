@@ -607,12 +607,31 @@ const DLP_PATTERNS_GLOBAL: Array<{ pattern: DlpPattern; globalRegex: RegExp }> =
 // ── Sensitive File Path Blocklist ─────────────────────────────────────────────
 // Blocks access attempts to credential/key files before their content is read.
 const SENSITIVE_PATH_PATTERNS: RegExp[] = [
-  /[/\\]\.ssh[/\\]/i,
-  /[/\\]\.aws[/\\]/i,
+  /[/\\]\.ssh([/\\]|$)/i,
+  /[/\\]\.aws([/\\]|$)/i,
   /[/\\]\.config[/\\]gcloud[/\\]/i,
   /[/\\]\.azure[/\\]/i,
   /[/\\]\.kube[/\\]config$/i,
-  /[/\\]\.env($|\.)/i, // .env, .env.local, .env.production — not .envoy
+  // ⚠️ ONE SEMANTIC, FOUR COPIES. This is the AST tier's `.env` rule verbatim
+  // (shell/index.ts SENSITIVE_PATH_RULES), whose reasoning is documented there:
+  // structural suffix chain rather than a hand-written list, `example|sample|
+  // template` exempt because a fixture stays a fixture whatever follows, and
+  // `.test` anchored because `test` names an ENVIRONMENT -- `.env.test` is the
+  // committed template, `.env.test.local` is gitignored and holds real values.
+  //
+  // It was previously `[/\\]\.env($|\.)` with NO exemptions, so `Read .env.example`
+  // blocked while `cat .env.example` allowed: the same file, opposite verdicts,
+  // decided only by which tool asked. See src/__tests__/jail-both-doors.test.ts,
+  // which is the contract that now holds these copies in step, and stage 5 of
+  // doc/credential-jail-architecture.md, which replaces them with one generated
+  // source.
+  // ⚠️ The `.local` branch comes FIRST and takes no exemption. A fixture stays a
+  // fixture whatever follows it -- `.env.example.md` is documentation -- but
+  // `.env.example.local` is gitignored by the `.env*.local` convention and holds
+  // real values, exactly the reasoning that anchors `(?!\.test$)` rather than
+  // using `\b`. Without this branch the fixture exemption also bought a two-step
+  // bypass: `cp .env .env.sample`, then read the copy.
+  /[/\\]\.env(?![\w-])(?:[\w.-]*\.local$|(?!\.(?:example|sample|template)\b)(?!\.test$)[\w.-]*$)/i, // .env + any suffix chain; fixtures exempt unless .local
   /[/\\]\.git-credentials$/i,
   /[/\\]\.npmrc$/i,
   /[/\\]\.docker[/\\]config\.json$/i,

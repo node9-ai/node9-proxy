@@ -14,7 +14,7 @@ import os from 'os';
 import { agentDisplayName, agentColorName, agentBadgeText } from '../../scan-summary';
 import { pricingFor } from '../../pricing/litellm';
 import { geminiPriceFor } from '../../cost-gemini';
-import { codexSessionCost } from '../../cost-codex';
+import { listCodexSessionFiles, parseCodexUsage, codexUsageInWindow } from '../../cost-codex';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -467,9 +467,6 @@ function buildCodexSessions(
   days: number | null,
   allAuditEntries: ReturnType<typeof loadAuditEntries>
 ): SessionSummary[] {
-  const sessionsBase = path.join(os.homedir(), '.codex', 'sessions');
-  if (!fs.existsSync(sessionsBase)) return [];
-
   const cutoff =
     days !== null
       ? (() => {
@@ -480,38 +477,7 @@ function buildCodexSessions(
         })()
       : null;
 
-  const jsonlFiles: string[] = [];
-  try {
-    for (const year of fs.readdirSync(sessionsBase)) {
-      const yearPath = path.join(sessionsBase, year);
-      try {
-        if (!fs.statSync(yearPath).isDirectory()) continue;
-      } catch {
-        continue;
-      }
-      for (const month of fs.readdirSync(yearPath)) {
-        const monthPath = path.join(yearPath, month);
-        try {
-          if (!fs.statSync(monthPath).isDirectory()) continue;
-        } catch {
-          continue;
-        }
-        for (const day of fs.readdirSync(monthPath)) {
-          const dayPath = path.join(monthPath, day);
-          try {
-            if (!fs.statSync(dayPath).isDirectory()) continue;
-          } catch {
-            continue;
-          }
-          for (const file of fs.readdirSync(dayPath)) {
-            if (file.endsWith('.jsonl')) jsonlFiles.push(path.join(dayPath, file));
-          }
-        }
-      }
-    }
-  } catch {
-    return [];
-  }
+  const jsonlFiles = listCodexSessionFiles();
 
   const summaries: SessionSummary[] = [];
 
@@ -529,11 +495,6 @@ function buildCodexSessions(
     let firstPrompt = '';
     const toolCalls: ToolCall[] = [];
     let lastToolTs = '';
-    let lastTotalInput = 0;
-    let lastTotalCached = 0;
-    let lastTotalOutput = 0;
-    let model = ''; // turn_context.model, last-wins — for per-model pricing
-
     for (const line of lines) {
       if (!line.trim()) continue;
       let entry: { type: string; timestamp?: string; payload?: Record<string, unknown> };
@@ -552,22 +513,8 @@ function buildCodexSessions(
         continue;
       }
 
-      if (entry.type === 'turn_context' && typeof p['model'] === 'string') {
-        model = p['model'];
-        continue;
-      }
-
       if (entry.type === 'event_msg' && p['type'] === 'user_message' && !firstPrompt) {
         firstPrompt = String(p['message'] ?? '');
-        continue;
-      }
-
-      if (entry.type === 'event_msg' && p['type'] === 'token_count') {
-        const info = (p['info'] ?? {}) as Record<string, unknown>;
-        const usage = (info['total_token_usage'] ?? {}) as Record<string, number>;
-        lastTotalInput = usage['input_tokens'] ?? lastTotalInput;
-        lastTotalCached = usage['cached_input_tokens'] ?? lastTotalCached;
-        lastTotalOutput = usage['output_tokens'] ?? lastTotalOutput;
         continue;
       }
 
@@ -584,13 +531,18 @@ function buildCodexSessions(
     }
 
     if (!sessionId || !startTime) continue;
-    if (cutoff && new Date(startTime) < cutoff) continue;
-
-    const costUSD = codexSessionCost(model, {
-      input: lastTotalInput,
-      cached: lastTotalCached,
-      output: lastTotalOutput,
-    });
+    const parsedUsage = parseCodexUsage(lines);
+    const usageEvents = codexUsageInWindow(parsedUsage, cutoff);
+    if (
+      cutoff &&
+      new Date(startTime) < cutoff &&
+      usageEvents.length === 0 &&
+      !toolCalls.some((call) => new Date(call.timestamp) >= cutoff)
+    )
+      continue;
+    const costUSD = usageEvents.reduce((sum, event) => sum + event.costUSD, 0);
+    const lastUsageTs = parsedUsage.events.at(-1)?.timestamp ?? '';
+    if (lastUsageTs > lastToolTs) lastToolTs = lastUsageTs;
 
     const windowEnd = new Date(
       Math.max(new Date(startTime).getTime(), lastToolTs ? new Date(lastToolTs).getTime() : 0) +

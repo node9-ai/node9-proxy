@@ -43,6 +43,9 @@ export {
   detectInlineExec,
   AST_FS_REGEX_RULES,
   FS_READ_TOOLS,
+  COMMAND_WRAPPERS,
+  NET_BINARIES,
+  unwrapCommandHead,
   extractShellDestinations,
   parseDestHost,
 } from './shell';

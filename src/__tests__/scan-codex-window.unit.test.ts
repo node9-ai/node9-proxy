@@ -124,7 +124,7 @@ describe('scanCodexHistory — cost window', () => {
       ].join('\n')
     );
     expect(costFor(new Date(Date.now() - 30 * DAY))).toBe(0);
-    // ...but with no window at all it still counts, since nothing is excluded.
-    expect(costFor(null)).toBeGreaterThan(0);
+    // Without any timestamp the usage cannot be assigned to a reporting day.
+    expect(costFor(null)).toBe(0);
   });
 });

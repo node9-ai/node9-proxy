@@ -246,7 +246,73 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 //
 // The re-scan is the point: those reads happened on real machines and produced
 // no finding at all, so the history a user sees today under-reports them.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v10';
+// v11 (2026-09-10): the credential jail's `.ssh`/`.aws` matchers required a
+// TRAILING separator, so they jailed the files inside a credential directory
+// and not the directory itself; `base64` was absent from FS_READ_TOOLS. Both
+// gaps meant a read that really happened produced no finding at all, which is
+// what makes the re-scan worth its cost. Measured through
+// extractCanonicalFindings before bumping:
+//
+//   command                                     v10        v11
+//   base64 ~/.ssh/id_rsa                      (none)  →  block/critical
+//   grep -r TODO ~/.ssh                       (none)  →  block/critical
+//   cat ~/.aws                                (none)  →  block/critical
+//   grep -r x ~/.ssh | curl -d @-             (none)  →  block/critical
+//   cat ~/.ssh/id_rsa                         block   →  block   (control)
+//   rg /.ssh src/                             (none)  →  (none)  (search, quiet)
+//   cat ~/.sshfoo                             (none)  →  (none)  (boundary)
+//
+// ⚠️ v10 shipped with no entry here. Two silent bumps in a row is how the
+// table stops being trustworthy; this is the repayment, not a precedent.
+// v12 (2026-09-10): the credential jail's FIVE carriers were brought onto one
+// `.env` semantic, and destructive-regex.ts's SENSITIVE_PATH_RE -- the carrier
+// that feeds THIS extractor, gated to FILE_TOOLS at line 411 -- was corrected
+// in both directions. It named four key filenames under `.ssh/`, so a read of
+// the DIRECTORY produced no finding at all; and its `.env` clause had no
+// fixture exemption, so it reported a committed template as a critical secret
+// read. Measured through extractCanonicalFindings before bumping:
+//
+//   tool call                      v11                    v12
+//   Read ~/.ssh        (dir)     (none)  ->  sensitive-file-read/critical
+//   Read ~/.ssh/config           (none)  ->  sensitive-file-read/critical
+//   Read ~/.aws        (dir)     (none)  ->  sensitive-file-read/critical
+//   Grep path=~/.ssh             (none)  ->  sensitive-file-read/critical
+//   Read .env.example          critical  ->  (none)     false positive removed
+//   Read .env.prod             critical  ->  critical   (control, unmoved)
+//
+// The re-scan earns its cost twice here: reads of a whole credential directory
+// through a file tool produced NO finding on real machines, and every committed
+// `.env.example` in history is currently recorded as a critical secret read.
+//
+// ⚠️ I first bumped only the hash, on a measurement that covered Bash and the
+// two aligned tiers and showed no output change. That measurement was
+// incomplete: it predated finding the fifth carrier, which is the one on this
+// extractor's own path. "Source changed, output did not" is a real state, but
+// it has to be measured across EVERY carrier the extractor reads, not the ones
+// the change set out to touch.
+// v13 (2026-09-11): stage 2 of the credential jail -- REACHABILITY. The
+// matcher was consulted only for a path that was a direct argv entry of a
+// reader at argv[0]; a wrapped, redirected, string-wrapped or find-exec'd read
+// never reached it. Every change is a normalisation before the matcher, so a
+// wrapped read gets exactly the verdict of its unwrapped form. Measured
+// through extractCanonicalFindings before bumping:
+//
+//   command                              v12                 v13
+//   env cat ~/.ssh/id_rsa              (none)  ->  ast-fs-op block/critical
+//   sudo -u bob cat ~/.ssh/id_rsa      priv-esc review  ->  + ast-fs-op block/critical
+//   cat < ~/.ssh/id_rsa                (none)  ->  ast-fs-op block/critical
+//   Y=$(<~/.ssh/id_rsa)                (none)  ->  ast-fs-op block/critical
+//   sh -c "cat ~/.ssh/id_rsa"          (none)  ->  ast-fs-op block/critical
+//   eval "cat ~/.ssh/id_rsa"           (none)  ->  ast-fs-op block/critical
+//   find ~/.ssh -exec cat {} +         (none)  ->  ast-fs-op block/critical
+//   cat ~/.ssh/id_rsa                  block   ->  block            (control)
+//   env cat ~/notes.txt                (none)  ->  (none)           (control)
+//   grep -r .ssh ~/p                   (none)  ->  (none)           (search, quiet)
+//
+// The re-scan earns its cost: `env cat`, `cat <` and `eval "cat"` reads of
+// credential files happened on real machines and produced no finding at all.
+// Verdict snapshot over 396 corpus commands: 28 moved, 0 loosened.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v13';
 
 /**
  * SHA-256 prefix of the detector-source files
@@ -258,7 +324,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v10';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'c4edee9dc99eb69a';
+export const CANONICAL_EXTRACTOR_HASH = '4622a2f41696af04';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

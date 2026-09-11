@@ -21,13 +21,13 @@ const SESSION = [
 
 describe('parseCodexSession', () => {
   it('takes the final cumulative usage and attributes model/cwd/runId', () => {
-    const e = parseCodexSession(SESSION)!;
+    const e = parseCodexSession(SESSION)[0]!;
     expect(e).not.toBeNull();
     // Last token_count wins (cumulative): input 2000, cached 800 → fresh 1200.
     expect(e.inputTokens).toBe(1200);
     expect(e.cacheReadTokens).toBe(800);
     expect(e.outputTokens).toBe(120);
-    expect(e.cacheWriteTokens).toBe(0); // OpenAI: no cache-write
+    expect(e.cacheWriteTokens).toBe(0); // absent in this legacy fixture
     expect(e.date).toBe('2026-06-11');
     expect(e.runId).toBe('sess-abc');
     expect(e.workingDir).toBe('/home/nadav/node9');
@@ -35,20 +35,22 @@ describe('parseCodexSession', () => {
     expect(e.costUSD).toBeGreaterThan(0);
   });
 
-  it('returns null without a session_meta timestamp or any usage', () => {
-    expect(parseCodexSession(['{"type":"turn_context","payload":{"model":"gpt-5.4"}}'])).toBeNull();
+  it('returns no rows without usable timestamped usage', () => {
+    expect(parseCodexSession(['{"type":"turn_context","payload":{"model":"gpt-5.4"}}'])).toEqual(
+      []
+    );
     expect(
       parseCodexSession([
         '{"type":"session_meta","payload":{"timestamp":"2026-06-11T00:00:00Z","id":"s"}}',
       ])
-    ).toBeNull(); // meta but no token_count
+    ).toEqual([]); // meta but no token_count
   });
 
   it('still prices a session whose model field is absent (fallback, not $0)', () => {
     const e = parseCodexSession([
       '{"type":"session_meta","payload":{"timestamp":"2026-06-11T00:00:00Z","id":"s2"}}',
       '{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500,"cached_input_tokens":0,"output_tokens":40}}}}',
-    ])!;
+    ])[0]!;
     expect(e.inputTokens).toBe(500);
     expect(e.costUSD).toBeGreaterThan(0);
   });

@@ -26,10 +26,12 @@ import { keySafeEnv } from './env';
 
 export const CLI = path.resolve(__dirname, '../../../dist/cli.js');
 
-export type Verdict = 'allow' | 'block' | 'held' | 'error';
+export type Verdict = 'allow' | 'review' | 'block' | 'held' | 'error';
 
 export interface ProbeResult {
   verdict: Verdict;
+  /** spawnSync error. CLAUDE.md: a silent spawn failure must not pass tests. */
+  error?: Error;
   status: number | null;
   stdout: string;
   stderr: string;
@@ -77,6 +79,31 @@ export function runCli(home: string, args: string[], timeoutMs = 60000) {
  * `hook_event_name` is mandatory — check.ts no-ops without it, which silently
  * turns every probe into a false pass.
  */
+/**
+ * One line per exit-code/JSON combination. `ask` rides on exit 0 with
+ * `permissionDecision:"ask"` in the JSON; before 2026-09-11 it read as 'allow',
+ * which is how a taint-tier pre-emption of the jail's hard block looked like a
+ * stage-2 failure instead of the downgrade it was. Claude Code prompts on it
+ * interactively and DENIES it headless (measured): a review, never an allow.
+ */
+function verdictOf(status: number | null, held: boolean, stdout: string): Verdict {
+  if (held) return 'held';
+  if (status === 2) return 'block';
+  if (status !== 0) return 'error';
+  return /"permissionDecision":"ask"/.test(stdout) ? 'review' : 'allow';
+}
+
+/** A home with a real `~/.ssh/id_rsa` (built-in jail) and an ordinary file. */
+export function seedBuiltinJailHome(prefix: string): { home: string; key: string; plain: string } {
+  const home = makeHome(prefix);
+  fs.mkdirSync(path.join(home, '.ssh'), { recursive: true });
+  const key = path.join(home, '.ssh', 'id_rsa');
+  const plain = path.join(home, 'notes.txt');
+  fs.writeFileSync(key, 'not a real key\n');
+  fs.writeFileSync(plain, 'hello\n');
+  return { home, key, plain };
+}
+
 export function probe(
   home: string,
   toolName: string,
@@ -108,14 +135,14 @@ export function probe(
   });
   // A killed-by-timeout probe means the gate held the call for a human.
   const held = r.signal !== null || r.status === null;
-  const verdict: Verdict = held
-    ? 'held'
-    : r.status === 0
-      ? 'allow'
-      : r.status === 2
-        ? 'block'
-        : 'error';
-  return { verdict, status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+  const verdict = verdictOf(r.status, held, r.stdout ?? '');
+  return {
+    verdict,
+    status: r.status,
+    stdout: r.stdout ?? '',
+    stderr: r.stderr ?? '',
+    error: r.error,
+  };
 }
 
 /** `node9 explain` — the REPORTING path. Kept only so a gauntlet can compare it

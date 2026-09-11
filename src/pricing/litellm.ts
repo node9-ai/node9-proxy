@@ -73,6 +73,18 @@ const BUNDLED_PRICING: Record<string, PricingTuple> = {
   'gpt-5': [1.25e-6, 10e-6, 0, 0.125e-6],
   'gpt-5-codex': [1.25e-6, 10e-6, 0, 0.125e-6],
   'gpt-5-mini': [0.25e-6, 2e-6, 0, 0.025e-6],
+  // Codex offline rates checked against official OpenAI model pages, 2026-09-11.
+  'gpt-5.1-codex': [1.25e-6, 10e-6, 0, 0.125e-6],
+  'gpt-5.1-codex-max': [1.25e-6, 10e-6, 0, 0.125e-6],
+  'gpt-5.1-codex-mini': [0.25e-6, 2e-6, 0, 0.025e-6],
+  'gpt-5.2-codex': [1.75e-6, 14e-6, 0, 0.175e-6],
+  'gpt-5.3-codex': [1.75e-6, 14e-6, 0, 0.175e-6],
+  'gpt-5.4': [2.5e-6, 15e-6, 0, 0.25e-6],
+  'gpt-5.4-mini': [0.75e-6, 4.5e-6, 0, 0.075e-6],
+  'gpt-5.5': [5e-6, 30e-6, 0, 0.5e-6],
+  'gpt-5.6-sol': [4e-6, 20e-6, 5e-6, 0.4e-6],
+  'gpt-5.6-terra': [2e-6, 12e-6, 2.5e-6, 0.2e-6],
+  'gpt-6-astra': [10e-6, 50e-6, 12.5e-6, 1e-6],
   o3: [2e-6, 8e-6, 0, 0.5e-6],
   'o4-mini': [1.1e-6, 4.4e-6, 0, 0.275e-6],
   // Google. Values copied from the live LiteLLM table (verified 2026-06-14)
@@ -275,9 +287,10 @@ export async function ensurePricingLoaded(): Promise<void> {
  */
 const lookupCache = new Map<string, PricingTuple | null>();
 
-export function pricingFor(model: string): PricingTuple | null {
+export function pricingFor(model: string, options: { exact?: boolean } = {}): PricingTuple | null {
   const norm = normalizeModel(model);
-  const cached = lookupCache.get(norm);
+  const lookupKey = options.exact ? `exact:${norm}` : norm;
+  const cached = lookupCache.get(lookupKey);
   if (cached !== undefined) return cached;
 
   // If the async prime (ensurePricingLoaded) hasn't run — e.g. the synchronous
@@ -315,6 +328,7 @@ export function pricingFor(model: string): PricingTuple | null {
       resolved = exact;
       break;
     }
+    if (options.exact) continue;
     let best: string | null = null;
     for (const key of Object.keys(source)) {
       if (norm.startsWith(key.toLowerCase()) && (best === null || key.length > best.length)) {
@@ -326,7 +340,7 @@ export function pricingFor(model: string): PricingTuple | null {
       break;
     }
   }
-  lookupCache.set(norm, resolved);
+  lookupCache.set(lookupKey, resolved);
   return resolved;
 }
 

