@@ -290,7 +290,29 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // extractor's own path. "Source changed, output did not" is a real state, but
 // it has to be measured across EVERY carrier the extractor reads, not the ones
 // the change set out to touch.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v12';
+// v13 (2026-09-11): stage 2 of the credential jail -- REACHABILITY. The
+// matcher was consulted only for a path that was a direct argv entry of a
+// reader at argv[0]; a wrapped, redirected, string-wrapped or find-exec'd read
+// never reached it. Every change is a normalisation before the matcher, so a
+// wrapped read gets exactly the verdict of its unwrapped form. Measured
+// through extractCanonicalFindings before bumping:
+//
+//   command                              v12                 v13
+//   env cat ~/.ssh/id_rsa              (none)  ->  ast-fs-op block/critical
+//   sudo -u bob cat ~/.ssh/id_rsa      priv-esc review  ->  + ast-fs-op block/critical
+//   cat < ~/.ssh/id_rsa                (none)  ->  ast-fs-op block/critical
+//   Y=$(<~/.ssh/id_rsa)                (none)  ->  ast-fs-op block/critical
+//   sh -c "cat ~/.ssh/id_rsa"          (none)  ->  ast-fs-op block/critical
+//   eval "cat ~/.ssh/id_rsa"           (none)  ->  ast-fs-op block/critical
+//   find ~/.ssh -exec cat {} +         (none)  ->  ast-fs-op block/critical
+//   cat ~/.ssh/id_rsa                  block   ->  block            (control)
+//   env cat ~/notes.txt                (none)  ->  (none)           (control)
+//   grep -r .ssh ~/p                   (none)  ->  (none)           (search, quiet)
+//
+// The re-scan earns its cost: `env cat`, `cat <` and `eval "cat"` reads of
+// credential files happened on real machines and produced no finding at all.
+// Verdict snapshot over 396 corpus commands: 28 moved, 0 loosened.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v13';
 
 /**
  * SHA-256 prefix of the detector-source files
@@ -302,7 +324,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v12';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'f94995ea5829a0f7';
+export const CANONICAL_EXTRACTOR_HASH = '4622a2f41696af04';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
