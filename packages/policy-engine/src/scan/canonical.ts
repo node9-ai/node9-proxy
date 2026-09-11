@@ -314,6 +314,14 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // Verdict snapshot over 396 corpus commands: 28 moved, 0 loosened.
 export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v13';
 
+// 2026-09-11, hash bumped with NO version bump: stage 3 of the credential jail
+// (argument POSITION kept in extractLiteralArgs) changed detector SOURCE and
+// not detector OUTPUT. Measured the way stage 1 taught: not on the rows the
+// change set out to touch but on the whole 396-command corpus through
+// analyzeFsOperation, the only extractor feed the change reaches -- 0 of 396
+// verdicts moved. dlp/, pipe-chain and destructive-regex are untouched. A
+// version bump would cost every daemon a full re-scan and change nothing.
+
 /**
  * SHA-256 prefix of the detector-source files
  * (canonical.ts + pii.ts + destructive-regex.ts).
@@ -324,7 +332,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v13';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '4622a2f41696af04';
+export const CANONICAL_EXTRACTOR_HASH = '9447177a66965008';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

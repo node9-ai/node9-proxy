@@ -1279,27 +1279,77 @@ export function isProtectedHomePath(rawPath: string): boolean {
  * the resolved string for each arg that is purely literal text.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
+// ── Stage 3: argument position ───────────────────────────────────────────────
+// Until 2026-09-11 the line `if (v.startsWith('-')) flags.push(v); else
+// paths.push(v);` turned every command into a bag of words. Which word came
+// first, and which flag it followed, were thrown away -- the one missing fact
+// behind BUGS.md section A (three copy-verb fixes reverted: without a slot,
+// `cp KEY /tmp/k` and `cp /tmp/ci_key KEY` are the same bag) and behind the
+// `rg "\.env\.local"` false positive (a search PATTERN and a PATH are the same
+// token). This stage keeps the position and changes no verdict: `paths` is
+// bit-identical to the old filter, and the corpus diff for the commit is
+// empty. Design: doc/jail-stage3-4-position-design.md.
+
+/** A resolved, non-flag argument and where it sits. */
+export interface PositionedArg {
+  /** The resolved literal. */
+  value: string;
+  /** 0-based SLOT among non-flag words -- `cp SRC DEST`: SRC is 0, DEST is 1. */
+  index: number;
+  /** Absolute index in the resolved word list, for explainability. */
+  argv: number;
+  /** The flag immediately before this word (`ssh -i KEY`: '-i'), else null. */
+  afterFlag: string | null;
+}
+
+/**
+ * The positioned non-flag words of `words[from..to)`. A dynamic word (null)
+ * occupies no slot AND breaks the flag link -- `-v $SRC KEY` gives KEY no flag,
+ * because something unknowable sat between them. Its `.map(a => a.value)` is
+ * exactly the pre-stage-3 filter, which jail-position.spec.ts pins.
+ */
+export function positionedArgs(
+  words: (string | null)[],
+  from = 1,
+  to: number = words.length
+): PositionedArg[] {
+  const out: PositionedArg[] = [];
+  let afterFlag: string | null = null;
+  for (let i = from; i < to; i++) {
+    const v = words[i];
+    if (v === null) {
+      afterFlag = null;
+      continue;
+    }
+    if (v.startsWith('-')) {
+      afterFlag = v;
+      continue;
+    }
+    out.push({ value: v, index: out.length, argv: i, afterFlag });
+    afterFlag = null;
+  }
+  return out;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function extractLiteralArgs(callExpr: any): {
   name: string;
   flags: string[];
+  /** Unchanged contract: `args.map(a => a.value)`. The rm branch reads this. */
   paths: string[];
   /** Every arg resolved once (null = dynamic); stage-2 helpers read this. */
   words: (string | null)[];
+  /** Stage 3: the same paths, with their slot and preceding flag. */
+  args: PositionedArg[];
 } {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const args: any[] = callExpr.Args || [];
-  if (args.length === 0) return { name: '', flags: [], paths: [], words: [] };
-  const words = args.map((a) => resolveWordLiteral(a));
+  const rawArgs: any[] = callExpr.Args || [];
+  if (rawArgs.length === 0) return { name: '', flags: [], paths: [], words: [], args: [] };
+  const words = rawArgs.map((a) => resolveWordLiteral(a));
   const name = (words[0] ?? '').toLowerCase();
-  const flags: string[] = [];
-  const paths: string[] = [];
-  for (let i = 1; i < words.length; i++) {
-    const v = words[i];
-    if (v === null) continue;
-    if (v.startsWith('-')) flags.push(v);
-    else paths.push(v);
-  }
-  return { name, flags, paths, words };
+  const flags = words.slice(1).filter((w): w is string => w !== null && w.startsWith('-'));
+  const args = positionedArgs(words);
+  return { name, flags, paths: args.map((a) => a.value), words, args };
 }
 
 // ── Network egress destination extraction (GAP-5) ───────────────────────────
@@ -1989,8 +2039,10 @@ function matchSensitivePath(p: string): FsOpVerdict | null {
 // `env /bin/cat KEY` unwrapped to `/bin/cat` and then failed the reader test.
 const isReaderWord = (w: string | null) =>
   w !== null && FS_READ_TOOLS.has(w.split('/').pop()?.toLowerCase() ?? '');
+// Stage 3: one builder for the direct and the wrapped path, so `sudo cp KEY X`
+// sees the same slots as `cp KEY X`.
 const positionalAfter = (words: (string | null)[], from: number, to = words.length) =>
-  words.slice(from, to).filter((w): w is string => w !== null && !w.startsWith('-'));
+  positionedArgs(words, from, to).map((a) => a.value);
 
 /**
  * Non-flag literal words after the reader when the reader is reached through

@@ -45,6 +45,8 @@ export {
   FS_READ_TOOLS,
   COMMAND_WRAPPERS,
   NET_BINARIES,
+  positionedArgs,
+  type PositionedArg,
   unwrapCommandHead,
   extractShellDestinations,
   parseDestHost,
