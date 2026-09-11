@@ -71,6 +71,39 @@ export function codexSessionCost(
 }
 
 /** Include archived rollouts; do not follow directory symlinks or read unrelated files. */
+/**
+ * A file's stats and its opening line, taken from ONE descriptor so the two
+ * cannot describe different files if the rollout is rewritten mid-scan. Reads
+ * only up to the first newline: a session's opening record is a few tens of KB
+ * while the file itself can be hundreds of MB. A record larger than the cap
+ * yields no id, which keeps that file independent rather than merging it with
+ * another session.
+ */
+function statAndFirstLine(file: string): { stat: fs.Stats; first: string } {
+  const CAP = 4 * 1024 * 1024;
+  const CHUNK = 64 * 1024;
+  const fd = fs.openSync(file, 'r');
+  try {
+    const stat = fs.fstatSync(fd);
+    const limit = Math.min(stat.size, CAP);
+    const parts: Buffer[] = [];
+    for (let pos = 0; pos < limit; pos += CHUNK) {
+      const buf = Buffer.alloc(Math.min(CHUNK, limit - pos));
+      const read = fs.readSync(fd, buf, 0, buf.length, pos);
+      if (read <= 0) break;
+      const slice = buf.subarray(0, read);
+      const nl = slice.indexOf(0x0a);
+      // Decode only whole buffers, never a chunk boundary: a split multi-byte
+      // character would corrupt the JSON we are about to parse.
+      parts.push(nl >= 0 ? slice.subarray(0, nl) : slice);
+      if (nl >= 0) break;
+    }
+    return { stat, first: Buffer.concat(parts).toString('utf8') };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 export function listCodexSessionFiles(base = codexSessionsDir()): string[] {
   const files: string[] = [];
   const walk = (dir: string): void => {
@@ -94,10 +127,10 @@ export function listCodexSessionFiles(base = codexSessionsDir()): string[] {
   const sessions = new Map<string, { file: string; mtime: number; size: number }>();
   for (const file of files.sort()) {
     try {
-      const stat = fs.statSync(file);
+      const { stat, first: head } = statAndFirstLine(file);
       let id = '';
       try {
-        const first = JSON.parse(fs.readFileSync(file, 'utf8').split('\n', 1)[0]);
+        const first = JSON.parse(head);
         if (first?.type === 'session_meta' && typeof first.payload?.id === 'string')
           id = first.payload.id;
       } catch {
