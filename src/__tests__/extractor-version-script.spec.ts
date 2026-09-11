@@ -35,6 +35,7 @@ const SOURCE_FILES = [
   // ENOENT rather than on the drift it means to test.
   'packages/policy-engine/src/rules/index.ts',
   'packages/policy-engine/src/shell/index.ts',
+  'packages/policy-engine/src/policy/pipe-chain.ts',
 ];
 
 describe('check-extractor-version.mjs', () => {

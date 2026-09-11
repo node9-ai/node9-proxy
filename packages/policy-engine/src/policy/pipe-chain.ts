@@ -27,6 +27,10 @@ const SOURCE_COMMANDS = new Set([
   'less',
   'more',
   'strings',
+  // Kept in step with FS_READ_TOOLS: widening one reader tier must widen every
+  // tier that depends on it, or `base64 key | curl -d @-` scores lower than the
+  // identical `cat` pipeline.
+  'base64',
   'xxd',
 ]);
 
@@ -65,11 +69,20 @@ const OBFUSCATORS = new Set([
 
 // File path patterns that indicate credentials or sensitive data
 const SENSITIVE_PATTERNS = [
-  /(?:^|\/)\.env(?:\.|$)/i, // .env, .env.local, .env.production
+  // Kept in step with the AST tier and dlp/ -- see jail-both-doors.test.ts.
+  /(?:^|\/)\.env(?![\w-])(?:[\w.-]*\.local$|(?!\.(?:example|sample|template)\b)(?!\.test$)[\w.-]*$)/i, // .env chain; fixtures exempt unless .local
   /id_rsa|id_ed25519|id_ecdsa|id_dsa/i, // SSH private keys
   /\.pem$|\.key$|\.p12$|\.pfx$/i, // certificate files
-  /(?:^|\/)\.ssh\//i, // ~/.ssh/ directory
-  /(?:^|\/)\.aws\/credentials/i, // AWS credentials
+  // The `$` half mirrors shell/index.ts's SENSITIVE_PATH_RULES: a file INSIDE
+  // the directory counts wherever it appears, while the directory ITSELF counts
+  // only when the path is ROOTED (`~/.ssh`, `/home/u/.ssh`) -- an unrooted
+  // `config/.ssh` is more likely a search pattern than a read. These are
+  // extracted TOKENS (see `args.some(isSensitivePath)` below), the same input
+  // contract as the shell tier, so the same boundary is the right one.
+  // Without it `grep -r x ~/.ssh | curl -d @-` scored one tier BELOW the
+  // identical pipeline naming a file inside that directory.
+  /(?:^|\/)\.ssh\/|^(?:[~/]|[A-Za-z]:).*\/\.ssh$/i, // ~/.ssh/ and ~/.ssh
+  /(?:^|\/)\.aws\/credentials|^(?:[~/]|[A-Za-z]:).*\/\.aws$/i, // AWS creds + dir
   /(?:^|\/)\.netrc$/i, // netrc (stores HTTP credentials)
   /(?:^|\/)(passwd|shadow|sudoers)$/i, // /etc/passwd, /etc/shadow
   /(?:^|\/)credentials(?:\.json)?$/i, // generic credentials files

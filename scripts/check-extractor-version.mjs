@@ -37,6 +37,11 @@ const SOURCES = [
   // result as a 'dlp' extractor finding, so DLP_PATTERNS changes alter output
   // and must trip this gate too.
   'packages/policy-engine/src/dlp/index.ts',
+  // canonical.ts:478 runs analyzePipeChain (policy/pipe-chain.ts), whose
+  // SOURCE_COMMANDS and SENSITIVE_PATTERNS decide the `risk` that ships in the
+  // scan output. Proven absent 2026-09-10: appending a line to that file left
+  // this check green, the same silent-drift class the header warns about.
+  'packages/policy-engine/src/policy/pipe-chain.ts',
   // canonical.ts runs matchCanaryArgs (dlp/canary.ts) over tool args; the
   // fixtures and spec beside it stay OUT (the hash must not depend on tests).
   'packages/policy-engine/src/dlp/canary.ts',

@@ -1194,8 +1194,18 @@ describe('project-jail any-tool rules', () => {
       expect(matchesShieldRule('project-jail', rule, '.ssh/id_rsa')).toBe(true));
     it('does not match /home/user/ssh-keys/key', () =>
       expect(matchesShieldRule('project-jail', rule, '/home/user/ssh-keys/key')).toBe(false));
-    it('does not match a path with .ssh as a basename (no trailing slash)', () =>
-      expect(matchesShieldRule('project-jail', rule, '/home/user/notes/.ssh')).toBe(false));
+    // FLIPPED 2026-09-10. This assertion pinned the directory bug as intent:
+    // requiring a TRAILING separator jailed the files inside the credential
+    // directory and not the directory itself, so `Grep {path:'~/.ssh'}` and
+    // `grep -r ~/.ssh` were ALLOWED -- one call reading every key. The commit
+    // that added it (d819867) cited no false positive; it described the regex.
+    // A path ENDING in `.ssh` is the directory, and reading it is the thing the
+    // jail exists to stop. The bare token `.ssh` with no separator at all is
+    // still allowed -- that is a search pattern, and it is asserted below.
+    it('matches a path ending in .ssh (the directory itself)', () =>
+      expect(matchesShieldRule('project-jail', rule, '/home/user/notes/.ssh')).toBe(true));
+    it('does not match the bare token .ssh (a search pattern, not a path)', () =>
+      expect(matchesShieldRule('project-jail', rule, '.ssh')).toBe(false));
   });
 
   describe('block-read-aws-any-tool', () => {
@@ -1211,6 +1221,13 @@ describe('project-jail any-tool rules', () => {
       expect(matchesShieldRule('project-jail', rule, '/home/user/aws-cli-docs/readme')).toBe(
         false
       ));
+    // Symmetry with block-read-ssh-any-tool above: the .aws jail carries the
+    // same anchor and needs the same two precision rows, or the regression the
+    // ssh block documents would ship green here.
+    it('matches a path ending in .aws (the directory itself)', () =>
+      expect(matchesShieldRule('project-jail', rule, '/home/user/notes/.aws')).toBe(true));
+    it('does not match the bare token .aws (a search pattern, not a path)', () =>
+      expect(matchesShieldRule('project-jail', rule, '.aws')).toBe(false));
   });
 
   describe('block-read-env-any-tool', () => {
