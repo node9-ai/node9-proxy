@@ -43,7 +43,13 @@ function home(): { home: string; key: string; plain: string } {
   return seeded;
 }
 
-describe('taint tier vs the jail, daemon absent', () => {
+// skipIf(win32) for the documented reason in jail-gauntlet: mvdan parses `\` as
+// a POSIX escape, so a Windows-shaped path reaches the matcher with no
+// separators left and the AST tier returns null for everything -- the CONTROL
+// row fails first, which is how this file caught it. Every probe here is a
+// built-in-jail probe, so the whole block is POSIX-only. (The two stage-2
+// blocks in jail-gauntlet carry the same guard; this file was missed.)
+describe.skipIf(process.platform === 'win32')('taint tier vs the jail, daemon absent', () => {
   it('controls: a plain read of the key blocks; a plain read of notes allows', () => {
     const { home: h, key, plain } = home();
     expect(probe(h, 'Bash', { command: `cat ${key}` }).verdict).toBe('block');
