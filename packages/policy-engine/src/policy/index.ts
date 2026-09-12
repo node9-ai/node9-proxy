@@ -404,6 +404,9 @@ export async function evaluatePolicy(
   // AST/regex interference. Mirrors the CLI scan's per-agent gates
   // (scan.ts:1037, 1319, 1614).
   const bashCommand = agent !== 'Terminal' ? shellShapedCommand : null;
+  // A tier-2 REVIEW (a credential copy) carried past the smart-rules tier so a
+  // stricter rule can still win. See the analyzeFsOperation site below.
+  let pendingAstReview: PolicyVerdict | undefined;
 
   // Layer-1 invariant: built-in AST blocks (block-rm-rf-home, project-jail
   // sensitive-file reads) must fire BEFORE user smart rules so a permissive
@@ -423,7 +426,7 @@ export async function evaluatePolicy(
     if (fsVerdict) {
       const isShieldRule = fsVerdict.ruleName.startsWith('shield:');
       const labelPrefix = isShieldRule ? 'project-jail (AST)' : 'Node9 (AST)';
-      return {
+      const astVerdict: PolicyVerdict = {
         decision: fsVerdict.verdict,
         blockedByLabel: `${labelPrefix}: ${fsVerdict.ruleName}`,
         reason: fsVerdict.reason,
@@ -431,6 +434,17 @@ export async function evaluatePolicy(
         ruleName: fsVerdict.ruleName,
         ruleDescription: fsVerdict.reason,
       };
+      // A BLOCK returns here, ahead of user rules, so a permissive rule cannot
+      // bypass it (the layer-1 invariant above). A REVIEW must NOT: stage 4
+      // (2026-09-12) made a credential COPY a review, and returning it at tier 2
+      // silenced an org/user jail rule that BLOCKS the same path -- `jail add
+      // ~/.ssh` or managedConfig.jailPaths -- which fired before the AST tier
+      // learned copies (/code-review, cross-file tracer). Two verdicts on one
+      // input resolve by MAX, never by order: the review is carried to the
+      // tier-3 candidates, where a stricter rule still wins and a permissive
+      // `allow` rule cannot silence it.
+      if (fsVerdict.verdict === 'block') return astVerdict;
+      pendingAstReview = astVerdict;
     }
 
     // SQL-DDL via a real DB CLI — AST-aware so a grep/echo of "drop table" /
@@ -522,8 +536,11 @@ export async function evaluatePolicy(
     );
     const matchedRule = resolvePinned(matches);
     if (matchedRule) {
+      // A permissive user rule cannot silence a built-in review.
       if (matchedRule.verdict === 'allow')
-        return { decision: 'allow', ruleName: matchedRule.name ?? matchedRule.tool };
+        return (
+          pendingAstReview ?? { decision: 'allow', ruleName: matchedRule.name ?? matchedRule.tool }
+        );
       return {
         decision: matchedRule.verdict,
         blockedByLabel: `Smart Rule: ${matchedRule.name ?? matchedRule.tool}`,
@@ -576,6 +593,7 @@ export async function evaluatePolicy(
     // Note this deliberately does NOT change `resolvePinned` for user smart
     // rules — there the law is first-match, and allow-lists depend on it.
     const candidates: PolicyVerdict[] = [];
+    if (pendingAstReview) candidates.push(pendingAstReview);
 
     // Eval-remote — Class A, no knob. Kept as an immediate return: it is the
     // one built-in that can never be softened, so nothing later can raise it.

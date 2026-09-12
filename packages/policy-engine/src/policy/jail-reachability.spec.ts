@@ -245,10 +245,17 @@ describe('jail reachability — non-goals, pinned as failing', () => {
   // FS_OP_PRESCREEN_RE has no `/` separator, so `/bin/cat KEY` is allowed at
   // argv[0] too. Fixing it means basenaming `name` in extractLiteralArgs, which
   // every other branch (rm, sql, chmod) reads -- its own change, not this one.
-  it.fails('an absolute reader path', () => {
+  // Flipped 2026-09-12: extractLiteralArgs basenames the verb now, so
+  // `/bin/cat K` is `cat K`. Stage 4 forced it -- the prescreen gained `/` for
+  // `/bin/cp`, and without the basename an absolute path reached the weaker
+  // copy rule and not the stronger read rule (/code-review, altitude).
+  it('an absolute reader path', () => {
     expect(v(`/bin/cat ${X}`)).toMatch(/^block:/);
   });
-  it.fails('an absolute reader path under a wrapper', () => {
+  // Flipped 2026-09-12: stage 4 taught the prescreen that a path separator is
+  // a separator too (`/bin/cp` had to reach the parser), and this pinned
+  // non-goal started passing as a side effect. Kept as a positive row.
+  it('an absolute reader path under a wrapper', () => {
     expect(v(`env /bin/cat ${X}`)).toMatch(/^block:/);
   });
   it.fails('depth 2', () => {

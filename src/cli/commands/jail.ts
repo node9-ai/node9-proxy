@@ -14,6 +14,10 @@ const BUILTIN_JAIL = [
   '~/.aws — AWS credentials',
   '.env files',
   'credential files — credentials.json, .netrc, .npmrc, .docker, .kube, gcloud',
+  // Stage 4 (2026-09-11): reads are blocked; a COPY out of the jail (cp, tar,
+  // scp, rsync, aws s3 cp, ...) is reviewed, because a backup and a theft are
+  // the same command shape.
+  'copies out of the jail (cp, tar, scp, rsync, cloud upload) — review',
 ];
 
 export function registerJailCommand(program: Command): void {

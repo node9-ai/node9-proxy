@@ -121,8 +121,20 @@ describe('stage 3 — `paths` is the old filter, bit for bit', () => {
     // A tiny in-file sample of the corpus diff, which must be EMPTY for this
     // commit (the full 396-row diff runs outside vitest, see the commit body).
     expect(analyzeFsOperation(`cat ${K}`)?.verdict).toBe('block');
-    expect(analyzeFsOperation(`cp ${K} /tmp/k`)).toBeNull(); // stage 4's job, not this one
+    // Stage 4 landed (2026-09-12): a copy out of the jail is a review. This
+    // row read `toBeNull()` while stage 3 shipped alone, which is how the two
+    // stages stayed separable in the log.
     expect(analyzeFsOperation(`ssh -i ${K} host`)).toBeNull();
     expect(analyzeFsOperation(`grep -r .ssh /home/u/project`)).toBeNull();
+  });
+});
+
+// Stage 4 landed 2026-09-12 and is the first CONSUMER of position. Its row sits
+// apart from the stage-3 witness above so that block keeps meaning "stage 3
+// changed no verdict": this row read `toBeNull()` while stage 3 shipped alone,
+// which is how the two stages stayed separable in the log.
+describe('stage 4 consumes position', () => {
+  it('a copy out of the jail is a review', () => {
+    expect(analyzeFsOperation(`cp ${K} /tmp/k`)?.verdict).toBe('review');
   });
 });

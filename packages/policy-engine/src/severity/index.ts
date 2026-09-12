@@ -42,6 +42,12 @@ export function classifyRuleSeverity(
     'read-ssh',
     'read-gcp',
     'read-cred',
+    // Stage 4 (2026-09-11): a copy of a credential file scores like a READ of it --
+    // read-ssh/aws/cred are critical, so copy-ssh/aws/cred are; read-env is high
+    // (below), so copy-env joins the high list, not this one (/code-review).
+    'copy-ssh',
+    'copy-aws',
+    'copy-cred',
     'delete-repo',
     'helm-uninstall',
     'drop-table',
@@ -55,6 +61,7 @@ export function classifyRuleSeverity(
   if (criticalPatterns.some((p) => n.includes(p))) return 'critical';
 
   const highPatterns = [
+    'copy-env',
     'force-push',
     'force_push',
     'git-destructive',
@@ -84,6 +91,11 @@ export function narrativeRuleLabel(name: string): string {
   const map: Record<string, string> = {
     'read-aws': 'AWS credentials read',
     'read-ssh': 'SSH private key read',
+    // Stage 4 copy twins, so `scan --narrative` prints a label, not a raw slug.
+    'copy-ssh': 'SSH private key copied out',
+    'copy-aws': 'AWS credentials copied out',
+    'copy-env': '.env file copied out',
+    'copy-cred': 'credential file copied out',
     'read-gcp': 'GCP credentials read',
     'read-cred': 'credential file read',
     'delete-repo': 'GitHub repository deletion',

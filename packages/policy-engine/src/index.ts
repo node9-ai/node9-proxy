@@ -46,6 +46,8 @@ export {
   COMMAND_WRAPPERS,
   NET_BINARIES,
   positionedArgs,
+  COPY_VERBS,
+  sampleCopyCommand,
   type PositionedArg,
   unwrapCommandHead,
   extractShellDestinations,

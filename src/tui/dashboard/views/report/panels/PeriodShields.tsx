@@ -24,7 +24,7 @@ import { Box, Text } from 'ink';
 import { COL } from '../../../panels.js';
 import type { AggregateResult } from '../../../../../cli/aggregate/report-audit.js';
 import type { ShieldStatus } from '../../../types.js';
-import { buildRuleToShieldMap } from '../../../data.js';
+import { buildRuleToShieldMap, shieldOfRule } from '../../../data.js';
 import { num } from '../util.js';
 
 // Max rows shown across active + inactive combined. Anything past
@@ -54,7 +54,7 @@ export function PeriodShields({
   const byShield = new Map<string, number>();
   if (data) {
     for (const [rule, count] of data.ruleMap) {
-      const shield = ruleToShield.get(rule);
+      const shield = shieldOfRule(ruleToShield, rule);
       if (!shield) continue;
       byShield.set(shield, (byShield.get(shield) ?? 0) + count);
     }

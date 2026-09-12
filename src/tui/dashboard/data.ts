@@ -1181,6 +1181,20 @@ export function buildRuleToShieldMap(): Map<string, string> {
 }
 
 /**
+ * The shield a rule name belongs to. Exact names first (the JSON list), then
+ * the `shield:<name>:` prefix -- AST-only rules such as
+ * `shield:project-jail:review-copy-ssh` live in the engine and not in the JSON,
+ * and were silently dropped from per-shield counts (/code-review 2026-09-12).
+ * Mirrors the SaaS's canon-taxonomy, which attributes by that prefix.
+ */
+export function shieldOfRule(map: Map<string, string>, rule: string): string | undefined {
+  const exact = map.get(rule);
+  if (exact) return exact;
+  const m = /^shield:([^:]+):/.exec(rule);
+  return m && SHIELDS[m[1]] ? m[1] : undefined;
+}
+
+/**
  * Pure reducer: tally a tool event into the per-shield activity
  * aggregate. Increments blocks for verdict='block', reviews for
  * verdict='review', skips allow/pending. Events whose checkedBy
@@ -1195,7 +1209,7 @@ export function applyActivityToShields(
 ): SessionShieldsAgg {
   if (e.kind !== 'tool' || !e.checkedBy) return agg;
   if (e.verdict !== 'block' && e.verdict !== 'review') return agg;
-  const shieldName = ruleToShield.get(e.checkedBy);
+  const shieldName = shieldOfRule(ruleToShield, e.checkedBy);
   if (!shieldName) return agg;
   const current = agg.byShield[shieldName] ?? { blocks: 0, reviews: 0 };
   const updated = {

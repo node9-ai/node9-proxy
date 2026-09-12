@@ -491,12 +491,99 @@ export const FS_READ_TOOLS = new Set([
 //
 // `rm` is joined in because the detector also handles deletion; it is not a
 // reader and deliberately does not live in FS_READ_TOOLS.
+// Lifted above the prescreen on purpose: the prescreen is DERIVED from this
+// table's heads, so a copy verb added here reaches the parser without anyone
+// remembering a second list (the trap that sank the first copy-verb attempt).
+// Overlap, on purpose and documented: `scp`/`rsync` are also in NET_BINARIES
+// (a destination extractor), and `gzip`/`bzip2`/`xz` in pipe-chain's OBFUSCATORS
+// (an encoder tier). Each table encodes a different fact -- slot shape, network
+// sink, encoder -- so they are not merged; when a verb joins one, ask whether
+// it belongs in the others (`zstd` is an obfuscator and not yet a copy verb).
+//
+// Flags. GNU and cloud CLIs do not spell options as "exact word, operand next":
+// they bundle (`-rt DIR`), attach (`-t/tmp`, `--file=K`), sit BEFORE the
+// subcommand (`gsutil -m cp`), and name things that are not sources
+// (`--exclude .env`). /code-review round 2 (2026-09-12) reproduced 25 rows
+// against the first "exact word" model. Flags are therefore read by their LAST
+// LETTER for a short bundle and by NAME for a long one, and each verb lists the
+// flags whose operand is never a source. scp's list mirrors VALUE_FLAGS.scp,
+// the destination extractor's table for the same binary (defined later in
+// this module, so it cannot be referenced here at init).
+
+/** How a copy verb's arguments are read. */
+interface CopyShape {
+  /**
+   *  allButLast   cp SRC... DEST         (GNU -t moves DEST into a flag: every slot is a source)
+   *  first        ln TARGET LINK
+   *  all          gzip -c FILE
+   *  archive      tar/zip/ar/7z: the inputs after the archive slot, in a WRITING mode
+   *  flagOperand  the source is a flag's operand: az ... upload -f SRC / --file SRC
+   */
+  source: 'allButLast' | 'first' | 'all' | 'archive' | 'flagOperand';
+  archive?: 'tar' | 'zip' | 'ar' | '7z';
+  /** flagOperand: the flags (short letter or long name) whose operand is the source. */
+  sourceFlags?: string[];
+  /** GNU `-t DIR` / `--target-directory`: the destination is in a flag. */
+  targetDirFlag?: boolean;
+  /** Flags whose operand is NEVER a source: a short LETTER ('i') or a long name ('--exclude'). */
+  skipFlags?: string[];
+}
+
+const SCP_VALUE_FLAGS = ['i', 'F', 'o', 'c', 'S', 'P', 'J', 'D', 'W', 'l'];
+const RSYNC_SKIP = [
+  'e',
+  '--rsh',
+  '--exclude',
+  '--exclude-from',
+  '--include',
+  '--include-from',
+  '--files-from',
+  'f',
+  '--filter',
+];
+
+export const COPY_VERBS: Record<string, CopyShape> = {
+  cp: { source: 'allButLast', targetDirFlag: true },
+  mv: { source: 'allButLast', targetDirFlag: true },
+  install: { source: 'allButLast', targetDirFlag: true },
+  ln: { source: 'first', targetDirFlag: true },
+  scp: { source: 'allButLast', skipFlags: SCP_VALUE_FLAGS },
+  rsync: { source: 'allButLast', skipFlags: RSYNC_SKIP },
+  tar: {
+    source: 'archive',
+    archive: 'tar',
+    skipFlags: ['f', 'X', 'T', '--file', '--exclude', '--exclude-from', '--files-from'],
+  },
+  zip: { source: 'archive', archive: 'zip', skipFlags: ['x', 'i', '--exclude', '--include'] },
+  ar: { source: 'archive', archive: 'ar' },
+  '7z': { source: 'archive', archive: '7z', skipFlags: ['x', '--exclude'] },
+  gzip: { source: 'all' },
+  bzip2: { source: 'all' },
+  xz: { source: 'all' },
+  'docker cp': { source: 'allButLast' },
+  'kubectl cp': { source: 'allButLast' },
+  'gsutil cp': { source: 'allButLast' },
+  'gsutil rsync': { source: 'allButLast' },
+  'rclone copy': { source: 'allButLast' },
+  'rclone sync': { source: 'allButLast' },
+  'aws s3 cp': { source: 'allButLast' },
+  'aws s3 mv': { source: 'allButLast' },
+  'aws s3 sync': { source: 'allButLast' },
+  'gcloud storage cp': { source: 'allButLast' },
+  'az storage blob upload': { source: 'flagOperand', sourceFlags: ['f', '--file'] },
+};
+
+/** `tar czf` -- a bundled mode word: letters only, no dash, in slot 0. */
+const TAR_MODE_WORD = /^[a-zA-Z]+$/;
+/** The first word of every copy verb, for the prescreen. */
+const COPY_VERB_HEADS = new Set(Object.keys(COPY_VERBS).map((k) => k.split(' ')[0]));
+
 const FS_OP_PRESCREEN_RE = new RegExp(
   // A quote is a separator too: `eval "cat X"` and `sh -c 'cat X'` put the
   // reader right after `"` / `'`, and without these two characters the
   // prescreen rejected every string-wrapped read before the parser ran.
   // Found 2026-09-11 by instrumenting the walk -- no CallExpr was ever visited.
-  `(?:^|[\\s|;&("'\`\\n])(?:rm|${[...FS_READ_TOOLS]
+  `(?:^|[\\s|;&("'\`\\n/])(?:rm|${[...FS_READ_TOOLS, ...COPY_VERB_HEADS]
     // Escape defensively: every current name is bare word characters, but a
     // future addition with a `.` or `+` would otherwise become a wildcard and
     // silently widen the prescreen.
@@ -1346,7 +1433,10 @@ function extractLiteralArgs(callExpr: any): {
   const rawArgs: any[] = callExpr.Args || [];
   if (rawArgs.length === 0) return { name: '', flags: [], paths: [], words: [], args: [] };
   const words = rawArgs.map((a) => resolveWordLiteral(a));
-  const name = (words[0] ?? '').toLowerCase();
+  // Basenamed: `/bin/cat K` is `cat K`. Until 2026-09-12 only the copy tier
+  // basenamed its verb, so an absolute path reached the weaker rule and not
+  // the stronger one (/code-review).
+  const name = baseWord(words[0]);
   const flags = words.slice(1).filter((w): w is string => w !== null && w.startsWith('-'));
   const args = positionedArgs(words);
   return { name, flags, paths: args.map((a) => a.value), words, args };
@@ -2000,6 +2090,13 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
         }
       }
 
+      // Stage 4: a jailed path in a slot this verb COPIES FROM. Review, never
+      // block -- see copyVerdictOf. Combined by strictness so `cp K x && cat K`
+      // still ends in the read's block.
+      for (const p of copySourcePaths(words)) {
+        result = stricter(result, copyVerdictOf(matchSensitivePath(p)));
+      }
+
       return true;
     });
     return result;
@@ -2026,6 +2123,283 @@ function stricter(a: FsOpVerdict | null, b: FsOpVerdict | null): FsOpVerdict | n
   return b.verdict === 'block' && a.verdict !== 'block' ? b : a;
 }
 
+// ── Stage 4: copy verbs, guarded by position ─────────────────────────────────
+// BUGS.md section A, open since 2026-08-21: `cat ~/.ssh/id_rsa` blocked while
+// `cp ~/.ssh/id_rsa /tmp/k` was allowed, because the jail asked "does this verb
+// PRINT a file". Three verb-agnostic fixes ("a jailed path appears anywhere")
+// were reverted for the same three false positives -- `ssh -i KEY host`,
+// `cp .env.example .env`, `cp /tmp/ci_key ~/.ssh/KEY` -- which pipelock ships.
+//
+// With stage 3's slots the question is narrower: is the jailed path in a slot
+// this verb READS FROM? `cp SRC DEST` reads every slot but the last; `ln` the
+// first; `tar` everything after the archive; `scp -i KEY` reads the key as a
+// flag operand and does not copy it. The three false positives fall out of
+// the slot model. Every shape below was measured on the real AST first
+// (doc/jail-stage3-4-position-design.md).
+//
+// The verdict is REVIEW. `tar czf ssh-backup.tgz ~/.ssh` and `tar czf
+// /tmp/s.tgz ~/.ssh` are the same verb, slot and path; position cannot tell
+// a backup from theft, and a block would break every backup script. A review
+// asks, and headless Claude Code denies an ask (measured), so CI still stops.
+// No config knob in this stage: a Class B knob crosses nine seams across two
+// repos (config-schema, daemon/sync, managed.ts x2, config/index x2,
+// policy/index x2, SaaS resolve-managed + firewall.service + ManagedControls)
+// and the default would be the value chosen anyway. Follow-up.
+
+/**
+ * A flag word, decoded the way GNU and cloud CLIs mean it. A short bundle is
+ * named by its LAST letter (`-rt` is `-t`, `-czf` is `-f`); anything after the
+ * letter run is an attached value (`-t/tmp`); a long flag may carry `=value`.
+ * A lone `-` is stdout, not a flag.
+ */
+function flagInfo(w: string): {
+  letter: string | null;
+  long: string | null;
+  attached: string | null;
+} {
+  if (w.startsWith('--')) {
+    const eq = w.indexOf('=');
+    return eq < 0
+      ? { letter: null, long: w, attached: null }
+      : { letter: null, long: w.slice(0, eq), attached: w.slice(eq + 1) };
+  }
+  const m = /^-([a-zA-Z]+)(.*)$/.exec(w);
+  if (!m) return { letter: null, long: null, attached: null };
+  return { letter: m[1][m[1].length - 1], long: null, attached: m[2] === '' ? null : m[2] };
+}
+
+function flagIs(w: string | null, names: string[]): boolean {
+  if (w === null) return false;
+  const f = flagInfo(w);
+  return names.some((n) => (n.startsWith('--') ? f.long === n : f.letter === n));
+}
+
+/** A slot whose preceding flag names it as an operand that is not a source. */
+function operandOf(a: PositionedArg, names: string[] | undefined): boolean {
+  if (!names || a.afterFlag === null) return false;
+  return flagIs(a.afterFlag, names) && flagInfo(a.afterFlag).attached === null;
+}
+
+/**
+ * Resolve the copy verb at `words[h]`, including multi-word heads. Subcommand
+ * words are matched in order; a slot that does not extend the head but is a
+ * flag's operand (`--profile prod`) is skipped, so `gsutil -m cp` and
+ * `aws --profile prod s3 cp` both resolve. Returns the shape and the argv
+ * index of the last verb word.
+ */
+function resolveCopyShape(
+  words: (string | null)[],
+  h: number
+): { shape: CopyShape; last: number } | null {
+  const verb = baseWord(words[h]);
+  if (!verb) return null;
+  const direct = COPY_VERBS[verb];
+  if (direct) return { shape: direct, last: h };
+  const slots = positionedArgs(words, h + 1);
+  for (let i = 0; i < slots.length; i++) {
+    for (let n = 3; n >= 1; n--) {
+      const part = slots.slice(i, i + n);
+      if (part.length < n) continue;
+      const key = [verb, ...part.map((a) => a.value.toLowerCase())].join(' ');
+      const shape = COPY_VERBS[key];
+      if (shape) return { shape, last: part[n - 1].argv };
+    }
+    if (slots[i].afterFlag === null) return null; // a bare operand: the verb ended
+  }
+  return null;
+}
+
+/** The find options that precede start points and are not predicates. */
+const FIND_OPTIONS = new Set(['-H', '-L', '-P']);
+
+/**
+ * `find START... [predicates] -exec ACTION {} ...`: the start points end at the
+ * first predicate (a dash word that is not a find option). Shared by the read
+ * tier (wrappedReadPaths) and the copy tier, so the find grammar lives once.
+ */
+function findStartPoints(words: (string | null)[], h: number): { k: number; starts: string[] } {
+  const k = words.findIndex((w, i) => i > h && w !== null && FIND_EXEC_FLAGS.has(w));
+  if (k < 0) return { k, starts: [] };
+  const firstPredicate = words.findIndex(
+    (w, i) => i > h && w !== null && w.startsWith('-') && !FIND_OPTIONS.has(w)
+  );
+  const end = firstPredicate > h ? firstPredicate : k;
+  return { k, starts: positionalAfter(words, h + 1, end) };
+}
+
+/**
+ * The literal paths this CallExpr copies FROM, or [] when it is not a copy
+ * verb. Wrappers are peeled with unwrapCommandHead so `sudo -u bob cp K x`
+ * sees the slots `cp K x` sees. `find ... -exec <copy verb>` copies its start
+ * points, with the action resolved by the same resolver (`-exec sudo cp`,
+ * `-exec aws s3 cp`).
+ */
+function copySourcePaths(words: (string | null)[]): string[] {
+  const h = unwrapCommandHead(words);
+  // unwrapCommandHead treats `find ... -exec CMD` as a wrapper and lands ON the
+  // action, so look for `find` among the peeled words, not at the head.
+  const fi = words.findIndex((w, i) => i <= h && baseWord(w) === 'find');
+  if (fi >= 0) {
+    const { k, starts } = findStartPoints(words, fi);
+    if (k < 0) return [];
+    const action = unwrapCommandHead(words.slice(k + 1));
+    return resolveCopyShape(words.slice(k + 1), action) ? starts : [];
+  }
+  // Cheap exit for the ~99% of CallExprs whose head is no copy verb.
+  if (!COPY_VERB_HEADS.has(baseWord(words[h]))) return [];
+  const r = resolveCopyShape(words, h);
+  if (!r) return [];
+  const { shape, last } = r;
+  const args = positionedArgs(words, last + 1);
+  const tail = words.slice(last + 1);
+  const skipped = (a: PositionedArg) => operandOf(a, shape.skipFlags);
+  const targetDir =
+    shape.targetDirFlag === true &&
+    tail.some((w) => w !== null && w.startsWith('-') && flagIs(w, ['t', '--target-directory']));
+  const targetOperand = (a: PositionedArg) =>
+    targetDir && operandOf(a, ['t', '--target-directory']);
+  // The destination is the last NON-FLAG word; when it is dynamic (`$DEST`) it
+  // is not a slot, so every slot is a source (`cp K $DEST -v` ends in a flag).
+  const lastOperand = [...tail].reverse().find((w) => w === null || !w.startsWith('-'));
+  const dynamicDest = lastOperand === null;
+  // A literal destination INSIDE the jail is not a copy OUT of it:
+  // `mv ~/.ssh/id_rsa ~/.ssh/id_rsa.bak` renames, `cp /tmp/k ~/.ssh/id_rsa`
+  // installs. Only for the shapes whose destination IS the last operand --
+  // for an archiver the last operand is an INPUT (`tar czf out.tgz ~/.ssh`),
+  // and with `-t DIR` the destination sits in the flag. tar's extract modes
+  // are handled in archiveInputs, which reads nothing at all.
+  const destIsLastOperand =
+    (shape.source === 'allButLast' || shape.source === 'first') && !targetDir && !dynamicDest;
+  if (destIsLastOperand && typeof lastOperand === 'string' && matchSensitivePath(lastOperand))
+    return [];
+
+  let src: PositionedArg[];
+  switch (shape.source) {
+    case 'all':
+      src = args;
+      break;
+    case 'first':
+      src = targetDir ? args : args.slice(0, 1);
+      break;
+    case 'flagOperand': {
+      const inline = tail
+        .filter((w): w is string => w !== null && w.startsWith('--'))
+        .map((w) => flagInfo(w))
+        .filter((f) => f.attached !== null && (shape.sourceFlags ?? []).includes(f.long ?? ''))
+        .map((f) => f.attached as string);
+      return [
+        ...args
+          .filter(
+            (a) =>
+              flagIs(a.afterFlag, shape.sourceFlags ?? []) &&
+              flagInfo(a.afterFlag as string).attached === null
+          )
+          .map((a) => a.value),
+        ...inline,
+      ];
+    }
+    case 'archive':
+      src = archiveInputs(shape.archive as 'tar' | 'zip' | 'ar' | '7z', args, tail);
+      break;
+    case 'allButLast':
+      src = targetDir || dynamicDest ? args : args.slice(0, -1);
+      break;
+  }
+  return src.filter((a) => !skipped(a) && !targetOperand(a)).map((a) => a.value);
+}
+
+/**
+ * The inputs of an archiver: every slot after the ARCHIVE slot, in a mode that
+ * reads them. The archive is `-f`'s operand, the slot after a bundled tar mode
+ * word containing `f` (`tar czf OUT IN`), zip's slot 0, ar's slot after its
+ * key, 7z's slot after its subcommand -- and NO slot when it is `-` (stdout):
+ * `tar cf - IN`, `zip -r - IN` parse `-` as a flag, and IN follows it. tar's
+ * extract/list modes (`x`, `t`, --extract) READ NOTHING from the jail --
+ * `tar xzf keys.tgz -C ~/.ssh` is a key install -- and return []; in a
+ * writing mode `-C DIR` is a source (the directory archived from).
+ */
+function archiveInputs(
+  kind: 'tar' | 'zip' | 'ar' | '7z',
+  args: PositionedArg[],
+  tail: (string | null)[]
+): PositionedArg[] {
+  const first = args[0];
+  const bareKey = first && first.afterFlag === null && TAR_MODE_WORD.test(first.value);
+  if (kind === 'tar') {
+    const flagsText = tail.filter((w): w is string => w !== null && w.startsWith('-')).join(' ');
+    const mode = (bareKey ? first.value : '') + flagsText;
+    const extracting =
+      /x|t/.test(bareKey ? first.value.replace(/f/g, '') : '') ||
+      /(^|\s)-[a-zA-Z]*[xt]|--extract|--list|--get/.test(flagsText);
+    const writing =
+      /[cruA]/.test(bareKey ? first.value : '') ||
+      /(^|\s)-[a-zA-Z]*[cruA]|--create|--append|--update|--concatenate/.test(flagsText);
+    if (extracting && !writing) return [];
+    void mode;
+    let i = 0;
+    if (bareKey) {
+      i = 1;
+      const next = args[1];
+      if (first.value.includes('f') && next && next.afterFlag === null) i = 2; // the archive
+    }
+    return args.slice(i);
+  }
+  if (kind === 'zip') return first && first.afterFlag === '-' ? args : args.slice(1);
+  if (kind === 'ar') return bareKey ? args.slice(2) : args.slice(1);
+  return args.slice(2); // 7z: subcommand, archive, inputs
+}
+
+/**
+ * One representative command per copy verb, for a gate test that DERIVES its
+ * rows from COPY_VERBS instead of keeping a second hand list (the trap the
+ * prescreen comment above describes). `src` is the path being copied out.
+ */
+export function sampleCopyCommand(verb: string, src: string): string {
+  const shape = COPY_VERBS[verb];
+  if (!shape) throw new Error(`not a copy verb: ${verb}`);
+  const remote = /^(scp|rsync|aws |gsutil|gcloud|rclone|docker|kubectl)/.test(verb);
+  switch (shape.source) {
+    case 'first':
+      return `${verb} -s ${src} /tmp/n9-link`;
+    case 'all':
+      return `${verb} -c ${src} > /tmp/n9-out`;
+    case 'flagOperand':
+      return `${verb} -f ${src} -c n9`;
+    case 'archive':
+      return shape.archive === 'tar'
+        ? `tar czf /tmp/n9-out.tgz ${src}`
+        : shape.archive === 'zip'
+          ? `zip -r /tmp/n9-out.zip ${src}`
+          : shape.archive === 'ar'
+            ? `ar rc /tmp/n9-out.a ${src}`
+            : `7z a /tmp/n9-out.7z ${src}`;
+    case 'allButLast':
+      return `${verb} ${src} ${remote ? (verb.startsWith('scp') || verb === 'rsync' ? 'user@host.invalid:/tmp/' : verb.startsWith('docker') || verb.startsWith('kubectl') ? 'ctr:/tmp/' : 'remote:/n9/') : '/tmp/n9-copy'}`;
+  }
+}
+
+/** The copy rule for each read rule. Explicit, so a read rule named without
+ *  `-read-` cannot silently keep its read name on a review verdict. */
+const COPY_RULE_OF: Record<string, string> = {
+  'shield:project-jail:block-read-ssh': 'shield:project-jail:review-copy-ssh',
+  'shield:project-jail:block-read-aws': 'shield:project-jail:review-copy-aws',
+  'shield:project-jail:block-read-env': 'shield:project-jail:review-copy-env',
+  'shield:project-jail:review-read-credentials': 'shield:project-jail:review-copy-credentials',
+};
+
+/** A copy gets the read rule's copy twin, and a review. */
+function copyVerdictOf(hit: FsOpVerdict | null): FsOpVerdict | null {
+  if (!hit) return null;
+  const ruleName = COPY_RULE_OF[hit.ruleName];
+  if (!ruleName) return null; // an unmapped read rule is not a copy rule; the read tier owns it
+  return {
+    ruleName,
+    verdict: 'review',
+    reason: `Copying ${hit.path} moves a credential out of its jail (project-jail shield)`,
+    path: hit.path,
+  };
+}
+
 /** One matcher for every path slot: argv, wrapper arg, find start point, redirect. */
 function matchSensitivePath(p: string): FsOpVerdict | null {
   for (const sp of SENSITIVE_PATH_RULES) {
@@ -2037,8 +2411,11 @@ function matchSensitivePath(p: string): FsOpVerdict | null {
 
 // Basenamed, because unwrapCommandHead basenames its head: without it
 // `env /bin/cat KEY` unwrapped to `/bin/cat` and then failed the reader test.
-const isReaderWord = (w: string | null) =>
-  w !== null && FS_READ_TOOLS.has(w.split('/').pop()?.toLowerCase() ?? '');
+/** The command name of a word: basename, lowercased; '' for a dynamic word. */
+function baseWord(w: string | null | undefined): string {
+  return (w ?? '').split('/').pop()?.toLowerCase() ?? '';
+}
+const isReaderWord = (w: string | null) => w !== null && FS_READ_TOOLS.has(baseWord(w));
 // Stage 3: one builder for the direct and the wrapped path, so `sudo cp KEY X`
 // sees the same slots as `cp KEY X`.
 const positionalAfter = (words: (string | null)[], from: number, to = words.length) =>
@@ -2063,16 +2440,8 @@ const positionalAfter = (words: (string | null)[], from: number, to = words.leng
  */
 function wrappedReadPaths(words: (string | null)[], name: string): string[] | null {
   if (name === 'find') {
-    const k = words.findIndex((w) => w !== null && FIND_EXEC_FLAGS.has(w));
-    if (k < 1 || !isReaderWord(words[k + 1] ?? null)) return null;
-    // find's grammar is `find <start points> <predicates> -exec ...`, so the
-    // start points end at the FIRST predicate. Taking every non-flag word
-    // before -exec swallowed PREDICATE OPERANDS, and an EXCLUSION then read as
-    // a read: `find src -not -path '*/.ssh/*' -exec grep -l TODO {} +` became a
-    // hard block on a command whose whole point is avoiding the jailed files
-    // (/code-review 2026-09-11).
-    const firstPredicate = words.findIndex((w, i) => i > 0 && w !== null && w.startsWith('-'));
-    return positionalAfter(words, 1, firstPredicate > 0 ? firstPredicate : k);
+    const { k, starts } = findStartPoints(words, 0);
+    return k > 0 && isReaderWord(words[k + 1] ?? null) ? starts : null;
   }
   if (!COMMAND_WRAPPERS.has(name) && !RUNNER_WRAPPERS.has(name)) return null;
   const h = unwrapCommandHead(words);
