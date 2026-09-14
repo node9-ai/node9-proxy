@@ -74,6 +74,7 @@ import { registerDlpCommand } from './cli/commands/dlp';
 import { registerMaskCommand } from './cli/commands/mask';
 import { registerBlastCommand } from './cli/commands/blast';
 import { undoLeftoverPaths } from './utils/undo-leftovers';
+import { safeMessage } from './utils/safe-text';
 
 const { version } = JSON.parse(
   fs.readFileSync(path.join(__dirname, '../package.json'), 'utf-8')
@@ -136,7 +137,7 @@ program
           cliVersion: version,
         });
         if (!res.ok) {
-          console.error(chalk.red(`✗ ${res.reason}`));
+          console.error(chalk.red(`✗ ${safeMessage(res.reason)}`));
           process.exitCode = 1;
           return;
         }

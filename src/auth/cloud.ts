@@ -5,6 +5,7 @@ import os from 'os';
 import path from 'path';
 import { type RiskMetadata } from '../context-sniper';
 import { HOOK_DEBUG_LOG } from '../audit';
+import { safeMessage } from '../utils/safe-text';
 
 export interface CloudApprovalResult {
   approved: boolean;
@@ -368,13 +369,13 @@ export async function resolveNode9SaaS(
     if (!res.ok) {
       fs.appendFileSync(
         HOOK_DEBUG_LOG,
-        `[resolve-cloud] PATCH ${resolveUrl} → HTTP ${res.status}\n`
+        `[resolve-cloud] PATCH ${safeMessage(resolveUrl, 200)} → HTTP ${res.status}\n`
       );
     }
   } catch (err) {
     fs.appendFileSync(
       HOOK_DEBUG_LOG,
-      `[resolve-cloud] PATCH failed for ${requestId}: ${(err as Error).message}\n`
+      `[resolve-cloud] PATCH failed for ${safeMessage(requestId, 64)}: ${safeMessage(err)}\n`
     );
   }
 }

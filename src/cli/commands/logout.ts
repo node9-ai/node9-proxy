@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import chalk from 'chalk';
 import { postJson } from '../../utils/post-json';
+import { safeMessage } from '../../utils/safe-text';
 
 // node9 logout (login-v2 §5, phase C.2) — the machine end of Disconnect.
 // Revokes this machine's key in the cloud (best-effort) and removes it
@@ -77,7 +78,7 @@ export function registerLogoutCommand(program: Command): void {
       } else if (res.outcome === 'already') {
         console.log(chalk.gray('✓ Cloud: this machine was already disconnected.'));
       } else {
-        console.log(chalk.yellow(`⚠ Could not reach the cloud (${res.detail}).`));
+        console.log(chalk.yellow(`⚠ Could not reach the cloud (${safeMessage(res.detail)}).`));
         console.log(
           chalk.yellow('  The key was removed locally, but is still listed in the dashboard —')
         );

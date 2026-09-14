@@ -69,3 +69,29 @@ export function stripAnsiSequences(s: string): string {
 export function stripControlChars(s: string): string {
   return s.replace(CONTROL_CHAR_RE, '');
 }
+
+/**
+ * One safe line, for any string that came from outside this process before it
+ * reaches a terminal or a log file.
+ *
+ * node9's terminal output IS the user's trust signal: a "connected and
+ * governed" line is what tells someone the machine is protected. A response
+ * field carrying CR plus SGR codes can paint a line that looks exactly like
+ * one of ours, and a newline in a value written to hook-debug.log forges a
+ * second journal entry. So: escape sequences removed, all whitespace collapsed
+ * to single spaces (one value can never become two lines), and a length cap so
+ * a hostile or broken peer cannot flood the log.
+ *
+ * Accepts unknown because most call sites hold a caught `error` or an optional
+ * response field.
+ */
+export function safeMessage(value: unknown, max = 300): string {
+  const raw =
+    typeof value === 'string'
+      ? value
+      : value instanceof Error
+        ? value.message
+        : String(value ?? '');
+  const s = stripTerminalEscapes(raw).replace(/\s+/g, ' ').trim();
+  return s.length > max ? s.slice(0, max - 1) + '\u2026' : s;
+}

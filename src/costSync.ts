@@ -20,6 +20,7 @@ import { codexSource } from './cost-codex.js';
 import { geminiSource } from './cost-gemini.js';
 import { copilotSource } from './cost-copilot.js';
 import { listSessionFiles } from './session-files.js';
+import { safeMessage } from './utils/safe-text';
 
 type DailyEntry = {
   date: string;
@@ -342,7 +343,7 @@ export async function postCostBatches(
         }
       }
     } catch (err) {
-      fs.appendFileSync(HOOK_DEBUG_LOG, `[cost-sync] ${(err as Error).message}\n`);
+      fs.appendFileSync(HOOK_DEBUG_LOG, `[cost-sync] ${safeMessage(err)}\n`);
     }
   }
 }

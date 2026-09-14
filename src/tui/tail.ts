@@ -9,6 +9,7 @@ import { spawn } from 'child_process';
 import { openStartupLogFd, recordStartupState } from '../daemon/startup-log';
 import { DAEMON_PORT } from '../daemon';
 import { getInternalToken } from '../auth/daemon';
+import { safeMessage } from '../utils/safe-text';
 
 const PID_FILE = path.join(os.homedir(), '.node9', 'daemon.pid');
 
@@ -1250,7 +1251,7 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
       err.code === 'ECONNREFUSED'
         ? 'Daemon is not running. Start it with: node9 daemon start'
         : err.message;
-    console.error(chalk.red(`\n❌ ${msg}`));
+    console.error(chalk.red(`\n❌ ${safeMessage(msg)}`));
     process.exit(1);
   });
 }

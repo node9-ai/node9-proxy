@@ -541,7 +541,12 @@ export function registerCheckCommand(program: Command): void {
             const logPath = path.join(os.homedir(), '.node9', 'hook-debug.log');
             if (!fs.existsSync(path.dirname(logPath)))
               fs.mkdirSync(path.dirname(logPath), { recursive: true });
-            fs.appendFileSync(logPath, `[${new Date().toISOString()}] STDIN: ${raw}\n`);
+            // JSON-encode: `raw` is agent-supplied and a literal newline in it
+            // would forge a second journal line. Matches the sibling at :277.
+            fs.appendFileSync(
+              logPath,
+              `[${new Date().toISOString()}] STDIN: ${JSON.stringify(raw)}\n`
+            );
           }
           const rawToolName = stripControlChars(extractToolName(payload));
           const toolName = canonicalToolName(rawToolName);

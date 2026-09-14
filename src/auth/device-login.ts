@@ -4,6 +4,7 @@ import { resolveCloudEndpoint } from './cloud-endpoints';
 import { getMachineId } from '../machine-id';
 import { openBrowser } from '../utils/open-browser';
 import { postJson } from '../utils/post-json';
+import { safeMessage } from '../utils/safe-text';
 
 // The CLI half of device-auth login (login-v2 B1). Start an authorization,
 // hand the human a URL + short code, then poll until the browser approves —
@@ -57,15 +58,17 @@ export async function runDeviceLogin(
   } catch (e) {
     return {
       ok: false,
-      reason: `Could not reach the node9 cloud: ${e instanceof Error ? e.message : String(e)}`,
+      reason: `Could not reach the node9 cloud: ${safeMessage(e)}`,
     };
   }
 
   console.log('');
   console.log(`  Open this link to approve the connection:`);
-  console.log(`  ${chalk.cyan.underline(start.verificationUrl)}`);
+  console.log(`  ${chalk.cyan.underline(safeMessage(start.verificationUrl, 200))}`);
   console.log('');
-  console.log(`  Code: ${chalk.bold(start.userCode)} ${chalk.gray('(match it in the browser)')}`);
+  console.log(
+    `  Code: ${chalk.bold(safeMessage(start.userCode, 40))} ${chalk.gray('(match it in the browser)')}`
+  );
   console.log('');
   const opened = opts.noBrowser ? false : openBrowser(start.verificationUrl);
   console.log(

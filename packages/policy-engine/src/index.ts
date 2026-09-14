@@ -90,7 +90,12 @@ export { validateRegex, getCompiledRegex } from './utils/regex';
 // nine copies of three regexes across the proxy and the engine. Three
 // functions, not one: see the module header for why flattening them corrupts
 // scan previews.
-export { stripTerminalEscapes, stripAnsiSequences, stripControlChars } from './utils/safe-text';
+export {
+  stripTerminalEscapes,
+  stripAnsiSequences,
+  stripControlChars,
+  safeMessage,
+} from './utils/safe-text';
 
 // Shields — 11 builtin definitions + pure validators (no fs).
 export type { ShieldDefinition, ShieldVerdict, ShieldOverrides } from './shields';

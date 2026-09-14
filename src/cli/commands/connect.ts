@@ -5,6 +5,7 @@ import { URL } from 'url';
 import chalk from 'chalk';
 import { onboardMachine, renderOnboardOutcome } from '../../onboarding';
 import { resolveCloudEndpoint } from '../../auth/cloud-endpoints';
+import { safeMessage } from '../../utils/safe-text';
 
 // node9 connect <token> — the onboarding bridge. Exchanges a dashboard connect
 // token for a workspace key (POST /cli/connect), then hands off to THE shared
@@ -87,7 +88,7 @@ export function registerConnectCommand(program: Command): void {
       try {
         resp = await postConnect(resolveConnectUrl(options.apiUrl), token);
       } catch (e) {
-        console.error(chalk.red(`✗ ${e instanceof Error ? e.message : 'Connect failed.'}`));
+        console.error(chalk.red(`✗ ${safeMessage(e) || 'Connect failed.'}`));
         process.exitCode = 1;
         return;
       }
