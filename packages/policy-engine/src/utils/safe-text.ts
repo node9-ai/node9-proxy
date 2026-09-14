@@ -7,7 +7,7 @@
 // kept in step only by comments. They are collected here so a fix reaches
 // every caller at once.
 //
-// There are three functions rather than one because the three jobs genuinely
+// There are separate functions rather than one because the jobs genuinely
 // differ, and flattening them corrupts output:
 //
 //   stripTerminalEscapes('alpha\nbeta\ttail') -> 'alpha\nbeta\ttail'
@@ -35,15 +35,6 @@ const TERMINAL_ESCAPE_RE =
   /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
 
 /**
- * Escape sequences only (CSI, OSC, Fe). Leaves every other character alone,
- * including all whitespace and other C0 controls.
- *
- * For short display strings that are shown verbatim and must not be able to
- * repaint the terminal: agent names, MCP server names, DLP samples.
- */
-const ANSI_SEQUENCE_RE = /\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-_])/g;
-
-/**
  * Every C0 control and DEL, whitespace included.
  *
  * For values that must be a single opaque token: tool names on their way into
@@ -58,11 +49,6 @@ const CONTROL_CHAR_RE = /[\x00-\x1F\x7F]/g;
 /** See TERMINAL_ESCAPE_RE. Keeps tab, newline and carriage return. */
 export function stripTerminalEscapes(s: string): string {
   return s.replace(TERMINAL_ESCAPE_RE, '');
-}
-
-/** See ANSI_SEQUENCE_RE. Removes escape sequences and nothing else. */
-export function stripAnsiSequences(s: string): string {
-  return s.replace(ANSI_SEQUENCE_RE, '');
 }
 
 /** See CONTROL_CHAR_RE. Removes every C0 control and DEL, whitespace included. */

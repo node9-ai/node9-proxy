@@ -2,7 +2,7 @@
 import { spawn, ChildProcess } from 'child_process';
 import path from 'path';
 import { smartTruncate, extractContext } from '../context-sniper';
-import { stripAnsiSequences } from '../utils/safe-text';
+import { safeMessage } from '../utils/safe-text';
 
 export const isTestEnv = () => {
   return (
@@ -172,7 +172,7 @@ function buildPlainMessage(
   if (locked) lines.push('⚠️  LOCKED BY ADMIN POLICY\n');
 
   // Strip ANSI escape sequences — agent name is caller-supplied metadata.
-  const safeAgent = stripAnsiSequences(agent ?? 'AI Agent').slice(0, 80);
+  const safeAgent = safeMessage(agent ?? 'AI Agent', 80);
   lines.push(`🤖 ${safeAgent}  |  🔧 ${toolName}`);
   lines.push(`🛡️  ${explainableLabel || 'Security Policy'}`);
   if (ruleDescription) lines.push(`ℹ  ${ruleDescription}`);

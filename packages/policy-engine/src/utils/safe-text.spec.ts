@@ -1,10 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import {
-  stripTerminalEscapes,
-  stripAnsiSequences,
-  stripControlChars,
-  safeMessage,
-} from './safe-text';
+import { stripTerminalEscapes, stripControlChars, safeMessage } from './safe-text';
 
 // A forged "success" line: CR to return to column 0, SGR green, fake text.
 const FORGED_LINE = '\x1b[32m OK Cloud: connected and governed\x1b[0m';
@@ -36,18 +31,6 @@ describe('stripTerminalEscapes', () => {
   });
 });
 
-describe('stripAnsiSequences', () => {
-  it('removes escape sequences', () => {
-    expect(stripAnsiSequences('\x1b[31mred\x1b[0m')).toBe('red');
-    expect(stripAnsiSequences('\x1b]0;title\x07rest')).toBe('rest');
-  });
-
-  it('leaves every other character alone, including C0 and whitespace', () => {
-    expect(stripAnsiSequences('a\tb\nc\rd')).toBe('a\tb\nc\rd');
-    expect(stripAnsiSequences('a\x00b\x07c')).toBe('a\x00b\x07c');
-  });
-});
-
 describe('stripControlChars', () => {
   it('removes every C0 control and DEL, whitespace included', () => {
     expect(stripControlChars('a\tb\nc\rd')).toBe('abcd');
@@ -67,14 +50,12 @@ describe('the three are deliberately different', () => {
     expect(stripTerminalEscapes(input)).toBe('alpha\nbeta\ttail');
     expect(stripTerminalEscapes(input).replace(/\s+/g, ' ')).toBe('alpha beta tail');
     expect(stripControlChars(input)).toBe('alphabetatail');
-    expect(stripAnsiSequences(input)).toBe('alpha\nbeta\ttail');
   });
 
   it('differs on non-whitespace C0 controls', () => {
     const input = 'a\x07b';
     expect(stripTerminalEscapes(input)).toBe('ab');
     expect(stripControlChars(input)).toBe('ab');
-    expect(stripAnsiSequences(input)).toBe('a\x07b');
   });
 });
 
