@@ -89,3 +89,49 @@ describe('openBrowser URL validation', () => {
     expect(spawnMock).not.toHaveBeenCalled();
   });
 });
+
+// The win32 branch is the one the fix actually changes, and the Windows CI
+// matrix does not run on a stacked PR, so cover it here by stubbing platform.
+describe('openBrowser on Windows', () => {
+  const realPlatform = process.platform;
+  const setPlatform = (p: string) =>
+    Object.defineProperty(process, 'platform', { value: p, configurable: true });
+
+  afterEach(() => setPlatform(realPlatform));
+
+  it('invokes cmd.exe with the URL in its own argument slot, no shell', async () => {
+    setPlatform('win32');
+    vi.resetModules();
+    spawnMock.mockClear();
+    const mod = await import('../utils/open-browser.js');
+    const url = 'https://app.node9.ai/device?code=ABCD';
+
+    expect(mod.openBrowser(url)).toBe(true);
+    const [cmd, args, opts] = spawnMock.mock.calls[0];
+    expect(cmd).toBe('cmd.exe');
+    // `start` needs a window-title placeholder before its target, otherwise it
+    // treats a quoted URL as the title and opens nothing.
+    expect(args).toEqual(['/c', 'start', '', url]);
+    expect(opts?.shell).toBeUndefined();
+  });
+
+  it('still refuses a metacharacter URL on Windows', async () => {
+    setPlatform('win32');
+    vi.resetModules();
+    spawnMock.mockClear();
+    const mod = await import('../utils/open-browser.js');
+
+    expect(mod.openBrowser('https://ok.example/ & calc.exe')).toBe(false);
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('does not apply the Linux display guard on Windows', async () => {
+    setPlatform('win32');
+    delete process.env.DISPLAY;
+    vi.resetModules();
+    spawnMock.mockClear();
+    const mod = await import('../utils/open-browser.js');
+
+    expect(mod.openBrowser('https://app.node9.ai/device')).toBe(true);
+  });
+});
