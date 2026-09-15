@@ -2,12 +2,14 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { DEFAULT_CONFIG } from './config';
+import { DEFAULT_API_URL } from './auth/api-url';
 
 // Shared credential + config writer — used by both `node9 login` and the
 // onboarding `node9 connect`. Writes ~/.node9/credentials.json (profile-merged,
 // 0o600) and, for the default profile, the ~/.node9/config.json approvers block.
 // Returns the effective cloud state so callers can print the right message.
-const DEFAULT_API_URL = 'https://api.node9.ai/api/v1/intercept';
+// One home for this value: the host pin in auth/api-url validates against it,
+// so a second copy here would let `node9 login` write a URL its own pin rejects.
 
 export function writeCredentialsAndConfig(
   apiKey: string,

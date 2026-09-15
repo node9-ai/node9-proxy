@@ -30,6 +30,7 @@ import { tickScanWatcher, commitTotalsUpload, tickForensicBroadcast } from './sc
 import { broadcastForensic } from './state.js';
 import { appendToLog, HOOK_DEBUG_LOG } from '../audit/index.js';
 import { getMachineId } from '../machine-id.js';
+import { DEFAULT_API_URL as BASE_API_URL } from '../auth/api-url';
 
 // One row per session delta sent on /scan/report. The BE stores
 // these in ScanSessionSignals using INSERT-ON-CONFLICT INCREMENT, so
@@ -110,7 +111,9 @@ const rulesCacheFile = () => path.join(os.homedir(), '.node9', 'rules-cache.json
 // Last-known-good sibling — the reader falls back to it when the primary is
 // present but unparseable (external corruption). Kept in sync by writeCache.
 const rulesCacheBackupFile = () => path.join(os.homedir(), '.node9', 'rules-cache.last-good.json');
-const DEFAULT_API_URL = 'https://api.node9.ai/api/v1/intercept/policies/sync';
+// Derived, not restated: the host pin in auth/api-url validates against
+// DEFAULT_API_URL, so a second literal here could name a host its own pin rejects.
+const DEFAULT_API_URL = `${BASE_API_URL}/policies/sync`;
 const DEFAULT_INTERVAL_HOURS = 5;
 // Floor + ceiling for the resolved sync interval. The 15s floor keeps a
 // misconfigured/aggressive value from hammering the API (the ETag/304 path
