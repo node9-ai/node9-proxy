@@ -121,6 +121,19 @@ export interface PolicyVerdict {
   matchedField?: string;
   matchedWord?: string;
   tier?: 1 | 2 | 3 | 4 | 5 | 6 | 7;
+  /**
+   * False when NO human may override this verdict: the SSRF tier-1 floors,
+   * whose own reason string already tells the user "This address cannot be
+   * allowlisted". Absent means an override is a legitimate product decision,
+   * which is every other verdict.
+   *
+   * It exists because the host downgrades a hard block into a review whenever a
+   * human approver is reachable (orchestrator.ts, `mayDowngrade`). That is right
+   * for a smart-rule block and wrong for a floor, and the host could not tell
+   * the two apart: `overridable` was computed in egress/ssrf.ts, rendered into
+   * the reason sentence, and then dropped here.
+   */
+  overridable?: boolean;
   ruleName?: string;
   /** State predicates from the matched smart rule (only when decision is 'block'). */
   dependsOnStatePredicates?: string[];
@@ -371,6 +384,7 @@ export async function evaluatePolicy(
         ruleName: `ssrf:${dest.tier}:${toolName}:${dest.host}`,
         ruleDescription: dest.reason,
         tier: 3,
+        overridable: dest.overridable,
       };
     }
   }
@@ -672,6 +686,7 @@ export async function evaluatePolicy(
           ruleName: `ssrf:${ssrf.tier}:${ssrf.binary}:${ssrf.host}`,
           ruleDescription: ssrf.reason,
           tier: 3,
+          overridable: ssrf.overridable,
         };
       }
     }

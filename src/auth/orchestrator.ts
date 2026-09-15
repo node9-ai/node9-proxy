@@ -198,6 +198,38 @@ export async function hasReachableHumanApprover(opts: {
   return opts.approvers.terminal !== false && (await daemonHasInteractiveApprover());
 }
 
+/**
+ * Whether a hard block may soften into a review/recovery card.
+ *
+ * A block softens ONLY when a genuine human approver is reachable (a GUI popup
+ * or a connected `node9 tail`). With none — CI, headless, a piped
+ * non-interactive agent — it stays hard, so the approver race can never resolve
+ * it to allow (a cloud immediate-allow of a client-side shield the SaaS has no
+ * rule for). Cloud is deliberately not a "human": it can auto-resolve.
+ *
+ * `overridable: false` refuses the downgrade outright, whatever else is true.
+ * That is the SSRF tier-1 floors, whose reason string already promises the user
+ * "This address cannot be allowlisted". Before this, a reachable human turned
+ * that promise into a dialog, and on a governed desktop the metadata endpoint
+ * was allowed while `node9 explain` still said BLOCK.
+ *
+ * `!== false` and not `=== true`: every verdict that carries no opinion keeps
+ * the previous behaviour. Only an explicit "no one may override this" changes.
+ *
+ * Pure, and extracted for the same reason resolveNativeDecision is: the live
+ * condition includes `isTestEnv`, so a test running under vitest can never
+ * observe a downgrade through the real path.
+ */
+export function mayDowngradeHardBlock(opts: {
+  daemonUp: boolean;
+  isTestEnv: boolean;
+  humanApproverReachable: boolean;
+  overridable?: boolean;
+}): boolean {
+  if (opts.overridable === false) return false;
+  return opts.daemonUp && !opts.isTestEnv && opts.humanApproverReachable;
+}
+
 export async function authorizeHeadless(
   toolName: string,
   args: unknown,
@@ -883,12 +915,12 @@ async function _authorizeHeadlessCore(
           calledFromDaemon: options?.calledFromDaemon,
         });
       }
-      // A hard block softens into a review/recovery card ONLY when a genuine
-      // human approver is reachable (GUI popup or connected tail). With none —
-      // CI, headless, a piped non-interactive agent — it stays hard so the
-      // approver race can never resolve it to allow (a cloud immediate-allow of
-      // a client-side shield the SaaS has no rule for). Fails closed.
-      const mayDowngrade = daemonUp && !isTestEnv && humanApproverReachable;
+      const mayDowngrade = mayDowngradeHardBlock({
+        daemonUp,
+        isTestEnv,
+        humanApproverReachable,
+        overridable: policyResult.overridable,
+      });
 
       // The audit row + hard-block result, shared by every non-softening path so
       // a fail-closed decision is a single call.
