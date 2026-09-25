@@ -633,6 +633,13 @@ async function _authorizeHeadlessCore(
     const filePath = String(argsObj.file_path ?? argsObj.path ?? argsObj.filename ?? '');
     const dlpMatch: DlpMatch | null = (filePath ? scanFilePath(filePath) : null) ?? scanArgs(args);
     if (dlpMatch) {
+      // Attribution and hashing, ONCE, for both paths below: every row written
+      // for this call -- the block row, the flagged row, and every outcome row
+      // after it -- names the pattern and carries no credential in its args.
+      // (A review row passing the config's value would have stored args in
+      // clear with hashing off; redactSecrets needs a label to key on.)
+      meta = { ...meta, dlpPattern: dlpMatch.patternName, dlpSample: dlpMatch.redactedSample };
+      hashAuditArgs = true;
       const dlpReason =
         `🚨 DATA LOSS PREVENTION: ${dlpMatch.patternName} detected in ` +
         `field "${dlpMatch.fieldPath}" (${dlpMatch.redactedSample})`;
@@ -655,12 +662,8 @@ async function _authorizeHeadlessCore(
             args,
             'deny',
             isObserveMode ? 'observe-mode-dlp-would-block' : 'dlp-block',
-            {
-              ...meta,
-              dlpPattern: dlpMatch.patternName,
-              dlpSample: dlpMatch.redactedSample,
-            },
-            true
+            meta,
+            hashAuditArgs
           );
         // Taint the destination file so future uploads of it are also blocked.
         if (isWriteTool(toolName) && filePath) {
@@ -684,11 +687,8 @@ async function _authorizeHeadlessCore(
       // severity === 'review': fall through to the race engine with a DLP label.
       // Write an audit entry now so the DLP flag is traceable even if the race
       // engine later approves the call without recording why it was intercepted.
-      // Widen meta and force hashing FIRST, so the flagged row itself -- the one
-      // the dashboard renders as "Flagged" -- says what was found and carries
-      // no credential (/code-review, DLP-3).
-      meta = { ...meta, dlpPattern: dlpMatch.patternName, dlpSample: dlpMatch.redactedSample };
-      hashAuditArgs = true;
+      // meta and hashing were set above, so the flagged row -- the one the
+      // dashboard renders as "Flagged" -- names the pattern (/code-review, DLP-3).
       if (!isManual)
         appendLocalAudit(toolName, args, 'allow', 'dlp-review-flagged', meta, hashAuditArgs);
       explainableLabel = '🚨 Node9 DLP (Credential Review)';
@@ -844,6 +844,14 @@ async function _authorizeHeadlessCore(
    * guard that runs early must see what is known so far.
    */
   const callSpecificReview = (): boolean => dlpReviewFlagged || !!appPermReview || !!taintWarning;
+  /** A trust session may answer this call. ONE definition for the two places
+   *  that must agree: the trust guard that honours a session, and the native
+   *  "Always Allow" button that writes one. When they disagreed the button
+   *  wrote a session the guard then ignored (fix #5 for app permissions; DLP,
+   *  taint and downgraded hard blocks by /code-review, DLP-3). The button is
+   *  unreachable under vitest (isTestEnv forces native off), so the trust-guard
+   *  rows are its witness through this shared predicate. */
+  const standingTrustApplies = (): boolean => !callSpecificReview() && !hardBlockDowngraded;
   const reviewDemanded = (): boolean =>
     callSpecificReview() ||
     localSmartRuleMatched === true ||
@@ -1133,13 +1141,14 @@ async function _authorizeHeadlessCore(
       }
     }
 
-    // A DLP-flagged call keeps the gate's label unless the engine names a more
-    // specific one. The generic fallback used to wipe it: the gate reads
-    // getConfig(cwd) and the engine getConfig(), so a project config that
-    // enables DLP flags a call the engine allows, and the approver card said
-    // "Local Config" with no word of a credential (/code-review, DLP-3).
-    explainableLabel =
-      policyResult.blockedByLabel || (dlpReviewFlagged ? explainableLabel : 'Local Config');
+    // Fall back to the label already carried, not a literal "Local Config":
+    // the gate reads getConfig(cwd) and the engine getConfig(), so a project
+    // config enabling DLP flags a call the global engine ALLOWS, and the
+    // literal wiped the DLP label on its way to the approver (/code-review,
+    // DLP-3). When the engine names its own label (a smart-rule review), that
+    // label replaces the DLP one, as before; combining the two, the way the
+    // app-permission branch does, is not done here.
+    explainableLabel = policyResult.blockedByLabel || explainableLabel;
     policyMatchedField = policyResult.matchedField;
     policyMatchedWord = policyResult.matchedWord;
     // B1 (#6): the tier-7 strict fallback reviews with NO ruleName (it is a
@@ -1313,7 +1322,7 @@ async function _authorizeHeadlessCore(
     }
   }
 
-  if (!callSpecificReview() && !hardBlockDowngraded && getActiveTrustSession(toolName, args)) {
+  if (standingTrustApplies() && getActiveTrustSession(toolName, args)) {
     // Local row only — cloud delivery via the outbox shipper.
     if (!isManual) appendLocalAudit(toolName, args, 'allow', 'trust', meta, hashAuditArgs);
     return { approved: true, checkedBy: 'trust' };
@@ -1672,10 +1681,9 @@ async function _authorizeHeadlessCore(
           // "1h trust" would silently no-op (the button would lie). Grant this
           // call once instead; the human is re-asked next time (correct for an
           // org-mandated review). Hiding the button on the card = fast follow.
-          // callSpecificReview, not `!appPermReview` alone: the trust guard
-          // ignores a session for a DLP or taint review too, so writing one
-          // for those would be the same lying button (/code-review, DLP-3).
-          if (!callSpecificReview()) {
+          // standingTrustApplies, the trust guard's own predicate: a session
+          // the guard would ignore must not be written (/code-review, DLP-3).
+          if (standingTrustApplies()) {
             writeTrustSession(toolName, 3600000, args);
             return { approved: true, checkedBy: 'trust' } as AuthResult;
           }
@@ -1748,14 +1756,6 @@ async function _authorizeHeadlessCore(
         { ...meta, ruleName: `app-permission:${appPermReviewTool}` },
         hashAuditArgs
       );
-    // DLP-3: the same gap for a credential review -- the flagged row was written
-    // at the gate BEFORE any decision, and the outcome had no row at all. meta
-    // already carries dlpPattern / dlpSample from the gate.
-    // Not from the daemon's background re-auth (calledFromDaemon): there an
-    // empty race means "no racer in THIS process" while the human's card is
-    // still open, and the row would be a deny the human never gave.
-    else if (!isManual && dlpReviewFlagged && !options?.calledFromDaemon)
-      appendLocalAudit(toolName, args, 'deny', 'dlp-review-denied', meta, hashAuditArgs);
     return {
       approved: false,
       noApprovalMechanism: true,

@@ -31,7 +31,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-const { mockInitSaaS, mockPollSaaS, auditCalls, trustState } = vi.hoisted(() => ({
+const { mockInitSaaS, mockPollSaaS, auditCalls, trustState, hashOverride } = vi.hoisted(() => ({
   auditCalls: [] as Array<{
     decision: string;
     checkedBy: string;
@@ -43,6 +43,10 @@ const { mockInitSaaS, mockPollSaaS, auditCalls, trustState } = vi.hoisted(() => 
   // a first draft of the trust row wrote one and stayed green with the guard
   // removed, a false witness. The matcher is stubbed instead.
   trustState: { active: false },
+  // The config merge never honours `settings.auditHashArgs: false` (measured),
+  // so a fixture cannot turn hashing off. The orchestrator reads
+  // config.settings.auditHashArgs directly; this override reaches that read.
+  hashOverride: { value: undefined as boolean | undefined },
   mockInitSaaS: vi.fn(
     async (
       ..._a: unknown[]
@@ -88,6 +92,17 @@ vi.mock('../audit/index', async (orig) => {
         hashed: a[5] === true,
       });
       return real.appendLocalAudit(...a);
+    },
+  };
+});
+vi.mock('../config', async (orig) => {
+  const real = await orig<typeof import('../config')>();
+  return {
+    ...real,
+    getConfig: (...a: Parameters<typeof real.getConfig>) => {
+      const cfg = real.getConfig(...a);
+      if (hashOverride.value === undefined) return cfg;
+      return { ...cfg, settings: { ...cfg.settings, auditHashArgs: hashOverride.value } };
     },
   };
 });
@@ -200,6 +215,7 @@ describe('DLP-3: a DLP credential review is never resolved by a non-human channe
     writeKeyedHome(50);
     auditCalls.length = 0;
     trustState.active = false;
+    hashOverride.value = undefined;
     mockInitSaaS.mockClear();
     mockPollSaaS.mockClear();
     mockInitSaaS.mockResolvedValue({ pending: false, approved: true });
@@ -340,6 +356,8 @@ describe('DLP-3: a DLP credential review is never resolved by a non-human channe
       return project;
     }
 
+    // This row pins the guard 7d23297 introduced; it is green on that commit.
+    // Its sibling below is the witness for the label fix that came after.
     it('does not answer a DLP review the engine would have allowed', async () => {
       const project = projectWithDlp();
       try {
@@ -381,38 +399,40 @@ describe('DLP-3: a DLP credential review is never resolved by a non-human channe
       expect(flagged?.meta.dlpPattern).toBe('Bearer Token');
     });
 
-    it('every row for a flagged call hashes its args (a guard, not a witness)', async () => {
+    it('every row for a flagged call hashes its args, even with hashing off', async () => {
       // The secret lives in the ARGS, not the meta: with hashing off the writer
       // stores args through redactSecrets, which needs a label to key on. The
-      // gate forces hashing on for every later row, as the block row always
-      // has. Measured: the config merge ignores `auditHashArgs: false` today,
-      // so this row cannot go red by config; it guards the property against a
-      // merge that starts honouring it.
-      writeUnkeyedHomeNoRacer({ auditHashArgs: false });
+      // gate forces hashing on for every row of a flagged call, as the block
+      // row always has. Red on 7d23297, whose flagged row passed the config's
+      // value.
+      hashOverride.value = false;
+      mockInitSaaS.mockResolvedValue({ pending: true, requestId: 'req-1' });
+      mockPollSaaS.mockImplementation(() => new Promise(() => {})); // times out: an outcome row
       await authorizeHeadless('Bash', BASH_ARGS, GATEWAY);
-      expect(auditCalls.length).toBeGreaterThan(1); // flagged + outcome
+      expect(auditCalls.length).toBeGreaterThan(0);
       for (const c of auditCalls)
         expect({ row: c.checkedBy, hashed: c.hashed }).toEqual({ row: c.checkedBy, hashed: true });
     });
 
-    it("the daemon's background re-auth writes no deny row while the human's card is open", async () => {
-      // With calledFromDaemon the native/terminal racers are skipped in THIS
-      // process while the daemon holds the card; an empty race there is not a
-      // decision, and a 'dlp-review-denied' row would be a deny nobody gave.
-      writeUnkeyedHomeNoRacer();
-      await authorizeHeadless('Bash', BASH_ARGS, GATEWAY, { calledFromDaemon: true });
-      expect(auditCalls.some((c) => c.checkedBy === 'dlp-review-denied')).toBe(false);
-    });
-
-    it('the final deny row exists and names the pattern (the flagged row alone said "allow")', async () => {
-      writeUnkeyedHomeNoRacer();
+    it('the outcome row names the pattern (a timeout, here), and no row carries the secret', async () => {
+      // No 'no channel' row is written: noApprovalMechanism means "the caller
+      // retries" (orchestrator.ts, authorizeHeadless), and a row there would be
+      // a deny nobody gave. The outcome travels on the race's own row.
+      mockInitSaaS.mockResolvedValue({ pending: true, requestId: 'req-1' });
+      mockPollSaaS.mockImplementation(() => new Promise(() => {}));
       await authorizeHeadless('Bash', BASH_ARGS, GATEWAY);
-      const denies = auditCalls.filter((c) => c.decision === 'deny');
-      expect(denies.length).toBeGreaterThan(0);
-      expect(denies.some((c) => c.meta.dlpPattern === 'Bearer Token')).toBe(true);
-      // and no row's attribution carries the secret itself
+      const outcome = auditCalls.filter((c) => c.checkedBy !== 'dlp-review-flagged');
+      expect(outcome.length).toBeGreaterThan(0);
+      expect(outcome.every((c) => c.meta.dlpPattern === 'Bearer Token')).toBe(true);
       for (const c of auditCalls)
         expect(JSON.stringify(c.meta)).not.toContain(FAKE_BEARER.slice(7));
+    });
+
+    it('an empty race writes no deny row (the caller retries)', async () => {
+      writeUnkeyedHomeNoRacer();
+      const r = await authorizeHeadless('Bash', BASH_ARGS, GATEWAY);
+      expect(r.noApprovalMechanism).toBe(true);
+      expect(auditCalls.filter((c) => c.decision === 'deny')).toEqual([]);
     });
   });
 
