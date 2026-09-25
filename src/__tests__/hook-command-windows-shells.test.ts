@@ -26,7 +26,7 @@
  * the thing they were written for.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
-import { spawn, spawnSync } from 'child_process';
+import { spawn, spawnSync, type SpawnSyncReturns } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -38,6 +38,9 @@ const isWindows = process.platform === 'win32';
 // depending on where Node happens to be installed on the runner.
 let dirWithSpace = '';
 let stubScript = '';
+// The stub appends a line here the moment it starts, so a failed run can say
+// whether the shell ever got as far as launching node.
+let marker = '';
 let restore: () => void = () => {};
 
 function stubProcess(execPath: string, argv1: string): () => void {
@@ -55,26 +58,67 @@ function toForwardSlashes(p: string): string {
   return p.replace(/\\/g, '/');
 }
 
-// Stands in for cli.js. It drains stdin and exits 0 on EOF, and it also exits 0
-// after a short fallback, because EOF is not guaranteed to reach it: under
-// `powershell -Command` the shell and the child node process share the piped
-// stdin, and when powershell reads it first the child waits for an EOF that
-// never comes. That race hung the powershell case until vitest's 30s timeout
-// on one Windows CI run (PR #364) and passed on the rerun. The question under
-// test is whether the shell can LAUNCH the command; a zero exit from this
-// script already proves that, however it got there. The pre-fix form still
-// fails, because it never gets as far as running this script.
+// Stands in for cli.js: drains stdin and exits 0 on EOF, with a 1s fallback exit
+// so it can never be the thing that hangs. The question under test is whether the
+// shell can LAUNCH the command; a zero exit from this script proves that. The
+// pre-fix form still fails, because it never gets as far as running it.
 const STUB_SOURCE =
   'process.stdin.resume();process.stdin.on("end",()=>process.exit(0));' +
   'setTimeout(()=>process.exit(0),1000);\n';
 
-// Well under vitest's 30s test timeout, so a hung shell fails the test with a
-// null exit status that names the runner, instead of a bare test timeout.
+// Per spawn. A hung shell fails with a null status and ETIMEDOUT that names the
+// runner, instead of a bare vitest timeout.
 const RUN_TIMEOUT_MS = 20_000;
+
+// Measured on windows-latest, 2026-09-25 (diagnostic branch, since deleted):
+// 90 isolated powershell launches never stalled (PowerShell up in ~240ms, the hook
+// command through it in ~300ms). Under the full suite's load, 1 of 12 runs stalled
+// past 20s with NO output and the stub never started, and in that same window a
+// bare `powershell -Command "exit 0"` stalled too. Two more runs took ~2.5s just to
+// start PowerShell. cmd never stalled (<110ms). So PowerShell 5.1 itself sometimes
+// fails to start on a loaded runner; it is not the command under test.
+//
+// That exact signature (timed out, node never started) is retried ONCE. Anything
+// else is a real result: a quoting bug makes the shell fail fast with a non-zero
+// status, or node start and exit non-zero, and neither is retried. Two stalls in a
+// row fail the test, with the diagnostic line in the log.
+export interface LaunchAttempt {
+  result: SpawnSyncReturns<string>;
+  nodeStarted: boolean;
+}
+export function isShellStall(a: LaunchAttempt): boolean {
+  const code = (a.result.error as NodeJS.ErrnoException | undefined)?.code;
+  return a.result.status === null && code === 'ETIMEDOUT' && !a.nodeStarted;
+}
+export function launchWithOneStallRetry(
+  attempt: () => LaunchAttempt,
+  log: (line: string) => void = console.log
+): { final: LaunchAttempt; stalls: number } {
+  let final = attempt();
+  let stalls = 0;
+  if (isShellStall(final)) {
+    stalls++;
+    log(`shell stalled before launching node (pid ${final.result.pid}); retrying once`);
+    final = attempt();
+    if (isShellStall(final)) {
+      stalls++;
+      log(`shell stalled again (pid ${final.result.pid}); failing`);
+    }
+  }
+  return { final, stalls };
+}
+
+function markerLines(): number {
+  try {
+    return fs.readFileSync(marker, 'utf8').split('\n').filter(Boolean).length;
+  } catch {
+    return 0;
+  }
+}
 
 // Each runner form, invoked the way an agent harness spawns a hook: the whole
 // command as one verbatim string, with a JSON payload on stdin.
-const RUNNERS: Array<{ name: string; run: (cmd: string) => number | null }> = [
+const RUNNERS: Array<{ name: string; run: (cmd: string) => SpawnSyncReturns<string> }> = [
   {
     name: 'cmd /d /c',
     run: (cmd) =>
@@ -83,7 +127,7 @@ const RUNNERS: Array<{ name: string; run: (cmd: string) => number | null }> = [
         windowsVerbatimArguments: true,
         encoding: 'utf-8',
         timeout: RUN_TIMEOUT_MS,
-      }).status,
+      }),
   },
   {
     name: 'cmd /d /s /c',
@@ -93,7 +137,7 @@ const RUNNERS: Array<{ name: string; run: (cmd: string) => number | null }> = [
         windowsVerbatimArguments: true,
         encoding: 'utf-8',
         timeout: RUN_TIMEOUT_MS,
-      }).status,
+      }),
   },
   {
     // powershell.exe -Command is parsed TWICE: the Windows command-line
@@ -110,7 +154,7 @@ const RUNNERS: Array<{ name: string; run: (cmd: string) => number | null }> = [
         windowsVerbatimArguments: true,
         encoding: 'utf-8',
         timeout: RUN_TIMEOUT_MS,
-      }).status,
+      }),
   },
 ];
 
@@ -124,7 +168,11 @@ describe.skipIf(!isWindows)('hook command launches under every Windows shell', (
     vi.stubEnv('NODE9_TESTING', '');
     dirWithSpace = fs.mkdtempSync(path.join(os.tmpdir(), 'node9 hook '));
     stubScript = path.join(dirWithSpace, 'cli.js');
-    fs.writeFileSync(stubScript, STUB_SOURCE);
+    marker = path.join(dirWithSpace, 'started.log');
+    fs.writeFileSync(
+      stubScript,
+      `require("fs").appendFileSync(${JSON.stringify(marker)}, "1\\n");` + STUB_SOURCE
+    );
     restore = stubProcess(process.execPath, stubScript);
   });
 
@@ -135,9 +183,23 @@ describe.skipIf(!isWindows)('hook command launches under every Windows shell', (
   });
 
   for (const runner of RUNNERS) {
-    it(`runs the emitted command under ${runner.name}`, () => {
-      expect(runner.run(fullPathCommand('check', 'win32'))).toBe(0);
-    });
+    // Two spawns of up to RUN_TIMEOUT_MS each, plus margin, when the retry fires.
+    it(
+      `runs the emitted command under ${runner.name}`,
+      () => {
+        const cmd = fullPathCommand('check', 'win32');
+        const { final } = launchWithOneStallRetry(
+          () => {
+            const before = markerLines();
+            const result = runner.run(cmd);
+            return { result, nodeStarted: markerLines() > before };
+          },
+          (line) => console.log(`[${runner.name}] ${line}`)
+        );
+        expect(final.result.status).toBe(0);
+      },
+      2 * RUN_TIMEOUT_MS + 10_000
+    );
   }
 
   it('emits a command that does not begin with a quote', () => {
@@ -158,15 +220,13 @@ describe.skipIf(!isWindows)('hook command launches under every Windows shell', (
     // different route (a leading quoted string is a string literal there, not
     // a command), and pinning a second mechanism to the same assertion would
     // make a future failure ambiguous.
-    expect(RUNNERS[0].run(broken)).not.toBe(0);
+    expect(RUNNERS[0].run(broken).status).not.toBe(0);
   });
 });
 
-// Runs on every platform: the stub must exit 0 even when stdin is never
-// closed, which is the condition that hung the powershell case on Windows.
-// The pipe below is held open on purpose and only closed after the child has
-// exited. With the old EOF-only stub the child never exits on its own and the
-// guard kills it, so the assertion sees a signal instead of exit code 0.
+// Runs on every platform: the stub must exit 0 even when stdin is never closed,
+// so the stub can never be the process that hangs. The pipe is held open on
+// purpose and only closed after the child has exited.
 describe('Windows shell test stub', () => {
   it('exits 0 even when stdin never reaches EOF', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-stub-'));
@@ -185,5 +245,69 @@ describe('Windows shell test stub', () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// Runs on every platform: the retry policy, driven by synthetic results. Only a
+// stall (timed out AND node never started) is retried, and only once.
+describe('powershell stall retry policy', () => {
+  const res = (status: number | null, code?: string): SpawnSyncReturns<string> =>
+    ({
+      pid: 1,
+      output: [],
+      stdout: '',
+      stderr: '',
+      status,
+      signal: status === null ? 'SIGTERM' : null,
+      error: code ? Object.assign(new Error(code), { code }) : undefined,
+    }) as SpawnSyncReturns<string>;
+  const seq = (...xs: LaunchAttempt[]) => {
+    let i = 0;
+    return () => xs[Math.min(i++, xs.length - 1)];
+  };
+  const quiet = () => {};
+
+  it('a stall followed by a clean launch passes, with one stall recorded', () => {
+    const r = launchWithOneStallRetry(
+      seq(
+        { result: res(null, 'ETIMEDOUT'), nodeStarted: false },
+        { result: res(0), nodeStarted: true }
+      ),
+      quiet
+    );
+    expect(r.final.result.status).toBe(0);
+    expect(r.stalls).toBe(1);
+  });
+
+  it('two stalls in a row fail: no second retry', () => {
+    const calls: number[] = [];
+    const stall = { result: res(null, 'ETIMEDOUT'), nodeStarted: false };
+    const r = launchWithOneStallRetry(() => {
+      calls.push(1);
+      return stall;
+    }, quiet);
+    expect(r.final.result.status).toBeNull();
+    expect(r.stalls).toBe(2);
+    expect(calls.length).toBe(2);
+  });
+
+  it('a timeout AFTER node started is a real result, not retried', () => {
+    const calls: number[] = [];
+    const r = launchWithOneStallRetry(() => {
+      calls.push(1);
+      return { result: res(null, 'ETIMEDOUT'), nodeStarted: true };
+    }, quiet);
+    expect(calls.length).toBe(1);
+    expect(r.stalls).toBe(0);
+  });
+
+  it('a fast non-zero exit (a real quoting bug) is not retried', () => {
+    const calls: number[] = [];
+    const r = launchWithOneStallRetry(() => {
+      calls.push(1);
+      return { result: res(1), nodeStarted: false };
+    }, quiet);
+    expect(calls.length).toBe(1);
+    expect(r.final.result.status).toBe(1);
   });
 });
