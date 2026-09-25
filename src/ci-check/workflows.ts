@@ -559,6 +559,62 @@ function hasEnvDeny(steps: Step[]): boolean {
   return steps.some((s) => /"?mode"?\s*:\s*"?deny/i.test(str(s.with?.['settings'])));
 }
 
+const CLAUDE_CODE_ACTION_RE = /anthropics\/claude-code-action@/i;
+// claude-code-base-action takes the same `show_full_output` input and logs the same way, but
+// has no allowed_non_write_users and no auto-scrub, so only the full-output check covers it.
+const FULL_OUTPUT_ACTION_RE = /anthropics\/claude-code(-base)?-action@/i;
+
+/** Does `uses` pin an exact release BELOW `min`? Floating refs (`v1`, `main`), SHAs and
+ *  anything unparseable return false: writing the setting at all implies a release that has
+ *  it, and a SHA cannot be dated from the file. Only a provably older tag is excluded. */
+function pinnedBelow(uses: string, min: [number, number, number]): boolean {
+  const m = /@v?(\d+)\.(\d+)\.(\d+)$/.exec(uses.trim());
+  if (!m) return false;
+  const v = [Number(m[1]), Number(m[2]), Number(m[3])];
+  for (let i = 0; i < 3; i++) if (v[i] !== min[i]) return v[i] < min[i];
+  return false;
+}
+const FULL_OUTPUT_MIN: [number, number, number] = [1, 0, 16]; // #580, 2025-10-28
+const ENV_SCRUB_MIN: [number, number, number] = [1, 0, 77]; // #1093, 2026-03-23
+
+/** `show_full_output: true` on a claude-code(-base)-action step. The action then writes every
+ *  agent message and tool result to the Actions log, which its own input description calls
+ *  publicly visible. The action compares the input strictly to "true", so a quoted "True" does
+ *  not enable it (unquoted True/TRUE is a YAML boolean and arrives as "true"). Before v1.0.16
+ *  the output was always printed and the input did not exist, so the setting is not blamed on
+ *  an older exact pin. (ophis, podsync, 2026-09-25.) */
+function showsFullOutput(steps: Step[]): boolean {
+  return steps.some(
+    (s) =>
+      FULL_OUTPUT_ACTION_RE.test(s.uses ?? '') &&
+      !pinnedBelow(s.uses ?? '', FULL_OUTPUT_MIN) &&
+      str(s.with?.['show_full_output']) === 'true'
+  );
+}
+
+/** The action's subprocess secret scrub was ON for this step and the workflow switched it off.
+ *  On: claude-code-action >= v1.0.77 auto-sets CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 exactly when
+ *  the step's allowed_non_write_users is non-empty (action.yml:
+ *  `env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB || (inputs.allowed_non_write_users != '' && '1') || ''`).
+ *  Without that input the scrub was never on, so there is nothing to have switched off.
+ *  Off: the effective env value (step, else job, else workflow; a key present with an empty or
+ *  null value still wins and falls through to '1') is non-empty, not an expression, and not one
+ *  the CLI accepts as on (1/true/yes/on). */
+function envScrubOptedOut(pairs: { job: Job; step: Step }[], wf: Workflow): boolean {
+  const wfEnv = (wf as { env?: Record<string, unknown> }).env;
+  const KEY = 'CLAUDE_CODE_SUBPROCESS_ENV_SCRUB';
+  return pairs.some(({ job, step }) => {
+    const uses = step.uses ?? '';
+    if (!CLAUDE_CODE_ACTION_RE.test(uses) || pinnedBelow(uses, ENV_SCRUB_MIN)) return false;
+    if (!str(step.with?.['allowed_non_write_users']).trim()) return false;
+    const holder = [step.env, job.env, wfEnv].find((e) => e != null && KEY in e);
+    if (!holder) return false;
+    const v = str(holder[KEY]).trim();
+    if (!v || /\$\{\{/.test(v)) return false;
+    return !/^(1|true|yes|on)$/i.test(v);
+  });
+}
+
 function agentActionsPinned(steps: Step[]): boolean {
   const agent = steps.filter(isAgentStep).filter((s) => s.uses);
   if (agent.length === 0) return false;
@@ -783,6 +839,21 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
     signals.push('allowed_non_write_users: "*" with github_token — any user can trigger the agent');
   if (elevated) signals.push('elevated permissions (contents/id-token: write)');
   if (pat) signals.push('a static PAT is exposed to the agent (recoverable via injection)');
+  // Scoped to the reachable agent jobs, like the tool and PAT signals above. By job, not by
+  // step identity: a YAML-anchored step is the same object in a gated job and an open one.
+  const scopedPairs = allSteps(wf).filter(
+    (p) => isAgentStep(p.step) && (injJobs.length === 0 || injJobs.includes(p.job))
+  );
+  const fullOutput = showsFullOutput(scopedPairs.map((p) => p.step));
+  const scrubOff = envScrubOptedOut(scopedPairs, wf);
+  if (fullOutput)
+    signals.push(
+      '`show_full_output: true` writes every agent command and its output to the Actions log, public on a public repo; GitHub masks known secret values there, but an agent told to encode one first can publish it without any network tool'
+    );
+  if (scrubOff)
+    signals.push(
+      "`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` is switched off, so the action no longer scrubs the Anthropic key, cloud credentials and Actions runtime tokens from the agent's shell"
+    );
   if (!gate && reach > 0) signals.push('no effective actor gate');
   // The ambiguous case: NO explicit `permissions:` anywhere. The GITHUB_TOKEN then
   // defaults to the repo/org setting, which MAY be write-all (the legacy default). We
@@ -816,7 +887,7 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
         ? 'Agent workflow with a risky pattern (partially mitigated)'
         : 'Agent workflow on a privileged trigger — review the actor gate';
 
-  return {
+  const finding: CiFinding = {
     check: 'CI-2',
     // One verdict per workflow file — the finding IS the file's reachability score.
     rule: 'CI-2.injectable-workflow',
@@ -833,6 +904,16 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
           ? 'This runs under `pull_request` (fork PRs get a read-only token), so the head checkout is low-risk today — keep it on `pull_request` (not `pull_request_target`) and keep the actor gate + scoped tools.'
           : 'Add/verify an actor gate, scope the agent tools to read-only, and env-deny secrets. See Anthropic’s claude-code-action security doc.',
   };
+  const extraFix = [
+    fullOutput
+      ? 'Remove `show_full_output: true` (the action documents it for debugging only).'
+      : '',
+    scrubOff ? 'Remove the `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` opt-out.' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+  if (extraFix) finding.fix = `${finding.fix} ${extraFix}`;
+  return finding;
 }
 
 // ─── CI-4: agent-reachable secrets ───────────────────────────────────────────

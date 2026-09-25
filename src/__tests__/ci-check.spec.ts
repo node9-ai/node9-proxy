@@ -2967,3 +2967,192 @@ jobs:
     expect(f.severity).toBe('high');
   });
 });
+
+// 2026-09-25: two settings central to real disclosures (ophis, podsync) that the scanner
+// did not name. Signal-only: they change what the reader is told, never the severity.
+describe('CI-2 — show_full_output and the env-scrub opt-out are named', () => {
+  const W = '.github/workflows/triage.yml';
+  const wf = (withExtra = '', stepEnv = '', jobEnv = '', wfEnv = '', ref = 'v1') => `
+on:
+  issues:
+    types: [opened]${wfEnv}
+permissions:
+  contents: read
+  issues: write
+jobs:
+  triage:
+    runs-on: ubuntu-latest${jobEnv}
+    steps:
+      - uses: anthropics/claude-code-action@${ref}${stepEnv}
+        with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
+          allowed_non_write_users: "*"
+          claude_args: "--allowedTools Bash"
+          prompt: "Triage the issue"${withExtra}
+`;
+  const has = (f: { signals: string[] }, re: RegExp) => f.signals.some((x) => re.test(x));
+
+  it('show_full_output: true is named, with a fix line, and severity is unchanged', () => {
+    const base = analyzeWorkflow(W, wf())!;
+    const f = analyzeWorkflow(W, wf('\n          show_full_output: true'))!;
+    expect(has(f, /show_full_output/)).toBe(true);
+    expect(f.fix).toMatch(/Remove `show_full_output: true`/);
+    expect(f.severity).toBe(base.severity);
+    expect(has(base, /show_full_output/)).toBe(false);
+  });
+
+  it('show_full_output: false, or an expression, is not named', () => {
+    for (const v of ['false', '${{ inputs.debug }}']) {
+      const f = analyzeWorkflow(W, wf(`\n          show_full_output: ${v}`))!;
+      expect(has(f, /show_full_output/)).toBe(false);
+    }
+  });
+
+  it('the scrub opt-out is named from step, job or workflow env, for 0/false/no/off', () => {
+    const e = (indent: string, v: string) =>
+      `\n${indent}env:\n${indent}  CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: ${v}`;
+    const cases = [
+      wf('', e('        ', '0')),
+      wf('', '', e('    ', '"false"')),
+      wf('', '', '', e('', 'off')),
+      wf('', e('        ', 'no')),
+    ];
+    const base = analyzeWorkflow(W, wf())!;
+    for (const c of cases) {
+      const f = analyzeWorkflow(W, c)!;
+      expect(has(f, /ENV_SCRUB` is switched off/)).toBe(true);
+      expect(f.fix).toMatch(/Remove the `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` opt-out/);
+      expect(f.severity).toBe(base.severity);
+    }
+  });
+
+  it('scrub set to 1, or a step-level value overriding a workflow-level 0, is not an opt-out', () => {
+    const on = analyzeWorkflow(
+      W,
+      wf('', '\n        env:\n          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"')
+    )!;
+    expect(has(on, /ENV_SCRUB/)).toBe(false);
+    const overridden = analyzeWorkflow(
+      W,
+      wf(
+        '',
+        '\n        env:\n          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"',
+        '',
+        '\nenv:\n  CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0"'
+      )
+    )!;
+    expect(has(overridden, /ENV_SCRUB/)).toBe(false);
+  });
+
+  it('the scrub line needs allowed_non_write_users on the step: without it the scrub was never on', () => {
+    const noInput = wf(
+      '',
+      '\n        env:\n          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0"'
+    ).replace('          allowed_non_write_users: "*"\n', '');
+    const f = analyzeWorkflow(W, noInput);
+    expect(f ? has(f, /ENV_SCRUB/) : false).toBe(false);
+  });
+
+  it('an exact pin older than the feature is not blamed on the setting', () => {
+    const scrubOld = analyzeWorkflow(
+      W,
+      wf('', '\n        env:\n          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0"', '', '', 'v1.0.50')
+    )!;
+    expect(has(scrubOld, /ENV_SCRUB/)).toBe(false);
+    const fullOld = analyzeWorkflow(
+      W,
+      wf('\n          show_full_output: true', '', '', '', 'v1.0.10')
+    )!;
+    expect(has(fullOld, /show_full_output/)).toBe(false);
+    const sha = analyzeWorkflow(
+      W,
+      wf('\n          show_full_output: true', '', '', '', 'a'.repeat(40))
+    )!;
+    expect(has(sha, /show_full_output/)).toBe(true);
+  });
+
+  it('a quoted "True" is not what the action enables; an unquoted True is', () => {
+    expect(
+      has(analyzeWorkflow(W, wf('\n          show_full_output: "True"'))!, /show_full_output/)
+    ).toBe(false);
+    expect(
+      has(analyzeWorkflow(W, wf('\n          show_full_output: True'))!, /show_full_output/)
+    ).toBe(true);
+  });
+
+  it('any value the CLI does not read as on is an opt-out; an empty step value still overrides', () => {
+    const odd = analyzeWorkflow(
+      W,
+      wf('', '\n        env:\n          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "disabled"')
+    )!;
+    expect(has(odd, /ENV_SCRUB` is switched off/)).toBe(true);
+    const empty = analyzeWorkflow(
+      W,
+      wf(
+        '',
+        '\n        env:\n          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB:',
+        '',
+        '\nenv:\n  CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0"'
+      )
+    )!;
+    expect(has(empty, /ENV_SCRUB/)).toBe(false);
+  });
+
+  it('claude-code-base-action: the full-output line applies, the scrub line does not', () => {
+    const other = `
+on:
+  issues:
+    types: [opened]
+permissions:
+  contents: read
+  issues: write
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    env:
+      CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0"
+    steps:
+      - uses: anthropics/claude-code-base-action@v1
+        with:
+          show_full_output: true
+          allowed_non_write_users: "*"
+          allowed_tools: "Bash"
+          prompt: \${{ github.event.issue.body }}
+`;
+    const f = analyzeWorkflow(W, other)!;
+    expect(f).toBeTruthy();
+    expect(has(f, /show_full_output/)).toBe(true);
+    expect(has(f, /ENV_SCRUB/)).toBe(false);
+  });
+
+  it('a YAML-anchored step in a gated job does not lend its env to the open job', () => {
+    const anchored = `
+on:
+  issues:
+    types: [opened]
+permissions:
+  contents: read
+  issues: write
+jobs:
+  open:
+    runs-on: ubuntu-latest
+    steps:
+      - &agent
+        uses: anthropics/claude-code-action@v1
+        with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
+          allowed_non_write_users: "*"
+          claude_args: "--allowedTools Bash"
+          prompt: "Triage"
+  gated:
+    if: github.event.issue.user.login == 'owner'
+    runs-on: ubuntu-latest
+    env:
+      CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0"
+    steps:
+      - *agent
+`;
+    const f = analyzeWorkflow(W, anchored)!;
+    expect(has(f, /ENV_SCRUB/)).toBe(false);
+  });
+});
