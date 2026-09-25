@@ -1649,13 +1649,26 @@ describe('CI-1 agent-config', () => {
   });
 
   // 1d: severity depth for the broad-tool grant.
-  it('broad Bash(git:*) with NO deny backstop → high (standing catastrophic pre-auth)', () => {
+  // Calibrated 2026-09-25: `Bash(git:*)` is the everyday grant of most repos. Broad, and
+  // worth naming why (git can run other programs), but not the catastrophe tier.
+  it('broad Bash(git:*) with NO deny backstop → medium, and says why git is broader than it looks', () => {
     const cfg = JSON.stringify({ permissions: { allow: ['Bash(git:*)'], deny: [] } });
     const f = analyzeAgentConfig('.claude/settings.json', cfg).find((x) =>
       /broad tools/i.test(x.title)
     );
     expect(f).toBeTruthy();
+    expect(f!.severity).toBe('medium');
+    expect(f!.signals.some((x) => /broader than it looks/.test(x))).toBe(true);
+    expect(f!.signals.some((x) => /catastrophic/.test(x))).toBe(false);
+  });
+  it('unrestricted Bash with NO deny backstop stays high', () => {
+    const cfg = JSON.stringify({ permissions: { allow: ['Bash'], deny: [] } });
+    const f = analyzeAgentConfig('.claude/settings.json', cfg).find((x) =>
+      /broad tools/i.test(x.title)
+    );
+    expect(f).toBeTruthy();
     expect(f!.severity).toBe('high');
+    expect(f!.signals.some((x) => /without a prompt/.test(x))).toBe(true);
   });
   it('broad Bash allow WITH a Bash deny backstop → medium', () => {
     const cfg = JSON.stringify({
@@ -2854,5 +2867,103 @@ jobs:
     const f = analyzeWorkflow('x.yml', wf);
     expect(f, 'still reported').not.toBeNull();
     expect(SEVERITY_RANK[f!.severity]).toBeLessThan(SEVERITY_RANK.high);
+  });
+});
+
+// 2026-09-25: three overclaims found while writing disclosures from the 800-repo corpus.
+describe('scan-repo overclaims — dead `||` operands, CI-1 calibration', () => {
+  // `${{ a || b }}` is evaluated left to right and the default token is always set.
+  const wfWithToken = (token: string, extra = '', ref = 'v1') => `
+on:
+  issues:
+    types: [opened]
+permissions:
+  contents: read
+  issues: write
+jobs:
+  triage:
+    runs-on: ubuntu-latest${extra}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@${ref}
+        with:
+          github_token: ${token}
+          allowed_non_write_users: "*"
+          claude_args: "--allowedTools Bash"
+          prompt: "Triage the issue"
+`;
+  const W = '.github/workflows/triage.yml';
+
+  it('`secrets.GITHUB_TOKEN || secrets.GH_PAT` reaches only the default token: no PAT, no CI-4', () => {
+    const wf = wfWithToken('${{ secrets.GITHUB_TOKEN || secrets.GH_PAT }}');
+    const f = analyzeWorkflow(W, wf)!;
+    expect(f.signals.some((x) => /static PAT/.test(x))).toBe(false);
+    expect(analyzeWorkflowSecrets(W, wf)).toBeNull();
+  });
+
+  it('`secrets.GH_PAT || secrets.GITHUB_TOKEN` reaches the PAT: PAT signal, and CI-4 names it', () => {
+    const wf = wfWithToken('${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}');
+    const f = analyzeWorkflow(W, wf)!;
+    expect(f.signals.some((x) => /static PAT/.test(x))).toBe(true);
+    const s = analyzeWorkflowSecrets(W, wf)!;
+    expect(s).toBeTruthy();
+    expect(s.signals[0]).toMatch(/GH_PAT/);
+  });
+
+  it('a dead operand in a job env var is not a reachable secret either', () => {
+    const wf = wfWithToken(
+      '${{ secrets.GITHUB_TOKEN }}',
+      '\n    env:\n      GH_TOKEN: ${{ secrets.GITHUB_TOKEN || secrets.DEPLOY_PAT }}'
+    );
+    expect(analyzeWorkflowSecrets(W, wf)).toBeNull();
+  });
+
+  it('`cond && secrets.GITHUB_TOKEN || secrets.PAT` (the ternary idiom) keeps the PAT live', () => {
+    const wf = wfWithToken(
+      '${{ secrets.GITHUB_TOKEN }}',
+      "\n    env:\n      GH_TOKEN: ${{ github.event_name == 'issues' && secrets.GITHUB_TOKEN || secrets.DEPLOY_PAT }}"
+    );
+    const s = analyzeWorkflowSecrets(W, wf)!;
+    expect(s).toBeTruthy();
+    expect(s.signals[0]).toMatch(/DEPLOY_PAT/);
+  });
+
+  it('negated or compared token operands are not treated as the always-set first operand', () => {
+    for (const expr of [
+      '${{ !secrets.GITHUB_TOKEN || secrets.DEPLOY_PAT }}',
+      '${{ inputs.x == secrets.GITHUB_TOKEN || secrets.DEPLOY_PAT }}',
+      '${{ secrets.GITHUB_TOKEN || fromJSON(secrets.DEPLOY_PAT) }}',
+    ]) {
+      const wf = wfWithToken('${{ secrets.GITHUB_TOKEN }}', `\n    env:\n      GH_TOKEN: ${expr}`);
+      expect(analyzeWorkflowSecrets(W, wf)?.signals[0]).toMatch(/DEPLOY_PAT/);
+    }
+  });
+
+  it('the CI-2 title keeps "with secrets": the action puts github_token into the agent env', () => {
+    const f = analyzeWorkflow(W, wfWithToken('${{ secrets.GITHUB_TOKEN }}'))!;
+    expect(['high', 'critical']).toContain(f.severity);
+    expect(f.title).toMatch(/with secrets/);
+  });
+
+  // CodeQL js/redos on the first version of the dead-tail regex: overlapping operand
+  // alternatives backtracked exponentially (22 repetitions took ~0.4s, each one doubling).
+  // Workflow files are attacker-controlled, so a long crafted chain must finish fast.
+  it('a long crafted `||` chain in a workflow does not hang the scanner (ReDoS)', () => {
+    const chain = '${{ secrets.GITHUB_TOKEN' + '||secrets._'.repeat(5000) + ' x';
+    const wf = wfWithToken('${{ secrets.GITHUB_TOKEN }}', `\n    env:\n      GH_TOKEN: "${chain}"`);
+    const t = Date.now();
+    analyzeWorkflowSecrets(W, wf);
+    analyzeWorkflow(W, wf);
+    expect(Date.now() - t).toBeLessThan(1000);
+  }, 5000);
+
+  it('CI-1: a deny list that does not touch Bash does not limit unrestricted Bash', () => {
+    const cfg = JSON.stringify({
+      permissions: { allow: ['Bash'], deny: ['Write', 'Edit(docs/**)'] },
+    });
+    const f = analyzeAgentConfig('.claude/settings.json', cfg).find((x) =>
+      /broad tools/i.test(x.title)
+    )!;
+    expect(f.severity).toBe('high');
   });
 });

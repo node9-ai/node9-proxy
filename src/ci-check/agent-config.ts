@@ -80,27 +80,46 @@ export function analyzeAgentConfig(path: string, content: string): CiFinding[] {
     /^Bash$|^Bash\(\s*\*|^Bash\(git:|^Write\(\s*\*|^Write$|^Edit$/.test(a)
   );
   if (broad.length > 0) {
-    // 1d: a broad allow with NO `deny` backstop covering the dangerous verbs is a standing,
-    // catastrophic pre-authorization for EVERY contributor's agent → high. A `deny` that names
-    // Bash/Write/Edit backstops it → medium.
     const hasBackstop = deny.some((d) => /Bash|Write|Edit/.test(d));
+    // For an unrestricted shell only a Bash deny counts: `deny: ['Write']` does nothing to
+    // limit `allow: ['Bash']`. A Bash deny narrows it but cannot make it safe, and the
+    // signal says exactly that.
+    const bashBackstop = deny.some((d) => /^Bash\b/.test(d));
+    // Calibration (2026-09-25): only an UNRESTRICTED shell with no `deny` backstop is high —
+    // any command an injected instruction names runs without a prompt, for everyone who opens
+    // the repo with the agent. `Bash(git:*)`, `Write` and `Edit` are broad and worth a look
+    // (git can run other programs via `-c core.pager=…` or `!` aliases), but they are the
+    // everyday grant of most repos, and calling them catastrophic overclaimed → medium.
+    const bareShell = broad.some((a) => /^Bash$|^Bash\(\s*\*/.test(a));
+    const high = bareShell && !bashBackstop;
+    const signals = [`broad allow(s): ${broad.slice(0, 5).join(', ')}`];
+    if (high)
+      signals.push(
+        'unrestricted `Bash` with no `deny` backstop — any command an injected instruction names runs without a prompt, for everyone who opens this repo with the agent'
+      );
+    else if (bareShell)
+      signals.push(
+        'a `Bash` deny list narrows the unrestricted `Bash` allow; it blocks only the commands it names'
+      );
+    if (broad.some((a) => /^Bash\(git:/.test(a)))
+      signals.push(
+        '`Bash(git:*)` pre-approves every git command; git can run other programs (`-c core.pager=…`, `!` aliases), so this is broader than it looks'
+      );
+    if (broad.some((a) => /^Write|^Edit$/.test(a)))
+      signals.push('`Write`/`Edit` pre-approve file changes without a prompt');
+    if (!high && !bareShell && !hasBackstop) signals.push('no `deny` entry narrows these grants');
     findings.push({
       check: 'CI-1',
       rule: 'CI-1.broad-allow',
       // File-level: one finding per config file. Adding a SECOND broad allow makes the
       // same statement about the same file, so it must not read as a new finding.
       dimension: 'toolRules',
-      severity: hasBackstop ? 'medium' : 'high',
-      title: hasBackstop
-        ? 'Committed agent config pre-authorizes broad tools'
-        : 'Committed agent config pre-authorizes broad tools with no deny backstop',
+      severity: high ? 'high' : 'medium',
+      title: high
+        ? 'Committed agent config pre-authorizes broad tools with no deny backstop'
+        : 'Committed agent config pre-authorizes broad tools',
       file: path,
-      signals: [
-        `broad allow(s): ${broad.slice(0, 5).join(', ')}`,
-        hasBackstop
-          ? 'a `deny` list backstops the broad allow'
-          : 'no `deny` entry covers Bash/Write/Edit — every contributor is pre-authorized for catastrophic tools',
-      ],
+      signals,
       fix: 'Scope the allow-list to specific read-only subcommands (e.g. `Bash(gh pr view:*)`); avoid bare `Bash`/`git:`/`Write`, or add a `deny` backstop.',
     });
   }

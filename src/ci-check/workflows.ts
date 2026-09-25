@@ -468,13 +468,35 @@ function injectableJobs(
   return out;
 }
 
+// GitHub evaluates `a || b || c` left to right, and `secrets.GITHUB_TOKEN` / `github.token`
+// is always set, so when it is the FIRST operand every operand after it can never be used:
+// `${{ secrets.GITHUB_TOKEN || secrets.GH_PAT }}` reaches only the default token, while
+// `${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}` reaches the PAT whenever one is configured.
+// Only that exact shape is stripped. The token must open the expression (right after `${{`,
+// `(` or a `,` argument separator), every later operand must be a plain reference or quoted
+// literal, and the chain must end the expression (`}}`, `)` or `,`). Anything else is left
+// alone, because `&&` binds tighter than `||`: in `cond && secrets.GITHUB_TOKEN || secrets.PAT`
+// (GitHub's documented ternary idiom) the PAT is live whenever `cond` is false.
+// The operand alternatives must not overlap: `secrets.X` and `github.token` are already
+// matched by the plain-reference branch, and listing them separately made the `(...)+`
+// ambiguous, which backtracks exponentially on a crafted `||secrets._||secrets._…` input
+// (CodeQL js/redos). Scanned workflow files are attacker-controlled, so this must stay linear.
+const DEAD_SECRET_TAIL_RE =
+  /(?<=(?:\$\{\{|\(|,)\s*)(secrets\.GITHUB_TOKEN|github\.token)(?:\s*\|\|\s*(?:'[^']*'|[A-Za-z_][A-Za-z0-9_.]*))+(?=\s*(?:\}\}|\)|,))/gi;
+function dropDeadSecretRefs(text: string): string {
+  return text.replace(DEAD_SECRET_TAIL_RE, '$1');
+}
+
 // R4-2: a static PAT reachable in a SPECIFIC set of jobs (the injectable ones) — a
 // PAT in a gated job must not be credited to an ungated one.
 function usesPatIn(jobs: Job[]): boolean {
   for (const j of jobs)
     for (const step of j.steps ?? []) {
-      const gt = str(step.with?.['github_token']);
-      if (/secrets\./i.test(gt) && !/secrets\.GITHUB_TOKEN/i.test(gt)) return true;
+      const gt = dropDeadSecretRefs(str(step.with?.['github_token']));
+      // Any secret other than the default token that can actually be reached is a static PAT.
+      // (Before 2026-09-25 this tested "no GITHUB_TOKEN anywhere in the expression", which
+      // missed `secrets.GH_PAT || secrets.GITHUB_TOKEN` and flagged the reverse.)
+      if (/secrets\.(?!GITHUB_TOKEN\b)[A-Za-z_]/i.test(gt)) return true;
     }
   return false;
 }
@@ -833,7 +855,8 @@ const FUEL_INPUT_KEYS =
 function fuelSecretNames(agentSteps: Step[]): Set<string> {
   const out = new Set<string>();
   const add = (v: unknown) => {
-    for (const m of str(v).matchAll(/secrets\.([A-Za-z_][A-Za-z0-9_]*)/gi)) out.add(m[1]);
+    for (const m of dropDeadSecretRefs(str(v)).matchAll(/secrets\.([A-Za-z_][A-Za-z0-9_]*)/gi))
+      out.add(m[1]);
   };
   for (const st of agentSteps) {
     for (const [k, v] of Object.entries(st.with ?? {})) if (FUEL_INPUT_KEYS.test(k)) add(v);
@@ -868,7 +891,7 @@ function agentReachableSecrets(
   blobs.push(str((wf as { env?: unknown }).env));
   const fuel = fuelSecretNames(agentSteps); // A1: fuel-by-assignment, not just by-name
   const found = new Map<string, string>();
-  for (const b of blobs) {
+  for (const b of blobs.map(dropDeadSecretRefs)) {
     for (const m of b.matchAll(/secrets\.([A-Za-z_][A-Za-z0-9_]*)/gi)) {
       const name = m[1];
       if (AGENT_FUEL_RE.test(name) || fuel.has(name)) continue;
