@@ -477,8 +477,12 @@ function injectableJobs(
 // literal, and the chain must end the expression (`}}`, `)` or `,`). Anything else is left
 // alone, because `&&` binds tighter than `||`: in `cond && secrets.GITHUB_TOKEN || secrets.PAT`
 // (GitHub's documented ternary idiom) the PAT is live whenever `cond` is false.
+// The operand alternatives must not overlap: `secrets.X` and `github.token` are already
+// matched by the plain-reference branch, and listing them separately made the `(...)+`
+// ambiguous, which backtracks exponentially on a crafted `||secrets._||secrets._…` input
+// (CodeQL js/redos). Scanned workflow files are attacker-controlled, so this must stay linear.
 const DEAD_SECRET_TAIL_RE =
-  /(?<=(?:\$\{\{|\(|,)\s*)(secrets\.GITHUB_TOKEN|github\.token)(?:\s*\|\|\s*(?:secrets\.[A-Za-z_][A-Za-z0-9_]*|github\.token|'[^']*'|[A-Za-z_][A-Za-z0-9_.]*))+(?=\s*(?:\}\}|\)|,))/gi;
+  /(?<=(?:\$\{\{|\(|,)\s*)(secrets\.GITHUB_TOKEN|github\.token)(?:\s*\|\|\s*(?:'[^']*'|[A-Za-z_][A-Za-z0-9_.]*))+(?=\s*(?:\}\}|\)|,))/gi;
 function dropDeadSecretRefs(text: string): string {
   return text.replace(DEAD_SECRET_TAIL_RE, '$1');
 }

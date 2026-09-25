@@ -2945,6 +2945,18 @@ jobs:
     expect(f.title).toMatch(/with secrets/);
   });
 
+  // CodeQL js/redos on the first version of the dead-tail regex: overlapping operand
+  // alternatives backtracked exponentially (22 repetitions took ~0.4s, each one doubling).
+  // Workflow files are attacker-controlled, so a long crafted chain must finish fast.
+  it('a long crafted `||` chain in a workflow does not hang the scanner (ReDoS)', () => {
+    const chain = '${{ secrets.GITHUB_TOKEN' + '||secrets._'.repeat(5000) + ' x';
+    const wf = wfWithToken('${{ secrets.GITHUB_TOKEN }}', `\n    env:\n      GH_TOKEN: "${chain}"`);
+    const t = Date.now();
+    analyzeWorkflowSecrets(W, wf);
+    analyzeWorkflow(W, wf);
+    expect(Date.now() - t).toBeLessThan(1000);
+  }, 5000);
+
   it('CI-1: a deny list that does not touch Bash does not limit unrestricted Bash', () => {
     const cfg = JSON.stringify({
       permissions: { allow: ['Bash'], deny: ['Write', 'Edit(docs/**)'] },
