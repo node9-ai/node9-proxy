@@ -358,7 +358,11 @@ async function _authorizeHeadlessCore(
   // Thread the working directory into meta so every audit row written below
   // carries it (the SaaS event-detail Context block reads it). One place,
   // so all decision paths inherit it. See shipper-context-fields.md.
-  const meta =
+  // `let`, not `const`: the DLP gate widens it with the finding's attribution
+  // (dlpPattern / dlpSample) so EVERY later row -- persistent, trust, race
+  // outcome, cloud -- says what was found, the way the block row already does.
+  let meta:
+    (NonNullable<typeof metaArg> & { dlpPattern?: string; dlpSample?: string }) | undefined =
     options?.cwd && !metaArg?.workingDir ? { ...metaArg, workingDir: options.cwd } : metaArg;
   if (process.env.NODE9_PAUSED === '1') return { approved: true, checkedBy: 'paused' };
   const pauseState = checkPause();
@@ -678,6 +682,7 @@ async function _authorizeHeadlessCore(
         appendLocalAudit(toolName, args, 'allow', 'dlp-review-flagged', meta, hashAuditArgs);
       explainableLabel = '🚨 Node9 DLP (Credential Review)';
       dlpReviewFlagged = true;
+      meta = { ...meta, dlpPattern: dlpMatch.patternName, dlpSample: dlpMatch.redactedSample };
     }
   }
 
@@ -804,6 +809,35 @@ async function _authorizeHeadlessCore(
   // remove it). `block` (and review under panic mode) hard-denies here.
   let appPermReview: string | null = null;
   let appPermReviewTool: string | null = null; // bareTool — for audit attribution
+
+  /**
+   * The review reasons, as two predicates every guard below asks instead of
+   * keeping its own hand-written list. fix #3 (app permission) and task #16
+   * (taint) each found those lists incomplete, and DLP-3 found the DLP
+   * reason in none of them: a credential review was answered by a prior
+   * "Always Allow", by the ignored-tools fast path, and by the SaaS's "no org
+   * rule matched" allow (doc/roadmap/active/dlp-fixes-design.md, 0). A sixth
+   * reason is added HERE and reaches every guard.
+   *
+   * callSpecificReview: a reason a user's STANDING decision (a prior "Always
+   * Allow", a trust session, the ignored-tools fast path, a local policy
+   * allow) cannot answer, because it was made before this call existed and
+   * these are about THIS call's content or an org's say-so, not the tool. A
+   * smart-rule review is deliberately NOT here: a standing decision is
+   * exactly how a user pre-answers one ("trust git push for an hour").
+   *
+   * reviewDemanded: a reason a NON-HUMAN channel (a SaaS auto-allow, a
+   * shadowMode answer) cannot answer. That is every reason.
+   *
+   * Closures, not constants: the reasons are set at different points of the
+   * walk (DLP at the gate, app permission after, taint after that), and a
+   * guard that runs early must see what is known so far.
+   */
+  const callSpecificReview = (): boolean => dlpReviewFlagged || !!appPermReview || !!taintWarning;
+  const reviewDemanded = (): boolean =>
+    callSpecificReview() ||
+    localSmartRuleMatched === true ||
+    options?.localSmartRuleMatched === true;
   if (meta?.serverKey) {
     const prefix = meta.mcpServer ? `mcp__${meta.mcpServer}__` : '';
     const bareTool =
@@ -922,7 +956,11 @@ async function _authorizeHeadlessCore(
     // (No `!taintWarning` term needed: this whole policy block is already inside
     // `if (!taintWarning && !isIgnoredTool(...))` above, so a tainted call never
     // reaches here — verified by revert experiment, task #16 vector C.)
-    if (policyResult.decision === 'allow' && !appPermReview) {
+    // (`!callSpecificReview()` is uniform with the other standing-decision
+    // guards; it has no witness of its own, because the engine runs the same
+    // scanner (policy/index.ts) and reviews whatever the gate flags, so a
+    // flagged call never reaches this allow.)
+    if (policyResult.decision === 'allow' && !callSpecificReview()) {
       // Local row only — the outbox shipper delivers it. Removing the old
       // awaited POST also removes a cloud round-trip from EVERY allowed
       // call (the hot path). Rule attribution rides on the row so the SaaS
@@ -1145,7 +1183,7 @@ async function _authorizeHeadlessCore(
         : getPersistentDecision(toolName);
     // `!appPermReview`: a prior "Always Allow" must not bypass an org-set review
     // (fix #3). A persistent DENY still short-circuits (tightening is fine).
-    if (persistent === 'allow' && !appPermReview) {
+    if (persistent === 'allow' && !callSpecificReview()) {
       // Local row only — cloud delivery via the outbox shipper.
       if (!isManual) appendLocalAudit(toolName, args, 'allow', 'persistent', meta, hashAuditArgs);
       return { approved: true, checkedBy: 'persistent' };
@@ -1160,7 +1198,10 @@ async function _authorizeHeadlessCore(
         blockedByLabel: 'Persistent User Rule',
       };
     }
-  } else if (!taintWarning && !appPermReview) {
+  } else if (!callSpecificReview()) {
+    // DLP-3: a flagged ignored tool (`Read` with a credential in an argument,
+    // scanIgnoredTools on) used to fall into this branch and return a bare
+    // {approved:true}; it now falls through to the race like a tainted one.
     // Jail guard (task #20): when a jail shield is armed, Read/Grep/Glob calls
     // that target a jailed or sensitive path must NOT take the ignoredTools
     // fast path — the jail's whole point is stopping file-tool reads.
@@ -1256,12 +1297,7 @@ async function _authorizeHeadlessCore(
     }
   }
 
-  if (
-    !taintWarning &&
-    !appPermReview &&
-    !hardBlockDowngraded &&
-    getActiveTrustSession(toolName, args)
-  ) {
+  if (!callSpecificReview() && !hardBlockDowngraded && getActiveTrustSession(toolName, args)) {
     // Local row only — cloud delivery via the outbox shipper.
     if (!isManual) appendLocalAudit(toolName, args, 'allow', 'trust', meta, hashAuditArgs);
     return { approved: true, checkedBy: 'trust' };
@@ -1364,17 +1400,13 @@ async function _authorizeHeadlessCore(
   // options?.localSmartRuleMatched is boolean|undefined — coerce to true/undefined
   // with a strict boolean check to avoid JS truthiness surprises across the API
   // boundary.
-  const forceReview =
-    localSmartRuleMatched === true ||
-    options?.localSmartRuleMatched === true ||
-    !!appPermReview ||
-    // Task #16 vector C: a taint review needs a GENUINE pending entry. Taint is
-    // a client-side heuristic the SaaS has no rule for, so without forceReview
-    // its checkRule answers "no org rule matched" → {approved:true}, which is
-    // not an approval of an exfiltration risk. Measured against the live BE:
-    // {approved:true} without this flag, {pending:true} with it.
-    !!taintWarning ||
-    undefined;
+  // Every review reason, from the one predicate (reviewDemanded). Task #16
+  // vector C stated the principle for taint: a client-side finding the SaaS
+  // has no rule for needs a GENUINE pending entry, or its checkRule answers
+  // "no org rule matched" → {approved:true}, which is not a human approving
+  // anything. Measured against the live BE: {approved:true} without this flag,
+  // {pending:true} with it. DLP-3 found the DLP reason missing here.
+  const forceReview = reviewDemanded() || undefined;
   // Round-3 F1e: a DOWNGRADED HARD BLOCK must not be resolvable by the cloud
   // racer. This is the sixth non-human channel — rows B/D/E/F of
   // shield-block-downgrade-realgate.spec.ts closed persistent, trust,
@@ -1425,13 +1457,7 @@ async function _authorizeHeadlessCore(
         // class this guard already protects — we now send forceReview for it, so
         // a shadowMode answer (from a shadow/observe org, or a stale BE ignoring
         // that flag) must not resolve an exfiltration review either.
-        if (
-          initResult.shadowMode &&
-          !localSmartRuleMatched &&
-          !options?.localSmartRuleMatched &&
-          !appPermReview &&
-          !taintWarning
-        ) {
+        if (initResult.shadowMode && !reviewDemanded()) {
           return { approved: true, checkedBy: 'cloud' };
         }
         // A local smart rule with verdict "review" represents explicit user intent
@@ -1475,7 +1501,9 @@ async function _authorizeHeadlessCore(
       // remoteApprovalOnly is noted but not enforced — local UI always has control.
       // Hard blocks are handled by Shields before the UI opens.
       // Don't overwrite the taint label — taint context must stay visible to the user.
-      if (!taintWarning && !appPermReview) explainableLabel = 'Organization Policy (SaaS)';
+      // ...nor the DLP one (DLP-3): the approver, and the final deny when no
+      // channel answers, must still say a credential was found.
+      if (!callSpecificReview()) explainableLabel = 'Organization Policy (SaaS)';
     } catch {
       // Cloud API handshake failed — fall through to local rules silently
     }
@@ -1698,6 +1726,11 @@ async function _authorizeHeadlessCore(
         { ...meta, ruleName: `app-permission:${appPermReviewTool}` },
         hashAuditArgs
       );
+    // DLP-3: the same gap for a credential review -- the flagged row was written
+    // at the gate BEFORE any decision, and the outcome had no row at all. meta
+    // already carries dlpPattern / dlpSample from the gate.
+    else if (!isManual && dlpReviewFlagged)
+      appendLocalAudit(toolName, args, 'deny', 'dlp-review-denied', meta, hashAuditArgs);
     return {
       approved: false,
       noApprovalMechanism: true,
