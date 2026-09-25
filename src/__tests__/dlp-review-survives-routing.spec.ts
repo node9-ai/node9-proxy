@@ -32,7 +32,12 @@ import os from 'os';
 import path from 'path';
 
 const { mockInitSaaS, mockPollSaaS, auditCalls, trustState } = vi.hoisted(() => ({
-  auditCalls: [] as Array<{ decision: string; checkedBy: string; meta: Record<string, unknown> }>,
+  auditCalls: [] as Array<{
+    decision: string;
+    checkedBy: string;
+    meta: Record<string, unknown>;
+    hashed: boolean;
+  }>,
   // The trust file's path is resolved from the REAL home at module load
   // (auth/state.ts TRUST_FILE), so a trust.json in a tmp HOME is never read:
   // a first draft of the trust row wrote one and stayed green with the guard
@@ -80,6 +85,7 @@ vi.mock('../audit/index', async (orig) => {
         decision: a[2],
         checkedBy: a[3],
         meta: (a[4] ?? {}) as Record<string, unknown>,
+        hashed: a[5] === true,
       });
       return real.appendLocalAudit(...a);
     },
@@ -152,7 +158,10 @@ describe('DLP-3: a DLP credential review is never resolved by a non-human channe
    *  a POSITIVE timeout"), and a local config honours it; 0 is the one way to
    *  leave the race with NO racer, which is the path that returns the
    *  engine's own label and writes the no-channel deny row. */
-  function writeUnkeyedHomeNoRacer(): void {
+  function writeUnkeyedHomeNoRacer(
+    extraSettings: Record<string, unknown> = {},
+    extraDlp: Record<string, unknown> = {}
+  ): void {
     fs.rmSync(path.join(tmpHome, '.node9', 'rules-cache.json'), { force: true });
     fs.writeFileSync(
       path.join(tmpHome, '.node9', 'credentials.json'),
@@ -172,8 +181,9 @@ describe('DLP-3: a DLP credential review is never resolved by a non-human channe
           approvalTimeoutMs: 0,
           autoStartDaemon: false,
           approvers: { native: false, browser: false, cloud: true, terminal: false },
+          ...extraSettings,
         },
-        policy: { dlp: { enabled: true, scanIgnoredTools: true } },
+        policy: { dlp: { enabled: true, scanIgnoredTools: true, ...extraDlp } },
       })
     );
     _resetConfigCache();
@@ -313,11 +323,44 @@ describe('DLP-3: a DLP credential review is never resolved by a non-human channe
     });
   });
 
-  // No row for the local-policy allow guard: the engine runs the same scanner
-  // the gate does (policy/index.ts) and reviews whatever the gate flags, so a
-  // flagged call never reaches that allow. Measured: a Write with the fixture
-  // in its content stays denied with the guard's term removed. The term is
-  // kept for uniformity and says so in place.
+  // ── Guard 7: a local policy allow ─────────────────────────────────────────
+  describe('local policy allow', () => {
+    // The engine runs the same scanner the gate does (policy/index.ts) and
+    // usually reviews whatever the gate flags, so a first draft called this
+    // guard unwitnessable. /code-review found the gap: the gate reads
+    // getConfig(cwd) and the engine getConfig(), so a PROJECT config that
+    // enables DLP flags a call the global engine allows.
+    function projectWithDlp(): string {
+      writeUnkeyedHomeNoRacer({}, { enabled: false });
+      const project = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-dlp3-proj-'));
+      fs.writeFileSync(
+        path.join(project, 'node9.config.json'),
+        JSON.stringify({ policy: { dlp: { enabled: true, scanIgnoredTools: true } } })
+      );
+      return project;
+    }
+
+    it('does not answer a DLP review the engine would have allowed', async () => {
+      const project = projectWithDlp();
+      try {
+        const r = await authorizeHeadless('Bash', BASH_ARGS, GATEWAY, { cwd: project });
+        expect(r.approved).toBe(false);
+        expect(r.checkedBy).not.toBe('local-policy');
+      } finally {
+        fs.rmSync(project, { recursive: true, force: true });
+      }
+    });
+
+    it('and the approver still learns a credential was found (the label is not wiped)', async () => {
+      const project = projectWithDlp();
+      try {
+        const r = await authorizeHeadless('Bash', BASH_ARGS, GATEWAY, { cwd: project });
+        expect(r.blockedByLabel).toContain('DLP');
+      } finally {
+        fs.rmSync(project, { recursive: true, force: true });
+      }
+    });
+  });
 
   // ── Guard 6: the label survives the handshake ─────────────────────────────
   describe('attribution', () => {
@@ -330,6 +373,35 @@ describe('DLP-3: a DLP credential review is never resolved by a non-human channe
       expect(r.approved).toBe(false);
       expect(r.blockedBy).toBe('no-approval-mechanism'); // the path under test, not a timeout
       expect(r.blockedByLabel).toContain('DLP');
+    });
+
+    it('the flagged row itself names the pattern (the one the dashboard renders as Flagged)', async () => {
+      await authorizeHeadless('Bash', BASH_ARGS, GATEWAY);
+      const flagged = auditCalls.find((c) => c.checkedBy === 'dlp-review-flagged');
+      expect(flagged?.meta.dlpPattern).toBe('Bearer Token');
+    });
+
+    it('every row for a flagged call hashes its args (a guard, not a witness)', async () => {
+      // The secret lives in the ARGS, not the meta: with hashing off the writer
+      // stores args through redactSecrets, which needs a label to key on. The
+      // gate forces hashing on for every later row, as the block row always
+      // has. Measured: the config merge ignores `auditHashArgs: false` today,
+      // so this row cannot go red by config; it guards the property against a
+      // merge that starts honouring it.
+      writeUnkeyedHomeNoRacer({ auditHashArgs: false });
+      await authorizeHeadless('Bash', BASH_ARGS, GATEWAY);
+      expect(auditCalls.length).toBeGreaterThan(1); // flagged + outcome
+      for (const c of auditCalls)
+        expect({ row: c.checkedBy, hashed: c.hashed }).toEqual({ row: c.checkedBy, hashed: true });
+    });
+
+    it("the daemon's background re-auth writes no deny row while the human's card is open", async () => {
+      // With calledFromDaemon the native/terminal racers are skipped in THIS
+      // process while the daemon holds the card; an empty race there is not a
+      // decision, and a 'dlp-review-denied' row would be a deny nobody gave.
+      writeUnkeyedHomeNoRacer();
+      await authorizeHeadless('Bash', BASH_ARGS, GATEWAY, { calledFromDaemon: true });
+      expect(auditCalls.some((c) => c.checkedBy === 'dlp-review-denied')).toBe(false);
     });
 
     it('the final deny row exists and names the pattern (the flagged row alone said "allow")', async () => {
@@ -363,6 +435,16 @@ describe('DLP-3: a DLP credential review is never resolved by a non-human channe
 
   // ── Unchanged behaviour ───────────────────────────────────────────────────
   describe('what must not change', () => {
+    it("reviewAction:'block' still hard-denies at the gate: no flagged row, no race", async () => {
+      writeUnkeyedHomeNoRacer({}, { reviewAction: 'block' });
+      const r = await authorizeHeadless('Bash', BASH_ARGS, GATEWAY);
+      expect(r.approved).toBe(false);
+      expect(r.blockedBy).toBe('local-config');
+      expect(r.blockedByLabel).toContain('DLP');
+      expect(auditCalls.some((c) => c.checkedBy === 'dlp-review-flagged')).toBe(false);
+      expect(mockInitSaaS).not.toHaveBeenCalled();
+    });
+
     it('inline-ask still defers a DLP review to the dev, before any SaaS call', async () => {
       const r = await authorizeHeadless(
         'Bash',
