@@ -7,6 +7,7 @@ import path from 'path';
 import type { CiFinding } from './types';
 import { parseFrontmatter, allowedToolsOf } from './frontmatter';
 import { SCRIPT_EXT_RE, isHookScript } from './instructions';
+import { lineAtIndex, jsonValueIndex } from './lines';
 
 interface Settings {
   permissions?: { allow?: unknown[]; deny?: unknown[] };
@@ -130,6 +131,12 @@ export interface TreeListing {
   complete: boolean;
 }
 
+/** Line of a hook command in the settings source, or undefined. */
+function cmdLine(content: string, cmd: string): number | undefined {
+  const i = jsonValueIndex(content, cmd);
+  return i >= 0 ? lineAtIndex(content, i) : undefined;
+}
+
 export function analyzeAgentConfig(path: string, content: string, tree?: TreeListing): CiFinding[] {
   let cfg: Settings;
   try {
@@ -162,6 +169,7 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
         ? 'Agent hook runs UNPINNED/remote third-party code on every action'
         : 'Agent hook runs third-party code in the agent hot path',
       file: path,
+      ...(cmdLine(content, cmd) ? { line: cmdLine(content, cmd) } : {}),
       signals: [
         `hook command: \`${cmd.slice(0, 120)}\``,
         remoteExec
@@ -188,6 +196,7 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
           severity: 'medium',
           title: 'Agent hook runs a script that is not committed',
           file: path,
+          ...(cmdLine(content, cmd) ? { line: cmdLine(content, cmd) } : {}),
           signals: [
             `hook command: \`${cmd.slice(0, 120)}\``,
             `\`${script}\` is not in the repository — whatever lands at that path later runs before every agent action, for everyone`,
@@ -203,6 +212,7 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
           severity: 'advisory',
           title: 'Agent hook runs a committed script this scan did not read',
           file: path,
+          ...(cmdLine(content, cmd) ? { line: cmdLine(content, cmd) } : {}),
           signals: [
             `hook command: \`${cmd.slice(0, 120)}\``,
             `\`${script}\` is committed but outside \`.claude/hooks/\`, the paths this scan reads — its contents were not graded`,
@@ -219,7 +229,10 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
   const grade = gradeBroadGrant(allow, deny);
   if (grade) {
     const { high, signals } = grade;
+    // Anchor at the first broad entry: where the reviewer has to change something.
+    const at = jsonValueIndex(content, grade.broad[0]);
     findings.push({
+      ...(at >= 0 ? { line: lineAtIndex(content, at) } : {}),
       check: 'CI-1',
       rule: 'CI-1.broad-allow',
       // File-level: one finding per config file. Adding a SECOND broad allow makes the
@@ -259,10 +272,12 @@ export function analyzeSkillGrants(path: string, content: string): CiFinding[] {
   });
   if (!grade) return [];
   const kind = /commands\//.test(path) ? 'slash command' : 'skill';
+  const at = content.search(/^allowed-tools\s*:/m);
   return [
     {
       check: 'CI-1',
       rule: 'CI-1.skill-allowed-tools',
+      ...(at >= 0 ? { line: lineAtIndex(content, at) } : {}),
       // File-level: one finding per skill or command, like CI-1.broad-allow per config file.
       dimension: 'toolRules',
       // Capped at medium (2026-09-27): a settings.json grant applies to every agent action,

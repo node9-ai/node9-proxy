@@ -12,6 +12,7 @@
 
 import { parse as parseToml } from 'smol-toml';
 import { analyzeMcpServers, type McpServerSpec } from './mcp';
+import { lineAtIndex } from './lines';
 import type { CiFinding } from './types';
 
 interface CodexConfig {
@@ -30,7 +31,7 @@ export function analyzeCodexConfig(path: string, content: string): CiFinding[] {
   const findings: CiFinding[] = [];
 
   // CI-3 — MCP servers (reuse the exact `.mcp.json` danger model).
-  findings.push(...analyzeMcpServers(cfg.mcp_servers ?? {}, path));
+  findings.push(...analyzeMcpServers(cfg.mcp_servers ?? {}, path, content));
 
   // CI-1 — autonomy settings. `danger-full-access` (arbitrary cmds, full disk/network) is
   // catastrophic → high; `never` approval alone is bounded (a sandbox may still constrain
@@ -46,7 +47,12 @@ export function analyzeCodexConfig(path: string, content: string): CiFinding[] {
         : null,
       noApproval ? 'approval_policy = "never" — no human approval for agent actions' : null,
     ].filter((s): s is string => s !== null);
+    // Anchor at the setting that makes it worst: sandbox_mode when it grants full access.
+    const at = content.search(
+      fullAccess ? /^[ \t]*sandbox_mode\s*=/m : /^[ \t]*approval_policy\s*=/m
+    );
     findings.push({
+      ...(at >= 0 ? { line: lineAtIndex(content, at) } : {}),
       check: 'CI-1',
       // One finding per Codex config; `danger-full-access` vs `approval_policy = never`
       // are two severities of the same statement, so tightening one is a de-escalation

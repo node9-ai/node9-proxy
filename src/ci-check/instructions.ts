@@ -11,6 +11,7 @@
 // permission grant and is graded by CI-1 (analyzeSkillGrants in agent-config.ts).
 
 import type { CiFinding, Severity } from './types';
+import { lineAtIndex } from './lines';
 
 // ── Tier 1: structural concealment — classified by LEGITIMACY, not "is it invisible" ──
 // Presence of an invisible/formatting char ≠ concealment. Four classes, distinct handling
@@ -46,8 +47,9 @@ const isAsciiWordChar = (ch: string | undefined): boolean => !!ch && /[A-Za-z0-9
 /** D: count zero-width chars (U+200B/U+2060) that SPLIT a visible Latin word — the concealment
  *  shape. Skips a neighbor in a ZW-legit script (word-break typography) and whitespace/edge
  *  boundaries (formatting). */
-function suspiciousZeroWidth(text: string): number {
+function suspiciousZeroWidth(text: string): { count: number; first: number } {
   let n = 0;
+  let first = -1;
   for (let i = 0; i < text.length; i++) {
     const c = text.charCodeAt(i);
     if (c !== 0x200b && c !== 0x2060) continue;
@@ -56,9 +58,12 @@ function suspiciousZeroWidth(text: string): number {
     const prev = text[i - 1];
     const next = text[i + 1];
     if (!prev || !next || /\s/.test(prev) || /\s/.test(next)) continue;
-    if (isAsciiWordChar(prev) && isAsciiWordChar(next)) n++;
+    if (isAsciiWordChar(prev) && isAsciiWordChar(next)) {
+      if (first < 0) first = i;
+      n++;
+    }
   }
-  return n;
+  return { count: n, first };
 }
 const stripZeroWidth = (t: string): string => t.replace(/[​⁠]/g, '');
 
@@ -264,7 +269,8 @@ function mk(
   title: string,
   signals: string[],
   fix: string,
-  path: string
+  path: string,
+  line?: number
 ): CiFinding {
   // Every CI-6 signal fires at most once per file, so the rule id alone locates it.
   return {
@@ -274,10 +280,14 @@ function mk(
     severity,
     title,
     file: path,
+    ...(line ? { line } : {}),
     signals,
     fix,
   };
 }
+
+const lineAt = (text: string, i: number): number | undefined =>
+  i >= 0 ? lineAtIndex(text, i) : undefined;
 
 /** Analyze one agent instruction file. Returns 0+ findings. Never throws. */
 export function analyzeInstructionFile(path: string, content: string): CiFinding[] {
@@ -295,7 +305,8 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
           'contains Unicode tag characters (U+E0000–E007F) — an invisible instruction-smuggling channel with no legitimate use in text',
         ],
         'Remove the tag characters. Instruction files must be plain, reviewable text.',
-        path
+        path,
+        lineAt(content, content.search(TAG_CHARS))
       )
     );
   if (BIDI_OVERRIDE.test(content))
@@ -308,7 +319,8 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
           'contains a bidi override (U+202D/U+202E) — a Trojan-Source technique that visually reorders text so a human reads something different from what the agent parses',
         ],
         'Remove the bidi override characters.',
-        path
+        path,
+        lineAt(content, content.search(BIDI_OVERRIDE))
       )
     );
   else if (BIDI_EMBED_ISOLATE.test(content))
@@ -321,11 +333,12 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
           'contains bidi embed/isolate characters (U+202A–202C / U+2066–2069) — legitimate in right-to-left text, but confirm they are not being used to hide or reorder instructions',
         ],
         'Confirm the bidi marks are legitimate RTL formatting; remove otherwise.',
-        path
+        path,
+        lineAt(content, content.search(BIDI_EMBED_ISOLATE))
       )
     );
   const zw = suspiciousZeroWidth(content);
-  if (zw > 0) {
+  if (zw.count > 0) {
     const revealed = OVERRIDE_RE.test(stripZeroWidth(content)) && !OVERRIDE_RE.test(content);
     findings.push(
       mk(
@@ -338,7 +351,8 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
             : 'a zero-width character splits a visible Latin word — a concealment technique (hides text from human review while the agent reads it as contiguous)',
         ],
         'Remove the zero-width characters. Instruction files must be plain, reviewable text.',
-        path
+        path,
+        lineAt(content, zw.first)
       )
     );
   }
@@ -356,7 +370,8 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
           `contains a prompt-override / role-impersonation directive (\`${m[0].slice(0, 60).trim()}\`)${ovEnc ? ' — concealed in a base64 blob' : ''}`,
         ],
         'Remove the override text. An instruction file should not tell the agent to ignore its own rules.',
-        path
+        path,
+        ov ? lineAt(content, ov.index) : undefined // concealed in base64: no line, never a wrong one
       )
     );
   }
@@ -377,7 +392,8 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
         'Instruction directs the agent to fetch and run remote code',
         [`\`${fo[0].slice(0, 70).trim()}\` — fetch-and-obey, outside an install/setup section`],
         'Do not instruct the agent to pipe remote content into a shell; pin and vendor scripts instead.',
-        path
+        path,
+        lineAt(content, fo.index)
       )
     );
   }
@@ -395,7 +411,8 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
         'Instruction points the agent at credential material',
         [`references \`${sp[0].slice(0, 50).trim()}\` — directs the agent toward secrets`],
         'Do not reference credential files or paths in agent instructions.',
-        path
+        path,
+        lineAt(content, sp.index)
       )
     );
   }
@@ -413,7 +430,8 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
         'Instruction directs the agent to send data to an external endpoint',
         [`\`${ex[0].slice(0, 70).trim()}\` — possible exfiltration directive`],
         'Remove external post/upload directives from agent instructions.',
-        path
+        path,
+        lineAt(content, ex.index)
       )
     );
   }
