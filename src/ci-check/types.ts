@@ -47,6 +47,11 @@ export interface CiFinding {
    *  same hook command registered twice). 0 for the first occurrence; assigned by the
    *  scan, never by a check. */
   ordinal?: number;
+  /** Set when a committed `.node9-ignore.json` entry covers this finding. The finding stays
+   *  in the output and the comment (marked, counted) and is excluded from `worst` and the
+   *  gate. `key` is the entry's readable identity, so a diff can ask whether the suppression
+   *  existed in the base. */
+  suppressed?: { reason: string; key: string; expires?: string };
 }
 
 /** How one finding relates to the base scan. `escalated` is a finding that already
@@ -115,6 +120,17 @@ export interface ScanResult {
   /** True when a fetch was rate-limited / errored — the scan could NOT read every
    *  file, so `worst: null` must NOT be presented as "clean" (false assurance). */
   incomplete: boolean;
+  /** Active entries from the repo's `.node9-ignore.json`, so a diff can compare them
+   *  against the base's. Absent when there was no file. */
+  suppressions?: {
+    rule: string;
+    file: string;
+    locator?: string;
+    reason: string;
+    expires?: string;
+  }[];
+  /** How many findings above are marked suppressed. `worst` is computed over the rest. */
+  suppressedCount?: number;
 }
 
 /** Severity rank for comparison / worst-of. Higher = worse. */

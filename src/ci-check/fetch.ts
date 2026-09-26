@@ -45,7 +45,9 @@ export function resolveGitHubToken(): string | undefined {
 
 /** The committed files that make up the agent-security surface. Fixed list —
  *  we never fetch arbitrary repo content. Workflows are enumerated separately. */
-const SURFACE_FILES = [
+export const SURFACE_FILES = [
+  // The team's suppressions. Root only; parsed by scanTree, never routed to an analyzer.
+  '.node9-ignore.json',
   '.claude/settings.json',
   '.claude/settings.local.json',
   '.mcp.json',

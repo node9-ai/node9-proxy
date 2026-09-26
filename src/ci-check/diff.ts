@@ -20,6 +20,7 @@ import type {
   Severity,
 } from './types';
 import { SEVERITY_RANK } from './types';
+import { suppressionKey } from './suppress';
 
 /** The stable identity of a finding across two scans.
  *
@@ -117,13 +118,28 @@ export function diffScans(base: ScanResult | null | undefined, head: ScanResult)
 
   const removed = base.findings.filter((f) => !matched.has(fingerprintOf(f)));
 
+  // THE suppression property. A `.node9-ignore.json` is committed, so whoever can add a
+  // finding can add its suppression in the same commit; applied blindly that PR is green.
+  // A suppression that did not exist in the base does not apply to a finding this change
+  // introduced or escalated. Silencing something costs a separate, reviewable commit.
+  const baseKeys = new Set((base.suppressions ?? []).map(suppressionKey));
+  for (const f of [...added, ...escalated.map((e) => e.finding)]) {
+    if (f.suppressed && !baseKeys.has(f.suppressed.key)) {
+      delete f.suppressed;
+      f.signals.push(
+        'a suppression for this finding was added in the same change — not honoured; suppress it in a separate commit so the decision is reviewable'
+      );
+    }
+  }
+  const introduced = [...added, ...escalated.map((e) => e.finding)].filter((f) => !f.suppressed);
+
   return {
     base: state,
     added,
     removed,
     unchanged,
     escalated,
-    worstIntroduced: worstOf([...added.map((f) => f.severity), ...escalated.map((e) => e.to)]),
+    worstIntroduced: worstOf(introduced.map((f) => f.severity)),
     // The head side of the same guard: a scan that could not read every file has not
     // earned the word "clean", however trustworthy the base was.
     incomplete: head.incomplete,

@@ -45,8 +45,14 @@ function gateWorst(result, scope) {
  *  everything when there is no trustworthy diff. */
 function annotatable(result) {
   const d = result.diff;
-  if (!d || d.base !== 'ok') return Array.isArray(result.findings) ? result.findings : [];
-  return [...(d.added || []), ...(d.escalated || []).map((e) => e.finding)];
+  const all =
+    !d || d.base !== 'ok'
+      ? Array.isArray(result.findings)
+        ? result.findings
+        : []
+      : [...(d.added || []), ...(d.escalated || []).map((e) => e.finding)];
+  // A suppressed finding is a reviewed decision: it stays in the collapsed list, not on the diff.
+  return all.filter((f) => !f.suppressed);
 }
 
 /** GitHub workflow commands: one annotation per finding, on the file in the PR diff.
@@ -150,7 +156,10 @@ function renderDetail(result) {
   );
   L.push('');
   for (const f of findings) {
-    L.push(`**${ICON[f.severity] ?? '•'} ${String(f.severity).toUpperCase()} — ${f.title}**`);
+    L.push(
+      `**${ICON[f.severity] ?? '•'} ${String(f.severity).toUpperCase()} — ${f.title}**` +
+        (f.suppressed ? ` _(suppressed: ${f.suppressed.reason})_` : '')
+    );
     L.push(`\`${f.file}${f.line ? ':' + f.line : ''}\` · ${f.check}`);
     for (const s of f.signals ?? []) L.push(`- ${s}`);
     if (f.mitigations?.length) L.push(`- _mitigated:_ ${f.mitigations.join('; ')}`);
@@ -164,7 +173,10 @@ function renderDetail(result) {
 /** Render the sticky comment: lead with the ATTACK STORY (threat → mechanism → single fix),
  *  raw findings collapsed into <details>. Same ScanResult data, reframed for impact. */
 function renderComment(result) {
-  const all = Array.isArray(result.findings) ? result.findings : [];
+  const all = (Array.isArray(result.findings) ? result.findings : []).filter((f) => !f.suppressed);
+  const suppressedN = (Array.isArray(result.findings) ? result.findings : []).filter(
+    (f) => f.suppressed
+  ).length;
   const d = result.diff;
   const trusted = d && d.base === 'ok';
   // CI-5: when we know what this change introduced, the comment is about THAT. A reviewer
@@ -176,7 +188,7 @@ function renderComment(result) {
   const L = [MARKER];
   // An incomplete scan can never take the green branch, however little it found.
   if (trusted && findings.length === 0 && !d.incomplete && !result.incomplete) {
-    L.push('### 🛡️ node9 agent-security · ✅');
+    L.push(`### 🛡️ node9 agent-security · ✅${suppressedN ? ` · ${suppressedN} suppressed` : ''}`);
     L.push('');
     L.push(
       `**This PR introduces no agent-security findings.**` +
@@ -207,11 +219,17 @@ function renderComment(result) {
     L.push('');
   }
   if (findings.length === 0) {
-    L.push('### 🛡️ node9 agent-security · ✅');
+    L.push(`### 🛡️ node9 agent-security · ✅${suppressedN ? ` · ${suppressedN} suppressed` : ''}`);
     L.push('');
     L.push(
-      'No agent-security findings — no injectable workflows, unsafe agent configs, or unpinned MCP servers.'
+      suppressedN
+        ? `No unsuppressed agent-security findings. ${suppressedN} finding(s) are suppressed by \`.node9-ignore.json\` — listed below with their reasons.`
+        : 'No agent-security findings — no injectable workflows, unsafe agent configs, or unpinned MCP servers.'
     );
+    if (suppressedN) {
+      L.push('');
+      L.push(renderDetail(result));
+    }
     return L.join('\n');
   }
   const anchor = [...findings].sort((a, b) => RANK[b.severity] - RANK[a.severity])[0];
@@ -227,7 +245,8 @@ function renderComment(result) {
 
   L.push(
     `### 🛡️ node9 agent-security · ${ICON[worst] ?? '🟢'} ${tier}` +
-      (trusted ? ` · introduced by this PR` : '')
+      (trusted ? ` · introduced by this PR` : '') +
+      (suppressedN ? ` · ${suppressedN} suppressed` : '')
   );
   if (trusted && (d.escalated || []).length) {
     L.push('');
@@ -518,6 +537,33 @@ function selftest() {
     'a partial scan never claims the PR introduced nothing'
   );
   assert.ok(partialComment.includes('could not read every file'), 'a partial scan says so');
+
+  // ── suppression (.node9-ignore.json) ─────────────────────────────────────────
+  const sup = { reason: 'accepted, tracked in #412', key: 'k' };
+  const mixed = {
+    worst: 'medium',
+    findings: [f('critical', { suppressed: sup }), f('medium', { file: 'b.yml' })],
+    inspected: ['a'],
+  };
+  assert.strictEqual(annotationLines(mixed).length, 1, 'a suppressed finding is not annotated');
+  assert.match(annotationLines(mixed)[0], /file=b\.yml/, 'the unsuppressed one is');
+  const c2 = renderComment(mixed);
+  assert.ok(c2.includes('1 suppressed'), 'the headline counts suppressed findings');
+  assert.ok(c2.includes('suppressed: accepted, tracked in #412'), 'the detail shows the reason');
+  assert.ok(
+    !c2.includes('Critical — action needed'),
+    'the headline tier ignores the suppressed critical'
+  );
+  assert.ok(c2.includes('Medium — hardening'), 'and is driven by the unsuppressed medium');
+  const allSup = renderComment({
+    worst: null,
+    findings: [f('critical', { suppressed: sup })],
+    inspected: ['a'],
+  });
+  assert.ok(
+    allSup.includes('1 suppressed') || allSup.includes('suppressed:'),
+    'all-suppressed still names the suppression'
+  );
 
   // Annotations follow the same scope.
   const introducedOnly = withDiff(

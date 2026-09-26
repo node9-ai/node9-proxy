@@ -16,6 +16,7 @@ import {
   skillDirsOf,
 } from './instructions';
 import { analyzeScript } from './scripts';
+import { SUPPRESSIONS_FILE, parseSuppressions, applySuppressions } from './suppress';
 import { assignOrdinals } from './diff';
 import type { CiFinding, ScanResult, Severity, RepoTree } from './types';
 import { SEVERITY_RANK } from './types';
@@ -44,8 +45,15 @@ export function scanTree(tree: RepoTree): ScanResult {
   const listing = tree.paths
     ? { paths: new Set(tree.paths), complete: tree.pathsComplete === true }
     : undefined;
+  // The team's suppressions, parsed once. Applied AFTER every check has run, so a check can
+  // never see a finding as absent; and never routed to a content analyzer.
+  const suppressionsFile = tree.files.find((f) => f.path === SUPPRESSIONS_FILE);
+  const suppressions = suppressionsFile
+    ? parseSuppressions(suppressionsFile.content, new Date())
+    : undefined;
   for (const file of tree.files) {
     inspected.push(file.path);
+    if (file.path === SUPPRESSIONS_FILE) continue;
     try {
       if (/\.github\/workflows\/.+\.ya?ml$/.test(file.path)) {
         const f = analyzeWorkflow(file.path, file.content);
@@ -75,6 +83,13 @@ export function scanTree(tree: RepoTree): ScanResult {
   // identical findings in one file keep distinct, stable identities across scans.
   assignOrdinals(findings);
 
+  let suppressedCount = 0;
+  if (suppressions) {
+    findings.push(...suppressions.findings);
+    notes.push(...suppressions.notes);
+    suppressedCount = applySuppressions(findings, suppressions.active);
+  }
+
   // Worst-first, then by file for stable output.
   findings.sort(
     (a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] || a.file.localeCompare(b.file)
@@ -84,7 +99,16 @@ export function scanTree(tree: RepoTree): ScanResult {
   // worst is then "we couldn't look", not "clean". Surface it so no caller (CLI
   // header, Action, SaaS) renders a partial scan as a clean bill of health.
   const incomplete = notes.some((nt) => /may be INCOMPLETE/i.test(nt));
-  return { source: tree.source, findings, inspected, notes, worst: worstOf(findings), incomplete };
+  // `worst` is what the gate judges, so it is computed over the UNSUPPRESSED findings only.
+  return {
+    source: tree.source,
+    findings,
+    inspected,
+    notes,
+    worst: worstOf(findings.filter((f) => !f.suppressed)),
+    incomplete,
+    ...(suppressions ? { suppressions: suppressions.active, suppressedCount } : {}),
+  };
 }
 
 /** Fetch + scan a repo (URL | owner/repo | local path). `onProgress` is a
