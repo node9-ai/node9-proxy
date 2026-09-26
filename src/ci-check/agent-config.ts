@@ -176,7 +176,10 @@ export function analyzeSkillGrants(path: string, content: string): CiFinding[] {
       rule: 'CI-1.skill-allowed-tools',
       // File-level: one finding per skill or command, like CI-1.broad-allow per config file.
       dimension: 'toolRules',
-      severity: grade.high ? 'high' : 'medium',
+      // Capped at medium (2026-09-27): a settings.json grant applies to every agent action,
+      // a skill's or command's only while it runs. The signal still names the unrestricted
+      // shell — the cap is on reach, not on honesty.
+      severity: 'medium',
       title: grade.high
         ? `Committed ${kind} pre-authorizes an unrestricted shell while active`
         : `Committed ${kind} pre-authorizes broad tools while active`,
