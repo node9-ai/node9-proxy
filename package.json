@@ -1,6 +1,6 @@
 {
   "name": "@node9/proxy",
-  "version": "2.24.1",
+  "version": "2.24.2",
   "description": "IAM for your AI agents. Set what Claude Code, Codex, Gemini, Cursor and any MCP server are allowed to do, review risky actions before they run, and keep every action on the record.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
