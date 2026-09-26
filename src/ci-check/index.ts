@@ -8,13 +8,8 @@ import { analyzeWorkflow, analyzeWorkflowSecrets } from './workflows';
 import { analyzeAgentConfig, analyzeSkillGrants } from './agent-config';
 import { analyzeMcp } from './mcp';
 import { analyzeCodexConfig } from './codex';
-import {
-  analyzeInstructionFile,
-  isInstructionFile,
-  isHookScript,
-  isSkillScript,
-  skillDirsOf,
-} from './instructions';
+import { analyzeInstructionFile, skillDirsOf } from './instructions';
+import { routeOf } from './route';
 import { analyzeScript } from './scripts';
 import { SUPPRESSIONS_FILE, parseSuppressions, applySuppressions } from './suppress';
 import { assignOrdinals } from './diff';
@@ -65,24 +60,33 @@ export function scanTree(tree: RepoTree): ScanResult {
       // Read ONCE: a local reader's content is read on demand and not held (§K), so a second
       // access would read the file again. Everything below uses this one copy.
       const content = file.content;
-      if (/\.github\/workflows\/.+\.ya?ml$/.test(file.path)) {
-        const f = analyzeWorkflow(file.path, content);
-        if (f) findings.push(f);
-        const s = analyzeWorkflowSecrets(file.path, content); // CI-4
-        if (s) findings.push(s);
-      } else if (/\.claude\/settings(\.local)?\.json$/.test(file.path)) {
-        findings.push(...analyzeAgentConfig(file.path, content, listing));
-      } else if (isHookScript(file.path)) {
-        findings.push(...analyzeScript(file.path, content, 'CI-1.hook-script'));
-      } else if (isSkillScript(file.path, skillDirs)) {
-        findings.push(...analyzeScript(file.path, content, 'CI-6.skill-script'));
-      } else if (/\.mcp\.json$|\.cursor\/mcp\.json$/.test(file.path)) {
-        findings.push(...analyzeMcp(file.path, content));
-      } else if (/(^|\/)\.codex\/config\.toml$/.test(file.path)) {
-        findings.push(...analyzeCodexConfig(file.path, content)); // CI-3 + CI-1 (1c-A)
-      } else if (isInstructionFile(file.path, skillDirs)) {
-        findings.push(...analyzeInstructionFile(file.path, content)); // CI-6: the content
-        findings.push(...analyzeSkillGrants(file.path, content)); // CI-1: the grant
+      switch (routeOf(file.path, skillDirs)) {
+        case 'workflow': {
+          const f = analyzeWorkflow(file.path, content);
+          if (f) findings.push(f);
+          const s = analyzeWorkflowSecrets(file.path, content); // CI-4
+          if (s) findings.push(s);
+          break;
+        }
+        case 'agent-config':
+          findings.push(...analyzeAgentConfig(file.path, content, listing));
+          break;
+        case 'hook-script':
+          findings.push(...analyzeScript(file.path, content, 'CI-1.hook-script'));
+          break;
+        case 'skill-script':
+          findings.push(...analyzeScript(file.path, content, 'CI-6.skill-script'));
+          break;
+        case 'mcp':
+          findings.push(...analyzeMcp(file.path, content));
+          break;
+        case 'codex':
+          findings.push(...analyzeCodexConfig(file.path, content)); // CI-3 + CI-1 (1c-A)
+          break;
+        case 'instruction':
+          findings.push(...analyzeInstructionFile(file.path, content)); // CI-6: the content
+          findings.push(...analyzeSkillGrants(file.path, content)); // CI-1: the grant
+          break;
       }
     } catch (err) {
       notes.push(`checker degraded on ${file.path}: ${(err as Error)?.message ?? 'error'}`);
