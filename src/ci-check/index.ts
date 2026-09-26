@@ -8,7 +8,14 @@ import { analyzeWorkflow, analyzeWorkflowSecrets } from './workflows';
 import { analyzeAgentConfig, analyzeSkillGrants } from './agent-config';
 import { analyzeMcp } from './mcp';
 import { analyzeCodexConfig } from './codex';
-import { analyzeInstructionFile, isInstructionFile, skillDirsOf } from './instructions';
+import {
+  analyzeInstructionFile,
+  isInstructionFile,
+  isHookScript,
+  isSkillScript,
+  skillDirsOf,
+} from './instructions';
+import { analyzeScript } from './scripts';
 import { assignOrdinals } from './diff';
 import type { CiFinding, ScanResult, Severity, RepoTree } from './types';
 import { SEVERITY_RANK } from './types';
@@ -32,6 +39,11 @@ export function scanTree(tree: RepoTree): ScanResult {
   // Same skill directories the selector used, so a supporting file that was fetched is
   // also routed to CI-6 rather than read and silently dropped.
   const skillDirs = skillDirsOf(tree.files.map((f) => f.path));
+  // The whole listing, when the reader had one, so the hook check can tell "not committed"
+  // from "not read". A listing that is not known to be complete decides nothing.
+  const listing = tree.paths
+    ? { paths: new Set(tree.paths), complete: tree.pathsComplete === true }
+    : undefined;
   for (const file of tree.files) {
     inspected.push(file.path);
     try {
@@ -41,7 +53,11 @@ export function scanTree(tree: RepoTree): ScanResult {
         const s = analyzeWorkflowSecrets(file.path, file.content); // CI-4
         if (s) findings.push(s);
       } else if (/\.claude\/settings(\.local)?\.json$/.test(file.path)) {
-        findings.push(...analyzeAgentConfig(file.path, file.content));
+        findings.push(...analyzeAgentConfig(file.path, file.content, listing));
+      } else if (isHookScript(file.path)) {
+        findings.push(...analyzeScript(file.path, file.content, 'CI-1.hook-script'));
+      } else if (isSkillScript(file.path, skillDirs)) {
+        findings.push(...analyzeScript(file.path, file.content, 'CI-6.skill-script'));
       } else if (/\.mcp\.json$|\.cursor\/mcp\.json$/.test(file.path)) {
         findings.push(...analyzeMcp(file.path, file.content));
       } else if (/(^|\/)\.codex\/config\.toml$/.test(file.path)) {

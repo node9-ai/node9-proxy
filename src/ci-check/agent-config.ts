@@ -3,8 +3,10 @@
 // in the repo and apply to EVERY contributor's machine. We flag hooks that run
 // remote/unpinned code and over-broad permission grants. Static, parse-only.
 
+import path from 'path';
 import type { CiFinding } from './types';
 import { parseFrontmatter, allowedToolsOf } from './frontmatter';
+import { SCRIPT_EXT_RE, isHookScript } from './instructions';
 
 interface Settings {
   permissions?: { allow?: unknown[]; deny?: unknown[] };
@@ -80,7 +82,55 @@ export function gradeBroadGrant(
   return { broad, bareShell, high, signals };
 }
 
-export function analyzeAgentConfig(path: string, content: string): CiFinding[] {
+/** Split a hook command the way a shell would, well enough to find a path: on whitespace,
+ *  keeping quoted spans whole and dropping their quotes. */
+function shellTokens(cmd: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let q: string | null = null;
+  for (const ch of cmd) {
+    if (q) {
+      if (ch === q) q = null;
+      else cur += ch;
+    } else if (ch === '"' || ch === "'") q = ch;
+    else if (/\s/.test(ch)) {
+      if (cur) out.push(cur);
+      cur = '';
+    } else cur += ch;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+/** The repo-relative script a hook command runs, or null when it does not name one (inline
+ *  shell, npx, a binary on PATH, a URL). Strips `${CLAUDE_PROJECT_DIR}/`, `$CLAUDE_PROJECT_DIR/`,
+ *  `./` and quotes. A committed config is attacker-controlled input, so the path in it is not
+ *  trusted: absolute paths and anything that escapes the root after normalisation are null.
+ *  Never reads the filesystem. */
+export function hookScriptPath(cmd: string): string | null {
+  for (const raw of shellTokens(cmd)) {
+    let t = raw.replace(/^\$\{CLAUDE_PROJECT_DIR\}\/|^\$CLAUDE_PROJECT_DIR\//, '');
+    if (t === raw && (t.startsWith('/') || /^[A-Za-z]:[\\/]/.test(t))) continue; // absolute
+    if (/^(https?:|\$|-)/.test(t)) continue; // a URL, another variable, a flag
+    t = t.replace(/^\.\//, '');
+    if (!SCRIPT_EXT_RE.test(t) && !/(^|\/)\.claude\/hooks\//.test(t)) continue;
+    const norm = path.posix.normalize(t);
+    if (norm.startsWith('..') || norm.startsWith('/') || norm.includes('/../')) return null;
+    return norm;
+  }
+  return null;
+}
+
+/** What the reader knew about the whole tree, so a hook can be placed in one of three states:
+ *  the script it names is committed and scanned, committed but outside the paths this scan
+ *  reads, or not committed at all. `complete: false` means the listing was truncated — a path
+ *  missing from it is unknown, not absent, and nothing is claimed. */
+export interface TreeListing {
+  paths: ReadonlySet<string>;
+  complete: boolean;
+}
+
+export function analyzeAgentConfig(path: string, content: string, tree?: TreeListing): CiFinding[] {
   let cfg: Settings;
   try {
     cfg = JSON.parse(content) as Settings;
@@ -122,6 +172,45 @@ export function analyzeAgentConfig(path: string, content: string): CiFinding[] {
       ],
       fix: 'Vendor the command as a committed local script, or pin an exact version and treat updates as security-reviewed.',
     });
+  }
+
+  // The script a hook names: three states, never two. Decided only from a complete listing.
+  if (tree?.complete) {
+    for (const cmd of hookCommands(cfg.hooks)) {
+      const script = hookScriptPath(cmd);
+      if (!script) continue;
+      if (!tree.paths.has(script)) {
+        findings.push({
+          check: 'CI-1',
+          rule: 'CI-1.hook-script-missing',
+          locator: script,
+          dimension: 'toolRules',
+          severity: 'medium',
+          title: 'Agent hook runs a script that is not committed',
+          file: path,
+          signals: [
+            `hook command: \`${cmd.slice(0, 120)}\``,
+            `\`${script}\` is not in the repository — whatever lands at that path later runs before every agent action, for everyone`,
+          ],
+          fix: 'Commit the script the hook runs, or remove the hook.',
+        });
+      } else if (!isHookScript(script)) {
+        findings.push({
+          check: 'CI-1',
+          rule: 'CI-1.hook-script-unscanned',
+          locator: script,
+          dimension: 'toolRules',
+          severity: 'advisory',
+          title: 'Agent hook runs a committed script this scan did not read',
+          file: path,
+          signals: [
+            `hook command: \`${cmd.slice(0, 120)}\``,
+            `\`${script}\` is committed but outside \`.claude/hooks/\`, the paths this scan reads — its contents were not graded`,
+          ],
+          fix: 'Move the script under `.claude/hooks/` so it is scanned with the hook that runs it, or review it by hand.',
+        });
+      }
+    }
   }
 
   // Over-broad permission grants pre-authorizing every contributor's agent.

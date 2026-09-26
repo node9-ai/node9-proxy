@@ -95,6 +95,13 @@ export interface RepoTree {
   files: RepoFile[];
   /** Non-fatal fetch notes (rate-limit, missing dir) — surfaced, never thrown. */
   notes: string[];
+  /** Every blob path in the listing the surface was chosen from, when the reader had one
+   *  (local walk, git ref, GitHub Trees). Lets a check decide "this hook names a file that
+   *  is not committed" without a filesystem call. Absent on the root-list fallback. */
+  paths?: string[];
+  /** True only when `paths` is the WHOLE listing. A path missing from a truncated or
+   *  capped listing is unknown, not absent, and no check may call it "missing". */
+  pathsComplete?: boolean;
 }
 
 export interface ScanResult {

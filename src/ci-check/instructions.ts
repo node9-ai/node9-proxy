@@ -23,8 +23,8 @@ import type { CiFinding, Severity } from './types';
 //   D — Zero-width (U+200B word-break, U+2060 word-joiner): legit in SE-Asian/CJK scripts →
 //       fire ONLY on the concealment SIGNATURE (splits a visible Latin word; escalate to
 //       critical only when de-hiding REVEALS a directive — mirrors decodeSuspiciousBase64).
-const TAG_CHARS = /[\u{E0000}-\u{E007F}]/u; // A
-const BIDI_OVERRIDE = /[‭‮]/; // B
+export const TAG_CHARS = /[\u{E0000}-\u{E007F}]/u; // A
+export const BIDI_OVERRIDE = /[‭‮]/; // B
 const BIDI_EMBED_ISOLATE = /[‪-‬⁦-⁩]/; // C
 
 // D allow-list: scripts where a zero-width space is a legitimate word/line-break hint (no
@@ -98,6 +98,21 @@ export function isSkillSupportFile(path: string, skillDirs: ReadonlySet<string>)
   return false;
 }
 
+/** Files an agent will RUN rather than read. Surface by path, like workflows: a hook script
+ *  is anything runnable under `.claude/hooks/` at any depth, a skill script is a runnable
+ *  file inside a skill directory. Graded by analyzeScript in scripts.ts. */
+export const SCRIPT_EXT_RE = /\.(sh|bash|zsh|py|js|mjs|cjs|ts|rb|pl|ps1)$/i;
+export function isHookScript(path: string): boolean {
+  return /(^|\/)\.claude\/hooks\/.+/.test(path) && SCRIPT_EXT_RE.test(path);
+}
+export function isSkillScript(path: string, skillDirs: ReadonlySet<string>): boolean {
+  if (!SCRIPT_EXT_RE.test(path)) return false;
+  for (let d = path.lastIndexOf('/'); d > 0; d = path.lastIndexOf('/', d - 1)) {
+    if (skillDirs.has(path.slice(0, d))) return true;
+  }
+  return false;
+}
+
 /** ONE answer to "is this an instruction file". `skillDirs` must come from skillDirsOf
  *  over the same tree: a skill's supporting files are instructions only by virtue of the
  *  SKILL.md beside them, so this cannot be decided from one path alone. */
@@ -107,20 +122,20 @@ export function isInstructionFile(path: string, skillDirs: ReadonlySet<string>):
 
 // Prompt-override / role-impersonation directives. The classic phrases only — no bare
 // "system:" (too FP-prone in docs).
-const OVERRIDE_RE =
+export const OVERRIDE_RE =
   /ignore\s+(all\s+)?(previous|prior|the\s+above)\s+(instructions|prompts?|rules)|disregard\s+(the\s+|your\s+)?(system\s+)?(prompt|instructions|rules)|forget\s+(everything|all\s+(previous|prior))|you\s+are\s+now\s+(a|an|the)\b|<\/?system>/i;
 
 // ── Tier 2: dangerous sink WITH agent-directive framing → medium ───────────────
 // Remote-exec (fetch-and-obey). `| python3 -m json.tool` pretty-prints the fetched bytes,
 // it does not execute them (2 of the 12 skill-corpus false positives, 2026-09-22).
-const FETCH_OBEY_RE =
+export const FETCH_OBEY_RE =
   /\b(curl|wget|iwr|invoke-webrequest)\b[^\n|]*\|\s*(bash|sh|zsh|python3?(?!\s+-m\s+json\.tool\b)|node|iex)\b|\b(curl|wget)\b[^\n]*&&[^\n]*\b(bash|sh)\b/i;
 // Credential-file access.
-const SECRET_PATH_RE =
+export const SECRET_PATH_RE =
   /~\/\.aws\/credentials|~\/\.ssh\/id_[a-z]+|~\/\.config\/gh\/hosts|read\s+the\s+(token|secret|api[_ ]?key|password)\s+(in|from)\s+[.`'"]?\.?env/i;
 // Exfil to an external endpoint. "Send the user to https://…" moves a person, not data
 // (2 of the 12 skill-corpus false positives, 2026-09-22).
-const EXFIL_RE =
+export const EXFIL_RE =
   /\b(post|send|upload|exfiltrate|forward)\b(?!\s+(the\s+|your\s+)?(users?|them|him|her|people|visitors?|customers?|readers?)\b)[^\n]{0,40}\b(to|at)\b[^\n]{0,50}(https?:\/\/|webhook|hook\.[a-z])/i;
 
 // A human-facing section (install/dev docs) — a `curl|bash` here is setup guidance for a
@@ -154,6 +169,62 @@ function isQuotedExample(text: string, idx: number, len: number): boolean {
   const close = text[idx + len];
   const quoted = (open === '"' || open === "'" || open === '`') && close === open;
   return quoted && EXAMPLE_FRAMING_RE.test(text.slice(Math.max(0, idx - 120), idx));
+}
+
+// `curl … | python -c "<program>"` where the program only PARSES what it reads is not
+// fetch-and-obey — it is the everyday shape of a skill that reads an API. It becomes one only
+// when the inline program can execute what it was handed. `| python` with no `-c` executes
+// stdin and stays a match. (11 of the 14 hermes-agent findings, 2026-09-26.)
+const INLINE_EXEC_RE =
+  /\b(exec|eval|subprocess|os\.system|popen|spawn|child_process|execSync|execFile)\b/;
+export function isInlineParser(text: string, match: RegExpExecArray): boolean {
+  if (!/\b(python3?|node)$/.test(match[0])) return false;
+  const after = text.slice(match.index + match[0].length);
+  const m = /^[ \t]+(-c|-e)[ \t]*(["'])/.exec(after);
+  if (!m) return false;
+  const q = m[2];
+  const start = m[0].length;
+  let end = after.indexOf(q, start);
+  if (end < 0) end = Math.min(after.length, start + 4000);
+  return !INLINE_EXEC_RE.test(after.slice(start, end));
+}
+
+// `gh secret set SSH_KEY < ~/.ssh/id_rsa` reads a key INTO the user's own secret store
+// through the official CLI; the documented form, not a directive toward secrets.
+function isSecretStoreWrite(text: string, idx: number): boolean {
+  const lineStart = text.lastIndexOf('\n', idx - 1) + 1;
+  return /\bgh\s+secret\s+set\b/.test(text.slice(lineStart, idx));
+}
+
+// `[Environment variables, ~/.ssh/id_rsa, /etc/shadow, etc.]` — a bracketed placeholder in a
+// report template describing what an attacker took, on one line. Not an instruction.
+function inBracketPlaceholder(text: string, idx: number, len: number): boolean {
+  const lineStart = text.lastIndexOf('\n', idx - 1) + 1;
+  let lineEnd = text.indexOf('\n', idx);
+  if (lineEnd < 0) lineEnd = text.length;
+  const before = text.slice(lineStart, idx);
+  const after = text.slice(idx + len, lineEnd);
+  return (
+    before.lastIndexOf('[') > before.lastIndexOf(']') &&
+    after.indexOf(']') >= 0 &&
+    (after.indexOf('[') < 0 || after.indexOf(']') < after.indexOf('['))
+  );
+}
+
+// `**Before:** You can webhook the event. **After:** Send the event to the webhook.` — a
+// grammar example labelled as one. The 30 characters before the match end in the label.
+const EXAMPLE_LABEL_RE =
+  /\b(before|after|example|wrong|right|bad|good|incorrect|correct)\s*:\**\s*$/i;
+function afterExampleLabel(text: string, idx: number): boolean {
+  return EXAMPLE_LABEL_RE.test(text.slice(Math.max(0, idx - 30), idx));
+}
+
+// `docs/<system>/atlas/` — `<system>` as a path segment is a placeholder for a name, not a
+// tag around instructions. Same-length substitution keeps every index valid.
+export function maskPathPlaceholders(text: string): string {
+  return text
+    .replace(/<system>(?=\/)|(?<=\/)<system>/g, '<sysdir>')
+    .replace(/<\/system>(?=\/)|(?<=\/)<\/system>/g, '</sysdir>');
 }
 
 function inHumanSection(text: string, idx: number): boolean {
@@ -264,7 +335,7 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
       )
     );
   }
-  const ovRaw = OVERRIDE_RE.exec(content);
+  const ovRaw = OVERRIDE_RE.exec(maskPathPlaceholders(content));
   const ov = ovRaw && !isQuotedExample(content, ovRaw.index, ovRaw[0].length) ? ovRaw : null;
   const ovEnc = !ov ? OVERRIDE_RE.exec(decoded) : null;
   if (ov || ovEnc) {
@@ -289,7 +360,8 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
     fo &&
     !inHumanSection(content, fo.index) &&
     !isNegated(content, fo.index) &&
-    !isQuotedExample(content, fo.index, fo[0].length)
+    !isQuotedExample(content, fo.index, fo[0].length) &&
+    !isInlineParser(content, fo)
   ) {
     findings.push(
       mk(
@@ -303,7 +375,12 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
     );
   }
   const sp = SECRET_PATH_RE.exec(content);
-  if (sp && !isNegated(content, sp.index)) {
+  if (
+    sp &&
+    !isNegated(content, sp.index) &&
+    !isSecretStoreWrite(content, sp.index) &&
+    !inBracketPlaceholder(content, sp.index, sp[0].length)
+  ) {
     findings.push(
       mk(
         'CI-6.secret-path',
@@ -316,7 +393,12 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
     );
   }
   const ex = EXFIL_RE.exec(content);
-  if (ex && !inHumanSection(content, ex.index) && !isNegated(content, ex.index)) {
+  if (
+    ex &&
+    !inHumanSection(content, ex.index) &&
+    !isNegated(content, ex.index) &&
+    !afterExampleLabel(content, ex.index)
+  ) {
     findings.push(
       mk(
         'CI-6.exfil-directive',

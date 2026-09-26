@@ -5,11 +5,17 @@
 // degrades to a note (fail-open) so a rate-limit or missing dir never throws.
 
 import fs from 'fs';
-import { isInstructionFile, isSkillSupportFile, skillDirsOf } from './instructions';
 import path from 'path';
 import { execFileSync } from 'node:child_process';
 import { request } from 'undici';
 import type { RepoTree, RepoFile } from './types';
+import {
+  isInstructionFile,
+  isSkillSupportFile,
+  skillDirsOf,
+  isHookScript,
+  isSkillScript,
+} from './instructions';
 
 // gh-CLI token is resolved at most once per process (spawning gh is expensive).
 let cachedGhToken: string | null | undefined;
@@ -74,9 +80,18 @@ const CONFIG_FILE_RE =
 export function selectSurface(paths: string[]): string[] {
   const skillDirs = skillDirsOf(paths);
   const isSupport = (p: string) => isSkillSupportFile(p, skillDirs);
+  // Scripts sort with the supporting files: a cap must never drop a SKILL.md for its own
+  // helper, and a hook's settings.json before the hook it names.
+  const isLate = (p: string) => isSupport(p) || isHookScript(p) || isSkillScript(p, skillDirs);
   return paths
-    .filter((p) => isInstructionFile(p, skillDirs) || CONFIG_FILE_RE.test(p))
-    .sort((a, b) => Number(isSupport(a)) - Number(isSupport(b)));
+    .filter(
+      (p) =>
+        isInstructionFile(p, skillDirs) ||
+        CONFIG_FILE_RE.test(p) ||
+        isHookScript(p) ||
+        isSkillScript(p, skillDirs)
+    )
+    .sort((a, b) => Number(isLate(a)) - Number(isLate(b)));
 }
 // Dependency / framework-output dirs that are NEVER a repo's own agent surface — a vendored
 // `node_modules/**/CLAUDE.md` is noise. Skipped SILENTLY.
@@ -86,7 +101,17 @@ const IGNORE_HARD = /(^|\/)(node_modules|vendor|\.git|\.next|\.venv|site-package
 // silently dropped) so a genuinely-committed config isn't invisible. ([7])
 const IGNORE_SOFT = /(^|\/)(dist|build|out|target)\//;
 const isIgnoredDir = (relSlash: string) => IGNORE_HARD.test(relSlash) || IGNORE_SOFT.test(relSlash);
-const MAX_SURFACE_FILES = 200;
+/** How much surface one reader may take. The GitHub Contents path pays one request per
+ *  file under a rate limit, so it stays small. A local walk or a git ref costs a readFileSync
+ *  or a `git show` per file, so it is sized for the largest real repository measured:
+ *  NousResearch/hermes-agent commits 771 skill files, and a 200-file cap there hid 11 of the
+ *  14 findings a full scan produces (2026-09-26). */
+export interface SurfaceCaps {
+  files: number;
+  bytes?: number;
+}
+export const API_CAPS: SurfaceCaps = { files: 200 };
+export const LOCAL_CAPS: SurfaceCaps = { files: 5000, bytes: 32 * 1024 * 1024 };
 
 /** Pure: from a flat list of repo file paths, pick the agent-surface files at any depth,
  *  skipping dependency/build dirs, capped at MAX_SURFACE_FILES. Pushes a note (marked
@@ -94,12 +119,19 @@ const MAX_SURFACE_FILES = 200;
  *  a large monorepo must never be silently under-scanned. A surface file under a build-output
  *  dir is excluded but NOTED (not silently dropped). Shared by the GitHub Trees path and local
  *  recursion. */
-export function pickSurfacePaths(paths: string[], truncated: boolean, notes: string[]): string[] {
+export function pickSurfacePaths(
+  paths: string[],
+  truncated: boolean,
+  notes: string[],
+  caps: SurfaceCaps = API_CAPS
+): string[] {
   const surface = selectSurface(paths.filter((p) => !IGNORE_HARD.test(p)));
   const matched = surface.filter((p) => !IGNORE_SOFT.test(p));
   const softSkipped = surface.filter((p) => IGNORE_SOFT.test(p));
-  const capped = matched.slice(0, MAX_SURFACE_FILES);
-  if (truncated || matched.length > MAX_SURFACE_FILES) {
+  const capped = matched.slice(0, caps.files);
+  // AT the cap, not past it: a scan that stops exactly at the limit cannot be told apart
+  // from one that had more to read, so it is not reported as whole.
+  if (truncated || matched.length >= caps.files) {
     notes.push(
       `repo tree is large/truncated — some agent-surface files may be INCOMPLETE (scanned ${capped.length} of ${matched.length}${truncated ? '+' : ''}).`
     );
@@ -263,7 +295,7 @@ async function listSurfaceTree(
   owner: string,
   repo: string,
   notes: string[]
-): Promise<{ surface: string[]; workflows: string[] } | null> {
+): Promise<{ surface: string[]; workflows: string[]; paths: string[]; complete: boolean } | null> {
   const url = `https://api.github.com/repos/${owner}/${repo}/git/trees/HEAD?recursive=1`;
   const { status, json } = await ghGet(url);
   if (status === 403 || status === 429) {
@@ -283,6 +315,8 @@ async function listSurfaceTree(
   return {
     surface: pickSurfacePaths(blobs, !!tree.truncated, notes),
     workflows: blobs.filter((p) => ROOT_WORKFLOW_RE.test(p)),
+    paths: blobs,
+    complete: !tree.truncated,
   };
 }
 
@@ -317,7 +351,12 @@ export async function fetchGitHubTree(
       onProgress?.({ phase: 'fetching agent surface', done: ++done, total: allPaths.length });
       return f;
     });
-    return { source: `${owner}/${repo}`, files: fetched.filter((f): f is RepoFile => !!f), notes };
+    return {
+      source: `${owner}/${repo}`,
+      files: fetched.filter((f): f is RepoFile => !!f),
+      notes,
+      ...(discovered ? { paths: discovered.paths, pathsComplete: discovered.complete } : {}),
+    };
   } catch (err) {
     // "may be INCOMPLETE" is load-bearing — index.ts keys `incomplete` off it, so a total
     // fetch failure is never rendered as a clean bill of health.
@@ -329,15 +368,28 @@ export async function fetchGitHubTree(
 }
 
 /** Read the agent-surface from a local directory (no network). */
-export function readLocalTree(dir: string): RepoTree {
+export function readLocalTree(dir: string, caps: SurfaceCaps = LOCAL_CAPS): RepoTree {
   const root = dir.replace(/^~/, process.env.HOME ?? '~');
   const files: RepoFile[] = [];
   const notes: string[] = [];
+  const budget = caps.bytes ?? Infinity;
+  let bytes = 0;
+  let overBudget = false;
   const add = (rel: string) => {
+    if (overBudget) return;
     const abs = path.join(root, rel);
     try {
       if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
-        files.push({ path: rel, content: fs.readFileSync(abs, 'utf8') });
+        const content = fs.readFileSync(abs, 'utf8');
+        bytes += Buffer.byteLength(content);
+        if (bytes > budget) {
+          overBudget = true;
+          notes.push(
+            `repo surface is large — files past a ${budget}-byte budget may be INCOMPLETE (stopped before ${rel}).`
+          );
+          return;
+        }
+        files.push({ path: rel, content });
       }
     } catch {
       /* unreadable → skip */
@@ -383,11 +435,11 @@ export function readLocalTree(dir: string): RepoTree {
   };
   walk('');
   const matches = selectSurface(all);
-  if (matches.length > MAX_SURFACE_FILES || dirsVisited >= MAX_DIRS)
+  if (matches.length >= caps.files || dirsVisited >= MAX_DIRS)
     notes.push(
-      `repo is large — some agent-surface files may be INCOMPLETE (capped at ${MAX_SURFACE_FILES} files / ${MAX_DIRS} dirs).`
+      `repo is large — some agent-surface files may be INCOMPLETE (capped at ${caps.files} files / ${MAX_DIRS} dirs).`
     );
-  for (const rel of matches.slice(0, MAX_SURFACE_FILES)) collect(rel);
+  for (const rel of matches.slice(0, caps.files)) collect(rel);
   const wfDir = path.join(root, WORKFLOW_DIR);
   try {
     if (fs.existsSync(wfDir)) {
@@ -398,7 +450,7 @@ export function readLocalTree(dir: string): RepoTree {
   } catch {
     /* unreadable workflows dir → skip */
   }
-  return { source: root, files, notes };
+  return { source: root, files, notes, paths: all, pathsComplete: dirsVisited < MAX_DIRS };
 }
 
 /** Read the agent surface as it exists at a git REF, without touching the working tree.
@@ -412,7 +464,11 @@ export function readLocalTree(dir: string): RepoTree {
  *  "did-not-run" state — the caller MUST NOT treat it as an empty/clean base, which
  *  would report the whole repo as introduced. Selection mirrors `readLocalTree`
  *  predicate-for-predicate so base and head can never disagree about WHAT was scanned. */
-export function readGitRefTree(dir: string, ref: string): RepoTree | null {
+export function readGitRefTree(
+  dir: string,
+  ref: string,
+  caps: SurfaceCaps = LOCAL_CAPS
+): RepoTree | null {
   const root = dir.replace(/^~/, process.env.HOME ?? '~');
   // A ref beginning with "-" would be read by git as a flag. Reject rather than sanitize.
   if (!ref || ref.startsWith('-')) return null;
@@ -454,12 +510,12 @@ export function readGitRefTree(dir: string, ref: string): RepoTree | null {
   // old baseline), then nested matches, then root workflows.
   for (const rel of SURFACE_FILES) add(rel);
   const nested = selectSurface(all.filter((rel) => !isIgnoredDir(rel)));
-  if (nested.length > MAX_SURFACE_FILES) {
+  if (nested.length >= caps.files) {
     notes.push(
-      `repo is large — some agent-surface files may be INCOMPLETE (capped at ${MAX_SURFACE_FILES} files).`
+      `repo is large — some agent-surface files may be INCOMPLETE (capped at ${caps.files} files).`
     );
   }
-  for (const rel of nested.slice(0, MAX_SURFACE_FILES)) add(rel);
+  for (const rel of nested.slice(0, caps.files)) add(rel);
   for (const rel of all) {
     if (
       rel.startsWith(`${WORKFLOW_DIR}/`) &&
@@ -469,7 +525,7 @@ export function readGitRefTree(dir: string, ref: string): RepoTree | null {
       add(rel);
   }
 
-  return { source: `${root}@${ref}`, files, notes };
+  return { source: `${root}@${ref}`, files, notes, paths: all, pathsComplete: true };
 }
 
 /** Resolve any input (URL | owner/repo | local path) to a RepoTree. */
