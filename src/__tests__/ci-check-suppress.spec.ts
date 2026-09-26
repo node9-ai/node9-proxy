@@ -93,13 +93,58 @@ describe('THE RULE: a suppression added in the same change does not apply', () =
     expect(d.worstIntroduced).toBe('high');
   });
 
-  it('an untrustworthy base honours nothing new either (degrades, never opens)', () => {
+  it('an untrustworthy base honours NO suppression in the gate (degrades strict, never opens)', () => {
+    // Nobody can tell which suppressions are new when the base could not be read, so none
+    // is honoured: the same law as the rest of CI-5 — degrade to the strict answer.
     const head = scan([{ path: MCP, content: unpinned }, suppress([ENTRY])]);
     const d = diffScans(null, head);
     expect(d.base).toBe('did-not-run');
-    // The absolute answer over UNSUPPRESSED findings: the head honours its own file, so
-    // the absolute worst is null — but incomplete stays true and the gate cannot pass.
     expect(d.incomplete).toBe(true);
+    expect(d.worstAll).toBe('medium');
+    expect(d.worstIntroduced).toBe('medium');
+    expect(d.honoured.find((f) => f.rule === ENTRY.rule)?.suppressed).toBeUndefined();
+  });
+});
+
+// G.1 (2026-09-27): the rule must hold in the DEFAULT gate (`fail-on-scope: all`), which reads
+// `worst`, not only in the `introduced` gate, which reads `worstIntroduced`.
+describe('THE RULE in the default gate: worstAll over the honoured view', () => {
+  it('the attack under `all`: new finding + its suppression in one change → worstAll = medium', () => {
+    const base = scan([{ path: MCP, content: JSON.stringify({ mcpServers: {} }) }]);
+    const head = scan([{ path: MCP, content: unpinned }, suppress([ENTRY])]);
+    expect(head.worst).toBeNull(); // the head alone is fooled…
+    const d = diffScans(base, head);
+    expect(d.worstAll).toBe('medium'); // …the diff is not
+    const f = d.honoured.find((x) => x.rule === ENTRY.rule);
+    expect(f?.suppressed).toBeUndefined();
+    expect(f?.signals.join(' ')).toMatch(/same change/);
+  });
+
+  it('the legitimate workflow: a PR that only suppresses a pre-existing finding → honoured in `all` too', () => {
+    const base = scan([{ path: MCP, content: unpinned }]);
+    const head = scan([{ path: MCP, content: unpinned }, suppress([ENTRY])]);
+    const d = diffScans(base, head);
+    expect(d.worstAll).toBeNull();
+    expect(d.honoured.find((x) => x.rule === ENTRY.rule)?.suppressed).toBeTruthy();
+  });
+
+  it('a pre-existing unsuppressed finding still counts in worstAll', () => {
+    const files = [{ path: MCP, content: unpinned }];
+    const d = diffScans(scan(files), scan(files));
+    expect(d.worstAll).toBe('medium');
+    expect(d.worstIntroduced).toBeNull();
+  });
+
+  it('diffScans does not mutate the head, and is idempotent', () => {
+    const base = scan([{ path: MCP, content: JSON.stringify({ mcpServers: {} }) }]);
+    const head = scan([{ path: MCP, content: unpinned }, suppress([ENTRY])]);
+    const signalsBefore = head.findings[0].signals.length;
+    const d1 = diffScans(base, head);
+    const d2 = diffScans(base, head);
+    expect(head.findings[0].suppressed).toBeTruthy(); // head untouched
+    expect(head.findings[0].signals).toHaveLength(signalsBefore);
+    expect(d2.honoured[0].signals).toHaveLength(d1.honoured[0].signals.length); // no double push
+    expect(d2.worstAll).toBe(d1.worstAll);
   });
 });
 

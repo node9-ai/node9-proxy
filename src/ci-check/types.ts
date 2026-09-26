@@ -85,6 +85,13 @@ export interface ScanDiff {
    *  about what we read, not about the change — so the third state is carried separately
    *  and no consumer may render an incomplete diff as a pass. */
   incomplete: boolean;
+  /** Every head finding as the GATE must see it: a suppression added in the same change is
+   *  dropped (introduced or escalated findings), and none is honoured when the base could not
+   *  be read. The CLI replaces the result's findings with this view. */
+  honoured: CiFinding[];
+  /** Worst over `honoured` minus what is still suppressed — the DEFAULT gate's input
+   *  (`fail-on-scope: all`). `worstIntroduced` is the narrow gate's. */
+  worstAll: Severity | null;
 }
 
 /** A fetched agent-surface file. `content` is the raw text (never executed). */

@@ -80,6 +80,18 @@ export function registerScanRepoCommand(program: Command): void {
         if (opts.base) {
           const baseTree = readGitRefTree(target, opts.base);
           diff = diffScans(baseTree ? scanTree(baseTree) : null, res);
+          // ONE truth for every consumer (the JSON the Action reads, the renderers, the exit
+          // code): the head as the gate must see it. A suppression added in the same change
+          // is not honoured in the default gate either — `worst` is replaced, not just
+          // `worstIntroduced` (design G.1, 2026-09-27).
+          res = {
+            ...res,
+            findings: diff.honoured,
+            worst: diff.worstAll,
+            ...(res.suppressions
+              ? { suppressedCount: diff.honoured.filter((f) => f.suppressed).length }
+              : {}),
+          };
         }
 
         if (opts.json) {
