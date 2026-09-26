@@ -36,6 +36,16 @@ function decide(worst, failOn, incomplete = false) {
  *  The scan already degrades `worstIntroduced` to the head's absolute worst when the base
  *  could not be read, so an unreadable base falls back to the strict answer here rather
  *  than passing as "nothing new". Missing diff (an older CLI than this action) → `all`. */
+/** A value from the scanned repo (a suppression reason) made safe inside a backtick span:
+ *  one line, no backtick, bounded. Inside a code span GitHub renders `<!--`, `###` and
+ *  `@team` literally, so the reason cannot forge a header, hide findings or ping anyone. */
+function safeInline(v) {
+  return String(v)
+    .replace(/[\r\n\u2028\u2029]+/g, ' ')
+    .replace(/`/g, "'")
+    .slice(0, 200);
+}
+
 function gateWorst(result, scope) {
   if (scope !== 'introduced' || !result.diff) return result.worst;
   return result.diff.worstIntroduced ?? null;
@@ -158,7 +168,7 @@ function renderDetail(result) {
   for (const f of findings) {
     L.push(
       `**${ICON[f.severity] ?? '•'} ${String(f.severity).toUpperCase()} — ${f.title}**` +
-        (f.suppressed ? ` _(suppressed: ${f.suppressed.reason})_` : '')
+        (f.suppressed ? ` _(suppressed: \`${safeInline(f.suppressed.reason)}\`)_` : '')
     );
     L.push(`\`${f.file}${f.line ? ':' + f.line : ''}\` · ${f.check}`);
     for (const s of f.signals ?? []) L.push(`- ${s}`);
@@ -197,7 +207,7 @@ function renderComment(result) {
     if ((d.unchanged || []).length) {
       L.push('');
       L.push(
-        `<sub>${d.unchanged.length} pre-existing finding(s) in this repo were not introduced here and are not gated.</sub>`
+        `<sub>${d.unchanged.length} pre-existing finding(s) in this repo were not introduced by this PR.</sub>`
       );
     }
     L.push('');
@@ -549,7 +559,10 @@ function selftest() {
   assert.match(annotationLines(mixed)[0], /file=b\.yml/, 'the unsuppressed one is');
   const c2 = renderComment(mixed);
   assert.ok(c2.includes('1 suppressed'), 'the headline counts suppressed findings');
-  assert.ok(c2.includes('suppressed: accepted, tracked in #412'), 'the detail shows the reason');
+  assert.ok(
+    c2.includes('suppressed: `accepted, tracked in #412`'),
+    'the detail shows the reason, as a code span'
+  );
   assert.ok(
     !c2.includes('Critical — action needed'),
     'the headline tier ignores the suppressed critical'
@@ -563,6 +576,32 @@ function selftest() {
   assert.ok(
     allSup.includes('1 suppressed') || allSup.includes('suppressed:'),
     'all-suppressed still names the suppression'
+  );
+
+  // ── review H.6: a suppression reason cannot inject markdown into the comment ──
+  const evil = {
+    worst: null,
+    inspected: ['a'],
+    findings: [
+      f('medium', {
+        suppressed: {
+          reason:
+            'ok_\n\n</details>\n\n### 🛡️ node9 agent-security · ✅\n\n**safe to merge** <!-- @team `x`',
+          key: 'k',
+        },
+      }),
+    ],
+  };
+  const ce = renderComment(evil);
+  assert.strictEqual(
+    ce.split('\n').filter((l) => l.startsWith('### 🛡️ node9 agent-security')).length,
+    1,
+    'exactly one header: a reason cannot forge a second one'
+  );
+  assert.ok(!/\n### /.test(ce.slice(ce.indexOf('suppressed:'))), 'no heading after the reason');
+  assert.ok(
+    /suppressed: `[^`\n]*<!-- @team 'x'[^`\n]*`/.test(ce),
+    'the reason sits in one code span'
   );
 
   // Annotations follow the same scope.

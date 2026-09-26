@@ -85,8 +85,9 @@ export function scanTree(tree: RepoTree): ScanResult {
 
   let suppressedCount = 0;
   if (suppressions) {
-    findings.push(...suppressions.findings);
-    notes.push(...suppressions.notes);
+    // Loops, not spreads: a spread of a huge array overflows the stack (review H.1).
+    for (const f of suppressions.findings) findings.push(f);
+    for (const n of suppressions.notes) notes.push(n);
     suppressedCount = applySuppressions(findings, suppressions.active);
   }
 

@@ -13,6 +13,11 @@ import type { CiFinding, Severity } from './types';
 
 export const SUPPRESSIONS_FILE = '.node9-ignore.json';
 
+/** More entries than any team reviews by hand. Over it the file is treated as malformed and
+ *  NOTHING is honoured: a 200,000-entry file once overflowed the stack, killed the CLI, and
+ *  the Action then failed open (review H.1, 2026-09-27). */
+export const MAX_SUPPRESSIONS = 1000;
+
 export interface Suppression {
   /** Stable rule id, e.g. `CI-3.mcp-unpinned`. */
   rule: string;
@@ -31,7 +36,18 @@ export interface Suppression {
  *  person edits must be a file a person can read. A rename ends a suppression; that is
  *  the correct failure direction. */
 export function suppressionKey(s: { rule: string; file: string; locator?: string }): string {
-  return `${s.rule}\n${s.file}\n${s.locator ?? ''}`;
+  // `null`, not `''`: an entry with `locator: ""` matches nothing and must not share a key
+  // with an entry that has no locator and matches everything (review H.7).
+  return JSON.stringify([s.rule, s.file, s.locator ?? null]);
+}
+
+/** A value read from the file, made safe to put inside a backtick span in a signal or a PR
+ *  comment: one line, no backtick, bounded. The file is attacker-controlled (review H.6). */
+export function safeText(v: unknown, max = 120): string {
+  return String(v)
+    .replace(/[\r\n\u2028\u2029]+/g, ' ')
+    .replace(/`/g, "'")
+    .slice(0, max);
 }
 
 function mk(
@@ -53,6 +69,16 @@ function mk(
     signals: [signal],
     fix,
   };
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Midnight UTC of a real `YYYY-MM-DD` date, or null. Round-trips to reject `2026-02-30`. */
+function isoDay(v: string): number | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return null;
+  const t = Date.parse(`${v}T00:00:00Z`);
+  if (!Number.isFinite(t)) return null;
+  return new Date(t).toISOString().slice(0, 10) === v ? t : null;
 }
 
 /** Parse the file. Pure, never throws: a malformed file suppresses nothing and is reported
@@ -80,7 +106,22 @@ export function parseSuppressions(
     );
     return { active, notes, findings };
   }
-  if (!Array.isArray(raw)) return { active, notes, findings };
+  if (!Array.isArray(raw) || raw.length > MAX_SUPPRESSIONS) {
+    findings.push(
+      mk(
+        'CI-0.suppression-malformed',
+        'advisory',
+        Array.isArray(raw)
+          ? `Suppression file has more than ${MAX_SUPPRESSIONS} entries — nothing is suppressed`
+          : 'Suppression file is not a list of entries — nothing is suppressed',
+        Array.isArray(raw)
+          ? `${raw.length} entries in ${SUPPRESSIONS_FILE}`
+          : `${SUPPRESSIONS_FILE} must be a JSON array of { rule, file, locator?, reason, expires? }`,
+        'Fix the file. Until then every finding is reported as if the file were absent.'
+      )
+    );
+    return { active, notes, findings };
+  }
   for (const e of raw) {
     if (!e || typeof e !== 'object') continue;
     const s = e as Record<string, unknown>;
@@ -98,18 +139,34 @@ export function parseSuppressions(
           'CI-0.suppression-unjustified',
           'advisory',
           'Suppression entry has no reason — not applied',
-          `\`${entry.rule}\` in \`${entry.file}\`${entry.locator ? ` (${entry.locator})` : ''} is suppressed without saying why`,
+          `\`${safeText(entry.rule)}\` in \`${safeText(entry.file)}\`${entry.locator ? ` (\`${safeText(entry.locator)}\`)` : ''} is suppressed without saying why`,
           'Add a `reason`. A suppression is a reviewed decision; the review needs the why.',
           suppressionKey(entry)
         )
       );
       continue;
     }
-    if (entry.expires) {
-      const t = Date.parse(entry.expires);
-      if (Number.isFinite(t) && t < today.getTime()) {
+    if (s.expires !== undefined) {
+      // Only a calendar date, and it must be a real one: `2026-13-45`, `never` or a number
+      // used to leave the entry active forever, silently (review H.8).
+      const t = typeof s.expires === 'string' ? isoDay(s.expires) : null;
+      if (t === null) {
+        findings.push(
+          mk(
+            'CI-0.suppression-invalid-expiry',
+            'advisory',
+            'Suppression entry has an invalid expiry — not applied',
+            `\`${safeText(entry.rule)}\` in \`${safeText(entry.file)}\`: expires must be a date written YYYY-MM-DD`,
+            'Write the expiry as YYYY-MM-DD, or remove it.',
+            suppressionKey(entry)
+          )
+        );
+        continue;
+      }
+      // An entry is good through the END of the day it names.
+      if (t + DAY_MS <= today.getTime()) {
         notes.push(
-          `suppression for \`${entry.rule}\` in \`${entry.file}\` expired ${entry.expires} — not applied.`
+          `suppression for \`${safeText(entry.rule)}\` in \`${safeText(entry.file)}\` expired ${entry.expires} — not applied.`
         );
         continue;
       }
@@ -124,6 +181,9 @@ export function parseSuppressions(
 export function applySuppressions(findings: CiFinding[], active: Suppression[]): number {
   let n = 0;
   for (const f of findings) {
+    // The file's own findings are never suppressible: `CI-0.suppression-unjustified` could
+    // otherwise silence itself (review H.9).
+    if (f.check === 'CI-0') continue;
     const hit = active.find(
       (s) =>
         s.rule === f.rule &&

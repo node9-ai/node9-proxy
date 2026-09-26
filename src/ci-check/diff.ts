@@ -20,7 +20,6 @@ import type {
   Severity,
 } from './types';
 import { SEVERITY_RANK } from './types';
-import { suppressionKey } from './suppress';
 
 /** The stable identity of a finding across two scans.
  *
@@ -74,10 +73,23 @@ function baseStateOf(base: ScanResult | null | undefined): BaseState {
  * head's own worst severity. A caller that gates on `worstIntroduced` therefore gets the
  * old, strict behaviour when the comparison was impossible — never a false all-clear.
  */
-const NOT_HONOURED =
-  'a suppression for this finding was added in the same change — not honoured; suppress it in a separate commit so the decision is reviewable';
+const NOT_HONOURED_NEW =
+  'this finding is new: a suppression cannot accept a finding in the same change that introduces it — merge it, then suppress it in a separate reviewed change';
 const BASE_UNREADABLE =
   'the base could not be read, so no suppression can be shown to predate this change — not honoured';
+const notHonouredEscalated = (from: Severity) =>
+  `this finding was accepted at ${from} and this change makes it worse — the suppression does not cover the new severity`;
+const NOT_HONOURED_EVIDENCE =
+  'the evidence changed in this change (the finding now matches something different) — the suppression covered the old evidence, not this';
+
+/** Same evidence: what the finding matched and why it is graded as it is. `line` is not
+ *  evidence — moving a finding must not end its suppression. */
+function sameEvidence(a: CiFinding, b: CiFinding): boolean {
+  return (
+    JSON.stringify(a.signals) === JSON.stringify(b.signals) &&
+    JSON.stringify(a.mitigations ?? []) === JSON.stringify(b.mitigations ?? [])
+  );
+}
 
 /** A copy with its suppression dropped and the reason named. `diffScans` never mutates the
  *  head it was given: calling it twice must not double a signal, and the head must stay what
@@ -119,7 +131,6 @@ export function diffScans(base: ScanResult | null | undefined, head: ScanResult)
   // introduced or escalated — in EITHER gate. Silencing something costs a separate,
   // reviewable commit. A pre-existing finding suppressed by this change is the legitimate
   // workflow and stays honoured.
-  const baseKeys = new Set((base.suppressions ?? []).map(suppressionKey));
   const baseByFp = new Map<string, CiFinding>();
   for (const f of base.findings) baseByFp.set(fingerprintOf(f), f);
 
@@ -136,11 +147,21 @@ export function diffScans(base: ScanResult | null | undefined, head: ScanResult)
     // deleted, a mitigation removed). It is not new, and calling it "unchanged" would let
     // the removal merge silently — so it is its own class, and it counts as introduced.
     const isEscalation = !!prior && SEVERITY_RANK[raw.severity] > SEVERITY_RANK[prior.severity];
-    const introducedHere = !prior || isEscalation;
-    const f =
-      introducedHere && raw.suppressed && !baseKeys.has(raw.suppressed.key)
-        ? unhonour(raw, NOT_HONOURED)
-        : raw;
+    // THE honour rule (review H.2–H.4, 2026-09-27): a head finding keeps its suppression only
+    // if the SAME finding existed in the base, no worse, with the same evidence. That keeps
+    // the legitimate workflow — a change that only suppresses an unchanged pre-existing
+    // finding — and refuses: a new finding (even under a wide base entry), an escalation of
+    // an accepted finding, and a suppressed finding whose content was swapped.
+    const why = !raw.suppressed
+      ? null
+      : !prior
+        ? NOT_HONOURED_NEW
+        : isEscalation
+          ? notHonouredEscalated(prior.severity)
+          : !sameEvidence(raw, prior)
+            ? NOT_HONOURED_EVIDENCE
+            : null;
+    const f = why ? unhonour(raw, why) : raw;
     honoured.push(f);
     if (!prior) {
       added.push(f);
