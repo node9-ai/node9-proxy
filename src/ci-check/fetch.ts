@@ -6,7 +6,6 @@
 
 import fs from 'fs';
 import path from 'path';
-import posixPath from 'path/posix';
 import { execFileSync } from 'node:child_process';
 import { request } from 'undici';
 import type { RepoTree, RepoFile } from './types';
@@ -303,29 +302,184 @@ async function listWorkflowPaths(owner: string, repo: string, notes: string[]): 
 // ROOT-only workflow yaml (GitHub ignores nested `.github/workflows`).
 const ROOT_WORKFLOW_RE = /^\.github\/workflows\/[^/]+\.ya?ml$/;
 
-type Kind = 'file' | 'link' | 'other';
+// ─────────────────────────────────────────────────────────────────────────────
+// ONE reading layer (§K, corrected in §K.2). The truth is what the AGENT loads: for a working
+// tree that is the disk, with links resolved the way the OS resolves them. Every reader
+// produces the same raw listing (nothing followed), and ONE resolver, ONE expansion of
+// directory links and ONE plan run over it. The readers differ only in HOW a listing and a
+// byte are obtained: the disk, a git object, or the GitHub API. A CI-5 diff compares a head
+// read one way with a base read another, so any other difference becomes a false
+// "introduced" finding.
+// ─────────────────────────────────────────────────────────────────────────────
 
-/** Kind from a git mode (`git ls-files -s`, `git ls-tree`, the Trees API). */
+type Kind = 'file' | 'link' | 'dir' | 'other';
+
+/** Kind from a git mode (`git ls-tree`, the Trees API). */
 function kindOfMode(mode: string): Kind {
   if (mode === '120000') return 'link';
   if (mode === '100644' || mode === '100755') return 'file';
-  return 'other'; // 160000 submodule, 040000 tree
+  // 040000 a tree; 160000 a submodule: a directory whose content is another repository and is
+  // not listed — the same as the working tree reader, which does not enter a nested repository.
+  if (mode === '040000' || mode === '160000') return 'dir';
+  return 'other';
 }
 
 const INCOMPLETE = 'may be INCOMPLETE';
 
 /** One text form for every reader: a checkout written with `eol=crlf` has CRLF where the blob
  *  has LF (hermes-agent's install.ps1), and every check reads line by line. Without this, the
- *  local and git readers disagree on content that is the same file. */
+ *  local and git readers disagree on content that is the same file. Content only — a link's
+ *  text is used exactly as stored. */
 const lf = (t: string): string => t.replace(/\r\n/g, '\n');
 const tooLargeNote = (rel: string) =>
   `${rel} is larger than ${MAX_FILE_BYTES / (1024 * 1024)} MiB — not read; results ${INCOMPLETE}.`;
 const outsideNote = (rel: string) =>
   `${rel} is a symlink that points outside the repository — not read.`;
+const unwalkedNote = (rel: string) =>
+  `${rel} is a symlink into a dependency directory (node_modules, vendor, …) that is not scanned — not read.`;
+const unreadNote = (rel: string, why: string) =>
+  `${rel} could not be read (${why}) — results ${INCOMPLETE}.`;
+
+/** Dependency dirs (IGNORE_HARD) are never walked on disk — a real node_modules can hold
+ *  hundreds of thousands of files — so NO reader lists them: a path there is unknown to every
+ *  reader alike. A check must treat such a path as unknown, never as "missing". */
+export const isUnwalked = (p: string): boolean => IGNORE_HARD.test(p);
+
+/** A reader's raw listing: every entry as stored, no link followed. */
+interface Listing {
+  /** Non-directory entry paths (files, links, others), sorted. */
+  paths: string[];
+  /** The kind at a path; directories are implicit in git and the API. */
+  kind(p: string): Kind | undefined;
+  /** A link's exact text; `undefined` = not fetched yet (the API), `null` = unreadable. */
+  linkText(p: string): string | null | undefined;
+  /** Non-directory entries anywhere under `dir`. */
+  under(dir: string): string[];
+}
+
+function makeListing(
+  kinds: Map<string, Kind>,
+  linkText: (p: string) => string | null | undefined
+): Listing {
+  const paths = [...kinds.keys()].filter((p) => kinds.get(p) !== 'dir').sort();
+  const dirs = new Set<string>();
+  for (const [p, k] of kinds) if (k === 'dir') dirs.add(p);
+  for (const p of paths)
+    for (let i = p.indexOf('/'); i > 0; i = p.indexOf('/', i + 1)) dirs.add(p.slice(0, i));
+  const firstAtOrAfter = (s: string) => {
+    let lo = 0;
+    let hi = paths.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (paths[mid] < s) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+  return {
+    paths,
+    kind: (p) => kinds.get(p) ?? (dirs.has(p) ? 'dir' : undefined),
+    linkText,
+    under: (dir) => {
+      const prefix = `${dir}/`;
+      const out: string[] = [];
+      for (let i = firstAtOrAfter(prefix); i < paths.length && paths[i].startsWith(prefix); i++)
+        out.push(paths[i]);
+      return out;
+    },
+  };
+}
+
+type Resolved =
+  { real: string; kind: Kind } | { skip: 'outside' | 'dangling' | 'unwalked' } | { need: string };
+
+/** The ONE resolver: the path walk `open(2)` does, over the listing. Component by component; a
+ *  link component is replaced by its EXACT text (no trimming, no separator rewriting) relative
+ *  to the directory it sits in; `..` pops one REAL component; an absolute text or a pop past the
+ *  root leaves the repository; a non-directory followed by more components is ENOTDIR; more
+ *  than MAX_LINK_HOPS link expansions is ELOOP. Never touches the host filesystem, so every
+ *  reader gets the same answer. `need` = a link text the caller has not fetched yet. */
+function resolvePath(p: string, l: Listing): Resolved {
+  const real: string[] = [];
+  let rest = p.split('/');
+  let hops = 0;
+  while (rest.length) {
+    const c = rest.shift()!;
+    if (c === '' || c === '.') continue;
+    if (c === '..') {
+      if (!real.length) return { skip: 'outside' };
+      real.pop();
+      continue;
+    }
+    const cand = real.length ? `${real.join('/')}/${c}` : c;
+    const k = l.kind(cand);
+    if (k === undefined) return { skip: isUnwalked(`${cand}/`) ? 'unwalked' : 'dangling' };
+    if (k === 'link') {
+      if (++hops > MAX_LINK_HOPS) return { skip: 'dangling' }; // ELOOP
+      const t = l.linkText(cand);
+      if (t === undefined) return { need: cand };
+      if (t === null || t === '') return { skip: 'dangling' };
+      if (t.startsWith('/')) return { skip: 'outside' };
+      rest = [...t.split('/'), ...rest];
+      continue;
+    }
+    if (k !== 'dir' && rest.length) return { skip: 'dangling' }; // ENOTDIR
+    real.push(c);
+  }
+  const r = real.join('/');
+  return { real: r, kind: r === '' ? 'dir' : l.kind(r)! };
+}
+
+/** Directory links bring their target's entries under the link's own path: an agent opening
+ *  `.claude/settings.json` through `.claude -> cfg` gets `cfg/settings.json`. 109 of the 122
+ *  directory links across 118 repositories sit in agent-surface positions
+ *  (`.claude/skills/X -> .agents/skills/X`). A link to its own ancestor is not expanded (an
+ *  agent does not recurse through it); past MAX_EXPANDED entries the scan says INCOMPLETE. */
+const MAX_EXPANDED = 20_000; // measured maximum across 118 repositories: 173
+
+function visiblePaths(
+  l: Listing,
+  notes: string[]
+): { paths: string[]; complete: boolean } | { need: string[] } {
+  const out = [...l.paths];
+  const needs = new Set<string>();
+  const queue = l.paths.filter((p) => l.kind(p) === 'link');
+  let expanded = 0;
+  let complete = true;
+  for (let i = 0; i < queue.length && complete; i++) {
+    const v = queue[i];
+    const r = resolvePath(v, l);
+    if ('need' in r) {
+      needs.add(r.need);
+      continue;
+    }
+    if (!('real' in r) || r.kind !== 'dir') continue;
+    const slash = v.lastIndexOf('/');
+    const parent = resolvePath(slash < 0 ? '' : v.slice(0, slash), l);
+    if (!('real' in parent)) continue;
+    if (r.real === '' || parent.real === r.real || parent.real.startsWith(`${r.real}/`)) continue;
+    for (const q of l.under(r.real)) {
+      if (expanded >= MAX_EXPANDED) {
+        complete = false;
+        break;
+      }
+      const vq = v + q.slice(r.real.length);
+      out.push(vq);
+      expanded++;
+      if (l.kind(q) === 'link') queue.push(vq);
+    }
+  }
+  if (needs.size) return { need: [...needs] };
+  if (!complete)
+    notes.push(
+      `directory symlinks expand past ${MAX_EXPANDED} entries — some agent-surface files ${INCOMPLETE}.`
+    );
+  return { paths: out, complete };
+}
 
 /** The ONE plan: which paths are read, in order. The fixed root surface files and the root
- *  workflows always come first and are never capped; nested surface files follow, through the
- *  one selector, capped only where the reader pays per file (the API). */
+ *  workflows always come first; nested surface files follow, through the one selector, capped
+ *  only where the reader pays per file (the API). */
 function planSurface(
   paths: string[],
   notes: string[],
@@ -340,242 +494,225 @@ function planSurface(
   return [...new Set([...root, ...workflows, ...nested])];
 }
 
-type LinkOutcome = { target: string } | { skip: 'dangling' | 'outside' | 'directory' };
+interface PlannedRead {
+  /** The path the agent opens (a link's own path when read through a link). */
+  rel: string;
+  /** The listing entry that holds the bytes. */
+  real: string;
+}
 
-/** The ONE symlink rule. A link whose text resolves (relative to its own directory, up to
- *  MAX_LINK_HOPS) to a regular file inside the repository is read as that file's content under
- *  the link's own path — the agent loads exactly that. A link that leaves the repository is not
- *  read (and noted); dangling and directory links are not read. Decided from the listing and
- *  the link text only, never from the host filesystem, so every reader agrees. */
-function resolveLink(
-  linkPath: string,
-  kindOf: (p: string) => Kind | undefined,
-  textOf: (p: string) => string | null,
-  isDir: (p: string) => boolean
-): LinkOutcome {
-  let cur = linkPath;
-  for (let hop = 0; hop < MAX_LINK_HOPS; hop++) {
-    const text = textOf(cur);
-    if (text === null) return { skip: 'dangling' };
-    const t = text.trim();
-    if (t.startsWith('/') || /^[A-Za-z]:[\\/]/.test(t) || t.startsWith('\\\\'))
-      return { skip: 'outside' };
-    const next = posixPath.normalize(posixPath.join(posixPath.dirname(cur), t.replace(/\\/g, '/')));
-    if (next === '..' || next.startsWith('../')) return { skip: 'outside' };
-    const k = kindOf(next);
-    if (k === 'file') return { target: next };
-    if (k === 'link') {
-      cur = next;
+/** Listing → visible paths → plan → one read per real file. A link to a file that is already
+ *  read under its own name is not read again (every real in-repo file link measured had that
+ *  shape); a link to a file NOT otherwise read is read under the link's path — the agent loads
+ *  it. Every skip that could hide content is said. */
+function planReads(
+  l: Listing,
+  opts: { nestedCap?: number; truncated?: boolean } = {}
+):
+  | { reads: PlannedRead[]; paths: string[]; complete: boolean; notes: string[] }
+  | { need: string[] } {
+  const notes: string[] = [];
+  const v = visiblePaths(l, notes);
+  if ('need' in v) return v;
+  const planned = planSurface(v.paths, notes, opts);
+  const plannedSet = new Set(planned);
+  const needs = new Set<string>();
+  const reads: PlannedRead[] = [];
+  const taken = new Set<string>();
+  const dangling: string[] = [];
+  for (const rel of planned) {
+    const r = resolvePath(rel, l);
+    if ('need' in r) {
+      needs.add(r.need);
       continue;
     }
-    return isDir(next) ? { skip: 'directory' } : { skip: 'dangling' };
+    if ('skip' in r) {
+      if (r.skip === 'outside') notes.push(outsideNote(rel));
+      else if (r.skip === 'unwalked') notes.push(unwalkedNote(rel));
+      else dangling.push(rel);
+      continue;
+    }
+    if (r.kind !== 'file') continue; // a directory or a submodule named like a surface file
+    if (r.real !== rel && plannedSet.has(r.real)) continue; // read under its own name
+    if (taken.has(r.real)) continue; // two links to one file: read once
+    taken.add(r.real);
+    reads.push({ rel, real: r.real });
   }
-  return { skip: 'dangling' }; // the OS gives up too (ELOOP): nothing for the agent to load
+  if (needs.size) return { need: [...needs] };
+  if (dangling.length)
+    notes.push(
+      `${dangling.length} agent-surface symlink(s) point at nothing readable (e.g. ${dangling.slice(0, 3).join(', ')}) — not read; an agent cannot load them either.`
+    );
+  return { reads, paths: v.paths, complete: v.complete, notes };
 }
 
-function dirTester(paths: string[]): (p: string) => boolean {
-  const dirs = new Set<string>();
-  for (const p of paths)
-    for (let i = p.indexOf('/'); i > 0; i = p.indexOf('/', i + 1)) dirs.add(p.slice(0, i));
-  return (p) => dirs.has(p);
-}
+/** Compare the limit on the text every reader produces (after CRLF → LF), so a checkout written
+ *  with `eol=crlf` is not over the limit where its blob is under it. */
+const overLimit = (text: string) => Buffer.byteLength(text, 'utf8') > MAX_FILE_BYTES;
+/** Raw bytes above this are over the limit whatever their line endings. */
+const RAW_LIMIT = 2 * MAX_FILE_BYTES;
 
 // ── local working tree ───────────────────────────────────────────────────────
 
-const OPEN_NOFOLLOW = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0);
+// O_NONBLOCK: a FIFO swapped in after the walk must not hang the scan on open.
+const OPEN_READ =
+  fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0);
+/** Entry budget for the disk walk: the largest of 118 repositories had 123,492 (12,530 dirs,
+ *  335 ms). Past it, the scan says INCOMPLETE rather than crawling on. */
+const MAX_WALK_ENTRIES = 1_000_000;
 
-/** What is on disk at `rel`, without following a link: a regular file (with its size), a
- *  link, or nothing readable. One open, one fstat on that handle — no check-then-read race. */
-function probe(
-  root: string,
-  rel: string
-): { kind: 'file'; size: number } | { kind: 'link' | 'none' } {
-  let fd: number | undefined;
-  try {
-    fd = fs.openSync(path.join(root, rel), OPEN_NOFOLLOW);
-    const st = fs.fstatSync(fd);
-    return st.isFile() ? { kind: 'file', size: st.size } : { kind: 'none' };
-  } catch (e) {
-    const code = (e as NodeJS.ErrnoException)?.code;
-    return code === 'ELOOP' || code === 'EMLINK' ? { kind: 'link' } : { kind: 'none' };
-  } finally {
-    if (fd !== undefined) fs.closeSync(fd);
-  }
-}
-
-/** Read a regular file through one O_NOFOLLOW handle, refusing anything over the limit. */
-function readCapped(abs: string): string | null {
-  let fd: number | undefined;
-  try {
-    fd = fs.openSync(abs, OPEN_NOFOLLOW);
-    const st = fs.fstatSync(fd);
-    if (!st.isFile() || st.size > MAX_FILE_BYTES) return null;
-    return lf(fs.readFileSync(fd, 'utf8'));
-  } catch {
-    return null;
-  } finally {
-    if (fd !== undefined) fs.closeSync(fd);
-  }
-}
-
-/** A link's text on disk. With `core.symlinks=false` (Windows) git checks a link out as a small
- *  text file holding the link text; the index still says 120000, so read it as text. */
-function localLinkText(root: string, rel: string, indexSaysLink: boolean): string | null {
-  const abs = path.join(root, rel);
-  try {
-    return fs.readlinkSync(abs);
-  } catch {
-    if (!indexSaysLink) return null;
-    const t = readCapped(abs);
-    return t !== null && t.length <= 4096 ? t : null;
-  }
-}
-
-/** The working tree's listing from git: tracked files with their modes, plus untracked files
- *  that are not ignored (a developer's CLI run should see a file they have not committed yet).
- *  null when `root` is not inside a git work tree or git is unavailable. */
-function gitWorkTreeListing(root: string): { path: string; kind: Kind | 'unknown' }[] | null {
-  const run = (args: string[]): string | null => {
-    try {
-      return execFileSync('git', ['-C', root, ...args], {
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-        maxBuffer: 256 * 1024 * 1024,
-        timeout: 60_000,
-      });
-    } catch {
-      return null;
-    }
-  };
-  const tracked = run(['ls-files', '-z', '-s', '--cached']);
-  if (tracked === null) return null;
-  const out: { path: string; kind: Kind | 'unknown' }[] = [];
-  const seen = new Set<string>();
-  for (const line of tracked.split('\0')) {
-    const tab = line.indexOf('\t');
-    if (tab < 0) continue;
-    const p = line.slice(tab + 1);
-    if (seen.has(p)) continue; // unmerged entries repeat a path with stages 1–3
-    seen.add(p);
-    out.push({ path: p, kind: kindOfMode(line.slice(0, line.indexOf(' '))) });
-  }
-  for (const p of (run(['ls-files', '-z', '--others', '--exclude-standard']) ?? '').split('\0')) {
-    if (p && !seen.has(p)) {
-      seen.add(p);
-      out.push({ path: p, kind: 'unknown' });
-    }
-  }
-  return out;
-}
-
-/** A folder that is not a git work tree (a CLI run on a plain directory): walk it, bounded.
- *  Never the PR gate — the Action always scans a checkout. */
-function walkListing(
-  root: string,
-  notes: string[]
-): { entries: { path: string; kind: Kind }[]; complete: boolean } {
-  const entries: { path: string; kind: Kind }[] = [];
-  const MAX_DIRS = 5000; // dir-visit budget so a huge tree can't turn a scan into a full crawl
-  let dirsVisited = 0;
-  const walk = (relDir: string) => {
-    if (dirsVisited >= MAX_DIRS) return;
-    dirsVisited++;
+/** Walk the directory as it is on disk: nothing followed, dependency dirs not entered, a nested
+ *  git repository (a submodule checkout) not entered — git lists a submodule as one entry, so
+ *  the base does the same. No git process: the scanned folder's own `.git/config` can run
+ *  commands (`core.fsmonitor`), and a folder is scanned precisely because it is not trusted. */
+function walkDisk(root: string, notes: string[]): { kinds: Map<string, Kind>; complete: boolean } {
+  const kinds = new Map<string, Kind>();
+  const nestedRepos: string[] = [];
+  const unlistable: string[] = [];
+  const stack: string[] = [''];
+  let count = 0;
+  let complete = true;
+  while (stack.length && complete) {
+    const relDir = stack.pop()!;
     let dirents: fs.Dirent[];
     try {
       dirents = fs.readdirSync(path.join(root, relDir), { withFileTypes: true });
-    } catch {
-      return;
+    } catch (e) {
+      unlistable.push(`${relDir || '.'} (${(e as NodeJS.ErrnoException)?.code ?? 'error'})`);
+      continue;
     }
     for (const e of dirents) {
-      if (dirsVisited >= MAX_DIRS) return;
+      if (++count > MAX_WALK_ENTRIES) {
+        complete = false;
+        break;
+      }
       const rel = relDir ? `${relDir}/${e.name}` : e.name;
       if (e.isDirectory()) {
-        if (IGNORE_HARD.test(`${rel}/`)) continue; // never descend into node_modules & co.
-        walk(rel);
-      } else if (e.isSymbolicLink()) entries.push({ path: rel, kind: 'link' });
-      else if (e.isFile()) entries.push({ path: rel, kind: 'file' });
+        if (isUnwalked(`${rel}/`)) continue;
+        if (fs.existsSync(path.join(root, rel, '.git'))) {
+          kinds.set(rel, 'dir'); // listed as a directory, not entered: git lists no content either
+          nestedRepos.push(rel);
+          continue;
+        }
+        kinds.set(rel, 'dir');
+        stack.push(rel);
+      } else if (e.isSymbolicLink()) kinds.set(rel, 'link');
+      else if (e.isFile()) kinds.set(rel, 'file');
+      else kinds.set(rel, 'other');
     }
-  };
-  walk('');
-  const complete = dirsVisited < MAX_DIRS;
+  }
   if (!complete)
     notes.push(
-      `repo is large — some agent-surface files ${INCOMPLETE} (stopped after ${MAX_DIRS} directories).`
+      `repo is large — some agent-surface files ${INCOMPLETE} (stopped after ${MAX_WALK_ENTRIES} entries).`
     );
-  return { entries, complete };
+  if (unlistable.length)
+    notes.push(
+      `${unlistable.length} director${unlistable.length === 1 ? 'y' : 'ies'} could not be listed (e.g. ${unlistable.slice(0, 3).join(', ')}) — results ${INCOMPLETE}.`
+    );
+  if (nestedRepos.length)
+    notes.push(
+      `skipped ${nestedRepos.length} nested git repositor${nestedRepos.length === 1 ? 'y' : 'ies'} (e.g. ${nestedRepos.slice(0, 3).join(', ')}) — scan ${nestedRepos.length === 1 ? 'it' : 'each'} on its own.`
+    );
+  return { kinds, complete };
 }
 
-/** Read the agent surface of a local directory. Lists through git when it is a git work tree
- *  (the Action's checkout, a developer's clone) so the listing is the same one the PR base
- *  reader sees; walks the folder otherwise. Content is NOT read here: each file is read when
- *  scanTree asks for it and then let go, so memory is bounded by one file, not by the repo. */
+/** A link's text as the host OS reads it. On Windows the OS takes `\` as a separator and a
+ *  drive path as absolute; the resolver speaks POSIX, so translate there and nowhere else. */
+function localLinkText(root: string, rel: string): string | null {
+  try {
+    const t = fs.readlinkSync(path.join(root, rel));
+    if (process.platform !== 'win32') return t;
+    return path.win32.isAbsolute(t) ? `/${t}` : t.replace(/\\/g, '/');
+  } catch {
+    return null;
+  }
+}
+
+/** Read one regular file through one O_NOFOLLOW handle. Throws a note-shaped error (carrying
+ *  "may be INCOMPLETE") when the file cannot be read or is over the limit — the content getter
+ *  runs inside scanTree's per-file guard, which records it. */
+function readLocalFile(abs: string, rel: string): string {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(abs, OPEN_READ);
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) throw new Error(unreadNote(rel, 'no longer a regular file'));
+    if (st.size > RAW_LIMIT) throw new Error(tooLargeNote(rel));
+    const text = lf(fs.readFileSync(fd, 'utf8'));
+    if (overLimit(text)) throw new Error(tooLargeNote(rel));
+    return text;
+  } catch (e) {
+    const msg = (e as Error)?.message ?? '';
+    if (msg.includes(INCOMPLETE)) throw e;
+    throw new Error(unreadNote(rel, (e as NodeJS.ErrnoException)?.code ?? 'error'));
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+/** Read the agent surface of a local directory, as the agent sees it on disk. Content is NOT
+ *  read here: each file is read when scanTree asks for it and then let go, so memory is bounded
+ *  by one file, not by the repo. */
 export function readLocalTree(dir: string): RepoTree {
   const root = dir.replace(/^~/, process.env.HOME ?? '~');
   const notes: string[] = [];
-  const fromGit = gitWorkTreeListing(root);
-  const walked = fromGit ? null : walkListing(root, notes);
-  const kinds = new Map<string, Kind | 'unknown'>(
-    fromGit
-      ? fromGit.map((e) => [e.path, e.kind] as const)
-      : walked!.entries.map((e) => [e.path, e.kind] as const)
-  );
-  const paths = [...kinds.keys()];
-  const indexLinks = new Set(paths.filter((p) => kinds.get(p) === 'link'));
-  const kindOf = (p: string): Kind | undefined => {
-    const k = kinds.get(p);
-    if (k === undefined) return undefined;
-    if (k !== 'unknown') return k;
-    const pr = probe(root, p);
-    const resolved: Kind = pr.kind === 'file' ? 'file' : pr.kind === 'link' ? 'link' : 'other';
-    kinds.set(p, resolved);
-    return resolved;
-  };
-  const isDir = dirTester(paths);
+  const walked = walkDisk(root, notes);
+  const plan = planReads(makeListing(walked.kinds, (p) => localLinkText(root, p)));
+  if ('need' in plan) throw new Error('unreachable: local link texts are always known');
+  notes.push(...plan.notes);
   const files: RepoFile[] = [];
-  const planLocal = planSurface(paths, notes);
-  const plannedLocal = new Set(planLocal);
-  for (const rel of planLocal) {
-    let target = rel;
-    if (kindOf(rel) === 'link') {
-      const r = resolveLink(rel, kindOf, (p) => localLinkText(root, p, indexLinks.has(p)), isDir);
-      if ('skip' in r) {
-        if (r.skip === 'outside') notes.push(outsideNote(rel));
-        continue;
-      }
-      // Already read under its own name (AGENTS.md -> CLAUDE.md): grading it twice only
-      // duplicates every finding. A link to a file NOT otherwise read is read here.
-      if (plannedLocal.has(r.target)) continue;
-      target = r.target;
-    } else if (kindOf(rel) !== 'file') continue;
-    const pr = probe(root, target);
-    if (pr.kind !== 'file') continue; // listed but gone, or not what git says it is
-    if (pr.size > MAX_FILE_BYTES) {
+  for (const { rel, real } of plan.reads) {
+    const abs = path.join(root, real);
+    let size = 0;
+    try {
+      size = fs.lstatSync(abs).size;
+    } catch {
+      /* gone since the walk: the getter reports it */
+    }
+    if (size > RAW_LIMIT) {
       notes.push(tooLargeNote(rel));
       continue;
     }
-    const abs = path.join(root, target);
     files.push({
       path: rel,
       // Read on demand, not held: scanTree reads each file once, analyzes it, and moves on.
       get content(): string {
-        return readCapped(abs) ?? '';
+        return readLocalFile(abs, rel);
       },
     });
   }
-  return { source: root, files, notes, paths, pathsComplete: fromGit ? true : walked!.complete };
+  return {
+    source: root,
+    files,
+    notes,
+    paths: plan.paths,
+    pathsComplete: walked.complete && plan.complete,
+  };
 }
 
 // ── a git ref (the PR base) ──────────────────────────────────────────────────
 
+/** git reads the repository's own config. The commands used here (rev-parse, ls-tree,
+ *  cat-file) were tested not to run `core.fsmonitor` (git 2.43); these switch off the settings
+ *  that run programs anyway, as a second wall. */
+const GIT_SAFE = ['-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null'];
+const gitEnv = (): NodeJS.ProcessEnv => ({
+  ...process.env,
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_OPTIONAL_LOCKS: '0',
+  GIT_TERMINAL_PROMPT: '0',
+});
+
 /** Many blobs through ONE `git cat-file --batch` process (a process per file took 9.7 s on
- *  a 1,577-file base; one batch takes 0.12 s). Returns sha → text; missing objects are absent.
- *  Throws when the batch cannot be run — the caller turns that into "the base did not run". */
+ *  a 1,577-file base; one batch takes 0.12 s). Returns sha → raw text; missing objects are
+ *  absent. Throws when the batch cannot be run — the caller turns that into "did not run". */
 function catFileBatch(root: string, shas: string[]): Map<string, string> {
   const out = new Map<string, string>();
   if (shas.length === 0) return out;
-  const buf = execFileSync('git', ['-C', root, 'cat-file', '--batch'], {
+  const buf = execFileSync('git', [...GIT_SAFE, '-C', root, 'cat-file', '--batch'], {
     input: shas.join('\n') + '\n',
     stdio: ['pipe', 'pipe', 'ignore'],
+    env: gitEnv(),
     maxBuffer: 512 * 1024 * 1024,
     timeout: 120_000,
   });
@@ -585,9 +722,9 @@ function catFileBatch(root: string, shas: string[]): Map<string, string> {
     if (nl < 0) break;
     const header = buf.toString('utf8', i, nl).split(' ');
     i = nl + 1;
-    if (header[1] === 'missing' || header.length < 3) continue;
+    if (header[1] === 'missing' || header[1] === 'ambiguous' || header.length < 3) continue;
     const size = Number(header[2]);
-    out.set(header[0], lf(buf.toString('utf8', i, i + size)));
+    out.set(header[0], buf.toString('utf8', i, i + size));
     i += size + 1; // the content is followed by a newline
   }
   return out;
@@ -608,9 +745,10 @@ export function readGitRefTree(dir: string, ref: string): RepoTree | null {
   if (!ref || ref.startsWith('-')) return null;
   const git = (args: string[]): string | null => {
     try {
-      return execFileSync('git', ['-C', root, ...args], {
+      return execFileSync('git', [...GIT_SAFE, '-C', root, ...args], {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
+        env: gitEnv(),
         maxBuffer: 256 * 1024 * 1024,
         timeout: 60_000,
       });
@@ -629,53 +767,51 @@ export function readGitRefTree(dir: string, ref: string): RepoTree | null {
   for (const line of listing.split('\0')) {
     const tab = line.indexOf('\t');
     if (tab < 0) continue;
+    const p = line.slice(tab + 1);
+    if (isUnwalked(p)) continue; // the working tree never walks these; neither does the base
     const [mode, , objSha, size] = line.slice(0, tab).split(/\s+/);
-    entries.set(line.slice(tab + 1), {
-      kind: kindOfMode(mode),
-      sha: objSha,
-      size: Number(size) || 0,
-    });
+    entries.set(p, { kind: kindOfMode(mode), sha: objSha, size: Number(size) || 0 });
   }
-  const paths = [...entries.keys()];
-  const notes: string[] = [];
   try {
     // Every link's text in one batch (links are small), so resolution needs no more processes.
     const linkShas = [...entries.values()].filter((e) => e.kind === 'link').map((e) => e.sha);
     const linkText = catFileBatch(root, [...new Set(linkShas)]);
-    const kindOf = (p: string) => entries.get(p)?.kind;
-    const textOf = (p: string) => {
-      const e = entries.get(p);
-      return e && e.kind === 'link' ? (linkText.get(e.sha) ?? null) : null;
-    };
-    const isDir = dirTester(paths);
-    const planned: { rel: string; sha: string }[] = [];
-    const planGit = planSurface(paths, notes);
-    const plannedGit = new Set(planGit);
-    for (const rel of planGit) {
-      let target = rel;
-      if (kindOf(rel) === 'link') {
-        const r = resolveLink(rel, kindOf, textOf, isDir);
-        if ('skip' in r) {
-          if (r.skip === 'outside') notes.push(outsideNote(rel));
-          continue;
-        }
-        if (plannedGit.has(r.target)) continue; // read under its own name (see readLocalTree)
-        target = r.target;
-      } else if (kindOf(rel) !== 'file') continue;
-      const e = entries.get(target)!;
-      if (e.size > MAX_FILE_BYTES) {
+    const kinds = new Map([...entries].map(([p, e]) => [p, e.kind] as const));
+    const plan = planReads(
+      makeListing(kinds, (p) => {
+        const e = entries.get(p);
+        return e && e.kind === 'link' ? (linkText.get(e.sha) ?? null) : null;
+      })
+    );
+    if ('need' in plan) return null; // unreachable: every link text was fetched above
+    const notes = plan.notes;
+    const reads = plan.reads.filter(({ rel, real }) => {
+      if (entries.get(real)!.size <= RAW_LIMIT) return true;
+      notes.push(tooLargeNote(rel));
+      return false;
+    });
+    const bytes = catFileBatch(root, [...new Set(reads.map((r) => entries.get(r.real)!.sha))]);
+    const files: RepoFile[] = [];
+    for (const { rel, real } of reads) {
+      const raw = bytes.get(entries.get(real)!.sha);
+      if (raw === undefined) {
+        notes.push(unreadNote(rel, 'object missing from this clone'));
+        continue;
+      }
+      const content = lf(raw);
+      if (overLimit(content)) {
         notes.push(tooLargeNote(rel));
         continue;
       }
-      planned.push({ rel, sha: e.sha });
+      files.push({ path: rel, content });
     }
-    const bytes = catFileBatch(root, [...new Set(planned.map((x) => x.sha))]);
-    const files: RepoFile[] = [];
-    for (const { rel, sha: s } of planned) {
-      const content = bytes.get(s);
-      if (content !== undefined) files.push({ path: rel, content });
-    }
-    return { source: `${root}@${ref}`, files, notes, paths, pathsComplete: true };
+    return {
+      source: `${root}@${ref}`,
+      files,
+      notes,
+      paths: plan.paths,
+      pathsComplete: plan.complete,
+    };
   } catch {
     return null; // the base could not be read: did-not-run, never "clean"
   }
@@ -721,39 +857,89 @@ async function listTree(
   return { entries, truncated: !!tree.truncated };
 }
 
+/** One scan's spend on the API. The hosted scan shares one token across every user, and a repo
+ *  is free to be hostile: 2,000 workflows sharing one 4 MiB blob cost the attacker 4 MiB. So
+ *  blobs are fetched once per sha, and the scan stops at a request and byte budget — above the
+ *  largest real surface measured (github/gh-aw: 772 workflows, 48.7 MB) — and says so. */
+export const API_BUDGET = { requests: 1000, bytes: 64 * 1024 * 1024 };
+
+type BlobResult = { text: string } | { error: string };
+
+class ApiSession {
+  requests = 1; // the Trees call
+  bytes = 0;
+  budgetHit = false;
+  readonly failed: string[] = [];
+  private readonly cache = new Map<string, Promise<BlobResult>>();
+  constructor(
+    private readonly owner: string,
+    private readonly repo: string,
+    private readonly notes: string[]
+  ) {}
+
+  blob(sha: string, size: number): Promise<BlobResult> {
+    const hit = this.cache.get(sha);
+    if (hit) return hit;
+    if (this.requests >= API_BUDGET.requests || this.bytes + size > API_BUDGET.bytes) {
+      this.budgetHit = true;
+      return Promise.resolve({ error: 'budget' });
+    }
+    this.requests++;
+    this.bytes += size;
+    const p = fetchBlob(this.owner, this.repo, sha, this.notes);
+    this.cache.set(sha, p);
+    return p;
+  }
+
+  /** The notes that make a partial API read visible. */
+  closingNotes(): string[] {
+    const out: string[] = [];
+    if (this.failed.length)
+      out.push(
+        `${this.failed.length} file(s) could not be fetched from GitHub (e.g. ${this.failed.slice(0, 3).join(', ')}) — results ${INCOMPLETE}.`
+      );
+    if (this.budgetHit)
+      out.push(
+        `the scan stopped at its GitHub budget (${API_BUDGET.requests} requests, ${API_BUDGET.bytes / (1024 * 1024)} MiB) — results ${INCOMPLETE}.`
+      );
+    return out;
+  }
+}
+
 /** One blob by sha — the Git Blobs API, not Contents: Contents returns a file over 1 MB with an
  *  EMPTY body (hermes-agent's 1,077,327-byte llms-full.md read as nothing) and a symlink with
- *  no content at all. Blobs returns both. */
+ *  no content at all. Blobs returns both. Raw text: a link's text is used exactly as stored. */
 async function fetchBlob(
   owner: string,
   repo: string,
   sha: string,
   notes: string[]
-): Promise<string | null> {
+): Promise<BlobResult> {
   const { status, json } = await ghGet(
     `https://api.github.com/repos/${owner}/${repo}/git/blobs/${sha}`
   );
   if (status === 403 || status === 429) {
     if (!notes.includes(RATE_LIMIT_NOTE)) notes.push(RATE_LIMIT_NOTE);
-    return null;
+    return { error: 'rate limit' };
   }
   if (status === 0) {
     if (!notes.includes(NETWORK_NOTE)) notes.push(NETWORK_NOTE);
-    return null;
+    return { error: 'network' };
   }
-  if (status !== 200 || !json || typeof json !== 'object') return null;
+  if (status !== 200 || !json || typeof json !== 'object') return { error: `HTTP ${status}` };
   const b = json as { content?: unknown; encoding?: unknown };
-  if (typeof b.content !== 'string') return null;
-  return lf(
-    b.encoding === 'base64' ? Buffer.from(b.content, 'base64').toString('utf8') : b.content
-  );
+  if (typeof b.content !== 'string') return { error: 'malformed blob' };
+  return {
+    text: b.encoding === 'base64' ? Buffer.from(b.content, 'base64').toString('utf8') : b.content,
+  };
 }
 
 const FETCH_CONCURRENCY = 8;
 
 /** Fetch the agent-surface of a GitHub repo. Never throws — network/absence failures become
- *  notes; the checks run over whatever we got. The same plan, symlink rule and per-file limit
- *  as the local and git readers; capped at API_CAPS nested files because each costs a request. */
+ *  notes; the checks run over whatever we got. The same resolver, expansion, plan and per-file
+ *  limit as the local and git readers; nested files capped at API_CAPS and the whole scan at
+ *  API_BUDGET, because each file costs a request. */
 export async function fetchGitHubTree(
   owner: string,
   repo: string,
@@ -777,64 +963,60 @@ export async function fetchGitHubTree(
         notes,
       };
     }
-    const entries = new Map(listed.entries.map((e) => [e.path, e]));
-    const paths = [...entries.keys()];
-    const kindOf = (p: string): Kind | undefined => {
-      const e = entries.get(p);
-      return e ? (e.type === 'blob' ? kindOfMode(e.mode) : 'other') : undefined;
-    };
-    const planned = planSurface(paths, notes, {
-      nestedCap: API_CAPS.files,
-      truncated: listed.truncated,
-    });
-
-    // Link texts are small blobs, fetched as a chain is walked; then the one symlink rule.
+    const entries = new Map(
+      listed.entries.filter((e) => !isUnwalked(e.path)).map((e) => [e.path, e])
+    );
+    const kinds = new Map(
+      [...entries].map(([p, e]) => [p, e.type === 'blob' ? kindOfMode(e.mode) : 'dir'] as const)
+    );
+    const session = new ApiSession(owner, repo, notes);
+    // Link texts are fetched as the resolver asks for them, a round per link depth.
     const linkText = new Map<string, string | null>();
-    const textOf = (p: string) => linkText.get(p) ?? null;
-    const isDir = dirTester(paths);
-    const reads: { rel: string; sha: string }[] = [];
-    const plannedApi = new Set(planned);
-    for (const rel of planned) {
-      let target = rel;
-      if (kindOf(rel) === 'link') {
-        let cur = rel;
-        for (let hop = 0; hop < MAX_LINK_HOPS && kindOf(cur) === 'link'; hop++) {
-          if (!linkText.has(cur))
-            linkText.set(cur, await fetchBlob(owner, repo, entries.get(cur)!.sha, notes));
-          const t = linkText.get(cur);
-          if (t === null || t === undefined) break;
-          const next = posixPath.normalize(posixPath.join(posixPath.dirname(cur), t.trim()));
-          if (kindOf(next) !== 'link') break;
-          cur = next;
+    const listing = makeListing(kinds, (p) => (linkText.has(p) ? linkText.get(p)! : undefined));
+    const opts = { nestedCap: API_CAPS.files, truncated: listed.truncated };
+    let plan = planReads(listing, opts);
+    while ('need' in plan) {
+      await pooled(plan.need, FETCH_CONCURRENCY, async (p) => {
+        const e = entries.get(p)!;
+        const r = await session.blob(e.sha, e.size ?? 0);
+        if ('text' in r) linkText.set(p, r.text);
+        else {
+          linkText.set(p, null);
+          if (r.error !== 'budget') session.failed.push(`${p}: ${r.error}`);
         }
-        const r = resolveLink(rel, kindOf, textOf, isDir);
-        if ('skip' in r) {
-          if (r.skip === 'outside') notes.push(outsideNote(rel));
-          continue;
-        }
-        if (plannedApi.has(r.target)) continue; // read under its own name (see readLocalTree)
-        target = r.target;
-      } else if (kindOf(rel) !== 'file') continue;
-      const e = entries.get(target)!;
-      if ((e.size ?? 0) > MAX_FILE_BYTES) {
-        notes.push(tooLargeNote(rel));
-        continue;
-      }
-      reads.push({ rel, sha: e.sha });
+      });
+      plan = planReads(listing, opts);
     }
+    notes.push(...plan.notes);
 
-    let done = 0;
-    const fetched = await pooled(reads, FETCH_CONCURRENCY, async ({ rel, sha }) => {
-      const content = await fetchBlob(owner, repo, sha, notes);
-      onProgress?.({ phase: 'fetching agent surface', done: ++done, total: reads.length });
-      return content === null ? null : { path: rel, content };
+    const reads = plan.reads.filter(({ rel, real }) => {
+      if ((entries.get(real)!.size ?? 0) <= RAW_LIMIT) return true;
+      notes.push(tooLargeNote(rel));
+      return false;
     });
+    let done = 0;
+    const fetched = await pooled(reads, FETCH_CONCURRENCY, async ({ rel, real }) => {
+      const e = entries.get(real)!;
+      const r = await session.blob(e.sha, e.size ?? 0);
+      onProgress?.({ phase: 'fetching agent surface', done: ++done, total: reads.length });
+      if ('error' in r) {
+        if (r.error !== 'budget') session.failed.push(`${rel}: ${r.error}`);
+        return null;
+      }
+      const content = lf(r.text);
+      if (overLimit(content)) {
+        notes.push(tooLargeNote(rel));
+        return null;
+      }
+      return { path: rel, content };
+    });
+    notes.push(...session.closingNotes());
     return {
       source: `${owner}/${repo}`,
       files: fetched.filter((f): f is RepoFile => !!f),
       notes,
-      paths,
-      pathsComplete: !listed.truncated,
+      paths: plan.paths,
+      pathsComplete: !listed.truncated && plan.complete,
     };
   } catch (err) {
     // "may be INCOMPLETE" is load-bearing — index.ts keys `incomplete` off it, so a total

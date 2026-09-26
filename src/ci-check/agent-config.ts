@@ -129,6 +129,8 @@ export function hookScriptPath(cmd: string): string | null {
 export interface TreeListing {
   paths: ReadonlySet<string>;
   complete: boolean;
+  /** Paths no reader lists (dependency dirs are never walked): unknown, never "missing". */
+  unknown?: (p: string) => boolean;
 }
 
 /** Line of a hook command in the settings source, or undefined. */
@@ -186,7 +188,7 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
   if (tree?.complete) {
     for (const cmd of hookCommands(cfg.hooks)) {
       const script = hookScriptPath(cmd);
-      if (!script) continue;
+      if (!script || tree.unknown?.(script)) continue;
       if (!tree.paths.has(script)) {
         findings.push({
           check: 'CI-1',

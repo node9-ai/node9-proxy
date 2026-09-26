@@ -439,13 +439,21 @@ describe('the surface cap — a correctness bug on a 771-skill-file repository',
     const root = tmp();
     try {
       for (let i = 0; i < 6; i++) write(root, `.claude/skills/s${i}/SKILL.md`, 'x'.repeat(1000));
+      // over the limit, decided when read (the limit is on the LF-normalised text, K.2)
       write(root, '.claude/skills/big/SKILL.md', 'x'.repeat(MAX_FILE_BYTES + 1));
+      // over twice the limit: over whatever its line endings, dropped before reading
+      write(root, '.claude/skills/huge/SKILL.md', 'x'.repeat(2 * MAX_FILE_BYTES + 1));
       const t = readLocalTree(root);
       expect(t.files.filter((x) => /s\d\/SKILL\.md$/.test(x.path))).toHaveLength(6);
-      expect(t.files.map((x) => x.path)).not.toContain('.claude/skills/big/SKILL.md');
-      expect(t.notes.some((n) => /big\/SKILL\.md/.test(n) && /may be INCOMPLETE/i.test(n))).toBe(
-        true
-      );
+      expect(t.files.map((x) => x.path)).not.toContain('.claude/skills/huge/SKILL.md');
+      const res = scanTree(t);
+      expect(res.incomplete).toBe(true);
+      for (const name of ['big', 'huge'])
+        expect(
+          res.notes.some((n) => n.includes(`${name}/SKILL.md is larger than`)),
+          name
+        ).toBe(true);
+      expect(res.findings.some((f) => /\/(big|huge)\//.test(f.file))).toBe(false);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

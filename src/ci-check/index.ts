@@ -3,7 +3,7 @@
 // aggregate → worst-severity. Never throws: a bad file becomes a note, so a
 // scan always returns a result (fail-open on our own bugs).
 
-import { fetchTree, type OnProgress } from './fetch';
+import { fetchTree, isUnwalked, type OnProgress } from './fetch';
 import { analyzeWorkflow, analyzeWorkflowSecrets } from './workflows';
 import { analyzeAgentConfig, analyzeSkillGrants } from './agent-config';
 import { analyzeMcp } from './mcp';
@@ -43,14 +43,21 @@ export function scanTree(tree: RepoTree): ScanResult {
   // The whole listing, when the reader had one, so the hook check can tell "not committed"
   // from "not read". A listing that is not known to be complete decides nothing.
   const listing = tree.paths
-    ? { paths: new Set(tree.paths), complete: tree.pathsComplete === true }
+    ? { paths: new Set(tree.paths), complete: tree.pathsComplete === true, unknown: isUnwalked }
     : undefined;
   // The team's suppressions, parsed once. Applied AFTER every check has run, so a check can
   // never see a finding as absent; and never routed to a content analyzer.
   const suppressionsFile = tree.files.find((f) => f.path === SUPPRESSIONS_FILE);
-  const suppressions = suppressionsFile
-    ? parseSuppressions(suppressionsFile.content, new Date())
-    : undefined;
+  // A local reader reads content on demand and throws when the file cannot be read; then no
+  // suppression applies (stricter, never looser) and the scan says it may be incomplete.
+  let suppressions: ReturnType<typeof parseSuppressions> | undefined;
+  if (suppressionsFile) {
+    try {
+      suppressions = parseSuppressions(suppressionsFile.content, new Date());
+    } catch (err) {
+      notes.push(`${(err as Error)?.message ?? `${SUPPRESSIONS_FILE} could not be read`}`);
+    }
+  }
   for (const file of tree.files) {
     inspected.push(file.path);
     if (file.path === SUPPRESSIONS_FILE) continue;

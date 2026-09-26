@@ -73,6 +73,9 @@ function makeRepo(): string {
     fs.symlinkSync(`../${path.basename(root)}-escape.md`, path.join(root, '.windsurfrules')); // relative escape
   }
   git('add', '-A');
+  // a submodule that was never checked out: one gitlink entry in git, an empty dir on disk
+  fs.mkdirSync(path.join(root, 'ext'));
+  git('update-index', '--add', '--cacheinfo', `160000,${'1'.repeat(40)},ext`);
   git('commit', '-qm', 'fixture');
   fs.rmSync(path.join(root, '.claude/skills/deploy/scripts/setup.ps1'));
   git('checkout', '--', '.claude/skills/deploy/scripts/setup.ps1'); // now written with CRLF
@@ -95,12 +98,14 @@ describe('K — the local reader and the git-ref reader agree', () => {
     fs.rmSync(path.join(root, '..', `${path.basename(root)}-escape.md`), { force: true });
   });
 
-  it('same listing: every committed path, ignored dirs included (#7)', () => {
+  it('same listing: every path outside the dependency dirs, build output included (#7)', () => {
     const local = readLocalTree(root);
     const base = readGitRefTree(root, 'HEAD')!;
     expect(new Set(local.paths)).toEqual(new Set(base.paths));
     expect(local.paths).toContain('dist/hook.js');
-    expect(local.paths).toContain('node_modules/tool/hook.js');
+    // node_modules & co. are never walked on disk (cost), so no reader lists them: a path there
+    // is unknown to every reader alike, never "missing" (K.2)
+    expect(local.paths).not.toContain('node_modules/tool/hook.js');
     expect(local.pathsComplete).toBe(true);
   });
 
@@ -283,8 +288,300 @@ describe('K — the GitHub reader: Trees + Blobs, same plan, same symlink rule',
     expect(t.pathsComplete).toBe(true);
     expect(scanTree(t).findings.map((f) => f.rule)).toContain('CI-2.injectable-workflow');
   });
+});
 
-  it('a file over MAX_FILE_BYTES is unread and noted', () => {
-    expect(MAX_FILE_BYTES).toBeGreaterThanOrEqual(4 * 1024 * 1024);
+// ── K.2 — corrections after the independent review of c98c086 ─────────────────────────────
+// The working tree's truth is what the AGENT loads: the disk, with links resolved the way the
+// OS resolves them — not git's index. Each row below failed on c98c086.
+
+const BROAD = JSON.stringify({ permissions: { allow: ['Bash(*)'] } });
+
+function tmp(prefix: string): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+}
+function put(root: string, rel: string, body: string) {
+  fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+  fs.writeFileSync(path.join(root, rel), body);
+}
+function gitIn(root: string, ...a: string[]) {
+  return execFileSync('git', ['-C', root, ...a], { stdio: ['ignore', 'pipe', 'ignore'] });
+}
+function commitAll(root: string) {
+  gitIn(root, 'init', '-q');
+  gitIn(root, 'config', 'user.email', 't@e.test');
+  gitIn(root, 'config', 'user.name', 't');
+  gitIn(root, 'add', '-A');
+  gitIn(root, 'commit', '-qm', 'fixture');
+}
+const rulesAt = (t: RepoTree) => scanTree(t).findings.map((f) => `${f.rule}@${f.file}`);
+
+describe.runIf(posix)('K.2 — the local reader never runs the scanned repository', () => {
+  it("a scanned repo's own .git/config cannot run a command (core.fsmonitor)", () => {
+    const root = tmp('node9-fsmon-');
+    const marker = path.join(root, '..', `${path.basename(root)}-ran`);
+    try {
+      put(root, 'CLAUDE.md', '# x\n');
+      commitAll(root);
+      gitIn(root, 'config', 'core.fsmonitor', `touch ${marker}`);
+      readLocalTree(root);
+      expect(fs.existsSync(marker)).toBe(false);
+      readGitRefTree(root, 'HEAD');
+      expect(fs.existsSync(marker)).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(marker, { force: true });
+    }
+  });
+});
+
+describe.runIf(posix)('K.2 — what is on disk is what is scanned', () => {
+  it('a folder that a parent repository ignores is read, not "empty"', () => {
+    const parent = tmp('node9-parent-');
+    try {
+      put(parent, '.gitignore', 'downloads/\n');
+      commitAll(parent);
+      const root = path.join(parent, 'downloads', 'x');
+      put(root, '.claude/settings.json', BROAD);
+      expect(rulesAt(readLocalTree(root))).toContain('CI-1.broad-allow@.claude/settings.json');
+    } finally {
+      fs.rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('a gitignored .claude/settings.local.json is read — the agent loads it', () => {
+    const root = tmp('node9-local-');
+    try {
+      put(root, '.gitignore', '.claude/settings.local.json\n');
+      commitAll(root);
+      put(root, '.claude/settings.local.json', BROAD);
+      expect(rulesAt(readLocalTree(root))).toContain(
+        'CI-1.broad-allow@.claude/settings.local.json'
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.runIf(posix && process.getuid?.() !== 0)(
+    'a directory that cannot be listed is INCOMPLETE',
+    () => {
+      const root = tmp('node9-perm-');
+      try {
+        put(root, 'CLAUDE.md', '# x\n');
+        put(root, 'locked/CLAUDE.md', OVERRIDE);
+        fs.chmodSync(path.join(root, 'locked'), 0o000);
+        expect(scanTree(readLocalTree(root)).incomplete).toBe(true);
+      } finally {
+        fs.chmodSync(path.join(root, 'locked'), 0o755);
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it('a file that disappears between listing and reading is noted as INCOMPLETE', () => {
+    const root = tmp('node9-gone-');
+    try {
+      put(root, 'CLAUDE.md', '# x\n');
+      const t = readLocalTree(root);
+      fs.rmSync(path.join(root, 'CLAUDE.md'));
+      expect(scanTree(t).incomplete).toBe(true);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe.runIf(posix)('K.2 — links resolve the way the OS resolves them, in every reader', () => {
+  let root = '';
+  const readers = () => [readLocalTree(root), readGitRefTree(root, 'HEAD')!];
+  beforeAll(() => {
+    root = tmp('node9-links-');
+    // a directory link: `.claude -> cfg`; the agent opens .claude/settings.json through it
+    put(root, 'cfg/settings.json', BROAD);
+    fs.symlinkSync('cfg', path.join(root, '.claude'));
+    // the common shape (goose, Project-K): a skill dir linked from another agent's folder
+    put(root, '.agents/skills/s/SKILL.md', `---\nname: s\n---\n${OVERRIDE}`);
+    fs.mkdirSync(path.join(root, '.codex/skills'), { recursive: true });
+    fs.symlinkSync('../../.agents/skills/s', path.join(root, '.codex/skills/s'));
+    // exact text: a trailing space is part of the name
+    put(root, 'notes.md', '# benign\n');
+    put(root, 'notes.md ', OVERRIDE);
+    fs.symlinkSync('notes.md ', path.join(root, 'AGENTS.md'));
+    // `..` after a linked component pops the REAL directory, not the text
+    put(root, 'deep/x/keep.md', '# keep\n');
+    put(root, 'deep/rules.md', OVERRIDE);
+    put(root, 'rules.md', '# benign\n');
+    fs.symlinkSync('deep/x', path.join(root, 'sub'));
+    fs.symlinkSync('sub/../rules.md', path.join(root, 'GEMINI.md'));
+    // a backslash is part of a file name on Linux, not a separator
+    put(root, 'w/notes.md', '# benign\n');
+    put(root, 'w\\notes.md', OVERRIDE);
+    fs.symlinkSync('w\\notes.md', path.join(root, '.windsurfrules'));
+    // a ROOT link to a nested surface file: the root is planned first, yet the file is read
+    // (and its findings reported) under its own name
+    put(root, 'team/CLAUDE.md', OVERRIDE);
+    fs.symlinkSync('team/CLAUDE.md', path.join(root, 'CLAUDE.md'));
+    // a loop and a self-link terminate
+    fs.mkdirSync(path.join(root, 'loop'), { recursive: true });
+    fs.symlinkSync('..', path.join(root, 'loop/up'));
+    fs.symlinkSync('.clinerules', path.join(root, '.clinerules'));
+    commitAll(root);
+  });
+  afterAll(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  it('a directory link is followed: .claude -> cfg is read and graded', () => {
+    for (const t of readers()) {
+      expect(rulesAt(t), t.source).toContain('CI-1.broad-allow@.claude/settings.json');
+      expect(t.paths, t.source).toContain('.claude/settings.json');
+    }
+  });
+
+  it('a skill reached through a directory link is read once, under its own path', () => {
+    for (const t of readers()) {
+      const hits = rulesAt(t).filter(
+        (r) => r.startsWith('CI-6.prompt-override@') && /skills\/s\//.test(r)
+      );
+      expect(hits, t.source).toEqual(['CI-6.prompt-override@.agents/skills/s/SKILL.md']);
+    }
+  });
+
+  it("a root link to a nested surface file reports it under the file's own path", () => {
+    for (const t of readers()) {
+      expect(byFile(t).has('CLAUDE.md'), t.source).toBe(false);
+      expect(rulesAt(t), t.source).toContain('CI-6.prompt-override@team/CLAUDE.md');
+    }
+  });
+
+  it('link text is exact: a trailing space and a backslash name the file the OS opens', () => {
+    for (const t of readers()) {
+      const m = byFile(t);
+      expect(m.get('AGENTS.md'), t.source).toBe(OVERRIDE);
+      expect(m.get('.windsurfrules'), t.source).toBe(OVERRIDE);
+    }
+  });
+
+  it('`..` after a linked directory pops the real directory', () => {
+    for (const t of readers()) expect(byFile(t).get('GEMINI.md'), t.source).toBe(OVERRIDE);
+  });
+
+  it('loops terminate; the two readers still agree', () => {
+    const [a, b] = readers();
+    expect(new Set(a.paths)).toEqual(new Set(b.paths));
+    expect(findingKeys(a)).toEqual(findingKeys(b));
+    expect(byFile(a).has('.clinerules')).toBe(false);
+  });
+});
+
+describe('K.2 — the GitHub reader is bounded and never drops a file silently', () => {
+  let prev: Dispatcher;
+  let agent: MockAgent;
+  const b64 = (s: string) => Buffer.from(s, 'utf8').toString('base64');
+  const hits = new Map<string, number>();
+  const WF = fx('injectable-pr-target.yml');
+  const serve = (
+    repo: string,
+    tree: object[],
+    blobs: Record<string, string | number>,
+    truncated = false
+  ) => {
+    const api = agent.get('https://api.github.com');
+    api
+      .intercept({ path: `/repos/o/${repo}/git/trees/HEAD?recursive=1`, method: 'GET' })
+      .reply(200, { tree, truncated })
+      .persist();
+    api
+      .intercept({ path: new RegExp(`^/repos/o/${repo}/git/blobs/`), method: 'GET' })
+      .reply((opts) => {
+        const sha = String(opts.path).split('/').pop()!;
+        hits.set(`${repo}:${sha}`, (hits.get(`${repo}:${sha}`) ?? 0) + 1);
+        const b = blobs[sha];
+        if (typeof b === 'number') return { statusCode: b, data: '{}' };
+        if (b === undefined) return { statusCode: 404, data: '{}' };
+        return {
+          statusCode: 200,
+          data: JSON.stringify({ sha, encoding: 'base64', content: b64(b) }),
+        };
+      })
+      .persist();
+  };
+  const blob = (p: string, sha: string, size = 100) => ({
+    path: p,
+    mode: '100644',
+    type: 'blob',
+    sha,
+    size,
+  });
+  const link = (p: string, sha: string) => ({
+    path: p,
+    mode: '120000',
+    type: 'blob',
+    sha,
+    size: 8,
+  });
+
+  beforeAll(() => {
+    prev = getGlobalDispatcher();
+    agent = new MockAgent();
+    agent.disableNetConnect();
+    setGlobalDispatcher(agent);
+    // 2,000 workflows that share ONE blob: one request, not 2,000
+    serve(
+      'same',
+      Array.from({ length: 2000 }, (_, i) => blob(`.github/workflows/w${i}.yml`, 'wf')),
+      { wf: WF }
+    );
+    // more distinct blobs than the request budget: read up to the budget, then say so
+    serve(
+      'many',
+      Array.from({ length: 1200 }, (_, i) => blob(`.github/workflows/w${i}.yml`, `b${i}`)),
+      Object.fromEntries(Array.from({ length: 1200 }, (_, i) => [`b${i}`, 'on: push\njobs: {}\n']))
+    );
+    // a blob that fails, a blob over the per-file limit, and a directory link
+    serve(
+      'mixed',
+      [
+        blob('CLAUDE.md', 'gone'),
+        blob('big/SKILL.md', 'big', MAX_FILE_BYTES * 3),
+        blob('cfg/settings.json', 'cfg'),
+        link('.claude', 'lnk'),
+        blob('.github/workflows/review.yml', 'w1'),
+      ],
+      { gone: 404, cfg: BROAD, lnk: 'cfg', w1: WF }
+    );
+  });
+  afterAll(async () => {
+    setGlobalDispatcher(prev);
+    await agent.close();
+  });
+
+  it('blobs are fetched once per sha', async () => {
+    const t = await fetchGitHubTree('o', 'same');
+    expect(t.files).toHaveLength(2000);
+    expect(hits.get('same:wf')).toBe(1);
+  });
+
+  it('a request budget bounds the scan, and hitting it is INCOMPLETE', async () => {
+    const t = await fetchGitHubTree('o', 'many');
+    expect(t.files.length).toBeLessThan(1200);
+    expect(scanTree(t).incomplete).toBe(true);
+  });
+
+  it('a blob that cannot be fetched is INCOMPLETE, not silently absent', async () => {
+    const t = await fetchGitHubTree('o', 'mixed');
+    expect(byFile(t).has('CLAUDE.md')).toBe(false);
+    expect(scanTree(t).incomplete).toBe(true);
+    expect(t.notes.some((n) => /CLAUDE\.md|could not be fetched/i.test(n))).toBe(true);
+  });
+
+  it('a file over MAX_FILE_BYTES is noted and never requested', async () => {
+    const t = await fetchGitHubTree('o', 'mixed');
+    expect(t.notes.some((n) => /big\/SKILL\.md/.test(n) && /INCOMPLETE/.test(n))).toBe(true);
+    expect(hits.get('mixed:big')).toBeUndefined();
+  });
+
+  it('a directory link is followed as in the local and git readers', async () => {
+    const t = await fetchGitHubTree('o', 'mixed');
+    expect(rulesAt(t)).toContain('CI-1.broad-allow@.claude/settings.json');
+    expect(rulesAt(t)).toContain('CI-2.injectable-workflow@.github/workflows/review.yml');
   });
 });
