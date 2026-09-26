@@ -1,0 +1,28 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.node9-ai/node9",
+  "title": "node9",
+  "description": "Security gate for AI agents and MCP servers: allow, hold for approval, or block each tool call",
+  "websiteUrl": "https://node9.ai",
+  "repository": {
+    "url": "https://github.com/node9-ai/node9-proxy",
+    "source": "github"
+  },
+  "version": "2.24.2",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "node9-ai",
+      "version": "2.24.2",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp-server"
+        }
+      ]
+    }
+  ]
+}
