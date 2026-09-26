@@ -91,14 +91,49 @@ export function skillDirsOf(paths: Iterable<string>): Set<string> {
   return dirs;
 }
 
+/** A package manifest. Beside a SKILL.md it means the directory is an APPLICATION that carries
+ *  a skill at its root, not a skill package (2026-09-27: 7 of 2,475 skill directories across the
+ *  119-repo A/B samples; all 7 CI-6 findings under them were the app's own docs). */
+export const PROJECT_MANIFEST_RE =
+  /^(package\.json|pyproject\.toml|setup\.py|Cargo\.toml|go\.mod|pom\.xml|build\.gradle|Gemfile|composer\.json)$/;
+/** The Agent Skills layout: where a skill keeps the files the agent reads on demand. */
+const SKILL_LAYOUT_RE = /^(references|reference|templates|resources|examples|assets)\//;
+
+/** Skill directories that are really application roots: a package manifest sits beside the
+ *  SKILL.md. Path-only, so the three readers decide it identically. */
+export function appSkillDirsOf(
+  paths: Iterable<string>,
+  skillDirs: ReadonlySet<string>
+): Set<string> {
+  const apps = new Set<string>();
+  for (const p of paths) {
+    const i = p.lastIndexOf('/');
+    if (i > 0 && skillDirs.has(p.slice(0, i)) && PROJECT_MANIFEST_RE.test(p.slice(i + 1)))
+      apps.add(p.slice(0, i));
+  }
+  return apps;
+}
+
 /** A markdown file inside a skill directory, other than a SKILL.md. SKILL.md is the entry
  *  point the agent loads; these are the reference files it points at and the agent reads
  *  on demand, so they carry the same trust. 515 of them sat beside 383 SKILL.md files in
- *  the 2026-09-24 corpus, more than half the text a skill can hand to an agent. */
-export function isSkillSupportFile(path: string, skillDirs: ReadonlySet<string>): boolean {
+ *  the 2026-09-24 corpus, more than half the text a skill can hand to an agent.
+ *
+ *  The DEEPEST skill directory above the file decides. If that directory is an application
+ *  root (`appDirs`), only the Agent Skills layout counts — its CHANGELOG, TODOS and design docs
+ *  are the app's, not the skill's. Every other skill directory takes any `.md` below it:
+ *  authors keep real support files in `templates/`, `resources/`, `examples/`, `docs/`… and a
+ *  layout whitelist for everyone would drop ~500 of them. */
+export function isSkillSupportFile(
+  path: string,
+  skillDirs: ReadonlySet<string>,
+  appDirs?: ReadonlySet<string>
+): boolean {
   if (!path.endsWith('.md') || /(^|\/)[Ss][Kk][Ii][Ll][Ll]\.md$/.test(path)) return false;
   for (let d = path.lastIndexOf('/'); d > 0; d = path.lastIndexOf('/', d - 1)) {
-    if (skillDirs.has(path.slice(0, d))) return true;
+    const dir = path.slice(0, d);
+    if (!skillDirs.has(dir)) continue;
+    return !appDirs?.has(dir) || SKILL_LAYOUT_RE.test(path.slice(d + 1));
   }
   return false;
 }
@@ -128,8 +163,12 @@ export function isSkillScript(path: string, skillDirs: ReadonlySet<string>): boo
 /** ONE answer to "is this an instruction file". `skillDirs` must come from skillDirsOf
  *  over the same tree: a skill's supporting files are instructions only by virtue of the
  *  SKILL.md beside them, so this cannot be decided from one path alone. */
-export function isInstructionFile(path: string, skillDirs: ReadonlySet<string>): boolean {
-  return INSTRUCTION_FILE_RE.test(path) || isSkillSupportFile(path, skillDirs);
+export function isInstructionFile(
+  path: string,
+  skillDirs: ReadonlySet<string>,
+  appDirs?: ReadonlySet<string>
+): boolean {
+  return INSTRUCTION_FILE_RE.test(path) || isSkillSupportFile(path, skillDirs, appDirs);
 }
 
 // Prompt-override / role-impersonation directives. The classic phrases only — no bare

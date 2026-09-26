@@ -46,6 +46,28 @@ function safeInline(v) {
     .slice(0, 200);
 }
 
+/** Why the Action did not scan, in the reviewer's words, with the one-line fix. */
+const SKIP_REASONS = {
+  pull_request_target:
+    'this workflow runs on `pull_request_target`, which checks out the base branch, so the changes in this PR are not visible to the scan. Run this Action on `pull_request` instead.',
+};
+
+/** The sticky comment when the Action deliberately did not scan. Never reads as clean. */
+function renderSkipped(reason) {
+  const why = SKIP_REASONS[reason] || `the scan was skipped (${safeInline(reason)}).`;
+  return [
+    MARKER,
+    '### 🛡️ node9 agent-security · ⚪ node9 did not scan this PR',
+    '',
+    `node9 did not scan this PR: ${why}`,
+  ].join('\n');
+}
+
+/** A skipped scan neither passes nor blocks: neutral, exit 0 (founder decision 2026-09-27). */
+function decideSkipped() {
+  return { fail: false, conclusion: 'neutral', exitCode: 0 };
+}
+
 function gateWorst(result, scope) {
   if (scope !== 'introduced' || !result.diff) return result.worst;
   return result.diff.worstIntroduced ?? null;
@@ -356,6 +378,37 @@ function readEvent() {
 }
 
 async function main() {
+  // Deliberately not scanned (I.1): say so, never fall into the unreadable-result path below.
+  const skipped = process.env.NODE9_SKIPPED;
+  if (skipped) {
+    const repo = process.env.GITHUB_REPOSITORY;
+    const { prNumber, headSha } = readEvent();
+    const why = SKIP_REASONS[skipped] || `the scan was skipped (${skipped}).`;
+    console.log(`::warning title=node9 did not scan this PR::${why.replace(/`/g, '')}`);
+    if ((process.env.NODE9_COMMENT || 'true') !== 'false' && prNumber) {
+      try {
+        await upsertStickyComment(repo, prNumber, renderSkipped(skipped));
+      } catch (e) {
+        console.error(`node9: comment failed (${e.message}) — continuing.`);
+      }
+    }
+    if (headSha) {
+      try {
+        await gh('POST', `/repos/${repo}/check-runs`, {
+          name: CHECK_NAME,
+          head_sha: headSha,
+          status: 'completed',
+          conclusion: decideSkipped().conclusion,
+          output: { title: 'node9 did not scan this PR', summary: why },
+        });
+      } catch (e) {
+        console.error(`node9: check-run failed (${e.message}) — continuing.`);
+      }
+    }
+    console.log(`node9 agent-security: not scanned (${skipped}) · neutral`);
+    return decideSkipped().exitCode;
+  }
+
   // Fail-open on our own problems: a broken scan must never block a merge.
   let result;
   try {
@@ -603,6 +656,19 @@ function selftest() {
     /suppressed: `[^`\n]*<!-- @team 'x'[^`\n]*`/.test(ce),
     'the reason sits in one code span'
   );
+
+  // ── I.1: under pull_request_target the Action does not scan, and says so ─────
+  const sk = renderSkipped('pull_request_target');
+  assert.ok(sk.startsWith(MARKER), 'skipped comment is sticky');
+  assert.ok(sk.includes('node9 did not scan this PR'), 'skipped comment says it did not scan');
+  assert.ok(
+    sk.includes('pull_request_target') && sk.includes('`pull_request`'),
+    'names the event and the fix'
+  );
+  assert.ok(!sk.includes('✅'), 'a skipped scan never reads as clean');
+  const skd = decideSkipped();
+  assert.strictEqual(skd.conclusion, 'neutral', 'skipped → neutral, never success');
+  assert.strictEqual(skd.exitCode, 0, 'skipped → never blocks the PR');
 
   // Annotations follow the same scope.
   const introducedOnly = withDiff(

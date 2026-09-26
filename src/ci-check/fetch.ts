@@ -13,6 +13,7 @@ import {
   isInstructionFile,
   isSkillSupportFile,
   skillDirsOf,
+  appSkillDirsOf,
   isHookScript,
   isSkillScript,
 } from './instructions';
@@ -81,14 +82,16 @@ const CONFIG_FILE_RE =
  *  ignored directories. */
 export function selectSurface(paths: string[]): string[] {
   const skillDirs = skillDirsOf(paths);
-  const isSupport = (p: string) => isSkillSupportFile(p, skillDirs);
+  // An application that carries a SKILL.md at its root contributes only its skill layout.
+  const appDirs = appSkillDirsOf(paths, skillDirs);
+  const isSupport = (p: string) => isSkillSupportFile(p, skillDirs, appDirs);
   // Scripts sort with the supporting files: a cap must never drop a SKILL.md for its own
   // helper, and a hook's settings.json before the hook it names.
   const isLate = (p: string) => isSupport(p) || isHookScript(p) || isSkillScript(p, skillDirs);
   return paths
     .filter(
       (p) =>
-        isInstructionFile(p, skillDirs) ||
+        isInstructionFile(p, skillDirs, appDirs) ||
         CONFIG_FILE_RE.test(p) ||
         isHookScript(p) ||
         isSkillScript(p, skillDirs)
