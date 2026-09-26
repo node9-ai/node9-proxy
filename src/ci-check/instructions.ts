@@ -105,10 +105,17 @@ export const SCRIPT_EXT_RE = /\.(sh|bash|zsh|py|js|mjs|cjs|ts|rb|pl|ps1)$/i;
 export function isHookScript(path: string): boolean {
   return /(^|\/)\.claude\/hooks\/.+/.test(path) && SCRIPT_EXT_RE.test(path);
 }
+/** A skill's scripts live where the Agent Skills layout puts them: directly beside the
+ *  SKILL.md, or under its `scripts/` or `bin/`. A whole application that carries a SKILL.md
+ *  at its root (Project-K's `integrations/gstack/`) is not one big skill: its `src/` and
+ *  `test/` are the app, and admitting them made a prompt-injection classifier and its tests
+ *  read as ten HIGH findings (2026-09-26). */
 export function isSkillScript(path: string, skillDirs: ReadonlySet<string>): boolean {
   if (!SCRIPT_EXT_RE.test(path)) return false;
   for (let d = path.lastIndexOf('/'); d > 0; d = path.lastIndexOf('/', d - 1)) {
-    if (skillDirs.has(path.slice(0, d))) return true;
+    if (!skillDirs.has(path.slice(0, d))) continue;
+    const rel = path.slice(d + 1);
+    return !rel.includes('/') || /^(scripts|bin)\//.test(rel);
   }
   return false;
 }

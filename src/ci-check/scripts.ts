@@ -55,20 +55,38 @@ const REDACTION_RE = /\b(sed|redact|mask)\b|\*\*\*/i;
 interface LogicalLine {
   text: string;
   line: number;
+  /** Inside a heredoc body: the line is DATA the script emits, not code. */
+  emitted: boolean;
 }
 
+// An override phrase is a finding only when the script EMITS it — a heredoc body, or an
+// echo/printf/cat on the same logical line. The same phrase as a regex, a list entry or a test
+// payload is a detector, not an attack: a prompt-injection classifier and its tests produced
+// ten HIGH findings in the first full-width run of this rule (Project-K gstack, 2026-09-26).
+const EMIT_RE = /\b(echo|printf|cat)\b/;
+const HEREDOC_OPEN_RE = /<<-?\s*["']?([A-Za-z_][A-Za-z0-9_]*)["']?/;
+
 /** Join backslash-continued lines so a pipeline split across lines is graded as one
- *  command, and report the FIRST physical line number of each. */
+ *  command, report the FIRST physical line number of each, and mark heredoc bodies. */
 function logicalLines(content: string): LogicalLine[] {
   const out: LogicalLine[] = [];
   const raw = content.split(/\r?\n/);
+  let heredocTag: string | null = null;
   for (let i = 0; i < raw.length; i++) {
     const start = i + 1;
     let text = raw[i];
+    if (heredocTag) {
+      const done = text.trim() === heredocTag;
+      out.push({ text, line: start, emitted: !done });
+      if (done) heredocTag = null;
+      continue;
+    }
     while (/\\$/.test(text) && i + 1 < raw.length) {
       text = text.slice(0, -1) + ' ' + raw[++i];
     }
-    out.push({ text, line: start });
+    out.push({ text, line: start, emitted: false });
+    const h = HEREDOC_OPEN_RE.exec(text);
+    if (h) heredocTag = h[1];
   }
   return out;
 }
@@ -132,7 +150,7 @@ export function analyzeScript(path: string, content: string, rulePrefix: string)
     );
   }
 
-  for (const { text, line } of logicalLines(content)) {
+  for (const { text, line, emitted } of logicalLines(content)) {
     const fo = FETCH_OBEY_RE.exec(text);
     const remote =
       (fo && !isInlineParser(text, fo)) ||
@@ -175,7 +193,7 @@ export function analyzeScript(path: string, content: string, rulePrefix: string)
         )
       );
     }
-    const ov = OVERRIDE_RE.exec(maskPathPlaceholders(text));
+    const ov = emitted || EMIT_RE.test(text) ? OVERRIDE_RE.exec(maskPathPlaceholders(text)) : null;
     if (ov) {
       once(
         mk(
