@@ -36,6 +36,7 @@ import {
   readLocalTree,
   readGitRefTree,
   API_CAPS,
+  MAX_FILE_BYTES,
 } from '../ci-check/fetch';
 import type { RepoFile } from '../ci-check/types';
 
@@ -432,16 +433,19 @@ describe('the surface cap — a correctness bug on a 771-skill-file repository',
     expect(under.some((n) => /may be INCOMPLETE/i.test(n))).toBe(false);
   });
 
-  it('local caps are injectable, and a byte budget stops with an INCOMPLETE note', () => {
+  it('there is no total byte budget; a single file over the per-file limit is unread and noted', () => {
+    // K (2026-09-27): the 32 MiB total budget cut real repositories (github/gh-aw, 48.7 MB of
+    // workflows) and let padding crowd out workflows. It is gone; the limit is per file.
     const root = tmp();
     try {
       for (let i = 0; i < 6; i++) write(root, `.claude/skills/s${i}/SKILL.md`, 'x'.repeat(1000));
-      const t = readLocalTree(root, { files: 100, bytes: 3500 });
-      expect(t.files.length).toBeLessThan(6);
-      expect(t.notes.some((n) => /may be INCOMPLETE/i.test(n))).toBe(true);
-      const f = readLocalTree(root, { files: 3, bytes: 1_000_000 });
-      expect(f.files.filter((x) => x.path.endsWith('SKILL.md'))).toHaveLength(3);
-      expect(f.notes.some((n) => /may be INCOMPLETE/i.test(n))).toBe(true);
+      write(root, '.claude/skills/big/SKILL.md', 'x'.repeat(MAX_FILE_BYTES + 1));
+      const t = readLocalTree(root);
+      expect(t.files.filter((x) => /s\d\/SKILL\.md$/.test(x.path))).toHaveLength(6);
+      expect(t.files.map((x) => x.path)).not.toContain('.claude/skills/big/SKILL.md');
+      expect(t.notes.some((n) => /big\/SKILL\.md/.test(n) && /may be INCOMPLETE/i.test(n))).toBe(
+        true
+      );
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

@@ -55,24 +55,27 @@ export function scanTree(tree: RepoTree): ScanResult {
     inspected.push(file.path);
     if (file.path === SUPPRESSIONS_FILE) continue;
     try {
+      // Read ONCE: a local reader's content is read on demand and not held (§K), so a second
+      // access would read the file again. Everything below uses this one copy.
+      const content = file.content;
       if (/\.github\/workflows\/.+\.ya?ml$/.test(file.path)) {
-        const f = analyzeWorkflow(file.path, file.content);
+        const f = analyzeWorkflow(file.path, content);
         if (f) findings.push(f);
-        const s = analyzeWorkflowSecrets(file.path, file.content); // CI-4
+        const s = analyzeWorkflowSecrets(file.path, content); // CI-4
         if (s) findings.push(s);
       } else if (/\.claude\/settings(\.local)?\.json$/.test(file.path)) {
-        findings.push(...analyzeAgentConfig(file.path, file.content, listing));
+        findings.push(...analyzeAgentConfig(file.path, content, listing));
       } else if (isHookScript(file.path)) {
-        findings.push(...analyzeScript(file.path, file.content, 'CI-1.hook-script'));
+        findings.push(...analyzeScript(file.path, content, 'CI-1.hook-script'));
       } else if (isSkillScript(file.path, skillDirs)) {
-        findings.push(...analyzeScript(file.path, file.content, 'CI-6.skill-script'));
+        findings.push(...analyzeScript(file.path, content, 'CI-6.skill-script'));
       } else if (/\.mcp\.json$|\.cursor\/mcp\.json$/.test(file.path)) {
-        findings.push(...analyzeMcp(file.path, file.content));
+        findings.push(...analyzeMcp(file.path, content));
       } else if (/(^|\/)\.codex\/config\.toml$/.test(file.path)) {
-        findings.push(...analyzeCodexConfig(file.path, file.content)); // CI-3 + CI-1 (1c-A)
+        findings.push(...analyzeCodexConfig(file.path, content)); // CI-3 + CI-1 (1c-A)
       } else if (isInstructionFile(file.path, skillDirs)) {
-        findings.push(...analyzeInstructionFile(file.path, file.content)); // CI-6: the content
-        findings.push(...analyzeSkillGrants(file.path, file.content)); // CI-1: the grant
+        findings.push(...analyzeInstructionFile(file.path, content)); // CI-6: the content
+        findings.push(...analyzeSkillGrants(file.path, content)); // CI-1: the grant
       }
     } catch (err) {
       notes.push(`checker degraded on ${file.path}: ${(err as Error)?.message ?? 'error'}`);
