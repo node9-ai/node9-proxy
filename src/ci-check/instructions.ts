@@ -1,11 +1,14 @@
 // src/ci-check/instructions.ts
 // CI-6 — committed agent INSTRUCTION files (CLAUDE.md / AGENTS.md / GEMINI.md /
-// .cursorrules / .github/copilot-instructions.md / .claude skills & commands). These
-// are auto-loaded into the agent's system prompt straight from the repo, so a poisoned
+// .cursorrules / .github/copilot-instructions.md, plus SKILL.md, a skill's supporting
+// .md files, .claude/agents/*.md and .claude/commands/**.md). These are loaded into the
+// agent's context straight from the repo, so a poisoned
 // or careless one is a PERSISTENT injection vector — loaded into every future agent run
 // by every contributor. LOW-FP BY DESIGN: only structural, undefendable signals fire
 // high; ambiguous natural-language prose (autonomy phrasing) is deliberately NOT flagged
 // here (needs an LLM pass — see the scope doc). Static, parse-only, never executed.
+// The CONTENT is graded here; a skill's or command's `allowed-tools` frontmatter is a
+// permission grant and is graded by CI-1 (analyzeSkillGrants in agent-config.ts).
 
 import type { CiFinding, Severity } from './types';
 
@@ -62,12 +65,14 @@ const stripZeroWidth = (t: string): string => t.replace(/[​⁠]/g, '');
 /** Every committed file an agent loads as instructions on its own. ONE definition: the tree
  *  walk in fetch.ts picks by it and the dispatcher in index.ts routes by it, so a file can
  *  never be fetched and then silently dropped, or the reverse. The last three shapes are the
- *  Agent Skills standard (`SKILL.md`, loaded by Claude Code, Codex, Hermes, OpenClaw and Pi)
+ *  Agent Skills standard (`SKILL.md` in any letter case — `talmolab/sleap` commits
+ *  `skill.md`, which every case-insensitive contributor disk resolves; the always-loaded
+ *  CLAUDE.md/AGENTS.md stay case-exact — loaded by Claude Code, Codex, Hermes, OpenClaw and Pi)
  *  and Claude Code's own subagents and slash commands. Measured over 389 real skill files
  *  before they were added (2026-09-22): 4 of 4 known-malicious fixtures caught; 12 benign
  *  files flagged, every one a false positive, in the shapes fixed alongside this change. */
 export const INSTRUCTION_FILE_RE =
-  /(^|\/)(CLAUDE|AGENTS|GEMINI)\.md$|(^|\/)\.cursorrules$|(^|\/)\.(windsurf|cline)rules$|(^|\/)copilot-instructions\.md$|(^|\/)SKILL\.md$|(^|\/)\.claude\/agents\/[^/]+\.md$|(^|\/)\.claude\/commands\/.+\.md$/;
+  /(^|\/)(CLAUDE|AGENTS|GEMINI)\.md$|(^|\/)\.cursorrules$|(^|\/)\.(windsurf|cline)rules$|(^|\/)copilot-instructions\.md$|(^|\/)[Ss][Kk][Ii][Ll][Ll]\.md$|(^|\/)\.claude\/agents\/[^/]+\.md$|(^|\/)\.claude\/commands\/.+\.md$/;
 
 /** Directories that hold a skill: the parent of every SKILL.md, except the repository
  *  root. A root-level SKILL.md is a repository that IS a skill package, and treating its
@@ -75,7 +80,7 @@ export const INSTRUCTION_FILE_RE =
 export function skillDirsOf(paths: Iterable<string>): Set<string> {
   const dirs = new Set<string>();
   for (const p of paths) {
-    const m = /^(.+)\/SKILL\.md$/.exec(p);
+    const m = /^(.+)\/[Ss][Kk][Ii][Ll][Ll]\.md$/.exec(p);
     if (m) dirs.add(m[1]);
   }
   return dirs;
@@ -86,7 +91,7 @@ export function skillDirsOf(paths: Iterable<string>): Set<string> {
  *  on demand, so they carry the same trust. 515 of them sat beside 383 SKILL.md files in
  *  the 2026-09-24 corpus, more than half the text a skill can hand to an agent. */
 export function isSkillSupportFile(path: string, skillDirs: ReadonlySet<string>): boolean {
-  if (!path.endsWith('.md') || /(^|\/)SKILL\.md$/.test(path)) return false;
+  if (!path.endsWith('.md') || /(^|\/)[Ss][Kk][Ii][Ll][Ll]\.md$/.test(path)) return false;
   for (let d = path.lastIndexOf('/'); d > 0; d = path.lastIndexOf('/', d - 1)) {
     if (skillDirs.has(path.slice(0, d))) return true;
   }

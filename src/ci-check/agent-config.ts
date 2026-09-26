@@ -4,6 +4,7 @@
 // remote/unpinned code and over-broad permission grants. Static, parse-only.
 
 import type { CiFinding } from './types';
+import { parseFrontmatter, allowedToolsOf } from './frontmatter';
 
 interface Settings {
   permissions?: { allow?: unknown[]; deny?: unknown[] };
@@ -27,6 +28,56 @@ function hookCommands(hooks: Record<string, unknown[]> | undefined): string[] {
     }
   }
   return out;
+}
+
+/** What a broad grant is, and how badly. ONE definition, shared by settings.json
+ *  (`permissions.allow`) and a skill's or command's `allowed-tools`, so the two containers
+ *  can never drift: a bare `Bash` is graded the same wherever it is written.
+ *
+ *  Returns null when nothing in `allow` is broad. `denySupported` is false for a skill,
+ *  which has no deny list, so the "no deny narrows these" signal is not emitted there.
+ *  `scope` finishes the sentence that says who is exposed. */
+export function gradeBroadGrant(
+  allow: string[],
+  deny: string[],
+  opts: { denySupported?: boolean; scope?: string } = {}
+): { broad: string[]; bareShell: boolean; high: boolean; signals: string[] } | null {
+  const denySupported = opts.denySupported ?? true;
+  const scope = opts.scope ?? 'for everyone who opens this repo with the agent';
+  const broad = allow.filter((a) =>
+    /^Bash$|^Bash\(\s*\*|^Bash\(git:|^Write\(\s*\*|^Write$|^Edit$/.test(a)
+  );
+  if (broad.length === 0) return null;
+  const hasBackstop = deny.some((d) => /Bash|Write|Edit/.test(d));
+  // For an unrestricted shell only a Bash deny counts: `deny: ['Write']` does nothing to
+  // limit `allow: ['Bash']`. A Bash deny narrows it but cannot make it safe, and the
+  // signal says exactly that.
+  const bashBackstop = deny.some((d) => /^Bash\b/.test(d));
+  // Calibration (2026-09-25): only an UNRESTRICTED shell with no `deny` backstop is high —
+  // any command an injected instruction names runs without a prompt, for everyone who opens
+  // the repo with the agent. `Bash(git:*)`, `Write` and `Edit` are broad and worth a look
+  // (git can run other programs via `-c core.pager=…` or `!` aliases), but they are the
+  // everyday grant of most repos, and calling them catastrophic overclaimed → medium.
+  const bareShell = broad.some((a) => /^Bash$|^Bash\(\s*\*/.test(a));
+  const high = bareShell && !bashBackstop;
+  const signals = [`broad allow(s): ${broad.slice(0, 5).join(', ')}`];
+  if (high)
+    signals.push(
+      `unrestricted \`Bash\` with no \`deny\` backstop — any command an injected instruction names runs without a prompt, ${scope}`
+    );
+  else if (bareShell)
+    signals.push(
+      'a `Bash` deny list narrows the unrestricted `Bash` allow; it blocks only the commands it names'
+    );
+  if (broad.some((a) => /^Bash\(git:/.test(a)))
+    signals.push(
+      '`Bash(git:*)` pre-approves every git command; git can run other programs (`-c core.pager=…`, `!` aliases), so this is broader than it looks'
+    );
+  if (broad.some((a) => /^Write|^Edit$/.test(a)))
+    signals.push('`Write`/`Edit` pre-approve file changes without a prompt');
+  if (denySupported && !high && !bareShell && !hasBackstop)
+    signals.push('no `deny` entry narrows these grants');
+  return { broad, bareShell, high, signals };
 }
 
 export function analyzeAgentConfig(path: string, content: string): CiFinding[] {
@@ -76,38 +127,9 @@ export function analyzeAgentConfig(path: string, content: string): CiFinding[] {
   // Over-broad permission grants pre-authorizing every contributor's agent.
   const allow = asStrings(cfg.permissions?.allow);
   const deny = asStrings(cfg.permissions?.deny);
-  const broad = allow.filter((a) =>
-    /^Bash$|^Bash\(\s*\*|^Bash\(git:|^Write\(\s*\*|^Write$|^Edit$/.test(a)
-  );
-  if (broad.length > 0) {
-    const hasBackstop = deny.some((d) => /Bash|Write|Edit/.test(d));
-    // For an unrestricted shell only a Bash deny counts: `deny: ['Write']` does nothing to
-    // limit `allow: ['Bash']`. A Bash deny narrows it but cannot make it safe, and the
-    // signal says exactly that.
-    const bashBackstop = deny.some((d) => /^Bash\b/.test(d));
-    // Calibration (2026-09-25): only an UNRESTRICTED shell with no `deny` backstop is high —
-    // any command an injected instruction names runs without a prompt, for everyone who opens
-    // the repo with the agent. `Bash(git:*)`, `Write` and `Edit` are broad and worth a look
-    // (git can run other programs via `-c core.pager=…` or `!` aliases), but they are the
-    // everyday grant of most repos, and calling them catastrophic overclaimed → medium.
-    const bareShell = broad.some((a) => /^Bash$|^Bash\(\s*\*/.test(a));
-    const high = bareShell && !bashBackstop;
-    const signals = [`broad allow(s): ${broad.slice(0, 5).join(', ')}`];
-    if (high)
-      signals.push(
-        'unrestricted `Bash` with no `deny` backstop — any command an injected instruction names runs without a prompt, for everyone who opens this repo with the agent'
-      );
-    else if (bareShell)
-      signals.push(
-        'a `Bash` deny list narrows the unrestricted `Bash` allow; it blocks only the commands it names'
-      );
-    if (broad.some((a) => /^Bash\(git:/.test(a)))
-      signals.push(
-        '`Bash(git:*)` pre-approves every git command; git can run other programs (`-c core.pager=…`, `!` aliases), so this is broader than it looks'
-      );
-    if (broad.some((a) => /^Write|^Edit$/.test(a)))
-      signals.push('`Write`/`Edit` pre-approve file changes without a prompt');
-    if (!high && !bareShell && !hasBackstop) signals.push('no `deny` entry narrows these grants');
+  const grade = gradeBroadGrant(allow, deny);
+  if (grade) {
+    const { high, signals } = grade;
     findings.push({
       check: 'CI-1',
       rule: 'CI-1.broad-allow',
@@ -125,4 +147,42 @@ export function analyzeAgentConfig(path: string, content: string): CiFinding[] {
   }
 
   return findings;
+}
+
+/** Any spelling of the Agent Skills entry file, plus Claude Code's slash commands. Only
+ *  these two carry `allowed-tools` with the meaning "use without asking". A subagent's
+ *  `tools:` is scope, not authorization, and a CLAUDE.md has no such field at all. */
+const GRANT_CARRIER_RE = /(^|\/)[Ss][Kk][Ii][Ll][Ll]\.md$|(^|\/)\.claude\/commands\/.+\.md$/;
+
+/** CI-1 over a skill's or slash command's frontmatter. `allowed-tools` is a
+ *  pre-authorization — tools Claude may use WITHOUT asking while the skill or command is
+ *  active — so it is graded by the same law as `permissions.allow` in settings.json.
+ *  There is no deny list in a skill, so a bare `Bash` here is graded exactly like a
+ *  settings.json with no backstop. Static, parse-only. */
+export function analyzeSkillGrants(path: string, content: string): CiFinding[] {
+  if (!GRANT_CARRIER_RE.test(path)) return [];
+  const allow = allowedToolsOf(parseFrontmatter(content));
+  if (allow.length === 0) return [];
+  const grade = gradeBroadGrant(allow, [], {
+    denySupported: false,
+    scope:
+      'whenever this skill or command is active, for everyone who opens this repo with the agent',
+  });
+  if (!grade) return [];
+  const kind = /commands\//.test(path) ? 'slash command' : 'skill';
+  return [
+    {
+      check: 'CI-1',
+      rule: 'CI-1.skill-allowed-tools',
+      // File-level: one finding per skill or command, like CI-1.broad-allow per config file.
+      dimension: 'toolRules',
+      severity: grade.high ? 'high' : 'medium',
+      title: grade.high
+        ? `Committed ${kind} pre-authorizes an unrestricted shell while active`
+        : `Committed ${kind} pre-authorizes broad tools while active`,
+      file: path,
+      signals: grade.signals,
+      fix: 'Scope `allowed-tools` to the specific commands the skill needs (e.g. `Bash(git status:*)`); avoid a bare `Bash`, `Write` or `Edit`.',
+    },
+  ];
 }

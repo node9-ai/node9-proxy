@@ -5,7 +5,7 @@
 
 import { fetchTree, type OnProgress } from './fetch';
 import { analyzeWorkflow, analyzeWorkflowSecrets } from './workflows';
-import { analyzeAgentConfig } from './agent-config';
+import { analyzeAgentConfig, analyzeSkillGrants } from './agent-config';
 import { analyzeMcp } from './mcp';
 import { analyzeCodexConfig } from './codex';
 import { analyzeInstructionFile, isInstructionFile, skillDirsOf } from './instructions';
@@ -47,7 +47,8 @@ export function scanTree(tree: RepoTree): ScanResult {
       } else if (/(^|\/)\.codex\/config\.toml$/.test(file.path)) {
         findings.push(...analyzeCodexConfig(file.path, file.content)); // CI-3 + CI-1 (1c-A)
       } else if (isInstructionFile(file.path, skillDirs)) {
-        findings.push(...analyzeInstructionFile(file.path, file.content)); // CI-6
+        findings.push(...analyzeInstructionFile(file.path, file.content)); // CI-6: the content
+        findings.push(...analyzeSkillGrants(file.path, file.content)); // CI-1: the grant
       }
     } catch (err) {
       notes.push(`checker degraded on ${file.path}: ${(err as Error)?.message ?? 'error'}`);
