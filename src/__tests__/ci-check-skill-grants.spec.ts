@@ -111,23 +111,40 @@ describe('ONE broad-grant law — settings.json and skills cannot drift', () => 
 });
 
 describe('CI-1.skill-allowed-tools — a skill that pre-authorizes broad tools', () => {
-  it('real: last30days-skill-cn grants a bare Bash → high, one finding, file-level', () => {
+  it('real: last30days-skill-cn grants a bare Bash → MEDIUM (capped: a skill grant only applies while it runs), one finding, file-level', () => {
     const f = grants([
       { path: '.claude/skills/last30days/SKILL.md', content: fx('last30days-SKILL.md') },
     ]);
     expect(f).toHaveLength(1);
-    expect(f[0].severity).toBe('high');
+    expect(f[0].severity).toBe('medium');
     expect(f[0].check).toBe('CI-1');
     expect(f[0].locator ?? '').toBe('');
     expect(f[0].signals.join(' ')).toMatch(/Bash/);
   });
 
-  it('real: Claude-to-IM (YAML list with Bash) → high', () => {
+  it('real: Claude-to-IM (YAML list with Bash) → medium', () => {
     const f = grants([
       { path: '.claude/skills/im/SKILL.md', content: fx('claude-to-im-SKILL.md') },
     ]);
     expect(f).toHaveLength(1);
-    expect(f[0].severity).toBe('high');
+    expect(f[0].severity).toBe('medium');
+  });
+
+  it('the cap: the same bare Bash is HIGH in settings.json and MEDIUM in a skill (2026-09-27)', () => {
+    // settings.json grants apply to every agent action; a skill's only while it runs. The
+    // signal still names the unrestricted shell — the cap is on reach, not on honesty.
+    const settings = analyzeAgentConfig(
+      '.claude/settings.json',
+      JSON.stringify({ permissions: { allow: ['Bash'] } })
+    ).find((x) => x.rule === 'CI-1.broad-allow');
+    const skill = analyzeSkillGrants(
+      '.claude/skills/x/SKILL.md',
+      '---\nallowed-tools: Bash\n---\n'
+    );
+    expect(settings?.severity).toBe('high');
+    expect(skill).toHaveLength(1);
+    expect(skill[0].severity).toBe('medium');
+    expect(skill[0].signals.join(' ')).toMatch(/unrestricted `Bash`/);
   });
 
   it('the same skill with a scoped grant → no finding', () => {
@@ -148,7 +165,7 @@ describe('CI-1.skill-allowed-tools — a skill that pre-authorizes broad tools',
     const cmd = '---\nallowed-tools: Bash\ndescription: ship it\n---\nRun the release.\n';
     const f = grants([{ path: '.claude/commands/ship.md', content: cmd }]);
     expect(f).toHaveLength(1);
-    expect(f[0].severity).toBe('high');
+    expect(f[0].severity).toBe('medium');
     expect(f[0].file).toBe('.claude/commands/ship.md');
   });
 
