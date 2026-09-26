@@ -73,6 +73,7 @@ interface Step {
 }
 interface Job {
   if?: string;
+  needs?: string | string[];
   permissions?: Record<string, string> | string;
   steps?: Step[];
   env?: Record<string, unknown>;
@@ -330,7 +331,7 @@ const NONCONTAINS_GATE_RE = new RegExp(
 // A permission/authorization STEP OUTPUT compared POSITIVELY — a marketplace permission-check
 // action whose boolean output guards the agent step (a `uses:` action, so hasStepMembershipGate's
 // `run:`-only check misses it). `== 'false'` is an anti-gate, not matched. JOB-SCOPED ONLY (used
-// in jobActorGate, NOT the whole-workflow hasActorGate) — a step output is produced in ONE job, so
+// in jobActorGate; there is no whole-workflow gate test any more) — a step output is produced in ONE job, so
 // crediting it workflow-wide would let a gated job mask an ungated sibling (the R2-1 bug).
 const PERMISSION_OUTPUT_GATE_RE =
   /steps\.[\w-]+\.outputs\.[\w-]*(permission|allowed|authoriz|is[_-]?(admin|member|maintainer|collaborator))[\w-]*\s*==\s*['"]?(true|admin|write|maintain)/i;
@@ -367,17 +368,6 @@ function ifsAreGated(ifs: string, labelConfigured: boolean): boolean {
   return gated || labelGated;
 }
 
-/** An effective actor gate anywhere in the workflow: a label gate (maintainer must
- *  apply) or an if that checks author_association / write permission / specific
- *  logins. Whole-workflow scope — used by CI-2. */
-function hasActorGate(wf: Workflow, raw: Record<string, unknown>): boolean {
-  const ifs = [jobList(wf).map((j) => j.if), allSteps(wf).map((s) => s.step.if)]
-    .flat()
-    .map(str)
-    .join(' ');
-  return ifsAreGated(ifs, labelTypeConfigured(wf, raw));
-}
-
 /** R4-5: a fail-closed actor gate expressed as a job STEP — a membership/permission
  *  API check (`gh api /orgs/…/memberships/…`, `getCollaboratorPermissionLevel`, …) whose
  *  output guards the agent step via `if: steps.<gate>.outputs.<x> == …`. openmrs gates this
@@ -411,13 +401,102 @@ function jobActorGate(job: Job, wf: Workflow, raw: Record<string, unknown>): boo
   const ifs = [job.if, ...(job.steps ?? []).map((s) => s.if)].map(str).join(' ');
   // G-d′: an `assignee.login == '…'` gate (only someone with triage/write access can
   // assign an issue) counts too. Kept in the JOB-scoped check only — NOT in the shared
-  // ACTOR_GATE_RE / whole-workflow hasActorGate, so a gated sibling job can't mask an
+  // ACTOR_GATE_RE; gating is judged per job, so a gated sibling job can't mask an
   // ungated injectable one.
   return (
     ifsAreGated(ifs, labelTypeConfigured(wf, raw)) ||
     /assignee\.login\s*==|event\.assignee\b/i.test(ifs) ||
     PERMISSION_OUTPUT_GATE_RE.test(ifs) || // [2] job-scoped permission-check-output gate
     hasStepMembershipGate(job) // R4-5
+  );
+}
+
+/** Is this job actor-gated, either on its own or through its `needs:` chain?
+ *
+ *  GitHub prefixes a job's `if:` with an implicit `success() &&` unless the expression itself
+ *  calls a status function (success/failure/always/cancelled). With that implicit check, a
+ *  skipped or failed job ANYWHERE upstream in the needs: chain skips this job, even if a job in
+ *  between ran under always() (actions/runner#491). With an explicit status function the
+ *  expression alone decides, so an upstream gate counts only if the expression also requires
+ *  that gating job's result, as in the common `always() && needs.check.result == 'success'`.
+ *
+ *  An upstream job gates when its JOB-LEVEL `if:` is an actor gate with no top-level `||` (an
+ *  `a || github.actor == x` clause lets everyone through on `a`), or when it gates at step level
+ *  and turns that into a skip or failure the dependent sees: it has a failing step (`exit 1`,
+ *  `core.setFailed`), or the dependent's `if:` reads its outputs. A step gate alone does not:
+ *  the upstream job still succeeds and the dependent runs.
+ *
+ *  Before 2026-09-26 CI-2 used a whole-workflow gate test, so a gated sibling job masked an
+ *  ungated one in the same file (a false negative found in review). */
+const STATUS_FN_RE = /\b(success|failure|always|cancelled)\s*\(/i;
+const FAILING_STEP_RE = /\bexit\s+[1-9]|core\.setFailed|process\.exit\(\s*[1-9]/;
+
+function needsOf(job: Job): string[] {
+  return (Array.isArray(job.needs) ? job.needs : job.needs ? [job.needs] : []).map(String);
+}
+
+function escapeRe(x: string): string {
+  return x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Does upstream job `name` itself turn untrusted actors into a skip/failure downstream?
+ *  `readerIf` is the dependent's `if:` (only a DIRECT dependent can read `needs.<name>`). */
+function upstreamJobGates(
+  name: string,
+  dep: Job,
+  wf: Workflow,
+  raw: Record<string, unknown>,
+  readerIf: string | null
+): boolean {
+  const depIf = str(dep.if);
+  const label = labelTypeConfigured(wf, raw);
+  if (
+    !/\|\|/.test(depIf) &&
+    (ifsAreGated(depIf, label) || /assignee\.login\s*==|event\.assignee\b/i.test(depIf))
+  )
+    return true;
+  const steps = dep.steps ?? [];
+  const stepGated =
+    ifsAreGated(steps.map((st) => str(st.if)).join(' '), label) || hasStepMembershipGate(dep);
+  if (!stepGated) return false;
+  if (
+    steps.some(
+      (st) => FAILING_STEP_RE.test(str(st.run)) || FAILING_STEP_RE.test(str(st.with?.['script']))
+    )
+  )
+    return true;
+  return readerIf !== null && new RegExp(`needs\\.${escapeRe(name)}\\.outputs\\.`).test(readerIf);
+}
+
+/** Names of every job upstream of `job` (transitively) that gates, per upstreamJobGates. */
+function gatingAncestors(job: Job, wf: Workflow, raw: Record<string, unknown>): Set<string> {
+  const out = new Set<string>();
+  const seen = new Set<string>();
+  const visit = (j: Job, readerIf: string | null) => {
+    for (const name of needsOf(j)) {
+      const dep = wf.jobs?.[name];
+      if (!dep) continue;
+      if (upstreamJobGates(name, dep, wf, raw, readerIf)) out.add(name);
+      if (seen.has(name)) continue;
+      seen.add(name);
+      visit(dep, str(dep.if));
+    }
+  };
+  visit(job, str(job.if));
+  return out;
+}
+
+function jobGated(job: Job, wf: Workflow, raw: Record<string, unknown>): boolean {
+  if (jobActorGate(job, wf, raw)) return true;
+  const gating = gatingAncestors(job, wf, raw);
+  if (gating.size === 0) return false;
+  const ownIf = str(job.if);
+  if (!STATUS_FN_RE.test(ownIf)) return true; // implicit success(): any gating ancestor skips it
+  // Explicit status function: credit only a required success of a gating DIRECT dependency.
+  return needsOf(job).some(
+    (n) =>
+      gating.has(n) &&
+      new RegExp(`needs\\.${escapeRe(n)}\\.result\\s*==\\s*['"]success['"]`).test(ownIf)
   );
 }
 
@@ -461,8 +540,7 @@ function injectableJobs(
     const a = (job.steps ?? []).filter(isAgentStep);
     if (!a.length) continue;
     const jobStar = bypassArmed(a);
-    if (jobActorGate(job, wf, raw) || hasImplicitActorGate(a, jobStar && untrustedTrigger))
-      continue;
+    if (jobGated(job, wf, raw) || hasImplicitActorGate(a, jobStar && untrustedTrigger)) continue;
     out.push(job);
   }
   return out;
@@ -711,7 +789,6 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   const pat = usesPatIn(powerJobs);
   const power = (broadTools ? 2 : 0) + (bypassActive ? 1 : 0) + (elevated ? 1 : 0) + (pat ? 1 : 0);
 
-  const explicitGate = hasActorGate(wf, raw);
   const implicitGate = hasImplicitActorGate(agentSteps, bypassActive);
   // R4-round2#1: the step-membership gate is credited PER-JOB (via jobActorGate →
   // injectableJobs → reach), NOT as a whole-workflow severity cap (which would mask an
@@ -720,7 +797,12 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   const membershipGated =
     injJobs.length === 0 &&
     jobList(wf).some((j) => (j.steps ?? []).some(isAgentStep) && hasStepMembershipGate(j));
-  const gate = explicitGate || implicitGate;
+  // The severity cap below applies only when EVERY agent job is gated (per job, including the
+  // needs: chain, or by claude-code-action's default gate). injectableJobs already made that
+  // call per job, so an empty injJobs is exactly "all gated". A whole-workflow test would let
+  // one gated job mask an open sibling.
+  const gate = injJobs.length === 0;
+  const gatedSiblings = agentJobs.filter((j) => !injJobs.includes(j)).length;
   const envDeny = hasEnvDeny(agentSteps);
   const pinned = agentActionsPinned(agentSteps);
 
@@ -855,6 +937,21 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
       "`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` is switched off, so the action no longer scrubs the Anthropic key, cloud credentials and Actions runtime tokens from the agent's shell"
     );
   if (!gate && reach > 0) signals.push('no effective actor gate');
+  if (!gate && reach > 0 && gatedSiblings > 0) {
+    const siblings = agentJobs.filter((j) => !injJobs.includes(j));
+    const explicit = siblings.filter((j) => jobGated(j, wf, raw)).length;
+    const byDefault = siblings.length - explicit;
+    const n = (k: number) => `${k} other agent job${k === 1 ? '' : 's'}`;
+    const parts = [
+      explicit ? `${n(explicit)} ${explicit === 1 ? 'is' : 'are'} actor-gated` : '',
+      byDefault
+        ? `${n(byDefault)} ${byDefault === 1 ? 'is' : 'are'} held by claude-code-action's default write-access gate`
+        : '',
+    ].filter(Boolean);
+    signals.push(
+      `${parts.join('; ')} in this workflow; this finding is about the ungated one${injJobs.length === 1 ? '' : 's'}`
+    );
+  }
   // The ambiguous case: NO explicit `permissions:` anywhere. The GITHUB_TOKEN then
   // defaults to the repo/org setting, which MAY be write-all (the legacy default). We
   // can't prove it from the file, so we don't inflate severity (that would false-positive
@@ -867,9 +964,9 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
     );
 
   const mitigations: string[] = [];
-  if (explicitGate || membershipGated)
+  if (gate && (membershipGated || agentJobs.some((j) => jobGated(j, wf, raw))))
     mitigations.push('actor-gated (maintainer/label/write-user required)');
-  else if (implicitGate)
+  else if (gate && implicitGate)
     mitigations.push('claude-code-action gates the agent to write-access users by default');
   if (head === 'subdir') mitigations.push('untrusted head isolated in a subdir, not root');
   if (envDeny) mitigations.push('secrets env-denied from the agent subprocess');
@@ -1018,7 +1115,7 @@ function evalAgentJob(
     promptTakesUntrusted(jobAgentSteps) ? 2 : 0,
     bypassActive ? 2 : 0
   );
-  const gate = jobActorGate(job, wf, raw) || hasImplicitActorGate(jobAgentSteps, bypassActive);
+  const gate = jobGated(job, wf, raw) || hasImplicitActorGate(jobAgentSteps, bypassActive);
   const injectable = untrustedTrigger && !gate && reach > 0;
   const canReadEnv = EXFIL_RCE_RE.test(collectTools(jobAgentSteps)); // bare shell = read env + exfil
 

@@ -3156,3 +3156,244 @@ jobs:
     expect(has(f, /ENV_SCRUB/)).toBe(false);
   });
 });
+
+// 2026-09-26: a gated sibling job masked an ungated one (whole-workflow gate test). Found by
+// the independent review of 2.23.3. Gating is now per agent job, through the needs: chain.
+describe('CI-2 — one gated job does not mask an open one', () => {
+  const W = '.github/workflows/bots.yml';
+  const openJob = `
+  open:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
+          allowed_non_write_users: "*"
+          claude_args: "--allowedTools Bash"
+          prompt: "Triage the issue"`;
+  const gatedJob = `
+  owner-only:
+    if: github.event.issue.user.login == 'owner'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
+          allowed_non_write_users: "*"
+          claude_args: "--allowedTools Bash"
+          prompt: "Do what the owner asks"`;
+  const head = `
+on:
+  issues:
+    types: [opened]
+permissions:
+  contents: read
+  issues: write
+jobs:`;
+  const rank = (s: string) => ['advisory', 'medium', 'high', 'critical'].indexOf(s);
+
+  it('an open job keeps its severity when a gated sibling is added, and the signal says so', () => {
+    const alone = analyzeWorkflow(W, head + openJob)!;
+    const withSibling = analyzeWorkflow(W, head + openJob + gatedJob)!;
+    expect(rank(alone.severity)).toBeGreaterThanOrEqual(rank('high'));
+    expect(withSibling.severity).toBe(alone.severity);
+    expect(withSibling.signals.some((x) => /1 other agent job is actor-gated/.test(x))).toBe(true);
+    expect(withSibling.mitigations?.some((m) => /actor-gated/.test(m)) ?? false).toBe(false);
+  });
+
+  it('when every agent job is gated, it is still an advisory with the gate named', () => {
+    const f = analyzeWorkflow(W, head + gatedJob)!;
+    expect(f.severity).toBe('advisory');
+    expect(f.mitigations?.some((m) => /actor-gated/.test(m))).toBe(true);
+  });
+
+  const check = (ifLine: string) => `
+  check:
+    ${ifLine}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok`;
+  const needy = (extraIf = '') =>
+    openJob.replace('  open:\n', `  open:\n    needs: check\n${extraIf}`);
+
+  it('a job-level gate upstream in the needs: chain gates the agent job', () => {
+    const f = analyzeWorkflow(
+      W,
+      head + check("if: github.event.issue.author_association == 'OWNER'") + needy()
+    )!;
+    expect(f.severity).toBe('advisory');
+  });
+
+  it('a transitive needs: chain carries the gate', () => {
+    const mid = `
+  mid:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo mid`;
+    const agent = openJob.replace('  open:\n', '  open:\n    needs: [mid]\n');
+    const f = analyzeWorkflow(W, head + check("if: github.actor == 'owner'") + mid + agent)!;
+    expect(f.severity).toBe('advisory');
+  });
+
+  it('always() on the agent job escapes an upstream gate', () => {
+    const f = analyzeWorkflow(
+      W,
+      head + check("if: github.actor == 'owner'") + needy('    if: always()\n')
+    )!;
+    expect(rank(f.severity)).toBeGreaterThanOrEqual(rank('high'));
+  });
+
+  it('a gate on an upstream STEP does not gate the dependent job', () => {
+    const stepGated = `
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - if: github.actor == 'owner'
+        run: echo ok`;
+    const f = analyzeWorkflow(W, head + stepGated + needy())!;
+    expect(rank(f.severity)).toBeGreaterThanOrEqual(rank('high'));
+  });
+
+  it('a needs: cycle does not hang', () => {
+    const a = `
+  a:
+    needs: b
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo a
+  b:
+    needs: a
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo b`;
+    const agent = openJob.replace('  open:\n', '  open:\n    needs: a\n');
+    const f = analyzeWorkflow(W, head + a + agent)!;
+    expect(rank(f.severity)).toBeGreaterThanOrEqual(rank('high'));
+  });
+
+  // Review of the first version (2026-09-26). GitHub prefixes `if:` with an implicit
+  // `success() &&` unless it calls a status function (actions/runner#491).
+  const gatedCheck = check("if: github.event.issue.author_association == 'OWNER'");
+
+  it('any explicit status function drops the implicit success(): !failure(), success() || x', () => {
+    for (const cond of [
+      '${{ !failure() }}',
+      "failure() || github.event_name == 'issues'",
+      "success() || github.event_name == 'issues'",
+    ]) {
+      const f = analyzeWorkflow(W, head + gatedCheck + needy(`    if: ${cond}\n`))!;
+      expect(rank(f.severity)).toBeGreaterThanOrEqual(rank('high'));
+    }
+  });
+
+  it('`always() && needs.check.result == success` IS gated by the upstream job', () => {
+    for (const cond of [
+      "always() && needs.check.result == 'success'",
+      "${{ !cancelled() && needs.check.result == 'success' }}",
+    ]) {
+      const f = analyzeWorkflow(W, head + gatedCheck + needy(`    if: ${cond}\n`))!;
+      expect(f.severity).toBe('advisory');
+    }
+  });
+
+  it('a skip anywhere up the chain propagates through an intermediate always() job', () => {
+    const mid = `
+  mid:
+    needs: check
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo mid`;
+    const agent = openJob.replace('  open:\n', '  open:\n    needs: mid\n');
+    const f = analyzeWorkflow(W, head + gatedCheck + mid + agent)!;
+    expect(f.severity).toBe('advisory');
+  });
+
+  it('a check job that exports a step-gated output the agent reads IS a gate', () => {
+    const exporter = `
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      allowed: \${{ steps.a.outputs.allowed }}
+    steps:
+      - id: a
+        if: contains(fromJson('["OWNER","MEMBER"]'), github.event.issue.author_association)
+        run: echo "allowed=true" >> "$GITHUB_OUTPUT"`;
+    const f = analyzeWorkflow(
+      W,
+      head + exporter + needy("    if: needs.check.outputs.allowed == 'true'\n")
+    )!;
+    expect(f.severity).toBe('advisory');
+  });
+
+  it('a check job that fails for untrusted actors IS a gate', () => {
+    const failer = `
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - id: p
+        if: github.event.issue.author_association == 'OWNER'
+        run: echo "ok=1" >> "$GITHUB_OUTPUT"
+      - if: steps.p.outputs.ok != '1'
+        run: exit 1`;
+    const f = analyzeWorkflow(W, head + failer + needy())!;
+    expect(f.severity).toBe('advisory');
+  });
+
+  it('an upstream `x || github.actor == owner` is not credited as a gate', () => {
+    const f = analyzeWorkflow(
+      W,
+      head + check("if: github.event_name == 'issues' || github.actor == 'owner'") + needy()
+    )!;
+    expect(rank(f.severity)).toBeGreaterThanOrEqual(rank('high'));
+  });
+
+  it('a sibling held only by the default write gate is described as such, not as actor-gated', () => {
+    const defaultGated = gatedJob
+      .replace("    if: github.event.issue.user.login == 'owner'\n", '')
+      .replace('          allowed_non_write_users: "*"\n', '');
+    const f = analyzeWorkflow(W, head + openJob + defaultGated)!;
+    expect(
+      f.signals.some((x) => /held by claude-code-action's default write-access gate/.test(x))
+    ).toBe(true);
+    expect(f.signals.some((x) => /is actor-gated/.test(x))).toBe(false);
+  });
+
+  it('an unrelated non-agent job gate does not make the default-gated agent read as actor-gated', () => {
+    const agentDefault = openJob.replace('          allowed_non_write_users: "*"\n', '');
+    const bot = `
+  deps:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo deps`;
+    const f = analyzeWorkflow(W, head + agentDefault + bot)!;
+    expect(f.mitigations?.some((m) => /default/.test(m))).toBe(true);
+    expect(f.mitigations?.some((m) => /maintainer\/label\/write-user/.test(m)) ?? false).toBe(
+      false
+    );
+  });
+
+  it('CI-4 uses the same per-job gate: a needs:-gated job holding a secret is not exploitable', () => {
+    const secretAgent = needy().replace(
+      '    runs-on: ubuntu-latest\n    steps:',
+      '    runs-on: ubuntu-latest\n    env:\n      DATABASE_URL: ${{ secrets.DATABASE_URL }}\n    steps:'
+    );
+    const gated = analyzeWorkflowSecrets(
+      W,
+      head + check("if: github.event.issue.author_association == 'OWNER'") + secretAgent
+    )!;
+    expect(gated.severity).toBe('advisory');
+    const open = analyzeWorkflowSecrets(
+      W,
+      head +
+        check('runs-on: ubuntu-latest').replace(
+          '    runs-on: ubuntu-latest\n    runs-on',
+          '    runs-on'
+        ) +
+        secretAgent
+    );
+    expect(open?.severity).toBe('critical');
+  });
+});
