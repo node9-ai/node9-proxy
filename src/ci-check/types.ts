@@ -47,6 +47,11 @@ export interface CiFinding {
    *  same hook command registered twice). 0 for the first occurrence; assigned by the
    *  scan, never by a check. */
   ordinal?: number;
+  /** Set when a committed `.node9-ignore.json` entry covers this finding. The finding stays
+   *  in the output and the comment (marked, counted) and is excluded from `worst` and the
+   *  gate. `key` is the entry's readable identity, so a diff can ask whether the suppression
+   *  existed in the base. */
+  suppressed?: { reason: string; key: string; expires?: string };
 }
 
 /** How one finding relates to the base scan. `escalated` is a finding that already
@@ -80,6 +85,13 @@ export interface ScanDiff {
    *  about what we read, not about the change — so the third state is carried separately
    *  and no consumer may render an incomplete diff as a pass. */
   incomplete: boolean;
+  /** Every head finding as the GATE must see it: a suppression added in the same change is
+   *  dropped (introduced or escalated findings), and none is honoured when the base could not
+   *  be read. The CLI replaces the result's findings with this view. */
+  honoured: CiFinding[];
+  /** Worst over `honoured` minus what is still suppressed — the DEFAULT gate's input
+   *  (`fail-on-scope: all`). `worstIntroduced` is the narrow gate's. */
+  worstAll: Severity | null;
 }
 
 /** A fetched agent-surface file. `content` is the raw text (never executed). */
@@ -95,6 +107,13 @@ export interface RepoTree {
   files: RepoFile[];
   /** Non-fatal fetch notes (rate-limit, missing dir) — surfaced, never thrown. */
   notes: string[];
+  /** Every blob path in the listing the surface was chosen from, when the reader had one
+   *  (local walk, git ref, GitHub Trees). Lets a check decide "this hook names a file that
+   *  is not committed" without a filesystem call. Absent on the root-list fallback. */
+  paths?: string[];
+  /** True only when `paths` is the WHOLE listing. A path missing from a truncated or
+   *  capped listing is unknown, not absent, and no check may call it "missing". */
+  pathsComplete?: boolean;
 }
 
 export interface ScanResult {
@@ -108,6 +127,17 @@ export interface ScanResult {
   /** True when a fetch was rate-limited / errored — the scan could NOT read every
    *  file, so `worst: null` must NOT be presented as "clean" (false assurance). */
   incomplete: boolean;
+  /** Active entries from the repo's `.node9-ignore.json`, so a diff can compare them
+   *  against the base's. Absent when there was no file. */
+  suppressions?: {
+    rule: string;
+    file: string;
+    locator?: string;
+    reason: string;
+    expires?: string;
+  }[];
+  /** How many findings above are marked suppressed. `worst` is computed over the rest. */
+  suppressedCount?: number;
 }
 
 /** Severity rank for comparison / worst-of. Higher = worse. */

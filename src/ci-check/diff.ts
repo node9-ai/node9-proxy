@@ -73,46 +73,104 @@ function baseStateOf(base: ScanResult | null | undefined): BaseState {
  * head's own worst severity. A caller that gates on `worstIntroduced` therefore gets the
  * old, strict behaviour when the comparison was impossible — never a false all-clear.
  */
+const NOT_HONOURED_NEW =
+  'this finding is new: a suppression cannot accept a finding in the same change that introduces it — merge it, then suppress it in a separate reviewed change';
+const BASE_UNREADABLE =
+  'the base could not be read, so no suppression can be shown to predate this change — not honoured';
+const notHonouredEscalated = (from: Severity) =>
+  `this finding was accepted at ${from} and this change makes it worse — the suppression does not cover the new severity`;
+const NOT_HONOURED_EVIDENCE =
+  'the evidence changed in this change (the finding now matches something different) — the suppression covered the old evidence, not this';
+
+/** Same evidence: what the finding matched and why it is graded as it is. `line` is not
+ *  evidence — moving a finding must not end its suppression. */
+function sameEvidence(a: CiFinding, b: CiFinding): boolean {
+  return (
+    JSON.stringify(a.signals) === JSON.stringify(b.signals) &&
+    JSON.stringify(a.mitigations ?? []) === JSON.stringify(b.mitigations ?? [])
+  );
+}
+
+/** A copy with its suppression dropped and the reason named. `diffScans` never mutates the
+ *  head it was given: calling it twice must not double a signal, and the head must stay what
+ *  scanTree returned. */
+function unhonour(f: CiFinding, why: string): CiFinding {
+  const { suppressed: _dropped, ...rest } = f;
+  void _dropped;
+  return { ...rest, signals: [...f.signals, why] };
+}
+
+function worstUnsuppressed(findings: CiFinding[]): Severity | null {
+  return worstOf(findings.filter((f) => !f.suppressed).map((f) => f.severity));
+}
+
 export function diffScans(base: ScanResult | null | undefined, head: ScanResult): ScanDiff {
   const state = baseStateOf(base);
 
   if (state !== 'ok' || !base) {
+    // Nobody can tell which suppressions are new when the base could not be read, so none is
+    // honoured in the gate: degrade strict, never open — the same law as the rest of CI-5.
+    const honoured = head.findings.map((f) => (f.suppressed ? unhonour(f, BASE_UNREADABLE) : f));
+    const worstAll = worstUnsuppressed(honoured);
     return {
       base: state,
       added: [],
       removed: [],
-      unchanged: [...head.findings],
+      unchanged: honoured,
       escalated: [],
-      worstIntroduced: head.worst,
+      worstIntroduced: worstAll,
+      honoured,
+      worstAll,
       incomplete: true,
     };
   }
 
+  // THE suppression property. A `.node9-ignore.json` is committed, so whoever can add a
+  // finding can add its suppression in the same commit; applied blindly that PR is green.
+  // A suppression that did not exist in the base does not apply to a finding this change
+  // introduced or escalated — in EITHER gate. Silencing something costs a separate,
+  // reviewable commit. A pre-existing finding suppressed by this change is the legitimate
+  // workflow and stays honoured.
   const baseByFp = new Map<string, CiFinding>();
   for (const f of base.findings) baseByFp.set(fingerprintOf(f), f);
 
   const added: CiFinding[] = [];
   const unchanged: CiFinding[] = [];
   const escalated: EscalatedFinding[] = [];
+  const honoured: CiFinding[] = [];
   const matched = new Set<string>();
 
-  for (const f of head.findings) {
-    const fp = fingerprintOf(f);
+  for (const raw of head.findings) {
+    const fp = fingerprintOf(raw);
     const prior = baseByFp.get(fp);
+    // A finding that already existed and got WORSE is guardrail erosion (a deny backstop
+    // deleted, a mitigation removed). It is not new, and calling it "unchanged" would let
+    // the removal merge silently — so it is its own class, and it counts as introduced.
+    const isEscalation = !!prior && SEVERITY_RANK[raw.severity] > SEVERITY_RANK[prior.severity];
+    // THE honour rule (review H.2–H.4, 2026-09-27): a head finding keeps its suppression only
+    // if the SAME finding existed in the base, no worse, with the same evidence. That keeps
+    // the legitimate workflow — a change that only suppresses an unchanged pre-existing
+    // finding — and refuses: a new finding (even under a wide base entry), an escalation of
+    // an accepted finding, and a suppressed finding whose content was swapped.
+    const why = !raw.suppressed
+      ? null
+      : !prior
+        ? NOT_HONOURED_NEW
+        : isEscalation
+          ? notHonouredEscalated(prior.severity)
+          : !sameEvidence(raw, prior)
+            ? NOT_HONOURED_EVIDENCE
+            : null;
+    const f = why ? unhonour(raw, why) : raw;
+    honoured.push(f);
     if (!prior) {
       added.push(f);
       continue;
     }
     matched.add(fp);
-    // A finding that already existed and got WORSE is guardrail erosion (a deny backstop
-    // deleted, a mitigation removed). It is not new, and calling it "unchanged" would let
-    // the removal merge silently — so it is its own class, and it counts as introduced.
-    if (SEVERITY_RANK[f.severity] > SEVERITY_RANK[prior.severity]) {
-      escalated.push({ finding: f, from: prior.severity, to: f.severity });
-    } else {
-      // Equal, or IMPROVED. A de-escalation is a fix in progress, never an introduction.
-      unchanged.push(f);
-    }
+    if (isEscalation) escalated.push({ finding: f, from: prior.severity, to: f.severity });
+    // Equal, or IMPROVED. A de-escalation is a fix in progress, never an introduction.
+    else unchanged.push(f);
   }
 
   const removed = base.findings.filter((f) => !matched.has(fingerprintOf(f)));
@@ -123,7 +181,9 @@ export function diffScans(base: ScanResult | null | undefined, head: ScanResult)
     removed,
     unchanged,
     escalated,
-    worstIntroduced: worstOf([...added.map((f) => f.severity), ...escalated.map((e) => e.to)]),
+    worstIntroduced: worstUnsuppressed([...added, ...escalated.map((e) => e.finding)]),
+    honoured,
+    worstAll: worstUnsuppressed(honoured),
     // The head side of the same guard: a scan that could not read every file has not
     // earned the word "clean", however trustworthy the base was.
     incomplete: head.incomplete,

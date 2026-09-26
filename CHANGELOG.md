@@ -1,6 +1,10 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+**Release notes for every version, including all 2.x releases, are on
+[GitHub Releases](https://github.com/node9-ai/node9-proxy/releases).** They are
+generated on each release, so they are complete and current. The version
+entries in this file stop at v1.19.3; what follows is the Unreleased section
+kept by hand and the notes for older versions.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 

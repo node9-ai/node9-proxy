@@ -36,6 +36,38 @@ function decide(worst, failOn, incomplete = false) {
  *  The scan already degrades `worstIntroduced` to the head's absolute worst when the base
  *  could not be read, so an unreadable base falls back to the strict answer here rather
  *  than passing as "nothing new". Missing diff (an older CLI than this action) → `all`. */
+/** A value from the scanned repo (a suppression reason) made safe inside a backtick span:
+ *  one line, no backtick, bounded. Inside a code span GitHub renders `<!--`, `###` and
+ *  `@team` literally, so the reason cannot forge a header, hide findings or ping anyone. */
+function safeInline(v) {
+  return String(v)
+    .replace(/[\r\n\u2028\u2029]+/g, ' ')
+    .replace(/`/g, "'")
+    .slice(0, 200);
+}
+
+/** Why the Action did not scan, in the reviewer's words, with the one-line fix. */
+const SKIP_REASONS = {
+  pull_request_target:
+    'this workflow runs on `pull_request_target`, which checks out the base branch, so the changes in this PR are not visible to the scan. Run this Action on `pull_request` instead.',
+};
+
+/** The sticky comment when the Action deliberately did not scan. Never reads as clean. */
+function renderSkipped(reason) {
+  const why = SKIP_REASONS[reason] || `the scan was skipped (${safeInline(reason)}).`;
+  return [
+    MARKER,
+    '### 🛡️ node9 agent-security · ⚪ node9 did not scan this PR',
+    '',
+    `node9 did not scan this PR: ${why}`,
+  ].join('\n');
+}
+
+/** A skipped scan neither passes nor blocks: neutral, exit 0 (founder decision 2026-09-27). */
+function decideSkipped() {
+  return { fail: false, conclusion: 'neutral', exitCode: 0 };
+}
+
 function gateWorst(result, scope) {
   if (scope !== 'introduced' || !result.diff) return result.worst;
   return result.diff.worstIntroduced ?? null;
@@ -45,8 +77,14 @@ function gateWorst(result, scope) {
  *  everything when there is no trustworthy diff. */
 function annotatable(result) {
   const d = result.diff;
-  if (!d || d.base !== 'ok') return Array.isArray(result.findings) ? result.findings : [];
-  return [...(d.added || []), ...(d.escalated || []).map((e) => e.finding)];
+  const all =
+    !d || d.base !== 'ok'
+      ? Array.isArray(result.findings)
+        ? result.findings
+        : []
+      : [...(d.added || []), ...(d.escalated || []).map((e) => e.finding)];
+  // A suppressed finding is a reviewed decision: it stays in the collapsed list, not on the diff.
+  return all.filter((f) => !f.suppressed);
 }
 
 /** GitHub workflow commands: one annotation per finding, on the file in the PR diff.
@@ -150,7 +188,10 @@ function renderDetail(result) {
   );
   L.push('');
   for (const f of findings) {
-    L.push(`**${ICON[f.severity] ?? '•'} ${String(f.severity).toUpperCase()} — ${f.title}**`);
+    L.push(
+      `**${ICON[f.severity] ?? '•'} ${String(f.severity).toUpperCase()} — ${f.title}**` +
+        (f.suppressed ? ` _(suppressed: \`${safeInline(f.suppressed.reason)}\`)_` : '')
+    );
     L.push(`\`${f.file}${f.line ? ':' + f.line : ''}\` · ${f.check}`);
     for (const s of f.signals ?? []) L.push(`- ${s}`);
     if (f.mitigations?.length) L.push(`- _mitigated:_ ${f.mitigations.join('; ')}`);
@@ -164,7 +205,10 @@ function renderDetail(result) {
 /** Render the sticky comment: lead with the ATTACK STORY (threat → mechanism → single fix),
  *  raw findings collapsed into <details>. Same ScanResult data, reframed for impact. */
 function renderComment(result) {
-  const all = Array.isArray(result.findings) ? result.findings : [];
+  const all = (Array.isArray(result.findings) ? result.findings : []).filter((f) => !f.suppressed);
+  const suppressedN = (Array.isArray(result.findings) ? result.findings : []).filter(
+    (f) => f.suppressed
+  ).length;
   const d = result.diff;
   const trusted = d && d.base === 'ok';
   // CI-5: when we know what this change introduced, the comment is about THAT. A reviewer
@@ -176,7 +220,7 @@ function renderComment(result) {
   const L = [MARKER];
   // An incomplete scan can never take the green branch, however little it found.
   if (trusted && findings.length === 0 && !d.incomplete && !result.incomplete) {
-    L.push('### 🛡️ node9 agent-security · ✅');
+    L.push(`### 🛡️ node9 agent-security · ✅${suppressedN ? ` · ${suppressedN} suppressed` : ''}`);
     L.push('');
     L.push(
       `**This PR introduces no agent-security findings.**` +
@@ -185,7 +229,7 @@ function renderComment(result) {
     if ((d.unchanged || []).length) {
       L.push('');
       L.push(
-        `<sub>${d.unchanged.length} pre-existing finding(s) in this repo were not introduced here and are not gated.</sub>`
+        `<sub>${d.unchanged.length} pre-existing finding(s) in this repo were not introduced by this PR.</sub>`
       );
     }
     L.push('');
@@ -207,11 +251,17 @@ function renderComment(result) {
     L.push('');
   }
   if (findings.length === 0) {
-    L.push('### 🛡️ node9 agent-security · ✅');
+    L.push(`### 🛡️ node9 agent-security · ✅${suppressedN ? ` · ${suppressedN} suppressed` : ''}`);
     L.push('');
     L.push(
-      'No agent-security findings — no injectable workflows, unsafe agent configs, or unpinned MCP servers.'
+      suppressedN
+        ? `No unsuppressed agent-security findings. ${suppressedN} finding(s) are suppressed by \`.node9-ignore.json\` — listed below with their reasons.`
+        : 'No agent-security findings — no injectable workflows, unsafe agent configs, or unpinned MCP servers.'
     );
+    if (suppressedN) {
+      L.push('');
+      L.push(renderDetail(result));
+    }
     return L.join('\n');
   }
   const anchor = [...findings].sort((a, b) => RANK[b.severity] - RANK[a.severity])[0];
@@ -227,7 +277,8 @@ function renderComment(result) {
 
   L.push(
     `### 🛡️ node9 agent-security · ${ICON[worst] ?? '🟢'} ${tier}` +
-      (trusted ? ` · introduced by this PR` : '')
+      (trusted ? ` · introduced by this PR` : '') +
+      (suppressedN ? ` · ${suppressedN} suppressed` : '')
   );
   if (trusted && (d.escalated || []).length) {
     L.push('');
@@ -327,6 +378,37 @@ function readEvent() {
 }
 
 async function main() {
+  // Deliberately not scanned (I.1): say so, never fall into the unreadable-result path below.
+  const skipped = process.env.NODE9_SKIPPED;
+  if (skipped) {
+    const repo = process.env.GITHUB_REPOSITORY;
+    const { prNumber, headSha } = readEvent();
+    const why = SKIP_REASONS[skipped] || `the scan was skipped (${skipped}).`;
+    console.log(`::warning title=node9 did not scan this PR::${why.replace(/`/g, '')}`);
+    if ((process.env.NODE9_COMMENT || 'true') !== 'false' && prNumber) {
+      try {
+        await upsertStickyComment(repo, prNumber, renderSkipped(skipped));
+      } catch (e) {
+        console.error(`node9: comment failed (${e.message}) — continuing.`);
+      }
+    }
+    if (headSha) {
+      try {
+        await gh('POST', `/repos/${repo}/check-runs`, {
+          name: CHECK_NAME,
+          head_sha: headSha,
+          status: 'completed',
+          conclusion: decideSkipped().conclusion,
+          output: { title: 'node9 did not scan this PR', summary: why },
+        });
+      } catch (e) {
+        console.error(`node9: check-run failed (${e.message}) — continuing.`);
+      }
+    }
+    console.log(`node9 agent-security: not scanned (${skipped}) · neutral`);
+    return decideSkipped().exitCode;
+  }
+
   // Fail-open on our own problems: a broken scan must never block a merge.
   let result;
   try {
@@ -518,6 +600,75 @@ function selftest() {
     'a partial scan never claims the PR introduced nothing'
   );
   assert.ok(partialComment.includes('could not read every file'), 'a partial scan says so');
+
+  // ── suppression (.node9-ignore.json) ─────────────────────────────────────────
+  const sup = { reason: 'accepted, tracked in #412', key: 'k' };
+  const mixed = {
+    worst: 'medium',
+    findings: [f('critical', { suppressed: sup }), f('medium', { file: 'b.yml' })],
+    inspected: ['a'],
+  };
+  assert.strictEqual(annotationLines(mixed).length, 1, 'a suppressed finding is not annotated');
+  assert.match(annotationLines(mixed)[0], /file=b\.yml/, 'the unsuppressed one is');
+  const c2 = renderComment(mixed);
+  assert.ok(c2.includes('1 suppressed'), 'the headline counts suppressed findings');
+  assert.ok(
+    c2.includes('suppressed: `accepted, tracked in #412`'),
+    'the detail shows the reason, as a code span'
+  );
+  assert.ok(
+    !c2.includes('Critical — action needed'),
+    'the headline tier ignores the suppressed critical'
+  );
+  assert.ok(c2.includes('Medium — hardening'), 'and is driven by the unsuppressed medium');
+  const allSup = renderComment({
+    worst: null,
+    findings: [f('critical', { suppressed: sup })],
+    inspected: ['a'],
+  });
+  assert.ok(
+    allSup.includes('1 suppressed') || allSup.includes('suppressed:'),
+    'all-suppressed still names the suppression'
+  );
+
+  // ── review H.6: a suppression reason cannot inject markdown into the comment ──
+  const evil = {
+    worst: null,
+    inspected: ['a'],
+    findings: [
+      f('medium', {
+        suppressed: {
+          reason:
+            'ok_\n\n</details>\n\n### 🛡️ node9 agent-security · ✅\n\n**safe to merge** <!-- @team `x`',
+          key: 'k',
+        },
+      }),
+    ],
+  };
+  const ce = renderComment(evil);
+  assert.strictEqual(
+    ce.split('\n').filter((l) => l.startsWith('### 🛡️ node9 agent-security')).length,
+    1,
+    'exactly one header: a reason cannot forge a second one'
+  );
+  assert.ok(!/\n### /.test(ce.slice(ce.indexOf('suppressed:'))), 'no heading after the reason');
+  assert.ok(
+    /suppressed: `[^`\n]*<!-- @team 'x'[^`\n]*`/.test(ce),
+    'the reason sits in one code span'
+  );
+
+  // ── I.1: under pull_request_target the Action does not scan, and says so ─────
+  const sk = renderSkipped('pull_request_target');
+  assert.ok(sk.startsWith(MARKER), 'skipped comment is sticky');
+  assert.ok(sk.includes('node9 did not scan this PR'), 'skipped comment says it did not scan');
+  assert.ok(
+    sk.includes('pull_request_target') && sk.includes('`pull_request`'),
+    'names the event and the fix'
+  );
+  assert.ok(!sk.includes('✅'), 'a skipped scan never reads as clean');
+  const skd = decideSkipped();
+  assert.strictEqual(skd.conclusion, 'neutral', 'skipped → neutral, never success');
+  assert.strictEqual(skd.exitCode, 0, 'skipped → never blocks the PR');
 
   // Annotations follow the same scope.
   const introducedOnly = withDiff(
