@@ -29,10 +29,18 @@ const git = (...a: string[]) =>
   execFileSync('git', ['-C', root, ...a], { stdio: ['ignore', 'pipe', 'ignore'] })
     .toString()
     .trim();
-const scan = (...extra: string[]) =>
+// The runner's own GitHub env must not leak in: this suite runs inside GitHub Actions too.
+const cleanEnv = () => {
+  const e: NodeJS.ProcessEnv = { ...process.env, NODE9_TESTING: '1' };
+  delete e.GITHUB_BASE_REF;
+  delete e.GITHUB_EVENT_NAME;
+  return e;
+};
+const scan = (...extra: string[]) => scanWith(cleanEnv(), ...extra);
+const scanWith = (env: NodeJS.ProcessEnv, ...extra: string[]) =>
   spawnSync(process.execPath, [CLI, 'scan-repo', root, '--json', ...extra], {
     encoding: 'utf8',
-    env: { ...process.env, NODE9_TESTING: '1' },
+    env,
     timeout: 60_000,
   });
 
@@ -92,6 +100,20 @@ describe('scan-repo --base: a suppression added in the same change does not open
     const out = JSON.parse(r.stdout);
     expect(out.worst).toBe('medium');
     expect(out.diff.base).toBe('did-not-run');
+  });
+
+  it('H.5: no --base on a pull-request runner → no suppression is honoured', () => {
+    git('checkout', '-q', 'attack');
+    const r = scanWith({
+      ...cleanEnv(),
+      GITHUB_BASE_REF: 'main',
+      GITHUB_EVENT_NAME: 'pull_request',
+    });
+    expect(r.error).toBeUndefined();
+    expect(r.status).not.toBe(0);
+    const out = JSON.parse(r.stdout);
+    expect(out.worst).toBe('medium');
+    expect(out.notes.join(' ')).toMatch(/without --base/);
   });
 
   it('no --base (a local run): suppressions apply as written', () => {

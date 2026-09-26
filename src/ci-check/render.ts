@@ -4,6 +4,7 @@
 // finding shows the signals that fired AND the mitigations seen.
 
 import chalk from 'chalk';
+import { safeText } from './suppress';
 import type { ScanResult, CiFinding, ScanDiff, Severity } from './types';
 
 const ICON: Record<Severity, string> = {
@@ -86,7 +87,7 @@ function ownedHint(source: string): boolean {
 function findingMd(f: CiFinding, L: string[]): void {
   L.push(
     `**${ICON[f.severity]} ${f.severity.toUpperCase()} — ${f.title}**` +
-      (f.suppressed ? ` _(suppressed: ${f.suppressed.reason})_` : '')
+      (f.suppressed ? ` _(suppressed: \`${safeText(f.suppressed.reason, 200)}\`)_` : '')
   );
   L.push(`\`${f.file}${f.line ? ':' + f.line : ''}\`  ·  ${f.rule}`);
   L.push('');
