@@ -380,24 +380,32 @@ export function readLocalTree(dir: string, caps: SurfaceCaps = LOCAL_CAPS): Repo
   const budget = caps.bytes ?? Infinity;
   let bytes = 0;
   let overBudget = false;
+  // Open each file ONCE and check the handle that is read: no check-then-read race (CodeQL
+  // js/file-system-race), and O_NOFOLLOW refuses a symlink — a PR can commit
+  // `CLAUDE.md -> <a file on the CI runner>`, and a detector's signal quotes what it matched.
+  // Windows has no O_NOFOLLOW (0 here); git there checks symlinks out as plain text files.
+  const openFlags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0);
   const add = (rel: string) => {
     if (overBudget) return;
     const abs = path.join(root, rel);
+    let fd: number | undefined;
     try {
-      if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
-        const content = fs.readFileSync(abs, 'utf8');
-        bytes += Buffer.byteLength(content);
-        if (bytes > budget) {
-          overBudget = true;
-          notes.push(
-            `repo surface is large — files past a ${budget}-byte budget may be INCOMPLETE (stopped before ${rel}).`
-          );
-          return;
-        }
-        files.push({ path: rel, content });
+      fd = fs.openSync(abs, openFlags);
+      if (!fs.fstatSync(fd).isFile()) return;
+      const content = fs.readFileSync(fd, 'utf8');
+      bytes += Buffer.byteLength(content);
+      if (bytes > budget) {
+        overBudget = true;
+        notes.push(
+          `repo surface is large — files past a ${budget}-byte budget may be INCOMPLETE (stopped before ${rel}).`
+        );
+        return;
       }
+      files.push({ path: rel, content });
     } catch {
-      /* unreadable → skip */
+      /* missing, unreadable, or a symlink → skip */
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
     }
   };
   const seen = new Set<string>();
