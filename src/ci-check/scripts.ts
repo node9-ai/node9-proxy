@@ -71,6 +71,9 @@ const REDACTION_RE = /\b(sed|redact|mask)\b|\*\*\*/i;
 interface LogicalLine {
   text: string;
   line: number;
+  /** The physical line after this logical one (0-based): where a quoted program that the line
+   *  opens and does not close continues. */
+  next: number;
   /** Inside a heredoc body: the line is DATA the script emits, not code. */
   emitted: boolean;
 }
@@ -93,14 +96,14 @@ function logicalLines(content: string): LogicalLine[] {
     let text = raw[i];
     if (heredocTag) {
       const done = text.trim() === heredocTag;
-      out.push({ text, line: start, emitted: !done });
+      out.push({ text, line: start, next: i + 1, emitted: !done });
       if (done) heredocTag = null;
       continue;
     }
     while (/\\$/.test(text) && i + 1 < raw.length) {
       text = text.slice(0, -1) + ' ' + raw[++i];
     }
-    out.push({ text, line: start, emitted: false });
+    out.push({ text, line: start, next: i + 1, emitted: false });
     const h = HEREDOC_OPEN_RE.exec(text);
     if (h) heredocTag = h[1];
   }
@@ -166,10 +169,20 @@ export function analyzeScript(path: string, content: string, rulePrefix: string)
     );
   }
 
-  for (const { text, line, emitted } of logicalLines(content)) {
+  // Offsets of the physical lines, so the inline-parser check can read a program that a line
+  // opens and later lines close (`| python -c "` + a body over several lines, a real hermes
+  // shape) — within the same 4,000-character window the check has always used.
+  const lineStarts = [0];
+  for (let i = content.indexOf('\n'); i >= 0; i = content.indexOf('\n', i + 1))
+    lineStarts.push(i + 1);
+  const withFollowing = (text: string, next: number) =>
+    next < lineStarts.length
+      ? `${text}\n${content.slice(lineStarts[next], lineStarts[next] + 4000)}`
+      : text;
+  for (const { text, line, next, emitted } of logicalLines(content)) {
     const fo = findFetchObey(text);
     const remote =
-      (fo && !isInlineParser(text, fo)) ||
+      (fo && !isInlineParser(withFollowing(text, next), fo)) ||
       PROCESS_SUBST_RE.test(text) ||
       EVAL_FETCH_RE.test(text) ||
       SHELL_C_FETCH_RE.test(text);

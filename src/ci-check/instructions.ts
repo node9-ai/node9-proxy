@@ -302,25 +302,51 @@ function isQuotedExample(text: string, idx: number, len: number): boolean {
 // fetch-and-obey — it is the everyday shape of a skill that reads an API. It becomes one only
 // when the inline program can execute what it was handed. `| python` with no `-c` executes
 // stdin and stays a match. (11 of the 14 hermes-agent findings, 2026-09-26.)
+// Code-running idioms, not only the words `exec`/`eval` (§M): an import machinery, a code
+// object, a deserializer that runs code, a raw call into libc, a new function body, a VM, a
+// dynamic import. `re.compile` is a regex, not code.
 const INLINE_EXEC_RE =
-  /\b(exec|eval|subprocess|os\.system|popen|spawn|child_process|execSync|execFile)\b/;
+  /\b(exec|eval|subprocess|os\.system|popen|spawn|child_process|execSync|execFile|runpy|__import__|importlib|pickle|marshal|ctypes|pty)\b|(?<!\bre\.)\bcompile\s*\(|\bFunction\s*\(|\bvm\.|\bimport\s*\(/;
+// The parser's output must not be handed on to something that runs it.
+const PIPED_ONWARD_RE = /\|\s*(bash|sh|zsh|python3?|node|iex)\b/i;
+
+/** Where a shell-quoted program ends: the first unescaped closing quote. Inside "…" a backslash
+ *  escapes the next character (`"print(\"x\"); exec(…)"` is one program); inside '…' nothing
+ *  does. -1 when unterminated. */
+function quotedEnd(text: string, from: number, q: string): number {
+  for (let i = from; i < text.length; i++) {
+    if (q === '"' && text[i] === '\\') i++;
+    else if (text[i] === q) return i;
+  }
+  return -1;
+}
+
 export function isInlineParser(text: string, match: { index: number; 0: string }): boolean {
   if (!/\b(python3?|node)$/.test(match[0])) return false;
   const after = text.slice(match.index + match[0].length);
   const m = /^[ \t]+(-c|-e)[ \t]*(["'])/.exec(after);
   if (!m) return false;
-  const q = m[2];
-  const start = m[0].length;
-  let end = after.indexOf(q, start);
-  if (end < 0) end = Math.min(after.length, start + 4000);
-  return !INLINE_EXEC_RE.test(after.slice(start, end));
+  const end = quotedEnd(after, m[0].length, m[2]);
+  if (end < 0) return false; // no end to the program: nothing proves it only parses
+  if (INLINE_EXEC_RE.test(after.slice(m[0].length, end))) return false;
+  const rest = after.slice(end + 1);
+  const eol = rest.indexOf('\n');
+  return !PIPED_ONWARD_RE.test(eol < 0 ? rest : rest.slice(0, eol));
 }
 
 // `gh secret set SSH_KEY < ~/.ssh/id_rsa` reads a key INTO the user's own secret store
-// through the official CLI; the documented form, not a directive toward secrets.
-function isSecretStoreWrite(text: string, idx: number): boolean {
+// through the official CLI; the documented form, not a directive toward secrets. Only that
+// form, alone on its line (§M): `--repo`/`-R` would send the key to someone else's repository,
+// and a second command on the line is not covered by the first.
+function isSecretStoreWrite(text: string, idx: number, len: number): boolean {
   const lineStart = text.lastIndexOf('\n', idx - 1) + 1;
-  return /\bgh\s+secret\s+set\b/.test(text.slice(lineStart, idx));
+  let lineEnd = text.indexOf('\n', idx);
+  if (lineEnd < 0) lineEnd = text.length;
+  return (
+    /^\s*(?:\$\s+)?gh\s+secret\s+set\s+[A-Za-z_][A-Za-z0-9_]*\s*<\s*$/.test(
+      text.slice(lineStart, idx)
+    ) && /^\s*$/.test(text.slice(idx + len, lineEnd))
+  );
 }
 
 // `[Environment variables, ~/.ssh/id_rsa, /etc/shadow, etc.]` — a bracketed placeholder in a
@@ -516,7 +542,7 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
   if (
     sp &&
     !isNegated(content, sp.index) &&
-    !isSecretStoreWrite(content, sp.index) &&
+    !isSecretStoreWrite(content, sp.index, sp[0].length) &&
     !inBracketPlaceholder(content, sp.index, sp[0].length)
   ) {
     findings.push(
