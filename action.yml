@@ -38,11 +38,27 @@ inputs:
 runs:
   using: 'composite'
   steps:
+    # Decide first whether a scan here would mean anything. Under `pull_request_target`,
+    # checkout gets the BASE branch, so a scan would compare base with base and never see the
+    # PR — and checking out the PR head in that job (it holds secrets and a write token) is
+    # the exact pattern CI-2 flags. So: do not scan, and say so (neutral, never blocks).
+    - name: Check the event
+      id: guard
+      shell: bash
+      env:
+        EVENT: ${{ github.event_name }}
+      run: |
+        if [ "$EVENT" = "pull_request_target" ]; then
+          echo "skip=pull_request_target" >> "$GITHUB_OUTPUT"
+        fi
+
     # Self-contained: check out the repo so we have the config to scan. Idempotent
     # if the caller already checked out.
     - name: Check out repository
+      if: steps.guard.outputs.skip == ''
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+    # Always: comment.js needs Node even when the scan is skipped.
     - name: Set up Node
       uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
       with:
@@ -53,7 +69,7 @@ runs:
     # needs. A failure here is deliberately non-fatal: the scan then reports that it could
     # not read the base, which degrades the gate to the strict absolute answer.
     - name: Fetch the base commit
-      if: github.event.pull_request.base.sha != ''
+      if: steps.guard.outputs.skip == '' && github.event.pull_request.base.sha != ''
       shell: bash
       run: |
         git -C "$GITHUB_WORKSPACE" fetch --no-tags --depth=1 origin \
@@ -62,6 +78,7 @@ runs:
 
     - name: Run node9 agent-security scan
       id: scan
+      if: steps.guard.outputs.skip == ''
       shell: bash
       env:
         NODE9_BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -86,4 +103,5 @@ runs:
         NODE9_FAIL_ON_SCOPE: ${{ inputs.fail-on-scope }}
         NODE9_COMMENT: ${{ inputs.comment }}
         NODE9_ANNOTATE: ${{ inputs.annotate }}
+        NODE9_SKIPPED: ${{ steps.guard.outputs.skip }}
       run: node "${GITHUB_ACTION_PATH}/comment.js"

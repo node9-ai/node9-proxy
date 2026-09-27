@@ -8,6 +8,7 @@
 // Severity mirrors the posture Severity so renderers/consumers stay consistent.
 
 import type { Severity } from '../posture/types';
+import type { Route } from './route';
 
 export type { Severity };
 
@@ -47,6 +48,11 @@ export interface CiFinding {
    *  same hook command registered twice). 0 for the first occurrence; assigned by the
    *  scan, never by a check. */
   ordinal?: number;
+  /** Set when a committed `.node9-ignore.json` entry covers this finding. The finding stays
+   *  in the output and the comment (marked, counted) and is excluded from `worst` and the
+   *  gate. `key` is the entry's readable identity, so a diff can ask whether the suppression
+   *  existed in the base. */
+  suppressed?: { reason: string; key: string; expires?: string };
 }
 
 /** How one finding relates to the base scan. `escalated` is a finding that already
@@ -80,12 +86,36 @@ export interface ScanDiff {
    *  about what we read, not about the change — so the third state is carried separately
    *  and no consumer may render an incomplete diff as a pass. */
   incomplete: boolean;
+  /** Every head finding as the GATE must see it: a suppression added in the same change is
+   *  dropped (introduced or escalated findings), and none is honoured when the base could not
+   *  be read. The CLI replaces the result's findings with this view. */
+  honoured: CiFinding[];
+  /** Worst over `honoured` minus what is still suppressed — the DEFAULT gate's input
+   *  (`fail-on-scope: all`). `worstIntroduced` is the narrow gate's. */
+  worstAll: Severity | null;
 }
 
 /** A fetched agent-surface file. `content` is the raw text (never executed). */
 export interface RepoFile {
   path: string;
   content: string;
+  /** The check the reader routed this path to (route.ts), decided over the whole plan. Absent
+   *  on hand-built trees; scanTree then routes by path itself. */
+  route?: Route | null;
+}
+
+/** A symlink where agent configuration can live that the scan does not follow (K.4): it is
+ *  absolute, climbs above the repository root, points at a folder that contains it, or leads
+ *  into a dependency directory or another repository. The agent may load content no reviewer
+ *  sees, so it is reported as a finding, not skipped. */
+export interface UnfollowedLink {
+  /** The path the agent opens. */
+  path: string;
+  /** The link that is not followed (the path itself, or a link on the way). */
+  link: string;
+  /** Its exact text. */
+  text: string;
+  why: string;
 }
 
 /** The subset of a repo we fetch — config only, never source. */
@@ -95,6 +125,15 @@ export interface RepoTree {
   files: RepoFile[];
   /** Non-fatal fetch notes (rate-limit, missing dir) — surfaced, never thrown. */
   notes: string[];
+  /** Every blob path in the listing the surface was chosen from, when the reader had one
+   *  (local walk, git ref, GitHub Trees). Lets a check decide "this hook names a file that
+   *  is not committed" without a filesystem call. Absent on the root-list fallback. */
+  paths?: string[];
+  /** True only when `paths` is the WHOLE listing. A path missing from a truncated or
+   *  capped listing is unknown, not absent, and no check may call it "missing". */
+  pathsComplete?: boolean;
+  /** Links where agent configuration can live that were not followed — each one a finding. */
+  unfollowed?: UnfollowedLink[];
 }
 
 export interface ScanResult {
@@ -108,6 +147,17 @@ export interface ScanResult {
   /** True when a fetch was rate-limited / errored — the scan could NOT read every
    *  file, so `worst: null` must NOT be presented as "clean" (false assurance). */
   incomplete: boolean;
+  /** Active entries from the repo's `.node9-ignore.json`, so a diff can compare them
+   *  against the base's. Absent when there was no file. */
+  suppressions?: {
+    rule: string;
+    file: string;
+    locator?: string;
+    reason: string;
+    expires?: string;
+  }[];
+  /** How many findings above are marked suppressed. `worst` is computed over the rest. */
+  suppressedCount?: number;
 }
 
 /** Severity rank for comparison / worst-of. Higher = worse. */

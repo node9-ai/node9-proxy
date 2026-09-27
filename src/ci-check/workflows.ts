@@ -6,9 +6,11 @@
 //   danger = reachability(untrusted → agent) × power(tools/secrets) × exposure
 // then applies the actor gate and mitigations. Static + parse-only.
 
-import { parse as parseYaml } from 'yaml';
+import { parseYamlStrict as parseYaml } from './yaml-strict';
+import { lineOf, lineOfRe } from './lines';
 import type { CiFinding, Severity } from './types';
 import { SEVERITY_RANK } from './types';
+import { safeText } from './suppress';
 
 // Known agent actions — a step using one of these runs an LLM with tools.
 const AGENT_ACTION_RE =
@@ -913,7 +915,7 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
     const names = matchedBroadTools(toolsBlob);
     signals.push(
       names.length
-        ? `agent has broad/write-capable tools: ${names.map((n) => `\`${n}\``).join(', ')}`
+        ? `agent has broad/write-capable tools: ${names.map((n) => `\`${safeText(n, 80)}\``).join(', ')}`
         : 'agent has broad/write-capable tool grants'
     );
   }
@@ -984,7 +986,15 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
         ? 'Agent workflow with a risky pattern (partially mitigated)'
         : 'Agent workflow on a privileged trigger — review the actor gate';
 
+  const agentUses = agentSteps.find((st) => typeof st.uses === 'string')?.uses;
+  const line =
+    (agentUses ? lineOf(content, agentUses) : undefined) ??
+    lineOfRe(
+      content,
+      /^[ \t]*(pull_request_target|issue_comment|issues|workflow_run|pull_request_review_comment|pull_request)[ \t]*:/m
+    );
   const finding: CiFinding = {
+    ...(line ? { line } : {}),
     check: 'CI-2',
     // One verdict per workflow file — the finding IS the file's reachability score.
     rule: 'CI-2.injectable-workflow',
@@ -1176,7 +1186,12 @@ export function analyzeWorkflowSecrets(path: string, content: string): CiFinding
     .sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity])[0];
   if (!worst) return null;
 
+  const firstSecret = worst.secrets[0]?.name ?? '';
+  const secretLine = /^id-token/.test(firstSecret)
+    ? lineOfRe(content, /^[ \t]*id-token[ \t]*:[ \t]*write/m)
+    : lineOf(content, `secrets.${firstSecret}`);
   return {
+    ...(secretLine ? { line: secretLine } : {}),
     check: 'CI-4',
     rule: 'CI-4.agent-reachable-secret',
     dimension: 'data',

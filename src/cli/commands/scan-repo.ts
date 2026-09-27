@@ -80,6 +80,36 @@ export function registerScanRepoCommand(program: Command): void {
         if (opts.base) {
           const baseTree = readGitRefTree(target, opts.base);
           diff = diffScans(baseTree ? scanTree(baseTree) : null, res);
+          // ONE truth for every consumer (the JSON the Action reads, the renderers, the exit
+          // code): the head as the gate must see it. A suppression added in the same change
+          // is not honoured in the default gate either — `worst` is replaced, not just
+          // `worstIntroduced` (design G.1, 2026-09-27).
+          res = {
+            ...res,
+            findings: diff.honoured,
+            worst: diff.worstAll,
+            ...(res.suppressions
+              ? { suppressedCount: diff.honoured.filter((f) => f.suppressed).length }
+              : {}),
+          };
+        }
+
+        // A pull-request runner with no --base (an older Action ref, a hand-written workflow,
+        // `node9-version: latest` under an action that predates CI-5) cannot show that any
+        // suppression predates the PR, so none is honoured — the file is PR-controlled
+        // (review H.5, 2026-09-27). A local run, or a push event, applies the file as written.
+        if (!opts.base && process.env.GITHUB_BASE_REF && res.suppressedCount) {
+          const strict = diffScans(null, res);
+          res = {
+            ...res,
+            findings: strict.honoured,
+            worst: strict.worstAll,
+            suppressedCount: 0,
+            notes: [
+              ...res.notes,
+              'running on a pull request without --base: no suppression can be shown to predate it — none honoured. Pass --base <base sha> to honour suppressions that existed before this PR.',
+            ],
+          };
         }
 
         if (opts.json) {

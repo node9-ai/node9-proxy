@@ -2488,11 +2488,14 @@ describe('CI-6 — skills, subagents and slash commands (the 389-file corpus, 20
     });
 
     it('does not match look-alikes', () => {
+      // `skill.md` (lowercase) was a look-alike here until 2026-09-26: `talmolab/sleap`
+      // commits `.claude/skills/pr/skill.md`, and every case-insensitive contributor disk
+      // loads it. It is now surface — see ci-check-skill-grants.spec.ts. `SKILLS.md`
+      // (plural) is still a docs page, not a skill.
       for (const p of [
         'docs/SKILLS.md',
         '.claude/agents/notes.txt',
         '.claude/commands/README',
-        'skill.md',
         '.claude/settings.json',
       ]) {
         expect(INSTRUCTION_FILE_RE.test(p), p).toBe(false);

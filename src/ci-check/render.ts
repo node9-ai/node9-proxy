@@ -4,6 +4,7 @@
 // finding shows the signals that fired AND the mitigations seen.
 
 import chalk from 'chalk';
+import { safeText } from './suppress';
 import type { ScanResult, CiFinding, ScanDiff, Severity } from './types';
 
 const ICON: Record<Severity, string> = {
@@ -83,12 +84,30 @@ function ownedHint(source: string): boolean {
 
 /** One finding, as Markdown. Shared by the absolute and the diff renderers so the two can
  *  never drift in how a finding reads. */
+/** One line of markdown built partly from repo text (§P3; the same rule as comment.js): no
+ *  line breaks; outside code spans, no HTML start and no @-mention. Code spans are left as they
+ *  are, so a command in one copies exactly. */
+export function mdLine(v: unknown): string {
+  return String(v)
+    .replace(/[\r\n\u2028\u2029]+/g, ' ')
+    .replace(/(`[^`]*`)|([^`]+)/g, (_m, code: string | undefined, text: string | undefined) =>
+      code
+        ? code
+        : (text ?? '')
+            .replace(/<(?=[!/?A-Za-z])/g, '<\u200b')
+            .replace(/(^|[^A-Za-z0-9_])@(?=[A-Za-z0-9])/g, '$1@\u200b')
+    );
+}
+
 function findingMd(f: CiFinding, L: string[]): void {
-  L.push(`**${ICON[f.severity]} ${f.severity.toUpperCase()} — ${f.title}**`);
-  L.push(`\`${f.file}${f.line ? ':' + f.line : ''}\`  ·  ${f.rule}`);
+  L.push(
+    `**${ICON[f.severity]} ${f.severity.toUpperCase()} — ${mdLine(f.title)}**` +
+      (f.suppressed ? ` _(suppressed: \`${safeText(f.suppressed.reason, 200)}\`)_` : '')
+  );
+  L.push(`\`${safeText(f.file, 300)}${f.line ? ':' + Number(f.line) : ''}\`  ·  ${f.rule}`);
   L.push('');
-  for (const s of f.signals) L.push(`- ${s}`);
-  if (f.mitigations?.length) L.push(`- _mitigated:_ ${f.mitigations.join('; ')}`);
+  for (const s of f.signals) L.push(`- ${mdLine(s)}`);
+  if (f.mitigations?.length) L.push(`- _mitigated:_ ${mdLine(f.mitigations.join('; '))}`);
   L.push('');
   L.push(`→ **Fix:** ${f.fix}`);
   L.push('');
@@ -115,7 +134,12 @@ export function renderScan(res: ScanResult, diff?: ScanDiff): string {
           ? chalk.yellow.bold('⚠️  INCOMPLETE — could not read all files')
           : chalk.green('✅ agent-security: clean');
   L.push(`🛡️  ${chalk.bold('node9 scan-repo')}  ·  ${res.source}  ·  ${head}`);
-  L.push(chalk.gray(`   inspected ${res.inspected.length} config file(s), ${n} finding(s)`));
+  L.push(
+    chalk.gray(
+      `   inspected ${res.inspected.length} config file(s), ${n} finding(s)` +
+        (res.suppressedCount ? ` · ${res.suppressedCount} suppressed by .node9-ignore.json` : '')
+    )
+  );
   if (diff) {
     const introduced = diff.added.length + diff.escalated.length;
     L.push(
@@ -202,7 +226,8 @@ export function renderScanMarkdown(res: ScanResult, diff?: ScanDiff): string {
   L.push(`### 🛡️ node9 agent-security · \`${res.source}\` · ${status}`);
   L.push('');
   L.push(
-    `Inspected ${res.inspected.length} config file(s) · **${res.findings.length} finding(s)**`
+    `Inspected ${res.inspected.length} config file(s) · **${res.findings.length} finding(s)**` +
+      (res.suppressedCount ? ` · ${res.suppressedCount} suppressed by \`.node9-ignore.json\`` : '')
   );
   L.push('');
   // CI-5: lead with what THIS change is answerable for. A reviewer cannot act on a repo's

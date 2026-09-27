@@ -3,7 +3,9 @@
 // and inline credential values (reusing the DLP scanner). Static, parse-only.
 
 import { scanText } from '@node9/policy-engine';
+import { lineAtIndex } from './lines';
 import type { CiFinding } from './types';
+import { safeText } from './suppress';
 
 export interface McpServerSpec {
   command?: string;
@@ -20,7 +22,7 @@ export function analyzeMcp(path: string, content: string): CiFinding[] {
   } catch {
     return [];
   }
-  return analyzeMcpServers(cfg.mcpServers ?? {}, path);
+  return analyzeMcpServers(cfg.mcpServers ?? {}, path, content);
 }
 
 /** Score a normalized MCP server map. Shared by `.mcp.json` (CI-3) and Codex's
@@ -29,12 +31,20 @@ export function analyzeMcp(path: string, content: string): CiFinding[] {
  *  in `env` = an agent-reachable secret committed to the repo. */
 export function analyzeMcpServers(
   servers: Record<string, McpServerSpec>,
-  path: string
+  path: string,
+  content = ''
 ): CiFinding[] {
   const findings: CiFinding[] = [];
   for (const [name, srv] of Object.entries(servers ?? {})) {
     if (!srv || srv.disabled) continue;
     const argv = [srv.command, ...(Array.isArray(srv.args) ? srv.args.map(String) : [])].join(' ');
+    // Both CI-3 rules anchor at the server's name: `"name":` in JSON, `[mcp_servers.name]`
+    // (or a dotted key) in TOML. Unknown → no line, never a wrong one.
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const at = content.search(
+      new RegExp(`"${esc}"\\s*:|^[ \\t]*\\[mcp_servers\\.(?:"${esc}"|${esc})\\]`, 'm')
+    );
+    const line = at >= 0 ? lineAtIndex(content, at) : undefined;
 
     // Unpinned executable server.
     if (/\bnpx\b/.test(argv) && (/@latest\b/.test(argv) || !/@\d/.test(argv))) {
@@ -46,7 +56,8 @@ export function analyzeMcpServers(
         severity: 'medium',
         title: `MCP server "${name}" runs an unpinned executable`,
         file: path,
-        signals: [`\`${argv.slice(0, 120)}\` — unversioned/@latest npx`],
+        ...(line ? { line } : {}),
+        signals: [`\`${safeText(argv, 120)}\` — unversioned/@latest npx`],
         fix: 'Pin the MCP server package to an exact version so a PR (or a registry compromise) can’t swap the toolchain.',
       });
     }
@@ -64,6 +75,7 @@ export function analyzeMcpServers(
           severity: 'high',
           title: `MCP server "${name}" has an inline credential`,
           file: path,
+          ...(line ? { line } : {}),
           signals: [
             `env.${k} matches ${hit.patternName} — agent-reachable secret committed to the repo`,
           ],
