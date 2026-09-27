@@ -77,7 +77,7 @@ describe('O — an incomplete scan never reads as clean, and says what was not r
     expect(md.indexOf('could not read everything')).toBeGreaterThan(md.indexOf('High'));
     expect(md).toContain('big/SKILL.md');
     expect(c.checkSummary(r).title).toBe(
-      '1 agent-security finding(s), worst: high — scan incomplete'
+      '1 agent-security finding(s), worst: high (scan incomplete)'
     );
   });
 

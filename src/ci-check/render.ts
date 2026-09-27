@@ -5,7 +5,84 @@
 
 import chalk from 'chalk';
 import { safeText } from './suppress';
+import { groupReview, isAlert, reviewQuestion, REVIEW_FILES, REVIEW_LINES_PER_FILE } from './tier';
 import type { ScanResult, CiFinding, ScanDiff, Severity } from './types';
+
+/** What the report lists as findings: alerts and notes. Review items go to "Worth a look" (§Q). */
+const listed = (fs: CiFinding[]): CiFinding[] => fs.filter((f) => f.tier !== 'review');
+
+/** The quoted text of a finding: its first code span, else its title. */
+function excerpt(f: CiFinding): string {
+  const m = /`([^`]+)`/.exec(f.signals[0] ?? '');
+  return safeText(m ? m[1] : f.title, 120).replace(/`/g, "'");
+}
+
+/** The "Worth a look" block, as Markdown. Empty when there is nothing to review. */
+function reviewMd(findings: CiFinding[]): string[] {
+  const { byFile, grants } = groupReview(findings);
+  if (!byFile.size && !grants) return [];
+  const L = ['<details><summary><b>🔍 Worth a look (not counted in the result)</b></summary>', ''];
+  if (byFile.size) {
+    L.push(
+      "node9 found text that matches a risky pattern, but in its context it is usually harmless: an install note, a quoted example, documentation. We can't be sure, so we are pointing you at it rather than raising an alert. Please open each place and confirm it is not an instruction to the agent. Where node9 could not read a script, it says so. These items do not change the result."
+    );
+    L.push('');
+    const files = [...byFile.keys()];
+    for (const file of files.slice(0, REVIEW_FILES)) {
+      const fs = byFile.get(file)!;
+      L.push(`- \`${safeText(file, 300)}\``);
+      for (const f of fs.slice(0, REVIEW_LINES_PER_FILE))
+        L.push(
+          `  - ${f.line ? `line ${Number(f.line)}: ` : ''}\`${excerpt(f)}\`. Check: ${reviewQuestion(f.rule)}`
+        );
+      if (fs.length > REVIEW_LINES_PER_FILE)
+        L.push(`  - and ${fs.length - REVIEW_LINES_PER_FILE} similar lines in this file`);
+    }
+    const more = files.length - REVIEW_FILES;
+    if (more > 0) L.push(`- and ${more} more file${more === 1 ? '' : 's'}`);
+  }
+  if (grants) {
+    L.push('');
+    L.push(
+      `${grants} skill${grants === 1 ? ' is' : 's are'} granted broad tools (Bash, Write or Edit). For most skills that matches what the skill does; check the ones that should only read.`
+    );
+  }
+  L.push('', '</details>', '');
+  return L;
+}
+
+/** The "Worth a look" block for the terminal: one counted line, then the places. */
+function reviewTerminal(findings: CiFinding[]): string[] {
+  const { byFile, grants } = groupReview(findings);
+  const items = [...byFile.values()].reduce((a, fs) => a + fs.length, 0);
+  if (!items && !grants) return [];
+  const L: string[] = [];
+  if (items) {
+    L.push(
+      chalk.bold(`🔍 ${items} ${items === 1 ? 'item' : 'items'} worth a look (not counted)`) +
+        chalk.gray(': risky-looking text in a context that is usually harmless. Please confirm.')
+    );
+    const files = [...byFile.keys()];
+    for (const file of files.slice(0, REVIEW_FILES)) {
+      const fs = byFile.get(file)!;
+      L.push(chalk.gray(`   ${file}`));
+      for (const f of fs.slice(0, REVIEW_LINES_PER_FILE))
+        L.push(`     • ${f.line ? `line ${f.line}: ` : ''}${excerpt(f)}`);
+      if (fs.length > REVIEW_LINES_PER_FILE)
+        L.push(chalk.gray(`     and ${fs.length - REVIEW_LINES_PER_FILE} similar lines`));
+    }
+    const more = files.length - REVIEW_FILES;
+    if (more > 0) L.push(chalk.gray(`   and ${more} more file${more === 1 ? '' : 's'}`));
+  }
+  if (grants)
+    L.push(
+      chalk.gray(
+        `   ${grants} skill${grants === 1 ? ' is' : 's are'} granted broad tools (Bash, Write or Edit); usually what the skill needs.`
+      )
+    );
+  L.push('');
+  return L;
+}
 
 const ICON: Record<Severity, string> = {
   critical: '🔴',
@@ -46,11 +123,13 @@ function renderCta(res: ScanResult): string[] {
   // over `incomplete` (a HIGH we DID read still leads), and only a truly clean,
   // complete scan gets the "green" line.
   if (res.worst === 'critical' || res.worst === 'high') {
-    const n = res.findings.filter((f) => f.severity === 'critical' || f.severity === 'high').length;
+    const n = res.findings.filter(
+      (f) => isAlert(f) && !f.suppressed && (f.severity === 'critical' || f.severity === 'high')
+    ).length;
     L.push(
       '   ' +
         chalk.red.bold(
-          `🔴 ${n} ${n === 1 ? 'issue' : 'issues'} to fix — then stop the next at the PR.`
+          `🔴 ${n} ${n === 1 ? 'issue' : 'issues'} to fix, then stop the next at the PR.`
         )
     );
     L.push('');
@@ -62,13 +141,20 @@ function renderCta(res: ScanResult): string[] {
   } else if (res.incomplete) {
     // Couldn't read every file over the API. The Action scans the checked-out
     // tree in CI (no rate limit), so it's the honest fix for an incomplete scan.
-    L.push('   ' + chalk.yellow.bold('⚠️  Incomplete — not a clean bill of health.'));
+    L.push('   ' + chalk.yellow.bold('⚠️  Incomplete: not a clean bill of health.'));
     L.push('');
     L.push('   ' + chalk.bold('Get a complete check on every PR (CI reads the tree directly):'));
   } else {
-    L.push('   ' + chalk.green('✅ Agent CI is well-configured — 0 unmitigated issues.'));
+    L.push(
+      '   ' +
+        chalk.green(
+          groupReview(res.findings).byFile.size
+            ? '✅ No alerts. Check the items worth a look above.'
+            : '✅ Agent CI is well-configured: 0 unmitigated issues.'
+        )
+    );
     L.push('');
-    L.push('   ' + chalk.bold('Keep it green as you add agent workflows — check every PR:'));
+    L.push('   ' + chalk.bold('Keep it green as you add agent workflows. Check every PR:'));
   }
 
   L.push('   ' + chalk.dim('→ ') + chalk.cyan.underline(ACTION_URL));
@@ -101,7 +187,7 @@ export function mdLine(v: unknown): string {
 
 function findingMd(f: CiFinding, L: string[]): void {
   L.push(
-    `**${ICON[f.severity]} ${f.severity.toUpperCase()} — ${mdLine(f.title)}**` +
+    `**${ICON[f.severity]} ${f.severity.toUpperCase()}: ${mdLine(f.title)}**` +
       (f.suppressed ? ` _(suppressed: \`${safeText(f.suppressed.reason, 200)}\`)_` : '')
   );
   L.push(`\`${safeText(f.file, 300)}${f.line ? ':' + Number(f.line) : ''}\`  ·  ${f.rule}`);
@@ -116,13 +202,14 @@ function findingMd(f: CiFinding, L: string[]): void {
 /** Why a diff could not be trusted, in the reviewer's words. Never rendered as "clean". */
 function baseWarning(base: ScanDiff['base']): string {
   return base === 'did-not-run'
-    ? '⚠️ **Could not read the base commit**, so nothing below can be called "new" — every finding in this repo is listed. (A shallow clone is the usual cause: fetch the base ref.)'
+    ? '⚠️ **Could not read the base commit**, so nothing below can be called "new". Every finding in this repo is listed. (A shallow clone is the usual cause: fetch the base ref.)'
     : '⚠️ **The base scan could not read every file**, so a finding missing from it would look new. Every finding in this repo is listed instead.';
 }
 
 export function renderScan(res: ScanResult, diff?: ScanDiff): string {
   const L: string[] = [];
-  const n = res.findings.length;
+  const shown = listed(res.findings);
+  const n = shown.length;
   // An incomplete scan (rate limit / network) can never be "clean" — it didn't
   // read every file. Say so loudly instead of implying a clean bill of health.
   const head =
@@ -131,8 +218,10 @@ export function renderScan(res: ScanResult, diff?: ScanDiff): string {
       : res.worst
         ? chalk.yellow('agent-security notes')
         : res.incomplete
-          ? chalk.yellow.bold('⚠️  INCOMPLETE — could not read all files')
-          : chalk.green('✅ agent-security: clean');
+          ? chalk.yellow.bold('⚠️  INCOMPLETE: could not read all files')
+          : groupReview(res.findings).byFile.size
+            ? chalk.green('✅ agent-security: no alerts (items worth a look below)')
+            : chalk.green('✅ agent-security: clean');
   L.push(`🛡️  ${chalk.bold('node9 scan-repo')}  ·  ${res.source}  ·  ${head}`);
   L.push(
     chalk.gray(
@@ -141,11 +230,11 @@ export function renderScan(res: ScanResult, diff?: ScanDiff): string {
     )
   );
   if (diff) {
-    const introduced = diff.added.length + diff.escalated.length;
+    const introduced = listed(diff.added).length + diff.escalated.length;
     L.push(
       diff.base !== 'ok'
         ? chalk.yellow.bold(
-            `   ⚠️  base ${diff.base === 'did-not-run' ? 'could not be read' : 'scan was incomplete'} — cannot say what is new; showing everything`
+            `   ⚠️  base ${diff.base === 'did-not-run' ? 'could not be read' : 'scan was incomplete'}, so it cannot say what is new; showing everything`
           )
         : introduced > 0
           ? chalk.red.bold(
@@ -168,14 +257,14 @@ export function renderScan(res: ScanResult, diff?: ScanDiff): string {
     L.push(
       chalk.yellow.bold(
         rateLimited
-          ? '   ⚠️  Rate-limited — some files were unread. NOT a clean bill of health; set GITHUB_TOKEN (or run `gh auth login`) and re-run.'
+          ? '   ⚠️  Rate-limited: some files were unread. NOT a clean bill of health; set GITHUB_TOKEN (or run `gh auth login`) and re-run.'
           : '   ⚠️  A network error left some files unread. NOT a clean bill of health; re-run.'
       )
     );
   }
   L.push('');
 
-  for (const f of res.findings) {
+  for (const f of shown) {
     L.push(
       `${ICON[f.severity]} ${COLOR[f.severity](f.severity.toUpperCase())}  ${chalk.bold(f.title)}`
     );
@@ -193,16 +282,20 @@ export function renderScan(res: ScanResult, diff?: ScanDiff): string {
     L.push('');
   }
 
+  L.push(...reviewTerminal(res.findings));
+
   for (const note of res.notes) L.push(chalk.gray(`   note: ${note}`));
 
   // Responsible-use reminder on a remote HIGH+ finding.
-  const hasHigh = res.findings.some((f) => f.severity === 'critical' || f.severity === 'high');
+  const hasHigh = shown.some(
+    (f) => isAlert(f) && !f.suppressed && (f.severity === 'critical' || f.severity === 'high')
+  );
   if (hasHigh && !ownedHint(res.source)) {
     L.push('');
     L.push(
       chalk.yellow(
         '   ⚠️  This looks like a live issue on a repo you may not own. Disclose it privately\n' +
-          '       to the maintainers — do not publish it. (node9 never weaponizes findings.)'
+          '       to the maintainers; do not publish it. (node9 never weaponizes findings.)'
       )
     );
   }
@@ -225,8 +318,9 @@ export function renderScanMarkdown(res: ScanResult, diff?: ScanDiff): string {
           : '✅';
   L.push(`### 🛡️ node9 agent-security · \`${res.source}\` · ${status}`);
   L.push('');
+  const shown = listed(res.findings);
   L.push(
-    `Inspected ${res.inspected.length} config file(s) · **${res.findings.length} finding(s)**` +
+    `Inspected ${res.inspected.length} config file(s) · **${shown.length} finding(s)**` +
       (res.suppressedCount ? ` · ${res.suppressedCount} suppressed by \`.node9-ignore.json\`` : '')
   );
   L.push('');
@@ -234,7 +328,7 @@ export function renderScanMarkdown(res: ScanResult, diff?: ScanDiff): string {
   // accumulated history, and burying the one new finding under twelve old ones is how a
   // gate gets muted. Pre-existing findings stay in the comment — collapsed, not deleted.
   if (diff && diff.base === 'ok') {
-    const introduced = [...diff.added, ...diff.escalated.map((e) => e.finding)];
+    const introduced = [...listed(diff.added), ...diff.escalated.map((e) => e.finding)];
     if (introduced.length === 0) {
       L.push(
         `✅ **This change introduces no agent-security findings.**` +
@@ -242,9 +336,9 @@ export function renderScanMarkdown(res: ScanResult, diff?: ScanDiff): string {
       );
       L.push('');
     } else {
-      L.push(`#### ⚠️ Introduced by this change — ${introduced.length} finding(s)`);
+      L.push(`#### ⚠️ Introduced by this change: ${introduced.length} finding(s)`);
       L.push('');
-      for (const f of diff.added) findingMd(f, L);
+      for (const f of listed(diff.added)) findingMd(f, L);
       for (const e of diff.escalated) {
         L.push(
           `> _Guardrail erosion: this finding already existed at **${e.from}** and this change widens it to **${e.to}**._`
@@ -257,15 +351,17 @@ export function renderScanMarkdown(res: ScanResult, diff?: ScanDiff): string {
       L.push(`✅ Fixed by this change: ${diff.removed.length} finding(s).`);
       L.push('');
     }
-    if (diff.unchanged.length) {
+    if (listed(diff.unchanged).length) {
       L.push(
-        `<details><summary>${diff.unchanged.length} pre-existing finding(s) — not introduced by this change</summary>`
+        `<details><summary>${listed(diff.unchanged).length} pre-existing finding(s), not introduced by this change</summary>`
       );
       L.push('');
-      for (const f of diff.unchanged) findingMd(f, L);
+      for (const f of listed(diff.unchanged)) findingMd(f, L);
       L.push('</details>');
       L.push('');
     }
+    // What this change adds; old review items are not news.
+    L.push(...reviewMd(diff.added));
     return L.join('\n');
   }
 
@@ -273,8 +369,9 @@ export function renderScanMarkdown(res: ScanResult, diff?: ScanDiff): string {
     L.push(baseWarning(diff.base));
     L.push('');
   }
-  for (const f of res.findings) findingMd(f, L);
-  if (res.findings.length === 0) L.push('No committed agent-security issues found.');
+  for (const f of shown) findingMd(f, L);
+  if (shown.length === 0) L.push('No committed agent-security issues found.');
+  L.push(...reviewMd(res.findings));
   // NOTE: intentionally NO Action CTA here. This renders the PR comment posted
   // BY the Action itself — if it's commenting, the Action is already installed,
   // so a "go install the Action" CTA would be redundant and spammy in-PR.

@@ -67,7 +67,7 @@ export function gradeBroadGrant(
   const signals = [`broad allow(s): ${broad.slice(0, 5).join(', ')}`];
   if (high)
     signals.push(
-      `unrestricted \`Bash\` with no \`deny\` backstop — any command an injected instruction names runs without a prompt, ${scope}`
+      `unrestricted \`Bash\` with no \`deny\` backstop: any command an injected instruction names runs without a prompt, ${scope}`
     );
   else if (bareShell)
     signals.push(
@@ -176,9 +176,9 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
       signals: [
         `hook command: \`${safeText(cmd, 120)}\``,
         remoteExec
-          ? 'fetch-and-run (curl|wget / pipe-to-shell) — unpinnable remote code execution on every contributor'
+          ? 'fetch-and-run (curl|wget / pipe-to-shell): unpinnable remote code execution on every contributor'
           : unpinned
-            ? 'unpinned — a compromised/yanked package = code execution on every contributor'
+            ? 'unpinned: a compromised/yanked package = code execution on every contributor'
             : 'pinned, but still a standing supply-chain dependency in the agent hot path',
       ],
       fix: 'Vendor the command as a committed local script, or pin an exact version and treat updates as security-reviewed.',
@@ -202,7 +202,7 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
           ...(cmdLine(content, cmd) ? { line: cmdLine(content, cmd) } : {}),
           signals: [
             `hook command: \`${safeText(cmd, 120)}\``,
-            `\`${safeText(script, 200)}\` is not in the repository — whatever lands at that path later runs before every agent action, for everyone`,
+            `\`${safeText(script, 200)}\` is not in the repository: whatever lands at that path later runs before every agent action, for everyone`,
           ],
           fix: 'Commit the script the hook runs, or remove the hook.',
         });
@@ -218,7 +218,7 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
           ...(cmdLine(content, cmd) ? { line: cmdLine(content, cmd) } : {}),
           signals: [
             `hook command: \`${safeText(cmd, 120)}\``,
-            `\`${safeText(script, 200)}\` is committed but outside \`.claude/hooks/\`, the paths this scan reads — its contents were not graded`,
+            `\`${safeText(script, 200)}\` is committed but outside \`.claude/hooks/\` (the paths this scan reads), so its contents were not graded`,
           ],
           fix: 'Move the script under `.claude/hooks/` so it is scanned with the hook that runs it, or review it by hand.',
         });

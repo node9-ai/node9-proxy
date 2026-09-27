@@ -43,9 +43,9 @@ export function analyzeCodexConfig(path: string, content: string): CiFinding[] {
   if (fullAccess || noApproval) {
     const signals = [
       fullAccess
-        ? 'sandbox_mode = "danger-full-access" — the agent runs arbitrary commands with full disk + network access'
+        ? 'sandbox_mode = "danger-full-access": the agent runs arbitrary commands with full disk + network access'
         : null,
-      noApproval ? 'approval_policy = "never" — no human approval for agent actions' : null,
+      noApproval ? 'approval_policy = "never": no human approval for agent actions' : null,
     ].filter((s): s is string => s !== null);
     // Anchor at the setting that makes it worst: sandbox_mode when it grants full access.
     const at = content.search(

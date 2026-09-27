@@ -897,12 +897,12 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   else if (reusable)
     signals.push(
       reusableLoadedGun
-        ? `reusable workflow (${triggers.join(', ')}) that checks out an untrusted head / ingests untrusted input — exploitable the moment a caller wires a fork trigger (reachability depends on the caller, but this workflow is built to process attacker input)`
-        : `reusable workflow (${triggers.join(', ')}) — no untrusted trigger of its own; reachability depends on the caller's trigger + actor gate`
+        ? `reusable workflow (${triggers.join(', ')}) that checks out an untrusted head / ingests untrusted input: exploitable the moment a caller wires a fork trigger (reachability depends on the caller, but this workflow is built to process attacker input)`
+        : `reusable workflow (${triggers.join(', ')}): no untrusted trigger of its own; reachability depends on the caller's trigger + actor gate`
     );
   if (forkInput && !privileged && !reusable)
     signals.push(
-      'triggered by `pull_request` — fork PRs run with a read-only token (lower risk than pull_request_target)'
+      'triggered by `pull_request`: fork PRs run with a read-only token (lower risk than pull_request_target)'
     );
   if (head === 'root') signals.push('checks out the untrusted PR head into the workspace root');
   if (head === 'subdir') signals.push('checks out the untrusted PR head into an isolated subdir');
@@ -920,7 +920,9 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
     );
   }
   if (bypassActive)
-    signals.push('allowed_non_write_users: "*" with github_token — any user can trigger the agent');
+    signals.push(
+      'allowed_non_write_users: "*" with github_token, so any user can trigger the agent'
+    );
   if (elevated) signals.push('elevated permissions (contents/id-token: write)');
   if (pat) signals.push('a static PAT is exposed to the agent (recoverable via injection)');
   // Scoped to the reachable agent jobs, like the tool and PAT signals above. By job, not by
@@ -962,7 +964,7 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   const noExplicitPerms = wf.permissions == null && jobList(wf).every((j) => j.permissions == null);
   if (noExplicitPerms && reach > 0 && (broadTools || githubWriteTool))
     signals.push(
-      'no explicit `permissions:` — the token defaults to the repo/org setting, which may grant write; set it explicitly to read-only'
+      'no explicit `permissions:` block. The token defaults to the repo/org setting, which may grant write; set it explicitly to read-only'
     );
 
   const mitigations: string[] = [];
@@ -981,10 +983,10 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
 
   const title =
     severity === 'critical' || severity === 'high'
-      ? 'Injectable agent workflow — untrusted input reaches a tool-using agent with secrets'
+      ? 'Injectable agent workflow: untrusted input reaches a tool-using agent with secrets'
       : severity === 'medium'
         ? 'Agent workflow with a risky pattern (partially mitigated)'
-        : 'Agent workflow on a privileged trigger — review the actor gate';
+        : 'Agent workflow on a privileged trigger: review the actor gate';
 
   const agentUses = agentSteps.find((st) => typeof st.uses === 'string')?.uses;
   const line =
@@ -1006,9 +1008,9 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
     mitigations: mitigations.length ? mitigations : undefined,
     fix:
       head === 'root' && privileged
-        ? 'Do not check out the untrusted PR head into the workspace root under a privileged trigger (pull_request_target/workflow_run) — check out the base ref, or isolate the head in a subdir (--add-dir). Add an actor gate and scope the agent tools.'
+        ? 'Do not check out the untrusted PR head into the workspace root under a privileged trigger (pull_request_target/workflow_run): check out the base ref, or isolate the head in a subdir (--add-dir). Add an actor gate and scope the agent tools.'
         : head === 'root'
-          ? 'This runs under `pull_request` (fork PRs get a read-only token), so the head checkout is low-risk today — keep it on `pull_request` (not `pull_request_target`) and keep the actor gate + scoped tools.'
+          ? 'This runs under `pull_request` (fork PRs get a read-only token), so the head checkout is low-risk today: keep it on `pull_request` (not `pull_request_target`) and keep the actor gate + scoped tools.'
           : 'Add/verify an actor gate, scope the agent tools to read-only, and env-deny secrets. See Anthropic’s claude-code-action security doc.',
   };
   const extraFix = [
@@ -1198,17 +1200,17 @@ export function analyzeWorkflowSecrets(path: string, content: string): CiFinding
     severity: worst.severity,
     title:
       worst.severity === 'advisory'
-        ? 'Secrets reachable by the agent — hardening'
+        ? 'Secrets reachable by the agent: hardening'
         : 'Exfiltratable secrets reachable by an injectable agent',
     file: path,
     signals: [
       `agent can reach: ${worst.secrets.map((s) => s.name).join(', ')}`,
       worst.injectable
         ? 'the agent is externally triggerable (untrusted trigger, no gate)'
-        : 'gated / not externally triggerable — latent risk only',
+        : 'gated / not externally triggerable: latent risk only',
       worst.canReadEnv
         ? 'agent has arbitrary shell (bare Bash) → can read env and exfiltrate'
-        : 'no arbitrary-shell tool — not exfiltratable today, but one tool-add away',
+        : 'no arbitrary-shell tool: not exfiltratable today, but one tool-add away',
     ],
     fix: 'Move extra secrets to a separate trusted job the agent cannot reach; drop id-token:write if unused; scope the agent tools to read-only and gate the trigger.',
   };

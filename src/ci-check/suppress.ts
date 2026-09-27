@@ -99,7 +99,7 @@ export function parseSuppressions(
       mk(
         'CI-0.suppression-malformed',
         'advisory',
-        'Suppression file is not valid JSON — nothing is suppressed',
+        'Suppression file is not valid JSON: nothing is suppressed',
         `${SUPPRESSIONS_FILE} could not be parsed`,
         'Fix the JSON. Until then every finding is reported as if the file were absent.'
       )
@@ -112,8 +112,8 @@ export function parseSuppressions(
         'CI-0.suppression-malformed',
         'advisory',
         Array.isArray(raw)
-          ? `Suppression file has more than ${MAX_SUPPRESSIONS} entries — nothing is suppressed`
-          : 'Suppression file is not a list of entries — nothing is suppressed',
+          ? `Suppression file has more than ${MAX_SUPPRESSIONS} entries: nothing is suppressed`
+          : 'Suppression file is not a list of entries: nothing is suppressed',
         Array.isArray(raw)
           ? `${raw.length} entries in ${SUPPRESSIONS_FILE}`
           : `${SUPPRESSIONS_FILE} must be a JSON array of { rule, file, locator?, reason, expires? }`,
@@ -138,7 +138,7 @@ export function parseSuppressions(
         mk(
           'CI-0.suppression-unjustified',
           'advisory',
-          'Suppression entry has no reason — not applied',
+          'Suppression entry has no reason: not applied',
           `\`${safeText(entry.rule)}\` in \`${safeText(entry.file)}\`${entry.locator ? ` (\`${safeText(entry.locator)}\`)` : ''} is suppressed without saying why`,
           'Add a `reason`. A suppression is a reviewed decision; the review needs the why.',
           suppressionKey(entry)
@@ -155,7 +155,7 @@ export function parseSuppressions(
           mk(
             'CI-0.suppression-invalid-expiry',
             'advisory',
-            'Suppression entry has an invalid expiry — not applied',
+            'Suppression entry has an invalid expiry: not applied',
             `\`${safeText(entry.rule)}\` in \`${safeText(entry.file)}\`: expires must be a date written YYYY-MM-DD`,
             'Write the expiry as YYYY-MM-DD, or remove it.',
             suppressionKey(entry)
@@ -166,7 +166,7 @@ export function parseSuppressions(
       // An entry is good through the END of the day it names.
       if (t + DAY_MS <= today.getTime()) {
         notes.push(
-          `suppression for \`${safeText(entry.rule)}\` in \`${safeText(entry.file)}\` expired ${entry.expires} — not applied.`
+          `suppression for \`${safeText(entry.rule)}\` in \`${safeText(entry.file)}\` expired ${entry.expires}: not applied.`
         );
         continue;
       }

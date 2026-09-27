@@ -9,6 +9,7 @@
 
 import type { Severity } from '../posture/types';
 import type { Route } from './route';
+import type { Tier } from './tier';
 
 export type { Severity };
 
@@ -53,6 +54,9 @@ export interface CiFinding {
    *  gate. `key` is the entry's readable identity, so a diff can ask whether the suppression
    *  existed in the base. */
   suppressed?: { reason: string; key: string; expires?: string };
+  /** Whether it counts (tier.ts): `alert` sets the result; `review` is listed under "Worth a look";
+   *  `note` is information. Not part of the finding's identity. */
+  tier?: Tier;
 }
 
 /** How one finding relates to the base scan. `escalated` is a finding that already

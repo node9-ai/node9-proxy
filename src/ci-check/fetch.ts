@@ -181,14 +181,14 @@ export function pickSurfacePaths(
   // from one that had more to read, so it is not reported as whole.
   if (truncated || matched.length >= caps.files) {
     notes.push(
-      `repo tree is large/truncated — some agent-surface files may be INCOMPLETE (scanned ${capped.length} of ${matched.length}${truncated ? '+' : ''}).`
+      `repo tree is large/truncated: some agent-surface files may be INCOMPLETE (scanned ${capped.length} of ${matched.length}${truncated ? '+' : ''}).`
     );
   }
   if (softSkipped.length) {
     // NB: deliberately NO "INCOMPLETE" marker — skipping build output is intentional, not a
     // partial scan; we just surface it so a real committed config there isn't invisible.
     notes.push(
-      `skipped ${softSkipped.length} agent-surface file(s) under a build-output dir (dist/build/out/target), e.g. ${softSkipped.slice(0, 3).join(', ')} — if any is a real committed config, move it out of the build dir to have it scanned.`
+      `skipped ${softSkipped.length} agent-surface file(s) under a build-output dir (dist/build/out/target), e.g. ${softSkipped.slice(0, 3).join(', ')}: if any is a real committed config, move it out of the build dir to have it scanned.`
     );
   }
   return capped;
@@ -286,9 +286,9 @@ async function ghGet(url: string): Promise<{ status: number; json: unknown }> {
 }
 
 const RATE_LIMIT_NOTE =
-  'GitHub rate limit hit — results may be INCOMPLETE (a missing file could be unread, not absent). Set GITHUB_TOKEN or run `gh auth login`.';
+  'GitHub rate limit hit: results may be INCOMPLETE (a missing file could be unread, not absent). Set GITHUB_TOKEN or run `gh auth login`.';
 const NETWORK_NOTE =
-  'A network error/timeout occurred — results may be INCOMPLETE (some files were not fetched).';
+  'A network error/timeout occurred: results may be INCOMPLETE (some files were not fetched).';
 
 /** Fetch one file's decoded content, or null if absent. On a 403 (rate limit)
  *  we can't distinguish absent from unread, so we record a note so a partial
@@ -377,9 +377,9 @@ const INCOMPLETE = 'may be INCOMPLETE';
  *  text is used exactly as stored. */
 const lf = (t: string): string => t.replace(/\r\n/g, '\n');
 const tooLargeNote = (rel: string) =>
-  `${rel} is larger than ${MAX_FILE_BYTES / (1024 * 1024)} MiB — not read; results ${INCOMPLETE}.`;
+  `${rel} is larger than ${MAX_FILE_BYTES / (1024 * 1024)} MiB: not read; results ${INCOMPLETE}.`;
 const unreadNote = (rel: string, why: string) =>
-  `${rel} could not be read (${why}) — results ${INCOMPLETE}.`;
+  `${rel} could not be read (${why}): results ${INCOMPLETE}.`;
 
 /** A path where agent configuration can live: under a surface anchor (`.claude`, `skills`, …). */
 const inAgentArea = (p: string) => p.split('/').some((c) => AGENT_FOLDERS.has(c));
@@ -633,11 +633,11 @@ function visiblePaths(
   if (needs.size) return { need: [...needs] };
   if (!complete)
     notes.push(
-      `directory symlinks expand past ${MAX_EXPANDED} entries — some agent-surface files ${INCOMPLETE}.`
+      `directory symlinks expand past ${MAX_EXPANDED} entries: some agent-surface files ${INCOMPLETE}.`
     );
   if (elsewhere.length)
     notes.push(
-      `${elsewhere.length} symlink(s) outside the agent folders are not followed (e.g. ${elsewhere.slice(0, 3).join(', ')}) — results ${INCOMPLETE}.`
+      `${elsewhere.length} symlink(s) outside the agent folders are not followed (e.g. ${elsewhere.slice(0, 3).join(', ')}): results ${INCOMPLETE}.`
     );
   return { paths: out, complete };
 }
@@ -732,10 +732,10 @@ function planReads(
   const byPath = new Map(unfollowed.map((u) => [u.path, u]));
   const capped = capNested(reads, opts.nestedCap, notes);
   if (R.budgetHit)
-    notes.push(`symlink resolution stopped at its step budget — results ${INCOMPLETE}.`);
+    notes.push(`symlink resolution stopped at its step budget: results ${INCOMPLETE}.`);
   if (dangling.length)
     notes.push(
-      `${dangling.length} agent-surface symlink(s) point at nothing in the repository (e.g. ${dangling.slice(0, 3).join(', ')}) — not read.`
+      `${dangling.length} agent-surface symlink(s) point at nothing in the repository (e.g. ${dangling.slice(0, 3).join(', ')}): not read.`
     );
   return {
     reads: capped,
@@ -758,7 +758,7 @@ function capNested(reads: PlannedRead[], cap: number | undefined, notes: string[
   // AT the cap, not past it: a scan that stops exactly at the limit cannot be told apart
   // from one that had more to read, so it is not reported as whole.
   notes.push(
-    `repo tree is large — some agent-surface files ${INCOMPLETE} (scanned ${keep.size} of ${nested.length} nested files).`
+    `repo tree is large: some agent-surface files ${INCOMPLETE} (scanned ${keep.size} of ${nested.length} nested files).`
   );
   return reads.filter((r) => isRoot(r) || keep.has(r));
 }
@@ -825,15 +825,15 @@ function walkDisk(
   for (const sub of gitmodulePaths(root)) sealed.add(sub);
   if (!complete)
     notes.push(
-      `repo is large — some agent-surface files ${INCOMPLETE} (stopped after ${MAX_WALK_ENTRIES} entries).`
+      `repo is large: some agent-surface files ${INCOMPLETE} (stopped after ${MAX_WALK_ENTRIES} entries).`
     );
   if (unlistable.length)
     notes.push(
-      `${unlistable.length} director${unlistable.length === 1 ? 'y' : 'ies'} could not be listed (e.g. ${unlistable.slice(0, 3).join(', ')}) — results ${INCOMPLETE}.`
+      `${unlistable.length} director${unlistable.length === 1 ? 'y' : 'ies'} could not be listed (e.g. ${unlistable.slice(0, 3).join(', ')}): results ${INCOMPLETE}.`
     );
   if (nestedRepos.length)
     notes.push(
-      `skipped ${nestedRepos.length} nested git repositor${nestedRepos.length === 1 ? 'y' : 'ies'} (e.g. ${nestedRepos.slice(0, 3).join(', ')}) — scan ${nestedRepos.length === 1 ? 'it' : 'each'} on its own.`
+      `skipped ${nestedRepos.length} nested git repositor${nestedRepos.length === 1 ? 'y' : 'ies'} (e.g. ${nestedRepos.slice(0, 3).join(', ')}): scan ${nestedRepos.length === 1 ? 'it' : 'each'} on its own.`
     );
   return { kinds, sealed, complete };
 }
@@ -1154,11 +1154,11 @@ class ApiSession {
     const out: string[] = [];
     if (this.failed.length)
       out.push(
-        `${this.failed.length} file(s) could not be fetched from GitHub (e.g. ${this.failed.slice(0, 3).join(', ')}) — results ${INCOMPLETE}.`
+        `${this.failed.length} file(s) could not be fetched from GitHub (e.g. ${this.failed.slice(0, 3).join(', ')}): results ${INCOMPLETE}.`
       );
     if (this.budgetHit)
       out.push(
-        `the scan stopped at its GitHub budget (${API_BUDGET.requests} requests, ${API_BUDGET.bytes / (1024 * 1024)} MiB) — results ${INCOMPLETE}.`
+        `the scan stopped at its GitHub budget (${API_BUDGET.requests} requests, ${API_BUDGET.bytes / (1024 * 1024)} MiB): results ${INCOMPLETE}.`
       );
     return out;
   }
@@ -1286,7 +1286,7 @@ export async function fetchGitHubTree(
     // "may be INCOMPLETE" is load-bearing — index.ts keys `incomplete` off it, so a total
     // fetch failure is never rendered as a clean bill of health.
     notes.push(
-      `fetch degraded: ${(err as Error)?.message ?? 'network error'} — results ${INCOMPLETE} (the repo could not be fetched).`
+      `fetch degraded (${(err as Error)?.message ?? 'network error'}): results ${INCOMPLETE} (the repo could not be fetched).`
     );
     return { source: `${owner}/${repo}`, files: [], notes };
   }

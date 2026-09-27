@@ -13,6 +13,7 @@
 import type { CiFinding, Severity } from './types';
 import { lineAtIndex } from './lines';
 import { safeText } from './suppress';
+import { onlyOfficialInstaller, onlyLocal, MAX_EXCUSED_PER_LINE } from './harmless';
 
 // ── Tier 1: structural concealment — classified by LEGITIMACY, not "is it invisible" ──
 // Presence of an invisible/formatting char ≠ concealment. Four classes, distinct handling
@@ -234,15 +235,36 @@ const AND_SHELL_WORD_RE = /\b(bash|sh)\b/gi;
 
 /** The first fetch-and-obey in `text`, as `RegExp.exec` of the old regex would report it. */
 export function findFetchObey(text: string): { index: number; 0: string } | null {
+  return findFetchObeyUnless(text, () => false);
+}
+
+/** The first fetch-and-obey whose line `skip` does not excuse: one per line, in order, so a
+ *  harmless first match (an official installer, §Q) never hides a later one. */
+export function findFetchObeyUnless(
+  text: string,
+  skip: (m: { index: number; 0: string }, line: string) => boolean
+): { index: number; 0: string } | null {
   for (let start = 0; start <= text.length;) {
     let end = text.indexOf('\n', start);
     if (end < 0) end = text.length;
-    const m = fetchObeyInLine(text, start, end);
-    if (m) return m;
+    // Every match on the line, not only the first: a harmless one must not hide the next. A
+    // match reaches its shell word and names every URL before it, so the next starts after it.
+    // Past MAX_EXCUSED_PER_LINE excused matches the next is reported: visible, never a stall.
+    const line = text.slice(start, end);
+    for (let from = start, excused = 0; from < end; excused++) {
+      const m = fetchObeyInLine(text, from, end);
+      if (!m) break;
+      if (excused >= MAX_EXCUSED_PER_LINE || !skip(m, line)) return m;
+      from = m.index + Math.max(1, m[0].length);
+    }
     start = end + 1;
   }
   return null;
 }
+
+/** §Q: fetching from the vendor's own installer, or from this machine, is not remote code. */
+export const harmlessFetch = (m: { 0: string }): boolean =>
+  onlyOfficialInstaller(m[0]) || onlyLocal(m[0]);
 
 function fetchObeyInLine(
   text: string,
@@ -485,7 +507,7 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
         'critical',
         'Unicode tag characters in an agent instruction file',
         [
-          'contains Unicode tag characters (U+E0000–E007F) — an invisible instruction-smuggling channel with no legitimate use in text',
+          'contains Unicode tag characters (U+E0000–E007F): an invisible instruction-smuggling channel with no legitimate use in text',
         ],
         'Remove the tag characters. Instruction files must be plain, reviewable text.',
         path,
@@ -499,7 +521,7 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
         'critical',
         'Bidirectional override characters in an agent instruction file',
         [
-          'contains a bidi override (U+202D/U+202E) — a Trojan-Source technique that visually reorders text so a human reads something different from what the agent parses',
+          'contains a bidi override (U+202D/U+202E): a Trojan-Source technique that visually reorders text so a human reads something different from what the agent parses',
         ],
         'Remove the bidi override characters.',
         path,
@@ -513,7 +535,7 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
         'advisory',
         'Bidirectional formatting characters in an agent instruction file',
         [
-          'contains bidi embed/isolate characters (U+202A–202C / U+2066–2069) — legitimate in right-to-left text, but confirm they are not being used to hide or reorder instructions',
+          'contains bidi embed/isolate characters (U+202A–202C / U+2066–2069): legitimate in right-to-left text, but confirm they are not being used to hide or reorder instructions',
         ],
         'Confirm the bidi marks are legitimate RTL formatting; remove otherwise.',
         path,
@@ -531,7 +553,7 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
         [
           revealed
             ? 'a zero-width character conceals a prompt-override directive that only appears once the hidden characters are stripped'
-            : 'a zero-width character splits a visible Latin word — a concealment technique (hides text from human review while the agent reads it as contiguous)',
+            : 'a zero-width character splits a visible Latin word: a concealment technique (hides text from human review while the agent reads it as contiguous)',
         ],
         'Remove the zero-width characters. Instruction files must be plain, reviewable text.',
         path,
@@ -550,7 +572,7 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
         ovEnc ? 'critical' : 'high',
         'Prompt-override directive in an agent instruction file',
         [
-          `contains a prompt-override / role-impersonation directive (\`${safeText(m[0].slice(0, 60).trim(), 60)}\`)${ovEnc ? ' — concealed in a base64 blob' : ''}`,
+          `contains a prompt-override / role-impersonation directive (\`${safeText(m[0].slice(0, 60).trim(), 60)}\`)${ovEnc ? ', concealed in a base64 blob' : ''}`,
         ],
         'Remove the override text. An instruction file should not tell the agent to ignore its own rules.',
         path,
@@ -560,7 +582,7 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
   }
 
   // Tier 2 — sink + agent-directive framing (skip human install docs + safety clauses)
-  const fo = findFetchObey(content);
+  const fo = findFetchObeyUnless(content, harmlessFetch);
   if (
     fo &&
     !inHumanSection(content, fo.index) &&
@@ -574,7 +596,7 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
         'medium',
         'Instruction directs the agent to fetch and run remote code',
         [
-          `\`${safeText(fo[0].slice(0, 70).trim(), 70)}\` — fetch-and-obey, outside an install/setup section`,
+          `\`${safeText(fo[0].slice(0, 70).trim(), 70)}\`: fetch-and-obey, outside an install/setup section`,
         ],
         'Do not instruct the agent to pipe remote content into a shell; pin and vendor scripts instead.',
         path,
@@ -595,7 +617,7 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
         'medium',
         'Instruction points the agent at credential material',
         [
-          `references \`${safeText(sp[0].slice(0, 50).trim(), 50)}\` — directs the agent toward secrets`,
+          `references \`${safeText(sp[0].slice(0, 50).trim(), 50)}\`: directs the agent toward secrets`,
         ],
         'Do not reference credential files or paths in agent instructions.',
         path,
@@ -603,7 +625,20 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
       )
     );
   }
-  const ex = EXFIL_RE.exec(content);
+  // §Q: sending to this machine is not exfiltration: every address on the line is local.
+  let ex: RegExpExecArray | null = null;
+  let excused = 0;
+  for (const m of content.matchAll(new RegExp(EXFIL_RE.source, 'gi'))) {
+    let eol = content.indexOf('\n', m.index);
+    if (eol < 0) eol = content.length;
+    if (
+      excused++ < MAX_EXCUSED_PER_LINE &&
+      onlyLocal(content.slice(content.lastIndexOf('\n', m.index) + 1, eol))
+    )
+      continue;
+    ex = m as RegExpExecArray;
+    break;
+  }
   if (
     ex &&
     !inHumanSection(content, ex.index) &&
@@ -615,7 +650,7 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
         'CI-6.exfil-directive',
         'medium',
         'Instruction directs the agent to send data to an external endpoint',
-        [`\`${safeText(ex[0].slice(0, 70).trim(), 70)}\` — possible exfiltration directive`],
+        [`\`${safeText(ex[0].slice(0, 70).trim(), 70)}\`: possible exfiltration directive`],
         'Remove external post/upload directives from agent instructions.',
         path,
         lineAt(content, ex.index)
