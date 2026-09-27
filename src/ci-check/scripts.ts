@@ -14,11 +14,13 @@ import {
   TAG_CHARS,
   BIDI_OVERRIDE,
   OVERRIDE_RE,
-  findFetchObey,
+  findFetchObeyUnless,
+  harmlessFetch,
   SECRET_PATH_RE,
   isInlineParser,
   maskPathPlaceholders,
 } from './instructions';
+import { isCommentLine, inPrintedMessage, MAX_EXCUSED_PER_LINE } from './harmless';
 import { safeText } from './suppress';
 
 /** A script larger than this is not read. It is REPORTED as unread — the third state — never
@@ -67,6 +69,12 @@ const isSensitive = (text: string) =>
 // is diagnostics far more often than theft, and a redaction step on the same logical line
 // makes it fine.
 const ENV_DUMP_RE = /^\s*(env|printenv)(\s+-\S+)*\s*(\||>)/;
+// `env | grep '^PREFIX_'` keeps one named family of variables: a selection, not a dump (§Q). Only
+// a pattern anchored to a name prefix: `grep -i "RAILWAY"` also matches RAILWAY_TOKEN anywhere in
+// the name, and a secret-shaped prefix is never a harmless selection.
+const ENV_FILTERED_RE =
+  /^\s*(env|printenv)(\s+-\S+)*\s*\|\s*(grep|egrep|rg)(\s+-\S+)*\s+(['"]?)\^[A-Za-z][A-Za-z0-9]*_?\5(\s|\||$)/;
+const SECRET_NAME_RE = /token|secret|key|pass|auth|cred/i;
 const REDACTION_RE = /\b(sed|redact|mask)\b|\*\*\*/i;
 
 interface LogicalLine {
@@ -143,7 +151,7 @@ export function analyzeScript(path: string, content: string, rulePrefix: string)
         'unscanned-size',
         'advisory',
         'Committed agent script is too large for this scan to read',
-        `${content.length} bytes — above the ${MAX_SCRIPT_BYTES}-byte limit; its contents were NOT graded`,
+        `${content.length} bytes: above the ${MAX_SCRIPT_BYTES}-byte limit; its contents were NOT graded`,
         'Split the script, or review it by hand: everything in it runs with the agent.'
       ),
     ];
@@ -164,7 +172,7 @@ export function analyzeScript(path: string, content: string, rulePrefix: string)
         'hidden-chars',
         'critical',
         'Hidden or reordering characters in a committed agent script',
-        'contains Unicode tag or bidi-override characters — text a human reads differently from what the shell runs',
+        'contains Unicode tag or bidi-override characters: text a human reads differently from what the shell runs',
         'Remove them. A script the agent runs must be plain, reviewable text.'
       )
     );
@@ -180,44 +188,70 @@ export function analyzeScript(path: string, content: string, rulePrefix: string)
     next < lineStarts.length
       ? `${text}\n${content.slice(lineStarts[next], lineStarts[next] + 4000)}`
       : text;
+  // §Q: a match in a comment, or in a message printed for a person, is not executed.
+  // Every match is printed, not only the first: `echo "…"; curl … | bash` runs the second.
+  // Past MAX_EXCUSED_PER_LINE matches the line is not excused: visible, never a stall.
+  const printed = (re: RegExp, text: string) => {
+    let n = 0;
+    for (const m of text.matchAll(new RegExp(re.source, re.flags.replace('g', '') + 'g'))) {
+      if (++n > MAX_EXCUSED_PER_LINE || !inPrintedMessage(text, m.index)) return false;
+    }
+    return n > 0;
+  };
   for (const { text, line, next, emitted } of logicalLines(content)) {
-    const fo = findFetchObey(text);
+    if (!emitted && isCommentLine(text)) continue;
+    // The first fetch that runs remote code: not a parser reading JSON, not the vendor's own
+    // installer or this machine, not a message printed for a person.
+    const fo = findFetchObeyUnless(
+      text,
+      (m) =>
+        isInlineParser(withFollowing(text, next), m) ||
+        harmlessFetch(m) ||
+        inPrintedMessage(text, m.index)
+    );
     const remote =
-      (fo && !isInlineParser(withFollowing(text, next), fo)) ||
-      PROCESS_SUBST_RE.test(text) ||
-      EVAL_FETCH_RE.test(text) ||
-      SHELL_C_FETCH_RE.test(text);
+      !!fo ||
+      (PROCESS_SUBST_RE.test(text) && !printed(PROCESS_SUBST_RE, text)) ||
+      (EVAL_FETCH_RE.test(text) && !printed(EVAL_FETCH_RE, text)) ||
+      (SHELL_C_FETCH_RE.test(text) && !printed(SHELL_C_FETCH_RE, text));
     if (remote) {
       once(
         mk(
           'remote-exec',
           'high',
           'Committed agent script fetches and runs remote code',
-          `\`${safeText(text.trim(), 100)}\` — whatever that URL serves runs here, for everyone`,
+          `\`${safeText(text.trim(), 100)}\`: whatever that URL serves runs here, for everyone`,
           'Vendor the script and pin it; never pipe a download into a shell from a hook or skill.',
           line
         )
       );
     }
-    if ((hasCurlUpload(text) || hasNetcatRead(text)) && isSensitive(text)) {
+    if (
+      (hasCurlUpload(text) || hasNetcatRead(text)) &&
+      isSensitive(text) &&
+      !printed(/\b(curl|nc|ncat|netcat)\b/, text)
+    ) {
       once(
         mk(
           'exfil',
           'high',
           'Committed agent script sends a local file to a remote host',
-          `\`${safeText(text.trim(), 100)}\` — a file from this machine leaves it`,
+          `\`${safeText(text.trim(), 100)}\`: a file from this machine leaves it`,
           'Remove the upload, or make the destination and the file explicit and reviewed.',
           line
         )
       );
     }
-    if (SECRET_PATH_RE.test(text) || HOME_SECRET_RE.test(text)) {
+    if (
+      (SECRET_PATH_RE.test(text) && !printed(SECRET_PATH_RE, text)) ||
+      (HOME_SECRET_RE.test(text) && !printed(HOME_SECRET_RE, text))
+    ) {
       once(
         mk(
           'secret-read',
           'medium',
           'Committed agent script reads credential material',
-          `\`${safeText(text.trim(), 100)}\` — touches a credential file`,
+          `\`${safeText(text.trim(), 100)}\`: touches a credential file`,
           'Do not read credential files from an agent hook or skill; pass what is needed explicitly.',
           line
         )
@@ -230,19 +264,23 @@ export function analyzeScript(path: string, content: string, rulePrefix: string)
           'prompt-override',
           'high',
           'Committed agent script feeds a prompt-override directive to a model',
-          `\`${safeText(ov[0], 60)}\` — an instruction to ignore rules, emitted by a script`,
+          `\`${safeText(ov[0], 60)}\`: an instruction to ignore rules, emitted by a script`,
           'Remove the override text.',
           line
         )
       );
     }
-    if (ENV_DUMP_RE.test(text) && !REDACTION_RE.test(text)) {
+    if (
+      ENV_DUMP_RE.test(text) &&
+      !(ENV_FILTERED_RE.test(text) && !SECRET_NAME_RE.test(text)) &&
+      !REDACTION_RE.test(text)
+    ) {
       once(
         mk(
           'env-dump',
           'advisory',
           'Committed agent script prints the whole environment',
-          `\`${safeText(text.trim(), 100)}\` — every variable, tokens included, goes to that pipe or file without redaction`,
+          `\`${safeText(text.trim(), 100)}\`: every variable, tokens included, goes to that pipe or file without redaction`,
           'Filter to the variables you need, or redact values (e.g. `| sed -E "s/(TOKEN|SECRET|KEY)=.*/\\\\1=***/"`).',
           line
         )

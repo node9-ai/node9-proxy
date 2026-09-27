@@ -10,11 +10,16 @@ import { analyzeMcp } from './mcp';
 import { analyzeCodexConfig } from './codex';
 import { analyzeInstructionFile, appSkillDirsOf, namedDocs, skillDirsOf } from './instructions';
 import { routeOf } from './route';
+import { tierOf, isAlert } from './tier';
+import { testPathKind } from './harmless';
 import { analyzeScript } from './scripts';
 import { SUPPRESSIONS_FILE, parseSuppressions, applySuppressions } from './suppress';
 import { assignOrdinals } from './diff';
 import type { CiFinding, ScanResult, Severity, RepoTree } from './types';
 import { SEVERITY_RANK } from './types';
+
+// The routes whose findings are about file CONTENT: graded per tier, skipped in fixture trees.
+const CONTENT_ROUTES = new Set(['instruction', 'hook-script', 'skill-script']);
 
 export type { RepoTree, CiFinding, ScanResult };
 
@@ -85,6 +90,11 @@ export function scanTree(tree: RepoTree): ScanResult {
     }
     inspected.push(file.path);
     if (file.path === SUPPRESSIONS_FILE) continue;
+    // §Q: content under a test, fixture or example tree (see testPathKind): read, and not graded,
+    // except what an agent loads there by name, which keeps its alerts.
+    const testKind = route && CONTENT_ROUTES.has(route) ? testPathKind(file.path, route) : 'none';
+    if (testKind === 'skip') continue;
+    const before = findings.length;
     try {
       // Read ONCE: a local reader's content is read on demand and not held (§K), so a second
       // access would read the file again. Everything below uses this one copy.
@@ -120,6 +130,10 @@ export function scanTree(tree: RepoTree): ScanResult {
     } catch (err) {
       notes.push(`checker degraded on ${file.path}: ${(err as Error)?.message ?? 'error'}`);
     }
+    if (testKind === 'alerts-only') {
+      const kept = findings.splice(before).filter((f) => tierOf(f) === 'alert');
+      findings.push(...kept);
+    }
   }
 
   // K.4: a symlink where agent configuration can live that the scan does not follow is itself
@@ -138,7 +152,7 @@ export function scanTree(tree: RepoTree): ScanResult {
       title: 'Agent configuration is a symlink this scan does not follow',
       file: u.path,
       signals: [
-        `\`${quote(u.link)}\` is a symlink to \`${quote(u.text)}\` — not followed: ${u.why}`,
+        `\`${quote(u.link)}\` is a symlink to \`${quote(u.text)}\`, not followed: ${u.why}`,
         'the agent opens whatever the link leads to; no reviewer sees that content in the repository',
       ],
       fix: 'Commit the file itself, or make the link a relative path to a file inside the repository.',
@@ -157,6 +171,9 @@ export function scanTree(tree: RepoTree): ScanResult {
     suppressedCount = applySuppressions(findings, suppressions.active);
   }
 
+  // Every finding says whether it counts (§Q); only alerts set the result.
+  for (const f of findings) f.tier = tierOf(f);
+
   // Worst-first, then by file for stable output.
   findings.sort(
     (a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] || a.file.localeCompare(b.file)
@@ -172,7 +189,7 @@ export function scanTree(tree: RepoTree): ScanResult {
     findings,
     inspected,
     notes,
-    worst: worstOf(findings.filter((f) => !f.suppressed)),
+    worst: worstOf(findings.filter((f) => !f.suppressed && isAlert(f))),
     incomplete,
     ...(suppressions ? { suppressions: suppressions.active, suppressedCount } : {}),
   };

@@ -20,6 +20,7 @@ import type {
   Severity,
 } from './types';
 import { SEVERITY_RANK } from './types';
+import { isAlert } from './tier';
 
 /** The stable identity of a finding across two scans.
  *
@@ -74,13 +75,13 @@ function baseStateOf(base: ScanResult | null | undefined): BaseState {
  * old, strict behaviour when the comparison was impossible — never a false all-clear.
  */
 const NOT_HONOURED_NEW =
-  'this finding is new: a suppression cannot accept a finding in the same change that introduces it — merge it, then suppress it in a separate reviewed change';
+  'this finding is new: a suppression cannot accept a finding in the same change that introduces it. Merge it, then suppress it in a separate reviewed change';
 const BASE_UNREADABLE =
-  'the base could not be read, so no suppression can be shown to predate this change — not honoured';
+  'the base could not be read, so no suppression can be shown to predate this change: not honoured';
 const notHonouredEscalated = (from: Severity) =>
-  `this finding was accepted at ${from} and this change makes it worse — the suppression does not cover the new severity`;
+  `this finding was accepted at ${from} and this change makes it worse: the suppression does not cover the new severity`;
 const NOT_HONOURED_EVIDENCE =
-  'the evidence changed in this change (the finding now matches something different) — the suppression covered the old evidence, not this';
+  'the evidence changed in this change (the finding now matches something different): the suppression covered the old evidence, not this';
 
 /** Same evidence: what the finding matched and why it is graded as it is. `line` is not
  *  evidence — moving a finding must not end its suppression. */
@@ -100,8 +101,9 @@ function unhonour(f: CiFinding, why: string): CiFinding {
   return { ...rest, signals: [...f.signals, why] };
 }
 
+/** The gate's input: unsuppressed ALERTS only (§Q). A review item or a note never gates. */
 function worstUnsuppressed(findings: CiFinding[]): Severity | null {
-  return worstOf(findings.filter((f) => !f.suppressed).map((f) => f.severity));
+  return worstOf(findings.filter((f) => !f.suppressed && isAlert(f)).map((f) => f.severity));
 }
 
 export function diffScans(base: ScanResult | null | undefined, head: ScanResult): ScanDiff {

@@ -7,6 +7,12 @@ import { lineAtIndex } from './lines';
 import type { CiFinding } from './types';
 import { safeText } from './suppress';
 
+// The WHOLE command: `npx [-y] tsx ./file.ts [plain args]`; `${CLAUDE_PLUGIN_ROOT}/` is the plugin's
+// own folder, set by Claude Code. Anchored, with no shell operator, so
+// `sh -c "npx evil@latest; npx tsx ./a.ts"` is not excused by its tail.
+const LOCAL_RUNNER_RE =
+  /^npx\s+(?:-y\s+|--yes\s+)?(?:tsx|ts-node|node)\s+(?:\.{1,2}\/|\$\{CLAUDE_PLUGIN_ROOT\}\/)?[\w@./-]+\.(?:m?[jt]s|cjs)(?:\s+[^\s;&|`$<>()]+)*$/;
+
 export interface McpServerSpec {
   command?: string;
   args?: unknown[];
@@ -46,8 +52,13 @@ export function analyzeMcpServers(
     );
     const line = at >= 0 ? lineAtIndex(content, at) : undefined;
 
-    // Unpinned executable server.
-    if (/\bnpx\b/.test(argv) && (/@latest\b/.test(argv) || !/@\d/.test(argv))) {
+    // Unpinned executable server. A runner started on a file in the repository (`npx tsx
+    // ./server.ts`) runs local code: only the runner is unversioned, not the server (§Q).
+    if (
+      /\bnpx\b/.test(argv) &&
+      (/@latest\b/.test(argv) || !/@\d/.test(argv)) &&
+      !LOCAL_RUNNER_RE.test(argv)
+    ) {
       findings.push({
         check: 'CI-3',
         rule: 'CI-3.mcp-unpinned',
@@ -57,7 +68,7 @@ export function analyzeMcpServers(
         title: `MCP server "${name}" runs an unpinned executable`,
         file: path,
         ...(line ? { line } : {}),
-        signals: [`\`${safeText(argv, 120)}\` — unversioned/@latest npx`],
+        signals: [`\`${safeText(argv, 120)}\`: unversioned/@latest npx`],
         fix: 'Pin the MCP server package to an exact version so a PR (or a registry compromise) can’t swap the toolchain.',
       });
     }
@@ -77,7 +88,7 @@ export function analyzeMcpServers(
           file: path,
           ...(line ? { line } : {}),
           signals: [
-            `env.${k} matches ${hit.patternName} — agent-reachable secret committed to the repo`,
+            `env.${k} matches ${hit.patternName}: agent-reachable secret committed to the repo`,
           ],
           fix: 'Move the value to an env var reference (${VAR}) resolved at launch; never commit the secret.',
         });

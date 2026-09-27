@@ -2421,7 +2421,7 @@ describe('scan-repo closing CTA (presentation only — no scan logic)', () => {
   it('a HIGH scan closes with a fix-then-cover CTA (not the green line)', async () => {
     const { renderScan } = await import('../ci-check/render.js');
     const out = renderScan(result({ worst: 'high', findings: [finding('high')] }));
-    expect(out).toMatch(/to fix — then stop the next at the PR/);
+    expect(out).toMatch(/to fix, then stop the next at the PR/);
     expect(out).toContain('marketplace/actions/node9-agent-security?');
     expect(out).not.toMatch(/well-configured/);
   });

@@ -46,6 +46,99 @@ function safeInline(v) {
     .slice(0, 200);
 }
 
+// ── Tiers (§Q) ──────────────────────────────────────────────────────────────
+// Only alerts decide the result. Review items are patterns found in context that is usually
+// harmless (an install note, a quoted example, docs): listed plainly under "Worth a look", never
+// counted. A finding without a tier (an older CLI) counts as an alert.
+const isAlert = (f) => !f.tier || f.tier === 'alert';
+const isReview = (f) => f.tier === 'review';
+const GRANT_RULE = 'CI-1.skill-allowed-tools';
+const REVIEW_FILES = 10;
+const REVIEW_LINES_PER_FILE = 3;
+/** One check question per kind, so a reviewer knows what to look for. */
+function reviewQuestion(rule) {
+  if (/fetch-and-obey|remote-exec/.test(rule))
+    return "Is the agent told to run this, or is it a note for a person? Is the source the vendor's own?";
+  if (/prompt-override/.test(rule)) return 'Is this aimed at the model, or quoted as an example?';
+  if (/exfil/.test(rule)) return "Where does the data go: your own service, or someone else's?";
+  if (/secret/.test(rule))
+    return 'Is the agent asked to read or send the file, or is it only named?';
+  if (/hook-script-missing/.test(rule))
+    return 'Does this hook exist on every machine that runs it?';
+  if (/hidden-chars/.test(rule))
+    return 'Why does this script hold invisible characters? A list of them to detect is fine.';
+  if (/unscanned/.test(rule))
+    return 'node9 did not read this script (too large, or outside the folders it reads). What does it run?';
+  return 'Is this an instruction the agent follows, or text for a person?';
+}
+/** The quoted text of a finding: its first code span, else its title. */
+function excerpt(f) {
+  const m = /`([^`]+)`/.exec((f.signals || [])[0] || '');
+  return safeInline(m ? m[1] : f.title).slice(0, 120);
+}
+/** The "Worth a look" section: grouped per file, at most REVIEW_FILES files, a skill-grant line. */
+/** The review items this comment lists. On a PR with a readable base, only what the PR adds: old
+ *  review items are not news. */
+function reviewItems(result) {
+  const d = result.diff;
+  const source =
+    d && d.base === 'ok' ? d.added || [] : Array.isArray(result.findings) ? result.findings : [];
+  return source.filter((f) => !f.suppressed && isReview(f));
+}
+/** "and N items worth a look below", for a headline that has no alert to lead with. */
+function reviewTail(result) {
+  const n = reviewItems(result).length;
+  return n ? ` ${n} item${n === 1 ? '' : 's'} worth a look below.` : '';
+}
+function renderReview(result) {
+  const items = reviewItems(result);
+  const grants = items.filter((f) => f.rule === GRANT_RULE);
+  const rest = items.filter((f) => f.rule !== GRANT_RULE);
+  if (!rest.length && !grants.length) return '';
+  const L = ['<details><summary><b>🔍 Worth a look (not counted in the result)</b></summary>', ''];
+  if (rest.length) {
+    L.push(
+      "node9 found text that matches a risky pattern, but in its context it is usually harmless: an install note, a quoted example, documentation. We can't be sure, so we are pointing you at it rather than raising an alert. Please open each place and confirm it is not an instruction to the agent. Where node9 could not read a script, it says so. These items do not change the result."
+    );
+    L.push('');
+    const byFile = new Map();
+    for (const f of rest) {
+      if (!byFile.has(f.file)) byFile.set(f.file, []);
+      byFile.get(f.file).push(f);
+    }
+    // The files most worth opening first: the worst item, then the most items.
+    const worstRank = (fs) => Math.max(...fs.map((f) => RANK[f.severity] || 0));
+    const files = [...byFile.keys()].sort(
+      (x, y) =>
+        worstRank(byFile.get(y)) - worstRank(byFile.get(x)) ||
+        byFile.get(y).length - byFile.get(x).length
+    );
+    for (const file of files.slice(0, REVIEW_FILES)) {
+      const fs = byFile.get(file);
+      L.push(`- \`${safeInline(file)}\``);
+      for (const f of fs.slice(0, REVIEW_LINES_PER_FILE))
+        L.push(
+          `  - ${f.line ? `line ${Number(f.line)}: ` : ''}\`${excerpt(f)}\`. Check: ${reviewQuestion(f.rule)}`
+        );
+      if (fs.length > REVIEW_LINES_PER_FILE)
+        L.push(`  - and ${fs.length - REVIEW_LINES_PER_FILE} similar lines in this file`);
+    }
+    if (files.length > REVIEW_FILES)
+      L.push(
+        `- and ${files.length - REVIEW_FILES} more file${files.length - REVIEW_FILES === 1 ? '' : 's'}`
+      );
+  }
+  if (grants.length) {
+    L.push('');
+    L.push(
+      `${grants.length} skill${grants.length === 1 ? ' is' : 's are'} granted broad tools (Bash, Write or Edit). For most skills that matches what the skill does; check the ones that should only read.`
+    );
+  }
+  L.push('');
+  L.push('</details>');
+  return L.join('\n');
+}
+
 // ── An incomplete scan (§O, founder decision 2026-09-27) ────────────────────────
 // A PR author can make a scan incomplete (padding, caps, budgets). The conclusion is neutral,
 // never success; everything the reviewer reads must say the same, and say WHAT was not read.
@@ -69,7 +162,7 @@ function unreadList(result) {
 }
 function unreadBlock(result) {
   return [
-    "**⚠️ node9 could not read everything** — it did not finish reading this repository's agent configuration, so it cannot say this PR is clean. Not read:",
+    "**⚠️ node9 could not read everything.** It did not finish reading this repository's agent configuration, so it cannot say this PR is clean. Not read:",
     unreadList(result),
   ].join('\n');
 }
@@ -148,7 +241,8 @@ function annotatable(result) {
         : []
       : [...(d.added || []), ...(d.escalated || []).map((e) => e.finding)];
   // A suppressed finding is a reviewed decision: it stays in the collapsed list, not on the diff.
-  return all.filter((f) => !f.suppressed);
+  // Only alerts are annotated (§Q): a review item is listed in the comment, not on the diff.
+  return all.filter((f) => !f.suppressed && isAlert(f));
 }
 
 /** GitHub workflow commands: one annotation per finding, on the file in the PR diff.
@@ -202,16 +296,16 @@ function threatLine(anchor, companions) {
     case 'CI-1':
       return sev === 'high'
         ? "This repo pre-authorizes every contributor's agent to run broad tools (Bash/Write) with no deny backstop."
-        : 'A committed agent config grants broad tools — worth scoping down.';
+        : 'A committed agent config grants broad tools. It is worth scoping down.';
     case 'CI-3':
-      return "An MCP server runs an unpinned package — a compromised release would run in every contributor's agent.";
+      return "An MCP server runs an unpinned package: a compromised release would run in every contributor's agent.";
     case 'CI-6':
       if (sev === 'critical')
         return 'An agent instruction file hides characters that conceal instructions from human review.';
       if (sev === 'high')
         return 'An agent instruction file tells the agent to ignore its own rules.';
       if (sev === 'medium')
-        return 'An agent instruction file points the agent at a risky action — review it.';
+        return 'An agent instruction file points the agent at a risky action. Review it.';
       return 'A minor note on an agent instruction file.';
     default:
       return RANK[sev] >= RANK.high
@@ -231,7 +325,7 @@ function mechanism(anchor, companions) {
     case 'CI-4':
       return calm
         ? "It's gated or scoped today, but a small change (an untrusted trigger, or broader tools) would open it."
-        : "Anyone who can trigger this workflow reaches the agent, and it runs with your repo's permissions — no human approves first.";
+        : "Anyone who can trigger this workflow reaches the agent, and it runs with your repo's permissions. No human approves first.";
     case 'CI-1':
       return 'It ships in the repo, so it applies to every contributor who runs the agent here.';
     case 'CI-3':
@@ -245,7 +339,9 @@ function mechanism(anchor, companions) {
 
 /** The collapsed fact-list — the previous renderComment body, kept verbatim for power users. */
 function renderDetail(result) {
-  const findings = Array.isArray(result.findings) ? result.findings : [];
+  const findings = (Array.isArray(result.findings) ? result.findings : []).filter(
+    (f) => !isReview(f)
+  );
   const L = [];
   L.push(
     `<details><summary>${findings.length} finding(s) · ${[...new Set(findings.map((f) => f.check))].join(', ')} · full detail</summary>`
@@ -253,7 +349,7 @@ function renderDetail(result) {
   L.push('');
   for (const f of findings) {
     L.push(
-      `**${ICON[f.severity] ?? '•'} ${String(f.severity).toUpperCase()} — ${mdLine(f.title)}**` +
+      `**${ICON[f.severity] ?? '•'} ${String(f.severity).toUpperCase()}: ${mdLine(f.title)}**` +
         (f.suppressed ? ` _(suppressed: \`${safeInline(f.suppressed.reason)}\`)_` : '')
     );
     L.push(`\`${safeInline(f.file)}${f.line ? ':' + Number(f.line) : ''}\` · ${f.check}`);
@@ -269,9 +365,19 @@ function renderDetail(result) {
 /** Render the sticky comment: lead with the ATTACK STORY (threat → mechanism → single fix),
  *  raw findings collapsed into <details>. Same ScanResult data, reframed for impact. */
 function renderComment(result) {
-  const all = (Array.isArray(result.findings) ? result.findings : []).filter((f) => !f.suppressed);
+  const review = renderReview(result);
+  const withReview = (L) => {
+    if (review) L.push('', review);
+    return L.join('\n');
+  };
+  const all = (Array.isArray(result.findings) ? result.findings : []).filter(
+    (f) => !f.suppressed && isAlert(f)
+  );
   const suppressedN = (Array.isArray(result.findings) ? result.findings : []).filter(
     (f) => f.suppressed
+  ).length;
+  const notesN = (Array.isArray(result.findings) ? result.findings : []).filter(
+    (f) => !f.suppressed && f.tier === 'note'
   ).length;
   const d = result.diff;
   const trusted = d && d.base === 'ok';
@@ -287,8 +393,9 @@ function renderComment(result) {
     L.push(`### 🛡️ node9 agent-security · ✅${suppressedN ? ` · ${suppressedN} suppressed` : ''}`);
     L.push('');
     L.push(
-      `**This PR introduces no agent-security findings.**` +
-        ((d.removed || []).length ? ` It also fixes ${d.removed.length}.` : '')
+      `**This PR introduces no agent-security ${reviewItems(result).length ? 'alerts' : 'findings'}.**` +
+        ((d.removed || []).length ? ` It also fixes ${d.removed.length}.` : '') +
+        reviewTail(result)
     );
     if ((d.unchanged || []).length) {
       L.push('');
@@ -298,14 +405,14 @@ function renderComment(result) {
     }
     L.push('');
     L.push(renderDetail(result));
-    return L.join('\n');
+    return withReview(L);
   }
   const partial = isIncomplete(result);
   if (d && !trusted) {
     L.push(
       d.base === 'did-not-run'
-        ? '<sub>⚠️ Could not read the base commit, so nothing below can be called new — every finding in this repo is listed. A shallow clone is the usual cause.</sub>'
-        : '<sub>⚠️ The base scan could not read every file, so a finding missing from it would look new — every finding in this repo is listed.</sub>'
+        ? '<sub>⚠️ Could not read the base commit, so nothing below can be called new. Every finding in this repo is listed. A shallow clone is the usual cause.</sub>'
+        : '<sub>⚠️ The base scan could not read every file, so a finding missing from it would look new. Every finding in this repo is listed.</sub>'
     );
     L.push('');
   }
@@ -315,36 +422,39 @@ function renderComment(result) {
     );
     L.push('');
     L.push(unreadBlock(result));
-    if (suppressedN) {
+    if (suppressedN || notesN) {
       L.push('');
       L.push(renderDetail(result));
     }
-    return L.join('\n');
+    return withReview(L);
   }
   if (findings.length === 0) {
     L.push(`### 🛡️ node9 agent-security · ✅${suppressedN ? ` · ${suppressedN} suppressed` : ''}`);
     L.push('');
     L.push(
       suppressedN
-        ? `No unsuppressed agent-security findings. ${suppressedN} finding(s) are suppressed by \`.node9-ignore.json\` — listed below with their reasons.`
-        : 'No agent-security findings — no injectable workflows, unsafe agent configs, or unpinned MCP servers.'
+        ? `No unsuppressed agent-security findings. ${suppressedN} finding(s) are suppressed by \`.node9-ignore.json\` and listed below with their reasons.`
+        : reviewTail(result)
+          ? `No agent-security alerts.${reviewTail(result)}`
+          : 'No agent-security findings: no injectable workflows, unsafe agent configs, or unpinned MCP servers.'
     );
-    if (suppressedN) {
+    // Notes (a gated workflow) are not counted, but they are shown.
+    if (suppressedN || notesN) {
       L.push('');
       L.push(renderDetail(result));
     }
-    return L.join('\n');
+    return withReview(L);
   }
   const anchor = [...findings].sort((a, b) => RANK[b.severity] - RANK[a.severity])[0];
   const companions = findings.filter((f) => f.file === anchor.file); // chain-merge same-file findings
   const tier =
     worst === 'critical'
-      ? 'Critical — action needed'
+      ? 'Critical: action needed'
       : worst === 'high'
-        ? 'High — action needed'
+        ? 'High: action needed'
         : worst === 'medium'
-          ? 'Medium — hardening'
-          : 'Advisory — note';
+          ? 'Medium: hardening'
+          : 'Advisory: note';
 
   L.push(
     `### 🛡️ node9 agent-security · ${ICON[worst] ?? '🟢'} ${tier}` +
@@ -354,7 +464,7 @@ function renderComment(result) {
   if (trusted && (d.escalated || []).length) {
     L.push('');
     L.push(
-      `_${d.escalated.length} of these already existed and this PR widens them — a guardrail was removed, not added._`
+      `_${d.escalated.length} of these already existed and this PR widens them: a guardrail was removed, not added._`
     );
   }
   if (partial) {
@@ -379,26 +489,32 @@ function renderComment(result) {
   }
   L.push('');
   L.push(renderDetail(result));
+  if (review) L.push('', review);
   L.push('');
   L.push(
-    "<sub>node9 scans committed agent config statically — it never runs your repo's code. · Catch this on every PR → node9.ai</sub>"
+    "<sub>node9 scans committed agent config statically and never runs your repo's code. · Catch this on every PR → node9.ai</sub>"
   );
   return L.join('\n');
 }
 
 /** A check-run output summary (title + short body). */
 function checkSummary(result) {
-  const n = Array.isArray(result.findings) ? result.findings.length : 0;
+  const n = (Array.isArray(result.findings) ? result.findings : []).filter(
+    (f) => !f.suppressed && isAlert(f)
+  ).length;
   const worst = result.worst;
   if (isIncomplete(result)) {
     const title = worst
-      ? `${n} agent-security finding(s), worst: ${worst} — scan incomplete`
+      ? `${n} agent-security finding(s), worst: ${worst} (scan incomplete)`
       : 'node9 could not read everything';
     return { title, summary: `${title}\n\nNot read:\n${unreadList(result)}` };
   }
+  const reviewN = reviewItems(result).length;
   const title = worst
     ? `${n} agent-security finding(s), worst: ${worst}`
-    : 'No agent-security findings';
+    : reviewN
+      ? `No agent-security alerts, ${reviewN} item(s) worth a look`
+      : 'No agent-security findings';
   return { title, summary: title };
 }
 
@@ -470,7 +586,7 @@ async function main() {
       try {
         await upsertStickyComment(repo, prNumber, renderSkipped(skipped));
       } catch (e) {
-        console.error(`node9: comment failed (${e.message}) — continuing.`);
+        console.error(`node9: comment failed (${e.message}), continuing.`);
       }
     }
     if (headSha) {
@@ -483,7 +599,7 @@ async function main() {
           output: { title: 'node9 did not scan this PR', summary: why },
         });
       } catch (e) {
-        console.error(`node9: check-run failed (${e.message}) — continuing.`);
+        console.error(`node9: check-run failed (${e.message}), continuing.`);
       }
     }
     console.log(`node9 agent-security: not scanned (${skipped}) · neutral`);
@@ -495,7 +611,7 @@ async function main() {
   try {
     result = JSON.parse(fs.readFileSync(process.env.NODE9_RESULT, 'utf8'));
   } catch (e) {
-    console.error(`node9: could not read scan result (${e.message}) — skipping (fail-open).`);
+    console.error(`node9: could not read scan result (${e.message}), skipping (fail-open).`);
     return 0;
   }
 
@@ -523,14 +639,14 @@ async function main() {
     try {
       await upsertStickyComment(repo, prNumber, renderComment(result));
     } catch (e) {
-      console.error(`node9: comment failed (${e.message}) — continuing.`);
+      console.error(`node9: comment failed (${e.message}), continuing.`);
     }
   }
   if (headSha) {
     try {
       await postCheckRun(repo, headSha, result, conclusion);
     } catch (e) {
-      console.error(`node9: check-run failed (${e.message}) — continuing.`);
+      console.error(`node9: check-run failed (${e.message}), continuing.`);
     }
   }
 
@@ -568,7 +684,7 @@ function selftest() {
     ],
   });
   assert.ok(c.startsWith(MARKER), 'marker first (sticky)');
-  assert.ok(c.includes('<details>') && c.includes('HIGH — X'), 'raw detail collapsed, not deleted');
+  assert.ok(c.includes('<details>') && c.includes('HIGH: X'), 'raw detail collapsed, not deleted');
   assert.ok(c.includes('✅ Fix') && c.includes('do y'), 'single fix surfaced up front');
   assert.ok(
     renderComment({ worst: null, findings: [] }).includes('No agent-security findings'),
@@ -701,10 +817,10 @@ function selftest() {
     'the detail shows the reason, as a code span'
   );
   assert.ok(
-    !c2.includes('Critical — action needed'),
+    !c2.includes('Critical: action needed'),
     'the headline tier ignores the suppressed critical'
   );
-  assert.ok(c2.includes('Medium — hardening'), 'and is driven by the unsuppressed medium');
+  assert.ok(c2.includes('Medium: hardening'), 'and is driven by the unsuppressed medium');
   const allSup = renderComment({
     worst: null,
     findings: [f('critical', { suppressed: sup })],
@@ -864,7 +980,7 @@ function selftest() {
   assert.doesNotMatch(
     med,
     /run code|steal|arbitrary code/i,
-    'medium must stay calm — no breach language'
+    'medium must stay calm: no breach language'
   );
   assert.match(med, /hardening/i, 'medium → hardening framing');
   // ADVISORY → neutral, no drama.
@@ -887,7 +1003,7 @@ if (require.main === module) {
     main()
       .then((code) => process.exit(code))
       .catch((e) => {
-        console.error(`node9: unexpected error (${e.message}) — failing open.`);
+        console.error(`node9: unexpected error (${e.message}), failing open.`);
         process.exit(0);
       });
   }

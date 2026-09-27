@@ -107,7 +107,7 @@ export function registerScanRepoCommand(program: Command): void {
             suppressedCount: 0,
             notes: [
               ...res.notes,
-              'running on a pull request without --base: no suppression can be shown to predate it — none honoured. Pass --base <base sha> to honour suppressions that existed before this PR.',
+              'running on a pull request without --base, so no suppression can be shown to predate it and none is honoured. Pass --base <base sha> to honour suppressions that existed before this PR.',
             ],
           };
         }
