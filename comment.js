@@ -46,6 +46,45 @@ function safeInline(v) {
     .slice(0, 200);
 }
 
+// ── An incomplete scan (§O, founder decision 2026-09-27) ────────────────────────
+// A PR author can make a scan incomplete (padding, caps, budgets). The conclusion is neutral,
+// never success; everything the reviewer reads must say the same, and say WHAT was not read.
+const INCOMPLETE_NOTE_RE = /may be INCOMPLETE/i;
+function isIncomplete(result) {
+  return !!(result.incomplete || (result.diff && result.diff.incomplete));
+}
+/** The scan's own reasons for being partial: the notes that carry "may be INCOMPLETE". */
+function unreadNotes(result) {
+  const notes = Array.isArray(result.notes) ? result.notes : [];
+  return [...new Set(notes.map(String).filter((n) => INCOMPLETE_NOTE_RE.test(n)))];
+}
+/** The reasons as a markdown list: at most 5, each an inert code span (file names are the PR
+ *  author's), then how many more. */
+function unreadList(result) {
+  const notes = unreadNotes(result);
+  const L = notes.slice(0, 5).map((n) => `- \`${safeInline(n)}\``);
+  if (notes.length > 5) L.push(`- and ${notes.length - 5} more`);
+  if (!notes.length) L.push('- (the scan did not say which files)');
+  return L.join('\n');
+}
+function unreadBlock(result) {
+  return [
+    "**⚠️ node9 could not read everything** — it did not finish reading this repository's agent configuration, so it cannot say this PR is clean. Not read:",
+    unreadList(result),
+  ].join('\n');
+}
+/** GitHub workflow-command data: `%`, CR and LF must be escaped, or a note could end the
+ *  command and start another. */
+function escapeCommandData(v) {
+  return String(v).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+}
+/** One Actions-log warning for an incomplete scan; null for a complete one. */
+function incompleteWarning(result) {
+  if (!isIncomplete(result)) return null;
+  const first = unreadNotes(result)[0] || 'the scan did not finish reading every file';
+  return `::warning title=node9 could not read everything::${escapeCommandData(first.slice(0, 300))}`;
+}
+
 /** Why the Action did not scan, in the reviewer's words, with the one-line fix. */
 const SKIP_REASONS = {
   pull_request_target:
@@ -236,12 +275,7 @@ function renderComment(result) {
     L.push(renderDetail(result));
     return L.join('\n');
   }
-  if (d && trusted && (d.incomplete || result.incomplete)) {
-    L.push(
-      '<sub>⚠️ This scan could not read every file, so it cannot claim the change introduced nothing — treat the list below as partial.</sub>'
-    );
-    L.push('');
-  }
+  const partial = isIncomplete(result);
   if (d && !trusted) {
     L.push(
       d.base === 'did-not-run'
@@ -249,6 +283,18 @@ function renderComment(result) {
         : '<sub>⚠️ The base scan could not read every file, so a finding missing from it would look new — every finding in this repo is listed.</sub>'
     );
     L.push('');
+  }
+  if (findings.length === 0 && partial) {
+    L.push(
+      `### 🛡️ node9 agent-security · ⚠️ could not read everything${suppressedN ? ` · ${suppressedN} suppressed` : ''}`
+    );
+    L.push('');
+    L.push(unreadBlock(result));
+    if (suppressedN) {
+      L.push('');
+      L.push(renderDetail(result));
+    }
+    return L.join('\n');
   }
   if (findings.length === 0) {
     L.push(`### 🛡️ node9 agent-security · ✅${suppressedN ? ` · ${suppressedN} suppressed` : ''}`);
@@ -286,6 +332,10 @@ function renderComment(result) {
       `_${d.escalated.length} of these already existed and this PR widens them — a guardrail was removed, not added._`
     );
   }
+  if (partial) {
+    L.push('');
+    L.push(unreadBlock(result));
+  }
   L.push('');
   L.push(`**${threatLine(anchor, companions)}**`);
   const mech = mechanism(anchor, companions);
@@ -315,6 +365,12 @@ function renderComment(result) {
 function checkSummary(result) {
   const n = Array.isArray(result.findings) ? result.findings.length : 0;
   const worst = result.worst;
+  if (isIncomplete(result)) {
+    const title = worst
+      ? `${n} agent-security finding(s), worst: ${worst} — scan incomplete`
+      : 'node9 could not read everything';
+    return { title, summary: `${title}\n\nNot read:\n${unreadList(result)}` };
+  }
   const title = worst
     ? `${n} agent-security finding(s), worst: ${worst}`
     : 'No agent-security findings';
@@ -428,6 +484,9 @@ async function main() {
     failOn,
     !!(result.incomplete || (result.diff && result.diff.incomplete))
   );
+
+  const warning = incompleteWarning(result);
+  if (warning) console.log(warning);
 
   // Inline annotations, on the file the reviewer is already looking at. Printed before the
   // API calls so they still land if commenting fails.
@@ -599,7 +658,7 @@ function selftest() {
     !partialComment.includes('introduces no agent-security findings'),
     'a partial scan never claims the PR introduced nothing'
   );
-  assert.ok(partialComment.includes('could not read every file'), 'a partial scan says so');
+  assert.ok(partialComment.includes('could not read everything'), 'a partial scan says so');
 
   // ── suppression (.node9-ignore.json) ─────────────────────────────────────────
   const sup = { reason: 'accepted, tracked in #412', key: 'k' };
@@ -809,4 +868,12 @@ if (require.main === module) {
   }
 }
 
-module.exports = { decide, renderComment, checkSummary, threatLine, mechanism, renderDetail };
+module.exports = {
+  decide,
+  renderComment,
+  checkSummary,
+  incompleteWarning,
+  threatLine,
+  mechanism,
+  renderDetail,
+};
