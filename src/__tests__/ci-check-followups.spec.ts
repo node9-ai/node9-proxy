@@ -22,6 +22,7 @@ import {
   isInstructionFile,
 } from '../ci-check/instructions';
 import { selectSurface } from '../ci-check/fetch';
+import { routeOf } from '../ci-check/route';
 
 const G = 'integrations/gstack';
 const V = 'integrations/claude-code-harness/skills/generate-video';
@@ -93,8 +94,15 @@ describe('I.2 — an application with a SKILL.md at its root is not one big skil
 
   it('the ONE selector applies it (so all three readers agree)', () => {
     const picked = selectSurface(listing);
-    expect(picked).not.toContain(`${G}/docs/designs/GCOMPACTION.md`);
-    expect(picked).not.toContain(`${G}/CHANGELOG.md`);
+    // §N: an app's own docs are selected, but routed as app docs — graded only when the app's
+    // SKILL.md names them — and sorted after every file that is always graded.
+    const dirs = skillDirsOf(listing);
+    const apps = appSkillDirsOf(listing, dirs);
+    for (const doc of [`${G}/docs/designs/GCOMPACTION.md`, `${G}/CHANGELOG.md`]) {
+      expect(picked).toContain(doc);
+      expect(routeOf(doc, dirs, apps)).toBe('app-doc');
+      expect(picked.indexOf(doc)).toBeGreaterThan(picked.indexOf(`${G}/references/usage.md`));
+    }
     expect(picked).toContain(`${G}/references/usage.md`);
     expect(picked).toContain(`${G}/CLAUDE.md`);
     expect(picked).toContain('.claude/skills/deploy/docs/runbook.md');

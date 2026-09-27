@@ -8,7 +8,7 @@ import { analyzeWorkflow, analyzeWorkflowSecrets } from './workflows';
 import { analyzeAgentConfig, analyzeSkillGrants } from './agent-config';
 import { analyzeMcp } from './mcp';
 import { analyzeCodexConfig } from './codex';
-import { analyzeInstructionFile, skillDirsOf } from './instructions';
+import { analyzeInstructionFile, appSkillDirsOf, namedDocs, skillDirsOf } from './instructions';
 import { routeOf } from './route';
 import { analyzeScript } from './scripts';
 import { SUPPRESSIONS_FILE, parseSuppressions, applySuppressions } from './suppress';
@@ -53,15 +53,43 @@ export function scanTree(tree: RepoTree): ScanResult {
       notes.push(`${(err as Error)?.message ?? `${SUPPRESSIONS_FILE} could not be read`}`);
     }
   }
+  const appDirs = appSkillDirsOf(tree.paths ?? tree.files.map((f) => f.path), skillDirs);
+  // §N: the docs each app-root skill's SKILL.md names — the only app docs that are graded.
+  const named = new Map<string, Set<string>>();
+  const namedBy = (docPath: string): boolean => {
+    let dir = docPath;
+    do dir = dir.slice(0, Math.max(0, dir.lastIndexOf('/')));
+    while (dir && !appDirs.has(dir));
+    if (!dir) return false;
+    if (!named.has(dir)) {
+      const skill = tree.files.find(
+        (f) =>
+          f.path === `${dir}/SKILL.md` || f.path.toLowerCase() === `${dir.toLowerCase()}/skill.md`
+      );
+      let text = '';
+      try {
+        text = skill?.content ?? '';
+      } catch {
+        /* unreadable: the SKILL.md's own entry already says so */
+      }
+      named.set(dir, namedDocs(dir, text));
+    }
+    return named.get(dir)!.has(docPath);
+  };
   for (const file of tree.files) {
+    // The reader routed each path over the whole plan (K.4); a hand-built tree has no route.
+    let route = file.route !== undefined ? file.route : routeOf(file.path, skillDirs, appDirs);
+    if (route === 'app-doc') {
+      if (!namedBy(file.path)) continue; // the app's own doc: not graded, not inspected
+      route = 'instruction';
+    }
     inspected.push(file.path);
     if (file.path === SUPPRESSIONS_FILE) continue;
     try {
       // Read ONCE: a local reader's content is read on demand and not held (§K), so a second
       // access would read the file again. Everything below uses this one copy.
       const content = file.content;
-      // The reader routed each path over the whole plan (K.4); a hand-built tree has no route.
-      switch (file.route !== undefined ? file.route : routeOf(file.path, skillDirs)) {
+      switch (route) {
         case 'workflow': {
           const f = analyzeWorkflow(file.path, content);
           if (f) findings.push(f);

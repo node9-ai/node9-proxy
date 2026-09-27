@@ -138,6 +138,47 @@ export function isSkillSupportFile(
   return false;
 }
 
+/** A markdown file of an APPLICATION that carries a skill (§N): under an app-root skill directory
+ *  and outside the Agent Skills layout. Selected by path like any support file, but graded only
+ *  when the app's SKILL.md names it (scanTree decides, with the content) — an app's CHANGELOG and
+ *  design docs are the app's, while a doc the skill tells the agent to follow is the skill's. */
+export function isAppDoc(
+  path: string,
+  skillDirs: ReadonlySet<string>,
+  appDirs: ReadonlySet<string>
+): boolean {
+  // An instruction file by its own name (CLAUDE.md, copilot-instructions.md, …) is always one.
+  if (!path.endsWith('.md') || INSTRUCTION_FILE_RE.test(path)) return false;
+  for (let d = path.lastIndexOf('/'); d > 0; d = path.lastIndexOf('/', d - 1)) {
+    const dir = path.slice(0, d);
+    if (!skillDirs.has(dir)) continue;
+    return appDirs.has(dir) && !SKILL_LAYOUT_RE.test(path.slice(d + 1));
+  }
+  return false;
+}
+
+/** The `.md` files a SKILL.md in `dir` names by a relative path — a markdown link target, a bare
+ *  or backticked token — resolved against `dir` and staying inside it. A tokenizer, not a regex:
+ *  linear by construction (§L). URLs, absolute and home paths are not the skill's files. */
+export function namedDocs(dir: string, skillMd: string): Set<string> {
+  const out = new Set<string>();
+  for (const raw of skillMd.split(/[\s()[\]<>`'"]+/)) {
+    const token = raw.replace(/[#?].*$/, '').replace(/[.,;:!]+$/, '');
+    if (!/\.md$/i.test(token) || token.includes('://') || /^[/~]/.test(token)) continue;
+    const parts: string[] = dir.split('/');
+    let inside = true;
+    for (const c of token.split('/')) {
+      if (c === '' || c === '.') continue;
+      if (c === '..') {
+        parts.pop();
+        if (parts.length < dir.split('/').length) inside = false;
+      } else parts.push(c);
+    }
+    if (inside) out.add(parts.join('/'));
+  }
+  return out;
+}
+
 /** Files an agent will RUN rather than read. Surface by path, like workflows: a hook script
  *  is anything runnable under `.claude/hooks/` at any depth, a skill script is a runnable
  *  file inside a skill directory. Graded by analyzeScript in scripts.ts. */

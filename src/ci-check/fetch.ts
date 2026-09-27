@@ -17,6 +17,7 @@ import {
   appSkillDirsOf,
   isHookScript,
   isSkillScript,
+  isAppDoc,
 } from './instructions';
 
 // gh-CLI token is resolved at most once per process (spawning gh is expensive).
@@ -89,15 +90,19 @@ export function selectSurface(paths: string[]): string[] {
   // Scripts sort with the supporting files: a cap must never drop a SKILL.md for its own
   // helper, and a hook's settings.json before the hook it names.
   const isLate = (p: string) => isSupport(p) || isHookScript(p) || isSkillScript(p, skillDirs);
+  // An app's other docs come last of all (§N): they are graded only if its SKILL.md names them,
+  // so under a cap they must never displace a file that is always graded.
+  const rank = (p: string) => (isAppDoc(p, skillDirs, appDirs) ? 2 : Number(isLate(p)));
   return paths
     .filter(
       (p) =>
         isInstructionFile(p, skillDirs, appDirs) ||
         CONFIG_FILE_RE.test(p) ||
         isHookScript(p) ||
-        isSkillScript(p, skillDirs)
+        isSkillScript(p, skillDirs) ||
+        isAppDoc(p, skillDirs, appDirs)
     )
-    .sort((a, b) => Number(isLate(a)) - Number(isLate(b)));
+    .sort((a, b) => rank(a) - rank(b));
 }
 // Dependency / framework-output dirs that are NEVER a repo's own agent surface — a vendored
 // `node_modules/**/CLAUDE.md` is noise. Skipped SILENTLY.
@@ -167,7 +172,10 @@ export function pickSurfacePaths(
 ): string[] {
   const surface = selectSurface(paths.filter((p) => !isUnwalked(p)));
   const matched = surface.filter((p) => !isBuildOutput(p));
-  const softSkipped = surface.filter((p) => isBuildOutput(p));
+  // An app's own docs are graded only when named (§N); one under build output is not news.
+  const skillDirs = skillDirsOf(surface);
+  const appDirs = appSkillDirsOf(paths, skillDirs);
+  const softSkipped = surface.filter((p) => isBuildOutput(p) && !isAppDoc(p, skillDirs, appDirs));
   const capped = matched.slice(0, caps.files);
   // AT the cap, not past it: a scan that stops exactly at the limit cannot be told apart
   // from one that had more to read, so it is not reported as whole.
@@ -660,6 +668,7 @@ function planReads(
   if ('need' in v) return v;
   const planned = planSurface(v.paths, notes, !!opts.truncated);
   const skillDirs = skillDirsOf(planned);
+  const appDirs = appSkillDirsOf(v.paths, skillDirs);
   const resolved: (PlannedRead & { key: string })[] = [];
   const dangling: string[] = [];
   const needs = new Set<string>();
@@ -676,7 +685,7 @@ function planReads(
       continue; // 'budget' is noted once, below
     }
     if (r.kind !== 'file') continue; // a directory or a submodule named like a surface file
-    const route = routeOf(rel, skillDirs);
+    const route = routeOf(rel, skillDirs, appDirs);
     resolved.push({ rel, real: r.real, route, key: `${r.real}\0${route}` });
   }
   const own = new Set(resolved.filter((x) => x.rel === x.real).map((x) => x.key));
