@@ -4,7 +4,7 @@
 // never a hand-rolled key scanner, which would mis-read a quoted or multi-line value.
 // Static, parse-only, never executed.
 
-import { parse as parseYaml } from 'yaml';
+import { parseYamlStrict as parseYaml } from './yaml-strict';
 
 /** The frontmatter as an object, or null when the file has none or it does not parse.
  *  A malformed block is null, not a throw: the caller is a scanner and must keep going. */

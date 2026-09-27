@@ -14,7 +14,7 @@ import {
   TAG_CHARS,
   BIDI_OVERRIDE,
   OVERRIDE_RE,
-  FETCH_OBEY_RE,
+  findFetchObey,
   SECRET_PATH_RE,
   isInlineParser,
   maskPathPlaceholders,
@@ -30,9 +30,25 @@ const PROCESS_SUBST_RE = /\b(bash|sh|zsh)\s+<\(\s*(curl|wget)\b/;
 const EVAL_FETCH_RE = /\beval\s+["']?\$\(\s*(curl|wget)\b/;
 const SHELL_C_FETCH_RE = /\b(sh|bash|zsh)\s+-c\s+["']\$\(\s*(curl|wget)\b/;
 // Sending a local file somewhere: curl's upload/data-from-file forms, or netcat fed a file.
-const CURL_UPLOAD_RE =
-  /\bcurl\b[^\n]*\s(?:-d|--data(?:-binary|-raw|-urlencode)?)\s*["']?@|\bcurl\b[^\n]*\s(?:-T|--upload-file)\s+\S/;
-const NETCAT_RE = /\b(nc|ncat|netcat)\b[^\n]*<\s*\S/;
+// Linear (§L): the first `curl`/`nc` on a line, then the option in the rest of it — a later one
+// sees strictly less of the line, so it cannot match where the first does not. Same answers as
+//   \bcurl\b[^\n]*\s(?:-d|--data(?:-binary|-raw|-urlencode)?)\s*["']?@|\bcurl\b[^\n]*\s(?:-T|--upload-file)\s+\S
+//   \b(nc|ncat|netcat)\b[^\n]*<\s*\S
+// on a logical line (no newline), which backtracked quadratically on a long one.
+const CURL_WORD_RE = /\bcurl\b/;
+const CURL_UPLOAD_TAIL_RE =
+  /\s(?:-d|--data(?:-binary|-raw|-urlencode)?)\s*["']?@|\s(?:-T|--upload-file)\s+\S/;
+const NETCAT_WORD_RE = /\b(nc|ncat|netcat)\b/;
+const NETCAT_TAIL_RE = /<\s*\S/;
+const firstThen = (line: string, word: RegExp, tail: RegExp): boolean => {
+  const w = word.exec(line);
+  return !!w && tail.test(line.slice(w.index + w[0].length));
+};
+const eachLine = (text: string, f: (line: string) => boolean) => text.split('\n').some(f);
+export const hasCurlUpload = (text: string): boolean =>
+  eachLine(text, (l) => firstThen(l, CURL_WORD_RE, CURL_UPLOAD_TAIL_RE));
+export const hasNetcatRead = (text: string): boolean =>
+  eachLine(text, (l) => firstThen(l, NETCAT_WORD_RE, NETCAT_TAIL_RE));
 // Credential material by its home path, in the spellings a script uses.
 const HOME_SECRET_RE = /\$HOME\/\.(aws|ssh|config\/gh)\b|\$\{HOME\}\/\.(aws|ssh|config\/gh)\b/;
 // What makes an upload EXFIL rather than a skill doing its job: the payload is sensitive —
@@ -151,7 +167,7 @@ export function analyzeScript(path: string, content: string, rulePrefix: string)
   }
 
   for (const { text, line, emitted } of logicalLines(content)) {
-    const fo = FETCH_OBEY_RE.exec(text);
+    const fo = findFetchObey(text);
     const remote =
       (fo && !isInlineParser(text, fo)) ||
       PROCESS_SUBST_RE.test(text) ||
@@ -169,7 +185,7 @@ export function analyzeScript(path: string, content: string, rulePrefix: string)
         )
       );
     }
-    if ((CURL_UPLOAD_RE.test(text) || NETCAT_RE.test(text)) && isSensitive(text)) {
+    if ((hasCurlUpload(text) || hasNetcatRead(text)) && isSensitive(text)) {
       once(
         mk(
           'exfil',

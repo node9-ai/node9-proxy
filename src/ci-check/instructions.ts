@@ -179,8 +179,84 @@ export const OVERRIDE_RE =
 // ── Tier 2: dangerous sink WITH agent-directive framing → medium ───────────────
 // Remote-exec (fetch-and-obey). `| python3 -m json.tool` pretty-prints the fetched bytes,
 // it does not execute them (2 of the 12 skill-corpus false positives, 2026-09-22).
-export const FETCH_OBEY_RE =
-  /\b(curl|wget|iwr|invoke-webrequest)\b[^\n|]*\|\s*(bash|sh|zsh|python3?(?!\s+-m\s+json\.tool\b)|node|iex)\b|\b(curl|wget)\b[^\n]*&&[^\n]*\b(bash|sh)\b/i;
+//
+// Found in linear time (§L). The regex this replaces —
+//   \b(curl|wget|iwr|invoke-webrequest)\b[^\n|]*\|\s*(bash|sh|zsh|python3?(?!\s+-m\s+json\.tool\b)|node|iex)\b
+//   |\b(curl|wget)\b[^\n]*&&[^\n]*\b(bash|sh)\b                                        (flag i)
+// — backtracked: every `curl` scanned to the end of its line and back, so a 64 KB line of
+// `curl a && ` took about 7 minutes. findFetchObey returns the SAME index and matched text
+// (a differential test holds it to the regex on 20,000 random texts).
+const FETCH_WORD_RE = /\b(curl|wget|iwr|invoke-webrequest)\b/gi;
+const PIPED_SHELL_RE = /\s*(bash|sh|zsh|python3?(?!\s+-m\s+json\.tool\b)|node|iex)\b/iy;
+const AND_SHELL_WORD_RE = /\b(bash|sh)\b/gi;
+
+/** The first fetch-and-obey in `text`, as `RegExp.exec` of the old regex would report it. */
+export function findFetchObey(text: string): { index: number; 0: string } | null {
+  for (let start = 0; start <= text.length;) {
+    let end = text.indexOf('\n', start);
+    if (end < 0) end = text.length;
+    const m = fetchObeyInLine(text, start, end);
+    if (m) return m;
+    start = end + 1;
+  }
+  return null;
+}
+
+function fetchObeyInLine(
+  text: string,
+  start: number,
+  end: number
+): { index: number; 0: string } | null {
+  const line = text.slice(start, end);
+  const words: { at: number; word: string }[] = [];
+  for (const w of line.matchAll(FETCH_WORD_RE))
+    words.push({ at: w.index, word: w[1].toLowerCase() });
+  if (!words.length) return null;
+
+  // Branch 1: a fetch word, then no pipe until a pipe that a shell follows (the shell may sit on
+  // the next line: `\s*` crosses newlines). The leftmost word of the first such segment.
+  let first: { index: number; 0: string } | null = null;
+  let w = 0;
+  for (let seg = 0; w < words.length;) {
+    const pipe = line.indexOf('|', seg);
+    if (pipe < 0) break;
+    if (words[w].at < pipe) {
+      PIPED_SHELL_RE.lastIndex = start + pipe + 1;
+      const sh = PIPED_SHELL_RE.exec(text);
+      if (sh) {
+        first = {
+          index: start + words[w].at,
+          0: text.slice(start + words[w].at, sh.index + sh[0].length),
+        };
+        break;
+      }
+    }
+    seg = pipe + 1;
+    while (w < words.length && words[w].at < seg) w++;
+  }
+
+  // Branch 2: the FIRST curl/wget with a `&&` after it and a bash/sh word after that. A later
+  // curl sees less of the line, so it cannot match where the first does not. The regex's
+  // greedy parts end the match at the line's LAST bash/sh word.
+  const cw = words.find((x) => x.word === 'curl' || x.word === 'wget');
+  let second: { index: number; 0: string } | null = null;
+  if (cw) {
+    const amp = line.indexOf('&&', cw.at + cw.word.length);
+    if (amp >= 0) {
+      let lastEnd = -1;
+      let lastStart = -1;
+      for (const s of line.matchAll(AND_SHELL_WORD_RE)) {
+        lastStart = s.index;
+        lastEnd = s.index + s[0].length;
+      }
+      if (lastStart >= amp + 2) second = { index: start + cw.at, 0: line.slice(cw.at, lastEnd) };
+    }
+  }
+
+  // Leftmost wins; at the same start the first alternative does.
+  if (first && second) return second.index < first.index ? second : first;
+  return first ?? second;
+}
 // Credential-file access.
 export const SECRET_PATH_RE =
   /~\/\.aws\/credentials|~\/\.ssh\/id_[a-z]+|~\/\.config\/gh\/hosts|read\s+the\s+(token|secret|api[_ ]?key|password)\s+(in|from)\s+[.`'"]?\.?env/i;
@@ -228,7 +304,7 @@ function isQuotedExample(text: string, idx: number, len: number): boolean {
 // stdin and stays a match. (11 of the 14 hermes-agent findings, 2026-09-26.)
 const INLINE_EXEC_RE =
   /\b(exec|eval|subprocess|os\.system|popen|spawn|child_process|execSync|execFile)\b/;
-export function isInlineParser(text: string, match: RegExpExecArray): boolean {
+export function isInlineParser(text: string, match: { index: number; 0: string }): boolean {
   if (!/\b(python3?|node)$/.test(match[0])) return false;
   const after = text.slice(match.index + match[0].length);
   const m = /^[ \t]+(-c|-e)[ \t]*(["'])/.exec(after);
@@ -416,7 +492,7 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
   }
 
   // Tier 2 — sink + agent-directive framing (skip human install docs + safety clauses)
-  const fo = FETCH_OBEY_RE.exec(content);
+  const fo = findFetchObey(content);
   if (
     fo &&
     !inHumanSection(content, fo.index) &&

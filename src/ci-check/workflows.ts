@@ -6,7 +6,7 @@
 //   danger = reachability(untrusted → agent) × power(tools/secrets) × exposure
 // then applies the actor gate and mitigations. Static + parse-only.
 
-import { parse as parseYaml } from 'yaml';
+import { parseYamlStrict as parseYaml } from './yaml-strict';
 import { lineOf, lineOfRe } from './lines';
 import type { CiFinding, Severity } from './types';
 import { SEVERITY_RANK } from './types';
