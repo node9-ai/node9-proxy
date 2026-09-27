@@ -106,10 +106,18 @@ const HARD_DIR = /^(node_modules|vendor|\.next|\.venv|site-packages)$/;
 // findings (avoid stale-generated-copy noise), but a surface file found here is NOTED (not
 // silently dropped) so a genuinely-committed config isn't invisible. ([7])
 const SOFT_DIR = /^(dist|build|out|target)$/;
-/** Folders where agent configuration begins. Below one of them a folder name is the author's
- *  choice, not a dependency tree: `.claude/skills/vendor/SKILL.md` is a skill named "vendor"
- *  (2.24.2 dropped it), while `node_modules/x/.claude/settings.json` is still noise. */
-const SURFACE_ANCHORS = new Set([
+/** A directory of `p` matching `dirRe`, unless it is a skill folder that happens to carry the
+ *  name (`.claude/skills/vendor/SKILL.md` is a skill named "vendor"; 2.24.2 dropped it). A
+ *  dependency tree inside an agent folder (`.claude/hooks/node_modules`) is still a dependency
+ *  tree. A path ending in `/` is a directory itself. */
+function underDir(p: string, dirRe: RegExp): boolean {
+  const dirs = p.split('/');
+  dirs.pop();
+  return dirs.some((c, i) => dirRe.test(c) && dirs[i - 1] !== 'skills');
+}
+/** Folders where agent configuration lives. A link that is not followed anywhere under one of
+ *  them is a finding (K.4). */
+const AGENT_FOLDERS = new Set([
   '.claude',
   '.github',
   '.cursor',
@@ -120,18 +128,10 @@ const SURFACE_ANCHORS = new Set([
   '.roo',
   '.clinerules',
   'skills',
+  'commands',
+  'agents',
+  'hooks',
 ]);
-/** A directory of `p` matching `dirRe` comes before the first surface anchor. A path ending in
- *  `/` is a directory itself. */
-function underDir(p: string, dirRe: RegExp): boolean {
-  const dirs = p.split('/');
-  dirs.pop();
-  for (const c of dirs) {
-    if (SURFACE_ANCHORS.has(c)) return false;
-    if (dirRe.test(c)) return true;
-  }
-  return false;
-}
 /** Dependency dirs are not listed by their own name by any reader, and `.git` never is. A
  *  check must treat a path there as unknown, never as "missing". */
 export const isUnwalked = (p: string): boolean =>
@@ -374,7 +374,7 @@ const unreadNote = (rel: string, why: string) =>
   `${rel} could not be read (${why}) — results ${INCOMPLETE}.`;
 
 /** A path where agent configuration can live: under a surface anchor (`.claude`, `skills`, …). */
-const inAgentArea = (p: string) => p.split('/').some((c) => SURFACE_ANCHORS.has(c));
+const inAgentArea = (p: string) => p.split('/').some((c) => AGENT_FOLDERS.has(c));
 
 /** A reader's raw listing: every entry as stored, no link followed. */
 interface Listing {
@@ -584,10 +584,11 @@ function visiblePaths(
       continue;
     }
     if ('skip' in r) {
-      if (r.skip === 'unfollowed' && r.link === v) {
+      if (r.skip === 'unfollowed') {
+        // Judged at the path the agent opens, whichever link on the way is not followed.
         if (inAgentArea(v) || selectSurface([v]).length)
           unfollowed.push({ path: v, link: r.link, text: r.text, why: r.why });
-        else elsewhere.push(v);
+        else if (r.link === v) elsewhere.push(v);
       }
       continue;
     }
@@ -790,6 +791,9 @@ function walkDisk(
       } else stack.push(rel);
     }
   }
+  // A submodule that was not checked out (a clone without --recursive, actions/checkout's
+  // default) is an empty folder on disk; git lists it as a gitlink, which the base seals.
+  for (const sub of gitmodulePaths(root)) sealed.add(sub);
   if (!complete)
     notes.push(
       `repo is large — some agent-surface files ${INCOMPLETE} (stopped after ${MAX_WALK_ENTRIES} entries).`
@@ -803,6 +807,16 @@ function walkDisk(
       `skipped ${nestedRepos.length} nested git repositor${nestedRepos.length === 1 ? 'y' : 'ies'} (e.g. ${nestedRepos.slice(0, 3).join(', ')}) — scan ${nestedRepos.length === 1 ? 'it' : 'each'} on its own.`
     );
   return { kinds, sealed, complete };
+}
+
+/** Submodule paths from the root `.gitmodules`, read as data (never through a link). */
+function gitmodulePaths(root: string): string[] {
+  try {
+    const text = readLocalFile(path.join(root, '.gitmodules'), '.gitmodules');
+    return [...text.matchAll(/^\s*path\s*=\s*(.+?)\s*$/gm)].map((m) => m[1].replace(/\/+$/, ''));
+  } catch {
+    return [];
+  }
 }
 
 /** A link's text as the host OS reads it. On Windows the OS takes `\` as a separator and a

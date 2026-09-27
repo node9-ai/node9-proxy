@@ -768,6 +768,86 @@ describe.runIf(posix)('K.4 — links that are not plain are findings, in every r
     }
   });
 
+  it('a link into a submodule that was not checked out is a finding in both readers', () => {
+    const root = tmp('node9-submod-');
+    try {
+      fs.mkdirSync(path.join(root, '.claude/skills'), { recursive: true });
+      fs.symlinkSync('../../sub/x', path.join(root, '.claude/skills/x'));
+      fs.symlinkSync('sub/x/SKILL.md', path.join(root, 'CLAUDE.md'));
+      put(
+        root,
+        '.gitmodules',
+        '[submodule "sub"]\n\tpath = sub\n\turl = https://example.test/sub\n'
+      );
+      commitAll(root);
+      gitIn(root, 'update-index', '--add', '--cacheinfo', `160000,${'1'.repeat(40)},sub`);
+      gitIn(root, 'commit', '-qm', 'submodule');
+      fs.mkdirSync(path.join(root, 'sub')); // what a clone without --recursive leaves
+      for (const t of [readLocalTree(root), readGitRefTree(root, 'HEAD')!])
+        expect(flagged(t), t.source).toEqual(['.claude/skills/x', 'CLAUDE.md']);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('a plain link in an agent folder that leads through an unfollowed link is a finding', () => {
+    const root = tmp('node9-via-');
+    try {
+      put(root, 'docs/cmds/deploy.md', OVERRIDE);
+      fs.mkdirSync(path.join(root, 'tools'));
+      fs.symlinkSync('/proc/self/cwd/docs/cmds', path.join(root, 'tools/cmds'));
+      fs.mkdirSync(path.join(root, '.claude'));
+      fs.symlinkSync('../tools/cmds', path.join(root, '.claude/commands'));
+      commitAll(root);
+      for (const t of [readLocalTree(root), readGitRefTree(root, 'HEAD')!]) {
+        expect(flagged(t), t.source).toEqual(['.claude/commands']);
+        const f = scanTree(t).findings.find((x) => x.file === '.claude/commands')!;
+        expect(f.locator, t.source).toBe('tools/cmds'); // the link that is not followed
+      }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('dependency dirs inside agent folders are still dependencies', () => {
+    const root = tmp('node9-deps-');
+    try {
+      put(root, '.claude/hooks/package.json', '{"dependencies":{"evil-skill":"1.0.0"}}');
+      fs.mkdirSync(path.join(root, '.claude/skills'), { recursive: true });
+      fs.symlinkSync('../hooks/node_modules/evil-skill', path.join(root, '.claude/skills/x'));
+      // committed by JS actions; not the repo's own agent surface
+      put(root, '.github/actions/a/node_modules/pkg/AGENTS.md', OVERRIDE);
+      commitAll(root);
+      // installed after checkout: must not change the verdict
+      put(root, '.claude/hooks/node_modules/evil-skill/SKILL.md', `---\nname: e\n---\n${OVERRIDE}`);
+      put(root, '.claude/hooks/node_modules/evil-skill/index.js', 'require("child_process")\n');
+      const [local, base] = [readLocalTree(root), readGitRefTree(root, 'HEAD')!];
+      for (const t of [local, base]) {
+        expect(flagged(t), t.source).toEqual(['.claude/skills/x']);
+        expect(
+          rulesAt(t).some((r) => r.includes('node_modules/')),
+          t.source
+        ).toBe(false);
+      }
+      expect(findingKeys(local)).toEqual(findingKeys(base));
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('control characters in a link text never reach the report', () => {
+    const root = tmp('node9-ctl-');
+    try {
+      fs.symlinkSync('/tmp/\u001b[2J\u202eevil', path.join(root, 'CLAUDE.md'));
+      const f = scanTree(readLocalTree(root)).findings.find((x) => x.file === 'CLAUDE.md')!;
+      expect(f.signals.join(' ')).not.toMatch(
+        /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("a deduplicated skill's docs are still graded", () => {
     const root = tmp('node9-dedupe-');
     try {

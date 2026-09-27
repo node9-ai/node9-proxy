@@ -96,7 +96,10 @@ export function scanTree(tree: RepoTree): ScanResult {
 
   // K.4: a symlink where agent configuration can live that the scan does not follow is itself
   // the evidence — the agent may load content no reviewer sees.
-  const quote = (t: string) => t.replace(/[`\r\n\u2028\u2029]+/g, ' ').slice(0, 120);
+  // link text is the PR author's: no backticks, control characters or bidi overrides
+  const UNSAFE =
+    /[`\u0000-\u001f\u007f-\u009f\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g; // eslint-disable-line no-control-regex
+  const quote = (t: string) => t.replace(UNSAFE, ' ').slice(0, 120);
   for (const u of tree.unfollowed ?? []) {
     findings.push({
       check: 'CI-1',
