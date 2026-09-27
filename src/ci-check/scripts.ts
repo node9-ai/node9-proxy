@@ -19,6 +19,7 @@ import {
   isInlineParser,
   maskPathPlaceholders,
 } from './instructions';
+import { safeText } from './suppress';
 
 /** A script larger than this is not read. It is REPORTED as unread — the third state — never
  *  silently skipped. 64 KiB covers every hook and skill script measured (the largest real
@@ -192,7 +193,7 @@ export function analyzeScript(path: string, content: string, rulePrefix: string)
           'remote-exec',
           'high',
           'Committed agent script fetches and runs remote code',
-          `\`${text.trim().slice(0, 100)}\` — whatever that URL serves runs here, for everyone`,
+          `\`${safeText(text.trim(), 100)}\` — whatever that URL serves runs here, for everyone`,
           'Vendor the script and pin it; never pipe a download into a shell from a hook or skill.',
           line
         )
@@ -204,7 +205,7 @@ export function analyzeScript(path: string, content: string, rulePrefix: string)
           'exfil',
           'high',
           'Committed agent script sends a local file to a remote host',
-          `\`${text.trim().slice(0, 100)}\` — a file from this machine leaves it`,
+          `\`${safeText(text.trim(), 100)}\` — a file from this machine leaves it`,
           'Remove the upload, or make the destination and the file explicit and reviewed.',
           line
         )
@@ -216,7 +217,7 @@ export function analyzeScript(path: string, content: string, rulePrefix: string)
           'secret-read',
           'medium',
           'Committed agent script reads credential material',
-          `\`${text.trim().slice(0, 100)}\` — touches a credential file`,
+          `\`${safeText(text.trim(), 100)}\` — touches a credential file`,
           'Do not read credential files from an agent hook or skill; pass what is needed explicitly.',
           line
         )
@@ -229,7 +230,7 @@ export function analyzeScript(path: string, content: string, rulePrefix: string)
           'prompt-override',
           'high',
           'Committed agent script feeds a prompt-override directive to a model',
-          `\`${ov[0].slice(0, 60)}\` — an instruction to ignore rules, emitted by a script`,
+          `\`${safeText(ov[0], 60)}\` — an instruction to ignore rules, emitted by a script`,
           'Remove the override text.',
           line
         )
@@ -241,7 +242,7 @@ export function analyzeScript(path: string, content: string, rulePrefix: string)
           'env-dump',
           'advisory',
           'Committed agent script prints the whole environment',
-          `\`${text.trim().slice(0, 100)}\` — every variable, tokens included, goes to that pipe or file without redaction`,
+          `\`${safeText(text.trim(), 100)}\` — every variable, tokens included, goes to that pipe or file without redaction`,
           'Filter to the variables you need, or redact values (e.g. `| sed -E "s/(TOKEN|SECRET|KEY)=.*/\\\\1=***/"`).',
           line
         )

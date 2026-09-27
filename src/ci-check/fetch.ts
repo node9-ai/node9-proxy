@@ -397,6 +397,9 @@ interface Listing {
    *  a nested repository or submodule. Decided by name where possible, so a dependency dir
    *  that exists only after an install step gets the same verdict in the head and the base. */
   sealed(p: string): boolean;
+  /** `parts` (a path grown one component at a time) has just entered a nested repository or
+   *  submodule — O(depth of the deepest one), so a long link text stays linear (§P2). */
+  sealedPrefix(parts: string[]): boolean;
 }
 
 function prefixes(p: string): string[] {
@@ -411,6 +414,8 @@ function makeListing(
   sealedDirs: Set<string>
 ): Listing {
   const paths = [...kinds.keys()].filter((p) => kinds.get(p) !== 'dir').sort();
+  let sealedDepth = 0;
+  for (const d of sealedDirs) sealedDepth = Math.max(sealedDepth, d.split('/').length);
   const dirs = new Set<string>();
   for (const [p, k] of kinds) if (k === 'dir') dirs.add(p);
   for (const p of paths) for (const d of prefixes(p)) dirs.add(d);
@@ -432,6 +437,8 @@ function makeListing(
       return out;
     },
     sealed: (p) => isUnwalked(`${p}/`) || [...prefixes(p), p].some((d) => sealedDirs.has(d)),
+    // Called once per component as a path grows, so the shorter prefixes were already checked.
+    sealedPrefix: (parts) => parts.length <= sealedDepth && sealedDirs.has(parts.join('/')),
   };
 }
 
@@ -524,22 +531,32 @@ class Resolver {
       out = unfollowed('it is an absolute path');
     else {
       // Where the text leads, component by component, before anything is looked up: it must
-      // never climb above the root and never enter a sealed directory.
+      // never climb above the root and never enter a dependency dir or `.git` by name. O(1) per
+      // component and counted against the step budget (§P2: a `x/`×2,040 text used to cost
+      // quadratic time outside it). Nested repositories are checked on the final target.
       const dir = parentOf(cand);
-      let at = dir;
+      const parts = dir ? dir.split('/') : [];
       let bad: string | null = null;
       for (const c of text.split('/')) {
+        if (++this.steps > MAX_RESOLVE_STEPS) {
+          this.budgetHit = true;
+          return { r: { skip: 'budget' }, hops: 0 };
+        }
         if (c === '' || c === '.') continue;
         if (c === '..') {
-          if (at === '') {
+          if (!parts.length) {
             bad = 'it climbs above the repository root';
             break;
           }
-          at = parentOf(at);
+          parts.pop();
           continue;
         }
-        at = at ? `${at}/${c}` : c;
-        if (this.l.sealed(at)) {
+        parts.push(c);
+        if (
+          c === '.git' ||
+          (HARD_DIR.test(c) && parts[parts.length - 2] !== 'skills') ||
+          this.l.sealedPrefix(parts)
+        ) {
           bad = 'it leads into a dependency directory or another repository';
           break;
         }
@@ -673,7 +690,10 @@ function planReads(
   const dangling: string[] = [];
   const needs = new Set<string>();
   for (const rel of planned) {
-    const r = R.resolve(rel);
+    // A file listed by its own name has no link above it (listings hold real paths): it is
+    // itself, and never waits on the link budget — junk links cannot starve ordinary files
+    // (the final pre-release review, §P1).
+    const r: Resolved = l.kind(rel) === 'file' ? { real: rel, kind: 'file' } : R.resolve(rel);
     if ('need' in r) {
       needs.add(r.need);
       continue;
@@ -911,11 +931,16 @@ export function readLocalTree(dir: string): RepoTree {
  *  cat-file) were tested not to run `core.fsmonitor` (git 2.43); these switch off the settings
  *  that run programs anyway, as a second wall. */
 export const GIT_SAFE = ['-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null'];
-const gitEnv = (): NodeJS.ProcessEnv => ({
+export const gitEnv = (): NodeJS.ProcessEnv => ({
   ...process.env,
   GIT_CONFIG_NOSYSTEM: '1',
   GIT_OPTIONAL_LOCKS: '0',
   GIT_TERMINAL_PROMPT: '0',
+  // A partial clone fetches a missing object from its configured remote, and the scanned
+  // folder's own .git/config can point that remote at a command (§P5). The base reader reads
+  // what is already here, never the network.
+  GIT_NO_LAZY_FETCH: '1',
+  GIT_ALLOW_PROTOCOL: 'none',
 });
 
 /** Many blobs through ONE `git cat-file --batch` process (a process per file took 9.7 s on

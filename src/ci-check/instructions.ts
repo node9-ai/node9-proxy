@@ -12,6 +12,7 @@
 
 import type { CiFinding, Severity } from './types';
 import { lineAtIndex } from './lines';
+import { safeText } from './suppress';
 
 // ── Tier 1: structural concealment — classified by LEGITIMACY, not "is it invisible" ──
 // Presence of an invisible/formatting char ≠ concealment. Four classes, distinct handling
@@ -549,7 +550,7 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
         ovEnc ? 'critical' : 'high',
         'Prompt-override directive in an agent instruction file',
         [
-          `contains a prompt-override / role-impersonation directive (\`${m[0].slice(0, 60).trim()}\`)${ovEnc ? ' — concealed in a base64 blob' : ''}`,
+          `contains a prompt-override / role-impersonation directive (\`${safeText(m[0].slice(0, 60).trim(), 60)}\`)${ovEnc ? ' — concealed in a base64 blob' : ''}`,
         ],
         'Remove the override text. An instruction file should not tell the agent to ignore its own rules.',
         path,
@@ -572,7 +573,9 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
         'CI-6.fetch-and-obey',
         'medium',
         'Instruction directs the agent to fetch and run remote code',
-        [`\`${fo[0].slice(0, 70).trim()}\` — fetch-and-obey, outside an install/setup section`],
+        [
+          `\`${safeText(fo[0].slice(0, 70).trim(), 70)}\` — fetch-and-obey, outside an install/setup section`,
+        ],
         'Do not instruct the agent to pipe remote content into a shell; pin and vendor scripts instead.',
         path,
         lineAt(content, fo.index)
@@ -591,7 +594,9 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
         'CI-6.secret-path',
         'medium',
         'Instruction points the agent at credential material',
-        [`references \`${sp[0].slice(0, 50).trim()}\` — directs the agent toward secrets`],
+        [
+          `references \`${safeText(sp[0].slice(0, 50).trim(), 50)}\` — directs the agent toward secrets`,
+        ],
         'Do not reference credential files or paths in agent instructions.',
         path,
         lineAt(content, sp.index)
@@ -610,7 +615,7 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
         'CI-6.exfil-directive',
         'medium',
         'Instruction directs the agent to send data to an external endpoint',
-        [`\`${ex[0].slice(0, 70).trim()}\` — possible exfiltration directive`],
+        [`\`${safeText(ex[0].slice(0, 70).trim(), 70)}\` — possible exfiltration directive`],
         'Remove external post/upload directives from agent instructions.',
         path,
         lineAt(content, ex.index)

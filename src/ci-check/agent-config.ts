@@ -8,6 +8,7 @@ import type { CiFinding } from './types';
 import { parseFrontmatter, allowedToolsOf } from './frontmatter';
 import { SCRIPT_EXT_RE, isHookScript } from './instructions';
 import { lineAtIndex, jsonValueIndex } from './lines';
+import { safeText } from './suppress';
 
 interface Settings {
   permissions?: { allow?: unknown[]; deny?: unknown[] };
@@ -173,7 +174,7 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
       file: path,
       ...(cmdLine(content, cmd) ? { line: cmdLine(content, cmd) } : {}),
       signals: [
-        `hook command: \`${cmd.slice(0, 120)}\``,
+        `hook command: \`${safeText(cmd, 120)}\``,
         remoteExec
           ? 'fetch-and-run (curl|wget / pipe-to-shell) — unpinnable remote code execution on every contributor'
           : unpinned
@@ -200,8 +201,8 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
           file: path,
           ...(cmdLine(content, cmd) ? { line: cmdLine(content, cmd) } : {}),
           signals: [
-            `hook command: \`${cmd.slice(0, 120)}\``,
-            `\`${script}\` is not in the repository — whatever lands at that path later runs before every agent action, for everyone`,
+            `hook command: \`${safeText(cmd, 120)}\``,
+            `\`${safeText(script, 200)}\` is not in the repository — whatever lands at that path later runs before every agent action, for everyone`,
           ],
           fix: 'Commit the script the hook runs, or remove the hook.',
         });
@@ -216,8 +217,8 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
           file: path,
           ...(cmdLine(content, cmd) ? { line: cmdLine(content, cmd) } : {}),
           signals: [
-            `hook command: \`${cmd.slice(0, 120)}\``,
-            `\`${script}\` is committed but outside \`.claude/hooks/\`, the paths this scan reads — its contents were not graded`,
+            `hook command: \`${safeText(cmd, 120)}\``,
+            `\`${safeText(script, 200)}\` is committed but outside \`.claude/hooks/\`, the paths this scan reads — its contents were not graded`,
           ],
           fix: 'Move the script under `.claude/hooks/` so it is scanned with the hook that runs it, or review it by hand.',
         });

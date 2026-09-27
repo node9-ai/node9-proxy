@@ -5,6 +5,7 @@
 import { scanText } from '@node9/policy-engine';
 import { lineAtIndex } from './lines';
 import type { CiFinding } from './types';
+import { safeText } from './suppress';
 
 export interface McpServerSpec {
   command?: string;
@@ -56,7 +57,7 @@ export function analyzeMcpServers(
         title: `MCP server "${name}" runs an unpinned executable`,
         file: path,
         ...(line ? { line } : {}),
-        signals: [`\`${argv.slice(0, 120)}\` — unversioned/@latest npx`],
+        signals: [`\`${safeText(argv, 120)}\` — unversioned/@latest npx`],
         fix: 'Pin the MCP server package to an exact version so a PR (or a registry compromise) can’t swap the toolchain.',
       });
     }

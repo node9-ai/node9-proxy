@@ -10,6 +10,7 @@ import { parseYamlStrict as parseYaml } from './yaml-strict';
 import { lineOf, lineOfRe } from './lines';
 import type { CiFinding, Severity } from './types';
 import { SEVERITY_RANK } from './types';
+import { safeText } from './suppress';
 
 // Known agent actions — a step using one of these runs an LLM with tools.
 const AGENT_ACTION_RE =
@@ -914,7 +915,7 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
     const names = matchedBroadTools(toolsBlob);
     signals.push(
       names.length
-        ? `agent has broad/write-capable tools: ${names.map((n) => `\`${n}\``).join(', ')}`
+        ? `agent has broad/write-capable tools: ${names.map((n) => `\`${safeText(n, 80)}\``).join(', ')}`
         : 'agent has broad/write-capable tool grants'
     );
   }
