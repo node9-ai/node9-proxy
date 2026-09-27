@@ -85,6 +85,31 @@ function incompleteWarning(result) {
   return `::warning title=node9 could not read everything::${escapeCommandData(first.slice(0, 300))}`;
 }
 
+// ── Repo text in the comment (§P3) ────────────────────────────────────────────
+// A finding's file path, title and signals carry text from the scanned repository (an MCP
+// server name, a permission entry, a workflow trigger, a command). Rendered as-is it could forge
+// a header, hide the rest of the comment with `<!--`, ping a team, or break out of a code span.
+// Made inert HERE, where it is rendered, so no analyzer has to get it right on its own.
+
+/** One line of markdown built partly from repo text: no line breaks; outside code spans, no
+ *  HTML start (`<!--`, `<tag`) and no @-mention. Code spans are left as they are — their text
+ *  is literal, and a command in one must copy exactly. */
+function mdLine(v) {
+  return String(v)
+    .replace(/[\r\n\u2028\u2029]+/g, ' ')
+    .replace(/(`[^`]*`)|([^`]+)/g, (m, code, text) =>
+      code
+        ? code
+        : text
+            .replace(/<(?=[!/?A-Za-z])/g, '<\u200b')
+            .replace(/(^|[^A-Za-z0-9_])@(?=[A-Za-z0-9])/g, '$1@\u200b')
+    );
+}
+/** A workflow-command property value (`file=`, `title=`): `%`, CR, LF, `:` and `,` escaped. */
+function escapeCommandProperty(v) {
+  return escapeCommandData(v).replace(/:/g, '%3A').replace(/,/g, '%2C');
+}
+
 /** Why the Action did not scan, in the reviewer's words, with the one-line fix. */
 const SKIP_REASONS = {
   pull_request_target:
@@ -134,7 +159,7 @@ function annotationLines(result) {
   const level = { critical: 'error', high: 'error', medium: 'warning', advisory: 'notice' };
   return annotatable(result).map(
     (f) =>
-      `::${level[f.severity] || 'notice'} file=${f.file},line=${f.line || 1},title=node9 ${f.rule || f.check}::${String(f.title).replace(/\r?\n/g, ' ')}`
+      `::${level[f.severity] || 'notice'} file=${escapeCommandProperty(f.file)},line=${Number(f.line) || 1},title=${escapeCommandProperty(`node9 ${f.rule || f.check}`)}::${escapeCommandData(f.title)}`
   );
 }
 
@@ -228,12 +253,12 @@ function renderDetail(result) {
   L.push('');
   for (const f of findings) {
     L.push(
-      `**${ICON[f.severity] ?? '•'} ${String(f.severity).toUpperCase()} — ${f.title}**` +
+      `**${ICON[f.severity] ?? '•'} ${String(f.severity).toUpperCase()} — ${mdLine(f.title)}**` +
         (f.suppressed ? ` _(suppressed: \`${safeInline(f.suppressed.reason)}\`)_` : '')
     );
-    L.push(`\`${f.file}${f.line ? ':' + f.line : ''}\` · ${f.check}`);
-    for (const s of f.signals ?? []) L.push(`- ${s}`);
-    if (f.mitigations?.length) L.push(`- _mitigated:_ ${f.mitigations.join('; ')}`);
+    L.push(`\`${safeInline(f.file)}${f.line ? ':' + Number(f.line) : ''}\` · ${f.check}`);
+    for (const s of f.signals ?? []) L.push(`- ${mdLine(s)}`);
+    if (f.mitigations?.length) L.push(`- _mitigated:_ ${mdLine(f.mitigations.join('; '))}`);
     if (f.fix) L.push(`- → **Fix:** ${f.fix}`);
     L.push('');
   }
@@ -346,10 +371,10 @@ function renderComment(result) {
   const fixes = [...new Set(companions.map((f) => f.fix).filter(Boolean))];
   if (fixes.length === 1) {
     L.push('');
-    L.push(`**✅ Fix** in \`${anchor.file}\`: ${fixes[0]}`);
+    L.push(`**✅ Fix** in \`${safeInline(anchor.file)}\`: ${fixes[0]}`);
   } else if (fixes.length > 1) {
     L.push('');
-    L.push(`**✅ Fix** in \`${anchor.file}\`:`);
+    L.push(`**✅ Fix** in \`${safeInline(anchor.file)}\`:`);
     for (const fx of fixes) L.push(`- ${fx}`);
   }
   L.push('');
@@ -873,6 +898,7 @@ module.exports = {
   renderComment,
   checkSummary,
   incompleteWarning,
+  annotationLines,
   threatLine,
   mechanism,
   renderDetail,

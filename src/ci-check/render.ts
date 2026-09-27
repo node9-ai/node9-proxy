@@ -84,15 +84,30 @@ function ownedHint(source: string): boolean {
 
 /** One finding, as Markdown. Shared by the absolute and the diff renderers so the two can
  *  never drift in how a finding reads. */
+/** One line of markdown built partly from repo text (§P3; the same rule as comment.js): no
+ *  line breaks; outside code spans, no HTML start and no @-mention. Code spans are left as they
+ *  are, so a command in one copies exactly. */
+export function mdLine(v: unknown): string {
+  return String(v)
+    .replace(/[\r\n\u2028\u2029]+/g, ' ')
+    .replace(/(`[^`]*`)|([^`]+)/g, (_m, code: string | undefined, text: string | undefined) =>
+      code
+        ? code
+        : (text ?? '')
+            .replace(/<(?=[!/?A-Za-z])/g, '<\u200b')
+            .replace(/(^|[^A-Za-z0-9_])@(?=[A-Za-z0-9])/g, '$1@\u200b')
+    );
+}
+
 function findingMd(f: CiFinding, L: string[]): void {
   L.push(
-    `**${ICON[f.severity]} ${f.severity.toUpperCase()} — ${f.title}**` +
+    `**${ICON[f.severity]} ${f.severity.toUpperCase()} — ${mdLine(f.title)}**` +
       (f.suppressed ? ` _(suppressed: \`${safeText(f.suppressed.reason, 200)}\`)_` : '')
   );
-  L.push(`\`${f.file}${f.line ? ':' + f.line : ''}\`  ·  ${f.rule}`);
+  L.push(`\`${safeText(f.file, 300)}${f.line ? ':' + Number(f.line) : ''}\`  ·  ${f.rule}`);
   L.push('');
-  for (const s of f.signals) L.push(`- ${s}`);
-  if (f.mitigations?.length) L.push(`- _mitigated:_ ${f.mitigations.join('; ')}`);
+  for (const s of f.signals) L.push(`- ${mdLine(s)}`);
+  if (f.mitigations?.length) L.push(`- _mitigated:_ ${mdLine(f.mitigations.join('; '))}`);
   L.push('');
   L.push(`→ **Fix:** ${f.fix}`);
   L.push('');
