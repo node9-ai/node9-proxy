@@ -8,8 +8,8 @@ import fs from 'fs';
 import path from 'path';
 import { execFileSync } from 'node:child_process';
 import { request } from 'undici';
-import type { RepoTree, RepoFile } from './types';
-import { routeOf } from './route';
+import type { RepoTree, RepoFile, UnfollowedLink } from './types';
+import { routeOf, type Route } from './route';
 import {
   isInstructionFile,
   isSkillSupportFile,
@@ -101,11 +101,42 @@ export function selectSurface(paths: string[]): string[] {
 }
 // Dependency / framework-output dirs that are NEVER a repo's own agent surface — a vendored
 // `node_modules/**/CLAUDE.md` is noise. Skipped SILENTLY.
-const IGNORE_HARD = /(^|\/)(node_modules|vendor|\.git|\.next|\.venv|site-packages)\//;
+const HARD_DIR = /^(node_modules|vendor|\.next|\.venv|site-packages)$/;
 // Build-output dirs — USUALLY generated, occasionally a real source package. Skipped from
 // findings (avoid stale-generated-copy noise), but a surface file found here is NOTED (not
 // silently dropped) so a genuinely-committed config isn't invisible. ([7])
-const IGNORE_SOFT = /(^|\/)(dist|build|out|target)\//;
+const SOFT_DIR = /^(dist|build|out|target)$/;
+/** Folders where agent configuration begins. Below one of them a folder name is the author's
+ *  choice, not a dependency tree: `.claude/skills/vendor/SKILL.md` is a skill named "vendor"
+ *  (2.24.2 dropped it), while `node_modules/x/.claude/settings.json` is still noise. */
+const SURFACE_ANCHORS = new Set([
+  '.claude',
+  '.github',
+  '.cursor',
+  '.codex',
+  '.agents',
+  '.gemini',
+  '.windsurf',
+  '.roo',
+  '.clinerules',
+  'skills',
+]);
+/** A directory of `p` matching `dirRe` comes before the first surface anchor. A path ending in
+ *  `/` is a directory itself. */
+function underDir(p: string, dirRe: RegExp): boolean {
+  const dirs = p.split('/');
+  dirs.pop();
+  for (const c of dirs) {
+    if (SURFACE_ANCHORS.has(c)) return false;
+    if (dirRe.test(c)) return true;
+  }
+  return false;
+}
+/** Dependency dirs are not listed by their own name by any reader, and `.git` never is. A
+ *  check must treat a path there as unknown, never as "missing". */
+export const isUnwalked = (p: string): boolean =>
+  underDir(p, HARD_DIR) || p.split('/').slice(0, -1).includes('.git');
+const isBuildOutput = (p: string): boolean => underDir(p, SOFT_DIR);
 /** How many NESTED surface files one reader may take. Only the GitHub API reader is capped: it
  *  pays one rate-limited request per file. The local and git readers are not — there is no
  *  total budget any more (§K, 2026-09-27): a 32 MiB budget cut real repositories (github/gh-aw
@@ -134,9 +165,9 @@ export function pickSurfacePaths(
   notes: string[],
   caps: SurfaceCaps = API_CAPS
 ): string[] {
-  const surface = selectSurface(paths.filter((p) => !IGNORE_HARD.test(p)));
-  const matched = surface.filter((p) => !IGNORE_SOFT.test(p));
-  const softSkipped = surface.filter((p) => IGNORE_SOFT.test(p));
+  const surface = selectSurface(paths.filter((p) => !isUnwalked(p)));
+  const matched = surface.filter((p) => !isBuildOutput(p));
+  const softSkipped = surface.filter((p) => isBuildOutput(p));
   const capped = matched.slice(0, caps.files);
   // AT the cap, not past it: a scan that stops exactly at the limit cannot be told apart
   // from one that had more to read, so it is not reported as whole.
@@ -304,13 +335,19 @@ async function listWorkflowPaths(owner: string, repo: string, notes: string[]): 
 const ROOT_WORKFLOW_RE = /^\.github\/workflows\/[^/]+\.ya?ml$/;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ONE reading layer (§K, corrected in §K.2 and §K.3). The truth is what the AGENT sees from the
-// repository root: links followed the way the OS follows them, and a file's meaning taken from
-// the path the agent opens it by. Every reader produces the same raw listing (nothing followed);
-// ONE resolver, ONE expansion of directory links and ONE plan run over it. The readers differ
-// only in HOW a listing and a byte are obtained: the disk, a git object, or the GitHub API. A
-// CI-5 diff compares a head read one way with a base read another, so any other difference
-// becomes a false "introduced" finding.
+// ONE reading layer (§K; corrected in §K.2–K.4). The truth is what the AGENT sees from the
+// repository root, and a file's meaning comes from the path the agent opens it by. Every reader
+// produces the same raw listing (nothing followed); ONE resolver, ONE expansion of directory
+// links and ONE plan run over it. The readers differ only in HOW a listing and a byte are
+// obtained: the disk, a git object, or the GitHub API. A CI-5 diff compares a head read one way
+// with a base read another, so any other difference becomes a false "introduced" finding.
+//
+// Links (K.4). Three review rounds each found a new way to make an OS emulation disagree with
+// the OS (ancestor links, /proc, out-and-back through the checkout name, dependency dirs). Real
+// repositories use none of it: of 770 links across 118 repositories, every link that leads
+// anywhere is a PLAIN in-repo link (AGENTS.md -> CLAUDE.md, .claude/skills/X -> ../../.agents/…).
+// So the scan follows plain links only, and every other link where agent configuration can live
+// is itself a finding — the trick becomes the evidence.
 // ─────────────────────────────────────────────────────────────────────────────
 
 type Kind = 'file' | 'link' | 'dir' | 'other';
@@ -318,7 +355,7 @@ type Kind = 'file' | 'link' | 'dir' | 'other';
 /** Kind from a git mode (`git ls-tree`, the Trees API). */
 function kindOfMode(mode: string): Kind {
   if (mode === '120000') return 'link';
-  if (mode === '100644' || mode === '100755') return 'file';
+  if (/^100[0-7]{3}$/.test(mode)) return 'file';
   // 040000 a tree; 160000 a submodule: a directory whose content is another repository.
   if (mode === '040000' || mode === '160000') return 'dir';
   return 'other';
@@ -333,36 +370,25 @@ const INCOMPLETE = 'may be INCOMPLETE';
 const lf = (t: string): string => t.replace(/\r\n/g, '\n');
 const tooLargeNote = (rel: string) =>
   `${rel} is larger than ${MAX_FILE_BYTES / (1024 * 1024)} MiB — not read; results ${INCOMPLETE}.`;
-const outsideNote = (rel: string) =>
-  `${rel} is a symlink that points outside the repository — not read.`;
 const unreadNote = (rel: string, why: string) =>
   `${rel} could not be read (${why}) — results ${INCOMPLETE}.`;
 
-/** Dependency dirs (IGNORE_HARD) are not listed when entered by their OWN name — a real
- *  node_modules can hold hundreds of thousands of files, and a vendored CLAUDE.md is noise.
- *  Reached THROUGH a link they are read like anything else: the agent follows the link. A check
- *  must treat a path there as unknown, never as "missing". */
-export const isUnwalked = (p: string): boolean => IGNORE_HARD.test(p);
+/** A path where agent configuration can live: under a surface anchor (`.claude`, `skills`, …). */
+const inAgentArea = (p: string) => p.split('/').some((c) => SURFACE_ANCHORS.has(c));
 
 /** A reader's raw listing: every entry as stored, no link followed. */
 interface Listing {
-  /** Non-directory entries visible by their own name (outside dependency dirs and nested
-   *  repositories), sorted. */
+  /** Non-directory entries listed by their own name, sorted. */
   paths: string[];
-  /** The kind at any path, including inside dirs that are not listed by their own name. */
   kind(p: string): Kind | undefined;
   /** A link's exact text; `undefined` = not fetched yet (the API), `null` = unreadable. */
   linkText(p: string): string | null | undefined;
   /** Non-directory entries anywhere under `dir`. */
   under(dir: string): string[];
-  /** Absolute forms of the root (its path and its realpath); null when unknown (the API: the
-   *  checkout directory's name decides where `../<name>/…` lands). */
-  roots: string[][] | null;
-  /** Inside a submodule, whose content no reader of this repository has. */
-  opaque?(p: string): boolean;
-  /** Local only: does the host open this path (a case-insensitive file system can open what
-   *  the listing calls dangling)? */
-  hostOpens?(p: string): boolean;
+  /** Inside a directory that is not this repository's own content: a dependency dir, `.git`,
+   *  a nested repository or submodule. Decided by name where possible, so a dependency dir
+   *  that exists only after an install step gets the same verdict in the head and the base. */
+  sealed(p: string): boolean;
 }
 
 function prefixes(p: string): string[] {
@@ -371,87 +397,69 @@ function prefixes(p: string): string[] {
   return out;
 }
 
-function sortedUnder(paths: string[]): (dir: string) => string[] {
-  return (dir) => {
-    const prefix = `${dir}/`;
-    let lo = 0;
-    let hi = paths.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (paths[mid] < prefix) lo = mid + 1;
-      else hi = mid;
-    }
-    const out: string[] = [];
-    for (let i = lo; i < paths.length && paths[i].startsWith(prefix); i++) out.push(paths[i]);
-    return out;
-  };
-}
-
-/** A listing over entries a reader holds in full (git, the API). */
-function entriesListing(
+function makeListing(
   kinds: Map<string, Kind>,
   linkText: (p: string) => string | null | undefined,
-  roots: string[][] | null
+  sealedDirs: Set<string>
 ): Listing {
-  const all = [...kinds.keys()].filter((p) => kinds.get(p) !== 'dir').sort();
+  const paths = [...kinds.keys()].filter((p) => kinds.get(p) !== 'dir').sort();
   const dirs = new Set<string>();
   for (const [p, k] of kinds) if (k === 'dir') dirs.add(p);
-  for (const p of all) for (const d of prefixes(p)) dirs.add(d);
-  const submodules = new Set([...kinds].filter(([, k]) => k === 'dir').map(([p]) => p));
-  for (const p of all) for (const d of prefixes(p)) submodules.delete(d); // a dir with entries
+  for (const p of paths) for (const d of prefixes(p)) dirs.add(d);
   return {
-    paths: all.filter((p) => !isUnwalked(p)),
+    paths,
     kind: (p) => kinds.get(p) ?? (dirs.has(p) ? 'dir' : undefined),
     linkText,
-    under: sortedUnder(all),
-    roots,
-    opaque: (p) => [...prefixes(p), p].some((d) => submodules.has(d)),
+    under: (dir) => {
+      const prefix = `${dir}/`;
+      let lo = 0;
+      let hi = paths.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (paths[mid] < prefix) lo = mid + 1;
+        else hi = mid;
+      }
+      const out: string[] = [];
+      for (let i = lo; i < paths.length && paths[i].startsWith(prefix); i++) out.push(paths[i]);
+      return out;
+    },
+    sealed: (p) => isUnwalked(`${p}/`) || [...prefixes(p), p].some((d) => sealedDirs.has(d)),
   };
 }
 
 /** Steps (path components) all resolution in one scan may take. Real repositories take a few
- *  thousand; a crafted link graph took 67 s before resolutions were memoized (K.3 review). */
+ *  thousand; past it the scan says INCOMPLETE. */
 const MAX_RESOLVE_STEPS = 2_000_000;
 
-type Skip = 'outside' | 'dangling' | 'unknown-root' | 'opaque' | 'budget';
-type Resolved = { real: string; kind: Kind } | { skip: Skip } | { need: string };
+type Resolved =
+  | { real: string; kind: Kind }
+  | { skip: 'dangling' | 'budget' }
+  | { skip: 'unfollowed'; link: string; text: string; why: string }
+  | { need: string };
 
-/** The ONE resolver: the path walk `open(2)` does, over the listing. Component by component; a
- *  link component is replaced by the resolution of its EXACT text (no trimming, no separator
- *  rewriting) from the directory it sits in; `..` pops one REAL component; a path that leaves
- *  the root and comes back through the root's own name is inside; a non-directory followed by
- *  more components is ENOTDIR; more than MAX_LINK_HOPS nested links is ELOOP. Each link's
- *  resolution is memoized (it depends only on where the link is), and all resolution in a scan
- *  shares one step budget. Never touches the host filesystem, so readers cannot disagree.
- *  `need` = a link text the caller has not fetched yet. */
+const parentOf = (p: string) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '');
+const within = (inner: string, outer: string) =>
+  outer === '' || inner === outer || inner.startsWith(`${outer}/`);
+
+/** The ONE resolver. Follows PLAIN links only: relative text (used exactly as stored), never
+ *  above the repository root at any step, never into a sealed directory, never to a folder that
+ *  contains the link, at most MAX_LINK_HOPS links in one lookup (the OS limit). Anything else is
+ *  `unfollowed`, with the link and why. Each link's resolution is memoized with the number of
+ *  links it followed — it depends only on where the link is — and all resolution in a scan
+ *  shares one step budget. `need` = a link text the caller has not fetched yet (the API). */
 class Resolver {
   budgetHit = false;
   private steps = 0;
-  /** A link's resolution and how many links it followed (the OS counts every link followed in
-   *  one lookup; more than MAX_LINK_HOPS is ELOOP). Context-free, so always memoizable. */
   private readonly memo = new Map<string, { r: Resolved; hops: number }>();
   private readonly active = new Set<string>();
   constructor(private readonly l: Listing) {}
 
   resolve(p: string): Resolved {
-    return this.walk([], null, p.split('/')).r;
+    return this.walk('', p.split('/')).r;
   }
 
-  private reenter(abs: string[]): boolean {
-    return (this.l.roots ?? []).some(
-      (r) => r.length === abs.length && r.every((c, i) => c === abs[i])
-    );
-  }
-
-  /** `real`: components inside the root; `outside`: absolute components once the walk has left
-   *  the root (then nothing is looked up until it comes back). */
-  private walk(
-    start: string[],
-    outsideStart: string[] | null,
-    comps: string[]
-  ): { r: Resolved; hops: number } {
-    let real = [...start];
-    let outside = outsideStart ? [...outsideStart] : null;
+  private walk(start: string, comps: string[]): { r: Resolved; hops: number } {
+    let real = start;
     let hops = 0;
     const done = (r: Resolved) => ({ r, hops });
     for (let i = 0; i < comps.length; i++) {
@@ -462,63 +470,86 @@ class Resolver {
       const c = comps[i];
       const last = i === comps.length - 1;
       if (c === '' || c === '.') continue;
-      if (outside) {
-        if (c === '..') outside.pop();
-        else outside.push(c);
-        if (this.reenter(outside)) {
-          outside = null;
-          real = [];
-        }
-        continue;
-      }
       if (c === '..') {
-        if (real.length) {
-          real.pop();
-          continue;
-        }
-        if (!this.l.roots) return done({ skip: 'unknown-root' });
-        outside = this.l.roots[0].slice(0, -1);
+        // `..` after a link can climb from a shallower real dir than the text suggests
+        if (real === '')
+          return done({
+            skip: 'unfollowed',
+            link: '',
+            text: '',
+            why: 'it climbs above the repository root',
+          });
+        real = parentOf(real);
         continue;
       }
-      const cand = real.length ? `${real.join('/')}/${c}` : c;
+      const cand = real ? `${real}/${c}` : c;
       const k = this.l.kind(cand);
-      if (k === undefined) return done({ skip: this.l.opaque?.(cand) ? 'opaque' : 'dangling' });
       if (k === 'link') {
         const lr = this.link(cand);
         hops += lr.hops;
         if (hops > MAX_LINK_HOPS) return done({ skip: 'dangling' }); // ELOOP
         if (!('real' in lr.r)) return done(lr.r);
         if (lr.r.kind !== 'dir' && !last) return done({ skip: 'dangling' }); // ENOTDIR
-        real = lr.r.real ? lr.r.real.split('/') : [];
+        real = lr.r.real;
         continue;
       }
+      if (k === undefined) return done({ skip: 'dangling' });
       if (k !== 'dir' && !last) return done({ skip: 'dangling' }); // ENOTDIR
-      real.push(c);
+      real = cand;
     }
-    if (outside) return done({ skip: 'outside' });
-    const rr = real.join('/');
-    return done({ real: rr, kind: rr === '' ? 'dir' : this.l.kind(rr)! });
+    return done({ real, kind: real === '' ? 'dir' : this.l.kind(real)! });
   }
 
   private link(cand: string): { r: Resolved; hops: number } {
     const hit = this.memo.get(cand);
     if (hit) return hit;
     if (this.active.has(cand)) return { r: { skip: 'dangling' }, hops: Infinity }; // a cycle
-    const t = this.l.linkText(cand);
-    if (t === undefined) return { r: { need: cand }, hops: 0 };
+    const text = this.l.linkText(cand);
+    if (text === undefined) return { r: { need: cand }, hops: 0 };
+    const unfollowed = (why: string) => ({
+      r: { skip: 'unfollowed' as const, link: cand, text: text ?? '', why },
+      hops: 1,
+    });
     let out: { r: Resolved; hops: number };
-    if (t === null || t === '') out = { r: { skip: 'dangling' }, hops: 1 };
-    else if (t.startsWith('/') && !this.l.roots) out = { r: { skip: 'unknown-root' }, hops: 1 };
+    if (text === null || text === '') out = { r: { skip: 'dangling' }, hops: 1 };
+    else if (text.startsWith('/') || /^[A-Za-z]:[\\/]/.test(text))
+      out = unfollowed('it is an absolute path');
     else {
-      this.active.add(cand);
-      const slash = cand.lastIndexOf('/');
-      const dir = slash < 0 ? [] : cand.slice(0, slash).split('/');
-      const inner = t.startsWith('/')
-        ? this.walk([], [], t.split('/'))
-        : this.walk(dir, null, t.split('/'));
-      this.active.delete(cand);
-      out = { r: inner.r, hops: inner.hops + 1 };
-      if (out.hops > MAX_LINK_HOPS) out = { r: { skip: 'dangling' }, hops: out.hops };
+      // Where the text leads, component by component, before anything is looked up: it must
+      // never climb above the root and never enter a sealed directory.
+      const dir = parentOf(cand);
+      let at = dir;
+      let bad: string | null = null;
+      for (const c of text.split('/')) {
+        if (c === '' || c === '.') continue;
+        if (c === '..') {
+          if (at === '') {
+            bad = 'it climbs above the repository root';
+            break;
+          }
+          at = parentOf(at);
+          continue;
+        }
+        at = at ? `${at}/${c}` : c;
+        if (this.l.sealed(at)) {
+          bad = 'it leads into a dependency directory or another repository';
+          break;
+        }
+      }
+      if (bad) out = unfollowed(bad);
+      else {
+        this.active.add(cand);
+        const inner = this.walk(dir, text.split('/'));
+        this.active.delete(cand);
+        out = { r: inner.r, hops: inner.hops + 1 };
+        if ('skip' in out.r && out.r.skip === 'unfollowed' && out.r.link === '')
+          out = unfollowed(out.r.why);
+        else if (out.hops > MAX_LINK_HOPS) out = { r: { skip: 'dangling' }, hops: out.hops };
+        else if ('real' in out.r && out.r.kind === 'dir' && within(dir, out.r.real))
+          out = unfollowed('it points at a folder that contains it');
+        else if ('real' in out.r && this.l.sealed(out.r.real))
+          out = unfollowed('it leads into a dependency directory or another repository');
+      }
     }
     const r = out.r;
     if (!('need' in r) && !('skip' in r && r.skip === 'budget')) this.memo.set(cand, out);
@@ -527,27 +558,22 @@ class Resolver {
 }
 
 /** Directory links bring their target's entries under the link's own path: an agent opening
- *  `.claude/settings.json` through `.claude -> cfg` gets `cfg/settings.json`, wherever `cfg`
- *  lives — a dependency dir or a nested repository included. 109 of the 122 directory links
- *  across 118 repositories sit in agent-surface positions (`.claude/skills/X -> .agents/skills/X`).
- *  A link back into a directory already on its own chain is not expanded (a loop: the agent does
- *  not recurse through it); past MAX_EXPANDED entries the scan says INCOMPLETE. */
+ *  `.claude/settings.json` through `.claude -> cfg` gets `cfg/settings.json`. 109 of the 122
+ *  directory links across 118 repositories sit in agent-surface positions. A plain link back
+ *  into a directory already on its own chain is a loop and is not expanded again; past
+ *  MAX_EXPANDED entries the scan says INCOMPLETE. */
 const MAX_EXPANDED = 20_000; // measured maximum across 118 repositories: 173
-
-const dirOf = (p: string) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '');
-const within = (inner: string, outer: string) =>
-  outer === '' || inner === outer || inner.startsWith(`${outer}/`);
 
 function visiblePaths(
   l: Listing,
   R: Resolver,
-  notes: string[]
+  notes: string[],
+  unfollowed: UnfollowedLink[]
 ): { paths: string[]; complete: boolean } | { need: string[] } {
-  const out = [...l.paths];
+  const out = [...l.paths.filter((p) => !isUnwalked(p))];
   const needs = new Set<string>();
-  const unresolvable: string[] = [];
-  // Each queued link carries the real directories on its visible chain.
-  const queue = l.paths.filter((p) => l.kind(p) === 'link').map((v) => ({ v, chain: [dirOf(v)] }));
+  const elsewhere: string[] = [];
+  const queue = out.filter((p) => l.kind(p) === 'link').map((v) => ({ v, chain: [parentOf(v)] }));
   let expanded = 0;
   let complete = true;
   for (let i = 0; i < queue.length && complete; i++) {
@@ -558,7 +584,11 @@ function visiblePaths(
       continue;
     }
     if ('skip' in r) {
-      if (r.skip === 'unknown-root' || r.skip === 'opaque') unresolvable.push(v);
+      if (r.skip === 'unfollowed' && r.link === v) {
+        if (inAgentArea(v) || selectSurface([v]).length)
+          unfollowed.push({ path: v, link: r.link, text: r.text, why: r.why });
+        else elsewhere.push(v);
+      }
       continue;
     }
     if (r.kind !== 'dir') continue;
@@ -571,7 +601,7 @@ function visiblePaths(
       const vq = v + q.slice(r.real.length);
       out.push(vq);
       expanded++;
-      if (l.kind(q) === 'link') queue.push({ v: vq, chain: [...chain, dirOf(q)] });
+      if (l.kind(q) === 'link') queue.push({ v: vq, chain: [...chain, parentOf(q)] });
     }
   }
   if (needs.size) return { need: [...needs] };
@@ -579,9 +609,9 @@ function visiblePaths(
     notes.push(
       `directory symlinks expand past ${MAX_EXPANDED} entries — some agent-surface files ${INCOMPLETE}.`
     );
-  if (unresolvable.length)
+  if (elsewhere.length)
     notes.push(
-      `${unresolvable.length} symlink(s) could not be followed here (e.g. ${unresolvable.slice(0, 3).join(', ')}: out of the repository through its checkout path, or into a submodule) — results ${INCOMPLETE}.`
+      `${elsewhere.length} symlink(s) outside the agent folders are not followed (e.g. ${elsewhere.slice(0, 3).join(', ')}) — results ${INCOMPLETE}.`
     );
   return { paths: out, complete };
 }
@@ -601,29 +631,37 @@ interface PlannedRead {
   rel: string;
   /** The listing entry that holds the bytes. */
   real: string;
+  /** The check this path goes to, decided over the whole plan. */
+  route: Route | null;
+}
+
+interface Plan {
+  reads: PlannedRead[];
+  /** Visible paths that resolve to a file — what the hook check calls "committed". */
+  paths: string[];
+  complete: boolean;
+  notes: string[];
+  unfollowed: UnfollowedLink[];
 }
 
 /** Listing → visible paths → plan → reads. Every planned path is read under its own path and
  *  routed by it. A path is dropped as a duplicate only when the same real file goes to the SAME
- *  check under another path — the path under the file's own name first (`AGENTS.md -> CLAUDE.md`
- *  is one instruction file; `.claude/settings.json -> ../.mcp.json` is settings AND an MCP
- *  config, and is read as both). Every skip that could hide content is said. `nestedCap` (the
- *  API) caps nested reads after duplicates are dropped, so duplicates never use up the cap. */
+ *  check under another path — the path under the file's own name first. `nestedCap` (the API)
+ *  caps nested reads after duplicates are dropped, so duplicates never use up the cap. */
 function planReads(
   l: Listing,
   R: Resolver,
   opts: { nestedCap?: number; truncated?: boolean } = {}
-):
-  | { reads: PlannedRead[]; paths: string[]; complete: boolean; notes: string[] }
-  | { need: string[] } {
+): Plan | { need: string[] } {
   const notes: string[] = [];
-  const v = visiblePaths(l, R, notes);
+  const unfollowed: UnfollowedLink[] = [];
+  const v = visiblePaths(l, R, notes, unfollowed);
   if ('need' in v) return v;
   const planned = planSurface(v.paths, notes, !!opts.truncated);
   const skillDirs = skillDirsOf(planned);
-  const needs = new Set<string>();
   const resolved: (PlannedRead & { key: string })[] = [];
   const dangling: string[] = [];
+  const needs = new Set<string>();
   for (const rel of planned) {
     const r = R.resolve(rel);
     if ('need' in r) {
@@ -631,31 +669,37 @@ function planReads(
       continue;
     }
     if ('skip' in r) {
-      if (r.skip === 'outside') notes.push(outsideNote(rel));
-      else if (r.skip === 'dangling') {
-        if (l.hostOpens?.(rel))
-          notes.push(
-            `${rel} opens on this machine but does not resolve in the repository (a case-insensitive file system?) — not read; results ${INCOMPLETE}.`
-          );
-        else dangling.push(rel);
-      } else if (r.skip === 'unknown-root' || r.skip === 'opaque')
-        notes.push(
-          `${rel} is a symlink that cannot be followed here (out of the repository through its checkout path, or into a submodule) — not read; results ${INCOMPLETE}.`
-        );
+      if (r.skip === 'unfollowed')
+        unfollowed.push({ path: rel, link: r.link, text: r.text, why: r.why });
+      else if (r.skip === 'dangling') dangling.push(rel);
       continue; // 'budget' is noted once, below
     }
     if (r.kind !== 'file') continue; // a directory or a submodule named like a surface file
-    resolved.push({ rel, real: r.real, key: `${r.real}\0${routeOf(rel, skillDirs)}` });
+    const route = routeOf(rel, skillDirs);
+    resolved.push({ rel, real: r.real, route, key: `${r.real}\0${route}` });
   }
-  if (needs.size) return { need: [...needs] };
   const own = new Set(resolved.filter((x) => x.rel === x.real).map((x) => x.key));
   const seen = new Set<string>();
   const reads: PlannedRead[] = [];
   for (const x of resolved) {
     if (x.rel !== x.real && (own.has(x.key) || seen.has(x.key))) continue;
     seen.add(x.key);
-    reads.push({ rel: x.rel, real: x.real });
+    reads.push({ rel: x.rel, real: x.real, route: x.route });
   }
+  // What the hook check may call committed: a path that resolves to a file. A dangling link is
+  // listed but opens nothing, so a hook naming it is "missing".
+  const files: string[] = [];
+  for (const p of v.paths) {
+    if (l.kind(p) === 'file') files.push(p);
+    else {
+      const r = R.resolve(p);
+      if ('need' in r) needs.add(r.need);
+      else if ('real' in r && r.kind === 'file') files.push(p);
+    }
+  }
+  if (needs.size) return { need: [...needs] };
+  // one finding per path, however many ways it was reached
+  const byPath = new Map(unfollowed.map((u) => [u.path, u]));
   const capped = capNested(reads, opts.nestedCap, notes);
   if (R.budgetHit)
     notes.push(`symlink resolution stopped at its step budget — results ${INCOMPLETE}.`);
@@ -663,7 +707,13 @@ function planReads(
     notes.push(
       `${dangling.length} agent-surface symlink(s) point at nothing in the repository (e.g. ${dangling.slice(0, 3).join(', ')}) — not read.`
     );
-  return { reads: capped, paths: v.paths, complete: v.complete && !R.budgetHit, notes };
+  return {
+    reads: capped,
+    paths: files,
+    complete: v.complete && !R.budgetHit,
+    notes,
+    unfollowed: [...byPath.values()],
+  };
 }
 
 /** Root surface files and root workflows are never capped; nested reads are, where each costs
@@ -689,19 +739,6 @@ const overLimit = (text: string) => Buffer.byteLength(text, 'utf8') > MAX_FILE_B
 /** Raw bytes above this are over the limit whatever their line endings. */
 const RAW_LIMIT = 2 * MAX_FILE_BYTES;
 
-/** Both absolute forms of a local root, as path components. */
-function rootForms(root: string): string[][] {
-  const forms = new Set<string>([path.resolve(root)]);
-  try {
-    forms.add(fs.realpathSync(root));
-  } catch {
-    /* a root that cannot be resolved has no files to read either */
-  }
-  const split = (p: string) => p.split(/[\\/]/).filter(Boolean);
-  // the realpath first: `..` past the root pops the REAL parent, as the OS does
-  return [...forms].reverse().map(split);
-}
-
 // ── local working tree ───────────────────────────────────────────────────────
 
 // O_NONBLOCK: a FIFO swapped in after the walk must not hang the scan on open.
@@ -715,16 +752,15 @@ const direntKind = (e: fs.Dirent | fs.Stats): Kind =>
   e.isSymbolicLink() ? 'link' : e.isDirectory() ? 'dir' : e.isFile() ? 'file' : 'other';
 
 /** Walk the directory as it is on disk, nothing followed. Dependency dirs and nested git
- *  repositories (submodule checkouts) are not entered by their own name — they are recorded
- *  as `unentered` and read on demand when a link leads into them. No git process: the scanned
- *  folder's own `.git/config` can run commands (`core.fsmonitor`), and a folder is scanned
- *  precisely because it is not trusted. */
+ *  repositories (submodule checkouts) are not entered — they are sealed: a link into them is
+ *  not followed. No git process: the scanned folder's own `.git/config` can run commands
+ *  (`core.fsmonitor`), and a folder is scanned precisely because it is not trusted. */
 function walkDisk(
   root: string,
   notes: string[]
-): { kinds: Map<string, Kind>; unentered: Set<string>; complete: boolean } {
+): { kinds: Map<string, Kind>; sealed: Set<string>; complete: boolean } {
   const kinds = new Map<string, Kind>();
-  const unentered = new Set<string>();
+  const sealed = new Set<string>();
   const nestedRepos: string[] = [];
   const unlistable: string[] = [];
   const stack: string[] = [''];
@@ -747,10 +783,9 @@ function walkDisk(
       const rel = relDir ? `${relDir}/${e.name}` : e.name;
       const k = direntKind(e);
       kinds.set(rel, k);
-      if (k !== 'dir') continue;
-      if (isUnwalked(`${rel}/`)) unentered.add(rel);
-      else if (fs.existsSync(path.join(root, rel, '.git'))) {
-        unentered.add(rel);
+      if (k !== 'dir' || isUnwalked(`${rel}/`)) continue;
+      if (fs.existsSync(path.join(root, rel, '.git'))) {
+        sealed.add(rel);
         nestedRepos.push(rel);
       } else stack.push(rel);
     }
@@ -767,7 +802,7 @@ function walkDisk(
     notes.push(
       `skipped ${nestedRepos.length} nested git repositor${nestedRepos.length === 1 ? 'y' : 'ies'} (e.g. ${nestedRepos.slice(0, 3).join(', ')}) — scan ${nestedRepos.length === 1 ? 'it' : 'each'} on its own.`
     );
-  return { kinds, unentered, complete };
+  return { kinds, sealed, complete };
 }
 
 /** A link's text as the host OS reads it. On Windows the OS takes `\` as a separator and a
@@ -780,75 +815,6 @@ function localLinkText(root: string, rel: string): string | null {
   } catch {
     return null;
   }
-}
-
-/** The working tree's listing: the walk, plus on-demand lookups inside the dirs the walk did
- *  not enter (reached only through links). */
-function localListing(
-  root: string,
-  walked: { kinds: Map<string, Kind>; unentered: Set<string> }
-): Listing {
-  const { kinds, unentered } = walked;
-  const paths = [...kinds.keys()].filter((p) => kinds.get(p) !== 'dir').sort();
-  const inUnentered = (p: string) => [...prefixes(p), p].some((d) => unentered.has(d));
-  const lazyKinds = new Map<string, Kind | undefined>();
-  const lazyUnder = new Map<string, string[]>();
-  const kind = (p: string): Kind | undefined => {
-    const k = kinds.get(p);
-    if (k !== undefined || !inUnentered(p)) return k;
-    if (!lazyKinds.has(p)) {
-      let lk: Kind | undefined;
-      try {
-        lk = direntKind(fs.lstatSync(path.join(root, p)));
-      } catch {
-        lk = undefined;
-      }
-      lazyKinds.set(p, lk);
-    }
-    return lazyKinds.get(p);
-  };
-  const walkedUnder = sortedUnder(paths);
-  const under = (dir: string): string[] => {
-    if (!inUnentered(dir)) return walkedUnder(dir);
-    let hit = lazyUnder.get(dir);
-    if (!hit) {
-      hit = [];
-      const stack = [dir];
-      while (stack.length && hit.length <= MAX_EXPANDED) {
-        const d = stack.pop()!;
-        let ents: fs.Dirent[] = [];
-        try {
-          ents = fs.readdirSync(path.join(root, d), { withFileTypes: true });
-        } catch {
-          /* unreadable: nothing under it */
-        }
-        for (const e of ents) {
-          const rel = `${d}/${e.name}`;
-          const k = direntKind(e);
-          lazyKinds.set(rel, k);
-          if (k === 'dir') stack.push(rel);
-          else hit.push(rel);
-        }
-      }
-      hit.sort();
-      lazyUnder.set(dir, hit);
-    }
-    return hit;
-  };
-  return {
-    paths,
-    kind,
-    linkText: (p) => localLinkText(root, p),
-    under,
-    roots: rootForms(root),
-    hostOpens: (p) => {
-      try {
-        return fs.statSync(path.join(root, p)).isFile();
-      } catch {
-        return false;
-      }
-    },
-  };
 }
 
 /** Read one regular file through one O_NOFOLLOW handle. Throws a note-shaped error (carrying
@@ -880,12 +846,12 @@ export function readLocalTree(dir: string): RepoTree {
   const root = dir.replace(/^~/, process.env.HOME ?? '~');
   const notes: string[] = [];
   const walked = walkDisk(root, notes);
-  const listing = localListing(root, walked);
+  const listing = makeListing(walked.kinds, (p) => localLinkText(root, p), walked.sealed);
   const plan = planReads(listing, new Resolver(listing));
   if ('need' in plan) throw new Error('unreachable: local link texts are always known');
   notes.push(...plan.notes);
   const files: RepoFile[] = [];
-  for (const { rel, real } of plan.reads) {
+  for (const { rel, real, route } of plan.reads) {
     const abs = path.join(root, real);
     let size = 0;
     try {
@@ -899,6 +865,7 @@ export function readLocalTree(dir: string): RepoTree {
     }
     files.push({
       path: rel,
+      route,
       // Read on demand, not held: scanTree reads each file once, analyzes it, and moves on.
       get content(): string {
         return readLocalFile(abs, rel);
@@ -911,6 +878,7 @@ export function readLocalTree(dir: string): RepoTree {
     notes,
     paths: plan.paths,
     pathsComplete: walked.complete && plan.complete,
+    unfollowed: plan.unfollowed,
   };
 }
 
@@ -952,6 +920,21 @@ function catFileBatch(root: string, shas: string[]): Map<string, string> {
     i += size + 1; // the content is followed by a newline
   }
   return out;
+}
+
+/** A listing over a full entry list (git, the API). Dependency dirs are dropped by name; a
+ *  submodule (a directory with no entries of its own) is sealed. */
+function entriesListing(
+  kinds: Map<string, Kind>,
+  linkText: (p: string) => string | null | undefined
+): Listing {
+  const own = new Map([...kinds].filter(([p]) => !isUnwalked(p)));
+  const withEntries = new Set<string>();
+  for (const p of own.keys()) for (const d of prefixes(p)) withEntries.add(d);
+  const submodules = new Set(
+    [...own].filter(([p, k]) => k === 'dir' && !withEntries.has(p)).map(([p]) => p)
+  );
+  return makeListing(own, linkText, submodules);
 }
 
 /** Read the agent surface as it exists at a git REF, without touching the working tree.
@@ -1000,17 +983,14 @@ export function readGitRefTree(dir: string, ref: string): RepoTree | null {
   }
   try {
     // Every link's text in one batch (links are small), so resolution needs no more processes.
-    const linkShas = [...entries.values()].filter((e) => e.kind === 'link').map((e) => e.sha);
+    const linkShas = [...entries]
+      .filter(([p, e]) => e.kind === 'link' && !isUnwalked(p))
+      .map(([, e]) => e.sha);
     const linkText = catFileBatch(root, [...new Set(linkShas)]);
-    const kinds = new Map([...entries].map(([p, e]) => [p, e.kind] as const));
-    const l = entriesListing(
-      kinds,
-      (p) => {
-        const e = entries.get(p);
-        return e && e.kind === 'link' ? (linkText.get(e.sha) ?? null) : null;
-      },
-      rootForms(root)
-    );
+    const l = entriesListing(new Map([...entries].map(([p, e]) => [p, e.kind] as const)), (p) => {
+      const e = entries.get(p);
+      return e && e.kind === 'link' ? (linkText.get(e.sha) ?? null) : null;
+    });
     const plan = planReads(l, new Resolver(l));
     if ('need' in plan) return null; // unreachable: every link text was fetched above
     const notes = plan.notes;
@@ -1021,7 +1001,7 @@ export function readGitRefTree(dir: string, ref: string): RepoTree | null {
     });
     const bytes = catFileBatch(root, [...new Set(reads.map((r) => entries.get(r.real)!.sha))]);
     const files: RepoFile[] = [];
-    for (const { rel, real } of reads) {
+    for (const { rel, real, route } of reads) {
       const raw = bytes.get(entries.get(real)!.sha);
       if (raw === undefined) {
         notes.push(unreadNote(rel, 'object missing from this clone'));
@@ -1032,7 +1012,7 @@ export function readGitRefTree(dir: string, ref: string): RepoTree | null {
         notes.push(tooLargeNote(rel));
         continue;
       }
-      files.push({ path: rel, content });
+      files.push({ path: rel, content, route });
     }
     return {
       source: `${root}@${ref}`,
@@ -1040,6 +1020,7 @@ export function readGitRefTree(dir: string, ref: string): RepoTree | null {
       notes,
       paths: plan.paths,
       pathsComplete: plan.complete,
+      unfollowed: plan.unfollowed,
     };
   } catch {
     return null; // the base could not be read: did-not-run, never "clean"
@@ -1199,15 +1180,9 @@ export async function fetchGitHubTree(
       [...entries].map(([p, e]) => [p, e.type === 'blob' ? kindOfMode(e.mode) : 'dir'] as const)
     );
     const session = new ApiSession(owner, repo, notes);
-    // Link texts are fetched as the resolver asks for them, a round per link depth. The API
-    // does not know the checkout directory, so a link that leaves the repository cannot be
-    // followed back in (roots: null) and is reported as such.
+    // Link texts are fetched as the resolver asks for them, a round per link depth.
     const linkText = new Map<string, string | null>();
-    const listing = entriesListing(
-      kinds,
-      (p) => (linkText.has(p) ? linkText.get(p)! : undefined),
-      null
-    );
+    const listing = entriesListing(kinds, (p) => (linkText.has(p) ? linkText.get(p)! : undefined));
     const R = new Resolver(listing);
     const opts = { nestedCap: API_CAPS.files, truncated: listed.truncated };
     let plan = planReads(listing, R, opts);
@@ -1231,21 +1206,25 @@ export async function fetchGitHubTree(
       return false;
     });
     let done = 0;
-    const fetched = await pooled(reads, FETCH_CONCURRENCY, async ({ rel, real }) => {
-      const e = entries.get(real)!;
-      const r = await session.blob(e.sha, e.size ?? 0);
-      onProgress?.({ phase: 'fetching agent surface', done: ++done, total: reads.length });
-      if ('error' in r) {
-        if (r.error !== 'budget') session.failed.push(`${rel}: ${r.error}`);
-        return null;
+    const fetched = await pooled(
+      reads,
+      FETCH_CONCURRENCY,
+      async ({ rel, real, route }): Promise<RepoFile | null> => {
+        const e = entries.get(real)!;
+        const r = await session.blob(e.sha, e.size ?? 0);
+        onProgress?.({ phase: 'fetching agent surface', done: ++done, total: reads.length });
+        if ('error' in r) {
+          if (r.error !== 'budget') session.failed.push(`${rel}: ${r.error}`);
+          return null;
+        }
+        const content = lf(r.text);
+        if (overLimit(content)) {
+          notes.push(tooLargeNote(rel));
+          return null;
+        }
+        return { path: rel, content, route };
       }
-      const content = lf(r.text);
-      if (overLimit(content)) {
-        notes.push(tooLargeNote(rel));
-        return null;
-      }
-      return { path: rel, content };
-    });
+    );
     notes.push(...session.closingNotes());
     return {
       source: `${owner}/${repo}`,
@@ -1253,6 +1232,7 @@ export async function fetchGitHubTree(
       notes,
       paths: plan.paths,
       pathsComplete: !listed.truncated && plan.complete,
+      unfollowed: plan.unfollowed,
     };
   } catch (err) {
     // "may be INCOMPLETE" is load-bearing — index.ts keys `incomplete` off it, so a total

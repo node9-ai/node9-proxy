@@ -8,6 +8,7 @@
 // Severity mirrors the posture Severity so renderers/consumers stay consistent.
 
 import type { Severity } from '../posture/types';
+import type { Route } from './route';
 
 export type { Severity };
 
@@ -98,6 +99,23 @@ export interface ScanDiff {
 export interface RepoFile {
   path: string;
   content: string;
+  /** The check the reader routed this path to (route.ts), decided over the whole plan. Absent
+   *  on hand-built trees; scanTree then routes by path itself. */
+  route?: Route | null;
+}
+
+/** A symlink where agent configuration can live that the scan does not follow (K.4): it is
+ *  absolute, climbs above the repository root, points at a folder that contains it, or leads
+ *  into a dependency directory or another repository. The agent may load content no reviewer
+ *  sees, so it is reported as a finding, not skipped. */
+export interface UnfollowedLink {
+  /** The path the agent opens. */
+  path: string;
+  /** The link that is not followed (the path itself, or a link on the way). */
+  link: string;
+  /** Its exact text. */
+  text: string;
+  why: string;
 }
 
 /** The subset of a repo we fetch — config only, never source. */
@@ -114,6 +132,8 @@ export interface RepoTree {
   /** True only when `paths` is the WHOLE listing. A path missing from a truncated or
    *  capped listing is unknown, not absent, and no check may call it "missing". */
   pathsComplete?: boolean;
+  /** Links where agent configuration can live that were not followed — each one a finding. */
+  unfollowed?: UnfollowedLink[];
 }
 
 export interface ScanResult {

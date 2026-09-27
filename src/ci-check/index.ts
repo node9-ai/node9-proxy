@@ -60,7 +60,8 @@ export function scanTree(tree: RepoTree): ScanResult {
       // Read ONCE: a local reader's content is read on demand and not held (§K), so a second
       // access would read the file again. Everything below uses this one copy.
       const content = file.content;
-      switch (routeOf(file.path, skillDirs)) {
+      // The reader routed each path over the whole plan (K.4); a hand-built tree has no route.
+      switch (file.route !== undefined ? file.route : routeOf(file.path, skillDirs)) {
         case 'workflow': {
           const f = analyzeWorkflow(file.path, content);
           if (f) findings.push(f);
@@ -91,6 +92,26 @@ export function scanTree(tree: RepoTree): ScanResult {
     } catch (err) {
       notes.push(`checker degraded on ${file.path}: ${(err as Error)?.message ?? 'error'}`);
     }
+  }
+
+  // K.4: a symlink where agent configuration can live that the scan does not follow is itself
+  // the evidence — the agent may load content no reviewer sees.
+  const quote = (t: string) => t.replace(/[`\r\n\u2028\u2029]+/g, ' ').slice(0, 120);
+  for (const u of tree.unfollowed ?? []) {
+    findings.push({
+      check: 'CI-1',
+      rule: 'CI-1.unfollowable-symlink',
+      locator: u.link,
+      dimension: 'files',
+      severity: 'medium',
+      title: 'Agent configuration is a symlink this scan does not follow',
+      file: u.path,
+      signals: [
+        `\`${quote(u.link)}\` is a symlink to \`${quote(u.text)}\` — not followed: ${u.why}`,
+        'the agent opens whatever the link leads to; no reviewer sees that content in the repository',
+      ],
+      fix: 'Commit the file itself, or make the link a relative path to a file inside the repository.',
+    });
   }
 
   // Identity before sorting: ordinals are assigned in EMISSION order so two otherwise

@@ -590,7 +590,10 @@ describe('readLocalTree refuses symlinks and reads through one handle', () => {
       expect(t.files.map((f) => f.path)).not.toContain('CLAUDE.md');
       expect(t.files.map((f) => f.path)).toContain('AGENTS.md');
       const res = scanTree(t);
-      expect(res.findings.filter((f) => f.file === 'CLAUDE.md')).toHaveLength(0);
+      // not read — and the link itself is the finding (K.4), never its target's content
+      expect(res.findings.filter((f) => f.file === 'CLAUDE.md').map((f) => f.rule)).toEqual([
+        'CI-1.unfollowable-symlink',
+      ]);
       expect(JSON.stringify(res)).not.toMatch(/deploy key/);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
