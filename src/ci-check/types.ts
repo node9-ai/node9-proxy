@@ -57,6 +57,17 @@ export interface CiFinding {
   /** Whether it counts (tier.ts): `alert` sets the result; `review` is listed under "Worth a look";
    *  `note` is information. Not part of the finding's identity. */
   tier?: Tier;
+  /** The finding in plain words (explain.ts), for the kinds most readers meet. `signals` stay
+   *  the technical record. Not part of the finding's identity or its evidence. */
+  explain?: Explain;
+}
+
+/** What a finding means, in plain words. Repository text appears only inside code spans. */
+export interface Explain {
+  headline: string;
+  happens: string;
+  saw: string[];
+  fix: string[];
 }
 
 /** How one finding relates to the base scan. `escalated` is a finding that already

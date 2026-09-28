@@ -186,17 +186,27 @@ export function mdLine(v: unknown): string {
 }
 
 function findingMd(f: CiFinding, L: string[]): void {
+  const ex = f.explain;
   L.push(
-    `**${ICON[f.severity]} ${f.severity.toUpperCase()}: ${mdLine(f.title)}**` +
+    `**${ICON[f.severity]} ${f.severity.toUpperCase()}: ${mdLine(ex ? ex.headline : f.title)}**` +
       (f.suppressed ? ` _(suppressed: \`${safeText(f.suppressed.reason, 200)}\`)_` : '')
   );
   L.push(`\`${safeText(f.file, 300)}${f.line ? ':' + Number(f.line) : ''}\`  ·  ${f.rule}`);
   L.push('');
+  if (ex) {
+    // Plain words first (design R); the check's own record follows, collapsed.
+    L.push(mdLine(ex.happens), '', '**What we saw:**');
+    for (const s of ex.saw) L.push(`- ${mdLine(s)}`);
+    L.push('', '**✅ How to fix:**');
+    ex.fix.forEach((x, i) => L.push(`${i + 1}. ${mdLine(x)}`));
+    L.push('', '<details><summary>Technical details</summary>', '');
+  }
   for (const s of f.signals) L.push(`- ${mdLine(s)}`);
   if (f.mitigations?.length) L.push(`- _mitigated:_ ${mdLine(f.mitigations.join('; '))}`);
   L.push('');
   L.push(`→ **Fix:** ${f.fix}`);
   L.push('');
+  if (ex) L.push('</details>', '');
 }
 
 /** Why a diff could not be trusted, in the reviewer's words. Never rendered as "clean". */
@@ -265,13 +275,22 @@ export function renderScan(res: ScanResult, diff?: ScanDiff): string {
   L.push('');
 
   for (const f of shown) {
+    const ex = f.explain;
     L.push(
-      `${ICON[f.severity]} ${COLOR[f.severity](f.severity.toUpperCase())}  ${chalk.bold(f.title)}`
+      `${ICON[f.severity]} ${COLOR[f.severity](f.severity.toUpperCase())}  ${chalk.bold(ex ? ex.headline : f.title)}`
     );
     L.push(chalk.gray(`   ${f.file}${f.line ? ':' + f.line : ''}  ·  ${f.check}`));
-    for (const s of f.signals) L.push(`     • ${s}`);
-    if (f.mitigations?.length) L.push(chalk.gray(`     ✓ mitigated: ${f.mitigations.join('; ')}`));
-    L.push(chalk.cyan(`     → ${f.fix}`));
+    if (ex) {
+      // Plain words (design R): what can happen, what was seen, how to fix.
+      L.push(`     ${ex.happens}`);
+      for (const s of ex.saw) L.push(`     • ${s}`);
+      ex.fix.forEach((x, i) => L.push(chalk.cyan(`     ${i + 1}. ${x}`)));
+    } else {
+      for (const s of f.signals) L.push(`     • ${s}`);
+      if (f.mitigations?.length)
+        L.push(chalk.gray(`     ✓ mitigated: ${f.mitigations.join('; ')}`));
+      L.push(chalk.cyan(`     → ${f.fix}`));
+    }
     L.push('');
   }
 
