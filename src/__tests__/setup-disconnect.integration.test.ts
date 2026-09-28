@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { spawnSync } from 'child_process';
+import { pathToFileURL } from 'url';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -31,7 +32,8 @@ function run(apiKey = '', implicitProfile = false) {
   const script = path.join(home, 'disconnect.mts');
   fs.writeFileSync(
     script,
-    `import { disconnectMachine } from ${JSON.stringify(path.join(root, 'src/cli/commands/logout.ts'))};
+    // A file URL, not a path: the ESM loader reads a Windows "D:\..." as a URL scheme.
+    `import { disconnectMachine } from ${JSON.stringify(pathToFileURL(path.join(root, 'src/cli/commands/logout.ts')).href)};
 try { console.log(JSON.stringify(await disconnectMachine({ ${implicitProfile ? '' : "profile: 'default',"} resetCloudApprover: true }))); }
 catch (error) { console.error(error.message); process.exitCode = 1; }`
   );
@@ -82,7 +84,10 @@ describe('setup disconnect recovery', () => {
   it('validates malformed config before revoking or removing credentials', async () => {
     fs.writeFileSync(config, '{broken');
     const before = fs.readFileSync(credentials, 'utf8');
-    expect(run().status).toBe(1);
+    const result = run();
+    expect(result.status).toBe(1);
+    // Fail for the right reason: a broken import also exits 1.
+    expect(result.stderr).toContain('config.json is not valid JSON');
     expect(fs.readFileSync(credentials, 'utf8')).toBe(before);
   });
 });

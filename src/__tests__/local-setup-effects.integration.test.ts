@@ -3,6 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { spawnSync } from 'child_process';
+import { pathToFileURL } from 'url';
 const root = path.resolve(__dirname, '../..');
 const homes: string[] = [];
 function run(source: string, managed = false) {
@@ -30,7 +31,8 @@ function run(source: string, managed = false) {
   const script = path.join(home, 'exercise.mts');
   fs.writeFileSync(
     script,
-    `import { applyChanges } from ${JSON.stringify(path.join(root, 'src/cli/local-setup.ts'))};\n${source}`
+    // A file URL, not a path: the ESM loader reads a Windows "D:\..." as a URL scheme.
+    `import { applyChanges } from ${JSON.stringify(pathToFileURL(path.join(root, 'src/cli/local-setup.ts')).href)};\n${source}`
   );
   const r = spawnSync(
     process.execPath,
