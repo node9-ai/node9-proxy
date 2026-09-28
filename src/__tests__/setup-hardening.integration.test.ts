@@ -77,6 +77,32 @@ describe('problems the user can fix are one line', () => {
   });
 });
 
+describe('config.json holds only what a user can set', () => {
+  it('a fresh init writes no runtime-only fields and loads without a warning', () => {
+    const home = fixture();
+    const r = run(home, ['init', '--skip-setup']);
+    expect(r.error).toBeUndefined();
+    expect(r.status, r.stderr).toBe(0);
+    const written = JSON.parse(fs.readFileSync(path.join(home, '.node9/config.json'), 'utf8'));
+    expect(written).not.toHaveProperty('policySource');
+    expect(written).not.toHaveProperty('ssrfStrictSource');
+    expect(r.stdout + r.stderr).not.toContain('Invalid config');
+  });
+  it('a config written by an older init loads quietly and is not rewritten', () => {
+    const old = JSON.stringify({
+      settings: { mode: 'standard' },
+      policySource: 'local',
+      ssrfStrictSource: 'default',
+    });
+    const home = fixture({ 'config.json': old });
+    const r = run(home, ['init', '--skip-setup']);
+    expect(r.error).toBeUndefined();
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout + r.stderr).not.toContain('Invalid config');
+    expect(fs.readFileSync(path.join(home, '.node9/config.json'), 'utf8')).toBe(old);
+  });
+});
+
 describe('logout with an unreadable credentials file', () => {
   it('moves the file aside, disconnects locally and points at the dashboard', () => {
     const home = fixture({ 'credentials.json': 'not json' });

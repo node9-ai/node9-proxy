@@ -258,6 +258,15 @@ export const DANGEROUS_WORDS = [
   'shred', // permanently overwrites file contents (unrecoverable)
 ];
 
+/**
+ * Config fields getConfig computes at load time: part of Config, never part of
+ * the file. `node9 init` wrote them from DEFAULT_CONFIG from 2026-08-30 until
+ * the first-run wizard, so the loader drops them silently instead of warning on
+ * every run. They are never honored from a file: a local machine must not be
+ * able to claim workspace-managed policy.
+ */
+export const RUNTIME_ONLY_CONFIG_KEYS = ['policySource', 'ssrfStrictSource'] as const;
+
 // 2. The Master Default Config
 export const DEFAULT_CONFIG: Config = {
   version: '1.0',
@@ -1861,6 +1870,9 @@ function tryLoadConfig(filePath: string): Record<string, unknown> | null {
     }
   }
 
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    for (const key of RUNTIME_ONLY_CONFIG_KEYS) delete (raw as Record<string, unknown>)[key];
+  }
   const { sanitized, error } = sanitizeConfig(raw);
   if (error) {
     process.stderr.write(

@@ -11,6 +11,9 @@ beforeEach(() => {
   vi.stubEnv('CI', '');
   vi.stubEnv('GITHUB_ACTIONS', '');
   vi.stubEnv('NODE9_NONINTERACTIVE', '');
+  // vitest.config sets NODE9_TESTING for every test; clear it so the production
+  // send path runs. The test-run guard has its own test below.
+  vi.stubEnv('NODE9_TESTING', '');
   Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: true });
   Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: true });
   vi.mocked(confirm).mockReset();
@@ -41,6 +44,12 @@ describe('install statistics consent', () => {
     await askTelemetry([], true);
     expect(confirm).toHaveBeenCalledWith({ message: TELEMETRY_PROMPT, default: true });
     expect(request).toHaveBeenCalledTimes(1);
+  });
+  it('never sends from a test run, even after yes', async () => {
+    vi.stubEnv('NODE9_TESTING', '1');
+    vi.mocked(confirm).mockResolvedValue(true);
+    await askTelemetry([], true);
+    expect(request).not.toHaveBeenCalled();
   });
   it('does not send after no', async () => {
     vi.mocked(confirm).mockResolvedValue(false);

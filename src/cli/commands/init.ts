@@ -4,10 +4,11 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import https from 'https';
-import { DEFAULT_CONFIG, _resetConfigCache } from '../../config';
+import { DEFAULT_CONFIG, RUNTIME_ONLY_CONFIG_KEYS, _resetConfigCache } from '../../config';
 import { setupAgent, detectAgents, node9Version } from '../../setup';
 import { getMachineId } from '../../machine-id';
 import { atomicWriteSync } from '../../utils/atomic-write';
+import { isTestingMode } from '../daemon-starter';
 import { invalidConfig, isInteractive, isPromptCancellation, SetupError } from '../interactive';
 
 export interface TelemetryPayload {
@@ -50,6 +51,8 @@ export function buildTelemetryPayload(agents: string[], firstInstall: boolean): 
 }
 
 function fireTelemetryPing(agents: string[], firstInstall: boolean): void {
+  // A test run (NODE9_TESTING) is not an install: never count it.
+  if (isTestingMode()) return;
   try {
     const body = JSON.stringify(buildTelemetryPayload(agents, firstInstall));
     const req = https.request(
@@ -91,10 +94,11 @@ export function ensureConfig(mode?: string, force = false): { firstInstall: bool
   const file = path.join(os.homedir(), '.node9', 'config.json');
   const firstInstall = !fs.existsSync(file);
   if (firstInstall || force) {
-    const config = {
+    const config: Record<string, unknown> = {
       ...DEFAULT_CONFIG,
       settings: { ...DEFAULT_CONFIG.settings, mode: mode ?? DEFAULT_CONFIG.settings.mode },
     };
+    for (const key of RUNTIME_ONLY_CONFIG_KEYS) delete config[key];
     atomicWriteSync(file, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
   } else if (mode !== undefined) {
     let config;
