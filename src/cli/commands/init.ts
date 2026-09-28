@@ -1,35 +1,14 @@
-// src/cli/commands/init.ts
-// Registered as `node9 init` by cli.ts.
+// Shared installation steps and the script-compatible init command.
 import type { Command } from 'commander';
-import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import https from 'https';
-import { DEFAULT_CONFIG } from '../../core';
+import { DEFAULT_CONFIG, _resetConfigCache } from '../../config';
 import { setupAgent, detectAgents, node9Version } from '../../setup';
 import { getMachineId } from '../../machine-id';
-import { readActiveShields, writeActiveShields, migrateRenamedRuleKeys } from '../../shields';
-import {
-  installDaemonService,
-  isDaemonServiceInstalled,
-  isDaemonServiceEnabled,
-  ensureAutostartHealthy,
-} from '../../daemon/service';
-import { getConfig } from '../../core';
-import { autoStartDaemonAndWait, isTestingMode } from '../daemon-starter';
 import { atomicWriteSync } from '../../utils/atomic-write';
-
-// Three universally-applicable shields. Why these specifically:
-//   - bash-safe   — blocks curl|bash, rm -rf /, eval-of-remote. Universal value.
-//   - filesystem  — blocks writes to /etc, /boot, /usr, chmod 777. Universal value.
-//   - project-jail — blocks reads of ~/.ssh, ~/.aws, ~/.gcloud, .env. Directly
-//                    addresses the most common credential-leak finding.
-//
-// Domain-specific shields (postgres, mongodb, aws, k8s, github, docker, redis,
-// mcp-tool-gating) are left for users to enable on demand — enabling them by
-// default would create false positives for users who don't use those services.
-const DEFAULT_SHIELDS = ['bash-safe', 'filesystem', 'project-jail'];
+import { isInteractive, isPromptCancellation } from '../interactive';
 
 export interface TelemetryPayload {
   event: 'init_completed';
@@ -97,240 +76,78 @@ function fireTelemetryPing(agents: string[], firstInstall: boolean): void {
   }
 }
 
+export const TELEMETRY_PROMPT =
+  'Send usage stats to help improve node9? (a random install ID, detected agents, OS and version. No code, no args.)';
+
+export async function askTelemetry(agents: string[], firstInstall: boolean): Promise<void> {
+  if (!isInteractive()) return;
+  const { confirm } = await import('@inquirer/prompts');
+  if (await confirm({ message: TELEMETRY_PROMPT, default: true })) {
+    fireTelemetryPing(agents, firstInstall);
+  }
+}
+
+export function ensureConfig(mode?: string, force = false): { firstInstall: boolean } {
+  const file = path.join(os.homedir(), '.node9', 'config.json');
+  const firstInstall = !fs.existsSync(file);
+  if (firstInstall || force) {
+    const config = {
+      ...DEFAULT_CONFIG,
+      settings: { ...DEFAULT_CONFIG.settings, mode: mode ?? DEFAULT_CONFIG.settings.mode },
+    };
+    atomicWriteSync(file, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+  } else if (mode !== undefined) {
+    const config = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!config || typeof config !== 'object' || Array.isArray(config)) {
+      throw new Error('Invalid config.json; repair it or use --force to replace it.');
+    }
+    if (config.settings?.mode !== mode) {
+      config.settings = { ...config.settings, mode };
+      atomicWriteSync(file, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+    }
+  }
+  _resetConfigCache();
+  return { firstInstall };
+}
+
+export async function wireDetectedAgents(): Promise<string[]> {
+  const detected = detectAgents();
+  const found = (Object.keys(detected) as Array<keyof typeof detected>).filter((k) => detected[k]);
+  const previous = process.env.NODE9_NONINTERACTIVE;
+  process.env.NODE9_NONINTERACTIVE = '1';
+  try {
+    for (const agent of found) await setupAgent(agent);
+  } finally {
+    if (previous === undefined) delete process.env.NODE9_NONINTERACTIVE;
+    else process.env.NODE9_NONINTERACTIVE = previous;
+  }
+  return found;
+}
+
 export function registerInitCommand(program: Command): void {
   program
     .command('init')
     .description('Set up Node9: create config and wire all detected AI agents')
     .option('--force', 'Overwrite existing config')
-    .option(
-      '-m, --mode <mode>',
-      'Initial security mode: standard | strict | audit | observe (logs would-block, never blocks)',
-      'standard'
-    )
-    .option('--skip-setup', 'Only create config — do not wire AI agents')
-    .option(
-      '--recommended',
-      'Non-interactive: enable bash-safe + filesystem + project-jail shields without prompting'
-    )
+    .option('-m, --mode <mode>', 'Initial security mode: standard | strict | audit | observe')
+    .option('--skip-setup', 'Only configure protection; do not wire agents or install a service')
+    .option('--recommended', 'Enable recommended protection without asking any questions')
     .action(
       async (options: {
+        mode?: string;
         force?: boolean;
-        mode: string;
         skipSetup?: boolean;
         recommended?: boolean;
       }) => {
-        console.log(chalk.cyan.bold('\n🛡️  Node9 Init\n'));
-
-        // ── Step 0: One-shot migrations ───────────────────────────────────────
-        // Rename old rule keys in the user's shields.json overrides to their
-        // current names. Silent no-op when nothing needs rewriting; logs one
-        // line per migration when it does. Must run before any shield read so
-        // overrides resolve correctly downstream.
-        {
-          const migrated = migrateRenamedRuleKeys();
-          for (const m of migrated) {
-            console.log(chalk.dim(`  🔧 Rule renamed: ${m.oldKey} → ${m.newKey}`));
-          }
+        try {
+          const { runLocalSetup, renderSummary } = await import('../local-setup.js');
+          const summary = await runLocalSetup({ ...options, interactive: isInteractive() });
+          console.log(renderSummary(summary));
+        } catch (error) {
+          if (!isPromptCancellation(error)) throw error;
+          console.log('Setup cancelled. Run node9 setup to continue.');
+          process.exitCode = 130;
         }
-
-        // ── Step 1: Shields prompt → determines mode ───────────────────────────
-        let chosenMode = options.mode.toLowerCase();
-        if (!['standard', 'strict', 'audit', 'observe'].includes(chosenMode)) {
-          chosenMode = DEFAULT_CONFIG.settings.mode;
-        }
-
-        {
-          // --recommended skips the prompt entirely. Useful for scripted
-          // installs (`npm install -g node9-ai && node9 init --recommended`)
-          // and for users who've seen the scan output and want protection
-          // without making N yes/no decisions about shields they don't recognize.
-          let enableShields: boolean;
-          if (options.recommended) {
-            enableShields = true;
-            console.log(
-              chalk.dim(
-                '  Recommended mode: enabling bash-safe + filesystem + project-jail shields'
-              )
-            );
-          } else {
-            const { confirm } = await import('@inquirer/prompts');
-            enableShields = await confirm({
-              message:
-                'Enable recommended safety shields? (blocks rm -rf, credential reads, pipe-to-shell)',
-              default: true,
-            });
-          }
-          if (enableShields) {
-            chosenMode = 'standard';
-            // Activate default shields — merge with any already-active shields
-            try {
-              const current = readActiveShields();
-              const merged = Array.from(new Set([...current, ...DEFAULT_SHIELDS]));
-              const hasNewShields = DEFAULT_SHIELDS.some((s) => !current.includes(s));
-              if (hasNewShields) writeActiveShields(merged);
-            } catch (err) {
-              console.log(chalk.yellow(`  ⚠️  Could not update shields: ${String(err)}`));
-            }
-          }
-          console.log('');
-        }
-
-        // ── Step 2: Create or update config ───────────────────────────────────
-        const configPath = path.join(os.homedir(), '.node9', 'config.json');
-        // Captured BEFORE the create/update branch so the telemetry payload
-        // can distinguish first-time installs from re-runs of `node9 init`.
-        // `--force` overwrites an existing config but is still a re-install
-        // (the machine has run node9 before), so it counts as `false`.
-        const isFirstInstall = !fs.existsSync(configPath);
-
-        if (fs.existsSync(configPath) && !options.force) {
-          // Update mode in existing config to reflect shields choice
-          try {
-            const existing = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as Record<
-              string,
-              unknown
-            >;
-            const settings = (existing.settings ?? {}) as Record<string, unknown>;
-            if (settings.mode !== chosenMode) {
-              settings.mode = chosenMode;
-              existing.settings = settings;
-              atomicWriteSync(configPath, JSON.stringify(existing, null, 2) + '\n');
-              console.log(chalk.green(`✅ Mode updated: ${chosenMode}`));
-            } else {
-              console.log(chalk.blue(`ℹ️  Config already exists: ${configPath}`));
-            }
-          } catch {
-            console.log(chalk.blue(`ℹ️  Config already exists: ${configPath}`));
-          }
-        } else {
-          const configToSave = {
-            ...DEFAULT_CONFIG,
-            settings: { ...DEFAULT_CONFIG.settings, mode: chosenMode },
-          };
-
-          atomicWriteSync(configPath, JSON.stringify(configToSave, null, 2) + '\n');
-
-          console.log(chalk.green(`✅ Config created: ${configPath}`));
-          console.log(chalk.gray(`   Mode: ${chosenMode}`));
-        }
-
-        if (options.skipSetup) return;
-
-        // ── Step 3: Auto-detect and wire agents ────────────────────────────────
-        console.log('');
-        const detected = detectAgents();
-        const found = (Object.keys(detected) as Array<keyof typeof detected>).filter(
-          (k) => detected[k]
-        );
-
-        if (found.length === 0) {
-          console.log(
-            chalk.gray(
-              'No AI agents detected. Install one of the supported agents (Claude Code, Codex, Antigravity, Gemini CLI, GitHub Copilot CLI, Cursor, Windsurf, VSCode, Claude Desktop, Opencode, Pi, or Hermes Agent).'
-            )
-          );
-          console.log(
-            chalk.gray(
-              'then run: node9 agents add <claude|codex|antigravity|gemini|copilot|cursor|windsurf|vscode|claudeDesktop|opencode|pi|hermes>'
-            )
-          );
-          return;
-        }
-
-        console.log(chalk.bold('Detected agents:'));
-        for (const agent of found) {
-          console.log(chalk.green(`  ✓ ${agent}`));
-        }
-        console.log('');
-
-        for (const agent of found) {
-          console.log(chalk.bold(`Wiring ${agent}...`));
-          await setupAgent(agent);
-          console.log('');
-        }
-
-        // ── Step 4: Install daemon as login service ────────────────────────────
-        // Only prompt on platforms that support it and when not already installed.
-        // In non-interactive environments (CI, pipes) we skip silently.
-        if (
-          (process.platform === 'darwin' ||
-            process.platform === 'linux' ||
-            process.platform === 'win32') &&
-          process.stdout.isTTY
-        ) {
-          const alreadyInstalled = isDaemonServiceInstalled();
-          if (!alreadyInstalled) {
-            const { confirm } = await import('@inquirer/prompts');
-            const installService = await confirm({
-              message: 'Install daemon as a login service? (starts automatically on login)',
-              default: true,
-            });
-            if (installService) {
-              const result = installDaemonService();
-              if (result.ok) {
-                console.log(
-                  chalk.green(`  ✓ Daemon installed as login service (${result.platform})`)
-                );
-              } else {
-                console.log(chalk.yellow(`  ⚠️  Could not install service: ${result.reason}`));
-                console.log(chalk.gray('     You can try again later with: node9 daemon install'));
-              }
-            }
-          } else if (isDaemonServiceEnabled()) {
-            console.log(chalk.green('  ✓ Daemon login service already installed & enabled'));
-          } else {
-            // Installed but DISABLED — the exact stale-policy trigger. Re-enable it
-            // non-disruptively (no restart), but only if the user still wants
-            // autostart (ensureAutostartHealthy respects the autoStartDaemon opt-out).
-            const healed = ensureAutostartHealthy(!!getConfig().settings.autoStartDaemon);
-            console.log(
-              healed === 'repaired'
-                ? chalk.green('  ✓ Re-enabled daemon login service (was installed but disabled)')
-                : chalk.gray('  · Daemon login service is disabled (autostart off) — left as-is')
-            );
-          }
-
-          // Start the daemon right now so protection is immediate — don't make
-          // the user wait for next login or run node9 tail manually.
-          if (!isTestingMode()) {
-            process.stdout.write(chalk.dim('  Starting daemon...'));
-            const started = await autoStartDaemonAndWait();
-            if (started) {
-              process.stdout.write(
-                '\r' + chalk.green('  ✓ Daemon started — protection is active') + '\n'
-              );
-            } else {
-              process.stdout.write(
-                '\r' + chalk.dim('  Daemon will start on next login         ') + '\n'
-              );
-            }
-          }
-          console.log('');
-        }
-
-        // ── Step 5: Telemetry opt-in ───────────────────────────────────────────
-        {
-          const { confirm } = await import('@inquirer/prompts');
-          const sendTelemetry = await confirm({
-            message: 'Send anonymous usage stats to help improve node9? (no code, no args)',
-            default: true,
-          });
-          if (sendTelemetry) fireTelemetryPing(found, isFirstInstall);
-          console.log('');
-        }
-
-        // ── Summary ────────────────────────────────────────────────────────────
-        const agentList = found.join(', ');
-        console.log(chalk.green.bold(`🛡️  Node9 is protecting ${agentList}!`));
-        console.log('');
-        console.log(chalk.white('  Watch live:  ') + chalk.cyan('node9 monitor'));
-        console.log('');
-        console.log(chalk.gray('  ─────────────────────────────────────────────────'));
-        console.log(
-          chalk.white('  Team dashboard + full audit trail → ') +
-            chalk.cyan.bold('https://node9.ai')
-        );
-        console.log(chalk.gray('  ─────────────────────────────────────────────────'));
       }
     );
 }

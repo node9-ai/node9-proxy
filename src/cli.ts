@@ -35,7 +35,7 @@ import { parseDuration } from './utils/duration';
 import { runProxy } from './proxy';
 import { autoStartDaemonAndWait } from './cli/daemon-starter';
 import { onboardMachine, renderOnboardOutcome } from './onboarding';
-import { runDeviceLogin } from './auth/device-login';
+import { loginViaBrowser } from './auth/browser-login';
 import { registerLogoutCommand, revokeSelf } from './cli/commands/logout';
 import { openBrowser } from './utils/open-browser';
 import { registerCheckCommand } from './cli/commands/check';
@@ -131,19 +131,20 @@ program
           process.exitCode = 1;
           return;
         }
-        const res = await runDeviceLogin({
+        const result = await loginViaBrowser({
           apiUrl: options.apiUrl,
           noBrowser: options.browser === false,
           cliVersion: version,
         });
-        if (!res.ok) {
-          console.error(chalk.red(`✗ ${safeMessage(res.reason)}`));
+        if (result.kind === 'failed' || result.kind === 'cancelled') {
+          console.error(chalk.red(`✗ ${safeMessage(result.reason)}`));
           process.exitCode = 1;
-          return;
+        } else {
+          console.log(
+            renderOnboardOutcome(result.outcome, { workspaceName: result.workspaceName })
+          );
+          if (result.kind === 'partial') process.exitCode = 1;
         }
-        const outcome = await onboardMachine(res.apiKey);
-        console.log(renderOnboardOutcome(outcome, { workspaceName: res.workspaceName }));
-        if (!outcome.ok) process.exitCode = 1;
         return;
       }
       await runKeyLogin(apiKey, options);
@@ -233,8 +234,8 @@ program
 
 // 2b. SETUP (alias for addto)
 program
-  .command('setup', { hidden: true })
-  .description('Alias for "addto" — integrate Node9 with an AI agent')
+  .command('setup')
+  .description('Set up dashboard or local protection; optionally configure a specific agent')
   .addHelpText(
     'after',
     '\n  Supported targets:  claude  antigravity  copilot  gemini  cursor  codex  windsurf  vscode  hud'
@@ -245,22 +246,8 @@ program
   )
   .action(async (target?: string) => {
     if (!target) {
-      console.log(chalk.cyan('\n🛡️  Node9 Setup — integrate with your AI agent\n'));
-      console.log('  Usage:  ' + chalk.white('node9 setup <target>') + '\n');
-      console.log('  Targets:');
-      console.log('    ' + chalk.green('claude') + '    — Claude Code (hook mode)');
-      console.log('    ' + chalk.green('gemini') + '    — Gemini CLI (hook mode)');
-      console.log('    ' + chalk.green('antigravity') + ' — Antigravity / agy (hook mode)');
-      console.log('    ' + chalk.green('copilot') + '   — GitHub Copilot CLI (hook mode)');
-      console.log('    ' + chalk.green('cursor') + '    — Cursor (MCP proxy)');
-      console.log('    ' + chalk.green('codex') + '     — OpenAI Codex CLI (MCP proxy)');
-      console.log('    ' + chalk.green('windsurf') + '  — Windsurf (MCP proxy)');
-      console.log('    ' + chalk.green('vscode') + '    — VSCode / Copilot (MCP proxy)');
-      console.log('    ' + chalk.green('hermes') + '    — Hermes Agent (hook mode)');
-      process.stdout.write(
-        '    ' + chalk.green('hud') + '       — Claude Code security statusline\n'
-      );
-      console.log('');
+      const { runSetupWizard } = await import('./cli/first-run.js');
+      await runSetupWizard({ version });
       return;
     }
     const t = target.toLowerCase();
@@ -869,7 +856,14 @@ program
       console.error(chalk.green('\n✅ Approved — running command...\n'));
       await runProxy(fullCommand);
     } else {
-      program.help();
+      const { readFirstRunEnv, shouldOfferFirstRun, runSetupWizard, unwiredAgentHint } =
+        await import('./cli/first-run.js');
+      if (process.argv.length === 2 && shouldOfferFirstRun(readFirstRunEnv())) {
+        await runSetupWizard({ version });
+      } else {
+        program.outputHelp();
+        if (process.stdin.isTTY && process.stdout.isTTY) console.log(unwiredAgentHint());
+      }
     }
   });
 
