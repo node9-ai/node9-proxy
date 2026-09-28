@@ -32,11 +32,12 @@ INSTRUCTIONS:
   // rotate it immediately" for a `Read .env`, and the agent told the user node9
   // had misfired. Nothing was in the arguments but a path, and nothing was read.
   if (context?.kind === 'protected-path') {
+    // Operation-neutral: the same rules block reads, writes, edits and deletes.
     const subject = context.path ? `${context.path} is a protected file` : 'This file is protected';
-    return `NODE9: Blocked. ${subject}, so its contents stay out of the agent's reach. Nothing was read or sent, so nothing was exposed.
+    return `NODE9: Blocked. ${subject}, and node9 stopped this call to it. The call did not run, so nothing was exposed.
 INSTRUCTIONS:
-- Do NOT retry, and do NOT read it another way (cat, grep, a copy, a script).
-- If you need a value from it, ask the user to provide it or to run that step themselves.
+- Do NOT retry, and do NOT reach the file another way (cat, grep, a copy, a script, a redirect).
+- If this step needs that file, ask the user to provide what you need or to do the step themselves.
 - Tell the user node9 protected this file, then ask how to proceed.`;
   }
 
@@ -136,6 +137,10 @@ export function buildReviewMessage(
     blockedByLabel ||
     'this action needs your review';
   // MSG-2: a rule sentence that already ends in "." produced "backup.. Approve".
-  const sentence = why.replace(/[\s.!?]+$/, '');
-  return `Node9 flagged this for your review: ${sentence}. Approve to proceed, or deny to cancel.`;
+  // Add a period only when the sentence has no ending of its own: a question
+  // stays a question and an ellipsis stays an ellipsis (/code-review). No
+  // regex over the tail, so no backtracking on a long run of spaces.
+  const trimmed = why.trimEnd();
+  const sentence = /[.!?\u2026]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+  return `Node9 flagged this for your review: ${sentence} Approve to proceed, or deny to cancel.`;
 }

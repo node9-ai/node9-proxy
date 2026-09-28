@@ -101,14 +101,17 @@ describe('a protected file gets a protected-file message (MSG-1)', () => {
 // MSG-2: "...without a backup.. Approve to proceed" -- the rule's sentence
 // already ended in a period and one more was appended.
 describe('buildReviewMessage ends the reason with one period (MSG-2)', () => {
+  const OUT = (body: string) =>
+    `Node9 flagged this for your review: ${body} Approve to proceed, or deny to cancel.`;
   it.each([
-    ['ends in a period', 'rm is permanent.'],
-    ['ends in no punctuation', 'rm is permanent'],
-    ['ends in "!" and spaces', 'rm is permanent!  '],
-  ])('%s', (_name, reason) => {
-    const msg = buildReviewMessage(undefined, reason);
-    expect(msg).toBe(
-      'Node9 flagged this for your review: rm is permanent. Approve to proceed, or deny to cancel.'
-    );
+    ['ends in a period: kept, not doubled', 'rm is permanent.', 'rm is permanent.'],
+    ['ends in no punctuation: one added', 'rm is permanent', 'rm is permanent.'],
+    ['trailing spaces: trimmed', 'rm is permanent.   ', 'rm is permanent.'],
+    // /code-review: a trim of [.!?] turned questions into statements
+    ['a question stays a question', 'Deploy to prod?', 'Deploy to prod?'],
+    ['an exclamation stays', 'rm is permanent!', 'rm is permanent!'],
+    ['an ellipsis stays', 'this is irreversible...', 'this is irreversible...'],
+  ])('%s', (_name, reason, body) => {
+    expect(buildReviewMessage(undefined, reason)).toBe(OUT(body));
   });
 });
