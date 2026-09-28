@@ -7,7 +7,7 @@ import { loginViaBrowser } from '../auth/browser-login';
 import { renderOnboardOutcome } from '../onboarding';
 import { disconnectMachine } from './commands/logout';
 import { runLocalSetup, renderSummary } from './local-setup';
-import { isCI, isInteractive, isPromptCancellation } from './interactive';
+import { isCI, isInteractive, isPromptCancellation, SetupError } from './interactive';
 import { safeMessage } from '../utils/safe-text';
 
 export interface FirstRunEnv {
@@ -100,6 +100,10 @@ export async function runSetupWizard(opts: { version: string }): Promise<void> {
           console.log(
             `Disconnected locally. Cloud revocation was not confirmed: ${safeMessage(disconnected.detail)}. Disconnect this machine in the dashboard.`
           );
+        } else if (disconnected.outcome === 'unreadable') {
+          console.log(
+            'Disconnected locally. The credentials file could not be read, so the key was not revoked; it was moved aside. Disconnect this machine in the dashboard.'
+          );
         }
         console.log(renderSummary(await runLocalSetup({ interactive: true })));
         return;
@@ -122,6 +126,11 @@ export async function runSetupWizard(opts: { version: string }): Promise<void> {
     }
     console.log(renderSummary(await runLocalSetup({ interactive: true })));
   } catch (error) {
+    if (error instanceof SetupError) {
+      console.error(`✗ ${error.message}`);
+      process.exitCode = 1;
+      return;
+    }
     if (!isPromptCancellation(error)) throw error;
     console.log('Setup cancelled. Completed steps were kept; run node9 setup to continue.');
     process.exitCode = 130;

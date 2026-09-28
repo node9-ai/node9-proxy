@@ -8,7 +8,7 @@ import { DEFAULT_CONFIG, _resetConfigCache } from '../../config';
 import { setupAgent, detectAgents, node9Version } from '../../setup';
 import { getMachineId } from '../../machine-id';
 import { atomicWriteSync } from '../../utils/atomic-write';
-import { isInteractive, isPromptCancellation } from '../interactive';
+import { invalidConfig, isInteractive, isPromptCancellation, SetupError } from '../interactive';
 
 export interface TelemetryPayload {
   event: 'init_completed';
@@ -97,10 +97,13 @@ export function ensureConfig(mode?: string, force = false): { firstInstall: bool
     };
     atomicWriteSync(file, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
   } else if (mode !== undefined) {
-    const config = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (!config || typeof config !== 'object' || Array.isArray(config)) {
-      throw new Error('Invalid config.json; repair it or use --force to replace it.');
+    let config;
+    try {
+      config = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch {
+      config = undefined;
     }
+    if (!config || typeof config !== 'object' || Array.isArray(config)) throw invalidConfig();
     if (config.settings?.mode !== mode) {
       config.settings = { ...config.settings, mode };
       atomicWriteSync(file, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
@@ -144,6 +147,11 @@ export function registerInitCommand(program: Command): void {
           const summary = await runLocalSetup({ ...options, interactive: isInteractive() });
           console.log(renderSummary(summary));
         } catch (error) {
+          if (error instanceof SetupError) {
+            console.error(`✗ ${error.message}`);
+            process.exitCode = 1;
+            return;
+          }
           if (!isPromptCancellation(error)) throw error;
           console.log('Setup cancelled. Run node9 setup to continue.');
           process.exitCode = 130;

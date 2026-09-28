@@ -18,7 +18,7 @@ import { atomicWriteSync } from '../utils/atomic-write';
 import { safeMessage } from '../utils/safe-text';
 import { autoStartDaemonAndWait, isTestingMode } from './daemon-starter';
 import { askTelemetry, ensureConfig, wireDetectedAgents } from './commands/init';
-import { isInteractive } from './interactive';
+import { invalidConfig, isCI, isInteractive, mayChangeService, SetupError } from './interactive';
 
 export const DEFAULT_SHIELDS = ['bash-safe', 'filesystem', 'project-jail'];
 export type ChecklistKey = 'shields' | 'dlp' | 'egress' | 'service';
@@ -56,7 +56,7 @@ export interface SetupSummary {
   applied: AppliedChange[];
   state: LocalState;
   serviceRunning: boolean;
-  cloud: 'connected' | 'partial' | 'none' | 'configured';
+  cloud: 'none' | 'configured';
 }
 function configPath(): string {
   return path.join(os.homedir(), '.node9', 'config.json');
@@ -68,11 +68,17 @@ export function readLocalState(opts: { replaceConfig?: boolean } = {}): LocalSta
   const file = configPath();
   // Do not hide malformed user configuration behind getConfig's tolerant loader.
   if (fs.existsSync(file) && !opts.replaceConfig) {
-    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw))
-      throw new Error('Invalid config.json');
+    let raw: unknown;
+    try {
+      raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch {
+      raw = undefined;
+    }
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw invalidConfig();
   }
-  const config = getConfig(os.homedir());
+  // Global state only: getConfig skips the project layer for a directory with
+  // no node9.config.json, and ~/.node9 never holds one.
+  const config = getConfig(path.join(os.homedir(), '.node9'));
   const active = readActiveShields();
   const installed = isDaemonServiceInstalled();
   return {
@@ -234,10 +240,10 @@ export async function runLocalSetup(opts: {
   const interactive = opts.interactive && isInteractive() && !opts.recommended;
   let state = readLocalState({ replaceConfig: opts.force });
   if (state.managed && (opts.force || opts.mode || opts.recommended)) {
-    throw new Error('Policy is managed by your workspace. Change it in the dashboard.');
+    throw new SetupError('Policy is managed by your workspace. Change it in the dashboard.');
   }
   if (opts.mode && !['standard', 'strict', 'audit', 'observe'].includes(opts.mode.toLowerCase())) {
-    throw new Error('Mode must be standard, strict, audit, or observe.');
+    throw new SetupError('Mode must be standard, strict, audit, or observe.');
   }
   const firstInstall = state.fresh;
   const items = buildChecklist(state).filter((i) => !opts.skipSetup || i.key !== 'service');
@@ -289,10 +295,24 @@ export async function runLocalSetup(opts: {
   }
   // --force resets the config: compare choices with that new actual state.
   if (opts.force) state = readLocalState();
-  const changes = diffChoices(state, selected, partial).filter(
-    (c) => !opts.skipSetup || c.key !== 'service'
-  );
+  // Filter the changes, not the selection: an unselected service on an existing
+  // machine would otherwise read as "remove it". CI, Docker builds, pipes and
+  // agents never install or remove a login service (the pre-wizard init gate).
+  const serviceAllowed = mayChangeService({
+    stdoutTTY: !!process.stdout.isTTY,
+    ci: isCI(),
+    skipSetup: opts.skipSetup,
+  });
+  const planned = diffChoices(state, selected, partial);
+  const changes = planned.filter((c) => c.key !== 'service' || serviceAllowed);
   const applied = await applyChanges(changes);
+  if (!opts.skipSetup && planned.some((c) => c.key === 'service' && c.to && !serviceAllowed)) {
+    applied.push({
+      key: 'service',
+      ok: true,
+      detail: 'skipped without a terminal. Install it later: node9 daemon install',
+    });
+  }
   let agents: string[] = [];
   if (!opts.skipSetup) {
     try {

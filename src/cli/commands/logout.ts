@@ -5,6 +5,7 @@ import * as path from 'path';
 import chalk from 'chalk';
 import { atomicWriteSync } from '../../utils/atomic-write';
 import { _resetConfigCache } from '../../config';
+import { invalidConfig, SetupError } from '../interactive';
 import { postJson } from '../../utils/post-json';
 import { safeMessage } from '../../utils/safe-text';
 import { safeApiUrl, HOST_ALLOW_ENV } from '../../auth/api-url';
@@ -66,10 +67,24 @@ export async function revokeSelf(creds: {
 }
 
 export interface DisconnectResult {
-  outcome: 'revoked' | 'already' | 'unreachable' | 'not-logged-in';
+  outcome: 'revoked' | 'already' | 'unreachable' | 'unreadable' | 'not-logged-in';
   localRemoved: boolean;
   detail?: string;
   name?: string;
+  /** Where an unreadable credentials file was moved (outcome 'unreadable'). */
+  movedTo?: string;
+}
+
+/** Parse credentials.json; undefined when it exists but cannot be read as a profile map. */
+function readCredentialFile(
+  credPath: string
+): Record<string, { apiKey?: string; apiUrl?: string }> | undefined {
+  try {
+    const all = JSON.parse(fs.readFileSync(credPath, 'utf8'));
+    return all && typeof all === 'object' && !Array.isArray(all) ? all : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function disconnectMachine(opts: {
@@ -77,35 +92,51 @@ export async function disconnectMachine(opts: {
   profile?: string;
 }): Promise<DisconnectResult> {
   if (opts.resetCloudApprover && process.env.NODE9_API_KEY) {
-    throw new Error(
+    throw new SetupError(
       'NODE9_API_KEY is still set. Remove it from the environment before switching to local protection.'
     );
   }
   const profile = opts.profile ?? (process.env.NODE9_PROFILE || 'default');
   const credPath = path.join(os.homedir(), '.node9', 'credentials.json');
   const configPath = path.join(os.homedir(), '.node9', 'config.json');
-  let all: Record<string, { apiKey?: string; apiUrl?: string }> = {};
-  if (fs.existsSync(credPath)) {
-    all = JSON.parse(fs.readFileSync(credPath, 'utf8'));
-    if (!all || typeof all !== 'object' || Array.isArray(all))
-      throw new Error('Invalid credentials.json');
-  }
   // Validate the config before revoking anything: malformed settings must not
   // silently be replaced just to make the wizard finish.
   let config: Record<string, unknown> | undefined;
   if (opts.resetCloudApprover) {
-    config = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf8')) : {};
-    if (!config || typeof config !== 'object' || Array.isArray(config))
-      throw new Error('Invalid config.json');
+    try {
+      config = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf8')) : {};
+    } catch {
+      config = undefined;
+    }
+    if (!config || typeof config !== 'object' || Array.isArray(config)) throw invalidConfig();
   }
-  const entry = all[profile];
-  const remote = entry?.apiKey
-    ? await revokeSelf({ apiKey: entry.apiKey, apiUrl: entry.apiUrl })
-    : { outcome: 'not-logged-in' as const };
-  if (entry?.apiKey) {
-    delete all[profile];
-    if (Object.keys(all).length === 0) fs.unlinkSync(credPath);
-    else atomicWriteSync(credPath, JSON.stringify(all, null, 2) + '\n', { mode: 0o600 });
+  let remote: Omit<DisconnectResult, 'localRemoved'> = { outcome: 'not-logged-in' };
+  let localRemoved = false;
+  const all = fs.existsSync(credPath) ? readCredentialFile(credPath) : {};
+  if (!all) {
+    // The key cannot be read, so it cannot be revoked. Disconnect locally by
+    // moving the file aside (never deleting it: it may hold other profiles)
+    // and let the caller point the user at the dashboard.
+    const movedTo = `${credPath}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+    fs.renameSync(credPath, movedTo);
+    remote = { outcome: 'unreadable', movedTo };
+    localRemoved = true;
+  } else {
+    const entry = all[profile];
+    if (entry?.apiKey) {
+      remote = await revokeSelf({ apiKey: entry.apiKey, apiUrl: entry.apiUrl });
+      delete all[profile];
+      if (Object.keys(all).length === 0) {
+        try {
+          fs.unlinkSync(credPath);
+        } catch {
+          /* already gone */
+        }
+      } else {
+        atomicWriteSync(credPath, JSON.stringify(all, null, 2) + '\n', { mode: 0o600 });
+      }
+      localRemoved = true;
+    }
   }
   if (config) {
     const settings = (config.settings ?? {}) as Record<string, unknown>;
@@ -119,7 +150,7 @@ export async function disconnectMachine(opts: {
     atomicWriteSync(configPath, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
   }
   _resetConfigCache();
-  return { ...remote, localRemoved: true };
+  return { ...remote, localRemoved };
 }
 
 export function registerLogoutCommand(program: Command): void {
@@ -132,6 +163,25 @@ export function registerLogoutCommand(program: Command): void {
       const res = await disconnectMachine({ resetCloudApprover: false });
       if (res.outcome === 'not-logged-in') {
         console.log(chalk.gray('Not logged in — nothing to disconnect.'));
+        return;
+      }
+      if (res.outcome === 'unreadable') {
+        console.log(
+          chalk.yellow(
+            '⚠ ~/.node9/credentials.json could not be read, so the cloud key was not revoked.'
+          )
+        );
+        console.log(
+          chalk.green(
+            `✓ Local: moved it to ${path.basename(res.movedTo ?? '')}. This machine is disconnected here.`
+          )
+        );
+        console.log(
+          chalk.yellow('  Remove it from the dashboard too: Enforcement › Devices › Disconnect.')
+        );
+        console.log(
+          chalk.gray('  Local enforcement keeps running. Reconnect any time with: node9 login')
+        );
         return;
       }
       if (res.outcome === 'revoked') {
