@@ -3141,7 +3141,7 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
         // No length test here. `payload.length < command.length` looked like a
         // termination proof, but expansion can GROW the payload
         // (`K=KEY; sh -c "cat $K $K"`) and the wrapper then went unread. `depth`
-        // is the bound; the parse cache keys on the normalised string.
+        // is the bound; the parse cache keys on the command string.
         const payload = literalShellPayload(words, name);
         const claim = payload === null ? 'seen' : claimPayload(payload);
         if (claim === 'exhausted') {

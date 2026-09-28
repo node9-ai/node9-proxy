@@ -59,8 +59,8 @@ describe("JAIL-19 — the fix stays out of the text rules' way", () => {
   // A first cut returned the RAW command whenever the normalised reading did
   // not parse. That threw away every de-obfuscation in the whole command, and
   // the text rules, which never needed a parse, stopped matching tokens they
-  // matched before (/code-review on 5ddb367). The raw fallback now lives only
-  // in the jail reader; the normalised reading is what it always was.
+  // matched before (/code-review on 5ddb367). The jail now parses the raw
+  // command directly (1de6241); the normalised reading is what it always was.
   it('one unparseable word does not undo the de-obfuscation of the others', () => {
     expect(normalizeCommandForPolicy(`ca''t notes.txt; echo '(a)'`)).toContain('cat notes.txt');
   });
@@ -80,5 +80,38 @@ describe('JAIL-19 — de-obfuscation still works on ordinary tokens', () => {
 
   it('an obfuscated read still blocks', () => {
     expect(v(`ca''t .e''nv`)).toBe('block');
+  });
+});
+
+describe('JAIL-19 — a rewrite that still PARSES but changes structure cannot hide the read', () => {
+  // The headline class of the final fix (jail reads the raw command). Each of
+  // these unquotes to text that parses fine, but as a different command that no
+  // longer contains the read: a lone `"` pair swallows the statements between
+  // it into one string; a `;#` word comments out the rest of the line. On the
+  // parse-failure-only fallback (1686d1f) these were ALLOW; the raw-command
+  // reader (1de6241) blocks them.
+  it.each([
+    [`echo '"'; cat .env; echo '"'`, 'block'],
+    [`echo 'x;#'; cat .env`, 'block'],
+  ])('%s -> %s', (c, want) => expect(v(c)).toBe(want));
+});
+
+describe('JAIL-19 — the verdict cache is keyed by the RAW command', () => {
+  // Two commands with the SAME normalised text but different real meaning:
+  // `echo 'x;cat' .env` is one echo (no read); `echo x\;cat .env` is
+  // `echo x` then `cat .env` (a read). Both normalise to `echo x;cat .env`.
+  // Keyed by the normalised text, whichever ran first would decide the other;
+  // keyed by the raw command, each keeps its own verdict, in either order.
+  it('the read is not masked by an earlier no-read command that normalises alike', () => {
+    expect(normalizeCommandForPolicy(`echo 'x;cat' .env`)).toBe(
+      normalizeCommandForPolicy(`echo x\;cat .env`)
+    );
+    expect(v(`echo 'x;cat' .env`)).toBe('null'); // warms the cache with the no-read verdict
+    expect(v(`echo x\;cat .env`)).toBe('block'); // must not read the cached null
+  });
+
+  it('and in the other order', () => {
+    expect(v(`echo x\;cat .env`)).toBe('block');
+    expect(v(`echo 'x;cat' .env`)).toBe('null');
   });
 });
