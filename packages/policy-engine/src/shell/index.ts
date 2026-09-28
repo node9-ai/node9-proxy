@@ -135,10 +135,11 @@ const normalizeCache = new Map<string, CommandReadings>();
 const AST_CACHE_MAX = 5_000;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const astCache = new Map<string, any>();
-const PARSE_FAIL = Symbol('parse-fail');
+/** Exported for the JAIL-19 invariant rows (normalised text must still parse). */
+export const PARSE_FAIL = Symbol('parse-fail');
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function parseShared(command: string): any | typeof PARSE_FAIL {
+export function parseShared(command: string): any | typeof PARSE_FAIL {
   const cached = astCache.get(command);
   if (cached !== undefined) {
     astCache.delete(command);
@@ -353,6 +354,15 @@ function normalizeCommandForPolicyImpl(command: string): CommandReadings {
         // (/code-review, stage 6). The escaped spelling is the only one find
         // accepts, so this is the common case, not a corner.
         if (/^[;&|()<>]+$/.test(resolved)) continue;
+        // ⚠️ Never unquote a literal that holds a shell METACHARACTER, anywhere
+        // in it (JAIL-19). The operator-only guard above was the narrow case of
+        // this: a lone `(` survived, and `'s/(a)/b/'` became `s/(a)/b/`, which
+        // is not valid shell, so the jail parsed nothing and a recorded `grep
+        // KEY-FILE | sed 's/=(.{8}).*/…/'` was ALLOWED. `'#'` did not even fail
+        // the parse: unquoted it commented out the rest of the line. Quoting is
+        // only obfuscation when the unquoted word means the same thing, and a
+        // word holding one of these never does.
+        if (/[\s;&|()<>`$"'\\#]/.test(resolved)) continue;
         rewrites.push([s, e, resolved]);
         // Same token, but resolving ONLY the quote obfuscation. For `r''m` this
         // equals `resolved` (rm); for `C:\Users\x\.aw''s` it yields
@@ -374,7 +384,21 @@ function normalizeCommandForPolicyImpl(command: string): CommandReadings {
     };
     // Both readings carry the message-flag strips, so the widening reading can
     // never resurrect text the strip exists to hide.
-    return { posix: apply(rewrites), separator: apply(quoteOnlyRewrites) };
+    // The invariant that closes JAIL-19's class for any character the guard
+    // above does not list: the raw command parsed (PARSE_FAIL returned early),
+    // so a reading that no longer parses is a reading this function BROKE, and
+    // every tier that parses it (analyzeFsOperation first) would judge nothing.
+    // Fall back to the raw text: it misses the de-obfuscation, it never misses
+    // the read.
+    // Defence in depth: no row witnesses this layer on its own today, because
+    // the metacharacter guard above already covers every case measured; the
+    // rows in jail-normaliser-parse.spec.ts pin the invariant it protects.
+    const parsesOrRaw = (reading: string): string =>
+      reading === command || parseShared(reading) !== PARSE_FAIL ? reading : command;
+    return {
+      posix: parsesOrRaw(apply(rewrites)),
+      separator: parsesOrRaw(apply(quoteOnlyRewrites)),
+    };
   } catch {
     // parse error → return unchanged (fail open for FPs, not FNs)
     return { posix: command, separator: command };

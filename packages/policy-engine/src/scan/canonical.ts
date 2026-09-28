@@ -662,7 +662,12 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // so the regex twins and the scanner's text see what they always saw.
 // Verdict snapshot over 390 corpus commands: 2 moved, both ATTACK rows
 // (`F=KEY; cat $F`, `F=KEY; cp $F /tmp/x`), 0 legitimate rows.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v18';
+// canonical-v19 (JAIL-19): the normaliser no longer unquotes a word whose
+// literal holds a shell metacharacter, and falls back to the raw text when its
+// rewrite would not parse. Before, `grep KEY-FILE | sed 's/(a)/b/'` normalised
+// to text that did not parse and the jail judged nothing. Changes normaliser
+// output, so every history scanned under v18 is re-read.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v19';
 
 // 2026-09-11, hash bumped with NO version bump: stage 3 of the credential jail
 // (argument POSITION kept in extractLiteralArgs) changed detector SOURCE and
@@ -682,7 +687,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v18';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '5b2e76537f368d99';
+export const CANONICAL_EXTRACTOR_HASH = 'd1ce856bd91d33d1';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
