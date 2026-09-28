@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import { analyzeFsOperation, normalizeCommandForPolicy } from '../shell/index';
-import { parseShared, PARSE_FAIL } from '../shell/index';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // JAIL-19: A QUOTED WORD WITH A SHELL METACHARACTER MADE THE JAIL READ NOTHING
@@ -18,10 +17,10 @@ import { parseShared, PARSE_FAIL } from '../shell/index';
 // A lone `(` survived only because stage 6 refused to rewrite a word into a
 // bare operator; a balanced pair is not a bare operator.
 //
-// Two layers: a word whose literal holds a shell metacharacter is never
-// rewritten, and a normalised reading that does not parse while the raw
-// command did falls back to the raw command, which closes the class for any
-// character the first layer does not list.
+// Fix: the jail reader reads the RAW command whenever the normalised reading
+// does not parse, and the normaliser never unquotes a word into one starting
+// with `#`. The normalised reading itself is otherwise unchanged, because the
+// text rules depend on it.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const v = (c: string) => {
@@ -57,23 +56,24 @@ describe('JAIL-19 — a quoted metacharacter no longer hides the read', () => {
   ])('%s -> %s', (c, want) => expect(v(c)).toBe(want));
 });
 
-describe('JAIL-19 — the normalised reading parses whenever the raw one does', () => {
-  it.each([
-    `grep x .env | sed 's/(a)/b/'`,
-    `echo '#'; cat .env`,
-    `echo 'a"b'; cat .env`,
-    `echo 'x\`y'; cat .env`,
-    `echo '$(x'; cat .env`,
-    `awk '{print $1}' f`,
-    `printf '%s\\n' "(x)"`,
-  ])('%s', (c) => {
-    expect(parseShared(c)).not.toBe(PARSE_FAIL); // the raw command is valid shell
-    expect(parseShared(normalizeCommandForPolicy(c))).not.toBe(PARSE_FAIL);
+describe("JAIL-19 — the fix stays out of the text rules' way", () => {
+  // A first cut returned the RAW command whenever the normalised reading did
+  // not parse. That threw away every de-obfuscation in the whole command, and
+  // the text rules, which never needed a parse, stopped matching tokens they
+  // matched before (/code-review on 5ddb367). The raw fallback now lives only
+  // in the jail reader; the normalised reading is what it always was.
+  it('one unparseable word does not undo the de-obfuscation of the others', () => {
+    expect(normalizeCommandForPolicy(`ca''t notes.txt; echo '(a)'`)).toContain('cat notes.txt');
   });
 
-  it('a `#` inside a quoted word is not turned into a comment', () => {
-    expect(normalizeCommandForPolicy(`echo '#'; cat .env`)).toContain('cat .env');
-    expect(normalizeCommandForPolicy(`echo '#'; cat .env`)).not.toMatch(/^echo #;/);
+  it('a quoted script payload is still de-obfuscated for the text rules', () => {
+    expect(normalizeCommandForPolicy(`node -e 'con''sole.log(1)'`)).toContain('console.log(1)');
+  });
+
+  it('a `#` word is left quoted, so it is not a comment', () => {
+    const n = normalizeCommandForPolicy(`echo '#'; cat .env`);
+    expect(n).toContain('cat .env');
+    expect(n).not.toMatch(/^echo #;/);
   });
 });
 

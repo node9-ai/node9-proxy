@@ -135,11 +135,10 @@ const normalizeCache = new Map<string, CommandReadings>();
 const AST_CACHE_MAX = 5_000;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const astCache = new Map<string, any>();
-/** Exported for the JAIL-19 invariant rows (normalised text must still parse). */
-export const PARSE_FAIL = Symbol('parse-fail');
+const PARSE_FAIL = Symbol('parse-fail');
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function parseShared(command: string): any | typeof PARSE_FAIL {
+function parseShared(command: string): any | typeof PARSE_FAIL {
   const cached = astCache.get(command);
   if (cached !== undefined) {
     astCache.delete(command);
@@ -354,15 +353,14 @@ function normalizeCommandForPolicyImpl(command: string): CommandReadings {
         // (/code-review, stage 6). The escaped spelling is the only one find
         // accepts, so this is the common case, not a corner.
         if (/^[;&|()<>]+$/.test(resolved)) continue;
-        // ⚠️ Never unquote a literal that holds a shell METACHARACTER, anywhere
-        // in it (JAIL-19). The operator-only guard above was the narrow case of
-        // this: a lone `(` survived, and `'s/(a)/b/'` became `s/(a)/b/`, which
-        // is not valid shell, so the jail parsed nothing and a recorded `grep
-        // KEY-FILE | sed 's/=(.{8}).*/…/'` was ALLOWED. `'#'` did not even fail
-        // the parse: unquoted it commented out the rest of the line. Quoting is
-        // only obfuscation when the unquoted word means the same thing, and a
-        // word holding one of these never does.
-        if (/[\s;&|()<>`$"'\\#]/.test(resolved)) continue;
+        // ⚠️ Never unquote a word into one that STARTS with `#` (JAIL-19): the
+        // rewrite still parses, but as a comment that swallows the rest of the
+        // line, so every later statement disappears from every tier. Words that
+        // stop parsing once unquoted (a balanced `( )`, a quote, a backtick) are
+        // handled where the parse happens: the jail reader reads the raw
+        // command instead (analyzeFsOperation). Those rewrites stay here, because
+        // the text rules match the de-obfuscated reading without parsing it.
+        if (resolved.startsWith('#')) continue;
         rewrites.push([s, e, resolved]);
         // Same token, but resolving ONLY the quote obfuscation. For `r''m` this
         // equals `resolved` (rm); for `C:\Users\x\.aw''s` it yields
@@ -384,21 +382,7 @@ function normalizeCommandForPolicyImpl(command: string): CommandReadings {
     };
     // Both readings carry the message-flag strips, so the widening reading can
     // never resurrect text the strip exists to hide.
-    // The invariant that closes JAIL-19's class for any character the guard
-    // above does not list: the raw command parsed (PARSE_FAIL returned early),
-    // so a reading that no longer parses is a reading this function BROKE, and
-    // every tier that parses it (analyzeFsOperation first) would judge nothing.
-    // Fall back to the raw text: it misses the de-obfuscation, it never misses
-    // the read.
-    // Defence in depth: no row witnesses this layer on its own today, because
-    // the metacharacter guard above already covers every case measured; the
-    // rows in jail-normaliser-parse.spec.ts pin the invariant it protects.
-    const parsesOrRaw = (reading: string): string =>
-      reading === command || parseShared(reading) !== PARSE_FAIL ? reading : command;
-    return {
-      posix: parsesOrRaw(apply(rewrites)),
-      separator: parsesOrRaw(apply(quoteOnlyRewrites)),
-    };
+    return { posix: apply(rewrites), separator: apply(quoteOnlyRewrites) };
   } catch {
     // parse error → return unchanged (fail open for FPs, not FNs)
     return { posix: command, separator: command };
@@ -2843,7 +2827,14 @@ export function analyzeFsOperation(command: string): FsOpVerdict | null {
     fsOpCache.set(normalized, hit);
     return hit;
   }
-  const computed = analyzeFsOperationImpl(normalized);
+  // JAIL-19: the normalised reading exists for the TEXT rules, and unquoting a
+  // word like 'sed s/(a)/b/' makes it text that no longer parses. The jail must
+  // still read the command, so when the normalised reading does not parse it
+  // reads the raw one, which parsed (the normaliser returns raw text otherwise).
+  // Scoped to this reader: dropping the de-obfuscated reading for everyone
+  // weakened the text rules (/code-review on 5ddb367).
+  const readable = parseShared(normalized) === PARSE_FAIL ? command : normalized;
+  const computed = analyzeFsOperationImpl(readable);
   if (fsOpCache.size >= FS_OP_CACHE_MAX) {
     const oldest = fsOpCache.keys().next().value;
     if (oldest !== undefined) fsOpCache.delete(oldest);
