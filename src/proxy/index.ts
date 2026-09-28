@@ -95,7 +95,16 @@ export async function runProxy(targetCommand: string) {
             blockedByLabel.toLowerCase().includes('user') ||
             blockedByLabel.toLowerCase().includes('daemon') ||
             blockedByLabel.toLowerCase().includes('decision');
-          const aiInstruction = buildNegotiationMessage(blockedByLabel, isHuman, result.reason);
+          const aiInstruction = buildNegotiationMessage(
+            blockedByLabel,
+            isHuman,
+            result.reason,
+            undefined,
+            {
+              kind: result.blockKind,
+              path: result.blockedPath,
+            }
+          );
 
           const errorResponse = {
             jsonrpc: '2.0',

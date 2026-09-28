@@ -5,7 +5,13 @@ import { askNativePopup } from '../ui/native';
 import { computeRiskMetadata, type RiskMetadata } from '../context-sniper';
 import { scanArgs, scanFilePath, detectArgsPii, matchCanaryArgs, type DlpMatch } from '../dlp';
 import { canaryValues, loadCanaries } from '../canary/registry';
-import { ssrfDestinationFloor, NET_BINARIES } from '@node9/policy-engine';
+import {
+  ssrfDestinationFloor,
+  NET_BINARIES,
+  sensitivePathMatch,
+  analyzeFsOperation,
+  isBashTool,
+} from '@node9/policy-engine';
 import {
   extractShellDestinations,
   extractToolDestinations,
@@ -40,8 +46,65 @@ import { readActiveShields } from '../shields';
 import { findJailedPath, findJailedPathIn, USER_JAIL_SHIELD } from '../shields/jail';
 import { safeMessage } from '../utils/safe-text';
 
+/** The pattern name the DLP gate gives a sensitive-PATH hit, read off the
+ *  engine rather than copied, so a rename there cannot silently skip MSG-1. */
+const SENSITIVE_PATH_PATTERN = sensitivePathMatch('').patternName;
+
+/**
+ * Is this smart rule a block on a PROTECTED PATH? It decides the message the
+ * agent reads (MSG-1): a path block used to reach the agent as "a sensitive
+ * credential was found in your arguments ... rotate it", or as a bare
+ * "[Smart Rule: block-path-<slug>]". Three families, pinned against the real
+ * builders in protected-path-rule.spec.ts:
+ *   - the shipped project-jail read blocks, `shield:project-jail:block-read-*`
+ *   - what `node9 jail add` installs, `block-path-*` (measured bare names)
+ *   - a managed jail's rules, `org:block-path-*`
+ * Blocks only: a review goes to the approve/deny prompt, not this message.
+ */
+export function isProtectedPathRule(ruleName: string | undefined): boolean {
+  if (!ruleName) return false;
+  return (
+    /^(?:org:)?block-path-/.test(ruleName) || /^shield:project-jail:block-read-/.test(ruleName)
+  );
+}
+
+/** The path a protected-path block was about, for the agent's message. A path
+ *  is not a secret. File tools carry it in an argument; for a shell command the
+ *  engine's own reader resolves it (cached, the same call the gate just made).
+ *  Undefined when nothing names it: the message then says "This file". */
+function protectedPathOf(toolName: string, args: unknown): string | undefined {
+  const a =
+    args && typeof args === 'object' && !Array.isArray(args)
+      ? (args as Record<string, unknown>)
+      : {};
+  if (isBashTool(toolName) && typeof a.command === 'string') {
+    return analyzeFsOperation(a.command)?.path || undefined;
+  }
+  for (const k of ['file_path', 'path', 'filename', 'pattern']) {
+    if (typeof a[k] === 'string' && a[k]) return a[k] as string;
+  }
+  return undefined;
+}
+
+/** The two AuthResult fields a protected-path block carries, or nothing. */
+function protectedPathFields(
+  ruleName: string | undefined,
+  toolName: string,
+  args: unknown
+): Pick<AuthResult, 'blockKind' | 'blockedPath'> {
+  if (!isProtectedPathRule(ruleName)) return {};
+  const p = protectedPathOf(toolName, args);
+  return { blockKind: 'protected-path', blockedPath: p ? safeMessage(p) : undefined };
+}
+
 export interface AuthResult {
   approved: boolean;
+  /** What was protected, when the block is about a FILE rather than a value in
+   *  the arguments. Chooses the agent-facing message (MSG-1); the label, which
+   *  the dashboard and telemetry read, is unchanged. */
+  blockKind?: 'protected-path';
+  /** The path as the agent wrote it, for that message. Not a secret. */
+  blockedPath?: string;
   /** Verdict was "review" and the caller opted in via `deferReview`: the caller
    *  (an ask-capable agent's hook) renders the approve/deny prompt itself. The
    *  approver race did NOT run, and no SaaS pending entry was created. */
@@ -682,6 +745,14 @@ async function _authorizeHeadlessCore(
           reason: dlpReason,
           blockedBy: 'local-config',
           blockedByLabel: '🚨 Node9 DLP (Secret Detected)',
+          // A PATH hit is a protected file, not a secret in the arguments: the
+          // agent must not be told to rotate a credential it never saw (MSG-1).
+          ...(dlpMatch.patternName === SENSITIVE_PATH_PATTERN && {
+            blockKind: 'protected-path' as const,
+            // One safe line: the path is the agent's own argument, and it is
+            // printed to the developer's terminal and into the agent message.
+            blockedPath: safeMessage(dlpMatch.redactedSample),
+          }),
         };
       }
       // severity === 'review': fall through to the race engine with a DLP label.
@@ -1051,6 +1122,7 @@ async function _authorizeHeadlessCore(
           ruleHit: policyResult.ruleName,
           ...(policyResult.recoveryCommand && { recoveryCommand: policyResult.recoveryCommand }),
           ...(policyResult.ruleDescription && { ruleDescription: policyResult.ruleDescription }),
+          ...protectedPathFields(policyResult.ruleName, toolName, args),
         };
       };
 
@@ -1304,6 +1376,7 @@ async function _authorizeHeadlessCore(
             blockedBy: 'local-config',
             blockedByLabel: policyResult.blockedByLabel,
             ruleHit: policyResult.ruleName,
+            ...protectedPathFields(policyResult.ruleName, toolName, args),
           };
         }
         // Review verdict, or a hit the engine has no matching rule for (e.g. a

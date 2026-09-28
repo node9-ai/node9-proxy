@@ -568,6 +568,8 @@ export function registerCheckCommand(program: Command): void {
               blockedByLabel?: string;
               recoveryCommand?: string;
               ruleDescription?: string;
+              blockKind?: 'protected-path';
+              blockedPath?: string;
             }
           ) => {
             // 1. Determine the context (User vs Policy). I6: the fallback
@@ -594,7 +596,17 @@ export function registerCheckCommand(program: Command): void {
             try {
               ttyFd = fs.openSync('/dev/tty', 'w');
               const writeTty = (line: string) => fs.writeSync(ttyFd!, line + '\n');
-              if (
+              if (result?.blockKind === 'protected-path') {
+                // MSG-1: the credential banner below said "A sensitive secret was
+                // found in the tool arguments!" for a protected file, on the
+                // developer's own screen.
+                writeTty(
+                  chalk.red.bold(
+                    `\n🛑 node9 protected ${result.blockedPath ?? 'a file'} from "${toolName}"`
+                  )
+                );
+                writeTty(chalk.white(`   Protected files stay out of the agent's reach.`));
+              } else if (
                 blockedByContext.includes('DLP') ||
                 blockedByContext.includes('Secret Detected') ||
                 blockedByContext.includes('Credential Review')
@@ -626,7 +638,8 @@ export function registerCheckCommand(program: Command): void {
               blockedByContext,
               isHumanDecision,
               msg,
-              result?.recoveryCommand
+              result?.recoveryCommand,
+              { kind: result?.blockKind, path: result?.blockedPath }
             );
 
             // 5. Send the structured JSON back to the LLM agent

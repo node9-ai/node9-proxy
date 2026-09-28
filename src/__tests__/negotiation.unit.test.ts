@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildNegotiationMessage } from '../policy/negotiation';
+import { buildNegotiationMessage, buildReviewMessage } from '../policy/negotiation';
 
 // Every deny message node9 hands back to an agent must tell the agent to
 // surface the block to the human. Measured 2026-09-03 on the founder's
@@ -48,5 +48,67 @@ describe('buildNegotiationMessage tells the agent to inform the user', () => {
   it('the dlp branch never asks the agent to repeat the credential', () => {
     const msg = buildNegotiationMessage('DLP: secret detected', false);
     expect(msg).not.toMatch(/quote|repeat|show the (key|token|secret|credential)/i);
+  });
+});
+
+// MSG-1 (doc/BUGS.md): a PROTECTED FILE was told "a sensitive credential was
+// found in your tool call arguments ... rotate it immediately". No credential
+// was in the arguments, only a path, and on camera the agent told the user
+// node9 had misfired. The message is chosen by the KIND of block now, not by
+// a substring of the label, which the dashboard and telemetry also read.
+describe('a protected file gets a protected-file message (MSG-1)', () => {
+  const FALSE_CLAIMS = [/was found in your tool call arguments/i, /rotate/i, /compromised/i];
+
+  it('names the file, says it is protected, and makes no credential claim', () => {
+    const msg = buildNegotiationMessage(
+      '🚨 Node9 DLP (Secret Detected)',
+      false,
+      undefined,
+      undefined,
+      {
+        kind: 'protected-path',
+        path: '/work/app/.env',
+      }
+    );
+    expect(msg).toContain('/work/app/.env');
+    expect(msg).toMatch(/protected/i);
+    for (const claim of FALSE_CLAIMS) expect(msg).not.toMatch(claim);
+    expect(msg).toMatch(TELLS_THE_USER);
+  });
+
+  it('without a path it still makes no credential claim', () => {
+    const msg = buildNegotiationMessage('project-jail (AST): x', false, undefined, undefined, {
+      kind: 'protected-path',
+    });
+    expect(msg).toMatch(/this file/i);
+    for (const claim of FALSE_CLAIMS) expect(msg).not.toMatch(claim);
+  });
+
+  it('a REAL secret in the arguments keeps the credential text (control)', () => {
+    const msg = buildNegotiationMessage('🚨 Node9 DLP (Secret Detected)', false);
+    expect(msg).toMatch(/was found in your tool call arguments/);
+    expect(msg).toMatch(/rotate it immediately/);
+  });
+
+  it('a human decision is still a human decision, whatever the kind', () => {
+    const msg = buildNegotiationMessage('User Decision (Native)', true, 'no', undefined, {
+      kind: 'protected-path',
+    });
+    expect(msg).toMatch(/The human user rejected this action/);
+  });
+});
+
+// MSG-2: "...without a backup.. Approve to proceed" -- the rule's sentence
+// already ended in a period and one more was appended.
+describe('buildReviewMessage ends the reason with one period (MSG-2)', () => {
+  it.each([
+    ['ends in a period', 'rm is permanent.'],
+    ['ends in no punctuation', 'rm is permanent'],
+    ['ends in "!" and spaces', 'rm is permanent!  '],
+  ])('%s', (_name, reason) => {
+    const msg = buildReviewMessage(undefined, reason);
+    expect(msg).toBe(
+      'Node9 flagged this for your review: rm is permanent. Approve to proceed, or deny to cancel.'
+    );
   });
 });
