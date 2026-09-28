@@ -353,14 +353,6 @@ function normalizeCommandForPolicyImpl(command: string): CommandReadings {
         // (/code-review, stage 6). The escaped spelling is the only one find
         // accepts, so this is the common case, not a corner.
         if (/^[;&|()<>]+$/.test(resolved)) continue;
-        // ⚠️ Never unquote a word into one that STARTS with `#` (JAIL-19): the
-        // rewrite still parses, but as a comment that swallows the rest of the
-        // line, so every later statement disappears from every tier. Words that
-        // stop parsing once unquoted (a balanced `( )`, a quote, a backtick) are
-        // handled where the parse happens: the jail reader reads the raw
-        // command instead (analyzeFsOperation). Those rewrites stay here, because
-        // the text rules match the de-obfuscated reading without parsing it.
-        if (resolved.startsWith('#')) continue;
         rewrites.push([s, e, resolved]);
         // Same token, but resolving ONLY the quote obfuscation. For `r''m` this
         // equals `resolved` (rm); for `C:\Users\x\.aw''s` it yields
@@ -2812,34 +2804,36 @@ const FS_OP_CACHE_MAX = 5_000;
 const fsOpCache = new Map<string, FsOpVerdict | null>();
 
 export function analyzeFsOperation(command: string): FsOpVerdict | null {
-  // De-obfuscate command tokens first (r''m → rm, \rm → rm). Without this the
-  // raw-string prescreen below — and the AST command-name match — are dodged by
-  // trivial quote/escape tricks, since block-rm-rf-home is the AST's job (the
-  // equivalent regex smart rule is suppressed for bash; see policy/index.ts).
-  // normalizeCommandForPolicy is memoized + shares the AST cache, so this is
-  // cheap, and using the normalized string as the cache key dedups raw variants.
+  // The jail reads the command AS BASH WILL RUN IT: the raw text, parsed as-is.
+  // It resolves quoting and escapes word by word itself (resolveWordLiteral:
+  // `c''at .env` and `\rm` resolve), so it never needed the normalised reading
+  // for that, and reading the normalised one is what JAIL-19 was: unquoting a
+  // word can change the command's STRUCTURE (`'s/(a)/b/'` stops parsing, a lone
+  // `'"'` pair swallows the statements between them into one string, `'x;#'`
+  // becomes a comment), and every such rewrite hid a jailed read. A first fix
+  // fell back to the raw text only when the rewrite failed to parse, which
+  // missed the rewrites that still parse (/code-review on 1686d1f).
+  //
+  // The normalised reading is still used for the PRESCREEN, so a keyword spelt
+  // with quote tricks is not skipped; either reading passing the prescreen is
+  // enough. The cache is keyed by the RAW text, because the verdict now depends
+  // on it: keyed by the normalised text, two different commands that normalise
+  // alike would share whichever verdict was computed first.
   const normalized = normalizeCommandForPolicy(command);
   // Fast path — skip the AST parse when no fs-op tool keyword is present.
-  if (!FS_OP_PRESCREEN_RE.test(normalized)) return null;
-  if (fsOpCache.has(normalized)) {
-    const hit = fsOpCache.get(normalized) ?? null;
-    fsOpCache.delete(normalized);
-    fsOpCache.set(normalized, hit);
+  if (!FS_OP_PRESCREEN_RE.test(normalized) && !FS_OP_PRESCREEN_RE.test(command)) return null;
+  if (fsOpCache.has(command)) {
+    const hit = fsOpCache.get(command) ?? null;
+    fsOpCache.delete(command);
+    fsOpCache.set(command, hit);
     return hit;
   }
-  // JAIL-19: the normalised reading exists for the TEXT rules, and unquoting a
-  // word like 'sed s/(a)/b/' makes it text that no longer parses. The jail must
-  // still read the command, so when the normalised reading does not parse it
-  // reads the raw one, which parsed (the normaliser returns raw text otherwise).
-  // Scoped to this reader: dropping the de-obfuscated reading for everyone
-  // weakened the text rules (/code-review on 5ddb367).
-  const readable = parseShared(normalized) === PARSE_FAIL ? command : normalized;
-  const computed = analyzeFsOperationImpl(readable);
+  const computed = analyzeFsOperationImpl(command);
   if (fsOpCache.size >= FS_OP_CACHE_MAX) {
     const oldest = fsOpCache.keys().next().value;
     if (oldest !== undefined) fsOpCache.delete(oldest);
   }
-  fsOpCache.set(normalized, computed);
+  fsOpCache.set(command, computed);
   return computed;
 }
 

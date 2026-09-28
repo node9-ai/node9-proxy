@@ -17,10 +17,9 @@ import { analyzeFsOperation, normalizeCommandForPolicy } from '../shell/index';
 // A lone `(` survived only because stage 6 refused to rewrite a word into a
 // bare operator; a balanced pair is not a bare operator.
 //
-// Fix: the jail reader reads the RAW command whenever the normalised reading
-// does not parse, and the normaliser never unquotes a word into one starting
-// with `#`. The normalised reading itself is otherwise unchanged, because the
-// text rules depend on it.
+// Fix: the jail reader parses the RAW command, as bash will run it, and
+// resolves quoting word by word itself. The normalised reading is used only
+// for the prescreen and by the text rules, and is unchanged.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const v = (c: string) => {
@@ -68,12 +67,6 @@ describe("JAIL-19 — the fix stays out of the text rules' way", () => {
 
   it('a quoted script payload is still de-obfuscated for the text rules', () => {
     expect(normalizeCommandForPolicy(`node -e 'con''sole.log(1)'`)).toContain('console.log(1)');
-  });
-
-  it('a `#` word is left quoted, so it is not a comment', () => {
-    const n = normalizeCommandForPolicy(`echo '#'; cat .env`);
-    expect(n).toContain('cat .env');
-    expect(n).not.toMatch(/^echo #;/);
   });
 });
 

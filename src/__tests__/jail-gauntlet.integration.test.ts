@@ -500,10 +500,6 @@ describe('AST tier — Windows path blindness (known gap)', () => {
     ['~/.ssh', 'cat C:\\Users\\x\\.ssh\\id_rsa'],
     ['~/.aws', 'cat C:\\Users\\x\\.aws\\credentials'],
     ['.env', 'cat C:\\proj\\.env'],
-    [
-      'quoted — quotes do not help, POSIX escapes apply inside them too',
-      'cat "C:\\Users\\x\\.ssh\\id_rsa"',
-    ],
   ];
   for (const [label, cmd] of WIN_CASES) {
     // Body = what SHOULD happen. Marker = it does not yet. Delete the marker
@@ -512,6 +508,14 @@ describe('AST tier — Windows path blindness (known gap)', () => {
       expect(analyzeFsOperation(cmd)?.verdict).toBe('block');
     });
   }
+
+  // Was the fourth `it.fails` case ("quoted: quotes do not help"). Closed by
+  // JAIL-19: the jail reader now parses the RAW command, where the quoted word
+  // keeps its backslashes, instead of a normalised reading that had unquoted
+  // it. Marker deleted, expectation untouched, as the note above prescribes.
+  it('a QUOTED Windows backslash path is detected (closed by JAIL-19)', () => {
+    expect(analyzeFsOperation('cat "C:\\Users\\x\\.ssh\\id_rsa"')?.verdict).toBe('block');
+  });
 
   it('CONTROL: the same Windows path with FORWARD slashes IS detected', () => {
     const r = analyzeFsOperation('cat C:/Users/x/.ssh/id_rsa');
