@@ -99,7 +99,7 @@
     "react": "^19.2.6",
     "safe-regex2": "^5.1.0",
     "smol-toml": "^1.6.1",
-    "string-width": "^4.2.3",
+    "string-width": "^8.3.0",
     "yaml": "^2.9.0",
     "zod": "^4.5.4"
   },
