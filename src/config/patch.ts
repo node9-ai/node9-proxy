@@ -8,7 +8,9 @@ import os from 'os';
 import type { SmartRule } from './index.js';
 
 export type ConfigPatch =
-  { type: 'smartRule'; rule: SmartRule } | { type: 'ignoredTool'; toolName: string };
+  | { type: 'smartRule'; rule: SmartRule }
+  | { type: 'ignoredTool'; toolName: string }
+  | { type: 'dlp'; enabled: boolean; pii: 'off' | 'block' };
 
 export const GLOBAL_CONFIG_PATH = path.join(os.homedir(), '.node9', 'config.json');
 
@@ -41,6 +43,12 @@ export function patchConfig(configPath: string, patch: ConfigPatch): void {
     if (patch.rule.name && rules.some((r) => r.name === patch.rule.name)) return;
 
     rules.push(patch.rule);
+  } else if (patch.type === 'dlp') {
+    policy.dlp = {
+      ...(typeof policy.dlp === 'object' && policy.dlp !== null ? policy.dlp : {}),
+      enabled: patch.enabled,
+      pii: patch.pii,
+    };
   } else {
     if (!Array.isArray(policy.ignoredTools)) policy.ignoredTools = [];
     const ignored = policy.ignoredTools as string[];

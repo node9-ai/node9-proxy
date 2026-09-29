@@ -487,7 +487,9 @@ export async function runMcpGateway(
           const aiInstruction = buildNegotiationMessage(
             blockedByLabel,
             isHumanDecision,
-            result.reason
+            result.reason,
+            undefined,
+            { kind: result.blockKind, path: result.blockedPath }
           );
 
           const errorResponse = {

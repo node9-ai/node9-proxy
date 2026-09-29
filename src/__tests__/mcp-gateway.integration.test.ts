@@ -453,6 +453,39 @@ describe('mcp-gateway tool call interception', () => {
     }
   });
 
+  itUnix('a protected file is reported as protected, not as a leaked credential (MSG-1)', () => {
+    // The gateway builds its JSON-RPC error with the same negotiation message
+    // as the hook. A sensitive-PATH hit used to read "a sensitive credential
+    // was found in your tool call arguments ... rotate it immediately" to the
+    // MCP client, though only a path was in the arguments.
+    const home = makeTempHome({ settings: { mode: 'standard', autoStartDaemon: false } });
+    try {
+      const envPath = path.join(home, 'project', '.env');
+      const r = runGateway(
+        [
+          JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: 98,
+            method: 'tools/call',
+            params: { name: 'read_file', arguments: { path: envPath } },
+          }),
+        ],
+        home
+      );
+      expect(r.status).toBe(0);
+      const errorResponse = parseResponses(r.stdout).find((resp) => resp.id === 98);
+      expect(errorResponse?.error?.code).toBe(-32000);
+      const text = errorResponse!.error!.message;
+      expect(text).toContain('.env');
+      expect(text).toMatch(/protected/i);
+      expect(text).not.toMatch(/was found in your tool call arguments/i);
+      expect(text).not.toMatch(/rotate/i);
+    } finally {
+      cleanupDir(home);
+    }
+  });
+
   itUnix('id: 0 is a valid JSON-RPC id and gets a normal response', () => {
     // id===0 is a valid JSON-RPC id (number). Must not be treated as a notification
     // (id===undefined) or rejected — both would be protocol violations.

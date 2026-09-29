@@ -30,7 +30,7 @@ interface PollResponse {
 
 export type DeviceLoginResult =
   | { ok: true; apiKey: string; workspaceName: string; machineName: string }
-  | { ok: false; reason: string };
+  | { ok: false; reason: string; cancelled?: boolean };
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -110,7 +110,7 @@ export async function runDeviceLogin(
       };
     }
     if (poll.status === 'denied') {
-      return { ok: false, reason: 'The request was denied in the browser.' };
+      return { ok: false, reason: 'The request was denied in the browser.', cancelled: true };
     }
     return { ok: false, reason: 'The code expired — run `node9 login` again.' };
   }

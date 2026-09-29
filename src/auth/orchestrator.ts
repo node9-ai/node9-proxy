@@ -5,7 +5,13 @@ import { askNativePopup } from '../ui/native';
 import { computeRiskMetadata, type RiskMetadata } from '../context-sniper';
 import { scanArgs, scanFilePath, detectArgsPii, matchCanaryArgs, type DlpMatch } from '../dlp';
 import { canaryValues, loadCanaries } from '../canary/registry';
-import { ssrfDestinationFloor, NET_BINARIES } from '@node9/policy-engine';
+import {
+  ssrfDestinationFloor,
+  NET_BINARIES,
+  sensitivePathMatch,
+  analyzeFsOperation,
+  isBashTool,
+} from '@node9/policy-engine';
 import {
   extractShellDestinations,
   extractToolDestinations,
@@ -40,8 +46,92 @@ import { readActiveShields } from '../shields';
 import { findJailedPath, findJailedPathIn, USER_JAIL_SHIELD } from '../shields/jail';
 import { safeMessage } from '../utils/safe-text';
 
+/** The pattern name the DLP gate gives a sensitive-PATH hit, read off the
+ *  engine rather than copied, so a rename there cannot silently skip MSG-1. */
+const SENSITIVE_PATH_PATTERN = sensitivePathMatch('').patternName;
+
+/**
+ * Is this smart rule a block on a PROTECTED PATH? It decides the message the
+ * agent reads (MSG-1): a path block used to reach the agent as "a sensitive
+ * credential was found in your arguments ... rotate it", or as a bare
+ * "[Smart Rule: block-path-<slug>]". Three families, pinned against the real
+ * builders in protected-path-rule.spec.ts:
+ *   - the shipped project-jail read blocks, `shield:project-jail:block-read-*`
+ *   - what `node9 jail add` installs, `block-path-*` (measured bare names)
+ *   - a managed jail's rules, `org:block-path-*`
+ * Blocks only: a review goes to the approve/deny prompt, not this message.
+ */
+export function isProtectedPathRule(ruleName: string | undefined): boolean {
+  if (!ruleName) return false;
+  return (
+    /^(?:org:)?block-path-/.test(ruleName) || /^shield:project-jail:block-read-/.test(ruleName)
+  );
+}
+
+/** The argument field a path rule matched, from the rule's own name: pathRules
+ *  (shields/build.ts) emits one rule per field, suffixed `-anytool` (file_path),
+ *  `-anytool-path`, `-anytool-pattern`, or `-bash` (command). Picking the first
+ *  non-empty field instead named the wrong path for Glob, which carries the
+ *  jailed value in `pattern` and a parent directory in `path` (/code-review). */
+function matchedPathField(ruleName: string): string | undefined {
+  if (/-anytool-pattern$/.test(ruleName)) return 'pattern';
+  if (/-anytool-path$/.test(ruleName)) return 'path';
+  if (/-anytool$/.test(ruleName)) return 'file_path';
+  return undefined;
+}
+
+/** The path a protected-path block was about, for the agent's message. A path
+ *  is not a secret. For a shell command the engine's own reader resolves it
+ *  (cached, the same call the gate just made). Undefined when nothing names it
+ *  reliably: the message then says "This file". */
+function protectedPathOf(ruleName: string, toolName: string, args: unknown): string | undefined {
+  const a =
+    args && typeof args === 'object' && !Array.isArray(args)
+      ? (args as Record<string, unknown>)
+      : {};
+  if (isBashTool(toolName) && typeof a.command === 'string') {
+    return analyzeFsOperation(a.command)?.path || undefined;
+  }
+  const field = matchedPathField(ruleName);
+  const order = field ? [field] : ['file_path', 'path', 'filename', 'pattern'];
+  for (const k of order) {
+    if (typeof a[k] === 'string' && a[k]) return a[k] as string;
+  }
+  return undefined;
+}
+
+/** A path printed into the agent message and onto the developer's terminal is
+ *  the agent's own argument: one safe line (safeMessage), and no C1 controls or
+ *  bidi overrides, which safeMessage keeps and which can reorder or forge what
+ *  the developer sees (/code-review). */
+function safePathForDisplay(p: string): string {
+  return safeMessage(p).replace(/[\u0080-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '');
+}
+
+/** The two AuthResult fields a protected-path block carries, or nothing.
+ *  `credentialInArgs`: the protected-path text says "nothing was exposed",
+ *  which is false when the same call ALSO carries a credential (a Write of a
+ *  key into .env, `cat .env && curl -H "Authorization: Bearer ..."`). Such a
+ *  call keeps the credential or generic text (/code-review). */
+function protectedPathFields(
+  ruleName: string | undefined,
+  toolName: string,
+  args: unknown,
+  credentialInArgs: boolean
+): Pick<AuthResult, 'blockKind' | 'blockedPath'> {
+  if (!ruleName || credentialInArgs || !isProtectedPathRule(ruleName)) return {};
+  const p = protectedPathOf(ruleName, toolName, args);
+  return { blockKind: 'protected-path', blockedPath: p ? safePathForDisplay(p) : undefined };
+}
+
 export interface AuthResult {
   approved: boolean;
+  /** What was protected, when the block is about a FILE rather than a value in
+   *  the arguments. Chooses the agent-facing message (MSG-1); the label, which
+   *  the dashboard and telemetry read, is unchanged. */
+  blockKind?: 'protected-path';
+  /** The path as the agent wrote it, for that message. Not a secret. */
+  blockedPath?: string;
   /** Verdict was "review" and the caller opted in via `deferReview`: the caller
    *  (an ask-capable agent's hook) renders the approve/deny prompt itself. The
    *  approver race did NOT run, and no SaaS pending entry was created. */
@@ -682,6 +772,17 @@ async function _authorizeHeadlessCore(
           reason: dlpReason,
           blockedBy: 'local-config',
           blockedByLabel: '🚨 Node9 DLP (Secret Detected)',
+          // A PATH hit is a protected file, not a secret in the arguments: the
+          // agent must not be told to rotate a credential it never saw (MSG-1).
+          // Only when the arguments carry no credential: a path match
+          // short-circuits the argument scan above (`scanFilePath ?? scanArgs`),
+          // so a Write of a real key into .env would otherwise be told "nothing
+          // was exposed" (/code-review).
+          ...(dlpMatch.patternName === SENSITIVE_PATH_PATTERN &&
+            !scanArgs(args) && {
+              blockKind: 'protected-path' as const,
+              blockedPath: safePathForDisplay(dlpMatch.redactedSample),
+            }),
         };
       }
       // severity === 'review': fall through to the race engine with a DLP label.
@@ -1051,6 +1152,7 @@ async function _authorizeHeadlessCore(
           ruleHit: policyResult.ruleName,
           ...(policyResult.recoveryCommand && { recoveryCommand: policyResult.recoveryCommand }),
           ...(policyResult.ruleDescription && { ruleDescription: policyResult.ruleDescription }),
+          ...protectedPathFields(policyResult.ruleName, toolName, args, dlpReviewFlagged),
         };
       };
 
@@ -1304,6 +1406,7 @@ async function _authorizeHeadlessCore(
             blockedBy: 'local-config',
             blockedByLabel: policyResult.blockedByLabel,
             ruleHit: policyResult.ruleName,
+            ...protectedPathFields(policyResult.ruleName, toolName, args, dlpReviewFlagged),
           };
         }
         // Review verdict, or a hit the engine has no matching rule for (e.g. a

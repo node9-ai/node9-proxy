@@ -219,6 +219,8 @@ describe('every module that turns the credentials file into an apiUrl is on the 
   // file pass wholesale for one call anywhere in it. Adding a file here is a
   // conscious act, and the comment beside it has to say how that file pins.
   const READERS: Record<string, string> = {
+    'auth/browser-login.ts':
+      'compares only the saved attempt key; endpoints remain pinned by device-login and onboarding',
     'config/index.ts': 'getCredentials: the one parser, pins via safeApiUrl',
     'credentials.ts': 'the WRITER (node9 login); writes DEFAULT_API_URL, reads only to migrate',
     'cli.ts': 'uninstall: parses the profile map, hands apiUrl to revokeSelf, which pins',

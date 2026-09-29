@@ -6,6 +6,7 @@
 //   danger = reachability(untrusted → agent) × power(tools/secrets) × exposure
 // then applies the actor gate and mitigations. Static + parse-only.
 
+import { explainSecrets, explainWorkflow } from './explain';
 import { parseYamlStrict as parseYaml } from './yaml-strict';
 import { lineOf, lineOfRe } from './lines';
 import type { CiFinding, Severity } from './types';
@@ -1022,6 +1023,24 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
     .filter(Boolean)
     .join(' ');
   if (extraFix) finding.fix = `${finding.fix} ${extraFix}`;
+  finding.explain = explainWorkflow({
+    severity,
+    anyone: bypassActive && !gate,
+    ungated: !gate && reach > 0,
+    gated: gate,
+    triggers,
+    secretTriggers: secretExposed ? triggers.filter((t) => /target|workflow_run/i.test(t)) : [],
+    head: head === 'root' || head === 'subdir' ? head : null,
+    readsText: promptUntrusted,
+    tools: broadTools ? matchedBroadTools(toolsBlob) : [],
+    shell: rce,
+    pushCode: codeWrite,
+    editThreads: metaWrite,
+    pat,
+    publicOutput: fullOutput,
+    scrubOff,
+    reusable,
+  });
   return finding;
 }
 
@@ -1213,5 +1232,11 @@ export function analyzeWorkflowSecrets(path: string, content: string): CiFinding
         : 'no arbitrary-shell tool: not exfiltratable today, but one tool-add away',
     ],
     fix: 'Move extra secrets to a separate trusted job the agent cannot reach; drop id-token:write if unused; scope the agent tools to read-only and gate the trigger.',
+    explain: explainSecrets({
+      severity: worst.severity,
+      secrets: worst.secrets.map((s) => s.name),
+      injectable: worst.injectable,
+      shell: worst.canReadEnv,
+    }),
   };
 }
