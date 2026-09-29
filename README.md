@@ -42,16 +42,26 @@ npm install -g node9-ai                         # any platform
 Then, in any project:
 
 ```bash
-node9 init       # finds your agents and MCP servers and puts node9 in front of every tool call
+node9            # first run: choose dashboard connection or local protection
 node9 posture    # scores this machine 0-100: what a compromised agent could read, reach and run
 node9 login      # optional: adds this machine to a shared dashboard
 ```
 
 Requires Node.js 22+.
 
-**`init` is the whole product.** It writes the hooks, turns on the credential jail
-and the always-on rules, and starts enforcing immediately. Nothing leaves the
-machine and no account is needed.
+On a new interactive terminal, `node9` guides you through setup. Local protection
+needs no account. The checklist shows recommended shields, DLP/PII, optional
+network egress review, and the background service. Usage statistics are sent
+only if you accept the separate prompt. The summary lists configured agents
+and any setup steps that need attention.
+
+Run `node9 setup` to revisit setup, or `node9 setup <target>` to configure one agent.
+Once configured, bare `node9` shows help. `node9 init` remains available; for
+scripts use `node9 init --recommended` (no questions and no telemetry opt-in).
+`--skip-setup` leaves agent wiring and service installation alone. Explicit
+`--mode` takes precedence over the checklist's standard-mode recommendation.
+Existing settings are preserved unless selected changes or explicit flags request
+an update. Workspace policy is managed in the dashboard; service settings remain local.
 
 **`login` adds nothing to enforcement.** It connects the machine to a workspace so
 a team can see one record across everyone's laptops and CI, set policy centrally,

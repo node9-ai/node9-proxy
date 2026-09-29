@@ -2,6 +2,7 @@
 // CI-3 — committed .mcp.json. Flags unpinned executable servers (supply-chain)
 // and inline credential values (reusing the DLP scanner). Static, parse-only.
 
+import { explainMcp } from './explain';
 import { scanText } from '@node9/policy-engine';
 import { lineAtIndex } from './lines';
 import type { CiFinding } from './types';
@@ -70,6 +71,7 @@ export function analyzeMcpServers(
         ...(line ? { line } : {}),
         signals: [`\`${safeText(argv, 120)}\`: unversioned/@latest npx`],
         fix: 'Pin the MCP server package to an exact version so a PR (or a registry compromise) can’t swap the toolchain.',
+        explain: explainMcp({ name, argv }),
       });
     }
 

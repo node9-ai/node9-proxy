@@ -121,7 +121,7 @@ describe('runDeviceLogin', () => {
   it('a browser denial ends the flow with a clear reason', async () => {
     pollScript = [{ status: 'denied' }];
     const r = await runDeviceLogin(opts());
-    expect(r).toEqual({ ok: false, reason: expect.stringContaining('denied') });
+    expect(r).toEqual({ ok: false, reason: expect.stringContaining('denied'), cancelled: true });
   });
 
   it('an expired code tells the user to rerun login', async () => {

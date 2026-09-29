@@ -337,6 +337,28 @@ function mechanism(anchor, companions) {
   }
 }
 
+/** A finding in plain words, as the CLI's explain.ts wrote it: what is wrong, what can happen,
+ *  what was seen, how to fix it. Repository text in it sits in code spans; mdLine keeps them
+ *  as they are and neutralizes HTML and @-mentions outside them. */
+function hasExplain(f) {
+  const ex = f && f.explain;
+  return (
+    !!ex &&
+    typeof ex.headline === 'string' &&
+    typeof ex.happens === 'string' &&
+    Array.isArray(ex.saw) &&
+    Array.isArray(ex.fix)
+  );
+}
+function renderExplain(f, L) {
+  const ex = f.explain;
+  L.push(`**${mdLine(ex.headline)}**`, '', mdLine(ex.happens), '');
+  L.push(`**What we saw** in \`${safeInline(f.file)}${f.line ? ':' + Number(f.line) : ''}\`:`);
+  for (const s of ex.saw) L.push(`- ${mdLine(s)}`);
+  L.push('', '**✅ How to fix:**');
+  ex.fix.forEach((x, i) => L.push(`${i + 1}. ${mdLine(x)}`));
+}
+
 /** The collapsed fact-list — the previous renderComment body, kept verbatim for power users. */
 function renderDetail(result) {
   const findings = (Array.isArray(result.findings) ? result.findings : []).filter(
@@ -344,7 +366,7 @@ function renderDetail(result) {
   );
   const L = [];
   L.push(
-    `<details><summary>${findings.length} finding(s) · ${[...new Set(findings.map((f) => f.check))].join(', ')} · full detail</summary>`
+    `<details><summary>${findings.length} finding(s) · ${[...new Set(findings.map((f) => f.check))].join(', ')} · technical details</summary>`
   );
   L.push('');
   for (const f of findings) {
@@ -472,20 +494,33 @@ function renderComment(result) {
     L.push(unreadBlock(result));
   }
   L.push('');
-  L.push(`**${threatLine(anchor, companions)}**`);
-  const mech = mechanism(anchor, companions);
-  if (mech) {
-    L.push('');
-    L.push(mech);
-  }
-  const fixes = [...new Set(companions.map((f) => f.fix).filter(Boolean))];
-  if (fixes.length === 1) {
-    L.push('');
-    L.push(`**✅ Fix** in \`${safeInline(anchor.file)}\`: ${fixes[0]}`);
-  } else if (fixes.length > 1) {
-    L.push('');
-    L.push(`**✅ Fix** in \`${safeInline(anchor.file)}\`:`);
-    for (const fx of fixes) L.push(`- ${fx}`);
+  if (hasExplain(anchor)) {
+    // Plain words first (design R); the technical record stays in the collapsed detail.
+    renderExplain(anchor, L);
+    const others = findings.filter((f) => f !== anchor);
+    if (others.length) {
+      L.push('', '**Also found:**');
+      for (const f of others)
+        L.push(
+          `- ${ICON[f.severity] ?? '•'} ${mdLine(hasExplain(f) ? f.explain.headline : f.title)} (\`${safeInline(f.file)}\`)`
+        );
+    }
+  } else {
+    L.push(`**${threatLine(anchor, companions)}**`);
+    const mech = mechanism(anchor, companions);
+    if (mech) {
+      L.push('');
+      L.push(mech);
+    }
+    const fixes = [...new Set(companions.map((f) => f.fix).filter(Boolean))];
+    if (fixes.length === 1) {
+      L.push('');
+      L.push(`**✅ Fix** in \`${safeInline(anchor.file)}\`: ${fixes[0]}`);
+    } else if (fixes.length > 1) {
+      L.push('');
+      L.push(`**✅ Fix** in \`${safeInline(anchor.file)}\`:`);
+      for (const fx of fixes) L.push(`- ${fx}`);
+    }
   }
   L.push('');
   L.push(renderDetail(result));

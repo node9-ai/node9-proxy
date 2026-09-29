@@ -3,11 +3,19 @@
 // Instead of a generic "blocked" message, the AI gets actionable instructions
 // based on WHY it was blocked so it can pivot intelligently.
 
+/** What the block was about, from the verdict itself (AuthResult.blockKind /
+ *  blockedPath), so the message does not have to guess from the label. */
+export interface BlockContext {
+  kind?: 'protected-path';
+  path?: string;
+}
+
 export function buildNegotiationMessage(
   blockedByLabel: string,
   isHumanDecision: boolean,
   humanReason?: string,
-  recoveryCommand?: string
+  recoveryCommand?: string,
+  context?: BlockContext
 ): string {
   if (isHumanDecision) {
     return `NODE9: The human user rejected this action.
@@ -16,6 +24,21 @@ INSTRUCTIONS:
 - Do NOT retry this exact command.
 - Acknowledge the block to the user and ask if there is an alternative approach.
 - If you believe this action is critical, explain your reasoning and ask them to run "node9 pause 15m" to proceed.`;
+  }
+
+  // MSG-1: a protected FILE, before any label branch. A sensitive-path hit
+  // shares the DLP label with a real secret, so the label branch below told the
+  // agent "a sensitive credential was found in your tool call arguments ...
+  // rotate it immediately" for a `Read .env`, and the agent told the user node9
+  // had misfired. Nothing was in the arguments but a path, and nothing was read.
+  if (context?.kind === 'protected-path') {
+    // Operation-neutral: the same rules block reads, writes, edits and deletes.
+    const subject = context.path ? `${context.path} is a protected file` : 'This file is protected';
+    return `NODE9: Blocked. ${subject}, and node9 stopped this call to it. The call did not run, so nothing was exposed.
+INSTRUCTIONS:
+- Do NOT retry, and do NOT reach the file another way (cat, grep, a copy, a script, a redirect).
+- If this step needs that file, ask the user to provide what you need or to do the step themselves.
+- Tell the user node9 protected this file, then ask how to proceed.`;
   }
 
   const label = blockedByLabel.toLowerCase();
@@ -113,5 +136,11 @@ export function buildReviewMessage(
     (reason && reason !== blockedByLabel ? reason : undefined) ||
     blockedByLabel ||
     'this action needs your review';
-  return `Node9 flagged this for your review: ${why}. Approve to proceed, or deny to cancel.`;
+  // MSG-2: a rule sentence that already ends in "." produced "backup.. Approve".
+  // Add a period only when the sentence has no ending of its own: a question
+  // stays a question and an ellipsis stays an ellipsis (/code-review). No
+  // regex over the tail, so no backtracking on a long run of spaces.
+  const trimmed = why.trimEnd();
+  const sentence = /[.!?\u2026]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+  return `Node9 flagged this for your review: ${sentence} Approve to proceed, or deny to cancel.`;
 }

@@ -2804,27 +2804,36 @@ const FS_OP_CACHE_MAX = 5_000;
 const fsOpCache = new Map<string, FsOpVerdict | null>();
 
 export function analyzeFsOperation(command: string): FsOpVerdict | null {
-  // De-obfuscate command tokens first (r''m → rm, \rm → rm). Without this the
-  // raw-string prescreen below — and the AST command-name match — are dodged by
-  // trivial quote/escape tricks, since block-rm-rf-home is the AST's job (the
-  // equivalent regex smart rule is suppressed for bash; see policy/index.ts).
-  // normalizeCommandForPolicy is memoized + shares the AST cache, so this is
-  // cheap, and using the normalized string as the cache key dedups raw variants.
+  // The jail reads the command AS BASH WILL RUN IT: the raw text, parsed as-is.
+  // It resolves quoting and escapes word by word itself (resolveWordLiteral:
+  // `c''at .env` and `\rm` resolve), so it never needed the normalised reading
+  // for that, and reading the normalised one is what JAIL-19 was: unquoting a
+  // word can change the command's STRUCTURE (`'s/(a)/b/'` stops parsing, a lone
+  // `'"'` pair swallows the statements between them into one string, `'x;#'`
+  // becomes a comment), and every such rewrite hid a jailed read. A first fix
+  // fell back to the raw text only when the rewrite failed to parse, which
+  // missed the rewrites that still parse (/code-review on 1686d1f).
+  //
+  // The normalised reading is still used for the PRESCREEN, so a keyword spelt
+  // with quote tricks is not skipped; either reading passing the prescreen is
+  // enough. The cache is keyed by the RAW text, because the verdict now depends
+  // on it: keyed by the normalised text, two different commands that normalise
+  // alike would share whichever verdict was computed first.
   const normalized = normalizeCommandForPolicy(command);
   // Fast path — skip the AST parse when no fs-op tool keyword is present.
-  if (!FS_OP_PRESCREEN_RE.test(normalized)) return null;
-  if (fsOpCache.has(normalized)) {
-    const hit = fsOpCache.get(normalized) ?? null;
-    fsOpCache.delete(normalized);
-    fsOpCache.set(normalized, hit);
+  if (!FS_OP_PRESCREEN_RE.test(normalized) && !FS_OP_PRESCREEN_RE.test(command)) return null;
+  if (fsOpCache.has(command)) {
+    const hit = fsOpCache.get(command) ?? null;
+    fsOpCache.delete(command);
+    fsOpCache.set(command, hit);
     return hit;
   }
-  const computed = analyzeFsOperationImpl(normalized);
+  const computed = analyzeFsOperationImpl(command);
   if (fsOpCache.size >= FS_OP_CACHE_MAX) {
     const oldest = fsOpCache.keys().next().value;
     if (oldest !== undefined) fsOpCache.delete(oldest);
   }
-  fsOpCache.set(normalized, computed);
+  fsOpCache.set(command, computed);
   return computed;
 }
 
@@ -3132,7 +3141,7 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
         // No length test here. `payload.length < command.length` looked like a
         // termination proof, but expansion can GROW the payload
         // (`K=KEY; sh -c "cat $K $K"`) and the wrapper then went unread. `depth`
-        // is the bound; the parse cache keys on the normalised string.
+        // is the bound; the parse cache keys on the command string.
         const payload = literalShellPayload(words, name);
         const claim = payload === null ? 'seen' : claimPayload(payload);
         if (claim === 'exhausted') {

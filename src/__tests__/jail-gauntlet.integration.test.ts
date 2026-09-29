@@ -349,6 +349,47 @@ describe.skipIf(process.platform === 'win32')(
   }
 );
 
+/**
+ * JAIL-19 at the real gate. The normaliser rewrote a quoted word into its
+ * literal unquoted, so `sed 's/(a)/b/'` became `sed s/(a)/b/`, the rewritten
+ * command no longer parsed, and the jail read nothing: the recorded demo
+ * command masking a Stripe key with sed capture groups was ALLOWED and ran.
+ */
+describe.skipIf(process.platform === 'win32')(
+  'jail gauntlet — JAIL-19: a quoted shell metacharacter does not hide the read',
+  () => {
+    const keyIn = (home: string) => {
+      const ssh = path.join(home, '.ssh');
+      fs.mkdirSync(ssh, { recursive: true });
+      const key = path.join(ssh, 'id_rsa');
+      fs.writeFileSync(key, 'x\n');
+      return key;
+    };
+
+    it('CONTROL: the same pipeline without a paren blocks', () => {
+      const { home } = jailedHome();
+      const r = probe(home, 'Bash', { command: `grep x ${keyIn(home)} | sed 's/a/b/'` });
+      expect(r.verdict, 'without this the rows below prove nothing').toBe('block');
+    });
+
+    it.each([
+      ['a balanced pair in sed', (k: string) => `grep x ${k} | sed 's/(a)/b/'`],
+      [
+        'the recorded masking command',
+        (k: string) => `grep -i stripe ${k} | sed -E 's/=(.{8}).*(.{4})$/=\\1…\\2/'`,
+      ],
+      ['a later statement', (k: string) => `cat ${k}; echo '(a)'`],
+      ['a quoted #', (k: string) => `echo '#'; cat ${k}`],
+      ['a quoted double quote', (k: string) => `echo 'a"b'; cat ${k}`],
+      ['a quoted $(', (k: string) => `echo '$(x'; cat ${k}`],
+    ])('%s blocks', (_label, mk) => {
+      const { home } = jailedHome();
+      const r = probe(home, 'Bash', { command: mk(keyIn(home)) });
+      expect(r.verdict).toBe('block');
+    });
+  }
+);
+
 /** Build a command that MOVES rather than prints, per verb. */
 function copyCmd(verb: string, src: string): string {
   if (verb === 'tar') return `tar cf /tmp/n9-gauntlet.tar ${src}`;
@@ -459,10 +500,6 @@ describe('AST tier — Windows path blindness (known gap)', () => {
     ['~/.ssh', 'cat C:\\Users\\x\\.ssh\\id_rsa'],
     ['~/.aws', 'cat C:\\Users\\x\\.aws\\credentials'],
     ['.env', 'cat C:\\proj\\.env'],
-    [
-      'quoted — quotes do not help, POSIX escapes apply inside them too',
-      'cat "C:\\Users\\x\\.ssh\\id_rsa"',
-    ],
   ];
   for (const [label, cmd] of WIN_CASES) {
     // Body = what SHOULD happen. Marker = it does not yet. Delete the marker
@@ -471,6 +508,14 @@ describe('AST tier — Windows path blindness (known gap)', () => {
       expect(analyzeFsOperation(cmd)?.verdict).toBe('block');
     });
   }
+
+  // Was the fourth `it.fails` case ("quoted: quotes do not help"). Closed by
+  // JAIL-19: the jail reader now parses the RAW command, where the quoted word
+  // keeps its backslashes, instead of a normalised reading that had unquoted
+  // it. Marker deleted, expectation untouched, as the note above prescribes.
+  it('a QUOTED Windows backslash path is detected (closed by JAIL-19)', () => {
+    expect(analyzeFsOperation('cat "C:\\Users\\x\\.ssh\\id_rsa"')?.verdict).toBe('block');
+  });
 
   it('CONTROL: the same Windows path with FORWARD slashes IS detected', () => {
     const r = analyzeFsOperation('cat C:/Users/x/.ssh/id_rsa');

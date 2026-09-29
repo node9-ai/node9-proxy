@@ -3,6 +3,7 @@
 // in the repo and apply to EVERY contributor's machine. We flag hooks that run
 // remote/unpinned code and over-broad permission grants. Static, parse-only.
 
+import { explainGrant } from './explain';
 import path from 'path';
 import type { CiFinding } from './types';
 import { parseFrontmatter, allowedToolsOf } from './frontmatter';
@@ -248,6 +249,15 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
       file: path,
       signals,
       fix: 'Scope the allow-list to specific read-only subcommands (e.g. `Bash(gh pr view:*)`); avoid bare `Bash`/`git:`/`Write`, or add a `deny` backstop.',
+      explain: explainGrant({
+        high,
+        file: path,
+        broad: grade.broad,
+        bareShell: grade.bareShell,
+        hasBackstop: grade.bareShell
+          ? deny.some((d) => /^Bash\b/.test(d))
+          : deny.some((d) => /Bash|Write|Edit/.test(d)),
+      }),
     });
   }
 
