@@ -1,7 +1,7 @@
 {
   "name": "@node9/proxy",
   "version": "2.26.1",
-  "description": "IAM for your AI agents. Set what Claude Code, Codex, Gemini, Cursor and any MCP server are allowed to do, review risky actions before they run, and keep every action on the record.",
+  "description": "Access control for AI agents. Set what Claude Code, Codex, Gemini, Cursor and any MCP server are allowed to do, review risky actions before they run, and keep every action on the record.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
@@ -34,6 +34,7 @@
     "agent-security",
     "agentic-ai",
     "ai-agent",
+    "access-control",
     "iam",
     "agent-permissions",
     "mcp",
