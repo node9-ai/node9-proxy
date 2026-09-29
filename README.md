@@ -1,5 +1,5 @@
 <h1 align="center">🛡️ node9</h1>
-<p align="center">IAM for your AI agents</p>
+<p align="center">Access control for AI agents</p>
 <p align="center"><strong>Your AI agents can reach Slack, GitHub, email, and your database.<br />node9 decides what they may do with each one.</strong></p>
 <p align="center">
   <a href="https://www.npmjs.com/package/node9-ai"><img src="https://img.shields.io/npm/v/node9-ai.svg" alt="npm version" /></a>
@@ -19,17 +19,13 @@ Works with **Claude Code · Codex CLI · Antigravity (agy) · GitHub Copilot CLI
 
 ## What it looks like
 
-Your agent on the left, node9 on the right. Every tool call the agent makes is
-checked before it runs: allowed and recorded, held for your approval, or blocked.
-The agent here was launched with `--dangerously-skip-permissions`, and node9 still
-decides.
-
-<!-- VIDEO: drag monitor-loop.mp4 into a GitHub comment to get its user-attachments
-     URL, then replace this block. GitHub plays mp4 from that host; npm will not
-     render it, which is why the scan screenshot below stays. -->
+A real Claude Code session with node9 installed. Every tool call is checked
+before it runs. Building a page and editing a button run. A request to the cloud
+metadata address is blocked, and the agent gets the reason and carries on.
+Deleting files waits for your approval, right in the chat.
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/4661da97-c174-4bae-ae54-4c52a1d69213" width="760" alt="node9 monitor: live tool calls, decisions, shields and score" />
+  <img src="https://github.com/user-attachments/assets/bfd3eec5-94fa-45a9-ac79-d06684ab4b2c" width="760" alt="node9 in a Claude Code session: two calls allowed, one blocked, one held for approval" />
 </p>
 
 ## Install
