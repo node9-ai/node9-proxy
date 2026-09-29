@@ -33,6 +33,10 @@ function repo(files: Record<string, string>, links: [string, string][] = []): st
   git('init', '-q');
   git('config', 'user.email', 't@e.test');
   git('config', 'user.name', 't');
+  // No background gc or maintenance: a detached `git gc --auto` after the
+  // commit can still be writing into .git when the test removes the fixture.
+  git('config', 'gc.auto', '0');
+  git('config', 'maintenance.auto', 'false');
   git('add', '-A');
   git('commit', '-qm', 'fixture');
   return root;
@@ -63,7 +67,7 @@ describe.runIf(posix)('P1 — junk links cannot stop the scan from reading ordin
         expect(r, t.source).toContain('CI-2.injectable-workflow@.github/workflows/review.yml');
       }
     } finally {
-      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   });
 });
@@ -80,7 +84,7 @@ describe.runIf(posix)('P2 — a long link text costs linear time', () => {
       readLocalTree(root);
       expect(performance.now() - t0).toBeLessThan(3000);
     } finally {
-      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   });
 });
@@ -98,7 +102,7 @@ describe('P3 — repo text quoted in a finding cannot rewrite the PR comment', (
       expect(md).not.toContain('@acme');
       expect(md.split('<!--').length).toBe(2); // only the sticky-comment marker
     } finally {
-      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   };
 
