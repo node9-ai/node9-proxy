@@ -10,6 +10,8 @@ import {
   WIF_STOPWORD,
   XPRV_VALID,
   XPRV_INVALID,
+  GITHUB_VALID,
+  GITHUB_INVALID,
 } from './checksum.fixtures';
 
 const row = <T extends { id: string }>(rows: T[], id: string): T => {
@@ -38,7 +40,7 @@ describe('pattern registration', () => {
     }
   });
   it('the pattern-count floor moves with them', () => {
-    expect(DLP_PATTERNS.length).toBeGreaterThanOrEqual(58);
+    expect(DLP_PATTERNS.length).toBeGreaterThanOrEqual(59);
   });
 });
 
@@ -115,5 +117,77 @@ describe('anchoring (F2): no match inside a longer base58 blob', () => {
   });
   it('a WIF glued to a word character is not reported, pinned', () => {
     expect(scanArgs({ k: 'WIF_' + WIF_U })).toBeNull();
+  });
+});
+
+// ── GitHub classic tokens: the checksum decides ─────────────────────────────
+const GH_OK = asm(row(GITHUB_VALID, 'ghp-1').parts);
+const GH_R = asm(row(GITHUB_VALID, 'ghr-1').parts);
+const GH_LOOKALIKE = asm(row(GITHUB_INVALID, 'ghp-lookalike').parts);
+const GH_BAD = asm(row(GITHUB_INVALID, 'ghp-1-bad-check').parts);
+
+describe('GitHub Token — validate wiring', () => {
+  it('registers with a validator and without an entropy floor', () => {
+    const p = DLP_PATTERNS.find((x) => x.name === 'GitHub Token');
+    expect(typeof p?.validate).toBe('function');
+    expect(p?.minEntropy).toBeUndefined();
+  });
+  it('scanArgs: a checksummed token is reported at block, the sample masks it', () => {
+    const m = scanArgs({ command: `git clone https://${GH_OK}@github.com/o/r` });
+    expect(m?.patternName).toBe('GitHub Token');
+    expect(m?.severity).toBe('block');
+    expect(m?.redactedSample).not.toContain(GH_OK);
+  });
+  it('scanArgs: a lookalike (shape only) and a one-character checksum mutation are NOT reported', () => {
+    expect(scanArgs({ command: `git clone https://${GH_LOOKALIKE}@github.com/o/r` })).toBeNull();
+    expect(scanArgs({ env: { TOKEN: GH_BAD } })).toBeNull();
+  });
+  it('scanArgs: the ghr_ refresh-token prefix is covered', () => {
+    expect(scanArgs({ env: { TOKEN: GH_R } })?.patternName).toBe('GitHub Token');
+  });
+  it('scanText: valid reported, lookalike not', () => {
+    expect(scanText('token=' + GH_OK)?.patternName).toBe('GitHub Token');
+    expect(scanText('token=' + GH_LOOKALIKE)).toBeNull();
+  });
+  it('redactText: valid redacted, lookalike left intact', () => {
+    const pos = redactText('a ' + GH_OK + ' b');
+    expect(pos.result).toBe('a [node9-redacted:GitHub Token] b');
+    expect(pos.found).toEqual(['GitHub Token']);
+    const neg = redactText('a ' + GH_LOOKALIKE + ' b');
+    expect(neg.result).toBe('a ' + GH_LOOKALIKE + ' b');
+    expect(neg.found).toEqual([]);
+  });
+  it('a lookalike in front of a real token does not hide it', () => {
+    expect(scanText(GH_LOOKALIKE + ' ' + GH_OK)?.patternName).toBe('GitHub Token');
+  });
+});
+
+// ── Microsoft CASK: layout-validated pattern ────────────────────────────────
+const B64URL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+const caskFiller = (n: number) =>
+  Array.from({ length: n }, (_, i) => B64URL[(i * 11 + 5) % 64]).join('');
+const CASK_OK = caskFiller(42) + 'QA' + 'QJJQ' + 'ABAK' + 'TEST' + 'AA' + 'BJBMeA';
+const CASK_DATA = caskFiller(42) + 'QA' + 'QJJQ' + 'ABCK' + 'TEST' + 'DATADATA' + 'AA' + 'BJBMeA';
+const CASK_BAD_TS = caskFiller(42) + 'QA' + 'QJJQ' + 'ABAK' + 'TEST' + 'AA' + 'BMBMeA';
+const CASK_DASH = '-' + caskFiller(41) + 'QA' + 'QJJQ' + 'ABAK' + 'TEST' + 'AA' + 'BJBMeA';
+
+describe('Microsoft CASK Secret — validate wiring', () => {
+  it('registers at block severity with a validator', () => {
+    const p = DLP_PATTERNS.find((x) => x.name === 'Microsoft CASK Secret');
+    expect(p?.severity).toBe('block');
+    expect(typeof p?.validate).toBe('function');
+  });
+  it('scanArgs: a well-formed key is reported; one with a bad timestamp is not', () => {
+    expect(scanArgs({ env: { KEY: CASK_OK } })?.patternName).toBe('Microsoft CASK Secret');
+    expect(scanArgs({ env: { KEY: CASK_DATA } })?.patternName).toBe('Microsoft CASK Secret');
+    expect(scanArgs({ env: { KEY: CASK_BAD_TS } })).toBeNull();
+  });
+  it('scanText: a key that starts with "-" is still found (no \\b anchor)', () => {
+    expect(scanText('key: ' + CASK_DASH + '\n')?.patternName).toBe('Microsoft CASK Secret');
+  });
+  it('redactText: the key is redacted and listed', () => {
+    const r = redactText('x=' + CASK_OK + ';');
+    expect(r.result).not.toContain(CASK_OK);
+    expect(r.found).toEqual(['Microsoft CASK Secret']);
   });
 });

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import { scanArgs, scanFilePath, scanText, DLP_PATTERNS } from '../dlp.js';
+import { FAKE_GH_TOKEN, FAKE_GHO_TOKEN, FAKE_GH_LOOKALIKE } from './helpers/github-token';
 
 // NOTE: All fake secret strings are built via concatenation so GitHub's secret
 // scanner doesn't flag this test file. The values are obviously fake (sequential
@@ -34,7 +35,7 @@ describe('DLP_PATTERNS — built-in patterns', () => {
   });
 
   it('detects GitHub personal access token (ghp_)', () => {
-    const token = 'ghp_' + 'Xm7Kp3Qn9Bt2Vc6Wr1Ys4Zh8Pq5Nv3MtRjWf';
+    const token = FAKE_GH_TOKEN;
     const match = scanArgs({ command: `git clone https://${token}@github.com/org/repo` });
     expect(match).not.toBeNull();
     expect(match!.patternName).toBe('GitHub Token');
@@ -43,10 +44,17 @@ describe('DLP_PATTERNS — built-in patterns', () => {
   });
 
   it('detects GitHub OAuth token (gho_)', () => {
-    const token = 'gho_' + 'Xm7Kp3Qn9Bt2Vc6Wr1Ys4Zh8Pq5Nv3MtRjWf';
+    const token = FAKE_GHO_TOKEN;
     const match = scanArgs({ env: { TOKEN: token } });
     expect(match).not.toBeNull();
     expect(match!.patternName).toBe('GitHub Token');
+  });
+
+  it('leaves a GitHub-token-shaped string with a failing checksum alone', () => {
+    const match = scanArgs({
+      command: `git clone https://${FAKE_GH_LOOKALIKE}@github.com/org/repo`,
+    });
+    expect(match).toBeNull();
   });
 
   it('detects Slack bot token', () => {

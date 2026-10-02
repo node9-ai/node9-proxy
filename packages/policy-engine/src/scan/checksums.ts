@@ -226,3 +226,113 @@ export function validateXprv(s: string): boolean {
   const version = p.readUInt32BE(0);
   return XPRV_VERSIONS.has(version) && p[45] === 0x00;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GitHub tokens — https://github.blog/2021-04-05-behind-githubs-new-authentication-token-formats/
+// `gh[pousr]_` + 30 random base62 characters + 6 characters of checksum. The
+// checksum is CRC32 over the 30 random characters (the prefix is NOT covered),
+// Base62-encoded with the digits-first alphabet and zero-padded to 6. Verified
+// against a live token before this landed: random-only matched, prefix-inclusive
+// did not. Fine-grained PATs (`github_pat_`) are NOT validated here: their
+// checksum scope is undocumented, so they keep the regex-only path.
+// ─────────────────────────────────────────────────────────────────────────────
+const B62 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+
+let CRC32_TABLE: Int32Array | null = null;
+
+/** Plain CRC-32 (IEEE 802.3, reflected, 0xEDB88320), as unsigned. */
+export function crc32(input: string | Uint8Array): number {
+  if (!CRC32_TABLE) {
+    CRC32_TABLE = new Int32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let c = i;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      CRC32_TABLE[i] = c;
+    }
+  }
+  const bytes = typeof input === 'string' ? Buffer.from(input, 'utf8') : input;
+  let c = -1;
+  for (let i = 0; i < bytes.length; i++) c = CRC32_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ -1) >>> 0;
+}
+
+/** Base62 (0-9A-Za-z) of a 32-bit value, left-padded with '0' to 6 characters. */
+export function base62Checksum(value: number): string {
+  let n = value >>> 0;
+  let s = '';
+  while (n > 0) {
+    s = B62[n % 62] + s;
+    n = Math.floor(n / 62);
+  }
+  return s.padStart(6, '0');
+}
+
+const GITHUB_TOKEN_RE = /^gh[pousr]_([A-Za-z0-9]{30})([A-Za-z0-9]{6})$/;
+
+/**
+ * GitHub classic token (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`): true when the
+ * trailing 6 characters equal base62(crc32(random30)). A lookalike (a test
+ * fixture, a hash, sample text) fails with probability 1 - 1/62^6.
+ */
+export function validateGithubToken(raw: string): boolean {
+  const m = GITHUB_TOKEN_RE.exec(raw);
+  if (!m) return false;
+  return base62Checksum(crc32(m[1])) === m[2];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Microsoft Common Annotated Security Key (CASK) —
+// https://github.com/microsoft/cask/blob/main/docs/CaskSecret.md
+// The documented format carries NO checksum; what it publishes is a fixed
+// layout: a `QJJQ` signature at a fixed offset after the sensitive data, size
+// and provider fields with restricted alphabets, zero-valued reserved
+// characters, and a timestamp whose six characters each have a bounded range.
+// The validator checks every one of those positions, so a random base64url
+// blob that happens to contain `QJJQ` is rejected unless the whole layout fits.
+// ─────────────────────────────────────────────────────────────────────────────
+const B64URL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+const B64URL_INDEX: Readonly<Record<string, number>> = Object.fromEntries(
+  [...B64URL].map((c, i) => [c, i])
+);
+const CASK_TWO_ZERO_SUFFIX = new Set([...'AEIMQUYcgkosw048']);
+const CASK_FOUR_ZERO_SUFFIX = new Set([...'AQgw']);
+
+function b64urlIndex(ch: string | undefined): number {
+  return ch === undefined ? -1 : (B64URL_INDEX[ch] ?? -1);
+}
+
+/**
+ * CASK secret layout check. `raw` may carry ONE leading and ONE trailing
+ * delimiter (the pattern's regex consumes them, the way the Azure pattern
+ * does), which are stripped before the layout is read.
+ */
+export function validateCask(raw: string): boolean {
+  const s = raw.replace(/^[^A-Za-z0-9_-]/, '').replace(/[^A-Za-z0-9_-]$/, '');
+  if (!/^[A-Za-z0-9_-]+$/.test(s)) return false;
+  // Sensitive-data block: 256-bit (42 + suffix + 'A' = 44) or 512-bit
+  // (85 + suffix + 'AA' = 88). The size character after the signature must
+  // agree with the block length.
+  let sigAt: number;
+  if (s.slice(44, 48) === 'QJJQ' && s[49] === 'B') {
+    if (!CASK_TWO_ZERO_SUFFIX.has(s[42]) || s[43] !== 'A') return false;
+    sigAt = 44;
+  } else if (s.slice(88, 92) === 'QJJQ' && s[93] === 'C') {
+    if (!CASK_FOUR_ZERO_SUFFIX.has(s[85]) || s.slice(86, 88) !== 'AA') return false;
+    sigAt = 88;
+  } else {
+    return false;
+  }
+  if (s[sigAt + 4] !== 'A') return false; // 6 reserved bits
+  const segments = b64urlIndex(s[sigAt + 6]); // provider-data segments, 'A'..'K'
+  if (segments < 0 || segments > 10) return false;
+  // sigAt+7: provider kind (any base64url); sigAt+8..+12: provider signature.
+  const tsAt = sigAt + 12 + segments * 4 + 2;
+  if (s.slice(tsAt - 2, tsAt) !== 'AA') return false; // 12 reserved bits
+  if (s.length !== tsAt + 6) return false;
+  const month = b64urlIndex(s[tsAt + 1]);
+  const day = b64urlIndex(s[tsAt + 2]);
+  const hour = b64urlIndex(s[tsAt + 3]);
+  const minute = b64urlIndex(s[tsAt + 4]);
+  const second = b64urlIndex(s[tsAt + 5]);
+  return month <= 11 && day <= 30 && hour <= 23 && minute <= 59 && second <= 59;
+}

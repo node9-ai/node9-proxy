@@ -30,9 +30,9 @@ if (!cliExists) {
 }
 const itUnix = it.skipIf(process.platform === 'win32' || !cliExists);
 
-// A GitHub-token-shaped value, built by concatenation so no scanner reads this
-// file as a leak. It is the control: a REAL secret in the arguments.
-const FAKE_GH_TOKEN = 'ghp_' + 'Xm7Kp3Qn9Bt2Vc6Wr1Ys4Zh8Pq5Nv3MtL2Aa';
+// A checksum-valid GitHub-token canary (helpers/github-token.ts). It is the
+// control: a REAL-shaped secret in the arguments that the scanner must fire on.
+import { FAKE_GH_TOKEN } from './helpers/github-token';
 
 const FALSE_CLAIMS = [/was found in your tool call arguments/i, /rotate/i, /compromised/i];
 

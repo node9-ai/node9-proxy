@@ -8,7 +8,7 @@
 // never leaves the module.
 
 import safeRegex from 'safe-regex2';
-import { validateWif, validateXprv } from '../scan/checksums';
+import { validateWif, validateXprv, validateGithubToken, validateCask } from '../scan/checksums';
 import type { DlpMatch } from '../types';
 export type { DlpMatch } from '../types';
 
@@ -110,12 +110,16 @@ export const DLP_PATTERNS: DlpPattern[] = [
   },
 
   // ── GitHub ────────────────────────────────────────────────────────────────
+  // Classic tokens end in a CRC32 checksum (scan/checksums.ts). The validator
+  // DECIDES: a matching checksum is a token GitHub issued (block); a mismatch
+  // is a lookalike — a fixture, a hash, sample text — and is left alone. It
+  // replaces the entropy floor, which the checksum makes redundant.
   {
     name: 'GitHub Token',
-    regex: /\bgh[pous]_[A-Za-z0-9]{36}\b/,
+    regex: /\bgh[pousr]_[A-Za-z0-9]{36}\b/,
     severity: 'block',
-    keywords: ['ghp_', 'gho_', 'ghu_', 'ghs_'],
-    minEntropy: 3.0,
+    keywords: ['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_'],
+    validate: validateGithubToken,
   },
   {
     name: 'GitHub Fine-Grained PAT',
@@ -188,6 +192,22 @@ export const DLP_PATTERNS: DlpPattern[] = [
     regex: /(?:^|[\s>=:(,])([a-zA-Z0-9_~.]{3}\dQ~[a-zA-Z0-9_~.-]{31,34})(?:$|[\s<),])/,
     severity: 'block',
     keywords: ['q~'],
+  },
+
+  // ── Microsoft CASK (Common Annotated Security Key) ────────────────────────
+  // Fixed layout, no checksum (scan/checksums.ts, validateCask). The regex
+  // consumes one delimiter on each side, the way the Azure pattern does,
+  // because the key alphabet includes '-' and a `\b` anchor misses a key that
+  // starts or ends with one. The 5..45 run covers the provider kind + signature
+  // and 0..10 optional 4-character data segments; the validator pins the exact
+  // lengths and the timestamp ranges.
+  {
+    name: 'Microsoft CASK Secret',
+    regex:
+      /(?:^|[^A-Za-z0-9_-])(?:[A-Za-z0-9_-]{44}|[A-Za-z0-9_-]{88})QJJQA[BC][A-K][A-Za-z0-9_-]{5,45}AA[A-Za-z0-9_-]{6}(?:$|[^A-Za-z0-9_-])/,
+    severity: 'block',
+    keywords: ['qjjq'],
+    validate: validateCask,
   },
 
   // ── Databricks ────────────────────────────────────────────────────────────

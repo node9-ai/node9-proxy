@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { validateLuhn } from './checksums';
+import {
+  validateLuhn,
+  validateGithubToken,
+  validateCask,
+  crc32,
+  base62Checksum,
+} from './checksums';
+import { GITHUB_VALID, GITHUB_INVALID } from '../dlp/checksum.fixtures';
 import { asm, VALID_16, VALID_15, INVALID_16, INVALID_15 } from './pii.fixtures';
 
 // Fixture values are split parts; see pii.fixtures.ts for why. Assertions are
@@ -154,5 +161,104 @@ describe('validateXprv', () => {
   });
   it('rejects a corrupted checksum, an xpub (public), and a tprv (testnet)', () => {
     for (const r of XPRV_INVALID) expect(validateXprv(asmB(r.parts)), r.id).toBe(false);
+  });
+});
+
+// ── GitHub classic tokens ───────────────────────────────────────────────────
+// Ground truth comes from the fixtures (independent zlib.crc32 vectors), never
+// from the functions under test.
+const ghRow = (rows: typeof GITHUB_VALID, id: string) => {
+  const r = rows.find((x) => x.id === id);
+  if (!r) throw new Error(`fixture ${id} missing`);
+  return r;
+};
+
+describe('crc32 / base62Checksum', () => {
+  it('crc32 matches the IEEE check value for "123456789"', () => {
+    expect(crc32('123456789')).toBe(0xcbf43926);
+  });
+  it('base62Checksum zero-pads to six characters', () => {
+    expect(base62Checksum(0)).toBe('000000');
+    expect(base62Checksum(61)).toBe('00000z');
+    expect(base62Checksum(62)).toBe('000010');
+  });
+});
+
+describe('validateGithubToken', () => {
+  it('G1 accepts every prefix with a matching checksum', () => {
+    for (const r of GITHUB_VALID) expect(validateGithubToken(asm(r.parts)), r.id).toBe(true);
+  });
+  it('G2 rejects a checksum mutation, a body mutation and the historical lookalike', () => {
+    for (const r of GITHUB_INVALID) expect(validateGithubToken(asm(r.parts)), r.id).toBe(false);
+  });
+  it('G3 rejects a wrong shape: prefix only, short body, fine-grained PAT', () => {
+    expect(validateGithubToken('ghp_')).toBe(false);
+    expect(validateGithubToken(asm(ghRow(GITHUB_VALID, 'ghp-1').parts).slice(0, -1))).toBe(false);
+    expect(validateGithubToken('github_pat_' + 'A'.repeat(82))).toBe(false);
+  });
+  it('G4 the checksum covers the body only, not the prefix', () => {
+    // Swapping the prefix keeps the token valid: the CRC never saw it.
+    const body = asm(ghRow(GITHUB_VALID, 'ghp-1').parts.slice(1));
+    expect(validateGithubToken('ghu_' + body)).toBe(true);
+  });
+});
+
+// ── Microsoft CASK ──────────────────────────────────────────────────────────
+// Keys are BUILT from the published layout (docs/CaskSecret.md), position by
+// position, so the builder is an independent reading of the spec. The
+// sensitive data is a fixed non-secret filler.
+const B64URL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+const filler = (n: number) =>
+  Array.from({ length: n }, (_, i) => B64URL[(i * 7 + 3) % 64]).join('');
+function cask(
+  opts: {
+    bits?: 256 | 512;
+    segments?: number;
+    sizeChar?: string;
+    reserved?: string;
+    ts?: string;
+  } = {}
+): string {
+  const bits = opts.bits ?? 256;
+  const segments = opts.segments ?? 0;
+  const sensitive = bits === 256 ? filler(42) + 'Q' + 'A' : filler(85) + 'g' + 'AA';
+  const sizeChar = opts.sizeChar ?? (bits === 256 ? 'B' : 'C');
+  const head = 'QJJQ' + 'A' + sizeChar + B64URL[segments] + 'K' + 'TEST';
+  const data = 'DATA'.repeat(segments);
+  // year 'B' (2026), month 'J' (Oct), day 'B' (2), hour 'M' (12), minute 'e' (30), second 'A'
+  const ts = opts.ts ?? 'BJBMeA';
+  return sensitive + head + data + (opts.reserved ?? 'AA') + ts;
+}
+
+describe('validateCask', () => {
+  it('C1 accepts a 256-bit key with no provider data', () => {
+    expect(validateCask(cask())).toBe(true);
+  });
+  it('C2 accepts a 512-bit key and a key with ten data segments', () => {
+    expect(validateCask(cask({ bits: 512 }))).toBe(true);
+    expect(validateCask(cask({ segments: 10 }))).toBe(true);
+  });
+  it('C3 strips one delimiter on each side (the regex consumes them)', () => {
+    expect(validateCask(' ' + cask() + ' ')).toBe(true);
+    // A key whose first sensitive character is '-' (a `\b` anchor would miss it).
+    expect(validateCask('=' + '-' + cask().slice(1))).toBe(true);
+  });
+  it('C4 rejects a size character that disagrees with the sensitive block', () => {
+    expect(validateCask(cask({ sizeChar: 'C' }))).toBe(false);
+    expect(validateCask(cask({ bits: 512, sizeChar: 'B' }))).toBe(false);
+  });
+  it('C5 rejects non-zero reserved characters and a wrong total length', () => {
+    expect(validateCask(cask({ reserved: 'AB' }))).toBe(false);
+    expect(validateCask(cask() + 'A')).toBe(false);
+    expect(validateCask(cask().slice(0, -1))).toBe(false);
+  });
+  it('C6 rejects an out-of-range timestamp component', () => {
+    expect(validateCask(cask({ ts: 'BMBMeA' }))).toBe(false); // month 'M' = 13
+    expect(validateCask(cask({ ts: 'BJfMeA' }))).toBe(false); // day 'f' = 32
+    expect(validateCask(cask({ ts: 'BJBYeA' }))).toBe(false); // hour 'Y' = 24
+    expect(validateCask(cask({ ts: 'BJBM8A' }))).toBe(false); // minute '8' = 60
+  });
+  it('C7 rejects a base64url blob that merely contains the signature', () => {
+    expect(validateCask(filler(40) + 'QJJQ' + filler(40))).toBe(false);
   });
 });

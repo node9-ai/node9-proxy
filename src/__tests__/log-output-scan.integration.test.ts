@@ -18,7 +18,9 @@ const CLI = path.resolve(__dirname, '../../dist/cli.js');
 
 // Assembled at runtime so no secret-shaped literal sits in this source file
 // (node9's own DLP would otherwise flag it). Matches the GitHubToken pattern.
-const FAKE_TOKEN = ['ghp', '_', 'A1b2C3d4E5f6', 'G7h8I9j0K1l2', 'M3n4O5p6Q7r8'].join('');
+// Checksum-valid canary (helpers/github-token.ts): the GitHub pattern verifies
+// the CRC32 suffix, so a shape-only string would no longer fire.
+import { FAKE_GH_TOKEN as FAKE_TOKEN } from './helpers/github-token';
 
 // Injection payloads are plain English — assembled at runtime only to keep the
 // "ignore previous instructions" phrase out of any grep-able fixed string.

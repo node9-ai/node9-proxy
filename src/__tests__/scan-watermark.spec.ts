@@ -21,6 +21,7 @@
 // file itself contains no credential-pattern literals.
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { FAKE_GH_TOKEN } from './helpers/github-token';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -78,11 +79,9 @@ afterEach(() => {
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 function fakeGitHubToken(): string {
-  // Build at runtime so the source file has no credential-shaped literal.
-  // DLP scanner enforces min entropy 3.0; mixed alphanumeric clears that.
-  const prefix = 'g' + 'h' + 'p' + '_';
-  const body = 'AaBbCcDdEeFfGgHhIiJjKkLlMmNnOo0123456789'.slice(0, 36);
-  return prefix + body;
+  // Checksum-valid canary (helpers/github-token.ts): the GitHub pattern
+  // verifies the CRC32 suffix, so a shape-only string would not fire.
+  return FAKE_GH_TOKEN;
 }
 
 function lineWithGitHubToken(): string {

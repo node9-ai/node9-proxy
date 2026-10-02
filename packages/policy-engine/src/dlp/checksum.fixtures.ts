@@ -297,3 +297,56 @@ export const ROW_COUNTS = {
   XPRV_VALID: 4,
   XPRV_INVALID: 3,
 } as const;
+
+// ── GitHub classic tokens (CRC32 / Base62) ───────────────────────────────────
+// Positive rows: random 30-character bodies with their checksum computed by an
+// INDEPENDENT implementation (Python's zlib.crc32, base62 digits-first,
+// zero-padded to 6) — never by the validator under test. The bodies were drawn
+// from a seeded PRNG and are not tokens GitHub ever issued. Negative rows are
+// one-character mutations of the checksum or the body.
+export const GITHUB_VALID: Row[] = [
+  {
+    id: 'ghp-1',
+    parts: ['ghp_', 'Ah9twYNPiM', 'w5fvVKHUcl', 'tdvqmH0uuh', '41miR4'],
+    expect: true,
+    proves: 'classic PAT, checksum matches',
+  },
+  {
+    id: 'gho-1',
+    parts: ['gho_', 'SkDIOX5We7', '1mDf7svm8L', '4i3wm9dTRG', '4fY4SB'],
+    expect: true,
+    proves: 'OAuth token prefix, same checksum rule',
+  },
+  {
+    id: 'ghs-1',
+    parts: ['ghs_', 'oKUbnFVqiP', 'PBOthC3pbp', 'EUM0gGzv9j', '1RJuHe'],
+    expect: true,
+    proves: 'server-to-server prefix',
+  },
+  {
+    id: 'ghr-1',
+    parts: ['ghr_', 'P2MatYCz2F', 'HLZenIsQSr', 'jBvwfRU48e', '3Yn7Ma'],
+    expect: true,
+    proves: 'refresh-token prefix, previously uncovered',
+  },
+];
+export const GITHUB_INVALID: Row[] = [
+  {
+    id: 'ghp-1-bad-check',
+    parts: ['ghp_', 'Ah9twYNPiM', 'w5fvVKHUcl', 'tdvqmH0uuh', '41miR5'],
+    expect: false,
+    proves: 'last checksum character',
+  },
+  {
+    id: 'ghp-1-bad-body',
+    parts: ['ghp_', 'Ah9twYNPiN', 'w5fvVKHUcl', 'tdvqmH0uuh', '41miR4'],
+    expect: false,
+    proves: 'body mutation changes the CRC',
+  },
+  {
+    id: 'ghp-lookalike',
+    parts: ['ghp_', 'Xm7Kp3Qn9B', 't2Vc6Wr1Ys', '4Zh8Pq5Nv3', 'MtRjWf'],
+    expect: false,
+    proves: 'the historical test fixture: shape only, no checksum',
+  },
+];
