@@ -684,6 +684,10 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v21';
 // verdicts moved. dlp/, pipe-chain and destructive-regex are untouched. A
 // version bump would cost every daemon a full re-scan and change nothing.
 
+// 2026-10-02, hash bumped with NO version bump: dlp/index.ts only gained
+// re-exports of the injection normaliser (dlp/normalize.ts). No DLP pattern
+// or scanner changed, so detector output is identical.
+
 /**
  * SHA-256 prefix of the detector-source files
  * (canonical.ts + pii.ts + destructive-regex.ts).
@@ -694,7 +698,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v21';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '379cf860c2655865';
+export const CANONICAL_EXTRACTOR_HASH = '0f77495e8ef87ad5';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

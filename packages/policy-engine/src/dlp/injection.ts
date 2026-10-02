@@ -11,6 +11,8 @@
 // on `medium`+, which requires CORROBORATION (another signal or an untrusted
 // origin). No model dependency; bounded regexes (ReDoS-safe).
 
+import { scanViews } from './normalize';
+
 export type InjectionConfidence = 'low' | 'medium' | 'high';
 
 export interface InjectionMatch {
@@ -81,11 +83,24 @@ export function scanInjection(text: string, ctx: InjectionContext = {}): Injecti
   if (!text) return null;
   const t = text.length > MAX ? text.slice(0, MAX) : text;
 
+  // The patterns run on the text as written AND on its normalised readings
+  // (invisibles stripped, lookalikes folded, base64/hex blobs decoded —
+  // normalize.ts). A signal that appears only in a derived view means the
+  // phrase was hidden on purpose, which is corroboration in its own right:
+  // it scores as the `obfuscated` signal.
   const matched: string[] = [];
-  for (const sig of SIGNALS) {
-    if (sig.any.some((re) => re.test(t))) matched.push(sig.name);
+  let hiddenOnly = false;
+  for (const view of scanViews(t)) {
+    for (const sig of SIGNALS) {
+      if (matched.includes(sig.name)) continue;
+      if (sig.any.some((re) => re.test(view.text))) {
+        matched.push(sig.name);
+        if (view.kind !== 'original') hiddenOnly = true;
+      }
+    }
   }
   if (matched.length === 0) return null;
+  if (hiddenOnly) matched.push('obfuscated');
 
   const untrusted = !!ctx.tool && UNTRUSTED_TOOLS.test(ctx.tool);
   const score = matched.length + (untrusted ? 1 : 0);

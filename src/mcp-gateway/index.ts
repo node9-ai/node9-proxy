@@ -17,9 +17,10 @@
 import readline from 'readline';
 import chalk from 'chalk';
 import { spawn } from 'child_process';
+import { randomUUID } from 'crypto';
 import { execa } from 'execa';
 import { authorizeHeadless } from '../auth/orchestrator';
-import { _resetConfigCache } from '../config';
+import { _resetConfigCache, getConfig } from '../config';
 import { auditLocalAllow } from '../auth/cloud';
 import { getCredentials } from '../config';
 import { buildNegotiationMessage } from '../policy/negotiation';
@@ -34,8 +35,10 @@ import {
   isDaemonRunning,
   getInternalToken,
   notifyActivitySocket,
+  notifySessionTaint,
 } from '../auth/daemon';
 import { stripControlChars } from '../utils/safe-text';
+import { scanToolResult } from './result-scan';
 
 // readActiveShields + waitForMcpApproval helper removed — the
 // mcp-tool-gating shield (which used the browser dashboard for the
@@ -339,6 +342,16 @@ export async function runMcpGateway(
     { ts: number; toolName: string; agent?: string; mcpServer?: string }
   >();
 
+  // Session identity for taint (gap1). MCP stdio carries no agent session id,
+  // so the gateway process IS the session: a secret or an injected instruction
+  // in one tool result taints this id, and the next network/write call through
+  // this gateway is routed to review by authorizeHeadless's session-taint gate.
+  const gatewaySessionId = `mcp-gateway-${randomUUID()}`;
+  // Tools the server declares read-only (MCP `annotations.readOnlyHint`), from
+  // the last tools/list. Every other tool is state-changing for session taint:
+  // after an injected instruction surfaces, it goes to review.
+  const readOnlyTools = new Set<string>();
+
   // Captured from the MCP `initialize` handshake (clientInfo.name).
   // Used to attribute tools/call events to the originating agent (Claude /
   // Cursor / Codex / Gemini) in tail and audit surfaces. Falls back to
@@ -465,13 +478,19 @@ export async function runMcpGateway(
         // policy source (local ↔ workspace) goes unnoticed until restart.
         // The daemon already resets per-check; the gateway now matches.
         _resetConfigCache();
-        const result = await authorizeHeadless(toolName, toolArgs, {
-          agent: clientName ?? 'MCP-Gateway',
-          mcpServer,
-          // Managed per-tool app permissions are keyed by serverKey (the pin
-          // hash) — pass it so authorizeHeadless can enforce block/review.
-          serverKey,
-        });
+        const result = await authorizeHeadless(
+          toolName,
+          toolArgs,
+          {
+            agent: clientName ?? 'MCP-Gateway',
+            mcpServer,
+            // Managed per-tool app permissions are keyed by serverKey (the pin
+            // hash) — pass it so authorizeHeadless can enforce block/review.
+            serverKey,
+            sessionId: gatewaySessionId,
+          },
+          { sessionTaintGated: !readOnlyTools.has(toolName) }
+        );
 
         if (!result.approved) {
           console.error(chalk.red(`\n🛑 Node9 MCP Gateway: Action Blocked`));
@@ -600,9 +619,12 @@ export async function runMcpGateway(
     // Try to parse as JSON to check for tools/list response
     type UpstreamMessage = {
       id?: string | number | null;
-      result?: { tools?: unknown[] };
+      result?: { tools?: unknown[]; content?: unknown; structuredContent?: unknown };
       error?: unknown;
     };
+    // The line we forward. Replaced only when the response-channel scan below
+    // redacts a secret or frames injected text; otherwise byte-identical.
+    let outLine = line;
     let parsed: UpstreamMessage | undefined;
     try {
       parsed = JSON.parse(line) as UpstreamMessage;
@@ -622,6 +644,12 @@ export async function runMcpGateway(
       // Only check pins and apply filtering on successful responses that contain tools
       if (parsed.result && Array.isArray(parsed.result.tools)) {
         const tools = (parsed.result.tools as McpToolInfo[]) || [];
+        readOnlyTools.clear();
+        for (const t of tools as unknown[]) {
+          const tool = t as { name?: unknown; annotations?: { readOnlyHint?: unknown } };
+          if (typeof tool?.name === 'string' && tool.annotations?.readOnlyHint === true)
+            readOnlyTools.add(tool.name);
+        }
         const currentHash = hashToolDefinitions(tools);
         const pinStatus = checkPin(serverKey, currentHash, gatewayCwd);
         const token = getInternalToken();
@@ -785,6 +813,53 @@ export async function runMcpGateway(
           mcpServer: exec.mcpServer,
           isError,
         }).catch(() => {});
+
+        // ── Response-channel scan (gap1 in the gateway) ───────────────────
+        // Redact secrets out of the result and frame injected text as DATA
+        // before the agent reads it, then taint this gateway's session so
+        // the next network/write call goes to review. Fail open: a scanner
+        // error forwards the result unchanged — node9 never stops the agent
+        // because a check failed.
+        if (parsed.result !== undefined) {
+          try {
+            const cfg = getConfig();
+            const scan = scanToolResult(line, parsed, exec.toolName, {
+              dlpEnabled: cfg.policy.dlp.enabled,
+              injection: cfg.policy.injectionScan,
+            });
+            if (scan.changed) outLine = scan.line;
+            // A redacted secret never reaches the model, so it taints nothing
+            // (the same reasoning as the PostToolUse redact-output mode). An
+            // injection is framed but still READ, so it taints the session.
+            for (const name of scan.secrets) {
+              console.error(
+                chalk.yellow(
+                  `🔒 Node9: redacted a ${name} from the '${exec.toolName}' result before delivery`
+                )
+              );
+            }
+            if (scan.injection) {
+              console.error(
+                chalk.yellow(
+                  `⚠️  Node9: '${exec.toolName}' result looks like injected instructions ` +
+                    `(${scan.injection.signals.join(', ')}) — framed as untrusted data`
+                )
+              );
+              // Not awaited: holding this line back would let later lines
+              // overtake it. The POST lands long before the agent's next call.
+              notifySessionTaint(
+                gatewaySessionId,
+                `output-injection:${scan.injection.signals.join('+')}`
+              ).catch(() => {});
+            }
+          } catch (err) {
+            console.error(
+              chalk.gray(
+                `Node9: result scan skipped for '${exec.toolName}': ${err instanceof Error ? err.message : String(err)}`
+              )
+            );
+          }
+        }
       }
     }
 
@@ -825,8 +900,8 @@ export async function runMcpGateway(
       pendingCallNames.delete(parsed.id as string | number);
     }
 
-    // All other messages — forward unchanged
-    process.stdout.write(line + '\n');
+    // All other messages — forward unchanged (or the scanned copy of a tool result)
+    process.stdout.write(outLine + '\n');
   });
 
   // ── LIFECYCLE ──────────────────────────────────────────────────────────────

@@ -339,6 +339,10 @@ export async function authorizeHeadless(
     cwd?: string;
     localSmartRuleMatched?: boolean;
     deferReview?: boolean;
+    /** The caller classes this tool as state-changing (the MCP gateway: any
+     *  tool the server does not declare `readOnlyHint`), so a tainted session
+     *  routes it to review like a write or network call. */
+    sessionTaintGated?: boolean;
   }
 ): Promise<AuthResult> {
   // Skip socket notification when called from daemon — daemon already broadcasts via SSE
@@ -443,6 +447,7 @@ async function _authorizeHeadlessCore(
     localSmartRuleMatched?: boolean;
     socketActivitySent?: boolean;
     deferReview?: boolean;
+    sessionTaintGated?: boolean;
   }
 ): Promise<AuthResult> {
   // Thread the working directory into meta so every audit row written below
@@ -603,13 +608,18 @@ async function _authorizeHeadlessCore(
   if (
     !taintWarning &&
     meta?.sessionId &&
-    (isNetworkTool(toolName, args) || isWriteTool(toolName))
+    (isNetworkTool(toolName, args) || isWriteTool(toolName) || options?.sessionTaintGated === true)
   ) {
     const sessionTaint = await checkSessionTaint(meta.sessionId);
     if (sessionTaint.tainted && sessionTaint.record) {
+      const kind = isWriteTool(toolName)
+        ? 'write'
+        : isNetworkTool(toolName, args)
+          ? 'network'
+          : 'state-changing';
       taintWarning =
         `⚠️ node9 flagged this session — earlier tool output contained ${sessionTaint.record.source}. ` +
-        `Approve this ${isWriteTool(toolName) ? 'write' : 'network'} action before it proceeds.`;
+        `Approve this ${kind} action before it proceeds.`;
     }
   }
 

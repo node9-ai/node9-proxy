@@ -26,6 +26,15 @@ export {
   SENSITIVE_PATH_REGEXES,
 } from './dlp';
 export type { InjectionMatch, InjectionContext, InjectionConfidence } from './dlp';
+export {
+  stripInvisible,
+  foldHomoglyphs,
+  normalizeForScan,
+  decodeEmbeddedBase64,
+  decodeEmbeddedHex,
+  scanViews,
+} from './dlp';
+export type { ScanView } from './dlp';
 
 // Shell — AST-based detectors (mvdan-sh). Pure: input is a string, output is a verdict.
 export type { ShellCommandAnalysis, FsOpVerdict, ShellDestination } from './shell';

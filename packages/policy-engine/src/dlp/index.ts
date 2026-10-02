@@ -19,6 +19,15 @@ export {
   type InjectionContext,
   type InjectionConfidence,
 } from './injection';
+export {
+  stripInvisible,
+  foldHomoglyphs,
+  normalizeForScan,
+  decodeEmbeddedBase64,
+  decodeEmbeddedHex,
+  scanViews,
+  type ScanView,
+} from './normalize';
 
 interface DlpPattern {
   name: string;
