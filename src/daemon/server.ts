@@ -80,6 +80,7 @@ import { startMcpReconciler } from './mcp-reconciler.js';
 import { startHookHeal } from './hook-heal.js';
 import { logDaemonStartup, recordStartupState } from './startup-log.js';
 import { readMcpToolsConfig, updateServerDiscovery, approveServer } from './mcp-tools.js';
+import { startOsvSync } from '../supply-chain/osv-sync';
 
 export type DaemonReportPeriod = 'today' | '7d' | '30d' | 'month';
 
@@ -209,6 +210,7 @@ export function startDaemon(): void {
     startForensicBroadcast();
     startAuditShipper();
     startDlpScanner();
+    startOsvSync();
     startMcpReconciler();
     startHookHeal();
     loadInsightCounts(); // restore persisted nudge counters across restarts

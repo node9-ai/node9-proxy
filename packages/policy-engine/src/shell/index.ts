@@ -137,8 +137,10 @@ const AST_CACHE_MAX = 5_000;
 const astCache = new Map<string, any>();
 const PARSE_FAIL = Symbol('parse-fail');
 
+// Exported for the sibling detectors (package-install.ts) so they share the
+// cache; the result is a read-only AST or the PARSE_FAIL symbol.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function parseShared(command: string): any | typeof PARSE_FAIL {
+export function parseShared(command: string): any | typeof PARSE_FAIL {
   const cached = astCache.get(command);
   if (cached !== undefined) {
     astCache.delete(command);
@@ -2518,7 +2520,8 @@ function expandPlainParam(p: any): string | null | undefined {
   return HOME_VARIABLES.has(p.Param?.Value) ? '~' : undefined;
 }
 
-function resolveWordLiteral(w: any): string | null {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function resolveWordLiteral(w: any): string | null {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const parts: any[] = w?.Parts || [];
   let s = '';

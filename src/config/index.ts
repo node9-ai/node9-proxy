@@ -198,6 +198,21 @@ export interface Config {
       minConfidence: 'medium' | 'high';
       allow: string[];
     };
+    // Package check before install (src/supply-chain). A shell command that
+    // installs or runs registry packages (npm/pnpm/yarn/bun/npx, pip/uv/
+    // poetry) is checked against the local OSV malicious-package index, with
+    // OSV online as a fallback. Known malicious → `onMalicious`; publish age
+    // under `maxAgeHours` or an npm install script → review (registrySignals).
+    // `allow` holds package-name globs that are never checked. A failed
+    // lookup always allows and is recorded in hook-debug.log.
+    packageCheck: {
+      enabled: boolean;
+      onMalicious: 'block' | 'review';
+      registrySignals: boolean;
+      maxAgeHours: number;
+      onlineFallback: boolean;
+      allow: string[];
+    };
     skillPinning: {
       enabled: boolean;
       mode: 'warn' | 'block';
@@ -481,6 +496,14 @@ export const DEFAULT_CONFIG: Config = {
     },
     loopDetection: { enabled: true, threshold: 5, windowSeconds: 120 },
     injectionScan: { enabled: false, minConfidence: 'medium', allow: [] },
+    packageCheck: {
+      enabled: true,
+      onMalicious: 'block',
+      registrySignals: true,
+      maxAgeHours: 48,
+      onlineFallback: true,
+      allow: [],
+    },
     skillPinning: { enabled: false, mode: 'warn', roots: [] },
     trustedHosts: [],
     trustedHostsManaged: false,
@@ -872,6 +895,10 @@ export function getConfig(cwd?: string): Config {
       ...DEFAULT_CONFIG.policy.injectionScan,
       allow: [...DEFAULT_CONFIG.policy.injectionScan.allow],
     },
+    packageCheck: {
+      ...DEFAULT_CONFIG.policy.packageCheck,
+      allow: [...DEFAULT_CONFIG.policy.packageCheck.allow],
+    },
     skillPinning: {
       ...DEFAULT_CONFIG.policy.skillPinning,
       roots: [...DEFAULT_CONFIG.policy.skillPinning.roots],
@@ -1080,6 +1107,22 @@ export function getConfig(cwd?: string): Config {
         }
       }
     }
+    if (p.packageCheck && typeof p.packageCheck === 'object') {
+      const pc = p.packageCheck as Partial<Config['policy']['packageCheck']>;
+      const cur = mergedPolicy.packageCheck;
+      if (typeof pc.enabled === 'boolean') cur.enabled = pc.enabled;
+      if (pc.onMalicious === 'block' || pc.onMalicious === 'review')
+        cur.onMalicious = pc.onMalicious;
+      if (typeof pc.registrySignals === 'boolean') cur.registrySignals = pc.registrySignals;
+      if (typeof pc.maxAgeHours === 'number' && pc.maxAgeHours >= 0)
+        cur.maxAgeHours = pc.maxAgeHours;
+      if (typeof pc.onlineFallback === 'boolean') cur.onlineFallback = pc.onlineFallback;
+      if (Array.isArray(pc.allow)) {
+        for (const a of pc.allow) {
+          if (typeof a === 'string' && a.length > 0) cur.allow.push(a);
+        }
+      }
+    }
     if (p.skillPinning && typeof p.skillPinning === 'object') {
       const sp = p.skillPinning as Partial<Config['policy']['skillPinning']>;
       if (sp.enabled !== undefined) mergedPolicy.skillPinning.enabled = sp.enabled;
@@ -1219,6 +1262,14 @@ export function getConfig(cwd?: string): Config {
           injectionScan?: {
             enabled?: unknown;
             minConfidence?: unknown;
+            allow?: unknown;
+          };
+          packageCheck?: {
+            enabled?: unknown;
+            onMalicious?: unknown;
+            registrySignals?: unknown;
+            maxAgeHours?: unknown;
+            onlineFallback?: unknown;
             allow?: unknown;
           };
           loopDetection?: {
@@ -1415,6 +1466,34 @@ export function getConfig(cwd?: string): Config {
                 : cur.minConfidence,
             allow: Array.isArray(i.allow)
               ? i.allow.filter((x): x is string => typeof x === 'string')
+              : cur.allow,
+          };
+        }
+        // Detection: packageCheck replaces the local config per field, like
+        // injectionScan — the org owns which protections run. The org allow
+        // list REPLACES the local one, so a developer cannot exempt a package
+        // the org did not.
+        if (mc.packageCheck && typeof mc.packageCheck === 'object') {
+          const pc = mc.packageCheck;
+          const cur = mergedPolicy.packageCheck;
+          mergedPolicy.packageCheck = {
+            enabled: typeof pc.enabled === 'boolean' ? pc.enabled : cur.enabled,
+            onMalicious:
+              pc.onMalicious === 'block' || pc.onMalicious === 'review'
+                ? pc.onMalicious
+                : cur.onMalicious,
+            registrySignals:
+              typeof pc.registrySignals === 'boolean' ? pc.registrySignals : cur.registrySignals,
+            maxAgeHours:
+              typeof pc.maxAgeHours === 'number' &&
+              Number.isFinite(pc.maxAgeHours) &&
+              pc.maxAgeHours >= 0
+                ? pc.maxAgeHours
+                : cur.maxAgeHours,
+            onlineFallback:
+              typeof pc.onlineFallback === 'boolean' ? pc.onlineFallback : cur.onlineFallback,
+            allow: Array.isArray(pc.allow)
+              ? pc.allow.filter((a): a is string => typeof a === 'string' && a.length > 0)
               : cur.allow,
           };
         }

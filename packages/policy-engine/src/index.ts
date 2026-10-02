@@ -66,6 +66,14 @@ export {
   parseDestHost,
 } from './shell';
 
+// Package-install extraction (supply-chain check; the host does the lookups).
+export {
+  extractPackageInstalls,
+  normalizePyPiName,
+  type PackageInstallRequest,
+  type PackageEcosystem,
+} from './shell/package-install';
+
 // Egress / destination policy (GAP-5).
 export type { EgressPolicy, EgressVerdict, Destination } from './egress';
 export { evaluateEgress, isPrivateHost, hostMatches, DEFAULT_EGRESS_ALLOWLIST } from './egress';

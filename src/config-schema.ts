@@ -188,6 +188,16 @@ export const ConfigFileSchema = z
             allow: z.array(z.string()).optional(),
           })
           .optional(),
+        packageCheck: z
+          .object({
+            enabled: z.boolean().optional(),
+            onMalicious: z.enum(['block', 'review']).optional(),
+            registrySignals: z.boolean().optional(),
+            maxAgeHours: z.number().min(0).optional(),
+            onlineFallback: z.boolean().optional(),
+            allow: z.array(z.string()).optional(),
+          })
+          .optional(),
         skillPinning: z
           .object({
             enabled: z.boolean().optional(),
