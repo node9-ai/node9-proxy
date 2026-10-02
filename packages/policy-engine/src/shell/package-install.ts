@@ -75,49 +75,74 @@ function parseNpmSpec(raw: string): { name: string; version?: string } | null {
   return { name, version: exact ? exact[1] : undefined };
 }
 
-// npm/pnpm/yarn/bun flags whose operand is NOT a package.
-const NPM_FLAGS_WITH_OPERAND = new Set([
+// ── Flags that take a value ─────────────────────────────────────────────────
+// Per front-end: the flags whose NEXT word is their value, not a package.
+// Listing a flag that is boolean in that tool would swallow the package after
+// it (`pnpm add -w evil`: -w is boolean in pnpm) — a silent bypass — so each
+// set holds only flags that take a value in THAT tool. An unlisted value flag
+// errs the other way: its value is looked up as a package name too, which
+// costs a lookup and blocks nothing that is not itself in the index.
+const NPM_VALUE_FLAGS = new Set([
   '--registry',
   '--prefix',
-  '--cwd',
-  '--filter',
-  '-C',
-  '--workspace',
-  '-w',
-  '--tag',
-  '--loglevel',
   '--cache',
   '--userconfig',
-  '--modules-folder',
+  '--globalconfig',
+  '--workspace',
+  '-w',
+  '--loglevel',
+  '--tag',
+  '--before',
+  '--omit',
+  '--include',
+  '--install-strategy',
+  '--save-prefix',
+  '--scope',
+  '--otp',
+  '--cpu',
+  '--os',
+  '--libc',
 ]);
-
-/** Non-flag operands after `from`, honouring flags that take an operand. */
-function operands(words: (string | null)[], from: number, flagsWithOperand: Set<string>): string[] {
-  const out: string[] = [];
-  for (let i = from; i < words.length; i++) {
-    const w = words[i];
-    if (w === null) continue; // dynamic — unknowable, skip
-    if (w === '--') {
-      for (let j = i + 1; j < words.length; j++) {
-        const rest = words[j];
-        if (rest !== null) out.push(rest);
-      }
-      break;
-    }
-    if (w.startsWith('-')) {
-      if (flagsWithOperand.has(w) && !w.includes('=')) i++;
-      continue;
-    }
-    out.push(w);
-  }
-  return out;
-}
-
-// ── PyPI ────────────────────────────────────────────────────────────────────
-// PEP 508 name, optional extras, optional version specifier.
-const PY_SPEC_RE = /^([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)(?:\[[^\]]*\])?\s*(.*)$/;
-const PY_EXACT_RE = /^===?\s*v?(\d+(?:\.\d+)*(?:[a-zA-Z0-9.+!-]*))$/;
-const PIP_FLAGS_WITH_OPERAND = new Set([
+const PNPM_VALUE_FLAGS = new Set([
+  '--registry',
+  '-C',
+  '--dir',
+  '--filter',
+  '-F',
+  '--store-dir',
+  '--virtual-store-dir',
+  '--modules-dir',
+  '--lockfile-dir',
+  '--loglevel',
+  '--reporter',
+  '--network-concurrency',
+  '--child-concurrency',
+  '--workspace-concurrency',
+]);
+const YARN_VALUE_FLAGS = new Set([
+  '--registry',
+  '--cwd',
+  '--modules-folder',
+  '--cache-folder',
+  '--global-folder',
+  '--link-folder',
+  '--preferred-cache-folder',
+  '--mutex',
+  '--network-timeout',
+  '--network-concurrency',
+  '--use-yarnrc',
+  '--otp',
+]);
+const BUN_VALUE_FLAGS = new Set([
+  '--registry',
+  '--cwd',
+  '--cache-dir',
+  '-c',
+  '--config',
+  '--omit',
+  '--backend',
+]);
+const PIP_VALUE_FLAGS = new Set([
   '-r',
   '--requirement',
   '-c',
@@ -132,6 +157,8 @@ const PIP_FLAGS_WITH_OPERAND = new Set([
   '--prefix',
   '--root',
   '--src',
+  '-e',
+  '--editable',
   '--platform',
   '--python-version',
   '--implementation',
@@ -140,17 +167,156 @@ const PIP_FLAGS_WITH_OPERAND = new Set([
   '--cache-dir',
   '--log',
   '--trusted-host',
+  '--upgrade-strategy',
+  '--progress-bar',
+  '--report',
+  '-C',
+  '--config-settings',
+  '--global-option',
+  '--no-binary',
+  '--only-binary',
+  '--retries',
+  '--timeout',
+  '--exists-action',
+  '--cert',
+  '--client-cert',
   '--python',
+]);
+const UV_VALUE_FLAGS = new Set([
   '-p',
+  '--python',
   '--group',
   '--optional',
-  '--source',
-  '-e',
-  '--editable',
+  '--index',
+  '--index-url',
+  '--default-index',
+  '--extra-index-url',
+  '-f',
+  '--find-links',
   '--with',
   '--from',
+  '--directory',
+  '--project',
+  '--package',
+  '--rev',
+  '--tag',
+  '--branch',
+  '--extra',
+  '--config-file',
+  '--cache-dir',
+  '-r',
+  '--requirement',
+  '-c',
+  '--constraint',
+  '-e',
+  '--editable',
+  '--target',
+  '--prefix',
+  '--index-strategy',
+  '--keyring-provider',
+  '--resolution',
+  '--prerelease',
+  '--exclude-newer',
+  '--link-mode',
+  '--color',
+  '-m',
+  '--marker',
+  '--bounds',
+  '--script',
+]);
+const POETRY_VALUE_FLAGS = new Set([
+  '-G',
+  '--group',
+  '--source',
+  '-E',
+  '--extras',
+  '--python',
+  '--platform',
+  '-C',
+  '--directory',
+  '-P',
+  '--project',
+]);
+const PIPENV_VALUE_FLAGS = new Set([
+  '-r',
+  '--requirements',
+  '--python',
+  '-i',
+  '--index',
+  '--extra-index-url',
+  '--categories',
+  '-e',
+  '--editable',
+]);
+const PIPX_VALUE_FLAGS = new Set([
+  '--python',
+  '--pip-args',
+  '--index-url',
+  '--spec',
+  '--suffix',
+  '--preinstall',
 ]);
 
+/** Is `w` a value-taking flag (and not already `--flag=value`)? */
+function takesValue(w: string, valueFlags: Set<string>): boolean {
+  return !w.includes('=') && valueFlags.has(w);
+}
+
+/** Index of the first non-flag word at or after `from`, skipping flag values; -1 if none or dynamic. */
+function verbIndex(words: (string | null)[], from: number, valueFlags: Set<string>): number {
+  for (let i = from; i < words.length; i++) {
+    const w = words[i];
+    if (w === null) return -1;
+    if (w.startsWith('-')) {
+      if (takesValue(w, valueFlags)) i++;
+      continue;
+    }
+    return i;
+  }
+  return -1;
+}
+
+/** Non-flag operands after `from`, honouring value-taking flags. */
+function operands(words: (string | null)[], from: number, valueFlags: Set<string>): string[] {
+  const out: string[] = [];
+  if (from < 0) return out;
+  for (let i = from; i < words.length; i++) {
+    const w = words[i];
+    if (w === null) continue; // dynamic — unknowable, skip
+    if (w === '--') {
+      for (let j = i + 1; j < words.length; j++) {
+        const rest = words[j];
+        if (rest !== null) out.push(rest);
+      }
+      break;
+    }
+    if (w.startsWith('-')) {
+      if (takesValue(w, valueFlags)) i++;
+      continue;
+    }
+    out.push(w);
+  }
+  return out;
+}
+
+/** Values of the given flags (`--from X`, `--with=X`), e.g. the package uvx installs. */
+function flagValues(words: (string | null)[], from: number, names: string[]): string[] {
+  const out: string[] = [];
+  for (let i = from; i >= 0 && i < words.length; i++) {
+    const w = words[i];
+    if (w === null) continue;
+    for (const n of names) {
+      if (w === n && typeof words[i + 1] === 'string') out.push(words[i + 1] as string);
+      else if (w.startsWith(n + '=')) out.push(w.slice(n.length + 1));
+    }
+  }
+  return out;
+}
+
+// ── PyPI ────────────────────────────────────────────────────────────────────
+// PEP 508 name, optional extras, optional version specifier.
+const PY_SPEC_RE = /^([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)(?:\[[^\]]*\])?\s*(.*)$/;
+const PY_EXACT_RE = /^===?\s*v?(\d+(?:\.\d+)*(?:[a-zA-Z0-9.+!-]*))$/;
 /** PEP 503 normalisation: lowercase, runs of `-_.` collapse to `-`. */
 export function normalizePyPiName(name: string): string {
   return name.toLowerCase().replace(/[-_.]+/g, '-');
@@ -173,7 +339,34 @@ function basename(w: string | null): string {
   return (w ?? '').toLowerCase().split('/').pop() ?? '';
 }
 
-/** Skip `sudo`, `env FOO=1`, `nice -n 5`, `timeout 30` … and return the head index. */
+const MANAGER_HEADS = new Set([
+  'npm',
+  'npx',
+  'pnpm',
+  'yarn',
+  'bun',
+  'bunx',
+  'pip',
+  'pip3',
+  'pipx',
+  'python',
+  'python3',
+  'py',
+  'uv',
+  'uvx',
+  'poetry',
+  'pipenv',
+]);
+// Shells whose `-c` argument is a script we re-read (`bash -lc "npm i x"`).
+const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'ash']);
+const MAX_NESTING = 3;
+
+/**
+ * Skip `sudo -u bob`, `env FOO=1`, `nice -n 5`, `timeout 30` … and return the
+ * head index. A wrapper flag's following word is taken as that flag's value
+ * unless it is itself a package manager, a shell or another wrapper — so
+ * `sudo -u deploy npm i x` reaches npm instead of stopping at `deploy`.
+ */
 function skipWrappers(words: (string | null)[]): number {
   let i = 0;
   while (i < words.length) {
@@ -182,9 +375,23 @@ function skipWrappers(words: (string | null)[]): number {
     i++;
     while (i < words.length) {
       const t = words[i];
-      if (t === null) break;
-      if (/^[A-Za-z_]\w*=/.test(t) || t.startsWith('-') || /^\d+[smhd]?$/.test(t)) {
+      if (t === null) return i;
+      if (/^[A-Za-z_]\w*=/.test(t) || /^\d+(?:\.\d+)?[smhd]?$/.test(t)) {
         i++;
+        continue;
+      }
+      if (t.startsWith('-')) {
+        i++;
+        const next = words[i];
+        const nb = basename(next ?? null);
+        if (
+          next != null &&
+          !next.startsWith('-') &&
+          !MANAGER_HEADS.has(nb) &&
+          !SHELLS.has(nb) &&
+          !COMMAND_WRAPPERS.has(nb)
+        )
+          i++;
         continue;
       }
       break;
@@ -220,28 +427,20 @@ function pushPy(out: PackageInstallRequest[], manager: string, specs: string[], 
   }
 }
 
-/** `npx [-y] [-p pkg]… <pkg|cmd> [args]`: the packages npx would fetch. */
+/** `npx [flags] [-p pkg]… <pkg|cmd> [args]`: the packages npx would fetch. */
 function npxPackages(words: (string | null)[], from: number): string[] {
-  const explicit: string[] = [];
-  for (let i = from; i < words.length; i++) {
+  const explicit = flagValues(words, from, ['-p', '--package']);
+  for (let i = from; i >= 0 && i < words.length; i++) {
     const w = words[i];
-    if (w === null) return explicit; // dynamic — stop, the command is unknowable
+    if (w === null) return explicit; // dynamic — the command is unknowable
     if (w === '--') {
       const next = words[i + 1];
       return explicit.length > 0 ? explicit : next ? [next] : [];
     }
-    if (w === '-p' || w === '--package') {
-      const v = words[i + 1];
-      if (v) explicit.push(v);
-      i++;
-      continue;
-    }
-    if (w.startsWith('--package=')) {
-      explicit.push(w.slice('--package='.length));
-      continue;
-    }
     if (w.startsWith('-')) {
-      if (w === '-c' || w === '--call') i++; // `npx -c "cmd"`: the operand is a shell string
+      // -p/--package values were collected above; -c/--call takes a shell string.
+      if (w === '-p' || w === '--package' || w === '-c' || w === '--call') i++;
+      else if (takesValue(w, NPM_VALUE_FLAGS)) i++;
       continue;
     }
     // First bare operand: the package itself unless -p named the packages.
@@ -250,99 +449,208 @@ function npxPackages(words: (string | null)[], from: number): string[] {
   return explicit;
 }
 
-function fromCall(words: (string | null)[], out: PackageInstallRequest[]): void {
+/** uvx / `uv tool run`: the tool package, plus `--from` / `--with` packages. */
+function uvxPackages(words: (string | null)[], from: number): string[] {
+  const from_ = flagValues(words, from, ['--from']);
+  const withs = flagValues(words, from, ['--with']);
+  const first = verbIndex(words, from, UV_VALUE_FLAGS);
+  const tool = first >= 0 && from_.length === 0 ? [words[first] as string] : [];
+  return [...from_, ...tool, ...withs];
+}
+
+function lower(w: string | null | undefined): string {
+  return (w ?? '').toLowerCase();
+}
+
+function fromCall(words: (string | null)[], out: PackageInstallRequest[], depth: number): void {
   const start = skipWrappers(words);
   const head = basename(words[start]);
-  const sub = (words[start + 1] ?? '').toLowerCase();
-  const rest = (from: number, flags = NPM_FLAGS_WITH_OPERAND) => operands(words, from, flags);
+
+  // `bash -lc "npm i x"` / `sh -c '…'` / `eval "…"`: re-read the script.
+  if (depth < MAX_NESTING && (SHELLS.has(head) || head === 'eval')) {
+    let script: string | null = null;
+    if (head === 'eval') {
+      const parts = words.slice(start + 1);
+      if (parts.every((w) => w !== null)) script = parts.join(' ');
+    } else {
+      for (let i = start + 1; i < words.length; i++) {
+        const w = words[i];
+        if (w === null || !w.startsWith('-')) break;
+        if (/^-[a-z]*c[a-z]*$/i.test(w) && !w.startsWith('--')) {
+          script = words[i + 1] ?? null;
+          break;
+        }
+      }
+    }
+    if (script) {
+      collect(script, out, depth + 1);
+      // The word resolver keeps `\"` escapes inside double quotes (they are
+      // only dropped in the jail walk), so `bash -c "bash -c \"npm i x\""`
+      // arrives with literal backslashes. Read the de-escaped script too: an
+      // extra reading can only add lookups, never hide a package.
+      const unescaped = script.replace(/\\(["\\$`])/g, '$1');
+      if (unescaped !== script) collect(unescaped, out, depth + 1);
+    }
+    return;
+  }
 
   switch (head) {
-    case 'npm':
-      if (NPM_INSTALL_VERBS.has(sub)) pushNpm(out, 'npm', rest(start + 2));
-      else if (NPM_EXEC_VERBS.has(sub)) pushNpm(out, 'npm exec', npxPackages(words, start + 2));
+    case 'npm': {
+      const v = verbIndex(words, start + 1, NPM_VALUE_FLAGS);
+      const verb = lower(words[v]);
+      if (v < 0) return;
+      if (NPM_INSTALL_VERBS.has(verb)) pushNpm(out, 'npm', operands(words, v + 1, NPM_VALUE_FLAGS));
+      else if (NPM_EXEC_VERBS.has(verb)) pushNpm(out, 'npm exec', npxPackages(words, v + 1));
       return;
+    }
     case 'npx':
       pushNpm(out, 'npx', npxPackages(words, start + 1));
       return;
-    case 'pnpm':
-      if (PNPM_INSTALL_VERBS.has(sub)) pushNpm(out, 'pnpm', rest(start + 2));
-      else if (DLX_VERBS.has(sub)) pushNpm(out, 'pnpm dlx', npxPackages(words, start + 2));
-      return;
-    case 'yarn': {
-      // `yarn global add pkg` (v1) — step over `global`.
-      const off = sub === 'global' ? 1 : 0;
-      const verb = off ? (words[start + 2] ?? '').toLowerCase() : sub;
-      if (YARN_INSTALL_VERBS.has(verb)) pushNpm(out, 'yarn', rest(start + 2 + off));
-      else if (DLX_VERBS.has(verb)) pushNpm(out, 'yarn dlx', npxPackages(words, start + 2 + off));
+    case 'pnpm': {
+      const v = verbIndex(words, start + 1, PNPM_VALUE_FLAGS);
+      const verb = lower(words[v]);
+      if (v < 0) return;
+      if (PNPM_INSTALL_VERBS.has(verb))
+        pushNpm(out, 'pnpm', operands(words, v + 1, PNPM_VALUE_FLAGS));
+      else if (DLX_VERBS.has(verb)) pushNpm(out, 'pnpm dlx', npxPackages(words, v + 1));
       return;
     }
-    case 'bun':
-      if (BUN_INSTALL_VERBS.has(sub)) pushNpm(out, 'bun', rest(start + 2));
-      else if (sub === 'x') pushNpm(out, 'bunx', npxPackages(words, start + 2));
+    case 'yarn': {
+      let v = verbIndex(words, start + 1, YARN_VALUE_FLAGS);
+      if (v < 0) return;
+      // `yarn global add pkg` (v1) — step over `global`.
+      if (lower(words[v]) === 'global') v = verbIndex(words, v + 1, YARN_VALUE_FLAGS);
+      const verb = lower(words[v]);
+      if (v < 0) return;
+      if (YARN_INSTALL_VERBS.has(verb))
+        pushNpm(out, 'yarn', operands(words, v + 1, YARN_VALUE_FLAGS));
+      else if (DLX_VERBS.has(verb)) pushNpm(out, 'yarn dlx', npxPackages(words, v + 1));
       return;
+    }
+    case 'bun': {
+      const v = verbIndex(words, start + 1, BUN_VALUE_FLAGS);
+      const verb = lower(words[v]);
+      if (v < 0) return;
+      if (BUN_INSTALL_VERBS.has(verb)) pushNpm(out, 'bun', operands(words, v + 1, BUN_VALUE_FLAGS));
+      else if (verb === 'x') pushNpm(out, 'bunx', npxPackages(words, v + 1));
+      return;
+    }
     case 'bunx':
       pushNpm(out, 'bunx', npxPackages(words, start + 1));
       return;
     case 'pip':
     case 'pip3':
-    case 'pipx':
-      if (sub === 'install') pushPy(out, head, rest(start + 2, PIP_FLAGS_WITH_OPERAND));
-      else if (head === 'pipx' && sub === 'run')
-        pushPy(out, 'pipx run', rest(start + 2, PIP_FLAGS_WITH_OPERAND), 1);
+      pipInstall(words, start + 1, head, out);
       return;
     case 'python':
     case 'python3':
-    case 'py':
-      // python -m pip install …
-      if (sub === '-m' && basename(words[start + 2]) === 'pip') {
-        if ((words[start + 3] ?? '').toLowerCase() === 'install')
-          pushPy(out, 'pip', rest(start + 4, PIP_FLAGS_WITH_OPERAND));
+    case 'py': {
+      // python [-I -u …] -m pip [global flags] install …
+      for (let i = start + 1; i < words.length; i++) {
+        const w = words[i];
+        if (w === null || !w.startsWith('-')) return;
+        if (w === '-m') {
+          if (basename(words[i + 1] ?? null) === 'pip') pipInstall(words, i + 2, 'pip', out);
+          return;
+        }
       }
       return;
-    case 'uv':
-      if (sub === 'add') pushPy(out, 'uv add', rest(start + 2, PIP_FLAGS_WITH_OPERAND));
-      else if (sub === 'pip' && (words[start + 2] ?? '').toLowerCase() === 'install')
-        pushPy(out, 'uv pip', rest(start + 3, PIP_FLAGS_WITH_OPERAND));
-      else if (sub === 'tool' && (words[start + 2] ?? '').toLowerCase() === 'install')
-        pushPy(out, 'uv tool', rest(start + 3, PIP_FLAGS_WITH_OPERAND));
-      else if (sub === 'tool' && (words[start + 2] ?? '').toLowerCase() === 'run')
-        pushPy(out, 'uvx', rest(start + 3, PIP_FLAGS_WITH_OPERAND), 1);
+    }
+    case 'pipx': {
+      const v = verbIndex(words, start + 1, PIPX_VALUE_FLAGS);
+      const verb = lower(words[v]);
+      if (v < 0) return;
+      const spec = flagValues(words, v + 1, ['--spec']);
+      if (verb === 'install')
+        pushPy(out, 'pipx', [...spec, ...operands(words, v + 1, PIPX_VALUE_FLAGS)]);
+      else if (verb === 'run')
+        pushPy(
+          out,
+          'pipx run',
+          spec.length > 0 ? spec : operands(words, v + 1, PIPX_VALUE_FLAGS),
+          1
+        );
       return;
+    }
+    case 'uv': {
+      const v = verbIndex(words, start + 1, UV_VALUE_FLAGS);
+      const verb = lower(words[v]);
+      if (v < 0) return;
+      if (verb === 'add') {
+        pushPy(out, 'uv add', operands(words, v + 1, UV_VALUE_FLAGS));
+        return;
+      }
+      const v2 = verbIndex(words, v + 1, UV_VALUE_FLAGS);
+      const sub = lower(words[v2]);
+      if (v2 < 0) return;
+      if (verb === 'pip' && sub === 'install')
+        pushPy(out, 'uv pip', operands(words, v2 + 1, UV_VALUE_FLAGS));
+      else if (verb === 'tool' && sub === 'install')
+        pushPy(out, 'uv tool', [
+          ...flagValues(words, v2 + 1, ['--from', '--with']),
+          ...operands(words, v2 + 1, UV_VALUE_FLAGS),
+        ]);
+      else if (verb === 'tool' && sub === 'run') pushPy(out, 'uvx', uvxPackages(words, v2 + 1));
+      return;
+    }
     case 'uvx':
-      pushPy(out, 'uvx', rest(start + 1, PIP_FLAGS_WITH_OPERAND), 1);
+      pushPy(out, 'uvx', uvxPackages(words, start + 1));
       return;
-    case 'poetry':
-      if (sub === 'add') pushPy(out, 'poetry', rest(start + 2, PIP_FLAGS_WITH_OPERAND));
+    case 'poetry': {
+      const v = verbIndex(words, start + 1, POETRY_VALUE_FLAGS);
+      if (v >= 0 && lower(words[v]) === 'add')
+        pushPy(out, 'poetry', operands(words, v + 1, POETRY_VALUE_FLAGS));
       return;
-    case 'pipenv':
-      if (sub === 'install') pushPy(out, 'pipenv', rest(start + 2, PIP_FLAGS_WITH_OPERAND));
+    }
+    case 'pipenv': {
+      const v = verbIndex(words, start + 1, PIPENV_VALUE_FLAGS);
+      if (v >= 0 && lower(words[v]) === 'install')
+        pushPy(out, 'pipenv', operands(words, v + 1, PIPENV_VALUE_FLAGS));
       return;
+    }
     default:
       return;
   }
 }
 
-/**
- * Every registry package the command would install or run, in command order.
- * Walks every simple command in the AST (so `cd x && npm i evil | tee log`
- * still yields `evil`). A command that does not parse yields nothing — the
- * check fails open by construction; the policy engine's other detectors keep
- * their own fallbacks.
- */
-export function extractPackageInstalls(command: string): PackageInstallRequest[] {
-  if (!command || command.length > 50_000) return [];
+/** `pip [global flags] install [flags] specs…` starting after the `pip` word. */
+function pipInstall(
+  words: (string | null)[],
+  from: number,
+  manager: string,
+  out: PackageInstallRequest[]
+): void {
+  const v = verbIndex(words, from, PIP_VALUE_FLAGS);
+  if (v >= 0 && lower(words[v]) === 'install')
+    pushPy(out, manager, operands(words, v + 1, PIP_VALUE_FLAGS));
+}
+
+function collect(command: string, out: PackageInstallRequest[], depth: number): void {
+  if (!command || command.length > 50_000) return;
   const f = parseShared(command);
-  if (typeof f === 'symbol') return [];
-  const out: PackageInstallRequest[] = [];
+  if (typeof f === 'symbol') return;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   syntax.Walk(f, (node: any) => {
     if (node && syntax.NodeType(node) === 'CallExpr') {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const words = ((node.Args as any[]) || []).map((a) => resolveWordLiteral(a));
-      if (words.length > 0) fromCall(words, out);
+      if (words.length > 0) fromCall(words, out, depth);
     }
     return true;
   });
+}
+
+/**
+ * Every registry package the command would install or run, in command order.
+ * Walks every simple command in the AST (so `cd x && npm i evil | tee log`
+ * still yields `evil`), and re-reads the script of `sh -c` / `bash -lc` /
+ * `eval` up to three levels deep. A command that does not parse yields
+ * nothing — the check fails open by construction; the policy engine's other
+ * detectors keep their own fallbacks.
+ */
+export function extractPackageInstalls(command: string): PackageInstallRequest[] {
+  const out: PackageInstallRequest[] = [];
+  collect(command, out, 0);
   // Deduplicate identical (ecosystem, name, version) rows from repeated calls.
   const seen = new Set<string>();
   return out.filter((r) => {

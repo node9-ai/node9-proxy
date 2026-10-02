@@ -135,3 +135,50 @@ describe('extractPackageInstalls — shell structure', () => {
     expect(names('npm i left-pad && npm i left-pad')).toEqual(['left-pad']);
   });
 });
+
+// /code-review: each row was a silent bypass — the package was never extracted,
+// so the install ran with no check and no recorded miss.
+describe('extractPackageInstalls — review regressions', () => {
+  it('global flags before the subcommand', () => {
+    expect(names('npm --prefix app install evil-pkg@1.0.0')).toEqual(['evil-pkg']);
+    expect(names('npm -g i evil-pkg')).toEqual(['evil-pkg']);
+    expect(names('npm --registry=https://r.example install evil-pkg')).toEqual(['evil-pkg']);
+    expect(names('pnpm -C web add evil-pkg')).toEqual(['evil-pkg']);
+    expect(names('yarn --cwd web add evil-pkg')).toEqual(['evil-pkg']);
+    expect(names('bun --cwd web add evil-pkg')).toEqual(['evil-pkg']);
+    expect(names('pip -q install evil-py')).toEqual(['evil-py']);
+    expect(names('pip --proxy http://p:1 install evil-py')).toEqual(['evil-py']);
+    expect(names('python3 -I -m pip --disable-pip-version-check install evil-py')).toEqual([
+      'evil-py',
+    ]);
+    expect(names('uv --quiet add evil-py')).toEqual(['evil-py']);
+    expect(names('uv --directory app pip install evil-py')).toEqual(['evil-py']);
+    expect(names('poetry -C app add evil-py')).toEqual(['evil-py']);
+  });
+  it('a flag that is boolean in pnpm does not swallow the package', () => {
+    expect(names('pnpm add -w evil-pkg')).toEqual(['evil-pkg']);
+    expect(names('pnpm add -D -w evil-pkg')).toEqual(['evil-pkg']);
+  });
+  it('npx value flags do not become the package', () => {
+    expect(names('npx --cache /tmp/c evil-pkg')).toEqual(['evil-pkg']);
+    expect(names('npx --registry https://r.example evil-pkg')).toEqual(['evil-pkg']);
+    expect(names('npx -y --prefix /tmp evil-pkg arg')).toEqual(['evil-pkg']);
+  });
+  it('wrapper flags with a non-numeric value', () => {
+    expect(names('sudo -u deploy npm i -g evil-pkg')).toEqual(['evil-pkg']);
+    expect(names('doas -u root pip install evil-py')).toEqual(['evil-py']);
+    expect(names('sudo npm i evil-pkg')).toEqual(['evil-pkg']);
+  });
+  it('installs inside sh -c / bash -lc / eval are re-read', () => {
+    expect(names('bash -lc "npm install evil-pkg@1.0.0"')).toEqual(['evil-pkg']);
+    expect(names("sh -c 'cd x && pip install evil-py'")).toEqual(['evil-py']);
+    expect(names('eval "npx evil-pkg"')).toEqual(['evil-pkg']);
+    expect(names('bash -c "bash -c \\"npm i evil-pkg\\""')).toEqual(['evil-pkg']);
+    expect(names('bash script.sh')).toEqual([]);
+  });
+  it('uvx --from / --with and pipx --spec name the installed packages', () => {
+    expect(names('uvx --from evil-py tool-cmd')).toEqual(['evil-py']);
+    expect(names('uvx --with extra-py ruff check')).toEqual(['ruff', 'extra-py']);
+    expect(names('pipx run --spec evil-py cmd')).toEqual(['evil-py']);
+  });
+});

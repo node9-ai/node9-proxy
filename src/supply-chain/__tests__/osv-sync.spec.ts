@@ -114,8 +114,29 @@ describe('fullSync + incrementalSync', () => {
   it('a failed record fetch writes nothing (the window is retried next run)', async () => {
     routes[`${BUCKET}/npm/modified_id.csv`] = () =>
       new Response('2026-10-03T00:00:00Z,MAL-0000-0005');
-    await expect(incrementalSync('npm', BUCKET, 0)).rejects.toThrow(/HTTP 404/);
+    routes[`${BUCKET}/npm/MAL-0000-0005.json`] = () => new Response('busy', { status: 503 });
+    await expect(incrementalSync('npm', BUCKET, 0)).rejects.toThrow(/HTTP 503/);
     expect(readMeta('npm')).toBeNull();
+  });
+
+  // /code-review: a 404 used to throw, so one removed record failed every run
+  // until the weekly rebuild and the index went stale for days.
+  it('a record removed upstream (404) is skipped and the rest still apply', async () => {
+    routes[`${BUCKET}/npm/modified_id.csv`] = () =>
+      new Response(
+        ['2026-10-03T00:00:00Z,MAL-0000-0006', '2026-10-03T00:00:00Z,MAL-0000-0005'].join('\n')
+      );
+    routes[`${BUCKET}/npm/MAL-0000-0006.json`] = () =>
+      new Response(
+        JSON.stringify(
+          malRecord('MAL-0000-0006', 'npm', 'node9-canary-f', {
+            all: true,
+            modified: '2026-10-03T00:00:00Z',
+          })
+        )
+      );
+    expect(await incrementalSync('npm', BUCKET, 0)).toBe(1);
+    expect(lookupIndex('npm', 'node9-canary-f').status).toBe('hit');
   });
 
   it('an archive with no MAL records is rejected and leaves no index', async () => {

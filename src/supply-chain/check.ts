@@ -45,8 +45,13 @@ export interface PackageCheckResult {
   checked: number;
 }
 
-/** At most this many packages are looked up per command; the rest are a miss. */
-const MAX_PACKAGES = 10;
+/**
+ * At most this many packages per command get NETWORK lookups (registry,
+ * OSV online). Every package, however many, is checked against the local
+ * index: that costs one small file read, and capping it would let ten benign
+ * names in front of a malicious one wave it through.
+ */
+const MAX_NETWORK_PACKAGES = 10;
 
 const ALLOW: PackageCheckResult = { verdict: 'allow', findings: [], misses: [], checked: 0 };
 
@@ -188,10 +193,11 @@ export async function runPackageCheck(
     if (requests.length === 0) return ALLOW;
 
     const misses: string[] = [];
-    const checked = requests.slice(0, MAX_PACKAGES);
-    for (const p of requests.slice(MAX_PACKAGES))
-      misses.push(`${label(p)}: over the per-command limit`);
-    const settled = await Promise.allSettled(checked.map((p) => checkOne(p, cfg, misses)));
+    const checked = requests;
+    const localOnly: PackageCheckConfig = { ...cfg, registrySignals: false, onlineFallback: false };
+    const settled = await Promise.allSettled(
+      checked.map((p, i) => checkOne(p, i < MAX_NETWORK_PACKAGES ? cfg : localOnly, misses))
+    );
     const findings: PackageFinding[] = [];
     settled.forEach((s, i) => {
       if (s.status === 'fulfilled') findings.push(...s.value);

@@ -162,6 +162,12 @@ export async function incrementalSync(
       const res = await fetch(`${bucket}/${eco}/${id}.json`, {
         signal: AbortSignal.timeout(15_000),
       });
+      // A record listed in modified_id.csv but no longer served was removed
+      // between the CSV and this fetch. Skipping it is the only way forward:
+      // throwing would fail every run on the same id until the weekly full
+      // rebuild, leaving the whole index stale. Its old rows (if any) stay
+      // until that rebuild, which errs toward blocking.
+      if (res.status === 404) continue;
       if (!res.ok) throw new Error(`record ${id}: HTTP ${res.status}`);
       const parsed = entriesFromRecord(eco, await res.json());
       if (!parsed) continue;

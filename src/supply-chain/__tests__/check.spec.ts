@@ -211,3 +211,25 @@ describe('runPackageCheck — scope', () => {
     expect(calls).toEqual([]);
   });
 });
+
+// /code-review: packages past the 10th used to be allowed unchecked, so ten
+// benign names in front of a malicious one waved it through.
+describe('runPackageCheck — many packages in one command', () => {
+  it('the 11th package is still checked against the local index', async () => {
+    indexWith('npm', 'node9-canary-mal', [{ id: 'MAL-0000-0001', all: true }]);
+    const benign = Array.from({ length: 10 }, (_, i) => `node9-canary-ok${i}@1.0.0`).join(' ');
+    const r = await runPackageCheck(...bash(`npm i ${benign} node9-canary-mal@1.0.0`), {
+      ...CFG,
+      registrySignals: false,
+    });
+    expect(r.verdict).toBe('block');
+    expect(r.reason).toContain('MAL-0000-0001');
+  });
+  it('packages past the 10th make no network call', async () => {
+    indexWith('npm', 'node9-canary-other', [], false); // stale index: a miss would go online
+    routes['http://osv.test/v1/querybatch'] = () => json({ results: [{ vulns: [] }] });
+    const pkgs = Array.from({ length: 12 }, (_, i) => `node9-canary-p${i}@1.0.0`).join(' ');
+    await runPackageCheck(...bash(`npm i ${pkgs}`), { ...CFG, registrySignals: false });
+    expect(calls.filter((c) => c.includes('querybatch'))).toHaveLength(10);
+  });
+});
