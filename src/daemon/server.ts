@@ -2,6 +2,7 @@
 // HTTP server for the Node9 localhost approval daemon.
 // All route handlers live here; shared state is in daemon/state.ts.
 import http from 'http';
+import { autoMigrateLocalConfig } from '../config/migrate';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -205,6 +206,9 @@ export function startDaemon(): void {
   // — that throws at import time, before this runs; A4b (child stderr → the same log)
   // is what captures those.
   try {
+    // Once after an upgrade: the config file moves to the v2 shape here, not
+    // in the hooks (see config/migrate.ts).
+    autoMigrateLocalConfig();
     startCostSync();
     startCloudSync();
     startForensicBroadcast();

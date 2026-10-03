@@ -88,6 +88,8 @@ describe('node9 egress (integration)', () => {
         ...baseEnv,
         NODE9_NO_AUTO_DAEMON: '1',
         NODE9_TESTING: '1',
+        // These rows pin the legacy on-disk shape; migration has its own spec.
+        NODE9_NO_CONFIG_MIGRATE: '1',
         HOME: home,
         USERPROFILE: home,
       },

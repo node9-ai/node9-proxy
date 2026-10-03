@@ -9,6 +9,7 @@
 //     ↓ direct function calls
 //   node9 internals (config, shields, …)
 import readline from 'readline';
+import { writeConfigFile } from '../config/write';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -620,23 +621,6 @@ const GLOBAL_CONFIG_PATH = path.join(os.homedir(), '.node9', 'config.json');
 const APPROVER_CHANNELS = ['native', 'browser', 'cloud', 'terminal'] as const;
 type ApproverChannel = (typeof APPROVER_CHANNELS)[number];
 
-function readGlobalConfigRaw(): Record<string, unknown> {
-  try {
-    if (fs.existsSync(GLOBAL_CONFIG_PATH)) {
-      return JSON.parse(fs.readFileSync(GLOBAL_CONFIG_PATH, 'utf-8')) as Record<string, unknown>;
-    }
-  } catch {
-    // corrupt or missing — start fresh
-  }
-  return {};
-}
-
-function writeGlobalConfigRaw(data: Record<string, unknown>): void {
-  const dir = path.dirname(GLOBAL_CONFIG_PATH);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(GLOBAL_CONFIG_PATH, JSON.stringify(data, null, 2) + '\n');
-}
-
 function handleApproverList(): string {
   const config = getConfig();
   const approvers = config.settings.approvers;
@@ -667,13 +651,10 @@ function handleApproverSet(args: Record<string, unknown>): string {
     throw new Error('enabled must be a boolean (true or false).');
   }
 
-  const raw = readGlobalConfigRaw();
-  const settings = (raw.settings ?? {}) as Record<string, unknown>;
-  const approvers = (settings.approvers ?? {}) as Record<string, unknown>;
-  approvers[channel] = enabled;
-  settings.approvers = approvers;
-  raw.settings = settings;
-  writeGlobalConfigRaw(raw);
+  writeConfigFile(GLOBAL_CONFIG_PATH, (file) => {
+    const settings = (file.settings ??= {});
+    settings.approvers = { ...(settings.approvers ?? {}), [channel]: enabled };
+  });
 
   // Warn if all channels are now disabled
   const currentApprovers = getConfig().settings.approvers;
@@ -782,28 +763,21 @@ function handleRuleAdd(args: Record<string, unknown>): string {
     throw new Error(`Invalid regex pattern: ${pattern}`);
   }
 
-  const raw = readGlobalConfigRaw();
-  const policy = (raw.policy ?? {}) as Record<string, unknown>;
-  const smartRules = (policy.smartRules ?? []) as unknown[];
-
-  // Check for duplicate name
-  const existing = smartRules.find(
-    (r) => typeof r === 'object' && r !== null && (r as Record<string, unknown>).name === name
-  );
-  if (existing) throw new Error(`A rule named "${name}" already exists.`);
-
-  smartRules.push({
-    name,
-    tool,
-    conditions: [{ field, op: 'matches', value: pattern }],
-    conditionMode: 'all',
-    verdict,
-    reason,
+  writeConfigFile(GLOBAL_CONFIG_PATH, (file) => {
+    const policy = (file.policy ??= {});
+    const smartRules = (policy.smartRules ??= []);
+    // Check for duplicate name
+    if (smartRules.some((r) => r.name === name))
+      throw new Error(`A rule named "${name}" already exists.`);
+    smartRules.push({
+      name,
+      tool,
+      conditions: [{ field, op: 'matches', value: pattern }],
+      conditionMode: 'all',
+      verdict: verdict as 'allow' | 'review' | 'block',
+      reason,
+    });
   });
-
-  policy.smartRules = smartRules;
-  raw.policy = policy;
-  writeGlobalConfigRaw(raw);
 
   return `Rule "${name}" added to ~/.node9/config.json — verdict: ${verdict} when ${field} matches "${pattern}"`;
 }

@@ -16,6 +16,8 @@ import {
   resolveCheck,
   resolveAllChecks,
   ssrfCheckId,
+  checkValue,
+  resolveCheckMap,
 } from './catalog';
 import { BUILTIN_SHIELDS } from './shields';
 
@@ -266,5 +268,42 @@ describe("resolveCheck reads today's config shape without changing a verdict", (
 
   it('an unknown id answers undefined', () => {
     expect(resolveCheck({}, 'commands.does-not-exist')).toBeUndefined();
+  });
+});
+
+describe('checkValue: an explicit checks map wins over the legacy knobs', () => {
+  it('reads the explicit value, raised to the floor', () => {
+    expect(checkValue({ checks: { 'commands.sudo': 'off' } }, 'commands.sudo')).toBe('off');
+    expect(checkValue({ checks: { 'commands.sudo': 'log' } }, 'commands.sudo')).toBe('log');
+    expect(
+      checkValue(
+        { commandChecks: { inlineExec: 'off' }, checks: { 'commands.inline-exec': 'block' } },
+        'commands.inline-exec'
+      )
+    ).toBe('block');
+  });
+
+  it('falls back to the legacy knob, then to the default', () => {
+    expect(checkValue({ commandChecks: { inlineExec: 'off' } }, 'commands.inline-exec')).toBe(
+      'off'
+    );
+    expect(checkValue({}, 'commands.sudo')).toBe('review');
+    expect(checkValue({}, 'commands.curl-pipe-shell')).toBe('block');
+  });
+
+  it('a locked check answers block whatever the map says', () => {
+    expect(checkValue({ checks: { 'network.metadata': 'off' } }, 'network.metadata')).toBe('block');
+  });
+
+  it('an unknown id or an invalid value is ignored', () => {
+    expect(checkValue({}, 'commands.nope')).toBe('off');
+    expect(checkValue({ checks: { 'commands.sudo': 'maybe' } }, 'commands.sudo')).toBe('review');
+  });
+
+  it('resolveCheckMap answers for every row', () => {
+    const map = resolveCheckMap({ checks: { 'commands.sudo': 'off' } });
+    expect(Object.keys(map).length).toBe(CHECKS.length);
+    expect(map['commands.sudo']).toBe('off');
+    expect(map['commands.rm-home']).toBe('block');
   });
 });

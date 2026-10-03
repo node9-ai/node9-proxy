@@ -5,6 +5,7 @@
  * Requires `npm run build` (spawns dist/cli.js).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { readConfigFileLegacy } from '../config/write';
 import { spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
@@ -185,7 +186,9 @@ describe('node9 MCP server — egress control tools', () => {
   const egressOf = (
     h: string
   ): { enabled?: boolean; mode?: string; allow?: string[]; deny?: string[] } => {
-    const raw = JSON.parse(fs.readFileSync(path.join(h, '.node9', 'config.json'), 'utf-8')) as {
+    // The server migrates the file to the v2 shape at start; read it through
+    // the one reader, which answers in the legacy shape whatever the format.
+    const raw = readConfigFileLegacy(path.join(h, '.node9', 'config.json')) as {
       policy?: { egress?: { enabled?: boolean; mode?: string; allow?: string[]; deny?: string[] } };
     };
     return raw.policy?.egress ?? {};

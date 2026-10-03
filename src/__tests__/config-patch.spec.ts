@@ -90,10 +90,11 @@ describe('patchConfig — smartRule', () => {
   });
 
   it('preserves existing config keys outside of policy', () => {
-    fs.writeFileSync(configPath, JSON.stringify({ version: 2, policy: {} }));
+    fs.writeFileSync(configPath, JSON.stringify({ version: '1.0', custom: 42, policy: {} }));
     patchConfig(configPath, { type: 'smartRule', rule });
     const data = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    expect(data.version).toBe(2);
+    expect(data.version).toBe('1.0');
+    expect(data.custom).toBe(42);
   });
 });
 
@@ -140,8 +141,8 @@ describe('patchConfig — error handling', () => {
     expect(() => patchConfig(configPath, { type: 'ignoredTool', toolName: 'Bash' })).toThrow();
     // Corrupted file must not be truncated or overwritten by the failing call
     expect(fs.readFileSync(configPath, 'utf8')).toBe(badContent);
-    // Parse failure happens before any write — no .node9-tmp orphan should be left
-    expect(fs.existsSync(configPath + '.node9-tmp')).toBe(false);
+    // Parse failure happens before any write — no temp-file orphan should be left
+    expect(fs.readdirSync(path.dirname(configPath)).some((n) => n.endsWith('.tmp'))).toBe(false);
   });
 
   it('passes mode 0o600 to writeFileSync (spy-based, all platforms)', () => {
@@ -151,7 +152,8 @@ describe('patchConfig — error handling', () => {
     const writeSpy = vi.spyOn(fs, 'writeFileSync');
     try {
       patchConfig(configPath, { type: 'ignoredTool', toolName: 'Bash' });
-      const tmpCall = writeSpy.mock.calls.find(([p]) => String(p).endsWith('.node9-tmp'));
+      // The shared atomic writer names its temp file `<file>.<uuid>.tmp`.
+      const tmpCall = writeSpy.mock.calls.find(([p]) => String(p).endsWith('.tmp'));
       expect(tmpCall).toBeDefined();
       if (!tmpCall) return; // TypeScript narrowing — never reached; expect above throws first
       const opts = tmpCall[2];

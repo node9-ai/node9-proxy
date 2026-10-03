@@ -1,4 +1,5 @@
 import type { Command } from 'commander';
+import { readConfigFileView, writeConfigFile } from '../../config/write';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -101,14 +102,12 @@ export async function disconnectMachine(opts: {
   const configPath = path.join(os.homedir(), '.node9', 'config.json');
   // Validate the config before revoking anything: malformed settings must not
   // silently be replaced just to make the wizard finish.
-  let config: Record<string, unknown> | undefined;
   if (opts.resetCloudApprover) {
     try {
-      config = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf8')) : {};
+      readConfigFileView(configPath);
     } catch {
-      config = undefined;
+      throw invalidConfig();
     }
-    if (!config || typeof config !== 'object' || Array.isArray(config)) throw invalidConfig();
   }
   let remote: Omit<DisconnectResult, 'localRemoved'> = { outcome: 'not-logged-in' };
   let localRemoved = false;
@@ -138,16 +137,11 @@ export async function disconnectMachine(opts: {
       localRemoved = true;
     }
   }
-  if (config) {
-    const settings = (config.settings ?? {}) as Record<string, unknown>;
-    config.settings = {
-      ...settings,
-      approvers: {
-        ...((settings.approvers ?? {}) as Record<string, unknown>),
-        cloud: false,
-      },
-    };
-    atomicWriteSync(configPath, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+  if (opts.resetCloudApprover) {
+    writeConfigFile(configPath, (config) => {
+      const settings = (config.settings ??= {});
+      settings.approvers = { ...(settings.approvers ?? {}), cloud: false };
+    });
   }
   _resetConfigCache();
   return { ...remote, localRemoved };

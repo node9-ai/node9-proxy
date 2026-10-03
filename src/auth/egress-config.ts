@@ -7,7 +7,7 @@
 // REFUSE to write over a config we couldn't parse — silently overwriting would
 // destroy the user's other settings.
 
-import fs from 'fs';
+import { readConfigFileLegacy, writeConfigFile } from '../config/write';
 import os from 'os';
 import path from 'path';
 import { classifySsrf } from '@node9/policy-engine';
@@ -50,26 +50,16 @@ export function egressConfigPath(): string {
  * parse (that would silently destroy the user's other settings).
  */
 export function readEgressRawConfig(): RawConfig {
-  let text: string;
-  try {
-    text = fs.readFileSync(egressConfigPath(), 'utf8');
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {};
-    throw err; // permission/other read error — don't silently clobber
-  }
-  try {
-    return JSON.parse(text) as RawConfig;
-  } catch {
-    throw new Error(
-      `${egressConfigPath()} is not valid JSON — fix it before changing egress (refusing to overwrite).`
-    );
-  }
+  // The legacy view of the file whatever its format; throws on a file that
+  // exists but cannot be read, so it is never overwritten.
+  return readConfigFileLegacy(egressConfigPath()) as RawConfig;
 }
 
-export function writeEgressRawConfig(config: RawConfig): void {
-  const p = egressConfigPath();
-  fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+/** Read-mutate-write the global file under the one config writer. */
+function mutateEgressConfig(mutate: (config: RawConfig) => void): void {
+  writeConfigFile(egressConfigPath(), (file) => {
+    mutate(file as unknown as RawConfig);
+  });
 }
 
 /**
@@ -96,19 +86,19 @@ export function getEgress(): EgressBlock {
 
 /** Read-merge-write a change to policy.egress. Throws on a malformed config. */
 export function setEgress(change: Partial<EgressBlock>): void {
-  const config = readEgressRawConfig();
-  applyEgress(config, change);
-  writeEgressRawConfig(config);
+  mutateEgressConfig((config) => {
+    applyEgress(config, change);
+  });
 }
 
 /** Append a host to the allow or deny list (idempotent). Throws on malformed config. */
 export function addEgressHost(list: 'allow' | 'deny', host: string): void {
-  const config = readEgressRawConfig();
-  const existing = (config.policy?.egress ?? {}) as Partial<EgressBlock>;
-  const current: EgressBlock = { ...DEFAULT_EGRESS, ...existing };
-  const updated = current[list].includes(host) ? current[list] : [...current[list], host];
-  applyEgress(config, { [list]: updated });
-  writeEgressRawConfig(config);
+  mutateEgressConfig((config) => {
+    const existing = (config.policy?.egress ?? {}) as Partial<EgressBlock>;
+    const current: EgressBlock = { ...DEFAULT_EGRESS, ...existing };
+    const updated = current[list].includes(host) ? current[list] : [...current[list], host];
+    applyEgress(config, { [list]: updated });
+  });
 }
 
 /**
@@ -132,23 +122,23 @@ export function addSsrfExemption(address: string): void {
         `This is the one part of the floor no setting releases.`
     );
   }
-  const config = readEgressRawConfig();
-  const existing = (config.policy?.egress ?? {}) as Partial<EgressBlock>;
-  // A hand-edited scalar here used to be spread per CHARACTER: "10.0.0.1"
-  // became ["1","0",".",…] and the command still reported success. Refuse and
-  // say so rather than rewriting a file we cannot read as intended.
-  if (existing.ssrfAllow !== undefined && !Array.isArray(existing.ssrfAllow)) {
-    throw new Error(
-      `${egressConfigPath()} has policy.egress.ssrfAllow set to something that is not a list — ` +
-        `fix it before adding an exemption (refusing to overwrite).`
-    );
-  }
-  const current: EgressBlock = { ...DEFAULT_EGRESS, ...existing };
-  const updated = current.ssrfAllow.includes(address)
-    ? current.ssrfAllow
-    : [...current.ssrfAllow, address];
-  applyEgress(config, { ssrfAllow: updated });
-  writeEgressRawConfig(config);
+  mutateEgressConfig((config) => {
+    const existing = (config.policy?.egress ?? {}) as Partial<EgressBlock>;
+    // A hand-edited scalar here used to be spread per CHARACTER: "10.0.0.1"
+    // became ["1","0",".",…] and the command still reported success. Refuse and
+    // say so rather than rewriting a file we cannot read as intended.
+    if (existing.ssrfAllow !== undefined && !Array.isArray(existing.ssrfAllow)) {
+      throw new Error(
+        `${egressConfigPath()} has policy.egress.ssrfAllow set to something that is not a list — ` +
+          `fix it before adding an exemption (refusing to overwrite).`
+      );
+    }
+    const current: EgressBlock = { ...DEFAULT_EGRESS, ...existing };
+    const updated = current.ssrfAllow.includes(address)
+      ? current.ssrfAllow
+      : [...current.ssrfAllow, address];
+    applyEgress(config, { ssrfAllow: updated });
+  });
 }
 
 /** Lowercase + trim a host so the CLI and MCP normalize identically. */

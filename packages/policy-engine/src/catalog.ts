@@ -596,6 +596,12 @@ export interface CatalogSettings {
   packageCheck?: { enabled?: boolean; onMalicious?: string };
   /** Shields the host actually injected (`policy.appliedShields`). */
   appliedShields?: readonly string[];
+  /**
+   * Explicit per-check values, keyed by check id: the v2 config file's
+   * `checks` map, or the host's resolved map. Wins over the legacy knobs
+   * above; a value below a row's floor is raised to the floor.
+   */
+  checks?: Readonly<Record<string, string>>;
 }
 
 /** Where a value came from. `configured` means it departs from the shipped
@@ -603,7 +609,30 @@ export interface CatalogSettings {
  *  "set" and "unset" cannot be told apart, and the departure is what a reader
  *  wants to know. A pack row never claims a source; its value says whether the
  *  pack is on. */
-export type CheckSource = 'default' | 'configured' | 'locked';
+/**
+ * The ONE projection from a host config (`settings` + `policy`) to what the
+ * resolver reads. The engine and the proxy both call it, so a new knob is
+ * threaded through once.
+ */
+export function catalogSettingsFromConfig(
+  settings: { mode?: string },
+  policy: Omit<CatalogSettings, 'mode'>
+): CatalogSettings {
+  return {
+    mode: settings.mode,
+    commandChecks: policy.commandChecks,
+    dlp: policy.dlp,
+    egress: policy.egress,
+    loopDetection: policy.loopDetection,
+    injectionScan: policy.injectionScan,
+    skillPinning: policy.skillPinning,
+    packageCheck: policy.packageCheck,
+    appliedShields: policy.appliedShields ?? [],
+    checks: policy.checks,
+  };
+}
+
+export type CheckSource = 'default' | 'configured' | 'locked' | 'local' | 'project' | 'workspace';
 
 export interface ResolvedCheck {
   id: string;
@@ -674,13 +703,19 @@ export function resolveCheck(settings: CatalogSettings, id: string): ResolvedChe
   const def = CHECK_BY_ID.get(id);
   if (!def) return undefined;
   if (isLockedCheck(def)) return { id, value: 'block', source: 'locked' };
+  const floor = def.floor ? CHECK_VERDICT_RANK[def.floor] : 0;
+  // An explicit entry (a v2 file, or the host's resolved map) wins.
+  const explicit = settings.checks?.[id];
+  if (isVerdict(explicit)) {
+    const value = CHECK_VERDICT_RANK[explicit] < floor ? def.floor! : explicit;
+    return { id, value, source: value === def.defaultValue ? 'default' : 'configured' };
+  }
   if (def.pack) {
     const on = settings.appliedShields?.includes(def.pack) ?? false;
     return { id, value: on ? def.defaultValue : 'off', source: 'default' };
   }
   const read = LEGACY_READERS[id]?.(settings);
   if (read === undefined) return { id, value: def.defaultValue, source: 'default' };
-  const floor = def.floor ? CHECK_VERDICT_RANK[def.floor] : 0;
   const value = CHECK_VERDICT_RANK[read] < floor ? def.floor! : read;
   return { id, value, source: value === def.defaultValue ? 'default' : 'configured' };
 }
@@ -688,4 +723,22 @@ export function resolveCheck(settings: CatalogSettings, id: string): ResolvedChe
 /** Every check resolved, in catalog order. */
 export function resolveAllChecks(settings: CatalogSettings): ResolvedCheck[] {
   return CHECKS.map((c) => resolveCheck(settings, c.id)!);
+}
+
+/**
+ * The value a detector should act on: an explicit `checks[id]` entry when
+ * the settings carry one (raised to the row's floor), else the legacy
+ * resolution. Detectors call this and nothing else, so a check's value is
+ * decided in one place whatever file or payload it came from.
+ */
+export function checkValue(settings: CatalogSettings, id: string): Verdict {
+  return resolveCheck(settings, id)?.value ?? 'off';
+}
+
+/** Resolve every check the way `checkValue` would, as one map. The host
+ *  stores this on its config so every reader sees the same answers. */
+export function resolveCheckMap(settings: CatalogSettings): Record<string, Verdict> {
+  const out: Record<string, Verdict> = {};
+  for (const c of CHECKS) out[c.id] = checkValue(settings, c.id);
+  return out;
 }

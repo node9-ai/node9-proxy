@@ -17,10 +17,11 @@ function fixture(files: Record<string, string> = {}) {
   }
   return home;
 }
-function run(home: string, args: string[]) {
+function run(home: string, args: string[], extraEnv: Record<string, string> = {}) {
   return spawnSync(process.execPath, [cli, ...args], {
     cwd: home,
     env: {
+      ...extraEnv,
       PATH: path.join(home, 'empty-bin'),
       HOME: home,
       USERPROFILE: home,
@@ -88,18 +89,26 @@ describe('config.json holds only what a user can set', () => {
     expect(written).not.toHaveProperty('ssrfStrictSource');
     expect(r.stdout + r.stderr).not.toContain('Invalid config');
   });
-  it('a config written by an older init loads quietly and is not rewritten', () => {
+  it('a config written by an older init loads quietly and moves to v2 with a backup', () => {
     const old = JSON.stringify({
       settings: { mode: 'standard' },
       policySource: 'local',
       ssrfStrictSource: 'default',
     });
     const home = fixture({ 'config.json': old });
-    const r = run(home, ['init', '--skip-setup']);
+    const r = run(home, ['init', '--skip-setup'], { NODE9_TEST_CONFIG_MIGRATE: '1' });
     expect(r.error).toBeUndefined();
     expect(r.status, r.stderr).toBe(0);
     expect(r.stdout + r.stderr).not.toContain('Invalid config');
-    expect(fs.readFileSync(path.join(home, '.node9/config.json'), 'utf8')).toBe(old);
+    // Every value was a default or runtime-only, so nothing is carried over.
+    expect(JSON.parse(fs.readFileSync(path.join(home, '.node9/config.json'), 'utf8'))).toEqual({
+      version: '2',
+    });
+    const backup = fs
+      .readdirSync(path.join(home, '.node9'))
+      .find((n) => n.startsWith('config.json.bak-'));
+    expect(backup).toBeDefined();
+    expect(fs.readFileSync(path.join(home, '.node9', backup!), 'utf8')).toBe(old);
   });
 });
 

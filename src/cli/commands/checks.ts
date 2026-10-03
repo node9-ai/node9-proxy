@@ -12,38 +12,36 @@ import {
   CHECKS,
   CHECK_GROUPS,
   resolveAllChecks,
-  type CatalogSettings,
   type CheckGroup,
   type ResolvedCheck,
 } from '@node9/policy-engine';
-import { getConfig, type Config } from '../../config';
-
-/** The slice of the merged config the catalog resolver reads. */
-export function catalogSettingsFrom(config: Config): CatalogSettings {
-  return {
-    mode: config.settings.mode,
-    commandChecks: config.policy.commandChecks,
-    dlp: config.policy.dlp,
-    egress: config.policy.egress,
-    loopDetection: config.policy.loopDetection,
-    injectionScan: config.policy.injectionScan,
-    skillPinning: config.policy.skillPinning,
-    packageCheck: config.policy.packageCheck,
-    appliedShields: config.policy.appliedShields ?? [],
-  };
-}
+import { getConfig, catalogSettingsFrom, type Config } from '../../config';
+import { configurableValues } from '../../config/v2';
 
 interface ChecksReport {
   policySource: string;
   mode: string;
   packsOn: string[];
   packsOff: string[];
-  checks: Array<ResolvedCheck & { group: CheckGroup; title: string; pack?: string }>;
+  checks: Array<
+    ResolvedCheck & {
+      group: CheckGroup;
+      title: string;
+      pack?: string;
+      /** What a config file may set for this check today; empty = fixed. */
+      configurable: readonly string[];
+    }
+  >;
 }
 
 export function buildChecksReport(config: Config): ChecksReport {
-  const settings = catalogSettingsFrom(config);
-  const resolved = resolveAllChecks(settings);
+  const settings = catalogSettingsFrom(config.settings, config.policy);
+  // A v2 file states a check explicitly, so its source is known; everything
+  // else falls back to "differs from the shipped default".
+  const stated = config.policy.checkSources ?? {};
+  const resolved = resolveAllChecks(settings).map((r) =>
+    r.source === 'locked' ? r : stated[r.id] ? { ...r, source: stated[r.id] } : r
+  );
   const packs = [...new Set(CHECKS.filter((c) => c.pack).map((c) => c.pack!))].sort();
   const on = new Set(settings.appliedShields ?? []);
   return {
@@ -56,6 +54,7 @@ export function buildChecksReport(config: Config): ChecksReport {
       group: CHECKS[i].group,
       title: CHECKS[i].title,
       ...(CHECKS[i].pack && { pack: CHECKS[i].pack }),
+      configurable: configurableValues(CHECKS[i].id),
     })),
   };
 }
@@ -80,7 +79,11 @@ function renderChecks(report: ChecksReport): string {
   const row = (c: ChecksReport['checks'][number]) => {
     const value = (VALUE_COLOR[c.value] ?? chalk.white)(c.value.padEnd(7));
     const source = c.source === 'locked' ? chalk.magenta('locked') : chalk.gray(c.source);
-    return `  ${c.id.padEnd(34)} ${value} ${source.padEnd(20)} ${c.title}`;
+    const fixed =
+      c.source !== 'locked' && c.configurable.length === 0
+        ? chalk.gray('  (not configurable yet)')
+        : '';
+    return `  ${c.id.padEnd(34)} ${value} ${source.padEnd(20)} ${c.title}${fixed}`;
   };
 
   for (const group of CHECK_GROUPS) {

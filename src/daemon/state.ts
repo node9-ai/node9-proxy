@@ -2,6 +2,7 @@
 // Shared mutable state, types, utility functions, and SSE/broadcast for the daemon.
 // Imported by daemon/server.ts (routes) and daemon/index.ts (stopDaemon/daemonStatus).
 import http from 'http';
+import { writeLocalSetting } from '../config/write';
 import net from 'net';
 import fs from 'fs';
 import path from 'path';
@@ -258,15 +259,7 @@ export function hasStoredSlackKey(): boolean {
 }
 
 export function writeGlobalSetting(key: string, value: unknown): void {
-  let config: Record<string, unknown> = {};
-  try {
-    if (fs.existsSync(GLOBAL_CONFIG_FILE)) {
-      config = JSON.parse(fs.readFileSync(GLOBAL_CONFIG_FILE, 'utf-8')) as Record<string, unknown>;
-    }
-  } catch {}
-  if (!config.settings || typeof config.settings !== 'object') config.settings = {};
-  (config.settings as Record<string, unknown>)[key] = value;
-  atomicWriteSync(GLOBAL_CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 });
+  writeLocalSetting(key, value);
 }
 
 export function writeTrustEntry(

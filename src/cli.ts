@@ -40,7 +40,9 @@ import { registerLogoutCommand, revokeSelf } from './cli/commands/logout';
 import { openBrowser } from './utils/open-browser';
 import { registerCheckCommand } from './cli/commands/check';
 import { registerLogCommand } from './cli/commands/log';
-import { registerShieldCommand, registerConfigShowCommand } from './cli/commands/shield';
+import { registerShieldCommand } from './cli/commands/shield';
+import { registerConfigCommand } from './cli/commands/config-cmd';
+import { autoMigrateLocalConfig } from './config/migrate';
 import { registerDoctorCommand } from './cli/commands/doctor';
 import { registerAuditCommand } from './cli/commands/audit';
 import { registerReportCommand } from './cli/commands/report';
@@ -874,7 +876,7 @@ registerUndoCommand(program);
 
 // Shield management + config show
 registerShieldCommand(program);
-registerConfigShowCommand(program);
+registerConfigCommand(program);
 
 // Trusted-host allowlist
 registerTrustCommand(program);
@@ -951,6 +953,15 @@ const firstArg = process.argv[2];
 if (firstArg && firstArg !== '--' && !firstArg.startsWith('-') && !knownSubcommands.has(firstArg)) {
   process.argv.splice(2, 0, '--');
 }
+
+// The one-time move of ~/.node9/config.json to the v2 shape runs before any
+// command except the hooks: `check` and `log` run on every tool call, in
+// parallel, and must never write the config. The daemon runs it at start.
+program.hook('preAction', (_thisCommand, actionCommand) => {
+  const name = actionCommand.name();
+  if (name === 'check' || name === 'log') return;
+  autoMigrateLocalConfig();
+});
 
 (async () => {
   await program.parseAsync();

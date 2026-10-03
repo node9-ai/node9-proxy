@@ -531,9 +531,9 @@ export function registerShieldCommand(program: Command): void {
     );
 }
 
-export function registerConfigShowCommand(program: Command): void {
-  program
-    .command('config show')
+export function registerConfigShowCommand(parent: Command): void {
+  parent
+    .command('show')
     .description(
       'Show the full effective runtime configuration including shields and advisory rules'
     )

@@ -92,6 +92,9 @@ export {
   ssrfCheckId,
   resolveCheck,
   resolveAllChecks,
+  checkValue,
+  resolveCheckMap,
+  catalogSettingsFromConfig,
 } from './catalog';
 export type {
   Verdict,

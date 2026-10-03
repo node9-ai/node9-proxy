@@ -79,6 +79,12 @@ export interface SmartRule {
    * resolved exactly as today (first match wins).
    */
   pinned?: boolean;
+  /**
+   * Set by the host on the rules it ships (the default and advisory rules and
+   * a pack's rules). The catalog's per-check value governs ONLY these: a user
+   * rule that reuses a shipped name keeps its own verdict.
+   */
+  builtin?: boolean;
 }
 
 /**
