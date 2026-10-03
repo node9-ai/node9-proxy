@@ -28,6 +28,7 @@ import { normalizeHost } from '../auth/trusted-hosts';
 
 export type { SmartCondition, SmartRule } from '@node9/policy-engine';
 import type { SmartRule } from '@node9/policy-engine';
+import { BUILTIN_DANGEROUS_WORDS } from '@node9/policy-engine';
 import { classifySsrf } from '@node9/policy-engine';
 // The trusted shield catalog. A cloud-mandated shield resolves its body from
 // here directly, never a user ~/.node9/shields/<name>.json that shadows the
@@ -268,10 +269,9 @@ export const DANGEROUS_WORDS = [
 // Intentionally minimal — only words that are catastrophic AND never appear
 // in legitimate code/content. Everything else is handled by smart rules,
 // which can scope to specific tool fields and avoid false positives.
-export const DANGEROUS_WORDS = [
-  'mkfs', // formats/wipes a filesystem partition
-  'shred', // permanently overwrites file contents (unrecoverable)
-];
+// The list itself lives in the engine's catalog (`commands.disk-destroy`), so
+// the detector that attributes a hit to that check reads the same words.
+export const DANGEROUS_WORDS: string[] = [...BUILTIN_DANGEROUS_WORDS];
 
 /**
  * Config fields getConfig computes at load time: part of Config, never part of

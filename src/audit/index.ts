@@ -7,6 +7,7 @@ import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
 import { hashArgs } from './hasher.js';
+import { checkIdForRule, checkIdForCheckedBy } from '@node9/policy-engine';
 
 export const LOCAL_AUDIT_LOG = path.join(os.homedir(), '.node9', 'audit.log');
 export const HOOK_DEBUG_LOG = path.join(os.homedir(), '.node9', 'hook-debug.log');
@@ -149,6 +150,10 @@ export function appendLocalAudit(
      *  specific shields without having to redefine the existing
      *  checkedBy taxonomy. */
     ruleName?: string;
+    /** The catalog check behind the verdict (`commands.sudo`), when the
+     *  caller had it on the verdict. Absent, the row still gets one when
+     *  `ruleName` or `checkedBy` translates (catalog.ts). */
+    checkId?: string;
     /** Agent-native tool name when canonicalisation rewrote it (e.g.
      *  Hermes `terminal` → canonical `Bash`). Audit row's `tool` field
      *  stays canonical so report aggregation works; this field lets
@@ -227,6 +232,11 @@ export function appendLocalAudit(
   const testRun =
     isTestCall(toolName, args) || process.env.NODE9_TESTING === '1' ? { testRun: true } : {};
   const ruleNameField = meta?.ruleName ? { ruleName: meta.ruleName } : {};
+  // The catalog check this row counts against. Lets the dashboard show, per
+  // check, how often it fired and how often a human approved, without a
+  // second taxonomy beside checkedBy and ruleName.
+  const checkId = meta?.checkId ?? checkIdForRule(meta?.ruleName) ?? checkIdForCheckedBy(checkedBy);
+  const checkIdField = checkId ? { checkId } : {};
   const agentToolNameField = meta?.agentToolName ? { agentToolName: meta.agentToolName } : {};
   const dlpFields = meta?.dlpPattern
     ? { dlpPattern: meta.dlpPattern, dlpSample: meta.dlpSample }
@@ -276,6 +286,7 @@ export function appendLocalAudit(
     decision,
     checkedBy,
     ...ruleNameField,
+    ...checkIdField,
     ...dlpFields,
     ...canaryFields,
     ...cloudLinkField,

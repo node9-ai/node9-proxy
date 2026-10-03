@@ -74,6 +74,34 @@ export {
   type PackageEcosystem,
 } from './shell/package-install';
 
+// Checks catalog — the one list of what node9 checks, and the resolver over
+// today's config shape. The dashboard, the local file and `node9 checks` derive
+// from it.
+export {
+  CHECKS,
+  CHECK_BY_ID,
+  CHECK_GROUPS,
+  VERDICTS,
+  CHECK_VERDICT_RANK,
+  BUILTIN_DANGEROUS_WORDS,
+  getCheck,
+  isVerdict,
+  isLockedCheck,
+  checkIdForRule,
+  checkIdForCheckedBy,
+  ssrfCheckId,
+  resolveCheck,
+  resolveAllChecks,
+} from './catalog';
+export type {
+  Verdict,
+  CheckGroup,
+  CheckDef,
+  CatalogSettings,
+  CheckSource,
+  ResolvedCheck,
+} from './catalog';
+
 // Egress / destination policy (GAP-5).
 export type { EgressPolicy, EgressVerdict, Destination } from './egress';
 export { evaluateEgress, isPrivateHost, hostMatches, DEFAULT_EGRESS_ALLOWLIST } from './egress';

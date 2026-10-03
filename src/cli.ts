@@ -60,6 +60,7 @@ import { registerScanCommand } from './cli/commands/scan';
 import { registerPostureCommand } from './cli/commands/posture';
 import { registerScanRepoCommand } from './cli/commands/scan-repo';
 import { registerEgressCommand } from './cli/commands/egress';
+import { registerChecksCommand } from './cli/commands/checks';
 import { registerJailCommand } from './cli/commands/jail';
 import { registerCanaryCommand } from './cli/commands/canary';
 import { removeKind } from './canary/plant';
@@ -895,6 +896,7 @@ registerScanRepoCommand(program);
 
 // Egress control (the posture remediation on-ramp)
 registerEgressCommand(program);
+registerChecksCommand(program);
 // Credential jail — user-extensible protected paths
 registerJailCommand(program);
 // Decoy credentials (canary)

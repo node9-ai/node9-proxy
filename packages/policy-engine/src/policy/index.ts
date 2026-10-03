@@ -28,6 +28,7 @@ import { matchesPattern, evaluateSmartConditions, getNestedValue } from '../rule
 import { analyzePipeChain } from './pipe-chain';
 import { extractAllSshHosts } from './ssh-parser';
 import { evaluateEgress, type EgressPolicy, type EgressVerdict } from '../egress';
+import { checkIdForRule, ssrfCheckId, BUILTIN_DANGEROUS_WORDS } from '../catalog';
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -135,6 +136,13 @@ export interface PolicyVerdict {
    */
   overridable?: boolean;
   ruleName?: string;
+  /**
+   * The catalog check this verdict belongs to (`commands.sudo`,
+   * `data.secrets`, ...). Set on every non-allow verdict a built-in detector,
+   * a product rule or a pack rule produces; absent on an allow and on a user
+   * or organisation rule, which are rules, not checks. See catalog.ts.
+   */
+  checkId?: string;
   /** State predicates from the matched smart rule (only when decision is 'block'). */
   dependsOnStatePredicates?: string[];
   /** Recovery command to suggest when this rule hard-blocks (from SmartRule.recoveryCommand). */
@@ -282,6 +290,7 @@ function pipeChainVerdict(
         blockedByLabel: 'Node9: Pipe-Chain to Trusted Host (obfuscated)',
         reason: `Obfuscated pipe to trusted host(s): ${sinks.join(', ')} — requires approval`,
         tier: 3,
+        checkId: 'data.pipe-chain-obfuscated',
       };
     }
     return {
@@ -289,6 +298,7 @@ function pipeChainVerdict(
       blockedByLabel: 'Node9: Pipe-Chain Exfiltration (critical)',
       reason: `Sensitive file piped through obfuscator to network sink: ${pipeAnalysis.sourceFiles.join(', ')} → ${sinks.join(', ')}`,
       tier: 3,
+      checkId: 'data.pipe-chain-obfuscated',
     };
   }
 
@@ -306,6 +316,7 @@ function pipeChainVerdict(
     blockedByLabel: 'Node9: Pipe-Chain Exfiltration (high)',
     reason: `Sensitive file piped to network sink: ${pipeAnalysis.sourceFiles.join(', ')} → ${sinks.join(', ')}`,
     tier: 3,
+    checkId: 'data.pipe-chain',
   };
 }
 
@@ -339,6 +350,7 @@ function egressPolicyVerdict(eg: EgressVerdict): PolicyVerdict {
     ruleName: `egress:${eg.binary}:${eg.host}`,
     ruleDescription: eg.reason,
     tier: eg.verdict === 'block' ? 3 : 4,
+    checkId: 'network.unknown-host',
   };
 }
 
@@ -370,6 +382,7 @@ export async function evaluatePolicy(
             : 'review',
         blockedByLabel: `DLP: ${dlpMatch.patternName}`,
         reason: `${dlpMatch.patternName} detected in ${dlpMatch.fieldPath}`,
+        checkId: dlpMatch.severity === 'block' ? 'data.secrets' : 'data.secrets-weak',
       };
     }
   }
@@ -406,6 +419,7 @@ export async function evaluatePolicy(
         ruleDescription: dest.reason,
         tier: 3,
         overridable: dest.overridable,
+        checkId: ssrfCheckId(dest.tier),
       };
     }
   }
@@ -498,6 +512,7 @@ export async function evaluatePolicy(
         tier: 2,
         ruleName: fsVerdict.ruleName,
         ruleDescription: fsVerdict.reason,
+        checkId: checkIdForRule(fsVerdict.ruleName),
       };
       // A BLOCK returns here, ahead of user rules, so a permissive rule cannot
       // bypass it (the layer-1 invariant above). A REVIEW must NOT: stage 4
@@ -526,6 +541,7 @@ export async function evaluatePolicy(
         tier: 2,
         ruleName: sqlVerdict.ruleName,
         ruleDescription: sqlVerdict.description,
+        checkId: 'commands.sql-ddl',
       };
     }
 
@@ -547,6 +563,7 @@ export async function evaluatePolicy(
         tier: 2,
         ruleName: chmodVerdict.ruleName,
         ruleDescription: chmodVerdict.description,
+        checkId: 'commands.chmod',
       };
     }
   }
@@ -606,12 +623,15 @@ export async function evaluatePolicy(
         return (
           pendingAstReview ?? { decision: 'allow', ruleName: matchedRule.name ?? matchedRule.tool }
         );
+      // A product or pack rule names its check; a user or org rule does not.
+      const checkId = checkIdForRule(matchedRule.name);
       return {
         decision: matchedRule.verdict,
         blockedByLabel: `Smart Rule: ${matchedRule.name ?? matchedRule.tool}`,
         reason: matchedRule.reason,
         tier: 2,
         ruleName: matchedRule.name ?? matchedRule.tool,
+        ...(checkId && { checkId }),
         ...((matchedRule.description ?? matchedRule.reason) && {
           ruleDescription: matchedRule.description ?? matchedRule.reason,
         }),
@@ -677,6 +697,7 @@ export async function evaluatePolicy(
         ruleDescription:
           'The AI is downloading a script from the internet and running it immediately without inspection. This is a common way malware gets installed.',
         tier: 3,
+        checkId: 'commands.eval-remote',
       };
     }
 
@@ -699,6 +720,7 @@ export async function evaluatePolicy(
         ruleDescription:
           'The AI is running code directly from the command line. Review the full script below before allowing it to execute.',
         tier: 3,
+        checkId: 'commands.inline-exec',
       });
     }
 
@@ -712,6 +734,7 @@ export async function evaluatePolicy(
         ruleDescription:
           'The AI is running a command that includes a variable or subshell expansion. The actual command executed at runtime may differ from what is shown here.',
         tier: 3,
+        checkId: 'commands.eval-dynamic',
       });
     }
 
@@ -744,6 +767,7 @@ export async function evaluatePolicy(
           ruleDescription: ssrf.reason,
           tier: 3,
           overridable: ssrf.overridable,
+          checkId: ssrfCheckId(ssrf.tier),
         };
       }
     }
@@ -784,6 +808,7 @@ export async function evaluatePolicy(
           blockedByLabel: 'Node9: Suspect Binary',
           reason: `Binary "${firstToken}" resolved to ${prov.resolvedPath} — ${prov.reason}`,
           tier: 3,
+          checkId: 'commands.temp-binary',
         };
       }
       if (prov.trustLevel === 'unknown' && config.settings.mode === 'strict') {
@@ -792,6 +817,7 @@ export async function evaluatePolicy(
           blockedByLabel: 'Node9: Unknown Binary (strict mode)',
           reason: `Binary "${firstToken}" — ${prov.reason}`,
           tier: 3,
+          checkId: 'commands.temp-binary',
         };
       }
     }
@@ -829,7 +855,12 @@ export async function evaluatePolicy(
     if (hasSystemDisaster || isRootWipe) {
       // If it IS a system disaster, return review so the dev gets a
       // "Manual Nuclear Protection" popup as a final safety check.
-      return { decision: 'review', blockedByLabel: 'Manual Nuclear Protection', tier: 3 };
+      return {
+        decision: 'review',
+        blockedByLabel: 'Manual Nuclear Protection',
+        tier: 3,
+        checkId: 'commands.disk-destroy',
+      };
     }
 
     // For everything else (docker, psql, rmdir, delete, rm),
@@ -892,13 +923,21 @@ export async function evaluatePolicy(
       matchedField,
       ruleDescription: `This command contains a flagged keyword ("${matchedDangerousWord}") from your node9 config. Review it before allowing.`,
       tier: 6,
+      checkId: BUILTIN_DANGEROUS_WORDS.includes((matchedDangerousWord ?? '').toLowerCase())
+        ? 'commands.disk-destroy'
+        : 'commands.dangerous-word',
     };
   }
 
   // ── 7. Strict Mode Fallback ─────────────────────────────────────────────
   if (config.settings.mode === 'strict') {
     if (activeEnvironment?.requireApproval === false) return { decision: 'allow' };
-    return { decision: 'review', blockedByLabel: 'Global Config (Strict Mode Active)', tier: 7 };
+    return {
+      decision: 'review',
+      blockedByLabel: 'Global Config (Strict Mode Active)',
+      tier: 7,
+      checkId: 'commands.unknown',
+    };
   }
 
   return { decision: 'allow' };
