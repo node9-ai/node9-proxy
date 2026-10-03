@@ -182,3 +182,27 @@ describe('extractPackageInstalls — review regressions', () => {
     expect(names('pipx run --spec evil-py cmd')).toEqual(['evil-py']);
   });
 });
+
+// /code-review round 2.
+describe('extractPackageInstalls — review round 2', () => {
+  it('yarn workspace <name> add', () => {
+    expect(names('yarn workspace web add evil-pkg')).toEqual(['evil-pkg']);
+    expect(names('yarn workspace @app/web add -D evil-pkg@1.0.0')).toEqual(['evil-pkg']);
+  });
+  it('uv run --with installs the package', () => {
+    expect(names('uv run --with evil-py main.py')).toEqual(['evil-py']);
+    expect(names('uv run --with=evil-py --with other-py python -c x')).toEqual([
+      'evil-py',
+      'other-py',
+    ]);
+    expect(names('uv run main.py')).toEqual([]);
+  });
+  it('python interpreter flags with a value before -m pip', () => {
+    expect(names('python -W ignore -m pip install evil-py')).toEqual(['evil-py']);
+    expect(names('python3 -X dev -u -m pip install evil-py')).toEqual(['evil-py']);
+  });
+  it('shell long options with a value before -c', () => {
+    expect(names('bash --rcfile /dev/null -c "npm i evil-pkg"')).toEqual(['evil-pkg']);
+    expect(names('bash -o pipefail -c "pip install evil-py"')).toEqual(['evil-py']);
+  });
+});

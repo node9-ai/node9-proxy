@@ -231,3 +231,27 @@ describe('redactText — whole text', () => {
     expect(r.found).toEqual(['GitHub Token']);
   });
 });
+
+// /code-review: redactText replaced "capture group 1" for ANY pattern that
+// had one. The connection-string pattern captures its scheme, so only the
+// scheme word was replaced and the password reached the model.
+describe('redactText — only a declared redactGroup narrows the replacement', () => {
+  // Assembled at runtime so no connection-string literal lives in the source.
+  const DB_URL = ['postgres', '://', 'app:', 'pw-canary-7781', '@db.corp-internal.net/main'].join(
+    ''
+  );
+  it('a pattern with an undeclared capture group is redacted whole', () => {
+    const r = redactText('url=' + DB_URL + ' end');
+    expect(r.found).toEqual(['Database Connection String']);
+    expect(r.result).not.toContain('pw-canary-7781');
+    expect(r.result).not.toContain('db.corp-internal.net');
+    expect(r.result).toBe('url=[node9-redacted:Database Connection String]/main end');
+  });
+  it('every pattern that declares redactGroup has that many groups', () => {
+    for (const p of DLP_PATTERNS) {
+      if (p.redactGroup === undefined) continue;
+      const groups = new RegExp(p.regex.source + '|').exec('')!.length - 1;
+      expect(groups, p.name).toBeGreaterThanOrEqual(p.redactGroup);
+    }
+  });
+});

@@ -55,6 +55,11 @@ interface DlpPattern {
    * is treated as "not suppressed" so a validator bug cannot hide a match.
    */
   validate?: (raw: string) => boolean;
+  /** When the regex consumes delimiters around the secret, the capture group
+   *  that holds the secret itself; redactText replaces only that group. Any
+   *  other capture group (a scheme, a prefix) is NOT the secret, so the field
+   *  is explicit rather than "group 1 if present". */
+  redactGroup?: number;
 }
 
 // Matches variable assignment or config-file patterns that indicate a secret
@@ -201,6 +206,7 @@ export const DLP_PATTERNS: DlpPattern[] = [
     regex: /(?:^|[\s>=:(,])([a-zA-Z0-9_~.]{3}\dQ~[a-zA-Z0-9_~.-]{31,34})(?:$|[\s<),])/,
     severity: 'block',
     keywords: ['q~'],
+    redactGroup: 1,
   },
 
   // ── Microsoft CASK (Common Annotated Security Key) ────────────────────────
@@ -219,6 +225,7 @@ export const DLP_PATTERNS: DlpPattern[] = [
     severity: 'block',
     keywords: ['qjjq'],
     validate: validateCask,
+    redactGroup: 1,
   },
 
   // ── Databricks ────────────────────────────────────────────────────────────
@@ -930,8 +937,11 @@ export function scanText(text: string): DlpMatch | null {
 // rejected (a secret split across a boundary would be missed). The cost is
 // linear: every pattern passes safe-regex2 and is keyword-prefiltered.
 //
-// A pattern with a capture group (one that consumes a leading delimiter, like
-// Azure and CASK) redacts only the group, so the quote, `=` or space survives.
+// A pattern that declares `redactGroup` (one that consumes a leading
+// delimiter, like Azure and CASK) redacts only that group, so the quote, `=`
+// or space survives. Any other capture group is left alone: the connection
+// string pattern captures its SCHEME, and replacing only that would hand the
+// model the password.
 export function redactText(text: string): { result: string; found: string[] } {
   let result = text;
   const found: string[] = [];
@@ -945,7 +955,10 @@ export function redactText(text: string): { result: string; found: string[] } {
       if (suppressed(pattern, match)) return match; // leave the text intact
       if (!found.includes(pattern.name)) found.push(pattern.name);
       const marker = `[node9-redacted:${pattern.name}]`;
-      const group = typeof rest[0] === 'string' ? rest[0] : undefined;
+      const group =
+        pattern.redactGroup !== undefined && typeof rest[pattern.redactGroup - 1] === 'string'
+          ? (rest[pattern.redactGroup - 1] as string)
+          : undefined;
       return group ? match.replace(group, marker) : marker;
     });
   }

@@ -233,3 +233,17 @@ describe('runPackageCheck — many packages in one command', () => {
     expect(calls.filter((c) => c.includes('querybatch'))).toHaveLength(10);
   });
 });
+
+describe('runPackageCheck — miss text past the network cap', () => {
+  it('names the cap, not the config, for packages 11+ with no index', async () => {
+    const pkgs = Array.from({ length: 11 }, (_, i) => `node9-canary-p${i}@1.0.0`).join(' ');
+    routes['http://osv.test/v1/querybatch'] = () => json({ results: [{ vulns: [] }] });
+    for (let i = 0; i < 10; i++)
+      routes[`http://registry.test/node9-canary-p${i}`] = () => npmDoc('1.0.0');
+    const r = await runPackageCheck(...bash(`npm i ${pkgs}`), CFG);
+    const capped = r.misses.filter((m) => m.includes('node9-canary-p10'));
+    expect(capped.length).toBeGreaterThan(0);
+    expect(capped[0]).toContain('per-command network cap');
+    expect(capped[0]).not.toContain('online fallback off');
+  });
+});

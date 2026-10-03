@@ -360,6 +360,7 @@ const MANAGER_HEADS = new Set([
 // Shells whose `-c` argument is a script we re-read (`bash -lc "npm i x"`).
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'ash']);
 const MAX_NESTING = 3;
+const SHELL_VALUE_FLAGS = new Set(['--rcfile', '--init-file', '-O', '+O', '-o', '+o']);
 
 /**
  * Skip `sudo -u bob`, `env FOO=1`, `nice -n 5`, `timeout 30` … and return the
@@ -476,6 +477,11 @@ function fromCall(words: (string | null)[], out: PackageInstallRequest[], depth:
       for (let i = start + 1; i < words.length; i++) {
         const w = words[i];
         if (w === null || !w.startsWith('-')) break;
+        // Shell options that take a separate value before -c.
+        if (SHELL_VALUE_FLAGS.has(w)) {
+          i++;
+          continue;
+        }
         if (/^-[a-z]*c[a-z]*$/i.test(w) && !w.startsWith('--')) {
           script = words[i + 1] ?? null;
           break;
@@ -520,6 +526,11 @@ function fromCall(words: (string | null)[], out: PackageInstallRequest[], depth:
       if (v < 0) return;
       // `yarn global add pkg` (v1) — step over `global`.
       if (lower(words[v]) === 'global') v = verbIndex(words, v + 1, YARN_VALUE_FLAGS);
+      // `yarn workspace <name> add pkg` (v1 and berry) — step over both.
+      else if (lower(words[v]) === 'workspace') {
+        const name = verbIndex(words, v + 1, YARN_VALUE_FLAGS);
+        v = name < 0 ? -1 : verbIndex(words, name + 1, YARN_VALUE_FLAGS);
+      }
       const verb = lower(words[v]);
       if (v < 0) return;
       if (YARN_INSTALL_VERBS.has(verb))
@@ -545,10 +556,14 @@ function fromCall(words: (string | null)[], out: PackageInstallRequest[], depth:
     case 'python':
     case 'python3':
     case 'py': {
-      // python [-I -u …] -m pip [global flags] install …
+      // python [-I -u -W ignore …] -m pip [global flags] install …
       for (let i = start + 1; i < words.length; i++) {
         const w = words[i];
         if (w === null || !w.startsWith('-')) return;
+        if (w === '-W' || w === '-X' || w === '--check-hash-based-pycs') {
+          i++; // interpreter flags that take a separate value
+          continue;
+        }
         if (w === '-m') {
           if (basename(words[i + 1] ?? null) === 'pip') pipInstall(words, i + 2, 'pip', out);
           return;
@@ -578,6 +593,11 @@ function fromCall(words: (string | null)[], out: PackageInstallRequest[], depth:
       if (v < 0) return;
       if (verb === 'add') {
         pushPy(out, 'uv add', operands(words, v + 1, UV_VALUE_FLAGS));
+        return;
+      }
+      // `uv run --with pkg script.py` installs pkg into an ephemeral env.
+      if (verb === 'run') {
+        pushPy(out, 'uv run', flagValues(words, v + 1, ['--with', '--with-editable']));
         return;
       }
       const v2 = verbIndex(words, v + 1, UV_VALUE_FLAGS);

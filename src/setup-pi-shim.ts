@@ -190,7 +190,9 @@ module.exports = function (pi) {
         });
         if (r.status === 0 && r.stdout) {
           const resp = JSON.parse(r.stdout);
-          if (resp && Array.isArray(resp.found) && resp.found.length > 0 && typeof resp.redacted === "string") {
+          // A secret was redacted OR the text was framed as injected: either way the
+          // model must get the redacted text, not the original (a frame alone has found=[]).
+          if (resp && typeof resp.redacted === "string" && ((Array.isArray(resp.found) && resp.found.length > 0) || resp.injection)) {
             mutated = true;
             return { ...block, text: resp.redacted };
           }

@@ -27,6 +27,8 @@ export interface PackageCheckConfig {
   maxAgeHours: number;
   onlineFallback: boolean;
   allow: string[];
+  /** Internal: set by runPackageCheck for packages past the per-command network cap. */
+  networkCapped?: boolean;
 }
 
 export interface PackageFinding {
@@ -78,7 +80,9 @@ async function maliciousFor(
   if (!entries && !(local.status === 'clean' && local.fresh)) {
     // No index, or a stale one that has nothing: ask OSV online.
     if (!cfg.onlineFallback) {
-      misses.push(`${label(p, version)}: local index ${local.status}, online fallback off`);
+      misses.push(
+        `${label(p, version)}: local index ${local.status}, no online lookup (${cfg.networkCapped ? 'over the per-command network cap' : 'online fallback off'})`
+      );
       return null;
     }
     let ids: string[][] | null = null;
@@ -194,7 +198,12 @@ export async function runPackageCheck(
 
     const misses: string[] = [];
     const checked = requests;
-    const localOnly: PackageCheckConfig = { ...cfg, registrySignals: false, onlineFallback: false };
+    const localOnly: PackageCheckConfig = {
+      ...cfg,
+      registrySignals: false,
+      onlineFallback: false,
+      networkCapped: true,
+    };
     const settled = await Promise.allSettled(
       checked.map((p, i) => checkOne(p, i < MAX_NETWORK_PACKAGES ? cfg : localOnly, misses))
     );
