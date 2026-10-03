@@ -191,3 +191,43 @@ describe('Microsoft CASK Secret — validate wiring', () => {
     expect(r.found).toEqual(['Microsoft CASK Secret']);
   });
 });
+
+// /code-review: the CASK regex consumed the delimiter on BOTH sides, so
+// redaction ate the surrounding quotes and a second key one space later was
+// never matched (its leading delimiter had been consumed by the first).
+describe('Microsoft CASK Secret — delimiters', () => {
+  it('redaction keeps the quotes and the = around the key', () => {
+    expect(redactText(`KEY="${CASK_OK}"`).result).toBe(
+      'KEY="[node9-redacted:Microsoft CASK Secret]"'
+    );
+  });
+  it('two keys separated by one space are both redacted', () => {
+    const r = redactText(`${CASK_OK} ${CASK_DATA}`);
+    expect(r.result).toBe(
+      '[node9-redacted:Microsoft CASK Secret] [node9-redacted:Microsoft CASK Secret]'
+    );
+  });
+  it('a rejected lookalike right before a real key does not hide it', () => {
+    expect(scanText(`${CASK_BAD_TS} ${CASK_OK}`)?.patternName).toBe('Microsoft CASK Secret');
+  });
+});
+
+// /code-review: redactText sliced its input to 100 KB and returned the slice,
+// so a caller that replaces content with the result lost everything after it,
+// and a secret past 100 KB was never redacted.
+describe('redactText — whole text', () => {
+  const PAD = 'lorem ipsum dolor sit amet\n'.repeat(5000); // ~135 KB
+  it('keeps every character past 100 KB', () => {
+    const text = GH_OK + '\n' + PAD + 'tail-marker';
+    const r = redactText(text);
+    expect(r.result.endsWith('tail-marker')).toBe(true);
+    expect(r.result.length).toBe(
+      text.length - GH_OK.length + '[node9-redacted:GitHub Token]'.length
+    );
+  });
+  it('redacts a secret that sits past 100 KB', () => {
+    const r = redactText(PAD + 'token=' + GH_OK);
+    expect(r.result).not.toContain(GH_OK);
+    expect(r.found).toEqual(['GitHub Token']);
+  });
+});

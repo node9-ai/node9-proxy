@@ -204,16 +204,18 @@ export const DLP_PATTERNS: DlpPattern[] = [
   },
 
   // ── Microsoft CASK (Common Annotated Security Key) ────────────────────────
-  // Fixed layout, no checksum (scan/checksums.ts, validateCask). The regex
-  // consumes one delimiter on each side, the way the Azure pattern does,
-  // because the key alphabet includes '-' and a `\b` anchor misses a key that
-  // starts or ends with one. The 5..45 run covers the provider kind + signature
+  // Fixed layout, no checksum (scan/checksums.ts, validateCask). The key
+  // alphabet includes '-', so a `\b` anchor misses a key that starts or ends
+  // with one: the regex consumes one LEADING delimiter (lookbehind fails
+  // safe-regex2) and only LOOKS AHEAD at the trailing one, so two keys
+  // separated by a single space are both matched. The key is capture group 1,
+  // the only part redactText replaces. The 5..45 run covers the provider kind + signature
   // and 0..10 optional 4-character data segments; the validator pins the exact
   // lengths and the timestamp ranges.
   {
     name: 'Microsoft CASK Secret',
     regex:
-      /(?:^|[^A-Za-z0-9_-])(?:[A-Za-z0-9_-]{44}|[A-Za-z0-9_-]{88})QJJQA[BC][A-K][A-Za-z0-9_-]{5,45}AA[A-Za-z0-9_-]{6}(?:$|[^A-Za-z0-9_-])/,
+      /(?:^|[^A-Za-z0-9_-])((?:[A-Za-z0-9_-]{44}|[A-Za-z0-9_-]{88})QJJQA[BC][A-K][A-Za-z0-9_-]{5,45}AA[A-Za-z0-9_-]{6})(?=$|[^A-Za-z0-9_-])/,
     severity: 'block',
     keywords: ['qjjq'],
     validate: validateCask,
@@ -921,25 +923,30 @@ export function scanText(text: string): DlpMatch | null {
 // Replaces all DLP pattern matches in text with [node9-redacted:<PatternName>].
 // Returns the redacted string and a list of pattern names that were found.
 //
-// Uses the same MAX_STRING_BYTES truncation as scanArgs/scanText. Chunking
-// was rejected because it creates chunk-boundary evasion: a secret split
-// across a boundary would not be matched. Individual string values inside
-// JSONL session files are almost never > 100KB, so truncation is the safe
-// and correct bound here.
+// The WHOLE text, with no truncation and no chunking. Every caller replaces
+// the content it passed in with `result` (the MCP gateway, the redact-output
+// shim path, `node9 mask`), so the old MAX_STRING_BYTES slice silently dropped
+// everything past 100 KB and left a secret there unredacted. Chunking stays
+// rejected (a secret split across a boundary would be missed). The cost is
+// linear: every pattern passes safe-regex2 and is keyword-prefiltered.
+//
+// A pattern with a capture group (one that consumes a leading delimiter, like
+// Azure and CASK) redacts only the group, so the quote, `=` or space survives.
 export function redactText(text: string): { result: string; found: string[] } {
-  const t = text.length > MAX_STRING_BYTES ? text.slice(0, MAX_STRING_BYTES) : text;
-  let result = t;
+  let result = text;
   const found: string[] = [];
-  const lower = t.toLowerCase();
+  const lower = text.toLowerCase();
 
   for (const { pattern, globalRegex } of DLP_PATTERNS_GLOBAL) {
     if (pattern.keywords && !pattern.keywords.some((kw) => lower.includes(kw.toLowerCase()))) {
       continue;
     }
-    result = result.replace(globalRegex, (match) => {
+    result = result.replace(globalRegex, (match: string, ...rest: unknown[]) => {
       if (suppressed(pattern, match)) return match; // leave the text intact
       if (!found.includes(pattern.name)) found.push(pattern.name);
-      return `[node9-redacted:${pattern.name}]`;
+      const marker = `[node9-redacted:${pattern.name}]`;
+      const group = typeof rest[0] === 'string' ? rest[0] : undefined;
+      return group ? match.replace(group, marker) : marker;
     });
   }
   return { result, found };

@@ -128,8 +128,9 @@ describe('mcp-gateway response-channel scan', () => {
     });
     try {
       const { texts, stderr } = runGateway(home, INJECTION);
-      expect(texts[0]).toMatch(/^\[node9: untrusted tool output/);
-      expect(texts[texts.length - 1]).toBe('[node9: end untrusted output]');
+      const id = /^\[node9 untrusted-output ([0-9a-f]{12}):/.exec(texts[0])?.[1];
+      expect(id).toBeDefined();
+      expect(texts[texts.length - 1]).toBe(`[node9 end ${id}]`);
       expect(texts).toContain(INJECTION);
       expect(stderr).toMatch(/injected instructions/);
     } finally {

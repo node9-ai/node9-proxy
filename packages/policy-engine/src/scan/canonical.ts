@@ -674,6 +674,8 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // Microsoft CASK pattern. Detector OUTPUT changes in both directions: a
 // token-shaped string without a valid checksum is no longer a finding, a
 // CASK-layout key now is. Histories scanned under v20 re-read.
+// Same unreleased v21: redactText now covers the whole text (no 100 KB
+// slice) and the CASK pattern no longer consumes its trailing delimiter.
 export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v21';
 
 // 2026-09-11, hash bumped with NO version bump: stage 3 of the credential jail
@@ -701,7 +703,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v21';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '7464582e5b174b4b';
+export const CANONICAL_EXTRACTOR_HASH = '61d8a2419d466c60';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
