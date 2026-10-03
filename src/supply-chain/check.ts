@@ -27,8 +27,6 @@ export interface PackageCheckConfig {
   maxAgeHours: number;
   onlineFallback: boolean;
   allow: string[];
-  /** Internal: set by runPackageCheck for packages past the per-command network cap. */
-  networkCapped?: boolean;
 }
 
 export interface PackageFinding {
@@ -72,16 +70,17 @@ async function maliciousFor(
   p: PackageInstallRequest,
   version: string | undefined,
   cfg: PackageCheckConfig,
-  misses: string[]
+  misses: string[],
+  networkCapped: boolean
 ): Promise<PackageFinding | null> {
   const local = lookupIndex(p.ecosystem, p.name);
   const entries: OsvEntry[] | null = local.status === 'hit' ? local.entries : null;
 
   if (!entries && !(local.status === 'clean' && local.fresh)) {
     // No index, or a stale one that has nothing: ask OSV online.
-    if (!cfg.onlineFallback) {
+    if (!cfg.onlineFallback || networkCapped) {
       misses.push(
-        `${label(p, version)}: local index ${local.status}, no online lookup (${cfg.networkCapped ? 'over the per-command network cap' : 'online fallback off'})`
+        `${label(p, version)}: local index ${local.status}, no online lookup (${networkCapped ? 'over the per-command network cap' : 'online fallback off'})`
       );
       return null;
     }
@@ -140,11 +139,12 @@ async function maliciousFor(
 async function checkOne(
   p: PackageInstallRequest,
   cfg: PackageCheckConfig,
-  misses: string[]
+  misses: string[],
+  networkCapped: boolean
 ): Promise<PackageFinding[]> {
   const findings: PackageFinding[] = [];
   let info: RegistryInfo | null = null;
-  if (cfg.registrySignals) {
+  if (cfg.registrySignals && !networkCapped) {
     try {
       info = await registryInfo(p.ecosystem, p.name, p.version);
       if (!info) misses.push(`${label(p, p.version)}: registry metadata unavailable`);
@@ -154,7 +154,7 @@ async function checkOne(
   }
   const version = p.version ?? info?.version;
 
-  const mal = await maliciousFor(p, version, cfg, misses);
+  const mal = await maliciousFor(p, version, cfg, misses, networkCapped);
   if (mal) findings.push(mal);
 
   if (info?.publishedAtMs !== undefined) {
@@ -198,14 +198,8 @@ export async function runPackageCheck(
 
     const misses: string[] = [];
     const checked = requests;
-    const localOnly: PackageCheckConfig = {
-      ...cfg,
-      registrySignals: false,
-      onlineFallback: false,
-      networkCapped: true,
-    };
     const settled = await Promise.allSettled(
-      checked.map((p, i) => checkOne(p, i < MAX_NETWORK_PACKAGES ? cfg : localOnly, misses))
+      checked.map((p, i) => checkOne(p, cfg, misses, i >= MAX_NETWORK_PACKAGES))
     );
     const findings: PackageFinding[] = [];
     settled.forEach((s, i) => {

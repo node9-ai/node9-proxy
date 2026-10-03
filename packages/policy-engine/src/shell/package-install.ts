@@ -299,15 +299,21 @@ function operands(words: (string | null)[], from: number, valueFlags: Set<string
   return out;
 }
 
-/** Values of the given flags (`--from X`, `--with=X`), e.g. the package uvx installs. */
+/**
+ * Values of the given flags (`--from X`, `--with=X`), e.g. the package uvx
+ * installs. uv takes a comma-separated list there (`--with a,b`), so values
+ * are split on commas; a comma never appears in a package spec.
+ */
 function flagValues(words: (string | null)[], from: number, names: string[]): string[] {
   const out: string[] = [];
   for (let i = from; i >= 0 && i < words.length; i++) {
     const w = words[i];
     if (w === null) continue;
     for (const n of names) {
-      if (w === n && typeof words[i + 1] === 'string') out.push(words[i + 1] as string);
-      else if (w.startsWith(n + '=')) out.push(w.slice(n.length + 1));
+      let v: string | undefined;
+      if (w === n && typeof words[i + 1] === 'string') v = words[i + 1] as string;
+      else if (w.startsWith(n + '=')) v = w.slice(n.length + 1);
+      if (v !== undefined) out.push(...v.split(',').filter((x) => x.length > 0));
     }
   }
   return out;
@@ -476,8 +482,8 @@ function fromCall(words: (string | null)[], out: PackageInstallRequest[], depth:
     } else {
       for (let i = start + 1; i < words.length; i++) {
         const w = words[i];
-        if (w === null || !w.startsWith('-')) break;
-        // Shell options that take a separate value before -c.
+        if (w === null || !/^[-+]/.test(w)) break;
+        // Shell options that take a separate value before -c (`+o`/`+O` unset).
         if (SHELL_VALUE_FLAGS.has(w)) {
           i++;
           continue;
@@ -500,7 +506,13 @@ function fromCall(words: (string | null)[], out: PackageInstallRequest[], depth:
     return;
   }
 
-  switch (head) {
+  // Versioned front-ends behave like the bare name: python3.12, pip3.11.
+  const family = /^python\d+(?:\.\d+)*$/.test(head)
+    ? 'python'
+    : /^pip\d+(?:\.\d+)*$/.test(head)
+      ? 'pip'
+      : head;
+  switch (family) {
     case 'npm': {
       const v = verbIndex(words, start + 1, NPM_VALUE_FLAGS);
       const verb = lower(words[v]);

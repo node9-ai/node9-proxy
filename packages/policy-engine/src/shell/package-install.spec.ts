@@ -206,3 +206,21 @@ describe('extractPackageInstalls — review round 2', () => {
     expect(names('bash -o pipefail -c "pip install evil-py"')).toEqual(['evil-py']);
   });
 });
+
+// /code-review round 3.
+describe('extractPackageInstalls — review round 3', () => {
+  it('versioned interpreters and pip front-ends', () => {
+    expect(names('python3.12 -m pip install evil-py')).toEqual(['evil-py']);
+    expect(names('/usr/bin/python3.11 -m pip install evil-py')).toEqual(['evil-py']);
+    expect(names('pip3.12 install evil-py')).toEqual(['evil-py']);
+    expect(names('python3.12 script.py')).toEqual([]);
+  });
+  it('+o / +O shell options before -c', () => {
+    expect(names('bash +O extglob -c "npm i evil-pkg"')).toEqual(['evil-pkg']);
+    expect(names('bash +o posix -c "npm i evil-pkg"')).toEqual(['evil-pkg']);
+  });
+  it('comma-separated --with lists', () => {
+    expect(names('uv run --with requests,evil-py main.py')).toEqual(['requests', 'evil-py']);
+    expect(names('uvx --with=a-py,b-py ruff')).toEqual(['ruff', 'a-py', 'b-py']);
+  });
+});
