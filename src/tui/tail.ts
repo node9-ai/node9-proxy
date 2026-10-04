@@ -1,5 +1,6 @@
 // src/tui/tail.ts — Terminal Flight Recorder + Interactive Approvals
 import http from 'http';
+import { readConfigFileLegacy, writeLocalConfig } from '../config/write';
 import chalk from 'chalk';
 import fs from 'fs';
 import os from 'os';
@@ -594,11 +595,8 @@ function buildRecoveryCardLines(req: ApprovalRequest): string[] {
 // ── Approver helpers ─────────────────────────────────────────────────────────
 
 function readApproversFromDisk(): Record<string, boolean> {
-  const configPath = path.join(os.homedir(), '.node9', 'config.json');
   try {
-    const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
-    const settings = (raw.settings ?? {}) as Record<string, unknown>;
-    return (settings.approvers ?? {}) as Record<string, boolean>;
+    return (readConfigFileLegacy().settings?.approvers ?? {}) as Record<string, boolean>;
   } catch {
     return {};
   }
@@ -617,15 +615,13 @@ function approverStatusLine(): string {
 }
 
 function toggleApprover(channel: string): void {
-  const configPath = path.join(os.homedir(), '.node9', 'config.json');
   try {
-    const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
-    const settings = (raw.settings ?? {}) as Record<string, unknown>;
-    const approvers = (settings.approvers ?? {}) as Record<string, boolean>;
-    approvers[channel] = approvers[channel] === false; // flip: false→true, true/undefined→false
-    settings.approvers = approvers;
-    raw.settings = settings;
-    fs.writeFileSync(configPath, JSON.stringify(raw, null, 2) + '\n');
+    writeLocalConfig((file) => {
+      const settings = (file.settings ??= {});
+      const approvers = (settings.approvers ?? {}) as Record<string, boolean>;
+      approvers[channel] = approvers[channel] === false; // flip: false→true, true/undefined→false
+      settings.approvers = approvers;
+    });
   } catch (err) {
     process.stderr.write(`[node9] toggleApprover failed: ${String(err)}\n`);
   }

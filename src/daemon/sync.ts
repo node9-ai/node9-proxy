@@ -6,6 +6,7 @@
 // The proxy reads rules-cache.json via getConfig() to enforce cloud-defined rules
 // even when offline.
 import fs from 'fs';
+import { isVerdict, configurableValues, type Verdict } from '@node9/policy-engine';
 import https from 'https';
 import os from 'os';
 import path from 'path';
@@ -156,6 +157,15 @@ export interface RulesCache {
   shields?: string[];
   /** Cloud-managed settings (Managed Config M2, baseline+lock). */
   managedConfig?: ManagedConfigCache;
+  /** The workspace config in the catalog's language (phase 3a): what the
+   *  server derived from the same columns as `managedConfig`. Absent from an
+   *  older server. */
+  config?: WorkspaceConfigCache;
+}
+
+export interface WorkspaceConfigCache {
+  /** Catalog id -> value, validated against the catalog on the way in. */
+  checks: Record<string, Verdict>;
 }
 
 /** Cloud-managed settings persisted in the cache (M2: mode + egress + dlp). */
@@ -222,6 +232,8 @@ interface CloudPolicyBody {
     appPermissions?: unknown;
     locked?: unknown;
   }; // M2 settings
+  /** Phase 3a: `{ version: "2", checks, tuning, packs, approvals }`. */
+  config?: unknown;
 }
 
 /**
@@ -592,6 +604,26 @@ function coerceInt(v: unknown, min: number, max: number, dflt: number): number {
  * filtering keeps junk out of the cache the proxy applies.
  */
 
+/**
+ * The workspace config in the catalog's language. Only `checks` is read in
+ * phase 3a; every entry is validated against the catalog, and an id a
+ * workspace cannot set yet (no detector reads it) is dropped, so the cache
+ * never claims a value that is not in force.
+ */
+export function extractWorkspaceConfig(body: CloudPolicyBody): WorkspaceConfigCache | undefined {
+  const c = body.config;
+  if (!c || typeof c !== 'object' || Array.isArray(c)) return undefined;
+  const raw = (c as { checks?: unknown }).checks;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const checks: Record<string, Verdict> = {};
+  for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!isVerdict(value)) continue;
+    if (!configurableValues(id).includes(value)) continue;
+    checks[id] = value;
+  }
+  return Object.keys(checks).length ? { checks } : undefined;
+}
+
 export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache | undefined {
   const mc = body.managedConfig;
   if (!mc || typeof mc !== 'object') return undefined;
@@ -844,6 +876,7 @@ async function syncOnce(): Promise<void> {
         workspaceId: result.body.workspaceId,
         shields: extractShields(result.body),
         managedConfig: extractManagedConfig(result.body),
+        config: extractWorkspaceConfig(result.body),
       };
       writeCache(cache);
       recordSyncHealth({ ok: true, changed: true });
@@ -1204,6 +1237,7 @@ export async function runCloudSync(): Promise<
       workspaceId: result.body.workspaceId,
       shields: extractShields(result.body),
       managedConfig: extractManagedConfig(result.body),
+      config: extractWorkspaceConfig(result.body),
     };
     writeCache(cache);
     recordSyncHealth({ ok: true, changed: true });

@@ -669,7 +669,14 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // forces the fleet re-scan that a same-version bump would have skipped (the
 // daemon watermark resets on a version change). No detector change over the
 // last v19 build; the number moves so no machine keeps a v19 watermark.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v20';
+// canonical-v21 (2026-10-02): checksum validation for GitHub classic tokens
+// (CRC32/Base62 over the 30 random characters, `ghr_` added) and a new
+// Microsoft CASK pattern. Detector OUTPUT changes in both directions: a
+// token-shaped string without a valid checksum is no longer a finding, a
+// CASK-layout key now is. Histories scanned under v20 re-read.
+// Same unreleased v21: redactText now covers the whole text (no 100 KB
+// slice) and the CASK pattern no longer consumes its trailing delimiter.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v21';
 
 // 2026-09-11, hash bumped with NO version bump: stage 3 of the credential jail
 // (argument POSITION kept in extractLiteralArgs) changed detector SOURCE and
@@ -678,6 +685,13 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v20';
 // analyzeFsOperation, the only extractor feed the change reaches -- 0 of 396
 // verdicts moved. dlp/, pipe-chain and destructive-regex are untouched. A
 // version bump would cost every daemon a full re-scan and change nothing.
+
+// 2026-10-02, hash bumped with NO version bump: shell/index.ts only exported
+// parseShared and resolveWordLiteral for the package-install extractor
+// (shell/package-install.ts, outside the hash set). No detector changed.
+// 2026-10-02, hash bumped with NO version bump: dlp/index.ts only gained
+// re-exports of the injection normaliser (dlp/normalize.ts). No DLP pattern
+// or scanner changed, so detector output is identical.
 
 /**
  * SHA-256 prefix of the detector-source files
@@ -689,7 +703,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v20';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '074a11609f2cb39a';
+export const CANONICAL_EXTRACTOR_HASH = 'efe6e39d25bedd78';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

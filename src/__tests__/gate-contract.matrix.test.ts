@@ -29,8 +29,9 @@ import path from 'path';
 const CLI = path.resolve(__dirname, '../../dist/cli.js');
 const FIXTURES = path.resolve(__dirname, 'fixtures/gate-inputs');
 
-// Composed at runtime so node9's own DLP never flags this source file.
-const FAKE_GH_TOKEN = 'ghp_' + 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789';
+// A checksum-valid canary (see helpers/github-token.ts): the GitHub pattern
+// validates the CRC32 suffix, so a shape-only string would no longer fire.
+import { FAKE_GH_TOKEN } from './helpers/github-token';
 
 interface MatrixRow {
   fixture: string; // fixtures/gate-inputs/<fixture>.json

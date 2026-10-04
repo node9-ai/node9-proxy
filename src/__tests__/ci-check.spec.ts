@@ -36,12 +36,9 @@ import {
 const FX = path.join(__dirname, 'fixtures', 'ci-check');
 const read = (f: string) => fs.readFileSync(path.join(FX, f), 'utf8');
 
-// A GitHub-token-shaped string built at runtime so no literal credential lives
-// in the source (node9's own DLP — correctly — blocks committing one). Built as
-// a full 36-char permutation of the base36 alphabet (high entropy, non-repeating)
-// so the DLP scanner's entropy gate accepts it.
-const ALPHA = 'abcdefghijklmnopqrstuvwxyz0123456789';
-const FAKE_TOKEN = 'ghp_' + Array.from({ length: 36 }, (_, i) => ALPHA[(i * 13 + 5) % 36]).join('');
+// A checksum-valid GitHub-token canary (helpers/github-token.ts): the DLP
+// pattern verifies the CRC32 suffix, so a shape-only string would not fire.
+import { FAKE_GH_TOKEN as FAKE_TOKEN } from './helpers/github-token';
 
 describe('CI-2 workflow analyzer — the severity nuance (the moat)', () => {
   it('F7: rates milvus ADVISORY — claude-code-action gates to write-access by default', () => {

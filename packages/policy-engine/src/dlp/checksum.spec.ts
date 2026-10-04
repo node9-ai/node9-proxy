@@ -10,6 +10,8 @@ import {
   WIF_STOPWORD,
   XPRV_VALID,
   XPRV_INVALID,
+  GITHUB_VALID,
+  GITHUB_INVALID,
 } from './checksum.fixtures';
 
 const row = <T extends { id: string }>(rows: T[], id: string): T => {
@@ -38,7 +40,7 @@ describe('pattern registration', () => {
     }
   });
   it('the pattern-count floor moves with them', () => {
-    expect(DLP_PATTERNS.length).toBeGreaterThanOrEqual(58);
+    expect(DLP_PATTERNS.length).toBeGreaterThanOrEqual(59);
   });
 });
 
@@ -115,5 +117,141 @@ describe('anchoring (F2): no match inside a longer base58 blob', () => {
   });
   it('a WIF glued to a word character is not reported, pinned', () => {
     expect(scanArgs({ k: 'WIF_' + WIF_U })).toBeNull();
+  });
+});
+
+// ── GitHub classic tokens: the checksum decides ─────────────────────────────
+const GH_OK = asm(row(GITHUB_VALID, 'ghp-1').parts);
+const GH_R = asm(row(GITHUB_VALID, 'ghr-1').parts);
+const GH_LOOKALIKE = asm(row(GITHUB_INVALID, 'ghp-lookalike').parts);
+const GH_BAD = asm(row(GITHUB_INVALID, 'ghp-1-bad-check').parts);
+
+describe('GitHub Token — validate wiring', () => {
+  it('registers with a validator and without an entropy floor', () => {
+    const p = DLP_PATTERNS.find((x) => x.name === 'GitHub Token');
+    expect(typeof p?.validate).toBe('function');
+    expect(p?.minEntropy).toBeUndefined();
+  });
+  it('scanArgs: a checksummed token is reported at block, the sample masks it', () => {
+    const m = scanArgs({ command: `git clone https://${GH_OK}@github.com/o/r` });
+    expect(m?.patternName).toBe('GitHub Token');
+    expect(m?.severity).toBe('block');
+    expect(m?.redactedSample).not.toContain(GH_OK);
+  });
+  it('scanArgs: a lookalike (shape only) and a one-character checksum mutation are NOT reported', () => {
+    expect(scanArgs({ command: `git clone https://${GH_LOOKALIKE}@github.com/o/r` })).toBeNull();
+    expect(scanArgs({ env: { TOKEN: GH_BAD } })).toBeNull();
+  });
+  it('scanArgs: the ghr_ refresh-token prefix is covered', () => {
+    expect(scanArgs({ env: { TOKEN: GH_R } })?.patternName).toBe('GitHub Token');
+  });
+  it('scanText: valid reported, lookalike not', () => {
+    expect(scanText('token=' + GH_OK)?.patternName).toBe('GitHub Token');
+    expect(scanText('token=' + GH_LOOKALIKE)).toBeNull();
+  });
+  it('redactText: valid redacted, lookalike left intact', () => {
+    const pos = redactText('a ' + GH_OK + ' b');
+    expect(pos.result).toBe('a [node9-redacted:GitHub Token] b');
+    expect(pos.found).toEqual(['GitHub Token']);
+    const neg = redactText('a ' + GH_LOOKALIKE + ' b');
+    expect(neg.result).toBe('a ' + GH_LOOKALIKE + ' b');
+    expect(neg.found).toEqual([]);
+  });
+  it('a lookalike in front of a real token does not hide it', () => {
+    expect(scanText(GH_LOOKALIKE + ' ' + GH_OK)?.patternName).toBe('GitHub Token');
+  });
+});
+
+// ── Microsoft CASK: layout-validated pattern ────────────────────────────────
+const B64URL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+const caskFiller = (n: number) =>
+  Array.from({ length: n }, (_, i) => B64URL[(i * 11 + 5) % 64]).join('');
+const CASK_OK = caskFiller(42) + 'QA' + 'QJJQ' + 'ABAK' + 'TEST' + 'AA' + 'BJBMeA';
+const CASK_DATA = caskFiller(42) + 'QA' + 'QJJQ' + 'ABCK' + 'TEST' + 'DATADATA' + 'AA' + 'BJBMeA';
+const CASK_BAD_TS = caskFiller(42) + 'QA' + 'QJJQ' + 'ABAK' + 'TEST' + 'AA' + 'BMBMeA';
+const CASK_DASH = '-' + caskFiller(41) + 'QA' + 'QJJQ' + 'ABAK' + 'TEST' + 'AA' + 'BJBMeA';
+
+describe('Microsoft CASK Secret — validate wiring', () => {
+  it('registers at block severity with a validator', () => {
+    const p = DLP_PATTERNS.find((x) => x.name === 'Microsoft CASK Secret');
+    expect(p?.severity).toBe('block');
+    expect(typeof p?.validate).toBe('function');
+  });
+  it('scanArgs: a well-formed key is reported; one with a bad timestamp is not', () => {
+    expect(scanArgs({ env: { KEY: CASK_OK } })?.patternName).toBe('Microsoft CASK Secret');
+    expect(scanArgs({ env: { KEY: CASK_DATA } })?.patternName).toBe('Microsoft CASK Secret');
+    expect(scanArgs({ env: { KEY: CASK_BAD_TS } })).toBeNull();
+  });
+  it('scanText: a key that starts with "-" is still found (no \\b anchor)', () => {
+    expect(scanText('key: ' + CASK_DASH + '\n')?.patternName).toBe('Microsoft CASK Secret');
+  });
+  it('redactText: the key is redacted and listed', () => {
+    const r = redactText('x=' + CASK_OK + ';');
+    expect(r.result).not.toContain(CASK_OK);
+    expect(r.found).toEqual(['Microsoft CASK Secret']);
+  });
+});
+
+// /code-review: the CASK regex consumed the delimiter on BOTH sides, so
+// redaction ate the surrounding quotes and a second key one space later was
+// never matched (its leading delimiter had been consumed by the first).
+describe('Microsoft CASK Secret — delimiters', () => {
+  it('redaction keeps the quotes and the = around the key', () => {
+    expect(redactText(`KEY="${CASK_OK}"`).result).toBe(
+      'KEY="[node9-redacted:Microsoft CASK Secret]"'
+    );
+  });
+  it('two keys separated by one space are both redacted', () => {
+    const r = redactText(`${CASK_OK} ${CASK_DATA}`);
+    expect(r.result).toBe(
+      '[node9-redacted:Microsoft CASK Secret] [node9-redacted:Microsoft CASK Secret]'
+    );
+  });
+  it('a rejected lookalike right before a real key does not hide it', () => {
+    expect(scanText(`${CASK_BAD_TS} ${CASK_OK}`)?.patternName).toBe('Microsoft CASK Secret');
+  });
+});
+
+// /code-review: redactText sliced its input to 100 KB and returned the slice,
+// so a caller that replaces content with the result lost everything after it,
+// and a secret past 100 KB was never redacted.
+describe('redactText — whole text', () => {
+  const PAD = 'lorem ipsum dolor sit amet\n'.repeat(5000); // ~135 KB
+  it('keeps every character past 100 KB', () => {
+    const text = GH_OK + '\n' + PAD + 'tail-marker';
+    const r = redactText(text);
+    expect(r.result.endsWith('tail-marker')).toBe(true);
+    expect(r.result.length).toBe(
+      text.length - GH_OK.length + '[node9-redacted:GitHub Token]'.length
+    );
+  });
+  it('redacts a secret that sits past 100 KB', () => {
+    const r = redactText(PAD + 'token=' + GH_OK);
+    expect(r.result).not.toContain(GH_OK);
+    expect(r.found).toEqual(['GitHub Token']);
+  });
+});
+
+// /code-review: redactText replaced "capture group 1" for ANY pattern that
+// had one. The connection-string pattern captures its scheme, so only the
+// scheme word was replaced and the password reached the model.
+describe('redactText — only a declared redactGroup narrows the replacement', () => {
+  // Assembled at runtime so no connection-string literal lives in the source.
+  const DB_URL = ['postgres', '://', 'app:', 'pw-canary-7781', '@db.corp-internal.net/main'].join(
+    ''
+  );
+  it('a pattern with an undeclared capture group is redacted whole', () => {
+    const r = redactText('url=' + DB_URL + ' end');
+    expect(r.found).toEqual(['Database Connection String']);
+    expect(r.result).not.toContain('pw-canary-7781');
+    expect(r.result).not.toContain('db.corp-internal.net');
+    expect(r.result).toBe('url=[node9-redacted:Database Connection String]/main end');
+  });
+  it('every pattern that declares redactGroup has that many groups', () => {
+    for (const p of DLP_PATTERNS) {
+      if (p.redactGroup === undefined) continue;
+      const groups = new RegExp(p.regex.source + '|').exec('')!.length - 1;
+      expect(groups, p.name).toBeGreaterThanOrEqual(p.redactGroup);
+    }
   });
 });

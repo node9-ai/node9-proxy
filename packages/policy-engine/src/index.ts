@@ -26,6 +26,15 @@ export {
   SENSITIVE_PATH_REGEXES,
 } from './dlp';
 export type { InjectionMatch, InjectionContext, InjectionConfidence } from './dlp';
+export {
+  stripInvisible,
+  foldHomoglyphs,
+  normalizeForScan,
+  decodeEmbeddedBase64,
+  decodeEmbeddedHex,
+  scanViews,
+} from './dlp';
+export type { ScanView } from './dlp';
 
 // Shell — AST-based detectors (mvdan-sh). Pure: input is a string, output is a verdict.
 export type { ShellCommandAnalysis, FsOpVerdict, ShellDestination } from './shell';
@@ -56,6 +65,59 @@ export {
   extractShellDestinations,
   parseDestHost,
 } from './shell';
+
+// Package-install extraction (supply-chain check; the host does the lookups).
+export {
+  extractPackageInstalls,
+  normalizePyPiName,
+  type PackageInstallRequest,
+  type PackageEcosystem,
+} from './shell/package-install';
+
+// Checks catalog — the one list of what node9 checks, and the resolver over
+// today's config shape. The dashboard, the local file and `node9 checks` derive
+// from it.
+export {
+  CHECKS,
+  CHECK_BY_ID,
+  CHECK_GROUPS,
+  VERDICTS,
+  CHECK_VERDICT_RANK,
+  BUILTIN_DANGEROUS_WORDS,
+  getCheck,
+  isVerdict,
+  isLockedCheck,
+  checkIdForRule,
+  checkIdForCheckedBy,
+  ssrfCheckId,
+  resolveCheck,
+  resolveAllChecks,
+  checkValue,
+  resolveCheckMap,
+  catalogSettingsFromConfig,
+} from './catalog';
+export type {
+  Verdict,
+  CheckGroup,
+  CheckDef,
+  CatalogSettings,
+  CheckSource,
+  ResolvedCheck,
+} from './catalog';
+export { CHECK_TEXT, type CheckText } from './catalog-text';
+export {
+  TUNING_FIELDS,
+  tuningFromLegacyPolicy,
+  tuningToLegacyPolicy,
+  checksFromLegacyPolicy,
+  checkToLegacyPolicy,
+  MAP_GOVERNED,
+  KNOB_GOVERNED,
+  isKnobGoverned,
+  configurableValues,
+  CONFIGURABLE_CHECK_IDS,
+} from './catalog-knobs';
+export type { LegacyPolicyKnobs, TuningField } from './catalog-knobs';
 
 // Egress / destination policy (GAP-5).
 export type { EgressPolicy, EgressVerdict, Destination } from './egress';

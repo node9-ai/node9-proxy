@@ -28,6 +28,17 @@ import { normalizeHost } from '../auth/trusted-hosts';
 
 export type { SmartCondition, SmartRule } from '@node9/policy-engine';
 import type { SmartRule } from '@node9/policy-engine';
+import {
+  BUILTIN_DANGEROUS_WORDS,
+  CHECK_VERDICT_RANK,
+  resolveCheckMap,
+  catalogSettingsFromConfig,
+  isVerdict,
+  configurableValues,
+  type CatalogSettings,
+  type Verdict,
+} from '@node9/policy-engine';
+import { isV2File, v2ToLegacy } from './v2';
 import { classifySsrf } from '@node9/policy-engine';
 // The trusted shield catalog. A cloud-mandated shield resolves its body from
 // here directly, never a user ~/.node9/shields/<name>.json that shadows the
@@ -198,6 +209,21 @@ export interface Config {
       minConfidence: 'medium' | 'high';
       allow: string[];
     };
+    // Package check before install (src/supply-chain). A shell command that
+    // installs or runs registry packages (npm/pnpm/yarn/bun/npx, pip/uv/
+    // poetry) is checked against the local OSV malicious-package index, with
+    // OSV online as a fallback. Known malicious → `onMalicious`; publish age
+    // under `maxAgeHours` or an npm install script → review (registrySignals).
+    // `allow` holds package-name globs that are never checked. A failed
+    // lookup always allows and is recorded in hook-debug.log.
+    packageCheck: {
+      enabled: boolean;
+      onMalicious: 'block' | 'review';
+      registrySignals: boolean;
+      maxAgeHours: number;
+      onlineFallback: boolean;
+      allow: string[];
+    };
     skillPinning: {
       enabled: boolean;
       mode: 'warn' | 'block';
@@ -219,6 +245,16 @@ export interface Config {
     // file-tool guard needs the PATHS themselves: rules alone can't tell it
     // whether to stop a Read/Grep/Glob from taking the ignoredTools fast path.
     managedJailPaths: Array<{ path: string; verdict: 'block' | 'review' }>;
+    /**
+     * RESOLVED output, never user input: every catalog check's value in
+     * force, built from the legacy knobs above plus the explicit `checks` of
+     * a v2 config file. The engine reads this map; `node9 checks` prints it.
+     * Overwritten on every getConfig(); a value in a config file is ignored.
+     */
+    checks?: Record<string, Verdict>;
+    /** Which file stated a check explicitly (v2 files only). Absent = the
+     *  value came from a legacy knob or the catalog default. */
+    checkSources?: Record<string, 'local' | 'project' | 'workspace'>;
   };
   environments: Record<string, EnvironmentConfig>;
   /** PR-2: 'workspace' = keyed (policy from the cloud); 'local' = the
@@ -253,10 +289,9 @@ export const DANGEROUS_WORDS = [
 // Intentionally minimal — only words that are catastrophic AND never appear
 // in legitimate code/content. Everything else is handled by smart rules,
 // which can scope to specific tool fields and avoid false positives.
-export const DANGEROUS_WORDS = [
-  'mkfs', // formats/wipes a filesystem partition
-  'shred', // permanently overwrites file contents (unrecoverable)
-];
+// The list itself lives in the engine's catalog (`commands.disk-destroy`), so
+// the detector that attributes a hit to that check reads the same words.
+export const DANGEROUS_WORDS: string[] = [...BUILTIN_DANGEROUS_WORDS];
 
 /**
  * Config fields getConfig computes at load time: part of Config, never part of
@@ -481,6 +516,14 @@ export const DEFAULT_CONFIG: Config = {
     },
     loopDetection: { enabled: true, threshold: 5, windowSeconds: 120 },
     injectionScan: { enabled: false, minConfidence: 'medium', allow: [] },
+    packageCheck: {
+      enabled: true,
+      onMalicious: 'block',
+      registrySignals: true,
+      maxAgeHours: 48,
+      onlineFallback: true,
+      allow: [],
+    },
     skillPinning: { enabled: false, mode: 'warn', roots: [] },
     trustedHosts: [],
     trustedHostsManaged: false,
@@ -597,13 +640,15 @@ export function getGlobalSettings(): {
   try {
     const globalConfigPath = path.join(os.homedir(), '.node9', 'config.json');
     if (fs.existsSync(globalConfigPath)) {
-      const parsed = JSON.parse(fs.readFileSync(globalConfigPath, 'utf-8')) as Record<
-        string,
-        unknown
-      >;
+      const raw = JSON.parse(fs.readFileSync(globalConfigPath, 'utf-8')) as Record<string, unknown>;
+      // A v2 file keeps these under `device`; read it as the legacy shape.
+      const parsed = (isV2File(raw) ? v2ToLegacy(raw).legacy : raw) as Record<string, unknown>;
       const settings = (parsed.settings as Record<string, unknown>) || {};
       return {
-        mode: (settings.mode as string) || 'audit',
+        // The engine's default is DEFAULT_CONFIG.settings.mode ('standard');
+        // this used to say 'audit', so `GET /settings` reported a mode no
+        // machine without a stated mode actually runs.
+        mode: (settings.mode as string) || DEFAULT_CONFIG.settings.mode,
         autoStartDaemon: settings.autoStartDaemon !== false,
         slackEnabled: settings.slackEnabled !== false,
         enableTrustSessions: settings.enableTrustSessions === true,
@@ -612,7 +657,7 @@ export function getGlobalSettings(): {
     }
   } catch {}
   return {
-    mode: 'audit',
+    mode: DEFAULT_CONFIG.settings.mode,
     autoStartDaemon: true,
     slackEnabled: true,
     enableTrustSessions: false,
@@ -833,6 +878,32 @@ function logCacheReadIssue(cacheFile: string, kind: string): void {
   }
 }
 
+/** What v2 files stated, keyed by path. Filled by tryLoadConfig on the same
+ *  getConfig() call that reads them: `checks` = map entries (map-governed
+ *  checks and pack rows), `stated` = every accepted entry, for sources. */
+const v2ChecksByPath = new Map<
+  string,
+  { checks: Record<string, Verdict>; stated: Record<string, Verdict> }
+>();
+
+/** commandChecks knob → the catalog check it governs. */
+const KNOB_TO_CHECK: Record<string, string> = {
+  inlineExec: 'commands.inline-exec',
+  rmAdvisory: 'commands.rm',
+  chmod: 'commands.chmod',
+  sqlDdl: 'commands.sql-ddl',
+  evalDynamic: 'commands.eval-dynamic',
+  pipeChainHigh: 'data.pipe-chain',
+};
+
+/** The slice of a merged config the catalog resolver reads. */
+export function catalogSettingsFrom(
+  settings: Config['settings'],
+  policy: Config['policy']
+): CatalogSettings {
+  return catalogSettingsFromConfig(settings, policy);
+}
+
 export function getConfig(cwd?: string): Config {
   // When an explicit cwd is provided (hook commands passing payload.cwd), skip
   // the cache entirely — each project directory may have its own node9.config.json,
@@ -847,7 +918,7 @@ export function getConfig(cwd?: string): Config {
   const projectPath = path.join(cwd ?? process.cwd(), 'node9.config.json');
 
   const globalConfig = tryLoadConfig(globalPath);
-  const projectConfig = tryLoadConfig(projectPath);
+  const projectConfig = tryLoadConfig(projectPath, { project: true });
 
   const mergedSettings = {
     ...DEFAULT_CONFIG.settings,
@@ -859,7 +930,9 @@ export function getConfig(cwd?: string): Config {
     dangerousWords: [...DEFAULT_CONFIG.policy.dangerousWords],
     ignoredTools: [...DEFAULT_CONFIG.policy.ignoredTools],
     toolInspection: { ...DEFAULT_CONFIG.policy.toolInspection },
-    smartRules: [...DEFAULT_CONFIG.policy.smartRules],
+    // Shipped rules carry `builtin`: the catalog's per-check value governs
+    // them and only them (a user rule that reuses a name keeps its verdict).
+    smartRules: DEFAULT_CONFIG.policy.smartRules.map((r) => ({ ...r, builtin: true })),
     dlp: { ...DEFAULT_CONFIG.policy.dlp },
     egress: {
       ...DEFAULT_CONFIG.policy.egress,
@@ -871,6 +944,10 @@ export function getConfig(cwd?: string): Config {
     injectionScan: {
       ...DEFAULT_CONFIG.policy.injectionScan,
       allow: [...DEFAULT_CONFIG.policy.injectionScan.allow],
+    },
+    packageCheck: {
+      ...DEFAULT_CONFIG.policy.packageCheck,
+      allow: [...DEFAULT_CONFIG.policy.packageCheck.allow],
     },
     skillPinning: {
       ...DEFAULT_CONFIG.policy.skillPinning,
@@ -904,6 +981,8 @@ export function getConfig(cwd?: string): Config {
   const keyed = !!pr2Creds?.apiKey && pr2Creds.localOnly !== true;
   // Provenance for the one field a status screen attributes out loud.
   let ssrfStrictSource: Config['ssrfStrictSource'] = 'default';
+  // Phase 3a: checks the workspace stated, from the cache's `config` block.
+  const workspaceChecks: Record<string, Verdict> = {};
 
   const applyLayer = (
     source: Record<string, unknown> | null,
@@ -1080,6 +1159,22 @@ export function getConfig(cwd?: string): Config {
         }
       }
     }
+    if (p.packageCheck && typeof p.packageCheck === 'object') {
+      const pc = p.packageCheck as Partial<Config['policy']['packageCheck']>;
+      const cur = mergedPolicy.packageCheck;
+      if (typeof pc.enabled === 'boolean') cur.enabled = pc.enabled;
+      if (pc.onMalicious === 'block' || pc.onMalicious === 'review')
+        cur.onMalicious = pc.onMalicious;
+      if (typeof pc.registrySignals === 'boolean') cur.registrySignals = pc.registrySignals;
+      if (typeof pc.maxAgeHours === 'number' && pc.maxAgeHours >= 0)
+        cur.maxAgeHours = pc.maxAgeHours;
+      if (typeof pc.onlineFallback === 'boolean') cur.onlineFallback = pc.onlineFallback;
+      if (Array.isArray(pc.allow)) {
+        for (const a of pc.allow) {
+          if (typeof a === 'string' && a.length > 0) cur.allow.push(a);
+        }
+      }
+    }
     if (p.skillPinning && typeof p.skillPinning === 'object') {
       const sp = p.skillPinning as Partial<Config['policy']['skillPinning']>;
       if (sp.enabled !== undefined) mergedPolicy.skillPinning.enabled = sp.enabled;
@@ -1191,6 +1286,16 @@ export function getConfig(cwd?: string): Config {
       if (Array.isArray(raw.shields)) {
         cloudManagedShields = raw.shields.filter((s): s is string => typeof s === 'string');
       }
+      // Phase 3a: the workspace's checks in the catalog's language. Validated
+      // once more here, since the cache file is on disk and editable.
+      if (raw.config && typeof raw.config === 'object') {
+        const checks = (raw.config as { checks?: unknown }).checks;
+        if (checks && typeof checks === 'object' && !Array.isArray(checks)) {
+          for (const [id, v] of Object.entries(checks as Record<string, unknown>)) {
+            if (isVerdict(v) && configurableValues(id).includes(v)) workspaceChecks[id] = v;
+          }
+        }
+      }
       // Managed settings (M2, baseline+lock) — applied as a floor a dev can only
       // tighten, unless the admin locked it. Runs BEFORE the shadow/panic
       // overrides below so those stay absolute.
@@ -1219,6 +1324,14 @@ export function getConfig(cwd?: string): Config {
           injectionScan?: {
             enabled?: unknown;
             minConfidence?: unknown;
+            allow?: unknown;
+          };
+          packageCheck?: {
+            enabled?: unknown;
+            onMalicious?: unknown;
+            registrySignals?: unknown;
+            maxAgeHours?: unknown;
+            onlineFallback?: unknown;
             allow?: unknown;
           };
           loopDetection?: {
@@ -1418,6 +1531,34 @@ export function getConfig(cwd?: string): Config {
               : cur.allow,
           };
         }
+        // Detection: packageCheck replaces the local config per field, like
+        // injectionScan — the org owns which protections run. The org allow
+        // list REPLACES the local one, so a developer cannot exempt a package
+        // the org did not.
+        if (mc.packageCheck && typeof mc.packageCheck === 'object') {
+          const pc = mc.packageCheck;
+          const cur = mergedPolicy.packageCheck;
+          mergedPolicy.packageCheck = {
+            enabled: typeof pc.enabled === 'boolean' ? pc.enabled : cur.enabled,
+            onMalicious:
+              pc.onMalicious === 'block' || pc.onMalicious === 'review'
+                ? pc.onMalicious
+                : cur.onMalicious,
+            registrySignals:
+              typeof pc.registrySignals === 'boolean' ? pc.registrySignals : cur.registrySignals,
+            maxAgeHours:
+              typeof pc.maxAgeHours === 'number' &&
+              Number.isFinite(pc.maxAgeHours) &&
+              pc.maxAgeHours >= 0
+                ? pc.maxAgeHours
+                : cur.maxAgeHours,
+            onlineFallback:
+              typeof pc.onlineFallback === 'boolean' ? pc.onlineFallback : cur.onlineFallback,
+            allow: Array.isArray(pc.allow)
+              ? pc.allow.filter((a): a is string => typeof a === 'string' && a.length > 0)
+              : cur.allow,
+          };
+        }
         if (mc.loopDetection && typeof mc.loopDetection === 'object') {
           const l = mc.loopDetection;
           const cur = mergedPolicy.loopDetection;
@@ -1610,11 +1751,13 @@ export function getConfig(cwd?: string): Config {
         if (collides) {
           mergedPolicy.smartRules = mergedPolicy.smartRules.filter((r) => r.name !== rule.name);
         }
-        mergedPolicy.smartRules.push({ ...rule, pinned: true });
+        mergedPolicy.smartRules.push({ ...rule, pinned: true, builtin: true });
       } else if (!collides) {
         const overrideVerdict = rule.name ? ruleOverrides[rule.name] : undefined;
         mergedPolicy.smartRules.push(
-          overrideVerdict !== undefined ? { ...rule, verdict: overrideVerdict } : rule
+          overrideVerdict !== undefined
+            ? { ...rule, verdict: overrideVerdict, builtin: true }
+            : { ...rule, builtin: true }
         );
       }
     }
@@ -1673,7 +1816,7 @@ export function getConfig(cwd?: string): Config {
     // (A local `rmAdvisory:'block'` must still swap the verdict — this is the
     // dev's own knob, not an org mandate.)
     if (!managed) {
-      if (!twin) mergedPolicy.smartRules.push({ ...rule, verdict: knobVerdict });
+      if (!twin) mergedPolicy.smartRules.push({ ...rule, verdict: knobVerdict, builtin: true });
       continue;
     }
 
@@ -1720,7 +1863,7 @@ export function getConfig(cwd?: string): Config {
       ];
       injected.conditionMode = 'all';
     }
-    mergedPolicy.smartRules.push(injected);
+    mergedPolicy.smartRules.push({ ...injected, builtin: true });
   }
 
   // NODE9_MODE is a local dev convenience — honoured only when the cloud hasn't
@@ -1820,6 +1963,71 @@ export function getConfig(cwd?: string): Config {
   const resolvedSsrfStrictSource: Config['ssrfStrictSource'] =
     keyed && (ssrfStrictSource as string) === 'local' ? 'default' : ssrfStrictSource;
 
+  // ── The checks map (catalog phase 2) ─────────────────────────────────────
+  // Explicit per-check values from v2 files overlay the legacy resolution. A
+  // keyed machine ignores both local files, as it does every local policy
+  // layer. The project file may only tighten what the global file or the
+  // legacy knobs decided.
+  const explicit: Record<string, Verdict> = {};
+  const checkSources: Record<string, 'local' | 'project' | 'workspace'> = {};
+  if (keyed) {
+    // The workspace's values are the truth on a keyed machine; the local
+    // files have no say. A knob-governed entry also travelled as its knob in
+    // managedConfig, so the two agree by construction.
+    for (const [id, v] of Object.entries(workspaceChecks)) {
+      explicit[id] = v;
+      checkSources[id] = 'workspace';
+    }
+  } else {
+    // The legacy resolution already carries every floor the org set
+    // (applyManagedCommandChecks wrote them into commandChecks). A local entry
+    // for a managed knob may tighten it, never go below it.
+    const floored = resolveCheckMap(catalogSettingsFrom(mergedSettings, mergedPolicy));
+    const managedIds = new Set(
+      [...managedCommandCheckKeys].map((k) => KNOB_TO_CHECK[k]).filter(Boolean)
+    );
+    const global = v2ChecksByPath.get(globalPath);
+    for (const [id, v] of Object.entries(global?.checks ?? {})) {
+      if (managedIds.has(id) && CHECK_VERDICT_RANK[v] < CHECK_VERDICT_RANK[floored[id] ?? 'off'])
+        continue;
+      explicit[id] = v;
+    }
+    const base = resolveCheckMap({
+      ...catalogSettingsFrom(mergedSettings, mergedPolicy),
+      checks: explicit,
+    });
+    for (const [id, v] of Object.entries(v2ChecksByPath.get(projectPath)?.checks ?? {})) {
+      if (CHECK_VERDICT_RANK[v] > CHECK_VERDICT_RANK[base[id] ?? 'off']) {
+        explicit[id] = v;
+        checkSources[id] = 'project';
+      }
+    }
+    // A stated value that is the one in force names its file as the source.
+    const inForce = resolveCheckMap({
+      ...catalogSettingsFrom(mergedSettings, mergedPolicy),
+      checks: explicit,
+    });
+    for (const [id, v] of Object.entries(global?.stated ?? {})) {
+      if (!checkSources[id] && inForce[id] === v) checkSources[id] = 'local';
+    }
+    for (const [id, v] of Object.entries(v2ChecksByPath.get(projectPath)?.stated ?? {})) {
+      if (!checkSources[id] && inForce[id] === v && !(id in (global?.stated ?? {})))
+        checkSources[id] = 'project';
+    }
+  }
+  const resolvedChecks = resolveCheckMap({
+    ...catalogSettingsFrom(mergedSettings, mergedPolicy),
+    checks: explicit,
+  });
+  // A pack row's verdict lives on its injected rule, where `node9 shield set`
+  // overrides it; the engine treats a map entry for a pack row as an explicit
+  // override, so only one a file stated may ride in the map.
+  for (const id of Object.keys(resolvedChecks)) {
+    if (id.startsWith('packs.') && !(id in explicit)) delete resolvedChecks[id];
+  }
+  mergedPolicy.checks = resolvedChecks;
+  mergedPolicy.checkSources = checkSources;
+
   const result: Config = {
     settings: mergedSettings,
     policy: mergedPolicy,
@@ -1840,7 +2048,11 @@ export function getConfig(cwd?: string): Config {
   return result;
 }
 
-function tryLoadConfig(filePath: string): Record<string, unknown> | null {
+function tryLoadConfig(
+  filePath: string,
+  options: { project?: boolean } = {}
+): Record<string, unknown> | null {
+  v2ChecksByPath.delete(filePath);
   if (!fs.existsSync(filePath)) return null;
   let raw: unknown;
   try {
@@ -1851,6 +2063,17 @@ function tryLoadConfig(filePath: string): Record<string, unknown> | null {
       `\n⚠️  Node9: Failed to parse ${filePath}\n   ${msg}\n   → Using default config\n\n`
     );
     return null;
+  }
+
+  // A v2 file (catalog ids) is translated to the legacy shape the merge below
+  // has always consumed; its explicit checks ride alongside for the checks
+  // map. Problems are reported and the offending entries dropped: a config
+  // file must never break a tool call.
+  if (isV2File(raw)) {
+    const { legacy, checks, stated, warnings } = v2ToLegacy(raw, { project: options.project });
+    for (const w of warnings) process.stderr.write(`\n⚠️  Node9: ${filePath}: ${w}\n`);
+    v2ChecksByPath.set(filePath, { checks, stated });
+    raw = legacy;
   }
   const SUPPORTED_VERSION = '1.0';
   const SUPPORTED_MAJOR = SUPPORTED_VERSION.split('.')[0];

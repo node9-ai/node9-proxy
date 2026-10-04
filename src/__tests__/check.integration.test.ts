@@ -20,6 +20,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import http from 'http';
+import { FAKE_GH_TOKEN } from './helpers/github-token';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -372,9 +373,9 @@ describe('ignored tools fast-path', () => {
   });
 
   it('Claude UserPromptSubmit with GitHub token in prompt blocks with Claude permissionDecision shape', () => {
-    // Same runtime-composition trick — keep our own DLP scanner from flagging
-    // this source file during edits.
-    const fakeGhToken = 'ghp_' + 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789';
+    // Checksum-valid canary (helpers/github-token.ts): the GitHub pattern
+    // verifies the CRC32 suffix, so a shape-only string would not fire.
+    const fakeGhToken = FAKE_GH_TOKEN;
     const r = runCheck(
       {
         session_id: 's1',

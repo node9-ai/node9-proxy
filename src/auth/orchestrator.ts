@@ -42,6 +42,7 @@ import {
 } from './daemon';
 import { initNode9SaaS, pollNode9SaaS, resolveNode9SaaS } from './cloud';
 import { recordAndCheck } from '../loop-detector';
+import { runPackageCheck } from '../supply-chain/check';
 import { readActiveShields } from '../shields';
 import { findJailedPath, findJailedPathIn, USER_JAIL_SHIELD } from '../shields/jail';
 import { safeMessage } from '../utils/safe-text';
@@ -339,6 +340,10 @@ export async function authorizeHeadless(
     cwd?: string;
     localSmartRuleMatched?: boolean;
     deferReview?: boolean;
+    /** The caller classes this tool as state-changing (the MCP gateway: any
+     *  tool the server does not declare `readOnlyHint`), so a tainted session
+     *  routes it to review like a write or network call. */
+    sessionTaintGated?: boolean;
   }
 ): Promise<AuthResult> {
   // Skip socket notification when called from daemon — daemon already broadcasts via SSE
@@ -443,6 +448,7 @@ async function _authorizeHeadlessCore(
     localSmartRuleMatched?: boolean;
     socketActivitySent?: boolean;
     deferReview?: boolean;
+    sessionTaintGated?: boolean;
   }
 ): Promise<AuthResult> {
   // Thread the working directory into meta so every audit row written below
@@ -504,6 +510,7 @@ async function _authorizeHeadlessCore(
 
   let explainableLabel = 'Local Config';
   let dlpReviewFlagged = false; // a credential was found at DLP 'review' severity
+  let packageReview: string | null = null; // the package check asked for review
   let policyMatchedField: string | undefined;
   let policyMatchedWord: string | undefined;
   let policyRuleDescription: string | undefined;
@@ -603,13 +610,18 @@ async function _authorizeHeadlessCore(
   if (
     !taintWarning &&
     meta?.sessionId &&
-    (isNetworkTool(toolName, args) || isWriteTool(toolName))
+    (isNetworkTool(toolName, args) || isWriteTool(toolName) || options?.sessionTaintGated === true)
   ) {
     const sessionTaint = await checkSessionTaint(meta.sessionId);
     if (sessionTaint.tainted && sessionTaint.record) {
+      const kind = isWriteTool(toolName)
+        ? 'write'
+        : isNetworkTool(toolName, args)
+          ? 'network'
+          : 'state-changing';
       taintWarning =
         `⚠️ node9 flagged this session — earlier tool output contained ${sessionTaint.record.source}. ` +
-        `Approve this ${isWriteTool(toolName) ? 'write' : 'network'} action before it proceeds.`;
+        `Approve this ${kind} action before it proceeds.`;
     }
   }
 
@@ -841,6 +853,70 @@ async function _authorizeHeadlessCore(
     }
   }
 
+  // ── PACKAGE CHECK (supply chain) ──────────────────────────────────────────
+  // A shell command that installs or runs registry packages is checked before
+  // it runs: a known malicious package (OSV MAL- record) blocks with the
+  // advisory id; a malicious record with an unknown version, a package
+  // published inside policy.packageCheck.maxAgeHours, or an npm install script
+  // routes to review. Lookups fail OPEN — node9 never stops the agent because
+  // a check failed — and every miss is written to hook-debug.log.
+  // Not for manual (Terminal) calls: a human typing an install is the
+  // decision this check would otherwise ask them for.
+  // `?.`: a config without the key (an older managed shape, a partial test
+  // config) must skip the check, never throw — an exception here would turn
+  // into a fail-CLOSED engine error in the gateway.
+  const packageCheck = config.policy.packageCheck;
+  if (packageCheck?.enabled && !isManual) {
+    const pkg = await runPackageCheck(toolName, args, packageCheck);
+    if (pkg.misses.length > 0) {
+      appendToLog(HOOK_DEBUG_LOG, {
+        ts: new Date().toISOString(),
+        event: 'package-check-miss',
+        tool: toolName,
+        misses: pkg.misses,
+      });
+    }
+    if (pkg.verdict === 'block' && pkg.reason) {
+      const advisories = pkg.findings.flatMap((f) => f.advisories ?? []);
+      appendLocalAudit(
+        toolName,
+        args,
+        'deny',
+        isObserveMode ? 'observe-mode-package-would-block' : 'package-malicious',
+        { ...meta, ruleName: `package-check:${advisories.join(',')}` },
+        hashAuditArgs
+      );
+      if (isObserveMode) {
+        return {
+          approved: true,
+          checkedBy: 'audit',
+          observeWouldBlock: true,
+          blockedByLabel: '📦 Node9 Package Check (Malicious)',
+        };
+      }
+      return {
+        approved: false,
+        reason: pkg.reason,
+        blockedBy: 'local-config',
+        blockedByLabel: '📦 Node9 Package Check (Malicious)',
+        ruleHit: `package-check:${advisories.join(',')}`,
+        ruleDescription: pkg.reason,
+      };
+    }
+    if (pkg.verdict === 'review' && pkg.reason) {
+      appendLocalAudit(
+        toolName,
+        args,
+        'allow',
+        'package-review-flagged',
+        { ...meta, ruleName: 'package-check:review' },
+        hashAuditArgs
+      );
+      packageReview = pkg.reason;
+      if (!dlpReviewFlagged) explainableLabel = '📦 Node9 Package Check (Review)';
+    }
+  }
+
   // ── G10: a tool on the ignored list that DECLARES a destination ──────────
   // WebFetch is on ignoredTools, so with the guards below it never reached
   // evaluatePolicy and the egress policy was shell-only (measured 2026-09-20:
@@ -944,7 +1020,8 @@ async function _authorizeHeadlessCore(
    * walk (DLP at the gate, app permission after, taint after that), and a
    * guard that runs early must see what is known so far.
    */
-  const callSpecificReview = (): boolean => dlpReviewFlagged || !!appPermReview || !!taintWarning;
+  const callSpecificReview = (): boolean =>
+    dlpReviewFlagged || !!appPermReview || !!taintWarning || !!packageReview;
   /** A trust session may answer this call. ONE definition for the two places
    *  that must agree: the trust guard that honours a session, and the native
    *  "Always Allow" button that writes one. When they disagreed the button
@@ -1475,6 +1552,22 @@ async function _authorizeHeadlessCore(
         appPermReview
       );
     }
+  } else if (packageReview) {
+    // The package check's findings ride as the rule text so every approval
+    // surface says WHICH package and why. A policy label set above (a smart
+    // rule that also reviewed) is kept; the findings still reach the card.
+    policyRuleDescription =
+      explainableLabel === '📦 Node9 Package Check (Review)' || !policyRuleDescription
+        ? packageReview
+        : `${policyRuleDescription}\n${packageReview}`;
+    riskMetadata = computeRiskMetadata(
+      args,
+      5,
+      explainableLabel,
+      undefined,
+      undefined,
+      packageReview
+    );
   }
 
   // ── INLINE-ASK DEFER (review → caller renders the prompt) ────────────────
@@ -1507,7 +1600,11 @@ async function _authorizeHeadlessCore(
       // The prompt must say WHY: the taint sentence beats the bare label so
       // the dev sees the actual risk context inline. (No appPermReview term:
       // deferReview and serverKey never co-occur in production — see above.)
-      reason: taintWarning || explainableLabel || 'Node9 flagged this action for review.',
+      reason:
+        taintWarning ||
+        packageReview ||
+        explainableLabel ||
+        'Node9 flagged this action for review.',
       ruleDescription: policyRuleDescription,
       blockedByLabel: explainableLabel,
     };

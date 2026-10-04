@@ -58,6 +58,16 @@ Do NOT attempt to bypass this check or pass the credential through another tool.
 - Tell the user node9 blocked this and why, then ask how to proceed.`;
   }
 
+  if (label.includes('package check')) {
+    // The reason names the package and the advisory id (OSV MAL-…); the agent
+    // needs both to tell the user what was stopped and to pick another package.
+    return `NODE9: Blocked — ${humanReason || 'a package in this command is known to be malicious.'}
+INSTRUCTIONS:
+- Do NOT install this package, and do NOT fetch it another way (a different package manager, a tarball URL, a git URL, a mirror).
+- If a dependency is needed, suggest a well-known alternative and let the user choose.
+- Tell the user node9 blocked this install and name the advisory, then ask how to proceed.`;
+  }
+
   if (label.includes('sql safety') && label.includes('delete without where')) {
     return `NODE9: Blocked — DELETE without WHERE clause would wipe the entire table.
 INSTRUCTION: Add a WHERE clause to scope the deletion (e.g. WHERE id = <value>).

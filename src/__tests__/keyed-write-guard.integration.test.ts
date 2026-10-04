@@ -26,6 +26,7 @@
 // is spawnable. MCP rows G15-G21 live in keyed-mcp-guard.integration.test.ts.
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { readConfigFileLegacy } from '../config/write';
 import { spawnSync } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -235,10 +236,13 @@ describe('§G unkeyed twins — the known-true instruments (same commands, no ke
   it('egress off works (the weakening twin — G5 instrument)', () => {
     const r = runCli(home, ['egress', 'off']);
     expect(r.status).toBe(0);
-    const cfg = JSON.parse(fs.readFileSync(path.join(home, '.node9', 'config.json'), 'utf-8')) as {
+    // The unkeyed CLI migrates the file to v2 first; read its legacy view.
+    const cfg = readConfigFileLegacy(path.join(home, '.node9', 'config.json')) as {
       policy?: { egress?: { enabled?: boolean } };
     };
-    expect(cfg.policy?.egress?.enabled).toBe(false);
+    // Off is the shipped default, and the v2 file writes only departures from
+    // the defaults, so "off" now reads as an absent block.
+    expect(cfg.policy?.egress?.enabled ?? false).toBe(false);
   });
 
   it('shield enable postgres works and lands in shields.json', () => {

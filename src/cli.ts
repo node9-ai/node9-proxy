@@ -40,7 +40,9 @@ import { registerLogoutCommand, revokeSelf } from './cli/commands/logout';
 import { openBrowser } from './utils/open-browser';
 import { registerCheckCommand } from './cli/commands/check';
 import { registerLogCommand } from './cli/commands/log';
-import { registerShieldCommand, registerConfigShowCommand } from './cli/commands/shield';
+import { registerShieldCommand } from './cli/commands/shield';
+import { registerConfigCommand } from './cli/commands/config-cmd';
+import { autoMigrateLocalConfig } from './config/migrate';
 import { registerDoctorCommand } from './cli/commands/doctor';
 import { registerAuditCommand } from './cli/commands/audit';
 import { registerReportCommand } from './cli/commands/report';
@@ -60,6 +62,7 @@ import { registerScanCommand } from './cli/commands/scan';
 import { registerPostureCommand } from './cli/commands/posture';
 import { registerScanRepoCommand } from './cli/commands/scan-repo';
 import { registerEgressCommand } from './cli/commands/egress';
+import { registerChecksCommand } from './cli/commands/checks';
 import { registerJailCommand } from './cli/commands/jail';
 import { registerCanaryCommand } from './cli/commands/canary';
 import { removeKind } from './canary/plant';
@@ -68,6 +71,7 @@ import { uninstallDaemonService } from './daemon/index';
 import { registerSandboxCommand } from './cli/commands/sandbox';
 import { registerSessionsCommand } from './cli/commands/sessions';
 import { registerSessionTaintCommand } from './cli/commands/session-taint';
+import { registerPackageIndexCommand } from './cli/commands/package-index';
 import { registerSkillPinCommand } from './cli/commands/skill-pin';
 import { registerDecisionsCommand } from './cli/commands/decisions';
 import { registerDlpCommand } from './cli/commands/dlp';
@@ -872,7 +876,7 @@ registerUndoCommand(program);
 
 // Shield management + config show
 registerShieldCommand(program);
-registerConfigShowCommand(program);
+registerConfigCommand(program);
 
 // Trusted-host allowlist
 registerTrustCommand(program);
@@ -894,6 +898,7 @@ registerScanRepoCommand(program);
 
 // Egress control (the posture remediation on-ramp)
 registerEgressCommand(program);
+registerChecksCommand(program);
 // Credential jail — user-extensible protected paths
 registerJailCommand(program);
 // Decoy credentials (canary)
@@ -903,6 +908,7 @@ registerSandboxCommand(program, version);
 // Session history
 registerSessionsCommand(program);
 registerSessionTaintCommand(program);
+registerPackageIndexCommand(program);
 
 // Response DLP findings
 registerDlpCommand(program);
@@ -947,6 +953,15 @@ const firstArg = process.argv[2];
 if (firstArg && firstArg !== '--' && !firstArg.startsWith('-') && !knownSubcommands.has(firstArg)) {
   process.argv.splice(2, 0, '--');
 }
+
+// The one-time move of ~/.node9/config.json to the v2 shape runs before any
+// command except the hooks: `check` and `log` run on every tool call, in
+// parallel, and must never write the config. The daemon runs it at start.
+program.hook('preAction', (_thisCommand, actionCommand) => {
+  const name = actionCommand.name();
+  if (name === 'check' || name === 'log') return;
+  autoMigrateLocalConfig();
+});
 
 (async () => {
   await program.parseAsync();

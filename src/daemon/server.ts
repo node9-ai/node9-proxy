@@ -2,6 +2,7 @@
 // HTTP server for the Node9 localhost approval daemon.
 // All route handlers live here; shared state is in daemon/state.ts.
 import http from 'http';
+import { autoMigrateLocalConfig } from '../config/migrate';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -80,6 +81,7 @@ import { startMcpReconciler } from './mcp-reconciler.js';
 import { startHookHeal } from './hook-heal.js';
 import { logDaemonStartup, recordStartupState } from './startup-log.js';
 import { readMcpToolsConfig, updateServerDiscovery, approveServer } from './mcp-tools.js';
+import { startOsvSync } from '../supply-chain/osv-sync';
 
 export type DaemonReportPeriod = 'today' | '7d' | '30d' | 'month';
 
@@ -204,11 +206,15 @@ export function startDaemon(): void {
   // — that throws at import time, before this runs; A4b (child stderr → the same log)
   // is what captures those.
   try {
+    // Once after an upgrade: the config file moves to the v2 shape here, not
+    // in the hooks (see config/migrate.ts).
+    autoMigrateLocalConfig();
     startCostSync();
     startCloudSync();
     startForensicBroadcast();
     startAuditShipper();
     startDlpScanner();
+    startOsvSync();
     startMcpReconciler();
     startHookHeal();
     loadInsightCounts(); // restore persisted nudge counters across restarts
@@ -687,9 +693,8 @@ export function startDaemon(): void {
       try {
         const counters = sessionCounters.get();
         // PR-2 §0.6: the HUD's mode is the EFFECTIVE mode from the full
-        // merge — getGlobalSettings reads the raw local file (default
-        // 'audit'), which on a keyed machine is exactly the value the
-        // machine ignores.
+        // merge — getGlobalSettings reads the raw local file, which on a
+        // keyed machine is exactly the value the machine ignores.
         const mode = getConfig().settings.mode as HudStatus['mode'];
         const status: HudStatus = {
           mode,

@@ -370,6 +370,40 @@ describe('§K — keyed replace-mode: policy = DEFAULT_CONFIG ⊕ cloud only', (
       });
     });
 
+    it('K6c: local packageCheck off dropped — DEFAULT on (the org owns the protection)', () => {
+      keyed();
+      writeGlobal({ policy: { packageCheck: { enabled: false, allow: ['*'] } } });
+      expect(cfg().policy.packageCheck).toEqual({
+        enabled: true,
+        onMalicious: 'block',
+        registrySignals: true,
+        maxAgeHours: 48,
+        onlineFallback: true,
+        allow: [],
+      });
+    });
+
+    it('K6d: cloud packageCheck applies verbatim, invalid fields keep the default', () => {
+      keyed();
+      mc({
+        packageCheck: {
+          enabled: true,
+          onMalicious: 'review',
+          registrySignals: false,
+          maxAgeHours: -1,
+          allow: ['@myorg/*', 7],
+        },
+      });
+      expect(cfg().policy.packageCheck).toEqual({
+        enabled: true,
+        onMalicious: 'review',
+        registrySignals: false,
+        maxAgeHours: 48,
+        onlineFallback: true,
+        allow: ['@myorg/*'],
+      });
+    });
+
     it('K7a: local loopDetection off dropped — DEFAULT on 5/120 (tightening direction)', () => {
       keyed();
       writeGlobal({ policy: { loopDetection: { enabled: false } } });

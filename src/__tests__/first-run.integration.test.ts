@@ -39,6 +39,8 @@ fs.accessSync = function(file, ...args) {
       USERPROFILE: home,
       CI: 'true',
       NODE9_TESTING: '1',
+      // These rows pin the legacy on-disk shape; migration has its own spec.
+      NODE9_NO_CONFIG_MIGRATE: '1',
       NODE9_NO_AUTO_DAEMON: '1',
     },
     encoding: 'utf8',
@@ -100,6 +102,7 @@ describe('setup CLI without a terminal', () => {
     expect(fs.readFileSync(file, 'utf8')).toBe('{broken');
     const result = run(home, ['init', '--force', '--skip-setup', '--mode', 'strict']);
     expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(fs.readFileSync(file, 'utf8')).settings.mode).toBe('strict');
+    // --force writes a fresh file in the v2 shape, where mode is top-level.
+    expect(JSON.parse(fs.readFileSync(file, 'utf8'))).toEqual({ version: '2', mode: 'strict' });
   });
 });

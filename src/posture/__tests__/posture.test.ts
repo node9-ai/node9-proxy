@@ -37,7 +37,9 @@ const f = (category: string, severity: Severity = 'high'): Finding => ({
 
 // A fake token assembled at runtime — matches the DLP "GitHub Token" pattern
 // once joined, but no secret-shaped literal appears in this source file.
-const FAKE_TOKEN = ['ghp', '_', 'A1b2C3d4E5f6', 'G7h8I9j0K1l2', 'M3n4O5p6Q7r8'].join('');
+// Checksum-valid canary (src/__tests__/helpers/github-token.ts): the GitHub
+// pattern verifies the CRC32 suffix, so a shape-only string would not fire.
+import { FAKE_GH_TOKEN as FAKE_TOKEN } from '../../__tests__/helpers/github-token';
 
 describe('evaluateEgressConfig', () => {
   it('flags HIGH when egress is disabled', () => {

@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import { writeConfigFile } from './config/write';
 import * as os from 'os';
 import * as path from 'path';
 import { DEFAULT_CONFIG } from './config';
@@ -52,18 +53,6 @@ export function writeCredentialsAndConfig(
   let effectiveCloud: boolean | null = null;
   if (profileName === 'default') {
     const configPath = path.join(home, '.node9', 'config.json');
-    let config: Record<string, unknown> = {};
-    try {
-      if (fs.existsSync(configPath)) {
-        config = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
-      }
-    } catch {
-      // Corrupt config — start fresh.
-    }
-    if (!config.settings || typeof config.settings !== 'object') {
-      config.settings = {};
-    }
-    const s = config.settings as Record<string, unknown>;
     // ONE approvers seed (login-v2 §5, B0). Defaults derive from DEFAULT_CONFIG
     // so an init-written config and a login-written config can never disagree
     // again — the old dual seed plus preserve-on-login locked cloud:false
@@ -75,22 +64,29 @@ export function writeCredentialsAndConfig(
     //
     // The legacy `browser` approver (local dashboard removed in v3) is dropped
     // from the block on every write so it stops resurfacing in configs.
-    const existing =
-      s.approvers && typeof s.approvers === 'object'
-        ? (s.approvers as Record<string, unknown>)
-        : {};
-    const d = DEFAULT_CONFIG.settings.approvers;
-    s.approvers = {
-      native: typeof existing.native === 'boolean' ? existing.native : d.native,
-      terminal: typeof existing.terminal === 'boolean' ? existing.terminal : d.terminal,
-      cloud: !opts.isLocal,
-    };
-    if (!fs.existsSync(path.dirname(configPath))) {
-      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    const seed = () =>
+      writeConfigFile(configPath, (config) => {
+        const s = (config.settings ??= {});
+        const existing = (s.approvers ?? {}) as Record<string, unknown>;
+        const d = DEFAULT_CONFIG.settings.approvers;
+        s.approvers = {
+          native: typeof existing.native === 'boolean' ? existing.native : d.native,
+          terminal: typeof existing.terminal === 'boolean' ? existing.terminal : d.terminal,
+          cloud: !opts.isLocal,
+        };
+      });
+    try {
+      seed();
+    } catch (err) {
+      // A corrupt config must not fail a login that already saved its key:
+      // move it aside (never delete it) and seed a fresh file.
+      if (!/not valid JSON|not a JSON object/.test((err as Error).message)) throw err;
+      fs.renameSync(
+        configPath,
+        `${configPath}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`
+      );
+      seed();
     }
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 2), {
-      mode: 0o600,
-    });
     effectiveCloud = !opts.isLocal;
   }
 

@@ -1,10 +1,12 @@
 // Shared installation steps and the script-compatible init command.
 import type { Command } from 'commander';
+import { legacyToV2 } from '../../config/v2';
+import { writeConfigFile } from '../../config/write';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import https from 'https';
-import { DEFAULT_CONFIG, RUNTIME_ONLY_CONFIG_KEYS, _resetConfigCache } from '../../config';
+import { DEFAULT_CONFIG, _resetConfigCache } from '../../config';
 import { setupAgent, detectAgents, node9Version } from '../../setup';
 import { getMachineId } from '../../machine-id';
 import { atomicWriteSync } from '../../utils/atomic-write';
@@ -94,23 +96,22 @@ export function ensureConfig(mode?: string, force = false): { firstInstall: bool
   const file = path.join(os.homedir(), '.node9', 'config.json');
   const firstInstall = !fs.existsSync(file);
   if (firstInstall || force) {
-    const config: Record<string, unknown> = {
-      ...DEFAULT_CONFIG,
-      settings: { ...DEFAULT_CONFIG.settings, mode: mode ?? DEFAULT_CONFIG.settings.mode },
-    };
-    for (const key of RUNTIME_ONLY_CONFIG_KEYS) delete config[key];
-    atomicWriteSync(file, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+    // A new machine gets the v2 file, holding only what departs from the
+    // shipped defaults: a mode, when one was chosen, and nothing else.
+    const body = legacyToV2(
+      mode !== undefined && mode !== DEFAULT_CONFIG.settings.mode
+        ? { settings: { mode: mode as 'standard' } }
+        : {}
+    );
+    atomicWriteSync(file, JSON.stringify(body, null, 2) + '\n', { mode: 0o600 });
   } else if (mode !== undefined) {
-    let config;
     try {
-      config = JSON.parse(fs.readFileSync(file, 'utf8'));
+      writeConfigFile(file, (config) => {
+        if (config.settings?.mode === mode) return;
+        config.settings = { ...config.settings, mode: mode as 'standard' };
+      });
     } catch {
-      config = undefined;
-    }
-    if (!config || typeof config !== 'object' || Array.isArray(config)) throw invalidConfig();
-    if (config.settings?.mode !== mode) {
-      config.settings = { ...config.settings, mode };
-      atomicWriteSync(file, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+      throw invalidConfig();
     }
   }
   _resetConfigCache();

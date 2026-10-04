@@ -28,6 +28,17 @@ import { matchesPattern, evaluateSmartConditions, getNestedValue } from '../rule
 import { analyzePipeChain } from './pipe-chain';
 import { extractAllSshHosts } from './ssh-parser';
 import { evaluateEgress, type EgressPolicy, type EgressVerdict } from '../egress';
+import {
+  checkIdForRule,
+  checkValue,
+  catalogSettingsFromConfig,
+  getCheck,
+  isVerdict,
+  ssrfCheckId,
+  BUILTIN_DANGEROUS_WORDS,
+  type CatalogSettings,
+  type Verdict,
+} from '../catalog';
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -62,20 +73,22 @@ export interface PolicyConfig {
       evalDynamic?: 'review' | 'block';
       pipeChainHigh?: 'review' | 'block';
     };
+    /**
+     * Per-check values keyed by catalog id (`commands.sudo`: `off`), the
+     * resolved map the host builds from its config file(s). Wins over the
+     * legacy knobs above. Absent for a caller that still builds the legacy
+     * shape by hand; the catalog then answers from those knobs.
+     */
+    checks?: Record<string, string>;
   };
   settings: {
     mode: string;
   };
 }
 
-/** Resolve a command-check knob: unknown/absent → 'review' (today's default). */
-function resolveCheck(v: string | undefined): 'off' | 'review' | 'block' {
-  return v === 'off' || v === 'block' ? v : 'review';
-}
-
-/** Class-B variant — 'off' is not a legal outcome for tighten-only checks. */
-function resolveCheckTight(v: string | undefined): 'review' | 'block' {
-  return v === 'block' ? 'block' : 'review';
+/** The slice of a PolicyConfig the catalog resolver reads. */
+function catalogSettings(config: PolicyConfig): CatalogSettings {
+  return catalogSettingsFromConfig(config.settings, config.policy);
 }
 
 export interface PolicyContext {
@@ -135,6 +148,19 @@ export interface PolicyVerdict {
    */
   overridable?: boolean;
   ruleName?: string;
+  /**
+   * True on an `allow` that records a finding: the check is set to `log`, so
+   * the call runs and the audit row names the check (through ruleName and
+   * checkId), but nothing stops. Never set together with review or block.
+   */
+  logged?: boolean;
+  /**
+   * The catalog check this verdict belongs to (`commands.sudo`,
+   * `data.secrets`, ...). Set on every non-allow verdict a built-in detector,
+   * a product rule or a pack rule produces; absent on an allow and on a user
+   * or organisation rule, which are rules, not checks. See catalog.ts.
+   */
+  checkId?: string;
   /** State predicates from the matched smart rule (only when decision is 'block'). */
   dependsOnStatePredicates?: string[];
   /** Recovery command to suggest when this rule hard-blocks (from SmartRule.recoveryCommand). */
@@ -262,9 +288,9 @@ export function checkDangerousSql(sql: string): string | null {
 function pipeChainVerdict(
   command: string,
   isTrustedHost?: (host: string) => boolean,
-  // Class B tighten-only knob (commandChecks.pipeChainHigh): floor verdict for
-  // the HIGH tier's untrusted-sink case. Critical tier is Class A — untouched.
-  highAction: 'review' | 'block' = 'review'
+  // The `data.pipe-chain` check's value, for the HIGH tier's untrusted-sink
+  // case. The critical tier is `data.pipe-chain-obfuscated` and always blocks.
+  highAction: Verdict = 'review'
 ): PolicyVerdict | null {
   const pipeAnalysis = analyzePipeChain(command);
   if (!pipeAnalysis.isPipeline) return null;
@@ -282,6 +308,7 @@ function pipeChainVerdict(
         blockedByLabel: 'Node9: Pipe-Chain to Trusted Host (obfuscated)',
         reason: `Obfuscated pipe to trusted host(s): ${sinks.join(', ')} — requires approval`,
         tier: 3,
+        checkId: 'data.pipe-chain-obfuscated',
       };
     }
     return {
@@ -289,6 +316,7 @@ function pipeChainVerdict(
       blockedByLabel: 'Node9: Pipe-Chain Exfiltration (critical)',
       reason: `Sensitive file piped through obfuscator to network sink: ${pipeAnalysis.sourceFiles.join(', ')} → ${sinks.join(', ')}`,
       tier: 3,
+      checkId: 'data.pipe-chain-obfuscated',
     };
   }
 
@@ -301,12 +329,33 @@ function pipeChainVerdict(
       tier: 3,
     };
   }
-  return {
-    decision: highAction,
+  return applyCheckValue(highAction, {
+    decision: 'review',
     blockedByLabel: 'Node9: Pipe-Chain Exfiltration (high)',
     reason: `Sensitive file piped to network sink: ${pipeAnalysis.sourceFiles.join(', ')} → ${sinks.join(', ')}`,
     tier: 3,
-  };
+    checkId: 'data.pipe-chain',
+  });
+}
+
+/**
+ * Apply a check's value to the verdict its detector built. `off` drops the
+ * finding, `log` turns it into an allow that still names the check (the
+ * audit row records it), `review` and `block` set the decision. A logged
+ * allow must never be returned early by a caller: it would skip the tiers
+ * below it (the SSRF floor among them), so callers keep it aside and hand it
+ * back only where they would otherwise allow.
+ */
+function applyCheckValue(value: Verdict, verdict: PolicyVerdict): PolicyVerdict | null {
+  if (value === 'off') return null;
+  if (value === 'log')
+    return {
+      ...verdict,
+      decision: 'allow',
+      logged: true,
+      ruleName: verdict.ruleName ?? verdict.blockedByLabel,
+    };
+  return { ...verdict, decision: value };
 }
 
 // ── Public evaluator ──────────────────────────────────────────────────────────
@@ -339,6 +388,7 @@ function egressPolicyVerdict(eg: EgressVerdict): PolicyVerdict {
     ruleName: `egress:${eg.binary}:${eg.host}`,
     ruleDescription: eg.reason,
     tier: eg.verdict === 'block' ? 3 : 4,
+    checkId: 'network.unknown-host',
   };
 }
 
@@ -351,6 +401,16 @@ export async function evaluatePolicy(
 ): Promise<PolicyVerdict> {
   const { agent, cwd, activeEnvironment } = context;
   const { checkProvenance, isTrustedHost } = hooks;
+  const settingsView = catalogSettings(config);
+  // ONE reader for every built-in site: the check's value in force.
+  const cv = (id: string): Verdict => checkValue(settingsView, id);
+  // A finding whose check is `log`: kept aside and returned only where the
+  // evaluation would otherwise allow, never ahead of a later tier.
+  let loggedFinding: PolicyVerdict | undefined;
+  const noteLogged = (v: PolicyVerdict | null): void => {
+    if (v?.logged && !loggedFinding) loggedFinding = v;
+  };
+  const allowed = (): PolicyVerdict => loggedFinding ?? { decision: 'allow' };
 
   // 0. DLP Content Scanner — runs before ignoredTools fast path so credentials
   // in "safe" tools (ls, grep, cat) are always caught when scanIgnoredTools is on.
@@ -370,6 +430,7 @@ export async function evaluatePolicy(
             : 'review',
         blockedByLabel: `DLP: ${dlpMatch.patternName}`,
         reason: `${dlpMatch.patternName} detected in ${dlpMatch.fieldPath}`,
+        checkId: dlpMatch.severity === 'block' ? 'data.secrets' : 'data.secrets-weak',
       };
     }
   }
@@ -406,6 +467,7 @@ export async function evaluatePolicy(
         ruleDescription: dest.reason,
         tier: 3,
         overridable: dest.overridable,
+        checkId: ssrfCheckId(dest.tier),
       };
     }
   }
@@ -480,12 +542,9 @@ export async function evaluatePolicy(
   // https://trusted.com) can still downgrade AST's block — trust list is an
   // explicit user opt-in. See core.test.ts:1763 and v1.4.0-trusted-hosts.
   if (bashCommand !== null) {
-    const pipeVerdict = pipeChainVerdict(
-      bashCommand,
-      isTrustedHost,
-      resolveCheckTight(config.policy.commandChecks?.pipeChainHigh)
-    );
-    if (pipeVerdict) return pipeVerdict;
+    const pipeVerdict = pipeChainVerdict(bashCommand, isTrustedHost, cv('data.pipe-chain'));
+    if (pipeVerdict?.logged) noteLogged(pipeVerdict);
+    else if (pipeVerdict) return pipeVerdict;
 
     const fsVerdict = analyzeFsOperation(bashCommand);
     if (fsVerdict) {
@@ -498,6 +557,7 @@ export async function evaluatePolicy(
         tier: 2,
         ruleName: fsVerdict.ruleName,
         ruleDescription: fsVerdict.reason,
+        checkId: checkIdForRule(fsVerdict.ruleName),
       };
       // A BLOCK returns here, ahead of user rules, so a permissive rule cannot
       // bypass it (the layer-1 invariant above). A REVIEW must NOT: stage 4
@@ -515,18 +575,20 @@ export async function evaluatePolicy(
     // SQL-DDL via a real DB CLI — AST-aware so a grep/echo of "drop table" /
     // "|mysql" no longer false-positives (the regex smart rule is suppressed for
     // bash via AST_FS_REGEX_RULES). Mirrors the rm/sudo/chmod AST migrations.
-    const sqlAction = resolveCheck(config.policy.commandChecks?.sqlDdl);
+    const sqlAction = cv('commands.sql-ddl');
     const sqlVerdict = sqlAction === 'off' ? null : analyzeSqlDestructive(bashCommand);
     if (sqlVerdict) {
-      return {
-        // analyzeSqlDestructive is typed review-only, so the knob maps 1:1.
-        decision: sqlAction === 'block' ? 'block' : 'review',
+      const v = applyCheckValue(sqlAction, {
+        decision: 'review',
         blockedByLabel: `Node9 (AST): ${sqlVerdict.ruleName}`,
         reason: sqlVerdict.reason,
         tier: 2,
         ruleName: sqlVerdict.ruleName,
         ruleDescription: sqlVerdict.description,
-      };
+        checkId: 'commands.sql-ddl',
+      });
+      if (v?.logged) noteLogged(v);
+      else if (v) return v;
     }
 
     // chmod 777 / 0777 / a+rwx (world-writable only; +x is execute-only and
@@ -536,18 +598,20 @@ export async function evaluatePolicy(
     // AST_FS_REGEX_RULES). Mirrors the SQL-DDL AST migration above. The rule
     // name is shield-prefixed, so use the project-jail (AST) label like the
     // fs-op branch does for shield rules.
-    const chmodAction = resolveCheck(config.policy.commandChecks?.chmod);
+    const chmodAction = cv('commands.chmod');
     const chmodVerdict = chmodAction === 'off' ? null : analyzeChmod777(bashCommand);
     if (chmodVerdict) {
-      return {
-        // analyzeChmod777 is typed review-only, so the knob maps 1:1.
-        decision: chmodAction === 'block' ? 'block' : 'review',
+      const v = applyCheckValue(chmodAction, {
+        decision: 'review',
         blockedByLabel: `project-jail (AST): ${chmodVerdict.ruleName}`,
         reason: chmodVerdict.reason,
         tier: 2,
         ruleName: chmodVerdict.ruleName,
         ruleDescription: chmodVerdict.description,
-      };
+        checkId: 'commands.chmod',
+      });
+      if (v?.logged) noteLogged(v);
+      else if (v) return v;
     }
   }
 
@@ -578,9 +642,9 @@ export async function evaluatePolicy(
       if (bashCommand === null || !rule.name || !AST_FS_REGEX_RULES.has(rule.name)) return false;
       const knob =
         rule.name === 'review-drop-truncate-shell'
-          ? resolveCheck(config.policy.commandChecks?.sqlDdl)
+          ? cv('commands.sql-ddl')
           : rule.name === 'shield:filesystem:review-chmod-777'
-            ? resolveCheck(config.policy.commandChecks?.chmod)
+            ? cv('commands.chmod')
             : undefined;
       if (knob === 'off' && rule.pinned) return false;
       return true;
@@ -592,13 +656,53 @@ export async function evaluatePolicy(
     // tool-name spelling silently voids sudo/pipe-to-shell/force-push coverage
     // (verified live 2026-08-12: all four read `allow` on defaults).
     // `shellShaped` is computed once above and shared with the AST tiers.
-    const matches = config.policy.smartRules.filter(
-      (rule) =>
-        toolMatchesRule(toolName, rule.tool, config.policy.toolInspection) &&
-        !astSuppressed(rule) &&
-        !(rmCleanupWaiver && rule.name === 'review-rm' && rule.verdict === 'review') &&
-        evaluateSmartConditions(args, rule)
-    );
+    // The check behind a PRODUCT rule governs it: `off` drops the rule, `log`
+    // records it without stopping, review/block set the verdict. A pack row
+    // is governed only by an explicit `checks` entry (its legacy resolution
+    // depends on the host's applied-shield list, which the engine does not
+    // see); an allow rule (a waiver) is never touched; a user or org rule has
+    // no check and is left alone.
+    const ruleCheck = (rule: SmartRule): { id: string; value: Verdict } | undefined => {
+      if (rule.verdict === 'allow') return undefined;
+      // Only a rule the host shipped (`builtin`) follows the catalog; a user
+      // rule that reuses a shipped name keeps its own verdict. A cloud-pinned
+      // mandate is the organisation's; a local value must not touch it.
+      if (!rule.builtin || rule.pinned) return undefined;
+      const id = checkIdForRule(rule.name);
+      if (!id) return undefined;
+      const def = getCheck(id);
+      if (!def) return undefined;
+      // A shield's rule carries its own verdict (and any `node9 shield set`
+      // override). Only an explicit pack-row entry governs it; a shield rule
+      // folded into a product check (filesystem's chmod) keeps its verdict.
+      if (rule.name?.startsWith('shield:') && !def.pack) return undefined;
+      if (def.pack) {
+        const explicit = config.policy.checks?.[id];
+        return isVerdict(explicit) ? { id, value: explicit } : undefined;
+      }
+      return { id, value: cv(id) };
+    };
+    const matches = config.policy.smartRules.filter((rule) => {
+      if (!toolMatchesRule(toolName, rule.tool, config.policy.toolInspection)) return false;
+      if (astSuppressed(rule)) return false;
+      if (rmCleanupWaiver && rule.name === 'review-rm' && rule.verdict === 'review') return false;
+      if (!evaluateSmartConditions(args, rule)) return false;
+      const check = ruleCheck(rule);
+      if (check?.value === 'off') return false;
+      if (check?.value === 'log') {
+        noteLogged({
+          decision: 'allow',
+          logged: true,
+          blockedByLabel: `Smart Rule: ${rule.name ?? rule.tool}`,
+          reason: rule.reason,
+          tier: 2,
+          ruleName: rule.name ?? rule.tool,
+          checkId: check.id,
+        });
+        return false;
+      }
+      return true;
+    });
     const matchedRule = resolvePinned(matches);
     if (matchedRule) {
       // A permissive user rule cannot silence a built-in review.
@@ -606,20 +710,28 @@ export async function evaluatePolicy(
         return (
           pendingAstReview ?? { decision: 'allow', ruleName: matchedRule.name ?? matchedRule.tool }
         );
+      // A product or pack rule names its check; a user or org rule does not.
+      const check = ruleCheck(matchedRule);
+      const checkId = check?.id ?? checkIdForRule(matchedRule.name);
+      const decision =
+        check && (check.value === 'review' || check.value === 'block')
+          ? check.value
+          : matchedRule.verdict;
       return {
-        decision: matchedRule.verdict,
+        decision,
         blockedByLabel: `Smart Rule: ${matchedRule.name ?? matchedRule.tool}`,
         reason: matchedRule.reason,
         tier: 2,
         ruleName: matchedRule.name ?? matchedRule.tool,
+        ...(checkId && { checkId }),
         ...((matchedRule.description ?? matchedRule.reason) && {
           ruleDescription: matchedRule.description ?? matchedRule.reason,
         }),
-        ...(matchedRule.verdict === 'block' &&
+        ...(decision === 'block' &&
           matchedRule.dependsOnState?.length && {
             dependsOnStatePredicates: matchedRule.dependsOnState,
           }),
-        ...(matchedRule.verdict === 'block' &&
+        ...(decision === 'block' &&
           matchedRule.recoveryCommand && {
             recoveryCommand: matchedRule.recoveryCommand,
           }),
@@ -677,41 +789,47 @@ export async function evaluatePolicy(
         ruleDescription:
           'The AI is downloading a script from the internet and running it immediately without inspection. This is a common way malware gets installed.',
         tier: 3,
+        checkId: 'commands.eval-remote',
       };
     }
 
     // Pipe-chain. A trusted-host downgrade is an explicit user opt-in and still
     // short-circuits — it is a deliberate ALLOW, not an opinion to be out-voted.
-    const ptVerdict = pipeChainVerdict(
-      shellCommand,
-      isTrustedHost,
-      resolveCheckTight(config.policy.commandChecks?.pipeChainHigh)
-    );
-    if (ptVerdict?.decision === 'allow') return ptVerdict;
-    if (ptVerdict) candidates.push(ptVerdict);
+    const ptVerdict = pipeChainVerdict(shellCommand, isTrustedHost, cv('data.pipe-chain'));
+    if (ptVerdict?.logged) noteLogged(ptVerdict);
+    else if (ptVerdict?.decision === 'allow') return ptVerdict;
+    else if (ptVerdict) candidates.push(ptVerdict);
 
-    // Inline execution — Class C (off | review | block).
-    const inlineAction = resolveCheck(config.policy.commandChecks?.inlineExec);
-    if (inlineAction !== 'off' && detectInlineExec(shellCommand)) {
-      candidates.push({
-        decision: inlineAction === 'block' ? 'block' : 'review',
+    // Each candidate below goes through its check's value: `off` drops it,
+    // `log` keeps it aside, review/block compete on strictness.
+    const consider = (id: string, verdict: PolicyVerdict): void => {
+      const v = applyCheckValue(cv(id), verdict);
+      if (v?.logged) noteLogged(v);
+      else if (v) candidates.push(v);
+    };
+
+    // Inline execution.
+    if (detectInlineExec(shellCommand)) {
+      consider('commands.inline-exec', {
+        decision: 'review',
         blockedByLabel: 'Node9 Standard (Inline Execution)',
         ruleDescription:
           'The AI is running code directly from the command line. Review the full script below before allowing it to execute.',
         tier: 3,
+        checkId: 'commands.inline-exec',
       });
     }
 
-    // Eval of DYNAMIC content — Class B, tighten-only (may upgrade to block,
-    // can never be turned off).
+    // Eval of DYNAMIC content.
     if (evalVerdict === 'review') {
-      candidates.push({
-        decision: resolveCheckTight(config.policy.commandChecks?.evalDynamic),
+      consider('commands.eval-dynamic', {
+        decision: 'review',
         blockedByLabel: 'Node9: Eval Dynamic Content',
         reason: 'eval of dynamic content (variable or subshell expansion) requires approval',
         ruleDescription:
           'The AI is running a command that includes a variable or subshell expansion. The actual command executed at runtime may differ from what is shown here.',
         tier: 3,
+        checkId: 'commands.eval-dynamic',
       });
     }
 
@@ -744,6 +862,7 @@ export async function evaluatePolicy(
           ruleDescription: ssrf.reason,
           tier: 3,
           overridable: ssrf.overridable,
+          checkId: ssrfCheckId(ssrf.tier),
         };
       }
     }
@@ -779,12 +898,20 @@ export async function evaluatePolicy(
     if (firstToken && firstToken.startsWith('/') && checkProvenance) {
       const prov = checkProvenance(firstToken, cwd);
       if (prov.trustLevel === 'suspect') {
-        return {
-          decision: config.settings.mode === 'strict' ? 'block' : 'review',
-          blockedByLabel: 'Node9: Suspect Binary',
-          reason: `Binary "${firstToken}" resolved to ${prov.resolvedPath} — ${prov.reason}`,
-          tier: 3,
-        };
+        // Strict mode blocks what the check would only review.
+        const value = cv('commands.temp-binary');
+        const v = applyCheckValue(
+          value === 'review' && config.settings.mode === 'strict' ? 'block' : value,
+          {
+            decision: 'review',
+            blockedByLabel: 'Node9: Suspect Binary',
+            reason: `Binary "${firstToken}" resolved to ${prov.resolvedPath} — ${prov.reason}`,
+            tier: 3,
+            checkId: 'commands.temp-binary',
+          }
+        );
+        if (v?.logged) noteLogged(v);
+        else if (v) return v;
       }
       if (prov.trustLevel === 'unknown' && config.settings.mode === 'strict') {
         return {
@@ -792,6 +919,7 @@ export async function evaluatePolicy(
           blockedByLabel: 'Node9: Unknown Binary (strict mode)',
           reason: `Binary "${firstToken}" — ${prov.reason}`,
           tier: 3,
+          checkId: 'commands.temp-binary',
         };
       }
     }
@@ -829,24 +957,37 @@ export async function evaluatePolicy(
     if (hasSystemDisaster || isRootWipe) {
       // If it IS a system disaster, return review so the dev gets a
       // "Manual Nuclear Protection" popup as a final safety check.
-      return { decision: 'review', blockedByLabel: 'Manual Nuclear Protection', tier: 3 };
+      return {
+        decision: 'review',
+        blockedByLabel: 'Manual Nuclear Protection',
+        tier: 3,
+        checkId: 'commands.disk-destroy',
+      };
     }
 
     // For everything else (docker, psql, rmdir, delete, rm),
     // we trust the human and auto-allow.
-    return { decision: 'allow' };
+    return allowed();
   }
 
   // ── 5. Sandbox Check (Safe Zones) ───────────────────────────────────────
   if (pathTokens.length > 0 && config.policy.sandboxPaths.length > 0) {
     const allInSandbox = pathTokens.every((p) => matchesPattern(p, config.policy.sandboxPaths));
-    if (allInSandbox) return { decision: 'allow' };
+    if (allInSandbox) return allowed();
   }
 
   // ── 6. Dangerous Words Evaluation ───────────────────────────────────────
+  // The product's own words are `commands.disk-destroy`; a pack's or the
+  // config's are `commands.dangerous-word`. A word whose check is off is not
+  // scanned at all.
+  const wordCheckId = (word: string): string =>
+    BUILTIN_DANGEROUS_WORDS.includes(word.toLowerCase())
+      ? 'commands.disk-destroy'
+      : 'commands.dangerous-word';
+  const scannedWords = config.policy.dangerousWords.filter((w) => cv(wordCheckId(w)) !== 'off');
   let matchedDangerousWord: string | undefined;
   const isDangerous = allTokens.some((token) =>
-    config.policy.dangerousWords.some((word) => {
+    scannedWords.some((word) => {
       const w = word.toLowerCase();
       const hit =
         token === w ||
@@ -885,23 +1026,32 @@ export async function evaluatePolicy(
         }
       }
     }
-    return {
+    const id = wordCheckId(matchedDangerousWord ?? '');
+    const v = applyCheckValue(cv(id), {
       decision: 'review',
       blockedByLabel: `Project/Global Config — dangerous word: "${matchedDangerousWord}"`,
       matchedWord: matchedDangerousWord,
       matchedField,
       ruleDescription: `This command contains a flagged keyword ("${matchedDangerousWord}") from your node9 config. Review it before allowing.`,
       tier: 6,
-    };
+      checkId: id,
+    });
+    if (v?.logged) noteLogged(v);
+    else if (v) return v;
   }
 
   // ── 7. Strict Mode Fallback ─────────────────────────────────────────────
   if (config.settings.mode === 'strict') {
-    if (activeEnvironment?.requireApproval === false) return { decision: 'allow' };
-    return { decision: 'review', blockedByLabel: 'Global Config (Strict Mode Active)', tier: 7 };
+    if (activeEnvironment?.requireApproval === false) return allowed();
+    return {
+      decision: 'review',
+      blockedByLabel: 'Global Config (Strict Mode Active)',
+      tier: 7,
+      checkId: 'commands.unknown',
+    };
   }
 
-  return { decision: 'allow' };
+  return allowed();
 }
 
 /** Returns true when toolName matches the config's ignoredTools list. */
