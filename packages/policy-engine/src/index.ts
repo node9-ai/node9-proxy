@@ -104,6 +104,7 @@ export type {
   CheckSource,
   ResolvedCheck,
 } from './catalog';
+export { CHECK_TEXT, type CheckText } from './catalog-text';
 export {
   TUNING_FIELDS,
   tuningFromLegacyPolicy,

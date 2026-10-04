@@ -16,6 +16,7 @@
 
 import { BUILTIN_SHIELDS } from './shields';
 import { isStrictGatedTier, type SsrfTier } from './egress/ssrf';
+import { CHECK_TEXT } from './catalog-text';
 
 // ── Vocabulary ────────────────────────────────────────────────────────────────
 
@@ -62,6 +63,12 @@ export interface CheckDef {
   /** Rule names and labels the code emits today for this check. Exact
    *  matches only; prefixed families are handled in `checkIdForRule`. */
   legacy?: readonly string[];
+  /** Plain-language explanation (catalog-text.ts). */
+  plain?: string;
+  /** One concrete thing an agent might do that this check catches. */
+  example?: string;
+  /** When to change the default, and to what. */
+  advice?: string;
 }
 
 const ALL: readonly Verdict[] = VERDICTS;
@@ -473,7 +480,21 @@ function packRows(): CheckDef[] {
   return rows;
 }
 
-export const CHECKS: readonly CheckDef[] = [...PRODUCT_CHECKS, ...packRows()];
+/** Attach the plain-language text (catalog-text.ts). A pack row reuses its
+ *  shield rule's description. */
+function withText(def: CheckDef): CheckDef {
+  const text = CHECK_TEXT[def.id];
+  if (text) return { ...def, ...text };
+  if (def.pack)
+    return {
+      ...def,
+      plain: def.catches,
+      advice: `Part of the ${def.pack} pack, turned on from the Apps page.`,
+    };
+  return def;
+}
+
+export const CHECKS: readonly CheckDef[] = [...PRODUCT_CHECKS, ...packRows()].map(withText);
 
 export const CHECK_BY_ID: ReadonlyMap<string, CheckDef> = new Map(CHECKS.map((c) => [c.id, c]));
 

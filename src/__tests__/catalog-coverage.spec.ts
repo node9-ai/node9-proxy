@@ -18,7 +18,7 @@ vi.mock('../shields', async () => {
 
 import { getConfig, _resetConfigCache } from '../config';
 import { evaluatePolicy } from '../policy';
-import { buildChecksReport } from '../cli/commands/checks';
+import { buildChecksReport, renderCheckDetail } from '../cli/commands/checks';
 
 let tmpHome: string;
 let origHome: string | undefined;
@@ -150,6 +150,25 @@ describe('config-driven checks', () => {
     expect(metadata).toMatchObject({ value: 'block', source: 'locked' });
     expect(report.policySource).toBe('local');
     expect(report.packsOff).toContain('postgres');
+  });
+
+  it('node9 checks <id> explains one check: plain words, an example, value, source, advice', () => {
+    withConfig({ version: '1.0', policy: { commandChecks: { inlineExec: 'off' } } });
+    const report = buildChecksReport(getConfig());
+    const sudo = report.checks.find((c) => c.id === 'commands.sudo')!;
+    expect(sudo.plain).toBeTruthy();
+    expect(sudo.example).toBeTruthy();
+    expect(sudo.advice).toBeTruthy();
+    const detail = renderCheckDetail(report, 'commands.inline-exec')!;
+    for (const part of [
+      sudo.plain,
+      report.checks.find((c) => c.id === 'commands.inline-exec')!.plain,
+    ])
+      expect(part).toBeTruthy();
+    expect(detail).toContain('commands.inline-exec');
+    expect(detail).toContain(report.checks.find((c) => c.id === 'commands.inline-exec')!.plain!);
+    expect(detail).toMatch(/off/);
+    expect(renderCheckDetail(report, 'commands.nope')).toBeNull();
   });
 });
 

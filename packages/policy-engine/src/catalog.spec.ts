@@ -20,6 +20,7 @@ import {
   resolveCheckMap,
 } from './catalog';
 import { BUILTIN_SHIELDS } from './shields';
+import { CHECK_TEXT } from './catalog-text';
 
 describe('catalog integrity', () => {
   it('every id is unique and spelled group.name', () => {
@@ -305,5 +306,29 @@ describe('checkValue: an explicit checks map wins over the legacy knobs', () => 
     expect(Object.keys(map).length).toBe(CHECKS.length);
     expect(map['commands.sudo']).toBe('off');
     expect(map['commands.rm-home']).toBe('block');
+  });
+});
+
+describe('plain-language text (catalog-text.ts)', () => {
+  it('every product check explains itself: a plain sentence and when to change it', () => {
+    for (const c of CHECKS.filter((x) => !x.pack)) {
+      expect(c.plain, c.id).toBeTruthy();
+      expect(c.advice, c.id).toBeTruthy();
+    }
+  });
+
+  it('the text table names only real checks', () => {
+    for (const id of Object.keys(CHECK_TEXT)) expect(CHECK_BY_ID.has(id), id).toBe(true);
+  });
+
+  it('a pack row reuses its rule description and points at Apps', () => {
+    const row = CHECKS.find((c) => c.id === 'packs.postgres.drop-table')!;
+    expect(row.plain).toBe(row.catches);
+    expect(row.advice).toMatch(/Apps/);
+  });
+
+  it('a locked check says it is always on, a fixed check says it is fixed', () => {
+    for (const c of CHECKS.filter((x) => x.floor === 'block'))
+      expect(c.advice, c.id).toMatch(/Always blocked/);
   });
 });

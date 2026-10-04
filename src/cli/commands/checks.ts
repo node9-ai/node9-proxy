@@ -30,6 +30,10 @@ interface ChecksReport {
       pack?: string;
       /** What a config file may set for this check today; empty = fixed. */
       configurable: readonly string[];
+      /** Plain-language text from the catalog (catalog-text.ts). */
+      plain?: string;
+      example?: string;
+      advice?: string;
     }
   >;
 }
@@ -55,6 +59,9 @@ export function buildChecksReport(config: Config): ChecksReport {
       title: CHECKS[i].title,
       ...(CHECKS[i].pack && { pack: CHECKS[i].pack }),
       configurable: configurableValues(CHECKS[i].id),
+      ...(CHECKS[i].plain && { plain: CHECKS[i].plain }),
+      ...(CHECKS[i].example && { example: CHECKS[i].example }),
+      ...(CHECKS[i].advice && { advice: CHECKS[i].advice }),
     })),
   };
 }
@@ -103,16 +110,54 @@ function renderChecks(report: ChecksReport): string {
     lines.push(chalk.gray(`Packs off: ${report.packsOff.join(', ')}`));
     lines.push('');
   }
+  lines.push(chalk.gray('node9 checks <id> explains one check, e.g. node9 checks commands.sudo'));
+  lines.push('');
+  return lines.join('\n');
+}
+
+/** One check, explained: what it catches in plain words, an example, the
+ *  value in force and where it comes from, and when to change it. Null for
+ *  an id the catalog does not know. */
+export function renderCheckDetail(report: ChecksReport, id: string): string | null {
+  const c = report.checks.find((x) => x.id === id);
+  if (!c) return null;
+  const value = (VALUE_COLOR[c.value] ?? chalk.white)(c.value);
+  const settable =
+    c.source === 'locked'
+      ? 'locked, always on'
+      : c.configurable.length
+        ? c.configurable.join(', ')
+        : 'not configurable yet';
+  const lines = ['', `${chalk.cyan.bold(c.title)}   ${chalk.gray(c.id)}`, ''];
+  if (c.plain) lines.push(`  ${c.plain}`);
+  if (c.example) lines.push(`  ${chalk.gray('Example:')} ${c.example}`);
+  lines.push('');
+  lines.push(`  ${chalk.gray('Value:')}    ${value} (${c.source})`);
+  lines.push(`  ${chalk.gray('Settable:')} ${settable}`);
+  if (c.advice) lines.push(`  ${chalk.gray('When to change:')} ${c.advice}`);
+  lines.push('');
   return lines.join('\n');
 }
 
 export function registerChecksCommand(program: Command): void {
   program
-    .command('checks')
-    .description('List every check with the value in force on this machine and its source')
+    .command('checks [id]')
+    .description(
+      'List every check with the value in force on this machine and its source; with an id, explain that check'
+    )
     .option('--json', 'Machine-readable output')
-    .action((opts: { json?: boolean }) => {
+    .action((id: string | undefined, opts: { json?: boolean }) => {
       const report = buildChecksReport(getConfig());
+      if (id) {
+        const one = report.checks.find((c) => c.id === id);
+        if (!one) {
+          console.error(chalk.red(`Unknown check: ${id}. Run node9 checks for the list.`));
+          process.exitCode = 1;
+          return;
+        }
+        console.log(opts.json ? JSON.stringify(one, null, 2) : renderCheckDetail(report, id));
+        return;
+      }
       if (opts.json) {
         console.log(JSON.stringify(report, null, 2));
         return;
