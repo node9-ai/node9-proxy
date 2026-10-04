@@ -33,6 +33,8 @@ import {
   CHECK_VERDICT_RANK,
   resolveCheckMap,
   catalogSettingsFromConfig,
+  isVerdict,
+  configurableValues,
   type CatalogSettings,
   type Verdict,
 } from '@node9/policy-engine';
@@ -252,7 +254,7 @@ export interface Config {
     checks?: Record<string, Verdict>;
     /** Which file stated a check explicitly (v2 files only). Absent = the
      *  value came from a legacy knob or the catalog default. */
-    checkSources?: Record<string, 'local' | 'project'>;
+    checkSources?: Record<string, 'local' | 'project' | 'workspace'>;
   };
   environments: Record<string, EnvironmentConfig>;
   /** PR-2: 'workspace' = keyed (policy from the cloud); 'local' = the
@@ -976,6 +978,8 @@ export function getConfig(cwd?: string): Config {
   const keyed = !!pr2Creds?.apiKey && pr2Creds.localOnly !== true;
   // Provenance for the one field a status screen attributes out loud.
   let ssrfStrictSource: Config['ssrfStrictSource'] = 'default';
+  // Phase 3a: checks the workspace stated, from the cache's `config` block.
+  const workspaceChecks: Record<string, Verdict> = {};
 
   const applyLayer = (
     source: Record<string, unknown> | null,
@@ -1278,6 +1282,16 @@ export function getConfig(cwd?: string): Config {
       }
       if (Array.isArray(raw.shields)) {
         cloudManagedShields = raw.shields.filter((s): s is string => typeof s === 'string');
+      }
+      // Phase 3a: the workspace's checks in the catalog's language. Validated
+      // once more here, since the cache file is on disk and editable.
+      if (raw.config && typeof raw.config === 'object') {
+        const checks = (raw.config as { checks?: unknown }).checks;
+        if (checks && typeof checks === 'object' && !Array.isArray(checks)) {
+          for (const [id, v] of Object.entries(checks as Record<string, unknown>)) {
+            if (isVerdict(v) && configurableValues(id).includes(v)) workspaceChecks[id] = v;
+          }
+        }
       }
       // Managed settings (M2, baseline+lock) — applied as a floor a dev can only
       // tighten, unless the admin locked it. Runs BEFORE the shadow/panic
@@ -1952,8 +1966,16 @@ export function getConfig(cwd?: string): Config {
   // layer. The project file may only tighten what the global file or the
   // legacy knobs decided.
   const explicit: Record<string, Verdict> = {};
-  const checkSources: Record<string, 'local' | 'project'> = {};
-  if (!keyed) {
+  const checkSources: Record<string, 'local' | 'project' | 'workspace'> = {};
+  if (keyed) {
+    // The workspace's values are the truth on a keyed machine; the local
+    // files have no say. A knob-governed entry also travelled as its knob in
+    // managedConfig, so the two agree by construction.
+    for (const [id, v] of Object.entries(workspaceChecks)) {
+      explicit[id] = v;
+      checkSources[id] = 'workspace';
+    }
+  } else {
     // The legacy resolution already carries every floor the org set
     // (applyManagedCommandChecks wrote them into commandChecks). A local entry
     // for a managed knob may tighten it, never go below it.

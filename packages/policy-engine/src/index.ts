@@ -104,6 +104,19 @@ export type {
   CheckSource,
   ResolvedCheck,
 } from './catalog';
+export {
+  TUNING_FIELDS,
+  tuningFromLegacyPolicy,
+  tuningToLegacyPolicy,
+  checksFromLegacyPolicy,
+  checkToLegacyPolicy,
+  MAP_GOVERNED,
+  KNOB_GOVERNED,
+  isKnobGoverned,
+  configurableValues,
+  CONFIGURABLE_CHECK_IDS,
+} from './catalog-knobs';
+export type { LegacyPolicyKnobs, TuningField } from './catalog-knobs';
 
 // Egress / destination policy (GAP-5).
 export type { EgressPolicy, EgressVerdict, Destination } from './egress';

@@ -12,14 +12,23 @@
 // directly. Design: "Controls catalog", section "Phase 2".
 
 import {
-  CHECKS,
   CHECK_BY_ID,
   CHECK_VERDICT_RANK,
   isVerdict,
   isLockedCheck,
+  checksFromLegacyPolicy,
+  checkToLegacyPolicy,
+  tuningFromLegacyPolicy,
+  tuningToLegacyPolicy,
+  configurableValues,
+  isKnobGoverned,
+  CONFIGURABLE_CHECK_IDS,
+  TUNING_FIELDS,
   type Verdict,
   type CheckDef,
 } from '@node9/policy-engine';
+
+export { configurableValues } from '@node9/policy-engine';
 import type { z } from 'zod';
 import type { ConfigFileSchema } from '../config-schema';
 import { DEFAULT_CONFIG, type SmartRule } from './index';
@@ -79,245 +88,7 @@ const SETTINGS_WITH_A_HOME = new Set([
 ]);
 
 const APPROVER_CHANNELS = ['native', 'terminal', 'cloud', 'browser'] as const;
-
-// ── Tuning: legacy policy fields that are a check's settings ─────────────────
-
-interface TuningField {
-  checkId: string;
-  /** Field name in the v2 tuning object. */
-  name: string;
-  /** Path under legacy `policy`. */
-  legacy: [keyof LegacyPolicy, string];
-}
-
-const TUNING_FIELDS: TuningField[] = [
-  { checkId: 'network.unknown-host', name: 'allow', legacy: ['egress', 'allow'] },
-  { checkId: 'network.unknown-host', name: 'deny', legacy: ['egress', 'deny'] },
-  { checkId: 'network.unknown-host', name: 'allowPrivate', legacy: ['egress', 'allowPrivate'] },
-  { checkId: 'network.internal-addresses', name: 'exemptions', legacy: ['egress', 'ssrfAllow'] },
-  { checkId: 'data.secrets', name: 'scanIgnoredTools', legacy: ['dlp', 'scanIgnoredTools'] },
-  { checkId: 'behavior.loops', name: 'threshold', legacy: ['loopDetection', 'threshold'] },
-  { checkId: 'behavior.loops', name: 'windowSeconds', legacy: ['loopDetection', 'windowSeconds'] },
-  {
-    checkId: 'behavior.prompt-injection',
-    name: 'minConfidence',
-    legacy: ['injectionScan', 'minConfidence'],
-  },
-  { checkId: 'behavior.prompt-injection', name: 'exemptTools', legacy: ['injectionScan', 'allow'] },
-  { checkId: 'loading.skill-tamper', name: 'roots', legacy: ['skillPinning', 'roots'] },
-  {
-    checkId: 'loading.malicious-package',
-    name: 'registrySignals',
-    legacy: ['packageCheck', 'registrySignals'],
-  },
-  {
-    checkId: 'loading.malicious-package',
-    name: 'maxAgeHours',
-    legacy: ['packageCheck', 'maxAgeHours'],
-  },
-  {
-    checkId: 'loading.malicious-package',
-    name: 'onlineFallback',
-    legacy: ['packageCheck', 'onlineFallback'],
-  },
-  { checkId: 'loading.malicious-package', name: 'allow', legacy: ['packageCheck', 'allow'] },
-];
-
-// ── Checks: legacy knobs ↔ catalog ids ───────────────────────────────────────
-
 type Obj = Record<string, unknown>;
-
-/** Read the checks a legacy policy block states explicitly. */
-function checksFromLegacy(policy: LegacyPolicy, mode: string | undefined): Record<string, Verdict> {
-  const out: Record<string, Verdict> = {};
-  const cc = policy.commandChecks ?? {};
-  const put = (id: string, v: string | undefined) => {
-    if (isVerdict(v)) out[id] = v;
-  };
-  put('commands.inline-exec', cc.inlineExec);
-  put('commands.rm', cc.rmAdvisory);
-  put('commands.chmod', cc.chmod);
-  put('commands.sql-ddl', cc.sqlDdl);
-  put('commands.eval-dynamic', cc.evalDynamic);
-  put('data.pipe-chain', cc.pipeChainHigh);
-
-  const dlp = policy.dlp;
-  if (dlp?.enabled === false) {
-    // The weak-credential row follows: DLP off turns both off.
-    out['data.secrets'] = 'off';
-  } else {
-    if (dlp?.enabled === true) out['data.secrets'] = 'block';
-    if (dlp?.reviewAction) out['data.secrets-weak'] = dlp.reviewAction;
-  }
-  if (dlp?.pii) out['data.pii'] = dlp.pii;
-
-  const eg = policy.egress;
-  if (eg?.enabled === false) out['network.unknown-host'] = 'off';
-  else if (eg?.enabled === true) out['network.unknown-host'] = eg.mode ?? 'review';
-  if (eg?.ssrfStrict !== undefined)
-    out['network.internal-addresses'] = eg.ssrfStrict ? 'block' : 'off';
-
-  const loop = policy.loopDetection;
-  if (loop?.enabled !== undefined) out['behavior.loops'] = loop.enabled ? 'block' : 'off';
-
-  const inj = policy.injectionScan;
-  if (inj?.enabled !== undefined) out['behavior.prompt-injection'] = inj.enabled ? 'log' : 'off';
-
-  const skill = policy.skillPinning;
-  if (skill?.enabled === false) out['loading.skill-tamper'] = 'off';
-  else if (skill?.enabled === true)
-    out['loading.skill-tamper'] = skill.mode === 'block' ? 'block' : 'log';
-
-  const pkg = policy.packageCheck;
-  if (pkg?.enabled === false) out['loading.malicious-package'] = 'off';
-  else if (pkg?.enabled === true)
-    out['loading.malicious-package'] = pkg.onMalicious === 'review' ? 'review' : 'block';
-
-  if (mode === 'strict') out['commands.unknown'] = 'review';
-  return out;
-}
-
-/**
- * Write one check's value into a legacy policy block. Returns false when the
- * legacy shape cannot carry the value; the caller keeps the value in
- * `policy.checks`, which the engine reads directly, so nothing is lost for a
- * check the engine governs through the map. The legacy knobs only exist for
- * the gates that still read them (DLP, PII, egress, loops, pins, packages).
- */
-function checkToLegacy(policy: Obj, id: string, v: Verdict): boolean {
-  const obj = (key: string): Obj => {
-    if (!policy[key] || typeof policy[key] !== 'object') policy[key] = {};
-    return policy[key] as Obj;
-  };
-  const offOr = (key: string, on: () => void): boolean => {
-    if (v === 'off') obj(key).enabled = false;
-    else {
-      obj(key).enabled = true;
-      on();
-    }
-    return true;
-  };
-  switch (id) {
-    case 'commands.inline-exec':
-      if (v === 'log') return false;
-      obj('commandChecks').inlineExec = v;
-      return true;
-    case 'commands.rm':
-      if (v === 'log') return false;
-      obj('commandChecks').rmAdvisory = v;
-      return true;
-    case 'commands.chmod':
-      if (v === 'log') return false;
-      obj('commandChecks').chmod = v;
-      return true;
-    case 'commands.sql-ddl':
-      if (v === 'log') return false;
-      obj('commandChecks').sqlDdl = v;
-      return true;
-    case 'commands.eval-dynamic':
-      if (v !== 'review' && v !== 'block') return false;
-      obj('commandChecks').evalDynamic = v;
-      return true;
-    case 'data.pipe-chain':
-      if (v !== 'review' && v !== 'block') return false;
-      obj('commandChecks').pipeChainHigh = v;
-      return true;
-    case 'data.secrets':
-      if (v === 'off') obj('dlp').enabled = false;
-      else if (v === 'block') obj('dlp').enabled = true;
-      else return false;
-      return true;
-    case 'data.secrets-weak':
-      if (v !== 'review' && v !== 'block') return false;
-      obj('dlp').reviewAction = v;
-      return true;
-    case 'data.pii':
-      if (v !== 'off' && v !== 'block') return false;
-      obj('dlp').pii = v;
-      return true;
-    case 'network.unknown-host':
-      if (v === 'log') return false;
-      return offOr('egress', () => {
-        obj('egress').mode = v;
-      });
-    case 'network.internal-addresses':
-      if (v !== 'off' && v !== 'block') return false;
-      obj('egress').ssrfStrict = v === 'block';
-      return true;
-    case 'behavior.loops':
-      if (v !== 'off' && v !== 'block') return false;
-      obj('loopDetection').enabled = v === 'block';
-      return true;
-    case 'behavior.prompt-injection':
-      if (v !== 'off' && v !== 'log') return false;
-      obj('injectionScan').enabled = v === 'log';
-      return true;
-    case 'loading.skill-tamper':
-      if (v === 'review') return false;
-      return offOr('skillPinning', () => {
-        obj('skillPinning').mode = v === 'block' ? 'block' : 'warn';
-      });
-    case 'loading.malicious-package':
-      if (v === 'log') return false;
-      return offOr('packageCheck', () => {
-        obj('packageCheck').onMalicious = v === 'review' ? 'review' : 'block';
-      });
-    default:
-      return false;
-  }
-}
-
-// ── What a file may set today ────────────────────────────────────────────────
-
-/**
- * Checks whose detector reads the resolved `policy.checks` map: every value
- * the catalog row offers works. Pack rows (`packs.*`) qualify too.
- */
-const MAP_GOVERNED = new Set([
-  'commands.inline-exec',
-  'commands.eval-dynamic',
-  'commands.curl-pipe-shell',
-  'commands.rm',
-  'commands.chmod',
-  'commands.sudo',
-  'commands.git-destructive',
-  'commands.sql-ddl',
-  'commands.sql-no-where',
-  'commands.temp-binary',
-  'commands.disk-destroy',
-  'commands.dangerous-word',
-  'data.pipe-chain',
-]);
-
-/**
- * Checks whose gate still reads a legacy knob (the orchestrator's DLP, PII,
- * egress, loop, pin and package gates): only the values that knob can carry.
- */
-const KNOB_GOVERNED: Record<string, readonly Verdict[]> = {
-  'data.secrets': ['off', 'block'],
-  'data.secrets-weak': ['review', 'block'],
-  'data.pii': ['off', 'block'],
-  'network.unknown-host': ['off', 'review', 'block'],
-  'network.internal-addresses': ['off', 'block'],
-  'behavior.loops': ['off', 'block'],
-  'behavior.prompt-injection': ['off', 'log'],
-  'loading.skill-tamper': ['off', 'log', 'block'],
-  'loading.malicious-package': ['off', 'review', 'block'],
-};
-
-/**
- * The values a config file may set for a check TODAY. Empty for a check
- * whose detector reads neither the map nor a knob yet (the canary, the
- * credential-file and taint gates, MCP pins, the jail): stating it in a file
- * would change nothing, and `node9 checks` would then report a value that is
- * not in force. Those rows are shown as "not configurable yet".
- */
-export function configurableValues(id: string): readonly Verdict[] {
-  const def = CHECK_BY_ID.get(id);
-  if (!def || isLockedCheck(def) || id === 'commands.unknown') return [];
-  if (def.pack || MAP_GOVERNED.has(id)) return def.values;
-  return KNOB_GOVERNED[id] ?? [];
-}
 
 // ── v2 → legacy ──────────────────────────────────────────────────────────────
 
@@ -433,7 +204,7 @@ export function v2ToLegacy(raw: Record<string, unknown>, options: V2Options = {}
       warnings.push(`checks.${id}: accepts ${allowed.join(', ')} today; "${value}" ignored`);
       continue;
     }
-    const knobGoverned = id in KNOB_GOVERNED;
+    const knobGoverned = isKnobGoverned(id);
     if (
       options.project &&
       knobGoverned &&
@@ -443,26 +214,16 @@ export function v2ToLegacy(raw: Record<string, unknown>, options: V2Options = {}
       continue;
     }
     stated[id] = value;
-    if (knobGoverned) checkToLegacy(policy, id, value);
+    if (knobGoverned) checkToLegacyPolicy(policy, id, value);
     else checks[id] = value;
   }
 
-  for (const [id, fields] of Object.entries(v2.tuning ?? {})) {
-    if (!CHECK_BY_ID.has(id)) {
-      warnings.push(`tuning.${id}: no such check`);
-      continue;
-    }
-    if (!fields || typeof fields !== 'object') continue;
-    for (const [name, value] of Object.entries(fields)) {
-      const field = TUNING_FIELDS.find((f) => f.checkId === id && f.name === name);
-      if (!field) {
-        warnings.push(`tuning.${id}.${name}: no such setting`);
-        continue;
-      }
-      const [block, key] = field.legacy;
-      if (!policy[block] || typeof policy[block] !== 'object') policy[block] = {};
-      (policy[block] as Obj)[key] = value;
-    }
+  for (const id of Object.keys(v2.tuning ?? {})) {
+    if (!CHECK_BY_ID.has(id)) warnings.push(`tuning.${id}: no such check`);
+  }
+  for (const pair of tuningToLegacyPolicy(policy, v2.tuning ?? {})) {
+    const [id] = pair.split('.', 1);
+    if (CHECK_BY_ID.has(id)) warnings.push(`tuning.${pair}: no such setting`);
   }
 
   const legacy: LegacyFile = { version: '1.0' };
@@ -473,6 +234,8 @@ export function v2ToLegacy(raw: Record<string, unknown>, options: V2Options = {}
 }
 
 // ── legacy → v2 ──────────────────────────────────────────────────────────────
+
+const TUNING_FIELDS_BY_NAME = new Map(TUNING_FIELDS.map((f) => [`${f.checkId}.${f.name}`, f]));
 
 function sameValue(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
@@ -531,7 +294,7 @@ export function legacyToV2(
   else if (settings.reviewChannel === 'approver') approvals.reviewPrompt = 'approver';
   if (Object.keys(approvals).length) out.approvals = approvals;
 
-  const fromKnobs = checksFromLegacy(
+  const fromKnobs = checksFromLegacyPolicy(
     policy,
     typeof settings.mode === 'string' ? settings.mode : undefined
   );
@@ -545,13 +308,14 @@ export function legacyToV2(
   if (Object.keys(kept).length) out.checks = kept;
 
   const tuning: Record<string, Obj> = {};
-  for (const f of TUNING_FIELDS) {
-    const [block, key] = f.legacy;
-    const value = (policy[block] as Obj | undefined)?.[key];
-    if (value === undefined) continue;
-    const dValue = (dPolicy[block] as Obj | undefined)?.[key];
-    if (sameValue(value, dValue)) continue;
-    (tuning[f.checkId] ??= {})[f.name] = value;
+  for (const [id, fields] of Object.entries(tuningFromLegacyPolicy(policy))) {
+    for (const [name, value] of Object.entries(fields)) {
+      const field = TUNING_FIELDS_BY_NAME.get(`${id}.${name}`);
+      if (!field) continue;
+      const [block, key] = field.legacy;
+      if (sameValue(value, (dPolicy[block] as Obj | undefined)?.[key])) continue;
+      (tuning[id] ??= {})[name] = value;
+    }
   }
   if (Object.keys(tuning).length) out.tuning = tuning;
 
@@ -583,6 +347,4 @@ export function legacyToV2(
 }
 
 /** The ids a v2 file can state today. */
-export const FILE_CHECK_IDS: readonly string[] = CHECKS.filter(
-  (c) => configurableValues(c.id).length > 0
-).map((c) => c.id);
+export const FILE_CHECK_IDS: readonly string[] = CONFIGURABLE_CHECK_IDS;
