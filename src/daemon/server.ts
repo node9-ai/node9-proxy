@@ -693,9 +693,8 @@ export function startDaemon(): void {
       try {
         const counters = sessionCounters.get();
         // PR-2 §0.6: the HUD's mode is the EFFECTIVE mode from the full
-        // merge — getGlobalSettings reads the raw local file (default
-        // 'audit'), which on a keyed machine is exactly the value the
-        // machine ignores.
+        // merge — getGlobalSettings reads the raw local file, which on a
+        // keyed machine is exactly the value the machine ignores.
         const mode = getConfig().settings.mode as HudStatus['mode'];
         const status: HudStatus = {
           mode,

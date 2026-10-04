@@ -101,7 +101,19 @@ describe('getGlobalSettings', () => {
     readSpy.mockImplementation((p) => (String(p) === globalPath ? 'not json' : ''));
     const s = getGlobalSettings();
     expect(s.autoStartDaemon).toBe(true);
-    expect(s.mode).toBe('audit');
+    expect(s.mode).toBe('standard');
+  });
+
+  it('reports the engine default mode when the file states none', () => {
+    // Was 'audit': GET /settings named a mode the engine does not run
+    // (DEFAULT_CONFIG.settings.mode is 'standard').
+    expect(getGlobalSettings().mode).toBe('standard');
+    const globalPath = path.join('/mock/home', '.node9', 'config.json');
+    existsSpy.mockImplementation((p) => String(p) === globalPath);
+    readSpy.mockImplementation((p) =>
+      String(p) === globalPath ? JSON.stringify({ settings: {} }) : ''
+    );
+    expect(getGlobalSettings().mode).toBe('standard');
   });
 });
 

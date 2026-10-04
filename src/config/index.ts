@@ -645,7 +645,10 @@ export function getGlobalSettings(): {
       const parsed = (isV2File(raw) ? v2ToLegacy(raw).legacy : raw) as Record<string, unknown>;
       const settings = (parsed.settings as Record<string, unknown>) || {};
       return {
-        mode: (settings.mode as string) || 'audit',
+        // The engine's default is DEFAULT_CONFIG.settings.mode ('standard');
+        // this used to say 'audit', so `GET /settings` reported a mode no
+        // machine without a stated mode actually runs.
+        mode: (settings.mode as string) || DEFAULT_CONFIG.settings.mode,
         autoStartDaemon: settings.autoStartDaemon !== false,
         slackEnabled: settings.slackEnabled !== false,
         enableTrustSessions: settings.enableTrustSessions === true,
@@ -654,7 +657,7 @@ export function getGlobalSettings(): {
     }
   } catch {}
   return {
-    mode: 'audit',
+    mode: DEFAULT_CONFIG.settings.mode,
     autoStartDaemon: true,
     slackEnabled: true,
     enableTrustSessions: false,
