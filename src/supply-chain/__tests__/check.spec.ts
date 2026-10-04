@@ -6,6 +6,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { runPackageCheck, type PackageCheckConfig } from '../check';
+import { registryInfo } from '../registry';
 import { writeMeta, writeShard, shardOf, indexKey } from '../osv-index';
 
 const CFG: PackageCheckConfig = {
@@ -251,5 +252,18 @@ describe('runPackageCheck — miss text past the network cap', () => {
     expect(capped.length).toBeGreaterThan(0);
     expect(capped[0]).toContain('per-command network cap');
     expect(capped[0]).not.toContain('online fallback off');
+  });
+});
+
+describe('registry lookup URL', () => {
+  it('encodes every slash of a package name, not only the first', async () => {
+    routes['http://registry.test/@scope%2Fpkg'] = () => npmDoc('1.0.0');
+    routes['http://registry.test/@scope%2Fpkg%2F..%2Fother'] = () => npmDoc('1.0.0');
+    await registryInfo('npm', '@scope/pkg');
+    await registryInfo('npm', '@scope/pkg/../other');
+    expect(calls).toEqual([
+      'http://registry.test/@scope%2Fpkg',
+      'http://registry.test/@scope%2Fpkg%2F..%2Fother',
+    ]);
   });
 });

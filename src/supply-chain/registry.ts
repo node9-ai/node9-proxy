@@ -25,7 +25,9 @@ const MAX_BYTES = 2 * 1024 * 1024;
 async function npmInfo(name: string, version?: string): Promise<RegistryInfo | null> {
   const base = endpoints().npmRegistry;
   if (!base) return null;
-  const doc = (await fetchJson(`${base}/${name.replace('/', '%2F')}`, {
+  // Every slash, not the first: a valid scoped name has one, and a name with
+  // more must not reach another registry path (CodeQL js/incomplete-sanitization).
+  const doc = (await fetchJson(`${base}/${name.replaceAll('/', '%2F')}`, {
     timeoutMs: TIMEOUT_MS,
     maxBytes: MAX_BYTES,
     headers: { Accept: 'application/vnd.npm.install-v1+json' },

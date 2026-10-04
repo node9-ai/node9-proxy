@@ -525,6 +525,22 @@ const PROJECT_JAIL_BLOCK_READ = /^shield:project-jail:block-read-(ssh|aws|env)(-
  * Undefined for a user or organisation rule (`org:` and unnamed rules are
  * rules, not checks) and for a label no check claims.
  */
+const OVERRIDE_PREFIX = 'Override block rule:';
+const LABEL_WRAPPERS = ['Smart Rule:', 'Node9 (AST):', 'project-jail (AST):'] as const;
+
+/** The rule name inside a wrapping label, or undefined when `s` is not one. */
+function unwrapRuleLabel(s: string): string | undefined {
+  let rest = s;
+  const override = rest.lastIndexOf(OVERRIDE_PREFIX);
+  if (override >= 0) rest = rest.slice(override + OVERRIDE_PREFIX.length).trimStart();
+  for (const wrapper of LABEL_WRAPPERS) {
+    if (!rest.startsWith(wrapper)) continue;
+    const inner = rest.slice(wrapper.length).trim();
+    return inner.length > 0 ? inner : undefined;
+  }
+  return undefined;
+}
+
 export function checkIdForRule(nameOrLabel: string | undefined): string | undefined {
   if (!nameOrLabel) return undefined;
   const s = nameOrLabel.trim();
@@ -533,12 +549,11 @@ export function checkIdForRule(nameOrLabel: string | undefined): string | undefi
 
   // Labels that wrap a rule name: "Smart Rule: review-sudo",
   // "Node9 (AST): block-rm-rf-home", "project-jail (AST): shield:...",
-  // "⚠️ Override block rule: Smart Rule: ...".
-  const wrapped =
-    /^(?:.*Override block rule:\s*)?(?:Smart Rule|Node9 \(AST\)|project-jail \(AST\)):\s*(.+)$/.exec(
-      s
-    );
-  if (wrapped) return checkIdForRule(wrapped[1]);
+  // "⚠️ Override block rule: Smart Rule: ...". Plain string work, not a
+  // regex: the old pattern backtracked polynomially on a label with a long
+  // run of spaces after the prefix (CodeQL js/polynomial-redos).
+  const unwrapped = unwrapRuleLabel(s);
+  if (unwrapped !== undefined) return checkIdForRule(unwrapped);
 
   if (s.startsWith('shield:project-jail:')) {
     return PROJECT_JAIL_BLOCK_READ.test(s)

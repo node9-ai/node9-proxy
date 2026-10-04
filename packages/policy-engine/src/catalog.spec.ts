@@ -332,3 +332,12 @@ describe('plain-language text (catalog-text.ts)', () => {
       expect(c.advice, c.id).toMatch(/Always blocked/);
   });
 });
+
+describe('checkIdForRule: label parsing stays linear (CodeQL js/polynomial-redos)', () => {
+  it('a wrapper followed by a huge run of spaces returns at once', () => {
+    const started = Date.now();
+    expect(checkIdForRule('Smart Rule:' + ' '.repeat(200_000))).toBeUndefined();
+    expect(checkIdForRule('Override block rule:' + ' '.repeat(200_000) + 'x')).toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+});
