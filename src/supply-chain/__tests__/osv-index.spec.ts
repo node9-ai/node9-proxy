@@ -115,13 +115,19 @@ describe('compareVersions / entryCovers', () => {
 describe('lookupIndex', () => {
   let home: string;
   let origHome: string | undefined;
+  // os.homedir() reads USERPROFILE on Windows, HOME elsewhere: set both.
+  let origUserProfile: string | undefined;
   beforeEach(() => {
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-osv-'));
     origHome = process.env.HOME;
     process.env.HOME = home;
+    origUserProfile = process.env.USERPROFILE;
+    process.env.USERPROFILE = home;
   });
   afterEach(() => {
     process.env.HOME = origHome;
+    if (origUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = origUserProfile;
     fs.rmSync(home, { recursive: true, force: true });
   });
 

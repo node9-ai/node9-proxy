@@ -20,6 +20,8 @@ const OLD = '2020-01-01T00:00:00Z';
 
 let home: string;
 let origHome: string | undefined;
+// os.homedir() reads USERPROFILE on Windows, HOME elsewhere: set both.
+let origUserProfile: string | undefined;
 let routes: Record<string, () => Response | Promise<Response>>;
 let calls: string[];
 
@@ -53,6 +55,8 @@ beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-pkgcheck-'));
   origHome = process.env.HOME;
   process.env.HOME = home;
+  origUserProfile = process.env.USERPROFILE;
+  process.env.USERPROFILE = home;
   process.env.NODE9_NPM_REGISTRY_URL = 'http://registry.test';
   process.env.NODE9_PYPI_URL = 'http://pypi.test';
   process.env.NODE9_OSV_API_URL = 'http://osv.test';
@@ -68,6 +72,8 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   process.env.HOME = origHome;
+  if (origUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = origUserProfile;
   delete process.env.NODE9_NPM_REGISTRY_URL;
   delete process.env.NODE9_PYPI_URL;
   delete process.env.NODE9_OSV_API_URL;

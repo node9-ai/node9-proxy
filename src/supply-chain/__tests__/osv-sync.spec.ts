@@ -9,12 +9,16 @@ import { buildZip, malRecord } from './zip-fixture';
 const BUCKET = 'http://bucket.test';
 let home: string;
 let origHome: string | undefined;
+// os.homedir() reads USERPROFILE on Windows, HOME elsewhere: set both.
+let origUserProfile: string | undefined;
 let routes: Record<string, () => Response>;
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-osvsync-'));
   origHome = process.env.HOME;
   process.env.HOME = home;
+  origUserProfile = process.env.USERPROFILE;
+  process.env.USERPROFILE = home;
   routes = {};
   vi.stubGlobal('fetch', async (url: string) => {
     const r = routes[String(url)];
@@ -25,6 +29,8 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   process.env.HOME = origHome;
+  if (origUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = origUserProfile;
   fs.rmSync(home, { recursive: true, force: true });
 });
 
