@@ -62,7 +62,14 @@ describe('automatic migration', () => {
   });
 
   it('the hooks never migrate', () => {
-    fs.writeFileSync(cfg(), JSON.stringify({ version: '1.0', settings: { mode: 'strict' } }));
+    // A v1 file whose verdict for `ls` is a plain allow. Strict mode made it a
+    // review, and a review with no daemon to answer it waits for an approval:
+    // on CI (no daemon) the spawn hung for the full 60s timeout, while a
+    // developer machine with a running daemon answered at once.
+    fs.writeFileSync(
+      cfg(),
+      JSON.stringify({ version: '1.0', policy: { commandChecks: { inlineExec: 'off' } } })
+    );
     const r = run(['check', JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } })]);
     expect(r.status, r.stderr).not.toBeNull();
     expect(read().version).toBe('1.0');
