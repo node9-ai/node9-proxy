@@ -376,8 +376,9 @@ describe('§K — keyed replace-mode: policy = DEFAULT_CONFIG ⊕ cloud only', (
       expect(cfg().policy.packageCheck).toEqual({
         enabled: true,
         onMalicious: 'block',
-        registrySignals: true,
+        newPackage: 'review',
         maxAgeHours: 48,
+        installScript: 'review',
         onlineFallback: true,
         allow: [],
       });
@@ -389,7 +390,8 @@ describe('§K — keyed replace-mode: policy = DEFAULT_CONFIG ⊕ cloud only', (
         packageCheck: {
           enabled: true,
           onMalicious: 'review',
-          registrySignals: false,
+          newPackage: 'off',
+          installScript: 'maybe',
           maxAgeHours: -1,
           allow: ['@myorg/*', 7],
         },
@@ -397,11 +399,28 @@ describe('§K — keyed replace-mode: policy = DEFAULT_CONFIG ⊕ cloud only', (
       expect(cfg().policy.packageCheck).toEqual({
         enabled: true,
         onMalicious: 'review',
-        registrySignals: false,
+        newPackage: 'off',
         maxAgeHours: 48,
+        installScript: 'review',
         onlineFallback: true,
         allow: ['@myorg/*'],
       });
+    });
+
+    it('K6e: the 2.27.0 registrySignals:false column still turns both signals off', () => {
+      keyed();
+      mc({ packageCheck: { registrySignals: false } });
+      const pc = cfg().policy.packageCheck;
+      expect(pc.newPackage).toBe('off');
+      expect(pc.installScript).toBe('off');
+    });
+
+    it('K6f: an explicit new key beats the legacy boolean', () => {
+      keyed();
+      mc({ packageCheck: { registrySignals: false, installScript: 'review' } });
+      const pc = cfg().policy.packageCheck;
+      expect(pc.newPackage).toBe('off');
+      expect(pc.installScript).toBe('review');
     });
 
     it('K7a: local loopDetection off dropped — DEFAULT on 5/120 (tightening direction)', () => {

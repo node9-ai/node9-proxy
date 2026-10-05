@@ -867,7 +867,7 @@ async function _authorizeHeadlessCore(
   // into a fail-CLOSED engine error in the gateway.
   const packageCheck = config.policy.packageCheck;
   if (packageCheck?.enabled && !isManual) {
-    const pkg = await runPackageCheck(toolName, args, packageCheck);
+    const pkg = await runPackageCheck(toolName, args, packageCheck, options?.cwd);
     if (pkg.misses.length > 0) {
       appendToLog(HOOK_DEBUG_LOG, {
         ts: new Date().toISOString(),

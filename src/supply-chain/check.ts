@@ -19,12 +19,14 @@ import {
 import { lookupIndex, entryCovers, type OsvEntry } from './osv-index';
 import { queryOsvMalicious } from './osv-online';
 import { registryInfo, type RegistryInfo } from './registry';
+import { resolveInstalled, LOCAL_FIRST_MANAGERS } from './local-resolve';
 
 export interface PackageCheckConfig {
   enabled: boolean;
   onMalicious: 'block' | 'review';
-  registrySignals: boolean;
+  newPackage: 'review' | 'off';
   maxAgeHours: number;
+  installScript: 'review' | 'off';
   onlineFallback: boolean;
   allow: string[];
 }
@@ -32,6 +34,8 @@ export interface PackageCheckConfig {
 export interface PackageFinding {
   pkg: PackageInstallRequest;
   version?: string;
+  /** The finding is about the copy already in node_modules, not a download. */
+  installed?: boolean;
   kind: 'malicious' | 'malicious-unpinned' | 'new' | 'install-script';
   detail: string;
   advisories?: string[];
@@ -136,18 +140,62 @@ async function maliciousFor(
   return null;
 }
 
+/** `npx <pkg>` with a copy in node_modules runs that copy: the install is in
+ *  the past, so only the index matters (a hit still blocks, the run is now),
+ *  and nothing is asked of the registry or OSV online. */
+function checkInstalled(
+  p: PackageInstallRequest,
+  version: string,
+  misses: string[]
+): PackageFinding[] {
+  const local = lookupIndex(p.ecosystem, p.name);
+  if (local.status === 'unavailable') {
+    misses.push(`${label(p, version)}: installed copy, local index unavailable`);
+    return [];
+  }
+  if (local.status !== 'hit') return [];
+  const covering = local.entries.filter((e) => entryCovers(e, version) === true).map((e) => e.id);
+  if (covering.length === 0) return [];
+  return [
+    {
+      pkg: p,
+      version,
+      installed: true,
+      kind: 'malicious',
+      advisories: covering,
+      detail: `installed ${label(p, version)} (${covering.join(', ')})`,
+    },
+  ];
+}
+
 async function checkOne(
   p: PackageInstallRequest,
   cfg: PackageCheckConfig,
   misses: string[],
-  networkCapped: boolean
+  networkCapped: boolean,
+  cwd: string | undefined
 ): Promise<PackageFinding[]> {
+  // Only a BARE name runs the local copy: with any spec (`foo@next`,
+  // `foo@^10`, `foo@1.2.3`) npx compares and downloads what the spec asks for,
+  // so that request is judged as a download.
+  if (p.ecosystem === 'npm' && LOCAL_FIRST_MANAGERS.has(p.manager) && p.raw === p.name) {
+    const installed = resolveInstalled(p.name, cwd);
+    if (installed) return checkInstalled(p, installed.version, misses);
+  }
   const findings: PackageFinding[] = [];
   let info: RegistryInfo | null = null;
-  if (cfg.registrySignals && !networkCapped) {
+  const wantsRegistry = cfg.newPackage !== 'off' || cfg.installScript !== 'off';
+  if (wantsRegistry && !networkCapped) {
     try {
-      info = await registryInfo(p.ecosystem, p.name, p.version);
+      // With the age signal off there is no window, so the per-version time
+      // (a second, larger request) is never fetched.
+      const windowMs = cfg.newPackage === 'off' ? 0 : cfg.maxAgeHours * 3_600_000;
+      info = await registryInfo(p.ecosystem, p.name, p.version, windowMs);
       if (!info) misses.push(`${label(p, p.version)}: registry metadata unavailable`);
+      else if (info.ageFallback)
+        misses.push(
+          `${label(p, info.version)}: age from the package modified time (${info.ageFallback})`
+        );
     } catch (err) {
       misses.push(`${label(p, p.version)}: registry ${(err as Error).message}`);
     }
@@ -157,7 +205,7 @@ async function checkOne(
   const mal = await maliciousFor(p, version, cfg, misses, networkCapped);
   if (mal) findings.push(mal);
 
-  if (info?.publishedAtMs !== undefined) {
+  if (cfg.newPackage !== 'off' && info?.publishedAtMs !== undefined) {
     const ageH = (Date.now() - info.publishedAtMs) / 3_600_000;
     if (ageH >= 0 && ageH < cfg.maxAgeHours) {
       findings.push({
@@ -168,7 +216,7 @@ async function checkOne(
       });
     }
   }
-  if (info?.hasInstallScript) {
+  if (cfg.installScript !== 'off' && info?.hasInstallScript) {
     findings.push({
       pkg: p,
       version,
@@ -186,7 +234,9 @@ async function checkOne(
 export async function runPackageCheck(
   toolName: string,
   args: unknown,
-  cfg: PackageCheckConfig
+  cfg: PackageCheckConfig,
+  /** The hook's validated absolute working directory; where `npx` looks for node_modules. */
+  cwd?: string
 ): Promise<PackageCheckResult> {
   if (!cfg.enabled) return ALLOW;
   try {
@@ -199,7 +249,7 @@ export async function runPackageCheck(
     const misses: string[] = [];
     const checked = requests;
     const settled = await Promise.allSettled(
-      checked.map((p, i) => checkOne(p, cfg, misses, i >= MAX_NETWORK_PACKAGES))
+      checked.map((p, i) => checkOne(p, cfg, misses, i >= MAX_NETWORK_PACKAGES, cwd))
     );
     const findings: PackageFinding[] = [];
     settled.forEach((s, i) => {

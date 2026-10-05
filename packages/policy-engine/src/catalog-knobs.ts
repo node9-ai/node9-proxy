@@ -31,7 +31,10 @@ export interface LegacyPolicyKnobs {
   packageCheck?: {
     enabled?: boolean;
     onMalicious?: string;
+    /** 2.27.0: one boolean for both signals. Read, never written. */
     registrySignals?: boolean;
+    newPackage?: string;
+    installScript?: string;
     maxAgeHours?: number;
     onlineFallback?: boolean;
     allow?: string[];
@@ -65,13 +68,18 @@ export const TUNING_FIELDS: readonly TuningField[] = [
   { checkId: 'loading.skill-tamper', name: 'roots', legacy: ['skillPinning', 'roots'] },
   {
     checkId: 'loading.malicious-package',
-    name: 'registrySignals',
-    legacy: ['packageCheck', 'registrySignals'],
+    name: 'newPackage',
+    legacy: ['packageCheck', 'newPackage'],
   },
   {
     checkId: 'loading.malicious-package',
     name: 'maxAgeHours',
     legacy: ['packageCheck', 'maxAgeHours'],
+  },
+  {
+    checkId: 'loading.malicious-package',
+    name: 'installScript',
+    legacy: ['packageCheck', 'installScript'],
   },
   {
     checkId: 'loading.malicious-package',
@@ -85,6 +93,11 @@ export const TUNING_FIELDS: readonly TuningField[] = [
 export function tuningFromLegacyPolicy(policy: LegacyPolicyKnobs): Record<string, Obj> {
   const out: Record<string, Obj> = {};
   const p = policy as Obj;
+  // The 2.27.0 `registrySignals: false` reads as both new fields off, unless
+  // the block states them itself (the loop below then overwrites).
+  if (policy.packageCheck?.registrySignals === false) {
+    out['loading.malicious-package'] = { newPackage: 'off', installScript: 'off' };
+  }
   for (const f of TUNING_FIELDS) {
     const [block, key] = f.legacy;
     const value = (p[block] as Obj | undefined)?.[key];

@@ -401,6 +401,34 @@ describe('extractManagedConfig — reviewChannel + approvalTimeoutMs (Preference
     });
   });
 
+  it('keeps packageCheck per field; the 2.27.0 registrySignals:false reads as both off', () => {
+    const out = extractManagedConfig({
+      managedConfig: {
+        packageCheck: {
+          enabled: true,
+          onMalicious: 'review',
+          installScript: 'maybe',
+          maxAgeHours: 24,
+          allow: ['@acme/*', 7],
+        },
+        locked: [],
+      },
+    });
+    expect(out?.packageCheck).toEqual({
+      enabled: true,
+      onMalicious: 'review',
+      maxAgeHours: 24,
+      allow: ['@acme/*'],
+    });
+    const legacy = extractManagedConfig({
+      managedConfig: { packageCheck: { registrySignals: false, newPackage: 'review' }, locked: [] },
+    });
+    expect(legacy?.packageCheck).toEqual({ newPackage: 'review', installScript: 'off' });
+    expect(
+      extractManagedConfig({ managedConfig: { packageCheck: { enabled: 'yes' }, locked: [] } })
+    ).toBeUndefined();
+  });
+
   it('drops an invalid reviewChannel and a negative timeout', () => {
     const out = extractManagedConfig({
       managedConfig: { reviewChannel: 'bogus', approvalTimeoutMs: -1, locked: [] },

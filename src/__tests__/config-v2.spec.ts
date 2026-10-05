@@ -224,6 +224,19 @@ describe('translation', () => {
     });
   });
 
+  it('the 2.27.0 registrySignals:false reads as both new tuning fields off, and is not written back', () => {
+    const file = initWroteDefaults();
+    (file.policy!.packageCheck as Record<string, unknown>) = { registrySignals: false };
+    const v2 = legacyToV2(file) as unknown as { tuning?: Record<string, Record<string, unknown>> };
+    expect(v2.tuning?.['loading.malicious-package']).toEqual({
+      newPackage: 'off',
+      installScript: 'off',
+    });
+    expect(JSON.stringify(v2)).not.toContain('registrySignals');
+    const { legacy } = v2ToLegacy(v2 as unknown as Record<string, unknown>);
+    expect(legacy.policy?.packageCheck).toMatchObject({ newPackage: 'off', installScript: 'off' });
+  });
+
   it('round trip: the same resolved checks before and after', () => {
     const file = initWroteDefaults();
     file.settings!.mode = 'strict';
