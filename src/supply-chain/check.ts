@@ -11,6 +11,7 @@
 // Contract: never throws, never blocks because a lookup failed. Failures are
 // returned as `misses` for the caller to record.
 import picomatch from 'picomatch';
+import path from 'path';
 import {
   extractPackageInstalls,
   isBashTool,
@@ -175,12 +176,19 @@ async function checkOne(
   networkCapped: boolean,
   cwd: string | undefined
 ): Promise<PackageFinding[]> {
-  // Only a BARE name runs the local copy: with any spec (`foo@next`,
-  // `foo@^10`, `foo@1.2.3`) npx compares and downloads what the spec asks for,
-  // so that request is judged as a download.
-  if (p.ecosystem === 'npm' && LOCAL_FIRST_MANAGERS.has(p.manager) && p.raw === p.name) {
-    const installed = resolveInstalled(p.name, cwd);
-    if (installed) return checkInstalled(p, installed.version, misses);
+  if (
+    p.ecosystem === 'npm' &&
+    LOCAL_FIRST_MANAGERS.has(p.manager) &&
+    p.localCwd !== null &&
+    (p.raw === p.name || p.version)
+  ) {
+    const localCwd =
+      cwd && path.isAbsolute(cwd)
+        ? (p.localCwd ?? []).reduce((dir, step) => path.resolve(dir, step), cwd)
+        : undefined;
+    const installed = resolveInstalled(p.name, localCwd);
+    if (installed && (!p.version || p.version === installed.version))
+      return checkInstalled(p, installed.version, misses);
   }
   const findings: PackageFinding[] = [];
   let info: RegistryInfo | null = null;
@@ -190,7 +198,7 @@ async function checkOne(
       // With the age signal off there is no window, so the per-version time
       // (a second, larger request) is never fetched.
       const windowMs = cfg.newPackage === 'off' ? 0 : cfg.maxAgeHours * 3_600_000;
-      info = await registryInfo(p.ecosystem, p.name, p.version, windowMs);
+      info = await registryInfo(p.ecosystem, p.name, p.version, windowMs, p.raw);
       if (!info) misses.push(`${label(p, p.version)}: registry metadata unavailable`);
       else if (info.ageFallback)
         misses.push(
@@ -212,7 +220,9 @@ async function checkOne(
         pkg: p,
         version,
         kind: 'new',
-        detail: `${label(p, version)} was published ${Math.max(1, Math.round(ageH))}h ago (under ${cfg.maxAgeHours}h)`,
+        detail: info.ageFallback
+          ? `${label(p, version)} has package metadata updated ${Math.max(1, Math.round(ageH))}h ago (under ${cfg.maxAgeHours}h); version publish time unavailable`
+          : `${label(p, version)} was published ${Math.max(1, Math.round(ageH))}h ago (under ${cfg.maxAgeHours}h)`,
       });
     }
   }

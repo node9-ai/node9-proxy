@@ -113,7 +113,15 @@ export function tuningToLegacyPolicy(policy: Obj, tuning: Record<string, unknown
   const unknown: string[] = [];
   for (const [id, fields] of Object.entries(tuning)) {
     if (!fields || typeof fields !== 'object') continue;
-    for (const [name, value] of Object.entries(fields as Obj)) {
+    const normalized = { ...(fields as Obj) };
+    if (id === 'loading.malicious-package') {
+      if (normalized.registrySignals === false) {
+        normalized.newPackage ??= 'off';
+        normalized.installScript ??= 'off';
+      }
+      delete normalized.registrySignals;
+    }
+    for (const [name, value] of Object.entries(normalized)) {
       const field = TUNING_FIELDS.find((f) => f.checkId === id && f.name === name);
       if (!field) {
         unknown.push(`${id}.${name}`);

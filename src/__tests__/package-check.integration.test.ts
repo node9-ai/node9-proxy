@@ -173,3 +173,38 @@ describe('node9 check — npx with an installed copy', () => {
     expect(r.status).toBe(0);
   });
 });
+
+describe('node9 check package resolution regressions', () => {
+  itCli('checks the actual local copy after changing directory', () => {
+    for (const [folder, version] of [
+      ['project', '1.0.0'],
+      ['project/app', '2.0.0'],
+    ]) {
+      const dir = path.join(home, folder, 'node_modules', 'node9-canary-local');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, 'package.json'),
+        JSON.stringify({ name: 'node9-canary-local', version })
+      );
+    }
+    writeIndex('npm', 'node9-canary-local', [{ id: 'MAL-TEST-CWD', versions: ['2.0.0'] }]);
+    const r = check('cd app && npx node9-canary-local', {}, path.join(home, 'project'));
+    expect(r.status).toBe(2);
+    expect(JSON.parse(r.stdout).hookSpecificOutput.permissionDecisionReason).toContain(
+      'MAL-TEST-CWD'
+    );
+  });
+
+  itCli('a local run never hides a later unpinned installation', () => {
+    const dir = path.join(home, 'node_modules', 'node9-canary-local');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'package.json'),
+      JSON.stringify({ name: 'node9-canary-local', version: '1.0.0' })
+    );
+    writeIndex('npm', 'node9-canary-local', [{ id: 'MAL-TEST-DOWNLOAD', versions: ['2.0.0'] }]);
+    const r = check('npx node9-canary-local && npm install node9-canary-local');
+    expect(r.status).toBe(0);
+    expect(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision).toBe('ask');
+  });
+});

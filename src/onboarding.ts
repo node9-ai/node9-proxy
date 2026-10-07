@@ -1,8 +1,11 @@
 import chalk from 'chalk';
+import { globalConfigPath, writeConfigFile } from './config/write';
 import { writeCredentialsAndConfig } from './credentials';
 import { setupDetectedAgents } from './setup';
 import { runCloudSync, runPolicyPush } from './daemon/sync';
-import { ensureAutostartHealthy } from './daemon/service';
+import { ensureAutostartHealthy, autostartState, installDaemonService } from './daemon/service';
+import { confirm } from '@inquirer/prompts';
+import { isInteractive, isCI, mayChangeService, isPromptCancellation } from './cli/interactive';
 import { isDaemonRunning } from './auth/daemon';
 import { isTestingMode } from './cli/daemon-starter';
 import { getConfig } from './config';
@@ -58,6 +61,7 @@ export async function onboardMachine(
   // 2. Wire detected agents. Non-interactive (curl|sh and CI shells have no
   //    TTY). Best-effort: a machine with no agents installed yet is still a
   //    valid connection, so a wiring failure doesn't fail the onboarding.
+  const previousNoninteractive = process.env.NODE9_NONINTERACTIVE;
   process.env.NODE9_NONINTERACTIVE = '1';
   try {
     wired.push(...(await setupDetectedAgents()));
@@ -70,6 +74,9 @@ export async function onboardMachine(
     });
   } catch (e) {
     steps.push({ name: 'agents', ok: false, detail: e instanceof Error ? e.message : String(e) });
+  } finally {
+    if (previousNoninteractive === undefined) delete process.env.NODE9_NONINTERACTIVE;
+    else process.env.NODE9_NONINTERACTIVE = previousNoninteractive;
   }
 
   // 3+4. Cloud: policy pull, then the ACKED snapshot push. The cloud steps use
@@ -108,7 +115,7 @@ export async function onboardMachine(
     //    service the moment the machine becomes cloud-enabled so policy keeps
     //    syncing across reboots. Informational — never fails the onboarding.
     const healed = ensureAutostartHealthy(!!getConfig().settings.autoStartDaemon);
-    const detail =
+    let detail =
       healed === 'repaired'
         ? 'autostart re-enabled (survives reboot)'
         : isDaemonRunning()
@@ -116,7 +123,40 @@ export async function onboardMachine(
           : healed === 'unsupported'
             ? 'no background service on this platform: starts on agent activity'
             : 'starts on agent activity (make it survive reboots: node9 daemon install)';
-    steps.push({ name: 'daemon', ok: true, detail });
+    let daemonOk = true;
+    if (
+      sync.ok &&
+      push.ok &&
+      isInteractive() &&
+      mayChangeService({ stdoutTTY: !!process.stdout.isTTY, ci: isCI() }) &&
+      autostartState() === 'absent'
+    ) {
+      try {
+        if (
+          await confirm({
+            message: 'Run node9 in the background when this computer starts?',
+            default: true,
+          })
+        ) {
+          const installed = installDaemonService();
+          if (installed.ok)
+            writeConfigFile(globalConfigPath(), (config) => {
+              config.settings ??= {};
+              config.settings.autoStartDaemon = true;
+            });
+          daemonOk = installed.ok;
+          detail = installed.ok
+            ? 'background service installed (starts at login)'
+            : installed.reason;
+        }
+      } catch (error) {
+        if (!isPromptCancellation(error)) {
+          daemonOk = false;
+          detail = 'Background service setup failed; run node9 daemon install';
+        }
+      }
+    }
+    steps.push({ name: 'daemon', ok: daemonOk, detail });
   }
 
   const required: OnboardStep['name'][] = ['credentials', 'policy-sync', 'register'];

@@ -371,3 +371,43 @@ export function startAuditShipper(): void {
   setTimeout(() => void shipOnce(), 3_000);
   setInterval(() => void shipOnce(), intervalMs);
 }
+
+/** Bounded, read-only sample of events eligible for the actual shipper. */
+export function outboxBacklog(
+  auditLogPath: string = LOCAL_AUDIT_LOG,
+  watermarkPath: string = AUDIT_SHIP_WATERMARK,
+  maxBytes = MAX_CHUNK_BYTES
+): { outboxPending: number | null; outboxOldestAt: string | null; outboxTruncated: boolean } {
+  try {
+    const size = fs.statSync(auditLogPath).size;
+    const wm = readWatermark(watermarkPath);
+    const offset =
+      wm && wm.fileSig === fileSignature(auditLogPath) && wm.offset <= size ? wm.offset : 0;
+    const length = Math.min(size - offset, maxBytes);
+    const fd = fs.openSync(auditLogPath, 'r');
+    let chunk: Buffer;
+    try {
+      const buffer = Buffer.alloc(length);
+      const read = fs.readSync(fd, buffer, 0, length, offset);
+      chunk = buffer.subarray(0, read);
+    } finally {
+      fs.closeSync(fd);
+    }
+    const { rows } = buildWireRows(chunk);
+    const oldest = rows.reduce((old, row) => {
+      const time = Date.parse(row.ts);
+      return Number.isFinite(time) ? Math.min(old, time) : old;
+    }, Infinity);
+    return {
+      outboxPending: rows.length,
+      outboxOldestAt: Number.isFinite(oldest) ? new Date(oldest).toISOString() : null,
+      outboxTruncated: size - offset > length,
+    };
+  } catch (error) {
+    return {
+      outboxPending: (error as NodeJS.ErrnoException).code === 'ENOENT' ? 0 : null,
+      outboxOldestAt: null,
+      outboxTruncated: false,
+    };
+  }
+}

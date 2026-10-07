@@ -457,3 +457,77 @@ describe('runPackageCheck — npm age is version-true', () => {
     expect(r.misses.some((m) => m.includes('age from the package modified time'))).toBe(true);
   });
 });
+
+describe('package resolution regressions', () => {
+  let project: string;
+  beforeEach(() => {
+    project = projectWith({ eslint: '9.1.0' });
+  });
+  afterEach(() => fs.rmSync(project, { recursive: true, force: true }));
+
+  it.each(['npm install eslint', 'pnpm dlx eslint', 'npx eslint@next'])(
+    'checks a later download: %s',
+    async (download) => {
+      indexWith('npm', 'eslint', [{ id: 'MAL-TEST-DOWNLOAD', versions: ['10.0.0'] }]);
+      routes['http://registry.test/eslint'] = () =>
+        json({
+          modified: OLD,
+          'dist-tags': { latest: '10.0.0', next: '10.0.0' },
+          versions: { '10.0.0': {} },
+        });
+      const r = await runPackageCheck(...bash(`npx eslint . && ${download}`), CFG, project);
+      expect(r.verdict).toBe('block');
+      expect(r.reason).toContain('MAL-TEST-DOWNLOAD');
+    }
+  );
+
+  it('checks the installed version after a literal directory change', async () => {
+    const app = path.join(project, 'app', 'node_modules', 'eslint');
+    fs.mkdirSync(app, { recursive: true });
+    fs.writeFileSync(
+      path.join(app, 'package.json'),
+      JSON.stringify({ name: 'eslint', version: '10.0.0' })
+    );
+    indexWith('npm', 'eslint', [{ id: 'MAL-TEST-CWD', versions: ['10.0.0'] }]);
+    const r = await runPackageCheck(...bash('cd app && npx eslint .'), CFG, project);
+    expect(r.verdict).toBe('block');
+    expect(r.reason).toContain('MAL-TEST-CWD');
+    expect(calls).toEqual([]);
+  });
+
+  it('does not use the original directory for workspace or prefix overrides', async () => {
+    indexWith('npm', 'eslint', [{ id: 'MAL-TEST-REMOTE', versions: ['10.0.0'] }]);
+    routes['http://registry.test/eslint'] = () => npmDoc('10.0.0');
+    const r = await runPackageCheck(...bash('npm --prefix /other exec eslint'), CFG, project);
+    expect(r.verdict).toBe('block');
+    expect(calls).not.toEqual([]);
+  });
+
+  it('uses an exact matching installed version without a registry call', async () => {
+    indexWith('npm', 'node9-canary-other', []);
+    const r = await runPackageCheck(...bash('npx eslint@9.1.0 .'), CFG, project);
+    expect(r.verdict).toBe('allow');
+    expect(calls).toEqual([]);
+  });
+
+  it.each(['next', '^10.0.0'])('checks the version selected by %s, not latest', async (spec) => {
+    indexWith('npm', 'eslint', [{ id: 'MAL-TEST-SPEC', versions: ['10.1.0'] }]);
+    routes['http://registry.test/eslint'] = () =>
+      json({
+        modified: OLD,
+        'dist-tags': { latest: '9.1.0', next: '10.1.0' },
+        versions: { '9.1.0': {}, '10.1.0': {} },
+      });
+    const r = await runPackageCheck(...bash(`npx eslint@${spec}`), CFG, project);
+    expect(r.verdict).toBe('block');
+    expect(r.findings[0].version).toBe('10.1.0');
+  });
+});
+
+it('resolves a bare npm alias to the target package latest', async () => {
+  indexWith('npm', 'eslint', [{ id: 'MAL-TEST-ALIAS', versions: ['10.0.0'] }]);
+  routes['http://registry.test/eslint'] = () => npmDoc('10.0.0');
+  const result = await runPackageCheck(...bash('npm install lint@npm:eslint'), CFG);
+  expect(result.verdict).toBe('block');
+  expect(result.findings[0].version).toBe('10.0.0');
+});

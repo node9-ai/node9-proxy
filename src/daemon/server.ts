@@ -1,3 +1,4 @@
+import { startHeartbeat } from './heartbeat';
 // src/daemon/server.ts
 // HTTP server for the Node9 localhost approval daemon.
 // All route handlers live here; shared state is in daemon/state.ts.
@@ -213,6 +214,7 @@ export function startDaemon(): void {
     startCloudSync();
     startForensicBroadcast();
     startAuditShipper();
+    startHeartbeat();
     startDlpScanner();
     startOsvSync();
     startMcpReconciler();

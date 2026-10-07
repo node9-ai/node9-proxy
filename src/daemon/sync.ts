@@ -1,3 +1,4 @@
+import { createSyncTrigger } from './sync-trigger';
 // src/daemon/sync.ts
 // Periodic sync of cloud policy rules to ~/.node9/rules-cache.json
 // The daemon calls startCloudSync() once on startup; it reads the configured
@@ -292,7 +293,7 @@ export function readCredentials(): { apiKey: string; apiUrl: string } | null {
  * with 304 when nothing has changed. Silent fallback on any error —
  * a missing or corrupt cache simply means "no cached etag, send 200".
  */
-function readCachedEtag(): string | undefined {
+export function readCachedEtag(): string | undefined {
   try {
     const raw = JSON.parse(fs.readFileSync(rulesCacheFile(), 'utf-8')) as Record<string, unknown>;
     return typeof raw.etag === 'string' ? raw.etag : undefined;
@@ -1351,6 +1352,8 @@ export function getCloudRules(): unknown[] | null {
  * Start the background cloud-policy sync loop.
  * Called once by startDaemon(). Timer is unref'd so it doesn't prevent process exit.
  */
+export const triggerSyncNow = createSyncTrigger(syncOnce);
+
 export function startCloudSync(): void {
   // Self-rescheduling: re-resolve the interval after every sync so a changed
   // cloud cadence (pushed on the last sync) takes effect on the next cycle, not
@@ -1359,7 +1362,7 @@ export function startCloudSync(): void {
     const t = setTimeout(() => {
       // syncOnce handles its own errors; reschedule regardless so the loop
       // never dies on a transient failure.
-      void syncOnce()
+      void triggerSyncNow(false)
         .catch(() => {})
         .finally(() => scheduleNext(effectiveSyncIntervalMs()));
     }, ms);

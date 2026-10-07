@@ -3,6 +3,7 @@
 // install would resolve to, how recently it was published, and (npm) whether
 // it runs an install script. Every function fails soft: a failed lookup
 // returns `null` and the caller records a miss.
+import { maxSatisfying, satisfies, validRange } from 'semver';
 import type { PackageEcosystem } from '@node9/policy-engine';
 import { endpoints, fetchJson } from './net';
 
@@ -37,7 +38,8 @@ const MAX_BYTES = 2 * 1024 * 1024;
 async function npmInfo(
   name: string,
   version: string | undefined,
-  freshWindowMs: number
+  freshWindowMs: number,
+  raw?: string
 ): Promise<RegistryInfo | null> {
   const base = endpoints().npmRegistry;
   if (!base) return null;
@@ -55,7 +57,23 @@ async function npmInfo(
   } | null;
   if (!doc) return null;
   const latest = doc['dist-tags']?.latest;
-  const resolved = version ?? latest;
+  // Preserve the requested tag/range: latest is only the default for a bare name.
+  const aliasStart = raw?.indexOf('@npm:') ?? -1;
+  const target = aliasStart > 0 ? raw!.slice(aliasStart + 5) : raw?.replace(/^npm:/, '');
+  const specStart = target?.indexOf('@', 1) ?? -1;
+  const spec = specStart > 0 ? target!.slice(specStart + 1) : '';
+  let resolved = version;
+  if (!resolved) {
+    if (!spec) resolved = latest;
+    else if (doc['dist-tags']?.[spec]) resolved = doc['dist-tags'][spec];
+    else if (validRange(spec)) {
+      // npm prefers the default tag if it satisfies the requested range.
+      resolved =
+        latest && satisfies(latest, spec)
+          ? latest
+          : (maxSatisfying(Object.keys(doc.versions ?? {}), spec) ?? undefined);
+    }
+  }
   if (!resolved) return null;
   const v = doc.versions?.[resolved];
   const modifiedMs = doc.modified ? Date.parse(doc.modified) : NaN;
@@ -116,7 +134,8 @@ export async function registryInfo(
   name: string,
   version: string | undefined,
   /** The age window the caller judges by; inside it npm's per-version time is read. */
-  freshWindowMs: number
+  freshWindowMs: number,
+  raw?: string
 ): Promise<RegistryInfo | null> {
-  return eco === 'npm' ? npmInfo(name, version, freshWindowMs) : pypiInfo(name, version);
+  return eco === 'npm' ? npmInfo(name, version, freshWindowMs, raw) : pypiInfo(name, version);
 }

@@ -367,3 +367,17 @@ describe('review fixes (2026-10-03)', () => {
     expect(data.checks).toEqual({ 'commands.sudo': 'review', 'data.pii': 'block' });
   });
 });
+
+describe('legacy package tuning in v2', () => {
+  it('translates the old boolean per field and writes only the new keys', () => {
+    writeGlobal({
+      version: '2',
+      tuning: { 'loading.malicious-package': { registrySignals: false, newPackage: 'review' } },
+    });
+    const cfg = getConfig();
+    expect(cfg.policy.packageCheck.newPackage).toBe('review');
+    expect(cfg.policy.packageCheck.installScript).toBe('off');
+    const written = legacyToV2(cfg as unknown as LegacyFile);
+    expect(written.tuning?.['loading.malicious-package']).not.toHaveProperty('registrySignals');
+  });
+});

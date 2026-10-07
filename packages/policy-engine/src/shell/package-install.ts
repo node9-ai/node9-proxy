@@ -28,6 +28,8 @@ export interface PackageInstallRequest {
   version?: string;
   /** The argument as written. */
   raw: string;
+  /** Literal cd steps before this call; null means the execution context is unknown. */
+  localCwd?: string[] | null;
 }
 
 // ── npm-family ──────────────────────────────────────────────────────────────
@@ -657,16 +659,77 @@ function pipInstall(
     pushPy(out, manager, operands(words, v + 1, PIP_VALUE_FLAGS));
 }
 
+// Only a simple call, optionally preceded by literal `cd ... &&` steps, can
+// prove which local tree will be used. Other shell structures still extract
+// every package, but must not take the local-only shortcut.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function localContexts(file: any): Map<number, string[]> {
+  const contexts = new Map<number, string[]>();
+  // mvdan-sh uses numeric operators; derive && from the parser rather than
+  // duplicating its internal enum.
+  const sample = parseShared('cd . && true');
+  if (typeof sample === 'symbol') return contexts;
+  const andOp = sample.Stmts[0].Cmd.Op;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function visit(stmt: any, steps: string[], depth = 0): string[] | null {
+    if (depth > 64) return null;
+    if (!stmt || stmt.Background || stmt.Negated || stmt.Redirs?.length) return null;
+    const cmd = stmt.Cmd;
+    const kind = syntax.NodeType(cmd);
+    if (kind === 'BinaryCmd' && cmd.Op === andOp) {
+      const next = visit(cmd.X, steps, depth + 1);
+      return next === null ? null : visit(cmd.Y, next, depth + 1);
+    }
+    if (kind !== 'CallExpr' || cmd.Assigns?.length) return null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const words = (cmd.Args ?? []).map((w: any) => resolveWordLiteral(w));
+    if (
+      words[0] === 'cd' &&
+      words.length === 2 &&
+      typeof words[1] === 'string' &&
+      words[1] &&
+      !/^[-~]/.test(words[1])
+    )
+      return [...steps, words[1]];
+    if (!['npx', 'npm', 'bunx', 'bun'].includes(words[0])) return null;
+    // Context-changing flags, wrappers and expansions cannot prove locality.
+    if (
+      words.some(
+        (w: string | null) =>
+          w === null ||
+          /^(?:--(?:prefix|cwd|directory|workspace|workspaces|global|ignore-existing)(?:=|$)|-[Cwg])/.test(
+            w
+          )
+      )
+    )
+      return null;
+    contexts.set(cmd.Pos().Offset(), steps);
+    // An arbitrary executable can mutate node_modules before the next call.
+    return null;
+  }
+  if (file.Stmts?.length === 1) visit(file.Stmts[0], []);
+  return contexts;
+}
+
 function collect(command: string, out: PackageInstallRequest[], depth: number): void {
   if (!command || command.length > 50_000) return;
   const f = parseShared(command);
   if (typeof f === 'symbol') return;
+  const contexts = depth === 0 ? localContexts(f) : new Map<number, string[]>();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   syntax.Walk(f, (node: any) => {
     if (node && syntax.NodeType(node) === 'CallExpr') {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const words = ((node.Args as any[]) || []).map((a) => resolveWordLiteral(a));
+      const start = out.length;
       if (words.length > 0) fromCall(words, out, depth);
+      const steps = contexts.get(node.Pos().Offset());
+      for (let i = start; i < out.length; i++) {
+        if (['npx', 'bunx', 'npm exec'].includes(out[i].manager)) {
+          if (!steps) out[i].localCwd = null;
+          else if (steps.length) out[i].localCwd = steps;
+        }
+      }
     }
     return true;
   });
@@ -683,10 +746,10 @@ function collect(command: string, out: PackageInstallRequest[], depth: number): 
 export function extractPackageInstalls(command: string): PackageInstallRequest[] {
   const out: PackageInstallRequest[] = [];
   collect(command, out, 0);
-  // Deduplicate identical (ecosystem, name, version) rows from repeated calls.
+  // Deduplicate only equivalent requests: a local run never hides a download.
   const seen = new Set<string>();
   return out.filter((r) => {
-    const k = `${r.ecosystem}\0${r.name}\0${r.version ?? ''}`;
+    const k = JSON.stringify([r.ecosystem, r.manager, r.name, r.raw, r.localCwd]);
     if (seen.has(k)) return false;
     seen.add(k);
     return true;
