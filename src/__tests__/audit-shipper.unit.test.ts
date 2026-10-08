@@ -234,6 +234,12 @@ describe('buildArgsPreview', () => {
   it('caps the preview at 120 chars', () => {
     expect(buildArgsPreview({ command: 'x'.repeat(500) })?.length).toBe(120);
   });
+
+  it('does not split a Unicode character at the preview boundary', () => {
+    const preview = buildArgsPreview({ command: 'x'.repeat(119) + '😀' + 'tail' });
+    expect(preview).toBe('x'.repeat(119) + '😀');
+    expect(Array.from(preview ?? '')).toHaveLength(120);
+  });
 });
 
 describe('shipOnce', () => {

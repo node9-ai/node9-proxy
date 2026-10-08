@@ -69,7 +69,9 @@ export function buildArgsPreview(args: unknown): string | undefined {
     const primary = o && (o.command ?? o.file_path ?? o.path ?? o.url ?? o.query);
     const text = typeof primary === 'string' ? primary : args ? JSON.stringify(args) : '';
     if (!text) return undefined;
-    return redactSecrets(text).slice(0, 120);
+    // Limit by Unicode code points. String.slice can split an emoji's UTF-16
+    // surrogate pair and leave a lone surrogate that the cloud API cannot store.
+    return Array.from(redactSecrets(text)).slice(0, 120).join('');
   } catch {
     return undefined;
   }
