@@ -1,4 +1,3 @@
-import { startHeartbeat } from './heartbeat';
 // src/daemon/server.ts
 // HTTP server for the Node9 localhost approval daemon.
 // All route handlers live here; shared state is in daemon/state.ts.
@@ -83,6 +82,7 @@ import { startHookHeal } from './hook-heal.js';
 import { logDaemonStartup, recordStartupState } from './startup-log.js';
 import { readMcpToolsConfig, updateServerDiscovery, approveServer } from './mcp-tools.js';
 import { startOsvSync } from '../supply-chain/osv-sync';
+import { startHeartbeat } from './heartbeat';
 
 export type DaemonReportPeriod = 'today' | '7d' | '30d' | 'month';
 

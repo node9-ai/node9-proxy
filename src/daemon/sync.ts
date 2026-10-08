@@ -1,4 +1,3 @@
-import { createSyncTrigger } from './sync-trigger';
 // src/daemon/sync.ts
 // Periodic sync of cloud policy rules to ~/.node9/rules-cache.json
 // The daemon calls startCloudSync() once on startup; it reads the configured
@@ -32,6 +31,7 @@ import { tickScanWatcher, commitTotalsUpload, tickForensicBroadcast } from './sc
 import { broadcastForensic } from './state.js';
 import { appendToLog, HOOK_DEBUG_LOG } from '../audit/index.js';
 import { getMachineId } from '../machine-id.js';
+import { createSyncTrigger } from './sync-trigger';
 
 // One row per session delta sent on /scan/report. The BE stores
 // these in ScanSessionSignals using INSERT-ON-CONFLICT INCREMENT, so
