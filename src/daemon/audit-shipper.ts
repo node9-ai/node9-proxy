@@ -17,7 +17,12 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { LOCAL_AUDIT_LOG, HOOK_DEBUG_LOG, appendToLog } from '../audit/index.js';
+import {
+  LOCAL_AUDIT_LOG,
+  HOOK_DEBUG_LOG,
+  appendToLog,
+  truncateAuditPreview,
+} from '../audit/index.js';
 import { getConfig } from '../config/index.js';
 import { readCredentials } from './sync.js';
 import { validateApiUrl } from '../auth/cloud.js';
@@ -173,7 +178,10 @@ export function buildWireRows(chunk: Buffer): { rows: WireRow[]; consumed: numbe
         ? { args: parsed.args as Record<string, unknown> }
         : {}),
       ...(typeof parsed.argsHash === 'string' ? { argsHash: parsed.argsHash } : {}),
-      ...(typeof parsed.argsPreview === 'string' ? { argsPreview: parsed.argsPreview } : {}),
+      // Repair previews already queued by versions that counted code points.
+      ...(typeof parsed.argsPreview === 'string'
+        ? { argsPreview: truncateAuditPreview(parsed.argsPreview) }
+        : {}),
       decision: parsed.decision,
       ...(checkedBy ? { checkedBy } : {}),
       ...(typeof parsed.ruleName === 'string' ? { ruleName: parsed.ruleName } : {}),

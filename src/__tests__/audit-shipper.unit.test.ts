@@ -237,8 +237,19 @@ describe('buildArgsPreview', () => {
 
   it('does not split a Unicode character at the preview boundary', () => {
     const preview = buildArgsPreview({ command: 'x'.repeat(119) + '😀' + 'tail' });
-    expect(preview).toBe('x'.repeat(119) + '😀');
-    expect(Array.from(preview ?? '')).toHaveLength(120);
+    expect(preview).toBe('x'.repeat(119));
+  });
+
+  it('preserves a complete surrogate pair that fits within the limit', () => {
+    expect(buildArgsPreview({ command: 'x'.repeat(118) + '\u{1f600}' + 'tail' })).toBe(
+      'x'.repeat(118) + '\u{1f600}'
+    );
+  });
+
+  it('keeps emoji-heavy previews within the API UTF-16 length limit', () => {
+    const preview = buildArgsPreview({ command: '\u{1f600}'.repeat(120) });
+    expect(preview).toBe('\u{1f600}'.repeat(60));
+    expect(preview?.length).toBeLessThanOrEqual(120);
   });
 });
 
@@ -273,6 +284,21 @@ describe('shipOnce', () => {
     const wm = readWatermark(watermarkPath);
     expect(wm?.offset).toBe(fs.statSync(auditLogPath).size);
     expect(shipLagBytes(auditLogPath, watermarkPath)).toBe(0);
+  });
+
+  it('ships already queued oversized previews without changing the local log', async () => {
+    const content = row({ args: undefined, argsPreview: '\u{1f600}'.repeat(120) });
+    fs.writeFileSync(auditLogPath, content);
+    const fetchImpl = (async (_url: unknown, init?: { body?: unknown }) => {
+      const body = JSON.parse(String(init?.body)) as { rows: { argsPreview: string }[] };
+      // The backend validates string length in UTF-16 code units before ingestion.
+      const valid = body.rows.every((r) => r.argsPreview.length <= 160);
+      return { ok: valid, status: valid ? 200 : 400 } as Response;
+    }) as typeof fetch;
+
+    expect(await shipOnce(deps(fetchImpl))).toEqual({ status: 'shipped', shipped: 1 });
+    expect(shipLagBytes(auditLogPath, watermarkPath)).toBe(0);
+    expect(fs.readFileSync(auditLogPath, 'utf8')).toBe(content);
   });
 
   it('is incremental: a second pass ships only new rows', async () => {
