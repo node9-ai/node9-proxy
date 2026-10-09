@@ -38,6 +38,12 @@ import { onboardMachine, renderOnboardOutcome } from './onboarding';
 import { loginViaBrowser } from './auth/browser-login';
 import { registerLogoutCommand, revokeSelf } from './cli/commands/logout';
 import { openBrowser } from './utils/open-browser';
+import {
+  buildExplainJson,
+  buildExplainJsonError,
+  displaySafe,
+  inputPreview,
+} from './cli/render/explain-display';
 import { registerCheckCommand } from './cli/commands/check';
 import { registerLogCommand } from './cli/commands/log';
 import { registerShieldCommand } from './cli/commands/shield';
@@ -543,7 +549,19 @@ program
   )
   .argument('<tool>', 'Tool name (e.g. bash, str_replace_based_edit_tool, execute_query)')
   .argument('[args]', 'Tool arguments as JSON, or a plain command string for shell tools')
-  .action(async (tool: string, argsRaw?: string) => {
+  .option(
+    '--json',
+    'Machine-readable output (one JSON document; no "decision" field means failure)'
+  )
+  .action(async (tool: string, argsRaw: string | undefined, opts: { json?: boolean }) => {
+    // Every user-derived string goes through displaySafe() (redacted, one
+    // visible line) before it is printed, so the input cannot forge a
+    // Decision line or leak a secret into a log of this output.
+    const failJson = (message: string): never => {
+      console.log(JSON.stringify(buildExplainJsonError(message), null, 2));
+      process.exit(1);
+    };
+
     let args: unknown = {};
     if (argsRaw) {
       const trimmed = argsRaw.trim();
@@ -551,7 +569,8 @@ program
         try {
           args = JSON.parse(trimmed);
         } catch {
-          console.error(chalk.red(`\n❌ Invalid JSON: ${trimmed}\n`));
+          if (opts.json) failJson('Invalid JSON in [args]');
+          console.error(chalk.red(`\n❌ Invalid JSON: ${inputPreview(trimmed)}\n`));
           process.exit(1);
         }
       } else {
@@ -560,15 +579,25 @@ program
       }
     }
 
-    const result = await explainPolicy(tool, args);
+    let result: Awaited<ReturnType<typeof explainPolicy>>;
+    try {
+      result = await explainPolicy(tool, args);
+    } catch (err) {
+      if (opts.json) failJson(`explain failed: ${displaySafe(String(err))}`);
+      throw err;
+    }
+
+    if (opts.json) {
+      console.log(JSON.stringify(buildExplainJson(result, argsRaw), null, 2));
+      return;
+    }
 
     console.log('');
     console.log(chalk.cyan.bold('🛡️  Node9 Explain'));
     console.log('');
-    console.log(`   ${chalk.bold('Tool:')}    ${chalk.white(result.tool)}`);
+    console.log(`   ${chalk.bold('Tool:')}    ${chalk.white(displaySafe(result.tool))}`);
     if (argsRaw) {
-      const preview = argsRaw.length > 80 ? argsRaw.slice(0, 77) + '…' : argsRaw;
-      console.log(`   ${chalk.bold('Input:')}   ${chalk.gray(preview)}`);
+      console.log(`   ${chalk.bold('Input:')}   ${chalk.gray(inputPreview(argsRaw))}`);
     }
 
     // ── Waterfall ────────────────────────────────────────────────────────────
@@ -602,9 +631,10 @@ program
       else if (step.outcome === 'skip') icon = chalk.gray('  ─ ');
       else icon = chalk.gray('  ○ ');
 
-      const name = step.name.padEnd(18);
+      const name = displaySafe(step.name).padEnd(18);
       const nameStr = isFinal ? chalk.white.bold(name) : chalk.white(name);
-      const detail = isFinal ? chalk.white(step.detail) : chalk.gray(step.detail);
+      const safeDetail = displaySafe(step.detail);
+      const detail = isFinal ? chalk.white(safeDetail) : chalk.gray(safeDetail);
       const arrow = isFinal ? chalk.yellow('  ← STOP') : '';
       console.log(`${icon} ${nameStr} ${detail}${arrow}`);
     }
@@ -618,14 +648,14 @@ program
         chalk.red.bold('  Decision: 🛑 BLOCK') + chalk.gray('  — this action is blocked')
       );
       if (result.blockedByLabel) {
-        console.log(chalk.gray(`  Reason:   ${result.blockedByLabel}`));
+        console.log(chalk.gray(`  Reason:   ${displaySafe(result.blockedByLabel)}`));
       }
     } else {
       console.log(
         chalk.red.bold('  Decision: 🔴 REVIEW') + chalk.gray('  — human approval required')
       );
       if (result.blockedByLabel) {
-        console.log(chalk.gray(`  Reason:   ${result.blockedByLabel}`));
+        console.log(chalk.gray(`  Reason:   ${displaySafe(result.blockedByLabel)}`));
       }
     }
     console.log('');
