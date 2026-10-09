@@ -1,0 +1,17 @@
+# A reusable template: the caller's trigger and gate decide reachability, and passing the
+# issue number in is how a gated caller uses it too. Not "built to process attacker input".
+name: Reusable triage
+on:
+  workflow_call:
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: google-github-actions/run-gemini-cli@v0
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          prompt: Triage the issue in ISSUE_NUMBER and apply labels.

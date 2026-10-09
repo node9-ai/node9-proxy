@@ -1,0 +1,31 @@
+# The gating job's `if:` has `||` only INSIDE a parenthesised group; every alternative is gated
+# (a maintainer label, or a member comment). The agent job runs only when that job succeeded.
+name: Review
+on:
+  pull_request_target:
+    types: [opened, synchronize, labeled]
+  issue_comment:
+    types: [created]
+jobs:
+  setup:
+    if: >-
+      github.repository_owner == 'acme' &&
+      ((github.event_name == 'pull_request_target' && github.event.label.name == 'claude-review') ||
+       (github.event_name == 'issue_comment' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)))
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+  review:
+    needs: setup
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          allowed_non_write_users: "*"
+          prompt: "Review PR ${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"

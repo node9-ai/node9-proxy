@@ -37,12 +37,12 @@ function writeIndex(eco: 'npm' | 'PyPI', name: string, entries: object[]): void 
   );
 }
 
-function check(command: string, config: object = {}) {
+function check(command: string, config: object = {}, cwd: string = home) {
   fs.writeFileSync(path.join(home, '.node9', 'config.json'), JSON.stringify(config));
   const payload = {
     hook_event_name: 'PreToolUse',
     session_id: 'pkg-check-it',
-    cwd: home,
+    cwd,
     tool_name: 'Bash',
     tool_input: { command },
   };
@@ -132,5 +132,79 @@ describe('node9 check — package check before install', () => {
       policy: { packageCheck: { allow: ['node9-canary-*'] } },
     });
     expect(r.status).toBe(0);
+  });
+});
+
+// Design 2.2 (T11): `npx <pkg>` with the package already in node_modules runs
+// the installed copy. No network is reachable here (NODE9_TESTING, no URL
+// overrides), so an allow proves the registry was never needed.
+describe('node9 check — npx with an installed copy', () => {
+  function project(version: string): string {
+    const dir = path.join(home, 'project', 'node_modules', 'eslint');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'eslint', version }));
+    return path.join(home, 'project');
+  }
+
+  itCli('allows npx of an installed package without any lookup', () => {
+    writeIndex('npm', 'node9-canary-other', [{ id: 'MAL-0000-0001', all: true }]);
+    const r = check('npx eslint src/', {}, project('9.1.0'));
+    expect(r.status).toBe(0);
+    expect(r.stdout).not.toContain('deny');
+    expect(r.stdout).not.toContain('ask');
+    const debug = fs.existsSync(path.join(home, '.node9', 'hook-debug.log'))
+      ? fs.readFileSync(path.join(home, '.node9', 'hook-debug.log'), 'utf8')
+      : '';
+    expect(debug).not.toContain('package-check-miss');
+  });
+
+  itCli('blocks npx when the installed version is in the index', () => {
+    writeIndex('npm', 'eslint', [{ id: 'MAL-0000-0009', versions: ['9.1.0'] }]);
+    const r = check('npx eslint .', {}, project('9.1.0'));
+    expect(r.status).toBe(2);
+    const out = JSON.parse(r.stdout);
+    expect(out.hookSpecificOutput.permissionDecisionReason).toContain('MAL-0000-0009');
+    expect(out.hookSpecificOutput.permissionDecisionReason).toContain('installed');
+  });
+
+  itCli('a different installed version is not the flagged one', () => {
+    writeIndex('npm', 'eslint', [{ id: 'MAL-0000-0009', versions: ['9.1.0'] }]);
+    const r = check('npx eslint .', {}, project('9.2.0'));
+    expect(r.status).toBe(0);
+  });
+});
+
+describe('node9 check package resolution regressions', () => {
+  itCli('checks the actual local copy after changing directory', () => {
+    for (const [folder, version] of [
+      ['project', '1.0.0'],
+      ['project/app', '2.0.0'],
+    ]) {
+      const dir = path.join(home, folder, 'node_modules', 'node9-canary-local');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, 'package.json'),
+        JSON.stringify({ name: 'node9-canary-local', version })
+      );
+    }
+    writeIndex('npm', 'node9-canary-local', [{ id: 'MAL-TEST-CWD', versions: ['2.0.0'] }]);
+    const r = check('cd app && npx node9-canary-local', {}, path.join(home, 'project'));
+    expect(r.status).toBe(2);
+    expect(JSON.parse(r.stdout).hookSpecificOutput.permissionDecisionReason).toContain(
+      'MAL-TEST-CWD'
+    );
+  });
+
+  itCli('a local run never hides a later unpinned installation', () => {
+    const dir = path.join(home, 'node_modules', 'node9-canary-local');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'package.json'),
+      JSON.stringify({ name: 'node9-canary-local', version: '1.0.0' })
+    );
+    writeIndex('npm', 'node9-canary-local', [{ id: 'MAL-TEST-DOWNLOAD', versions: ['2.0.0'] }]);
+    const r = check('npx node9-canary-local && npm install node9-canary-local');
+    expect(r.status).toBe(0);
+    expect(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision).toBe('ask');
   });
 });

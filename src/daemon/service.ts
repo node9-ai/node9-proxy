@@ -650,3 +650,10 @@ export function isDaemonServiceEnabled(): boolean {
   }
   return false;
 }
+
+/** Installed files alone do not prove the service will run after login. */
+export function autostartState(): 'enabled' | 'disabled' | 'absent' | 'unsupported' {
+  if (!['linux', 'darwin', 'win32'].includes(process.platform)) return 'unsupported';
+  if (!isDaemonServiceInstalled()) return 'absent';
+  return isDaemonServiceEnabled() ? 'enabled' : 'disabled';
+}

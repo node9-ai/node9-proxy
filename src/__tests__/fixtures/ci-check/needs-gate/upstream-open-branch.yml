@@ -1,0 +1,29 @@
+# The gating job's `if:` has an ungated top-level branch: anyone opening a PR passes it.
+name: Review
+on:
+  pull_request_target:
+    types: [opened]
+  issue_comment:
+    types: [created]
+jobs:
+  setup:
+    if: >-
+      (github.event_name == 'pull_request_target') ||
+      (github.event_name == 'issue_comment' && github.event.comment.author_association == 'MEMBER')
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+  review:
+    needs: setup
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          allowed_non_write_users: "*"
+          prompt: "Review PR ${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"

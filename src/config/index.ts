@@ -212,15 +212,18 @@ export interface Config {
     // Package check before install (src/supply-chain). A shell command that
     // installs or runs registry packages (npm/pnpm/yarn/bun/npx, pip/uv/
     // poetry) is checked against the local OSV malicious-package index, with
-    // OSV online as a fallback. Known malicious → `onMalicious`; publish age
-    // under `maxAgeHours` or an npm install script → review (registrySignals).
-    // `allow` holds package-name globs that are never checked. A failed
-    // lookup always allows and is recorded in hook-debug.log.
+    // OSV online as a fallback. Known malicious → `onMalicious`; a version
+    // published under `maxAgeHours` → `newPackage`; an npm install script →
+    // `installScript` (each review or off). `allow` holds package-name globs
+    // that are never checked. A failed lookup always allows and is recorded
+    // in hook-debug.log. The 2.27.0 key `registrySignals` (one boolean for
+    // both signals) is still read: false turns both off, true changes nothing.
     packageCheck: {
       enabled: boolean;
       onMalicious: 'block' | 'review';
-      registrySignals: boolean;
+      newPackage: 'review' | 'off';
       maxAgeHours: number;
+      installScript: 'review' | 'off';
       onlineFallback: boolean;
       allow: string[];
     };
@@ -519,8 +522,9 @@ export const DEFAULT_CONFIG: Config = {
     packageCheck: {
       enabled: true,
       onMalicious: 'block',
-      registrySignals: true,
+      newPackage: 'review',
       maxAgeHours: 48,
+      installScript: 'review',
       onlineFallback: true,
       allow: [],
     },
@@ -1165,7 +1169,14 @@ export function getConfig(cwd?: string): Config {
       if (typeof pc.enabled === 'boolean') cur.enabled = pc.enabled;
       if (pc.onMalicious === 'block' || pc.onMalicious === 'review')
         cur.onMalicious = pc.onMalicious;
-      if (typeof pc.registrySignals === 'boolean') cur.registrySignals = pc.registrySignals;
+      // Legacy first, so an explicit newPackage / installScript wins over it.
+      if ((pc as { registrySignals?: unknown }).registrySignals === false) {
+        cur.newPackage = 'off';
+        cur.installScript = 'off';
+      }
+      if (pc.newPackage === 'review' || pc.newPackage === 'off') cur.newPackage = pc.newPackage;
+      if (pc.installScript === 'review' || pc.installScript === 'off')
+        cur.installScript = pc.installScript;
       if (typeof pc.maxAgeHours === 'number' && pc.maxAgeHours >= 0)
         cur.maxAgeHours = pc.maxAgeHours;
       if (typeof pc.onlineFallback === 'boolean') cur.onlineFallback = pc.onlineFallback;
@@ -1330,6 +1341,8 @@ export function getConfig(cwd?: string): Config {
             enabled?: unknown;
             onMalicious?: unknown;
             registrySignals?: unknown;
+            newPackage?: unknown;
+            installScript?: unknown;
             maxAgeHours?: unknown;
             onlineFallback?: unknown;
             allow?: unknown;
@@ -1544,8 +1557,20 @@ export function getConfig(cwd?: string): Config {
               pc.onMalicious === 'block' || pc.onMalicious === 'review'
                 ? pc.onMalicious
                 : cur.onMalicious,
-            registrySignals:
-              typeof pc.registrySignals === 'boolean' ? pc.registrySignals : cur.registrySignals,
+            // The 2.27.0 boolean still arrives from older dashboard columns:
+            // false turns both signals off unless the new keys say otherwise.
+            newPackage:
+              pc.newPackage === 'review' || pc.newPackage === 'off'
+                ? pc.newPackage
+                : pc.registrySignals === false
+                  ? 'off'
+                  : cur.newPackage,
+            installScript:
+              pc.installScript === 'review' || pc.installScript === 'off'
+                ? pc.installScript
+                : pc.registrySignals === false
+                  ? 'off'
+                  : cur.installScript,
             maxAgeHours:
               typeof pc.maxAgeHours === 'number' &&
               Number.isFinite(pc.maxAgeHours) &&

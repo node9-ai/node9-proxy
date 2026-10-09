@@ -192,7 +192,10 @@ export const ConfigFileSchema = z
           .object({
             enabled: z.boolean().optional(),
             onMalicious: z.enum(['block', 'review']).optional(),
+            // 2.27.0 shape, still accepted: false = newPackage and installScript off.
             registrySignals: z.boolean().optional(),
+            newPackage: z.enum(['review', 'off']).optional(),
+            installScript: z.enum(['review', 'off']).optional(),
             maxAgeHours: z.number().min(0).optional(),
             onlineFallback: z.boolean().optional(),
             allow: z.array(z.string()).optional(),

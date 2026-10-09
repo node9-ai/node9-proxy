@@ -1,0 +1,14 @@
+on:
+  issues:
+    types: [opened]
+permissions:
+  contents: write
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    steps:
+      - run: jq -r '.issue.body' "$GITHUB_EVENT_PATH" > /tmp/p.md
+      - uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt_file: /tmp/p.md

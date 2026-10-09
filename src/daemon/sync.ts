@@ -31,6 +31,7 @@ import { tickScanWatcher, commitTotalsUpload, tickForensicBroadcast } from './sc
 import { broadcastForensic } from './state.js';
 import { appendToLog, HOOK_DEBUG_LOG } from '../audit/index.js';
 import { getMachineId } from '../machine-id.js';
+import { createSyncTrigger } from './sync-trigger';
 
 // One row per session delta sent on /scan/report. The BE stores
 // these in ScanSessionSignals using INSERT-ON-CONFLICT INCREMENT, so
@@ -188,6 +189,15 @@ export interface ManagedConfigCache {
   injectionScan?: { enabled: boolean; minConfidence: string; allow: string[] };
   loopDetection?: { enabled: boolean; threshold: number; windowSeconds: number };
   skillPinning?: { enabled: boolean; mode: string; roots: string[] };
+  packageCheck?: {
+    enabled?: boolean;
+    onMalicious?: 'block' | 'review';
+    newPackage?: 'review' | 'off';
+    installScript?: 'review' | 'off';
+    maxAgeHours?: number;
+    onlineFallback?: boolean;
+    allow?: string[];
+  };
   jailPaths?: { path: string; verdict: string }[];
   trustedHosts?: string[];
   appPermissions?: Record<string, Record<string, string>>;
@@ -227,6 +237,16 @@ interface CloudPolicyBody {
     injectionScan?: { enabled?: unknown; minConfidence?: unknown; allow?: unknown };
     loopDetection?: { enabled?: unknown; threshold?: unknown; windowSeconds?: unknown };
     skillPinning?: { enabled?: unknown; mode?: unknown; roots?: unknown };
+    packageCheck?: {
+      enabled?: unknown;
+      onMalicious?: unknown;
+      registrySignals?: unknown;
+      newPackage?: unknown;
+      installScript?: unknown;
+      maxAgeHours?: unknown;
+      onlineFallback?: unknown;
+      allow?: unknown;
+    };
     jailPaths?: { path?: unknown; verdict?: unknown }[];
     trustedHosts?: unknown;
     appPermissions?: unknown;
@@ -273,7 +293,7 @@ export function readCredentials(): { apiKey: string; apiUrl: string } | null {
  * with 304 when nothing has changed. Silent fallback on any error —
  * a missing or corrupt cache simply means "no cached etag, send 200".
  */
-function readCachedEtag(): string | undefined {
+export function readCachedEtag(): string | undefined {
   try {
     const raw = JSON.parse(fs.readFileSync(rulesCacheFile(), 'utf-8')) as Record<string, unknown>;
     return typeof raw.etag === 'string' ? raw.etag : undefined;
@@ -744,6 +764,32 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
         : [],
     };
   }
+  // Detection: packageCheck — per field, only what the row states (the
+  // config merge replaces per field, so an absent key keeps the local value).
+  // The 2.27.0 boolean `registrySignals: false` is carried as both new keys.
+  if (mc.packageCheck && typeof mc.packageCheck === 'object') {
+    const pc = mc.packageCheck;
+    const out2: NonNullable<ManagedConfigCache['packageCheck']> = {};
+    if (typeof pc.enabled === 'boolean') out2.enabled = pc.enabled;
+    if (pc.onMalicious === 'block' || pc.onMalicious === 'review')
+      out2.onMalicious = pc.onMalicious;
+    const legacyOff = pc.registrySignals === false;
+    if (pc.newPackage === 'review' || pc.newPackage === 'off') out2.newPackage = pc.newPackage;
+    else if (legacyOff) out2.newPackage = 'off';
+    if (pc.installScript === 'review' || pc.installScript === 'off')
+      out2.installScript = pc.installScript;
+    else if (legacyOff) out2.installScript = 'off';
+    if (
+      typeof pc.maxAgeHours === 'number' &&
+      Number.isFinite(pc.maxAgeHours) &&
+      pc.maxAgeHours >= 0
+    )
+      out2.maxAgeHours = pc.maxAgeHours;
+    if (typeof pc.onlineFallback === 'boolean') out2.onlineFallback = pc.onlineFallback;
+    if (Array.isArray(pc.allow))
+      out2.allow = pc.allow.filter((x): x is string => typeof x === 'string' && x.length > 0);
+    if (Object.keys(out2).length > 0) out.packageCheck = out2;
+  }
   if (Array.isArray(mc.jailPaths)) {
     const jail = mc.jailPaths
       .map((jp) => ({
@@ -792,6 +838,7 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
     out.injectionScan !== undefined ||
     out.loopDetection !== undefined ||
     out.skillPinning !== undefined ||
+    out.packageCheck !== undefined ||
     out.jailPaths !== undefined ||
     out.trustedHosts !== undefined ||
     out.appPermissions !== undefined
@@ -1305,6 +1352,8 @@ export function getCloudRules(): unknown[] | null {
  * Start the background cloud-policy sync loop.
  * Called once by startDaemon(). Timer is unref'd so it doesn't prevent process exit.
  */
+export const triggerSyncNow = createSyncTrigger(syncOnce);
+
 export function startCloudSync(): void {
   // Self-rescheduling: re-resolve the interval after every sync so a changed
   // cloud cadence (pushed on the last sync) takes effect on the next cycle, not
@@ -1313,7 +1362,7 @@ export function startCloudSync(): void {
     const t = setTimeout(() => {
       // syncOnce handles its own errors; reschedule regardless so the loop
       // never dies on a transient failure.
-      void syncOnce()
+      void triggerSyncNow(false)
         .catch(() => {})
         .finally(() => scheduleNext(effectiveSyncIntervalMs()));
     }, ms);

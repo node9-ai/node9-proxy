@@ -1,0 +1,25 @@
+# Shape of a triage workflow: a static prompt file, the agent reads the issue
+# through the GitHub MCP server and can update any issue.
+name: Issue Triage
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Write the prompt
+        run: |
+          mkdir -p /tmp/prompts
+          cat > /tmp/prompts/triage.txt << 'EOF2'
+          Read the issue with the GitHub tools and apply labels.
+          EOF2
+      - uses: anthropics/claude-code-base-action@beta
+        with:
+          prompt_file: /tmp/prompts/triage.txt
+          allowed_tools: "Bash(gh label list),mcp__github__get_issue,mcp__github__get_issue_comments,mcp__github__update_issue"
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

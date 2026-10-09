@@ -17,7 +17,12 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { LOCAL_AUDIT_LOG, HOOK_DEBUG_LOG, appendToLog } from '../audit/index.js';
+import {
+  LOCAL_AUDIT_LOG,
+  HOOK_DEBUG_LOG,
+  appendToLog,
+  truncateAuditPreview,
+} from '../audit/index.js';
 import { getConfig } from '../config/index.js';
 import { readCredentials } from './sync.js';
 import { validateApiUrl } from '../auth/cloud.js';
@@ -173,7 +178,10 @@ export function buildWireRows(chunk: Buffer): { rows: WireRow[]; consumed: numbe
         ? { args: parsed.args as Record<string, unknown> }
         : {}),
       ...(typeof parsed.argsHash === 'string' ? { argsHash: parsed.argsHash } : {}),
-      ...(typeof parsed.argsPreview === 'string' ? { argsPreview: parsed.argsPreview } : {}),
+      // Repair previews already queued by versions that counted code points.
+      ...(typeof parsed.argsPreview === 'string'
+        ? { argsPreview: truncateAuditPreview(parsed.argsPreview) }
+        : {}),
       decision: parsed.decision,
       ...(checkedBy ? { checkedBy } : {}),
       ...(typeof parsed.ruleName === 'string' ? { ruleName: parsed.ruleName } : {}),
@@ -370,4 +378,48 @@ export function startAuditShipper(): void {
   // First pass shortly after boot (catch up a backlog), then steady ticks.
   setTimeout(() => void shipOnce(), 3_000);
   setInterval(() => void shipOnce(), intervalMs);
+}
+
+/** Bounded, read-only sample of events eligible for the actual shipper. */
+export function outboxBacklog(
+  auditLogPath: string = LOCAL_AUDIT_LOG,
+  watermarkPath: string = AUDIT_SHIP_WATERMARK,
+  maxBytes = MAX_CHUNK_BYTES
+): { outboxPending: number | null; outboxOldestAt: string | null; outboxTruncated: boolean } {
+  try {
+    // Open first and size the OPEN file (fstat), so the size and the bytes read come from the
+    // same file even if the path is replaced in between (CodeQL js/file-system-race).
+    const fd = fs.openSync(auditLogPath, 'r');
+    let chunk: Buffer;
+    let truncated: boolean;
+    try {
+      const size = fs.fstatSync(fd).size;
+      const wm = readWatermark(watermarkPath);
+      const offset =
+        wm && wm.fileSig === fileSignature(auditLogPath) && wm.offset <= size ? wm.offset : 0;
+      const length = Math.min(size - offset, maxBytes);
+      const buffer = Buffer.alloc(length);
+      const read = fs.readSync(fd, buffer, 0, length, offset);
+      chunk = buffer.subarray(0, read);
+      truncated = size - offset > length;
+    } finally {
+      fs.closeSync(fd);
+    }
+    const { rows } = buildWireRows(chunk);
+    const oldest = rows.reduce((old, row) => {
+      const time = Date.parse(row.ts);
+      return Number.isFinite(time) ? Math.min(old, time) : old;
+    }, Infinity);
+    return {
+      outboxPending: rows.length,
+      outboxOldestAt: Number.isFinite(oldest) ? new Date(oldest).toISOString() : null,
+      outboxTruncated: truncated,
+    };
+  } catch (error) {
+    return {
+      outboxPending: (error as NodeJS.ErrnoException).code === 'ENOENT' ? 0 : null,
+      outboxOldestAt: null,
+      outboxTruncated: false,
+    };
+  }
 }

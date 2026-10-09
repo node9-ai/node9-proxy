@@ -69,10 +69,15 @@ export function buildArgsPreview(args: unknown): string | undefined {
     const primary = o && (o.command ?? o.file_path ?? o.path ?? o.url ?? o.query);
     const text = typeof primary === 'string' ? primary : args ? JSON.stringify(args) : '';
     if (!text) return undefined;
-    return redactSecrets(text).slice(0, 120);
+    return truncateAuditPreview(redactSecrets(text));
   } catch {
     return undefined;
   }
+}
+
+/** Keep the API's UTF-16 length budget without splitting a surrogate pair. */
+export function truncateAuditPreview(text: string): string {
+  return text.slice(0, 120).replace(/[\uD800-\uDBFF]$/, '');
 }
 
 export function appendToLog(logPath: string, entry: object): void {

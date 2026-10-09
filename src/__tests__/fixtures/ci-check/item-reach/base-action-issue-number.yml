@@ -1,0 +1,20 @@
+# Shape of a dedupe workflow: the prompt carries only the issue NUMBER, the agent
+# fetches the issue itself (tools come from a committed slash command).
+name: Issue Dedupe
+on:
+  issues:
+    types: [opened]
+jobs:
+  dedupe:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-base-action@beta
+        with:
+          prompt: "/dedupe ${{ github.repository }}/issues/${{ github.event.issue.number }}"
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_env: |
+            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

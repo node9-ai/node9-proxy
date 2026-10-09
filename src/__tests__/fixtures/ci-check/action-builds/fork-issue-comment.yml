@@ -1,0 +1,20 @@
+# A third-party build on an entity event keeps the write gate, like the official action.
+name: Agent
+on:
+  issue_comment:
+    types: [created]
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - uses: someone/claude-code-action@0123456789abcdef0123456789abcdef01234567
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: "Fix the failing build: ${{ github.event.comment.body }}"
+          claude_args: '--allowedTools "Bash,Edit,Write"'

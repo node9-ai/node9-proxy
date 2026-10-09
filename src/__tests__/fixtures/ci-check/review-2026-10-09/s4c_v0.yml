@@ -1,0 +1,18 @@
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+permissions:
+  contents: write
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: anthropics/claude-code-action@v0
+        with:
+          anthropic_api_key: ${{ secrets.K }}
+          prompt: "Fix the CI failure"
+          claude_args: --allowedTools Bash

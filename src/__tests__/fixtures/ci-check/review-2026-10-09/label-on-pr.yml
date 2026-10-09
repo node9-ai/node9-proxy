@@ -1,0 +1,29 @@
+# Every alternative is gated: a maintainer adds the label, the label is already on the PR, or a
+# member comments. The repository guard is a prefix with `&&`.
+name: Review
+on:
+  pull_request_target:
+    types: [labeled, synchronize]
+  issue_comment:
+    types: [created]
+jobs:
+  review:
+    if: >-
+      github.repository_owner == 'acme' &&
+      ((github.event_name == 'pull_request_target' &&
+        (github.event.action == 'labeled' && github.event.label.name == 'claude-review' ||
+         github.event.action != 'labeled' && contains(github.event.pull_request.labels.*.name, 'claude-review'))) ||
+       (github.event_name == 'issue_comment' &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          allowed_non_write_users: "*"
+          prompt: "Review PR ${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"

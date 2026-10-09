@@ -82,6 +82,7 @@ import { startHookHeal } from './hook-heal.js';
 import { logDaemonStartup, recordStartupState } from './startup-log.js';
 import { readMcpToolsConfig, updateServerDiscovery, approveServer } from './mcp-tools.js';
 import { startOsvSync } from '../supply-chain/osv-sync';
+import { startHeartbeat } from './heartbeat';
 
 export type DaemonReportPeriod = 'today' | '7d' | '30d' | 'month';
 
@@ -213,6 +214,7 @@ export function startDaemon(): void {
     startCloudSync();
     startForensicBroadcast();
     startAuditShipper();
+    startHeartbeat();
     startDlpScanner();
     startOsvSync();
     startMcpReconciler();

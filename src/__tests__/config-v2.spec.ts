@@ -224,6 +224,19 @@ describe('translation', () => {
     });
   });
 
+  it('the 2.27.0 registrySignals:false reads as both new tuning fields off, and is not written back', () => {
+    const file = initWroteDefaults();
+    (file.policy!.packageCheck as Record<string, unknown>) = { registrySignals: false };
+    const v2 = legacyToV2(file) as unknown as { tuning?: Record<string, Record<string, unknown>> };
+    expect(v2.tuning?.['loading.malicious-package']).toEqual({
+      newPackage: 'off',
+      installScript: 'off',
+    });
+    expect(JSON.stringify(v2)).not.toContain('registrySignals');
+    const { legacy } = v2ToLegacy(v2 as unknown as Record<string, unknown>);
+    expect(legacy.policy?.packageCheck).toMatchObject({ newPackage: 'off', installScript: 'off' });
+  });
+
   it('round trip: the same resolved checks before and after', () => {
     const file = initWroteDefaults();
     file.settings!.mode = 'strict';
@@ -352,5 +365,19 @@ describe('review fixes (2026-10-03)', () => {
     writeLocalSetting('autoStartDaemon', false);
     const data = JSON.parse(fs.readFileSync(globalFile(), 'utf8')) as Record<string, unknown>;
     expect(data.checks).toEqual({ 'commands.sudo': 'review', 'data.pii': 'block' });
+  });
+});
+
+describe('legacy package tuning in v2', () => {
+  it('translates the old boolean per field and writes only the new keys', () => {
+    writeGlobal({
+      version: '2',
+      tuning: { 'loading.malicious-package': { registrySignals: false, newPackage: 'review' } },
+    });
+    const cfg = getConfig();
+    expect(cfg.policy.packageCheck.newPackage).toBe('review');
+    expect(cfg.policy.packageCheck.installScript).toBe('off');
+    const written = legacyToV2(cfg as unknown as LegacyFile);
+    expect(written.tuning?.['loading.malicious-package']).not.toHaveProperty('registrySignals');
   });
 });

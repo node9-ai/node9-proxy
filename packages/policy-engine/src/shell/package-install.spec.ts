@@ -224,3 +224,25 @@ describe('extractPackageInstalls — review round 3', () => {
     expect(names('uvx --with=a-py,b-py ruff')).toEqual(['ruff', 'a-py', 'b-py']);
   });
 });
+
+describe('local execution context', () => {
+  it.each([
+    'npm -wother exec eslint',
+    'npx -g eslint',
+    'env npm exec eslint',
+    'bash -c "npx eslint"',
+    'cd "$TARGET" && npx eslint',
+    'cd app; npx eslint',
+  ])('does not assume the hook directory for %s', (command) => {
+    expect(one(command).localCwd).toBeNull();
+  });
+  it.each(['npx eslint', 'bunx eslint', 'npm exec eslint'])(
+    'keeps a plain local run eligible: %s',
+    (command) => {
+      expect(one(command).localCwd).toBeUndefined();
+    }
+  );
+  it('preserves directory steps for a literal successful chain', () => {
+    expect(one('cd app && cd frontend && npx eslint').localCwd).toEqual(['app', 'frontend']);
+  });
+});

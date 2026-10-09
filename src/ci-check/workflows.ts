@@ -15,7 +15,7 @@ import { safeText } from './suppress';
 
 // Known agent actions — a step using one of these runs an LLM with tools.
 const AGENT_ACTION_RE =
-  /(anthropics\/claude-code(-base)?-action|anthropics\/claude-code|openai\/codex|codex-action|run-?aider|aider-?action|google-github-actions\/run-gemini)/i;
+  /(anthropics\/claude-code(-base)?-action|anthropics\/claude-code|^\s*[\w.-]{1,100}\/claude-code-action@|openai\/codex|codex-action|run-?aider|aider-?action|google-github-actions\/run-gemini)/i;
 
 // Broad, write/exfil-capable tool grants (bare or dangerous verbs).
 const BROAD_TOOL_RE =
@@ -159,7 +159,8 @@ function triggerReach(wf: Workflow, raw: Record<string, unknown>) {
     firable.some((t) =>
       /pull_request_target|pull_request_review|workflow_run|issue|discussion/i.test(t)
     );
-  return { keys, untrusted, reusable, secretExposed, privileged };
+  const workflowRun = firable.some((t) => /^workflow_run$/i.test(t));
+  return { keys, untrusted, reusable, secretExposed, privileged, workflowRun };
 }
 
 /** Job values, dropping null entries. An empty job block (`notify:` with no body) parses
@@ -307,6 +308,44 @@ function promptTakesUntrusted(steps: Step[]): boolean {
   return false;
 }
 
+// S.1 (2026-10-09): untrusted text that reaches the agent WITHOUT sitting in its prompt.
+// The issue-triage and dedupe templates pass the item NUMBER (or nothing) and let the agent
+// fetch the text itself, or an earlier step writes the body into a prompt file. 216 hand-
+// verified misses on 2.27.0 included ~60 of this shape (OrcaSlicer, hermes, …).
+//
+// A tool that reads issues/PRs (the triggering one, or any one an injected agent names).
+const ITEM_READ_TOOL_RE =
+  /mcp__github__(get_issue|get_issue_comments|get_pull_request|get_pull_request_diff|get_pull_request_files|get_pull_request_comments|get_pull_request_reviews|search_issues|list_issues)\b|Bash\(\s*gh\s+(issue|pr)\s+(view|diff|list)\b|Bash\(\s*gh\s+(api|search)\b|Bash\(\s*gh\s*:/i;
+// The handle an agent dereferences: the triggering item's number or comment id.
+const ITEM_HANDLE_RE =
+  /github\.event\.(issue|pull_request|discussion)\.number|github\.event\.number\b|github\.event\.comment\.id/i;
+// Attacker-writable text, in workflow expression or github-script form.
+const PAYLOAD_TEXT_RE =
+  /github\.event\.(issue|comment|pull_request|review|discussion)\.(body|title)|context\.payload\.(issue|comment|pull_request|review|discussion)\b|GITHUB_EVENT_PATH|github\.event_path/i;
+
+/** How (if at all) the agent in this job reads the untrusted item other than through its
+ *  prompt text: a read tool, the item's handle, or a prompt file an earlier step built from
+ *  the payload. Job-scoped: an earlier step only feeds an agent step of the same job. */
+function jobReadsUntrustedItem(job: Job): 'tool' | 'handle' | 'prompt-file' | null {
+  const steps = job.steps ?? [];
+  const agent = steps.filter(isAgentStep);
+  if (!agent.length) return null;
+  if (ITEM_READ_TOOL_RE.test(collectTools(agent))) return 'tool';
+  for (const st of agent)
+    if (ITEM_HANDLE_RE.test(str(st.with) + ' ' + str(st.env) + ' ' + str(job.env))) return 'handle';
+  for (let i = 0; i < steps.length; i++) {
+    const st = steps[i];
+    // `prompt_file` (claude-code-action) or `prompt-file` (openai/codex-action).
+    if (!isAgentStep(st) || !str(st.with?.['prompt_file'] ?? st.with?.['prompt-file'])) continue;
+    const earlier = steps.slice(0, i).filter((p) => !isAgentStep(p));
+    if (
+      earlier.some((p) => PAYLOAD_TEXT_RE.test(str(p.run) + ' ' + str(p.with) + ' ' + str(p.env)))
+    )
+      return 'prompt-file';
+  }
+  return null;
+}
+
 // An `if:` that clearly RESTRICTS the agent to a trusted actor. POLARITY matters (round 5,
 // 1a): matching `author_association` / `MEMBER` as a bare substring credited an INVERTED
 // check — `!= 'MEMBER'` (runs for everyone else) or `== 'NONE'` / `== 'FIRST_TIME_CONTRIBUTOR'`
@@ -362,12 +401,21 @@ function labelTypeConfigured(wf: Workflow, raw: Record<string, unknown>): boolea
   );
 }
 
+// `!contains(…labels…, 'skip-ai')`, `contains(…) == false`, `labels[0] == null` admit every PR
+// that lacks an opt-out label, i.e. every stranger's PR; only a positive contains() is a gate.
+const PR_LABEL_GATE_RE =
+  /(?<!!\s{0,5}\(?\s{0,5})contains\(\s*github\.event\.pull_request\.labels\.\*\.name\s*,\s*'[^']{1,100}'\s*\)(?!\s*(?:==\s*false|!=\s*true))/i;
+
 /** Do these joined `if:` expressions constitute an actor gate? */
 function ifsAreGated(ifs: string, labelConfigured: boolean): boolean {
   // Credit a contains() inclusion ONLY when it is not negated (`!contains(…)` = anti-gate).
   const containsGate = CONTAINS_GATE_RE.test(ifs) && !NEGATED_CONTAINS_RE.test(ifs);
   const gated = NONCONTAINS_GATE_RE.test(ifs) || containsGate;
-  const labelGated = labelConfigured && /event\.label|label\.name/i.test(ifs);
+  // A label already on the PR (`contains(github.event.pull_request.labels.*.name, 'x')`) was put
+  // there by someone with triage access, like the `label.name` of a labeled event. Only a
+  // POSITIVE test counts (second review): see PR_LABEL_GATE_RE.
+  const labelGated =
+    labelConfigured && (/event\.label|label\.name/i.test(ifs) || PR_LABEL_GATE_RE.test(ifs));
   return gated || labelGated;
 }
 
@@ -397,19 +445,191 @@ function hasStepMembershipGate(job: Job): boolean {
   );
 }
 
-/** Actor gate scoped to a SINGLE job (its own `if:` + its steps' `if:`s). CI-4
- *  evaluates each agent job independently, so a gate on a DIFFERENT job must not
- *  be credited to this one (and vice-versa). */
-function jobActorGate(job: Job, wf: Workflow, raw: Record<string, unknown>): boolean {
-  const ifs = [job.if, ...(job.steps ?? []).map((s) => s.if)].map(str).join(' ');
+// ─── `if:` expressions (S.2/S.5, rewritten after the 2026-10-09 pre-release review) ─────
+// Searching the text for a gate credited `a && (b || gate)` and `owner == 'x' && (open || gate)`
+// as gated, and read a trusted-event pin across a nested group or through `!`. The expression
+// is now parsed: `||` is a gate only when EVERY branch is, `&&` when ANY part is, `!` never.
+type IfExpr =
+  | { k: 'or'; c: IfExpr[] }
+  | { k: 'and'; c: IfExpr[] }
+  | { k: 'not'; c: IfExpr }
+  | { k: 'atom'; t: string };
+
+const IF_MAX_DEPTH = 64; // GitHub rejects far shallower nesting; deeper is not a real workflow
+const IF_MAX_LEN = 20_000;
+
+/** Parse a GitHub `if:` expression into `||`, `&&`, `!`, groups and atoms. A function call's
+ *  parentheses and a single-quoted string (`''` escapes a quote) stay inside their atom.
+ *  Null when the text is empty, too long, too deep or unbalanced: the caller reads null as
+ *  "not a gate", so an unreadable expression never hides a finding. Never throws. */
+function parseIf(src: string): IfExpr | null {
+  let e = src.trim();
+  const wrapped = /^\$\{\{([\s\S]*)\}\}$/.exec(e);
+  if (wrapped) e = wrapped[1].trim();
+  if (!e || e.length > IF_MAX_LEN) return null;
+  let i = 0;
+  let depth = 0;
+  class Bad extends Error {}
+  const ws = () => {
+    while (i < e.length && /\s/.test(e[i])) i++;
+  };
+  const deeper = () => {
+    if (++depth > IF_MAX_DEPTH) throw new Bad();
+  };
+  const atom = (): IfExpr => {
+    const start = i;
+    let calls = 0;
+    let quote = false;
+    while (i < e.length) {
+      const ch = e[i];
+      if (quote) {
+        if (ch === "'" && e[i + 1] === "'") i += 2;
+        else {
+          if (ch === "'") quote = false;
+          i++;
+        }
+        continue;
+      }
+      if (ch === "'") quote = true;
+      else if (ch === '(') {
+        if (++calls > IF_MAX_DEPTH) throw new Bad();
+      } else if (ch === ')') {
+        if (calls === 0) break;
+        calls--;
+      } else if (calls === 0 && (e.startsWith('&&', i) || e.startsWith('||', i))) break;
+      i++;
+    }
+    const t = e.slice(start, i).trim();
+    if (!t || quote || calls > 0) throw new Bad();
+    return { k: 'atom', t };
+  };
+  const unary = (): IfExpr => {
+    ws();
+    if (e[i] === '!' && e[i + 1] !== '=') {
+      i++;
+      deeper();
+      const c = unary();
+      depth--;
+      return { k: 'not', c };
+    }
+    if (e[i] === '(') {
+      i++;
+      deeper();
+      const c = or();
+      ws();
+      if (e[i] !== ')') throw new Bad();
+      i++;
+      depth--;
+      return c;
+    }
+    return atom();
+  };
+  const list = (op: '&&' | '||', next: () => IfExpr, k: 'and' | 'or'): IfExpr => {
+    const c = [next()];
+    for (;;) {
+      ws();
+      if (!e.startsWith(op, i)) break;
+      i += 2;
+      c.push(next());
+    }
+    return c.length === 1 ? c[0] : { k, c };
+  };
+  const and = (): IfExpr => list('&&', unary, 'and');
+  const or = (): IfExpr => list('||', and, 'or');
+  try {
+    const x = or();
+    ws();
+    return i === e.length ? x : null;
+  } catch {
+    return null; // unbalanced, too deep, or empty operand
+  }
+}
+
+// An atom that only holds for an event a stranger cannot fire (needs write access or runs in a
+// trusted context). `!=` does not match: it admits every OTHER event.
+// The whole atom (second review): the same text inside a string literal is not a pin.
+const TRUSTED_EVENT_ATOM_RE =
+  /^github\.event_name\s*==\s*'(workflow_dispatch|schedule|push|workflow_call|repository_dispatch)'$/i;
+const ASSIGNEE_GATE_RE = /assignee\.login\s*==|event\.assignee\b/i;
+
+/** The steps' `if:`s joined for the gate search, or '' when longer than IF_MAX_LEN: no real gate
+ *  is that long, and the gate regexes must never run super-linearly on scanned text (second
+ *  review: a 640 KB step `if:` took minutes). '' reads as "not a gate". */
+function stepIfText(steps: Step[]): string {
+  const s = steps.map((st) => str(st.if)).join(' ');
+  return s.length > IF_MAX_LEN ? '' : s;
+}
+
+/** Is this text an actor gate? The gate shapes of ifsAreGated, plus the job-scoped ones. */
+function gatedText(ifs: string, labelConfigured: boolean): boolean {
   // G-d′: an `assignee.login == '…'` gate (only someone with triage/write access can
   // assign an issue) counts too. Kept in the JOB-scoped check only — NOT in the shared
   // ACTOR_GATE_RE; gating is judged per job, so a gated sibling job can't mask an
   // ungated injectable one.
   return (
-    ifsAreGated(ifs, labelTypeConfigured(wf, raw)) ||
-    /assignee\.login\s*==|event\.assignee\b/i.test(ifs) ||
-    PERMISSION_OUTPUT_GATE_RE.test(ifs) || // [2] job-scoped permission-check-output gate
+    ifsAreGated(ifs, labelConfigured) ||
+    ASSIGNEE_GATE_RE.test(ifs) ||
+    PERMISSION_OUTPUT_GATE_RE.test(ifs) // [2] job-scoped permission-check-output gate
+  );
+}
+
+/** Does this expression keep strangers out? */
+function exprGated(x: IfExpr, labelConfigured: boolean): boolean {
+  switch (x.k) {
+    case 'atom':
+      return gatedText(x.t, labelConfigured) || TRUSTED_EVENT_ATOM_RE.test(x.t);
+    case 'not':
+      return false;
+    case 'and':
+      return x.c.some((c) => exprGated(c, labelConfigured));
+    case 'or':
+      return x.c.every((c) => exprGated(c, labelConfigured));
+  }
+}
+
+/** Is a job-level `if:` an actor gate? Shared by the job's own gate and the needs chain, so the
+ *  two cannot disagree. */
+function jobIfGated(jobIf: string, labelConfigured: boolean): boolean {
+  const x = parseIf(jobIf);
+  return x !== null && exprGated(x, labelConfigured);
+}
+
+/** Can this expression be true for event `ev`? Only `github.event_name ==/!= '<x>'` atoms decide;
+ *  anything else, `!` included, might be true. */
+function exprAllowsEvent(x: IfExpr, ev: string): boolean {
+  switch (x.k) {
+    case 'atom': {
+      const m = /^github\.event_name\s*(==|!=)\s*'([\w-]+)'$/i.exec(x.t);
+      if (!m) return true;
+      return (m[2].toLowerCase() === ev) === (m[1] === '==');
+    }
+    case 'not':
+      return true;
+    case 'and':
+      return x.c.every((c) => exprAllowsEvent(c, ev));
+    case 'or':
+      return x.c.some((c) => exprAllowsEvent(c, ev));
+  }
+}
+
+/** Review finding 5: does THIS job run on a stranger-firable workflow_run? A job whose `if:`
+ *  pins it to another event (`github.event_name == 'issue_comment' && …`) does not, although
+ *  the workflow also lists workflow_run. */
+function jobOnWorkflowRun(job: Job, workflowRun: boolean): boolean {
+  if (!workflowRun) return false;
+  const x = parseIf(str(job.if));
+  return x === null || exprAllowsEvent(x, 'workflow_run');
+}
+
+/** Actor gate scoped to a SINGLE job (its own `if:` + its steps' `if:`s). CI-4
+ *  evaluates each agent job independently, so a gate on a DIFFERENT job must not
+ *  be credited to this one (and vice-versa). */
+function jobActorGate(job: Job, wf: Workflow, raw: Record<string, unknown>): boolean {
+  const labelConfigured = labelTypeConfigured(wf, raw);
+  const stepIfs = stepIfText(job.steps ?? []);
+  return (
+    jobIfGated(str(job.if), labelConfigured) ||
+    gatedText(stepIfs, labelConfigured) ||
     hasStepMembershipGate(job) // R4-5
   );
 }
@@ -453,14 +673,12 @@ function upstreamJobGates(
 ): boolean {
   const depIf = str(dep.if);
   const label = labelTypeConfigured(wf, raw);
-  if (
-    !/\|\|/.test(depIf) &&
-    (ifsAreGated(depIf, label) || /assignee\.login\s*==|event\.assignee\b/i.test(depIf))
-  )
-    return true;
+  // S.5 (2026-10-09): judged per top-level `||` branch, like the job's own gate. The old test
+  // refused any `||`, even one inside a group whose every alternative is gated
+  // (eeea2222/systemd-clean, hand-verified clean, scored medium).
+  if (depIf && jobIfGated(depIf, label)) return true;
   const steps = dep.steps ?? [];
-  const stepGated =
-    ifsAreGated(steps.map((st) => str(st.if)).join(' '), label) || hasStepMembershipGate(dep);
+  const stepGated = ifsAreGated(stepIfText(steps), label) || hasStepMembershipGate(dep);
   if (!stepGated) return false;
   if (
     steps.some(
@@ -523,9 +741,44 @@ function bypassArmed(steps: Step[]): boolean {
  *  it. So a workflow using it, without the "*" bypass, has an effective IMPLICIT
  *  actor gate — the anonymous-attacker vector is blocked even without an explicit
  *  `if:`. Missing this = crying wolf on the most common claude-code-action setup. */
-function hasImplicitActorGate(agentSteps: Step[], bypassActive: boolean): boolean {
+function hasImplicitActorGate(
+  agentSteps: Step[],
+  bypassActive: boolean,
+  workflowRun = false
+): boolean {
   if (bypassActive) return false; // bypass on (and reachable) → the default gate is off
-  return agentSteps.some((s) => /anthropics\/claude-code-action@/i.test(s.uses ?? ''));
+  return agentSteps.some((s) => {
+    const build = claudeActionBuild(s.uses);
+    if (!build) return false;
+    // Entity events (issues, comments, PRs): every build checks write access.
+    if (!workflowRun) return true;
+    // S.4 (2026-10-09): on workflow_run the official action checks the actor only from
+    // v1.0.185 (#1590); a third-party build is not assumed to carry that change.
+    return build.official && workflowRunChecked(build.ref);
+  });
+}
+
+/** `<owner>/claude-code-action@<ref>` → who built it and which ref; null for anything else
+ *  (claude-code-base-action included: it has no write gate at all). */
+function claudeActionBuild(
+  uses?: string
+): { official: boolean; owner: string; ref: string } | null {
+  const m = /^\s*([\w.-]{1,100})\/claude-code-action@(\S{1,200})/i.exec(uses ?? '');
+  if (!m) return null;
+  return { official: m[1].toLowerCase() === 'anthropics', owner: m[1], ref: m[2] };
+}
+
+const WORKFLOW_RUN_CHECK_MIN = 185; // claude-code-action v1.0.185, #1590 (2026-08-04)
+const SHA_REF_RE = /^[0-9a-f]{40}$/i;
+
+/** Does this ref of the official action check the actor on workflow_run? `@beta` and explicit
+ *  `v1.0.N` with N < 185 do not. A moving ref (`v1`, `main`) does. A SHA pin is unknown to a
+ *  static scanner and is given the benefit of the doubt; the finding asks to confirm it. */
+function workflowRunChecked(ref: string): boolean {
+  if (/^beta\b/i.test(ref) || /^v0(\.|$)/i.test(ref)) return false;
+  const v = /^v1\.0\.(\d+)$/.exec(ref);
+  if (v) return Number(v[1]) >= WORKFLOW_RUN_CHECK_MIN;
+  return true;
 }
 
 /** G-d: agent steps whose OWN job is injectable — i.e. not actor-gated and not held
@@ -539,11 +792,16 @@ function injectableJobs(
   untrustedTrigger: boolean
 ): Job[] {
   const out: Job[] = [];
+  const { workflowRun } = triggerReach(wf, raw);
   for (const job of jobList(wf)) {
     const a = (job.steps ?? []).filter(isAgentStep);
     if (!a.length) continue;
     const jobStar = bypassArmed(a);
-    if (jobGated(job, wf, raw) || hasImplicitActorGate(a, jobStar && untrustedTrigger)) continue;
+    if (
+      jobGated(job, wf, raw) ||
+      hasImplicitActorGate(a, jobStar && untrustedTrigger, jobOnWorkflowRun(job, workflowRun))
+    )
+      continue;
     out.push(job);
   }
   return out;
@@ -744,6 +1002,7 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
     secretExposed,
     reusable,
     privileged,
+    workflowRun,
   } = triggerReach(wf, raw);
 
   const nonWrite = str(agentSteps.map((s) => s.with?.['allowed_non_write_users']).find(Boolean));
@@ -770,6 +1029,11 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   const powerSteps = injJobs.flatMap((j) => (j.steps ?? []).filter(isAgentStep));
   const scopedSteps = powerSteps.length ? powerSteps : agentSteps; // fallback: never blank
   const toolsBlob = collectTools(scopedSteps);
+  // S.1: the agent reads the untrusted item itself (tool, handle, payload-built prompt file).
+  // Scoped to the INJECTABLE jobs, like the tools above: a gated job's read tool is unreachable.
+  // Only for a workflow with its OWN stranger-firable trigger: a reusable template given the
+  // item number is how a gated caller uses it too, and the caller is not visible here.
+  const itemRead = forkInput ? (injJobs.map(jobReadsUntrustedItem).find(Boolean) ?? null) : null;
 
   // Reach REQUIRES an untrusted trigger AND at least one injectable (ungated) agent job.
   // If every agent job is actor-gated (injJobs empty), an untrusted trigger can't reach
@@ -779,7 +1043,7 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
     untrustedTrigger && injJobs.length
       ? Math.max(
           head === 'root' ? 3 : head === 'subdir' ? 1 : 0,
-          promptUntrusted ? 2 : 0,
+          promptUntrusted || itemRead ? 2 : 0,
           bypassActive ? 2 : 0
         )
       : 0;
@@ -792,7 +1056,9 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   const pat = usesPatIn(powerJobs);
   const power = (broadTools ? 2 : 0) + (bypassActive ? 1 : 0) + (elevated ? 1 : 0) + (pat ? 1 : 0);
 
-  const implicitGate = hasImplicitActorGate(agentSteps, bypassActive);
+  // Jobs that run on a stranger-firable workflow_run (review finding 5: decided per job).
+  const workflowRunJobs = agentJobs.filter((j) => jobOnWorkflowRun(j, workflowRun));
+  const implicitGate = hasImplicitActorGate(agentSteps, bypassActive, workflowRunJobs.length > 0);
   // R4-round2#1: the step-membership gate is credited PER-JOB (via jobActorGate →
   // injectableJobs → reach), NOT as a whole-workflow severity cap (which would mask an
   // ungated sibling). We only surface it as a MITIGATION signal when EVERY agent job is
@@ -907,7 +1173,36 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
     );
   if (head === 'root') signals.push('checks out the untrusted PR head into the workspace root');
   if (head === 'subdir') signals.push('checks out the untrusted PR head into an isolated subdir');
+  // S.4: which claude-code-action build runs, and whether it checks the actor on workflow_run.
+  if (workflowRunJobs.length) {
+    const builds = workflowRunJobs
+      .flatMap((j) => (j.steps ?? []).filter(isAgentStep))
+      .map((st) => claudeActionBuild(st.uses))
+      .filter((b) => b !== null);
+    const thirdParty = builds.find((b) => !b.official);
+    if (thirdParty)
+      signals.push(
+        `third-party build of claude-code-action (\`${safeText(thirdParty.owner, 40)}\`): on workflow_run it is not assumed to check the actor (the official action does from v1.0.185)`
+      );
+    const old = builds.find((b) => b.official && !workflowRunChecked(b.ref));
+    if (old)
+      signals.push(
+        `claude-code-action \`@${safeText(old.ref, 40)}\` predates v1.0.185, so it does not check the actor on workflow_run`
+      );
+    else if (builds.some((b) => b.official && SHA_REF_RE.test(b.ref)))
+      signals.push(
+        'claude-code-action is pinned by SHA on workflow_run: its actor check there exists from v1.0.185; confirm the pinned commit is that release or newer'
+      );
+  }
   if (promptUntrusted) signals.push('feeds untrusted PR/issue text to the agent');
+  else if (itemRead)
+    signals.push(
+      itemRead === 'prompt-file'
+        ? 'an earlier step writes untrusted PR/issue text into the prompt file the agent reads'
+        : itemRead === 'tool'
+          ? 'the agent fetches PR/issue text itself with a read tool (the text never appears in the prompt)'
+          : 'the agent is given the PR/issue number and reads the text itself (the text never appears in the prompt)'
+    );
   if (broadTools) {
     // Names embed scanned-file text that flows into the Action's PR comment (render.ts).
     // Wrap each in a backtick code span (the repo convention, cf. agent-config's hook
@@ -1143,10 +1438,16 @@ function evalAgentJob(
   const head = untrustedHeadCheckout(jobSteps);
   const reach = Math.max(
     head === 'root' ? 3 : head === 'subdir' ? 1 : 0,
-    promptTakesUntrusted(jobAgentSteps) ? 2 : 0,
+    promptTakesUntrusted(jobAgentSteps) || (!reusable && jobReadsUntrustedItem(job)) ? 2 : 0,
     bypassActive ? 2 : 0
   );
-  const gate = jobGated(job, wf, raw) || hasImplicitActorGate(jobAgentSteps, bypassActive);
+  const gate =
+    jobGated(job, wf, raw) ||
+    hasImplicitActorGate(
+      jobAgentSteps,
+      bypassActive,
+      jobOnWorkflowRun(job, triggerReach(wf, raw).workflowRun)
+    );
   const injectable = untrustedTrigger && !gate && reach > 0;
   const canReadEnv = EXFIL_RCE_RE.test(collectTools(jobAgentSteps)); // bare shell = read env + exfil
 
