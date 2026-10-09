@@ -15,7 +15,7 @@ import { safeText } from './suppress';
 
 // Known agent actions — a step using one of these runs an LLM with tools.
 const AGENT_ACTION_RE =
-  /(anthropics\/claude-code(-base)?-action|anthropics\/claude-code|openai\/codex|codex-action|run-?aider|aider-?action|google-github-actions\/run-gemini)/i;
+  /(anthropics\/claude-code(-base)?-action|anthropics\/claude-code|[\w.-]+\/claude-code-action@|openai\/codex|codex-action|run-?aider|aider-?action|google-github-actions\/run-gemini)/i;
 
 // Broad, write/exfil-capable tool grants (bare or dangerous verbs).
 const BROAD_TOOL_RE =
@@ -159,7 +159,8 @@ function triggerReach(wf: Workflow, raw: Record<string, unknown>) {
     firable.some((t) =>
       /pull_request_target|pull_request_review|workflow_run|issue|discussion/i.test(t)
     );
-  return { keys, untrusted, reusable, secretExposed, privileged };
+  const workflowRun = firable.some((t) => /^workflow_run$/i.test(t));
+  return { keys, untrusted, reusable, secretExposed, privileged, workflowRun };
 }
 
 /** Job values, dropping null entries. An empty job block (`notify:` with no body) parses
@@ -624,9 +625,44 @@ function bypassArmed(steps: Step[]): boolean {
  *  it. So a workflow using it, without the "*" bypass, has an effective IMPLICIT
  *  actor gate — the anonymous-attacker vector is blocked even without an explicit
  *  `if:`. Missing this = crying wolf on the most common claude-code-action setup. */
-function hasImplicitActorGate(agentSteps: Step[], bypassActive: boolean): boolean {
+function hasImplicitActorGate(
+  agentSteps: Step[],
+  bypassActive: boolean,
+  workflowRun = false
+): boolean {
   if (bypassActive) return false; // bypass on (and reachable) → the default gate is off
-  return agentSteps.some((s) => /anthropics\/claude-code-action@/i.test(s.uses ?? ''));
+  return agentSteps.some((s) => {
+    const build = claudeActionBuild(s.uses);
+    if (!build) return false;
+    // Entity events (issues, comments, PRs): every build checks write access.
+    if (!workflowRun) return true;
+    // S.4 (2026-10-09): on workflow_run the official action checks the actor only from
+    // v1.0.185 (#1590); a third-party build is not assumed to carry that change.
+    return build.official && workflowRunChecked(build.ref);
+  });
+}
+
+/** `<owner>/claude-code-action@<ref>` → who built it and which ref; null for anything else
+ *  (claude-code-base-action included: it has no write gate at all). */
+function claudeActionBuild(
+  uses?: string
+): { official: boolean; owner: string; ref: string } | null {
+  const m = /^\s*([\w.-]+)\/claude-code-action@(\S+)/i.exec(uses ?? '');
+  if (!m) return null;
+  return { official: m[1].toLowerCase() === 'anthropics', owner: m[1], ref: m[2] };
+}
+
+const WORKFLOW_RUN_CHECK_MIN = 185; // claude-code-action v1.0.185, #1590 (2026-08-04)
+const SHA_REF_RE = /^[0-9a-f]{40}$/i;
+
+/** Does this ref of the official action check the actor on workflow_run? `@beta` and explicit
+ *  `v1.0.N` with N < 185 do not. A moving ref (`v1`, `main`) does. A SHA pin is unknown to a
+ *  static scanner and is given the benefit of the doubt; the finding asks to confirm it. */
+function workflowRunChecked(ref: string): boolean {
+  if (/^beta\b/i.test(ref)) return false;
+  const v = /^v1\.0\.(\d+)$/.exec(ref);
+  if (v) return Number(v[1]) >= WORKFLOW_RUN_CHECK_MIN;
+  return true;
 }
 
 /** G-d: agent steps whose OWN job is injectable — i.e. not actor-gated and not held
@@ -640,11 +676,13 @@ function injectableJobs(
   untrustedTrigger: boolean
 ): Job[] {
   const out: Job[] = [];
+  const { workflowRun } = triggerReach(wf, raw);
   for (const job of jobList(wf)) {
     const a = (job.steps ?? []).filter(isAgentStep);
     if (!a.length) continue;
     const jobStar = bypassArmed(a);
-    if (jobGated(job, wf, raw) || hasImplicitActorGate(a, jobStar && untrustedTrigger)) continue;
+    if (jobGated(job, wf, raw) || hasImplicitActorGate(a, jobStar && untrustedTrigger, workflowRun))
+      continue;
     out.push(job);
   }
   return out;
@@ -845,6 +883,7 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
     secretExposed,
     reusable,
     privileged,
+    workflowRun,
   } = triggerReach(wf, raw);
 
   const nonWrite = str(agentSteps.map((s) => s.with?.['allowed_non_write_users']).find(Boolean));
@@ -898,7 +937,7 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   const pat = usesPatIn(powerJobs);
   const power = (broadTools ? 2 : 0) + (bypassActive ? 1 : 0) + (elevated ? 1 : 0) + (pat ? 1 : 0);
 
-  const implicitGate = hasImplicitActorGate(agentSteps, bypassActive);
+  const implicitGate = hasImplicitActorGate(agentSteps, bypassActive, workflowRun);
   // R4-round2#1: the step-membership gate is credited PER-JOB (via jobActorGate →
   // injectableJobs → reach), NOT as a whole-workflow severity cap (which would mask an
   // ungated sibling). We only surface it as a MITIGATION signal when EVERY agent job is
@@ -1013,6 +1052,24 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
     );
   if (head === 'root') signals.push('checks out the untrusted PR head into the workspace root');
   if (head === 'subdir') signals.push('checks out the untrusted PR head into an isolated subdir');
+  // S.4: which claude-code-action build runs, and whether it checks the actor on workflow_run.
+  if (workflowRun) {
+    const builds = agentSteps.map((st) => claudeActionBuild(st.uses)).filter((b) => b !== null);
+    const thirdParty = builds.find((b) => !b.official);
+    if (thirdParty)
+      signals.push(
+        `third-party build of claude-code-action (\`${safeText(thirdParty.owner, 40)}\`): on workflow_run it is not assumed to check the actor (the official action does from v1.0.185)`
+      );
+    const old = builds.find((b) => b.official && !workflowRunChecked(b.ref));
+    if (old)
+      signals.push(
+        `claude-code-action \`@${safeText(old.ref, 40)}\` predates v1.0.185, so it does not check the actor on workflow_run`
+      );
+    else if (builds.some((b) => b.official && SHA_REF_RE.test(b.ref)))
+      signals.push(
+        'claude-code-action is pinned by SHA on workflow_run: its actor check there exists from v1.0.185; confirm the pinned commit is that release or newer'
+      );
+  }
   if (promptUntrusted) signals.push('feeds untrusted PR/issue text to the agent');
   else if (itemRead)
     signals.push(
@@ -1260,7 +1317,9 @@ function evalAgentJob(
     promptTakesUntrusted(jobAgentSteps) || (!reusable && jobReadsUntrustedItem(job)) ? 2 : 0,
     bypassActive ? 2 : 0
   );
-  const gate = jobGated(job, wf, raw) || hasImplicitActorGate(jobAgentSteps, bypassActive);
+  const gate =
+    jobGated(job, wf, raw) ||
+    hasImplicitActorGate(jobAgentSteps, bypassActive, triggerReach(wf, raw).workflowRun);
   const injectable = untrustedTrigger && !gate && reach > 0;
   const canReadEnv = EXFIL_RCE_RE.test(collectTools(jobAgentSteps)); // bare shell = read env + exfil
 

@@ -1,0 +1,21 @@
+# An explicit pin below v1.0.185: no actor check on workflow_run.
+name: Agent
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - uses: anthropics/claude-code-action@v1.0.150
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: "Fix the failing build: ${{ github.event.comment.body }}"
+          claude_args: '--allowedTools "Bash,Edit,Write"'
