@@ -387,17 +387,21 @@ export function outboxBacklog(
   maxBytes = MAX_CHUNK_BYTES
 ): { outboxPending: number | null; outboxOldestAt: string | null; outboxTruncated: boolean } {
   try {
-    const size = fs.statSync(auditLogPath).size;
-    const wm = readWatermark(watermarkPath);
-    const offset =
-      wm && wm.fileSig === fileSignature(auditLogPath) && wm.offset <= size ? wm.offset : 0;
-    const length = Math.min(size - offset, maxBytes);
+    // Open first and size the OPEN file (fstat), so the size and the bytes read come from the
+    // same file even if the path is replaced in between (CodeQL js/file-system-race).
     const fd = fs.openSync(auditLogPath, 'r');
     let chunk: Buffer;
+    let truncated: boolean;
     try {
+      const size = fs.fstatSync(fd).size;
+      const wm = readWatermark(watermarkPath);
+      const offset =
+        wm && wm.fileSig === fileSignature(auditLogPath) && wm.offset <= size ? wm.offset : 0;
+      const length = Math.min(size - offset, maxBytes);
       const buffer = Buffer.alloc(length);
       const read = fs.readSync(fd, buffer, 0, length, offset);
       chunk = buffer.subarray(0, read);
+      truncated = size - offset > length;
     } finally {
       fs.closeSync(fd);
     }
@@ -409,7 +413,7 @@ export function outboxBacklog(
     return {
       outboxPending: rows.length,
       outboxOldestAt: Number.isFinite(oldest) ? new Date(oldest).toISOString() : null,
-      outboxTruncated: size - offset > length,
+      outboxTruncated: truncated,
     };
   } catch (error) {
     return {
