@@ -34,6 +34,18 @@ inputs:
     description: 'Token for posting the comment + check-run (defaults to the job token)'
     required: false
     default: ${{ github.token }}
+  node9-upload-key:
+    description: >-
+      Repository upload key from the node9 dashboard (Repositories, Scan on every push).
+      When set, each push scan is also sent to that node9 workspace, which needs
+      `permissions: id-token: write` on the job. Empty (the default) sends nothing.
+      Uploads never change the check result.
+    required: false
+    default: ''
+  node9-api-url:
+    description: "node9 API for uploads. Only https://api.node9.ai (the default) or node9's test deployment are accepted."
+    required: false
+    default: 'https://api.node9.ai'
 
 runs:
   using: 'composite'
@@ -82,17 +94,53 @@ runs:
       shell: bash
       env:
         NODE9_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        NODE9_VERSION_INPUT: ${{ inputs.node9-version }}
+        NODE9_WILL_UPLOAD: ${{ github.event_name == 'push' && inputs.node9-upload-key != '' }}
       run: |
         set -euo pipefail
+        # Uploads only: resolve the exact scanner version first and run that one,
+        # so the upload reports the version that really scanned. Other runs keep
+        # the input as given, with no extra registry call. If npm cannot answer,
+        # the scan still runs with the input and the version stays unknown (the
+        # upload is then skipped; the check itself is unaffected).
+        VERSION=""
+        if [ "$NODE9_WILL_UPLOAD" = "true" ]; then
+          VERSION="$(npm view "node9-ai@${NODE9_VERSION_INPUT}" version --json 2>/dev/null \
+            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const v=JSON.parse(s);const x=Array.isArray(v)?v[v.length-1]:v;if(/^[0-9A-Za-z.+-]{1,50}$/.test(x))process.stdout.write(x)}catch{}})' \
+            || true)"
+        fi
+        SPEC="${VERSION:-$NODE9_VERSION_INPUT}"
         # Static, config-only scan of the checked-out workspace. Never fails this
         # step on a finding (the gate is applied by comment.js per fail-on).
         # `--base` is passed whenever the event has one, INCLUDING when the fetch above
         # failed: an unreadable base must be reported as such, not silently skipped.
         BASE_ARGS=()
         if [ -n "${NODE9_BASE_SHA:-}" ]; then BASE_ARGS=(--base "$NODE9_BASE_SHA"); fi
-        npx -y "node9-ai@${{ inputs.node9-version }}" scan-repo "$GITHUB_WORKSPACE" \
+        STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        npx -y "node9-ai@${SPEC}" scan-repo "$GITHUB_WORKSPACE" \
           "${BASE_ARGS[@]}" --json > "${RUNNER_TEMP}/node9-result.json" || true
-        echo "result=${RUNNER_TEMP}/node9-result.json" >> "$GITHUB_OUTPUT"
+        COMPLETED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        {
+          echo "result=${RUNNER_TEMP}/node9-result.json"
+          echo "version=${VERSION}"
+          echo "started=${STARTED}"
+          echo "completed=${COMPLETED}"
+        } >> "$GITHUB_OUTPUT"
+
+    # Repository dashboard upload: push runs with a key only. Before the gate, so a
+    # failing gate cannot skip it; upload.js always exits 0, so it cannot fail the
+    # job either. The key is passed to this step alone.
+    - name: Send the scan to node9
+      if: steps.guard.outputs.skip == '' && github.event_name == 'push' && inputs.node9-upload-key != ''
+      shell: bash
+      env:
+        NODE9_UPLOAD_KEY: ${{ inputs.node9-upload-key }}
+        NODE9_API_URL: ${{ inputs.node9-api-url }}
+        NODE9_RESULT: ${{ steps.scan.outputs.result }}
+        NODE9_SCANNER_VERSION: ${{ steps.scan.outputs.version }}
+        NODE9_SCAN_STARTED_AT: ${{ steps.scan.outputs.started }}
+        NODE9_SCAN_COMPLETED_AT: ${{ steps.scan.outputs.completed }}
+      run: node "${GITHUB_ACTION_PATH}/upload.js" || true
 
     - name: Comment + gate
       shell: bash
