@@ -29,6 +29,7 @@ import {
   type InjectionConfidence,
 } from '../../dlp';
 import { frameUntrusted } from '../../utils/untrusted-frame';
+import { collectToolOutputText, shellOutputText } from '../../tool-output';
 import { hashArgs } from '../../audit/hasher';
 import { parseCpMvOp } from '../../utils/cp-mv-parser';
 import {
@@ -160,7 +161,10 @@ export function registerLogCommand(program: Command): void {
             tool_name?: string;
             name?: string;
             tool_input?: unknown;
-            tool_response?: { output?: string };
+            // Per agent and per tool: Claude Code's Bash sends { stdout, stderr },
+            // its Read { file: { content } }, the shims { output }. Read through
+            // tool-output.ts, never a single field.
+            tool_response?: unknown;
             args?: unknown;
             cwd?: string;
             hook_event_name?: string;
@@ -323,7 +327,7 @@ export function registerLogCommand(program: Command): void {
               typeof (rawInput as Record<string, unknown>).command === 'string'
                 ? ((rawInput as Record<string, unknown>).command as string)
                 : null;
-            const output = payload.tool_response?.output ?? '';
+            const output = shellOutputText(payload.tool_response);
             if (bashCommand && output) {
               const testResult = detectTestResult(bashCommand, output);
               if (testResult) {
@@ -415,10 +419,40 @@ export function registerLogCommand(program: Command): void {
           // the model directly. We can't redact post-hoc on those agents, but we
           // stop the leaked/injected content from being acted on or exfiltrated.
           {
-            const toolOutput = payload.tool_response?.output;
+            // Mode A's contract with the shims is `{ output } → { redacted }`:
+            // `redacted` replaces `output` verbatim, so it is read as sent and
+            // never cut (redactText covers the whole text). Mode B only warns,
+            // so it reads every leaf under the scan bound and records a cut.
+            const rawResponse = payload.tool_response;
+            const shimOutput =
+              rawResponse &&
+              typeof rawResponse === 'object' &&
+              typeof (rawResponse as { output?: unknown }).output === 'string'
+                ? (rawResponse as { output: string }).output
+                : undefined;
+            const collected = redactOutputMode
+              ? {
+                  text:
+                    shimOutput ??
+                    collectToolOutputText(rawResponse, { maxBytes: Number.MAX_SAFE_INTEGER }).text,
+                  truncated: false,
+                }
+              : collectToolOutputText(rawResponse);
+            const toolOutput = collected.text;
+            if (collected.truncated) {
+              // A partial inspection is not a clean one (mcp-content-gate,
+              // "never use truncation as successful inspection"): the prefix
+              // is still scanned, and the gap is on record.
+              appendToLog(HOOK_DEBUG_LOG, {
+                ts: new Date().toISOString(),
+                event: 'post-tool-scan-truncated',
+                tool,
+                scannedBytes: toolOutput.length,
+              });
+            }
             const inj = config.policy.injectionScan;
             const injectionOn = inj.enabled && !inj.allow.includes(tool);
-            if (typeof toolOutput === 'string' && toolOutput.length > 0) {
+            if (toolOutput.length > 0) {
               if (redactOutputMode) {
                 // Mode A (OpenCode/Pi/Hermes): the calling shim CAN mutate the
                 // result. Redact secrets out before the model sees it; then, if
@@ -509,7 +543,12 @@ export function registerLogCommand(program: Command): void {
           // host sees success even when audit.log was not written; the error is
           // surfaced on stderr and in hook-debug.log for operator visibility.
         }
-        process.exit(0);
+        // Flush before exiting. stdout is a pipe when a shim or a hook host
+        // runs us, and a pipe write is asynchronous: process.exit right after a
+        // large `{ redacted }` emit cut the JSON mid-string, the shim's
+        // JSON.parse threw, and the model kept the UNREDACTED output. The empty
+        // write's callback runs once everything queued before it has drained.
+        process.stdout.write('', () => process.exit(0));
       };
 
       if (data) {

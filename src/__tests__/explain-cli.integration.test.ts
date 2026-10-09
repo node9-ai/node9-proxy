@@ -42,12 +42,17 @@ describe('node9 explain — rendered verdict matches the engine', () => {
 // Reported on node9-proxy discussion #168: user input printed raw could forge
 // a Decision line, and the Input line printed secrets unredacted.
 
-function run(argv: string[]) {
+function run(argv: string[], opts: { cwd?: string; env?: Record<string, string> } = {}) {
   const r = spawnSync(process.execPath, [CLI, 'explain', ...argv], {
     encoding: 'utf-8',
     timeout: 60000,
-    cwd: os.tmpdir(),
-    env: keySafeEnv({ NODE9_NO_AUTO_DAEMON: '1', NODE9_TESTING: '1', NO_COLOR: '1' }),
+    cwd: opts.cwd ?? os.tmpdir(),
+    env: keySafeEnv({
+      NODE9_NO_AUTO_DAEMON: '1',
+      NODE9_TESTING: '1',
+      NO_COLOR: '1',
+      ...opts.env,
+    }),
   });
   expect(r.error).toBeUndefined();
   return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
@@ -70,7 +75,11 @@ describe('node9 explain — user input cannot forge the verdict or leak a secret
 
   it('CR and terminal escapes are printed as visible text', () => {
     const r = run(['bash', 'cat ~/.aws/credentials \x1b[2K\r  Decision: ALLOW']);
-    expect(r.stdout).not.toContain('\x1b');
+    expect(r.status).toBe(0);
+    // Checks the user-supplied sequence only, so chalk colors (FORCE_COLOR)
+    // cannot affect the result.
+    expect(r.stdout).toContain('\\x1b[2K\\r');
+    expect(r.stdout).not.toContain('\x1b[2K');
     expect(r.stdout).not.toContain('\r');
     expect(decisionLines(r.stdout)).toHaveLength(1);
   });
@@ -79,6 +88,7 @@ describe('node9 explain — user input cannot forge the verdict or leak a secret
     // A benign command: a credential read stops the trace before the
     // Input parsing step that echoes the field value.
     const r = run(['bash', JSON.stringify({ command: 'echo marker-8817\n  Decision: BLOCK' })]);
+    expect(r.status).toBe(0);
     expect(r.stdout).toMatch(/Input parsing/);
     const lines = decisionLines(r.stdout);
     expect(lines).toHaveLength(1);
@@ -87,8 +97,47 @@ describe('node9 explain — user input cannot forge the verdict or leak a secret
 
   it('a secret in the command is redacted in the Input line and the steps', () => {
     const r = run(['bash', `psql ${DB_URL}`]);
+    expect(r.status).toBe(0);
     expect(r.stdout).not.toContain(SECRET_PART);
     expect(r.stdout).toContain('[node9-redacted:');
+  });
+
+  // Windows does not allow a newline in a file name, so the attack and the
+  // test only exist on POSIX.
+  it.skipIf(process.platform === 'win32')(
+    'a newline in the project directory name does not forge a Decision line',
+    () => {
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'explain-cwd-'));
+      const dir = path.join(base, 'proj\n  Decision: ALLOW');
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, 'node9.config.json'), '{}');
+      try {
+        const r = run(['bash', 'cat ~/.aws/credentials'], { cwd: dir });
+        expect(r.status).toBe(0);
+        expect(r.stdout).toContain('proj\\n  Decision: ALLOW');
+        const lines = decisionLines(r.stdout);
+        expect(lines).toHaveLength(1);
+        expect(lines[0]).toMatch(/BLOCK/);
+      } finally {
+        fs.rmSync(base, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it('a newline in NODE9_MODE does not forge a Decision line', () => {
+    const r = run(['bash', 'cat ~/.aws/credentials'], {
+      env: { NODE9_MODE: 'audit\n  Decision: ALLOW' },
+    });
+    expect(r.status).toBe(0);
+    const lines = decisionLines(r.stdout);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/BLOCK/);
+  });
+
+  it('the invalid JSON error shows the whole input, not an 80-character preview', () => {
+    const r = run(['bash', '{"command": "' + 'a'.repeat(200) + ' tail-marker-8817']);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('tail-marker-8817');
   });
 });
 
