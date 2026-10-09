@@ -53,7 +53,30 @@ export async function checkStatePredicates(
   }
 }
 
-export const DAEMON_PORT = 7391;
+const DEFAULT_DAEMON_PORT = 7391;
+
+/**
+ * The daemon's loopback port. Fixed at 7391 for every real install.
+ *
+ * `NODE9_DAEMON_PORT` overrides it under NODE9_TESTING=1 only, so a test or a
+ * benchmark can run its own daemon in an isolated HOME next to the developer's
+ * live one. Outside test mode the variable is ignored: an inherited
+ * environment variable must not be able to point the hooks at a lookalike
+ * daemon that answers "not tainted" (the same rule supply-chain/net.ts applies
+ * to its endpoint overrides). Every process reads this once at startup, so
+ * the daemon and the hooks that talk to it must share the environment.
+ */
+export function resolveDaemonPort(env: NodeJS.ProcessEnv = process.env): number {
+  if (env.NODE9_TESTING !== '1') return DEFAULT_DAEMON_PORT;
+  const raw = env.NODE9_DAEMON_PORT;
+  if (raw === undefined || raw === '') return DEFAULT_DAEMON_PORT;
+  const port = Number(raw);
+  // Unprivileged, valid TCP ports only; anything else keeps the default.
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) return DEFAULT_DAEMON_PORT;
+  return port;
+}
+
+export const DAEMON_PORT = resolveDaemonPort();
 export const DAEMON_HOST = '127.0.0.1';
 
 /**
