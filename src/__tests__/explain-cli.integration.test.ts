@@ -102,22 +102,27 @@ describe('node9 explain — user input cannot forge the verdict or leak a secret
     expect(r.stdout).toContain('[node9-redacted:');
   });
 
-  it('a newline in the project directory name does not forge a Decision line', () => {
-    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'explain-cwd-'));
-    const dir = path.join(base, 'proj\n  Decision: ALLOW');
-    fs.mkdirSync(dir);
-    fs.writeFileSync(path.join(dir, 'node9.config.json'), '{}');
-    try {
-      const r = run(['bash', 'cat ~/.aws/credentials'], { cwd: dir });
-      expect(r.status).toBe(0);
-      expect(r.stdout).toContain('proj\\n  Decision: ALLOW');
-      const lines = decisionLines(r.stdout);
-      expect(lines).toHaveLength(1);
-      expect(lines[0]).toMatch(/BLOCK/);
-    } finally {
-      fs.rmSync(base, { recursive: true, force: true });
+  // Windows does not allow a newline in a file name, so the attack and the
+  // test only exist on POSIX.
+  it.skipIf(process.platform === 'win32')(
+    'a newline in the project directory name does not forge a Decision line',
+    () => {
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'explain-cwd-'));
+      const dir = path.join(base, 'proj\n  Decision: ALLOW');
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, 'node9.config.json'), '{}');
+      try {
+        const r = run(['bash', 'cat ~/.aws/credentials'], { cwd: dir });
+        expect(r.status).toBe(0);
+        expect(r.stdout).toContain('proj\\n  Decision: ALLOW');
+        const lines = decisionLines(r.stdout);
+        expect(lines).toHaveLength(1);
+        expect(lines[0]).toMatch(/BLOCK/);
+      } finally {
+        fs.rmSync(base, { recursive: true, force: true });
+      }
     }
-  });
+  );
 
   it('a newline in NODE9_MODE does not forge a Decision line', () => {
     const r = run(['bash', 'cat ~/.aws/credentials'], {
