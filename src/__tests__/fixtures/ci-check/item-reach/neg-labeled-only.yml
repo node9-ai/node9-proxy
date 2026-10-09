@@ -1,0 +1,16 @@
+# Only a label (triage access) starts it: not stranger-firable.
+name: Labeled triage
+on:
+  issues:
+    types: [labeled]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: anthropics/claude-code-base-action@beta
+        with:
+          prompt: "Triage issue ${{ github.event.issue.number }}"
+          allowed_tools: "mcp__github__get_issue,mcp__github__update_issue"
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

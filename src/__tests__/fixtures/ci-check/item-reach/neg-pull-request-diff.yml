@@ -1,0 +1,18 @@
+# A plain pull_request review: fork PRs get a read-only token and no secrets.
+name: PR review
+on:
+  pull_request:
+    types: [opened, synchronize]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-base-action@beta
+        with:
+          prompt: "Review PR ${{ github.event.pull_request.number }}"
+          allowed_tools: "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*)"
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

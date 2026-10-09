@@ -307,6 +307,43 @@ function promptTakesUntrusted(steps: Step[]): boolean {
   return false;
 }
 
+// S.1 (2026-10-09): untrusted text that reaches the agent WITHOUT sitting in its prompt.
+// The issue-triage and dedupe templates pass the item NUMBER (or nothing) and let the agent
+// fetch the text itself, or an earlier step writes the body into a prompt file. 216 hand-
+// verified misses on 2.27.0 included ~60 of this shape (OrcaSlicer, hermes, …).
+//
+// A tool that reads issues/PRs (the triggering one, or any one an injected agent names).
+const ITEM_READ_TOOL_RE =
+  /mcp__github__(get_issue|get_issue_comments|get_pull_request|get_pull_request_diff|get_pull_request_files|get_pull_request_comments|get_pull_request_reviews|search_issues|list_issues)\b|Bash\(\s*gh\s+(issue|pr)\s+(view|diff|list)\b|Bash\(\s*gh\s+(api|search)\b|Bash\(\s*gh\s*:/i;
+// The handle an agent dereferences: the triggering item's number or comment id.
+const ITEM_HANDLE_RE =
+  /github\.event\.(issue|pull_request|discussion)\.number|github\.event\.comment\.id/i;
+// Attacker-writable text, in workflow expression or github-script form.
+const PAYLOAD_TEXT_RE =
+  /github\.event\.(issue|comment|pull_request|review|discussion)\.(body|title)|context\.payload\.(issue|comment|pull_request|review|discussion)\b/i;
+
+/** How (if at all) the agent in this job reads the untrusted item other than through its
+ *  prompt text: a read tool, the item's handle, or a prompt file an earlier step built from
+ *  the payload. Job-scoped: an earlier step only feeds an agent step of the same job. */
+function jobReadsUntrustedItem(job: Job): 'tool' | 'handle' | 'prompt-file' | null {
+  const steps = job.steps ?? [];
+  const agent = steps.filter(isAgentStep);
+  if (!agent.length) return null;
+  if (ITEM_READ_TOOL_RE.test(collectTools(agent))) return 'tool';
+  for (const st of agent)
+    if (ITEM_HANDLE_RE.test(str(st.with) + ' ' + str(st.env) + ' ' + str(job.env))) return 'handle';
+  for (let i = 0; i < steps.length; i++) {
+    const st = steps[i];
+    if (!isAgentStep(st) || !str(st.with?.['prompt_file'])) continue;
+    const earlier = steps.slice(0, i).filter((p) => !isAgentStep(p));
+    if (
+      earlier.some((p) => PAYLOAD_TEXT_RE.test(str(p.run) + ' ' + str(p.with) + ' ' + str(p.env)))
+    )
+      return 'prompt-file';
+  }
+  return null;
+}
+
 // An `if:` that clearly RESTRICTS the agent to a trusted actor. POLARITY matters (round 5,
 // 1a): matching `author_association` / `MEMBER` as a bare substring credited an INVERTED
 // check — `!= 'MEMBER'` (runs for everyone else) or `== 'NONE'` / `== 'FIRST_TIME_CONTRIBUTOR'`
@@ -770,6 +807,11 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   const powerSteps = injJobs.flatMap((j) => (j.steps ?? []).filter(isAgentStep));
   const scopedSteps = powerSteps.length ? powerSteps : agentSteps; // fallback: never blank
   const toolsBlob = collectTools(scopedSteps);
+  // S.1: the agent reads the untrusted item itself (tool, handle, payload-built prompt file).
+  // Scoped to the INJECTABLE jobs, like the tools above: a gated job's read tool is unreachable.
+  // Only for a workflow with its OWN stranger-firable trigger: a reusable template given the
+  // item number is how a gated caller uses it too, and the caller is not visible here.
+  const itemRead = forkInput ? (injJobs.map(jobReadsUntrustedItem).find(Boolean) ?? null) : null;
 
   // Reach REQUIRES an untrusted trigger AND at least one injectable (ungated) agent job.
   // If every agent job is actor-gated (injJobs empty), an untrusted trigger can't reach
@@ -779,7 +821,7 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
     untrustedTrigger && injJobs.length
       ? Math.max(
           head === 'root' ? 3 : head === 'subdir' ? 1 : 0,
-          promptUntrusted ? 2 : 0,
+          promptUntrusted || itemRead ? 2 : 0,
           bypassActive ? 2 : 0
         )
       : 0;
@@ -908,6 +950,14 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   if (head === 'root') signals.push('checks out the untrusted PR head into the workspace root');
   if (head === 'subdir') signals.push('checks out the untrusted PR head into an isolated subdir');
   if (promptUntrusted) signals.push('feeds untrusted PR/issue text to the agent');
+  else if (itemRead)
+    signals.push(
+      itemRead === 'prompt-file'
+        ? 'an earlier step writes untrusted PR/issue text into the prompt file the agent reads'
+        : itemRead === 'tool'
+          ? 'the agent fetches PR/issue text itself with a read tool (the text never appears in the prompt)'
+          : 'the agent is given the PR/issue number and reads the text itself (the text never appears in the prompt)'
+    );
   if (broadTools) {
     // Names embed scanned-file text that flows into the Action's PR comment (render.ts).
     // Wrap each in a backtick code span (the repo convention, cf. agent-config's hook
@@ -1143,7 +1193,7 @@ function evalAgentJob(
   const head = untrustedHeadCheckout(jobSteps);
   const reach = Math.max(
     head === 'root' ? 3 : head === 'subdir' ? 1 : 0,
-    promptTakesUntrusted(jobAgentSteps) ? 2 : 0,
+    promptTakesUntrusted(jobAgentSteps) || (!reusable && jobReadsUntrustedItem(job)) ? 2 : 0,
     bypassActive ? 2 : 0
   );
   const gate = jobGated(job, wf, raw) || hasImplicitActorGate(jobAgentSteps, bypassActive);

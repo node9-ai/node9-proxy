@@ -1,0 +1,16 @@
+# A scheduled sweep: no stranger-firable trigger.
+name: Nightly triage
+on:
+  schedule:
+    - cron: '0 3 * * *'
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: anthropics/claude-code-base-action@beta
+        with:
+          prompt: "Triage the open issues"
+          allowed_tools: "mcp__github__list_issues,mcp__github__get_issue,mcp__github__update_issue"
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
