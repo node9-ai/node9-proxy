@@ -35,6 +35,23 @@ function hookCommands(hooks: Record<string, unknown[]> | undefined): string[] {
   return out;
 }
 
+// S.3 (2026-10-09): a grant that runs ANY code or reaches ANY host is broad, not only a bare
+// shell. The command is an interpreter, a network tool, a shell builtin that runs other
+// commands, or `gh` with every sub-command; it may follow `VAR=value ` prefixes and be
+// followed only by flags; and the grant must END in a wildcard. An exact command (`Bash(python3 -c "…")`,
+// `Bash(curl -s https://…)`) approves that one command, and a fixed sub-command
+// (`Bash(python -m pytest:*)`, `Bash(npx prettier:*)`, `Bash(uv run pyright *)`) is scoped.
+const OPEN_RUNNER_RE = new RegExp(
+  String.raw`^Bash\(\s*(?:[A-Z_][A-Z0-9_]*=\S*\s+)*` +
+    String.raw`(python3?|node|deno|bun|ruby|perl|php|uv\s+run|uvx|npx|pnpm\s+dlx|yarn\s+dlx|pipx|docker\s+run|` +
+    String.raw`curl|wget|nc|ncat|ssh|scp|rsync|sh|bash|zsh|eval|source|xargs|gh)` +
+    String.raw`(?:\s+-[A-Za-z]+)*\s*['"]?\s*(?::\*|\s\*|\*)\s*\)$`,
+  'i'
+);
+function openRunner(grant: string): boolean {
+  return OPEN_RUNNER_RE.test(grant);
+}
+
 /** What a broad grant is, and how badly. ONE definition, shared by settings.json
  *  (`permissions.allow`) and a skill's or command's `allowed-tools`, so the two containers
  *  can never drift: a bare `Bash` is graded the same wherever it is written.
@@ -49,8 +66,8 @@ export function gradeBroadGrant(
 ): { broad: string[]; bareShell: boolean; high: boolean; signals: string[] } | null {
   const denySupported = opts.denySupported ?? true;
   const scope = opts.scope ?? 'for everyone who opens this repo with the agent';
-  const broad = allow.filter((a) =>
-    /^Bash$|^Bash\(\s*\*|^Bash\(git:|^Write\(\s*\*|^Write$|^Edit$/.test(a)
+  const broad = allow.filter(
+    (a) => /^Bash$|^Bash\(\s*\*|^Bash\(git:|^Write\(\s*\*|^Write$|^Edit$/.test(a) || openRunner(a)
   );
   if (broad.length === 0) return null;
   const hasBackstop = deny.some((d) => /Bash|Write|Edit/.test(d));
@@ -80,6 +97,10 @@ export function gradeBroadGrant(
     );
   if (broad.some((a) => /^Write|^Edit$/.test(a)))
     signals.push('`Write`/`Edit` pre-approve file changes without a prompt');
+  if (broad.some(openRunner))
+    signals.push(
+      'an interpreter, network tool, shell runner or `gh` grant ending in a wildcard runs any code or request an injected instruction writes, without a prompt'
+    );
   if (denySupported && !high && !bareShell && !hasBackstop)
     signals.push('no `deny` entry narrows these grants');
   return { broad, bareShell, high, signals };
