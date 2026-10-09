@@ -1,0 +1,25 @@
+{
+  "session_id": "00000000-0000-4000-8000-000000000002",
+  "transcript_path": "/home/user/.claude/projects/-home-user-node9/00000000-0000-4000-8000-000000000002.jsonl",
+  "cwd": "/home/user/node9",
+  "scratchpad_dir": "/tmp/claude-1000/-home-user-node9/00000000-0000-4000-8000-000000000002/scratchpad",
+  "prompt_id": "00000000-0000-4000-8000-000000000002",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Read",
+  "tool_input": {
+    "file_path": "/home/user/node9/sample.txt"
+  },
+  "tool_response": {
+    "type": "text",
+    "file": {
+      "filePath": "/home/user/node9/sample.txt",
+      "content": "line one\noriginal-file-text-7781\n",
+      "numLines": 3,
+      "startLine": 1,
+      "totalLines": 3
+    }
+  },
+  "tool_use_id": "toolu_fixture_0002",
+  "duration_ms": 8
+}
