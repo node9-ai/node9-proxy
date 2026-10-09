@@ -33,9 +33,19 @@ const CASES = {
   Glob: { allow: 'Glob', prompt: `Use the Glob tool with the pattern **/${MARK}*.txt` },
   Write: { allow: 'Write', prompt: `Write a file named out.txt containing exactly: ${MARK}` },
   Edit: { allow: 'Edit', prompt: `Edit sample.txt, replacing "line one" with "line 1 ${MARK}".` },
+  // An MCP tool through the hook path: a tiny stdio server (MCP_SERVER below)
+  // whose one tool returns the marker.
+  MCP: {
+    tool: 'mcp__verify__echo',
+    allow: 'mcp__verify__echo',
+    mcp: true,
+    prompt: 'Call the mcp__verify__echo tool once.',
+  },
   WebFetch: {
     allow: 'WebFetch',
-    prompt: `Fetch https://example.com with WebFetch and reply with the word ${MARK}.`,
+    // WebFetch returns its own model's answer about the page, so the marker
+    // has to be in the prompt it is given.
+    prompt: `Use WebFetch on https://example.com with this prompt: "Begin your answer with the word ${MARK}, then give the page title."`,
   },
 };
 
@@ -57,6 +67,26 @@ process.stdin.on('end', () => {
 });
 `;
 
+const MCP_SERVER = `
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin });
+const send = (m) => process.stdout.write(JSON.stringify(m) + String.fromCharCode(10));
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.id === undefined) return; // notification
+  if (msg.method === 'initialize')
+    return send({ jsonrpc: '2.0', id: msg.id, result: {
+      protocolVersion: msg.params.protocolVersion, capabilities: { tools: {} },
+      serverInfo: { name: 'verify', version: '1.0.0' } } });
+  if (msg.method === 'tools/list')
+    return send({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'echo',
+      description: 'Returns a fixed line', inputSchema: { type: 'object', properties: {} } }] } });
+  if (msg.method === 'tools/call')
+    return send({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'echo: ${MARK}' }] } });
+  send({ jsonrpc: '2.0', id: msg.id, result: {} });
+});
+`;
+
 const version = spawnSync('claude', ['--version'], { encoding: 'utf8' }).stdout.trim();
 console.log(`Claude Code ${version || '(not found)'}, model ${MODEL}\n`);
 const tools = process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(CASES);
@@ -72,17 +102,29 @@ for (const tool of tools) {
   fs.writeFileSync(path.join(dir, 'hook.cjs'), HOOK);
   fs.writeFileSync(path.join(dir, 'sample.txt'), `line one\n${MARK}\n`);
   fs.writeFileSync(path.join(dir, `${MARK}.txt`), 'x\n');
+  const toolName = c.tool ?? tool;
   const settings = {
     hooks: {
       PostToolUse: [
         {
-          matcher: tool,
+          matcher: toolName,
           hooks: [{ type: 'command', command: `node ${path.join(dir, 'hook.cjs')}` }],
         },
       ],
     },
   };
   fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify(settings));
+  const mcpArgs = [];
+  if (c.mcp) {
+    fs.writeFileSync(path.join(dir, 'server.cjs'), MCP_SERVER);
+    fs.writeFileSync(
+      path.join(dir, 'mcp.json'),
+      JSON.stringify({
+        mcpServers: { verify: { command: 'node', args: [path.join(dir, 'server.cjs')] } },
+      })
+    );
+    mcpArgs.push('--mcp-config', path.join(dir, 'mcp.json'), '--strict-mcp-config');
+  }
   const r = spawnSync(
     'claude',
     [
@@ -97,11 +139,15 @@ for (const tool of tools) {
       '--output-format',
       'stream-json',
       '--verbose',
+      ...mcpArgs,
     ],
     { cwd: dir, encoding: 'utf8', input: '', timeout: 240_000 }
   );
+  // Only results of THIS tool count: a model often runs another tool first
+  // (Edit needs a Read), and that tool has no hook in this run.
   let seen = '';
   let error = '';
+  const toolOf = new Map();
   for (const line of (r.stdout || '').split('\n')) {
     let ev;
     try {
@@ -109,9 +155,13 @@ for (const tool of tools) {
     } catch {
       continue;
     }
+    if (ev.type === 'assistant')
+      for (const part of ev.message?.content ?? [])
+        if (part?.type === 'tool_use') toolOf.set(part.id, part.name);
     if (ev.type === 'user')
       for (const part of ev.message?.content ?? [])
-        if (part?.type === 'tool_result') seen += JSON.stringify(part.content);
+        if (part?.type === 'tool_result' && toolOf.get(part.tool_use_id) === toolName)
+          seen += JSON.stringify(part.content);
     if (ev.type === 'result' && ev.is_error) error = String(ev.result).slice(0, 80);
   }
   const log = fs.existsSync(path.join(dir, 'hook.log'))
@@ -128,7 +178,9 @@ for (const tool of tools) {
           ? 'APPLIED'
           : seen.includes(MARK)
             ? 'IGNORED (original delivered)'
-            : 'inconclusive';
+            : !seen
+              ? 'inconclusive (tool not run)'
+              : 'n/a: the result the model reads does not carry the content';
   rows.push([tool, verdict]);
   fs.rmSync(dir, { recursive: true, force: true });
 }
