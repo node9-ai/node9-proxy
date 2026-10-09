@@ -43,7 +43,9 @@ import {
   buildExplainJsonError,
   displaySafe,
   inputPreview,
+  toSafeJson,
 } from './cli/render/explain-display';
+import type { ExplainResult } from './policy';
 import { registerCheckCommand } from './cli/commands/check';
 import { registerLogCommand } from './cli/commands/log';
 import { registerShieldCommand } from './cli/commands/shield';
@@ -558,7 +560,7 @@ program
     // visible line) before it is printed, so the input cannot forge a
     // Decision line or leak a secret into a log of this output.
     const failJson = (message: string): never => {
-      console.log(JSON.stringify(buildExplainJsonError(message), null, 2));
+      console.log(toSafeJson(buildExplainJsonError(message)));
       process.exit(1);
     };
 
@@ -570,7 +572,7 @@ program
           args = JSON.parse(trimmed);
         } catch {
           if (opts.json) failJson('Invalid JSON in [args]');
-          console.error(chalk.red(`\n❌ Invalid JSON: ${inputPreview(trimmed)}\n`));
+          console.error(chalk.red(`\n❌ Invalid JSON: ${displaySafe(trimmed)}\n`));
           process.exit(1);
         }
       } else {
@@ -579,7 +581,7 @@ program
       }
     }
 
-    let result: Awaited<ReturnType<typeof explainPolicy>>;
+    let result: ExplainResult;
     try {
       result = await explainPolicy(tool, args);
     } catch (err) {
@@ -588,7 +590,7 @@ program
     }
 
     if (opts.json) {
-      console.log(JSON.stringify(buildExplainJson(result, argsRaw), null, 2));
+      console.log(toSafeJson(buildExplainJson(result, argsRaw)));
       return;
     }
 
@@ -605,16 +607,19 @@ program
     console.log(chalk.bold('Config Sources (Waterfall):'));
     for (const tier of result.waterfall) {
       const num = chalk.gray(`  ${tier.tier}.`);
-      const label = tier.label.padEnd(16);
+      // path comes from the cwd and note can carry NODE9_MODE: both are
+      // outside input, sanitized like the rest of the trace.
+      const label = displaySafe(tier.label).padEnd(16);
+      const tierNote = tier.note === undefined ? undefined : displaySafe(tier.note);
       let statusStr: string;
       if (tier.tier === 1) {
-        statusStr = chalk.gray(tier.note ?? '');
+        statusStr = chalk.gray(tierNote ?? '');
       } else if (tier.status === 'active') {
-        const loc = tier.path ? chalk.gray(tier.path) : '';
-        const note = tier.note ? chalk.gray(`(${tier.note})`) : '';
+        const loc = tier.path ? chalk.gray(displaySafe(tier.path)) : '';
+        const note = tierNote ? chalk.gray(`(${tierNote})`) : '';
         statusStr = chalk.green('✓ active') + (loc ? '  ' + loc : '') + (note ? '  ' + note : '');
       } else {
-        statusStr = chalk.gray('○ ' + (tier.note ?? 'not found'));
+        statusStr = chalk.gray('○ ' + (tierNote ?? 'not found'));
       }
       console.log(`${num} ${chalk.white(label)} ${statusStr}`);
     }

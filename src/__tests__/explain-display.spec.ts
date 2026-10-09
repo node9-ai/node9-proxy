@@ -9,6 +9,7 @@ import {
   inputPreview,
   buildExplainJson,
   buildExplainJsonError,
+  toSafeJson,
   INPUT_PREVIEW_MAX,
 } from '../cli/render/explain-display';
 import type { ExplainResult } from '../policy';
@@ -49,7 +50,9 @@ describe('displaySafe', () => {
   });
 
   it('leaves ordinary text, including non-ASCII letters and emoji, unchanged', () => {
-    const s = 'ls -la ./café/日本 🚀';
+    // Accented Latin, CJK and an emoji, built from code points so the source
+    // stays ASCII.
+    const s = `ls -la ./caf${String.fromCodePoint(0xe9)}/${String.fromCodePoint(0x65e5, 0x672c)} ${String.fromCodePoint(0x1f680)}`;
     expect(displaySafe(s)).toBe(s);
   });
 
@@ -68,6 +71,22 @@ describe('inputPreview', () => {
     expect(out).not.toContain(SECRET_PART);
     expect(out).not.toContain(SECRET_PART.slice(0, 6));
     expect(out.length).toBeLessThanOrEqual(INPUT_PREVIEW_MAX);
+  });
+
+  it('never splits an emoji at the truncation boundary', () => {
+    const raw = 'x'.repeat(INPUT_PREVIEW_MAX - 4) + String.fromCodePoint(0x1f680) + 'y'.repeat(20);
+    const out = inputPreview(raw);
+    const loneSurrogate = [...out].some((ch) => {
+      const c = ch.codePointAt(0)!;
+      return c >= 0xd800 && c <= 0xdfff;
+    });
+    expect(loneSurrogate).toBe(false);
+    expect(out).toContain(String.fromCodePoint(0x1f680));
+  });
+
+  it('never splits a visible escape at the truncation boundary', () => {
+    const raw = 'x'.repeat(INPUT_PREVIEW_MAX - 4) + String.fromCharCode(0x202e) + 'y'.repeat(20);
+    expect(inputPreview(raw)).toContain('\\u202e');
   });
 
   it('leaves a short input whole', () => {
@@ -115,5 +134,20 @@ describe('buildExplainJson', () => {
     const doc = buildExplainJsonError('Invalid JSON in [args]');
     expect(doc).toEqual({ schemaVersion: 1, error: 'Invalid JSON in [args]' });
     expect('decision' in doc).toBe(false);
+  });
+});
+
+describe('toSafeJson', () => {
+  it('escapes bidi and line separators that JSON.stringify leaves raw, losslessly', () => {
+    const rlo = String.fromCharCode(0x202e);
+    const ls = String.fromCharCode(0x2028);
+    const c1 = String.fromCharCode(0x9b);
+    const doc = { input: `echo a${rlo}b${ls}c${c1}d` };
+    const out = toSafeJson(doc);
+    expect(out).not.toContain(rlo);
+    expect(out).not.toContain(ls);
+    expect(out).not.toContain(c1);
+    expect(out).toContain('\\u202e');
+    expect(JSON.parse(out)).toEqual(doc);
   });
 });
