@@ -434,21 +434,85 @@ function hasStepMembershipGate(job: Job): boolean {
   );
 }
 
+/** Does the expression open and close with ONE pair of parens around all of it? */
+function wrappedInParens(e: string): boolean {
+  if (!e.startsWith('(') || !e.endsWith(')')) return false;
+  let depth = 0;
+  let quote = false;
+  for (let i = 0; i < e.length; i++) {
+    const ch = e[i];
+    if (ch === "'") quote = !quote;
+    if (quote) continue;
+    if (ch === '(') depth++;
+    else if (ch === ')') depth--;
+    if (depth === 0 && i < e.length - 1) return false; // closed before the end: `(a) || (b)`
+  }
+  return depth === 0;
+}
+
+/** S.2 (2026-10-09): the top-level `||` branches of an `if:` expression. `||` inside parens
+ *  (`fromJSON(…)`, a grouped sub-expression) or inside a string literal does not split. GitHub
+ *  expression strings are single-quoted (`''` escapes a quote, which the toggle handles). */
+function topLevelOrBranches(expr: string): string[] {
+  let e = expr.trim();
+  const wrapped = /^\$\{\{([\s\S]*)\}\}$/.exec(e);
+  if (wrapped) e = wrapped[1].trim();
+  const out: string[] = [];
+  let depth = 0;
+  let quote = false;
+  let cur = '';
+  for (let i = 0; i < e.length; i++) {
+    const ch = e[i];
+    if (ch === "'") quote = !quote;
+    if (!quote) {
+      if (ch === '(') depth++;
+      else if (ch === ')') depth--;
+      else if (depth === 0 && ch === '|' && e[i + 1] === '|') {
+        out.push(cur);
+        cur = '';
+        i++;
+        continue;
+      }
+    }
+    cur += ch;
+  }
+  out.push(cur);
+  const parts = out.map((s) => s.trim()).filter(Boolean);
+  if (parts.length === 1 && wrappedInParens(parts[0]))
+    return topLevelOrBranches(parts[0].slice(1, -1));
+  return parts;
+}
+
+// A branch that only runs for an event a stranger cannot fire (needs write access or runs in
+// a trusted context). `!=` does not match: it admits every OTHER event.
+const TRUSTED_EVENT_BRANCH_RE =
+  /github\.event_name\s*==\s*['"](workflow_dispatch|schedule|push|workflow_call|repository_dispatch)['"]/i;
+const ASSIGNEE_GATE_RE = /assignee\.login\s*==|event\.assignee\b/i;
+
 /** Actor gate scoped to a SINGLE job (its own `if:` + its steps' `if:`s). CI-4
  *  evaluates each agent job independently, so a gate on a DIFFERENT job must not
  *  be credited to this one (and vice-versa). */
 function jobActorGate(job: Job, wf: Workflow, raw: Record<string, unknown>): boolean {
-  const ifs = [job.if, ...(job.steps ?? []).map((s) => s.if)].map(str).join(' ');
+  const labelConfigured = labelTypeConfigured(wf, raw);
   // G-d′: an `assignee.login == '…'` gate (only someone with triage/write access can
   // assign an issue) counts too. Kept in the JOB-scoped check only — NOT in the shared
   // ACTOR_GATE_RE; gating is judged per job, so a gated sibling job can't mask an
   // ungated injectable one.
-  return (
-    ifsAreGated(ifs, labelTypeConfigured(wf, raw)) ||
-    /assignee\.login\s*==|event\.assignee\b/i.test(ifs) ||
-    PERMISSION_OUTPUT_GATE_RE.test(ifs) || // [2] job-scoped permission-check-output gate
-    hasStepMembershipGate(job) // R4-5
-  );
+  const gatedText = (ifs: string) =>
+    ifsAreGated(ifs, labelConfigured) ||
+    ASSIGNEE_GATE_RE.test(ifs) ||
+    PERMISSION_OUTPUT_GATE_RE.test(ifs); // [2] job-scoped permission-check-output gate
+  // S.2: with a top-level `||` in the job `if:`, EVERY branch must be gated (or pinned to a
+  // trusted event): `(issues opened) || (comment && login == 'x')` lets any issue opener in,
+  // although a gate appears in the text (derstrassi/karoofirefly).
+  const jobIf = str(job.if);
+  const branches = topLevelOrBranches(jobIf);
+  const jobIfGated =
+    branches.length > 1
+      ? branches.every((b) => gatedText(b) || TRUSTED_EVENT_BRANCH_RE.test(b))
+      : gatedText(jobIf);
+  const stepIfs = (job.steps ?? []).map((s) => str(s.if)).join(' ');
+  return jobIfGated || gatedText(stepIfs) || hasStepMembershipGate(job); // R4-5
 }
 
 /** Is this job actor-gated, either on its own or through its `needs:` chain?
