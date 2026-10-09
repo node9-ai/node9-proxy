@@ -401,14 +401,21 @@ function labelTypeConfigured(wf: Workflow, raw: Record<string, unknown>): boolea
   );
 }
 
+// `!contains(…labels…, 'skip-ai')`, `contains(…) == false`, `labels[0] == null` admit every PR
+// that lacks an opt-out label, i.e. every stranger's PR; only a positive contains() is a gate.
+const PR_LABEL_GATE_RE =
+  /(?<!!\s{0,5}\(?\s{0,5})contains\(\s*github\.event\.pull_request\.labels\.\*\.name\s*,\s*'[^']{1,100}'\s*\)(?!\s*(?:==\s*false|!=\s*true))/i;
+
 /** Do these joined `if:` expressions constitute an actor gate? */
 function ifsAreGated(ifs: string, labelConfigured: boolean): boolean {
   // Credit a contains() inclusion ONLY when it is not negated (`!contains(…)` = anti-gate).
   const containsGate = CONTAINS_GATE_RE.test(ifs) && !NEGATED_CONTAINS_RE.test(ifs);
   const gated = NONCONTAINS_GATE_RE.test(ifs) || containsGate;
   // A label already on the PR (`contains(github.event.pull_request.labels.*.name, 'x')`) was put
-  // there by someone with triage access, like the `label.name` of a labeled event.
-  const labelGated = labelConfigured && /event\.label|label\.name|pull_request\.labels/i.test(ifs);
+  // there by someone with triage access, like the `label.name` of a labeled event. Only a
+  // POSITIVE test counts (second review): see PR_LABEL_GATE_RE.
+  const labelGated =
+    labelConfigured && (/event\.label|label\.name/i.test(ifs) || PR_LABEL_GATE_RE.test(ifs));
   return gated || labelGated;
 }
 
@@ -540,9 +547,18 @@ function parseIf(src: string): IfExpr | null {
 
 // An atom that only holds for an event a stranger cannot fire (needs write access or runs in a
 // trusted context). `!=` does not match: it admits every OTHER event.
-const TRUSTED_EVENT_BRANCH_RE =
-  /github\.event_name\s*==\s*['"](workflow_dispatch|schedule|push|workflow_call|repository_dispatch)['"]/i;
+// The whole atom (second review): the same text inside a string literal is not a pin.
+const TRUSTED_EVENT_ATOM_RE =
+  /^github\.event_name\s*==\s*'(workflow_dispatch|schedule|push|workflow_call|repository_dispatch)'$/i;
 const ASSIGNEE_GATE_RE = /assignee\.login\s*==|event\.assignee\b/i;
+
+/** The steps' `if:`s joined for the gate search, or '' when longer than IF_MAX_LEN: no real gate
+ *  is that long, and the gate regexes must never run super-linearly on scanned text (second
+ *  review: a 640 KB step `if:` took minutes). '' reads as "not a gate". */
+function stepIfText(steps: Step[]): string {
+  const s = steps.map((st) => str(st.if)).join(' ');
+  return s.length > IF_MAX_LEN ? '' : s;
+}
 
 /** Is this text an actor gate? The gate shapes of ifsAreGated, plus the job-scoped ones. */
 function gatedText(ifs: string, labelConfigured: boolean): boolean {
@@ -561,7 +577,7 @@ function gatedText(ifs: string, labelConfigured: boolean): boolean {
 function exprGated(x: IfExpr, labelConfigured: boolean): boolean {
   switch (x.k) {
     case 'atom':
-      return gatedText(x.t, labelConfigured) || TRUSTED_EVENT_BRANCH_RE.test(x.t);
+      return gatedText(x.t, labelConfigured) || TRUSTED_EVENT_ATOM_RE.test(x.t);
     case 'not':
       return false;
     case 'and':
@@ -610,7 +626,7 @@ function jobOnWorkflowRun(job: Job, workflowRun: boolean): boolean {
  *  be credited to this one (and vice-versa). */
 function jobActorGate(job: Job, wf: Workflow, raw: Record<string, unknown>): boolean {
   const labelConfigured = labelTypeConfigured(wf, raw);
-  const stepIfs = (job.steps ?? []).map((s) => str(s.if)).join(' ');
+  const stepIfs = stepIfText(job.steps ?? []);
   return (
     jobIfGated(str(job.if), labelConfigured) ||
     gatedText(stepIfs, labelConfigured) ||
@@ -662,8 +678,7 @@ function upstreamJobGates(
   // (eeea2222/systemd-clean, hand-verified clean, scored medium).
   if (depIf && jobIfGated(depIf, label)) return true;
   const steps = dep.steps ?? [];
-  const stepGated =
-    ifsAreGated(steps.map((st) => str(st.if)).join(' '), label) || hasStepMembershipGate(dep);
+  const stepGated = ifsAreGated(stepIfText(steps), label) || hasStepMembershipGate(dep);
   if (!stepGated) return false;
   if (
     steps.some(
