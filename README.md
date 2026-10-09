@@ -65,6 +65,19 @@ and approve held actions from a dashboard or Slack. Skip it and node9 works exac
 the same, alone, offline. `node9 logout` disconnects again and local enforcement
 keeps running.
 
+### Use as an MCP server
+
+node9 also runs as an MCP server, so an agent can read its status, posture, audit
+record and policy, and explain any decision, from inside the conversation:
+
+```bash
+claude mcp add --transport stdio node9 -- npx -y node9-ai mcp-server
+```
+
+Any MCP client works the same way: the command is `npx -y node9-ai mcp-server`
+over stdio, with no API key. It is listed in the official MCP Registry as
+`io.github.node9-ai/node9`.
+
 ## The problem
 
 In August 2025, compromised releases of the
