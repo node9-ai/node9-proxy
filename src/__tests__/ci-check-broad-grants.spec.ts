@@ -66,6 +66,9 @@ describe('S.3 — what stays not broad', () => {
     'Bash(gh api:*)',
     'Bash(gh issue view:*)',
     'Bash(python3)',
+    // Informational flags, as in getsentry/sentry's committed config.
+    'Bash(node --version:*)',
+    'Bash(python3 --help:*)',
   ];
   for (const g of negatives)
     it(`${g} is not broad`, () => {

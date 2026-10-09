@@ -1,0 +1,9 @@
+on: workflow_run
+jobs:
+  a:
+    if: {a: "||"}
+    runs-on: x
+    steps:
+      - uses: evil/claude-code-action@
+      - uses: anthropics/claude-code-action@v1.0.99999999999999999999
+        with: {prompt: "${{ github.event.issue.number }}"}

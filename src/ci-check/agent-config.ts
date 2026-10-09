@@ -38,18 +38,27 @@ function hookCommands(hooks: Record<string, unknown[]> | undefined): string[] {
 // S.3 (2026-10-09): a grant that runs ANY code or reaches ANY host is broad, not only a bare
 // shell. The command is an interpreter, a network tool, a shell builtin that runs other
 // commands, or `gh` with every sub-command; it may follow `VAR=value ` prefixes and be
-// followed only by flags; and the grant must END in a wildcard. An exact command (`Bash(python3 -c "…")`,
-// `Bash(curl -s https://…)`) approves that one command, and a fixed sub-command
-// (`Bash(python -m pytest:*)`, `Bash(npx prettier:*)`, `Bash(uv run pyright *)`) is scoped.
+// followed only by flags; and the grant must END in a wildcard. An exact command
+// (`Bash(python3 -c "…")`, `Bash(curl -s https://…)`) approves that one command, and a fixed
+// sub-command (`Bash(python -m pytest:*)`, `Bash(npx prettier:*)`, `Bash(uv run pyright *)`) is
+// scoped.
 const OPEN_RUNNER_RE = new RegExp(
-  String.raw`^Bash\(\s*(?:[A-Z_][A-Z0-9_]*=\S*\s+)*` +
-    String.raw`(python3?|node|deno|bun|ruby|perl|php|uv\s+run|uvx|npx|pnpm\s+dlx|yarn\s+dlx|pipx|docker\s+run|` +
-    String.raw`curl|wget|nc|ncat|ssh|scp|rsync|sh|bash|zsh|eval|source|xargs|gh)` +
-    String.raw`(?:\s+-[A-Za-z]+)*\s*['"]?\s*(?::\*|\s\*|\*)\s*\)$`,
+  String.raw`^Bash\((?:[A-Z_][A-Z0-9_]{0,40}=\S{0,200} )*(?:/[\w./-]{0,80}/)?` +
+    String.raw`(python(?:3(?:\.\d{1,2})?)?|node|deno(?: run)?|bun(?: x)?|ruby|perl|php|uv run|uvx|npx|npm exec|pnpm dlx|yarn dlx|pipx|docker run|` +
+    String.raw`curl|wget|nc|ncat|ssh|scp|rsync|sh|bash|zsh|eval|source|xargs|env|sudo|gh)` +
+    String.raw`(?: --?[A-Za-z][\w-]{0,30}){0,4} ?['"]?(?::\*| \*|\*)\)$`,
   'i'
 );
+// Review finding 4 (2026-10-09): the first version ran in quadratic time on a long allow entry
+// (a scanned repo controls it). The grant is whitespace-normalised and length-capped first, and
+// every repetition above is bounded.
+const OPEN_RUNNER_MAX = 300;
+// An informational flag (`node --version:*`, `python --help:*`) runs nothing the caller chose;
+// getsentry/sentry, the low-FP fixture, grants five of them.
+const INFO_FLAG_RE = /\s--?(version|help|V|v|h)\b/;
 function openRunner(grant: string): boolean {
-  return OPEN_RUNNER_RE.test(grant);
+  if (grant.length > OPEN_RUNNER_MAX || INFO_FLAG_RE.test(grant)) return false;
+  return OPEN_RUNNER_RE.test(grant.replace(/\s+/g, ' ').replace(/\(\s+/, '('));
 }
 
 /** What a broad grant is, and how badly. ONE definition, shared by settings.json

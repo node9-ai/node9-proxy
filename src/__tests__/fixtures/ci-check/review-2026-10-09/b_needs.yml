@@ -1,0 +1,21 @@
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+permissions:
+  contents: write
+jobs:
+  check:
+    if: github.event_name == 'issue_comment' && (contains(github.event.comment.body, '@codex') || github.actor == 'owner')
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+  agent:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: openai/codex-action@v1
+        with:
+          prompt: "Handle ${{ github.event.comment.body }} ${{ github.event.issue.body }}"
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
