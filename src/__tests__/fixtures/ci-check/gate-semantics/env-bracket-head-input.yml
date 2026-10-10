@@ -1,0 +1,630 @@
+name: Codex sharded benchmark case
+
+on:
+  workflow_call:
+    inputs:
+      case-id:
+        required: true
+        type: string
+      base-sha:
+        required: true
+        type: string
+      head-sha:
+        required: true
+        type: string
+      variant-json:
+        required: true
+        type: string
+      reasoning-effort:
+        required: true
+        type: string
+      prompt-profile:
+        required: true
+        type: string
+      repeat:
+        required: true
+        type: string
+    secrets:
+      OPENAI_API_KEY:
+        required: true
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  prepare-shard:
+    name: Prepare ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        shard: [shard-1, shard-2]
+    env:
+      CASE_ID: ${{ inputs['case-id'] }}
+      VARIANT_ID: ${{ fromJSON(inputs['variant-json']).id }}
+      SHARD_ID: ${{ matrix.shard }}
+      REPEAT: ${{ inputs.repeat }}
+      REVIEW_BASE_SHA: ${{ inputs['base-sha'] }}
+      REVIEW_HEAD_SHA: ${{ inputs['head-sha'] }}
+      REVIEW_COMMIT_RANGE: ${{ format('{0}...{1}', inputs['base-sha'], inputs['head-sha']) }}
+      REVIEW_BLOB_BASE_URL: ${{ format('https://github.com/{0}/blob/{1}', github.repository, inputs['head-sha']) }}
+      REVIEW_MANIFEST_FILE: .codex-input/codex-shard-manifest.json
+      REVIEW_DIFF_FILE: .codex-input/codex-review.diff
+      PREPARED_ARTIFACT_NAME: sharded-benchmark-prepared-${{ inputs['case-id'] }}-${{ fromJSON(inputs['variant-json']).id }}-${{ inputs.repeat }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout fixed historical head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.REVIEW_HEAD_SHA }}
+          # Full history is confined to this secretless preparation job so the
+          # exact three-dot merge base is available to the trusted planner.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout trusted sharding tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: .codex-trusted
+          sparse-checkout: |
+            .github/codex-sharded-review-prompt.md
+            .github/scripts/plan_codex_review_shards.py
+            .github/scripts/render_codex_shard_prompt.py
+            .github/scripts/verify_codex_shard_plan.py
+            .github/scripts/write_codex_shard_result.py
+          sparse-checkout-cone-mode: false
+
+      - name: Fetch and validate fixed historical range
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git -c protocol.version=2 \
+              -c "http.https://github.com/.extraheader=AUTHORIZATION: bearer ${GITHUB_TOKEN}" \
+              fetch --no-tags origin "$REVIEW_BASE_SHA" "$REVIEW_HEAD_SHA"
+          test "$(git rev-parse HEAD)" = "$REVIEW_HEAD_SHA"
+          git cat-file -e "$REVIEW_BASE_SHA^{commit}"
+          git cat-file -e "$REVIEW_HEAD_SHA^{commit}"
+          test "$REVIEW_COMMIT_RANGE" = "$REVIEW_BASE_SHA...$REVIEW_HEAD_SHA"
+          if git config --local --get-regexp '^http\..*\.extraheader$'; then
+            echo "Checkout retained HTTP credentials after the exact-SHA fetch." >&2
+            exit 1
+          fi
+
+      - name: Plan bounded review shards
+        id: plan
+        env:
+          VARIANT_JSON: ${{ inputs['variant-json'] }}
+          UNIFIED: ${{ fromJSON(inputs['variant-json']).unified }}
+          INTER_HUNK: ${{ fromJSON(inputs['variant-json'])['inter-hunk'] }}
+          PLAN_DIR: ${{ runner.temp }}/codex-shard-plan
+        run: |
+          set -euo pipefail
+          python3 .codex-trusted/.github/scripts/plan_codex_review_shards.py \
+            --case "$CASE_ID" \
+            --variant "$VARIANT_ID" \
+            --repeat "$REPEAT" \
+            --base-sha "$REVIEW_BASE_SHA" \
+            --head-sha "$REVIEW_HEAD_SHA" \
+            --commit-range "$REVIEW_COMMIT_RANGE" \
+            --shard "$SHARD_ID" \
+            --unified "$UNIFIED" \
+            --inter-hunk "$INTER_HUNK" \
+            --variant-metadata-json "$VARIANT_JSON" \
+            --output-dir "$PLAN_DIR"
+
+      - name: Assemble isolated model input
+        env:
+          PLAN_DIR: ${{ runner.temp }}/codex-shard-plan
+          PREPARED_DIR: ${{ runner.temp }}/codex-prepared
+          REVIEW_MERGE_BASE_BLOB_URL: ${{ format('https://github.com/{0}/blob/{1}', github.repository, steps.plan.outputs.merge_base_sha) }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$PREPARED_DIR/trusted-tools"
+          cp "$PLAN_DIR/codex-shard-manifest.json" "$PREPARED_DIR/"
+          cp "$PLAN_DIR/codex-review.diff" "$PREPARED_DIR/"
+          cp .codex-trusted/.github/scripts/verify_codex_shard_plan.py "$PREPARED_DIR/trusted-tools/"
+          cp .codex-trusted/.github/scripts/write_codex_shard_result.py "$PREPARED_DIR/trusted-tools/"
+          python3 .codex-trusted/.github/scripts/render_codex_shard_prompt.py \
+            --template .codex-trusted/.github/codex-sharded-review-prompt.md \
+            --output "$PREPARED_DIR/codex-review-prompt.md"
+          git archive --format=tar.gz -9 "$REVIEW_HEAD_SHA" -- . \
+            ':(glob,exclude)**/*codex*benchmark*' \
+            > "$PREPARED_DIR/model-worktree.tar.gz"
+          if tar -tzf "$PREPARED_DIR/model-worktree.tar.gz" | \
+              grep -E '(^|/)\.git(/|$)|(^|/)[^/]*codex[^/]*benchmark[^/]*$'; then
+            echo "Isolated model worktree contains forbidden refs or corpus labels." >&2
+            exit 1
+          fi
+
+      - name: Upload isolated model input
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.PREPARED_ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/codex-prepared
+          if-no-files-found: error
+
+  shard-review:
+    name: Model ${{ matrix.shard }}
+    needs: prepare-shard
+    runs-on: ubuntu-latest
+    # This is the enforceable model boundary. Preparation runs in a separate job,
+    # and the isolated model job is cancelled after six minutes even though the
+    # pinned composite action ignores its caller-step timeout.
+    timeout-minutes: 6
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        shard: [shard-1, shard-2]
+    env:
+      CASE_ID: ${{ inputs['case-id'] }}
+      VARIANT_ID: ${{ fromJSON(inputs['variant-json']).id }}
+      SHARD_ID: ${{ matrix.shard }}
+      REPEAT: ${{ inputs.repeat }}
+      CODEX_MODEL: gpt-5.6-sol
+      CODEX_REASONING_EFFORT: ${{ inputs['reasoning-effort'] }}
+      CODEX_TIMEOUT_MINUTES: "6"
+      OPENAI_API_KEY_PRESENT: ${{ secrets.OPENAI_API_KEY != '' }}
+      PREPARED_ARTIFACT_NAME: sharded-benchmark-prepared-${{ inputs['case-id'] }}-${{ fromJSON(inputs['variant-json']).id }}-${{ inputs.repeat }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+      IDENTITY_ARTIFACT_NAME: sharded-benchmark-identity-${{ inputs['case-id'] }}-${{ fromJSON(inputs['variant-json']).id }}-${{ inputs.repeat }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+      RESULT_ARTIFACT_NAME: sharded-benchmark-shard-${{ inputs['case-id'] }}-${{ fromJSON(inputs['variant-json']).id }}-${{ inputs.repeat }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+      REVIEW_MANIFEST_FILE: model-worktree/.codex-input/codex-shard-manifest.json
+      REVIEW_DIFF_FILE: model-worktree/.codex-input/codex-review.diff
+    steps:
+      - name: Download prepared shard
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.PREPARED_ARTIFACT_NAME }}
+          path: prepared-shard
+
+      - name: Materialize isolated model workspace
+        id: materialize
+        run: |
+          set -euo pipefail
+          mkdir -p model-worktree/.codex-input
+          tar -xzf prepared-shard/model-worktree.tar.gz -C model-worktree
+          cp prepared-shard/codex-shard-manifest.json "$REVIEW_MANIFEST_FILE"
+          cp prepared-shard/codex-review.diff "$REVIEW_DIFF_FILE"
+          cp prepared-shard/codex-review-prompt.md model-worktree/.codex-input/
+          python3 prepared-shard/trusted-tools/verify_codex_shard_plan.py \
+            --manifest "$REVIEW_MANIFEST_FILE" \
+            --packet "$REVIEW_DIFF_FILE" \
+            --shard "$SHARD_ID"
+          test ! -e model-worktree/.git
+          test ! -e model-worktree/.github/codex-benchmark-corpus.json
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = json.loads(Path(os.environ["REVIEW_MANIFEST_FILE"]).read_text())
+          shard = next(item for item in manifest["shards"] if item["id"] == os.environ["SHARD_ID"])
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"active={'true' if manifest['status'] == 'planned' and shard['active'] else 'false'}\n")
+          PY
+
+      - name: Bind trusted model job identity
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          FULL_JOB_NAME: Sharded ${{ env.CASE_ID }} / ${{ env.VARIANT_ID }} / ${{ env.REPEAT }} / Model ${{ env.SHARD_ID }}
+          SHORT_JOB_NAME: Model ${{ env.SHARD_ID }}
+          IDENTITY_FILE: ${{ runner.temp }}/shard-job-identity.json
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs = require('fs');
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId,
+              per_page: 100,
+            });
+            const matches = jobs.filter(job =>
+              job.status === 'in_progress' &&
+              (job.name === process.env.FULL_JOB_NAME || job.name === process.env.SHORT_JOB_NAME)
+            );
+            if (matches.length !== 1) {
+              core.setFailed(`Expected one in-progress model job, found ${matches.length}.`);
+              return;
+            }
+            fs.writeFileSync(
+              process.env.IDENTITY_FILE,
+              `${JSON.stringify({
+                run_id: context.runId,
+                run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+                case: process.env.CASE_ID,
+                variant: process.env.VARIANT_ID,
+                repeat: process.env.REPEAT,
+                shard_id: process.env.SHARD_ID,
+                job_id: matches[0].id,
+              }, null, 2)}\n`,
+              {encoding: 'utf8', mode: 0o600},
+            );
+
+      - name: Upload trusted model job identity
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.IDENTITY_ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/shard-job-identity.json
+          if-no-files-found: error
+
+      - name: Require benchmark API key
+        if: ${{ steps.materialize.outputs.active == 'true' }}
+        run: |
+          if [ "$OPENAI_API_KEY_PRESENT" != "true" ]; then
+            echo "OPENAI_API_KEY is required for the sharded Codex benchmark." >&2
+            exit 1
+          fi
+
+      - name: Load trusted shard prompt
+        id: prompt
+        if: ${{ steps.materialize.outputs.active == 'true' }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const fs = require('fs');
+            core.setOutput('prompt', fs.readFileSync('model-worktree/.codex-input/codex-review-prompt.md', 'utf8'));
+
+      - name: Record trusted Codex start
+        id: codex_start
+        run: echo "started_at=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: Run bounded shard review
+        id: run_codex
+        if: ${{ steps.materialize.outputs.active == 'true' }}
+        timeout-minutes: 6
+        continue-on-error: true
+        uses: openai/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e # v1.12
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          model: ${{ env.CODEX_MODEL }}
+          codex-args: '["-c","model_reasoning_effort=${{ env.CODEX_REASONING_EFFORT }}"]'
+          output-schema: |
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["overall_risk", "review_markdown"],
+              "properties": {
+                "overall_risk": {
+                  "type": "string",
+                  "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "NONE"]
+                },
+                "review_markdown": {"type": "string", "minLength": 1}
+              }
+            }
+          safety-strategy: drop-sudo
+          sandbox: read-only
+          working-directory: model-worktree
+          prompt: ${{ steps.prompt.outputs.prompt }}
+
+      - name: Write trusted shard result
+        id: write_result
+        if: ${{ always() && !cancelled() && steps.materialize.outcome == 'success' }}
+        env:
+          CODEX_OUTCOME: ${{ steps.run_codex.outcome }}
+          REVIEW_OUTPUT: ${{ steps.run_codex.outputs.final-message }}
+          STARTED_AT: ${{ steps.codex_start.outputs.started_at }}
+        run: |
+          python3 prepared-shard/trusted-tools/write_codex_shard_result.py \
+            --manifest "$REVIEW_MANIFEST_FILE" \
+            --shard "$SHARD_ID" \
+            --started-at "$STARTED_AT" \
+            --output-dir shard-result
+
+      - name: Upload trusted shard result
+        if: ${{ always() && steps.write_result.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.RESULT_ARTIFACT_NAME }}
+          path: |
+            shard-result/shard-result.json
+            shard-result/shard-review.md
+            shard-result/codex-shard-manifest.json
+          if-no-files-found: error
+
+  finalize-shard:
+    name: Finalize ${{ matrix.shard }}
+    needs: shard-review
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        shard: [shard-1, shard-2]
+    env:
+      CASE_ID: ${{ inputs['case-id'] }}
+      VARIANT_ID: ${{ fromJSON(inputs['variant-json']).id }}
+      SHARD_ID: ${{ matrix.shard }}
+      REPEAT: ${{ inputs.repeat }}
+      CODEX_MODEL: gpt-5.6-sol
+      CODEX_REASONING_EFFORT: ${{ inputs['reasoning-effort'] }}
+      CODEX_TIMEOUT_MINUTES: "6"
+      CODEX_CANCELLATION_CLEANUP_SECONDS: "300"
+      PREPARED_ARTIFACT_NAME: sharded-benchmark-prepared-${{ inputs['case-id'] }}-${{ fromJSON(inputs['variant-json']).id }}-${{ inputs.repeat }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+      IDENTITY_ARTIFACT_NAME: sharded-benchmark-identity-${{ inputs['case-id'] }}-${{ fromJSON(inputs['variant-json']).id }}-${{ inputs.repeat }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+      RESULT_ARTIFACT_NAME: sharded-benchmark-shard-${{ inputs['case-id'] }}-${{ fromJSON(inputs['variant-json']).id }}-${{ inputs.repeat }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout trusted sharding tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: .codex-trusted
+          sparse-checkout: |
+            .github/scripts/verify_codex_shard_plan.py
+            .github/scripts/write_codex_shard_result.py
+          sparse-checkout-cone-mode: false
+
+      - name: Download prepared shard
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.PREPARED_ARTIFACT_NAME }}
+          path: prepared-shard
+
+      - name: Verify trusted shard plan
+        run: |
+          python3 .codex-trusted/.github/scripts/verify_codex_shard_plan.py \
+            --manifest prepared-shard/codex-shard-manifest.json \
+            --packet prepared-shard/codex-review.diff \
+            --shard "$SHARD_ID"
+
+      - name: Download trusted model job identity
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.IDENTITY_ARTIFACT_NAME }}
+          path: model-identity
+
+      - name: Verify trusted model job identity
+        id: identity
+        env:
+          EXPECTED_RUN_ID: ${{ github.run_id }}
+          EXPECTED_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          identity = json.loads(Path("model-identity/shard-job-identity.json").read_text(encoding="utf-8"))
+          expected = {
+              "run_id": int(os.environ["EXPECTED_RUN_ID"]),
+              "run_attempt": int(os.environ["EXPECTED_RUN_ATTEMPT"]),
+              "case": os.environ["CASE_ID"],
+              "variant": os.environ["VARIANT_ID"],
+              "repeat": os.environ["REPEAT"],
+              "shard_id": os.environ["SHARD_ID"],
+          }
+          for name, value in expected.items():
+              if identity.get(name) != value:
+                  raise SystemExit(f"trusted model identity has invalid {name}")
+          job_id = identity.get("job_id")
+          if not isinstance(job_id, int) or job_id <= 0:
+              raise SystemExit("trusted model identity has invalid job_id")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"job_id={job_id}\n")
+          PY
+
+      - name: Inspect bounded model job
+        id: inspect
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          SHARD_JOB_ID: ${{ steps.identity.outputs.job_id }}
+          RESULT_ARTIFACT_NAME: ${{ env.RESULT_ARTIFACT_NAME }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId,
+              per_page: 100,
+            });
+            const matches = jobs.filter(job => String(job.id) === process.env.SHARD_JOB_ID);
+            if (matches.length !== 1) {
+              core.setFailed(`Expected one model job with trusted ID ${process.env.SHARD_JOB_ID}, found ${matches.length}.`);
+              return;
+            }
+            const job = matches[0];
+            const conclusion = job.conclusion || '';
+            let classification = conclusion === 'success' ? 'completed' : 'automation-failure';
+            let detail = '';
+            let elapsedSeconds = null;
+            if (conclusion === 'cancelled') {
+              const requiredSteps = [
+                'Download prepared shard',
+                'Materialize isolated model workspace',
+                'Bind trusted model job identity',
+                'Upload trusted model job identity',
+                'Require benchmark API key',
+                'Load trusted shard prompt',
+                'Record trusted Codex start',
+              ];
+              const prerequisitesSucceeded = requiredSteps.every(name =>
+                job.steps?.some(step => step.name === name && step.conclusion === 'success')
+              );
+              const codexStep = job.steps?.find(step => step.name === 'Run bounded shard review');
+              const jobStartedAt = Date.parse(job.started_at || '');
+              const codexStartedAt = Date.parse(codexStep?.started_at || '');
+              const completedAt = Date.parse(job.completed_at || '');
+              const observedJobAndCleanupSeconds =
+                Number.isFinite(jobStartedAt) && Number.isFinite(completedAt)
+                  ? Math.max(0, Math.floor((completedAt - jobStartedAt) / 1000))
+                  : null;
+              const observedCodexAndCleanupSeconds =
+                Number.isFinite(codexStartedAt) && Number.isFinite(completedAt)
+                  ? Math.max(0, Math.floor((completedAt - codexStartedAt) / 1000))
+                  : null;
+              const codexWasCancelledInReview =
+                Boolean(codexStep?.started_at) &&
+                (
+                  codexStep?.conclusion === 'cancelled' ||
+                  (codexStep?.status === 'in_progress' && codexStep?.conclusion == null)
+                );
+              const budgetSeconds = Number(process.env.CODEX_TIMEOUT_MINUTES) * 60;
+              const cleanupSeconds = Number(process.env.CODEX_CANCELLATION_CLEANUP_SECONDS);
+              const budgetEvidence =
+                prerequisitesSucceeded &&
+                codexWasCancelledInReview &&
+                observedJobAndCleanupSeconds !== null &&
+                observedJobAndCleanupSeconds >= budgetSeconds + cleanupSeconds;
+              classification = budgetEvidence ? 'budget-timeout' : 'unexpected-cancellation';
+              elapsedSeconds = observedCodexAndCleanupSeconds === null
+                ? null
+                : Math.min(budgetSeconds, Math.max(0, observedCodexAndCleanupSeconds - cleanupSeconds));
+              detail = JSON.stringify({
+                prerequisites_succeeded: prerequisitesSucceeded,
+                codex_started: Boolean(codexStep?.started_at),
+                codex_status: codexStep?.status || null,
+                codex_conclusion: codexStep?.conclusion || null,
+                observed_job_and_cleanup_seconds: observedJobAndCleanupSeconds,
+                observed_codex_and_cleanup_seconds: observedCodexAndCleanupSeconds,
+                measured_model_seconds: elapsedSeconds,
+                budget_seconds: budgetSeconds,
+                expected_cleanup_seconds: cleanupSeconds,
+              });
+            }
+
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId,
+              per_page: 100,
+            });
+            core.setOutput('conclusion', conclusion);
+            core.setOutput('classification', classification);
+            core.setOutput('classification_detail', detail);
+            core.setOutput('elapsed_seconds', elapsedSeconds === null ? '' : String(elapsedSeconds));
+            core.setOutput(
+              'result_artifact_exists',
+              artifacts.some(artifact => artifact.name === process.env.RESULT_ARTIFACT_NAME && !artifact.expired) ? 'true' : 'false'
+            );
+
+      - name: Require completed or budget-cancelled shard
+        env:
+          AGENT_CONCLUSION: ${{ steps.inspect.outputs.conclusion }}
+          AGENT_CLASSIFICATION: ${{ steps.inspect.outputs.classification }}
+          AGENT_CLASSIFICATION_DETAIL: ${{ steps.inspect.outputs.classification_detail }}
+          RESULT_ARTIFACT_EXISTS: ${{ steps.inspect.outputs.result_artifact_exists }}
+        run: |
+          case "$AGENT_CONCLUSION:$AGENT_CLASSIFICATION" in
+            success:completed)
+              if [ "$RESULT_ARTIFACT_EXISTS" != "true" ]; then
+                echo "Completed shard did not upload $RESULT_ARTIFACT_NAME." >&2
+                exit 1
+              fi
+              ;;
+            cancelled:budget-timeout) ;;
+            *)
+              echo "Shard automation failed instead of exhausting its budget: $AGENT_CONCLUSION/$AGENT_CLASSIFICATION ($AGENT_CLASSIFICATION_DETAIL)" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Write trusted shard timeout result
+        id: write_timeout
+        if: ${{ steps.inspect.outputs.conclusion == 'cancelled' && steps.inspect.outputs.classification == 'budget-timeout' }}
+        env:
+          TIMEOUT_ELAPSED_SECONDS: ${{ steps.inspect.outputs.elapsed_seconds }}
+        run: |
+          python3 .codex-trusted/.github/scripts/write_codex_shard_result.py \
+            --manifest prepared-shard/codex-shard-manifest.json \
+            --shard "$SHARD_ID" \
+            --elapsed-seconds "$TIMEOUT_ELAPSED_SECONDS" \
+            --force-incomplete-reason codex-job-timeout \
+            --output-dir shard-result
+
+      - name: Upload trusted shard timeout result
+        if: ${{ steps.write_timeout.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.RESULT_ARTIFACT_NAME }}
+          path: |
+            shard-result/shard-result.json
+            shard-result/shard-review.md
+            shard-result/codex-shard-manifest.json
+          if-no-files-found: error
+
+  aggregate:
+    name: Aggregate sharded benchmark result
+    needs: finalize-shard
+    if: ${{ always() && needs.finalize-shard.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      CASE_ID: ${{ inputs['case-id'] }}
+      VARIANT_ID: ${{ fromJSON(inputs['variant-json']).id }}
+      REPEAT: ${{ inputs.repeat }}
+      CODEX_MODEL: gpt-5.6-sol
+      CODEX_REASONING_EFFORT: ${{ inputs['reasoning-effort'] }}
+      PROMPT_PROFILE: ${{ inputs['prompt-profile'] }}
+      SHARD_1_ARTIFACT: sharded-benchmark-shard-${{ inputs['case-id'] }}-${{ fromJSON(inputs['variant-json']).id }}-${{ inputs.repeat }}-shard-1-${{ github.run_id }}-${{ github.run_attempt }}
+      SHARD_2_ARTIFACT: sharded-benchmark-shard-${{ inputs['case-id'] }}-${{ fromJSON(inputs['variant-json']).id }}-${{ inputs.repeat }}-shard-2-${{ github.run_id }}-${{ github.run_attempt }}
+      AGGREGATE_ARTIFACT: sharded-benchmark-result-${{ inputs['case-id'] }}-${{ fromJSON(inputs['variant-json']).id }}-${{ inputs.repeat }}-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout trusted aggregation tool
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: .codex-trusted
+          sparse-checkout: |
+            .github/codex-benchmark-corpus.json
+            .github/scripts/aggregate_codex_shard_results.py
+            .github/scripts/write_codex_shard_result.py
+          sparse-checkout-cone-mode: false
+
+      - name: Download shard 1 result
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.SHARD_1_ARTIFACT }}
+          path: shard-results/shard-1
+
+      - name: Download shard 2 result
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.SHARD_2_ARTIFACT }}
+          path: shard-results/shard-2
+
+      - name: Aggregate trusted shard results
+        run: |
+          python3 .codex-trusted/.github/scripts/aggregate_codex_shard_results.py \
+            --corpus-file .codex-trusted/.github/codex-benchmark-corpus.json \
+            --shard-1-dir shard-results/shard-1 \
+            --shard-2-dir shard-results/shard-2 \
+            --output-dir aggregate-result
+
+      - name: Upload aggregate benchmark result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.AGGREGATE_ARTIFACT }}
+          path: |
+            aggregate-result/benchmark-review.json
+            aggregate-result/benchmark-review.md
+            aggregate-result/benchmark-scope.json
+            aggregate-result/benchmark-elapsed-time.txt
+            aggregate-result/codex-shard-manifest.json
+          if-no-files-found: error
+
+      - name: Require completed aggregate
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          result = json.loads(
+              Path("aggregate-result/benchmark-review.json").read_text(encoding="utf-8")
+          )
+          if result.get("benchmark_status") != "completed":
+              raise SystemExit("sharded benchmark case did not complete every required shard")
+          PY

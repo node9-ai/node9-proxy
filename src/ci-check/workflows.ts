@@ -171,6 +171,72 @@ function jobList(wf: Workflow): Job[] {
   return Object.values(wf.jobs ?? {}).filter((j): j is Job => j != null);
 }
 
+// T.6 (2026-10-10): read the workflow the way the runner does, before any check runs.
+const ENV_REF_RE = /\$\{\{\s*env\.([A-Za-z_][A-Za-z0-9_]{0,100})\s*\}\}/g;
+const RESOLVED_MAX_LEN = 100_000;
+
+/** `${{ env.X }}` in an action input, replaced by X from the step, job or workflow `env:`
+ *  (first holder wins, as on the runner). One level only; an unknown name stays as written. */
+function resolveEnvRefs(v: string, envs: (Record<string, unknown> | undefined)[]): string {
+  if (!v.includes('env.')) return v;
+  const out = v.replace(ENV_REF_RE, (whole, name: string) => {
+    const holder = envs.find((e) => e != null && typeof e === 'object' && name in e);
+    return holder ? str(holder[name]) : whole;
+  });
+  return out.length > RESOLVED_MAX_LEN ? v : out;
+}
+
+/** A job `if:` that can never be true: `false`, `${{ false }}`, `<expr> && false`. */
+function ifNeverTrue(v: unknown): boolean {
+  if (v === false) return true;
+  if (typeof v !== 'string') return false;
+  const never = (x: IfExpr): boolean => {
+    switch (x.k) {
+      case 'atom':
+        return /^false$/i.test(x.t.trim());
+      case 'not':
+        return false;
+      case 'and':
+        return x.c.some(never);
+      case 'or':
+        return x.c.every(never);
+    }
+  };
+  const x = parseIf(v);
+  return x !== null && never(x);
+}
+
+/** T.6: (1) action inputs are case-insensitive, so every `with:` key is lower-cased
+ *  (mdn/fred passes `GITHUB_TOKEN:` and so arms the "*" bypass); (2) `${{ env.X }}` in a
+ *  `with:` value is resolved (the assistant-ui template passes its prompt and tools that
+ *  way); (3) a job that can never run is dropped (kilobench `if: false`). Mutates `raw`. */
+function normalizeWorkflow(raw: Record<string, unknown>): Workflow {
+  const wf = raw as Workflow;
+  const wfEnv = (raw as { env?: Record<string, unknown> }).env;
+  const jobs = wf.jobs;
+  if (!jobs || typeof jobs !== 'object') return wf;
+  for (const [name, job] of Object.entries(jobs)) {
+    if (job == null || typeof job !== 'object') continue;
+    if (ifNeverTrue(job.if)) {
+      delete jobs[name];
+      continue;
+    }
+    if (!Array.isArray(job.steps)) continue;
+    for (const step of job.steps) {
+      if (step == null || typeof step !== 'object') continue;
+      if (step.with == null || typeof step.with !== 'object') continue;
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(step.with)) {
+        const key = k.toLowerCase();
+        if (key in out) continue;
+        out[key] = typeof v === 'string' ? resolveEnvRefs(v, [step.env, job.env, wfEnv]) : v;
+      }
+      step.with = out;
+    }
+  }
+  return wf;
+}
+
 function allSteps(wf: Workflow): { job: Job; step: Step }[] {
   const out: { job: Job; step: Step }[] = [];
   for (const job of jobList(wf)) {
@@ -286,7 +352,7 @@ function untrustedHeadCheckout(steps: Step[]): 'root' | 'subdir' | null {
     // Also catch reusable-workflow inputs that carry the fork head
     // (inputs.expected_head_sha / inputs.head_ref), not just github.event.*.
     if (
-      /pull_request\.head|head[._]sha|head_ref|expected_head|workflow_run\.head|inputs\.[\w]*head/i.test(
+      /pull_request\.head|head[._-]sha|head_ref|expected_head|workflow_run\.head|inputs(?:\.|\[\s*['"])[\w-]*head/i.test(
         ref
       )
     ) {
@@ -303,7 +369,9 @@ function promptTakesUntrusted(steps: Step[]): boolean {
       str(st.with?.['prompt']) + ' ' + str(st.with?.['direct_prompt']) + ' ' + collectTools([st]);
     if (/github\.event\.(issue|comment|pull_request|review)\.(body|title)/i.test(blob)) return true;
     // A review command over a fork PR reads the untrusted diff.
-    if (/pull_request\.number|\/code-review|\/review/i.test(blob)) return true;
+    // A command, not a path: `.git/review-policy.diff` is not `/review` (block/proto-fleet,
+    // surfaced once T.6 resolved `${{ env.X }}` into the prompt).
+    if (/pull_request\.number|(?<![\w./-])\/(?:code-)?review(?![\w-])/i.test(blob)) return true;
   }
   return false;
 }
@@ -406,10 +474,16 @@ function labelTypeConfigured(wf: Workflow, raw: Record<string, unknown>): boolea
 const PR_LABEL_GATE_RE =
   /(?<!!\s{0,5}\(?\s{0,5})contains\(\s*github\.event\.pull_request\.labels\.\*\.name\s*,\s*'[^']{1,100}'\s*\)(?!\s*(?:==\s*false|!=\s*true))/i;
 
+// T.6.4 (2026-10-10): a literal association set that also admits a role without write access is
+// not a gate. CONTRIBUTOR is anyone with one merged commit (frankbria/ralph-claude-code).
+const NONWRITE_SET_RE =
+  /contains\(\s*fromjson\(\s*['"]\[[^\]]{0,400}\b(CONTRIBUTOR|FIRST_TIME_CONTRIBUTOR|FIRST_TIMER|NONE|MANNEQUIN)\b/i;
+
 /** Do these joined `if:` expressions constitute an actor gate? */
 function ifsAreGated(ifs: string, labelConfigured: boolean): boolean {
   // Credit a contains() inclusion ONLY when it is not negated (`!contains(…)` = anti-gate).
-  const containsGate = CONTAINS_GATE_RE.test(ifs) && !NEGATED_CONTAINS_RE.test(ifs);
+  const containsGate =
+    CONTAINS_GATE_RE.test(ifs) && !NEGATED_CONTAINS_RE.test(ifs) && !NONWRITE_SET_RE.test(ifs);
   const gated = NONCONTAINS_GATE_RE.test(ifs) || containsGate;
   // A label already on the PR (`contains(github.event.pull_request.labels.*.name, 'x')`) was put
   // there by someone with triage access, like the `label.name` of a labeled event. Only a
@@ -626,11 +700,18 @@ function jobOnWorkflowRun(job: Job, workflowRun: boolean): boolean {
  *  be credited to this one (and vice-versa). */
 function jobActorGate(job: Job, wf: Workflow, raw: Record<string, unknown>): boolean {
   const labelConfigured = labelTypeConfigured(wf, raw);
-  const stepIfs = stepIfText(job.steps ?? []);
+  // T.6.1 (2026-10-10): a step `if:` guards only its own step. The joined step text credited
+  // the same-repo test of an "internal review" step to the "fork review" agent step beside it
+  // (the assistant-ui template, hand-verified high). Every agent step must carry its own gate.
+  const agent = (job.steps ?? []).filter(isAgentStep);
+  const agentStepsGated =
+    agent.length > 0 &&
+    agent.every((s) => {
+      const x = parseIf(str(s.if));
+      return x !== null && exprGated(x, labelConfigured);
+    });
   return (
-    jobIfGated(str(job.if), labelConfigured) ||
-    gatedText(stepIfs, labelConfigured) ||
-    hasStepMembershipGate(job) // R4-5
+    jobIfGated(str(job.if), labelConfigured) || agentStepsGated || hasStepMembershipGate(job) // R4-5
   );
 }
 
@@ -730,9 +811,19 @@ function jobGated(job: Job, wf: Workflow, raw: Record<string, unknown>): boolean
 function bypassArmed(steps: Step[]): boolean {
   return steps.some(
     (s) =>
-      str(s.with?.['allowed_non_write_users']) === '*' &&
+      nonWriteOpen(str(s.with?.['allowed_non_write_users'])) &&
       (!!str(s.with?.['github_token']) || !!str(s.env?.['OVERRIDE_GITHUB_TOKEN']))
   );
+}
+
+// T.6.5 (2026-10-10): a value bound to the user who fired the event allows that user, whoever
+// it is, so it is "*" in effect (ordinary7Zz/my_nnUNet: `${{ github.event.issue.user.login }}`).
+const ACTOR_BOUND_RE =
+  /\$\{\{[^}]{0,200}\b(github\.event\.[\w.]{0,80}\buser\.login|github\.actor|github\.triggering_actor)\b/i;
+
+/** Does this allowed_non_write_users value admit any user? */
+function nonWriteOpen(v: string): boolean {
+  return v.trim() === '*' || ACTOR_BOUND_RE.test(v);
 }
 
 /** `anthropics/claude-code-action` (the higher-level action — NOT the lower-level
@@ -977,7 +1068,7 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   } catch {
     return null; // unparseable YAML — caller notes it; we don't guess.
   }
-  const wf = raw as Workflow;
+  const wf = normalizeWorkflow(raw);
   const steps = allSteps(wf).map((s) => s.step);
   const agentSteps = steps.filter(isAgentStep);
   // The job(s) the agent actually runs in — permission checks scope to these, so
@@ -1008,8 +1099,9 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   const nonWrite = str(agentSteps.map((s) => s.with?.['allowed_non_write_users']).find(Boolean));
   const nonWriteStar = bypassArmed(agentSteps);
   // "*" written but no github_token on that step: the action ignores it and keeps its gate.
-  const starWithoutToken = nonWrite === '*' && !nonWriteStar;
-  const nonWriteList = !!nonWrite && nonWrite !== '*';
+  const starWithoutToken = nonWriteOpen(nonWrite) && !nonWriteStar;
+  const nonWriteList = !!nonWrite && !nonWriteOpen(nonWrite);
+  const nonWriteActor = nonWrite.trim() !== '*' && nonWriteOpen(nonWrite);
 
   // reusable (workflow_call) is scored as potentially-untrusted — its caller may wire an
   // untrusted trigger — but capped at medium below since we can't see the caller.
@@ -1217,7 +1309,9 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   }
   if (bypassActive)
     signals.push(
-      'allowed_non_write_users: "*" with github_token, so any user can trigger the agent'
+      nonWriteActor
+        ? "allowed_non_write_users is the triggering user's own login, with github_token, so any user can trigger the agent"
+        : 'allowed_non_write_users: "*" with github_token, so any user can trigger the agent'
     );
   if (elevated) signals.push('elevated permissions (contents/id-token: write)');
   if (pat) signals.push('a static PAT is exposed to the agent (recoverable via injection)');
@@ -1489,7 +1583,7 @@ export function analyzeWorkflowSecrets(path: string, content: string): CiFinding
   } catch {
     return null;
   }
-  const wf = raw as Workflow;
+  const wf = normalizeWorkflow(raw);
   const all = allSteps(wf);
   if (!all.some((s) => isAgentStep(s.step))) return null;
 

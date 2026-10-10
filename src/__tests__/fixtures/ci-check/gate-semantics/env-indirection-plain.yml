@@ -1,0 +1,18 @@
+# Control: the same workflow with the values written inline. env-indirection.yml must match it.
+name: Triage
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-base-action@beta
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          allowed_tools: Bash,Write
+          prompt: "Triage this issue: ${{ github.event.issue.title }} ${{ github.event.issue.body }}"

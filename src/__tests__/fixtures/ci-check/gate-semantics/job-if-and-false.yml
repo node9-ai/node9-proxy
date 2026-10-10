@@ -1,0 +1,19 @@
+# Same, disabled as `<expr> && false` (benewende-dev/outio-ai compliance-close).
+name: Duplicates
+on:
+  issues:
+    types: [opened]
+jobs:
+  check:
+    if: github.event.issue.state == 'open' && false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-base-action@beta
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          allowed_tools: Bash,Write
+          prompt: Triage issue ${{ github.event.issue.title }}

@@ -1,0 +1,21 @@
+# Reduced from frankbria/ralph-claude-code (hand: problem). The association set admits
+# CONTRIBUTOR (anyone with one merged commit), so it is not a write-access gate.
+name: Review
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+jobs:
+  review:
+    if: contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.pull_request.author_association)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt: Review PR ${{ github.event.pull_request.number }}

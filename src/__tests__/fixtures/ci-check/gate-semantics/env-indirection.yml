@@ -1,0 +1,22 @@
+# Reduced from the assistant-ui template: prompt and tools reach the action through `env:`.
+name: Triage
+on:
+  issues:
+    types: [opened]
+env:
+  TRIAGE_PROMPT: "Triage this issue: ${{ github.event.issue.title }} ${{ github.event.issue.body }}"
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    env:
+      TOOLS: "Bash,Write"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-base-action@beta
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          allowed_tools: ${{ env.TOOLS }}
+          prompt: ${{ env.TRIAGE_PROMPT }}
