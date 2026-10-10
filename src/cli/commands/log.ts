@@ -28,8 +28,13 @@ import {
   DLP_SCAN_LIMITS,
   type InjectionConfidence,
 } from '../../dlp';
-import { frameUntrusted } from '../../utils/untrusted-frame';
-import { collectToolOutputText, shellOutputText } from '../../tool-output';
+import { frameUntrusted, newUntrustedFrame, neutralizeMarkers } from '../../utils/untrusted-frame';
+import {
+  collectToolOutputText,
+  shellOutputText,
+  mapToolOutputStrings,
+  frameToolOutputLeaves,
+} from '../../tool-output';
 import { hashArgs } from '../../audit/hasher';
 import { parseCpMvOp } from '../../utils/cp-mv-parser';
 import {
@@ -480,22 +485,56 @@ export function registerLogCommand(program: Command): void {
                 // lines would corrupt the hook protocol).
                 const warnings: string[] = [];
 
+                // Mode C (Claude Code): the hook CAN replace what the model reads,
+                // through `updatedToolOutput` in the tool's own shape. Redact every
+                // string leaf, whole (no scan bound: the replacement must carry the
+                // entire result back). The warning and the taint below still run:
+                // the hook cannot see whether Claude Code accepted the replacement
+                // (a shape it does not recognise is dropped on its side, logged
+                // there, never reported back). Secret redaction follows the
+                // data.secrets row; injection framing below follows injectionScan.
+                // Design: claude-output-redaction-design.md.
+                const inPlace = agent === 'Claude Code' && config.policy.dlp.enabled;
+                const redactedNames = new Set<string>();
+                let updatedToolOutput: unknown = undefined;
+                if (inPlace) {
+                  const mapped = mapToolOutputStrings(payload.tool_response, (leaf) => {
+                    const r = redactText(leaf);
+                    for (const name of r.found) redactedNames.add(name);
+                    return r.result;
+                  });
+                  if (redactedNames.size > 0) updatedToolOutput = mapped;
+                }
+
                 const hit = scanText(toolOutput);
-                if (hit) {
-                  await notifySessionTaint(
-                    payloadSessionId ?? '',
-                    `output-secret:${hit.patternName}`
-                  );
+                // A secret past the scan bound is found by the whole-leaf
+                // redaction only; it still taints and warns.
+                const secretName = hit?.patternName ?? [...redactedNames][0];
+                if (secretName) {
+                  await notifySessionTaint(payloadSessionId ?? '', `output-secret:${secretName}`);
                   warnings.push(
-                    `⚠️ node9: this tool output contained a credential (${hit.patternName}). ` +
-                      `Do not echo, store, or transmit it — treat it as compromised and rotate it. ` +
-                      `node9 has flagged this session: the next network or write action will require approval.`
+                    updatedToolOutput !== undefined
+                      ? `⚠️ node9: this tool output contained a credential (${secretName}); node9 replaced it ` +
+                          `with [node9-redacted:…] before you read it. Treat the credential as compromised. ` +
+                          `node9 has flagged this session: the next network or write action will require approval.`
+                      : `⚠️ node9: this tool output contained a credential (${secretName}). ` +
+                          `Do not echo, store, or transmit it — treat it as compromised and rotate it. ` +
+                          `node9 has flagged this session: the next network or write action will require approval.`
                   );
                 }
 
                 if (injectionOn) {
                   const m = scanInjection(toolOutput, { tool: rawToolName });
                   if (m && atLeastConfidence(m.confidence, inj.minConfidence)) {
+                    if (agent === 'Claude Code') {
+                      // Frame the leaves that carry the injection, inside the shape.
+                      updatedToolOutput = frameToolOutputLeaves(
+                        updatedToolOutput ?? payload.tool_response,
+                        (leaf) => scanInjection(leaf, { tool: rawToolName }) !== null,
+                        newUntrustedFrame,
+                        neutralizeMarkers
+                      );
+                    }
                     await notifySessionTaint(
                       payloadSessionId ?? '',
                       `output-injection:${m.signals.join('+')}`
@@ -509,12 +548,30 @@ export function registerLogCommand(program: Command): void {
                   }
                 }
 
-                if (warnings.length > 0 && (agent === 'Claude Code' || agent === 'Codex')) {
+                if (redactedNames.size > 0) {
+                  // A delivery event, not a decision: local-only (no eid and no
+                  // decision, so the shipper skips it, like test-result rows).
+                  appendToLog(LOCAL_AUDIT_LOG, {
+                    ts: new Date().toISOString(),
+                    tool,
+                    source: 'output-redacted',
+                    outputRedacted: [...redactedNames],
+                    ...(payloadSessionId ? { sessionId: payloadSessionId } : {}),
+                  });
+                }
+
+                if (
+                  (warnings.length > 0 || updatedToolOutput !== undefined) &&
+                  (agent === 'Claude Code' || agent === 'Codex')
+                ) {
                   process.stdout.write(
                     JSON.stringify({
                       hookSpecificOutput: {
                         hookEventName: 'PostToolUse',
-                        additionalContext: warnings.join('\n\n'),
+                        ...(warnings.length > 0
+                          ? { additionalContext: warnings.join('\n\n') }
+                          : {}),
+                        ...(updatedToolOutput !== undefined ? { updatedToolOutput } : {}),
                       },
                     }) + '\n'
                   );
