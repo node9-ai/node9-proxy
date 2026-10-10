@@ -1,4 +1,4 @@
-# Same shape with a write-only association set (band-app/band style): stays gated.
+# Same shape with a write-only association set: stays gated.
 name: Review
 on:
   pull_request_target:

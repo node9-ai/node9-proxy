@@ -1,4 +1,4 @@
-# Reduced from the assistant-ui template: prompt and tools reach the action through `env:`.
+# The prompt and tools reach the action through `env:`.
 name: Triage
 on:
   issues:

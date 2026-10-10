@@ -1,4 +1,4 @@
-# Reduced from aravhawk/kilobench `check-duplicates`: a job disabled with `if: false` never runs.
+# A job disabled with `if: false` never runs.
 name: Duplicates
 on:
   issues:

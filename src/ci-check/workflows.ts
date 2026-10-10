@@ -207,9 +207,9 @@ function ifNeverTrue(v: unknown): boolean {
 }
 
 /** T.6: (1) action inputs are case-insensitive, so every `with:` key is lower-cased
- *  (mdn/fred passes `GITHUB_TOKEN:` and so arms the "*" bypass); (2) `${{ env.X }}` in a
- *  `with:` value is resolved (the assistant-ui template passes its prompt and tools that
- *  way); (3) a job that can never run is dropped (kilobench `if: false`). Mutates `raw`. */
+ *  (`GITHUB_TOKEN:` under `with:` arms the "*" bypass); (2) `${{ env.X }}` in a
+ *  `with:` value is resolved (a common review template passes its prompt and tools that
+ *  way); (3) a job that can never run is dropped (`if: false`). Mutates `raw`. */
 function normalizeWorkflow(raw: Record<string, unknown>): Workflow {
   const wf = raw as Workflow;
   const wfEnv = (raw as { env?: Record<string, unknown> }).env;
@@ -369,8 +369,8 @@ function promptTakesUntrusted(steps: Step[]): boolean {
       str(st.with?.['prompt']) + ' ' + str(st.with?.['direct_prompt']) + ' ' + collectTools([st]);
     if (/github\.event\.(issue|comment|pull_request|review)\.(body|title)/i.test(blob)) return true;
     // A review command over a fork PR reads the untrusted diff.
-    // A command, not a path: `.git/review-policy.diff` is not `/review` (block/proto-fleet,
-    // surfaced once T.6 resolved `${{ env.X }}` into the prompt).
+    // A command, not a path: `.git/review-policy.diff` is not `/review` (surfaced once
+    // T.6 resolved `${{ env.X }}` into the prompt).
     if (/pull_request\.number|(?<![\w./-])\/(?:code-)?review(?![\w-])/i.test(blob)) return true;
   }
   return false;
@@ -475,7 +475,7 @@ const PR_LABEL_GATE_RE =
   /(?<!!\s{0,5}\(?\s{0,5})contains\(\s*github\.event\.pull_request\.labels\.\*\.name\s*,\s*'[^']{1,100}'\s*\)(?!\s*(?:==\s*false|!=\s*true))/i;
 
 // T.6.4 (2026-10-10): a literal association set that also admits a role without write access is
-// not a gate. CONTRIBUTOR is anyone with one merged commit (frankbria/ralph-claude-code).
+// not a gate. CONTRIBUTOR is anyone with one merged commit.
 const NONWRITE_SET_RE =
   /contains\(\s*fromjson\(\s*['"]\[[^\]]{0,400}\b(CONTRIBUTOR|FIRST_TIME_CONTRIBUTOR|FIRST_TIMER|NONE|MANNEQUIN)\b/i;
 
@@ -702,7 +702,7 @@ function jobActorGate(job: Job, wf: Workflow, raw: Record<string, unknown>): boo
   const labelConfigured = labelTypeConfigured(wf, raw);
   // T.6.1 (2026-10-10): a step `if:` guards only its own step. The joined step text credited
   // the same-repo test of an "internal review" step to the "fork review" agent step beside it
-  // (the assistant-ui template, hand-verified high). Every agent step must carry its own gate.
+  // (a common review template). Every agent step must carry its own gate.
   const agent = (job.steps ?? []).filter(isAgentStep);
   const agentStepsGated =
     agent.length > 0 &&
@@ -817,7 +817,7 @@ function bypassArmed(steps: Step[]): boolean {
 }
 
 // T.6.5 (2026-10-10): a value bound to the user who fired the event allows that user, whoever
-// it is, so it is "*" in effect (ordinary7Zz/my_nnUNet: `${{ github.event.issue.user.login }}`).
+// it is, so it is "*" in effect (`${{ github.event.issue.user.login }}`).
 const ACTOR_BOUND_RE =
   /\$\{\{[^}]{0,200}\b(github\.event\.[\w.]{0,80}\buser\.login|github\.actor|github\.triggering_actor)\b/i;
 

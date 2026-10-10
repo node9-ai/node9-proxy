@@ -1,5 +1,5 @@
-# Reduced from frankbria/ralph-claude-code (hand: problem). The association set admits
-# CONTRIBUTOR (anyone with one merged commit), so it is not a write-access gate.
+# The association set admits CONTRIBUTOR (anyone with one merged commit), so it is not a
+# write-access gate.
 name: Review
 on:
   pull_request_target:

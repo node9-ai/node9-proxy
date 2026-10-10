@@ -1,6 +1,5 @@
-// T.6 — gate and input semantics (design: scanner-gaps-code-design.md §T.6, 2026-10-10).
-// WRITTEN BEFORE THE IMPLEMENTATION. Fixtures are real workflows from the hand-reviewed
-// clones (named in each test) plus reduced shapes where one rule has to be isolated.
+// T.6 — gate and input semantics (2026-10-10). WRITTEN BEFORE THE IMPLEMENTATION. Fixtures are
+// shapes measured on the hand-reviewed corpus, written by hand, one rule each.
 
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
@@ -18,7 +17,7 @@ const rank = (f: string) => {
 const mitigations = (f: string) => (ci2(f)?.mitigations ?? []).join(' ');
 
 describe('T.6.1 — a sibling step `if:` does not gate the agent step', () => {
-  it('assistant-ui template: the internal step is same-repo gated, the fork step is not (keen0429, hand: high)', () => {
+  it('the same-repo step is gated, the fork step beside it is not', () => {
     expect(rank('step-if-sibling.yml')).toBeGreaterThanOrEqual(SEVERITY_RANK.medium);
     expect(mitigations('step-if-sibling.yml')).not.toMatch(/actor-gated/i);
   });
@@ -32,23 +31,23 @@ describe('T.6.2 — `${{ env.X }}` in the agent step is resolved before the prom
 });
 
 describe('T.6.2 — what resolving `${{ env.X }}` must not change', () => {
-  it('a resolved file path `.git/review-policy.diff` is not a `/review` command (block/proto-fleet, hand: clean)', () => {
+  it('a resolved file path `.git/review-policy.diff` is not a `/review` command', () => {
     expect(rank('env-path-not-review-command.yml')).toBeLessThanOrEqual(SEVERITY_RANK.advisory);
   });
 
-  it("a head ref resolved to `${{ inputs['head-sha'] }}` is still a head checkout (block/proto-fleet template)", () => {
+  it("a head ref resolved to `${{ inputs['head-sha'] }}` is still a head checkout", () => {
     const f = ci2('env-bracket-head-input.yml');
     expect((f?.signals ?? []).join(' ')).toMatch(/checks out the untrusted PR head/i);
   });
 });
 
 describe('T.6.3 — action inputs are case-insensitive', () => {
-  it('`GITHUB_TOKEN:` under `with:` arms the "*" bypass (mdn/fred, hand: medium)', () => {
+  it('`GITHUB_TOKEN:` under `with:` arms the "*" bypass', () => {
     expect(rank('with-key-case.yml')).toBeGreaterThanOrEqual(SEVERITY_RANK.medium);
     expect(mitigations('with-key-case.yml')).not.toMatch(/keeps its default write gate/i);
   });
 
-  it('"*" with no token in any spelling keeps the gate (HAOCHENYE/ghstack-play, hand: clean CI)', () => {
+  it('"*" with no token in any spelling keeps the gate', () => {
     expect(rank('star-without-token.yml')).toBeLessThanOrEqual(SEVERITY_RANK.advisory);
   });
 });
@@ -64,12 +63,12 @@ describe('T.6.4 — an association set that admits a non-write role is not a gat
 });
 
 describe('T.6.5 — allowed_non_write_users bound to the triggering actor acts as "*"', () => {
-  it('`${{ github.event.issue.user.login }}` with github_token (ordinary7Zz/my_nnUNet, hand: medium)', () => {
+  it('`${{ github.event.issue.user.login }}` with github_token', () => {
     expect(rank('nonwrite-actor-login.yml')).toBeGreaterThanOrEqual(SEVERITY_RANK.medium);
     expect(mitigations('nonwrite-actor-login.yml')).not.toMatch(/scoped to a list/i);
   });
 
-  it('CONTRIBUTOR set plus the PR author login (frankbria/ralph-claude-code, hand: medium)', () => {
+  it('CONTRIBUTOR set plus the PR author login', () => {
     expect(rank('contributor-and-actor-login.yml')).toBeGreaterThanOrEqual(SEVERITY_RANK.medium);
   });
 });

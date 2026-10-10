@@ -1,4 +1,4 @@
-# Same, disabled as `<expr> && false` (benewende-dev/outio-ai compliance-close).
+# Same, disabled as `<expr> && false`.
 name: Duplicates
 on:
   issues:
