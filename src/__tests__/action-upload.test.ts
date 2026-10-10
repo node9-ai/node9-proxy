@@ -388,34 +388,78 @@ describe('action.yml: the upload step', () => {
     expect(holders.map((s) => s.name)).toEqual(['Send the scan to node9']);
   });
 
-  it('only an upload run asks npm for the exact version; pull requests are unchanged', () => {
+  it('only an upload run asks for the exact version; pull requests are unchanged', () => {
     const scan = steps[at('Run node9 agent-security scan')];
     expect(scan.env?.NODE9_WILL_UPLOAD).toBe(
       "${{ github.event_name == 'push' && inputs.node9-upload-key != '' }}"
     );
     expect(scan.run).toMatch(
-      /if \[ "\$NODE9_WILL_UPLOAD" = "true" \]; then\s+VERSION="\$\(timeout 30 npm view/
+      /if \[ "\$NODE9_WILL_UPLOAD" = "true" \]; then\s+VERSION="\$\(node "\$\{GITHUB_ACTION_PATH\}\/resolve-version\.js" "\$NODE9_VERSION_INPUT" \|\| true\)"/
     );
+    // No `timeout` command: macOS runners lack it, Windows has another one.
+    expect(scan.run).not.toMatch(/\btimeout\b/);
   });
 
   it('no step interpolates an expression into its shell text; values arrive through env', () => {
     for (const s of steps) if (s.run) expect(s.run, s.name).not.toContain('${{');
   });
+});
 
-  it('the scan step resolves an exact version: the highest match, bounded, never junk', () => {
-    const scan = steps[at('Run node9 agent-security scan')].run ?? '';
-    expect(scan).toMatch(/timeout 30 npm view .* --fetch-retries=1/);
-    const script = /node -e '([^']+)'/.exec(scan)?.[1];
-    expect(script).toBeTruthy();
-    const pick = (stdin: string) =>
-      spawnSync(process.execPath, ['-e', script!], { input: stdin, encoding: 'utf8' }).stdout;
-    expect(pick('"2.28.1"')).toBe('2.28.1');
-    // npm lists range matches in publish order, not version order.
-    expect(pick('["2.28.0","2.27.1"]')).toBe('2.28.0');
-    expect(pick('["2.9.0","2.10.0"]')).toBe('2.10.0');
-    expect(pick('')).toBe('');
-    expect(pick('{"error":{"code":"E404"}}')).toBe('');
-    expect(pick('"2.28.1; rm -rf /"')).toBe('');
-    expect(pick('["2.28.1; rm -rf /"]')).toBe('');
+describe('resolve-version.js', () => {
+  const rv = createRequire(__filename)(path.join(ROOT, 'resolve-version.js')) as {
+    compare: (a: string, b: string) => number;
+    pickHighest: (json: string) => string;
+    resolve: (spec: string, exec: (...a: unknown[]) => string) => string;
+    TIMEOUT_MS: number;
+  };
+
+  it('picks the highest version, not the last published one', () => {
+    expect(rv.pickHighest('"2.28.1"')).toBe('2.28.1');
+    expect(rv.pickHighest('["2.28.0","2.27.1"]')).toBe('2.28.0');
+    expect(rv.pickHighest('["2.9.0","2.10.0"]')).toBe('2.10.0');
+  });
+
+  it('orders a release above its prereleases, as semver does', () => {
+    expect(rv.pickHighest('["2.29.0","2.29.0-beta.2"]')).toBe('2.29.0');
+    expect(rv.pickHighest('["2.29.0-beta.10","2.29.0-beta.2"]')).toBe('2.29.0-beta.10');
+    expect(rv.pickHighest('["2.29.0-alpha.1","2.29.0-beta.1"]')).toBe('2.29.0-beta.1');
+    expect(rv.compare('2.29.0+build.1', '2.29.0')).toBe(0);
+  });
+
+  it('never returns anything but a version string', () => {
+    expect(rv.pickHighest('')).toBe('');
+    expect(rv.pickHighest('{"error":{"code":"E404"}}')).toBe('');
+    expect(rv.pickHighest('"2.28.1; rm -rf /"')).toBe('');
+    expect(rv.pickHighest('["2.28.1; rm -rf /"]')).toBe('');
+  });
+
+  it('asks npm without a shell, bounded in time, and swallows its failures', () => {
+    const calls: unknown[][] = [];
+    const exec = (...a: unknown[]) => {
+      calls.push(a);
+      return '"2.28.1"';
+    };
+    expect(rv.resolve('latest', exec)).toBe('2.28.1');
+    const [, args, opts] = calls[0] as [string, string[], { timeout: number; shell?: boolean }];
+    expect(args).toContain('node9-ai@latest');
+    expect(opts.timeout).toBe(rv.TIMEOUT_MS);
+    expect(opts.shell).toBeUndefined();
+    const failing = () => {
+      throw Object.assign(new Error('spawnSync npm ETIMEDOUT'), { code: 'ETIMEDOUT' });
+    };
+    expect(rv.resolve('latest', failing)).toBe('');
+    expect(rv.resolve('', exec)).toBe('');
+  });
+
+  it('as a process it prints nothing and exits 0 when npm cannot answer', () => {
+    const r = spawnSync(
+      process.execPath,
+      [path.join(ROOT, 'resolve-version.js'), 'x'.repeat(101)],
+      {
+        encoding: 'utf8',
+      }
+    );
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe('');
   });
 });

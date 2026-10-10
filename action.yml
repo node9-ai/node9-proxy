@@ -101,15 +101,14 @@ runs:
         set -euo pipefail
         # Uploads only: resolve the exact scanner version first and run that one,
         # so the upload reports the version that really scanned. A range or a
-        # dist-tag resolves to its highest matching version. Other runs keep the
-        # input as given, with no extra registry call. If npm cannot answer
-        # within 30 s, the scan still runs with the input and the version stays
-        # unknown (the upload is then skipped; the check itself is unaffected).
+        # dist-tag resolves to its highest matching version (resolve-version.js,
+        # bounded at 30 s on every runner OS). Other runs keep the input as
+        # given, with no extra registry call. If npm cannot answer, the scan
+        # still runs with the input and the version stays unknown (the upload
+        # is then skipped; the check itself is unaffected).
         VERSION=""
         if [ "$NODE9_WILL_UPLOAD" = "true" ]; then
-          VERSION="$(timeout 30 npm view "node9-ai@${NODE9_VERSION_INPUT}" version --json --fetch-retries=1 2>/dev/null \
-            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const v=JSON.parse(s);const ok=x=>/^[0-9A-Za-z.+-]{1,50}$/.test(x);const n=x=>x.split(/[.+-]/).map(p=>/^\d+$/.test(p)?Number(p):p);const cmp=(a,b)=>{const x=n(a),y=n(b);for(let i=0;i<Math.max(x.length,y.length);i++){const d=(x[i]??0)>(y[i]??0)?1:(x[i]??0)<(y[i]??0)?-1:0;if(d)return d}return 0};const list=(Array.isArray(v)?v:[v]).filter(x=>typeof x==="string"&&ok(x)).sort(cmp);if(list.length)process.stdout.write(list[list.length-1])}catch{}})' \
-            || true)"
+          VERSION="$(node "${GITHUB_ACTION_PATH}/resolve-version.js" "$NODE9_VERSION_INPUT" || true)"
         fi
         SPEC="${VERSION:-$NODE9_VERSION_INPUT}"
         # Static, config-only scan of the checked-out workspace. Never fails this

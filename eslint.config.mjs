@@ -18,6 +18,7 @@ export default tseslint.config(
       // The Action's upload script, same shape; covered by
       // src/__tests__/action-upload.test.ts.
       'upload.js',
+      'resolve-version.js',
       'dist/**',
       'node_modules/**',
       'coverage/**',
