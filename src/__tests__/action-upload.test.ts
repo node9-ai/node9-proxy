@@ -27,6 +27,8 @@ const upload = createRequire(__filename)(path.join(ROOT, 'upload.js')) as {
 const KEY = 'n9r_' + 'A'.repeat(43);
 const SHA = 'a'.repeat(40);
 const OIDC_URL = 'https://token.actions.example/request?api-version=2.0';
+// Shaped like a compact JWS (three dot-separated parts), as GitHub's tokens are.
+const TOKEN = 'header.payload.signature';
 const RESULT = JSON.stringify({
   source: '/home/runner/work/repo/repo',
   findings: [{ check: 'CI-2', rule: 'CI-2.injectable-workflow', severity: 'high' }],
@@ -76,7 +78,7 @@ function fakeDeps(
     fetch: async (url, init) => {
       calls.push({ url, init });
       if (url.startsWith('https://token.actions.example/')) {
-        return opts.oidc ?? json(200, { value: 'signed-oidc-token' });
+        return opts.oidc ?? json(200, { value: TOKEN });
       }
       const next = ingest[i++];
       if (!next) throw new Error('unexpected upload attempt');
@@ -104,6 +106,16 @@ describe('upload.js: when it sends nothing', () => {
   it('a pull_request run never uploads, even with a key', async () => {
     const f = fakeDeps([]);
     const r = await upload.run({ ...baseEnv(), GITHUB_EVENT_NAME: 'pull_request' }, f.deps);
+    expect(r.uploaded).toBe(false);
+    expect(f.calls).toHaveLength(0);
+  });
+
+  it('a tag push is not reported: it can never be the trusted branch', async () => {
+    const f = fakeDeps([]);
+    const r = await upload.run(
+      { ...baseEnv(), GITHUB_REF: 'refs/tags/v1.0.0', GITHUB_REF_TYPE: 'tag' },
+      f.deps
+    );
     expect(r.uploaded).toBe(false);
     expect(f.calls).toHaveLength(0);
   });
@@ -179,6 +191,9 @@ describe('upload.js: the upload', () => {
     const oidc = new URL(f.calls[0].url);
     expect(oidc.searchParams.get('audience')).toBe('node9');
     expect(oidc.searchParams.get('api-version')).toBe('2.0');
+    const oidcHeaders = f.calls[0].init?.headers as Record<string, string>;
+    expect(oidcHeaders.Authorization).toBe('Bearer runner-request-token');
+    expect(f.calls[0].init?.signal).toBeInstanceOf(AbortSignal);
 
     const [u] = f.uploads();
     expect(u.url).toBe('https://api.node9.ai/api/v1/repository-scans/ingest');
@@ -186,7 +201,7 @@ describe('upload.js: the upload', () => {
     expect(u.init?.redirect).toBe('error');
     const headers = u.init?.headers as Record<string, string>;
     expect(headers.Authorization).toBe(`Bearer ${KEY}`);
-    expect(headers['X-GitHub-OIDC-Token']).toBe('signed-oidc-token');
+    expect(headers['X-GitHub-OIDC-Token']).toBe(TOKEN);
 
     const body = JSON.parse(String(u.init?.body));
     expect(body).toEqual({
@@ -270,11 +285,59 @@ describe('upload.js: the upload', () => {
     expect(r.line).toContain(String(status));
   });
 
-  it('never prints the key or the token, even when the server echoes them', async () => {
-    const f = fakeDeps([json(401, { message: `bad key ${KEY}\nand token signed-oidc-token` })]);
+  it('a refusal reads as the server applying its rules, not as a failed upload', async () => {
+    const f = fakeDeps([json(403, { message: 'The run is not on the trusted branch.' })]);
+    const r = await upload.run(baseEnv(), f.deps);
+    expect(r.line).toMatch(/did not accept/);
+    expect(r.line).not.toMatch(/failed/);
+    expect(r.line).toContain('trusted branch');
+  });
+
+  it('three server errors: three attempts, two waits, then a failure line', async () => {
+    const f = fakeDeps([json(503, {}), json(502, {}), json(500, { message: 'db' })]);
+    const r = await upload.run(baseEnv(), f.deps);
+    expect(r.uploaded).toBe(false);
+    expect(f.uploads()).toHaveLength(3);
+    expect(f.sleeps).toEqual([2000, 5000]);
+    expect(r.line).toMatch(/failed after 3 attempts: 500/);
+    // Every attempt has its own timeout, and the OIDC request too.
+    for (const c of f.calls) expect(c.init?.signal).toBeInstanceOf(AbortSignal);
+    expect(new Set(f.uploads().map((c) => c.init?.signal)).size).toBe(3);
+  });
+
+  it('a thrown fetch error that repeats a credential is scrubbed', async () => {
+    const leak = () => new TypeError(`Headers.append: "${TOKEN}" is invalid (${KEY})`);
+    // Thrown errors are retried, so each of the three attempts throws it.
+    const f = fakeDeps([leak(), leak(), leak()]);
     const r = await upload.run(baseEnv(), f.deps);
     expect(r.line).not.toContain(KEY);
-    expect(r.line).not.toContain('signed-oidc-token');
+    expect(r.line).not.toContain(TOKEN);
+    expect(r.line).toContain('[redacted]');
+  });
+
+  it('a GitHub token that is not a JWT is never sent', async () => {
+    const f = fakeDeps([], { oidc: json(200, { value: 'not a jwt\r\nX: y' }) });
+    const r = await upload.run(baseEnv(), f.deps);
+    expect(r.uploaded).toBe(false);
+    expect(f.uploads()).toHaveLength(0);
+    expect(r.line).not.toContain('not a jwt');
+  });
+
+  it('a second attempt of a run is sent as attempt 2', async () => {
+    const f = fakeDeps([json(201, { duplicate: false })]);
+    await upload.run({ ...baseEnv(), GITHUB_RUN_ATTEMPT: '2' }, f.deps);
+    expect(JSON.parse(String(f.uploads()[0].init?.body)).workflowRunAttempt).toBe(2);
+    const g = fakeDeps([]);
+    const r = await upload.run({ ...baseEnv(), GITHUB_RUN_ATTEMPT: '' }, g.deps);
+    expect(r.uploaded).toBe(false);
+    expect(g.uploads()).toHaveLength(0);
+  });
+
+  it('never prints the key or the token, even when the server echoes them', async () => {
+    const f = fakeDeps([json(401, { message: `bad key ${KEY}\nand token ${TOKEN}` })]);
+    const r = await upload.run(baseEnv(), f.deps);
+    expect(r.line).not.toContain(KEY);
+    expect(r.line).not.toContain(TOKEN);
     expect(r.line).not.toContain('\n');
   });
 
@@ -331,20 +394,28 @@ describe('action.yml: the upload step', () => {
       "${{ github.event_name == 'push' && inputs.node9-upload-key != '' }}"
     );
     expect(scan.run).toMatch(
-      /if \[ "\$NODE9_WILL_UPLOAD" = "true" \]; then\s+VERSION="\$\(npm view/
+      /if \[ "\$NODE9_WILL_UPLOAD" = "true" \]; then\s+VERSION="\$\(timeout 30 npm view/
     );
   });
 
-  it('the scan step resolves an exact version: the last match, never junk', () => {
+  it('no step interpolates an expression into its shell text; values arrive through env', () => {
+    for (const s of steps) if (s.run) expect(s.run, s.name).not.toContain('${{');
+  });
+
+  it('the scan step resolves an exact version: the highest match, bounded, never junk', () => {
     const scan = steps[at('Run node9 agent-security scan')].run ?? '';
+    expect(scan).toMatch(/timeout 30 npm view .* --fetch-retries=1/);
     const script = /node -e '([^']+)'/.exec(scan)?.[1];
     expect(script).toBeTruthy();
     const pick = (stdin: string) =>
       spawnSync(process.execPath, ['-e', script!], { input: stdin, encoding: 'utf8' }).stdout;
     expect(pick('"2.28.1"')).toBe('2.28.1');
-    expect(pick('["2.27.0","2.28.1"]')).toBe('2.28.1');
+    // npm lists range matches in publish order, not version order.
+    expect(pick('["2.28.0","2.27.1"]')).toBe('2.28.0');
+    expect(pick('["2.9.0","2.10.0"]')).toBe('2.10.0');
     expect(pick('')).toBe('');
     expect(pick('{"error":{"code":"E404"}}')).toBe('');
     expect(pick('"2.28.1; rm -rf /"')).toBe('');
+    expect(pick('["2.28.1; rm -rf /"]')).toBe('');
   });
 });

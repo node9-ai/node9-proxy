@@ -21,6 +21,9 @@ const DEFAULT_API = 'https://api.node9.ai';
 // deployment; anything else is refused, including lookalike and http URLs.
 const ALLOWED_APIS = ['https://api.node9.ai', 'https://dev-api.node9.ai'];
 const KEY_RE = /^n9r_[A-Za-z0-9_-]{43}$/;
+// A GitHub OIDC token is a compact JWS: three base64url parts. Anything else
+// is not sent (and so never reaches a header or an error message).
+const JWT_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
 const ATTEMPTS = 3;
 const TIMEOUT_MS = 15_000;
 const BACKOFF_MS = [2_000, 5_000];
@@ -78,6 +81,8 @@ function buildEnvelope(env, result) {
     commitSha: env.GITHUB_SHA,
     workflowRunId: env.GITHUB_RUN_ID,
     workflowRunAttempt: Number(env.GITHUB_RUN_ATTEMPT),
+    // Known limit: matrix legs share GITHUB_JOB, so only the first leg's upload
+    // is stored for a run attempt. The dashboard workflow has no matrix.
     workflowJobKey: env.GITHUB_JOB,
     scannerVersion: env.NODE9_SCANNER_VERSION,
     startedAt: env.NODE9_SCAN_STARTED_AT,
@@ -122,8 +127,8 @@ async function requestOidcToken(env, fetchImpl) {
     });
     if (!res.ok) return new Error(`GitHub refused the OIDC token request (${res.status})`);
     const body = await res.json();
-    if (!body || typeof body.value !== 'string' || !body.value) {
-      return new Error('GitHub returned no OIDC token');
+    if (!body || typeof body.value !== 'string' || !JWT_RE.test(body.value)) {
+      return new Error('GitHub returned no usable OIDC token');
     }
     return body.value;
   } catch (err) {
@@ -136,15 +141,23 @@ async function requestOidcToken(env, fetchImpl) {
  *  retry. */
 const retryable = (last) => (last.status === 0 && !last.final) || last.status >= 500;
 
+/** Neither credential is ever printed: the log is public on a public
+ *  repository, and a response or an error could repeat a header value. */
+function scrub(text, secrets) {
+  let out = String(text);
+  for (const s of secrets) if (s) out = out.split(s).join('[redacted]');
+  return oneLine(out);
+}
+
 /** A fetch that threw. A redirect is refused by design (`redirect: 'error'`)
  *  and is final; anything else thrown is the network or the timeout. */
-function thrown(err) {
+function thrown(err, secrets) {
   const cause = err && err.cause && err.cause.message ? String(err.cause.message) : '';
   const message = err && err.message ? err.message : String(err);
   return {
     status: 0,
     final: /redirect/i.test(cause) || /redirect/i.test(message),
-    message: oneLine(cause ? `${message}: ${cause}` : message),
+    message: scrub(cause ? `${message}: ${cause}` : message, secrets),
   };
 }
 
@@ -173,14 +186,9 @@ async function send(origin, key, token, body, deps) {
       if (res.ok) return { ok: true, status: res.status, payload, attempts: attempt };
       const message = payload && payload.message ? payload.message : res.statusText;
       const text = Array.isArray(message) ? message.join('; ') : String(message);
-      // The log is public on a public repository: neither credential is ever
-      // printed, even if a response were to repeat one.
-      last = {
-        status: res.status,
-        message: oneLine(text.split(key).join('[key]').split(token).join('[token]')),
-      };
+      last = { status: res.status, message: scrub(text, [key, token]) };
     } catch (err) {
-      last = thrown(err);
+      last = thrown(err, [key, token]);
     }
     if (!retryable(last) || attempt === ATTEMPTS) {
       return { ok: false, ...last, attempts: attempt };
@@ -197,6 +205,11 @@ async function run(env, deps) {
   const key = (env.NODE9_UPLOAD_KEY || '').trim();
   if (!key) return skip('no upload key');
   if (env.GITHUB_EVENT_NAME !== 'push') return skip('only push runs upload');
+  // The server accepts one trusted branch; a tag push can never match it, so
+  // it is not worth a request (which would count against the key's budget).
+  if (env.GITHUB_REF_TYPE && env.GITHUB_REF_TYPE !== 'branch') {
+    return skip('only a branch push is reported');
+  }
   if (!KEY_RE.test(key)) {
     return skip(
       'the upload key is not a node9 repository key. Copy it again from the repository page'
@@ -246,6 +259,14 @@ async function run(env, deps) {
     };
   }
   const why = outcome.status ? `${outcome.status} ${outcome.message}` : outcome.message;
+  // A refusal is the server applying its rules (another branch, a revoked
+  // key), not a failure of this run.
+  if (outcome.status >= 400 && outcome.status < 500) {
+    return {
+      uploaded: false,
+      line: `node9 did not accept this scan: ${why}. The check result is not affected.`,
+    };
+  }
   return {
     uploaded: false,
     line: `node9 upload failed after ${outcome.attempts} attempt${outcome.attempts === 1 ? '' : 's'}: ${why}. The check result is not affected.`,

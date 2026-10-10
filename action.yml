@@ -37,9 +37,9 @@ inputs:
   node9-upload-key:
     description: >-
       Repository upload key from the node9 dashboard (Repositories, Scan on every push).
-      When set, each push scan is also sent to that node9 workspace, which needs
-      `permissions: id-token: write` on the job. Empty (the default) sends nothing.
-      Uploads never change the check result.
+      When set, each push scan is also sent to that node9 workspace. Add `id-token: write`
+      to the job's existing permissions (keep `contents: read` and the others). Empty
+      (the default) sends nothing. Uploads never change the check result.
     required: false
     default: ''
   node9-api-url:
@@ -83,9 +83,10 @@ runs:
     - name: Fetch the base commit
       if: steps.guard.outputs.skip == '' && github.event.pull_request.base.sha != ''
       shell: bash
+      env:
+        NODE9_BASE_SHA: ${{ github.event.pull_request.base.sha }}
       run: |
-        git -C "$GITHUB_WORKSPACE" fetch --no-tags --depth=1 origin \
-          "${{ github.event.pull_request.base.sha }}" 2>/dev/null \
+        git -C "$GITHUB_WORKSPACE" fetch --no-tags --depth=1 origin "$NODE9_BASE_SHA" 2>/dev/null \
           || echo "node9: could not fetch the base commit; the scan will report every finding."
 
     - name: Run node9 agent-security scan
@@ -99,14 +100,15 @@ runs:
       run: |
         set -euo pipefail
         # Uploads only: resolve the exact scanner version first and run that one,
-        # so the upload reports the version that really scanned. Other runs keep
-        # the input as given, with no extra registry call. If npm cannot answer,
-        # the scan still runs with the input and the version stays unknown (the
-        # upload is then skipped; the check itself is unaffected).
+        # so the upload reports the version that really scanned. A range or a
+        # dist-tag resolves to its highest matching version. Other runs keep the
+        # input as given, with no extra registry call. If npm cannot answer
+        # within 30 s, the scan still runs with the input and the version stays
+        # unknown (the upload is then skipped; the check itself is unaffected).
         VERSION=""
         if [ "$NODE9_WILL_UPLOAD" = "true" ]; then
-          VERSION="$(npm view "node9-ai@${NODE9_VERSION_INPUT}" version --json 2>/dev/null \
-            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const v=JSON.parse(s);const x=Array.isArray(v)?v[v.length-1]:v;if(/^[0-9A-Za-z.+-]{1,50}$/.test(x))process.stdout.write(x)}catch{}})' \
+          VERSION="$(timeout 30 npm view "node9-ai@${NODE9_VERSION_INPUT}" version --json --fetch-retries=1 2>/dev/null \
+            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const v=JSON.parse(s);const ok=x=>/^[0-9A-Za-z.+-]{1,50}$/.test(x);const n=x=>x.split(/[.+-]/).map(p=>/^\d+$/.test(p)?Number(p):p);const cmp=(a,b)=>{const x=n(a),y=n(b);for(let i=0;i<Math.max(x.length,y.length);i++){const d=(x[i]??0)>(y[i]??0)?1:(x[i]??0)<(y[i]??0)?-1:0;if(d)return d}return 0};const list=(Array.isArray(v)?v:[v]).filter(x=>typeof x==="string"&&ok(x)).sort(cmp);if(list.length)process.stdout.write(list[list.length-1])}catch{}})' \
             || true)"
         fi
         SPEC="${VERSION:-$NODE9_VERSION_INPUT}"
