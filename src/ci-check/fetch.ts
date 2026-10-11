@@ -656,7 +656,12 @@ function planSurface(paths: string[], notes: string[], truncated: boolean): stri
   const present = new Set(paths);
   const root = SURFACE_FILES.filter((p) => present.has(p));
   const workflows = paths.filter((p) => ROOT_WORKFLOW_RE.test(p));
-  const forms = paths.filter((p) => ISSUE_FORM_RE.test(p)).slice(0, MAX_ISSUE_FORMS);
+  const allForms = paths.filter((p) => ISSUE_FORM_RE.test(p));
+  const forms = allForms.slice(0, MAX_ISSUE_FORMS);
+  if (allForms.length > MAX_ISSUE_FORMS)
+    notes.push(
+      `${allForms.length} issue forms; read the first ${MAX_ISSUE_FORMS} (a label an unread form applies is not known): results ${INCOMPLETE}.`
+    );
   // T.3: the root manifests name the package the repository publishes.
   forms.push(...['package.json', 'pyproject.toml'].filter((p) => present.has(p)));
   const nested = pickSurfacePaths(paths, truncated, notes, { files: Number.POSITIVE_INFINITY });

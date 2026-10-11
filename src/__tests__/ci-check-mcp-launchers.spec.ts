@@ -4,7 +4,7 @@
 // image without a tag, and through the VS Code, Kiro, Gemini and opencode config files.
 
 import { describe, it, expect } from 'vitest';
-import { analyzeMcp, launchedPackage, ownPackageNames } from '../ci-check/mcp';
+import { analyzeMcp, launchedPackages, ownPackageNames } from '../ci-check/mcp';
 import { routeOf } from '../ci-check/route';
 
 const cfg = (servers: Record<string, unknown>, key = 'mcpServers') =>
@@ -85,7 +85,7 @@ describe("T.3 — the repository's own package is not a third-party supply chain
   ]);
 
   it('reads the names a repository publishes', () => {
-    expect([...own].sort()).toEqual(['@acme/server', 'some-tool', 'some_tool']);
+    expect([...own].sort()).toEqual(['npm:@acme/server', 'pypi:some-tool', 'pypi:some_tool']);
   });
 
   it('starting its own package unpinned is not flagged', () => {
@@ -101,8 +101,11 @@ describe("T.3 — the repository's own package is not a third-party supply chain
   });
 
   it('finds the launched package behind flags and versions', () => {
-    expect(launchedPackage('uvx --from some-tool==1.2 some-tool')).toBe('some-tool');
-    expect(launchedPackage('npx -y @scope/pkg@latest')).toBe('@scope/pkg');
-    expect(launchedPackage('corepack pnpm dlx @playwright/mcp@latest')).toBe('@playwright/mcp');
+    expect(launchedPackages('uvx --from some-tool==1.2 some-tool')).toEqual(['some-tool']);
+    expect(launchedPackages('npx -y @scope/pkg@latest')).toEqual(['@scope/pkg']);
+    expect(launchedPackages('corepack pnpm dlx @playwright/mcp@latest')).toEqual([
+      '@playwright/mcp',
+    ]);
+    expect(launchedPackages('npx -p a@1 --package=b c')).toEqual(['a', 'b']);
   });
 });

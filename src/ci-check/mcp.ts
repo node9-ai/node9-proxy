@@ -72,31 +72,51 @@ function runImage(tokens: string[]): string | null {
   return null;
 }
 
-/** The package a launcher starts (`uvx --from pkg==1 x` → pkg), lower case, without its
- *  version; null when no package token is found. */
-export function launchedPackage(argv: string): string | null {
+/** The packages a launcher installs (`uvx --from pkg==1 x` → pkg; `npx -p a -p b cmd` → a, b),
+ *  lower case, without versions. With no package flag, the first positional token is the
+ *  package. Empty when no launcher or package token is found. */
+export function launchedPackages(argv: string): string[] {
   const t = argv.split(/\s+/).filter(Boolean);
   const i = t.findIndex((x) => /(^|\/)(npx|pnpx|bunx|uvx|dlx|exec|x|run)$/.test(x));
-  if (i < 0) return null;
+  if (i < 0) return [];
+  const bare = (v: string) =>
+    v.startsWith('@') ? v.replace(/^(@[^/]+\/[^@]+).*$/, '$1') : v.replace(/(==|@).*$/, '');
+  const flagged: string[] = [];
+  let positional: string | null = null;
   for (let k = i + 1; k < t.length; k++) {
     const tok = t[k];
+    const eq = /^(--from|-p|--package)=(.*)$/.exec(tok);
+    if (eq) {
+      flagged.push(eq[2]);
+      continue;
+    }
     if (/^(--from|-p|--package)$/.test(tok)) {
-      const v = t[k + 1];
-      return v
-        ? v
-            .replace(/(==|@(?!$)).*$/, '')
-            .replace(/^@?$/, '')
-            .toLowerCase() || null
-        : null;
+      if (t[k + 1]) flagged.push(t[++k]);
+      continue;
     }
     if (tok.startsWith('-')) continue;
-    // A scoped npm name keeps its leading `@scope/`; the version after the last `@` goes.
-    const name = tok.startsWith('@')
-      ? tok.replace(/^(@[^/]+\/[^@]+).*$/, '$1')
-      : tok.replace(/(==|@).*$/, '');
-    return name ? name.toLowerCase() : null;
+    positional ??= tok;
   }
-  return null;
+  // With a package flag, the positional token is a command from those packages.
+  const names = flagged.length ? flagged : positional ? [positional] : [];
+  return names.map((n) => bare(n).toLowerCase()).filter(Boolean);
+}
+
+// A shell around the launcher runs more than its first command.
+const SHELL_RE = /(?:^|\/)(?:sh|bash|zsh|dash|cmd|pwsh|powershell)(?:\.exe)?$/i;
+const SHELL_OP_RE = /[;&|`$<>()]/;
+
+/** Is every package this server installs one the repository itself publishes, on the registry
+ *  this launcher fetches from? `own` holds `npm:<name>` / `pypi:<name>` (ownPackageNames); a
+ *  plain name matches any registry. */
+function launchesOwnPackage(argv: string, own: ReadonlySet<string>): boolean {
+  if (own.size === 0) return false;
+  if (SHELL_OP_RE.test(argv) || SHELL_RE.test(argv.split(/\s+/)[0] ?? '')) return false;
+  const l = LAUNCHERS.find((x) => x.re.test(argv));
+  if (!l) return false;
+  const reg = l.registry === 'PyPI' ? 'pypi' : 'npm';
+  const pkgs = launchedPackages(argv);
+  return pkgs.length > 0 && pkgs.every((p) => own.has(`${reg}:${p}`) || own.has(p));
 }
 
 /** Why this server's executable is unpinned, or null. `own` is what the repository itself
@@ -107,8 +127,7 @@ function unpinnedLauncher(
   own: ReadonlySet<string>
 ): { launcher: string; registry: string } | null {
   if (LOCAL_RUNNER_RE.test(argv)) return null;
-  const pkg = launchedPackage(argv);
-  if (pkg && own.has(pkg)) return null;
+  if (launchesOwnPackage(argv, own)) return null;
   const image = runImage(argv.split(/\s+/));
   if (image) {
     if (image.includes('@sha256:')) return null;
@@ -125,14 +144,16 @@ function unpinnedLauncher(
     : null;
 }
 
-/** T.3: the package names a repository publishes, read from its root manifests. */
+/** T.3: the package names a repository publishes, read from its root manifests, each with its
+ *  registry (`npm:<name>`, `pypi:<name>`). A `private` package.json publishes nothing. */
 export function ownPackageNames(manifests: { path: string; content: string }[]): Set<string> {
   const out = new Set<string>();
   for (const m of manifests) {
     if (m.path === 'package.json') {
       try {
-        const name = (JSON.parse(m.content) as { name?: unknown }).name;
-        if (typeof name === 'string' && name) out.add(name.toLowerCase());
+        const pkg = JSON.parse(m.content) as { name?: unknown; private?: unknown };
+        if (typeof pkg.name === 'string' && pkg.name && pkg.private !== true)
+          out.add(`npm:${pkg.name.toLowerCase()}`);
       } catch {
         /* not JSON: no name */
       }
@@ -140,8 +161,8 @@ export function ownPackageNames(manifests: { path: string; content: string }[]):
       const sec = /^\[(project|tool\.poetry)\]\s*$([\s\S]*?)(?=^\[|(?![\s\S]))/m.exec(m.content);
       const name = sec && /^name\s*=\s*["']([^"']{1,200})["']/m.exec(sec[2]);
       if (name) {
-        out.add(name[1].toLowerCase());
-        out.add(name[1].toLowerCase().replace(/_/g, '-'));
+        out.add(`pypi:${name[1].toLowerCase()}`);
+        out.add(`pypi:${name[1].toLowerCase().replace(/_/g, '-')}`);
       }
     }
   }

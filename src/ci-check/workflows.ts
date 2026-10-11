@@ -8,6 +8,7 @@
 
 import { explainSecrets, explainWorkflow } from './explain';
 import { parseYamlStrict as parseYaml } from './yaml-strict';
+import { parseFrontmatter } from './frontmatter';
 import { lineOf, lineOfRe } from './lines';
 import type { CiFinding, Severity } from './types';
 import { SEVERITY_RANK } from './types';
@@ -149,23 +150,36 @@ function keyStrangerFirable(on: Record<string, unknown>, key: string): boolean {
  *  of these is not a gate: any stranger who opens an issue from that form carries the label. */
 let AUTO_LABELS: ReadonlySet<string> = new Set();
 
-/** The `labels:` an issue form (YAML) or issue template (Markdown front matter) applies. */
+/** The `labels:` an issue form (YAML) or issue template (Markdown front matter) applies. Read
+ *  with the YAML parser (a compact `- x` list or a comment after the key hid the label from a
+ *  line reader, review round 2); the line reader stays only for a form that does not parse. */
 export function issueFormLabels(content: string): string[] {
-  const out: string[] = [];
   const text = content.length > 200_000 ? content.slice(0, 200_000) : content;
-  const lines = text.split(/\r?\n/);
-  for (let i = 0; i < lines.length; i++) {
-    const m = /^labels:\s*(.*)$/.exec(lines[i]);
-    if (!m) continue;
-    const inline = m[1].trim();
-    if (inline) {
-      out.push(...inline.replace(/^\[|\]$/g, '').split(','));
-    } else {
-      for (let j = i + 1; j < lines.length && /^\s+-\s/.test(lines[j]); j++)
-        out.push(lines[j].replace(/^\s+-\s/, ''));
+  let value: unknown;
+  let parsed = false;
+  if (/^﻿?\s*---[ \t]*\r?\n/.test(text)) {
+    const fm = parseFrontmatter(text);
+    parsed = fm !== null;
+    value = fm?.['labels'];
+  } else {
+    try {
+      const doc = parseYaml(text);
+      parsed = true;
+      if (doc && typeof doc === 'object' && !Array.isArray(doc))
+        value = (doc as Record<string, unknown>)['labels'];
+    } catch {
+      /* not strict YAML: the line reader below */
     }
   }
-  return out
+  const raw: unknown[] = parsed
+    ? Array.isArray(value)
+      ? value
+      : typeof value === 'string'
+        ? value.split(',')
+        : []
+    : labelLines(text);
+  return raw
+    .filter((l): l is string => typeof l === 'string')
     .map((l) =>
       l
         .trim()
@@ -174,6 +188,24 @@ export function issueFormLabels(content: string): string[] {
         .toLowerCase()
     )
     .filter((l) => l && l.length <= 100);
+}
+
+/** `labels: a, b`, `labels: [a, b]` or `labels:` and a `- x` list, line by line. */
+function labelLines(text: string): string[] {
+  const out: string[] = [];
+  const lines = text.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^labels:[ \t]*([^#]*)/.exec(lines[i]);
+    if (!m) continue;
+    const inline = m[1].trim();
+    if (inline) {
+      out.push(...inline.replace(/^\[|\]$/g, '').split(','));
+    } else {
+      for (let j = i + 1; j < lines.length && /^\s*-\s/.test(lines[j]); j++)
+        out.push(lines[j].replace(/^\s*-\s/, '').replace(/\s#.*$/, ''));
+    }
+  }
+  return out;
 }
 
 /** T.1 (2026-10-11): a workflow in the same repository that calls a reusable one with
@@ -190,6 +222,8 @@ export interface LocalCaller {
   /** The calling job runs on an upstream job's output (`needs.<job>.outputs.command == 'x'`),
    *  a dispatcher whose branches a static reader cannot tie to this call. */
   dispatched: boolean;
+  /** The caller is itself a reusable template: who reaches it lives one level further up. */
+  reusable: boolean;
 }
 
 /** The local callers of the workflow being analysed, set by analyzeWorkflow(Secrets) for the
@@ -221,7 +255,10 @@ function triggerReach(wf: Workflow, raw: Record<string, unknown>) {
   // open, the template keeps the reusable score (a gated dispatcher whose ungated branch never
   // sends this command must not turn into an alert).
   const open = (callers ?? []).filter((c) => c.untrusted && !c.gated && !c.dispatched);
-  const unresolved = (callers ?? []).some((c) => c.untrusted && !c.gated && c.dispatched);
+  // A caller that is itself a template (A calls B, B calls C) is unresolved the same way.
+  const unresolved = (callers ?? []).some(
+    (c) => (c.untrusted && !c.gated && c.dispatched) || (c.reusable && !c.gated)
+  );
   if (reusable && callers?.length && (open.length || !unresolved)) {
     return {
       keys: [...new Set(open.flatMap((c) => c.keys))],
@@ -396,6 +433,7 @@ function localCallsOfInner(
         workflowRun: reach.workflowRun,
         gated: jobGated(job, wf, raw),
         dispatched: /needs\.[\w-]+\.outputs\./.test(str(job.if)),
+        reusable: reach.reusable,
       },
     });
   }
@@ -503,7 +541,8 @@ function collectTools(steps: Step[]): string {
     const w = st.with ?? {};
     const args = str(w['claude_args']) + ' ' + str(w['codex-args']) + ' ' + str(w['codex_args']);
     s += ' ' + allowedToolsFromArgs(args);
-    s += ' ' + str(w['allowed_tools']) + ' ' + str(w['allowedTools']);
+    // `with:` keys are lower-cased by normalizeWorkflow.
+    s += ' ' + str(w['allowed_tools']) + ' ' + str(w['allowedtools']);
     s += ' ' + allowedToolsFromSettings(str(w['settings']));
     // T.2a: skipping permissions makes any allow list moot: an unrestricted shell.
     if (PERMISSION_BYPASS_RE.test(args) || /^danger-full-access$/i.test(str(w['sandbox'])))
@@ -785,24 +824,41 @@ const CONTAINS_GATE_RE =
 const NEGATED_CONTAINS_RE =
   /!\s*\(?\s*contains\((?:[^()]|\([^()]*\))*(login|actor|association|OWNER|MEMBER|COLLABORATOR)/i;
 
-/** Is a label-type gate configured on an untrusted trigger? F14a: a label gate
- *  counts on pull_request_target OR pull_request (a backport resolver gates a
- *  `pull_request: types:[labeled]` job on the label name). */
-function labelTypeConfigured(wf: Workflow, raw: Record<string, unknown>): boolean {
+/** Which label gates a workflow's triggers make meaningful. F14a: a PR label counts on
+ *  pull_request_target OR pull_request with `types: [labeled]` (a backport resolver gates a
+ *  `pull_request: types:[labeled]` job on the label name). T.6.9: an issue's labels are set by
+ *  someone with triage access, but only when `issues` is the sole stranger-firable trigger: on
+ *  an `issue_comment` job a labelled issue still takes anyone's comment (review, round 2). */
+interface LabelConfig {
+  pr: boolean;
+  issues: boolean;
+}
+function labelTypeConfigured(wf: Workflow, raw: Record<string, unknown>): LabelConfig {
   const on = (wf.on ?? raw['on'] ?? raw[true as unknown as string]) as
     Record<string, unknown> | undefined;
   const prTypes = (t: unknown): string[] =>
     t && Array.isArray((t as { types?: unknown }).types)
       ? (t as { types: unknown[] }).types.map(String)
       : [];
-  return (
+  const pr =
     prTypes(on?.['pull_request_target']).includes('labeled') ||
-    prTypes(on?.['pull_request']).includes('labeled') ||
-    // T.6.9: an issue's labels are set by someone with triage access (an issue form that
-    // applies the label on its own is T.5b's case).
-    (on != null && typeof on === 'object' && 'issues' in on)
-  );
+    prTypes(on?.['pull_request']).includes('labeled');
+  const onObj = onObject(wf, raw) ?? {};
+  const issues =
+    on != null &&
+    typeof on === 'object' &&
+    'issues' in on &&
+    triggerKeys(wf, raw).every((k) => /^issues$/i.test(k) || !keyStrangerFirable(onObj, k));
+  return { pr, issues };
 }
+
+// The label of a `labeled` event, tested positively. `label.name != 'skip-ai'` admits every
+// event without that label, an `opened` issue included (review, round 2).
+const EVENT_LABEL_GATE_RE =
+  /\blabel\.name\s*==\s*'|\b(?:contains|startsWith)\(\s*github\.event\.label\.name\b/i;
+// A label already on the issue (not the PR) when the job runs.
+const ISSUE_LABEL_GATE_RE =
+  /(?<!!\s{0,5}\(?\s{0,5})contains\(\s*github\.event\.issue\.labels\.\*\.name\s*,\s*'[^']{1,100}'\s*\)(?!\s*(?:==\s*false|!=\s*true))/i;
 
 // `!contains(…labels…, 'skip-ai')`, `contains(…) == false`, `labels[0] == null` admit every PR
 // that lacks an opt-out label, i.e. every stranger's PR; only a positive contains() is a gate.
@@ -833,7 +889,7 @@ function testsAutoLabel(ifs: string): boolean {
 }
 
 /** Do these joined `if:` expressions constitute an actor gate? */
-function ifsAreGated(ifs: string, labelConfigured: boolean): boolean {
+function ifsAreGated(ifs: string, label: LabelConfig): boolean {
   // Credit a contains() inclusion ONLY when it is not negated (`!contains(…)` = anti-gate).
   const containsGate =
     CONTAINS_GATE_RE.test(ifs) && !NEGATED_CONTAINS_RE.test(ifs) && !NONWRITE_SET_RE.test(ifs);
@@ -842,8 +898,9 @@ function ifsAreGated(ifs: string, labelConfigured: boolean): boolean {
   // there by someone with triage access, like the `label.name` of a labeled event. Only a
   // POSITIVE test counts (second review): see PR_LABEL_GATE_RE.
   const labelGated =
-    labelConfigured &&
-    (/event\.label|label\.name/i.test(ifs) || PR_LABEL_GATE_RE.test(ifs)) &&
+    (((label.pr || label.issues) && EVENT_LABEL_GATE_RE.test(ifs)) ||
+      (label.pr && PR_LABEL_GATE_RE.test(ifs)) ||
+      (label.issues && ISSUE_LABEL_GATE_RE.test(ifs))) &&
     !testsAutoLabel(ifs);
   return gated || labelGated;
 }
@@ -895,6 +952,9 @@ function parseIf(src: string): IfExpr | null {
   let e = src.trim();
   const wrapped = /^\$\{\{([\s\S]*)\}\}$/.exec(e);
   if (wrapped) e = wrapped[1].trim();
+  // Text outside one `${{ }}` (`false && ${{ x }}`, `${{ a }} && ${{ b }}`) is a template: the
+  // runner reads the whole `if:` as a non-empty string, which is always true (review, round 2).
+  if (e.includes('${{')) return null;
   if (!e || e.length > IF_MAX_LEN) return null;
   let i = 0;
   let depth = 0;
@@ -990,7 +1050,7 @@ function stepIfText(steps: Step[]): string {
 }
 
 /** Is this text an actor gate? The gate shapes of ifsAreGated, plus the job-scoped ones. */
-function gatedText(ifs: string, labelConfigured: boolean): boolean {
+function gatedText(ifs: string, labelConfigured: LabelConfig): boolean {
   // G-d′: an `assignee.login == '…'` gate (only someone with triage/write access can
   // assign an issue) counts too. Kept in the JOB-scoped check only — NOT in the shared
   // ACTOR_GATE_RE; gating is judged per job, so a gated sibling job can't mask an
@@ -1003,7 +1063,7 @@ function gatedText(ifs: string, labelConfigured: boolean): boolean {
 }
 
 /** Does this expression keep strangers out? */
-function exprGated(x: IfExpr, labelConfigured: boolean): boolean {
+function exprGated(x: IfExpr, labelConfigured: LabelConfig): boolean {
   switch (x.k) {
     case 'atom':
       return gatedText(x.t, labelConfigured) || TRUSTED_EVENT_ATOM_RE.test(x.t);
@@ -1018,7 +1078,7 @@ function exprGated(x: IfExpr, labelConfigured: boolean): boolean {
 
 /** Is a job-level `if:` an actor gate? Shared by the job's own gate and the needs chain, so the
  *  two cannot disagree. */
-function jobIfGated(jobIf: string, labelConfigured: boolean): boolean {
+function jobIfGated(jobIf: string, labelConfigured: LabelConfig): boolean {
   const x = parseIf(jobIf);
   return x !== null && exprGated(x, labelConfigured);
 }
@@ -1093,6 +1153,41 @@ function jobActorGate(job: Job, wf: Workflow, raw: Record<string, unknown>): boo
  *  ungated one in the same file (a false negative found in review). */
 const ACTOR_ALLOWLIST_RE =
   /\.includes\(\s*(?:context\.actor|github\.actor|context\.payload\.sender\.login|[\w.]{0,40}user\.login|login)\b|\b(?:context\.actor|github\.actor)\s*===?\s*['"]/;
+const ACTOR_ALLOWLIST_G = new RegExp(ACTOR_ALLOWLIST_RE.source, 'g');
+const BLOCK_LIST_NAME_RE = /block|deny|ban|spam|abuse|exclu|ignore/i;
+
+/** Does an upstream script ADMIT by the actor? Read for polarity (review, round 2): a block list
+ *  (`blocked.includes(context.actor) ? 'false' : 'true'`) admits everyone it does not name.
+ *  Without a ternary (`if (!allowed.includes(actor)) core.setFailed(…)`) the test is credited. */
+function scriptAllowsByActor(code: string): boolean {
+  if (code.length > 200_000) return false;
+  for (const m of code.matchAll(ACTOR_ALLOWLIST_G)) {
+    const at = m.index ?? 0;
+    const before = code.slice(Math.max(0, at - 80), at);
+    if (m[0].startsWith('.includes')) {
+      const list = /([\w$.]{1,60})$/.exec(before)?.[1] ?? '';
+      if (BLOCK_LIST_NAME_RE.test(list)) continue;
+    }
+    const negated = /!\s{0,3}\(?\s{0,3}[\w$.]{0,60}$/.test(before);
+    const ternary = /^[^?;\n]{0,150}\?\s{0,5}['"`]?(true|false)\b/.exec(code.slice(at, at + 200));
+    if (!ternary || (ternary[1] === 'true') !== negated) return true;
+  }
+  return false;
+}
+
+/** Does the dependent's `if:` run on a YES from upstream job `name`? `!needs.x.outputs.ok`,
+ *  `!= 'true'` and `== 'false'` run on a NO. */
+function readsOutputPositively(readerIf: string, name: string): boolean {
+  const ref = `needs\\.${escapeRe(name)}\\.outputs\\.[\\w-]{1,100}`;
+  if (!new RegExp(ref).test(readerIf)) return false;
+  const yes = `'(?:true|yes|1|write|admin|maintain)'`;
+  const no = `'(?:false|no|0|)'`;
+  return !new RegExp(
+    `!\\s{0,5}\\(?\\s{0,5}(?:fromjson\\(\\s{0,5})?${ref}|${ref}\\s{0,5}\\)?\\s{0,5}(?:!=\\s{0,5}${yes}|==\\s{0,5}${no})`,
+    'i'
+  ).test(readerIf);
+}
+
 const STATUS_FN_RE = /\b(success|failure|always|cancelled)\s*\(/i;
 const FAILING_STEP_RE = /\bexit\s+[1-9]|core\.setFailed|process\.exit\(\s*[1-9]/;
 
@@ -1124,10 +1219,10 @@ function upstreamJobGates(
   // or an allowlist compared with the actor) gates a dependent that reads its outputs.
   if (
     readerIf !== null &&
-    new RegExp(`needs\\.${escapeRe(name)}\\.outputs\\.`).test(readerIf) &&
+    readsOutputPositively(readerIf, name) &&
     steps.some((st) => {
       const code = str(st.run) + ' ' + str(st.with?.['script']);
-      return MEMBERSHIP_CHECK_RE.test(code) || ACTOR_ALLOWLIST_RE.test(code);
+      return MEMBERSHIP_CHECK_RE.test(code) || scriptAllowsByActor(code);
     })
   )
     return true;
