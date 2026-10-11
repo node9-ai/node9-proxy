@@ -90,9 +90,9 @@ export function scanTree(tree: RepoTree): ScanResult {
     }
     return named.get(dir)!.has(docPath);
   };
-  // T.1: who calls each local reusable workflow. Workflow contents are read here once and
-  // reused below (a local reader reads on demand, §K).
-  const workflowText = new Map<string, string>();
+  // T.1: who calls each local reusable workflow. Only the caller records are kept: holding
+  // every workflow's text until the end undid the one-file memory bound of §K (review, round 2),
+  // so the main loop reads each file again.
   const callersOf = new Map<string, LocalCaller[]>();
   // T.6.9: labels an issue form puts on every new issue are not a gate.
   const autoLabels = new Set<string>();
@@ -121,7 +121,6 @@ export function scanTree(tree: RepoTree): ScanResult {
     if (routeOfFile(file) !== 'workflow') continue;
     try {
       const content = file.content;
-      workflowText.set(file.path, content);
       for (const { target, caller } of localCallsOf(file.path, content, autoLabels)) {
         const list = callersOf.get(target) ?? [];
         list.push(caller);
@@ -149,7 +148,7 @@ export function scanTree(tree: RepoTree): ScanResult {
     try {
       // Read ONCE: a local reader's content is read on demand and not held (§K), so a second
       // access would read the file again. Everything below uses this one copy.
-      const content = workflowText.get(file.path) ?? file.content;
+      const content = file.content;
       switch (route) {
         case 'workflow': {
           const callers = callersOf.get(file.path);
@@ -183,7 +182,10 @@ export function scanTree(tree: RepoTree): ScanResult {
           break;
       }
     } catch (err) {
-      notes.push(`checker degraded on ${file.path}: ${(err as Error)?.message ?? 'error'}`);
+      // A checker that throws has not looked: the result may be INCOMPLETE, never clean.
+      notes.push(
+        `checker degraded on ${file.path}: ${(err as Error)?.message ?? 'error'}; results may be INCOMPLETE`
+      );
     }
     if (testKind === 'alerts-only') {
       const kept = findings.splice(before).filter((f) => tierOf(f) === 'alert');

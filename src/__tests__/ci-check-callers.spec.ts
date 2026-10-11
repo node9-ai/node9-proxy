@@ -66,4 +66,21 @@ describe('T.1 — what stays as it is', () => {
     expect(f!.signals.join(' ')).toMatch(/reusable workflow \(workflow_call\)/);
     expect(rank('no-caller', 'analysis.yml')).toBeLessThanOrEqual(SEVERITY_RANK.medium);
   });
+
+  it('a copy of a called template with no caller of its own keeps the reusable score', () => {
+    // Identical content is parsed once and shared; the callers of one path must not reach
+    // the other (review, round 2).
+    const t = tree('stranger-caller');
+    // Right after the original, so the two are analysed back to back.
+    const at = t.files.findIndex((f) => f.path.endsWith('/analysis.yml'));
+    t.files.splice(at + 1, 0, {
+      path: '.github/workflows/analysis-copy.yml',
+      content: t.files[at].content,
+    });
+    const copy = scanTree(t).findings.find(
+      (f) => f.check === 'CI-2' && f.file === '.github/workflows/analysis-copy.yml'
+    );
+    expect(copy?.signals.join(' ')).toMatch(/reusable workflow \(workflow_call\)/);
+    expect(copy?.signals.join(' ')).not.toMatch(/called by/);
+  });
 });

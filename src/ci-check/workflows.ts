@@ -75,6 +75,8 @@ interface Step {
   env?: Record<string, unknown>;
   /** T.2a: the workflow and job `env:` this step sees (set by normalizeWorkflow). */
   scopeEnv?: Record<string, unknown>;
+  /** Does that env carry event context? Computed once per job by normalizeWorkflow. */
+  scopeEnvEvent?: boolean;
 }
 interface Job {
   if?: string;
@@ -256,11 +258,20 @@ const RESOLVED_MAX_LEN = 100_000;
  *  (first holder wins, as on the runner). One level only; an unknown name stays as written. */
 function resolveEnvRefs(v: string, envs: (Record<string, unknown> | undefined)[]): string {
   if (!v.includes('env.')) return v;
-  const out = v.replace(ENV_REF_RE, (whole, name: string) => {
-    const holder = envs.find((e) => e != null && typeof e === 'object' && name in e);
+  const holderOf = (name: string) =>
+    envs.find((e) => e != null && typeof e === 'object' && name in e);
+  // Measure before building: thousands of references to a large value would otherwise build a
+  // string past V8's limit and throw, which dropped every finding of the file (review, round 2).
+  let projected = v.length;
+  for (const m of v.matchAll(ENV_REF_RE)) {
+    const holder = holderOf(m[1]);
+    if (holder) projected += str(holder[m[1]]).length - m[0].length;
+    if (projected > RESOLVED_MAX_LEN) return v;
+  }
+  return v.replace(ENV_REF_RE, (whole, name: string) => {
+    const holder = holderOf(name);
     return holder ? str(holder[name]) : whole;
   });
-  return out.length > RESOLVED_MAX_LEN ? v : out;
 }
 
 /** A job `if:` that can never be true: `false`, `${{ false }}`, `<expr> && false`. */
@@ -292,6 +303,7 @@ function normalizeWorkflow(raw: Record<string, unknown>): Workflow {
   const wfEnv = (raw as { env?: Record<string, unknown> }).env;
   const jobs = wf.jobs;
   if (!jobs || typeof jobs !== 'object') return wf;
+  const wfEnvEvent = EVENT_CONTEXT_RE.test(str(wfEnv));
   for (const [name, job] of Object.entries(jobs)) {
     if (job == null || typeof job !== 'object') continue;
     if (ifNeverTrue(job.if)) {
@@ -299,13 +311,21 @@ function normalizeWorkflow(raw: Record<string, unknown>): Workflow {
       continue;
     }
     if (!Array.isArray(job.steps)) continue;
+    // A YAML alias (`- *agent`) is one object in every job that uses it: copy each step, so one
+    // job's env never becomes another's (review, round 2).
+    job.steps = job.steps.map((st) =>
+      st != null && typeof st === 'object' && !Array.isArray(st) ? { ...st } : st
+    );
     const scopeEnv = {
       ...(wfEnv && typeof wfEnv === 'object' ? wfEnv : {}),
       ...(job.env && typeof job.env === 'object' ? job.env : {}),
     };
+    // Computed once per job, not on every isAgentStep call (a large env times many steps).
+    const scopeEnvEvent = wfEnvEvent || EVENT_CONTEXT_RE.test(str(job.env));
     for (const step of job.steps) {
       if (step == null || typeof step !== 'object') continue;
       step.scopeEnv = scopeEnv;
+      step.scopeEnvEvent = scopeEnvEvent;
       if (step.with == null || typeof step.with !== 'object') continue;
       const out: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(step.with)) {
@@ -317,6 +337,18 @@ function normalizeWorkflow(raw: Record<string, unknown>): Workflow {
     }
   }
   return wf;
+}
+
+// One parse and one normalisation per file, shared by the analyses that read it in a row
+// (analyzeWorkflow, …Secrets, …Plugins, …TrustedReaders, …ForkCodeOnTrust). Throws like
+// parseYaml. The analyses only read the normalised workflow.
+let LOADED: { content: string; raw: Record<string, unknown>; wf: Workflow } | null = null;
+function loadWorkflow(content: string): { raw: Record<string, unknown>; wf: Workflow } {
+  if (LOADED !== null && LOADED.content === content) return LOADED;
+  const raw = (parseYaml(content) ?? {}) as Record<string, unknown>;
+  const wf = raw && typeof raw === 'object' ? normalizeWorkflow(raw) : (raw as Workflow);
+  LOADED = { content, raw, wf };
+  return LOADED;
 }
 
 const LOCAL_WORKFLOW_USES_RE = /^\s*\.\/\.github\/workflows\/([\w.-]{1,200}\.ya?ml)\s*$/i;
@@ -341,12 +373,13 @@ function localCallsOfInner(
 ): { target: string; caller: LocalCaller }[] {
   let raw: Record<string, unknown>;
   try {
-    raw = (parseYaml(content) ?? {}) as Record<string, unknown>;
+    raw = loadWorkflow(content).raw;
   } catch {
     return [];
   }
   if (!raw || typeof raw !== 'object') return [];
-  const wf = normalizeWorkflow(raw);
+  const wf = raw as Workflow; // normalised by loadWorkflow
+  CALLERS.delete(wf); // this file's own triggers, never callers left from another analysis
   const reach = triggerReach(wf, raw);
   const out: { target: string; caller: LocalCaller }[] = [];
   for (const job of jobList(wf)) {
@@ -389,7 +422,7 @@ const EVENT_CONTEXT_RE = /github\.event|context\.payload/;
 /** A `run:` step that really invokes an agent (not the loose "agent word next to github.event"
  *  heuristic): only its command line and env are read as the agent's prompt and grants. */
 function isRunAgent(step: Step): boolean {
-  return !!step.run && !step.uses && AGENT_CLI_RE.test(step.run);
+  return typeof step.run === 'string' && !step.uses && AGENT_CLI_RE.test(step.run);
 }
 
 // T.2b (2026-10-11): an action input that takes a model credential (either spelling).
@@ -422,7 +455,7 @@ function isWrapperAgent(step: Step): boolean {
 function isAgentStep(step: Step): boolean {
   if (step.uses && AGENT_ACTION_RE.test(step.uses)) return true;
   if (step.uses && isWrapperAgent(step)) return true;
-  if (!step.run) return false;
+  if (typeof step.run !== 'string' || !step.run) return false;
   // run-step heuristic: an agent CLI fed event context.
   if (/\b(claude|aider|codex|gemini)\b/i.test(step.run) && /github\.event/.test(step.run))
     return true;
@@ -431,7 +464,8 @@ function isAgentStep(step: Step): boolean {
   if (!AGENT_CLI_RE.test(step.run)) return false;
   const env = { ...(step.scopeEnv ?? {}), ...(step.env ?? {}) };
   return (
-    EVENT_CONTEXT_RE.test(str(step.env) + ' ' + str(step.scopeEnv)) ||
+    !!step.scopeEnvEvent ||
+    EVENT_CONTEXT_RE.test(str(step.env)) ||
     Object.keys(env).some((k) => RUN_FUEL_ENV_RE.test(k))
   );
 }
@@ -568,12 +602,19 @@ function matchedBroadTools(blob: string): string[] {
  *  Takes a step list so callers can scope it to a single job (CI-4 per-job). */
 // T.7 (2026-10-11): the PR head also arrives by `refs/pull/<n>/head|merge`, by `gh pr checkout`,
 // and by fetching `pull/<n>/head` and checking it out in a run step.
-const RUN_HEAD_CHECKOUT_RE =
-  /\bgh\s+pr\s+checkout\b|\bgit\s+fetch\b[^\n]{0,200}\bpull\/[^\s/]{1,80}\/(?:head|merge)\b[^\n]{0,300}[\n;&|]+\s*git\s+(?:checkout|switch)\b/;
+const GH_PR_CHECKOUT_RE = /\bgh\s+pr\s+checkout\b/;
+const FETCH_PULL_RE = /\bgit\s+fetch\b[^\n]{0,200}\bpull\/[^\s/]{1,80}\/(?:head|merge)\b/;
+const GIT_CHECKOUT_RE = /\bgit\s+(?:checkout|switch)\b/;
+/** Linear (the one-regex form was quadratic on a run of newlines, review round 2). */
+function runChecksOutHead(run: string): boolean {
+  if (GH_PR_CHECKOUT_RE.test(run)) return true;
+  const m = FETCH_PULL_RE.exec(run);
+  return m !== null && GIT_CHECKOUT_RE.test(run.slice(m.index));
+}
 
 function untrustedHeadCheckout(steps: Step[]): 'root' | 'subdir' | null {
   for (const step of steps) {
-    if (!step.uses && step.run && RUN_HEAD_CHECKOUT_RE.test(step.run)) return 'root';
+    if (!step.uses && typeof step.run === 'string' && runChecksOutHead(step.run)) return 'root';
     if (!step.uses || !/actions\/checkout/.test(step.uses)) continue;
     const ref = str(step.with?.['ref']);
     if (/refs\/pull\//.test(ref)) return step.with?.['path'] ? 'subdir' : 'root';
@@ -682,8 +723,11 @@ function jobReadsUntrustedItem(job: Job): ItemRead | null {
       str(st.with?.['direct_prompt']) +
       ' ' +
       str(st.with?.['prompt_file'] ?? st.with?.['prompt-file']);
-    for (const m of input.matchAll(STEP_OUTPUT_REF_RE)) {
-      const src = steps.slice(0, i).find((p) => p.id === m[1]);
+    // Each referenced step once (review, round 2: K references to one large step cost K x S).
+    const ids = new Set<string>();
+    for (const m of input.matchAll(STEP_OUTPUT_REF_RE)) ids.add(m[1]);
+    for (const id of ids) {
+      const src = steps.slice(0, i).find((p) => p.id === id);
       if (src && PAYLOAD_TEXT_RE.test(str(src.run) + ' ' + str(src.with) + ' ' + str(src.env)))
         return 'step-output';
     }
@@ -720,8 +764,19 @@ const NONCONTAINS_GATE_RE = new RegExp(
 // `run:`-only check misses it). `== 'false'` is an anti-gate, not matched. JOB-SCOPED ONLY (used
 // in jobActorGate; there is no whole-workflow gate test any more) — a step output is produced in ONE job, so
 // crediting it workflow-wide would let a gated job mask an ungated sibling (the R2-1 bug).
-const PERMISSION_OUTPUT_GATE_RE =
-  /steps\.[\w-]+\.outputs\.[\w-]*(permission|allowed|authoriz|is[_-]?(admin|member|maintainer|collaborator))[\w-]*\s*==\s*['"]?(true|admin|write|maintain)/i;
+// Linear form (review, round 2): `[\w-]*(keyword)[\w-]*` around the identifier backtracked
+// quadratically on a long one. Match the identifier once, then look for the keyword inside it.
+const PERMISSION_OUTPUT_RE =
+  /steps\.[\w-]{1,100}\.outputs\.([\w-]{1,200})\s*==\s*['"]?(?:true|admin|write|maintain)/gi;
+const PERMISSION_OUTPUT_NAME_RE =
+  /permission|allowed|authoriz|is[_-]?(?:admin|member|maintainer|collaborator)/i;
+const PERMISSION_OUTPUT_GATE_RE = {
+  test(ifs: string): boolean {
+    for (const m of ifs.matchAll(PERMISSION_OUTPUT_RE))
+      if (PERMISSION_OUTPUT_NAME_RE.test(m[1])) return true;
+    return false;
+  },
+};
 // A contains()-based inclusion of a privileged set — one level of nested parens for
 // `contains(fromJson('[…]'), …)`. POLARITY: `contains(…)` is a positive inclusion (gate), but
 // `!contains(…)` runs for everyone EXCEPT the set (an anti-gate) — credit only the former.
@@ -1004,8 +1059,12 @@ function jobActorGate(job: Job, wf: Workflow, raw: Record<string, unknown>): boo
   // the same-repo test of an "internal review" step to the "fork review" agent step beside it
   // (a common review template). Every agent step must carry its own gate.
   const agent = (job.steps ?? []).filter(isAgentStep);
+  // The same total bound the joined step text had (stepIfText): hundreds of long `if:`s, each
+  // parsed and gate-tested, cost 20x more than before (review, round 2). Too long is not a gate.
+  const ifTotal = agent.reduce((n, s) => n + str(s.if).length, 0);
   const agentStepsGated =
     agent.length > 0 &&
+    ifTotal <= IF_MAX_LEN &&
     agent.every((s) => {
       const x = parseIf(str(s.if));
       return x !== null && exprGated(x, labelConfigured);
@@ -1136,7 +1195,11 @@ const ACTOR_BOUND_RE =
 
 /** Does this allowed_non_write_users value admit any user? */
 function nonWriteOpen(v: string): boolean {
-  return v.trim() === '*' || ACTOR_BOUND_RE.test(v);
+  const t = v.trim();
+  if (t === '*') return true;
+  // A real value is a login list or one expression; a megabyte of text is neither, and the
+  // regex below costs ~100 steps a character on it (review, round 2).
+  return t.length <= 1_000 && ACTOR_BOUND_RE.test(t);
 }
 
 /** `anthropics/claude-code-action` (the higher-level action — NOT the lower-level
@@ -1395,12 +1458,15 @@ function analyzeWorkflowInner(
 ): CiFinding | null {
   let raw: Record<string, unknown>;
   try {
-    raw = (parseYaml(content) ?? {}) as Record<string, unknown>;
+    raw = loadWorkflow(content).raw;
   } catch {
     return null; // unparseable YAML — caller notes it; we don't guess.
   }
-  const wf = normalizeWorkflow(raw);
+  const wf = raw as Workflow; // normalised by loadWorkflow
+  // The parsed workflow is shared by files with identical content (loadWorkflow), so the callers
+  // are set or cleared on every analysis, never left from another path.
   if (callers?.length) CALLERS.set(wf, callers);
+  else CALLERS.delete(wf);
   const steps = allSteps(wf).map((s) => s.step);
   const agentSteps = steps.filter(isAgentStep);
   // The job(s) the agent actually runs in — permission checks scope to these, so
@@ -1945,12 +2011,15 @@ function analyzeWorkflowSecretsInner(
 ): CiFinding | null {
   let raw: Record<string, unknown>;
   try {
-    raw = (parseYaml(content) ?? {}) as Record<string, unknown>;
+    raw = loadWorkflow(content).raw;
   } catch {
     return null;
   }
-  const wf = normalizeWorkflow(raw);
+  const wf = raw as Workflow; // normalised by loadWorkflow
+  // The parsed workflow is shared by files with identical content (loadWorkflow), so the callers
+  // are set or cleared on every analysis, never left from another path.
   if (callers?.length) CALLERS.set(wf, callers);
+  else CALLERS.delete(wf);
   const all = allSteps(wf);
   if (!all.some((s) => isAgentStep(s.step))) return null;
 
@@ -2020,12 +2089,12 @@ function marketplaceOwner(market: string): string | undefined {
 export function analyzeWorkflowPlugins(path: string, content: string, owner?: string): CiFinding[] {
   let raw: Record<string, unknown>;
   try {
-    raw = (parseYaml(content) ?? {}) as Record<string, unknown>;
+    raw = loadWorkflow(content).raw;
   } catch {
     return [];
   }
   if (!raw || typeof raw !== 'object') return [];
-  const wf = normalizeWorkflow(raw);
+  const wf = raw as Workflow; // normalised by loadWorkflow
   const out: CiFinding[] = [];
   const seen = new Set<string>();
   for (const { step } of allSteps(wf)) {
@@ -2088,12 +2157,12 @@ export function analyzeTrustedReaders(
 function analyzeTrustedReadersInner(path: string, content: string): CiFinding[] {
   let raw: Record<string, unknown>;
   try {
-    raw = (parseYaml(content) ?? {}) as Record<string, unknown>;
+    raw = loadWorkflow(content).raw;
   } catch {
     return [];
   }
   if (!raw || typeof raw !== 'object') return [];
-  const wf = normalizeWorkflow(raw);
+  const wf = raw as Workflow; // normalised by loadWorkflow
   const reach = triggerReach(wf, raw);
   // Stranger-firable workflows are CI-2's; reusable templates are judged through their callers.
   if (reach.untrusted || reach.reusable || reach.keys.length === 0) return [];
@@ -2231,13 +2300,16 @@ function analyzeForkCodeOnTrustInner(
 ): CiFinding[] {
   let raw: Record<string, unknown>;
   try {
-    raw = (parseYaml(content) ?? {}) as Record<string, unknown>;
+    raw = loadWorkflow(content).raw;
   } catch {
     return [];
   }
   if (!raw || typeof raw !== 'object') return [];
-  const wf = normalizeWorkflow(raw);
+  const wf = raw as Workflow; // normalised by loadWorkflow
+  // The parsed workflow is shared by files with identical content (loadWorkflow), so the callers
+  // are set or cleared on every analysis, never left from another path.
   if (callers?.length) CALLERS.set(wf, callers);
+  else CALLERS.delete(wf);
   const reach = triggerReach(wf, raw);
   const forkKeys = reach.keys.filter((k) => FORK_PR_TRIGGER_RE.test(k));
   if (!forkKeys.length) return [];
