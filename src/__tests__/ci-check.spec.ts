@@ -1,10 +1,10 @@
 // Tests for `node9 scan-repo` / the ci-check engine.
 //
 // The load-bearing assertion is the SEVERITY NUANCE (design §4.5): the same
-// "pull_request_target + agent" shape must rate milvus HIGH+, NVIDIA MEDIUM
-// (mitigated), and strapi safe/advisory. A tool that flags them identically is
-// the cry-wolf failure the whole design exists to avoid. Fixtures are the REAL
-// verified configs (per CLAUDE.md: real caller inputs).
+// "pull_request_target + agent" shape must rate a default-gated review advisory, a
+// mitigated reusable workflow MEDIUM, and a label-gated one safe/advisory. A tool that
+// flags them identically is the cry-wolf failure the whole design exists to avoid.
+// Fixtures are short hand-written files in the shapes real repositories commit.
 
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
@@ -41,13 +41,13 @@ const read = (f: string) => fs.readFileSync(path.join(FX, f), 'utf8');
 import { FAKE_GH_TOKEN as FAKE_TOKEN } from './helpers/github-token';
 
 describe('CI-2 workflow analyzer — the severity nuance (the moat)', () => {
-  it('F7: rates milvus ADVISORY — claude-code-action gates to write-access by default', () => {
-    // milvus uses claude-code-action with NO allowed_non_write_users, so the
+  it('F7: rates a default-gated pull_request_target review ADVISORY — claude-code-action gates to write-access by default', () => {
+    // The workflow uses claude-code-action with NO allowed_non_write_users, so the
     // action blocks untrusted authors by default → this is a hardening advisory,
     // NOT a HIGH "any attacker" finding. (The pre-F7 HIGH was crying wolf.)
     const f = analyzeWorkflow(
       '.github/workflows/claude-code-review.yml',
-      read('milvus-claude-review.yml')
+      read('pr-target-review-default-gate.yml')
     );
     expect(f).not.toBeNull();
     expect(SEVERITY_RANK[f!.severity]).toBeLessThanOrEqual(SEVERITY_RANK.advisory);
@@ -56,24 +56,24 @@ describe('CI-2 workflow analyzer — the severity nuance (the moat)', () => {
     expect(f!.signals.join(' ')).toMatch(/root/i);
   });
 
-  it('rates NVIDIA <= MEDIUM — reusable (workflow_call), capped at medium + mitigated', () => {
-    // R4-1a + round2#5: NVIDIA is `on: workflow_call:` — a reusable workflow with no
+  it('rates a mitigated reusable workflow <= MEDIUM — workflow_call, capped at medium', () => {
+    // R4-1a + round2#5: the fixture is `on: workflow_call:`, a reusable workflow with no
     // stranger trigger of its own. It is scored as potentially-untrusted but CAPPED at
     // medium (its real reachability lives in the unseen caller); its mitigation signals
     // (subdir head, env-deny, pinned) remain. Not hidden as advisory, not over-claimed high.
     const f = analyzeWorkflow(
       '.github/workflows/_claude-fix-attempt.yml',
-      read('nvidia-claude-fix.yml')
+      read('reusable-fix-mitigated.yml')
     );
     expect(f).not.toBeNull();
     expect(SEVERITY_RANK[f!.severity]).toBeLessThanOrEqual(SEVERITY_RANK.medium);
     expect(f!.mitigations?.join(' ')).toMatch(/subdir|env-denied|pinned/i);
   });
 
-  it('rates strapi SAFE/advisory — label-gated, base checkout, scoped tools', () => {
+  it('rates a label-gated workflow SAFE/advisory — base checkout, scoped tools', () => {
     const f = analyzeWorkflow(
       '.github/workflows/needs-qa-checklist.yml',
-      read('strapi-needs-qa.yml')
+      read('label-gated-base-checkout.yml')
     );
     if (f) expect(SEVERITY_RANK[f.severity]).toBeLessThanOrEqual(SEVERITY_RANK.advisory);
   });
@@ -81,7 +81,7 @@ describe('CI-2 workflow analyzer — the severity nuance (the moat)', () => {
   it('THE MOAT: a truly-ungated workflow > a mitigated one > a gated one', () => {
     // Post-F7 the moat is anchored honestly: only a workflow with the default
     // gate REMOVED (allowed_non_write_users:*) is genuinely high; a mitigated one
-    // is medium; a gated one (milvus, via the implicit gate) is advisory.
+    // is medium; a gated one (the default-gated review, via the implicit gate) is advisory.
     const dangerous = `
 on:
   pull_request_target:
@@ -102,7 +102,7 @@ jobs:
           claude_args: '--allowedTools "Bash"'
 `;
     // Middle tier: a non-reusable, ungated-but-scoped workflow → genuinely medium.
-    // (NVIDIA is no longer usable here — as a reusable workflow it's now advisory, R4-1a.)
+    // (The reusable fixture is no longer usable here: it is capped by R4-1a.)
     const mitigated = `
 on:
   issues:
@@ -123,13 +123,13 @@ jobs:
 `;
     const danger = analyzeWorkflow('d.yml', dangerous)!;
     const medium = analyzeWorkflow('mid.yml', mitigated)!;
-    const milvus = analyzeWorkflow('m.yml', read('milvus-claude-review.yml'))!;
+    const gated = analyzeWorkflow('m.yml', read('pr-target-review-default-gate.yml'))!;
     expect(SEVERITY_RANK[danger.severity]).toBeGreaterThan(SEVERITY_RANK[medium.severity]);
-    expect(SEVERITY_RANK[medium.severity]).toBeGreaterThan(SEVERITY_RANK[milvus.severity]);
+    expect(SEVERITY_RANK[medium.severity]).toBeGreaterThan(SEVERITY_RANK[gated.severity]);
   });
 
   it('F8: a GATED workflow with dangerous tools but no untrusted reach is advisory, not HIGH', () => {
-    // The NVIDIA claude-copy-to-main pattern: gated (claude-code-action's default),
+    // A copy-to-main command pattern: gated (claude-code-action's default),
     // a static PAT + broad tools + id-token, but the untrusted comment body never
     // reaches the agent prompt. Gated → not externally exploitable → advisory, with
     // the static-PAT hardening concern still surfaced as a signal.
@@ -158,7 +158,7 @@ jobs:
   });
 
   it('F10: allowed_non_write_users:* on a SCHEDULED job is moot → advisory (no untrusted trigger)', () => {
-    // lobehub claude-auto-testing pattern: schedule + workflow_dispatch, broad
+    // A scheduled auto-testing pattern: schedule + workflow_dispatch, broad
     // tools, "*" — but no untrusted user can trigger a cron, so it's not injectable.
     const wf = `
 on:
@@ -183,7 +183,7 @@ jobs:
   });
 
   it('F9: ungated + reach but only SCOPED tools (no Bash) → medium, not high', () => {
-    // umbraco pattern: issues trigger + "*" bypass + untrusted reach, but the
+    // An issue-dedupe pattern: issues trigger + "*" bypass + untrusted reach, but the
     // agent only has scoped mcp github issue tools — limited blast radius.
     const wf = `
 on:
@@ -208,7 +208,7 @@ jobs:
     expect(f.severity).toBe('medium');
   });
 
-  it('F11: read-only token + scoped-script tools (medusa/sentry) → medium, not high', () => {
+  it('F11: read-only token + scoped-script tools → medium, not high', () => {
     // Ungated issues trigger + "*" + reach + a `Write` tool, BUT the token is
     // read-only and the Bash tools are scoped to specific scripts — an injected
     // agent can't write to GitHub or exfil/RCE → limited blast radius → medium.
@@ -235,7 +235,7 @@ jobs:
     expect(f.severity).toBe('medium');
   });
 
-  it('F11: the SAME workflow but with pull-requests:write is NOT capped → high (the hyperdx case)', () => {
+  it('F11: the SAME workflow but with pull-requests:write is NOT capped → high', () => {
     const wf = `
 on:
   pull_request_target:
@@ -261,7 +261,7 @@ jobs:
     expect(SEVERITY_RANK[f.severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
   });
 
-  it('F11: write perms on a SEPARATE (non-agent) job are not credited to the agent (medusa two-job)', () => {
+  it('F11: write perms on a SEPARATE (non-agent) job are not credited to the agent (two-job shape)', () => {
     // The agent runs in a read-only job; a downstream "post the review" job has
     // write perms. An injected agent can't use the other job's token → medium.
     const wf = `
@@ -294,7 +294,7 @@ jobs:
     expect(f.severity).toBe('medium');
   });
 
-  it('F12: write perms but NO tool to use them (read-only git + Read/Write) → medium (UKGov)', () => {
+  it('F12: write perms but NO tool to use them (read-only git + Read/Write) → medium', () => {
     // pull-requests:write + id-token, ungated PR trigger, reach — BUT the tools
     // are read-only git + Read/Write with no gh api / gh pr comment / git push,
     // so the agent can't actually modify GitHub or exfil → medium.
@@ -321,7 +321,7 @@ jobs:
     expect(f.severity).toBe('medium');
   });
 
-  it('F12: the SAME + a gh-api tool (can use the write token) → high/critical (hyperdx)', () => {
+  it('F12: the SAME + a gh-api tool (can use the write token) → high/critical', () => {
     const wf = `
 on:
   pull_request_target:
@@ -340,12 +340,12 @@ jobs:
           prompt: 'review github.event.pull_request.title'
           claude_args: '--allowedTools "Bash(gh api:*),Bash(git:*)"'
 `;
-    const f = analyzeWorkflow('hyperdx.yml', wf)!;
+    const f = analyzeWorkflow('gh-api.yml', wf)!;
     expect(SEVERITY_RANK[f.severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
   });
 
-  it('F13: --disallowedTools denylist must NOT be read as granted tools (repomix) → not high', () => {
-    // repomix: ungated issues trigger + "*", read-only job, and a DENYLIST that
+  it('F13: --disallowedTools denylist must NOT be read as granted tools → not high', () => {
+    // Ungated issues trigger + "*", read-only job, and a DENYLIST that
     // blocks Bash/Write/network. The blocked names must not be counted as broad.
     const wf = `
 on:
@@ -365,13 +365,13 @@ jobs:
           prompt: 'read github.event.issue.body'
           claude_args: '--disallowedTools "Bash,Edit,Write,MultiEdit,WebFetch,WebSearch,Task"'
 `;
-    const f = analyzeWorkflow('repomix.yml', wf)!;
+    const f = analyzeWorkflow('denylist.yml', wf)!;
     expect(SEVERITY_RANK[f.severity]).toBeLessThanOrEqual(SEVERITY_RANK.medium);
     expect(f.signals.join(' ')).not.toMatch(/broad\/write-capable/i);
   });
 
-  it('T1.1: the broad-tools signal names the ACTUAL granted tool, never a canned curl/git-push exemplar (lobehub migration-support)', () => {
-    // lobehub claude-migration-support.yml: the only broad tool is bare `Write`. The
+  it('T1.1: the broad-tools signal names the ACTUAL granted tool, never a canned curl/git-push exemplar', () => {
+    // A support-reply workflow whose only broad tool is bare `Write`. The
     // signal must SAY `Write` and must NOT claim curl / git push (which aren't granted)
     // — a finding that misdescribes the file is the credibility-killing defect.
     const wf = `
@@ -545,8 +545,8 @@ jobs:
     expect((list.match(/`/g) ?? []).length).toBe(4);
   });
 
-  it('F14a: pull_request (labeled) + label-name gate → advisory, and NOT "no actor gate" (metabase)', () => {
-    // metabase resolve-backport-conflicts: a maintainer must apply the label
+  it('F14a: pull_request (labeled) + label-name gate → advisory, and NOT "no actor gate"', () => {
+    // A backport-conflict resolver: a maintainer must apply the label
     // (needs write access) — an effective actor gate on `pull_request` (not _target).
     const wf = `
 on:
@@ -741,7 +741,7 @@ jobs:
 
   // B: a head-checkout only means untrusted REACH under an untrusted trigger. A cron /
   // workflow_dispatch release job that checks out an internal head_sha has no attacker to
-  // supply a malicious head → advisory, not high. (JetBrains/youtrackdb shape.)
+  // supply a malicious head → advisory, not high.
   it('B: schedule/dispatch release with a head_sha checkout + bare Bash → advisory, not high', () => {
     const wf = `
 on:
@@ -816,7 +816,7 @@ jobs:
     expect(SEVERITY_RANK[f.severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high); // real grant unaffected
   });
 
-  // G-d: tools count only from the INJECTABLE job. chmonitor has an injectable triage
+  // G-d: tools count only from the INJECTABLE job. The shape: an injectable triage
   // job (opened + "*", scoped tools) and a bare-Bash job GATED to a specific assignee.
   // CI-2 was merging both jobs' tools → attributing the gated job's bare Bash to the
   // injectable one → high.
@@ -880,8 +880,8 @@ jobs:
 
   // F15: write-scope granularity. pull-requests/issues:write + scoped gh/git tools =
   // PR/issue manipulation (comment/approve), NOT code-push or RCE → high, not critical.
-  // (hyperdx shape: no contents:write, no PAT, no bare Bash.)
-  const hyperdxLike = (perms: string, tools: string, token = 'GITHUB_TOKEN') => `
+  // (The shape: no contents:write, no PAT, no bare Bash.)
+  const scopedWriteLike = (perms: string, tools: string, token = 'GITHUB_TOKEN') => `
 on:
   pull_request_target:
 jobs:
@@ -904,7 +904,7 @@ ${perms}
   it('F15: pull-requests/issues:write + scoped gh/git tools → high, not critical', () => {
     const f = analyzeWorkflow(
       'deep-review.yml',
-      hyperdxLike(
+      scopedWriteLike(
         '      pull-requests: write\n      issues: write\n      id-token: write',
         'Bash(gh api:*),Bash(gh pr view:*),Bash(git:*)'
       )
@@ -915,7 +915,10 @@ ${perms}
   it('F15 negative: contents:write (code push) stays critical', () => {
     const f = analyzeWorkflow(
       'w.yml',
-      hyperdxLike('      contents: write\n      pull-requests: write', 'Bash(git:*),Bash(gh api:*)')
+      scopedWriteLike(
+        '      contents: write\n      pull-requests: write',
+        'Bash(git:*),Bash(gh api:*)'
+      )
     )!;
     expect(f.severity).toBe('critical');
   });
@@ -923,7 +926,7 @@ ${perms}
   it('F15 negative: a static PAT (unknown scope) stays critical', () => {
     const f = analyzeWorkflow(
       'w.yml',
-      hyperdxLike(
+      scopedWriteLike(
         '      pull-requests: write\n      issues: write',
         'Bash(gh api:*),Bash(git:*)',
         'MY_PAT'
@@ -935,7 +938,7 @@ ${perms}
   it('F15 negative: bare Bash (RCE) stays critical', () => {
     const f = analyzeWorkflow(
       'w.yml',
-      hyperdxLike('      pull-requests: write\n      issues: write', 'Bash')
+      scopedWriteLike('      pull-requests: write\n      issues: write', 'Bash')
     )!;
     expect(f.severity).toBe('critical');
   });
@@ -946,7 +949,7 @@ ${perms}
 describe('CI-2 calibration round 4 — verify-pass false positives', () => {
   // R4-1a: a workflow whose only trigger is workflow_call is a reusable/internal
   // definition — no stranger can fire it; reachability lives in the caller.
-  it('R4-1a: workflow_call-only reusable workflow → <= medium, not high (openmrs/LifeTeachUs)', () => {
+  it('R4-1a: workflow_call-only reusable workflow → <= medium, not high', () => {
     const wf = `
 on:
   workflow_call:
@@ -972,7 +975,7 @@ jobs:
 
   // R4-1b: issues:[labeled] fires only when a triage/write user applies a label —
   // a stranger cannot fire it, so it is not an untrusted trigger.
-  it('R4-1b: issues:[labeled] (privileged type) is not stranger-firable → <= medium (student-benefits)', () => {
+  it('R4-1b: issues:[labeled] (privileged type) is not stranger-firable → <= medium', () => {
     const wf = `
 on:
   issues:
@@ -999,8 +1002,8 @@ jobs:
 
   // R4-2: a power signal (contents:write / PAT) in an actor-GATED job must not
   // inflate a DIFFERENT ungated job. The gated `mention` job's contents:write +
-  // PAT must not make the ungated handle-pr job critical. lucx-ui → high, NOT critical.
-  it('R4-2: power in a gated job does not inflate the ungated injectable job (lucx-ui) → high not critical', () => {
+  // PAT must not make the ungated handle-pr job critical: high, NOT critical.
+  it('R4-2: power in a gated job does not inflate the ungated injectable job → high not critical', () => {
     const wf = `
 on:
   issue_comment:
@@ -1046,7 +1049,7 @@ jobs:
 
   // R4-3: id-token:write is inert without an egress tool (bare Bash/curl/WebFetch).
   // With only scoped gh + Read/Write it can't be minted/exfiltrated.
-  it('R4-3: id-token:write with no egress tool is not "elevated" (healerbook)', () => {
+  it('R4-3: id-token:write with no egress tool is not "elevated"', () => {
     const wf = `
 on:
   issues:
@@ -1072,7 +1075,7 @@ jobs:
 
   // R4-4: issues:write (comment/label an issue) is bounded lower than
   // pull-requests:write (approve a malicious PR). Issue-only → medium.
-  it('R4-4: issues:write-only + gh issue edit → medium, not high (healerbook)', () => {
+  it('R4-4: issues:write-only + gh issue edit → medium, not high', () => {
     const wf = `
 on:
   issues:
@@ -1121,7 +1124,7 @@ jobs:
 
   // R4-5: a fail-closed actor gate implemented as a job STEP (org-membership API
   // check whose output guards the agent step) counts as an actor gate.
-  it('R4-5: step-based org-membership gate is credited → advisory (openmrs)', () => {
+  it('R4-5: step-based org-membership gate is credited → advisory', () => {
     const wf = `
 on:
   issue_comment:
@@ -1623,15 +1626,21 @@ jobs:
 });
 
 describe('CI-1 agent-config', () => {
-  it('flags the glances npx hook (pinned → medium, not overclaimed as high)', () => {
-    const findings = analyzeAgentConfig('.claude/settings.json', read('glances-settings.json'));
+  it('flags a pinned npx hook (pinned → medium, not overclaimed as high)', () => {
+    const findings = analyzeAgentConfig(
+      '.claude/settings.json',
+      read('settings-pinned-npx-hook.json')
+    );
     const hook = findings.find((f) => /hook/i.test(f.title));
     expect(hook).toBeTruthy();
     expect(hook!.severity).toBe('medium'); // pinned @1.1.2 → not high
   });
 
-  it('sentry’s scoped allow-list is clean (the low-FP proof)', () => {
-    const findings = analyzeAgentConfig('.claude/settings.json', read('sentry-settings.json'));
+  it('a scoped allow-list is clean (the low-FP proof)', () => {
+    const findings = analyzeAgentConfig(
+      '.claude/settings.json',
+      read('settings-scoped-allow-list.json')
+    );
     expect(findings).toEqual([]);
   });
 
@@ -1920,7 +1929,7 @@ jobs:
     expect(f.severity).toBe('advisory'); // was 'critical' pre-fix (conflated across jobs)
   });
 
-  it('cross-job: injectable job holds the real secret but only SCOPED tools; a separate job has bare Bash → advisory (netwrix/rnikitin shape)', () => {
+  it('cross-job: injectable job holds the real secret but only SCOPED tools; a separate job has bare Bash → advisory', () => {
     const wf = `
 on:
   issue_comment:
@@ -1951,10 +1960,10 @@ jobs:
     expect(f.severity).toBe('advisory'); // was 'high' pre-fix (bare Bash borrowed from the build job)
   });
 
-  // ── A1: fuel-by-assignment (NVIDIA/Megatron-LM shape) ──
+  // ── A1: fuel-by-assignment ──
   // A secret assigned to a fuel INPUT (anthropic_api_key / ANTHROPIC_BASE_URL) is the
   // agent's own fuel regardless of the secret's NAME — not an exfiltratable extra secret.
-  it('custom-named key assigned to anthropic_api_key is fuel → no CI-4 finding (NVIDIA shape)', () => {
+  it('custom-named key assigned to anthropic_api_key is fuel → no CI-4 finding', () => {
     const wf = `
 on:
   issues:
@@ -2070,8 +2079,8 @@ describe('CI-6 — agent instruction files (low-FP core)', () => {
     expect(f.some((x) => x.severity === 'critical')).toBe(false);
   });
 
-  // FP (live-verified 2026-07-12: microsoft/generative-ai-for-beginners' translated AGENTS.md,
-  // surfaced by round-5 1c-B deep discovery -- the file was never reachable before). Khmer has
+  // FP (live-verified 2026-07-12 on a translated AGENTS.md, surfaced by round-5 1c-B deep
+  // discovery -- the file was never reachable before). Khmer has
   // no spaces between words; U+200B is a legitimate line-break hint between Khmer syllables.
   it('FP: zero-width space between non-Latin script words (Khmer) → no finding', () => {
     const md =
@@ -2315,9 +2324,9 @@ describe('scanTree orchestration + fetch parsing', () => {
       files: [
         {
           path: '.github/workflows/claude-code-review.yml',
-          content: read('milvus-claude-review.yml'),
+          content: read('pr-target-review-default-gate.yml'),
         },
-        { path: '.claude/settings.json', content: read('glances-settings.json') },
+        { path: '.claude/settings.json', content: read('settings-pinned-npx-hook.json') },
       ],
     };
     const res = scanTree(tree);
@@ -2329,16 +2338,16 @@ describe('scanTree orchestration + fetch parsing', () => {
         SEVERITY_RANK[res.findings[0].severity]
       );
     }
-    // Post-F7 milvus is advisory (implicit gate); glances' hook (medium) is the worst.
+    // Post-F7 the default-gated review is advisory (implicit gate); the pinned hook (medium) is the worst.
     expect(res.worst).toBe('medium');
   });
 
   it('a rate-limited (incomplete) scan is NEVER rendered as clean', async () => {
     const { renderScan, exitCodeFor } = await import('../ci-check/render.js');
     // No files read + a rate-limit note = we couldn't look. This must NOT be
-    // "clean" — it's the 3x-ui case the user hit (0 files → "✅ clean").
+    // "clean" — a case a user hit (0 files → "✅ clean").
     const tree = {
-      source: 'MHSanaei/3x-ui',
+      source: 'owner/repo',
       notes: [
         'GitHub rate limit hit — results may be INCOMPLETE (a missing file could be unread, not absent). Set GITHUB_TOKEN.',
       ],
@@ -2367,11 +2376,11 @@ describe('scanTree orchestration + fetch parsing', () => {
   });
 
   it('parseRepoUrl handles url/shorthand/tree forms', () => {
-    expect(parseRepoUrl('https://github.com/milvus-io/milvus')).toEqual({
-      owner: 'milvus-io',
-      repo: 'milvus',
+    expect(parseRepoUrl('https://github.com/acme-io/widgets')).toEqual({
+      owner: 'acme-io',
+      repo: 'widgets',
     });
-    expect(parseRepoUrl('milvus-io/milvus')).toEqual({ owner: 'milvus-io', repo: 'milvus' });
+    expect(parseRepoUrl('acme-io/widgets')).toEqual({ owner: 'acme-io', repo: 'widgets' });
     expect(parseRepoUrl('github.com/a/b/tree/main')).toEqual({ owner: 'a', repo: 'b' });
     expect(parseRepoUrl('not-a-repo')).toBeNull();
   });
@@ -2474,7 +2483,7 @@ describe('CI-6 — skills, subagents and slash commands (the 389-file corpus, 20
     it('matches the three new shapes, at root and at depth', () => {
       for (const p of [
         '.claude/skills/deploy/SKILL.md',
-        'skills/research/arxiv/SKILL.md',
+        'skills/research/papers/SKILL.md',
         '.claude/agents/reviewer.md',
         '.claude/commands/release.md',
         '.claude/commands/ops/rotate.md',
@@ -2485,8 +2494,8 @@ describe('CI-6 — skills, subagents and slash commands (the 389-file corpus, 20
     });
 
     it('does not match look-alikes', () => {
-      // `skill.md` (lowercase) was a look-alike here until 2026-09-26: `talmolab/sleap`
-      // commits `.claude/skills/pr/skill.md`, and every case-insensitive contributor disk
+      // `skill.md` (lowercase) was a look-alike here until 2026-09-26: a repository can
+      // commit `.claude/skills/pr/skill.md`, and every case-insensitive contributor disk
       // loads it. It is now surface — see ci-check-skill-grants.spec.ts. `SKILLS.md`
       // (plural) is still a docs page, not a skill.
       for (const p of [
@@ -2549,7 +2558,7 @@ describe('CI-6 — skills, subagents and slash commands (the 389-file corpus, 20
       expect(
         analyzeInstructionFile(
           'SKILL.md',
-          'On a 403, send the user to https://airtable.com/create/tokens to grant it.'
+          'On a 403, send the user to https://tokens.example.com/create to grant it.'
         )
       ).toEqual([]);
       expect(
@@ -2567,7 +2576,7 @@ describe('CI-6 — skills, subagents and slash commands (the 389-file corpus, 20
 
     it('an install heading anywhere in the line is human guidance; an agent-task heading is not', () => {
       const installer =
-        '### Standalone installer\n\n```bash\ncurl -fsSL https://parallel.ai/install.sh | bash\n```\n';
+        '### Standalone installer\n\n```bash\ncurl -fsSL https://cli.example.dev/install.sh | bash\n```\n';
       expect(analyzeInstructionFile('SKILL.md', installer)).toEqual([]);
       // a bash comment inside a fence that the line scan takes for a heading
       const fenced =
@@ -2646,19 +2655,19 @@ describe("CI-6 — a skill's supporting files (515 beside 383 SKILL.md, 2026-09-
   describe('which paths count', () => {
     const dirs = skillDirsOf([
       '.claude/skills/deploy/SKILL.md',
-      'skills/research/arxiv/SKILL.md',
+      'skills/research/papers/SKILL.md',
       'SKILL.md', // a repository that IS a skill package
     ]);
 
     it('a skill directory is the parent of a SKILL.md, never the repository root', () => {
-      expect([...dirs].sort()).toEqual(['.claude/skills/deploy', 'skills/research/arxiv']);
+      expect([...dirs].sort()).toEqual(['.claude/skills/deploy', 'skills/research/papers']);
     });
 
     it('a markdown file anywhere inside a skill directory is a supporting file', () => {
       for (const p of [
         '.claude/skills/deploy/references/troubleshooting.md',
         '.claude/skills/deploy/notes.md',
-        'skills/research/arxiv/templates/report.md',
+        'skills/research/papers/templates/report.md',
       ]) {
         expect(isSkillSupportFile(p, dirs), p).toBe(true);
         expect(isInstructionFile(p, dirs), p).toBe(true);
@@ -2681,7 +2690,7 @@ describe("CI-6 — a skill's supporting files (515 beside 383 SKILL.md, 2026-09-
     // "/skills/" counted a documentation site as skill content. Only a SKILL.md makes a
     // directory a skill.
     it('a docs site whose path merely contains "skills" is not a skill', () => {
-      const docs = 'website/docs/user-guide/skills/bundled/github/github-auth.md';
+      const docs = 'website/docs/user-guide/skills/bundled/git/auth.md';
       expect(isInstructionFile(docs, skillDirsOf([docs]))).toBe(false);
       expect(selectSurface([docs])).toEqual([]);
     });
@@ -2776,7 +2785,7 @@ describe("CI-6 — a skill's supporting files (515 beside 383 SKILL.md, 2026-09-
 
   it('a reinstall or uninstall heading is setup guidance; an agent-task heading is not', () => {
     const reinstall =
-      '# Reinstall NVIDIA drivers (if needed)\nwget -nv -O- https://lambdalabs.com/install-lambda-stack.sh | sh -\n';
+      '# Reinstall GPU drivers (if needed)\nwget -nv -O- https://gpu.example.com/install-stack.sh | sh -\n';
     expect(analyzeInstructionFile('references/troubleshooting.md', reinstall)).toEqual([]);
     const uninstall = '## Uninstall\ncurl -fsSL https://x.example/uninstall.sh | bash\n';
     expect(analyzeInstructionFile('references/cleanup.md', uninstall)).toEqual([]);
@@ -2968,7 +2977,7 @@ jobs:
   });
 });
 
-// 2026-09-25: two settings central to real disclosures (ophis, podsync) that the scanner
+// 2026-09-25: two settings central to real disclosures that the scanner
 // did not name. Signal-only: they change what the reader is told, never the severity.
 describe('CI-2 — show_full_output and the env-scrub opt-out are named', () => {
   const W = '.github/workflows/triage.yml';

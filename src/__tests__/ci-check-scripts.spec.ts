@@ -1,9 +1,9 @@
 // PR-B corpus: the scripts an agent will run, the surface cap, and the six false-positive
-// shapes the hermes-agent full scan exposed.
+// shapes one full repository scan exposed.
 //
-// WRITTEN BEFORE THE IMPLEMENTATION (CLAUDE.md: corpus before code). Real fixtures were
-// fetched 2026-09-26 from dartsim/dart, getkyo/kyo, puppetlabs/puppetlabs-firewall and the
-// local NousResearch/hermes-agent clone (d0288be5b3); synthetic rows are edits of them.
+// WRITTEN BEFORE THE IMPLEMENTATION (CLAUDE.md: corpus before code). Fixtures are short
+// hand-written files in the shapes real repositories commit (a pre-commit guard hook, a skill's
+// readme checker, an rm blocker); synthetic rows are edits of them.
 //
 // The load-bearing assertions:
 //   1. Scripts become surface BY PATH (`.claude/hooks/**`, scripts inside a skill dir)
@@ -11,7 +11,7 @@
 //   2. A hook that names a script is in one of THREE states — committed and scanned,
 //      committed but outside the paths we read, or not committed at all — and the scan says
 //      which, never guessing when the tree listing itself was incomplete.
-//   3. A guard script that mentions `rm` (puppetlabs no-rm.sh) and a JSON parser behind a
+//   3. A guard script that mentions `rm` (a no-rm hook) and a JSON parser behind a
 //      pipe (`curl … | python -c`) must stay silent: those are the cry-wolf rows.
 //   4. The 200-file cap was a correctness bug: 771 skill files in one repo hid 11 findings.
 //      Local readers get a large cap; the INCOMPLETE note fires AT the cap, not past it.
@@ -82,26 +82,26 @@ describe('scripts are surface by path', () => {
     expect(isSkillScript('.claude/skills/other/x.sh', dirs)).toBe(false); // no SKILL.md above it
   });
 
-  it('a project that carries a SKILL.md at its root is not one big skill (Project-K gstack, real)', () => {
-    // `integrations/gstack/SKILL.md` sits at the root of a whole application. The Agent
+  it('a project that carries a SKILL.md at its root is not one big skill', () => {
+    // `integrations/toolkit/SKILL.md` sits at the root of a whole application. The Agent
     // Skills layout is `SKILL.md`, `scripts/`, `bin/`, `references/`, `assets/`; the app's
     // `src/` and `test/` are the app, not the skill. Admitting them made a prompt-injection
     // CLASSIFIER and its tests read as ten HIGH prompt-override findings.
-    const dirs = skillDirsOf(['integrations/gstack/SKILL.md']);
+    const dirs = skillDirsOf(['integrations/toolkit/SKILL.md']);
     for (const p of [
-      'integrations/gstack/browse/src/cli.ts',
-      'integrations/gstack/browse/src/security-classifier.ts',
-      'integrations/gstack/browse/test/security.test.ts',
-      'integrations/gstack/test/gstack-question-log.test.ts',
-      'integrations/gstack/lib/util.js',
+      'integrations/toolkit/browse/src/cli.ts',
+      'integrations/toolkit/browse/src/security-classifier.ts',
+      'integrations/toolkit/browse/test/security.test.ts',
+      'integrations/toolkit/test/question-log.test.ts',
+      'integrations/toolkit/lib/util.js',
     ]) {
       expect(isSkillScript(p, dirs), p).toBe(false);
     }
     for (const p of [
-      'integrations/gstack/run.sh',
-      'integrations/gstack/scripts/setup.py',
-      'integrations/gstack/scripts/nested/deep.sh',
-      'integrations/gstack/bin/gstack.js',
+      'integrations/toolkit/run.sh',
+      'integrations/toolkit/scripts/setup.py',
+      'integrations/toolkit/scripts/nested/deep.sh',
+      'integrations/toolkit/bin/toolkit.js',
     ]) {
       expect(isSkillScript(p, dirs), p).toBe(true);
     }
@@ -127,8 +127,9 @@ describe('scripts are surface by path', () => {
 // ── 2. hookScriptPath ─────────────────────────────────────────────────────────
 
 describe('hookScriptPath — the repo-relative script a hook command runs', () => {
-  it('real (dartsim/dart): a quoted ${CLAUDE_PROJECT_DIR} path', () => {
-    const cmd = JSON.parse(fx('dart-settings.json')).hooks.PreToolUse[0].hooks[0].command;
+  it('a quoted ${CLAUDE_PROJECT_DIR} path', () => {
+    const cmd = JSON.parse(fx('hook-settings-quoted-project-dir.json')).hooks.PreToolUse[0].hooks[0]
+      .command;
     expect(cmd).toContain('${CLAUDE_PROJECT_DIR}');
     expect(hookScriptPath(cmd)).toBe(HOOK);
   });
@@ -164,7 +165,7 @@ describe('hookScriptPath — the repo-relative script a hook command runs', () =
 // ── 3. the three states of a hook ─────────────────────────────────────────────
 
 describe('a hook that names a script — committed and scanned, committed but unread, or missing', () => {
-  const settings = fx('dart-settings.json');
+  const settings = fx('hook-settings-quoted-project-dir.json');
   const withScript = { paths: new Set(['.claude/settings.json', HOOK]), complete: true };
   const withoutScript = { paths: new Set(['.claude/settings.json']), complete: true };
 
@@ -209,7 +210,7 @@ describe('a hook that names a script — committed and scanned, committed but un
     const files = [{ path: '.claude/settings.json', content: settings }];
     const missing = scan(files, { paths: ['.claude/settings.json'], pathsComplete: true });
     expect(rules(missing.findings)).toContain('CI-1.hook-script-missing');
-    const present = scan([...files, { path: HOOK, content: fx('dart-pre-commit-guard.sh') }], {
+    const present = scan([...files, { path: HOOK, content: fx('hook-pre-commit-guard.sh') }], {
       paths: ['.claude/settings.json', HOOK],
       pathsComplete: true,
     });
@@ -220,18 +221,18 @@ describe('a hook that names a script — committed and scanned, committed but un
 // ── 4. analyzeScript ──────────────────────────────────────────────────────────
 
 describe('analyzeScript — static, per line, graded by the same laws as the prose', () => {
-  it('real guard scripts are silent: dart pre-commit-guard.sh, kyo readme-check.sh, puppetlabs no-rm.sh', () => {
-    expect(analyzeScript(HOOK, fx('dart-pre-commit-guard.sh'), 'CI-1.hook-script')).toEqual([]);
+  it('guard scripts are silent: a pre-commit guard, a readme checker, a no-rm hook', () => {
+    expect(analyzeScript(HOOK, fx('hook-pre-commit-guard.sh'), 'CI-1.hook-script')).toEqual([]);
     expect(
       analyzeScript(
         '.claude/skills/readme/readme-check.sh',
-        fx('kyo-readme-check.sh'),
+        fx('skill-readme-check.sh'),
         'CI-6.skill-script'
       )
     ).toEqual([]);
     // Mentions `rm` on every line because it BLOCKS rm. The cry-wolf guard for this item.
     expect(
-      analyzeScript('.claude/hooks/no-rm.sh', fx('puppetlabs-no-rm.sh'), 'CI-1.hook-script')
+      analyzeScript('.claude/hooks/no-rm.sh', fx('hook-block-rm.sh'), 'CI-1.hook-script')
     ).toEqual([]);
   });
 
@@ -257,10 +258,10 @@ describe('analyzeScript — static, per line, graded by the same laws as the pro
     }
   });
 
-  it('a pipe into an inline PARSER is not fetch-and-run (the hermes shape, 11 of 14)', () => {
+  it('a pipe into an inline PARSER is not fetch-and-run (11 of 14 findings in one repository)', () => {
     for (const line of [
       'GH_USER=$(curl -s -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/user | python -c "import sys,json; print(json.load(sys.stdin)[\'login\'])")',
-      'curl -s "https://export.arxiv.org/api/query?x=1" | python -c "\nimport sys, xml.etree.ElementTree as ET\nprint(ET.parse(sys.stdin))"',
+      'curl -s "https://papers.example.org/api/query?x=1" | python -c "\nimport sys, xml.etree.ElementTree as ET\nprint(ET.parse(sys.stdin))"',
       "curl -s https://x.test/a.json | node -e \"let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).id))\"",
       'curl -s https://x.test/a.json | python3 -m json.tool',
     ]) {
@@ -276,7 +277,7 @@ describe('analyzeScript — static, per line, graded by the same laws as the pro
     expect(f.map((x) => x.severity).sort()).toEqual(['high', 'medium']);
   });
 
-  it("a publishing skill uploading the USER'S file to ITS OWN service is not exfil (hermes here-now, real)", () => {
+  it("a publishing skill uploading the USER'S file to ITS OWN service is not exfil", () => {
     // The first full-width run of this analyzer flagged these two lines HIGH on a repository
     // the manual review had called clean. Exfil is a SENSITIVE payload leaving the machine —
     // credentials, the environment — not any upload. A generic `--data-binary "@$local_file"`
@@ -289,7 +290,7 @@ describe('analyzeScript — static, per line, graded by the same laws as the pro
       expect(
         rules(
           analyzeScript(
-            '.claude/skills/here-now/scripts/drive.sh',
+            '.claude/skills/publish/scripts/upload.sh',
             line + '\n',
             'CI-6.skill-script'
           )
@@ -299,12 +300,12 @@ describe('analyzeScript — static, per line, graded by the same laws as the pro
     }
   });
 
-  it('a Python parameter named env is not an env dump (hermes unbroker/emailer.py:171, real)', () => {
+  it('a Python parameter named env is not an env dump', () => {
     const py =
-      'def send(broker: dict, body_text: str, to: str | None = None,\n         env: dict | None = None, _smtp_factory=None,\n         min_interval: float = 0.0) -> dict:\n';
-    expect(
-      analyzeScript('.claude/skills/unbroker/scripts/emailer.py', py, 'CI-6.skill-script')
-    ).toEqual([]);
+      'def send(account: dict, body_text: str, to: str | None = None,\n         env: dict | None = None, _smtp_factory=None,\n         min_interval: float = 0.0) -> dict:\n';
+    expect(analyzeScript('.claude/skills/mailer/scripts/send.py', py, 'CI-6.skill-script')).toEqual(
+      []
+    );
   });
 
   it('other exfil spellings', () => {
@@ -342,7 +343,7 @@ describe('analyzeScript — static, per line, graded by the same laws as the pro
     );
   });
 
-  it('the same phrase as a DETECTION pattern or a test payload is not an override (Project-K gstack, real)', () => {
+  it('the same phrase as a DETECTION pattern or a test payload is not an override', () => {
     // A prompt-injection classifier and its tests carry the phrases as data. Ten HIGH
     // findings on one repository in the first full-width run of this rule.
     for (const line of [
@@ -361,16 +362,16 @@ describe('analyzeScript — static, per line, graded by the same laws as the pro
     }
   });
 
-  it('env dumped to a log/pipe → advisory (hermes mcp-oauth-remote-gateway, real line)', () => {
+  it('env dumped to a log/pipe → advisory', () => {
     const f = analyzeScript(
       '.claude/skills/x/diag.sh',
-      'env | grep -iE "HERMES|RAILWAY|CONTAINER"\n',
+      'env | grep -iE "MYAPP|RAILWAY|CONTAINER"\n',
       'CI-6.skill-script'
     );
     expect(rules(f)).toEqual(['CI-6.skill-script.env-dump']);
     expect(f[0].severity).toBe('advisory');
     // The redacted form the same skill uses two paragraphs earlier is fine.
-    const redacted = 'env | grep -iE "HERMES|RAILWAY" | sed -E \'s/=(.*)$/=<redacted>/\'\n';
+    const redacted = 'env | grep -iE "MYAPP|RAILWAY" | sed -E \'s/=(.*)$/=<redacted>/\'\n';
     expect(analyzeScript('.claude/skills/x/diag.sh', redacted, 'CI-6.skill-script')).toEqual([]);
     // A shebang is not an env dump.
     expect(analyzeScript(HOOK, '#!/usr/bin/env bash\necho hi\n', 'CI-1.hook-script')).toEqual([]);
@@ -434,7 +435,7 @@ describe('the surface cap — a correctness bug on a 771-skill-file repository',
   });
 
   it('there is no total byte budget; a single file over the per-file limit is unread and noted', () => {
-    // K (2026-09-27): the 32 MiB total budget cut real repositories (github/gh-aw, 48.7 MB of
+    // K (2026-09-27): the 32 MiB total budget cut real repositories (one had 48.7 MB of
     // workflows) and let padding crowd out workflows. It is gone; the limit is per file.
     const root = tmp();
     try {
@@ -462,7 +463,7 @@ describe('the surface cap — a correctness bug on a 771-skill-file repository',
   it('every reader reports the full path listing so the hook check can decide "missing"', () => {
     const root = tmp();
     try {
-      write(root, '.claude/settings.json', fx('dart-settings.json'));
+      write(root, '.claude/settings.json', fx('hook-settings-quoted-project-dir.json'));
       write(root, 'src/index.ts', 'export {}');
       const t = readLocalTree(root);
       expect(t.paths).toContain('src/index.ts');
@@ -490,10 +491,10 @@ describe('readGitRefTree admits exactly what readLocalTree admits (CI-5 parity)'
       git('init', '-q');
       git('config', 'user.email', 't@e.test');
       git('config', 'user.name', 't');
-      w('.claude/settings.json', fx('dart-settings.json'));
-      w(HOOK, fx('dart-pre-commit-guard.sh'));
+      w('.claude/settings.json', fx('hook-settings-quoted-project-dir.json'));
+      w(HOOK, fx('hook-pre-commit-guard.sh'));
       w('.claude/skills/readme/SKILL.md', '---\nname: readme\n---\n');
-      w('.claude/skills/readme/readme-check.sh', fx('kyo-readme-check.sh'));
+      w('.claude/skills/readme/readme-check.sh', fx('skill-readme-check.sh'));
       w('src/index.ts', 'export {}');
       git('add', '-A');
       git('commit', '-qm', 'base');
@@ -511,21 +512,21 @@ describe('readGitRefTree admits exactly what readLocalTree admits (CI-5 parity)'
   });
 });
 
-// ── 7. the six hermes-agent false positives must stay silent (and their twins fire) ──
+// ── 7. six false-positive shapes from one repository stay silent (and their twins fire) ──
 
-describe('CI-6 prose: the hermes-agent false positives (14 of 14 on d0288be5b3)', () => {
+describe('CI-6 prose: six false-positive shapes (14 of 14 findings in one repository)', () => {
   const ci6 = (p: string, content: string) => rules(analyzeInstructionFile(p, content));
 
-  it('arxiv SKILL.md: curl | python -c that parses XML is not fetch-and-obey', () => {
-    expect(ci6('skills/research/arxiv/SKILL.md', fx('hermes-arxiv-SKILL.md'))).not.toContain(
+  it('a paper-search SKILL.md: curl | python -c that parses XML is not fetch-and-obey', () => {
+    expect(ci6('skills/paper-search/SKILL.md', fx('skill-fetch-parse-xml.md'))).not.toContain(
       'CI-6.fetch-and-obey'
     );
   });
 
-  it('github repo-management.md: an inline JSON parser, and `gh secret set SSH_KEY < ~/.ssh/id_rsa`', () => {
+  it('a repo-management reference: an inline JSON parser, and `gh secret set SSH_KEY < ~/.ssh/id_rsa`', () => {
     const r = ci6(
-      'skills/software-development/github/references/repo-management.md',
-      fx('hermes-github-repo-management.md')
+      'skills/github/references/repo-management.md',
+      fx('reference-json-parser-and-secret-set.md')
     );
     expect(r).not.toContain('CI-6.fetch-and-obey');
     expect(r).not.toContain('CI-6.secret-path');
@@ -533,23 +534,20 @@ describe('CI-6 prose: the hermes-agent false positives (14 of 14 on d0288be5b3)'
 
   it('a report template listing `~/.ssh/id_rsa` inside a bracketed placeholder', () => {
     expect(
-      ci6(
-        'optional-skills/security/oss-forensics/templates/malicious-package-report.md',
-        fx('hermes-malicious-package-report.md')
-      )
+      ci6('skills/forensics/templates/package-report.md', fx('template-bracket-placeholder.md'))
     ).not.toContain('CI-6.secret-path');
   });
 
-  it('system-atlas: `docs/<system>/atlas/` is a path placeholder, not a tag', () => {
-    expect(
-      ci6('optional-skills/creative/system-atlas/SKILL.md', fx('hermes-system-atlas-SKILL.md'))
-    ).not.toContain('CI-6.prompt-override');
+  it('an atlas skill: `docs/<system>/atlas/` is a path placeholder, not a tag', () => {
+    expect(ci6('skills/atlas/SKILL.md', fx('skill-path-placeholder.md'))).not.toContain(
+      'CI-6.prompt-override'
+    );
   });
 
-  it('simple-english: a Before/After grammar example is not an exfil directive', () => {
-    expect(
-      ci6('optional-skills/creative/simple-english/SKILL.md', fx('hermes-simple-english-SKILL.md'))
-    ).not.toContain('CI-6.exfil-directive');
+  it('a plain-English skill: a Before/After grammar example is not an exfil directive', () => {
+    expect(ci6('skills/plain-english/SKILL.md', fx('skill-before-after-example.md'))).not.toContain(
+      'CI-6.exfil-directive'
+    );
   });
 
   it('…and the malicious twins of each shape still fire', () => {

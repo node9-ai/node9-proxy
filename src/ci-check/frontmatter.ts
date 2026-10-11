@@ -21,7 +21,7 @@ export function parseFrontmatter(content: string): Record<string, unknown> | nul
       ? (parsed as Record<string, unknown>)
       : null;
   } catch {
-    // Real frontmatter is often not strict YAML — `moltis-org/moltis` writes
+    // Real frontmatter is often not strict YAML — a committed slash command writes
     // `argument-hint: ["a"] ["b"] ["c"]`, three flow sequences on one line, and strict
     // parsing throws on the whole block. The grant sits on its own well-formed line and
     // must not be lost with it. Fall back to the shapes a grant line can take: a scalar

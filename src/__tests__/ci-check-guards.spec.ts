@@ -88,9 +88,9 @@ describe('M — the secret-store excuse covers only `gh secret set NAME < key`',
 });
 
 describe('M — a program a script line opens and later lines close', () => {
-  it('a parser over several lines is still a parser (the real arxiv shape)', () => {
+  it('a parser over several lines is still a parser (a real paper-search shape)', () => {
     const t =
-      'curl -s "https://export.arxiv.org/api/query?x=1" | python -c "\nimport sys, xml.etree.ElementTree as ET\nprint(ET.parse(sys.stdin))"\n';
+      'curl -s "https://papers.example.org/api/query?x=1" | python -c "\nimport sys, xml.etree.ElementTree as ET\nprint(ET.parse(sys.stdin))"\n';
     expect(hook(t)).not.toContain('CI-1.hook-script.remote-exec');
   });
 

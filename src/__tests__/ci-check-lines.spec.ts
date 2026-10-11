@@ -52,10 +52,12 @@ describe('CI-2 / CI-4 — real workflow fixture (injectable-pr-target.yml)', () 
 });
 
 describe('CI-1 — settings.json', () => {
-  it('a hook naming a missing script points at its command (dartsim/dart, line 9)', () => {
+  it('a hook naming a missing script points at its command (line 9)', () => {
     const r = scanTree({
       source: 'o/r',
-      files: [{ path: '.claude/settings.json', content: fx('dart-settings.json') }],
+      files: [
+        { path: '.claude/settings.json', content: fx('hook-settings-quoted-project-dir.json') },
+      ],
       notes: [],
       paths: ['.claude/settings.json'],
       pathsComplete: true,
@@ -129,9 +131,10 @@ describe('CI-6 and the skill grant — markdown', () => {
       byRule(scan([{ path: 'CLAUDE.md', content: md }]).findings, 'CI-6.prompt-override')?.line
     ).toBe(3);
   });
-  it('a skill grant points at `allowed-tools:` (real last30days-skill-cn, line 6)', () => {
+  it('a skill grant points at `allowed-tools:` (line 6)', () => {
     const f = byRule(
-      scan([{ path: '.claude/skills/x/SKILL.md', content: fx('last30days-SKILL.md') }]).findings,
+      scan([{ path: '.claude/skills/x/SKILL.md', content: fx('skill-grant-comma-list.md') }])
+        .findings,
       'CI-1.skill-allowed-tools'
     );
     expect(f?.line).toBe(6);

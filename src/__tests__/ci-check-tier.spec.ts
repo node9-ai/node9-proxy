@@ -187,7 +187,7 @@ describe('Q — targeted fixes from the per-rule table', () => {
     ).not.toContain('CI-6.skill-script.env-dump');
     for (const line of [
       'env > /tmp/e.txt',
-      'env | grep -iE "HERMES|RAILWAY"', // unanchored: RAILWAY_TOKEN matches too
+      'env | grep -iE "MYAPP|RAILWAY"', // unanchored: RAILWAY_TOKEN matches too
       "env | grep '^GITHUB_TOKEN'", // a secret-shaped name is never a harmless selection
     ])
       expect(rulesOf({ ...skill, '.claude/skills/s/run.sh': `${line}\n` }), line).toContain(

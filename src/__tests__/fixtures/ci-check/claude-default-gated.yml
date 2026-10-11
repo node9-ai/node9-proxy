@@ -1,5 +1,6 @@
-# .github/workflows/claude.yml
-name: Claude Code
+# An @claude mention workflow on untrusted triggers with write permissions, held only by
+# claude-code-action's default write-access gate (no allowed_non_write_users).
+name: Claude
 
 on:
   issues:
@@ -15,7 +16,6 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
-  actions: read
   id-token: write
 
 jobs:
@@ -24,16 +24,10 @@ jobs:
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
-      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+      (github.event_name == 'issues' && contains(github.event.issue.body, '@claude'))
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Run Claude Code
-        id: claude
-        uses: anthropics/claude-code-action@beta
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@beta
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

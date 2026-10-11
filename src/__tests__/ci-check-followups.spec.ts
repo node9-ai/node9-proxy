@@ -1,11 +1,10 @@
 // Follow-ups I.1 and I.2 (design: scanner-gaps-code-design.md §I, 2026-09-27).
 //
-// WRITTEN BEFORE THE IMPLEMENTATION. Paths are real, from Adityavanjre/Project-K and the
-// 119-repo A/B samples.
+// WRITTEN BEFORE THE IMPLEMENTATION. Paths are in the shapes of the 119-repo A/B samples.
 //
 // I.2 — a skill directory with a package manifest beside its SKILL.md is an APPLICATION that
 // carries a skill at its root. Its own docs are not agent instructions: 7 of 7 findings under
-// such directories were false (gstack design docs, CHANGELOG, TODOS). Only the Agent Skills
+// such directories were false (the app's design docs, CHANGELOG, TODOS). Only the Agent Skills
 // layout counts there. Every other skill directory keeps today's rule — 2,824 real support
 // files, many in `templates/`, `resources/`, `examples/`, `docs/`, must not move.
 //
@@ -24,8 +23,8 @@ import {
 import { selectSurface } from '../ci-check/fetch';
 import { routeOf } from '../ci-check/route';
 
-const G = 'integrations/gstack';
-const V = 'integrations/claude-code-harness/skills/generate-video';
+const G = 'integrations/app-skill';
+const V = 'integrations/agent-harness/skills/make-video';
 
 describe('I.2 — an application with a SKILL.md at its root is not one big skill', () => {
   const listing = [
@@ -34,11 +33,11 @@ describe('I.2 — an application with a SKILL.md at its root is not one big skil
     `${G}/CHANGELOG.md`,
     `${G}/TODOS.md`,
     `${G}/CLAUDE.md`,
-    `${G}/docs/designs/GCOMPACTION.md`,
-    `${G}/docs/designs/ML_PROMPT_INJECTION_KILLER.md`,
+    `${G}/docs/designs/COMPACTION.md`,
+    `${G}/docs/designs/PROMPT_FILTER.md`,
     `${G}/references/usage.md`,
-    `${G}/autoplan/SKILL.md`, // a nested ordinary skill inside the app
-    `${G}/autoplan/notes.md`,
+    `${G}/planner/SKILL.md`, // a nested ordinary skill inside the app
+    `${G}/planner/notes.md`,
     `${V}/SKILL.md`,
     `${V}/package.json`,
     `${V}/references/prompts.md`,
@@ -60,8 +59,8 @@ describe('I.2 — an application with a SKILL.md at its root is not one big skil
     for (const p of [
       `${G}/CHANGELOG.md`,
       `${G}/TODOS.md`,
-      `${G}/docs/designs/GCOMPACTION.md`,
-      `${G}/docs/designs/ML_PROMPT_INJECTION_KILLER.md`,
+      `${G}/docs/designs/COMPACTION.md`,
+      `${G}/docs/designs/PROMPT_FILTER.md`,
       `${V}/src/README.md`,
       `${V}/tests/fixtures/case.md`,
     ]) {
@@ -80,7 +79,7 @@ describe('I.2 — an application with a SKILL.md at its root is not one big skil
   });
 
   it('a nested ordinary skill inside the app keeps the ordinary rule', () => {
-    expect(isSkillSupportFile(`${G}/autoplan/notes.md`, dirs, apps)).toBe(true);
+    expect(isSkillSupportFile(`${G}/planner/notes.md`, dirs, apps)).toBe(true);
   });
 
   it('an ordinary skill is unchanged: docs/ and rules/ are still support files', () => {
@@ -98,7 +97,7 @@ describe('I.2 — an application with a SKILL.md at its root is not one big skil
     // SKILL.md names them — and sorted after every file that is always graded.
     const dirs = skillDirsOf(listing);
     const apps = appSkillDirsOf(listing, dirs);
-    for (const doc of [`${G}/docs/designs/GCOMPACTION.md`, `${G}/CHANGELOG.md`]) {
+    for (const doc of [`${G}/docs/designs/COMPACTION.md`, `${G}/CHANGELOG.md`]) {
       expect(picked).toContain(doc);
       expect(routeOf(doc, dirs, apps)).toBe('app-doc');
       expect(picked.indexOf(doc)).toBeGreaterThan(picked.indexOf(`${G}/references/usage.md`));

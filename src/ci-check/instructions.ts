@@ -72,9 +72,9 @@ const stripZeroWidth = (t: string): string => t.replace(/[​⁠]/g, '');
 /** Every committed file an agent loads as instructions on its own. ONE definition: the tree
  *  walk in fetch.ts picks by it and the dispatcher in index.ts routes by it, so a file can
  *  never be fetched and then silently dropped, or the reverse. The last three shapes are the
- *  Agent Skills standard (`SKILL.md` in any letter case — `talmolab/sleap` commits
+ *  Agent Skills standard (`SKILL.md` in any letter case — some repositories commit
  *  `skill.md`, which every case-insensitive contributor disk resolves; the always-loaded
- *  CLAUDE.md/AGENTS.md stay case-exact — loaded by Claude Code, Codex, Hermes, OpenClaw and Pi)
+ *  CLAUDE.md/AGENTS.md stay case-exact — loaded by Claude Code, Codex and other agents)
  *  and Claude Code's own subagents and slash commands. Measured over 389 real skill files
  *  before they were added (2026-09-22): 4 of 4 known-malicious fixtures caught; 12 benign
  *  files flagged, every one a false positive, in the shapes fixed alongside this change. */
@@ -190,7 +190,7 @@ export function isHookScript(path: string): boolean {
 }
 /** A skill's scripts live where the Agent Skills layout puts them: directly beside the
  *  SKILL.md, or under its `scripts/` or `bin/`. A whole application that carries a SKILL.md
- *  at its root (Project-K's `integrations/gstack/`) is not one big skill: its `src/` and
+ *  at its root (e.g. `integrations/<app>/`) is not one big skill: its `src/` and
  *  `test/` are the app, and admitting them made a prompt-injection classifier and its tests
  *  read as ten HIGH findings (2026-09-26). */
 export function isSkillScript(path: string, skillDirs: ReadonlySet<string>): boolean {
@@ -365,7 +365,7 @@ function isQuotedExample(text: string, idx: number, len: number): boolean {
 // `curl … | python -c "<program>"` where the program only PARSES what it reads is not
 // fetch-and-obey — it is the everyday shape of a skill that reads an API. It becomes one only
 // when the inline program can execute what it was handed. `| python` with no `-c` executes
-// stdin and stays a match. (11 of the 14 hermes-agent findings, 2026-09-26.)
+// stdin and stays a match. (11 of the 14 findings in one repository, 2026-09-26.)
 // Code-running idioms, not only the words `exec`/`eval` (§M): an import machinery, a code
 // object, a deserializer that runs code, a raw call into libc, a new function body, a VM, a
 // dynamic import. `re.compile` is a regex, not code.

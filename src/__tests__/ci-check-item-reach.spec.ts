@@ -66,7 +66,7 @@ describe('S.1 — what must not change', () => {
   });
 
   it('a reusable template given the issue number stays advisory: the caller decides reach', () => {
-    // A/B regression (google-github-actions/run-gemini-cli, hand-verified clean): its gated
+    // A/B regression (a repository hand-verified as clean): its gated
     // dispatcher calls these templates, which read the item by number. Item reach applies only
     // to a workflow with its own stranger-firable trigger.
     expect(rank('neg-reusable-item-handle.yml')).toBeLessThanOrEqual(SEVERITY_RANK.advisory);

@@ -2,8 +2,8 @@
 // (design: scanner-gaps-code-design.md §S.5, 2026-10-09). WRITTEN BEFORE THE IMPLEMENTATION.
 //
 // upstreamJobGates refused any upstream `if:` that contained `||` anywhere, even inside a
-// parenthesised group whose every alternative is gated (eeea2222/systemd-clean, hand-verified
-// clean, scored medium). S.2 made jobActorGate judge each top-level `||` branch; the needs chain
+// parenthesised group whose every alternative is gated (a repository hand-verified as clean,
+// scored medium). S.2 made jobActorGate judge each top-level `||` branch; the needs chain
 // now uses the same predicate, so the two can no longer disagree.
 
 import { describe, it, expect } from 'vitest';

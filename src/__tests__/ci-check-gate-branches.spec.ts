@@ -3,7 +3,7 @@
 //
 // jobActorGate joined the job `if:` into one string and looked for a gate anywhere in it, so
 // `(issues opened) || (comment && login == 'owner')` counted as gated by the second branch while
-// the first let any issue opener reach the agent (derstrassi/karoofirefly, hand-verified).
+// the first let any issue opener reach the agent (a hand-verified case).
 // Now every top-level `||` branch of the job `if:` must be gated, or pinned to a trusted event.
 
 import { describe, it, expect } from 'vitest';

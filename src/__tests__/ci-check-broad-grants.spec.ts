@@ -62,11 +62,11 @@ describe('S.3 — what stays not broad', () => {
     'Bash(PYRIGHT_PYTHON_IGNORE_WARNINGS=1 uv run pyright *)',
     'Bash(curl -s https://api.example.com/health)',
     'Bash(gh api repos/o/r/issues:*)',
-    // The common read grant; getsentry/sentry's committed config (the low-FP fixture) has it.
+    // The common read grant; the low-FP settings fixture has it.
     'Bash(gh api:*)',
     'Bash(gh issue view:*)',
     'Bash(python3)',
-    // Informational flags, as in getsentry/sentry's committed config.
+    // Informational flags, as in the low-FP settings fixture.
     'Bash(node --version:*)',
     'Bash(python3 --help:*)',
   ];

@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "deny": [
+      "Read: .venv/**",
+      "Read: node_modules/**",
+      "Read: __pycache__/**",
+      "Read: dist/**",
+      "Read: .git/**"
+    ]
+  },
+  "skills": {
+    "test": {
+      "description": "Run the appropriate test suite based on changed files",
+      "path": "skills/test.md"
+    },
+    "lint": {
+      "description": "Format and lint the codebase",
+      "path": "skills/lint.md"
+    }
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx commit-guard@1.1.2"
+          }
+        ]
+      }
+    ]
+  }
+}

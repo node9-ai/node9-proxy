@@ -3,7 +3,7 @@
 //
 // I.2 made a skill directory with a package manifest beside its SKILL.md an application: only the
 // Agent Skills layout counts as its support files, so an app's own design docs and CHANGELOG are
-// not read as agent instructions (7 false positives in Project-K's gstack). An attacker could use
+// not read as agent instructions (7 false positives in one repository). An attacker could use
 // that: add a package.json, put the payload in docs/setup.md, and have the SKILL.md say "follow
 // docs/setup.md". Now such a doc is read, and graded only when the app's SKILL.md names it.
 
@@ -69,7 +69,7 @@ describe('N — a doc the app SKILL.md names is graded', () => {
   });
 });
 
-describe('N — an app doc the SKILL.md does not name stays silent (the gstack shape)', () => {
+describe('N — an app doc the SKILL.md does not name stays silent (the app-root shape)', () => {
   it('not graded and not listed as inspected', () => {
     const root = repo(
       appFiles('Use the app.', {

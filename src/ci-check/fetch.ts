@@ -144,7 +144,7 @@ export const isUnwalked = (p: string): boolean =>
 const isBuildOutput = (p: string): boolean => underDir(p, SOFT_DIR);
 /** How many NESTED surface files one reader may take. Only the GitHub API reader is capped: it
  *  pays one rate-limited request per file. The local and git readers are not — there is no
- *  total budget any more (§K, 2026-09-27): a 32 MiB budget cut real repositories (github/gh-aw
+ *  total budget any more (§K, 2026-09-27): a 32 MiB budget cut real repositories (one
  *  commits 48.7 MB of workflows) and let padding crowd out the workflows. Memory is bounded per
  *  file instead, by MAX_FILE_BYTES and by reading content only when it is analyzed. */
 export interface SurfaceCaps {
@@ -372,7 +372,7 @@ function kindOfMode(mode: string): Kind {
 const INCOMPLETE = 'may be INCOMPLETE';
 
 /** One text form for every reader: a checkout written with `eol=crlf` has CRLF where the blob
- *  has LF (hermes-agent's install.ps1), and every check reads line by line. Without this, the
+ *  has LF (a committed install.ps1), and every check reads line by line. Without this, the
  *  local and git readers disagree on content that is the same file. Content only — a link's
  *  text is used exactly as stored. */
 const lf = (t: string): string => t.replace(/\r\n/g, '\n');
@@ -1118,7 +1118,7 @@ async function listTree(
 /** One scan's spend on the API. The hosted scan shares one token across every user, and a repo
  *  is free to be hostile: 2,000 workflows sharing one 4 MiB blob cost the attacker 4 MiB. So
  *  blobs are fetched once per sha, and the scan stops at a request and byte budget — above the
- *  largest real surface measured (github/gh-aw: 772 workflows, 48.7 MB) — and says so. */
+ *  largest real surface measured (772 workflows, 48.7 MB) — and says so. */
 export const API_BUDGET = { requests: 1000, bytes: 64 * 1024 * 1024 };
 
 type BlobResult = { text: string } | { error: string };
@@ -1165,7 +1165,7 @@ class ApiSession {
 }
 
 /** One blob by sha — the Git Blobs API, not Contents: Contents returns a file over 1 MB with an
- *  EMPTY body (hermes-agent's 1,077,327-byte llms-full.md read as nothing) and a symlink with
+ *  EMPTY body (a 1,077,327-byte llms-full.md read as nothing) and a symlink with
  *  no content at all. Blobs returns both. Raw text: a link's text is used exactly as stored. */
 async function fetchBlob(
   owner: string,

@@ -1,0 +1,37 @@
+# pull_request_target, but only a maintainer-applied label starts it, the checkout is the base
+# branch, and the agent's tools are scoped gh commands.
+name: Needs QA Checklist
+
+on:
+  pull_request_target:
+    types: [labeled]
+
+jobs:
+  generate-checklist:
+    if: ${{ github.event.label.name == 'needs-qa' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Generate QA checklist
+        uses: anthropics/claude-code-action@v1.0.132
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          github_token: ${{ github.token }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Fetch the PR title, body and diff, write a QA checklist for it, and post it as a
+            PR comment (update the previous one if it exists).
+          claude_args: |
+            --allowedTools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh api repos/${{ github.repository }}/issues/comments/*:*)"

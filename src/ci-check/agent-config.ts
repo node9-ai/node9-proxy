@@ -54,7 +54,7 @@ const OPEN_RUNNER_RE = new RegExp(
 // every repetition above is bounded.
 const OPEN_RUNNER_MAX = 300;
 // An informational flag (`node --version:*`, `python --help:*`) runs nothing the caller chose;
-// getsentry/sentry, the low-FP fixture, grants five of them. Only the long forms: `-v` is
+// the low-FP settings fixture grants five of them. Only the long forms: `-v` is
 // verbose for curl/ssh/bash and `-h` a host for docker (second review).
 const INFO_FLAG_RE = /\s--(version|help)\b/;
 function openRunner(grant: string): boolean {

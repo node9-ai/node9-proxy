@@ -379,7 +379,7 @@ function promptTakesUntrusted(steps: Step[]): boolean {
 // S.1 (2026-10-09): untrusted text that reaches the agent WITHOUT sitting in its prompt.
 // The issue-triage and dedupe templates pass the item NUMBER (or nothing) and let the agent
 // fetch the text itself, or an earlier step writes the body into a prompt file. 216 hand-
-// verified misses on 2.27.0 included ~60 of this shape (OrcaSlicer, hermes, …).
+// verified misses on 2.27.0 included ~60 of this shape.
 //
 // A tool that reads issues/PRs (the triggering one, or any one an injected agent names).
 const ITEM_READ_TOOL_RE =
@@ -454,7 +454,7 @@ const NEGATED_CONTAINS_RE =
   /!\s*\(?\s*contains\((?:[^()]|\([^()]*\))*(login|actor|association|OWNER|MEMBER|COLLABORATOR)/i;
 
 /** Is a label-type gate configured on an untrusted trigger? F14a: a label gate
- *  counts on pull_request_target OR pull_request (metabase gates a
+ *  counts on pull_request_target OR pull_request (a backport resolver gates a
  *  `pull_request: types:[labeled]` job on the label name). */
 function labelTypeConfigured(wf: Workflow, raw: Record<string, unknown>): boolean {
   const on = (wf.on ?? raw['on'] ?? raw[true as unknown as string]) as
@@ -495,8 +495,8 @@ function ifsAreGated(ifs: string, labelConfigured: boolean): boolean {
 
 /** R4-5: a fail-closed actor gate expressed as a job STEP — a membership/permission
  *  API check (`gh api /orgs/…/memberships/…`, `getCollaboratorPermissionLevel`, …) whose
- *  output guards the agent step via `if: steps.<gate>.outputs.<x> == …`. openmrs gates this
- *  way; ACTOR_GATE_RE only reads `if:` expressions and misses it. */
+ *  output guards the agent step via `if: steps.<gate>.outputs.<x> == …`. Some repositories gate
+ *  this way; ACTOR_GATE_RE only reads `if:` expressions and misses it. */
 function hasStepMembershipGate(job: Job): boolean {
   const steps = job.steps ?? [];
   // Gate steps: a per-user membership/permission CHECK that has an `id` (so a later
@@ -756,7 +756,7 @@ function upstreamJobGates(
   const label = labelTypeConfigured(wf, raw);
   // S.5 (2026-10-09): judged per top-level `||` branch, like the job's own gate. The old test
   // refused any `||`, even one inside a group whose every alternative is gated
-  // (eeea2222/systemd-clean, hand-verified clean, scored medium).
+  // (a repository hand-verified as clean was scored medium).
   if (depIf && jobIfGated(depIf, label)) return true;
   const steps = dep.steps ?? [];
   const stepGated = ifsAreGated(stepIfText(steps), label) || hasStepMembershipGate(dep);
@@ -874,7 +874,7 @@ function workflowRunChecked(ref: string): boolean {
 
 /** G-d: agent steps whose OWN job is injectable — i.e. not actor-gated and not held
  *  by the claude-code-action default gate. Only these contribute to blast radius: a
- *  gated sibling job's tools (chmonitor's `assignee == duyetbot` bare-Bash job) can't
+ *  gated sibling job's tools (a bare-Bash job gated on `assignee == <bot>`) can't
  *  be reached by the untrusted trigger, so they must not inflate the injectable job.
  *  Falls back to all agent steps if none qualify (never blank). */
 function injectableJobs(
@@ -1012,7 +1012,7 @@ const ENV_SCRUB_MIN: [number, number, number] = [1, 0, 77]; // #1093, 2026-03-23
  *  publicly visible. The action compares the input strictly to "true", so a quoted "True" does
  *  not enable it (unquoted True/TRUE is a YAML boolean and arrives as "true"). Before v1.0.16
  *  the output was always printed and the input did not exist, so the setting is not blamed on
- *  an older exact pin. (ophis, podsync, 2026-09-25.) */
+ *  an older exact pin. (2026-09-25.) */
 function showsFullOutput(steps: Step[]): boolean {
   return steps.some(
     (s) =>
@@ -1072,7 +1072,7 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   const steps = allSteps(wf).map((s) => s.step);
   const agentSteps = steps.filter(isAgentStep);
   // The job(s) the agent actually runs in — permission checks scope to these, so
-  // a separate job's write perms don't get credited to the agent (the medusa bug).
+  // a separate job's write perms don't get credited to the agent (the two-job bug).
   const agentJobs = [
     ...new Set(
       allSteps(wf)
@@ -1201,10 +1201,9 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   // exercise it. An injected agent can only cause real harm if it can EXFIL/RCE
   // (bare Bash / curl / wget / sh — not a scoped script), OR modify GitHub, which
   // needs BOTH a write token/PAT AND a tool that can use it (`gh api` / `gh pr
-  // comment` / `git push`). UKGov has pull-requests:write + id-token but only
-  // read-only git + Read/Write tools — no way to touch GitHub or exfil → medium.
-  // medusa/sentry (read-only token + scoped scripts) → medium. hyperdx (write +
-  // `Bash(gh api:*)`) → correctly stays high/critical.
+  // comment` / `git push`). pull-requests:write + id-token but only read-only git +
+  // Read/Write tools — no way to touch GitHub or exfil → medium. A read-only token +
+  // scoped scripts → medium. Write + `Bash(gh api:*)` → correctly stays high/critical.
   const exfilOrRce = EXFIL_RCE_RE.test(toolsBlob);
   const githubWriteTool = GH_WRITE_TOOL_RE.test(toolsBlob);
   // F15: three damage tiers, not one. RCE (bare Bash/curl) and CODE-WRITE (contents:write
@@ -1218,12 +1217,12 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
   const canDamage = rce || codeWrite || metaWrite;
   if (!canDamage && severity && SEVERITY_RANK[severity] > SEVERITY_RANK.medium) severity = 'medium';
   // F15: metadata-write-ONLY (no RCE, no code-write) can't be catastrophic → cap critical to high.
-  // hyperdx: pull-requests/issues:write + Bash(gh api:*)/Bash(git:*), no bare Bash, no PAT — an
+  // pull-requests/issues:write + Bash(gh api:*)/Bash(git:*), no bare Bash, no PAT — an
   // injected agent manipulates PRs/issues but can't push code (needs contents:write) → high.
   if (canDamage && !rce && !codeWrite && severity === 'critical') severity = 'high';
   // R4-4: issue-only write (issues:write, NO pull-requests:write, NO code-write) is bounded
   // lower than PR-write — an injected agent can comment/label/close ISSUES but cannot approve
-  // a malicious PR or push code. That's medium, not high. (healerbook.)
+  // a malicious PR or push code. That's medium, not high.
   const issueOnlyWrite =
     metaWrite && !hasPrWritePerm(wf, powerJobs) && !hasCodeWritePerm(wf, powerJobs);
   if (issueOnlyWrite && !rce && severity && SEVERITY_RANK[severity] > SEVERITY_RANK.medium)

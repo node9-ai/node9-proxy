@@ -5,7 +5,7 @@
 // PRs) in every release, and on `workflow_run` only from v1.0.185 (#1590, 2026-08-04). The scanner
 // recognised only `anthropics/claude-code-action` as an agent and credited its write gate on every
 // trigger. A third-party build (`<owner>/claude-code-action`) was not an agent at all, so a fork
-// running on workflow_run with Bash (facebookincubator/velox, hand-verified) produced no finding.
+// running on workflow_run with Bash (a hand-verified case) produced no finding.
 
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
