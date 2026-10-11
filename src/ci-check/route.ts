@@ -8,6 +8,9 @@
 import { isAppDoc, isHookScript, isInstructionFile, isSkillScript } from './instructions';
 import { SUPPRESSIONS_FILE } from './suppress';
 
+/** A root issue form or issue template (GitHub reads only the root `.github/ISSUE_TEMPLATE`). */
+export const ISSUE_FORM_RE = /^\.github\/ISSUE_TEMPLATE\/[^/]+\.(ya?ml|md)$/i;
+
 export type Route =
   | 'suppressions'
   | 'workflow'
@@ -18,7 +21,9 @@ export type Route =
   | 'codex'
   | 'instruction'
   /** An application's own doc under an app-root skill: graded only if the SKILL.md names it. */
-  | 'app-doc';
+  | 'app-doc'
+  /** T.6.9: a root issue form; read only for the labels it applies, never graded. */
+  | 'issue-form';
 
 /** The check a path is routed to, in scanTree's order; null when no check reads it. */
 export function routeOf(
@@ -28,6 +33,7 @@ export function routeOf(
 ): Route | null {
   if (path === SUPPRESSIONS_FILE) return 'suppressions';
   if (/\.github\/workflows\/.+\.ya?ml$/.test(path)) return 'workflow';
+  if (ISSUE_FORM_RE.test(path)) return 'issue-form';
   if (/\.claude\/settings(\.local)?\.json$/.test(path)) return 'agent-config';
   if (isHookScript(path)) return 'hook-script';
   if (isSkillScript(path, skillDirs)) return 'skill-script';

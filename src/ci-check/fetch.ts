@@ -9,7 +9,7 @@ import path from 'path';
 import { execFileSync } from 'node:child_process';
 import { request } from 'undici';
 import type { RepoTree, RepoFile, UnfollowedLink } from './types';
-import { routeOf, type Route } from './route';
+import { routeOf, type Route, ISSUE_FORM_RE } from './route';
 import {
   isInstructionFile,
   isSkillSupportFile,
@@ -341,6 +341,9 @@ async function listWorkflowPaths(owner: string, repo: string, notes: string[]): 
 
 // ROOT-only workflow yaml (GitHub ignores nested `.github/workflows`).
 const ROOT_WORKFLOW_RE = /^\.github\/workflows\/[^/]+\.ya?ml$/;
+// T.6.9: issue forms are read for the labels they apply (a label a form puts on every new issue
+// is not a gate). Root only, small, and bounded so a repository cannot pad the read with them.
+const MAX_ISSUE_FORMS = 40;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ONE reading layer (§K; corrected in §K.2–K.4). The truth is what the AGENT sees from the
@@ -648,8 +651,9 @@ function planSurface(paths: string[], notes: string[], truncated: boolean): stri
   const present = new Set(paths);
   const root = SURFACE_FILES.filter((p) => present.has(p));
   const workflows = paths.filter((p) => ROOT_WORKFLOW_RE.test(p));
+  const forms = paths.filter((p) => ISSUE_FORM_RE.test(p)).slice(0, MAX_ISSUE_FORMS);
   const nested = pickSurfacePaths(paths, truncated, notes, { files: Number.POSITIVE_INFINITY });
-  return [...new Set([...root, ...workflows, ...nested])];
+  return [...new Set([...root, ...workflows, ...forms, ...nested])];
 }
 
 interface PlannedRead {
@@ -751,7 +755,8 @@ function planReads(
 function capNested(reads: PlannedRead[], cap: number | undefined, notes: string[]): PlannedRead[] {
   if (cap === undefined) return reads;
   const rootSet = new Set<string>(SURFACE_FILES);
-  const isRoot = (r: PlannedRead) => rootSet.has(r.rel) || ROOT_WORKFLOW_RE.test(r.rel);
+  const isRoot = (r: PlannedRead) =>
+    rootSet.has(r.rel) || ROOT_WORKFLOW_RE.test(r.rel) || ISSUE_FORM_RE.test(r.rel);
   const nested = reads.filter((r) => !isRoot(r));
   if (nested.length < cap) return reads;
   const keep = new Set(nested.slice(0, cap));

@@ -7,6 +7,7 @@ import { fetchTree, isUnwalked, type OnProgress } from './fetch';
 import {
   analyzeWorkflow,
   analyzeWorkflowSecrets,
+  issueFormLabels,
   localCallsOf,
   type LocalCaller,
 } from './workflows';
@@ -90,13 +91,24 @@ export function scanTree(tree: RepoTree): ScanResult {
   // reused below (a local reader reads on demand, §K).
   const workflowText = new Map<string, string>();
   const callersOf = new Map<string, LocalCaller[]>();
+  // T.6.9: labels an issue form puts on every new issue are not a gate.
+  const autoLabels = new Set<string>();
+  const routeOfFile = (file: (typeof tree.files)[number]) =>
+    file.route !== undefined ? file.route : routeOf(file.path, skillDirs, appDirs);
   for (const file of tree.files) {
-    const route = file.route !== undefined ? file.route : routeOf(file.path, skillDirs, appDirs);
-    if (route !== 'workflow') continue;
+    if (routeOfFile(file) !== 'issue-form') continue;
+    try {
+      for (const l of issueFormLabels(file.content)) autoLabels.add(l);
+    } catch {
+      /* unreadable form: its labels are unknown, so none is excluded from the gates */
+    }
+  }
+  for (const file of tree.files) {
+    if (routeOfFile(file) !== 'workflow') continue;
     try {
       const content = file.content;
       workflowText.set(file.path, content);
-      for (const { target, caller } of localCallsOf(file.path, content)) {
+      for (const { target, caller } of localCallsOf(file.path, content, autoLabels)) {
         const list = callersOf.get(target) ?? [];
         list.push(caller);
         callersOf.set(target, list);
@@ -112,6 +124,7 @@ export function scanTree(tree: RepoTree): ScanResult {
       if (!namedBy(file.path)) continue; // the app's own doc: not graded, not inspected
       route = 'instruction';
     }
+    if (route === 'issue-form') continue; // read above for its labels; not agent surface
     inspected.push(file.path);
     if (file.path === SUPPRESSIONS_FILE) continue;
     // §Q: content under a test, fixture or example tree (see testPathKind): read, and not graded,
@@ -126,9 +139,9 @@ export function scanTree(tree: RepoTree): ScanResult {
       switch (route) {
         case 'workflow': {
           const callers = callersOf.get(file.path);
-          const f = analyzeWorkflow(file.path, content, callers);
+          const f = analyzeWorkflow(file.path, content, callers, autoLabels);
           if (f) findings.push(f);
-          const s = analyzeWorkflowSecrets(file.path, content, callers); // CI-4
+          const s = analyzeWorkflowSecrets(file.path, content, callers, autoLabels); // CI-4
           if (s) findings.push(s);
           break;
         }

@@ -34,7 +34,7 @@ const EXFIL_RCE_RE =
 // are the write ones (view/diff/list are reads); `git push` / `Bash(git:*)` can
 // push. Used by the F12 damage-capability check.
 const GH_WRITE_TOOL_RE =
-  /Bash\(\s*(gh api|gh:|gh (pr|issue) (comment|edit|merge|close|review|create|ready|lock|reopen)|git push|git:)/i;
+  /Bash\(\s*(gh api|gh:|gh (pr|issue) (comment|edit|merge|close|review|create|ready|lock|reopen)|gh (pr|issue)\s*[:*)]|git push|git:)/i;
 
 // R4-3: a tool that can actually mint+transmit an OIDC token or exfil a secret —
 // arbitrary shell or network egress. `id-token:write` is inert without one of these.
@@ -73,6 +73,8 @@ interface Step {
   if?: string;
   with?: Record<string, unknown>;
   env?: Record<string, unknown>;
+  /** T.2a: the workflow and job `env:` this step sees (set by normalizeWorkflow). */
+  scopeEnv?: Record<string, unknown>;
 }
 interface Job {
   if?: string;
@@ -140,6 +142,38 @@ function keyStrangerFirable(on: Record<string, unknown>, key: string): boolean {
       return false;
   }
 }
+/** T.6.9: labels the repository's issue forms apply to every new issue (lower case), set by
+ *  analyzeWorkflow(Secrets) for the duration of one synchronous analysis. A label test on one
+ *  of these is not a gate: any stranger who opens an issue from that form carries the label. */
+let AUTO_LABELS: ReadonlySet<string> = new Set();
+
+/** The `labels:` an issue form (YAML) or issue template (Markdown front matter) applies. */
+export function issueFormLabels(content: string): string[] {
+  const out: string[] = [];
+  const text = content.length > 200_000 ? content.slice(0, 200_000) : content;
+  const lines = text.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^labels:\s*(.*)$/.exec(lines[i]);
+    if (!m) continue;
+    const inline = m[1].trim();
+    if (inline) {
+      out.push(...inline.replace(/^\[|\]$/g, '').split(','));
+    } else {
+      for (let j = i + 1; j < lines.length && /^\s+-\s/.test(lines[j]); j++)
+        out.push(lines[j].replace(/^\s+-\s/, ''));
+    }
+  }
+  return out
+    .map((l) =>
+      l
+        .trim()
+        .replace(/^['"]|['"]$/g, '')
+        .trim()
+        .toLowerCase()
+    )
+    .filter((l) => l && l.length <= 100);
+}
+
 /** T.1 (2026-10-11): a workflow in the same repository that calls a reusable one with
  *  `uses: ./.github/workflows/<file>`, and what its trigger and its calling job let in. */
 export interface LocalCaller {
@@ -261,8 +295,13 @@ function normalizeWorkflow(raw: Record<string, unknown>): Workflow {
       continue;
     }
     if (!Array.isArray(job.steps)) continue;
+    const scopeEnv = {
+      ...(wfEnv && typeof wfEnv === 'object' ? wfEnv : {}),
+      ...(job.env && typeof job.env === 'object' ? job.env : {}),
+    };
     for (const step of job.steps) {
       if (step == null || typeof step !== 'object') continue;
+      step.scopeEnv = scopeEnv;
       if (step.with == null || typeof step.with !== 'object') continue;
       const out: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(step.with)) {
@@ -280,6 +319,19 @@ const LOCAL_WORKFLOW_USES_RE = /^\s*\.\/\.github\/workflows\/([\w.-]{1,200}\.ya?
 
 /** T.1: the local reusable workflows `content` calls, each with this file as the caller. */
 export function localCallsOf(
+  path: string,
+  content: string,
+  autoLabels?: ReadonlySet<string>
+): { target: string; caller: LocalCaller }[] {
+  AUTO_LABELS = autoLabels ?? new Set();
+  try {
+    return localCallsOfInner(path, content);
+  } finally {
+    AUTO_LABELS = new Set();
+  }
+}
+
+function localCallsOfInner(
   path: string,
   content: string
 ): { target: string; caller: LocalCaller }[] {
@@ -321,16 +373,35 @@ function allSteps(wf: Workflow): { job: Job; step: Step }[] {
   return out;
 }
 
+// T.2a (2026-10-11): an agent CLI invoked to do work (not `--version` or an install), or an
+// agent SDK script, or a hosted agent's session API.
+const AGENT_CLI_RE =
+  /\b(?:claude\s+(?:-p|--print|--continue|--resume)\b|codex\s+exec\b|gemini\s+(?:-p|--prompt)\b|aider\s|opencode\s+run\b|goose\s+run\b|kilo\s+run\b|pi\s+--print\b|llmproc\s|acpx\s|harbor\s+(?:check|run)\b|copilot\s+(?:-p|--prompt|--allow-all-tools)\b)|api\.devin\.ai\/|software-agent-sdk|\bagent_script\.py\b/i;
+// The model credential a run-step agent is started with.
+const RUN_FUEL_ENV_RE =
+  /^(ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY|GEMINI_API_KEY|GOOGLE_API_KEY|KILO_API_KEY|OPENCODE_API_KEY|DEVIN_API_KEY|LLM_API_KEY|AWS_BEARER_TOKEN_BEDROCK)$/i;
+const EVENT_CONTEXT_RE = /github\.event|context\.payload/;
+
+/** A `run:` step that really invokes an agent (not the loose "agent word next to github.event"
+ *  heuristic): only its command line and env are read as the agent's prompt and grants. */
+function isRunAgent(step: Step): boolean {
+  return !!step.run && !step.uses && AGENT_CLI_RE.test(step.run);
+}
+
 function isAgentStep(step: Step): boolean {
   if (step.uses && AGENT_ACTION_RE.test(step.uses)) return true;
+  if (!step.run) return false;
   // run-step heuristic: an agent CLI fed event context.
-  if (
-    step.run &&
-    /\b(claude|aider|codex|gemini)\b/i.test(step.run) &&
-    /github\.event/.test(step.run)
-  )
+  if (/\b(claude|aider|codex|gemini)\b/i.test(step.run) && /github\.event/.test(step.run))
     return true;
-  return false;
+  // T.2a: the event text often reaches the CLI through the step or job `env:`, and a CLI
+  // started with a model key is an agent whatever its prompt.
+  if (!AGENT_CLI_RE.test(step.run)) return false;
+  const env = { ...(step.scopeEnv ?? {}), ...(step.env ?? {}) };
+  return (
+    EVENT_CONTEXT_RE.test(str(step.env) + ' ' + str(step.scopeEnv)) ||
+    Object.keys(env).some((k) => RUN_FUEL_ENV_RE.test(k))
+  );
 }
 
 // G-c: pull ONLY the --allowedTools / --allowed-tools value(s) from a claude_args
@@ -364,11 +435,53 @@ function collectTools(steps: Step[]): string {
   let s = '';
   for (const st of steps) {
     const w = st.with ?? {};
-    s += ' ' + allowedToolsFromArgs(str(w['claude_args']));
+    const args = str(w['claude_args']) + ' ' + str(w['codex-args']) + ' ' + str(w['codex_args']);
+    s += ' ' + allowedToolsFromArgs(args);
     s += ' ' + str(w['allowed_tools']) + ' ' + str(w['allowedTools']);
     s += ' ' + allowedToolsFromSettings(str(w['settings']));
+    // T.2a: skipping permissions makes any allow list moot: an unrestricted shell.
+    if (PERMISSION_BYPASS_RE.test(args) || /^danger-full-access$/i.test(str(w['sandbox'])))
+      s += ' Bash';
+    if (st.run && isRunAgent(st)) {
+      s += ' ' + allowedToolsFromArgs(st.run);
+      if (PERMISSION_BYPASS_RE.test(st.run)) s += ' Bash';
+      s += ' ' + permissionEnvGrants({ ...(st.scopeEnv ?? {}), ...(st.env ?? {}) });
+    }
   }
   return s;
+}
+
+const PERMISSION_BYPASS_RE =
+  /--dangerously-skip-permissions|--permission-mode[=\s]+["']?bypassPermissions|--dangerously-bypass-approvals-and-sandbox|--allow-all-tools|--yolo\b/i;
+
+/** T.2a: opencode / Kilo take their tool policy as JSON in an env var. `"bash": "allow"` or a
+ *  `"*": "allow"` pattern is an unrestricted shell; any other allowed pattern is a scoped
+ *  `Bash(<command>:*)` grant; `"webfetch": "allow"` is network egress. */
+function permissionEnvGrants(env: Record<string, unknown>): string {
+  let out = '';
+  for (const key of ['OPENCODE_PERMISSION', 'KILO_PERMISSION']) {
+    const raw = str(env[key]);
+    if (!raw || raw.length > 20_000) continue;
+    let cfg: unknown;
+    try {
+      cfg = JSON.parse(raw);
+    } catch {
+      continue; // an expression or malformed JSON: no grant read, none invented
+    }
+    if (!cfg || typeof cfg !== 'object') continue;
+    const c = cfg as Record<string, unknown>;
+    const bash = c['bash'];
+    if (bash === 'allow') out += ' Bash';
+    else if (bash && typeof bash === 'object') {
+      for (const [pat, v] of Object.entries(bash as Record<string, unknown>)) {
+        if (v !== 'allow') continue;
+        const cmd = pat.replace(/\*+\s*$/, '').trim();
+        out += cmd ? ` Bash(${cmd}:*)` : ' Bash';
+      }
+    }
+    if (c['webfetch'] === 'allow') out += ' WebFetch';
+  }
+  return out;
 }
 
 /** Split a collected-tools blob into individual grant tokens. Grants are comma/space
@@ -442,7 +555,13 @@ function untrustedHeadCheckout(steps: Step[]): 'root' | 'subdir' | null {
 function promptTakesUntrusted(steps: Step[]): boolean {
   for (const st of steps) {
     const blob =
-      str(st.with?.['prompt']) + ' ' + str(st.with?.['direct_prompt']) + ' ' + collectTools([st]);
+      str(st.with?.['prompt']) +
+      ' ' +
+      str(st.with?.['direct_prompt']) +
+      ' ' +
+      collectTools([st]) +
+      // T.2a: a run-step agent's prompt is its command line and the env it reads.
+      (isRunAgent(st) ? ' ' + st.run + ' ' + str(st.env) + ' ' + str(st.scopeEnv) : '');
     if (/github\.event\.(issue|comment|pull_request|review)\.(body|title)/i.test(blob)) return true;
     // A review command over a fork PR reads the untrusted diff.
     // A command, not a path: `.git/review-policy.diff` is not `/review` (surfaced once
@@ -476,7 +595,18 @@ function jobReadsUntrustedItem(job: Job): 'tool' | 'handle' | 'prompt-file' | nu
   if (!agent.length) return null;
   if (ITEM_READ_TOOL_RE.test(collectTools(agent))) return 'tool';
   for (const st of agent)
-    if (ITEM_HANDLE_RE.test(str(st.with) + ' ' + str(st.env) + ' ' + str(job.env))) return 'handle';
+    if (
+      ITEM_HANDLE_RE.test(
+        str(st.with) +
+          ' ' +
+          str(st.env) +
+          ' ' +
+          str(job.env) +
+          ' ' +
+          (isRunAgent(st) ? str(st.run) : '')
+      )
+    )
+      return 'handle';
   for (let i = 0; i < steps.length; i++) {
     const st = steps[i];
     // `prompt_file` (claude-code-action) or `prompt-file` (openai/codex-action).
@@ -541,19 +671,32 @@ function labelTypeConfigured(wf: Workflow, raw: Record<string, unknown>): boolea
       : [];
   return (
     prTypes(on?.['pull_request_target']).includes('labeled') ||
-    prTypes(on?.['pull_request']).includes('labeled')
+    prTypes(on?.['pull_request']).includes('labeled') ||
+    // T.6.9: an issue's labels are set by someone with triage access (an issue form that
+    // applies the label on its own is T.5b's case).
+    (on != null && typeof on === 'object' && 'issues' in on)
   );
 }
 
 // `!contains(…labels…, 'skip-ai')`, `contains(…) == false`, `labels[0] == null` admit every PR
 // that lacks an opt-out label, i.e. every stranger's PR; only a positive contains() is a gate.
 const PR_LABEL_GATE_RE =
-  /(?<!!\s{0,5}\(?\s{0,5})contains\(\s*github\.event\.pull_request\.labels\.\*\.name\s*,\s*'[^']{1,100}'\s*\)(?!\s*(?:==\s*false|!=\s*true))/i;
+  /(?<!!\s{0,5}\(?\s{0,5})contains\(\s*github\.event\.(?:pull_request|issue)\.labels\.\*\.name\s*,\s*'[^']{1,100}'\s*\)(?!\s*(?:==\s*false|!=\s*true))/i;
 
 // T.6.4 (2026-10-10): a literal association set that also admits a role without write access is
 // not a gate. CONTRIBUTOR is anyone with one merged commit.
 const NONWRITE_SET_RE =
   /contains\(\s*fromjson\(\s*['"]\[[^\]]{0,400}\b(CONTRIBUTOR|FIRST_TIME_CONTRIBUTOR|FIRST_TIMER|NONE|MANNEQUIN)\b/i;
+
+/** Does this expression test a label that an issue form applies on its own (T.6.9)? */
+function testsAutoLabel(ifs: string): boolean {
+  if (AUTO_LABELS.size === 0) return false;
+  for (const m of ifs.matchAll(
+    /labels\.\*\.name\s*,\s*'([^']{1,100})'|label\.name\s*==\s*'([^']{1,100})'/gi
+  ))
+    if (AUTO_LABELS.has((m[1] ?? m[2]).toLowerCase())) return true;
+  return false;
+}
 
 /** Do these joined `if:` expressions constitute an actor gate? */
 function ifsAreGated(ifs: string, labelConfigured: boolean): boolean {
@@ -565,7 +708,9 @@ function ifsAreGated(ifs: string, labelConfigured: boolean): boolean {
   // there by someone with triage access, like the `label.name` of a labeled event. Only a
   // POSITIVE test counts (second review): see PR_LABEL_GATE_RE.
   const labelGated =
-    labelConfigured && (/event\.label|label\.name/i.test(ifs) || PR_LABEL_GATE_RE.test(ifs));
+    labelConfigured &&
+    (/event\.label|label\.name/i.test(ifs) || PR_LABEL_GATE_RE.test(ifs)) &&
+    !testsAutoLabel(ifs);
   return gated || labelGated;
 }
 
@@ -1153,6 +1298,20 @@ function severityFromScore(score: number): Severity | null {
 export function analyzeWorkflow(
   path: string,
   content: string,
+  callers?: LocalCaller[],
+  autoLabels?: ReadonlySet<string>
+): CiFinding | null {
+  AUTO_LABELS = autoLabels ?? new Set();
+  try {
+    return analyzeWorkflowInner(path, content, callers);
+  } finally {
+    AUTO_LABELS = new Set();
+  }
+}
+
+function analyzeWorkflowInner(
+  path: string,
+  content: string,
   callers?: LocalCaller[]
 ): CiFinding | null {
   let raw: Record<string, unknown>;
@@ -1676,6 +1835,20 @@ function evalAgentJob(
  *  with a DIFFERENT job's untrusted trigger. Null when no job is a finding. Never
  *  throws. */
 export function analyzeWorkflowSecrets(
+  path: string,
+  content: string,
+  callers?: LocalCaller[],
+  autoLabels?: ReadonlySet<string>
+): CiFinding | null {
+  AUTO_LABELS = autoLabels ?? new Set();
+  try {
+    return analyzeWorkflowSecretsInner(path, content, callers);
+  } finally {
+    AUTO_LABELS = new Set();
+  }
+}
+
+function analyzeWorkflowSecretsInner(
   path: string,
   content: string,
   callers?: LocalCaller[]

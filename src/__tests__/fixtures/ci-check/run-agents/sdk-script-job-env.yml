@@ -1,0 +1,23 @@
+# An agent SDK script run with `uv run python`; the PR text sits in the job `env:`.
+name: Review
+on:
+  pull_request_target:
+    types: [opened]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      PR_TITLE: ${{ github.event.pull_request.title }}
+      PR_BODY: ${{ github.event.pull_request.body }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: example/agent-sdk
+          path: agent-sdk
+      - env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.BOT_PAT }}
+        run: uv run python agent-sdk/examples/review/agent_script.py

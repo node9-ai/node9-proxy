@@ -1,0 +1,18 @@
+# Runs on a new issue only when it carries a label; a stranger cannot label an issue.
+name: Agent
+on:
+  issues:
+    types: [opened]
+jobs:
+  task:
+    if: contains(github.event.issue.labels.*.name, 'agent')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          claude --print --dangerously-skip-permissions "${{ github.event.issue.title }}: ${{ github.event.issue.body }}"
