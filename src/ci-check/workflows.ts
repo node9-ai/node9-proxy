@@ -566,10 +566,17 @@ function matchedBroadTools(blob: string): string[] {
 /** Where (if anywhere) an untrusted PR head is checked out. 'root' = into the
  *  workspace (dangerous under pull_request_target); 'subdir' = isolated path.
  *  Takes a step list so callers can scope it to a single job (CI-4 per-job). */
+// T.7 (2026-10-11): the PR head also arrives by `refs/pull/<n>/head|merge`, by `gh pr checkout`,
+// and by fetching `pull/<n>/head` and checking it out in a run step.
+const RUN_HEAD_CHECKOUT_RE =
+  /\bgh\s+pr\s+checkout\b|\bgit\s+fetch\b[^\n]{0,200}\bpull\/[^\s/]{1,80}\/(?:head|merge)\b[^\n]{0,300}[\n;&|]+\s*git\s+(?:checkout|switch)\b/;
+
 function untrustedHeadCheckout(steps: Step[]): 'root' | 'subdir' | null {
   for (const step of steps) {
+    if (!step.uses && step.run && RUN_HEAD_CHECKOUT_RE.test(step.run)) return 'root';
     if (!step.uses || !/actions\/checkout/.test(step.uses)) continue;
     const ref = str(step.with?.['ref']);
+    if (/refs\/pull\//.test(ref)) return step.with?.['path'] ? 'subdir' : 'root';
     // Also catch reusable-workflow inputs that carry the fork head
     // (inputs.expected_head_sha / inputs.head_ref), not just github.event.*.
     if (
@@ -2164,6 +2171,108 @@ function analyzeTrustedReadersInner(path: string, content: string): CiFinding[] 
           `it holds ${writes}: injected text in that content can act with it`,
         ],
         fix: 'Give the agent a read-only token and apply its output in a separate step, or filter the items to trusted authors first.',
+      },
+    ];
+  }
+  return [];
+}
+
+// T.7 (2026-10-11): fork code in a gated agent job. Founder decision (node9Firewall#337): an
+// agent a maintainer starts on fork code is a problem, counted at the lowest level. The gate
+// stops a stranger from starting the job; once a maintainer does (a comment, a label, a push
+// to the PR branch, a reopen), the agent runs inside the fork's checkout.
+const FORK_PR_TRIGGER_RE =
+  /^(pull_request_target|issue_comment|pull_request_review|pull_request_review_comment|workflow_run)$/i;
+// An explicit "this repository's own branches only" test: no fork code ever runs.
+const SAME_REPO_GATE_RE =
+  /head\.repo\.full_name\s*==\s*github\.repository|head\.repo\.fork\s*==\s*false|head_repository\.full_name\s*==\s*github\.repository|head_repository\.fork\s*==\s*false|workflow_run\.pull_requests\[0\]/i;
+
+const TRUSTED_AUTHOR_GATE_RE =
+  /\b(?:pull_request|issue)\.user\.login\s*==|github\.event\.(?:pull_request|issue)\.author_association\s*==\s*['"](?:OWNER|MEMBER|COLLABORATOR)|contains\(\s*fromjson\(\s*['"][^'"]{0,200}\b(?:OWNER|MEMBER|COLLABORATOR)\b[^'"]{0,200}['"]\s*\)\s*,\s*github\.event\.(?:pull_request|issue)\.author_association/i;
+
+/** Does every way through this `if:` require the PR's AUTHOR to be trusted? (An `||` branch
+ *  that a trusted commenter alone satisfies lets a stranger's PR through.) */
+function requiresTrustedAuthor(src: string): boolean {
+  const x = parseIf(src);
+  if (!x) return false;
+  const req = (e: IfExpr): boolean => {
+    switch (e.k) {
+      case 'atom':
+        return TRUSTED_AUTHOR_GATE_RE.test(e.t) && !NONWRITE_SET_RE.test(e.t);
+      case 'not':
+        return false;
+      case 'and':
+        return e.c.some(req);
+      case 'or':
+        return e.c.every(req);
+    }
+  };
+  return req(x);
+}
+
+export function analyzeForkCodeOnTrust(
+  path: string,
+  content: string,
+  callers?: LocalCaller[],
+  autoLabels?: ReadonlySet<string>
+): CiFinding[] {
+  AUTO_LABELS = autoLabels ?? new Set();
+  try {
+    return analyzeForkCodeOnTrustInner(path, content, callers);
+  } finally {
+    AUTO_LABELS = new Set();
+  }
+}
+
+function analyzeForkCodeOnTrustInner(
+  path: string,
+  content: string,
+  callers?: LocalCaller[]
+): CiFinding[] {
+  let raw: Record<string, unknown>;
+  try {
+    raw = (parseYaml(content) ?? {}) as Record<string, unknown>;
+  } catch {
+    return [];
+  }
+  if (!raw || typeof raw !== 'object') return [];
+  const wf = normalizeWorkflow(raw);
+  if (callers?.length) CALLERS.set(wf, callers);
+  const reach = triggerReach(wf, raw);
+  const forkKeys = reach.keys.filter((k) => FORK_PR_TRIGGER_RE.test(k));
+  if (!forkKeys.length) return [];
+  // A job a stranger can start is CI-2's (injectable-workflow), at its full score.
+  const inj = new Set(injectableJobs(wf, raw, reach.untrusted || reach.reusable));
+  for (const job of jobList(wf)) {
+    if (inj.has(job)) continue;
+    const steps = job.steps ?? [];
+    const agent = steps.filter(isAgentStep);
+    if (!agent.length) continue;
+    if (untrustedHeadCheckout(steps) !== 'root') continue;
+    // A read-only sandbox runs none of the fork's code (codex `sandbox: read-only`).
+    if (agent.every((st) => /^read-only$/i.test(str(st.with?.['sandbox'])))) continue;
+    const ifs = str(job.if) + ' ' + steps.map((st) => str(st.if)).join(' ');
+    if (SAME_REPO_GATE_RE.test(ifs)) continue;
+    // The code itself comes from a trusted author: the gate tests who wrote the PR, not who
+    // started the run (an author allowlist, or the author's association with the repository).
+    if (requiresTrustedAuthor(str(job.if))) continue;
+    // Something worth taking: a secret in the job (the model key counts) or a write token.
+    const holdsSecret = /secrets\./i.test(str(job.steps) + ' ' + str(job.env));
+    if (!holdsSecret && !jobsHaveWrite(wf, [job], /:\s*["']?write/i)) continue;
+    return [
+      {
+        check: 'CI-2',
+        rule: 'CI-2.fork-code-on-trust',
+        dimension: 'workflows',
+        severity: 'advisory',
+        title: "A maintainer's action runs the agent inside the fork's code",
+        file: path,
+        signals: [
+          `triggered by ${forkKeys.map((k) => safeText(k, 40)).join(', ')}, behind a gate a maintainer passes (a comment, a label, a push to the PR branch, a reopen)`,
+          'checks out the untrusted PR head into the workspace root',
+          "the agent loads the fork's CLAUDE.md, .claude/settings.json hooks, .mcp.json and build scripts next to the job's secrets",
+        ],
+        fix: "Check out the base branch and give the agent the diff, or check the PR head out into a subdirectory the agent does not start in; do not let it run the fork's build or hooks.",
       },
     ];
   }

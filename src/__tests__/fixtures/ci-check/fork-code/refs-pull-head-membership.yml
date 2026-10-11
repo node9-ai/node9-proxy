@@ -1,0 +1,30 @@
+# A team member's `/review` checks out `refs/pull/<n>/head` and runs a shell-capable agent in it.
+name: PR review
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  review:
+    if: contains(github.event.comment.body, '/review')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - id: gate
+        env:
+          GH_TOKEN: ${{ secrets.ORG_READ_TOKEN }}
+        run: |
+          gh api /orgs/example/teams/devs/memberships/${{ github.actor }} >/dev/null || exit 1
+          echo "allowed=true" >> "$GITHUB_OUTPUT"
+      - if: steps.gate.outputs.allowed == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.issue.number }}/head
+      - if: steps.gate.outputs.allowed == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
+          allowed_non_write_users: '*'
+          claude_args: --allowedTools "Bash,Read,Grep"

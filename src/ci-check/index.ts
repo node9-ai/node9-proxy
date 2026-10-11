@@ -9,6 +9,7 @@ import {
   analyzeWorkflowSecrets,
   analyzeWorkflowPlugins,
   analyzeTrustedReaders,
+  analyzeForkCodeOnTrust,
   issueFormLabels,
   localCallsOf,
   type LocalCaller,
@@ -158,6 +159,7 @@ export function scanTree(tree: RepoTree): ScanResult {
           if (s) findings.push(s);
           findings.push(...analyzeWorkflowPlugins(file.path, content, tree.owner)); // CI-3: plugin sources
           findings.push(...analyzeTrustedReaders(file.path, content, autoLabels)); // T.5
+          findings.push(...analyzeForkCodeOnTrust(file.path, content, callers, autoLabels)); // T.7
           break;
         }
         case 'agent-config':
