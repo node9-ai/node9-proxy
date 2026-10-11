@@ -1823,18 +1823,24 @@ function analyzeWorkflowInner(
   const openCallers = (callers ?? []).filter((c) => c.untrusted && !c.gated && !c.dispatched);
   if (openCallers.length)
     signals.push(
-      `called by ${openCallers.map((c) => `${safeText(c.file, 120)} (${c.keys.join(', ')})`).join('; ')}`
+      `called by ${openCallers.map((c) => `${safeText(c.file, 120)} (${c.keys.map((k) => safeText(k, 40)).join(', ')})`).join('; ')}`
     );
   if (secretExposed)
     signals.push(
-      `runs with base-repo secrets (${triggers.filter((t) => /target|workflow_run/i.test(t)).join(', ')})`
+      `runs with base-repo secrets (${triggers
+        .filter((t) => /target|workflow_run/i.test(t))
+        .map((t) => safeText(t, 40))
+        .join(', ')})`
     );
-  else if (forkInput) signals.push(`triggered by untrusted input (${triggers.join(', ')})`);
+  else if (forkInput)
+    signals.push(
+      `triggered by untrusted input (${triggers.map((t) => safeText(t, 40)).join(', ')})`
+    );
   else if (reusable)
     signals.push(
       reusableLoadedGun
-        ? `reusable workflow (${triggers.join(', ')}) that checks out an untrusted head / ingests untrusted input: exploitable the moment a caller wires a fork trigger (reachability depends on the caller, but this workflow is built to process attacker input)`
-        : `reusable workflow (${triggers.join(', ')}): no untrusted trigger of its own; reachability depends on the caller's trigger + actor gate`
+        ? `reusable workflow (${triggers.map((t) => safeText(t, 40)).join(', ')}) that checks out an untrusted head / ingests untrusted input: exploitable the moment a caller wires a fork trigger (reachability depends on the caller, but this workflow is built to process attacker input)`
+        : `reusable workflow (${triggers.map((t) => safeText(t, 40)).join(', ')}): no untrusted trigger of its own; reachability depends on the caller's trigger + actor gate`
     );
   if (forkInput && !privileged && !reusable)
     signals.push(
@@ -2333,17 +2339,29 @@ function sanitizedListing(t: string): boolean {
 export function analyzeTrustedReaders(
   path: string,
   content: string,
-  autoLabels?: ReadonlySet<string>
+  autoLabels?: ReadonlySet<string>,
+  callers?: LocalCaller[]
 ): CiFinding[] {
   AUTO_LABELS = autoLabels ?? new Set();
   try {
-    return analyzeTrustedReadersInner(path, content);
+    return analyzeTrustedReadersInner(path, content, callers);
   } finally {
     AUTO_LABELS = new Set();
   }
 }
 
-function analyzeTrustedReadersInner(path: string, content: string): CiFinding[] {
+/** A template's triggers are its callers' (T.1), gated ones included: T.5 and T.7 are about the
+ *  runs a stranger cannot start (review, round 2: split into caller and template, the same shape
+ *  counted nothing). */
+function keysWithCallers(keys: string[], callers?: LocalCaller[]): string[] {
+  return [...new Set([...keys, ...(callers ?? []).flatMap((c) => c.keys)])];
+}
+
+function analyzeTrustedReadersInner(
+  path: string,
+  content: string,
+  callers?: LocalCaller[]
+): CiFinding[] {
   let raw: Record<string, unknown>;
   try {
     raw = loadWorkflow(content).raw;
@@ -2352,12 +2370,15 @@ function analyzeTrustedReadersInner(path: string, content: string): CiFinding[] 
   }
   if (!raw || typeof raw !== 'object') return [];
   const wf = raw as Workflow; // normalised by loadWorkflow
+  if (callers?.length) CALLERS.set(wf, callers);
+  else CALLERS.delete(wf);
   const reach = triggerReach(wf, raw);
-  // Stranger-firable workflows are CI-2's; reusable templates are judged through their callers.
-  if (reach.untrusted || reach.reusable || reach.keys.length === 0) return [];
+  // Stranger-firable workflows are CI-2's; a template with no caller is judged by its callers.
+  if (reach.untrusted || reach.reusable) return [];
+  const keys = keysWithCallers(reach.keys, callers);
   // The founder's decision is about SCHEDULED agents: nobody chooses what they read. A run a
   // maintainer starts (dispatch, a label, a release) is the maintainer-triggered case (T.7).
-  if (!reach.keys.some((k) => /^schedule$/i.test(k))) return [];
+  if (!keys.some((k) => /^schedule$/i.test(k))) return [];
   for (const job of jobList(wf)) {
     // A job that runs on schedule reads what nobody picked, whatever other (maintainer-only)
     // triggers the file has; one pinned to an item event is judged per item (review, round 2).
@@ -2427,7 +2448,7 @@ function analyzeTrustedReadersInner(path: string, content: string): CiFinding[] 
         title: 'Agent on a trusted trigger reads content strangers write, with a write token',
         file: path,
         signals: [
-          `runs on ${reach.keys.map((k) => safeText(k, 40)).join(', ')}: no stranger starts it`,
+          `runs on ${keys.map((k) => safeText(k, 40)).join(', ')}: no stranger starts it`,
           ...reads.map((r) => `the agent ${r}`),
           `it holds ${writes}: injected text in that content can act with it`,
         ],
@@ -2557,7 +2578,7 @@ function analyzeForkCodeOnTrustInner(
   if (callers?.length) CALLERS.set(wf, callers);
   else CALLERS.delete(wf);
   const reach = triggerReach(wf, raw);
-  const forkKeys = reach.keys.filter((k) => FORK_PR_TRIGGER_RE.test(k));
+  const forkKeys = keysWithCallers(reach.keys, callers).filter((k) => FORK_PR_TRIGGER_RE.test(k));
   if (!forkKeys.length) return [];
   // A job a stranger can start is CI-2's (injectable-workflow), at its full score.
   const inj = new Set(injectableJobs(wf, raw, reach.untrusted || reach.reusable));

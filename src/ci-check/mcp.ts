@@ -181,6 +181,8 @@ export interface McpServerSpec {
   url?: string;
   env?: Record<string, unknown>;
   disabled?: boolean;
+  /** The key the server is written under, when the map key is qualified by its section. */
+  anchor?: string;
 }
 
 export function analyzeMcp(
@@ -191,7 +193,10 @@ export function analyzeMcp(
   let cfg: {
     mcpServers?: Record<string, McpServerSpec>;
     servers?: Record<string, McpServerSpec>;
-    mcp?: Record<string, { command?: unknown; enabled?: boolean; url?: string }>;
+    mcp?: Record<
+      string,
+      { command?: unknown; enabled?: boolean; url?: string; environment?: unknown }
+    >;
   };
   try {
     cfg = JSON.parse(content);
@@ -200,21 +205,38 @@ export function analyzeMcp(
   }
   if (!cfg || typeof cfg !== 'object') return [];
   // T.3: VS Code keeps servers under `servers`; opencode under `mcp`, with the command as an
-  // array (`["npx", "-y", "pkg"]`) and `enabled: false` to switch one off.
-  const servers: Record<string, McpServerSpec> = {
-    ...(cfg.mcpServers ?? {}),
-    ...(cfg.servers ?? {}),
-  };
-  for (const [name, s] of Object.entries(cfg.mcp ?? {})) {
+  // array (`["npx", "-y", "pkg"]`), its env as `environment` and `enabled: false` to switch one
+  // off. Each section is read on its own: merged by name, a decoy in one hid the real server in
+  // another (review, round 2). A name in more than one section is qualified by its section.
+  const sections: [string, Record<string, McpServerSpec>][] = [];
+  const obj = (x: unknown) =>
+    x && typeof x === 'object' && !Array.isArray(x) ? (x as Record<string, unknown>) : {};
+  sections.push(['mcpServers', obj(cfg.mcpServers) as Record<string, McpServerSpec>]);
+  sections.push(['servers', obj(cfg.servers) as Record<string, McpServerSpec>]);
+  const opencode: Record<string, McpServerSpec> = {};
+  for (const [name, s] of Object.entries(obj(cfg.mcp))) {
     if (!s || typeof s !== 'object') continue;
-    const cmd = Array.isArray(s.command) ? s.command.map(String) : [];
-    servers[name] = {
+    const o = s as { command?: unknown; enabled?: boolean; url?: string; environment?: unknown };
+    const cmd = Array.isArray(o.command) ? o.command.map(String) : [];
+    opencode[name] = {
       command: cmd[0],
       args: cmd.slice(1),
-      url: s.url,
-      disabled: s.enabled === false,
+      url: o.url,
+      env: obj(o.environment),
+      disabled: o.enabled === false,
     };
   }
+  sections.push(['mcp', opencode]);
+  const count = new Map<string, number>();
+  for (const [, sec] of sections)
+    for (const name of Object.keys(sec)) count.set(name, (count.get(name) ?? 0) + 1);
+  const servers: Record<string, McpServerSpec> = {};
+  for (const [section, sec] of sections)
+    for (const [name, spec] of Object.entries(sec)) {
+      if (!spec || typeof spec !== 'object') continue;
+      const key = (count.get(name) ?? 0) > 1 ? `${section}.${name}` : name;
+      servers[key] = { ...spec, anchor: name };
+    }
   return analyzeMcpServers(servers, path, content, own);
 }
 
@@ -234,7 +256,7 @@ export function analyzeMcpServers(
     const argv = [srv.command, ...(Array.isArray(srv.args) ? srv.args.map(String) : [])].join(' ');
     // Both CI-3 rules anchor at the server's name: `"name":` in JSON, `[mcp_servers.name]`
     // (or a dotted key) in TOML. Unknown → no line, never a wrong one.
-    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const esc = (srv.anchor ?? name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const at = content.search(
       new RegExp(`"${esc}"\\s*:|^[ \\t]*\\[mcp_servers\\.(?:"${esc}"|${esc})\\]`, 'm')
     );
@@ -259,7 +281,17 @@ export function analyzeMcpServers(
             : `\`${safeText(argv, 120)}\`: unversioned/latest ${why.launcher}`,
         ],
         fix: 'Pin the MCP server package to an exact version so a PR (or a registry compromise) can’t swap the toolchain.',
-        explain: explainMcp({ name, argv, registry: why.registry }),
+        explain: explainMcp({
+          name,
+          argv,
+          registry: why.registry,
+          pkg:
+            why.launcher === 'docker run'
+              ? (runImage(argv.split(/\s+/))?.replace(/:[^/:]*$/, '') ?? null)
+              : why.launcher === 'go run'
+                ? (/\bgo\s+run\s+(?:-\S+\s+)*([^\s@]+)@/.exec(argv)?.[1] ?? null)
+                : (launchedPackages(argv)[0] ?? null),
+        }),
       });
     }
 

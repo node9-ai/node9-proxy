@@ -909,13 +909,35 @@ function readLocalFile(abs: string, rel: string): string {
 /** The GitHub owner of a local clone's `origin`, or undefined. Args array, no shell; a missing
  *  git, remote or GitHub URL yields undefined and decides nothing. */
 function localGitHubOwner(root: string): string | undefined {
+  // Read `<root>/.git/config` itself (review, round 2): `git config` searches up from `root`, so a
+  // directory that is not a clone took its parent's owner, honoured GIT_DIR from the environment,
+  // and blocked on an `include.path` that names a FIFO. No include is followed here.
   try {
-    const url = execFileSync('git', ['-C', root, 'config', '--get', 'remote.origin.url'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 3000,
-    }).trim();
-    return /github\.com[:/]([\w.-]{1,100})\//i.exec(url)?.[1];
+    let gitDir = path.join(root, '.git');
+    const st = fs.lstatSync(gitDir);
+    if (st.isFile()) {
+      // A worktree or submodule: `gitdir: <path>`, and a worktree's config is in its commondir.
+      const m = /^gitdir:\s*(.+?)\s*$/m.exec(fs.readFileSync(gitDir, 'utf8').slice(0, 4096));
+      if (!m) return undefined;
+      gitDir = path.resolve(root, m[1]);
+      const common = path.join(gitDir, 'commondir');
+      if (fs.existsSync(common))
+        gitDir = path.resolve(gitDir, fs.readFileSync(common, 'utf8').slice(0, 4096).trim());
+    } else if (!st.isDirectory()) return undefined;
+    const cfg = path.join(gitDir, 'config');
+    const cst = fs.lstatSync(cfg);
+    if (!cst.isFile() || cst.size > 1_000_000) return undefined;
+    let inOrigin = false;
+    for (const line of fs.readFileSync(cfg, 'utf8').split(/\r?\n/)) {
+      const sec = /^\s*\[\s*([^\]\s]+)(?:\s+"([^"]*)")?\s*\]/.exec(line);
+      if (sec) {
+        inOrigin = sec[1].toLowerCase() === 'remote' && sec[2] === 'origin';
+        continue;
+      }
+      const url = inOrigin && /^\s*url\s*=\s*(.+?)\s*$/i.exec(line);
+      if (url) return /github\.com[:/]([\w.-]{1,100})\//i.exec(url[1])?.[1];
+    }
+    return undefined;
   } catch {
     return undefined;
   }
@@ -1100,8 +1122,12 @@ export function readGitRefTree(dir: string, ref: string): RepoTree | null {
       }
       files.push({ path: rel, content, route });
     }
+    // The same owner as the head read (review, round 2): without it, a same-owner plugin
+    // marketplace was exempt on the head and flagged on the base, a false "fixed" in every PR.
+    const owner = localGitHubOwner(root);
     return {
       source: `${root}@${ref}`,
+      ...(owner ? { owner } : {}),
       files,
       notes,
       paths: plan.paths,

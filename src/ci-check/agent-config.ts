@@ -146,7 +146,7 @@ export function gradeBroadGrant(
     );
   if (broad.some((a) => /^Write|^Edit$/.test(a)))
     signals.push('`Write`/`Edit` pre-approve file changes without a prompt');
-  if (broad.some(openRunner))
+  if (broad.some((a) => openRunner(asBash(a))))
     signals.push(
       'an interpreter, network tool, shell runner or `gh` grant ending in a wildcard runs any code or request an injected instruction writes, without a prompt'
     );

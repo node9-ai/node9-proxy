@@ -294,15 +294,36 @@ export function npxPackage(argv: string): string | null {
   return null;
 }
 
-export function explainMcp(f: { name: string; argv: string; registry?: string }): Explain {
-  const pkg = npxPackage(f.argv);
-  const what = pkg ? code(pkg) : f.registry === 'the image registry' ? 'image' : 'the package';
+export function explainMcp(f: {
+  name: string;
+  argv: string;
+  registry?: string;
+  pkg?: string | null;
+}): Explain {
+  const pkg = f.pkg ?? npxPackage(f.argv);
+  const registry = f.registry ?? 'npm';
+  const image = registry === 'the image registry';
+  const what = pkg
+    ? `the newest ${code(pkg)}`
+    : image
+      ? 'the newest image'
+      : 'the newest version of the package';
+  // The pin in the launcher's own syntax (review, round 2: one npm example for every registry).
+  const example = !pkg
+    ? null
+    : image
+      ? `${pkg}@sha256:…`
+      : registry === 'PyPI'
+        ? `${pkg}==x.y.z`
+        : registry === 'the Go module proxy'
+          ? `${pkg}@vX.Y.Z`
+          : `${pkg}@x.y.z`;
   return {
     headline: `MCP server ${code(f.name, 60)} installs whatever version is newest, every time`,
-    happens: `Each run downloads the latest ${what} from ${f.registry ?? 'npm'}. If that package is ever taken over, the next version runs on every developer's computer.`,
+    happens: `Each run downloads ${what} from ${registry}. If it is ever taken over, the next version runs on every developer's computer.`,
     saw: [`It starts with ${code(f.argv, 120)}.`],
     fix: [
-      pkg ? `Pin an exact version, for example ${code(`${pkg}@x.y.z`)}.` : 'Pin an exact version.',
+      example ? `Pin an exact version, for example ${code(example)}.` : 'Pin an exact version.',
     ],
   };
 }

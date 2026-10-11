@@ -157,7 +157,7 @@ export function scanTree(tree: RepoTree): ScanResult {
           const s = analyzeWorkflowSecrets(file.path, content, callers, autoLabels); // CI-4
           if (s) findings.push(s);
           findings.push(...analyzeWorkflowPlugins(file.path, content, tree.owner)); // CI-3: plugin sources
-          findings.push(...analyzeTrustedReaders(file.path, content, autoLabels)); // T.5
+          findings.push(...analyzeTrustedReaders(file.path, content, autoLabels, callers)); // T.5
           findings.push(...analyzeForkCodeOnTrust(file.path, content, callers, autoLabels)); // T.7
           break;
         }
