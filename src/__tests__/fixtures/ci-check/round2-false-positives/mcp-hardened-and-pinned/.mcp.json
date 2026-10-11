@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "github": {
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "--read-only", "--cap-drop", "ALL",
+               "--security-opt", "no-new-privileges",
+               "-e", "GITHUB_PERSONAL_ACCESS_TOKEN",
+               "ghcr.io/github/github-mcp-server:v0.9.0"]
+    },
+    "py": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/example-org/example-mcp@v1.4.0", "example-mcp"]
+    },
+    "local": {
+      "command": "uvx",
+      "args": ["--from", ".", "example-mcp"]
+    }
+  }
+}

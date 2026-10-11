@@ -10,6 +10,7 @@ import { parseFrontmatter, allowedToolsOf } from './frontmatter';
 import { SCRIPT_EXT_RE, isHookScript } from './instructions';
 import { lineAtIndex, jsonValueIndex } from './lines';
 import { safeText } from './suppress';
+import { sanitizedListing } from './listing';
 
 interface Settings {
   permissions?: { allow?: unknown[]; deny?: unknown[] };
@@ -73,13 +74,13 @@ const EXTRA_RUNNER_RE = new RegExp(
   String.raw`^Bash\((?:[A-Z_][A-Z0-9_]{0,40}=\S{0,200} )*(?:/[\w./-]{0,80}/)?` +
     String.raw`(awk|gawk|mawk|sed|tee|tar|make(?! -n\b)|vim|vi|nvim|less|man|timeout|dd|install|` +
     String.raw`dotnet (?:run|script)|cargo run|go run|mvn exec|gradle run|npm start|tmux|` +
-    String.raw`rm|git (?:push|config|remote|submodule|filter-branch)|gh (?:repo|secret|auth|release))` +
+    String.raw`rm|git (?:push|config|submodule|filter-branch)|gh (?:repo|secret|auth|release))` +
     String.raw`(?: --?[A-Za-z][\w-]{0,30}){0,4} ?['"]?(?::\*| \*|\*)\)$`,
   'i'
 );
 // MCP tools whose job is to execute code or commands, pre-approved in `permissions.allow`.
 const MCP_EXEC_RE =
-  /^mcp__ide__executeCode$|^mcp__[\w-]{1,80}__(?:execute|exec|run)_(?:code|command|shell|sql|query)$|^mcp__[\w-]{1,80}__(?:ctx_)?(?:batch_)?execute$|^mcp__playwright__browser_evaluate$|^mcp__[\w-]{1,80}__(?:bash|shell|terminal)$/;
+  /^mcp__ide__executeCode$|^mcp__[\w-]{1,80}__(?:execute|exec|run)_(?:code|command|shell|sql|query)$|^mcp__[\w-]{1,80}__(?:ctx_)?(?:batch_)?execute$|^mcp__[\w-]{1,80}__(?:bash|shell|terminal)$/;
 
 function extraRunner(grant: string): boolean {
   if (grant.length > OPEN_RUNNER_MAX || INFO_FLAG_RE.test(grant)) return false;
@@ -354,8 +355,9 @@ const ROOT_SURFACE_RE = /^\.(claude|agents|github|codex|cursor|gemini)\//;
 const ITEM_TEXT_RE =
   /gh\s+(?:pr|issue)\s+(?:view|diff|list)\b|gh\s+pr\s+checkout\b|git\s+fetch\s+[^\n]{0,80}\bpull\/|gh\s+api\s+graphql\b|gh\s+api\s+[^\n]{0,120}\/(?:pulls|issues)\b|mcp__github__(?:get_issue|get_pull_request|list_issues|search_issues)|--json\s+[^\n]{0,120}\b(?:body|title)\b/;
 const PR_TEXT_RE = /gh\s+pr\s+(?:view|diff)\b|gh\s+api\s+[^\n]{0,120}\/pulls\b/;
-const WEB_TEXT_RE =
-  /\bWebFetch\b|\bWebSearch\b|\bsearch the web\b|\bfetch (?:the )?(?:url|page)\b/i;
+// Verb phrases only: the bare words WebFetch / WebSearch in prose ("do not use WebFetch") are
+// not a read, and a granted web tool is already read from the allow list (review, round 2).
+const WEB_TEXT_RE = /\bsearch the web\b|\bfetch (?:the )?(?:url|page)\b/i;
 
 /** Why this skill's grant meets stranger text, or null. */
 function skillReadsUntrusted(
@@ -370,13 +372,20 @@ function skillReadsUntrusted(
     .map((a) => a.replace(/^PowerShell(?=$|\()/, 'Bash'))
     .some((a) => /^Bash$|^Bash\(\s*\*/.test(a) || (openRunner(a) && !/^Bash\(\s*gh\b/.test(a)));
   const webGrant = allow.some((a) => /^(WebFetch|WebSearch)\b/.test(a));
-  if (runsCode && ITEM_TEXT_RE.test(body))
+  // Line by line: a lookup cut down to a number, a URL or a SHA (`gh pr view --json url -q .url`)
+  // reads no stranger text (review, round 2).
+  const reads = (re: RegExp) =>
+    body
+      .replace(/\\\r?\n/g, ' ')
+      .split('\n')
+      .some((l) => re.test(l) && !sanitizedListing(l));
+  if (runsCode && reads(ITEM_TEXT_RE))
     return 'it reads pull request or issue text that strangers write, with a grant that runs code';
   if (runsCode && (webGrant || WEB_TEXT_RE.test(body)))
     return 'it reads web content anyone can publish, with a grant that runs code';
   const writes = allow.some((a) => /^(Write|Edit|MultiEdit)$/.test(a));
   const ghOrGit = allow.some((a) => /^Bash\(\s*(gh|git)\b/.test(a));
-  if (writes && ghOrGit && PR_TEXT_RE.test(body))
+  if (writes && ghOrGit && reads(PR_TEXT_RE))
     return 'it reads pull request text that strangers write, and may edit files and run git/gh on it';
   return null;
 }

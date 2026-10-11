@@ -243,9 +243,19 @@ export function explainGrant(f: GrantFacts): Explain {
   const git = f.broad.some((a) => /^Bash\(git:/.test(a));
   const files = f.broad.some((a) => /^Write|^Edit$/.test(a));
   const template = TEMPLATE_PATH_RE.test(f.file);
+  // Any other broad grant is a runner (an interpreter, a launcher, an exec escape): without a
+  // phrase for it the headline had no verb ("Agents in this repository  without asking").
+  const runner = f.broad.some((a) => !/^Bash\(git:|^Write|^Edit$/.test(a));
   const what = f.bareShell
     ? 'run commands and change files'
-    : sentence([git ? 'run git commands' : '', files ? 'change files' : ''].filter(Boolean), true);
+    : sentence(
+        [
+          runner ? 'run programs' : '',
+          git ? 'run git commands' : '',
+          files ? 'change files' : '',
+        ].filter(Boolean),
+        true
+      );
   const saw: string[] = [];
   if (template) saw.push('This is a template: every project made from it gets these permissions.');
   saw.push(

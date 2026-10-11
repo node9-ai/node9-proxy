@@ -13,6 +13,7 @@ import { lineOf, lineOfRe } from './lines';
 import type { CiFinding, Severity } from './types';
 import { SEVERITY_RANK } from './types';
 import { safeText } from './suppress';
+import { sanitizedListing } from './listing';
 
 // Known agent actions — a step using one of these runs an LLM with tools.
 const AGENT_ACTION_RE =
@@ -764,7 +765,48 @@ const PAYLOAD_TEXT_RE =
 // workflow_run of a fork PR's workflow, those files are the fork's.
 const RUN_ARTIFACT_RE =
   /gh\s+run\s+download\b|\/runs\/\$\{\{\s*github\.event\.workflow_run\.id\s*\}\}\/(?:artifacts|logs)/i;
+/** T.4 (review, round 2): the names of this tree's workflows that no stranger can start, set for
+ *  one analysis. Artifacts of a run of one of them were not produced by a PR. */
+let TRUSTED_RUN_SOURCES: ReadonlySet<string> = new Set();
+let UPSTREAM_TRUSTED = false;
+
+/** Does every workflow this one runs after (`workflow_run.workflows`) belong to the tree and run
+ *  on no stranger-firable trigger? */
+function upstreamRunTrusted(wf: Workflow, raw: Record<string, unknown>): boolean {
+  const on = onObject(wf, raw);
+  const run = on?.['workflow_run'] as { workflows?: unknown } | undefined;
+  const names = Array.isArray(run?.workflows) ? run.workflows.map(String) : [];
+  return names.length > 0 && names.every((n) => TRUSTED_RUN_SOURCES.has(n));
+}
+
+/** T.4: a workflow's name for `workflow_run.workflows` (its `name:`, else its path), and
+ *  whether a stranger can start it. Read by scanTree before the analyses. */
+export function runSourceOf(
+  path: string,
+  content: string,
+  autoLabels?: ReadonlySet<string>
+): { name: string; trusted: boolean } | null {
+  AUTO_LABELS = autoLabels ?? new Set();
+  try {
+    let raw: Record<string, unknown>;
+    try {
+      raw = loadWorkflow(content).raw;
+    } catch {
+      return null;
+    }
+    if (!raw || typeof raw !== 'object') return null;
+    const wf = raw as Workflow;
+    CALLERS.delete(wf);
+    const reach = triggerReach(wf, raw);
+    const name = typeof raw['name'] === 'string' && raw['name'] ? (raw['name'] as string) : path;
+    return { name, trusted: !reach.untrusted && !reach.reusable };
+  } finally {
+    AUTO_LABELS = new Set();
+  }
+}
+
 function downloadsRunArtifacts(st: Step): boolean {
+  if (UPSTREAM_TRUSTED) return false;
   if (/actions\/download-artifact/i.test(str(st.uses)))
     return /workflow_run\.id/.test(str(st.with?.['run-id']) + ' ' + str(st.with?.['run_id']));
   return RUN_ARTIFACT_RE.test(str(st.run) + ' ' + str(st.with?.['script']));
@@ -1612,13 +1654,17 @@ export function analyzeWorkflow(
   path: string,
   content: string,
   callers?: LocalCaller[],
-  autoLabels?: ReadonlySet<string>
+  autoLabels?: ReadonlySet<string>,
+  trustedRunSources?: ReadonlySet<string>
 ): CiFinding | null {
   AUTO_LABELS = autoLabels ?? new Set();
+  TRUSTED_RUN_SOURCES = trustedRunSources ?? new Set();
   try {
     return analyzeWorkflowInner(path, content, callers);
   } finally {
     AUTO_LABELS = new Set();
+    TRUSTED_RUN_SOURCES = new Set();
+    UPSTREAM_TRUSTED = false;
   }
 }
 
@@ -1638,6 +1684,7 @@ function analyzeWorkflowInner(
   // are set or cleared on every analysis, never left from another path.
   if (callers?.length) CALLERS.set(wf, callers);
   else CALLERS.delete(wf);
+  UPSTREAM_TRUSTED = upstreamRunTrusted(wf, raw);
   const steps = allSteps(wf).map((s) => s.step);
   const agentSteps = steps.filter(isAgentStep);
   // The job(s) the agent actually runs in — permission checks scope to these, so
@@ -1677,7 +1724,9 @@ function analyzeWorkflowInner(
   const untrustedTrigger = forkInput || reusable;
   const bypassActive = nonWriteStar && untrustedTrigger;
 
-  const head = untrustedHeadCheckout(steps);
+  // An agent in a read-only sandbox runs none of the checked-out code (review, round 2).
+  const head =
+    agentSteps.length && agentSteps.every(readOnlySandbox) ? null : untrustedHeadCheckout(steps);
   const promptUntrusted = promptTakesUntrusted(agentSteps);
 
   // G-d / R4-2 / R4-round2#1: reach AND power come only from the INJECTABLE job(s) — a
@@ -2171,13 +2220,17 @@ export function analyzeWorkflowSecrets(
   path: string,
   content: string,
   callers?: LocalCaller[],
-  autoLabels?: ReadonlySet<string>
+  autoLabels?: ReadonlySet<string>,
+  trustedRunSources?: ReadonlySet<string>
 ): CiFinding | null {
   AUTO_LABELS = autoLabels ?? new Set();
+  TRUSTED_RUN_SOURCES = trustedRunSources ?? new Set();
   try {
     return analyzeWorkflowSecretsInner(path, content, callers);
   } finally {
     AUTO_LABELS = new Set();
+    TRUSTED_RUN_SOURCES = new Set();
+    UPSTREAM_TRUSTED = false;
   }
 }
 
@@ -2197,6 +2250,7 @@ function analyzeWorkflowSecretsInner(
   // are set or cleared on every analysis, never left from another path.
   if (callers?.length) CALLERS.set(wf, callers);
   else CALLERS.delete(wf);
+  UPSTREAM_TRUSTED = upstreamRunTrusted(wf, raw);
   const all = allSteps(wf);
   if (!all.some((s) => isAgentStep(s.step))) return null;
 
@@ -2312,28 +2366,22 @@ export function analyzeWorkflowPlugins(path: string, content: string, owner?: st
 // that still reads content strangers write (open issues and PRs, or the
 // web) while it holds a write token. Founder decision (node9Firewall#337): counted, at the
 // lowest level (advisory, tier alert).
+// "open issues" in prose is a read, except after a verb of making ("and open pull requests for
+// the updates" creates them; review, round 2).
 const ITEM_LIST_RE =
-  /gh\s+(?:issue|pr)\s+(?:list|view)\b|gh\s+search\b|gh\s+api\s+[^\n]{0,80}\/(?:issues|pulls)\b|\blist_issues\b|\bsearch_issues\b|issues\.listForRepo|pulls\.list\b|\bopen (?:issues|pull requests)\b/i;
+  /gh\s+(?:issue|pr)\s+(?:list|view)\b|gh\s+search\b|gh\s+api\s+[^\n]{0,80}\/(?:issues|pulls)\b|\blist_issues\b|\bsearch_issues\b|issues\.listForRepo|pulls\.list\b|(?<!\b(?:and|to|then|or|will|should|must|may|can|please|you|also)\s)\bopen (?:issues|pull requests)\b/i;
 const WEB_READ_RE = /(^|["\s,])(WebFetch|WebSearch)(\(|\s|,|"|$)/;
 // A listing whose output is cut down to a field before the agent sees it (`| grep -o`,
 // `--jq '.[].number'`) carries no stranger text.
-// Only when every field it keeps is an identifier: `--jq '[.number, .title, .body]'` still
-// hands over the body (review, round 2).
-const SAFE_LIST_FIELD_RE =
-  /^(?:number|url|html_url|id|node_id|sha|state|createdat|updatedat|closedat|mergedat|headrefname|baserefname|isdraft|headrefoid)$/i;
-function sanitizedListing(t: string): boolean {
-  if (t.length > 50_000) return false;
-  if (/\|\s*grep\s+-[a-zA-Z]*o/.test(t)) return true;
-  const fieldsSafe = (expr: string, fieldRe: RegExp) => {
-    const fields = [...expr.matchAll(fieldRe)].map((m) => m[1]);
-    return fields.length > 0 && fields.every((f) => SAFE_LIST_FIELD_RE.test(f));
-  };
-  const jq = [...t.matchAll(/--jq[\s=]+(?:'([^']{0,500})'|"([^"]{0,500})")/g)].map(
-    (m) => m[1] ?? m[2]
-  );
-  if (jq.length) return jq.every((e) => fieldsSafe(e, /\.([A-Za-z_]\w{0,60})/g));
-  const json = [...t.matchAll(/--json[\s=]+['"]?([\w,]{1,500})/g)].map((m) => m[1]);
-  return json.length > 0 && json.every((e) => fieldsSafe(e, /([A-Za-z_]\w{0,60})/g));
+
+/** Does this text list items in full on any one command? Judged per command line (a `\`
+ *  continuation joined), so a sanitized lookup does not excuse a full listing beside it. */
+function readsItemList(text: string): boolean {
+  if (text.length > 200_000) return ITEM_LIST_RE.test(text);
+  return text
+    .replace(/\\\r?\n/g, ' ')
+    .split('\n')
+    .some((l) => ITEM_LIST_RE.test(l) && !sanitizedListing(l));
 }
 
 export function analyzeTrustedReaders(
@@ -2404,9 +2452,11 @@ function analyzeTrustedReadersInner(
       .filter((st) => !isAgentStep(st))
       .map((st) => str(st.run) + ' ' + str(st.with?.['script']));
     const reads: string[] = [];
-    if (ITEM_READ_TOOL_RE.test(tools) || ITEM_LIST_RE.test(promptText))
+    // "open pull requests for the updates" creates PRs; a lookup in the prompt cut down to a
+    // number reads nothing (review, round 2).
+    if (ITEM_READ_TOOL_RE.test(tools) || readsItemList(promptText))
       reads.push('reads open issues or pull requests');
-    else if (earlier.some((t) => ITEM_LIST_RE.test(t) && !sanitizedListing(t)))
+    else if (earlier.some(readsItemList))
       reads.push('an earlier step lists open issues or pull requests for it');
     if (WEB_READ_RE.test(tools)) reads.push('fetches third-party web content');
     if (!reads.length) continue;
@@ -2463,18 +2513,35 @@ function analyzeTrustedReadersInner(
 // agent a maintainer starts on fork code is a problem, counted at the lowest level. The gate
 // stops a stranger from starting the job; once a maintainer does (a comment, a label, a push
 // to the PR branch, a reopen), the agent runs inside the fork's checkout.
-const FORK_PR_TRIGGER_RE =
-  /^(pull_request_target|issue_comment|pull_request_review|pull_request_review_comment|workflow_run)$/i;
+// Not pull_request_review(_comment): a fork's review event runs in the fork's context, with no
+// secrets and a read-only token, like pull_request (review, round 2).
+const FORK_PR_TRIGGER_RE = /^(pull_request_target|issue_comment|workflow_run)$/i;
 // An explicit "this repository's own branches only" test: no fork code ever runs.
-const SAME_REPO_GATE_RE =
-  /head\.repo\.full_name\s*==\s*github\.repository|head\.repo\.fork\s*==\s*false|head_repository\.full_name\s*==\s*github\.repository|head_repository\.fork\s*==\s*false|workflow_run\.pull_requests\[0\]/i;
+const SAME_REPO_GATE_RE = new RegExp(
+  [
+    String.raw`head(?:\.repo|_repository)\.full_name\s*==\s*github\.(?:repository\b|event\.(?:pull_request\.base\.repo|repository)\.full_name)`,
+    String.raw`github\.repository\s*==\s*github\.event\.(?:pull_request\.head\.repo|workflow_run\.head_repository)\.full_name`,
+    String.raw`head(?:\.repo|_repository)\.fork\s*==\s*false`,
+    String.raw`head(?:\.repo|_repository)\.owner\.login\s*==\s*github\.repository_owner`,
+    String.raw`workflow_run\.pull_requests\[0\]`,
+  ].join('|'),
+  'i'
+);
+// `!github.event.pull_request.head.repo.fork`: the negated spelling of `fork == false`.
+const NOT_FORK_ATOM_RE =
+  /^github\.event\.(?:pull_request\.head\.repo|workflow_run\.head_repository)\.fork$/i;
 
 const TRUSTED_AUTHOR_GATE_RE =
   /\b(?:pull_request|issue)\.user\.login\s*==|github\.event\.(?:pull_request|issue)\.author_association\s*==\s*['"](?:OWNER|MEMBER|COLLABORATOR)|contains\(\s*fromjson\(\s*['"][^'"]{0,200}\b(?:OWNER|MEMBER|COLLABORATOR)\b[^'"]{0,200}['"]\s*\)\s*,\s*github\.event\.(?:pull_request|issue)\.author_association/i;
 
 /** Does every way through this `if:` hold an atom matching `re`, unnegated and unchained? A way
  *  that cannot run on any of `events` (when given) needs none. */
-function requiresAtom(src: string, re: RegExp, events?: string[]): boolean {
+function requiresAtom(
+  src: string,
+  re: RegExp,
+  events?: string[],
+  notRe: RegExp = NOT_FORK_ATOM_RE
+): boolean {
   const x = parseIf(src);
   if (!x) return false;
   const req = (e: IfExpr): boolean => {
@@ -2485,7 +2552,7 @@ function requiresAtom(src: string, re: RegExp, events?: string[]): boolean {
         return re.test(m) && !CHAINED_COMPARE_RE.test(m);
       }
       case 'not':
-        return false;
+        return e.c.k === 'atom' && notRe.test(e.c.t.trim());
       case 'and':
         return e.c.some(req);
       case 'or':
@@ -2495,23 +2562,29 @@ function requiresAtom(src: string, re: RegExp, events?: string[]): boolean {
   return req(x);
 }
 
-/** The events on which these head checkouts resolve to the PR head, or null for any event. */
+const PR_EVENTS = [
+  'pull_request_target',
+  'pull_request',
+  'pull_request_review',
+  'pull_request_review_comment',
+];
+/** The events on which these head checkouts resolve to the PR head, or null for any event. A
+ *  fallback to the base (`|| github.sha`) resolves to no head at all on the other events. */
 function headRefEvents(heads: Step[]): string[] | null {
   const evs = new Set<string>();
   for (const st of heads) {
     if (st.uses == null) return null; // a `run:` checkout (`gh pr checkout`) works on any event
-    const ref = str(st.with?.['ref']);
-    if (/^\s*\$\{\{\s*github\.event\.workflow_run\.[\w.]+\s*\}\}\s*$/.test(ref))
-      evs.add('workflow_run');
-    else if (/^\s*\$\{\{\s*github\.event\.pull_request\.[\w.]+\s*\}\}\s*$/.test(ref))
-      for (const e of [
-        'pull_request_target',
-        'pull_request',
-        'pull_request_review',
-        'pull_request_review_comment',
-      ])
-        evs.add(e);
-    else return null;
+    const m = /^\s*\$\{\{([\s\S]{1,500})\}\}\s*$/.exec(str(st.with?.['ref']));
+    if (!m) return null;
+    for (const part of m[1].split('||').map((x) => x.trim())) {
+      if (/^github\.event\.workflow_run\.[\w.]+$/.test(part)) evs.add('workflow_run');
+      else if (/^github\.event\.pull_request\.[\w.]+$/.test(part))
+        PR_EVENTS.forEach((e) => evs.add(e));
+      else if (
+        !/^(?:github\.(?:sha|ref|ref_name|event\.repository\.default_branch)|'[^']*')$/.test(part)
+      )
+        return null;
+    }
   }
   return evs.size ? [...evs] : null;
 }
@@ -2600,6 +2673,8 @@ function analyzeForkCodeOnTrustInner(
     // A head ref read from one event's payload is empty on every other event (the default
     // branch is checked out then): only the branches that run on that event need the test.
     const evs = headRefEvents(heads);
+    // No fork trigger of this file checks the head out: the payload field is empty there.
+    if (evs && !forkKeys.some((k) => evs.includes(k.toLowerCase()))) continue;
     if (evs && requiresAtom(str(job.if), SAME_REPO_GATE_RE, evs)) continue;
     // The code itself comes from a trusted author: the gate tests who wrote the PR, not who
     // started the run (an author allowlist, or the author's association with the repository).

@@ -11,6 +11,7 @@ import {
   analyzeTrustedReaders,
   analyzeForkCodeOnTrust,
   issueFormLabels,
+  runSourceOf,
   localCallsOf,
   type LocalCaller,
 } from './workflows';
@@ -117,6 +118,19 @@ export function scanTree(tree: RepoTree): ScanResult {
       /* unreadable form: its labels are unknown, so none is excluded from the gates */
     }
   }
+  // T.4: the workflows no stranger can start, by the name `workflow_run.workflows` uses. A name
+  // shared with a stranger-firable workflow is not trusted.
+  const runSources = new Map<string, boolean>();
+  for (const file of tree.files) {
+    if (routeOfFile(file) !== 'workflow') continue;
+    try {
+      const src = runSourceOf(file.path, file.content, autoLabels);
+      if (src) runSources.set(src.name, (runSources.get(src.name) ?? true) && src.trusted);
+    } catch {
+      /* unreadable: not trusted */
+    }
+  }
+  const trustedRunSources = new Set([...runSources].filter(([, t]) => t).map(([n]) => n));
   for (const file of tree.files) {
     if (routeOfFile(file) !== 'workflow') continue;
     try {
@@ -152,9 +166,15 @@ export function scanTree(tree: RepoTree): ScanResult {
       switch (route) {
         case 'workflow': {
           const callers = callersOf.get(file.path);
-          const f = analyzeWorkflow(file.path, content, callers, autoLabels);
+          const f = analyzeWorkflow(file.path, content, callers, autoLabels, trustedRunSources);
           if (f) findings.push(f);
-          const s = analyzeWorkflowSecrets(file.path, content, callers, autoLabels); // CI-4
+          const s = analyzeWorkflowSecrets(
+            file.path,
+            content,
+            callers,
+            autoLabels,
+            trustedRunSources
+          ); // CI-4
           if (s) findings.push(s);
           findings.push(...analyzeWorkflowPlugins(file.path, content, tree.owner)); // CI-3: plugin sources
           findings.push(...analyzeTrustedReaders(file.path, content, autoLabels, callers)); // T.5

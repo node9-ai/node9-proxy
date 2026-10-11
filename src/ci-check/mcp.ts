@@ -26,7 +26,10 @@ const LAUNCHERS: { re: RegExp; name: string; registry: string }[] = [
   { re: /\bpipx\s+run\b/, name: 'pipx run', registry: 'PyPI' },
 ];
 // A version in either registry's spelling: `pkg@1.2.3`, `pkg==1.2.3`, `--from pkg==1.2.3`.
-const PINNED_RE = /@\d|==\s*\d/;
+// A tag (`@v1.4.0`) or a full commit SHA counts, whatever its first character (review, round 2).
+const PINNED_RE = /@v?\d|@[0-9a-f]{40}\b|==\s*\d/i;
+// `uvx --from . cmd` / `--from ./pkg`: the repository's own code.
+const LOCAL_FROM_RE = /(?:^|\s)--from(?:\s+|=)(?:\.{1,2}(?:\/\S*)?|\/\S*|~\/\S*)(?:\s|$)/;
 // Flags of `docker run` / `podman run` / `nerdctl run` that take a separate value. A missing
 // one made its value read as the image (`--tmpfs /tmp:rw` passed as pinned, review round 2).
 const RUN_VALUE_FLAGS = new Set(
@@ -127,6 +130,7 @@ function unpinnedLauncher(
   own: ReadonlySet<string>
 ): { launcher: string; registry: string } | null {
   if (LOCAL_RUNNER_RE.test(argv)) return null;
+  if (!SHELL_OP_RE.test(argv) && LOCAL_FROM_RE.test(argv)) return null;
   if (launchesOwnPackage(argv, own)) return null;
   const image = runImage(argv.split(/\s+/));
   if (image) {

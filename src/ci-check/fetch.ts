@@ -1275,7 +1275,14 @@ export async function fetchGitHubTree(
       // Trees failed: fall back to the fixed root list + the workflows directory (Contents
       // API), so a scan can never look at LESS than the old root-only baseline.
       const workflowPaths = await listWorkflowPaths(owner, repo, notes);
-      const allPaths = [...new Set([...SURFACE_FILES, ...workflowPaths])];
+      // The root manifests too: without them the own-package exemption (T.3) disappears.
+      const allPaths = [
+        ...new Set([...SURFACE_FILES, ...workflowPaths, 'package.json', 'pyproject.toml']),
+      ];
+      if (!notes.includes(RATE_LIMIT_NOTE) && !notes.includes(NETWORK_NOTE))
+        notes.push(
+          `the repository tree could not be listed; only the root files and the workflows were read: nested agent files ${INCOMPLETE}.`
+        );
       const fetched = await pooled(allPaths, FETCH_CONCURRENCY, (p) =>
         fetchOne(owner, repo, p, notes)
       );
