@@ -908,39 +908,52 @@ function readLocalFile(abs: string, rel: string): string {
  *  by one file, not by the repo. */
 /** The GitHub owner of a local clone's `origin`, or undefined. Args array, no shell; a missing
  *  git, remote or GitHub URL yields undefined and decides nothing. */
+/** A small regular file's text, read through one descriptor (no check-then-read race), or null.
+ *  A symlink as the last component is not followed. */
+function readSmallFile(p: string, max: number): string | null {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(p, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    const st = fs.fstatSync(fd);
+    if (!st.isFile() || st.size > max) return null;
+    const buf = Buffer.alloc(st.size);
+    const n = fs.readSync(fd, buf, 0, st.size, 0);
+    return buf.subarray(0, n).toString('utf8');
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
 function localGitHubOwner(root: string): string | undefined {
   // Read `<root>/.git/config` itself (review, round 2): `git config` searches up from `root`, so a
   // directory that is not a clone took its parent's owner, honoured GIT_DIR from the environment,
   // and blocked on an `include.path` that names a FIFO. No include is followed here.
-  try {
-    let gitDir = path.join(root, '.git');
-    const st = fs.lstatSync(gitDir);
-    if (st.isFile()) {
-      // A worktree or submodule: `gitdir: <path>`, and a worktree's config is in its commondir.
-      const m = /^gitdir:\s*(.+?)\s*$/m.exec(fs.readFileSync(gitDir, 'utf8').slice(0, 4096));
-      if (!m) return undefined;
-      gitDir = path.resolve(root, m[1]);
-      const common = path.join(gitDir, 'commondir');
-      if (fs.existsSync(common))
-        gitDir = path.resolve(gitDir, fs.readFileSync(common, 'utf8').slice(0, 4096).trim());
-    } else if (!st.isDirectory()) return undefined;
-    const cfg = path.join(gitDir, 'config');
-    const cst = fs.lstatSync(cfg);
-    if (!cst.isFile() || cst.size > 1_000_000) return undefined;
-    let inOrigin = false;
-    for (const line of fs.readFileSync(cfg, 'utf8').split(/\r?\n/)) {
-      const sec = /^\s*\[\s*([^\]\s]+)(?:\s+"([^"]*)")?\s*\]/.exec(line);
-      if (sec) {
-        inOrigin = sec[1].toLowerCase() === 'remote' && sec[2] === 'origin';
-        continue;
-      }
-      const url = inOrigin && /^\s*url\s*=\s*(.+?)\s*$/i.exec(line);
-      if (url) return /github\.com[:/]([\w.-]{1,100})\//i.exec(url[1])?.[1];
-    }
-    return undefined;
-  } catch {
-    return undefined;
+  let cfg = readSmallFile(path.join(root, '.git', 'config'), 1_000_000);
+  if (cfg === null) {
+    // A worktree or submodule: `.git` is a file, `gitdir: <path>`, and a worktree's config is in
+    // its commondir.
+    const pointer = readSmallFile(path.join(root, '.git'), 4096);
+    const m = pointer && /^gitdir:\s*(.+?)\s*$/m.exec(pointer);
+    if (!m) return undefined;
+    let gitDir = path.resolve(root, m[1]);
+    const common = readSmallFile(path.join(gitDir, 'commondir'), 4096);
+    if (common !== null) gitDir = path.resolve(gitDir, common.trim());
+    cfg = readSmallFile(path.join(gitDir, 'config'), 1_000_000);
+    if (cfg === null) return undefined;
   }
+  let inOrigin = false;
+  for (const line of cfg.split(/\r?\n/)) {
+    const sec = /^\s*\[\s*([^\]\s]+)(?:\s+"([^"]*)")?\s*\]/.exec(line);
+    if (sec) {
+      inOrigin = sec[1].toLowerCase() === 'remote' && sec[2] === 'origin';
+      continue;
+    }
+    const url = inOrigin && /^\s*url\s*=\s*(.+?)\s*$/i.exec(line);
+    if (url) return /github\.com[:/]([\w.-]{1,100})\//i.exec(url[1])?.[1];
+  }
+  return undefined;
 }
 
 export function readLocalTree(dir: string): RepoTree {
