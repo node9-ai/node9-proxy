@@ -26,7 +26,12 @@ export function tierOf(f: Pick<CiFinding, 'rule' | 'severity'>): Tier {
   // Accurate, but for most skills it is what the skill needs: summarized, never counted.
   if (rule === 'CI-1.skill-allowed-tools') return 'review';
   // T.5 (founder, node9Firewall#337): counted at the lowest level.
-  if (rule === 'CI-2.trusted-trigger-reader' || rule === 'CI-2.fork-code-on-trust') return 'alert';
+  if (
+    rule === 'CI-2.trusted-trigger-reader' ||
+    rule === 'CI-2.fork-code-on-trust' ||
+    rule === 'CI-1.skill-untrusted-input'
+  )
+    return 'alert';
   if (UNREAD_RULES.has(rule)) return 'review';
   // The workflow checks already grade a gated workflow down to advisory (28 of 30 false as alerts).
   if (rule.startsWith('CI-2.') || rule.startsWith('CI-4.'))

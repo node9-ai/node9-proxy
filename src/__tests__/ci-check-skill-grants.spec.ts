@@ -119,7 +119,9 @@ describe('ONE broad-grant law — settings.json and skills cannot drift', () => 
 describe('CI-1.skill-allowed-tools — a skill that pre-authorizes broad tools', () => {
   it('a skill that grants a bare Bash → MEDIUM (capped: a skill grant only applies while it runs), one finding, file-level', () => {
     const f = grants([
-      { path: '.claude/skills/trends/SKILL.md', content: fx('skill-grant-comma-list.md') },
+      // Outside the root agent surface: a research skill at the root with these grants is the
+      // T.8 shape (CI-1.skill-untrusted-input, ci-check-skill-tier.spec.ts).
+      { path: 'skills/trends/SKILL.md', content: fx('skill-grant-comma-list.md') },
     ]);
     expect(f).toHaveLength(1);
     expect(f[0].severity).toBe('medium');
@@ -200,12 +202,10 @@ describe('CI-1.skill-allowed-tools — a skill that pre-authorizes broad tools',
   });
 
   it('identity: same skill re-worded elsewhere keeps its fingerprint (CI-5 contract)', () => {
-    const a = grants([
-      { path: '.claude/skills/x/SKILL.md', content: fx('skill-grant-comma-list.md') },
-    ])[0];
+    const a = grants([{ path: 'skills/x/SKILL.md', content: fx('skill-grant-comma-list.md') }])[0];
     const b = grants([
       {
-        path: '.claude/skills/x/SKILL.md',
+        path: 'skills/x/SKILL.md',
         content: fx('skill-grant-comma-list.md') + '\n\nMore prose.\n',
       },
     ])[0];

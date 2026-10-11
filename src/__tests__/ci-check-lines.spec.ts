@@ -133,8 +133,7 @@ describe('CI-6 and the skill grant — markdown', () => {
   });
   it('a skill grant points at `allowed-tools:` (line 6)', () => {
     const f = byRule(
-      scan([{ path: '.claude/skills/x/SKILL.md', content: fx('skill-grant-comma-list.md') }])
-        .findings,
+      scan([{ path: 'skills/x/SKILL.md', content: fx('skill-grant-comma-list.md') }]).findings,
       'CI-1.skill-allowed-tools'
     );
     expect(f?.line).toBe(6);

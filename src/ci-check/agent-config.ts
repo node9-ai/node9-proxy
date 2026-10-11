@@ -300,6 +300,42 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
  *  `tools:` is scope, not authorization, and a CLAUDE.md has no such field at all. */
 const GRANT_CARRIER_RE = /(^|\/)[Ss][Kk][Ii][Ll][Ll]\.md$|(^|\/)\.claude\/commands\/.+\.md$/;
 
+// T.8 (2026-10-11): most skill grants are what the skill needs, so CI-1.skill-allowed-tools is
+// review-tier (§Q). It counts when three things meet in a skill of the repository's own agent
+// surface: a grant that runs code (a shell or an interpreter; gh or git alone do not) or writes
+// to GitHub, text a stranger writes (a PR, an issue, the web), and nothing between the two.
+// Measured on the hand-reviewed clones: 0 hand-clean repositories match.
+const ROOT_SURFACE_RE = /^\.(claude|agents|github|codex|cursor|gemini)\//;
+const ITEM_TEXT_RE =
+  /gh\s+(?:pr|issue)\s+(?:view|diff|list)\b|gh\s+api\s+[^\n]{0,120}\/(?:pulls|issues)\b|mcp__github__(?:get_issue|get_pull_request|list_issues|search_issues)|--json\s+[^\n]{0,120}\b(?:body|title)\b/;
+const PR_TEXT_RE = /gh\s+pr\s+(?:view|diff)\b|gh\s+api\s+[^\n]{0,120}\/pulls\b/;
+const WEB_TEXT_RE =
+  /\bWebFetch\b|\bWebSearch\b|\bsearch the web\b|\bfetch (?:the )?(?:url|page)\b/i;
+
+/** Why this skill's grant meets stranger text, or null. */
+function skillReadsUntrusted(
+  path: string,
+  content: string,
+  allow: string[],
+  broad: string[]
+): string | null {
+  if (!ROOT_SURFACE_RE.test(path)) return null;
+  const body = content.replace(/^---[\s\S]*?\n---/, '');
+  const runsCode = broad.some(
+    (a) => /^Bash$|^Bash\(\s*\*/.test(a) || (openRunner(a) && !/^Bash\(\s*gh\b/.test(a))
+  );
+  const webGrant = allow.some((a) => /^(WebFetch|WebSearch)\b/.test(a));
+  if (runsCode && ITEM_TEXT_RE.test(body))
+    return 'it reads pull request or issue text that strangers write, with a grant that runs code';
+  if (runsCode && (webGrant || WEB_TEXT_RE.test(body)))
+    return 'it reads web content anyone can publish, with a grant that runs code';
+  const writes = allow.some((a) => /^(Write|Edit|MultiEdit)$/.test(a));
+  const ghOrGit = allow.some((a) => /^Bash\(\s*(gh|git)\b/.test(a));
+  if (writes && ghOrGit && PR_TEXT_RE.test(body))
+    return 'it reads pull request text that strangers write, and may edit files and run git/gh on it';
+  return null;
+}
+
 /** CI-1 over a skill's or slash command's frontmatter. `allowed-tools` is a
  *  pre-authorization — tools Claude may use WITHOUT asking while the skill or command is
  *  active — so it is graded by the same law as `permissions.allow` in settings.json.
@@ -317,6 +353,21 @@ export function analyzeSkillGrants(path: string, content: string): CiFinding[] {
   if (!grade) return [];
   const kind = /commands\//.test(path) ? 'slash command' : 'skill';
   const at = content.search(/^allowed-tools\s*:/m);
+  const untrusted = skillReadsUntrusted(path, content, allow, grade.broad);
+  if (untrusted)
+    return [
+      {
+        check: 'CI-1',
+        rule: 'CI-1.skill-untrusted-input',
+        ...(at >= 0 ? { line: lineAtIndex(content, at) } : {}),
+        dimension: 'toolRules',
+        severity: 'advisory',
+        title: `Committed ${kind} runs code or writes with text strangers control`,
+        file: path,
+        signals: [...grade.signals, untrusted],
+        fix: 'Drop the shell or interpreter grant from a skill that reads PRs, issues or the web, or have it treat that text as data in a read-only step first.',
+      },
+    ];
   return [
     {
       check: 'CI-1',
