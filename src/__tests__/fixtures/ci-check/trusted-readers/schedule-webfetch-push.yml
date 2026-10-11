@@ -1,0 +1,19 @@
+# A daily agent fetches third-party web pages and may push.
+name: Scan feeds
+on:
+  schedule:
+    - cron: '0 6 * * *'
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          claude_args: --allowedTools "WebFetch,WebSearch,Edit,Bash(git push:*),Bash(gh pr create:*)"
+          prompt: Search the web for new evaluation papers and add them to the list.

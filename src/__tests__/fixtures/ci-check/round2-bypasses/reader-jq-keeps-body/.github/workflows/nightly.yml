@@ -1,0 +1,19 @@
+on:
+  schedule:
+    - cron: "0 3 * * *"
+permissions:
+  contents: write
+  issues: write
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: gh issue list --state open --json number,title,body --jq '.[] | [.number, .title, .body] | @tsv' > issues.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          prompt: "Fix the bugs described in issues.json and push a branch."
+          claude_args: "--allowedTools Bash"
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

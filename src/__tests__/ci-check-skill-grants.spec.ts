@@ -1,8 +1,8 @@
 // PR-A corpus: tool grants in skills and slash commands, and the lowercase skill.md.
 //
-// WRITTEN BEFORE THE IMPLEMENTATION (CLAUDE.md: corpus before code). Fixtures are real
-// files fetched from public repositories on 2026-09-26; the synthetic rows are edits of
-// those files, never invented shapes.
+// WRITTEN BEFORE THE IMPLEMENTATION (CLAUDE.md: corpus before code). Fixtures are short
+// hand-written files in the shapes real repositories commit; the synthetic rows are edits of
+// those files.
 //
 // The load-bearing distinctions:
 //   1. `allowed-tools:` in a SKILL.md or a slash command is a PRE-AUTHORIZATION ("tools
@@ -29,18 +29,18 @@ const scan = (files: RepoFile[]) => scanTree({ source: 'owner/repo', files, note
 const grants = (files: RepoFile[]) =>
   scan(files).findings.filter((f) => f.rule === 'CI-1.skill-allowed-tools');
 
-/** Replace the allowed-tools value in a real fixture, keeping everything else real. */
+/** Replace the allowed-tools value in a fixture, keeping everything else as it is. */
 const withAllowedTools = (content: string, value: string) =>
   content.replace(/^allowed-tools:.*(\n {2}- .*)*$/m, `allowed-tools: ${value}`);
 
 describe('frontmatter — the three real shapes of allowed-tools', () => {
-  it('comma-separated (Jesseovo/last30days-skill-cn)', () => {
-    const fm = parseFrontmatter(fx('last30days-SKILL.md'));
+  it('comma-separated', () => {
+    const fm = parseFrontmatter(fx('skill-grant-comma-list.md'));
     expect(allowedToolsOf(fm)).toEqual(['Bash', 'Read', 'Write', 'WebSearch']);
   });
 
-  it('YAML list (op7418/Claude-to-IM-skill)', () => {
-    const fm = parseFrontmatter(fx('claude-to-im-SKILL.md'));
+  it('YAML list', () => {
+    const fm = parseFrontmatter(fx('skill-grant-yaml-list.md'));
     expect(allowedToolsOf(fm)).toEqual([
       'Bash',
       'Read',
@@ -52,12 +52,12 @@ describe('frontmatter — the three real shapes of allowed-tools', () => {
     ]);
   });
 
-  it('a malformed sibling line does not lose allowed-tools (moltis-org/moltis, real)', () => {
+  it('a malformed sibling line does not lose allowed-tools', () => {
     // `argument-hint: ["<commit message>"] ["<pr title>"] ["<pr body>"]` is not valid YAML
     // (three flow sequences on one line) and strict parsing throws on the whole block. The
     // grant is on its own well-formed line and must still be read: a scanner that drops a
-    // real file's grant because a neighbouring line is sloppy is a silent miss.
-    const fm = parseFrontmatter(fx('moltis-ship-command.md'));
+    // committed file's grant because a neighbouring line is sloppy is a silent miss.
+    const fm = parseFrontmatter(fx('command-scoped-grants-bad-sibling.md'));
     expect(fm).not.toBeNull();
     expect(allowedToolsOf(fm)).toContain('Bash(git rev-parse:*)');
     expect(allowedToolsOf(fm)).toContain('Read');
@@ -89,15 +89,21 @@ describe('frontmatter — the three real shapes of allowed-tools', () => {
 });
 
 describe('ONE broad-grant law — settings.json and skills cannot drift', () => {
-  it('is the predicate analyzeAgentConfig uses: the sentry/glances fixtures grade as before', () => {
-    // These two real settings.json fixtures already have asserted severities in
+  it('is the predicate analyzeAgentConfig uses: the two settings fixtures grade as before', () => {
+    // These two settings.json fixtures already have asserted severities in
     // ci-check.spec.ts. If the extraction changed the law, they would move.
-    const sentry = analyzeAgentConfig('.claude/settings.json', fx('sentry-settings.json'));
-    const glances = analyzeAgentConfig('.claude/settings.json', fx('glances-settings.json'));
+    const scoped = analyzeAgentConfig(
+      '.claude/settings.json',
+      fx('settings-scoped-allow-list.json')
+    );
+    const pinnedHook = analyzeAgentConfig(
+      '.claude/settings.json',
+      fx('settings-pinned-npx-hook.json')
+    );
     const broad = (f: ReturnType<typeof analyzeAgentConfig>) =>
       f.find((x) => x.rule === 'CI-1.broad-allow')?.severity ?? null;
-    expect(broad(sentry)).toBe(null);
-    expect(broad(glances)).toBe(null);
+    expect(broad(scoped)).toBe(null);
+    expect(broad(pinnedHook)).toBe(null);
   });
 
   it('bare Bash with no deny → high; scoped Bash → nothing; Write/Edit → medium', () => {
@@ -111,9 +117,11 @@ describe('ONE broad-grant law — settings.json and skills cannot drift', () => 
 });
 
 describe('CI-1.skill-allowed-tools — a skill that pre-authorizes broad tools', () => {
-  it('real: last30days-skill-cn grants a bare Bash → MEDIUM (capped: a skill grant only applies while it runs), one finding, file-level', () => {
+  it('a skill that grants a bare Bash → MEDIUM (capped: a skill grant only applies while it runs), one finding, file-level', () => {
     const f = grants([
-      { path: '.claude/skills/last30days/SKILL.md', content: fx('last30days-SKILL.md') },
+      // Outside the root agent surface: a research skill at the root with these grants is the
+      // T.8 shape (CI-1.skill-untrusted-input, ci-check-skill-tier.spec.ts).
+      { path: 'skills/trends/SKILL.md', content: fx('skill-grant-comma-list.md') },
     ]);
     expect(f).toHaveLength(1);
     expect(f[0].severity).toBe('medium');
@@ -122,9 +130,9 @@ describe('CI-1.skill-allowed-tools — a skill that pre-authorizes broad tools',
     expect(f[0].signals.join(' ')).toMatch(/Bash/);
   });
 
-  it('real: Claude-to-IM (YAML list with Bash) → medium', () => {
+  it('a YAML-list grant with Bash → medium', () => {
     const f = grants([
-      { path: '.claude/skills/im/SKILL.md', content: fx('claude-to-im-SKILL.md') },
+      { path: '.claude/skills/bridge/SKILL.md', content: fx('skill-grant-yaml-list.md') },
     ]);
     expect(f).toHaveLength(1);
     expect(f[0].severity).toBe('medium');
@@ -148,15 +156,13 @@ describe('CI-1.skill-allowed-tools — a skill that pre-authorizes broad tools',
   });
 
   it('the same skill with a scoped grant → no finding', () => {
-    const scoped = withAllowedTools(fx('last30days-SKILL.md'), 'Bash(git status:*) Read');
-    expect(grants([{ path: '.claude/skills/last30days/SKILL.md', content: scoped }])).toHaveLength(
-      0
-    );
+    const scoped = withAllowedTools(fx('skill-grant-comma-list.md'), 'Bash(git status:*) Read');
+    expect(grants([{ path: '.claude/skills/trends/SKILL.md', content: scoped }])).toHaveLength(0);
   });
 
   it('the same skill granting only Write and Edit → medium, like settings.json', () => {
-    const we = withAllowedTools(fx('last30days-SKILL.md'), 'Write, Edit');
-    const f = grants([{ path: '.claude/skills/last30days/SKILL.md', content: we }]);
+    const we = withAllowedTools(fx('skill-grant-comma-list.md'), 'Write, Edit');
+    const f = grants([{ path: '.claude/skills/trends/SKILL.md', content: we }]);
     expect(f).toHaveLength(1);
     expect(f[0].severity).toBe('medium');
   });
@@ -169,25 +175,24 @@ describe('CI-1.skill-allowed-tools — a skill that pre-authorizes broad tools',
     expect(f[0].file).toBe('.claude/commands/ship.md');
   });
 
-  it('real: moltis-org/moltis ship command scopes every Bash grant → no finding', () => {
-    // `Bash(git status:*), Bash(gh pr create:*), Bash(./scripts/ship-pr.sh:*), Read` — nine
+  it('a ship command that scopes every Bash grant → no finding', () => {
+    // `Bash(git status:*), Bash(gh pr create:*), Bash(./scripts/ship.sh:*), Read`: nine
     // scoped grants and a read. This is what a well-written command looks like; it is the
     // cry-wolf guard for this rule, and the comma-split must keep each `Bash(...)` whole.
-    const content = fx('moltis-ship-command.md');
+    const content = fx('command-scoped-grants-bad-sibling.md');
     expect(allowedToolsOf(parseFrontmatter(content))).toContain('Bash(git rev-parse:*)');
     expect(gradeBroadGrant(allowedToolsOf(parseFrontmatter(content)), [])).toBeNull();
     expect(grants([{ path: '.claude/commands/ship.md', content }])).toHaveLength(0);
   });
 
-  it('real: a subagent with `tools: Read, Bash, Glob, Grep, Task` is SCOPE → no finding', () => {
-    // pgplex/pgschema/.claude/agents/plan.md. Permission prompts still apply to a
-    // subagent; the repo's settings.json decides whether Bash runs unprompted, and CI-1
-    // already grades that file.
-    const files = [{ path: '.claude/agents/plan.md', content: fx('pgschema-plan-agent.md') }];
+  it('a subagent with `tools: Read, Bash, Glob, Grep, Task` is SCOPE → no finding', () => {
+    // A planner subagent. Permission prompts still apply to a subagent; the repo's
+    // settings.json decides whether Bash runs unprompted, and CI-1 already grades that file.
+    const files = [{ path: '.claude/agents/plan.md', content: fx('subagent-tools-scope.md') }];
     expect(grants(files)).toHaveLength(0);
-    expect(analyzeSkillGrants('.claude/agents/plan.md', fx('pgschema-plan-agent.md'))).toHaveLength(
-      0
-    );
+    expect(
+      analyzeSkillGrants('.claude/agents/plan.md', fx('subagent-tools-scope.md'))
+    ).toHaveLength(0);
   });
 
   it('a CLAUDE.md with an allowed-tools line in its prose is not a grant', () => {
@@ -197,13 +202,11 @@ describe('CI-1.skill-allowed-tools — a skill that pre-authorizes broad tools',
   });
 
   it('identity: same skill re-worded elsewhere keeps its fingerprint (CI-5 contract)', () => {
-    const a = grants([
-      { path: '.claude/skills/x/SKILL.md', content: fx('last30days-SKILL.md') },
-    ])[0];
+    const a = grants([{ path: 'skills/x/SKILL.md', content: fx('skill-grant-comma-list.md') }])[0];
     const b = grants([
       {
-        path: '.claude/skills/x/SKILL.md',
-        content: fx('last30days-SKILL.md') + '\n\nMore prose.\n',
+        path: 'skills/x/SKILL.md',
+        content: fx('skill-grant-comma-list.md') + '\n\nMore prose.\n',
       },
     ])[0];
     expect(a.rule).toBe(b.rule);
@@ -212,7 +215,7 @@ describe('CI-1.skill-allowed-tools — a skill that pre-authorizes broad tools',
   });
 });
 
-describe('lowercase skill.md (talmolab/sleap) is surface on the machines that load it', () => {
+describe('lowercase skill.md is surface on the machines that load it', () => {
   const P = '.claude/skills/pr/skill.md';
 
   it('matches the instruction-file law', () => {
@@ -235,9 +238,9 @@ describe('lowercase skill.md (talmolab/sleap) is surface on the machines that lo
 
   it('is selected by the ONE selector and routed to CI-6 by scanTree', () => {
     expect(selectSurface([P, 'README.md'])).toEqual([P]);
-    const res = scan([{ path: P, content: fx('sleap-pr-skill-lowercase.md') }]);
+    const res = scan([{ path: P, content: fx('skill-lowercase-benign.md') }]);
     expect(res.inspected).toContain(P);
-    // The real sleap skill is benign: it must produce no CI-6 finding.
+    // A benign PR-workflow skill: it must produce no CI-6 finding.
     expect(res.findings.filter((f) => f.check === 'CI-6')).toHaveLength(0);
   });
 });

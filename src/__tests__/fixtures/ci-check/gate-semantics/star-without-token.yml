@@ -1,0 +1,18 @@
+# "*" with no token input in any spelling: the action keeps its default write check.
+name: Comment
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  respond:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          allowed_non_write_users: "*"
+          claude_args: --allowedTools "Read,Write,Edit,Bash(git:*),Bash(gh:*)"

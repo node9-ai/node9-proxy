@@ -1,0 +1,24 @@
+# A maintainer's @mention on a fork PR: `gh pr checkout` puts the fork's head in the workspace.
+# The gate admits a trusted COMMENTER or a trusted issue AUTHOR: the first alone lets a
+# stranger's PR through.
+name: Assistant
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  assist:
+    if: (github.event.comment.author_association == 'OWNER' || github.event.issue.author_association == 'OWNER') && contains(github.event.comment.body, '@claude')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - if: github.event.issue.pull_request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr checkout ${{ github.event.issue.number }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          settings: .claude/settings.json

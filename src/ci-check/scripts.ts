@@ -24,8 +24,8 @@ import { isCommentLine, inPrintedMessage, MAX_EXCUSED_PER_LINE } from './harmles
 import { safeText } from './suppress';
 
 /** A script larger than this is not read. It is REPORTED as unread — the third state — never
- *  silently skipped. 64 KiB covers every hook and skill script measured (the largest real
- *  fixture, dartsim/dart's pre-commit guard, is 32 KiB). */
+ *  silently skipped. 64 KiB covers every hook and skill script measured (the largest, a
+ *  pre-commit guard hook, is 32 KiB). */
 export const MAX_SCRIPT_BYTES = 64 * 1024;
 
 // The other fetch-and-run spellings a shell allows, beyond `curl … | sh`.
@@ -57,15 +57,15 @@ const HOME_SECRET_RE = /\$HOME\/\.(aws|ssh|config\/gh)\b|\$\{HOME\}\/\.(aws|ssh|
 // What makes an upload EXFIL rather than a skill doing its job: the payload is sensitive —
 // credential material, a system password file, a `.env`, or the environment itself. A
 // publishing skill sending `"@$local_file"` to the `$upload_url` its service handed back is
-// the skill's purpose (hermes-agent `here-now`, flagged HIGH by the first cut of this rule on
-// a repository the manual review had called clean, 2026-09-26).
+// the skill's purpose (flagged HIGH by the first cut of this rule on a
+// repository the manual review had called clean, 2026-09-26).
 const SENSITIVE_PAYLOAD_RE =
   /\/etc\/(passwd|shadow)\b|(^|[\s"'@=])\.env\b|\$\(\s*(env|printenv)\b|\bid_(rsa|ed25519|ecdsa|dsa)\b/;
 const isSensitive = (text: string) =>
   SECRET_PATH_RE.test(text) || HOME_SECRET_RE.test(text) || SENSITIVE_PAYLOAD_RE.test(text);
 // The whole environment sent to a pipe or a file: the command, optionally its flags, then the
 // pipe or redirect — nothing else in between, so a Python parameter named `env` followed by a
-// union-type `|` (hermes-agent `unbroker/scripts/emailer.py:171`) is not a match. Advisory: it
+// union-type `|` (`env: dict | None = None`) is not a match. Advisory: it
 // is diagnostics far more often than theft, and a redaction step on the same logical line
 // makes it fine.
 const ENV_DUMP_RE = /^\s*(env|printenv)(\s+-\S+)*\s*(\||>)/;
@@ -90,7 +90,7 @@ interface LogicalLine {
 // An override phrase is a finding only when the script EMITS it — a heredoc body, or an
 // echo/printf/cat on the same logical line. The same phrase as a regex, a list entry or a test
 // payload is a detector, not an attack: a prompt-injection classifier and its tests produced
-// ten HIGH findings in the first full-width run of this rule (Project-K gstack, 2026-09-26).
+// ten HIGH findings in the first full-width run of this rule (one repository, 2026-09-26).
 const EMIT_RE = /\b(echo|printf|cat)\b/;
 const HEREDOC_OPEN_RE = /<<-?\s*["']?([A-Za-z_][A-Za-z0-9_]*)["']?/;
 
@@ -179,7 +179,7 @@ export function analyzeScript(path: string, content: string, rulePrefix: string)
   }
 
   // Offsets of the physical lines, so the inline-parser check can read a program that a line
-  // opens and later lines close (`| python -c "` + a body over several lines, a real hermes
+  // opens and later lines close (`| python -c "` + a body over several lines, a real-world
   // shape) — within the same 4,000-character window the check has always used.
   const lineStarts = [0];
   for (let i = content.indexOf('\n'); i >= 0; i = content.indexOf('\n', i + 1))

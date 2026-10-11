@@ -109,7 +109,7 @@ describe('9 — more open-runner grants', () => {
     });
 });
 
-describe('A/B regression after the parser (eeea2222/systemd-clean, hand-verified clean)', () => {
+describe('A/B regression after the parser (a repository hand-verified as clean)', () => {
   it('a label already on the PR is a gate alternative, like the label of a labeled event', () => {
     expect(rank('label-on-pr.yml')).toBeLessThanOrEqual(ADVISORY);
   });

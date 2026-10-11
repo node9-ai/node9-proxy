@@ -29,7 +29,7 @@ const find = (files: Record<string, string>, rule: string): CiFinding => {
 };
 const FX = (n: string) => fs.readFileSync(path.join(__dirname, 'fixtures', 'ci-check', n), 'utf8');
 
-/** hive's real issue-triage shape: anyone can open an issue and start the agent, which has
+/** A real issue-triage shape: anyone can open an issue and start the agent, which has
  *  no shell and no extra secrets. */
 const TRIAGE = (star: boolean) => `on:
   issues:
@@ -81,7 +81,7 @@ describe('R: an injectable agent workflow, at each severity', () => {
     expect(f.explain!.fix[0]).toMatch(/write access/);
   });
 
-  it('medium: anyone can steer it, and it says what limits the damage (hive)', () => {
+  it('medium: anyone can steer it, and it says what limits the damage', () => {
     const f = find({ '.github/workflows/triage.yml': TRIAGE(true) }, 'CI-2.injectable-workflow');
     expect(f.severity).toBe('medium');
     wellFormed(f);
@@ -92,7 +92,7 @@ describe('R: an injectable agent workflow, at each severity', () => {
   });
 
   it('advisory: held by the action default gate, so protected today', () => {
-    // A real claude.yml from the 768-repo run: untrusted triggers, write permissions, and
+    // The common claude.yml shape: untrusted triggers, write permissions, and
     // claude-code-action's default write-access gate.
     const f = find(
       { '.github/workflows/claude.yml': FX('claude-default-gated.yml') },
@@ -106,9 +106,9 @@ describe('R: an injectable agent workflow, at each severity', () => {
 });
 
 describe('R: a note never contradicts what it saw', () => {
-  it('a stranger can start it but it can do little: says so, not "cannot start" (codex-cli)', () => {
+  it('a stranger can start it but it can do little: says so, not "cannot start"', () => {
     const f = find(
-      { '.github/workflows/issue-labeler.yml': FX('codex-issue-labeler.yml') },
+      { '.github/workflows/issue-labeler.yml': FX('issue-labeler-read-only.yml') },
       'CI-2.injectable-workflow'
     );
     expect(f.severity).toBe('advisory');
@@ -149,7 +149,7 @@ describe('R: broad permissions in a committed settings file', () => {
     expect(f.explain!.saw.join('\n')).toMatch(/git can run other programs/);
   });
 
-  it('a template says every project made from it gets the permissions (odk-ai)', () => {
+  it('a template says every project made from it gets the permissions', () => {
     const f = find(
       { 'template/config/.claude/settings.json': settings(['Bash(*)']) },
       'CI-1.broad-allow'

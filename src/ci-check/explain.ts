@@ -243,9 +243,19 @@ export function explainGrant(f: GrantFacts): Explain {
   const git = f.broad.some((a) => /^Bash\(git:/.test(a));
   const files = f.broad.some((a) => /^Write|^Edit$/.test(a));
   const template = TEMPLATE_PATH_RE.test(f.file);
+  // Any other broad grant is a runner (an interpreter, a launcher, an exec escape): without a
+  // phrase for it the headline had no verb ("Agents in this repository  without asking").
+  const runner = f.broad.some((a) => !/^Bash\(git:|^Write|^Edit$/.test(a));
   const what = f.bareShell
     ? 'run commands and change files'
-    : sentence([git ? 'run git commands' : '', files ? 'change files' : ''].filter(Boolean), true);
+    : sentence(
+        [
+          runner ? 'run programs' : '',
+          git ? 'run git commands' : '',
+          files ? 'change files' : '',
+        ].filter(Boolean),
+        true
+      );
   const saw: string[] = [];
   if (template) saw.push('This is a template: every project made from it gets these permissions.');
   saw.push(
@@ -294,15 +304,36 @@ export function npxPackage(argv: string): string | null {
   return null;
 }
 
-export function explainMcp(f: { name: string; argv: string }): Explain {
-  const pkg = npxPackage(f.argv);
-  const what = pkg ? code(pkg) : 'the package';
+export function explainMcp(f: {
+  name: string;
+  argv: string;
+  registry?: string;
+  pkg?: string | null;
+}): Explain {
+  const pkg = f.pkg ?? npxPackage(f.argv);
+  const registry = f.registry ?? 'npm';
+  const image = registry === 'the image registry';
+  const what = pkg
+    ? `the newest ${code(pkg)}`
+    : image
+      ? 'the newest image'
+      : 'the newest version of the package';
+  // The pin in the launcher's own syntax (review, round 2: one npm example for every registry).
+  const example = !pkg
+    ? null
+    : image
+      ? `${pkg}@sha256:…`
+      : registry === 'PyPI'
+        ? `${pkg}==x.y.z`
+        : registry === 'the Go module proxy'
+          ? `${pkg}@vX.Y.Z`
+          : `${pkg}@x.y.z`;
   return {
     headline: `MCP server ${code(f.name, 60)} installs whatever version is newest, every time`,
-    happens: `Each run downloads the latest ${what} from npm. If that package is ever taken over, the next version runs on every developer's computer.`,
+    happens: `Each run downloads ${what} from ${registry}. If it is ever taken over, the next version runs on every developer's computer.`,
     saw: [`It starts with ${code(f.argv, 120)}.`],
     fix: [
-      pkg ? `Pin an exact version, for example ${code(`${pkg}@x.y.z`)}.` : 'Pin an exact version.',
+      example ? `Pin an exact version, for example ${code(example)}.` : 'Pin an exact version.',
     ],
   };
 }

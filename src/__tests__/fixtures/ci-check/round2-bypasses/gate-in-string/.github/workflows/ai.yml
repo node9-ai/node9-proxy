@@ -1,0 +1,15 @@
+on:
+  issue_comment:
+    types: [created]
+permissions:
+  contents: write
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    steps:
+      - if: contains('github.actor == x', 'g')
+        uses: anthropics/claude-code-base-action@v1
+        with:
+          prompt: "Handle this request: ${{ github.event.comment.body }}"
+          allowed_tools: "Bash"
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

@@ -1,0 +1,23 @@
+# An agent CLI in a `run:` step; the issue text reaches it through the step `env:`, and
+# permissions are skipped.
+name: Triage
+on:
+  issues:
+    types: [opened, edited]
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm install -g @anthropic-ai/claude-code
+      - name: Classify
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          PROMPT="Classify this issue: $ISSUE_TITLE $ISSUE_BODY"
+          claude -p "$PROMPT" --max-turns 10 --dangerously-skip-permissions

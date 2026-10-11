@@ -1,0 +1,20 @@
+name: weekly dependency refresh
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Update the npm dependencies to their latest minor versions, run the tests,
+            and open pull requests for the updates that pass. Keep each PR small.
+          claude_args: --allowedTools "Bash(npm install:*),Bash(npm test:*),Bash(git:*),Bash(gh pr create:*)"

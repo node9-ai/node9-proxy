@@ -1,0 +1,23 @@
+# A reusable workflow whose checkout ref reaches the head through env and a bracketed input.
+name: Shard
+on:
+  workflow_call:
+    inputs:
+      head-sha:
+        type: string
+        required: true
+jobs:
+  shard:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      REVIEW_HEAD_SHA: ${{ inputs['head-sha'] }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REVIEW_HEAD_SHA }}
+      - uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt: Review the checked-out change.

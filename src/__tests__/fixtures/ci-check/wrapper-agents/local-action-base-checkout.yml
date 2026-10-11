@@ -1,0 +1,14 @@
+# The same local action after checking out the base: the repository's own code, a pull_request
+# trigger with no secrets for forks.
+name: Title check
+on:
+  pull_request:
+    types: [opened]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

@@ -1,0 +1,8 @@
+name: Task
+description: Ask the agent for something
+labels: ["agent", "triage"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What should be done?

@@ -1,0 +1,20 @@
+on:
+  issue_comment:
+    types: [created]
+permissions:
+  contents: write
+jobs:
+  fix:
+    if: github.event.issue.pull_request && github.event.comment.author_association == 'MEMBER'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: gh pr checkout ${{ github.event.issue.number }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt: "Fix the failing tests on this branch."
+          sandbox: read-only
+          codex-args: "--dangerously-bypass-approvals-and-sandbox"

@@ -1,0 +1,25 @@
+# Two openings at once: the association set admits CONTRIBUTOR, and allowed_non_write_users
+# is the PR author's login.
+name: Review
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+jobs:
+  review:
+    if: contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.pull_request.author_association)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          allowed_non_write_users: ${{ github.event.pull_request.user.login }}
+          claude_args: --allowedTools "Bash(gh pr comment:*),Bash(gh pr diff:*)"
+          prompt: Review PR ${{ github.event.pull_request.number }}

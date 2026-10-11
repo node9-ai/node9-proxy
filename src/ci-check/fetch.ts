@@ -9,7 +9,7 @@ import path from 'path';
 import { execFileSync } from 'node:child_process';
 import { request } from 'undici';
 import type { RepoTree, RepoFile, UnfollowedLink } from './types';
-import { routeOf, type Route } from './route';
+import { routeOf, type Route, ISSUE_FORM_RE } from './route';
 import {
   isInstructionFile,
   isSkillSupportFile,
@@ -55,6 +55,11 @@ export const SURFACE_FILES = [
   '.claude/settings.local.json',
   '.mcp.json',
   '.cursor/mcp.json',
+  '.vscode/mcp.json',
+  '.kiro/settings/mcp.json',
+  '.gemini/settings.json',
+  'opencode.json',
+  '.opencode/config.json',
   '.codex/config.toml',
   // CI-6: agent instruction files (auto-loaded into the agent's system prompt).
   'CLAUDE.md',
@@ -75,7 +80,7 @@ const WORKFLOW_DIR = '.github/workflows';
 // Instruction files come from the ONE definition in instructions.ts; only the config shapes
 // are spelled here. Adding a surface type means one edit, and the dispatcher sees it too.
 const CONFIG_FILE_RE =
-  /(^|\/)\.claude\/settings(\.local)?\.json$|(^|\/)\.mcp\.json$|(^|\/)\.cursor\/mcp\.json$|(^|\/)\.codex\/config\.toml$/;
+  /(^|\/)\.claude\/settings(\.local)?\.json$|(^|\/)\.mcp\.json$|(^|\/)\.cursor\/mcp\.json$|(^|\/)\.codex\/config\.toml$|(^|\/)\.vscode\/mcp\.json$|(^|\/)\.kiro\/settings\/mcp\.json$|(^|\/)\.gemini\/settings\.json$|(^|\/)opencode\.json$|(^|\/)\.opencode\/config\.json$/;
 /** Every agent-surface path in a tree, entry points and configs first and a skill's
  *  supporting files last, so a cap never drops a SKILL.md to make room for its own
  *  reference docs. The ONE selector: the GitHub Trees path, the local walk and the git-ref
@@ -144,7 +149,7 @@ export const isUnwalked = (p: string): boolean =>
 const isBuildOutput = (p: string): boolean => underDir(p, SOFT_DIR);
 /** How many NESTED surface files one reader may take. Only the GitHub API reader is capped: it
  *  pays one rate-limited request per file. The local and git readers are not — there is no
- *  total budget any more (§K, 2026-09-27): a 32 MiB budget cut real repositories (github/gh-aw
+ *  total budget any more (§K, 2026-09-27): a 32 MiB budget cut real repositories (one
  *  commits 48.7 MB of workflows) and let padding crowd out the workflows. Memory is bounded per
  *  file instead, by MAX_FILE_BYTES and by reading content only when it is analyzed. */
 export interface SurfaceCaps {
@@ -341,6 +346,9 @@ async function listWorkflowPaths(owner: string, repo: string, notes: string[]): 
 
 // ROOT-only workflow yaml (GitHub ignores nested `.github/workflows`).
 const ROOT_WORKFLOW_RE = /^\.github\/workflows\/[^/]+\.ya?ml$/;
+// T.6.9: issue forms are read for the labels they apply (a label a form puts on every new issue
+// is not a gate). Root only, small, and bounded so a repository cannot pad the read with them.
+const MAX_ISSUE_FORMS = 40;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ONE reading layer (§K; corrected in §K.2–K.4). The truth is what the AGENT sees from the
@@ -372,7 +380,7 @@ function kindOfMode(mode: string): Kind {
 const INCOMPLETE = 'may be INCOMPLETE';
 
 /** One text form for every reader: a checkout written with `eol=crlf` has CRLF where the blob
- *  has LF (hermes-agent's install.ps1), and every check reads line by line. Without this, the
+ *  has LF (a committed install.ps1), and every check reads line by line. Without this, the
  *  local and git readers disagree on content that is the same file. Content only — a link's
  *  text is used exactly as stored. */
 const lf = (t: string): string => t.replace(/\r\n/g, '\n');
@@ -648,8 +656,16 @@ function planSurface(paths: string[], notes: string[], truncated: boolean): stri
   const present = new Set(paths);
   const root = SURFACE_FILES.filter((p) => present.has(p));
   const workflows = paths.filter((p) => ROOT_WORKFLOW_RE.test(p));
+  const allForms = paths.filter((p) => ISSUE_FORM_RE.test(p));
+  const forms = allForms.slice(0, MAX_ISSUE_FORMS);
+  if (allForms.length > MAX_ISSUE_FORMS)
+    notes.push(
+      `${allForms.length} issue forms; read the first ${MAX_ISSUE_FORMS} (a label an unread form applies is not known): results ${INCOMPLETE}.`
+    );
+  // T.3: the root manifests name the package the repository publishes.
+  forms.push(...['package.json', 'pyproject.toml'].filter((p) => present.has(p)));
   const nested = pickSurfacePaths(paths, truncated, notes, { files: Number.POSITIVE_INFINITY });
-  return [...new Set([...root, ...workflows, ...nested])];
+  return [...new Set([...root, ...workflows, ...forms, ...nested])];
 }
 
 interface PlannedRead {
@@ -751,7 +767,12 @@ function planReads(
 function capNested(reads: PlannedRead[], cap: number | undefined, notes: string[]): PlannedRead[] {
   if (cap === undefined) return reads;
   const rootSet = new Set<string>(SURFACE_FILES);
-  const isRoot = (r: PlannedRead) => rootSet.has(r.rel) || ROOT_WORKFLOW_RE.test(r.rel);
+  const isRoot = (r: PlannedRead) =>
+    rootSet.has(r.rel) ||
+    ROOT_WORKFLOW_RE.test(r.rel) ||
+    ISSUE_FORM_RE.test(r.rel) ||
+    r.rel === 'package.json' ||
+    r.rel === 'pyproject.toml';
   const nested = reads.filter((r) => !isRoot(r));
   if (nested.length < cap) return reads;
   const keep = new Set(nested.slice(0, cap));
@@ -885,6 +906,56 @@ function readLocalFile(abs: string, rel: string): string {
 /** Read the agent surface of a local directory, as the agent sees it on disk. Content is NOT
  *  read here: each file is read when scanTree asks for it and then let go, so memory is bounded
  *  by one file, not by the repo. */
+/** The GitHub owner of a local clone's `origin`, or undefined. Args array, no shell; a missing
+ *  git, remote or GitHub URL yields undefined and decides nothing. */
+/** A small regular file's text, read through one descriptor (no check-then-read race), or null.
+ *  A symlink as the last component is not followed. */
+function readSmallFile(p: string, max: number): string | null {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(p, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    const st = fs.fstatSync(fd);
+    if (!st.isFile() || st.size > max) return null;
+    const buf = Buffer.alloc(st.size);
+    const n = fs.readSync(fd, buf, 0, st.size, 0);
+    return buf.subarray(0, n).toString('utf8');
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+function localGitHubOwner(root: string): string | undefined {
+  // Read `<root>/.git/config` itself (review, round 2): `git config` searches up from `root`, so a
+  // directory that is not a clone took its parent's owner, honoured GIT_DIR from the environment,
+  // and blocked on an `include.path` that names a FIFO. No include is followed here.
+  let cfg = readSmallFile(path.join(root, '.git', 'config'), 1_000_000);
+  if (cfg === null) {
+    // A worktree or submodule: `.git` is a file, `gitdir: <path>`, and a worktree's config is in
+    // its commondir.
+    const pointer = readSmallFile(path.join(root, '.git'), 4096);
+    const m = pointer && /^gitdir:\s*(.+?)\s*$/m.exec(pointer);
+    if (!m) return undefined;
+    let gitDir = path.resolve(root, m[1]);
+    const common = readSmallFile(path.join(gitDir, 'commondir'), 4096);
+    if (common !== null) gitDir = path.resolve(gitDir, common.trim());
+    cfg = readSmallFile(path.join(gitDir, 'config'), 1_000_000);
+    if (cfg === null) return undefined;
+  }
+  let inOrigin = false;
+  for (const line of cfg.split(/\r?\n/)) {
+    const sec = /^\s*\[\s*([^\]\s]+)(?:\s+"([^"]*)")?\s*\]/.exec(line);
+    if (sec) {
+      inOrigin = sec[1].toLowerCase() === 'remote' && sec[2] === 'origin';
+      continue;
+    }
+    const url = inOrigin && /^\s*url\s*=\s*(.+?)\s*$/i.exec(line);
+    if (url) return /github\.com[:/]([\w.-]{1,100})\//i.exec(url[1])?.[1];
+  }
+  return undefined;
+}
+
 export function readLocalTree(dir: string): RepoTree {
   const root = dir.replace(/^~/, process.env.HOME ?? '~');
   const notes: string[] = [];
@@ -915,8 +986,10 @@ export function readLocalTree(dir: string): RepoTree {
       },
     });
   }
+  const owner = localGitHubOwner(root);
   return {
     source: root,
+    ...(owner ? { owner } : {}),
     files,
     notes,
     paths: plan.paths,
@@ -1062,8 +1135,12 @@ export function readGitRefTree(dir: string, ref: string): RepoTree | null {
       }
       files.push({ path: rel, content, route });
     }
+    // The same owner as the head read (review, round 2): without it, a same-owner plugin
+    // marketplace was exempt on the head and flagged on the base, a false "fixed" in every PR.
+    const owner = localGitHubOwner(root);
     return {
       source: `${root}@${ref}`,
+      ...(owner ? { owner } : {}),
       files,
       notes,
       paths: plan.paths,
@@ -1118,7 +1195,7 @@ async function listTree(
 /** One scan's spend on the API. The hosted scan shares one token across every user, and a repo
  *  is free to be hostile: 2,000 workflows sharing one 4 MiB blob cost the attacker 4 MiB. So
  *  blobs are fetched once per sha, and the scan stops at a request and byte budget — above the
- *  largest real surface measured (github/gh-aw: 772 workflows, 48.7 MB) — and says so. */
+ *  largest real surface measured (772 workflows, 48.7 MB) — and says so. */
 export const API_BUDGET = { requests: 1000, bytes: 64 * 1024 * 1024 };
 
 type BlobResult = { text: string } | { error: string };
@@ -1165,7 +1242,7 @@ class ApiSession {
 }
 
 /** One blob by sha — the Git Blobs API, not Contents: Contents returns a file over 1 MB with an
- *  EMPTY body (hermes-agent's 1,077,327-byte llms-full.md read as nothing) and a symlink with
+ *  EMPTY body (a 1,077,327-byte llms-full.md read as nothing) and a symlink with
  *  no content at all. Blobs returns both. Raw text: a link's text is used exactly as stored. */
 async function fetchBlob(
   owner: string,
@@ -1211,12 +1288,20 @@ export async function fetchGitHubTree(
       // Trees failed: fall back to the fixed root list + the workflows directory (Contents
       // API), so a scan can never look at LESS than the old root-only baseline.
       const workflowPaths = await listWorkflowPaths(owner, repo, notes);
-      const allPaths = [...new Set([...SURFACE_FILES, ...workflowPaths])];
+      // The root manifests too: without them the own-package exemption (T.3) disappears.
+      const allPaths = [
+        ...new Set([...SURFACE_FILES, ...workflowPaths, 'package.json', 'pyproject.toml']),
+      ];
+      if (!notes.includes(RATE_LIMIT_NOTE) && !notes.includes(NETWORK_NOTE))
+        notes.push(
+          `the repository tree could not be listed; only the root files and the workflows were read: nested agent files ${INCOMPLETE}.`
+        );
       const fetched = await pooled(allPaths, FETCH_CONCURRENCY, (p) =>
         fetchOne(owner, repo, p, notes)
       );
       return {
         source: `${owner}/${repo}`,
+        owner,
         files: fetched.filter((f): f is RepoFile => !!f),
         notes,
       };
@@ -1276,6 +1361,7 @@ export async function fetchGitHubTree(
     notes.push(...session.closingNotes());
     return {
       source: `${owner}/${repo}`,
+      owner,
       files: fetched.filter((f): f is RepoFile => !!f),
       notes,
       paths: plan.paths,
@@ -1288,7 +1374,7 @@ export async function fetchGitHubTree(
     notes.push(
       `fetch degraded (${(err as Error)?.message ?? 'network error'}): results ${INCOMPLETE} (the repo could not be fetched).`
     );
-    return { source: `${owner}/${repo}`, files: [], notes };
+    return { source: `${owner}/${repo}`, owner, files: [], notes };
   }
 }
 

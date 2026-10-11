@@ -1,0 +1,24 @@
+name: Benchmark report
+on:
+  workflow_run:
+    workflows: ["Nightly benchmarks"]
+    types: [completed]
+permissions:
+  contents: read
+  issues: write
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: bench
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - run: npm install -g @anthropic-ai/claude-code@2.0.0
+      - name: report
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          claude -p "Summarise bench.txt and open an issue if any benchmark regressed by more than 5%." --allowedTools "Read,Bash(gh issue create:*)"

@@ -1,0 +1,18 @@
+# A plain shell step that mentions an agent's name next to the issue text: not an agent run,
+# so its command line is not read as an agent prompt.
+name: Sync
+on:
+  issues:
+    types: [labeled, closed]
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          echo "claude helper sync, issue #${{ github.event.issue.number }}: $ISSUE_TITLE"
+          gh issue view ${{ github.event.issue.number }} --json labels

@@ -1,0 +1,12 @@
+# Installs the CLI and prints its version: not an agent run.
+name: Setup
+on:
+  issues:
+    types: [opened]
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm install -g @anthropic-ai/claude-code && claude --version
+        env:
+          TITLE: ${{ github.event.issue.title }}

@@ -1,0 +1,21 @@
+# The PR head is checked out to the root; only the action's own write check stands in the way,
+# so a maintainer's push to the PR branch or a reopen runs the agent inside the fork's files.
+name: Review
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: /code-review

@@ -1,0 +1,10 @@
+# The caller is comment-triggered, but its calling job admits only write roles.
+name: Dispatch
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  call:
+    if: contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+    uses: ./.github/workflows/analysis.yml
+    secrets: inherit

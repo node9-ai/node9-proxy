@@ -1,0 +1,16 @@
+# The agent job holds a read-only token: nothing to misuse.
+name: Freshness
+on:
+  schedule:
+    - cron: '0 3 * * 1'
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt: List open issues with `gh issue list` and draft a summary.

@@ -1,0 +1,26 @@
+name: codex review
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  codex:
+    if: github.event.issue.pull_request != null && contains(github.event.comment.body, '@codex')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      final_message: ${{ steps.run_codex.outputs.final-message }}
+    steps:
+      - id: pr
+        env:
+          N: ${{ github.event.issue.number }}
+        run: echo "number=$N" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ steps.pr.outputs.number }}/merge
+      - id: run_codex
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          sandbox: read-only
+          prompt: Review the changes on this branch against main. Report findings in your final message.

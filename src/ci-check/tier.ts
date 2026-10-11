@@ -19,12 +19,19 @@ const UNREAD_RULES = new Set([
   'CI-1.hook-script.unscanned-size',
   'CI-6.skill-script.unscanned-size',
 ]);
-const CONCEALMENT = new Set(['CI-6.unicode-tag-chars', 'CI-6.bidi-override']);
+const CONCEALMENT = new Set(['CI-6.unicode-tag-chars', 'CI-6.bidi-override', 'CI-6.homoglyph']);
 
 export function tierOf(f: Pick<CiFinding, 'rule' | 'severity'>): Tier {
   const { rule, severity } = f;
   // Accurate, but for most skills it is what the skill needs: summarized, never counted.
   if (rule === 'CI-1.skill-allowed-tools') return 'review';
+  // T.5 (founder, node9Firewall#337): counted at the lowest level.
+  if (
+    rule === 'CI-2.trusted-trigger-reader' ||
+    rule === 'CI-2.fork-code-on-trust' ||
+    rule === 'CI-1.skill-untrusted-input'
+  )
+    return 'alert';
   if (UNREAD_RULES.has(rule)) return 'review';
   // The workflow checks already grade a gated workflow down to advisory (28 of 30 false as alerts).
   if (rule.startsWith('CI-2.') || rule.startsWith('CI-4.'))

@@ -1,0 +1,18 @@
+on:
+  issue_comment:
+    types: [created]
+permissions:
+  contents: write
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    env:
+      REQUEST: ${{ github.event.comment.body }}
+    steps:
+      - uses: anthropics/claude-code-base-action@v1
+        env:
+          TASK: ${{ env.REQUEST }}
+        with:
+          prompt: "Handle this request: ${{ env.TASK }}"
+          allowed_tools: "Bash"
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

@@ -336,15 +336,24 @@ export async function postCostBatches(
           // non-JSON / old SaaS — no shortfall info, nothing to log
         }
         if (typeof stored === 'number' && stored < batch.length) {
-          fs.appendFileSync(
-            HOOK_DEBUG_LOG,
-            `[cost-sync] dropped ${batch.length - stored} of ${batch.length} rows\n`
-          );
+          debugLog(`[cost-sync] dropped ${batch.length - stored} of ${batch.length} rows\n`);
         }
       }
     } catch (err) {
-      fs.appendFileSync(HOOK_DEBUG_LOG, `[cost-sync] ${safeMessage(err)}\n`);
+      debugLog(`[cost-sync] ${safeMessage(err)}\n`);
     }
+  }
+}
+
+/** Append to hook-debug.log, creating ~/.node9 first. A failed write must not abort the
+ *  remaining batches: on a machine with no ~/.node9 the bare append threw ENOENT out of the
+ *  batch loop's catch block. */
+function debugLog(line: string): void {
+  try {
+    fs.mkdirSync(path.dirname(HOOK_DEBUG_LOG), { recursive: true });
+    fs.appendFileSync(HOOK_DEBUG_LOG, line);
+  } catch (err) {
+    console.error(`[cost-sync] could not write ${HOOK_DEBUG_LOG}: ${safeMessage(err)}`);
   }
 }
 

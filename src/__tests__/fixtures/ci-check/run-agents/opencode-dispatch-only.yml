@@ -1,0 +1,14 @@
+# The same CLI on workflow_dispatch only: a maintainer runs it.
+name: Release notes
+on:
+  workflow_dispatch:
+jobs:
+  notes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        run: opencode run "Write release notes for the last tag"

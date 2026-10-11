@@ -1,0 +1,23 @@
+# allowed_non_write_users bound to the issue opener: every opener is allowed.
+name: Issue agent
+on:
+  issues:
+    types: [opened]
+jobs:
+  answer:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
+          allowed_non_write_users: ${{ github.event.issue.user.login }}
+          claude_args: --allowedTools "Bash(gh issue view:*),Read,Write,Grep"
+          prompt: Answer issue ${{ github.event.issue.number }}

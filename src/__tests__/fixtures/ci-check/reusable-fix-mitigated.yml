@@ -1,0 +1,69 @@
+# A reusable (workflow_call) fix workflow with no trigger of its own. The untrusted head goes
+# into a subdirectory, secrets are env-denied to the agent's shell, the action is SHA-pinned.
+name: Agent fix attempt
+
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        required: true
+        type: string
+      head_repo:
+        required: true
+        type: string
+      head_sha:
+        required: true
+        type: string
+      base_sha:
+        required: true
+        type: string
+    secrets:
+      inference_key:
+        required: true
+
+permissions: {}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Checkout trusted base
+        uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # v6
+        with:
+          ref: ${{ inputs.base_sha }}
+          persist-credentials: false
+
+      - name: Checkout fork head
+        uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # v6
+        with:
+          repository: ${{ inputs.head_repo }}
+          ref: ${{ inputs.head_sha }}
+          path: pr-head
+          persist-credentials: false
+
+      - name: Ask the agent for a local proposal
+        uses: anthropics/claude-code-action@89abcdef0123456789abcdef0123456789abcdef # v1.0.159
+        with:
+          anthropic_api_key: ${{ secrets.inference_key }}
+          github_token: ${{ github.token }}
+          allowed_non_write_users: "*"
+          settings: |
+            {
+              "permissions": {"deny": ["Read(~/.ssh/**)", "Bash(git push *)"]},
+              "sandbox": {
+                "enabled": true,
+                "network": {"deniedDomains": ["*"]},
+                "credentials": {"envVars": [
+                  {"name": "ANTHROPIC_API_KEY", "mode": "deny"},
+                  {"name": "GITHUB_TOKEN", "mode": "deny"}
+                ]}
+              }
+            }
+          prompt: |
+            Prepare one small local repair for PR #${{ inputs.pr_number }}. The untrusted PR is
+            in `pr-head/`. Work only there and never push.
+          claude_args: |
+            --allowedTools "Bash,Read(/pr-head/**),Edit(/pr-head/**)"

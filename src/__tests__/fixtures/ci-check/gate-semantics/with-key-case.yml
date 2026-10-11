@@ -1,0 +1,21 @@
+# The token input spelled in upper case. Action inputs are case-insensitive, so this is
+# github_token and the "*" bypass is armed.
+name: Review
+on:
+  pull_request_target:
+    types: [opened, reopened]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          allowed_non_write_users: "*"
+          claude_args: --allowedTools "Read,Grep,Bash(gh pr comment:*)"
+          prompt: Review PR ${{ github.event.pull_request.number }}

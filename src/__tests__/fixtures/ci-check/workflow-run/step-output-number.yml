@@ -1,0 +1,17 @@
+# An earlier step passes only the issue NUMBER through an output: not payload text.
+name: Label
+on:
+  issues:
+    types: [opened]
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - id: n
+        run: echo "num=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+      - uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt: Say hello to issue ${{ steps.n.outputs.num }}.

@@ -1,0 +1,21 @@
+# opencode reads the issue by number; its tool grant is a JSON env value that allows any
+# `gh issue` command.
+name: Duplicates
+on:
+  issues:
+    types: [opened]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: curl -fsSL https://example.invalid/install | bash
+      - env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          OPENCODE_PERMISSION: '{"bash": {"*": "deny", "gh issue*": "allow"}, "webfetch": "deny"}'
+        run: |
+          opencode run -m some/model "Look up issue ${{ github.event.issue.number }} with gh issue view and comment if it is a duplicate."

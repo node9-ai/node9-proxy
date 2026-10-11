@@ -1,0 +1,10 @@
+# The only caller runs on workflow_run of a PR workflow, with no gate.
+name: Review
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+jobs:
+  call:
+    uses: ./.github/workflows/analysis.yml
+    secrets: inherit

@@ -3,7 +3,7 @@
 // WRITTEN BEFORE THE IMPLEMENTATION. Three readers feed scanTree: a local checkout, a git ref
 // (the PR base), and the GitHub API. They were written and patched separately and disagreed on
 // the listing, the size limits and symlinks; CI-5 turns any disagreement into a false
-// "introduced" finding, and the 32 MiB total budget cut real repositories (github/gh-aw commits
+// "introduced" finding, and the 32 MiB total budget cut real repositories (one commits
 // 48.7 MB of workflows) and let padding crowd out the workflows.
 //
 // The law these rows pin:
@@ -60,7 +60,7 @@ function makeRepo(): string {
   // committed under an ignored dir: the folder walk never descends here, git lists it
   w('node_modules/tool/hook.js', 'console.log("ok")\n');
   w('docs/rules.md', OVERRIDE); // not surface on its own
-  // `eol=crlf`: the checkout has CRLF, the blob has LF (hermes-agent's install.ps1, real case)
+  // `eol=crlf`: the checkout has CRLF, the blob has LF (a committed install.ps1, real case)
   w('.gitattributes', '*.ps1 text eol=crlf\n');
   w('.claude/skills/deploy/scripts/setup.ps1', 'Write-Host "one"\nWrite-Host "two"\n');
   if (posix) {
@@ -175,7 +175,7 @@ describe('K — the local reader and the git-ref reader agree', () => {
 });
 
 describe('K — no total budget: nothing crowds out the workflows (#1)', () => {
-  it('the gh-aw shape: 60 workflows of 700 KB (42 MB) are all read, and the injectable one fires', () => {
+  it('a large workflow directory: 60 workflows of 700 KB (42 MB) are all read, and the injectable one fires', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-ghaw-'));
     try {
       const wf = path.join(root, '.github/workflows');
@@ -405,7 +405,7 @@ describe.runIf(posix)('K.2 — links resolve the way the OS resolves them, in ev
     // a directory link: `.claude -> cfg`; the agent opens .claude/settings.json through it
     put(root, 'cfg/settings.json', BROAD);
     fs.symlinkSync('cfg', path.join(root, '.claude'));
-    // the common shape (goose, Project-K): a skill dir linked from another agent's folder
+    // the common shape: a skill dir linked from another agent's folder
     put(root, '.agents/skills/s/SKILL.md', `---\nname: s\n---\n${OVERRIDE}`);
     fs.mkdirSync(path.join(root, '.codex/skills'), { recursive: true });
     fs.symlinkSync('../../.agents/skills/s', path.join(root, '.codex/skills/s'));

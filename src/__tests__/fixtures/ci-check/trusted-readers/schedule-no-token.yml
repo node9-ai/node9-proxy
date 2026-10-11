@@ -1,0 +1,22 @@
+# The agent reads open issues but gets no token; a separate step applies its output.
+name: Scheduled triage
+on:
+  schedule:
+    - cron: '0 * * * *'
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - id: list
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: gh issue list --state open --json number,title,body > issues.json
+      - uses: example-org/run-gemini-cli@v1
+        env:
+          GITHUB_TOKEN: ''
+        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          prompt: Read issues.json and suggest labels as JSON.

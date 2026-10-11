@@ -257,6 +257,32 @@ function annotationLines(result) {
   );
 }
 
+// Round 2: rules counted at the lowest level because the risk exists today. The generic
+// advisory text ("a minor hardening note", "gated or scoped today") says the opposite.
+const COUNTED_LOW = {
+  'CI-2.trusted-trigger-reader': {
+    threat:
+      'A scheduled agent reads issues or pull requests that strangers write, with a write token.',
+    mechanism:
+      'Nobody has to start it: text planted in an open issue or pull request reaches the agent on its next run, and it can act with that token.',
+  },
+  'CI-2.fork-code-on-trust': {
+    threat: "A maintainer's action runs the agent inside a fork's code.",
+    mechanism:
+      "The gate stops strangers from starting it, but once a maintainer does, the fork's CLAUDE.md, settings and build scripts load next to the job's secrets.",
+  },
+  'CI-1.skill-untrusted-input': {
+    threat: 'A committed skill reads text strangers write, with a grant that runs code.',
+    mechanism:
+      'Whenever the skill runs, instructions planted in that pull request, issue or page can run commands without a prompt.',
+  },
+  'CI-6.homoglyph': {
+    threat: 'An agent instruction file spells a word with look-alike letters.',
+    mechanism:
+      'It reads the same to a reviewer, but a search, a replace or a policy check on the real word misses it.',
+  },
+};
+
 /** Derive a one-line, severity-TIERED threat sentence from the anchor finding (+ its
  *  same-file companions, so a CI-2 injection + a CI-4 secret on one file tell ONE story).
  *  Derived from severity + check + signals — NEVER a fixed scary template — so it cannot
@@ -264,6 +290,7 @@ function annotationLines(result) {
  *  neutral. This honesty is the whole risk of the feature. */
 function threatLine(anchor, companions) {
   const sev = anchor.severity;
+  if (COUNTED_LOW[anchor.rule]) return COUNTED_LOW[anchor.rule].threat;
   const sig = companions
     .flatMap((c) => c.signals || [])
     .join(' | ')
@@ -319,6 +346,7 @@ function threatLine(anchor, companions) {
  *  exposure; medium/advisory stay calm. */
 function mechanism(anchor, companions) {
   const sev = anchor.severity;
+  if (COUNTED_LOW[anchor.rule]) return COUNTED_LOW[anchor.rule].mechanism;
   const calm = RANK[sev] <= RANK.medium;
   switch (anchor.check) {
     case 'CI-2':
@@ -476,7 +504,9 @@ function renderComment(result) {
         ? 'High: action needed'
         : worst === 'medium'
           ? 'Medium: hardening'
-          : 'Advisory: note';
+          : COUNTED_LOW[anchor.rule]
+            ? 'Low: worth fixing'
+            : 'Advisory: note';
 
   L.push(
     `### 🛡️ node9 agent-security · ${ICON[worst] ?? '🟢'} ${tier}` +

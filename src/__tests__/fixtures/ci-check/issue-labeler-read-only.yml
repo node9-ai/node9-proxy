@@ -1,0 +1,55 @@
+# A labeler any issue opener can start, but the agent only reads: a read-only sandbox, a
+# contents:read token, and a separate job applies the labels from its JSON output.
+name: Issue Labeler
+on:
+  issues:
+    types:
+      - opened
+      - labeled
+
+jobs:
+  suggest:
+    # Skip forks (no API key there)
+    if: github.repository == 'acme/widgets' && (github.event.action == 'opened' || (github.event.action == 'labeled' && github.event.label.name == 'auto-label'))
+    runs-on: ubuntu-latest
+    environment: issue-triage
+    permissions:
+      contents: read
+    outputs:
+      agent_output: ${{ steps.agent.outputs.final-message }}
+    steps:
+      - id: agent
+        uses: openai/codex-action@0123456789abcdef0123456789abcdef01234567 # v1
+        with:
+          openai-api-key: ${{ secrets.LABELER_OPENAI_API_KEY }}
+          allow-users: "*"
+          safety-strategy: drop-sudo
+          sandbox: read-only
+          prompt: |
+            Choose labels for the issue below. Reply with JSON only.
+
+            Issue title:
+            ${{ github.event.issue.title }}
+
+            Issue body:
+            ${{ github.event.issue.body }}
+          output-schema: |
+            {"type": "object", "properties": {"labels": {"type": "array", "items": {"type": "string"}}}, "required": ["labels"]}
+
+  apply:
+    needs: suggest
+    if: ${{ needs.suggest.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+      AGENT_OUTPUT: ${{ needs.suggest.outputs.agent_output }}
+    steps:
+      - name: Apply labels
+        run: |
+          labels=$(printf '%s' "$AGENT_OUTPUT" | jq -r '.labels[] | tostring')
+          for label in $labels; do gh issue edit "$ISSUE_NUMBER" --add-label "$label" || true; done

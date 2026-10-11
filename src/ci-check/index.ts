@@ -4,9 +4,19 @@
 // scan always returns a result (fail-open on our own bugs).
 
 import { fetchTree, isUnwalked, type OnProgress } from './fetch';
-import { analyzeWorkflow, analyzeWorkflowSecrets } from './workflows';
+import {
+  analyzeWorkflow,
+  analyzeWorkflowSecrets,
+  analyzeWorkflowPlugins,
+  analyzeTrustedReaders,
+  analyzeForkCodeOnTrust,
+  issueFormLabels,
+  runSourceOf,
+  localCallsOf,
+  type LocalCaller,
+} from './workflows';
 import { analyzeAgentConfig, analyzeSkillGrants } from './agent-config';
-import { analyzeMcp } from './mcp';
+import { analyzeMcp, ownPackageNames } from './mcp';
 import { analyzeCodexConfig } from './codex';
 import { analyzeInstructionFile, appSkillDirsOf, namedDocs, skillDirsOf } from './instructions';
 import { routeOf } from './route';
@@ -81,6 +91,59 @@ export function scanTree(tree: RepoTree): ScanResult {
     }
     return named.get(dir)!.has(docPath);
   };
+  // T.1: who calls each local reusable workflow. Only the caller records are kept: holding
+  // every workflow's text until the end undid the one-file memory bound of §K (review, round 2),
+  // so the main loop reads each file again.
+  const callersOf = new Map<string, LocalCaller[]>();
+  // T.6.9: labels an issue form puts on every new issue are not a gate.
+  const autoLabels = new Set<string>();
+  const routeOfFile = (file: (typeof tree.files)[number]) =>
+    file.route !== undefined ? file.route : routeOf(file.path, skillDirs, appDirs);
+  // T.3: the package names the repository publishes (its own MCP server is not third-party).
+  const manifests: { path: string; content: string }[] = [];
+  for (const file of tree.files) {
+    if (routeOfFile(file) !== 'manifest') continue;
+    try {
+      manifests.push({ path: file.path, content: file.content });
+    } catch {
+      /* unreadable: no own name, so nothing is excused */
+    }
+  }
+  const ownPackages = ownPackageNames(manifests);
+  for (const file of tree.files) {
+    if (routeOfFile(file) !== 'issue-form') continue;
+    try {
+      for (const l of issueFormLabels(file.content)) autoLabels.add(l);
+    } catch {
+      /* unreadable form: its labels are unknown, so none is excluded from the gates */
+    }
+  }
+  // T.4: the workflows no stranger can start, by the name `workflow_run.workflows` uses. A name
+  // shared with a stranger-firable workflow is not trusted.
+  const runSources = new Map<string, boolean>();
+  for (const file of tree.files) {
+    if (routeOfFile(file) !== 'workflow') continue;
+    try {
+      const src = runSourceOf(file.path, file.content, autoLabels);
+      if (src) runSources.set(src.name, (runSources.get(src.name) ?? true) && src.trusted);
+    } catch {
+      /* unreadable: not trusted */
+    }
+  }
+  const trustedRunSources = new Set([...runSources].filter(([, t]) => t).map(([n]) => n));
+  for (const file of tree.files) {
+    if (routeOfFile(file) !== 'workflow') continue;
+    try {
+      const content = file.content;
+      for (const { target, caller } of localCallsOf(file.path, content, autoLabels)) {
+        const list = callersOf.get(target) ?? [];
+        list.push(caller);
+        callersOf.set(target, list);
+      }
+    } catch {
+      /* unreadable: the main loop reports it */
+    }
+  }
   for (const file of tree.files) {
     // The reader routed each path over the whole plan (K.4); a hand-built tree has no route.
     let route = file.route !== undefined ? file.route : routeOf(file.path, skillDirs, appDirs);
@@ -88,6 +151,7 @@ export function scanTree(tree: RepoTree): ScanResult {
       if (!namedBy(file.path)) continue; // the app's own doc: not graded, not inspected
       route = 'instruction';
     }
+    if (route === 'issue-form' || route === 'manifest') continue; // read above; not agent surface
     inspected.push(file.path);
     if (file.path === SUPPRESSIONS_FILE) continue;
     // §Q: content under a test, fixture or example tree (see testPathKind): read, and not graded,
@@ -101,10 +165,20 @@ export function scanTree(tree: RepoTree): ScanResult {
       const content = file.content;
       switch (route) {
         case 'workflow': {
-          const f = analyzeWorkflow(file.path, content);
+          const callers = callersOf.get(file.path);
+          const f = analyzeWorkflow(file.path, content, callers, autoLabels, trustedRunSources);
           if (f) findings.push(f);
-          const s = analyzeWorkflowSecrets(file.path, content); // CI-4
+          const s = analyzeWorkflowSecrets(
+            file.path,
+            content,
+            callers,
+            autoLabels,
+            trustedRunSources
+          ); // CI-4
           if (s) findings.push(s);
+          findings.push(...analyzeWorkflowPlugins(file.path, content, tree.owner)); // CI-3: plugin sources
+          findings.push(...analyzeTrustedReaders(file.path, content, autoLabels, callers)); // T.5
+          findings.push(...analyzeForkCodeOnTrust(file.path, content, callers, autoLabels)); // T.7
           break;
         }
         case 'agent-config':
@@ -117,10 +191,10 @@ export function scanTree(tree: RepoTree): ScanResult {
           findings.push(...analyzeScript(file.path, content, 'CI-6.skill-script'));
           break;
         case 'mcp':
-          findings.push(...analyzeMcp(file.path, content));
+          findings.push(...analyzeMcp(file.path, content, ownPackages));
           break;
         case 'codex':
-          findings.push(...analyzeCodexConfig(file.path, content)); // CI-3 + CI-1 (1c-A)
+          findings.push(...analyzeCodexConfig(file.path, content, ownPackages)); // CI-3 + CI-1 (1c-A)
           break;
         case 'instruction':
           findings.push(...analyzeInstructionFile(file.path, content)); // CI-6: the content
@@ -128,7 +202,10 @@ export function scanTree(tree: RepoTree): ScanResult {
           break;
       }
     } catch (err) {
-      notes.push(`checker degraded on ${file.path}: ${(err as Error)?.message ?? 'error'}`);
+      // A checker that throws has not looked: the result may be INCOMPLETE, never clean.
+      notes.push(
+        `checker degraded on ${file.path}: ${(err as Error)?.message ?? 'error'}; results may be INCOMPLETE`
+      );
     }
     if (testKind === 'alerts-only') {
       const kept = findings.splice(before).filter((f) => tierOf(f) === 'alert');

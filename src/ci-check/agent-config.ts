@@ -10,6 +10,7 @@ import { parseFrontmatter, allowedToolsOf } from './frontmatter';
 import { SCRIPT_EXT_RE, isHookScript } from './instructions';
 import { lineAtIndex, jsonValueIndex } from './lines';
 import { safeText } from './suppress';
+import { sanitizedListing } from './listing';
 
 interface Settings {
   permissions?: { allow?: unknown[]; deny?: unknown[] };
@@ -45,7 +46,10 @@ function hookCommands(hooks: Record<string, unknown[]> | undefined): string[] {
 const OPEN_RUNNER_RE = new RegExp(
   String.raw`^Bash\((?:[A-Z_][A-Z0-9_]{0,40}=\S{0,200} )*(?:/[\w./-]{0,80}/)?` +
     String.raw`(python(?:3(?:\.\d{1,2})?)?|node|deno(?: run)?|bun(?: x)?|ruby|perl|php|uv run|uvx|npx|npm exec|pnpm dlx|yarn dlx|pipx|docker run|` +
-    String.raw`curl|wget|nc|ncat|ssh|scp|rsync|sh|bash|zsh|eval|source|xargs|env|sudo|gh)` +
+    String.raw`curl|wget|nc|ncat|ssh|scp|rsync|sh|bash|zsh|eval|source|xargs|env|sudo|gh|` +
+    // PowerShell, and the cmdlets that run a string or a program (a PowerShell grant is read
+    // as Bash, review round 2).
+    String.raw`pwsh|powershell|invoke-expression|iex|invoke-command|icm|start-process|invoke-webrequest|iwr|invoke-restmethod|irm)` +
     String.raw`(?: --?[A-Za-z][\w-]{0,30}){0,4} ?['"]?(?::\*| \*|\*)\)$`,
   'i'
 );
@@ -54,9 +58,38 @@ const OPEN_RUNNER_RE = new RegExp(
 // every repetition above is bounded.
 const OPEN_RUNNER_MAX = 300;
 // An informational flag (`node --version:*`, `python --help:*`) runs nothing the caller chose;
-// getsentry/sentry, the low-FP fixture, grants five of them. Only the long forms: `-v` is
+// the low-FP settings fixture grants five of them. Only the long forms: `-v` is
 // verbose for curl/ssh/bash and `-h` a host for docker (second review).
 const INFO_FLAG_RE = /\s--(version|help)\b/;
+// T.9 (2026-10-11): more wildcard grants that run code without a prompt, graded medium like the
+// S.3 runners, with the same grammar (`VAR=x` prefixes, then only flags, then a wildcard): a
+// command with an exec escape (`find -exec`, `awk system()`, `sed e`, `tee` to any path, `make`,
+// an editor or pager with `!`), a "run a program" sub-command, and a destructive or publishing
+// verb. Measured on the hand-reviewed clones before building. Not `find` and not `make -n`: the
+// low-FP settings fixture grants both. `find -exec` and `make -n --eval '$(shell …)'` do run code
+// (review, round 2); whether that outweighs the false alarms is the founder's decision.
+// Settings only: a skill or command is active only when invoked, and a ship command that
+// pre-approves `git push` is doing its job.
+const EXTRA_RUNNER_RE = new RegExp(
+  String.raw`^Bash\((?:[A-Z_][A-Z0-9_]{0,40}=\S{0,200} )*(?:/[\w./-]{0,80}/)?` +
+    String.raw`(awk|gawk|mawk|sed|tee|tar|make(?! -n\b)|vim|vi|nvim|less|man|timeout|dd|install|` +
+    String.raw`dotnet (?:run|script)|cargo run|go run|mvn exec|gradle run|npm start|tmux|` +
+    String.raw`rm|git (?:push|config|submodule|filter-branch)|gh (?:repo|secret|auth|release))` +
+    String.raw`(?: --?[A-Za-z][\w-]{0,30}){0,4} ?['"]?(?::\*| \*|\*)\)$`,
+  'i'
+);
+// MCP tools whose job is to execute code or commands, pre-approved in `permissions.allow`.
+const MCP_EXEC_RE =
+  /^mcp__ide__executeCode$|^mcp__[\w-]{1,80}__(?:execute|exec|run)_(?:code|command|shell|sql|query)$|^mcp__[\w-]{1,80}__(?:ctx_)?(?:batch_)?execute$|^mcp__[\w-]{1,80}__(?:bash|shell|terminal)$/;
+
+function extraRunner(grant: string): boolean {
+  if (grant.length > OPEN_RUNNER_MAX || INFO_FLAG_RE.test(grant)) return false;
+  return (
+    EXTRA_RUNNER_RE.test(grant.replace(/\s+/g, ' ').replace(/\(\s+/, '(')) ||
+    MCP_EXEC_RE.test(grant)
+  );
+}
+
 function openRunner(grant: string): boolean {
   if (grant.length > OPEN_RUNNER_MAX || INFO_FLAG_RE.test(grant)) return false;
   return OPEN_RUNNER_RE.test(grant.replace(/\s+/g, ' ').replace(/\(\s+/, '('));
@@ -72,25 +105,32 @@ function openRunner(grant: string): boolean {
 export function gradeBroadGrant(
   allow: string[],
   deny: string[],
-  opts: { denySupported?: boolean; scope?: string } = {}
+  opts: { denySupported?: boolean; scope?: string; settings?: boolean } = {}
 ): { broad: string[]; bareShell: boolean; high: boolean; signals: string[] } | null {
   const denySupported = opts.denySupported ?? true;
   const scope = opts.scope ?? 'for everyone who opens this repo with the agent';
-  const broad = allow.filter(
-    (a) => /^Bash$|^Bash\(\s*\*|^Bash\(git:|^Write\(\s*\*|^Write$|^Edit$/.test(a) || openRunner(a)
-  );
+  // T.9: a PowerShell grant is read with the same grammar as a Bash one.
+  const asBash = (a: string) => a.replace(/^PowerShell(?=$|\()/, 'Bash');
+  const broad = allow.filter((raw) => {
+    const a = asBash(raw);
+    return (
+      /^Bash$|^Bash\(\s*\*|^Bash\(git:|^Write\(\s*\*|^Write$|^Edit$/.test(a) ||
+      openRunner(a) ||
+      (opts.settings === true && extraRunner(a))
+    );
+  });
   if (broad.length === 0) return null;
-  const hasBackstop = deny.some((d) => /Bash|Write|Edit/.test(d));
+  const hasBackstop = deny.some((d) => /Bash|PowerShell|Write|Edit/.test(d));
   // For an unrestricted shell only a Bash deny counts: `deny: ['Write']` does nothing to
   // limit `allow: ['Bash']`. A Bash deny narrows it but cannot make it safe, and the
   // signal says exactly that.
-  const bashBackstop = deny.some((d) => /^Bash\b/.test(d));
+  const bashBackstop = deny.some((d) => /^(?:Bash|PowerShell)\b/.test(d));
   // Calibration (2026-09-25): only an UNRESTRICTED shell with no `deny` backstop is high —
   // any command an injected instruction names runs without a prompt, for everyone who opens
   // the repo with the agent. `Bash(git:*)`, `Write` and `Edit` are broad and worth a look
   // (git can run other programs via `-c core.pager=…` or `!` aliases), but they are the
   // everyday grant of most repos, and calling them catastrophic overclaimed → medium.
-  const bareShell = broad.some((a) => /^Bash$|^Bash\(\s*\*/.test(a));
+  const bareShell = broad.some((a) => /^Bash$|^Bash\(\s*\*/.test(asBash(a)));
   const high = bareShell && !bashBackstop;
   const signals = [`broad allow(s): ${broad.slice(0, 5).join(', ')}`];
   if (high)
@@ -107,7 +147,7 @@ export function gradeBroadGrant(
     );
   if (broad.some((a) => /^Write|^Edit$/.test(a)))
     signals.push('`Write`/`Edit` pre-approve file changes without a prompt');
-  if (broad.some(openRunner))
+  if (broad.some((a) => openRunner(asBash(a))))
     signals.push(
       'an interpreter, network tool, shell runner or `gh` grant ending in a wildcard runs any code or request an injected instruction writes, without a prompt'
     );
@@ -259,9 +299,13 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
   }
 
   // Over-broad permission grants pre-authorizing every contributor's agent.
-  const allow = asStrings(cfg.permissions?.allow);
+  // T.9: `permissions.allowedTools` is read as an alias of `permissions.allow`.
+  const allow = [
+    ...asStrings(cfg.permissions?.allow),
+    ...asStrings((cfg.permissions as { allowedTools?: unknown } | undefined)?.allowedTools),
+  ];
   const deny = asStrings(cfg.permissions?.deny);
-  const grade = gradeBroadGrant(allow, deny);
+  const grade = gradeBroadGrant(allow, deny, { settings: true });
   if (grade) {
     const { high, signals } = grade;
     // Anchor at the first broad entry: where the reviewer has to change something.
@@ -300,6 +344,52 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
  *  `tools:` is scope, not authorization, and a CLAUDE.md has no such field at all. */
 const GRANT_CARRIER_RE = /(^|\/)[Ss][Kk][Ii][Ll][Ll]\.md$|(^|\/)\.claude\/commands\/.+\.md$/;
 
+// T.8 (2026-10-11): most skill grants are what the skill needs, so CI-1.skill-allowed-tools is
+// review-tier (§Q). It counts when three things meet in a skill of the repository's own agent
+// surface: a grant that runs code (a shell or an interpreter; gh or git alone do not) or writes
+// to GitHub, text a stranger writes (a PR, an issue, the web), and nothing between the two.
+// Measured on the hand-reviewed clones: 0 hand-clean repositories match.
+const ROOT_SURFACE_RE = /^\.(claude|agents|github|codex|cursor|gemini)\//;
+// A stranger's PR checked out, fetched or read through GraphQL counts too: fork code is worse
+// than fork text (review, round 2).
+const ITEM_TEXT_RE =
+  /gh\s+(?:pr|issue)\s+(?:view|diff|list)\b|gh\s+pr\s+checkout\b|git\s+fetch\s+[^\n]{0,80}\bpull\/|gh\s+api\s+graphql\b|gh\s+api\s+[^\n]{0,120}\/(?:pulls|issues)\b|mcp__github__(?:get_issue|get_pull_request|list_issues|search_issues)|--json\s+[^\n]{0,120}\b(?:body|title)\b/;
+const PR_TEXT_RE = /gh\s+pr\s+(?:view|diff)\b|gh\s+api\s+[^\n]{0,120}\/pulls\b/;
+// Verb phrases only: the bare words WebFetch / WebSearch in prose ("do not use WebFetch") are
+// not a read, and a granted web tool is already read from the allow list (review, round 2).
+const WEB_TEXT_RE = /\bsearch the web\b|\bfetch (?:the )?(?:url|page)\b/i;
+
+/** Why this skill's grant meets stranger text, or null. */
+function skillReadsUntrusted(
+  path: string,
+  content: string,
+  allow: string[],
+  broad: string[]
+): string | null {
+  if (!ROOT_SURFACE_RE.test(path)) return null;
+  const body = content.replace(/^---[\s\S]*?\n---/, '');
+  const runsCode = broad
+    .map((a) => a.replace(/^PowerShell(?=$|\()/, 'Bash'))
+    .some((a) => /^Bash$|^Bash\(\s*\*/.test(a) || (openRunner(a) && !/^Bash\(\s*gh\b/.test(a)));
+  const webGrant = allow.some((a) => /^(WebFetch|WebSearch)\b/.test(a));
+  // Line by line: a lookup cut down to a number, a URL or a SHA (`gh pr view --json url -q .url`)
+  // reads no stranger text (review, round 2).
+  const reads = (re: RegExp) =>
+    body
+      .replace(/\\\r?\n/g, ' ')
+      .split('\n')
+      .some((l) => re.test(l) && !sanitizedListing(l));
+  if (runsCode && reads(ITEM_TEXT_RE))
+    return 'it reads pull request or issue text that strangers write, with a grant that runs code';
+  if (runsCode && (webGrant || WEB_TEXT_RE.test(body)))
+    return 'it reads web content anyone can publish, with a grant that runs code';
+  const writes = allow.some((a) => /^(Write|Edit|MultiEdit)$/.test(a));
+  const ghOrGit = allow.some((a) => /^Bash\(\s*(gh|git)\b/.test(a));
+  if (writes && ghOrGit && reads(PR_TEXT_RE))
+    return 'it reads pull request text that strangers write, and may edit files and run git/gh on it';
+  return null;
+}
+
 /** CI-1 over a skill's or slash command's frontmatter. `allowed-tools` is a
  *  pre-authorization — tools Claude may use WITHOUT asking while the skill or command is
  *  active — so it is graded by the same law as `permissions.allow` in settings.json.
@@ -317,6 +407,21 @@ export function analyzeSkillGrants(path: string, content: string): CiFinding[] {
   if (!grade) return [];
   const kind = /commands\//.test(path) ? 'slash command' : 'skill';
   const at = content.search(/^allowed-tools\s*:/m);
+  const untrusted = skillReadsUntrusted(path, content, allow, grade.broad);
+  if (untrusted)
+    return [
+      {
+        check: 'CI-1',
+        rule: 'CI-1.skill-untrusted-input',
+        ...(at >= 0 ? { line: lineAtIndex(content, at) } : {}),
+        dimension: 'toolRules',
+        severity: 'advisory',
+        title: `Committed ${kind} runs code or writes with text strangers control`,
+        file: path,
+        signals: [...grade.signals, untrusted],
+        fix: 'Drop the shell or interpreter grant from a skill that reads PRs, issues or the web, or have it treat that text as data in a read-only step first.',
+      },
+    ];
   return [
     {
       check: 'CI-1',

@@ -46,6 +46,113 @@ function isZwLegitScript(cp: number | undefined): boolean {
 }
 const isAsciiWordChar = (ch: string | undefined): boolean => !!ch && /[A-Za-z0-9]/.test(ch);
 
+// T.10 (2026-10-11): Cyrillic and Greek letters that look like Latin ones, and the Latin letter
+// each one passes for. A word that mixes them with Latin letters is concealment; a word wholly
+// in one script (Russian or Greek prose), a unit (`μs`) or a line that names the trick (a
+// security document's example) is not.
+const LOOKALIKE: Record<string, string> = {
+  а: 'a',
+  е: 'e',
+  о: 'o',
+  р: 'p',
+  с: 'c',
+  у: 'y',
+  х: 'x',
+  і: 'i',
+  ј: 'j',
+  ѕ: 's',
+  ԁ: 'd',
+  ԛ: 'q',
+  ԝ: 'w',
+  А: 'A',
+  В: 'B',
+  Е: 'E',
+  К: 'K',
+  М: 'M',
+  Н: 'H',
+  О: 'O',
+  Р: 'P',
+  С: 'C',
+  Т: 'T',
+  Х: 'X',
+  І: 'I',
+  Ј: 'J',
+  Ѕ: 'S',
+  Ԍ: 'G',
+  Ԛ: 'Q',
+  Ԝ: 'W',
+  ο: 'o',
+  α: 'a',
+  ρ: 'p',
+  τ: 't',
+  ν: 'v',
+  υ: 'u',
+  κ: 'k',
+  χ: 'x',
+  ι: 'i',
+  Α: 'A',
+  Β: 'B',
+  Ε: 'E',
+  Η: 'H',
+  Ι: 'I',
+  Κ: 'K',
+  Μ: 'M',
+  Ν: 'N',
+  Ο: 'O',
+  Ρ: 'P',
+  Τ: 'T',
+  Χ: 'X',
+  Υ: 'Y',
+  Ζ: 'Z',
+  // Armenian (review, round 2)
+  '\u0585': 'o',
+  '\u057d': 'u',
+  '\u0570': 'h',
+  '\u0578': 'n',
+  '\u0581': 'g',
+  '\u0566': 'q',
+};
+const MIXED_WORD_RE = /[A-Za-z\u0370-\u03ff\u0400-\u04ff\u0500-\u052f\u0530-\u058f]{4,60}/g;
+// A letter of a script that has Latin look-alikes. One the map does not hold (`\u04bb`, `\u057d`) is
+// counted too: a single unmapped letter used to turn the rule off (review, round 2).
+const FOREIGN_LETTER_RE = /[\u0370-\u03ff\u0400-\u04ff\u0500-\u052f\u0530-\u058f]/;
+const GREEK_RE = /[\u0370-\u03ff]/;
+const EXPLAINED_LINE_RE = /cyrillic|greek|armenian|homoglyph|confusable|look-?alike/i;
+const HOMOGLYPH_MAX_LINE = 2000;
+
+function homoglyphWord(content: string): { folded: string; count: number; line: number } | null {
+  const lines = content.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const text = lines[i];
+    if (text.length > HOMOGLYPH_MAX_LINE) continue;
+    // Only text a reader sees explains the line: an HTML comment does not render.
+    const visible = text.replace(/<!--[\s\S]*?(?:-->|$)/g, '');
+    if (EXPLAINED_LINE_RE.test(visible)) continue;
+    for (const m of text.matchAll(MIXED_WORD_RE)) {
+      const chars = [...m[0]];
+      const latin = chars.filter((c) => /[A-Za-z]/.test(c)).length;
+      const foreign = chars.filter((c) => FOREIGN_LETTER_RE.test(c));
+      // At least one letter must pass for a Latin one; a symbol with no look-alike (`cos\u03b8`)
+      // is notation. The unmapped letters next to it count with it.
+      if (latin < 2 || !foreign.some((c) => c in LOOKALIKE) || foreign.length > latin) continue;
+      // A Greek symbol with a Latin subscript (`\u03c1max`, `\u03c4min`) is notation, not a disguise.
+      const lead = chars.findIndex((c) => !FOREIGN_LETTER_RE.test(c));
+      if (
+        lead > 0 &&
+        chars.slice(0, lead).every((c) => GREEK_RE.test(c)) &&
+        lead === foreign.length
+      )
+        continue;
+      return {
+        folded: chars.map((c) => LOOKALIKE[c] ?? c).join(''),
+        count: foreign.length,
+        line: i + 1,
+      };
+    }
+  }
+  return null;
+}
+
 /** D: count zero-width chars (U+200B/U+2060) that SPLIT a visible Latin word — the concealment
  *  shape. Skips a neighbor in a ZW-legit script (word-break typography) and whitespace/edge
  *  boundaries (formatting). */
@@ -72,9 +179,9 @@ const stripZeroWidth = (t: string): string => t.replace(/[​⁠]/g, '');
 /** Every committed file an agent loads as instructions on its own. ONE definition: the tree
  *  walk in fetch.ts picks by it and the dispatcher in index.ts routes by it, so a file can
  *  never be fetched and then silently dropped, or the reverse. The last three shapes are the
- *  Agent Skills standard (`SKILL.md` in any letter case — `talmolab/sleap` commits
+ *  Agent Skills standard (`SKILL.md` in any letter case — some repositories commit
  *  `skill.md`, which every case-insensitive contributor disk resolves; the always-loaded
- *  CLAUDE.md/AGENTS.md stay case-exact — loaded by Claude Code, Codex, Hermes, OpenClaw and Pi)
+ *  CLAUDE.md/AGENTS.md stay case-exact — loaded by Claude Code, Codex and other agents)
  *  and Claude Code's own subagents and slash commands. Measured over 389 real skill files
  *  before they were added (2026-09-22): 4 of 4 known-malicious fixtures caught; 12 benign
  *  files flagged, every one a false positive, in the shapes fixed alongside this change. */
@@ -190,7 +297,7 @@ export function isHookScript(path: string): boolean {
 }
 /** A skill's scripts live where the Agent Skills layout puts them: directly beside the
  *  SKILL.md, or under its `scripts/` or `bin/`. A whole application that carries a SKILL.md
- *  at its root (Project-K's `integrations/gstack/`) is not one big skill: its `src/` and
+ *  at its root (e.g. `integrations/<app>/`) is not one big skill: its `src/` and
  *  `test/` are the app, and admitting them made a prompt-injection classifier and its tests
  *  read as ten HIGH findings (2026-09-26). */
 export function isSkillScript(path: string, skillDirs: ReadonlySet<string>): boolean {
@@ -365,7 +472,7 @@ function isQuotedExample(text: string, idx: number, len: number): boolean {
 // `curl … | python -c "<program>"` where the program only PARSES what it reads is not
 // fetch-and-obey — it is the everyday shape of a skill that reads an API. It becomes one only
 // when the inline program can execute what it was handed. `| python` with no `-c` executes
-// stdin and stays a match. (11 of the 14 hermes-agent findings, 2026-09-26.)
+// stdin and stays a match. (11 of the 14 findings in one repository, 2026-09-26.)
 // Code-running idioms, not only the words `exec`/`eval` (§M): an import machinery, a code
 // object, a deserializer that runs code, a raw call into libc, a new function body, a VM, a
 // dynamic import. `re.compile` is a regex, not code.
@@ -498,6 +605,23 @@ const lineAt = (text: string, i: number): number | undefined =>
 export function analyzeInstructionFile(path: string, content: string): CiFinding[] {
   const findings: CiFinding[] = [];
   const decoded = decodeSuspiciousBase64(content);
+
+  // T.10: a Latin word spelled with Cyrillic or Greek look-alike letters.
+  const glyph = homoglyphWord(content);
+  if (glyph)
+    findings.push(
+      mk(
+        'CI-6.homoglyph',
+        'advisory',
+        'A word in an agent instruction file is spelled with look-alike letters',
+        [
+          `\`${glyph.folded}\` is written with ${glyph.count} non-Latin look-alike letter(s): it reads the same to a reviewer, but a search, a replace or a policy check on the real word misses it`,
+        ],
+        'Spell the word with plain Latin letters, or explain on the same line why the look-alikes are there.',
+        path,
+        glyph.line
+      )
+    );
 
   // Tier 1 — structural concealment, classified by legitimacy (A/B/C/D).
   if (TAG_CHARS.test(content))

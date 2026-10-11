@@ -21,7 +21,11 @@ interface CodexConfig {
   approval_policy?: unknown;
 }
 
-export function analyzeCodexConfig(path: string, content: string): CiFinding[] {
+export function analyzeCodexConfig(
+  path: string,
+  content: string,
+  own: ReadonlySet<string> = new Set()
+): CiFinding[] {
   let cfg: CodexConfig;
   try {
     cfg = parseToml(content) as CodexConfig;
@@ -31,7 +35,7 @@ export function analyzeCodexConfig(path: string, content: string): CiFinding[] {
   const findings: CiFinding[] = [];
 
   // CI-3 — MCP servers (reuse the exact `.mcp.json` danger model).
-  findings.push(...analyzeMcpServers(cfg.mcp_servers ?? {}, path, content));
+  findings.push(...analyzeMcpServers(cfg.mcp_servers ?? {}, path, content, own));
 
   // CI-1 — autonomy settings. `danger-full-access` (arbitrary cmds, full disk/network) is
   // catastrophic → high; `never` approval alone is bounded (a sandbox may still constrain

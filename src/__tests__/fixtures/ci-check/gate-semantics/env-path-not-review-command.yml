@@ -1,0 +1,22 @@
+# The prompt names a file through `${{ env.X }}`; once resolved, `.git/review-policy.diff`
+# is a path, not a `/review` command over a fork PR.
+name: Policy
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      DIFF_FILE: .git/review-policy.diff
+    steps:
+      - uses: actions/checkout@v4
+      - uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          sandbox: read-only
+          prompt: |
+            Read `${{ env.DIFF_FILE }}` and classify the change as low or high risk.

@@ -1,0 +1,18 @@
+# claude-code-action with permissions skipped in claude_args: the tool grant is moot.
+name: Triage
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-base-action@beta
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: --permission-mode bypassPermissions --allowedTools "Read"
+          prompt: Triage ${{ github.event.issue.title }}

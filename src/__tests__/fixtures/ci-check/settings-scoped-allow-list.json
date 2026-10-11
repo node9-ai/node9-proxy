@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(find:*)",
+      "Bash(git status:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr diff:*)",
+      "Bash(gh issue view:*)",
+      "Bash(gh run view:*)",
+      "Bash(gh api:*)",
+      "Bash(yarn test:*)",
+      "Bash(yarn lint:*)",
+      "Bash(npm --version:*)",
+      "Bash(node --version:*)",
+      "Bash(npx --version:*)",
+      "Bash(npx expo prebuild)",
+      "Bash(python --version:*)",
+      "Bash(python3 --version:*)",
+      "Bash(ruby --version:*)",
+      "Bash(make -n:*)",
+      "Bash(./gradlew tasks:*)",
+      "Bash(./gradlew assembleRelease)",
+      "Skill(team-skills:code-review)",
+      "Skill(team-skills:find-bugs)",
+      "WebFetch(domain:docs.github.com)",
+      "WebFetch(domain:nodejs.org)"
+    ],
+    "deny": []
+  }
+}

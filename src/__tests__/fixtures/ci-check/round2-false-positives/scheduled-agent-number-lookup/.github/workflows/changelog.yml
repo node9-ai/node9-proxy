@@ -1,0 +1,20 @@
+name: daily changelog
+on:
+  schedule:
+    - cron: '0 3 * * *'
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  changelog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Update CHANGELOG.md from `git log` since the last tag. First check whether the
+            changelog PR already exists with
+            `gh pr list --head bot/changelog --json number --jq '.[0].number'`; if it does, stop.
+          claude_args: --allowedTools "Edit,Bash(git log:*),Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*)"

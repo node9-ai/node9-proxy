@@ -1,0 +1,25 @@
+# A dispatcher: any issue opener reaches the `dispatch` job, which only routes; the calling job
+# runs on the command it extracted, so which branch sends this command is not visible statically.
+name: Dispatch
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+jobs:
+  dispatch:
+    if: |-
+      (github.event_name == 'issues') || (
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+      )
+    runs-on: ubuntu-latest
+    outputs:
+      command: ${{ steps.extract.outputs.command }}
+    steps:
+      - id: extract
+        run: echo "command=review" >> "$GITHUB_OUTPUT"
+  review:
+    needs: dispatch
+    if: needs.dispatch.outputs.command == 'review'
+    uses: ./.github/workflows/analysis.yml
+    secrets: inherit

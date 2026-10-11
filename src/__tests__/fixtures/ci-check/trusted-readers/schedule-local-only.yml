@@ -1,0 +1,17 @@
+# A scheduled agent with a write token that reads only the repository's own files.
+name: Docs
+on:
+  schedule:
+    - cron: '0 2 * * *'
+permissions:
+  contents: write
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: --allowedTools "Read,Edit,Bash(git:*)"
+          prompt: Update docs/api.md from the source in src/.

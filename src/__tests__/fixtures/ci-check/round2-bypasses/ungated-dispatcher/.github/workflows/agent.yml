@@ -1,0 +1,13 @@
+on:
+  workflow_call:
+permissions:
+  contents: write
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-base-action@v1
+        with:
+          prompt: "Work on issue #${{ github.event.issue.number }}. Read it with the GitHub tools first."
+          allowed_tools: "Bash,mcp__github__get_issue,mcp__github__get_issue_comments"
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
