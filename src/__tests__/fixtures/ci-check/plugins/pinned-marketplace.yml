@@ -1,0 +1,19 @@
+# A third-party marketplace pinned to a commit.
+name: Review
+on:
+  pull_request:
+    types: [opened, synchronize]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          plugin_marketplaces: https://github.com/example-person/some-plugins.git#0123456789abcdef0123456789abcdef01234567
+          plugins: helper@some-plugins
+          prompt: Review this PR

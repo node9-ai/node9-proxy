@@ -55,6 +55,11 @@ export const SURFACE_FILES = [
   '.claude/settings.local.json',
   '.mcp.json',
   '.cursor/mcp.json',
+  '.vscode/mcp.json',
+  '.kiro/settings/mcp.json',
+  '.gemini/settings.json',
+  'opencode.json',
+  '.opencode/config.json',
   '.codex/config.toml',
   // CI-6: agent instruction files (auto-loaded into the agent's system prompt).
   'CLAUDE.md',
@@ -75,7 +80,7 @@ const WORKFLOW_DIR = '.github/workflows';
 // Instruction files come from the ONE definition in instructions.ts; only the config shapes
 // are spelled here. Adding a surface type means one edit, and the dispatcher sees it too.
 const CONFIG_FILE_RE =
-  /(^|\/)\.claude\/settings(\.local)?\.json$|(^|\/)\.mcp\.json$|(^|\/)\.cursor\/mcp\.json$|(^|\/)\.codex\/config\.toml$/;
+  /(^|\/)\.claude\/settings(\.local)?\.json$|(^|\/)\.mcp\.json$|(^|\/)\.cursor\/mcp\.json$|(^|\/)\.codex\/config\.toml$|(^|\/)\.vscode\/mcp\.json$|(^|\/)\.kiro\/settings\/mcp\.json$|(^|\/)\.gemini\/settings\.json$|(^|\/)opencode\.json$|(^|\/)\.opencode\/config\.json$/;
 /** Every agent-surface path in a tree, entry points and configs first and a skill's
  *  supporting files last, so a cap never drops a SKILL.md to make room for its own
  *  reference docs. The ONE selector: the GitHub Trees path, the local walk and the git-ref
@@ -652,6 +657,8 @@ function planSurface(paths: string[], notes: string[], truncated: boolean): stri
   const root = SURFACE_FILES.filter((p) => present.has(p));
   const workflows = paths.filter((p) => ROOT_WORKFLOW_RE.test(p));
   const forms = paths.filter((p) => ISSUE_FORM_RE.test(p)).slice(0, MAX_ISSUE_FORMS);
+  // T.3: the root manifests name the package the repository publishes.
+  forms.push(...['package.json', 'pyproject.toml'].filter((p) => present.has(p)));
   const nested = pickSurfacePaths(paths, truncated, notes, { files: Number.POSITIVE_INFINITY });
   return [...new Set([...root, ...workflows, ...forms, ...nested])];
 }
@@ -756,7 +763,11 @@ function capNested(reads: PlannedRead[], cap: number | undefined, notes: string[
   if (cap === undefined) return reads;
   const rootSet = new Set<string>(SURFACE_FILES);
   const isRoot = (r: PlannedRead) =>
-    rootSet.has(r.rel) || ROOT_WORKFLOW_RE.test(r.rel) || ISSUE_FORM_RE.test(r.rel);
+    rootSet.has(r.rel) ||
+    ROOT_WORKFLOW_RE.test(r.rel) ||
+    ISSUE_FORM_RE.test(r.rel) ||
+    r.rel === 'package.json' ||
+    r.rel === 'pyproject.toml';
   const nested = reads.filter((r) => !isRoot(r));
   if (nested.length < cap) return reads;
   const keep = new Set(nested.slice(0, cap));
@@ -890,6 +901,21 @@ function readLocalFile(abs: string, rel: string): string {
 /** Read the agent surface of a local directory, as the agent sees it on disk. Content is NOT
  *  read here: each file is read when scanTree asks for it and then let go, so memory is bounded
  *  by one file, not by the repo. */
+/** The GitHub owner of a local clone's `origin`, or undefined. Args array, no shell; a missing
+ *  git, remote or GitHub URL yields undefined and decides nothing. */
+function localGitHubOwner(root: string): string | undefined {
+  try {
+    const url = execFileSync('git', ['-C', root, 'config', '--get', 'remote.origin.url'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 3000,
+    }).trim();
+    return /github\.com[:/]([\w.-]{1,100})\//i.exec(url)?.[1];
+  } catch {
+    return undefined;
+  }
+}
+
 export function readLocalTree(dir: string): RepoTree {
   const root = dir.replace(/^~/, process.env.HOME ?? '~');
   const notes: string[] = [];
@@ -920,8 +946,10 @@ export function readLocalTree(dir: string): RepoTree {
       },
     });
   }
+  const owner = localGitHubOwner(root);
   return {
     source: root,
+    ...(owner ? { owner } : {}),
     files,
     notes,
     paths: plan.paths,
@@ -1222,6 +1250,7 @@ export async function fetchGitHubTree(
       );
       return {
         source: `${owner}/${repo}`,
+        owner,
         files: fetched.filter((f): f is RepoFile => !!f),
         notes,
       };
@@ -1281,6 +1310,7 @@ export async function fetchGitHubTree(
     notes.push(...session.closingNotes());
     return {
       source: `${owner}/${repo}`,
+      owner,
       files: fetched.filter((f): f is RepoFile => !!f),
       notes,
       paths: plan.paths,
@@ -1293,7 +1323,7 @@ export async function fetchGitHubTree(
     notes.push(
       `fetch degraded (${(err as Error)?.message ?? 'network error'}): results ${INCOMPLETE} (the repo could not be fetched).`
     );
-    return { source: `${owner}/${repo}`, files: [], notes };
+    return { source: `${owner}/${repo}`, owner, files: [], notes };
   }
 }
 

@@ -12,7 +12,141 @@ import { safeText } from './suppress';
 // own folder, set by Claude Code. Anchored, with no shell operator, so
 // `sh -c "npx evil@latest; npx tsx ./a.ts"` is not excused by its tail.
 const LOCAL_RUNNER_RE =
-  /^npx\s+(?:-y\s+|--yes\s+)?(?:tsx|ts-node|node)\s+(?:\.{1,2}\/|\$\{CLAUDE_PLUGIN_ROOT\}\/)?[\w@./-]+\.(?:m?[jt]s|cjs)(?:\s+[^\s;&|`$<>()]+)*$/;
+  /^(?:npx|pnpx|bunx)\s+(?:-y\s+|--yes\s+)?(?:tsx|ts-node|node)\s+(?:\.{1,2}\/|\$\{CLAUDE_PLUGIN_ROOT\}\/)?[\w@./-]+\.(?:m?[jt]s|cjs)(?:\s+[^\s;&|`$<>()]+)*$/;
+
+// T.3 (2026-10-11): launchers that fetch a package by name when the server starts, and the
+// registry each one fetches from (named in the explanation).
+const LAUNCHERS: { re: RegExp; name: string; registry: string }[] = [
+  { re: /\bnpx\b/, name: 'npx', registry: 'npm' },
+  { re: /\bpnpx\b|\bpnpm\s+dlx\b/, name: 'pnpm dlx', registry: 'npm' },
+  { re: /\byarn\s+dlx\b/, name: 'yarn dlx', registry: 'npm' },
+  { re: /\bnpm\s+exec\b/, name: 'npm exec', registry: 'npm' },
+  { re: /\bbunx\b|\bbun\s+x\b/, name: 'bunx', registry: 'npm' },
+  { re: /\buvx\b|\buv\s+tool\s+run\b/, name: 'uvx', registry: 'PyPI' },
+  { re: /\bpipx\s+run\b/, name: 'pipx run', registry: 'PyPI' },
+];
+// A version in either registry's spelling: `pkg@1.2.3`, `pkg==1.2.3`, `--from pkg==1.2.3`.
+const PINNED_RE = /@\d|==\s*\d/;
+// Flags of `docker run` / `podman run` that take a separate value.
+const RUN_VALUE_FLAGS = new Set([
+  '-e',
+  '--env',
+  '-v',
+  '--volume',
+  '--name',
+  '-p',
+  '--publish',
+  '--network',
+  '--mount',
+  '-w',
+  '--workdir',
+  '--entrypoint',
+  '-u',
+  '--user',
+  '--env-file',
+  '--platform',
+  '-l',
+  '--label',
+  '-h',
+  '--hostname',
+  '--add-host',
+  '--cpus',
+  '-m',
+  '--memory',
+  '--pull',
+  '--device',
+]);
+
+/** The image a `docker run` / `podman run` argv starts, or null when there is none. */
+function runImage(tokens: string[]): string | null {
+  const i = tokens.findIndex((t, k) => /(^|\/)(docker|podman)$/.test(t) && tokens[k + 1] === 'run');
+  if (i < 0) return null;
+  for (let k = i + 2; k < tokens.length; k++) {
+    const t = tokens[k];
+    if (t.startsWith('-')) {
+      if (!t.includes('=') && RUN_VALUE_FLAGS.has(t)) k++;
+      continue;
+    }
+    return t;
+  }
+  return null;
+}
+
+/** The package a launcher starts (`uvx --from pkg==1 x` → pkg), lower case, without its
+ *  version; null when no package token is found. */
+export function launchedPackage(argv: string): string | null {
+  const t = argv.split(/\s+/).filter(Boolean);
+  const i = t.findIndex((x) => /(^|\/)(npx|pnpx|bunx|uvx|dlx|exec|x|run)$/.test(x));
+  if (i < 0) return null;
+  for (let k = i + 1; k < t.length; k++) {
+    const tok = t[k];
+    if (/^(--from|-p|--package)$/.test(tok)) {
+      const v = t[k + 1];
+      return v
+        ? v
+            .replace(/(==|@(?!$)).*$/, '')
+            .replace(/^@?$/, '')
+            .toLowerCase() || null
+        : null;
+    }
+    if (tok.startsWith('-')) continue;
+    // A scoped npm name keeps its leading `@scope/`; the version after the last `@` goes.
+    const name = tok.startsWith('@')
+      ? tok.replace(/^(@[^/]+\/[^@]+).*$/, '$1')
+      : tok.replace(/(==|@).*$/, '');
+    return name ? name.toLowerCase() : null;
+  }
+  return null;
+}
+
+/** Why this server's executable is unpinned, or null. `own` is what the repository itself
+ *  publishes (its root package.json / pyproject.toml name): starting its own package is not a
+ *  third-party supply chain. */
+function unpinnedLauncher(
+  argv: string,
+  own: ReadonlySet<string>
+): { launcher: string; registry: string } | null {
+  if (LOCAL_RUNNER_RE.test(argv)) return null;
+  const pkg = launchedPackage(argv);
+  if (pkg && own.has(pkg)) return null;
+  const image = runImage(argv.split(/\s+/));
+  if (image) {
+    if (image.includes('@sha256:')) return null;
+    const tail = image.slice(image.lastIndexOf('/') + 1);
+    const tag = tail.includes(':') ? tail.slice(tail.indexOf(':') + 1) : '';
+    return !tag || tag === 'latest'
+      ? { launcher: 'docker run', registry: 'the image registry' }
+      : null;
+  }
+  const l = LAUNCHERS.find((x) => x.re.test(argv));
+  if (!l) return null;
+  return /@latest\b/.test(argv) || !PINNED_RE.test(argv)
+    ? { launcher: l.name, registry: l.registry }
+    : null;
+}
+
+/** T.3: the package names a repository publishes, read from its root manifests. */
+export function ownPackageNames(manifests: { path: string; content: string }[]): Set<string> {
+  const out = new Set<string>();
+  for (const m of manifests) {
+    if (m.path === 'package.json') {
+      try {
+        const name = (JSON.parse(m.content) as { name?: unknown }).name;
+        if (typeof name === 'string' && name) out.add(name.toLowerCase());
+      } catch {
+        /* not JSON: no name */
+      }
+    } else if (m.path === 'pyproject.toml') {
+      const sec = /^\[(project|tool\.poetry)\]\s*$([\s\S]*?)(?=^\[|(?![\s\S]))/m.exec(m.content);
+      const name = sec && /^name\s*=\s*["']([^"']{1,200})["']/m.exec(sec[2]);
+      if (name) {
+        out.add(name[1].toLowerCase());
+        out.add(name[1].toLowerCase().replace(/_/g, '-'));
+      }
+    }
+  }
+  return out;
+}
 
 export interface McpServerSpec {
   command?: string;
@@ -22,14 +156,39 @@ export interface McpServerSpec {
   disabled?: boolean;
 }
 
-export function analyzeMcp(path: string, content: string): CiFinding[] {
-  let cfg: { mcpServers?: Record<string, McpServerSpec> };
+export function analyzeMcp(
+  path: string,
+  content: string,
+  own: ReadonlySet<string> = new Set()
+): CiFinding[] {
+  let cfg: {
+    mcpServers?: Record<string, McpServerSpec>;
+    servers?: Record<string, McpServerSpec>;
+    mcp?: Record<string, { command?: unknown; enabled?: boolean; url?: string }>;
+  };
   try {
     cfg = JSON.parse(content);
   } catch {
     return [];
   }
-  return analyzeMcpServers(cfg.mcpServers ?? {}, path, content);
+  if (!cfg || typeof cfg !== 'object') return [];
+  // T.3: VS Code keeps servers under `servers`; opencode under `mcp`, with the command as an
+  // array (`["npx", "-y", "pkg"]`) and `enabled: false` to switch one off.
+  const servers: Record<string, McpServerSpec> = {
+    ...(cfg.mcpServers ?? {}),
+    ...(cfg.servers ?? {}),
+  };
+  for (const [name, s] of Object.entries(cfg.mcp ?? {})) {
+    if (!s || typeof s !== 'object') continue;
+    const cmd = Array.isArray(s.command) ? s.command.map(String) : [];
+    servers[name] = {
+      command: cmd[0],
+      args: cmd.slice(1),
+      url: s.url,
+      disabled: s.enabled === false,
+    };
+  }
+  return analyzeMcpServers(servers, path, content, own);
 }
 
 /** Score a normalized MCP server map. Shared by `.mcp.json` (CI-3) and Codex's
@@ -39,7 +198,8 @@ export function analyzeMcp(path: string, content: string): CiFinding[] {
 export function analyzeMcpServers(
   servers: Record<string, McpServerSpec>,
   path: string,
-  content = ''
+  content = '',
+  own: ReadonlySet<string> = new Set()
 ): CiFinding[] {
   const findings: CiFinding[] = [];
   for (const [name, srv] of Object.entries(servers ?? {})) {
@@ -55,11 +215,8 @@ export function analyzeMcpServers(
 
     // Unpinned executable server. A runner started on a file in the repository (`npx tsx
     // ./server.ts`) runs local code: only the runner is unversioned, not the server (§Q).
-    if (
-      /\bnpx\b/.test(argv) &&
-      (/@latest\b/.test(argv) || !/@\d/.test(argv)) &&
-      !LOCAL_RUNNER_RE.test(argv)
-    ) {
+    const why = unpinnedLauncher(argv, own);
+    if (why) {
       findings.push({
         check: 'CI-3',
         rule: 'CI-3.mcp-unpinned',
@@ -69,9 +226,13 @@ export function analyzeMcpServers(
         title: `MCP server "${name}" runs an unpinned executable`,
         file: path,
         ...(line ? { line } : {}),
-        signals: [`\`${safeText(argv, 120)}\`: unversioned/@latest npx`],
+        signals: [
+          why.launcher === 'npx'
+            ? `\`${safeText(argv, 120)}\`: unversioned/@latest npx`
+            : `\`${safeText(argv, 120)}\`: unversioned/latest ${why.launcher}`,
+        ],
         fix: 'Pin the MCP server package to an exact version so a PR (or a registry compromise) can’t swap the toolchain.',
-        explain: explainMcp({ name, argv }),
+        explain: explainMcp({ name, argv, registry: why.registry }),
       });
     }
 

@@ -149,6 +149,9 @@ export interface RepoTree {
   pathsComplete?: boolean;
   /** Links where agent configuration can live that were not followed — each one a finding. */
   unfollowed?: UnfollowedLink[];
+  /** The GitHub owner (user or org), when known: a source the same owner controls is not a
+   *  third party (T.3). */
+  owner?: string;
 }
 
 export interface ScanResult {

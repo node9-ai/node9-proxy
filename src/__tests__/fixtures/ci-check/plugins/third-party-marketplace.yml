@@ -1,0 +1,20 @@
+# claude-code-action installs a plugin from a third-party marketplace at run time, unpinned:
+# that marketplace's owner controls code and prompts (plugins can ship hooks) next to the token.
+name: Review
+on:
+  pull_request:
+    types: [opened, synchronize]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          plugin_marketplaces: https://github.com/example-person/some-plugins.git
+          plugins: helper@some-plugins
+          prompt: Review this PR

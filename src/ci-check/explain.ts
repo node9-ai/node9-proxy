@@ -294,12 +294,12 @@ export function npxPackage(argv: string): string | null {
   return null;
 }
 
-export function explainMcp(f: { name: string; argv: string }): Explain {
+export function explainMcp(f: { name: string; argv: string; registry?: string }): Explain {
   const pkg = npxPackage(f.argv);
-  const what = pkg ? code(pkg) : 'the package';
+  const what = pkg ? code(pkg) : f.registry === 'the image registry' ? 'image' : 'the package';
   return {
     headline: `MCP server ${code(f.name, 60)} installs whatever version is newest, every time`,
-    happens: `Each run downloads the latest ${what} from npm. If that package is ever taken over, the next version runs on every developer's computer.`,
+    happens: `Each run downloads the latest ${what} from ${f.registry ?? 'npm'}. If that package is ever taken over, the next version runs on every developer's computer.`,
     saw: [`It starts with ${code(f.argv, 120)}.`],
     fix: [
       pkg ? `Pin an exact version, for example ${code(`${pkg}@x.y.z`)}.` : 'Pin an exact version.',

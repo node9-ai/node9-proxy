@@ -1947,3 +1947,58 @@ function analyzeWorkflowSecretsInner(
     }),
   };
 }
+
+// T.3 (2026-10-11): claude-code-action installs plugins from the marketplaces it is given, on
+// every run. A marketplace outside the vendor's own org that is not pinned to a commit lets its
+// owner change code and prompts (plugins can ship hooks) that run next to the job's token.
+const VENDOR_MARKETPLACE_RE = /(^|[/:])anthropics\//i;
+const COMMIT_PIN_RE = /[#@][0-9a-f]{40}\b/i;
+
+/** The GitHub owner a marketplace reference points at (`https://github.com/<o>/…`, `<o>/<r>`). */
+function marketplaceOwner(market: string): string | undefined {
+  return (
+    /github\.com[:/]([\w.-]{1,100})\//i.exec(market)?.[1] ??
+    /^([\w.-]{1,100})\/[\w.-]{1,100}(?:[#@].*)?$/.exec(market)?.[1]
+  );
+}
+
+export function analyzeWorkflowPlugins(path: string, content: string, owner?: string): CiFinding[] {
+  let raw: Record<string, unknown>;
+  try {
+    raw = (parseYaml(content) ?? {}) as Record<string, unknown>;
+  } catch {
+    return [];
+  }
+  if (!raw || typeof raw !== 'object') return [];
+  const wf = normalizeWorkflow(raw);
+  const out: CiFinding[] = [];
+  const seen = new Set<string>();
+  for (const { step } of allSteps(wf)) {
+    if (!claudeActionBuild(step.uses)) continue;
+    if (!str(step.with?.['plugins']).trim()) continue;
+    for (const m of str(step.with?.['plugin_marketplaces']).split(/[\s,]+/)) {
+      const market = m.trim();
+      if (!market || VENDOR_MARKETPLACE_RE.test(market) || COMMIT_PIN_RE.test(market)) continue;
+      // The repository itself (`./.`) or a repository of the same owner is not a third party.
+      if (/^\.{1,2}(\/|$)/.test(market)) continue;
+      const mo = marketplaceOwner(market);
+      if (owner && mo && mo.toLowerCase() === owner.toLowerCase()) continue;
+      if (seen.has(market)) continue;
+      seen.add(market);
+      out.push({
+        check: 'CI-3',
+        rule: 'CI-3.plugin-unpinned',
+        locator: safeText(market, 200),
+        dimension: 'mcp',
+        severity: 'medium',
+        title: 'Agent installs plugins from a third-party marketplace on every run',
+        file: path,
+        signals: [
+          `\`plugin_marketplaces: ${safeText(market, 120)}\` is not pinned to a commit: whoever controls it changes the code and prompts the agent runs`,
+        ],
+        fix: 'Pin the marketplace to a commit (`<url>#<sha>`), or vendor the plugin into this repository.',
+      });
+    }
+  }
+  return out;
+}

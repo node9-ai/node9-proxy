@@ -7,12 +7,13 @@ import { fetchTree, isUnwalked, type OnProgress } from './fetch';
 import {
   analyzeWorkflow,
   analyzeWorkflowSecrets,
+  analyzeWorkflowPlugins,
   issueFormLabels,
   localCallsOf,
   type LocalCaller,
 } from './workflows';
 import { analyzeAgentConfig, analyzeSkillGrants } from './agent-config';
-import { analyzeMcp } from './mcp';
+import { analyzeMcp, ownPackageNames } from './mcp';
 import { analyzeCodexConfig } from './codex';
 import { analyzeInstructionFile, appSkillDirsOf, namedDocs, skillDirsOf } from './instructions';
 import { routeOf } from './route';
@@ -95,6 +96,17 @@ export function scanTree(tree: RepoTree): ScanResult {
   const autoLabels = new Set<string>();
   const routeOfFile = (file: (typeof tree.files)[number]) =>
     file.route !== undefined ? file.route : routeOf(file.path, skillDirs, appDirs);
+  // T.3: the package names the repository publishes (its own MCP server is not third-party).
+  const manifests: { path: string; content: string }[] = [];
+  for (const file of tree.files) {
+    if (routeOfFile(file) !== 'manifest') continue;
+    try {
+      manifests.push({ path: file.path, content: file.content });
+    } catch {
+      /* unreadable: no own name, so nothing is excused */
+    }
+  }
+  const ownPackages = ownPackageNames(manifests);
   for (const file of tree.files) {
     if (routeOfFile(file) !== 'issue-form') continue;
     try {
@@ -124,7 +136,7 @@ export function scanTree(tree: RepoTree): ScanResult {
       if (!namedBy(file.path)) continue; // the app's own doc: not graded, not inspected
       route = 'instruction';
     }
-    if (route === 'issue-form') continue; // read above for its labels; not agent surface
+    if (route === 'issue-form' || route === 'manifest') continue; // read above; not agent surface
     inspected.push(file.path);
     if (file.path === SUPPRESSIONS_FILE) continue;
     // §Q: content under a test, fixture or example tree (see testPathKind): read, and not graded,
@@ -143,6 +155,7 @@ export function scanTree(tree: RepoTree): ScanResult {
           if (f) findings.push(f);
           const s = analyzeWorkflowSecrets(file.path, content, callers, autoLabels); // CI-4
           if (s) findings.push(s);
+          findings.push(...analyzeWorkflowPlugins(file.path, content, tree.owner)); // CI-3: plugin sources
           break;
         }
         case 'agent-config':
@@ -155,10 +168,10 @@ export function scanTree(tree: RepoTree): ScanResult {
           findings.push(...analyzeScript(file.path, content, 'CI-6.skill-script'));
           break;
         case 'mcp':
-          findings.push(...analyzeMcp(file.path, content));
+          findings.push(...analyzeMcp(file.path, content, ownPackages));
           break;
         case 'codex':
-          findings.push(...analyzeCodexConfig(file.path, content)); // CI-3 + CI-1 (1c-A)
+          findings.push(...analyzeCodexConfig(file.path, content, ownPackages)); // CI-3 + CI-1 (1c-A)
           break;
         case 'instruction':
           findings.push(...analyzeInstructionFile(file.path, content)); // CI-6: the content
