@@ -25,6 +25,8 @@ export function tierOf(f: Pick<CiFinding, 'rule' | 'severity'>): Tier {
   const { rule, severity } = f;
   // Accurate, but for most skills it is what the skill needs: summarized, never counted.
   if (rule === 'CI-1.skill-allowed-tools') return 'review';
+  // Founder decision (round-2 review): `find` and `make -n` grants are listed, never counted.
+  if (rule === 'CI-1.exec-escape-grant') return 'review';
   // T.5 (founder, node9Firewall#337): counted at the lowest level.
   if (
     rule === 'CI-2.trusted-trigger-reader' ||
@@ -70,6 +72,8 @@ export function reviewQuestion(rule: string): string {
     return 'Does this hook exist on every machine that runs it?';
   if (/hidden-chars/.test(rule))
     return 'Why does this script hold invisible characters? A list of them to detect is fine.';
+  if (/exec-escape/.test(rule))
+    return 'Does the agent need this command with any arguments, or only one exact form?';
   if (/unscanned/.test(rule))
     return 'node9 did not read this script (too large, or outside the folders it reads). What does it run?';
   return 'Is this an instruction the agent follows, or text for a person?';

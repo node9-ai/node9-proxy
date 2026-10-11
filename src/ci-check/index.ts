@@ -135,7 +135,12 @@ export function scanTree(tree: RepoTree): ScanResult {
     if (routeOfFile(file) !== 'workflow') continue;
     try {
       const content = file.content;
-      for (const { target, caller } of localCallsOf(file.path, content, autoLabels)) {
+      for (const { target, caller } of localCallsOf(
+        file.path,
+        content,
+        autoLabels,
+        trustedRunSources
+      )) {
         const list = callersOf.get(target) ?? [];
         list.push(caller);
         callersOf.set(target, list);
@@ -177,8 +182,12 @@ export function scanTree(tree: RepoTree): ScanResult {
           ); // CI-4
           if (s) findings.push(s);
           findings.push(...analyzeWorkflowPlugins(file.path, content, tree.owner)); // CI-3: plugin sources
-          findings.push(...analyzeTrustedReaders(file.path, content, autoLabels, callers)); // T.5
-          findings.push(...analyzeForkCodeOnTrust(file.path, content, callers, autoLabels)); // T.7
+          findings.push(
+            ...analyzeTrustedReaders(file.path, content, autoLabels, callers, trustedRunSources)
+          ); // T.5
+          findings.push(
+            ...analyzeForkCodeOnTrust(file.path, content, callers, autoLabels, trustedRunSources)
+          ); // T.7
           break;
         }
         case 'agent-config':

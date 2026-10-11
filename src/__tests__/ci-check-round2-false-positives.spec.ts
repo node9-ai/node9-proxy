@@ -151,3 +151,55 @@ describe('batch 3c: a sanitized lookup does not excuse a full listing beside it'
     ).toContain('CI-2.trusted-trigger-reader .github/workflows/n.yml');
   });
 });
+
+describe('workflow_run after a workflow only the team can start', () => {
+  const doctor = [
+    'name: CI doctor',
+    'on:',
+    '  workflow_run:',
+    '    workflows: [Build]',
+    '    types: [completed]',
+    'permissions:',
+    '  contents: write',
+    'jobs:',
+    '  doctor:',
+    '    runs-on: ubuntu-latest',
+    '    env:',
+    '      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}',
+    '    steps:',
+    '      - run: claude -p "Explain the failed run and comment on its pull request" --allowedTools "Write,mcp__github__get_pull_request" --dangerously-skip-permissions',
+    '',
+  ].join('\n');
+  const build = (on: string) =>
+    `name: Build\non:\n${on}\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: make\n`;
+  const scan = (files: Record<string, string>) =>
+    alerts({
+      source: 'owner/repo',
+      notes: [],
+      files: Object.entries(files).map(([p, content]) => ({ path: p, content })),
+    });
+
+  it('a push-only upstream: no stranger reaches the agent', () => {
+    expect(
+      scan({
+        '.github/workflows/build.yml': build('  push:\n    branches: [main]'),
+        '.github/workflows/doctor.yml': doctor,
+      })
+    ).toEqual([]);
+  });
+
+  it('an upstream a fork PR starts: still open', () => {
+    expect(
+      scan({
+        '.github/workflows/build.yml': build('  pull_request:'),
+        '.github/workflows/doctor.yml': doctor,
+      })
+    ).toContain('CI-2.injectable-workflow .github/workflows/doctor.yml');
+  });
+
+  it('an upstream not in the tree: still open', () => {
+    expect(scan({ '.github/workflows/doctor.yml': doctor })).toContain(
+      'CI-2.injectable-workflow .github/workflows/doctor.yml'
+    );
+  });
+});
