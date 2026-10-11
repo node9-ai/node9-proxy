@@ -1,0 +1,9 @@
+# The only caller runs on repository_dispatch, which needs write access.
+name: Dispatch
+on:
+  repository_dispatch:
+    types: [run-analysis]
+jobs:
+  call:
+    uses: ./.github/workflows/analysis.yml
+    secrets: inherit

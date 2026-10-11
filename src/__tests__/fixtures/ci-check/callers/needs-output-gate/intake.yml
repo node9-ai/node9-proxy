@@ -1,0 +1,25 @@
+# The caller is issue-triggered; an upstream job checks the actor against an allowlist in a
+# script and the calling job runs only when that job says so.
+name: Intake
+on:
+  issues:
+    types: [opened]
+jobs:
+  route:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.route.outputs.should_run }}
+    steps:
+      - id: route
+        uses: actions/github-script@v7
+        env:
+          ALLOWED_ACTORS: alice,bob
+        with:
+          script: |
+            const allowed = (process.env.ALLOWED_ACTORS || '').split(',');
+            core.setOutput('should_run', allowed.includes(context.actor) ? 'true' : 'false');
+  call:
+    needs: route
+    if: needs.route.outputs.should_run == 'true'
+    uses: ./.github/workflows/analysis.yml
+    secrets: inherit

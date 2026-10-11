@@ -4,7 +4,12 @@
 // scan always returns a result (fail-open on our own bugs).
 
 import { fetchTree, isUnwalked, type OnProgress } from './fetch';
-import { analyzeWorkflow, analyzeWorkflowSecrets } from './workflows';
+import {
+  analyzeWorkflow,
+  analyzeWorkflowSecrets,
+  localCallsOf,
+  type LocalCaller,
+} from './workflows';
 import { analyzeAgentConfig, analyzeSkillGrants } from './agent-config';
 import { analyzeMcp } from './mcp';
 import { analyzeCodexConfig } from './codex';
@@ -81,6 +86,25 @@ export function scanTree(tree: RepoTree): ScanResult {
     }
     return named.get(dir)!.has(docPath);
   };
+  // T.1: who calls each local reusable workflow. Workflow contents are read here once and
+  // reused below (a local reader reads on demand, §K).
+  const workflowText = new Map<string, string>();
+  const callersOf = new Map<string, LocalCaller[]>();
+  for (const file of tree.files) {
+    const route = file.route !== undefined ? file.route : routeOf(file.path, skillDirs, appDirs);
+    if (route !== 'workflow') continue;
+    try {
+      const content = file.content;
+      workflowText.set(file.path, content);
+      for (const { target, caller } of localCallsOf(file.path, content)) {
+        const list = callersOf.get(target) ?? [];
+        list.push(caller);
+        callersOf.set(target, list);
+      }
+    } catch {
+      /* unreadable: the main loop reports it */
+    }
+  }
   for (const file of tree.files) {
     // The reader routed each path over the whole plan (K.4); a hand-built tree has no route.
     let route = file.route !== undefined ? file.route : routeOf(file.path, skillDirs, appDirs);
@@ -98,12 +122,13 @@ export function scanTree(tree: RepoTree): ScanResult {
     try {
       // Read ONCE: a local reader's content is read on demand and not held (§K), so a second
       // access would read the file again. Everything below uses this one copy.
-      const content = file.content;
+      const content = workflowText.get(file.path) ?? file.content;
       switch (route) {
         case 'workflow': {
-          const f = analyzeWorkflow(file.path, content);
+          const callers = callersOf.get(file.path);
+          const f = analyzeWorkflow(file.path, content, callers);
           if (f) findings.push(f);
-          const s = analyzeWorkflowSecrets(file.path, content); // CI-4
+          const s = analyzeWorkflowSecrets(file.path, content, callers); // CI-4
           if (s) findings.push(s);
           break;
         }

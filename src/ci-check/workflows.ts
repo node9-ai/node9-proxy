@@ -76,6 +76,8 @@ interface Step {
 }
 interface Job {
   if?: string;
+  /** A job that calls a reusable workflow has `uses:` and no steps. */
+  uses?: string;
   needs?: string | string[];
   permissions?: Record<string, string> | string;
   steps?: Step[];
@@ -138,6 +140,26 @@ function keyStrangerFirable(on: Record<string, unknown>, key: string): boolean {
       return false;
   }
 }
+/** T.1 (2026-10-11): a workflow in the same repository that calls a reusable one with
+ *  `uses: ./.github/workflows/<file>`, and what its trigger and its calling job let in. */
+export interface LocalCaller {
+  file: string;
+  keys: string[];
+  untrusted: boolean;
+  secretExposed: boolean;
+  privileged: boolean;
+  workflowRun: boolean;
+  /** The calling job is gated (its own `if:` or its `needs:` chain). */
+  gated: boolean;
+  /** The calling job runs on an upstream job's output (`needs.<job>.outputs.command == 'x'`),
+   *  a dispatcher whose branches a static reader cannot tie to this call. */
+  dispatched: boolean;
+}
+
+/** The local callers of the workflow being analysed, set by analyzeWorkflow(Secrets) for the
+ *  duration of one analysis; triggerReach reads them. */
+const CALLERS = new WeakMap<Workflow, LocalCaller[]>();
+
 /** R4-1: the reachability of a workflow's triggers.
  *  - untrusted: some trigger an anonymous outsider can fire.
  *  - reusable: has `workflow_call` and NO stranger-firable trigger of its own — a
@@ -153,6 +175,23 @@ function triggerReach(wf: Workflow, raw: Record<string, unknown>) {
   const firable = keys.filter((k) => keyStrangerFirable(on, k));
   const untrusted = firable.length > 0;
   const reusable = !untrusted && keys.some((k) => /^workflow_call$/i.test(k));
+  // T.1: a reusable workflow with local callers takes its reach from them.
+  const callers = CALLERS.get(wf);
+  // A caller that runs on a dispatcher's output is unresolved: when only such callers are left
+  // open, the template keeps the reusable score (a gated dispatcher whose ungated branch never
+  // sends this command must not turn into an alert).
+  const open = (callers ?? []).filter((c) => c.untrusted && !c.gated && !c.dispatched);
+  const unresolved = (callers ?? []).some((c) => c.untrusted && !c.gated && c.dispatched);
+  if (reusable && callers?.length && (open.length || !unresolved)) {
+    return {
+      keys: [...new Set(open.flatMap((c) => c.keys))],
+      untrusted: open.length > 0,
+      reusable: false,
+      secretExposed: open.some((c) => c.secretExposed),
+      privileged: open.some((c) => c.privileged),
+      workflowRun: open.some((c) => c.workflowRun),
+    };
+  }
   const secretExposed = firable.some((t) => /pull_request_target|workflow_run/i.test(t));
   const privileged =
     untrusted &&
@@ -235,6 +274,43 @@ function normalizeWorkflow(raw: Record<string, unknown>): Workflow {
     }
   }
   return wf;
+}
+
+const LOCAL_WORKFLOW_USES_RE = /^\s*\.\/\.github\/workflows\/([\w.-]{1,200}\.ya?ml)\s*$/i;
+
+/** T.1: the local reusable workflows `content` calls, each with this file as the caller. */
+export function localCallsOf(
+  path: string,
+  content: string
+): { target: string; caller: LocalCaller }[] {
+  let raw: Record<string, unknown>;
+  try {
+    raw = (parseYaml(content) ?? {}) as Record<string, unknown>;
+  } catch {
+    return [];
+  }
+  if (!raw || typeof raw !== 'object') return [];
+  const wf = normalizeWorkflow(raw);
+  const reach = triggerReach(wf, raw);
+  const out: { target: string; caller: LocalCaller }[] = [];
+  for (const job of jobList(wf)) {
+    const m = LOCAL_WORKFLOW_USES_RE.exec(str(job.uses));
+    if (!m) continue;
+    out.push({
+      target: `.github/workflows/${m[1]}`,
+      caller: {
+        file: path,
+        keys: reach.keys,
+        untrusted: reach.untrusted,
+        secretExposed: reach.secretExposed,
+        privileged: reach.privileged,
+        workflowRun: reach.workflowRun,
+        gated: jobGated(job, wf, raw),
+        dispatched: /needs\.[\w-]+\.outputs\./.test(str(job.if)),
+      },
+    });
+  }
+  return out;
 }
 
 function allSteps(wf: Workflow): { job: Job; step: Step }[] {
@@ -732,6 +808,8 @@ function jobActorGate(job: Job, wf: Workflow, raw: Record<string, unknown>): boo
  *
  *  Before 2026-09-26 CI-2 used a whole-workflow gate test, so a gated sibling job masked an
  *  ungated one in the same file (a false negative found in review). */
+const ACTOR_ALLOWLIST_RE =
+  /\.includes\(\s*(?:context\.actor|github\.actor|context\.payload\.sender\.login|[\w.]{0,40}user\.login|login)\b|\b(?:context\.actor|github\.actor)\s*===?\s*['"]/;
 const STATUS_FN_RE = /\b(success|failure|always|cancelled)\s*\(/i;
 const FAILING_STEP_RE = /\bexit\s+[1-9]|core\.setFailed|process\.exit\(\s*[1-9]/;
 
@@ -759,6 +837,17 @@ function upstreamJobGates(
   // (a repository hand-verified as clean was scored medium).
   if (depIf && jobIfGated(depIf, label)) return true;
   const steps = dep.steps ?? [];
+  // T.1: an upstream job whose script decides by the actor (a permission or membership call,
+  // or an allowlist compared with the actor) gates a dependent that reads its outputs.
+  if (
+    readerIf !== null &&
+    new RegExp(`needs\\.${escapeRe(name)}\\.outputs\\.`).test(readerIf) &&
+    steps.some((st) => {
+      const code = str(st.run) + ' ' + str(st.with?.['script']);
+      return MEMBERSHIP_CHECK_RE.test(code) || ACTOR_ALLOWLIST_RE.test(code);
+    })
+  )
+    return true;
   const stepGated = ifsAreGated(stepIfText(steps), label) || hasStepMembershipGate(dep);
   if (!stepGated) return false;
   if (
@@ -1061,7 +1150,11 @@ function severityFromScore(score: number): Severity | null {
 
 /** Analyze one workflow file. Returns a finding, or null if it's not an agentic
  *  workflow or is clean. Never throws (parse errors → null + caller notes). */
-export function analyzeWorkflow(path: string, content: string): CiFinding | null {
+export function analyzeWorkflow(
+  path: string,
+  content: string,
+  callers?: LocalCaller[]
+): CiFinding | null {
   let raw: Record<string, unknown>;
   try {
     raw = (parseYaml(content) ?? {}) as Record<string, unknown>;
@@ -1069,6 +1162,7 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
     return null; // unparseable YAML — caller notes it; we don't guess.
   }
   const wf = normalizeWorkflow(raw);
+  if (callers?.length) CALLERS.set(wf, callers);
   const steps = allSteps(wf).map((s) => s.step);
   const agentSteps = steps.filter(isAgentStep);
   // The job(s) the agent actually runs in — permission checks scope to these, so
@@ -1247,6 +1341,12 @@ export function analyzeWorkflow(path: string, content: string): CiFinding | null
 
   // Build the transparent record of WHY this severity.
   const signals: string[] = [];
+  // T.1: name the local caller whose trigger the template was scored with.
+  const openCallers = (callers ?? []).filter((c) => c.untrusted && !c.gated && !c.dispatched);
+  if (openCallers.length)
+    signals.push(
+      `called by ${openCallers.map((c) => `${safeText(c.file, 120)} (${c.keys.join(', ')})`).join('; ')}`
+    );
   if (secretExposed)
     signals.push(
       `runs with base-repo secrets (${triggers.filter((t) => /target|workflow_run/i.test(t)).join(', ')})`
@@ -1575,7 +1675,11 @@ function evalAgentJob(
  *  reports the worst — a secret + shell in a NON-reachable job must not conflate
  *  with a DIFFERENT job's untrusted trigger. Null when no job is a finding. Never
  *  throws. */
-export function analyzeWorkflowSecrets(path: string, content: string): CiFinding | null {
+export function analyzeWorkflowSecrets(
+  path: string,
+  content: string,
+  callers?: LocalCaller[]
+): CiFinding | null {
   let raw: Record<string, unknown>;
   try {
     raw = (parseYaml(content) ?? {}) as Record<string, unknown>;
@@ -1583,6 +1687,7 @@ export function analyzeWorkflowSecrets(path: string, content: string): CiFinding
     return null;
   }
   const wf = normalizeWorkflow(raw);
+  if (callers?.length) CALLERS.set(wf, callers);
   const all = allSteps(wf);
   if (!all.some((s) => isAgentStep(s.step))) return null;
 
