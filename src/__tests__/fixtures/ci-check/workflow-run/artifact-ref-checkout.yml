@@ -1,0 +1,27 @@
+# The PR head comes from the triggering run's artifact and is checked out to the root.
+name: Review
+on:
+  workflow_run:
+    workflows: [Review trigger]
+    types: [completed]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pr-info
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - id: pr
+        run: echo "head_sha=$(cat pr-info/head_sha)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.head_sha }}
+      - uses: someone/claude-code-action@0123456789abcdef0123456789abcdef01234567
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: Review the checked-out change.

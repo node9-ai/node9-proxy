@@ -617,7 +617,20 @@ const PAYLOAD_TEXT_RE =
 /** How (if at all) the agent in this job reads the untrusted item other than through its
  *  prompt text: a read tool, the item's handle, or a prompt file an earlier step built from
  *  the payload. Job-scoped: an earlier step only feeds an agent step of the same job. */
-function jobReadsUntrustedItem(job: Job): 'tool' | 'handle' | 'prompt-file' | null {
+// T.4 (2026-10-11): a step that brings the triggering run's artifacts into the job. On a
+// workflow_run of a fork PR's workflow, those files are the fork's.
+const RUN_ARTIFACT_RE =
+  /gh\s+run\s+download\b|\/runs\/\$\{\{\s*github\.event\.workflow_run\.id\s*\}\}\/(?:artifacts|logs)/i;
+function downloadsRunArtifacts(st: Step): boolean {
+  if (/actions\/download-artifact/i.test(str(st.uses)))
+    return /workflow_run\.id/.test(str(st.with?.['run-id']) + ' ' + str(st.with?.['run_id']));
+  return RUN_ARTIFACT_RE.test(str(st.run) + ' ' + str(st.with?.['script']));
+}
+const STEP_OUTPUT_REF_RE = /steps\.([\w-]{1,100})\.outputs\./g;
+
+type ItemRead = 'tool' | 'handle' | 'prompt-file' | 'artifact' | 'step-output';
+
+function jobReadsUntrustedItem(job: Job): ItemRead | null {
   const steps = job.steps ?? [];
   const agent = steps.filter(isAgentStep);
   if (!agent.length) return null;
@@ -644,6 +657,25 @@ function jobReadsUntrustedItem(job: Job): 'tool' | 'handle' | 'prompt-file' | nu
       earlier.some((p) => PAYLOAD_TEXT_RE.test(str(p.run) + ' ' + str(p.with) + ' ' + str(p.env)))
     )
       return 'prompt-file';
+  }
+  // T.4: the triggering run's artifacts land in the workspace before an agent step runs.
+  const firstDownload = steps.findIndex(downloadsRunArtifacts);
+  if (firstDownload >= 0 && steps.slice(firstDownload + 1).some(isAgentStep)) return 'artifact';
+  // T.4: the prompt is an earlier step's output, and that step handled payload text.
+  for (let i = 0; i < steps.length; i++) {
+    const st = steps[i];
+    if (!isAgentStep(st)) continue;
+    const input =
+      str(st.with?.['prompt']) +
+      ' ' +
+      str(st.with?.['direct_prompt']) +
+      ' ' +
+      str(st.with?.['prompt_file'] ?? st.with?.['prompt-file']);
+    for (const m of input.matchAll(STEP_OUTPUT_REF_RE)) {
+      const src = steps.slice(0, i).find((p) => p.id === m[1]);
+      if (src && PAYLOAD_TEXT_RE.test(str(src.run) + ' ' + str(src.with) + ' ' + str(src.env)))
+        return 'step-output';
+    }
   }
   return null;
 }
@@ -1584,9 +1616,13 @@ function analyzeWorkflowInner(
     signals.push(
       itemRead === 'prompt-file'
         ? 'an earlier step writes untrusted PR/issue text into the prompt file the agent reads'
-        : itemRead === 'tool'
-          ? 'the agent fetches PR/issue text itself with a read tool (the text never appears in the prompt)'
-          : 'the agent is given the PR/issue number and reads the text itself (the text never appears in the prompt)'
+        : itemRead === 'artifact'
+          ? 'the job downloads the artifacts of the triggering run (produced by the PR) before the agent runs'
+          : itemRead === 'step-output'
+            ? "the agent's prompt is an earlier step's output, built from untrusted PR/issue text"
+            : itemRead === 'tool'
+              ? 'the agent fetches PR/issue text itself with a read tool (the text never appears in the prompt)'
+              : 'the agent is given the PR/issue number and reads the text itself (the text never appears in the prompt)'
     );
   if (broadTools) {
     // Names embed scanned-file text that flows into the Action's PR comment (render.ts).

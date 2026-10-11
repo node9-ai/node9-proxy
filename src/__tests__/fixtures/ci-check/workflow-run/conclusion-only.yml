@@ -1,0 +1,18 @@
+# A workflow_run handler that only reads the conclusion and posts fixed text.
+name: Notify
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+jobs:
+  notify:
+    if: github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: someone/claude-code-action@0123456789abcdef0123456789abcdef01234567
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: Summarise the repository's README in one line.

@@ -1,0 +1,23 @@
+# The comment text is pasted into an earlier step and passed to the agent as a step output.
+name: Comment agent
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  respond:
+    if: contains(github.event.comment.body, '@bot')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - id: ctx
+        env:
+          BODY: ${{ github.event.comment.body }}
+        run: |
+          echo "final_prompt=Do this: $BODY" >> "$GITHUB_OUTPUT"
+      - uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt: ${{ steps.ctx.outputs.final_prompt }}
