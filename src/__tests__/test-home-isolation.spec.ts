@@ -27,7 +27,10 @@ describe('test home isolation', () => {
     const gitDir = execFileSync('git', ['-C', root, 'rev-parse', '--absolute-git-dir'], {
       encoding: 'utf8',
     }).trim();
-    expect(fs.realpathSync(gitDir)).toBe(fs.realpathSync(path.join(root, '.git')));
+    // `.native` on both sides: on Windows the temp dir can come back in its 8.3 short form
+    // (RUNNER~1) from one call and the long form from another, and only the native resolver
+    // expands it (CI on windows-latest failed on exactly that).
+    expect(fs.realpathSync.native(gitDir)).toBe(fs.realpathSync.native(path.join(root, '.git')));
     fs.rmSync(root, { recursive: true, force: true });
   });
 });
