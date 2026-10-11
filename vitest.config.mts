@@ -4,6 +4,8 @@ export default defineConfig({
   test: {
     environment: 'node',
     env: { NODE9_TESTING: '1' },
+    // Each test file gets an empty HOME, so the developer's ~/.node9 never changes a result.
+    setupFiles: ['src/__tests__/helpers/isolate-home.ts'],
     clearMocks: true,
     // Integration tests spawn child processes via spawnSync (runCheck / runDoctor).
     // On slow CI runners those can take 10-15s. The default 5s vitest timeout fires
