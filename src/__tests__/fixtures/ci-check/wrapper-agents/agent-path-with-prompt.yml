@@ -1,0 +1,19 @@
+# A third-party action whose path names an agent runtime and takes a prompt.
+name: Triage
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    env:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: example-org/actions/.github/actions/claude-run@main
+        with:
+          tools: Bash,Read,Grep
+          prompt: Triage issue ${{ github.event.issue.number }} using `gh issue view`.

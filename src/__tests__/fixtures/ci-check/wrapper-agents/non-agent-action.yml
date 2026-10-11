@@ -1,0 +1,17 @@
+# A link checker from an agent vendor's organisation, with no model key: not an agent.
+name: Links
+on:
+  pull_request_target:
+    types: [opened]
+jobs:
+  links:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: Kilo-Org/lychee-action@v2
+        with:
+          args: --verbose .

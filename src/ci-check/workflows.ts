@@ -388,8 +388,36 @@ function isRunAgent(step: Step): boolean {
   return !!step.run && !step.uses && AGENT_CLI_RE.test(step.run);
 }
 
+// T.2b (2026-10-11): an action input that takes a model credential (either spelling).
+const FUEL_WITH_KEY_RE =
+  /^(anthropic[_-]api[_-]key|anthropic[_-]auth[_-]token|claude[_-]code[_-]oauth[_-]token|claude[_-]oauth[_-]token|openai[_-]api[_-]key|gemini[_-]api[_-]key|google[_-]api[_-]key)$/i;
+// An action path (after the owner) that names an agent runtime. The owner is not read:
+// `Kilo-Org/lychee-action` is a link checker.
+const AGENT_PATH_RE =
+  /(?:^|[/_.-])(claude|codex|gemini|opencode|goose|aider|kilo(?:code)?)(?:$|[/_.-])/i;
+const PROMPT_INPUT_RE = /^(prompt|direct_prompt|prompt_file|prompt-file|agent)$/i;
+
+/** T.2b: a wrapper action runs an agent when it is handed a model key, or when its path names
+ *  an agent runtime and it takes a prompt (or the job holds a model key). Not the official
+ *  claude-code-action, so no implicit actor gate is credited to it. */
+function isWrapperAgent(step: Step): boolean {
+  const uses = str(step.uses);
+  const w = step.with ?? {};
+  if (Object.keys(w).some((k) => FUEL_WITH_KEY_RE.test(k))) return true;
+  const env = { ...(step.scopeEnv ?? {}), ...(step.env ?? {}) };
+  const fuelEnv = Object.keys(env).some((k) => RUN_FUEL_ENV_RE.test(k));
+  // `uses: ./…`: the repository's own action (or, after a head checkout, the fork's).
+  if (/^\s*\.\//.test(uses))
+    return Object.keys(step.env ?? {}).some((k) => RUN_FUEL_ENV_RE.test(k));
+  const pathPart = uses.replace(/^\s*[^/@\s]{1,100}\//, '').replace(/@.*$/, '');
+  return (
+    AGENT_PATH_RE.test(pathPart) && (Object.keys(w).some((k) => PROMPT_INPUT_RE.test(k)) || fuelEnv)
+  );
+}
+
 function isAgentStep(step: Step): boolean {
   if (step.uses && AGENT_ACTION_RE.test(step.uses)) return true;
+  if (step.uses && isWrapperAgent(step)) return true;
   if (!step.run) return false;
   // run-step heuristic: an agent CLI fed event context.
   if (/\b(claude|aider|codex|gemini)\b/i.test(step.run) && /github\.event/.test(step.run))
@@ -1373,7 +1401,10 @@ function analyzeWorkflowInner(
   const powerJobs = injJobs.length ? injJobs : agentJobs;
   const powerSteps = injJobs.flatMap((j) => (j.steps ?? []).filter(isAgentStep));
   const scopedSteps = powerSteps.length ? powerSteps : agentSteps; // fallback: never blank
-  const toolsBlob = collectTools(scopedSteps);
+  // T.2b: `uses: ./…` after checking out the untrusted head to the workspace root runs the
+  // head's own action code with the job's secrets: code execution, whatever the agent does.
+  const headActionRuns = head === 'root' && powerSteps.some((st) => /^\s*\.\//.test(str(st.uses)));
+  const toolsBlob = collectTools(scopedSteps) + (headActionRuns ? ' Bash' : '');
   // S.1: the agent reads the untrusted item itself (tool, handle, payload-built prompt file).
   // Scoped to the INJECTABLE jobs, like the tools above: a gated job's read tool is unreachable.
   // Only for a workflow with its OWN stranger-firable trigger: a reusable template given the
@@ -1522,6 +1553,10 @@ function analyzeWorkflowInner(
       'triggered by `pull_request`: fork PRs run with a read-only token (lower risk than pull_request_target)'
     );
   if (head === 'root') signals.push('checks out the untrusted PR head into the workspace root');
+  if (headActionRuns)
+    signals.push(
+      "runs the checked-out head's own action (`uses: ./…`): the PR author's code runs with the job's secrets"
+    );
   if (head === 'subdir') signals.push('checks out the untrusted PR head into an isolated subdir');
   // S.4: which claude-code-action build runs, and whether it checks the actor on workflow_run.
   if (workflowRunJobs.length) {
@@ -1704,7 +1739,7 @@ const AGENT_FUEL_RE =
 // MY_CLAUDE_KEY, …). Deliberately EXCLUDES `github_token` — a non-default token
 // passed there is a recoverable PAT (usesPat/CI-2 already treats it as a real secret).
 const FUEL_INPUT_KEYS =
-  /^(anthropic_api_key|anthropic_auth_token|anthropic_base_url|claude_code_oauth_token|openai_api_key|openai_base_url|gemini_api_key|google_api_key)$/i;
+  /^(anthropic[_-]api[_-]key|anthropic[_-]auth[_-]token|anthropic[_-]base[_-]url|claude[_-]code[_-]oauth[_-]token|claude[_-]oauth[_-]token|openai[_-]api[_-]key|openai[_-]base[_-]url|gemini[_-]api[_-]key|google[_-]api[_-]key)$/i;
 
 /** Secret names that are the agent's own fuel by ASSIGNMENT: bound to a fuel input
  *  key (`with:`) or to a fuel-named env var. */
