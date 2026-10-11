@@ -12,6 +12,9 @@ import type { RepoTree } from '../ci-check/types';
 import { isAlert } from '../ci-check/tier';
 
 const FX = path.join(__dirname, 'fixtures', 'ci-check', 'round2-false-positives');
+// The repository ignores `.claude/`, so skill fixtures are stored under `claude/` and read back at
+// the path the agent opens.
+const agentPath = (p: string) => p.replace(/^claude\//, '.claude/');
 const load = (dir: string): RepoTree => {
   const files: { path: string; content: string }[] = [];
   const walk = (d: string) => {
@@ -20,7 +23,7 @@ const load = (dir: string): RepoTree => {
       if (e.isDirectory()) walk(p);
       else
         files.push({
-          path: path.relative(path.join(FX, dir), p).split(path.sep).join('/'),
+          path: agentPath(path.relative(path.join(FX, dir), p).split(path.sep).join('/')),
           content: fs.readFileSync(p, 'utf8'),
         });
     }
