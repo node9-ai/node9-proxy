@@ -1,0 +1,21 @@
+# Runs when an issue gets the `submission` label; anyone can open an issue from the form.
+name: Analyze
+on:
+  issues:
+    types: [labeled]
+jobs:
+  analyze:
+    if: github.event.label.name == 'submission'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          allowed_non_write_users: '*'
+          claude_args: --allowedTools "Read,Grep"
+          prompt: Analyze the submission in issue ${{ github.event.issue.number }}.

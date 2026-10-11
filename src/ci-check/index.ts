@@ -8,6 +8,7 @@ import {
   analyzeWorkflow,
   analyzeWorkflowSecrets,
   analyzeWorkflowPlugins,
+  analyzeTrustedReaders,
   issueFormLabels,
   localCallsOf,
   type LocalCaller,
@@ -156,6 +157,7 @@ export function scanTree(tree: RepoTree): ScanResult {
           const s = analyzeWorkflowSecrets(file.path, content, callers, autoLabels); // CI-4
           if (s) findings.push(s);
           findings.push(...analyzeWorkflowPlugins(file.path, content, tree.owner)); // CI-3: plugin sources
+          findings.push(...analyzeTrustedReaders(file.path, content, autoLabels)); // T.5
           break;
         }
         case 'agent-config':

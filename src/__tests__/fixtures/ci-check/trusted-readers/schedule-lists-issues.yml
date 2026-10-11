@@ -1,0 +1,27 @@
+# A daily agent lists every open issue (anyone can open one) and works them with a write token.
+name: Backlog
+on:
+  schedule:
+    - cron: '35 9 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+jobs:
+  work:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.BOT_PAT }}
+      - id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh issue list --state open --json number,title,body > issues.json
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
+          claude_args: --allowedTools "Edit,Write,Bash(git:*),Bash(npm:*)"
+          prompt: Read issues.json and implement the first issue that is ready.

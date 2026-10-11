@@ -1,0 +1,8 @@
+name: Submit
+description: Submit an entry
+labels: ["submission"]
+body:
+  - type: input
+    id: url
+    attributes:
+      label: URL

@@ -206,7 +206,11 @@ const CALLERS = new WeakMap<Workflow, LocalCaller[]>();
 function triggerReach(wf: Workflow, raw: Record<string, unknown>) {
   const on = onObject(wf, raw) ?? {};
   const keys = triggerKeys(wf, raw);
-  const firable = keys.filter((k) => keyStrangerFirable(on, k));
+  // T.5b: an `issues` trigger whose gate label an issue form applies to every new issue is
+  // fired by whoever opens an issue from that form.
+  const firable = keys.filter(
+    (k) => keyStrangerFirable(on, k) || (/^issues$/i.test(k) && testsAutoLabel(allIfText(wf)))
+  );
   const untrusted = firable.length > 0;
   const reusable = !untrusted && keys.some((k) => /^workflow_call$/i.test(k));
   // T.1: a reusable workflow with local callers takes its reach from them.
@@ -747,6 +751,14 @@ const PR_LABEL_GATE_RE =
 // not a gate. CONTRIBUTOR is anyone with one merged commit.
 const NONWRITE_SET_RE =
   /contains\(\s*fromjson\(\s*['"]\[[^\]]{0,400}\b(CONTRIBUTOR|FIRST_TIME_CONTRIBUTOR|FIRST_TIMER|NONE|MANNEQUIN)\b/i;
+
+/** Every job and step `if:` of the workflow, joined (bounded like stepIfText). */
+function allIfText(wf: Workflow): string {
+  const s = jobList(wf)
+    .map((j) => str(j.if) + ' ' + (j.steps ?? []).map((st) => str(st.if)).join(' '))
+    .join(' ');
+  return s.length > IF_MAX_LEN ? '' : s;
+}
 
 /** Does this expression test a label that an issue form applies on its own (T.6.9)? */
 function testsAutoLabel(ifs: string): boolean {
@@ -2037,4 +2049,123 @@ export function analyzeWorkflowPlugins(path: string, content: string, owner?: st
     }
   }
   return out;
+}
+
+// T.5a (2026-10-11): a SCHEDULED agent (no stranger can fire it, and nobody picks what it reads)
+// that still reads content strangers write (open issues and PRs, or the
+// web) while it holds a write token. Founder decision (node9Firewall#337): counted, at the
+// lowest level (advisory, tier alert).
+const ITEM_LIST_RE =
+  /gh\s+(?:issue|pr)\s+(?:list|view)\b|gh\s+search\b|gh\s+api\s+[^\n]{0,80}\/(?:issues|pulls)\b|\blist_issues\b|\bsearch_issues\b|issues\.listForRepo|pulls\.list\b|\bopen (?:issues|pull requests)\b/i;
+// Triggers on a single item (an issue, a PR, a comment, a run): judged per item, not here.
+const ITEM_EVENT_TRIGGER_RE =
+  /^(issues|issue_comment|pull_request|pull_request_target|pull_request_review|pull_request_review_comment|discussion|discussion_comment|workflow_run)$/i;
+const WEB_READ_RE = /(^|["\s,])(WebFetch|WebSearch)(\(|\s|,|"|$)/;
+// A listing whose output is cut down to a field before the agent sees it (`| grep -o`,
+// `--jq '.[].number'`) carries no stranger text.
+const SANITIZED_LIST_RE = /\|\s*grep\s+-[a-zA-Z]*o|--jq\s+['"][^'"]*\.(?:number|url|id)\b/;
+
+export function analyzeTrustedReaders(
+  path: string,
+  content: string,
+  autoLabels?: ReadonlySet<string>
+): CiFinding[] {
+  AUTO_LABELS = autoLabels ?? new Set();
+  try {
+    return analyzeTrustedReadersInner(path, content);
+  } finally {
+    AUTO_LABELS = new Set();
+  }
+}
+
+function analyzeTrustedReadersInner(path: string, content: string): CiFinding[] {
+  let raw: Record<string, unknown>;
+  try {
+    raw = (parseYaml(content) ?? {}) as Record<string, unknown>;
+  } catch {
+    return [];
+  }
+  if (!raw || typeof raw !== 'object') return [];
+  const wf = normalizeWorkflow(raw);
+  const reach = triggerReach(wf, raw);
+  // Stranger-firable workflows are CI-2's; reusable templates are judged through their callers.
+  if (reach.untrusted || reach.reusable || reach.keys.length === 0) return [];
+  // The founder's decision is about SCHEDULED agents: nobody chooses what they read. A run a
+  // maintainer starts (dispatch, a label, a release) is the maintainer-triggered case (T.7).
+  if (!reach.keys.some((k) => /^schedule$/i.test(k))) return [];
+  if (reach.keys.some((k) => ITEM_EVENT_TRIGGER_RE.test(k))) return [];
+  for (const job of jobList(wf)) {
+    const steps = job.steps ?? [];
+    const agentIdx = steps.findIndex(isAgentStep);
+    if (agentIdx < 0) continue;
+    const agent = steps.filter(isAgentStep);
+    const tools = collectTools(agent);
+    const promptText = agent
+      .map(
+        (st) =>
+          str(st.with?.['prompt']) +
+          ' ' +
+          str(st.with?.['direct_prompt']) +
+          ' ' +
+          (isRunAgent(st) ? str(st.run) : '')
+      )
+      .join(' ');
+    const earlier = steps
+      .slice(0, agentIdx)
+      .filter((st) => !isAgentStep(st))
+      .map((st) => str(st.run) + ' ' + str(st.with?.['script']));
+    const reads: string[] = [];
+    if (ITEM_READ_TOOL_RE.test(tools) || ITEM_LIST_RE.test(promptText))
+      reads.push('reads open issues or pull requests');
+    else if (earlier.some((t) => ITEM_LIST_RE.test(t) && !SANITIZED_LIST_RE.test(t)))
+      reads.push('an earlier step lists open issues or pull requests for it');
+    if (WEB_READ_RE.test(tools)) reads.push('fetches third-party web content');
+    if (!reads.length) continue;
+
+    // The write power the agent can reach: a token handed to it, a checkout that keeps the job
+    // token (or a PAT) in .git/config, or a PAT. A token withheld (`''`) is none.
+    const withheld = agent.every(
+      (st) =>
+        str(st.with?.['github_token']).trim() === "''" ||
+        ('github_token' in (st.with ?? {}) && str(st.with?.['github_token']).trim() === '') ||
+        ('GITHUB_TOKEN' in (st.env ?? {}) && str(st.env?.['GITHUB_TOKEN']).trim() === '')
+    );
+    const checkouts = steps
+      .slice(0, agentIdx)
+      .filter((st) => /actions\/checkout/i.test(str(st.uses)));
+    const persisted = checkouts.some((st) => str(st.with?.['persist-credentials']) !== 'false');
+    const checkoutPat = checkouts.some((st) =>
+      /secrets\.(?!GITHUB_TOKEN\b)[A-Za-z_]/i.test(str(st.with?.['token']))
+    );
+    const pat = usesPatIn([job]) || checkoutPat;
+    const permWrite = jobsHaveWrite(
+      wf,
+      [job],
+      /["']?(contents|issues|pull-requests)["']?\s*:\s*["']?write/i
+    );
+    const handsToken = agent.some(
+      (st) => !!claudeActionBuild(st.uses) || !!str(st.with?.['github_token']).trim()
+    );
+    const write = pat || (permWrite && !withheld && (handsToken || persisted));
+    if (!write) continue;
+
+    const writes = pat ? 'a static PAT' : 'a write token';
+    return [
+      {
+        check: 'CI-2',
+        rule: 'CI-2.trusted-trigger-reader',
+        dimension: 'workflows',
+        severity: 'advisory',
+        title: 'Agent on a trusted trigger reads content strangers write, with a write token',
+        file: path,
+        signals: [
+          `runs on ${reach.keys.map((k) => safeText(k, 40)).join(', ')}: no stranger starts it`,
+          ...reads.map((r) => `the agent ${r}`),
+          `it holds ${writes}: injected text in that content can act with it`,
+        ],
+        fix: 'Give the agent a read-only token and apply its output in a separate step, or filter the items to trusted authors first.',
+      },
+    ];
+  }
+  return [];
 }
