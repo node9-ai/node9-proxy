@@ -57,6 +57,34 @@ const OPEN_RUNNER_MAX = 300;
 // the low-FP settings fixture grants five of them. Only the long forms: `-v` is
 // verbose for curl/ssh/bash and `-h` a host for docker (second review).
 const INFO_FLAG_RE = /\s--(version|help)\b/;
+// T.9 (2026-10-11): more wildcard grants that run code without a prompt, graded medium like the
+// S.3 runners, with the same grammar (`VAR=x` prefixes, then only flags, then a wildcard): a
+// command with an exec escape (`find -exec`, `awk system()`, `sed e`, `tee` to any path, `make`,
+// an editor or pager with `!`), a "run a program" sub-command, and a destructive or publishing
+// verb. Measured on the hand-reviewed clones before building. Not `find` (the low-FP settings
+// fixture grants it as a search tool) and not `make -n` (a dry run prints, it runs nothing).
+// Settings only: a skill or command is active only when invoked, and a ship command that
+// pre-approves `git push` is doing its job.
+const EXTRA_RUNNER_RE = new RegExp(
+  String.raw`^Bash\((?:[A-Z_][A-Z0-9_]{0,40}=\S{0,200} )*(?:/[\w./-]{0,80}/)?` +
+    String.raw`(awk|gawk|mawk|sed|tee|tar|make(?! -n\b)|vim|vi|nvim|less|man|timeout|dd|install|` +
+    String.raw`dotnet (?:run|script)|cargo run|go run|mvn exec|gradle run|npm start|tmux|` +
+    String.raw`rm|git (?:push|config|remote|submodule|filter-branch)|gh (?:repo|secret|auth|release))` +
+    String.raw`(?: --?[A-Za-z][\w-]{0,30}){0,4} ?['"]?(?::\*| \*|\*)\)$`,
+  'i'
+);
+// MCP tools whose job is to execute code or commands, pre-approved in `permissions.allow`.
+const MCP_EXEC_RE =
+  /^mcp__ide__executeCode$|^mcp__[\w-]{1,80}__(?:execute|exec|run)_(?:code|command|shell|sql|query)$|^mcp__[\w-]{1,80}__(?:ctx_)?(?:batch_)?execute$|^mcp__playwright__browser_evaluate$|^mcp__[\w-]{1,80}__(?:bash|shell|terminal)$/;
+
+function extraRunner(grant: string): boolean {
+  if (grant.length > OPEN_RUNNER_MAX || INFO_FLAG_RE.test(grant)) return false;
+  return (
+    EXTRA_RUNNER_RE.test(grant.replace(/\s+/g, ' ').replace(/\(\s+/, '(')) ||
+    MCP_EXEC_RE.test(grant)
+  );
+}
+
 function openRunner(grant: string): boolean {
   if (grant.length > OPEN_RUNNER_MAX || INFO_FLAG_RE.test(grant)) return false;
   return OPEN_RUNNER_RE.test(grant.replace(/\s+/g, ' ').replace(/\(\s+/, '('));
@@ -72,13 +100,20 @@ function openRunner(grant: string): boolean {
 export function gradeBroadGrant(
   allow: string[],
   deny: string[],
-  opts: { denySupported?: boolean; scope?: string } = {}
+  opts: { denySupported?: boolean; scope?: string; settings?: boolean } = {}
 ): { broad: string[]; bareShell: boolean; high: boolean; signals: string[] } | null {
   const denySupported = opts.denySupported ?? true;
   const scope = opts.scope ?? 'for everyone who opens this repo with the agent';
-  const broad = allow.filter(
-    (a) => /^Bash$|^Bash\(\s*\*|^Bash\(git:|^Write\(\s*\*|^Write$|^Edit$/.test(a) || openRunner(a)
-  );
+  // T.9: a PowerShell grant is read with the same grammar as a Bash one.
+  const asBash = (a: string) => a.replace(/^PowerShell\(/, 'Bash(');
+  const broad = allow.filter((raw) => {
+    const a = asBash(raw);
+    return (
+      /^Bash$|^Bash\(\s*\*|^Bash\(git:|^Write\(\s*\*|^Write$|^Edit$/.test(a) ||
+      openRunner(a) ||
+      (opts.settings === true && extraRunner(a))
+    );
+  });
   if (broad.length === 0) return null;
   const hasBackstop = deny.some((d) => /Bash|Write|Edit/.test(d));
   // For an unrestricted shell only a Bash deny counts: `deny: ['Write']` does nothing to
@@ -259,9 +294,13 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
   }
 
   // Over-broad permission grants pre-authorizing every contributor's agent.
-  const allow = asStrings(cfg.permissions?.allow);
+  // T.9: `permissions.allowedTools` is read as an alias of `permissions.allow`.
+  const allow = [
+    ...asStrings(cfg.permissions?.allow),
+    ...asStrings((cfg.permissions as { allowedTools?: unknown } | undefined)?.allowedTools),
+  ];
   const deny = asStrings(cfg.permissions?.deny);
-  const grade = gradeBroadGrant(allow, deny);
+  const grade = gradeBroadGrant(allow, deny, { settings: true });
   if (grade) {
     const { high, signals } = grade;
     // Anchor at the first broad entry: where the reviewer has to change something.
