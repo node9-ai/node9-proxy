@@ -151,6 +151,14 @@ describe('batch 2 — an upstream script gate needs a positive allowlist', () =>
     ).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
   });
 
+  it("a permission read on `!= 'none'` is not (a stranger has `read`)", () => {
+    const perm =
+      "const { data } = await github.rest.repos.getCollaboratorPermissionLevel({ ...context.repo, username: context.actor }); core.setOutput('allowed', data.permission);";
+    expect(
+      worst({ [WF]: gatedBy(perm, "needs.check.outputs.allowed != 'none'") })
+    ).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
+  });
+
   it('a block list (`blocked.includes(actor) ? false : true`) is not a gate', () => {
     const wf = [
       'on:',

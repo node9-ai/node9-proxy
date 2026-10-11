@@ -1,0 +1,15 @@
+on:
+  issue_comment:
+    types: [created]
+permissions:
+  contents: write
+jobs:
+  answer:
+    runs-on: ubuntu-latest
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      REQUEST: ${{ github.event.comment.body }}
+    steps:
+      - run: codex --full-auto exec "$REQUEST"

@@ -104,23 +104,50 @@ const LOOKALIKE: Record<string, string> = {
   Χ: 'X',
   Υ: 'Y',
   Ζ: 'Z',
+  // Armenian (review, round 2)
+  '\u0585': 'o',
+  '\u057d': 'u',
+  '\u0570': 'h',
+  '\u0578': 'n',
+  '\u0581': 'g',
+  '\u0566': 'q',
 };
-const MIXED_WORD_RE = /[A-Za-z\u0370-\u03ff\u0400-\u04ff\u0500-\u052f]{4,60}/g;
-const EXPLAINED_LINE_RE = /cyrillic|greek|homoglyph|confusable|look-?alike/i;
+const MIXED_WORD_RE = /[A-Za-z\u0370-\u03ff\u0400-\u04ff\u0500-\u052f\u0530-\u058f]{4,60}/g;
+// A letter of a script that has Latin look-alikes. One the map does not hold (`\u04bb`, `\u057d`) is
+// counted too: a single unmapped letter used to turn the rule off (review, round 2).
+const FOREIGN_LETTER_RE = /[\u0370-\u03ff\u0400-\u04ff\u0500-\u052f\u0530-\u058f]/;
+const GREEK_RE = /[\u0370-\u03ff]/;
+const EXPLAINED_LINE_RE = /cyrillic|greek|armenian|homoglyph|confusable|look-?alike/i;
 const HOMOGLYPH_MAX_LINE = 2000;
 
 function homoglyphWord(content: string): { folded: string; count: number; line: number } | null {
   const lines = content.split('\n');
   for (let i = 0; i < lines.length; i++) {
     const text = lines[i];
-    if (text.length > HOMOGLYPH_MAX_LINE || EXPLAINED_LINE_RE.test(text)) continue;
+    if (text.length > HOMOGLYPH_MAX_LINE) continue;
+    // Only text a reader sees explains the line: an HTML comment does not render.
+    const visible = text.replace(/<!--[\s\S]*?(?:-->|$)/g, '');
+    if (EXPLAINED_LINE_RE.test(visible)) continue;
     for (const m of text.matchAll(MIXED_WORD_RE)) {
-      const w = m[0];
-      const latin = (w.match(/[A-Za-z]/g) ?? []).length;
-      const look = [...w].filter((c) => c in LOOKALIKE).length;
-      const other = [...w].length - latin - look;
-      if (latin >= 2 && look >= 1 && other === 0)
-        return { folded: [...w].map((c) => LOOKALIKE[c] ?? c).join(''), count: look, line: i + 1 };
+      const chars = [...m[0]];
+      const latin = chars.filter((c) => /[A-Za-z]/.test(c)).length;
+      const foreign = chars.filter((c) => FOREIGN_LETTER_RE.test(c));
+      // At least one letter must pass for a Latin one; a symbol with no look-alike (`cos\u03b8`)
+      // is notation. The unmapped letters next to it count with it.
+      if (latin < 2 || !foreign.some((c) => c in LOOKALIKE) || foreign.length > latin) continue;
+      // A Greek symbol with a Latin subscript (`\u03c1max`, `\u03c4min`) is notation, not a disguise.
+      const lead = chars.findIndex((c) => !FOREIGN_LETTER_RE.test(c));
+      if (
+        lead > 0 &&
+        chars.slice(0, lead).every((c) => GREEK_RE.test(c)) &&
+        lead === foreign.length
+      )
+        continue;
+      return {
+        folded: chars.map((c) => LOOKALIKE[c] ?? c).join(''),
+        count: foreign.length,
+        line: i + 1,
+      };
     }
   }
   return null;
@@ -588,7 +615,7 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
         'advisory',
         'A word in an agent instruction file is spelled with look-alike letters',
         [
-          `\`${glyph.folded}\` is written with ${glyph.count} Cyrillic or Greek look-alike letter(s): it reads the same to a reviewer, but a search, a replace or a policy check on the real word misses it`,
+          `\`${glyph.folded}\` is written with ${glyph.count} non-Latin look-alike letter(s): it reads the same to a reviewer, but a search, a replace or a policy check on the real word misses it`,
         ],
         'Spell the word with plain Latin letters, or explain on the same line why the look-alikes are there.',
         path,

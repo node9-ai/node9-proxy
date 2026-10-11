@@ -20,48 +20,48 @@ const LAUNCHERS: { re: RegExp; name: string; registry: string }[] = [
   { re: /\bnpx\b/, name: 'npx', registry: 'npm' },
   { re: /\bpnpx\b|\bpnpm\s+dlx\b/, name: 'pnpm dlx', registry: 'npm' },
   { re: /\byarn\s+dlx\b/, name: 'yarn dlx', registry: 'npm' },
-  { re: /\bnpm\s+exec\b/, name: 'npm exec', registry: 'npm' },
+  { re: /\bnpm\s+(?:exec|x)\b/, name: 'npm exec', registry: 'npm' },
   { re: /\bbunx\b|\bbun\s+x\b/, name: 'bunx', registry: 'npm' },
   { re: /\buvx\b|\buv\s+tool\s+run\b/, name: 'uvx', registry: 'PyPI' },
   { re: /\bpipx\s+run\b/, name: 'pipx run', registry: 'PyPI' },
 ];
 // A version in either registry's spelling: `pkg@1.2.3`, `pkg==1.2.3`, `--from pkg==1.2.3`.
 const PINNED_RE = /@\d|==\s*\d/;
-// Flags of `docker run` / `podman run` that take a separate value.
-const RUN_VALUE_FLAGS = new Set([
-  '-e',
-  '--env',
-  '-v',
-  '--volume',
-  '--name',
-  '-p',
-  '--publish',
-  '--network',
-  '--mount',
-  '-w',
-  '--workdir',
-  '--entrypoint',
-  '-u',
-  '--user',
-  '--env-file',
-  '--platform',
-  '-l',
-  '--label',
-  '-h',
-  '--hostname',
-  '--add-host',
-  '--cpus',
-  '-m',
-  '--memory',
-  '--pull',
-  '--device',
-]);
+// Flags of `docker run` / `podman run` / `nerdctl run` that take a separate value. A missing
+// one made its value read as the image (`--tmpfs /tmp:rw` passed as pinned, review round 2).
+const RUN_VALUE_FLAGS = new Set(
+  [
+    '-a --attach --add-host --annotation --blkio-weight --blkio-weight-device --cap-add',
+    '--cap-drop --cgroup-parent --cgroupns --cgroups --cgroup-conf --cidfile --cpu-period',
+    '--cpu-quota --cpu-rt-period --cpu-rt-runtime -c --cpu-shares --cpus --cpuset-cpus',
+    '--cpuset-mems --device --device-cgroup-rule --device-read-bps --device-read-iops',
+    '--device-write-bps --device-write-iops --dns --dns-option --dns-search --domainname',
+    '--entrypoint -e --env --env-file --expose --gpus --group-add --health-cmd',
+    '--health-interval --health-retries --health-start-interval --health-start-period',
+    '--health-timeout -h --hostname --ip --ip6 --ipc --isolation --kernel-memory -l --label',
+    '--label-file --link --link-local-ip --log-driver --log-opt --mac-address -m --memory',
+    '--memory-reservation --memory-swap --memory-swappiness --mount --name --network --net',
+    '--network-alias --oom-score-adj --pid --pids-limit --platform -p --publish --pull',
+    '--restart --runtime --security-opt --shm-size --stop-signal --stop-timeout',
+    '--storage-opt --sysctl --tmpfs --ulimit -u --user --userns --uts -v --volume',
+    '--volume-driver --volumes-from -w --workdir --secret --pod --arch --os --variant',
+    '--timezone --umask --requires --uidmap --gidmap --subuidname --subgidname --hooks-dir',
+    '--init-path --seccomp-policy --sdnotify --personality --preserve-fds --chrootdirs',
+  ]
+    .join(' ')
+    .split(' ')
+);
 
-/** The image a `docker run` / `podman run` argv starts, or null when there is none. */
+/** The image a container `run` argv starts, or null when there is none. */
 function runImage(tokens: string[]): string | null {
-  const i = tokens.findIndex((t, k) => /(^|\/)(docker|podman)$/.test(t) && tokens[k + 1] === 'run');
+  const i = tokens.findIndex(
+    (t, k) =>
+      /(^|\/)(docker|podman|nerdctl)$/.test(t) &&
+      (tokens[k + 1] === 'run' || (tokens[k + 1] === 'container' && tokens[k + 2] === 'run'))
+  );
   if (i < 0) return null;
-  for (let k = i + 2; k < tokens.length; k++) {
+  const from = tokens[i + 1] === 'run' ? i + 2 : i + 3;
+  for (let k = from; k < tokens.length; k++) {
     const t = tokens[k];
     if (t.startsWith('-')) {
       if (!t.includes('=') && RUN_VALUE_FLAGS.has(t)) k++;
@@ -137,6 +137,12 @@ function unpinnedLauncher(
       ? { launcher: 'docker run', registry: 'the image registry' }
       : null;
   }
+  // `go run module@version` fetches the module; without `@` it builds local code.
+  const goMod = /\bgo\s+run\s+(?:-\S+\s+)*([^\s@]+)@(\S+)/.exec(argv);
+  if (goMod)
+    return /^v\d/.test(goMod[2]) || /^[0-9a-f]{40}$/.test(goMod[2])
+      ? null
+      : { launcher: 'go run', registry: 'the Go module proxy' };
   const l = LAUNCHERS.find((x) => x.re.test(argv));
   if (!l) return null;
   return /@latest\b/.test(argv) || !PINNED_RE.test(argv)

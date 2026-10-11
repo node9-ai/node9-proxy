@@ -1,0 +1,20 @@
+on:
+  issue_comment:
+    types: [created]
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  fix:
+    if: github.event.issue.pull_request && github.event.comment.author_association == 'MEMBER' && github.event.issue.user.login == 'renovate[bot]' == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: gh pr checkout ${{ github.event.issue.number }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          prompt: "Fix the failing tests on this branch and push."
+          claude_args: "--allowedTools Bash"
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

@@ -1,0 +1,18 @@
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  route:
+    runs-on: ubuntu-latest
+    outputs:
+      cmd: ${{ steps.p.outputs.cmd }}
+    steps:
+      - id: p
+        env:
+          BODY: ${{ github.event.comment.body }}
+        run: echo "cmd=$(printf '%s' "$BODY" | head -c 20 | sed -n 's#^/\([a-z]*\).*#\1#p')" >> "$GITHUB_OUTPUT"
+  call:
+    needs: route
+    if: needs.route.outputs.cmd == 'triage'
+    uses: ./.github/workflows/agent.yml
+    secrets: inherit

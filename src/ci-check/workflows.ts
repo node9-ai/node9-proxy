@@ -157,7 +157,7 @@ export function issueFormLabels(content: string): string[] {
   const text = content.length > 200_000 ? content.slice(0, 200_000) : content;
   let value: unknown;
   let parsed = false;
-  if (/^﻿?\s*---[ \t]*\r?\n/.test(text)) {
+  if (/^\uFEFF?\s*---[ \t]*\r?\n/.test(text)) {
     const fm = parseFrontmatter(text);
     parsed = fm !== null;
     value = fm?.['labels'];
@@ -288,27 +288,39 @@ function jobList(wf: Workflow): Job[] {
 }
 
 // T.6 (2026-10-10): read the workflow the way the runner does, before any check runs.
-const ENV_REF_RE = /\$\{\{\s*env\.([A-Za-z_][A-Za-z0-9_]{0,100})\s*\}\}/g;
+const ENV_REF_RE =
+  /\$\{\{\s*env(?:\.([A-Za-z_][A-Za-z0-9_]{0,100})|\[\s*['"]([A-Za-z_][A-Za-z0-9_]{0,100})['"]\s*\])\s*\}\}/g;
+// A step `env:` may itself read `env` (`TASK: ${{ env.REQUEST }}`): follow a few hops.
+const ENV_REF_HOPS = 3;
 const RESOLVED_MAX_LEN = 100_000;
 
 /** `${{ env.X }}` in an action input, replaced by X from the step, job or workflow `env:`
  *  (first holder wins, as on the runner). One level only; an unknown name stays as written. */
 function resolveEnvRefs(v: string, envs: (Record<string, unknown> | undefined)[]): string {
-  if (!v.includes('env.')) return v;
   const holderOf = (name: string) =>
     envs.find((e) => e != null && typeof e === 'object' && name in e);
-  // Measure before building: thousands of references to a large value would otherwise build a
-  // string past V8's limit and throw, which dropped every finding of the file (review, round 2).
-  let projected = v.length;
-  for (const m of v.matchAll(ENV_REF_RE)) {
-    const holder = holderOf(m[1]);
-    if (holder) projected += str(holder[m[1]]).length - m[0].length;
-    if (projected > RESOLVED_MAX_LEN) return v;
+  for (let hop = 0; hop < ENV_REF_HOPS && v.includes('env'); hop++) {
+    // Measure before building: thousands of references to a large value would otherwise build a
+    // string past V8's limit and throw, which dropped every finding of the file (review, round 2).
+    let projected = v.length;
+    let any = false;
+    for (const m of v.matchAll(ENV_REF_RE)) {
+      const name = m[1] ?? m[2];
+      const holder = holderOf(name);
+      if (holder) {
+        any = true;
+        projected += str(holder[name]).length - m[0].length;
+      }
+      if (projected > RESOLVED_MAX_LEN) return v;
+    }
+    if (!any) break;
+    v = v.replace(ENV_REF_RE, (whole, a: string | undefined, b: string | undefined) => {
+      const name = (a ?? b) as string;
+      const holder = holderOf(name);
+      return holder ? str(holder[name]) : whole;
+    });
   }
-  return v.replace(ENV_REF_RE, (whole, name: string) => {
-    const holder = holderOf(name);
-    return holder ? str(holder[name]) : whole;
-  });
+  return v;
 }
 
 /** A job `if:` that can never be true: `false`, `${{ false }}`, `<expr> && false`. */
@@ -432,12 +444,41 @@ function localCallsOfInner(
         privileged: reach.privileged,
         workflowRun: reach.workflowRun,
         gated: jobGated(job, wf, raw),
-        dispatched: /needs\.[\w-]+\.outputs\./.test(str(job.if)),
+        dispatched: dispatchedByGatedJob(job, wf, raw),
         reusable: reach.reusable,
       },
     });
   }
   return out;
+}
+
+/** Does this calling job run on the output of an upstream dispatcher with a gate on at least
+ *  one of its branches? Which branch sends which command is not visible statically, so that is
+ *  the "unresolved" case triggerReach keeps at the reusable score. A router with no gate at all
+ *  that parses a stranger's comment opens every template it calls (review, round 2). */
+function dispatchedByGatedJob(job: Job, wf: Workflow, raw: Record<string, unknown>): boolean {
+  const names = [...str(job.if).matchAll(/needs\.([\w-]{1,100})\.outputs\./g)].map((m) => m[1]);
+  if (!names.length) return false;
+  const jobs = (wf.jobs ?? {}) as Record<string, Job | null>;
+  const label = labelTypeConfigured(wf, raw);
+  const someBranchGated = (x: IfExpr): boolean => {
+    switch (x.k) {
+      case 'atom':
+        return exprGated(x, label);
+      case 'not':
+        return false;
+      case 'and':
+      case 'or':
+        return x.c.some(someBranchGated);
+    }
+  };
+  return names.every((n) => {
+    const up = jobs[n];
+    if (up == null) return false;
+    if (jobGated(up, wf, raw)) return true;
+    const x = parseIf(str(up.if));
+    return x !== null && someBranchGated(x);
+  });
 }
 
 function allSteps(wf: Workflow): { job: Job; step: Step }[] {
@@ -450,8 +491,20 @@ function allSteps(wf: Workflow): { job: Job; step: Step }[] {
 
 // T.2a (2026-10-11): an agent CLI invoked to do work (not `--version` or an install), or an
 // agent SDK script, or a hosted agent's session API.
-const AGENT_CLI_RE =
-  /\b(?:claude\s+(?:-p|--print|--continue|--resume)\b|codex\s+exec\b|gemini\s+(?:-p|--prompt)\b|aider\s|opencode\s+run\b|goose\s+run\b|kilo\s+run\b|pi\s+--print\b|llmproc\s|acpx\s|harbor\s+(?:check|run)\b|copilot\s+(?:-p|--prompt|--allow-all-tools)\b)|api\.devin\.ai\/|software-agent-sdk|\bagent_script\.py\b/i;
+const AGENT_CLI_RE = new RegExp(
+  [
+    // The binary at a command start, then its "do work" flag anywhere on the same command
+    // (`claude --model x -p`, `claude "$Q" --print`, `npx @anthropic-ai/claude-code -p`): the
+    // flag had to come first (review, round 2). Bounded: at most 300 characters per command.
+    String.raw`(?:^|[\s|;&(])(?:claude|@anthropic-ai/claude-code(?:@[\w.-]{1,40})?)(?=\s)[^\n;&|]{0,300}?\s(?:-p|--print|--continue|--resume)(?=[\s"'=]|$)`,
+    String.raw`(?:^|[\s|;&(])(?:codex|@openai/codex(?:@[\w.-]{1,40})?)(?=\s)[^\n;&|]{0,300}?\sexec\b`,
+    String.raw`(?:^|[\s|;&(])(?:gemini|@google/gemini-cli(?:@[\w.-]{1,40})?)(?=\s)[^\n;&|]{0,300}?\s(?:-p|--prompt)(?=[\s"'=]|$)`,
+    String.raw`(?:^|[\s|;&(])copilot(?=\s)[^\n;&|]{0,300}?\s(?:-p|--prompt|--allow-all-tools)(?=[\s"'=]|$)`,
+    String.raw`\b(?:aider\s|opencode\s+run\b|goose\s+run\b|kilo\s+run\b|pi\s+--print\b|llmproc\s|acpx\s|harbor\s+(?:check|run)\b)`,
+    String.raw`api\.devin\.ai/|software-agent-sdk|\bagent_script\.py\b`,
+  ].join('|'),
+  'i'
+);
 // The model credential a run-step agent is started with.
 const RUN_FUEL_ENV_RE =
   /^(ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY|GEMINI_API_KEY|GOOGLE_API_KEY|KILO_API_KEY|OPENCODE_API_KEY|DEVIN_API_KEY|LLM_API_KEY|AWS_BEARER_TOKEN_BEDROCK)$/i;
@@ -482,8 +535,7 @@ function isWrapperAgent(step: Step): boolean {
   const env = { ...(step.scopeEnv ?? {}), ...(step.env ?? {}) };
   const fuelEnv = Object.keys(env).some((k) => RUN_FUEL_ENV_RE.test(k));
   // `uses: ./…`: the repository's own action (or, after a head checkout, the fork's).
-  if (/^\s*\.\//.test(uses))
-    return Object.keys(step.env ?? {}).some((k) => RUN_FUEL_ENV_RE.test(k));
+  if (/^\s*\.\//.test(uses)) return fuelEnv; // the job env reaches the action too (review, round 2)
   const pathPart = uses.replace(/^\s*[^/@\s]{1,100}\//, '').replace(/@.*$/, '');
   return (
     AGENT_PATH_RE.test(pathPart) && (Object.keys(w).some((k) => PROMPT_INPUT_RE.test(k)) || fuelEnv)
@@ -867,8 +919,10 @@ const PR_LABEL_GATE_RE =
 
 // T.6.4 (2026-10-10): a literal association set that also admits a role without write access is
 // not a gate. CONTRIBUTOR is anyone with one merged commit.
+// A plain string set (`contains('OWNER,…,CONTRIBUTOR', …)`) is a substring test, the same thing
+// (review, round 2).
 const NONWRITE_SET_RE =
-  /contains\(\s*fromjson\(\s*['"]\[[^\]]{0,400}\b(CONTRIBUTOR|FIRST_TIME_CONTRIBUTOR|FIRST_TIMER|NONE|MANNEQUIN)\b/i;
+  /contains\(\s*(?:fromjson\(\s*['"]\[[^\]]{0,400}|'[^']{0,400})\b(CONTRIBUTOR|FIRST_TIME_CONTRIBUTOR|FIRST_TIMER|NONE|MANNEQUIN)\b/i;
 
 /** Every job and step `if:` of the workflow, joined (bounded like stepIfText). */
 function allIfText(wf: Workflow): string {
@@ -890,17 +944,20 @@ function testsAutoLabel(ifs: string): boolean {
 
 /** Do these joined `if:` expressions constitute an actor gate? */
 function ifsAreGated(ifs: string, label: LabelConfig): boolean {
+  // The gate shapes are read with string literals emptied (maskLiterals); the role set and the
+  // auto-applied labels are read from the literals themselves.
+  const m = maskLiterals(ifs);
   // Credit a contains() inclusion ONLY when it is not negated (`!contains(…)` = anti-gate).
   const containsGate =
-    CONTAINS_GATE_RE.test(ifs) && !NEGATED_CONTAINS_RE.test(ifs) && !NONWRITE_SET_RE.test(ifs);
-  const gated = NONCONTAINS_GATE_RE.test(ifs) || containsGate;
+    CONTAINS_GATE_RE.test(m) && !NEGATED_CONTAINS_RE.test(m) && !NONWRITE_SET_RE.test(ifs);
+  const gated = NONCONTAINS_GATE_RE.test(m) || containsGate;
   // A label already on the PR (`contains(github.event.pull_request.labels.*.name, 'x')`) was put
   // there by someone with triage access, like the `label.name` of a labeled event. Only a
   // POSITIVE test counts (second review): see PR_LABEL_GATE_RE.
   const labelGated =
-    (((label.pr || label.issues) && EVENT_LABEL_GATE_RE.test(ifs)) ||
-      (label.pr && PR_LABEL_GATE_RE.test(ifs)) ||
-      (label.issues && ISSUE_LABEL_GATE_RE.test(ifs))) &&
+    (((label.pr || label.issues) && EVENT_LABEL_GATE_RE.test(m)) ||
+      (label.pr && PR_LABEL_GATE_RE.test(m)) ||
+      (label.issues && ISSUE_LABEL_GATE_RE.test(m))) &&
     !testsAutoLabel(ifs);
   return gated || labelGated;
 }
@@ -1049,16 +1106,28 @@ function stepIfText(steps: Step[]): string {
   return s.length > IF_MAX_LEN ? '' : s;
 }
 
+/** `ifs` with every string literal emptied, except one compared with `==` / `!=` (the value a
+ *  gate tests): `contains('github.actor == x', 'g')` holds gate text in a string and is always
+ *  true (review, round 2). */
+function maskLiterals(ifs: string): string {
+  return ifs.replace(/(==|!=)?(\s*)'(?:[^']|'')*'/g, (m, op: string | undefined, sp: string) =>
+    op ? m : `${sp}'_'`
+  );
+}
+// `a == 'x' == false` compares the result of a comparison: "not x", true for every stranger.
+const CHAINED_COMPARE_RE = /(?:==|!=)[^=!]*(?:==|!=)/;
+
 /** Is this text an actor gate? The gate shapes of ifsAreGated, plus the job-scoped ones. */
 function gatedText(ifs: string, labelConfigured: LabelConfig): boolean {
   // G-d′: an `assignee.login == '…'` gate (only someone with triage/write access can
   // assign an issue) counts too. Kept in the JOB-scoped check only — NOT in the shared
   // ACTOR_GATE_RE; gating is judged per job, so a gated sibling job can't mask an
   // ungated injectable one.
+  const masked = maskLiterals(ifs);
   return (
     ifsAreGated(ifs, labelConfigured) ||
-    ASSIGNEE_GATE_RE.test(ifs) ||
-    PERMISSION_OUTPUT_GATE_RE.test(ifs) // [2] job-scoped permission-check-output gate
+    ASSIGNEE_GATE_RE.test(masked) ||
+    PERMISSION_OUTPUT_GATE_RE.test(masked) // [2] job-scoped permission-check-output gate
   );
 }
 
@@ -1066,6 +1135,7 @@ function gatedText(ifs: string, labelConfigured: LabelConfig): boolean {
 function exprGated(x: IfExpr, labelConfigured: LabelConfig): boolean {
   switch (x.k) {
     case 'atom':
+      if (CHAINED_COMPARE_RE.test(maskLiterals(x.t))) return false;
       return gatedText(x.t, labelConfigured) || TRUSTED_EVENT_ATOM_RE.test(x.t);
     case 'not':
       return false;
@@ -1180,16 +1250,17 @@ function scriptAllowsByActor(code: string): boolean {
 function readsOutputPositively(readerIf: string, name: string): boolean {
   const ref = `needs\\.${escapeRe(name)}\\.outputs\\.[\\w-]{1,100}`;
   if (!new RegExp(ref).test(readerIf)) return false;
-  const yes = `'(?:true|yes|1|write|admin|maintain)'`;
-  const no = `'(?:false|no|0|)'`;
+  const no = `'(?:false|no|0|)'(?![\\w'])`;
+  // `!= 'none'` admits `read`, which every stranger has: only `!=` a "no" word runs on a yes.
   return !new RegExp(
-    `!\\s{0,5}\\(?\\s{0,5}(?:fromjson\\(\\s{0,5})?${ref}|${ref}\\s{0,5}\\)?\\s{0,5}(?:!=\\s{0,5}${yes}|==\\s{0,5}${no})`,
+    `!\\s{0,5}\\(?\\s{0,5}(?:fromjson\\(\\s{0,5})?${ref}|${ref}\\s{0,5}\\)?\\s{0,5}(?:!=\\s{0,5}(?!${no})|==\\s{0,5}${no})`,
     'i'
   ).test(readerIf);
 }
 
 const STATUS_FN_RE = /\b(success|failure|always|cancelled)\s*\(/i;
-const FAILING_STEP_RE = /\bexit\s+[1-9]|core\.setFailed|process\.exit\(\s*[1-9]/;
+const FAILING_STEP_RE =
+  /\bexit\s+[1-9]|core\.setFailed|process\.exit\(\s*[1-9]|actions\.cancelWorkflowRun\b/;
 
 function needsOf(job: Job): string[] {
   return (Array.isArray(job.needs) ? job.needs : job.needs ? [job.needs] : []).map(String);
@@ -1226,7 +1297,12 @@ function upstreamJobGates(
     })
   )
     return true;
-  const stepGated = ifsAreGated(stepIfText(steps), label) || hasStepMembershipGate(dep);
+  // A permission or membership call in a script step counts too (a compiled agentic workflow
+  // checks the actor in a github-script step, then cancels the run for anyone else).
+  const stepGated =
+    ifsAreGated(stepIfText(steps), label) ||
+    hasStepMembershipGate(dep) ||
+    steps.some((st) => MEMBERSHIP_CHECK_RE.test(str(st.with?.['script'])));
   if (!stepGated) return false;
   if (
     steps.some(
@@ -1234,7 +1310,7 @@ function upstreamJobGates(
     )
   )
     return true;
-  return readerIf !== null && new RegExp(`needs\\.${escapeRe(name)}\\.outputs\\.`).test(readerIf);
+  return readerIf !== null && readsOutputPositively(readerIf, name);
 }
 
 /** Names of every job upstream of `job` (transitively) that gates, per upstreamJobGates. */
@@ -1286,7 +1362,7 @@ function bypassArmed(steps: Step[]): boolean {
 // T.6.5 (2026-10-10): a value bound to the user who fired the event allows that user, whoever
 // it is, so it is "*" in effect (`${{ github.event.issue.user.login }}`).
 const ACTOR_BOUND_RE =
-  /\$\{\{[^}]{0,200}\b(github\.event\.[\w.]{0,80}\buser\.login|github\.actor|github\.triggering_actor)\b/i;
+  /\$\{\{[^}]{0,200}\b(github\.event\.[\w.]{0,80}\b(?:user|sender)\.login|github\.event\.sender\.login|github\.actor|github\.triggering_actor)\b/i;
 
 /** Does this allowed_non_write_users value admit any user? */
 function nonWriteOpen(v: string): boolean {
@@ -2170,14 +2246,17 @@ function analyzeWorkflowSecretsInner(
 // T.3 (2026-10-11): claude-code-action installs plugins from the marketplaces it is given, on
 // every run. A marketplace outside the vendor's own org that is not pinned to a commit lets its
 // owner change code and prompts (plugins can ship hooks) that run next to the job's token.
-const VENDOR_MARKETPLACE_RE = /(^|[/:])anthropics\//i;
 const COMMIT_PIN_RE = /[#@][0-9a-f]{40}\b/i;
 
-/** The GitHub owner a marketplace reference points at (`https://github.com/<o>/…`, `<o>/<r>`). */
+/** The GitHub owner a marketplace reference points at: `https://github.com/<o>/…`,
+ *  `git@github.com:<o>/…` or the `<o>/<r>` shorthand. Any other host, or a `..` segment, has
+ *  none: `https://git.example.net/anthropics/…` is not the vendor's (review, round 2). */
 function marketplaceOwner(market: string): string | undefined {
+  if (/(^|[/\\])\.\.([/\\]|$)/.test(market)) return undefined;
   return (
-    /github\.com[:/]([\w.-]{1,100})\//i.exec(market)?.[1] ??
-    /^([\w.-]{1,100})\/[\w.-]{1,100}(?:[#@].*)?$/.exec(market)?.[1]
+    /^(?:https?:\/\/(?:www\.)?|git@|ssh:\/\/git@)?github\.com[:/]([\w.-]{1,100})\/[\w.-]{1,100}(?:\.git)?\/?(?:[#@].*)?$/i.exec(
+      market
+    )?.[1] ?? /^([\w.-]{1,100})\/[\w.-]{1,100}(?:[#@].*)?$/.exec(market)?.[1]
   );
 }
 
@@ -2197,10 +2276,11 @@ export function analyzeWorkflowPlugins(path: string, content: string, owner?: st
     if (!str(step.with?.['plugins']).trim()) continue;
     for (const m of str(step.with?.['plugin_marketplaces']).split(/[\s,]+/)) {
       const market = m.trim();
-      if (!market || VENDOR_MARKETPLACE_RE.test(market) || COMMIT_PIN_RE.test(market)) continue;
+      if (!market || COMMIT_PIN_RE.test(market)) continue;
       // The repository itself (`./.`) or a repository of the same owner is not a third party.
       if (/^\.{1,2}(\/|$)/.test(market)) continue;
       const mo = marketplaceOwner(market);
+      if (mo && mo.toLowerCase() === 'anthropics') continue;
       if (owner && mo && mo.toLowerCase() === owner.toLowerCase()) continue;
       if (seen.has(market)) continue;
       seen.add(market);
@@ -2228,13 +2308,27 @@ export function analyzeWorkflowPlugins(path: string, content: string, owner?: st
 // lowest level (advisory, tier alert).
 const ITEM_LIST_RE =
   /gh\s+(?:issue|pr)\s+(?:list|view)\b|gh\s+search\b|gh\s+api\s+[^\n]{0,80}\/(?:issues|pulls)\b|\blist_issues\b|\bsearch_issues\b|issues\.listForRepo|pulls\.list\b|\bopen (?:issues|pull requests)\b/i;
-// Triggers on a single item (an issue, a PR, a comment, a run): judged per item, not here.
-const ITEM_EVENT_TRIGGER_RE =
-  /^(issues|issue_comment|pull_request|pull_request_target|pull_request_review|pull_request_review_comment|discussion|discussion_comment|workflow_run)$/i;
 const WEB_READ_RE = /(^|["\s,])(WebFetch|WebSearch)(\(|\s|,|"|$)/;
 // A listing whose output is cut down to a field before the agent sees it (`| grep -o`,
 // `--jq '.[].number'`) carries no stranger text.
-const SANITIZED_LIST_RE = /\|\s*grep\s+-[a-zA-Z]*o|--jq\s+['"][^'"]*\.(?:number|url|id)\b/;
+// Only when every field it keeps is an identifier: `--jq '[.number, .title, .body]'` still
+// hands over the body (review, round 2).
+const SAFE_LIST_FIELD_RE =
+  /^(?:number|url|html_url|id|node_id|sha|state|createdat|updatedat|closedat|mergedat|headrefname|baserefname|isdraft|headrefoid)$/i;
+function sanitizedListing(t: string): boolean {
+  if (t.length > 50_000) return false;
+  if (/\|\s*grep\s+-[a-zA-Z]*o/.test(t)) return true;
+  const fieldsSafe = (expr: string, fieldRe: RegExp) => {
+    const fields = [...expr.matchAll(fieldRe)].map((m) => m[1]);
+    return fields.length > 0 && fields.every((f) => SAFE_LIST_FIELD_RE.test(f));
+  };
+  const jq = [...t.matchAll(/--jq[\s=]+(?:'([^']{0,500})'|"([^"]{0,500})")/g)].map(
+    (m) => m[1] ?? m[2]
+  );
+  if (jq.length) return jq.every((e) => fieldsSafe(e, /\.([A-Za-z_]\w{0,60})/g));
+  const json = [...t.matchAll(/--json[\s=]+['"]?([\w,]{1,500})/g)].map((m) => m[1]);
+  return json.length > 0 && json.every((e) => fieldsSafe(e, /([A-Za-z_]\w{0,60})/g));
+}
 
 export function analyzeTrustedReaders(
   path: string,
@@ -2264,8 +2358,11 @@ function analyzeTrustedReadersInner(path: string, content: string): CiFinding[] 
   // The founder's decision is about SCHEDULED agents: nobody chooses what they read. A run a
   // maintainer starts (dispatch, a label, a release) is the maintainer-triggered case (T.7).
   if (!reach.keys.some((k) => /^schedule$/i.test(k))) return [];
-  if (reach.keys.some((k) => ITEM_EVENT_TRIGGER_RE.test(k))) return [];
   for (const job of jobList(wf)) {
+    // A job that runs on schedule reads what nobody picked, whatever other (maintainer-only)
+    // triggers the file has; one pinned to an item event is judged per item (review, round 2).
+    const jobIf = parseIf(str(job.if));
+    if (jobIf !== null && !exprAllowsEvent(jobIf, 'schedule')) continue;
     const steps = job.steps ?? [];
     const agentIdx = steps.findIndex(isAgentStep);
     if (agentIdx < 0) continue;
@@ -2288,7 +2385,7 @@ function analyzeTrustedReadersInner(path: string, content: string): CiFinding[] 
     const reads: string[] = [];
     if (ITEM_READ_TOOL_RE.test(tools) || ITEM_LIST_RE.test(promptText))
       reads.push('reads open issues or pull requests');
-    else if (earlier.some((t) => ITEM_LIST_RE.test(t) && !SANITIZED_LIST_RE.test(t)))
+    else if (earlier.some((t) => ITEM_LIST_RE.test(t) && !sanitizedListing(t)))
       reads.push('an earlier step lists open issues or pull requests for it');
     if (WEB_READ_RE.test(tools)) reads.push('fetches third-party web content');
     if (!reads.length) continue;
@@ -2354,6 +2451,56 @@ const SAME_REPO_GATE_RE =
 const TRUSTED_AUTHOR_GATE_RE =
   /\b(?:pull_request|issue)\.user\.login\s*==|github\.event\.(?:pull_request|issue)\.author_association\s*==\s*['"](?:OWNER|MEMBER|COLLABORATOR)|contains\(\s*fromjson\(\s*['"][^'"]{0,200}\b(?:OWNER|MEMBER|COLLABORATOR)\b[^'"]{0,200}['"]\s*\)\s*,\s*github\.event\.(?:pull_request|issue)\.author_association/i;
 
+/** Does every way through this `if:` hold an atom matching `re`, unnegated and unchained? A way
+ *  that cannot run on any of `events` (when given) needs none. */
+function requiresAtom(src: string, re: RegExp, events?: string[]): boolean {
+  const x = parseIf(src);
+  if (!x) return false;
+  const req = (e: IfExpr): boolean => {
+    if (events?.length && events.every((ev) => !exprAllowsEvent(e, ev))) return true;
+    switch (e.k) {
+      case 'atom': {
+        const m = maskLiterals(e.t);
+        return re.test(m) && !CHAINED_COMPARE_RE.test(m);
+      }
+      case 'not':
+        return false;
+      case 'and':
+        return e.c.some(req);
+      case 'or':
+        return e.c.every(req);
+    }
+  };
+  return req(x);
+}
+
+/** The events on which these head checkouts resolve to the PR head, or null for any event. */
+function headRefEvents(heads: Step[]): string[] | null {
+  const evs = new Set<string>();
+  for (const st of heads) {
+    if (st.uses == null) return null; // a `run:` checkout (`gh pr checkout`) works on any event
+    const ref = str(st.with?.['ref']);
+    if (/^\s*\$\{\{\s*github\.event\.workflow_run\.[\w.]+\s*\}\}\s*$/.test(ref))
+      evs.add('workflow_run');
+    else if (/^\s*\$\{\{\s*github\.event\.pull_request\.[\w.]+\s*\}\}\s*$/.test(ref))
+      for (const e of [
+        'pull_request_target',
+        'pull_request',
+        'pull_request_review',
+        'pull_request_review_comment',
+      ])
+        evs.add(e);
+    else return null;
+  }
+  return evs.size ? [...evs] : null;
+}
+
+/** A codex step whose sandbox is read-only and not bypassed by its args. */
+function readOnlySandbox(st: Step): boolean {
+  const args = str(st.with?.['codex-args']) + ' ' + str(st.with?.['codex_args']);
+  return /^read-only$/i.test(str(st.with?.['sandbox'])) && !PERMISSION_BYPASS_RE.test(args);
+}
+
 /** Does every way through this `if:` require the PR's AUTHOR to be trusted? (An `||` branch
  *  that a trusted commenter alone satisfies lets a stranger's PR through.) */
 function requiresTrustedAuthor(src: string): boolean {
@@ -2362,7 +2509,11 @@ function requiresTrustedAuthor(src: string): boolean {
   const req = (e: IfExpr): boolean => {
     switch (e.k) {
       case 'atom':
-        return TRUSTED_AUTHOR_GATE_RE.test(e.t) && !NONWRITE_SET_RE.test(e.t);
+        return (
+          TRUSTED_AUTHOR_GATE_RE.test(e.t) &&
+          !NONWRITE_SET_RE.test(e.t) &&
+          !CHAINED_COMPARE_RE.test(maskLiterals(e.t))
+        );
       case 'not':
         return false;
       case 'and':
@@ -2416,10 +2567,19 @@ function analyzeForkCodeOnTrustInner(
     const agent = steps.filter(isAgentStep);
     if (!agent.length) continue;
     if (untrustedHeadCheckout(steps) !== 'root') continue;
-    // A read-only sandbox runs none of the fork's code (codex `sandbox: read-only`).
-    if (agent.every((st) => /^read-only$/i.test(str(st.with?.['sandbox'])))) continue;
-    const ifs = str(job.if) + ' ' + steps.map((st) => str(st.if)).join(' ');
-    if (SAME_REPO_GATE_RE.test(ifs)) continue;
+    // A read-only sandbox runs none of the fork's code (codex `sandbox: read-only`), unless the
+    // args switch the sandbox off (review, round 2).
+    if (agent.every(readOnlySandbox)) continue;
+    // "Same repository only", required on every way into the job, the agent steps, or the
+    // head checkouts. A test on an unrelated step guards nothing (review, round 2).
+    if (requiresAtom(str(job.if), SAME_REPO_GATE_RE)) continue;
+    if (agent.every((st) => requiresAtom(str(st.if), SAME_REPO_GATE_RE))) continue;
+    const heads = steps.filter((st) => untrustedHeadCheckout([st]) === 'root');
+    if (heads.length && heads.every((st) => requiresAtom(str(st.if), SAME_REPO_GATE_RE))) continue;
+    // A head ref read from one event's payload is empty on every other event (the default
+    // branch is checked out then): only the branches that run on that event need the test.
+    const evs = headRefEvents(heads);
+    if (evs && requiresAtom(str(job.if), SAME_REPO_GATE_RE, evs)) continue;
     // The code itself comes from a trusted author: the gate tests who wrote the PR, not who
     // started the run (an author allowlist, or the author's association with the repository).
     if (requiresTrustedAuthor(str(job.if))) continue;
