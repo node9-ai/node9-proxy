@@ -78,6 +78,25 @@ const EXTRA_RUNNER_RE = new RegExp(
     String.raw`(?: --?[A-Za-z][\w-]{0,30}){0,4} ?['"]?(?::\*| \*|\*)\)$`,
   'i'
 );
+// Founder decision (round-2 review, 2026-10-11): `find` (`-exec`) and `make -n` (`--eval
+// '$(shell …)'`) do run other programs, but the low-FP settings fixture grants both as everyday
+// tools. They are listed for review (CI-1.exec-escape-grant), never counted.
+const EXEC_ESCAPE_RE = new RegExp(
+  String.raw`^Bash\((?:[A-Z_][A-Z0-9_]{0,40}=\S{0,200} )*(?:/[\w./-]{0,80}/)?` +
+    String.raw`(find|make -n)` +
+    String.raw`(?: --?[A-Za-z][\w-]{0,30}){0,4} ?['"]?(?::\*| \*|\*)\)$`,
+  'i'
+);
+function execEscape(grant: string): boolean {
+  if (grant.length > OPEN_RUNNER_MAX) return false;
+  return EXEC_ESCAPE_RE.test(
+    grant
+      .replace(/^PowerShell(?=$|\()/, 'Bash')
+      .replace(/\s+/g, ' ')
+      .replace(/\(\s+/, '(')
+  );
+}
+
 // MCP tools whose job is to execute code or commands, pre-approved in `permissions.allow`.
 const MCP_EXEC_RE =
   /^mcp__ide__executeCode$|^mcp__[\w-]{1,80}__(?:execute|exec|run)_(?:code|command|shell|sql|query)$|^mcp__[\w-]{1,80}__(?:ctx_)?(?:batch_)?execute$|^mcp__[\w-]{1,80}__(?:bash|shell|terminal)$/;
@@ -333,6 +352,27 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
           ? deny.some((d) => /^Bash\b/.test(d))
           : deny.some((d) => /Bash|Write|Edit/.test(d)),
       }),
+    });
+  }
+  const escapes = allow.filter(execEscape);
+  if (escapes.length) {
+    const at = jsonValueIndex(content, escapes[0]);
+    findings.push({
+      ...(at >= 0 ? { line: lineAtIndex(content, at) } : {}),
+      check: 'CI-1',
+      rule: 'CI-1.exec-escape-grant',
+      dimension: 'toolRules',
+      severity: 'medium',
+      title: 'Committed agent config pre-approves a command that can run other programs',
+      file: path,
+      signals: [
+        `pre-approved: ${escapes
+          .slice(0, 5)
+          .map((e) => `\`${safeText(e, 80)}\``)
+          .join(', ')}`,
+        '`find -exec` and `make -n --eval` run other programs without a prompt',
+      ],
+      fix: 'Pre-approve the exact command you need (for example `Bash(find . -name *.ts)` or `Bash(make test)`), not every argument.',
     });
   }
 

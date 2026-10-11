@@ -1,4 +1,4 @@
-# A third-party build on an entity event keeps the write gate, like the official action.
+# A third-party build on an entity event: its own code decides whether any write gate exists.
 name: Agent
 on:
   issue_comment:

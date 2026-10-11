@@ -22,6 +22,7 @@ import {
   isSkillSupportFile,
   skillDirsOf,
 } from '../ci-check/instructions';
+import { tierOf } from '../ci-check/tier';
 import { scanTree } from '../ci-check';
 import { SEVERITY_RANK } from '../ci-check/types';
 import {
@@ -1641,7 +1642,10 @@ describe('CI-1 agent-config', () => {
       '.claude/settings.json',
       read('settings-scoped-allow-list.json')
     );
-    expect(findings).toEqual([]);
+    // Its `find` and `make -n` grants are listed for review, never counted (founder decision,
+    // round-2 review): nothing else is reported.
+    expect(findings.map((f) => f.rule)).toEqual(['CI-1.exec-escape-grant']);
+    expect(findings.map((f) => tierOf(f))).toEqual(['review']);
   });
 
   it('flags an UNPINNED hook as high', () => {

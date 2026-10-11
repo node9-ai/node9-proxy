@@ -67,6 +67,8 @@ function reviewQuestion(rule) {
     return 'Does this hook exist on every machine that runs it?';
   if (/hidden-chars/.test(rule))
     return 'Why does this script hold invisible characters? A list of them to detect is fine.';
+  if (/exec-escape/.test(rule))
+    return 'Does the agent need this command with any arguments, or only one exact form?';
   if (/unscanned/.test(rule))
     return 'node9 did not read this script (too large, or outside the folders it reads). What does it run?';
   return 'Is this an instruction the agent follows, or text for a person?';

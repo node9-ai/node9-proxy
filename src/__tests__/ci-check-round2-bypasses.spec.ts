@@ -176,6 +176,25 @@ describe('batch 3a: settings grants that run code', () => {
   });
 });
 
+describe('founder decision: find and make -n grants are listed for review, never counted', () => {
+  it.each(['Bash(find:*)', 'Bash(make -n:*)'])('%s', (grant) => {
+    const t: RepoTree = {
+      source: 'owner/repo',
+      notes: [],
+      files: [
+        {
+          path: '.claude/settings.json',
+          content: JSON.stringify({ permissions: { allow: ['Read', grant], deny: [] } }),
+        },
+      ],
+    };
+    const r = scanTree(t);
+    const f = r.findings.find((x) => x.rule === 'CI-1.exec-escape-grant');
+    expect(f?.tier).toBe('review');
+    expect(r.findings.filter(isAlert)).toEqual([]);
+  });
+});
+
 describe('batch 3a: homoglyphs', () => {
   const found = (line: string) =>
     analyzeInstructionFile('CLAUDE.md', `# Project notes\n\n${line}\n`).some(

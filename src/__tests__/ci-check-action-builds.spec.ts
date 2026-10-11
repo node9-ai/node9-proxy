@@ -29,10 +29,12 @@ describe('S.4a — a third-party build of claude-code-action', () => {
     expect(f!.signals.join(' ')).toMatch(/third-party build/i);
   });
 
-  it('on an entity event it keeps the write gate, like the official action: advisory at most', () => {
+  // Founder decision (round-2 review B21, 2026-10-11): the build's own code decides whether any
+  // gate exists, so only `anthropics/` is credited with the write gate, on every event.
+  it('on an entity event it is not credited with the official write gate: high', () => {
     const f = ci2('fork-issue-comment.yml');
-    expect(f).not.toBeNull(); // it IS an agent now
-    expect(SEVERITY_RANK[f!.severity]).toBeLessThanOrEqual(SEVERITY_RANK.advisory);
+    expect(f).not.toBeNull();
+    expect(SEVERITY_RANK[f!.severity]).toBeGreaterThanOrEqual(SEVERITY_RANK.high);
   });
 });
 

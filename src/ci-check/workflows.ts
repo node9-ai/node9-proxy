@@ -1430,11 +1430,14 @@ function hasImplicitActorGate(
   return agentSteps.some((s) => {
     const build = claudeActionBuild(s.uses);
     if (!build) return false;
-    // Entity events (issues, comments, PRs): every build checks write access.
+    // A third-party build's own code decides whether any gate exists (founder decision, round-2
+    // review B21, 2026-10-11): only the official action is credited, on every event.
+    if (!build.official) return false;
+    // Entity events (issues, comments, PRs): every official release checks write access.
     if (!workflowRun) return true;
     // S.4 (2026-10-09): on workflow_run the official action checks the actor only from
-    // v1.0.185 (#1590); a third-party build is not assumed to carry that change.
-    return build.official && workflowRunChecked(build.ref);
+    // v1.0.185 (#1590).
+    return workflowRunChecked(build.ref);
   });
 }
 
@@ -1901,17 +1904,20 @@ function analyzeWorkflowInner(
       "runs the checked-out head's own action (`uses: ./…`): the PR author's code runs with the job's secrets"
     );
   if (head === 'subdir') signals.push('checks out the untrusted PR head into an isolated subdir');
-  // S.4: which claude-code-action build runs, and whether it checks the actor on workflow_run.
+  // S.4: which claude-code-action build runs, and whether it checks the actor. A third-party
+  // build is never credited with the official write gate (B21), on any event.
+  const thirdParty = agentSteps
+    .map((st) => claudeActionBuild(st.uses))
+    .find((b) => b !== null && !b.official);
+  if (thirdParty && !implicitGate)
+    signals.push(
+      `third-party build of claude-code-action (\`${safeText(thirdParty.owner, 40)}\`): not assumed to check the actor's write access like the official action`
+    );
   if (workflowRunJobs.length) {
     const builds = workflowRunJobs
       .flatMap((j) => (j.steps ?? []).filter(isAgentStep))
       .map((st) => claudeActionBuild(st.uses))
       .filter((b) => b !== null);
-    const thirdParty = builds.find((b) => !b.official);
-    if (thirdParty)
-      signals.push(
-        `third-party build of claude-code-action (\`${safeText(thirdParty.owner, 40)}\`): on workflow_run it is not assumed to check the actor (the official action does from v1.0.185)`
-      );
     const old = builds.find((b) => b.official && !workflowRunChecked(b.ref));
     if (old)
       signals.push(
