@@ -46,6 +46,86 @@ function isZwLegitScript(cp: number | undefined): boolean {
 }
 const isAsciiWordChar = (ch: string | undefined): boolean => !!ch && /[A-Za-z0-9]/.test(ch);
 
+// T.10 (2026-10-11): Cyrillic and Greek letters that look like Latin ones, and the Latin letter
+// each one passes for. A word that mixes them with Latin letters is concealment; a word wholly
+// in one script (Russian or Greek prose), a unit (`μs`) or a line that names the trick (a
+// security document's example) is not.
+const LOOKALIKE: Record<string, string> = {
+  а: 'a',
+  е: 'e',
+  о: 'o',
+  р: 'p',
+  с: 'c',
+  у: 'y',
+  х: 'x',
+  і: 'i',
+  ј: 'j',
+  ѕ: 's',
+  ԁ: 'd',
+  ԛ: 'q',
+  ԝ: 'w',
+  А: 'A',
+  В: 'B',
+  Е: 'E',
+  К: 'K',
+  М: 'M',
+  Н: 'H',
+  О: 'O',
+  Р: 'P',
+  С: 'C',
+  Т: 'T',
+  Х: 'X',
+  І: 'I',
+  Ј: 'J',
+  Ѕ: 'S',
+  Ԍ: 'G',
+  Ԛ: 'Q',
+  Ԝ: 'W',
+  ο: 'o',
+  α: 'a',
+  ρ: 'p',
+  τ: 't',
+  ν: 'v',
+  υ: 'u',
+  κ: 'k',
+  χ: 'x',
+  ι: 'i',
+  Α: 'A',
+  Β: 'B',
+  Ε: 'E',
+  Η: 'H',
+  Ι: 'I',
+  Κ: 'K',
+  Μ: 'M',
+  Ν: 'N',
+  Ο: 'O',
+  Ρ: 'P',
+  Τ: 'T',
+  Χ: 'X',
+  Υ: 'Y',
+  Ζ: 'Z',
+};
+const MIXED_WORD_RE = /[A-Za-z\u0370-\u03ff\u0400-\u04ff\u0500-\u052f]{4,60}/g;
+const EXPLAINED_LINE_RE = /cyrillic|greek|homoglyph|confusable|look-?alike/i;
+const HOMOGLYPH_MAX_LINE = 2000;
+
+function homoglyphWord(content: string): { folded: string; count: number; line: number } | null {
+  const lines = content.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const text = lines[i];
+    if (text.length > HOMOGLYPH_MAX_LINE || EXPLAINED_LINE_RE.test(text)) continue;
+    for (const m of text.matchAll(MIXED_WORD_RE)) {
+      const w = m[0];
+      const latin = (w.match(/[A-Za-z]/g) ?? []).length;
+      const look = [...w].filter((c) => c in LOOKALIKE).length;
+      const other = [...w].length - latin - look;
+      if (latin >= 2 && look >= 1 && other === 0)
+        return { folded: [...w].map((c) => LOOKALIKE[c] ?? c).join(''), count: look, line: i + 1 };
+    }
+  }
+  return null;
+}
+
 /** D: count zero-width chars (U+200B/U+2060) that SPLIT a visible Latin word — the concealment
  *  shape. Skips a neighbor in a ZW-legit script (word-break typography) and whitespace/edge
  *  boundaries (formatting). */
@@ -498,6 +578,23 @@ const lineAt = (text: string, i: number): number | undefined =>
 export function analyzeInstructionFile(path: string, content: string): CiFinding[] {
   const findings: CiFinding[] = [];
   const decoded = decodeSuspiciousBase64(content);
+
+  // T.10: a Latin word spelled with Cyrillic or Greek look-alike letters.
+  const glyph = homoglyphWord(content);
+  if (glyph)
+    findings.push(
+      mk(
+        'CI-6.homoglyph',
+        'advisory',
+        'A word in an agent instruction file is spelled with look-alike letters',
+        [
+          `\`${glyph.folded}\` is written with ${glyph.count} Cyrillic or Greek look-alike letter(s): it reads the same to a reviewer, but a search, a replace or a policy check on the real word misses it`,
+        ],
+        'Spell the word with plain Latin letters, or explain on the same line why the look-alikes are there.',
+        path,
+        glyph.line
+      )
+    );
 
   // Tier 1 — structural concealment, classified by legitimacy (A/B/C/D).
   if (TAG_CHARS.test(content))

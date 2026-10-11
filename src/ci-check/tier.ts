@@ -19,7 +19,7 @@ const UNREAD_RULES = new Set([
   'CI-1.hook-script.unscanned-size',
   'CI-6.skill-script.unscanned-size',
 ]);
-const CONCEALMENT = new Set(['CI-6.unicode-tag-chars', 'CI-6.bidi-override']);
+const CONCEALMENT = new Set(['CI-6.unicode-tag-chars', 'CI-6.bidi-override', 'CI-6.homoglyph']);
 
 export function tierOf(f: Pick<CiFinding, 'rule' | 'severity'>): Tier {
   const { rule, severity } = f;
