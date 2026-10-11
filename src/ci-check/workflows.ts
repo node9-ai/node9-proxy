@@ -245,8 +245,12 @@ function triggerReach(wf: Workflow, raw: Record<string, unknown>) {
   const keys = triggerKeys(wf, raw);
   // T.5b: an `issues` trigger whose gate label an issue form applies to every new issue is
   // fired by whoever opens an issue from that form.
+  // A `workflow_run` after workflows that are all in the tree and that no stranger can start
+  // (push, schedule, dispatch) is not a stranger's run either (round-2 table check, 2026-10-11).
   const firable = keys.filter(
-    (k) => keyStrangerFirable(on, k) || (/^issues$/i.test(k) && testsAutoLabel(allIfText(wf)))
+    (k) =>
+      (keyStrangerFirable(on, k) && !(/^workflow_run$/i.test(k) && upstreamRunTrusted(wf, raw))) ||
+      (/^issues$/i.test(k) && testsAutoLabel(allIfText(wf)))
   );
   const untrusted = firable.length > 0;
   const reusable = !untrusted && keys.some((k) => /^workflow_call$/i.test(k));
@@ -407,13 +411,16 @@ const LOCAL_WORKFLOW_USES_RE = /^\s*\.\/\.github\/workflows\/([\w.-]{1,200}\.ya?
 export function localCallsOf(
   path: string,
   content: string,
-  autoLabels?: ReadonlySet<string>
+  autoLabels?: ReadonlySet<string>,
+  trustedRunSources?: ReadonlySet<string>
 ): { target: string; caller: LocalCaller }[] {
   AUTO_LABELS = autoLabels ?? new Set();
+  TRUSTED_RUN_SOURCES = trustedRunSources ?? new Set();
   try {
     return localCallsOfInner(path, content);
   } finally {
     AUTO_LABELS = new Set();
+    TRUSTED_RUN_SOURCES = new Set();
   }
 }
 
@@ -2394,13 +2401,16 @@ export function analyzeTrustedReaders(
   path: string,
   content: string,
   autoLabels?: ReadonlySet<string>,
-  callers?: LocalCaller[]
+  callers?: LocalCaller[],
+  trustedRunSources?: ReadonlySet<string>
 ): CiFinding[] {
   AUTO_LABELS = autoLabels ?? new Set();
+  TRUSTED_RUN_SOURCES = trustedRunSources ?? new Set();
   try {
     return analyzeTrustedReadersInner(path, content, callers);
   } finally {
     AUTO_LABELS = new Set();
+    TRUSTED_RUN_SOURCES = new Set();
   }
 }
 
@@ -2629,13 +2639,16 @@ export function analyzeForkCodeOnTrust(
   path: string,
   content: string,
   callers?: LocalCaller[],
-  autoLabels?: ReadonlySet<string>
+  autoLabels?: ReadonlySet<string>,
+  trustedRunSources?: ReadonlySet<string>
 ): CiFinding[] {
   AUTO_LABELS = autoLabels ?? new Set();
+  TRUSTED_RUN_SOURCES = trustedRunSources ?? new Set();
   try {
     return analyzeForkCodeOnTrustInner(path, content, callers);
   } finally {
     AUTO_LABELS = new Set();
+    TRUSTED_RUN_SOURCES = new Set();
   }
 }
 
