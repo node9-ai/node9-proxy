@@ -1,0 +1,70 @@
+# Advisories OSV-Scanner (and OpenSSF Scorecard) should not count.
+# Every entry is a dev-only dependency of the release tooling with no fix
+# available. Production dependencies are not listed here; `npm audit --omit=dev`
+# must stay clean. ignoreUntil forces a re-review: drop an entry as soon as
+# `npm audit` no longer reports it.
+
+[[IgnoredVulns]]
+id = "GHSA-2vr4-cq9g-pvrc"
+ignoreUntil = 2027-01-12
+reason = "ip-address. Dev-only release tooling: bundled inside the npm package that @semantic-release/npm depends on. Bundled deps cannot be overridden and the latest npm still ships this version. Never shipped in @node9/proxy and only runs in the release workflow."
+
+[[IgnoredVulns]]
+id = "GHSA-h3mg-xc3c-68pw"
+ignoreUntil = 2027-01-12
+reason = "ip-address. Dev-only release tooling: bundled inside the npm package that @semantic-release/npm depends on. Bundled deps cannot be overridden and the latest npm still ships this version. Never shipped in @node9/proxy and only runs in the release workflow."
+
+[[IgnoredVulns]]
+id = "GHSA-j6r3-76f7-8jcv"
+ignoreUntil = 2027-01-12
+reason = "ip-address. Dev-only release tooling: bundled inside the npm package that @semantic-release/npm depends on. Bundled deps cannot be overridden and the latest npm still ships this version. Never shipped in @node9/proxy and only runs in the release workflow."
+
+[[IgnoredVulns]]
+id = "GHSA-rpw4-54j3-4h4q"
+ignoreUntil = 2027-01-12
+reason = "ip-address. Dev-only release tooling: bundled inside the npm package that @semantic-release/npm depends on. Bundled deps cannot be overridden and the latest npm still ships this version. Never shipped in @node9/proxy and only runs in the release workflow."
+
+[[IgnoredVulns]]
+id = "GHSA-3wwx-pv8p-q78v"
+ignoreUntil = 2027-01-12
+reason = "undici. Dev-only release tooling: bundled inside the npm package that @semantic-release/npm depends on. Bundled deps cannot be overridden and the latest npm still ships this version. Never shipped in @node9/proxy and only runs in the release workflow."
+
+[[IgnoredVulns]]
+id = "GHSA-r53p-7pc4-xj5r"
+ignoreUntil = 2027-01-12
+reason = "undici. Dev-only release tooling: bundled inside the npm package that @semantic-release/npm depends on. Bundled deps cannot be overridden and the latest npm still ships this version. Never shipped in @node9/proxy and only runs in the release workflow."
+
+[[IgnoredVulns]]
+id = "GHSA-rfgv-xxqx-mfg5"
+ignoreUntil = 2027-01-12
+reason = "undici. Dev-only release tooling: bundled inside the npm package that @semantic-release/npm depends on. Bundled deps cannot be overridden and the latest npm still ships this version. Never shipped in @node9/proxy and only runs in the release workflow."
+
+[[IgnoredVulns]]
+id = "GHSA-6j4f-fj2g-mc7p"
+ignoreUntil = 2027-01-12
+reason = "brace-expansion. Dev-only release tooling: bundled inside the npm package that @semantic-release/npm depends on. Bundled deps cannot be overridden and the latest npm still ships this version. Never shipped in @node9/proxy and only runs in the release workflow."
+
+[[IgnoredVulns]]
+id = "GHSA-q2hr-2g5m-vwhr"
+ignoreUntil = 2027-01-12
+reason = "brace-expansion. Dev-only release tooling: bundled inside the npm package that @semantic-release/npm depends on. Bundled deps cannot be overridden and the latest npm still ships this version. Never shipped in @node9/proxy and only runs in the release workflow."
+
+[[IgnoredVulns]]
+id = "GHSA-qhr7-859c-m2p7"
+ignoreUntil = 2027-01-12
+reason = "brace-expansion. Dev-only release tooling: bundled inside the npm package that @semantic-release/npm depends on. Bundled deps cannot be overridden and the latest npm still ships this version. Never shipped in @node9/proxy and only runs in the release workflow."
+
+[[IgnoredVulns]]
+id = "GHSA-ch52-4w7c-c8xp"
+ignoreUntil = 2027-01-12
+reason = "http-cache-semantics. Dev-only release tooling: bundled inside the npm package that @semantic-release/npm depends on. Bundled deps cannot be overridden and the latest npm still ships this version. Never shipped in @node9/proxy and only runs in the release workflow."
+
+[[IgnoredVulns]]
+id = "GHSA-rj75-hqrm-r3gf"
+ignoreUntil = 2027-01-12
+reason = "postcss-selector-parser. Dev-only release tooling: bundled inside the npm package that @semantic-release/npm depends on. Bundled deps cannot be overridden and the latest npm still ships this version. Never shipped in @node9/proxy and only runs in the release workflow."
+
+[[IgnoredVulns]]
+id = "GHSA-vfj7-8cjw-p6xm"
+ignoreUntil = 2027-01-12
+reason = "braces. Dev-only release tooling: reached through micromatch in @semantic-release/commit-analyzer, which only matches commit messages from this repository. No fixed braces release exists yet. Never shipped in @node9/proxy."
