@@ -2,12 +2,20 @@
 # Action AS IT EXISTS IN THIS COMMIT (`uses: ./`) rather than a released pin — a
 # fix on dev reaches this gate immediately, and nothing can go stale. Gates
 # merges at fail-on: high (the job is a required status check on main).
+#
+# Pushes to main also send the scan to node9's own workspace dashboard. Only the
+# `report` job gets the upload key and `id-token: write`; pull request jobs,
+# including ones from forks, never see the key.
 name: node9 agent-security
-on: pull_request
+on:
+  pull_request:
+  push:
+    branches: [main]
 permissions:
   contents: read
 jobs:
   scan:
+    if: github.event_name == 'pull_request'
     permissions:
       contents: read
       pull-requests: write # the sticky PR comment
@@ -19,3 +27,14 @@ jobs:
       - uses: ./
         with:
           fail-on: high
+  report:
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      id-token: write # proves to node9 which repository, workflow and commit ran
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./
+        with:
+          node9-upload-key: ${{ secrets.NODE9_REPO_UPLOAD_KEY }}
