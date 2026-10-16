@@ -532,6 +532,12 @@ async function _authorizeHeadlessCore(
   // tier 3, no ruleName) from being resolved by any non-human channel.
   let hardBlockDowngraded = false;
 
+  // The argument scan (bounded decoding views) is the most expensive check on
+  // the hot path. Run it at most once per call and hand the result to the
+  // engine and every guard that needs it.
+  let argScan: DlpMatch | null | undefined;
+  const argumentScan = (): DlpMatch | null => (argScan ??= scanArgumentSecrets(args));
+
   // Resolve once with this request's cwd/config. This floor cannot be skipped
   // by the taint branch, ignored Read, or a trusted-host pipeline.
   let fileAccess: PreparedFileAccess;
@@ -545,9 +551,20 @@ async function _authorizeHeadlessCore(
           fileAccess,
           catalogSettingsFromConfig(config.settings, config.policy)
         );
-  } catch {
+  } catch (error) {
     // The hook's outer catch fails open. An operand this analysis cannot
     // evaluate is held for approval instead; legacy path DLP stays in force.
+    // The message never carries the operand (picomatch reports only lengths).
+    try {
+      appendToLog(HOOK_DEBUG_LOG, {
+        ts: new Date().toISOString(),
+        check: 'file-protection',
+        tool: toolName,
+        message: String((error as Error)?.message ?? error).slice(0, 200),
+      });
+    } catch {
+      /* Logging must not turn a held call into a failure. */
+    }
     fileAccess = { cwd: options?.cwd, homeDirs: [], accesses: [], handledPaths: new Set() };
     fileFinding = isManual ? null : incompleteFileVerdict();
   }
@@ -567,6 +584,7 @@ async function _authorizeHeadlessCore(
       fileAccess,
       config,
       skipIgnoredFastPath,
+      argumentScan: argScan,
     });
   if (fileFinding) {
     meta = { ...meta, ruleName: fileFinding.ruleName };
@@ -600,7 +618,7 @@ async function _authorizeHeadlessCore(
         ruleDescription: fileFinding.ruleDescription,
         // Only when the arguments carry no credential: the agent must not be
         // told that nothing was exposed while the content holds a key.
-        ...(!scanArgumentSecrets(args) && {
+        ...(!argumentScan() && {
           blockKind: 'protected-path' as const,
           blockedPath: safePathForDisplay(fileFinding.path),
         }),
@@ -812,7 +830,7 @@ async function _authorizeHeadlessCore(
         ? scanFilePath(filePath, options?.cwd, {
             systemAccessHandled: !isManual && fileAccess.handledPaths.has(filePath),
           })
-        : null) ?? scanArgumentSecrets(args);
+        : null) ?? argumentScan();
     if (dlpMatch) {
       // Attribution and hashing, ONCE, for both paths below: every row written
       // for this call -- the block row, the flagged row, and every outcome row
@@ -870,7 +888,7 @@ async function _authorizeHeadlessCore(
           // so a Write of a real key into .env would otherwise be told "nothing
           // was exposed" (/code-review).
           ...(dlpMatch.patternName === SENSITIVE_PATH_PATTERN &&
-            !scanArgumentSecrets(args) && {
+            !argumentScan() && {
               blockKind: 'protected-path' as const,
               blockedPath: safePathForDisplay(dlpMatch.redactedSample),
             }),

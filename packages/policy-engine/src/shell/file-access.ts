@@ -36,12 +36,40 @@ interface Piece {
 interface State {
   cwd: string[];
   vars: Map<string, string[] | null>;
+  /**
+   * Where the shell is if the statement just walked succeeded. Only a `cd` sets
+   * it; the next command of a pure `&&` chain runs there. Everywhere else the
+   * union in `cwd` applies, because a `cd` to a missing directory fails and
+   * leaves the shell where it was.
+   */
+  onSuccess?: string[];
 }
 const MAX_ALTERNATIVES = 64;
 const MAX_DEPTH = 64;
 const MAX_PAYLOAD_DEPTH = 24;
 const unique = (a: string[]): string[] => [...new Set(a)].slice(0, MAX_ALTERNATIVES);
 const clone = (s: State): State => ({ cwd: [...s.cwd], vars: new Map(s.vars) });
+
+/**
+ * bash executes the complete statements before a syntax error and stops at
+ * it. Parse the longest prefix that ends before the reported error line, so a
+ * heredoc body or multi-line string is never read as separate commands.
+ */
+function runnablePrefix(command: string): any | null {
+  let text = command;
+  for (let attempt = 0; attempt < 32; attempt++) {
+    try {
+      return syntax.NewParser().Parse(text, '');
+    } catch (error: any) {
+      const message = String(typeof error?.Error === 'function' ? error.Error() : error?.message);
+      const line = Number(/^(\d+):/.exec(message)?.[1]);
+      const lines = text.split('\n');
+      if (!line || line <= 1 || line > lines.length) return null;
+      text = lines.slice(0, line - 1).join('\n');
+    }
+  }
+  return null;
+}
 const base = (s: string | null): string => (s ?? '').replace(/\/+$/, '').split('/').pop() ?? '';
 const quoteGlob = (s: string): string => s.replace(/[\\*?\[\]{}()!+@]/g, '\\$&');
 const asWord = (p: Piece): Word => ({ value: p.value, ...(p.glob ? { pattern: p.pattern } : {}) });
@@ -63,6 +91,7 @@ const WRITES = new Set(['>x', '>>x', '>|x', '&>x', '&>>x', '<>x'].map(opOf));
 const READS = new Set(['<x', '<>x'].map(opOf));
 /** `>&word` with a non-numeric word is `&>word` in bash. */
 const DUP_OUT = opOf('>&x');
+const HERE_STRING = opOf('<<<x');
 const AND = parseShared('a && b').Stmts[0].Cmd.Op;
 const OR = parseShared('a || b').Stmts[0].Cmd.Op;
 /** `${x:-d}` `${x-d}` `${x:=d}` `${x=d}`: the default is the value when x is unset. */
@@ -140,9 +169,12 @@ function wordValues(word: any, state: State): Word[] {
     return { out, dynamic: false };
   };
   const { out, dynamic } = expand(word?.Parts ?? [], false);
-  return out.map((piece) =>
-    dynamic ? { value: piece.value, pattern: piece.pattern + '*', dynamic: true } : asWord(piece)
-  );
+  if (!dynamic) return out.map(asWord);
+  // Without a literal prefix the operand could be anything relative to the
+  // working directory; claiming `cwd/*` would block `rm -rf $DIR` run from `/`.
+  return out
+    .filter((piece) => piece.value !== '')
+    .map((piece) => ({ value: piece.value, pattern: piece.pattern + '*', dynamic: true }));
 }
 
 /** No verdict cache: cwd, homes, assignments, and host state belong to each call. */
@@ -219,8 +251,9 @@ export function collectShellFileAccesses(
     const args = tokens.slice(head + 1);
     const strings = args.map((w) => w?.value ?? '');
     if (name === 'cd' || name === 'pushd') {
-      // `cd -` returns to a directory this analysis does not track.
-      if (args.some((w) => w?.value === '-')) return;
+      // `cd -` returns to a directory this analysis does not track, and an
+      // unresolvable target (`cd $DIR`) could be anywhere. Neither is a bare `cd`.
+      if (args.some((w) => w === null || w.value === '-' || w.dynamic)) return;
       const home = nested.vars.get('HOME')?.[0] ?? '~';
       const target = args.find((w) => w && !w.value.startsWith('-')) ?? { value: home };
       if (!target.value || target.pattern || target.dynamic) return;
@@ -228,12 +261,14 @@ export function collectShellFileAccesses(
         target.value === '~' || target.value.startsWith('~/')
           ? home + target.value.slice(1)
           : target.value;
-      // After an absolute cd the shell is in exactly one place. A relative
-      // target keeps every prior candidate.
-      state.cwd =
+      // The cd may fail (a missing directory), so every prior directory stays
+      // possible. Only a following `&&` command may assume it succeeded.
+      const next =
         expanded.startsWith('/') || expanded.startsWith('~')
           ? [expanded]
-          : unique([...state.cwd, ...state.cwd.map((cwd) => `${cwd}/${expanded}`)]);
+          : state.cwd.map((cwd) => `${cwd}/${expanded}`);
+      state.cwd = unique([...state.cwd, ...next]);
+      state.onSuccess = unique(next);
       return;
     }
     if (name === 'su' || name === 'runuser') {
@@ -465,13 +500,28 @@ export function collectShellFileAccesses(
     let nameFilter: string | null = null;
     let pathFilter: string | null = null;
     let shallow = false;
-    for (let i = head + 1; i < tokens.length; i++) {
+    // Narrow only a plain conjunction of tests: negation, alternation and
+    // grouping can make a later -name exclude rather than select.
+    const end = words.findIndex(
+      (w, k) => k > head && ['-exec', '-execdir', '-ok', '-okdir'].includes(w ?? '')
+    );
+    const expression = words.slice(head + 1, end < 0 ? words.length : end);
+    const plain = !expression.some((w) =>
+      ['!', '-not', '-o', '-or', '(', ')', ','].includes(w ?? '')
+    );
+    for (let i = head + 1; plain && i < tokens.length; i++) {
       const next = tokens[i + 1];
       if (!next || next.dynamic) continue;
       const flag = words[i];
       if ((flag === '-name' || flag === '-iname') && !next.value.includes('/'))
         nameFilter = next.value;
-      if (flag === '-path' || flag === '-ipath' || flag === '-wholename') pathFilter = next.value;
+      // find matches -path against the whole path; only an absolute pattern
+      // can stand in for the start points.
+      if (
+        (flag === '-path' || flag === '-ipath' || flag === '-wholename') &&
+        next.value.startsWith('/')
+      )
+        pathFilter = next.value;
       if (flag === '-maxdepth' && /^[01]$/.test(next.value)) shallow = true;
     }
     const reach = (start: string): string => {
@@ -526,18 +576,44 @@ export function collectShellFileAccesses(
     }
     for (const tokens of alternatives) fromWords(tokens, state, nested, depth);
   }
-  /** `bash <<EOF ... EOF`: a shell with no script operand runs the heredoc. */
-  function heredocScript(stmt: any, cmd: any, state: State, depth: number): void {
-    const hdoc = (stmt.Redirs ?? []).find((r: any) => r.Hdoc);
-    if (!hdoc || syntax.NodeType(cmd) !== 'CallExpr') return;
+  /** A shell with no script operand reads its program from stdin. */
+  function readsScriptFromStdin(stmt: any): boolean {
+    const cmd = stmt?.Cmd;
+    if (!cmd || syntax.NodeType(cmd) !== 'CallExpr') return false;
     const words = (cmd.Args ?? []).map((a: any) => resolveWordLiteral(a));
     const head = unwrapCommandHead(words);
-    if (!SHELL_INTERPRETERS.has(base(words[head])) || !shellConsumesPipe(words.slice(head + 1)))
-      return;
-    nestedPayload(resolveWordLiteral(hdoc.Hdoc), clone(state), depth);
+    return SHELL_INTERPRETERS.has(base(words[head])) && shellConsumesPipe(words.slice(head + 1));
+  }
+  /** The literal text a statement feeds to stdin: a heredoc or a herestring. */
+  function stdinText(stmt: any): string | null {
+    for (const redir of stmt?.Redirs ?? []) {
+      if (redir.Hdoc) return resolveWordLiteral(redir.Hdoc);
+      if (redir.Op === HERE_STRING) return resolveWordLiteral(redir.Word);
+    }
+    return null;
+  }
+  /** The literal text a pipeline stage writes: `cat <<EOF`, `echo ...`, `printf '...'`. */
+  function producedText(stmt: any): string | null {
+    const cmd = stmt?.Cmd;
+    if (!cmd || syntax.NodeType(cmd) !== 'CallExpr') return null;
+    const words: (string | null)[] = (cmd.Args ?? []).map((a: any) => resolveWordLiteral(a));
+    if (words.some((w) => w === null)) return null;
+    const head = unwrapCommandHead(words);
+    const name = base(words[head]);
+    const rest = words.slice(head + 1) as string[];
+    if (name === 'cat' && rest.length === 0) return stdinText(stmt);
+    if (name === 'echo') return rest.filter((w) => !/^-[neE]+$/.test(w)).join(' ');
+    if (name === 'printf' && rest.length === 1 && !rest[0].includes('%'))
+      return rest[0].replace(/\\n/g, '\n');
+    return null;
+  }
+  /** `bash <<EOF`, `bash <<< '...'`: the shell runs its stdin text. */
+  function stdinScript(stmt: any, state: State, depth: number): void {
+    if (readsScriptFromStdin(stmt)) nestedPayload(stdinText(stmt), clone(state), depth);
   }
   function statement(stmt: any, state: State, depth: number): void {
     if (!stmt || depth > MAX_DEPTH) return;
+    state.onSuccess = undefined;
     if (stmt.Background) state = clone(state);
     for (const redir of stmt.Redirs ?? []) {
       substitutions(redir.Word, state, depth);
@@ -552,7 +628,7 @@ export function collectShellFileAccesses(
     }
     const cmd = stmt.Cmd;
     if (!cmd) return;
-    heredocScript(stmt, cmd, state, depth);
+    stdinScript(stmt, state, depth);
     switch (syntax.NodeType(cmd)) {
       case 'CallExpr':
         call(cmd, state, depth);
@@ -582,15 +658,29 @@ export function collectShellFileAccesses(
             break;
           }
         }
-        // In an && / || list each command sees the state its predecessors
-        // produced. The list may stop early, so the state from before it is
-        // retained for whatever follows. Pipeline stages run in subshells.
-        const before = clone(state);
-        for (const { op, part } of segments) {
-          if (op === AND || op === OR) statement(part, state, depth + 1);
-          else statement(part, clone(state), depth + 1);
-        }
-        merge(state, before);
+        // A list may stop at any command, and a `cd` in it may fail, so the
+        // state after the list is the union of every state seen in it. Inside
+        // a pure `&&` chain a command runs only if its predecessor succeeded,
+        // so it may use the predecessor's onSuccess directory. A `||` command
+        // runs after a failure anywhere before it. Pipeline stages are
+        // subshells; a literal script piped into a shell is parsed as code.
+        const seen = clone(state);
+        let pureAnd = true;
+        segments.forEach(({ op, part }, i) => {
+          if (op === AND || op === OR) {
+            if (i > 0 && op === AND && pureAnd && state.onSuccess) state.cwd = state.onSuccess;
+            if (i > 0 && op === OR) merge(state, seen);
+            statement(part, state, depth + 1);
+          } else {
+            statement(part, clone(state), depth + 1);
+            if (i > 0 && readsScriptFromStdin(part))
+              nestedPayload(producedText(segments[i - 1].part), clone(state), depth);
+          }
+          if (i > 0 && op !== AND) pureAnd = false;
+          merge(seen, state);
+        });
+        merge(state, seen);
+        state.onSuccess = undefined;
         break;
       }
       case 'Block':
@@ -656,14 +746,7 @@ export function collectShellFileAccesses(
     for (const stmt of stmts ?? []) statement(stmt, state, depth);
   }
   const parsed = parseShared(command);
-  if (typeof parsed !== 'symbol') statements(parsed.Stmts, initial, 0);
-  else {
-    // bash runs the lines before a syntax error. Inspect each line that
-    // parses on its own rather than treating the whole command as opaque.
-    for (const line of command.split('\n')) {
-      const f = parseShared(line);
-      if (typeof f !== 'symbol') statements(f.Stmts ?? [], initial, 0);
-    }
-  }
+  const program = typeof parsed !== 'symbol' ? parsed : runnablePrefix(command);
+  if (program) statements(program.Stmts ?? [], initial, 0);
   return out;
 }

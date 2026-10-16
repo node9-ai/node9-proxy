@@ -68,13 +68,13 @@ describe('bounded argument secret inspection', () => {
   it('reports cycles and skipped structure as incomplete rather than clean', () => {
     const cyclic: Record<string, unknown> = {};
     cyclic.self = cyclic;
-    for (const args of [cyclic, { text: ' '.repeat(1_100_000) }, Array(20_000).fill('small')]) {
+    for (const args of [cyclic, { text: ' '.repeat(5_000_000) }, Array(20_000).fill('small')]) {
       expect(inspectArgumentSecrets(args).coverage).toBe('incomplete');
       expect(scanArgumentSecrets(args)?.severity).toBe('review');
     }
   });
   it('keeps a detected block when another field is incomplete', () => {
-    expect(scanArgumentSecrets({ token, large: ' '.repeat(1_100_000) })?.severity).toBe('block');
+    expect(scanArgumentSecrets({ large: ' '.repeat(5_000_000), token })?.severity).toBe('block');
   });
   it('enforces decoding depth and leaves no clean result on an uninspected layer', () => {
     let value = token;

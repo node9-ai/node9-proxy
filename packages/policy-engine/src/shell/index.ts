@@ -438,6 +438,7 @@ export function detectDangerousShellExec(command: string): 'block' | 'review' | 
   try {
     const f = sharedParser.Parse(command, 'cmd');
     let result: 'block' | 'review' | null = null;
+    const assigned = assignedNames(f);
 
     syntax.Walk(f, (node: unknown) => {
       if (!node || result === 'block') return false; // short-circuit once blocked
@@ -485,7 +486,11 @@ export function detectDangerousShellExec(command: string): 'block' | 'review' | 
       const lookup =
         headWords[0]?.toLowerCase() === 'command' &&
         headWords.slice(1).some((w) => w === '-v' || w === '-V');
-      if (!lookup && (opaqueExecutable(args[0]) || opaqueExecutable(args[head]))) result = 'review';
+      if (
+        !lookup &&
+        (opaqueExecutable(args[0], assigned) || opaqueExecutable(args[head], assigned))
+      )
+        result = 'review';
 
       // Resolve the command name (first arg, single Lit)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -553,14 +558,48 @@ interface ExecutablePart {
   value: string;
   quoted: boolean;
 }
-function executableParts(word: any, quoted = false): ExecutablePart[] {
+/**
+ * Names the command itself assigns: `X=...`, `export/declare/local X=...`, a
+ * `for X in` loop, or a reader such as `read X`. A default expansion of such a
+ * name does not tell us the program; the command chose it at run time.
+ */
+const VARIABLE_READERS = new Set([
+  'read',
+  'mapfile',
+  'readarray',
+  'getopts',
+  'export',
+  'declare',
+  'typeset',
+  'local',
+  'readonly',
+  'printf',
+]);
+function assignedNames(f: any): Set<string> {
+  const names = new Set<string>();
+  syntax.Walk(f, (node: any) => {
+    if (!node) return false;
+    const kind = syntax.NodeType(node);
+    if (kind === 'Assign' && node.Name?.Value) names.add(node.Name.Value);
+    if (kind === 'ForClause' && node.Loop?.Name?.Value) names.add(node.Loop.Name.Value);
+    if (kind === 'CallExpr') {
+      const words = (node.Args ?? []).map((a: any) => resolveWordLiteral(a));
+      if (VARIABLE_READERS.has(words[0] ?? ''))
+        for (const w of words.slice(1)) if (w && /^[A-Za-z_]\w*$/.test(w)) names.add(w);
+    }
+    return true;
+  });
+  return names;
+}
+
+function executableParts(word: any, assigned: Set<string>, quoted = false): ExecutablePart[] {
   return (word?.Parts ?? []).flatMap((part: any): ExecutablePart[] => {
     const kind = syntax.NodeType(part);
-    if (kind === 'DblQuoted') return executableParts(part, true);
+    if (kind === 'DblQuoted') return executableParts(part, assigned, true);
     if (kind === 'Lit') return [{ kind: 'Lit', value: part.Value ?? '', quoted }];
     if (kind === 'SglQuoted')
       return [{ kind: part.Dollar ? 'Dynamic' : 'Lit', value: part.Value ?? '', quoted: true }];
-    if (kind === 'ParamExp' && isDefaultExpansion(part)) {
+    if (kind === 'ParamExp' && isDefaultExpansion(part) && !assigned.has(part.Param?.Value)) {
       const fallback = part.Exp.Word ? resolveWordLiteral(part.Exp.Word) : '';
       if (fallback !== null) return [{ kind: 'Lit', value: fallback, quoted }];
     }
@@ -576,8 +615,8 @@ function executableParts(word: any, quoted = false): ExecutablePart[] {
 // `$HOME/.cargo/bin/cargo` and `"$(npm bin)/eslint"` name the program plainly
 // while `$(printf rm)`, `$CMD` and `/bin/{rm,}` do not. Expansions in ordinary
 // arguments, quoted documentation, and script stdin never trigger it.
-function opaqueExecutable(word: any): boolean {
-  const parts = executableParts(word);
+function opaqueExecutable(word: any, assigned: Set<string>): boolean {
+  const parts = executableParts(word, assigned);
   let lastSlash = -1;
   parts.forEach((p, i) => {
     if (p.kind === 'Lit' && p.value.includes('/')) lastSlash = i;

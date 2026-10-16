@@ -16,6 +16,10 @@ describe('runtime-generated shell execution', () => {
     'echo "echo hi" | bash -',
     '${X}ash -c cmd',
     './scripts/${TARGET}.sh',
+    // A default names the program only when the command never sets the variable.
+    'X=bash; ${X:-true} -c id',
+    'read X; ${X:-ls} /data',
+    'for X in rm; do ${X:-ls} -rf /data; done',
   ];
   it.each(commands)('requires inspection of runtime code: %s', (command) => {
     expect(detectDangerousShellExec(command)).toBe('review');

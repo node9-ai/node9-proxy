@@ -6,7 +6,7 @@ import type { ToolInspection } from '../shell/tool-input';
 // Engine purity: no fs/path/os/process imports here. Anything that needs
 // to touch the host system arrives via the hooks parameter.
 
-import type { SmartRule } from '../types';
+import type { SmartRule, DlpMatch } from '../types';
 import {
   collectFileAccesses,
   evaluateProtectedFileAccess,
@@ -118,6 +118,12 @@ export interface PolicyContext extends FileAccessContext {
    * Read/Grep/Glob. Opt-in per call; never set on the hot path.
    */
   skipIgnoredFastPath?: boolean;
+  /**
+   * The host's own `scanArgumentSecrets(args)` result for these exact
+   * arguments, so the gate and the engine scan once per call. Set only by
+   * trusted host code; absent means the engine scans.
+   */
+  argumentScan?: DlpMatch | null;
 }
 
 export type ProvenanceTrust = 'system' | 'managed' | 'user' | 'suspect' | 'unknown';
@@ -415,7 +421,12 @@ export async function evaluatePolicy(
   let dlpVerdict: PolicyVerdict | undefined;
   const wouldBeIgnored = matchesPattern(toolName, config.policy.ignoredTools);
   if (config.policy.dlp.enabled && (!wouldBeIgnored || config.policy.dlp.scanIgnoredTools)) {
-    const dlpMatch = args !== undefined ? scanArgumentSecrets(args) : null;
+    const dlpMatch =
+      args === undefined
+        ? null
+        : context.argumentScan !== undefined
+          ? context.argumentScan
+          : scanArgumentSecrets(args);
     if (dlpMatch) {
       dlpVerdict = {
         // reviewAction:'block' (inline-ask v2): the admin upgraded

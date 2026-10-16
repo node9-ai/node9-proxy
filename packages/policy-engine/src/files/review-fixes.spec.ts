@@ -136,20 +136,61 @@ describe('shell globs follow bash, not find', () => {
 });
 
 describe('directory tracking', () => {
-  it.each([
-    'cd /etc && cd /tmp && rm passwd',
-    'cd /etc; cd /tmp; rm passwd',
-    'pushd /etc; cd /tmp; rm passwd',
-  ])('drops a directory the shell has provably left: %s', (command) => {
-    expect(verdict(command)).toBeNull();
+  it('uses the new directory only for the next command of a pure && chain', () => {
+    expect(verdict('cd /etc && cd /tmp && rm passwd')).toBeNull();
   });
   it.each([
     'cd /etc && rm passwd',
     'cd /etc && true; rm passwd',
     'cd /etc || true; rm passwd',
     'cd etc && rm passwd',
+    // A cd to a missing directory fails and leaves the shell where it was.
+    'cd /etc; cd /tmp; rm passwd',
+    'cd /etc; cd /nonexistent; rm passwd',
+    'cd /etc && cd /nonexistent || rm passwd',
+    'cd /etc && cd /nonexistent 2>/dev/null; rm passwd',
+    'cd /etc || cd /tmp && rm passwd',
+    'cd /etc; cd /tmp; cd -; rm passwd',
+    'pushd /etc; cd /tmp; rm passwd',
   ])('keeps a directory the shell may be in: %s', (command) => {
     expect(verdict(command, { cwd: '/', homeDirs: ['/home/u'] })).toBe('block');
+  });
+});
+
+describe('second review round', () => {
+  it.each([
+    'cat <<EOF | bash\nrm /etc/passwd\nEOF',
+    "bash <<< 'rm /etc/passwd'",
+    "echo 'rm /etc/passwd' | bash",
+    "printf 'rm /etc/passwd' | sudo sh",
+  ])('parses a literal script fed to a shell: %s', (command) => {
+    expect(verdict(command)).toBe('block');
+  });
+  it.each([
+    "echo 'rm /etc/passwd'",
+    'cat <<EOF | grep x\nrm /etc/passwd\nEOF',
+    "bash script.sh <<< 'rm /etc/passwd'",
+  ])('treats text that no shell runs as data: %s', (command) => {
+    expect(verdict(command)).toBeNull();
+  });
+  it.each([
+    "find / -path '*/etc/passwd' -delete",
+    'find /etc \\( -name x -o -name passwd \\) -delete',
+    'find /etc \\( -name passwd -o -name x \\) -delete',
+    'find /etc ! -name x -delete',
+    'find /etc -not -name x -exec rm {} \\;',
+  ])('does not let a find expression narrow away a protected file: %s', (command) => {
+    expect(verdict(command)).toBe('block');
+  });
+  it('inspects only the statements before a syntax error', () => {
+    expect(verdict("cat > notes.md <<'EOF'\nrm -rf /etc/pam.d\nEOF\nfoo() {")).toBeNull();
+    expect(verdict('echo x >> /etc/sudoers\n}')).toBe('block');
+    expect(verdict('echo x >> /etc/sudoers; }')).toBeNull();
+  });
+  it('needs a literal prefix before matching a dynamic operand', () => {
+    expect(verdict('rm -rf $BUILD_DIR', { cwd: '/', homeDirs: ['/home/u'] })).toBeNull();
+    expect(verdict('echo x > $LOG', { cwd: '/etc', homeDirs: ['/home/u'] })).toBeNull();
+    expect(verdict('dd of=/etc/pass$X')).toBe('block');
   });
 });
 

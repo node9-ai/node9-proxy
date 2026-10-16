@@ -56,10 +56,19 @@ describe('ordinary documents complete their inspection', () => {
         '}'.repeat(ARGUMENT_SCAN_LIMITS.maxDepth + 2)
     );
     expect(scanArgumentSecrets(deep)?.patternName).toBe('Argument inspection incomplete');
-    expect(
-      scanArgumentSecrets({ content: 'x'.repeat(ARGUMENT_SCAN_LIMITS.maxSourceBytes + 1) })
-        ?.patternName
-    ).toBe('Argument inspection incomplete');
+    const beyondTail =
+      ARGUMENT_SCAN_LIMITS.maxTailBytes + 2 * ARGUMENT_SCAN_LIMITS.maxStringCharacters;
+    expect(scanArgumentSecrets({ content: 'x'.repeat(beyondTail) })?.patternName).toBe(
+      'Argument inspection incomplete'
+    );
+  });
+  it('still blocks a credential placed after a padding field', () => {
+    for (const pad of [1_100_000, 5_000_000])
+      expect(scanArgumentSecrets({ pad: 'x'.repeat(pad), token })?.severity).toBe('block');
+    const fields = Object.fromEntries(
+      Array.from({ length: 9 }, (_, i) => [`p${i}`, 'x'.repeat(200_000)])
+    );
+    expect(scanArgumentSecrets({ ...fields, token })?.severity).toBe('block');
   });
 });
 

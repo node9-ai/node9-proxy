@@ -9,7 +9,10 @@ export const ARGUMENT_SCAN_LIMITS = {
   maxStringCharacters: 100_000,
   /** Windows overlap by this much so a token on a window edge is still seen whole. */
   windowOverlap: 4_096,
+  /** Budget for the first window of every string, so one large field cannot starve the rest. */
   maxSourceBytes: 1_048_576,
+  /** Separate budget for the text beyond each string's first window. */
+  maxTailBytes: 4_194_304,
   maxJsonCharacters: 10_000,
 } as const;
 
@@ -31,6 +34,7 @@ export function inspectArgumentSecrets(args: unknown): ArgumentInspectionResult 
   const ancestors = new Set<object>();
   let nodes = 0;
   let sourceBytes = 0;
+  let tailBytes = 0;
   let best: DlpMatch | null = null;
   const accept = (match: DlpMatch | null) => {
     if (match && (!best || (best.severity !== 'block' && match.severity === 'block'))) best = match;
@@ -72,34 +76,44 @@ export function inspectArgumentSecrets(args: unknown): ArgumentInspectionResult 
       return;
     }
     if (typeof value !== 'string') return;
-    let text = value;
+    const { maxStringCharacters: window, windowOverlap: overlap } = ARGUMENT_SCAN_LIMITS;
+    // The first window of every string is charged to the source budget; the
+    // rest of a long string is charged to a separate tail budget. A padding
+    // field therefore cannot exhaust the budget before a later field is read.
+    let text = value.slice(0, window);
     const remaining = ARGUMENT_SCAN_LIMITS.maxSourceBytes - sourceBytes;
     const bytes = Buffer.byteLength(text);
-    if (bytes > remaining) {
+    const truncated = bytes > remaining;
+    if (truncated) {
       budget.reasons.add('argument-bytes');
       text = Buffer.from(text).subarray(0, Math.max(0, remaining)).toString('utf8');
     }
     sourceBytes += Math.min(bytes, Math.max(0, remaining));
     if (!text) return;
-    // Every byte of raw text is matched, in overlapping windows. Decoding views
-    // are derived from the first window only: an encoded credential deep inside
-    // a very large payload is reported as incomplete decoding, not as clean.
-    const { maxStringCharacters: window, windowOverlap: overlap } = ARGUMENT_SCAN_LIMITS;
-    for (let start = 0; ; start += window - overlap) {
-      const chunk = text.slice(start, start + window);
-      if (start === 0) {
-        for (const view of secretViews(chunk, budget)) {
-          const hit = matchArgumentText(view.text, fieldPath, budget);
-          if (hit)
-            accept(view.transforms.length ? { ...hit, redactedSample: '[encoded secret]' } : hit);
-        }
-      } else accept(matchArgumentText(chunk, fieldPath, budget));
-      if (start + window >= text.length) break;
+    for (const view of secretViews(text, budget)) {
+      const hit = matchArgumentText(view.text, fieldPath, budget);
+      if (hit)
+        accept(view.transforms.length ? { ...hit, redactedSample: '[encoded secret]' } : hit);
     }
-    if (text.length > window) budget.reasons.add('decode-window');
+    if (!truncated && value.length > window) {
+      // Raw text beyond the first window is matched in overlapping windows.
+      // Decoding views come from the first window only.
+      budget.reasons.add('decode-window');
+      for (let start = window - overlap; start < value.length; start += window - overlap) {
+        const chunk = value.slice(start, start + window);
+        const chunkBytes = Buffer.byteLength(chunk);
+        if (tailBytes + chunkBytes > ARGUMENT_SCAN_LIMITS.maxTailBytes) {
+          budget.reasons.add('argument-string');
+          break;
+        }
+        tailBytes += chunkBytes;
+        accept(matchArgumentText(chunk, fieldPath, budget));
+        if (start + window >= value.length) break;
+      }
+    }
     const trimmed = text.trim();
     if (
-      text.length < ARGUMENT_SCAN_LIMITS.maxJsonCharacters &&
+      value.length < ARGUMENT_SCAN_LIMITS.maxJsonCharacters &&
       (trimmed.startsWith('{') || trimmed.startsWith('['))
     ) {
       try {

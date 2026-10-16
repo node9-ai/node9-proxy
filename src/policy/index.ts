@@ -1,4 +1,4 @@
-import type { ToolInspection } from '@node9/policy-engine';
+import type { ToolInspection, DlpMatch } from '@node9/policy-engine';
 // src/policy/index.ts
 // Host wrapper around @node9/policy-engine.
 //
@@ -55,6 +55,8 @@ export async function evaluatePolicy(
     skipIgnoredFastPath?: boolean;
     fileAccess?: PreparedFileAccess;
     config?: ReturnType<typeof getConfig>;
+    /** The gate's scanArgumentSecrets(args) for these arguments, when already computed. */
+    argumentScan?: DlpMatch | null;
   }
 ): Promise<PolicyVerdict> {
   const config = opts?.config ?? getConfig(cwd);
@@ -71,6 +73,7 @@ export async function evaluatePolicy(
       cwd: prepared.cwd,
       activeEnvironment,
       skipIgnoredFastPath: opts?.skipIgnoredFastPath,
+      argumentScan: opts?.argumentScan,
     },
     {
       checkProvenance,
