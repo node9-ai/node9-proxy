@@ -168,7 +168,9 @@ describe('Issue 338 through the built hook', () => {
   );
 });
 
-describe('Issue 338 through the real MCP gateway', () => {
+// Same convention as mcp-gateway.integration.test.ts: the gateway's stdio
+// piping of a quoted Windows upstream path is not exercised on win32.
+describe.skipIf(process.platform === 'win32')('Issue 338 through the real MCP gateway', () => {
   it('does not forward blocked calls and preserves the original allowed payload', async () => {
     const script = path.join(home, 'upstream.cjs');
     const calls = path.join(home, 'executed.jsonl');
