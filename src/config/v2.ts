@@ -55,7 +55,7 @@ export interface ConfigFileV2 {
   rules?: SmartRule[];
   tools?: {
     ignored?: string[];
-    inspection?: Record<string, string>;
+    inspection?: import('@node9/policy-engine').ToolInspection;
     sandboxPaths?: string[];
     dangerousWords?: string[];
   };

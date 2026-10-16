@@ -18,6 +18,22 @@ export interface CheckText {
 }
 
 export const CHECK_TEXT: Readonly<Record<string, CheckText>> = {
+  'files.shell-startup': {
+    plain: 'The agent changes a file that runs whenever your shell starts.',
+    example: 'echo "export EDITOR=vim" >> ~/.bashrc',
+    advice: 'Keep Review so a person confirms changes to shell initialization.',
+  },
+  'files.system-auth': {
+    plain: 'The agent changes or removes files that control system accounts and authentication.',
+    example: 'rm /etc/passwd',
+    advice:
+      'Always blocked in enforcing modes. Make intentional system authentication changes manually.',
+  },
+  'files.password-hashes': {
+    plain: 'The agent reads password hashes from the system account database.',
+    example: 'cat /etc/shadow',
+    advice: 'Keep Review, or choose Block when agents must never read system password hashes.',
+  },
   // ── Commands ──────────────────────────────────────────────────────────────
   'commands.inline-exec': {
     plain: 'The agent runs a small program written inside the command itself.',

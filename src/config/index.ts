@@ -1,3 +1,4 @@
+import type { ToolInspection } from '@node9/policy-engine';
 // src/config/index.ts
 // Config types, constants, and runtime config loading.
 // Kept separate from core.ts policy logic so tests can import config types
@@ -138,7 +139,7 @@ export interface Config {
     sandboxPaths: string[];
     dangerousWords: string[];
     ignoredTools: string[];
-    toolInspection: Record<string, string>;
+    toolInspection: ToolInspection;
     smartRules: SmartRule[];
     /**
      * RESOLVED output, never user input: the shields the shield layer

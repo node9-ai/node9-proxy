@@ -33,6 +33,7 @@ const SOURCES = [
   // 2026-08-20 matcher change through with no version bump.
   'packages/policy-engine/src/rules/index.ts',
   'packages/policy-engine/src/shell/index.ts',
+  'packages/policy-engine/src/shell/tool-input.ts',
   // canonical.ts:297 runs scanArgs (dlp/index.ts) over tool args and ships the
   // result as a 'dlp' extractor finding, so DLP_PATTERNS changes alter output
   // and must trip this gate too.
@@ -42,6 +43,7 @@ const SOURCES = [
   // scan output. Proven absent 2026-09-10: appending a line to that file left
   // this check green, the same silent-drift class the header warns about.
   'packages/policy-engine/src/policy/pipe-chain.ts',
+  'packages/policy-engine/src/files/paths.ts',
   // canonical.ts runs matchCanaryArgs (dlp/canary.ts) over tool args; the
   // fixtures and spec beside it stay OUT (the hash must not depend on tests).
   'packages/policy-engine/src/dlp/canary.ts',

@@ -14,6 +14,15 @@
 
 import mvdanSh from 'mvdan-sh';
 import { matchesPattern } from '../rules';
+import { isShellShapedTool, type ToolInspection } from './tool-input';
+export {
+  BASH_TOOL_NAMES,
+  isBashTool,
+  isShellShapedTool,
+  resolveShellInput,
+  shellRuleArgs,
+} from './tool-input';
+export type { ToolInspection, ToolInspectionEntry, ShellInputResolution } from './tool-input';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const { syntax } = mvdanSh as any;
@@ -434,11 +443,49 @@ export function detectDangerousShellExec(command: string): 'block' | 'review' | 
       if (!node || result === 'block') return false; // short-circuit once blocked
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
+      if (syntax.NodeType(n) === 'BinaryCmd' && n.Y && !listOps().has(n.Op)) {
+        const call = n.Y.Cmd;
+        if (call && syntax.NodeType(call) === 'CallExpr') {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const words = (call.Args || []).map((a: any) => resolveWordLiteral(a));
+          const head = unwrapCommandHead(words);
+          const name = (words[head] ?? '').split('/').pop() ?? '';
+          // A shell with no script operand consumes executable code from the
+          // pipe. A script operand or -c selects its own code, so stdin is data.
+          // Direct downloader pipelines retain their own configurable check.
+          // Transforming or locally generated code has no such owner.
+          const producer = n.X?.Cmd;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const producerWords = (producer?.Args ?? []).map((a: any) => resolveWordLiteral(a));
+          const directDownload = DOWNLOAD_CMDS.has(
+            (producerWords[unwrapCommandHead(producerWords)] ?? '').split('/').pop()
+          );
+          if (
+            !directDownload &&
+            SHELL_INTERPRETERS.has(name) &&
+            shellConsumesPipe(words.slice(head + 1))
+          )
+            result = 'review';
+        }
+      }
       if (syntax.NodeType(n) !== 'CallExpr') return true;
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const args: any[] = n.Args || [];
       if (args.length === 0) return true;
+
+      // Preserve assignment-shaped wrapper arguments while stopping at an
+      // unresolved executable instead of skipping it as a wrapper operand.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const headWords = args.map((a: any) =>
+        /^[A-Za-z_]\w*=/.test(a.Parts?.[0]?.Value ?? '') ? 'ENV=' : resolveWordLiteral(a)
+      );
+      const head = unwrapCommandHead(headWords, false, true);
+      // `command -v $x` looks a program up; it does not run it.
+      const lookup =
+        headWords[0]?.toLowerCase() === 'command' &&
+        headWords.slice(1).some((w) => w === '-v' || w === '-V');
+      if (!lookup && (opaqueExecutable(args[0]) || opaqueExecutable(args[head]))) result = 'review';
 
       // Resolve the command name (first arg, single Lit)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -474,6 +521,93 @@ export function detectDangerousShellExec(command: string): 'block' | 'review' | 
   } catch {
     return null; // parse error → fail open (don't block on uncertainty)
   }
+}
+
+/* eslint-disable @typescript-eslint/no-explicit-any -- mvdan-sh nodes are untyped */
+// `${x:-d}` `${x-d}` `${x:=d}` `${x=d}`: a literal default names the program plainly.
+let defaultExpansionOps: Set<number> | null = null;
+function isDefaultExpansion(part: any): boolean {
+  defaultExpansionOps ??= new Set(
+    ['${x:-y}', '${x-y}', '${x:=y}', '${x=y}'].map(
+      (s) => (parseShared(`echo ${s}`) as any).Stmts[0].Cmd.Args[1].Parts[0].Exp.Op
+    )
+  );
+  return part.Exp !== undefined && part.Exp !== null && defaultExpansionOps.has(part.Exp.Op);
+}
+
+/** `$(which X)` / `$(command -v X)` / `$(type -p X)` resolve to the literal X. */
+function lookupSubstitution(part: any): string | null {
+  const stmts: any[] = part.Stmts ?? [];
+  if (stmts.length !== 1 || !stmts[0].Cmd || syntax.NodeType(stmts[0].Cmd) !== 'CallExpr')
+    return null;
+  const words = (stmts[0].Cmd.Args ?? []).map((a: any) => resolveWordLiteral(a));
+  if (words.some((w: string | null) => w === null)) return null;
+  if (words.length === 2 && words[0] === 'which') return words[1];
+  if (words.length === 3 && words[0] === 'command' && words[1] === '-v') return words[2];
+  if (words.length === 3 && words[0] === 'type' && words[1] === '-p') return words[2];
+  return null;
+}
+
+interface ExecutablePart {
+  kind: 'Lit' | 'Dynamic';
+  value: string;
+  quoted: boolean;
+}
+function executableParts(word: any, quoted = false): ExecutablePart[] {
+  return (word?.Parts ?? []).flatMap((part: any): ExecutablePart[] => {
+    const kind = syntax.NodeType(part);
+    if (kind === 'DblQuoted') return executableParts(part, true);
+    if (kind === 'Lit') return [{ kind: 'Lit', value: part.Value ?? '', quoted }];
+    if (kind === 'SglQuoted')
+      return [{ kind: part.Dollar ? 'Dynamic' : 'Lit', value: part.Value ?? '', quoted: true }];
+    if (kind === 'ParamExp' && isDefaultExpansion(part)) {
+      const fallback = part.Exp.Word ? resolveWordLiteral(part.Exp.Word) : '';
+      if (fallback !== null) return [{ kind: 'Lit', value: fallback, quoted }];
+    }
+    if (kind === 'CmdSubst') {
+      const name = lookupSubstitution(part);
+      if (name !== null) return [{ kind: 'Lit', value: name, quoted }];
+    }
+    return [{ kind: 'Dynamic', value: '', quoted }];
+  });
+}
+
+// Only the executable word carries this meaning, and only its program name:
+// `$HOME/.cargo/bin/cargo` and `"$(npm bin)/eslint"` name the program plainly
+// while `$(printf rm)`, `$CMD` and `/bin/{rm,}` do not. Expansions in ordinary
+// arguments, quoted documentation, and script stdin never trigger it.
+function opaqueExecutable(word: any): boolean {
+  const parts = executableParts(word);
+  let lastSlash = -1;
+  parts.forEach((p, i) => {
+    if (p.kind === 'Lit' && p.value.includes('/')) lastSlash = i;
+  });
+  return parts.some((p, i) => {
+    if (i < lastSlash) return false;
+    if (p.kind === 'Dynamic') return true;
+    const tail = i === lastSlash ? p.value.slice(p.value.lastIndexOf('/') + 1) : p.value;
+    return !p.quoted && /(^|[^\\])\{[^{}]*,/.test(tail);
+  });
+}
+
+/* eslint-enable @typescript-eslint/no-explicit-any */
+
+/** A shell with no script operand reads its program from stdin. `-` ends options and still does. */
+export function shellConsumesPipe(args: Array<string | null>): boolean {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === null) return false;
+    if (arg === '-') return true;
+    if (arg === '--') return args[i + 1] === undefined;
+    if (/^-[^-]*c/.test(arg) || arg === '--command') return false;
+    if (/^-[^-]*s/.test(arg)) return true;
+    if (arg === '-o' || arg === '-O') {
+      i++;
+      continue;
+    }
+    if (!arg.startsWith('-')) return false;
+  }
+  return true;
 }
 
 /** @deprecated Use detectDangerousShellExec — kept for backwards compatibility */
@@ -1363,18 +1497,6 @@ export interface FsOpVerdict {
 // Tool names across all three supported agents that carry a shell command in
 // `args.command`. Both the CLI scan (per-agent in scan.ts) and the live hook's
 // AST FS-op tier need to know which calls are bash-shaped.
-export const BASH_TOOL_NAMES = new Set<string>([
-  'bash',
-  'execute_bash',
-  'run_shell_command',
-  'shell',
-  'exec_command',
-]);
-
-export function isBashTool(toolName: string): boolean {
-  return BASH_TOOL_NAMES.has(toolName.toLowerCase());
-}
-
 // Names of regex-based smart rules whose detection is provided by
 // analyzeFsOperation. When the AST detector ran on a bash command (regardless
 // of whether AST returned a verdict) these regex rules must be suppressed —
@@ -1529,16 +1651,6 @@ function chmodHasOpenPermMode(command: string): boolean {
  * (/code-review 2026-08-13: the gate reviewed `sudo …` on `shell` while scan
  * reported nothing, so the customer-facing report under-counted).
  */
-export function isShellShapedTool(
-  toolName: string,
-  toolInspection?: Record<string, string>
-): boolean {
-  if (isBashTool(toolName)) return true;
-  if (!toolInspection) return false;
-  const pattern = Object.keys(toolInspection).find((p) => matchesPattern(toolName, p));
-  return pattern !== undefined && toolInspection[pattern] === 'command';
-}
-
 /**
  * Does a smart rule's `tool` scope cover this tool? Adds the shell-shape alias:
  * the six default shell-safety rules and shield bundles are written
@@ -1549,7 +1661,7 @@ export function isShellShapedTool(
 export function toolMatchesRule(
   toolName: string,
   ruleTool: string | string[] | undefined,
-  toolInspection?: Record<string, string>
+  toolInspection?: ToolInspection
 ): boolean {
   if (!ruleTool) return true;
   if (matchesPattern(toolName, ruleTool)) return true;
@@ -1698,6 +1810,25 @@ const WRAPPER_TAKES_TARGET = new Set(['chroot']);
 // branch both read it, so a flag added here reaches the inline-exec tier and
 // the credential jail together (they had already drifted on `-okdir`).
 const FIND_EXEC_FLAGS = new Set(['-exec', '-execdir', '-ok', '-okdir']);
+/** Verbs that change or remove files. A wrapper flag never takes one as its operand. */
+export const FS_MUTATION_TOOLS = new Set([
+  'rm',
+  'unlink',
+  'shred',
+  'truncate',
+  'tee',
+  'cp',
+  'mv',
+  'install',
+  'ln',
+  'touch',
+  'dd',
+  'sed',
+  'chmod',
+  'chown',
+  'mkdir',
+  'rmdir',
+]);
 
 // Interpreters whose LEADING bare operand names a target rather than a program
 // (`su USER -c CODE`). Their real code flag follows that operand.
@@ -1707,13 +1838,18 @@ const INTERP_LEADING_TARGET = new Set(['su']);
  *  of the real command head. Handles `sudo -u www python3`, `env -u FOO python3`,
  *  `timeout 5 python3`, `uv run python`, `conda run -n env python`,
  *  `chroot /mnt python3`. */
-export function unwrapCommandHead(words: (string | null)[]): number {
+export function unwrapCommandHead(
+  words: (string | null)[],
+  stopAtFind = false,
+  stopAtDynamic = false
+): number {
   let i = 0;
   while (i < words.length) {
     const head = (words[i] ?? '').toLowerCase().split('/').pop() ?? '';
     // `find … -exec CMD …` / `-execdir` run CMD per match — the real command
     // head sits after the flag, and mvdan parses it as ordinary find operands.
     if (head === 'find') {
+      if (stopAtFind) break;
       const x = words.findIndex((w, k) => k > i && w !== null && FIND_EXEC_FLAGS.has(w));
       if (x < 0) break;
       i = x + 1;
@@ -1730,6 +1866,7 @@ export function unwrapCommandHead(words: (string | null)[]): number {
     while (i < words.length) {
       const t = words[i];
       if (t === null) {
+        if (stopAtDynamic) return i;
         i++;
         continue;
       } // dynamic token — keep scanning
@@ -1755,8 +1892,10 @@ export function unwrapCommandHead(words: (string | null)[]): number {
           // A reader is a command, never a flag's operand: `env - cat X`,
           // `stdbuf -o0 cat X`, `ionice -c3 cat X`. Without this the head was
           // swallowed and the jail needed a looser fallback whose cost was a
-          // false positive on `sudo echo cat X`.
-          !FS_READ_TOOLS.has(nxt.split('/').pop()?.toLowerCase() ?? '')
+          // false positive on `sudo echo cat X`. The same holds for the
+          // mutation verbs: `sudo -n rm X`, `env -i tee X`, `sudo -- rm X`.
+          !FS_READ_TOOLS.has(nxt.split('/').pop()?.toLowerCase() ?? '') &&
+          !FS_MUTATION_TOOLS.has(nxt.split('/').pop()?.toLowerCase() ?? '')
         )
           i++;
         continue;
@@ -3360,9 +3499,13 @@ function findActions(words: (string | null)[], h: number): (string | null)[][] {
   return out;
 }
 
-function findStartPoints(words: (string | null)[], h: number): { k: number; starts: string[] } {
+export function findStartPoints(
+  words: (string | null)[],
+  h: number
+): { k: number; starts: string[] } {
   const k = words.findIndex((w, i) => i > h && w !== null && FIND_EXEC_FLAGS.has(w));
-  if (k < 0) return { k, starts: [] };
+  // Without an -exec family action (`find /etc -delete`) the start points still
+  // end at the first predicate; callers that need an action check `k` themselves.
   // `--` separates find's options from its start points; it is NOT a predicate.
   // Treating it as one put `end` on it and erased every start point, so
   // `find -- /home/u/.ssh -type f -exec cat {} +` produced no finding while the
@@ -3371,7 +3514,7 @@ function findStartPoints(words: (string | null)[], h: number): { k: number; star
   const firstPredicate = words.findIndex(
     (w, i) => i > h && w !== null && w !== '--' && w.startsWith('-') && !FIND_OPTIONS.has(w)
   );
-  const end = firstPredicate > h ? firstPredicate : k;
+  const end = firstPredicate > h ? firstPredicate : k > h ? k : words.length;
   return { k, starts: positionalAfter(words, h + 1, end) };
 }
 
@@ -3382,7 +3525,7 @@ function findStartPoints(words: (string | null)[], h: number): { k: number; star
  * points, with the action resolved by the same resolver (`-exec sudo cp`,
  * `-exec aws s3 cp`).
  */
-function copySourcePaths(words: (string | null)[]): string[] {
+export function copySourcePaths(words: (string | null)[]): string[] {
   const h = unwrapCommandHead(words);
   // unwrapCommandHead treats `find ... -exec CMD` as a wrapper and lands ON the
   // action, so look for `find` among the peeled words, not at the head.
@@ -3836,7 +3979,7 @@ function flagEffect(token: string, shape: PatternShape, known: Set<string>): Fla
  * the pattern-slot work of stage 5 had to be applied to all three by hand. One
  * definition, so a reader learned in one tier is learned in every tier.
  */
-function readerPaths(words: (string | null)[], h: number): string[] {
+export function readerPaths(words: (string | null)[], h: number): string[] {
   const head = baseWord(words[h]);
   const from = h + 1;
   const flags = words.slice(from).filter((w): w is string => w !== null && w.startsWith('-'));
@@ -4041,7 +4184,7 @@ function wrappedReadPaths(words: (string | null)[], name: string): string[] | nu
  * `eval cat X` and `eval "cat X"` both yield `cat X`. Only an exact `-c` is
  * honoured; a combined `-lc` is a pinned non-goal.
  */
-function literalShellPayload(words: (string | null)[], name: string): string | null {
+export function literalShellPayload(words: (string | null)[], name: string): string | null {
   // `sudo sh -c "cat KEY"` is the commonest privileged idiom there is, and the
   // wrapper hid it: this ran on argv[0] only. Unwrap first, then read the
   // interpreter from the head. (Measured 2026-09-11: `sudo sh -c`, `env sh -c`

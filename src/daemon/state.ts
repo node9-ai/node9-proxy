@@ -11,7 +11,7 @@ import os from 'os';
 import { randomUUID } from 'crypto';
 import { RiskMetadata } from '../context-sniper';
 import { DAEMON_PORT, DAEMON_HOST } from '../auth/daemon';
-import type { ScanFinding } from '@node9/policy-engine';
+import { scanArgumentSecrets, type ScanFinding } from '@node9/policy-engine';
 import { SuggestionTracker, type Suggestion } from './suggestion-tracker.js';
 import { TaintStore, SessionTaintStore } from './taint-store.js';
 import { sessionCounters } from './session-counters.js';
@@ -203,8 +203,13 @@ export { atomicWriteSync };
 const SECRET_KEY_RE = /password|secret|token|key|apikey|credential|auth/i;
 
 export function redactArgs(value: unknown): unknown {
+  if (scanArgumentSecrets(value)) return '[REDACTED]';
+  return redactArgFields(value);
+}
+
+function redactArgFields(value: unknown): unknown {
   if (!value || typeof value !== 'object') return value;
-  if (Array.isArray(value)) return value.map(redactArgs);
+  if (Array.isArray(value)) return value.map(redactArgFields);
   // Null-prototype target: on a plain `{}`, assigning the key `__proto__` hits
   // the inherited setter instead of creating an own property, so an argument by
   // that name never reaches JSON.stringify and vanishes from the audit entry.
@@ -213,7 +218,7 @@ export function redactArgs(value: unknown): unknown {
   // which does give `__proto__` as an own key.
   const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
   for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    result[k] = SECRET_KEY_RE.test(k) ? '[REDACTED]' : redactArgs(v);
+    result[k] = SECRET_KEY_RE.test(k) ? '[REDACTED]' : redactArgFields(v);
   }
   return result;
 }

@@ -8,6 +8,8 @@
 // never leaves the module.
 
 import safeRegex from 'safe-regex2';
+import { findMnemonic } from './mnemonic';
+import { isLegacySystemPath, LEGACY_SYSTEM_PATH_RE } from '../files/paths';
 import { validateWif, validateXprv, validateGithubToken, validateCask } from '../scan/checksums';
 import type { DlpMatch } from '../types';
 export type { DlpMatch } from '../types';
@@ -677,9 +679,6 @@ const SENSITIVE_PATH_PATTERNS: RegExp[] = [
   /[/\\][^/\\]+\.key$/i,
   /[/\\][^/\\]+\.p12$/i,
   /[/\\][^/\\]+\.pfx$/i,
-  /^(?:[a-zA-Z]:)?\/etc\/passwd$/,
-  /^(?:[a-zA-Z]:)?\/etc\/shadow$/,
-  /^(?:[a-zA-Z]:)?\/etc\/sudoers$/,
   /[/\\]credentials\.json$/i,
   /[/\\]id_rsa$/i,
   /[/\\]id_ed25519$/i,
@@ -696,9 +695,15 @@ const SENSITIVE_PATH_PATTERNS: RegExp[] = [
  *                      redactedSample so alerts show the original spelling.
  * @returns A DlpMatch with severity 'block' if the path is sensitive, else null.
  */
-export function matchSensitivePath(resolvedPath: string, originalPath: string): DlpMatch | null {
+export function matchSensitivePath(
+  resolvedPath: string,
+  originalPath: string,
+  options: { systemAccessHandled?: boolean } = {}
+): DlpMatch | null {
   // Normalise to forward slashes for cross-platform pattern matching.
   const normalised = resolvedPath.replace(/\\/g, '/');
+  if (!options.systemAccessHandled && isLegacySystemPath(normalised))
+    return sensitivePathMatch(originalPath);
 
   for (const pattern of SENSITIVE_PATH_PATTERNS) {
     if (pattern.test(normalised)) {
@@ -725,7 +730,10 @@ export function sensitivePathMatch(originalPath: string): DlpMatch {
 }
 
 /** Exposed so the proxy can apply the same patterns directly if needed. */
-export const SENSITIVE_PATH_REGEXES: readonly RegExp[] = SENSITIVE_PATH_PATTERNS;
+export const SENSITIVE_PATH_REGEXES: readonly RegExp[] = [
+  ...SENSITIVE_PATH_PATTERNS,
+  LEGACY_SYSTEM_PATH_RE,
+];
 
 // ── Builtin pattern safety check (runs at module load) ────────────────────
 // Every regex shipped in this package is run against scanArgs / scanText on
@@ -836,6 +844,41 @@ function firstAcceptedMatch(pattern: DlpPattern, text: string): string | null {
     // spaces and keep their own resume, witnessed by the card and IBAN specs).
   }
   return null;
+}
+
+/** Shared accepted-token matcher for bounded argument views. */
+export function matchArgumentText(
+  text: string,
+  fieldPath: string,
+  budget?: { candidates: number; reasons: Set<string> }
+): DlpMatch | null {
+  const lower = text.toLowerCase();
+  const assignment = isAssignmentContext(text);
+  let best: DlpMatch | null = null;
+  for (const pattern of DLP_PATTERNS) {
+    if (pattern.keywords && !pattern.keywords.some((kw) => lower.includes(kw.toLowerCase())))
+      continue;
+    const raw = firstAcceptedMatch(pattern, text);
+    if (raw === null) continue;
+    const severity = pattern.contextBoost && assignment ? 'block' : pattern.severity;
+    const match: DlpMatch = {
+      patternName: pattern.name,
+      fieldPath,
+      redactedSample: maskSecret(raw, pattern.regex),
+      severity,
+    };
+    if (severity === 'block') return match;
+    best ??= match;
+  }
+  if (findMnemonic(text, budget)) {
+    return {
+      patternName: 'BIP-39 Recovery Phrase',
+      fieldPath,
+      redactedSample: '[recovery phrase]',
+      severity: 'block',
+    };
+  }
+  return best;
 }
 
 export function scanArgs(args: unknown, depth = 0, fieldPath = 'args'): DlpMatch | null {
