@@ -686,7 +686,11 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // number as a card (node9Firewall#333). An unseparated card-shaped run
 // directly after `<digit>.` is not a finding; histories scanned under v23
 // re-read.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v24';
+// canonical-v25 (node9Firewall#348): two context-based argument patterns at
+// review, `Credential in URL Query` and `Assigned Secret`, and a driver suffix
+// in `Database Connection String` (`mysql+pymysql://`). New finding names, so
+// histories scanned under v24 re-read.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v25';
 
 // 2026-09-11, hash bumped with NO version bump: stage 3 of the credential jail
 // (argument POSITION kept in extractLiteralArgs) changed detector SOURCE and
@@ -713,7 +717,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v24';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '2824567b883090c1';
+export const CANONICAL_EXTRACTOR_HASH = '8a103567688fd6eb';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

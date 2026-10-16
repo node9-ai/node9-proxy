@@ -55,13 +55,23 @@ interface DlpPattern {
    * happens to contain a stopword substring is a real secret, roughly 1 in
    * 3,000 real WIF keys); a failing one rejects it. Must never throw; a throw
    * is treated as "not suppressed" so a validator bug cannot hide a match.
+   * `before` is up to 64 characters of the text ahead of the match, for a
+   * validator that reads the variable name the value is assigned to.
    */
-  validate?: (raw: string) => boolean;
+  validate?: (raw: string, before?: string) => boolean;
   /** When the regex consumes delimiters around the secret, the capture group
    *  that holds the secret itself; redactText replaces only that group. Any
    *  other capture group (a scheme, a prefix) is NOT the secret, so the field
    *  is explicit rather than "group 1 if present". */
   redactGroup?: number;
+  /**
+   * Only the tool-argument gate (scanArgs, matchArgumentText) uses this
+   * pattern. Output redaction (redactText) and response-text scanning
+   * (scanText) skip it. For the broad, context-based patterns that name a
+   * secret by its variable or query key: a review at the gate is cheap, a
+   * rewrite of every config file an agent reads is not.
+   */
+  argumentsOnly?: boolean;
 }
 
 // Matches variable assignment or config-file patterns that indicate a secret
@@ -115,6 +125,121 @@ const DLP_STOPWORDS: string[] = [
   'your',
   'here',
 ];
+
+// ── Context validators (node9Firewall#348) ────────────────────────────────────
+// Shared by the two name-based patterns. A value is "generated-looking" when
+// it is not a placeholder, not a reference to a variable or a call, not an
+// identifier or a word, and has enough entropy for its length.
+
+/** The value a name-based pattern captured, or null when the regex did not. */
+function capturedValue(raw: string, pattern: RegExp): string | null {
+  const m = raw.match(pattern);
+  return m?.[1] ?? null;
+}
+
+/** A reference, not a value: `$VAR`, `@ivar`, `%ENV`, `process.env.X`, `os.environ`, `config.x`. */
+const REFERENCE_VALUE_RE =
+  /^[$@%]|^(?:process\.env|os\.environ|env|config|settings|self|this|opts?|options|params|cfg)\b/i;
+/** Letters, dots, dashes and underscores only: an identifier or a word, not a generated value. */
+const IDENTIFIER_VALUE_RE = /^[A-Za-z_.-]+$/;
+/** An email address next to a password is the login, not the secret. */
+const EMAIL_VALUE_RE = /^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$/;
+
+/** `base64-something-random`, `my_secret_value_2`: joined words in one case, digits aside. */
+function looksLikeJoinedWords(value: string): boolean {
+  const segments = value.replace(/[0-9]/g, '').split(/[-_.]/);
+  return (
+    segments.length >= 2 &&
+    segments.every((seg) => /^[a-z]{2,}$/.test(seg) || /^[A-Z]{2,}$/.test(seg))
+  );
+}
+
+/** `0123456789abcdef`, `ABCDEFGHIJKLMNOP`: eight or more consecutive code points in a row. */
+function hasSequentialRun(value: string): boolean {
+  let run = 1;
+  for (let i = 1; i < value.length; i++) {
+    run = value.charCodeAt(i) === value.charCodeAt(i - 1) + 1 ? run + 1 : 1;
+    if (run >= 8) return true;
+  }
+  return false;
+}
+
+/**
+ * A value in a vendor shape whose checksum fails (a `ghp_` token with the
+ * wrong CRC, a WIF key with a bad hash) is a look-alike node9 allows on
+ * purpose; the context patterns must not reverse that decision.
+ */
+function rejectedByStructuredValidator(value: string): boolean {
+  for (const p of DLP_PATTERNS) {
+    if (!p.validate || p.argumentsOnly) continue;
+    const m = value.match(p.regex);
+    if (m && !p.validate(m[0])) return true;
+  }
+  return false;
+}
+
+function looksGenerated(
+  value: string,
+  minLength: number,
+  minEntropy: number,
+  lettersOnlyAllowed = false
+): boolean {
+  if (value.length < minLength) return false;
+  const lower = value.toLowerCase();
+  if (DLP_STOPWORDS.some((sw) => lower.includes(sw))) return false;
+  if (REFERENCE_VALUE_RE.test(value)) return false;
+  if (!lettersOnlyAllowed && IDENTIFIER_VALUE_RE.test(value)) return false;
+  if (EMAIL_VALUE_RE.test(value)) return false;
+  if (looksLikeJoinedWords(value) || hasSequentialRun(value)) return false;
+  if (value.includes('://')) return false; // a URL has its own patterns
+  if (rejectedByStructuredValidator(value)) return false;
+  return shannonEntropy(value) >= minEntropy;
+}
+
+/**
+ * The variable or key the value is assigned to. A name that says fixture
+ * (`FAKE_TOKEN`, `mockSecret`) or that names a derivative (`token_hash`,
+ * `password_length`, `secret_id`) is not holding a credential.
+ */
+const FIXTURE_NAME_RE = /(?:fake|dummy|example|sample|mock|stub|placeholder|test)/i;
+const DERIVATIVE_NAME_RE =
+  /(?:hash|digest|id|type|name|url|uri|path|file|len|length|count|size|ttl|expires?|expiry|age|date|time|format|field|header|param)$/i;
+
+function nameHoldsCredential(name: string): boolean {
+  return !FIXTURE_NAME_RE.test(name) && !DERIVATIVE_NAME_RE.test(name);
+}
+
+const QUERY_CREDENTIAL_VALUE_RE = /=([A-Za-z0-9%+/_.~-]{8,}={0,2})$/;
+const OTP_SECRET_RE = /^[A-Z2-7]{16,}=*$/i;
+
+const QUERY_CREDENTIAL_NAME_RE = /^[?&;]?([A-Za-z_-]+)=/;
+
+function validateQueryCredential(raw: string): boolean {
+  const value = capturedValue(raw, QUERY_CREDENTIAL_VALUE_RE);
+  const name = capturedValue(raw, QUERY_CREDENTIAL_NAME_RE);
+  if (value === null || name === null || !nameHoldsCredential(name)) return false;
+  // An otpauth secret is base32: letters and digits 2-7, often letters only.
+  if (OTP_SECRET_RE.test(value)) return looksGenerated(value, 16, 3.0, true);
+  // Anything else must mix letters and digits and be at least 12 long, so a
+  // fixture such as `?token=ftoken123` or a slug is not a finding.
+  if (!/[0-9]/.test(value) || !/[A-Za-z]/.test(value)) return false;
+  return looksGenerated(value, 12, 3.0);
+}
+
+const ASSIGNED_SECRET_VALUE_RE = /(?:[:=]|=>)\s*["'`]?([A-Za-z0-9+/_.!@#$%^*~-]{12,}={0,2})$/;
+
+const ASSIGNED_SECRET_NAME_RE = /^([A-Za-z0-9_]+)/;
+
+function validateAssignedSecret(raw: string, before = ''): boolean {
+  const value = capturedValue(raw, ASSIGNED_SECRET_VALUE_RE);
+  const name = capturedValue(raw, ASSIGNED_SECRET_NAME_RE);
+  if (value === null || name === null) return false;
+  // The match starts at the keyword; the rest of the name (`FAKE_` in
+  // `FAKE_TOKEN`, `mock` in `mockSecret`) is in the text just before it.
+  const prefix = before.match(/[A-Za-z0-9_]*$/)?.[0] ?? '';
+  if (!nameHoldsCredential(prefix + name)) return false;
+  return looksGenerated(value, 12, 3.5);
+}
 
 export const DLP_PATTERNS: DlpPattern[] = [
   // ── AWS ───────────────────────────────────────────────────────────────────
@@ -608,25 +733,58 @@ export const DLP_PATTERNS: DlpPattern[] = [
   // 'placeholder', 'changeme', etc.) keep doc/README scans clean.
   {
     name: 'Database Connection String',
+    // `[a-z0-9+]*` after the base name accepts the TLS spelling (`rediss`,
+    // `amqps`), `postgresql`, and a driver suffix (`mongodb+srv`,
+    // `mysql+pymysql`, `postgresql+psycopg2`) in one star-height-1 shape.
     regex:
-      /\b(redis|rediss|postgres|postgresql|mongodb|mongodb\+srv|mysql|mariadb|amqp|amqps|kafka|clickhouse|cassandra):\/\/[^:/\s@]*:[^@\s]{4,}@[^\s/]+/,
+      /\b((?:redis|postgres|mongodb|mysql|mariadb|amqp|kafka|clickhouse|cassandra)[a-z0-9+]*):\/\/[^:/\s@]*:[^@\s]{4,}@[^\s/]+/i,
     severity: 'block',
     keywords: [
-      'redis://',
-      'rediss://',
-      'postgres://',
-      'postgresql://',
-      'mongodb://',
-      'mongodb+srv://',
-      'mysql://',
-      'mariadb://',
-      'amqp://',
-      'amqps://',
+      'redis',
+      'postgres',
+      'mongodb',
+      'mysql',
+      'mariadb',
+      'amqp',
       'kafka://',
-      'clickhouse://',
-      'cassandra://',
+      'clickhouse',
+      'cassandra',
     ],
     minEntropy: 3.0,
+  },
+
+  // ── Credential in a URL query value ───────────────────────────────────────
+  // A query parameter whose key names a secret (`?secret=`, `&apiKey=`,
+  // `&sig=`, the `secret` of an `otpauth://` URI). The value itself has no
+  // vendor shape, so the validator decides: a placeholder, a word, a bare
+  // identifier or a short value is left alone. review, not block: a
+  // fixture token in a test URL is common (node9Firewall#348, item 1).
+  {
+    name: 'Credential in URL Query',
+    regex:
+      /(?:^|[?&;])(?:api[_-]?key|access[_-]?token|client[_-]?secret|secret[_-]?key|auth[_-]?token|private[_-]?key|secret|token|apikey|password|passwd|pwd|auth|sig|signature)=([A-Za-z0-9%+/_.~-]{8,}={0,2})/i,
+    severity: 'review',
+    keywords: ['secret', 'token', 'key', 'password', 'passwd', 'pwd', 'auth', 'sig'],
+    validate: validateQueryCredential,
+    argumentsOnly: true,
+  },
+
+  // ── Secret assigned to a telling name ─────────────────────────────────────
+  // `password: ...`, `JWT_SECRET=...`, `api_key = "..."`. The name alone is
+  // not a finding: most such lines hold a reference (`process.env.X`), a
+  // placeholder or a word. The validator accepts only a value that looks
+  // generated: 12+ characters, not an identifier, Shannon entropy of 3.5
+  // bits per character or more. review, never block (node9Firewall#348,
+  // item 4). Tuned on CredData's public split; its look-alike lines are the
+  // negative control.
+  {
+    name: 'Assigned Secret',
+    regex:
+      /(?:password|passphrase|passwd|pwd|secret|token|api[_-]?key|auth[_-]?key|private[_-]?key|access[_-]?key|client[_-]?secret)[A-Za-z0-9_]*["'\]]{0,2}\s*(?:[:=]|=>)\s*["'`]?([A-Za-z0-9+/_.!@#$%^*~-]{12,}={0,2})/i,
+    severity: 'review',
+    keywords: ['password', 'passphrase', 'passwd', 'pwd', 'secret', 'token', 'key'],
+    validate: validateAssignedSecret,
+    argumentsOnly: true,
   },
 ];
 
@@ -805,11 +963,11 @@ export const DLP_SCAN_LIMITS = {
  * three DLP entrypoints (scanArgs, scanText, redactText); they used to carry
  * three copies of the stopword + entropy sequence, and redactText had no test.
  */
-function suppressed(pattern: DlpPattern, raw: string): boolean {
+function suppressed(pattern: DlpPattern, raw: string, before = ''): boolean {
   if (pattern.validate) {
     let ok: boolean;
     try {
-      ok = pattern.validate(raw);
+      ok = pattern.validate(raw, before);
     } catch {
       ok = true; // a crashing validator must not hide a block-severity match
     }
@@ -836,7 +994,7 @@ function firstAcceptedMatch(pattern: DlpPattern, text: string): string | null {
       re.lastIndex = m.index + 1; // progress guard; these patterns never match empty
       continue;
     }
-    if (!suppressed(pattern, m[0])) return m[0];
+    if (!suppressed(pattern, m[0], text.slice(Math.max(0, m.index - 64), m.index))) return m[0];
     // On rejection, exec's own lastIndex advance (to the end of the match) is
     // sufficient: every DLP pattern is \b-anchored and separator-free, so a
     // valid match can never begin INSIDE a rejected one. No overlap resume is
@@ -955,6 +1113,7 @@ export function scanText(text: string): DlpMatch | null {
   const t = text.length > MAX_STRING_BYTES ? text.slice(0, MAX_STRING_BYTES) : text;
   const tLower = t.toLowerCase();
   for (const pattern of DLP_PATTERNS) {
+    if (pattern.argumentsOnly) continue;
     if (pattern.keywords && !pattern.keywords.some((kw) => tLower.includes(kw.toLowerCase()))) {
       continue;
     }
@@ -991,6 +1150,7 @@ export function redactText(text: string): { result: string; found: string[] } {
   const lower = text.toLowerCase();
 
   for (const { pattern, globalRegex } of DLP_PATTERNS_GLOBAL) {
+    if (pattern.argumentsOnly) continue;
     if (pattern.keywords && !pattern.keywords.some((kw) => lower.includes(kw.toLowerCase()))) {
       continue;
     }
