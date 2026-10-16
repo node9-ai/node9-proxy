@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { randomUUID } from 'crypto';
+import { addTrustedRecipient } from '../auth/trusted-recipients';
 import { spawnSync } from 'child_process';
 import chalk from 'chalk';
 import { authorizeHeadless, getGlobalSettings, getConfig, _resetConfigCache } from '../core';
@@ -81,7 +82,12 @@ import { startDlpScanner } from './dlp-scanner.js';
 import { startMcpReconciler } from './mcp-reconciler.js';
 import { startHookHeal } from './hook-heal.js';
 import { logDaemonStartup, recordStartupState } from './startup-log.js';
-import { readMcpToolsConfig, updateServerDiscovery, approveServer } from './mcp-tools.js';
+import {
+  readMcpToolsConfig,
+  updateServerDiscovery,
+  approveServer,
+  sanitizeToolAnnotations,
+} from './mcp-tools.js';
 import { startOsvSync } from '../supply-chain/osv-sync';
 import { startHeartbeat } from './heartbeat';
 
@@ -243,6 +249,33 @@ export function startDaemon(): void {
   //                           kept so any in-flight client requests
   //                           landing across the upgrade still work.
   const internalToken = randomUUID();
+
+  /** The "Allow + trust" half of a decision on an exposure card (fw#318 P5). */
+  const applyTrustRecipients = (entry: PendingEntry): void => {
+    const dests = entry.riskMetadata?.exposureDestinations ?? [];
+    if (dests.length === 0) return;
+    let policySource: string | undefined;
+    try {
+      policySource = getConfig().policySource;
+    } catch {
+      policySource = undefined;
+    }
+    if (policySource !== 'workspace') {
+      for (const d of dests) {
+        try {
+          addTrustedRecipient(d, 'approval');
+        } catch {
+          /* a bad value is skipped; the allow still stands */
+        }
+      }
+    }
+    if (entry.sessionId) {
+      sessionExposureStore.approve(
+        entry.sessionId,
+        dests.map((d) => `${entry.toolName}|${d}`)
+      );
+    }
+  };
   const validToken = (req: http.IncomingMessage) =>
     req.headers['x-node9-internal'] === internalToken ||
     req.headers['x-node9-token'] === internalToken;
@@ -387,6 +420,7 @@ export function startDaemon(): void {
           activityId,
           cwd,
           localSmartRuleMatched = false,
+          sessionId,
         } = JSON.parse(body);
         // When fromCLI is true the CLI already sent an 'activity' event with
         // activityId via the Unix socket. Reuse that ID so the daemon's
@@ -397,6 +431,7 @@ export function startDaemon(): void {
           toolName,
           args,
           riskMetadata: riskMetadata ?? undefined,
+          ...(typeof sessionId === 'string' && sessionId.length <= 256 && { sessionId }),
           ...(typeof recoveryCommand === 'string' && recoveryCommand && { recoveryCommand }),
           ...(viewOnly && { viewOnly: true }),
           agent: typeof agent === 'string' ? agent : undefined,
@@ -603,7 +638,7 @@ export function startDaemon(): void {
           res.writeHead(409, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({ conflict: true, decision: entry.earlyDecision }));
         }
-        const { decision, persist, trustDuration, reason, source } = JSON.parse(
+        const { decision, persist, trustDuration, reason, source, trustRecipients } = JSON.parse(
           await readBody(req)
         ) as {
           decision: string;
@@ -611,7 +646,16 @@ export function startDaemon(): void {
           trustDuration?: string;
           reason?: string;
           source?: string;
+          trustRecipients?: boolean;
         };
+
+        // fw#318 P5: "Allow + trust this address". Only an exposure card
+        // carries destinations; the list is written locally unless the
+        // workspace owns the policy, and the session's exposure is cleared for
+        // those destinations either way.
+        if (decision === 'allow' && trustRecipients === true) {
+          applyTrustRecipients(entry);
+        }
 
         // Trust session
         if (decision === 'trust' && trustDuration) {
@@ -1308,7 +1352,22 @@ export function startDaemon(): void {
         }
 
         const safeName = typeof name === 'string' && name ? name.slice(0, 80) : undefined;
-        const status = updateServerDiscovery(serverKey, tools, safeName);
+        // Name, description and boolean annotations only: a server's tools/list
+        // is outside content and the inventory file is read by every hook.
+        const safeTools = (tools as unknown[])
+          .filter((t): t is Record<string, unknown> => !!t && typeof t === 'object')
+          .filter((t) => typeof t.name === 'string' && (t.name as string).length <= 200)
+          .map((t) => {
+            const ann = sanitizeToolAnnotations(t.annotations);
+            return {
+              name: t.name as string,
+              ...(typeof t.description === 'string'
+                ? { description: (t.description as string).slice(0, 2000) }
+                : {}),
+              ...(ann ? { annotations: ann } : {}),
+            };
+          });
+        const status = updateServerDiscovery(serverKey, safeTools, safeName);
         if (status === 'new' || status === 'drift') {
           appendAuditLog({
             toolName: `mcp-server:${serverKey}`,

@@ -68,6 +68,8 @@ export interface PendingEntry {
   earlyDecision: Decision | null;
   earlyReason?: string;
   decisionSource?: string; // 'browser', 'terminal', or undefined (cloud/auto)
+  /** The agent session the call belongs to (fw#318 P5: trust-this-address clears its exposure). */
+  sessionId?: string;
   /** New fields for MCP discovery */
   type?: 'tool-call' | 'mcp-discovery';
   mcpTools?: Array<{ name: string; description?: string }>;

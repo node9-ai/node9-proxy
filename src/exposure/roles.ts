@@ -6,6 +6,7 @@
 // inventory are phase P2.
 
 import type { Config } from '../config';
+import { readMcpToolsConfig, type McpToolAnnotations } from '../daemon/mcp-tools';
 
 /** The review label every surface shows for a held call. */
 export const EXPOSURE_LABEL = '🛡️ Node9 Exposure';
@@ -13,6 +14,53 @@ export const EXPOSURE_LABEL = '🛡️ Node9 Exposure';
 export interface ToolRole {
   source: boolean;
   action: boolean;
+  /** The server declared the tool destructive: held after exposure even with no destination. */
+  destructive?: boolean;
+}
+
+/** Servers the agent itself provides (Claude Code's session, view and host
+ *  tools): their results are the agent's own state, not outside content, and
+ *  their calls change nothing outside the machine. Read, not source or action.
+ *  Server-name prefixes, lower-cased. */
+const AGENT_INTERNAL_PREFIXES = ['ccd_', 'visualize'];
+
+/** Claude Code folds characters outside [A-Za-z0-9_-] in a server name. */
+function foldServerName(name: string): string {
+  return name.replace(/[^A-Za-z0-9_-]/g, '_').toLowerCase();
+}
+
+let inventoryCache: Map<string, Map<string, McpToolAnnotations | null>> | null = null;
+
+/**
+ * The annotations the inventory holds for `server`/`tool`, or null: no
+ * record, no annotations, or two records sharing the name (ambiguous, so
+ * unannotated). The inventory is read once per process (the hook lives for
+ * one call) and matched on the gateway's config name after the same folding
+ * the agent applies to its server names.
+ */
+export function resolveToolAnnotations(server: string, tool: string): McpToolAnnotations | null {
+  if (inventoryCache === null) {
+    inventoryCache = new Map();
+    try {
+      const seen = new Map<string, number>();
+      for (const cfg of Object.values(readMcpToolsConfig())) {
+        if (!cfg?.name) continue;
+        const key = foldServerName(cfg.name);
+        seen.set(key, (seen.get(key) ?? 0) + 1);
+        const tools = new Map<string, McpToolAnnotations | null>();
+        for (const t of cfg.tools ?? []) tools.set(t.name, t.annotations ?? null);
+        inventoryCache.set(key, tools);
+      }
+      for (const [key, n] of seen) if (n > 1) inventoryCache.delete(key);
+    } catch {
+      /* no inventory: unannotated */
+    }
+  }
+  return inventoryCache.get(foldServerName(server))?.get(tool) ?? null;
+}
+
+export function _resetRolesCache(): void {
+  inventoryCache = null;
 }
 
 /** Built-in tools that return content from outside the machine. Bare,
@@ -61,8 +109,15 @@ export function toolRole(toolName: string, policy: Config['policy']['untrustedCo
     if (configured === 'source') return { source: true, action: false };
     if (configured === 'action') return { source: false, action: true };
     if (configured === 'read') return { source: false, action: false };
+    const serverLower = mcp.server.toLowerCase();
+    if (AGENT_INTERNAL_PREFIXES.some((p) => serverLower.startsWith(p)))
+      return { source: false, action: false };
     if (BUILTIN_SOURCES.has(bare)) return { source: true, action: false };
-    return { source: true, action: true };
+    // Annotations add caution only (P2 decision 9.1): a declared
+    // destructiveHint makes the call destructive; readOnlyHint or
+    // openWorldHint:false never relax by themselves.
+    const ann = resolveToolAnnotations(mcp.server, mcp.bare);
+    return { source: true, action: true, destructive: ann?.destructiveHint === true };
   }
   return { source: BUILTIN_SOURCES.has(bare), action: false };
 }

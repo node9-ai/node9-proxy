@@ -28,7 +28,7 @@ import { checkProvenance } from '../utils/provenance.js';
 import { hashToolDefinitions, getServerKey, checkPin, updatePin } from '../mcp-pin';
 import { tokenize } from '../mcp-cmd';
 import type { McpToolInfo } from '../daemon/mcp-tools';
-import { getServerConfig, deriveServerName } from '../daemon/mcp-tools';
+import { getServerConfig, deriveServerName, sanitizeToolAnnotations } from '../daemon/mcp-tools';
 import {
   DAEMON_PORT,
   DAEMON_HOST,
@@ -669,8 +669,23 @@ export async function runMcpGateway(
         );
 
         // 1. Notify daemon of discovery (handles drift & new servers)
-        if (isDaemonRunning() && process.env.NODE9_TESTING !== '1') {
-          const toolSummary = tools.map((t) => ({ name: t.name, description: t.description }));
+        if (
+          isDaemonRunning() &&
+          (process.env.NODE9_TESTING !== '1' || process.env.NODE9_TEST_DISCOVERY === '1')
+        ) {
+          // Name, description and the boolean annotation hints (fw#318 P2):
+          // the hook reads them from the inventory to class the tool.
+          const toolSummary = tools.map((t) => ({
+            name: t.name,
+            description: t.description,
+            ...(sanitizeToolAnnotations((t as { annotations?: unknown }).annotations)
+              ? {
+                  annotations: sanitizeToolAnnotations(
+                    (t as { annotations?: unknown }).annotations
+                  ),
+                }
+              : {}),
+          }));
           fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/mcp/discovered`, {
             method: 'POST',
             headers: {

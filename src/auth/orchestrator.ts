@@ -42,7 +42,7 @@ import {
 } from '@node9/policy-engine';
 import { knownProjectHosts } from '../exposure/known-hosts';
 import { toolRole, splitMcpToolName, sourceWord, EXPOSURE_LABEL } from '../exposure/roles';
-import { isTrustedRecipient } from './trusted-recipients';
+import { isTrustedRecipient, addTrustedRecipient } from './trusted-recipients';
 import { isTrustedHost, matchesTrustedHost } from './trusted-hosts';
 import { getConfig, getCredentials } from '../config';
 import { isIgnoredTool, evaluatePolicy } from '../policy';
@@ -762,6 +762,7 @@ async function _authorizeHeadlessCore(
   // Fail open like taint: no daemon, no record, no hold.
   let exposureReview: string | null = null;
   let exposureKeys: string[] = [];
+  let exposureDestinations: string[] = [];
   const ucPolicy = config.policy.untrustedContent;
   if (ucPolicy?.enabled && !taintWarning && meta?.sessionId && !isManual) {
     // MCP actions (the hook's namespaced names, the gateway's flagged bare
@@ -838,7 +839,11 @@ async function _authorizeHeadlessCore(
           else logged.push(d);
         }
         const bare = splitMcpToolName(toolName)?.bare ?? toolName;
-        if (dests.size === 0 && acts && isDestructiveToolName(bare)) {
+        if (
+          dests.size === 0 &&
+          acts &&
+          (role.destructive === true || isDestructiveToolName(bare))
+        ) {
           held.push({ dest: '', why: 'destructive' });
         }
         const last = rec.sources[rec.sources.length - 1];
@@ -865,6 +870,20 @@ async function _authorizeHeadlessCore(
           );
           exposureReview = `🛡️ Node9: this session read ${read}. This call ${parts.join('; and ')}.`;
           exposureKeys = held.filter((h) => h.dest).map((h) => `${toolName}|${h.dest}`);
+          // The destinations ride on the card for "Approve and trust this
+          // address" (P5); the inline prompt names the command instead.
+          exposureDestinations = held
+            .filter((h) => h.dest)
+            .map((h) => h.dest)
+            .slice(0, 10);
+          if (exposureDestinations.length > 0 && options?.deferReview) {
+            exposureReview +=
+              ` To trust ${exposureDestinations.length === 1 ? 'this address' : 'these addresses'} for good, the user runs: ` +
+              exposureDestinations
+                .map((d) => `node9 trust recipient add ${destinationValue(d)}`)
+                .join('; ') +
+              '.';
+          }
         } else if (held.length > 0 || logged.length > 0) {
           // Judged and let through: a delivery row, not a decision (no eid,
           // so the shipper skips it). Kinds and counts only, never a value.
@@ -1813,6 +1832,7 @@ async function _authorizeHeadlessCore(
     riskMetadata.ruleDescription = (
       appPermReview ? `${exposureReview}\n${appPermReview}` : exposureReview
     ).slice(0, 1024);
+    if (exposureDestinations.length > 0) riskMetadata.exposureDestinations = exposureDestinations;
   } else if (appPermReview) {
     // Org-set per-tool review (MCP app permission) — same fall-through-to-race
     // shape as taint, at elevated (not maximum) tier. The reason string rides as
@@ -2106,7 +2126,8 @@ async function _authorizeHeadlessCore(
           appPermReview || callSpecificReview() ? true : undefined,
           undefined,
           localSmartRuleMatched || options?.localSmartRuleMatched,
-          options?.socketActivitySent
+          options?.socketActivitySent,
+          meta?.sessionId
         );
         daemonEntryId = entry.id;
         daemonAllowCount = entry.allowCount;
@@ -2165,8 +2186,19 @@ async function _authorizeHeadlessCore(
           policyMatchedField,
           policyMatchedWord,
           daemonAllowCount,
-          riskMetadata?.ruleDescription
+          riskMetadata?.ruleDescription,
+          exposureDestinations
         );
+
+        if (decision === 'trust_recipients') {
+          // fw#318 P5: allow this call and trust its destinations for good,
+          // unless the machine's policy is the workspace's (the list is then
+          // the organisation's; the call is still allowed once).
+          if (config.policySource !== 'workspace') {
+            for (const d of exposureDestinations) addTrustedRecipient(d, 'approval');
+          }
+          return { approved: true, checkedBy: 'daemon', decisionSource: 'native' } as AuthResult;
+        }
 
         if (decision === 'always_allow') {
           // fix #5 (behavioral half): for an app-perm review, do NOT persist a

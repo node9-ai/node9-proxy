@@ -30,12 +30,13 @@ export function resolveNativeDecision(opts: {
   output: string;
   elapsedMs: number;
   locked: boolean;
-}): 'allow' | 'deny' | 'always_allow' {
+}): 'allow' | 'deny' | 'always_allow' | 'trust_recipients' {
   const { code, output, elapsedMs, locked } = opts;
   if (locked) return 'deny';
   // Fail closed: an affirmative that arrives faster than a human could read the
   // dialog and click is spurious (timeout-as-0, WM auto-close, headless dismiss).
   const tooFast = elapsedMs < MIN_INTERACTION_MS;
+  if (output.includes('Allow & trust')) return tooFast ? 'deny' : 'trust_recipients';
   if (output.includes('Always Allow')) return tooFast ? 'deny' : 'always_allow';
   if (code === 0) return tooFast ? 'deny' : 'allow';
   return 'deny';
@@ -165,7 +166,8 @@ function buildPlainMessage(
   explainableLabel: string | undefined,
   locked: boolean,
   allowCount: number = 1,
-  ruleDescription?: string
+  ruleDescription?: string,
+  exposure = false
 ): string {
   const lines: string[] = [];
 
@@ -179,14 +181,18 @@ function buildPlainMessage(
   lines.push('');
   lines.push(formattedArgs);
 
-  if (allowCount >= 3) {
+  if (allowCount >= 3 && !exposure) {
     lines.push('');
     lines.push(`💡 Approved ${allowCount - 1}× before — "Always Allow" creates a permanent rule`);
   }
 
   if (!locked) {
     lines.push('');
-    lines.push('↵ Enter = Allow ↵   |   ⎋ Esc = Block ⎋   |   "Always Allow" = never ask again');
+    lines.push(
+      exposure
+        ? '↵ Enter = Allow once   |   ⎋ Esc = Block   |   "Allow & trust" = this address is fine from now on'
+        : '↵ Enter = Allow ↵   |   ⎋ Esc = Block ⎋   |   "Always Allow" = never ask again'
+    );
   }
 
   return lines.join('\n');
@@ -199,7 +205,8 @@ function buildPangoMessage(
   explainableLabel: string | undefined,
   locked: boolean,
   allowCount: number = 1,
-  ruleDescription?: string
+  ruleDescription?: string,
+  exposure = false
 ): string {
   const lines: string[] = [];
 
@@ -216,7 +223,7 @@ function buildPangoMessage(
   lines.push('');
   lines.push(`<tt>${escapePango(formattedArgs)}</tt>`);
 
-  if (allowCount >= 3) {
+  if (allowCount >= 3 && !exposure) {
     lines.push('');
     lines.push(
       `<span foreground="#f0c040">💡 Approved ${allowCount - 1}× before — "Always Allow" creates a permanent rule</span>`
@@ -226,7 +233,9 @@ function buildPangoMessage(
   if (!locked) {
     lines.push('');
     lines.push(
-      '<small>↵ Enter = <b>Allow ↵</b>   |   ⎋ Esc = <b>Block ⎋</b>   |   "Always Allow" = never ask again</small>'
+      exposure
+        ? '<small>↵ Enter = <b>Allow once</b>   |   ⎋ Esc = <b>Block</b>   |   "Allow &amp; trust" = this address is fine from now on</small>'
+        : '<small>↵ Enter = <b>Allow ↵</b>   |   ⎋ Esc = <b>Block ⎋</b>   |   "Always Allow" = never ask again</small>'
     );
   }
 
@@ -243,9 +252,12 @@ export async function askNativePopup(
   matchedField?: string,
   matchedWord?: string,
   allowCount: number = 1,
-  ruleDescription?: string
-): Promise<'allow' | 'deny' | 'always_allow'> {
+  ruleDescription?: string,
+  /** fw#318 P5: an exposure card offers "Allow & trust" instead of "Always Allow". */
+  exposureDestinations: readonly string[] = []
+): Promise<'allow' | 'deny' | 'always_allow' | 'trust_recipients'> {
   if (isTestEnv()) return 'deny';
+  const thirdButton = exposureDestinations.length > 0 ? 'Allow & trust' : 'Always Allow';
 
   const { message: formattedArgs, intent } = formatArgs(args, matchedField, matchedWord);
   const intentLabel = intent === 'EDIT' ? 'Code Edit' : 'Action Approval';
@@ -258,7 +270,8 @@ export async function askNativePopup(
     explainableLabel,
     locked,
     allowCount,
-    ruleDescription
+    ruleDescription,
+    exposureDestinations.length > 0
   );
 
   return new Promise((resolve) => {
@@ -288,7 +301,7 @@ export async function askNativePopup(
       if (process.platform === 'darwin') {
         const buttons = locked
           ? `buttons {"Waiting…"} default button "Waiting…"`
-          : `buttons {"Block ⎋", "Always Allow", "Allow ↵"} default button "Allow ↵" cancel button "Block ⎋"`;
+          : `buttons {"Block ⎋", "${thirdButton}", "Allow ↵"} default button "Allow ↵" cancel button "Block ⎋"`;
         const script = `on run argv\ntell application "System Events"\nactivate\ndisplay dialog (item 1 of argv) with title (item 2 of argv) ${buttons}\nend tell\nend run`;
         childProcess = spawn('osascript', ['-e', script, '--', message, title]);
       } else if (process.platform === 'linux') {
@@ -299,7 +312,8 @@ export async function askNativePopup(
           explainableLabel,
           locked,
           allowCount,
-          ruleDescription
+          ruleDescription,
+          exposureDestinations.length > 0
         );
         // No --timeout: zenity's timeout exit code is 0 on X11/XWayland, which
         // the close handler would silently treat as "allow". Instead we rely on
@@ -318,7 +332,7 @@ export async function askNativePopup(
         ];
         if (!locked) {
           argsList.push('--cancel-label', 'Block  ⎋');
-          argsList.push('--extra-button', 'Always Allow');
+          argsList.push('--extra-button', thirdButton);
         }
         childProcess = spawn('zenity', argsList);
       } else if (process.platform === 'win32') {

@@ -256,7 +256,9 @@ export async function registerDaemonEntry(
    *  Set when a local smart rule with verdict "review" matched in the hook process. */
   localSmartRuleMatched?: boolean,
   /** When false, the socket send of the activity event failed — daemon must emit it. */
-  socketActivitySent?: boolean
+  socketActivitySent?: boolean,
+  /** The agent session, so a "trust this address" decision can clear its exposure (fw#318 P5). */
+  sessionId?: string
 ): Promise<{ id: string; allowCount: number }> {
   const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
   const ctrl = new AbortController();
@@ -283,6 +285,7 @@ export async function registerDaemonEntry(
         ...(skipBackgroundAuth && { skipBackgroundAuth: true }),
         ...(viewOnly && { viewOnly: true }),
         ...(localSmartRuleMatched && { localSmartRuleMatched: true }),
+        ...(sessionId && { sessionId }),
       }),
       signal: ctrl.signal,
     });

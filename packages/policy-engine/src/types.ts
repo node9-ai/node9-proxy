@@ -122,4 +122,7 @@ export interface RiskMetadata {
   ruleName?: string;
   /** Human-readable description of the matched smart rule or shield. */
   ruleDescription?: string;
+  /** fw#318: the destinations an exposure review holds ('email:x@y', 'host:h'),
+   *  for the "Approve and trust this address" button. Local surfaces only. */
+  exposureDestinations?: string[];
 }

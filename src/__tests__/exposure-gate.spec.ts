@@ -274,3 +274,19 @@ describe('exposure gate: a send after the session read outside content', () => {
     expect(mockCheckSessionExposure).not.toHaveBeenCalled();
   });
 });
+
+// fw#318 P5, row B4: the native popup's third button on an exposure card.
+describe('native popup decisions on an exposure card', () => {
+  it('"Allow & trust" resolves to trust_recipients, after a human-speed interval', async () => {
+    const { resolveNativeDecision } = await import('../ui/native.js');
+    expect(
+      resolveNativeDecision({ code: 1, output: 'Allow & trust\n', elapsedMs: 2000, locked: false })
+    ).toBe('trust_recipients');
+    expect(
+      resolveNativeDecision({ code: 1, output: 'Allow & trust\n', elapsedMs: 50, locked: false })
+    ).toBe('deny');
+    expect(
+      resolveNativeDecision({ code: 1, output: 'Always Allow\n', elapsedMs: 2000, locked: false })
+    ).toBe('always_allow');
+  });
+});

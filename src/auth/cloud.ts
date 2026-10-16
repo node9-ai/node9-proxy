@@ -251,7 +251,13 @@ export async function initNode9SaaS(
           cwd: process.cwd(),
           platform: os.platform(),
         },
-        ...(riskMetadata && { riskMetadata }),
+        // Local-only fields (fw#318 exposureDestinations) stay off the wire:
+        // the SaaS validates riskMetadata strictly and would drop it whole.
+        ...(riskMetadata && {
+          riskMetadata: Object.fromEntries(
+            Object.entries(riskMetadata).filter(([, v]) => !Array.isArray(v))
+          ),
+        }),
         ...(ciContext && { ciContext }),
         ...(agentPolicy && { policy: agentPolicy }),
         ...(forceReview && { forceReview: true }),
