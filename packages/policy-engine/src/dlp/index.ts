@@ -65,11 +65,13 @@ interface DlpPattern {
    *  is explicit rather than "group 1 if present". */
   redactGroup?: number;
   /**
-   * Only the tool-argument gate (scanArgs, matchArgumentText) uses this
-   * pattern. Output redaction (redactText) and response-text scanning
-   * (scanText) skip it. For the broad, context-based patterns that name a
-   * secret by its variable or query key: a review at the gate is cheap, a
-   * rewrite of every config file an agent reads is not.
+   * Only the bounded tool-argument gate (matchArgumentText, reached through
+   * inspectArgumentSecrets / scanArgumentSecrets) uses this pattern. The raw
+   * scanners skip it: scanArgs (prompts, tool output, history scans, audit
+   * attribution), scanText (response text) and redactText (output
+   * redaction). For the broad, context-based patterns that name a secret by
+   * its variable or query key: a review on a tool call is cheap, a hard block
+   * on a prompt or a rewrite of every file an agent reads is not.
    */
   argumentsOnly?: boolean;
 }
@@ -142,6 +144,10 @@ const REFERENCE_VALUE_RE =
   /^[$@%]|^(?:process\.env|os\.environ|env|config|settings|self|this|opts?|options|params|cfg)\b/i;
 /** Letters, dots, dashes and underscores only: an identifier or a word, not a generated value. */
 const IDENTIFIER_VALUE_RE = /^[A-Za-z_.-]+$/;
+/** `/home/u/app`, `./src`, `~/dev`, `../x`: a path, not a secret. */
+const PATH_VALUE_RE = /^(?:\/|\.{1,2}\/|~\/)/;
+/** `jwtConstants.secretKey2024`, `cfg.auth.token`: a property reference. */
+const DOTTED_REFERENCE_RE = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/;
 /** An email address next to a password is the login, not the secret. */
 const EMAIL_VALUE_RE = /^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$/;
 
@@ -191,7 +197,7 @@ function looksGenerated(
   if (!lettersOnlyAllowed && IDENTIFIER_VALUE_RE.test(value)) return false;
   if (EMAIL_VALUE_RE.test(value)) return false;
   if (looksLikeJoinedWords(value) || hasSequentialRun(value)) return false;
-  if (value.includes('://')) return false; // a URL has its own patterns
+  if (PATH_VALUE_RE.test(value) || DOTTED_REFERENCE_RE.test(value)) return false;
   if (rejectedByStructuredValidator(value)) return false;
   return shannonEntropy(value) >= minEntropy;
 }
@@ -209,15 +215,12 @@ function nameHoldsCredential(name: string): boolean {
   return !FIXTURE_NAME_RE.test(name) && !DERIVATIVE_NAME_RE.test(name);
 }
 
-const QUERY_CREDENTIAL_VALUE_RE = /=([A-Za-z0-9%+/_.~-]{8,}={0,2})$/;
+const QUERY_CREDENTIAL_VALUE_RE = /=([A-Za-z0-9%+/_.~-]{8,512}={0,2})$/;
 const OTP_SECRET_RE = /^[A-Z2-7]{16,}=*$/i;
-
-const QUERY_CREDENTIAL_NAME_RE = /^[?&;]?([A-Za-z_-]+)=/;
 
 function validateQueryCredential(raw: string): boolean {
   const value = capturedValue(raw, QUERY_CREDENTIAL_VALUE_RE);
-  const name = capturedValue(raw, QUERY_CREDENTIAL_NAME_RE);
-  if (value === null || name === null || !nameHoldsCredential(name)) return false;
+  if (value === null) return false;
   // An otpauth secret is base32: letters and digits 2-7, often letters only.
   if (OTP_SECRET_RE.test(value)) return looksGenerated(value, 16, 3.0, true);
   // Anything else must mix letters and digits and be at least 12 long, so a
@@ -226,14 +229,36 @@ function validateQueryCredential(raw: string): boolean {
   return looksGenerated(value, 12, 3.0);
 }
 
-const ASSIGNED_SECRET_VALUE_RE = /(?:[:=]|=>)\s*["'`]?([A-Za-z0-9+/_.!@#$%^*~-]{12,}={0,2})$/;
+const ASSIGNED_SECRET_VALUE_RE =
+  /(?::=|=>|[:=])[ \t]{0,8}["'`]?([A-Za-z0-9+/_.!@#$%^*~-]{12,512}={0,2})$/;
 
 const ASSIGNED_SECRET_NAME_RE = /^([A-Za-z0-9_]+)/;
+
+const NAME_KEYWORD_RE =
+  /^(?:password|passphrase|passwd|pwd|secret|token|api[_-]?key|auth[_-]?key|private[_-]?key|access[_-]?key|client[_-]?secret)/i;
+
+/**
+ * The keyword must end the name or be followed by a new part of it: `_`,
+ * `-`, a digit, or an uppercase letter after a lowercase keyword
+ * (`secretKey`). `tokenizer`, `passwords`, `TOKENIZER` are other words.
+ */
+function keywordEndsAPart(name: string): boolean {
+  const keyword = name.match(NAME_KEYWORD_RE)?.[0];
+  if (!keyword) return false;
+  const next = name.charAt(keyword.length);
+  if (next === '' || /[_\-0-9]/.test(next)) return true;
+  const lastIsLower = /[a-z]/.test(keyword.charAt(keyword.length - 1));
+  return lastIsLower && /[A-Z]/.test(next);
+}
+
+/** `arn:aws:secretsmanager:...:secret:prod/x`: an ARN segment, not an assignment. */
+const ARN_CONTEXT_RE = /\barn:[A-Za-z0-9-]*:[^\s"'`]*$/i;
 
 function validateAssignedSecret(raw: string, before = ''): boolean {
   const value = capturedValue(raw, ASSIGNED_SECRET_VALUE_RE);
   const name = capturedValue(raw, ASSIGNED_SECRET_NAME_RE);
   if (value === null || name === null) return false;
+  if (!keywordEndsAPart(name) || ARN_CONTEXT_RE.test(before)) return false;
   // The match starts at the keyword; the rest of the name (`FAKE_` in
   // `FAKE_TOKEN`, `mock` in `mockSecret`) is in the text just before it.
   const prefix = before.match(/[A-Za-z0-9_]*$/)?.[0] ?? '';
@@ -762,7 +787,7 @@ export const DLP_PATTERNS: DlpPattern[] = [
   {
     name: 'Credential in URL Query',
     regex:
-      /(?:^|[?&;])(?:api[_-]?key|access[_-]?token|client[_-]?secret|secret[_-]?key|auth[_-]?token|private[_-]?key|secret|token|apikey|password|passwd|pwd|auth|sig|signature)=([A-Za-z0-9%+/_.~-]{8,}={0,2})/i,
+      /(?:^|[?&;])(?:api[_-]?key|access[_-]?token|client[_-]?secret|secret[_-]?key|auth[_-]?token|private[_-]?key|secret|token|apikey|password|passwd|pwd|auth|sig|signature)=([A-Za-z0-9%+/_.~-]{8,512}={0,2})/i,
     severity: 'review',
     keywords: ['secret', 'token', 'key', 'password', 'passwd', 'pwd', 'auth', 'sig'],
     validate: validateQueryCredential,
@@ -780,7 +805,7 @@ export const DLP_PATTERNS: DlpPattern[] = [
   {
     name: 'Assigned Secret',
     regex:
-      /(?:password|passphrase|passwd|pwd|secret|token|api[_-]?key|auth[_-]?key|private[_-]?key|access[_-]?key|client[_-]?secret)[A-Za-z0-9_]*["'\]]{0,2}\s*(?:[:=]|=>)\s*["'`]?([A-Za-z0-9+/_.!@#$%^*~-]{12,}={0,2})/i,
+      /(?:password|passphrase|passwd|pwd|secret|token|api[_-]?key|auth[_-]?key|private[_-]?key|access[_-]?key|client[_-]?secret)[A-Za-z0-9_]{0,40}["'\]]{0,2}[ \t]{0,8}(?::=|=>|[:=])[ \t]{0,8}["'`]?([A-Za-z0-9+/_.!@#$%^*~-]{12,512}={0,2})/i,
     severity: 'review',
     keywords: ['password', 'passphrase', 'passwd', 'pwd', 'secret', 'token', 'key'],
     validate: validateAssignedSecret,
@@ -996,8 +1021,11 @@ function firstAcceptedMatch(pattern: DlpPattern, text: string): string | null {
     }
     if (!suppressed(pattern, m[0], text.slice(Math.max(0, m.index - 64), m.index))) return m[0];
     // On rejection, exec's own lastIndex advance (to the end of the match) is
-    // sufficient: every DLP pattern is \b-anchored and separator-free, so a
-    // valid match can never begin INSIDE a rejected one. No overlap resume is
+    // sufficient: the vendor patterns are \b-anchored and separator-free, so a
+    // valid match can never begin INSIDE a rejected one. The two context
+    // patterns (argumentsOnly) start at a keyword or a query separator; a
+    // rejected one can hide a later assignment on the same run only when the
+    // two overlap, an accepted limit for a review-level heuristic. No overlap resume is
     // needed here (unlike hasValidCard / hasValidIban, whose tokens contain
     // spaces and keep their own resume, witnessed by the card and IBAN specs).
   }
@@ -1064,6 +1092,8 @@ export function scanArgs(args: unknown, depth = 0, fieldPath = 'args'): DlpMatch
     const assignmentCtx = isAssignmentContext(text);
 
     for (const pattern of DLP_PATTERNS) {
+      // Context patterns belong to the bounded argument gate only.
+      if (pattern.argumentsOnly) continue;
       // Keyword prefilter: if the pattern declares keywords, at least one must
       // appear in the string before we invoke the regex engine.
       if (

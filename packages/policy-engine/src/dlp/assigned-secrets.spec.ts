@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { scanArgs, scanText, redactText } from './index';
-import { inspectArgumentSecrets } from './arguments';
+import { inspectArgumentSecrets, scanArgumentSecrets } from './arguments';
+
+// The bounded argument gate: the only entry point that uses the context patterns.
+const gate = (args: unknown) => scanArgumentSecrets(args);
 
 // Name-based patterns from node9Firewall#348: a credential in a URL query
 // value and a secret assigned to a telling name. Every value below is
@@ -14,7 +17,7 @@ const OTP_LONG = ['QJAMKITDWZ', 'PDTY4MZIYU', '2PHAKGSJVYNW'].join('');
 
 describe('Credential in URL Query', () => {
   it('reviews a generated value under a secret-naming query key', () => {
-    const m = scanArgs({ url: `https://api.example.test/v1/users?q=1&apiKey=${HEX32}` });
+    const m = gate({ url: `https://api.example.test/v1/users?q=1&apiKey=${HEX32}` });
     expect(m?.patternName).toBe('Credential in URL Query');
     expect(m?.severity).toBe('review');
     expect(m?.redactedSample).not.toContain(HEX32.slice(4, -4));
@@ -22,7 +25,7 @@ describe('Credential in URL Query', () => {
 
   it('reviews the secret of an otpauth URI, letters-only base32 included', () => {
     for (const secret of [OTP, OTP_LONG, 'GYKNEFFDCUPMVEZB']) {
-      const m = scanArgs({
+      const m = gate({
         content: `expect(uri).to eq 'otpauth://totp/Big%20Corp:alice%40bigco.test?secret=${secret}&issuer=Big%20Corp'`,
       });
       expect(m?.patternName, secret).toBe('Credential in URL Query');
@@ -30,7 +33,7 @@ describe('Credential in URL Query', () => {
   });
 
   it('finds the value in a query fragment without a scheme', () => {
-    expect(scanArgs({ content: `@"&secret=${OTP_LONG}";` })?.patternName).toBe(
+    expect(gate({ content: `@"&secret=${OTP_LONG}";` })?.patternName).toBe(
       'Credential in URL Query'
     );
   });
@@ -46,13 +49,14 @@ describe('Credential in URL Query', () => {
       'https://example.test/api?secret=client-secret-value',
       'https://example.test/x?signature=sha256',
     ];
-    for (const text of benign) expect(scanArgs({ url: text }), text).toBeNull();
+    for (const text of benign) expect(gate({ url: text }), text).toBeNull();
   });
 
-  it('is a gate-only pattern: output redaction and response text do not use it', () => {
+  it('is a gate-only pattern: raw scanners, output redaction and response text do not use it', () => {
     const text = `https://api.example.test/v1?apiKey=${HEX32}`;
     expect(redactText(text).found).toEqual([]);
     expect(scanText(text)).toBeNull();
+    expect(scanArgs({ prompt: text })).toBeNull();
   });
 });
 
@@ -69,7 +73,7 @@ describe('Assigned Secret', () => {
       `'passphrase' => '${GENERATED}'`,
     ];
     for (const line of lines) {
-      const m = scanArgs({ content: line });
+      const m = gate({ content: line });
       expect(m?.patternName, line).toBe('Assigned Secret');
       expect(m?.severity, line).toBe('review');
     }
@@ -103,19 +107,19 @@ describe('Assigned Secret', () => {
       `password_length: ${GENERATED}`,
       "login, password = 'someone@example.test', 'mlbbmimevm'",
     ];
-    for (const text of benign) expect(scanArgs({ content: text }), text).toBeNull();
+    for (const text of benign) expect(gate({ content: text }), text).toBeNull();
   });
 
   it('does not reverse a checksum decision on a vendor-shaped look-alike', () => {
     // A GitHub token shape with a failing CRC32 is allowed on purpose.
     const lookalike = 'ghp_' + 'A'.repeat(30) + 'bcdef1';
-    expect(scanArgs({ content: `export GITHUB_TOKEN=${lookalike}` })).toBeNull();
-    expect(scanArgs({ url: `https://log.example.test/?token=${lookalike}` })).toBeNull();
+    expect(gate({ content: `export GITHUB_TOKEN=${lookalike}` })).toBeNull();
+    expect(gate({ url: `https://log.example.test/?token=${lookalike}` })).toBeNull();
   });
 
   it('yields to a block-severity match in the same text', () => {
     const key = ['AKIA', 'QX7Z3BHD', 'M7NPLKV5'].join('');
-    const m = scanArgs({ content: `AWS_ACCESS_KEY_ID=${key}\nJWT_SECRET=${GENERATED}` });
+    const m = gate({ content: `AWS_ACCESS_KEY_ID=${key}\nJWT_SECRET=${GENERATED}` });
     expect(m?.severity).toBe('block');
     expect(m?.patternName).toBe('AWS Access Key ID');
   });
@@ -126,10 +130,38 @@ describe('Assigned Secret', () => {
     expect(r.coverage).toBe('complete');
   });
 
-  it('is a gate-only pattern: output redaction and response text do not use it', () => {
+  it('is a gate-only pattern: raw scanners, output redaction and response text do not use it', () => {
     const text = `password: ${GENERATED}`;
     expect(redactText(text).result).toBe(text);
     expect(scanText(text)).toBeNull();
+    expect(scanArgs({ prompt: text })).toBeNull();
+  });
+
+  it('stays linear on long runs of a keyword', () => {
+    for (const word of ['pwd', 'token', 'api_key', 'secret', 'password=']) {
+      const text = word.repeat(Math.ceil(200_000 / word.length));
+      const start = performance.now();
+      gate({ content: text });
+      expect(performance.now() - start, word).toBeLessThan(500);
+    }
+  });
+
+  it('reviews a Go short variable declaration', () => {
+    expect(gate({ content: `apiKey := "${GENERATED}"` })?.patternName).toBe('Assigned Secret');
+  });
+
+  it('leaves paths, ARNs, property references and longer words alone', () => {
+    const benign = [
+      'why does export PWD=/home/someone/project/packages break',
+      '"pwd": "/Users/alice/dev/my-app2/src"',
+      'cd ./build && TOKEN_FILE=~/secrets/token2.txt run',
+      'aws secretsmanager get-secret-value --secret-id arn:aws:secretsmanager:us-east-1:123456789012:secret:prod/billing/stripe-api-Xy9Z1a',
+      'tokenizer: "sentence-transformers/all-MiniLM-L6-v2"',
+      'TOKENIZER=bert-base-uncased-v2x',
+      'secretOrKey: jwtConstants.secretKey2024',
+      'passwords: Xk9fQ2mZ7pLw4RtB8vN',
+    ];
+    for (const text of benign) expect(gate({ content: text }), text).toBeNull();
   });
 });
 
@@ -137,14 +169,17 @@ describe('Database Connection String with a driver suffix', () => {
   it('blocks a SQLAlchemy-style scheme with an inline password', () => {
     const pw = ['idqg', 'Rt7', 'x'].join('');
     for (const scheme of ['mysql+pymysql', 'postgresql+psycopg2', 'mariadb+mariadbconnector']) {
-      const m = scanArgs({ content: `DATABASE_URI = '${scheme}://root:${pw}@db.test/app'` });
+      const m = gate({ content: `DATABASE_URI = '${scheme}://root:${pw}@db.test/app'` });
       expect(m?.patternName, scheme).toBe('Database Connection String');
       expect(m?.severity, scheme).toBe('block');
+      expect(scanArgs({ content: `${scheme}://root:${pw}@db.test/app` })?.patternName).toBe(
+        'Database Connection String'
+      );
     }
   });
 
   it('still ignores a user-only URL and an http basic-auth URL', () => {
-    expect(scanArgs({ content: 'mysql+pymysql://root@db.test/app' })).toBeNull();
-    expect(scanArgs({ content: 'http://user:pass1234@peer1.test:8080/eureka/' })).toBeNull();
+    expect(gate({ content: 'mysql+pymysql://root@db.test/app' })).toBeNull();
+    expect(gate({ content: 'http://user:pass1234@peer1.test:8080/eureka/' })).toBeNull();
   });
 });
