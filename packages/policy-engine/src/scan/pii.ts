@@ -17,6 +17,15 @@
 // \b on both sides, so a digit immediately before or after the number
 // defeats them, exactly as it did before Luhn was added.
 //
+// An unseparated card-shaped run that directly follows `<digit>.` is not a
+// card. A `.` is a word boundary, so without that rule the fractional part of
+// a float printed at full precision (16 or 17 digits after `0.`) is read as a
+// card, and 70 of the 4,950 fractions k/n with 2 <= n <= 100 pass Luhn
+// (node9Firewall#333). The rule lives in hasValidCard, not in the regexes, so
+// they stay lookbehind-free (safe-regex2, house style). Accepted gap: an
+// unseparated card written directly after a digit and a dot ("1.<card>") is
+// not detected; a grouped one still is, since a fraction has no separators.
+//
 // This file is part of the extractor-version hash set
 // (scripts/check-extractor-version.mjs): editing it changes detector output.
 
@@ -72,11 +81,25 @@ function hasValidCard(text: string): boolean {
     const re = new RegExp(base.source, 'g');
     let m: RegExpExecArray | null;
     while ((m = re.exec(text)) !== null) {
-      if (validateLuhn(m[0].replace(/\D/g, ''))) return true;
+      const digits = m[0].replace(/\D/g, '');
+      if (!isDecimalFraction(text, m.index, digits.length === m[0].length)) {
+        if (validateLuhn(digits)) return true;
+      }
       re.lastIndex = m.index + 1;
     }
   }
   return false;
+}
+
+/**
+ * True if an unseparated digit run at `index` is the fractional part of a
+ * number: it directly follows `<digit>.` (node9Firewall#333). A grouped run
+ * ("4xxx 4xxx ...") is never a fraction, so it is not exempt.
+ */
+function isDecimalFraction(text: string, index: number, unseparated: boolean): boolean {
+  if (!unseparated || text[index - 1] !== '.') return false;
+  const before = text.charCodeAt(index - 2);
+  return before >= 48 && before <= 57;
 }
 
 /** Same overlapping-search shape as hasValidCard; validateIban strips formatting itself. */

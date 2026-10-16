@@ -11,7 +11,7 @@ import os from 'os';
 import { randomUUID } from 'crypto';
 import { RiskMetadata } from '../context-sniper';
 import { DAEMON_PORT, DAEMON_HOST } from '../auth/daemon';
-import type { ScanFinding } from '@node9/policy-engine';
+import { scanArgumentSecrets, type ScanFinding } from '@node9/policy-engine';
 import { SuggestionTracker, type Suggestion } from './suggestion-tracker.js';
 import { TaintStore, SessionTaintStore } from './taint-store.js';
 import { sessionCounters } from './session-counters.js';
@@ -203,19 +203,26 @@ export { atomicWriteSync };
 const SECRET_KEY_RE = /password|secret|token|key|apikey|credential|auth/i;
 
 export function redactArgs(value: unknown): unknown {
+  if (scanArgumentSecrets(value)) return '[REDACTED]';
+  return redactArgFields(value);
+}
+
+function redactArgFields(value: unknown): unknown {
   if (!value || typeof value !== 'object') return value;
-  if (Array.isArray(value)) return value.map(redactArgs);
-  // Null-prototype target: on a plain `{}`, assigning the key `__proto__` hits
-  // the inherited setter instead of creating an own property, so an argument by
-  // that name never reaches JSON.stringify and vanishes from the audit entry.
-  // Losing an audited field is the real risk here, not pollution — the value is
-  // per-object and stringify ignores the prototype. Args arrive via JSON.parse,
-  // which does give `__proto__` as an own key.
-  const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
-  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    result[k] = SECRET_KEY_RE.test(k) ? '[REDACTED]' : redactArgs(v);
-  }
-  return result;
+  if (Array.isArray(value)) return value.map(redactArgFields);
+  // Object.fromEntries defines each key as an own data property, so a key named
+  // `__proto__` stays an own property instead of hitting the inherited setter:
+  // an argument by that name still reaches JSON.stringify and the audit entry.
+  // The copy then gets a null prototype, so no argument key can ever resolve
+  // through Object.prototype. No computed-key assignment anywhere. Args arrive
+  // via JSON.parse, which does give `__proto__` as an own key.
+  const copy = Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([k, v]) => [
+      k,
+      SECRET_KEY_RE.test(k) ? '[REDACTED]' : redactArgFields(v),
+    ])
+  );
+  return Object.setPrototypeOf(copy, null) as Record<string, unknown>;
 }
 
 export function appendAuditLog(data: { toolName: string; args: unknown; decision: string }): void {

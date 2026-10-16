@@ -187,7 +187,7 @@ describe('D. it can never crash a tool call', () => {
 // WebFetch still reached the metadata endpoint while `navigate` was blocked.
 describe('E. placement', () => {
   it('E1 an IGNORED tool is still judged', async () => {
-    const { evaluatePolicy } = await import('../policy');
+    const { evaluatePolicy } = await import('../policy/index.js');
     const config = {
       settings: { mode: 'standard' },
       policy: {

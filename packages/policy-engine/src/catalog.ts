@@ -84,6 +84,34 @@ export const BUILTIN_DANGEROUS_WORDS: readonly string[] = ['mkfs', 'shred'];
 // none produces false positives.
 
 const PRODUCT_CHECKS: readonly CheckDef[] = [
+  {
+    id: 'files.shell-startup',
+    group: 'files',
+    title: 'Shell startup files',
+    catches: 'Writes, replacements and removals of personal shell startup files',
+    values: ALL,
+    defaultValue: 'review',
+    legacy: ['review-shell-startup-mutation'],
+  },
+  {
+    id: 'files.system-auth',
+    group: 'files',
+    title: 'System authentication files',
+    catches: 'Changes to system authentication files and PAM configuration',
+    values: ['block'],
+    defaultValue: 'block',
+    floor: 'block',
+    legacy: ['block-system-auth-mutation'],
+  },
+  {
+    id: 'files.password-hashes',
+    group: 'files',
+    title: 'System password hashes',
+    catches: 'Reads and copies of /etc/shadow and /etc/gshadow',
+    values: ALL,
+    defaultValue: 'review',
+    legacy: ['review-password-hash-read'],
+  },
   // ── Commands ────────────────────────────────────────────────────────────
   {
     id: 'commands.inline-exec',
@@ -98,7 +126,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
     id: 'commands.eval-dynamic',
     group: 'commands',
     title: 'Eval of dynamic content',
-    catches: 'a variable or a subshell inside eval or a -c payload',
+    catches: 'generated executable names, shell code from stdin, or dynamic eval/-c payloads',
     values: ALL,
     defaultValue: 'review',
     legacy: ['Node9: Eval Dynamic Content'],

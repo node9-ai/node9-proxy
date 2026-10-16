@@ -149,8 +149,11 @@ check_review "destroy_cluster"     '{"tool_name":"destroy_cluster","tool_input":
 
 echo -e "\n  ${YELLOW}Claude Code Bash tool — dangerous commands (review-tier → inline ask):${RESET}"
 
-# 1. Test 'rm' on a SENSITIVE path (not in allowPaths and not in /tmp)
-check_review "Bash: rm /etc/passwd"    '{"tool_name":"Bash","tool_input":{"command":"rm /etc/passwd"}}'
+# 1. Test 'rm' on a path outside the project (not in allowPaths and not in /tmp)
+check_review "Bash: rm /opt/app/config.yml" '{"tool_name":"Bash","tool_input":{"command":"rm /opt/app/config.yml"}}'
+
+# 1b. A system authentication file is a locked block (files.system-auth), never a review
+check_blocked "Bash: rm /etc/passwd"   '{"tool_name":"Bash","tool_input":{"command":"rm /etc/passwd"}}'
 
 # 2. Test a "Nuke" word (drop) inside the sandbox (Nukes should be blocked everywhere)
 check_review "Bash: drop /tmp/db"      '{"tool_name":"Bash","tool_input":{"command":"psql -c \"drop table users\""}}'

@@ -22,6 +22,7 @@ import {
 } from '../../auth/daemon';
 import {
   scanArgs,
+  inspectArgumentSecrets,
   scanText,
   redactText,
   scanInjection,
@@ -136,6 +137,14 @@ function buildArgsField(rawInput: unknown): Record<string, unknown> {
     if (hit) return { ...hashed, dlpPattern: hit.patternName, dlpSample: hit.redactedSample };
     // Clean, but only meaningful if the scanner actually saw all of it.
     if (!scanCoveredEverything(rawInput)) return { ...hashed, argsUnscanned: true };
+    // Fully seen by the raw scanner and clean. The gate's context patterns (a
+    // secret assigned to a telling name, node9Firewall#348) are not in
+    // scanArgs; a value the gate reviewed as a credential must not be stored
+    // in plaintext either. Only a real pattern match counts here: the
+    // gate's "inspection incomplete" marker is not a finding.
+    const gateHit = inspectArgumentSecrets(rawInput).match;
+    if (gateHit)
+      return { ...hashed, dlpPattern: gateHit.patternName, dlpSample: gateHit.redactedSample };
     return { args: JSON.parse(redactSecrets(JSON.stringify(rawInput))) as unknown };
   } catch {
     return hashed;

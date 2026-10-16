@@ -48,4 +48,11 @@ describe('explain ↔ engine reconcile (Phase 3 invariant)', () => {
     const r = await explainPolicy('bash', { command: 'ls -la' });
     expect(r.decision).toBe('allow');
   });
+
+  it('preserves SQL inspection details when resolving shell inputs', async () => {
+    const r = await explainPolicy('postgres:query', { sql: 'SELECT name FROM users' });
+    expect(r.steps).toContainEqual(
+      expect.objectContaining({ name: 'SQL token stripping', outcome: 'checked' })
+    );
+  });
 });

@@ -12,6 +12,22 @@
 export const ENGINE_VERSION = '1.4.0';
 
 export type { SmartCondition, SmartRule, DlpMatch, RiskMetadata } from './types';
+export {
+  collectFileAccesses,
+  evaluateProtectedFileAccess,
+  fileToolOperation,
+  incompleteFileVerdict,
+} from './files/protected-access';
+export type { ProtectedFileVerdict } from './files/protected-access';
+export {
+  normalizeFilePath,
+  isLegacySystemPath,
+  isPasswordHashPath,
+  SYSTEM_AUTH_FILES,
+  SYSTEM_AUTH_DIRS,
+  STARTUP_NAMES,
+} from './files/paths';
+export type { FileAccess, FileAccessContext } from './files/paths';
 
 // DLP — pure scanners. Path-resolving I/O wraps matchSensitivePath in the proxy.
 export {
@@ -48,6 +64,8 @@ export {
   BASH_TOOL_NAMES,
   isBashTool,
   isShellShapedTool,
+  resolveShellInput,
+  shellRuleArgs,
   toolMatchesRule,
   detectInlineExec,
   AST_FS_REGEX_RULES,
@@ -262,3 +280,8 @@ export {
 export type { SsrfTier, SsrfMatch, SsrfVerdict, SsrfFloorOptions } from './egress/ssrf';
 export { extractShellDestTokens } from './shell/index';
 export type { ShellDestToken } from './shell/index';
+
+export type { ToolInspection, ToolInspectionEntry, ShellInputResolution } from './shell/tool-input';
+
+export { inspectArgumentSecrets, scanArgumentSecrets, ARGUMENT_SCAN_LIMITS } from './dlp/arguments';
+export type { ArgumentInspectionResult } from './dlp/arguments';

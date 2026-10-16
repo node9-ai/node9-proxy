@@ -3,7 +3,14 @@
 import { randomUUID } from 'crypto';
 import { askNativePopup } from '../ui/native';
 import { computeRiskMetadata, type RiskMetadata } from '../context-sniper';
-import { scanArgs, scanFilePath, detectArgsPii, matchCanaryArgs, type DlpMatch } from '../dlp';
+import {
+  scanArgumentSecrets,
+  scanArgs,
+  scanFilePath,
+  detectArgsPii,
+  matchCanaryArgs,
+  type DlpMatch,
+} from '../dlp';
 import { canaryValues, loadCanaries } from '../canary/registry';
 import {
   ssrfDestinationFloor,
@@ -11,7 +18,13 @@ import {
   sensitivePathMatch,
   analyzeFsOperation,
   isBashTool,
+  resolveShellInput,
+  evaluateProtectedFileAccess,
+  incompleteFileVerdict,
+  catalogSettingsFromConfig,
+  type ProtectedFileVerdict,
 } from '@node9/policy-engine';
+import { prepareFileAccesses, type PreparedFileAccess } from '../policy/file-access';
 import {
   extractShellDestinations,
   extractToolDestinations,
@@ -186,7 +199,7 @@ function isWriteTool(toolName: string): boolean {
  * Extract file paths that a tool might be reading from or uploading.
  * Used to check taint before approving network/shell operations.
  */
-function extractFilePaths(toolName: string, args: unknown): string[] {
+function extractFilePaths(toolName: string, args: unknown, shellCommand?: string): string[] {
   const paths: string[] = [];
   if (!args || typeof args !== 'object' || Array.isArray(args)) return paths;
   const a = args as Record<string, unknown>;
@@ -197,7 +210,9 @@ function extractFilePaths(toolName: string, args: unknown): string[] {
   }
 
   // Shell command — extract file references from curl -T, scp, rsync, nc etc.
-  const cmd = typeof a.command === 'string' ? a.command : typeof a.cmd === 'string' ? a.cmd : '';
+  const cmd =
+    shellCommand ??
+    (typeof a.command === 'string' ? a.command : typeof a.cmd === 'string' ? a.cmd : '');
   if (cmd) {
     // curl -T <file> or --data-binary @<file> or --upload-file <file>
     for (const m of cmd.matchAll(/(?:-T|--upload-file|--data(?:-binary)?)\s+@?(\S+)/g)) {
@@ -233,17 +248,6 @@ function extractFilePaths(toolName: string, args: unknown): string[] {
 // `.ssh` is a dotfile, while a slash or a quote before the name is just a path
 // or a payload. Measured over 13 shapes, 2026-09-11.
 const NETWORK_COMMAND_RE = new RegExp(`(?<![.\\w-])(${[...NET_BINARIES].join('|')})\\b`);
-
-function isNetworkTool(toolName: string, args: unknown): boolean {
-  const t = toolName.toLowerCase();
-  if (t === 'bash' || t === 'shell' || t === 'run_shell_command' || t === 'terminal.execute') {
-    const a = args as Record<string, unknown> | null;
-    const cmd =
-      typeof a?.command === 'string' ? a.command : typeof a?.cmd === 'string' ? a.cmd : '';
-    return NETWORK_COMMAND_RE.test(cmd);
-  }
-  return false;
-}
 
 // ── Flight Recorder — fire-and-forget socket notify ──────────────────────────
 // Returns a Promise so callers can await socket flush before process.exit().
@@ -458,7 +462,8 @@ async function _authorizeHeadlessCore(
   // (dlpPattern / dlpSample) so EVERY later row -- persistent, trust, race
   // outcome, cloud -- says what was found, the way the block row already does.
   let meta:
-    (NonNullable<typeof metaArg> & { dlpPattern?: string; dlpSample?: string }) | undefined =
+    | (NonNullable<typeof metaArg> & { dlpPattern?: string; dlpSample?: string; ruleName?: string })
+    | undefined =
     options?.cwd && !metaArg?.workingDir ? { ...metaArg, workingDir: options.cwd } : metaArg;
   if (process.env.NODE9_PAUSED === '1') return { approved: true, checkedBy: 'paused' };
   const pauseState = checkPause();
@@ -527,14 +532,111 @@ async function _authorizeHeadlessCore(
   // tier 3, no ruleName) from being resolved by any non-human channel.
   let hardBlockDowngraded = false;
 
+  // The argument scan (bounded decoding views) is the most expensive check on
+  // the hot path. Run it at most once per call and hand the result to the
+  // engine and every guard that needs it.
+  let argScan: DlpMatch | null | undefined;
+  const argumentScan = (): DlpMatch | null => (argScan ??= scanArgumentSecrets(args));
+
+  // Resolve once with this request's cwd/config. This floor cannot be skipped
+  // by the taint branch, ignored Read, or a trusted-host pipeline.
+  let fileAccess: PreparedFileAccess;
+  let fileFinding: ProtectedFileVerdict | null;
+  try {
+    fileAccess = prepareFileAccesses(toolName, args, options?.cwd, config.policy.toolInspection);
+    fileFinding = isManual
+      ? null
+      : evaluateProtectedFileAccess(
+          fileAccess.accesses,
+          fileAccess,
+          catalogSettingsFromConfig(config.settings, config.policy)
+        );
+  } catch (error) {
+    // The hook's outer catch fails open. An operand this analysis cannot
+    // evaluate is held for approval instead; legacy path DLP stays in force.
+    // The message never carries the operand (picomatch reports only lengths).
+    try {
+      appendToLog(HOOK_DEBUG_LOG, {
+        ts: new Date().toISOString(),
+        check: 'file-protection',
+        tool: toolName,
+        message: String((error as Error)?.message ?? error).slice(0, 200),
+      });
+    } catch {
+      /* Logging must not turn a held call into a failure. */
+    }
+    fileAccess = { cwd: options?.cwd, homeDirs: [], accesses: [], handledPaths: new Set() };
+    fileFinding = isManual ? null : incompleteFileVerdict();
+  }
+  const shellInput = resolveShellInput(toolName, args, config.policy.toolInspection);
+  const networkShell = shellInput.kind === 'shell' && NETWORK_COMMAND_RE.test(shellInput.command);
+  const shellReview = !isManual && shellInput.kind === 'uninspectable';
+  if (shellReview) {
+    hashAuditArgs = true;
+    explainableLabel = 'Shell inspection incomplete';
+    policyRuleDescription =
+      'The executable command could not be inspected. Approve this call explicitly.';
+  }
+  const fileReview =
+    !isObserveMode && config.settings.mode !== 'audit' && fileFinding?.decision === 'review';
+  const evaluateCurrentPolicy = (skipIgnoredFastPath = false) =>
+    evaluatePolicy(toolName, args, meta?.agent, options?.cwd, {
+      fileAccess,
+      config,
+      skipIgnoredFastPath,
+      argumentScan: argScan,
+    });
+  if (fileFinding) {
+    meta = { ...meta, ruleName: fileFinding.ruleName };
+    // The command or edit content may contain credentials; do not log it before DLP runs.
+    hashAuditArgs = true;
+    const observing = isObserveMode || config.settings.mode === 'audit';
+    const blocked =
+      !observing && (fileFinding.decision === 'block' || (fileReview && config.settings.panicMode));
+    appendLocalAudit(
+      toolName,
+      args,
+      blocked ? 'deny' : 'allow',
+      observing
+        ? 'observe-mode-file-protection'
+        : blocked
+          ? 'file-protection-block'
+          : fileReview
+            ? 'file-protection-review'
+            : 'file-protection-log',
+      meta,
+      hashAuditArgs
+    );
+    if (blocked)
+      return {
+        approved: false,
+        checkedBy: 'local-policy',
+        blockedBy: 'local-config',
+        reason: fileFinding.reason,
+        blockedByLabel: fileFinding.blockedByLabel,
+        ruleHit: fileFinding.ruleName,
+        ruleDescription: fileFinding.ruleDescription,
+        // Only when the arguments carry no credential: the agent must not be
+        // told that nothing was exposed while the content holds a key.
+        ...(!argumentScan() && {
+          blockKind: 'protected-path' as const,
+          blockedPath: safePathForDisplay(fileFinding.path),
+        }),
+      };
+    if (fileReview) {
+      explainableLabel = fileFinding.blockedByLabel ?? explainableLabel;
+      policyRuleDescription = fileFinding.reason;
+    }
+  }
+
   // ── TAINT CHECK ───────────────────────────────────────────────────────────
   // Before DLP: if this is a network/upload operation touching a previously
   // tainted file, surface a warning through the race engine — the user decides.
   // Taint is heuristic (a file *may* still be sensitive); hard blocks are
   // reserved for team policy shields.
   let taintWarning: string | null = null;
-  if (isNetworkTool(toolName, args)) {
-    const filePaths = extractFilePaths(toolName, args);
+  if (shellInput.kind === 'shell' && NETWORK_COMMAND_RE.test(shellInput.command)) {
+    const filePaths = extractFilePaths(toolName, args, shellInput.command);
     if (filePaths.length > 0) {
       const taintResult = await checkTaint(filePaths);
       if (taintResult.tainted && taintResult.record) {
@@ -551,13 +653,7 @@ async function _authorizeHeadlessCore(
         // a hard block. Only when egress is enabled and the destination isn't on
         // the allow list / private (evaluateEgress returns non-null).
         if (config.policy.egress?.enabled) {
-          const a =
-            args && typeof args === 'object' && !Array.isArray(args)
-              ? (args as Record<string, unknown>)
-              : {};
-          const cmd =
-            typeof a.command === 'string' ? a.command : typeof a.cmd === 'string' ? a.cmd : '';
-          const dests = cmd ? extractShellDestinations(cmd) : [];
+          const dests = extractShellDestinations(shellInput.command);
           const eg = dests.length > 0 ? evaluateEgress(dests, config.policy.egress) : null;
           if (eg) {
             if (!isManual)
@@ -610,15 +706,11 @@ async function _authorizeHeadlessCore(
   if (
     !taintWarning &&
     meta?.sessionId &&
-    (isNetworkTool(toolName, args) || isWriteTool(toolName) || options?.sessionTaintGated === true)
+    (networkShell || isWriteTool(toolName) || options?.sessionTaintGated === true)
   ) {
     const sessionTaint = await checkSessionTaint(meta.sessionId);
     if (sessionTaint.tainted && sessionTaint.record) {
-      const kind = isWriteTool(toolName)
-        ? 'write'
-        : isNetworkTool(toolName, args)
-          ? 'network'
-          : 'state-changing';
+      const kind = isWriteTool(toolName) ? 'write' : networkShell ? 'network' : 'state-changing';
       taintWarning =
         `⚠️ node9 flagged this session — earlier tool output contained ${sessionTaint.record.source}. ` +
         `Approve this ${kind} action before it proceeds.`;
@@ -733,7 +825,12 @@ async function _authorizeHeadlessCore(
         ? (args as Record<string, unknown>)
         : {};
     const filePath = String(argsObj.file_path ?? argsObj.path ?? argsObj.filename ?? '');
-    const dlpMatch: DlpMatch | null = (filePath ? scanFilePath(filePath) : null) ?? scanArgs(args);
+    const dlpMatch: DlpMatch | null =
+      (filePath
+        ? scanFilePath(filePath, options?.cwd, {
+            systemAccessHandled: !isManual && fileAccess.handledPaths.has(filePath),
+          })
+        : null) ?? argumentScan();
     if (dlpMatch) {
       // Attribution and hashing, ONCE, for both paths below: every row written
       // for this call -- the block row, the flagged row, and every outcome row
@@ -791,7 +888,7 @@ async function _authorizeHeadlessCore(
           // so a Write of a real key into .env would otherwise be told "nothing
           // was exposed" (/code-review).
           ...(dlpMatch.patternName === SENSITIVE_PATH_PATTERN &&
-            !scanArgs(args) && {
+            !argumentScan() && {
               blockKind: 'protected-path' as const,
               blockedPath: safePathForDisplay(dlpMatch.redactedSample),
             }),
@@ -936,11 +1033,12 @@ async function _authorizeHeadlessCore(
   // it. The engine's own fast path returns the egress verdict or allow.
   const declaredEgress =
     config.policy.egress?.enabled === true && extractToolDestinations(toolName, args).length > 0;
-  const judge = !isIgnoredTool(toolName) || declaredEgress;
+  const judge =
+    !isIgnoredTool(toolName) || declaredEgress || !!fileFinding || shellInput.kind !== 'not-shell';
 
   if (isObserveMode) {
     if (judge) {
-      const policyResult = await evaluatePolicy(toolName, args, meta?.agent, options?.cwd);
+      const policyResult = await evaluateCurrentPolicy();
       const wouldBlock = policyResult.decision === 'block';
       if (!isManual)
         appendLocalAudit(
@@ -966,7 +1064,7 @@ async function _authorizeHeadlessCore(
 
   if (config.settings.mode === 'audit') {
     if (judge) {
-      const policyResult = await evaluatePolicy(toolName, args, meta?.agent, options?.cwd);
+      const policyResult = await evaluateCurrentPolicy();
       if (policyResult.decision === 'review') {
         // Local row only — the outbox shipper delivers it to the SaaS.
         // (The old decision-time POST is gone: it was a latency tax when
@@ -1021,7 +1119,12 @@ async function _authorizeHeadlessCore(
    * guard that runs early must see what is known so far.
    */
   const callSpecificReview = (): boolean =>
-    dlpReviewFlagged || !!appPermReview || !!taintWarning || !!packageReview;
+    fileReview ||
+    shellReview ||
+    dlpReviewFlagged ||
+    !!appPermReview ||
+    !!taintWarning ||
+    !!packageReview;
   /** A trust session may answer this call. ONE definition for the two places
    *  that must agree: the trust guard that honours a session, and the native
    *  "Always Allow" button that writes one. When they disagreed the button
@@ -1122,7 +1225,7 @@ async function _authorizeHeadlessCore(
       }
     }
 
-    let policyResult = await evaluatePolicy(toolName, args, meta?.agent);
+    let policyResult = await evaluateCurrentPolicy();
 
     // ── Cloud panic mode ──────────────────────────────────────────────
     // When the workspace admin has flipped panic mode on (via the SaaS
@@ -1153,9 +1256,10 @@ async function _authorizeHeadlessCore(
     // `if (!taintWarning && !isIgnoredTool(...))` above, so a tainted call never
     // reaches here — verified by revert experiment, task #16 vector C.)
     // (`!callSpecificReview()`: load-bearing. The engine runs the same scanner
-    // (policy/index.ts) and usually reviews whatever the gate flags, but the
-    // gate reads getConfig(cwd) and the engine getConfig(), so a project config
-    // enabling DLP flags a call the engine allows. Found by /code-review.)
+    // (policy/index.ts) and usually reviews whatever the gate flags; the gate's
+    // own flags (taint, package, app permission, protected file, uninspectable
+    // shell) are not all known to the engine, so the gate keeps the last word.
+    // Found by /code-review when the two read different configs.)
     if (policyResult.decision === 'allow' && !callSpecificReview()) {
       // Local row only — the outbox shipper delivers it. Removing the old
       // awaited POST also removes a cloud round-trip from EVERY allowed
@@ -1321,10 +1425,10 @@ async function _authorizeHeadlessCore(
     }
 
     // Fall back to the label already carried, not a literal "Local Config":
-    // the gate reads getConfig(cwd) and the engine getConfig(), so a project
-    // config enabling DLP flags a call the global engine ALLOWS, and the
-    // literal wiped the DLP label on its way to the approver (/code-review,
-    // DLP-3). When the engine names its own label (a smart-rule review), that
+    // a gate-only flag (DLP, protected file, uninspectable shell) can review a
+    // call the engine ALLOWS, and the literal wiped the DLP label on its way to
+    // the approver (/code-review, DLP-3). The engine now receives the gate's
+    // config, so the two no longer read different files. When the engine names its own label (a smart-rule review), that
     // label replaces the DLP one, as before; combining the two, the way the
     // app-permission branch does, is not done here.
     explainableLabel = policyResult.blockedByLabel || explainableLabel;
@@ -1455,16 +1559,18 @@ async function _authorizeHeadlessCore(
         (candidates.map(findJailedPath).find(Boolean) ??
           candidates.map((c) => findJailedPathIn(c, managedJail)).find(Boolean)) ||
         null;
-      const sensitiveHit = candidates.some((c) => scanFilePath(c));
+      const sensitiveHit = candidates.some((c) =>
+        scanFilePath(c, options?.cwd, {
+          systemAccessHandled: !isManual && fileAccess.handledPaths.has(c),
+        })
+      );
       if (jailHit || sensitiveHit) {
         // Let THE ENGINE decide — the shield's own rules carry the verdict and
         // the rule name (one matcher, one decision-maker; no guard-local
         // verdict logic to drift out of sync). skipIgnoredFastPath: without it
         // the engine's tier-1 ignored fast path returns 'allow' before the
         // shield's `tool:'*'` rules are consulted (the second half of #20).
-        const policyResult = await evaluatePolicy(toolName, args, meta?.agent, options?.cwd, {
-          skipIgnoredFastPath: true,
-        });
+        const policyResult = await evaluateCurrentPolicy(true);
         if (policyResult.decision === 'block') {
           // Mirror the branch-1 hardBlock() shape so the block row is
           // attributed to its rule (Report SHIELDS panel keys on ruleName).

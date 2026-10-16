@@ -1,6 +1,6 @@
 {
   "name": "@node9/policy-engine",
-  "version": "2.30.1",
+  "version": "2.31.0",
   "description": "Shared policy evaluation engine for node9 — DLP, smart rules, AST shell parsing, shields, loop detection. Pure functions, no I/O. Used by both node9-proxy and the node9 SaaS firewall.",
   "license": "Apache-2.0",
   "homepage": "https://node9.ai",
@@ -32,7 +32,8 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "engines": {
     "node": ">=22"

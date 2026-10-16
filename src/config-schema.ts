@@ -139,7 +139,15 @@ export const ConfigFileSchema = z
         sandboxPaths: z.array(z.string()).optional(),
         dangerousWords: z.array(noNewlines).optional(),
         ignoredTools: z.array(z.string()).optional(),
-        toolInspection: z.record(z.string(), z.string()).optional(),
+        toolInspection: z
+          .record(
+            z.string(),
+            z.union([
+              z.string(),
+              z.object({ kind: z.literal('shell'), field: z.string().min(1) }).strict(),
+            ])
+          )
+          .optional(),
         smartRules: z.array(SmartRuleSchema).optional(),
         dlp: z
           .object({

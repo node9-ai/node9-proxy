@@ -1,3 +1,4 @@
+import type { ToolInspection, DlpMatch } from '@node9/policy-engine';
 // src/policy/index.ts
 // Host wrapper around @node9/policy-engine.
 //
@@ -11,7 +12,8 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { scanArgs, scanFilePath } from '../dlp';
+import { scanArgumentSecrets, scanFilePath } from '../dlp';
+import { prepareFileAccesses, type PreparedFileAccess } from './file-access';
 import { getConfig, getActiveEnvironment } from '../config';
 import { checkProvenance } from '../utils/provenance.js';
 import { matchesTrustedHost, isTrustedHost } from '../auth/trusted-hosts.js';
@@ -19,9 +21,12 @@ import {
   evaluatePolicy as engineEvaluatePolicy,
   isIgnoredTool as engineIsIgnoredTool,
   matchesPattern,
+  getNestedValue,
   evaluateSmartConditions,
   detectDangerousShellExec,
   analyzeShellCommand,
+  resolveShellInput,
+  shellRuleArgs,
   type PolicyVerdict,
 } from '@node9/policy-engine';
 
@@ -46,15 +51,30 @@ export async function evaluatePolicy(
   // Task #20: the orchestrator's jail guard needs the engine to evaluate the
   // full rule chain for a file tool that would otherwise take the ignored
   // fast path (it has already found a jailed/sensitive path in the args).
-  opts?: { skipIgnoredFastPath?: boolean }
+  opts?: {
+    skipIgnoredFastPath?: boolean;
+    fileAccess?: PreparedFileAccess;
+    config?: ReturnType<typeof getConfig>;
+    /** The gate's scanArgumentSecrets(args) for these arguments, when already computed. */
+    argumentScan?: DlpMatch | null;
+  }
 ): Promise<PolicyVerdict> {
-  const config = getConfig();
+  const config = opts?.config ?? getConfig(cwd);
+  const prepared =
+    opts?.fileAccess ?? prepareFileAccesses(toolName, args, cwd, config.policy.toolInspection);
   const activeEnvironment = getActiveEnvironment(config) ?? undefined;
   return engineEvaluatePolicy(
     config,
     toolName,
     args,
-    { agent, cwd, activeEnvironment, skipIgnoredFastPath: opts?.skipIgnoredFastPath },
+    {
+      ...prepared,
+      agent,
+      cwd: prepared.cwd,
+      activeEnvironment,
+      skipIgnoredFastPath: opts?.skipIgnoredFastPath,
+      argumentScan: opts?.argumentScan,
+    },
     {
       checkProvenance,
       // Managed → match against the org list (frozen with the rest of managed
@@ -111,22 +131,25 @@ function tokenize(toolName: string): string[] {
 function explainExtractShellCommand(
   toolName: string,
   args: unknown,
-  toolInspection: Record<string, string>
+  toolInspection: ToolInspection
 ): { command: string | null; matchingPattern: string | undefined; fieldName: string } {
-  const patterns = Object.keys(toolInspection);
-  const matchingPattern = patterns.find((p) => matchesPattern(toolName, p));
-  if (!matchingPattern) return { command: null, matchingPattern: undefined, fieldName: 'command' };
-  const fieldPath = toolInspection[matchingPattern];
-  const value =
-    args && typeof args === 'object' ? (args as Record<string, unknown>)[fieldPath] : undefined;
+  const shell = resolveShellInput(toolName, args, toolInspection);
+  const matchingPattern = Object.keys(toolInspection).find((p) => matchesPattern(toolName, p));
+  // Legacy non-shell mappings (notably SQL) still supply tokens for explain.
+  // Do not use this fallback for an ambiguous or malformed shell invocation.
+  const entry = matchingPattern === undefined ? undefined : toolInspection[matchingPattern];
+  const legacyValue =
+    shell.kind === 'not-shell' && typeof entry === 'string' ? getNestedValue(args, entry) : null;
   return {
-    command: typeof value === 'string' ? value : null,
+    command:
+      shell.kind === 'shell' ? shell.command : typeof legacyValue === 'string' ? legacyValue : null,
     matchingPattern,
-    fieldName: fieldPath,
+    fieldName:
+      shell.kind === 'shell' ? shell.fieldPath : typeof entry === 'string' ? entry : 'command',
   };
 }
 
-function explainIsSqlTool(toolName: string, toolInspection: Record<string, string>): boolean {
+function explainIsSqlTool(toolName: string, toolInspection: ToolInspection): boolean {
   const patterns = Object.keys(toolInspection);
   const matchingPattern = patterns.find((p) => matchesPattern(toolName, p));
   if (!matchingPattern) return false;
@@ -157,9 +180,15 @@ export async function explainPolicy(
   args?: unknown,
   agent: string = EXPLAIN_AGENT
 ): Promise<ExplainResult> {
-  const derived = await deriveExplainTrace(toolName, args);
-  const engine = await evaluatePolicy(toolName, args, agent);
-  if (derived.decision === engine.decision) return derived;
+  const config = getConfig();
+  const prepared = prepareFileAccesses(toolName, args, process.cwd(), config.policy.toolInspection);
+  const derived = await deriveExplainTrace(toolName, args, prepared);
+  const engine = await evaluatePolicy(toolName, args, agent, prepared.cwd, {
+    fileAccess: prepared,
+    config,
+  });
+  const fileVerdict = engine.checkId?.startsWith('files.');
+  if (derived.decision === engine.decision && !fileVerdict) return derived;
 
   // Drift canary — a gate the engine runs (and the re-derivation models
   // differently) decided this. Loud in debug so the next added gate can't
@@ -172,13 +201,14 @@ export async function explainPolicy(
   }
 
   const engineStep: ExplainStep = {
-    name: 'Engine verdict (authoritative)',
+    name: fileVerdict ? 'Protected file access' : 'Engine verdict (authoritative)',
     outcome: engine.decision,
-    detail:
-      `${engine.blockedByLabel ?? 'policy engine'}` +
-      `${engine.reason ? `: ${engine.reason}` : ''} — this is the verdict the live hook actually ` +
-      `enforces. It differs from the preview trace above, which models the policy tiers separately ` +
-      `and can drift; the engine is authoritative.`,
+    detail: fileVerdict
+      ? (engine.reason ?? engine.ruleDescription ?? 'Protected file access')
+      : `${engine.blockedByLabel ?? 'policy engine'}` +
+        `${engine.reason ? `: ${engine.reason}` : ''} — this is the verdict the live hook actually ` +
+        `enforces. It differs from the preview trace above, which models the policy tiers separately ` +
+        `and can drift; the engine is authoritative.`,
     isFinal: true,
   };
 
@@ -191,7 +221,11 @@ export async function explainPolicy(
   };
 }
 
-async function deriveExplainTrace(toolName: string, args?: unknown): Promise<ExplainResult> {
+async function deriveExplainTrace(
+  toolName: string,
+  args: unknown,
+  prepared: PreparedFileAccess
+): Promise<ExplainResult> {
   const steps: ExplainStep[] = [];
 
   const globalPath = path.join(os.homedir(), '.node9', 'config.json');
@@ -262,7 +296,11 @@ async function deriveExplainTrace(toolName: string, args?: unknown): Promise<Exp
         : {};
     const filePathE = String(argsObjE.file_path ?? argsObjE.path ?? argsObjE.filename ?? '');
     const dlpMatch =
-      (filePathE ? scanFilePath(filePathE) : null) ?? (args !== undefined ? scanArgs(args) : null);
+      (filePathE
+        ? scanFilePath(filePathE, prepared.cwd, {
+            systemAccessHandled: prepared.handledPaths.has(filePathE),
+          })
+        : null) ?? (args !== undefined ? scanArgumentSecrets(args) : null);
     if (dlpMatch) {
       // Mirror the real gate (orchestrator DLP section): reviewAction:'block'
       // upgrades review-severity matches — explain must not say 'review'
@@ -312,7 +350,10 @@ async function deriveExplainTrace(toolName: string, args?: unknown): Promise<Exp
     const matchedRule = config.policy.smartRules.find(
       (rule) =>
         toolMatchesRule(toolName, rule.tool, config.policy.toolInspection) &&
-        evaluateSmartConditions(args, rule)
+        evaluateSmartConditions(
+          shellRuleArgs(toolName, args, rule.tool, config.policy.toolInspection),
+          rule
+        )
     );
     if (matchedRule) {
       const label = `Smart Rule: ${matchedRule.name ?? matchedRule.tool}`;

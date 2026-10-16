@@ -138,10 +138,16 @@ describe('Gemini BeforeTool payload format', () => {
   it('evaluates tool policy from Gemini { name, args } format', async () => {
     mockConfig({});
     // Gemini sends { name, args } not { tool_name, tool_input }.
-    // The engine's AST FS-op tier blocks `rm -rf /` outright (root wipe).
+    // On POSIX the protected-file floor blocks the root wipe before ordinary FS
+    // rules; that policy is POSIX-only, so on win32 the rm-home rule blocks it.
     const dangerous = await evaluatePolicy('Shell', { command: 'rm -rf /' });
     expect(dangerous.decision).toBe('block');
-    expect(dangerous.ruleName).toBe('block-rm-rf-home');
+    if (process.platform === 'win32') {
+      expect(dangerous.ruleName).toBe('block-rm-rf-home');
+    } else {
+      expect(dangerous.ruleName).toBe('block-system-auth-mutation');
+      expect(dangerous.overridable).toBe(false);
+    }
   });
 
   it('blocks dangerous Gemini tool via name/args format', async () => {
