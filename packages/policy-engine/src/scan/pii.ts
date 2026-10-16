@@ -17,12 +17,14 @@
 // \b on both sides, so a digit immediately before or after the number
 // defeats them, exactly as it did before Luhn was added.
 //
-// Both card regexes also refuse a run that directly follows `<digit>.`. A `.`
-// is a word boundary, so without that guard the fractional part of a float
-// printed at full precision (16 or 17 digits after `0.`) is read as a card,
-// and 70 of the 4,950 fractions k/n with 2 <= n <= 100 pass Luhn
-// (node9Firewall#333). Accepted gap: a real card written directly after a
-// digit and a dot ("1.<card>") is not detected.
+// An unseparated card-shaped run that directly follows `<digit>.` is not a
+// card. A `.` is a word boundary, so without that rule the fractional part of
+// a float printed at full precision (16 or 17 digits after `0.`) is read as a
+// card, and 70 of the 4,950 fractions k/n with 2 <= n <= 100 pass Luhn
+// (node9Firewall#333). The rule lives in hasValidCard, not in the regexes, so
+// they stay lookbehind-free (safe-regex2, house style). Accepted gap: an
+// unseparated card written directly after a digit and a dot ("1.<card>") is
+// not detected; a grouped one still is, since a fraction has no separators.
 //
 // This file is part of the extractor-version hash set
 // (scripts/check-extractor-version.mjs): editing it changes detector output.
@@ -42,9 +44,9 @@ const PII_PHONE_RE = /\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b/;
 // 16 digits, 4-4-4-4: Visa (4), Mastercard (51-55), Discover (6). The Amex
 // prefixes are deliberately NOT here: Amex is 15 digits, so any 16-digit run
 // starting 34/37 is by construction not a card.
-const PII_CC16_RE = /(?<!\d\.)\b(?:4\d{3}|5[1-5]\d{2}|6\d{3})[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b/;
+const PII_CC16_RE = /\b(?:4\d{3}|5[1-5]\d{2}|6\d{3})[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b/;
 // 15 digits, 4-6-5: American Express (34, 37).
-const PII_CC15_RE = /(?<!\d\.)\b3[47]\d{2}[-\s]?\d{6}[-\s]?\d{5}\b/;
+const PII_CC15_RE = /\b3[47]\d{2}[-\s]?\d{6}[-\s]?\d{5}\b/;
 
 // IBAN (ISO 13616): two letters, two check digits, then 11..30 alphanumerics
 // optionally grouped by single spaces or dashes ("GB29 NWBK 6016 1331 9268 19").
@@ -79,11 +81,25 @@ function hasValidCard(text: string): boolean {
     const re = new RegExp(base.source, 'g');
     let m: RegExpExecArray | null;
     while ((m = re.exec(text)) !== null) {
-      if (validateLuhn(m[0].replace(/\D/g, ''))) return true;
+      const digits = m[0].replace(/\D/g, '');
+      if (!isDecimalFraction(text, m.index, digits.length === m[0].length)) {
+        if (validateLuhn(digits)) return true;
+      }
       re.lastIndex = m.index + 1;
     }
   }
   return false;
+}
+
+/**
+ * True if an unseparated digit run at `index` is the fractional part of a
+ * number: it directly follows `<digit>.` (node9Firewall#333). A grouped run
+ * ("4xxx 4xxx ...") is never a fraction, so it is not exempt.
+ */
+function isDecimalFraction(text: string, index: number, unseparated: boolean): boolean {
+  if (!unseparated || text[index - 1] !== '.') return false;
+  const before = text.charCodeAt(index - 2);
+  return before >= 48 && before <= 57;
 }
 
 /** Same overlapping-search shape as hasValidCard; validateIban strips formatting itself. */

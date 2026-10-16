@@ -280,6 +280,24 @@ export const COMPOSITE: { id: string; build: () => string; expectCard: boolean; 
       proves: 'the guard needs a digit before the dot, not any dot',
     },
     {
+      id: 'grouped-after-decimal-point',
+      build: () => ['1.', asm(V1, ' ')].join(''),
+      expectCard: true,
+      proves: 'only an unseparated run is exempt; a fraction has no separators',
+    },
+    {
+      id: 'decimal-at-text-start',
+      build: () => ['.', asm(V1)].join(''),
+      expectCard: true,
+      proves: 'a dot at the start of the text is not a decimal point',
+    },
+    {
+      id: 'csv-after-decimal-column',
+      build: () => ['1.5,', asm(V1)].join(''),
+      expectCard: true,
+      proves: 'only a dot directly before the run exempts it; a digit then a comma does not',
+    },
+    {
       id: 'sentence-end-dot',
       build: () => ['card ', asm(V1), '.'].join(''),
       expectCard: true,
@@ -297,5 +315,5 @@ export const ROW_COUNTS = {
   INVALID_16: 5,
   INVALID_15: 1,
   NON_CARD_16: 5,
-  COMPOSITE: 24,
+  COMPOSITE: 27,
 } as const;

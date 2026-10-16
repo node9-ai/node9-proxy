@@ -683,8 +683,9 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // executors (exec, run_command, terminal, cmd/script fields) reach the shell
 // detectors, and eval-dynamic covers runtime-generated executable names.
 // canonical-v24: the card detector no longer reads the fractional part of a
-// number as a card (node9Firewall#333). A card-shaped run directly after
-// `<digit>.` is not a finding; histories scanned under v23 re-read.
+// number as a card (node9Firewall#333). An unseparated card-shaped run
+// directly after `<digit>.` is not a finding; histories scanned under v23
+// re-read.
 export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v24';
 
 // 2026-09-11, hash bumped with NO version bump: stage 3 of the credential jail
@@ -712,7 +713,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v24';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '2c834e281c96b351';
+export const CANONICAL_EXTRACTOR_HASH = '6f9c94d66a9ad9f1';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
