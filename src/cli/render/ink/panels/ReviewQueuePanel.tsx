@@ -38,7 +38,7 @@ export function ReviewQueuePanel({
       <Text bold>REVIEW QUEUE</Text>
       {rules.map((rule, i) => (
         <Box key={i}>
-          <Box width={22}>
+          <Box width={22} paddingRight={1}>
             <Text wrap="truncate-end">{rule.name}</Text>
           </Box>
           <Box width={6}>

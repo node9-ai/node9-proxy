@@ -59,13 +59,13 @@ export function DecoyPanel({ summary, width, now = new Date() }: Props): React.R
             <Box width={5}>
               <Text dimColor>{relativeDate(c.timestamp, now).padStart(4)}</Text>
             </Box>
-            <Box width={16}>
+            <Box width={16} paddingRight={1}>
               <Text color="red" bold wrap="truncate-end">
                 {c.kind}
                 {c.retired ? ' (retired)' : ''}
               </Text>
             </Box>
-            <Box width={15}>
+            <Box width={15} paddingRight={1}>
               <Text dimColor wrap="truncate-end">{`[${c.toolName}]`}</Text>
             </Box>
             <Text dimColor wrap="truncate-end">

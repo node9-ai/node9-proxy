@@ -64,7 +64,7 @@ export function BlockedPanel({
           <Box width={3}>
             <Text color="red">✗</Text>
           </Box>
-          <Box width={24}>
+          <Box width={24} paddingRight={1}>
             <Text bold wrap="truncate-end">
               {rule.name}
             </Text>
