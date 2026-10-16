@@ -47,12 +47,12 @@ export function LeaksPanel({ summary, width, now = new Date() }: Props): React.R
           <Box width={5}>
             <Text dimColor>{relativeDate(leak.timestamp, now).padStart(4)}</Text>
           </Box>
-          <Box width={16}>
+          <Box width={16} paddingRight={1}>
             <Text color="red" bold wrap="truncate-end">
               {leak.patternName}
             </Text>
           </Box>
-          <Box width={15}>
+          <Box width={15} paddingRight={1}>
             <Text dimColor wrap="truncate-end">{`[${leak.toolName}]`}</Text>
           </Box>
           <Text dimColor wrap="truncate-end">
