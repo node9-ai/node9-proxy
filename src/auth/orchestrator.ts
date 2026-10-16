@@ -195,6 +195,12 @@ function isWriteTool(toolName: string): boolean {
   return WRITE_TOOLS.has(t);
 }
 
+/** A namespaced MCP tool as the agent hook forwards it (`mcp__<server>__<tool>`).
+ *  Same shape the hook and the gateway use to extract the server name. */
+function isMcpToolName(toolName: string): boolean {
+  return /^mcp__[^_](?:[^_]|_(?!_))*?__/i.test(toolName);
+}
+
 /**
  * Extract file paths that a tool might be reading from or uploading.
  * Used to check taint before approving network/shell operations.
@@ -346,7 +352,8 @@ export async function authorizeHeadless(
     deferReview?: boolean;
     /** The caller classes this tool as state-changing (the MCP gateway: any
      *  tool the server does not declare `readOnlyHint`), so a tainted session
-     *  routes it to review like a write or network call. */
+     *  routes it to review like a write or network call. Left undefined (the
+     *  agent hook), a namespaced `mcp__*` tool is gated: fw#344. */
     sessionTaintGated?: boolean;
   }
 ): Promise<AuthResult> {
@@ -699,18 +706,33 @@ async function _authorizeHeadlessCore(
   // ── SESSION TAINT (gap1) ──────────────────────────────────────────────────
   // If an earlier tool's OUTPUT in this session was flagged (a secret surfaced;
   // later, an injected instruction), route the session's next high-risk call —
-  // network or write — to human review. Soft (review, not a hard block): tool
+  // network, write or MCP — to human review. Soft (review, not a hard block): tool
   // output containing a secret-shaped string is common and often benign, so we
   // confirm rather than block. `!taintWarning` keeps the file-taint above (with
   // its egress hard-block synergy) as the higher-precedence signal.
+  //
+  // MCP tools reach here two ways. The gateway forwards BARE names and says
+  // itself whether the tool is gated (`sessionTaintGated`, from the server's
+  // readOnlyHint). The agent hook forwards `mcp__<server>__<tool>` names and
+  // says nothing: the hook never sees a tools/list, so it has no annotations
+  // to consult. Until it does, every namespaced MCP tool is gated (fw#344):
+  // `mcp__gmail__send_email` after a poisoned email was the one call the
+  // taint existed for, and it was the one call the taint never reached.
+  const mcpHookTool = options?.sessionTaintGated === undefined && isMcpToolName(toolName);
   if (
     !taintWarning &&
     meta?.sessionId &&
-    (networkShell || isWriteTool(toolName) || options?.sessionTaintGated === true)
+    (networkShell || isWriteTool(toolName) || options?.sessionTaintGated === true || mcpHookTool)
   ) {
     const sessionTaint = await checkSessionTaint(meta.sessionId);
     if (sessionTaint.tainted && sessionTaint.record) {
-      const kind = isWriteTool(toolName) ? 'write' : networkShell ? 'network' : 'state-changing';
+      const kind = isWriteTool(toolName)
+        ? 'write'
+        : networkShell
+          ? 'network'
+          : mcpHookTool
+            ? 'MCP'
+            : 'state-changing';
       taintWarning =
         `⚠️ node9 flagged this session — earlier tool output contained ${sessionTaint.record.source}. ` +
         `Approve this ${kind} action before it proceeds.`;
