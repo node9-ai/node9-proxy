@@ -146,7 +146,9 @@ const FORENSIC_DISPLAY_MS = 5_000;
 
 export function App(): React.ReactElement {
   const { exit } = useApp();
-  const { stdout } = useStdout();
+  // ink 8 types stdout as a generic Node stream; `rows` and the resize
+  // event belong to the TTY stream it is at run time.
+  const stdout = useStdout().stdout as NodeJS.WriteStream | undefined;
   const [openedAt] = useState<number>(() => Date.now());
   // Top-level view — '[1]' realtime (default) vs '[2]' report. Phase 1
   // of the two-view restructure: switcher + stub Report view. Phase 2+
