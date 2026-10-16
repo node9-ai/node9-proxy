@@ -56,19 +56,20 @@ function run(argv: string[], input?: string) {
 }
 
 function check(tool: string, args: object) {
-  const result = run([
-    'check',
-    '--agent',
-    'claude',
-    JSON.stringify({
-      hook_event_name: 'PreToolUse',
-      tool_name: tool,
-      tool_input: args,
-      session_id: 'issue338',
-      tool_use_id: 'issue338-call',
-      cwd: home,
-    }),
-  ]);
+  const payload = JSON.stringify({
+    hook_event_name: 'PreToolUse',
+    tool_name: tool,
+    tool_input: args,
+    session_id: 'issue338',
+    tool_use_id: 'issue338-call',
+    cwd: home,
+  });
+  // Windows caps a command line near 32 KB; large payloads go through stdin,
+  // which is how the agents deliver hook input anyway.
+  const result =
+    payload.length > 16_000
+      ? run(['check', '--agent', 'claude'], payload)
+      : run(['check', '--agent', 'claude', payload]);
   expect(result.stderr).toBe('');
   return { status: result.status, body: result.stdout.trim() ? JSON.parse(result.stdout) : null };
 }
@@ -153,14 +154,18 @@ describe('Issue 338 through the built hook', () => {
       body: null,
     });
   });
-  it('holds a long pattern the matcher cannot compile instead of failing open', () => {
-    const result = check('Bash', { command: 'rm /etc/' + 'a'.repeat(70_000) + '*' });
-    expect(result.body.hookSpecificOutput.permissionDecision).toBe('ask');
-    expect(
-      check('Bash', { command: 'echo x >> /etc/sudoers; : > /etc/[a' + 'b'.repeat(70_000) + ']' })
-        .status
-    ).toBe(2);
-  });
+  // The protected-file policy is POSIX-only.
+  it.skipIf(process.platform === 'win32')(
+    'holds a long pattern the matcher cannot compile instead of failing open',
+    () => {
+      const result = check('Bash', { command: 'rm /etc/' + 'a'.repeat(70_000) + '*' });
+      expect(result.body.hookSpecificOutput.permissionDecision).toBe('ask');
+      expect(
+        check('Bash', { command: 'echo x >> /etc/sudoers; : > /etc/[a' + 'b'.repeat(70_000) + ']' })
+          .status
+      ).toBe(2);
+    }
+  );
 });
 
 describe('Issue 338 through the real MCP gateway', () => {
@@ -185,7 +190,10 @@ require('readline').createInterface({ input: process.stdin }).on('line', line =>
     const messages = [
       { name: 'exec', arguments: { cmd: 'ls', marker: 'original' } },
       { name: 'send_message', arguments: { body: encoded } },
-      { name: 'exec', arguments: { command: 'rm /etc/passwd' } },
+      // The protected-file policy is POSIX-only; on win32 legacy rules decide.
+      ...(process.platform === 'win32'
+        ? []
+        : [{ name: 'exec', arguments: { command: 'rm /etc/passwd' } }]),
       { name: 'exec', arguments: { command: '$(printf rm) -rf /important/data' } },
       {
         name: 'send_message',
@@ -228,10 +236,8 @@ require('readline').createInterface({ input: process.stdin }).on('line', line =>
     try {
       expect((await request(0, 'tools/list')).result.tools).toHaveLength(2);
       expect((await request(1, 'tools/call', messages[0])).result).toBeDefined();
-      expect((await request(2, 'tools/call', messages[1])).error).toBeDefined();
-      expect((await request(3, 'tools/call', messages[2])).error).toBeDefined();
-      expect((await request(4, 'tools/call', messages[3])).error).toBeDefined();
-      expect((await request(5, 'tools/call', messages[4])).error).toBeDefined();
+      for (const [i, message] of messages.slice(1).entries())
+        expect((await request(i + 2, 'tools/call', message)).error).toBeDefined();
       child.stdin.end();
       expect(await close, stderr).toBe(0);
     } finally {

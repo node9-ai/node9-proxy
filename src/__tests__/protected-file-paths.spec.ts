@@ -5,7 +5,9 @@ import path from 'path';
 import { evaluateProtectedFileAccess } from '@node9/policy-engine';
 import { prepareFileAccesses } from '../policy/file-access';
 
-describe('protected file host resolution', () => {
+// The protected-file policy is POSIX-only: on win32 the host prepares no
+// accesses and legacy path DLP keeps its block (see src/policy/file-access.ts).
+describe.skipIf(process.platform === 'win32')('protected file host resolution', () => {
   let dir: string;
   let home: string;
   beforeEach(() => {
