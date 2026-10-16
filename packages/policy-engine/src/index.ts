@@ -172,6 +172,8 @@ export {
   isDestructiveToolName,
   MAX_DESTINATIONS,
 } from './exposure/destinations';
+export type { ShellExposure } from './exposure/shell';
+export { classifyShellExposure } from './exposure/shell';
 
 // Smart rules — tool-name pattern match + condition evaluator.
 export { matchesPattern, getNestedValue, evaluateSmartConditions } from './rules';

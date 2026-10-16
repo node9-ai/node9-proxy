@@ -67,6 +67,13 @@ export function toolRole(toolName: string, policy: Config['policy']['untrustedCo
   return { source: BUILTIN_SOURCES.has(bare), action: false };
 }
 
+/** The word for what a shell fetch read, from the classifier's fetch kinds. */
+export function shellSourceWord(kinds: readonly string[]): string {
+  if (kinds.some((k) => /^gh (issue|pr)/.test(k))) return 'issue';
+  if (kinds.some((k) => k.startsWith('git ') || k === 'gh repo')) return 'repository';
+  return 'web page';
+}
+
 /** The word the frame and the prompt use for what was read. */
 export function sourceWord(toolName: string): string {
   const mcp = splitMcpToolName(toolName);

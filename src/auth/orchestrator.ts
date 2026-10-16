@@ -38,7 +38,9 @@ import {
   destinationKind,
   isDestructiveToolName,
   hostMatches,
+  classifyShellExposure,
 } from '@node9/policy-engine';
+import { knownProjectHosts } from '../exposure/known-hosts';
 import { toolRole, splitMcpToolName, sourceWord, EXPOSURE_LABEL } from '../exposure/roles';
 import { isTrustedRecipient } from './trusted-recipients';
 import { isTrustedHost, matchesTrustedHost } from './trusted-hosts';
@@ -762,19 +764,43 @@ async function _authorizeHeadlessCore(
   let exposureKeys: string[] = [];
   const ucPolicy = config.policy.untrustedContent;
   if (ucPolicy?.enabled && !taintWarning && meta?.sessionId && !isManual) {
-    // Phase 1 judges MCP actions (the hook's namespaced names, the gateway's
-    // flagged bare names). Shell sinks (`curl -d`, `git push`, `gh`) arrive
-    // with their AST classification in P3: holding every `curl` after a
-    // WebFetch would stop ordinary coding sessions for nothing.
+    // MCP actions (the hook's namespaced names, the gateway's flagged bare
+    // names) are judged by their argument destinations. A shell command is
+    // judged by its AST classification (P3): a SEND (`curl -d`, `git push`,
+    // `gh issue comment`, `npm publish`) by the full table; a plain FETCH
+    // (`curl https://x`) only when its host appeared in the content read,
+    // which is how a query string carries data out. Holding every `curl`
+    // after a WebFetch would stop ordinary coding sessions for nothing.
     const role = toolRole(toolName, ucPolicy);
     // The gateway forwards bare names and says itself that the tool acts.
     const acts = role.action || options?.sessionTaintGated === true;
-    const judged = acts;
+    const shellExp = shellInput.kind === 'shell' ? classifyShellExposure(shellInput.command) : null;
+    const judged = acts || !!(shellExp && (shellExp.sends || shellExp.fetches));
     if (judged) {
       const exposure = await checkSessionExposure(meta.sessionId);
       if (exposure.exposed && exposure.record) {
         const rec = exposure.record;
-        const dests = new Set<string>(extractArgDestinations(args));
+        const dests = new Set<string>(shellExp ? [] : extractArgDestinations(args));
+        // Hosts a plain fetch reaches: judged only against the content read.
+        const fetchOnly = new Set<string>();
+        const projectHosts = shellExp ? knownProjectHosts(options?.cwd) : null;
+        if (shellExp) {
+          if (shellExp.sends) {
+            for (const d of shellExp.destinations) dests.add(d);
+            // `git push <remote>`: the repository's own remotes are known;
+            // a name the config does not resolve is still its own remote.
+            for (const name of shellExp.gitRemotes) {
+              const hosts = projectHosts!.remotes.get(name);
+              if (hosts) for (const h of hosts) dests.add(h);
+            }
+          }
+          if (shellExp.fetches && shellInput.kind === 'shell') {
+            for (const d of extractShellDestinations(shellInput.command)) {
+              const h = `host:${d.host.toLowerCase()}`;
+              if (!dests.has(h)) fetchOnly.add(h);
+            }
+          }
+        }
         const inContent = new Set(rec.destinations);
         const mentioned = new Set(rec.userMentioned);
         const approved = new Set(rec.approved);
@@ -798,19 +824,28 @@ async function _authorizeHeadlessCore(
               (isTrustedHost(value) ||
                 (config.policy.trustedHostsManaged &&
                   matchesTrustedHost(value, config.policy.trustedHosts)) ||
-                config.policy.egress.allow.some((pat) => hostMatches(value, pat))));
+                config.policy.egress.allow.some((pat) => hostMatches(value, pat)) ||
+                (projectHosts !== null && projectHosts.hosts.has(d))));
           if (known) logged.push(d);
           else if (inContent.has(d)) held.push({ dest: d, why: 'appeared in what was read' });
           else held.push({ dest: d, why: 'not known to this session' });
+        }
+        for (const d of fetchOnly) {
+          const key = `${toolName}|${d}`;
+          if (ucPolicy.afterExposure === 'ask-once' && approved.has(key)) logged.push(d);
+          else if (inContent.has(d) && !(projectHosts !== null && projectHosts.hosts.has(d)))
+            held.push({ dest: d, why: 'appeared in what was read' });
+          else logged.push(d);
         }
         const bare = splitMcpToolName(toolName)?.bare ?? toolName;
         if (dests.size === 0 && acts && isDestructiveToolName(bare)) {
           held.push({ dest: '', why: 'destructive' });
         }
         const last = rec.sources[rec.sources.length - 1];
+        const readWord = last ? (last.word ?? sourceWord(last.tool)) : 'content';
         const when = last ? new Date(last.at).toTimeString().slice(0, 5) : '';
         const read = last
-          ? `${/^[aeiou]/i.test(sourceWord(last.tool)) ? 'an' : 'a'} ${sourceWord(last.tool)}` +
+          ? `${/^[aeiou]/i.test(readWord) ? 'an' : 'a'} ${readWord}` +
             (last.server ? ` through ${last.server}` : '') +
             (when ? ` at ${when}` : '')
           : 'outside content';
@@ -823,7 +858,7 @@ async function _authorizeHeadlessCore(
             h.dest
               ? `sends to ${destinationValue(h.dest)}, ${
                   h.why === 'appeared in what was read'
-                    ? `${noun(h.dest)} that appeared in that ${last ? sourceWord(last.tool) : 'content'}`
+                    ? `${noun(h.dest)} that appeared in that ${last ? readWord : 'content'}`
                     : `${noun(h.dest)} this session did not know`
                 }`
               : `is ${bare}, a destructive call, with no known destination`

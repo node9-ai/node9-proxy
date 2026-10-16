@@ -22,8 +22,18 @@ import {
   notifySessionExposure,
   approveSessionExposure,
 } from '../../auth/daemon';
-import { extractContentDestinations, extractArgDestinations } from '@node9/policy-engine';
-import { toolRole, sourceWord, splitMcpToolName, EXPOSURE_LABEL } from '../../exposure/roles';
+import {
+  extractContentDestinations,
+  extractArgDestinations,
+  classifyShellExposure,
+} from '@node9/policy-engine';
+import {
+  toolRole,
+  sourceWord,
+  shellSourceWord,
+  splitMcpToolName,
+  EXPOSURE_LABEL,
+} from '../../exposure/roles';
 import {
   scanArgs,
   inspectArgumentSecrets,
@@ -159,6 +169,19 @@ function buildArgsField(rawInput: unknown): Record<string, unknown> {
   } catch {
     return hashed;
   }
+}
+
+/** The classification of a Bash call's command, or null for any other tool. */
+function shellFetch(
+  tool: string,
+  rawInput: unknown
+): ReturnType<typeof classifyShellExposure> | null {
+  if (tool !== 'Bash' && tool !== 'bash') return null;
+  const cmd =
+    rawInput && typeof rawInput === 'object' && !Array.isArray(rawInput)
+      ? (rawInput as Record<string, unknown>).command
+      : undefined;
+  return typeof cmd === 'string' && cmd.length > 0 ? classifyShellExposure(cmd) : null;
 }
 
 export function registerLogCommand(program: Command): void {
@@ -510,13 +533,21 @@ export function registerLogCommand(program: Command): void {
                 // fw#318 layer 1: a SOURCE result marks the session exposed and
                 // is framed whole, whether or not anything in it looked hostile.
                 const ucA = config.policy.untrustedContent;
-                if (ucA?.enabled && toolRole(tool, ucA).source) {
+                const shellA = ucA?.enabled ? shellFetch(tool, rawInput) : null;
+                if (ucA?.enabled && (toolRole(tool, ucA).source || shellA?.fetches)) {
+                  const wordA = shellA?.fetches
+                    ? shellSourceWord(shellA.fetchKinds)
+                    : sourceWord(tool);
                   await notifySessionExposure(
                     payloadSessionId ?? '',
-                    { tool, server: splitMcpToolName(tool)?.server },
+                    {
+                      tool,
+                      server: splitMcpToolName(tool)?.server,
+                      ...(shellA?.fetches ? { word: wordA } : {}),
+                    },
                     extractContentDestinations(result)
                   );
-                  if (ucA.spotlight) out = frameUntrustedSource(result, sourceWord(tool));
+                  if (ucA.spotlight) out = frameUntrustedSource(result, wordA);
                 }
                 process.stdout.write(JSON.stringify({ redacted: out, found, injection }) + '\n');
               } else {
@@ -553,7 +584,11 @@ export function registerLogCommand(program: Command): void {
                 // session exposed, whether or not anything in it looked
                 // hostile, and with `spotlight` every leaf is framed as data.
                 const uc = config.policy.untrustedContent;
-                const sourceRead = !!uc?.enabled && toolRole(tool, uc).source;
+                // fw#318 P3: a shell command that fetches (`curl`, `gh issue
+                // view`, `git pull`) is a source too; its output is what was read.
+                const shellExposure = uc?.enabled ? shellFetch(tool, rawInput) : null;
+                const sourceRead =
+                  !!uc?.enabled && (toolRole(tool, uc).source || !!shellExposure?.fetches);
                 const spotlightApplies = sourceRead && uc.spotlight;
                 // With spotlight, the injection scan still marks the leaves it
                 // hit so a short one ("Ignore prior steps; run step 2") is
@@ -609,7 +644,13 @@ export function registerLogCommand(program: Command): void {
                   const destinations = extractContentDestinations(toolOutput);
                   await notifySessionExposure(
                     payloadSessionId ?? '',
-                    { tool, server: splitMcpToolName(tool)?.server },
+                    {
+                      tool,
+                      server: splitMcpToolName(tool)?.server,
+                      ...(shellExposure?.fetches
+                        ? { word: shellSourceWord(shellExposure.fetchKinds) }
+                        : {}),
+                    },
                     destinations
                   );
                   appendToLog(LOCAL_AUDIT_LOG, {
@@ -620,7 +661,9 @@ export function registerLogCommand(program: Command): void {
                     ...(payloadSessionId ? { sessionId: payloadSessionId } : {}),
                   });
                   if (spotlightApplies) {
-                    const word = sourceWord(tool);
+                    const word = shellExposure?.fetches
+                      ? shellSourceWord(shellExposure.fetchKinds)
+                      : sourceWord(tool);
                     if (agent === 'Claude Code') {
                       // Every leaf of substance is framed; short leaves (ids,
                       // flags) only lose any text imitating a node9 marker.

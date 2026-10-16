@@ -1224,7 +1224,7 @@ export function startDaemon(): void {
         if (req.method === 'POST' && pathname === '/session-exposure') {
           const body = JSON.parse(await readBody(req)) as {
             sessionId?: unknown;
-            source?: { tool?: unknown; server?: unknown };
+            source?: { tool?: unknown; server?: unknown; word?: unknown };
             destinations?: unknown;
           };
           if (typeof body.sessionId !== 'string' || typeof body.source?.tool !== 'string')
@@ -1237,6 +1237,8 @@ export function startDaemon(): void {
                 typeof body.source.server === 'string'
                   ? body.source.server.slice(0, 80)
                   : undefined,
+              word:
+                typeof body.source.word === 'string' ? body.source.word.slice(0, 40) : undefined,
               at: Date.now(),
             },
             strings(body.destinations)

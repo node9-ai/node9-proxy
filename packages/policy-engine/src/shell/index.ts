@@ -2799,7 +2799,7 @@ export function parseDestHost(token: string): string | null {
 // Per-binary destination extraction from an ordered, literal-resolved arg list
 // (null entries = dynamic args). Returns raw destination tokens (host parsing
 // happens in the caller so `raw` is preserved).
-function destTokensForBinary(binary: string, args: (string | null)[]): string[] {
+export function destTokensForBinary(binary: string, args: (string | null)[]): string[] {
   const valueFlags = VALUE_FLAGS[binary] ?? new Set<string>();
   const positionals: string[] = [];
   const urlFlagValues: string[] = [];

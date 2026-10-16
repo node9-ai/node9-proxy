@@ -15,6 +15,8 @@ export interface ExposureSource {
   tool: string;
   /** The MCP server's config name, when the tool is namespaced. */
   server?: string;
+  /** What was read, as the prompt names it: 'email', 'web page', 'issue', 'repository'. */
+  word?: string;
   at: number;
 }
 
@@ -105,7 +107,12 @@ export class SessionExposureStore {
   ): void {
     if (!sessionId || sessionId.length > MAX_SESSION_ID) return;
     const e = this.ensure(sessionId, ttlMs);
-    e.sources.push({ tool: source.tool, server: source.server, at: source.at || Date.now() });
+    e.sources.push({
+      tool: source.tool,
+      server: source.server,
+      ...(source.word ? { word: source.word } : {}),
+      at: source.at || Date.now(),
+    });
     if (e.sources.length > MAX_SOURCES) e.sources.splice(0, e.sources.length - MAX_SOURCES);
     addCapped(e.destinations, destinations, MAX_VALUES);
     e.expiresAt = Date.now() + ttlMs;
