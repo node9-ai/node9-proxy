@@ -1,3 +1,4 @@
+import type { ToolInspection } from '../shell/tool-input';
 // Canonical detection pipeline — the one extractor every JSONL-scanning
 // consumer in node9 calls. Replaces the duplicated detection logic in
 // scan.ts (CLI), scan-watermark.ts (daemon), and scan-upload-history.ts
@@ -32,7 +33,8 @@ import {
   analyzeFsOperation,
   analyzeShellCommand,
   detectDangerousShellExec,
-  isShellShapedTool,
+  resolveShellInput,
+  shellRuleArgs,
   AST_FS_REGEX_RULES,
   toolMatchesRule,
   normalizeCommandForPolicy,
@@ -148,7 +150,7 @@ export interface ExtractContext {
   }>;
   /** toolInspection map from PolicyConfig — drives shell-command extraction
    *  for tools that aren't the standard 'bash' name. Defaults handled by caller. */
-  toolInspection: Record<string, string>;
+  toolInspection: ToolInspection;
   /** DLP enabled flag from PolicyConfig. */
   dlpEnabled: boolean;
   /** Decoy credentials registered on this machine (value plus kind and plant
@@ -676,7 +678,19 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // CASK-layout key now is. Histories scanned under v20 re-read.
 // Same unreleased v21: redactText now covers the whole text (no 100 KB
 // slice) and the CASK pattern no longer consumes its trailing delimiter.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v21';
+// canonical-v22: password-hash pipeline sources now include /etc/gshadow.
+// canonical-v23: shell commands are resolved through resolveShellInput, so MCP
+// executors (exec, run_command, terminal, cmd/script fields) reach the shell
+// detectors, and eval-dynamic covers runtime-generated executable names.
+// canonical-v24: the card detector no longer reads the fractional part of a
+// number as a card (node9Firewall#333). An unseparated card-shaped run
+// directly after `<digit>.` is not a finding; histories scanned under v23
+// re-read.
+// canonical-v25 (node9Firewall#348): `Database Connection String` accepts a
+// driver suffix (`mysql+pymysql://`), so histories scanned under v24 re-read.
+// The two new context patterns (`Credential in URL Query`, `Assigned Secret`)
+// are argumentsOnly: the live gate reviews them, scanArgs here does not.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v25';
 
 // 2026-09-11, hash bumped with NO version bump: stage 3 of the credential jail
 // (argument POSITION kept in extractLiteralArgs) changed detector SOURCE and
@@ -703,7 +717,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v21';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'efe6e39d25bedd78';
+export const CANONICAL_EXTRACTOR_HASH = 'd734bd7389fbaf7e';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
@@ -717,14 +731,15 @@ export function extractCanonicalFindings(
   const out: CanonicalFinding[] = [];
   const ts = call.timestamp;
   const toolNameLower = call.toolName.toLowerCase();
-  const command = typeof call.args.command === 'string' ? (call.args.command as string) : null;
+  const shellInput = resolveShellInput(call.toolName, call.args, ctx.toolInspection);
+  const command = shellInput.kind === 'shell' ? shellInput.command : null;
   // Shell-shaped, not just BASH_TOOL_NAMES: `terminal.execute` carries a shell
   // command via toolInspection and must reach the AST detectors below, or the
   // regex twins those detectors supersede fire uncorrected in the rule loop.
   // Keyed on the SAME predicate the rule loop uses (toolMatchesRule) so the two
   // cannot drift — the round-3 review found them disagreeing, which is what let
   // `grep "drop table"` false-positive for that tool.
-  const isShell = isShellShapedTool(call.toolName, ctx.toolInspection) && command !== null;
+  const isShell = shellInput.kind === 'shell';
 
   // ── Long output redacted (per-line, no rule needed) ──────────────────────
   if (call.outputBytes !== undefined && call.outputBytes > LONG_OUTPUT_THRESHOLD_BYTES) {
@@ -877,7 +892,13 @@ export function extractCanonicalFindings(
     // Shell-shape alias so scan agrees with the gate about which rules apply.
     if (!toolMatchesRule(toolNameLower, r.tool, ctx.toolInspection)) continue;
     if (r.name && AST_FS_REGEX_RULES.has(r.name)) continue;
-    if (!evaluateSmartConditions(call.args, r)) continue;
+    if (
+      !evaluateSmartConditions(
+        shellRuleArgs(call.toolName, call.args, r.tool, ctx.toolInspection),
+        r
+      )
+    )
+      continue;
 
     out.push(
       makeFinding({

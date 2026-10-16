@@ -1,4 +1,5 @@
 import { unwrapCommandHead, FS_READ_TOOLS } from '../shell/index';
+import { isPasswordHashPath } from '../files/paths';
 
 // Pipe-chain exfiltration detector.
 // Classifies the stages of a shell pipeline as source / transform / sink and
@@ -82,7 +83,7 @@ const SENSITIVE_PATTERNS = [
 ];
 
 function isSensitivePath(p: string): boolean {
-  return SENSITIVE_PATTERNS.some((re) => re.test(p));
+  return isPasswordHashPath(p) || SENSITIVE_PATTERNS.some((re) => re.test(p));
 }
 
 /**

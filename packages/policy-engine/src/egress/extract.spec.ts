@@ -158,7 +158,7 @@ describe('extractShellDestinations — rsync (JAIL-8)', () => {
   });
 
   it('every NET_BINARIES member has an arm (derived, so this cannot drift again)', async () => {
-    const { NET_BINARIES } = await import('../shell');
+    const { NET_BINARIES } = await import('../shell/index.js');
     // The four PowerShell spellings (Invoke-WebRequest / Invoke-RestMethod and
     // their aliases) are members with no arm TODAY. That is a real gap and it is
     // filed (memory: PowerShell dialect blindness, the `iwr -InFile` egress slot

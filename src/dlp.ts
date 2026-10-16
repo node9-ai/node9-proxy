@@ -17,6 +17,8 @@ export {
   DLP_PATTERNS,
   DLP_SCAN_LIMITS,
   scanArgs,
+  scanArgumentSecrets,
+  inspectArgumentSecrets,
   scanText,
   redactText,
   scanInjection,
@@ -35,7 +37,11 @@ export type { InjectionMatch, InjectionContext, InjectionConfidence } from '@nod
  *
  * Returns a DlpMatch if the path is sensitive, null if clean.
  */
-export function scanFilePath(filePath: string, cwd = process.cwd()): DlpMatch | null {
+export function scanFilePath(
+  filePath: string,
+  cwd = process.cwd(),
+  options: { systemAccessHandled?: boolean } = {}
+): DlpMatch | null {
   if (!filePath) return null;
 
   let resolved: string;
@@ -59,5 +65,5 @@ export function scanFilePath(filePath: string, cwd = process.cwd()): DlpMatch | 
     }
   }
 
-  return matchSensitivePath(resolved, filePath);
+  return matchSensitivePath(resolved, filePath, options);
 }

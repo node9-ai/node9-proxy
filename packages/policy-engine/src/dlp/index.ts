@@ -8,6 +8,8 @@
 // never leaves the module.
 
 import safeRegex from 'safe-regex2';
+import { findMnemonic } from './mnemonic';
+import { isLegacySystemPath, LEGACY_SYSTEM_PATH_RE } from '../files/paths';
 import { validateWif, validateXprv, validateGithubToken, validateCask } from '../scan/checksums';
 import type { DlpMatch } from '../types';
 export type { DlpMatch } from '../types';
@@ -53,13 +55,25 @@ interface DlpPattern {
    * happens to contain a stopword substring is a real secret, roughly 1 in
    * 3,000 real WIF keys); a failing one rejects it. Must never throw; a throw
    * is treated as "not suppressed" so a validator bug cannot hide a match.
+   * `before` is up to 64 characters of the text ahead of the match, for a
+   * validator that reads the variable name the value is assigned to.
    */
-  validate?: (raw: string) => boolean;
+  validate?: (raw: string, before?: string) => boolean;
   /** When the regex consumes delimiters around the secret, the capture group
    *  that holds the secret itself; redactText replaces only that group. Any
    *  other capture group (a scheme, a prefix) is NOT the secret, so the field
    *  is explicit rather than "group 1 if present". */
   redactGroup?: number;
+  /**
+   * Only the bounded tool-argument gate (matchArgumentText, reached through
+   * inspectArgumentSecrets / scanArgumentSecrets) uses this pattern. The raw
+   * scanners skip it: scanArgs (prompts, tool output, history scans, audit
+   * attribution), scanText (response text) and redactText (output
+   * redaction). For the broad, context-based patterns that name a secret by
+   * its variable or query key: a review on a tool call is cheap, a hard block
+   * on a prompt or a rewrite of every file an agent reads is not.
+   */
+  argumentsOnly?: boolean;
 }
 
 // Matches variable assignment or config-file patterns that indicate a secret
@@ -113,6 +127,144 @@ const DLP_STOPWORDS: string[] = [
   'your',
   'here',
 ];
+
+// ── Context validators (node9Firewall#348) ────────────────────────────────────
+// Shared by the two name-based patterns. A value is "generated-looking" when
+// it is not a placeholder, not a reference to a variable or a call, not an
+// identifier or a word, and has enough entropy for its length.
+
+/** The value a name-based pattern captured, or null when the regex did not. */
+function capturedValue(raw: string, pattern: RegExp): string | null {
+  const m = raw.match(pattern);
+  return m?.[1] ?? null;
+}
+
+/** A reference, not a value: `$VAR`, `@ivar`, `%ENV`, `process.env.X`, `os.environ`, `config.x`. */
+const REFERENCE_VALUE_RE =
+  /^[$@%]|^(?:process\.env|os\.environ|env|config|settings|self|this|opts?|options|params|cfg)\b/i;
+/** Letters, dots, dashes and underscores only: an identifier or a word, not a generated value. */
+const IDENTIFIER_VALUE_RE = /^[A-Za-z_.-]+$/;
+/** `/home/u/app`, `./src`, `~/dev`, `../x`: a path, not a secret. */
+const PATH_VALUE_RE = /^(?:\/|\.{1,2}\/|~\/)/;
+/** `jwtConstants.secretKey2024`, `cfg.auth.token`: a property reference. */
+const DOTTED_REFERENCE_RE = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/;
+/** An email address next to a password is the login, not the secret. */
+const EMAIL_VALUE_RE = /^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$/;
+
+/** `base64-something-random`, `my_secret_value_2`: joined words in one case, digits aside. */
+function looksLikeJoinedWords(value: string): boolean {
+  const segments = value.replace(/[0-9]/g, '').split(/[-_.]/);
+  return (
+    segments.length >= 2 &&
+    segments.every((seg) => /^[a-z]{2,}$/.test(seg) || /^[A-Z]{2,}$/.test(seg))
+  );
+}
+
+/** `0123456789abcdef`, `ABCDEFGHIJKLMNOP`: eight or more consecutive code points in a row. */
+function hasSequentialRun(value: string): boolean {
+  let run = 1;
+  for (let i = 1; i < value.length; i++) {
+    run = value.charCodeAt(i) === value.charCodeAt(i - 1) + 1 ? run + 1 : 1;
+    if (run >= 8) return true;
+  }
+  return false;
+}
+
+/**
+ * A value in a vendor shape whose checksum fails (a `ghp_` token with the
+ * wrong CRC, a WIF key with a bad hash) is a look-alike node9 allows on
+ * purpose; the context patterns must not reverse that decision.
+ */
+function rejectedByStructuredValidator(value: string): boolean {
+  for (const p of DLP_PATTERNS) {
+    if (!p.validate || p.argumentsOnly) continue;
+    const m = value.match(p.regex);
+    if (m && !p.validate(m[0])) return true;
+  }
+  return false;
+}
+
+function looksGenerated(
+  value: string,
+  minLength: number,
+  minEntropy: number,
+  lettersOnlyAllowed = false
+): boolean {
+  if (value.length < minLength) return false;
+  const lower = value.toLowerCase();
+  if (DLP_STOPWORDS.some((sw) => lower.includes(sw))) return false;
+  if (REFERENCE_VALUE_RE.test(value)) return false;
+  if (!lettersOnlyAllowed && IDENTIFIER_VALUE_RE.test(value)) return false;
+  if (EMAIL_VALUE_RE.test(value)) return false;
+  if (looksLikeJoinedWords(value) || hasSequentialRun(value)) return false;
+  if (PATH_VALUE_RE.test(value) || DOTTED_REFERENCE_RE.test(value)) return false;
+  if (rejectedByStructuredValidator(value)) return false;
+  return shannonEntropy(value) >= minEntropy;
+}
+
+/**
+ * The variable or key the value is assigned to. A name that says fixture
+ * (`FAKE_TOKEN`, `mockSecret`) or that names a derivative (`token_hash`,
+ * `password_length`, `secret_id`) is not holding a credential.
+ */
+const FIXTURE_NAME_RE = /(?:fake|dummy|example|sample|mock|stub|placeholder|test)/i;
+const DERIVATIVE_NAME_RE =
+  /(?:hash|digest|id|type|name|url|uri|path|file|len|length|count|size|ttl|expires?|expiry|age|date|time|format|field|header|param)$/i;
+
+function nameHoldsCredential(name: string): boolean {
+  return !FIXTURE_NAME_RE.test(name) && !DERIVATIVE_NAME_RE.test(name);
+}
+
+const QUERY_CREDENTIAL_VALUE_RE = /=([A-Za-z0-9%+/_.~-]{8,512}={0,2})$/;
+const OTP_SECRET_RE = /^[A-Z2-7]{16,}=*$/i;
+
+function validateQueryCredential(raw: string): boolean {
+  const value = capturedValue(raw, QUERY_CREDENTIAL_VALUE_RE);
+  if (value === null) return false;
+  // An otpauth secret is base32: letters and digits 2-7, often letters only.
+  if (OTP_SECRET_RE.test(value)) return looksGenerated(value, 16, 3.0, true);
+  // Anything else must mix letters and digits and be at least 12 long, so a
+  // fixture such as `?token=ftoken123` or a slug is not a finding.
+  if (!/[0-9]/.test(value) || !/[A-Za-z]/.test(value)) return false;
+  return looksGenerated(value, 12, 3.0);
+}
+
+const ASSIGNED_SECRET_VALUE_RE =
+  /(?::=|=>|[:=])[ \t]{0,8}["'`]?([A-Za-z0-9+/_.!@#$%^*~-]{12,512}={0,2})$/;
+
+const ASSIGNED_SECRET_NAME_RE = /^([A-Za-z0-9_]+)/;
+
+const NAME_KEYWORD_RE =
+  /^(?:password|passphrase|passwd|pwd|secret|token|api[_-]?key|auth[_-]?key|private[_-]?key|access[_-]?key|client[_-]?secret)/i;
+
+/**
+ * The keyword must end the name or be followed by a new part of it: `_`,
+ * `-`, a digit, or an uppercase letter after a lowercase keyword
+ * (`secretKey`). `tokenizer`, `passwords`, `TOKENIZER` are other words.
+ */
+function keywordEndsAPart(name: string): boolean {
+  const keyword = name.match(NAME_KEYWORD_RE)?.[0];
+  if (!keyword) return false;
+  const next = name.charAt(keyword.length);
+  if (next === '' || /[_\-0-9]/.test(next)) return true;
+  const lastIsLower = /[a-z]/.test(keyword.charAt(keyword.length - 1));
+  return lastIsLower && /[A-Z]/.test(next);
+}
+
+/** `arn:aws:secretsmanager:...:secret:prod/x`: an ARN segment, not an assignment. */
+const ARN_CONTEXT_RE = /\barn:[A-Za-z0-9-]*:[^\s"'`]*$/i;
+
+function validateAssignedSecret(raw: string, before = ''): boolean {
+  const value = capturedValue(raw, ASSIGNED_SECRET_VALUE_RE);
+  const name = capturedValue(raw, ASSIGNED_SECRET_NAME_RE);
+  if (value === null || name === null) return false;
+  if (!keywordEndsAPart(name) || ARN_CONTEXT_RE.test(before)) return false;
+  // The match starts at the keyword; the rest of the name (`FAKE_` in
+  // `FAKE_TOKEN`, `mock` in `mockSecret`) is in the text just before it.
+  const prefix = before.match(/[A-Za-z0-9_]*$/)?.[0] ?? '';
+  if (!nameHoldsCredential(prefix + name)) return false;
+  return looksGenerated(value, 12, 3.5);
+}
 
 export const DLP_PATTERNS: DlpPattern[] = [
   // ── AWS ───────────────────────────────────────────────────────────────────
@@ -606,25 +758,58 @@ export const DLP_PATTERNS: DlpPattern[] = [
   // 'placeholder', 'changeme', etc.) keep doc/README scans clean.
   {
     name: 'Database Connection String',
+    // `[a-z0-9+]*` after the base name accepts the TLS spelling (`rediss`,
+    // `amqps`), `postgresql`, and a driver suffix (`mongodb+srv`,
+    // `mysql+pymysql`, `postgresql+psycopg2`) in one star-height-1 shape.
     regex:
-      /\b(redis|rediss|postgres|postgresql|mongodb|mongodb\+srv|mysql|mariadb|amqp|amqps|kafka|clickhouse|cassandra):\/\/[^:/\s@]*:[^@\s]{4,}@[^\s/]+/,
+      /\b((?:redis|postgres|mongodb|mysql|mariadb|amqp|kafka|clickhouse|cassandra)[a-z0-9+]*):\/\/[^:/\s@]*:[^@\s]{4,}@[^\s/]+/i,
     severity: 'block',
     keywords: [
-      'redis://',
-      'rediss://',
-      'postgres://',
-      'postgresql://',
-      'mongodb://',
-      'mongodb+srv://',
-      'mysql://',
-      'mariadb://',
-      'amqp://',
-      'amqps://',
+      'redis',
+      'postgres',
+      'mongodb',
+      'mysql',
+      'mariadb',
+      'amqp',
       'kafka://',
-      'clickhouse://',
-      'cassandra://',
+      'clickhouse',
+      'cassandra',
     ],
     minEntropy: 3.0,
+  },
+
+  // ── Credential in a URL query value ───────────────────────────────────────
+  // A query parameter whose key names a secret (`?secret=`, `&apiKey=`,
+  // `&sig=`, the `secret` of an `otpauth://` URI). The value itself has no
+  // vendor shape, so the validator decides: a placeholder, a word, a bare
+  // identifier or a short value is left alone. review, not block: a
+  // fixture token in a test URL is common (node9Firewall#348, item 1).
+  {
+    name: 'Credential in URL Query',
+    regex:
+      /(?:^|[?&;])(?:api[_-]?key|access[_-]?token|client[_-]?secret|secret[_-]?key|auth[_-]?token|private[_-]?key|secret|token|apikey|password|passwd|pwd|auth|sig|signature)=([A-Za-z0-9%+/_.~-]{8,512}={0,2})/i,
+    severity: 'review',
+    keywords: ['secret', 'token', 'key', 'password', 'passwd', 'pwd', 'auth', 'sig'],
+    validate: validateQueryCredential,
+    argumentsOnly: true,
+  },
+
+  // ── Secret assigned to a telling name ─────────────────────────────────────
+  // `password: ...`, `JWT_SECRET=...`, `api_key = "..."`. The name alone is
+  // not a finding: most such lines hold a reference (`process.env.X`), a
+  // placeholder or a word. The validator accepts only a value that looks
+  // generated: 12+ characters, not an identifier, Shannon entropy of 3.5
+  // bits per character or more. review, never block (node9Firewall#348,
+  // item 4). Tuned on CredData's public split; its look-alike lines are the
+  // negative control.
+  {
+    name: 'Assigned Secret',
+    regex:
+      /(?:password|passphrase|passwd|pwd|secret|token|api[_-]?key|auth[_-]?key|private[_-]?key|access[_-]?key|client[_-]?secret)[A-Za-z0-9_]{0,40}["'\]]{0,2}[ \t]{0,8}(?::=|=>|[:=])[ \t]{0,8}["'`]?([A-Za-z0-9+/_.!@#$%^*~-]{12,512}={0,2})/i,
+    severity: 'review',
+    keywords: ['password', 'passphrase', 'passwd', 'pwd', 'secret', 'token', 'key'],
+    validate: validateAssignedSecret,
+    argumentsOnly: true,
   },
 ];
 
@@ -677,9 +862,6 @@ const SENSITIVE_PATH_PATTERNS: RegExp[] = [
   /[/\\][^/\\]+\.key$/i,
   /[/\\][^/\\]+\.p12$/i,
   /[/\\][^/\\]+\.pfx$/i,
-  /^(?:[a-zA-Z]:)?\/etc\/passwd$/,
-  /^(?:[a-zA-Z]:)?\/etc\/shadow$/,
-  /^(?:[a-zA-Z]:)?\/etc\/sudoers$/,
   /[/\\]credentials\.json$/i,
   /[/\\]id_rsa$/i,
   /[/\\]id_ed25519$/i,
@@ -696,9 +878,15 @@ const SENSITIVE_PATH_PATTERNS: RegExp[] = [
  *                      redactedSample so alerts show the original spelling.
  * @returns A DlpMatch with severity 'block' if the path is sensitive, else null.
  */
-export function matchSensitivePath(resolvedPath: string, originalPath: string): DlpMatch | null {
+export function matchSensitivePath(
+  resolvedPath: string,
+  originalPath: string,
+  options: { systemAccessHandled?: boolean } = {}
+): DlpMatch | null {
   // Normalise to forward slashes for cross-platform pattern matching.
   const normalised = resolvedPath.replace(/\\/g, '/');
+  if (!options.systemAccessHandled && isLegacySystemPath(normalised))
+    return sensitivePathMatch(originalPath);
 
   for (const pattern of SENSITIVE_PATH_PATTERNS) {
     if (pattern.test(normalised)) {
@@ -725,7 +913,10 @@ export function sensitivePathMatch(originalPath: string): DlpMatch {
 }
 
 /** Exposed so the proxy can apply the same patterns directly if needed. */
-export const SENSITIVE_PATH_REGEXES: readonly RegExp[] = SENSITIVE_PATH_PATTERNS;
+export const SENSITIVE_PATH_REGEXES: readonly RegExp[] = [
+  ...SENSITIVE_PATH_PATTERNS,
+  LEGACY_SYSTEM_PATH_RE,
+];
 
 // ── Builtin pattern safety check (runs at module load) ────────────────────
 // Every regex shipped in this package is run against scanArgs / scanText on
@@ -797,11 +988,11 @@ export const DLP_SCAN_LIMITS = {
  * three DLP entrypoints (scanArgs, scanText, redactText); they used to carry
  * three copies of the stopword + entropy sequence, and redactText had no test.
  */
-function suppressed(pattern: DlpPattern, raw: string): boolean {
+function suppressed(pattern: DlpPattern, raw: string, before = ''): boolean {
   if (pattern.validate) {
     let ok: boolean;
     try {
-      ok = pattern.validate(raw);
+      ok = pattern.validate(raw, before);
     } catch {
       ok = true; // a crashing validator must not hide a block-severity match
     }
@@ -828,14 +1019,52 @@ function firstAcceptedMatch(pattern: DlpPattern, text: string): string | null {
       re.lastIndex = m.index + 1; // progress guard; these patterns never match empty
       continue;
     }
-    if (!suppressed(pattern, m[0])) return m[0];
+    if (!suppressed(pattern, m[0], text.slice(Math.max(0, m.index - 64), m.index))) return m[0];
     // On rejection, exec's own lastIndex advance (to the end of the match) is
-    // sufficient: every DLP pattern is \b-anchored and separator-free, so a
-    // valid match can never begin INSIDE a rejected one. No overlap resume is
+    // sufficient: the vendor patterns are \b-anchored and separator-free, so a
+    // valid match can never begin INSIDE a rejected one. The two context
+    // patterns (argumentsOnly) start at a keyword or a query separator; a
+    // rejected one can hide a later assignment on the same run only when the
+    // two overlap, an accepted limit for a review-level heuristic. No overlap resume is
     // needed here (unlike hasValidCard / hasValidIban, whose tokens contain
     // spaces and keep their own resume, witnessed by the card and IBAN specs).
   }
   return null;
+}
+
+/** Shared accepted-token matcher for bounded argument views. */
+export function matchArgumentText(
+  text: string,
+  fieldPath: string,
+  budget?: { candidates: number; reasons: Set<string> }
+): DlpMatch | null {
+  const lower = text.toLowerCase();
+  const assignment = isAssignmentContext(text);
+  let best: DlpMatch | null = null;
+  for (const pattern of DLP_PATTERNS) {
+    if (pattern.keywords && !pattern.keywords.some((kw) => lower.includes(kw.toLowerCase())))
+      continue;
+    const raw = firstAcceptedMatch(pattern, text);
+    if (raw === null) continue;
+    const severity = pattern.contextBoost && assignment ? 'block' : pattern.severity;
+    const match: DlpMatch = {
+      patternName: pattern.name,
+      fieldPath,
+      redactedSample: maskSecret(raw, pattern.regex),
+      severity,
+    };
+    if (severity === 'block') return match;
+    best ??= match;
+  }
+  if (findMnemonic(text, budget)) {
+    return {
+      patternName: 'BIP-39 Recovery Phrase',
+      fieldPath,
+      redactedSample: '[recovery phrase]',
+      severity: 'block',
+    };
+  }
+  return best;
 }
 
 export function scanArgs(args: unknown, depth = 0, fieldPath = 'args'): DlpMatch | null {
@@ -863,6 +1092,8 @@ export function scanArgs(args: unknown, depth = 0, fieldPath = 'args'): DlpMatch
     const assignmentCtx = isAssignmentContext(text);
 
     for (const pattern of DLP_PATTERNS) {
+      // Context patterns belong to the bounded argument gate only.
+      if (pattern.argumentsOnly) continue;
       // Keyword prefilter: if the pattern declares keywords, at least one must
       // appear in the string before we invoke the regex engine.
       if (
@@ -912,6 +1143,7 @@ export function scanText(text: string): DlpMatch | null {
   const t = text.length > MAX_STRING_BYTES ? text.slice(0, MAX_STRING_BYTES) : text;
   const tLower = t.toLowerCase();
   for (const pattern of DLP_PATTERNS) {
+    if (pattern.argumentsOnly) continue;
     if (pattern.keywords && !pattern.keywords.some((kw) => tLower.includes(kw.toLowerCase()))) {
       continue;
     }
@@ -948,6 +1180,7 @@ export function redactText(text: string): { result: string; found: string[] } {
   const lower = text.toLowerCase();
 
   for (const { pattern, globalRegex } of DLP_PATTERNS_GLOBAL) {
+    if (pattern.argumentsOnly) continue;
     if (pattern.keywords && !pattern.keywords.some((kw) => lower.includes(kw.toLowerCase()))) {
       continue;
     }

@@ -1,3 +1,4 @@
+import type { ToolInspection } from '../shell/tool-input';
 // Stateless policy evaluator. The host passes config, args, optional
 // context (agent, cwd, active environment) and an optional hook bag for
 // I/O-bound checks (binary provenance, trusted-host lookup).
@@ -5,11 +6,17 @@
 // Engine purity: no fs/path/os/process imports here. Anything that needs
 // to touch the host system arrives via the hooks parameter.
 
-import type { SmartRule } from '../types';
+import type { SmartRule, DlpMatch } from '../types';
+import {
+  collectFileAccesses,
+  evaluateProtectedFileAccess,
+  incompleteFileVerdict,
+} from '../files/protected-access';
+import type { FileAccessContext } from '../files/paths';
 import { extractShellDestTokens } from '../shell/index';
 import { ssrfFloor } from '../egress/ssrf';
 import { ssrfDestinationFloor, extractToolDestinations } from '../egress/destinations';
-import { scanArgs } from '../dlp';
+import { scanArgumentSecrets } from '../dlp/arguments';
 import {
   detectDangerousShellExec,
   analyzeShellCommand,
@@ -17,7 +24,8 @@ import {
   analyzeSqlDestructive,
   analyzeChmod777,
   isRmCreatedInCommandCleanup,
-  isBashTool,
+  resolveShellInput,
+  shellRuleArgs,
   detectInlineExec,
   toolMatchesRule,
   AST_FS_REGEX_RULES,
@@ -47,7 +55,7 @@ export interface PolicyConfig {
     sandboxPaths: string[];
     dangerousWords: string[];
     ignoredTools: string[];
-    toolInspection: Record<string, string>;
+    toolInspection: ToolInspection;
     smartRules: SmartRule[];
     dlp: {
       enabled: boolean;
@@ -91,7 +99,7 @@ function catalogSettings(config: PolicyConfig): CatalogSettings {
   return catalogSettingsFromConfig(config.settings, config.policy);
 }
 
-export interface PolicyContext {
+export interface PolicyContext extends FileAccessContext {
   /** "Terminal" disables most blocks (manual user typing). */
   agent?: string;
   /** Working directory passed through to provenance hook. */
@@ -110,6 +118,12 @@ export interface PolicyContext {
    * Read/Grep/Glob. Opt-in per call; never set on the hot path.
    */
   skipIgnoredFastPath?: boolean;
+  /**
+   * The host's own `scanArgumentSecrets(args)` result for these exact
+   * arguments, so the gate and the engine scan once per call. Set only by
+   * trusted host code; absent means the engine scans.
+   */
+  argumentScan?: DlpMatch | null;
 }
 
 export type ProvenanceTrust = 'system' | 'managed' | 'user' | 'suspect' | 'unknown';
@@ -228,27 +242,18 @@ function tokenize(toolName: string): string[] {
 function extractShellCommand(
   toolName: string,
   args: unknown,
-  toolInspection: Record<string, string>
+  toolInspection: ToolInspection
 ): string | null {
   const patterns = Object.keys(toolInspection);
   const matchingPattern = patterns.find((p) => matchesPattern(toolName, p));
   if (!matchingPattern) return null;
   const fieldPath = toolInspection[matchingPattern];
-  const value = getNestedValue(args, fieldPath);
+  const value = getNestedValue(args, typeof fieldPath === 'string' ? fieldPath : fieldPath.field);
   return typeof value === 'string' ? value : null;
 }
 
-/** Returns true when a tool's inspected field is a shell command — i.e. the
- *  tool is shell-shaped even though its name is outside BASH_TOOL_NAMES
- *  (e.g. `terminal.execute`). Mirrors isSqlTool below. */
-function inspectsShellCommand(toolName: string, toolInspection: Record<string, string>): boolean {
-  const patterns = Object.keys(toolInspection);
-  const matchingPattern = patterns.find((p) => matchesPattern(toolName, p));
-  return matchingPattern !== undefined && toolInspection[matchingPattern] === 'command';
-}
-
 /** Returns true when a tool's inspected field is SQL (sql or query). */
-function isSqlTool(toolName: string, toolInspection: Record<string, string>): boolean {
+function isSqlTool(toolName: string, toolInspection: ToolInspection): boolean {
   const patterns = Object.keys(toolInspection);
   const matchingPattern = patterns.find((p) => matchesPattern(toolName, p));
   if (!matchingPattern) return false;
@@ -399,28 +404,31 @@ export async function evaluatePolicy(
   context: PolicyContext = {},
   hooks: PolicyHostHooks = {}
 ): Promise<PolicyVerdict> {
-  const { agent, cwd, activeEnvironment } = context;
-  const { checkProvenance, isTrustedHost } = hooks;
-  const settingsView = catalogSettings(config);
-  // ONE reader for every built-in site: the check's value in force.
-  const cv = (id: string): Verdict => checkValue(settingsView, id);
-  // A finding whose check is `log`: kept aside and returned only where the
-  // evaluation would otherwise allow, never ahead of a later tier.
-  let loggedFinding: PolicyVerdict | undefined;
-  const noteLogged = (v: PolicyVerdict | null): void => {
-    if (v?.logged && !loggedFinding) loggedFinding = v;
-  };
-  const allowed = (): PolicyVerdict => loggedFinding ?? { decision: 'allow' };
-
-  // 0. DLP Content Scanner — runs before ignoredTools fast path so credentials
-  // in "safe" tools (ls, grep, cat) are always caught when scanIgnoredTools is on.
-  // Uses scanArgs only (not scanFilePath): sensitive-path access is already covered
-  // by smart rules; this tier catches secret content (AWS keys, tokens) in arg values.
+  let protectedVerdict: PolicyVerdict | null = null;
+  if (context.agent !== 'Terminal') {
+    try {
+      const accesses =
+        context.accesses ??
+        collectFileAccesses(toolName, args, context, config.policy.toolInspection);
+      protectedVerdict = evaluateProtectedFileAccess(accesses, context, catalogSettings(config));
+    } catch {
+      // An exception while inspecting file operands must never fail open.
+      protectedVerdict = incompleteFileVerdict();
+    }
+  }
+  // This floor precedes DLP reviews, ignored tools and trusted-host pipe allows.
+  if (protectedVerdict?.decision === 'block') return protectedVerdict;
+  let dlpVerdict: PolicyVerdict | undefined;
   const wouldBeIgnored = matchesPattern(toolName, config.policy.ignoredTools);
   if (config.policy.dlp.enabled && (!wouldBeIgnored || config.policy.dlp.scanIgnoredTools)) {
-    const dlpMatch = args !== undefined ? scanArgs(args) : null;
+    const dlpMatch =
+      args === undefined
+        ? null
+        : context.argumentScan !== undefined
+          ? context.argumentScan
+          : scanArgumentSecrets(args);
     if (dlpMatch) {
-      return {
+      dlpVerdict = {
         // reviewAction:'block' (inline-ask v2): the admin upgraded
         // review-severity matches to a hard block — every evaluatePolicy
         // caller (orchestrator, explain, gateway) must agree with the gate.
@@ -434,6 +442,57 @@ export async function evaluatePolicy(
       };
     }
   }
+  if (dlpVerdict?.decision === 'block') return dlpVerdict;
+  const result = await evaluatePolicyCore(
+    config,
+    toolName,
+    args,
+    {
+      ...context,
+      skipIgnoredFastPath: context.skipIgnoredFastPath || protectedVerdict?.decision === 'review',
+    },
+    hooks
+  );
+  if (result.decision === 'block') return result;
+  if (
+    context.agent !== 'Terminal' &&
+    resolveShellInput(toolName, args, config.policy.toolInspection).kind === 'uninspectable'
+  ) {
+    return {
+      decision: 'review',
+      ruleName: 'shell-inspection-incomplete',
+      blockedByLabel: 'Shell inspection incomplete',
+      reason: 'The executable command could not be inspected. Approve this call explicitly.',
+    };
+  }
+  if (protectedVerdict?.decision === 'review') return protectedVerdict;
+  if (dlpVerdict) return dlpVerdict;
+  return result.decision === 'allow' && protectedVerdict?.logged ? protectedVerdict : result;
+}
+
+async function evaluatePolicyCore(
+  config: PolicyConfig,
+  toolName: string,
+  args?: unknown,
+  context: PolicyContext = {},
+  hooks: PolicyHostHooks = {}
+): Promise<PolicyVerdict> {
+  const { agent, cwd, activeEnvironment } = context;
+  const { checkProvenance, isTrustedHost } = hooks;
+  const settingsView = catalogSettings(config);
+  // ONE reader for every built-in site: the check's value in force.
+  const cv = (id: string): Verdict => checkValue(settingsView, id);
+  // A finding whose check is `log`: kept aside and returned only where the
+  // evaluation would otherwise allow, never ahead of a later tier.
+  let loggedFinding: PolicyVerdict | undefined;
+  const noteLogged = (v: PolicyVerdict | null): void => {
+    if (v?.logged && !loggedFinding) loggedFinding = v;
+  };
+  const allowed = (): PolicyVerdict => loggedFinding ?? { decision: 'allow' };
+
+  // Content DLP is collected by evaluatePolicy before this waterfall.
+  const shellInput = resolveShellInput(toolName, args, config.policy.toolInspection);
+  const wouldBeIgnored = matchesPattern(toolName, config.policy.ignoredTools);
 
   // ── SSRF floor, non-shell destinations ──────────────────────────────────
   // A tool that fetches a URL itself reaches a protected address without ever
@@ -503,7 +562,7 @@ export async function evaluatePolicy(
   // G10: an ignored tool that declared a destination the egress policy
   // actions gets that verdict instead of the silent allow. Smart rules never
   // ran for an ignored tool before this change and still do not.
-  if (wouldBeIgnored && !context.skipIgnoredFastPath) {
+  if (wouldBeIgnored && shellInput.kind === 'not-shell' && !context.skipIgnoredFastPath) {
     return pendingToolEgress ?? { decision: 'allow' };
   }
 
@@ -516,15 +575,7 @@ export async function evaluatePolicy(
   // `terminal.execute` running the AST-superseded REGEX twins with no AST to
   // correct them — resurrecting the `grep "drop table"` false positive and
   // making commandChecks.chmod/sqlDdl inoperative for that tool.
-  const shellShaped =
-    isBashTool(toolName) || inspectsShellCommand(toolName, config.policy.toolInspection);
-  const shellShapedCommand = shellShaped
-    ? isBashTool(toolName) && args && typeof args === 'object'
-      ? typeof (args as Record<string, unknown>).command === 'string'
-        ? ((args as Record<string, unknown>).command as string)
-        : null
-      : extractShellCommand(toolName, args, config.policy.toolInspection)
-    : null;
+  const shellShapedCommand = shellInput.kind === 'shell' ? shellInput.command : null;
 
   // AST FS-op gate — only fires for AI-driven calls. node9 is AI-driven; manual
   // (Terminal) users are trusted and reach the tier-4 manual auto-allow without
@@ -686,7 +737,13 @@ export async function evaluatePolicy(
       if (!toolMatchesRule(toolName, rule.tool, config.policy.toolInspection)) return false;
       if (astSuppressed(rule)) return false;
       if (rmCleanupWaiver && rule.name === 'review-rm' && rule.verdict === 'review') return false;
-      if (!evaluateSmartConditions(args, rule)) return false;
+      if (
+        !evaluateSmartConditions(
+          shellRuleArgs(toolName, args, rule.tool, config.policy.toolInspection),
+          rule
+        )
+      )
+        return false;
       const check = ruleCheck(rule);
       if (check?.value === 'off') return false;
       if (check?.value === 'log') {
@@ -749,7 +806,12 @@ export async function evaluatePolicy(
   // before dangerous words, mirroring where the shell branch sits.
   if (pendingToolEgress) return pendingToolEgress;
 
-  const shellCommand = extractShellCommand(toolName, args, config.policy.toolInspection);
+  const shellCommand =
+    shellInput.kind === 'shell'
+      ? shellInput.command
+      : shellInput.kind === 'not-shell'
+        ? extractShellCommand(toolName, args, config.policy.toolInspection)
+        : null;
   if (shellCommand) {
     const analyzed: ShellCommandAnalysis = analyzeShellCommand(shellCommand);
     allTokens = analyzed.allTokens;
@@ -825,7 +887,7 @@ export async function evaluatePolicy(
       consider('commands.eval-dynamic', {
         decision: 'review',
         blockedByLabel: 'Node9: Eval Dynamic Content',
-        reason: 'eval of dynamic content (variable or subshell expansion) requires approval',
+        reason: 'Runtime-generated commands or shell code require approval',
         ruleDescription:
           'The AI is running a command that includes a variable or subshell expansion. The actual command executed at runtime may differ from what is shown here.',
         tier: 3,

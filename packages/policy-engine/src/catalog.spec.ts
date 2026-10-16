@@ -43,11 +43,12 @@ describe('catalog integrity', () => {
     }
   });
 
-  it('a locked row offers block only, and exactly three rows are locked', () => {
+  it('a locked row offers block only, and exactly four rows are locked', () => {
     const locked = CHECKS.filter(isLockedCheck);
     expect(locked.map((c) => c.id).sort()).toEqual([
       'commands.eval-remote',
       'commands.rm-home',
+      'files.system-auth',
       'network.metadata',
     ]);
     for (const c of locked) expect(c.values).toEqual(['block']);

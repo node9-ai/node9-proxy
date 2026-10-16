@@ -285,6 +285,8 @@ export function checkToLegacyPolicy(policy: Obj, id: string, v: Verdict): boolea
  * catalog row offers works. Pack rows (`packs.*`) qualify too.
  */
 export const MAP_GOVERNED: ReadonlySet<string> = new Set([
+  'files.shell-startup',
+  'files.password-hashes',
   'commands.inline-exec',
   'commands.eval-dynamic',
   'commands.curl-pipe-shell',
