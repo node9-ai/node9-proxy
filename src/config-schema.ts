@@ -209,6 +209,17 @@ export const ConfigFileSchema = z
             allow: z.array(z.string()).optional(),
           })
           .optional(),
+        untrustedContent: z
+          .object({
+            enabled: z.boolean().optional(),
+            spotlight: z.boolean().optional(),
+            afterExposure: z.enum(['ask-once', 'ask-every-time', 'log-only']).optional(),
+            orgDomains: z.array(z.string()).optional(),
+            roles: z
+              .record(z.string(), z.record(z.string(), z.enum(['source', 'action', 'read'])))
+              .optional(),
+          })
+          .optional(),
         skillPinning: z
           .object({
             enabled: z.boolean().optional(),

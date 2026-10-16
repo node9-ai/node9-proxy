@@ -58,6 +58,7 @@ import {
   type Decision,
   taintStore,
   sessionTaintStore,
+  sessionExposureStore,
   insightCounts,
   loadInsightCounts,
   saveInsightCounts,
@@ -1092,6 +1093,9 @@ export function startDaemon(): void {
     // output, so its next high-risk call is routed to review. Set by the
     // PostToolUse `log` hook; queried by the next PreToolUse `check`.
     if (req.method === 'POST' && pathname === '/session-taint') {
+      // fw#318 decision 6: the taint decides whether a call is held, so only a
+      // holder of the internal token may write, read or clear it.
+      if (!validToken(req)) return res.writeHead(403).end();
       try {
         const body = JSON.parse(await readBody(req)) as {
           sessionId?: unknown;
@@ -1113,6 +1117,9 @@ export function startDaemon(): void {
     }
 
     if (req.method === 'POST' && pathname === '/session-taint/check') {
+      // fw#318 decision 6: the taint decides whether a call is held, so only a
+      // holder of the internal token may write, read or clear it.
+      if (!validToken(req)) return res.writeHead(403).end();
       try {
         const body = JSON.parse(await readBody(req)) as { sessionId?: unknown };
         if (typeof body.sessionId !== 'string') {
@@ -1129,11 +1136,17 @@ export function startDaemon(): void {
     }
 
     if (req.method === 'GET' && pathname === '/session-taint/list') {
+      // fw#318 decision 6: the taint decides whether a call is held, so only a
+      // holder of the internal token may write, read or clear it.
+      if (!validToken(req)) return res.writeHead(403).end();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ records: sessionTaintStore.list() }));
     }
 
     if (req.method === 'POST' && pathname === '/session-taint/clear') {
+      // fw#318 decision 6: the taint decides whether a call is held, so only a
+      // holder of the internal token may write, read or clear it.
+      if (!validToken(req)) return res.writeHead(403).end();
       try {
         const body = JSON.parse(await readBody(req)) as { sessionId?: unknown; all?: unknown };
         if (body.all === true) {
@@ -1191,6 +1204,88 @@ export function startDaemon(): void {
       } catch {
         res.writeHead(400).end();
         return;
+      }
+    }
+
+    // ── Session exposure (fw#318) — the session READ outside content. Set by
+    // the PostToolUse `log` hook and the gateway; the user's own mentions by
+    // the UserPromptSubmit hook; queried by the next PreToolUse `check`.
+    // Every route takes the internal token: the record decides whether a
+    // send is held, so no other local process may write or clear it.
+    if (pathname.startsWith('/session-exposure')) {
+      if (!validToken(req)) return res.writeHead(403).end();
+      const json = (code: number, body: unknown) => {
+        res.writeHead(code, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify(body));
+      };
+      const strings = (v: unknown): string[] =>
+        Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+      try {
+        if (req.method === 'POST' && pathname === '/session-exposure') {
+          const body = JSON.parse(await readBody(req)) as {
+            sessionId?: unknown;
+            source?: { tool?: unknown; server?: unknown };
+            destinations?: unknown;
+          };
+          if (typeof body.sessionId !== 'string' || typeof body.source?.tool !== 'string')
+            return json(400, { error: 'sessionId and source.tool are required strings' });
+          sessionExposureStore.mark(
+            body.sessionId,
+            {
+              tool: body.source.tool.slice(0, 200),
+              server:
+                typeof body.source.server === 'string'
+                  ? body.source.server.slice(0, 80)
+                  : undefined,
+              at: Date.now(),
+            },
+            strings(body.destinations)
+          );
+          return json(200, { ok: true });
+        }
+        if (req.method === 'POST' && pathname === '/session-exposure/user-mentioned') {
+          const body = JSON.parse(await readBody(req)) as {
+            sessionId?: unknown;
+            destinations?: unknown;
+          };
+          if (typeof body.sessionId !== 'string')
+            return json(400, { error: 'sessionId must be a string' });
+          sessionExposureStore.mention(body.sessionId, strings(body.destinations));
+          return json(200, { ok: true });
+        }
+        if (req.method === 'POST' && pathname === '/session-exposure/check') {
+          const body = JSON.parse(await readBody(req)) as { sessionId?: unknown };
+          if (typeof body.sessionId !== 'string')
+            return json(400, { error: 'sessionId must be a string' });
+          const record = sessionExposureStore.check(body.sessionId);
+          return json(200, record ? { exposed: true, record } : { exposed: false });
+        }
+        if (req.method === 'POST' && pathname === '/session-exposure/approve') {
+          const body = JSON.parse(await readBody(req)) as { sessionId?: unknown; keys?: unknown };
+          if (typeof body.sessionId !== 'string')
+            return json(400, { error: 'sessionId must be a string' });
+          return json(200, {
+            ok: sessionExposureStore.approve(body.sessionId, strings(body.keys)),
+          });
+        }
+        if (req.method === 'GET' && pathname === '/session-exposure/list') {
+          return json(200, { records: sessionExposureStore.list() });
+        }
+        if (req.method === 'POST' && pathname === '/session-exposure/clear') {
+          const body = JSON.parse(await readBody(req)) as { sessionId?: unknown; all?: unknown };
+          if (body.all === true) {
+            const cleared = sessionExposureStore.list().length;
+            sessionExposureStore.clear();
+            return json(200, { ok: true, cleared });
+          }
+          if (typeof body.sessionId !== 'string' || body.sessionId.length === 0)
+            return json(400, { error: 'sessionId (non-empty) or all:true is required' });
+          const cleared = sessionExposureStore.clearSession(body.sessionId) ? 1 : 0;
+          return json(200, { ok: true, cleared });
+        }
+        return res.writeHead(404).end();
+      } catch {
+        return res.writeHead(400).end();
       }
     }
 

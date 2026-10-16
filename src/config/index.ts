@@ -233,6 +233,18 @@ export interface Config {
       mode: 'warn' | 'block';
       roots: string[];
     };
+    // fw#318: a session that READ outside content (an email, a web page, an
+    // issue) is exposed; its later sends are judged by destination. `spotlight`
+    // frames every source result for the model; `afterExposure` is what a held
+    // call does; `orgDomains` makes a send inside the organisation a log row;
+    // `roles` overrides a tool's source/action/read role per server name.
+    untrustedContent: {
+      enabled: boolean;
+      spotlight: boolean;
+      afterExposure: 'ask-once' | 'ask-every-time' | 'log-only';
+      orgDomains: string[];
+      roles: Record<string, Record<string, 'source' | 'action' | 'read'>>;
+    };
     // Pipe-chain trusted hosts — downgrades secret|curl-host exfil verdicts.
     // ONLY the managed source populates this list; when unmanaged, the policy
     // hook reads the local file directly via the fresh (TTL+mtime) getCachedHosts
@@ -423,6 +435,31 @@ export const DEFAULT_CONFIG: Config = {
         description:
           'The AI wants to drop or truncate a database table via the shell. This permanently deletes the table structure or all its data.',
       },
+      // ── node9 itself ──────────────────────────────────────────────────────
+      // The agent runs as the user, so a `node9 ...` command from Bash can
+      // clear the session's taint or exposure, trust a destination or pause
+      // the gate. Those are the user's own commands; from the agent they are
+      // a review (fw#318 review finding 1).
+      {
+        name: 'review-node9-disarm',
+        tool: 'bash',
+        conditions: [
+          {
+            field: 'command',
+            op: 'matches',
+            // Single spaces on purpose: a nested `\\s+` inside the alternation
+            // fails the engine's ReDoS check and the rule would be dropped.
+            value:
+              '(^|&&|\\|\\||;)\\s*(npx )?node9 (session-(exposure|taint) clear|trust (add|recipient add)|pause|shield (disable|set)|egress allow|approver set)\\b',
+            flags: 'i',
+          },
+        ],
+        conditionMode: 'all',
+        verdict: 'review',
+        reason: 'node9 self-weakening command run by the agent',
+        description:
+          "The AI wants to run a node9 command that clears a session flag, trusts a destination, pauses the gate or weakens a shield. These are your commands to run, not the agent's.",
+      },
       // ── Git safety ────────────────────────────────────────────────────────
       {
         name: 'review-force-push',
@@ -530,6 +567,13 @@ export const DEFAULT_CONFIG: Config = {
       allow: [],
     },
     skillPinning: { enabled: false, mode: 'warn', roots: [] },
+    untrustedContent: {
+      enabled: true,
+      spotlight: true,
+      afterExposure: 'ask-once',
+      orgDomains: [],
+      roles: {},
+    },
     trustedHosts: [],
     trustedHostsManaged: false,
     appPermissions: {},
@@ -958,6 +1002,11 @@ export function getConfig(cwd?: string): Config {
       ...DEFAULT_CONFIG.policy.skillPinning,
       roots: [...DEFAULT_CONFIG.policy.skillPinning.roots],
     },
+    untrustedContent: {
+      ...DEFAULT_CONFIG.policy.untrustedContent,
+      orgDomains: [...DEFAULT_CONFIG.policy.untrustedContent.orgDomains],
+      roles: {},
+    },
     // Left empty on purpose: the local file is read fresh at policy-eval time
     // (getCachedHosts via isTrustedHost), NOT snapshotted into the frozen config
     // here. A managed list fills this below and flips trustedHostsManaged.
@@ -1197,6 +1246,9 @@ export function getConfig(cwd?: string): Config {
         }
       }
     }
+    if (p.untrustedContent && typeof p.untrustedContent === 'object') {
+      applyUntrustedContent(mergedPolicy.untrustedContent, p.untrustedContent, false, isProject);
+    }
 
     const envs = (source.environments || {}) as Record<string, unknown>;
     for (const [envName, envConfig] of Object.entries(envs)) {
@@ -1354,6 +1406,7 @@ export function getConfig(cwd?: string): Config {
             windowSeconds?: unknown;
           };
           skillPinning?: { enabled?: unknown; mode?: unknown; roots?: unknown };
+          untrustedContent?: unknown;
           jailPaths?: { path?: unknown; verdict?: unknown }[];
           trustedHosts?: unknown;
           appPermissions?: unknown;
@@ -1585,6 +1638,12 @@ export function getConfig(cwd?: string): Config {
               : cur.allow,
           };
         }
+        // fw#318: untrustedContent replaces the local config per field, like
+        // packageCheck. The org domain list and the role map REPLACE the local
+        // ones when stated, so a developer cannot widen what the org narrowed.
+        if (mc.untrustedContent && typeof mc.untrustedContent === 'object') {
+          applyUntrustedContent(mergedPolicy.untrustedContent, mc.untrustedContent, true);
+        }
         if (mc.loopDetection && typeof mc.loopDetection === 'object') {
           const l = mc.loopDetection;
           const cur = mergedPolicy.loopDetection;
@@ -1688,6 +1747,7 @@ export function getConfig(cwd?: string): Config {
           on(mc.egress) ||
           on(mc.dlp) ||
           on(mc.injectionScan) ||
+          on(mc.untrustedContent) ||
           on(mc.skillPinning) ||
           on(mc.loopDetection) ||
           (!!mc.commandChecks &&
@@ -2129,4 +2189,58 @@ function tryLoadConfig(
     );
   }
   return sanitized;
+}
+
+/**
+ * fw#318: merge a `policy.untrustedContent` block into the running policy, per
+ * field, validating every value (a bad value keeps the current one). With
+ * `replaceLists`, a stated `orgDomains` / `roles` replaces the current one (the
+ * managed layer); otherwise domains append and roles merge per server.
+ */
+function applyUntrustedContent(
+  cur: Config['policy']['untrustedContent'],
+  raw: unknown,
+  replaceLists = false,
+  isProject = false
+): void {
+  if (!raw || typeof raw !== 'object') return;
+  const uc = raw as Record<string, unknown>;
+  // A repository's config may not weaken the gate (same floor as egress and
+  // commandChecks): a cloned repo cannot switch it off, log instead of ask,
+  // make a domain its own, or declare a tool harmless. It may tighten.
+  const AFTER_RANK = { 'log-only': 0, 'ask-once': 1, 'ask-every-time': 2 } as const;
+  if (typeof uc.enabled === 'boolean' && !(isProject && uc.enabled === false))
+    cur.enabled = uc.enabled;
+  if (typeof uc.spotlight === 'boolean' && !(isProject && uc.spotlight === false))
+    cur.spotlight = uc.spotlight;
+  if (
+    (uc.afterExposure === 'ask-once' ||
+      uc.afterExposure === 'ask-every-time' ||
+      uc.afterExposure === 'log-only') &&
+    !(isProject && AFTER_RANK[uc.afterExposure] < AFTER_RANK[cur.afterExposure])
+  )
+    cur.afterExposure = uc.afterExposure;
+  if (Array.isArray(uc.orgDomains) && !isProject) {
+    const domains = uc.orgDomains
+      .filter((d): d is string => typeof d === 'string')
+      .map((d) => d.trim().toLowerCase().replace(/^@/, ''))
+      .filter((d) => /^[a-z0-9.-]+\.[a-z]{2,}$/.test(d));
+    if (replaceLists) cur.orgDomains = domains;
+    else for (const d of domains) if (!cur.orgDomains.includes(d)) cur.orgDomains.push(d);
+  }
+  if (uc.roles && typeof uc.roles === 'object' && !Array.isArray(uc.roles)) {
+    const next: Config['policy']['untrustedContent']['roles'] = replaceLists ? {} : cur.roles;
+    for (const [server, tools] of Object.entries(uc.roles as Record<string, unknown>)) {
+      if (!tools || typeof tools !== 'object' || Array.isArray(tools)) continue;
+      const m: Record<string, 'source' | 'action' | 'read'> = { ...(next[server] ?? {}) };
+      for (const [tool, role] of Object.entries(tools as Record<string, unknown>)) {
+        if (role === 'source' || role === 'action' || role === 'read') {
+          if (isProject && role !== 'action') continue; // a repo may only add caution
+          m[tool] = role;
+        }
+      }
+      if (Object.keys(m).length > 0) next[server] = m;
+    }
+    cur.roles = next;
+  }
 }

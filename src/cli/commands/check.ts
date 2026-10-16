@@ -9,7 +9,8 @@ import path from 'path';
 import os from 'os';
 import { authorizeHeadless } from '../../auth/orchestrator';
 import { checkPause } from '../../auth/state';
-import { isDaemonRunning } from '../../auth/daemon';
+import { isDaemonRunning, notifyUserMentions } from '../../auth/daemon';
+import { extractContentDestinations } from '@node9/policy-engine';
 import { openStartupLogFd, recordStartupState } from '../../daemon/startup-log';
 import { getConfig, type Config } from '../../config';
 import { buildNegotiationMessage, buildReviewMessage } from '../../policy/negotiation';
@@ -283,6 +284,27 @@ export function registerCheckCommand(program: Command): void {
             // this, prompts stayed BLOCKED while everything else was paused
             // (dogfound 2026-07-05). Same guard pair as the orchestrator.
             if (process.env.NODE9_PAUSED === '1' || checkPause().paused) process.exit(0);
+
+            // fw#318 (design 5.3): an address, host or IBAN the user typed is
+            // known for this session, so a later send to it is not held.
+            // Best-effort and awaited: the process exits right after.
+            try {
+              const sid =
+                typeof payload.session_id === 'string'
+                  ? payload.session_id
+                  : typeof payload.conversationId === 'string'
+                    ? payload.conversationId
+                    : '';
+              const promptCwd =
+                typeof payload.cwd === 'string' && path.isAbsolute(payload.cwd)
+                  ? payload.cwd
+                  : undefined;
+              if (sid && getConfig(promptCwd).policy.untrustedContent?.enabled) {
+                await notifyUserMentions(sid, extractContentDestinations(prompt));
+              }
+            } catch {
+              /* never block the prompt on this */
+            }
 
             const dlpMatch = scanArgs({ prompt });
             // Decoy credentials: a planted value pasted into a prompt is the same

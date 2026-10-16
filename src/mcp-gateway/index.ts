@@ -36,9 +36,11 @@ import {
   getInternalToken,
   notifyActivitySocket,
   notifySessionTaint,
+  notifySessionExposure,
 } from '../auth/daemon';
 import { stripControlChars } from '../utils/safe-text';
 import { scanToolResult } from './result-scan';
+import { sourceWord } from '../exposure/roles';
 
 // readActiveShields + waitForMcpApproval helper removed — the
 // mcp-tool-gating shield (which used the browser dashboard for the
@@ -823,11 +825,27 @@ export async function runMcpGateway(
         if (parsed.result !== undefined) {
           try {
             const cfg = getConfig();
+            // fw#318: through the gateway every tool is an MCP tool and, with
+            // no annotation yet read here (P2), a source of outside content:
+            // its result marks the gateway session exposed and, with
+            // spotlight, is framed whole.
+            const uc = cfg.policy.untrustedContent;
             const scan = scanToolResult(line, parsed, exec.toolName, {
               dlpEnabled: cfg.policy.dlp.enabled,
               injection: cfg.policy.injectionScan,
+              spotlight:
+                uc?.enabled && uc.spotlight
+                  ? sourceWord(`mcp__${configName || 'server'}__${exec.toolName}`)
+                  : undefined,
             });
             if (scan.changed) outLine = scan.line;
+            if (uc?.enabled) {
+              notifySessionExposure(
+                gatewaySessionId,
+                { tool: exec.toolName, server: configName || undefined },
+                scan.destinations
+              ).catch(() => {});
+            }
             // A redacted secret never reaches the model, so it taints nothing
             // (the same reasoning as the PostToolUse redact-output mode). An
             // injection is framed but still READ, so it taints the session.

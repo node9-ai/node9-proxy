@@ -413,6 +413,7 @@ export async function notifyTaintPropagate(
 // Re-export TaintRecord so callers share one canonical type instead of an inline duplicate.
 export type { TaintRecord } from '../daemon/taint-store.js';
 import type { TaintRecord, SessionTaintRecord } from '../daemon/taint-store.js';
+import type { SessionExposureRecord } from '../daemon/exposure-store.js';
 
 export interface SessionTaintCheckResult {
   tainted: boolean;
@@ -481,7 +482,7 @@ export async function notifySessionTaint(sessionId: string, source: string): Pro
   try {
     await fetch(`${base}/session-taint`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: exposureHeaders(),
       body: JSON.stringify({ sessionId, source }),
       signal: AbortSignal.timeout(1000),
     });
@@ -501,7 +502,7 @@ export async function checkSessionTaint(sessionId: string): Promise<SessionTaint
   try {
     const res = await fetch(`${base}/session-taint/check`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: exposureHeaders(),
       body: JSON.stringify({ sessionId }),
       signal: AbortSignal.timeout(2000),
     });
@@ -521,7 +522,10 @@ export async function listSessionTaints(): Promise<SessionTaintRecord[]> {
   if (!isDaemonRunning()) return [];
   const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
   try {
-    const res = await fetch(`${base}/session-taint/list`, { signal: AbortSignal.timeout(2000) });
+    const res = await fetch(`${base}/session-taint/list`, {
+      headers: exposureHeaders(),
+      signal: AbortSignal.timeout(2000),
+    });
     const json = (await res.json()) as { records?: SessionTaintRecord[] };
     return json.records ?? [];
   } catch {
@@ -544,11 +548,127 @@ export async function clearSessionTaint(opts: {
   try {
     const res = await fetch(`${base}/session-taint/clear`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: exposureHeaders(),
       body: JSON.stringify(opts),
       signal: AbortSignal.timeout(2000),
     });
     return (await res.json()) as { ok: boolean; cleared: number };
+  } catch {
+    return { ok: false, cleared: 0, daemonUnavailable: true };
+  }
+}
+
+// ── Session exposure (fw#318) ───────────────────────────────────────────────
+// The session READ outside content. Same contracts as the taint client above:
+// notify is best-effort and awaited before the hook exits; check fails open.
+// Every route takes the daemon's internal token (read from daemon.pid).
+
+export interface SessionExposureCheckResult {
+  exposed: boolean;
+  record?: SessionExposureRecord;
+  daemonUnavailable?: boolean;
+}
+
+function exposureHeaders(): Record<string, string> {
+  return {
+    'Content-Type': 'application/json',
+    'X-Node9-Internal': getInternalToken() ?? '',
+  };
+}
+
+async function exposurePost(route: string, body: unknown, timeoutMs: number): Promise<unknown> {
+  const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
+  const res = await fetch(`${base}${route}`, {
+    method: 'POST',
+    headers: exposureHeaders(),
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  // A 403 (stale daemon.pid after a restart) or a 400 must read as "the
+  // daemon did not answer", never as a record.
+  if (!res.ok) throw new Error(`session-exposure ${route}: HTTP ${res.status}`);
+  return res.json();
+}
+
+/** The session read a source. */
+export async function notifySessionExposure(
+  sessionId: string,
+  source: { tool: string; server?: string },
+  destinations: readonly string[]
+): Promise<void> {
+  if (!sessionId || !isDaemonRunning()) return;
+  try {
+    await exposurePost('/session-exposure', { sessionId, source, destinations }, 1000);
+  } catch {
+    // Best-effort — daemon unreachable is non-fatal.
+  }
+}
+
+/** The user named these destinations in a prompt. */
+export async function notifyUserMentions(
+  sessionId: string,
+  destinations: readonly string[]
+): Promise<void> {
+  if (!sessionId || destinations.length === 0 || !isDaemonRunning()) return;
+  try {
+    await exposurePost('/session-exposure/user-mentioned', { sessionId, destinations }, 1000);
+  } catch {
+    // Best-effort.
+  }
+}
+
+/** Fail-open: a daemon blip returns { exposed: false }. */
+export async function checkSessionExposure(sessionId: string): Promise<SessionExposureCheckResult> {
+  if (!sessionId || !isDaemonRunning()) return { exposed: false };
+  try {
+    return (await exposurePost(
+      '/session-exposure/check',
+      { sessionId },
+      2000
+    )) as SessionExposureCheckResult;
+  } catch {
+    return { exposed: false, daemonUnavailable: true };
+  }
+}
+
+/** An approval cleared these '<tool>|<destination>' keys (ask-once). */
+export async function approveSessionExposure(
+  sessionId: string,
+  keys: readonly string[]
+): Promise<void> {
+  if (!sessionId || keys.length === 0 || !isDaemonRunning()) return;
+  try {
+    await exposurePost('/session-exposure/approve', { sessionId, keys }, 1000);
+  } catch {
+    // Best-effort.
+  }
+}
+
+export async function listSessionExposures(): Promise<SessionExposureRecord[]> {
+  if (!isDaemonRunning()) return [];
+  const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
+  try {
+    const res = await fetch(`${base}/session-exposure/list`, {
+      headers: exposureHeaders(),
+      signal: AbortSignal.timeout(2000),
+    });
+    const json = (await res.json()) as { records?: SessionExposureRecord[] };
+    return json.records ?? [];
+  } catch {
+    return [];
+  }
+}
+
+export async function clearSessionExposure(opts: {
+  sessionId?: string;
+  all?: boolean;
+}): Promise<{ ok: boolean; cleared: number; daemonUnavailable?: boolean }> {
+  if (!isDaemonRunning()) return { ok: false, cleared: 0, daemonUnavailable: true };
+  try {
+    return (await exposurePost('/session-exposure/clear', opts, 2000)) as {
+      ok: boolean;
+      cleared: number;
+    };
   } catch {
     return { ok: false, cleared: 0, daemonUnavailable: true };
   }

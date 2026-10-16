@@ -145,7 +145,7 @@ describe('scanToolResult — unchanged contract', () => {
   it('returns the input line byte-for-byte when nothing fires', () => {
     const line = '{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"hi"}]}}';
     const s = scanToolResult(line, JSON.parse(line), 't', ON);
-    expect(s).toEqual({ line, changed: false, secrets: [], injection: null });
+    expect(s).toEqual({ line, changed: false, secrets: [], injection: null, destinations: [] });
   });
   it('ignores responses that are not tool results (tools/list, errors, empty)', () => {
     for (const parsed of [

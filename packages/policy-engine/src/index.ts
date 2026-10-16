@@ -160,6 +160,19 @@ export type {
 } from './policy';
 export { evaluatePolicy, resolvePinned, isIgnoredTool, checkDangerousSql } from './policy';
 
+// Exposure — destinations in content and in call arguments, for the gate
+// that judges a send after the session read outside content.
+export type { DestinationKind } from './exposure/destinations';
+export {
+  extractContentDestinations,
+  extractArgDestinations,
+  destinationDomain,
+  destinationKind,
+  destinationValue,
+  isDestructiveToolName,
+  MAX_DESTINATIONS,
+} from './exposure/destinations';
+
 // Smart rules — tool-name pattern match + condition evaluator.
 export { matchesPattern, getNestedValue, evaluateSmartConditions } from './rules';
 

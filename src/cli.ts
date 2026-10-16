@@ -79,6 +79,7 @@ import { uninstallDaemonService } from './daemon/index';
 import { registerSandboxCommand } from './cli/commands/sandbox';
 import { registerSessionsCommand } from './cli/commands/sessions';
 import { registerSessionTaintCommand } from './cli/commands/session-taint';
+import { registerSessionExposureCommand } from './cli/commands/session-exposure';
 import { registerPackageIndexCommand } from './cli/commands/package-index';
 import { registerSkillPinCommand } from './cli/commands/skill-pin';
 import { registerDecisionsCommand } from './cli/commands/decisions';
@@ -943,6 +944,7 @@ registerSandboxCommand(program, version);
 // Session history
 registerSessionsCommand(program);
 registerSessionTaintCommand(program);
+registerSessionExposureCommand(program);
 registerPackageIndexCommand(program);
 
 // Response DLP findings

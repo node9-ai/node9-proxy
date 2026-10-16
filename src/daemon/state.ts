@@ -14,6 +14,7 @@ import { DAEMON_PORT, DAEMON_HOST } from '../auth/daemon';
 import { scanArgumentSecrets, type ScanFinding } from '@node9/policy-engine';
 import { SuggestionTracker, type Suggestion } from './suggestion-tracker.js';
 import { TaintStore, SessionTaintStore } from './taint-store.js';
+import { SessionExposureStore } from './exposure-store.js';
 import { sessionCounters } from './session-counters.js';
 import { sessionHistory } from './session-history.js';
 import { atomicWriteSync } from '../utils/atomic-write';
@@ -87,6 +88,9 @@ export const taintStore = new TaintStore();
 /** Session-scoped taint (gap1): a session that just consumed flagged tool
  *  output; its next high-risk call is routed to review until the taint expires. */
 export const sessionTaintStore = new SessionTaintStore();
+/** Session exposure (fw#318): the session READ outside content; the next call
+ *  that sends is judged against what it read. Not a detection. */
+export const sessionExposureStore = new SessionExposureStore();
 /** Cumulative per-tool allow count for the 💡 insight line.
  *  Unlike suggestionTracker, this never resets after the suggestion threshold —
  *  only on deny. Used by all approval channels (terminal, browser, native popup).

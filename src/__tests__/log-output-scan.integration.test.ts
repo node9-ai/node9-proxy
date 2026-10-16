@@ -152,14 +152,43 @@ describe('log — response-channel DLP (gap1)', () => {
     expect(stdout).toMatch(/INJECTED INSTRUCTIONS/);
   });
 
-  it('stays silent on a real injection when injectionScan is DEFAULT OFF', () => {
-    // No enableInjectionScan() — proves the flag gates the behavior.
+  it('gives no injection warning on a real injection when injectionScan is DEFAULT OFF', () => {
+    // No enableInjectionScan() — proves the flag gates the detection. The
+    // result is still framed as data from a web page (fw#318 spotlight, on by
+    // default), which is not a detection and names no signal.
     const { stdout, status } = runLog(
       {
         hook_event_name: 'PostToolUse',
         tool_name: 'WebFetch',
         tool_use_id: 'tu-off',
         session_id: 's-off',
+        tool_response: { output: `Page content:\n${INJECTION}\n` },
+      },
+      home
+    );
+    expect(status).toBe(0);
+    const parsed = JSON.parse(stdout.trim()) as {
+      hookSpecificOutput?: { additionalContext?: string; updatedToolOutput?: unknown };
+    };
+    expect(parsed.hookSpecificOutput?.additionalContext).toBeUndefined();
+    expect(JSON.stringify(parsed.hookSpecificOutput?.updatedToolOutput)).toMatch(
+      /DATA from a web page/
+    );
+    expect(stdout).not.toMatch(/INJECTED INSTRUCTIONS/);
+  });
+
+  it('stays silent on a real injection when injectionScan is off and spotlight is off', () => {
+    fs.mkdirSync(path.join(home, '.node9'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.node9', 'config.json'),
+      JSON.stringify({ policy: { untrustedContent: { spotlight: false } } })
+    );
+    const { stdout, status } = runLog(
+      {
+        hook_event_name: 'PostToolUse',
+        tool_name: 'WebFetch',
+        tool_use_id: 'tu-off-2',
+        session_id: 's-off-2',
         tool_response: { output: `Page content:\n${INJECTION}\n` },
       },
       home
@@ -279,6 +308,34 @@ describe('log --redact-output (gap1 Mode A — for output-mutating shims)', () =
       redacted: string;
       injection: unknown;
     };
+    expect(resp.injection).toBeNull();
+    // fw#318 spotlight (default on): a fetched page is framed as data from a
+    // web page even when clean; the text itself is untouched inside the frame.
+    expect(resp.redacted).toContain('ordinary fetched page, nothing suspicious');
+    expect(resp.redacted).toMatch(/DATA from a web page/);
+  });
+
+  it('returns the clean text unframed when spotlight is off (Mode A)', () => {
+    fs.mkdirSync(path.join(home, '.node9'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.node9', 'config.json'),
+      JSON.stringify({
+        policy: { injectionScan: { enabled: true }, untrustedContent: { spotlight: false } },
+      })
+    );
+    const { stdout, status } = runLog(
+      {
+        hook_event_name: 'PostToolUse',
+        tool_name: 'WebFetch',
+        meta: { agent: 'Opencode' },
+        session_id: 's-clean-a2',
+        tool_response: { output: 'ordinary fetched page, nothing suspicious' },
+      },
+      home,
+      ['--redact-output']
+    );
+    expect(status).toBe(0);
+    const resp = JSON.parse(stdout.trim()) as { redacted: string; injection: unknown };
     expect(resp.injection).toBeNull();
     expect(resp.redacted).toBe('ordinary fetched page, nothing suspicious');
   });

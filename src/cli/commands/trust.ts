@@ -11,6 +11,11 @@ import {
   normalizeHost,
 } from '../../auth/trusted-hosts.js';
 import { cliGuardPolicyWrite } from '../../config/keyed-guard';
+import {
+  readTrustedRecipients,
+  addTrustedRecipient,
+  removeTrustedRecipient,
+} from '../../auth/trusted-recipients.js';
 
 /** Loose hostname validator: FQDN or wildcard glob (*.example.com). */
 function isValidHost(host: string): boolean {
@@ -73,6 +78,64 @@ export function registerTrustCommand(program: Command): void {
       for (const entry of hosts) {
         const date = new Date(entry.addedAt).toLocaleDateString();
         console.log(`  ${chalk.cyan(entry.host.padEnd(40))} ${chalk.gray(`added ${date}`)}`);
+      }
+      console.log('');
+    });
+
+  // ── trust recipient (fw#318) ───────────────────────────────────────────────
+  // Destinations a send may reach after the session read outside content
+  // without being held: an exact address, host or IBAN. A domain belongs in
+  // policy.untrustedContent.orgDomains.
+  const rec = trustCmd
+    .command('recipient')
+    .description(
+      'Manage trusted recipients (sends to them after reading outside content are not held)'
+    );
+
+  rec
+    .command('add <value>')
+    .description('Trust an address, host or IBAN exactly (x@y.z, api.example, GB..)')
+    .action((value: string) => {
+      if (!cliGuardPolicyWrite(`trust recipient add ${value}`)) return;
+      const stored = addTrustedRecipient(value, 'user');
+      if (!stored) {
+        console.error(
+          chalk.red(`\n❌ Not a destination: "${value}"\n`) +
+            chalk.gray('   Use an email address, a hostname or URL, or an IBAN.\n')
+        );
+        process.exit(1);
+      }
+      console.log(chalk.green(`\n✅ ${stored} added to trusted recipients.\n`));
+    });
+
+  rec
+    .command('remove <value>')
+    .description('Remove a trusted recipient')
+    .action((value: string) => {
+      if (!cliGuardPolicyWrite(`trust recipient remove ${value}`)) return;
+      if (!removeTrustedRecipient(value)) {
+        console.error(chalk.yellow(`\n⚠️  "${value}" is not in the trusted recipients list.\n`));
+        process.exit(1);
+      }
+      console.log(chalk.green(`\n✅ ${value} removed from trusted recipients.\n`));
+    });
+
+  rec
+    .command('list')
+    .description('Show all trusted recipients')
+    .action(() => {
+      const entries = readTrustedRecipients();
+      if (entries.length === 0) {
+        console.log(chalk.gray('\n  No trusted recipients.\n'));
+        console.log(`  Add one: ${chalk.cyan('node9 trust recipient add partner@example.com')}\n`);
+        return;
+      }
+      console.log(chalk.bold('\n🔓 Trusted Recipients\n'));
+      for (const e of entries) {
+        const date = new Date(e.addedAt).toLocaleDateString();
+        console.log(
+          `  ${chalk.cyan(e.value.padEnd(44))} ${chalk.gray(`added ${date} (${e.addedBy})`)}`
+        );
       }
       console.log('');
     });
