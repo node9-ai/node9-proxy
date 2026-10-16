@@ -131,6 +131,61 @@ describe('detectArgsPii — high-signal PII in tool args (realtime path)', () =>
   });
 });
 
+// ── decimal fractions (node9Firewall#333) ──────────────────────────────────
+// A float printed at full precision has 16 or 17 digits after `0.`, and the
+// `.` is a word boundary, so the fractional part used to read as a card.
+// Values are computed at run time: the literals are exactly what the realtime
+// gate blocked, so they cannot appear in source or in a tool call.
+
+/** Every simple fraction k/n with 2 <= n <= 100 (4,950 values). */
+const FRACTIONS: number[] = [];
+for (let n = 2; n <= 100; n++) for (let k = 1; k < n; k++) FRACTIONS.push(k / n);
+const fractionDigits = (x: number) => String(x).split('.')[1] ?? '';
+
+describe('detectPii — decimal fractions are not cards (#333)', () => {
+  it('instrument: the sweep has teeth (70 fractional parts are card-shaped and pass Luhn alone)', () => {
+    expect(FRACTIONS.length).toBe(4950);
+    expect(FRACTIONS.filter((x) => hasCard(fractionDigits(x))).length).toBe(70);
+    expect(hasCard(fractionDigits(46 / 96))).toBe(true);
+  });
+  it('issue row: 46/96 written as pretty JSON is NOT a card', () => {
+    expect(hasCard(JSON.stringify({ catch_rate: 46 / 96 }, null, 2))).toBe(false);
+  });
+  it('issue row: 1/2 written as pretty JSON is NOT a card', () => {
+    expect(hasCard(JSON.stringify({ catch_rate: 1 / 2 }, null, 2))).toBe(false);
+  });
+  it('sweep: 0 of 4,950 fractions are flagged, as JSON, as negatives, as plain text', () => {
+    const flagged = FRACTIONS.filter(
+      (x) =>
+        hasCard(JSON.stringify({ rate: x })) ||
+        hasCard(String(-x)) ||
+        hasCard('rate ' + String(x) + ' done')
+    );
+    expect(flagged.length).toBe(0);
+  });
+  it('a real card in the same JSON shape still IS a card', () => {
+    expect(hasCard(JSON.stringify({ catch_rate: asm(VALID_16[0].parts) }, null, 2))).toBe(true);
+    expect(hasCard(JSON.stringify({ catch_rate: asm(VALID_15[0].parts) }, null, 2))).toBe(true);
+  });
+});
+
+describe('detectArgsPii — decimal fractions are not cards (#333)', () => {
+  it('issue row: a Write of metrics.json holding 46/96 is not gated', () => {
+    const content = JSON.stringify({ catch_rate: 46 / 96 }, null, 2);
+    expect(argsHasCard({ file_path: 'metrics.json', content })).toBe(false);
+  });
+  it('sweep: 0 of 4,950 fractions are flagged as a string leaf or a number leaf', () => {
+    const flagged = FRACTIONS.filter(
+      (x) => argsHasCard({ content: JSON.stringify({ rate: x }) }) || argsHasCard({ rate: x })
+    );
+    expect(flagged.length).toBe(0);
+  });
+  it('a real card in the same Write shape is still gated', () => {
+    const content = JSON.stringify({ catch_rate: asm(VALID_16[0].parts) }, null, 2);
+    expect(argsHasCard({ file_path: 'metrics.json', content })).toBe(true);
+  });
+});
+
 // ── IBAN (commit B) ─────────────────────────────────────────────────────────
 import { IBAN_VALID, IBAN_INVALID, IBAN_REGISTRY, asm as asmB } from '../dlp/checksum.fixtures';
 

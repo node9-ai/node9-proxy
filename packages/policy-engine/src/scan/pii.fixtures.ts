@@ -254,6 +254,37 @@ export const COMPOSITE: { id: string; build: () => string; expectCard: boolean; 
       proves:
         '15-digit widening is prefix-scoped (M12); this value IS Luhn-valid so only the 34/37 prefix rejects it',
     },
+    // decimal point (node9Firewall#333)
+    {
+      id: 'after-decimal-point',
+      build: () => ['0.', asm(V1)].join(''),
+      expectCard: false,
+      proves: 'the fractional part of a number is not a card (16-digit lookbehind)',
+    },
+    {
+      id: 'after-decimal-point-int-part',
+      build: () => ['12.', asm(V1)].join(''),
+      expectCard: false,
+      proves: 'any digit before the dot, not only a leading 0',
+    },
+    {
+      id: 'amex-after-decimal-point',
+      build: () => ['0.', asm(A1)].join(''),
+      expectCard: false,
+      proves: 'the 15-digit regex carries the same lookbehind',
+    },
+    {
+      id: 'after-word-dot',
+      build: () => ['card.', asm(V1)].join(''),
+      expectCard: true,
+      proves: 'the guard needs a digit before the dot, not any dot',
+    },
+    {
+      id: 'sentence-end-dot',
+      build: () => ['card ', asm(V1), '.'].join(''),
+      expectCard: true,
+      proves: 'a full stop after a card still blocks',
+    },
   ];
 
 /** A5: a card that BEGINS A LINE inside a multi-line value. */
@@ -266,5 +297,5 @@ export const ROW_COUNTS = {
   INVALID_16: 5,
   INVALID_15: 1,
   NON_CARD_16: 5,
-  COMPOSITE: 19,
+  COMPOSITE: 24,
 } as const;

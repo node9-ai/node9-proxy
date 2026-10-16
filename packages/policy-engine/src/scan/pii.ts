@@ -17,6 +17,13 @@
 // \b on both sides, so a digit immediately before or after the number
 // defeats them, exactly as it did before Luhn was added.
 //
+// Both card regexes also refuse a run that directly follows `<digit>.`. A `.`
+// is a word boundary, so without that guard the fractional part of a float
+// printed at full precision (16 or 17 digits after `0.`) is read as a card,
+// and 70 of the 4,950 fractions k/n with 2 <= n <= 100 pass Luhn
+// (node9Firewall#333). Accepted gap: a real card written directly after a
+// digit and a dot ("1.<card>") is not detected.
+//
 // This file is part of the extractor-version hash set
 // (scripts/check-extractor-version.mjs): editing it changes detector output.
 
@@ -35,9 +42,9 @@ const PII_PHONE_RE = /\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b/;
 // 16 digits, 4-4-4-4: Visa (4), Mastercard (51-55), Discover (6). The Amex
 // prefixes are deliberately NOT here: Amex is 15 digits, so any 16-digit run
 // starting 34/37 is by construction not a card.
-const PII_CC16_RE = /\b(?:4\d{3}|5[1-5]\d{2}|6\d{3})[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b/;
+const PII_CC16_RE = /(?<!\d\.)\b(?:4\d{3}|5[1-5]\d{2}|6\d{3})[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b/;
 // 15 digits, 4-6-5: American Express (34, 37).
-const PII_CC15_RE = /\b3[47]\d{2}[-\s]?\d{6}[-\s]?\d{5}\b/;
+const PII_CC15_RE = /(?<!\d\.)\b3[47]\d{2}[-\s]?\d{6}[-\s]?\d{5}\b/;
 
 // IBAN (ISO 13616): two letters, two check digits, then 11..30 alphanumerics
 // optionally grouped by single spaces or dashes ("GB29 NWBK 6016 1331 9268 19").
