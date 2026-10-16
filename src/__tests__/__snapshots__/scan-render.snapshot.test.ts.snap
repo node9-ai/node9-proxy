@@ -86,7 +86,7 @@ exports[`N6 — state-aware phrasing (enabledShields injected) > ink scorecard: 
 ━━━━━━━━━ Medium (37 ops flagged · 1 loop · 125 repeat calls (1% of all calls)) ━━━━━━━━━━
 ╭──────────────────────────────────────────╮ ╭──────────────────────────────────────────╮
 │ REVIEW QUEUE                             │ │ AGENT LOOPS                              │
-│ review-git-destructive×22   default      │ │ Edit      ×125          100%             │
+│ review-git-destructi… ×22   default      │ │ Edit      ×125          100%             │
 │ review-sudo           ×12   default      │ │ Top stuck:                               │
 │ review-read-cred… ×3  ✓ shield:project-… │ │ ×126    /home/u/node9/src/scan.ts        │
 │ → runtime approval                       │ │ → live loop-detector                     │
@@ -465,7 +465,7 @@ exports[`renderScanScorecardInk — output snapshots > panel fixture (critical s
 ━━━━━━━━━ Medium (37 ops flagged · 1 loop · 125 repeat calls (1% of all calls)) ━━━━━━━━━━
 ╭──────────────────────────────────────────╮ ╭──────────────────────────────────────────╮
 │ REVIEW QUEUE                             │ │ AGENT LOOPS                              │
-│ review-git-destructive×22   default      │ │ Edit      ×125          100%             │
+│ review-git-destructi… ×22   default      │ │ Edit      ×125          100%             │
 │ review-sudo           ×12   default      │ │ Top stuck:                               │
 │ review-read-cre… ×3  needs shield:proje… │ │ ×126    /home/u/node9/src/scan.ts        │
 │ → runtime approval                       │ │ → live loop-detector                     │
