@@ -452,7 +452,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
       'a send to an unknown destination, a destination found in what was read, or a destructive call after the session read an email, a web page or an issue',
     values: ['off', 'log', 'review'],
     defaultValue: 'review',
-    legacy: ['🛡️ Node9 Exposure'],
+    legacy: ['🛡️ Node9 Exposure', 'exposure'],
   },
 
   // ── What the agent loads ────────────────────────────────────────────────

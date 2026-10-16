@@ -2869,9 +2869,13 @@ export function extractShellDestinations(command: string): ShellDestination[] {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const callArgs: any[] = n.Args || [];
       if (callArgs.length === 0) return true;
-      const name = (resolveWordLiteral(callArgs[0]) || '').toLowerCase();
+      // `sudo curl`, `env X=1 curl`, `timeout 5 curl`: the network binary is
+      // the head after the wrappers (fw#318 P1.1), as everywhere else.
+      const words = callArgs.map((a) => resolveWordLiteral(a));
+      const at = unwrapCommandHead(words);
+      const name = (words[at] || '').toLowerCase().split('/').pop() ?? '';
       if (!NET_BINARIES.has(name)) return true;
-      const rest = callArgs.slice(1).map((a) => resolveWordLiteral(a));
+      const rest = words.slice(at + 1);
       for (const raw of destTokensForBinary(name, rest)) {
         const host = parseDestHost(raw);
         if (!host) continue;

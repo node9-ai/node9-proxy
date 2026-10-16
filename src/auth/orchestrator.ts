@@ -1768,17 +1768,16 @@ async function _authorizeHeadlessCore(
     );
   } else if (exposureReview) {
     // fw#318: a send after the session read outside content. Same
-    // fall-through-to-race shape as taint; the reason rides as ruleName so
-    // every approval surface says what was read and where this sends.
+    // fall-through-to-race shape as taint. The rule name is the stable
+    // `exposure` (catalog lookup, reports); the sentence rides as
+    // ruleDescription, the field every approval surface shows (tail, the
+    // native popup, Mission Control, Slack), so each says what was read and
+    // where this sends.
     explainableLabel = EXPOSURE_LABEL;
-    riskMetadata = computeRiskMetadata(
-      args,
-      6,
-      explainableLabel,
-      undefined,
-      undefined,
+    riskMetadata = computeRiskMetadata(args, 6, explainableLabel, undefined, undefined, 'exposure');
+    riskMetadata.ruleDescription = (
       appPermReview ? `${exposureReview}\n${appPermReview}` : exposureReview
-    );
+    ).slice(0, 1024);
   } else if (appPermReview) {
     // Org-set per-tool review (MCP app permission) — same fall-through-to-race
     // shape as taint, at elevated (not maximum) tier. The reason string rides as
@@ -2066,7 +2065,10 @@ async function _authorizeHeadlessCore(
           // auto-allows. This process (the long-running gateway — appPermReview
           // only ever happens here) stays alive to run its own racers, so the
           // daemon just holds the card and waits for the human decision.
-          appPermReview ? true : undefined,
+          // fw#318 P1.1: the same for every call-specific review (exposure,
+          // session taint, DLP, file review): the re-run carries no session id
+          // and cannot see these reasons, so it must never answer the card.
+          appPermReview || callSpecificReview() ? true : undefined,
           undefined,
           localSmartRuleMatched || options?.localSmartRuleMatched,
           options?.socketActivitySent

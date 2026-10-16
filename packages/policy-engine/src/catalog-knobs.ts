@@ -39,6 +39,12 @@ export interface LegacyPolicyKnobs {
     onlineFallback?: boolean;
     allow?: string[];
   };
+  untrustedContent?: {
+    enabled?: boolean;
+    spotlight?: boolean;
+    afterExposure?: string;
+    orgDomains?: string[];
+  };
 }
 
 // ── Tuning: legacy policy fields that are a check's settings ─────────────────
@@ -87,6 +93,24 @@ export const TUNING_FIELDS: readonly TuningField[] = [
     legacy: ['packageCheck', 'onlineFallback'],
   },
   { checkId: 'loading.malicious-package', name: 'allow', legacy: ['packageCheck', 'allow'] },
+  // fw#318: the verdict carries off / log (log-only) / review; the tuning
+  // carries whether a review asks once per destination or every time, the
+  // frame around outside content, and the organisation's own domains.
+  {
+    checkId: 'behavior.untrusted-content',
+    name: 'afterExposure',
+    legacy: ['untrustedContent', 'afterExposure'],
+  },
+  {
+    checkId: 'behavior.untrusted-content',
+    name: 'spotlight',
+    legacy: ['untrustedContent', 'spotlight'],
+  },
+  {
+    checkId: 'behavior.untrusted-content',
+    name: 'orgDomains',
+    legacy: ['untrustedContent', 'orgDomains'],
+  },
 ];
 
 /** Every tuning field a legacy policy block states, as `{ checkId: { name: value } }`. */
@@ -187,6 +211,11 @@ export function checksFromLegacyPolicy(
   else if (pkg?.enabled === true)
     out['loading.malicious-package'] = pkg.onMalicious === 'review' ? 'review' : 'block';
 
+  const uc = policy.untrustedContent;
+  if (uc?.enabled === false) out['behavior.untrusted-content'] = 'off';
+  else if (uc?.enabled === true)
+    out['behavior.untrusted-content'] = uc.afterExposure === 'log-only' ? 'log' : 'review';
+
   if (mode === 'strict') out['commands.unknown'] = 'review';
   return out;
 }
@@ -273,6 +302,14 @@ export function checkToLegacyPolicy(policy: Obj, id: string, v: Verdict): boolea
       return offOr('packageCheck', () => {
         obj('packageCheck').onMalicious = v === 'review' ? 'review' : 'block';
       });
+    case 'behavior.untrusted-content':
+      if (v !== 'off' && v !== 'log' && v !== 'review') return false;
+      return offOr('untrustedContent', () => {
+        const uc = obj('untrustedContent');
+        // `review` keeps a stated ask-every-time; anything else asks once.
+        if (v === 'log') uc.afterExposure = 'log-only';
+        else if (uc.afterExposure !== 'ask-every-time') uc.afterExposure = 'ask-once';
+      });
     default:
       return false;
   }
@@ -299,6 +336,7 @@ export const MAP_GOVERNED: ReadonlySet<string> = new Set([
   'commands.temp-binary',
   'commands.disk-destroy',
   'commands.dangerous-word',
+  'commands.node9-disarm',
   'data.pipe-chain',
 ]);
 
@@ -316,6 +354,7 @@ export const KNOB_GOVERNED: Readonly<Record<string, readonly Verdict[]>> = {
   'behavior.prompt-injection': ['off', 'log'],
   'loading.skill-tamper': ['off', 'log', 'block'],
   'loading.malicious-package': ['off', 'review', 'block'],
+  'behavior.untrusted-content': ['off', 'log', 'review'],
 };
 
 export function isKnobGoverned(id: string): boolean {

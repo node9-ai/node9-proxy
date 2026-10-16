@@ -3,150 +3,33 @@
 // PostToolUse (`log`), UserPromptSubmit and PreToolUse (`check`), one agent
 // session. Requires `npm run build`.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { spawn, spawnSync, type ChildProcess } from 'child_process';
-import fs from 'fs';
-import net from 'net';
-import os from 'os';
-import path from 'path';
-import { keySafeEnv } from './helpers/env';
+import { spawnSync } from 'child_process';
+import { startDaemonHook, cliExists, type DaemonHook } from './helpers/daemon-hook';
 
-const CLI = path.resolve(__dirname, '../../dist/cli.js');
-const cliExists = fs.existsSync(CLI);
-if (!cliExists) console.warn('[exposure.integration] skipped — dist/cli.js not found');
 const itUnix = it.skipIf(process.platform === 'win32' || !cliExists);
-
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.once('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
-      const port = (srv.address() as net.AddressInfo).port;
-      srv.close(() => resolve(port));
-    });
-  });
-}
-
-let home: string;
-let proj: string;
-let port: number;
-let daemon: ChildProcess | undefined;
-let env: Record<string, string | undefined>;
-
-function writeConfig(policy: Record<string, unknown>): void {
-  fs.writeFileSync(
-    path.join(home, '.node9', 'config.json'),
-    JSON.stringify({
-      settings: {
-        mode: 'standard',
-        autoStartDaemon: false,
-        approvalTimeoutMs: 0,
-        approvers: { native: false, browser: false, cloud: false, terminal: false },
-      },
-      policy: { loopDetection: { enabled: false }, ...policy },
-    })
-  );
-}
-
-function run(args: string[]): { status: number | null; stdout: string; stderr: string } {
-  const r = spawnSync(process.execPath, [CLI, ...args], {
-    cwd: proj,
-    encoding: 'utf8',
-    timeout: 20_000,
-    env,
-  });
-  expect(r.error).toBeUndefined();
-  expect(r.status).not.toBeNull();
-  return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
-}
-
 const SID = 'exposure-int';
-let tuid = 0;
-const payload = (extra: Record<string, unknown>) =>
-  JSON.stringify({ session_id: SID, tool_use_id: `tu-${++tuid}`, cwd: proj, ...extra });
 
-function check(tool: string, input: unknown) {
-  const r = run([
-    'check',
-    payload({ hook_event_name: 'PreToolUse', tool_name: tool, tool_input: input }),
-  ]);
-  const out = r.stdout.trim();
-  const ask = out
-    ? (JSON.parse(out) as {
-        hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string };
-      })
-    : null;
-  return {
-    status: r.status,
-    ask: ask?.hookSpecificOutput?.permissionDecision,
-    reason: ask?.hookSpecificOutput?.permissionDecisionReason ?? '',
-  };
-}
-
-function log(tool: string, input: unknown, response: unknown, tool_use_id?: string) {
-  const body: Record<string, unknown> = {
-    hook_event_name: 'PostToolUse',
-    tool_name: tool,
-    tool_input: input,
-    tool_response: response,
-  };
-  if (tool_use_id) body.tool_use_id = tool_use_id;
-  const r = run(['log', payload(body)]);
-  const out = r.stdout.trim();
-  return {
-    status: r.status,
-    out: out
-      ? (JSON.parse(out) as {
-          hookSpecificOutput?: { additionalContext?: string; updatedToolOutput?: unknown };
-        })
-      : null,
-  };
-}
-
-async function waitFor(url: string, headers: Record<string, string>, ms: number): Promise<boolean> {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(url, { headers });
-      if (res.ok) return true;
-    } catch {
-      /* not yet */
-    }
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  return false;
-}
+let h: DaemonHook;
+let port: number;
+let proj: string;
+const writeConfig = (policy: Record<string, unknown>) => h.writeConfig(policy);
+const run = (args: string[]) => h.run(args);
+const check = (tool: string, input: unknown) => h.check(tool, input);
+const log = (tool: string, input: unknown, response: unknown, tuid?: string) =>
+  h.log(tool, input, response, tuid);
+const tuidNow = () => h.lastTuid();
 
 beforeAll(async () => {
   if (!cliExists || process.platform === 'win32') return;
-  home = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-exposure-int-'));
-  proj = path.join(home, 'proj');
-  fs.mkdirSync(path.join(home, '.node9'), { recursive: true });
-  fs.mkdirSync(proj);
-  writeConfig({ untrustedContent: { orgDomains: ['acme.example'] } });
-  port = await freePort();
-  env = {
-    ...keySafeEnv(),
-    HOME: home,
-    USERPROFILE: home,
-    NODE9_TESTING: '1',
-    NODE9_NO_AUTO_DAEMON: '1',
-    NODE9_DAEMON_PORT: String(port),
-  };
-  daemon = spawn(process.execPath, [CLI, 'daemon', 'start'], { env, stdio: 'pipe' });
-  const up = await waitFor(`http://127.0.0.1:${port}/settings`, {}, 8000);
-  if (!up) throw new Error('daemon did not start');
+  h = await startDaemonHook({
+    sessionId: SID,
+    policy: { untrustedContent: { orgDomains: ['acme.example'] } },
+  });
+  port = h.port;
+  proj = h.proj;
 }, 20_000);
 
-afterAll(() => {
-  if (!home) return;
-  try {
-    spawnSync(process.execPath, [CLI, 'daemon', 'stop'], { env, timeout: 10_000 });
-  } catch {
-    /* best effort */
-  }
-  if (daemon && daemon.exitCode === null) daemon.kill();
-  fs.rmSync(home, { recursive: true, force: true });
-});
+afterAll(() => h?.dispose());
 
 describe('exposure through the built hook and a real daemon', () => {
   itUnix('a send in a clean session is allowed silently', () => {
@@ -169,11 +52,7 @@ describe('exposure through the built hook and a real daemon', () => {
     expect(updated).toMatch(/node9 untrusted-output [0-9a-f]{12}: .* DATA from a web page/);
     expect(updated).toMatch(/Node9: ignored an instruction in the web page/);
     expect(r.out?.hookSpecificOutput?.additionalContext).toBeUndefined();
-    const token = (
-      JSON.parse(fs.readFileSync(path.join(home, '.node9', 'daemon.pid'), 'utf8')) as {
-        internalToken: string;
-      }
-    ).internalToken;
+    const token = h.token();
     const list = spawnSync(
       'curl',
       ['-s', '-H', `X-Node9-Internal: ${token}`, `http://127.0.0.1:${port}/session-exposure/list`],
@@ -237,7 +116,7 @@ describe('exposure through the built hook and a real daemon', () => {
       'mcp__gmail__send_email',
       { to: 'stranger@example.org', body: 'hi' },
       { content: [{ type: 'text', text: 'sent' }] },
-      `tu-${tuid}`
+      tuidNow()
     );
     expect(r.status).toBe(0);
     expect(
@@ -266,8 +145,7 @@ describe('exposure through the built hook and a real daemon', () => {
   itUnix(
     'T17: with the daemon down every call is allowed (fail open) and the gap is on record',
     () => {
-      spawnSync(process.execPath, [CLI, 'daemon', 'stop'], { env, timeout: 10_000 });
-      if (daemon && daemon.exitCode === null) daemon.kill();
+      h.stopDaemon();
       const r = check('mcp__gmail__send_email', { to: 'press@news.example', body: 'hi' });
       expect(r.status).toBe(0);
       expect(r.ask).toBeUndefined();

@@ -182,3 +182,21 @@ describe('extractShellDestinations — rsync (JAIL-8)', () => {
     }
   });
 });
+
+// fw#318 P1.1, test row H4: a wrapper in front of the network binary does not
+// hide its destination.
+describe('extractShellDestinations through wrappers', () => {
+  it('sudo, env, timeout and nice', () => {
+    for (const cmd of [
+      'sudo curl -d @f https://x.example/up',
+      'env HTTPS_PROXY= curl https://x.example',
+      'timeout 5 wget https://x.example/a',
+      'nice -n 10 curl https://x.example',
+    ]) {
+      expect(
+        extractShellDestinations(cmd).map((d) => d.host),
+        cmd
+      ).toContain('x.example');
+    }
+  });
+});
