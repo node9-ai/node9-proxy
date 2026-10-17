@@ -189,6 +189,13 @@ export interface ManagedConfigCache {
   injectionScan?: { enabled: boolean; minConfidence: string; allow: string[] };
   loopDetection?: { enabled: boolean; threshold: number; windowSeconds: number };
   skillPinning?: { enabled: boolean; mode: string; roots: string[] };
+  untrustedContent?: {
+    enabled?: boolean;
+    spotlight?: boolean;
+    afterExposure?: 'ask-once' | 'ask-every-time' | 'log-only';
+    orgDomains?: string[];
+    roles?: Record<string, Record<string, 'source' | 'action' | 'read'>>;
+  };
   packageCheck?: {
     enabled?: boolean;
     onMalicious?: 'block' | 'review';
@@ -237,6 +244,13 @@ interface CloudPolicyBody {
     injectionScan?: { enabled?: unknown; minConfidence?: unknown; allow?: unknown };
     loopDetection?: { enabled?: unknown; threshold?: unknown; windowSeconds?: unknown };
     skillPinning?: { enabled?: unknown; mode?: unknown; roots?: unknown };
+    untrustedContent?: {
+      enabled?: unknown;
+      spotlight?: unknown;
+      afterExposure?: unknown;
+      orgDomains?: unknown;
+      roles?: unknown;
+    };
     packageCheck?: {
       enabled?: unknown;
       onMalicious?: unknown;
@@ -764,6 +778,33 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
         : [],
     };
   }
+  // fw#318: untrustedContent — per field, only what the row states.
+  if (mc.untrustedContent && typeof mc.untrustedContent === 'object') {
+    const u = mc.untrustedContent;
+    const out3: NonNullable<ManagedConfigCache['untrustedContent']> = {};
+    if (typeof u.enabled === 'boolean') out3.enabled = u.enabled;
+    if (typeof u.spotlight === 'boolean') out3.spotlight = u.spotlight;
+    if (
+      u.afterExposure === 'ask-once' ||
+      u.afterExposure === 'ask-every-time' ||
+      u.afterExposure === 'log-only'
+    )
+      out3.afterExposure = u.afterExposure;
+    if (Array.isArray(u.orgDomains))
+      out3.orgDomains = u.orgDomains.filter((x): x is string => typeof x === 'string');
+    if (u.roles && typeof u.roles === 'object' && !Array.isArray(u.roles)) {
+      const roles: NonNullable<typeof out3.roles> = {};
+      for (const [server, tools] of Object.entries(u.roles as Record<string, unknown>)) {
+        if (!tools || typeof tools !== 'object' || Array.isArray(tools)) continue;
+        const m: Record<string, 'source' | 'action' | 'read'> = {};
+        for (const [tool, role] of Object.entries(tools as Record<string, unknown>))
+          if (role === 'source' || role === 'action' || role === 'read') m[tool] = role;
+        if (Object.keys(m).length) roles[server] = m;
+      }
+      out3.roles = roles;
+    }
+    if (Object.keys(out3).length) out.untrustedContent = out3;
+  }
   // Detection: packageCheck — per field, only what the row states (the
   // config merge replaces per field, so an absent key keeps the local value).
   // The 2.27.0 boolean `registrySignals: false` is carried as both new keys.
@@ -838,6 +879,7 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
     out.injectionScan !== undefined ||
     out.loopDetection !== undefined ||
     out.skillPinning !== undefined ||
+    out.untrustedContent !== undefined ||
     out.packageCheck !== undefined ||
     out.jailPaths !== undefined ||
     out.trustedHosts !== undefined ||

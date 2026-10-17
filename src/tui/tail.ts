@@ -97,6 +97,8 @@ interface ApprovalRequest {
     matchedWord?: string;
     ruleName?: string;
     ruleDescription?: string;
+    /** fw#318: the destinations an exposure review holds; enables [s]. */
+    exposureDestinations?: string[];
   };
   /** When set, shows the [1]/[2]/[3] recovery menu instead of the standard [y/n/a/t] prompt. */
   recoveryCommand?: string;
@@ -420,12 +422,19 @@ function postDecisionHttp(
   decision: 'allow' | 'deny' | 'trust',
   authToken: string,
   port: number,
-  opts?: { persist?: boolean; trustDuration?: string; reason?: string; source?: string }
+  opts?: {
+    persist?: boolean;
+    trustDuration?: string;
+    reason?: string;
+    source?: string;
+    trustRecipients?: boolean;
+  }
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const bodyObj: Record<string, unknown> = { decision, source: opts?.source ?? 'terminal' };
     if (opts?.persist) bodyObj.persist = true;
     if (opts?.trustDuration) bodyObj.trustDuration = opts.trustDuration;
+    if (opts?.trustRecipients) bodyObj.trustRecipients = true;
     if (opts?.reason) bodyObj.reason = opts.reason;
     const body = JSON.stringify(bodyObj);
     const req = http.request(
@@ -534,6 +543,13 @@ function buildCardLines(req: ApprovalRequest, localCount: number = 0): string[] 
     lines.push(`${CYAN}║${RESET} ${YELLOW}⚠  ${req.riskMetadata.ruleName}${RESET}`);
   }
 
+  // Exposure card (fw#318): the destinations [s] would trust.
+  const exposure = req.riskMetadata?.exposureDestinations ?? [];
+  if (exposure.length > 0) {
+    const shown = exposure.map((d) => d.replace(/^[a-z]+:/, '')).join(', ');
+    lines.push(`${CYAN}║${RESET} To:      ${BOLD}${shown}${RESET}`);
+  }
+
   if (argsPreview) {
     const argLabel = req.toolName.toLowerCase().includes('bash') ? 'Command' : 'Args   ';
     lines.push(`${CYAN}║${RESET} ${argLabel}:  ${GRAY}${argsPreview}${RESET}`);
@@ -546,10 +562,14 @@ function buildCardLines(req: ApprovalRequest, localCount: number = 0): string[] 
     );
   }
 
+  // An exposure card offers "allow + trust this address" and no tool-wide
+  // standing allow: "Always Allow" answers the wrong question there (fw#343).
   lines.push(
     `${CYAN}╚${RESET}`,
     ``,
-    `  ${BOLD}${GREEN}[↵/y]${RESET} Allow   ${BOLD}${RED}[n]${RESET} Deny   ${BOLD}${YELLOW}[a]${RESET} Always Allow   ${BOLD}${CYAN}[t]${RESET} Trust 30m`,
+    exposure.length > 0
+      ? `  ${BOLD}${GREEN}[↵/y]${RESET} Allow   ${BOLD}${RED}[n]${RESET} Deny   ${BOLD}${CYAN}[s]${RESET} Allow + trust ${exposure.length === 1 ? 'this address' : 'these addresses'}`
+      : `  ${BOLD}${GREEN}[↵/y]${RESET} Allow   ${BOLD}${RED}[n]${RESET} Deny   ${BOLD}${YELLOW}[a]${RESET} Always Allow   ${BOLD}${CYAN}[t]${RESET} Trust 30m`,
     ``
   );
 
@@ -812,7 +832,9 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
       enterIdleMode();
     };
 
-    const settle = (action: 'allow' | 'deny' | 'always-allow' | 'trust' | 'redirect') => {
+    const settle = (
+      action: 'allow' | 'deny' | 'always-allow' | 'trust' | 'redirect' | 'trust-recipients'
+    ) => {
       if (settled) return;
       settled = true;
       cleanup();
@@ -842,7 +864,12 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
       cardLineCount = 0;
 
       // Update local consecutive-allow counter for this toolName
-      if (action === 'allow' || action === 'always-allow' || action === 'trust') {
+      if (
+        action === 'allow' ||
+        action === 'always-allow' ||
+        action === 'trust' ||
+        action === 'trust-recipients'
+      ) {
         localAllowCounts.set(req.toolName, (localAllowCounts.get(req.toolName) ?? 0) + 1);
       } else if (action === 'deny' || action === 'redirect') {
         localAllowCounts.delete(req.toolName);
@@ -851,10 +878,20 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
       // Map action to decision + options for the daemon
       let httpDecision: 'allow' | 'deny' | 'trust';
       let httpOpts:
-        { persist?: boolean; trustDuration?: string; reason?: string; source?: string } | undefined;
+        | {
+            persist?: boolean;
+            trustDuration?: string;
+            reason?: string;
+            source?: string;
+            trustRecipients?: boolean;
+          }
+        | undefined;
       if (action === 'always-allow') {
         httpDecision = 'allow';
         httpOpts = { persist: true };
+      } else if (action === 'trust-recipients') {
+        httpDecision = 'allow';
+        httpOpts = { trustRecipients: true };
       } else if (action === 'trust') {
         httpDecision = 'trust';
         httpOpts = { trustDuration: '30m' };
@@ -946,9 +983,11 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
           settle('allow');
         } else if (name === 'n' || name === 'd' || (key?.ctrl && name === 'c')) {
           settle('deny');
-        } else if (name === 'a') {
+        } else if (name === 's' && (req.riskMetadata?.exposureDestinations?.length ?? 0) > 0) {
+          settle('trust-recipients');
+        } else if (name === 'a' && !(req.riskMetadata?.exposureDestinations?.length ?? 0)) {
           settle('always-allow');
-        } else if (name === 't') {
+        } else if (name === 't' && !(req.riskMetadata?.exposureDestinations?.length ?? 0)) {
           settle('trust');
         }
       }

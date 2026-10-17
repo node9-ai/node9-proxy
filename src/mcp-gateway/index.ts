@@ -28,7 +28,7 @@ import { checkProvenance } from '../utils/provenance.js';
 import { hashToolDefinitions, getServerKey, checkPin, updatePin } from '../mcp-pin';
 import { tokenize } from '../mcp-cmd';
 import type { McpToolInfo } from '../daemon/mcp-tools';
-import { getServerConfig, deriveServerName } from '../daemon/mcp-tools';
+import { getServerConfig, deriveServerName, sanitizeToolAnnotations } from '../daemon/mcp-tools';
 import {
   DAEMON_PORT,
   DAEMON_HOST,
@@ -36,9 +36,12 @@ import {
   getInternalToken,
   notifyActivitySocket,
   notifySessionTaint,
+  notifySessionExposure,
 } from '../auth/daemon';
 import { stripControlChars } from '../utils/safe-text';
 import { scanToolResult } from './result-scan';
+import { sourceWord, toolRole } from '../exposure/roles';
+import { markSessionExposed } from '../exposure/marker';
 
 // readActiveShields + waitForMcpApproval helper removed — the
 // mcp-tool-gating shield (which used the browser dashboard for the
@@ -489,7 +492,9 @@ export async function runMcpGateway(
             serverKey,
             sessionId: gatewaySessionId,
           },
-          { sessionTaintGated: !readOnlyTools.has(toolName) }
+          // cwd: the gateway's own working directory is the project the agent
+          // launched it from; without it every write would be "outside".
+          { sessionTaintGated: !readOnlyTools.has(toolName), cwd: gatewayCwd }
         );
 
         if (!result.approved) {
@@ -667,8 +672,23 @@ export async function runMcpGateway(
         );
 
         // 1. Notify daemon of discovery (handles drift & new servers)
-        if (isDaemonRunning() && process.env.NODE9_TESTING !== '1') {
-          const toolSummary = tools.map((t) => ({ name: t.name, description: t.description }));
+        if (
+          isDaemonRunning() &&
+          (process.env.NODE9_TESTING !== '1' || process.env.NODE9_TEST_DISCOVERY === '1')
+        ) {
+          // Name, description and the boolean annotation hints (fw#318 P2):
+          // the hook reads them from the inventory to class the tool.
+          const toolSummary = tools.map((t) => ({
+            name: t.name,
+            description: t.description,
+            ...(sanitizeToolAnnotations((t as { annotations?: unknown }).annotations)
+              ? {
+                  annotations: sanitizeToolAnnotations(
+                    (t as { annotations?: unknown }).annotations
+                  ),
+                }
+              : {}),
+          }));
           fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/mcp/discovered`, {
             method: 'POST',
             headers: {
@@ -823,11 +843,29 @@ export async function runMcpGateway(
         if (parsed.result !== undefined) {
           try {
             const cfg = getConfig();
+            // fw#318: through the gateway every tool is an MCP tool and, with
+            // no annotation yet read here (P2), a source of outside content:
+            // its result marks the gateway session exposed and, with
+            // spotlight, is framed whole.
+            const uc = cfg.policy.untrustedContent;
+            // The same role the hook would give `mcp__<name>__<tool>`: an
+            // explicit `read` role (or an agent-internal server) marks nothing.
+            const nsName = `mcp__${configName || deriveServerName(upstreamCommand)}__${exec.toolName}`;
+            const isSource = !!uc?.enabled && toolRole(nsName, uc).source;
             const scan = scanToolResult(line, parsed, exec.toolName, {
               dlpEnabled: cfg.policy.dlp.enabled,
               injection: cfg.policy.injectionScan,
+              spotlight: isSource && uc.spotlight ? sourceWord(nsName) : undefined,
             });
             if (scan.changed) outLine = scan.line;
+            if (isSource) {
+              markSessionExposed(gatewaySessionId);
+              notifySessionExposure(
+                gatewaySessionId,
+                { tool: exec.toolName, server: configName || undefined },
+                scan.destinations
+              ).catch(() => {});
+            }
             // A redacted secret never reaches the model, so it taints nothing
             // (the same reasoning as the PostToolUse redact-output mode). An
             // injection is framed but still READ, so it taints the session.

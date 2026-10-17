@@ -14,6 +14,7 @@ import { DAEMON_PORT, DAEMON_HOST } from '../auth/daemon';
 import { scanArgumentSecrets, type ScanFinding } from '@node9/policy-engine';
 import { SuggestionTracker, type Suggestion } from './suggestion-tracker.js';
 import { TaintStore, SessionTaintStore } from './taint-store.js';
+import { SessionExposureStore } from './exposure-store.js';
 import { sessionCounters } from './session-counters.js';
 import { sessionHistory } from './session-history.js';
 import { atomicWriteSync } from '../utils/atomic-write';
@@ -67,6 +68,8 @@ export interface PendingEntry {
   earlyDecision: Decision | null;
   earlyReason?: string;
   decisionSource?: string; // 'browser', 'terminal', or undefined (cloud/auto)
+  /** The agent session the call belongs to (fw#318 P5: trust-this-address clears its exposure). */
+  sessionId?: string;
   /** New fields for MCP discovery */
   type?: 'tool-call' | 'mcp-discovery';
   mcpTools?: Array<{ name: string; description?: string }>;
@@ -87,6 +90,9 @@ export const taintStore = new TaintStore();
 /** Session-scoped taint (gap1): a session that just consumed flagged tool
  *  output; its next high-risk call is routed to review until the taint expires. */
 export const sessionTaintStore = new SessionTaintStore();
+/** Session exposure (fw#318): the session READ outside content; the next call
+ *  that sends is judged against what it read. Not a detection. */
+export const sessionExposureStore = new SessionExposureStore();
 /** Cumulative per-tool allow count for the 💡 insight line.
  *  Unlike suggestionTracker, this never resets after the suggestion threshold —
  *  only on deny. Used by all approval channels (terminal, browser, native popup).

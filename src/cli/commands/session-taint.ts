@@ -24,13 +24,10 @@ import type { SessionTaintRecord } from '../../daemon/taint-store';
  *   - otherwise a unique prefix match resolves
  *   - 0 matches → { error: 'not-found' }; >1 → { error: 'ambiguous', matches }
  */
-export function resolveSessionId(
-  records: SessionTaintRecord[],
+export function resolveSessionId<T extends { sessionId: string } = SessionTaintRecord>(
+  records: T[],
   query: string
-):
-  | { record: SessionTaintRecord }
-  | { error: 'not-found' }
-  | { error: 'ambiguous'; matches: string[] } {
+): { record: T } | { error: 'not-found' } | { error: 'ambiguous'; matches: string[] } {
   const exact = records.find((r) => r.sessionId === query);
   if (exact) return { record: exact };
   const prefixed = records.filter((r) => r.sessionId.startsWith(query));

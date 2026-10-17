@@ -11,6 +11,44 @@ export const SYSTEM_AUTH_FILES = [
 export const SYSTEM_AUTH_DIRS = ['/etc/security', '/etc/pam.d', '/etc/sudoers.d'] as const;
 export const PASSWORD_HASH_FILES = ['/etc/shadow', '/etc/gshadow'] as const;
 export const STARTUP_NAMES = ['.bashrc', '.zshrc', '.profile', '.bash_profile'] as const;
+
+/**
+ * Files inside a project that run code or instruct the agent (fw#318 P4,
+ * design 6). A write there after the session read outside content is held:
+ * it is how an injected instruction persists past the session. Relative to
+ * the project root; a directory entry covers everything under it.
+ */
+export const AGENT_INSTRUCTION_FILES = [
+  '.gitlab-ci.yml',
+  'CLAUDE.md',
+  'AGENTS.md',
+  '.cursorrules',
+  '.mcp.json',
+  '.vscode/settings.json',
+  'package.json',
+] as const;
+export const AGENT_INSTRUCTION_DIRS = [
+  '.github/workflows',
+  '.claude',
+  '.cursor',
+  '.git/hooks',
+  '.husky',
+] as const;
+
+/** Is `absPath` one of the agent-instruction files of the project at `root`? */
+export function isAgentInstructionPath(absPath: string, root: string): boolean {
+  const r = root.replace(/\/$/, '');
+  if (!(absPath === r || absPath.startsWith(r + '/'))) return false;
+  const rel = absPath.slice(r.length + 1);
+  if ((AGENT_INSTRUCTION_FILES as readonly string[]).includes(rel)) return true;
+  return AGENT_INSTRUCTION_DIRS.some((d) => rel === d || rel.startsWith(d + '/'));
+}
+
+/** `isInside(root, p)`: `p` is `root` or below it, lexically. */
+export function isInside(root: string, p: string): boolean {
+  const r = root.replace(/\/$/, '') || '/';
+  return p === r || p.startsWith(r === '/' ? '/' : r + '/');
+}
 export const LEGACY_SYSTEM_PATH_RE = /^(?:[a-zA-Z]:)?\/etc\/(?:passwd|shadow|sudoers)$/;
 
 export function isPasswordHashPath(p: string): boolean {

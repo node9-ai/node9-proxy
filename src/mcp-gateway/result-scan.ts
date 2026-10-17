@@ -8,13 +8,17 @@
 // Pure over its inputs: the caller supplies the config slice and performs the
 // side effects (session taint, stderr) from the returned findings.
 import { redactText, scanInjection, type InjectionMatch, type InjectionConfidence } from '../dlp';
-import { newUntrustedFrame, neutralizeMarkers } from '../utils/untrusted-frame';
+import { newUntrustedFrame, newSourceFrame, neutralizeMarkers } from '../utils/untrusted-frame';
+import { extractContentDestinations } from '@node9/policy-engine';
 
 export interface ResultScanConfig {
   /** policy.dlp.enabled — secret redaction. */
   dlpEnabled: boolean;
   /** policy.injectionScan — framing of injected text. */
   injection: { enabled: boolean; minConfidence: 'medium' | 'high'; allow: string[] };
+  /** fw#318 spotlight: frame EVERY result as data from this kind of source
+   *  ('email', 'web page', ...). Undefined keeps the detection-only framing. */
+  spotlight?: string;
 }
 
 export interface ResultScan {
@@ -25,6 +29,8 @@ export interface ResultScan {
   secrets: string[];
   /** Actionable injection match, or null. */
   injection: InjectionMatch | null;
+  /** fw#318: destination-like values in the result text (emails, hosts, IBANs). */
+  destinations: string[];
 }
 
 const CONFIDENCE_RANK: Record<InjectionConfidence, number> = { low: 0, medium: 1, high: 2 };
@@ -54,12 +60,22 @@ export function scanToolResult(
   tool: string,
   cfg: ResultScanConfig
 ): ResultScan {
-  const unchanged: ResultScan = { line, changed: false, secrets: [], injection: null };
+  const unchanged: ResultScan = {
+    line,
+    changed: false,
+    secrets: [],
+    injection: null,
+    destinations: [],
+  };
   if (typeof parsed !== 'object' || parsed === null) return unchanged;
   const result = (parsed as { result?: unknown }).result;
   if (typeof result !== 'object' || result === null) return unchanged;
-  const res = result as { content?: unknown; structuredContent?: unknown };
+  const res = result as { content?: unknown; structuredContent?: unknown; isError?: unknown };
   if (!Array.isArray(res.content)) return unchanged;
+  // An error result carries the server's message, not outside content; the
+  // DLP still redacts it, spotlight leaves it alone so clients that read the
+  // message verbatim keep working.
+  const spotlight = res.isError === true ? undefined : cfg.spotlight;
 
   const secrets = new Set<string>();
   let mutated = false;
@@ -115,20 +131,39 @@ export function scanToolResult(
     }
   }
 
-  if (!mutated) return unchanged;
+  const destinations = texts.length > 0 ? extractContentDestinations(texts.join('\n')) : [];
+  if (spotlight !== undefined && texts.length > 0) mutated = true;
+  if (!mutated) return { ...unchanged, destinations };
 
   // A fresh random boundary per result (utils/untrusted-frame.ts): content
   // that writes a footer of its own cannot close a frame it cannot name.
-  const frame = injection ? newUntrustedFrame() : null;
-  const framed = frame
-    ? [
-        { type: 'text', text: frame.header },
-        ...content.map((item) =>
-          isTextContent(item) ? { ...item, text: neutralizeMarkers(item.text) } : item
-        ),
-        { type: 'text', text: frame.footer },
-      ]
-    : content;
+  // With spotlight the frame is the source frame and is applied always, and
+  // it rides INSIDE the first and last text items rather than as items of
+  // its own, so a client that reads `content[0].text` still finds its text
+  // (prefixed), not a node9 header in place of it.
+  let framed = content;
+  if (spotlight !== undefined) {
+    const frame = newSourceFrame(spotlight);
+    const textIdx = content.map((item, i) => (isTextContent(item) ? i : -1)).filter((i) => i >= 0);
+    const first = textIdx[0];
+    const last = textIdx[textIdx.length - 1];
+    framed = content.map((item, i) => {
+      if (!isTextContent(item)) return item;
+      let text = neutralizeMarkers(item.text);
+      if (i === first) text = `${frame.header}\n${text}`;
+      if (i === last) text = `${text}\n${frame.footer}`;
+      return { ...item, text };
+    });
+  } else if (injection) {
+    const frame = newUntrustedFrame();
+    framed = [
+      { type: 'text', text: frame.header },
+      ...content.map((item) =>
+        isTextContent(item) ? { ...item, text: neutralizeMarkers(item.text) } : item
+      ),
+      { type: 'text', text: frame.footer },
+    ];
+  }
   const nextResult: Record<string, unknown> = {
     ...(result as Record<string, unknown>),
     content: framed,
@@ -138,5 +173,11 @@ export function scanToolResult(
     else nextResult.structuredContent = structured;
   }
   const next = { ...(parsed as Record<string, unknown>), result: nextResult };
-  return { line: JSON.stringify(next), changed: true, secrets: [...secrets], injection };
+  return {
+    line: JSON.stringify(next),
+    changed: true,
+    secrets: [...secrets],
+    injection,
+    destinations,
+  };
 }

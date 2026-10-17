@@ -1,6 +1,7 @@
 // src/auth/orchestrator.ts
 // The multi-channel race engine: coordinates cloud, native, browser, and terminal approval channels.
 import { randomUUID } from 'crypto';
+import os from 'os';
 import { askNativePopup } from '../ui/native';
 import { computeRiskMetadata, type RiskMetadata } from '../context-sniper';
 import {
@@ -31,6 +32,23 @@ import {
   evaluateEgress,
 } from '@node9/policy-engine';
 import { appendHookDebug, appendLocalAudit, appendToLog, HOOK_DEBUG_LOG } from '../audit';
+import {
+  extractArgDestinations,
+  destinationDomain,
+  destinationValue,
+  destinationKind,
+  isDestructiveToolName,
+  isLoopbackHost,
+  hostMatches,
+  classifyShellExposure,
+  fileToolOperation,
+} from '@node9/policy-engine';
+import { knownProjectHosts } from '../exposure/known-hosts';
+import { judgeWritesAfterExposure, type WriteHold } from '../exposure/writes';
+import { maybeSessionExposed } from '../exposure/marker';
+import { toolRole, splitMcpToolName, sourceWord, EXPOSURE_LABEL } from '../exposure/roles';
+import { isTrustedRecipient, addTrustedRecipient } from './trusted-recipients';
+import { isTrustedHost, matchesTrustedHost } from './trusted-hosts';
 import { getConfig, getCredentials } from '../config';
 import { isIgnoredTool, evaluatePolicy } from '../policy';
 import {
@@ -50,6 +68,8 @@ import {
   notifyTaint,
   checkTaint,
   checkSessionTaint,
+  checkSessionExposure,
+  approveSessionExposure,
   notifyActivitySocket,
   checkStatePredicates,
 } from './daemon';
@@ -168,6 +188,8 @@ export interface AuthResult {
   decisionSource?: 'terminal' | 'browser' | 'native' | 'cloud' | 'timeout' | 'local';
   /** Name of the smart rule that fired (for HUD lastRuleHit tracking). */
   ruleHit?: string;
+  /** fw#318: the keys an exposure review held, for the inline-ask marker. */
+  exposureKeys?: string[];
   /** Observe mode: this decision would have been blocked in standard mode. */
   observeWouldBlock?: boolean;
   /** Recovery command to suggest when a stateful rule hard-blocks (e.g. "npm test"). */
@@ -193,6 +215,12 @@ const WRITE_TOOLS = new Set([
 function isWriteTool(toolName: string): boolean {
   const t = toolName.toLowerCase().replace(/[^a-z_]/g, '_');
   return WRITE_TOOLS.has(t);
+}
+
+/** A namespaced MCP tool as the agent hook forwards it (`mcp__<server>__<tool>`).
+ *  Same shape the hook and the gateway use to extract the server name. */
+function isMcpToolName(toolName: string): boolean {
+  return /^mcp__[^_](?:[^_]|_(?!_))*?__/i.test(toolName);
 }
 
 /**
@@ -346,7 +374,8 @@ export async function authorizeHeadless(
     deferReview?: boolean;
     /** The caller classes this tool as state-changing (the MCP gateway: any
      *  tool the server does not declare `readOnlyHint`), so a tainted session
-     *  routes it to review like a write or network call. */
+     *  routes it to review like a write or network call. Left undefined (the
+     *  agent hook), a namespaced `mcp__*` tool is gated: fw#344. */
     sessionTaintGated?: boolean;
   }
 ): Promise<AuthResult> {
@@ -699,21 +728,318 @@ async function _authorizeHeadlessCore(
   // ── SESSION TAINT (gap1) ──────────────────────────────────────────────────
   // If an earlier tool's OUTPUT in this session was flagged (a secret surfaced;
   // later, an injected instruction), route the session's next high-risk call —
-  // network or write — to human review. Soft (review, not a hard block): tool
+  // network, write or MCP — to human review. Soft (review, not a hard block): tool
   // output containing a secret-shaped string is common and often benign, so we
   // confirm rather than block. `!taintWarning` keeps the file-taint above (with
   // its egress hard-block synergy) as the higher-precedence signal.
+  //
+  // MCP tools reach here two ways. The gateway forwards BARE names and says
+  // itself whether the tool is gated (`sessionTaintGated`, from the server's
+  // readOnlyHint). The agent hook forwards `mcp__<server>__<tool>` names and
+  // says nothing: the hook never sees a tools/list, so it has no annotations
+  // to consult. Until it does, every namespaced MCP tool is gated (fw#344):
+  // `mcp__gmail__send_email` after a poisoned email was the one call the
+  // taint existed for, and it was the one call the taint never reached.
+  const mcpHookTool = options?.sessionTaintGated === undefined && isMcpToolName(toolName);
+  // The daemon's answer to "is this session exposed", when the taint round
+  // trip below already asked it (fw#318): undefined when it did not run.
+  let daemonSaysExposed: boolean | undefined;
   if (
     !taintWarning &&
     meta?.sessionId &&
-    (networkShell || isWriteTool(toolName) || options?.sessionTaintGated === true)
+    (networkShell || isWriteTool(toolName) || options?.sessionTaintGated === true || mcpHookTool)
   ) {
     const sessionTaint = await checkSessionTaint(meta.sessionId);
+    if (typeof sessionTaint.exposed === 'boolean') daemonSaysExposed = sessionTaint.exposed;
     if (sessionTaint.tainted && sessionTaint.record) {
-      const kind = isWriteTool(toolName) ? 'write' : networkShell ? 'network' : 'state-changing';
+      const kind = isWriteTool(toolName)
+        ? 'write'
+        : networkShell
+          ? 'network'
+          : mcpHookTool
+            ? 'MCP'
+            : 'state-changing';
       taintWarning =
         `⚠️ node9 flagged this session — earlier tool output contained ${sessionTaint.record.source}. ` +
         `Approve this ${kind} action before it proceeds.`;
+    }
+  }
+
+  // ── SESSION EXPOSURE (fw#318 layer 4) ─────────────────────────────────────
+  // The session READ outside content (an email, a web page, an issue): a call
+  // that SENDS is judged by where it sends and what it is, not by whether the
+  // text looked hostile. Design 5.2. The reason joins callSpecificReview()
+  // below, so no standing approval, trust session or policy allow answers it.
+  // Fail open like taint: no daemon, no record, no hold.
+  let exposureReview: string | null = null;
+  let exposureKeys: string[] = [];
+  let exposureDestinations: string[] = [];
+  const ucPolicy = config.policy.untrustedContent;
+  if (ucPolicy?.enabled && !taintWarning && meta?.sessionId && !isManual) {
+    // MCP actions (the hook's namespaced names, the gateway's flagged bare
+    // names) are judged by their argument destinations. A shell command is
+    // judged by its AST classification (P3): a SEND (`curl -d`, `git push`,
+    // `gh issue comment`, `npm publish`) by the full table; a plain FETCH
+    // (`curl https://x`) only when its host appeared in the content read,
+    // which is how a query string carries data out. Holding every `curl`
+    // after a WebFetch would stop ordinary coding sessions for nothing.
+    const role = toolRole(toolName, ucPolicy);
+    // The gateway forwards bare names and says itself that the tool acts.
+    const acts = role.action || options?.sessionTaintGated === true;
+    const shellExp = shellInput.kind === 'shell' ? classifyShellExposure(shellInput.command) : null;
+    // P4: a write (a file tool, an MCP file tool by its bare name, or a shell
+    // redirect, tee, cp, sed -i) is judged by where it lands and what it
+    // carries, never as a send to the URLs its content mentions.
+    const bareName = splitMcpToolName(toolName)?.bare;
+    const mcpFileWrite = bareName !== undefined && fileToolOperation(bareName, args) === 'write';
+    const writes = (
+      mcpFileWrite
+        ? prepareFileAccesses(bareName!, args, options?.cwd, config.policy.toolInspection).accesses
+        : fileAccess.accesses
+    ).filter((a) => ['write', 'create', 'remove'].includes(a.operation));
+    const sendsSomething = (acts && !mcpFileWrite) || !!shellExp?.sends;
+    // A call judged only for a write or a plain fetch asks the daemon only
+    // when it may be exposed: the hot path of an ordinary session (every
+    // edit, every redirect) skips the round trip. The marker file is only a
+    // hint: the agent can delete it. So the taint round trip's answer wins
+    // when there was one (file tools, network shell, MCP), and a shell write
+    // that exposure would hold anyway (outside the project, an instruction
+    // file) asks the daemon even without a marker.
+    const mayBeExposed =
+      daemonSaysExposed ??
+      (maybeSessionExposed(meta.sessionId) ||
+        (writes.length > 0 &&
+          judgeWritesAfterExposure({
+            accesses: writes,
+            args,
+            shellCommand: shellInput.kind === 'shell' ? shellInput.command : null,
+            cwd: options?.cwd,
+            inContent: new Set(),
+            isKnown: () => true,
+          }).length > 0));
+    const judged = sendsSomething || ((!!shellExp?.fetches || writes.length > 0) && mayBeExposed);
+    if (judged) {
+      const exposure = await checkSessionExposure(meta.sessionId);
+      if (exposure.exposed && exposure.record) {
+        const rec = exposure.record;
+        // Argument destinations are a SEND only for an MCP action; what a
+        // write tool carries in its content is judged by the write rules.
+        const dests = new Set<string>(
+          acts && !shellExp && !mcpFileWrite ? extractArgDestinations(args) : []
+        );
+        // Hosts a plain fetch reaches: judged only against the content read.
+        const fetchOnly = new Set<string>();
+        const projectHosts = shellExp ? knownProjectHosts(options?.cwd) : null;
+        // `git push <name>` with a name the repository's config does not
+        // hold, when that config lists remotes: nothing to compare, held. With
+        // no readable config, the name is taken as the project's own remote.
+        let unknownRemote = false;
+        if (shellExp) {
+          if (shellExp.sends) {
+            for (const d of shellExp.destinations) dests.add(d);
+            // `git push <remote>`: the repository's own remotes are known.
+            // A push with no target ('') goes to the branch's default remote:
+            // origin, or else one of the config's own remotes.
+            for (const name of shellExp.gitRemotes) {
+              const remotes = projectHosts!.remotes;
+              const hosts =
+                name === ''
+                  ? (remotes.get('origin') ?? [...remotes.values()].flat())
+                  : remotes.get(name);
+              if (hosts) for (const h of hosts) dests.add(h);
+              else if (projectHosts!.remotes.size > 0) unknownRemote = true;
+            }
+          }
+          if (shellExp.fetches) {
+            for (const h of shellExp.fetchDestinations) if (!dests.has(h)) fetchOnly.add(h);
+          }
+        }
+        const inContent = new Set(rec.destinations);
+        const mentioned = new Set(rec.userMentioned);
+        const approved = new Set(rec.approved);
+        const held: { dest: string; why: string; repo?: string }[] = [];
+        const logged: string[] = [];
+        const writeProjectHosts = projectHosts ?? knownProjectHosts(options?.cwd);
+        // ONE known-destination test for sends, fetches and written content:
+        // the organisation, the user's own words, the trusted lists, the
+        // egress allow list and the project's own remotes and registries.
+        const isKnown = (d: string): boolean => {
+          const domain = destinationDomain(d);
+          const value = destinationValue(d);
+          return (
+            (domain !== null && ucPolicy.orgDomains.includes(domain)) ||
+            mentioned.has(d) ||
+            isTrustedRecipient(d) ||
+            (destinationKind(d) === 'host' &&
+              (isLoopbackHost(value) ||
+                isTrustedHost(value) ||
+                (config.policy.trustedHostsManaged &&
+                  matchesTrustedHost(value, config.policy.trustedHosts)) ||
+                config.policy.egress.allow.some((pat) => hostMatches(value, pat)) ||
+                writeProjectHosts.hosts.has(d)))
+          );
+        };
+        const approvedOnce = (key: string) =>
+          ucPolicy.afterExposure === 'ask-once' && approved.has(key);
+        // On a git host the project uses, the repository decides, not the
+        // host: github.com holds the project's origin and an attacker's
+        // mirror alike. A repository there is known only when it is one of
+        // the project's remotes (or approved once), and its host is not
+        // judged. Elsewhere the host is judged as any other destination.
+        const repos = (shellExp?.sends ? shellExp.repos : []).filter((r) =>
+          writeProjectHosts.hosts.has(`host:${r.split('/')[0]}`)
+        );
+        const repoHosts = new Set(repos.map((r) => `host:${r.split('/')[0]}`));
+        for (const r of repos) {
+          if (writeProjectHosts.repos.has(r) || approvedOnce(`${toolName}|repo:${r}`))
+            logged.push(`repo:${r}`);
+          else held.push({ dest: '', why: 'repository', repo: r });
+        }
+        // Known wins: a colleague's address is in the email it replies to,
+        // and the user's own words, the trusted lists and an earlier
+        // approval all outrank "it appeared in the content". For a
+        // destination nobody vouched for, appearing in the content is the
+        // strongest signal and says so in the prompt.
+        for (const d of dests) {
+          if (repoHosts.has(d)) continue;
+          if (approvedOnce(`${toolName}|${d}`) || isKnown(d)) logged.push(d);
+          else if (inContent.has(d)) held.push({ dest: d, why: 'appeared in what was read' });
+          else held.push({ dest: d, why: 'not known to this session' });
+        }
+        // A plain fetch is held only when its host appeared in the content
+        // read and nobody vouched for it.
+        for (const d of fetchOnly) {
+          if (approvedOnce(`${toolName}|${d}`) || isKnown(d) || !inContent.has(d)) logged.push(d);
+          else held.push({ dest: d, why: 'appeared in what was read' });
+        }
+        // A shell send whose destination is built at run time (`curl -d @f
+        // "$URL"`) names nothing to compare: after exposure it is held.
+        if (
+          shellExp?.sends &&
+          (shellExp.unresolved ||
+            unknownRemote ||
+            (shellExp.destinations.length === 0 && shellExp.gitRemotes.length === 0)) &&
+          !approvedOnce(`${toolName}|unresolved`)
+        ) {
+          held.push({ dest: '', why: 'unresolved' });
+        }
+        // A file write is judged by the write rules below: the reference
+        // filesystem server marks write_file destructive (it overwrites).
+        const bare = splitMcpToolName(toolName)?.bare ?? toolName;
+        if (
+          dests.size === 0 &&
+          acts &&
+          !mcpFileWrite &&
+          (role.destructive === true || isDestructiveToolName(bare))
+        ) {
+          held.push({ dest: '', why: 'destructive' });
+        }
+        // P4: writes after exposure (design 6). Each hold carries a key so
+        // ask-once can clear that path (or that destination) for the session.
+        const writeHolds: WriteHold[] =
+          writes.length > 0
+            ? judgeWritesAfterExposure({
+                accesses: writes,
+                args,
+                shellCommand: shellInput.kind === 'shell' ? shellInput.command : null,
+                cwd: options?.cwd,
+                inContent,
+                isKnown,
+              }).filter((h) => {
+                const key = `${toolName}|${h.why === 'content-destination' ? h.destination : `path:${h.path}`}`;
+                if (ucPolicy.afterExposure === 'ask-once' && approved.has(key)) {
+                  logged.push(key);
+                  return false;
+                }
+                return true;
+              })
+            : [];
+        const last = rec.sources[rec.sources.length - 1];
+        const readWord = last ? (last.word ?? sourceWord(last.tool)) : 'content';
+        const when = last ? new Date(last.at).toTimeString().slice(0, 5) : '';
+        const read = last
+          ? `${/^[aeiou]/i.test(readWord) ? 'an' : 'a'} ${readWord}` +
+            (last.server ? ` through ${last.server}` : '') +
+            (when ? ` at ${when}` : '')
+          : 'outside content';
+        if ((held.length > 0 || writeHolds.length > 0) && ucPolicy.afterExposure !== 'log-only') {
+          const noun = (d: string): string => {
+            const k = destinationKind(d);
+            return k === 'email' ? 'an address' : k === 'host' ? 'a host' : 'an account';
+          };
+          const parts = held.map((h) =>
+            h.dest
+              ? `sends to ${destinationValue(h.dest)}, ${
+                  h.why === 'appeared in what was read'
+                    ? `${noun(h.dest)} that appeared in that ${last ? readWord : 'content'}`
+                    : `${noun(h.dest)} this session did not know`
+                }`
+              : h.why === 'repository'
+                ? h.repo!.endsWith('/*')
+                  ? `sends to a repository on ${h.repo!.slice(0, -2)} it does not name (a gist, a new repository or an API call)`
+                  : `sends to ${h.repo}, a repository that is not one of this project's remotes`
+                : h.why === 'unresolved'
+                  ? 'sends to a destination this session cannot see (built at run time, or a remote of another repository)'
+                  : `is ${bare}, a destructive call, with no known destination`
+          );
+          const home = os.homedir();
+          const short = (p: string) => (p.startsWith(home + '/') ? '~' + p.slice(home.length) : p);
+          for (const w of writeHolds) {
+            parts.push(
+              w.why === 'outside-project'
+                ? `writes outside the project, to ${short(w.path)}`
+                : w.why === 'agent-instruction'
+                  ? `writes to ${short(w.path)}, a file that runs code or instructs the agent`
+                  : `writes content carrying ${destinationValue(w.destination ?? '')}, ${noun(w.destination ?? 'host:x')} that appeared in that ${readWord}`
+            );
+          }
+          exposureReview = `🛡️ Node9: this session read ${read}. This call ${parts.join('; and ')}.`;
+          exposureKeys = [
+            ...held
+              .filter((h) => h.dest || h.why === 'unresolved' || h.why === 'repository')
+              .map((h) =>
+                h.why === 'repository'
+                  ? `${toolName}|repo:${h.repo}`
+                  : `${toolName}|${h.dest || 'unresolved'}`
+              ),
+            ...writeHolds.map(
+              (w) =>
+                `${toolName}|${w.why === 'content-destination' ? w.destination : `path:${w.path}`}`
+            ),
+          ];
+          // The destinations ride on the card for "Approve and trust this
+          // address" (P5); the inline prompt names the command instead.
+          exposureDestinations = held
+            .filter((h) => h.dest)
+            .map((h) => h.dest)
+            .slice(0, 10);
+          if (exposureDestinations.length > 0 && options?.deferReview) {
+            exposureReview +=
+              ` To trust ${exposureDestinations.length === 1 ? 'this address' : 'these addresses'} for good, the user runs: ` +
+              exposureDestinations
+                .map((d) => `node9 trust recipient add ${destinationValue(d)}`)
+                .join('; ') +
+              '.';
+          }
+        } else if (held.length > 0 || writeHolds.length > 0 || logged.length > 0) {
+          // Judged and let through: a delivery row, not a decision (no eid,
+          // so the shipper skips it). Kinds and counts only, never a value.
+          appendToLog(HOOK_DEBUG_LOG, {
+            ts: new Date().toISOString(),
+            event: 'exposure-logged',
+            tool: toolName,
+            held: held.length + writeHolds.length,
+            known: logged.length,
+            sessionId: meta.sessionId,
+          });
+        }
+      } else if (exposure.daemonUnavailable) {
+        appendToLog(HOOK_DEBUG_LOG, {
+          ts: new Date().toISOString(),
+          event: 'exposure-unavailable',
+          tool: toolName,
+        });
+      }
     }
   }
 
@@ -1124,6 +1450,7 @@ async function _authorizeHeadlessCore(
     dlpReviewFlagged ||
     !!appPermReview ||
     !!taintWarning ||
+    !!exposureReview ||
     !!packageReview;
   /** A trust session may answer this call. ONE definition for the two places
    *  that must agree: the trust guard that honours a session, and the native
@@ -1630,6 +1957,19 @@ async function _authorizeHeadlessCore(
       undefined,
       appPermReview ? `${taintWarning}\n${appPermReview}` : taintWarning
     );
+  } else if (exposureReview) {
+    // fw#318: a send after the session read outside content. Same
+    // fall-through-to-race shape as taint. The rule name is the stable
+    // `exposure` (catalog lookup, reports); the sentence rides as
+    // ruleDescription, the field every approval surface shows (tail, the
+    // native popup, Mission Control, Slack), so each says what was read and
+    // where this sends.
+    explainableLabel = EXPOSURE_LABEL;
+    riskMetadata = computeRiskMetadata(args, 6, explainableLabel, undefined, undefined, 'exposure');
+    riskMetadata.ruleDescription = (
+      appPermReview ? `${exposureReview}\n${appPermReview}` : exposureReview
+    ).slice(0, 1024);
+    if (exposureDestinations.length > 0) riskMetadata.exposureDestinations = exposureDestinations;
   } else if (appPermReview) {
     // Org-set per-tool review (MCP app permission) — same fall-through-to-race
     // shape as taint, at elevated (not maximum) tier. The reason string rides as
@@ -1709,8 +2049,10 @@ async function _authorizeHeadlessCore(
       reason:
         taintWarning ||
         packageReview ||
+        exposureReview ||
         explainableLabel ||
         'Node9 flagged this action for review.',
+      ...(exposureReview && exposureKeys.length > 0 ? { exposureKeys } : {}),
       ruleDescription: policyRuleDescription,
       blockedByLabel: explainableLabel,
     };
@@ -1916,10 +2258,14 @@ async function _authorizeHeadlessCore(
           // auto-allows. This process (the long-running gateway — appPermReview
           // only ever happens here) stays alive to run its own racers, so the
           // daemon just holds the card and waits for the human decision.
-          appPermReview ? true : undefined,
+          // fw#318 P1.1: the same for every call-specific review (exposure,
+          // session taint, DLP, file review): the re-run carries no session id
+          // and cannot see these reasons, so it must never answer the card.
+          appPermReview || callSpecificReview() ? true : undefined,
           undefined,
           localSmartRuleMatched || options?.localSmartRuleMatched,
-          options?.socketActivitySent
+          options?.socketActivitySent,
+          meta?.sessionId
         );
         daemonEntryId = entry.id;
         daemonAllowCount = entry.allowCount;
@@ -1978,8 +2324,19 @@ async function _authorizeHeadlessCore(
           policyMatchedField,
           policyMatchedWord,
           daemonAllowCount,
-          riskMetadata?.ruleDescription
+          riskMetadata?.ruleDescription,
+          exposureDestinations
         );
+
+        if (decision === 'trust_recipients') {
+          // fw#318 P5: allow this call and trust its destinations for good,
+          // unless the machine's policy is the workspace's (the list is then
+          // the organisation's; the call is still allowed once).
+          if (config.policySource !== 'workspace') {
+            for (const d of exposureDestinations) addTrustedRecipient(d, 'approval');
+          }
+          return { approved: true, checkedBy: 'daemon', decisionSource: 'native' } as AuthResult;
+        }
 
         if (decision === 'always_allow') {
           // fix #5 (behavioral half): for an app-perm review, do NOT persist a
@@ -2133,6 +2490,18 @@ async function _authorizeHeadlessCore(
   // Control doesn't stay stuck on PENDING forever.
   // We await this (not fire-and-forget) because the CLI process may exit
   // immediately after this function returns, killing any in-flight fetch.
+  // fw#318 ask-once: a human allow clears this call's destinations for the
+  // session (never the whole record). Awaited: the hook process exits right
+  // after this function returns, and an unawaited POST would be lost.
+  if (
+    finalResult.approved &&
+    exposureKeys.length > 0 &&
+    meta?.sessionId &&
+    ucPolicy?.afterExposure === 'ask-once'
+  ) {
+    await approveSessionExposure(meta.sessionId, exposureKeys);
+  }
+
   if (cloudRequestId && creds && finalResult.checkedBy !== 'cloud') {
     await resolveNode9SaaS(
       cloudRequestId,

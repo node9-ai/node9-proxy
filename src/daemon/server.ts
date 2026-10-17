@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { randomUUID } from 'crypto';
+import { addTrustedRecipient } from '../auth/trusted-recipients';
 import { spawnSync } from 'child_process';
 import chalk from 'chalk';
 import { authorizeHeadless, getGlobalSettings, getConfig, _resetConfigCache } from '../core';
@@ -58,6 +59,7 @@ import {
   type Decision,
   taintStore,
   sessionTaintStore,
+  sessionExposureStore,
   insightCounts,
   loadInsightCounts,
   saveInsightCounts,
@@ -80,7 +82,12 @@ import { startDlpScanner } from './dlp-scanner.js';
 import { startMcpReconciler } from './mcp-reconciler.js';
 import { startHookHeal } from './hook-heal.js';
 import { logDaemonStartup, recordStartupState } from './startup-log.js';
-import { readMcpToolsConfig, updateServerDiscovery, approveServer } from './mcp-tools.js';
+import {
+  readMcpToolsConfig,
+  updateServerDiscovery,
+  approveServer,
+  sanitizeToolAnnotations,
+} from './mcp-tools.js';
 import { startOsvSync } from '../supply-chain/osv-sync';
 import { startHeartbeat } from './heartbeat';
 
@@ -242,6 +249,33 @@ export function startDaemon(): void {
   //                           kept so any in-flight client requests
   //                           landing across the upgrade still work.
   const internalToken = randomUUID();
+
+  /** The "Allow + trust" half of a decision on an exposure card (fw#318 P5). */
+  const applyTrustRecipients = (entry: PendingEntry): void => {
+    const dests = entry.riskMetadata?.exposureDestinations ?? [];
+    if (dests.length === 0) return;
+    let policySource: string | undefined;
+    try {
+      policySource = getConfig().policySource;
+    } catch {
+      policySource = undefined;
+    }
+    if (policySource !== 'workspace') {
+      for (const d of dests) {
+        try {
+          addTrustedRecipient(d, 'approval');
+        } catch {
+          /* a bad value is skipped; the allow still stands */
+        }
+      }
+    }
+    if (entry.sessionId) {
+      sessionExposureStore.approve(
+        entry.sessionId,
+        dests.map((d) => `${entry.toolName}|${d}`)
+      );
+    }
+  };
   const validToken = (req: http.IncomingMessage) =>
     req.headers['x-node9-internal'] === internalToken ||
     req.headers['x-node9-token'] === internalToken;
@@ -386,6 +420,7 @@ export function startDaemon(): void {
           activityId,
           cwd,
           localSmartRuleMatched = false,
+          sessionId,
         } = JSON.parse(body);
         // When fromCLI is true the CLI already sent an 'activity' event with
         // activityId via the Unix socket. Reuse that ID so the daemon's
@@ -396,6 +431,7 @@ export function startDaemon(): void {
           toolName,
           args,
           riskMetadata: riskMetadata ?? undefined,
+          ...(typeof sessionId === 'string' && sessionId.length <= 256 && { sessionId }),
           ...(typeof recoveryCommand === 'string' && recoveryCommand && { recoveryCommand }),
           ...(viewOnly && { viewOnly: true }),
           agent: typeof agent === 'string' ? agent : undefined,
@@ -602,7 +638,7 @@ export function startDaemon(): void {
           res.writeHead(409, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({ conflict: true, decision: entry.earlyDecision }));
         }
-        const { decision, persist, trustDuration, reason, source } = JSON.parse(
+        const { decision, persist, trustDuration, reason, source, trustRecipients } = JSON.parse(
           await readBody(req)
         ) as {
           decision: string;
@@ -610,7 +646,16 @@ export function startDaemon(): void {
           trustDuration?: string;
           reason?: string;
           source?: string;
+          trustRecipients?: boolean;
         };
+
+        // fw#318 P5: "Allow + trust this address". Only an exposure card
+        // carries destinations; the list is written locally unless the
+        // workspace owns the policy, and the session's exposure is cleared for
+        // those destinations either way.
+        if (decision === 'allow' && trustRecipients === true) {
+          applyTrustRecipients(entry);
+        }
 
         // Trust session
         if (decision === 'trust' && trustDuration) {
@@ -1092,6 +1137,9 @@ export function startDaemon(): void {
     // output, so its next high-risk call is routed to review. Set by the
     // PostToolUse `log` hook; queried by the next PreToolUse `check`.
     if (req.method === 'POST' && pathname === '/session-taint') {
+      // fw#318 decision 6: the taint decides whether a call is held, so only a
+      // holder of the internal token may write, read or clear it.
+      if (!validToken(req)) return res.writeHead(403).end();
       try {
         const body = JSON.parse(await readBody(req)) as {
           sessionId?: unknown;
@@ -1113,6 +1161,9 @@ export function startDaemon(): void {
     }
 
     if (req.method === 'POST' && pathname === '/session-taint/check') {
+      // fw#318 decision 6: the taint decides whether a call is held, so only a
+      // holder of the internal token may write, read or clear it.
+      if (!validToken(req)) return res.writeHead(403).end();
       try {
         const body = JSON.parse(await readBody(req)) as { sessionId?: unknown };
         if (typeof body.sessionId !== 'string') {
@@ -1120,8 +1171,13 @@ export function startDaemon(): void {
           return res.end(JSON.stringify({ error: 'sessionId must be a string' }));
         }
         const record = sessionTaintStore.check(body.sessionId);
+        // fw#318: the same round trip says whether the session is exposed, so
+        // a deleted marker file cannot hide it from the calls that ask here.
+        const exposed = sessionExposureStore.check(body.sessionId) !== null;
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify(record ? { tainted: true, record } : { tainted: false }));
+        return res.end(
+          JSON.stringify(record ? { tainted: true, record, exposed } : { tainted: false, exposed })
+        );
       } catch {
         res.writeHead(400).end();
         return;
@@ -1129,11 +1185,17 @@ export function startDaemon(): void {
     }
 
     if (req.method === 'GET' && pathname === '/session-taint/list') {
+      // fw#318 decision 6: the taint decides whether a call is held, so only a
+      // holder of the internal token may write, read or clear it.
+      if (!validToken(req)) return res.writeHead(403).end();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ records: sessionTaintStore.list() }));
     }
 
     if (req.method === 'POST' && pathname === '/session-taint/clear') {
+      // fw#318 decision 6: the taint decides whether a call is held, so only a
+      // holder of the internal token may write, read or clear it.
+      if (!validToken(req)) return res.writeHead(403).end();
       try {
         const body = JSON.parse(await readBody(req)) as { sessionId?: unknown; all?: unknown };
         if (body.all === true) {
@@ -1194,6 +1256,90 @@ export function startDaemon(): void {
       }
     }
 
+    // ── Session exposure (fw#318) — the session READ outside content. Set by
+    // the PostToolUse `log` hook and the gateway; the user's own mentions by
+    // the UserPromptSubmit hook; queried by the next PreToolUse `check`.
+    // Every route takes the internal token: the record decides whether a
+    // send is held, so no other local process may write or clear it.
+    if (pathname.startsWith('/session-exposure')) {
+      if (!validToken(req)) return res.writeHead(403).end();
+      const json = (code: number, body: unknown) => {
+        res.writeHead(code, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify(body));
+      };
+      const strings = (v: unknown): string[] =>
+        Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+      try {
+        if (req.method === 'POST' && pathname === '/session-exposure') {
+          const body = JSON.parse(await readBody(req)) as {
+            sessionId?: unknown;
+            source?: { tool?: unknown; server?: unknown; word?: unknown };
+            destinations?: unknown;
+          };
+          if (typeof body.sessionId !== 'string' || typeof body.source?.tool !== 'string')
+            return json(400, { error: 'sessionId and source.tool are required strings' });
+          sessionExposureStore.mark(
+            body.sessionId,
+            {
+              tool: body.source.tool.slice(0, 200),
+              server:
+                typeof body.source.server === 'string'
+                  ? body.source.server.slice(0, 80)
+                  : undefined,
+              word:
+                typeof body.source.word === 'string' ? body.source.word.slice(0, 40) : undefined,
+              at: Date.now(),
+            },
+            strings(body.destinations)
+          );
+          return json(200, { ok: true });
+        }
+        if (req.method === 'POST' && pathname === '/session-exposure/user-mentioned') {
+          const body = JSON.parse(await readBody(req)) as {
+            sessionId?: unknown;
+            destinations?: unknown;
+          };
+          if (typeof body.sessionId !== 'string')
+            return json(400, { error: 'sessionId must be a string' });
+          sessionExposureStore.mention(body.sessionId, strings(body.destinations));
+          return json(200, { ok: true });
+        }
+        if (req.method === 'POST' && pathname === '/session-exposure/check') {
+          const body = JSON.parse(await readBody(req)) as { sessionId?: unknown };
+          if (typeof body.sessionId !== 'string')
+            return json(400, { error: 'sessionId must be a string' });
+          const record = sessionExposureStore.check(body.sessionId);
+          return json(200, record ? { exposed: true, record } : { exposed: false });
+        }
+        if (req.method === 'POST' && pathname === '/session-exposure/approve') {
+          const body = JSON.parse(await readBody(req)) as { sessionId?: unknown; keys?: unknown };
+          if (typeof body.sessionId !== 'string')
+            return json(400, { error: 'sessionId must be a string' });
+          return json(200, {
+            ok: sessionExposureStore.approve(body.sessionId, strings(body.keys)),
+          });
+        }
+        if (req.method === 'GET' && pathname === '/session-exposure/list') {
+          return json(200, { records: sessionExposureStore.list() });
+        }
+        if (req.method === 'POST' && pathname === '/session-exposure/clear') {
+          const body = JSON.parse(await readBody(req)) as { sessionId?: unknown; all?: unknown };
+          if (body.all === true) {
+            const cleared = sessionExposureStore.list().length;
+            sessionExposureStore.clear();
+            return json(200, { ok: true, cleared });
+          }
+          if (typeof body.sessionId !== 'string' || body.sessionId.length === 0)
+            return json(400, { error: 'sessionId (non-empty) or all:true is required' });
+          const cleared = sessionExposureStore.clearSession(body.sessionId) ? 1 : 0;
+          return json(200, { ok: true, cleared });
+        }
+        return res.writeHead(404).end();
+      } catch {
+        return res.writeHead(400).end();
+      }
+    }
+
     if (req.method === 'POST' && pathname === '/mcp/discovered') {
       // Called by gateway, requires internal token
       if (req.headers['x-node9-internal'] !== internalToken) return res.writeHead(403).end();
@@ -1211,7 +1357,22 @@ export function startDaemon(): void {
         }
 
         const safeName = typeof name === 'string' && name ? name.slice(0, 80) : undefined;
-        const status = updateServerDiscovery(serverKey, tools, safeName);
+        // Name, description and boolean annotations only: a server's tools/list
+        // is outside content and the inventory file is read by every hook.
+        const safeTools = (tools as unknown[])
+          .filter((t): t is Record<string, unknown> => !!t && typeof t === 'object')
+          .filter((t) => typeof t.name === 'string' && (t.name as string).length <= 200)
+          .map((t) => {
+            const ann = sanitizeToolAnnotations(t.annotations);
+            return {
+              name: t.name as string,
+              ...(typeof t.description === 'string'
+                ? { description: (t.description as string).slice(0, 2000) }
+                : {}),
+              ...(ann ? { annotations: ann } : {}),
+            };
+          });
+        const status = updateServerDiscovery(serverKey, safeTools, safeName);
         if (status === 'new' || status === 'drift') {
           appendAuditLog({
             toolName: `mcp-server:${serverKey}`,

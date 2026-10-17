@@ -9,7 +9,8 @@ import path from 'path';
 import os from 'os';
 import { authorizeHeadless } from '../../auth/orchestrator';
 import { checkPause } from '../../auth/state';
-import { isDaemonRunning } from '../../auth/daemon';
+import { isDaemonRunning, notifyUserMentions } from '../../auth/daemon';
+import { extractContentDestinations } from '@node9/policy-engine';
 import { openStartupLogFd, recordStartupState } from '../../daemon/startup-log';
 import { getConfig, type Config } from '../../config';
 import { buildNegotiationMessage, buildReviewMessage } from '../../policy/negotiation';
@@ -296,7 +297,29 @@ export function registerCheckCommand(program: Command): void {
             }
             const canaryHit =
               canaryVals.length > 0 ? matchCanaryArgs({ prompt }, canaryVals) : null;
-            if (!dlpMatch && !canaryHit) process.exit(0);
+            if (!dlpMatch && !canaryHit) {
+              // fw#318 (design 5.3): an address, host or IBAN the user typed is
+              // known for this session, so a later send to it is not held.
+              // Best-effort and awaited: the process exits right after.
+              try {
+                const sid =
+                  typeof payload.session_id === 'string'
+                    ? payload.session_id
+                    : typeof payload.conversationId === 'string'
+                      ? payload.conversationId
+                      : '';
+                const promptCwd =
+                  typeof payload.cwd === 'string' && path.isAbsolute(payload.cwd)
+                    ? payload.cwd
+                    : undefined;
+                if (sid && getConfig(promptCwd).policy.untrustedContent?.enabled) {
+                  await notifyUserMentions(sid, extractContentDestinations(prompt));
+                }
+              } catch {
+                /* never block the prompt on this */
+              }
+              process.exit(0);
+            }
             let canaryRec: ReturnType<typeof loadCanaries>[number] | null = null;
             if (canaryHit) {
               try {
@@ -695,6 +718,7 @@ export function registerCheckCommand(program: Command): void {
             blockedByLabel?: string;
             ruleDescription?: string;
             reason?: string;
+            exposureKeys?: string[];
           }) => {
             const msg = buildReviewMessage(
               result.blockedByLabel,
@@ -719,6 +743,7 @@ export function registerCheckCommand(program: Command): void {
                   sessionId: sid,
                   ts: Date.now(),
                   label: result.blockedByLabel,
+                  ...(result.exposureKeys?.length ? { exposureKeys: result.exposureKeys } : {}),
                 });
               }
             } catch {

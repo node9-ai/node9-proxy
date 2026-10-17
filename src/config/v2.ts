@@ -225,6 +225,12 @@ export function v2ToLegacy(raw: Record<string, unknown>, options: V2Options = {}
     const [id] = pair.split('.', 1);
     if (CHECK_BY_ID.has(id)) warnings.push(`tuning.${pair}: no such setting`);
   }
+  // The verdict `log` is the log-only mode: a tuning `afterExposure` written
+  // after it may say ask-once or ask-every-time, but never re-arm the asks.
+  if (stated['behavior.untrusted-content'] === 'log') {
+    const uc = policy.untrustedContent as Record<string, unknown> | undefined;
+    if (uc) uc.afterExposure = 'log-only';
+  }
 
   const legacy: LegacyFile = { version: '1.0' };
   if (Object.keys(settings).length) legacy.settings = settings as LegacySettings;

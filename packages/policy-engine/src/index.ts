@@ -26,6 +26,10 @@ export {
   SYSTEM_AUTH_FILES,
   SYSTEM_AUTH_DIRS,
   STARTUP_NAMES,
+  AGENT_INSTRUCTION_FILES,
+  AGENT_INSTRUCTION_DIRS,
+  isAgentInstructionPath,
+  isInside,
 } from './files/paths';
 export type { FileAccess, FileAccessContext } from './files/paths';
 
@@ -159,6 +163,23 @@ export type {
   ProvenanceTrust,
 } from './policy';
 export { evaluatePolicy, resolvePinned, isIgnoredTool, checkDangerousSql } from './policy';
+
+// Exposure — destinations in content and in call arguments, for the gate
+// that judges a send after the session read outside content.
+export type { DestinationKind } from './exposure/destinations';
+export {
+  extractContentDestinations,
+  extractArgDestinations,
+  destinationDomain,
+  destinationKind,
+  destinationValue,
+  isDestructiveToolName,
+  isLoopbackHost,
+  gitRepoPath,
+  MAX_DESTINATIONS,
+} from './exposure/destinations';
+export type { ShellExposure } from './exposure/shell';
+export { classifyShellExposure } from './exposure/shell';
 
 // Smart rules — tool-name pattern match + condition evaluator.
 export { matchesPattern, getNestedValue, evaluateSmartConditions } from './rules';

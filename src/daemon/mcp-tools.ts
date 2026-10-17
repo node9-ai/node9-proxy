@@ -3,9 +3,29 @@ import path from 'path';
 import os from 'os';
 import { tokenize } from '../mcp-cmd';
 
+/** The MCP tool annotations node9 keeps (booleans only). They add caution
+ *  (destructiveHint) and suggest a role; they never relax on their own. */
+export interface McpToolAnnotations {
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
 export interface McpToolInfo {
   name: string;
   description?: string;
+  annotations?: McpToolAnnotations;
+}
+
+/** Keep only the four boolean hints of a tool's annotations, if any. */
+export function sanitizeToolAnnotations(raw: unknown): McpToolAnnotations | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const a = raw as Record<string, unknown>;
+  const out: McpToolAnnotations = {};
+  for (const k of ['readOnlyHint', 'destructiveHint', 'idempotentHint', 'openWorldHint'] as const)
+    if (typeof a[k] === 'boolean') out[k] = a[k] as boolean;
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 export interface McpServerConfig {
@@ -59,7 +79,7 @@ export function deriveServerName(cmd: string): string {
 
 export type McpToolsConfig = Record<string, McpServerConfig>;
 
-function getMcpToolsFile(): string {
+export function getMcpToolsFile(): string {
   return path.join(os.homedir(), '.node9', 'mcp-tools.json');
 }
 
@@ -140,6 +160,19 @@ export function updateServerDiscovery(
     existing.status = 'pending'; // Require re-approval
     writeMcpToolsConfig(config);
     return 'drift';
+  }
+
+  // Same names: keep the latest description and annotations (fw#318 P2),
+  // so a hint the server added later reaches the hook. A changed definition
+  // is a pin mismatch at the gateway anyway; this only keeps the inventory
+  // current.
+  const byName = new Map(tools.map((t) => [t.name, t]));
+  for (const t of existing.tools) {
+    const fresh = byName.get(t.name);
+    if (!fresh) continue;
+    if (fresh.description !== undefined) t.description = fresh.description;
+    if (fresh.annotations) t.annotations = fresh.annotations;
+    else delete t.annotations;
   }
 
   writeMcpToolsConfig(config); // persist the refreshed lastSeenAt (+ any backfilled name)

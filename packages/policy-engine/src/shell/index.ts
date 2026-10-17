@@ -2712,6 +2712,35 @@ export function resolveWordLiteral(w: any): string | null {
 }
 
 /**
+ * The literal text a word starts with, up to its first dynamic part, and
+ * whether a dynamic part followed. `"https://x.example/p?d=$(cat f)"` keeps
+ * `https://x.example/p?d=`: enough to name the host the data goes to, which
+ * resolveWordLiteral (null for the whole word) cannot. Inside double quotes
+ * the parts of the quoted string are walked the same way.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function resolveWordPrefix(w: any): { prefix: string; dynamic: boolean } {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const walk = (parts: any[]): { prefix: string; dynamic: boolean } => {
+    let s = '';
+    for (const p of parts) {
+      if (p && typeof p === 'object' && Array.isArray(p.Parts) && p.Dollar !== undefined) {
+        // A double-quoted string: descend into its parts.
+        const inner = walk(p.Parts);
+        s += inner.prefix;
+        if (inner.dynamic) return { prefix: s, dynamic: true };
+        continue;
+      }
+      const piece = resolvePart(p, false);
+      if (piece === undefined || piece === null) return { prefix: s, dynamic: true };
+      s += piece;
+    }
+    return { prefix: s, dynamic: false };
+  };
+  return walk(w?.Parts || []);
+}
+
+/**
  * One word PART, resolved once.
  *
  * `undefined` = dynamic (the caller gives up on the word), `null` = recorded as
@@ -2799,7 +2828,7 @@ export function parseDestHost(token: string): string | null {
 // Per-binary destination extraction from an ordered, literal-resolved arg list
 // (null entries = dynamic args). Returns raw destination tokens (host parsing
 // happens in the caller so `raw` is preserved).
-function destTokensForBinary(binary: string, args: (string | null)[]): string[] {
+export function destTokensForBinary(binary: string, args: (string | null)[]): string[] {
   const valueFlags = VALUE_FLAGS[binary] ?? new Set<string>();
   const positionals: string[] = [];
   const urlFlagValues: string[] = [];
@@ -2869,9 +2898,13 @@ export function extractShellDestinations(command: string): ShellDestination[] {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const callArgs: any[] = n.Args || [];
       if (callArgs.length === 0) return true;
-      const name = (resolveWordLiteral(callArgs[0]) || '').toLowerCase();
+      // `sudo curl`, `env X=1 curl`, `timeout 5 curl`: the network binary is
+      // the head after the wrappers (fw#318 P1.1), as everywhere else.
+      const words = callArgs.map((a) => resolveWordLiteral(a));
+      const at = unwrapCommandHead(words);
+      const name = (words[at] || '').toLowerCase().split('/').pop() ?? '';
       if (!NET_BINARIES.has(name)) return true;
-      const rest = callArgs.slice(1).map((a) => resolveWordLiteral(a));
+      const rest = words.slice(at + 1);
       for (const raw of destTokensForBinary(name, rest)) {
         const host = parseDestHost(raw);
         if (!host) continue;

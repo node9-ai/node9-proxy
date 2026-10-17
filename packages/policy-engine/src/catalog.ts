@@ -197,6 +197,16 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
     legacy: ['review-force-push', 'review-git-destructive'],
   },
   {
+    id: 'commands.node9-disarm',
+    group: 'commands',
+    title: 'node9 disarmed from the shell',
+    catches:
+      'a node9 command that clears a session flag, trusts a destination, pauses the gate or weakens a shield, run by the agent',
+    values: ALL,
+    defaultValue: 'review',
+    legacy: ['review-node9-disarm'],
+  },
+  {
     id: 'commands.sql-ddl',
     group: 'commands',
     title: 'Drop or truncate',
@@ -434,6 +444,16 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
     defaultValue: 'review',
     legacy: ['🔴 Node9 Taint (Exfiltration Prevention)'],
   },
+  {
+    id: 'behavior.untrusted-content',
+    group: 'behavior',
+    title: 'Send after reading outside content',
+    catches:
+      'a send to an unknown destination, a destination found in what was read, or a destructive call after the session read an email, a web page or an issue',
+    values: ['off', 'log', 'review'],
+    defaultValue: 'review',
+    legacy: ['🛡️ Node9 Exposure', 'exposure'],
+  },
 
   // ── What the agent loads ────────────────────────────────────────────────
   {
@@ -658,6 +678,7 @@ export interface CatalogSettings {
   injectionScan?: { enabled?: boolean };
   skillPinning?: { enabled?: boolean; mode?: string };
   packageCheck?: { enabled?: boolean; onMalicious?: string };
+  untrustedContent?: { enabled?: boolean; afterExposure?: string };
   /** Shields the host actually injected (`policy.appliedShields`). */
   appliedShields?: readonly string[];
   /**
@@ -691,6 +712,7 @@ export function catalogSettingsFromConfig(
     injectionScan: policy.injectionScan,
     skillPinning: policy.skillPinning,
     packageCheck: policy.packageCheck,
+    untrustedContent: policy.untrustedContent,
     appliedShields: policy.appliedShields ?? [],
     checks: policy.checks,
   };
@@ -754,6 +776,11 @@ const LEGACY_READERS: Record<string, LegacyReader> = {
     if (s.packageCheck?.enabled === undefined) return undefined;
     if (!s.packageCheck.enabled) return 'off';
     return s.packageCheck.onMalicious === 'review' ? 'review' : 'block';
+  },
+  'behavior.untrusted-content': (s) => {
+    if (s.untrustedContent?.enabled === undefined) return undefined;
+    if (!s.untrustedContent.enabled) return 'off';
+    return s.untrustedContent.afterExposure === 'log-only' ? 'log' : 'review';
   },
 };
 
