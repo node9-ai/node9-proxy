@@ -1,4 +1,4 @@
-import type { ToolInspection } from '../shell/tool-input';
+import type { InspectionInput } from '../shell/tool-input';
 // Canonical detection pipeline — the one extractor every JSONL-scanning
 // consumer in node9 calls. Replaces the duplicated detection logic in
 // scan.ts (CLI), scan-watermark.ts (daemon), and scan-upload-history.ts
@@ -150,7 +150,7 @@ export interface ExtractContext {
   }>;
   /** toolInspection map from PolicyConfig — drives shell-command extraction
    *  for tools that aren't the standard 'bash' name. Defaults handled by caller. */
-  toolInspection: ToolInspection;
+  toolInspection: InspectionInput;
   /** DLP enabled flag from PolicyConfig. */
   dlpEnabled: boolean;
   /** Decoy credentials registered on this machine (value plus kind and plant
@@ -688,9 +688,13 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // re-read.
 // canonical-v25 (node9Firewall#348): `Database Connection String` accepts a
 // driver suffix (`mysql+pymysql://`), so histories scanned under v24 re-read.
+// canonical-v26 (node9Firewall#338, review 3): MCP executors named
+// execute_command / start_process and friends, servers whose name contains
+// `__`, and argv-style calls (`command` + `args`) now resolve to a shell
+// command, so histories scanned under v25 re-read.
 // The two new context patterns (`Credential in URL Query`, `Assigned Secret`)
 // are argumentsOnly: the live gate reviews them, scanArgs here does not.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v25';
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v26';
 
 // 2026-09-11, hash bumped with NO version bump: stage 3 of the credential jail
 // (argument POSITION kept in extractLiteralArgs) changed detector SOURCE and
@@ -717,7 +721,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v25';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '48ef4af5dd89198d';
+export const CANONICAL_EXTRACTOR_HASH = '3bc668904f6675c5';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

@@ -14,15 +14,23 @@
 
 import mvdanSh from 'mvdan-sh';
 import { matchesPattern } from '../rules';
-import { isShellShapedTool, type ToolInspection } from './tool-input';
+import { isShellShapedTool, type InspectionInput } from './tool-input';
 export {
   BASH_TOOL_NAMES,
   isBashTool,
   isShellShapedTool,
+  inspectionEntry,
+  inspectionLayers,
   resolveShellInput,
   shellRuleArgs,
 } from './tool-input';
-export type { ToolInspection, ToolInspectionEntry, ShellInputResolution } from './tool-input';
+export type {
+  ToolInspection,
+  ToolInspectionEntry,
+  InspectionLayers,
+  InspectionInput,
+  ShellInputResolution,
+} from './tool-input';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const { syntax } = mvdanSh as any;
@@ -1700,7 +1708,7 @@ function chmodHasOpenPermMode(command: string): boolean {
 export function toolMatchesRule(
   toolName: string,
   ruleTool: string | string[] | undefined,
-  toolInspection?: ToolInspection
+  toolInspection?: InspectionInput
 ): boolean {
   if (!ruleTool) return true;
   if (matchesPattern(toolName, ruleTool)) return true;

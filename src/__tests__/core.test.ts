@@ -502,6 +502,27 @@ describe('global config (~/.node9/config.json)', () => {
   });
 });
 
+// ── getConfig — toolInspection provenance (fw#338 review 3) ──────────────────
+
+describe('getConfig — toolInspection provenance', () => {
+  it('keeps a project toolInspection apart from the trusted map', () => {
+    mockBothConfigs(
+      { policy: { toolInspection: { 'mcp__*': 'query' } } },
+      { policy: { toolInspection: { mcp__db__exec: 'sql' } } }
+    );
+    const config = getConfig();
+    expect(config.policy.toolInspection).toMatchObject({ mcp__db__exec: 'sql', bash: 'command' });
+    expect(config.policy.toolInspection).not.toHaveProperty('mcp__*');
+    expect(config.policy.projectToolInspection).toEqual({ 'mcp__*': 'query' });
+  });
+  it('reads a v2 project file the same way', () => {
+    mockProjectConfig({ version: '2', tools: { inspection: { 'mcp__*': 'query' } } });
+    const config = getConfig();
+    expect(config.policy.toolInspection).not.toHaveProperty('mcp__*');
+    expect(config.policy.projectToolInspection).toEqual({ 'mcp__*': 'query' });
+  });
+});
+
 // ── getConfig — smart rule deduplication ──────────────────────────────────────
 
 describe('getConfig — smart rule deduplication', () => {

@@ -1,4 +1,4 @@
-import type { ToolInspection } from '../shell/tool-input';
+import type { InspectionInput } from '../shell/tool-input';
 import picomatch from 'picomatch';
 import { checkValue, type CatalogSettings } from '../catalog';
 import { resolveShellInput } from '../shell/tool-input';
@@ -68,7 +68,7 @@ export function collectFileAccesses(
   tool: string,
   args: unknown,
   context: FileAccessContext = {},
-  inspection: ToolInspection = {}
+  inspection: InspectionInput = {}
 ): FileAccess[] {
   if (!args || typeof args !== 'object' || Array.isArray(args)) return [];
   const a = args as Record<string, unknown>;

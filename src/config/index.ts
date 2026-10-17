@@ -141,6 +141,13 @@ export interface Config {
     dangerousWords: string[];
     ignoredTools: string[];
     toolInspection: ToolInspection;
+    /**
+     * RESOLVED output: the `toolInspection` entries a repository-carried
+     * node9.config.json contributed. Kept apart from the trusted map because
+     * that file is agent-writable in-session: the resolver lets it add a shell
+     * tool or field but never remap a recognized executor away from shell.
+     */
+    projectToolInspection?: ToolInspection;
     smartRules: SmartRule[];
     /**
      * RESOLVED output, never user input: the shields the shield layer
@@ -985,6 +992,7 @@ export function getConfig(cwd?: string): Config {
     dangerousWords: [...DEFAULT_CONFIG.policy.dangerousWords],
     ignoredTools: [...DEFAULT_CONFIG.policy.ignoredTools],
     toolInspection: { ...DEFAULT_CONFIG.policy.toolInspection },
+    projectToolInspection: {},
     // Shipped rules carry `builtin`: the catalog's per-check value governs
     // them and only them (a user rule that reuses a name keeps its verdict).
     smartRules: DEFAULT_CONFIG.policy.smartRules.map((r) => ({ ...r, builtin: true })),
@@ -1095,8 +1103,17 @@ export function getConfig(cwd?: string): Config {
     // This allows a project to relax global restrictions.
     if (p.dangerousWords) mergedPolicy.dangerousWords = [...p.dangerousWords];
 
-    if (p.toolInspection)
-      mergedPolicy.toolInspection = { ...mergedPolicy.toolInspection, ...p.toolInspection };
+    if (p.toolInspection) {
+      // A repo-carried file lands in its own map: the shell resolver reads it
+      // as additive only (fw#338 review 3: `"mcp__*": "query"` in a checked-out
+      // repo switched off inspection of every MCP executor).
+      if (isProject)
+        mergedPolicy.projectToolInspection = {
+          ...mergedPolicy.projectToolInspection,
+          ...p.toolInspection,
+        };
+      else mergedPolicy.toolInspection = { ...mergedPolicy.toolInspection, ...p.toolInspection };
+    }
     // Project rules are inserted between default block rules and default review/allow rules.
     // This gives project rules priority over built-in review rules (e.g. a stateful block
     // rule fires before the default review-git-push) while preserving the Layer 1 invariant:

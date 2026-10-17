@@ -19,6 +19,7 @@ import {
   sensitivePathMatch,
   analyzeFsOperation,
   isBashTool,
+  inspectionLayers,
   resolveShellInput,
   evaluateProtectedFileAccess,
   incompleteFileVerdict,
@@ -580,7 +581,7 @@ async function _authorizeHeadlessCore(
   let fileAccess: PreparedFileAccess;
   let fileFinding: ProtectedFileVerdict | null;
   try {
-    fileAccess = prepareFileAccesses(toolName, args, options?.cwd, config.policy.toolInspection);
+    fileAccess = prepareFileAccesses(toolName, args, options?.cwd, inspectionLayers(config.policy));
     fileFinding = isManual
       ? null
       : evaluateProtectedFileAccess(
@@ -605,7 +606,7 @@ async function _authorizeHeadlessCore(
     fileAccess = { cwd: options?.cwd, homeDirs: [], accesses: [], handledPaths: new Set() };
     fileFinding = isManual ? null : incompleteFileVerdict();
   }
-  const shellInput = resolveShellInput(toolName, args, config.policy.toolInspection);
+  const shellInput = resolveShellInput(toolName, args, inspectionLayers(config.policy));
   const networkShell = shellInput.kind === 'shell' && NETWORK_COMMAND_RE.test(shellInput.command);
   const shellReview = !isManual && shellInput.kind === 'uninspectable';
   if (shellReview) {
@@ -803,7 +804,8 @@ async function _authorizeHeadlessCore(
     const mcpFileWrite = bareName !== undefined && fileToolOperation(bareName, args) === 'write';
     const writes = (
       mcpFileWrite
-        ? prepareFileAccesses(bareName!, args, options?.cwd, config.policy.toolInspection).accesses
+        ? prepareFileAccesses(bareName!, args, options?.cwd, inspectionLayers(config.policy))
+            .accesses
         : fileAccess.accesses
     ).filter((a) => ['write', 'create', 'remove'].includes(a.operation));
     const sendsSomething = (acts && !mcpFileWrite) || !!shellExp?.sends;

@@ -68,6 +68,8 @@ export {
   BASH_TOOL_NAMES,
   isBashTool,
   isShellShapedTool,
+  inspectionEntry,
+  inspectionLayers,
   resolveShellInput,
   shellRuleArgs,
   toolMatchesRule,
@@ -302,7 +304,13 @@ export type { SsrfTier, SsrfMatch, SsrfVerdict, SsrfFloorOptions } from './egres
 export { extractShellDestTokens } from './shell/index';
 export type { ShellDestToken } from './shell/index';
 
-export type { ToolInspection, ToolInspectionEntry, ShellInputResolution } from './shell/tool-input';
+export type {
+  ToolInspection,
+  ToolInspectionEntry,
+  InspectionLayers,
+  InspectionInput,
+  ShellInputResolution,
+} from './shell/tool-input';
 
 export { inspectArgumentSecrets, scanArgumentSecrets, ARGUMENT_SCAN_LIMITS } from './dlp/arguments';
 export type { ArgumentInspectionResult } from './dlp/arguments';
