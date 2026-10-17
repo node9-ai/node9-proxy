@@ -31,4 +31,28 @@ describe('auditLocalAllow riskMetadata cleaning (numeric fields)', () => {
     expect(body.riskMetadata).toEqual({ mcpToolCount: 12 });
     expect(body.checkedBy).toBe('mcp-discovered');
   });
+
+  it('fw#318 2b: keeps exposureDestinations on the wire, drops other arrays', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal('fetch', fetchMock);
+    await auditLocalAllow(
+      'mcp__gmail__send_email',
+      { to: 'x@drop.example' },
+      'local-policy',
+      { apiKey: 'n9_live_x', apiUrl: 'https://api.node9.ai' },
+      { mcpServer: 'gmail' },
+      undefined,
+      false,
+      {
+        ruleName: 'exposure',
+        exposureDestinations: ['email:x@drop.example'],
+        other: ['a'],
+      } as never
+    );
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
+    expect(body.riskMetadata).toEqual({
+      ruleName: 'exposure',
+      exposureDestinations: ['email:x@drop.example'],
+    });
+  });
 });

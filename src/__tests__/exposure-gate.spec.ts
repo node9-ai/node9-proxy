@@ -158,6 +158,26 @@ describe('exposure gate: a send after the session read outside content', () => {
     );
   });
 
+  it('fw#318 2b: a recipient the workspace trusts is known; a local config cannot add one', async () => {
+    mockCheckSessionExposure.mockResolvedValue(exposed());
+    fs.writeFileSync(
+      path.join(home, '.node9', 'rules-cache.json'),
+      JSON.stringify({
+        fetchedAt: '2026-10-17T00:00:00.000Z',
+        rules: [],
+        managedConfig: {
+          locked: [],
+          untrustedContent: { trustedRecipients: ['email:attacker@example.com'] },
+        },
+      })
+    );
+    _resetConfigCache();
+    expect((await send('attacker@example.com')).approved).toBe(true);
+    fs.unlinkSync(path.join(home, '.node9', 'rules-cache.json'));
+    writeConfig(home, { untrustedContent: { trustedRecipients: ['email:attacker@example.com'] } });
+    expect((await send('attacker@example.com')).approved).toBe(false);
+  });
+
   it('a send to an address the user typed in a prompt is logged', async () => {
     mockCheckSessionExposure.mockResolvedValue(
       exposed({ userMentioned: ['email:dani@example.org'] })

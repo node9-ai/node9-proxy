@@ -1,3 +1,4 @@
+import { normalizeRecipient } from '../auth/trusted-recipients';
 import type { ToolInspection } from '@node9/policy-engine';
 // src/config/index.ts
 // Config types, constants, and runtime config loading.
@@ -244,6 +245,10 @@ export interface Config {
       afterExposure: 'ask-once' | 'ask-every-time' | 'log-only';
       orgDomains: string[];
       roles: Record<string, Record<string, 'source' | 'action' | 'read'>>;
+      /** fw#318 2b: destinations the workspace trusts ('email:x@y', 'host:h',
+       *  'iban:..', 'account:..'), managed only; the developer's own list is
+       *  the local trusted-recipients.json, read fresh by the gate. */
+      trustedRecipients: string[];
     };
     // Pipe-chain trusted hosts — downgrades secret|curl-host exfil verdicts.
     // ONLY the managed source populates this list; when unmanaged, the policy
@@ -573,6 +578,7 @@ export const DEFAULT_CONFIG: Config = {
       afterExposure: 'ask-once',
       orgDomains: [],
       roles: {},
+      trustedRecipients: [],
     },
     trustedHosts: [],
     trustedHostsManaged: false,
@@ -1006,6 +1012,7 @@ export function getConfig(cwd?: string): Config {
       ...DEFAULT_CONFIG.policy.untrustedContent,
       orgDomains: [...DEFAULT_CONFIG.policy.untrustedContent.orgDomains],
       roles: {},
+      trustedRecipients: [],
     },
     // Left empty on purpose: the local file is read fresh at policy-eval time
     // (getCachedHosts via isTrustedHost), NOT snapshotted into the frozen config
@@ -2227,6 +2234,19 @@ function applyUntrustedContent(
       .filter((d) => /^[a-z0-9.-]+\.[a-z]{2,}$/.test(d));
     if (replaceLists) cur.orgDomains = domains;
     else for (const d of domains) if (!cur.orgDomains.includes(d)) cur.orgDomains.push(d);
+  }
+  // The workspace's trusted recipients come from the managed layer only: a
+  // local or repository config cannot vouch for an address on the org's
+  // behalf (the developer's own list is the local file, consulted beside it).
+  if (replaceLists && Array.isArray(uc.trustedRecipients)) {
+    cur.trustedRecipients = [
+      ...new Set(
+        uc.trustedRecipients
+          .filter((v): v is string => typeof v === 'string')
+          .map((v) => normalizeRecipient(v))
+          .filter((v): v is string => v !== null)
+      ),
+    ].slice(0, 200);
   }
   if (uc.roles && typeof uc.roles === 'object' && !Array.isArray(uc.roles)) {
     const next: Config['policy']['untrustedContent']['roles'] = replaceLists ? {} : cur.roles;

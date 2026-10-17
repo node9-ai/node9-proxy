@@ -15,9 +15,11 @@ describe('SessionExposureStore', () => {
     s.mention('a', ['email:dani@example.com']);
     expect(s.check('a')).toBeNull();
     expect(s.list()).toEqual([]);
-    s.mark('a', { tool: 'WebFetch', at: 1 }, ['host:evil.test']);
+    s.mark('a', { tool: 'WebFetch', at: 1, eid: 'evt-read-1' }, ['host:evil.test']);
     const r = s.check('a');
     expect(r?.sources.map((x) => x.tool)).toEqual(['WebFetch']);
+    // fw#318 2b: the read's audit eid rides with the source, for the edge.
+    expect(r?.sources[0].eid).toBe('evt-read-1');
     expect(r?.destinations).toEqual(['host:evil.test']);
     expect(r?.userMentioned).toEqual(['email:dani@example.com']);
   });

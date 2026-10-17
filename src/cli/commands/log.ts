@@ -449,6 +449,9 @@ export function registerLogCommand(program: Command): void {
                 {
                   agent,
                   ruleName: reviewLabel,
+                  ...(resolvedReview.exposureFromEid
+                    ? { exposureFromEid: resolvedReview.exposureFromEid }
+                    : {}),
                   ...(rawToolName !== tool ? { agentToolName: rawToolName } : {}),
                   ...(typeof payloadSessionId === 'string' ? { sessionId: payloadSessionId } : {}),
                   ...(safeCwd ? { workingDir: safeCwd } : {}),
@@ -640,6 +643,23 @@ export function registerLogCommand(program: Command): void {
                 if (sourceRead) {
                   const destinations = extractContentDestinations(toolOutput);
                   markSessionExposed(payloadSessionId ?? '');
+                  // fw#318 2b: an informational row beside the call's own
+                  // allow row (the SaaS keeps such rows out of its counts,
+                  // like mcp-discovered). Its eid is the source of the edge
+                  // a held send draws back to this read.
+                  const sourceEid = appendLocalAudit(
+                    tool,
+                    rawInput,
+                    'allow',
+                    'exposure-source',
+                    {
+                      agent,
+                      ...(payloadSessionId ? { sessionId: payloadSessionId } : {}),
+                      ...(rawToolName !== tool ? { agentToolName: rawToolName } : {}),
+                      exposure: { kind: 'source', destinations: destinations.length },
+                    },
+                    config.settings.auditHashArgs === true
+                  );
                   await notifySessionExposure(
                     payloadSessionId ?? '',
                     {
@@ -648,16 +668,10 @@ export function registerLogCommand(program: Command): void {
                       ...(shellExposure?.fetches
                         ? { word: shellSourceWord(shellExposure.fetchKinds) }
                         : {}),
+                      eid: sourceEid,
                     },
                     destinations
                   );
-                  appendToLog(LOCAL_AUDIT_LOG, {
-                    ts: new Date().toISOString(),
-                    tool,
-                    source: 'exposure-source',
-                    destinations: destinations.length,
-                    ...(payloadSessionId ? { sessionId: payloadSessionId } : {}),
-                  });
                   if (spotlightApplies) {
                     const word = shellExposure?.fetches
                       ? shellSourceWord(shellExposure.fetchKinds)

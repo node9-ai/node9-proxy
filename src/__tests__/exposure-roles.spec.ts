@@ -14,6 +14,7 @@ const POLICY = {
   afterExposure: 'ask-once' as const,
   orgDomains: [] as string[],
   roles: {} as Record<string, Record<string, 'source' | 'action' | 'read'>>,
+  trustedRecipients: [] as string[],
 };
 
 let home: string;

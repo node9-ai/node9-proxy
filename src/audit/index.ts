@@ -206,6 +206,13 @@ export function appendLocalAudit(
      *  source label. The SaaS draws a taint edge from taintFromEid → this row. */
     taintFromEid?: string;
     taintSource?: string;
+    /** fw#318 2b: a read of outside content (an informational row beside
+     *  the call's own allow row) or a send let through after one; counts
+     *  only, never a value. */
+    exposure?: { kind: 'source' | 'logged'; destinations: number };
+    /** fw#318 2b: on a send held after exposure, the eid of the read it
+     *  followed (the session graph's edge, like taintFromEid). */
+    exposureFromEid?: string;
   },
   auditHashArgsEnabled?: boolean
 ): string {
@@ -277,6 +284,10 @@ export function appendLocalAudit(
         ...(meta.taintSource && { taintSource: meta.taintSource }),
       }
     : {};
+  const exposureFields = {
+    ...(meta?.exposure ? { exposure: meta.exposure } : {}),
+    ...(meta?.exposureFromEid ? { exposureFromEid: meta.exposureFromEid } : {}),
+  };
   // eid is captured here (not generated inline) so the caller can use it as the
   // SOURCE of a taint edge — see notifyTaint(path, source, eid) at the DLP block.
   const eid = generateEventId();
@@ -301,6 +312,7 @@ export function appendLocalAudit(
     ...loopCountField,
     ...transcriptPathField,
     ...taintFields,
+    ...exposureFields,
     ...testRun,
     agent: meta?.agent,
     mcpServer: meta?.mcpServer,

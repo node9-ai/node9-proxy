@@ -138,6 +138,17 @@ describe('buildWireRows', () => {
     expect(rows[0].args).toBeUndefined();
   });
 
+  it('fw#318 2b: forwards exposure counts and the read-to-send edge; drops a malformed one', () => {
+    const content =
+      row({ checkedBy: 'exposure-source', exposure: { kind: 'source', destinations: 2 } }) +
+      row({ checkedBy: 'inline-review', ruleName: 'exposure', exposureFromEid: 'evt-read-1' }) +
+      row({ exposure: { kind: 'bogus', destinations: 'x' } });
+    const { rows } = buildWireRows(Buffer.from(content));
+    expect(rows[0]).toMatchObject({ exposure: { kind: 'source', destinations: 2 } });
+    expect(rows[1]).toMatchObject({ exposureFromEid: 'evt-read-1' });
+    expect(rows[2].exposure).toBeUndefined();
+  });
+
   it('carries the redacted preview for hash-mode rows (dashboard readability)', () => {
     const content = row({
       args: undefined,
