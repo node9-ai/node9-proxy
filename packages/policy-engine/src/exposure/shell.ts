@@ -48,7 +48,8 @@ export interface ShellExposure {
   sends: boolean;
   /** Normalised destinations of the sending calls ('host:x.example'). */
   destinations: string[];
-  /** `git push <remote-name>`: the remote names used, for the host to resolve. */
+  /** `git push <remote-name>`: the remote names used, for the host to resolve;
+   *  '' is a push with no target (the branch's default remote). */
   gitRemotes: string[];
   /**
    * Repositories the git-host sends reach, `host/owner/name`. A host is not
@@ -117,6 +118,36 @@ const GH_WRITE = new Set([
   'fork',
 ]);
 const GH_HOSTNAME_FLAGS = new Set(['--hostname', '-h', '-R', '--repo']);
+// Value flags of `gh repo <verb>`, so a description or a topic is not read
+// as the repository operand.
+const GH_REPO_VALUE_FLAGS = new Set([
+  '--hostname',
+  '-R',
+  '--repo',
+  '-d',
+  '--description',
+  '-h',
+  '--homepage',
+  '--visibility',
+  '--default-branch',
+  '--add-topic',
+  '--remove-topic',
+  '-p',
+  '--template',
+  '-s',
+  '--source',
+  '-b',
+  '--branch',
+  '-l',
+  '--license',
+  '-g',
+  '--gitignore',
+  '-t',
+  '--team',
+  '-r',
+  '--remote',
+  '--org',
+]);
 const GH_API_VALUE_FLAGS = new Set([
   '--hostname',
   '-X',
@@ -170,6 +201,8 @@ const CWD_CHANGERS = new Set(['cd', 'pushd', 'popd']);
 /** Per-command state across the calls of one command line. */
 interface WalkState {
   cwdChanged: boolean;
+  /** Variables set for the rest of the command (`export GH_REPO=x &&`). */
+  env: Set<string>;
 }
 
 /** A repository named by `-R`/`gh repo` operands: `owner/name`,
@@ -425,8 +458,13 @@ function classifyCall(
           (group === 'repo' && (verb === 'create' || verb === 'fork'))
         ) {
           repo = `${ghHost}/*`;
-        } else if (group === 'repo' && pos.length > 2) {
-          repo = typeof pos[2] === 'string' ? ghRepoArg(pos[2], ghHost).repo : `${ghHost}/*`;
+        } else if (group === 'repo' && verb !== 'rename') {
+          // `gh repo edit|delete|archive [<repository>]`; rename's operand is
+          // the new name of the current repository, not another one.
+          const operand = positionals(args, GH_REPO_VALUE_FLAGS)[2];
+          if (operand === null) repo = `${ghHost}/*`;
+          else if (operand !== undefined) repo = ghRepoArg(operand, ghHost).repo;
+          else if (envRepo) repo = `${ghHost}/*`;
         } else if (envRepo) {
           repo = `${ghHost}/*`;
         }
@@ -491,7 +529,11 @@ function classifyCall(
           out.unresolved = true;
           return;
         }
-        const target = pos.slice(1).find((p) => p !== null && !p.startsWith('-')) ?? null;
+        // `--repo=<repository>` names the target as the first operand would.
+        const target =
+          flagValue(args, ['--repo']) ??
+          pos.slice(1).find((p) => p !== null && !p.startsWith('-')) ??
+          null;
         // A url: scheme, `user@host:path`, or scp-like `host.tld:path`.
         if (
           target !== null &&
@@ -510,7 +552,7 @@ function classifyCall(
           args.some((w) => w !== null && /^(-C|--git-dir|--work-tree)(=|$)/.test(w)) ||
           env.some((n) => n === 'GIT_DIR' || n === 'GIT_WORK_TREE' || n === 'GIT_CONFIG');
         if (elsewhere) out.unresolved = true;
-        else out.gitRemotes.push(target ?? 'origin');
+        else out.gitRemotes.push(target ?? '');
       }
       return;
     }
@@ -542,7 +584,21 @@ function walkCalls(command: string, out: ShellExposure, depth: number, state: Wa
   if (typeof f === 'symbol' || !f) return;
   syntax.Walk(f, (node: unknown) => {
     if (!node) return false;
-    if (syntax.NodeType(node) !== 'CallExpr') return true;
+    const type = syntax.NodeType(node);
+    // `export GH_REPO=x && gh ...`, `declare -x GIT_DIR=...`, `GH_REPO=x; ...`:
+    // the variable reaches every later call of the command.
+    if (type === 'DeclClause') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      for (const a of (node as any).Args || []) if (a?.Name?.Value) state.env.add(a.Name.Value);
+      return true;
+    }
+    if (type !== 'CallExpr') return true;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const call = node as any;
+    if ((call.Args || []).length === 0) {
+      for (const a of call.Assigns || []) if (a?.Name?.Value) state.env.add(a.Name.Value);
+      return true;
+    }
     const c = callWords(node);
     if (!c) return true;
     if (SHELLS.has(c.head) && depth < MAX_DEPTH) {
@@ -552,7 +608,7 @@ function walkCalls(command: string, out: ShellExposure, depth: number, state: Wa
       return true;
     }
     if (CWD_CHANGERS.has(c.head)) state.cwdChanged = true;
-    classifyCall(c.head, c.args, c.prefixes, c.env, state, out);
+    classifyCall(c.head, c.args, c.prefixes, [...c.env, ...state.env], state, out);
     return true;
   });
 }
@@ -568,7 +624,7 @@ export function classifyShellExposure(command: string): ShellExposure {
     fetchKinds: [],
   };
   try {
-    walkCalls(command, out, 0, { cwdChanged: false });
+    walkCalls(command, out, 0, { cwdChanged: false, env: new Set() });
   } catch {
     return { ...EMPTY };
   }

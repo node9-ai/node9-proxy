@@ -838,8 +838,14 @@ async function _authorizeHeadlessCore(
           if (shellExp.sends) {
             for (const d of shellExp.destinations) dests.add(d);
             // `git push <remote>`: the repository's own remotes are known.
+            // A push with no target ('') goes to the branch's default remote:
+            // origin, or else one of the config's own remotes.
             for (const name of shellExp.gitRemotes) {
-              const hosts = projectHosts!.remotes.get(name);
+              const remotes = projectHosts!.remotes;
+              const hosts =
+                name === ''
+                  ? (remotes.get('origin') ?? [...remotes.values()].flat())
+                  : remotes.get(name);
               if (hosts) for (const h of hosts) dests.add(h);
               else if (projectHosts!.remotes.size > 0) unknownRemote = true;
             }
