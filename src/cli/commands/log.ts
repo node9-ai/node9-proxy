@@ -520,20 +520,24 @@ export function registerLogCommand(program: Command): void {
                 // output in place, so there's nothing to contain downstream.
                 const { result, found } = redactText(toolOutput);
                 let out = result;
+                // fw#318 layer 1: a SOURCE result marks the session exposed and
+                // is framed whole, whether or not anything in it looked hostile.
+                const ucA = config.policy.untrustedContent;
+                const shellA = ucA?.enabled ? shellFetch(tool, rawInput) : null;
+                const sourceA = !!ucA?.enabled && (toolRole(tool, ucA).source || !!shellA?.fetches);
                 let injection: ReturnType<typeof scanInjection> = null;
                 if (injectionOn) {
-                  const m = scanInjection(result, { tool: rawToolName });
+                  const m = scanInjection(result, {
+                    tool: rawToolName,
+                    ...(sourceA ? { untrusted: true } : {}),
+                  });
                   if (m && atLeastConfidence(m.confidence, inj.minConfidence)) {
                     injection = m;
                     // Random per-frame boundary (utils/untrusted-frame.ts).
                     out = frameUntrusted(result);
                   }
                 }
-                // fw#318 layer 1: a SOURCE result marks the session exposed and
-                // is framed whole, whether or not anything in it looked hostile.
-                const ucA = config.policy.untrustedContent;
-                const shellA = ucA?.enabled ? shellFetch(tool, rawInput) : null;
-                if (ucA?.enabled && (toolRole(tool, ucA).source || shellA?.fetches)) {
+                if (sourceA) {
                   const wordA = shellA?.fetches
                     ? shellSourceWord(shellA.fetchKinds)
                     : sourceWord(tool);
@@ -613,16 +617,20 @@ export function registerLogCommand(program: Command): void {
                 }
 
                 if (injectionOn) {
-                  const m = scanInjection(toolOutput, { tool: rawToolName });
+                  // A #318 source (an unannotated MCP tool, a shell fetch) is
+                  // outside content to the scanner too, not only the web tools
+                  // its own name list knows (fw#328 step 1).
+                  const injCtx = { tool: rawToolName, ...(sourceRead ? { untrusted: true } : {}) };
+                  const m = scanInjection(toolOutput, injCtx);
                   if (m && atLeastConfidence(m.confidence, inj.minConfidence)) {
                     if (spotlightApplies) {
-                      injectedLeaf = (leaf) => scanInjection(leaf, { tool: rawToolName }) !== null;
+                      injectedLeaf = (leaf) => scanInjection(leaf, injCtx) !== null;
                     }
                     if (agent === 'Claude Code' && !spotlightApplies) {
                       // Frame the leaves that carry the injection, inside the shape.
                       updatedToolOutput = frameToolOutputLeaves(
                         updatedToolOutput ?? payload.tool_response,
-                        (leaf) => scanInjection(leaf, { tool: rawToolName }) !== null,
+                        (leaf) => scanInjection(leaf, injCtx) !== null,
                         newUntrustedFrame,
                         neutralizeMarkers
                       );

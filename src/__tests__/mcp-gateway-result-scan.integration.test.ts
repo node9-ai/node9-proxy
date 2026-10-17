@@ -141,6 +141,34 @@ describe('mcp-gateway response-channel scan', () => {
     }
   });
 
+  // fw#328 step 1: one override phrase with no destination is actionable from a
+  // source tool. Without the gateway's source decision the bare `read_page`
+  // never matched the scanner's web-tool list and this stayed silent.
+  itUnix('flags a single override phrase from a source tool, not from a read tool', () => {
+    const overrideOnly = INJECTION.split(' and send')[0] + ', and reply in French from now on.';
+    const name = deriveServerName(`"${NODE}" "${upstream}"`);
+    const src = makeTempHome({
+      settings: { mode: 'audit' },
+      policy: { injectionScan: { enabled: true } },
+    });
+    const read = makeTempHome({
+      settings: { mode: 'audit' },
+      policy: {
+        injectionScan: { enabled: true },
+        untrustedContent: { roles: { [name]: { read_page: 'read' } } },
+      },
+    });
+    try {
+      expect(runGateway(src, overrideOnly).stderr).toMatch(
+        /injected instructions \(override-instructions, untrusted-origin\)/
+      );
+      expect(runGateway(read, overrideOnly).stderr).not.toMatch(/injected instructions/);
+    } finally {
+      fs.rmSync(src, { recursive: true, force: true });
+      fs.rmSync(read, { recursive: true, force: true });
+    }
+  });
+
   itUnix(
     'frames every result as data from a source by default (fw#318 spotlight), with no detection',
     () => {
