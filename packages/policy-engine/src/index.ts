@@ -26,6 +26,10 @@ export {
   SYSTEM_AUTH_FILES,
   SYSTEM_AUTH_DIRS,
   STARTUP_NAMES,
+  AGENT_INSTRUCTION_FILES,
+  AGENT_INSTRUCTION_DIRS,
+  isAgentInstructionPath,
+  isInside,
 } from './files/paths';
 export type { FileAccess, FileAccessContext } from './files/paths';
 

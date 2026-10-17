@@ -1,6 +1,7 @@
 // src/auth/orchestrator.ts
 // The multi-channel race engine: coordinates cloud, native, browser, and terminal approval channels.
 import { randomUUID } from 'crypto';
+import os from 'os';
 import { askNativePopup } from '../ui/native';
 import { computeRiskMetadata, type RiskMetadata } from '../context-sniper';
 import {
@@ -41,6 +42,7 @@ import {
   classifyShellExposure,
 } from '@node9/policy-engine';
 import { knownProjectHosts } from '../exposure/known-hosts';
+import { judgeWritesAfterExposure, type WriteHold } from '../exposure/writes';
 import { toolRole, splitMcpToolName, sourceWord, EXPOSURE_LABEL } from '../exposure/roles';
 import { isTrustedRecipient, addTrustedRecipient } from './trusted-recipients';
 import { isTrustedHost, matchesTrustedHost } from './trusted-hosts';
@@ -776,12 +778,20 @@ async function _authorizeHeadlessCore(
     // The gateway forwards bare names and says itself that the tool acts.
     const acts = role.action || options?.sessionTaintGated === true;
     const shellExp = shellInput.kind === 'shell' ? classifyShellExposure(shellInput.command) : null;
-    const judged = acts || !!(shellExp && (shellExp.sends || shellExp.fetches));
+    // P4: a write (a file tool, or a shell redirect, tee, cp, sed -i) is
+    // judged by where it lands and what it carries.
+    const writes = fileAccess.accesses.filter((a) =>
+      ['write', 'create', 'remove'].includes(a.operation)
+    );
+    const judged =
+      acts || !!(shellExp && (shellExp.sends || shellExp.fetches)) || writes.length > 0;
     if (judged) {
       const exposure = await checkSessionExposure(meta.sessionId);
       if (exposure.exposed && exposure.record) {
         const rec = exposure.record;
-        const dests = new Set<string>(shellExp ? [] : extractArgDestinations(args));
+        // Argument destinations are a SEND only for an MCP action; what a
+        // write tool carries in its content is judged by the write rules.
+        const dests = new Set<string>(acts && !shellExp ? extractArgDestinations(args) : []);
         // Hosts a plain fetch reaches: judged only against the content read.
         const fetchOnly = new Set<string>();
         const projectHosts = shellExp ? knownProjectHosts(options?.cwd) : null;
@@ -795,11 +805,8 @@ async function _authorizeHeadlessCore(
               if (hosts) for (const h of hosts) dests.add(h);
             }
           }
-          if (shellExp.fetches && shellInput.kind === 'shell') {
-            for (const d of extractShellDestinations(shellInput.command)) {
-              const h = `host:${d.host.toLowerCase()}`;
-              if (!dests.has(h)) fetchOnly.add(h);
-            }
+          if (shellExp.fetches) {
+            for (const h of shellExp.fetchDestinations) if (!dests.has(h)) fetchOnly.add(h);
           }
         }
         const inContent = new Set(rec.destinations);
@@ -846,6 +853,30 @@ async function _authorizeHeadlessCore(
         ) {
           held.push({ dest: '', why: 'destructive' });
         }
+        // P4: writes after exposure (design 6). Each hold carries a key so
+        // ask-once can clear that path (or that destination) for the session.
+        const knownForWrites = new Set<string>([
+          ...mentioned,
+          ...(projectHosts ? projectHosts.hosts : []),
+        ]);
+        const writeHolds: WriteHold[] =
+          writes.length > 0
+            ? judgeWritesAfterExposure({
+                accesses: writes,
+                args,
+                shellCommand: shellInput.kind === 'shell' ? shellInput.command : null,
+                cwd: options?.cwd,
+                inContent,
+                known: knownForWrites,
+              }).filter((h) => {
+                const key = `${toolName}|${h.why === 'content-destination' ? h.destination : `path:${h.path}`}`;
+                if (ucPolicy.afterExposure === 'ask-once' && approved.has(key)) {
+                  logged.push(key);
+                  return false;
+                }
+                return true;
+              })
+            : [];
         const last = rec.sources[rec.sources.length - 1];
         const readWord = last ? (last.word ?? sourceWord(last.tool)) : 'content';
         const when = last ? new Date(last.at).toTimeString().slice(0, 5) : '';
@@ -854,7 +885,7 @@ async function _authorizeHeadlessCore(
             (last.server ? ` through ${last.server}` : '') +
             (when ? ` at ${when}` : '')
           : 'outside content';
-        if (held.length > 0 && ucPolicy.afterExposure !== 'log-only') {
+        if ((held.length > 0 || writeHolds.length > 0) && ucPolicy.afterExposure !== 'log-only') {
           const noun = (d: string): string => {
             const k = destinationKind(d);
             return k === 'email' ? 'an address' : k === 'host' ? 'a host' : 'an account';
@@ -868,8 +899,25 @@ async function _authorizeHeadlessCore(
                 }`
               : `is ${bare}, a destructive call, with no known destination`
           );
+          const home = os.homedir();
+          const short = (p: string) => (p.startsWith(home + '/') ? '~' + p.slice(home.length) : p);
+          for (const w of writeHolds) {
+            parts.push(
+              w.why === 'outside-project'
+                ? `writes outside the project, to ${short(w.path)}`
+                : w.why === 'agent-instruction'
+                  ? `writes to ${short(w.path)}, a file that runs code or instructs the agent`
+                  : `writes content carrying ${destinationValue(w.destination ?? '')}, ${noun(w.destination ?? 'host:x')} that appeared in that ${readWord}`
+            );
+          }
           exposureReview = `🛡️ Node9: this session read ${read}. This call ${parts.join('; and ')}.`;
-          exposureKeys = held.filter((h) => h.dest).map((h) => `${toolName}|${h.dest}`);
+          exposureKeys = [
+            ...held.filter((h) => h.dest).map((h) => `${toolName}|${h.dest}`),
+            ...writeHolds.map(
+              (w) =>
+                `${toolName}|${w.why === 'content-destination' ? w.destination : `path:${w.path}`}`
+            ),
+          ];
           // The destinations ride on the card for "Approve and trust this
           // address" (P5); the inline prompt names the command instead.
           exposureDestinations = held
@@ -884,14 +932,14 @@ async function _authorizeHeadlessCore(
                 .join('; ') +
               '.';
           }
-        } else if (held.length > 0 || logged.length > 0) {
+        } else if (held.length > 0 || writeHolds.length > 0 || logged.length > 0) {
           // Judged and let through: a delivery row, not a decision (no eid,
           // so the shipper skips it). Kinds and counts only, never a value.
           appendToLog(HOOK_DEBUG_LOG, {
             ts: new Date().toISOString(),
             event: 'exposure-logged',
             tool: toolName,
-            held: held.length,
+            held: held.length + writeHolds.length,
             known: logged.length,
             sessionId: meta.sessionId,
           });

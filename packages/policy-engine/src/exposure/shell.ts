@@ -27,6 +27,7 @@ import mvdanSh from 'mvdan-sh';
 import {
   parseShared,
   resolveWordLiteral,
+  resolveWordPrefix,
   unwrapCommandHead,
   parseDestHost,
   destTokensForBinary,
@@ -45,6 +46,8 @@ export interface ShellExposure {
   destinations: string[];
   /** `git push <remote-name>`: the remote names used, for the host to resolve. */
   gitRemotes: string[];
+  /** Hosts the fetching calls reach ('host:x.example'), literal prefixes of dynamic URLs included. */
+  fetchDestinations: string[];
   /** Short labels of the fetching calls ('curl', 'gh issue', 'git pull'), for the frame. */
   fetchKinds: string[];
 }
@@ -54,6 +57,7 @@ const EMPTY: ShellExposure = {
   sends: false,
   destinations: [],
   gitRemotes: [],
+  fetchDestinations: [],
   fetchKinds: [],
 };
 
@@ -121,19 +125,24 @@ function host(token: string | null | undefined): string | null {
   return h && h !== 'localhost' ? `host:${h}` : null;
 }
 
-/** The words of one call, wrappers stripped, as literals (null = dynamic). */
-function callWords(call: unknown): { head: string; args: (string | null)[] } | null {
+/** The words of one call, wrappers stripped, as literals (null = dynamic);
+ *  `prefixes` keeps each word's literal start so a URL whose query is
+ *  dynamic (`"https://x/p?d=$(cat f)"`) still names its host. */
+function callWords(
+  call: unknown
+): { head: string; args: (string | null)[]; prefixes: string[] } | null {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const raw: any[] = (call as any).Args || [];
   if (raw.length === 0) return null;
   const words = raw.map((a) => resolveWordLiteral(a));
+  const prefixes = raw.map((a) => resolveWordPrefix(a).prefix);
   // `npm`, `yarn`, `cargo` are runners to unwrapCommandHead (`npm exec x`);
   // here they are the binaries themselves, so they are read before unwrapping.
   const first = (words[0] || '').toLowerCase().split('/').pop() ?? '';
   const at = OWN_HEADS.has(first) ? 0 : unwrapCommandHead(words);
   const head = (words[at] || '').toLowerCase().split('/').pop() ?? '';
   if (!head) return null;
-  return { head, args: words.slice(at + 1) };
+  return { head, args: words.slice(at + 1), prefixes: prefixes.slice(at + 1) };
 }
 
 /** Flag values of the given names (`--x V`, `--x=V`), first one wins. */
@@ -171,7 +180,12 @@ function positionals(args: (string | null)[], valueFlags: Set<string>): (string 
   return out;
 }
 
-function classifyCall(head: string, args: (string | null)[], out: ShellExposure): void {
+function classifyCall(
+  head: string,
+  args: (string | null)[],
+  prefixes: string[],
+  out: ShellExposure
+): void {
   const lower = args.map((a) => (a === null ? null : a.toLowerCase()));
   switch (head) {
     case 'curl':
@@ -198,11 +212,17 @@ function classifyCall(head: string, args: (string | null)[], out: ShellExposure)
         if (/^(?:--request=|-X)(POST|PUT|PATCH|DELETE)$/i.test(w)) sends = true;
         if (name === '--method' && next && WRITE_METHODS.has(next)) sends = true;
       }
-      const dests = destTokensForBinary(binary, args)
+      // A dynamic URL word (`"https://x/p?d=$(cat f)"`) is null to the
+      // destination extractor; its literal prefix still names the host.
+      const withPrefixes = args.map((a, i) =>
+        a === null && /^[a-z][a-z0-9+.-]*:\/\//i.test(prefixes[i] ?? '') ? prefixes[i] : a
+      );
+      const dests = destTokensForBinary(binary, withPrefixes)
         .map((t) => host(t))
         .filter((h): h is string => h !== null);
       out.fetches = true;
       out.fetchKinds.push(head);
+      out.fetchDestinations.push(...dests);
       if (sends) {
         out.sends = true;
         out.destinations.push(...dests);
@@ -227,6 +247,10 @@ function classifyCall(head: string, args: (string | null)[], out: ShellExposure)
       if (sources.some(remote)) {
         out.fetches = true;
         out.fetchKinds.push(head);
+        for (const src of sources.filter(remote)) {
+          const h = host(src);
+          if (h) out.fetchDestinations.push(h);
+        }
       }
       return;
     }
@@ -239,7 +263,10 @@ function classifyCall(head: string, args: (string | null)[], out: ShellExposure)
       out.fetchKinds.push(head);
       for (const t of destTokensForBinary(head, args)) {
         const h = host(t);
-        if (h) out.destinations.push(h);
+        if (h) {
+          out.destinations.push(h);
+          out.fetchDestinations.push(h);
+        }
       }
       return;
     }
@@ -260,6 +287,7 @@ function classifyCall(head: string, args: (string | null)[], out: ShellExposure)
         } else {
           out.fetches = true;
           out.fetchKinds.push('gh api');
+          out.fetchDestinations.push(dest);
         }
         return;
       }
@@ -270,6 +298,7 @@ function classifyCall(head: string, args: (string | null)[], out: ShellExposure)
       } else if (GH_READ.has(verb)) {
         out.fetches = true;
         out.fetchKinds.push(`gh ${group}`);
+        out.fetchDestinations.push(dest);
       }
       return;
     }
@@ -280,6 +309,10 @@ function classifyCall(head: string, args: (string | null)[], out: ShellExposure)
       if (GIT_FETCH.has(verb)) {
         out.fetches = true;
         out.fetchKinds.push(`git ${verb}`);
+        for (const p of pos.slice(1)) {
+          const h = p !== null && /:\/\/|@/.test(p) ? host(p) : null;
+          if (h) out.fetchDestinations.push(h);
+        }
         return;
       }
       if (verb === 'push') {
@@ -332,20 +365,27 @@ function walkCalls(command: string, out: ShellExposure, depth: number): void {
       if (typeof payload === 'string') walkCalls(payload, out, depth + 1);
       return true;
     }
-    classifyCall(c.head, c.args, out);
+    classifyCall(c.head, c.args, c.prefixes, out);
     return true;
   });
 }
 
 /** Classify a shell command as a source, a sink, both or neither. Never throws. */
 export function classifyShellExposure(command: string): ShellExposure {
-  const out: ShellExposure = { ...EMPTY, destinations: [], gitRemotes: [], fetchKinds: [] };
+  const out: ShellExposure = {
+    ...EMPTY,
+    destinations: [],
+    gitRemotes: [],
+    fetchDestinations: [],
+    fetchKinds: [],
+  };
   try {
     walkCalls(command, out, 0);
   } catch {
     return { ...EMPTY };
   }
   out.destinations = [...new Set(out.destinations)];
+  out.fetchDestinations = [...new Set(out.fetchDestinations)];
   out.gitRemotes = [...new Set(out.gitRemotes)];
   out.fetchKinds = [...new Set(out.fetchKinds)];
   return out;
