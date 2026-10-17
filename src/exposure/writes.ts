@@ -7,7 +7,8 @@
 // that runs code or instructs the agent, or carries a destination that
 // appeared in the content read; an ordinary file inside the project is
 // logged. Protected system files keep their own checks (d3801fc), which run
-// before this gate.
+// before this gate. Like them, this gate is POSIX-only: on Windows the file
+// accesses it judges are not prepared (prepareFileAccesses).
 import fs from 'fs';
 import os from 'os';
 import path from 'path';

@@ -43,7 +43,10 @@ import { markSessionExposed } from '../exposure/marker.js';
 const SID = 'writes-session';
 const META = { agent: 'Claude Code', sessionId: SID };
 
-describe('writes after exposure', () => {
+// The file-access layer P4 builds on (prepareFileAccesses) is POSIX-only:
+// on Windows it returns no accesses, so writes after exposure are not judged
+// there. Sends after exposure are (exposure-gate.spec.ts runs on Windows).
+describe.skipIf(process.platform === 'win32')('writes after exposure', () => {
   let home: string;
   let proj: string;
   let origHome: string | undefined;
