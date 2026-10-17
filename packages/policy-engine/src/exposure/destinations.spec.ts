@@ -162,5 +162,11 @@ describe('isLoopbackHost and gitRepoPath', () => {
     expect(gitRepoPath('https://gitlab.example/g/sub/app.git')).toBe('gitlab.example/g/sub/app');
     expect(gitRepoPath('/srv/git/app.git')).toBeNull();
     expect(gitRepoPath('https://github.com/')).toBeNull();
+    // A long run of slashes in the middle stays linear (CodeQL js/polynomial-redos).
+    const t0 = Date.now();
+    expect(gitRepoPath(`git@github.com:a${'/'.repeat(50_000)}x`)).toBe(
+      `github.com/a${'/'.repeat(50_000)}x`
+    );
+    expect(Date.now() - t0).toBeLessThan(500);
   });
 });

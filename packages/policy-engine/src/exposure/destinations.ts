@@ -239,8 +239,14 @@ export function gitRepoPath(url: string): string | null {
     host = scp[1].toLowerCase();
     p = scp[2];
   }
+  // Trim slashes with indices: `/\/+$/` backtracks quadratically on a long
+  // run of slashes that does not end the string.
+  let start = 0;
+  let end = p.length;
+  while (start < end && p[start] === '/') start++;
+  while (end > start && p[end - 1] === '/') end--;
   const tail = p
-    .replace(/^\/+|\/+$/g, '')
+    .slice(start, end)
     .replace(/\.git$/i, '')
     .toLowerCase();
   if (!host || !tail.includes('/')) return null;
