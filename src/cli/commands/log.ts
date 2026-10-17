@@ -159,9 +159,16 @@ function buildArgsField(rawInput: unknown): Record<string, unknown> {
     // scanArgs; a value the gate reviewed as a credential must not be stored
     // in plaintext either. Only a real pattern match counts here: the
     // gate's "inspection incomplete" marker is not a finding.
-    const gateHit = inspectArgumentSecrets(rawInput).match;
-    if (gateHit)
-      return { ...hashed, dlpPattern: gateHit.patternName, dlpSample: gateHit.redactedSample };
+    const inspected = inspectArgumentSecrets(rawInput);
+    if (inspected.match)
+      return {
+        ...hashed,
+        dlpPattern: inspected.match.patternName,
+        dlpSample: inspected.match.redactedSample,
+      };
+    // Decoding cut short (a nested layer, a flood of hostname labels, the
+    // phrase budget) is not a clean scan either: the row keeps the hash.
+    if (inspected.coverage === 'incomplete') return { ...hashed, argsUnscanned: true };
     return { args: JSON.parse(redactSecrets(JSON.stringify(rawInput))) as unknown };
   } catch {
     return hashed;
