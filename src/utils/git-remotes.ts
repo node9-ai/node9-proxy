@@ -7,12 +7,15 @@
 // or unreadable config is an empty list.
 import fs from 'fs';
 import path from 'path';
+import { gitRepoPath } from '@node9/policy-engine';
 
 export interface GitRemote {
   name: string;
   urls: string[];
   /** Lower-cased hosts of the urls, `host:` prefixed as the exposure gate compares them. */
   hosts: string[];
+  /** The repositories the urls name, `host/owner/name` (gitRepoPath). */
+  repos: string[];
 }
 
 function readSmallFile(p: string, max: number): string | null {
@@ -94,7 +97,7 @@ export function readGitRemotes(
         if (sec) {
           current =
             sec[1].toLowerCase() === 'remote' && sec[2]
-              ? { name: sec[2], urls: [], hosts: [] }
+              ? { name: sec[2], urls: [], hosts: [], repos: [] }
               : null;
           if (current) out.push(current);
           continue;
@@ -104,6 +107,8 @@ export function readGitRemotes(
           current.urls.push(url[1]);
           const h = gitRemoteHost(url[1]);
           if (h && !current.hosts.includes(`host:${h}`)) current.hosts.push(`host:${h}`);
+          const repo = gitRepoPath(url[1]);
+          if (repo && !current.repos.includes(repo)) current.repos.push(repo);
         }
       }
     }

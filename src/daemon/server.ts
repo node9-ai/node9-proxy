@@ -1171,8 +1171,13 @@ export function startDaemon(): void {
           return res.end(JSON.stringify({ error: 'sessionId must be a string' }));
         }
         const record = sessionTaintStore.check(body.sessionId);
+        // fw#318: the same round trip says whether the session is exposed, so
+        // a deleted marker file cannot hide it from the calls that ask here.
+        const exposed = sessionExposureStore.check(body.sessionId) !== null;
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify(record ? { tainted: true, record } : { tainted: false }));
+        return res.end(
+          JSON.stringify(record ? { tainted: true, record, exposed } : { tainted: false, exposed })
+        );
       } catch {
         res.writeHead(400).end();
         return;

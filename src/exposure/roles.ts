@@ -6,7 +6,8 @@
 // inventory are phase P2.
 
 import type { Config } from '../config';
-import { readMcpToolsConfig, type McpToolAnnotations } from '../daemon/mcp-tools';
+import fs from 'fs';
+import { getMcpToolsFile, readMcpToolsConfig, type McpToolAnnotations } from '../daemon/mcp-tools';
 
 /** The review label every surface shows for a held call. */
 export const EXPOSURE_LABEL = '🛡️ Node9 Exposure';
@@ -30,16 +31,30 @@ function foldServerName(name: string): string {
 }
 
 let inventoryCache: Map<string, Map<string, McpToolAnnotations | null>> | null = null;
+let inventoryStamp: string | null = null;
+
+/** The inventory file's mtime and size, or '' when it is missing. */
+function inventoryFileStamp(): string {
+  try {
+    const st = fs.statSync(getMcpToolsFile());
+    return `${st.mtimeMs}:${st.size}`;
+  } catch {
+    return '';
+  }
+}
 
 /**
  * The annotations the inventory holds for `server`/`tool`, or null: no
  * record, no annotations, or two records sharing the name (ambiguous, so
- * unannotated). The inventory is read once per process (the hook lives for
- * one call) and matched on the gateway's config name after the same folding
- * the agent applies to its server names.
+ * unannotated). The inventory is reread when the file changes (the gateway
+ * lives for the whole agent session while servers are discovered) and matched
+ * on the gateway's config name after the same folding the agent applies to
+ * its server names.
  */
 export function resolveToolAnnotations(server: string, tool: string): McpToolAnnotations | null {
-  if (inventoryCache === null) {
+  const stamp = inventoryFileStamp();
+  if (inventoryCache === null || stamp !== inventoryStamp) {
+    inventoryStamp = stamp;
     inventoryCache = new Map();
     try {
       const seen = new Map<string, number>();
@@ -61,6 +76,7 @@ export function resolveToolAnnotations(server: string, tool: string): McpToolAnn
 
 export function _resetRolesCache(): void {
   inventoryCache = null;
+  inventoryStamp = null;
 }
 
 /** Built-in tools that return content from outside the machine. Bare,

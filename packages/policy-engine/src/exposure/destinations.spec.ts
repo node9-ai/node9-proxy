@@ -3,6 +3,8 @@ import { describe, it, expect } from 'vitest';
 import {
   extractContentDestinations,
   extractArgDestinations,
+  isLoopbackHost,
+  gitRepoPath,
   destinationDomain,
   destinationKind,
   destinationValue,
@@ -133,5 +135,32 @@ describe('helpers', () => {
       expect(isDestructiveToolName(n)).toBe(true);
     for (const n of ['create_event', 'send_email', 'get_file', 'deleted_items', 'payload'])
       expect(isDestructiveToolName(n)).toBe(false);
+  });
+});
+
+describe('isLoopbackHost and gitRepoPath', () => {
+  it('knows the machine itself', () => {
+    for (const h of [
+      'localhost',
+      'app.localhost',
+      '127.0.0.1',
+      '127.1.2.3',
+      '::1',
+      '[::1]',
+      '0.0.0.0',
+    ])
+      expect(isLoopbackHost(h), h).toBe(true);
+    for (const h of ['localhost.evil.example', '128.0.0.1', '10.0.0.1', 'example.com'])
+      expect(isLoopbackHost(h), h).toBe(false);
+  });
+
+  it('reads owner/name from https, ssh and scp-like urls', () => {
+    expect(gitRepoPath('https://github.com/Acme/App.git')).toBe('github.com/acme/app');
+    expect(gitRepoPath('https://user:tok@github.com/acme/app/')).toBe('github.com/acme/app');
+    expect(gitRepoPath('ssh://git@github.com/acme/app.git')).toBe('github.com/acme/app');
+    expect(gitRepoPath('git@github.com:acme/app.git')).toBe('github.com/acme/app');
+    expect(gitRepoPath('https://gitlab.example/g/sub/app.git')).toBe('gitlab.example/g/sub/app');
+    expect(gitRepoPath('/srv/git/app.git')).toBeNull();
+    expect(gitRepoPath('https://github.com/')).toBeNull();
   });
 });

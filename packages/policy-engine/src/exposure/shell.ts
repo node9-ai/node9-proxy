@@ -13,8 +13,11 @@
 //                              fetch when it is the source
 //   nc, ncat, netcat, ssh      both
 //   gh                         read verbs fetch, write verbs send (github.com
-//                              or --hostname)
-//   git                        clone, fetch, pull fetch; push sends
+//                              or --hostname); -R, a gist, a new repository
+//                              or `gh api` name the repository reached
+//   git                        clone, fetch, pull fetch; push, and pointing a
+//                              remote at a url (remote add/set-url, config
+//                              remote.*.url, -c), send
 //   npm/pnpm/yarn publish, twine upload, cargo publish, gem push, docker push
 //                              send, to the registry named or the ecosystem's
 //   python -c, node -e ...     not read (out of scope; the taint gate's network
@@ -33,6 +36,7 @@ import {
   destTokensForBinary,
   VALUE_FLAGS,
 } from '../shell';
+import { gitRepoPath } from './destinations';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const { syntax } = mvdanSh as any;
@@ -46,6 +50,17 @@ export interface ShellExposure {
   destinations: string[];
   /** `git push <remote-name>`: the remote names used, for the host to resolve. */
   gitRemotes: string[];
+  /**
+   * Repositories the git-host sends reach, `host/owner/name`. A host is not
+   * enough there: github.com holds the project's origin and every attacker's
+   * mirror. `host/*` is a repository the command does not name (a gist, a new
+   * repository, a GraphQL call). A send to the current repository (`gh issue
+   * comment 7`) names none.
+   */
+  repos: string[];
+  /** A send whose target this command makes unknowable (`cd x && git push`,
+   *  `git -C x push`, a dynamic `-R`): held after exposure. */
+  unresolved: boolean;
   /** Hosts the fetching calls reach ('host:x.example'), literal prefixes of dynamic URLs included. */
   fetchDestinations: string[];
   /** Short labels of the fetching calls ('curl', 'gh issue', 'git pull'), for the frame. */
@@ -57,6 +72,8 @@ const EMPTY: ShellExposure = {
   sends: false,
   destinations: [],
   gitRemotes: [],
+  repos: [],
+  unresolved: false,
   fetchDestinations: [],
   fetchKinds: [],
 };
@@ -100,6 +117,25 @@ const GH_WRITE = new Set([
   'fork',
 ]);
 const GH_HOSTNAME_FLAGS = new Set(['--hostname', '-h', '-R', '--repo']);
+const GH_API_VALUE_FLAGS = new Set([
+  '--hostname',
+  '-X',
+  '--method',
+  '-f',
+  '--raw-field',
+  '-F',
+  '--field',
+  '-H',
+  '--header',
+  '--input',
+  '-q',
+  '--jq',
+  '-t',
+  '--template',
+  '--cache',
+  '-p',
+  '--preview',
+]);
 
 const GIT_FETCH = new Set(['clone', 'fetch', 'pull', 'ls-remote']);
 const PUBLISH: Record<string, { verbs: Set<string>; registry: string; flag?: string[] }> = {
@@ -119,18 +155,74 @@ const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh']);
 const OWN_HEADS = new Set([...Object.keys(PUBLISH), 'git', 'gh']);
 const MAX_DEPTH = 3;
 
+// Loopback hosts are kept: a send to localhost names a destination, which
+// the gate then knows is the machine itself.
 function host(token: string | null | undefined): string | null {
   if (!token) return null;
   const h = parseDestHost(token);
-  return h && h !== 'localhost' ? `host:${h}` : null;
+  return h ? `host:${h}` : null;
+}
+
+/** Calls that move the shell elsewhere, so a later `git push <remote>`
+ *  resolves in a repository the hook did not read. */
+const CWD_CHANGERS = new Set(['cd', 'pushd', 'popd']);
+
+/** Per-command state across the calls of one command line. */
+interface WalkState {
+  cwdChanged: boolean;
+}
+
+/** A repository named by `-R`/`gh repo` operands: `owner/name`,
+ *  `host/owner/name` or a url. */
+function ghRepoArg(v: string, defaultHost: string): { host: string; repo: string } {
+  if (/:\/\/|@/.test(v)) {
+    const r = gitRepoPath(v);
+    if (r) return { host: r.split('/')[0], repo: r };
+  }
+  const parts = v
+    .toLowerCase()
+    .replace(/\.git$/, '')
+    .split('/')
+    .filter(Boolean);
+  if (parts.length === 3) return { host: parts[0], repo: parts.join('/') };
+  if (parts.length === 2) return { host: defaultHost, repo: `${defaultHost}/${parts.join('/')}` };
+  return { host: defaultHost, repo: `${defaultHost}/*` };
+}
+
+/** The repository a `gh api` write reaches, from its endpoint. Undefined is
+ *  the current repository (`repos/{owner}/{repo}/...`). */
+function ghApiRepo(endpoint: string | null, ghHost: string): string | undefined {
+  if (endpoint === null) return `${ghHost}/*`;
+  const e = endpoint.replace(/^https?:\/\/[^/]+\//i, '').replace(/^\/+/, '');
+  const m = /^repos\/([^/]+)\/([^/?#]+)/i.exec(e);
+  if (!m) return `${ghHost}/*`;
+  if (m[1] === '{owner}' && m[2] === '{repo}') return undefined;
+  return `${ghHost}/${m[1].toLowerCase()}/${m[2].toLowerCase()}`;
+}
+
+/** A send that points a git remote at `url`. */
+function sendToGitUrl(url: string | null | undefined, out: ShellExposure): void {
+  out.sends = true;
+  const h = typeof url === 'string' ? host(url) : null;
+  if (!url || !h) {
+    out.unresolved = true;
+    return;
+  }
+  out.destinations.push(h);
+  const r = gitRepoPath(url);
+  if (r) out.repos.push(r);
 }
 
 /** The words of one call, wrappers stripped, as literals (null = dynamic);
  *  `prefixes` keeps each word's literal start so a URL whose query is
  *  dynamic (`"https://x/p?d=$(cat f)"`) still names its host. */
-function callWords(
-  call: unknown
-): { head: string; args: (string | null)[]; prefixes: string[] } | null {
+function callWords(call: unknown): {
+  head: string;
+  args: (string | null)[];
+  prefixes: string[];
+  /** Environment names set for this call (`X=1 cmd`, `env X=1 cmd`). */
+  env: string[];
+} | null {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const raw: any[] = (call as any).Args || [];
   if (raw.length === 0) return null;
@@ -142,7 +234,15 @@ function callWords(
   const at = OWN_HEADS.has(first) ? 0 : unwrapCommandHead(words);
   const head = (words[at] || '').toLowerCase().split('/').pop() ?? '';
   if (!head) return null;
-  return { head, args: words.slice(at + 1), prefixes: prefixes.slice(at + 1) };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const assigns: any[] = (call as any).Assigns || [];
+  const env = [
+    ...assigns.map((a) => String(a?.Name?.Value ?? '')),
+    ...words
+      .slice(0, at)
+      .map((w) => (w === null ? '' : (/^([A-Za-z_][A-Za-z0-9_]*)=/.exec(w)?.[1] ?? ''))),
+  ].filter(Boolean);
+  return { head, args: words.slice(at + 1), prefixes: prefixes.slice(at + 1), env };
 }
 
 /** Flag values of the given names (`--x V`, `--x=V`), first one wins. */
@@ -184,6 +284,8 @@ function classifyCall(
   head: string,
   args: (string | null)[],
   prefixes: string[],
+  env: string[],
+  state: WalkState,
   out: ShellExposure
 ): void {
   const lower = args.map((a) => (a === null ? null : a.toLowerCase()));
@@ -275,7 +377,10 @@ function classifyCall(
       const group = pos[0] ?? null;
       const verb = pos[1] ?? null;
       const hn = flagValue(args, ['--hostname']);
-      const dest = host(hn ?? 'github.com') ?? 'host:github.com';
+      let dest = host(hn ?? 'github.com') ?? 'host:github.com';
+      const ghHost = dest.slice('host:'.length);
+      // GH_REPO and GH_HOST point gh at another repository than the current one.
+      const envRepo = env.some((n) => n === 'GH_REPO' || n === 'GH_HOST');
       if (group === 'api') {
         const method = (flagValue(args, ['-X', '--method']) ?? 'get').toLowerCase();
         const hasBody = args.some(
@@ -284,6 +389,10 @@ function classifyCall(
         if (WRITE_METHODS.has(method) || hasBody) {
           out.sends = true;
           out.destinations.push(dest);
+          const endpoint = positionals(args, GH_API_VALUE_FLAGS)[1] ?? null;
+          const repo = ghApiRepo(endpoint, ghHost);
+          if (repo !== undefined) out.repos.push(repo);
+          else if (envRepo) out.repos.push(`${ghHost}/*`);
         } else {
           out.fetches = true;
           out.fetchKinds.push('gh api');
@@ -294,7 +403,35 @@ function classifyCall(
       if (group === null || verb === null) return;
       if (GH_WRITE.has(verb)) {
         out.sends = true;
+        // The repository reached: -R, a gist or a new repository (never one
+        // of the project's), `gh repo <verb> owner/name`, or the current one.
+        const rIdx = args.findIndex((w) => w === '-R' || w === '--repo');
+        const rEq = args.find((w) => w !== null && /^(-R|--repo)=/.test(w));
+        const rVal =
+          rEq !== undefined && rEq !== null
+            ? rEq.slice(rEq.indexOf('=') + 1)
+            : rIdx >= 0
+              ? args[rIdx + 1]
+              : undefined;
+        let repo: string | undefined;
+        if (rIdx >= 0 || rEq !== undefined) {
+          if (typeof rVal === 'string') {
+            const named = ghRepoArg(rVal, ghHost);
+            repo = named.repo;
+            if (named.host !== ghHost) dest = `host:${named.host}`;
+          } else repo = `${ghHost}/*`;
+        } else if (
+          group === 'gist' ||
+          (group === 'repo' && (verb === 'create' || verb === 'fork'))
+        ) {
+          repo = `${ghHost}/*`;
+        } else if (group === 'repo' && pos.length > 2) {
+          repo = typeof pos[2] === 'string' ? ghRepoArg(pos[2], ghHost).repo : `${ghHost}/*`;
+        } else if (envRepo) {
+          repo = `${ghHost}/*`;
+        }
         out.destinations.push(dest);
+        if (repo !== undefined) out.repos.push(repo);
       } else if (GH_READ.has(verb)) {
         out.fetches = true;
         out.fetchKinds.push(`gh ${group}`);
@@ -306,6 +443,38 @@ function classifyCall(
       const pos = positionals(args, new Set(['-C', '-c', '--git-dir', '--work-tree']));
       const verb = pos[0];
       if (verb === null || verb === undefined) return;
+      // `git -c remote.x.url=URL <verb>`: the remote now points at URL.
+      for (let i = 0; i < args.length; i++) {
+        if (args[i] !== '-c') continue;
+        const v = args[i + 1];
+        if (v === null || v === undefined) {
+          if (verb === 'push') out.unresolved = true;
+          continue;
+        }
+        const m = /^remote\.[^=]+\.(?:push)?url=(.*)$/i.exec(v);
+        if (m) sendToGitUrl(m[1], out);
+      }
+      // Pointing a remote at a url is how a later `git push <name>` leaves:
+      // judged as the send it prepares, to that url.
+      if (verb === 'remote') {
+        const rp = positionals(args, new Set(['-C', '-c', '--git-dir', '--work-tree', '-t', '-m']));
+        const sub = rp[1];
+        if (sub === 'add' || sub === 'set-url') {
+          const url = rp.slice(2).filter((p) => p !== '--push' && p !== '--add')[1];
+          sendToGitUrl(url, out);
+        }
+        return;
+      }
+      if (verb === 'config') {
+        // A read (`git config remote.origin.url`, `--get`) names no value.
+        const reads = args.some(
+          (w) =>
+            w !== null && /^--(get|get-all|get-regexp|unset|unset-all|list|get-urlmatch)$/.test(w)
+        );
+        const k = pos.findIndex((p) => p !== null && /^remote\..+\.(?:push)?url$/i.test(p));
+        if (k >= 0 && k + 1 < pos.length && !reads) sendToGitUrl(pos[k + 1], out);
+        return;
+      }
       if (GIT_FETCH.has(verb)) {
         out.fetches = true;
         out.fetchKinds.push(`git ${verb}`);
@@ -316,15 +485,32 @@ function classifyCall(
         return;
       }
       if (verb === 'push') {
-        out.sends = true;
-        const target = pos.slice(1).find((p) => p !== null && !p.startsWith('-')) ?? null;
-        if (target === null) {
-          out.gitRemotes.push('origin');
+        // `git push "$URL"`: the repository is built at run time.
+        if (pos.length > 1 && pos[1] === null) {
+          out.sends = true;
+          out.unresolved = true;
           return;
         }
-        const h = host(target);
-        if (h && /:\/\/|@/.test(target)) out.destinations.push(h);
-        else out.gitRemotes.push(target);
+        const target = pos.slice(1).find((p) => p !== null && !p.startsWith('-')) ?? null;
+        // A url: scheme, `user@host:path`, or scp-like `host.tld:path`.
+        if (
+          target !== null &&
+          (/:\/\/|@/.test(target) || /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+:/.test(target))
+        ) {
+          sendToGitUrl(target, out);
+          return;
+        }
+        // A local path (`../backup`, `/srv/git/app.git`) stays on the machine.
+        if (target !== null && /^[./~]|\//.test(target)) return;
+        out.sends = true;
+        // A remote name resolves in the repository the hook reads; in
+        // another one (`cd x &&`, `-C x`, GIT_DIR) it names nothing known.
+        const elsewhere =
+          state.cwdChanged ||
+          args.some((w) => w !== null && /^(-C|--git-dir|--work-tree)(=|$)/.test(w)) ||
+          env.some((n) => n === 'GIT_DIR' || n === 'GIT_WORK_TREE' || n === 'GIT_CONFIG');
+        if (elsewhere) out.unresolved = true;
+        else out.gitRemotes.push(target ?? 'origin');
       }
       return;
     }
@@ -351,7 +537,7 @@ function classifyCall(
   }
 }
 
-function walkCalls(command: string, out: ShellExposure, depth: number): void {
+function walkCalls(command: string, out: ShellExposure, depth: number, state: WalkState): void {
   const f = parseShared(command);
   if (typeof f === 'symbol' || !f) return;
   syntax.Walk(f, (node: unknown) => {
@@ -362,10 +548,11 @@ function walkCalls(command: string, out: ShellExposure, depth: number): void {
     if (SHELLS.has(c.head) && depth < MAX_DEPTH) {
       const i = c.args.findIndex((w) => w === '-c' || w === '-lc' || w === '-ec');
       const payload = i >= 0 ? c.args[i + 1] : null;
-      if (typeof payload === 'string') walkCalls(payload, out, depth + 1);
+      if (typeof payload === 'string') walkCalls(payload, out, depth + 1, state);
       return true;
     }
-    classifyCall(c.head, c.args, c.prefixes, out);
+    if (CWD_CHANGERS.has(c.head)) state.cwdChanged = true;
+    classifyCall(c.head, c.args, c.prefixes, c.env, state, out);
     return true;
   });
 }
@@ -376,17 +563,19 @@ export function classifyShellExposure(command: string): ShellExposure {
     ...EMPTY,
     destinations: [],
     gitRemotes: [],
+    repos: [],
     fetchDestinations: [],
     fetchKinds: [],
   };
   try {
-    walkCalls(command, out, 0);
+    walkCalls(command, out, 0, { cwdChanged: false });
   } catch {
     return { ...EMPTY };
   }
   out.destinations = [...new Set(out.destinations)];
   out.fetchDestinations = [...new Set(out.fetchDestinations)];
   out.gitRemotes = [...new Set(out.gitRemotes)];
+  out.repos = [...new Set(out.repos)];
   out.fetchKinds = [...new Set(out.fetchKinds)];
   return out;
 }

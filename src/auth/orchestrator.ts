@@ -38,6 +38,7 @@ import {
   destinationValue,
   destinationKind,
   isDestructiveToolName,
+  isLoopbackHost,
   hostMatches,
   classifyShellExposure,
   fileToolOperation,
@@ -740,12 +741,16 @@ async function _authorizeHeadlessCore(
   // `mcp__gmail__send_email` after a poisoned email was the one call the
   // taint existed for, and it was the one call the taint never reached.
   const mcpHookTool = options?.sessionTaintGated === undefined && isMcpToolName(toolName);
+  // The daemon's answer to "is this session exposed", when the taint round
+  // trip below already asked it (fw#318): undefined when it did not run.
+  let daemonSaysExposed: boolean | undefined;
   if (
     !taintWarning &&
     meta?.sessionId &&
     (networkShell || isWriteTool(toolName) || options?.sessionTaintGated === true || mcpHookTool)
   ) {
     const sessionTaint = await checkSessionTaint(meta.sessionId);
+    if (typeof sessionTaint.exposed === 'boolean') daemonSaysExposed = sessionTaint.exposed;
     if (sessionTaint.tainted && sessionTaint.record) {
       const kind = isWriteTool(toolName)
         ? 'write'
@@ -794,11 +799,25 @@ async function _authorizeHeadlessCore(
     ).filter((a) => ['write', 'create', 'remove'].includes(a.operation));
     const sendsSomething = (acts && !mcpFileWrite) || !!shellExp?.sends;
     // A call judged only for a write or a plain fetch asks the daemon only
-    // when this session's marker says it may be exposed: the hot path of an
-    // ordinary session (every edit, every redirect) skips the round trip.
-    const judged =
-      sendsSomething ||
-      ((!!shellExp?.fetches || writes.length > 0) && maybeSessionExposed(meta.sessionId));
+    // when it may be exposed: the hot path of an ordinary session (every
+    // edit, every redirect) skips the round trip. The marker file is only a
+    // hint: the agent can delete it. So the taint round trip's answer wins
+    // when there was one (file tools, network shell, MCP), and a shell write
+    // that exposure would hold anyway (outside the project, an instruction
+    // file) asks the daemon even without a marker.
+    const mayBeExposed =
+      daemonSaysExposed ??
+      (maybeSessionExposed(meta.sessionId) ||
+        (writes.length > 0 &&
+          judgeWritesAfterExposure({
+            accesses: writes,
+            args,
+            shellCommand: shellInput.kind === 'shell' ? shellInput.command : null,
+            cwd: options?.cwd,
+            inContent: new Set(),
+            isKnown: () => true,
+          }).length > 0));
+    const judged = sendsSomething || ((!!shellExp?.fetches || writes.length > 0) && mayBeExposed);
     if (judged) {
       const exposure = await checkSessionExposure(meta.sessionId);
       if (exposure.exposed && exposure.record) {
@@ -811,14 +830,18 @@ async function _authorizeHeadlessCore(
         // Hosts a plain fetch reaches: judged only against the content read.
         const fetchOnly = new Set<string>();
         const projectHosts = shellExp ? knownProjectHosts(options?.cwd) : null;
+        // `git push <name>` with a name the repository's config does not
+        // hold, when that config lists remotes: nothing to compare, held. With
+        // no readable config, the name is taken as the project's own remote.
+        let unknownRemote = false;
         if (shellExp) {
           if (shellExp.sends) {
             for (const d of shellExp.destinations) dests.add(d);
-            // `git push <remote>`: the repository's own remotes are known;
-            // a name the config does not resolve is still its own remote.
+            // `git push <remote>`: the repository's own remotes are known.
             for (const name of shellExp.gitRemotes) {
               const hosts = projectHosts!.remotes.get(name);
               if (hosts) for (const h of hosts) dests.add(h);
+              else if (projectHosts!.remotes.size > 0) unknownRemote = true;
             }
           }
           if (shellExp.fetches) {
@@ -828,7 +851,7 @@ async function _authorizeHeadlessCore(
         const inContent = new Set(rec.destinations);
         const mentioned = new Set(rec.userMentioned);
         const approved = new Set(rec.approved);
-        const held: { dest: string; why: string }[] = [];
+        const held: { dest: string; why: string; repo?: string }[] = [];
         const logged: string[] = [];
         const writeProjectHosts = projectHosts ?? knownProjectHosts(options?.cwd);
         // ONE known-destination test for sends, fetches and written content:
@@ -842,7 +865,8 @@ async function _authorizeHeadlessCore(
             mentioned.has(d) ||
             isTrustedRecipient(d) ||
             (destinationKind(d) === 'host' &&
-              (isTrustedHost(value) ||
+              (isLoopbackHost(value) ||
+                isTrustedHost(value) ||
                 (config.policy.trustedHostsManaged &&
                   matchesTrustedHost(value, config.policy.trustedHosts)) ||
                 config.policy.egress.allow.some((pat) => hostMatches(value, pat)) ||
@@ -851,12 +875,27 @@ async function _authorizeHeadlessCore(
         };
         const approvedOnce = (key: string) =>
           ucPolicy.afterExposure === 'ask-once' && approved.has(key);
+        // On a git host the project uses, the repository decides, not the
+        // host: github.com holds the project's origin and an attacker's
+        // mirror alike. A repository there is known only when it is one of
+        // the project's remotes (or approved once), and its host is not
+        // judged. Elsewhere the host is judged as any other destination.
+        const repos = (shellExp?.sends ? shellExp.repos : []).filter((r) =>
+          writeProjectHosts.hosts.has(`host:${r.split('/')[0]}`)
+        );
+        const repoHosts = new Set(repos.map((r) => `host:${r.split('/')[0]}`));
+        for (const r of repos) {
+          if (writeProjectHosts.repos.has(r) || approvedOnce(`${toolName}|repo:${r}`))
+            logged.push(`repo:${r}`);
+          else held.push({ dest: '', why: 'repository', repo: r });
+        }
         // Known wins: a colleague's address is in the email it replies to,
         // and the user's own words, the trusted lists and an earlier
         // approval all outrank "it appeared in the content". For a
         // destination nobody vouched for, appearing in the content is the
         // strongest signal and says so in the prompt.
         for (const d of dests) {
+          if (repoHosts.has(d)) continue;
           if (approvedOnce(`${toolName}|${d}`) || isKnown(d)) logged.push(d);
           else if (inContent.has(d)) held.push({ dest: d, why: 'appeared in what was read' });
           else held.push({ dest: d, why: 'not known to this session' });
@@ -871,16 +910,20 @@ async function _authorizeHeadlessCore(
         // "$URL"`) names nothing to compare: after exposure it is held.
         if (
           shellExp?.sends &&
-          shellExp.destinations.length === 0 &&
-          shellExp.gitRemotes.length === 0 &&
+          (shellExp.unresolved ||
+            unknownRemote ||
+            (shellExp.destinations.length === 0 && shellExp.gitRemotes.length === 0)) &&
           !approvedOnce(`${toolName}|unresolved`)
         ) {
           held.push({ dest: '', why: 'unresolved' });
         }
+        // A file write is judged by the write rules below: the reference
+        // filesystem server marks write_file destructive (it overwrites).
         const bare = splitMcpToolName(toolName)?.bare ?? toolName;
         if (
           dests.size === 0 &&
           acts &&
+          !mcpFileWrite &&
           (role.destructive === true || isDestructiveToolName(bare))
         ) {
           held.push({ dest: '', why: 'destructive' });
@@ -925,9 +968,13 @@ async function _authorizeHeadlessCore(
                     ? `${noun(h.dest)} that appeared in that ${last ? readWord : 'content'}`
                     : `${noun(h.dest)} this session did not know`
                 }`
-              : h.why === 'unresolved'
-                ? 'sends to a destination built at run time, which this session cannot see'
-                : `is ${bare}, a destructive call, with no known destination`
+              : h.why === 'repository'
+                ? h.repo!.endsWith('/*')
+                  ? `sends to a repository on ${h.repo!.slice(0, -2)} it does not name (a gist, a new repository or an API call)`
+                  : `sends to ${h.repo}, a repository that is not one of this project's remotes`
+                : h.why === 'unresolved'
+                  ? 'sends to a destination this session cannot see (built at run time, or a remote of another repository)'
+                  : `is ${bare}, a destructive call, with no known destination`
           );
           const home = os.homedir();
           const short = (p: string) => (p.startsWith(home + '/') ? '~' + p.slice(home.length) : p);
@@ -943,8 +990,12 @@ async function _authorizeHeadlessCore(
           exposureReview = `🛡️ Node9: this session read ${read}. This call ${parts.join('; and ')}.`;
           exposureKeys = [
             ...held
-              .filter((h) => h.dest || h.why === 'unresolved')
-              .map((h) => `${toolName}|${h.dest || 'unresolved'}`),
+              .filter((h) => h.dest || h.why === 'unresolved' || h.why === 'repository')
+              .map((h) =>
+                h.why === 'repository'
+                  ? `${toolName}|repo:${h.repo}`
+                  : `${toolName}|${h.dest || 'unresolved'}`
+              ),
             ...writeHolds.map(
               (w) =>
                 `${toolName}|${w.why === 'content-destination' ? w.destination : `path:${w.path}`}`

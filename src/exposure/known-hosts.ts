@@ -2,8 +2,10 @@
 // Hosts the project already talks to (fw#318 P3, design 5.3): the
 // repository's own git remotes, and the default registry of each ecosystem
 // the project uses (a package.json means npm). A send there after the
-// session read outside content is logged, not held. Cached per process; the
-// hook lives for one call.
+// session read outside content is logged, not held. On a git host the
+// repository is compared, not the host: github.com holds the project's origin
+// and every other repository too. Cached per process; the hook lives for one
+// call.
 import fs from 'fs';
 import path from 'path';
 import { readGitRemotes } from '../utils/git-remotes';
@@ -11,6 +13,8 @@ import { readGitRemotes } from '../utils/git-remotes';
 export interface KnownProjectHosts {
   /** `host:` destinations of every remote url plus the ecosystems' registries. */
   hosts: Set<string>;
+  /** The repositories the remotes name, `host/owner/name`. */
+  repos: Set<string>;
   /** Remote name -> its `host:` destinations, for `git push <name>`. */
   remotes: Map<string, string[]>;
 }
@@ -45,16 +49,17 @@ function manifestRoot(dir: string): string | null {
 }
 
 export function knownProjectHosts(dir: string | undefined): KnownProjectHosts {
-  const empty: KnownProjectHosts = { hosts: new Set(), remotes: new Map() };
+  const empty: KnownProjectHosts = { hosts: new Set(), repos: new Set(), remotes: new Map() };
   if (!dir) return empty;
   const key = path.resolve(dir);
   const hit = cache.get(key);
   if (hit) return hit;
-  const out: KnownProjectHosts = { hosts: new Set(), remotes: new Map() };
+  const out: KnownProjectHosts = { hosts: new Set(), repos: new Set(), remotes: new Map() };
   try {
     for (const r of readGitRemotes(key)) {
       out.remotes.set(r.name, r.hosts);
       for (const h of r.hosts) out.hosts.add(h);
+      for (const repo of r.repos) out.repos.add(repo);
     }
     const root = manifestRoot(key);
     if (root !== null) {

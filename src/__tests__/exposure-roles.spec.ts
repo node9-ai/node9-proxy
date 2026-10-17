@@ -115,6 +115,18 @@ describe('R4: name matching', () => {
   });
 });
 
+describe('second review 5: a long-lived process sees servers discovered later', () => {
+  it('rereads the inventory when the file changes, without a cache reset', () => {
+    expect(resolveToolAnnotations('crm', 'drop_table')).toBeNull();
+    updateServerDiscovery(
+      'k-late',
+      [{ name: 'drop_table', annotations: { destructiveHint: true } }],
+      'crm'
+    );
+    expect(resolveToolAnnotations('crm', 'drop_table')).toEqual({ destructiveHint: true });
+  });
+});
+
 describe('agent-internal servers', () => {
   it("Claude Code's own session and view tools are read, not source or action", () => {
     expect(toolRole('mcp__ccd_session__mark_chapter', POLICY)).toEqual({

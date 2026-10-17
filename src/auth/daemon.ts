@@ -421,6 +421,8 @@ import type { SessionExposureRecord } from '../daemon/exposure-store.js';
 export interface SessionTaintCheckResult {
   tainted: boolean;
   record?: SessionTaintRecord;
+  /** fw#318: the session read outside content (the daemon's exposure record). */
+  exposed?: boolean;
   /** True when the daemon was unreachable — caller treats as untainted (fail-open). */
   daemonUnavailable?: boolean;
 }

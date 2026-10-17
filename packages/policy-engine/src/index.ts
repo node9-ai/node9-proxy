@@ -174,6 +174,8 @@ export {
   destinationKind,
   destinationValue,
   isDestructiveToolName,
+  isLoopbackHost,
+  gitRepoPath,
   MAX_DESTINATIONS,
 } from './exposure/destinations';
 export type { ShellExposure } from './exposure/shell';

@@ -79,7 +79,7 @@ export function deriveServerName(cmd: string): string {
 
 export type McpToolsConfig = Record<string, McpServerConfig>;
 
-function getMcpToolsFile(): string {
+export function getMcpToolsFile(): string {
   return path.join(os.homedir(), '.node9', 'mcp-tools.json');
 }
 

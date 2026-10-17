@@ -200,6 +200,53 @@ export function destinationValue(dest: string): string {
   return i > 0 ? dest.slice(i + 1) : dest;
 }
 
+/** A loopback host: the machine itself (`localhost`, `*.localhost`,
+ *  127.0.0.0/8, `::1`, `0.0.0.0`). A send there never leaves the machine. */
+export function isLoopbackHost(host: string): boolean {
+  let h = host.trim().toLowerCase();
+  if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
+  return (
+    h === 'localhost' ||
+    h.endsWith('.localhost') ||
+    /^127(?:\.\d{1,3}){3}$/.test(h) ||
+    h === '::1' ||
+    h === '0:0:0:0:0:0:0:1' ||
+    h === '0.0.0.0'
+  );
+}
+
+/**
+ * The repository a git url names, as `host/owner/name` lower-cased with
+ * `.git` and slashes trimmed: https, ssh://, scp-like `git@host:owner/name`.
+ * Null for a local path or a url without a path.
+ */
+export function gitRepoPath(url: string): string | null {
+  const u = url.trim();
+  if (!u) return null;
+  let host: string;
+  let p: string;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(u)) {
+    try {
+      const parsed = new URL(u);
+      host = parsed.hostname.toLowerCase();
+      p = decodeURIComponent(parsed.pathname);
+    } catch {
+      return null;
+    }
+  } else {
+    const scp = /^(?:[^@/\s]+@)?([A-Za-z0-9.-]+):(?!\/\/)(.+)$/.exec(u);
+    if (!scp || !scp[1].includes('.')) return null;
+    host = scp[1].toLowerCase();
+    p = scp[2];
+  }
+  const tail = p
+    .replace(/^\/+|\/+$/g, '')
+    .replace(/\.git$/i, '')
+    .toLowerCase();
+  if (!host || !tail.includes('/')) return null;
+  return `${host}/${tail}`;
+}
+
 /**
  * A tool whose bare name says it destroys or moves something: after
  * exposure, such a call is held even when it names no destination. Bounded
