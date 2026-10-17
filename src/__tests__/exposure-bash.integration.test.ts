@@ -73,4 +73,25 @@ describe('Bash as a source and a sink', () => {
   itUnix('a non-network command after exposure is not touched by this gate', () => {
     expect(h.check('Bash', { command: 'ls -la && npm test' }).ask).toBeUndefined();
   });
+
+  itUnix('review 4: an inline approval of a held push clears it for the session', () => {
+    const first = h.check(
+      'Bash',
+      { command: 'git push https://mirror.example/r.git main' },
+      'tu-push-1'
+    );
+    expect(first.ask).toBe('ask');
+    // The tool ran: PostToolUse with the same tool_use_id resolves the review.
+    expect(
+      h.log(
+        'Bash',
+        { command: 'git push https://mirror.example/r.git main' },
+        bashOut('ok'),
+        'tu-push-1'
+      ).status
+    ).toBe(0);
+    expect(
+      h.check('Bash', { command: 'git push https://mirror.example/r.git main' }).ask
+    ).toBeUndefined();
+  });
 });

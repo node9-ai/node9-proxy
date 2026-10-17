@@ -48,10 +48,11 @@ export function gitRemoteHost(url: string): string | null {
   return null;
 }
 
-/** Walk up from `dir` to the nearest `.git` (a directory or a worktree pointer). */
-function findGitConfig(dir: string): string | null {
+/** Walk up from `dir` to the nearest `.git` (a directory or a worktree pointer);
+ *  with `walkUp: false`, only `dir` itself. */
+function findGitConfig(dir: string, walkUp = true): string | null {
   let cur = path.resolve(dir);
-  for (let i = 0; i < 64; i++) {
+  for (let i = 0; i < (walkUp ? 64 : 1); i++) {
     const dotGit = path.join(cur, '.git');
     const direct = readSmallFile(path.join(dotGit, 'config'), 1_000_000);
     if (direct !== null) return direct;
@@ -72,15 +73,20 @@ function findGitConfig(dir: string): string | null {
 
 const cache = new Map<string, GitRemote[]>();
 
-/** Every remote of the repository that contains `dir`. Cached per process. */
-export function readGitRemotes(dir: string | undefined): GitRemote[] {
+/** Every remote of the repository that contains `dir` (or, with
+ *  `walkUp: false`, whose root is `dir`). Cached per process. */
+export function readGitRemotes(
+  dir: string | undefined,
+  opts: { walkUp?: boolean } = {}
+): GitRemote[] {
   if (!dir) return [];
-  const key = path.resolve(dir);
+  const walkUp = opts.walkUp !== false;
+  const key = `${walkUp ? 'up' : 'at'}:${path.resolve(dir)}`;
   const hit = cache.get(key);
   if (hit) return hit;
   const out: GitRemote[] = [];
   try {
-    const cfg = findGitConfig(key);
+    const cfg = findGitConfig(path.resolve(dir), walkUp);
     if (cfg !== null) {
       let current: GitRemote | null = null;
       for (const line of cfg.split(/\r?\n/)) {

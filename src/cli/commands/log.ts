@@ -22,11 +22,8 @@ import {
   notifySessionExposure,
   approveSessionExposure,
 } from '../../auth/daemon';
-import {
-  extractContentDestinations,
-  extractArgDestinations,
-  classifyShellExposure,
-} from '@node9/policy-engine';
+import { extractContentDestinations, classifyShellExposure } from '@node9/policy-engine';
+import { markSessionExposed } from '../../exposure/marker';
 import {
   toolRole,
   sourceWord,
@@ -424,10 +421,9 @@ export function registerLogCommand(program: Command): void {
             payloadSessionId &&
             config.policy.untrustedContent?.afterExposure === 'ask-once'
           ) {
-            await approveSessionExposure(
-              payloadSessionId,
-              extractArgDestinations(rawInput).map((d) => `${tool}|${d}`)
-            );
+            // The keys the gate held at defer time: argument destinations,
+            // shell destinations and written paths alike.
+            await approveSessionExposure(payloadSessionId, resolvedReview.exposureKeys ?? []);
           }
 
           // v2 (review-ask-inline-v2-spec.md): the dev's inline approve is a real
@@ -538,6 +534,7 @@ export function registerLogCommand(program: Command): void {
                   const wordA = shellA?.fetches
                     ? shellSourceWord(shellA.fetchKinds)
                     : sourceWord(tool);
+                  markSessionExposed(payloadSessionId ?? '');
                   await notifySessionExposure(
                     payloadSessionId ?? '',
                     {
@@ -642,6 +639,7 @@ export function registerLogCommand(program: Command): void {
 
                 if (sourceRead) {
                   const destinations = extractContentDestinations(toolOutput);
+                  markSessionExposed(payloadSessionId ?? '');
                   await notifySessionExposure(
                     payloadSessionId ?? '',
                     {

@@ -35,6 +35,7 @@ vi.mock('../auth/daemon.js', async (orig) => ({
 }));
 
 import { authorizeHeadless, _resetConfigCache } from '../core.js';
+import { markSessionExposed } from '../exposure/marker.js';
 
 const SID = 'writes-session';
 const META = { agent: 'Claude Code', sessionId: SID };
@@ -69,6 +70,8 @@ describe('writes after exposure', () => {
       })
     );
     _resetConfigCache();
+    // The record says exposed; the marker is what the hot path checks first.
+    markSessionExposed(SID);
     mockCheckSessionExposure.mockReset();
     mockCheckSessionExposure.mockResolvedValue({
       exposed: true,
@@ -179,5 +182,77 @@ describe('writes after exposure', () => {
         })
       ).approved
     ).toBe(true);
+  });
+
+  it('review 1: a redirect to /dev/null or /dev/stderr is not a write outside the project', async () => {
+    for (const command of [
+      'npm test > /dev/null 2>&1',
+      'grep -r x . 2>/dev/null',
+      'echo hi | tee /dev/stderr',
+    ]) {
+      const r = await authorizeHeadless('Bash', { command }, META, {
+        cwd: proj,
+        deferReview: true,
+      });
+      expect(r.approved, command).toBe(true);
+    }
+  });
+
+  it('review 2: an MCP file write is judged as a write, not as a send to the URLs it contains', async () => {
+    const ok = await write('mcp__filesystem__write_file', {
+      path: path.join(proj, 'src', 'notes.md'),
+      content: 'see https://docs.example/guide and mail ops@vendor.example',
+    });
+    expect(ok.approved).toBe(true);
+    const outside = await write('mcp__filesystem__write_file', {
+      path: path.join(home, 'notes.md'),
+      content: 'x',
+    });
+    expect(outside.review).toBe(true);
+    expect(outside.reason).toMatch(/writes outside the project/);
+  });
+
+  it('review 6: written content naming an organisation address is known', async () => {
+    fs.writeFileSync(
+      path.join(home, '.node9', 'config.json'),
+      JSON.stringify({
+        settings: {
+          mode: 'standard',
+          approvalTimeoutMs: 50,
+          approvers: { native: false, browser: false, cloud: false, terminal: false },
+        },
+        policy: {
+          loopDetection: { enabled: false },
+          untrustedContent: { orgDomains: ['acme.example'] },
+        },
+      })
+    );
+    _resetConfigCache();
+    mockCheckSessionExposure.mockResolvedValue({
+      exposed: true,
+      record: {
+        sessionId: SID,
+        sources: [{ tool: 'mcp__mail__get_message', at: Date.now() }],
+        destinations: ['email:dana@acme.example'],
+        userMentioned: [],
+        approved: [],
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 60_000,
+      },
+    });
+    const r = await write('Write', {
+      file_path: path.join(proj, 'CONTRIBUTORS'),
+      content: 'Dana <dana@acme.example>\n',
+    });
+    expect(r.approved).toBe(true);
+  });
+
+  it('review 8: with no marker the write path never asks the daemon', async () => {
+    const { clearSessionMarkers } = await import('../exposure/marker.js');
+    clearSessionMarkers(SID);
+    mockCheckSessionExposure.mockClear();
+    const r = await write('Write', { file_path: path.join(home, 'notes.md'), content: 'x' });
+    expect(r.approved).toBe(true);
+    expect(mockCheckSessionExposure).not.toHaveBeenCalled();
   });
 });

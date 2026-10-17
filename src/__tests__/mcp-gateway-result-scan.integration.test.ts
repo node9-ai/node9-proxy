@@ -14,6 +14,7 @@ import { spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { deriveServerName } from '../daemon/mcp-tools';
 
 const CLI = path.resolve(__dirname, '../../dist/cli.js');
 const NODE = process.execPath;
@@ -154,6 +155,22 @@ describe('mcp-gateway response-channel scan', () => {
         expect(t[0]).toContain(`\n${INJECTION}\n`);
         expect(t[0]).toMatch(/\n\[node9 end [0-9a-f]{12}\]$/);
         expect(runGateway(home, 'just a page').texts[0]).toContain('\njust a page\n');
+      } finally {
+        fs.rmSync(home, { recursive: true, force: true });
+      }
+    }
+  );
+
+  itUnix(
+    'review 3: a tool the user classed as read is not framed (the gateway applies roles)',
+    () => {
+      const name = deriveServerName(`"${NODE}" "${upstream}"`);
+      const home = makeTempHome({
+        settings: { mode: 'audit' },
+        policy: { untrustedContent: { roles: { [name]: { read_page: 'read' } } } },
+      });
+      try {
+        expect(runGateway(home, 'just a page').texts).toEqual(['just a page']);
       } finally {
         fs.rmSync(home, { recursive: true, force: true });
       }

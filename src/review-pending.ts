@@ -37,6 +37,9 @@ export interface PendingReview {
   sessionId?: string;
   ts: number;
   label?: string;
+  /** fw#318: the '<tool>|<destination or path:p>' keys an exposure review held,
+   *  approved for the session when the agent's inline prompt is accepted. */
+  exposureKeys?: string[];
 }
 
 interface Store {

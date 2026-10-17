@@ -91,7 +91,8 @@ export function judgeWritesAfterExposure(opts: {
   shellCommand: string | null;
   cwd: string | undefined;
   inContent: ReadonlySet<string>;
-  known: ReadonlySet<string>;
+  /** The one known-destination test the send rules use (org, typed, trusted, allowed). */
+  isKnown: (dest: string) => boolean;
   home?: string;
 }): WriteHold[] {
   const holds: WriteHold[] = [];
@@ -105,6 +106,8 @@ export function judgeWritesAfterExposure(opts: {
       access.candidates?.[0] ?? normalizeFilePath(access.path, access.cwd ?? opts.cwd ?? '', home);
     if (seen.has(p)) continue;
     seen.add(p);
+    // Device files are not storage: `2>/dev/null`, `tee /dev/stderr`.
+    if (p === '/dev' || p.startsWith('/dev/')) continue;
     // A protected system or startup file (d3801fc) was judged before this
     // gate: its review or block already holds the call, so no second reason.
     if (root !== null && isInside(root, p)) {
@@ -127,7 +130,7 @@ export function judgeWritesAfterExposure(opts: {
   const texts = opts.shellCommand !== null ? [opts.shellCommand] : writtenContent(opts.args);
   if (texts.length > 0 && opts.inContent.size > 0) {
     for (const d of extractContentDestinations(texts.join('\n'))) {
-      if (opts.inContent.has(d) && !opts.known.has(d)) {
+      if (opts.inContent.has(d) && !opts.isKnown(d)) {
         const target = [...seen][0] ?? '';
         if (!holds.some((h) => h.why === 'content-destination' && h.destination === d))
           holds.push({ path: target, why: 'content-destination', destination: d });

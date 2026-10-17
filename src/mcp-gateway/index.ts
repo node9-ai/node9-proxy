@@ -40,7 +40,8 @@ import {
 } from '../auth/daemon';
 import { stripControlChars } from '../utils/safe-text';
 import { scanToolResult } from './result-scan';
-import { sourceWord } from '../exposure/roles';
+import { sourceWord, toolRole } from '../exposure/roles';
+import { markSessionExposed } from '../exposure/marker';
 
 // readActiveShields + waitForMcpApproval helper removed — the
 // mcp-tool-gating shield (which used the browser dashboard for the
@@ -491,7 +492,9 @@ export async function runMcpGateway(
             serverKey,
             sessionId: gatewaySessionId,
           },
-          { sessionTaintGated: !readOnlyTools.has(toolName) }
+          // cwd: the gateway's own working directory is the project the agent
+          // launched it from; without it every write would be "outside".
+          { sessionTaintGated: !readOnlyTools.has(toolName), cwd: gatewayCwd }
         );
 
         if (!result.approved) {
@@ -845,16 +848,18 @@ export async function runMcpGateway(
             // its result marks the gateway session exposed and, with
             // spotlight, is framed whole.
             const uc = cfg.policy.untrustedContent;
+            // The same role the hook would give `mcp__<name>__<tool>`: an
+            // explicit `read` role (or an agent-internal server) marks nothing.
+            const nsName = `mcp__${configName || deriveServerName(upstreamCommand)}__${exec.toolName}`;
+            const isSource = !!uc?.enabled && toolRole(nsName, uc).source;
             const scan = scanToolResult(line, parsed, exec.toolName, {
               dlpEnabled: cfg.policy.dlp.enabled,
               injection: cfg.policy.injectionScan,
-              spotlight:
-                uc?.enabled && uc.spotlight
-                  ? sourceWord(`mcp__${configName || 'server'}__${exec.toolName}`)
-                  : undefined,
+              spotlight: isSource && uc.spotlight ? sourceWord(nsName) : undefined,
             });
             if (scan.changed) outLine = scan.line;
-            if (uc?.enabled) {
+            if (isSource) {
+              markSessionExposed(gatewaySessionId);
               notifySessionExposure(
                 gatewaySessionId,
                 { tool: exec.toolName, server: configName || undefined },

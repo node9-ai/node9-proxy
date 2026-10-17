@@ -13,6 +13,7 @@ import chalk from 'chalk';
 import { listSessionExposures, clearSessionExposure } from '../../auth/daemon';
 import type { SessionExposureRecord } from '../../daemon/exposure-store';
 import { resolveSessionId } from './session-taint';
+import { clearSessionMarkers } from '../../exposure/marker';
 
 function fmtRemaining(expiresAt: number): string {
   const ms = expiresAt - Date.now();
@@ -83,6 +84,7 @@ export function registerSessionExposureCommand(program: Command): void {
       console.log('');
       if (opts.all) {
         const res = await clearSessionExposure({ all: true });
+        clearSessionMarkers();
         if (res.daemonUnavailable) {
           console.log(chalk.dim('  node9 daemon not running — nothing to clear.') + '\n');
           return;
@@ -117,6 +119,7 @@ export function registerSessionExposureCommand(program: Command): void {
         return;
       }
       const res = await clearSessionExposure({ sessionId: resolved.record.sessionId });
+      clearSessionMarkers(resolved.record.sessionId);
       console.log(
         res.cleared > 0
           ? chalk.green('  ✓ ') +

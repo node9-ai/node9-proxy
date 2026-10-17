@@ -87,6 +87,25 @@ export function removeTrustedRecipient(raw: string): boolean {
   return true;
 }
 
+let cache: { mtime: number; values: Set<string> } | null = null;
+
+function mtimeOf(): number {
+  try {
+    return fs.statSync(getTrustedRecipientsPath()).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+/** Is `value` on the list? Re-reads the file only when it changed. */
 export function isTrustedRecipient(value: string): boolean {
-  return readTrustedRecipients().some((e) => e.value === value);
+  const mtime = mtimeOf();
+  if (!cache || cache.mtime !== mtime) {
+    cache = { mtime, values: new Set(readTrustedRecipients().map((e) => e.value)) };
+  }
+  return cache.values.has(value);
+}
+
+export function _resetTrustedRecipientsCache(): void {
+  cache = null;
 }

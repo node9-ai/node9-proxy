@@ -285,27 +285,6 @@ export function registerCheckCommand(program: Command): void {
             // (dogfound 2026-07-05). Same guard pair as the orchestrator.
             if (process.env.NODE9_PAUSED === '1' || checkPause().paused) process.exit(0);
 
-            // fw#318 (design 5.3): an address, host or IBAN the user typed is
-            // known for this session, so a later send to it is not held.
-            // Best-effort and awaited: the process exits right after.
-            try {
-              const sid =
-                typeof payload.session_id === 'string'
-                  ? payload.session_id
-                  : typeof payload.conversationId === 'string'
-                    ? payload.conversationId
-                    : '';
-              const promptCwd =
-                typeof payload.cwd === 'string' && path.isAbsolute(payload.cwd)
-                  ? payload.cwd
-                  : undefined;
-              if (sid && getConfig(promptCwd).policy.untrustedContent?.enabled) {
-                await notifyUserMentions(sid, extractContentDestinations(prompt));
-              }
-            } catch {
-              /* never block the prompt on this */
-            }
-
             const dlpMatch = scanArgs({ prompt });
             // Decoy credentials: a planted value pasted into a prompt is the same
             // value on the same path as one in a reply (canary-design.md H10).
@@ -318,7 +297,29 @@ export function registerCheckCommand(program: Command): void {
             }
             const canaryHit =
               canaryVals.length > 0 ? matchCanaryArgs({ prompt }, canaryVals) : null;
-            if (!dlpMatch && !canaryHit) process.exit(0);
+            if (!dlpMatch && !canaryHit) {
+              // fw#318 (design 5.3): an address, host or IBAN the user typed is
+              // known for this session, so a later send to it is not held.
+              // Best-effort and awaited: the process exits right after.
+              try {
+                const sid =
+                  typeof payload.session_id === 'string'
+                    ? payload.session_id
+                    : typeof payload.conversationId === 'string'
+                      ? payload.conversationId
+                      : '';
+                const promptCwd =
+                  typeof payload.cwd === 'string' && path.isAbsolute(payload.cwd)
+                    ? payload.cwd
+                    : undefined;
+                if (sid && getConfig(promptCwd).policy.untrustedContent?.enabled) {
+                  await notifyUserMentions(sid, extractContentDestinations(prompt));
+                }
+              } catch {
+                /* never block the prompt on this */
+              }
+              process.exit(0);
+            }
             let canaryRec: ReturnType<typeof loadCanaries>[number] | null = null;
             if (canaryHit) {
               try {
@@ -717,6 +718,7 @@ export function registerCheckCommand(program: Command): void {
             blockedByLabel?: string;
             ruleDescription?: string;
             reason?: string;
+            exposureKeys?: string[];
           }) => {
             const msg = buildReviewMessage(
               result.blockedByLabel,
@@ -741,6 +743,7 @@ export function registerCheckCommand(program: Command): void {
                   sessionId: sid,
                   ts: Date.now(),
                   label: result.blockedByLabel,
+                  ...(result.exposureKeys?.length ? { exposureKeys: result.exposureKeys } : {}),
                 });
               }
             } catch {

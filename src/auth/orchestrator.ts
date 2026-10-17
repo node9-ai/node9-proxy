@@ -40,9 +40,11 @@ import {
   isDestructiveToolName,
   hostMatches,
   classifyShellExposure,
+  fileToolOperation,
 } from '@node9/policy-engine';
 import { knownProjectHosts } from '../exposure/known-hosts';
 import { judgeWritesAfterExposure, type WriteHold } from '../exposure/writes';
+import { maybeSessionExposed } from '../exposure/marker';
 import { toolRole, splitMcpToolName, sourceWord, EXPOSURE_LABEL } from '../exposure/roles';
 import { isTrustedRecipient, addTrustedRecipient } from './trusted-recipients';
 import { isTrustedHost, matchesTrustedHost } from './trusted-hosts';
@@ -185,6 +187,8 @@ export interface AuthResult {
   decisionSource?: 'terminal' | 'browser' | 'native' | 'cloud' | 'timeout' | 'local';
   /** Name of the smart rule that fired (for HUD lastRuleHit tracking). */
   ruleHit?: string;
+  /** fw#318: the keys an exposure review held, for the inline-ask marker. */
+  exposureKeys?: string[];
   /** Observe mode: this decision would have been blocked in standard mode. */
   observeWouldBlock?: boolean;
   /** Recovery command to suggest when a stateful rule hard-blocks (e.g. "npm test"). */
@@ -778,20 +782,32 @@ async function _authorizeHeadlessCore(
     // The gateway forwards bare names and says itself that the tool acts.
     const acts = role.action || options?.sessionTaintGated === true;
     const shellExp = shellInput.kind === 'shell' ? classifyShellExposure(shellInput.command) : null;
-    // P4: a write (a file tool, or a shell redirect, tee, cp, sed -i) is
-    // judged by where it lands and what it carries.
-    const writes = fileAccess.accesses.filter((a) =>
-      ['write', 'create', 'remove'].includes(a.operation)
-    );
+    // P4: a write (a file tool, an MCP file tool by its bare name, or a shell
+    // redirect, tee, cp, sed -i) is judged by where it lands and what it
+    // carries, never as a send to the URLs its content mentions.
+    const bareName = splitMcpToolName(toolName)?.bare;
+    const mcpFileWrite = bareName !== undefined && fileToolOperation(bareName, args) === 'write';
+    const writes = (
+      mcpFileWrite
+        ? prepareFileAccesses(bareName!, args, options?.cwd, config.policy.toolInspection).accesses
+        : fileAccess.accesses
+    ).filter((a) => ['write', 'create', 'remove'].includes(a.operation));
+    const sendsSomething = (acts && !mcpFileWrite) || !!shellExp?.sends;
+    // A call judged only for a write or a plain fetch asks the daemon only
+    // when this session's marker says it may be exposed: the hot path of an
+    // ordinary session (every edit, every redirect) skips the round trip.
     const judged =
-      acts || !!(shellExp && (shellExp.sends || shellExp.fetches)) || writes.length > 0;
+      sendsSomething ||
+      ((!!shellExp?.fetches || writes.length > 0) && maybeSessionExposed(meta.sessionId));
     if (judged) {
       const exposure = await checkSessionExposure(meta.sessionId);
       if (exposure.exposed && exposure.record) {
         const rec = exposure.record;
         // Argument destinations are a SEND only for an MCP action; what a
         // write tool carries in its content is judged by the write rules.
-        const dests = new Set<string>(acts && !shellExp ? extractArgDestinations(args) : []);
+        const dests = new Set<string>(
+          acts && !shellExp && !mcpFileWrite ? extractArgDestinations(args) : []
+        );
         // Hosts a plain fetch reaches: judged only against the content read.
         const fetchOnly = new Set<string>();
         const projectHosts = shellExp ? knownProjectHosts(options?.cwd) : null;
@@ -814,17 +830,14 @@ async function _authorizeHeadlessCore(
         const approved = new Set(rec.approved);
         const held: { dest: string; why: string }[] = [];
         const logged: string[] = [];
-        // Known wins: a colleague's address is in the email it replies to,
-        // and the user's own words, the trusted lists and an earlier
-        // approval all outrank "it appeared in the content". For a
-        // destination nobody vouched for, appearing in the content is the
-        // strongest signal and says so in the prompt.
-        for (const d of dests) {
-          const key = `${toolName}|${d}`;
+        const writeProjectHosts = projectHosts ?? knownProjectHosts(options?.cwd);
+        // ONE known-destination test for sends, fetches and written content:
+        // the organisation, the user's own words, the trusted lists, the
+        // egress allow list and the project's own remotes and registries.
+        const isKnown = (d: string): boolean => {
           const domain = destinationDomain(d);
           const value = destinationValue(d);
-          const known =
-            (ucPolicy.afterExposure === 'ask-once' && approved.has(key)) ||
+          return (
             (domain !== null && ucPolicy.orgDomains.includes(domain)) ||
             mentioned.has(d) ||
             isTrustedRecipient(d) ||
@@ -833,17 +846,36 @@ async function _authorizeHeadlessCore(
                 (config.policy.trustedHostsManaged &&
                   matchesTrustedHost(value, config.policy.trustedHosts)) ||
                 config.policy.egress.allow.some((pat) => hostMatches(value, pat)) ||
-                (projectHosts !== null && projectHosts.hosts.has(d))));
-          if (known) logged.push(d);
+                writeProjectHosts.hosts.has(d)))
+          );
+        };
+        const approvedOnce = (key: string) =>
+          ucPolicy.afterExposure === 'ask-once' && approved.has(key);
+        // Known wins: a colleague's address is in the email it replies to,
+        // and the user's own words, the trusted lists and an earlier
+        // approval all outrank "it appeared in the content". For a
+        // destination nobody vouched for, appearing in the content is the
+        // strongest signal and says so in the prompt.
+        for (const d of dests) {
+          if (approvedOnce(`${toolName}|${d}`) || isKnown(d)) logged.push(d);
           else if (inContent.has(d)) held.push({ dest: d, why: 'appeared in what was read' });
           else held.push({ dest: d, why: 'not known to this session' });
         }
+        // A plain fetch is held only when its host appeared in the content
+        // read and nobody vouched for it.
         for (const d of fetchOnly) {
-          const key = `${toolName}|${d}`;
-          if (ucPolicy.afterExposure === 'ask-once' && approved.has(key)) logged.push(d);
-          else if (inContent.has(d) && !(projectHosts !== null && projectHosts.hosts.has(d)))
-            held.push({ dest: d, why: 'appeared in what was read' });
-          else logged.push(d);
+          if (approvedOnce(`${toolName}|${d}`) || isKnown(d) || !inContent.has(d)) logged.push(d);
+          else held.push({ dest: d, why: 'appeared in what was read' });
+        }
+        // A shell send whose destination is built at run time (`curl -d @f
+        // "$URL"`) names nothing to compare: after exposure it is held.
+        if (
+          shellExp?.sends &&
+          shellExp.destinations.length === 0 &&
+          shellExp.gitRemotes.length === 0 &&
+          !approvedOnce(`${toolName}|unresolved`)
+        ) {
+          held.push({ dest: '', why: 'unresolved' });
         }
         const bare = splitMcpToolName(toolName)?.bare ?? toolName;
         if (
@@ -855,10 +887,6 @@ async function _authorizeHeadlessCore(
         }
         // P4: writes after exposure (design 6). Each hold carries a key so
         // ask-once can clear that path (or that destination) for the session.
-        const knownForWrites = new Set<string>([
-          ...mentioned,
-          ...(projectHosts ? projectHosts.hosts : []),
-        ]);
         const writeHolds: WriteHold[] =
           writes.length > 0
             ? judgeWritesAfterExposure({
@@ -867,7 +895,7 @@ async function _authorizeHeadlessCore(
                 shellCommand: shellInput.kind === 'shell' ? shellInput.command : null,
                 cwd: options?.cwd,
                 inContent,
-                known: knownForWrites,
+                isKnown,
               }).filter((h) => {
                 const key = `${toolName}|${h.why === 'content-destination' ? h.destination : `path:${h.path}`}`;
                 if (ucPolicy.afterExposure === 'ask-once' && approved.has(key)) {
@@ -897,7 +925,9 @@ async function _authorizeHeadlessCore(
                     ? `${noun(h.dest)} that appeared in that ${last ? readWord : 'content'}`
                     : `${noun(h.dest)} this session did not know`
                 }`
-              : `is ${bare}, a destructive call, with no known destination`
+              : h.why === 'unresolved'
+                ? 'sends to a destination built at run time, which this session cannot see'
+                : `is ${bare}, a destructive call, with no known destination`
           );
           const home = os.homedir();
           const short = (p: string) => (p.startsWith(home + '/') ? '~' + p.slice(home.length) : p);
@@ -912,7 +942,9 @@ async function _authorizeHeadlessCore(
           }
           exposureReview = `🛡️ Node9: this session read ${read}. This call ${parts.join('; and ')}.`;
           exposureKeys = [
-            ...held.filter((h) => h.dest).map((h) => `${toolName}|${h.dest}`),
+            ...held
+              .filter((h) => h.dest || h.why === 'unresolved')
+              .map((h) => `${toolName}|${h.dest || 'unresolved'}`),
             ...writeHolds.map(
               (w) =>
                 `${toolName}|${w.why === 'content-destination' ? w.destination : `path:${w.path}`}`
@@ -1963,6 +1995,7 @@ async function _authorizeHeadlessCore(
         exposureReview ||
         explainableLabel ||
         'Node9 flagged this action for review.',
+      ...(exposureReview && exposureKeys.length > 0 ? { exposureKeys } : {}),
       ruleDescription: policyRuleDescription,
       blockedByLabel: explainableLabel,
     };
