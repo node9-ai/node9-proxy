@@ -12,6 +12,8 @@ import {
   maskDestination,
   maskPersonalData,
   matchesTrustedEntry,
+  matchesTrustedList,
+  normalizeTrustedEntry,
   trustedEntryOf,
 } from './mask';
 
@@ -41,11 +43,23 @@ function destOf(v: Vector): string {
     : `iban:${full}`;
 }
 
-const VECTORS = (
-  JSON.parse(fs.readFileSync(path.join(__dirname, 'personal-data.vectors.json'), 'utf-8')) as {
-    vectors: Vector[];
-  }
-).vectors;
+type EntryVector = {
+  raw?: string;
+  iban?: { country: string; bban: string };
+  spaced?: boolean;
+  entry: string | null;
+};
+
+const FILE = JSON.parse(
+  fs.readFileSync(path.join(__dirname, 'personal-data.vectors.json'), 'utf-8')
+) as { vectors: Vector[]; entries: EntryVector[] };
+const VECTORS = FILE.vectors;
+
+function rawOf(e: EntryVector): string {
+  if (e.raw !== undefined) return e.raw;
+  const full = ibanOf(e.iban!.country, e.iban!.bban);
+  return e.spaced ? (full.match(/.{1,4}/g) ?? []).join(' ') : full;
+}
 
 const IBAN = ibanOf('GB', 'NODE' + '000000' + '12345678');
 const OTHER_IBAN = ibanOf('GB', 'NODE' + '000001' + '12345678');
@@ -76,6 +90,18 @@ describe('destinations: the shared vectors', () => {
     expect(matchesTrustedEntry('email:dana@acme.example', 'email:Dana@acme.example')).toBe(true);
   });
 
+  it.each(FILE.entries.map((e, i) => [i, e] as const))('entry vector %i', (_i, e) => {
+    expect(normalizeTrustedEntry(rawOf(e))).toBe(e.entry);
+  });
+
+  it('matches a list with one hash, plain and hashed entries alike', () => {
+    const list = ['host:drop.example', trustedEntryOf(`iban:${IBAN}`)];
+    expect(matchesTrustedList(`iban:${IBAN}`, list)).toBe(true);
+    expect(matchesTrustedList('host:Drop.Example', list)).toBe(true);
+    expect(matchesTrustedList(`iban:${OTHER_IBAN}`, list)).toBe(false);
+    expect(matchesTrustedList('host:x.example', [])).toBe(false);
+  });
+
   it('a malformed hash is not an entry', () => {
     expect(isHashedEntry('email:d***@acme.example#sha256:xyz')).toBe(false);
   });
@@ -96,6 +122,13 @@ describe('maskPersonalData: tool arguments', () => {
     expect(JSON.stringify(out)).not.toContain(IBAN.slice(4, 12));
   });
 
+  // Review: the checksum upper-cases, so the pattern reads either case.
+  it('masks a lower-case IBAN', () => {
+    expect(maskPersonalData(`pay ${IBAN.toLowerCase()} now`)).toBe(
+      `pay ${IBAN.slice(0, 4)} **** **** ${IBAN.slice(-4)} now`
+    );
+  });
+
   it('masks a spaced IBAN', () => {
     const spaced = (IBAN.match(/.{1,4}/g) ?? []).join(' ');
     expect(maskPersonalData(`pay ${spaced} now`)).toBe(
@@ -112,11 +145,17 @@ describe('maskPersonalData: tool arguments', () => {
       '****5678',
     ]);
     expect(masked({ to: 'api.example.com' }).to).toBe('api.example.com');
+    // Review: an uppercase code with no registered country, or the wrong
+    // length for its country, is not an account.
+    expect(masked({ ref: 'QQ12ABCDEFGHIJKLM' }).ref).toBe('QQ12ABCDEFGHIJKLM');
+    expect(masked({ ref: 'GB12ABCDEFGHIJKLM' }).ref).toBe('GB12ABCDEFGHIJKLM');
   });
 
   it('masks an account number under an account key, keeps a name there', () => {
     expect(masked({ account: 'TEST00012345678' }).account).toBe('****5678');
     expect(masked({ account: 'billing' }).account).toBe('billing');
+    // Review: a profile name with a year in it is not an account number.
+    expect(masked({ account: 'prod-2024-eu' }).account).toBe('prod-2024-eu');
   });
 
   it('leaves what is not personal data alone', () => {

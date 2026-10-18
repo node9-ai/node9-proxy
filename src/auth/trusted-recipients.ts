@@ -8,7 +8,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { extractArgDestinations, isHashedEntry, normalizeDestination } from '@node9/policy-engine';
+import { normalizeRecipient } from '@node9/policy-engine';
 
 export interface TrustedRecipientEntry {
   value: string;
@@ -44,24 +44,10 @@ function writeTrustedRecipients(entries: TrustedRecipientEntry[]): void {
   fs.renameSync(tmp, filePath);
 }
 
-/**
- * Normalise a user-typed value to the stored form. An address becomes
- * `email:`, an IBAN `iban:`, a URL or hostname `host:`. Returns null when the
- * value is not one of those three (a bare word, a domain without a host part
- * is still a host, which is fine: it is exact, not a wildcard).
- */
-export function normalizeRecipient(raw: string): string | null {
-  const v = raw.trim();
-  if (!v) return null;
-  if (/^(email|host|iban):/i.test(v)) {
-    const i = v.indexOf(':');
-    const kind = v.slice(0, i).toLowerCase();
-    const inner = normalizeRecipient(v.slice(i + 1));
-    return inner && inner.startsWith(`${kind}:`) ? inner : null;
-  }
-  const found = extractArgDestinations({ to: v });
-  return found.length === 1 ? found[0] : null;
-}
+// The stored form of a typed value (an address `email:`, an IBAN `iban:`, a
+// URL or hostname `host:`, `account:<number>`) is the engine's, shared with
+// the dashboard's mirror.
+export { normalizeRecipient };
 
 /** Add a value. Returns the stored form, or null when it is not a destination. */
 export function addTrustedRecipient(
@@ -98,25 +84,6 @@ function mtimeOf(): number {
 }
 
 /** Is `value` on the list? Re-reads the file only when it changed. */
-/**
- * An entry of the WORKSPACE list as the dashboard stores it (fw#318 review
- * F4): a masked kind arrives as '<masked>#sha256:<hex>' and is matched by its
- * hash; a host, or an older full value, is normalised like a typed one; an
- * account number keeps its kind. Null for anything else.
- */
-export function normalizeTrustedEntry(raw: string): string | null {
-  const v = raw.trim();
-  const i = v.indexOf('#sha256:');
-  if (i > 0) {
-    const entry = `${v.slice(0, i)}#sha256:${v.slice(i + 8).toLowerCase()}`;
-    return isHashedEntry(entry) ? entry : null;
-  }
-  if (/^account:/i.test(v)) {
-    const n = normalizeDestination(v);
-    return /^account:[A-Z0-9]{6,34}$/.test(n) ? n : null;
-  }
-  return normalizeRecipient(v);
-}
 
 export function isTrustedRecipient(value: string): boolean {
   const mtime = mtimeOf();

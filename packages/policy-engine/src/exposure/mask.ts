@@ -17,7 +17,8 @@
 // Pure, never throws.
 
 import { createHash } from 'crypto';
-import { validateIban, validateLuhn } from '../scan/checksums';
+import { IBAN_LENGTH, validateIban, validateLuhn } from '../scan/checksums';
+import { extractArgDestinations } from './destinations';
 
 const MASKED_KINDS = new Set(['email', 'iban', 'account']);
 const ENTRY_RE =
@@ -88,6 +89,63 @@ export function matchesTrustedEntry(dest: string, entry: string): boolean {
   return normalizeDestination(dest) === normalizeDestination(entry);
 }
 
+/** Does a full destination match any entry of a list? Hashes it once. */
+export function matchesTrustedList(dest: string, entries: readonly string[]): boolean {
+  if (entries.length === 0) return false;
+  const plain = normalizeDestination(dest);
+  let hash: string | undefined;
+  for (const entry of entries) {
+    const m = ENTRY_RE.exec(entry);
+    if (m) {
+      hash ??= hashDestination(dest);
+      if (hash === m[3]) return true;
+    } else if (plain === normalizeDestination(entry)) return true;
+  }
+  return false;
+}
+
+/**
+ * A recipient as a person types it, in the stored destination form: an
+ * address becomes `email:`, an IBAN `iban:`, a URL or hostname `host:`, and
+ * `account:<number>` keeps its kind. A value that carries its kind is checked
+ * against it. Null for anything else (a bare word, two values in one).
+ */
+export function normalizeRecipient(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const v = raw.trim();
+  if (!v || v.length > 512) return null;
+  const acct = /^account:([A-Za-z0-9 ]{8,40})$/i.exec(v);
+  if (acct) {
+    const n = acct[1].replace(/\s+/g, '').toUpperCase();
+    return n.length >= 8 && n.length <= 34 ? `account:${n}` : null;
+  }
+  if (/^(email|host|iban):/i.test(v)) {
+    const i = v.indexOf(':');
+    const kind = v.slice(0, i).toLowerCase();
+    const inner = normalizeRecipient(v.slice(i + 1));
+    return inner && inner.startsWith(`${kind}:`) ? inner : null;
+  }
+  const found = extractArgDestinations({ to: v });
+  return found.length === 1 ? found[0] : null;
+}
+
+/**
+ * One entry of a trusted list outside the machine (the dashboard's workspace
+ * list, the snapshot's personal list): a host in full; an address, IBAN or
+ * account as '<masked>#sha256:<hex>'. A value already in that form passes
+ * with its hash lower-cased; a full value is turned into it. Null when it is
+ * neither. The backend mirror asserts the same vectors.
+ */
+export function normalizeTrustedEntry(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const v = raw
+    .trim()
+    .replace(/#sha256:([0-9A-Fa-f]{64})$/, (_m, h: string) => `#sha256:${h.toLowerCase()}`);
+  if (v.includes('#')) return isHashedEntry(v) ? v : null;
+  const full = normalizeRecipient(v);
+  return full === null ? null : trustedEntryOf(full);
+}
+
 /** What a person reads for an entry: the masked part, without the hash. */
 export function entryDisplay(entry: string): string {
   const i = entry.indexOf('#sha256:');
@@ -96,9 +154,9 @@ export function entryDisplay(entry: string): string {
 
 // ── Free text (tool arguments) ──────────────────────────────────────────────
 
-// IBAN-shaped, with optional single spaces or dashes between groups; kept
-// only when the mod-97 checksum holds.
-const IBAN_TEXT_RE = /\b[A-Z]{2}\d{2}(?:[ -]?[A-Z0-9]{4}){2,7}(?:[ -]?[A-Z0-9]{1,4})?\b/g;
+// IBAN-shaped in either case, with optional single spaces or dashes between
+// groups; kept only when the mod-97 checksum holds.
+const IBAN_TEXT_RE = /\b[A-Z]{2}\d{2}(?:[ -]?[A-Z0-9]{4}){2,7}(?:[ -]?[A-Z0-9]{1,4})?\b/gi;
 // Card numbers as the PII detector reads them, kept only when Luhn holds.
 const CARD16_RE = /\b(?:4\d{3}|5[1-5]\d{2}|6\d{3})[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b/g;
 const CARD15_RE = /\b3[47]\d{2}[-\s]?\d{6}[-\s]?\d{5}\b/g;
@@ -110,8 +168,9 @@ const ACCOUNT_KEY_RE =
   /("(?:iban|account|account_number|accountNumber)"\s*:\s*")([A-Za-z0-9 .-]{6,40})(")/g;
 // A JSON string value that is IBAN-shaped as a whole: the gate reads it as an
 // account (a sandbox account) even when the checksum fails, so it is masked
-// under any key and inside arrays.
-const ACCOUNT_VALUE_RE = /"([A-Z]{2}\d{2}[A-Z0-9]{11,30})"/g;
+// under any key and inside arrays, when its country is a registered one and
+// its length is that country's.
+const ACCOUNT_VALUE_RE = /"([A-Z]{2}\d{2}[A-Z0-9]{11,30})"/gi;
 
 /**
  * IBANs (mod-97), card numbers (Luhn), account numbers (a whole IBAN-shaped
@@ -124,7 +183,7 @@ export function maskPersonalData(text: string): string {
   try {
     let out = text;
     out = out.replace(IBAN_TEXT_RE, (m) => {
-      const v = m.replace(/[ -]/g, '');
+      const v = m.replace(/[ -]/g, '').toUpperCase();
       return validateIban(v) ? `${v.slice(0, 4)} **** **** ${v.slice(-4)}` : m;
     });
     const card = (m: string) => {
@@ -132,11 +191,16 @@ export function maskPersonalData(text: string): string {
       return validateLuhn(digits) ? `**** **** **** ${digits.slice(-4)}` : m;
     };
     out = out.replace(CARD16_RE, card).replace(CARD15_RE, card);
-    out = out.replace(ACCOUNT_VALUE_RE, (_m, v: string) => `"****${v.slice(-4)}"`);
-    // A name under the key ("account": "billing") is not a number: kept.
-    out = out.replace(ACCOUNT_KEY_RE, (m, a: string, v: string, b: string) =>
-      v.replace(/\D/g, '').length < 4 ? m : `${a}****${v.replace(/[ .-]/g, '').slice(-4)}${b}`
+    out = out.replace(ACCOUNT_VALUE_RE, (m, v: string) =>
+      IBAN_LENGTH[v.slice(0, 2).toUpperCase()] === v.length ? `"****${v.slice(-4)}"` : m
     );
+    // Only a number is masked under the key: a name ("billing") or a profile
+    // ("prod-2024-eu") is kept. A number is six digits or more, and mostly digits.
+    out = out.replace(ACCOUNT_KEY_RE, (m, a: string, v: string, b: string) => {
+      const compact = v.replace(/[ .-]/g, '');
+      const digits = compact.replace(/\D/g, '').length;
+      return digits >= 6 && digits * 2 >= compact.length ? `${a}****${compact.slice(-4)}${b}` : m;
+    });
     if (out.includes('@')) out = out.replace(EMAIL_TEXT_RE, (m) => maskEmailValue(m));
     return out;
   } catch {

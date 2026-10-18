@@ -1,5 +1,5 @@
 {
-  "_comment": "fw#318 F4: masking and hashing of destinations. A copy of node9Firewall contract/personal-data.vectors.json: the engine (mask.spec.ts) and the backend mirror assert the same values. IBANs are given as parts (country, BBAN) and assembled with computed check digits by the test, so no full IBAN appears in this file.",
+  "_comment": "fw#318 F4: masking and hashing of destinations. A copy of node9Firewall contract/personal-data.vectors.json: the engine (mask.spec.ts) and the backend mirror assert the same values. IBANs are given as parts (country, BBAN) and assembled with computed check digits by the test, so no full IBAN appears in this file. 'entries' are trusted-list values as typed or received, and the stored form each becomes (null: refused).",
   "vectors": [
     {
       "iban": {
@@ -43,6 +43,52 @@
       "masked": "host:drop.example",
       "hash": "a0ec903a00e238780f5bdb1cfe8120a6bd0e10c0542d2a3ab285066650fe3f0a",
       "entry": "host:drop.example"
+    }
+  ],
+  "entries": [
+    {
+      "raw": "Dana@Acme.Example",
+      "entry": "email:d***@acme.example#sha256:f953d78d04e1454825c08af40c2558460b4dcbed5f8511d5d0eceed9976f78f8"
+    },
+    {
+      "raw": "email:dana@acme.example",
+      "entry": "email:d***@acme.example#sha256:f953d78d04e1454825c08af40c2558460b4dcbed5f8511d5d0eceed9976f78f8"
+    },
+    {
+      "iban": {
+        "country": "GB",
+        "bban": "NODE00000012345678"
+      },
+      "spaced": true,
+      "entry": "iban:GB54 **** **** 5678#sha256:7e66dce0ca6f2915cdc90a47d1805a5513638e794eb9feed1db30d2e4701f558"
+    },
+    {
+      "raw": "account:test 00012345678",
+      "entry": "account:****5678#sha256:925b6675e25beb99bf9ee1776c0a3d090cf684bc28cc88eaf69cc5a2e2bd879c"
+    },
+    {
+      "raw": "host:Drop.Example",
+      "entry": "host:drop.example"
+    },
+    {
+      "raw": "https://drop.example/collect",
+      "entry": "host:drop.example"
+    },
+    {
+      "raw": "email:d***@acme.example#sha256:F953D78D04E1454825C08AF40C2558460B4DCBED5F8511D5D0ECEED9976F78F8",
+      "entry": "email:d***@acme.example#sha256:f953d78d04e1454825c08af40c2558460b4dcbed5f8511d5d0eceed9976f78f8"
+    },
+    {
+      "raw": "email:d***@acme.example#sha256:xyz",
+      "entry": null
+    },
+    {
+      "raw": "word",
+      "entry": null
+    },
+    {
+      "raw": "host:dana@acme.example",
+      "entry": null
     }
   ]
 }

@@ -10,7 +10,8 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { trustedEntryOf } from '@node9/policy-engine';
-import { startDaemonHook, cliExists, type DaemonHook } from './helpers/daemon-hook';
+import { spawnSync } from 'child_process';
+import { startDaemonHook, cliExists, CLI, type DaemonHook } from './helpers/daemon-hook';
 import { writeKeyedHome } from './helpers/env';
 
 const itUnix = it.skipIf(process.platform === 'win32' || !cliExists);
@@ -107,6 +108,32 @@ describe('review fixes on a keyed machine', () => {
     expect(block).toBeDefined();
     expect(block?.exposure).toBeUndefined();
     expect(block?.exposureFromEid).toBeUndefined();
+  });
+
+  // Review: Mode A (OpenCode, Pi, Hermes: `log --redact-output`, payload on
+  // stdin) leaves the same read row as Mode B (F3).
+  itUnix('F3: a Mode A read writes the exposure-source row with an eid', () => {
+    const r = spawnSync(process.execPath, [CLI, 'log', '--redact-output'], {
+      input: JSON.stringify({
+        hook_event_name: 'PostToolUse',
+        tool_name: 'mcp__crm__get_notes',
+        session_id: 'mode-a',
+        cwd: h.proj,
+        tool_response: { output: 'Call Northwind about the renewal at buyer@prospect.example.' },
+        meta: { agent: 'Opencode' },
+      }),
+      encoding: 'utf8',
+      cwd: h.proj,
+      env: h.env,
+      timeout: 30_000,
+    });
+    expect(r.error).toBeUndefined();
+    expect(r.status).toBe(0);
+    const row = auditRows().find(
+      (x) => x.checkedBy === 'exposure-source' && x.sessionId === 'mode-a'
+    );
+    expect(row).toMatchObject({ exposure: { kind: 'source', destinations: 1 } });
+    expect(typeof row?.eid).toBe('string');
   });
 
   itUnix('P1: the audit log holds no full address or IBAN, and the read row is local', () => {

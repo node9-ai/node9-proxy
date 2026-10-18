@@ -296,6 +296,11 @@ export async function initNode9SaaS(
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${creds.apiKey}` },
       body: JSON.stringify({
         toolName,
+        // Masked (fw#318 review P1). The SaaS runs the workspace's cloud
+        // rules on these args too: a condition on a full address, IBAN or
+        // account no longer matches there; one on a domain still does. The
+        // same rules sync to this machine and are enforced locally on the
+        // full values, so the local verdict is unchanged (founder, 2026-10-18).
         args: maskArgsForCloud(args),
         // See auditLocalAllow above for the rationale on these two fields.
         ...(meta?.sessionId && { runId: meta.sessionId }),

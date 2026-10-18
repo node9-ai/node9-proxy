@@ -774,8 +774,9 @@ describe('getConfig — cloud-pushed runtime flags', () => {
         },
       }),
     });
+    // Stored in the entry form the dashboard uses (masked with its hash).
     expect(getConfig().policy.untrustedContent.trustedRecipients).toEqual([
-      'email:press@news.example',
+      trustedEntryOf('email:press@news.example'),
       'host:drop.example',
     ]);
   });
@@ -803,7 +804,7 @@ describe('getConfig — cloud-pushed runtime flags', () => {
     });
     expect(getConfig().policy.untrustedContent.trustedRecipients).toEqual([
       entry,
-      'account:TEST00012345678',
+      trustedEntryOf('account:TEST00012345678'),
     ]);
   });
 

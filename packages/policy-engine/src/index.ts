@@ -190,6 +190,9 @@ export {
   isHashedEntry,
   trustedEntryOf,
   matchesTrustedEntry,
+  matchesTrustedList,
+  normalizeRecipient,
+  normalizeTrustedEntry,
   entryDisplay,
   maskPersonalData,
 } from './exposure/mask';

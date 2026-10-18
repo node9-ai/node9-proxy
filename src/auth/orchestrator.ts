@@ -43,7 +43,7 @@ import {
   hostMatches,
   classifyShellExposure,
   fileToolOperation,
-  matchesTrustedEntry,
+  matchesTrustedList,
 } from '@node9/policy-engine';
 import { knownProjectHosts } from '../exposure/known-hosts';
 import { judgeWritesAfterExposure, type WriteHold } from '../exposure/writes';
@@ -894,7 +894,7 @@ async function _authorizeHeadlessCore(
             (domain !== null && ucPolicy.orgDomains.includes(domain)) ||
             mentioned.has(d) ||
             isTrustedRecipient(d) ||
-            ucPolicy.trustedRecipients.some((e) => matchesTrustedEntry(d, e)) ||
+            matchesTrustedList(d, ucPolicy.trustedRecipients) ||
             (destinationKind(d) === 'host' &&
               (isLoopbackHost(value) ||
                 isTrustedHost(value) ||
