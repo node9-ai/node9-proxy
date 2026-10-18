@@ -82,6 +82,7 @@ import { readActiveShields } from '../shields';
 import { findJailedPath, findJailedPathIn, USER_JAIL_SHIELD } from '../shields/jail';
 import { safeMessage } from '../utils/safe-text';
 import { asApprovalRequest } from '../policy/negotiation';
+import { HUMAN_DECISION_SOURCES, REDIRECT_SOURCE } from './decision-sources';
 
 /** The pattern name the DLP gate gives a sensitive-PATH hit, read off the
  *  engine rather than copied, so a rename there cannot silently skip MSG-1. */
@@ -448,8 +449,15 @@ export async function authorizeHeadless(
   return _authorizeHeadlessCore(toolName, args, meta, options);
 }
 
-/** The daemon's `decisionSource` values a person sets by answering a card. */
-const HUMAN_DAEMON_SOURCES: ReadonlySet<string> = new Set(['terminal', 'browser', 'native']);
+/** How long the terminal racer waits on /wait. The daemon answers by its
+ *  own timer, so the cap only guards against a daemon that never does: a
+ *  fixed 120 s cap cut a longer configured timeout short (the abort closes
+ *  the long-poll, which removes the card), and a 0 ("no timer") must not be
+ *  capped at all. */
+export function daemonWaitCapMs(approvalTimeoutMs: number | undefined): number {
+  if (approvalTimeoutMs === 0) return 0;
+  return Math.max(approvalTimeoutMs ?? 0, 120_000) + 5_000;
+}
 
 /**
  * The message shown when the gate asked for approval and nobody answered.
@@ -2444,31 +2452,72 @@ async function _authorizeHeadlessCore(
           decision: daemonDecision,
           source: decisionSource,
           reason: daemonReason,
-        } = await waitForDaemonDecision(daemonEntryId!, signal);
+        } = await waitForDaemonDecision(
+          daemonEntryId!,
+          signal,
+          daemonWaitCapMs(config.settings.approvalTimeoutMs)
+        );
         if (daemonDecision === 'abandoned') throw new Error('Abandoned');
 
         const isApproved = daemonDecision === 'allow';
         // 'terminal-redirect' = tail choice [2]: AI redirect with a custom reason string
-        const isRedirect = decisionSource === 'terminal-redirect';
-        // ENG-2: /wait answers `deny` with no human source when the daemon's
-        // timer fires (source 'timeout'), when its own background pass blocks,
-        // and when /wait itself fails. None of those is a person refusing, and
-        // the agent must not be told one did: it stops and asks instead of
-        // reading the block's reason.
+        const isRedirect = decisionSource === REDIRECT_SOURCE;
+        // ENG-2: a deny is a person's in node9 tail only with a human source.
+        // The daemon names its own deciders: its timer ('timeout'), and for a
+        // card its background pass resolved, the pass's cloud racer ('cloud')
+        // or a rule ('policy'). No source at all means /wait failed (the
+        // daemon died or the card was gone). None of those is a person
+        // refusing in the terminal, and the agent must not be told one did: it
+        // stops and asks instead of reading the block's reason.
         if (
           !isApproved &&
           !isRedirect &&
-          !(decisionSource && HUMAN_DAEMON_SOURCES.has(decisionSource))
+          !(decisionSource && HUMAN_DECISION_SOURCES.has(decisionSource))
         ) {
-          const blockedBy = decisionSource === 'timeout' ? 'timeout' : 'local-config';
-          if (downgradedBlock) return { ...downgradedBlock, blockedBy } as AuthResult;
+          // The organisation decided, as when the hook's own cloud racer wins.
+          if (decisionSource === 'cloud')
+            return {
+              approved: false,
+              reason: daemonReason || 'Action rejected by organization administrator via Slack.',
+              blockedBy: 'team-policy',
+              blockedByLabel: 'Organization Policy (SaaS)',
+              decisionSource: 'cloud',
+            } as AuthResult;
+          const timedOut = decisionSource === 'timeout';
+          if (downgradedBlock)
+            return {
+              ...downgradedBlock,
+              blockedBy: timedOut ? 'timeout' : 'local-config',
+            } as AuthResult;
+          if (timedOut)
+            return {
+              approved: false,
+              reason: daemonReason || 'No response: auto-denied after the approval timeout.',
+              blockedBy: 'timeout',
+              blockedByLabel: 'Approval Timeout',
+            } as AuthResult;
+          if (decisionSource === 'policy')
+            return {
+              approved: false,
+              reason: daemonReason || 'Action blocked by policy.',
+              blockedBy: 'local-config',
+              blockedByLabel: explainableLabel,
+            } as AuthResult;
+          // /wait failed: no channel decided, so no rule is named either.
           return {
             approved: false,
-            reason: daemonReason || 'node9 denied this call before anyone approved it.',
-            blockedBy,
-            blockedByLabel: decisionSource === 'timeout' ? 'Approval Timeout' : explainableLabel,
+            reason: daemonReason || 'node9 could not get an approval decision for this call.',
+            blockedBy: 'no-approval-mechanism',
+            blockedByLabel: 'Approval Unavailable',
           } as AuthResult;
         }
+        // An allow the daemon's background pass made is its decider's, not a
+        // click in node9 tail: the organisation's (as the hook's own cloud
+        // racer reports one), or a rule's.
+        if (isApproved && decisionSource === 'cloud')
+          return { approved: true, checkedBy: 'cloud', decisionSource: 'cloud' } as AuthResult;
+        if (isApproved && decisionSource === 'policy')
+          return { approved: true, checkedBy: 'local-policy' } as AuthResult;
         const via = 'Terminal (node9 tail)';
         return {
           approved: isApproved,

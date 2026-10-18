@@ -63,7 +63,8 @@ export interface PendingEntry {
   mcpServer?: string;
   timestamp: number;
   slackDelegated: boolean;
-  timer: ReturnType<typeof setTimeout>;
+  /** The auto-deny timer; none when approvalTimeoutMs is 0 ("no timer"). */
+  timer: ReturnType<typeof setTimeout> | undefined;
   waiter: ((d: Decision, reason?: string) => void) | null;
   earlyDecision: Decision | null;
   earlyReason?: string;

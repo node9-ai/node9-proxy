@@ -70,10 +70,10 @@ export function checkApprovalConfig(ctx: CheckContext): Finding[] {
   const a = s.approvers ?? { native: false, browser: false, cloud: false, terminal: false };
   const hasChannel = a.native || a.browser || a.cloud || a.terminal || s.reviewChannel === 'ask';
 
-  // A zero approval timeout turns node9's own timer off. The daemon's card
-  // still expires at the default (it used to deny every card the moment it
-  // opened), but a review with no daemon card, a desktop popup alone, waits
-  // until the agent's own hook timeout ends the hook.
+  // A zero approval timeout means "no timer" everywhere: the hook arms none,
+  // and the daemon's card in node9 tail stays open (it used to deny every
+  // card the moment it opened). A review nobody answers waits until the
+  // agent's own hook timeout ends the hook.
   const zeroTimeout: Finding[] =
     s.approvalTimeoutMs === 0
       ? [
@@ -83,7 +83,7 @@ export function checkApprovalConfig(ctx: CheckContext): Finding[] {
             title: 'Approval timeout is 0: node9 never times a review out',
             what: "A review waits for a person; node9's own timer is off.",
             why: '`settings.approvalTimeoutMs` is 0.',
-            who: "With no one at the screen, the agent's hook timeout decides instead of node9.",
+            who: "With no one at the screen, the agent's hook timeout ends the review, and some agents then run the tool.",
             detail: [],
             owner: 'node9',
             fix: 'Set a real approval timeout (e.g. 300000 ms) or clear it to use the default.',

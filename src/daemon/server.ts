@@ -8,6 +8,11 @@ import path from 'path';
 import os from 'os';
 import { randomUUID } from 'crypto';
 import { addTrustedRecipient } from '../auth/trusted-recipients';
+import {
+  backgroundPassSource,
+  DECISION_ROUTE_SOURCES,
+  HUMAN_DECISION_SOURCES,
+} from '../auth/decision-sources';
 import { spawnSync } from 'child_process';
 import chalk from 'chalk';
 import { authorizeHeadless, getGlobalSettings, getConfig, _resetConfigCache } from '../core';
@@ -207,12 +212,20 @@ export function buildDaemonReport(
   };
 }
 
-/** How long a card waits before the daemon denies it. `||`, not `??`: 0 is
- *  "no timer" to the hook, and read with `??` here it denied every card the
- *  moment it opened. A 0 takes the default, as the dashboard sync does. The
- *  tail's countdown and the timer read this one value. */
-function autoDenyMs(): number {
-  return getConfig().settings.approvalTimeoutMs || AUTO_DENY_MS;
+/** How long a card waits before the daemon denies it, or null for no timer.
+ *  0 means "no timer", as it does to the hook: read with `??` it armed a 0 ms
+ *  timer that denied every card the moment it opened. Unset takes the default.
+ *  The tail's countdown and the timer read this one value. */
+function autoDenyMs(): number | null {
+  const ms = getConfig().settings.approvalTimeoutMs;
+  if (ms === 0) return null;
+  return ms ?? AUTO_DENY_MS;
+}
+
+/** The card's auto-deny timer, or none when the timeout is 0. */
+function armAutoDeny(fire: () => void): ReturnType<typeof setTimeout> | undefined {
+  const ms = autoDenyMs();
+  return ms === null ? undefined : setTimeout(fire, ms);
 }
 
 export function startDaemon(): void {
@@ -448,7 +461,7 @@ export function startDaemon(): void {
           timestamp: Date.now(),
           earlyDecision: null,
           waiter: null,
-          timer: setTimeout(() => {
+          timer: armAutoDeny(() => {
             if (pending.has(id)) {
               const e = pending.get(id)!;
               appendAuditLog({
@@ -467,7 +480,7 @@ export function startDaemon(): void {
               pending.delete(id);
               broadcast('remove', { id, decision: 'deny' });
             }
-          }, autoDenyMs()),
+          }),
         };
         pending.set(id, entry);
 
@@ -567,6 +580,10 @@ export function startDaemon(): void {
             clearTimeout(e.timer);
             const decision: Decision = result.approved ? 'allow' : 'deny';
             appendAuditLog({ toolName: e.toolName, args: e.args, decision });
+            // fw#304 review: say who decided. Without a source the hook could
+            // not tell an administrator's deny in Slack (this pass runs the
+            // cloud racer) from a rule, and credited the rule.
+            e.decisionSource = backgroundPassSource(result);
             if (e.waiter) {
               e.waiter(decision, result.reason);
               pending.delete(id);
@@ -716,8 +733,7 @@ export function startDaemon(): void {
 
         // source is validated against an allowlist AFTER appendAuditLog so the
         // raw user-supplied value never reaches any log string — no log injection.
-        const VALID_SOURCES = new Set(['terminal', 'browser', 'native', 'terminal-redirect']);
-        if (source && VALID_SOURCES.has(source)) entry.decisionSource = source;
+        if (source && DECISION_ROUTE_SOURCES.has(source)) entry.decisionSource = source;
         if (entry.waiter) {
           entry.waiter(resolvedDecision, reason);
           pending.delete(id!);
@@ -911,8 +927,7 @@ export function startDaemon(): void {
           saveInsightCounts();
         }
 
-        const VALID_RESOLVE_SOURCES = new Set(['terminal', 'browser', 'native']);
-        if (source && VALID_RESOLVE_SOURCES.has(source)) entry.decisionSource = source;
+        if (source && HUMAN_DECISION_SOURCES.has(source)) entry.decisionSource = source;
 
         if (entry.waiter) entry.waiter(resolvedResolveDecision);
         else entry.earlyDecision = resolvedResolveDecision;

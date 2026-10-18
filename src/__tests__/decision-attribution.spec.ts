@@ -109,8 +109,9 @@ vi.mock('../shields', () => ({
   readActiveShields: () => [],
 }));
 
-import { authorizeHeadless, type AuthResult } from '../auth/orchestrator';
+import { authorizeHeadless, daemonWaitCapMs, type AuthResult } from '../auth/orchestrator';
 import { buildNegotiationMessage, isHumanDecision } from '../policy/negotiation';
+import { notifyDaemonViewer } from '../auth/daemon';
 
 // The verdict the engine returns for the builtin project-jail .env rule.
 const JAIL_BLOCK = {
@@ -209,10 +210,11 @@ describe('decision attribution (ENG-2, MSG-5)', () => {
       expect(agentMessage(res)).not.toMatch(/human/i);
     });
 
-    it('a review denied by the daemon with no source carries the review label and the daemon reason', async () => {
+    it("a review the daemon's background pass blocked (source 'policy') carries the review label and the pass's reason", async () => {
       H.evaluatePolicy.mockResolvedValue(PUSH_REVIEW);
       H.waitForDaemonDecision.mockResolvedValue({
         decision: 'deny',
+        source: 'policy',
         reason: 'denied by the background check',
       });
 
@@ -224,6 +226,86 @@ describe('decision attribution (ENG-2, MSG-5)', () => {
       expect(res.reason).toBe('denied by the background check');
       expect(res.decisionSource).toBeUndefined();
       expect(agentMessage(res)).not.toMatch(/human/i);
+    });
+
+    // fw#304 review, finding 1: the background pass runs the cloud racer, so
+    // an administrator's deny in Slack or Mission Control reaches the hook
+    // through the daemon. It is the organisation's decision, reported as the
+    // hook's own cloud racer reports one, not as a local rule.
+    it("an administrator's deny relayed by the background pass (source 'cloud') is the organisation's", async () => {
+      H.evaluatePolicy.mockResolvedValue(PUSH_REVIEW);
+      H.waitForDaemonDecision.mockResolvedValue({
+        decision: 'deny',
+        source: 'cloud',
+        reason: 'Action rejected by organization administrator via Slack.',
+      });
+
+      const res = await authorizeHeadless('Bash', { command: 'git push' });
+
+      expect(res.approved).toBe(false);
+      expect(res.blockedBy).toBe('team-policy');
+      expect(res.blockedByLabel).toBe('Organization Policy (SaaS)');
+      expect(res.decisionSource).toBe('cloud');
+      expect(res.reason).toBe('Action rejected by organization administrator via Slack.');
+    });
+
+    it("an administrator's deny of a softened block is still the organisation's, not the block", async () => {
+      H.evaluatePolicy.mockResolvedValue(JAIL_BLOCK);
+      H.waitForDaemonDecision.mockResolvedValue({ decision: 'deny', source: 'cloud' });
+
+      const res = await authorizeHeadless('Bash', { command: 'echo hello' });
+
+      expect(res.blockedBy).toBe('team-policy');
+      expect(res.blockedByLabel).toBe('Organization Policy (SaaS)');
+    });
+
+    // Finding 3: with no source the wait itself failed (the daemon died, the
+    // card was gone). No rule decided, so none is named.
+    it('a failed wait (no source) is Approval Unavailable, not the active rule', async () => {
+      H.evaluatePolicy.mockResolvedValue(PUSH_REVIEW);
+      H.waitForDaemonDecision.mockResolvedValue({ decision: 'deny' });
+
+      const res = await authorizeHeadless('Bash', { command: 'git push' });
+
+      expect(res.approved).toBe(false);
+      expect(res.blockedBy).toBe('no-approval-mechanism');
+      expect(res.blockedByLabel).toBe('Approval Unavailable');
+      expect(res.noApprovalMechanism).toBeUndefined();
+      expect(agentMessage(res)).not.toMatch(/human/i);
+    });
+
+    it('a failed wait on a cloud-connected machine does not name Organization Policy (SaaS)', async () => {
+      // A review no local rule asked for: the card is labelled as the
+      // organisation's, and the hook shares the daemon viewer card.
+      H.cloudEnabled.mockReturnValue(true);
+      H.initSaaS.mockResolvedValue({ pending: true, requestId: 'req-2' });
+      vi.mocked(notifyDaemonViewer).mockResolvedValueOnce({ id: 'viewer-1', allowCount: 1 });
+      H.evaluatePolicy.mockResolvedValue({
+        decision: 'review',
+        tier: 1,
+        blockedByLabel: 'Ordinary review',
+        reason: 'ordinary review verdict',
+      });
+      H.waitForDaemonDecision.mockResolvedValue({ decision: 'deny' });
+
+      const res = await authorizeHeadless('Bash', { command: 'echo hello' });
+
+      expect(H.waitForDaemonDecision).toHaveBeenCalled();
+      expect(res.blockedByLabel).toBe('Approval Unavailable');
+    });
+
+    it('the terminal racer waits as long as the configured timeout, and without a cap for 0', async () => {
+      H.evaluatePolicy.mockResolvedValue(PUSH_REVIEW);
+      H.waitForDaemonDecision.mockResolvedValue({ decision: 'deny', source: 'terminal' });
+
+      await authorizeHeadless('Bash', { command: 'git push' });
+
+      expect(H.waitForDaemonDecision.mock.calls[0][2]).toBe(daemonWaitCapMs(5000));
+      expect(daemonWaitCapMs(5000)).toBe(125_000);
+      expect(daemonWaitCapMs(300_000)).toBe(305_000);
+      expect(daemonWaitCapMs(0)).toBe(0);
+      // Unset is the default timeout, not "no timer".
+      expect(daemonWaitCapMs(undefined)).toBe(125_000);
     });
 
     it("a review the daemon's timer denied is an Approval Timeout", async () => {
@@ -243,7 +325,7 @@ describe('decision attribution (ENG-2, MSG-5)', () => {
         ruleName: 'review-user-data',
         blockedByLabel: 'Smart Rule: review-user-data',
       });
-      H.waitForDaemonDecision.mockResolvedValue({ decision: 'deny' });
+      H.waitForDaemonDecision.mockResolvedValue({ decision: 'deny', source: 'policy' });
 
       const res = await authorizeHeadless('Bash', { command: 'git push' });
 
@@ -285,6 +367,28 @@ describe('decision attribution (ENG-2, MSG-5)', () => {
 
       expect(res.blockedByLabel).toBe('Steered Redirect (Terminal)');
       expect(res.reason).toBe('push to a branch instead');
+    });
+
+    it("an allow the background pass's cloud racer made is the organisation's, not a click in tail", async () => {
+      H.evaluatePolicy.mockResolvedValue(PUSH_REVIEW);
+      H.waitForDaemonDecision.mockResolvedValue({ decision: 'allow', source: 'cloud' });
+
+      const res = await authorizeHeadless('Bash', { command: 'git push' });
+
+      expect(res.approved).toBe(true);
+      expect(res.checkedBy).toBe('cloud');
+      expect(res.decisionSource).toBe('cloud');
+    });
+
+    it('an allow the background pass made by rule is a rule allow', async () => {
+      H.evaluatePolicy.mockResolvedValue(PUSH_REVIEW);
+      H.waitForDaemonDecision.mockResolvedValue({ decision: 'allow', source: 'policy' });
+
+      const res = await authorizeHeadless('Bash', { command: 'git push' });
+
+      expect(res.approved).toBe(true);
+      expect(res.checkedBy).toBe('local-policy');
+      expect(res.decisionSource).toBeUndefined();
     });
 
     it('control: an allow from the daemon is unchanged', async () => {
