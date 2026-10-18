@@ -448,6 +448,9 @@ export function startDaemon(): void {
                 args: e.args,
                 decision: 'auto-deny',
               });
+              // ENG-2: say no one answered, so the hook does not report a
+              // human rejection.
+              e.decisionSource = 'timeout';
               if (e.waiter) e.waiter('deny', 'No response — auto-denied after timeout');
               else {
                 e.earlyDecision = 'deny';

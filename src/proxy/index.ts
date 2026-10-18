@@ -8,7 +8,7 @@ import { spawn } from 'child_process';
 import { execa } from 'execa';
 import { parseCommandString } from 'execa';
 import { authorizeHeadless } from '../auth/orchestrator';
-import { buildNegotiationMessage } from '../policy/negotiation';
+import { buildNegotiationMessage, isHumanDecision } from '../policy/negotiation';
 import { locatorCommand, shellInvocation } from '../utils/platform-shell';
 import { stripControlChars } from '../utils/safe-text';
 
@@ -91,10 +91,7 @@ export async function runProxy(targetCommand: string) {
 
           // 2. Talk to the AI with a context-specific negotiation message
           const blockedByLabel = result.blockedByLabel ?? result.reason ?? 'Security Policy';
-          const isHuman =
-            blockedByLabel.toLowerCase().includes('user') ||
-            blockedByLabel.toLowerCase().includes('daemon') ||
-            blockedByLabel.toLowerCase().includes('decision');
+          const isHuman = isHumanDecision(blockedByLabel, result.blockedBy);
           const aiInstruction = buildNegotiationMessage(
             blockedByLabel,
             isHuman,

@@ -13,7 +13,11 @@ import { isDaemonRunning, notifyUserMentions } from '../../auth/daemon';
 import { extractContentDestinations } from '@node9/policy-engine';
 import { openStartupLogFd, recordStartupState } from '../../daemon/startup-log';
 import { getConfig, type Config } from '../../config';
-import { buildNegotiationMessage, buildReviewMessage } from '../../policy/negotiation';
+import {
+  buildNegotiationMessage,
+  buildReviewMessage,
+  isHumanDecision,
+} from '../../policy/negotiation';
 import {
   autoStartDaemonAndWait,
   isTestingMode,
@@ -604,10 +608,7 @@ export function registerCheckCommand(program: Command): void {
               (isKeyedForPolicy() ? 'Workspace Policy' : 'Local Security Policy');
 
             // 2. Identify if it was a human decision or an automated rule
-            const isHumanDecision =
-              blockedByContext.toLowerCase().includes('user') ||
-              blockedByContext.toLowerCase().includes('daemon') ||
-              blockedByContext.toLowerCase().includes('decision');
+            const humanDecision = isHumanDecision(blockedByContext, result?.blockedBy);
 
             // 3. Print to the human terminal for visibility.
             // MUST NOT use stderr (console.error) — Claude Code treats any stderr
@@ -659,7 +660,7 @@ export function registerCheckCommand(program: Command): void {
             // 4. THE NEGOTIATION PROMPT: Context-specific instruction for the AI
             const aiFeedbackMessage = buildNegotiationMessage(
               blockedByContext,
-              isHumanDecision,
+              humanDecision,
               msg,
               result?.recoveryCommand,
               { kind: result?.blockKind, path: result?.blockedPath }

@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { buildNegotiationMessage, buildReviewMessage } from '../policy/negotiation';
+import {
+  agentFacingLabel,
+  asApprovalRequest,
+  buildNegotiationMessage,
+  buildReviewMessage,
+  isHumanDecision,
+} from '../policy/negotiation';
 
 // Every deny message node9 hands back to an agent must tell the agent to
 // surface the block to the human. Measured 2026-09-03 on the founder's
@@ -113,5 +119,83 @@ describe('buildReviewMessage ends the reason with one period (MSG-2)', () => {
     ['an ellipsis stays', 'this is irreversible...', 'this is irreversible...'],
   ])('%s', (_name, reason, body) => {
     expect(buildReviewMessage(undefined, reason)).toBe(OUT(body));
+  });
+});
+
+// MSG-3 (node9Firewall#306): the SSRF block reached the agent as "Action
+// blocked by security policy [<globe emoji> Node9 Egress (Protected Address)]".
+// The label keeps its exact spelling (the catalog, the dashboard and the
+// terminal key on it); only the agent's text drops the emoji.
+describe('the agent-facing label has no emoji and says node9 (MSG-3)', () => {
+  const PICTO = /\p{Extended_Pictographic}/u;
+
+  it('the SSRF block text the agent reads', () => {
+    const msg = buildNegotiationMessage('\u{1F310} Node9 Egress (Protected Address)', false);
+    expect(msg).not.toMatch(PICTO);
+    expect(msg).toContain('[node9 Egress (Protected Address)]');
+  });
+
+  it.each([
+    ['\u{1F310} Node9 Egress (Protected Address)', 'node9 Egress (Protected Address)'],
+    ['\u26A0\uFE0F Override block rule: Smart Rule: x', 'Override block rule: Smart Rule: x'],
+    ['Node9: Eval Remote Execution', 'node9: Eval Remote Execution'],
+    ['Smart Rule: review-git-push', 'Smart Rule: review-git-push'],
+    ['\u{1F310}', 'Security Policy'],
+  ])('%s', (label, shown) => {
+    expect(agentFacingLabel(label)).toBe(shown);
+  });
+
+  it('the branch choice still reads the raw label', () => {
+    const msg = buildNegotiationMessage('\u{1F6A8} Node9 DLP (Secret Detected)', false);
+    expect(msg).toMatch(/was found in your tool call arguments/);
+  });
+});
+
+// MSG-5 (node9Firewall#305): a softened block's approval card said "Reading
+// .env files is blocked" above "Enter = Allow".
+describe('a block sentence reads as a request on an approval card (MSG-5)', () => {
+  it.each([
+    [
+      'Reading .env files is blocked by project-jail shield',
+      'Reading .env files needs your approval (project-jail shield)',
+    ],
+    [
+      'DROP TABLE is irreversible \u2014 blocked by Postgres shield',
+      'DROP TABLE is irreversible. Needs your approval (Postgres shield)',
+    ],
+    [
+      'Reading SSH private keys is blocked by project-jail shield.',
+      'Reading SSH private keys needs your approval (project-jail shield)',
+    ],
+    ['Pushes are blocked by my rule.', 'Pushes are blocked by my rule.'],
+    // A user's own sentence is not rewritten: only the builtin "<name> shield" shape.
+    [
+      'Prod writes is blocked by policy unless the lead signs off.',
+      'Prod writes is blocked by policy unless the lead signs off.',
+    ],
+    ['X is blocked by .', 'X is blocked by .'],
+    ['Chained read of a sensitive file', 'Chained read of a sensitive file'],
+    [' is blocked by x', ' is blocked by x'],
+  ])('%s', (sentence, card) => {
+    expect(asApprovalRequest(sentence)).toBe(card);
+  });
+});
+
+// ENG-2 (node9Firewall#304): a deny is a person's only when no rule, timeout
+// or policy is named as its decider.
+describe('isHumanDecision', () => {
+  it.each([
+    ['User Decision (Native)', 'local-decision', true],
+    ['User Decision (Terminal (node9 tail))', 'local-decision', true],
+    ['User Decision (Native)', undefined, true],
+    ['Steered Redirect (Terminal)', 'local-decision', false],
+    ['Browser Dashboard (Abandoned)', 'local-decision', false],
+    ['Smart Rule: review-user-data', 'local-config', false],
+    ['Smart Rule: block-userdel', 'local-config', false],
+    ['Approval Timeout', 'timeout', false],
+    ['Organization Policy (SaaS)', 'team-policy', false],
+    ['local-decision', 'local-decision', true],
+  ] as const)('%s / %s', (label, blockedBy, human) => {
+    expect(isHumanDecision(label, blockedBy)).toBe(human);
   });
 });
